@@ -22,6 +22,8 @@
 - (опционально) `OUROBOROS_IDLE_COOLDOWN_SEC` (по умолчанию `900`)
 - (опционально) `OUROBOROS_IDLE_BUDGET_PCT_CAP` (по умолчанию `35`)
 - (опционально) `OUROBOROS_IDLE_MAX_PER_DAY` (по умолчанию `8`)
+- (опционально) `OUROBOROS_EVOLUTION_ENABLED_BY_DEFAULT` (`1`/`0`, по умолчанию `0`)
+- (опционально) `OUROBOROS_BUDGET_REPORT_EVERY_MESSAGES` (по умолчанию `10`)
 
 2) Запусти единственную boot-ячейку в Colab.
 3) Напиши своему Telegram-боту. Первый написавший становится владельцем.
@@ -53,6 +55,8 @@
 - `/panic` — мгновенно остановить всё (супервизор завершит работу)
 - `/restart` — мягко остановить активные задачи, очистить текущий runtime-контекст и перезапустить текущую версию
 - `/status` — статус задач/версии/бюджета
+- `/evolve` — включить endless evolution mode
+- `/evolve stop` — выключить endless evolution mode
 
 ## Самоизменение
 
@@ -64,6 +68,11 @@
 - `claude_code_edit(...)` — делегирует редактирование Claude Code CLI (headless), правит файлы in-place
 - `repo_commit_push(...)` — коммитит и пушит уже внесённые изменения (без перезаписи файла целиком)
 - `request_restart(...)` — применяет обновлённый код после push
+
+Рекомендуемая стратегия:
+- если Claude Code CLI доступен, по умолчанию сначала пробуй `claude_code_edit(...)`;
+- `repo_write_commit(...)` оставляй для маленьких точечных правок с заранее очевидным финальным содержимым;
+- для сложных правок и рефакторинга используй `claude_code_edit(...)` как primary path.
 
 Продвижение в `ouroboros-stable` требует явного подтверждения владельца (approval в чате).
 
@@ -125,6 +134,24 @@ Guardrails:
 - cooldown между idle-задачами (`OUROBOROS_IDLE_COOLDOWN_SEC`),
 - лимит доли бюджета (`OUROBOROS_IDLE_BUDGET_PCT_CAP`),
 - дневной лимит задач (`OUROBOROS_IDLE_MAX_PER_DAY`).
+
+Если включён endless evolution mode, idle-задачи не ставятся.
+
+## Endless evolution mode
+
+Когда режим включён (`/evolve`), супервизор непрерывно ставит evolution-задачи:
+- цикл без cooldown и дневных лимитов,
+- до команды владельца на остановку (`/evolve stop`) или исчерпания бюджета,
+- с обязательным правилом ветки: self-modification только в `ouroboros`.
+
+В этом режиме агент должен максимально часто опираться на `claude_code_edit(...)` для кодовых изменений, если CLI доступен.
+
+Базовый промпт режима: `prompts/evolution.md`.
+
+## Бюджет и отчётность
+
+- В `state/state.json` учитывается расход из OpenRouter и событий `llm_usage` от инструментов (включая Claude Code CLI, если инструмент передаёт стоимость).
+- В чат бюджетная строка отправляется не на каждое сообщение, а по cadence `OUROBOROS_BUDGET_REPORT_EVERY_MESSAGES` (по умолчанию раз в 10 сообщений).
 
 ## Модели
 

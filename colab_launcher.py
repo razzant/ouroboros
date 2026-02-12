@@ -195,6 +195,8 @@ IDLE_ENABLED = as_bool(get_secret("OUROBOROS_IDLE_ENABLED", default="1"), defaul
 IDLE_COOLDOWN_SEC = max(60, int(get_secret("OUROBOROS_IDLE_COOLDOWN_SEC", default="900") or "900"))
 IDLE_BUDGET_PCT_CAP = max(1.0, min(float(get_secret("OUROBOROS_IDLE_BUDGET_PCT_CAP", default="35") or "35"), 100.0))
 IDLE_MAX_PER_DAY = max(1, int(get_secret("OUROBOROS_IDLE_MAX_PER_DAY", default="8") or "8"))
+EVOLUTION_ENABLED_BY_DEFAULT = as_bool(get_secret("OUROBOROS_EVOLUTION_ENABLED_BY_DEFAULT", default="0"), default=False)
+BUDGET_REPORT_EVERY_MESSAGES = max(1, int(get_secret("OUROBOROS_BUDGET_REPORT_EVERY_MESSAGES", default="10") or "10"))
 
 # expose needed env to workers (do not print)
 os.environ["OPENROUTER_API_KEY"] = str(OPENROUTER_API_KEY)
@@ -237,7 +239,11 @@ def ensure_state_defaults(st: Dict[str, Any]) -> Dict[str, Any]:
     st.setdefault("current_sha", None)
     st.setdefault("last_owner_message_at", "")
     st.setdefault("last_idle_task_at", "")
+    st.setdefault("last_evolution_task_at", "")
     st.setdefault("idle_cursor", 0)
+    st.setdefault("budget_messages_since_report", 0)
+    st.setdefault("evolution_mode_enabled", EVOLUTION_ENABLED_BY_DEFAULT)
+    st.setdefault("evolution_cycle", 0)
     if not isinstance(st.get("idle_stats"), dict):
         st["idle_stats"] = {}
     return st
@@ -261,7 +267,11 @@ def load_state() -> Dict[str, Any]:
         "current_sha": None,
         "last_owner_message_at": "",
         "last_idle_task_at": "",
+        "last_evolution_task_at": "",
         "idle_cursor": 0,
+        "budget_messages_since_report": 0,
+        "evolution_mode_enabled": EVOLUTION_ENABLED_BY_DEFAULT,
+        "evolution_cycle": 0,
         "idle_stats": {},
     }
     STATE_PATH.write_text(json.dumps(st, ensure_ascii=False, indent=2), encoding="utf-8")
@@ -402,51 +412,26 @@ def _format_budget_line(st: Dict[str, Any]) -> str:
 
 
 def budget_line(force: bool = False) -> str:
-    '''Return budget line sometimes (gated), not on every message.
+    """Return budget line every N outgoing messages.
 
-    Policy:
-    - Show budget when spent_usd increased by >= OUROBOROS_BUDGET_REPORT_DELTA (default $1.0)
-      relative to the last printed value stored in state as budget_last_reported_usd.
-    - If the baseline is missing (first run after upgrade), we initialize it to current spent and do NOT print.
-    - If force=True, always show.
-
-    Setting:
-    - OUROBOROS_BUDGET_REPORT_DELTA: float, default 1.0. Use 0 to always show.
-    '''
+    - force=True always prints and resets the message counter.
+    - default cadence comes from OUROBOROS_BUDGET_REPORT_EVERY_MESSAGES (default: 10).
+    """
     try:
         st = load_state()
-        spent = float(st.get("spent_usd") or 0.0)
-
-        # delta threshold
-        try:
-            delta = float(get_secret("OUROBOROS_BUDGET_REPORT_DELTA", default="1.0") or "1.0")
-        except Exception:
-            delta = 1.0
-
-        if force or delta <= 0:
-            st["budget_last_reported_usd"] = spent
+        every = max(1, int(BUDGET_REPORT_EVERY_MESSAGES))
+        if force:
+            st["budget_messages_since_report"] = 0
             save_state(st)
             return _format_budget_line(st)
 
-        if "budget_last_reported_usd" not in st:
-            # Establish baseline, do not print immediately.
-            st["budget_last_reported_usd"] = spent
+        counter = int(st.get("budget_messages_since_report") or 0) + 1
+        if counter < every:
+            st["budget_messages_since_report"] = counter
             save_state(st)
             return ""
 
-        last = float(st.get("budget_last_reported_usd") or 0.0)
-
-        should = False
-        if spent < last - 1e-9:
-            # state reset / rollback
-            should = True
-        elif (spent - last) >= delta:
-            should = True
-
-        if not should:
-            return ""
-
-        st["budget_last_reported_usd"] = spent
+        st["budget_messages_since_report"] = 0
         save_state(st)
         return _format_budget_line(st)
     except Exception:
@@ -636,14 +621,26 @@ def assign_tasks() -> None:
                 send_with_budget(int(st["owner_chat_id"]), f"▶️ Стартую задачу {task['id']} (worker {w.wid})")
 
 def update_budget_from_usage(usage: Dict[str, Any]) -> None:
+    def _to_float(v: Any, default: float = 0.0) -> float:
+        try:
+            return float(v)
+        except Exception:
+            return default
+
+    def _to_int(v: Any, default: int = 0) -> int:
+        try:
+            return int(v)
+        except Exception:
+            return default
+
     st = load_state()
     cost = usage.get("cost") if isinstance(usage, dict) else None
     if cost is None:
         cost = 0.0
-    st["spent_usd"] = float(st.get("spent_usd") or 0.0) + float(cost)
+    st["spent_usd"] = _to_float(st.get("spent_usd") or 0.0) + _to_float(cost)
     st["spent_calls"] = int(st.get("spent_calls") or 0) + 1
-    st["spent_tokens_prompt"] = int(st.get("spent_tokens_prompt") or 0) + int(usage.get("prompt_tokens") or 0)
-    st["spent_tokens_completion"] = int(st.get("spent_tokens_completion") or 0) + int(usage.get("completion_tokens") or 0)
+    st["spent_tokens_prompt"] = _to_int(st.get("spent_tokens_prompt") or 0) + _to_int(usage.get("prompt_tokens") if isinstance(usage, dict) else 0)
+    st["spent_tokens_completion"] = _to_int(st.get("spent_tokens_completion") or 0) + _to_int(usage.get("completion_tokens") if isinstance(usage, dict) else 0)
     save_state(st)
 
 def parse_iso_to_ts(iso_ts: str) -> Optional[float]:
@@ -662,6 +659,89 @@ def budget_pct(st: Dict[str, Any]) -> float:
         return 0.0
     return (spent / total) * 100.0
 
+def _load_evolution_prompt_text() -> str:
+    p = REPO_DIR / "prompts" / "evolution.md"
+    try:
+        txt = p.read_text(encoding="utf-8").strip()
+        if txt:
+            return txt
+    except Exception:
+        pass
+    return (
+        "Endless evolution mode is active.\n"
+        "- Do one high-impact self-improvement step per cycle.\n"
+        "- Use LLM-based reasoning over hardcoded response templates.\n"
+        "- Commit+push only to branch ouroboros, then request_restart.\n"
+        "- Report: done/result/next.\n"
+    )
+
+def build_evolution_task_text(cycle: int) -> str:
+    return (
+        f"ENDLESS EVOLUTION CYCLE #{cycle}\n\n"
+        "Mode is active until owner asks to stop.\n"
+        "Start with `repo_read('prompts/evolution.md')` and follow it exactly.\n"
+        "Do one high-leverage self-improvement step now.\n"
+        "Strict branch rule: only `ouroboros` for any write/commit/push; never touch `main` or `ouroboros-stable`.\n"
+        "After changes: verify, commit+push, request_restart, then report concise Done/Result/Next.\n\n"
+        "Prompt snapshot:\n"
+        + _load_evolution_prompt_text()
+    )
+
+def enqueue_evolution_task_if_needed() -> None:
+    if PENDING or RUNNING:
+        return
+
+    st = load_state()
+    if not bool(st.get("evolution_mode_enabled")):
+        return
+
+    owner_chat_id = st.get("owner_chat_id")
+    if not owner_chat_id:
+        return
+
+    if budget_pct(st) >= 100.0:
+        st["evolution_mode_enabled"] = False
+        save_state(st)
+        append_jsonl(
+            DRIVE_ROOT / "logs" / "supervisor.jsonl",
+            {
+                "ts": datetime.datetime.now(datetime.timezone.utc).isoformat(),
+                "type": "evolution_mode_auto_stopped",
+                "reason": "budget_exhausted",
+                "budget_pct": budget_pct(st),
+            },
+        )
+        send_with_budget(int(owner_chat_id), "💸 Endless evolution остановлен: бюджет достиг лимита.")
+        return
+
+    cycle = int(st.get("evolution_cycle") or 0) + 1
+    tid = uuid.uuid4().hex[:8]
+    PENDING.append(
+        {
+            "id": tid,
+            "type": "evolution",
+            "chat_id": int(owner_chat_id),
+            "text": build_evolution_task_text(cycle),
+        }
+    )
+
+    now_iso = datetime.datetime.now(datetime.timezone.utc).isoformat()
+    st["evolution_cycle"] = cycle
+    st["last_evolution_task_at"] = now_iso
+    save_state(st)
+
+    append_jsonl(
+        DRIVE_ROOT / "logs" / "supervisor.jsonl",
+        {
+            "ts": now_iso,
+            "type": "evolution_task_enqueued",
+            "task_id": tid,
+            "cycle": cycle,
+            "budget_pct": budget_pct(st),
+        },
+    )
+    send_with_budget(int(owner_chat_id), f"🧬 Evolution task queued: {tid} (cycle {cycle})")
+
 def idle_task_catalog() -> List[Tuple[str, str]]:
     return [
         (
@@ -674,7 +754,7 @@ def idle_task_catalog() -> List[Tuple[str, str]]:
         ),
         (
             "code_improvement_idea",
-            "Idle internal task: inspect your own codebase and propose one safe high-impact improvement with rationale and validation plan.",
+            "Idle internal task: inspect your own codebase and propose one high-impact improvement with rationale and validation plan.",
         ),
         (
             "web_learning",
@@ -693,6 +773,8 @@ def enqueue_idle_task_if_needed() -> None:
         return
 
     st = load_state()
+    if bool(st.get("evolution_mode_enabled")):
+        return
     owner_chat_id = st.get("owner_chat_id")
     if not owner_chat_id:
         return
@@ -805,13 +887,20 @@ def status_text() -> str:
     lines.append(f"spent_usd: {st.get('spent_usd')}")
     lines.append(f"spent_calls: {st.get('spent_calls')}")
     lines.append(f"prompt_tokens: {st.get('spent_tokens_prompt')}, completion_tokens: {st.get('spent_tokens_completion')}")
+    lines.append(f"budget_report_every_messages: {BUDGET_REPORT_EVERY_MESSAGES}")
     lines.append(
         "idle: "
         + f"enabled={int(IDLE_ENABLED)}, cooldown_sec={IDLE_COOLDOWN_SEC}, "
         + f"budget_cap_pct={IDLE_BUDGET_PCT_CAP:.1f}, max_per_day={IDLE_MAX_PER_DAY}"
     )
+    lines.append(
+        "evolution: "
+        + f"enabled={int(bool(st.get('evolution_mode_enabled')))}, "
+        + f"cycle={int(st.get('evolution_cycle') or 0)}"
+    )
     lines.append(f"last_owner_message_at: {st.get('last_owner_message_at') or '-'}")
     lines.append(f"last_idle_task_at: {st.get('last_idle_task_at') or '-'}")
+    lines.append(f"last_evolution_task_at: {st.get('last_evolution_task_at') or '-'}")
     return "\n".join(lines)
 
 def cancel_task_by_id(task_id: str) -> bool:
@@ -889,6 +978,8 @@ append_jsonl(DRIVE_ROOT / "logs" / "supervisor.jsonl", {
     "idle_cooldown_sec": IDLE_COOLDOWN_SEC,
     "idle_budget_pct_cap": IDLE_BUDGET_PCT_CAP,
     "idle_max_per_day": IDLE_MAX_PER_DAY,
+    "evolution_enabled_by_default": int(EVOLUTION_ENABLED_BY_DEFAULT),
+    "budget_report_every_messages": BUDGET_REPORT_EVERY_MESSAGES,
 })
 
 offset = int(load_state().get("tg_offset") or 0)
@@ -1031,6 +1122,7 @@ while True:
                 )
             continue
 
+    enqueue_evolution_task_if_needed()
     enqueue_idle_task_if_needed()
     assign_tasks()
 
@@ -1102,6 +1194,70 @@ while True:
 
         if text.strip().lower().startswith("/status"):
             send_with_budget(chat_id, status_text(), force_budget=True)
+            continue
+
+        lowered = text.strip().lower()
+        if lowered.startswith("/evolve"):
+            parts = lowered.split()
+            action = parts[1] if len(parts) > 1 else "on"
+            turn_on = action not in ("off", "stop", "0")
+
+            st2 = load_state()
+            st2["evolution_mode_enabled"] = bool(turn_on)
+            save_state(st2)
+
+            removed_pending = 0
+            if not turn_on:
+                before = len(PENDING)
+                PENDING[:] = [t for t in PENDING if str(t.get("type")) != "evolution"]
+                removed_pending = before - len(PENDING)
+
+            append_jsonl(
+                DRIVE_ROOT / "logs" / "supervisor.jsonl",
+                {
+                    "ts": datetime.datetime.now(datetime.timezone.utc).isoformat(),
+                    "type": "evolution_mode_toggle",
+                    "enabled": bool(turn_on),
+                    "removed_pending": removed_pending,
+                    "source_text": text,
+                },
+            )
+
+            if turn_on:
+                send_with_budget(
+                    chat_id,
+                    "🧬 Endless evolution: ON.\n"
+                    "Буду крутить self-improvement циклы до твоей остановки или конца бюджета.\n"
+                    "Отключить: /evolve stop",
+                )
+            else:
+                send_with_budget(
+                    chat_id,
+                    f"🛑 Endless evolution: OFF. Снято pending evolution tasks: {removed_pending}.",
+                )
+            continue
+
+        if lowered in ("останови эволюцию", "остановить эволюцию", "стоп эволюции", "stop evolution"):
+            st2 = load_state()
+            st2["evolution_mode_enabled"] = False
+            save_state(st2)
+            before = len(PENDING)
+            PENDING[:] = [t for t in PENDING if str(t.get("type")) != "evolution"]
+            removed_pending = before - len(PENDING)
+            append_jsonl(
+                DRIVE_ROOT / "logs" / "supervisor.jsonl",
+                {
+                    "ts": datetime.datetime.now(datetime.timezone.utc).isoformat(),
+                    "type": "evolution_mode_toggle",
+                    "enabled": False,
+                    "removed_pending": removed_pending,
+                    "source_text": text,
+                },
+            )
+            send_with_budget(
+                chat_id,
+                f"🛑 Endless evolution остановлен. Снято pending evolution tasks: {removed_pending}.",
+            )
             continue
 
         if handle_approval(chat_id, text):
