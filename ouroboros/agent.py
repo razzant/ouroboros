@@ -1781,6 +1781,7 @@ class OuroborosAgent:
                                 "task_id": task.get("id"),
                                 "chat_id": chat_id_int,
                                 "original_text_len": len(text or ""),
+                                "original_text_sha256": sha256_text(text or ""),
                             },
                         )
                     else:
@@ -1815,6 +1816,8 @@ class OuroborosAgent:
                                             "chat_id": chat_id_int,
                                             "part": i,
                                             "parts_total": len(chunks),
+                                            "payload_len": len(chunk_text),
+                                            "payload_sha256": sha256_text(chunk_text),
                                         },
                                     )
                                     break
@@ -1835,6 +1838,10 @@ class OuroborosAgent:
                                                 "status": last_status,
                                                 "part": i,
                                                 "parts_total": len(chunks),
+                                                "payload_len": len(chunk_text),
+                                                "payload_sha256": sha256_text(chunk_text),
+                                                "plain_part_len": len(plain_part),
+                                                "plain_part_sha256": sha256_text(plain_part),
                                             },
                                         )
                                         break
@@ -1876,6 +1883,10 @@ class OuroborosAgent:
                                                 "chat_id": chat_id_int,
                                                 "part": i,
                                                 "parts_total": len(chunks),
+                                                "payload_len": len(chunk_text),
+                                                "payload_sha256": sha256_text(chunk_text),
+                                                "plain_fallback_len": len(plain_fallback_text),
+                                                "plain_fallback_sha256": sha256_text(plain_fallback_text),
                                             },
                                         )
                                         break
@@ -1903,6 +1914,8 @@ class OuroborosAgent:
                                                 "plain_parts": len(plain_chunks),
                                                 "html_len": len(chunk_text),
                                                 "plain_fallback_len": len(plain_fallback_text),
+                                                "html_sha256": sha256_text(chunk_text),
+                                                "plain_fallback_sha256": sha256_text(plain_fallback_text),
                                             },
                                         )
                                     else:
@@ -1921,6 +1934,10 @@ class OuroborosAgent:
                                                 "fallback_status": last_status,  # plain fallback error
                                                 "part": i,
                                                 "parts_total": len(chunks),
+                                                "html_len": len(chunk_text),
+                                                "html_sha256": sha256_text(chunk_text),
+                                                "plain_fallback_len": len(plain_fallback_text),
+                                                "plain_fallback_sha256": sha256_text(plain_fallback_text),
                                             },
                                         )
                                         break
