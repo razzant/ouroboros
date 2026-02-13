@@ -1727,6 +1727,23 @@ class OuroborosAgent:
                     f"я постараюсь обработать его по-другому."
                 )
 
+            # Detect empty model response (successful call but no text)
+            if not isinstance(text, str) or not text.strip():
+                had_tools = len(llm_trace.get("tool_calls", [])) > 0
+                tool_calls_count = len(llm_trace.get("tool_calls", []))
+                append_jsonl(
+                    drive_logs / "events.jsonl",
+                    {
+                        "ts": utc_now_iso(),
+                        "type": "empty_model_response",
+                        "task_id": task.get("id"),
+                        "task_type": task.get("type"),
+                        "had_tools": had_tools,
+                        "tool_calls": tool_calls_count,
+                    },
+                )
+                text = "⚠️ Модель вернула пустой ответ. Попробуй переформулировать запрос или повторить."
+
             self._pending_events.append(
                 {
                     "type": "llm_usage",
@@ -1887,6 +1904,10 @@ class OuroborosAgent:
             else:
                 # Strip markdown for plain-text fallback so raw ** and ``` don't clutter the message
                 text_for_supervisor = self._strip_markdown(text) if text else text
+
+            # Ensure text_for_supervisor is never empty (Telegram rejects empty messages)
+            if not isinstance(text_for_supervisor, str) or not text_for_supervisor.strip():
+                text_for_supervisor = "\u200b"
 
             self._pending_events.append(
                 {
