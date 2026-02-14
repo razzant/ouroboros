@@ -3,7 +3,7 @@
 Самомодифицирующийся агент. Работает в Google Colab, общается через Telegram,
 хранит код в GitHub, память — на Google Drive.
 
-**Версия:** 2.8.0
+**Версия:** 2.9.0
 
 ---
 
@@ -49,7 +49,7 @@ Telegram → colab_launcher.py (thin entry point)
            ouroboros/             (agent package)
             ├── agent.py         — thin orchestrator (task handling + events)
             ├── loop.py          — LLM tool loop (concurrent tools, retry, cost)
-            ├── context.py       — context builder + tool history compaction
+            ├── context.py       — context builder + prompt caching + compaction
             ├── apply_patch.py   — Claude Code CLI apply_patch shim
             ├── tools/           — pluggable tools
             ├── llm.py           — LLM client + cached token tracking
@@ -68,8 +68,8 @@ execution** (ThreadPoolExecutor), retry, effort escalation, per-round cost
 logging. Единственное место где происходит взаимодействие LLM ↔ tools.
 
 `context.py` — сборка LLM-контекста из промптов, памяти, логов и состояния.
-Включает `compact_tool_history()` для сжатия старых tool results в длинных
-диалогах — сокращает prompt tokens на 30-50% в evolution/review циклах.
+**Prompt caching** для Anthropic моделей через `cache_control` на статическом
+контенте (~10K tokens). `compact_tool_history()` для сжатия старых tool results.
 
 `tools/` — плагинная архитектура инструментов. Каждый модуль экспортирует
 `get_tools()`, новые инструменты добавляются как отдельные файлы.
@@ -97,7 +97,7 @@ ouroboros/
   apply_patch.py           — Claude Code CLI apply_patch shim
   agent.py                 — Тонкий оркестратор: handle_task, event emission
   loop.py                  — LLM tool loop: concurrent execution, retry, cost tracking
-  context.py               — Сборка контекста + compact_tool_history
+  context.py               — Сборка контекста + prompt caching + compact_tool_history
   tools/                   — Пакет инструментов (плагинная архитектура):
     __init__.py             — Реэкспорт ToolRegistry, ToolContext
     registry.py             — Реестр: schemas, execute, auto-discovery
@@ -151,6 +151,17 @@ colab_bootstrap_shim.py    — Boot shim (вставляется в Colab, не 
 
 ## Changelog
 
+### 2.9.0 — Prompt Caching for Anthropic Models
+
+Multipart system message с `cache_control` для кэширования статического контекста.
+
+- Статический контент (SYSTEM.md + BIBLE.md + README.md ~10K tokens) помечен `cache_control: {"type": "ephemeral"}`
+- Динамический контент (state, scratchpad, identity, logs) — отдельный блок без кэша
+- 11+ system messages → 1 multipart system message (cleaner API contract)
+- `apply_message_token_soft_cap` обновлён для multipart content
+- Ожидаемая экономия: ~50% prompt costs при multi-round диалогах (Anthropic pricing: cached tokens = 10% cost)
+- context.py: 250 → 301 строк (+51)
+
 ### 2.8.0 — Concurrent Tool Execution
 
 Параллельное выполнение tool calls через ThreadPoolExecutor.
@@ -178,7 +189,3 @@ colab_bootstrap_shim.py    — Boot shim (вставляется в Colab, не 
 ### 2.5.0 — Cost Tracking + Restart DRY
 
 Per-round `llm_round` events, `cached_tokens` tracking, `safe_restart()` consolidation.
-
-### 2.4.0 — Context Window Optimization
-
-`compact_tool_history()` — сжатие старых tool results (30-50% экономия tokens).
