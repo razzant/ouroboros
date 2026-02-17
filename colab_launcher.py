@@ -379,6 +379,8 @@ def _safe_qsize(q: Any) -> int:
 
 offset = int(load_state().get("tg_offset") or 0)
 _last_diag_heartbeat_ts = 0.0
+_last_message_ts: float = 0.0
+_ACTIVE_MODE_SEC: int = 300  # 5 min of activity = active polling mode
 
 # Auto-start background consciousness (creator's policy: always on by default)
 try:
@@ -406,9 +408,12 @@ while True:
     assign_tasks()
     persist_queue_snapshot(reason="main_loop")
 
-    # Poll Telegram
+    _now = time.time()
+    # Poll Telegram — adaptive: fast when active, long-poll when idle
+    _active = (_now - _last_message_ts) < _ACTIVE_MODE_SEC
+    _poll_timeout = 0 if _active else 10
     try:
-        updates = TG.get_updates(offset=offset, timeout=10)
+        updates = TG.get_updates(offset=offset, timeout=_poll_timeout)
     except Exception as e:
         append_jsonl(
             DRIVE_ROOT / "logs" / "supervisor.jsonl",
@@ -468,6 +473,7 @@ while True:
 
         log_chat("in", chat_id, user_id, text)
         st["last_owner_message_at"] = now_iso
+        _last_message_ts = time.time()
         save_state(st)
 
         # --- Safety rails (hardcoded, no LLM) ---
@@ -618,4 +624,6 @@ while True:
         )
         _last_diag_heartbeat_ts = now_epoch
 
-    time.sleep(0.2)
+    # Short sleep in active mode (fast response), longer when idle (save CPU)
+    _loop_sleep = 0.1 if (_now - _last_message_ts) < _ACTIVE_MODE_SEC else 0.5
+    time.sleep(_loop_sleep)
