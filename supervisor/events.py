@@ -11,10 +11,12 @@ import datetime
 import json
 import logging
 import os
+import re
 import sys
 import time
 import uuid
-from typing import Any, Dict
+from collections import Counter
+from typing import Any, Dict, Optional
 
 # Lazy imports to avoid circular dependencies — everything comes through ctx
 
@@ -226,6 +228,85 @@ def _handle_promote_to_stable(evt: Dict[str, Any], ctx: Any) -> None:
             )
 
 
+def _extract_keywords(text: str) -> Counter:
+    """Extract meaningful keywords from task description for dedup comparison."""
+    # Lowercase, strip punctuation, split into words
+    words = re.findall(r'[a-zA-Zа-яА-ЯёЁ0-9_]+', text.lower())
+    # Filter short words and common stop words
+    stop_words = {
+        'the', 'a', 'an', 'is', 'are', 'was', 'were', 'be', 'been', 'being',
+        'have', 'has', 'had', 'do', 'does', 'did', 'will', 'would', 'could',
+        'should', 'may', 'might', 'shall', 'can', 'need', 'must',
+        'and', 'or', 'but', 'if', 'then', 'else', 'when', 'where', 'how',
+        'what', 'which', 'who', 'whom', 'this', 'that', 'these', 'those',
+        'for', 'from', 'with', 'into', 'to', 'in', 'on', 'at', 'by', 'of',
+        'not', 'no', 'nor', 'so', 'too', 'very', 'just', 'also',
+        'it', 'its', 'my', 'your', 'our', 'their', 'his', 'her',
+        'all', 'each', 'every', 'both', 'few', 'more', 'most', 'other',
+        'some', 'such', 'only', 'own', 'same', 'than', 'any',
+        'use', 'using', 'used', 'make', 'ensure', 'check', 'task',
+        'begin_parent_context', 'end_parent_context', 'reference', 'material',
+        'instructions', 'context', 'parent',
+    }
+    return Counter(w for w in words if len(w) > 2 and w not in stop_words)
+
+
+def _keyword_similarity(a: Counter, b: Counter) -> float:
+    """Compute Jaccard-like similarity between two keyword sets."""
+    if not a or not b:
+        return 0.0
+    a_set = set(a.keys())
+    b_set = set(b.keys())
+    intersection = a_set & b_set
+    union = a_set | b_set
+    if not union:
+        return 0.0
+    # Weight by frequency: shared keywords that appear often matter more
+    shared_weight = sum(min(a[k], b[k]) for k in intersection)
+    total_weight = sum(a[k] for k in a) + sum(b[k] for k in b)
+    if total_weight == 0:
+        return 0.0
+    # Blend Jaccard (set overlap) and frequency overlap
+    jaccard = len(intersection) / len(union)
+    freq_overlap = (2 * shared_weight) / total_weight
+    return 0.5 * jaccard + 0.5 * freq_overlap
+
+
+def _find_duplicate_task(desc: str, pending: list, running: dict) -> Optional[str]:
+    """Check if a semantically similar task already exists.
+
+    Returns task_id of the duplicate if found, None otherwise.
+    Uses keyword overlap — cheap, fast, catches the main failure mode
+    (identical or near-identical tasks scheduled multiple times).
+    """
+    SIMILARITY_THRESHOLD = 0.55  # Tuned to catch obvious dupes without false positives
+
+    new_kw = _extract_keywords(desc)
+    if not new_kw:
+        return None
+
+    # Check pending tasks
+    for task in pending:
+        existing_desc = str(task.get("text") or task.get("description") or "")
+        existing_kw = _extract_keywords(existing_desc)
+        sim = _keyword_similarity(new_kw, existing_kw)
+        if sim >= SIMILARITY_THRESHOLD:
+            return task.get("id", "unknown")
+
+    # Check running tasks
+    for task_id, meta in running.items():
+        task_data = meta.get("task") if isinstance(meta, dict) else None
+        if not isinstance(task_data, dict):
+            continue
+        existing_desc = str(task_data.get("text") or task_data.get("description") or "")
+        existing_kw = _extract_keywords(existing_desc)
+        sim = _keyword_similarity(new_kw, existing_kw)
+        if sim >= SIMILARITY_THRESHOLD:
+            return task_id
+
+    return None
+
+
 def _handle_schedule_task(evt: Dict[str, Any], ctx: Any) -> None:
     st = ctx.load_state()
     owner_chat_id = st.get("owner_chat_id")
@@ -241,6 +322,14 @@ def _handle_schedule_task(evt: Dict[str, Any], ctx: Any) -> None:
         return
 
     if owner_chat_id and desc:
+        # --- Task deduplication (Bible P5: minimalism, no wasted work) ---
+        from supervisor.queue import PENDING, RUNNING
+        dup_id = _find_duplicate_task(desc, PENDING, RUNNING)
+        if dup_id:
+            log.info("Rejected duplicate task: new='%s' duplicates='%s'", desc[:100], dup_id)
+            ctx.send_with_budget(int(owner_chat_id), f"⚠️ Task rejected: semantically similar to already active task {dup_id}")
+            return
+
         tid = evt.get("task_id") or uuid.uuid4().hex[:8]
         text = desc
         if task_context:

@@ -56,24 +56,27 @@ def get_tools() -> List[ToolEntry]:
     return [
         ToolEntry(
             name="compact_context",
-            description=(
-                "Selectively compress old tool results in conversation history to save context tokens. "
-                "Call this when you notice context is getting large (e.g., after self-check reminder). "
-                "Keeps recent N tool rounds intact; older rounds get summarized to 1-line summaries. "
-                "You decide what to keep (via keep_last_n) — no information is lost, just compressed."
-            ),
-            parameters={
-                "type": "object",
-                "properties": {
-                    "keep_last_n": {
-                        "type": "integer",
-                        "description": "Number of recent tool rounds to keep fully intact (default 6, range 2-20). Lower = more compression.",
-                        "default": 6,
+            schema={
+                "name": "compact_context",
+                "description": (
+                    "Selectively compress old tool results in conversation history to save context tokens. "
+                    "Call this when you notice context is getting large (e.g., after self-check reminder). "
+                    "Keeps recent N tool rounds intact; older rounds get summarized to 1-line summaries. "
+                    "You decide what to keep (via keep_last_n) — no information is lost, just compressed."
+                ),
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "keep_last_n": {
+                            "type": "integer",
+                            "description": "Number of recent tool rounds to keep fully intact (default 6, range 2-20). Lower = more compression.",
+                            "default": 6,
+                        },
                     },
+                    "required": [],
                 },
-                "required": [],
             },
             handler=_compact_context,
-            timeout=5,
+            timeout_sec=5,
         ),
     ]

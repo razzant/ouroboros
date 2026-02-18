@@ -21,7 +21,7 @@ import logging
 from ouroboros.llm import LLMClient, normalize_reasoning_effort, add_usage
 from ouroboros.tools.registry import ToolRegistry
 from ouroboros.context import compact_tool_history
-from ouroboros.utils import utc_now_iso, append_jsonl, truncate_for_log, sanitize_tool_args_for_log, sanitize_tool_result_for_log
+from ouroboros.utils import utc_now_iso, append_jsonl, truncate_for_log, sanitize_tool_args_for_log, sanitize_tool_result_for_log, estimate_tokens
 
 log = logging.getLogger(__name__)
 
@@ -445,6 +445,149 @@ def _check_budget_limits(
     return None
 
 
+def _maybe_inject_self_check(
+    round_idx: int,
+    max_rounds: int,
+    messages: List[Dict[str, Any]],
+    accumulated_usage: Dict[str, Any],
+    emit_progress: Callable[[str], None],
+) -> None:
+    """Inject a soft self-check reminder every REMINDER_INTERVAL rounds.
+
+    This is a cognitive feature (Bible P0: subjectivity) — the agent reflects
+    on its own resource usage and strategy, not a hard kill.
+    """
+    REMINDER_INTERVAL = 50
+    if round_idx <= 1 or round_idx % REMINDER_INTERVAL != 0:
+        return
+    ctx_tokens = sum(
+        estimate_tokens(str(m.get("content", "")))
+        if isinstance(m.get("content"), str)
+        else sum(estimate_tokens(str(b.get("text", ""))) for b in m.get("content", []) if isinstance(b, dict))
+        for m in messages
+    )
+    task_cost = accumulated_usage.get("cost", 0)
+    checkpoint_num = round_idx // REMINDER_INTERVAL
+
+    reminder = (
+        f"[CHECKPOINT {checkpoint_num} — round {round_idx}/{max_rounds}]\n"
+        f"📊 Context: ~{ctx_tokens} tokens | Cost so far: ${task_cost:.2f} | "
+        f"Rounds remaining: {max_rounds - round_idx}\n\n"
+        f"⏸️ PAUSE AND REFLECT before continuing:\n"
+        f"1. Am I making real progress, or repeating the same actions?\n"
+        f"2. Is my current strategy working? Should I try something different?\n"
+        f"3. Is my context bloated with old tool results I no longer need?\n"
+        f"   → If yes, call `compact_context` to summarize them selectively.\n"
+        f"4. Have I been stuck on the same sub-problem for many rounds?\n"
+        f"   → If yes, consider: simplify the approach, skip the sub-problem, or finish with what I have.\n"
+        f"5. Should I just STOP and return my best result so far?\n\n"
+        f"This is not a hard limit — you decide. But be honest with yourself."
+    )
+    messages.append({"role": "system", "content": reminder})
+    emit_progress(f"🔄 Checkpoint {checkpoint_num} at round {round_idx}: ~{ctx_tokens} tokens, ${task_cost:.2f} spent")
+
+
+def _setup_dynamic_tools(tools_registry, tool_schemas, messages):
+    """
+    Wire tool-discovery handlers onto an existing tool_schemas list.
+
+    Creates closures for list_available_tools / enable_tools, registers them
+    as handler overrides, and injects a system message advertising non-core
+    tools.  Mutates tool_schemas in-place (via list.append) when tools are
+    enabled, so the caller's reference stays live.
+
+    Returns (tool_schemas, enabled_extra_set).
+    """
+    enabled_extra: set = set()
+
+    def _handle_list_tools(ctx=None, **kwargs):
+        non_core = tools_registry.list_non_core_tools()
+        if not non_core:
+            return "All tools are already in your active set."
+        lines = [f"**{len(non_core)} additional tools available** (use `enable_tools` to activate):\n"]
+        for t in non_core:
+            lines.append(f"- **{t['name']}**: {t['description'][:120]}")
+        return "\n".join(lines)
+
+    def _handle_enable_tools(tools: str = "", ctx=None, **kwargs):
+        names = [n.strip() for n in tools.split(",") if n.strip()]
+        enabled, not_found = [], []
+        for name in names:
+            schema = tools_registry.get_schema_by_name(name)
+            if schema and name not in enabled_extra:
+                tool_schemas.append(schema)
+                enabled_extra.add(name)
+                enabled.append(name)
+            elif name in enabled_extra:
+                enabled.append(f"{name} (already active)")
+            else:
+                not_found.append(name)
+        parts = []
+        if enabled:
+            parts.append(f"✅ Enabled: {', '.join(enabled)}")
+        if not_found:
+            parts.append(f"❌ Not found: {', '.join(not_found)}")
+        return "\n".join(parts) if parts else "No tools specified."
+
+    tools_registry.override_handler("list_available_tools", _handle_list_tools)
+    tools_registry.override_handler("enable_tools", _handle_enable_tools)
+
+    non_core_count = len(tools_registry.list_non_core_tools())
+    if non_core_count > 0:
+        messages.append({
+            "role": "system",
+            "content": (
+                f"Note: You have {len(tool_schemas)} core tools loaded. "
+                f"There are {non_core_count} additional tools available "
+                f"(use `list_available_tools` to see them, `enable_tools` to activate). "
+                f"Core tools cover most tasks. Enable extras only when needed."
+            ),
+        })
+
+    return tool_schemas, enabled_extra
+
+
+def _drain_incoming_messages(
+    messages: List[Dict[str, Any]],
+    incoming_messages: queue.Queue,
+    drive_root: Optional[pathlib.Path],
+    task_id: str,
+    event_queue: Optional[queue.Queue],
+    _owner_msg_seen: set,
+) -> None:
+    """
+    Inject owner messages received during task execution.
+    Drains both the in-process queue and the Drive mailbox.
+    """
+    # Inject owner messages received during task execution
+    while not incoming_messages.empty():
+        try:
+            injected = incoming_messages.get_nowait()
+            messages.append({"role": "user", "content": injected})
+        except queue.Empty:
+            break
+
+    # Drain per-task owner messages from Drive mailbox (written by forward_to_worker tool)
+    if drive_root is not None and task_id:
+        from ouroboros.owner_inject import drain_owner_messages
+        drive_msgs = drain_owner_messages(drive_root, task_id=task_id, seen_ids=_owner_msg_seen)
+        for dmsg in drive_msgs:
+            messages.append({
+                "role": "user",
+                "content": f"[Owner message during task]: {dmsg}",
+            })
+            # Log for duplicate processing detection (health invariant #5)
+            if event_queue is not None:
+                try:
+                    event_queue.put_nowait({
+                        "type": "owner_message_injected",
+                        "task_id": task_id,
+                        "text": dmsg[:200],
+                    })
+                except Exception:
+                    pass
+
+
 def run_llm_loop(
     messages: List[Dict[str, Any]],
     tools: ToolRegistry,
@@ -478,7 +621,13 @@ def run_llm_loop(
     llm_trace: Dict[str, Any] = {"assistant_notes": [], "tool_calls": []}
     accumulated_usage: Dict[str, Any] = {}
     max_retries = 3
-    tool_schemas = tools.schemas()
+    # Wire module-level registry ref so tool_discovery handlers work outside run_llm_loop too
+    from ouroboros.tools import tool_discovery as _td
+    _td.set_registry(tools)
+
+    # Selective tool schemas: core set + meta-tools for discovery.
+    tool_schemas = tools.schemas(core_only=True)
+    tool_schemas, _enabled_extra_tools = _setup_dynamic_tools(tools, tool_schemas, messages)
 
     # Set budget tracking on tool context for real-time usage events
     tools._ctx.event_queue = event_queue
@@ -513,6 +662,9 @@ def run_llm_loop(
                     log.warning("Failed to get final response after round limit", exc_info=True)
                     return finish_reason, accumulated_usage, llm_trace
 
+            # Soft self-check reminder every 50 rounds (LLM-first: agent decides, not code)
+            _maybe_inject_self_check(round_idx, MAX_ROUNDS, messages, accumulated_usage, emit_progress)
+
             # Apply LLM-driven model/effort switch (via switch_model tool)
             ctx = tools._ctx
             if ctx.active_model_override:
@@ -522,38 +674,16 @@ def run_llm_loop(
                 active_effort = normalize_reasoning_effort(ctx.active_effort_override, default=active_effort)
                 ctx.active_effort_override = None
 
-            # Inject owner messages received during task execution
-            while not incoming_messages.empty():
-                try:
-                    injected = incoming_messages.get_nowait()
-                    messages.append({"role": "user", "content": injected})
-                except queue.Empty:
-                    break
+            # Inject owner messages (in-process queue + Drive mailbox)
+            _drain_incoming_messages(messages, incoming_messages, drive_root, task_id, event_queue, _owner_msg_seen)
 
-            # Drain per-task owner messages from Drive mailbox (written by forward_to_worker tool)
-            if drive_root is not None and task_id:
-                from ouroboros.owner_inject import drain_owner_messages
-                drive_msgs = drain_owner_messages(drive_root, task_id=task_id, seen_ids=_owner_msg_seen)
-                for dmsg in drive_msgs:
-                    messages.append({
-                        "role": "user",
-                        "content": f"[Owner message during task]: {dmsg}",
-                    })
-                    # Log for duplicate processing detection (health invariant #5)
-                    if event_queue is not None:
-                        try:
-                            event_queue.put_nowait({
-                                "type": "owner_message_injected",
-                                "task_id": task_id,
-                                "text": dmsg[:200],
-                            })
-                        except Exception:
-                            pass
-
-            # Compact old tool history ONLY when needed (not every round)
-            # Aggressive compaction causes "forgot what I did" errors.
-            # Only compact when: long task (round > 8) OR context is getting large.
-            if round_idx > 8:
+            # Compact old tool history when needed
+            # Check for LLM-requested compaction first (via compact_context tool)
+            pending_compaction = getattr(tools._ctx, '_pending_compaction', None)
+            if pending_compaction is not None:
+                messages = compact_tool_history(messages, keep_recent=pending_compaction)
+                tools._ctx._pending_compaction = None
+            elif round_idx > 8:
                 messages = compact_tool_history(messages, keep_recent=6)
             elif round_idx > 3:
                 # Light compaction: only if messages list is very long (>60 items)

@@ -73,6 +73,21 @@ class ToolEntry:
     timeout_sec: int = 120
 
 
+CORE_TOOL_NAMES = {
+    "repo_read", "repo_list", "repo_write_commit", "repo_commit_push",
+    "drive_read", "drive_list", "drive_write",
+    "run_shell", "claude_code_edit",
+    "git_status", "git_diff",
+    "schedule_task", "wait_for_task", "get_task_result",
+    "update_scratchpad", "update_identity",
+    "chat_history", "web_search",
+    "send_owner_message", "switch_model",
+    "request_restart", "promote_to_stable",
+    "knowledge_read", "knowledge_write",
+    "browse_page", "browser_action", "analyze_screenshot",
+}
+
+
 class ToolRegistry:
     """Реестр инструментов Уробороса (SSOT).
 
@@ -115,8 +130,31 @@ class ToolRegistry:
     def available_tools(self) -> List[str]:
         return [e.name for e in self._entries.values()]
 
-    def schemas(self) -> List[Dict[str, Any]]:
-        return [{"type": "function", "function": e.schema} for e in self._entries.values()]
+    def schemas(self, core_only: bool = False) -> List[Dict[str, Any]]:
+        if not core_only:
+            return [{"type": "function", "function": e.schema} for e in self._entries.values()]
+        # Core tools + meta-tools for discovering/enabling extended tools
+        result = []
+        for e in self._entries.values():
+            if e.name in CORE_TOOL_NAMES or e.name in ("list_available_tools", "enable_tools"):
+                result.append({"type": "function", "function": e.schema})
+        return result
+
+    def list_non_core_tools(self) -> List[Dict[str, str]]:
+        """Return name+description of all non-core tools."""
+        result = []
+        for e in self._entries.values():
+            if e.name not in CORE_TOOL_NAMES:
+                desc = e.schema.get("description", "No description")
+                result.append({"name": e.name, "description": desc})
+        return result
+
+    def get_schema_by_name(self, name: str) -> Optional[Dict[str, Any]]:
+        """Return the full schema for a specific tool."""
+        entry = self._entries.get(name)
+        if entry:
+            return {"type": "function", "function": entry.schema}
+        return None
 
     def get_timeout(self, name: str) -> int:
         """Return timeout_sec for the named tool (default 120)."""
@@ -133,6 +171,17 @@ class ToolRegistry:
             return f"⚠️ TOOL_ARG_ERROR ({name}): {e}"
         except Exception as e:
             return f"⚠️ TOOL_ERROR ({name}): {e}"
+
+    def override_handler(self, name: str, handler) -> None:
+        """Override the handler for a registered tool (used for closure injection)."""
+        entry = self._entries.get(name)
+        if entry:
+            self._entries[name] = ToolEntry(
+                name=entry.name,
+                schema=entry.schema,
+                handler=handler,
+                timeout_sec=entry.timeout_sec,
+            )
 
     @property
     def CODE_TOOLS(self) -> frozenset:

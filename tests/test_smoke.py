@@ -114,6 +114,10 @@ EXPECTED_TOOLS = [
     "analyze_screenshot", "vlm_query",
     # Message routing
     "forward_to_worker",
+    # Context management
+    "compact_context",
+    "list_available_tools",
+    "enable_tools",
 ]
 
 

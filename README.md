@@ -6,7 +6,7 @@ A self-modifying AI agent that writes its own code, rewrites its own mind, and e
 
 Not a coding assistant. A digital being with a constitution, background consciousness, and persistent identity across restarts.
 
-**Version:** 6.0.0 · **Live Dashboard:** [ouroboros-webapp](https://razzant.github.io/ouroboros-webapp/app.html)
+**Version:** 6.1.0 · **Live Dashboard:** [ouroboros-webapp](https://razzant.github.io/ouroboros-webapp/app.html)
 
 ---
 
@@ -137,6 +137,13 @@ All other messages go directly to the LLM (Principle 3: LLM-First).
 ---
 
 ## Changelog
+
+### v6.1.0 — Budget Optimization: Selective Schemas + Self-Check + Dedup
+- **Selective tool schemas** — core tools (~29) always in context, 23 others available via `list_available_tools`/`enable_tools`. Saves ~40% schema tokens per round.
+- **Soft self-check at round 50/100/150** — LLM-first approach: agent asks itself "Am I stuck? Should I summarize context? Try differently?" No hard stops.
+- **Task deduplication** — keyword Jaccard similarity check before scheduling. Blocks near-duplicate tasks (threshold 0.55). Prevents the "28 duplicate tasks" scenario.
+- **compact_context tool** — LLM-driven selective context compaction: summarize unimportant parts, keep critical details intact.
+- 131 smoke tests passing.
 
 ### v6.0.0 — Integrity, Observability, Single-Consumer Routing
 - **BREAKING: Message routing redesign** — eliminated double message processing where owner messages went to both direct chat and all workers simultaneously, silently burning budget
