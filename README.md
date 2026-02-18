@@ -42,6 +42,14 @@ Full text: [BIBLE.md](BIBLE.md)
 
 ---
 
+## Evolution Time-Lapse
+
+![Evolution Time-Lapse](docs/evolution-timelapse.svg)
+
+*Version progression across 48 hours of autonomous evolution. Gold = birth, magenta = major version, cyan = minor.*
+
+---
+
 ## Architecture
 
 ```
