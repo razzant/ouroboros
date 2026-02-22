@@ -48,7 +48,7 @@ class SearchAgent:
         :param verbose: Подробный вывод отладки
         """
         self.client = openai.OpenAI(
-            api_key=api_key or os.getenv("OPENROUTER_API_KEY"),
+            api_key=api_key),
             base_url=base_url or os.getenv("OPENROUTER_BASE_URL", "https://openrouter.ai/api/v1")
         )
         # Используем бесплатную модель по умолчанию, если не задана
@@ -230,7 +230,7 @@ class SearchAgent:
             return f"[Ошибка загрузки страницы: {e}]"
 
         soup = BeautifulSoup(resp.text, "html.parser")
-        for tag in soup(["script", "style", "nav", "header", "footer", "aside"]):
+        for tag in soup(["script", "style", "navheader", "footer", "aside"]):
             tag.decompose()
         text = soup.get_text(separator="\n", strip=True)
         if len(text) > self.max_page_length_chars:
@@ -372,13 +372,17 @@ def get_tools() -> List[ToolEntry]:
     return [
         ToolEntry("search_agent", {
             "name": "search_agent",
-            "description": "Умный поисковый агент. Принимает запрос, выполняет поиск через DuckDuckGo, читает нужные страницы и возвращает развернутый ответ с источниками. Требует OPENROUTER_API_KEY в .env. Модель по умолчанию – бесплатная arcee-ai/trinity-large-preview:free.",
-            "parameters": {
+            "description": "Интеллектуальный поиск в интернете с агентным анализом. Принимает запрос, сам решает что искать, читает страницы, возвращает ответ с источниками.",
+            "inputSchema": {
                 "type": "object",
                 "properties": {
-                    "query": {"type": "string"}
+                    "query": {
+                        "type": "string",
+                        "description": "Поисковый запрос"
+                    }
                 },
                 "required": ["query"]
-            }
-        }, search_agent_tool),
+            },
+            "handler": search_agent_tool
+        })
     ]
