@@ -100,7 +100,7 @@ class SearchAgent:
                             }
                         },
                         "required": ["query"],
-                        "additionalProperties": False
+                        "additionalConstraints": None
                     },
                     "strict": True
                 }
@@ -119,7 +119,7 @@ class SearchAgent:
                             }
                         },
                         "required": ["url"],
-                        "additionalProperties": False
+                        "additionalConstraints": None
                     },
                     "strict": True
                 }
@@ -143,7 +143,7 @@ class SearchAgent:
                             }
                         },
                         "required": ["answer", "sources"],
-                        "additionalProperties": False
+                        "additionalConstraints": None
                     },
                     "strict": True
                 }
@@ -243,7 +243,8 @@ class SearchAgent:
                 model=self.model,
                 messages=messages,
                 tools=self.tools,
-                tool_choice="auto"
+                tool_choice="auto",
+                max_tokens=2000  # Limit tokens to stay within free tier
             )
             msg = response.choices[0].message
 
@@ -307,17 +308,13 @@ class SearchAgent:
             if self.verbose:
                 print(f"[DEBUG] Достигнут лимит итераций ({iteration}/{max_iterations}). Принудительная генерация ответа.")
             try:
-                last_msg = messages[-1] if messages else {"role": "system", "content": "Сгенерируй ответ на основе имеющейся информации."}
-                if last_msg["role"] == "user":
-                    prompt = last_msg["content"] + "\n\nИспользуй собранную информацию для формирования финального ответа. Если необходимо, вызови finalize_answer."
-                else:
-                    prompt = "Проанализируй всю собранную информацию и сформулируй финальный ответ. Вызови finalize_answer."
-                
+                prompt = "Проанализируй всю собранную информацию и сформулируй финальный ответ. Вызови finalize_answer."
                 response = self.client.chat.completions.create(
                     model=self.model,
                     messages=messages + [{"role": "user", "content": prompt}],
                     tools=self.tools,
-                    tool_choice={"type": "function", "function": {"name": "finalize_answer"}}
+                    tool_choice={"type": "function", "function": {"name": "finalize_answer"}},
+                    max_tokens=2000  # Stay within free tier
                 )
                 msg = response.choices[0].message
                 if msg.tool_calls:
