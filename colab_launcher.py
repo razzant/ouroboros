@@ -18,6 +18,8 @@ def install_launcher_deps() -> None:
         [sys.executable, "-m", "pip", "install", "-q", "openai>=1.0.0", "requests"],
         check=True,
     )
+    # Claude Code CLI is no longer required (switched to Google AI Studio)
+    # Kept for backward compatibility if ANTHROPIC_API_KEY is still set
 
 install_launcher_deps()
 
@@ -90,7 +92,7 @@ def _parse_int_cfg(raw: Optional[str], default: int, minimum: int = 0) -> int:
         val = default
     return max(minimum, val)
 
-OPENROUTER_API_KEY = get_secret("OPENROUTER_API_KEY", required=True)
+GOOGLE_API_KEY = get_secret("GOOGLE_API_KEY", required=True)
 TELEGRAM_BOT_TOKEN = get_secret("TELEGRAM_BOT_TOKEN", required=True)
 TOTAL_BUDGET_DEFAULT = get_secret("TOTAL_BUDGET", required=True)
 GITHUB_TOKEN = get_secret("GITHUB_TOKEN", required=True)
@@ -108,15 +110,15 @@ except Exception as e:
     log.warning(f"Failed to parse TOTAL_BUDGET ({TOTAL_BUDGET_DEFAULT!r}): {e}")
     TOTAL_BUDGET_LIMIT = 0.0
 
-OPENAI_API_KEY = get_secret("OPENAI_API_KEY", default="")
-ANTHROPIC_API_KEY = get_secret("ANTHROPIC_API_KEY", default="")
+ANTHROPIC_API_KEY = get_secret("ANTHROPIC_API_KEY", default="")  # optional, for Claude Code CLI only
 GITHUB_USER = get_cfg("GITHUB_USER", default=None, allow_legacy_secret=True)
 GITHUB_REPO = get_cfg("GITHUB_REPO", default=None, allow_legacy_secret=True)
 assert GITHUB_USER and str(GITHUB_USER).strip(), "GITHUB_USER not set. Add it to your config cell (see README)."
 assert GITHUB_REPO and str(GITHUB_REPO).strip(), "GITHUB_REPO not set. Add it to your config cell (see README)."
 MAX_WORKERS = int(get_cfg("OUROBOROS_MAX_WORKERS", default="5", allow_legacy_secret=True) or "5")
-MODEL_MAIN = get_cfg("OUROBOROS_MODEL", default="anthropic/claude-sonnet-4.6", allow_legacy_secret=True)
-MODEL_CODE = get_cfg("OUROBOROS_MODEL_CODE", default="anthropic/claude-sonnet-4.6", allow_legacy_secret=True)
+# NOTE: gemini-3.1-pro-preview is the primary model. Update to latest available in AI Studio if needed.
+MODEL_MAIN = get_cfg("OUROBOROS_MODEL", default="gemini-3.1-pro-preview", allow_legacy_secret=True)
+MODEL_CODE = get_cfg("OUROBOROS_MODEL_CODE", default="gemini-3.1-pro-preview", allow_legacy_secret=True)
 MODEL_LIGHT = get_cfg("OUROBOROS_MODEL_LIGHT", default=DEFAULT_LIGHT_MODEL, allow_legacy_secret=True)
 
 BUDGET_REPORT_EVERY_MESSAGES = 10
@@ -133,13 +135,12 @@ DIAG_SLOW_CYCLE_SEC = _parse_int_cfg(
     minimum=0,
 )
 
-os.environ["OPENROUTER_API_KEY"] = str(OPENROUTER_API_KEY)
-os.environ["OPENAI_API_KEY"] = str(OPENAI_API_KEY or "")
+os.environ["GOOGLE_API_KEY"] = str(GOOGLE_API_KEY)
 os.environ["ANTHROPIC_API_KEY"] = str(ANTHROPIC_API_KEY or "")
 os.environ["GITHUB_USER"] = str(GITHUB_USER)
 os.environ["GITHUB_REPO"] = str(GITHUB_REPO)
-os.environ["OUROBOROS_MODEL"] = str(MODEL_MAIN or "anthropic/claude-sonnet-4.6")
-os.environ["OUROBOROS_MODEL_CODE"] = str(MODEL_CODE or "anthropic/claude-sonnet-4.6")
+os.environ["OUROBOROS_MODEL"] = str(MODEL_MAIN or "gemini-3.1-pro-preview")
+os.environ["OUROBOROS_MODEL_CODE"] = str(MODEL_CODE or "gemini-3.1-pro-preview")
 if MODEL_LIGHT:
     os.environ["OUROBOROS_MODEL_LIGHT"] = str(MODEL_LIGHT)
 os.environ["OUROBOROS_DIAG_HEARTBEAT_SEC"] = str(DIAG_HEARTBEAT_SEC)

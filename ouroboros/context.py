@@ -364,26 +364,13 @@ def build_llm_messages(
 
     dynamic_text = "\n\n".join(dynamic_parts)
 
-    # System message with 3 content blocks for optimal caching
+    # System message: merged into single string for Gemini API compatibility.
+    # (Anthropic-style multipart system messages with cache_control are not used here.)
+    full_system_text = "\n\n".join(filter(None, [static_text, semi_stable_text, dynamic_text]))
     messages: List[Dict[str, Any]] = [
         {
             "role": "system",
-            "content": [
-                {
-                    "type": "text",
-                    "text": static_text,
-                    "cache_control": {"type": "ephemeral", "ttl": "1h"},
-                },
-                {
-                    "type": "text",
-                    "text": semi_stable_text,
-                    "cache_control": {"type": "ephemeral"},
-                },
-                {
-                    "type": "text",
-                    "text": dynamic_text,
-                },
-            ],
+            "content": full_system_text,
         },
         {"role": "user", "content": _build_user_content(task)},
     ]
@@ -426,7 +413,7 @@ def apply_message_token_soft_cap(
     if soft_cap_tokens <= 0 or estimated <= soft_cap_tokens:
         return messages, info
 
-    # Prune log summaries from the dynamic text block in multipart system messages
+    # Prune log summaries from the system message text
     prunable = ["## Recent chat", "## Recent progress", "## Recent tools", "## Recent events", "## Supervisor"]
     pruned = copy.deepcopy(messages)
     for prefix in prunable:
@@ -435,13 +422,32 @@ def apply_message_token_soft_cap(
         for i, msg in enumerate(pruned):
             content = msg.get("content")
 
-            # Handle multipart content (trim from dynamic text block)
+            # Handle string system message (Gemini-compatible format)
+            if isinstance(content, str) and msg.get("role") == "system":
+                if prefix in content:
+                    lines = content.split("\n\n")
+                    new_lines = []
+                    skip_section = False
+                    for line in lines:
+                        if line.startswith(prefix):
+                            skip_section = True
+                            info["trimmed_sections"].append(prefix)
+                        elif skip_section and line.startswith("## "):
+                            skip_section = False
+                            new_lines.append(line)
+                        elif not skip_section:
+                            new_lines.append(line)
+                    new_text = "\n\n".join(new_lines)
+                    pruned[i] = {**msg, "content": new_text}
+                    estimated = sum(_estimate_message_tokens(m) for m in pruned)
+                    info["estimated_tokens_after"] = estimated
+
+            # Handle legacy multipart content (kept for backwards compatibility)
             if isinstance(content, list) and msg.get("role") == "system":
-                # Find the dynamic text block (the block without cache_control)
+                # Find the dynamic text block
                 for j, block in enumerate(content):
                     if (isinstance(block, dict) and
-                        block.get("type") == "text" and
-                        "cache_control" not in block):
+                        block.get("type") == "text"):
                         text = block.get("text", "")
                         if prefix in text:
                             # Remove this section from the dynamic text

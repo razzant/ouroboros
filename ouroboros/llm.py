@@ -1,20 +1,29 @@
 """
 Ouroboros — LLM client.
 
-The only module that communicates with the LLM API (OpenRouter).
+The only module that communicates with the LLM API (Google AI Studio).
 Contract: chat(), default_model(), available_models(), add_usage().
+
+Uses Google AI Studio's OpenAI-compatible endpoint (free tier).
+Base URL: https://generativelanguage.googleapis.com/v1beta/openai/
+Auth: GOOGLE_API_KEY (from Google AI Studio: aistudio.google.com/app/apikey)
+
+Free tier rate limits (as of 2025):
+  gemini-2.5-pro:  2 RPM, 50 RPD
+  gemini-2.0-flash: 15 RPM, 1500 RPD  ← recommended for light/bg model
 """
 
 from __future__ import annotations
 
 import logging
 import os
-import time
 from typing import Any, Dict, List, Optional, Tuple
 
 log = logging.getLogger(__name__)
 
-DEFAULT_LIGHT_MODEL = "google/gemini-3-pro-preview"
+# NOTE: Update this to the latest available Gemini model in your AI Studio dashboard.
+# Common free-tier model IDs: gemini-2.5-pro, gemini-2.0-flash, gemini-1.5-pro
+DEFAULT_LIGHT_MODEL = "gemini-2.0-flash"
 
 
 def normalize_reasoning_effort(value: str, default: str = "medium") -> str:
@@ -38,79 +47,23 @@ def add_usage(total: Dict[str, Any], usage: Dict[str, Any]) -> None:
 
 def fetch_openrouter_pricing() -> Dict[str, Tuple[float, float, float]]:
     """
-    Fetch current pricing from OpenRouter API.
-
-    Returns dict of {model_id: (input_per_1m, cached_per_1m, output_per_1m)}.
-    Returns empty dict on failure.
+    No-op: Google AI Studio free tier has $0 cost.
+    Kept for API compatibility with loop.py which calls this function.
+    Returns empty dict — all cost calculations will return 0.
     """
-    import logging
-    log = logging.getLogger("ouroboros.llm")
-
-    try:
-        import requests
-    except ImportError:
-        log.warning("requests not installed, cannot fetch pricing")
-        return {}
-
-    try:
-        url = "https://openrouter.ai/api/v1/models"
-        resp = requests.get(url, timeout=15)
-        resp.raise_for_status()
-
-        data = resp.json()
-        models = data.get("data", [])
-
-        # Prefixes we care about
-        prefixes = ("anthropic/", "openai/", "google/", "meta-llama/", "x-ai/", "qwen/")
-
-        pricing_dict = {}
-        for model in models:
-            model_id = model.get("id", "")
-            if not model_id.startswith(prefixes):
-                continue
-
-            pricing = model.get("pricing", {})
-            if not pricing or not pricing.get("prompt"):
-                continue
-
-            # OpenRouter pricing is in dollars per token (raw values)
-            raw_prompt = float(pricing.get("prompt", 0))
-            raw_completion = float(pricing.get("completion", 0))
-            raw_cached_str = pricing.get("input_cache_read")
-            raw_cached = float(raw_cached_str) if raw_cached_str else None
-
-            # Convert to per-million tokens
-            prompt_price = round(raw_prompt * 1_000_000, 4)
-            completion_price = round(raw_completion * 1_000_000, 4)
-            if raw_cached is not None:
-                cached_price = round(raw_cached * 1_000_000, 4)
-            else:
-                cached_price = round(prompt_price * 0.1, 4)  # fallback: 10% of prompt
-
-            # Sanity check: skip obviously wrong prices
-            if prompt_price > 1000 or completion_price > 1000:
-                log.warning(f"Skipping {model_id}: prices seem wrong (prompt={prompt_price}, completion={completion_price})")
-                continue
-
-            pricing_dict[model_id] = (prompt_price, cached_price, completion_price)
-
-        log.info(f"Fetched pricing for {len(pricing_dict)} models from OpenRouter")
-        return pricing_dict
-
-    except (requests.RequestException, ValueError, KeyError) as e:
-        log.warning(f"Failed to fetch OpenRouter pricing: {e}")
-        return {}
+    log.debug("fetch_openrouter_pricing: no-op (using Google AI Studio free tier, cost = $0)")
+    return {}
 
 
 class LLMClient:
-    """OpenRouter API wrapper. All LLM calls go through this class."""
+    """Google AI Studio API wrapper (OpenAI-compatible endpoint). All LLM calls go through this class."""
 
     def __init__(
         self,
         api_key: Optional[str] = None,
-        base_url: str = "https://openrouter.ai/api/v1",
+        base_url: str = "https://generativelanguage.googleapis.com/v1beta/openai/",
     ):
-        self._api_key = api_key or os.environ.get("OPENROUTER_API_KEY", "")
+        self._api_key = api_key or os.environ.get("GOOGLE_API_KEY", "")
         self._base_url = base_url
         self._client = None
 
@@ -120,36 +73,8 @@ class LLMClient:
             self._client = OpenAI(
                 base_url=self._base_url,
                 api_key=self._api_key,
-                default_headers={
-                    "HTTP-Referer": "https://colab.research.google.com/",
-                    "X-Title": "Ouroboros",
-                },
             )
         return self._client
-
-    def _fetch_generation_cost(self, generation_id: str) -> Optional[float]:
-        """Fetch cost from OpenRouter Generation API as fallback."""
-        try:
-            import requests
-            url = f"{self._base_url.rstrip('/')}/generation?id={generation_id}"
-            resp = requests.get(url, headers={"Authorization": f"Bearer {self._api_key}"}, timeout=5)
-            if resp.status_code == 200:
-                data = resp.json().get("data") or {}
-                cost = data.get("total_cost") or data.get("usage", {}).get("cost")
-                if cost is not None:
-                    return float(cost)
-            # Generation might not be ready yet — retry once after short delay
-            time.sleep(0.5)
-            resp = requests.get(url, headers={"Authorization": f"Bearer {self._api_key}"}, timeout=5)
-            if resp.status_code == 200:
-                data = resp.json().get("data") or {}
-                cost = data.get("total_cost") or data.get("usage", {}).get("cost")
-                if cost is not None:
-                    return float(cost)
-        except Exception:
-            log.debug("Failed to fetch generation cost from OpenRouter", exc_info=True)
-            pass
-        return None
 
     def chat(
         self,
@@ -164,33 +89,13 @@ class LLMClient:
         client = self._get_client()
         effort = normalize_reasoning_effort(reasoning_effort)
 
-        extra_body: Dict[str, Any] = {
-            "reasoning": {"effort": effort, "exclude": True},
-        }
-
-        # Pin Anthropic models to Anthropic provider for prompt caching
-        if model.startswith("anthropic/"):
-            extra_body["provider"] = {
-                "order": ["Anthropic"],
-                "allow_fallbacks": False,
-                "require_parameters": True,
-            }
-
         kwargs: Dict[str, Any] = {
             "model": model,
             "messages": messages,
             "max_tokens": max_tokens,
-            "extra_body": extra_body,
         }
         if tools:
-            # Add cache_control to last tool for Anthropic prompt caching
-            # This caches all tool schemas (they never change between calls)
-            tools_with_cache = [t for t in tools]  # shallow copy
-            if tools_with_cache:
-                last_tool = {**tools_with_cache[-1]}  # copy last tool
-                last_tool["cache_control"] = {"type": "ephemeral", "ttl": "1h"}
-                tools_with_cache[-1] = last_tool
-            kwargs["tools"] = tools_with_cache
+            kwargs["tools"] = tools
             kwargs["tool_choice"] = tool_choice
 
         resp = client.chat.completions.create(**kwargs)
@@ -199,31 +104,10 @@ class LLMClient:
         choices = resp_dict.get("choices") or [{}]
         msg = (choices[0] if choices else {}).get("message") or {}
 
-        # Extract cached_tokens from prompt_tokens_details if available
-        if not usage.get("cached_tokens"):
-            prompt_details = usage.get("prompt_tokens_details") or {}
-            if isinstance(prompt_details, dict) and prompt_details.get("cached_tokens"):
-                usage["cached_tokens"] = int(prompt_details["cached_tokens"])
-
-        # Extract cache_write_tokens from prompt_tokens_details if available
-        # OpenRouter: "cache_write_tokens"
-        # Native Anthropic: "cache_creation_tokens" or "cache_creation_input_tokens"
-        if not usage.get("cache_write_tokens"):
-            prompt_details_for_write = usage.get("prompt_tokens_details") or {}
-            if isinstance(prompt_details_for_write, dict):
-                cache_write = (prompt_details_for_write.get("cache_write_tokens")
-                              or prompt_details_for_write.get("cache_creation_tokens")
-                              or prompt_details_for_write.get("cache_creation_input_tokens"))
-                if cache_write:
-                    usage["cache_write_tokens"] = int(cache_write)
-
-        # Ensure cost is present in usage (OpenRouter includes it, but fallback if missing)
-        if not usage.get("cost"):
-            gen_id = resp_dict.get("id") or ""
-            if gen_id:
-                cost = self._fetch_generation_cost(gen_id)
-                if cost is not None:
-                    usage["cost"] = cost
+        # Google AI Studio free tier: cost is always $0
+        usage["cost"] = 0.0
+        usage.setdefault("cached_tokens", 0)
+        usage.setdefault("cache_write_tokens", 0)
 
         return msg, usage
 
@@ -231,7 +115,7 @@ class LLMClient:
         self,
         prompt: str,
         images: List[Dict[str, Any]],
-        model: str = "anthropic/claude-sonnet-4.6",
+        model: str = "gemini-2.0-flash",
         max_tokens: int = 1024,
         reasoning_effort: str = "low",
     ) -> Tuple[str, Dict[str, Any]]:
@@ -280,11 +164,13 @@ class LLMClient:
 
     def default_model(self) -> str:
         """Return the single default model from env. LLM switches via tool if needed."""
-        return os.environ.get("OUROBOROS_MODEL", "anthropic/claude-sonnet-4.6")
+        # NOTE: Update OUROBOROS_MODEL env var to the latest Gemini model available in AI Studio.
+        # Free-tier options: gemini-3.1-pro-preview, gemini-2.5-pro, gemini-2.0-flash, gemini-1.5-pro
+        return os.environ.get("OUROBOROS_MODEL", "gemini-3.1-pro-preview")
 
     def available_models(self) -> List[str]:
         """Return list of available models from env (for switch_model tool schema)."""
-        main = os.environ.get("OUROBOROS_MODEL", "anthropic/claude-sonnet-4.6")
+        main = os.environ.get("OUROBOROS_MODEL", "gemini-3.1-pro-preview")
         code = os.environ.get("OUROBOROS_MODEL_CODE", "")
         light = os.environ.get("OUROBOROS_MODEL_LIGHT", "")
         models = [main]

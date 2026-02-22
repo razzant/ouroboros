@@ -263,31 +263,11 @@ def budget_remaining(st: Dict[str, Any]) -> float:
 
 def check_openrouter_ground_truth() -> Optional[Dict[str, float]]:
     """
-    Call OpenRouter API to get ground truth usage.
-
-    Returns dict with total_usd and daily_usd spent according to OpenRouter, or None on error.
+    No-op: Google AI Studio free tier has no billing API to query.
+    Kept for API compatibility — always returns $0 usage.
     """
-    try:
-        import urllib.request
-        api_key = os.environ.get("OPENROUTER_API_KEY", "").strip()
-        if not api_key:
-            return None
-        req = urllib.request.Request(
-            "https://openrouter.ai/api/v1/auth/key",
-            headers={"Authorization": f"Bearer {api_key}"},
-        )
-        with urllib.request.urlopen(req, timeout=10) as resp:
-            data = json.loads(resp.read().decode("utf-8"))
-        # OpenRouter API returns usage already in dollars (not cents)
-        usage_total = data.get("data", {}).get("usage", 0)
-        usage_daily = data.get("data", {}).get("usage_daily", 0)
-        return {
-            "total_usd": float(usage_total),
-            "daily_usd": float(usage_daily),
-        }
-    except Exception:
-        log.warning("Failed to fetch OpenRouter ground truth", exc_info=True)
-        return None
+    log.debug("check_openrouter_ground_truth: no-op (using Google AI Studio free tier)")
+    return {"total_usd": 0.0, "daily_usd": 0.0}
 
 
 def budget_pct(st: Dict[str, Any]) -> float:
