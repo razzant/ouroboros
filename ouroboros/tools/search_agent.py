@@ -225,7 +225,7 @@ class SearchAgent:
         if max_iterations is None:
             max_iterations = self.max_iterations
 
-        messages = [
+        messages: List[Dict] = [
             {"role": "system", "content": self.system_prompt},
             {"role": "user", "content": user_query}
         ]
@@ -234,7 +234,7 @@ class SearchAgent:
         final_answer = None
         sources = []
 
-        while iteration < max_iterations:
+        while iteration < max_iterations and final_answer is None:
             iteration += 1
             if self.verbose:
                 print(f"\n[DEBUG] Итерация {iteration}")
@@ -278,7 +278,7 @@ class SearchAgent:
                         })
 
                     elif func_name == "finalize_answer":
-                        final_answer = args["answer"]
+                        final_answer = args.get("answer", "")
                         sources = args.get("sources", [])
                         messages.append({
                             "role": "tool",
@@ -296,7 +296,6 @@ class SearchAgent:
 
                 if final_answer is not None:
                     break
-
             else:
                 if self.verbose:
                     print("[DEBUG] Модель ответила текстом без вызова инструментов")
@@ -308,9 +307,15 @@ class SearchAgent:
             if self.verbose:
                 print(f"[DEBUG] Достигнут лимит итераций ({iteration}/{max_iterations}). Принудительная генерация ответа.")
             try:
+                last_msg = messages[-1] if messages else {"role": "system", "content": "Сгенерируй ответ на основе имеющейся информации."}
+                if last_msg["role"] == "user":
+                    prompt = last_msg["content"] + "\n\nИспользуй собранную информацию для формирования финального ответа. Если необходимо, вызови finalize_answer."
+                else:
+                    prompt = "Проанализируй всю собранную информацию и сформулируй финальный ответ. Вызови finalize_answer."
+                
                 response = self.client.chat.completions.create(
                     model=self.model,
-                    messages=messages + [{"role": "user", "content": "Синтезируй итоговый ответ на исходный запрос на основе всей собранной информации. Вызови finalize_answer."}],
+                    messages=messages + [{"role": "user", "content": prompt}],
                     tools=self.tools,
                     tool_choice={"type": "function", "function": {"name": "finalize_answer"}}
                 )
@@ -356,15 +361,19 @@ def get_tools() -> List[ToolEntry]:
         ToolEntry(
             name="search_agent",
             schema={
-                "type": "object",
-                "properties": {
-                    "query": {
-                        "type": "string",
-                        "description": "Поисковый запрос для агента"
-                    }
-                },
-                "required": ["query"],
-                "additionalProperties": False
+                "name": "search_agent",
+                "description": "Автономный поисковый агент на основе LLM с function calling. Агент самостоятельно ищет в интернете, анализирует результаты и возвращает скомпилированный ответ с источниками.",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "query": {
+                            "type": "string",
+                            "description": "Поисковый запрос для агента"
+                        }
+                    },
+                    "required": ["query"],
+                    "additionalProperties": False
+                }
             },
             handler=_search_agent_handler
         )
