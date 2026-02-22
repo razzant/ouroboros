@@ -45,7 +45,8 @@ class SearchAgent:
             api_key=api_key,
             base_url=base_url or os.getenv("OPENROUTER_BASE_URL") or os.getenv("OPENAI_BASE_URL") or "https://openrouter.ai/api/v1"
         )
-        self.model = model or os.getenv("OPENROUTER_MODEL") or os.getenv("OPENAI_MODEL") or "gpt-4o-mini"
+        # Используем StepFun/Step-3.5-Flash:free как модель по умолчанию
+        self.model = model or os.getenv("OPENROUTER_MODEL") or os.getenv("OPENAI_MODEL") or "StepFun/Step-3.5-Flash:free"
         
         self.max_search_results = max_search_results
         self.max_page_length_chars = max_page_length_chars
@@ -87,7 +88,8 @@ class SearchAgent:
 - Не вызывай finalize_answer преждевременно, но и не зацикливайся – старайся уложиться в разумное число шагов.
 - В финальном ответе обязательно укажи источники (URL), на которые ты опирался.
 
-Помни: ты должен дать максимально полный и точный ответ на исходный запрос пользователя."""
+ВАЖНО: Если после 3-5 итераций у тебя уже есть достаточно информации для ответа, обязательно вызови finalize_answer. Не продолжай поиск бесконечно.
+"""
 
     def _define_tools(self) -> List[Dict[str, Any]]:
         return [
@@ -233,7 +235,7 @@ class SearchAgent:
     # Основной цикл обработки запроса
     # -------------------------------------------------------------------------
 
-    def process_query(self, user_query: str, max_iterations: int = 15) -> Dict[str, Any]:
+    def process_query(self, user_query: str, max_iterations: int = 10) -> Dict[str, Any]:
         """Запускает агента для обработки запроса пользователя."""
         messages = [
             {"role": "system", "content": self.system_prompt},
@@ -260,7 +262,6 @@ class SearchAgent:
             except Exception as e:
                 if self.verbose:
                     print(f"[DEBUG] Ошибка API: {e}")
-                # Прерываем цикл с ошибкой
                 final_answer = f"Ошибка при обращении к модели: {e}"
                 sources = []
                 break
@@ -330,7 +331,6 @@ class SearchAgent:
                 final_answer = msg.content or "Модель не предоставила ответ"
                 sources = ["Ответ сгенерирован без явных источников"]
 
-        # Форс Completing, если достигли лимита итераций
         if final_answer is None:
             final_answer = "Не удалось получить ответ за допустимое число итераций."
             sources = []
@@ -347,7 +347,7 @@ class SearchAgent:
 
 def search_agent_tool(query: str, max_iterations: int = 10) -> str:
     """
-    Инструмент для Ouroboros: выполняетSearchAgent и возвращает JSON строку.
+    Инструмент для Ouroboros: выполняет SearchAgent и возвращает JSON строку.
     """
     try:
         agent = SearchAgent(verbose=False)
@@ -366,17 +366,13 @@ def search_agent_tool(query: str, max_iterations: int = 10) -> str:
 
 search_agent_schema = {
     "name": "search_agent",
-    "description": "Автономный поисковый агент на основе LLM. Принимает запрос, самостоятельно выполняет поиск, читает страницы и возвращает структурированный ответ с источниками. Использует DuckDuckGo (HTML) и несколько итераций LLM для анализа.",
+    "description": "Автономный поисковый агент на основе LLM. Принимает запрос, самостоятельно выполняет поиск, читает страницы и возвращает структурированный ответ с источниками.",
     "parameters": {
         "type": "object",
         "properties": {
             "query": {
                 "type": "string",
                 "description": "Поисковый запрос пользователя"
-            },
-            "max_iterations": {
-                "type": "integer",
-                "description": "Максимальное число итераций агента (по умолчанию 10)"
             }
         },
         "required": ["query"],
@@ -384,14 +380,12 @@ search_agent_schema = {
     }
 }
 
-# Экспорт для регистрации
-def get_tools() -> List[ToolEntry]:
+def get_tools():
+    """Возвращает список инструментов этого модуля."""
     return [
         ToolEntry(
             name="search_agent",
             schema=search_agent_schema,
-            function=search_agent_tool
+            handler=search_agent_tool
         )
     ]
-
-__all__ = ["search_agent_tool", "get_tools", "SearchAgent"]
