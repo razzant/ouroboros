@@ -192,7 +192,7 @@ class SearchAgent:
         final_answer = None
         sources = []
         tool_call_count = 0
-        max_tool_calls = 10  # Force completion after 10 tool calls
+        max_tool_calls = 10
 
         while iteration < max_iterations and final_answer is None:
             iteration += 1
@@ -249,11 +249,9 @@ class SearchAgent:
                             "content": f"Ошибка: неизвестный инструмент {fname}"
                         })
                     
-                    # Force completion if too many tool calls without finalize
                     if tool_call_count >= max_tool_calls and final_answer is None:
                         if self.verbose:
                             print(f"[DEBUG] Достигнут лимит инструментов ({max_tool_calls}), принудительное завершение")
-                        # Ask model to finalize with what it has
                         messages.append({
                             "role": "user",
                             "content": "Достигнут лимит поисковых запросов. Пожалуйста, заверши поиск и верни финальный ответ на основе собранной информации, даже если она неполная. Используй инструмент finalize_answer."
@@ -261,14 +259,12 @@ class SearchAgent:
             else:
                 if self.verbose:
                     print("[DEBUG] Модель не вызвала инструменты, завершаем")
-                # Model gave a direct answer without tool calls
                 if msg.content:
                     final_answer = msg.content
                     sources = []
                 break
 
         if final_answer is None:
-            # Try to get a final answer by prompting the model
             if self.verbose:
                 print("[DEBUG] Попытка получить финальный ответ после цикла")
             try:
@@ -315,7 +311,7 @@ def get_tools() -> List[ToolEntry]:
             {
                 "name": "search_agent",
                 "description": "Интеллектуальный поиск в интернете с агентным анализом. Принимает запрос, сам решает что искать, читает страницы, возвращает ответ с источниками.",
-                "inputSchema": {
+                "parameters": {
                     "type": "object",
                     "properties": {
                         "query": {"type": "string", "description": "Поисковый запрос"}
