@@ -308,8 +308,7 @@ def search_agent_tool(query: str) -> str:
     return json.dumps(result, ensure_ascii=False)
 
 
-def get_tools() -> List[Dict]:
-    from .registry import ToolEntry
+def get_tools() -> List[ToolEntry]:
     return [
         ToolEntry(
             "search_agent",
@@ -322,8 +321,8 @@ def get_tools() -> List[Dict]:
                         "query": {"type": "string", "description": "Поисковый запрос"}
                     },
                     "required": ["query"]
-                },
-                "handler": search_agent_tool
-            }
+                }
+            },
+            search_agent_tool
         )
     ]
