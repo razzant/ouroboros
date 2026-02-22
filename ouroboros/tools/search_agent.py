@@ -32,6 +32,7 @@ class SearchAgent:
         model: Optional[str] = None,
         max_search_results: int = 5,
         max_page_length_chars: int = 8000,
+        max_iterations: int = 15,
         request_delay: float = 1.0,
         verbose: bool = False
     ):
@@ -43,6 +44,7 @@ class SearchAgent:
         self.model = model or os.getenv("OPENAI_MODEL") or os.getenv("OPENROUTER_MODEL") or "StepFun/Step-3.5-Flash:free"
         self.max_search_results = max_search_results
         self.max_page_length_chars = max_page_length_chars
+        self.max_iterations = max_iterations
         self.request_delay = request_delay
         self.verbose = verbose
 
@@ -246,11 +248,14 @@ class SearchAgent:
     # Основной цикл обработки запроса
     # -------------------------------------------------------------------------
 
-    def process_query(self, user_query: str, max_iterations: int = 15) -> Dict[str, Any]:
+    def process_query(self, user_query: str, max_iterations: Optional[int] = None) -> Dict[str, Any]:
         """
         Запускает агента для обработки запроса пользователя.
         Возвращает словарь с ключами 'answer' и 'sources'.
         """
+        if max_iterations is None:
+            max_iterations = self.max_iterations
+
         messages = [
             {"role": "system", "content": self.system_prompt},
             {"role": "user", "content": user_query}
@@ -359,18 +364,41 @@ class SearchAgent:
                     sources = ["Ответ сгенерирован без явных источников (модель не использовала поиск)"]
                     break
                 else:
-                    # Если нет ни工具, ни текста, возможно, модель ничего не сказала. Продолжим?
+                    # Если нет ни инструментов, ни текста, возможно, модель ничего не сказала. Продолжим?
                     if self.verbose:
                         print("[DEBUG] Модель не ответила и не вызвала инструменты – продолжаем")
                     messages.append(msg)
 
+        # Если до сих пор нет final_answer, делаем финальный принудительный вызов
         if final_answer is None:
-            # Принудительное завершение: берем последний ответ модели, если есть
-            if messages and messages[-1]["role"] == "assistant" and messages[-1].get("content"):
-                final_answer = messages[-1]["content"] + "\n[Принудительное завершение: достигнут лимит итераций]"
-                sources = ["Лимит итераций исчерпан, ответ взят из последнего сообщения модели"]
-            else:
-                final_answer = "Не удалось получить ответ за допустимое число итераций. Возможно, модель не смогла обработать запрос."
+            if self.verbose:
+                print(f"[DEBUG] Достигнут лимит итераций ({iteration}/{max_iterations}). Принудительная генерация ответа.")
+            
+            # Последняя попытка: запрос модели без инструментов
+            try:
+                final_response = self.client.chat.completions.create(
+                    model=self.model,
+                    messages=messages + [{"role": "system", "content": "Ты только что закончил поиск. Теперь синтезируй итоговый ответ на исходный запрос пользователя, используя всю собранную информацию. В ответе укажи подробный ответ и список URL источников, на которые ты опирался. Формат: JSON с полями 'answer' и 'sources'."}],
+                    tools=None
+                )
+                final_msg = final_response.choices[0].message
+                if final_msg.content:
+                    # Пытаемся извлечь JSON, если модель вернула текст
+                    try:
+                        parsed = json.loads(final_msg.content)
+                        final_answer = parsed.get("answer", final_msg.content)
+                        sources = parsed.get("sources", [])
+                    except json.JSONDecodeError:
+                        final_answer = final_msg.content
+                        # Пытаемся извлечь источники из текста
+                        sources = self._extract_sources_from_text(final_answer)
+                else:
+                    final_answer = "Не удалось получить ответ при принудительном завершении."
+                    sources = []
+            except Exception as e:
+                if self.verbose:
+                    print(f"[DEBUG] Ошибка при принудительной генерации: {e}")
+                final_answer = f"Ошибка при принудительной генерации ответа: {e}"
                 sources = []
 
         return {
@@ -378,6 +406,15 @@ class SearchAgent:
             "sources": sources,
             "iterations": iteration
         }
+
+    def _extract_sources_from_text(self, text: str) -> List[str]:
+        """
+        Пытается извлечь URL из текста ( heuristic ).
+        """
+        import re
+        # Ищем URL-подобные строки
+        urls = re.findall(r'https?://[^\s\\]+', text)
+        return list(set(urls))[:10]  # уникальные, до 10
 
 
 # -----------------------------------------------------------------------------
@@ -431,8 +468,8 @@ def get_tools() -> List[ToolEntry]:
 if __name__ == "__main__":
     # Пример использования
     agent = SearchAgent(
-        api_key=os.getenv("OPENROUTER_API_KEY"),
-        base_url=os.getenv("OPENROUTER_BASE_URL", "https://openrouter.ai/api/v1"),
+        api_key=os.getenv("OPENAI_API_KEY") or os.getenv("OPENROUTER_API_KEY"),
+        base_url=os.getenv("OPENAI_BASE_URL") or os.getenv("OPENROUTER_BASE_URL") or "https://openrouter.ai/api/v1",
         model=os.getenv("OPENROUTER_MODEL", "StepFun/Step-3.5-Flash:free"),
         verbose=True
     )
