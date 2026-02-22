@@ -68,44 +68,56 @@ class SearchAgent:
     def _define_tools(self) -> List[Dict[str, Any]]:
         return [
             {
-                "name": "search_web",
-                "description": "Выполняет поиск в интернете по запросу, возвращает список результатов с заголовками, ссылками и сниппетами",
-                "parameters": {
-                    "type": "object",
-                    "properties": {
-                        "query": {"type": "string", "description": "Поисковый запрос"}
+                "type": "function",
+                "function": {
+                    "name": "search_web",
+                    "description": "Выполняет поиск в интернете по запросу, возвращает список результатов с заголовками, ссылками и сниппетами",
+                    "parameters": {
+                        "type": "object",
+                        "properties": {
+                            "query": {"type": "string", "description": "Поисковый запрос"}
+                        },
+                        "required": ["query"],
+                        "additionalProperties": False
                     },
-                    "required": ["query"],
-                    "additionalProperties": False
+                    "strict": True
                 }
             },
             {
-                "name": "read_page",
-                "description": "Загружает полное содержимое страницы по URL",
-                "parameters": {
-                    "type": "object",
-                    "properties": {
-                        "url": {"type": "string", "description": "URL страницы для загрузки"}
+                "type": "function",
+                "function": {
+                    "name": "read_page",
+                    "description": "Загружает полное содержимое страницы по URL",
+                    "parameters": {
+                        "type": "object",
+                        "properties": {
+                            "url": {"type": "string", "description": "URL страницы для загрузки"}
+                        },
+                        "required": ["url"],
+                        "additionalProperties": False
                     },
-                    "required": ["url"],
-                    "additionalProperties": False
+                    "strict": True
                 }
             },
             {
-                "name": "finalize_answer",
-                "description": "Завершает поиск и возвращает финальный ответ с указанием источников",
-                "parameters": {
-                    "type": "object",
-                    "properties": {
-                        "answer": {"type": "string", "description": "Финальный ответ на запрос пользователя"},
-                        "sources": {
-                            "type": "array",
-                            "items": {"type": "string"},
-                            "description": "Список URL использованных источников"
-                        }
+                "type": "function",
+                "function": {
+                    "name": "finalize_answer",
+                    "description": "Завершает поиск и возвращает финальный ответ с указанием источников",
+                    "parameters": {
+                        "type": "object",
+                        "properties": {
+                            "answer": {"type": "string", "description": "Финальный ответ на запрос пользователя"},
+                            "sources": {
+                                "type": "array",
+                                "items": {"type": "string"},
+                                "description": "Список URL использованных источников"
+                            }
+                        },
+                        "required": ["answer", "sources"],
+                        "additionalProperties": False
                     },
-                    "required": ["answer", "sources"],
-                    "additionalProperties": False
+                    "strict": True
                 }
             }
         ]
