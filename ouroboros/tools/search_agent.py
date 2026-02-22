@@ -59,13 +59,16 @@ class SearchAgent:
 
 3. finalize_answer(answer: str, sources: List[str]) — завершает поиск и возвращает итоговый ответ. Вызывай только когда информация собрана достаточно.
 
-Правила:
+ПРАВИЛА РАБОТЫ:
 - При получении запроса подумай, какие поисковые запросы нужны.
 - Вызывай search_web для каждого запроса и анализируй результаты.
 - Если сниппеты недостаточны, вызывай read_page для перспективных ссылок.
-- После сбора данных вызови finalize_answer.
-- Не вызывай finalize_answer слишком рано, но и не зацикливайся. Ограничься 5-10 итерациями.
-- В финальном ответе обязательно укажи источники (URL).
+- После сбора данных (обычно 2-4 поиска и чтении 1-3 страниц) вызови finalize_answer.
+- НЕ ПЕРЕПОЛНЯЙ ИСТОЧНИКИ: выбери 3-5 самых релевантных URL.
+- ВСЕГДА вызывай finalize_answer, даже если информация неполная — верни лучший возможный ответ.
+- Если произошла ошибка (например, страница недоступна), все равно продолжи и finalize_answer в конце.
+
+ВАЖНО: Ты должен ВСЕГДА завершить поиск вызовом finalize_answer. Не зацикливайся.
 
 Цель: максимально полный и точный ответ на исходный запрос."""
 
@@ -95,7 +98,7 @@ class SearchAgent:
                     "parameters": {
                         "type": "object",
                         "properties": {
-                            "url": {"type": "string", "description": "URL страницы"}
+                            "url": {"type": "string", "description": "URL страницы для загрузки"}
                         },
                         "required": ["url"],
                         "additionalProperties": False
@@ -107,12 +110,16 @@ class SearchAgent:
                 "type": "function",
                 "function": {
                     "name": "finalize_answer",
-                    "description": "Завершает поиск и возвращает финальный ответ с источниками",
+                    "description": "Завершает поиск и возвращает финальный ответ",
                     "parameters": {
                         "type": "object",
                         "properties": {
-                            "answer": {"type": "string", "description": "Итоговый ответ"},
-                            "sources": {"type": "array", "items": {"type": "string"}, "description": "Список использованных URL"}
+                            "answer": {"type": "string", "description": "Итоговый ответ на запрос пользователя"},
+                            "sources": {
+                                "type": "array",
+                                "items": {"type": "string"},
+                                "description": "Список использованных URL (3-5 самых релевантных)"
+                            }
                         },
                         "required": ["answer", "sources"],
                         "additionalProperties": False
@@ -176,7 +183,7 @@ class SearchAgent:
             text = text[:self.max_page_length] + "\n...[обрезано]"
         return text
 
-    def process_query(self, user_query: str, max_iterations: int = 10) -> Dict[str, Any]:
+    def process_query(self, user_query: str, max_iterations: int = 8) -> Dict[str, Any]:
         messages = [
             {"role": "system", "content": self.system_prompt},
             {"role": "user", "content": user_query}
@@ -184,6 +191,8 @@ class SearchAgent:
         iteration = 0
         final_answer = None
         sources = []
+        tool_call_count = 0
+        max_tool_calls = 10  # Force completion after 10 tool calls
 
         while iteration < max_iterations and final_answer is None:
             iteration += 1
@@ -208,6 +217,8 @@ class SearchAgent:
                 for tool_call in msg.tool_calls:
                     fname = tool_call.function.name
                     args = json.loads(tool_call.function.arguments)
+                    tool_call_count += 1
+                    
                     if fname == "search_web":
                         results = self.search_web(args["query"])
                         messages.append({
@@ -237,16 +248,55 @@ class SearchAgent:
                             "tool_call_id": tool_call.id,
                             "content": f"Ошибка: неизвестный инструмент {fname}"
                         })
+                    
+                    # Force completion if too many tool calls without finalize
+                    if tool_call_count >= max_tool_calls and final_answer is None:
+                        if self.verbose:
+                            print(f"[DEBUG] Достигнут лимит инструментов ({max_tool_calls}), принудительное завершение")
+                        # Ask model to finalize with what it has
+                        messages.append({
+                            "role": "user",
+                            "content": "Достигнут лимит поисковых запросов. Пожалуйста, заверши поиск и верни финальный ответ на основе собранной информации, даже если она неполная. Используй инструмент finalize_answer."
+                        })
             else:
                 if self.verbose:
                     print("[DEBUG] Модель не вызвала инструменты, завершаем")
-                final_answer = msg.content
-                sources = []
+                # Model gave a direct answer without tool calls
+                if msg.content:
+                    final_answer = msg.content
+                    sources = []
                 break
 
         if final_answer is None:
-            final_answer = "Не удалось получить ответ за разрешённое число итераций."
-            sources = []
+            # Try to get a final answer by prompting the model
+            if self.verbose:
+                print("[DEBUG] Попытка получить финальный ответ после цикла")
+            try:
+                messages.append({
+                    "role": "user",
+                    "content": "Пожалуйста, заверши поиск и верни финальный ответ на основе всей собранной информации. Используй инструмент finalize_answer."
+                })
+                response = self.client.chat.completions.create(
+                    model=self.model,
+                    messages=messages,
+                    tools=self.tools,
+                    tool_choice={"type": "function", "function": {"name": "finalize_answer"}}
+                )
+                msg = response.choices[0].message
+                if msg.tool_calls:
+                    for tool_call in msg.tool_calls:
+                        if tool_call.function.name == "finalize_answer":
+                            args = json.loads(tool_call.function.arguments)
+                            final_answer = args["answer"]
+                            sources = args.get("sources", [])
+                            break
+            except Exception as e:
+                if self.verbose:
+                    print(f"[DEBUG] Ошибка при финализации: {e}")
+            
+            if final_answer is None:
+                final_answer = "Не удалось получить ответ за разрешённое число итераций."
+                sources = []
 
         return {"answer": final_answer, "sources": sources, "iterations": iteration}
 
@@ -254,7 +304,7 @@ class SearchAgent:
 def search_agent_tool(query: str) -> str:
     """Обработчик инструмента для вызова из системы Ouroboros."""
     agent = SearchAgent(verbose=False)
-    result = agent.process_query(query, max_iterations=5)
+    result = agent.process_query(query, max_iterations=6)
     return json.dumps(result, ensure_ascii=False)
 
 
