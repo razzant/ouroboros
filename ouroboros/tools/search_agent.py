@@ -68,56 +68,44 @@ class SearchAgent:
     def _define_tools(self) -> List[Dict[str, Any]]:
         return [
             {
-                "type": "function",
-                "function": {
-                    "name": "search_web",
-                    "description": "Выполняет поиск в интернете по запросу, возвращает список результатов с заголовками, ссылками и сниппетами",
-                    "parameters": {
-                        "type": "object",
-                        "properties": {
-                            "query": {"type": "string", "description": "Поисковый запрос"}
-                        },
-                        "required": ["query"],
-                        "additionalProperties": False
+                "name": "search_web",
+                "description": "Выполняет поиск в интернете по запросу, возвращает список результатов с заголовками, ссылками и сниппетами",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "query": {"type": "string", "description": "Поисковый запрос"}
                     },
-                    "strict": True
+                    "required": ["query"],
+                    "additionalProperties": False
                 }
             },
             {
-                "type": "function",
-                "function": {
-                    "name": "read_page",
-                    "description": "Загружает полное содержимое страницы по URL",
-                    "parameters": {
-                        "type": "object",
-                        "properties": {
-                            "url": {"type": "string", "description": "URL страницы для загрузки"}
-                        },
-                        "required": ["url"],
-                        "additionalProperties": False
+                "name": "read_page",
+                "description": "Загружает полное содержимое страницы по URL",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "url": {"type": "string", "description": "URL страницы для загрузки"}
                     },
-                    "strict": True
+                    "required": ["url"],
+                    "additionalProperties": False
                 }
             },
             {
-                "type": "function",
-                "function": {
-                    "name": "finalize_answer",
-                    "description": "Завершает поиск и возвращает финальный ответ с указанием источников",
-                    "parameters": {
-                        "type": "object",
-                        "properties": {
-                            "answer": {"type": "string", "description": "Финальный ответ на запрос пользователя"},
-                            "sources": {
-                                "type": "array",
-                                "items": {"type": "string"},
-                                "description": "Список URL использованных источников"
-                            }
-                        },
-                        "required": ["answer", "sources"],
-                        "additionalProperties": False
+                "name": "finalize_answer",
+                "description": "Завершает поиск и возвращает финальный ответ с указанием источников",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "answer": {"type": "string", "description": "Финальный ответ на запрос пользователя"},
+                        "sources": {
+                            "type": "array",
+                            "items": {"type": "string"},
+                            "description": "Список URL использованных источников"
+                        }
                     },
-                    "strict": True
+                    "required": ["answer", "sources"],
+                    "additionalProperties": False
                 }
             }
         ]
@@ -340,18 +328,15 @@ def get_tools() -> List[ToolEntry]:
         ToolEntry(
             name="search_agent",
             schema={
-                "type": "function",
-                "function": {
-                    "name": "search_agent",
-                    "description": "Поиск в интернете с глубоким анализом. Возвращает JSON с answer, sources, iterations",
-                    "parameters": {
-                        "type": "object",
-                        "properties": {
-                            "query": {"type": "string", "description": "Поисковый запрос"}
-                        },
-                        "required": ["query"],
-                        "additionalProperties": False
-                    }
+                "name": "search_agent",
+                "description": "Поиск в интернете с глубоким анализом. Возвращает JSON с answer, sources, iterations",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "query": {"type": "string", "description": "Поисковый запрос"}
+                    },
+                    "required": ["query"],
+                    "additionalProperties": False
                 }
             },
             handler=search_agent_tool
