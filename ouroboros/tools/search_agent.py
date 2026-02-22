@@ -35,34 +35,32 @@ class SearchAgent:
         request_delay: float = 1.0,
         verbose: bool = False
     ):
-        """Инициализация агента."""
-        # Настройки OpenAI/OpenRouter
-        api_key = api_key or os.getenv("OPENROUTER_API_KEY") or os.getenv("OPENAI_API_KEY")
-        if not api_key:
-            raise ValueError("Не найден API ключ. Установите OPENROUTER_API_KEY или OPENAI_API_KEY в .env")
-        
-        self.client = openai.OpenAI(
-            api_key=api_key,
-            base_url=base_url or os.getenv("OPENROUTER_BASE_URL") or os.getenv("OPENAI_BASE_URL") or "https://openrouter.ai/api/v1"
-        )
-        # Используем StepFun/Step-3.5-Flash:free как модель по умолчанию
-        self.model = model or os.getenv("OPENROUTER_MODEL") or os.getenv("OPENAI_MODEL") or "StepFun/Step-3.5-Flash:free"
-        
+        """
+        Инициализация агента.
+        """
+        self.api_key = api_key or os.getenv("OPENAI_API_KEY") or os.getenv("OPENROUTER_API_KEY")
+        self.base_url = base_url or os.getenv("OPENAI_BASE_URL") or os.getenv("OPENROUTER_BASE_URL") or "https://openrouter.ai/api/v1"
+        self.model = model or os.getenv("OPENAI_MODEL") or os.getenv("OPENROUTER_MODEL") or "StepFun/Step-3.5-Flash:free"
         self.max_search_results = max_search_results
         self.max_page_length_chars = max_page_length_chars
         self.request_delay = request_delay
         self.verbose = verbose
 
-        # Системный промпт
-        self.system_prompt = self._build_system_prompt()
+        if not self.api_key:
+            raise ValueError("OpenAI/OpenRouter API key not found in environment (OPENAI_API_KEY or OPENROUTER_API_KEY)")
 
-        # Инструменты для function calling
+        self.client = openai.OpenAI(
+            api_key=self.api_key,
+            base_url=self.base_url
+        )
+
+        self.system_prompt = self._build_system_prompt()
         self.tools = self._define_tools()
 
     def _build_system_prompt(self) -> str:
         return """Ты – SearchAgent, автономный поисковый агент. Твоя задача – находить точную и актуальную информацию в интернете, отвечая на запрос пользователя.
 
-У тебя есть три инструмента:
+У тебя есть два инструмента:
 
 1. search_web(query: str) -> List[Dict]  
    Выполняет поиск в интернете по строке query.  
@@ -77,7 +75,7 @@ class SearchAgent:
 
 3. finalize_answer(answer: str, sources: List[str])  
    Завершает работу агента и возвращает итоговый ответ answer вместе со списком использованных источников (sources – список URL).  
-   Этот инструмент нужно вызвать только когда информация собрана полностью.
+   Этот инструмент нужно вызвать только когда информация собрана достаточно для полного ответа.
 
 Правила работы:
 - Получив запрос пользователя, проанализируй его. Если нужно – разбей на подзадачи.
@@ -87,11 +85,13 @@ class SearchAgent:
 - После того как собрал достаточно данных (возможно, после нескольких итераций), вызови finalize_answer.
 - Не вызывай finalize_answer преждевременно, но и не зацикливайся – старайся уложиться в разумное число шагов.
 - В финальном ответе обязательно укажи источники (URL), на которые ты опирался.
+- Если по запросу не удаётся найти информацию, всё равно вызови finalize_answer с объяснением, что ничего найдено не было.
+- Ты можешь вызвать finalize_answer в любой момент, когда считаешь ответ готовым.
 
-ВАЖНО: Если после 3-5 итераций у тебя уже есть достаточно информации для ответа, обязательно вызови finalize_answer. Не продолжай поиск бесконечно.
+Важно: используй инструменты последовательно, анализируй результаты каждого шага перед следующим.
 """
 
-    def _define_tools(self) -> List[Dict[str, Any]]:
+    def _define_tools(self) -> List[Dict]:
         return [
             {
                 "type": "function",
@@ -162,14 +162,16 @@ class SearchAgent:
     # -------------------------------------------------------------------------
 
     def _duckduckgo_search(self, query: str) -> List[Dict[str, str]]:
-        """Парсинг DuckDuckGo (HTML-версия) для получения результатов поиска."""
+        """
+        Парсинг DuckDuckGo (HTML-версия) для получения результатов поиска.
+        """
         url = f"https://html.duckduckgo.com/html/?q={quote_plus(query)}"
         headers = {
             "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"
         }
 
         try:
-            time.sleep(self.request_delay)
+            time.sleep(self.request_delay)  # вежливость
             resp = requests.get(url, headers=headers, timeout=15)
             resp.raise_for_status()
         except Exception as e:
@@ -179,12 +181,15 @@ class SearchAgent:
 
         soup = BeautifulSoup(resp.text, "html.parser")
         results = []
+        # Каждый результат находится в <div class="result">
         for result in soup.select(".result")[:self.max_search_results]:
             title_elem = result.select_one(".result__a")
             if not title_elem:
                 continue
             title = title_elem.get_text(strip=True)
+            # Ссылка может быть в атрибуте href и содержать перенаправление
             href = title_elem.get("href", "")
+            # Извлекаем реальный URL из параметра uddg
             if href.startswith("/l/?kh=-1&uddg="):
                 import urllib.parse
                 parsed = urllib.parse.parse_qs(urllib.parse.urlparse(href).query)
@@ -203,16 +208,20 @@ class SearchAgent:
         return results
 
     def search_web(self, query: str) -> List[Dict[str, str]]:
-        """Публичный метод поиска."""
+        """
+        Публичный метод поиска.
+        """
         if self.verbose:
             print(f"[DEBUG] Поиск: {query}")
         return self._duckduckgo_search(query)
 
     def read_page(self, url: str) -> str:
-        """Загружает страницу, очищает от HTML и возвращает текст."""
+        """
+        Загружает страницу, очищает от HTML и возвращает текст.
+        """
         if self.verbose:
             print(f"[DEBUG] Чтение страницы: {url}")
-        time.sleep(self.request_delay)
+        time.sleep(self.request_delay)  # вежливость
 
         headers = {
             "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"
@@ -224,9 +233,11 @@ class SearchAgent:
             return f"[Ошибка загрузки страницы: {e}]"
 
         soup = BeautifulSoup(resp.text, "html.parser")
+        # Удаляем скрипты, стили, навигацию
         for tag in soup(["script", "style", "nav", "header", "footer", "aside"]):
             tag.decompose()
         text = soup.get_text(separator="\n", strip=True)
+        # Обрезаем, если слишком длинно
         if len(text) > self.max_page_length_chars:
             text = text[:self.max_page_length_chars] + "\n...[текст обрезан]"
         return text
@@ -235,8 +246,11 @@ class SearchAgent:
     # Основной цикл обработки запроса
     # -------------------------------------------------------------------------
 
-    def process_query(self, user_query: str, max_iterations: int = 10) -> Dict[str, Any]:
-        """Запускает агента для обработки запроса пользователя."""
+    def process_query(self, user_query: str, max_iterations: int = 15) -> Dict[str, Any]:
+        """
+        Запускает агента для обработки запроса пользователя.
+        Возвращает словарь с ключами 'answer' и 'sources'.
+        """
         messages = [
             {"role": "system", "content": self.system_prompt},
             {"role": "user", "content": user_query}
@@ -261,11 +275,12 @@ class SearchAgent:
                 msg = response.choices[0].message
             except Exception as e:
                 if self.verbose:
-                    print(f"[DEBUG] Ошибка API: {e}")
-                final_answer = f"Ошибка при обращении к модели: {e}"
+                    print(f"[DEBUG] Ошибка вызова модели: {e}")
+                final_answer = f"Ошибка вызова модели: {e}"
                 sources = []
                 break
 
+            # Если модель хочет вызвать инструменты
             if msg.tool_calls:
                 if self.verbose:
                     print(f"[DEBUG] Вызов инструментов: {[tc.function.name for tc in msg.tool_calls]}")
@@ -278,62 +293,85 @@ class SearchAgent:
                     except json.JSONDecodeError as e:
                         if self.verbose:
                             print(f"[DEBUG] Ошибка парсинга аргументов: {e}")
-                        args = {}
-
-                    if func_name == "search_web":
-                        query = args.get("query", "")
-                        if query:
-                            results = self.search_web(query)
-                            result_str = json.dumps(results, ensure_ascii=False, indent=2)
-                        else:
-                            result_str = "Ошибка: пустой поисковый запрос"
+                        result_content = f"Ошибка парсинга аргументов: {e}"
                         messages.append({
                             "role": "tool",
                             "tool_call_id": tool_call.id,
-                            "content": result_str
+                            "content": result_content
+                        })
+                        continue
+
+                    if func_name == "search_web":
+                        query = args.get("query", "")
+                        if not query:
+                            result_content = "Ошибка: поисковый запрос пустой"
+                        else:
+                            results = self.search_web(query)
+                            result_content = json.dumps(results, ensure_ascii=False, indent=2)
+                        messages.append({
+                            "role": "tool",
+                            "tool_call_id": tool_call.id,
+                            "content": result_content
                         })
 
                     elif func_name == "read_page":
                         url = args.get("url", "")
-                        if url:
+                        if not url:
+                            result_content = "Ошибка: URL не указан"
+                        else:
                             page_text = self.read_page(url)
+                            # Обрезаем, если слишком длинно (на всякий случай)
                             if len(page_text) > 10000:
                                 page_text = page_text[:10000] + "\n...[текст обрезан]"
-                        else:
-                            page_text = "Ошибка: пустой URL"
+                            result_content = page_text
                         messages.append({
                             "role": "tool",
                             "tool_call_id": tool_call.id,
-                            "content": page_text
+                            "content": result_content
                         })
 
                     elif func_name == "finalize_answer":
                         final_answer = args.get("answer", "")
                         sources = args.get("sources", [])
+                        # Добавляем результат вызова (можно просто подтверждение)
                         messages.append({
                             "role": "tool",
                             "tool_call_id": tool_call.id,
                             "content": "Поиск завершён, ответ сохранён."
                         })
-                        break
+                        break  # можно выйти из цикла, но лучше дать модели завершить
 
                     else:
+                        # Неизвестный инструмент
+                        result_content = f"Ошибка: неизвестный инструмент {func_name}"
                         messages.append({
                             "role": "tool",
                             "tool_call_id": tool_call.id,
-                            "content": f"Ошибка: неизвестный инструмент {func_name}"
+                            "content": result_content
                         })
             else:
-                # Модель не вызвала инструменты
-                if self.verbose:
-                    print("[DEBUG] Модель ответила текстом без вызова инструментов")
-                messages.append(msg)
-                final_answer = msg.content or "Модель не предоставила ответ"
-                sources = ["Ответ сгенерирован без явных источников"]
+                # Модель не вызвала инструменты – возможно, она хочет завершить без поиска? 
+                # Проверим, есть ли ответ. Если да, считаем его финальным.
+                if msg.content:
+                    if self.verbose:
+                        print("[DEBUG] Модель ответила текстом без вызова инструментов – считаем финальным ответом")
+                    final_answer = msg.content
+                    sources = ["Ответ сгенерирован без явных источников (модель не использовала поиск)"]
+                    break
+                else:
+                    # Если нет ни工具, ни текста, возможно, модель ничего не сказала. Продолжим?
+                    if self.verbose:
+                        print("[DEBUG] Модель не ответила и не вызвала инструменты – продолжаем")
+                    messages.append(msg)
 
         if final_answer is None:
-            final_answer = "Не удалось получить ответ за допустимое число итераций."
-            sources = []
+            # Принудительное завершение: берем последний ответ модели, если есть
+            if messages and messages[-1]["role"] == "assistant" and messages[-1].get("content"):
+                final_answer = messages[-1]["content"] + "\n[Принудительное завершение: достигнут лимит итераций]"
+                sources = ["Лимит итераций исчерпан, ответ взят из последнего сообщения модели"]
+            else:
+                final_answer = "Не удалось получить ответ за допустимое число итераций. Возможно, модель не смогла обработать запрос."
+                sources = []
 
         return {
             "answer": final_answer,
@@ -341,51 +379,68 @@ class SearchAgent:
             "iterations": iteration
         }
 
+
 # -----------------------------------------------------------------------------
-# Функция-обёртка для инструмента
+# Интеграция в систему Ouroboros
 # -----------------------------------------------------------------------------
 
-def search_agent_tool(query: str, max_iterations: int = 10) -> str:
+def search_agent_tool(query: str) -> Dict[str, Any]:
     """
-    Инструмент для Ouroboros: выполняет SearchAgent и возвращает JSON строку.
+    Обёртка для вызова SearchAgent как инструмента Ouroboros.
+    Возвращает JSON с ответом и источниками.
     """
     try:
         agent = SearchAgent(verbose=False)
-        result = agent.process_query(query, max_iterations=max_iterations)
-        return json.dumps(result, ensure_ascii=False, indent=2)
+        result = agent.process_query(query)
+        return result
     except Exception as e:
-        return json.dumps({
-            "answer": f"Ошибка инициализации SearchAgent: {e}",
+        return {
+            "answer": f"Ошибка при выполнении поиска: {str(e)}",
             "sources": [],
-            "iterations": 0
-        }, ensure_ascii=False, indent=2)
+            "iterations": 0,
+            "error": True
+        }
 
-# -----------------------------------------------------------------------------
-# Регистрация инструмента
-# -----------------------------------------------------------------------------
 
-search_agent_schema = {
-    "name": "search_agent",
-    "description": "Автономный поисковый агент на основе LLM. Принимает запрос, самостоятельно выполняет поиск, читает страницы и возвращает структурированный ответ с источниками.",
-    "parameters": {
-        "type": "object",
-        "properties": {
-            "query": {
-                "type": "string",
-                "description": "Поисковый запрос пользователя"
-            }
-        },
-        "required": ["query"],
-        "additionalProperties": False
-    }
-}
-
-def get_tools():
-    """Возвращает список инструментов этого модуля."""
+def get_tools() -> List[ToolEntry]:
+    """
+    Возвращает список инструментов для регистрации в Ouroboros.
+    """
     return [
         ToolEntry(
             name="search_agent",
-            schema=search_agent_schema,
-            handler=search_agent_tool
+            description="Автономный поисковый агент на основе LLM. Принимает запрос, самостоятельно ищет в интернете, читает страницы и возвращает ответ с источниками. Использует DuckDuckGo, не требует API ключей для поиска. Для работы нужен OPENROUTER_API_KEY и OPENROUTER_MODEL.",
+            input_schema={
+                "type": "object",
+                "properties": {
+                    "query": {
+                        "type": "string",
+                        "description": "Поисковый запрос пользователя"
+                    }
+                },
+                "required": ["query"]
+            },
+            handler=lambda params: json.dumps(search_agent_tool(params["query"]), ensure_ascii=False)
         )
     ]
+
+
+if __name__ == "__main__":
+    # Пример использования
+    agent = SearchAgent(
+        api_key=os.getenv("OPENROUTER_API_KEY"),
+        base_url=os.getenv("OPENROUTER_BASE_URL", "https://openrouter.ai/api/v1"),
+        model=os.getenv("OPENROUTER_MODEL", "StepFun/Step-3.5-Flash:free"),
+        verbose=True
+    )
+
+    query = "Какие последние новости в области open source больших языковых моделей?"
+    result = agent.process_query(query)
+
+    print("\n" + "="*60)
+    print("ОТВЕТ:")
+    print(result["answer"])
+    print("\nИСТОЧНИКИ:")
+    for src in result["sources"]:
+        print(f"- {src}")
+    print(f"\nИтераций: {result['iterations']}")
