@@ -25,23 +25,14 @@ from ouroboros.utils import utc_now_iso, append_jsonl, truncate_for_log, sanitiz
 
 log = logging.getLogger(__name__)
 
-# Pricing from OpenRouter API (2026-02-17). Update periodically via /api/v1/models.
+# Google AI Studio free tier: all models cost $0.
+# Pricing table kept for structure compatibility but all values are 0.
 _MODEL_PRICING_STATIC = {
-    "anthropic/claude-opus-4.6": (5.0, 0.5, 25.0),
-    "anthropic/claude-opus-4": (15.0, 1.5, 75.0),
-    "anthropic/claude-sonnet-4": (3.0, 0.30, 15.0),
-    "anthropic/claude-sonnet-4.6": (3.0, 0.30, 15.0),
-    "anthropic/claude-sonnet-4.5": (3.0, 0.30, 15.0),
-    "openai/o3": (2.0, 0.50, 8.0),
-    "openai/o3-pro": (20.0, 1.0, 80.0),
-    "openai/o4-mini": (1.10, 0.275, 4.40),
-    "openai/gpt-4.1": (2.0, 0.50, 8.0),
-    "openai/gpt-5.2": (1.75, 0.175, 14.0),
-    "openai/gpt-5.2-codex": (1.75, 0.175, 14.0),
-    "google/gemini-2.5-pro-preview": (1.25, 0.125, 10.0),
-    "google/gemini-3-pro-preview": (2.0, 0.20, 12.0),
-    "x-ai/grok-3-mini": (0.30, 0.03, 0.50),
-    "qwen/qwen3.5-plus-02-15": (0.40, 0.04, 2.40),
+    "gemini-3.1-pro-preview": (0.0, 0.0, 0.0),
+    "gemini-2.5-pro": (0.0, 0.0, 0.0),
+    "gemini-2.0-flash": (0.0, 0.0, 0.0),
+    "gemini-1.5-pro": (0.0, 0.0, 0.0),
+    "gemini-1.5-flash": (0.0, 0.0, 0.0),
 }
 
 _pricing_fetched = False
@@ -701,7 +692,7 @@ def run_llm_loop(
                 # Configurable fallback priority list (Bible P3: no hardcoded behavior)
                 fallback_list_raw = os.environ.get(
                     "OUROBOROS_MODEL_FALLBACK_LIST",
-                    "google/gemini-2.5-pro-preview,openai/o3,anthropic/claude-sonnet-4.6"
+                    "gemini-2.5-pro,gemini-2.0-flash,gemini-1.5-pro"
                 )
                 fallback_candidates = [m.strip() for m in fallback_list_raw.split(",") if m.strip()]
                 fallback_model = None

@@ -19,9 +19,10 @@ log = logging.getLogger(__name__)
 # Maximum number of models allowed per review
 MAX_MODELS = 10
 # Concurrency limit for parallel requests
-CONCURRENCY_LIMIT = 5
+CONCURRENCY_LIMIT = 3  # Reduced to respect free tier rate limits
 
-OPENROUTER_URL = "https://openrouter.ai/api/v1/chat/completions"
+# Google AI Studio OpenAI-compatible endpoint
+GOOGLE_AI_STUDIO_URL = "https://generativelanguage.googleapis.com/v1beta/openai/chat/completions"
 
 
 def get_tools():
@@ -54,8 +55,8 @@ def get_tools():
                             "type": "array",
                             "items": {"type": "string"},
                             "description": (
-                                "OpenRouter model identifiers to query "
-                                "(e.g. 3 diverse models for good coverage)"
+                                "Google AI Studio model IDs to query "
+                                "(e.g. ['gemini-3.1-pro-preview', 'gemini-2.5-pro', 'gemini-2.0-flash'])"
                             ),
                         },
                     },
@@ -92,7 +93,7 @@ async def _query_model(client, model, messages, api_key, semaphore):
     async with semaphore:
         try:
             resp = await client.post(
-                OPENROUTER_URL,
+                GOOGLE_AI_STUDIO_URL,
                 headers={
                     "Authorization": f"Bearer {api_key}",
                     "Content-Type": "application/json",
@@ -135,7 +136,7 @@ async def _multi_model_review_async(content: str, prompt: str, models: list, ctx
     if not prompt:
         return {"error": "prompt is required"}
     if not models:
-        return {"error": "models list is required (e.g. ['openai/o3', 'google/gemini-2.5-pro'])"}
+        return {"error": "models list is required (e.g. ['gemini-3.1-pro-preview', 'gemini-2.5-pro', 'gemini-2.0-flash'])"}
 
     if not isinstance(models, list) or not all(isinstance(m, str) for m in models):
         return {"error": "models must be a list of strings"}
@@ -146,9 +147,9 @@ async def _multi_model_review_async(content: str, prompt: str, models: list, ctx
     if len(models) == 0:
         return {"error": "At least one model is required"}
 
-    api_key = os.environ.get("OPENROUTER_API_KEY", "")
+    api_key = os.environ.get("GOOGLE_API_KEY", "")
     if not api_key:
-        return {"error": "OPENROUTER_API_KEY not set"}
+        return {"error": "GOOGLE_API_KEY not set"}
 
     messages = [
         {"role": "system", "content": prompt},

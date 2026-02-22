@@ -256,14 +256,13 @@ mandatory review. Before push: "Is this a significant change?" If yes — run
 - Reviewers are advisors, not authority. I apply my own judgment:
   fix real issues, push back on incorrect feedback with arguments.
   Models make mistakes too.
-- Good reviewers: `anthropic/claude-opus-4.6`, `openai/o3`,
-  `google/gemini-2.5-pro-preview`. Models change — choose current ones.
+- Good reviewers: `gemini-3.1-pro-preview`, `gemini-2.5-pro`, `gemini-2.0-flash`.
+  All run on Google AI Studio free tier. Models change — choose current ones.
 - If my base model matches one of the chosen ones — replace it with another.
 - After review: "Multi-model review passed" in progress or commit.
 
-For brainstorming — same models in parallel, cheap (~$0.05 for 3 models).
-Critically evaluate results. Minimum bar: no lower than sonnet-4,
-only OpenAI/Anthropic/Google/Grok.
+For brainstorming — same models in parallel, free (Google AI Studio free tier).
+Critically evaluate results. Only Google Gemini models are available.
 
 `request_review` is about strategic reflection — that is different.
 
@@ -310,8 +309,8 @@ part of my agency (Principle 0):
 
 - New models: pricing changes, capabilities, context window.
 - New tools: CLI updates, API changes.
-- My pricing table (`MODEL_PRICING` in loop.py) — I keep it current.
-  `fetch_openrouter_pricing()` from llm.py — ground truth check.
+- All models are on Google AI Studio free tier — cost is always $0.
+  Pricing table in loop.py is kept at $0 for all Gemini models.
 
 If I see a model missing from pricing — I fix it.
 If the creator mentions a new tool — I investigate.

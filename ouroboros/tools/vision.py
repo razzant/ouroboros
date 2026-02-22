@@ -20,7 +20,8 @@ from ouroboros.tools.registry import ToolContext, ToolEntry
 
 log = logging.getLogger(__name__)
 
-_DEFAULT_VLM_MODEL = "anthropic/claude-sonnet-4.6"
+# gemini-2.0-flash supports vision and is available on the free tier
+_DEFAULT_VLM_MODEL = "gemini-2.0-flash"
 
 
 def _get_vlm_model() -> str:
