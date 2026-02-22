@@ -1,5 +1,4 @@
-"""
-SearchAgent - Автономный поисковый агент на основе LLM с function calling.
+"""SearchAgent - Автономный поисковый агент на основе LLM с function calling.
 Агент получает запрос, самостоятельно формирует поисковые запросы,
 анализирует сниппеты, при необходимости читает страницы,
 и возвращает итоговый ответ со ссылками на источники.
@@ -52,7 +51,8 @@ class SearchAgent:
             api_key=api_key or os.getenv("OPENROUTER_API_KEY"),
             base_url=base_url or os.getenv("OPENROUTER_BASE_URL", "https://openrouter.ai/api/v1")
         )
-        self.model = model or os.getenv("OPENROUTER_MODEL", "qwen/qwen3-vl-235b-a22b-thinking")
+        # Используем бесплатную модель по умолчанию, если не задана
+        self.model = model or os.getenv("OUROBOROS_MODEL", "arcee-ai/trinity-large-preview:free")
         self.max_search_results = max_search_results
         self.max_page_length_chars = max_page_length_chars
         self.request_delay = request_delay
@@ -84,16 +84,21 @@ class SearchAgent:
    Завершает работу агента и возвращает итоговый ответ answer вместе со списком использованных источников (sources – список URL).  
    Этот инструмент нужно вызвать только когда информация собрана полностью.
 
-Правила работы:
-- Получив запрос пользователя, проанализируй его. Если нужно – разбей на подзадачи.
-- Для каждой подзадачи сформулируй один или несколько поисковых запросов.
-- Вызывай search_web для каждого запроса. Изучай полученные сниппеты.
-- Если сниппетов недостаточно, вызывай read_page для наиболее перспективных ссылок.
-- После того как собрал достаточно данных (возможно, после нескольких итераций), вызови finalize_answer.
-- Не вызывай finalize_answer преждевременно, но и не зацикливайся – старайся уложиться в разумное число шагов.
-- В финальном ответе обязательно укажи источники (URL), на которые ты опирался.
+КРИТИЧЕСКИ ВАЖНЫЕ ПРАВИЛА:
 
-Помни: ты должен дать максимально полный и точный ответ на исходный запрос пользователя.
+- ОГРАНИЧЕНИЕ ИТЕРАЦИЙ: максимум 3 поисковых запроса (search_web) и максимум 2 прочитанные страницы (read_page). После этого ты ОБЯЗАН вызвать finalize_answer.
+- НЕ ЗАЦИКЛИВАЙСЯ: если поиск даёт плохие результаты или не возвращает нужной информации, не повторяй те же запросы. Собери что есть, и вызови finalize_answer.
+- ПРЕЖДЕВРЕМЕННОЕ ЗАВЕРШЕНИЕ: если уже после первого или второго поиска информация кажется достаточной, немедленно вызови finalize_answer.
+- НЕ ПЫТАЙСЯ СОВЕРШЕНСТВОВАТЬ: твоя цель – дать хороший ответ, а не идеальный. Лучше завершить, чем бесконечно искать.
+- ВЫЗОВ FINALIZE_ANSWER – это единственный способ вернуть результат. Без этого вызова пользователь не получит ответ.
+
+Алгоритм:
+1. Проанализируй запрос. При необходимости разбей на подзадачи.
+2. Выполни 1-3 поисковых запроса через search_web.
+3. Изучи сниппеты. Если нужно deeper – прочти до 2 страниц через read_page.
+4. Как только собрал достаточно информации (или исчерпал лимит) – вызови finalize_answer с полным ответом и списком источников.
+
+Помни: ты должен дать максимально полный и точный ответ на исходный запрос пользователя, но в РАЗУМНЫЕ СРОКИ.
 """
 
     def _define_tools(self) -> List[Dict]:
@@ -249,6 +254,8 @@ class SearchAgent:
         iteration = 0
         final_answer = None
         sources = []
+        search_calls = 0
+        read_calls = 0
 
         while iteration < max_iterations and final_answer is None:
             iteration += 1
@@ -274,9 +281,14 @@ class SearchAgent:
                     args = json.loads(tool_call.function.arguments)
 
                     if func_name == "search_web":
-                        query = args["query"]
-                        results = self.search_web(query)
-                        result_str = json.dumps(results, ensure_ascii=False, indent=2)
+                        search_calls += 1
+                        if search_calls > 3:
+                            # Превысили лимит поисков, принудительно завершаем
+                            result_str = "Лимит поисковых запросов исчерпан. Пожалуйста, вызови finalize_answer."
+                        else:
+                            query = args["query"]
+                            results = self.search_web(query)
+                            result_str = json.dumps(results, ensure_ascii=False, indent=2)
                         messages.append({
                             "role": "tool",
                             "tool_call_id": tool_call.id,
@@ -284,14 +296,19 @@ class SearchAgent:
                         })
 
                     elif func_name == "read_page":
-                        url = args["url"]
-                        page_text = self.read_page(url)
-                        if len(page_text) > 10000:
-                            page_text = page_text[:10000] + "\n...[текст обрезан]"
+                        read_calls += 1
+                        if read_calls > 2:
+                            result_str = "Лимит чтения страниц исчерпан. Пожалуйста, вызови finalize_answer."
+                        else:
+                            url = args["url"]
+                            page_text = self.read_page(url)
+                            if len(page_text) > 10000:
+                                page_text = page_text[:10000] + "\n...[текст обрезан]"
+                            result_str = page_text
                         messages.append({
                             "role": "tool",
                             "tool_call_id": tool_call.id,
-                            "content": page_text
+                            "content": result_str
                         })
 
                     elif func_name == "finalize_answer":
@@ -318,7 +335,7 @@ class SearchAgent:
                 sources = ["Ответ сгенерирован без явных источников"]
 
         if final_answer is None:
-            final_answer = "Не удалось получить ответ за допустимое число итераций."
+            final_answer = "Не удалось получить ответ за допустимое число итераций. Возможно, информации по запросу недостаточно или поиск не дал результатов."
             sources = []
 
         return {
@@ -355,7 +372,7 @@ def get_tools() -> List[ToolEntry]:
     return [
         ToolEntry("search_agent", {
             "name": "search_agent",
-            "description": "Умный поисковый агент. Принимает запрос, выполняет поиск через DuckDuckGo, читает нужные страницы и возвращает развернутый ответ с источниками. Требует OPENROUTER_API_KEY и OPENROUTER_MODEL в .env.",
+            "description": "Умный поисковый агент. Принимает запрос, выполняет поиск через DuckDuckGo, читает нужные страницы и возвращает развернутый ответ с источниками. Требует OPENROUTER_API_KEY в .env. Модель по умолчанию – бесплатная arcee-ai/trinity-large-preview:free.",
             "parameters": {
                 "type": "object",
                 "properties": {
