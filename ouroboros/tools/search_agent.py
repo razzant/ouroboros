@@ -1,4 +1,5 @@
-"""SearchAgent - Autonomous search agent using LLM with function calling.
+"""
+SearchAgent - Autonomous search agent using LLM with function calling.
 
 Performs deep web searches via DuckDuckGo (HTML parsing, no API keys required),
 reads pages with BeautifulSoup, and compiles synthesized answers with sources.
@@ -11,8 +12,9 @@ import os
 import time
 import json
 import logging
+import re
 import requests
-from typing import List, Dict, Any
+from typing import List, Dict, Any, Optional
 from urllib.parse import quote_plus
 from bs4 import BeautifulSoup
 import openai
@@ -325,7 +327,6 @@ class SearchAgent:
                     sources = parsed.get("sources", [])
                 except json.JSONDecodeError:
                     # Try to extract JSON from markdown code block if present
-                    import re
                     match = re.search(r"```(?:json)?\s*({.*?})\s*```", summary_text, re.DOTALL)
                     if match:
                         try:
@@ -339,7 +340,7 @@ class SearchAgent:
                         final_answer = summary_text
                         sources = []
             except Exception as e:
-                final_answer = f"Превышено число итераций.Ответ не собран. Ошибка: {e}"
+                final_answer = f"Превышено число итераций. Ответ не собран. Ошибка: {e}"
                 sources = []
 
         return {
@@ -358,46 +359,45 @@ def search_agent_tool(ctx: ToolContext, query: str, max_iterations: int = 10) ->
     try:
         agent = SearchAgent(max_iterations=max_iterations, verbose=False)
         result = agent.process_query(query)
-        return json.dumps({
-            "answer": result["answer"],
-            "sources": result["sources"],
-            "iterations": result["iterations"]
-        }, ensure_ascii=False)
+        return json.dumps(result, ensure_ascii=False)
     except Exception as e:
+        log.exception("SearchAgent tool failed")
         return json.dumps({
-            "answer": f"SearchAgent error: {e}",
+            "answer": f"Ошибка поискового агента: {e}",
             "sources": [],
             "iterations": 0
         }, ensure_ascii=False)
 
 
 def get_tools() -> List[ToolEntry]:
-    """Return SearchAgent tool entry for registry."""
+    """Register the search_agent tool."""
     return [
         ToolEntry(
             name="search_agent",
             schema={
-                "name": "search_agent",
-                "description": "Autonomous web search agent. Uses DuckDuckGo + page reading. Returns synthesized answer with sources. Needs OPENROUTER_API_KEY.",
-                "parameters": {
-                    "type": "object",
-                    "properties": {
-                        "query": {
-                            "type": "string",
-                            "description": "Search query"
+                "type": "function",
+                "function": {
+                    "name": "search_agent",
+                    "description": "Автономный поисковый агент с глубоким анализом: выполняет поиск, читает страницы, возвращает ответ с источниками",
+                    "parameters": {
+                        "type": "object",
+                        "properties": {
+                            "query": {
+                                "type": "string",
+                                "description": "Поисковый запрос на естественном языке"
+                            },
+                            "max_iterations": {
+                                "type": "integer",
+                                "description": "Максимальное количество итераций агента (по умолчанию 10)",
+                                "default": 10
+                            }
                         },
-                        "max_iterations": {
-                            "type": "integer",
-                            "description": "Max agent iterations (default 10)",
-                            "default": 10
-                        }
+                        "required": ["query"],
+                        "additionalProperties": False
                     },
-                    "required": ["query"],
-                    "additionalProperties": False
+                    "strict": True
                 }
             },
-            handler=search_agent_tool,
-            is_code_tool=False,
-            timeout_sec=180
+            handler=search_agent_tool
         )
     ]
