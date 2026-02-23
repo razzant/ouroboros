@@ -3,8 +3,9 @@
 
 This test instantiates the SearchAgent directly and verifies:
 - Agent can process a query end-to-end
-- Returns answer with sources within iteration limit
-- No exceptions escape
+- Returns a non-empty answer (not the default failure message)
+- Returns at least one source
+- Completes within iteration limit
 """
 import os
 import sys
@@ -43,14 +44,15 @@ def test_search_agent_direct():
         base_url=base_url,
         model=model,
         verbose=True,
+        max_search_results=5,
         request_delay=0.5
     )
 
-    query = "какие есть ИИ модели с бесплатным api?"
+    query = "что такое оuroboros система"
     print(f"\nTesting SearchAgent with query: {query!r}")
 
     try:
-        result = agent.process_query(query, max_iterations=3)
+        result = agent.process_query(query, max_iterations=5)
         print("\n=== RESULT ===")
         print(json.dumps(result, ensure_ascii=False, indent=2))
 
@@ -61,17 +63,30 @@ def test_search_agent_direct():
         assert "iterations" in result, "Result must have 'iterations' field"
         assert isinstance(result["sources"], list), "'sources' must be a list"
 
-        # Answer should be non-empty string
         answer = result["answer"]
-        assert isinstance(answer, str) and len(answer.strip()) > 10, f"Answer should be a non-empty string, got: {answer!r}"
+        iterations = result["iterations"]
+        sources = result["sources"]
 
-        # Should complete within iteration limit (not None)
-        assert result["iterations"] <= 3, f"Exceeded max iterations 3, got {result['iterations']}"
+        # The agent should produce a genuine answer, not the default failure message
+        DEFAULT_FAILURE = "Не удалось получить ответ за допустимое число итераций."
+        assert answer != DEFAULT_FAILURE, f"Agent failed to produce an answer. Got default failure message."
 
-        # Should have at least one source or answer was synthesized from search snippets
-        print(f"\n✅ Test passed! Iterations: {result['iterations']}, sources: {len(result['sources'])}")
+        # Answer should be non-empty and substantive
+        assert isinstance(answer, str) and len(answer.strip()) > 20, f"Answer too short: {answer!r}"
+
+        # Sources should include at least one URL
+        assert len(sources) > 0, f"Expected at least one source, got {len(sources)}"
+
+        # Should complete within iteration limit
+        assert iterations <= 5, f"Exceeded max iterations 5, got {iterations}"
+
+        print(f"\n✅ Test passed! Iterations: {iterations}, sources: {len(sources)}")
+        print(f"Answer preview: {answer[:200]}...")
         return True
 
+    except AssertionError as e:
+        print(f"\n❌ Assertion failed: {e}")
+        return False
     except Exception as e:
         print(f"\n❌ Test failed with exception: {e}")
         import traceback
