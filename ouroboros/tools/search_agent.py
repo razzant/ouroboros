@@ -14,7 +14,7 @@ import json
 import logging
 import re
 import requests
-from typing import List, Dict, Any, Optional
+from typing import List, Dict, Any
 from urllib.parse import quote_plus
 from bs4 import BeautifulSoup
 import openai
@@ -74,7 +74,7 @@ class SearchAgent:
 """
 
     def _define_tools(self) -> List[Dict[str, Any]]:
-        """Return list of OpenAI tool schemas with proper wrapper."""
+        """Return list of OpenAI tool schemas."""
         return [
             {
                 "type": "function",
@@ -362,33 +362,24 @@ def search_agent_tool(ctx: ToolContext, query: str, max_iterations: int = 10) ->
         result = agent.process_query(query)
         return json.dumps(result, ensure_ascii=False)
     except Exception as e:
-        log.exception("SearchAgent tool failed")
+        log.exception("SearchAgent failed")
         return json.dumps({
-            "answer": f"Ошибка поискового агента: {e}",
+            "answer": f"Ошибка при выполнении поиска: {e}",
             "sources": [],
             "iterations": 0
         }, ensure_ascii=False)
 
 
+# Registry integration
 def get_tools() -> List[ToolEntry]:
-    """Return ToolEntry list for auto-discovery."""
     return [
         ToolEntry(
             name="search_agent",
-            schema={
-                "name": "search_agent",
-                "description": "Поиск в интернете через автономного агента (DuckDuckGo + LLM)",
-                "parameters": {
-                    "type": "object",
-                    "properties": {
-                        "query": {"type": "string", "description": "Поисковый запрос"},
-                        "max_iterations": {"type": "integer", "description": "Максимальное число итераций агента (по умолчанию 10)"}
-                    },
-                    "required": ["query"],
-                    "additionalProperties": False
-                },
-                "strict": True
+            description="Автономный поисковый агент: выполняет глубокий поиск и возвращает развернутый ответ с источниками. Поиск через DuckDuckGo, чтение страниц, синтез информации.",
+            params={
+                "query": {"type": "string", "description": "Поисковый запрос"},
+                "max_iterations": {"type": "integer", "description": "Максимальное число итераций агента (по умолчанию 10)", "optional": True}
             },
-            handler=search_agent_tool
+            function=search_agent_tool
         )
     ]
