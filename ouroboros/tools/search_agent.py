@@ -1,3 +1,375 @@
+"""
+SearchAgent - Autonomous search agent using LLM with function calling.
+
+Performs deep web searches via DuckDuckGo (HTML parsing, no API keys required),
+reads pages with BeautifulSoup, and compiles synthesized answers with sources.
+Uses OpenRouter credentials from environment.
+"""
+
+from __future__ import annotations
+
+import os
+import time
+import json
+import logging
+import re
+import requests
+from typing import List, Dict, Any, Optional
+from urllib.parse import quote_plus
+from bs4 import BeautifulSoup
+import openai
+from dotenv import load_dotenv
+
+from .registry import ToolEntry, ToolContext
+
+log = logging.getLogger(__name__)
+load_dotenv()
+
+
+class SearchAgent:
+    """Internal agent that performs search, reads pages, and compiles answers."""
+
+    def __init__(
+        self,
+        api_key: Optional[str] = None,
+        base_url: Optional[str] = None,
+        model: Optional[str] = None,
+        max_iterations: int = 10,
+        max_search_results: int = 5,
+        max_page_length: int = 8000,
+        request_delay: float = 1.0,
+        verbose: bool = False
+    ):
+        # OpenAI-compatible client
+        self.client = openai.OpenAI(
+            api_key=api_key or os.getenv("OPENROUTER_API_KEY") or os.getenv("OPENAI_API_KEY"),
+            base_url=base_url or os.getenv("OPENROUTER_BASE_URL") or "https://openrouter.ai/api/v1",
+            timeout=30.0
+        )
+        self.model = model or os.getenv("OPENROUTER_MODEL") or os.getenv("OUROBOROS_MODEL_LIGHT") or "StepFun/Step-3.5-Flash:free"
+        self.max_iterations = max_iterations
+        self.max_search_results = max_search_results
+        self.max_page_length = max_page_length
+        self.request_delay = request_delay
+        self.verbose = verbose
+
+        self.system_prompt = self._build_system_prompt()
+        self.tools_schema = self._define_tools()
+
+    def _build_system_prompt(self) -> str:
+        return """Ты — автономный поисковый агент. Твоя задача — найти и предоставить точный ответ на запрос пользователя, используя доступные инструменты.
+
+Инструменты:
+1. search_web(query: str) — выполняет поиск в интернете. Возвращает список результатов с title, url, snippet.
+2. read_page(url: str) — загружает и читает содержимое страницы.
+3. finalize_answer(answer: str, sources: List[str]) — завершает поиск и возвращает финальный ответ со списком источников.
+
+Критически важные правила:
+- Собери информацию, выполняя поиски и читая страницы. После того как достаточно данных собрано, ВСЕГДА вызывай finalize_answer.
+- Не отвечай текстовым сообщением без вызова инструментов. Твой ответ должен содержать вызов одной из функций.
+- Используй read_page для получения полного текста важных страниц.
+- Если по результатам поиска можно ответить сразу (в сниппетах есть полный ответ), всё равно вызови finalize_answer.
+- Не зацикливайся. После 2-3 итераций, если информации достаточно, завершай.
+- В finalize_answer укажи развернутый ответ (answer) и список URL источников (sources). Это обязательный завершающий шаг.
+"""
+
+    def _define_tools(self) -> List[Dict[str, Any]]:
+        """Return list of OpenAI tool schemas with proper wrapper."""
+        return [
+            {
+                "type": "function",
+                "function": {
+                    "name": "search_web",
+                    "description": "Выполняет поиск в интернете по запросу, возвращает список результатов с заголовками, ссылками и сниппетами",
+                    "parameters": {
+                        "type": "object",
+                        "properties": {
+                            "query": {"type": "string", "description": "Поисковый запрос"}
+                        },
+                        "required": ["query"],
+                        "additionalProperties": False
+                    },
+                    "strict": True
+                }
+            },
+            {
+                "type": "function",
+                "function": {
+                    "name": "read_page",
+                    "description": "Загружает полное содержимое страницы по URL",
+                    "parameters": {
+                        "type": "object",
+                        "properties": {
+                            "url": {"type": "string", "description": "URL страницы для загрузки"}
+                        },
+                        "required": ["url"],
+                        "additionalProperties": False
+                    },
+                    "strict": True
+                }
+            },
+            {
+                "type": "function",
+                "function": {
+                    "name": "finalize_answer",
+                    "description": "Завершает поиск и возвращает финальный ответ с указанием источников",
+                    "parameters": {
+                        "type": "object",
+                        "properties": {
+                            "answer": {"type": "string", "description": "Финальный ответ на запрос пользователя"},
+                            "sources": {
+                                "type": "array",
+                                "items": {"type": "string"},
+                                "description": "Список URL использованных источников"
+                            }
+                        },
+                        "required": ["answer", "sources"],
+                        "additionalProperties": False
+                    },
+                    "strict": True
+                }
+            }
+        ]
+
+    # -------------------------------------------------------------------------
+    # Search engine implementation (DuckDuckGo HTML parsing)
+    # -------------------------------------------------------------------------
+
+    def _duckduckgo_search(self, query: str) -> List[Dict[str, str]]:
+        """Perform search using DuckDuckGo HTML interface (no API key needed)."""
+        url = f"https://html.duckduckgo.com/html/?q={quote_plus(query)}"
+        headers = {
+            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"
+        }
+
+        try:
+            time.sleep(self.request_delay)
+            resp = requests.get(url, headers=headers, timeout=15)
+            resp.raise_for_status()
+        except Exception as e:
+            if self.verbose:
+                print(f"[DEBUG] DuckDuckGo search error: {e}")
+            return []
+
+        soup = BeautifulSoup(resp.text, "html.parser")
+        results = []
+
+        for result in soup.select(".result")[:self.max_search_results]:
+            title_elem = result.select_one(".result__title .result__a")
+            if not title_elem:
+                continue
+            title = title_elem.get_text(strip=True)
+            href = title_elem.get("href", "")
+
+            # Extract real URL from DuckDuckGo redirect
+            if href.startswith("/l/?kh=-1&uddg="):
+                import urllib.parse
+                parsed = urllib.parse.parse_qs(urllib.parse.urlparse(href).query)
+                real_url = parsed.get("uddg", [""])[0]
+            else:
+                real_url = href
+
+            snippet_elem = result.select_one(".result__snippet")
+            snippet = snippet_elem.get_text(strip=True) if snippet_elem else ""
+
+            if real_url:
+                results.append({
+                    "title": title,
+                    "url": real_url,
+                    "snippet": snippet
+                })
+
+        return results
+
+    def search_web(self, query: str) -> List[Dict[str, str]]:
+        """Public search method."""
+        if self.verbose:
+            print(f"[DEBUG] search_web: {query}")
+        return self._duckduckgo_search(query)
+
+    def read_page(self, url: str) -> str:
+        """Download and extract text from a webpage."""
+        if self.verbose:
+            print(f"[DEBUG] read_page: {url}")
+
+        time.sleep(self.request_delay)
+        headers = {
+            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"
+        }
+
+        try:
+            resp = requests.get(url, headers=headers, timeout=15)
+            resp.raise_for_status()
+        except Exception as e:
+            return f"[Ошибка загрузки страницы: {e}]"
+
+        soup = BeautifulSoup(resp.text, "html.parser")
+        for tag in soup(["script", "style", "nav", "header", "footer", "aside"]):
+            tag.decompose()
+
+        text = soup.get_text(separator="\n", strip=True)
+        if len(text) > self.max_page_length:
+            text = text[:self.max_page_length] + "\n...[обрезано]"
+        return text
+
+    # -------------------------------------------------------------------------
+    # Main agent loop
+    # -------------------------------------------------------------------------
+
+    def process_query(self, user_query: str) -> Dict[str, Any]:
+        """Run the agent loop to answer a user query."""
+        messages = [
+            {"role": "system", "content": self.system_prompt},
+            {"role": "user", "content": user_query}
+        ]
+
+        final_answer = None
+        sources = []
+        iteration = 0
+
+        while iteration < self.max_iterations and final_answer is None:
+            iteration += 1
+            if self.verbose:
+                print(f"[DEBUG] Iteration {iteration}")
+
+            # Reminder near the limit to force finalization
+            if iteration >= self.max_iterations - 2 and final_answer is None:
+                reminder = "Важно: если собрали достаточно информации, немедленно вызовите finalize_answer с ответом и источниками. Не продолжайте без необходимости."
+                messages.append({"role": "system", "content": reminder})
+                if self.verbose:
+                    print("[DEBUG] Added finalization reminder")
+
+            try:
+                response = self.client.chat.completions.create(
+                    model=self.model,
+                    messages=messages,
+                    tools=self.tools_schema,
+                    tool_choice="auto",
+                    max_tokens=2000
+                )
+                msg = response.choices[0].message
+            except requests.exceptions.Timeout:
+                if self.verbose:
+                    print("[DEBUG] API timeout")
+                break
+            except Exception as e:
+                if self.verbose:
+                    print(f"[DEBUG] API error: {e}")
+                break
+
+            if msg.tool_calls:
+                messages.append(msg)
+
+                for tool_call in msg.tool_calls:
+                    func_name = tool_call.function.name
+                    try:
+                        args = json.loads(tool_call.function.arguments)
+                    except json.JSONDecodeError:
+                        args = {}
+
+                    if func_name == "search_web":
+                        query = args.get("query", "")
+                        results = self.search_web(query)
+                        result_str = json.dumps(results, ensure_ascii=False)
+                        messages.append({
+                            "role": "tool",
+                            "tool_call_id": tool_call.id,
+                            "content": result_str
+                        })
+
+                    elif func_name == "read_page":
+                        url = args.get("url", "")
+                        page_text = self.read_page(url)
+                        messages.append({
+                            "role": "tool",
+                            "tool_call_id": tool_call.id,
+                            "content": page_text
+                        })
+
+                    elif func_name == "finalize_answer":
+                        final_answer = args.get("answer", "")
+                        sources = args.get("sources", [])
+                        messages.append({
+                            "role": "tool",
+                            "tool_call_id": tool_call.id,
+                            "content": "Answer finalized"
+                        })
+                        break
+
+                    else:
+                        messages.append({
+                            "role": "tool",
+                            "tool_call_id": tool_call.id,
+                            "content": f"Unknown tool: {func_name}"
+                        })
+            else:
+                # Model responded without tools; finish with its content
+                final_answer = msg.content or "No answer generated"
+                sources = []
+                break
+
+        # Force completion if we reached max_iterations without finalize_answer
+        if final_answer is None:
+            try:
+                # Use a larger context slice to retain more information
+                context_messages = messages[-8:] if len(messages) > 8 else messages
+                summary_resp = self.client.chat.completions.create(
+                    model=self.model,
+                    messages=[
+                        {"role": "system", "content": "На основе собранной информации дай финальный ответ. Обязательно верни JSON с ключами 'answer' (строка) и 'sources' (массив URL). Если точных источников нет, укажи пустой массив."},
+                        {"role": "user", "content": user_query}
+                    ] + context_messages,
+                    max_tokens=2000
+                )
+                summary_text = summary_resp.choices[0].message.content or "Превышено число итераций. Ответ не собран."
+                try:
+                    parsed = json.loads(summary_text)
+                    final_answer = parsed.get("answer", summary_text)
+                    sources = parsed.get("sources", [])
+                except json.JSONDecodeError:
+                    # Try to extract JSON from markdown code block if present
+                    match = re.search(r"```(?:json)?\s*({.*?})\s*```", summary_text, re.DOTALL)
+                    if match:
+                        try:
+                            parsed = json.loads(match.group(1))
+                            final_answer = parsed.get("answer", str(parsed))
+                            sources = parsed.get("sources", [])
+                        except json.JSONDecodeError:
+                            final_answer = summary_text
+                            sources = []
+                    else:
+                        final_answer = summary_text
+                        sources = []
+            except Exception as e:
+                final_answer = f"Превышено число итераций. Ответ не собран. Ошибка: {e}"
+                sources = []
+
+        return {
+            "answer": final_answer,
+            "sources": sources,
+            "iterations": iteration
+        }
+
+
+# -------------------------------------------------------------------------
+# Tool registration
+# -------------------------------------------------------------------------
+
+def search_agent_tool(ctx: ToolContext, query: str, max_iterations: int = 10) -> str:
+    """Tool wrapper for SearchAgent: return JSON with answer, sources, iterations."""
+    try:
+        agent = SearchAgent(max_iterations=max_iterations, verbose=False)
+        result = agent.process_query(query)
+        return json.dumps(result, ensure_ascii=False)
+    except Exception as e:
+        log.exception("SearchAgent tool failed")
+        return json.dumps({
+            "answer": f"Ошибка поискового агента: {e}",
+            "sources": [],
+            "iterations": 0
+        }, ensure_ascii=False)
+
+
 def get_tools() -> List[ToolEntry]:
     """Return ToolEntry list for auto-discovery."""
     return [
