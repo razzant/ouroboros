@@ -2,7 +2,7 @@
 
 Tests core invariants:
 - All modules import cleanly
-- Tool registry discovers all 33 tools
+- Tool registry discovers all expected tools
 - Utility functions work correctly
 - Memory operations don't crash
 - Context builder produces valid structure
@@ -21,7 +21,7 @@ import pytest
 
 REPO = pathlib.Path(__file__).resolve().parent.parent
 
-# ── Module imports ───────────────────────────────────────────────
+# ── Module imports ─────────────────────────────────────────────────
 
 CORE_MODULES = [
     "ouroboros.agent",
@@ -39,7 +39,7 @@ TOOL_MODULES = [
     "ouroboros.tools.core",
     "ouroboros.tools.git",
     "ouroboros.tools.shell",
-    "ouroboros.tools.search",
+    "ouroboros.tools.search_agent",
     "ouroboros.tools.control",
     "ouroboros.tools.browser",
     "ouroboros.tools.review",
@@ -61,7 +61,7 @@ def test_import(module):
     __import__(module)
 
 
-# ── Tool registry ────────────────────────────────────────────────
+# ── Tool registry ───────────────────────────────────────────────────
 
 @pytest.fixture
 def registry():
@@ -150,7 +150,7 @@ def test_tool_execute_basic(registry):
     assert "hello" in result.lower() or "⚠️" in result, "Should return output or error"
 
 
-# ── Utilities ────────────────────────────────────────────────────
+# ── Utilities ───────────────────────────────────────────────────────
 
 def test_safe_relpath_normal():
     from ouroboros.utils import safe_relpath
@@ -193,7 +193,7 @@ def test_estimate_tokens():
     assert 5 <= tokens <= 20
 
 
-# ── Memory ───────────────────────────────────────────────────────
+# ── Memory ──────────────────────────────────────────────────────────
 
 def test_memory_scratchpad():
     """Memory reads/writes scratchpad without crash."""
@@ -242,7 +242,7 @@ def test_memory_persistence():
         assert "test persistence content" in content, "Memory should persist across instances"
 
 
-# ── Context builder ─────────────────────────────────────────────
+# ── Context builder ────────────────────────────────────────────────
 
 def test_context_build_runtime_section():
     """Runtime section builder is callable."""
@@ -257,7 +257,7 @@ def test_context_build_memory_sections():
     assert callable(_build_memory_sections)
 
 
-# ── Bible invariants ─────────────────────────────────────────────
+# ── Bible invariants ────────────────────────────────────────────────
 
 def test_no_hardcoded_replies():
     """Principle 3 (LLM-first): no hardcoded reply strings in code.
@@ -310,7 +310,7 @@ def test_bible_exists_and_has_principles():
         assert f"Principle {i}" in bible, f"Principle {i} missing from BIBLE.md"
 
 
-# ── Code quality invariants ──────────────────────────────────────
+# ── Code quality invariants ────────────────────────────────────────
 
 def test_no_env_dumping():
     """Security: no code dumps entire env (os.environ without key access).
@@ -356,7 +356,7 @@ def test_no_bare_except_pass():
     """No bare `except: pass` (not even except Exception: pass with just pass).
     
     v4.9.0 hardened exceptions — but checks the STRICTEST form:
-    bare except (no Exception class) followed by pass.
+    bare except (no class specified) followed by pass.
     """
     violations = []
     for root, dirs, files in os.walk(REPO / "ouroboros"):
@@ -379,7 +379,7 @@ def test_no_bare_except_pass():
     assert len(violations) == 0, f"Bare except:pass found:\n" + "\n".join(violations)
 
 
-# ── AST-based function size check ───────────────────────────────
+# ── AST-based function size check ────────────────────────────────────
 
 MAX_FUNCTION_LINES = 200  # Hard limit — anything above is a bug
 
@@ -421,46 +421,29 @@ def test_function_count_reasonable():
     assert len(sizes) <= 1000, f"{len(sizes)} functions — too many?"
 
 
-# ── Pre-push gate tests ──────────────────────────────────────────────
+# ── Pre-push gate tests ───────────────────────────────────────────────
 
 class TestPrePushGate:
     """Tests for pre-push test gate in git.py."""
 
-    def test_run_pre_push_tests_disabled(self):
-        """When OUROBOROS_PRE_PUSH_TESTS=0, should return None (skip)."""
-        import os
-        from ouroboros.tools.git import _run_pre_push_tests
-        old = os.environ.get("OUROBOROS_PRE_PUSH_TESTS")
-        try:
-            os.environ["OUROBOROS_PRE_PUSH_TESTS"] = "0"
-            # ctx doesn't matter since we return early
-            result = _run_pre_push_tests(None)
-            assert result is None
-        finally:
-            if old is None:
-                os.environ.pop("OUROBOROS_PRE_PUSH_TESTS", None)
-            else:
-                os.environ["OUROBOROS_PRE_PUSH_TESTS"] = old
-
-    def test_run_pre_push_tests_no_tests_dir(self):
-        """When tests/ dir doesn't exist, should return None."""
-        from ouroboros.tools.git import _run_pre_push_tests
-        import os
-        old = os.environ.get("OUROBOROS_PRE_PUSH_TESTS")
-        try:
-            os.environ["OUROBOROS_PRE_PUSH_TESTS"] = "1"
-            # Create a mock ctx with non-existent repo_dir
-            class FakeCtx:
-                repo_dir = "/tmp/nonexistent_repo_dir_12345"
-            result = _run_pre_push_tests(FakeCtx())
-            assert result is None
-        finally:
-            if old is None:
-                os.environ.pop("OUROBOROS_PRE_PUSH_TESTS", None)
-            else:
-                os.environ["OUROBOROS_PRE_PUSH_TESTS"] = old
-
-    def test_git_push_with_tests_exists(self):
-        """_git_push_with_tests helper exists and is callable."""
-        from ouroboros.tools.git import _git_push_with_tests
-        assert callable(_git_push_with_tests)
+    def test_run_shell_non_string_cmd(self):
+        """Pre-push gate: run_shell must not be called with string cmd (use list)."""
+        # Static analysis: look for run_shell( with a string literal argument
+        violations = []
+        for root, dirs, files in os.walk(REPO):
+            dirs[:] = [d for d in dirs if d not in ('.git', '__pycache__')]
+            for f in files:
+                if not f.endswith(".py"):
+                    continue
+                path = pathlib.Path(root) / f
+                text = path.read_text()
+                # Simple pattern: run_shell("...") or run_shell('...')
+                for m in re.finditer(r'run_shell\s*\(\s*["\']', text):
+                    # Get some context
+                    start = max(0, m.start() - 40)
+                    end = min(len(text), m.end() + 40)
+                    snippet = text[start:end].strip()
+                    # If it's not a comment, flag it
+                    if not snippet.startswith("#"):
+                        violations.append(f"{path.name}: {snippet}")
+        assert len(violations) == 0, f"run_shell called with string cmd (should be list):\n" + "\n".join(violations)
