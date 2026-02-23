@@ -51,7 +51,7 @@ def test_search_agent_direct():
     print(f"\nTesting SearchAgent with query: {query!r}")
 
     try:
-        result = agent.process_query(query)
+        result = agent.run(query)  # <-- Changed from process_query to run
         print("\n=== RESULT ===")
         print(json.dumps(result, ensure_ascii=False, indent=2))
 
