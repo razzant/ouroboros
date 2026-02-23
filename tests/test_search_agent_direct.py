@@ -43,16 +43,17 @@ def test_search_agent_direct():
         api_key=api_key,
         base_url=base_url,
         model=model,
-        verbose=True,
+        max_iterations=5,
         max_search_results=5,
-        request_delay=0.5
+        request_delay=0.5,
+        verbose=True
     )
 
     query = "что такое оuroboros система"
     print(f"\nTesting SearchAgent with query: {query!r}")
 
     try:
-        result = agent.process_query(query, max_iterations=5)
+        result = agent.process_query(query)
         print("\n=== RESULT ===")
         print(json.dumps(result, ensure_ascii=False, indent=2))
 
