@@ -223,6 +223,17 @@ Full text: [BIBLE.md](BIBLE.md)
 
 ## Changelog
 
+
+### v6.4.0 -- Local Runtime + Circuit Breaker Fix
+- **Feat: Local runtime** -- Replaced Colab-specific launcher with environment-based configuration. Works outside Google Colab, no Drive dependency.
+- **Fix: Evolution circuit breaker** -- Changed success heuristic from cost>0.10 to rounds>=1, preventing false failures on free models.
+- **Feat: Env hot-reload** -- Added reload_env() to load .env changes without restart.
+- **Fix: Version sync** -- Completed incomplete release: VERSION, pyproject.toml, README header all 6.4.0.
+- **Fix: Registry corruption** -- Recovered from broken tool registry state.
+- **Fix: Pre-push reliability** -- Excluded venv from scans, added fast gates.
+- **Knowledge** -- search-agent-design, release-6.4.0 documented.
+
+
 ### v6.3.0 -- SearchAgent Integration
 - **Feature: SearchAgent tool** -- Added autonomous search agent with DuckDuckGo parsing, page reading, and LLM-driven synthesis. No external API required.
 - **Fix: SearchAgent termination** -- Improved system prompt and fallback completion to ensure agent cycles terminate properly.
