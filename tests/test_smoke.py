@@ -271,8 +271,10 @@ def test_no_hardcoded_replies():
         re.IGNORECASE,
     )
     violations = []
-    for root, dirs, files in os.walk(REPO / "ouroboros"):
-        dirs[:] = [d for d in dirs if d != "__pycache__"]
+    # Exclude heavy/irrelevant directories
+    exclude_dirs = {'.git', '__pycache__', 'venv', '.venv', 'env', 'build', 'dist', '.pytest_cache'}
+    for root, dirs, files in os.walk(REPO):
+        dirs[:] = [d for d in dirs if d not in exclude_dirs]
         for f in files:
             if not f.endswith(".py"):
                 continue
@@ -322,8 +324,9 @@ def test_no_env_dumping():
     # Only flag raw os.environ passed to print/json/log without bracket or .get( accessor
     dangerous = re.compile(r'(?:print|json\.dumps|log)\s*\(.*\bos\.environ\b(?!\s*[\[.])')
     violations = []
+    exclude_dirs = {'.git', '__pycache__', 'venv', '.venv', 'env', 'build', 'dist', '.pytest_cache'}
     for root, dirs, files in os.walk(REPO):
-        dirs[:] = [d for d in dirs if d not in ('.git', '__pycache__', 'tests')]
+        dirs[:] = [d for d in dirs if d not in exclude_dirs]
         for f in files:
             if not f.endswith(".py"):
                 continue
@@ -340,8 +343,9 @@ def test_no_oversized_modules():
     """Principle 5: no module exceeds 1000 lines."""
     max_lines = 1000
     violations = []
+    exclude_dirs = {'.git', '__pycache__', 'venv', '.venv', 'env', 'build', 'dist', '.pytest_cache'}
     for root, dirs, files in os.walk(REPO):
-        dirs[:] = [d for d in dirs if d not in ('.git', '__pycache__', 'tests')]
+        dirs[:] = [d for d in dirs if d not in exclude_dirs]
         for f in files:
             if not f.endswith(".py"):
                 continue
@@ -359,8 +363,9 @@ def test_no_bare_except_pass():
     bare except (no class specified) followed by pass.
     """
     violations = []
+    exclude_dirs = {'.git', '__pycache__', 'venv', '.venv', 'env', 'build', 'dist', '.pytest_cache'}
     for root, dirs, files in os.walk(REPO / "ouroboros"):
-        dirs[:] = [d for d in dirs if d != "__pycache__"]
+        dirs[:] = [d for d in dirs if d not in exclude_dirs]
         for f in files:
             if not f.endswith(".py"):
                 continue
@@ -387,8 +392,9 @@ MAX_FUNCTION_LINES = 200  # Hard limit — anything above is a bug
 def _get_function_sizes():
     """Return list of (file, func_name, lines) for all functions."""
     results = []
+    exclude_dirs = {'.git', '__pycache__', 'venv', '.venv', 'env', 'build', 'dist', '.pytest_cache'}
     for root, dirs, files in os.walk(REPO):
-        dirs[:] = [d for d in dirs if d not in ('.git', '__pycache__', 'tests')]
+        dirs[:] = [d for d in dirs if d not in exclude_dirs]
         for f in files:
             if not f.endswith(".py"):
                 continue
@@ -424,14 +430,15 @@ def test_function_count_reasonable():
 # ── Pre-push gate tests ───────────────────────────────────────────────
 
 class TestPrePushGate:
-    """Tests for pre-push test gate in git.py."""
+    """Tests for pre-push gate in git.py."""
 
     def test_run_shell_non_string_cmd(self):
         """Pre-push gate: run_shell must not be called with string cmd (use list)."""
         # Static analysis: look for run_shell( with a string literal argument
         violations = []
+        exclude_dirs = {'.git', '__pycache__', 'venv', '.venv', 'env', 'build', 'dist', '.pytest_cache'}
         for root, dirs, files in os.walk(REPO):
-            dirs[:] = [d for d in dirs if d not in ('.git', '__pycache__')]
+            dirs[:] = [d for d in dirs if d not in exclude_dirs]
             for f in files:
                 if not f.endswith(".py"):
                     continue
