@@ -74,51 +74,60 @@ class SearchAgent:
 """
 
     def _define_tools(self) -> List[Dict[str, Any]]:
-        """Return list of OpenAI function schemas (inner dicts, no outer wrapper)."""
+        """Return list of OpenAI tool schemas with proper wrapper."""
         return [
             {
-                "name": "search_web",
-                "description": "Выполняет поиск в интернете по запросу, возвращает список результатов с заголовками, ссылками и сниппетами",
-                "parameters": {
-                    "type": "object",
-                    "properties": {
-                        "query": {"type": "string", "description": "Поисковый запрос"}
+                "type": "function",
+                "function": {
+                    "name": "search_web",
+                    "description": "Выполняет поиск в интернете по запросу, возвращает список результатов с заголовками, ссылками и сниппетами",
+                    "parameters": {
+                        "type": "object",
+                        "properties": {
+                            "query": {"type": "string", "description": "Поисковый запрос"}
+                        },
+                        "required": ["query"],
+                        "additionalProperties": False
                     },
-                    "required": ["query"],
-                    "additionalProperties": False
-                },
-                "strict": True
+                    "strict": True
+                }
             },
             {
-                "name": "read_page",
-                "description": "Загружает полное содержимое страницы по URL",
-                "parameters": {
-                    "type": "object",
-                    "properties": {
-                        "url": {"type": "string", "description": "URL страницы для загрузки"}
+                "type": "function",
+                "function": {
+                    "name": "read_page",
+                    "description": "Загружает полное содержимое страницы по URL",
+                    "parameters": {
+                        "type": "object",
+                        "properties": {
+                            "url": {"type": "string", "description": "URL страницы для загрузки"}
+                        },
+                        "required": ["url"],
+                        "additionalProperties": False
                     },
-                    "required": ["url"],
-                    "additionalProperties": False
-                },
-                "strict": True
+                    "strict": True
+                }
             },
             {
-                "name": "finalize_answer",
-                "description": "Завершает поиск и возвращает финальный ответ с указанием источников",
-                "parameters": {
-                    "type": "object",
-                    "properties": {
-                        "answer": {"type": "string", "description": "Финальный ответ на запрос пользователя"},
-                        "sources": {
-                            "type": "array",
-                            "items": {"type": "string"},
-                            "description": "Список URL использованных источников"
-                        }
+                "type": "function",
+                "function": {
+                    "name": "finalize_answer",
+                    "description": "Завершает поиск и возвращает финальный ответ с указанием источников",
+                    "parameters": {
+                        "type": "object",
+                        "properties": {
+                            "answer": {"type": "string", "description": "Финальный ответ на запрос пользователя"},
+                            "sources": {
+                                "type": "array",
+                                "items": {"type": "string"},
+                                "description": "Список URL использованных источников"
+                            }
+                        },
+                        "required": ["answer", "sources"],
+                        "additionalProperties": False
                     },
-                    "required": ["answer", "sources"],
-                    "additionalProperties": False
-                },
-                "strict": True
+                    "strict": True
+                }
             }
         ]
 
@@ -239,7 +248,7 @@ class SearchAgent:
                     max_tokens=2000
                 )
                 msg = response.choices[0].message
-            except openai.Timeout:
+            except requests.exceptions.Timeout:
                 if self.verbose:
                     print("[DEBUG] API timeout")
                 break
@@ -362,77 +371,16 @@ def search_agent_tool(ctx: ToolContext, query: str, max_iterations: int = 10) ->
 
 
 def get_tools() -> List[ToolEntry]:
-    """Register the search_agent tool."""
-    tools_defs = [
-        {
-            "name": "search_web",
-            "description": "Выполняет поиск в интернете по запросу, возвращает список результатов с заголовками, ссылками и сниппетами",
-            "parameters": {
-                "type": "object",
-                "properties": {
-                    "query": {"type": "string", "description": "Поисковый запрос"}
-                },
-                "required": ["query"],
-                "additionalProperties": False
-            },
-            "strict": True
-        },
-        {
-            "name": "read_page",
-            "description": "Загружает полное содержимое страницы по URL",
-            "parameters": {
-                "type": "object",
-                "properties": {
-                    "url": {"type": "string", "description": "URL страницы для загрузки"}
-                },
-                "required": ["url"],
-                "additionalProperties": False
-            },
-            "strict": True
-        },
-        {
-            "name": "finalize_answer",
-            "description": "Завершает поиск и возвращает финальный ответ с указанием источников",
-            "parameters": {
-                "type": "object",
-                "properties": {
-                    "answer": {"type": "string", "description": "Финальный ответ на запрос пользователя"},
-                    "sources": {
-                        "type": "array",
-                        "items": {"type": "string"},
-                        "description": "Список URL использованных источников"
-                    }
-                },
-                "required": ["answer", "sources"],
-                "additionalProperties": False
-            },
-            "strict": True
-        }
-    ]
+    """Return ToolEntry list for auto-discovery."""
     return [
         ToolEntry(
             name="search_agent",
-            schema={
-                "name": "search_agent",
-                "description": "Автономный поисковый агент с глубоким анализом: выполняет поиск, читает страницы, возвращает ответ с источниками",
-                "parameters": {
-                    "type": "object",
-                    "properties": {
-                        "query": {
-                            "type": "string",
-                            "description": "Поисковый запрос на естественном языке"
-                        },
-                        "max_iterations": {
-                            "type": "integer",
-                            "description": "Максимальное количество итераций агента (по умолчанию 10)",
-                            "default": 10
-                        }
-                    },
-                    "required": ["query"],
-                    "additionalProperties": False
-                },
-                "strict": True
+            description="Поиск в интернете через автономного агента (DuckDuckGo + LLM)",
+            params={
+                "query": {"type": "string", "description": "Поисковый запрос"},
+                "max_iterations": {"type": "integer", "description": "Максимальное число итераций агента (по умолчанию 10)"}
             },
-            handler=search_agent_tool
+            required=["query"],
+            function=search_agent_tool
         )
     ]
