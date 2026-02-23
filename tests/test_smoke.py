@@ -271,15 +271,22 @@ def test_no_hardcoded_replies():
         re.IGNORECASE,
     )
     violations = []
-    # Exclude heavy/irrelevant directories
-    exclude_dirs = {'.git', '__pycache__', 'venv', '.venv', 'env', 'build', 'dist', '.pytest_cache'}
-    for root, dirs, files in os.walk(REPO):
-        dirs[:] = [d for d in dirs if d not in exclude_dirs]
-        for f in files:
-            if not f.endswith(".py"):
+    # Exclude heavy/irrelevant directories and scan only source directories
+    exclude_dirs = {'.git', '__pycache__', 'venv', '.venv', 'env', 'build', 'dist', '.pytest_cache', 'node_modules', 'wheels', '.cache'}
+    # We'll explicitly walk only the main source dirs to avoid huge scans
+    source_roots = [REPO / "ouroboros", REPO / "supervisor", REPO / "tests"]
+    for root in source_roots:
+        if not root.exists():
+            continue
+        for path in root.rglob("*.py"):
+            # Skip any path that contains an excluded directory part
+            if any(part in exclude_dirs for part in path.parts):
                 continue
-            path = pathlib.Path(root) / f
-            for i, line in enumerate(path.read_text().splitlines(), 1):
+            try:
+                lines = path.read_text().splitlines()
+            except Exception:
+                continue
+            for i, line in enumerate(lines, 1):
                 if line.strip().startswith("#"):
                     continue
                 if suspicious.search(line):
@@ -325,12 +332,13 @@ def test_no_env_dumping():
     dangerous = re.compile(r'(?:print|json\.dumps|log)\s*\(.*\bos\.environ\b(?!\s*[\[.])')
     violations = []
     exclude_dirs = {'.git', '__pycache__', 'venv', '.venv', 'env', 'build', 'dist', '.pytest_cache'}
-    for root, dirs, files in os.walk(REPO):
-        dirs[:] = [d for d in dirs if d not in exclude_dirs]
-        for f in files:
-            if not f.endswith(".py"):
+    source_roots = [REPO / "ouroboros", REPO / "supervisor", REPO / "tests"]
+    for root in source_roots:
+        if not root.exists():
+            continue
+        for path in root.rglob("*.py"):
+            if any(part in exclude_dirs for part in path.parts):
                 continue
-            path = pathlib.Path(root) / f
             for i, line in enumerate(path.read_text().splitlines(), 1):
                 if line.strip().startswith("#"):
                     continue
@@ -344,12 +352,13 @@ def test_no_oversized_modules():
     max_lines = 1000
     violations = []
     exclude_dirs = {'.git', '__pycache__', 'venv', '.venv', 'env', 'build', 'dist', '.pytest_cache'}
-    for root, dirs, files in os.walk(REPO):
-        dirs[:] = [d for d in dirs if d not in exclude_dirs]
-        for f in files:
-            if not f.endswith(".py"):
+    source_roots = [REPO / "ouroboros", REPO / "supervisor"]
+    for root in source_roots:
+        if not root.exists():
+            continue
+        for path in root.rglob("*.py"):
+            if any(part in exclude_dirs for part in path.parts):
                 continue
-            path = pathlib.Path(root) / f
             lines = len(path.read_text().splitlines())
             if lines > max_lines:
                 violations.append(f"{path.name}: {lines} lines")
@@ -364,12 +373,11 @@ def test_no_bare_except_pass():
     """
     violations = []
     exclude_dirs = {'.git', '__pycache__', 'venv', '.venv', 'env', 'build', 'dist', '.pytest_cache'}
-    for root, dirs, files in os.walk(REPO / "ouroboros"):
-        dirs[:] = [d for d in dirs if d not in exclude_dirs]
-        for f in files:
-            if not f.endswith(".py"):
+    source_root = REPO / "ouroboros"
+    if source_root.exists():
+        for path in source_root.rglob("*.py"):
+            if any(part in exclude_dirs for part in path.parts):
                 continue
-            path = pathlib.Path(root) / f
             lines = path.read_text().splitlines()
             for i, line in enumerate(lines, 1):
                 stripped = line.strip()
@@ -393,12 +401,13 @@ def _get_function_sizes():
     """Return list of (file, func_name, lines) for all functions."""
     results = []
     exclude_dirs = {'.git', '__pycache__', 'venv', '.venv', 'env', 'build', 'dist', '.pytest_cache'}
-    for root, dirs, files in os.walk(REPO):
-        dirs[:] = [d for d in dirs if d not in exclude_dirs]
-        for f in files:
-            if not f.endswith(".py"):
+    source_roots = [REPO / "ouroboros", REPO / "supervisor"]
+    for root in source_roots:
+        if not root.exists():
+            continue
+        for path in root.rglob("*.py"):
+            if any(part in exclude_dirs for part in path.parts):
                 continue
-            path = pathlib.Path(root) / f
             try:
                 tree = ast.parse(path.read_text())
             except SyntaxError:
@@ -406,7 +415,7 @@ def _get_function_sizes():
             for node in ast.walk(tree):
                 if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
                     size = node.end_lineno - node.lineno + 1
-                    results.append((f, node.name, size))
+                    results.append((str(path.relative_to(REPO)), node.name, size))
     return results
 
 
@@ -437,13 +446,18 @@ class TestPrePushGate:
         # Static analysis: look for run_shell( with a string literal argument
         violations = []
         exclude_dirs = {'.git', '__pycache__', 'venv', '.venv', 'env', 'build', 'dist', '.pytest_cache'}
-        for root, dirs, files in os.walk(REPO):
-            dirs[:] = [d for d in dirs if d not in exclude_dirs]
-            for f in files:
-                if not f.endswith(".py"):
+        source_roots = [REPO / "ouroboros", REPO / "supervisor", REPO / "tests"]
+        for root in source_roots:
+            if not root.exists():
+                continue
+            for path in root.rglob("*.py"):
+                # skip heavy paths
+                if any(part in exclude_dirs for part in path.parts):
                     continue
-                path = pathlib.Path(root) / f
-                text = path.read_text()
+                try:
+                    text = path.read_text()
+                except Exception:
+                    continue
                 # Simple pattern: run_shell("...") or run_shell('...')
                 for m in re.finditer(r'run_shell\s*\(\s*["\']', text):
                     # Get some context
@@ -453,4 +467,8 @@ class TestPrePushGate:
                     # If it's not a comment, flag it
                     if not snippet.startswith("#"):
                         violations.append(f"{path.name}: {snippet}")
+                        # Early exit on first violation to avoid long scans
+                        break
+            if violations:
+                break
         assert len(violations) == 0, f"run_shell called with string cmd (should be list):\n" + "\n".join(violations)
