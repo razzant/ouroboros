@@ -90,7 +90,6 @@ EXPECTED_TOOLS = [
     "git_status", "git_diff",
     "run_shell", "claude_code_edit",
     "browse_page", "browser_action",
-    "web_search",
     "search_agent",
     "chat_history", "update_scratchpad", "update_identity",
     "request_restart", "promote_to_stable", "request_review",
