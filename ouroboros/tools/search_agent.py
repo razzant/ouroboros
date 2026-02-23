@@ -59,11 +59,13 @@ class SearchAgent:
 2. read_page(url: str) — загружает и читает содержимое страницы.
 3. finalize_answer(answer: str, sources: List[str]) — завершает поиск и возвращает финальный ответ со списком источников.
 
-Алгоритм:
-- Анализируй запрос. При необходимости делай несколько поисковых запросов.
-- Изучай сниппеты. Если информации недостаточно — читай полные страницы.
-- После сбора достаточных данных вызови finalize_answer.
-- Не злоупотребляй количеством итераций. Вызывай finalize_answer, когда ответ готов.
+Критически важные правила:
+- Собери информацию, выполняя поиски и читая страницы. После того как достаточно данных собрано, ВСЕГДА вызывай finalize_answer.
+- Не отвечай текстовым сообщением без вызова инструментов. Твой ответ должен содержать вызов одной из функций.
+- Используй read_page для получения полного текста важных страниц.
+- Если по результатам поиска можно ответить сразу (в сниппетах есть полный ответ), всё равно вызови finalize_answer.
+- Не зацикливайся. После 2-3 итераций, если информации достаточно, завершай.
+- В finalize_answer укажи развернутый ответ (answer) и список URL источников (sources). Это обязательный завершающий шаг.
 """
 
     def _define_tools(self) -> List[Dict[str, Any]]:
@@ -224,6 +226,13 @@ class SearchAgent:
             if self.verbose:
                 print(f"[DEBUG] Iteration {iteration}")
 
+            # Remind model to finalize if approaching limit
+            if iteration >= self.max_iterations - 2 and final_answer is None:
+                reminder = "Важно: если собрали достаточно информации, немедленно вызовите finalize_answer с ответом и источниками. Не продолжайте без необходимости."
+                messages.append({"role": "system", "content": reminder})
+                if self.verbose:
+                    print("[DEBUG] Added finalization reminder")
+
             try:
                 response = self.client.chat.completions.create(
                     model=self.model,
@@ -288,32 +297,44 @@ class SearchAgent:
                             "content": f"Unknown tool: {func_name}"
                         })
             else:
-                # Model responded without tools; finish with its content
+                # Model responded without tools; finish with its content (should not happen with good prompt)
                 final_answer = msg.content or "No answer generated"
                 sources = []
                 break
 
         # Force completion if we reached max_iterations without finalize_answer
         if final_answer is None:
-            # Simple direct answer attempt with current context
             try:
+                # Use a larger context slice to retain more information
+                context_messages = messages[-8:] if len(messages) > 8 else messages
                 summary_resp = self.client.chat.completions.create(
                     model=self.model,
                     messages=[
-                        {"role": "system", "content": "На основе собранной информации дай краткий ответ. Если есть источники — упомяни их. Верни JSON с ключами 'answer' (строка) и 'sources' (массив URL)."},
+                        {"role": "system", "content": "На основе собранной информации дай финальный ответ. Обязательно верни JSON с ключами 'answer' (строка) и 'sources' (массив URL). Если точных источников нет, укажи пустой массив."},
                         {"role": "user", "content": user_query}
-                    ] + messages[-3:],  # recent context only
-                    max_tokens=1500
+                    ] + context_messages,
+                    max_tokens=2000
                 )
                 summary_text = summary_resp.choices[0].message.content or "Превышено число итераций. Ответ не собран."
-                # Try to parse JSON; if fails, just use text as answer
                 try:
                     parsed = json.loads(summary_text)
                     final_answer = parsed.get("answer", summary_text)
                     sources = parsed.get("sources", [])
                 except json.JSONDecodeError:
-                    final_answer = summary_text
-                    sources = []
+                    # Try to extract JSON from markdown code block if present
+                    import re
+                    match = re.search(r"```(?:json)?\s*({.*?})\s*```", summary_text, re.DOTALL)
+                    if match:
+                        try:
+                            parsed = json.loads(match.group(1))
+                            final_answer = parsed.get("answer", str(parsed))
+                            sources = parsed.get("sources", [])
+                        except json.JSONDecodeError:
+                            final_answer = summary_text
+                            sources = []
+                    else:
+                        final_answer = summary_text
+                        sources = []
             except Exception as e:
                 final_answer = f"Превышено число итераций. Ответ не собран. Ошибка: {e}"
                 sources = []
