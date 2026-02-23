@@ -18,7 +18,7 @@ from bs4 import BeautifulSoup
 import openai
 from dotenv import load_dotenv
 
-from .registry import ToolEntry
+from .registry import ToolEntry, ToolContext
 
 log = logging.getLogger(__name__)
 load_dotenv()
@@ -339,7 +339,7 @@ class SearchAgent:
                         final_answer = summary_text
                         sources = []
             except Exception as e:
-                final_answer = f"Превышено число итераций. Ответ не собран. Ошибка: {e}"
+                final_answer = f"Превышено число итераций.Ответ не собран. Ошибка: {e}"
                 sources = []
 
         return {
@@ -353,7 +353,7 @@ class SearchAgent:
 # Tool registration
 # -------------------------------------------------------------------------
 
-def search_agent_tool(query: str, max_iterations: int = 10) -> str:
+def search_agent_tool(ctx: ToolContext, query: str, max_iterations: int = 10) -> str:
     """Tool wrapper for SearchAgent: return JSON with answer, sources, iterations."""
     try:
         agent = SearchAgent(max_iterations=max_iterations, verbose=False)
@@ -376,23 +376,28 @@ def get_tools() -> List[ToolEntry]:
     return [
         ToolEntry(
             name="search_agent",
-            description="Autonomous web search agent. Uses DuckDuckGo + page reading. Returns synthesized answer with sources. Needs OPENROUTER_API_KEY.",
-            callable=search_agent_tool,
             schema={
-                "type": "object",
-                "properties": {
-                    "query": {
-                        "type": "string",
-                        "description": "Search query"
+                "name": "search_agent",
+                "description": "Autonomous web search agent. Uses DuckDuckGo + page reading. Returns synthesized answer with sources. Needs OPENROUTER_API_KEY.",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "query": {
+                            "type": "string",
+                            "description": "Search query"
+                        },
+                        "max_iterations": {
+                            "type": "integer",
+                            "description": "Max agent iterations (default 10)",
+                            "default": 10
+                        }
                     },
-                    "max_iterations": {
-                        "type": "integer",
-                        "description": "Max agent iterations (default 10)",
-                        "default": 10
-                    }
-                },
-                "required": ["query"],
-                "additionalProperties": False
-            }
+                    "required": ["query"],
+                    "additionalProperties": False
+                }
+            },
+            handler=search_agent_tool,
+            is_code_tool=False,
+            timeout_sec=180
         )
     ]
