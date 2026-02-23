@@ -1,13 +1,18 @@
 """SearchAgent - Autonomous search agent using LLM with function calling.
 
-No external search API required. Uses DuckDuckGo HTML parsing and BeautifulSoup.
+Performs deep web searches via DuckDuckGo (HTML parsing, no API keys required),
+reads pages with BeautifulSoup, and compiles synthesized answers with sources.
+Uses OpenRouter credentials from environment.
 """
+
+from __future__ import annotations
 
 import os
 import time
 import json
+import logging
 import requests
-from typing import List, Dict, Any, Optional
+from typing import List, Dict, Any
 from urllib.parse import quote_plus
 from bs4 import BeautifulSoup
 import openai
@@ -15,11 +20,12 @@ from dotenv import load_dotenv
 
 from .registry import ToolEntry
 
+log = logging.getLogger(__name__)
 load_dotenv()
 
 
 class SearchAgent:
-    """Autonomous agent that searches the web, reads pages, and compiles answers."""
+    """Internal agent that performs search, reads pages, and compiles answers."""
 
     def __init__(
         self,
@@ -32,7 +38,7 @@ class SearchAgent:
         request_delay: float = 1.0,
         verbose: bool = False
     ):
-        # OpenAI-compatible client with timeout
+        # OpenAI-compatible client
         self.client = openai.OpenAI(
             api_key=api_key or os.getenv("OPENROUTER_API_KEY") or os.getenv("OPENAI_API_KEY"),
             base_url=base_url or os.getenv("OPENROUTER_BASE_URL") or "https://openrouter.ai/api/v1",
@@ -45,10 +51,7 @@ class SearchAgent:
         self.request_delay = request_delay
         self.verbose = verbose
 
-        # System prompt
         self.system_prompt = self._build_system_prompt()
-
-        # Tool schemas for function calling
         self.tools_schema = self._define_tools()
 
     def _build_system_prompt(self) -> str:
@@ -226,7 +229,7 @@ class SearchAgent:
             if self.verbose:
                 print(f"[DEBUG] Iteration {iteration}")
 
-            # Remind model to finalize if approaching limit
+            # Reminder near the limit to force finalization
             if iteration >= self.max_iterations - 2 and final_answer is None:
                 reminder = "Важно: если собрали достаточно информации, немедленно вызовите finalize_answer с ответом и источниками. Не продолжайте без необходимости."
                 messages.append({"role": "system", "content": reminder})
@@ -297,7 +300,7 @@ class SearchAgent:
                             "content": f"Unknown tool: {func_name}"
                         })
             else:
-                # Model responded without tools; finish with its content (should not happen with good prompt)
+                # Model responded without tools; finish with its content
                 final_answer = msg.content or "No answer generated"
                 sources = []
                 break
@@ -362,27 +365,34 @@ def search_agent_tool(query: str, max_iterations: int = 10) -> str:
         }, ensure_ascii=False)
     except Exception as e:
         return json.dumps({
-            "error": str(e)
+            "answer": f"SearchAgent error: {e}",
+            "sources": [],
+            "iterations": 0
         }, ensure_ascii=False)
 
 
 def get_tools() -> List[ToolEntry]:
-    """Return SearchAgent tool descriptor."""
+    """Return SearchAgent tool entry for registry."""
     return [
         ToolEntry(
             name="search_agent",
+            description="Autonomous web search agent. Uses DuckDuckGo + page reading. Returns synthesized answer with sources. Needs OPENROUTER_API_KEY.",
+            callable=search_agent_tool,
             schema={
-                "name": "search_agent",
-                "description": "Поиск в интернете с глубоким анализом. Возвращает JSON с answer, sources, iterations",
-                "parameters": {
-                    "type": "object",
-                    "properties": {
-                        "query": {"type": "string", "description": "Поисковый запрос"}
+                "type": "object",
+                "properties": {
+                    "query": {
+                        "type": "string",
+                        "description": "Search query"
                     },
-                    "required": ["query"],
-                    "additionalProperties": False
-                }
-            },
-            handler=search_agent_tool
+                    "max_iterations": {
+                        "type": "integer",
+                        "description": "Max agent iterations (default 10)",
+                        "default": 10
+                    }
+                },
+                "required": ["query"],
+                "additionalProperties": False
+            }
         )
     ]
