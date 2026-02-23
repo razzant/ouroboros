@@ -375,11 +375,19 @@ def get_tools() -> List[ToolEntry]:
     return [
         ToolEntry(
             name="search_agent",
-            description="Автономный поисковый агент: выполняет глубокий поиск и возвращает развернутый ответ с источниками. Поиск через DuckDuckGo, чтение страниц, синтез информации.",
-            params={
-                "query": {"type": "string", "description": "Поисковый запрос"},
-                "max_iterations": {"type": "integer", "description": "Максимальное число итераций агента (по умолчанию 10)", "optional": True}
+            schema={
+                "name": "search_agent",
+                "description": "Автономный поисковый агент: выполняет глубокий поиск и возвращает развернутый ответ с источниками. Поиск через DuckDuckGo, чтение страниц, синтез информации.",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "query": {"type": "string", "description": "Поисковый запрос"},
+                        "max_iterations": {"type": "integer", "description": "Максимальное число итераций агента (по умолчанию 10)", "optional": True}
+                    },
+                    "required": ["query"],
+                    "additionalProperties": False
+                }
             },
-            function=search_agent_tool
+            handler=search_agent_tool
         )
     ]
