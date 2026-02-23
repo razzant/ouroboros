@@ -222,6 +222,11 @@ Full text: [BIBLE.md](BIBLE.md)
 ---
 
 ## Changelog
+n### v6.3.0 -- SearchAgent Integration
+- **Feature: SearchAgent tool** -- Added autonomous search agent with DuckDuckGo parsing, page reading, and LLM-driven synthesis. No external API required.
+- **Fix: SearchAgent termination** -- Improved system prompt and fallback completion to ensure agent cycles terminate properly.
+- **Feature: registry auto-discovery** -- tools package now scans submodules; SearchAgent auto-registers.
+
 
 ### v6.2.0 -- Critical Bugfixes + LLM-First Dedup
 - **Fix: worker_id==0 hard-timeout bug** -- `int(x or -1)` treated worker 0 as -1, preventing terminate on timeout and causing double task execution. Replaced all `x or default` patterns with None-safe checks.
