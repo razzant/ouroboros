@@ -1,16 +1,18 @@
 """
-SearchAgent - Автономный поисковый агент на основе LLM с function calling.
-Агент получает запрос, самостоятельно формирует поисковые запросы,
-анализирует сниппеты, при необходимости читает страницы,
-и возвращает итоговый ответ со ссылками на источники.
+SearchAgent - Autonomous search agent using LLM with function calling.
 
-Поиск выполняется через DuckDuckGo (HTML-парсинг) – не требует ключей.
-Чтение страниц – через requests + BeautifulSoup.
+Performs deep web searches via DuckDuckGo (HTML parsing, no API keys required),
+reads pages with BeautifulSoup, and compiles synthesized answers with sources.
+Uses OpenRouter credentials from environment.
 """
+
+from __future__ import annotations
 
 import os
 import time
 import json
+import logging
+import re
 import requests
 from typing import List, Dict, Any, Optional
 from urllib.parse import quote_plus
@@ -18,95 +20,71 @@ from bs4 import BeautifulSoup
 import openai
 from dotenv import load_dotenv
 
+from .registry import ToolEntry, ToolContext
+
+log = logging.getLogger(__name__)
 load_dotenv()
 
 
 class SearchAgent:
-    """
-    Агент для глубокого поиска в интернете.
-    Использует LLM с function calling для планирования и синтеза информации.
-    """
+    """Internal agent that performs search, reads pages, and compiles answers."""
 
     def __init__(
         self,
         api_key: Optional[str] = None,
         base_url: Optional[str] = None,
         model: Optional[str] = None,
+        max_iterations: int = 10,
         max_search_results: int = 5,
-        max_page_length_chars: int = 8000,
+        max_page_length: int = 8000,
         request_delay: float = 1.0,
         verbose: bool = False
     ):
-        """
-        Инициализация агента.
-
-        :param api_key: API ключ для OpenAI-совместимой модели (OpenRouter/z.ai)
-        :param base_url: Базовый URL API (например, https://openrouter.ai/api/v1)
-        :param model: Название модели (должна поддерживать function calling)
-        :param max_search_results: Максимальное количество результатов на один поиск
-        :param max_page_length_chars: Максимальная длина текста страницы (в символах)
-        :param request_delay: Задержка между HTTP-запросами (сек)
-        :param verbose: Подробный вывод отладки
-        """
+        # OpenAI-compatible client
         self.client = openai.OpenAI(
-            api_key=api_key or os.getenv("OPENROUTER_API_KEY"),
-            base_url=base_url or os.getenv("OPENROUTER_BASE_URL", "https://openrouter.ai/api/v1")
+            api_key=api_key or os.getenv("OPENROUTER_API_KEY") or os.getenv("OPENAI_API_KEY"),
+            base_url=base_url or os.getenv("OPENROUTER_BASE_URL") or "https://openrouter.ai/api/v1",
+            timeout=30.0
         )
-        self.model = model or os.getenv("OPENROUTER_MODEL", "qwen/qwen3-vl-235b-a22b-thinking")
+        self.model = model or os.getenv("OPENROUTER_MODEL") or os.getenv("OUROBOROS_MODEL_LIGHT") or "StepFun/Step-3.5-Flash:free"
+        self.max_iterations = max_iterations
         self.max_search_results = max_search_results
-        self.max_page_length_chars = max_page_length_chars
+        self.max_page_length = max_page_length
         self.request_delay = request_delay
         self.verbose = verbose
 
-        # Системный промпт
         self.system_prompt = self._build_system_prompt()
-
-        # Инструменты для function calling
-        self.tools = self._define_tools()
+        self.tools_schema = self._define_tools()
 
     def _build_system_prompt(self) -> str:
-        return """Ты – SearchAgent, автономный поисковый агент. Твоя задача – находить точную и актуальную информацию в интернете, отвечая на запрос пользователя.
+        return """Ты — автономный поисковый агент. Твоя задача — найти и предоставить точный ответ на запрос пользователя, используя доступные инструменты.
 
-У тебя есть три инструмента:
+Инструменты:
+1. search_web(query: str) — выполняет поиск в интернете. Возвращает список результатов с title, url, snippet.
+2. read_page(url: str) — загружает и читает содержимое страницы.
+3. finalize_answer(answer: str, sources: List[str]) — завершает поиск и возвращает финальный ответ со списком источников.
 
-1. search_web(query: str) -> List[Dict]  
-   Выполняет поиск в интернете по строке query.  
-   Возвращает список результатов, каждый содержит:
-   - title – заголовок страницы,
-   - url – ссылка на страницу,
-   - snippet – краткое описание (сниппет).
-
-2. read_page(url: str) -> str  
-   Загружает страницу по указанному URL и возвращает её текстовое содержание (очищенное от HTML).  
-   Если страница слишком большая, она обрезается.
-
-3. finalize_answer(answer: str, sources: List[str])  
-   Завершает работу агента и возвращает итоговый ответ answer вместе со списком использованных источников (sources – список URL).  
-   Этот инструмент нужно вызвать только когда информация собрана полностью.
-
-Правила работы:
-- Получив запрос пользователя, проанализируй его. Если нужно – разбей на подзадачи.
-- Для каждой подзадачи сформулируй один или несколько поисковых запросов.
-- Вызывай search_web для каждого запроса. Изучай полученные сниппеты.
-- Если сниппетов недостаточно, вызывай read_page для наиболее перспективных ссылок.
-- После того как собрал достаточно данных (возможно, после нескольких итераций), вызови finalize_answer.
-- Не вызывай finalize_answer преждевременно, но и не зацикливайся – старайся уложиться в разумное число шагов.
-- В финальном ответе обязательно укажи источники (URL), на которые ты опирался.
-
-Помни: ты должен дать максимально полный и точный ответ на исходный запрос пользователя.
+Критически важные правила:
+- Собери информацию, выполняя поиски и читая страницы. После того как достаточно данных собрано, ВСЕГДА вызывай finalize_answer.
+- Не отвечай текстовым сообщением без вызова инструментов. Твой ответ должен содержать вызов одной из функций.
+- Используй read_page для получения полного текста важных страниц.
+- Если по результатам поиска можно ответить сразу (в сниппетах есть полный ответ), всё равно вызови finalize_answer.
+- Не зацикливайся. После 2-3 итераций, если информации достаточно, завершай.
+- В finalize_answer укажи развернутый ответ (answer) и список URL источников (sources). Это обязательный завершающий шаг.
 """
 
-    def _define_tools(self) -> List[Dict]:
+    def _define_tools(self) -> List[Dict[str, Any]]:
+        """Return list of OpenAI tool schemas with proper wrapper."""
         return [
             {
                 "type": "function",
                 "function": {
                     "name": "search_web",
-                    "description": "Выполняет поиск в интернете по запросу и возвращает результаты",
+                    "description": "Выполняет поиск в интернете по запросу, возвращает список результатов с заголовками, ссылками и сниппетами",
                     "parameters": {
                         "type": "object",
                         "properties": {
-                            "query": {"type": "string"}
+                            "query": {"type": "string", "description": "Поисковый запрос"}
                         },
                         "required": ["query"],
                         "additionalProperties": False
@@ -118,11 +96,11 @@ class SearchAgent:
                 "type": "function",
                 "function": {
                     "name": "read_page",
-                    "description": "Загружает страницу по URL и возвращает её текстовое содержание",
+                    "description": "Загружает полное содержимое страницы по URL",
                     "parameters": {
                         "type": "object",
                         "properties": {
-                            "url": {"type": "string"}
+                            "url": {"type": "string", "description": "URL страницы для загрузки"}
                         },
                         "required": ["url"],
                         "additionalProperties": False
@@ -134,14 +112,15 @@ class SearchAgent:
                 "type": "function",
                 "function": {
                     "name": "finalize_answer",
-                    "description": "Завершает поиск и возвращает финальный ответ",
+                    "description": "Завершает поиск и возвращает финальный ответ с указанием источников",
                     "parameters": {
                         "type": "object",
                         "properties": {
-                            "answer": {"type": "string"},
+                            "answer": {"type": "string", "description": "Финальный ответ на запрос пользователя"},
                             "sources": {
                                 "type": "array",
-                                "items": {"type": "string"}
+                                "items": {"type": "string"},
+                                "description": "Список URL использованных источников"
                             }
                         },
                         "required": ["answer", "sources"],
@@ -153,71 +132,71 @@ class SearchAgent:
         ]
 
     # -------------------------------------------------------------------------
-    # Инструменты для работы с интернетом
+    # Search engine implementation (DuckDuckGo HTML parsing)
     # -------------------------------------------------------------------------
 
     def _duckduckgo_search(self, query: str) -> List[Dict[str, str]]:
-        """
-        Парсинг DuckDuckGo (HTML-версия) для получения результатов поиска.
-        """
+        """Perform search using DuckDuckGo HTML interface (no API key needed)."""
         url = f"https://html.duckduckgo.com/html/?q={quote_plus(query)}"
         headers = {
             "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"
         }
 
         try:
-            time.sleep(self.request_delay)  # вежливость
+            time.sleep(self.request_delay)
             resp = requests.get(url, headers=headers, timeout=15)
             resp.raise_for_status()
         except Exception as e:
             if self.verbose:
-                print(f"[DEBUG] Ошибка при запросе к DuckDuckGo: {e}")
+                print(f"[DEBUG] DuckDuckGo search error: {e}")
             return []
 
         soup = BeautifulSoup(resp.text, "html.parser")
         results = []
+
         for result in soup.select(".result")[:self.max_search_results]:
-            title_elem = result.select_one(".result__a")
+            title_elem = result.select_one(".result__title .result__a")
             if not title_elem:
                 continue
             title = title_elem.get_text(strip=True)
             href = title_elem.get("href", "")
+
+            # Extract real URL from DuckDuckGo redirect
             if href.startswith("/l/?kh=-1&uddg="):
                 import urllib.parse
                 parsed = urllib.parse.parse_qs(urllib.parse.urlparse(href).query)
-                url = parsed.get("uddg", [""])[0]
+                real_url = parsed.get("uddg", [""])[0]
             else:
-                url = href
+                real_url = href
 
             snippet_elem = result.select_one(".result__snippet")
             snippet = snippet_elem.get_text(strip=True) if snippet_elem else ""
 
-            results.append({
-                "title": title,
-                "url": url,
-                "snippet": snippet
-            })
+            if real_url:
+                results.append({
+                    "title": title,
+                    "url": real_url,
+                    "snippet": snippet
+                })
+
         return results
 
     def search_web(self, query: str) -> List[Dict[str, str]]:
-        """
-        Публичный метод поиска.
-        """
+        """Public search method."""
         if self.verbose:
-            print(f"[DEBUG] Поиск: {query}")
+            print(f"[DEBUG] search_web: {query}")
         return self._duckduckgo_search(query)
 
     def read_page(self, url: str) -> str:
-        """
-        Загружает страницу, очищает от HTML и возвращает текст.
-        """
+        """Download and extract text from a webpage."""
         if self.verbose:
-            print(f"[DEBUG] Чтение страницы: {url}")
-        time.sleep(self.request_delay)  # вежливость
+            print(f"[DEBUG] read_page: {url}")
 
+        time.sleep(self.request_delay)
         headers = {
             "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"
         }
+
         try:
             resp = requests.get(url, headers=headers, timeout=15)
             resp.raise_for_status()
@@ -227,56 +206,71 @@ class SearchAgent:
         soup = BeautifulSoup(resp.text, "html.parser")
         for tag in soup(["script", "style", "nav", "header", "footer", "aside"]):
             tag.decompose()
+
         text = soup.get_text(separator="\n", strip=True)
-        if len(text) > self.max_page_length_chars:
-            text = text[:self.max_page_length_chars] + "\n...[текст обрезан]"
+        if len(text) > self.max_page_length:
+            text = text[:self.max_page_length] + "\n...[обрезано]"
         return text
 
     # -------------------------------------------------------------------------
-    # Основной цикл обработки запроса
+    # Main agent loop
     # -------------------------------------------------------------------------
 
-    def process_query(self, user_query: str, max_iterations: int = 15) -> Dict[str, Any]:
-        """
-        Запускает агента для обработки запроса пользователя.
-        Возвращает словарь с ключами 'answer' и 'sources'.
-        """
+    def process_query(self, user_query: str) -> Dict[str, Any]:
+        """Run the agent loop to answer a user query."""
         messages = [
             {"role": "system", "content": self.system_prompt},
             {"role": "user", "content": user_query}
         ]
 
-        iteration = 0
         final_answer = None
         sources = []
+        iteration = 0
 
-        while iteration < max_iterations and final_answer is None:
+        while iteration < self.max_iterations and final_answer is None:
             iteration += 1
             if self.verbose:
-                print(f"\n[DEBUG] Итерация {iteration}")
+                print(f"[DEBUG] Iteration {iteration}")
 
-            # Вызов LLM с инструментами
-            response = self.client.chat.completions.create(
-                model=self.model,
-                messages=messages,
-                tools=self.tools,
-                tool_choice="auto"
-            )
-            msg = response.choices[0].message
+            # Reminder near the limit to force finalization
+            if iteration >= self.max_iterations - 2 and final_answer is None:
+                reminder = "Важно: если собрали достаточно информации, немедленно вызовите finalize_answer с ответом и источниками. Не продолжайте без необходимости."
+                messages.append({"role": "system", "content": reminder})
+                if self.verbose:
+                    print("[DEBUG] Added finalization reminder")
+
+            try:
+                response = self.client.chat.completions.create(
+                    model=self.model,
+                    messages=messages,
+                    tools=self.tools_schema,
+                    tool_choice="auto",
+                    max_tokens=2000
+                )
+                msg = response.choices[0].message
+            except requests.exceptions.Timeout:
+                if self.verbose:
+                    print("[DEBUG] API timeout")
+                break
+            except Exception as e:
+                if self.verbose:
+                    print(f"[DEBUG] API error: {e}")
+                break
 
             if msg.tool_calls:
-                if self.verbose:
-                    print(f"[DEBUG] Вызов инструментов: {[tc.function.name for tc in msg.tool_calls]}")
                 messages.append(msg)
 
                 for tool_call in msg.tool_calls:
                     func_name = tool_call.function.name
-                    args = json.loads(tool_call.function.arguments)
+                    try:
+                        args = json.loads(tool_call.function.arguments)
+                    except json.JSONDecodeError:
+                        args = {}
 
                     if func_name == "search_web":
-                        query = args["query"]
+                        query = args.get("query", "")
                         results = self.search_web(query)
-                        result_str = json.dumps(results, ensure_ascii=False, indent=2)
+                        result_str = json.dumps(results, ensure_ascii=False)
                         messages.append({
                             "role": "tool",
                             "tool_call_id": tool_call.id,
@@ -284,10 +278,8 @@ class SearchAgent:
                         })
 
                     elif func_name == "read_page":
-                        url = args["url"]
+                        url = args.get("url", "")
                         page_text = self.read_page(url)
-                        if len(page_text) > 10000:
-                            page_text = page_text[:10000] + "\n...[текст обрезан]"
                         messages.append({
                             "role": "tool",
                             "tool_call_id": tool_call.id,
@@ -295,12 +287,12 @@ class SearchAgent:
                         })
 
                     elif func_name == "finalize_answer":
-                        final_answer = args["answer"]
+                        final_answer = args.get("answer", "")
                         sources = args.get("sources", [])
                         messages.append({
                             "role": "tool",
                             "tool_call_id": tool_call.id,
-                            "content": "Поиск завершён, ответ сохранён."
+                            "content": "Answer finalized"
                         })
                         break
 
@@ -308,18 +300,49 @@ class SearchAgent:
                         messages.append({
                             "role": "tool",
                             "tool_call_id": tool_call.id,
-                            "content": f"Ошибка: неизвестный инструмент {func_name}"
+                            "content": f"Unknown tool: {func_name}"
                         })
             else:
-                if self.verbose:
-                    print("[DEBUG] Модель ответила текстом без вызова инструментов")
-                messages.append(msg)
-                final_answer = msg.content
-                sources = ["Ответ сгенерирован без явных источников"]
+                # Model responded without tools; finish with its content
+                final_answer = msg.content or "No answer generated"
+                sources = []
+                break
 
+        # Force completion if we reached max_iterations without finalize_answer
         if final_answer is None:
-            final_answer = "Не удалось получить ответ за допустимое число итераций."
-            sources = []
+            try:
+                # Use a larger context slice to retain more information
+                context_messages = messages[-8:] if len(messages) > 8 else messages
+                summary_resp = self.client.chat.completions.create(
+                    model=self.model,
+                    messages=[
+                        {"role": "system", "content": "На основе собранной информации дай финальный ответ. Обязательно верни JSON с ключами 'answer' (строка) и 'sources' (массив URL). Если точных источников нет, укажи пустой массив."},
+                        {"role": "user", "content": user_query}
+                    ] + context_messages,
+                    max_tokens=2000
+                )
+                summary_text = summary_resp.choices[0].message.content or "Превышено число итераций. Ответ не собран."
+                try:
+                    parsed = json.loads(summary_text)
+                    final_answer = parsed.get("answer", summary_text)
+                    sources = parsed.get("sources", [])
+                except json.JSONDecodeError:
+                    # Try to extract JSON from markdown code block if present
+                    match = re.search(r"```(?:json)?\s*({.*?})\s*```", summary_text, re.DOTALL)
+                    if match:
+                        try:
+                            parsed = json.loads(match.group(1))
+                            final_answer = parsed.get("answer", str(parsed))
+                            sources = parsed.get("sources", [])
+                        except json.JSONDecodeError:
+                            final_answer = summary_text
+                            sources = []
+                    else:
+                        final_answer = summary_text
+                        sources = []
+            except Exception as e:
+                final_answer = f"Превышено число итераций. Ответ не собран. Ошибка: {e}"
+                sources = []
 
         return {
             "answer": final_answer,
@@ -328,40 +351,44 @@ class SearchAgent:
         }
 
 
-def search_agent_tool(query: str) -> str:
-    """
-    Инструмент-обёртка для использования SearchAgent как инструмента Ouroboros.
-    """
+# -------------------------------------------------------------------------
+# Tool registration
+# -------------------------------------------------------------------------
+
+def search_agent_tool(ctx: ToolContext, query: str, max_iterations: int = 10) -> str:
+    """Tool wrapper for SearchAgent: return JSON with answer, sources, iterations."""
     try:
-        agent = SearchAgent(verbose=False)
+        agent = SearchAgent(max_iterations=max_iterations, verbose=False)
         result = agent.process_query(query)
-        return json.dumps({
-            "answer": result["answer"],
-            "sources": result["sources"],
-            "iterations": result["iterations"]
-        }, ensure_ascii=False, indent=2)
+        return json.dumps(result, ensure_ascii=False)
     except Exception as e:
-        return json.dumps({"error": str(e)}, ensure_ascii=False)
-
-
-# -----------------------------------------------------------------------------
-# Интеграция с системой инструментов Ouroboros
-# -----------------------------------------------------------------------------
-
-from ouroboros.tools.registry import ToolContext, ToolEntry
+        log.exception("SearchAgent tool failed")
+        return json.dumps({
+            "answer": f"Ошибка поискового агента: {e}",
+            "sources": [],
+            "iterations": 0
+        }, ensure_ascii=False)
 
 
 def get_tools() -> List[ToolEntry]:
+    """Return ToolEntry list for auto-discovery."""
     return [
-        ToolEntry("search_agent", {
-            "name": "search_agent",
-            "description": "Умный поисковый агент. Принимает запрос, выполняет поиск через DuckDuckGo, читает нужные страницы и возвращает развернутый ответ с источниками. Требует OPENROUTER_API_KEY и OPENROUTER_MODEL в .env.",
-            "parameters": {
-                "type": "object",
-                "properties": {
-                    "query": {"type": "string"}
+        ToolEntry(
+            name="search_agent",
+            schema={
+                "name": "search_agent",
+                "description": "Поиск в интернете через автономного агента (DuckDuckGo + LLM)",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "query": {"type": "string", "description": "Поисковый запрос"},
+                        "max_iterations": {"type": "integer", "description": "Максимальное число итераций агента (по умолчанию 10)"}
+                    },
+                    "required": ["query"],
+                    "additionalProperties": False
                 },
-                "required": ["query"]
-            }
-        }, search_agent_tool),
+                "strict": True
+            },
+            handler=search_agent_tool
+        )
     ]
