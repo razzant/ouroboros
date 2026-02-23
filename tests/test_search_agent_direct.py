@@ -43,7 +43,6 @@ def test_search_agent_direct():
         base_url=base_url,
         model=model,
         verbose=True,
-        max_iterations=5,  # short for test
         request_delay=0.5
     )
 
@@ -51,7 +50,7 @@ def test_search_agent_direct():
     print(f"\nTesting SearchAgent with query: {query!r}")
 
     try:
-        result = agent.run(query)  # <-- Changed from process_query to run
+        result = agent.process_query(query, max_iterations=5)
         print("\n=== RESULT ===")
         print(json.dumps(result, ensure_ascii=False, indent=2))
 
