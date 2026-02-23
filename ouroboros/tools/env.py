@@ -71,7 +71,7 @@ def _reload_env_tool() -> Dict[str, int]:
     return {"reloaded": reloaded, "changed": changed}
 
 
-def get_tools() -> list[ToolEntry]:
+def get_tools():
     from ouroboros.tools.registry import ToolEntry
     return [
         ToolEntry(
