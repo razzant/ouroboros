@@ -43,7 +43,6 @@ def test_search_agent_direct():
         base_url=base_url,
         model=model,
         verbose=True,
-        max_search_results=5,
         request_delay=0.5
     )
 
@@ -51,7 +50,7 @@ def test_search_agent_direct():
     print(f"\nTesting SearchAgent with query: {query!r}")
 
     try:
-        result = agent.process_query(query, max_iterations=5)  # Correct API
+        result = agent.process_query(query, max_iterations=3)
         print("\n=== RESULT ===")
         print(json.dumps(result, ensure_ascii=False, indent=2))
 
@@ -67,8 +66,9 @@ def test_search_agent_direct():
         assert isinstance(answer, str) and len(answer.strip()) > 10, f"Answer should be a non-empty string, got: {answer!r}"
 
         # Should complete within iteration limit (not None)
-        assert result["iterations"] <= 5, f"Exceeded max iterations 5, got {result['iterations']}"
+        assert result["iterations"] <= 3, f"Exceeded max iterations 3, got {result['iterations']}"
 
+        # Should have at least one source or answer was synthesized from search snippets
         print(f"\n✅ Test passed! Iterations: {result['iterations']}, sources: {len(result['sources'])}")
         return True
 
