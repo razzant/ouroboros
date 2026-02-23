@@ -32,12 +32,13 @@ class SearchAgent:
         request_delay: float = 1.0,
         verbose: bool = False
     ):
-        # OpenAI-compatible client
+        # OpenAI-compatible client with timeout
         self.client = openai.OpenAI(
             api_key=api_key or os.getenv("OPENROUTER_API_KEY") or os.getenv("OPENAI_API_KEY"),
-            base_url=base_url or os.getenv("OPENROUTER_BASE_URL") or "https://openrouter.ai/api/v1"
+            base_url=base_url or os.getenv("OPENROUTER_BASE_URL") or "https://openrouter.ai/api/v1",
+            timeout=30.0
         )
-        self.model = model or os.getenv("OPENROUTER_MODEL") or os.getenv("OUROBOROS_MODEL_LIGHT") or "gpt-3.5-turbo"
+        self.model = model or os.getenv("OPENROUTER_MODEL") or os.getenv("OUROBOROS_MODEL_LIGHT") or "StepFun/Step-3.5-Flash:free"
         self.max_iterations = max_iterations
         self.max_search_results = max_search_results
         self.max_page_length = max_page_length
@@ -229,9 +230,13 @@ class SearchAgent:
                     messages=messages,
                     tools=self.tools_schema,
                     tool_choice="auto",
-                    max_tokens=2000  # stay within free tier limits
+                    max_tokens=2000
                 )
                 msg = response.choices[0].message
+            except openai.Timeout:
+                if self.verbose:
+                    print("[DEBUG] API timeout")
+                break
             except Exception as e:
                 if self.verbose:
                     print(f"[DEBUG] API error: {e}")
@@ -289,20 +294,26 @@ class SearchAgent:
                 break
 
         # Force completion if we reached max_iterations without finalize_answer
-        if final_answer is None and iteration >= self.max_iterations:
-            # Ask the model to produce an answer based on the conversation
+        if final_answer is None:
+            # Simple direct answer attempt with current context
             try:
                 summary_resp = self.client.chat.completions.create(
                     model=self.model,
                     messages=[
-                        {"role": "system", "content": "Синтезируй ответ на основе собранной информации. Верни JSON с ключами 'answer' (строка) и 'sources' (массив URL)."},
+                        {"role": "system", "content": "На основе собранной информации дай краткий ответ. Если есть источники — упомяни их. Верни JSON с ключами 'answer' (строка) и 'sources' (массив URL)."},
                         {"role": "user", "content": user_query}
-                    ] + messages[-5:],  # include recent context
-                    max_tokens=2000
+                    ] + messages[-3:],  # recent context only
+                    max_tokens=1500
                 )
                 summary_text = summary_resp.choices[0].message.content or "Превышено число итераций. Ответ не собран."
-                final_answer = summary_text
-                sources = []
+                # Try to parse JSON; if fails, just use text as answer
+                try:
+                    parsed = json.loads(summary_text)
+                    final_answer = parsed.get("answer", summary_text)
+                    sources = parsed.get("sources", [])
+                except json.JSONDecodeError:
+                    final_answer = summary_text
+                    sources = []
             except Exception as e:
                 final_answer = f"Превышено число итераций. Ответ не собран. Ошибка: {e}"
                 sources = []
