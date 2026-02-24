@@ -1,4 +1,4 @@
-"""Shell tools: run_shell, claude_code_edit."""
+"""Shell tools: run_shell, claude_code_edit (Cline)."""
 
 from __future__ import annotations
 
@@ -84,37 +84,80 @@ def _run_shell(ctx: ToolContext, cmd, cwd: str = "") -> str:
         return f"⚠️ SHELL_ERROR: {e}"
 
 
-def _run_claude_cli(work_dir: str, prompt: str, env: dict) -> subprocess.CompletedProcess:
-    """Run Claude CLI with permission-mode fallback."""
-    claude_bin = shutil.which("claude")
+def _run_cline_cli(work_dir: str, prompt: str, env: dict) -> subprocess.CompletedProcess:
+    """Run Cline CLI with OpenRouter configuration via env and config file."""
+    cline_bin = shutil.which("cline")
+    if not cline_bin:
+        raise FileNotFoundError("cline binary not found in PATH")
+
+    model = os.environ.get("CLINE_MODEL", "openrouter/StepFun/Step-3.5-Flash:free")
     cmd = [
-        claude_bin, "-p", prompt,
-        "--output-format", "json",
+        cline_bin,
+        "-y",  # auto-approve all actions (YOLO)
+        "--json",
+        "--model", model,
         "--max-turns", "12",
-        "--tools", "Read,Edit,Grep,Glob",
+        "--tools", "Read,Edit,Grep,Glob,Bash",
+        prompt
     ]
 
-    # Try --permission-mode first, fallback to --dangerously-skip-permissions
-    perm_mode = os.environ.get("OUROBOROS_CLAUDE_CODE_PERMISSION_MODE", "bypassPermissions").strip()
-    primary_cmd = cmd + ["--permission-mode", perm_mode]
-    legacy_cmd = cmd + ["--dangerously-skip-permissions"]
+    # Ensure environment contains required keys: CLINE_API_KEY, CLINE_BASE_URL
+    # Also pass through any existing CLINE_* variables
+    full_env = env.copy()
+    full_env.setdefault("CLINE_API_KEY", os.environ.get("OPENROUTER_API_KEY", ""))
+    full_env.setdefault("CLINE_BASE_URL", os.environ.get("OPENROUTER_BASE_URL", "https://openrouter.ai/api/v1"))
+    full_env.setdefault("CLINE_MODEL", model)
+
+    # If running as root (sandbox), set IS_SANDBOX for Cline
+    try:
+        if hasattr(os, "geteuid") and os.geteuid() == 0:
+            full_env.setdefault("IS_SANDBOX", "1")
+    except Exception:
+        pass
+
+    # Ensure user-level npm bin is in PATH
+    local_bin = str(pathlib.Path.home() / ".npm-global" / "bin")
+    if local_bin not in full_env.get("PATH", ""):
+        full_env["PATH"] = f"{local_bin}:{full_env.get('PATH', '')}"
 
     res = subprocess.run(
-        primary_cmd, cwd=work_dir,
-        capture_output=True, text=True, timeout=300, env=env,
+        cmd, cwd=work_dir,
+        capture_output=True, text=True, timeout=300, env=full_env,
     )
-
-    if res.returncode != 0:
-        combined = ((res.stdout or "") + "\n" + (res.stderr or "")).lower()
-        if "--permission-mode" in combined and any(
-            m in combined for m in ("unknown option", "unknown argument", "unrecognized option", "unexpected argument")
-        ):
-            res = subprocess.run(
-                legacy_cmd, cwd=work_dir,
-                capture_output=True, text=True, timeout=300, env=env,
-            )
-
     return res
+
+
+def _parse_cline_output(stdout: str, ctx: ToolContext) -> str:
+    """Parse Cline JSON output into result string and emit usage events."""
+    try:
+        # Cline outputs a stream of JSON objects, one per line. We'll capture the last meaningful say.text.
+        lines = [line.strip() for line in stdout.splitlines() if line.strip()]
+        last_result = ""
+        for line in lines:
+            try:
+                obj = json.loads(line)
+                if obj.get("type") == "say" and "text" in obj:
+                    last_result = obj["text"]
+                # Emit cost event if present
+                cost = obj.get("cost_usd") or obj.get("total_cost_usd")
+                if isinstance(cost, (int, float)):
+                    ctx.pending_events.append({
+                        "type": "llm_usage",
+                        "provider": "cline",
+                        "usage": {"cost": float(cost)},
+                        "source": "claude_code_edit",
+                        "ts": utc_now_iso(),
+                        "category": "task",
+                    })
+            except Exception:
+                continue
+        if not last_result:
+            last_result = stdout
+        out = {"result": last_result}
+        return json.dumps(out, ensure_ascii=False, indent=2)
+    except Exception as e:
+        log.debug("Failed to parse claude_code_edit JSON output", exc_info=True)
+        return stdout
 
 
 def _check_uncommitted_changes(repo_dir: pathlib.Path) -> str:
@@ -146,36 +189,9 @@ def _check_uncommitted_changes(repo_dir: pathlib.Path) -> str:
     return ""
 
 
-def _parse_claude_output(stdout: str, ctx: ToolContext) -> str:
-    """Parse JSON output and emit cost event, return result string."""
-    try:
-        payload = json.loads(stdout)
-        out: Dict[str, Any] = {
-            "result": payload.get("result", ""),
-            "session_id": payload.get("session_id"),
-        }
-        if isinstance(payload.get("total_cost_usd"), (int, float)):
-            ctx.pending_events.append({
-                "type": "llm_usage",
-                "provider": "claude_code_cli",
-                "usage": {"cost": float(payload["total_cost_usd"])},
-                "source": "claude_code_edit",
-                "ts": utc_now_iso(),
-                "category": "task",
-            })
-        return json.dumps(out, ensure_ascii=False, indent=2)
-    except Exception:
-        log.debug("Failed to parse claude_code_edit JSON output", exc_info=True)
-        return stdout
-
-
 def _claude_code_edit(ctx: ToolContext, prompt: str, cwd: str = "") -> str:
-    """Delegate code edits to Claude Code CLI."""
+    """Delegate code edits to Cline CLI (OpenRouter provider)."""
     from ouroboros.tools.git import _acquire_git_lock, _release_git_lock
-
-    api_key = os.environ.get("ANTHROPIC_API_KEY", "")
-    if not api_key:
-        return "⚠️ ANTHROPIC_API_KEY not set, claude_code_edit unavailable."
 
     work_dir = str(ctx.repo_dir)
     if cwd and cwd.strip() not in ("", ".", "./"):
@@ -183,11 +199,11 @@ def _claude_code_edit(ctx: ToolContext, prompt: str, cwd: str = "") -> str:
         if candidate.exists():
             work_dir = str(candidate)
 
-    claude_bin = shutil.which("claude")
-    if not claude_bin:
-        return "⚠️ Claude CLI not found. Ensure ANTHROPIC_API_KEY is set."
+    cline_bin = shutil.which("cline")
+    if not cline_bin:
+        return "⚠️ Cline CLI not found in PATH. Install with: npm install -g cline"
 
-    ctx.emit_progress_fn("Delegating to Claude Code CLI...")
+    ctx.emit_progress_fn("Delegating to Cline CLI...")
 
     lock = _acquire_git_lock(ctx)
     try:
@@ -203,25 +219,28 @@ def _claude_code_edit(ctx: ToolContext, prompt: str, cwd: str = "") -> str:
         )
 
         env = os.environ.copy()
-        env["ANTHROPIC_API_KEY"] = api_key
+        # Ensure OpenRouter keys are present for provider auth
+        env.setdefault("OPENROUTER_API_KEY", "")
+        env.setdefault("CLINE_API_KEY", env["OPENROUTER_API_KEY"])
+        env.setdefault("CLINE_BASE_URL", "https://openrouter.ai/api/v1")
+
         try:
             if hasattr(os, "geteuid") and os.geteuid() == 0:
                 env.setdefault("IS_SANDBOX", "1")
         except Exception:
-            log.debug("Failed to check geteuid for sandbox detection", exc_info=True)
             pass
-        local_bin = str(pathlib.Path.home() / ".local" / "bin")
+        local_bin = str(pathlib.Path.home() / ".npm-global" / "bin")
         if local_bin not in env.get("PATH", ""):
             env["PATH"] = f"{local_bin}:{env.get('PATH', '')}"
 
-        res = _run_claude_cli(work_dir, full_prompt, env)
+        res = _run_cline_cli(work_dir, full_prompt, env)
 
         stdout = (res.stdout or "").strip()
         stderr = (res.stderr or "").strip()
         if res.returncode != 0:
-            return f"⚠️ CLAUDE_CODE_ERROR: exit={res.returncode}\nSTDOUT:\n{stdout}\nSTDERR:\n{stderr}"
+            return f"⚠️ CLINE_ERROR: exit={res.returncode}\nSTDOUT:\n{stdout}\nSTDERR:\n{stderr}"
         if not stdout:
-            stdout = "OK: Claude Code completed with empty output."
+            stdout = "OK: Cline completed with empty output."
 
         # Check for uncommitted changes and append warning BEFORE finally block
         warning = _check_uncommitted_changes(ctx.repo_dir)
@@ -229,14 +248,14 @@ def _claude_code_edit(ctx: ToolContext, prompt: str, cwd: str = "") -> str:
             stdout += warning
 
     except subprocess.TimeoutExpired:
-        return "⚠️ CLAUDE_CODE_TIMEOUT: exceeded 300s."
+        return "⚠️ CLINE_TIMEOUT: exceeded 300s."
     except Exception as e:
-        return f"⚠️ CLAUDE_CODE_FAILED: {type(e).__name__}: {e}"
+        return f"⚠️ CLINE_FAILED: {type(e).__name__}: {e}"
     finally:
         _release_git_lock(lock)
 
     # Parse JSON output and account cost
-    return _parse_claude_output(stdout, ctx)
+    return _parse_cline_output(stdout, ctx)
 
 
 def get_tools() -> List[ToolEntry]:
@@ -251,7 +270,7 @@ def get_tools() -> List[ToolEntry]:
         }, _run_shell, is_code_tool=True),
         ToolEntry("claude_code_edit", {
             "name": "claude_code_edit",
-            "description": "Delegate code edits to Claude Code CLI. Preferred for multi-file changes and refactors. Follow with repo_commit_push.",
+            "description": "Delegate code edits to Cline CLI (OpenRouter). Preferred for multi-file changes and refactors. Follow with repo_commit_push.",
             "parameters": {"type": "object", "properties": {
                 "prompt": {"type": "string"},
                 "cwd": {"type": "string", "default": ""},
