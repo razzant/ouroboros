@@ -38,7 +38,7 @@ def _run_cline_cli(
     """
     Run Cline CLI in headless mode and return CompletedProcess.
     Uses OpenRouter via environment variables:
-      CLINE_MODEL (default: openrouter/StepFun/Step-3.5-Flash:free)
+      CLINE_MODEL (default: stepfun/step-3.5-flash)
       OPENROUTER_API_KEY
       OPENROUTER_BASE_URL (default: https://openrouter.ai/api/v1)
     """
@@ -48,7 +48,7 @@ def _run_cline_cli(
         raise FileNotFoundError("Cline CLI not found in PATH. Install with: npm install -g cline")
 
     # Build command
-    model = env.get("CLINE_MODEL", "openrouter/StepFun/Step-3.5-Flash:free")
+    model = env.get("CLINE_MODEL", "stepfun/step-3.5-flash")
     cmd = [
         cline_bin,
         "task",  # explicit subcommand
@@ -153,7 +153,7 @@ def get_tools():
         },
         {
             "name": "claude_code_edit",
-            "description": "Delegate code edits to Cline CLI (OpenRouter). Preferred for multi-file changes and refactors. Follow with repo_commit_push. Uses model from CLINE_MODEL (default: openrouter/StepFun/Step-3.5-Flash:free).",
+            "description": "Delegate code edits to Cline CLI (OpenRouter). Preferred for multi-file changes and refactors. Follow with repo_commit_push. Uses model from CLINE_MODEL (default: stepfun/step-3.5-flash).",
             "inputSchema": {
                 "type": "object",
                 "properties": {
