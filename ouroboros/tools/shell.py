@@ -1,17 +1,18 @@
-"""Shell tools: run_shell, claude_code_edit (now Cline)."""
+"""Shell tools: run_shell, claude_code_edit (Cline)."""
 
 import os
 import pathlib
 import subprocess
 import json
 import time
-import shutil  # ← added for shutil.which
+import shutil
+import logging
 from typing import Dict, Any, Optional
 
-from ouroboros.utils import emit_progress, emit_error, get_uncommitted_changes
+log = logging.getLogger(__name__)
 
 def _run_shell(cmd: list, cwd: pathlib.Path, timeout_sec: int = 300) -> subprocess.CompletedProcess:
-    """Run shell command with timeout. Returns CompletedProcess."""
+    """Run shell command with timeout."""
     try:
         res = subprocess.run(
             cmd,
@@ -24,43 +25,29 @@ def _run_shell(cmd: list, cwd: pathlib.Path, timeout_sec: int = 300) -> subproce
     except subprocess.TimeoutExpired as e:
         raise TimeoutError(f"Command timed out after {timeout_sec}s: {' '.join(cmd)}") from e
 
-def _emit_usage_event(tool_name: str, duration: float, tokens: Optional[Dict[str, int]] = None):
-    """Emit tool usage event to logs (placeholder)."""
-    # TODO: integrate with actual event system
-    pass
-
 def _run_cline_cli(
     work_dir: pathlib.Path,
     prompt: str,
     env: Dict[str, str],
     timeout_sec: int = 600,
 ) -> subprocess.CompletedProcess:
-    """
-    Run Cline CLI in headless mode and return CompletedProcess.
-    Uses OpenRouter via environment variables:
-      CLINE_MODEL (default: stepfun/step-3.5-flash)
-      OPENROUTER_API_KEY
-      OPENROUTER_BASE_URL (default: https://openrouter.ai/api/v1)
-    """
-    # Resolve CLI path
+    """Run Cline CLI in headless mode with OpenRouter."""
     cline_bin = shutil.which("cline")
     if not cline_bin:
-        raise FileNotFoundError("Cline CLI not found in PATH. Install with: npm install -g cline")
+        raise FileNotFoundError("Cline CLI not found. Install with: npm install -g cline")
 
-    # Build command
-    model = env.get("CLINE_MODEL", "stepfun/step-3.5-flash")
+    model = env.get("CLINE_MODEL", "stepfun/step-3.5-flash:free")
     cmd = [
         cline_bin,
-        "task",  # explicit subcommand
-        "-y",  # yolo mode (auto-approve)
-        "--json",  # machine-readable output
-        "--max-consecutive-mistakes", "5",  # limit retries
+        "task",
+        "-y",
+        "--json",
+        "--max-consecutive-mistakes", "5",
         "-m", model,
         "--cwd", str(work_dir),
         prompt,
     ]
 
-    # Merge environment: keep OpenRouter settings
     final_env = os.environ.copy()
     final_env.update(env)
 
@@ -75,37 +62,27 @@ def _run_cline_cli(
             timeout=timeout_sec,
             check=False,
         )
-        duration = time.time() - start
-        _emit_usage_event("cline_edit", duration)
+        log.info("Cline completed in %.2fs", time.time() - start)
         return proc
     except subprocess.TimeoutExpired as e:
-        duration = time.time() - start
-        _emit_usage_event("cline_edit", duration)
+        log.error("Cline timeout after %ds", timeout_sec)
         raise TimeoutError(f"Cline timed out after {timeout_sec}s") from e
     except Exception as e:
-        duration = time.time() - start
-        _emit_usage_event("cline_edit", duration)
+        log.exception("Cline execution failed")
         raise
 
 def _claude_code_edit(prompt: str, cwd: str = "", **kwargs) -> str:
-    """
-    Tool handler for claude_code_edit (now implemented via Cline).
-    Executes Cline in headless mode and returns stdout/stderr.
-    On success, checks for uncommitted changes and prompts to commit.
-    """
+    """Tool: delegate code edits to Cline (OpenRouter)."""
     work_dir = pathlib.Path(cwd) if cwd else pathlib.Path.cwd()
 
-    # Prepare environment: ensure OpenRouter keys are present
     env = dict(os.environ)
-    required = ["OPENROUTER_API_KEY"]
-    missing = [k for k in required if not env.get(k)]
-    if missing:
-        return f"Error: missing environment variables: {missing}. Set them in .env or runtime env."
+    if not env.get("OPENROUTER_API_KEY"):
+        return "Error: OPENROUTER_API_KEY not set. Configure .env or environment."
 
     try:
         res = _run_cline_cli(work_dir, prompt, env)
     except Exception as e:
-        emit_error(f"cline execution failed: {e}")
+        log.error("cline failed: %s", e)
         return f"cline execution failed: {e}"
 
     output = ""
@@ -114,32 +91,24 @@ def _claude_code_edit(prompt: str, cwd: str = "", **kwargs) -> str:
     if res.stderr:
         output += "\n--- STDERR ---\n" + res.stderr
 
-    # Try to parse JSON lines from output for structured info
+    # Basic JSON parsing for structured output
     try:
-        # Cline may emit multiple JSON lines; extract last one with 'message' or 'type'
         lines = output.strip().splitlines()
         json_lines = [l for l in lines if l.strip().startswith("{")]
         if json_lines:
             last = json.loads(json_lines[-1])
-            # Summarize
             summary = last.get("message", last.get("content", last.get("type", "Cline finished")))
             output = f"[Cline] {summary}\n" + output
     except Exception:
-        pass  # keep raw output
-
-    # Check git status after Cline run; inform about uncommitted changes
-    changes = get_uncommitted_changes()
-    if changes:
-        output += "\n\n⚠️ Uncommitted changes detected. Remember to commit via repo_commit_push."
+        pass
 
     return output or "Cline completed with no output."
 
-# Export toolset
 def get_tools():
     return [
         {
             "name": "run_shell",
-            "description": "Run a shell command in the repo. Use for git, npm, file ops, etc. Provide cmd as list of strings.",
+            "description": "Run a shell command in the repo. Provide cmd as list of strings.",
             "inputSchema": {
                 "type": "object",
                 "properties": {
@@ -153,7 +122,7 @@ def get_tools():
         },
         {
             "name": "claude_code_edit",
-            "description": "Delegate code edits to Cline CLI (OpenRouter). Preferred for multi-file changes and refactors. Follow with repo_commit_push. Uses model from CLINE_MODEL (default: stepfun/step-3.5-flash).",
+            "description": "Delegate code edits to Cline CLI (OpenRouter). Preferred for multi-file changes. Follow with repo_commit_push. Uses CLINE_MODEL (default: stepfun/step-3.5-flash:free).",
             "inputSchema": {
                 "type": "object",
                 "properties": {
