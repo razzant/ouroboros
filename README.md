@@ -224,6 +224,10 @@ Full text: [BIBLE.md](BIBLE.md)
 ## Changelog
 
 
+### v6.4.1 (2026-02-24) -- Network Freeze Fix
+- **Fix: Network error retry** -- After primary and fallback model failures, implement retry loop with 10-second timeout instead of immediate freeze. Prevents agent from exiting during transient network issues.
+
+
 ### v6.4.0 -- Local Runtime + Circuit Breaker Fix
 - **Feat: Local runtime** -- Replaced Colab-specific launcher with environment-based configuration. Works outside Google Colab, no Drive dependency.
 - **Fix: Evolution circuit breaker** -- Changed success heuristic from cost>0.10 to rounds>=1, preventing false failures on free models.
