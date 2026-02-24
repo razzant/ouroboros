@@ -18,7 +18,7 @@ log = logging.getLogger(__name__)
 
 
 def _run_shell(ctx: ToolContext, cmd, cwd: str = "") -> str:
-    # Recover from LLM sending cmd as JSON string instead of list
+    """Execute a shell command and return stdout+stderr."""
     if isinstance(cmd, str):
         raw_cmd = cmd
         warning = "run_shell_cmd_string"
@@ -84,16 +84,16 @@ def _run_shell(ctx: ToolContext, cmd, cwd: str = "") -> str:
         return f"⚠️ SHELL_ERROR: {e}"
 
 
-def _run_cline_cli(work_dir: str, prompt: str, env: dict) -> subprocess.CompletedProcess:
-    """Run Cline CLI with OpenRouter configuration via env and config file."""
+def _run_cline_cli(work_dir: pathlib.Path, prompt: str, env: Dict[str, str]) -> subprocess.CompletedProcess:
+    """Run Cline CLI with OpenRouter configuration."""
     cline_bin = shutil.which("cline")
     if not cline_bin:
-        raise FileNotFoundError("cline binary not found in PATH")
+        raise FileNotFoundError("cline binary not found in PATH. Install: npm install -g cline")
 
     model = os.environ.get("CLINE_MODEL", "openrouter/StepFun/Step-3.5-Flash:free")
     cmd = [
         cline_bin,
-        "-y",  # auto-approve all actions (YOLO)
+        "-y",  # auto-approve all actions
         "--json",
         "--model", model,
         "--max-turns", "12",
@@ -101,27 +101,23 @@ def _run_cline_cli(work_dir: str, prompt: str, env: dict) -> subprocess.Complete
         prompt
     ]
 
-    # Ensure environment contains required keys: CLINE_API_KEY, CLINE_BASE_URL
-    # Also pass through any existing CLINE_* variables
     full_env = env.copy()
     full_env.setdefault("CLINE_API_KEY", os.environ.get("OPENROUTER_API_KEY", ""))
     full_env.setdefault("CLINE_BASE_URL", os.environ.get("OPENROUTER_BASE_URL", "https://openrouter.ai/api/v1"))
     full_env.setdefault("CLINE_MODEL", model)
 
-    # If running as root (sandbox), set IS_SANDBOX for Cline
     try:
         if hasattr(os, "geteuid") and os.geteuid() == 0:
             full_env.setdefault("IS_SANDBOX", "1")
     except Exception:
         pass
 
-    # Ensure user-level npm bin is in PATH
     local_bin = str(pathlib.Path.home() / ".npm-global" / "bin")
     if local_bin not in full_env.get("PATH", ""):
         full_env["PATH"] = f"{local_bin}:{full_env.get('PATH', '')}"
 
     res = subprocess.run(
-        cmd, cwd=work_dir,
+        cmd, cwd=str(work_dir),
         capture_output=True, text=True, timeout=300, env=full_env,
     )
     return res
@@ -130,7 +126,6 @@ def _run_cline_cli(work_dir: str, prompt: str, env: dict) -> subprocess.Complete
 def _parse_cline_output(stdout: str, ctx: ToolContext) -> str:
     """Parse Cline JSON output into result string and emit usage events."""
     try:
-        # Cline outputs a stream of JSON objects, one per line. We'll capture the last meaningful say.text.
         lines = [line.strip() for line in stdout.splitlines() if line.strip()]
         last_result = ""
         for line in lines:
@@ -138,7 +133,6 @@ def _parse_cline_output(stdout: str, ctx: ToolContext) -> str:
                 obj = json.loads(line)
                 if obj.get("type") == "say" and "text" in obj:
                     last_result = obj["text"]
-                # Emit cost event if present
                 cost = obj.get("cost_usd") or obj.get("total_cost_usd")
                 if isinstance(cost, (int, float)):
                     ctx.pending_events.append({
@@ -193,11 +187,11 @@ def _claude_code_edit(ctx: ToolContext, prompt: str, cwd: str = "") -> str:
     """Delegate code edits to Cline CLI (OpenRouter provider)."""
     from ouroboros.tools.git import _acquire_git_lock, _release_git_lock
 
-    work_dir = str(ctx.repo_dir)
+    work_dir = ctx.repo_dir
     if cwd and cwd.strip() not in ("", ".", "./"):
         candidate = (ctx.repo_dir / cwd).resolve()
         if candidate.exists():
-            work_dir = str(candidate)
+            work_dir = candidate
 
     cline_bin = shutil.which("cline")
     if not cline_bin:
@@ -219,10 +213,10 @@ def _claude_code_edit(ctx: ToolContext, prompt: str, cwd: str = "") -> str:
         )
 
         env = os.environ.copy()
-        # Ensure OpenRouter keys are present for provider auth
         env.setdefault("OPENROUTER_API_KEY", "")
         env.setdefault("CLINE_API_KEY", env["OPENROUTER_API_KEY"])
         env.setdefault("CLINE_BASE_URL", "https://openrouter.ai/api/v1")
+        env.setdefault("CLINE_MODEL", os.environ.get("CLINE_MODEL", "openrouter/StepFun/Step-3.5-Flash:free"))
 
         try:
             if hasattr(os, "geteuid") and os.geteuid() == 0:
@@ -242,7 +236,6 @@ def _claude_code_edit(ctx: ToolContext, prompt: str, cwd: str = "") -> str:
         if not stdout:
             stdout = "OK: Cline completed with empty output."
 
-        # Check for uncommitted changes and append warning BEFORE finally block
         warning = _check_uncommitted_changes(ctx.repo_dir)
         if warning:
             stdout += warning
@@ -254,7 +247,6 @@ def _claude_code_edit(ctx: ToolContext, prompt: str, cwd: str = "") -> str:
     finally:
         _release_git_lock(lock)
 
-    # Parse JSON output and account cost
     return _parse_cline_output(stdout, ctx)
 
 
