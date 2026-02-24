@@ -372,7 +372,7 @@ class BackgroundConsciousness:
         # Knowledge base
         "knowledge_read", "knowledge_write", "knowledge_list",
         # Read-only tools for awareness
-        "web_search", "repo_read", "repo_list", "drive_read", "drive_list",
+        "repo_read", "repo_list", "drive_read", "drive_list",
         "chat_history",
         # GitHub Issues
         "list_github_issues", "get_github_issue",

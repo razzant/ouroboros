@@ -1,5 +1,4 @@
-"""
-Ouroboros — Tool registry (SSOT).
+"""Tool registry (SSOT).
 
 Plugin architecture: each module in tools/ exports get_tools().
 ToolRegistry collects all tools, provides schemas() and execute().
@@ -189,3 +188,24 @@ class ToolRegistry:
     @property
     def CODE_TOOLS(self) -> frozenset:
         return frozenset(e.name for e in self._entries.values() if e.is_code_tool)
+
+
+def get_tools() -> List[Dict[str, Any]]:
+    """Return schemas for all driver functions (excluding meta-tools)."""
+    from . import tool_discovery
+    from pathlib import Path
+    import os
+    try:
+        # Build a minimal registry just to get tool schemas
+        from ouroboros.context import Context
+        ctx = Context(Path(os.getcwd()), Path(os.getenv('DRIVE_ROOT', '/home/ivan/.ouroboros')))
+        registry = ToolRegistry(ctx)
+        # Get all tools except the discovery ones
+        tools = []
+        for entry in registry._entries.values():
+            if entry.name not in ('list_available_tools', 'enable_tools'):
+                tools.append({"type": "function", "function": entry.schema})
+        return tools
+    except Exception:
+        # Fallback: return empty list if we can't build context
+        return []
