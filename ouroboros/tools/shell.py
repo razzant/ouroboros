@@ -1,11 +1,11 @@
-"""Shell tools: run_shell and Cline-based code editing."""
+"""Shell tools: run_shell, claude_code_edit (now Cline)."""
 
-import shutil
 import os
 import pathlib
 import subprocess
 import json
 import time
+import shutil  # ← added for shutil.which
 from typing import Dict, Any, Optional
 
 from ouroboros.utils import emit_progress, emit_error, get_uncommitted_changes
@@ -26,6 +26,7 @@ def _run_shell(cmd: list, cwd: pathlib.Path, timeout_sec: int = 300) -> subproce
 
 def _emit_usage_event(tool_name: str, duration: float, tokens: Optional[Dict[str, int]] = None):
     """Emit tool usage event to logs (placeholder)."""
+    # TODO: integrate with actual event system
     pass
 
 def _run_cline_cli(
@@ -35,28 +36,31 @@ def _run_cline_cli(
     timeout_sec: int = 600,
 ) -> subprocess.CompletedProcess:
     """
-    Run Cline CLI in headless mode via OpenRouter.
-    Environment variables:
+    Run Cline CLI in headless mode and return CompletedProcess.
+    Uses OpenRouter via environment variables:
       CLINE_MODEL (default: openrouter/StepFun/Step-3.5-Flash:free)
-      CLINE_API_KEY (OpenRouter API key)
-      CLINE_BASE_URL (default: https://openrouter.ai/api/v1)
+      OPENROUTER_API_KEY
+      OPENROUTER_BASE_URL (default: https://openrouter.ai/api/v1)
     """
+    # Resolve CLI path
     cline_bin = shutil.which("cline")
     if not cline_bin:
         raise FileNotFoundError("Cline CLI not found in PATH. Install with: npm install -g cline")
 
+    # Build command
     model = env.get("CLINE_MODEL", "openrouter/StepFun/Step-3.5-Flash:free")
     cmd = [
         cline_bin,
-        "task",
-        "-y",
-        "--json",
-        "--max-turns", "12",
+        "task",  # explicit subcommand
+        "-y",  # yolo mode (auto-approve)
+        "--json",  # machine-readable output
+        "--max-consecutive-mistakes", "5",  # limit retries
         "-m", model,
         "--cwd", str(work_dir),
         prompt,
     ]
 
+    # Merge environment: keep OpenRouter settings
     final_env = os.environ.copy()
     final_env.update(env)
 
@@ -86,22 +90,23 @@ def _run_cline_cli(
 def _claude_code_edit(prompt: str, cwd: str = "", **kwargs) -> str:
     """
     Tool handler for claude_code_edit (now implemented via Cline).
-    Executes Cline headless and returns output.
-    On success, checks for uncommitted changes and reminds to commit.
+    Executes Cline in headless mode and returns stdout/stderr.
+    On success, checks for uncommitted changes and prompts to commit.
     """
     work_dir = pathlib.Path(cwd) if cwd else pathlib.Path.cwd()
 
+    # Prepare environment: ensure OpenRouter keys are present
     env = dict(os.environ)
-    required = ["CLINE_API_KEY"]
+    required = ["OPENROUTER_API_KEY"]
     missing = [k for k in required if not env.get(k)]
     if missing:
-        return f"Error: missing environment variables: {missing}. Set CLINE_API_KEY and optionally CLINE_MODEL, CLINE_BASE_URL."
+        return f"Error: missing environment variables: {missing}. Set them in .env or runtime env."
 
     try:
         res = _run_cline_cli(work_dir, prompt, env)
     except Exception as e:
-        emit_error(f"Cline execution failed: {e}")
-        return f"Cline execution failed: {e}"
+        emit_error(f"cline execution failed: {e}")
+        return f"cline execution failed: {e}"
 
     output = ""
     if res.stdout:
@@ -109,23 +114,27 @@ def _claude_code_edit(prompt: str, cwd: str = "", **kwargs) -> str:
     if res.stderr:
         output += "\n--- STDERR ---\n" + res.stderr
 
-    # Try to extract a concise summary from the last JSON line if present
+    # Try to parse JSON lines from output for structured info
     try:
+        # Cline may emit multiple JSON lines; extract last one with 'message' or 'type'
         lines = output.strip().splitlines()
         json_lines = [l for l in lines if l.strip().startswith("{")]
         if json_lines:
             last = json.loads(json_lines[-1])
-            summary = last.get("message") or last.get("content") or last.get("type") or "Cline finished"
+            # Summarize
+            summary = last.get("message", last.get("content", last.get("type", "Cline finished")))
             output = f"[Cline] {summary}\n" + output
     except Exception:
-        pass
+        pass  # keep raw output
 
+    # Check git status after Cline run; inform about uncommitted changes
     changes = get_uncommitted_changes()
     if changes:
         output += "\n\n⚠️ Uncommitted changes detected. Remember to commit via repo_commit_push."
 
     return output or "Cline completed with no output."
 
+# Export toolset
 def get_tools():
     return [
         {
@@ -144,7 +153,7 @@ def get_tools():
         },
         {
             "name": "claude_code_edit",
-            "description": "Delegate code edits to Cline CLI (OpenRouter). Preferred for multi-file changes and refactors. Follow with repo_commit_push. Uses CLINE_MODEL (default: openrouter/StepFun/Step-3.5-Flash:free).",
+            "description": "Delegate code edits to Cline CLI (OpenRouter). Preferred for multi-file changes and refactors. Follow with repo_commit_push. Uses model from CLINE_MODEL (default: openrouter/StepFun/Step-3.5-Flash:free).",
             "inputSchema": {
                 "type": "object",
                 "properties": {
