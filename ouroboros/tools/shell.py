@@ -1,3 +1,4 @@
+import shutil
 """Shell tools: run_shell, claude_code_edit (now Cline)."""
 
 import os
