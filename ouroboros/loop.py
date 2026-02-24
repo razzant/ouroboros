@@ -1,6 +1,10 @@
                 # If fallback also fails, enter persistent retry loop
                 # We don't give up — network issues may be transient. Keep trying until success or task killed.
                 retry_interval = int(os.environ.get("OUROBOROS_FALLBACK_RETRY_INTERVAL", "10"))  # seconds
+                # In tests, make retry nearly instantaneous to avoid pytest hangs
+                if os.environ.get('PYTEST_CURRENT_TEST'):
+                    retry_interval = 0.01
+
                 emit_progress(f"⚠️ Fallback model {fallback_model} also failed. Entering retry loop (every {retry_interval}s) until network recovers.")
 
                 # Determine retry limit: unlimited in production, limited in tests to avoid hang
