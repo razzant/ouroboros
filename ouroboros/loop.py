@@ -44,6 +44,10 @@ _MODEL_PRICING_STATIC = {
     "qwen/qwen3.5-plus-02-15": (0.40, 0.04, 2.40),
 }
 
+# Context compaction thresholds (tokens) — prevent OOM on local LLM
+CONTEXT_COMPACT_SOFT = 30000   # Compact at 30K estimated tokens
+CONTEXT_COMPACT_HARD = 50000   # Force compact at 50K
+
 _pricing_fetched = False
 _cached_pricing = None
 _pricing_lock = threading.Lock()
@@ -79,6 +83,15 @@ def _get_pricing() -> Dict[str, Tuple[float, float, float]]:
             _log.getLogger(__name__).warning("Failed to sync pricing from OpenRouter: %s", e)
             # Reset flag so we retry next time
             _pricing_fetched = False
+
+        # Auto-detect local mode: if OUROBOROS_BASE_URL != OpenRouter,
+        # mark all loaded models as free (no API cost for local inference)
+        # This must come AFTER fetch to override any cloud pricing
+        base_url = os.environ.get("OUROBOROS_BASE_URL", "")
+        if base_url and "openrouter.ai" not in base_url:
+            _cached_pricing = {
+                k: (0.0, 0.0, 0.0) for k in _cached_pricing
+            }
 
         return _cached_pricing
 
@@ -683,12 +696,26 @@ def run_llm_loop(
             if pending_compaction is not None:
                 messages = compact_tool_history_llm(messages, keep_recent=pending_compaction)
                 tools._ctx._pending_compaction = None
-            elif round_idx > 8:
-                messages = compact_tool_history(messages, keep_recent=6)
-            elif round_idx > 3:
-                # Light compaction: only if messages list is very long (>60 items)
-                if len(messages) > 60:
+            else:
+                # Token-aware compaction: compact when context exceeds safe limits
+                # Estimate token count (rough: ~4 chars per token for typical messages)
+                estimated_tokens = sum(
+                    len(str(m.get("content", ""))) // 4 +
+                    len(str(m.get("tool_calls", []))) * 100
+                    for m in messages
+                )
+                
+                # Aggressive compaction for local mode to prevent OOM
+                if estimated_tokens > CONTEXT_COMPACT_HARD:
+                    messages = compact_tool_history(messages, keep_recent=10)
+                elif estimated_tokens > CONTEXT_COMPACT_SOFT:
+                    messages = compact_tool_history(messages, keep_recent=8)
+                elif round_idx > 5:
                     messages = compact_tool_history(messages, keep_recent=6)
+                elif round_idx > 3:
+                    # Light compaction: only if messages list is very long (>60 items)
+                    if len(messages) > 60:
+                        messages = compact_tool_history(messages, keep_recent=6)
 
             # --- LLM call with retry ---
             msg, cost = _call_llm_with_retry(
@@ -698,6 +725,17 @@ def run_llm_loop(
 
             # Fallback to another model if primary model returns empty responses
             if msg is None:
+                # Check if we're in local mode (no cloud API)
+                base_url = os.environ.get("OUROBOROS_BASE_URL", "")
+                is_local_mode = base_url and "openrouter.ai" not in base_url
+                
+                if is_local_mode:
+                    # In local mode, don't try cloud fallback — just report failure
+                    return (
+                        f"⚠️ Failed to get a response from model {active_model} after {max_retries} attempts. "
+                        f"Local mode: no cloud fallback available. Check your local LLM server."
+                    ), accumulated_usage, llm_trace
+                
                 # Configurable fallback priority list (Bible P3: no hardcoded behavior)
                 fallback_list_raw = os.environ.get(
                     "OUROBOROS_MODEL_FALLBACK_LIST",
