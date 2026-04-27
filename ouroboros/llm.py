@@ -199,6 +199,11 @@ class LLMClient:
         choices = resp_dict.get("choices") or [{}]
         msg = (choices[0] if choices else {}).get("message") or {}
 
+        # Fallback: if content is empty but reasoning_content exists (Qwen thinking models),
+        # use reasoning_content as the response content
+        if not msg.get("content") and msg.get("reasoning_content"):
+            msg["content"] = msg["reasoning_content"]
+
         # Extract cached_tokens from prompt_tokens_details if available
         if not usage.get("cached_tokens"):
             prompt_details = usage.get("prompt_tokens_details") or {}
