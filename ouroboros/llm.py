@@ -151,6 +151,16 @@ class LLMClient:
             pass
         return None
 
+    @staticmethod
+    def _ensure_system_first(messages: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+        """Move system message to the beginning (required by llama.cpp Jinja templates)."""
+        system_msgs = [m for m in messages if m.get("role") == "system"]
+        if not system_msgs:
+            return messages
+        # Keep only the last system message (most recent takes precedence)
+        other_msgs = [m for m in messages if m.get("role") != "system"]
+        return [system_msgs[-1]] + other_msgs
+
     def chat(
         self,
         messages: List[Dict[str, Any]],
@@ -163,6 +173,9 @@ class LLMClient:
         """Single LLM call. Returns: (response_message_dict, usage_dict with cost)."""
         client = self._get_client()
         effort = normalize_reasoning_effort(reasoning_effort)
+
+        # Ensure system message is first (required by llama.cpp Jinja templates)
+        messages = self._ensure_system_first(messages)
 
         extra_body: Dict[str, Any] = {
             "reasoning": {"effort": effort, "exclude": True},
