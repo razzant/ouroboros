@@ -1,0 +1,25 @@
+[Unit]
+Description=Ouroboros Zera Supervisor Watchdog
+After=network.target llama-server.service
+Wants=llama-server.service
+
+[Service]
+Type=simple
+User=zera
+WorkingDirectory=/home/zera/ouroboros_zera
+ExecStart=/bin/bash /home/zera/ouroboros_zera/.ouroboros/watchdog.sh
+Restart=always
+RestartSec=10
+Environment=HOME=/home/zera
+Environment=PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
+
+# Logging
+StandardOutput=append:/home/zera/ouroboros_zera/.ouroboros/logs/watchdog-stdout.log
+StandardError=append:/home/zera/ouroboros_zera/.ouroboros/logs/watchdog-stderr.log
+
+# Resource limits
+MemoryMax=256M
+CPUQuota=25%
+
+[Install]
+WantedBy=multi-user.target
