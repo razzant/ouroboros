@@ -1,0 +1,18 @@
+[2026-04-28T07:39:28+00:00] [WATCHDOG] ==========================================
+[2026-04-28T07:39:28+00:00] [WATCHDOG] Watchdog starting...
+[2026-04-28T07:39:28+00:00] [WATCHDOG]   Check interval: 30s
+[2026-04-28T07:39:28+00:00] [WATCHDOG]   LLM timeout: 10s
+[2026-04-28T07:39:28+00:00] [WATCHDOG]   TG timeout: 10s
+[2026-04-28T07:39:28+00:00] [WATCHDOG]   Max restarts/24h: 20
+[2026-04-28T07:39:28+00:00] [WATCHDOG]   Grace period: 5s
+[2026-04-28T07:39:28+00:00] [WATCHDOG] ==========================================
+[2026-04-28T08:49:29+00:00] [WATCHDOG] WARNING: llama-server not responding on port 8080
+[2026-04-28T10:54:51+00:00] [WATCHDOG] WARNING: llama-server not responding on port 8080
+G]   Check interval: 30s
+[2026-04-28T08:17:40+00:00] [WATCHDOG]   LLM timeout: 10s
+[2026-04-28T08:17:40+00:00] [WATCHDOG]   TG timeout: 10s
+[2026-04-28T08:17:40+00:00] [WATCHDOG]   Max restarts/24h: 20
+[2026-04-28T08:17:40+00:00] [WATCHDOG]   Grace period: 5s
+[2026-04-28T08:17:40+00:00] [WATCHDOG] ==========================================
+[2026-04-28T08:49:25+00:00] [WATCHDOG] WARNING: llama-server not responding on port 8080
+[2026-04-28T10:55:03+00:00] [WATCHDOG] WARNING: llama-server not responding on port 8080

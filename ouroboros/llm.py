@@ -108,10 +108,10 @@ class LLMClient:
     def __init__(
         self,
         api_key: Optional[str] = None,
-        base_url: str = "https://openrouter.ai/api/v1",
+        base_url: str = "",
     ):
         self._api_key = api_key or os.environ.get("OPENROUTER_API_KEY", "")
-        self._base_url = base_url
+        self._base_url = base_url or os.environ.get("OUROBOROS_BASE_URL", "https://openrouter.ai/api/v1")
         self._client = None
 
     def _get_client(self):
@@ -151,6 +151,16 @@ class LLMClient:
             pass
         return None
 
+    @staticmethod
+    def _ensure_system_first(messages: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+        """Move system message to the beginning (required by llama.cpp Jinja templates)."""
+        system_msgs = [m for m in messages if m.get("role") == "system"]
+        if not system_msgs:
+            return messages
+        # Keep only the last system message (most recent takes precedence)
+        other_msgs = [m for m in messages if m.get("role") != "system"]
+        return [system_msgs[-1]] + other_msgs
+
     def chat(
         self,
         messages: List[Dict[str, Any]],
@@ -163,6 +173,9 @@ class LLMClient:
         """Single LLM call. Returns: (response_message_dict, usage_dict with cost)."""
         client = self._get_client()
         effort = normalize_reasoning_effort(reasoning_effort)
+
+        # Ensure system message is first (required by llama.cpp Jinja templates)
+        messages = self._ensure_system_first(messages)
 
         extra_body: Dict[str, Any] = {
             "reasoning": {"effort": effort, "exclude": True},
@@ -198,6 +211,11 @@ class LLMClient:
         usage = resp_dict.get("usage") or {}
         choices = resp_dict.get("choices") or [{}]
         msg = (choices[0] if choices else {}).get("message") or {}
+
+        # Fallback: if content is empty but reasoning_content exists (Qwen thinking models),
+        # use reasoning_content as the response content
+        if not msg.get("content") and msg.get("reasoning_content"):
+            msg["content"] = msg["reasoning_content"]
 
         # Extract cached_tokens from prompt_tokens_details if available
         if not usage.get("cached_tokens"):

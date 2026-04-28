@@ -128,6 +128,7 @@ def ensure_state_defaults(st: Dict[str, Any]) -> Dict[str, Any]:
     st.setdefault("owner_id", None)
     st.setdefault("owner_chat_id", None)
     st.setdefault("tg_offset", 0)
+    st.setdefault("budget_limit", 0.0)
     st.setdefault("spent_usd", 0.0)
     st.setdefault("spent_calls", 0)
     st.setdefault("spent_tokens_prompt", 0)
