@@ -42,18 +42,6 @@ def init(drive_root: pathlib.Path, total_budget_limit: float = 0.0) -> None:
 # Atomic file operations
 # ---------------------------------------------------------------------------
 
-def atomic_write_text(path: pathlib.Path, content: str) -> None:
-    path.parent.mkdir(parents=True, exist_ok=True)
-    tmp = path.with_name(f".{path.name}.tmp.{uuid.uuid4().hex}")
-    fd = os.open(str(tmp), os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o644)
-    try:
-        data = content.encode("utf-8")
-        os.write(fd, data)
-        os.fsync(fd)
-    finally:
-        os.close(fd)
-    os.replace(str(tmp), str(path))
-
 
 def json_load_file(path: pathlib.Path) -> Optional[Dict[str, Any]]:
     try:
@@ -115,8 +103,8 @@ def release_file_lock(lock_path: pathlib.Path, lock_fd: Optional[int]) -> None:
         pass
 
 
-# Re-export append_jsonl from ouroboros.utils (single source of truth)
-from ouroboros.utils import append_jsonl  # noqa: F401
+# Re-export append_jsonl and atomic_write_text from ouroboros.utils (single source of truth)
+from ouroboros.utils import append_jsonl, atomic_write_text  # noqa: F401
 
 
 # ---------------------------------------------------------------------------

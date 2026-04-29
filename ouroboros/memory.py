@@ -13,7 +13,7 @@ import pathlib
 from collections import Counter
 from typing import Any, Dict, List, Optional
 
-from ouroboros.utils import utc_now_iso, read_text, write_text, append_jsonl, short
+from ouroboros.utils import utc_now_iso, read_text, atomic_write_text, append_jsonl, short
 
 log = logging.getLogger(__name__)
 
@@ -49,28 +49,28 @@ class Memory:
         if p.exists():
             return read_text(p)
         default = self._default_scratchpad()
-        write_text(p, default)
+        atomic_write_text(p, default)
         return default
 
     def save_scratchpad(self, content: str) -> None:
-        write_text(self.scratchpad_path(), content)
+        atomic_write_text(self.scratchpad_path(), content)
 
     def load_identity(self) -> str:
         p = self.identity_path()
         if p.exists():
             return read_text(p)
         default = self._default_identity()
-        write_text(p, default)
+        atomic_write_text(p, default)
         return default
 
     def ensure_files(self) -> None:
         """Create memory files if they don't exist."""
         if not self.scratchpad_path().exists():
-            write_text(self.scratchpad_path(), self._default_scratchpad())
+            atomic_write_text(self.scratchpad_path(), self._default_scratchpad())
         if not self.identity_path().exists():
-            write_text(self.identity_path(), self._default_identity())
+            atomic_write_text(self.identity_path(), self._default_identity())
         if not self.journal_path().exists():
-            write_text(self.journal_path(), "")
+            atomic_write_text(self.journal_path(), "")
 
     # --- Chat history ---
 

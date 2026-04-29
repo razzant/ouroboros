@@ -44,9 +44,21 @@ def read_text(path: pathlib.Path) -> str:
     return path.read_text(encoding="utf-8")
 
 
-def write_text(path: pathlib.Path, content: str) -> None:
+def atomic_write_text(path: pathlib.Path, content: str) -> None:
+    import uuid
     path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(content, encoding="utf-8")
+    tmp = path.with_name(f".{path.name}.tmp.{uuid.uuid4().hex}")
+    fd = os.open(str(tmp), os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o644)
+    try:
+        data = content.encode("utf-8")
+        os.write(fd, data)
+        os.fsync(fd)
+    finally:
+        os.close(fd)
+    os.replace(str(tmp), str(path))
+
+def write_text(path: pathlib.Path, content: str) -> None:
+    atomic_write_text(path, content)
 
 
 def append_jsonl(path: pathlib.Path, obj: Dict[str, Any]) -> None:
