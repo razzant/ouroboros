@@ -10,7 +10,7 @@ from pathlib import Path
 from typing import Any, Dict, List
 
 from ouroboros.tools.registry import ToolContext, ToolEntry
-from ouroboros.utils import utc_now_iso, write_text, run_cmd
+from ouroboros.utils import utc_now_iso, atomic_write_text, run_cmd
 
 log = logging.getLogger(__name__)
 
@@ -25,7 +25,7 @@ def _request_restart(ctx: ToolContext, reason: str) -> str:
         sha = run_cmd(["git", "rev-parse", "HEAD"], cwd=ctx.repo_dir)
         branch = run_cmd(["git", "rev-parse", "--abbrev-ref", "HEAD"], cwd=ctx.repo_dir)
         verify_path = ctx.drive_path("state") / "pending_restart_verify.json"
-        write_text(verify_path, json.dumps({
+        atomic_write_text(verify_path, json.dumps({
             "ts": utc_now_iso(), "expected_sha": sha,
             "expected_branch": branch, "reason": reason,
         }, ensure_ascii=False, indent=2))
@@ -133,7 +133,7 @@ def _update_identity(ctx: ToolContext, content: str) -> str:
     """Update identity manifest (who you are, who you want to become)."""
     path = ctx.drive_root / "memory" / "identity.md"
     path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(content, encoding="utf-8")
+    atomic_write_text(path, content)
     return f"OK: identity updated ({len(content)} chars)"
 
 
