@@ -88,6 +88,9 @@ def _chat_history(ctx: ToolContext, count: int = 100, offset: int = 0, search: s
 
 def _update_scratchpad(ctx: ToolContext, content: str) -> str:
     """LLM-driven scratchpad update (Constitution P3: LLM-first)."""
+    # Memory guard: prevent 0-byte wipe
+    if not content or len(content.strip()) < 50:
+        return "ERROR: scratchpad content too short (protection against 0-byte wipe). Minimum 50 non-whitespace chars required."
     from ouroboros.memory import Memory
     mem = Memory(drive_root=ctx.drive_root)
     mem.ensure_files()
@@ -131,10 +134,10 @@ def _send_owner_message(ctx: ToolContext, text: str, reason: str = "") -> str:
 
 def _update_identity(ctx: ToolContext, content: str) -> str:
     """Update identity manifest (who you are, who you want to become)."""
+    # Memory guard: prevent 0-byte wipe and too-short content
+    if not content or len(content.strip()) < 50:
+        return "ERROR: identity content too short (protection against 0-byte wipe). Minimum 50 non-whitespace chars required."
     path = ctx.drive_root / "memory" / "identity.md"
-    # Memory guard: prevent runaway identity bloat
-    if len(content) > 50:
-        return f"ERROR: identity content too long ({len(content)} chars, max 50). Keep it concise."
     path.parent.mkdir(parents=True, exist_ok=True)
     atomic_write_text(path, content)
     return f"OK: identity updated ({len(content)} chars)"
