@@ -33,7 +33,7 @@ Most AI agents execute tasks. Ouroboros **creates itself.**
 ## Architecture
 
 ```
-Telegram --> colab_launcher.py
+Telegram --> local_launcher.py
                 |
             supervisor/              (process management)
               state.py              -- state, budget tracking
@@ -75,14 +75,13 @@ Telegram --> colab_launcher.py
 
 ---
 
-## Quick Start (Google Colab)
+## Quick Start (Local)
 
 ### Step 1: Create a Telegram Bot
 
 1. Open Telegram and search for [@BotFather](https://t.me/BotFather).
 2. Send `/newbot` and follow the prompts to choose a name and username.
 3. Copy the **bot token**.
-4. You will use this token as `TELEGRAM_BOT_TOKEN` in the next step.
 
 ### Step 2: Get API Keys
 
@@ -90,60 +89,44 @@ Telegram --> colab_launcher.py
 |-----|----------|-----------------|
 | `OPENROUTER_API_KEY` | Yes | [openrouter.ai/keys](https://openrouter.ai/keys) -- Create an account, add credits, generate a key |
 | `TELEGRAM_BOT_TOKEN` | Yes | [@BotFather](https://t.me/BotFather) on Telegram (see Step 1) |
-| `TOTAL_BUDGET` | Yes | Your spending limit in USD (e.g. `50`) |
 | `GITHUB_TOKEN` | Yes | [github.com/settings/tokens](https://github.com/settings/tokens) -- Generate a classic token with `repo` scope |
 | `OPENAI_API_KEY` | No | [platform.openai.com/api-keys](https://platform.openai.com/api-keys) -- Enables web search tool |
 | `ANTHROPIC_API_KEY` | No | [console.anthropic.com/settings/keys](https://console.anthropic.com/settings/keys) -- Enables Claude Code CLI |
 
-### Step 3: Set Up Google Colab
+### Step 3: Clone and Configure
 
-1. Open a new notebook at [colab.research.google.com](https://colab.research.google.com/).
-2. Go to the menu: **Runtime > Change runtime type** and select a **GPU** (optional, but recommended for browser automation).
-3. Click the **key icon** in the left sidebar (Secrets) and add each API key from the table above. Make sure "Notebook access" is toggled on for each secret.
-
-### Step 4: Fork and Run
-
-1. **Fork** this repository on GitHub: click the **Fork** button at the top of the page.
-2. Paste the following into a Google Colab cell and press **Shift+Enter** to run:
-
-```python
-import os
-
-# ⚠️ CHANGE THESE to your GitHub username and forked repo name
-CFG = {
-    "GITHUB_USER": "YOUR_GITHUB_USERNAME",                       # <-- CHANGE THIS
-    "GITHUB_REPO": "ouroboros",                                  # <-- repo name (after fork)
-    # Models
-    "OUROBOROS_MODEL": "anthropic/claude-sonnet-4.6",            # primary LLM (via OpenRouter)
-    "OUROBOROS_MODEL_CODE": "anthropic/claude-sonnet-4.6",       # code editing (Claude Code CLI)
-    "OUROBOROS_MODEL_LIGHT": "google/gemini-3-pro-preview",      # consciousness + lightweight tasks
-    "OUROBOROS_WEBSEARCH_MODEL": "gpt-5",                        # web search (OpenAI Responses API)
-    # Fallback chain (first model != active will be used on empty response)
-    "OUROBOROS_MODEL_FALLBACK_LIST": "anthropic/claude-sonnet-4.6,google/gemini-3-pro-preview,openai/gpt-4.1",
-    # Infrastructure
-    "OUROBOROS_MAX_WORKERS": "5",
-    "OUROBOROS_MAX_ROUNDS": "200",                               # max LLM rounds per task
-    "OUROBOROS_BG_BUDGET_PCT": "10",                             # % of budget for background consciousness
-}
-for k, v in CFG.items():
-    os.environ[k] = str(v)
-
-# Clone the original repo (the boot shim will re-point origin to your fork)
-!git clone https://github.com/joi-lab/ouroboros.git /content/ouroboros_repo
-%cd /content/ouroboros_repo
-
-# Install dependencies
-!pip install -q -r requirements.txt
-
-# Run the boot shim
-%run colab_bootstrap_shim.py
+```bash
+cd /home/zera
+git clone https://github.com/YOUR_GITHUB_USERNAME/ouroboros_zera.git
+cd ouroboros_zera
+pip install -r requirements.txt
 ```
 
-### Step 5: Start Chatting
+Create `.ouroboros/.env`:
 
-Open your Telegram bot and send any message. The first person to write becomes the **creator** (owner). All subsequent messages from other users are kindly ignored.
+```env
+OPENROUTER_API_KEY=your_key_here
+TELEGRAM_BOT_TOKEN=your_bot_token
+GITHUB_TOKEN=your_github_token
+OPENAI_API_KEY=your_openai_key
+ANTHROPIC_API_KEY=your_anthropic_key
+OUROBOROS_MODEL=anthropic/claude-sonnet-4.6
+OUROBOROS_MODEL_CODE=anthropic/claude-sonnet-4.6
+OUROBOROS_MODEL_LIGHT=google/gemini-3-pro-preview
+OUROBOROS_MODEL_FALLBACK_LIST=anthropic/claude-sonnet-4.6,google/gemini-3-pro-preview,openai/gpt-4.1
+OUROBOROS_MAX_WORKERS=5
+OUROBOROS_MAX_ROUNDS=200
+```
 
-**Restarting:** If Colab disconnects or you restart the runtime, just re-run the same cell. Your Ouroboros's evolution is preserved -- all changes are pushed to your fork, and agent state lives on Google Drive.
+### Step 4: Launch
+
+```bash
+python3 local_launcher.py
+```
+
+Open your Telegram bot and send any message. The first person to write becomes the **creator** (owner).
+
+**Restarting:** Just run `python3 local_launcher.py` again. All state is preserved on the local filesystem.
 
 ---
 

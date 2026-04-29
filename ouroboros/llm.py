@@ -121,7 +121,7 @@ class LLMClient:
                 base_url=self._base_url,
                 api_key=self._api_key,
                 default_headers={
-                    "HTTP-Referer": "https://colab.research.google.com/",
+                    "HTTP-Referer": "https://github.com/joi-lab/ouroboros_zera",
                     "X-Title": "Ouroboros",
                 },
             )

@@ -27,7 +27,7 @@ log = logging.getLogger(__name__)
 # ---------------------------------------------------------------------------
 # Module-level config (set via init())
 # ---------------------------------------------------------------------------
-REPO_DIR: pathlib.Path = pathlib.Path("/content/ouroboros_repo")
+REPO_DIR: pathlib.Path = pathlib.Path("/home/zera/ouroboros/drive")
 DRIVE_ROOT: pathlib.Path = pathlib.Path("/home/zera/ouroboros/drive")
 REMOTE_URL: str = ""
 BRANCH_DEV: str = "ouroboros"

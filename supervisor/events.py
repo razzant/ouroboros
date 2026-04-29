@@ -2,7 +2,7 @@
 Supervisor event dispatcher.
 
 Maps event types from worker EVENT_Q to handler functions.
-Extracted from colab_launcher.py main loop to keep it under 500 lines.
+Extracted from the monolithic launcher to keep each module under 500 lines.
 """
 
 from __future__ import annotations
@@ -195,7 +195,7 @@ def _handle_restart_request(evt: Dict[str, Any], ctx: Any) -> None:
     ctx.save_state(st2)
     ctx.persist_queue_snapshot(reason="pre_restart_exit")
     # Replace current process with fresh Python — loads all modules from scratch
-    launcher = os.path.join(os.getcwd(), "colab_launcher.py")
+    launcher = os.path.join(os.getcwd(), "local_launcher.py")
     os.execv(sys.executable, [sys.executable, launcher])
 
 
