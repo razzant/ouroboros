@@ -16,7 +16,7 @@ def _codebase_health(ctx: ToolContext) -> str:
         from ouroboros.review import collect_sections, compute_complexity_metrics
 
         repo_dir = pathlib.Path(ctx.repo_dir)
-        drive_root = pathlib.Path(os.environ.get("DRIVE_ROOT", "/content/drive/MyDrive/Ouroboros"))
+        drive_root = pathlib.Path(os.environ.get("DRIVE_ROOT", "/home/zera/ouroboros/drive"))
 
         sections, stats = collect_sections(repo_dir, drive_root)
         metrics = compute_complexity_metrics(sections)
