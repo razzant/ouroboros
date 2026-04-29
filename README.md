@@ -44,10 +44,21 @@ Telegram --> colab_launcher.py
               events.py             -- event dispatch
                 |
             ouroboros/               (agent core)
-              agent.py              -- thin orchestrator
+              agent/                 (agent package)
+                agent.py            -- OuroborosAgent orchestrator
+                events.py           -- task result emission
+                review.py           -- review context building
+              execution/             (execution layer)
+                loop.py             -- run_llm_loop (core LLM loop)
+                timeout.py          -- tool timeout handling
+                tools.py            -- stateful executor, parallel execution
+              config/                (configuration)
+                paths.py            -- path resolution
+              memory/                (memory management)
+                guard.py            -- memory guard / OOM prevention
               consciousness.py      -- background thinking loop
               context.py            -- LLM context, prompt caching
-              loop.py               -- tool loop, concurrent execution
+              loop.py               -- thin wrapper → execution.loop
               tools/                -- plugin registry (auto-discovery)
                 core.py             -- file ops
                 git.py              -- git ops
@@ -59,7 +70,6 @@ Telegram --> colab_launcher.py
                 review.py           -- multi-model review
               llm.py                -- OpenRouter client
               memory.py             -- scratchpad, identity, chat
-              review.py             -- code metrics
               utils.py              -- utilities
 ```
 
@@ -225,6 +235,13 @@ Full text: [BIBLE.md](BIBLE.md)
 ---
 
 ## Changelog
+
+### v6.3.0 -- Execution Layer Extraction (Bible P5: Minimalism)
+- **Execution layer extraction** -- `run_llm_loop()` moved from `ouroboros/loop.py` to `ouroboros/execution/loop.py`. Core LLM loop is now a dedicated module.
+- **Agent package** -- `ouroboros/agent.py` restructured into `ouroboros/agent/` package: `agent.py` (OuroborosAgent), `events.py` (emit_task_results), `review.py` (build_review_context).
+- **Git ops extraction** -- `check_uncommitted_changes()` and `check_version_sync()` moved to `supervisor/git_ops.py`.
+- **Combined size reduction** -- `ouroboros/agent.py` + `ouroboros/loop.py` reduced from 1079 to 344 lines (-68%).
+- **New modules**: `ouroboros/execution/loop.py`, `ouroboros/execution/__init__.py`, `ouroboros/agent/__init__.py`, `ouroboros/agent/events.py`, `ouroboros/agent/review.py`, `supervisor/git_ops.py`.
 
 ### v6.2.0 -- Critical Bugfixes + LLM-First Dedup
 - **Fix: worker_id==0 hard-timeout bug** -- `int(x or -1)` treated worker 0 as -1, preventing terminate on timeout and causing double task execution. Replaced all `x or default` patterns with None-safe checks.

@@ -132,6 +132,9 @@ def _send_owner_message(ctx: ToolContext, text: str, reason: str = "") -> str:
 def _update_identity(ctx: ToolContext, content: str) -> str:
     """Update identity manifest (who you are, who you want to become)."""
     path = ctx.drive_root / "memory" / "identity.md"
+    # Memory guard: prevent runaway identity bloat
+    if len(content) > 50:
+        return f"ERROR: identity content too long ({len(content)} chars, max 50). Keep it concise."
     path.parent.mkdir(parents=True, exist_ok=True)
     atomic_write_text(path, content)
     return f"OK: identity updated ({len(content)} chars)"

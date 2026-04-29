@@ -428,3 +428,109 @@ def safe_restart(
 
     # Both branches failed
     return False, f"Both branches failed import (dev and stable)"
+
+
+# ---------------------------------------------------------------------------
+# Startup verification helpers (Bible Principle 1)
+# ---------------------------------------------------------------------------
+
+def check_uncommitted_changes(repo_dir: pathlib.Path, branch_dev: str) -> Tuple[dict, int]:
+    """Check for uncommitted changes and attempt auto-rescue commit & push."""
+    import re
+    try:
+        result = subprocess.run(
+            ["git", "status", "--porcelain"],
+            cwd=str(repo_dir),
+            capture_output=True, text=True, timeout=10, check=True
+        )
+        dirty_files = [l.strip() for l in result.stdout.strip().split('\n') if l.strip()]
+        if dirty_files:
+            auto_committed = False
+            try:
+                subprocess.run(["git", "add", "-u"], cwd=str(repo_dir), timeout=10, check=True)
+                subprocess.run(
+                    ["git", "commit", "-m", "auto-rescue: uncommitted changes detected on startup"],
+                    cwd=str(repo_dir), timeout=30, check=True
+                )
+                if not re.match(r'^[a-zA-Z0-9_/-]+$', branch_dev):
+                    raise ValueError(f"Invalid branch name: {branch_dev}")
+                subprocess.run(
+                    ["git", "pull", "--rebase", "origin", branch_dev],
+                    cwd=str(repo_dir), timeout=60, check=True
+                )
+                try:
+                    subprocess.run(
+                        ["git", "push", "origin", branch_dev],
+                        cwd=str(repo_dir), timeout=60, check=True
+                    )
+                    auto_committed = True
+                    log.warning(f"Auto-rescued {len(dirty_files)} uncommitted files on startup")
+                except subprocess.CalledProcessError:
+                    subprocess.run(
+                        ["git", "reset", "HEAD~1"],
+                        cwd=str(repo_dir), timeout=10, check=True
+                    )
+                    raise
+            except Exception as e:
+                log.warning(f"Failed to auto-rescue uncommitted changes: {e}", exc_info=True)
+            return {
+                "status": "warning", "files": dirty_files[:20],
+                "auto_committed": auto_committed,
+            }, 1
+        else:
+            return {"status": "ok"}, 0
+    except Exception as e:
+        return {"status": "error", "error": str(e)}, 0
+
+
+def check_version_sync(repo_dir: pathlib.Path) -> Tuple[dict, int]:
+    """Check VERSION file sync with git tags and pyproject.toml."""
+    import re
+    try:
+        version_file = (repo_dir / "VERSION").read_text().strip()
+        issue_count = 0
+        result_data = {"version_file": version_file}
+
+        pyproject_path = repo_dir / "pyproject.toml"
+        pyproject_content = pyproject_path.read_text()
+        match = re.search(r'^version\s*=\s*["\']([^"\']+)["\']', pyproject_content, re.MULTILINE)
+        if match:
+            pyproject_version = match.group(1)
+            result_data["pyproject_version"] = pyproject_version
+            if version_file != pyproject_version:
+                result_data["status"] = "warning"
+                issue_count += 1
+
+        try:
+            readme_content = (repo_dir / "README.md").read_text()
+            readme_match = re.search(r'\*\*Version:\*\*\s*(\d+\.\d+\.\d+)', readme_content)
+            if readme_match:
+                readme_version = readme_match.group(1)
+                result_data["readme_version"] = readme_version
+                if version_file != readme_version:
+                    result_data["status"] = "warning"
+                    issue_count += 1
+        except Exception:
+            log.debug("Failed to check README.md version", exc_info=True)
+
+        result = subprocess.run(
+            ["git", "describe", "--tags", "--abbrev=0"],
+            cwd=str(repo_dir),
+            capture_output=True, text=True, timeout=10
+        )
+        if result.returncode != 0:
+            result_data["status"] = "warning"
+            result_data["message"] = "no_tags"
+            return result_data, issue_count
+        else:
+            latest_tag = result.stdout.strip().lstrip('v')
+            result_data["latest_tag"] = latest_tag
+            if version_file != latest_tag:
+                result_data["status"] = "warning"
+                issue_count += 1
+
+        if issue_count == 0:
+            result_data["status"] = "ok"
+        return result_data, issue_count
+    except Exception as e:
+        return {"status": "error", "error": str(e)}, 0
