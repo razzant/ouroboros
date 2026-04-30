@@ -1524,3 +1524,32 @@ Exiting...
   Budget:         $0
 ============================================
 2026-04-30 12:21:44,876 [INFO] __main__: Environment ready: repo=/home/zera/ouroboros_zera, drive=/home/zera/ouroboros_zera/.ouroboros
+[ouroboros fa82584] auto-rescue: uncommitted changes detected on startup
+ 6 files changed, 41 insertions(+), 1 deletion(-)
+error: не удалось выполнить получение с перемещением: У вас есть непроиндексированные изменения.
+error: Сделайте коммит или спрячьте их.
+2026-04-30 12:21:45,417 [WARNING] supervisor.git_ops: Failed to auto-rescue uncommitted changes: Command '['git', 'pull', '--rebase', 'origin', 'ouroboros']' returned non-zero exit status 128.
+Traceback (most recent call last):
+  File "/home/zera/ouroboros_zera/supervisor/git_ops.py", line 457, in check_uncommitted_changes
+    subprocess.run(
+  File "/usr/lib/python3.12/subprocess.py", line 571, in run
+    raise CalledProcessError(retcode, process.args,
+subprocess.CalledProcessError: Command '['git', 'pull', '--rebase', 'origin', 'ouroboros']' returned non-zero exit status 128.
+2026-04-30 12:21:45,419 [WARNING] ouroboros.agent.agent: Startup verification found 3 issue(s): {'uncommitted_changes': {'status': 'warning', 'files': ['M .ouroboros/logs/events.jsonl', 'M .ouroboros/logs/restart_history.log', 'M .ouroboros/logs/supervisor-output.log', 'M .ouroboros/logs/watchdog-stdout.log', 'M .ouroboros/logs/watchdog.jsonl', 'M .ouroboros/supervisor.pid'], 'auto_committed': False}, 'version_sync': {'version_file': '6.3.0', 'pyproject_version': '6.2.0', 'status': 'warning', 'readme_version': '6.2.0', 'message': 'no_tags'}}
+============================================================
+  Ouroboros Zera — Local CLI
+  Type your message and press Enter.
+  Commands: 'quit', 'exit', 'help'
+============================================================
+You: 
+Exiting...
+[.] Loading .env from /home/zera/ouroboros_zera/.ouroboros
+============================================
+  Ouroboros Zera Local Launcher
+============================================
+  Model:          Qwen3.6-35B-A3B-Q4_K_M.gguf
+  Base URL:       http://localhost:8080/v1
+  GitHub:         srilankabankg-oss/ouroboros_zera
+  Budget:         $0
+============================================
+2026-04-30 12:22:20,279 [INFO] __main__: Environment ready: repo=/home/zera/ouroboros_zera, drive=/home/zera/ouroboros_zera/.ouroboros
