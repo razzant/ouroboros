@@ -7123,3 +7123,11 @@ G]   Check interval: 30s
 [2026-04-30T11:14:26+00:00] [WATCHDOG] WARNING: Supervisor process not found!
 [2026-04-30T11:14:26+00:00] [WATCHDOG] ERROR: Max restarts (20/24h) reached! Stopping watchdog.
 [2026-04-30T11:14:26+00:00] [WATCHDOG] ABORTED: Too many restarts. Manual intervention required.
+[2026-04-30T11:14:36+00:00] [WATCHDOG] ==========================================
+[2026-04-30T11:14:36+00:00] [WATCHDOG] Watchdog starting...
+[2026-04-30T11:14:36+00:00] [WATCHDOG]   Check interval: 30s
+[2026-04-30T11:14:36+00:00] [WATCHDOG]   LLM timeout: 10s
+[2026-04-30T11:14:36+00:00] [WATCHDOG]   TG timeout: 10s
+[2026-04-30T11:14:36+00:00] [WATCHDOG]   Max restarts/24h: 20
+[2026-04-30T11:14:36+00:00] [WATCHDOG]   Grace period: 5s
+[2026-04-30T11:14:36+00:00] [WATCHDOG] ==========================================

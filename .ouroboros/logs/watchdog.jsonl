@@ -2711,3 +2711,8 @@
 {"ts": "2026-04-30T11:13:36+00:00", "type": "health_check", "telegram": "healthy"}
 {"ts": "2026-04-30T11:14:16+00:00", "type": "watchdog_start", "check_interval": 30, "llm_timeout": 10, "tg_timeout": 10, "max_restarts": 20}
 {"ts": "2026-04-30T11:14:26+00:00", "type": "watchdog_start", "check_interval": 30, "llm_timeout": 10, "tg_timeout": 10, "max_restarts": 20}
+{"ts": "2026-04-30T11:14:36+00:00", "type": "watchdog_start", "check_interval": 30, "llm_timeout": 10, "tg_timeout": 10, "max_restarts": 20}
+{"ts": "2026-04-30T11:14:36+00:00", "type": "health_check", "llama": "healthy"}
+{"ts": "2026-04-30T11:14:37+00:00", "type": "health_check", "telegram": "healthy"}
+{"ts": "2026-04-30T11:15:07+00:00", "type": "health_check", "llama": "healthy"}
+{"ts": "2026-04-30T11:15:07+00:00", "type": "health_check", "telegram": "healthy"}
