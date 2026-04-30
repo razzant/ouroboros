@@ -2052,3 +2052,7 @@
 {"ts": "2026-04-30T09:18:47+00:00", "type": "watchdog_restarted", "pid": 3875654}
 {"ts": "2026-04-30T09:18:47+00:00", "type": "health_check", "llama": "healthy"}
 {"ts": "2026-04-30T09:18:47+00:00", "type": "health_check", "telegram": "healthy"}
+{"ts": "2026-04-30T09:19:17+00:00", "type": "watchdog_restart", "pid": null, "reason": "process_not_found"}
+{"ts": "2026-04-30T09:19:22+00:00", "type": "watchdog_restarted", "pid": 3876098}
+{"ts": "2026-04-30T09:19:22+00:00", "type": "health_check", "llama": "healthy"}
+{"ts": "2026-04-30T09:19:23+00:00", "type": "health_check", "telegram": "healthy"}
