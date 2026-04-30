@@ -101,7 +101,6 @@ class OuroborosAgent:
                 'ts': utc_now_iso(), 'type': 'worker_boot',
                 'pid': os.getpid(), 'git_branch': git_branch, 'git_sha': git_sha,
             })
-            self._verify_restart(git_sha)
             self._verify_system_state(git_sha)
         except Exception:
             log.warning("Worker boot logging failed", exc_info=True)
