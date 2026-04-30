@@ -125,6 +125,23 @@ def cli_loop(agent) -> None:
 # Main
 # ---------------------------------------------------------------------------
 
+# ---------------------------------------------------------------------------
+# Safe restart (prevents "blind" null SHA after git reset --hard)
+# ---------------------------------------------------------------------------
+
+def _safe_restart_impl() -> None:
+    """Trigger a supervisor-managed restart so SHA is re-synced from git.
+
+    This function is the *real* implementation — never replace with a no-op.
+    """
+    from supervisor.git_ops import safe_restart as _safe_restart
+    _safe_restart(reason="state-amnesia-guard: cold-start SHA re-sync")
+
+
+# Public alias for imports that reference `safe_restart` directly
+safe_restart = _safe_restart_impl
+
+
 def main() -> None:
     setup_env()
     agent = create_agent()

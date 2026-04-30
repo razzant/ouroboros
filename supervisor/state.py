@@ -141,6 +141,61 @@ def ensure_state_defaults(st: Dict[str, Any]) -> Dict[str, Any]:
     return st
 
 
+# ---------------------------------------------------------------------------
+# SHA initialization (prevent "blind" null SHA on cold start)
+# ---------------------------------------------------------------------------
+
+def ensure_sha_initialized(st: Dict[str, Any]) -> Dict[str, Any]:
+    """Ensure current_sha and current_branch are set from git on cold start.
+    
+    If already set, verify they still match HEAD. If mismatch, update.
+    This prevents the "worker_sha_verify_skipped" loop caused by null SHA.
+    """
+    import subprocess
+    
+    current_sha = str(st.get("current_sha") or "").strip()
+    current_branch = str(st.get("current_branch") or "").strip()
+    
+    # Only query git if we don't have valid values
+    if not current_sha or not current_branch:
+        try:
+            repo_dir = pathlib.Path("/home/zera/ouroboros/drive")
+            if not repo_dir.exists():
+                # Repo not cloned yet - can't get SHA
+                return st
+            
+            # Get current HEAD
+            branch_result = subprocess.run(
+                ["git", "rev-parse", "--abbrev-ref", "HEAD"],
+                cwd=str(repo_dir),
+                capture_output=True,
+                text=True,
+                check=True,
+                timeout=10,
+            )
+            head_result = subprocess.run(
+                ["git", "rev-parse", "HEAD"],
+                cwd=str(repo_dir),
+                capture_output=True,
+                text=True,
+                check=True,
+                timeout=10,
+            )
+            
+            new_branch = branch_result.stdout.strip()
+            new_sha = head_result.stdout.strip()
+            
+            # Update state only if we got valid values
+            if new_sha and new_branch:
+                st["current_sha"] = new_sha
+                st["current_branch"] = new_branch
+        except (subprocess.SubprocessError, OSError):
+            # Git not available or repo corrupted - leave as-is
+            pass
+    
+    return st
+
+
 def default_state_dict() -> Dict[str, Any]:
     """Create a fresh state dict. Single source of truth: ensure_state_defaults."""
     return ensure_state_defaults({})
@@ -203,6 +258,9 @@ def init_state() -> Dict[str, Any]:
     lock_fd = acquire_file_lock(STATE_LOCK_PATH)
     try:
         st = _load_state_unlocked()
+
+        # Initialize SHA from git if missing (prevent "blind" null SHA)
+        st = ensure_sha_initialized(st)
 
         # Capture session snapshots for drift detection
         st["session_spent_snapshot"] = float(st.get("spent_usd") or 0.0)

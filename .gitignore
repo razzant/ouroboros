@@ -26,3 +26,6 @@ Thumbs.db
 # Release artifacts (not tracked)
 .create_release.py
 .release_notes.md
+
+# Ouroboros runtime state (contains secrets in logs)
+.ouroboros/
