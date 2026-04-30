@@ -444,28 +444,39 @@ def check_uncommitted_changes(repo_dir: pathlib.Path, branch_dev: str) -> Tuple[
             capture_output=True, text=True, timeout=10, check=True
         )
         dirty_files = [l.strip() for l in result.stdout.strip().split('\n') if l.strip()]
+        log.info("[DEBUG] check_uncommitted_changes: dirty_files=%s", dirty_files)
         if dirty_files:
             auto_committed = False
             try:
+                log.info("[DEBUG] Adding dirty files for auto-rescue")
                 subprocess.run(["git", "add", "-u"], cwd=str(repo_dir), timeout=10, check=True)
+                log.info("[DEBUG] Committing auto-rescue changes")
                 subprocess.run(
                     ["git", "commit", "-m", "auto-rescue: uncommitted changes detected on startup"],
                     cwd=str(repo_dir), timeout=30, check=True
                 )
+                log.info("[DEBUG] Commit successful, checking branch name")
                 if not re.match(r'^[a-zA-Z0-9_/-]+$', branch_dev):
                     raise ValueError(f"Invalid branch name: {branch_dev}")
-                subprocess.run(
+                log.info("[DEBUG] Pulling with rebase: origin/%s", branch_dev)
+                pull_result = subprocess.run(
                     ["git", "pull", "--rebase", "origin", branch_dev],
-                    cwd=str(repo_dir), timeout=60, check=True
+                    cwd=str(repo_dir), timeout=60, check=True,
+                    capture_output=True, text=True
                 )
+                log.info("[DEBUG] Pull successful: %s", pull_result.stdout[:200] if pull_result.stdout else "empty")
                 try:
-                    subprocess.run(
+                    log.info("[DEBUG] Pushing to origin/%s", branch_dev)
+                    push_result = subprocess.run(
                         ["git", "push", "origin", branch_dev],
-                        cwd=str(repo_dir), timeout=60, check=True
+                        cwd=str(repo_dir), timeout=60, check=True,
+                        capture_output=True, text=True
                     )
+                    log.info("[DEBUG] Push successful: %s", push_result.stdout[:200] if push_result.stdout else "empty")
                     auto_committed = True
                     log.warning(f"Auto-rescued {len(dirty_files)} uncommitted files on startup")
-                except subprocess.CalledProcessError:
+                except subprocess.CalledProcessError as pe:
+                    log.error("[DEBUG] Push failed: %s | stderr: %s", pe, pe.stderr[:500] if pe.stderr else "none")
                     subprocess.run(
                         ["git", "reset", "HEAD~1"],
                         cwd=str(repo_dir), timeout=10, check=True
