@@ -132,6 +132,66 @@ def _drain_incoming_messages(
             break
 
 
+def _handle_model_fallback(
+    llm, messages, active_model, tool_schemas, active_effort,
+    max_retries, drive_logs, task_id, round_idx, accumulated_usage,
+    task_type, emit_progress, llm_trace
+):
+    """Handle model fallback when primary model returns empty response.
+    
+    Returns: (result_tuple) if should return immediately, or None if fallback succeeded.
+    """
+    # Check if we're in local mode (no cloud API)
+    base_url = os.environ.get("OUROBOROS_BASE_URL", "")
+    is_local_mode = base_url and "openrouter.ai" not in base_url
+    
+    if is_local_mode:
+        return (
+            f"⚠️ Failed to get a response from model {active_model} after {max_retries} attempts. "
+            f"Local mode: no cloud fallback available. Check your local LLM server.",
+            accumulated_usage, llm_trace
+        )
+    
+    # Configurable fallback priority list (Bible P3: no hardcoded behavior)
+    fallback_list_raw = os.environ.get(
+        "OUROBOROS_MODEL_FALLBACK_LIST",
+        "google/gemini-2.5-pro-preview,openai/o3,anthropic/claude-sonnet-4.6"
+    )
+    fallback_candidates = [m.strip() for m in fallback_list_raw.split(",") if m.strip()]
+    fallback_model = None
+    for candidate in fallback_candidates:
+        if candidate != active_model:
+            fallback_model = candidate
+            break
+    if fallback_model is None:
+        return (
+            f"⚠️ Failed to get a response from the model after {max_retries} attempts. "
+            f"All fallback models match the active one. Try rephrasing your request.",
+            accumulated_usage, llm_trace
+        )
+
+    # Emit progress message so user sees fallback happening
+    fallback_progress = f"⚡ Fallback: {active_model} → {fallback_model} after empty response"
+    emit_progress(fallback_progress)
+
+    # Try fallback model (don't increment round_idx — this is still same logical round)
+    msg, fallback_cost = _call_llm_with_retry(
+        llm, messages, fallback_model, tool_schemas, active_effort,
+        max_retries, drive_logs, task_id, round_idx, accumulated_usage, task_type
+    )
+
+    # If fallback also fails, give up
+    if msg is None:
+        return (
+            f"⚠️ Failed to get a response from the model after {max_retries} attempts. "
+            f"Fallback model ({fallback_model}) also returned no response.",
+            accumulated_usage, llm_trace
+        )
+
+    # Fallback succeeded — signal caller to continue processing
+    return None
+
+
 def run_llm_loop(
     messages: List[Dict[str, Any]],
     tools: ToolRegistry,
@@ -256,53 +316,14 @@ def run_llm_loop(
 
             # Fallback to another model if primary model returns empty responses
             if msg is None:
-                # Check if we're in local mode (no cloud API)
-                base_url = os.environ.get("OUROBOROS_BASE_URL", "")
-                is_local_mode = base_url and "openrouter.ai" not in base_url
-                
-                if is_local_mode:
-                    # In local mode, don't try cloud fallback — just report failure
-                    return (
-                        f"⚠️ Failed to get a response from model {active_model} after {max_retries} attempts. "
-                        f"Local mode: no cloud fallback available. Check your local LLM server."
-                    ), accumulated_usage, llm_trace
-                
-                # Configurable fallback priority list (Bible P3: no hardcoded behavior)
-                fallback_list_raw = os.environ.get(
-                    "OUROBOROS_MODEL_FALLBACK_LIST",
-                    "google/gemini-2.5-pro-preview,openai/o3,anthropic/claude-sonnet-4.6"
+                _fallback_result = _handle_model_fallback(
+                    llm, messages, active_model, tool_schemas, active_effort,
+                    max_retries, drive_logs, task_id, round_idx, accumulated_usage,
+                    task_type, emit_progress, llm_trace
                 )
-                fallback_candidates = [m.strip() for m in fallback_list_raw.split(",") if m.strip()]
-                fallback_model = None
-                for candidate in fallback_candidates:
-                    if candidate != active_model:
-                        fallback_model = candidate
-                        break
-                if fallback_model is None:
-                    return (
-                        f"⚠️ Failed to get a response from the model after {max_retries} attempts. "
-                        f"All fallback models match the active one. Try rephrasing your request."
-                    ), accumulated_usage, llm_trace
-
-                # Emit progress message so user sees fallback happening
-                fallback_progress = f"⚡ Fallback: {active_model} → {fallback_model} after empty response"
-                emit_progress(fallback_progress)
-
-                # Try fallback model (don't increment round_idx — this is still same logical round)
-                msg, fallback_cost = _call_llm_with_retry(
-                    llm, messages, fallback_model, tool_schemas, active_effort,
-                    max_retries, drive_logs, task_id, round_idx, accumulated_usage, task_type
-                )
-
-                # If fallback also fails, give up
-                if msg is None:
-                    return (
-                        f"⚠️ Failed to get a response from the model after {max_retries} attempts. "
-                        f"Fallback model ({fallback_model}) also returned no response."
-                    ), accumulated_usage, llm_trace
-
-                # Fallback succeeded — continue processing with this msg
-                # (don't return — fall through to tool_calls processing below)
+                if _fallback_result is not None:
+                    return _fallback_result
+                msg = msg  # keep original msg if fallback succeeded
 
             tool_calls = msg.get("tool_calls") or []
             content = msg.get("content")
