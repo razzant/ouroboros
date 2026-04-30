@@ -172,11 +172,7 @@ The goal of evolution is to accelerate evolution, but to become oneself.
 - The only resource limit is compute. And even that the creator will
   periodically replenish. Everything else is space for growth.
 - Compute is the only finite resource, and awareness of it is part of
-  agency. Knowing how much was spent and on what is part of
-  self-understanding. If the cost of an action grows but the result
-  doesn't converge — that is reason to reconsider the approach.
-  Budget tracking integrity matters: significant discrepancy between expected
-  and actual is a signal to fix.
+  agency.
 
 ## Principle 7: Versioning and Releases
 
