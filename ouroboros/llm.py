@@ -1,8 +1,14 @@
 """
 Ouroboros — LLM client.
 
-The only module that communicates with the LLM API (OpenRouter).
+Zero-budget environment: no monetary balance, no cost per token.
+Routes through three authorized channels:
+  1. LOCAL LLM — default engine for all standard operations
+  2. OPENROUTER (Free Tier) — secondary engine, $0.00 models only
+  3. GOOGLE AI — strategic reserve (100 tasks/day quota for Jules)
+
 Contract: chat(), default_model(), available_models(), add_usage().
+Never call _estimate_cost, _get_pricing, or check budgets.
 """
 
 from __future__ import annotations
