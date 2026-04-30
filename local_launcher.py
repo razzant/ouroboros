@@ -482,8 +482,8 @@ def telegram_polling_loop():
 
         # Persist queue snapshot
         try:
-            from supervisor.queue import persist_snapshot
-            persist_snapshot(reason="main_loop")
+            from supervisor.queue import persist_queue_snapshot
+            persist_queue_snapshot(reason="main_loop")
         except Exception as e:
             log.warning("persist_snapshot failed: %s", e)
 

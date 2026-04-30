@@ -2696,3 +2696,9 @@
 {"ts": "2026-04-30T11:11:02+00:00", "type": "watchdog_start", "check_interval": 30, "llm_timeout": 10, "tg_timeout": 10, "max_restarts": 20}
 {"ts": "2026-04-30T11:11:13+00:00", "type": "watchdog_start", "check_interval": 30, "llm_timeout": 10, "tg_timeout": 10, "max_restarts": 20}
 {"ts": "2026-04-30T11:11:13+00:00", "type": "health_check", "llama": "healthy"}
+{"ts": "2026-04-30T11:11:13+00:00", "type": "health_check", "telegram": "healthy"}
+{"ts": "2026-04-30T11:11:53+00:00", "type": "watchdog_start", "check_interval": 30, "llm_timeout": 10, "tg_timeout": 10, "max_restarts": 20}
+{"ts": "2026-04-30T11:12:03+00:00", "type": "watchdog_start", "check_interval": 30, "llm_timeout": 10, "tg_timeout": 10, "max_restarts": 20}
+{"ts": "2026-04-30T11:12:14+00:00", "type": "watchdog_start", "check_interval": 30, "llm_timeout": 10, "tg_timeout": 10, "max_restarts": 20}
+{"ts": "2026-04-30T11:12:24+00:00", "type": "watchdog_start", "check_interval": 30, "llm_timeout": 10, "tg_timeout": 10, "max_restarts": 20}
+{"ts": "2026-04-30T11:12:34+00:00", "type": "watchdog_start", "check_interval": 30, "llm_timeout": 10, "tg_timeout": 10, "max_restarts": 20}
