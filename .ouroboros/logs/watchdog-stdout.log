@@ -69,3 +69,754 @@ G]   Check interval: 30s
 [2026-04-30T09:22:50+00:00] [WATCHDOG] Restarting supervisor...
 [2026-04-30T09:22:50+00:00] [WATCHDOG] Waiting 5s before restart...
 [2026-04-30T09:22:55+00:00] [WATCHDOG] Supervisor restarted with PID 3878801
+[2026-04-30T09:23:25+00:00] [WATCHDOG] WARNING: Supervisor process not found!
+[2026-04-30T09:23:25+00:00] [WATCHDOG] ERROR: Max restarts (20/24h) reached! Stopping watchdog.
+[2026-04-30T09:23:25+00:00] [WATCHDOG] ABORTED: Too many restarts. Manual intervention required.
+[2026-04-30T09:23:35+00:00] [WATCHDOG] ==========================================
+[2026-04-30T09:23:35+00:00] [WATCHDOG] Watchdog starting...
+[2026-04-30T09:23:35+00:00] [WATCHDOG]   Check interval: 30s
+[2026-04-30T09:23:35+00:00] [WATCHDOG]   LLM timeout: 10s
+[2026-04-30T09:23:35+00:00] [WATCHDOG]   TG timeout: 10s
+[2026-04-30T09:23:35+00:00] [WATCHDOG]   Max restarts/24h: 20
+[2026-04-30T09:23:35+00:00] [WATCHDOG]   Grace period: 5s
+[2026-04-30T09:23:35+00:00] [WATCHDOG] ==========================================
+[2026-04-30T09:23:36+00:00] [WATCHDOG] WARNING: Supervisor process not found!
+[2026-04-30T09:23:36+00:00] [WATCHDOG] ERROR: Max restarts (20/24h) reached! Stopping watchdog.
+[2026-04-30T09:23:36+00:00] [WATCHDOG] ABORTED: Too many restarts. Manual intervention required.
+[2026-04-30T09:23:46+00:00] [WATCHDOG] ==========================================
+[2026-04-30T09:23:46+00:00] [WATCHDOG] Watchdog starting...
+[2026-04-30T09:23:46+00:00] [WATCHDOG]   Check interval: 30s
+[2026-04-30T09:23:46+00:00] [WATCHDOG]   LLM timeout: 10s
+[2026-04-30T09:23:46+00:00] [WATCHDOG]   TG timeout: 10s
+[2026-04-30T09:23:46+00:00] [WATCHDOG]   Max restarts/24h: 20
+[2026-04-30T09:23:46+00:00] [WATCHDOG]   Grace period: 5s
+[2026-04-30T09:23:46+00:00] [WATCHDOG] ==========================================
+[2026-04-30T09:23:46+00:00] [WATCHDOG] WARNING: Supervisor process not found!
+[2026-04-30T09:23:46+00:00] [WATCHDOG] ERROR: Max restarts (20/24h) reached! Stopping watchdog.
+[2026-04-30T09:23:46+00:00] [WATCHDOG] ABORTED: Too many restarts. Manual intervention required.
+[2026-04-30T09:23:56+00:00] [WATCHDOG] ==========================================
+[2026-04-30T09:23:56+00:00] [WATCHDOG] Watchdog starting...
+[2026-04-30T09:23:56+00:00] [WATCHDOG]   Check interval: 30s
+[2026-04-30T09:23:56+00:00] [WATCHDOG]   LLM timeout: 10s
+[2026-04-30T09:23:56+00:00] [WATCHDOG]   TG timeout: 10s
+[2026-04-30T09:23:56+00:00] [WATCHDOG]   Max restarts/24h: 20
+[2026-04-30T09:23:56+00:00] [WATCHDOG]   Grace period: 5s
+[2026-04-30T09:23:56+00:00] [WATCHDOG] ==========================================
+[2026-04-30T09:23:56+00:00] [WATCHDOG] WARNING: Supervisor process not found!
+[2026-04-30T09:23:56+00:00] [WATCHDOG] ERROR: Max restarts (20/24h) reached! Stopping watchdog.
+[2026-04-30T09:23:56+00:00] [WATCHDOG] ABORTED: Too many restarts. Manual intervention required.
+[2026-04-30T09:24:06+00:00] [WATCHDOG] ==========================================
+[2026-04-30T09:24:06+00:00] [WATCHDOG] Watchdog starting...
+[2026-04-30T09:24:06+00:00] [WATCHDOG]   Check interval: 30s
+[2026-04-30T09:24:06+00:00] [WATCHDOG]   LLM timeout: 10s
+[2026-04-30T09:24:06+00:00] [WATCHDOG]   TG timeout: 10s
+[2026-04-30T09:24:06+00:00] [WATCHDOG]   Max restarts/24h: 20
+[2026-04-30T09:24:06+00:00] [WATCHDOG]   Grace period: 5s
+[2026-04-30T09:24:06+00:00] [WATCHDOG] ==========================================
+[2026-04-30T09:24:06+00:00] [WATCHDOG] WARNING: Supervisor process not found!
+[2026-04-30T09:24:06+00:00] [WATCHDOG] ERROR: Max restarts (20/24h) reached! Stopping watchdog.
+[2026-04-30T09:24:06+00:00] [WATCHDOG] ABORTED: Too many restarts. Manual intervention required.
+[2026-04-30T09:24:16+00:00] [WATCHDOG] ==========================================
+[2026-04-30T09:24:16+00:00] [WATCHDOG] Watchdog starting...
+[2026-04-30T09:24:16+00:00] [WATCHDOG]   Check interval: 30s
+[2026-04-30T09:24:16+00:00] [WATCHDOG]   LLM timeout: 10s
+[2026-04-30T09:24:16+00:00] [WATCHDOG]   TG timeout: 10s
+[2026-04-30T09:24:16+00:00] [WATCHDOG]   Max restarts/24h: 20
+[2026-04-30T09:24:16+00:00] [WATCHDOG]   Grace period: 5s
+[2026-04-30T09:24:16+00:00] [WATCHDOG] ==========================================
+[2026-04-30T09:24:17+00:00] [WATCHDOG] WARNING: Supervisor process not found!
+[2026-04-30T09:24:17+00:00] [WATCHDOG] ERROR: Max restarts (20/24h) reached! Stopping watchdog.
+[2026-04-30T09:24:17+00:00] [WATCHDOG] ABORTED: Too many restarts. Manual intervention required.
+[2026-04-30T09:24:27+00:00] [WATCHDOG] ==========================================
+[2026-04-30T09:24:27+00:00] [WATCHDOG] Watchdog starting...
+[2026-04-30T09:24:27+00:00] [WATCHDOG]   Check interval: 30s
+[2026-04-30T09:24:27+00:00] [WATCHDOG]   LLM timeout: 10s
+[2026-04-30T09:24:27+00:00] [WATCHDOG]   TG timeout: 10s
+[2026-04-30T09:24:27+00:00] [WATCHDOG]   Max restarts/24h: 20
+[2026-04-30T09:24:27+00:00] [WATCHDOG]   Grace period: 5s
+[2026-04-30T09:24:27+00:00] [WATCHDOG] ==========================================
+[2026-04-30T09:24:27+00:00] [WATCHDOG] WARNING: Supervisor process not found!
+[2026-04-30T09:24:27+00:00] [WATCHDOG] ERROR: Max restarts (20/24h) reached! Stopping watchdog.
+[2026-04-30T09:24:27+00:00] [WATCHDOG] ABORTED: Too many restarts. Manual intervention required.
+[2026-04-30T09:24:37+00:00] [WATCHDOG] ==========================================
+[2026-04-30T09:24:37+00:00] [WATCHDOG] Watchdog starting...
+[2026-04-30T09:24:37+00:00] [WATCHDOG]   Check interval: 30s
+[2026-04-30T09:24:37+00:00] [WATCHDOG]   LLM timeout: 10s
+[2026-04-30T09:24:37+00:00] [WATCHDOG]   TG timeout: 10s
+[2026-04-30T09:24:37+00:00] [WATCHDOG]   Max restarts/24h: 20
+[2026-04-30T09:24:37+00:00] [WATCHDOG]   Grace period: 5s
+[2026-04-30T09:24:37+00:00] [WATCHDOG] ==========================================
+[2026-04-30T09:24:37+00:00] [WATCHDOG] WARNING: Supervisor process not found!
+[2026-04-30T09:24:37+00:00] [WATCHDOG] ERROR: Max restarts (20/24h) reached! Stopping watchdog.
+[2026-04-30T09:24:37+00:00] [WATCHDOG] ABORTED: Too many restarts. Manual intervention required.
+[2026-04-30T09:24:47+00:00] [WATCHDOG] ==========================================
+[2026-04-30T09:24:47+00:00] [WATCHDOG] Watchdog starting...
+[2026-04-30T09:24:47+00:00] [WATCHDOG]   Check interval: 30s
+[2026-04-30T09:24:47+00:00] [WATCHDOG]   LLM timeout: 10s
+[2026-04-30T09:24:47+00:00] [WATCHDOG]   TG timeout: 10s
+[2026-04-30T09:24:47+00:00] [WATCHDOG]   Max restarts/24h: 20
+[2026-04-30T09:24:47+00:00] [WATCHDOG]   Grace period: 5s
+[2026-04-30T09:24:47+00:00] [WATCHDOG] ==========================================
+[2026-04-30T09:24:47+00:00] [WATCHDOG] WARNING: Supervisor process not found!
+[2026-04-30T09:24:47+00:00] [WATCHDOG] ERROR: Max restarts (20/24h) reached! Stopping watchdog.
+[2026-04-30T09:24:47+00:00] [WATCHDOG] ABORTED: Too many restarts. Manual intervention required.
+[2026-04-30T09:24:57+00:00] [WATCHDOG] ==========================================
+[2026-04-30T09:24:57+00:00] [WATCHDOG] Watchdog starting...
+[2026-04-30T09:24:57+00:00] [WATCHDOG]   Check interval: 30s
+[2026-04-30T09:24:57+00:00] [WATCHDOG]   LLM timeout: 10s
+[2026-04-30T09:24:57+00:00] [WATCHDOG]   TG timeout: 10s
+[2026-04-30T09:24:57+00:00] [WATCHDOG]   Max restarts/24h: 20
+[2026-04-30T09:24:57+00:00] [WATCHDOG]   Grace period: 5s
+[2026-04-30T09:24:57+00:00] [WATCHDOG] ==========================================
+[2026-04-30T09:24:58+00:00] [WATCHDOG] WARNING: Supervisor process not found!
+[2026-04-30T09:24:58+00:00] [WATCHDOG] ERROR: Max restarts (20/24h) reached! Stopping watchdog.
+[2026-04-30T09:24:58+00:00] [WATCHDOG] ABORTED: Too many restarts. Manual intervention required.
+[2026-04-30T09:25:08+00:00] [WATCHDOG] ==========================================
+[2026-04-30T09:25:08+00:00] [WATCHDOG] Watchdog starting...
+[2026-04-30T09:25:08+00:00] [WATCHDOG]   Check interval: 30s
+[2026-04-30T09:25:08+00:00] [WATCHDOG]   LLM timeout: 10s
+[2026-04-30T09:25:08+00:00] [WATCHDOG]   TG timeout: 10s
+[2026-04-30T09:25:08+00:00] [WATCHDOG]   Max restarts/24h: 20
+[2026-04-30T09:25:08+00:00] [WATCHDOG]   Grace period: 5s
+[2026-04-30T09:25:08+00:00] [WATCHDOG] ==========================================
+[2026-04-30T09:25:08+00:00] [WATCHDOG] WARNING: Supervisor process not found!
+[2026-04-30T09:25:08+00:00] [WATCHDOG] ERROR: Max restarts (20/24h) reached! Stopping watchdog.
+[2026-04-30T09:25:08+00:00] [WATCHDOG] ABORTED: Too many restarts. Manual intervention required.
+[2026-04-30T09:25:18+00:00] [WATCHDOG] ==========================================
+[2026-04-30T09:25:18+00:00] [WATCHDOG] Watchdog starting...
+[2026-04-30T09:25:18+00:00] [WATCHDOG]   Check interval: 30s
+[2026-04-30T09:25:18+00:00] [WATCHDOG]   LLM timeout: 10s
+[2026-04-30T09:25:18+00:00] [WATCHDOG]   TG timeout: 10s
+[2026-04-30T09:25:18+00:00] [WATCHDOG]   Max restarts/24h: 20
+[2026-04-30T09:25:18+00:00] [WATCHDOG]   Grace period: 5s
+[2026-04-30T09:25:18+00:00] [WATCHDOG] ==========================================
+[2026-04-30T09:25:18+00:00] [WATCHDOG] WARNING: Supervisor process not found!
+[2026-04-30T09:25:18+00:00] [WATCHDOG] ERROR: Max restarts (20/24h) reached! Stopping watchdog.
+[2026-04-30T09:25:18+00:00] [WATCHDOG] ABORTED: Too many restarts. Manual intervention required.
+[2026-04-30T09:25:28+00:00] [WATCHDOG] ==========================================
+[2026-04-30T09:25:28+00:00] [WATCHDOG] Watchdog starting...
+[2026-04-30T09:25:28+00:00] [WATCHDOG]   Check interval: 30s
+[2026-04-30T09:25:28+00:00] [WATCHDOG]   LLM timeout: 10s
+[2026-04-30T09:25:28+00:00] [WATCHDOG]   TG timeout: 10s
+[2026-04-30T09:25:28+00:00] [WATCHDOG]   Max restarts/24h: 20
+[2026-04-30T09:25:28+00:00] [WATCHDOG]   Grace period: 5s
+[2026-04-30T09:25:28+00:00] [WATCHDOG] ==========================================
+[2026-04-30T09:25:28+00:00] [WATCHDOG] WARNING: Supervisor process not found!
+[2026-04-30T09:25:28+00:00] [WATCHDOG] ERROR: Max restarts (20/24h) reached! Stopping watchdog.
+[2026-04-30T09:25:28+00:00] [WATCHDOG] ABORTED: Too many restarts. Manual intervention required.
+[2026-04-30T09:25:38+00:00] [WATCHDOG] ==========================================
+[2026-04-30T09:25:38+00:00] [WATCHDOG] Watchdog starting...
+[2026-04-30T09:25:38+00:00] [WATCHDOG]   Check interval: 30s
+[2026-04-30T09:25:38+00:00] [WATCHDOG]   LLM timeout: 10s
+[2026-04-30T09:25:38+00:00] [WATCHDOG]   TG timeout: 10s
+[2026-04-30T09:25:38+00:00] [WATCHDOG]   Max restarts/24h: 20
+[2026-04-30T09:25:38+00:00] [WATCHDOG]   Grace period: 5s
+[2026-04-30T09:25:38+00:00] [WATCHDOG] ==========================================
+[2026-04-30T09:25:39+00:00] [WATCHDOG] WARNING: Supervisor process not found!
+[2026-04-30T09:25:39+00:00] [WATCHDOG] ERROR: Max restarts (20/24h) reached! Stopping watchdog.
+[2026-04-30T09:25:39+00:00] [WATCHDOG] ABORTED: Too many restarts. Manual intervention required.
+[2026-04-30T09:25:49+00:00] [WATCHDOG] ==========================================
+[2026-04-30T09:25:49+00:00] [WATCHDOG] Watchdog starting...
+[2026-04-30T09:25:49+00:00] [WATCHDOG]   Check interval: 30s
+[2026-04-30T09:25:49+00:00] [WATCHDOG]   LLM timeout: 10s
+[2026-04-30T09:25:49+00:00] [WATCHDOG]   TG timeout: 10s
+[2026-04-30T09:25:49+00:00] [WATCHDOG]   Max restarts/24h: 20
+[2026-04-30T09:25:49+00:00] [WATCHDOG]   Grace period: 5s
+[2026-04-30T09:25:49+00:00] [WATCHDOG] ==========================================
+[2026-04-30T09:25:49+00:00] [WATCHDOG] WARNING: Supervisor process not found!
+[2026-04-30T09:25:49+00:00] [WATCHDOG] ERROR: Max restarts (20/24h) reached! Stopping watchdog.
+[2026-04-30T09:25:49+00:00] [WATCHDOG] ABORTED: Too many restarts. Manual intervention required.
+[2026-04-30T09:25:59+00:00] [WATCHDOG] ==========================================
+[2026-04-30T09:25:59+00:00] [WATCHDOG] Watchdog starting...
+[2026-04-30T09:25:59+00:00] [WATCHDOG]   Check interval: 30s
+[2026-04-30T09:25:59+00:00] [WATCHDOG]   LLM timeout: 10s
+[2026-04-30T09:25:59+00:00] [WATCHDOG]   TG timeout: 10s
+[2026-04-30T09:25:59+00:00] [WATCHDOG]   Max restarts/24h: 20
+[2026-04-30T09:25:59+00:00] [WATCHDOG]   Grace period: 5s
+[2026-04-30T09:25:59+00:00] [WATCHDOG] ==========================================
+[2026-04-30T09:25:59+00:00] [WATCHDOG] WARNING: Supervisor process not found!
+[2026-04-30T09:25:59+00:00] [WATCHDOG] ERROR: Max restarts (20/24h) reached! Stopping watchdog.
+[2026-04-30T09:25:59+00:00] [WATCHDOG] ABORTED: Too many restarts. Manual intervention required.
+[2026-04-30T09:26:09+00:00] [WATCHDOG] ==========================================
+[2026-04-30T09:26:09+00:00] [WATCHDOG] Watchdog starting...
+[2026-04-30T09:26:09+00:00] [WATCHDOG]   Check interval: 30s
+[2026-04-30T09:26:09+00:00] [WATCHDOG]   LLM timeout: 10s
+[2026-04-30T09:26:09+00:00] [WATCHDOG]   TG timeout: 10s
+[2026-04-30T09:26:09+00:00] [WATCHDOG]   Max restarts/24h: 20
+[2026-04-30T09:26:09+00:00] [WATCHDOG]   Grace period: 5s
+[2026-04-30T09:26:09+00:00] [WATCHDOG] ==========================================
+[2026-04-30T09:26:09+00:00] [WATCHDOG] WARNING: Supervisor process not found!
+[2026-04-30T09:26:09+00:00] [WATCHDOG] ERROR: Max restarts (20/24h) reached! Stopping watchdog.
+[2026-04-30T09:26:09+00:00] [WATCHDOG] ABORTED: Too many restarts. Manual intervention required.
+[2026-04-30T09:26:19+00:00] [WATCHDOG] ==========================================
+[2026-04-30T09:26:19+00:00] [WATCHDOG] Watchdog starting...
+[2026-04-30T09:26:19+00:00] [WATCHDOG]   Check interval: 30s
+[2026-04-30T09:26:19+00:00] [WATCHDOG]   LLM timeout: 10s
+[2026-04-30T09:26:19+00:00] [WATCHDOG]   TG timeout: 10s
+[2026-04-30T09:26:19+00:00] [WATCHDOG]   Max restarts/24h: 20
+[2026-04-30T09:26:19+00:00] [WATCHDOG]   Grace period: 5s
+[2026-04-30T09:26:19+00:00] [WATCHDOG] ==========================================
+[2026-04-30T09:26:20+00:00] [WATCHDOG] WARNING: Supervisor process not found!
+[2026-04-30T09:26:20+00:00] [WATCHDOG] ERROR: Max restarts (20/24h) reached! Stopping watchdog.
+[2026-04-30T09:26:20+00:00] [WATCHDOG] ABORTED: Too many restarts. Manual intervention required.
+[2026-04-30T09:26:30+00:00] [WATCHDOG] ==========================================
+[2026-04-30T09:26:30+00:00] [WATCHDOG] Watchdog starting...
+[2026-04-30T09:26:30+00:00] [WATCHDOG]   Check interval: 30s
+[2026-04-30T09:26:30+00:00] [WATCHDOG]   LLM timeout: 10s
+[2026-04-30T09:26:30+00:00] [WATCHDOG]   TG timeout: 10s
+[2026-04-30T09:26:30+00:00] [WATCHDOG]   Max restarts/24h: 20
+[2026-04-30T09:26:30+00:00] [WATCHDOG]   Grace period: 5s
+[2026-04-30T09:26:30+00:00] [WATCHDOG] ==========================================
+[2026-04-30T09:26:30+00:00] [WATCHDOG] WARNING: Supervisor process not found!
+[2026-04-30T09:26:30+00:00] [WATCHDOG] ERROR: Max restarts (20/24h) reached! Stopping watchdog.
+[2026-04-30T09:26:30+00:00] [WATCHDOG] ABORTED: Too many restarts. Manual intervention required.
+[2026-04-30T09:26:40+00:00] [WATCHDOG] ==========================================
+[2026-04-30T09:26:40+00:00] [WATCHDOG] Watchdog starting...
+[2026-04-30T09:26:40+00:00] [WATCHDOG]   Check interval: 30s
+[2026-04-30T09:26:40+00:00] [WATCHDOG]   LLM timeout: 10s
+[2026-04-30T09:26:40+00:00] [WATCHDOG]   TG timeout: 10s
+[2026-04-30T09:26:40+00:00] [WATCHDOG]   Max restarts/24h: 20
+[2026-04-30T09:26:40+00:00] [WATCHDOG]   Grace period: 5s
+[2026-04-30T09:26:40+00:00] [WATCHDOG] ==========================================
+[2026-04-30T09:26:40+00:00] [WATCHDOG] WARNING: Supervisor process not found!
+[2026-04-30T09:26:40+00:00] [WATCHDOG] ERROR: Max restarts (20/24h) reached! Stopping watchdog.
+[2026-04-30T09:26:40+00:00] [WATCHDOG] ABORTED: Too many restarts. Manual intervention required.
+[2026-04-30T09:26:50+00:00] [WATCHDOG] ==========================================
+[2026-04-30T09:26:50+00:00] [WATCHDOG] Watchdog starting...
+[2026-04-30T09:26:50+00:00] [WATCHDOG]   Check interval: 30s
+[2026-04-30T09:26:50+00:00] [WATCHDOG]   LLM timeout: 10s
+[2026-04-30T09:26:50+00:00] [WATCHDOG]   TG timeout: 10s
+[2026-04-30T09:26:50+00:00] [WATCHDOG]   Max restarts/24h: 20
+[2026-04-30T09:26:50+00:00] [WATCHDOG]   Grace period: 5s
+[2026-04-30T09:26:50+00:00] [WATCHDOG] ==========================================
+[2026-04-30T09:26:50+00:00] [WATCHDOG] WARNING: Supervisor process not found!
+[2026-04-30T09:26:50+00:00] [WATCHDOG] ERROR: Max restarts (20/24h) reached! Stopping watchdog.
+[2026-04-30T09:26:50+00:00] [WATCHDOG] ABORTED: Too many restarts. Manual intervention required.
+[2026-04-30T09:27:00+00:00] [WATCHDOG] ==========================================
+[2026-04-30T09:27:00+00:00] [WATCHDOG] Watchdog starting...
+[2026-04-30T09:27:00+00:00] [WATCHDOG]   Check interval: 30s
+[2026-04-30T09:27:00+00:00] [WATCHDOG]   LLM timeout: 10s
+[2026-04-30T09:27:00+00:00] [WATCHDOG]   TG timeout: 10s
+[2026-04-30T09:27:00+00:00] [WATCHDOG]   Max restarts/24h: 20
+[2026-04-30T09:27:00+00:00] [WATCHDOG]   Grace period: 5s
+[2026-04-30T09:27:00+00:00] [WATCHDOG] ==========================================
+[2026-04-30T09:27:01+00:00] [WATCHDOG] WARNING: Supervisor process not found!
+[2026-04-30T09:27:01+00:00] [WATCHDOG] ERROR: Max restarts (20/24h) reached! Stopping watchdog.
+[2026-04-30T09:27:01+00:00] [WATCHDOG] ABORTED: Too many restarts. Manual intervention required.
+[2026-04-30T09:27:11+00:00] [WATCHDOG] ==========================================
+[2026-04-30T09:27:11+00:00] [WATCHDOG] Watchdog starting...
+[2026-04-30T09:27:11+00:00] [WATCHDOG]   Check interval: 30s
+[2026-04-30T09:27:11+00:00] [WATCHDOG]   LLM timeout: 10s
+[2026-04-30T09:27:11+00:00] [WATCHDOG]   TG timeout: 10s
+[2026-04-30T09:27:11+00:00] [WATCHDOG]   Max restarts/24h: 20
+[2026-04-30T09:27:11+00:00] [WATCHDOG]   Grace period: 5s
+[2026-04-30T09:27:11+00:00] [WATCHDOG] ==========================================
+[2026-04-30T09:27:11+00:00] [WATCHDOG] WARNING: Supervisor process not found!
+[2026-04-30T09:27:11+00:00] [WATCHDOG] ERROR: Max restarts (20/24h) reached! Stopping watchdog.
+[2026-04-30T09:27:11+00:00] [WATCHDOG] ABORTED: Too many restarts. Manual intervention required.
+[2026-04-30T09:27:21+00:00] [WATCHDOG] ==========================================
+[2026-04-30T09:27:21+00:00] [WATCHDOG] Watchdog starting...
+[2026-04-30T09:27:21+00:00] [WATCHDOG]   Check interval: 30s
+[2026-04-30T09:27:21+00:00] [WATCHDOG]   LLM timeout: 10s
+[2026-04-30T09:27:21+00:00] [WATCHDOG]   TG timeout: 10s
+[2026-04-30T09:27:21+00:00] [WATCHDOG]   Max restarts/24h: 20
+[2026-04-30T09:27:21+00:00] [WATCHDOG]   Grace period: 5s
+[2026-04-30T09:27:21+00:00] [WATCHDOG] ==========================================
+[2026-04-30T09:27:21+00:00] [WATCHDOG] WARNING: Supervisor process not found!
+[2026-04-30T09:27:21+00:00] [WATCHDOG] ERROR: Max restarts (20/24h) reached! Stopping watchdog.
+[2026-04-30T09:27:21+00:00] [WATCHDOG] ABORTED: Too many restarts. Manual intervention required.
+[2026-04-30T09:27:31+00:00] [WATCHDOG] ==========================================
+[2026-04-30T09:27:31+00:00] [WATCHDOG] Watchdog starting...
+[2026-04-30T09:27:31+00:00] [WATCHDOG]   Check interval: 30s
+[2026-04-30T09:27:31+00:00] [WATCHDOG]   LLM timeout: 10s
+[2026-04-30T09:27:31+00:00] [WATCHDOG]   TG timeout: 10s
+[2026-04-30T09:27:31+00:00] [WATCHDOG]   Max restarts/24h: 20
+[2026-04-30T09:27:31+00:00] [WATCHDOG]   Grace period: 5s
+[2026-04-30T09:27:31+00:00] [WATCHDOG] ==========================================
+[2026-04-30T09:27:31+00:00] [WATCHDOG] WARNING: Supervisor process not found!
+[2026-04-30T09:27:31+00:00] [WATCHDOG] ERROR: Max restarts (20/24h) reached! Stopping watchdog.
+[2026-04-30T09:27:31+00:00] [WATCHDOG] ABORTED: Too many restarts. Manual intervention required.
+[2026-04-30T09:27:41+00:00] [WATCHDOG] ==========================================
+[2026-04-30T09:27:41+00:00] [WATCHDOG] Watchdog starting...
+[2026-04-30T09:27:41+00:00] [WATCHDOG]   Check interval: 30s
+[2026-04-30T09:27:41+00:00] [WATCHDOG]   LLM timeout: 10s
+[2026-04-30T09:27:41+00:00] [WATCHDOG]   TG timeout: 10s
+[2026-04-30T09:27:41+00:00] [WATCHDOG]   Max restarts/24h: 20
+[2026-04-30T09:27:41+00:00] [WATCHDOG]   Grace period: 5s
+[2026-04-30T09:27:41+00:00] [WATCHDOG] ==========================================
+[2026-04-30T09:27:42+00:00] [WATCHDOG] WARNING: Supervisor process not found!
+[2026-04-30T09:27:42+00:00] [WATCHDOG] ERROR: Max restarts (20/24h) reached! Stopping watchdog.
+[2026-04-30T09:27:42+00:00] [WATCHDOG] ABORTED: Too many restarts. Manual intervention required.
+[2026-04-30T09:27:52+00:00] [WATCHDOG] ==========================================
+[2026-04-30T09:27:52+00:00] [WATCHDOG] Watchdog starting...
+[2026-04-30T09:27:52+00:00] [WATCHDOG]   Check interval: 30s
+[2026-04-30T09:27:52+00:00] [WATCHDOG]   LLM timeout: 10s
+[2026-04-30T09:27:52+00:00] [WATCHDOG]   TG timeout: 10s
+[2026-04-30T09:27:52+00:00] [WATCHDOG]   Max restarts/24h: 20
+[2026-04-30T09:27:52+00:00] [WATCHDOG]   Grace period: 5s
+[2026-04-30T09:27:52+00:00] [WATCHDOG] ==========================================
+[2026-04-30T09:27:52+00:00] [WATCHDOG] WARNING: Supervisor process not found!
+[2026-04-30T09:27:52+00:00] [WATCHDOG] ERROR: Max restarts (20/24h) reached! Stopping watchdog.
+[2026-04-30T09:27:52+00:00] [WATCHDOG] ABORTED: Too many restarts. Manual intervention required.
+[2026-04-30T09:28:02+00:00] [WATCHDOG] ==========================================
+[2026-04-30T09:28:02+00:00] [WATCHDOG] Watchdog starting...
+[2026-04-30T09:28:02+00:00] [WATCHDOG]   Check interval: 30s
+[2026-04-30T09:28:02+00:00] [WATCHDOG]   LLM timeout: 10s
+[2026-04-30T09:28:02+00:00] [WATCHDOG]   TG timeout: 10s
+[2026-04-30T09:28:02+00:00] [WATCHDOG]   Max restarts/24h: 20
+[2026-04-30T09:28:02+00:00] [WATCHDOG]   Grace period: 5s
+[2026-04-30T09:28:02+00:00] [WATCHDOG] ==========================================
+[2026-04-30T09:28:02+00:00] [WATCHDOG] WARNING: Supervisor process not found!
+[2026-04-30T09:28:02+00:00] [WATCHDOG] ERROR: Max restarts (20/24h) reached! Stopping watchdog.
+[2026-04-30T09:28:02+00:00] [WATCHDOG] ABORTED: Too many restarts. Manual intervention required.
+[2026-04-30T09:28:12+00:00] [WATCHDOG] ==========================================
+[2026-04-30T09:28:12+00:00] [WATCHDOG] Watchdog starting...
+[2026-04-30T09:28:12+00:00] [WATCHDOG]   Check interval: 30s
+[2026-04-30T09:28:12+00:00] [WATCHDOG]   LLM timeout: 10s
+[2026-04-30T09:28:12+00:00] [WATCHDOG]   TG timeout: 10s
+[2026-04-30T09:28:12+00:00] [WATCHDOG]   Max restarts/24h: 20
+[2026-04-30T09:28:12+00:00] [WATCHDOG]   Grace period: 5s
+[2026-04-30T09:28:12+00:00] [WATCHDOG] ==========================================
+[2026-04-30T09:28:12+00:00] [WATCHDOG] WARNING: Supervisor process not found!
+[2026-04-30T09:28:12+00:00] [WATCHDOG] ERROR: Max restarts (20/24h) reached! Stopping watchdog.
+[2026-04-30T09:28:12+00:00] [WATCHDOG] ABORTED: Too many restarts. Manual intervention required.
+[2026-04-30T09:28:22+00:00] [WATCHDOG] ==========================================
+[2026-04-30T09:28:22+00:00] [WATCHDOG] Watchdog starting...
+[2026-04-30T09:28:22+00:00] [WATCHDOG]   Check interval: 30s
+[2026-04-30T09:28:22+00:00] [WATCHDOG]   LLM timeout: 10s
+[2026-04-30T09:28:22+00:00] [WATCHDOG]   TG timeout: 10s
+[2026-04-30T09:28:22+00:00] [WATCHDOG]   Max restarts/24h: 20
+[2026-04-30T09:28:22+00:00] [WATCHDOG]   Grace period: 5s
+[2026-04-30T09:28:22+00:00] [WATCHDOG] ==========================================
+[2026-04-30T09:28:22+00:00] [WATCHDOG] WARNING: Supervisor process not found!
+[2026-04-30T09:28:23+00:00] [WATCHDOG] ERROR: Max restarts (20/24h) reached! Stopping watchdog.
+[2026-04-30T09:28:23+00:00] [WATCHDOG] ABORTED: Too many restarts. Manual intervention required.
+[2026-04-30T09:28:33+00:00] [WATCHDOG] ==========================================
+[2026-04-30T09:28:33+00:00] [WATCHDOG] Watchdog starting...
+[2026-04-30T09:28:33+00:00] [WATCHDOG]   Check interval: 30s
+[2026-04-30T09:28:33+00:00] [WATCHDOG]   LLM timeout: 10s
+[2026-04-30T09:28:33+00:00] [WATCHDOG]   TG timeout: 10s
+[2026-04-30T09:28:33+00:00] [WATCHDOG]   Max restarts/24h: 20
+[2026-04-30T09:28:33+00:00] [WATCHDOG]   Grace period: 5s
+[2026-04-30T09:28:33+00:00] [WATCHDOG] ==========================================
+[2026-04-30T09:28:33+00:00] [WATCHDOG] WARNING: Supervisor process not found!
+[2026-04-30T09:28:33+00:00] [WATCHDOG] ERROR: Max restarts (20/24h) reached! Stopping watchdog.
+[2026-04-30T09:28:33+00:00] [WATCHDOG] ABORTED: Too many restarts. Manual intervention required.
+[2026-04-30T09:28:43+00:00] [WATCHDOG] ==========================================
+[2026-04-30T09:28:43+00:00] [WATCHDOG] Watchdog starting...
+[2026-04-30T09:28:43+00:00] [WATCHDOG]   Check interval: 30s
+[2026-04-30T09:28:43+00:00] [WATCHDOG]   LLM timeout: 10s
+[2026-04-30T09:28:43+00:00] [WATCHDOG]   TG timeout: 10s
+[2026-04-30T09:28:43+00:00] [WATCHDOG]   Max restarts/24h: 20
+[2026-04-30T09:28:43+00:00] [WATCHDOG]   Grace period: 5s
+[2026-04-30T09:28:43+00:00] [WATCHDOG] ==========================================
+[2026-04-30T09:28:43+00:00] [WATCHDOG] WARNING: Supervisor process not found!
+[2026-04-30T09:28:43+00:00] [WATCHDOG] ERROR: Max restarts (20/24h) reached! Stopping watchdog.
+[2026-04-30T09:28:43+00:00] [WATCHDOG] ABORTED: Too many restarts. Manual intervention required.
+[2026-04-30T09:28:53+00:00] [WATCHDOG] ==========================================
+[2026-04-30T09:28:53+00:00] [WATCHDOG] Watchdog starting...
+[2026-04-30T09:28:53+00:00] [WATCHDOG]   Check interval: 30s
+[2026-04-30T09:28:53+00:00] [WATCHDOG]   LLM timeout: 10s
+[2026-04-30T09:28:53+00:00] [WATCHDOG]   TG timeout: 10s
+[2026-04-30T09:28:53+00:00] [WATCHDOG]   Max restarts/24h: 20
+[2026-04-30T09:28:53+00:00] [WATCHDOG]   Grace period: 5s
+[2026-04-30T09:28:53+00:00] [WATCHDOG] ==========================================
+[2026-04-30T09:28:53+00:00] [WATCHDOG] WARNING: Supervisor process not found!
+[2026-04-30T09:28:53+00:00] [WATCHDOG] ERROR: Max restarts (20/24h) reached! Stopping watchdog.
+[2026-04-30T09:28:53+00:00] [WATCHDOG] ABORTED: Too many restarts. Manual intervention required.
+[2026-04-30T09:29:03+00:00] [WATCHDOG] ==========================================
+[2026-04-30T09:29:03+00:00] [WATCHDOG] Watchdog starting...
+[2026-04-30T09:29:03+00:00] [WATCHDOG]   Check interval: 30s
+[2026-04-30T09:29:03+00:00] [WATCHDOG]   LLM timeout: 10s
+[2026-04-30T09:29:03+00:00] [WATCHDOG]   TG timeout: 10s
+[2026-04-30T09:29:03+00:00] [WATCHDOG]   Max restarts/24h: 20
+[2026-04-30T09:29:03+00:00] [WATCHDOG]   Grace period: 5s
+[2026-04-30T09:29:03+00:00] [WATCHDOG] ==========================================
+[2026-04-30T09:29:04+00:00] [WATCHDOG] WARNING: Supervisor process not found!
+[2026-04-30T09:29:04+00:00] [WATCHDOG] ERROR: Max restarts (20/24h) reached! Stopping watchdog.
+[2026-04-30T09:29:04+00:00] [WATCHDOG] ABORTED: Too many restarts. Manual intervention required.
+[2026-04-30T09:29:14+00:00] [WATCHDOG] ==========================================
+[2026-04-30T09:29:14+00:00] [WATCHDOG] Watchdog starting...
+[2026-04-30T09:29:14+00:00] [WATCHDOG]   Check interval: 30s
+[2026-04-30T09:29:14+00:00] [WATCHDOG]   LLM timeout: 10s
+[2026-04-30T09:29:14+00:00] [WATCHDOG]   TG timeout: 10s
+[2026-04-30T09:29:14+00:00] [WATCHDOG]   Max restarts/24h: 20
+[2026-04-30T09:29:14+00:00] [WATCHDOG]   Grace period: 5s
+[2026-04-30T09:29:14+00:00] [WATCHDOG] ==========================================
+[2026-04-30T09:29:14+00:00] [WATCHDOG] WARNING: Supervisor process not found!
+[2026-04-30T09:29:14+00:00] [WATCHDOG] ERROR: Max restarts (20/24h) reached! Stopping watchdog.
+[2026-04-30T09:29:14+00:00] [WATCHDOG] ABORTED: Too many restarts. Manual intervention required.
+[2026-04-30T09:29:24+00:00] [WATCHDOG] ==========================================
+[2026-04-30T09:29:24+00:00] [WATCHDOG] Watchdog starting...
+[2026-04-30T09:29:24+00:00] [WATCHDOG]   Check interval: 30s
+[2026-04-30T09:29:24+00:00] [WATCHDOG]   LLM timeout: 10s
+[2026-04-30T09:29:24+00:00] [WATCHDOG]   TG timeout: 10s
+[2026-04-30T09:29:24+00:00] [WATCHDOG]   Max restarts/24h: 20
+[2026-04-30T09:29:24+00:00] [WATCHDOG]   Grace period: 5s
+[2026-04-30T09:29:24+00:00] [WATCHDOG] ==========================================
+[2026-04-30T09:29:24+00:00] [WATCHDOG] WARNING: Supervisor process not found!
+[2026-04-30T09:29:24+00:00] [WATCHDOG] ERROR: Max restarts (20/24h) reached! Stopping watchdog.
+[2026-04-30T09:29:24+00:00] [WATCHDOG] ABORTED: Too many restarts. Manual intervention required.
+[2026-04-30T09:29:34+00:00] [WATCHDOG] ==========================================
+[2026-04-30T09:29:34+00:00] [WATCHDOG] Watchdog starting...
+[2026-04-30T09:29:34+00:00] [WATCHDOG]   Check interval: 30s
+[2026-04-30T09:29:34+00:00] [WATCHDOG]   LLM timeout: 10s
+[2026-04-30T09:29:34+00:00] [WATCHDOG]   TG timeout: 10s
+[2026-04-30T09:29:34+00:00] [WATCHDOG]   Max restarts/24h: 20
+[2026-04-30T09:29:34+00:00] [WATCHDOG]   Grace period: 5s
+[2026-04-30T09:29:34+00:00] [WATCHDOG] ==========================================
+[2026-04-30T09:29:34+00:00] [WATCHDOG] WARNING: Supervisor process not found!
+[2026-04-30T09:29:34+00:00] [WATCHDOG] ERROR: Max restarts (20/24h) reached! Stopping watchdog.
+[2026-04-30T09:29:34+00:00] [WATCHDOG] ABORTED: Too many restarts. Manual intervention required.
+[2026-04-30T09:29:44+00:00] [WATCHDOG] ==========================================
+[2026-04-30T09:29:44+00:00] [WATCHDOG] Watchdog starting...
+[2026-04-30T09:29:44+00:00] [WATCHDOG]   Check interval: 30s
+[2026-04-30T09:29:44+00:00] [WATCHDOG]   LLM timeout: 10s
+[2026-04-30T09:29:44+00:00] [WATCHDOG]   TG timeout: 10s
+[2026-04-30T09:29:44+00:00] [WATCHDOG]   Max restarts/24h: 20
+[2026-04-30T09:29:44+00:00] [WATCHDOG]   Grace period: 5s
+[2026-04-30T09:29:44+00:00] [WATCHDOG] ==========================================
+[2026-04-30T09:29:45+00:00] [WATCHDOG] WARNING: Supervisor process not found!
+[2026-04-30T09:29:45+00:00] [WATCHDOG] ERROR: Max restarts (20/24h) reached! Stopping watchdog.
+[2026-04-30T09:29:45+00:00] [WATCHDOG] ABORTED: Too many restarts. Manual intervention required.
+[2026-04-30T09:29:55+00:00] [WATCHDOG] ==========================================
+[2026-04-30T09:29:55+00:00] [WATCHDOG] Watchdog starting...
+[2026-04-30T09:29:55+00:00] [WATCHDOG]   Check interval: 30s
+[2026-04-30T09:29:55+00:00] [WATCHDOG]   LLM timeout: 10s
+[2026-04-30T09:29:55+00:00] [WATCHDOG]   TG timeout: 10s
+[2026-04-30T09:29:55+00:00] [WATCHDOG]   Max restarts/24h: 20
+[2026-04-30T09:29:55+00:00] [WATCHDOG]   Grace period: 5s
+[2026-04-30T09:29:55+00:00] [WATCHDOG] ==========================================
+[2026-04-30T09:29:55+00:00] [WATCHDOG] WARNING: Supervisor process not found!
+[2026-04-30T09:29:55+00:00] [WATCHDOG] ERROR: Max restarts (20/24h) reached! Stopping watchdog.
+[2026-04-30T09:29:55+00:00] [WATCHDOG] ABORTED: Too many restarts. Manual intervention required.
+[2026-04-30T09:30:05+00:00] [WATCHDOG] ==========================================
+[2026-04-30T09:30:05+00:00] [WATCHDOG] Watchdog starting...
+[2026-04-30T09:30:05+00:00] [WATCHDOG]   Check interval: 30s
+[2026-04-30T09:30:05+00:00] [WATCHDOG]   LLM timeout: 10s
+[2026-04-30T09:30:05+00:00] [WATCHDOG]   TG timeout: 10s
+[2026-04-30T09:30:05+00:00] [WATCHDOG]   Max restarts/24h: 20
+[2026-04-30T09:30:05+00:00] [WATCHDOG]   Grace period: 5s
+[2026-04-30T09:30:05+00:00] [WATCHDOG] ==========================================
+[2026-04-30T09:30:05+00:00] [WATCHDOG] WARNING: Supervisor process not found!
+[2026-04-30T09:30:05+00:00] [WATCHDOG] ERROR: Max restarts (20/24h) reached! Stopping watchdog.
+[2026-04-30T09:30:05+00:00] [WATCHDOG] ABORTED: Too many restarts. Manual intervention required.
+[2026-04-30T09:30:15+00:00] [WATCHDOG] ==========================================
+[2026-04-30T09:30:15+00:00] [WATCHDOG] Watchdog starting...
+[2026-04-30T09:30:15+00:00] [WATCHDOG]   Check interval: 30s
+[2026-04-30T09:30:15+00:00] [WATCHDOG]   LLM timeout: 10s
+[2026-04-30T09:30:15+00:00] [WATCHDOG]   TG timeout: 10s
+[2026-04-30T09:30:15+00:00] [WATCHDOG]   Max restarts/24h: 20
+[2026-04-30T09:30:15+00:00] [WATCHDOG]   Grace period: 5s
+[2026-04-30T09:30:15+00:00] [WATCHDOG] ==========================================
+[2026-04-30T09:30:15+00:00] [WATCHDOG] WARNING: Supervisor process not found!
+[2026-04-30T09:30:15+00:00] [WATCHDOG] ERROR: Max restarts (20/24h) reached! Stopping watchdog.
+[2026-04-30T09:30:15+00:00] [WATCHDOG] ABORTED: Too many restarts. Manual intervention required.
+[2026-04-30T09:30:25+00:00] [WATCHDOG] ==========================================
+[2026-04-30T09:30:25+00:00] [WATCHDOG] Watchdog starting...
+[2026-04-30T09:30:25+00:00] [WATCHDOG]   Check interval: 30s
+[2026-04-30T09:30:25+00:00] [WATCHDOG]   LLM timeout: 10s
+[2026-04-30T09:30:25+00:00] [WATCHDOG]   TG timeout: 10s
+[2026-04-30T09:30:25+00:00] [WATCHDOG]   Max restarts/24h: 20
+[2026-04-30T09:30:25+00:00] [WATCHDOG]   Grace period: 5s
+[2026-04-30T09:30:25+00:00] [WATCHDOG] ==========================================
+[2026-04-30T09:30:26+00:00] [WATCHDOG] WARNING: Supervisor process not found!
+[2026-04-30T09:30:26+00:00] [WATCHDOG] ERROR: Max restarts (20/24h) reached! Stopping watchdog.
+[2026-04-30T09:30:26+00:00] [WATCHDOG] ABORTED: Too many restarts. Manual intervention required.
+[2026-04-30T09:30:36+00:00] [WATCHDOG] ==========================================
+[2026-04-30T09:30:36+00:00] [WATCHDOG] Watchdog starting...
+[2026-04-30T09:30:36+00:00] [WATCHDOG]   Check interval: 30s
+[2026-04-30T09:30:36+00:00] [WATCHDOG]   LLM timeout: 10s
+[2026-04-30T09:30:36+00:00] [WATCHDOG]   TG timeout: 10s
+[2026-04-30T09:30:36+00:00] [WATCHDOG]   Max restarts/24h: 20
+[2026-04-30T09:30:36+00:00] [WATCHDOG]   Grace period: 5s
+[2026-04-30T09:30:36+00:00] [WATCHDOG] ==========================================
+[2026-04-30T09:30:36+00:00] [WATCHDOG] WARNING: Supervisor process not found!
+[2026-04-30T09:30:36+00:00] [WATCHDOG] ERROR: Max restarts (20/24h) reached! Stopping watchdog.
+[2026-04-30T09:30:36+00:00] [WATCHDOG] ABORTED: Too many restarts. Manual intervention required.
+[2026-04-30T09:30:46+00:00] [WATCHDOG] ==========================================
+[2026-04-30T09:30:46+00:00] [WATCHDOG] Watchdog starting...
+[2026-04-30T09:30:46+00:00] [WATCHDOG]   Check interval: 30s
+[2026-04-30T09:30:46+00:00] [WATCHDOG]   LLM timeout: 10s
+[2026-04-30T09:30:46+00:00] [WATCHDOG]   TG timeout: 10s
+[2026-04-30T09:30:46+00:00] [WATCHDOG]   Max restarts/24h: 20
+[2026-04-30T09:30:46+00:00] [WATCHDOG]   Grace period: 5s
+[2026-04-30T09:30:46+00:00] [WATCHDOG] ==========================================
+[2026-04-30T09:30:46+00:00] [WATCHDOG] WARNING: Supervisor process not found!
+[2026-04-30T09:30:46+00:00] [WATCHDOG] ERROR: Max restarts (20/24h) reached! Stopping watchdog.
+[2026-04-30T09:30:46+00:00] [WATCHDOG] ABORTED: Too many restarts. Manual intervention required.
+[2026-04-30T09:30:56+00:00] [WATCHDOG] ==========================================
+[2026-04-30T09:30:56+00:00] [WATCHDOG] Watchdog starting...
+[2026-04-30T09:30:56+00:00] [WATCHDOG]   Check interval: 30s
+[2026-04-30T09:30:56+00:00] [WATCHDOG]   LLM timeout: 10s
+[2026-04-30T09:30:56+00:00] [WATCHDOG]   TG timeout: 10s
+[2026-04-30T09:30:56+00:00] [WATCHDOG]   Max restarts/24h: 20
+[2026-04-30T09:30:56+00:00] [WATCHDOG]   Grace period: 5s
+[2026-04-30T09:30:56+00:00] [WATCHDOG] ==========================================
+[2026-04-30T09:30:56+00:00] [WATCHDOG] WARNING: Supervisor process not found!
+[2026-04-30T09:30:56+00:00] [WATCHDOG] ERROR: Max restarts (20/24h) reached! Stopping watchdog.
+[2026-04-30T09:30:56+00:00] [WATCHDOG] ABORTED: Too many restarts. Manual intervention required.
+[2026-04-30T09:31:06+00:00] [WATCHDOG] ==========================================
+[2026-04-30T09:31:06+00:00] [WATCHDOG] Watchdog starting...
+[2026-04-30T09:31:06+00:00] [WATCHDOG]   Check interval: 30s
+[2026-04-30T09:31:06+00:00] [WATCHDOG]   LLM timeout: 10s
+[2026-04-30T09:31:06+00:00] [WATCHDOG]   TG timeout: 10s
+[2026-04-30T09:31:06+00:00] [WATCHDOG]   Max restarts/24h: 20
+[2026-04-30T09:31:06+00:00] [WATCHDOG]   Grace period: 5s
+[2026-04-30T09:31:06+00:00] [WATCHDOG] ==========================================
+[2026-04-30T09:31:07+00:00] [WATCHDOG] WARNING: Supervisor process not found!
+[2026-04-30T09:31:07+00:00] [WATCHDOG] ERROR: Max restarts (20/24h) reached! Stopping watchdog.
+[2026-04-30T09:31:07+00:00] [WATCHDOG] ABORTED: Too many restarts. Manual intervention required.
+[2026-04-30T09:31:17+00:00] [WATCHDOG] ==========================================
+[2026-04-30T09:31:17+00:00] [WATCHDOG] Watchdog starting...
+[2026-04-30T09:31:17+00:00] [WATCHDOG]   Check interval: 30s
+[2026-04-30T09:31:17+00:00] [WATCHDOG]   LLM timeout: 10s
+[2026-04-30T09:31:17+00:00] [WATCHDOG]   TG timeout: 10s
+[2026-04-30T09:31:17+00:00] [WATCHDOG]   Max restarts/24h: 20
+[2026-04-30T09:31:17+00:00] [WATCHDOG]   Grace period: 5s
+[2026-04-30T09:31:17+00:00] [WATCHDOG] ==========================================
+[2026-04-30T09:31:17+00:00] [WATCHDOG] WARNING: Supervisor process not found!
+[2026-04-30T09:31:17+00:00] [WATCHDOG] ERROR: Max restarts (20/24h) reached! Stopping watchdog.
+[2026-04-30T09:31:17+00:00] [WATCHDOG] ABORTED: Too many restarts. Manual intervention required.
+[2026-04-30T09:31:27+00:00] [WATCHDOG] ==========================================
+[2026-04-30T09:31:27+00:00] [WATCHDOG] Watchdog starting...
+[2026-04-30T09:31:27+00:00] [WATCHDOG]   Check interval: 30s
+[2026-04-30T09:31:27+00:00] [WATCHDOG]   LLM timeout: 10s
+[2026-04-30T09:31:27+00:00] [WATCHDOG]   TG timeout: 10s
+[2026-04-30T09:31:27+00:00] [WATCHDOG]   Max restarts/24h: 20
+[2026-04-30T09:31:27+00:00] [WATCHDOG]   Grace period: 5s
+[2026-04-30T09:31:27+00:00] [WATCHDOG] ==========================================
+[2026-04-30T09:31:27+00:00] [WATCHDOG] WARNING: Supervisor process not found!
+[2026-04-30T09:31:27+00:00] [WATCHDOG] ERROR: Max restarts (20/24h) reached! Stopping watchdog.
+[2026-04-30T09:31:27+00:00] [WATCHDOG] ABORTED: Too many restarts. Manual intervention required.
+[2026-04-30T09:31:37+00:00] [WATCHDOG] ==========================================
+[2026-04-30T09:31:37+00:00] [WATCHDOG] Watchdog starting...
+[2026-04-30T09:31:37+00:00] [WATCHDOG]   Check interval: 30s
+[2026-04-30T09:31:37+00:00] [WATCHDOG]   LLM timeout: 10s
+[2026-04-30T09:31:37+00:00] [WATCHDOG]   TG timeout: 10s
+[2026-04-30T09:31:37+00:00] [WATCHDOG]   Max restarts/24h: 20
+[2026-04-30T09:31:37+00:00] [WATCHDOG]   Grace period: 5s
+[2026-04-30T09:31:37+00:00] [WATCHDOG] ==========================================
+[2026-04-30T09:31:37+00:00] [WATCHDOG] WARNING: Supervisor process not found!
+[2026-04-30T09:31:37+00:00] [WATCHDOG] ERROR: Max restarts (20/24h) reached! Stopping watchdog.
+[2026-04-30T09:31:37+00:00] [WATCHDOG] ABORTED: Too many restarts. Manual intervention required.
+[2026-04-30T09:31:47+00:00] [WATCHDOG] ==========================================
+[2026-04-30T09:31:47+00:00] [WATCHDOG] Watchdog starting...
+[2026-04-30T09:31:47+00:00] [WATCHDOG]   Check interval: 30s
+[2026-04-30T09:31:47+00:00] [WATCHDOG]   LLM timeout: 10s
+[2026-04-30T09:31:47+00:00] [WATCHDOG]   TG timeout: 10s
+[2026-04-30T09:31:47+00:00] [WATCHDOG]   Max restarts/24h: 20
+[2026-04-30T09:31:47+00:00] [WATCHDOG]   Grace period: 5s
+[2026-04-30T09:31:47+00:00] [WATCHDOG] ==========================================
+[2026-04-30T09:31:48+00:00] [WATCHDOG] WARNING: Supervisor process not found!
+[2026-04-30T09:31:48+00:00] [WATCHDOG] ERROR: Max restarts (20/24h) reached! Stopping watchdog.
+[2026-04-30T09:31:48+00:00] [WATCHDOG] ABORTED: Too many restarts. Manual intervention required.
+[2026-04-30T09:31:58+00:00] [WATCHDOG] ==========================================
+[2026-04-30T09:31:58+00:00] [WATCHDOG] Watchdog starting...
+[2026-04-30T09:31:58+00:00] [WATCHDOG]   Check interval: 30s
+[2026-04-30T09:31:58+00:00] [WATCHDOG]   LLM timeout: 10s
+[2026-04-30T09:31:58+00:00] [WATCHDOG]   TG timeout: 10s
+[2026-04-30T09:31:58+00:00] [WATCHDOG]   Max restarts/24h: 20
+[2026-04-30T09:31:58+00:00] [WATCHDOG]   Grace period: 5s
+[2026-04-30T09:31:58+00:00] [WATCHDOG] ==========================================
+[2026-04-30T09:31:58+00:00] [WATCHDOG] WARNING: Supervisor process not found!
+[2026-04-30T09:31:58+00:00] [WATCHDOG] ERROR: Max restarts (20/24h) reached! Stopping watchdog.
+[2026-04-30T09:31:58+00:00] [WATCHDOG] ABORTED: Too many restarts. Manual intervention required.
+[2026-04-30T09:32:08+00:00] [WATCHDOG] ==========================================
+[2026-04-30T09:32:08+00:00] [WATCHDOG] Watchdog starting...
+[2026-04-30T09:32:08+00:00] [WATCHDOG]   Check interval: 30s
+[2026-04-30T09:32:08+00:00] [WATCHDOG]   LLM timeout: 10s
+[2026-04-30T09:32:08+00:00] [WATCHDOG]   TG timeout: 10s
+[2026-04-30T09:32:08+00:00] [WATCHDOG]   Max restarts/24h: 20
+[2026-04-30T09:32:08+00:00] [WATCHDOG]   Grace period: 5s
+[2026-04-30T09:32:08+00:00] [WATCHDOG] ==========================================
+[2026-04-30T09:32:08+00:00] [WATCHDOG] WARNING: Supervisor process not found!
+[2026-04-30T09:32:08+00:00] [WATCHDOG] ERROR: Max restarts (20/24h) reached! Stopping watchdog.
+[2026-04-30T09:32:08+00:00] [WATCHDOG] ABORTED: Too many restarts. Manual intervention required.
+[2026-04-30T09:32:18+00:00] [WATCHDOG] ==========================================
+[2026-04-30T09:32:18+00:00] [WATCHDOG] Watchdog starting...
+[2026-04-30T09:32:18+00:00] [WATCHDOG]   Check interval: 30s
+[2026-04-30T09:32:18+00:00] [WATCHDOG]   LLM timeout: 10s
+[2026-04-30T09:32:18+00:00] [WATCHDOG]   TG timeout: 10s
+[2026-04-30T09:32:18+00:00] [WATCHDOG]   Max restarts/24h: 20
+[2026-04-30T09:32:18+00:00] [WATCHDOG]   Grace period: 5s
+[2026-04-30T09:32:18+00:00] [WATCHDOG] ==========================================
+[2026-04-30T09:32:18+00:00] [WATCHDOG] WARNING: Supervisor process not found!
+[2026-04-30T09:32:18+00:00] [WATCHDOG] ERROR: Max restarts (20/24h) reached! Stopping watchdog.
+[2026-04-30T09:32:18+00:00] [WATCHDOG] ABORTED: Too many restarts. Manual intervention required.
+[2026-04-30T09:32:28+00:00] [WATCHDOG] ==========================================
+[2026-04-30T09:32:28+00:00] [WATCHDOG] Watchdog starting...
+[2026-04-30T09:32:28+00:00] [WATCHDOG]   Check interval: 30s
+[2026-04-30T09:32:28+00:00] [WATCHDOG]   LLM timeout: 10s
+[2026-04-30T09:32:28+00:00] [WATCHDOG]   TG timeout: 10s
+[2026-04-30T09:32:28+00:00] [WATCHDOG]   Max restarts/24h: 20
+[2026-04-30T09:32:28+00:00] [WATCHDOG]   Grace period: 5s
+[2026-04-30T09:32:28+00:00] [WATCHDOG] ==========================================
+[2026-04-30T09:32:29+00:00] [WATCHDOG] WARNING: Supervisor process not found!
+[2026-04-30T09:32:29+00:00] [WATCHDOG] ERROR: Max restarts (20/24h) reached! Stopping watchdog.
+[2026-04-30T09:32:29+00:00] [WATCHDOG] ABORTED: Too many restarts. Manual intervention required.
+[2026-04-30T09:32:39+00:00] [WATCHDOG] ==========================================
+[2026-04-30T09:32:39+00:00] [WATCHDOG] Watchdog starting...
+[2026-04-30T09:32:39+00:00] [WATCHDOG]   Check interval: 30s
+[2026-04-30T09:32:39+00:00] [WATCHDOG]   LLM timeout: 10s
+[2026-04-30T09:32:39+00:00] [WATCHDOG]   TG timeout: 10s
+[2026-04-30T09:32:39+00:00] [WATCHDOG]   Max restarts/24h: 20
+[2026-04-30T09:32:39+00:00] [WATCHDOG]   Grace period: 5s
+[2026-04-30T09:32:39+00:00] [WATCHDOG] ==========================================
+[2026-04-30T09:32:39+00:00] [WATCHDOG] WARNING: Supervisor process not found!
+[2026-04-30T09:32:39+00:00] [WATCHDOG] ERROR: Max restarts (20/24h) reached! Stopping watchdog.
+[2026-04-30T09:32:39+00:00] [WATCHDOG] ABORTED: Too many restarts. Manual intervention required.
+[2026-04-30T09:32:49+00:00] [WATCHDOG] ==========================================
+[2026-04-30T09:32:49+00:00] [WATCHDOG] Watchdog starting...
+[2026-04-30T09:32:49+00:00] [WATCHDOG]   Check interval: 30s
+[2026-04-30T09:32:49+00:00] [WATCHDOG]   LLM timeout: 10s
+[2026-04-30T09:32:49+00:00] [WATCHDOG]   TG timeout: 10s
+[2026-04-30T09:32:49+00:00] [WATCHDOG]   Max restarts/24h: 20
+[2026-04-30T09:32:49+00:00] [WATCHDOG]   Grace period: 5s
+[2026-04-30T09:32:49+00:00] [WATCHDOG] ==========================================
+[2026-04-30T09:32:49+00:00] [WATCHDOG] WARNING: Supervisor process not found!
+[2026-04-30T09:32:49+00:00] [WATCHDOG] ERROR: Max restarts (20/24h) reached! Stopping watchdog.
+[2026-04-30T09:32:49+00:00] [WATCHDOG] ABORTED: Too many restarts. Manual intervention required.
+[2026-04-30T09:32:59+00:00] [WATCHDOG] ==========================================
+[2026-04-30T09:32:59+00:00] [WATCHDOG] Watchdog starting...
+[2026-04-30T09:32:59+00:00] [WATCHDOG]   Check interval: 30s
+[2026-04-30T09:32:59+00:00] [WATCHDOG]   LLM timeout: 10s
+[2026-04-30T09:32:59+00:00] [WATCHDOG]   TG timeout: 10s
+[2026-04-30T09:32:59+00:00] [WATCHDOG]   Max restarts/24h: 20
+[2026-04-30T09:32:59+00:00] [WATCHDOG]   Grace period: 5s
+[2026-04-30T09:32:59+00:00] [WATCHDOG] ==========================================
+[2026-04-30T09:32:59+00:00] [WATCHDOG] WARNING: Supervisor process not found!
+[2026-04-30T09:32:59+00:00] [WATCHDOG] ERROR: Max restarts (20/24h) reached! Stopping watchdog.
+[2026-04-30T09:32:59+00:00] [WATCHDOG] ABORTED: Too many restarts. Manual intervention required.
+[2026-04-30T09:33:09+00:00] [WATCHDOG] ==========================================
+[2026-04-30T09:33:09+00:00] [WATCHDOG] Watchdog starting...
+[2026-04-30T09:33:09+00:00] [WATCHDOG]   Check interval: 30s
+[2026-04-30T09:33:09+00:00] [WATCHDOG]   LLM timeout: 10s
+[2026-04-30T09:33:09+00:00] [WATCHDOG]   TG timeout: 10s
+[2026-04-30T09:33:09+00:00] [WATCHDOG]   Max restarts/24h: 20
+[2026-04-30T09:33:09+00:00] [WATCHDOG]   Grace period: 5s
+[2026-04-30T09:33:09+00:00] [WATCHDOG] ==========================================
+[2026-04-30T09:33:10+00:00] [WATCHDOG] WARNING: Supervisor process not found!
+[2026-04-30T09:33:10+00:00] [WATCHDOG] ERROR: Max restarts (20/24h) reached! Stopping watchdog.
+[2026-04-30T09:33:10+00:00] [WATCHDOG] ABORTED: Too many restarts. Manual intervention required.
+[2026-04-30T09:33:20+00:00] [WATCHDOG] ==========================================
+[2026-04-30T09:33:20+00:00] [WATCHDOG] Watchdog starting...
+[2026-04-30T09:33:20+00:00] [WATCHDOG]   Check interval: 30s
+[2026-04-30T09:33:20+00:00] [WATCHDOG]   LLM timeout: 10s
+[2026-04-30T09:33:20+00:00] [WATCHDOG]   TG timeout: 10s
+[2026-04-30T09:33:20+00:00] [WATCHDOG]   Max restarts/24h: 20
+[2026-04-30T09:33:20+00:00] [WATCHDOG]   Grace period: 5s
+[2026-04-30T09:33:20+00:00] [WATCHDOG] ==========================================
+[2026-04-30T09:33:20+00:00] [WATCHDOG] WARNING: Supervisor process not found!
+[2026-04-30T09:33:20+00:00] [WATCHDOG] ERROR: Max restarts (20/24h) reached! Stopping watchdog.
+[2026-04-30T09:33:20+00:00] [WATCHDOG] ABORTED: Too many restarts. Manual intervention required.
+[2026-04-30T09:33:30+00:00] [WATCHDOG] ==========================================
+[2026-04-30T09:33:30+00:00] [WATCHDOG] Watchdog starting...
+[2026-04-30T09:33:30+00:00] [WATCHDOG]   Check interval: 30s
+[2026-04-30T09:33:30+00:00] [WATCHDOG]   LLM timeout: 10s
+[2026-04-30T09:33:30+00:00] [WATCHDOG]   TG timeout: 10s
+[2026-04-30T09:33:30+00:00] [WATCHDOG]   Max restarts/24h: 20
+[2026-04-30T09:33:30+00:00] [WATCHDOG]   Grace period: 5s
+[2026-04-30T09:33:30+00:00] [WATCHDOG] ==========================================
+[2026-04-30T09:33:30+00:00] [WATCHDOG] WARNING: Supervisor process not found!
+[2026-04-30T09:33:30+00:00] [WATCHDOG] ERROR: Max restarts (20/24h) reached! Stopping watchdog.
+[2026-04-30T09:33:30+00:00] [WATCHDOG] ABORTED: Too many restarts. Manual intervention required.
+[2026-04-30T09:33:40+00:00] [WATCHDOG] ==========================================
+[2026-04-30T09:33:40+00:00] [WATCHDOG] Watchdog starting...
+[2026-04-30T09:33:40+00:00] [WATCHDOG]   Check interval: 30s
+[2026-04-30T09:33:40+00:00] [WATCHDOG]   LLM timeout: 10s
+[2026-04-30T09:33:40+00:00] [WATCHDOG]   TG timeout: 10s
+[2026-04-30T09:33:40+00:00] [WATCHDOG]   Max restarts/24h: 20
+[2026-04-30T09:33:40+00:00] [WATCHDOG]   Grace period: 5s
+[2026-04-30T09:33:40+00:00] [WATCHDOG] ==========================================
+[2026-04-30T09:33:40+00:00] [WATCHDOG] WARNING: Supervisor process not found!
+[2026-04-30T09:33:40+00:00] [WATCHDOG] ERROR: Max restarts (20/24h) reached! Stopping watchdog.
+[2026-04-30T09:33:40+00:00] [WATCHDOG] ABORTED: Too many restarts. Manual intervention required.
+[2026-04-30T09:33:50+00:00] [WATCHDOG] ==========================================
+[2026-04-30T09:33:50+00:00] [WATCHDOG] Watchdog starting...
+[2026-04-30T09:33:50+00:00] [WATCHDOG]   Check interval: 30s
+[2026-04-30T09:33:50+00:00] [WATCHDOG]   LLM timeout: 10s
+[2026-04-30T09:33:50+00:00] [WATCHDOG]   TG timeout: 10s
+[2026-04-30T09:33:50+00:00] [WATCHDOG]   Max restarts/24h: 20
+[2026-04-30T09:33:50+00:00] [WATCHDOG]   Grace period: 5s
+[2026-04-30T09:33:50+00:00] [WATCHDOG] ==========================================
+[2026-04-30T09:33:51+00:00] [WATCHDOG] WARNING: Supervisor process not found!
+[2026-04-30T09:33:51+00:00] [WATCHDOG] ERROR: Max restarts (20/24h) reached! Stopping watchdog.
+[2026-04-30T09:33:51+00:00] [WATCHDOG] ABORTED: Too many restarts. Manual intervention required.
+[2026-04-30T09:34:01+00:00] [WATCHDOG] ==========================================
+[2026-04-30T09:34:01+00:00] [WATCHDOG] Watchdog starting...
+[2026-04-30T09:34:01+00:00] [WATCHDOG]   Check interval: 30s
+[2026-04-30T09:34:01+00:00] [WATCHDOG]   LLM timeout: 10s
+[2026-04-30T09:34:01+00:00] [WATCHDOG]   TG timeout: 10s
+[2026-04-30T09:34:01+00:00] [WATCHDOG]   Max restarts/24h: 20
+[2026-04-30T09:34:01+00:00] [WATCHDOG]   Grace period: 5s
+[2026-04-30T09:34:01+00:00] [WATCHDOG] ==========================================
+[2026-04-30T09:34:01+00:00] [WATCHDOG] WARNING: Supervisor process not found!
+[2026-04-30T09:34:01+00:00] [WATCHDOG] ERROR: Max restarts (20/24h) reached! Stopping watchdog.
+[2026-04-30T09:34:01+00:00] [WATCHDOG] ABORTED: Too many restarts. Manual intervention required.
+[2026-04-30T09:34:11+00:00] [WATCHDOG] ==========================================
+[2026-04-30T09:34:11+00:00] [WATCHDOG] Watchdog starting...
+[2026-04-30T09:34:11+00:00] [WATCHDOG]   Check interval: 30s
+[2026-04-30T09:34:11+00:00] [WATCHDOG]   LLM timeout: 10s
+[2026-04-30T09:34:11+00:00] [WATCHDOG]   TG timeout: 10s
+[2026-04-30T09:34:11+00:00] [WATCHDOG]   Max restarts/24h: 20
+[2026-04-30T09:34:11+00:00] [WATCHDOG]   Grace period: 5s
+[2026-04-30T09:34:11+00:00] [WATCHDOG] ==========================================
+[2026-04-30T09:34:11+00:00] [WATCHDOG] WARNING: Supervisor process not found!
+[2026-04-30T09:34:11+00:00] [WATCHDOG] ERROR: Max restarts (20/24h) reached! Stopping watchdog.
+[2026-04-30T09:34:11+00:00] [WATCHDOG] ABORTED: Too many restarts. Manual intervention required.
+[2026-04-30T09:34:21+00:00] [WATCHDOG] ==========================================
+[2026-04-30T09:34:21+00:00] [WATCHDOG] Watchdog starting...
+[2026-04-30T09:34:21+00:00] [WATCHDOG]   Check interval: 30s
+[2026-04-30T09:34:21+00:00] [WATCHDOG]   LLM timeout: 10s
+[2026-04-30T09:34:21+00:00] [WATCHDOG]   TG timeout: 10s
+[2026-04-30T09:34:21+00:00] [WATCHDOG]   Max restarts/24h: 20
+[2026-04-30T09:34:21+00:00] [WATCHDOG]   Grace period: 5s
+[2026-04-30T09:34:21+00:00] [WATCHDOG] ==========================================
+[2026-04-30T09:34:21+00:00] [WATCHDOG] WARNING: Supervisor process not found!
+[2026-04-30T09:34:21+00:00] [WATCHDOG] ERROR: Max restarts (20/24h) reached! Stopping watchdog.
+[2026-04-30T09:34:21+00:00] [WATCHDOG] ABORTED: Too many restarts. Manual intervention required.
+[2026-04-30T09:34:31+00:00] [WATCHDOG] ==========================================
+[2026-04-30T09:34:31+00:00] [WATCHDOG] Watchdog starting...
+[2026-04-30T09:34:31+00:00] [WATCHDOG]   Check interval: 30s
+[2026-04-30T09:34:31+00:00] [WATCHDOG]   LLM timeout: 10s
+[2026-04-30T09:34:31+00:00] [WATCHDOG]   TG timeout: 10s
+[2026-04-30T09:34:31+00:00] [WATCHDOG]   Max restarts/24h: 20
+[2026-04-30T09:34:31+00:00] [WATCHDOG]   Grace period: 5s
+[2026-04-30T09:34:31+00:00] [WATCHDOG] ==========================================
+[2026-04-30T09:34:32+00:00] [WATCHDOG] WARNING: Supervisor process not found!
+[2026-04-30T09:34:32+00:00] [WATCHDOG] ERROR: Max restarts (20/24h) reached! Stopping watchdog.
+[2026-04-30T09:34:32+00:00] [WATCHDOG] ABORTED: Too many restarts. Manual intervention required.
+[2026-04-30T09:34:42+00:00] [WATCHDOG] ==========================================
+[2026-04-30T09:34:42+00:00] [WATCHDOG] Watchdog starting...
+[2026-04-30T09:34:42+00:00] [WATCHDOG]   Check interval: 30s
+[2026-04-30T09:34:42+00:00] [WATCHDOG]   LLM timeout: 10s
+[2026-04-30T09:34:42+00:00] [WATCHDOG]   TG timeout: 10s
+[2026-04-30T09:34:42+00:00] [WATCHDOG]   Max restarts/24h: 20
+[2026-04-30T09:34:42+00:00] [WATCHDOG]   Grace period: 5s
+[2026-04-30T09:34:42+00:00] [WATCHDOG] ==========================================
+[2026-04-30T09:34:42+00:00] [WATCHDOG] WARNING: Supervisor process not found!
+[2026-04-30T09:34:42+00:00] [WATCHDOG] ERROR: Max restarts (20/24h) reached! Stopping watchdog.
+[2026-04-30T09:34:42+00:00] [WATCHDOG] ABORTED: Too many restarts. Manual intervention required.
+[2026-04-30T09:34:52+00:00] [WATCHDOG] ==========================================
+[2026-04-30T09:34:52+00:00] [WATCHDOG] Watchdog starting...
+[2026-04-30T09:34:52+00:00] [WATCHDOG]   Check interval: 30s
+[2026-04-30T09:34:52+00:00] [WATCHDOG]   LLM timeout: 10s
+[2026-04-30T09:34:52+00:00] [WATCHDOG]   TG timeout: 10s
+[2026-04-30T09:34:52+00:00] [WATCHDOG]   Max restarts/24h: 20
+[2026-04-30T09:34:52+00:00] [WATCHDOG]   Grace period: 5s
+[2026-04-30T09:34:52+00:00] [WATCHDOG] ==========================================
+[2026-04-30T09:34:52+00:00] [WATCHDOG] WARNING: Supervisor process not found!
+[2026-04-30T09:34:52+00:00] [WATCHDOG] ERROR: Max restarts (20/24h) reached! Stopping watchdog.
+[2026-04-30T09:34:52+00:00] [WATCHDOG] ABORTED: Too many restarts. Manual intervention required.
+[2026-04-30T09:35:02+00:00] [WATCHDOG] ==========================================
+[2026-04-30T09:35:02+00:00] [WATCHDOG] Watchdog starting...
+[2026-04-30T09:35:02+00:00] [WATCHDOG]   Check interval: 30s
+[2026-04-30T09:35:02+00:00] [WATCHDOG]   LLM timeout: 10s
+[2026-04-30T09:35:02+00:00] [WATCHDOG]   TG timeout: 10s
+[2026-04-30T09:35:02+00:00] [WATCHDOG]   Max restarts/24h: 20
+[2026-04-30T09:35:02+00:00] [WATCHDOG]   Grace period: 5s
+[2026-04-30T09:35:02+00:00] [WATCHDOG] ==========================================
+[2026-04-30T09:35:02+00:00] [WATCHDOG] WARNING: Supervisor process not found!
+[2026-04-30T09:35:02+00:00] [WATCHDOG] ERROR: Max restarts (20/24h) reached! Stopping watchdog.
+[2026-04-30T09:35:02+00:00] [WATCHDOG] ABORTED: Too many restarts. Manual intervention required.
