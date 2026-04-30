@@ -119,3 +119,19 @@ python local_launcher.py
 - **Гибридный подход**: используйте локальную модель для экономии, облачную для скорости
 
 Рекомендация: `OUROBOROS_MODEL=qwen3.6:35b` (локальная), `OUROBOROS_MODEL_LIGHT=google/gemini-3-pro-preview` (облачная быстрая).
+
+---
+
+## Тестирование (pytest)
+
+Ouroboros использует `pytest` для pre-push проверок. Убедитесь что pytest установлен:
+
+```bash
+pip install pytest>=7.0
+# ИЛИ
+pip install --break-system-packages pytest>=7.0
+```
+
+**Важно:** Pre-push тесты являются advisory (неблокирующими). Если тесты падают — push всё равно выполняется, но предупреждение логируется.
+
+Смотрите также: [`requirements.txt`](requirements.txt)

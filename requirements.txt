@@ -3,3 +3,4 @@ openai>=1.0.0
 requests
 playwright
 playwright-stealth
+pytest>=7.0
