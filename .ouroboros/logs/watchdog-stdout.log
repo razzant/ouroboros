@@ -16,3 +16,15 @@ G]   Check interval: 30s
 [2026-04-28T08:17:40+00:00] [WATCHDOG] ==========================================
 [2026-04-28T08:49:25+00:00] [WATCHDOG] WARNING: llama-server not responding on port 8080
 [2026-04-28T10:55:03+00:00] [WATCHDOG] WARNING: llama-server not responding on port 8080
+[2026-04-30T08:49:00+00:00] [WATCHDOG] ==========================================
+[2026-04-30T08:49:00+00:00] [WATCHDOG] Watchdog starting...
+[2026-04-30T08:49:00+00:00] [WATCHDOG]   Check interval: 30s
+[2026-04-30T08:49:00+00:00] [WATCHDOG]   LLM timeout: 10s
+[2026-04-30T08:49:00+00:00] [WATCHDOG]   TG timeout: 10s
+[2026-04-30T08:49:00+00:00] [WATCHDOG]   Max restarts/24h: 20
+[2026-04-30T08:49:00+00:00] [WATCHDOG]   Grace period: 5s
+[2026-04-30T08:49:00+00:00] [WATCHDOG] ==========================================
+[2026-04-30T08:49:00+00:00] [WATCHDOG] WARNING: Supervisor process not found!
+[2026-04-30T08:49:00+00:00] [WATCHDOG] Restarting supervisor...
+[2026-04-30T08:49:00+00:00] [WATCHDOG] Waiting 5s before restart...
+[2026-04-30T08:49:05+00:00] [WATCHDOG] Supervisor restarted with PID 3853820

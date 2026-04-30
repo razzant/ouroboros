@@ -1282,3 +1282,13 @@ Traceback (most recent call last):
     ^^^^^^^^^^^^^^^^^^^^
 AttributeError: 'OuroborosAgent' object has no attribute '_verify_restart'
 Pre-push tests failed, blocking push
+[.] Loading .env from /home/zera/ouroboros_zera/.ouroboros
+============================================
+  Ouroboros Zera Local Launcher
+============================================
+  Model:          Qwen3.6-35B-A3B-Q4_K_M.gguf
+  Base URL:       http://localhost:8080/v1
+  GitHub:         srilankabankg-oss/ouroboros_zera
+  Budget:         $0
+============================================
+2026-04-30 11:49:05,584 [INFO] __main__: Environment ready: repo=/home/zera/ouroboros_zera, drive=/home/zera/ouroboros_zera/.ouroboros
