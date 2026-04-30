@@ -2694,3 +2694,5 @@
 {"ts": "2026-04-30T11:10:42+00:00", "type": "watchdog_start", "check_interval": 30, "llm_timeout": 10, "tg_timeout": 10, "max_restarts": 20}
 {"ts": "2026-04-30T11:10:52+00:00", "type": "watchdog_start", "check_interval": 30, "llm_timeout": 10, "tg_timeout": 10, "max_restarts": 20}
 {"ts": "2026-04-30T11:11:02+00:00", "type": "watchdog_start", "check_interval": 30, "llm_timeout": 10, "tg_timeout": 10, "max_restarts": 20}
+{"ts": "2026-04-30T11:11:13+00:00", "type": "watchdog_start", "check_interval": 30, "llm_timeout": 10, "tg_timeout": 10, "max_restarts": 20}
+{"ts": "2026-04-30T11:11:13+00:00", "type": "health_check", "llama": "healthy"}
