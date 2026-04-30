@@ -308,7 +308,7 @@ def run_llm_loop(
             content = msg.get("content")
             # No tool calls — final response
             if not tool_calls:
-                return _handle_text_response(content, llm_trace, accumulated_usage)
+                return handle_text_response(content, llm_trace, accumulated_usage)
 
             # Process tool calls
             messages.append({"role": "assistant", "content": content or "", "tool_calls": tool_calls})

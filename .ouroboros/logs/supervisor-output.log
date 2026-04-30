@@ -1,0 +1,1284 @@
+[.] Loading .env from /home/zera/ouroboros_zera/.ouroboros
+============================================
+  Ouroboros Zera Local Launcher
+============================================
+  Model:          Qwen3.6-35B-A3B-Q4_K_M.gguf
+  Base URL:       http://localhost:8080/v1
+  GitHub:         srilankabankg-oss/ouroboros_zera
+  Budget:         $0
+============================================
+Уже на «ouroboros»
+M	.ouroboros/logs/watchdog.jsonl
+Эта ветка соответствует «origin/ouroboros».
+Указатель HEAD сейчас на коммите 6f8f08a Добавлены файлы для работы с локальной LLM и watchdog
+============================================================
+  Ouroboros Zera Local Launcher
+============================================================
+  Model:          Qwen3.6-35B-A3B-Q4_K_M.gguf
+  Model (code):   Qwen3.6-35B-A3B-Q4_K_M.gguf
+  Model (light):  Qwen3.6-35B-A3B-Q4_K_M.gguf
+  Base URL:       http://localhost:8080/v1
+  GitHub:         srilankabankg-oss/ouroboros_zera
+  Budget:         $0.0
+  Workers:        3
+  Telegram:       **********Ohkw
+============================================================
+fatal: Не удалось создать «/home/zera/ouroboros_zera/.git/index.lock»: Файл существует.
+
+Похоже, что другой процесс git запущен в этом репозитории,
+например редактор открыт из «git commit». Пожалуйста, убедитесь,
+что все процессы были завершены и потом попробуйте снова.
+Если это не поможет, то возможно процесс git был ранее завершен
+с ошибкой в этом репозитории: 
+удалите файл вручную для продолжения.
+Failed to auto-rescue uncommitted changes: Command '['git', 'add', '-u']' returned non-zero exit status 128.
+Traceback (most recent call last):
+  File "/home/zera/ouroboros_zera/ouroboros/agent.py", line 156, in _check_uncommitted_changes
+    subprocess.run(["git", "add", "-u"], cwd=str(self.env.repo_dir), timeout=10, check=True)
+  File "/usr/lib/python3.12/subprocess.py", line 571, in run
+    raise CalledProcessError(retcode, process.args,
+subprocess.CalledProcessError: Command '['git', 'add', '-u']' returned non-zero exit status 128.
+Startup verification found 1 issue(s): {'uncommitted_changes': {'status': 'warning', 'files': ['M .ouroboros/logs/watchdog.jsonl', '?? .ouroboros/logs/restart_history.log', '?? .ouroboros/logs/supervisor-output.log', '?? .ouroboros/supervisor.pid'], 'auto_committed': False}, 'version_sync': {'version_file': '6.2.0', 'pyproject_version': '6.2.0', 'readme_version': '6.2.0', 'status': 'warning', 'message': 'no_tags'}, 'budget': {'status': 'ok', 'remaining_usd': inf, 'total_usd': 0, 'spent_usd': 0, 'note': 'unlimited (local mode)'}}
+[ouroboros 4fde74f] auto-rescue: uncommitted changes detected on startup
+ 1 file changed, 2 insertions(+)
+fatal: Не удалось создать «/home/zera/ouroboros_zera/.git/index.lock»: Файл существует.
+
+Похоже, что другой процесс git запущен в этом репозитории,
+например редактор открыт из «git commit». Пожалуйста, убедитесь,
+что все процессы были завершены и потом попробуйте снова.
+Если это не поможет, то возможно процесс git был ранее завершен
+с ошибкой в этом репозитории: 
+удалите файл вручную для продолжения.
+Failed to auto-rescue uncommitted changes: Command '['git', 'commit', '-m', 'auto-rescue: uncommitted changes detected on startup']' returned non-zero exit status 128.
+Traceback (most recent call last):
+  File "/home/zera/ouroboros_zera/ouroboros/agent.py", line 157, in _check_uncommitted_changes
+    subprocess.run(
+  File "/usr/lib/python3.12/subprocess.py", line 571, in run
+    raise CalledProcessError(retcode, process.args,
+subprocess.CalledProcessError: Command '['git', 'commit', '-m', 'auto-rescue: uncommitted changes detected on startup']' returned non-zero exit status 128.
+Startup verification found 1 issue(s): {'uncommitted_changes': {'status': 'warning', 'files': ['?? .ouroboros/logs/restart_history.log', '?? .ouroboros/logs/supervisor-output.log', '?? .ouroboros/supervisor.pid'], 'auto_committed': False}, 'version_sync': {'version_file': '6.2.0', 'pyproject_version': '6.2.0', 'readme_version': '6.2.0', 'status': 'warning', 'message': 'no_tags'}, 'budget': {'status': 'ok', 'remaining_usd': inf, 'total_usd': 0, 'spent_usd': 0, 'note': 'unlimited (local mode)'}}
+fatal: couldn't find remote ref ouroboros
+Failed to auto-rescue uncommitted changes: Command '['git', 'pull', '--rebase', 'origin', 'ouroboros']' returned non-zero exit status 1.
+Traceback (most recent call last):
+  File "/home/zera/ouroboros_zera/ouroboros/agent.py", line 165, in _check_uncommitted_changes
+    subprocess.run(
+  File "/usr/lib/python3.12/subprocess.py", line 571, in run
+    raise CalledProcessError(retcode, process.args,
+subprocess.CalledProcessError: Command '['git', 'pull', '--rebase', 'origin', 'ouroboros']' returned non-zero exit status 1.
+Startup verification found 1 issue(s): {'uncommitted_changes': {'status': 'warning', 'files': ['M .ouroboros/logs/watchdog.jsonl', '?? .ouroboros/logs/restart_history.log', '?? .ouroboros/logs/supervisor-output.log', '?? .ouroboros/supervisor.pid'], 'auto_committed': False}, 'version_sync': {'version_file': '6.2.0', 'pyproject_version': '6.2.0', 'readme_version': '6.2.0', 'status': 'warning', 'message': 'no_tags'}, 'budget': {'status': 'ok', 'remaining_usd': inf, 'total_usd': 0, 'spent_usd': 0, 'note': 'unlimited (local mode)'}}
+Текущая ветка: ouroboros
+Ваша ветка опережает «origin/ouroboros» на 1 коммит.
+  (используйте «git push», чтобы опубликовать ваши локальные коммиты)
+
+Неотслеживаемые файлы:
+  (используйте «git add <файл>...», чтобы добавить в то, что будет включено в коммит)
+	.ouroboros/logs/restart_history.log
+	.ouroboros/logs/supervisor-output.log
+	.ouroboros/supervisor.pid
+
+индекс пуст, но есть неотслеживаемые файлы
+(используйте «git add», чтобы проиндексировать их)
+Failed to auto-rescue uncommitted changes: Command '['git', 'commit', '-m', 'auto-rescue: uncommitted changes detected on startup']' returned non-zero exit status 1.
+Traceback (most recent call last):
+  File "/home/zera/ouroboros_zera/ouroboros/agent.py", line 157, in _check_uncommitted_changes
+    subprocess.run(
+  File "/usr/lib/python3.12/subprocess.py", line 571, in run
+    raise CalledProcessError(retcode, process.args,
+subprocess.CalledProcessError: Command '['git', 'commit', '-m', 'auto-rescue: uncommitted changes detected on startup']' returned non-zero exit status 1.
+Startup verification found 1 issue(s): {'uncommitted_changes': {'status': 'warning', 'files': ['?? .ouroboros/logs/restart_history.log', '?? .ouroboros/logs/supervisor-output.log', '?? .ouroboros/supervisor.pid'], 'auto_committed': False}, 'version_sync': {'version_file': '6.2.0', 'pyproject_version': '6.2.0', 'readme_version': '6.2.0', 'status': 'warning', 'message': 'no_tags'}, 'budget': {'status': 'ok', 'remaining_usd': inf, 'total_usd': 0, 'spent_usd': 0, 'note': 'unlimited (local mode)'}}
+Уже на «ouroboros»
+M	.ouroboros/logs/watchdog.jsonl
+Ваша ветка опережает «origin/ouroboros» на 1 коммит.
+  (используйте «git push», чтобы опубликовать ваши локальные коммиты)
+Указатель HEAD сейчас на коммите 6f8f08a Добавлены файлы для работы с локальной LLM и watchdog
+Уже на «ouroboros»
+M	.ouroboros/logs/watchdog.jsonl
+Эта ветка соответствует «origin/ouroboros».
+Указатель HEAD сейчас на коммите 6f8f08a Добавлены файлы для работы с локальной LLM и watchdog
+============================================================
+  Ouroboros Zera Local Launcher
+============================================================
+  Model:          Qwen3.6-35B-A3B-Q4_K_M.gguf
+  Model (code):   Qwen3.6-35B-A3B-Q4_K_M.gguf
+  Model (light):  Qwen3.6-35B-A3B-Q4_K_M.gguf
+  Base URL:       http://localhost:8080/v1
+  GitHub:         srilankabankg-oss/ouroboros_zera
+  Budget:         $0.0
+  Workers:        3
+  Telegram:       **********Ohkw
+============================================================
+Текущая ветка: ouroboros
+Эта ветка соответствует «origin/ouroboros».
+
+Неотслеживаемые файлы:
+  (используйте «git add <файл>...», чтобы добавить в то, что будет включено в коммит)
+	.ouroboros/logs/restart_history.log
+	.ouroboros/logs/supervisor-output.log
+	.ouroboros/supervisor.pid
+
+индекс пуст, но есть неотслеживаемые файлы
+(используйте «git add», чтобы проиндексировать их)
+fatal: Не удалось создать «/home/zera/ouroboros_zera/.git/index.lock»: Файл существует.
+
+Похоже, что другой процесс git запущен в этом репозитории,
+например редактор открыт из «git commit». Пожалуйста, убедитесь,
+что все процессы были завершены и потом попробуйте снова.
+Если это не поможет, то возможно процесс git был ранее завершен
+с ошибкой в этом репозитории: 
+удалите файл вручную для продолжения.
+Failed to auto-rescue uncommitted changes: Command '['git', 'commit', '-m', 'auto-rescue: uncommitted changes detected on startup']' returned non-zero exit status 1.
+Traceback (most recent call last):
+  File "/home/zera/ouroboros_zera/ouroboros/agent.py", line 157, in _check_uncommitted_changes
+    subprocess.run(
+  File "/usr/lib/python3.12/subprocess.py", line 571, in run
+    raise CalledProcessError(retcode, process.args,
+subprocess.CalledProcessError: Command '['git', 'commit', '-m', 'auto-rescue: uncommitted changes detected on startup']' returned non-zero exit status 1.
+Startup verification found 1 issue(s): {'uncommitted_changes': {'status': 'warning', 'files': ['?? .ouroboros/logs/restart_history.log', '?? .ouroboros/logs/supervisor-output.log', '?? .ouroboros/supervisor.pid'], 'auto_committed': False}, 'version_sync': {'version_file': '6.2.0', 'pyproject_version': '6.2.0', 'readme_version': '6.2.0', 'status': 'warning', 'message': 'no_tags'}, 'budget': {'status': 'ok', 'remaining_usd': inf, 'total_usd': 0, 'spent_usd': 0, 'note': 'unlimited (local mode)'}}
+Failed to auto-rescue uncommitted changes: Command '['git', 'commit', '-m', 'auto-rescue: uncommitted changes detected on startup']' returned non-zero exit status 128.
+Traceback (most recent call last):
+  File "/home/zera/ouroboros_zera/ouroboros/agent.py", line 157, in _check_uncommitted_changes
+    subprocess.run(
+  File "/usr/lib/python3.12/subprocess.py", line 571, in run
+    raise CalledProcessError(retcode, process.args,
+subprocess.CalledProcessError: Command '['git', 'commit', '-m', 'auto-rescue: uncommitted changes detected on startup']' returned non-zero exit status 128.
+Текущая ветка: ouroboros
+Эта ветка соответствует «origin/ouroboros».
+
+Неотслеживаемые файлы:
+  (используйте «git add <файл>...», чтобы добавить в то, что будет включено в коммит)
+	.ouroboros/logs/restart_history.log
+	.ouroboros/logs/supervisor-output.log
+	.ouroboros/supervisor.pid
+
+индекс пуст, но есть неотслеживаемые файлы
+(используйте «git add», чтобы проиндексировать их)
+Failed to auto-rescue uncommitted changes: Command '['git', 'commit', '-m', 'auto-rescue: uncommitted changes detected on startup']' returned non-zero exit status 1.
+Traceback (most recent call last):
+  File "/home/zera/ouroboros_zera/ouroboros/agent.py", line 157, in _check_uncommitted_changes
+    subprocess.run(
+  File "/usr/lib/python3.12/subprocess.py", line 571, in run
+    raise CalledProcessError(retcode, process.args,
+subprocess.CalledProcessError: Command '['git', 'commit', '-m', 'auto-rescue: uncommitted changes detected on startup']' returned non-zero exit status 1.
+Startup verification found 1 issue(s): {'uncommitted_changes': {'status': 'warning', 'files': ['?? .ouroboros/logs/restart_history.log', '?? .ouroboros/logs/supervisor-output.log', '?? .ouroboros/supervisor.pid'], 'auto_committed': False}, 'version_sync': {'version_file': '6.2.0', 'pyproject_version': '6.2.0', 'readme_version': '6.2.0', 'status': 'warning', 'message': 'no_tags'}, 'budget': {'status': 'ok', 'remaining_usd': inf, 'total_usd': 0, 'spent_usd': 0, 'note': 'unlimited (local mode)'}}
+Startup verification found 1 issue(s): {'uncommitted_changes': {'status': 'warning', 'files': ['?? .ouroboros/logs/restart_history.log', '?? .ouroboros/logs/supervisor-output.log', '?? .ouroboros/supervisor.pid'], 'auto_committed': False}, 'version_sync': {'version_file': '6.2.0', 'pyproject_version': '6.2.0', 'readme_version': '6.2.0', 'status': 'warning', 'message': 'no_tags'}, 'budget': {'status': 'ok', 'remaining_usd': inf, 'total_usd': 0, 'spent_usd': 0, 'note': 'unlimited (local mode)'}}
+Текущая ветка: ouroboros
+Эта ветка соответствует «origin/ouroboros».
+
+Неотслеживаемые файлы:
+  (используйте «git add <файл>...», чтобы добавить в то, что будет включено в коммит)
+	.ouroboros/logs/restart_history.log
+	.ouroboros/logs/supervisor-output.log
+	.ouroboros/supervisor.pid
+
+индекс пуст, но есть неотслеживаемые файлы
+(используйте «git add», чтобы проиндексировать их)
+Failed to auto-rescue uncommitted changes: Command '['git', 'commit', '-m', 'auto-rescue: uncommitted changes detected on startup']' returned non-zero exit status 1.
+Traceback (most recent call last):
+  File "/home/zera/ouroboros_zera/ouroboros/agent.py", line 157, in _check_uncommitted_changes
+    subprocess.run(
+  File "/usr/lib/python3.12/subprocess.py", line 571, in run
+    raise CalledProcessError(retcode, process.args,
+subprocess.CalledProcessError: Command '['git', 'commit', '-m', 'auto-rescue: uncommitted changes detected on startup']' returned non-zero exit status 1.
+Startup verification found 1 issue(s): {'uncommitted_changes': {'status': 'warning', 'files': ['?? .ouroboros/logs/restart_history.log', '?? .ouroboros/logs/supervisor-output.log', '?? .ouroboros/supervisor.pid'], 'auto_committed': False}, 'version_sync': {'version_file': '6.2.0', 'pyproject_version': '6.2.0', 'readme_version': '6.2.0', 'status': 'warning', 'message': 'no_tags'}, 'budget': {'status': 'ok', 'remaining_usd': inf, 'total_usd': 0, 'spent_usd': 0, 'note': 'unlimited (local mode)'}}
+Уже на «ouroboros»
+M	.ouroboros/logs/watchdog.jsonl
+Эта ветка соответствует «origin/ouroboros».
+Указатель HEAD сейчас на коммите 6f8f08a Добавлены файлы для работы с локальной LLM и watchdog
+Уже на «ouroboros»
+M	.ouroboros/logs/watchdog.jsonl
+Эта ветка соответствует «origin/ouroboros».
+Указатель HEAD сейчас на коммите 6f8f08a Добавлены файлы для работы с локальной LLM и watchdog
+============================================================
+  Ouroboros Zera Local Launcher
+============================================================
+  Model:          Qwen3.6-35B-A3B-Q4_K_M.gguf
+  Model (code):   Qwen3.6-35B-A3B-Q4_K_M.gguf
+  Model (light):  Qwen3.6-35B-A3B-Q4_K_M.gguf
+  Base URL:       http://localhost:8080/v1
+  GitHub:         srilankabankg-oss/ouroboros_zera
+  Budget:         $0.0
+  Workers:        3
+  Telegram:       **********Ohkw
+============================================================
+Текущая ветка: ouroboros
+Эта ветка соответствует «origin/ouroboros».
+
+Неотслеживаемые файлы:
+  (используйте «git add <файл>...», чтобы добавить в то, что будет включено в коммит)
+	.ouroboros/logs/restart_history.log
+	.ouroboros/logs/supervisor-output.log
+	.ouroboros/supervisor.pid
+
+индекс пуст, но есть неотслеживаемые файлы
+(используйте «git add», чтобы проиндексировать их)
+fatal: Не удалось создать «/home/zera/ouroboros_zera/.git/index.lock»: Файл существует.
+
+Похоже, что другой процесс git запущен в этом репозитории,
+например редактор открыт из «git commit». Пожалуйста, убедитесь,
+что все процессы были завершены и потом попробуйте снова.
+Если это не поможет, то возможно процесс git был ранее завершен
+с ошибкой в этом репозитории: 
+удалите файл вручную для продолжения.
+Текущая ветка: ouroboros
+Эта ветка соответствует «origin/ouroboros».
+
+Неотслеживаемые файлы:
+  (используйте «git add <файл>...», чтобы добавить в то, что будет включено в коммит)
+	.ouroboros/logs/restart_history.log
+	.ouroboros/logs/supervisor-output.log
+	.ouroboros/supervisor.pid
+
+индекс пуст, но есть неотслеживаемые файлы
+(используйте «git add», чтобы проиндексировать их)
+Failed to auto-rescue uncommitted changes: Command '['git', 'commit', '-m', 'auto-rescue: uncommitted changes detected on startup']' returned non-zero exit status 1.
+Traceback (most recent call last):
+  File "/home/zera/ouroboros_zera/ouroboros/agent.py", line 157, in _check_uncommitted_changes
+    subprocess.run(
+  File "/usr/lib/python3.12/subprocess.py", line 571, in run
+    raise CalledProcessError(retcode, process.args,
+subprocess.CalledProcessError: Command '['git', 'commit', '-m', 'auto-rescue: uncommitted changes detected on startup']' returned non-zero exit status 1.
+Failed to auto-rescue uncommitted changes: Command '['git', 'commit', '-m', 'auto-rescue: uncommitted changes detected on startup']' returned non-zero exit status 1.
+Traceback (most recent call last):
+  File "/home/zera/ouroboros_zera/ouroboros/agent.py", line 157, in _check_uncommitted_changes
+    subprocess.run(
+  File "/usr/lib/python3.12/subprocess.py", line 571, in run
+    raise CalledProcessError(retcode, process.args,
+subprocess.CalledProcessError: Command '['git', 'commit', '-m', 'auto-rescue: uncommitted changes detected on startup']' returned non-zero exit status 1.
+Failed to auto-rescue uncommitted changes: Command '['git', 'commit', '-m', 'auto-rescue: uncommitted changes detected on startup']' returned non-zero exit status 128.
+Traceback (most recent call last):
+  File "/home/zera/ouroboros_zera/ouroboros/agent.py", line 157, in _check_uncommitted_changes
+    subprocess.run(
+  File "/usr/lib/python3.12/subprocess.py", line 571, in run
+    raise CalledProcessError(retcode, process.args,
+subprocess.CalledProcessError: Command '['git', 'commit', '-m', 'auto-rescue: uncommitted changes detected on startup']' returned non-zero exit status 128.
+Startup verification found 1 issue(s): {'uncommitted_changes': {'status': 'warning', 'files': ['?? .ouroboros/logs/restart_history.log', '?? .ouroboros/logs/supervisor-output.log', '?? .ouroboros/supervisor.pid'], 'auto_committed': False}, 'version_sync': {'version_file': '6.2.0', 'pyproject_version': '6.2.0', 'readme_version': '6.2.0', 'status': 'warning', 'message': 'no_tags'}, 'budget': {'status': 'ok', 'remaining_usd': inf, 'total_usd': 0, 'spent_usd': 0, 'note': 'unlimited (local mode)'}}
+Startup verification found 1 issue(s): {'uncommitted_changes': {'status': 'warning', 'files': ['?? .ouroboros/logs/restart_history.log', '?? .ouroboros/logs/supervisor-output.log', '?? .ouroboros/supervisor.pid'], 'auto_committed': False}, 'version_sync': {'version_file': '6.2.0', 'pyproject_version': '6.2.0', 'readme_version': '6.2.0', 'status': 'warning', 'message': 'no_tags'}, 'budget': {'status': 'ok', 'remaining_usd': inf, 'total_usd': 0, 'spent_usd': 0, 'note': 'unlimited (local mode)'}}
+Startup verification found 1 issue(s): {'uncommitted_changes': {'status': 'warning', 'files': ['?? .ouroboros/logs/restart_history.log', '?? .ouroboros/logs/supervisor-output.log', '?? .ouroboros/supervisor.pid'], 'auto_committed': False}, 'version_sync': {'version_file': '6.2.0', 'pyproject_version': '6.2.0', 'readme_version': '6.2.0', 'status': 'warning', 'message': 'no_tags'}, 'budget': {'status': 'ok', 'remaining_usd': inf, 'total_usd': 0, 'spent_usd': 0, 'note': 'unlimited (local mode)'}}
+Текущая ветка: ouroboros
+Эта ветка соответствует «origin/ouroboros».
+
+Неотслеживаемые файлы:
+  (используйте «git add <файл>...», чтобы добавить в то, что будет включено в коммит)
+	.ouroboros/logs/restart_history.log
+	.ouroboros/logs/supervisor-output.log
+	.ouroboros/supervisor.pid
+
+индекс пуст, но есть неотслеживаемые файлы
+(используйте «git add», чтобы проиндексировать их)
+Failed to auto-rescue uncommitted changes: Command '['git', 'commit', '-m', 'auto-rescue: uncommitted changes detected on startup']' returned non-zero exit status 1.
+Traceback (most recent call last):
+  File "/home/zera/ouroboros_zera/ouroboros/agent.py", line 157, in _check_uncommitted_changes
+    subprocess.run(
+  File "/usr/lib/python3.12/subprocess.py", line 571, in run
+    raise CalledProcessError(retcode, process.args,
+subprocess.CalledProcessError: Command '['git', 'commit', '-m', 'auto-rescue: uncommitted changes detected on startup']' returned non-zero exit status 1.
+Startup verification found 1 issue(s): {'uncommitted_changes': {'status': 'warning', 'files': ['?? .ouroboros/logs/restart_history.log', '?? .ouroboros/logs/supervisor-output.log', '?? .ouroboros/supervisor.pid'], 'auto_committed': False}, 'version_sync': {'version_file': '6.2.0', 'pyproject_version': '6.2.0', 'readme_version': '6.2.0', 'status': 'warning', 'message': 'no_tags'}, 'budget': {'status': 'ok', 'remaining_usd': inf, 'total_usd': 0, 'spent_usd': 0, 'note': 'unlimited (local mode)'}}
+Уже на «ouroboros»
+M	.ouroboros/logs/watchdog.jsonl
+Эта ветка соответствует «origin/ouroboros».
+Указатель HEAD сейчас на коммите 6f8f08a Добавлены файлы для работы с локальной LLM и watchdog
+Уже на «ouroboros»
+M	.ouroboros/logs/watchdog.jsonl
+Эта ветка соответствует «origin/ouroboros».
+Указатель HEAD сейчас на коммите 6f8f08a Добавлены файлы для работы с локальной LLM и watchdog
+============================================================
+  Ouroboros Zera Local Launcher
+============================================================
+  Model:          Qwen3.6-35B-A3B-Q4_K_M.gguf
+  Model (code):   Qwen3.6-35B-A3B-Q4_K_M.gguf
+  Model (light):  Qwen3.6-35B-A3B-Q4_K_M.gguf
+  Base URL:       http://localhost:8080/v1
+  GitHub:         srilankabankg-oss/ouroboros_zera
+  Budget:         $0.0
+  Workers:        3
+  Telegram:       **********Ohkw
+============================================================
+fatal: Не удалось создать «/home/zera/ouroboros_zera/.git/index.lock»: Файл существует.
+
+Похоже, что другой процесс git запущен в этом репозитории,
+например редактор открыт из «git commit». Пожалуйста, убедитесь,
+что все процессы были завершены и потом попробуйте снова.
+Если это не поможет, то возможно процесс git был ранее завершен
+с ошибкой в этом репозитории: 
+удалите файл вручную для продолжения.
+Текущая ветка: ouroboros
+Эта ветка соответствует «origin/ouroboros».
+
+Неотслеживаемые файлы:
+  (используйте «git add <файл>...», чтобы добавить в то, что будет включено в коммит)
+	.ouroboros/logs/restart_history.log
+	.ouroboros/logs/supervisor-output.log
+	.ouroboros/supervisor.pid
+
+индекс пуст, но есть неотслеживаемые файлы
+(используйте «git add», чтобы проиндексировать их)
+Failed to auto-rescue uncommitted changes: Command '['git', 'commit', '-m', 'auto-rescue: uncommitted changes detected on startup']' returned non-zero exit status 1.
+Traceback (most recent call last):
+  File "/home/zera/ouroboros_zera/ouroboros/agent.py", line 157, in _check_uncommitted_changes
+    subprocess.run(
+  File "/usr/lib/python3.12/subprocess.py", line 571, in run
+    raise CalledProcessError(retcode, process.args,
+subprocess.CalledProcessError: Command '['git', 'commit', '-m', 'auto-rescue: uncommitted changes detected on startup']' returned non-zero exit status 1.
+Failed to auto-rescue uncommitted changes: Command '['git', 'add', '-u']' returned non-zero exit status 128.
+Traceback (most recent call last):
+  File "/home/zera/ouroboros_zera/ouroboros/agent.py", line 156, in _check_uncommitted_changes
+    subprocess.run(["git", "add", "-u"], cwd=str(self.env.repo_dir), timeout=10, check=True)
+  File "/usr/lib/python3.12/subprocess.py", line 571, in run
+    raise CalledProcessError(retcode, process.args,
+subprocess.CalledProcessError: Command '['git', 'add', '-u']' returned non-zero exit status 128.
+Startup verification found 1 issue(s): {'uncommitted_changes': {'status': 'warning', 'files': ['?? .ouroboros/logs/restart_history.log', '?? .ouroboros/logs/supervisor-output.log', '?? .ouroboros/supervisor.pid'], 'auto_committed': False}, 'version_sync': {'version_file': '6.2.0', 'pyproject_version': '6.2.0', 'readme_version': '6.2.0', 'status': 'warning', 'message': 'no_tags'}, 'budget': {'status': 'ok', 'remaining_usd': inf, 'total_usd': 0, 'spent_usd': 0, 'note': 'unlimited (local mode)'}}
+Startup verification found 1 issue(s): {'uncommitted_changes': {'status': 'warning', 'files': ['?? .ouroboros/logs/restart_history.log', '?? .ouroboros/logs/supervisor-output.log', '?? .ouroboros/supervisor.pid'], 'auto_committed': False}, 'version_sync': {'version_file': '6.2.0', 'pyproject_version': '6.2.0', 'readme_version': '6.2.0', 'status': 'warning', 'message': 'no_tags'}, 'budget': {'status': 'ok', 'remaining_usd': inf, 'total_usd': 0, 'spent_usd': 0, 'note': 'unlimited (local mode)'}}
+Текущая ветка: ouroboros
+Эта ветка соответствует «origin/ouroboros».
+
+Неотслеживаемые файлы:
+  (используйте «git add <файл>...», чтобы добавить в то, что будет включено в коммит)
+	.ouroboros/logs/restart_history.log
+	.ouroboros/logs/supervisor-output.log
+	.ouroboros/supervisor.pid
+
+индекс пуст, но есть неотслеживаемые файлы
+(используйте «git add», чтобы проиндексировать их)
+Failed to auto-rescue uncommitted changes: Command '['git', 'commit', '-m', 'auto-rescue: uncommitted changes detected on startup']' returned non-zero exit status 1.
+Traceback (most recent call last):
+  File "/home/zera/ouroboros_zera/ouroboros/agent.py", line 157, in _check_uncommitted_changes
+    subprocess.run(
+  File "/usr/lib/python3.12/subprocess.py", line 571, in run
+    raise CalledProcessError(retcode, process.args,
+subprocess.CalledProcessError: Command '['git', 'commit', '-m', 'auto-rescue: uncommitted changes detected on startup']' returned non-zero exit status 1.
+Startup verification found 1 issue(s): {'uncommitted_changes': {'status': 'warning', 'files': ['?? .ouroboros/logs/restart_history.log', '?? .ouroboros/logs/supervisor-output.log', '?? .ouroboros/supervisor.pid'], 'auto_committed': False}, 'version_sync': {'version_file': '6.2.0', 'pyproject_version': '6.2.0', 'readme_version': '6.2.0', 'status': 'warning', 'message': 'no_tags'}, 'budget': {'status': 'ok', 'remaining_usd': inf, 'total_usd': 0, 'spent_usd': 0, 'note': 'unlimited (local mode)'}}
+Текущая ветка: ouroboros
+Эта ветка соответствует «origin/ouroboros».
+
+Неотслеживаемые файлы:
+  (используйте «git add <файл>...», чтобы добавить в то, что будет включено в коммит)
+	.ouroboros/logs/restart_history.log
+	.ouroboros/logs/supervisor-output.log
+	.ouroboros/supervisor.pid
+
+индекс пуст, но есть неотслеживаемые файлы
+(используйте «git add», чтобы проиндексировать их)
+Failed to auto-rescue uncommitted changes: Command '['git', 'commit', '-m', 'auto-rescue: uncommitted changes detected on startup']' returned non-zero exit status 1.
+Traceback (most recent call last):
+  File "/home/zera/ouroboros_zera/ouroboros/agent.py", line 157, in _check_uncommitted_changes
+    subprocess.run(
+  File "/usr/lib/python3.12/subprocess.py", line 571, in run
+    raise CalledProcessError(retcode, process.args,
+subprocess.CalledProcessError: Command '['git', 'commit', '-m', 'auto-rescue: uncommitted changes detected on startup']' returned non-zero exit status 1.
+Startup verification found 1 issue(s): {'uncommitted_changes': {'status': 'warning', 'files': ['?? .ouroboros/logs/restart_history.log', '?? .ouroboros/logs/supervisor-output.log', '?? .ouroboros/supervisor.pid'], 'auto_committed': False}, 'version_sync': {'version_file': '6.2.0', 'pyproject_version': '6.2.0', 'readme_version': '6.2.0', 'status': 'warning', 'message': 'no_tags'}, 'budget': {'status': 'ok', 'remaining_usd': inf, 'total_usd': 0, 'spent_usd': 0, 'note': 'unlimited (local mode)'}}
+Pre-push tests failed, blocking push
+Уже на «ouroboros»
+M	.ouroboros/logs/watchdog.jsonl
+Ваша ветка опережает «origin/ouroboros» на 1 коммит.
+  (используйте «git push», чтобы опубликовать ваши локальные коммиты)
+Указатель HEAD сейчас на коммите 6f8f08a Добавлены файлы для работы с локальной LLM и watchdog
+Уже на «ouroboros»
+M	.ouroboros/logs/watchdog.jsonl
+Эта ветка соответствует «origin/ouroboros».
+Указатель HEAD сейчас на коммите 6f8f08a Добавлены файлы для работы с локальной LLM и watchdog
+============================================================
+  Ouroboros Zera Local Launcher
+============================================================
+  Model:          Qwen3.6-35B-A3B-Q4_K_M.gguf
+  Model (code):   Qwen3.6-35B-A3B-Q4_K_M.gguf
+  Model (light):  Qwen3.6-35B-A3B-Q4_K_M.gguf
+  Base URL:       http://localhost:8080/v1
+  GitHub:         srilankabankg-oss/ouroboros_zera
+  Budget:         $0.0
+  Workers:        3
+  Telegram:       **********Ohkw
+============================================================
+Текущая ветка: ouroboros
+Эта ветка соответствует «origin/ouroboros».
+
+Неотслеживаемые файлы:
+  (используйте «git add <файл>...», чтобы добавить в то, что будет включено в коммит)
+	.ouroboros/logs/restart_history.log
+	.ouroboros/logs/supervisor-output.log
+	.ouroboros/supervisor.pid
+
+индекс пуст, но есть неотслеживаемые файлы
+(используйте «git add», чтобы проиндексировать их)
+Текущая ветка: ouroboros
+Эта ветка соответствует «origin/ouroboros».
+
+Неотслеживаемые файлы:
+  (используйте «git add <файл>...», чтобы добавить в то, что будет включено в коммит)
+	.ouroboros/logs/restart_history.log
+	.ouroboros/logs/supervisor-output.log
+	.ouroboros/supervisor.pid
+
+индекс пуст, но есть неотслеживаемые файлы
+(используйте «git add», чтобы проиндексировать их)
+Failed to auto-rescue uncommitted changes: Command '['git', 'commit', '-m', 'auto-rescue: uncommitted changes detected on startup']' returned non-zero exit status 1.
+Traceback (most recent call last):
+  File "/home/zera/ouroboros_zera/ouroboros/agent.py", line 157, in _check_uncommitted_changes
+    subprocess.run(
+  File "/usr/lib/python3.12/subprocess.py", line 571, in run
+    raise CalledProcessError(retcode, process.args,
+subprocess.CalledProcessError: Command '['git', 'commit', '-m', 'auto-rescue: uncommitted changes detected on startup']' returned non-zero exit status 1.
+Failed to auto-rescue uncommitted changes: Command '['git', 'commit', '-m', 'auto-rescue: uncommitted changes detected on startup']' returned non-zero exit status 1.
+Traceback (most recent call last):
+  File "/home/zera/ouroboros_zera/ouroboros/agent.py", line 157, in _check_uncommitted_changes
+    subprocess.run(
+  File "/usr/lib/python3.12/subprocess.py", line 571, in run
+    raise CalledProcessError(retcode, process.args,
+subprocess.CalledProcessError: Command '['git', 'commit', '-m', 'auto-rescue: uncommitted changes detected on startup']' returned non-zero exit status 1.
+Startup verification found 1 issue(s): {'uncommitted_changes': {'status': 'warning', 'files': ['?? .ouroboros/logs/restart_history.log', '?? .ouroboros/logs/supervisor-output.log', '?? .ouroboros/supervisor.pid'], 'auto_committed': False}, 'version_sync': {'version_file': '6.2.0', 'pyproject_version': '6.2.0', 'readme_version': '6.2.0', 'status': 'warning', 'message': 'no_tags'}, 'budget': {'status': 'ok', 'remaining_usd': inf, 'total_usd': 0, 'spent_usd': 0, 'note': 'unlimited (local mode)'}}
+Текущая ветка: ouroboros
+Эта ветка соответствует «origin/ouroboros».
+
+Неотслеживаемые файлы:
+  (используйте «git add <файл>...», чтобы добавить в то, что будет включено в коммит)
+	.ouroboros/logs/restart_history.log
+	.ouroboros/logs/supervisor-output.log
+	.ouroboros/supervisor.pid
+
+индекс пуст, но есть неотслеживаемые файлы
+(используйте «git add», чтобы проиндексировать их)
+Startup verification found 1 issue(s): {'uncommitted_changes': {'status': 'warning', 'files': ['?? .ouroboros/logs/restart_history.log', '?? .ouroboros/logs/supervisor-output.log', '?? .ouroboros/supervisor.pid'], 'auto_committed': False}, 'version_sync': {'version_file': '6.2.0', 'pyproject_version': '6.2.0', 'readme_version': '6.2.0', 'status': 'warning', 'message': 'no_tags'}, 'budget': {'status': 'ok', 'remaining_usd': inf, 'total_usd': 0, 'spent_usd': 0, 'note': 'unlimited (local mode)'}}
+Failed to auto-rescue uncommitted changes: Command '['git', 'commit', '-m', 'auto-rescue: uncommitted changes detected on startup']' returned non-zero exit status 1.
+Traceback (most recent call last):
+  File "/home/zera/ouroboros_zera/ouroboros/agent.py", line 157, in _check_uncommitted_changes
+    subprocess.run(
+  File "/usr/lib/python3.12/subprocess.py", line 571, in run
+    raise CalledProcessError(retcode, process.args,
+subprocess.CalledProcessError: Command '['git', 'commit', '-m', 'auto-rescue: uncommitted changes detected on startup']' returned non-zero exit status 1.
+Startup verification found 1 issue(s): {'uncommitted_changes': {'status': 'warning', 'files': ['?? .ouroboros/logs/restart_history.log', '?? .ouroboros/logs/supervisor-output.log', '?? .ouroboros/supervisor.pid'], 'auto_committed': False}, 'version_sync': {'version_file': '6.2.0', 'pyproject_version': '6.2.0', 'readme_version': '6.2.0', 'status': 'warning', 'message': 'no_tags'}, 'budget': {'status': 'ok', 'remaining_usd': inf, 'total_usd': 0, 'spent_usd': 0, 'note': 'unlimited (local mode)'}}
+Текущая ветка: ouroboros
+Эта ветка соответствует «origin/ouroboros».
+
+Неотслеживаемые файлы:
+  (используйте «git add <файл>...», чтобы добавить в то, что будет включено в коммит)
+	.ouroboros/logs/restart_history.log
+	.ouroboros/logs/supervisor-output.log
+	.ouroboros/supervisor.pid
+
+индекс пуст, но есть неотслеживаемые файлы
+(используйте «git add», чтобы проиндексировать их)
+Failed to auto-rescue uncommitted changes: Command '['git', 'commit', '-m', 'auto-rescue: uncommitted changes detected on startup']' returned non-zero exit status 1.
+Traceback (most recent call last):
+  File "/home/zera/ouroboros_zera/ouroboros/agent.py", line 157, in _check_uncommitted_changes
+    subprocess.run(
+  File "/usr/lib/python3.12/subprocess.py", line 571, in run
+    raise CalledProcessError(retcode, process.args,
+subprocess.CalledProcessError: Command '['git', 'commit', '-m', 'auto-rescue: uncommitted changes detected on startup']' returned non-zero exit status 1.
+Startup verification found 1 issue(s): {'uncommitted_changes': {'status': 'warning', 'files': ['?? .ouroboros/logs/restart_history.log', '?? .ouroboros/logs/supervisor-output.log', '?? .ouroboros/supervisor.pid'], 'auto_committed': False}, 'version_sync': {'version_file': '6.2.0', 'pyproject_version': '6.2.0', 'readme_version': '6.2.0', 'status': 'warning', 'message': 'no_tags'}, 'budget': {'status': 'ok', 'remaining_usd': inf, 'total_usd': 0, 'spent_usd': 0, 'note': 'unlimited (local mode)'}}
+Уже на «ouroboros»
+M	.ouroboros/logs/watchdog.jsonl
+Эта ветка соответствует «origin/ouroboros».
+Указатель HEAD сейчас на коммите 6f8f08a Добавлены файлы для работы с локальной LLM и watchdog
+Уже на «ouroboros»
+M	.ouroboros/logs/watchdog.jsonl
+Эта ветка соответствует «origin/ouroboros».
+Указатель HEAD сейчас на коммите 6f8f08a Добавлены файлы для работы с локальной LLM и watchdog
+============================================================
+  Ouroboros Zera Local Launcher
+============================================================
+  Model:          Qwen3.6-35B-A3B-Q4_K_M.gguf
+  Model (code):   Qwen3.6-35B-A3B-Q4_K_M.gguf
+  Model (light):  Qwen3.6-35B-A3B-Q4_K_M.gguf
+  Base URL:       http://localhost:8080/v1
+  GitHub:         srilankabankg-oss/ouroboros_zera
+  Budget:         $0.0
+  Workers:        3
+  Telegram:       **********Ohkw
+============================================================
+Текущая ветка: ouroboros
+Эта ветка соответствует «origin/ouroboros».
+
+Неотслеживаемые файлы:
+  (используйте «git add <файл>...», чтобы добавить в то, что будет включено в коммит)
+	.ouroboros/logs/restart_history.log
+	.ouroboros/logs/supervisor-output.log
+	.ouroboros/supervisor.pid
+
+индекс пуст, но есть неотслеживаемые файлы
+(используйте «git add», чтобы проиндексировать их)
+fatal: Не удалось создать «/home/zera/ouroboros_zera/.git/index.lock»: Файл существует.
+
+Похоже, что другой процесс git запущен в этом репозитории,
+например редактор открыт из «git commit». Пожалуйста, убедитесь,
+что все процессы были завершены и потом попробуйте снова.
+Если это не поможет, то возможно процесс git был ранее завершен
+с ошибкой в этом репозитории: 
+удалите файл вручную для продолжения.
+Текущая ветка: ouroboros
+Эта ветка соответствует «origin/ouroboros».
+
+Неотслеживаемые файлы:
+  (используйте «git add <файл>...», чтобы добавить в то, что будет включено в коммит)
+	.ouroboros/logs/restart_history.log
+	.ouroboros/logs/supervisor-output.log
+	.ouroboros/supervisor.pid
+
+индекс пуст, но есть неотслеживаемые файлы
+(используйте «git add», чтобы проиндексировать их)
+Failed to auto-rescue uncommitted changes: Command '['git', 'commit', '-m', 'auto-rescue: uncommitted changes detected on startup']' returned non-zero exit status 1.
+Traceback (most recent call last):
+  File "/home/zera/ouroboros_zera/ouroboros/agent.py", line 157, in _check_uncommitted_changes
+    subprocess.run(
+  File "/usr/lib/python3.12/subprocess.py", line 571, in run
+    raise CalledProcessError(retcode, process.args,
+subprocess.CalledProcessError: Command '['git', 'commit', '-m', 'auto-rescue: uncommitted changes detected on startup']' returned non-zero exit status 1.
+Failed to auto-rescue uncommitted changes: Command '['git', 'commit', '-m', 'auto-rescue: uncommitted changes detected on startup']' returned non-zero exit status 1.
+Traceback (most recent call last):
+  File "/home/zera/ouroboros_zera/ouroboros/agent.py", line 157, in _check_uncommitted_changes
+    subprocess.run(
+  File "/usr/lib/python3.12/subprocess.py", line 571, in run
+    raise CalledProcessError(retcode, process.args,
+subprocess.CalledProcessError: Command '['git', 'commit', '-m', 'auto-rescue: uncommitted changes detected on startup']' returned non-zero exit status 1.
+Startup verification found 1 issue(s): {'uncommitted_changes': {'status': 'warning', 'files': ['?? .ouroboros/logs/restart_history.log', '?? .ouroboros/logs/supervisor-output.log', '?? .ouroboros/supervisor.pid'], 'auto_committed': False}, 'version_sync': {'version_file': '6.2.0', 'pyproject_version': '6.2.0', 'readme_version': '6.2.0', 'status': 'warning', 'message': 'no_tags'}, 'budget': {'status': 'ok', 'remaining_usd': inf, 'total_usd': 0, 'spent_usd': 0, 'note': 'unlimited (local mode)'}}
+Failed to auto-rescue uncommitted changes: Command '['git', 'commit', '-m', 'auto-rescue: uncommitted changes detected on startup']' returned non-zero exit status 128.
+Traceback (most recent call last):
+  File "/home/zera/ouroboros_zera/ouroboros/agent.py", line 157, in _check_uncommitted_changes
+    subprocess.run(
+  File "/usr/lib/python3.12/subprocess.py", line 571, in run
+    raise CalledProcessError(retcode, process.args,
+subprocess.CalledProcessError: Command '['git', 'commit', '-m', 'auto-rescue: uncommitted changes detected on startup']' returned non-zero exit status 128.
+Startup verification found 1 issue(s): {'uncommitted_changes': {'status': 'warning', 'files': ['?? .ouroboros/logs/restart_history.log', '?? .ouroboros/logs/supervisor-output.log', '?? .ouroboros/supervisor.pid'], 'auto_committed': False}, 'version_sync': {'version_file': '6.2.0', 'pyproject_version': '6.2.0', 'readme_version': '6.2.0', 'status': 'warning', 'message': 'no_tags'}, 'budget': {'status': 'ok', 'remaining_usd': inf, 'total_usd': 0, 'spent_usd': 0, 'note': 'unlimited (local mode)'}}
+Startup verification found 1 issue(s): {'uncommitted_changes': {'status': 'warning', 'files': ['?? .ouroboros/logs/restart_history.log', '?? .ouroboros/logs/supervisor-output.log', '?? .ouroboros/supervisor.pid'], 'auto_committed': False}, 'version_sync': {'version_file': '6.2.0', 'pyproject_version': '6.2.0', 'readme_version': '6.2.0', 'status': 'warning', 'message': 'no_tags'}, 'budget': {'status': 'ok', 'remaining_usd': inf, 'total_usd': 0, 'spent_usd': 0, 'note': 'unlimited (local mode)'}}
+Текущая ветка: ouroboros
+Эта ветка соответствует «origin/ouroboros».
+
+Неотслеживаемые файлы:
+  (используйте «git add <файл>...», чтобы добавить в то, что будет включено в коммит)
+	.ouroboros/logs/restart_history.log
+	.ouroboros/logs/supervisor-output.log
+	.ouroboros/supervisor.pid
+
+индекс пуст, но есть неотслеживаемые файлы
+(используйте «git add», чтобы проиндексировать их)
+Failed to auto-rescue uncommitted changes: Command '['git', 'commit', '-m', 'auto-rescue: uncommitted changes detected on startup']' returned non-zero exit status 1.
+Traceback (most recent call last):
+  File "/home/zera/ouroboros_zera/ouroboros/agent.py", line 157, in _check_uncommitted_changes
+    subprocess.run(
+  File "/usr/lib/python3.12/subprocess.py", line 571, in run
+    raise CalledProcessError(retcode, process.args,
+subprocess.CalledProcessError: Command '['git', 'commit', '-m', 'auto-rescue: uncommitted changes detected on startup']' returned non-zero exit status 1.
+Startup verification found 1 issue(s): {'uncommitted_changes': {'status': 'warning', 'files': ['?? .ouroboros/logs/restart_history.log', '?? .ouroboros/logs/supervisor-output.log', '?? .ouroboros/supervisor.pid'], 'auto_committed': False}, 'version_sync': {'version_file': '6.2.0', 'pyproject_version': '6.2.0', 'readme_version': '6.2.0', 'status': 'warning', 'message': 'no_tags'}, 'budget': {'status': 'ok', 'remaining_usd': inf, 'total_usd': 0, 'spent_usd': 0, 'note': 'unlimited (local mode)'}}
+Browser cleanup hit thread error, resetting Playwright...
+
+[OK] Ouroboros Zera is running!
+[OK] Open your Telegram bot and send a message.
+[OK] Commands: /status, /restart, /evolve, /bg start, /panic
+[OK] Press Ctrl+C to stop.
+
+PANIC
+[.] Loading .env from /home/zera/ouroboros_zera/.ouroboros
+============================================
+  Ouroboros Zera Local Launcher
+============================================
+  Model:          Qwen3.6-35B-A3B-Q4_K_M.gguf
+  Base URL:       http://localhost:8080/v1
+  GitHub:         srilankabankg-oss/ouroboros_zera
+  Budget:         $0
+============================================
+[.] Loading .env from /home/zera/ouroboros_zera/.ouroboros
+============================================
+  Ouroboros Zera Local Launcher
+============================================
+  Model:          Qwen3.6-35B-A3B-Q4_K_M.gguf
+  Base URL:       http://localhost:8080/v1
+  GitHub:         srilankabankg-oss/ouroboros_zera
+  Budget:         $0
+============================================
+Already on 'ouroboros'
+M	.ouroboros/logs/watchdog.jsonl
+Your branch is up to date with 'origin/ouroboros'.
+HEAD is now at 6f8f08a Добавлены файлы для работы с локальной LLM и watchdog
+============================================================
+  Ouroboros Zera Local Launcher
+============================================================
+  Model:          Qwen3.6-35B-A3B-Q4_K_M.gguf
+  Model (code):   Qwen3.6-35B-A3B-Q4_K_M.gguf
+  Model (light):  Qwen3.6-35B-A3B-Q4_K_M.gguf
+  Base URL:       http://localhost:8080/v1
+  GitHub:         srilankabankg-oss/ouroboros_zera
+  Budget:         $0.0
+  Workers:        3
+  Telegram:       **********Ohkw
+============================================================
+fatal: Unable to create '/home/zera/ouroboros_zera/.git/index.lock': File exists.
+
+Another git process seems to be running in this repository, e.g.
+an editor opened by 'git commit'. Please make sure all processes
+are terminated then try again. If it still fails, a git process
+may have crashed in this repository earlier:
+remove the file manually to continue.
+On branch ouroboros
+Your branch is up to date with 'origin/ouroboros'.
+
+Untracked files:
+  (use "git add <file>..." to include in what will be committed)
+	.ouroboros/logs/restart_history.log
+	.ouroboros/logs/supervisor-output.log
+	.ouroboros/supervisor.pid
+
+nothing added to commit but untracked files present (use "git add" to track)
+Failed to auto-rescue uncommitted changes: Command '['git', 'add', '-u']' returned non-zero exit status 128.
+Traceback (most recent call last):
+  File "/home/zera/ouroboros_zera/ouroboros/agent.py", line 156, in _check_uncommitted_changes
+    subprocess.run(["git", "add", "-u"], cwd=str(self.env.repo_dir), timeout=10, check=True)
+  File "/usr/lib/python3.12/subprocess.py", line 571, in run
+    raise CalledProcessError(retcode, process.args,
+subprocess.CalledProcessError: Command '['git', 'add', '-u']' returned non-zero exit status 128.
+Failed to auto-rescue uncommitted changes: Command '['git', 'commit', '-m', 'auto-rescue: uncommitted changes detected on startup']' returned non-zero exit status 1.
+Traceback (most recent call last):
+  File "/home/zera/ouroboros_zera/ouroboros/agent.py", line 157, in _check_uncommitted_changes
+    subprocess.run(
+  File "/usr/lib/python3.12/subprocess.py", line 571, in run
+    raise CalledProcessError(retcode, process.args,
+subprocess.CalledProcessError: Command '['git', 'commit', '-m', 'auto-rescue: uncommitted changes detected on startup']' returned non-zero exit status 1.
+On branch ouroboros
+Your branch is up to date with 'origin/ouroboros'.
+
+Untracked files:
+  (use "git add <file>..." to include in what will be committed)
+	.ouroboros/logs/restart_history.log
+	.ouroboros/logs/supervisor-output.log
+	.ouroboros/supervisor.pid
+
+nothing added to commit but untracked files present (use "git add" to track)
+Startup verification found 1 issue(s): {'uncommitted_changes': {'status': 'warning', 'files': ['?? .ouroboros/logs/restart_history.log', '?? .ouroboros/logs/supervisor-output.log', '?? .ouroboros/supervisor.pid'], 'auto_committed': False}, 'version_sync': {'version_file': '6.2.0', 'pyproject_version': '6.2.0', 'readme_version': '6.2.0', 'status': 'warning', 'message': 'no_tags'}, 'budget': {'status': 'ok', 'remaining_usd': inf, 'total_usd': 0, 'spent_usd': 0, 'note': 'unlimited (local mode)'}}
+Startup verification found 1 issue(s): {'uncommitted_changes': {'status': 'warning', 'files': ['?? .ouroboros/logs/restart_history.log', '?? .ouroboros/logs/supervisor-output.log', '?? .ouroboros/supervisor.pid'], 'auto_committed': False}, 'version_sync': {'version_file': '6.2.0', 'pyproject_version': '6.2.0', 'readme_version': '6.2.0', 'status': 'warning', 'message': 'no_tags'}, 'budget': {'status': 'ok', 'remaining_usd': inf, 'total_usd': 0, 'spent_usd': 0, 'note': 'unlimited (local mode)'}}
+Failed to auto-rescue uncommitted changes: Command '['git', 'commit', '-m', 'auto-rescue: uncommitted changes detected on startup']' returned non-zero exit status 1.
+Traceback (most recent call last):
+  File "/home/zera/ouroboros_zera/ouroboros/agent.py", line 157, in _check_uncommitted_changes
+    subprocess.run(
+  File "/usr/lib/python3.12/subprocess.py", line 571, in run
+    raise CalledProcessError(retcode, process.args,
+subprocess.CalledProcessError: Command '['git', 'commit', '-m', 'auto-rescue: uncommitted changes detected on startup']' returned non-zero exit status 1.
+Startup verification found 1 issue(s): {'uncommitted_changes': {'status': 'warning', 'files': ['?? .ouroboros/logs/restart_history.log', '?? .ouroboros/logs/supervisor-output.log', '?? .ouroboros/supervisor.pid'], 'auto_committed': False}, 'version_sync': {'version_file': '6.2.0', 'pyproject_version': '6.2.0', 'readme_version': '6.2.0', 'status': 'warning', 'message': 'no_tags'}, 'budget': {'status': 'ok', 'remaining_usd': inf, 'total_usd': 0, 'spent_usd': 0, 'note': 'unlimited (local mode)'}}
+On branch ouroboros
+Your branch is up to date with 'origin/ouroboros'.
+
+Untracked files:
+  (use "git add <file>..." to include in what will be committed)
+	.ouroboros/logs/restart_history.log
+	.ouroboros/logs/supervisor-output.log
+	.ouroboros/supervisor.pid
+
+nothing added to commit but untracked files present (use "git add" to track)
+Failed to auto-rescue uncommitted changes: Command '['git', 'commit', '-m', 'auto-rescue: uncommitted changes detected on startup']' returned non-zero exit status 1.
+Traceback (most recent call last):
+  File "/home/zera/ouroboros_zera/ouroboros/agent.py", line 157, in _check_uncommitted_changes
+    subprocess.run(
+  File "/usr/lib/python3.12/subprocess.py", line 571, in run
+    raise CalledProcessError(retcode, process.args,
+subprocess.CalledProcessError: Command '['git', 'commit', '-m', 'auto-rescue: uncommitted changes detected on startup']' returned non-zero exit status 1.
+Startup verification found 1 issue(s): {'uncommitted_changes': {'status': 'warning', 'files': ['?? .ouroboros/logs/restart_history.log', '?? .ouroboros/logs/supervisor-output.log', '?? .ouroboros/supervisor.pid'], 'auto_committed': False}, 'version_sync': {'version_file': '6.2.0', 'pyproject_version': '6.2.0', 'readme_version': '6.2.0', 'status': 'warning', 'message': 'no_tags'}, 'budget': {'status': 'ok', 'remaining_usd': inf, 'total_usd': 0, 'spent_usd': 0, 'note': 'unlimited (local mode)'}}
+Уже на «ouroboros»
+Эта ветка соответствует «origin/ouroboros».
+Указатель HEAD сейчас на коммите 6f8f08a Добавлены файлы для работы с локальной LLM и watchdog
+============================================================
+  Ouroboros Zera Local Launcher
+============================================================
+  Model:          Qwen3.6-35B-A3B-Q4_K_M.gguf
+  Model (code):   Qwen3.6-35B-A3B-Q4_K_M.gguf
+  Model (light):  Qwen3.6-35B-A3B-Q4_K_M.gguf
+  Base URL:       http://localhost:8080/v1
+  GitHub:         srilankabankg-oss/ouroboros_zera
+  Budget:         $0.0
+  Workers:        3
+  Telegram:       **********Ohkw
+============================================================
+Текущая ветка: ouroboros
+Эта ветка соответствует «origin/ouroboros».
+
+Неотслеживаемые файлы:
+  (используйте «git add <файл>...», чтобы добавить в то, что будет включено в коммит)
+	.ouroboros/logs/restart_history.log
+	.ouroboros/logs/supervisor-output.log
+	.ouroboros/supervisor.pid
+
+индекс пуст, но есть неотслеживаемые файлы
+(используйте «git add», чтобы проиндексировать их)
+Failed to auto-rescue uncommitted changes: Command '['git', 'commit', '-m', 'auto-rescue: uncommitted changes detected on startup']' returned non-zero exit status 1.
+Traceback (most recent call last):
+  File "/home/zera/ouroboros_zera/ouroboros/agent.py", line 157, in _check_uncommitted_changes
+    subprocess.run(
+  File "/usr/lib/python3.12/subprocess.py", line 571, in run
+    raise CalledProcessError(retcode, process.args,
+subprocess.CalledProcessError: Command '['git', 'commit', '-m', 'auto-rescue: uncommitted changes detected on startup']' returned non-zero exit status 1.
+Startup verification found 1 issue(s): {'uncommitted_changes': {'status': 'warning', 'files': ['?? .ouroboros/logs/restart_history.log', '?? .ouroboros/logs/supervisor-output.log', '?? .ouroboros/supervisor.pid'], 'auto_committed': False}, 'version_sync': {'version_file': '6.2.0', 'pyproject_version': '6.2.0', 'readme_version': '6.2.0', 'status': 'warning', 'message': 'no_tags'}, 'budget': {'status': 'ok', 'remaining_usd': inf, 'total_usd': 0, 'spent_usd': 0, 'note': 'unlimited (local mode)'}}
+Текущая ветка: ouroboros
+Эта ветка соответствует «origin/ouroboros».
+
+Неотслеживаемые файлы:
+  (используйте «git add <файл>...», чтобы добавить в то, что будет включено в коммит)
+	.ouroboros/logs/restart_history.log
+	.ouroboros/logs/supervisor-output.log
+	.ouroboros/supervisor.pid
+
+индекс пуст, но есть неотслеживаемые файлы
+(используйте «git add», чтобы проиндексировать их)
+Failed to auto-rescue uncommitted changes: Command '['git', 'commit', '-m', 'auto-rescue: uncommitted changes detected on startup']' returned non-zero exit status 1.
+Traceback (most recent call last):
+  File "/home/zera/ouroboros_zera/ouroboros/agent.py", line 157, in _check_uncommitted_changes
+    subprocess.run(
+  File "/usr/lib/python3.12/subprocess.py", line 571, in run
+    raise CalledProcessError(retcode, process.args,
+subprocess.CalledProcessError: Command '['git', 'commit', '-m', 'auto-rescue: uncommitted changes detected on startup']' returned non-zero exit status 1.
+Startup verification found 1 issue(s): {'uncommitted_changes': {'status': 'warning', 'files': ['?? .ouroboros/logs/restart_history.log', '?? .ouroboros/logs/supervisor-output.log', '?? .ouroboros/supervisor.pid'], 'auto_committed': False}, 'version_sync': {'version_file': '6.2.0', 'pyproject_version': '6.2.0', 'readme_version': '6.2.0', 'status': 'warning', 'message': 'no_tags'}, 'budget': {'status': 'ok', 'remaining_usd': inf, 'total_usd': 0, 'spent_usd': 0, 'note': 'unlimited (local mode)'}}
+Текущая ветка: ouroboros
+Эта ветка соответствует «origin/ouroboros».
+
+Неотслеживаемые файлы:
+  (используйте «git add <файл>...», чтобы добавить в то, что будет включено в коммит)
+	.ouroboros/logs/restart_history.log
+	.ouroboros/logs/supervisor-output.log
+	.ouroboros/supervisor.pid
+
+индекс пуст, но есть неотслеживаемые файлы
+(используйте «git add», чтобы проиндексировать их)
+Failed to auto-rescue uncommitted changes: Command '['git', 'commit', '-m', 'auto-rescue: uncommitted changes detected on startup']' returned non-zero exit status 1.
+Traceback (most recent call last):
+  File "/home/zera/ouroboros_zera/ouroboros/agent.py", line 157, in _check_uncommitted_changes
+    subprocess.run(
+  File "/usr/lib/python3.12/subprocess.py", line 571, in run
+    raise CalledProcessError(retcode, process.args,
+subprocess.CalledProcessError: Command '['git', 'commit', '-m', 'auto-rescue: uncommitted changes detected on startup']' returned non-zero exit status 1.
+Startup verification found 1 issue(s): {'uncommitted_changes': {'status': 'warning', 'files': ['?? .ouroboros/logs/restart_history.log', '?? .ouroboros/logs/supervisor-output.log', '?? .ouroboros/supervisor.pid'], 'auto_committed': False}, 'version_sync': {'version_file': '6.2.0', 'pyproject_version': '6.2.0', 'readme_version': '6.2.0', 'status': 'warning', 'message': 'no_tags'}, 'budget': {'status': 'ok', 'remaining_usd': inf, 'total_usd': 0, 'spent_usd': 0, 'note': 'unlimited (local mode)'}}
+Текущая ветка: ouroboros
+Эта ветка соответствует «origin/ouroboros».
+
+Неотслеживаемые файлы:
+  (используйте «git add <файл>...», чтобы добавить в то, что будет включено в коммит)
+	.ouroboros/logs/restart_history.log
+	.ouroboros/logs/supervisor-output.log
+	.ouroboros/supervisor.pid
+
+индекс пуст, но есть неотслеживаемые файлы
+(используйте «git add», чтобы проиндексировать их)
+Failed to auto-rescue uncommitted changes: Command '['git', 'commit', '-m', 'auto-rescue: uncommitted changes detected on startup']' returned non-zero exit status 1.
+Traceback (most recent call last):
+  File "/home/zera/ouroboros_zera/ouroboros/agent.py", line 157, in _check_uncommitted_changes
+    subprocess.run(
+  File "/usr/lib/python3.12/subprocess.py", line 571, in run
+    raise CalledProcessError(retcode, process.args,
+subprocess.CalledProcessError: Command '['git', 'commit', '-m', 'auto-rescue: uncommitted changes detected on startup']' returned non-zero exit status 1.
+Startup verification found 1 issue(s): {'uncommitted_changes': {'status': 'warning', 'files': ['?? .ouroboros/logs/restart_history.log', '?? .ouroboros/logs/supervisor-output.log', '?? .ouroboros/supervisor.pid'], 'auto_committed': False}, 'version_sync': {'version_file': '6.2.0', 'pyproject_version': '6.2.0', 'readme_version': '6.2.0', 'status': 'warning', 'message': 'no_tags'}, 'budget': {'status': 'ok', 'remaining_usd': inf, 'total_usd': 0, 'spent_usd': 0, 'note': 'unlimited (local mode)'}}
+
+[OK] Ouroboros Zera is running!
+[OK] Open your Telegram bot and send a message.
+[OK] Commands: /status, /restart, /evolve, /bg start, /panic
+[OK] Press Ctrl+C to stop.
+
+PANIC
+
+[OK] Ouroboros Zera is running!
+[OK] Open your Telegram bot and send a message.
+[OK] Commands: /status, /restart, /evolve, /bg start, /panic
+[OK] Press Ctrl+C to stop.
+
+PANIC
+[.] Loading .env from /home/zera/ouroboros_zera/.ouroboros
+============================================
+  Ouroboros Zera Local Launcher
+============================================
+  Model:          Qwen3.6-35B-A3B-Q4_K_M.gguf
+  Base URL:       http://localhost:8080/v1
+  GitHub:         srilankabankg-oss/ouroboros_zera
+  Budget:         $0
+============================================
+[.] Loading .env from /home/zera/ouroboros_zera/.ouroboros
+============================================
+  Ouroboros Zera Local Launcher
+============================================
+  Model:          Qwen3.6-35B-A3B-Q4_K_M.gguf
+  Base URL:       http://localhost:8080/v1
+  GitHub:         srilankabankg-oss/ouroboros_zera
+  Budget:         $0
+============================================
+Already on 'ouroboros'
+M	.ouroboros/logs/watchdog.jsonl
+Your branch is up to date with 'origin/ouroboros'.
+HEAD is now at 6f8f08a Добавлены файлы для работы с локальной LLM и watchdog
+============================================================
+  Ouroboros Zera Local Launcher
+============================================================
+  Model:          Qwen3.6-35B-A3B-Q4_K_M.gguf
+  Model (code):   Qwen3.6-35B-A3B-Q4_K_M.gguf
+  Model (light):  Qwen3.6-35B-A3B-Q4_K_M.gguf
+  Base URL:       http://localhost:8080/v1
+  GitHub:         srilankabankg-oss/ouroboros_zera
+  Budget:         $0.0
+  Workers:        3
+  Telegram:       **********Ohkw
+============================================================
+On branch ouroboros
+Your branch is up to date with 'origin/ouroboros'.
+
+Untracked files:
+  (use "git add <file>..." to include in what will be committed)
+	.ouroboros/logs/restart_history.log
+	.ouroboros/logs/supervisor-output.log
+	.ouroboros/supervisor.pid
+
+nothing added to commit but untracked files present (use "git add" to track)
+On branch ouroboros
+Your branch is up to date with 'origin/ouroboros'.
+
+Untracked files:
+  (use "git add <file>..." to include in what will be committed)
+	.ouroboros/logs/restart_history.log
+	.ouroboros/logs/supervisor-output.log
+	.ouroboros/supervisor.pid
+
+nothing added to commit but untracked files present (use "git add" to track)
+Failed to auto-rescue uncommitted changes: Command '['git', 'commit', '-m', 'auto-rescue: uncommitted changes detected on startup']' returned non-zero exit status 1.
+Traceback (most recent call last):
+  File "/home/zera/ouroboros_zera/ouroboros/agent.py", line 157, in _check_uncommitted_changes
+    subprocess.run(
+  File "/usr/lib/python3.12/subprocess.py", line 571, in run
+    raise CalledProcessError(retcode, process.args,
+subprocess.CalledProcessError: Command '['git', 'commit', '-m', 'auto-rescue: uncommitted changes detected on startup']' returned non-zero exit status 1.
+Failed to auto-rescue uncommitted changes: Command '['git', 'commit', '-m', 'auto-rescue: uncommitted changes detected on startup']' returned non-zero exit status 1.
+Traceback (most recent call last):
+  File "/home/zera/ouroboros_zera/ouroboros/agent.py", line 157, in _check_uncommitted_changes
+    subprocess.run(
+  File "/usr/lib/python3.12/subprocess.py", line 571, in run
+    raise CalledProcessError(retcode, process.args,
+subprocess.CalledProcessError: Command '['git', 'commit', '-m', 'auto-rescue: uncommitted changes detected on startup']' returned non-zero exit status 1.
+Startup verification found 1 issue(s): {'uncommitted_changes': {'status': 'warning', 'files': ['?? .ouroboros/logs/restart_history.log', '?? .ouroboros/logs/supervisor-output.log', '?? .ouroboros/supervisor.pid'], 'auto_committed': False}, 'version_sync': {'version_file': '6.2.0', 'pyproject_version': '6.2.0', 'readme_version': '6.2.0', 'status': 'warning', 'message': 'no_tags'}, 'budget': {'status': 'ok', 'remaining_usd': inf, 'total_usd': 0, 'spent_usd': 0, 'note': 'unlimited (local mode)'}}
+Startup verification found 1 issue(s): {'uncommitted_changes': {'status': 'warning', 'files': ['?? .ouroboros/logs/restart_history.log', '?? .ouroboros/logs/supervisor-output.log', '?? .ouroboros/supervisor.pid'], 'auto_committed': False}, 'version_sync': {'version_file': '6.2.0', 'pyproject_version': '6.2.0', 'readme_version': '6.2.0', 'status': 'warning', 'message': 'no_tags'}, 'budget': {'status': 'ok', 'remaining_usd': inf, 'total_usd': 0, 'spent_usd': 0, 'note': 'unlimited (local mode)'}}
+On branch ouroboros
+Your branch is up to date with 'origin/ouroboros'.
+
+Untracked files:
+  (use "git add <file>..." to include in what will be committed)
+	.ouroboros/logs/restart_history.log
+	.ouroboros/logs/supervisor-output.log
+	.ouroboros/supervisor.pid
+
+nothing added to commit but untracked files present (use "git add" to track)
+Failed to auto-rescue uncommitted changes: Command '['git', 'commit', '-m', 'auto-rescue: uncommitted changes detected on startup']' returned non-zero exit status 1.
+Traceback (most recent call last):
+  File "/home/zera/ouroboros_zera/ouroboros/agent.py", line 157, in _check_uncommitted_changes
+    subprocess.run(
+  File "/usr/lib/python3.12/subprocess.py", line 571, in run
+    raise CalledProcessError(retcode, process.args,
+subprocess.CalledProcessError: Command '['git', 'commit', '-m', 'auto-rescue: uncommitted changes detected on startup']' returned non-zero exit status 1.
+Startup verification found 1 issue(s): {'uncommitted_changes': {'status': 'warning', 'files': ['?? .ouroboros/logs/restart_history.log', '?? .ouroboros/logs/supervisor-output.log', '?? .ouroboros/supervisor.pid'], 'auto_committed': False}, 'version_sync': {'version_file': '6.2.0', 'pyproject_version': '6.2.0', 'readme_version': '6.2.0', 'status': 'warning', 'message': 'no_tags'}, 'budget': {'status': 'ok', 'remaining_usd': inf, 'total_usd': 0, 'spent_usd': 0, 'note': 'unlimited (local mode)'}}
+On branch ouroboros
+Your branch is up to date with 'origin/ouroboros'.
+
+Untracked files:
+  (use "git add <file>..." to include in what will be committed)
+	.ouroboros/logs/restart_history.log
+	.ouroboros/logs/supervisor-output.log
+	.ouroboros/supervisor.pid
+
+nothing added to commit but untracked files present (use "git add" to track)
+Failed to auto-rescue uncommitted changes: Command '['git', 'commit', '-m', 'auto-rescue: uncommitted changes detected on startup']' returned non-zero exit status 1.
+Traceback (most recent call last):
+  File "/home/zera/ouroboros_zera/ouroboros/agent.py", line 157, in _check_uncommitted_changes
+    subprocess.run(
+  File "/usr/lib/python3.12/subprocess.py", line 571, in run
+    raise CalledProcessError(retcode, process.args,
+subprocess.CalledProcessError: Command '['git', 'commit', '-m', 'auto-rescue: uncommitted changes detected on startup']' returned non-zero exit status 1.
+Startup verification found 1 issue(s): {'uncommitted_changes': {'status': 'warning', 'files': ['?? .ouroboros/logs/restart_history.log', '?? .ouroboros/logs/supervisor-output.log', '?? .ouroboros/supervisor.pid'], 'auto_committed': False}, 'version_sync': {'version_file': '6.2.0', 'pyproject_version': '6.2.0', 'readme_version': '6.2.0', 'status': 'warning', 'message': 'no_tags'}, 'budget': {'status': 'ok', 'remaining_usd': inf, 'total_usd': 0, 'spent_usd': 0, 'note': 'unlimited (local mode)'}}
+Уже на «ouroboros»
+Эта ветка соответствует «origin/ouroboros».
+Указатель HEAD сейчас на коммите 6f8f08a Добавлены файлы для работы с локальной LLM и watchdog
+============================================================
+  Ouroboros Zera Local Launcher
+============================================================
+  Model:          Qwen3.6-35B-A3B-Q4_K_M.gguf
+  Model (code):   Qwen3.6-35B-A3B-Q4_K_M.gguf
+  Model (light):  Qwen3.6-35B-A3B-Q4_K_M.gguf
+  Base URL:       http://localhost:8080/v1
+  GitHub:         srilankabankg-oss/ouroboros_zera
+  Budget:         $0.0
+  Workers:        3
+  Telegram:       **********Ohkw
+============================================================
+Текущая ветка: ouroboros
+Эта ветка соответствует «origin/ouroboros».
+
+Неотслеживаемые файлы:
+  (используйте «git add <файл>...», чтобы добавить в то, что будет включено в коммит)
+	.ouroboros/logs/restart_history.log
+	.ouroboros/logs/supervisor-output.log
+	.ouroboros/supervisor.pid
+
+индекс пуст, но есть неотслеживаемые файлы
+(используйте «git add», чтобы проиндексировать их)
+Failed to auto-rescue uncommitted changes: Command '['git', 'commit', '-m', 'auto-rescue: uncommitted changes detected on startup']' returned non-zero exit status 1.
+Traceback (most recent call last):
+  File "/home/zera/ouroboros_zera/ouroboros/agent.py", line 157, in _check_uncommitted_changes
+    subprocess.run(
+  File "/usr/lib/python3.12/subprocess.py", line 571, in run
+    raise CalledProcessError(retcode, process.args,
+subprocess.CalledProcessError: Command '['git', 'commit', '-m', 'auto-rescue: uncommitted changes detected on startup']' returned non-zero exit status 1.
+Текущая ветка: ouroboros
+Эта ветка соответствует «origin/ouroboros».
+
+Неотслеживаемые файлы:
+  (используйте «git add <файл>...», чтобы добавить в то, что будет включено в коммит)
+	.ouroboros/logs/restart_history.log
+	.ouroboros/logs/supervisor-output.log
+	.ouroboros/supervisor.pid
+
+индекс пуст, но есть неотслеживаемые файлы
+(используйте «git add», чтобы проиндексировать их)
+Текущая ветка: ouroboros
+Эта ветка соответствует «origin/ouroboros».
+
+Неотслеживаемые файлы:
+  (используйте «git add <файл>...», чтобы добавить в то, что будет включено в коммит)
+	.ouroboros/logs/restart_history.log
+	.ouroboros/logs/supervisor-output.log
+	.ouroboros/supervisor.pid
+
+индекс пуст, но есть неотслеживаемые файлы
+(используйте «git add», чтобы проиндексировать их)
+Startup verification found 1 issue(s): {'uncommitted_changes': {'status': 'warning', 'files': ['?? .ouroboros/logs/restart_history.log', '?? .ouroboros/logs/supervisor-output.log', '?? .ouroboros/supervisor.pid'], 'auto_committed': False}, 'version_sync': {'version_file': '6.2.0', 'pyproject_version': '6.2.0', 'readme_version': '6.2.0', 'status': 'warning', 'message': 'no_tags'}, 'budget': {'status': 'ok', 'remaining_usd': inf, 'total_usd': 0, 'spent_usd': 0, 'note': 'unlimited (local mode)'}}
+Failed to auto-rescue uncommitted changes: Command '['git', 'commit', '-m', 'auto-rescue: uncommitted changes detected on startup']' returned non-zero exit status 1.
+Traceback (most recent call last):
+  File "/home/zera/ouroboros_zera/ouroboros/agent.py", line 157, in _check_uncommitted_changes
+    subprocess.run(
+  File "/usr/lib/python3.12/subprocess.py", line 571, in run
+    raise CalledProcessError(retcode, process.args,
+subprocess.CalledProcessError: Command '['git', 'commit', '-m', 'auto-rescue: uncommitted changes detected on startup']' returned non-zero exit status 1.
+Failed to auto-rescue uncommitted changes: Command '['git', 'commit', '-m', 'auto-rescue: uncommitted changes detected on startup']' returned non-zero exit status 1.
+Traceback (most recent call last):
+  File "/home/zera/ouroboros_zera/ouroboros/agent.py", line 157, in _check_uncommitted_changes
+    subprocess.run(
+  File "/usr/lib/python3.12/subprocess.py", line 571, in run
+    raise CalledProcessError(retcode, process.args,
+subprocess.CalledProcessError: Command '['git', 'commit', '-m', 'auto-rescue: uncommitted changes detected on startup']' returned non-zero exit status 1.
+Startup verification found 1 issue(s): {'uncommitted_changes': {'status': 'warning', 'files': ['?? .ouroboros/logs/restart_history.log', '?? .ouroboros/logs/supervisor-output.log', '?? .ouroboros/supervisor.pid'], 'auto_committed': False}, 'version_sync': {'version_file': '6.2.0', 'pyproject_version': '6.2.0', 'readme_version': '6.2.0', 'status': 'warning', 'message': 'no_tags'}, 'budget': {'status': 'ok', 'remaining_usd': inf, 'total_usd': 0, 'spent_usd': 0, 'note': 'unlimited (local mode)'}}
+Startup verification found 1 issue(s): {'uncommitted_changes': {'status': 'warning', 'files': ['?? .ouroboros/logs/restart_history.log', '?? .ouroboros/logs/supervisor-output.log', '?? .ouroboros/supervisor.pid'], 'auto_committed': False}, 'version_sync': {'version_file': '6.2.0', 'pyproject_version': '6.2.0', 'readme_version': '6.2.0', 'status': 'warning', 'message': 'no_tags'}, 'budget': {'status': 'ok', 'remaining_usd': inf, 'total_usd': 0, 'spent_usd': 0, 'note': 'unlimited (local mode)'}}
+Текущая ветка: ouroboros
+Эта ветка соответствует «origin/ouroboros».
+
+Неотслеживаемые файлы:
+  (используйте «git add <файл>...», чтобы добавить в то, что будет включено в коммит)
+	.ouroboros/logs/restart_history.log
+	.ouroboros/logs/supervisor-output.log
+	.ouroboros/supervisor.pid
+
+индекс пуст, но есть неотслеживаемые файлы
+(используйте «git add», чтобы проиндексировать их)
+Failed to auto-rescue uncommitted changes: Command '['git', 'commit', '-m', 'auto-rescue: uncommitted changes detected on startup']' returned non-zero exit status 1.
+Traceback (most recent call last):
+  File "/home/zera/ouroboros_zera/ouroboros/agent.py", line 157, in _check_uncommitted_changes
+    subprocess.run(
+  File "/usr/lib/python3.12/subprocess.py", line 571, in run
+    raise CalledProcessError(retcode, process.args,
+subprocess.CalledProcessError: Command '['git', 'commit', '-m', 'auto-rescue: uncommitted changes detected on startup']' returned non-zero exit status 1.
+Startup verification found 1 issue(s): {'uncommitted_changes': {'status': 'warning', 'files': ['?? .ouroboros/logs/restart_history.log', '?? .ouroboros/logs/supervisor-output.log', '?? .ouroboros/supervisor.pid'], 'auto_committed': False}, 'version_sync': {'version_file': '6.2.0', 'pyproject_version': '6.2.0', 'readme_version': '6.2.0', 'status': 'warning', 'message': 'no_tags'}, 'budget': {'status': 'ok', 'remaining_usd': inf, 'total_usd': 0, 'spent_usd': 0, 'note': 'unlimited (local mode)'}}
+
+[OK] Ouroboros Zera is running!
+[OK] Open your Telegram bot and send a message.
+[OK] Commands: /status, /restart, /evolve, /bg start, /panic
+[OK] Press Ctrl+C to stop.
+
+[.] Loading .env from /home/zera/ouroboros_zera/.ouroboros
+============================================
+  Ouroboros Zera Local Launcher
+============================================
+  Model:          Qwen3.6-35B-A3B-Q4_K_M.gguf
+  Base URL:       http://localhost:8080/v1
+  GitHub:         srilankabankg-oss/ouroboros_zera
+  Budget:         $0
+============================================
+Уже на «ouroboros»
+M	.ouroboros/logs/watchdog-stdout.log
+M	.ouroboros/logs/watchdog.jsonl
+Эта ветка соответствует «origin/ouroboros».
+Указатель HEAD сейчас на коммите 6f8f08a Добавлены файлы для работы с локальной LLM и watchdog
+============================================================
+  Ouroboros Zera Local Launcher
+============================================================
+  Model:          Qwen3.6-35B-A3B-Q4_K_M.gguf
+  Model (code):   Qwen3.6-35B-A3B-Q4_K_M.gguf
+  Model (light):  Qwen3.6-35B-A3B-Q4_K_M.gguf
+  Base URL:       http://localhost:8080/v1
+  GitHub:         srilankabankg-oss/ouroboros_zera
+  Budget:         $0.0
+  Workers:        3
+  Telegram:       **********Ohkw
+============================================================
+Текущая ветка: ouroboros
+Эта ветка соответствует «origin/ouroboros».
+
+Неотслеживаемые файлы:
+  (используйте «git add <файл>...», чтобы добавить в то, что будет включено в коммит)
+	.ouroboros/logs/restart_history.log
+	.ouroboros/logs/supervisor-output.log
+	.ouroboros/supervisor.pid
+
+индекс пуст, но есть неотслеживаемые файлы
+(используйте «git add», чтобы проиндексировать их)
+Текущая ветка: ouroboros
+Эта ветка соответствует «origin/ouroboros».
+
+Неотслеживаемые файлы:
+  (используйте «git add <файл>...», чтобы добавить в то, что будет включено в коммит)
+	.ouroboros/logs/restart_history.log
+	.ouroboros/logs/supervisor-output.log
+	.ouroboros/supervisor.pid
+
+индекс пуст, но есть неотслеживаемые файлы
+(используйте «git add», чтобы проиндексировать их)
+Failed to auto-rescue uncommitted changes: Command '['git', 'commit', '-m', 'auto-rescue: uncommitted changes detected on startup']' returned non-zero exit status 1.
+Traceback (most recent call last):
+  File "/home/zera/ouroboros_zera/ouroboros/agent.py", line 157, in _check_uncommitted_changes
+    subprocess.run(
+  File "/usr/lib/python3.12/subprocess.py", line 571, in run
+    raise CalledProcessError(retcode, process.args,
+subprocess.CalledProcessError: Command '['git', 'commit', '-m', 'auto-rescue: uncommitted changes detected on startup']' returned non-zero exit status 1.
+Failed to auto-rescue uncommitted changes: Command '['git', 'commit', '-m', 'auto-rescue: uncommitted changes detected on startup']' returned non-zero exit status 1.
+Traceback (most recent call last):
+  File "/home/zera/ouroboros_zera/ouroboros/agent.py", line 157, in _check_uncommitted_changes
+    subprocess.run(
+  File "/usr/lib/python3.12/subprocess.py", line 571, in run
+    raise CalledProcessError(retcode, process.args,
+subprocess.CalledProcessError: Command '['git', 'commit', '-m', 'auto-rescue: uncommitted changes detected on startup']' returned non-zero exit status 1.
+Startup verification found 1 issue(s): {'uncommitted_changes': {'status': 'warning', 'files': ['?? .ouroboros/logs/restart_history.log', '?? .ouroboros/logs/supervisor-output.log', '?? .ouroboros/supervisor.pid'], 'auto_committed': False}, 'version_sync': {'version_file': '6.2.0', 'pyproject_version': '6.2.0', 'readme_version': '6.2.0', 'status': 'warning', 'message': 'no_tags'}, 'budget': {'status': 'ok', 'remaining_usd': inf, 'total_usd': 0, 'spent_usd': 0, 'note': 'unlimited (local mode)'}}
+Startup verification found 1 issue(s): {'uncommitted_changes': {'status': 'warning', 'files': ['?? .ouroboros/logs/restart_history.log', '?? .ouroboros/logs/supervisor-output.log', '?? .ouroboros/supervisor.pid'], 'auto_committed': False}, 'version_sync': {'version_file': '6.2.0', 'pyproject_version': '6.2.0', 'readme_version': '6.2.0', 'status': 'warning', 'message': 'no_tags'}, 'budget': {'status': 'ok', 'remaining_usd': inf, 'total_usd': 0, 'spent_usd': 0, 'note': 'unlimited (local mode)'}}
+Текущая ветка: ouroboros
+Эта ветка соответствует «origin/ouroboros».
+
+Неотслеживаемые файлы:
+  (используйте «git add <файл>...», чтобы добавить в то, что будет включено в коммит)
+	.ouroboros/logs/restart_history.log
+	.ouroboros/logs/supervisor-output.log
+	.ouroboros/supervisor.pid
+
+индекс пуст, но есть неотслеживаемые файлы
+(используйте «git add», чтобы проиндексировать их)
+Failed to auto-rescue uncommitted changes: Command '['git', 'commit', '-m', 'auto-rescue: uncommitted changes detected on startup']' returned non-zero exit status 1.
+Traceback (most recent call last):
+  File "/home/zera/ouroboros_zera/ouroboros/agent.py", line 157, in _check_uncommitted_changes
+    subprocess.run(
+  File "/usr/lib/python3.12/subprocess.py", line 571, in run
+    raise CalledProcessError(retcode, process.args,
+subprocess.CalledProcessError: Command '['git', 'commit', '-m', 'auto-rescue: uncommitted changes detected on startup']' returned non-zero exit status 1.
+Startup verification found 1 issue(s): {'uncommitted_changes': {'status': 'warning', 'files': ['?? .ouroboros/logs/restart_history.log', '?? .ouroboros/logs/supervisor-output.log', '?? .ouroboros/supervisor.pid'], 'auto_committed': False}, 'version_sync': {'version_file': '6.2.0', 'pyproject_version': '6.2.0', 'readme_version': '6.2.0', 'status': 'warning', 'message': 'no_tags'}, 'budget': {'status': 'ok', 'remaining_usd': inf, 'total_usd': 0, 'spent_usd': 0, 'note': 'unlimited (local mode)'}}
+Текущая ветка: ouroboros
+Эта ветка соответствует «origin/ouroboros».
+
+Неотслеживаемые файлы:
+  (используйте «git add <файл>...», чтобы добавить в то, что будет включено в коммит)
+	.ouroboros/logs/restart_history.log
+	.ouroboros/logs/supervisor-output.log
+	.ouroboros/supervisor.pid
+
+индекс пуст, но есть неотслеживаемые файлы
+(используйте «git add», чтобы проиндексировать их)
+Failed to auto-rescue uncommitted changes: Command '['git', 'commit', '-m', 'auto-rescue: uncommitted changes detected on startup']' returned non-zero exit status 1.
+Traceback (most recent call last):
+  File "/home/zera/ouroboros_zera/ouroboros/agent.py", line 157, in _check_uncommitted_changes
+    subprocess.run(
+  File "/usr/lib/python3.12/subprocess.py", line 571, in run
+    raise CalledProcessError(retcode, process.args,
+subprocess.CalledProcessError: Command '['git', 'commit', '-m', 'auto-rescue: uncommitted changes detected on startup']' returned non-zero exit status 1.
+Startup verification found 1 issue(s): {'uncommitted_changes': {'status': 'warning', 'files': ['?? .ouroboros/logs/restart_history.log', '?? .ouroboros/logs/supervisor-output.log', '?? .ouroboros/supervisor.pid'], 'auto_committed': False}, 'version_sync': {'version_file': '6.2.0', 'pyproject_version': '6.2.0', 'readme_version': '6.2.0', 'status': 'warning', 'message': 'no_tags'}, 'budget': {'status': 'ok', 'remaining_usd': inf, 'total_usd': 0, 'spent_usd': 0, 'note': 'unlimited (local mode)'}}
+[.] Loading .env from /home/zera/ouroboros_zera/.ouroboros
+============================================
+  Ouroboros Zera Local Launcher
+============================================
+  Model:          Qwen3.6-35B-A3B-Q4_K_M.gguf
+  Base URL:       http://localhost:8080/v1
+  GitHub:         srilankabankg-oss/ouroboros_zera
+  Budget:         $0
+============================================
+Переключились на ветку «ouroboros»
+M	.ouroboros/logs/watchdog-stdout.log
+M	.ouroboros/logs/watchdog.jsonl
+D	ouroboros/agent.py
+M	ouroboros/loop.py
+M	ouroboros/tools/control.py
+M	ouroboros/tools/health.py
+M	supervisor/git_ops.py
+M	supervisor/queue.py
+M	supervisor/state.py
+M	supervisor/workers.py
+Эта ветка соответствует «origin/ouroboros».
+Указатель HEAD сейчас на коммите 6f8f08a Добавлены файлы для работы с локальной LLM и watchdog
+============================================================
+  Ouroboros Zera Local Launcher
+============================================================
+  Model:          Qwen3.6-35B-A3B-Q4_K_M.gguf
+  Model (code):   Qwen3.6-35B-A3B-Q4_K_M.gguf
+  Model (light):  Qwen3.6-35B-A3B-Q4_K_M.gguf
+  Base URL:       http://localhost:8080/v1
+  GitHub:         srilankabankg-oss/ouroboros_zera
+  Budget:         $0.0
+  Workers:        3
+  Telegram:       **********Ohkw
+============================================================
+Worker boot logging failed
+Traceback (most recent call last):
+  File "/home/zera/ouroboros_zera/ouroboros/agent/agent.py", line 104, in _log_worker_boot_once
+    self._verify_restart(git_sha)
+    ^^^^^^^^^^^^^^^^^^^^
+AttributeError: 'OuroborosAgent' object has no attribute '_verify_restart'
+Worker boot logging failed
+Traceback (most recent call last):
+  File "/home/zera/ouroboros_zera/ouroboros/agent/agent.py", line 104, in _log_worker_boot_once
+    self._verify_restart(git_sha)
+    ^^^^^^^^^^^^^^^^^^^^
+AttributeError: 'OuroborosAgent' object has no attribute '_verify_restart'
+Worker boot logging failed
+Traceback (most recent call last):
+  File "/home/zera/ouroboros_zera/ouroboros/agent/agent.py", line 104, in _log_worker_boot_once
+    self._verify_restart(git_sha)
+    ^^^^^^^^^^^^^^^^^^^^
+AttributeError: 'OuroborosAgent' object has no attribute '_verify_restart'
+
+[OK] Ouroboros Zera is running!
+[OK] Open your Telegram bot and send a message.
+[OK] Commands: /status, /restart, /evolve, /bg start, /panic
+[OK] Press Ctrl+C to stop.
+
+PANIC
+[.] Loading .env from /home/zera/ouroboros_zera/.ouroboros
+============================================
+  Ouroboros Zera Local Launcher
+============================================
+  Model:          Qwen3.6-35B-A3B-Q4_K_M.gguf
+  Base URL:       http://localhost:8080/v1
+  GitHub:         srilankabankg-oss/ouroboros_zera
+  Budget:         $0
+============================================
+Уже на «ouroboros»
+M	.ouroboros/logs/watchdog.jsonl
+Эта ветка соответствует «origin/ouroboros».
+Указатель HEAD сейчас на коммите 6f8f08a Добавлены файлы для работы с локальной LLM и watchdog
+============================================================
+  Ouroboros Zera Local Launcher
+============================================================
+  Model:          Qwen3.6-35B-A3B-Q4_K_M.gguf
+  Model (code):   Qwen3.6-35B-A3B-Q4_K_M.gguf
+  Model (light):  Qwen3.6-35B-A3B-Q4_K_M.gguf
+  Base URL:       http://localhost:8080/v1
+  GitHub:         srilankabankg-oss/ouroboros_zera
+  Budget:         $0.0
+  Workers:        3
+  Telegram:       **********Ohkw
+============================================================
+Worker boot logging failed
+Traceback (most recent call last):
+  File "/home/zera/ouroboros_zera/ouroboros/agent/agent.py", line 104, in _log_worker_boot_once
+    self._verify_restart(git_sha)
+    ^^^^^^^^^^^^^^^^^^^^
+AttributeError: 'OuroborosAgent' object has no attribute '_verify_restart'
+Worker boot logging failed
+Traceback (most recent call last):
+  File "/home/zera/ouroboros_zera/ouroboros/agent/agent.py", line 104, in _log_worker_boot_once
+    self._verify_restart(git_sha)
+    ^^^^^^^^^^^^^^^^^^^^
+AttributeError: 'OuroborosAgent' object has no attribute '_verify_restart'
+Worker boot logging failed
+Traceback (most recent call last):
+  File "/home/zera/ouroboros_zera/ouroboros/agent/agent.py", line 104, in _log_worker_boot_once
+    self._verify_restart(git_sha)
+    ^^^^^^^^^^^^^^^^^^^^
+AttributeError: 'OuroborosAgent' object has no attribute '_verify_restart'
+Worker boot logging failed
+Traceback (most recent call last):
+  File "/home/zera/ouroboros_zera/ouroboros/agent/agent.py", line 104, in _log_worker_boot_once
+    self._verify_restart(git_sha)
+    ^^^^^^^^^^^^^^^^^^^^
+AttributeError: 'OuroborosAgent' object has no attribute '_verify_restart'
+[.] Loading .env from /home/zera/ouroboros_zera/.ouroboros
+============================================
+  Ouroboros Zera Local Launcher
+============================================
+  Model:          Qwen3.6-35B-A3B-Q4_K_M.gguf
+  Base URL:       http://localhost:8080/v1
+  GitHub:         srilankabankg-oss/ouroboros_zera
+  Budget:         $0
+============================================
+Из https://github.com/srilankabankg-oss/ouroboros_zera
+ * [новая ветка]     jules-5883072438405485-fc59ef1a -> origin/jules-5883072438405485-fc59ef1a
+Уже на «ouroboros»
+M	.ouroboros/logs/watchdog-stdout.log
+M	.ouroboros/logs/watchdog.jsonl
+Эта ветка соответствует «origin/ouroboros».
+Указатель HEAD сейчас на коммите 4c78406 add resource routing rules: three channels (LOCAL/OPENROUTER/GOOGLE), zero-budget environment
+============================================================
+  Ouroboros Zera Local Launcher
+============================================================
+  Model:          Qwen3.6-35B-A3B-Q4_K_M.gguf
+  Model (code):   Qwen3.6-35B-A3B-Q4_K_M.gguf
+  Model (light):  Qwen3.6-35B-A3B-Q4_K_M.gguf
+  Base URL:       http://localhost:8080/v1
+  GitHub:         srilankabankg-oss/ouroboros_zera
+  Budget:         $0.0
+  Workers:        3
+  Telegram:       **********Ohkw
+============================================================
+Worker boot logging failed
+Traceback (most recent call last):
+  File "/home/zera/ouroboros_zera/ouroboros/agent/agent.py", line 104, in _log_worker_boot_once
+    self._verify_restart(git_sha)
+    ^^^^^^^^^^^^^^^^^^^^
+AttributeError: 'OuroborosAgent' object has no attribute '_verify_restart'
+Worker boot logging failed
+Traceback (most recent call last):
+  File "/home/zera/ouroboros_zera/ouroboros/agent/agent.py", line 104, in _log_worker_boot_once
+    self._verify_restart(git_sha)
+    ^^^^^^^^^^^^^^^^^^^^
+AttributeError: 'OuroborosAgent' object has no attribute '_verify_restart'
+Worker boot logging failed
+Traceback (most recent call last):
+  File "/home/zera/ouroboros_zera/ouroboros/agent/agent.py", line 104, in _log_worker_boot_once
+    self._verify_restart(git_sha)
+    ^^^^^^^^^^^^^^^^^^^^
+AttributeError: 'OuroborosAgent' object has no attribute '_verify_restart'
+Worker boot logging failed
+Traceback (most recent call last):
+  File "/home/zera/ouroboros_zera/ouroboros/agent/agent.py", line 104, in _log_worker_boot_once
+    self._verify_restart(git_sha)
+    ^^^^^^^^^^^^^^^^^^^^
+AttributeError: 'OuroborosAgent' object has no attribute '_verify_restart'
+Уже на «ouroboros»
+M	.ouroboros/logs/watchdog.jsonl
+Эта ветка соответствует «origin/ouroboros».
+Указатель HEAD сейчас на коммите 4c78406 add resource routing rules: three channels (LOCAL/OPENROUTER/GOOGLE), zero-budget environment
+Уже на «ouroboros»
+Эта ветка соответствует «origin/ouroboros».
+Указатель HEAD сейчас на коммите 4c78406 add resource routing rules: three channels (LOCAL/OPENROUTER/GOOGLE), zero-budget environment
+============================================================
+  Ouroboros Zera Local Launcher
+============================================================
+  Model:          Qwen3.6-35B-A3B-Q4_K_M.gguf
+  Model (code):   Qwen3.6-35B-A3B-Q4_K_M.gguf
+  Model (light):  Qwen3.6-35B-A3B-Q4_K_M.gguf
+  Base URL:       http://localhost:8080/v1
+  GitHub:         srilankabankg-oss/ouroboros_zera
+  Budget:         $0.0
+  Workers:        3
+  Telegram:       **********Ohkw
+============================================================
+Worker boot logging failed
+Traceback (most recent call last):
+  File "/home/zera/ouroboros_zera/ouroboros/agent/agent.py", line 104, in _log_worker_boot_once
+    self._verify_restart(git_sha)
+    ^^^^^^^^^^^^^^^^^^^^
+AttributeError: 'OuroborosAgent' object has no attribute '_verify_restart'
+Worker boot logging failed
+Traceback (most recent call last):
+  File "/home/zera/ouroboros_zera/ouroboros/agent/agent.py", line 104, in _log_worker_boot_once
+    self._verify_restart(git_sha)
+    ^^^^^^^^^^^^^^^^^^^^
+AttributeError: 'OuroborosAgent' object has no attribute '_verify_restart'
+Worker boot logging failed
+Traceback (most recent call last):
+  File "/home/zera/ouroboros_zera/ouroboros/agent/agent.py", line 104, in _log_worker_boot_once
+    self._verify_restart(git_sha)
+    ^^^^^^^^^^^^^^^^^^^^
+AttributeError: 'OuroborosAgent' object has no attribute '_verify_restart'
+Worker boot logging failed
+Traceback (most recent call last):
+  File "/home/zera/ouroboros_zera/ouroboros/agent/agent.py", line 104, in _log_worker_boot_once
+    self._verify_restart(git_sha)
+    ^^^^^^^^^^^^^^^^^^^^
+AttributeError: 'OuroborosAgent' object has no attribute '_verify_restart'
+Pre-push tests failed, blocking push
