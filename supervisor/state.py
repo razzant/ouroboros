@@ -211,25 +211,27 @@ def init_state() -> Dict[str, Any]:
     Fetches OpenRouter ground truth and stores session_daily_snapshot and
     session_spent_snapshot for drift calculation.
     """
+    # Step 1: HTTP to OpenRouter OUTSIDE the lock (can take up to 10s).
+    # Mirrors v6.0.0 fix in update_budget_from_usage — never block STATE_LOCK on HTTP.
+    ground_truth = check_openrouter_ground_truth()
+
+    # Step 2: Apply snapshots and ground truth under the lock.
+    # Re-read state inside the lock so concurrent writers (e.g. update_budget_from_usage)
+    # during the HTTP window are not lost.
     lock_fd = acquire_file_lock(STATE_LOCK_PATH)
     try:
         st = _load_state_unlocked()
 
-        # Capture session snapshots for drift detection
         st["session_spent_snapshot"] = float(st.get("spent_usd") or 0.0)
 
-        # Fetch OpenRouter ground truth to capture total_usd baseline
-        ground_truth = check_openrouter_ground_truth()
         if ground_truth is not None:
             st["session_total_snapshot"] = ground_truth["total_usd"]
             st["openrouter_total_usd"] = ground_truth["total_usd"]
             st["openrouter_daily_usd"] = ground_truth["daily_usd"]
             st["openrouter_last_check_at"] = datetime.datetime.now(datetime.timezone.utc).isoformat()
         else:
-            # If we can't fetch ground truth, use 0 as baseline
             st["session_total_snapshot"] = 0.0
 
-        # Reset drift tracking
         st["budget_drift_pct"] = None
         st["budget_drift_alert"] = False
 
