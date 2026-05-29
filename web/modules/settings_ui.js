@@ -87,6 +87,18 @@ const PROVIDER_CARDS = [
         ],
     },
     {
+        id: 'gigachat', title: 'GigaChat', icon: '/static/providers/gigachat.svg', hint: 'Sber GigaChat via the gigachat library',
+        fields: [
+            { id: 's-gigachat-credentials', settingKey: 'GIGACHAT_CREDENTIALS', label: 'Authorization Key', placeholder: 'Base64 client_id:secret (OAuth)' },
+            { id: 's-gigachat-scope', label: 'Scope', placeholder: 'GIGACHAT_API_PERS' },
+            { id: 's-gigachat-user', label: 'User (basic auth, optional)', placeholder: 'username' },
+            { id: 's-gigachat-password', settingKey: 'GIGACHAT_PASSWORD', label: 'Password (basic auth, optional)', placeholder: 'password' },
+            { id: 's-gigachat-base-url', label: 'Base URL', placeholder: 'https://gigachat.devices.sberbank.ru/api/v1' },
+            { id: 's-gigachat-verify-ssl', label: 'Verify SSL Certs', placeholder: 'true / false' },
+        ],
+        note: 'Use model values like <code>gigachat::GigaChat-3-Ultra</code> in the Models tab to route directly through GigaChat. Authenticate with either an Authorization Key (OAuth, scope usually <code>GIGACHAT_API_PERS</code>/<code>GIGACHAT_API_CORP</code>) or User + Password.',
+    },
+    {
         id: 'anthropic', title: 'Anthropic', icon: '/static/providers/anthropic.png', hint: 'Direct runtime plus Claude tooling',
         fields: [{ id: 's-anthropic', settingKey: 'ANTHROPIC_API_KEY', label: 'Anthropic API Key', placeholder: 'sk-ant-...' }],
         note: 'Use model values like <code>anthropic::claude-sonnet-4-6</code> in the Models tab to route models directly through Anthropic. Claude tooling still reuses this key.',
@@ -157,6 +169,8 @@ export const SECRET_KEYS = [
     ['OPENAI_API_KEY', 'OpenAI API Key', 'sk-...'],
     ['OPENAI_COMPATIBLE_API_KEY', 'OpenAI-compatible API Key', 'Compatible provider key'],
     ['CLOUDRU_FOUNDATION_MODELS_API_KEY', 'Cloud.ru Foundation Models API Key', 'Cloud.ru key'],
+    ['GIGACHAT_CREDENTIALS', 'GigaChat Authorization Key', 'Base64 client_id:secret'],
+    ['GIGACHAT_PASSWORD', 'GigaChat Password (basic auth)', 'password'],
     ['ANTHROPIC_API_KEY', 'Anthropic API Key', 'sk-ant-...'],
     ['GITHUB_TOKEN', 'GitHub Token', 'ghp_...'],
     ['OUROBOROS_NETWORK_PASSWORD', 'Network Password', 'Required for LAN/Docker binds'],

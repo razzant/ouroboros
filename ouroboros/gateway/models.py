@@ -156,6 +156,47 @@ async def _fetch_anthropic_model_catalog(
     return models
 
 
+async def _fetch_gigachat_model_catalog(
+    credentials: str,
+    scope: str,
+    base_url: str,
+    verify_ssl_certs: bool,
+    user: str = "",
+    password: str = "",
+) -> list[dict[str, str]]:
+    """List GigaChat models via the `gigachat` library (not OpenAI-compatible).
+
+    Auth is either an authorization key (OAuth) or user/password. Uses the
+    library's native async client so no blocking call / thread offload is needed
+    (the catalog loader stays fully async and fork-safe). Failures propagate to
+    the loader, which degrades gracefully per-provider.
+    """
+    from gigachat import GigaChatAsyncClient
+
+    kwargs: dict = {"scope": scope or "GIGACHAT_API_PERS", "verify_ssl_certs": verify_ssl_certs}
+    if credentials:
+        kwargs["credentials"] = credentials
+    if user:
+        kwargs["user"] = user
+    if password:
+        kwargs["password"] = password
+    if base_url:
+        kwargs["base_url"] = base_url
+
+    async with GigaChatAsyncClient(**kwargs) as client:
+        result = await client.aget_models()
+
+    entries: list[dict[str, str]] = []
+    for model in getattr(result, "data", None) or []:
+        model_id = str(getattr(model, "id_", "") or "").strip()
+        if not model_id:
+            continue
+        entries.append(
+            _build_model_catalog_entry("gigachat", "GigaChat", model_id, model_id)
+        )
+    return entries
+
+
 def _provider_specs(
     settings: dict,
 ) -> list[tuple[str, Callable[[httpx.AsyncClient], Awaitable[list[dict[str, str]]]]]]:
@@ -221,6 +262,28 @@ def _provider_specs(
                 "Cloud.ru",
                 cloudru_api_key,
                 cloudru_base_url,
+            ),
+        ))
+
+    gigachat_credentials = str(settings.get("GIGACHAT_CREDENTIALS", "") or "").strip()
+    gigachat_user = str(settings.get("GIGACHAT_USER", "") or "").strip()
+    gigachat_password = str(settings.get("GIGACHAT_PASSWORD", "") or "").strip()
+    if gigachat_credentials or (gigachat_user and gigachat_password):
+        gigachat_scope = str(settings.get("GIGACHAT_SCOPE", "") or "").strip() or "GIGACHAT_API_PERS"
+        gigachat_base_url = str(settings.get("GIGACHAT_BASE_URL", "") or "").strip()
+        gigachat_verify = str(settings.get("GIGACHAT_VERIFY_SSL_CERTS", "true") or "").strip().lower()
+        gigachat_verify_bool = gigachat_verify not in ("0", "false", "no", "off")
+        # GigaChat isn't OpenAI-compatible; the loader ignores the shared httpx
+        # client and uses the gigachat library directly (auth via key or basic).
+        specs.append((
+            "gigachat",
+            lambda _client: _fetch_gigachat_model_catalog(
+                gigachat_credentials,
+                gigachat_scope,
+                gigachat_base_url,
+                gigachat_verify_bool,
+                gigachat_user,
+                gigachat_password,
             ),
         ))
 

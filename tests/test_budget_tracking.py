@@ -195,6 +195,7 @@ class TestPlanReviewUsageEmit:
     ("openai::gpt-5.5", "openai"),
     ("openai-compatible::my-model", "openai-compatible"),
     ("cloudru::GigaChat-2-Max", "cloudru"),
+    ("gigachat::GigaChat-3-Ultra", "gigachat"),
     ("anthropic/claude-opus-4.6", "openrouter"),  # unprefixed → OpenRouter
     ("google/gemini-3.5-flash", "openrouter"),
     ("", "openrouter"),
@@ -217,6 +218,7 @@ class TestPlanReviewProviderAttribution:
         ("openai::gpt-5.5", "openai"),
         ("openai-compatible::my-model", "openai-compatible"),
         ("cloudru::GigaChat-2-Max", "cloudru"),
+        ("gigachat::GigaChat-2-Max", "gigachat"),
         ("anthropic/claude-opus-4.6", "openrouter"),  # unprefixed → OpenRouter
     ])
     def test_provider_per_model_prefix(self, model, expected_provider):

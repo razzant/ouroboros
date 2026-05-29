@@ -483,6 +483,35 @@ def test_resolve_cloudru_target_uses_default_base_url(monkeypatch):
     assert target["usage_model"] == "cloudru/giga-model"
 
 
+def test_resolve_gigachat_target_uses_defaults(monkeypatch):
+    monkeypatch.setenv("GIGACHAT_CREDENTIALS", "giga-creds")
+    monkeypatch.delenv("GIGACHAT_SCOPE", raising=False)
+    monkeypatch.delenv("GIGACHAT_BASE_URL", raising=False)
+    monkeypatch.delenv("GIGACHAT_VERIFY_SSL_CERTS", raising=False)
+
+    target = LLMClient()._resolve_remote_target("gigachat::GigaChat-2-Max")
+
+    assert target["provider"] == "gigachat"
+    assert target["api_key"] == "giga-creds"
+    assert target["scope"] == "GIGACHAT_API_PERS"
+    assert target["base_url"] == "https://gigachat.devices.sberbank.ru/api/v1"
+    assert target["verify_ssl_certs"] is True
+    assert target["usage_model"] == "gigachat/GigaChat-2-Max"
+
+
+def test_resolve_gigachat_target_honors_overrides(monkeypatch):
+    monkeypatch.setenv("GIGACHAT_CREDENTIALS", "giga-creds")
+    monkeypatch.setenv("GIGACHAT_SCOPE", "GIGACHAT_API_CORP")
+    monkeypatch.setenv("GIGACHAT_BASE_URL", "https://giga.example/api/v1")
+    monkeypatch.setenv("GIGACHAT_VERIFY_SSL_CERTS", "false")
+
+    target = LLMClient()._resolve_remote_target("gigachat::GigaChat")
+
+    assert target["scope"] == "GIGACHAT_API_CORP"
+    assert target["base_url"] == "https://giga.example/api/v1"
+    assert target["verify_ssl_certs"] is False
+
+
 def test_normalize_remote_response_estimates_cost_for_direct_openai(monkeypatch):
     monkeypatch.setenv("OPENAI_API_KEY", "openai-key")
 

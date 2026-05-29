@@ -154,7 +154,7 @@ def estimate_cost(model: str, prompt_tokens: int, completion_tokens: int,
 def infer_api_key_type(model: str, provider: Optional[str] = None) -> str:
     """Infer which API key is used based on model name."""
     provider_name = str(provider or "").strip().lower()
-    if provider_name in {"local", "openrouter", "openai", "anthropic", "openai-compatible", "cloudru"}:
+    if provider_name in {"local", "openrouter", "openai", "anthropic", "openai-compatible", "cloudru", "gigachat"}:
         return provider_name
     raw_model = str(model or "").strip()
     if raw_model.endswith(" (local)"):
@@ -167,6 +167,8 @@ def infer_api_key_type(model: str, provider: Optional[str] = None) -> str:
         return "openai-compatible"
     if raw_model.startswith("cloudru::"):
         return "cloudru"
+    if raw_model.startswith("gigachat::"):
+        return "gigachat"
     normalized = normalize_model_identity(raw_model)
     if normalized.startswith("openai/"):
         return "openrouter"
@@ -174,6 +176,8 @@ def infer_api_key_type(model: str, provider: Optional[str] = None) -> str:
         return "openai-compatible"
     if normalized.startswith("cloudru/"):
         return "cloudru"
+    if normalized.startswith("gigachat/"):
+        return "gigachat"
     if normalized.startswith(("anthropic/", "google/", "openai/", "x-ai/", "qwen/")):
         return "openrouter"
     if "claude" in normalized.lower():
@@ -189,6 +193,7 @@ def infer_provider_from_model(model: str) -> str:
       openai::*             → "openai"
       openai-compatible::*  → "openai-compatible"
       cloudru::*            → "cloudru"
+      gigachat::*           → "gigachat"
       anything else         → "openrouter"  (un-prefixed OpenRouter routing)
 
     Used by review-pipeline emitters to ensure /api/cost-breakdown attribution
@@ -205,6 +210,8 @@ def infer_provider_from_model(model: str) -> str:
         return "openai-compatible"
     if raw.startswith("cloudru::"):
         return "cloudru"
+    if raw.startswith("gigachat::"):
+        return "gigachat"
     return "openrouter"
 
 

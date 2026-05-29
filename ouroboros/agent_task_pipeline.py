@@ -34,6 +34,7 @@ def _resolve_task_summary_model(default_model: str) -> str:
         "openai::": "openai",
         "anthropic::": "anthropic",
         "cloudru::": "cloudru",
+        "gigachat::": "gigachat",
         "openai-compatible::": "openai-compatible",
         "openrouter::": "openrouter",
     }
@@ -41,6 +42,7 @@ def _resolve_task_summary_model(default_model: str) -> str:
         "openai": ["OPENAI_API_KEY"],
         "anthropic": ["ANTHROPIC_API_KEY"],
         "cloudru": ["CLOUDRU_FOUNDATION_MODELS_API_KEY"],
+        "gigachat": ["GIGACHAT_CREDENTIALS"],
         "openrouter": ["OPENROUTER_API_KEY"],
     }
 
@@ -56,6 +58,11 @@ def _resolve_task_summary_model(default_model: str) -> str:
             legacy_key = str(os.environ.get("OPENAI_API_KEY", "") or "").strip()
             legacy_base = str(os.environ.get("OPENAI_BASE_URL", "") or "").strip()
             return bool(compat or (legacy_key and legacy_base))
+        if provider == "gigachat":
+            creds = str(os.environ.get("GIGACHAT_CREDENTIALS", "") or "").strip()
+            user = str(os.environ.get("GIGACHAT_USER", "") or "").strip()
+            password = str(os.environ.get("GIGACHAT_PASSWORD", "") or "").strip()
+            return bool(creds or (user and password))
         for env_key in provider_env_keys.get(provider, ["OPENROUTER_API_KEY"]):
             if str(os.environ.get(env_key, "") or "").strip():
                 return True

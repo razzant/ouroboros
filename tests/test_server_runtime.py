@@ -13,6 +13,7 @@ def test_has_startup_ready_provider_accepts_any_remote_key_or_local_routing():
     assert has_startup_ready_provider({"ANTHROPIC_API_KEY": "sk-ant"})
     assert has_startup_ready_provider({"OPENAI_COMPATIBLE_API_KEY": "compat-key"})
     assert has_startup_ready_provider({"CLOUDRU_FOUNDATION_MODELS_API_KEY": "cloudru-key"})
+    assert has_startup_ready_provider({"GIGACHAT_CREDENTIALS": "giga-creds"})
     assert has_startup_ready_provider({"USE_LOCAL_MAIN": True})
     assert not has_startup_ready_provider({"LOCAL_MODEL_SOURCE": "Qwen/Qwen2.5-7B-Instruct-GGUF"})
 
@@ -468,3 +469,46 @@ def test_apply_runtime_provider_defaults_cloudru_migrates_populated_shipped_defa
     assert all(m.startswith("cloudru::") for m in normalized["OUROBOROS_REVIEW_MODELS"].split(","))
     assert normalized["OUROBOROS_SCOPE_REVIEW_MODEL"].startswith("cloudru::")
     assert normalized["OUROBOROS_SCOPE_REVIEW_MODELS"].startswith("cloudru::")
+
+
+def test_apply_runtime_provider_defaults_gigachat_only_elevates_to_direct():
+    """A GigaChat-only user (user/password auth, no other provider) must get
+    gigachat:: direct routing for main/code AND for the review/scope reviewer
+    slots — exercises the exclusive-direct path that previously KeyError'd because
+    gigachat lacked a _DIRECT_PROVIDER_AUTO_DEFAULTS entry."""
+    from ouroboros.server_runtime import apply_runtime_provider_defaults
+
+    normalized, changed, changed_keys = apply_runtime_provider_defaults({
+        "GIGACHAT_USER": "user",
+        "GIGACHAT_PASSWORD": "pass",
+    })
+    assert changed
+    assert "OUROBOROS_MODEL" in changed_keys
+    assert normalized["OUROBOROS_MODEL"].startswith("gigachat::")
+    assert normalized["OUROBOROS_MODEL_CODE"].startswith("gigachat::")
+    assert all(m.startswith("gigachat::") for m in normalized["OUROBOROS_REVIEW_MODELS"].split(","))
+    assert normalized["OUROBOROS_SCOPE_REVIEW_MODEL"].startswith("gigachat::")
+
+
+def test_apply_runtime_provider_defaults_gigachat_credentials_migrates_shipped_defaults():
+    """A GigaChat-only user (authorization key) whose settings still carry the
+    shipped (non-gigachat) defaults: main/code AND every review/scope reviewer slot
+    must migrate to gigachat:: so no slot points at a provider with no key."""
+    from ouroboros.server_runtime import apply_runtime_provider_defaults
+
+    normalized, changed, _ = apply_runtime_provider_defaults({
+        "GIGACHAT_CREDENTIALS": "base64-key",
+        "OUROBOROS_MODEL": "google/gemini-3.5-flash",
+        "OUROBOROS_MODEL_CODE": "google/gemini-3.5-flash",
+        "OUROBOROS_MODEL_LIGHT": "google/gemini-3.5-flash",
+        "OUROBOROS_MODEL_FALLBACK": "anthropic/claude-sonnet-4.6",
+        "OUROBOROS_REVIEW_MODELS": "openai/gpt-5.5,google/gemini-3.5-flash,anthropic/claude-opus-4.8",
+        "OUROBOROS_SCOPE_REVIEW_MODEL": "openai/gpt-5.5",
+        "OUROBOROS_SCOPE_REVIEW_MODELS": "openai/gpt-5.5",
+    })
+    assert changed
+    assert normalized["OUROBOROS_MODEL"].startswith("gigachat::")
+    assert normalized["OUROBOROS_MODEL_CODE"].startswith("gigachat::")
+    assert all(m.startswith("gigachat::") for m in normalized["OUROBOROS_REVIEW_MODELS"].split(","))
+    assert normalized["OUROBOROS_SCOPE_REVIEW_MODEL"].startswith("gigachat::")
+    assert normalized["OUROBOROS_SCOPE_REVIEW_MODELS"].startswith("gigachat::")

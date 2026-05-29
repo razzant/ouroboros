@@ -245,6 +245,7 @@ class LLMClient:
         self._local_port: Optional[int] = None
         self._remote_clients: Dict[Tuple[str, str, str, Tuple[Tuple[str, str], ...]], Any] = {}
         self._async_remote_clients: Dict[Tuple[str, str, str, Tuple[Tuple[str, str], ...]], Any] = {}
+        self._gigachat_clients: Dict[Tuple[str, str, str, str, str, bool], Any] = {}
 
     @classmethod
     def _fetch_openrouter_capabilities(cls) -> None:
@@ -361,6 +362,7 @@ class LLMClient:
             ("openai::", "openai"),
             ("anthropic::", "anthropic"),
             ("cloudru::", "cloudru"),
+            ("gigachat::", "gigachat"),
             ("openai-compatible::", "openai-compatible"),
             ("openrouter::", "openrouter"),
         ):
@@ -378,6 +380,8 @@ class LLMClient:
             return f"anthropic/{resolved_model}"
         if provider == "cloudru":
             return f"cloudru/{resolved_model}"
+        if provider == "gigachat":
+            return f"gigachat/{resolved_model}"
         return f"openai-compatible/{resolved_model}"
 
     def _resolve_remote_target(self, model: str) -> Dict[str, Any]:
@@ -418,6 +422,30 @@ class LLMClient:
                 "base_url": (
                     os.environ.get("CLOUDRU_FOUNDATION_MODELS_BASE_URL", "") or ""
                 ).strip() or "https://foundation-models.api.cloud.ru/v1",
+                "default_headers": {},
+                "supports_openrouter_extensions": False,
+                "supports_generation_cost": False,
+            }
+
+        if provider == "gigachat":
+            # GigaChat is NOT OpenAI-compatible — the `gigachat` library owns
+            # the transport and auth. Everything is env-configurable: `api_key`
+            # holds the authorization key (base64 client_id:secret) for the OAuth
+            # flow, OR user/password for basic auth against an internal endpoint.
+            # base_url/scope/verify are carried for the `_chat_gigachat` path.
+            verify_raw = (os.environ.get("GIGACHAT_VERIFY_SSL_CERTS", "") or "").strip().lower()
+            return {
+                "provider": provider,
+                "resolved_model": resolved_model,
+                "usage_model": usage_model,
+                "api_key": os.environ.get("GIGACHAT_CREDENTIALS", ""),
+                "user": (os.environ.get("GIGACHAT_USER", "") or "").strip(),
+                "password": os.environ.get("GIGACHAT_PASSWORD", "") or "",
+                "base_url": (
+                    os.environ.get("GIGACHAT_BASE_URL", "") or ""
+                ).strip() or "https://gigachat.devices.sberbank.ru/api/v1",
+                "scope": (os.environ.get("GIGACHAT_SCOPE", "") or "").strip() or "GIGACHAT_API_PERS",
+                "verify_ssl_certs": verify_raw not in ("0", "false", "no", "off"),
                 "default_headers": {},
                 "supports_openrouter_extensions": False,
                 "supports_generation_cost": False,
@@ -697,6 +725,20 @@ class LLMClient:
         if target.get("provider") == "anthropic":
             return await asyncio.to_thread(
                 self._chat_anthropic,
+                target,
+                messages,
+                tools,
+                reasoning_effort,
+                max_tokens,
+                tool_choice,
+                temperature,
+                no_proxy,
+            )
+        if target.get("provider") == "gigachat":
+            # The gigachat library client is synchronous; offload to a thread
+            # like the Anthropic path so the event loop is never blocked.
+            return await asyncio.to_thread(
+                self._chat_gigachat,
                 target,
                 messages,
                 tools,
@@ -1382,6 +1424,316 @@ class LLMClient:
             prompt_cache_ttl=prompt_cache_ttl,
         )
 
+    # ------------------------------------------------------------------
+    # GigaChat (native `gigachat` library — NOT OpenAI-compatible)
+    # ------------------------------------------------------------------
+    def _get_gigachat_client(self, target: Dict[str, Any]):
+        """Build (and cache) a GigaChat library client for the given target.
+
+        Auth is whatever the env provides: an authorization key (``credentials``
+        + ``scope``, OAuth) or ``user``/``password`` (basic auth). The library
+        exchanges these for a short-lived access token and refreshes it
+        automatically, so caching the client across calls is safe. Any other
+        ``GIGACHAT_*`` setting present in the environment (e.g.
+        ``GIGACHAT_PROFANITY_CHECK``) is picked up by the library itself.
+        """
+        credentials = str(target.get("api_key") or "")
+        user = str(target.get("user") or "")
+        password = str(target.get("password") or "")
+        scope = str(target.get("scope") or "GIGACHAT_API_PERS")
+        base_url = str(target.get("base_url") or "")
+        verify = bool(target.get("verify_ssl_certs", True))
+        cache_key = (credentials, user, password, scope, base_url, verify)
+
+        client = self._gigachat_clients.get(cache_key)
+        if client is None:
+            try:
+                from gigachat import GigaChat
+            except ImportError as exc:  # pragma: no cover - exercised only without the dep
+                raise RuntimeError(
+                    "The 'gigachat' package is required to use gigachat:: models. "
+                    "Install it with: pip install gigachat"
+                ) from exc
+            kwargs: Dict[str, Any] = {"scope": scope, "verify_ssl_certs": verify}
+            if credentials:
+                kwargs["credentials"] = credentials
+            if user:
+                kwargs["user"] = user
+            if password:
+                kwargs["password"] = password
+            if base_url:
+                kwargs["base_url"] = base_url
+            client = GigaChat(**kwargs)
+            self._gigachat_clients[cache_key] = client
+        return client
+
+    @staticmethod
+    def _gigachat_text(content: Any) -> str:
+        """Flatten OpenAI message content (str or list of blocks) to plain text.
+
+        GigaChat messages carry a plain-string ``content``; multipart blocks and
+        any ``cache_control`` markers are collapsed/dropped here.
+        """
+        if isinstance(content, list):
+            parts: List[str] = []
+            for block in content:
+                if isinstance(block, dict):
+                    parts.append(str(block.get("text", "")))
+                else:
+                    parts.append(str(block))
+            return "".join(parts)
+        return str(content or "")
+
+    @classmethod
+    def _gigachat_function_result(cls, content: Any) -> str:
+        """Return a function-result string that GigaChat accepts.
+
+        GigaChat requires the ``function``-role message content to be a valid
+        JSON document (it parses it server-side). Agent tool results are usually
+        plain text (file contents, command output), so anything that isn't
+        already valid JSON is wrapped as ``{"result": "<text>"}``.
+        """
+        text = cls._gigachat_text(content)
+        try:
+            json.loads(text)
+            return text  # already valid JSON — pass through unchanged
+        except Exception:
+            return json.dumps({"result": text}, ensure_ascii=False)
+
+    @classmethod
+    def _gigachat_messages(cls, messages: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+        """Convert OpenAI-style messages to GigaChat's message list.
+
+        Differences handled here:
+        - role ``tool`` (a tool result) → role ``function`` with the function
+          ``name`` resolved from the originating assistant ``tool_call_id``.
+        - assistant ``tool_calls`` (a list) → a single ``function_call`` object.
+          GigaChat supports ONE function call per turn, so parallel tool calls
+          are collapsed to the first one.
+        """
+        out: List[Dict[str, Any]] = []
+        call_id_to_name: Dict[str, str] = {}
+        last_function_name: Optional[str] = None
+
+        for msg in messages:
+            role = str(msg.get("role") or "")
+
+            if role == "tool":
+                name = (
+                    call_id_to_name.get(str(msg.get("tool_call_id") or ""))
+                    or last_function_name
+                    or "function"
+                )
+                out.append({
+                    "role": "function",
+                    "name": name,
+                    "content": cls._gigachat_function_result(msg.get("content")),
+                })
+                continue
+
+            effective_role = role if role in ("system", "user", "assistant") else "user"
+            # GigaChat requires the system message to be the FIRST message and
+            # rejects any later one ("system message must be the first message").
+            # The agent injects system-reminders mid-conversation, so demote any
+            # non-leading system message to a user message (keeps its content and
+            # recency, which matters for reminders).
+            if effective_role == "system" and out:
+                effective_role = "user"
+
+            gmsg: Dict[str, Any] = {
+                "role": effective_role,
+                "content": cls._gigachat_text(msg.get("content")),
+            }
+
+            tool_calls = msg.get("tool_calls")
+            if role == "assistant" and tool_calls:
+                # Record every id→name so following tool results resolve their
+                # function name, but only the first call is sent to GigaChat.
+                for tc in tool_calls:
+                    if not isinstance(tc, dict):
+                        continue
+                    tcid = str(tc.get("id") or "")
+                    tcname = str((tc.get("function") or {}).get("name") or "")
+                    if tcid and tcname:
+                        call_id_to_name[tcid] = tcname
+
+                first = tool_calls[0] if isinstance(tool_calls[0], dict) else {}
+                fn = first.get("function") or {}
+                name = str(fn.get("name") or "")
+                args_raw = fn.get("arguments")
+                arguments: Dict[str, Any] = {}
+                if isinstance(args_raw, dict):
+                    arguments = args_raw
+                elif isinstance(args_raw, str) and args_raw.strip():
+                    try:
+                        arguments = json.loads(args_raw)
+                    except Exception:
+                        arguments = {}
+                gmsg["function_call"] = {"name": name, "arguments": arguments}
+                last_function_name = name
+
+            out.append(gmsg)
+
+        return out
+
+    @staticmethod
+    def _gigachat_sanitize_schema(node: Any) -> Any:
+        """Make a JSON-Schema node acceptable to GigaChat's stricter validator.
+
+        GigaChat rejects any ``"type": "object"`` node that lacks a ``properties``
+        key with HTTP 422 ("Field is missing"), whereas OpenAI/JSON-Schema allow a
+        free-form object. Recursively ensure every object node carries
+        ``properties`` (default ``{}``), descending through ``properties`` values,
+        array ``items``, ``additionalProperties``, and ``anyOf``/``oneOf``/``allOf``.
+        ``cache_control`` markers are dropped wherever they appear.
+        """
+        if isinstance(node, list):
+            return [LLMClient._gigachat_sanitize_schema(v) for v in node]
+        if not isinstance(node, dict):
+            return node
+        out: Dict[str, Any] = {}
+        for key, value in node.items():
+            if key == "cache_control":
+                continue
+            if key == "properties" and isinstance(value, dict):
+                out[key] = {
+                    pk: LLMClient._gigachat_sanitize_schema(pv) for pk, pv in value.items()
+                }
+            elif key in ("items", "additionalProperties") and isinstance(value, (dict, list)):
+                out[key] = LLMClient._gigachat_sanitize_schema(value)
+            elif key in ("anyOf", "oneOf", "allOf") and isinstance(value, list):
+                out[key] = [LLMClient._gigachat_sanitize_schema(v) for v in value]
+            else:
+                out[key] = value
+        if out.get("type") == "object" and "properties" not in out:
+            out["properties"] = {}
+        return out
+
+    @staticmethod
+    def _gigachat_functions(
+        tools: Optional[List[Dict[str, Any]]],
+    ) -> List[Dict[str, Any]]:
+        """Convert OpenAI tool definitions to GigaChat ``functions`` entries."""
+        functions: List[Dict[str, Any]] = []
+        for tool in tools or []:
+            if not isinstance(tool, dict):
+                continue
+            fn = tool.get("function") if "function" in tool else tool
+            fn = fn or {}
+            name = str(fn.get("name") or "").strip()
+            if not name:
+                continue
+            entry: Dict[str, Any] = {"name": name}
+            if fn.get("description"):
+                entry["description"] = str(fn["description"])
+            params = fn.get("parameters")
+            if isinstance(params, dict):
+                entry["parameters"] = LLMClient._gigachat_sanitize_schema(params)
+            functions.append(entry)
+        return functions
+
+    def _chat_gigachat(
+        self,
+        target: Dict[str, Any],
+        messages: List[Dict[str, Any]],
+        tools: Optional[List[Dict[str, Any]]],
+        reasoning_effort: str,
+        max_tokens: int,
+        tool_choice: str,
+        temperature: Optional[float] = None,
+        no_proxy: bool = False,
+    ) -> Tuple[Dict[str, Any], Dict[str, Any]]:
+        # The gigachat library owns its own httpx transport and proxy handling;
+        # no_proxy (a macOS fork-safety flag for the OpenAI/requests paths) does
+        # not apply here.
+        del no_proxy
+
+        client = self._get_gigachat_client(target)
+
+        payload: Dict[str, Any] = {
+            "model": str(target.get("resolved_model") or ""),
+            "messages": self._gigachat_messages(messages),
+            "max_tokens": max_tokens,
+        }
+        if temperature is not None:
+            payload["temperature"] = temperature
+
+        functions = self._gigachat_functions(tools)
+        if functions:
+            payload["functions"] = functions
+            # GigaChat accepts "auto"/"none" (or a specific {name}); it has no
+            # strict "required", so anything else maps to "auto".
+            payload["function_call"] = tool_choice if tool_choice in ("auto", "none") else "auto"
+
+        effort = normalize_reasoning_effort(reasoning_effort)
+        if effort in ("low", "medium", "high"):
+            payload["reasoning_effort"] = effort
+
+        completion = client.chat(payload)
+        return self._normalize_gigachat_response(completion, target)
+
+    def _normalize_gigachat_response(
+        self,
+        completion: Any,
+        target: Dict[str, Any],
+    ) -> Tuple[Dict[str, Any], Dict[str, Any]]:
+        """Convert a GigaChat ``ChatCompletion`` into (message, usage) dicts.
+
+        A GigaChat ``function_call`` becomes a single OpenAI-style ``tool_calls``
+        entry (arguments re-encoded as a JSON string). Cost is estimated from
+        token counts via the local pricing table (GigaChat exposes no cost API).
+        """
+        choices = getattr(completion, "choices", None) or []
+        first = choices[0] if choices else None
+        gmsg = getattr(first, "message", None) if first is not None else None
+
+        content = (getattr(gmsg, "content", "") or "") if gmsg is not None else ""
+        message: Dict[str, Any] = {"role": "assistant", "content": content}
+
+        function_call = getattr(gmsg, "function_call", None) if gmsg is not None else None
+        if function_call is not None:
+            name = getattr(function_call, "name", "") or ""
+            arguments = getattr(function_call, "arguments", None)
+            if not isinstance(arguments, dict):
+                arguments = {}
+            try:
+                args_str = json.dumps(arguments, ensure_ascii=False)
+            except Exception:
+                args_str = "{}"
+            message["tool_calls"] = [{
+                "id": "call_0",
+                "type": "function",
+                "function": {"name": name, "arguments": args_str},
+            }]
+            # OpenAI convention: content is None when the turn is a tool call.
+            if not content:
+                message["content"] = None
+
+        usage_obj = getattr(completion, "usage", None)
+        prompt_tokens = int(getattr(usage_obj, "prompt_tokens", 0) or 0) if usage_obj is not None else 0
+        completion_tokens = int(getattr(usage_obj, "completion_tokens", 0) or 0) if usage_obj is not None else 0
+        cached_tokens = int(getattr(usage_obj, "precached_prompt_tokens", 0) or 0) if usage_obj is not None else 0
+
+        usage: Dict[str, Any] = {
+            "prompt_tokens": prompt_tokens,
+            "completion_tokens": completion_tokens,
+            "total_tokens": prompt_tokens + completion_tokens,
+            "cached_tokens": cached_tokens,
+            "provider": str(target.get("provider") or "gigachat"),
+            "resolved_model": str(target.get("usage_model") or target.get("resolved_model") or ""),
+        }
+        if prompt_tokens or completion_tokens:
+            from ouroboros.pricing import estimate_cost
+
+            estimated = estimate_cost(
+                usage["resolved_model"], prompt_tokens, completion_tokens, cached_tokens, 0
+            )
+            if estimated:
+                usage["cost"] = estimated
+        usage.setdefault("cost", 0.0)
+
+        return message, usage
+
     def _build_remote_kwargs(
         self,
         target: Dict[str, Any],
@@ -1559,6 +1911,12 @@ class LLMClient:
         """Send remote chat; no_proxy uses a one-shot client and skips OS proxy lookup."""
         if target.get("provider") == "anthropic":
             return self._chat_anthropic(
+                target, messages, tools, reasoning_effort, max_tokens, tool_choice, temperature,
+                no_proxy=no_proxy,
+            )
+
+        if target.get("provider") == "gigachat":
+            return self._chat_gigachat(
                 target, messages, tools, reasoning_effort, max_tokens, tool_choice, temperature,
                 no_proxy=no_proxy,
             )

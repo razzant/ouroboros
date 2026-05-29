@@ -25,6 +25,7 @@ def test_model_catalog_tags_provider_values(monkeypatch):
         "OPENAI_COMPATIBLE_API_KEY": "compat-key",
         "OPENAI_COMPATIBLE_BASE_URL": "https://compat.example/v1",
         "CLOUDRU_FOUNDATION_MODELS_API_KEY": "cloudru-key",
+        "GIGACHAT_CREDENTIALS": "giga-creds",
     })
 
     async def fake_openrouter(_client, _api_key):
@@ -45,9 +46,13 @@ def test_model_catalog_tags_provider_values(monkeypatch):
         }[provider_id]
         return [model_catalog_api._build_model_catalog_entry(provider_id, provider_label, model_id, model_id)]
 
+    async def fake_gigachat(_credentials, _scope, _base_url, _verify, _user="", _password=""):
+        return [model_catalog_api._build_model_catalog_entry("gigachat", "GigaChat", "giga-pro", "giga-pro")]
+
     monkeypatch.setattr(model_catalog_api, "_fetch_openrouter_model_catalog", fake_openrouter)
     monkeypatch.setattr(model_catalog_api, "_fetch_anthropic_model_catalog", fake_anthropic)
     monkeypatch.setattr(model_catalog_api, "_fetch_openai_compatible_model_catalog", fake_compatible)
+    monkeypatch.setattr(model_catalog_api, "_fetch_gigachat_model_catalog", fake_gigachat)
 
     response = asyncio.run(model_catalog_api.api_model_catalog(None))
     payload = json.loads(response.body.decode("utf-8"))
@@ -58,6 +63,7 @@ def test_model_catalog_tags_provider_values(monkeypatch):
     assert "anthropic::claude-sonnet-4-6" in values
     assert "openai-compatible::compatible-pro" in values
     assert "cloudru::cloudru-pro" in values
+    assert "gigachat::giga-pro" in values
     assert payload["errors"] == []
 
 

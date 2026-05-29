@@ -59,6 +59,13 @@ SETTINGS_DEFAULTS = {
     "OPENAI_COMPATIBLE_BASE_URL": "",
     "CLOUDRU_FOUNDATION_MODELS_API_KEY": "",
     "CLOUDRU_FOUNDATION_MODELS_BASE_URL": "https://foundation-models.api.cloud.ru/v1",
+    "GIGACHAT_CREDENTIALS": "",
+    "GIGACHAT_USER": "",
+    "GIGACHAT_PASSWORD": "",
+    "GIGACHAT_SCOPE": "GIGACHAT_API_PERS",
+    "GIGACHAT_BASE_URL": "https://gigachat.devices.sberbank.ru/api/v1",
+    "GIGACHAT_VERIFY_SSL_CERTS": "true",
+    "GIGACHAT_PROFANITY_CHECK": "",
     "ANTHROPIC_API_KEY": "",
 
     "OUROBOROS_NETWORK_PASSWORD": "",
@@ -215,10 +222,14 @@ def _exclusive_direct_remote_provider_env() -> str:
     has_legacy_base = bool(str(os.environ.get("OPENAI_BASE_URL", "") or "").strip())
     has_compatible = bool(str(os.environ.get("OPENAI_COMPATIBLE_API_KEY", "") or "").strip())
     has_cloudru = bool(str(os.environ.get("CLOUDRU_FOUNDATION_MODELS_API_KEY", "") or "").strip())
+    has_gigachat = bool(str(os.environ.get("GIGACHAT_CREDENTIALS", "") or "").strip()) or (
+        bool(str(os.environ.get("GIGACHAT_USER", "") or "").strip())
+        and bool(str(os.environ.get("GIGACHAT_PASSWORD", "") or "").strip())
+    )
     # OpenRouter / legacy OpenAI base / OpenAI-compatible all route through the
     # OpenRouter-style stack, so their presence means "not an exclusive direct
     # provider". Among the real direct providers (official OpenAI, Anthropic,
-    # Cloud.ru), return one only when exactly one is configured.
+    # Cloud.ru, GigaChat), return one only when exactly one is configured.
     if has_openrouter or has_legacy_base or has_compatible:
         return ""
     direct = [
@@ -226,6 +237,7 @@ def _exclusive_direct_remote_provider_env() -> str:
             ("openai", has_openai),
             ("anthropic", has_anthropic),
             ("cloudru", has_cloudru),
+            ("gigachat", has_gigachat),
         ) if present
     ]
     return direct[0] if len(direct) == 1 else ""
@@ -687,6 +699,9 @@ def apply_settings_to_env(settings: dict) -> None:
         "OPENROUTER_API_KEY", "OPENAI_API_KEY", "OPENAI_BASE_URL",
         "OPENAI_COMPATIBLE_API_KEY", "OPENAI_COMPATIBLE_BASE_URL",
         "CLOUDRU_FOUNDATION_MODELS_API_KEY", "CLOUDRU_FOUNDATION_MODELS_BASE_URL",
+        "GIGACHAT_CREDENTIALS", "GIGACHAT_USER", "GIGACHAT_PASSWORD",
+        "GIGACHAT_SCOPE", "GIGACHAT_BASE_URL", "GIGACHAT_VERIFY_SSL_CERTS",
+        "GIGACHAT_PROFANITY_CHECK",
         "ANTHROPIC_API_KEY",
         "OUROBOROS_NETWORK_PASSWORD",
         "OUROBOROS_MODEL", "OUROBOROS_MODEL_CODE", "OUROBOROS_MODEL_LIGHT",

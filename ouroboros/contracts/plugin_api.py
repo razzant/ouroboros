@@ -19,7 +19,8 @@ PLUGIN_API_VERSION = "1.2"
 # Core settings keys require explicit content-hash-bound owner grants.
 FORBIDDEN_SKILL_SETTINGS: frozenset[str] = frozenset({
     "OPENROUTER_API_KEY", "OPENAI_API_KEY", "OPENAI_COMPATIBLE_API_KEY",
-    "CLOUDRU_FOUNDATION_MODELS_API_KEY", "ANTHROPIC_API_KEY", "GITHUB_TOKEN",
+    "CLOUDRU_FOUNDATION_MODELS_API_KEY", "GIGACHAT_CREDENTIALS", "GIGACHAT_PASSWORD",
+    "ANTHROPIC_API_KEY", "GITHUB_TOKEN",
     "OUROBOROS_NETWORK_PASSWORD",
 })
 # Backwards-compatible alias for the extension name.

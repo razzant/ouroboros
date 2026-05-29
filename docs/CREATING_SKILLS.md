@@ -342,7 +342,7 @@ Skills UI.
 
 Some settings keys are protected: `OPENROUTER_API_KEY`,
 `OPENAI_API_KEY`, `OPENAI_COMPATIBLE_API_KEY`, `ANTHROPIC_API_KEY`,
-`CLOUDRU_FOUNDATION_MODELS_API_KEY`, `TELEGRAM_BOT_TOKEN`,
+`CLOUDRU_FOUNDATION_MODELS_API_KEY`, `GIGACHAT_CREDENTIALS`, `GIGACHAT_PASSWORD`, `TELEGRAM_BOT_TOKEN`,
 `GITHUB_TOKEN`, `OUROBOROS_NETWORK_PASSWORD`. These keys are NEVER
 forwarded to a skill by default, even when listed in
 `env_from_settings`. Custom secret keys stored in Settings → Secrets

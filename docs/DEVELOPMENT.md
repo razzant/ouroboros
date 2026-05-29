@@ -714,7 +714,8 @@ Default local pytest excludes costly or environment-dependent lanes:
 `portable_detail`. CI opts into them explicitly:
 
 - `integration` runs real provider checks, including Cloud.ru when
-  `CLOUDRU_FOUNDATION_MODELS_API_KEY` is configured.
+  `CLOUDRU_FOUNDATION_MODELS_API_KEY` is configured and GigaChat when
+  `GIGACHAT_CREDENTIALS` is configured.
 - `browser` launches real Playwright Chromium for agent browser tools.
 - `ui_browser` launches the host-side web UI under Playwright.
 - `ui_browser_docker` talks to an `ouroboros-web:test` container and must

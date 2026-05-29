@@ -141,6 +141,21 @@ def test_provider_basic_chat(provider_id, env_key, model, expected_provider):
     _assert_basic_response(result, expected_provider=expected_provider)
 
 
+@integration
+@pytest.mark.skipif(
+    not os.environ.get("GIGACHAT_CREDENTIALS"),
+    reason="GIGACHAT_CREDENTIALS not set",
+)
+def test_gigachat_basic_chat():
+    """Verify GigaChat direct routing via the gigachat library works."""
+    client = _get_llm_client()
+    result = client.chat(
+        messages=[{"role": "user", "content": "Respond with exactly: OK"}],
+        model="gigachat::GigaChat-3-Ultra",
+    )
+    _assert_basic_response(result, expected_provider="gigachat")
+
+
 # Isolation tests: clear competing provider keys so LLMClient can only route
 # through the single provider under test.
 
@@ -151,6 +166,7 @@ _COMPETING_KEYS = [
     "OPENAI_COMPATIBLE_API_KEY",
     "OPENAI_COMPATIBLE_BASE_URL",
     "CLOUDRU_FOUNDATION_MODELS_API_KEY",
+    "GIGACHAT_CREDENTIALS",
     "ANTHROPIC_API_KEY",
 ]
 
@@ -192,4 +208,22 @@ def test_provider_isolation(provider_id, env_key, model, monkeypatch):
     except Exception as exc:  # noqa: BLE001
         _skip_on_provider_environmental_error(provider_id, exc)
         raise
+    _assert_basic_response(result)
+
+
+@integration
+@pytest.mark.skipif(
+    not os.environ.get("GIGACHAT_CREDENTIALS"),
+    reason="GIGACHAT_CREDENTIALS not set",
+)
+def test_gigachat_isolation(monkeypatch):
+    """GigaChat works when it is the only configured provider."""
+    for key in _COMPETING_KEYS:
+        if key != "GIGACHAT_CREDENTIALS":
+            monkeypatch.delenv(key, raising=False)
+    client = _get_llm_client()
+    result = client.chat(
+        messages=[{"role": "user", "content": "Say hello"}],
+        model="gigachat::GigaChat-3-Ultra",
+    )
     _assert_basic_response(result)

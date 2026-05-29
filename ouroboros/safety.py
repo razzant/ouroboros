@@ -383,6 +383,8 @@ _REMOTE_PROVIDER_KEYS = (
     "ANTHROPIC_API_KEY",
     "OPENAI_COMPATIBLE_API_KEY",
     "CLOUDRU_FOUNDATION_MODELS_API_KEY",
+    "GIGACHAT_CREDENTIALS",
+    "GIGACHAT_PASSWORD",
 )
 
 _LOCAL_ROUTING_KEYS = (
@@ -400,6 +402,7 @@ _PROVIDER_KEY_ENV = {
     "anthropic": "ANTHROPIC_API_KEY",
     "openai-compatible": "OPENAI_COMPATIBLE_API_KEY",
     "cloudru": "CLOUDRU_FOUNDATION_MODELS_API_KEY",
+    "gigachat": "GIGACHAT_CREDENTIALS",
 }
 
 
@@ -421,6 +424,13 @@ def _light_model_has_reachable_provider(light_model: str) -> bool:
         key_type = infer_api_key_type(light_model)
     except Exception:  # pragma: no cover — defensive
         return True  # don't over-block on classifier failure
+    if key_type == "gigachat":
+        # GigaChat accepts either an authorization key (OAuth) or user/password.
+        has_creds = bool(str(os.environ.get("GIGACHAT_CREDENTIALS", "") or "").strip())
+        has_basic = bool(str(os.environ.get("GIGACHAT_USER", "") or "").strip()) and bool(
+            str(os.environ.get("GIGACHAT_PASSWORD", "") or "").strip()
+        )
+        return has_creds or has_basic
     env_key = _PROVIDER_KEY_ENV.get(key_type)
     if env_key is None:
         return True

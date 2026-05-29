@@ -48,7 +48,7 @@ server.py (Starlette+uvicorn) ← HTTP + WebSocket on configurable host:port (de
       ├── outcomes.py          ← Typed loop/task outcome, artifact bundle, verification ledger helpers
       ├── code_intelligence.py ← Internal code inventory v1: file facts, hashes, Python symbols/imports, JS/TS heuristics
       ├── pricing.py           ← Model pricing, cost estimation, usage events
-      ├── llm.py               ← Multi-provider LLM routing (OpenRouter/OpenAI/compatible/Cloud.ru/Anthropic) with adaptive request-parameter normalization for provider capabilities/rejections
+      ├── llm.py               ← Multi-provider LLM routing (OpenRouter/OpenAI/compatible/Cloud.ru/GigaChat/Anthropic) with adaptive request-parameter normalization for provider capabilities/rejections
       ├── mcp_client.py        ← HTTP/SSE MCP client manager: parses MCP_SERVERS, validates URLs/auth headers, masks tokens, normalizes external tool names as mcp_<server>__<tool>, refreshes tool lists, and dispatches calls through the guarded Python mcp SDK import
       ├── safety.py            ← Policy-based LLM safety check
       ├── consciousness.py     ← Background thinking loop (with progress emission)
@@ -1018,6 +1018,13 @@ Runtime floors:
 | OPENAI_COMPATIBLE_BASE_URL | "" | Optional. Dedicated OpenAI-compatible provider base URL |
 | CLOUDRU_FOUNDATION_MODELS_API_KEY | "" | Optional. Cloud.ru Foundation Models provider key |
 | CLOUDRU_FOUNDATION_MODELS_BASE_URL | `https://foundation-models.api.cloud.ru/v1` | Cloud.ru provider base URL |
+| GIGACHAT_CREDENTIALS | "" | Optional. Sber GigaChat authorization key (base64 `client_id:secret`, OAuth). Enables `gigachat::...` model values via the `gigachat` library |
+| GIGACHAT_USER | "" | Optional. GigaChat basic-auth username (alternative to `GIGACHAT_CREDENTIALS`) |
+| GIGACHAT_PASSWORD | "" | Optional. GigaChat basic-auth password (used with `GIGACHAT_USER`) |
+| GIGACHAT_SCOPE | `GIGACHAT_API_PERS` | GigaChat API scope (`GIGACHAT_API_PERS` personal / `GIGACHAT_API_CORP` corporate) |
+| GIGACHAT_BASE_URL | `https://gigachat.devices.sberbank.ru/api/v1` | GigaChat API base URL (override for internal endpoints) |
+| GIGACHAT_VERIFY_SSL_CERTS | `true` | Verify GigaChat TLS certs. Set `false` to skip (e.g. behind the Russian Trusted Root CA) |
+| GIGACHAT_PROFANITY_CHECK | "" | Optional. `true`/`false` profanity filter; read directly by the `gigachat` library |
 | ANTHROPIC_API_KEY | "" | Optional. Enables direct Anthropic runtime routing (`anthropic::...` model values) and Claude Agent SDK advisory/review internals |
 | transport-skill requested bot token | "" | Optional stored secret used by the Telegram bridge skill after owner grant |
 | transport-skill local chat id | "" | Optional stored setting used by the Telegram bridge skill |

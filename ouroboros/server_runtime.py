@@ -8,6 +8,7 @@ from typing import Awaitable, Callable
 from ouroboros.provider_models import (
     ANTHROPIC_DIRECT_DEFAULTS,
     CLOUDRU_DIRECT_DEFAULTS,
+    GIGACHAT_DIRECT_DEFAULTS,
     OPENAI_DIRECT_DEFAULTS,
     compute_direct_review_models_fallback,
     migrate_model_value,
@@ -35,13 +36,20 @@ _DIRECT_PROVIDER_AUTO_DEFAULTS = {
         "OUROBOROS_MODEL_LIGHT": CLOUDRU_DIRECT_DEFAULTS["light"],
         "OUROBOROS_MODEL_FALLBACK": CLOUDRU_DIRECT_DEFAULTS["fallback"],
     },
+    "gigachat": {
+        "OUROBOROS_MODEL": GIGACHAT_DIRECT_DEFAULTS["main"],
+        "OUROBOROS_MODEL_CODE": GIGACHAT_DIRECT_DEFAULTS["code"],
+        "OUROBOROS_MODEL_LIGHT": GIGACHAT_DIRECT_DEFAULTS["light"],
+        "OUROBOROS_MODEL_FALLBACK": GIGACHAT_DIRECT_DEFAULTS["fallback"],
+    },
 }
 # Legacy values that should be auto-replaced with a provider's direct defaults.
-# Cloud.ru intentionally has NO entry: a Cloud.ru-only user's main/code/light
-# slots match the shipped SETTINGS_DEFAULTS (google/gemini) and migrate via the
-# `current in {"", default}` check, and the review/scope slots are rebuilt from
-# the (now cloudru::) main by _normalize_direct_review_models — so no per-model
-# legacy set is needed (verified by test_apply_runtime_provider_defaults_cloudru_*).
+# Cloud.ru and GigaChat intentionally have NO entry: such a provider-only user's
+# main/code/light slots match the shipped SETTINGS_DEFAULTS (google/gemini) and
+# migrate via the `current in {"", default}` check, and the review/scope slots are
+# rebuilt from the (now cloudru::/gigachat::) main by _normalize_direct_review_models
+# — so no per-model legacy set is needed (verified by
+# test_apply_runtime_provider_defaults_cloudru_*).
 _DIRECT_PROVIDER_LEGACY_DEFAULTS = {
     "openai": {
         "OUROBOROS_MODEL": {"anthropic/claude-opus-4.6"},
@@ -167,9 +175,13 @@ def _exclusive_direct_remote_provider(settings: dict) -> str:
     has_legacy_openai_base = bool(_setting_text(settings, "OPENAI_BASE_URL"))
     has_compatible = bool(_setting_text(settings, "OPENAI_COMPATIBLE_API_KEY"))
     has_cloudru = bool(_setting_text(settings, "CLOUDRU_FOUNDATION_MODELS_API_KEY"))
+    has_gigachat = bool(_setting_text(settings, "GIGACHAT_CREDENTIALS")) or (
+        bool(_setting_text(settings, "GIGACHAT_USER"))
+        and bool(_setting_text(settings, "GIGACHAT_PASSWORD"))
+    )
     # Mirror config._exclusive_direct_remote_provider_env: OpenRouter / legacy
     # base / compatible disqualify exclusivity; among the real direct providers
-    # (OpenAI, Anthropic, Cloud.ru) return one only when exactly one is set.
+    # (OpenAI, Anthropic, Cloud.ru, GigaChat) return one only when exactly one is set.
     if has_openrouter or has_legacy_openai_base or has_compatible:
         return ""
     direct = [
@@ -177,6 +189,7 @@ def _exclusive_direct_remote_provider(settings: dict) -> str:
             ("openai", has_official_openai),
             ("anthropic", has_anthropic),
             ("cloudru", has_cloudru),
+            ("gigachat", has_gigachat),
         ) if present
     ]
     return direct[0] if len(direct) == 1 else ""
@@ -267,7 +280,7 @@ def classify_runtime_provider_change(before: dict, after: dict) -> str:
 
 def has_remote_provider(settings: dict) -> bool:
     """Return True when any supported remote-provider credential is configured."""
-    return any(
+    if any(
         str(settings.get(key, "") or "").strip()
         for key in (
             "OPENROUTER_API_KEY",
@@ -275,7 +288,13 @@ def has_remote_provider(settings: dict) -> bool:
             "ANTHROPIC_API_KEY",
             "OPENAI_COMPATIBLE_API_KEY",
             "CLOUDRU_FOUNDATION_MODELS_API_KEY",
+            "GIGACHAT_CREDENTIALS",
         )
+    ):
+        return True
+    # GigaChat also supports user/password basic auth.
+    return bool(str(settings.get("GIGACHAT_USER", "") or "").strip()) and bool(
+        str(settings.get("GIGACHAT_PASSWORD", "") or "").strip()
     )
 
 

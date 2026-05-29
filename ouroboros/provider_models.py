@@ -16,6 +16,13 @@ CLOUDRU_DIRECT_DEFAULTS = {
     "fallback": "cloudru::zai-org/GLM-4.7",
 }
 
+GIGACHAT_DIRECT_DEFAULTS = {
+    "main": "gigachat::GigaChat-3-Ultra",
+    "code": "gigachat::GigaChat-3-Ultra",
+    "light": "gigachat::GigaChat-3-Ultra",
+    "fallback": "gigachat::GigaChat-3-Ultra",
+}
+
 ANTHROPIC_DIRECT_DEFAULTS = {
     "main": "anthropic::claude-opus-4-8",
     "code": "anthropic::claude-opus-4-8",
@@ -27,6 +34,7 @@ _DIRECT_PROVIDER_DEFAULTS = {
     "openai": OPENAI_DIRECT_DEFAULTS,
     "anthropic": ANTHROPIC_DIRECT_DEFAULTS,
     "cloudru": CLOUDRU_DIRECT_DEFAULTS,
+    "gigachat": GIGACHAT_DIRECT_DEFAULTS,
 }
 
 _ANTHROPIC_MODEL_ALIASES = {
@@ -99,6 +107,8 @@ def normalize_model_identity(model: str) -> str:
         return f"openai-compatible/{text[len('openai-compatible::'):]}"
     if text.startswith("cloudru::"):
         return f"cloudru/{text[len('cloudru::'):]}"
+    if text.startswith("gigachat::"):
+        return f"gigachat/{text[len('gigachat::'):]}"
     if text.startswith("anthropic::"):
         return f"anthropic/{normalize_anthropic_model_id(text[len('anthropic::'):])}"
     if text.startswith("anthropic/"):

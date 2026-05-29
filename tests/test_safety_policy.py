@@ -416,6 +416,7 @@ def test_unknown_tool_under_local_only_config_uses_local_light(monkeypatch):
         "ANTHROPIC_API_KEY",
         "OPENAI_COMPATIBLE_API_KEY",
         "CLOUDRU_FOUNDATION_MODELS_API_KEY",
+        "GIGACHAT_CREDENTIALS",
     ):
         monkeypatch.delenv(k, raising=False)
     monkeypatch.setenv("USE_LOCAL_LIGHT", "true")
@@ -444,6 +445,7 @@ def test_unknown_tool_with_no_safety_backend_fails_open_with_warning(monkeypatch
         "ANTHROPIC_API_KEY",
         "OPENAI_COMPATIBLE_API_KEY",
         "CLOUDRU_FOUNDATION_MODELS_API_KEY",
+        "GIGACHAT_CREDENTIALS",
         "USE_LOCAL_MAIN",
         "USE_LOCAL_CODE",
         "USE_LOCAL_LIGHT",
@@ -474,6 +476,7 @@ def test_openrouter_only_with_direct_provider_light_model_fails_open(monkeypatch
         "ANTHROPIC_API_KEY",
         "OPENAI_COMPATIBLE_API_KEY",
         "CLOUDRU_FOUNDATION_MODELS_API_KEY",
+        "GIGACHAT_CREDENTIALS",
         "USE_LOCAL_MAIN",
         "USE_LOCAL_CODE",
         "USE_LOCAL_LIGHT",
@@ -508,6 +511,7 @@ def test_mixed_remote_local_provider_mismatch_local_failure_fails_open(monkeypat
         "ANTHROPIC_API_KEY",
         "OPENAI_COMPATIBLE_API_KEY",
         "CLOUDRU_FOUNDATION_MODELS_API_KEY",
+        "GIGACHAT_CREDENTIALS",
         "USE_LOCAL_LIGHT",
         "USE_LOCAL_CODE",
         "USE_LOCAL_FALLBACK",
@@ -538,6 +542,7 @@ def test_explicit_local_light_failure_still_blocks(monkeypatch):
         "ANTHROPIC_API_KEY",
         "OPENAI_COMPATIBLE_API_KEY",
         "CLOUDRU_FOUNDATION_MODELS_API_KEY",
+        "GIGACHAT_CREDENTIALS",
     ):
         monkeypatch.delenv(k, raising=False)
     monkeypatch.setenv("USE_LOCAL_LIGHT", "true")
@@ -563,6 +568,7 @@ def test_local_fallback_runtime_error_fails_open_with_warning(monkeypatch):
         "ANTHROPIC_API_KEY",
         "OPENAI_COMPATIBLE_API_KEY",
         "CLOUDRU_FOUNDATION_MODELS_API_KEY",
+        "GIGACHAT_CREDENTIALS",
     ):
         monkeypatch.delenv(k, raising=False)
     monkeypatch.setenv("USE_LOCAL_MAIN", "true")
@@ -910,6 +916,7 @@ def test_usage_event_uses_local_provider_when_use_local_light(monkeypatch):
         "ANTHROPIC_API_KEY",
         "OPENAI_COMPATIBLE_API_KEY",
         "CLOUDRU_FOUNDATION_MODELS_API_KEY",
+        "GIGACHAT_CREDENTIALS",
     ):
         monkeypatch.delenv(k, raising=False)
     monkeypatch.setenv("USE_LOCAL_LIGHT", "true")
