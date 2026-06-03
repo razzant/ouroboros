@@ -199,3 +199,51 @@ def test_normalize_function_call_response():
     assert call["function"]["name"] == "do"
     # arguments re-encoded as a JSON string (round-trips back to the dict)
     assert json.loads(call["function"]["arguments"]) == {"a": 1}
+
+
+def test_gigachat_payload_omits_reasoning_effort(monkeypatch):
+    """GigaChat can spend the response budget on hidden reasoning and return
+    empty content/tool_calls when reasoning_effort is sent."""
+    captured = {}
+
+    class FakeClient:
+        def chat(self, payload):
+            captured.update(payload)
+            return ChatCompletion(
+                choices=[Choices(
+                    message=Messages(
+                        role="assistant",
+                        content="",
+                        function_call=FunctionCall(name="do", arguments={"a": 1}),
+                    ),
+                    index=0,
+                    finish_reason="function_call",
+                )],
+                created=1,
+                model="GigaChat-3-Ultra",
+                usage=Usage(prompt_tokens=10, completion_tokens=5, total_tokens=15),
+                object="chat.completion",
+            )
+
+    monkeypatch.setattr(LLMClient, "_get_gigachat_client", lambda self, target: FakeClient())
+
+    client = LLMClient()
+    message, _ = client._chat_gigachat(
+        _target(),
+        [{"role": "user", "content": "call do"}],
+        [{
+            "type": "function",
+            "function": {
+                "name": "do",
+                "parameters": {"type": "object", "properties": {}},
+            },
+        }],
+        reasoning_effort="medium",
+        max_tokens=128,
+        tool_choice="auto",
+    )
+
+    assert "functions" in captured
+    assert captured["function_call"] == "auto"
+    assert "reasoning_effort" not in captured
+    assert message["tool_calls"][0]["function"]["name"] == "do"

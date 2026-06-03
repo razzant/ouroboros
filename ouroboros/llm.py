@@ -1665,9 +1665,9 @@ class LLMClient:
             # strict "required", so anything else maps to "auto".
             payload["function_call"] = tool_choice if tool_choice in ("auto", "none") else "auto"
 
-        effort = normalize_reasoning_effort(reasoning_effort)
-        if effort in ("low", "medium", "high"):
-            payload["reasoning_effort"] = effort
+        # Current GigaChat-3 models can spend the full max_tokens budget on
+        # hidden reasoning and return empty content/tool_calls when
+        # reasoning_effort is sent. Keep the native path deterministic.
 
         completion = client.chat(payload)
         return self._normalize_gigachat_response(completion, target)
