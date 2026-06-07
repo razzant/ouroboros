@@ -495,6 +495,30 @@ export function initChat({ ws, state, updateUnreadBadge, openSettingsTab, openDa
         return remaining <= threshold;
     }
 
+    // Convert a raw ISO/epoch timestamp to a sortable epoch-ms number, or NaN.
+    // NEVER derive this from normalizeLogTs() output — that is a lossy, time-only
+    // display string (no date), so it cannot order across days.
+    function tsToMs(raw) {
+        if (raw == null || raw === '') return NaN;
+        const ms = typeof raw === 'number' ? raw : Date.parse(raw);
+        return Number.isFinite(ms) ? ms : NaN;
+    }
+
+    // Stamp a node with a sortable data-ts (epoch-ms). For cards, setOnce anchors
+    // the node at its earliest timestamp (task start) so later updates don't
+    // re-sort a long-running card to the bottom.
+    function stampNodeTs(node, raw, { setOnce = false } = {}) {
+        if (!node) return;
+        const ms = tsToMs(raw);
+        if (!Number.isFinite(ms)) return;
+        if (setOnce && node.dataset.ts) {
+            const prev = Number(node.dataset.ts);
+            node.dataset.ts = String(Number.isFinite(prev) ? Math.min(prev, ms) : ms);
+        } else {
+            node.dataset.ts = String(ms);
+        }
+    }
+
     function insertMessageNode(node, options = {}) {
         if (!node) return;
         const shouldStick = Boolean(options.forceStick) || isNearBottom();
@@ -503,8 +527,28 @@ export function initChat({ ws, state, updateUnreadBadge, openSettingsTab, openDa
             return;
         }
         const typing = document.getElementById('typing-indicator');
-        if (typing && typing.parentNode === messagesDiv) messagesDiv.insertBefore(node, typing);
-        else messagesDiv.appendChild(node);
+        // Chronological insertion: place the node before the first existing child
+        // whose data-ts is greater. Children without a parseable data-ts
+        // (welcome/ephemeral bubbles, the typing indicator) are skipped, not
+        // coerced to 0/NaN. A node without its own data-ts falls back to append.
+        const nodeTs = Number(node.dataset?.ts);
+        let inserted = false;
+        if (Number.isFinite(nodeTs)) {
+            for (const child of messagesDiv.children) {
+                if (child === node || child === typing) continue;
+                const childTs = Number(child.dataset?.ts);
+                if (!Number.isFinite(childTs)) continue;
+                if (childTs > nodeTs) {
+                    messagesDiv.insertBefore(node, child);
+                    inserted = true;
+                    break;
+                }
+            }
+        }
+        if (!inserted) {
+            if (typing && typing.parentNode === messagesDiv) messagesDiv.insertBefore(node, typing);
+            else messagesDiv.appendChild(node);
+        }
         if (shouldStick) messagesDiv.scrollTop = messagesDiv.scrollHeight;
     }
 
@@ -559,11 +603,12 @@ export function initChat({ ws, state, updateUnreadBadge, openSettingsTab, openDa
         }, delayMs);
     }
 
-    function bufferLiveUpdate(taskState, summary, ts, dedupeKey = '') {
+    function bufferLiveUpdate(taskState, summary, ts, dedupeKey = '', rawTs = '') {
         if (!taskState || !summary) return;
         taskState.bufferedLiveUpdates.push({
             summary,
             ts,
+            rawTs,
             dedupeKey: dedupeKey || summary.dedupeKey || '',
         });
 
@@ -581,7 +626,7 @@ export function initChat({ ws, state, updateUnreadBadge, openSettingsTab, openDa
         const bufferedUpdates = [...taskState.bufferedLiveUpdates];
         taskState.bufferedLiveUpdates = [];
         for (const update of bufferedUpdates) {
-            applyLiveCardState(update.summary, taskState.taskId, update.ts, update.dedupeKey, { suppressDomInsert });
+            applyLiveCardState(update.summary, taskState.taskId, update.ts, update.dedupeKey, { suppressDomInsert, rawTs: update.rawTs });
         }
         if (taskState.completed) {
             finishLiveCard(taskState.taskId, taskState.completedPhase || 'done');
@@ -633,7 +678,7 @@ export function initChat({ ws, state, updateUnreadBadge, openSettingsTab, openDa
     // Logical slots that may host multiple independent cycles.
     const REUSABLE_TASK_IDS = new Set(['bg-consciousness', 'active']);
 
-    function queueTaskLiveUpdate(summary, taskId, ts, dedupeKey = '') {
+    function queueTaskLiveUpdate(summary, taskId, ts, dedupeKey = '', rawTs = '') {
         const resolvedTaskId = taskId || activeLiveGroupId || '';
         if (!resolvedTaskId) return;
         const taskState = getTaskUiState(resolvedTaskId, true);
@@ -662,11 +707,11 @@ export function initChat({ ws, state, updateUnreadBadge, openSettingsTab, openDa
             taskState.forceCard = true;
         }
         if (!taskState.cardVisible) {
-            bufferLiveUpdate(taskState, summary, ts, dedupeKey);
+            bufferLiveUpdate(taskState, summary, ts, dedupeKey, rawTs);
             revealBufferedCardIfNeeded(taskState);
             return;
         }
-        applyLiveCardState(summary, resolvedTaskId, ts, dedupeKey);
+        applyLiveCardState(summary, resolvedTaskId, ts, dedupeKey, { rawTs });
     }
 
     function createLiveCardRecord(groupId = '', options = {}) {
@@ -813,6 +858,9 @@ export function initChat({ ws, state, updateUnreadBadge, openSettingsTab, openDa
         record.metaEl.innerHTML = '';
         record.timelineEl.innerHTML = '';
         record.root.dataset.finished = '0';
+        // Reused (REUSABLE_TASK_IDS, e.g. bg-consciousness) cards start a fresh
+        // cycle: drop the old anchor so the next update re-stamps the new ts.
+        delete record.root.dataset.ts;
         setLiveCardTypingVisible(record, true);
         setLiveCardExpanded(record, record.isSubagent && nestedSubagentsExpanded);
     }
@@ -1000,7 +1048,7 @@ export function initChat({ ws, state, updateUnreadBadge, openSettingsTab, openDa
         }, 700);
     }
 
-    function applyLiveCardState(summary, groupId, ts, dedupeKey = '', { suppressDomInsert = false } = {}) {
+    function applyLiveCardState(summary, groupId, ts, dedupeKey = '', { suppressDomInsert = false, rawTs = '' } = {}) {
         const nextGroupId = groupId || activeLiveGroupId || 'active';
         const record = getLiveCardRecord(nextGroupId);
         const nextPhase = summary.phase || '';
@@ -1009,6 +1057,11 @@ export function initChat({ ws, state, updateUnreadBadge, openSettingsTab, openDa
         }
 
         if (!record.isSubagent) activeLiveGroupId = nextGroupId;
+        // Anchor the card chronologically at its earliest timestamp (raw, not the
+        // lossy normalized display string) BEFORE it is inserted into the DOM, so a
+        // replayed/finished card lands at its historical position, not the bottom.
+        // Subagent child cards live in their own container and are not ts-ordered.
+        if (!record.isSubagent) stampNodeTs(record.root, rawTs, { setOnce: true });
         ensureLiveCardVisible(record, { suppressDomInsert });
         record.updates += 1;
         const wasFinished = record.finished;
@@ -1188,7 +1241,7 @@ export function initChat({ ws, state, updateUnreadBadge, openSettingsTab, openDa
             taskId,
             normalizeLogTs(msg.ts || new Date().toISOString()),
             `task_done|${taskId}`,
-            { suppressDomInsert },
+            { suppressDomInsert, rawTs: msg.ts || new Date().toISOString() },
         );
         finishLiveCard(taskId, failedResult ? 'error' : 'done');
         scheduleTaskUiCleanup(taskState);
@@ -1261,7 +1314,7 @@ export function initChat({ ws, state, updateUnreadBadge, openSettingsTab, openDa
             lifecycle: msg?.lifecycle || null,
         });
         if (!summary) return;
-        queueTaskLiveUpdate(summary, taskId, normalizeLogTs(msg.ts || new Date().toISOString()), summary.dedupeKey || '');
+        queueTaskLiveUpdate(summary, taskId, normalizeLogTs(msg.ts || new Date().toISOString()), summary.dedupeKey || '', msg.ts || new Date().toISOString());
     }
 
     function updateSubagentCardFromEvent(evt, tsValue) {
@@ -1426,7 +1479,7 @@ export function initChat({ ws, state, updateUnreadBadge, openSettingsTab, openDa
             if (!summary) return;
             const info = subagentChildParents.get(taskId);
             if (info) getSubagentCardRecord(taskId, info.parentId, info.role);
-            queueTaskLiveUpdate(summary, taskId, normalizeLogTs(evt.ts || evt.timestamp), summary.dedupeKey || '');
+            queueTaskLiveUpdate(summary, taskId, normalizeLogTs(evt.ts || evt.timestamp), summary.dedupeKey || '', evt.ts || evt.timestamp);
             return;
         }
         if (eventType === 'tool_call_started') {
@@ -1444,7 +1497,7 @@ export function initChat({ ws, state, updateUnreadBadge, openSettingsTab, openDa
         }
         const summary = summarizeChatLiveEvent(evt);
         if (!summary) return;
-        queueTaskLiveUpdate(summary, taskId, normalizeLogTs(evt.ts || evt.timestamp), summary.dedupeKey || '');
+        queueTaskLiveUpdate(summary, taskId, normalizeLogTs(evt.ts || evt.timestamp), summary.dedupeKey || '', evt.ts || evt.timestamp);
         updateSubagentCardFromEvent(evt, evt.ts || evt.timestamp || new Date().toISOString());
         if (eventType === 'task_done') {
             const taskState = getTaskUiState(taskId, false);
@@ -1528,6 +1581,7 @@ export function initChat({ ws, state, updateUnreadBadge, openSettingsTab, openDa
                 requestAnimationFrame(() => updateMessagesPadding({ preserveStickiness: true }));
             });
         }
+        stampNodeTs(bubble, ts);
         insertMessageNode(bubble, { forceStick: !!opts.forceStick });
         rememberMessageKey(messageKey);
         if (pending && clientMessageId) pendingUserBubbles.set(clientMessageId, bubble);
@@ -2174,6 +2228,7 @@ export function initChat({ ws, state, updateUnreadBadge, openSettingsTab, openDa
         if (img && imageUrl) {
             img.addEventListener('click', () => window.open(imageUrl, '_blank'));
         }
+        stampNodeTs(bubble, msg.ts || new Date().toISOString());
         insertMessageNode(bubble);
         incrementUnreadIfNeeded();
     });
@@ -2204,6 +2259,7 @@ export function initChat({ ws, state, updateUnreadBadge, openSettingsTab, openDa
             <div class="message"><video class="chat-video" src="${escapeHtmlAttr(videoUrl)}" controls></video></div>
             ${timeHtml}
         `;
+        stampNodeTs(bubble, msg.ts || new Date().toISOString());
         insertMessageNode(bubble);
         incrementUnreadIfNeeded();
     });

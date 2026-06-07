@@ -1895,10 +1895,14 @@ body {
     white-space: nowrap;
     transition: color 0.18s, background 0.18s, border-color 0.18s, box-shadow 0.18s;
 }
-.chat-consilium:hover {
-    color: var(--accent);
-    border-color: rgba(232, 93, 111, 0.40);
-    background: rgba(38, 25, 34, 0.58);
+/* Scope hover to pointer devices: iOS Safari keeps :hover stuck after a tap,
+   which made the Consilium button look "still on" after disarming (BUG-1). */
+@media (hover: hover) {
+    .chat-consilium:hover {
+        color: var(--accent);
+        border-color: rgba(232, 93, 111, 0.40);
+        background: rgba(38, 25, 34, 0.58);
+    }
 }
 .chat-consilium[data-armed="true"] {
     color: var(--accent);
@@ -1937,8 +1941,10 @@ body {
     cursor: pointer;
     transition: color 0.15s, background 0.15s;
 }
-.chat-context-mode .chat-seg:hover {
-    color: var(--text-primary);
+@media (hover: hover) {
+    .chat-context-mode .chat-seg:hover {
+        color: var(--text-primary);
+    }
 }
 /* Active segment: Max glows accent (full context); Low glows amber (reduced). */
 .chat-context-mode[data-context-mode="max"] .chat-seg[data-mode="max"] {
@@ -1986,10 +1992,12 @@ body {
     display: flex;
     align-items: center;
 }
-.chat-send-inline:hover {
-    opacity: 1;
-    background: var(--accent-18);
-    border-color: rgba(232, 93, 111, 0.48);
+@media (hover: hover) {
+    .chat-send-inline:hover {
+        opacity: 1;
+        background: var(--accent-18);
+        border-color: rgba(232, 93, 111, 0.48);
+    }
 }
 .chat-send-inline:active {
     background: var(--accent-18);
