@@ -109,7 +109,12 @@ def _installed_skill_names():
         from ouroboros.config import get_skills_repo_path
         from ouroboros.skill_loader import discover_skills
 
-        return {s.name for s in discover_skills(DATA_DIR, repo_path=get_skills_repo_path())}
+        names = {s.name for s in discover_skills(DATA_DIR, repo_path=get_skills_repo_path())}
+        # Coalesce an EMPTY result to None ("unknown"), NOT "everything
+        # uninstalled": discover_skills returns [] without raising when the skills
+        # dir is momentarily unavailable; treating that as an empty install set
+        # would let an enforced reap mass-kill live companions. None ⇒ keep-all.
+        return names or None
     except Exception:
         log.debug("Could not compute installed skill names for custody reaper", exc_info=True)
         return None

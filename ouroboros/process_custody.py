@@ -12,8 +12,10 @@ Scopes:
   - ``task``:    dies with its owning task; reapable as soon as the task is no
                  longer running (and always across server generations).
   - ``session``: dies with the server generation (session_id mismatch → reap).
-  - ``daemon``:  intentionally outlives generations (e.g. launcher-managed
-                 companions); the reaper only prunes dead entries, never kills.
+  - ``daemon``:  genuine launcher-managed processes (e.g. ``server_restart_fallback``)
+                 outlive generations — never killed. Skill COMPANIONS also record
+                 daemon scope but are the exception: ``reap_orphaned_processes``
+                 reaps them on owner-uninstall or a foreign generation.
 
 This module deliberately lives OUTSIDE platform_layer (primitives-only) and
 adds no policy to the panic layers it complements (``_active_subprocesses``,

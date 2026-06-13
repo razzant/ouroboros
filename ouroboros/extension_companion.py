@@ -131,10 +131,11 @@ class CompanionSupervisor:
                 popen_kwargs.update(subprocess_new_group_kwargs())
             popen_kwargs = merge_hidden_kwargs(popen_kwargs)
             proc = subprocess.Popen(descriptor.command, **popen_kwargs)  # noqa: S603
-            # Write-through into the custody ledger (daemon scope: companions
-            # are launcher-managed and must survive server generations; the
-            # reaper only prunes their dead entries). The launcher-facing
-            # extension_companions.json contract stays untouched.
+            # Write-through into the custody ledger (daemon scope). Companions
+            # survive clean restarts (reconcile re-spawns them), but the reaper
+            # now reaps a companion entry when its owner skill is uninstalled OR
+            # the entry is from a foreign generation (see process_custody). The
+            # launcher-facing extension_companions.json contract stays untouched.
             try:
                 from ouroboros.config import DATA_DIR as _data_dir
                 from ouroboros.process_custody import record_process

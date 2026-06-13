@@ -193,8 +193,13 @@ def test_reaper_companion_log_only_does_not_kill(tmp_path):
     try:
         reaped = reap_orphaned_processes(tmp_path, live_owner_skills=set())  # gone_skill not installed
         assert proc.pid not in reaped and proc.poll() is None
-        events = (tmp_path / "logs" / "supervisor.jsonl").read_text(encoding="utf-8")
-        assert "process_would_reap" in events
+        import json as _json
+        lines = (tmp_path / "logs" / "supervisor.jsonl").read_text(encoding="utf-8").splitlines()
+        wr = [_json.loads(l) for l in lines if l.strip() and '"process_would_reap"' in l]
+        assert wr, "expected a process_would_reap event"
+        assert wr[-1]["pid"] == proc.pid
+        assert wr[-1]["owner_skill"] == "gone_skill"
+        assert wr[-1]["reason"] == "owner_uninstalled"
     finally:
         proc.kill(); proc.wait(timeout=5)
 
@@ -254,16 +259,22 @@ def test_reaper_keeps_companion_when_live_set_unknown(tmp_path, monkeypatch):
 
 
 @_POSIX_ONLY
-def test_reaper_parses_companion_owner_as_middle_segment(tmp_path):
+def test_reaper_parses_companion_owner_as_middle_segment(tmp_path, monkeypatch):
     # Owner is the MIDDLE field; a colon in the companion NAME must not corrupt it.
-    # my_skill IS installed + same session → kept, proving owner parsed as
-    # "my_skill" (not "job:42"); a wrong parse would not match and reap it.
+    # Foreign generation + enforce: a CORRECT parse → owner "my_skill" (installed)
+    # → reapable as a stale duplicate → KILLED. A wrong parse (empty owner) would
+    # gate out (reapable=False) and survive — so killing here proves the owner was
+    # parsed as the middle segment, not "job:42"/"42".
     proc = _sleeper(tmp_path, "companion:my_skill:job:42", "daemon")
     try:
+        monkeypatch.setattr(process_custody, "_SESSION_ID", "next-generation")
         reaped = reap_orphaned_processes(tmp_path, live_owner_skills={"my_skill"}, enforce_companion_reap=True)
-        assert proc.pid not in reaped and proc.poll() is None
+        assert proc.pid in reaped
+        _await_dead(proc)
+        assert proc.poll() is not None
     finally:
-        proc.kill(); proc.wait(timeout=5)
+        if proc.poll() is None:
+            proc.kill(); proc.wait(timeout=5)
 
 
 @_POSIX_ONLY
@@ -392,3 +403,23 @@ def test_live_kept_service_pids_reports_only_live_session_services(tmp_path):
         for p in (keep, task_svc, ws_keep, ws_task):
             p.kill()
             p.wait(timeout=5)
+
+
+def test_installed_skill_names_is_disk_derived_and_none_on_failure(monkeypatch):
+    # The reaper's owner-set source: disk-derived, and None (keep-all) on failure
+    # OR empty disk — never an empty set() that would look like "all uninstalled".
+    import server
+    import ouroboros.skill_loader as skl
+    from types import SimpleNamespace
+
+    def _raise(*a, **k):
+        raise RuntimeError("boom")
+    monkeypatch.setattr(skl, "discover_skills", _raise)
+    assert server._installed_skill_names() is None  # raise → keep-all
+
+    monkeypatch.setattr(skl, "discover_skills", lambda *a, **k: [])
+    assert server._installed_skill_names() is None  # empty disk → keep-all (not set())
+
+    monkeypatch.setattr(skl, "discover_skills",
+                        lambda *a, **k: [SimpleNamespace(name="alpha"), SimpleNamespace(name="beta")])
+    assert server._installed_skill_names() == {"alpha", "beta"}
