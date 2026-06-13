@@ -333,6 +333,8 @@ def reap_orphaned_processes(
     drive_root: pathlib.Path,
     *,
     running_task_ids: Optional[set] = None,
+    live_owner_skills: Optional[set] = None,
+    enforce_companion_reap: bool = False,
 ) -> List[int]:
     """Kill ledgered processes whose owning generation/task is gone.
 
@@ -341,7 +343,22 @@ def reap_orphaned_processes(
       - current session's entries → keep (their owners are alive);
         EXCEPT task-scoped entries whose owner task is no longer running;
       - previous generations: task/session scopes → kill group + reap event;
-        daemon scope → keep (launcher-managed lifecycles).
+        daemon scope → keep (genuine launcher-managed lifecycles, e.g.
+        ``server_restart_fallback``).
+      - skill COMPANIONS (purpose ``companion:<skill>:<name>``, recorded under
+        daemon scope) are the exception to daemon-keep: reap when the owner skill
+        is UNINSTALLED (not in ``live_owner_skills``) OR the entry is from a
+        FOREIGN generation (``CompanionSupervisor.start()`` always re-spawns a
+        fresh pid, so a fingerprint-matching companion from another generation is
+        a stale duplicate that also blocks the re-spawn on a port conflict).
+        Same-session companions are killed only when their owner is uninstalled.
+        ``live_owner_skills`` (installed skill names, disk-derived) is passed in
+        to keep this module policy-free; if None the companion clause keeps
+        everything (fail-safe — never mass-kill on missing info). Transient
+        not-live states (disabled / review / deps) are ``stop_skill``'s job, not
+        the reaper's. ``enforce_companion_reap=False`` (default) is LOG-ONLY:
+        records a ``process_would_reap`` event instead of killing — a safe first
+        rollout; flip to True to enforce.
     """
     drive_root = pathlib.Path(drive_root)
     entries = _read_ledger(drive_root)
@@ -356,13 +373,51 @@ def reap_orphaned_processes(
         if not _fingerprint_matches(entry):
             continue  # dead or recycled pid: prune silently
         owner_task = str(entry.get("owner_task") or "")
+        purpose = str(entry.get("purpose") or "")
         task_owner_gone = (
             scope == "task"
             and running_task_ids is not None
             and owner_task
             and owner_task not in running_task_ids
         )
-        if scope == "daemon" or (same_session and not task_owner_gone):
+        # Skill companions (purpose "companion:<skill>:<name>", daemon scope):
+        # reap when the owner skill is uninstalled OR the entry is from a foreign
+        # generation (start() always re-spawns → another generation's companion
+        # is a stale duplicate). Fail-safe: keep when the live set is unknown or
+        # the purpose can't be parsed. Same-session companions are killed only
+        # when their owner is uninstalled; foreign-generation ones always are.
+        if purpose.startswith("companion:"):
+            parts = purpose.split(":", 2)
+            owner_skill = parts[1] if (len(parts) >= 3 and parts[0] == "companion") else ""
+            owner_uninstalled = (
+                bool(owner_skill)
+                and live_owner_skills is not None
+                and owner_skill not in live_owner_skills
+            )
+            reapable = (
+                live_owner_skills is not None
+                and bool(owner_skill)
+                and (owner_uninstalled or not same_session)
+            )
+            if not reapable:
+                survivors.append(entry)
+                continue
+            if not enforce_companion_reap:
+                # First-rollout safety: record the intent, do NOT kill yet.
+                append_jsonl(drive_root / "logs" / "supervisor.jsonl", {
+                    "ts": utc_now_iso(),
+                    "type": "process_would_reap",
+                    "pid": pid,
+                    "pgid": int(entry.get("pgid") or 0),
+                    "purpose": purpose,
+                    "owner_skill": owner_skill,
+                    "reason": "owner_uninstalled" if owner_uninstalled else "foreign_generation",
+                    "stale_session": str(entry.get("session_id") or ""),
+                })
+                survivors.append(entry)
+                continue
+            # enforce → fall through to the kill block below
+        elif scope == "daemon" or (same_session and not task_owner_gone):
             survivors.append(entry)
             continue
         try:

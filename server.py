@@ -97,6 +97,24 @@ def _has_active_evolution_transaction() -> bool:
         return False
 
 
+def _installed_skill_names():
+    """Names of skills currently installed ON DISK (disk-derived, not in-memory).
+
+    Passed to the process-custody reaper so it can tell which skill-companion
+    orphans are safe to reap (owner uninstalled). Disk-derived so it is correct
+    independent of in-memory extension-reload timing; returns None on any failure
+    so the reaper fails toward KEEP (never mass-kills live skills' companions).
+    """
+    try:
+        from ouroboros.config import get_skills_repo_path
+        from ouroboros.skill_loader import discover_skills
+
+        return {s.name for s in discover_skills(DATA_DIR, repo_path=get_skills_repo_path())}
+    except Exception:
+        log.debug("Could not compute installed skill names for custody reaper", exc_info=True)
+        return None
+
+
 def _restart_current_process(host: str, port: int) -> None:
     _restart_current_process_impl(host, port, repo_dir=REPO_DIR, log=log)
 
@@ -445,7 +463,10 @@ def _periodic_supervisor_maintenance(last_custody_reap: list, last_review_reconc
             from ouroboros.process_custody import reap_orphaned_processes
             from supervisor.queue import RUNNING as _running_tasks
 
-            reap_orphaned_processes(DATA_DIR, running_task_ids=set(_running_tasks.keys()))
+            reap_orphaned_processes(
+                DATA_DIR, running_task_ids=set(_running_tasks.keys()),
+                live_owner_skills=_installed_skill_names(),
+            )
         except Exception:
             log.debug("Periodic custody reap failed", exc_info=True)
     if time.time() - last_review_reconcile[0] > 300:
@@ -988,7 +1009,7 @@ def _run_supervisor(settings: dict) -> None:
         try:
             from ouroboros.process_custody import reap_orphaned_processes
 
-            reaped = reap_orphaned_processes(DATA_DIR)
+            reaped = reap_orphaned_processes(DATA_DIR, live_owner_skills=_installed_skill_names())
             if reaped:
                 log.info("Process custody reaper killed %d orphaned process(es): %s", len(reaped), reaped)
         except Exception:
