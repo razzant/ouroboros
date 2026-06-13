@@ -326,6 +326,42 @@ def test_run_llm_loop_finalize_now_control_forces_best_effort_answer(tmp_path, m
     assert outcome["outcome_axes"]["execution"]["status"] == EXECUTION_BEST_EFFORT
 
 
+def test_run_llm_loop_injects_busy_written_owner_message(tmp_path, monkeypatch):
+    """End-to-end coupling for the busy-branch fix: a plain owner message
+    persisted to the live task's mailbox (server.py) is drained into the LLM
+    request at the next round boundary — using the same (drive_root, task_id)
+    contract the busy-branch writes under."""
+    from ouroboros.owner_mailbox import write_owner_message
+    from ouroboros.tools.registry import ToolRegistry
+
+    assert write_owner_message(tmp_path, "ты тут?", task_id="busytask") is True
+    seen = {}
+
+    class FakeLLM:
+        def default_model(self):
+            return "test-model"
+
+    def fake_call_llm_with_retry(_llm, request_messages, _model, tools_arg, *_args, **_kwargs):
+        seen["messages"] = [dict(item) for item in request_messages]
+        return {"role": "assistant", "content": "yes, here"}, 0.0
+
+    monkeypatch.setattr(loop_mod, "call_llm_with_retry", fake_call_llm_with_retry)
+
+    run_llm_loop(
+        messages=[{"role": "user", "content": "long job"}],
+        tools=ToolRegistry(repo_dir=tmp_path, drive_root=tmp_path),
+        llm=FakeLLM(),
+        drive_logs=tmp_path,
+        emit_progress=lambda _text: None,
+        incoming_messages=queue.Queue(),
+        task_id="busytask",
+        drive_root=tmp_path,
+    )
+
+    joined = json.dumps(seen["messages"], ensure_ascii=False)
+    assert "ты тут?" in joined  # the busy-written message reached the model
+
+
 def test_run_llm_loop_keeps_task_model_override_across_tool_rounds(tmp_path, monkeypatch):
     from ouroboros.tools.registry import ToolRegistry
 

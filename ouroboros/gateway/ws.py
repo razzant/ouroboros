@@ -264,18 +264,25 @@ async def ws_endpoint(websocket: WebSocket) -> None:
                         image_b64, image_mime, image_caption = _first_image_attachment(
                             msg.get("attachments")
                         )
-                        bridge.ui_send(
-                            payload,
+                        send_kwargs = dict(
                             sender_session_id=str(msg.get("sender_session_id", "") or ""),
                             client_message_id=str(msg.get("client_message_id", "") or ""),
                             image_base64=image_b64,
                             image_mime=image_mime,
                             image_caption=image_caption,
-                            task_metadata={
-                                "force_plan": force_plan,
-                                "force_plan_source": "consilium" if force_plan else "",
-                            },
                         )
+                        # Only attach planning metadata when a plan is actually
+                        # forced. A plain message must carry NO task_metadata so
+                        # that, if it arrives while a task is running, it is
+                        # delivered INTO that task (owner_mailbox) rather than
+                        # spawned as a separate queued task. Defense-in-depth for
+                        # the server.py busy-branch guard.
+                        if force_plan:
+                            send_kwargs["task_metadata"] = {
+                                "force_plan": True,
+                                "force_plan_source": "consilium",
+                            }
+                        bridge.ui_send(payload, **send_kwargs)
                     else:
                         bridge.ui_send(payload, broadcast=False)
                 except Exception:

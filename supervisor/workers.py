@@ -208,8 +208,83 @@ def _handle_chat_direct_locked(
         except Exception:
             log.debug("Suppressed exception", exc_info=True)
 
+def _collect_orphaned_owner_messages() -> tuple[list, list]:
+    """Read owner-text entries from every mailbox left behind by the process
+    that died across the restart.
+
+    Owner messages received while a task was busy are persisted per-task under
+    ``memory/owner_mailbox/<task_id>.jsonl``. After an exit-42/99 restart the
+    worker comes back with a *new* task_id, so those files are orphaned and the
+    round-boundary drain (which keys off the live task_id) never sees them.
+    This collects their ``KIND_OWNER_TEXT`` entries (control kinds are skipped —
+    stale post-restart), within a 24h recovery horizon, sorted chronologically.
+    Read-only: the caller unlinks the files only once it commits to resuming.
+    """
+    msgs: list = []
+    files: list = []
+    try:
+        from datetime import datetime, timedelta, timezone
+        from ouroboros.owner_mailbox import KIND_OWNER_TEXT
+        cutoff = datetime.now(timezone.utc) - timedelta(hours=24)
+        mbox_dir = DRIVE_ROOT / "memory" / "owner_mailbox"
+        if not mbox_dir.exists():
+            return [], []
+        for path in sorted(mbox_dir.glob("*.jsonl")):
+            files.append(path)
+            try:
+                for line in path.read_text(encoding="utf-8").splitlines():
+                    line = line.strip()
+                    if not line:
+                        continue
+                    entry = json.loads(line)
+                    if str(entry.get("kind") or KIND_OWNER_TEXT) != KIND_OWNER_TEXT:
+                        continue
+                    text = str(entry.get("text") or "").strip()
+                    if not text:
+                        continue
+                    ts = str(entry.get("ts") or "")
+                    # Drop only entries we can confidently date as stale; on a
+                    # parse failure deliver (losing a real message is worse).
+                    try:
+                        if datetime.fromisoformat(ts) < cutoff:
+                            continue
+                    except Exception:
+                        pass
+                    msgs.append((ts, text))
+            except Exception:
+                log.debug("Failed reading orphan mailbox %s", path, exc_info=True)
+        msgs.sort(key=lambda x: x[0])
+        return [t for _, t in msgs], files
+    except Exception:
+        log.debug("Failed collecting orphaned owner messages", exc_info=True)
+        return [], files
+
+
+def _purge_owner_mailboxes() -> None:
+    """Delete every orphaned owner mailbox.
+
+    Used on the deliberate-suppression boots (panic / owner-restart): a message
+    the owner suppressed by stopping must NOT be resurrected by a later,
+    non-suppressed restart within the 24h window. Only deleting the files
+    guarantees the P0 invariant that no orphan owner message is delivered after
+    a stop.
+    """
+    try:
+        mbox_dir = DRIVE_ROOT / "memory" / "owner_mailbox"
+        if not mbox_dir.exists():
+            return
+        for path in mbox_dir.glob("*.jsonl"):
+            try:
+                path.unlink(missing_ok=True)
+            except Exception:
+                log.debug("Failed to purge owner mailbox %s", path, exc_info=True)
+    except Exception:
+        log.debug("Failed to purge owner mailboxes", exc_info=True)
+
+
 def auto_resume_after_restart() -> None:
-    """Auto-resume after a recent restart when scratchpad still has work."""
+    """Auto-resume after a recent restart when scratchpad still has work or an
+    owner message arrived during the task that the restart interrupted."""
     try:
         owner_restart_flag = DRIVE_ROOT / "state" / "owner_restart_no_resume.flag"
         if owner_restart_flag.exists():
@@ -222,6 +297,9 @@ def auto_resume_after_restart() -> None:
                 pass
             except Exception:
                 log.debug("Failed to consume owner restart compatibility flag", exc_info=True)
+            # Owner deliberately restarted without resume → drop any pending
+            # owner messages so they cannot resurface on a later restart.
+            _purge_owner_mailboxes()
             log.info("Owner restart flag detected — skipping auto-resume.")
             return
 
@@ -229,6 +307,9 @@ def auto_resume_after_restart() -> None:
         panic_flag = DRIVE_ROOT / "state" / "panic_stop.flag"
         if panic_flag.exists():
             panic_flag.unlink(missing_ok=True)
+            # Emergency Stop → drop any pending owner messages (P0): they must
+            # never be resurrected by a subsequent non-suppressed restart.
+            _purge_owner_mailboxes()
             log.info("Panic flag detected — skipping auto-resume.")
             return
 
@@ -259,30 +340,68 @@ def auto_resume_after_restart() -> None:
         if not recent_restart:
             return
 
+        # Owner messages orphaned by the restart's new task_id. Read-only here;
+        # consumed only on resume.
+        missed_msgs, mailbox_files = _collect_orphaned_owner_messages()
+
+        has_scratchpad_work = False
         scratchpad_path = DRIVE_ROOT / "memory" / "scratchpad.md"
-        if not scratchpad_path.exists():
+        if scratchpad_path.exists():
+            scratchpad = scratchpad_path.read_text(encoding="utf-8")
+            stripped = scratchpad.strip()
+            if stripped and stripped != "# Scratchpad" and "(empty" not in stripped.lower():
+                has_scratchpad_work = True
+            else:
+                content_lines = [
+                    ln.strip() for ln in stripped.splitlines()
+                    if ln.strip() and not ln.strip().startswith("#") and ln.strip() != "- (empty)"
+                ]
+                content_lines = [ln for ln in content_lines if not ln.startswith("UpdatedAt:")]
+                has_scratchpad_work = bool(content_lines)
+
+        # Resume if there is unfinished scratchpad work OR an owner message was
+        # left unanswered when the process restarted.
+        if not has_scratchpad_work and not missed_msgs:
             return
 
-        scratchpad = scratchpad_path.read_text(encoding="utf-8")
-        stripped = scratchpad.strip()
-        if not stripped or stripped == "# Scratchpad" or "(empty" in stripped.lower():
-            content_lines = [
-                ln.strip() for ln in stripped.splitlines()
-                if ln.strip() and not ln.strip().startswith("#") and ln.strip() != "- (empty)"
-            ]
-            content_lines = [ln for ln in content_lines if not ln.startswith("UpdatedAt:")]
-            if not content_lines:
-                return
-
         time.sleep(2)  # Let everything initialize
+
+        # Re-check panic: an Emergency Stop raised during the init window above
+        # must abort resume (P0); pending owner messages are dropped too.
+        if (DRIVE_ROOT / "state" / "panic_stop.flag").exists():
+            _purge_owner_mailboxes()
+            log.info("Panic flag appeared during init — aborting auto-resume.")
+            return
+
         agent = _get_chat_agent()
         if not agent._busy:
+            resume_prompt = (
+                "[auto-resume after restart] Continue your work. Read scratchpad "
+                "and identity — they contain context of what you were doing."
+            )
+            if missed_msgs:
+                shown = missed_msgs[-20:]
+                lines = "\n".join(f"- {m}" for m in shown)
+                omitted = len(missed_msgs) - len(shown)
+                more = "" if omitted <= 0 else f"\n(+{omitted} earlier message(s) omitted)"
+                resume_prompt += (
+                    "\n\n[messages from your human arrived while you were working "
+                    "and the process restarted before you could read them — they "
+                    "have been waiting for a reply, address them first]:\n"
+                    + lines + more
+                )
+            # Consume every orphaned mailbox we scanned now that we are resuming:
+            # fresh messages were delivered above, stale/control-only files are
+            # discarded so they cannot resurface on a later restart.
+            for path in mailbox_files:
+                try:
+                    path.unlink(missing_ok=True)
+                except Exception:
+                    log.debug("Failed to unlink orphan mailbox %s", path, exc_info=True)
             import threading
             threading.Thread(
                 target=handle_chat_direct,
-                args=(int(chat_id),
-                      "[auto-resume after restart] Continue your work. Read scratchpad and identity — they contain context of what you were doing.",
-                      None),
+                args=(int(chat_id), resume_prompt, None),
                 daemon=True,
             ).start()
             append_jsonl(
@@ -290,6 +409,7 @@ def auto_resume_after_restart() -> None:
                 {
                     "ts": utc_now_iso(),
                     "type": "auto_resume_triggered",
+                    "missed_owner_messages": len(missed_msgs),
                 },
             )
     except Exception as e:

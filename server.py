@@ -427,14 +427,38 @@ def _process_bridge_updates(bridge, offset: int, ctx: Any) -> int:
                         ctx.consciousness.resume()
 
             if agent._busy:
-                if task_constraint or task_metadata:
+                # Gate the "spawn a new task" path on a REAL directive, not on
+                # the mere presence of a metadata envelope. Web chat attaches
+                # task_metadata={"force_plan": False, ...} to every message, so a
+                # bare `or task_metadata` (the 2026-06-05 regression) wrongly
+                # routed plain owner prose to a new task instead of delivering it
+                # into the running one. force_plan is inert downstream unless True.
+                if task_constraint or (task_metadata and task_metadata.get("force_plan")):
                     threading.Thread(
                         target=_run_constrained_or_resume,
                         args=(chat_id, text or image_caption, image_data, task_constraint, task_metadata, False),
                         daemon=True,
                     ).start()
                 else:
-                    agent.inject_message(text or image_caption, image_data=image_data)
+                    # Persist plain owner prose to the busy task's mailbox so it
+                    # survives a mid-round process restart (exit 42/99): the
+                    # round-boundary drain injects it from disk. Disk-only (no
+                    # in-memory inject) to avoid double injection — the mailbox
+                    # is keyed by the live task_id the loop already drains. The
+                    # mailbox is text-only, so images fall back to in-memory.
+                    busy_task_id = getattr(agent, "_current_task_id", None)
+                    persisted = False
+                    if text and not image_data and busy_task_id:
+                        try:
+                            from ouroboros.owner_mailbox import write_owner_message
+                            # Rely on the bool return (write_owner_message swallows
+                            # I/O errors) so a failed write falls back in-memory
+                            # instead of silently dropping the message.
+                            persisted = write_owner_message(agent.env.drive_root, text, task_id=busy_task_id)
+                        except Exception:
+                            persisted = False
+                    if not persisted:
+                        agent.inject_message(text or image_caption, image_data=image_data)
             else:
                 ctx.consciousness.pause()
                 threading.Thread(
