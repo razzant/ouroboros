@@ -623,11 +623,23 @@ scope=...)` — or, when an existing manager owns the Popen call, registered via
 ledger (`data/state/process_ledger.jsonl`) is what lets the orphan reaper find
 children after an abrupt worker/server death; an unledgered process orphans
 invisibly and forever. Scopes: `task` (dies with its task), `session` (dies
-with the server generation), `daemon` (launcher-managed; reaper only prunes).
-The reaper kills strictly by (pid, start_time, cmd_sha256) fingerprint — never
-add command-line-class matching, which would let a dev instance reap a
-packaged instance's processes. `tests/test_process_custody.py` enforces the
-chokepoint with an explicit allowlist for bounded synchronous helpers.
+with the server generation), `daemon` (genuine launcher-managed lifecycles,
+e.g. `server_restart_fallback` — reaper keeps them, only pruning dead entries).
+Skill **companions** also record `daemon` scope but are the documented
+exception: `reap_orphaned_processes` reaps a companion (`purpose
+companion:<skill>:<name>`) when its owning skill is **uninstalled** OR the entry
+is from a **foreign (dead) server generation** (`CompanionSupervisor.start()`
+always re-spawns a fresh pid, so a generation-crossing match is a stale
+duplicate). This is **log-only by default** (`enforce_companion_reap=False`
+emits a `process_would_reap` event instead of killing) and **fail-safe**:
+`live_owner_skills=None` (unknown install set — incl. a momentarily empty skills
+dir, coalesced to `None`) means keep-all, never a mass-kill, and same-session
+companions of installed skills are always kept so the live `CompanionSupervisor`
+stays their sole owner. The reaper kills strictly by (pid, start_time,
+cmd_sha256) fingerprint — never add command-line-class matching, which would let
+a dev instance reap a packaged instance's processes.
+`tests/test_process_custody.py` enforces the chokepoint with an explicit
+allowlist for bounded synchronous helpers.
 
 ## Platform Abstraction Rule
 

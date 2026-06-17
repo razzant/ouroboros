@@ -1,4 +1,4 @@
-# Ouroboros v6.36.1 — Architecture & Reference
+# Ouroboros v6.36.2 — Architecture & Reference
 
 This file is NOT a changelog. Version history lives in README.md, git tags, and commit log.
 
@@ -190,6 +190,11 @@ server.py (Starlette+uvicorn) ← HTTP + WebSocket on configurable host:port (de
       the reaper (server startup + 10-min supervisor tick) kills entries whose
       generation/task owner is gone, matching by STRICT fingerprint only —
       never by command-line class, so dev and packaged instances can coexist.
+      Genuine `daemon` entries are kept; skill companions (daemon scope,
+      `purpose companion:<skill>:<name>`) are the exception (v6.36.2) — reaped on
+      owner-uninstall or a foreign generation, **log-only by default**
+      (`enforce_companion_reap=False` → `process_would_reap`), fail-safe
+      (unknown live-skill set ⇒ keep-all).
       `start_parent_lifeline()` gives our python entrypoints (workers,
       extension runner, claude readonly child) a ppid watchdog that
       group-suicides when the parent dies. Panic layers (`_active_subprocesses`,
