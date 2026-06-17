@@ -191,7 +191,7 @@ def test_reaper_companion_log_only_does_not_kill(tmp_path):
     # process_would_reap event is recorded for the safe first rollout.
     proc = _sleeper(tmp_path, "companion:gone_skill:worker", "daemon")
     try:
-        reaped = reap_orphaned_processes(tmp_path, live_owner_skills=set())  # gone_skill not installed
+        reaped = reap_orphaned_processes(tmp_path, live_owner_skills={"other_skill"})  # gone_skill not in the installed set
         assert proc.pid not in reaped and proc.poll() is None
         import json as _json
         lines = (tmp_path / "logs" / "supervisor.jsonl").read_text(encoding="utf-8").splitlines()
@@ -208,13 +208,29 @@ def test_reaper_companion_log_only_does_not_kill(tmp_path):
 def test_reaper_kills_companion_of_uninstalled_skill_when_enforced(tmp_path):
     proc = _sleeper(tmp_path, "companion:gone_skill:worker", "daemon")
     try:
-        reaped = reap_orphaned_processes(tmp_path, live_owner_skills=set(), enforce_companion_reap=True)
+        reaped = reap_orphaned_processes(tmp_path, live_owner_skills={"other_skill"}, enforce_companion_reap=True)
         assert proc.pid in reaped
         _await_dead(proc)
         assert proc.poll() is not None
     finally:
         if proc.poll() is None:
             proc.kill(); proc.wait(timeout=5)
+
+
+@_POSIX_ONLY
+def test_reaper_empty_live_owner_skills_is_keep_all(tmp_path):
+    # Defense-in-depth: an explicitly EMPTY live_owner_skills is normalized to
+    # unknown (keep-all), NOT "every skill uninstalled" — even under enforce an
+    # empty install set must never mass-reap companions (it can transiently mean
+    # the skills dir was momentarily unreadable).
+    proc = _sleeper(tmp_path, "companion:gone_skill:worker", "daemon")
+    try:
+        reaped = reap_orphaned_processes(tmp_path, live_owner_skills=set(), enforce_companion_reap=True)
+        assert proc.pid not in reaped and proc.poll() is None
+        sup = tmp_path / "logs" / "supervisor.jsonl"
+        assert not sup.exists() or '"process_would_reap"' not in sup.read_text(encoding="utf-8")
+    finally:
+        proc.kill(); proc.wait(timeout=5)
 
 
 @_POSIX_ONLY

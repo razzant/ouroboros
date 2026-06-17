@@ -355,14 +355,23 @@ def reap_orphaned_processes(
         a stale duplicate that also blocks the re-spawn on a port conflict).
         Same-session companions are killed only when their owner is uninstalled.
         ``live_owner_skills`` (installed skill names, disk-derived) is passed in
-        to keep this module policy-free; if None the companion clause keeps
-        everything (fail-safe — never mass-kill on missing info). Transient
+        to keep this module policy-free; if None **or empty** the companion
+        clause keeps everything (fail-safe — never mass-kill on missing info; an
+        explicitly empty set is normalized to None below, so no caller can
+        trigger a companion mass-reap by passing an empty install set). Transient
         not-live states (disabled / review / deps) are ``stop_skill``'s job, not
         the reaper's. ``enforce_companion_reap=False`` (default) is LOG-ONLY:
         records a ``process_would_reap`` event instead of killing — a safe first
         rollout; flip to True to enforce.
     """
     drive_root = pathlib.Path(drive_root)
+    # Fail-safe (defense-in-depth): an explicitly EMPTY live_owner_skills means
+    # UNKNOWN (keep-all), NOT "every skill uninstalled". The only production
+    # producer (server._installed_skill_names) already coalesces an empty/failed
+    # discovery to None; normalizing here too guarantees no caller can trigger a
+    # companion mass-reap by handing in an empty set.
+    if live_owner_skills is not None and not live_owner_skills:
+        live_owner_skills = None
     entries = _read_ledger(drive_root)
     if not entries:
         return []
