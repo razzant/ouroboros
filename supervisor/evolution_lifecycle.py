@@ -15,6 +15,7 @@ import pathlib
 import uuid
 from typing import Any, Dict, Optional
 
+from ouroboros.evolution_fingerprint import canonical_objective_fingerprint
 from ouroboros.outcomes import normalize_outcome_axes
 from ouroboros.utils import atomic_write_json, read_json_dict, utc_now_iso
 
@@ -120,6 +121,10 @@ def begin_evolution_transaction(task_id: str, *, cycle: int, campaign: Dict[str,
         "campaign_id": str((campaign or {}).get("id") or ""),
         "task_id": str(task_id or ""),
         "cycle": int(cycle or 0),
+        # BUG3: capture the objective this cycle will run, at cycle START, as the SSOT
+        # per-cycle fingerprint. Read here (not at outcome time) because campaign["objective"]
+        # can be overwritten by a later promotion before the outcome is recorded.
+        "objective_fp": canonical_objective_fingerprint(str((campaign or {}).get("objective") or "")),
         "created_at": utc_now_iso(),
         "updated_at": utc_now_iso(),
         "base_head": base_head,
