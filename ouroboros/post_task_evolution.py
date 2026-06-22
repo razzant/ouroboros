@@ -27,6 +27,8 @@ import os
 import pathlib
 from typing import Any, Dict, Optional
 
+from ouroboros.evolution_fingerprint import _PLAN_REVIEW_SUFFIX
+
 log = logging.getLogger(__name__)
 
 _REQUEST_REL = "state/post_task_evolution_request.json"
@@ -314,10 +316,7 @@ def apply_pending_request(drive_root: Any) -> bool:
                 _safe_unlink(path)
                 return False
         if bool(req.get("requires_plan_review", True)):
-            objective += (
-                "\n\n(The source backlog item requires plan review: run plan_task "
-                "before implementing any code.)"
-            )
+            objective += _PLAN_REVIEW_SUFFIX
         start_evolution_campaign(objective, source="post_task")
         # Link the promoted backlog id to the campaign so close-on-commit (Phase 2 C)
         # can mark it done when the cycle is absorbed. Validate it against the OPEN
