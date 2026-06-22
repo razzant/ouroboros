@@ -78,6 +78,7 @@ def start_evolution_campaign(objective: str = "", *, source: str = "owner") -> D
             "cycles_done": 0,
             "absorbed_cycles_done": 0,
             "objective_repeat_counts": {},  # BUG3: fp -> non-absorbing-cycle count
+            "dropped_objective_fps": [],  # BUG3 Layer B: attempted-and-dropped objective fps
             "budget_spent_usd": 0.0,
             "last_task_id": "",
             "progress_notes": "",
@@ -165,20 +166,31 @@ def _bump_objective_repeat_count(campaign: Dict[str, Any], tx: Dict[str, Any]) -
         return
     counts = campaign.setdefault("objective_repeat_counts", {})
     counts[fp] = int(counts.get(fp, 0) or 0) + 1
+    # Layer B: also mark this objective attempted-and-dropped so the chooser (Layer A) can be
+    # told not to re-propose it. This is a campaign-local signal, NOT a backlog status flip:
+    # the backlog item stays "open" (the work is genuinely unsolved), we only stop FEEDING it
+    # back to the evolution objective chooser.
+    dropped = campaign.setdefault("dropped_objective_fps", [])
+    if fp not in dropped:
+        dropped.append(fp)
 
 
 def _clear_objective_repeat_count(campaign: Dict[str, Any], tx: Dict[str, Any]) -> None:
-    """BUG3: a genuine absorb clears ONLY this objective's repeat tally.
+    """BUG3: a genuine absorb clears ONLY this objective's repeat tally and dropped flag.
 
     Called at every site that sets ``cycle_outcome == "absorbed"`` (task-done here, plus the
     two durable boot/restart-verify absorb sites in agent_startup_checks). Keyed on the same
-    SSOT fingerprint as the bump so success on the looping objective resets exactly its bucket.
+    SSOT fingerprint as the bump so success on the looping objective resets exactly its bucket
+    and un-drops it (it landed, so it is no longer do-not-re-propose).
     """
     fp = str((tx or {}).get("objective_fp") or "")
     if not fp:
         return
     counts = campaign.setdefault("objective_repeat_counts", {})
     counts.pop(fp, None)
+    dropped = campaign.setdefault("dropped_objective_fps", [])
+    if fp in dropped:
+        dropped.remove(fp)
 
 
 def update_evolution_transaction(task_id: str, **updates: Any) -> None:
@@ -367,6 +379,7 @@ def update_evolution_campaign_after_task(
                 _cleanup_worktree_after_cycle(tx, str(task_id or ""))
                 append_unique_transaction(campaign, tx)
                 campaign.pop("active_transaction", None)
+                campaign.pop("post_task_backlog_id", None)  # BUG3 Layer B: detach (was missing on abandoned)
                 _bump_objective_repeat_count(campaign, tx)  # BUG3: non-absorbing cycle counts
             elif not has_commit:
                 tx["cycle_outcome"] = "no_op"

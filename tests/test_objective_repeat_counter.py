@@ -26,6 +26,10 @@ def _counts(campaign):
     return campaign.get("objective_repeat_counts") or {}
 
 
+def _dropped(campaign):
+    return campaign.get("dropped_objective_fps") or []
+
+
 def test_replay_tmp_b3_reaches_threshold_3_on_nonconsecutive_recurrence():
     """The API-KEY objective recurs at cyc 5,7,10,11 with DIFFERENT objectives at 6,8,9.
     A consecutive-streak counter peaks at 2; the cumulative map must reach 3 at cyc 10."""
@@ -83,3 +87,22 @@ def test_empty_fingerprint_is_never_bucketed():
     _bump_objective_repeat_count(c, {"objective_fp": ""})  # tx-less / empty objective
     _bump_objective_repeat_count(c, {})                    # missing key entirely
     assert _counts(c) == {}
+    assert _dropped(c) == []
+
+
+def test_layer_b_bump_records_dropped_fp_deduped():
+    c = {}
+    _bump_objective_repeat_count(c, _tx(APIKEY))
+    _bump_objective_repeat_count(c, _tx(APIKEY))  # again -> still a single entry
+    _bump_objective_repeat_count(c, _tx(REGMAP))
+    assert _dropped(c).count(fp(APIKEY)) == 1     # deduped, not appended twice
+    assert fp(REGMAP) in _dropped(c)
+
+
+def test_layer_b_absorb_undrops_only_the_absorbed_fp():
+    c = {}
+    _bump_objective_repeat_count(c, _tx(APIKEY))
+    _bump_objective_repeat_count(c, _tx(REGMAP))
+    _clear_objective_repeat_count(c, _tx(APIKEY))  # API-KEY landed -> no longer do-not-re-propose
+    assert fp(APIKEY) not in _dropped(c)
+    assert fp(REGMAP) in _dropped(c)               # the other stays dropped
