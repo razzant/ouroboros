@@ -910,7 +910,10 @@ def checkout_and_reset(branch: str, reason: str = "unspecified",
         if rc_local != 0:
             _run_git_resilient(["git", "reset", "--hard", "HEAD"], cwd=str(REPO_DIR), check=True)
             _run_git_resilient(["git", "clean", "-fd"], cwd=str(REPO_DIR), check=True)
-            _run_git_resilient(["git", "checkout", "-b", branch], cwd=str(REPO_DIR), check=False)
+            # §6 (same detached-HEAD class as BUG1): `-b` with check=False silently swallowed a
+            # "branch already exists" error and proceeded with HEAD possibly detached/wrong;
+            # `-B` force-creates the branch at HEAD and check=True raises a real failure.
+            _run_git_resilient(["git", "checkout", "-B", branch], cwd=str(REPO_DIR), check=True)
         else:
             if policy == "rescue_and_reset":
                 _run_git_resilient(["git", "reset", "--hard", "HEAD"], cwd=str(REPO_DIR), check=True)
