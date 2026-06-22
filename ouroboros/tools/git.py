@@ -243,6 +243,7 @@ def _run_reviewed_stage_cycle(
     goal: str = "",
     scope: str = "",
     review_rebuttal: str = "",
+    came_from_detached_checkout: bool = False,
 ) -> Dict[str, Any]:
     skip_advisory_pre_review = bool(skip_advisory_review or skip_advisory_pre_review)
     def _failed(message: str) -> Dict[str, Any]:
@@ -278,6 +279,20 @@ def _run_reviewed_stage_cycle(
     except Exception as exc:
         return _failed(f"⚠️ GIT_ERROR (status): {_sanitize_git_error(str(exc))}")
     if not status.strip():
+        if came_from_detached_checkout:
+            # BUG 2 fix: a clean tree right after a detached-HEAD reconciliation is NOT a
+            # legitimate no-op — it usually means commits/edits were orphaned. Emit a
+            # distinct, actionable diagnostic instead of the generic GIT_NO_CHANGES that
+            # previously misled the agent (it misdiagnosed it as a missing API key).
+            # The token carries the _FAILED marker (loop_tool_execution._FAILURE_MARKERS) and
+            # deliberately does NOT use the "⚠️ GIT_ERROR" prefix, which is carved out to
+            # is_error=False — so this DOES classify as an infra failure (execution=infra_failed)
+            # and counts toward evolution_consecutive_failures instead of resetting it.
+            return _failed(
+                "⚠️ GIT_LOST_WORKTREE_ON_DETACHED_CHECKOUT_FAILED: working tree is clean after "
+                "detached HEAD reconciliation. The detached commits may have been orphaned. "
+                "Inspect `git reflog` and restore if needed."
+            )
         return _failed("⚠️ GIT_NO_CHANGES: nothing to commit.")
 
     try:
@@ -1164,17 +1179,36 @@ def _repo_commit_push(ctx: ToolContext, commit_message: str,
         block_reason="infra_failure", block_details=msg,
         duration_sec=time.time() - _commit_start), msg)[1]
     try:
+        is_detached = False
+        came_from_detached_checkout = False
         try:
-            run_cmd(["git", "checkout", ctx.branch_dev], cwd=ctx.repo_dir)
+            current_branch = run_cmd(
+                ["git", "rev-parse", "--abbrev-ref", "HEAD"],
+                cwd=ctx.repo_dir,
+            ).strip()
+            is_detached = (current_branch == "HEAD")
+        except Exception:
+            pass
+
+        try:
+            if is_detached:
+                # BUG 1 fix: HEAD detached (e.g. seeded from a tag checkout). A plain
+                # `git checkout ctx.branch_dev` would jump to the branch's (older) tip and
+                # silently discard in-flight commits/work-tree edits. Force-move the branch
+                # to the current HEAD instead, preserving the detached commits and work tree.
+                run_cmd(["git", "checkout", "-B", ctx.branch_dev, "HEAD"], cwd=ctx.repo_dir)
+                came_from_detached_checkout = True
+            else:
+                run_cmd(["git", "checkout", ctx.branch_dev], cwd=ctx.repo_dir)
         except Exception as e:
             err_msg = _sanitize_git_error(str(e))
             already_on_target = False
             try:
-                current_branch = run_cmd(
+                current_branch_after = run_cmd(
                     ["git", "rev-parse", "--abbrev-ref", "HEAD"],
                     cwd=ctx.repo_dir,
                 ).strip()
-                already_on_target = (current_branch == ctx.branch_dev)
+                already_on_target = (current_branch_after == ctx.branch_dev)
             except Exception:
                 pass
             if not already_on_target:
@@ -1207,6 +1241,7 @@ def _repo_commit_push(ctx: ToolContext, commit_message: str,
             goal=goal,
             scope=scope,
             review_rebuttal=review_rebuttal,
+            came_from_detached_checkout=came_from_detached_checkout,
         )
         if outcome.get("status") != "passed":
             return str(outcome.get("message", "") or "")
