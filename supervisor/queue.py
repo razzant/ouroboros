@@ -50,6 +50,9 @@ HEARTBEAT_STALE_SEC: int = 120
 QUEUE_MAX_RETRIES: int = 1
 FINALIZATION_GRACE_SEC: int = FINALIZATION_GRACE_DEFAULT_SEC
 SCHEDULED_TASKS_FILE = pathlib.Path("state") / "scheduled_tasks.json"
+# BUG3: pause a campaign whose objective fails to absorb after this many reviewed cycles.
+# Mirrors the consecutive-failures threshold; keyed on the objective fingerprint, not failures.
+OBJECTIVE_REPEAT_CAP: int = 3
 
 
 def _task_deadline_ts(task: Dict[str, Any]) -> float:
@@ -1391,6 +1394,30 @@ def enqueue_evolution_task_if_needed() -> None:
             int(owner_chat_id),
             f"🧬⚠️ Evolution paused: {consecutive_failures} consecutive failures. "
             f"Use /evolve start to resume after investigating the issue."
+        )
+        return
+
+    # BUG3: pause if the SAME objective has been re-proposed and no-op'd
+    # OBJECTIVE_REPEAT_CAP times without ever absorbing. This is a SEPARATE breaker from
+    # consecutive_failures above: that counter is reset to 0 by ANY non-failing cycle
+    # (events.py), so it cannot catch a self-maintenance loop where a blocked objective is
+    # re-proposed NON-consecutively (interleaved with other no_op work). The per-objective
+    # count is keyed on the same canonical fingerprint the transaction stamps, accumulates
+    # across non-consecutive recurrence, and is cleared only on a genuine absorb.
+    from ouroboros.evolution_fingerprint import canonical_objective_fingerprint
+
+    _objective_repeat_counts = campaign.get("objective_repeat_counts") or {}
+    _active_objective_fp = canonical_objective_fingerprint(str(campaign.get("objective") or ""))
+    _objective_repeats = int(_objective_repeat_counts.get(_active_objective_fp, 0)) if _active_objective_fp else 0
+    if _objective_repeats >= OBJECTIVE_REPEAT_CAP:
+        pause_evolution_campaign("paused: objective re-proposed without ever absorbing")
+        update_state(_disable_evolution)
+        send_with_budget(
+            int(owner_chat_id),
+            f"🧬⚠️ Evolution paused: the current objective ran {_objective_repeats} reviewed "
+            f"cycles WITHOUT ever being absorbed — it keeps getting re-proposed and never lands "
+            f"(a self-maintenance loop, not progress). A plain resume won't help; use "
+            f"/evolve start with a DIFFERENT objective."
         )
         return
 

@@ -77,6 +77,7 @@ def start_evolution_campaign(objective: str = "", *, source: str = "owner") -> D
             "updated_at": now,
             "cycles_done": 0,
             "absorbed_cycles_done": 0,
+            "objective_repeat_counts": {},  # BUG3: fp -> non-absorbing-cycle count
             "budget_spent_usd": 0.0,
             "last_task_id": "",
             "progress_notes": "",
@@ -148,6 +149,36 @@ def begin_evolution_transaction(task_id: str, *, cycle: int, campaign: Dict[str,
         current["updated_at"] = utc_now_iso()
         _write_evolution_campaign(current)
     return transaction
+
+
+def _bump_objective_repeat_count(campaign: Dict[str, Any], tx: Dict[str, Any]) -> None:
+    """BUG3: count one non-absorbing cycle against its objective fingerprint.
+
+    Cumulative PER-FINGERPRINT (not a consecutive streak), so a blocked objective that is
+    re-proposed NON-consecutively (interleaved with other no_op work) still accumulates toward
+    the pause gate. ``setdefault`` tolerates campaigns persisted before this field existed; a
+    transaction without an ``objective_fp`` (e.g. a tx-less idle cycle) is skipped, never
+    bucketed under the empty key.
+    """
+    fp = str((tx or {}).get("objective_fp") or "")
+    if not fp:
+        return
+    counts = campaign.setdefault("objective_repeat_counts", {})
+    counts[fp] = int(counts.get(fp, 0) or 0) + 1
+
+
+def _clear_objective_repeat_count(campaign: Dict[str, Any], tx: Dict[str, Any]) -> None:
+    """BUG3: a genuine absorb clears ONLY this objective's repeat tally.
+
+    Called at every site that sets ``cycle_outcome == "absorbed"`` (task-done here, plus the
+    two durable boot/restart-verify absorb sites in agent_startup_checks). Keyed on the same
+    SSOT fingerprint as the bump so success on the looping objective resets exactly its bucket.
+    """
+    fp = str((tx or {}).get("objective_fp") or "")
+    if not fp:
+        return
+    counts = campaign.setdefault("objective_repeat_counts", {})
+    counts.pop(fp, None)
 
 
 def update_evolution_transaction(task_id: str, **updates: Any) -> None:
@@ -329,12 +360,14 @@ def update_evolution_campaign_after_task(
                 campaign["absorbed_cycles_done"] = int(campaign.get("absorbed_cycles_done") or 0) + 1
                 append_unique_transaction(campaign, tx)
                 campaign.pop("active_transaction", None)
+                _clear_objective_repeat_count(campaign, tx)  # BUG3: genuine progress clears this fp
             elif has_rescue:
                 tx["cycle_outcome"] = "abandoned"
                 tx["abandoned_reason"] = "rescue_ref_present"
                 _cleanup_worktree_after_cycle(tx, str(task_id or ""))
                 append_unique_transaction(campaign, tx)
                 campaign.pop("active_transaction", None)
+                _bump_objective_repeat_count(campaign, tx)  # BUG3: non-absorbing cycle counts
             elif not has_commit:
                 tx["cycle_outcome"] = "no_op"
                 tx["restart_required"] = False
@@ -343,6 +376,7 @@ def update_evolution_campaign_after_task(
                 append_unique_transaction(campaign, tx)
                 campaign.pop("active_transaction", None)
                 campaign.pop("post_task_backlog_id", None)
+                _bump_objective_repeat_count(campaign, tx)  # BUG3: non-absorbing cycle counts
             else:
                 tx["cycle_outcome"] = "waiting_for_restart"
                 tx["recovery_hint"] = tx.get("recovery_hint") or (

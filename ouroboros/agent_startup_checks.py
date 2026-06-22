@@ -529,6 +529,8 @@ def verify_restart(env: Any, git_sha: str) -> None:
                     _append_unique_transaction(campaign, tx)
                     campaign.pop("active_transaction", None)
                     _close_post_task_backlog(campaign)
+                    from supervisor.evolution_lifecycle import _clear_objective_repeat_count
+                    _clear_objective_repeat_count(campaign, tx)  # BUG3: absorb clears this fp
                     campaign["progress_notes"] = (
                         f"Restart reconciled for reviewed commit {commit_sha[:12]}; "
                         "self-evolution cycle absorbed at boot."
@@ -543,6 +545,8 @@ def verify_restart(env: Any, git_sha: str) -> None:
                     _append_unique_transaction(campaign, tx)
                     campaign.pop("active_transaction", None)
                     campaign.pop("post_task_backlog_id", None)
+                    from supervisor.evolution_lifecycle import _bump_objective_repeat_count
+                    _bump_objective_repeat_count(campaign, tx)  # BUG3: commit-but-never-absorbs counts
                     campaign["progress_notes"] = (
                         f"Restart reconciliation abandoned commit {commit_sha[:12]} "
                         f"because observed HEAD {observed_sha[:12]} does not contain it."
@@ -638,6 +642,8 @@ def verify_restart(env: Any, git_sha: str) -> None:
                 # item done. Doing this earlier (at commit_sha time) could close an
                 # item whose commit later fails restart verification.
                 _close_post_task_backlog(campaign)
+                from supervisor.evolution_lifecycle import _clear_objective_repeat_count
+                _clear_objective_repeat_count(campaign, tx)  # BUG3: absorb clears this fp
                 campaign["progress_notes"] = (
                     f"Restart verified for reviewed commit {observed_sha[:12]}; "
                     "self-evolution cycle absorbed."
@@ -650,6 +656,8 @@ def verify_restart(env: Any, git_sha: str) -> None:
                 # NOT addressed: clear the stale link WITHOUT closing it, so a later
                 # unrelated absorbed commit cannot close the wrong backlog item.
                 campaign.pop("post_task_backlog_id", None)
+                from supervisor.evolution_lifecycle import _bump_objective_repeat_count
+                _bump_objective_repeat_count(campaign, tx)  # BUG3: verified-but-no-absorb counts
                 campaign["progress_notes"] = (
                     f"Restart verified for {observed_sha[:12]}; no reviewed self-mod "
                     "commit was present, so no evolution cycle was absorbed."
