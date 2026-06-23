@@ -232,6 +232,9 @@ class OuroborosTerminalBenchAgent(BaseInstalledAgent):
         self.ouroboros_light_model = ouroboros_light_model
         self.leave_server_running_for_verifier = bool(leave_server_running_for_verifier)
         self._run_summary: dict[str, Any] = {}
+        # Monotonic timestamp of run() start, so the deadline we hand the agent accounts for the
+        # install/server time already consumed inside Harbor's external per-task wall-clock cap.
+        self._run_started_monotonic: float | None = None
 
     @staticmethod
     def name() -> str:
@@ -659,12 +662,22 @@ PY
 
     async def _run_ouroboros_task(self, environment: BaseEnvironment, env: dict[str, str]) -> dict[str, Any]:
         workspace_root = json.dumps(self.workspace_dir)
-        # Reward-hacking guard: when web tools are disabled, inject allowed_resources into the task
-        # body so core (ouroboros/tools/registry.py:_resource_allowed) blocks web_search/browse/
-        # browser + external/MCP tools for the benchmark task. Blocks the web TOOLS, not raw shell
-        # curl (full container egress lock is a separate, deferred layer -- see plan).
-        allowed_resources_line = (
-            '"allowed_resources": {"web": False, "network": False},'
+        # Reward-hacking guard: faithful TB2.1 runs give the task FULL container network
+        # (every task.toml declares allow_internet=true; tasks like build-cython-ext/caffe-cifar-10
+        # require `git clone`), so we must NOT block shell egress. We only withhold the agent's OWN
+        # LLM-powered web/search/browser/VLM tools (which a reference shell agent wouldn't have) via
+        # the declarative `disabled_tools` tool-policy. This leaves allowed_resources at its permissive
+        # default (network/git/pip available) and never trips the web<->network cross-implication in
+        # the registry resource gate. (Previously this set allowed_resources.network=false, which
+        # wrongly blocked `git clone` even though the container had working network.)
+        # This is exactly the `_WEB_TOOLS` set (web_search/browse_page/browser_action/analyze_screenshot/
+        # vlm_query), preserving the original disabled set — only the MECHANISM changed (denylist, not
+        # allowed_resources). `view_image` is intentionally NOT disabled: it is a LOCAL image-to-model
+        # tool registered OUTSIDE `_WEB_TOOLS` (it injects a local file into the agent's own model context,
+        # no web/second-model call), so local-image tasks (e.g. financial-document/code-from-image) keep a
+        # legitimate vision affordance a reference agent could also have.
+        disabled_tools_line = (
+            '"disabled_tools": ["web_search", "browse_page", "browser_action", "analyze_screenshot", "vlm_query"],'
             if getattr(self, "disable_agent_web", True)
             else ""
         )
@@ -708,9 +721,9 @@ PY
                 "actor_id": "harbor-terminal-bench",
                 "source": "terminal-bench",
                 "metadata": {{"source": "terminal-bench", "delegation_role": "root"}},
-                {allowed_resources_line}
+                {disabled_tools_line}
             }}
-            task_timeout = {int(self.task_timeout_sec or 0)}
+            task_timeout = {int(self._effective_task_timeout_sec())}
             if task_timeout > 0:
                 task_body["timeout_sec"] = task_timeout
             created = api("POST", "/api/tasks", task_body)
@@ -783,12 +796,24 @@ PY
             cwd=self.workspace_dir,
             timeout_sec=(self.task_timeout_sec + 60 if self.task_timeout_sec is not None else None),
         )
+        parsed: dict[str, Any] | None = None
+        try:
+            candidate = json.loads((result.stdout or "").strip().splitlines()[-1])
+            if isinstance(candidate, dict):
+                parsed = candidate
+        except Exception:
+            parsed = None
+        # The runner exits 2 (not 0) purely to SIGNAL a terminal `infra_failed` result — the task
+        # still reached a terminal /api/tasks state (status completed/failed). That is a real terminal
+        # outcome, NOT a Harbor wall-clock interruption, so treat it as a returned result (caller sets
+        # reached_terminal_result=True and the captured summary is NOT mislabeled
+        # captured_after_cancellation). Only a nonzero exit that produced NO terminal summary (e.g. a
+        # genuine runner crash / create_failed) is a real failure to raise on.
+        if parsed is not None and str(parsed.get("status") or "") in ("completed", "failed"):
+            return parsed
         if result.return_code != 0:
             raise RuntimeError(f"Ouroboros task runner failed: {result.stdout}\n{result.stderr}")
-        try:
-            return json.loads((result.stdout or "").strip().splitlines()[-1])
-        except Exception:
-            return {"raw_stdout": result.stdout or "", "raw_stderr": result.stderr or ""}
+        return parsed if parsed is not None else {"raw_stdout": result.stdout or "", "raw_stderr": result.stderr or ""}
 
     async def _stop_server(self, environment: BaseEnvironment) -> None:
         await environment.exec(
@@ -811,8 +836,12 @@ PY
             timeout_sec=10,
         )
 
-    async def _capture_current_task_summary(self, environment: BaseEnvironment) -> None:
-        """Persist best-effort task state if Harbor cancels agent.run mid-exec."""
+    async def _capture_current_task_summary(self, environment: BaseEnvironment, interrupted: bool = True) -> None:
+        """Persist best-effort task state. ``interrupted`` records whether Harbor cancelled
+        agent.run mid-exec (True) vs a routine post-terminal snapshot (False); it is written as
+        ``captured_after_cancellation`` so the disclosure ledger can tell a real cancellation
+        apart from a normal terminal finish."""
+        captured_after_cancellation = "True" if interrupted else "False"
         command = textwrap.dedent(
             f"""
             if [ ! -s /logs/agent/ouroboros-current-task-id.txt ]; then
@@ -852,7 +881,7 @@ PY
                 "prompt_tokens": latest.get("prompt_tokens"),
                 "completion_tokens": latest.get("completion_tokens"),
                 "total_rounds": latest.get("total_rounds"),
-                "captured_after_cancellation": True,
+                "captured_after_cancellation": {captured_after_cancellation},
                 "captured_at": time.time(),
             }}
             pathlib.Path("/logs/agent/ouroboros-run-summary.json").write_text(
@@ -860,7 +889,7 @@ PY
                 encoding="utf-8",
             )
             with pathlib.Path("/logs/agent/ouroboros-run.jsonl").open("a", encoding="utf-8") as f:
-                f.write(json.dumps({{"type": "final", "task_id": task_id, "result": latest, "captured_after_cancellation": True}}, ensure_ascii=False) + "\\n")
+                f.write(json.dumps({{"type": "final", "task_id": task_id, "result": latest, "captured_after_cancellation": {captured_after_cancellation}}}, ensure_ascii=False) + "\\n")
             PY
             """
         ).strip()
@@ -888,12 +917,89 @@ PY
                 return value
         return None
 
+    # Buffer between the agent's own deadline and Harbor's hard external kill, so the
+    # loop's graceful self-finalize (which itself fires get_finalization_grace_sec before
+    # the deadline) completes and the partial artifact is written before Harbor terminates.
+    _DEADLINE_SAFETY_SEC = 30
+
+    def _resolve_task_timeout_from_dataset(self, context: Any) -> int | None:
+        """Read the per-task agent wall-clock cap from the cached task.toml.
+
+        Harbor's AgentContext does not expose the task.toml timeout, so derive the task
+        name from the trial path (logs_dir = .../<task>__<trialhash>/agent) or context, then
+        read ``[agent].timeout_sec`` from the cached dataset task.toml. Best-effort: returns
+        None on any failure (agent then runs deadline-blind, as before — safe fallback)."""
+        task_name = ""
+        try:
+            parent = Path(self.logs_dir).resolve().parent.name  # "<task>__<trialhash>"
+            if "__" in parent:
+                task_name = parent.rsplit("__", 1)[0]
+        except Exception:
+            task_name = ""
+        if not task_name:
+            for attr in ("task_id", "task_name", "task", "name"):
+                raw = getattr(context, attr, None)
+                if isinstance(raw, str) and raw.strip():
+                    task_name = raw.strip().split("/")[-1].rsplit("__", 1)[0]
+                    break
+        if not task_name:
+            return None
+        try:
+            import glob as _glob
+            base = Path.home() / ".cache" / "harbor" / "tasks" / "packages" / "terminal-bench" / task_name
+            matches = _glob.glob(str(base / "**" / "task.toml"), recursive=True)
+            if not matches:
+                return None
+            # Pick the newest matching task.toml (avoid a stale cached package version).
+            chosen = max(matches, key=lambda p: os.path.getmtime(p))
+            text = Path(chosen).read_text(encoding="utf-8")
+        except Exception:
+            return None
+        # Parse [agent].timeout_sec without a toml dependency (the field is a simple float/int).
+        import re as _re
+        section = None
+        cap = None
+        for line in text.splitlines():
+            s = line.strip()
+            if s.startswith("[") and s.endswith("]"):
+                section = s[1:-1].strip()
+                continue
+            if section == "agent":
+                m = _re.match(r"timeout_sec\s*=\s*([0-9]+(?:\.[0-9]+)?)", s)
+                if m:
+                    try:
+                        cap = int(float(m.group(1)))
+                    except (TypeError, ValueError):
+                        cap = None
+                    break
+        return cap if (cap and cap > 0) else None
+
+    def _effective_task_timeout_sec(self) -> int:
+        """The deadline (sec from task creation) handed to the agent: the per-task Harbor cap
+        minus the install/server time already consumed and a small safety buffer. 0 means no
+        deadline (agent runs as before). The agent uses this to pace and self-finalize a partial
+        result before Harbor's hard external kill."""
+        cap = self.task_timeout_sec
+        if not cap or int(cap) <= 0:
+            return 0
+        elapsed = 0.0
+        if self._run_started_monotonic is not None:
+            elapsed = max(0.0, time.monotonic() - self._run_started_monotonic)
+        effective = float(int(cap)) - elapsed - float(self._DEADLINE_SAFETY_SEC)
+        # Cap IS known here (guard above returned for unknown caps). If install/server already ate
+        # the budget, hand the agent a 1s deadline so it enters graceful finalization immediately
+        # rather than running blind into Harbor's hard kill with an empty result.
+        return int(effective) if effective > 0 else 1
+
     async def run(self, instruction: str, environment: BaseEnvironment, context: AgentContext) -> None:
         self.logs_dir.mkdir(parents=True, exist_ok=True)
+        self._run_started_monotonic = time.monotonic()
         if self.task_timeout_sec is None:
             probed = self._context_task_timeout_sec(context)
             if probed:
                 self.task_timeout_sec = probed
+        if self.task_timeout_sec is None:
+            self.task_timeout_sec = self._resolve_task_timeout_from_dataset(context)
         (self.logs_dir / "instruction.txt").write_text(instruction, encoding="utf-8")
         await environment.upload_file(self.logs_dir / "instruction.txt", "/logs/agent/instruction.txt")
 
@@ -910,7 +1016,14 @@ PY
             reached_terminal_result = True
         finally:
             try:
-                await self._capture_current_task_summary(environment)
+                # Only mark the captured summary as a cancellation when run() did NOT reach a
+                # terminal result (i.e. Harbor actually interrupted mid-exec). On a normal terminal
+                # finish this is a routine post-run snapshot, not a cancellation — so the disclosure
+                # ledger does not misread a genuine terminal `provider_unavailable` as a wall-clock
+                # cancellation (run_tb._failure_category keys on captured_after_cancellation).
+                await self._capture_current_task_summary(
+                    environment, interrupted=not reached_terminal_result
+                )
             except Exception as exc:
                 (getattr(self, "logger", None) or log).warning("Failed to capture in-container Ouroboros task summary: %s", exc)
             if not self.leave_server_running_for_verifier or not reached_terminal_result:

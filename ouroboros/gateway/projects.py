@@ -232,6 +232,100 @@ def _preset_suggested_name(drive_root: object, task_id: str) -> str:
     return ""
 
 
+# Human labels for the skill-lifecycle job kinds that ``skill_lifecycle_queue.
+# _chat_task_id`` encodes into a synthetic task id (skill_lifecycle_<kind>_<target>_<job>).
+_SKILL_LIFECYCLE_KINDS = {
+    "install": "Install skill",
+    "review": "Review skill",
+    "enable": "Enable skill",
+    "disable": "Disable skill",
+    "remove": "Remove skill",
+    "update": "Update skill",
+    "dependency": "Skill dependencies",
+    "dependencies": "Skill dependencies",
+}
+
+
+def _skill_name_from_task(drive_root: object, task_id: str) -> str:
+    """An explicit skill name carried by a skill/system task (``skill`` /
+    ``metadata.skill`` / ``target``), persisted-result first then live queue.
+    Empty if none. Never raises."""
+    try:
+        from ouroboros.task_results import load_task_result
+
+        result = load_task_result(drive_root, task_id) or {}
+    except Exception:
+        result = {}
+    live = _task_from_live_queue(drive_root, task_id)
+    for src in (result, live):
+        if not isinstance(src, dict):
+            continue
+        meta = src.get("metadata") if isinstance(src.get("metadata"), dict) else {}
+        for value in (src.get("skill"), meta.get("skill"), src.get("target")):
+            name = str(value or "").strip()
+            if name:
+                return name
+    return ""
+
+
+def _cap_name(name: str) -> str:
+    name = " ".join(str(name or "").split())
+    if len(name) > _MAX_DERIVED_NAME:
+        return name[: _MAX_DERIVED_NAME - 1].rstrip() + "…"
+    return name
+
+
+def _system_task_display_name(drive_root: object, task_id: str) -> str:
+    """A human project name for a NON-human (skill/system) task that carries no
+    owner request text — so "turn into project" never dead-ends at the neutral
+    "New project". Source order: an explicit ``skill`` field, then the structural
+    ``skill_lifecycle_<kind>_<target>_<job>`` task-id form coined by
+    ``skill_lifecycle_queue._chat_task_id``. NOT a semantic gate (P5): it reads an
+    explicit field and a known structural id shape, never the objective text.
+    Empty when the task is not a recognized system task. Never raises."""
+    tid = str(task_id or "")
+    explicit_skill = _skill_name_from_task(drive_root, tid)
+    if tid.startswith("skill_lifecycle_"):
+        parts = tid[len("skill_lifecycle_"):].split("_")
+        kind = parts[0] if parts else ""
+        kind_label = _SKILL_LIFECYCLE_KINDS.get(kind, ("Skill " + kind).strip() or "Skill task")
+        # target = explicit skill field, else the id segments between kind and the
+        # trailing sanitized job-id segment. Best-effort; the name is cosmetic.
+        target = explicit_skill
+        if not target and len(parts) >= 3:
+            target = "_".join(parts[1:-1]).strip("_")
+        elif not target and len(parts) == 2:
+            target = parts[1].strip("_")
+        target = " ".join(str(target or "").split())
+        return _cap_name(f"{kind_label}: {target}" if target else kind_label)
+    if explicit_skill:
+        return _cap_name(f"Skill: {explicit_skill}")
+    return ""
+
+
+def _emit_naming_reason(drive_root: object, task_id: str, name: str, reason: str) -> None:
+    """Durable structured telemetry for HOW a project was named (which fallback
+    path fired) so a future "New project" regression is visible in events.jsonl
+    instead of silent (north star: transparency). Best-effort; never raises."""
+    try:
+        import pathlib
+
+        from ouroboros.utils import append_jsonl, utc_now_iso
+
+        append_jsonl(
+            pathlib.Path(str(drive_root)) / "logs" / "events.jsonl",
+            {
+                "ts": utc_now_iso(),
+                "type": "project_named",
+                "task_id": str(task_id),
+                "name": str(name),
+                "reason": str(reason),
+            },
+        )
+    except Exception:
+        log.debug("_emit_naming_reason failed", exc_info=True)
+
+
 async def api_projects_list(request: Request) -> JSONResponse:
     try:
         from ouroboros.projects_registry import projects_summary
@@ -318,16 +412,38 @@ async def api_project_from_task(request: Request) -> JSONResponse:
         # into its own fail-soft fallback, so a missing key / timeout never blocks convert.
         if supplied_name:
             project_name = supplied_name
+            _emit_naming_reason(drive_root, task_id, project_name, "supplied")
         else:
             from ouroboros.project_naming import llm_project_name_async
 
             preset = _preset_suggested_name(drive_root, task_id)
-            project_name = preset or await llm_project_name_async(
-                owner_text,
-                fallback_candidates=[_derive_project_name(drive_root, task_id), hint],
-                drive_root=drive_root,
-                task_id=task_id,
-            ) or "New project"
+            if preset:
+                project_name, reason = preset, "proactive_namer"
+            else:
+                # A skill/system task carries no owner request text; give the namer an
+                # explicit skill-derived candidate so the conversion never dead-ends at
+                # the neutral "New project" (the async namer folds it into its fail-soft
+                # heuristic, so a missing key / timeout still lands a real name).
+                derived = _derive_project_name(drive_root, task_id)
+                sys_name = _system_task_display_name(drive_root, task_id)
+                llm_name = await llm_project_name_async(
+                    owner_text,
+                    fallback_candidates=[derived, sys_name, hint],
+                    drive_root=drive_root,
+                    task_id=task_id,
+                )
+                project_name = llm_name or sys_name or "New project"
+                if not project_name or project_name == "New project":
+                    reason = "anonymous_fallback"
+                elif owner_text:
+                    reason = "llm_or_owner_text"
+                elif sys_name and project_name == sys_name:
+                    reason = "system_task"
+                elif derived and project_name == derived:
+                    reason = "derived"
+                else:
+                    reason = "hint_or_fallback"
+            _emit_naming_reason(drive_root, task_id, project_name, reason)
         # Was this task already converted? A repeat call (double broadcast, retry)
         # must not append the owner's request to the project thread twice (C4.5).
         first_conversion = project_binding_for_task(drive_root, task_id) is None

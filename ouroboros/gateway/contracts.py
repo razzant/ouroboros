@@ -105,7 +105,9 @@ class ChatOutbound(TypedDict):
     status: NotRequired[str]
     cost_usd: NotRequired[float]
     result: NotRequired[str]
+    result_truncated: NotRequired[bool]  # P3: WS preview was capped; fetch full via task id
     trace_summary: NotRequired[str]
+    trace_summary_truncated: NotRequired[bool]  # P3: WS preview capped
     error: NotRequired[str]
     artifact_status: NotRequired[str]
     artifact_bundle: NotRequired[Dict[str, Any]]
@@ -510,6 +512,7 @@ class TaskCreateRequest(_TaskCreateRequestRequired, total=False):
     attachments: list[Dict[str, Any]]
     allowed_resources: Dict[str, Any]
     resource_policy: Dict[str, Any]
+    disabled_tools: list[str]
     executor_ref: ExecutorRef
     service_teardown: Literal["stop", "keep"]
     deadline_at: str
@@ -591,6 +594,7 @@ HTTP_ENDPOINTS: tuple[str, ...] = (
     "POST /api/git/promote",
     "GET /api/update/status",
     "POST /api/update/check",
+    "POST /api/update/preflight",
     "POST /api/update/apply",
     "GET /api/cost-breakdown",
     "GET /api/evolution-data",

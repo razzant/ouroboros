@@ -1285,3 +1285,18 @@ def test_gc_migration_all_defaults_collapse_to_unified_default(tmp_path, monkeyp
     s = config.load_settings()
     # No customized value -> fall back to first present (worktree 7) == unified default.
     assert s.get("OUROBOROS_GC_RETENTION_DAYS") == 7
+
+
+def test_select_subagent_constraint_read_only_token_is_readonly():
+    """`write_surface='read_only'` resolves to the SAME read-only constraint as
+    omitting the surface — never an acting self_worktree — giving a read-only audit
+    child an explicit, provider-safe way to name its intent (P5 cancel-storm fix)."""
+    from ouroboros.tools.control import _select_subagent_constraint
+
+    baseline = _select_subagent_constraint("", "", False, [], "")  # omit = read-only
+    assert isinstance(baseline, dict)
+    assert baseline.get("mode")
+    for surface in ("read_only", "READ_ONLY", " read_only "):
+        constraint = _select_subagent_constraint(surface, "", False, [], "")
+        assert isinstance(constraint, dict), surface
+        assert constraint == baseline, surface

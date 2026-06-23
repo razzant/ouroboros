@@ -73,3 +73,4 @@ MagicMock/
 
 # Claudexor external-review tooling run artifacts (operator-side, never tracked)
 .claudexor/
+.review-evidence-iter2/

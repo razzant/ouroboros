@@ -546,7 +546,7 @@ def test_vcs_cache_dirs_are_not_hashed(tmp_path):
 def test_symlink_escape_excluded_from_pack(tmp_path):
     """Phase 3 round 10 regression: a symlink inside ``skill_dir`` whose
     target resolves outside the tree must NOT be hashed — otherwise
-    ``compute_content_hash`` + ``_build_skill_file_pack`` would exfiltrate
+    ``compute_content_hash`` + ``_build_skill_file_packs`` would exfiltrate
     arbitrary local file contents to external reviewer models."""
     import os, platform
     if platform.system() == "Windows":

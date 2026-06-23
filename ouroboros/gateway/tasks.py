@@ -30,6 +30,7 @@ from ouroboros.contracts.task_contract import (
     attach_task_contract,
     normalize_allowed_resources,
     normalize_bool,
+    normalize_disabled_tools,
     normalize_resource_policy,
 )
 from ouroboros.outcomes import public_task_result
@@ -191,6 +192,9 @@ async def api_tasks_create(request: Request) -> JSONResponse:
     resource_policy = normalize_resource_policy(body.get("resource_policy") or raw_metadata.get("resource_policy") or {})
     if resource_policy:
         metadata["resource_policy"] = resource_policy
+    disabled_tools = normalize_disabled_tools(body.get("disabled_tools") or raw_metadata.get("disabled_tools") or [])
+    if disabled_tools:
+        metadata["disabled_tools"] = disabled_tools
     service_teardown = str(body.get("service_teardown") or raw_metadata.get("service_teardown") or "").strip().lower()
     if service_teardown:
         if service_teardown not in {"stop", "keep"}:
@@ -287,6 +291,7 @@ async def api_tasks_create(request: Request) -> JSONResponse:
         "context_requires_self_body_docs": normalize_bool(body.get("context_requires_self_body_docs")),
         "allowed_resources": allowed_resources,
         "resource_policy": resource_policy,
+        "disabled_tools": disabled_tools,
         "deadline_at": deadline_at,
         "depth": depth,
         "parent_task_id": parent_task_id,

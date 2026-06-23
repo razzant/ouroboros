@@ -85,6 +85,7 @@ def collect_routes(
         api_reset,
         api_update_apply,
         api_update_check,
+        api_update_preflight,
         api_update_status,
     )
     from ouroboros.gateway.projects import (
@@ -208,6 +209,7 @@ def collect_routes(
         Route("/api/git/promote", endpoint=api_git_promote, methods=["POST"]),
         Route("/api/update/status", endpoint=api_update_status),
         Route("/api/update/check", endpoint=api_update_check, methods=["POST"]),
+        Route("/api/update/preflight", endpoint=api_update_preflight, methods=["POST"]),
         Route("/api/update/apply", endpoint=api_update_apply, methods=["POST"]),
         Route("/api/cost-breakdown", endpoint=make_cost_breakdown_endpoint(data_dir)),
         Route("/api/evolution-data", endpoint=api_evolution_data),

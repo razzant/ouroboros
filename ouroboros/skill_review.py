@@ -33,6 +33,7 @@ from ouroboros.skill_review_status import (
 )
 from ouroboros.utils import sanitize_tool_result_for_log
 from ouroboros.tools.review_helpers import (
+    REVIEW_PROMPT_TOKEN_BUDGET,
     build_anti_thrashing_rules_section,
     build_rebuttal_section,
     build_self_verification_template,
@@ -42,15 +43,26 @@ from ouroboros.tools.review_helpers import (
     load_checklist_section,
 )
 from ouroboros.triad_review import emit_review_model_error_events, extract_json_array, parse_model_review_results
-from ouroboros.utils import append_jsonl, atomic_write_json, iter_jsonl_objects, utc_now_iso
+from ouroboros.utils import append_jsonl, atomic_write_json, estimate_tokens, iter_jsonl_objects, utc_now_iso
 
 log = logging.getLogger(__name__)
 
 
-# Per-file/file-count caps protect the skill review prompt budget.
-_MAX_SKILL_FILE_BYTES = 64 * 1024
-_MAX_SKILL_FILES = 40
-_MAX_RAW_RESULT_CHARS = 4000
+# The reviewable skill payload is bound by ONE pack-level token budget (reusing the
+# review stack's SSOT REVIEW_PROMPT_TOKEN_BUDGET) instead of arbitrary per-file /
+# file-count BYTE caps: a 76 KB data file or a 41-file skill is fully reviewable when
+# the whole pack fits a 1M-context reviewer. Binary / unreadable files are still
+# refused (those are safety, not size). Headroom reserves the rest of the reviewer
+# prompt (governance docs + checklist + framing) so the SKILL pack alone is bounded.
+_SKILL_PACK_TOKEN_HEADROOM = 120_000
+
+
+def _skill_pack_token_budget() -> int:
+    """Estimated-token budget for the assembled skill file pack alone (SSOT
+    REVIEW_PROMPT_TOKEN_BUDGET minus headroom for the rest of the reviewer prompt)."""
+    return max(1, REVIEW_PROMPT_TOKEN_BUDGET - _SKILL_PACK_TOKEN_HEADROOM)
+
+
 _SKILL_CHECKLIST_SECTION = "Skill Review Checklist"
 
 # Loadable native code is unreviewable by LLMs. All non-UTF-8 runtime-reachable
@@ -66,15 +78,22 @@ _LOADABLE_BINARY_EXTENSIONS = frozenset(
 )
 
 
-class _SkillPackTooLarge(RuntimeError):
-    """Raised when a skill has too many runtime-reachable files to review."""
+class _SkillFileOverBudget(RuntimeError):
+    """Raised when a SINGLE skill file alone exceeds the reviewer token budget, so it
+    cannot be placed in any budget-sized review pack without truncating it (which
+    review refuses). Honest-pending: the maintainer must shrink/split that one file.
 
-    def __init__(self, file_count: int, limit: int) -> None:
+    The whole-skill over-budget case is NOT an error — it is split into multiple
+    budget-sized packs and reviewed in separate passes (see ``_build_skill_file_packs``
+    and ``_run_chunked_skill_review``)."""
+
+    def __init__(self, relpath: str, tokens: int, budget: int) -> None:
         super().__init__(
-            f"Skill pack exceeds reviewable cap: {file_count} files > {limit}."
+            f"Skill file {relpath!r} alone is ~{tokens} tokens > {budget} reviewer budget."
         )
-        self.file_count = file_count
-        self.limit = limit
+        self.relpath = relpath
+        self.tokens = tokens
+        self.budget = budget
 
 
 class _SkillFileUnreadable(RuntimeError):
@@ -98,19 +117,6 @@ class _SkillBinaryPayload(RuntimeError):
         )
         self.relpath = relpath
         self.size_bytes = size_bytes
-
-
-class _SkillFileTooLarge(RuntimeError):
-    """Raised when a file exceeds the review cap; truncation is not allowed."""
-
-    def __init__(self, relpath: str, size_bytes: int, limit: int) -> None:
-        super().__init__(
-            f"Skill file {relpath!r} is {size_bytes} bytes "
-            f"(limit {limit}); review refuses truncation."
-        )
-        self.relpath = relpath
-        self.size_bytes = size_bytes
-        self.limit = limit
 
 
 def _truncate_raw_result(text: str) -> str:
@@ -180,17 +186,15 @@ def _apply_auto_grant_outcome(outcome: SkillReviewOutcome, skill: Any, auto_gran
 # Prompt assembly
 
 
-def _read_capped_text(path: pathlib.Path, *, relpath: str = "") -> str:
-    """Read a text skill file; refuse unreadable, oversized, or binary payloads."""
+def _read_skill_text(path: pathlib.Path, *, relpath: str = "") -> str:
+    """Read a text skill file; refuse unreadable or binary payloads. The reviewable
+    SIZE is bound ONCE at the pack level (see ``_build_skill_file_packs``), not by an
+    arbitrary per-file byte cap, so a large legitimate text/data file is reviewable."""
     try:
         data = path.read_bytes()
     except OSError as exc:
         # Fail closed; placeholders would let review pass over missing payload.
         raise _SkillFileUnreadable(relpath or path.name, exc) from exc
-    if len(data) > _MAX_SKILL_FILE_BYTES:
-        raise _SkillFileTooLarge(
-            relpath or path.name, len(data), _MAX_SKILL_FILE_BYTES
-        )
     lowered = path.name.lower()
     if any(lowered.endswith(ext) for ext in _LOADABLE_BINARY_EXTENSIONS):
         raise _SkillBinaryPayload(relpath or path.name, len(data))
@@ -201,13 +205,23 @@ def _read_capped_text(path: pathlib.Path, *, relpath: str = "") -> str:
         raise _SkillBinaryPayload(relpath or path.name, len(data)) from exc
 
 
-def _build_skill_file_pack(
+def _build_skill_file_packs(
     skill_dir: pathlib.Path,
     *,
     manifest_entry: str = "",
     manifest_scripts: Optional[List[Dict[str, Any]]] = None,
-) -> str:
-    """Return a fenced-code pack mirroring the skill content-hash surface."""
+) -> List[str]:
+    """Return the fenced-code review pack(s) mirroring the skill content-hash surface.
+
+    Normally ONE pack. When the whole pack would exceed the reviewer token budget,
+    the files are split into multiple budget-sized packs (greedy by file) so each is
+    reviewed in a SEPARATE pass and EVERY byte is still reviewed — never silently
+    truncated. A single file that alone exceeds the budget cannot be split without
+    truncating it, so it raises ``_SkillFileOverBudget`` (honest-pending).
+
+    The bound is ONE pack-level token budget, not arbitrary per-file/file-count BYTE
+    caps. Binary / unreadable files are still refused by ``_read_skill_text`` (those
+    are safety, not size)."""
     from ouroboros.skill_loader import _iter_payload_files  # pylint: disable=W0212
 
     skill_dir = skill_dir.resolve()
@@ -217,19 +231,28 @@ def _build_skill_file_pack(
         manifest_scripts=manifest_scripts,
     )
     if not files:
-        return "(empty skill directory — no manifest, no payload)"
-    if len(files) > _MAX_SKILL_FILES:
-        # Never truncate the executable review surface.
-        raise _SkillPackTooLarge(len(files), _MAX_SKILL_FILES)
+        return ["(empty skill directory — no manifest, no payload)"]
 
-    blocks: List[str] = []
+    budget = _skill_pack_token_budget()
+    packs: List[str] = []
+    current: List[str] = []
+    current_tokens = 0
     for file_path in files:
         rel = file_path.relative_to(skill_dir).as_posix()
-        body = _read_capped_text(file_path, relpath=rel)
-        blocks.append(
-            f"### {rel}\n\n```\n{body}\n```"
-        )
-    return "\n\n".join(blocks)
+        body = _read_skill_text(file_path, relpath=rel)
+        block = f"### {rel}\n\n```\n{body}\n```"
+        block_tokens = estimate_tokens(block)
+        if block_tokens > budget:
+            # One file too large to review in a single pass without truncating it.
+            raise _SkillFileOverBudget(rel, block_tokens, budget)
+        if current and current_tokens + block_tokens > budget:
+            packs.append("\n\n".join(current))
+            current, current_tokens = [], 0
+        current.append(block)
+        current_tokens += block_tokens
+    if current:
+        packs.append("\n\n".join(current))
+    return packs
 
 
 def _load_governance_artifact(
@@ -1310,34 +1333,21 @@ def review_skill(
     )
     history = _load_skill_review_history(drive_root, skill.name)
     try:
-        file_pack = _build_skill_file_pack(
+        file_packs = _build_skill_file_packs(
             skill.skill_dir,
             manifest_entry=skill.manifest.entry,
             manifest_scripts=skill.manifest.scripts,
         )
-    except _SkillPackTooLarge as exc:
+    except _SkillFileOverBudget as exc:
         return SkillReviewOutcome(
             skill_name=skill.name,
             status=STATUS_PENDING,
             content_hash=content_hash,
             error=(
-                f"Skill pack exceeds reviewable cap ({exc.file_count} files "
-                f"> {exc.limit}). Reduce the skill payload or split it into "
-                "multiple skills — review cannot cover every executable file "
-                "as-is, and silently truncating would let a large skill slip "
-                "malicious code past review."
-            ),
-        )
-    except _SkillFileTooLarge as exc:
-        return SkillReviewOutcome(
-            skill_name=skill.name,
-            status=STATUS_PENDING,
-            content_hash=content_hash,
-            error=(
-                f"Skill file {exc.relpath!r} is {exc.size_bytes} bytes, over "
-                f"the {exc.limit}-byte per-file cap. Review refuses to "
-                "truncate executable skill payload — shrink the file or "
-                "split its logic so every byte can actually be reviewed."
+                f"Skill file {exc.relpath!r} alone is ~{exc.tokens} tokens, over the "
+                f"{exc.budget}-token reviewer budget. Review refuses to truncate the "
+                "executable surface — shrink or split that one file so it fits a "
+                "single review pass."
             ),
         )
     except _SkillBinaryPayload as exc:
@@ -1375,37 +1385,39 @@ def review_skill(
     )
     if preflight_outcome is not None:
         return preflight_outcome
-    prompt, advisory_evidence = _build_review_prompt_for_attempt(
+    models = list(get_review_models())
+    if len(file_packs) > 1:
+        log.warning(
+            "Skill %s exceeds the reviewer token budget; reviewing in %d chunked passes.",
+            skill.name,
+            len(file_packs),
+        )
+    from ouroboros.skill_review_passes import run_skill_review_passes
+
+    prompt, advisory_evidence, result_json_text, infra_error = run_skill_review_passes(
         ctx,
         drive_root,
         skill,
-        manifest_dump=manifest_dump,
-        content_hash=content_hash,
-        file_pack=file_pack,
-        history=history,
-        review_rebuttal=review_rebuttal,
+        evidence={
+            "manifest_dump": manifest_dump,
+            "content_hash": content_hash,
+            "history": history,
+            "review_rebuttal": review_rebuttal,
+            "required_items": _SKILL_REVIEW_ITEMS,
+        },
+        file_packs=file_packs,
+        models=models,
+        build_prompt=_build_review_prompt_for_attempt,
+        run_review=_handle_multi_model_review,
     )
-
-    models = list(get_review_models())
-    try:
-        result_json_text = _handle_multi_model_review(
-            ctx,
-            content=(
-                "Review the skill package whose manifest and payload are "
-                "included above, using the Skill Review Checklist. Return "
-                "ONLY the JSON array described in the output contract."
-            ),
-            prompt=prompt,
-            models=models,
-        )
-    except Exception as exc:  # pragma: no cover — transport failure path
-        log.warning("Skill review infrastructure failure for %s", skill.name, exc_info=True)
+    if infra_error:
+        log.warning("Skill review infrastructure failure for %s: %s", skill.name, infra_error)
         return SkillReviewOutcome(
             skill_name=skill.name,
             status=STATUS_PENDING,
             reviewer_models=models,
             content_hash=content_hash,
-            error=f"infrastructure failure: {sanitize_tool_result_for_log(f'{type(exc).__name__}: {exc}')}",
+            error=f"infrastructure failure: {sanitize_tool_result_for_log(infra_error)}",
         )
 
     try:

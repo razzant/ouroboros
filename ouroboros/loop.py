@@ -468,7 +468,9 @@ def _evict_stale_image_blocks(messages: List[Dict[str, Any]], *, incoming: int =
         if caption:
             placeholder += f": {caption}"
         if source_path:
-            placeholder += f"; re-view: vlm_query file_path={source_path}"
+            # view_image (local-file, native context, NOT web-gated) re-views the image;
+            # vlm_query is in _WEB_TOOLS and is blocked under allowed_resources.web=false.
+            placeholder += f"; re-view: view_image path={source_path}"
         placeholder += "]"
         content[b_idx] = {"type": "text", "text": placeholder}
 

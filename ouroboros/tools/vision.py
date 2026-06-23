@@ -5,7 +5,7 @@ from __future__ import annotations
 import logging
 import pathlib
 import os
-from typing import Any, Dict, List, Tuple
+from typing import Any, Dict, List, Optional, Tuple
 
 from ouroboros.config import resolve_effort
 from ouroboros.tools.registry import ToolContext, ToolEntry
@@ -237,6 +237,52 @@ def _allowed_file_roots(ctx: Any = None) -> List["pathlib.Path"]:
     return roots
 
 
+def _load_local_image_payload(ctx: ToolContext, file_path: str) -> Tuple[Optional[Dict[str, str]], str]:
+    """Validate a LOCAL image path against the SAME trust boundary the agent already
+    holds via read_file/run_command (allowed roots + protected-artifact read_bytes
+    policy + size cap + fail-closed MIME sniff), then return a downscaled provider
+    payload ``{"base64", "mime"}``. On any rejection returns ``(None, message)``.
+    LOCAL FILES ONLY — no URL, no base64 (no new exfiltration surface). Shared by
+    vlm_query(file_path=...) and view_image so both enforce identical checks."""
+    import pathlib
+    fp = pathlib.Path(file_path).expanduser().resolve()
+    if not fp.exists():
+        return None, f"⚠️ File not found: {file_path}"
+    allowed = _allowed_file_roots(ctx)
+    if not any(_path_is_under(fp, root) for root in allowed):
+        return None, (
+            f"⚠️ file_path must be inside the uploads directory or the active task "
+            f"workspace. Resolved path: {fp}. Use read_file for other paths."
+        )
+    # Honor the task protected-artifact policy: a workspace file may still be a
+    # black-box protected artifact whose bytes must not be read (same contract as
+    # read_file / query_code — block_reason_for_path with operation "read_bytes").
+    try:
+        from ouroboros.protected_artifacts import block_reason_for_path
+        _artifact_block = block_reason_for_path(ctx, fp, "read_bytes")
+    except Exception:
+        _artifact_block = ""
+    if _artifact_block:
+        return None, _artifact_block
+    if fp.stat().st_size > _VLM_MAX_FILE_BYTES:
+        return None, f"⚠️ File too large ({fp.stat().st_size} bytes). Max {_VLM_MAX_FILE_BYTES} bytes."
+    try:
+        raw = fp.read_bytes()
+    except Exception as e:
+        return None, f"⚠️ Failed to read image file: {e}"
+    # Fail closed: only recognized image bytes may be used.
+    mime = _detect_image_mime_for_vlm(raw)
+    if not mime:
+        return None, (
+            "⚠️ File does not appear to be a supported image (PNG/JPEG/GIF/WEBP). "
+            "Only image files are accepted."
+        )
+    try:
+        return _image_payload_from_bytes(raw, mime), ""
+    except ValueError as e:
+        return None, str(e)
+
+
 def _vlm_query(ctx: ToolContext, prompt: str, image_url: str = "", image_base64: str = "", image_mime: str = "image/png", file_path: str = "", model: str = "") -> str:
     """Analyze one image from uploads file_path, public URL, or base64."""
     if not image_url and not image_base64 and not file_path:
@@ -245,42 +291,10 @@ def _vlm_query(ctx: ToolContext, prompt: str, image_url: str = "", image_base64:
     images: List[Dict[str, Any]] = []
     try:
         if file_path:
-            import pathlib
-            fp = pathlib.Path(file_path).expanduser().resolve()
-            if not fp.exists():
-                return f"⚠️ File not found: {file_path}"
-            allowed = _allowed_file_roots(ctx)
-            if not any(_path_is_under(fp, root) for root in allowed):
-                return (
-                    f"⚠️ file_path must be inside the uploads directory or the active task "
-                    f"workspace. Resolved path: {fp}. Use send_photo or read_file for other paths."
-                )
-            # Honor the task protected-artifact policy: a workspace file may still be
-            # a black-box protected artifact whose bytes must not be read (same
-            # contract as read_file / query_code — protected_artifacts.block_reason_
-            # for_path with operation "read_bytes"). Without this, vlm_query would be
-            # a read_bytes bypass of task_contract.resource_policy.
-            try:
-                from ouroboros.protected_artifacts import block_reason_for_path
-                _artifact_block = block_reason_for_path(ctx, fp, "read_bytes")
-            except Exception:
-                _artifact_block = ""
-            if _artifact_block:
-                return _artifact_block
-            if fp.stat().st_size > _VLM_MAX_FILE_BYTES:
-                return f"⚠️ File too large ({fp.stat().st_size} bytes). Max {_VLM_MAX_FILE_BYTES} bytes."
-            try:
-                raw = fp.read_bytes()
-            except Exception as e:
-                return f"⚠️ Failed to read image file: {e}"
-            # Fail closed: only recognized image bytes may reach the VLM.
-            mime = _detect_image_mime_for_vlm(raw)
-            if not mime:
-                return (
-                    "⚠️ File does not appear to be a supported image (PNG/JPEG/GIF/WEBP). "
-                    "Only image files may be sent to the VLM via file_path."
-                )
-            images.append(_image_payload_from_bytes(raw, mime))
+            payload, err = _load_local_image_payload(ctx, file_path)
+            if err:
+                return err
+            images.append(payload)
         elif image_url:
             images.append({"url": image_url})
         else:
@@ -324,6 +338,72 @@ def _emit_usage(ctx: ToolContext, usage: Dict[str, Any], model: str) -> None:
         ctx.event_queue.put_nowait(event)
     except Exception:
         log.debug("Failed to emit VLM usage event", exc_info=True)
+
+
+def _view_image(ctx: ToolContext, path: str = "") -> str:
+    """Bring a LOCAL image file into the active model's context NATIVELY.
+
+    Resource class: local_file_to_model (NOT a web tool — it never touches the
+    network, so it is available even under allowed_resources.web=false). For a
+    vision-capable active model the image is injected as a native image content
+    block (the agent sees it INLINE in its own reasoning, like a browser
+    screenshot); a blind model gets a typed capability message. LOCAL PATHS ONLY
+    (no URL / no base64), same trust boundary as read_file. Prefer this over
+    vlm_query when you need to reason about the image yourself (charts, renders,
+    screenshots, photos, scanned/printed text)."""
+    if not path:
+        return "⚠️ Provide a local image file path."
+    payload, err = _load_local_image_payload(ctx, path)
+    if err:
+        return err
+    b64, mime = payload["base64"], payload["mime"]
+
+    from ouroboros.provider_models import supports_vision
+    active_model = (
+        str(getattr(ctx, "active_model", "") or "")
+        or str(getattr(ctx, "task_model_override", "") or "")
+        or str(os.environ.get("OUROBOROS_MODEL", "") or "")
+    )
+    if not supports_vision(active_model):
+        return _VLM_NO_VISION_MODEL_MSG
+    messages = getattr(ctx, "messages", None)
+    if not isinstance(messages, list):
+        return "⚠️ VIEW_IMAGE_UNAVAILABLE: no active conversation to attach the image to."
+
+    import pathlib
+    import base64 as _b64
+    from ouroboros.utils import utc_now_iso
+
+    src_name = pathlib.Path(path).name
+    ts = utc_now_iso().replace(":", "").replace("-", "")[:15]
+    ext = {"image/png": "png", "image/jpeg": "jpg", "image/gif": "gif", "image/webp": "webp"}.get(mime, "img")
+    view_dir = pathlib.Path(ctx.drive_root) / "uploads" / "views"
+    try:
+        view_dir.mkdir(parents=True, exist_ok=True)
+        # Use the stem + the ACTUAL (possibly downscaled, e.g. PNG->JPEG) mime extension —
+        # src_name already carries an extension, so f"{src_name}.{ext}" would double it.
+        view_path = view_dir / f"{ts}_{pathlib.Path(path).stem}.{ext}"
+        view_path.write_bytes(_b64.b64decode(b64))
+        source_path = str(view_path)
+    except Exception:
+        source_path = str(pathlib.Path(path).expanduser().resolve())
+
+    caption = f"[image: {src_name}]"
+    from ouroboros.loop import _append_or_merge_user_content
+
+    _append_or_merge_user_content(messages, [
+        {"type": "text", "text": caption},
+        {
+            "type": "image_url",
+            "image_url": {"url": f"data:{mime};base64,{b64}"},
+            "_caption": caption,
+            "_source_path": source_path,
+        },
+    ])
+    return (
+        f"'{src_name}' is now attached to your context natively — look at it and reason about it "
+        f"directly (vision-capable model). It was read from local disk; this is NOT a web tool."
+    )
 
 
 def get_tools() -> List[ToolEntry]:
@@ -400,5 +480,33 @@ def get_tools() -> List[ToolEntry]:
             },
             handler=_vlm_query,
             timeout_sec=90,
+        ),
+        ToolEntry(
+            name="view_image",
+            schema={
+                "name": "view_image",
+                "description": (
+                    "Bring a LOCAL image file natively into your own context so you can SEE and reason "
+                    "about it directly (vision-capable models). Resource class: local_file_to_model — it "
+                    "reads a local file and attaches it into your context; it is NOT a web tool and works "
+                    "even when web/network access is disabled. LOCAL PATHS ONLY (inside the task workspace "
+                    "or uploads dir); no URLs. Typical flow: after list_files reveals an image file "
+                    "(.png/.jpg/.jpeg/.gif/.webp) — including one you rendered yourself, e.g. a chart or a "
+                    "rendered toolpath — call view_image(path) and then analyze it inline. Prefer this over "
+                    "vlm_query when you need to reason about the image yourself rather than ask a separate model."
+                ),
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "path": {
+                            "type": "string",
+                            "description": "Local image file path inside the task workspace or uploads dir (e.g. /app/chart.png after list_files finds it).",
+                        },
+                    },
+                    "required": ["path"],
+                },
+            },
+            handler=_view_image,
+            timeout_sec=30,
         ),
     ]

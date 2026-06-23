@@ -42,6 +42,8 @@ RELEASE_INVARIANT_PATHS = frozenset({
     "ouroboros/launcher_bootstrap.py",
     "ouroboros/repo_remotes.py",
     "supervisor/git_ops.py",
+    "supervisor/update_merge.py",
+    "supervisor/update_merge_policy.py",
 })
 
 PROTECTED_RUNTIME_PATH_PREFIXES = FROZEN_CONTRACT_PATH_PREFIXES

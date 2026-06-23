@@ -912,10 +912,20 @@ export function createChatInstance({
             if (!button) return;
             const lineKey = button.dataset.liveLineToggle || '';
             if (!lineKey) return;
-            if (record.expandedLineKeys.has(lineKey)) record.expandedLineKeys.delete(lineKey);
-            else record.expandedLineKeys.add(lineKey);
+            const nowExpanded = !record.expandedLineKeys.has(lineKey);
+            if (nowExpanded) record.expandedLineKeys.add(lineKey);
+            else record.expandedLineKeys.delete(lineKey);
             renderLiveCardTimeline(record);
             syncLiveCardLayout(record);
+            // P3: on expand, lazily fetch the genuinely-full output for a server-truncated
+            // line (the WS preview was capped at 4000); cached on the item so a re-render
+            // keeps it. Best-effort — the capped preview stays on failure.
+            if (nowExpanded) {
+                const item = record.items.find((it) => it.lineKey === lineKey);
+                if (item && item.truncated && item.fullRef && !item.fetchedFull && !item._fetchingFull) {
+                    fetchFullLineOutput(item, record);
+                }
+            }
         });
         liveCardRecords.set(normalizedGroupId, record);
         // Cluster B: apply a name that arrived (task_named) before this card existed.
@@ -1062,6 +1072,9 @@ export function createChatInstance({
         return Boolean(
             (item.fullHeadline && item.fullHeadline !== item.headline)
             || (item.fullBody && item.fullBody !== item.body)
+            // P3: even when the preview equals the capped body, a server-truncated line
+            // with a fetch ref has MORE to show (the genuinely-full output on demand).
+            || (item.truncated && item.fullRef)
         );
     }
 
@@ -1129,7 +1142,12 @@ export function createChatInstance({
         const expandable = isLiveLineExpandable(item);
         const expanded = expandable && record.expandedLineKeys.has(item.lineKey);
         const displayHeadline = expanded && item.fullHeadline ? item.fullHeadline : item.headline;
-        const displayBody = expanded && item.fullBody ? item.fullBody : item.body;
+        // P3: when expanded, prefer the genuinely-full fetched output, then the capped
+        // fullBody, then the preview body. A server-truncated line shows the fetched full
+        // text in a bounded-scroll box so a huge research output never grows the chat.
+        const displayBody = expanded ? (item.fetchedFull || item.fullBody || item.body) : item.body;
+        const showingFetched = expanded && Boolean(item.fetchedFull);
+        const loadingFull = expanded && Boolean(item.truncated && item.fullRef && !item.fetchedFull);
         const isProgressLine = item.phase === 'working' || item.phase === 'thinking';
         const bodyId = `chat-live-line-body-${String(record.groupId || 'task').replace(/[^A-Za-z0-9_-]/g, '-')}-${String(item.lineKey || '').replace(/[^A-Za-z0-9_-]/g, '-')}`;
         const headContent = `
@@ -1147,7 +1165,7 @@ export function createChatInstance({
                     ${displayBody ? `aria-controls="${escapeHtmlAttr(bodyId)}"` : ''}
                 >
                     <span class="chat-live-line-head">${headContent}</span>
-                    <span class="chat-live-line-expand-label">${expanded ? 'Collapse' : 'Expand'}</span>
+                    <span class="chat-live-line-expand-label">${expanded ? 'Collapse' : ((item.truncated && item.fullRef) ? 'Show full' : 'Expand')}</span>
                 </button>
             `
             : `<div class="chat-live-line-head">${headContent}</div>`;
@@ -1158,7 +1176,7 @@ export function createChatInstance({
                 data-expanded="${expanded ? '1' : '0'}"
             >
                 ${headHtml}
-                ${displayBody ? `<div class="chat-live-line-body" id="${escapeHtmlAttr(bodyId)}">${renderMarkdown(displayBody)}</div>` : ''}
+                ${displayBody ? `<div class="chat-live-line-body${showingFetched ? ' chat-live-line-body-full' : ''}" id="${escapeHtmlAttr(bodyId)}">${renderMarkdown(displayBody)}${loadingFull ? '<div class="chat-live-line-loading">Loading full output…</div>' : ''}</div>` : ''}
             </div>
         `;
     }
@@ -1166,6 +1184,35 @@ export function createChatInstance({
     // Full rebuild for initial render and expand/collapse toggles.
     function renderLiveCardTimeline(record) {
         record.timelineEl.innerHTML = record.items.map((item) => buildTimelineItemHtml(item, record)).join('');
+    }
+
+    // P3: fetch the genuinely-full output for a server-truncated timeline line (the WS
+    // preview was capped at 4000 chars), cache it on the item, then re-render if the line
+    // is still expanded. The full text is fetched on demand (not pushed over the socket)
+    // and shown in a bounded-scroll box. Best-effort — the capped preview stays on failure.
+    async function fetchFullLineOutput(item, record) {
+        item._fetchingFull = true;
+        try {
+            const resp = await apiFetch(`/api/tasks/${encodeURIComponent(item.fullRef)}`, { cache: 'no-store' });
+            const data = resp && typeof resp.json === 'function' ? await resp.json() : resp;
+            // Compose ALL available full fields — a subagent line can carry both a result AND a
+            // (separately truncated) trace_summary, so `result || trace_summary` would hide the
+            // full trace. Label each section when both are present.
+            const result = String((data && data.result) || '').trim();
+            const trace = String((data && data.trace_summary) || '').trim();
+            let full = '';
+            if (result && trace) full = `[RESULT]\n${result}\n\n[TRACE]\n${trace}`;
+            else full = result || trace;
+            if (full) item.fetchedFull = full;
+        } catch {
+            // best-effort: leave the capped preview on failure
+        } finally {
+            item._fetchingFull = false;
+            if (record.expandedLineKeys.has(item.lineKey)) {
+                renderLiveCardTimeline(record);
+                syncLiveCardLayout(record);
+            }
+        }
     }
 
     // Append without disturbing existing DOM nodes.
@@ -1281,6 +1328,8 @@ export function createChatInstance({
                 it.fullHeadline = summary.fullHeadline || headline || it.fullHeadline;
                 it.body = summary.body || '';
                 it.fullBody = summary.fullBody || summary.body || it.fullBody || '';
+                it.fullRef = summary.fullRef || it.fullRef || '';
+                it.truncated = summary.truncated || it.truncated || false;
                 it.ts = ts || it.ts;
                 patchIndex = existingIdx;
                 timelineUpdate = 'patch-at';
@@ -1291,6 +1340,8 @@ export function createChatInstance({
                 it.ts = ts || it.ts;
                 it.fullHeadline = summary.fullHeadline || it.fullHeadline || it.headline;
                 it.fullBody = summary.fullBody || it.fullBody || it.body;
+                it.fullRef = summary.fullRef || it.fullRef || '';
+                it.truncated = summary.truncated || it.truncated || false;
                 timelineUpdate = 'patch-last';
             } else if (existingIdx !== -1) {
                 // Already rendered earlier in this card (e.g. a historical progress line
@@ -1307,6 +1358,8 @@ export function createChatInstance({
                     fullHeadline: summary.fullHeadline || headline || 'Update',
                     body: summary.body || '',
                     fullBody: summary.fullBody || summary.body || '',
+                    fullRef: summary.fullRef || '',
+                    truncated: summary.truncated || false,
                     ts: ts || '',
                     count: 1,
                     dedupeKey: syntheticKey,

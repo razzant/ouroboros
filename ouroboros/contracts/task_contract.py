@@ -48,6 +48,30 @@ def normalize_allowed_resources(value: Any) -> Dict[str, Any]:
     return out
 
 
+def normalize_disabled_tools(value: Any) -> list[str]:
+    """A clean, de-duplicated list of tool names the task is NOT allowed to use.
+
+    This is the declarative tool-policy surface a benchmark adapter (or any
+    caller) uses to withhold specific capabilities — e.g. disabling the agent's
+    own web-search/browser/VLM tools for a faithful run while leaving shell
+    network egress (git/pip) intact. It is independent of ``allowed_resources``
+    (which gates resource AXES like web/network), so it never triggers the
+    web<->network cross-implication in the registry resource gate.
+    """
+    if isinstance(value, str):
+        items = [value]
+    elif isinstance(value, (list, tuple)):
+        items = list(value)
+    else:
+        return []
+    seen: list[str] = []
+    for item in items:
+        name = str(item or "").strip()
+        if name and name not in seen:
+            seen.append(name)
+    return seen
+
+
 def normalize_bool(value: Any) -> bool:
     if isinstance(value, bool):
         return value
@@ -191,6 +215,11 @@ def build_task_contract(task: Mapping[str, Any] | None) -> Dict[str, Any]:
         or metadata.get("deadline_at")
         or ""
     ).strip()
+    disabled_tools = normalize_disabled_tools(
+        merged.get("disabled_tools")
+        if merged.get("disabled_tools") is not None
+        else (task.get("disabled_tools") or metadata.get("disabled_tools"))
+    )
     workspace_root = str(
         merged.get("workspace_root")
         or task.get("workspace_root")
@@ -218,6 +247,7 @@ def build_task_contract(task: Mapping[str, Any] | None) -> Dict[str, Any]:
         else [],
         "allowed_resources": allowed_resources,
         "resource_policy": resource_policy,
+        "disabled_tools": disabled_tools,
         "deadline_at": deadline_at,
         "context_requires_self_body_docs": normalize_bool(
             merged.get("context_requires_self_body_docs")
@@ -255,4 +285,4 @@ def attach_task_contract(task: Dict[str, Any]) -> Dict[str, Any]:
     return task
 
 
-__all__ = ["attach_task_contract", "build_task_contract", "normalize_allowed_resources", "normalize_bool", "normalize_delegation_budget", "normalize_resource_policy"]
+__all__ = ["attach_task_contract", "build_task_contract", "normalize_allowed_resources", "normalize_bool", "normalize_delegation_budget", "normalize_disabled_tools", "normalize_resource_policy"]

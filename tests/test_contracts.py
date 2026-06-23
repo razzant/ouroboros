@@ -1114,6 +1114,7 @@ def test_task_create_request_declares_executor_ref_contract():
         "attachments",
         "allowed_resources",
         "resource_policy",
+        "disabled_tools",
         "executor_ref",
         "service_teardown",
         "deadline_at",

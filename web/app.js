@@ -13,6 +13,8 @@ import { initCosts } from './modules/costs.js';
 import { initSkills } from './modules/skills.js';
 import { initWidgets } from './modules/widgets.js';
 import { initUpdates } from './modules/updates.js';
+import { initActivity } from './modules/activity.js';
+import { initUpdateStatus } from './modules/update_status.js';
 import { initDashboard } from './modules/dashboard.js';
 import { hydrateNavIcons } from './modules/page_icons.js';
 
@@ -500,9 +502,11 @@ dashboardControls = initDashboard(ctx);
 initLogs({ ...ctx, mount: document.getElementById('dashboard-panel-logs') });
 initEvolution({ ...ctx, mount: document.getElementById('dashboard-panel-evolution') });
 initUpdates({ ...ctx, mount: document.getElementById('dashboard-panel-updates') });
+initActivity({ ...ctx, mount: document.getElementById('dashboard-panel-activity') });
 initCosts({ ...ctx, mount: document.getElementById('dashboard-panel-costs') });
 initSkills(ctx);
 initWidgets(ctx);
+initUpdateStatus(ctx);
 
 initOnboardingOverlay();
 

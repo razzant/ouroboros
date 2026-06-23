@@ -942,7 +942,7 @@ def test_skill_review_hard_blocks_extensionless_binary(tmp_path, monkeypatch):
     loadable formats. An extensionless disguised binary must still
     raise ``_SkillBinaryPayload`` so raw bytes never reach reviewer
     models and no PASS verdict ships over an opaque hash."""
-    from ouroboros.skill_review import _read_capped_text, _SkillBinaryPayload
+    from ouroboros.skill_review import _read_skill_text, _SkillBinaryPayload
 
     skills_root = tmp_path / "skills"
     skill_dir = skills_root / "bin1"
@@ -953,7 +953,7 @@ def test_skill_review_hard_blocks_extensionless_binary(tmp_path, monkeypatch):
     (skill_dir / "cert.dat").write_bytes(payload)
 
     with pytest.raises(_SkillBinaryPayload):
-        _read_capped_text(skill_dir / "cert.dat", relpath="cert.dat")
+        _read_skill_text(skill_dir / "cert.dat", relpath="cert.dat")
 
 
 def test_skill_review_blocks_loadable_native_binaries(tmp_path):
@@ -962,7 +962,7 @@ def test_skill_review_blocks_loadable_native_binaries(tmp_path):
     review. The subprocess could otherwise ``ctypes.CDLL`` / import /
     require the blob and execute never-reviewed code even under a
     PASS verdict."""
-    from ouroboros.skill_review import _read_capped_text, _SkillBinaryPayload
+    from ouroboros.skill_review import _read_skill_text, _SkillBinaryPayload
 
     skills_root = tmp_path / "skills"
     skill_dir = skills_root / "nativelink"
@@ -970,14 +970,14 @@ def test_skill_review_blocks_loadable_native_binaries(tmp_path):
     target = skill_dir / "evil.so"
     target.write_bytes(b"\x7fELF" + b"\x00" * 128)
     with pytest.raises(_SkillBinaryPayload):
-        _read_capped_text(target, relpath="evil.so")
+        _read_skill_text(target, relpath="evil.so")
 
 
 def test_review_skill_fails_closed_on_unreadable_payload(tmp_path, monkeypatch):
     """Phase 3 round 18 regression: an unreadable payload file must
     fail review CLOSED (pending + error) instead of letting the
     placeholder slip past the gate. Regression for the old behaviour
-    where ``_read_capped_text`` returned a string on OSError and
+    where ``_read_skill_text`` returned a string on OSError and
     ``compute_content_hash`` silently skipped the file."""
     import os, platform
     if platform.system() == "Windows":
@@ -1027,100 +1027,59 @@ def test_review_skill_refuses_when_payload_contains_native_binary(tmp_path, monk
     assert "opaque" in outcome.error.lower()
 
 
-def test_review_skill_refuses_oversized_individual_file(tmp_path, monkeypatch):
-    """Phase 3 round 8 regression: a single oversized script must block
-    review rather than be truncated. Truncation would let malicious
-    logic hide past the cap and still ship a PASS verdict tied to the
-    full on-disk content hash."""
-    from ouroboros.skill_review import _MAX_SKILL_FILE_BYTES
+def test_skill_pack_includes_large_individual_file(tmp_path):
+    """A large legitimate data file (e.g. references/destinations.json — the 76 KB
+    file that used to hard-fail the per-file byte cap and lock the skill) is now
+    bound by ONE pack-level token budget, so it is reviewed in FULL instead of
+    dead-ending the skill at 'pending' (P5 token-budget gate)."""
+    from ouroboros.skill_review import _build_skill_file_packs
 
-    skills_root = tmp_path / "skills"
-    skill_dir = skills_root / "whale"
-    (skill_dir / "scripts").mkdir(parents=True)
-    (skill_dir / "SKILL.md").write_text(
-        (
-            "---\n"
-            "name: whale\n"
-            "description: A single huge file.\n"
-            "version: 0.1.0\n"
-            "type: script\n"
-            "runtime: python3\n"
-            "timeout_sec: 30\n"
-            "scripts:\n"
-            "  - name: big.py\n"
-            "---\n"
-            "body\n"
-        ),
-        encoding="utf-8",
-    )
-    # Build a file just over the per-file cap.
-    (skill_dir / "scripts" / "big.py").write_text(
-        "# " + "x" * (_MAX_SKILL_FILE_BYTES + 10) + "\nprint('hi')\n",
-        encoding="utf-8",
-    )
-    monkeypatch.setenv("OUROBOROS_SKILLS_REPO_PATH", str(skills_root))
-    ctx = _make_ctx(tmp_path)
-    with patch(
-        "ouroboros.tools.review._handle_multi_model_review",
-        side_effect=AssertionError("must not be called for oversized files"),
-    ):
-        outcome = review_skill(ctx, "whale")
-    assert outcome.status == "pending"
-    assert "per-file cap" in outcome.error
-    persisted = load_review_state(ctx.drive_root, "whale")
-    assert persisted.status == "pending"
+    skill_dir = tmp_path / "whale"
+    (skill_dir / "references").mkdir(parents=True)
+    big = "x" * (80 * 1024)  # well over the old 64 KiB per-file byte cap
+    (skill_dir / "references" / "destinations.json").write_text(big, encoding="utf-8")
+    (skill_dir / "SKILL.md").write_text("# whale\n", encoding="utf-8")
+
+    packs = _build_skill_file_packs(skill_dir)
+    assert len(packs) == 1  # well under the 800K-token budget -> a single pass
+    assert "references/destinations.json" in packs[0]
+    assert big in packs[0]  # full content, never silently truncated
 
 
-def test_review_skill_refuses_oversized_skill_pack(tmp_path, monkeypatch):
-    """Phase 3 round 5 regression: a skill with more payload files than
-    ``_MAX_SKILL_FILES`` must not silently truncate the review pack.
+def test_skill_packs_chunks_when_over_budget(tmp_path, monkeypatch):
+    """When the WHOLE skill payload exceeds the reviewer TOKEN budget, the files are
+    split into multiple budget-sized packs (every byte reviewed in a separate pass),
+    NOT refused — the P5 over-budget fallback. No silent truncation."""
+    import ouroboros.skill_review as sr
+    from ouroboros.skill_review import _build_skill_file_packs
 
-    Review returns status=pending with a descriptive error; the verdict
-    is NOT persisted, and `_handle_multi_model_review` is never even
-    invoked — belt-and-braces against a pathological skill sneaking
-    executable logic past review.
-    """
-    from ouroboros.skill_review import _MAX_SKILL_FILES
+    skill_dir = tmp_path / "huge"
+    skill_dir.mkdir()
+    for i in range(6):
+        (skill_dir / f"f_{i}.py").write_text("# pad line\n" * 30, encoding="utf-8")
+    # Each file's block fits, but a few together exceed this tiny budget -> chunking.
+    monkeypatch.setattr(sr, "_skill_pack_token_budget", lambda: 200)
 
-    skills_root = tmp_path / "skills"
-    skill_dir = skills_root / "huge"
-    (skill_dir / "scripts").mkdir(parents=True)
-    (skill_dir / "SKILL.md").write_text(
-        (
-            "---\n"
-            "name: huge\n"
-            "description: Too many files to review.\n"
-            "version: 0.1.0\n"
-            "type: script\n"
-            "runtime: python3\n"
-            "timeout_sec: 30\n"
-            "scripts:\n"
-            "  - name: first.py\n"
-            "---\n"
-            "body\n"
-        ),
-        encoding="utf-8",
-    )
-    # Generate > _MAX_SKILL_FILES payload files so the cap fires.
-    for i in range(_MAX_SKILL_FILES + 5):
-        (skill_dir / "scripts" / f"f_{i:03d}.py").write_text(
-            f"print({i})\n", encoding="utf-8"
-        )
-    monkeypatch.setenv("OUROBOROS_SKILLS_REPO_PATH", str(skills_root))
-    ctx = _make_ctx(tmp_path)
-    # We expect review to short-circuit BEFORE calling into the LLM
-    # machinery; patching `_handle_multi_model_review` to raise guarantees
-    # that happens.
-    with patch(
-        "ouroboros.tools.review._handle_multi_model_review",
-        side_effect=AssertionError("must not be called when pack is oversized"),
-    ):
-        outcome = review_skill(ctx, "huge")
-    assert outcome.status == "pending"
-    assert "Skill pack exceeds reviewable cap" in outcome.error
-    persisted = load_review_state(ctx.drive_root, "huge")
-    # Must NOT write a verdict on transport/infra failures.
-    assert persisted.status == "pending"
+    packs = _build_skill_file_packs(skill_dir)
+    assert len(packs) > 1  # split into chunks, not refused
+    combined = "\n\n".join(packs)
+    for i in range(6):
+        assert f"f_{i}.py" in combined  # every file reviewed across the chunks
+
+
+def test_skill_packs_single_file_over_budget_refused(tmp_path, monkeypatch):
+    """A SINGLE file that alone exceeds the budget cannot be chunked without truncating
+    it, so review fails closed loudly (_SkillFileOverBudget) — never silent truncation."""
+    import ouroboros.skill_review as sr
+    from ouroboros.skill_review import _SkillFileOverBudget, _build_skill_file_packs
+
+    skill_dir = tmp_path / "mono"
+    skill_dir.mkdir()
+    (skill_dir / "mono.py").write_text("payload " * 4000, encoding="utf-8")
+    monkeypatch.setattr(sr, "_skill_pack_token_budget", lambda: 10)
+
+    with pytest.raises(_SkillFileOverBudget):
+        _build_skill_file_packs(skill_dir)
 
 
 def test_review_skill_prompt_loads_core_governance_artifacts(tmp_path, monkeypatch):

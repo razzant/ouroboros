@@ -539,7 +539,10 @@ def _build_acting_constraint(
 
 def _select_subagent_constraint(write_surface, write_root, protected_paths_grant, external_tool_grants, parent_workspace_root, caller_readonly=False):
     """Read-only default (no surface), a validated acting constraint, or an error string."""
-    if not write_surface:
+    if not write_surface or str(write_surface).strip().lower() == "read_only":
+        # `read_only` is the explicit, provider-safe alias for the omit-surface
+        # read-only path (the handler also normalizes it; this guard keeps the selector
+        # correct for any direct caller and matches the schema enum) — never acting.
         return {"mode": LOCAL_READONLY_SUBAGENT_MODE, "allow_enable": False, "allow_review": False}
     if caller_readonly:
         # A read-only subagent may delegate read-only children only — never spawn an acting one.
@@ -707,6 +710,11 @@ def _schedule_task(
     # the same per-project knowledge (Phase 3b); never re-derive a different id.
     parent_project_id = str(getattr(ctx, "project_id", "") or "").strip()
     requested_surface = str(write_surface or "").strip().lower()
+    # `read_only` is a first-class, provider-safe alias for "omit write_surface" (NOT a
+    # VALID_WRITE_SURFACES acting surface) — normalize it to the read-only path so
+    # constraint selection, mutating detection, and the event all treat it as read-only (P5).
+    if requested_surface == "read_only":
+        requested_surface = ""
     from ouroboros.tool_access import active_tool_profile
     task_constraint = _select_subagent_constraint(
         requested_surface, write_root, protected_paths_grant, external_tool_grants, workspace_root,
@@ -719,8 +727,9 @@ def _schedule_task(
         or {}
     )
     executor_ref = _resolve_executor_ref(ctx)
-    # A writing/mutative child routes an `auto` lane to Heavy; a read-only child to Light.
-    child_mutating = bool(str(write_surface or "").strip()) or normalize_bool(may_mutate)
+    # A writing/mutative child routes an `auto` lane to Heavy; a read-only child to
+    # Light. Use the NORMALIZED surface so `read_only` counts as read-only, not acting.
+    child_mutating = bool(requested_surface) or normalize_bool(may_mutate)
     lane_slots = expand_subagent_lane_slots(requested_model_lane, depth=new_depth, mutating=child_mutating)
     if not lane_slots:
         return "⚠️ SUBTASK_STATUS_ERROR: no subagent lane slots resolved; subagent was not scheduled."
@@ -1428,9 +1437,13 @@ def get_tools() -> List[ToolEntry]:
                     "type": "string",
                     # No empty-string member: Google Gemini's function-calling validator
                     # rejects empty enum values (400 INVALID_ARGUMENT). Read-only is the
-                    # default by OMITTING this param (handled in _select_subagent_constraint).
-                    "enum": ["self_worktree", "external_workspace", "genesis"],
-                    "description": "Omit = read-only child. Otherwise the isolated write surface for a mutative child (see tool description). Requires mutative subagents enabled (default ON in advanced/pro).",
+                    # default by OMITTING this param; `read_only` is an explicit, provider-safe
+                    # (non-empty) alias for the SAME read-only path, so an audit/read-only child
+                    # can NAME its intent instead of reaching for an acting surface like
+                    # self_worktree (the trap behind the read-only-audit cancel-storm). It is NOT
+                    # an acting VALID_WRITE_SURFACES member — it normalizes to the omit path.
+                    "enum": ["read_only", "self_worktree", "external_workspace", "genesis"],
+                    "description": "read_only (or omit) = read-only child auditing THIS repo. Otherwise the isolated write surface for a MUTATIVE child (see tool description). Acting surfaces require mutative subagents enabled (default ON in advanced/pro).",
                 },
                 "write_root": {"type": "string", "description": "For write_surface=external_workspace: the external project directory. Ignored for self_worktree and genesis (both auto-provisioned)."},
                 "protected_paths_grant": {"type": "boolean", "default": False, "description": "Allow the child to modify protected paths in its self_worktree. Honored only in pro runtime mode; you still re-check at integration."},

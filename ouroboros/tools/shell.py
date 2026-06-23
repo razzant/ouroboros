@@ -111,48 +111,64 @@ def _resolve_effective_timeout(
     ctx: ToolContext | None = None,
     override_sec: int | None = None,
 ) -> int:
-    """Resolve effective timeout, capping by task deadline when present.
+    """Resolve the effective per-command timeout as ONE normalized pipeline:
+    resolve the REQUESTED value from a single precedence chain (per-call
+    ``override_sec`` > env ``OUROBOROS_TOOL_TIMEOUT_SEC`` > settings.json > config
+    ``SETTINGS_DEFAULTS`` > the in-code last-resort ``default_timeout_sec``), then
+    apply the per-call ceiling, then clamp toward the remaining task-deadline budget
+    (60s floor when a deadline exists), then floor at 1s. The outer budget loop
+    remains the hard deadline enforcer.
 
-    An explicit per-call ``override_sec`` (from ``run_command``/``run_script``)
-    takes precedence over env/settings/default, but is still clamped toward the
-    remaining task-deadline budget (same 60s floor / 1800s ceiling as the default
-    path); the outer budget loop remains the hard deadline enforcer.
+    Hygiene fix (SSOT): the prior code skipped an env/settings value EQUAL to the
+    config default (``!= default_setting``), so ``OUROBOROS_TOOL_TIMEOUT_SEC=600``
+    (= the SETTINGS_DEFAULTS value) silently fell through to the in-code 360s default.
+    The configured value is now honored regardless of equality, and env/settings
+    values no longer BYPASS the ceiling/deadline clamp. RELEASE NOTE: installs that
+    relied on the buggy effective 360s now get the configured 600s — a foreground
+    command may hold the task longer (still bounded by ceiling + task deadline).
     """
+    from ouroboros.config import get_per_call_timeout_ceiling_sec
+
+    # 1. Resolve the REQUESTED timeout from a single precedence chain.
+    requested: int | None = None
     if override_sec is not None:
         try:
             ov = int(override_sec)
         except (TypeError, ValueError):
             ov = 0
         if ov > 0:
-            from ouroboros.config import get_per_call_timeout_ceiling_sec
-
-            ceiling = get_per_call_timeout_ceiling_sec()
-            cap = ceiling
-            if ctx is not None:
-                remaining = deadline_remaining_sec(ctx)
-                if remaining > 0:
-                    cap = int(max(60, min(ceiling, remaining * 0.5)))
-            return max(1, min(ov, cap))
-    default_setting = int(SETTINGS_DEFAULTS.get("OUROBOROS_TOOL_TIMEOUT_SEC") or 0)
-    raw = str(os.environ.get("OUROBOROS_TOOL_TIMEOUT_SEC", "") or "").strip()
-    if raw:
+            requested = ov
+    if requested is None:
+        raw = str(os.environ.get("OUROBOROS_TOOL_TIMEOUT_SEC", "") or "").strip()
+        if raw:
+            try:
+                v = int(raw)
+                if v > 0:
+                    requested = v
+            except ValueError:
+                pass
+    if requested is None:
         try:
-            parsed = int(raw)
-            if parsed > 0 and parsed != default_setting:
-                return parsed
-        except ValueError:
+            settings_val = int(load_settings().get("OUROBOROS_TOOL_TIMEOUT_SEC") or 0)
+            if settings_val > 0:
+                requested = settings_val
+        except Exception:
             pass
-    try:
-        settings_val = int(load_settings().get("OUROBOROS_TOOL_TIMEOUT_SEC") or 0)
-        if settings_val > 0 and settings_val != default_setting:
-            return settings_val
-    except Exception:
-        pass
+    if requested is None:
+        cfg_default = int(SETTINGS_DEFAULTS.get("OUROBOROS_TOOL_TIMEOUT_SEC") or 0)
+        requested = cfg_default if cfg_default > 0 else int(default_timeout_sec)
+
+    # 2. Per-call ceiling.
+    effective = min(requested, get_per_call_timeout_ceiling_sec())
+
+    # 3. Clamp toward the remaining task-deadline budget (60s floor when a deadline exists).
     if ctx is not None:
         remaining = deadline_remaining_sec(ctx)
         if remaining > 0:
-            return int(max(60, min(1800, remaining * 0.5)))
-    return max(int(default_timeout_sec), 1)
+            effective = int(max(60, min(effective, remaining * 0.5)))
+
+    # 4. Floor at 1s.
+    return max(1, int(effective))
 
 
 def _describe_returncode(returncode: int, *, cwd: pathlib.Path | str | None = None) -> str:
@@ -1119,8 +1135,12 @@ def _run_shell(
         return autocorrect_note + f"{_describe_returncode(0, cwd=work_dir)}\n{_format_process_output(res.stdout or '', res.stderr or '')}{artifact_note}{audit_note}{executor_note}"
     except subprocess.TimeoutExpired:
         return (
-            f"⚠️ TOOL_TIMEOUT (run_command): command exceeded {timeout_sec}s. "
-            f"Subprocess tree was terminated. cwd={work_dir}"
+            f"⚠️ TOOL_TIMEOUT (run_command): command exceeded the per-command timeout of {timeout_sec}s "
+            f"and its subprocess tree was terminated (cwd={work_dir}). NOTE: this is the per-command "
+            f"FOREGROUND timeout, NOT the task deadline. For genuinely long-running compute (training, "
+            f"sampling, large builds/downloads), start it with start_service and poll "
+            f"service_status/service_logs while you do other work, or pass an explicit timeout_sec=<seconds> "
+            f"(up to the per-call ceiling) — and preserve a best-effort deliverable before the task deadline."
         )
     except Exception as e:
         return f"⚠️ SHELL_ERROR: {e}. cwd={work_dir}"

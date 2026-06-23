@@ -1879,6 +1879,20 @@ body.resizing-panels { user-select: none; }
     line-height: 1.5;
 }
 
+/* P3: the genuinely-full fetched output is shown in a bounded, scrollable box so a
+   huge subagent/research result expands in place without growing the chat endlessly. */
+.chat-live-line-body.chat-live-line-body-full {
+    max-height: 420px;
+    overflow-y: auto;
+}
+
+.chat-live-line-loading {
+    margin-top: 6px;
+    font-size: 12px;
+    font-style: italic;
+    color: rgba(148, 163, 184, 0.8);
+}
+
 .chat-live-line[data-expanded="1"] .chat-live-line-title {
     color: rgba(239, 246, 255, 0.9);
 }
@@ -3241,6 +3255,174 @@ textarea.chat-input::placeholder { color: var(--text-muted); }
 .dashboard-panel.active {
     display: flex;
     flex-direction: column;
+}
+
+/* P4: Activity subtab — cron schedules, running/queued tasks, background status. */
+.activity-scroll {
+    flex: 1;
+    min-height: 0;
+    overflow-y: auto;
+    padding: 16px 20px;
+    display: flex;
+    flex-direction: column;
+    gap: 16px;
+}
+
+.activity-section {
+    margin-bottom: 18px;
+}
+
+.activity-h {
+    margin: 0 0 8px;
+    font-size: 13px;
+    font-weight: 600;
+    color: rgba(226, 232, 240, 0.78);
+    text-transform: uppercase;
+    letter-spacing: 0.04em;
+}
+
+.activity-row {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 12px;
+    padding: 9px 12px;
+    border: 1px solid rgba(255, 255, 255, 0.07);
+    border-radius: 8px;
+    margin-bottom: 6px;
+    background: rgba(255, 255, 255, 0.02);
+}
+
+.activity-row.off {
+    opacity: 0.55;
+}
+
+.activity-row-main {
+    display: flex;
+    flex-direction: column;
+    min-width: 0;
+}
+
+.activity-name {
+    font-size: 13px;
+    color: rgba(239, 246, 255, 0.9);
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+}
+
+.activity-sub {
+    font-size: 12px;
+    color: rgba(148, 163, 184, 0.85);
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+}
+
+.activity-row-actions {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    flex-shrink: 0;
+}
+
+.activity-tag {
+    font-size: 11px;
+    color: rgba(148, 163, 184, 0.8);
+    font-style: italic;
+}
+
+.activity-empty,
+.activity-loading {
+    font-size: 13px;
+    color: rgba(148, 163, 184, 0.75);
+    padding: 8px 2px;
+}
+
+/* P2: main-screen Update pill + staged choice dialog. */
+.update-pill {
+    display: inline-flex;
+    align-items: center;
+    gap: 6px;
+    margin: 6px 8px;
+    padding: 5px 11px;
+    border-radius: 999px;
+    border: 1px solid rgba(56, 189, 248, 0.5);
+    background: rgba(56, 189, 248, 0.14);
+    color: #bae6fd;
+    font-size: 12px;
+    font-weight: 600;
+    cursor: pointer;
+}
+
+.update-pill:hover {
+    background: rgba(56, 189, 248, 0.22);
+}
+
+.update-pill.has-local {
+    border-color: rgba(251, 191, 36, 0.55);
+    background: rgba(251, 191, 36, 0.14);
+    color: #fde68a;
+}
+
+.update-dialog-overlay {
+    position: fixed;
+    inset: 0;
+    z-index: 1000;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    background: rgba(2, 6, 23, 0.6);
+}
+
+.update-dialog {
+    width: min(560px, calc(100vw - 32px));
+    max-height: calc(100vh - 64px);
+    overflow-y: auto;
+    background: #0f172a;
+    border: 1px solid rgba(255, 255, 255, 0.1);
+    border-radius: 12px;
+    padding: 20px;
+    color: rgba(226, 232, 240, 0.92);
+}
+
+.update-dialog-title {
+    margin: 0 0 6px;
+    font-size: 16px;
+}
+
+.update-dialog-meta {
+    font-size: 13px;
+    color: rgba(148, 163, 184, 0.9);
+    margin-bottom: 10px;
+}
+
+.update-dialog-conflicts {
+    margin: 0 0 12px;
+    padding-left: 18px;
+    max-height: 180px;
+    overflow-y: auto;
+    font-size: 12px;
+    color: rgba(226, 232, 240, 0.78);
+}
+
+.update-dialog-note {
+    font-size: 12px;
+    color: rgba(148, 163, 184, 0.85);
+    margin-bottom: 14px;
+    line-height: 1.5;
+}
+
+.update-dialog-actions {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 8px;
+}
+
+.update-dialog-status {
+    margin-top: 12px;
+    font-size: 13px;
+    color: rgba(148, 163, 184, 0.95);
 }
 
 .settings-embedded-content {

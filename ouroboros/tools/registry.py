@@ -203,6 +203,24 @@ def _detect_mutative_toggle_self_change(text_lower: str) -> bool:
     return has_key and has_write
 
 
+def _managed_update_code_tool_block(ctx: Any, name: str) -> str:
+    """Block a repo-mutating code tool while a managed-update assisted merge is staged for
+    ANOTHER task (P2/SC2). Returns a block message, or "" when allowed (this is the authorized
+    resolution task, or no managed tx is active). A corrupt tx marker fails closed."""
+    try:
+        from supervisor.update_merge import managed_assisted_tx_for
+
+        if managed_assisted_tx_for(getattr(ctx, "task_id", ""))[1]:
+            return (
+                f"⚠️ MANAGED_UPDATE_IN_PROGRESS: {name!r} is blocked while a managed update merge "
+                "is being resolved (only its authorized resolution task may write the repo). "
+                "Retry after the update lands or is rolled back."
+            )
+    except Exception:
+        return ""
+    return ""
+
+
 def _detect_evolution_owner_control_self_change(text_lower: str) -> bool:
     """Detect shell/script/CLI attempts to set the owner-only self-evolution controls:
     the post-task evolution toggle OR the persistent evolution-objective steer (which
@@ -454,6 +472,7 @@ _WORKSPACE_ALLOWED_TOOLS = frozenset({
     "browser_action",
     "analyze_screenshot",
     "vlm_query",
+    "view_image",
     "list_available_tools",
     "enable_tools",
 })
@@ -536,6 +555,27 @@ def _resource_allowed(ctx: Any, key: str) -> bool:
             if isinstance(value, bool) and not value:
                 return False
     return True
+
+
+def _disabled_tools(ctx: Any) -> frozenset:
+    """Tool names the task contract withholds (declarative tool policy).
+
+    Independent of ``allowed_resources``: a caller can disable specific tools
+    (e.g. the agent's web_search/browser/VLM tools for a faithful benchmark)
+    WITHOUT setting web/network=false — so shell network egress (git/pip) stays
+    available and the web<->network cross-implication in ``_resource_allowed``
+    never fires.
+    """
+    metadata = getattr(ctx, "task_metadata", {}) if isinstance(getattr(ctx, "task_metadata", {}), dict) else {}
+    contract = metadata.get("task_contract") if isinstance(metadata.get("task_contract"), dict) else {}
+    if not contract and isinstance(getattr(ctx, "task_contract", None), dict):
+        contract = getattr(ctx, "task_contract")
+    names: set = set()
+    for source in (metadata, contract):
+        raw = source.get("disabled_tools") if isinstance(source, dict) else None
+        if isinstance(raw, (list, tuple)):
+            names.update(str(n).strip() for n in raw if str(n).strip())
+    return frozenset(names)
 
 
 def _light_repo_snapshot(repo_dir: pathlib.Path) -> Optional[Dict[str, Any]]:
@@ -889,9 +929,11 @@ class ToolRegistry:
         # mode; disable the workspace filter when acting.
         workspace_mode = bool(getattr(self._ctx, "is_workspace_mode", lambda: False)()) and not acting_subagent
         local_readonly_subagent = self._is_local_readonly_subagent()
+        disabled = _disabled_tools(self._ctx)
         return [
             e.name
             for e in self._entries.values()
+            if e.name not in disabled  # declarative tool policy (task_contract.disabled_tools)
             if not workspace_mode or e.name in _WORKSPACE_ALLOWED_TOOLS
             if not local_readonly_subagent or e.name in LOCAL_READONLY_SUBAGENT_TOOL_NAMES
             if not acting_subagent or e.name in ACTING_SUBAGENT_TOOL_NAMES
@@ -957,16 +999,20 @@ class ToolRegistry:
         workspace_mode = bool(getattr(self._ctx, "is_workspace_mode", lambda: False)()) and not acting_subagent
         local_readonly_subagent = self._is_local_readonly_subagent()
         ephemeral_turn = bool(getattr(self._ctx, "is_ephemeral_turn", False))
+        disabled_tools = _disabled_tools(self._ctx)
         self._capability_omissions = []
         built_in = [
             schema
             for entry in self._entries.values()
+            if entry.name not in disabled_tools  # declarative tool policy (task_contract.disabled_tools)
             if not workspace_mode or entry.name in _WORKSPACE_ALLOWED_TOOLS
             if not local_readonly_subagent or entry.name in LOCAL_READONLY_SUBAGENT_TOOL_NAMES
             if not acting_subagent or entry.name in ACTING_SUBAGENT_TOOL_NAMES
             if not ephemeral_turn or entry.name in _EPHEMERAL_ALLOWED_TOOLS  # CW3: default-deny allowlist
             for schema in self._schemas_for_entry(entry)
         ]
+        if disabled_tools:
+            self._capability_omissions.append({"surface": "tools", "reason": "disabled_by_contract", "tools": sorted(disabled_tools)})
         # Include live extension tool schemas in normal tool discovery.
         extension_schemas: List[Dict[str, Any]] = []
         if ephemeral_turn:
@@ -1032,10 +1078,20 @@ class ToolRegistry:
                         self._capability_omissions.append({"surface": "mcp", "reason": "server_no_tools", "servers": _empty})
                 except Exception as exc:
                     self._capability_omissions.append({"surface": "mcp", "reason": "discovery_error", "error": f"{type(exc).__name__}: {exc}"})
-            return built_in + extension_schemas + mcp_schemas
+            combined = built_in + extension_schemas + mcp_schemas
+            if disabled_tools:
+                # Apply the declarative tool policy to dynamic extension/MCP schemas too, not just
+                # built-ins, so a disabled name can never surface from any discovery source.
+                combined = [
+                    s for s in combined
+                    if (s.get("function", {}) or {}).get("name") not in disabled_tools
+                ]
+            return combined
         # Core tools plus meta-tools for enabling extended tools.
         result = []
         for e in self._entries.values():
+            if e.name in disabled_tools:  # declarative tool policy (task_contract.disabled_tools)
+                continue
             if workspace_mode and not e.name in _WORKSPACE_ALLOWED_TOOLS:
                 continue
             if local_readonly_subagent and e.name not in LOCAL_READONLY_SUBAGENT_TOOL_NAMES:
@@ -1051,7 +1107,10 @@ class ToolRegistry:
                 or e.name in ("list_available_tools", "enable_tools")
             ):
                 result.extend(self._schemas_for_entry(e))
-        return result + extension_schemas
+        ext = extension_schemas
+        if disabled_tools:
+            ext = [s for s in ext if (s.get("function", {}) or {}).get("name") not in disabled_tools]
+        return result + ext
 
     def capability_omissions(self) -> List[Dict[str, Any]]:
         return [dict(item) for item in self._capability_omissions]
@@ -1063,6 +1122,10 @@ class ToolRegistry:
         acting_grants = self._acting_tool_grants() if acting_subagent else set()
         workspace_mode = bool(getattr(self._ctx, "is_workspace_mode", lambda: False)()) and not acting_subagent
         local_readonly_subagent = self._is_local_readonly_subagent()
+        # Declarative tool policy applies across ALL discovery sources (built-in, extension, MCP),
+        # so enable_tools/discovery can never surface a disabled name — consistent with schemas()/execute().
+        if requested in _disabled_tools(self._ctx):
+            return None
         entry = self._entries.get(requested)
         if entry:
             if getattr(self._ctx, "is_ephemeral_turn", False) and requested not in _EPHEMERAL_ALLOWED_TOOLS:
@@ -1921,6 +1984,45 @@ class ToolRegistry:
             )
         return ""
 
+    def _subagent_and_update_gate(
+        self, name, entry, ext_tool, is_mcp, local_readonly_subagent, acting_subagent, acting_tool_grants
+    ) -> str:
+        """Early dispatch gates that return a block message (or "" to allow): the read-only and
+        acting subagent tool-name allowlists, and the managed-update merge write-exclusivity
+        (P2/SC2 — only the authorized resolution task may run code tools while a merge is staged)."""
+        if local_readonly_subagent and entry is not None and name not in LOCAL_READONLY_SUBAGENT_TOOL_NAMES:
+            return (
+                "⚠️ LOCAL_READONLY_SUBAGENT_BLOCKED: this subagent may inspect "
+                "local repo/data/history plus web/browser surfaces and enabled "
+                "external tools, but may not call first-party local tool "
+                f"{name!r}. Parent tasks must perform writes, commits, review "
+                "gates, tool expansion, runtime control, shell, and skills. "
+                "Nested readonly delegation is allowed only through schedule_subagent "
+                "within configured depth/cap limits."
+            )
+        if acting_subagent and entry is not None and name not in ACTING_SUBAGENT_TOOL_NAMES:
+            return (
+                "⚠️ ACTING_SUBAGENT_BLOCKED: this mutative subagent may read and "
+                "write inside its isolated write root and run shell/services "
+                f"there, but may not call first-party tool {name!r}. It cannot "
+                "commit the live body, run review/runtime/skills lifecycle, enable "
+                "tools, or write cognitive memory; the parent integrates the "
+                "returned patch and is the sole committer."
+            )
+        if acting_subagent and entry is None and (ext_tool or is_mcp) and name not in acting_tool_grants:
+            return (
+                "⚠️ ACTING_SUBAGENT_TOOL_NOT_GRANTED: extension/MCP tool "
+                f"{name!r} is not in this acting subagent's external_tool_grants. "
+                "The parent must grant dynamic tools explicitly per child."
+            )
+        # Cover the full repo-mutating surface explicitly (CODE_TOOLS ∪ _REPO_MUTATION_TOOLS):
+        # write_file/edit_text/claude_code_edit AND shell/process tools (run_command/run_script/
+        # start_service) are all is_code_tool=True, but gating on the union makes the
+        # "no OTHER task writes the repo while a merge is staged" contract robust to flag drift.
+        if entry is not None and (name in self.CODE_TOOLS or name in _REPO_MUTATION_TOOLS):
+            return _managed_update_code_tool_block(self._ctx, name)
+        return ""
+
     def execute(self, name: str, args: Dict[str, Any]) -> str:
         name = str(name or "").strip()
         args = dict(args or {})
@@ -1961,35 +2063,17 @@ class ToolRegistry:
         _eph = self._ephemeral_block(name, ext_tool, is_mcp)  # CW3: built-in deny set + extension/MCP
         if _eph:
             return _eph
+        if name in _disabled_tools(self._ctx):
+            return f"⚠️ RESOURCE_CONSTRAINT_BLOCKED: task_contract.disabled_tools withholds {name!r} for this task."
         if name in _WEB_TOOLS and not _resource_allowed(self._ctx, "web"):
             return f"⚠️ RESOURCE_CONSTRAINT_BLOCKED: task_contract.allowed_resources.web=false blocks {name!r}."
         if (is_mcp or ext_tool) and not _resource_allowed(self._ctx, "network"):
             return f"⚠️ RESOURCE_CONSTRAINT_BLOCKED: task_contract.allowed_resources.network=false blocks external tool {name!r}."
-        if local_readonly_subagent and entry is not None and name not in LOCAL_READONLY_SUBAGENT_TOOL_NAMES:
-            return (
-                "⚠️ LOCAL_READONLY_SUBAGENT_BLOCKED: this subagent may inspect "
-                "local repo/data/history plus web/browser surfaces and enabled "
-                "external tools, but may not call first-party local tool "
-                f"{name!r}. Parent tasks must perform writes, commits, review "
-                "gates, tool expansion, runtime control, shell, and skills. "
-                "Nested readonly delegation is allowed only through schedule_subagent "
-                "within configured depth/cap limits."
-            )
-        if acting_subagent and entry is not None and name not in ACTING_SUBAGENT_TOOL_NAMES:
-            return (
-                "⚠️ ACTING_SUBAGENT_BLOCKED: this mutative subagent may read and "
-                "write inside its isolated write root and run shell/services "
-                f"there, but may not call first-party tool {name!r}. It cannot "
-                "commit the live body, run review/runtime/skills lifecycle, enable "
-                "tools, or write cognitive memory; the parent integrates the "
-                "returned patch and is the sole committer."
-            )
-        if acting_subagent and entry is None and (ext_tool or is_mcp) and name not in acting_tool_grants:
-            return (
-                "⚠️ ACTING_SUBAGENT_TOOL_NOT_GRANTED: extension/MCP tool "
-                f"{name!r} is not in this acting subagent's external_tool_grants. "
-                "The parent must grant dynamic tools explicitly per child."
-            )
+        _gate = self._subagent_and_update_gate(
+            name, entry, ext_tool, is_mcp, local_readonly_subagent, acting_subagent, acting_tool_grants
+        )
+        if _gate:
+            return _gate
 
         workspace_block_reason = ""
         try:

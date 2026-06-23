@@ -28,8 +28,8 @@ from devtools.benchmarks.terminal_bench.run_harbor_smoke import AGENT_IMPORT
 DEFAULT_DATASET = "terminal-bench/terminal-bench-2-1"
 
 # Every model slot the in-container adapter forwards (plus the review triad, handled specially).
-# Used by --all-model for a single-model run: review STAYS ON but homogenized to 3 identical
-# models. Exported to os.environ so the harbor subprocess and the adapter's forwarded-slot reads
+# Used by --all-model for a single-model run: review STAYS ON but lightened to ONE reviewer at low
+# effort by default (configurable). Exported to os.environ so the harbor subprocess and the adapter's forwarded-slot reads
 # (harbor_installed_agent._container_env) pick them up. This does NOT change repo config defaults.
 # Only slots the in-container adapter actually forwards (harbor_installed_agent._container_env).
 # Deliberately omitted because the container already covers them: HEAVY/CONSCIOUSNESS default to
@@ -47,15 +47,24 @@ _ALL_MODEL_SLOT_KEYS = (
 )
 
 
-def apply_all_model(model: str) -> None:
-    """Force every FORWARDED model slot to ``model`` for a single-model run (the review triad is
-    homogenized to 3 identical models). Mutates only this process's env, which propagates to the
-    harbor subprocess and the in-container adapter; it does not edit repo config defaults. The
-    container's HEAVY/CONSCIOUSNESS slots default to OUROBOROS_MODEL and the adapter pins the
-    fallback to the main model, so those need no explicit value here."""
+def apply_all_model(model: str, review_slots: int = 1, review_effort: str = "low") -> None:
+    """Force every FORWARDED model slot to ``model`` for a single-model run. Mutates only this
+    process's env, which propagates to the harbor subprocess and the in-container adapter; it does
+    NOT edit repo config defaults. The container's HEAVY/CONSCIOUSNESS slots default to
+    OUROBOROS_MODEL and the adapter pins the fallback to the main model, so those need no explicit
+    value here.
+
+    Review for a single-model run defaults to ONE reviewer at ``low`` effort (configurable via
+    --review-slots / --review-effort): three identical-model reviewers add latency/cost but no
+    diversity (a monoculture), and a single-model run cannot achieve reviewer-model diversity anyway.
+    This is a BENCHMARK setting, NOT a claim that the review subsystem got more reliable
+    (single_reviewer_no_diversity stays loud). EFFORT_SCOPE_REVIEW is set too for completeness
+    ("там и там"); scope review does not fire on a terminal-bench task (it is a commit-time gate)."""
     for key in _ALL_MODEL_SLOT_KEYS:
         os.environ[key] = model
-    os.environ["OUROBOROS_REVIEW_MODELS"] = ",".join([model, model, model])
+    os.environ["OUROBOROS_REVIEW_MODELS"] = ",".join([model] * max(1, int(review_slots)))
+    os.environ["OUROBOROS_EFFORT_REVIEW"] = review_effort
+    os.environ["OUROBOROS_EFFORT_SCOPE_REVIEW"] = review_effort
 
 
 @dataclass
@@ -251,6 +260,20 @@ def write_disclosure_ledger(*, jobs_dir: pathlib.Path, out_path: pathlib.Path, r
         # provider issue (e.g. reason_code="provider_unavailable"), so the truthful provider/infra
         # signal lives in this summary, NOT in Harbor's exception_info.
         adapter_summary = agent_meta.get("summary") if isinstance(agent_meta.get("summary"), dict) else {}
+        # The adapter's result.json summary carries reason_code/infra_failed but NOT the
+        # cancellation signal. captured_after_cancellation lives in the sibling run-summary,
+        # written by the adapter's teardown-snapshot path. It is the load-bearing signal that a
+        # terminal reason_code="provider_unavailable" is only a post-cancellation network-teardown
+        # artifact (the harness cuts container egress at the finish line, so the agent's own
+        # finalization/summary LLM calls die on DNS) rather than a real mid-run provider fault.
+        captured_after_cancellation = False
+        run_summary_path = result_json.parent / "agent" / "ouroboros-run-summary.json"
+        try:
+            run_summary = json.loads(run_summary_path.read_text(encoding="utf-8"))
+            if isinstance(run_summary, dict):
+                captured_after_cancellation = bool(run_summary.get("captured_after_cancellation"))
+        except (OSError, ValueError):
+            pass
         trials.append({
             "task_name": data.get("task_name"),
             "trial_name": data.get("trial_name"),
@@ -258,6 +281,7 @@ def write_disclosure_ledger(*, jobs_dir: pathlib.Path, out_path: pathlib.Path, r
             "exception_type": exception_type,
             "reason_code": adapter_summary.get("reason_code"),
             "infra_failed": bool(adapter_summary.get("infra_failed")),
+            "captured_after_cancellation": captured_after_cancellation,
             "cost_usd": agent_result.get("cost_usd"),
             "turns": agent_meta.get("turns"),
             "started_at": data.get("started_at"),
@@ -282,14 +306,47 @@ def write_disclosure_ledger(*, jobs_dir: pathlib.Path, out_path: pathlib.Path, r
     _timeout_types = {"AgentTimeoutError", "VerifierTimeoutError"}
     _provider_reasons = {"provider_unavailable", "llm_api_error", "rate_limited", "provider_error"}
 
-    def _is_provider_or_infra_failure(t: dict) -> bool:
-        if t["exception_type"] and t["exception_type"] not in _timeout_types:
-            return True
-        if t.get("infra_failed"):
-            return True
-        return t.get("reason_code") in _provider_reasons
+    def _failure_category(t: dict) -> str:
+        """Classify each trial into exactly one honest bucket (precedence matters).
 
-    provider_or_infra_failures = sum(1 for t in trials if _is_provider_or_infra_failure(t))
+        'pass'           reward 1.0 -- verifier-confirmed success, regardless of Ouroboros's own
+                         terminal status (Ouroboros may self-report failed/provider_unavailable when
+                         a post-work finalization call dies on the harness network teardown, yet the
+                         work in the container already passed the external verifier).
+        'provider_infra' a provider/infra fault that PREVENTED a fair attempt: any non-timeout Harbor
+                         exception (setup timeout, nonzero exit, transport), infra_failed, OR a
+                         provider reason_code seen WITHOUT the post-cancellation flag (a genuine
+                         mid-run provider/network death).
+        'cancelled'      the agent was stopped by the harness before producing a real terminal: a
+                         Harbor wall-clock timeout, OR a provider reason_code stamped only during
+                         post-cancellation network teardown (captured_after_cancellation) -- the
+                         harness cut egress at the finish line, the agent's own finalization LLM call
+                         died on DNS, and the real outcome was masked.
+        'genuine'        reward 0 having reached a real terminal (final_message / tool_failure / ...)
+                         -- a fair-shot wrong answer. NOTE: captured_after_cancellation is NOT used to
+                         route here; it is set broadly on teardown, including on trials that DID emit
+                         a final answer, so trusting it alone would wrongly excuse real wrong answers.
+        'other'          reward is null/other and none of the above.
+        """
+        if t["reward"] in (1, 1.0, True):
+            return "pass"
+        et = t.get("exception_type")
+        if et in _timeout_types:
+            return "cancelled"          # Harbor wall-clock timeout: cut off before finishing.
+        if et:
+            return "provider_infra"     # setup timeout / nonzero exit / transport: real infra fault.
+        if t.get("infra_failed"):
+            return "provider_infra"
+        if t.get("reason_code") in _provider_reasons:
+            # Provider reason WITH the teardown flag == masked harness cancellation, not a real
+            # provider fault; WITHOUT it == a genuine mid-run provider/network death.
+            return "cancelled" if t.get("captured_after_cancellation") else "provider_infra"
+        if t["reward"] in (0, 0.0, False):
+            return "genuine"            # reached a real terminal with reward 0 -> wrong answer.
+        return "other"
+
+    categories = collections.Counter(_failure_category(t) for t in trials)
+    provider_or_infra_failures = categories["provider_infra"]
     per_task: dict[str, dict] = collections.defaultdict(lambda: {"n": 0, "passed": 0})
     for trial in trials:
         bucket = per_task[trial["task_name"] or "?"]
@@ -311,18 +368,18 @@ def write_disclosure_ledger(*, jobs_dir: pathlib.Path, out_path: pathlib.Path, r
         "agent_timeout_count": int(exception_histogram.get("AgentTimeoutError", 0)),
         "api_rate_limit_error_count": int(exception_histogram.get("ApiRateLimitError", 0)),
         "provider_or_infra_failure_count": int(provider_or_infra_failures),
-        "genuine_failure_count": int(sum(
-            1 for t in trials
-            if t["reward"] in (0, 0.0)
-            and not _is_provider_or_infra_failure(t)
-            and t["exception_type"] not in _timeout_types
-        )),
+        "wall_clock_cancellation_count": int(categories["cancelled"]),
+        "genuine_failure_count": int(categories["genuine"]),
         "exception_note": (
-            "agent_timeout_count is reliable (Harbor-named). Provider/rate-limit failures usually appear "
-            "as an Ouroboros reason_code (e.g. provider_unavailable) on a clean reward-0 trial whose "
-            "Harbor exception_info is null -- so provider_or_infra_failure_count combines non-timeout "
-            "exceptions + infra_failed + provider reason_codes (see reason_code_histogram). Subtract those "
-            "from the reward-0 trials to get genuine_failure_count (real wrong answers, not 429 artifacts)."
+            "Honest taxonomy: every reward-0 trial is exactly one of provider_or_infra_failure / "
+            "wall_clock_cancellation / genuine_failure (reward-1 trials are 'pass'). agent_timeout_count "
+            "is the Harbor-named subset. A provider reason_code (e.g. provider_unavailable) only counts as "
+            "provider_or_infra when it was NOT a post-cancellation teardown artifact: the harness cuts "
+            "container egress at the finish line, so an agent's own finalization/summary LLM calls die on "
+            "DNS and get stamped provider_unavailable even though the task already passed or was merely cut "
+            "off by wall-clock -- those go to wall_clock_cancellation (captured_after_cancellation), NOT "
+            "provider_or_infra. genuine_failure_count is reward-0 given a fair shot (real wrong answers, "
+            "not provider artifacts and not wall-clock cut-offs)."
         ),
         "total_cost_usd": round(sum(costs), 4) if costs else None,
         "per_task_pass_rate": per_task_pass_rate,
@@ -332,7 +389,9 @@ def write_disclosure_ledger(*, jobs_dir: pathlib.Path, out_path: pathlib.Path, r
     print(
         f"[run_tb] disclosure ledger: {len(trials)} trials, "
         f"{ledger['agent_timeout_count']} AgentTimeoutError, "
-        f"{ledger['provider_or_infra_failure_count']} provider/infra failures -> {out_path}"
+        f"{ledger['provider_or_infra_failure_count']} provider/infra, "
+        f"{ledger['wall_clock_cancellation_count']} wall-clock-cancelled, "
+        f"{ledger['genuine_failure_count']} genuine failures -> {out_path}"
     )
     return ledger
 
@@ -382,12 +441,24 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument(
         "--all-model",
         default="",
-        help="convenience: set ALL model slots (incl. review triad/scope/websearch) to this model",
+        help="convenience: set ALL model slots (incl. review/scope/websearch) to this model",
+    )
+    parser.add_argument(
+        "--review-slots",
+        type=int,
+        default=1,
+        help="number of in-task acceptance reviewers for --all-model (default 1; 3 identical = monoculture, no diversity)",
+    )
+    parser.add_argument(
+        "--review-effort",
+        default="low",
+        choices=["none", "low", "medium", "high"],
+        help="reasoning effort for the in-task review under --all-model (default low; cuts the review-latency tax)",
     )
     args = parser.parse_args(argv)
 
     if args.all_model:
-        apply_all_model(args.all_model)
+        apply_all_model(args.all_model, review_slots=args.review_slots, review_effort=args.review_effort)
         args.model = args.all_model
         args.light_model = args.all_model
     if not args.model:

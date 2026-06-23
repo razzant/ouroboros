@@ -161,7 +161,10 @@ def test_skill_preflight_reports_python_syntax_error(tmp_path, monkeypatch):
     assert "SyntaxError" in result["files"][0]["stderr"]
 
 
-def test_skill_preflight_fails_closed_when_file_limit_omits_payload(tmp_path, monkeypatch):
+def test_skill_preflight_file_limit_omission_is_degraded_not_blocked(tmp_path, monkeypatch):
+    # A file count beyond the syntax-check headroom is a DEGRADED note, NOT a hard block:
+    # the skill-review pass now reads every file under a pack-level token budget (chunked
+    # when oversized), so preflight must not re-introduce an arbitrary file-count gate.
     ctx = _make_ctx(tmp_path)
     skills_root = tmp_path / "skills"
     skills_root.mkdir()
@@ -175,8 +178,10 @@ def test_skill_preflight_fails_closed_when_file_limit_omits_payload(tmp_path, mo
 
     result = json.loads(sp._handle_skill_preflight(ctx, skill="alpha"))
 
-    assert result["ok"] is False
+    assert result["ok"] is True  # proceeds to the authoritative token-budgeted review
     assert result["omitted_count"] > 0
+    assert result.get("degraded") is True
+    assert "token budget" in result.get("degraded_note", "")
 
 
 def test_skill_preflight_missing_validator_runtime_is_tolerated(tmp_path, monkeypatch):

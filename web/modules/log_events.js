@@ -454,6 +454,8 @@ function chatView({
     human = false,
     dedupeKey = '',
     meta = [],
+    fullRef = '',
+    truncated = false,
 } = {}) {
     const out = {
         phase,
@@ -468,6 +470,11 @@ function chatView({
     if (fullBody) out.fullBody = fullBody;
     if (fullHeadline) out.fullHeadline = fullHeadline;
     if (Array.isArray(meta) && meta.length) out.meta = meta.filter(Boolean);
+    // P3 uniform contract: when the WS body was truncated server-side, carry a
+    // fetch ref (a task id -> GET /api/tasks/{id}) so the bubble can load the
+    // genuinely-full output on demand instead of showing only the capped preview.
+    if (fullRef) out.fullRef = String(fullRef);
+    if (truncated) out.truncated = true;
     return out;
 }
 
@@ -533,6 +540,10 @@ export function summarizeChatLiveEvent(evt) {
             visible: true,
             promote: true,
             human: true,
+            // P3: the WS result/trace were capped at 4000 server-side; expose the
+            // subagent task id so "show full" can fetch the genuinely-full output.
+            fullRef: sid,
+            truncated: Boolean(evt.result_truncated || evt.trace_summary_truncated),
             meta: [
                 'subagent',
                 role ? `role=${role}` : '',

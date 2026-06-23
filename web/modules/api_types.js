@@ -104,7 +104,9 @@
  * @property {string=} status
  * @property {number=} cost_usd
  * @property {string=} result
+ * @property {boolean=} result_truncated
  * @property {string=} trace_summary
+ * @property {boolean=} trace_summary_truncated
  * @property {string=} error
  * @property {string=} artifact_status
  * @property {Object=} artifact_bundle
@@ -253,6 +255,7 @@
  * @property {Object[]=} attachments
  * @property {Object=} allowed_resources
  * @property {Object=} resource_policy
+ * @property {string[]=} disabled_tools Declarative tool-policy denylist: tool names withheld from the agent (independent of allowed_resources).
  * @property {ExecutorRef=} executor_ref
  * @property {"stop"|"keep"=} service_teardown Task service finalization policy; `keep` is for external verifiers/owners that need live services after task completion. POSIX-only: on Windows a cancel/hard-timeout tree-kills all task processes, so `keep` is not preserved there.
  * @property {string=} deadline_at
@@ -343,4 +346,4 @@
  * @property {boolean=} ok
  */
 
-export const GATEWAY_CONTRACT_VERSION = '6.40.0';
+export const GATEWAY_CONTRACT_VERSION = '6.42.0';

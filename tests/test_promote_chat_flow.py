@@ -581,6 +581,35 @@ def test_project_from_task_uses_neutral_name_when_nothing_derivable(tmp_path):
     assert payload["project"]["name"] != "task-noobj"
 
 
+def test_project_from_task_names_skill_lifecycle_task(tmp_path):
+    """A skill-lifecycle (non-human-text) task carries no owner request, so naming
+    derives a human label from the synthetic skill_lifecycle_<kind>_<target>_<job>
+    id instead of dead-ending at 'New project' (P1)."""
+    import asyncio
+    import json
+
+    from ouroboros.gateway.projects import api_project_from_task
+
+    class _Req:
+        def __init__(self):
+            self.app = types.SimpleNamespace(
+                state=types.SimpleNamespace(drive_root=tmp_path, repo_dir=tmp_path)
+            )
+
+        async def json(self):
+            return {
+                "task_id": "skill_lifecycle_install_travel-planner-notion-ai-obsidian_job1",
+                "id": "task-skl1",
+            }
+
+    payload = json.loads(asyncio.run(api_project_from_task(_Req())).body)
+    name = payload["project"]["name"]
+    assert name != "New project"
+    assert name.startswith("Install skill")
+    assert "travel-planner" in name
+    assert len(name) <= 60
+
+
 def test_project_from_task_uses_objective_hint_for_in_progress_direct_chat(tmp_path):
     """A still in-progress DIRECT chat task has no server-side title/objective/queue
     source, so the frontend's objective_hint (the owner's original request) names

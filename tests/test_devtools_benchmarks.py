@@ -738,6 +738,35 @@ def test_terminal_bench_openrouter_credit_preflight_blocks_low_credit(tmp_path, 
     assert payload["remaining_usd"] == 0.25
 
 
+def test_run_ouroboros_task_terminal_nonzero_exit_is_not_interruption(tmp_path):
+    """The in-container runner exits 2 to SIGNAL a terminal infra_failed result; that is a real
+    terminal task outcome (status completed/failed), NOT a Harbor wall-clock interruption.
+    _run_ouroboros_task must RETURN such a summary (so run() sets reached_terminal_result=True and
+    the captured summary is not mislabeled captured_after_cancellation). A nonzero exit with NO
+    terminal summary (a genuine runner crash) still raises."""
+    import asyncio
+    from types import SimpleNamespace
+    import devtools.benchmarks.terminal_bench.harbor_installed_agent as tb_agent
+
+    agent = tb_agent.OuroborosTerminalBenchAgent(logs_dir=tmp_path)
+
+    class _Env:
+        def __init__(self, return_code, stdout):
+            self._rc, self._out = return_code, stdout
+
+        async def exec(self, *, command, timeout_sec=None, env=None, cwd=None):
+            return SimpleNamespace(return_code=self._rc, stdout=self._out, stderr="")
+
+    terminal = json.dumps(
+        {"status": "failed", "reason_code": "provider_unavailable", "infra_failed": True, "return_code": 2}
+    )
+    out = asyncio.run(agent._run_ouroboros_task(_Env(2, terminal), {}))
+    assert out["status"] == "failed" and out["reason_code"] == "provider_unavailable"
+
+    with pytest.raises(RuntimeError):
+        asyncio.run(agent._run_ouroboros_task(_Env(2, "Traceback: boom\nnot-json"), {}))
+
+
 def test_terminal_bench_openrouter_credit_preflight_skips_when_unconfigured(tmp_path, monkeypatch):
     import devtools.benchmarks.terminal_bench.harbor_installed_agent as tb_agent
 

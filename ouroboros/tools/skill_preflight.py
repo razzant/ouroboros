@@ -32,7 +32,7 @@ log = logging.getLogger(__name__)
 
 _PREFLIGHT_TIMEOUT_SEC = 30
 _PREFLIGHT_MAX_OUTPUT_BYTES = 16 * 1024
-_PREFLIGHT_HARD_FILE_LIMIT = 60  # mirrors skill_review's _MAX_SKILL_FILES headroom
+_PREFLIGHT_HARD_FILE_LIMIT = 60  # independent preflight headroom (skill_review now uses a pack-level token budget)
 
 # Extension -> argv template + runtime; {path} is substituted into argv only.
 _VALIDATORS: Dict[str, Tuple[List[str], str]] = {
@@ -427,12 +427,15 @@ def _handle_skill_preflight(
     # syntax failures — and a file set with nothing syntax-checkable (e.g. only
     # .txt/.md, or all validators skipped) is tolerated; tri-model review stays
     # authoritative. A real syntax error (rc > 0) on any non-skipped file blocks.
+    # A file count beyond the syntax-check headroom is a DEGRADED note, NOT a block: the
+    # skill-review pass now packs the whole payload under a pack-level token budget (chunked
+    # when oversized) and reads every file, so an arbitrary preflight file-count cap must not
+    # re-introduce the hard gate the token budget replaced. omitted files are surfaced below.
     overall_ok = (
         all(f.get("ok") for f in manifest_findings)
         and all(f.get("ok") for f in widget_findings)
         and all(f.get("ok") for f in permission_findings)
         and all(f.get("ok") for f in file_findings if not f.get("skipped"))
-        and omitted_count == 0
     )
     skipped_files = [f for f in file_findings if f.get("skipped")]
     payload = {
@@ -449,15 +452,24 @@ def _handle_skill_preflight(
         "omitted_files": omitted_files,
         "ok": bool(overall_ok),
     }
+    notes: List[str] = []
     if skipped_files:
-        # Surface the degradation explicitly (no silent skip): tri-model review
-        # is authoritative for these files.
-        payload["degraded"] = True
-        payload["degraded_note"] = (
+        notes.append(
             f"{len(skipped_files)} validator(s) could not run "
             f"({', '.join(sorted({str(f.get('skip_reason') or 'skipped') for f in skipped_files}))}); "
             "syntax for those files was not verified and tri-model review remains authoritative."
         )
+    if omitted_count:
+        notes.append(
+            f"{omitted_count} file(s) beyond the {_PREFLIGHT_HARD_FILE_LIMIT}-file syntax-check headroom "
+            "were not individually syntax-checked; the skill-review pass reads every file under its "
+            "pack-level token budget (chunked when oversized) and remains authoritative."
+        )
+    if notes:
+        # Surface the degradation explicitly (no silent skip): tri-model review
+        # is authoritative for these files.
+        payload["degraded"] = True
+        payload["degraded_note"] = " ".join(notes)
     return json.dumps(payload, ensure_ascii=False, indent=2)
 
 

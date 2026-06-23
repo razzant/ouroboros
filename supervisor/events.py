@@ -574,6 +574,15 @@ def _handle_send_message(evt: Dict[str, Any], ctx: Any) -> None:
 def _handle_task_done(evt: Dict[str, Any], ctx: Any) -> None:
     task_id = evt.get("task_id")
     wid = evt.get("worker_id")
+    if task_id:
+        # Managed-update merge watchdog (P2/SC2): if an assisted-resolution task ended without
+        # landing the merge, free the live worktree + commit-exclusivity by rolling the update back.
+        try:
+            from supervisor.update_merge import abort_orphaned_assisted_tx
+
+            abort_orphaned_assisted_tx(str(task_id))
+        except Exception:
+            log.debug("assisted-merge orphan watchdog failed", exc_info=True)
     meta = ctx.RUNNING.get(str(task_id or ""), {}) if task_id else {}
     task = meta.get("task") if isinstance(meta, dict) and isinstance(meta.get("task"), dict) else {}
     task_type = str(evt.get("task_type") or task.get("type") or "")
@@ -804,7 +813,13 @@ def _handle_task_done(evt: Dict[str, Any], ctx: Any) -> None:
                         "status": status,
                         "cost_usd": effective_result.get("cost_usd", 0),
                         "result": truncate_for_log(str(effective_result.get("result") or ""), 4000),
+                        # P3 uniform contract: flag when the WS preview was truncated so
+                        # the bubble can offer "show full" and fetch the genuinely-full text
+                        # on demand (full_ref = subagent_task_id -> GET /api/tasks/{id}),
+                        # instead of leaving the 4000-char cap looking like the whole output.
+                        "result_truncated": len(str(effective_result.get("result") or "")) > 4000,
                         "trace_summary": truncate_for_log(str(effective_result.get("trace_summary") or ""), 4000),
+                        "trace_summary_truncated": len(str(effective_result.get("trace_summary") or "")) > 4000,
                         "error": truncate_for_log(str(effective_result.get("error") or ""), 1000),
                         "artifact_status": str(effective_result.get("artifact_status") or ""),
                     },

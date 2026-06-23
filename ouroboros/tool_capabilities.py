@@ -27,7 +27,7 @@ CORE_TOOL_NAMES: frozenset[str] = frozenset({
     "chat_history", "recent_tasks",
     "knowledge_read", "knowledge_write", "knowledge_list",
     "web_search",
-    "browse_page", "browser_action", "analyze_screenshot",
+    "browse_page", "browser_action", "analyze_screenshot", "view_image",
     "send_user_message", "send_photo", "send_video",
     "switch_model",
     "request_restart", "promote_to_stable",
@@ -56,7 +56,7 @@ LOCAL_READONLY_SUBAGENT_TOOL_NAMES: frozenset[str] = frozenset({
     # is a bounded local coordination write (no repo/control-plane mutation), so it is
     # allowed even for read-only subagents — same class as emitting progress.
     "tree_note", "tree_read",
-    "web_search", "browse_page", "browser_action", "analyze_screenshot", "vlm_query",
+    "web_search", "browse_page", "browser_action", "analyze_screenshot", "vlm_query", "view_image",
 })
 
 ACTING_SUBAGENT_MODE: str = "acting_subagent"
@@ -79,7 +79,7 @@ ACTING_SUBAGENT_TOOL_NAMES: frozenset[str] = frozenset({
     "schedule_subagent", "wait_task", "wait_tasks", "get_task_result",
     "knowledge_read", "knowledge_list",
     "tree_note", "tree_read",
-    "web_search", "browse_page", "browser_action", "analyze_screenshot", "vlm_query",
+    "web_search", "browse_page", "browser_action", "analyze_screenshot", "vlm_query", "view_image",
     "list_available_tools",
 })
 
