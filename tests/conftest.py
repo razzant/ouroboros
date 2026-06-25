@@ -54,30 +54,37 @@ def pytest_sessionstart(session):  # noqa: ARG001
 
 
 def pytest_sessionfinish(session, exitstatus):  # noqa: ARG001
-    repo_root = pathlib.Path(__file__).resolve().parents[1]
-    initial = getattr(session.config, "_ouroboros_initial_mock_pollution", set())
-    leaked = sorted(_mock_pollution_files(repo_root) - initial)
-    if leaked:
-        paths = ", ".join(str(p.relative_to(repo_root)) for p in leaked[:5])
-        # Clean it so it never rides a git add -A into a commit, THEN fail so the
-        # offending test is fixed at its source (an unmocked drive_root/path).
-        for p in leaked:
-            try:
-                if p.is_dir():
-                    shutil.rmtree(p, ignore_errors=True)
-                else:
-                    p.unlink(missing_ok=True)
-            except OSError:
-                pass
-        # Fail the run loudly WITHOUT relying on pytest.Exit (absent in the pinned pytest
-        # version → it would crash the session with AttributeError instead of cleanly
-        # failing). Setting session.exitstatus marks the run failed; a printed banner names
-        # the offending paths so the unmocked drive_root/path is fixed at its source.
-        print(
-            f"\n\n❌ TEST POLLUTION: mock-named paths leaked into repo root (cleaned): {paths}\n",
-            file=sys.stderr,
-        )
-        session.exitstatus = 1
+    # Under pytest-xdist this hook fires on the controller AND every worker process against the
+    # SHARED repo root. Run the repo-root pollution sweep + exitstatus mutation ONLY on the
+    # controller (the single authority): otherwise workers race the same shutil.rmtree and each
+    # set their own session.exitstatus, manufacturing a non-deterministic failed-shaped run.
+    # Workers carry a `workerinput` config attribute; the controller (and any serial run) do not.
+    if not hasattr(session.config, "workerinput"):
+        repo_root = pathlib.Path(__file__).resolve().parents[1]
+        initial = getattr(session.config, "_ouroboros_initial_mock_pollution", set())
+        leaked = sorted(_mock_pollution_files(repo_root) - initial)
+        if leaked:
+            paths = ", ".join(str(p.relative_to(repo_root)) for p in leaked[:5])
+            # Clean it so it never rides a git add -A into a commit, THEN fail so the
+            # offending test is fixed at its source (an unmocked drive_root/path).
+            for p in leaked:
+                try:
+                    if p.is_dir():
+                        shutil.rmtree(p, ignore_errors=True)
+                    else:
+                        p.unlink(missing_ok=True)
+                except OSError:
+                    pass
+            # Fail the run loudly WITHOUT relying on pytest.Exit (absent in the pinned pytest
+            # version → it would crash the session with AttributeError instead of cleanly
+            # failing). Setting session.exitstatus marks the run failed; a printed banner names
+            # the offending paths so the unmocked drive_root/path is fixed at its source.
+            print(
+                f"\n\n❌ TEST POLLUTION: mock-named paths leaked into repo root (cleaned): {paths}\n",
+                file=sys.stderr,
+            )
+            session.exitstatus = 1
+    # Per-process temp data dir (unique mkdtemp per controller/worker) — clean on EVERY process.
     if _PYTEST_DATA_DIR is not None:
         shutil.rmtree(_PYTEST_DATA_DIR, ignore_errors=True)
 
