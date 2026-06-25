@@ -1504,6 +1504,19 @@ def _code_search(ctx: ToolContext, query: str, path: str = ".",
             or _is_search_skippable(fp)
         )
 
+    # Validate a regex query UP FRONT so the invalid-regex contract holds for BOTH the
+    # ripgrep path and the Python fallback. ripgrep accepts some malformed patterns
+    # permissively (e.g. an unterminated '[' yields "no matches" instead of erroring),
+    # so without this the rg path would silently swallow an invalid regex while only the
+    # fallback rejected it. Non-regex queries are matched literally and need no check.
+    # (Checked before the wall-clock budget below: an invalid regex returns immediately,
+    # so there is no point starting the timer for it.)
+    if regex:
+        try:
+            re.compile(query)
+        except re.error as e:
+            return f"⚠️ SEARCH_ERROR: invalid regex: {e}"
+
     import time as _time
     _search_t0 = _time.monotonic()  # start the wall-clock budget BEFORE rg, so a
     # subsequent fallback degradation shares ONE budget (not a fresh 2nd one).
