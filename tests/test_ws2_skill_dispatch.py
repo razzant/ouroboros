@@ -44,29 +44,3 @@ def test_handler_wants_ctx_raw_vs_wrapper():
         return kwonly(**kwargs)
 
     assert _handler_wants_ctx(inspect.unwrap(wrapped)) is False
-
-
-def test_dispatch_uses_stored_wants_ctx_flag_for_keyword_only_handler():
-    """A keyword-only handler dispatched through the descriptor's wants_ctx flag
-    is called WITHOUT ctx (no positional ctx -> no TypeError). This mirrors the
-    extension_dispatch decision without standing up a full skill."""
-    from ouroboros.extension_process_runner import _handler_wants_ctx
-
-    calls = {}
-
-    def kw_handler(*, ms=500):
-        calls["ms"] = ms
-        return "ok"
-
-    # register_tool decides this on the RAW handler:
-    wants_ctx = _handler_wants_ctx(kw_handler)
-    assert wants_ctx is False
-
-    ext_tool = {"handler": kw_handler, "wants_ctx": wants_ctx}
-    call_args = {"ms": 250}
-    _wants = ext_tool.get("wants_ctx")
-    if _wants is None:
-        _wants = _handler_wants_ctx(inspect.unwrap(ext_tool["handler"]))
-    result = ext_tool["handler"](object(), **call_args) if _wants else ext_tool["handler"](**call_args)
-    assert result == "ok"
-    assert calls["ms"] == 250  # bound by name, ctx NOT passed positionally

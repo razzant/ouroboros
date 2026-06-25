@@ -134,15 +134,6 @@ class TestOwnerInjectPerTask(unittest.TestCase):
 class TestForwardToWorkerTool(unittest.TestCase):
     """Test that forward_to_worker tool is registered."""
 
-    def test_tool_registered(self):
-        from ouroboros.tools.registry import ToolRegistry
-        registry = ToolRegistry(
-            repo_dir=pathlib.Path("/tmp"),
-            drive_root=pathlib.Path("/tmp"),
-        )
-        tools = registry.available_tools()
-        self.assertIn("forward_to_worker", tools)
-
     def test_forward_to_worker_routes_to_child_drive_and_rejects_non_running(self):
         from types import SimpleNamespace
         from ouroboros.task_results import STATUS_RUNNING, STATUS_SCHEDULED, write_task_result

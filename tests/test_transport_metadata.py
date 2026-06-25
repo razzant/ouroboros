@@ -1,10 +1,4 @@
-from ouroboros.gateway.contracts import TransportMetadata
 from supervisor.message_bus import LocalChatBridge
-
-
-def test_transport_metadata_contract_shape():
-    payload: TransportMetadata = {"kind": "messenger", "conversation_id": "abc", "sender_label": "Messenger"}
-    assert payload["conversation_id"] == "abc"
 
 
 def test_bridge_preserves_generic_transport_metadata():

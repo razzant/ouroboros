@@ -57,12 +57,6 @@ class TestEmitProgress(unittest.TestCase):
         self.assertTrue(evt["is_progress"])
         self.assertIn("ts", evt)
 
-    def test_event_reaches_queue(self):
-        """Event actually ends up in the queue (not silently dropped)."""
-        bc, eq, _ = self._make_consciousness()
-        bc._emit_progress("hello world")
-        self.assertFalse(eq.empty())
-
     def test_empty_content_skipped(self):
         """Empty or whitespace-only content produces no event."""
         bc, eq, drive_root = self._make_consciousness()

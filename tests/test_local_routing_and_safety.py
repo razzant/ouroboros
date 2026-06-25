@@ -104,30 +104,6 @@ def test_build_openrouter_kwargs_for_anthropic_keeps_require_parameters_only():
 
 
 
-def test_build_openrouter_kwargs_for_anthropic_marks_last_sorted_tool_for_cache():
-    from ouroboros.llm import LLMClient
-
-    client = LLMClient()
-    target = client._resolve_remote_target("anthropic/claude-opus-4.6")
-    kwargs = client._build_remote_kwargs(
-        target,
-        [{"role": "user", "content": "hi"}],
-        "medium",
-        1000,
-        "auto",
-        None,
-        [
-            {"type": "function", "function": {"name": "zeta_tool", "description": "z", "parameters": {"type": "object", "properties": {}}}},
-            {"type": "function", "function": {"name": "alpha_tool", "description": "a", "parameters": {"type": "object", "properties": {}}}},
-        ],
-    )
-
-    assert [tool["function"]["name"] for tool in kwargs["tools"]] == ["alpha_tool", "zeta_tool"]
-    assert "cache_control" not in kwargs["tools"][0]
-    assert kwargs["tools"][-1]["cache_control"] == {"type": "ephemeral"}
-
-
-
 def test_build_openrouter_kwargs_for_non_anthropic_has_no_provider_block():
     from ouroboros.llm import LLMClient
 

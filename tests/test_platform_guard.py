@@ -170,14 +170,6 @@ def test_no_platform_specific_apis_outside_platform_layer():
         )
 
 
-def test_platform_layer_exists():
-    """platform_layer.py must exist (it's the SSOT for platform abstraction)."""
-    assert ALLOWED_FILE.exists(), (
-        f"ouroboros/platform_layer.py not found at {ALLOWED_FILE}. "
-        f"This file is required — it contains all platform-specific code."
-    )
-
-
 def test_platform_layer_exports_core_symbols():
     """platform_layer.py must export the core cross-platform symbols."""
     from ouroboros.platform_layer import (

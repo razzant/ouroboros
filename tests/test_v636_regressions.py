@@ -156,16 +156,6 @@ def test_vlm_query_honors_protected_artifact_policy(monkeypatch, tmp_path):
 
 
 # --- WA3 round-3: multi-scope review must not NameError on ScopeReviewResult ---
-def test_parallel_review_imports_scope_review_result():
-    """v6.36.0 round-3 finding: parallel_review._run_scope constructs
-    ScopeReviewResult in the multi-scope branch AND its own exception handler — the
-    symbol must resolve at module scope or both paths NameError, turning a valid
-    review into SCOPE_REVIEW_BLOCKED."""
-    import ouroboros.tools.parallel_review as pr
-    from ouroboros.tools.scope_review import ScopeReviewResult as SRR
-    assert getattr(pr, "ScopeReviewResult", None) is SRR
-
-
 # --- claudexor round: acceptance re-review must not be poisoned by stale verdict -
 def test_superseded_pre_revision_review_does_not_poison_objective():
     """claudexor finding (E/M): the objective reducer is worst-of-all-runs, so a

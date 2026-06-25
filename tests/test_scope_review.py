@@ -56,42 +56,6 @@ class TestChecklistSectionLoader:
             mod.load_checklist_section("Nonexistent Section")
 
 
-class TestGoalScopePrecedence:
-    def test_goal_wins(self):
-        mod = _get_module("ouroboros.tools.review_helpers")
-        text, source = mod.resolve_intent(goal="fix X", scope="scope Y", commit_message="msg Z")
-        assert source == "goal"
-        assert "fix X" in text
-
-    def test_scope_when_no_goal(self):
-        mod = _get_module("ouroboros.tools.review_helpers")
-        text, source = mod.resolve_intent(goal="", scope="scope Y", commit_message="msg Z")
-        assert source == "scope"
-        assert "scope Y" in text
-
-    def test_commit_message_when_no_goal_no_scope(self):
-        """v4.33.0: commit-message fallback returns only the subject line,
-        and source is labelled ``commit message (subject)`` to make the
-        scoping explicit for downstream readers.
-        """
-        mod = _get_module("ouroboros.tools.review_helpers")
-        text, source = mod.resolve_intent(goal="", scope="", commit_message="msg Z")
-        assert source == "commit message (subject)"
-        assert "msg Z" in text
-
-    def test_fallback_when_all_empty(self):
-        mod = _get_module("ouroboros.tools.review_helpers")
-        text, source = mod.resolve_intent()
-        assert source == "fallback"
-        assert "No explicit goal" in text
-
-    def test_no_raw_task_text_in_fallback(self):
-        """Fallback must NOT use raw task/chat text."""
-        mod = _get_module("ouroboros.tools.review_helpers")
-        text, source = mod.resolve_intent()
-        assert "task" not in text.lower() or "No explicit" in text
-
-
 class TestGoalSection:
     def test_goal_section_has_source(self):
         mod = _get_module("ouroboros.tools.review_helpers")

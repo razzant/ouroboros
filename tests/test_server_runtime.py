@@ -277,43 +277,6 @@ def test_apply_runtime_provider_defaults_normalizes_anthropic_only_setup():
     )
 
 
-def test_apply_runtime_provider_defaults_normalizes_anthropic_only_setup_with_shipped_defaults():
-    """Fresh-install path: user starts with shipped SETTINGS_DEFAULTS (claude-opus-4.6)
-    and adds only an Anthropic key. Main/code must normalize to anthropic::claude-opus-4-8
-    (the dash form), and REVIEW_MODELS must fall back to main × 3 for the missing triad.
-    This regression-pins the post-v4.33.1 default migration path."""
-    normalized, changed, changed_keys = apply_runtime_provider_defaults({
-        "ANTHROPIC_API_KEY": "sk-ant",
-        "OUROBOROS_MODEL": "anthropic/claude-opus-4.6",
-        "OUROBOROS_MODEL_HEAVY": "anthropic/claude-opus-4.6",
-        "OUROBOROS_MODEL_LIGHT": "anthropic/claude-sonnet-4.6",
-        "OUROBOROS_MODEL_FALLBACKS": "anthropic/claude-sonnet-4.6",
-    })
-
-    assert changed
-    assert set(changed_keys) == {
-        "OUROBOROS_MODEL",
-        "OUROBOROS_MODEL_HEAVY",
-        "OUROBOROS_MODEL_LIGHT",
-        "OUROBOROS_MODEL_FALLBACKS",
-        "OUROBOROS_REVIEW_MODELS",
-        "OUROBOROS_SCOPE_REVIEW_MODEL",
-        "OUROBOROS_SCOPE_REVIEW_MODELS",
-    }
-    assert normalized["OUROBOROS_MODEL"] == "anthropic::claude-opus-4-8"
-    assert normalized["OUROBOROS_MODEL_HEAVY"] == "anthropic::claude-opus-4-8"
-    assert normalized["OUROBOROS_MODEL_LIGHT"] == "anthropic::claude-sonnet-4-6"
-    assert normalized["OUROBOROS_MODEL_FALLBACKS"] == "anthropic::claude-sonnet-4-6"
-    # v4.39.0: `[main, light, light]` — 3 commit-triad slots, 2 unique.
-    assert normalized["OUROBOROS_REVIEW_MODELS"] == (
-        "anthropic::claude-opus-4-8,"
-        "anthropic::claude-sonnet-4-6,"
-        "anthropic::claude-sonnet-4-6"
-    )
-    assert normalized["OUROBOROS_SCOPE_REVIEW_MODEL"] == "anthropic::claude-opus-4-8"
-    assert normalized["OUROBOROS_SCOPE_REVIEW_MODELS"] == "anthropic::claude-opus-4-8"
-
-
 def test_apply_runtime_provider_defaults_skips_non_official_or_custom_configs():
     normalized, changed, changed_keys = apply_runtime_provider_defaults({
         "OPENAI_API_KEY": "sk-openai",

@@ -113,13 +113,6 @@ def _mark_reviewed(drive_root: pathlib.Path, skill_dir: pathlib.Path, name: str)
 # ---------------------------------------------------------------------------
 
 
-def test_skill_exec_tools_register_in_registry(tmp_path):
-    """ToolRegistry must expose the skill lifecycle tools."""
-    registry = ToolRegistry(repo_dir=tmp_path, drive_root=tmp_path)
-    names = {t["function"]["name"] for t in registry.schemas()}
-    assert {"list_skills", "skill_review", "skill_exec", "toggle_skill", "skill_preflight"} <= names
-
-
 def test_review_skill_uses_long_timeout_separate_from_skill_exec():
     entries = {entry.name: entry for entry in skill_exec_mod.get_tools()}
 

@@ -499,13 +499,6 @@ def test_review_status_registered():
     assert "review_status" in names
 
 
-def test_advisory_freshness_check_exists_in_git():
-    """_check_advisory_freshness must be defined in git.py."""
-    git_mod = _get_git_module()
-    assert hasattr(git_mod, "_check_advisory_freshness")
-    assert callable(git_mod._check_advisory_freshness)
-
-
 def test_advisory_gate_in_repo_commit_push():
     """The shared reviewed stage must gate review on advisory freshness."""
     git_mod = _get_git_module()
@@ -520,13 +513,6 @@ def test_advisory_gate_in_repo_commit_push():
     # Verify _run_parallel_review contains _run_unified_review
     parallel_source = inspect.getsource(git_mod._run_parallel_review)
     assert "_run_unified_review" in parallel_source
-
-
-def test_advisory_gate_lives_in_shared_reviewed_stage_cycle():
-    """repo_commit must inherit the advisory gate via the shared stage helper."""
-    git_mod = _get_git_module()
-    source = inspect.getsource(git_mod._run_reviewed_stage_cycle)
-    assert "_check_advisory_freshness" in source
 
 
 def test_advisory_freshness_blocks_without_fresh_run(tmp_path):

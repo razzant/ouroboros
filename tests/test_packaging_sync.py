@@ -51,12 +51,6 @@ def test_architecture_docs_describe_bundle_bootstrap_not_per_launch_core_sync():
     assert "copies workspace to `~/Ouroboros/repo/` on first run" not in architecture
 
 
-def test_readme_runtime_mode_entry_avoids_stale_test_count():
-    readme = (REPO / "README.md").read_text(encoding="utf-8")
-
-    assert "tests/test_runtime_mode_gating.py` (15 tests)" not in readme
-
-
 def test_readme_version_history_stays_within_minor_row_limit():
     readme = (REPO / "README.md").read_text(encoding="utf-8")
 

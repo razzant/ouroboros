@@ -324,19 +324,6 @@ def test_memory_persistence():
 
 # ── Context builder ─────────────────────────────────────────────
 
-def test_context_build_runtime_section():
-    """Runtime section builder is callable."""
-    from ouroboros.context import build_runtime_section
-    # Just check it's importable and callable
-    assert callable(build_runtime_section)
-
-
-def test_context_build_memory_sections():
-    """Memory sections builder is callable."""
-    from ouroboros.context import build_memory_sections
-    assert callable(build_memory_sections)
-
-
 # ── Bible invariants ─────────────────────────────────────────────
 
 def test_no_hardcoded_replies():
@@ -604,22 +591,3 @@ class TestPrePushGate:
                 _os.environ["OUROBOROS_PREFLIGHT_TIMEOUT_SEC"] = prev
 
 
-# ── Timeout handling ─────────────────────────────────────────────
-
-def test_concurrent_futures_timeout_caught():
-    """Regression test: concurrent.futures.TimeoutError must be caught.
-
-    On Python 3.10, concurrent.futures.TimeoutError is NOT a subclass of
-    builtins.TimeoutError. Our except clause must catch both.
-    Bug: tool timeouts killed the entire task instead of returning TOOL_TIMEOUT.
-    """
-    import concurrent.futures
-
-    # Verify the exception hierarchy (documents the bug)
-    # On Python 3.11+ this may be True, but our code must handle both
-    caught = False
-    try:
-        raise concurrent.futures.TimeoutError("test")
-    except (TimeoutError, concurrent.futures.TimeoutError):
-        caught = True
-    assert caught, "concurrent.futures.TimeoutError was not caught"

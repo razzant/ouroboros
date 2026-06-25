@@ -878,12 +878,6 @@ class TestParseAggregateSignal(unittest.TestCase):
 
 
 class TestPlanReviewToolRegistration(unittest.TestCase):
-    def test_get_tools_returns_plan_task(self):
-        from ouroboros.tools.plan_review import get_tools
-        tools = get_tools()
-        names = [t.name for t in tools]
-        self.assertIn("plan_task", names)
-
     def test_plan_task_schema_has_required_fields(self):
         from ouroboros.tools.plan_review import get_tools
         tool = next(t for t in get_tools() if t.name == "plan_task")

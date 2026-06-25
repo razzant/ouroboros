@@ -198,9 +198,3 @@ def test_view_image_is_not_web_gated():
     from ouroboros.tools.registry import _WEB_TOOLS
 
     assert "view_image" not in _WEB_TOOLS
-
-
-def test_view_image_registered_in_vision_tools():
-    from ouroboros.tools.vision import get_tools
-
-    assert "view_image" in {t.name for t in get_tools()}

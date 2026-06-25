@@ -61,14 +61,6 @@ def test_should_not_consolidate_missing_file(tmp_path):
     assert not mod.should_consolidate_scratchpad(mem)
 
 
-def test_rebuild_knowledge_index_exists():
-    """_rebuild_knowledge_index function must exist in consolidator."""
-    mod = _get_consolidator()
-    assert hasattr(mod, "_rebuild_knowledge_index"), (
-        "_rebuild_knowledge_index not found — knowledge index won't update after extraction"
-    )
-
-
 def test_rebuild_knowledge_index_creates_index():
     """_rebuild_knowledge_index must create index-full.md with topic entries."""
     mod = _get_consolidator()

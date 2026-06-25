@@ -12,7 +12,6 @@ SYSTEM + BIBLE are tier-0 and always full.
 
 import os
 import pathlib
-import re
 import tempfile
 
 # Unique sentinel placed inside the ARCHITECTURE body so we can prove the full
@@ -203,13 +202,6 @@ def test_low_mode_development_full_for_direct_chat_tasks_unless_explicitly_disab
     )
     assert "## DEVELOPMENT.md" not in pure_chat_text
     assert "DEVELOPMENT.md" in pure_chat_text  # but named in the on-demand pointer
-
-
-def test_version_regexes_match_runtime_formats():
-    badge = '[![Version 5.5.0](https://img.shields.io/badge/version-5.5.0-green.svg)](VERSION)'
-    assert re.search(r'version[- ](\d+\.\d+\.\d+)', badge, re.IGNORECASE)
-    header = '# Ouroboros v5.5.0 — Architecture & Reference'
-    assert re.search(r'# Ouroboros v(\d+\.\d+\.\d+)', header)
 
 
 # --- H (v6.39): lazy probe-on-first-use threads allow_fetch (fail-closed) ---

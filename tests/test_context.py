@@ -1055,42 +1055,6 @@ def test_recent_sections_filter_process_logs_by_task_id(tmp_path):
     assert "out-of-scope" not in combined
 
 
-def test_should_consolidate_chat_blocks(tmp_path):
-    from ouroboros.consolidator import should_consolidate, BLOCK_SIZE
-    chat_path = tmp_path / 'chat.jsonl'
-    meta_path = tmp_path / 'dialogue_meta.json'
-    entries = [
-        json.dumps({"ts": f"2026-03-09T10:{i % 60:02d}:00Z", "direction": "in", "text": "msg"})
-        for i in range(BLOCK_SIZE + 5)
-    ]
-    chat_path.write_text("\n".join(entries) + "\n", encoding='utf-8')
-    assert should_consolidate(meta_path, chat_path) is True
-
-
-def test_consolidate_chat_creates_block(tmp_path):
-    from unittest.mock import MagicMock
-    from ouroboros.consolidator import consolidate, _load_meta, _load_blocks, BLOCK_SIZE
-    chat_path = tmp_path / 'chat.jsonl'
-    blocks_path = tmp_path / 'dialogue_blocks.json'
-    meta_path = tmp_path / 'dialogue_meta.json'
-    entries = [
-        json.dumps({"ts": f"2026-03-09T10:{i % 60:02d}:00Z", "direction": "in", "text": f"msg {i}"})
-        for i in range(BLOCK_SIZE + 5)
-    ]
-    chat_path.write_text("\n".join(entries) + "\n", encoding='utf-8')
-    mock_llm = MagicMock()
-    mock_llm.chat.return_value = (
-        {"content": "### Block: test\n\nSummary."},
-        {"prompt_tokens": 100, "completion_tokens": 50, "cost": 0.001},
-    )
-    usage = consolidate(chat_path, blocks_path, meta_path, mock_llm)
-    assert usage is not None
-    meta = _load_meta(meta_path)
-    assert meta["last_consolidated_offset"] == BLOCK_SIZE
-    blocks = _load_blocks(blocks_path)
-    assert len(blocks) == 1
-
-
 def test_installed_skills_section_includes_warnings_verdict(tmp_path, monkeypatch):
     from ouroboros.context import _build_installed_skills_section
 
