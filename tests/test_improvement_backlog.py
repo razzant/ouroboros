@@ -1,11 +1,33 @@
 import threading
 
+import pytest
+
 from ouroboros.improvement_backlog import (
     append_backlog_items,
     backlog_path,
     format_backlog_digest,
     load_backlog_items,
 )
+
+
+@pytest.fixture(autouse=True)
+def _stub_semantic_dedup(monkeypatch):
+    """Neutralize the semantic-dedup LLM call for this module.
+
+    These tests exercise backlog/groom LOGIC, not the dedup detector. Seeding via
+    ``append_backlog_items`` runs the C9.2 semantic-redirect pre-pass, which calls
+    ``ouroboros.semantic_dedup.find_semantic_duplicate_id`` once per fingerprint-MISS
+    that has candidates — a real light-model NETWORK call. With no API key it
+    retry-storms (minutes, non-deterministic) before failing open to ``None``; that
+    made ``test_groom_backlog_rejects_invented_items`` alone ~129s (~40% of the whole
+    suite), because ``_seed_many`` seeds before any mock is installed. Stub the detector
+    to its own fail-open default (``None`` = no duplicate, exactly what the doomed call
+    eventually returns for the distinct seeded items) so the module is network-free and
+    deterministic. The dedup contract itself is covered by ``test_semantic_dedup_v6370``.
+    """
+    import ouroboros.semantic_dedup as semantic_dedup
+
+    monkeypatch.setattr(semantic_dedup, "find_semantic_duplicate_id", lambda *a, **k: None)
 
 
 def test_append_and_load_backlog_items(tmp_path):
