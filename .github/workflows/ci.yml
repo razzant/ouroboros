@@ -170,6 +170,19 @@ jobs:
           ! grep -q "no tests collected" /tmp/ui-collect.txt
           ! grep -q "no tests collected" /tmp/ui-docker-collect.txt
           ! grep -q "no tests collected" /tmp/portable-collect.txt
+      - name: Guard non-empty serial marker lane
+        run: |
+          set -euo pipefail
+          # The full-suite CI runs a PARALLEL pass (-m "not serial ...") + a SERIAL pass
+          # (-m serial). If a refactor empties _SERIAL_TEST_FILES (tests/conftest.py) the
+          # serial pass would silently collect 0 tests. `--collect-only -m serial` reproduces
+          # that selection: an empty lane makes pytest exit 5 (EXIT_NOTESTSCOLLECTED), which
+          # `set -o pipefail` surfaces through `| tee` to fail this step. The positive anchor
+          # grep is the working assertion — under -q pytest prints NO "no tests collected"
+          # text, so a `! grep` on it is a false-green no-op; instead we pin a known-stable
+          # serial file as a deliberate canary (rename it -> update this line).
+          python -m pytest tests/ --collect-only -m serial -q | tee /tmp/serial-collect.txt
+          grep -q "tests/test_workspace_executor.py" /tmp/serial-collect.txt
 
   ui-smoke:
     if: |

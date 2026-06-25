@@ -210,34 +210,51 @@ def _hide_bundled_skills(monkeypatch):
 
 @pytest.fixture(autouse=True)
 def _isolate_workspace_executor_globals():
-    """Isolate ``ouroboros.workspace_executor`` module-level registries between tests.
+    """Isolate process/service registry module-globals between tests (parallel-safety).
 
-    The module keeps process/service state in module globals ``_SERVICES`` / ``_FOREGROUND``
-    (workspace_executor.py:80-82). Tests register services into them and nothing reset them
-    between tests — a latent ordering bug that pytest-xdist's test REDISTRIBUTION exposes (a
-    test inherits another's leftover registry → e.g. the docker-cleanup tests flake under ``-n``).
-    Snapshot → clear → run → restore around every test so each starts from an empty registry, in
-    both serial and parallel runs. The module exposes a re-entrant ``_STATE_LOCK``. This makes the
-    ad-hoc manual ``_SERVICES.clear()`` calls scattered in the executor tests redundant (harmless).
+    Two modules keep service/process state in module-level dicts that nothing reset between tests
+    — a latent ordering bug that pytest-xdist's test REDISTRIBUTION exposes (a test inherits
+    another's leftover registry → e.g. the docker-cleanup tests flake under ``-n``):
+      * ``ouroboros.workspace_executor._SERVICES`` / ``_FOREGROUND`` (re-entrant ``_STATE_LOCK``);
+      * the legacy ``ouroboros.tools.services._SERVICES`` (a PLAIN ``_LOCK``).
+    Snapshot → clear → run → restore each around every test so each starts from an empty registry,
+    in both serial and parallel runs. Registry isolation ONLY — the records may wrap live Popen
+    handles, so we never terminate them (production owns process teardown). Each module is
+    lazy-imported under its own guard so a stripped build still collects, and only raw dict ops run
+    under the lock (never a services function that re-acquires the plain ``_LOCK`` → no deadlock).
+    Makes the ad-hoc manual ``_SERVICES.clear()`` calls in the executor tests redundant (harmless).
     """
     try:
         from ouroboros import workspace_executor as we
     except Exception:
-        yield
-        return
-    with we._STATE_LOCK:
-        saved_services = dict(we._SERVICES)
-        saved_foreground = dict(we._FOREGROUND)
-        we._SERVICES.clear()
-        we._FOREGROUND.clear()
+        we = None
+    try:
+        from ouroboros.tools import services as svc
+    except Exception:
+        svc = None
+    if we is not None:
+        with we._STATE_LOCK:
+            saved_we_services = dict(we._SERVICES)
+            saved_we_foreground = dict(we._FOREGROUND)
+            we._SERVICES.clear()
+            we._FOREGROUND.clear()
+    if svc is not None:
+        with svc._LOCK:
+            saved_svc_services = dict(svc._SERVICES)
+            svc._SERVICES.clear()
     try:
         yield
     finally:
-        with we._STATE_LOCK:
-            we._SERVICES.clear()
-            we._SERVICES.update(saved_services)
-            we._FOREGROUND.clear()
-            we._FOREGROUND.update(saved_foreground)
+        if we is not None:
+            with we._STATE_LOCK:
+                we._SERVICES.clear()
+                we._SERVICES.update(saved_we_services)
+                we._FOREGROUND.clear()
+                we._FOREGROUND.update(saved_we_foreground)
+        if svc is not None:
+            with svc._LOCK:
+                svc._SERVICES.clear()
+                svc._SERVICES.update(saved_svc_services)
 
 
 @pytest.hookimpl(hookwrapper=True)

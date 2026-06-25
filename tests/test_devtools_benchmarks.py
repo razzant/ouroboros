@@ -908,7 +908,7 @@ def test_osworld_shell_action_does_not_fabricate_bash_history():
     assert ".bash_history'" not in src  # the f.write to the history path is gone
 
 
-def test_terminal_bench_metadata_declares_all_assisting_models():
+def test_terminal_bench_metadata_declares_all_assisting_models(monkeypatch):
     """NW-6: with task_review_mode=required the review triad (incl. a frontier
     model) assists the measured run; metadata.yaml must declare every assisting
     model, not only the measured one."""
@@ -916,17 +916,12 @@ def test_terminal_bench_metadata_declares_all_assisting_models():
     spec = importlib.util.spec_from_file_location(
         "tb_run_for_meta", REPO_ROOT / "devtools" / "benchmarks" / "terminal_bench" / "run_tb.py")
     module = importlib.util.module_from_spec(spec)
-    _sys.modules[spec.name] = module  # dataclass field resolution needs this
+    monkeypatch.setitem(_sys.modules, spec.name, module)  # dataclass field resolution needs this
     spec.loader.exec_module(module)
-    import os as _os
-    prev = _os.environ.pop("OUROBOROS_REVIEW_MODELS", None)
-    try:
-        meta = module.leaderboard_metadata(
-            agent_name="Ouroboros", org_name="Ouroboros",
-            model="openai/gpt-5.5", light_model="google/gemini-3.5-flash")
-    finally:
-        if prev is not None:
-            _os.environ["OUROBOROS_REVIEW_MODELS"] = prev
+    monkeypatch.delenv("OUROBOROS_REVIEW_MODELS", raising=False)
+    meta = module.leaderboard_metadata(
+        agent_name="Ouroboros", org_name="Ouroboros",
+        model="openai/gpt-5.5", light_model="google/gemini-3.5-flash")
     # The default review triad includes a frontier helper that must be visible.
     assert "anthropic/claude-opus-4.8" in meta
     assert "commit_review_triad" in meta

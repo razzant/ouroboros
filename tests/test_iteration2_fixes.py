@@ -50,53 +50,49 @@ _PNG_1x1 = (
 
 
 # ----------------------------- #1 review knob -----------------------------
-def test_apply_all_model_one_low_reviewer_by_default():
+def test_apply_all_model_one_low_reviewer_by_default(monkeypatch):
     from devtools.benchmarks.terminal_bench.run_tb import apply_all_model
 
     for k in ("OUROBOROS_REVIEW_MODELS", "OUROBOROS_EFFORT_REVIEW", "OUROBOROS_EFFORT_SCOPE_REVIEW"):
-        os.environ.pop(k, None)
+        monkeypatch.delenv(k, raising=False)
     apply_all_model("google/gemini-3.5-flash")
     assert os.environ["OUROBOROS_REVIEW_MODELS"] == "google/gemini-3.5-flash"  # one reviewer, no commas
     assert os.environ["OUROBOROS_EFFORT_REVIEW"] == "low"
     assert os.environ["OUROBOROS_EFFORT_SCOPE_REVIEW"] == "low"
 
 
-def test_apply_all_model_configurable_slots_and_effort():
+def test_apply_all_model_configurable_slots_and_effort(monkeypatch):
     from devtools.benchmarks.terminal_bench.run_tb import apply_all_model
 
+    for k in ("OUROBOROS_REVIEW_MODELS", "OUROBOROS_EFFORT_REVIEW", "OUROBOROS_EFFORT_SCOPE_REVIEW"):
+        monkeypatch.delenv(k, raising=False)
     apply_all_model("m", review_slots=3, review_effort="medium")
     assert os.environ["OUROBOROS_REVIEW_MODELS"] == "m,m,m"
     assert os.environ["OUROBOROS_EFFORT_REVIEW"] == "medium"
 
 
 # ------------------------- #2 timeout resolver SSOT -------------------------
-def test_timeout_resolver_unset_honors_config_default_not_incode_360():
+def test_timeout_resolver_unset_honors_config_default_not_incode_360(monkeypatch):
     from ouroboros.tools.shell import _resolve_effective_timeout as resolve
 
-    os.environ.pop("OUROBOROS_TOOL_TIMEOUT_SEC", None)
+    monkeypatch.delenv("OUROBOROS_TOOL_TIMEOUT_SEC", raising=False)
     assert resolve(360) == 600  # the bug returned 360
 
 
-def test_timeout_resolver_env_equal_to_default_is_honored():
+def test_timeout_resolver_env_equal_to_default_is_honored(monkeypatch):
     from ouroboros.tools.shell import _resolve_effective_timeout as resolve
 
-    os.environ["OUROBOROS_TOOL_TIMEOUT_SEC"] = "600"
-    try:
-        assert resolve(360) == 600  # was silently dropped to 360 (== default skipped)
-    finally:
-        os.environ.pop("OUROBOROS_TOOL_TIMEOUT_SEC", None)
+    monkeypatch.setenv("OUROBOROS_TOOL_TIMEOUT_SEC", "600")
+    assert resolve(360) == 600  # was silently dropped to 360 (== default skipped)
 
 
-def test_timeout_resolver_ceiling_and_override():
+def test_timeout_resolver_ceiling_and_override(monkeypatch):
     from ouroboros.config import get_per_call_timeout_ceiling_sec
     from ouroboros.tools.shell import _resolve_effective_timeout as resolve
 
     ceiling = get_per_call_timeout_ceiling_sec()
-    os.environ["OUROBOROS_TOOL_TIMEOUT_SEC"] = "999999"
-    try:
-        assert resolve(360) == ceiling  # env clamped to ceiling
-    finally:
-        os.environ.pop("OUROBOROS_TOOL_TIMEOUT_SEC", None)
+    monkeypatch.setenv("OUROBOROS_TOOL_TIMEOUT_SEC", "999999")
+    assert resolve(360) == ceiling  # env clamped to ceiling
     assert resolve(360, None, 300) == 300  # per-call override honored
     assert resolve(360, None, 999999) == ceiling  # override clamped to ceiling
 
