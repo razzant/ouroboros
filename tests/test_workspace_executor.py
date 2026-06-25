@@ -1030,7 +1030,7 @@ def test_executor_panic_cleanup_kills_durable_foreground_and_service_processes(t
         killed_foreground = workspace_executor.kill_all_foreground(data, wait=False)
         killed_services = workspace_executor.kill_all_services(data, wait=False)
 
-        deadline = time.time() + 5
+        deadline = time.time() + 15
         while time.time() < deadline and (foreground.poll() is None or service.poll() is None):
             time.sleep(0.05)
         assert foreground.poll() is not None
@@ -1059,6 +1059,14 @@ def test_executor_cleanup_scans_child_drive_records_from_parent_data_root(tmp_pa
         stdin=subprocess.DEVNULL,
         **subprocess_new_group_kwargs(),
     )
+    # kill_all_foreground's PID-reuse safety check compares the process command-sha recorded at
+    # registration against the one it recomputes at kill time. Right after fork+exec the child's
+    # command line may not yet be readable, so registering too eagerly makes the two shas diverge
+    # and the kill is silently skipped (flaky). Wait until the command-sha is readable & stable.
+    for _ in range(200):
+        if workspace_executor._process_command_sha256(proc.pid):
+            break
+        time.sleep(0.02)
     try:
         workspace_executor._register_process(
             child_data,
@@ -1070,7 +1078,7 @@ def test_executor_cleanup_scans_child_drive_records_from_parent_data_root(tmp_pa
             },
         )
         killed = workspace_executor.kill_all_foreground(data, wait=False)
-        deadline = time.time() + 5
+        deadline = time.time() + 15
         while time.time() < deadline and proc.poll() is None:
             time.sleep(0.05)
         assert proc.poll() is not None

@@ -1064,6 +1064,29 @@ When adding a new opt-in lane, register the marker in `pyproject.toml`, add
 a collect-only zero-test guard in CI, and keep the default local addopts
 token-safe and Docker-safe.
 
+### Parallel CI and the `serial` marker
+
+CI runs the full default suite **in parallel** — `pytest -m "not serial" -n auto --dist loadscope
+--max-worker-restart=0` (~5× faster than serial) — followed by a short serial pass for `-m serial`
+(`.github/workflows/ci.yml`, jobs `quick-test` / `full-test`). Two rules keep new tests from breaking
+that:
+
+- **Mark real-process / real-port / process-global tests `@pytest.mark.serial`.** A test that spawns
+  a real OS process, binds a real port, or mutates a module-level registry is not parallel-safe:
+  under `-n` it flakes on kill/reap or port-reclaim timing, or it crashes its worker — which (with
+  `--max-worker-restart=0`) fails that worker's WHOLE co-located batch and shows up as spurious
+  failures in unrelated files. Mark such a test `@pytest.mark.serial` (or add its file to
+  `_SERIAL_TEST_FILES` in `tests/conftest.py`) so it runs in the serial pass instead.
+- **Keep every other test parallel-safe** so it stays in the fast pass: use `tmp_path` (never a fixed
+  path like `/tmp/foo.pid`); use `monkeypatch.setenv` / `monkeypatch.setattr` (never a bare
+  `os.environ[...] = ...`, which leaks to other tests on the same worker); never assume execution
+  order; and if you must mutate a module global, reset it around the test (pattern:
+  `tests/conftest.py::_isolate_workspace_executor_globals`).
+
+The per-commit preflight GATE stays **serial** regardless — never add `-n` to `pyproject.toml`
+`addopts` or to `ouroboros/preflight_runner.py` (a flaky parallel fail-closed gate manufactures
+non-deterministic `TESTS_FAILED` indistinguishable from a real immune rejection).
+
 ### GitHub Actions: secrets in step-level `if:` conditions
 
 GitHub Actions rejects `secrets.*` inside step-level `if:` expressions, and a

@@ -61,11 +61,16 @@ jobs:
       - name: Install dependencies
         run: |
           pip install -r requirements.txt
-          pip install pytest ruff
+          pip install pytest pytest-xdist pytest-timeout ruff
       - name: Lint (deterministic F-rule gate — catches the NameError-under-except class)
         run: python -m ruff check . --select F
-      - name: Run tests
-        run: python -m pytest tests/ -q --tb=short
+      # NOTE: a command-line `-m` REPLACES the pyproject `addopts` markexpr, so the default
+      # `not integration and not browser ...` exclusions must be repeated here, then ANDed with
+      # the serial split. --timeout guards against a hung test blocking the whole job.
+      - name: Run tests (parallel — excludes the costly marker lanes AND the serial real-process suites)
+        run: python -m pytest tests/ -m "not serial and not integration and not browser and not ui_browser and not ui_browser_docker and not portable_detail" -n auto --dist loadscope --max-worker-restart=0 --timeout=300 --timeout-method=thread -q --tb=short
+      - name: Run tests (serial — real subprocess/port/global-state suites that flake under -n)
+        run: python -m pytest tests/ -m "serial and not integration and not browser and not ui_browser and not ui_browser_docker and not portable_detail" -q --tb=short
       - name: Guard extracted transport imports stay out of core
         run: python -m pytest tests/test_no_core_a2a_telegram_imports.py -q
 
@@ -91,9 +96,13 @@ jobs:
       - name: Install dependencies
         run: |
           pip install -r requirements.txt
-          pip install pytest
-      - name: Run tests
-        run: python -m pytest tests/ -q --tb=short
+          pip install pytest pytest-xdist pytest-timeout
+      # A command-line `-m` REPLACES the pyproject addopts markexpr, so repeat the default
+      # marker-lane exclusions and AND them with the serial split. --timeout guards hangs.
+      - name: Run tests (parallel — excludes the costly marker lanes AND the serial real-process suites)
+        run: python -m pytest tests/ -m "not serial and not integration and not browser and not ui_browser and not ui_browser_docker and not portable_detail" -n auto --dist loadscope --max-worker-restart=0 --timeout=300 --timeout-method=thread -q --tb=short
+      - name: Run tests (serial — real subprocess/port/global-state suites that flake under -n)
+        run: python -m pytest tests/ -m "serial and not integration and not browser and not ui_browser and not ui_browser_docker and not portable_detail" -q --tb=short
       - name: Guard extracted transport imports stay out of core
         run: python -m pytest tests/test_no_core_a2a_telegram_imports.py -q
 

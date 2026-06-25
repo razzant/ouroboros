@@ -90,7 +90,7 @@ def test_claude_code_edit_reverts_repair_sidecars(tmp_path, monkeypatch):
     gateway = ModuleType("ouroboros.gateways.claude_code")
     gateway.resolve_claude_code_model = lambda: "test-model"
     gateway.DEFAULT_CLAUDE_CODE_MAX_TURNS = 1
-    sys.modules["ouroboros.gateways.claude_code"] = gateway
+    monkeypatch.setitem(sys.modules, "ouroboros.gateways.claude_code", gateway)
 
     ctx, skill = _ctx(tmp_path)
     sidecar = skill / ".self_authored.json"
@@ -126,7 +126,7 @@ def test_claude_code_edit_reverts_normal_skill_sidecars(tmp_path, monkeypatch):
     gateway = ModuleType("ouroboros.gateways.claude_code")
     gateway.resolve_claude_code_model = lambda: "test-model"
     gateway.DEFAULT_CLAUDE_CODE_MAX_TURNS = 1
-    sys.modules["ouroboros.gateways.claude_code"] = gateway
+    monkeypatch.setitem(sys.modules, "ouroboros.gateways.claude_code", gateway)
 
     repo = tmp_path / "repo"
     drive = tmp_path / "data"
@@ -168,7 +168,7 @@ def test_claude_code_edit_omitted_cwd_ignores_stale_short_form(tmp_path, monkeyp
     gateway = ModuleType("ouroboros.gateways.claude_code")
     gateway.resolve_claude_code_model = lambda: "test-model"
     gateway.DEFAULT_CLAUDE_CODE_MAX_TURNS = 1
-    sys.modules["ouroboros.gateways.claude_code"] = gateway
+    monkeypatch.setitem(sys.modules, "ouroboros.gateways.claude_code", gateway)
 
     repo = tmp_path / "repo"
     drive = tmp_path / "data"

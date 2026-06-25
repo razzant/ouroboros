@@ -18,6 +18,8 @@ tree-sitter>=0.23.2,<0.25
 tree-sitter-language-pack>=0.9.1,<1.0
 tzdata
 pytest>=7.0
+pytest-xdist>=3.5
+pytest-timeout>=2.1
 claude-agent-sdk>=0.1.60
 # MCP (Model Context Protocol) client. The runtime guards imports so a
 # broken/minimal source checkout reports sdk_available=false instead of
