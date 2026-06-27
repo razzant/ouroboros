@@ -32,8 +32,11 @@ OpenAI-lane scaffold delta; `Ouroboros@sonnet-4.6` vs `Claude Code(sonnet-4.6)` 
 
 ## Run
 
-One harness, all levels, parallel 3:
+One harness, all levels, parallel 3 (`GAIA_CODEX_EFFORT` / `GAIA_CLAUDE_EFFORT` pin reasoning
+effort for an apples-to-apples cross-harness comparison; codex's own default is `xhigh`, our
+solver default is `high`):
 ```bash
+GAIA_CODEX_EFFORT=high \
 python3.11 run_harness.py --harness codex      --model gpt-5.5         --subset 2023_all --limit 165 --max-samples 3 --out-dir <dir>
 python3.11 run_harness.py --harness claude_code --model claude-sonnet-4-6 --subset 2023_all --limit 165 --max-samples 3 --out-dir <dir>
 python3.11 run_harness.py --harness null                                 --subset 2023_all --limit 165 --out-dir <dir>   # must score ~0

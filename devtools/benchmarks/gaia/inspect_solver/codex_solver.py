@@ -68,6 +68,10 @@ def run_codex(
     workdir: pathlib.Path | None = None,
 ) -> dict:
     model = os.environ.get("GAIA_CODEX_MODEL", "gpt-5.5")
+    # Reasoning effort: codex's own default is "xhigh" (from ~/.codex/config.toml). For an
+    # apples-to-apples comparison with Ouroboros we pin "high" by default; `-c key=value`
+    # overrides the config value. Set GAIA_CODEX_EFFORT=xhigh to reproduce the codex default.
+    effort = os.environ.get("GAIA_CODEX_EFFORT", "high")  # low|medium|high|xhigh
     timeout_sec = float(os.environ.get("GAIA_SAMPLE_TIMEOUT_SEC", "3600") or "3600")
     work = pathlib.Path(workdir) if workdir else pathlib.Path(tempfile.mkdtemp())
     work.mkdir(parents=True, exist_ok=True)
@@ -87,6 +91,8 @@ def run_codex(
     cmd = ["codex", "exec", full_prompt,
            "--skip-git-repo-check", "--dangerously-bypass-approvals-and-sandbox",
            "-C", str(work), "-o", str(last_msg)]
+    if effort:
+        cmd[2:2] = ["-c", f"model_reasoning_effort={effort}"]  # override config.toml default
     if model:
         cmd[2:2] = ["--model", model]  # insert before the prompt is fine; codex parses flags anywhere
     env = dict(os.environ)
@@ -116,6 +122,7 @@ def run_codex(
         "final_answer": _extract_final_answer(result_text),
         "returncode": proc.returncode,
         "raw": result_text[:4000],
+        "effort": effort,
         "stderr_tail": (proc.stderr or "")[-2000:],
     }
 
@@ -147,6 +154,7 @@ def codex_solver():
             state.metadata = {}
         state.metadata["codex_raw"] = result.get("raw", "")
         state.metadata["codex_stderr"] = result.get("stderr_tail", "")
+        state.metadata["codex_effort"] = result.get("effort", "")
         if getattr(state, "output", None) is None:
             state.output = SimpleNamespace(completion="")
         state.output.completion = result["final_answer"]
