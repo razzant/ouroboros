@@ -138,17 +138,17 @@ def _degraded_scope_requested() -> bool:
 
 
 def _is_designated_default_reviewer(model: str) -> bool:
-    """True iff ``model`` is the SHIPPED designated scope reviewer
-    (``_SCOPE_MODEL_DEFAULT``), compared on the bare model id so a provider-prefixed
-    form (``openrouter::openai/gpt-5.5``) still matches. Used to scope the
-    ``blocking_1m`` no-evidence 1M sentinel to the shipped reviewer ONLY — NOT to an
-    operator's off-default pin (which must carry Capability Evidence to be trusted as
-    >=1M). ``OUROBOROS_SCOPE_REVIEW_MODEL`` is the override knob the v6.46.0 bug abused
-    (a 200K sonnet pinned while the floor stayed blocking_1m), so the configured value
-    must NOT itself confer 1M trust — only the shipped default or real evidence does."""
-    def _bare(m: str) -> str:
-        return str(m or "").split("::", 1)[-1].strip()
-    return bool(model) and _bare(model) == _bare(_SCOPE_MODEL_DEFAULT)
+    """True iff ``model`` is the shipped default reviewer, across provider spellings."""
+    def _normalized(m: str) -> str:
+        text = str(m or "").strip()
+        if text.startswith("openrouter::"):
+            text = text[len("openrouter::"):]
+        try:
+            from ouroboros.provider_models import normalize_model_identity
+            return normalize_model_identity(text)
+        except Exception:
+            return text
+    return bool(model) and _normalized(model) == _normalized(_SCOPE_MODEL_DEFAULT)
 
 
 def _scope_reviewer_window(model: str) -> int:
@@ -167,20 +167,26 @@ def _scope_reviewer_window(model: str) -> int:
     try:
         from ouroboros.capability_evidence import probe
         from ouroboros.config import DATA_DIR, load_settings
-        from ouroboros.gateway.settings import _active_main_route
-        # Probe the reviewer's REAL active route (provider/base_url/use_local), NOT a
-        # generic provider="" lookup: route_fingerprint() hashes provider+base_url, so a
-        # provider="" probe computes a fingerprint that can NEVER match a stored row,
-        # leaving every reviewer to the no-evidence fallthrough. Resolving the route the
-        # same way the active main route does lets a confirmed/asserted >=1M record apply
-        # so a genuinely-1M reviewer keeps its full window.
-        _route = _active_main_route(load_settings(), model_override=model)
+        from ouroboros.provider_models import provider_for_model
+        settings = load_settings()
+        provider = provider_for_model(model)
+        base_url = ""
+        if provider == "openai":
+            base_url = str(settings.get("OPENAI_BASE_URL") or "")
+        elif provider == "openai-compatible":
+            base_url = str(settings.get("OPENAI_COMPATIBLE_BASE_URL") or "")
+        elif provider == "cloudru":
+            base_url = str(settings.get("CLOUDRU_FOUNDATION_MODELS_BASE_URL") or "")
+        elif provider == "gigachat":
+            base_url = str(settings.get("GIGACHAT_BASE_URL") or "")
+        # Probe the scope slot, not the active main route (which honors USE_LOCAL_MAIN).
+        use_local = provider == "local" or model.endswith(" (local)")
         ev = probe(
             DATA_DIR,
-            provider=_route["provider"],
-            model=_route["model"],
-            base_url=_route["base_url"],
-            use_local=_route["use_local"],
+            provider="local" if use_local else provider,
+            model=model,
+            base_url=base_url,
+            use_local=use_local,
             allow_fetch=False,
         )
         if int(ev.window_tokens or 0) > 0:
@@ -1115,17 +1121,7 @@ def _is_provider_oversize_error(error_text: str) -> bool:
 
 
 def _provider_error_is_oversize(usage: dict, prompt_tokens_est: int, scope_model: str) -> bool:
-    """Gateway-route oversize detection from ``usage['provider_error']``.
-
-    On an openai-compatible / OpenRouter gateway a real oversize 400 comes back as an
-    HTTP-200-shaped body with an EMPTY message and ``usage['provider_error'] =
-    {code:400, kind:'provider_error', message:...}`` — so the raised-error text marker
-    (:func:`_is_provider_oversize_error`) is NEVER reached (``llm_error`` is empty) and
-    the empty body otherwise hard-blocks as ``empty_response``. Treat such a 400 as
-    oversize ONLY with INDEPENDENT size evidence, so a genuine auth/param/policy 400
-    (same code, same empty-body bucket) keeps the fail-closed blocking path: a blind
-    code==400 downgrade would let the commit gate pass WITHOUT real scope review on a
-    misconfiguration (a P3 immune regression worse than the overflow itself)."""
+    """Gateway-route oversize detection from ``usage['provider_error']``."""
     pe = usage.get("provider_error") if isinstance(usage, dict) else None
     if not isinstance(pe, dict):
         return False
@@ -1135,17 +1131,16 @@ def _provider_error_is_oversize(usage: dict, prompt_tokens_est: int, scope_model
         code = 0
     if code != 400:  # never 429/5xx (already rerouted as transient), never non-400
         return False
-    # Independent size evidence: EITHER an explicit oversize marker in the body, OR the
-    # prompt estimate is already near/over the reviewer's REAL window. The estimate
-    # undercounts real tokens by ~1.58x for Claude code packs, so 0.8x window is a
-    # conservative "plausibly oversize" floor — a small-prompt auth/param 400 fails it.
-    if _is_provider_oversize_error(str(pe.get("message") or "")):
-        return True
+    # Non-empty 400 messages must explicitly say oversize; only opaque gateway 400s can
+    # use size proximity, so auth/param/policy errors stay fail-closed.
+    message = str(pe.get("message") or "").strip()
+    if message:
+        return _is_provider_oversize_error(message)
     try:
-        window = int(_scope_reviewer_window(scope_model) or 0)
+        input_limit = int(_effective_scope_input_limit(scope_model=scope_model) or 0)
     except Exception:
-        window = 0
-    return window > 0 and int(prompt_tokens_est or 0) >= int(0.8 * window)
+        input_limit = 0
+    return input_limit > 0 and int(prompt_tokens_est or 0) >= int(0.8 * input_limit)
 
 
 def _scope_oversize_advisory_result(

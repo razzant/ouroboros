@@ -798,14 +798,15 @@ class TestRunScopeReviewFailClosed:
             def drive_logs(self):
                 return tmp_path
 
-        monkeypatch.setattr(mod, "_build_scope_prompt", lambda *a, **k: ("scope prompt", None))
+        # 32 chars ~= 8 estimated tokens: below the effective input limit (10), but
+        # near enough to be independent size evidence for an opaque gateway 400.
+        monkeypatch.setattr(mod, "_build_scope_prompt", lambda *a, **k: ("x" * 32, None))
         monkeypatch.setattr(
             mod, "_call_scope_llm",
             lambda *a, **k: ("", {"prompt_tokens": 0, "completion_tokens": 0,
                                   "provider_error": {"code": 400, "kind": "provider_error", "message": ""}}, ""),
         )
-        # Tiny window => the (small) prompt estimate is independent size evidence.
-        monkeypatch.setattr(mod, "_scope_reviewer_window", lambda m: 2)
+        monkeypatch.setattr(mod, "_effective_scope_input_limit", lambda *a, **k: 10)
 
         result = mod.run_scope_review(MockCtx(), "test commit", scope_model="anthropic/claude-sonnet-4.5")
 
@@ -829,14 +830,16 @@ class TestRunScopeReviewFailClosed:
             def drive_logs(self):
                 return tmp_path
 
-        monkeypatch.setattr(mod, "_build_scope_prompt", lambda *a, **k: ("scope prompt", None))
+        monkeypatch.setattr(mod, "_build_scope_prompt", lambda *a, **k: ("x" * 32, None))
         monkeypatch.setattr(
             mod, "_call_scope_llm",
             lambda *a, **k: ("", {"prompt_tokens": 0, "completion_tokens": 0,
                                   "provider_error": {"code": 400, "kind": "provider_error", "message": "invalid api key"}}, ""),
         )
-        # Large window + tiny prompt => no size evidence => stays blocking fail-closed.
-        monkeypatch.setattr(mod, "_scope_reviewer_window", lambda m: 1_000_000)
+        # Even a large prompt near the resolved window must stay fail-closed when the
+        # provider gives a concrete non-size message. Size proximity is reserved for
+        # opaque/empty gateway 400 bodies.
+        monkeypatch.setattr(mod, "_effective_scope_input_limit", lambda *a, **k: 10)
 
         result = mod.run_scope_review(MockCtx(), "test commit", scope_model="test-scope")
 
@@ -1905,9 +1908,16 @@ def test_scope_reviewer_window_fail_closed_on_absent_evidence(monkeypatch, tmp_p
     as 1M and overflowing its real window into a provider 400. A non-default >=1M
     reviewer must be owner-acked to regain 1M."""
     from ouroboros.tools import scope_review as sr
+    from ouroboros import capability_evidence
+    from types import SimpleNamespace
 
-    # Isolated, empty data dir -> probe returns no evidence for any model.
+    # Isolated, empty evidence -> no model gets Capability Evidence.
     monkeypatch.setenv("OUROBOROS_DATA_DIR", str(tmp_path))
+    monkeypatch.setattr(
+        capability_evidence,
+        "probe",
+        lambda *a, **k: SimpleNamespace(window_tokens=0),
+    )
 
     # An OFF-DEFAULT reviewer with no evidence fails closed under advisory...
     monkeypatch.setenv("OUROBOROS_SCOPE_REVIEW_FLOOR", "advisory")
@@ -1923,3 +1933,45 @@ def test_scope_reviewer_window_fail_closed_on_absent_evidence(monkeypatch, tmp_p
     # The SHIPPED designated reviewer keeps the 1M sentinel under blocking_1m.
     w_designated = sr._scope_reviewer_window(sr._SCOPE_MODEL_DEFAULT)
     assert w_designated == sr._SCOPE_MODEL_CONTEXT_WINDOW, w_designated
+
+    # Direct-provider and explicit OpenRouter spellings of the same shipped reviewer
+    # are also the designated default. Regression guard for openai::gpt-5.5 being
+    # reduced to bare "gpt-5.5" and then misclassified as off-default.
+    w_direct = sr._scope_reviewer_window("openai::gpt-5.5")
+    assert w_direct == sr._SCOPE_MODEL_CONTEXT_WINDOW, w_direct
+    w_openrouter = sr._scope_reviewer_window("openrouter::openai/gpt-5.5")
+    assert w_openrouter == sr._SCOPE_MODEL_CONTEXT_WINDOW, w_openrouter
+
+
+def test_scope_reviewer_window_uses_scope_slot_route_not_main(monkeypatch, tmp_path):
+    """Capability Evidence for scope review must use the scope slot's route.
+
+    A local-routed main lane (`USE_LOCAL_MAIN=true`) must not turn a remote direct
+    OpenAI scope reviewer into a local route lookup.
+    """
+    from types import SimpleNamespace
+    from ouroboros import capability_evidence, config
+    from ouroboros.tools import scope_review as sr
+
+    captured = {}
+
+    def fake_probe(drive_root, **kwargs):
+        captured.update(kwargs)
+        return SimpleNamespace(window_tokens=333_333)
+
+    monkeypatch.setattr(config, "DATA_DIR", tmp_path)
+    monkeypatch.setattr(
+        config,
+        "load_settings",
+        lambda: {
+            "USE_LOCAL_MAIN": True,
+            "OPENAI_BASE_URL": "https://api.openai.test/v1",
+        },
+    )
+    monkeypatch.setattr(capability_evidence, "probe", fake_probe)
+
+    assert sr._scope_reviewer_window("openai::gpt-5.5") == 333_333
+    assert captured["provider"] == "openai"
+    assert captured["model"] == "openai::gpt-5.5"
+    assert captured["base_url"] == "https://api.openai.test/v1"
+    assert captured["use_local"] is False
