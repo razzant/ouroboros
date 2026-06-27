@@ -47,6 +47,24 @@ except Exception:  # pragma: no cover - inspect is an optional benchmark depende
 
 
 _FINAL_RE = re.compile(r"FINAL ANSWER:\s*(.+?)\s*$", re.IGNORECASE | re.DOTALL)
+# Fallback patterns for when the model omits the FINAL ANSWER marker and the Claude Code
+# CLI wraps the bare answer in a meta sentence ("...the answer remains **Fred**", "...the
+# answer was already computed: 17.056"). Without these the verbose line defeats the GAIA
+# exact-match scorer even though the answer is correct.
+_ANSWER_FALLBACK_RES = [
+    re.compile(r"answer (?:was already (?:computed|determined)|is|was|remains)\s*[:\-]?\s*(.+)", re.IGNORECASE),
+    re.compile(r"already (?:computed|determined)\s*[:\-]?\s*(.+)", re.IGNORECASE),
+]
+
+
+def _clean_answer(s: str) -> str:
+    """First line; strip markdown bold/emphasis and surrounding/trailing punctuation."""
+    s = (s or "").strip()
+    if not s:
+        return ""
+    s = s.splitlines()[0].strip()
+    s = s.replace("**", "").replace("*", "").strip()
+    return s.strip().rstrip(".").strip()
 
 
 def _resolve_anthropic_key() -> str:
@@ -77,10 +95,13 @@ def _extract_final_answer(text: str) -> str:
         return ""
     matches = list(_FINAL_RE.finditer(text))
     if matches:
-        # take the FIRST line of the last marker's capture (GAIA answers are single-line)
-        return matches[-1].group(1).strip().splitlines()[0].strip()
+        return _clean_answer(matches[-1].group(1))
+    for rx in _ANSWER_FALLBACK_RES:  # no marker -> recover a verbose-wrapped answer
+        m = list(rx.finditer(text))
+        if m:
+            return _clean_answer(m[-1].group(1))
     lines = [ln.strip() for ln in text.splitlines() if ln.strip()]
-    return lines[-1] if lines else ""
+    return _clean_answer(lines[-1]) if lines else ""
 
 
 def run_claude_code(
@@ -91,6 +112,7 @@ def run_claude_code(
 ) -> dict:
     model = os.environ.get("GAIA_CLAUDE_MODEL", "claude-sonnet-4-5")
     max_turns = os.environ.get("GAIA_CLAUDE_MAX_TURNS", "40")
+    effort = os.environ.get("GAIA_CLAUDE_EFFORT", "high")  # reasoning effort: low|medium|high|max
     allowed = os.environ.get("GAIA_CLAUDE_ALLOWED_TOOLS", "Bash Read WebSearch WebFetch Glob Grep")
     timeout_sec = float(os.environ.get("GAIA_SAMPLE_TIMEOUT_SEC", "3600") or "3600")
 
@@ -112,6 +134,7 @@ def run_claude_code(
         "claude", "-p", full_prompt,
         "--output-format", "json",
         "--model", model,
+        "--effort", effort,
         "--allowedTools", allowed,
         "--max-turns", str(max_turns),
         "--dangerously-skip-permissions",
@@ -133,11 +156,16 @@ def run_claude_code(
 
     raw = proc.stdout or ""
     result_text = ""
+    cost_usd = 0.0
+    usage: dict = {}
     try:
         env_obj = json.loads(raw)
         result_text = str(env_obj.get("result", "") or "")
+        cost_usd = float(env_obj.get("total_cost_usd") or env_obj.get("cost_usd") or 0.0)
+        usage = env_obj.get("usage") or {}
         if env_obj.get("is_error"):
             return {"final_answer": "", "returncode": proc.returncode, "raw": raw[:2000],
+                    "cost_usd": cost_usd, "usage": usage,
                     "stderr_tail": f"claude is_error: {result_text[:300]}"}
     except Exception:
         result_text = raw  # non-JSON fallback
@@ -145,6 +173,8 @@ def run_claude_code(
         "final_answer": _extract_final_answer(result_text),
         "returncode": proc.returncode,
         "raw": result_text[:4000],
+        "cost_usd": cost_usd,
+        "usage": usage,
         "stderr_tail": (proc.stderr or "")[-2000:],
     }
 
@@ -176,6 +206,8 @@ def claude_code_solver():
             state.metadata = {}
         state.metadata["claude_code_raw"] = result.get("raw", "")
         state.metadata["claude_code_stderr"] = result.get("stderr_tail", "")
+        state.metadata["claude_code_cost_usd"] = result.get("cost_usd", 0.0)
+        state.metadata["claude_code_usage"] = result.get("usage", {})
         if getattr(state, "output", None) is None:
             state.output = SimpleNamespace(completion="")
         state.output.completion = result["final_answer"]
