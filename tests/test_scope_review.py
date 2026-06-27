@@ -640,6 +640,11 @@ class TestRunScopeReviewFailClosed:
             "_call_scope_llm",
             lambda *a, **k: (json.dumps(raw_items), {"prompt_tokens": 10, "completion_tokens": 5}, None),
         )
+        # Treat the fake reviewer as >=1M so this test isolates the ADVISORY-ENFORCEMENT
+        # downgrade (its target) from the separate sub-floor downgrade: an off-default
+        # model with no Capability Evidence now fail-closes to the sub-floor (v6.46.0 fix),
+        # which would empty critical_findings via the sub-floor path instead.
+        monkeypatch.setattr(mod, "_scope_reviewer_window", lambda m: 1_000_000)
 
         result = mod.run_scope_review(MockCtx(), "test commit", scope_model="test-scope")
 
@@ -775,6 +780,68 @@ class TestRunScopeReviewFailClosed:
 
         assert result.blocked is True
         assert result.status == "error"
+
+    def test_gateway_provider_error_400_oversize_downgrades_to_nonblocking_skip(self, tmp_path, monkeypatch):
+        """F2: an openai-compatible/OpenRouter oversize 400 returns an EMPTY body +
+        usage['provider_error']{code:400} with llm_error='' (NOT a raised text error),
+        so the text-marker oversize branch never fires and the empty body would
+        otherwise hard-block as empty_response. With independent size evidence it must
+        downgrade to the SAME non-blocking budget_exceeded advisory (the v6.46.0
+        OpenRouter scope-discard variant)."""
+        mod = _get_module("ouroboros.tools.scope_review")
+
+        class MockCtx:
+            repo_dir = str(tmp_path)
+            task_id = "scope-gateway-400-test"
+            pending_events = []
+
+            def drive_logs(self):
+                return tmp_path
+
+        monkeypatch.setattr(mod, "_build_scope_prompt", lambda *a, **k: ("scope prompt", None))
+        monkeypatch.setattr(
+            mod, "_call_scope_llm",
+            lambda *a, **k: ("", {"prompt_tokens": 0, "completion_tokens": 0,
+                                  "provider_error": {"code": 400, "kind": "provider_error", "message": ""}}, ""),
+        )
+        # Tiny window => the (small) prompt estimate is independent size evidence.
+        monkeypatch.setattr(mod, "_scope_reviewer_window", lambda m: 2)
+
+        result = mod.run_scope_review(MockCtx(), "test commit", scope_model="anthropic/claude-sonnet-4.5")
+
+        assert result.blocked is False
+        assert result.status == "budget_exceeded"
+        assert result.advisory_findings
+        assert result.advisory_findings[0]["item"] == "scope_review_skipped"
+
+    def test_gateway_provider_error_400_non_oversize_stays_fail_closed(self, tmp_path, monkeypatch):
+        """F2 guard: a NON-size gateway 400 (auth/param/policy — same code, same empty
+        body) must NOT downgrade. No size evidence (small prompt, large window) keeps the
+        fail-closed empty_response block, so a misconfiguration never silently skips the
+        blocking scope review."""
+        mod = _get_module("ouroboros.tools.scope_review")
+
+        class MockCtx:
+            repo_dir = str(tmp_path)
+            task_id = "scope-gateway-auth400-test"
+            pending_events = []
+
+            def drive_logs(self):
+                return tmp_path
+
+        monkeypatch.setattr(mod, "_build_scope_prompt", lambda *a, **k: ("scope prompt", None))
+        monkeypatch.setattr(
+            mod, "_call_scope_llm",
+            lambda *a, **k: ("", {"prompt_tokens": 0, "completion_tokens": 0,
+                                  "provider_error": {"code": 400, "kind": "provider_error", "message": "invalid api key"}}, ""),
+        )
+        # Large window + tiny prompt => no size evidence => stays blocking fail-closed.
+        monkeypatch.setattr(mod, "_scope_reviewer_window", lambda m: 1_000_000)
+
+        result = mod.run_scope_review(MockCtx(), "test commit", scope_model="test-scope")
+
+        assert result.blocked is True
+        assert result.status == "empty_response"
 
     def test_effective_scope_limit_uses_real_window_for_small_window_reviewer(self, monkeypatch):
         """B2: a KNOWN sub-1M reviewer window (Capability Evidence) replaces the
@@ -1830,19 +1897,29 @@ class TestTriadPromptAntiPatternLock:
 
 
 def test_scope_reviewer_window_fail_closed_on_absent_evidence(monkeypatch, tmp_path):
-    """claudexor B4: with NO capability evidence, an unknown reviewer must NOT be
-    treated as 1M unless the owner explicitly declared blocking_1m. floor=advisory
-    (or any non-blocking declaration) -> sub-floor window so the P3 authority
-    downgrades; floor=blocking_1m (default for the designated gpt-5.5) -> 1M."""
+    """claudexor B4 + v6.46.0 false-1M fix: with NO capability evidence, ONLY the
+    SHIPPED designated reviewer (_SCOPE_MODEL_DEFAULT) is granted the 1M blocking
+    sentinel under blocking_1m. An OFF-DEFAULT reviewer (e.g. an
+    OUROBOROS_SCOPE_REVIEW_MODEL pin) fails closed to the sub-floor under BOTH floors —
+    so the P3 authority downgrades it visibly instead of silently treating a 200K model
+    as 1M and overflowing its real window into a provider 400. A non-default >=1M
+    reviewer must be owner-acked to regain 1M."""
     from ouroboros.tools import scope_review as sr
 
     # Isolated, empty data dir -> probe returns no evidence for any model.
     monkeypatch.setenv("OUROBOROS_DATA_DIR", str(tmp_path))
 
+    # An OFF-DEFAULT reviewer with no evidence fails closed under advisory...
     monkeypatch.setenv("OUROBOROS_SCOPE_REVIEW_FLOOR", "advisory")
     w_adv = sr._scope_reviewer_window("gigachat::GigaChat-3-Ultra")
     assert 0 < w_adv < sr._SCOPE_MODEL_CONTEXT_WINDOW, w_adv  # fail-closed sub-floor
 
+    # ...AND under blocking_1m (the v6.46.0 bug: a pinned off-default 200K model that
+    # used to be wrongly trusted as 1M now fails closed instead of overflowing).
     monkeypatch.setenv("OUROBOROS_SCOPE_REVIEW_FLOOR", "blocking_1m")
-    w_block = sr._scope_reviewer_window("gigachat::GigaChat-3-Ultra")
-    assert w_block == sr._SCOPE_MODEL_CONTEXT_WINDOW, w_block  # explicit owner declaration
+    w_offdefault = sr._scope_reviewer_window("anthropic/claude-sonnet-4.5")
+    assert w_offdefault == sr._SCOPE_FAILCLOSED_WINDOW, w_offdefault
+
+    # The SHIPPED designated reviewer keeps the 1M sentinel under blocking_1m.
+    w_designated = sr._scope_reviewer_window(sr._SCOPE_MODEL_DEFAULT)
+    assert w_designated == sr._SCOPE_MODEL_CONTEXT_WINDOW, w_designated

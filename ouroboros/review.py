@@ -42,7 +42,12 @@ MAX_FUNCTION_LINES = 300
 # v6.50.0: reconciliation-layer helpers (typed delegation constraints, schedule-time
 # capability reconciliation, child-absorption outcome shelf) plus SWE-Pro adapter
 # hardening tests. Small headroom; split/paydown remains tracked in DEVELOPMENT.md.
-MAX_TOTAL_FUNCTIONS = 3575
+# scope-review false-1M fix: +4 (3575 -> 3579) — reviewed single-purpose helpers in
+# tools/scope_review.py: _is_designated_default_reviewer + its nested _bare,
+# _provider_error_is_oversize, and _scope_oversize_advisory_result (the last DEDUPES the
+# two oversize→advisory branches, keeping run_scope_review under the per-function line
+# gate). Small headroom.
+MAX_TOTAL_FUNCTIONS = 3582
 GRANDFATHERED_OVERSIZED_FUNCTIONS = {
     ("agent_startup_checks.py", "verify_restart"),  # managed #53 boot diagnostic flow, 307 lines
     ("git.py", "_run_reviewed_stage_cycle"),  # reviewed-commit gate orchestration, 302 lines

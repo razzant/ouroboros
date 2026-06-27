@@ -137,32 +137,66 @@ def _degraded_scope_requested() -> bool:
     return low and os.environ.get("OUROBOROS_SCOPE_REVIEW_DEGRADED", "").strip().lower() in ("1", "true", "yes", "on")
 
 
+def _is_designated_default_reviewer(model: str) -> bool:
+    """True iff ``model`` is the SHIPPED designated scope reviewer
+    (``_SCOPE_MODEL_DEFAULT``), compared on the bare model id so a provider-prefixed
+    form (``openrouter::openai/gpt-5.5``) still matches. Used to scope the
+    ``blocking_1m`` no-evidence 1M sentinel to the shipped reviewer ONLY — NOT to an
+    operator's off-default pin (which must carry Capability Evidence to be trusted as
+    >=1M). ``OUROBOROS_SCOPE_REVIEW_MODEL`` is the override knob the v6.46.0 bug abused
+    (a 200K sonnet pinned while the floor stayed blocking_1m), so the configured value
+    must NOT itself confer 1M trust — only the shipped default or real evidence does."""
+    def _bare(m: str) -> str:
+        return str(m or "").split("::", 1)[-1].strip()
+    return bool(model) and _bare(model) == _bare(_SCOPE_MODEL_DEFAULT)
+
+
 def _scope_reviewer_window(model: str) -> int:
     """Reviewer context window (tokens) from Capability Evidence, FAIL-CLOSED on
     absent evidence. Replaces the deleted static per-model window table: a
-    confirmed/asserted probe (provider metadata or owner-ack) gives the real
-    window. With NO evidence, the 1M blocking-floor sentinel is assumed ONLY when
-    the owner has explicitly declared the configured reviewer is the >=1M blocking
-    one via the floor config (``blocking_1m``, the default for the designated
-    gpt-5.5). When the floor is ``advisory`` — or the declaration is otherwise
-    absent — an unknown route returns a conservative sub-floor window so the P3
-    authority check downgrades it instead of silently treating it as 1M (claudexor
-    B4). Hot-path safe (allow_fetch=False): never blocks on the network."""
+    confirmed/asserted probe (provider metadata or owner-ack) for the reviewer's REAL
+    active route gives the real window. With NO evidence, the 1M blocking-floor
+    sentinel is granted ONLY to the SHIPPED designated reviewer under ``blocking_1m``
+    (the default for gpt-5.5); any other no-evidence reviewer — including an operator's
+    off-default ``OUROBOROS_SCOPE_REVIEW_MODEL`` pin — returns a conservative sub-floor
+    window so the P3 authority check downgrades it (visibly) instead of silently
+    treating a 200K model as 1M and overflowing its real window into a provider 400
+    (the v6.46.0 scope-discard bug). A non-default >=1M reviewer must be owner-acked to
+    regain 1M. Hot-path safe (allow_fetch=False): never blocks on the network."""
+    model = str(model or "")
     try:
         from ouroboros.capability_evidence import probe
-        from ouroboros.config import DATA_DIR
-        ev = probe(DATA_DIR, provider="", model=str(model or ""), allow_fetch=False)
+        from ouroboros.config import DATA_DIR, load_settings
+        from ouroboros.gateway.settings import _active_main_route
+        # Probe the reviewer's REAL active route (provider/base_url/use_local), NOT a
+        # generic provider="" lookup: route_fingerprint() hashes provider+base_url, so a
+        # provider="" probe computes a fingerprint that can NEVER match a stored row,
+        # leaving every reviewer to the no-evidence fallthrough. Resolving the route the
+        # same way the active main route does lets a confirmed/asserted >=1M record apply
+        # so a genuinely-1M reviewer keeps its full window.
+        _route = _active_main_route(load_settings(), model_override=model)
+        ev = probe(
+            DATA_DIR,
+            provider=_route["provider"],
+            model=_route["model"],
+            base_url=_route["base_url"],
+            use_local=_route["use_local"],
+            allow_fetch=False,
+        )
         if int(ev.window_tokens or 0) > 0:
             return int(ev.window_tokens)
     except Exception:
         pass
     try:
         from ouroboros.config import get_scope_review_floor
-        if get_scope_review_floor() != "blocking_1m":
-            return _SCOPE_FAILCLOSED_WINDOW
+        floor = get_scope_review_floor()
     except Exception:
-        pass
-    return _SCOPE_MODEL_CONTEXT_WINDOW
+        floor = "blocking_1m"
+    # blocking_1m declares the SHIPPED reviewer is the >=1M blocking gate; it does not
+    # extend that 1M trust to an arbitrary off-default pin with no evidence.
+    if floor == "blocking_1m" and _is_designated_default_reviewer(model):
+        return _SCOPE_MODEL_CONTEXT_WINDOW
+    return _SCOPE_FAILCLOSED_WINDOW
 
 
 def _window_scaled_reserves(window: int) -> tuple:
@@ -1080,6 +1114,79 @@ def _is_provider_oversize_error(error_text: str) -> bool:
     return any(marker in low for marker in _PROVIDER_OVERSIZE_MARKERS)
 
 
+def _provider_error_is_oversize(usage: dict, prompt_tokens_est: int, scope_model: str) -> bool:
+    """Gateway-route oversize detection from ``usage['provider_error']``.
+
+    On an openai-compatible / OpenRouter gateway a real oversize 400 comes back as an
+    HTTP-200-shaped body with an EMPTY message and ``usage['provider_error'] =
+    {code:400, kind:'provider_error', message:...}`` — so the raised-error text marker
+    (:func:`_is_provider_oversize_error`) is NEVER reached (``llm_error`` is empty) and
+    the empty body otherwise hard-blocks as ``empty_response``. Treat such a 400 as
+    oversize ONLY with INDEPENDENT size evidence, so a genuine auth/param/policy 400
+    (same code, same empty-body bucket) keeps the fail-closed blocking path: a blind
+    code==400 downgrade would let the commit gate pass WITHOUT real scope review on a
+    misconfiguration (a P3 immune regression worse than the overflow itself)."""
+    pe = usage.get("provider_error") if isinstance(usage, dict) else None
+    if not isinstance(pe, dict):
+        return False
+    try:
+        code = int(pe.get("code") or 0)
+    except (TypeError, ValueError):
+        code = 0
+    if code != 400:  # never 429/5xx (already rerouted as transient), never non-400
+        return False
+    # Independent size evidence: EITHER an explicit oversize marker in the body, OR the
+    # prompt estimate is already near/over the reviewer's REAL window. The estimate
+    # undercounts real tokens by ~1.58x for Claude code packs, so 0.8x window is a
+    # conservative "plausibly oversize" floor — a small-prompt auth/param 400 fails it.
+    if _is_provider_oversize_error(str(pe.get("message") or "")):
+        return True
+    try:
+        window = int(_scope_reviewer_window(scope_model) or 0)
+    except Exception:
+        window = 0
+    return window > 0 and int(prompt_tokens_est or 0) >= int(0.8 * window)
+
+
+def _scope_oversize_advisory_result(
+    *,
+    scope_model_id: str,
+    prompt_chars: int,
+    prompt_tokens_est: int,
+    prompt_ref: dict,
+    response_ref: dict,
+    provider_detail: str,
+) -> "ScopeReviewResult":
+    """The NON-blocking budget_exceeded advisory for a provider oversize rejection —
+    shared by the raised-error (anthropic-direct ``prompt is too long``) and the
+    empty-body gateway (``provider_error`` code=400) oversize paths so BOTH converge on
+    one visible advisory instead of a fail-closed block (the real tokenizer is denser
+    than the estimate gate; the pack cannot fit the reviewer window)."""
+    return ScopeReviewResult(
+        blocked=False,
+        block_message="",
+        status="budget_exceeded",
+        model_id=scope_model_id,
+        prompt_chars=prompt_chars,
+        context_manifest=_current_scope_context_manifest(),
+        prompt_ref=prompt_ref,
+        response_ref=response_ref,
+        advisory_findings=[{
+            "verdict": "FAIL",
+            "severity": "advisory",
+            "item": "scope_review_skipped",
+            "reason": (
+                f"⚠️ SCOPE_REVIEW_SKIPPED: the provider rejected the assembled scope prompt "
+                f"(~{prompt_tokens_est} estimated tokens) as exceeding the model's real "
+                f"context window. Scope review downgraded to non-blocking warning. "
+                "Provider error: "
+                + _truncate_review_artifact(str(provider_detail), 1000)
+            ),
+            "model": scope_model_id,
+        }],
+    )
+
+
 def _handle_prompt_signals(
     prompt: Optional[str],
     context_status: Optional["_TouchedContextStatus"],
@@ -1276,28 +1383,13 @@ def run_scope_review(
                 "(estimate-gate passed; real tokenizer denser). Downgrading to "
                 "non-blocking budget_exceeded. Error: %s", llm_error,
             )
-            return ScopeReviewResult(
-                blocked=False,
-                block_message="",
-                status="budget_exceeded",
-                model_id=scope_model_id,
+            return _scope_oversize_advisory_result(
+                scope_model_id=scope_model_id,
                 prompt_chars=_prompt_chars,
-                context_manifest=_current_scope_context_manifest(),
+                prompt_tokens_est=_prompt_tokens_est,
                 prompt_ref=_prompt_ref,
                 response_ref=_response_ref,
-                advisory_findings=[{
-                    "verdict": "FAIL",
-                    "severity": "advisory",
-                    "item": "scope_review_skipped",
-                    "reason": (
-                        f"⚠️ SCOPE_REVIEW_SKIPPED: the provider rejected the assembled scope prompt "
-                        f"(~{_prompt_tokens_est} estimated tokens) as exceeding the model's real "
-                        f"context window. Scope review downgraded to non-blocking warning. "
-                        "Provider error: "
-                        + _truncate_review_artifact(str(llm_error), 1000)
-                    ),
-                    "model": scope_model_id,
-                }],
+                provider_detail=llm_error,
             )
         return ScopeReviewResult(
             blocked=True,
@@ -1311,6 +1403,29 @@ def run_scope_review(
         )
     if _usage:
         emit_review_usage(ctx, model=scope_model_id, usage=_usage, source="scope_review")
+
+    if _provider_error_is_oversize(_usage, _prompt_tokens_est, scope_model_id):
+        # Gateway route (openai-compatible/OpenRouter): a real oversize 400 arrives as
+        # an EMPTY body + usage['provider_error']{code:400}, NOT a raised error carrying
+        # the "prompt is too long" text — so the llm_error oversize branch above never
+        # fires and the empty body would otherwise hard-block as empty_response. With
+        # INDEPENDENT size evidence (see _provider_error_is_oversize), downgrade to the
+        # SAME visible non-blocking budget_exceeded advisory the raised-error path uses.
+        # A non-size 400 (auth/param/policy) lacks that evidence and stays blocking below.
+        _pe_msg = str((_usage.get("provider_error") or {}).get("message") or "")
+        log.warning(
+            "Scope review skipped: gateway rejected the prompt as oversize via "
+            "provider_error code=400 (empty body; estimate-gate passed). Downgrading to "
+            "non-blocking budget_exceeded. provider_error: %s", _pe_msg or "(no message)",
+        )
+        return _scope_oversize_advisory_result(
+            scope_model_id=scope_model_id,
+            prompt_chars=_prompt_chars,
+            prompt_tokens_est=_prompt_tokens_est,
+            prompt_ref=_prompt_ref,
+            response_ref=_response_ref,
+            provider_detail=_pe_msg,
+        )
 
     if not raw_text.strip():
         # Empty model response is distinct from transport/API error.

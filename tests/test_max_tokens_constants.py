@@ -193,7 +193,7 @@ def test_scope_input_budget_reserves_output_within_window():
     )
 
 
-def test_scope_input_limit_is_model_family_calibrated():
+def test_scope_input_limit_is_model_family_calibrated(monkeypatch):
     """Claude-family scope reviewers get a code-density-calibrated input cap.
 
     Regression guard for the deterministic 400 where a 739,508-estimated-token
@@ -215,6 +215,12 @@ def test_scope_input_limit_is_model_family_calibrated():
         _SCOPE_MODEL_CONTEXT_WINDOW,
         _effective_scope_input_limit,
     )
+
+    # This test verifies the model-family CALIBRATION CONSTANT applied at a 1M window,
+    # not the window-resolution policy. Treat the reviewer as >=1M so an off-default
+    # Claude model (fable-5) takes the 1M-calibrated path: since the v6.46.0 false-1M
+    # fix, an off-default model with no Capability Evidence fail-closes to the sub-floor.
+    monkeypatch.setattr("ouroboros.tools.scope_review._scope_reviewer_window", lambda m: 1_000_000)
 
     assert _ANTHROPIC_REAL_TOKENS_PER_ESTIMATED >= 1.58, (
         "calibration ratio must cover the measured 1.58x Claude code density"
