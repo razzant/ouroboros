@@ -1462,26 +1462,39 @@ def test_clean_extension_runtime_state_unloads_staged_import_root(tmp_path):
 
 
 def test_reload_all_sweeps_stale_extension_imports(tmp_path, monkeypatch):
+    import os as _os, time as _time, uuid as _uuid
+    _DEAD = 999999  # owner PID treated as dead by the stub below
+    monkeypatch.setattr("ouroboros.platform_layer.pid_is_alive", lambda pid: pid != _DEAD)
     loaded, repo_root, drive_root = _prepare_extension(
         tmp_path,
         "sweep_ext",
         "def register(api):\n    pass\n",
         [],
     )
-    stale_root = drive_root / "state" / "skills" / "sweep_ext" / "__extension_imports" / "stale"
+    imports_dir = drive_root / "state" / "skills" / "sweep_ext" / "__extension_imports"
+    # A genuine orphan: owner PID dead AND mtime past the spawn grace (per-PID leaf name).
+    stale_root = imports_dir / f"{_DEAD}-{_uuid.uuid4().hex}"
     (stale_root / "skill").mkdir(parents=True)
+    _old = _time.time() - 2 * extension_loader._IMPORT_SWEEP_GRACE_SEC
+    _os.utime(stale_root, (_old, _old))
     monkeypatch.setenv("OUROBOROS_SKILLS_REPO_PATH", str(repo_root))
 
     results = extension_loader.reload_all(drive_root, lambda: {}, repo_path=str(repo_root))
 
     assert results["sweep_ext"] is None
-    assert not stale_root.exists()
-    live_roots = list((drive_root / "state" / "skills" / "sweep_ext" / "__extension_imports").iterdir())
+    assert not stale_root.exists()  # dead-owner + past-grace orphan reaped
+    live_roots = list(imports_dir.iterdir())
     assert len(live_roots) == 1
+    # The freshly-staged tree is tagged with THIS process's PID.
+    assert live_roots[0].name.startswith(f"{_os.getpid()}-")
     assert (live_roots[0] / "skill").exists()
 
 
 def test_reload_all_preserves_live_import_root_while_sweeping_stale_roots(tmp_path, monkeypatch):
+    import os as _os, time as _time, uuid as _uuid
+    _DEAD = 999999  # dead owner
+    _PEER = 888888  # a DIFFERENT, still-alive worker PID
+    monkeypatch.setattr("ouroboros.platform_layer.pid_is_alive", lambda pid: pid != _DEAD)
     loaded, repo_root, drive_root = _prepare_extension(
         tmp_path,
         "live_sweep_ext",
@@ -1492,17 +1505,70 @@ def test_reload_all_preserves_live_import_root_while_sweeping_stale_roots(tmp_pa
     assert err is None, err
     with extension_loader._lock:
         live_root = pathlib.Path(extension_loader._extensions["live_sweep_ext"].import_root)
-    stale_root = drive_root / "state" / "skills" / "live_sweep_ext" / "__extension_imports" / "stale"
+    imports_dir = drive_root / "state" / "skills" / "live_sweep_ext" / "__extension_imports"
+    # A LIVE PEER worker's freshly-staged tree (DIFFERENT, alive PID) must NOT be reaped —
+    # the cross-worker race the fix targets; the old single-survivor test could not express
+    # it, and the 'skip if pid==mine' miscoding would wrongly delete this.
+    peer_root = imports_dir / f"{_PEER}-{_uuid.uuid4().hex}"
+    (peer_root / "skill").mkdir(parents=True)
+    # A genuine orphan: dead owner + mtime past the spawn grace.
+    stale_root = imports_dir / f"{_DEAD}-{_uuid.uuid4().hex}"
     (stale_root / "skill").mkdir(parents=True)
+    _old = _time.time() - 2 * extension_loader._IMPORT_SWEEP_GRACE_SEC
+    _os.utime(stale_root, (_old, _old))
     monkeypatch.setenv("OUROBOROS_SKILLS_REPO_PATH", str(repo_root))
 
     results = extension_loader.reload_all(drive_root, lambda: {}, repo_path=str(repo_root))
 
     assert results["live_sweep_ext"] is None
-    assert live_root.exists()
-    assert not stale_root.exists()
-    live_roots = list((drive_root / "state" / "skills" / "live_sweep_ext" / "__extension_imports").iterdir())
-    assert live_roots == [live_root]
+    assert live_root.exists()       # this process's live bundle tree kept (keep-set + alive)
+    assert peer_root.exists()       # a LIVE peer worker's tree NOT reaped (regression direction)
+    assert not stale_root.exists()  # dead + aged orphan reaped
+    survivors = set(imports_dir.iterdir())
+    assert {live_root, peer_root} <= survivors
+    assert stale_root not in survivors
+
+
+def test_sweep_predicate_keeps_live_peer_and_grace_fresh_reaps_dead_orphan(tmp_path, monkeypatch):
+    """Per-PID sweep predicate in isolation (empty keep-set): a live-owner tree and a
+    dead-owner-but-within-grace tree survive; a dead-owner past-grace tree and a legacy
+    bare-uuid tree are reaped. Pins the MAX_WORKERS>1 cross-worker race fix at the
+    predicate level — the 'skip if pid==mine' and dropped-grace miscodings both fail here.
+    """
+    import os as _os, time as _time, uuid as _uuid
+    from ouroboros.skill_loader import skill_state_dir
+    _DEAD = 999999
+    _PEER = 888888  # different, alive
+    monkeypatch.setattr("ouroboros.platform_layer.pid_is_alive", lambda pid: pid != _DEAD)
+    drive_root = tmp_path / "drive"
+    imports_dir = skill_state_dir(drive_root, "predx") / "__extension_imports"
+    imports_dir.mkdir(parents=True)
+
+    def _mk(name, age=0.0):
+        d = imports_dir / name
+        (d / "skill").mkdir(parents=True)
+        if age:
+            t = _time.time() - age
+            _os.utime(d, (t, t))
+        return d
+
+    peer_live = _mk(f"{_PEER}-{_uuid.uuid4().hex}")  # owner alive (different PID)
+    dead_fresh = _mk(f"{_DEAD}-{_uuid.uuid4().hex}")  # owner dead, fresh
+    dead_old = _mk(f"{_DEAD}-{_uuid.uuid4().hex}", age=2 * extension_loader._IMPORT_SWEEP_GRACE_SEC)
+    legacy = _mk(_uuid.uuid4().hex)  # bare-uuid legacy (no parseable owner)
+    # An all-digit legacy uuid would int-parse to a huge number; the PID-range guard
+    # must treat it as legacy (reaped) and NOT feed it to pid_is_alive (which would
+    # OverflowError os.kill and escape the sweep).
+    all_digit_legacy = _mk("9" * 32)
+
+    # No bundle registered for "predx" -> keep-set empty -> isolates the new predicate.
+    extension_loader._sweep_stale_extension_imports(drive_root, "predx")
+
+    assert peer_live.exists(), "a LIVE peer (different PID) tree must NOT be reaped"
+    assert dead_fresh.exists(), "a dead-owner tree within the spawn grace must survive"
+    assert not dead_old.exists(), "a dead-owner past-grace orphan must be reaped"
+    assert not legacy.exists(), "a legacy bare-uuid tree (no live bundle) is reaped as before"
+    assert not all_digit_legacy.exists(), "an all-digit legacy uuid is reaped, not crashed on"
 
 
 def test_tool_registration_collision_raises(tmp_path):
