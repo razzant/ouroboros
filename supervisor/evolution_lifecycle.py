@@ -95,7 +95,14 @@ def start_evolution_campaign(objective: str = "", *, source: str = "owner") -> D
 
 
 def pause_evolution_campaign(reason: str = "") -> Dict[str, Any]:
-    """Pause the active evolution campaign without deleting its state."""
+    """Pause the active evolution campaign without deleting its state.
+
+    RESUMABLE: a later ``/evolve start`` resumes the SAME campaign in place
+    (start_evolution_campaign treats ``paused`` as resumable). Used by the system
+    breakers (light mode, consecutive failures, objective-repeat cap, budget reserve,
+    restart-blocked) — NOT by an owner stop. For an owner stop use
+    ``complete_evolution_campaign`` (terminal).
+    """
     campaign = _read_evolution_campaign()
     if campaign:
         campaign["status"] = "paused"
@@ -103,6 +110,41 @@ def pause_evolution_campaign(reason: str = "") -> Dict[str, Any]:
         campaign["pause_reason"] = str(reason or "")
         _write_evolution_campaign(campaign)
     return campaign
+
+
+def complete_evolution_campaign(reason: str = "", *, status: str = "stopped") -> Dict[str, Any]:
+    """Terminally CLOSE the active campaign — the OWNER-stop counterpart of the
+    resumable pause. ``status`` is non-{active,paused}, so a later ``/evolve start``
+    mints a FRESH campaign instead of resurrecting this one. Archives + pops any
+    in-flight ``active_transaction`` (and ``post_task_backlog_id``) so a terminally
+    stopped campaign carries no dangling commit for a boot reconcile to absorb. The
+    durable gate against autonomous re-arm is the ``evolution_owner_stopped`` state
+    flag set at the owner-stop sites (read by ``apply_pending_request``); this terminal
+    status is the observability/audit marker plus a clean campaign. Never raises."""
+    try:
+        campaign = _read_evolution_campaign()
+        if not campaign:
+            return campaign or {}
+        now = utc_now_iso()
+        tx = campaign.get("active_transaction")
+        if isinstance(tx, dict):
+            tx = {**tx, "cycle_outcome": tx.get("cycle_outcome") or "owner_stopped"}
+            try:
+                append_unique_transaction(campaign, tx)
+            except Exception:
+                pass
+            campaign.pop("active_transaction", None)
+        campaign.pop("post_task_backlog_id", None)
+        campaign.pop("pause_reason", None)
+        campaign["status"] = str(status or "stopped")
+        campaign["updated_at"] = now
+        campaign["completed_at"] = now
+        campaign["completion_reason"] = str(reason or "")
+        _write_evolution_campaign(campaign)
+        return campaign
+    except Exception:
+        log.debug("complete_evolution_campaign failed", exc_info=True)
+        return {}
 
 
 def begin_evolution_transaction(task_id: str, *, cycle: int, campaign: Dict[str, Any]) -> Dict[str, Any]:

@@ -154,6 +154,98 @@ def test_v5_apply_pending_request_activates_gated_campaign(tmp_path, monkeypatch
     assert not (tmp_path / "state" / "post_task_evolution_request.json").exists()
 
 
+def test_evolution_owner_stopped_blocks_post_task_rearm(tmp_path, monkeypatch):
+    """v6.52.x owner-stop-persistence fix (CORE regression, inverse of the test above):
+    with the durable ``evolution_owner_stopped`` flag set, a queued post-task promotion is
+    DROPPED — never used to silently re-arm evolution (no /evolve start). Also covers the
+    maybe_promote race where a worker re-wrote the request after the owner-stop cleared it."""
+    monkeypatch.setenv("OUROBOROS_POST_TASK_EVOLUTION", "true")
+    (tmp_path / "state").mkdir(parents=True, exist_ok=True)
+    (tmp_path / "state" / "post_task_evolution_request.json").write_text(json.dumps({
+        "objective": "Refactor X for clarity", "requires_plan_review": False, "source": "post_task",
+    }), encoding="utf-8")
+
+    started = {}
+    saved = {}
+    import supervisor.evolution_lifecycle as lifecycle
+    import supervisor.state as st
+    monkeypatch.setattr(lifecycle, "evolution_block_reason", lambda: "")
+    monkeypatch.setattr(lifecycle, "start_evolution_campaign",
+                        lambda objective, source="": started.update(objective=objective, source=source))
+    # Owner EXPLICITLY stopped: flag set, evolution disabled, owner present.
+    monkeypatch.setattr(st, "load_state",
+                        lambda: {"owner_chat_id": 7, "evolution_owner_stopped": True, "evolution_mode_enabled": False})
+
+    def _fake_update_state(mutator):
+        live = {"owner_chat_id": 7, "evolution_owner_stopped": True}
+        mutator(live)
+        saved.update(live)
+        return live
+    monkeypatch.setattr(st, "update_state", _fake_update_state)
+
+    assert pte.apply_pending_request(tmp_path) is False
+    assert started == {}, "start_evolution_campaign must NOT run while owner-stopped"
+    assert "evolution_mode_enabled" not in saved, "no autonomous re-enable while owner-stopped"
+    # the (raced) request is dropped so it cannot re-fire on a later idle tick
+    assert not (tmp_path / "state" / "post_task_evolution_request.json").exists()
+
+
+def test_post_task_apply_still_defers_when_already_enabled(tmp_path, monkeypatch):
+    """The pre-existing 'already enabled' guard is NOT stolen by the new owner-stop guard:
+    with evolution running (enabled True, NO owner-stop flag) apply DEFERS (returns False)
+    and LEAVES the request for the running campaign — the legitimate absorb-restart-verify
+    resume relies on enabled staying True and is untouched by this fix."""
+    monkeypatch.setenv("OUROBOROS_POST_TASK_EVOLUTION", "true")
+    (tmp_path / "state").mkdir(parents=True, exist_ok=True)
+    (tmp_path / "state" / "post_task_evolution_request.json").write_text(json.dumps({
+        "objective": "X", "requires_plan_review": False,
+    }), encoding="utf-8")
+    import supervisor.evolution_lifecycle as lifecycle
+    import supervisor.state as st
+    monkeypatch.setattr(lifecycle, "evolution_block_reason", lambda: "")
+    monkeypatch.setattr(st, "load_state", lambda: {"owner_chat_id": 7, "evolution_mode_enabled": True})
+
+    assert pte.apply_pending_request(tmp_path) is False
+    # deferred (enabled-guard), NOT dropped — distinct from the owner-stop drop above
+    assert (tmp_path / "state" / "post_task_evolution_request.json").exists()
+
+
+def test_complete_evolution_campaign_is_terminal_and_archives_tx(tmp_path, monkeypatch):
+    """complete_evolution_campaign terminally closes (status NOT in {active,paused}),
+    archives+pops any in-flight active_transaction, and pops post_task_backlog_id — so a
+    stopped campaign carries no dangling commit for a boot reconcile to absorb."""
+    import supervisor.queue as queue
+    import supervisor.evolution_lifecycle as lifecycle
+    monkeypatch.setattr(queue, "DRIVE_ROOT", str(tmp_path))
+    lifecycle._write_evolution_campaign({
+        "id": "OLD", "status": "active",
+        "active_transaction": {"task_id": "t1", "commit_sha": "abc"},
+        "post_task_backlog_id": "b1",
+    })
+    c = lifecycle.complete_evolution_campaign("disabled via owner chat", status="stopped")
+    assert c["status"] == "stopped"
+    assert c["status"] not in {"active", "paused"}
+    assert c.get("completion_reason") == "disabled via owner chat"
+    assert "active_transaction" not in c          # popped: no dangling tx for a boot reconcile
+    assert "post_task_backlog_id" not in c
+    assert c.get("transaction_history")            # archived, not lost
+
+
+def test_evolve_start_after_stop_mints_fresh_campaign(tmp_path, monkeypatch):
+    """A terminal 'stopped' campaign is NOT resurrected: /evolve start mints a FRESH
+    campaign (new id, active). Confirms owner re-engagement + that the fresh-mint branch
+    already covers terminal statuses (proposal (c) needs no code change)."""
+    import supervisor.queue as queue
+    import supervisor.evolution_lifecycle as lifecycle
+    monkeypatch.setattr(queue, "DRIVE_ROOT", str(tmp_path))
+    lifecycle._write_evolution_campaign({"id": "OLD", "status": "stopped"})
+    fresh = lifecycle.start_evolution_campaign("new objective", source="owner_chat")
+    assert fresh["id"] != "OLD"
+    assert fresh["status"] == "active"
+    assert fresh["objective"] == "new objective"
+    assert fresh.get("cycles_done") == 0
+
+
 def test_budget_reset_refuses_target_mismatch(tmp_path, monkeypatch):
     _seed_state(tmp_path)
     other = tmp_path.parent / (tmp_path.name + "_other")

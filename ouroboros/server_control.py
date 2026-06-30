@@ -81,7 +81,26 @@ def execute_panic_stop(
         st = load_state()
         st["evolution_mode_enabled"] = False
         st["bg_consciousness_enabled"] = False
+        # Panic is an owner stop: make it authoritative against the post-task pipeline too,
+        # so evolution cannot autonomously re-arm on the next boot (mirrors /evolve off).
+        st["evolution_owner_stopped"] = True
+        st["post_task_autostop"] = False
         save_state(st)
+    except Exception:
+        pass
+
+    # Terminal-close the campaign + drop any queued promotion. Each in its own guard so a
+    # missing/locked file never blocks the panic hard-exit (the flag above is the durable gate).
+    try:
+        from supervisor.evolution_lifecycle import complete_evolution_campaign
+
+        complete_evolution_campaign("panic stop", status="stopped")
+    except Exception:
+        pass
+    try:
+        from ouroboros.post_task_evolution import drop_pending_request
+
+        drop_pending_request(data_dir)
     except Exception:
         pass
 

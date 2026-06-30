@@ -71,7 +71,11 @@ MAX_FUNCTION_LINES = 300
 # every-exit-path fingerprint recording); artifacts.record_task_scratch +
 # artifacts.read_task_scratch_fingerprints (fingerprinted scratch manifest); verify._check_has_exit_masking
 # (Fix #2 sensor); outcomes.latest_unreconciled_masked_pass + outcomes.latest_unreconciled_masked_verification.
-MAX_TOTAL_FUNCTIONS = 3620
+# evolution-stop authoritative fix: +2 functions -> new count 3622; cap set to 3624 (+2 headroom).
+# evolution_lifecycle.complete_evolution_campaign (terminal owner-stop, distinct from the resumable pause) +
+# post_task_evolution.drop_pending_request (clear a queued promotion at the owner-stop sites; the durable backstop
+# is the evolution_owner_stopped flag read in apply_pending_request).
+MAX_TOTAL_FUNCTIONS = 3624
 GRANDFATHERED_OVERSIZED_FUNCTIONS = {
     ("agent_startup_checks.py", "verify_restart"),  # managed #53 boot diagnostic flow, 307 lines
     ("git.py", "_run_reviewed_stage_cycle"),  # reviewed-commit gate orchestration, 302 lines

@@ -101,6 +101,9 @@ def ensure_state_defaults(st: Dict[str, Any]) -> Dict[str, Any]:
     st.setdefault("last_evolution_task_at", "")
     st.setdefault("budget_messages_since_report", 0)
     st.setdefault("evolution_mode_enabled", False)
+    # Durable owner-stop sentinel: set True by the owner-stop sites, cleared ONLY by an
+    # owner /evolve start. apply_pending_request refuses to autonomously re-arm while True.
+    st.setdefault("evolution_owner_stopped", False)
     st.setdefault("evolution_cycle", 0)
     st.setdefault("session_total_snapshot", None)
     st.setdefault("session_spent_snapshot", None)

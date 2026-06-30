@@ -2004,31 +2004,40 @@ def _handle_toggle_evolution(evt: Dict[str, Any], ctx: Any) -> None:
         live["evolution_mode_enabled"] = enabled
         if enabled:
             live["evolution_consecutive_failures"] = 0
+        # Owner stop is AUTHORITATIVE against the post-task pipeline (mirrors /evolve): set
+        # the durable evolution_owner_stopped flag on disable, clear it on enable (this is an
+        # owner-authorized clear). This is what apply_pending_request reads to refuse re-arm.
+        live["evolution_owner_stopped"] = (not enabled)
         # Symmetry with the owner /evolve path: an explicit toggle must not inherit a
         # stale post-task one-shot autostop that would disable the campaign after one cycle.
         live["post_task_autostop"] = False
 
     st = update_state(_toggle_evolution)
     try:
-        from supervisor.evolution_lifecycle import pause_evolution_campaign, start_evolution_campaign
+        from supervisor.evolution_lifecycle import complete_evolution_campaign, start_evolution_campaign
 
         if enabled:
             start_evolution_campaign(str(evt.get("objective") or ""), source="agent_tool")
         else:
-            pause_evolution_campaign("disabled via agent tool")
+            # Terminal close (not a resumable pause), so a later /evolve start mints fresh.
+            complete_evolution_campaign("disabled via agent tool", status="stopped")
     except Exception:
         log.debug("Failed to update evolution campaign toggle state", exc_info=True)
     if not enabled:
         # Cancel the live evolution worker too — pruning PENDING alone leaves a
         # mid-cycle task running (and eligible for retry).
         from supervisor.queue import cancel_running_evolution_tasks
+        from ouroboros.post_task_evolution import drop_pending_request
+        from supervisor import state as _evo_state
 
+        # Fast path; the evolution_owner_stopped flag is the durable backstop.
+        drop_pending_request(_evo_state.DRIVE_ROOT)
         cancel_running_evolution_tasks("disabled via agent tool")
         ctx.PENDING[:] = [t for t in ctx.PENDING if str(t.get("type")) != "evolution"]
         ctx.sort_pending()
         ctx.persist_queue_snapshot(reason="evolve_off_via_tool")
     if st.get("owner_chat_id"):
-        state_str = "ON" if enabled else "OFF"
+        state_str = "ON" if enabled else "OFF — post-task auto-evolution also paused until /evolve start"
         ctx.send_with_budget(int(st["owner_chat_id"]), f"🧬 Evolution: {state_str} (via agent tool)")
 
 

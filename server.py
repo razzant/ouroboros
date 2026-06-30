@@ -712,24 +712,35 @@ def _process_bridge_updates(bridge, offset: int, ctx: Any) -> int:
             st2["evolution_mode_enabled"] = bool(turn_on)
             if turn_on:
                 st2["evolution_consecutive_failures"] = 0
+            # Owner stop is AUTHORITATIVE against the post-task promotion pipeline: the
+            # durable evolution_owner_stopped flag (read by apply_pending_request) blocks an
+            # autonomous re-arm until the owner /evolve starts again. Set True on stop,
+            # cleared (False) on turn_on — the only owner-authorized clear.
+            st2["evolution_owner_stopped"] = (not turn_on)
             # Owner-initiated evolution must not inherit a stale post-task one-shot
             # autostop, which would disable the owner's campaign after one cycle.
             st2["post_task_autostop"] = False
             ctx.save_state(st2)
             try:
-                from supervisor.evolution_lifecycle import pause_evolution_campaign, start_evolution_campaign
+                from supervisor.evolution_lifecycle import complete_evolution_campaign, start_evolution_campaign
 
                 if turn_on:
                     start_evolution_campaign(objective, source="owner_chat")
                 else:
-                    pause_evolution_campaign("disabled via owner chat")
+                    # Terminal close (not a resumable pause): /evolve start mints a FRESH
+                    # campaign rather than resurrecting this one.
+                    complete_evolution_campaign("disabled via owner chat", status="stopped")
             except Exception:
                 log.warning("Failed to update evolution campaign state", exc_info=True)
             if not turn_on:
                 # Cancel the live evolution worker too — pruning PENDING alone
                 # leaves a mid-cycle task running (and eligible for retry).
                 from supervisor.queue import cancel_running_evolution_tasks
+                from ouroboros.post_task_evolution import drop_pending_request
 
+                # Fast path: drop any queued post-task promotion so it cannot re-arm on
+                # the next boot tick (the evolution_owner_stopped flag is the durable backstop).
+                drop_pending_request(ctx.DRIVE_ROOT)
                 cancelled = cancel_running_evolution_tasks("disabled via owner chat")
                 ctx.PENDING[:] = [t for t in ctx.PENDING if str(t.get("type")) != "evolution"]
                 ctx.sort_pending()
@@ -739,7 +750,8 @@ def _process_bridge_updates(bridge, offset: int, ctx: Any) -> int:
                         chat_id,
                         f"🛑 Cancelled running evolution task(s): {', '.join(cancelled)}",
                     )
-            ctx.send_with_budget(chat_id, f"🧬 Evolution campaign: {'ON' if turn_on else 'OFF'}")
+            _evo_msg = "ON" if turn_on else "OFF — post-task auto-evolution also paused until /evolve start"
+            ctx.send_with_budget(chat_id, f"🧬 Evolution campaign: {_evo_msg}")
         elif lowered.startswith("/bg"):
             parts = lowered.split()
             action = parts[1] if len(parts) > 1 else "status"
