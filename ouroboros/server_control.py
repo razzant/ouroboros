@@ -91,10 +91,13 @@ def execute_panic_stop(
 
     # Terminal-close the campaign + drop any queued promotion. Each in its own guard so a
     # missing/locked file never blocks the panic hard-exit (the flag above is the durable gate).
+    # cleanup_worktree=False: the Emergency Stop Invariant (BIBLE) forbids delaying panic, so
+    # panic must NOT run the mid-cycle git stash/reset cleanup — the panic flag + boot reconcile
+    # own that recovery. (Graceful /evolve off + toggle do run the cleanup, after cancelling.)
     try:
         from supervisor.evolution_lifecycle import complete_evolution_campaign
 
-        complete_evolution_campaign("panic stop", status="stopped")
+        complete_evolution_campaign("panic stop", status="stopped", cleanup_worktree=False)
     except Exception:
         pass
     try:

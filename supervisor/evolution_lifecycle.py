@@ -112,7 +112,9 @@ def pause_evolution_campaign(reason: str = "") -> Dict[str, Any]:
     return campaign
 
 
-def complete_evolution_campaign(reason: str = "", *, status: str = "stopped") -> Dict[str, Any]:
+def complete_evolution_campaign(
+    reason: str = "", *, status: str = "stopped", cleanup_worktree: bool = True
+) -> Dict[str, Any]:
     """Terminally CLOSE the active campaign — the OWNER-stop counterpart of the
     resumable pause. ``status`` is non-{active,paused}, so a later ``/evolve start``
     mints a FRESH campaign instead of resurrecting this one. Archives + pops any
@@ -120,7 +122,12 @@ def complete_evolution_campaign(reason: str = "", *, status: str = "stopped") ->
     stopped campaign carries no dangling commit for a boot reconcile to absorb. The
     durable gate against autonomous re-arm is the ``evolution_owner_stopped`` state
     flag set at the owner-stop sites (read by ``apply_pending_request``); this terminal
-    status is the observability/audit marker plus a clean campaign. Never raises."""
+    status is the observability/audit marker plus a clean campaign. Never raises.
+
+    ``cleanup_worktree`` (default True) runs the deterministic per-cycle worktree reset
+    for an in-flight transaction. PANIC passes ``False``: the Emergency Stop Invariant
+    (BIBLE) forbids delaying panic, so panic must NOT run git stash/reset work before its
+    hard exit — the panic flag + boot reconcile own that recovery instead."""
     try:
         campaign = _read_evolution_campaign()
         if not campaign:
@@ -129,6 +136,20 @@ def complete_evolution_campaign(reason: str = "", *, status: str = "stopped") ->
         tx = campaign.get("active_transaction")
         if isinstance(tx, dict):
             tx = {**tx, "cycle_outcome": tx.get("cycle_outcome") or "owner_stopped"}
+            # Owner stop mid-cycle: this terminal 'stopped' status makes
+            # update_evolution_campaign_after_task early-return when the cancelled task's
+            # (async) task_done later fires, so the normal per-cycle worktree cleanup would
+            # be SKIPPED — leaking the abandoned, unreviewed evolution edits into the live
+            # repo. Run that same deterministic cleanup here before popping the tx. It is
+            # self-guarded (skips with a recorded reason while a task still holds the shared
+            # worktree — hence owner-stop sites cancel the running cycle BEFORE this close —
+            # kill-switch-able, never raises). SKIPPED under panic (cleanup_worktree=False):
+            # the Emergency Stop Invariant forbids any git work before the panic hard-exit.
+            if cleanup_worktree:
+                try:
+                    _cleanup_worktree_after_cycle(tx, str(tx.get("task_id") or ""))
+                except Exception:
+                    pass
             try:
                 append_unique_transaction(campaign, tx)
             except Exception:

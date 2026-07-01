@@ -2013,19 +2013,11 @@ def _handle_toggle_evolution(evt: Dict[str, Any], ctx: Any) -> None:
         live["post_task_autostop"] = False
 
     st = update_state(_toggle_evolution)
-    try:
-        from supervisor.evolution_lifecycle import complete_evolution_campaign, start_evolution_campaign
-
-        if enabled:
-            start_evolution_campaign(str(evt.get("objective") or ""), source="agent_tool")
-        else:
-            # Terminal close (not a resumable pause), so a later /evolve start mints fresh.
-            complete_evolution_campaign("disabled via agent tool", status="stopped")
-    except Exception:
-        log.debug("Failed to update evolution campaign toggle state", exc_info=True)
     if not enabled:
-        # Cancel the live evolution worker too — pruning PENDING alone leaves a
-        # mid-cycle task running (and eligible for retry).
+        # Cancel the live evolution worker BEFORE the terminal campaign close below:
+        # complete_evolution_campaign runs the per-cycle worktree cleanup, which skips
+        # while a task still holds the shared worktree — so the running cycle must be gone
+        # first (pruning PENDING alone leaves a mid-cycle task running and eligible for retry).
         from supervisor.queue import cancel_running_evolution_tasks
         from ouroboros.post_task_evolution import drop_pending_request
         from supervisor import state as _evo_state
@@ -2036,6 +2028,16 @@ def _handle_toggle_evolution(evt: Dict[str, Any], ctx: Any) -> None:
         ctx.PENDING[:] = [t for t in ctx.PENDING if str(t.get("type")) != "evolution"]
         ctx.sort_pending()
         ctx.persist_queue_snapshot(reason="evolve_off_via_tool")
+    try:
+        from supervisor.evolution_lifecycle import complete_evolution_campaign, start_evolution_campaign
+
+        if enabled:
+            start_evolution_campaign(str(evt.get("objective") or ""), source="agent_tool")
+        else:
+            # Terminal close (not a resumable pause), so a later /evolve start mints fresh.
+            complete_evolution_campaign("disabled via agent tool", status="stopped")
+    except Exception:
+        log.debug("Failed to update evolution campaign toggle state", exc_info=True)
     if st.get("owner_chat_id"):
         state_str = "ON" if enabled else "OFF — post-task auto-evolution also paused until /evolve start"
         ctx.send_with_budget(int(st["owner_chat_id"]), f"🧬 Evolution: {state_str} (via agent tool)")

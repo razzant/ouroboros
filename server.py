@@ -721,20 +721,11 @@ def _process_bridge_updates(bridge, offset: int, ctx: Any) -> int:
             # autostop, which would disable the owner's campaign after one cycle.
             st2["post_task_autostop"] = False
             ctx.save_state(st2)
-            try:
-                from supervisor.evolution_lifecycle import complete_evolution_campaign, start_evolution_campaign
-
-                if turn_on:
-                    start_evolution_campaign(objective, source="owner_chat")
-                else:
-                    # Terminal close (not a resumable pause): /evolve start mints a FRESH
-                    # campaign rather than resurrecting this one.
-                    complete_evolution_campaign("disabled via owner chat", status="stopped")
-            except Exception:
-                log.warning("Failed to update evolution campaign state", exc_info=True)
             if not turn_on:
-                # Cancel the live evolution worker too — pruning PENDING alone
-                # leaves a mid-cycle task running (and eligible for retry).
+                # Cancel the live evolution worker BEFORE the terminal campaign close below:
+                # complete_evolution_campaign runs the per-cycle worktree cleanup, which skips
+                # while a task still holds the shared worktree — so the running cycle must be
+                # gone first (pruning PENDING alone leaves a mid-cycle task running).
                 from supervisor.queue import cancel_running_evolution_tasks
                 from ouroboros.post_task_evolution import drop_pending_request
 
@@ -750,6 +741,17 @@ def _process_bridge_updates(bridge, offset: int, ctx: Any) -> int:
                         chat_id,
                         f"🛑 Cancelled running evolution task(s): {', '.join(cancelled)}",
                     )
+            try:
+                from supervisor.evolution_lifecycle import complete_evolution_campaign, start_evolution_campaign
+
+                if turn_on:
+                    start_evolution_campaign(objective, source="owner_chat")
+                else:
+                    # Terminal close (not a resumable pause): /evolve start mints a FRESH
+                    # campaign rather than resurrecting this one.
+                    complete_evolution_campaign("disabled via owner chat", status="stopped")
+            except Exception:
+                log.warning("Failed to update evolution campaign state", exc_info=True)
             _evo_msg = "ON" if turn_on else "OFF — post-task auto-evolution also paused until /evolve start"
             ctx.send_with_budget(chat_id, f"🧬 Evolution campaign: {_evo_msg}")
         elif lowered.startswith("/bg"):

@@ -460,12 +460,31 @@ def apply_pending_request(drive_root: Any) -> bool:
         from supervisor.state import update_state
 
         def _activate_one_shot(live: dict) -> None:
+            # Atomic re-check against a RACED owner stop: the earlier load_state()
+            # snapshot can be stale if an owner /evolve off / panic set the sentinel
+            # after it (panic can fire from another thread — the toggle/`/evolve` paths
+            # are already serialized ahead of this on the supervisor loop). Honor the
+            # LIVE flag inside the atomic update so evolution is never enabled against a
+            # fresh owner stop, even in that window.
+            if bool(live.get("evolution_owner_stopped")):
+                return
             live["evolution_mode_enabled"] = True
             live["evolution_consecutive_failures"] = 0
             live["post_task_autostop"] = True
 
-        update_state(_activate_one_shot)
+        st_after = update_state(_activate_one_shot)
         _safe_unlink(path)
+        if not bool(st_after.get("evolution_mode_enabled")):
+            # Owner stop won the race: the atomic re-check refused the enable. Terminal-
+            # close the campaign this now-stale path minted so no dangling active campaign
+            # survives, and do NOT audit a self-enable that did not happen. The durable
+            # sentinel keeps evolution off until an owner /evolve start.
+            try:
+                from supervisor.evolution_lifecycle import complete_evolution_campaign
+                complete_evolution_campaign("owner stop raced post-task enable", status="stopped")
+            except Exception:
+                pass
+            return False
         # Audit: this is the ONLY path that flips evolution_mode_enabled True without an
         # owner /evolve start. Record the cause + campaign id so any autonomous self-enable
         # is observable (the other True-writer is the owner /evolve handler).
