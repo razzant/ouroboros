@@ -27,6 +27,7 @@ from ouroboros.context_layout import (
 )
 from ouroboros.config import get_context_mode
 from ouroboros.contracts.task_contract import normalize_bool
+import ouroboros.resume as resume
 
 log = logging.getLogger(__name__)
 _LARGE_CONTEXT_SECTION_CHARS = LARGE_CONTEXT_SECTION_CHARS
@@ -1279,8 +1280,11 @@ def build_llm_messages(
                 },
             ],
         },
-        {"role": "user", "content": build_user_content(task)},
     ]
+    # Conversation-resume: splice the prior task's turns between the (fresh) system message and the
+    # new user turn, so successive submissions form one continuous, prompt-cacheable conversation.
+    messages.extend(resume.load_resume_turns(env, task))
+    messages.append({"role": "user", "content": build_user_content(task)})
 
     messages, cap_info = apply_message_token_soft_cap(messages, soft_cap_tokens)
     return messages, cap_info

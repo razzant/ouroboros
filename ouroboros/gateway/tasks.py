@@ -300,6 +300,7 @@ async def api_tasks_create(request: Request) -> JSONResponse:
         "chat_id": chat_id,
         "text": task_text,
         "description": description,
+        "resume_from_task_id": str(body.get("resume_from_task_id") or ""),
         "context": str(body.get("context") or ""),
         "expected_output": str(body.get("expected_output") or ""),
         "constraints": str(body.get("constraints") or ""),
