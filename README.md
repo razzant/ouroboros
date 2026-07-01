@@ -208,7 +208,7 @@ Settings now exposes tabbed provider cards for:
 - **OpenAI Compatible** — any custom OpenAI-style endpoint (use `openai-compatible::...`)
 - **Cloud.ru Foundation Models** — Cloud.ru OpenAI-compatible runtime (use `cloudru::...`)
 - **GigaChat** — Sber GigaChat via the `gigachat` library, OAuth key or user/password (use `gigachat::GigaChat-3-Ultra`, etc.)
-- **Anthropic** — direct runtime routing (`anthropic::claude-opus-4.8`, etc.) plus Claude Agent SDK tools
+- **Anthropic** — direct runtime routing (`anthropic::claude-opus-4.8`, etc.) plus Claude Agent SDK tools; Anthropic-compatible providers such as MiniMax Token Plan can use an Anthropic Base URL override with `anthropic::MiniMax-M3`
 
 If OpenRouter is not configured and only official OpenAI is present, untouched default model values are auto-remapped to `openai::gpt-5.5` / `openai::gpt-5.5-mini` so the first-run path does not strand the app on OpenRouter-only defaults.
 
@@ -217,6 +217,8 @@ The Settings page also includes:
 - optional `/api/model-catalog` lookup for configured providers
 - centralized Secrets storage for API keys, bridge tokens, passwords, and future skill-requested keys
 - a refactored desktop-first tabbed UI with searchable model pickers, segmented effort controls, task-result review mode, masked-secret toggles, explicit `Clear` actions, and local-model controls
+
+MiniMax Token Plan can be used through the Anthropic card without adding a separate MiniMax provider. Set the Anthropic API Key field to the MiniMax Token Plan key, set Anthropic Base URL override to `https://api.minimax.io/anthropic` (international) or `https://api.minimaxi.com/anthropic` (China), and use `anthropic::MiniMax-M3` in the runtime model slot. Ouroboros normalizes the direct runtime call to the provider's `/anthropic/v1/messages` endpoint and uses bearer-token Authorization for MiniMax-compatible direct Anthropic requests. Claude Agent SDK tooling receives `ANTHROPIC_AUTH_TOKEN` from the same saved secret, uses `MiniMax-M3[1m]` when the Claude Code model is still at the shipped default, and defaults `CLAUDE_CODE_AUTO_COMPACT_WINDOW` to `700000` for operational headroom. Set `CLAUDE_CODE_AUTO_COMPACT_WINDOW=1000000` only when you want the exact MiniMax Claude Code guide value. Clear conflicting shell `ANTHROPIC_AUTH_TOKEN` or `ANTHROPIC_BASE_URL` before launching Ouroboros because Claude Code gives shell env precedence over its settings.
 
 ### Run Tests
 
@@ -435,7 +437,7 @@ Created on first launch:
 | OpenAI Compatible API Key / Base URL | No | Any OpenAI-style endpoint (proxy, self-hosted gateway, third-party compatible API) |
 | Cloud.ru Foundation Models API Key | No | Cloud.ru Foundation Models provider |
 | GigaChat Authorization Key (or User/Password) | No | [developers.sber.ru/studio](https://developers.sber.ru/studio) — Sber GigaChat (`GIGACHAT_CREDENTIALS` + optional `GIGACHAT_SCOPE`, or `GIGACHAT_USER`/`GIGACHAT_PASSWORD`) |
-| Anthropic API Key | No | [console.anthropic.com](https://console.anthropic.com/settings/keys) — direct Anthropic runtime + Claude Agent SDK |
+| Anthropic API Key | No | [console.anthropic.com](https://console.anthropic.com/settings/keys) — direct Anthropic runtime + Claude Agent SDK; for MiniMax Token Plan, use the MiniMax key with Anthropic Base URL override `https://api.minimax.io/anthropic` or `https://api.minimaxi.com/anthropic` |
 | Telegram Bot Token | No | [@BotFather](https://t.me/BotFather) — used by the optional Telegram bridge skill |
 | GitHub Token | No | [github.com/settings/tokens](https://github.com/settings/tokens) — enables remote sync |
 
@@ -451,7 +453,7 @@ All keys are configured through the **Settings** page in the UI or during the fi
 | Vision | empty → Main | Caption/VLM lane (`OUROBOROS_MODEL_VISION`, empty falls back to Main for remote routes; local/blind routes need an explicit reachable vision slot for caption fallback); image input routing is controlled by `OUROBOROS_IMAGE_INPUT_MODE=auto|caption|inline|off` |
 | Consciousness | empty → Main | High-horizon background consciousness |
 | Fallbacks | `anthropic/claude-sonnet-4.6` | Comma-separated cross-model fallback chain when the primary fails (`OUROBOROS_MODEL_FALLBACKS`) |
-| Claude Agent SDK | `opus[1m]` | Anthropic model for Claude Agent SDK advisory/review internals; the `[1m]` suffix is a Claude Code selector that requests the 1M-context extended mode |
+| Claude Agent SDK | `opus[1m]` | Anthropic model for Claude Agent SDK advisory/review internals; the `[1m]` suffix is a Claude Code selector that requests the 1M-context extended mode. With a MiniMax Anthropic Base URL override, the default is translated to `MiniMax-M3[1m]`; direct runtime slots should use `anthropic::MiniMax-M3` instead. |
 | Scope Review | `openai/gpt-5.5` | Scope reviewer slot default; `OUROBOROS_SCOPE_REVIEW_MODELS` may configure multiple independent slots |
 | Web Search | `gpt-5.2` | OpenAI Responses API for web search |
 

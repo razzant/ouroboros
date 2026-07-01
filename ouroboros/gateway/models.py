@@ -12,6 +12,11 @@ from starlette.requests import Request
 from starlette.responses import JSONResponse
 
 from ouroboros.config import load_settings
+from ouroboros.anthropic_compat import (
+    anthropic_models_url,
+    is_minimax_anthropic_base_url,
+    normalize_anthropic_base_url,
+)
 from ouroboros.gateway._helpers import json_error, json_exception
 
 log = logging.getLogger(__name__)
@@ -129,13 +134,26 @@ async def _fetch_openai_compatible_model_catalog(
 async def _fetch_anthropic_model_catalog(
     client: httpx.AsyncClient,
     api_key: str,
+    base_url: str = "",
 ) -> list[dict[str, str]]:
+    effective_base_url = normalize_anthropic_base_url(base_url)
+    if is_minimax_anthropic_base_url(effective_base_url):
+        return [
+            _build_model_catalog_entry(
+                "anthropic",
+                "MiniMax Token Plan",
+                "MiniMax-M3",
+                "MiniMax-M3",
+                source="MiniMax Anthropic-compatible",
+            )
+        ]
+    headers = {
+        "anthropic-version": "2023-06-01",
+    }
+    headers["x-api-key"] = api_key
     response = await client.get(
-        "https://api.anthropic.com/v1/models",
-        headers={
-            "x-api-key": api_key,
-            "anthropic-version": "2023-06-01",
-        },
+        anthropic_models_url(effective_base_url),
+        headers=headers,
     )
     response.raise_for_status()
     data = response.json()
@@ -222,7 +240,14 @@ def _provider_specs(
 
     anthropic_api_key = str(settings.get("ANTHROPIC_API_KEY", "") or "").strip()
     if anthropic_api_key:
-        specs.append(("anthropic", lambda client: _fetch_anthropic_model_catalog(client, anthropic_api_key)))
+        anthropic_base_url = str(settings.get("ANTHROPIC_BASE_URL", "") or "").strip()
+        if anthropic_base_url:
+            specs.append((
+                "anthropic",
+                lambda client: _fetch_anthropic_model_catalog(client, anthropic_api_key, anthropic_base_url),
+            ))
+        else:
+            specs.append(("anthropic", lambda client: _fetch_anthropic_model_catalog(client, anthropic_api_key)))
 
     compatible_api_key = str(settings.get("OPENAI_COMPATIBLE_API_KEY", "") or "").strip()
     compatible_base_url = str(settings.get("OPENAI_COMPATIBLE_BASE_URL", "") or "").strip()

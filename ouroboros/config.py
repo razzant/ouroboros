@@ -18,6 +18,12 @@ from typing import Any, Optional
 from ouroboros.platform_layer import pid_lock_acquire as _compat_pid_lock_acquire
 from ouroboros.platform_layer import pid_lock_release as _compat_pid_lock_release
 from ouroboros.provider_models import compute_direct_review_models_fallback, migrate_model_value
+from ouroboros.anthropic_compat import (
+    MINIMAX_CLAUDE_MODEL,
+    is_minimax_anthropic_base_url,
+    minimax_claude_compact_window,
+    normalize_anthropic_base_url,
+)
 
 
 # Paths
@@ -78,6 +84,8 @@ SETTINGS_DEFAULTS = {
     "GIGACHAT_VERIFY_SSL_CERTS": "true",
     "GIGACHAT_PROFANITY_CHECK": "",
     "ANTHROPIC_API_KEY": "",
+    "ANTHROPIC_BASE_URL": "",
+    "CLAUDE_CODE_AUTO_COMPACT_WINDOW": "",
 
     "OUROBOROS_NETWORK_PASSWORD": "",
     "OUROBOROS_SERVER_HOST": "127.0.0.1",
@@ -1311,7 +1319,7 @@ def apply_settings_to_env(settings: dict) -> None:
         "GIGACHAT_CREDENTIALS", "GIGACHAT_USER", "GIGACHAT_PASSWORD",
         "GIGACHAT_SCOPE", "GIGACHAT_BASE_URL", "GIGACHAT_VERIFY_SSL_CERTS",
         "GIGACHAT_PROFANITY_CHECK",
-        "ANTHROPIC_API_KEY",
+        "ANTHROPIC_API_KEY", "ANTHROPIC_BASE_URL", "CLAUDE_CODE_AUTO_COMPACT_WINDOW",
         "OUROBOROS_NETWORK_PASSWORD",
         "OUROBOROS_MODEL", "OUROBOROS_MODEL_HEAVY", "OUROBOROS_MODEL_LIGHT", "OUROBOROS_MODEL_VISION",
         "OUROBOROS_MODEL_CONSCIOUSNESS",
@@ -1382,6 +1390,47 @@ def apply_settings_to_env(settings: dict) -> None:
             os.environ.pop(k, None)
         else:
             os.environ[k] = str(val)
+    try:
+        anthropic_base_url = normalize_anthropic_base_url(settings.get("ANTHROPIC_BASE_URL") or "")
+    except ValueError:
+        anthropic_base_url = str(settings.get("ANTHROPIC_BASE_URL") or "").strip()
+    if is_minimax_anthropic_base_url(anthropic_base_url):
+        raw_base_url = str(settings.get("ANTHROPIC_BASE_URL") or "").strip().rstrip("/")
+        api_key = str(settings.get("ANTHROPIC_API_KEY") or "").strip()
+        if api_key:
+            os.environ["ANTHROPIC_AUTH_TOKEN"] = api_key
+        else:
+            os.environ.pop("ANTHROPIC_AUTH_TOKEN", None)
+        # Claude Code follows the documented owner-facing MiniMax base URL and
+        # appends its own API path; the handwritten direct runtime separately
+        # normalizes this to the /v1 Messages endpoint.
+        os.environ["ANTHROPIC_BASE_URL"] = raw_base_url or anthropic_base_url
+        compact_window = minimax_claude_compact_window(
+            settings.get("CLAUDE_CODE_AUTO_COMPACT_WINDOW")
+        )
+        os.environ["CLAUDE_CODE_AUTO_COMPACT_WINDOW"] = compact_window
+        configured_model = str(settings.get("CLAUDE_CODE_MODEL") or "").strip()
+        default_model = str(SETTINGS_DEFAULTS.get("CLAUDE_CODE_MODEL") or "").strip()
+        claude_model = configured_model if configured_model and configured_model != default_model else MINIMAX_CLAUDE_MODEL
+        os.environ["CLAUDE_CODE_MODEL"] = claude_model
+        for key in (
+            "ANTHROPIC_MODEL",
+            "ANTHROPIC_DEFAULT_SONNET_MODEL",
+            "ANTHROPIC_DEFAULT_OPUS_MODEL",
+            "ANTHROPIC_DEFAULT_HAIKU_MODEL",
+        ):
+            os.environ[key] = claude_model
+    else:
+        os.environ.pop("ANTHROPIC_AUTH_TOKEN", None)
+        for key in (
+            "ANTHROPIC_MODEL",
+            "ANTHROPIC_DEFAULT_SONNET_MODEL",
+            "ANTHROPIC_DEFAULT_OPUS_MODEL",
+            "ANTHROPIC_DEFAULT_HAIKU_MODEL",
+        ):
+            os.environ.pop(key, None)
+        if not str(settings.get("CLAUDE_CODE_AUTO_COMPACT_WINDOW") or "").strip():
+            os.environ.pop("CLAUDE_CODE_AUTO_COMPACT_WINDOW", None)
     if not os.environ.get("OUROBOROS_REVIEW_MODELS"):
         os.environ["OUROBOROS_REVIEW_MODELS"] = str(SETTINGS_DEFAULTS["OUROBOROS_REVIEW_MODELS"])
     if not os.environ.get("OUROBOROS_REVIEW_ENFORCEMENT"):

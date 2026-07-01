@@ -460,6 +460,13 @@ def _active_main_route(
         base_url = str(settings.get("OPENAI_BASE_URL") or "")
     elif provider == "openai-compatible":
         base_url = str(settings.get("OPENAI_COMPATIBLE_BASE_URL") or "")
+    elif provider == "anthropic":
+        try:
+            from ouroboros.anthropic_compat import normalize_anthropic_base_url
+
+            base_url = normalize_anthropic_base_url(settings.get("ANTHROPIC_BASE_URL") or "")
+        except Exception:
+            base_url = str(settings.get("ANTHROPIC_BASE_URL") or "")
     elif provider == "cloudru":
         base_url = str(settings.get("CLOUDRU_FOUNDATION_MODELS_BASE_URL") or "")
     elif provider == "gigachat":

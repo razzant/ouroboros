@@ -78,7 +78,11 @@ MAX_FUNCTION_LINES = 300
 # v6.53.0 benchmark-generalization hardening adds small typed helpers for Observable Acceptance Claims,
 # support_refs, GAIA profiles, media frame extraction, VLM timeout wrapping, and workspace inheritance.
 # Cap intentionally moves with a small headroom rather than hiding growth elsewhere.
-MAX_TOTAL_FUNCTIONS = 3636
+# MiniMax Anthropic-compatible support +5 = 3641: isolated URL/auth/env/catalog
+# helpers in anthropic_compat.py keep direct-runtime endpoint construction,
+# model-catalog routing, and Claude tooling env propagation shared and testable
+# rather than duplicating provider checks inline.
+MAX_TOTAL_FUNCTIONS = 3641
 GRANDFATHERED_OVERSIZED_FUNCTIONS = {
     ("agent_startup_checks.py", "verify_restart"),  # managed #53 boot diagnostic flow, 307 lines
     ("git.py", "_run_reviewed_stage_cycle"),  # reviewed-commit gate orchestration, 302 lines

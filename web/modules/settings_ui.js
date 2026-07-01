@@ -102,8 +102,12 @@ const PROVIDER_CARDS = [
     },
     {
         id: 'anthropic', title: 'Anthropic', icon: '/static/providers/anthropic.png', hint: 'Direct runtime plus Claude tooling',
-        fields: [{ id: 's-anthropic', settingKey: 'ANTHROPIC_API_KEY', label: 'Anthropic API Key', placeholder: 'sk-ant-...' }],
-        note: 'Use model values like <code>anthropic::claude-sonnet-4-6</code> in the Models tab to route models directly through Anthropic. Claude tooling still reuses this key.',
+        fields: [
+            { id: 's-anthropic', settingKey: 'ANTHROPIC_API_KEY', label: 'Anthropic API Key / compatible auth token', placeholder: 'sk-ant-... or MiniMax Token Plan key' },
+            { id: 's-anthropic-base-url', label: 'Anthropic Base URL override', placeholder: 'https://api.minimax.io/anthropic' },
+            { id: 's-claude-auto-compact-window', label: 'Claude auto-compact window override', placeholder: 'blank = 700000 for MiniMax, 1000000 = exact MiniMax docs' },
+        ],
+        note: 'Use model values like <code>anthropic::claude-sonnet-4-6</code> for official Anthropic or <code>anthropic::MiniMax-M3</code> for MiniMax Token Plan. MiniMax documented base URLs are <code>https://api.minimax.io/anthropic</code> and <code>https://api.minimaxi.com/anthropic</code>; direct runtime calls their <code>/v1/messages</code> endpoint. Claude tooling receives <code>ANTHROPIC_AUTH_TOKEN</code>, <code>MiniMax-M3[1m]</code>, and a safer default auto-compact window of <code>700000</code>. Existing shell <code>ANTHROPIC_AUTH_TOKEN</code>/<code>ANTHROPIC_BASE_URL</code> can override Claude Code settings, so clear conflicting shell env vars before launch.',
         extra: `
             <div class="settings-toolbar" id="settings-claude-code-panel" hidden>
                 <button type="button" class="settings-ghost-btn" id="btn-claude-code-install">Repair Runtime</button>

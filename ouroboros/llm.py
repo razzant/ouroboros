@@ -11,6 +11,11 @@ import time
 import copy
 from typing import Any, Dict, List, Optional, Set, Tuple
 
+from ouroboros.anthropic_compat import (
+    anthropic_messages_url,
+    is_minimax_anthropic_base_url,
+    normalize_anthropic_base_url,
+)
 from ouroboros.provider_models import PROVIDER_PREFIXES, normalize_anthropic_model_id, normalize_model_identity
 from ouroboros.utils import in_worker_process
 
@@ -592,12 +597,15 @@ class LLMClient:
 
         if provider == "anthropic":
             resolved_model = normalize_anthropic_model_id(resolved_model)
+            raw_base_url = os.environ.get("ANTHROPIC_BASE_URL", "")
+            base_url = normalize_anthropic_base_url(raw_base_url)
             return {
                 "provider": provider,
                 "resolved_model": resolved_model,
                 "usage_model": self._qualified_model_name(provider, resolved_model),
                 "api_key": os.environ.get("ANTHROPIC_API_KEY", ""),
-                "base_url": "https://api.anthropic.com/v1",
+                "base_url": base_url,
+                "auth_scheme": "bearer" if is_minimax_anthropic_base_url(base_url) else "x-api-key",
                 "default_headers": {},
                 "supports_openrouter_extensions": False,
                 "supports_generation_cost": False,
@@ -2081,12 +2089,16 @@ class LLMClient:
             payload.get("tools"),
         )
 
-        url = f"{str(target.get('base_url') or '').rstrip('/')}/messages"
+        url = anthropic_messages_url(target.get("base_url") or "")
         headers = {
-            "x-api-key": str(target.get("api_key") or ""),
             "anthropic-version": "2023-06-01",
             "content-type": "application/json",
         }
+        api_key = str(target.get("api_key") or "")
+        if str(target.get("auth_scheme") or "").strip().lower() == "bearer":
+            headers["Authorization"] = f"Bearer {api_key}"
+        else:
+            headers["x-api-key"] = api_key
         request_timeout = float(timeout) if timeout and timeout > 0 else 120
 
         def _send(candidate: Dict[str, Any]):
