@@ -1281,9 +1281,15 @@ def build_llm_messages(
             ],
         },
     ]
-    # Conversation-resume: splice the prior task's turns between the (fresh) system message and the
-    # new user turn, so successive submissions form one continuous, prompt-cacheable conversation.
-    messages.extend(resume.load_resume_turns(env, task))
+    # Conversation-resume. CONTINUATION mode (the DEFAULT; the true CC --resume analog)
+    # re-enters the STORED conversation — original system message verbatim, append-only;
+    # SPLICE mode (explicit resume_mode=splice) splices the prior turns between the fresh
+    # system message and the new user turn.
+    _continuation = resume.load_continuation(env, task)
+    if _continuation:
+        messages = _continuation
+    else:
+        messages.extend(resume.load_resume_turns(env, task))
     messages.append({"role": "user", "content": build_user_content(task)})
 
     messages, cap_info = apply_message_token_soft_cap(messages, soft_cap_tokens)

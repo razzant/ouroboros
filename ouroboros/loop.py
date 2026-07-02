@@ -23,6 +23,7 @@ from ouroboros.context_budget import EMERGENCY_COMPACTION_CHARS, LOW_EMERGENCY_C
 from ouroboros.context_compaction import _tool_round_spans, compact_tool_history_llm
 from ouroboros.deadline_utils import parse_deadline_ts, utc_now
 from ouroboros.utils import estimate_tokens
+import ouroboros.resume as resume
 
 from ouroboros.loop_tool_execution import (
     StatefulToolExecutor,
@@ -2153,7 +2154,7 @@ def run_llm_loop(
                 event_queue=event_queue, task_id=task_id, drive_logs=drive_logs,
             )
 
-            messages, _compaction_usage = _run_round_compaction(
+            _compacted, _compaction_usage = _run_round_compaction(
                 messages,
                 _CompactionRoundContext(
                     tools=tools,
@@ -2169,6 +2170,11 @@ def run_llm_loop(
                     active_model=active_model,
                 ),
             )
+            if _compacted is not messages:
+                # Mutate IN PLACE (not rebind): the caller (agent.py) holds a reference to
+                # this list — resume.capture / note_final_msg must see the COMPACTED
+                # transcript, not a stale pre-compaction snapshot.
+                messages[:] = _compacted
             if tools._ctx.messages is not messages:
                 tools._ctx.messages = messages
             limit_ctx.messages = messages  # WA2: provider-death finalize must salvage the COMPACTED transcript
@@ -2260,6 +2266,9 @@ def run_llm_loop(
                     emit_progress=emit_progress,
                 ):
                     continue
+                # Conversation-resume capture fidelity: persist the FULL provider msg for this
+                # final turn (reasoning/response_id) — no-op unless OUROBOROS_RESUME_CAPTURE.
+                resume.note_final_msg(messages, msg)
                 return _no_tool_final_answer(content, limit_ctx, llm_trace, accumulated_usage)
 
             if getattr(tools._ctx, "_skill_finalization_injected", False):

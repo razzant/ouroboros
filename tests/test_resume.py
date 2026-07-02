@@ -20,17 +20,23 @@ def _capture_env(monkeypatch, tmp_path):
     monkeypatch.setenv("OUROBOROS_DATA_DIR", str(tmp_path))
 
 
-def test_capture_load_round_trip(monkeypatch, tmp_path):
+def test_capture_load_round_trip_default_is_continuation(monkeypatch, tmp_path):
     _capture_env(monkeypatch, tmp_path)
     resume.capture(None, "taskA",
                    [{"role": "system", "content": "sys"},
                     {"role": "user", "content": "remember BANANA-42"}],
                    "ok, BANANA-42 stored")
-    turns = resume.load_resume_turns(None, {"resume_from_task_id": "taskA"})
+    # DEFAULT (no resume_mode) = CONTINUATION: original system comes back verbatim
+    turns = resume.load_continuation(None, {"resume_from_task_id": "taskA"})
     roles = [t.get("role") for t in turns]
-    # prior system turn dropped; user + appended closing assistant remain
-    assert roles == ["user", "assistant"]
+    assert roles == ["system", "user", "assistant"]
+    assert turns[0]["content"] == "sys"                          # verbatim
     assert any(t["role"] == "assistant" and "BANANA-42" in str(t["content"]) for t in turns)
+    # and the splice loader stays out of the way unless explicitly requested
+    assert resume.load_resume_turns(None, {"resume_from_task_id": "taskA"}) == []
+    spliced = resume.load_resume_turns(None, {"resume_from_task_id": "taskA",
+                                              "resume_mode": "splice"})
+    assert [x["role"] for x in spliced] == ["user", "assistant"]  # legacy splice drops system
 
 
 def test_capture_appends_closing_assistant_turn(monkeypatch, tmp_path):
@@ -100,14 +106,16 @@ def test_load_drops_prior_system_turn(monkeypatch, tmp_path):
                    [{"role": "system", "content": "old system"},
                     {"role": "user", "content": "u"}],
                    "a")
-    turns = resume.load_resume_turns(None, {"resume_from_task_id": "t"})
+    turns = resume.load_resume_turns(None, {"resume_from_task_id": "t",
+                                            "resume_mode": "splice"})
     assert all(t["role"] != "system" for t in turns)
 
 
 def test_load_marks_cache_breakpoint_at_end(monkeypatch, tmp_path):
     _capture_env(monkeypatch, tmp_path)
     resume.capture(None, "t", [{"role": "user", "content": "u"}], "final")
-    turns = resume.load_resume_turns(None, {"resume_from_task_id": "t"})
+    turns = resume.load_resume_turns(None, {"resume_from_task_id": "t",
+                                            "resume_mode": "splice"})
     last = turns[-1]
     # string content is promoted to a text block carrying the ephemeral breakpoint
     assert isinstance(last["content"], list)
@@ -118,11 +126,13 @@ def test_load_empty_when_no_resume_id(monkeypatch, tmp_path):
     monkeypatch.setenv("OUROBOROS_DATA_DIR", str(tmp_path))
     assert resume.load_resume_turns(None, {}) == []
     assert resume.load_resume_turns(None, {"resume_from_task_id": ""}) == []
+    assert resume.load_continuation(None, {}) == []
+    assert resume.load_continuation(None, {"resume_from_task_id": ""}) == []
 
 
 def test_load_empty_when_file_missing(monkeypatch, tmp_path):
     monkeypatch.setenv("OUROBOROS_DATA_DIR", str(tmp_path))
-    assert resume.load_resume_turns(None, {"resume_from_task_id": "never_captured"}) == []
+    assert resume.load_continuation(None, {"resume_from_task_id": "never_captured"}) == []
 
 
 def test_path_traversal_guard(monkeypatch, tmp_path):
@@ -130,4 +140,135 @@ def test_path_traversal_guard(monkeypatch, tmp_path):
     # interpolated into a filesystem path — reject anything that could escape the resume dir.
     monkeypatch.setenv("OUROBOROS_DATA_DIR", str(tmp_path))
     for bad in ["../evil", "..", "a/b", "a\\b", ".hidden", "../../etc/passwd"]:
-        assert resume.load_resume_turns(None, {"resume_from_task_id": bad}) == []
+        assert resume.load_continuation(None, {"resume_from_task_id": bad}) == []
+        assert resume.load_resume_turns(None, {"resume_from_task_id": bad,
+                                               "resume_mode": "splice"}) == []
+
+
+# ---------------------------------------------------------------- continuation mode
+
+def _mk_capture(tmp_path, tid="tA", msgs=None):
+    (tmp_path / "state" / "resume").mkdir(parents=True, exist_ok=True)
+    default = [
+        {"role": "system", "content": [
+            {"type": "text", "text": "STATIC", "cache_control": {"type": "ephemeral"}},
+            {"type": "text", "text": "DYNAMIC"},
+        ]},
+        {"role": "user", "content": "q1"},
+        {"role": "assistant", "content": [
+            {"type": "text", "text": "a1", "cache_control": {"type": "ephemeral"}}]},
+    ]
+    (tmp_path / "state" / "resume" / f"{tid}.json").write_text(
+        json.dumps({"messages": msgs if msgs is not None else default}))
+
+
+def test_continuation_returns_stored_system_verbatim(monkeypatch, tmp_path):
+    # CC --resume analog: the ORIGINAL system message comes back byte-identical (its own
+    # cache_control breakpoints preserved) so the prefix is byte-stable => prompt-cache hits.
+    monkeypatch.setenv("OUROBOROS_DATA_DIR", str(tmp_path))
+    _mk_capture(tmp_path)
+    turns = resume.load_continuation(None, {"resume_from_task_id": "tA",
+                                            "resume_mode": "continuation"})
+    assert turns and turns[0]["role"] == "system"
+    assert turns[0]["content"][0]["cache_control"] == {"type": "ephemeral"}  # verbatim
+    assert turns[0]["content"][0]["text"] == "STATIC"
+    # non-system turns: stale breakpoints dropped, ONE fresh one at the end of the prefix
+    assert turns[1]["role"] == "user" and turns[2]["role"] == "assistant"
+    assert turns[-1]["content"][-1].get("cache_control") == {"type": "ephemeral"}
+    mid_blocks = [b for t in turns[1:-1] for b in
+                  (t["content"] if isinstance(t["content"], list) else [])]
+    assert all("cache_control" not in b for b in mid_blocks if isinstance(b, dict))
+
+
+def test_mode_selection_continuation_default_splice_explicit(monkeypatch, tmp_path):
+    monkeypatch.setenv("OUROBOROS_DATA_DIR", str(tmp_path))
+    _mk_capture(tmp_path)
+    # DEFAULT (no mode) = continuation fires, splice stays out of the way
+    assert resume.load_continuation(None, {"resume_from_task_id": "tA"}) != []
+    assert resume.load_resume_turns(None, {"resume_from_task_id": "tA"}) == []
+    # explicit continuation identical to default
+    assert resume.load_continuation(None, {"resume_from_task_id": "tA",
+                                           "resume_mode": "continuation"}) != []
+    # splice ONLY on explicit opt-in, and it still drops the system turn
+    assert resume.load_continuation(None, {"resume_from_task_id": "tA",
+                                           "resume_mode": "splice"}) == []
+    spliced = resume.load_resume_turns(None, {"resume_from_task_id": "tA",
+                                              "resume_mode": "splice"})
+    assert spliced and all(t["role"] != "system" for t in spliced)
+    # unknown mode falls back LOUDLY to the default (continuation)
+    assert resume.load_continuation(None, {"resume_from_task_id": "tA",
+                                           "resume_mode": "continuatoin"}) != []
+
+
+def test_continuation_without_system_falls_back_empty(monkeypatch, tmp_path):
+    monkeypatch.setenv("OUROBOROS_DATA_DIR", str(tmp_path))
+    _mk_capture(tmp_path, msgs=[{"role": "user", "content": "q"},
+                                {"role": "assistant", "content": "a"}])
+    assert resume.load_continuation(None, {"resume_from_task_id": "tA",
+                                           "resume_mode": "continuation"}) == []
+
+
+def test_continuation_path_traversal_guard(monkeypatch, tmp_path):
+    monkeypatch.setenv("OUROBOROS_DATA_DIR", str(tmp_path))
+    for bad in ["../evil", "..", "a/b", ".hidden"]:
+        assert resume.load_continuation(None, {"resume_from_task_id": bad,
+                                               "resume_mode": "continuation"}) == []
+
+
+# ------------------------------------------------------------ note_final_msg hook
+
+def test_note_final_msg_appends_full_msg_when_armed(monkeypatch):
+    monkeypatch.setenv("OUROBOROS_RESUME_CAPTURE", "1")
+    messages = [{"role": "user", "content": "q"}]
+    msg = {"role": "assistant", "content": "final", "tool_calls": None,
+           "reasoning_details": [{"type": "reasoning.text", "text": "t", "signature": "s"}],
+           "response_id": "gen-123", "cache_control": {"type": "ephemeral"}}
+    resume.note_final_msg(messages, msg)
+    last = messages[-1]
+    assert last["reasoning_details"][0]["signature"] == "s"   # fidelity preserved
+    assert last["response_id"] == "gen-123"
+    assert "tool_calls" not in last                            # None values dropped
+    assert "cache_control" not in last                         # stale breakpoint dropped
+    assert last["content"] == "final"
+
+
+def test_note_final_msg_noop_when_capture_disarmed(monkeypatch):
+    monkeypatch.delenv("OUROBOROS_RESUME_CAPTURE", raising=False)
+    messages = [{"role": "user", "content": "q"}]
+    resume.note_final_msg(messages, {"role": "assistant", "content": "x"})
+    assert len(messages) == 1                                  # normal runs untouched
+
+
+def test_note_final_msg_then_capture_no_duplicate(monkeypatch, tmp_path):
+    # loop appends the full final msg via the hook; capture's append-guard must then NOT
+    # add a second bare-text assistant turn.
+    _capture_env(monkeypatch, tmp_path)
+    messages = [{"role": "user", "content": "q"}]
+    resume.note_final_msg(messages, {"role": "assistant", "content": "final",
+                                     "reasoning": "think"})
+    resume.capture(None, "t", messages, "final")
+    msgs = json.loads((tmp_path / "state" / "resume" / "t.json").read_text())["messages"]
+    assert [m["role"] for m in msgs] == ["user", "assistant"]
+    assert msgs[-1].get("reasoning") == "think"                # full msg won, not bare text
+
+
+# ------------------------------------------------------------------ chain trim
+
+def test_continuation_trims_oldest_when_over_cap(monkeypatch, tmp_path):
+    monkeypatch.setenv("OUROBOROS_DATA_DIR", str(tmp_path))
+    monkeypatch.setenv("OUROBOROS_RESUME_MAX_CHARS", "2000")
+    msgs = [{"role": "system", "content": "SYS"}]
+    for i in range(20):  # ~20 x ~120 chars >> 2000 cap
+        msgs.append({"role": "user", "content": f"question {i} " + "x" * 80})
+        msgs.append({"role": "assistant", "content": f"answer {i} " + "y" * 80})
+    _mk_capture(tmp_path, msgs=msgs)
+    turns = resume.load_continuation(None, {"resume_from_task_id": "tA"})
+    assert turns[0]["role"] == "system" and turns[0]["content"] == "SYS"  # system survives
+    assert "omitted to fit the context window" in str(turns[1]["content"])  # explicit note
+    joined = str(turns)
+    assert "question 19" in joined            # newest kept
+    assert "question 0 " not in joined        # oldest dropped
+    # under the cap -> untouched, no note
+    monkeypatch.setenv("OUROBOROS_RESUME_MAX_CHARS", "600000")
+    turns2 = resume.load_continuation(None, {"resume_from_task_id": "tA"})
+    assert "omitted" not in str(turns2[1].get("content"))
