@@ -61,36 +61,37 @@ def test_capture_is_opt_in(monkeypatch, tmp_path):
     assert not (tmp_path / "state" / "resume" / "t.json").exists()
 
 
-def test_sanitize_preserves_tool_calls_drops_reasoning():
-    # H1: structural keys (tool_calls/tool_call_id/name) survive replay; provider-private
-    # reasoning + cache metadata are dropped (they do not survive a fresh API call).
+def test_sanitize_preserves_reasoning_and_tool_calls_drops_only_cache():
+    # Mirror the live-path replay policy: preserve structural keys (tool_calls/name) AND
+    # reasoning continuity (reasoning_details); drop ONLY cache_control (stale breakpoints).
     out = resume.sanitize_turn({
         "role": "assistant",
         "content": "x",
         "tool_calls": [{"id": "c1"}],
         "name": "f",
-        "reasoning_details": "secret",
-        "signature": "sig",
+        "reasoning_details": [{"type": "reasoning.text", "text": "plan", "signature": "sig"}],
         "cache_control": {"type": "ephemeral"},
     })
     assert out["tool_calls"] == [{"id": "c1"}]
     assert out["name"] == "f"
-    assert "reasoning_details" not in out
-    assert "signature" not in out
+    assert out["reasoning_details"][0]["signature"] == "sig"   # reasoning continuity preserved
     assert "cache_control" not in out
 
 
-def test_sanitize_strips_thinking_blocks():
+def test_sanitize_preserves_thinking_blocks_with_signatures():
+    # Same-model replay accepts thinking blocks; Anthropic signatures are cross-provider
+    # portable (llm.py live probe). Keep them; strip only the stale cache_control.
     out = resume.sanitize_turn({
         "role": "assistant",
         "content": [
-            {"type": "thinking", "thinking": "...", "signature": "s"},
+            {"type": "thinking", "thinking": "reasoning...", "signature": "s"},
             {"type": "text", "text": "answer", "cache_control": {"type": "ephemeral"}},
         ],
     })
     kinds = [b.get("type") for b in out["content"]]
-    assert kinds == ["text"]
-    assert "cache_control" not in out["content"][0]
+    assert kinds == ["thinking", "text"]                       # thinking block kept
+    assert out["content"][0]["signature"] == "s"               # with its signature
+    assert all("cache_control" not in b for b in out["content"])
 
 
 def test_load_drops_prior_system_turn(monkeypatch, tmp_path):

@@ -14,11 +14,16 @@ prior completed task, instead of starting cold. Two seams:
 This module is deliberately self-contained (json, os, pathlib, logging only) so it ports
 verbatim across Ouroboros versions — the core only needs 3 thin hooks calling into it.
 
-Invariants (extracted VERBATIM from feat/conversation-resume, do not change):
-  * The sanitize blocklist drops provider-private reasoning/cache metadata
-    (reasoning_details, reasoning_content, reasoning, response_id, signature, cache_control)
-    but PRESERVES structural keys tool_calls/tool_call_id/name (H1 — dropping tool_calls
-    causes provider 400s on replay).
+Invariants:
+  * Sanitize mirrors the LIVE-path replay policy (llm.py): PRESERVE reasoning continuity —
+    reasoning/reasoning_details and thinking blocks WITH their signatures are replayed
+    verbatim on resume, exactly as the in-task loop replays them. Anthropic thinking-block
+    signatures are live-probe-verified portable across OpenRouter providers
+    (llm.py _reasoning_signature_portable_across_or_providers), and the llm layer's
+    reactive 400 strip-and-retry is the safety net for any family that rejects a replayed
+    signature. Only ``cache_control`` is dropped (stale breakpoints from the prior task
+    would fight the fresh breakpoint placed below; max 4 per request). Structural keys
+    tool_calls/tool_call_id/name are preserved (dropping tool_calls 400s on replay).
   * The path-traversal guard rejects resume_from_task_id containing "/", "\\", a leading
     ".", or ".." and enforces containment under the resume dir (H2).
   * One ephemeral cache_control breakpoint at the end of the replayed turns.
@@ -35,16 +40,18 @@ from typing import Any, Dict, List
 
 log = logging.getLogger(__name__)
 
-_RESUME_DROP_TOP = ("reasoning_details", "reasoning_content", "reasoning", "response_id",
-                    "signature", "cache_control")
+_RESUME_DROP_TOP = ("cache_control",)
 
 
 def sanitize_turn(m: Dict[str, Any]) -> Dict[str, Any]:
-    """Resume: PRESERVE the turn's structural keys (role, content, tool_calls, tool_call_id, name — the
-    engine's native OpenAI-style format) so tool_call/tool_result pairing stays valid on replay, but DROP
-    provider-private reasoning/thinking + cache metadata, whose signatures do not survive replay in a fresh
-    API call (mirrors the live-path _strip_openrouter_roundtrip_metadata). A completed task's turns are
-    already paired, so keeping tool_calls/tool_call_id yields a valid conversation."""
+    """Resume: replay the turn with LIVE-path fidelity. Structural keys (role, content,
+    tool_calls, tool_call_id, name) AND reasoning continuity (assistant-level reasoning/
+    reasoning_details, thinking/redacted_thinking content blocks WITH signatures) are
+    preserved verbatim — same-model replay accepts them, cross-provider portability is
+    live-probe-verified for Anthropic/Gemini/OpenAI families (llm.py), and the llm layer's
+    reactive 400 strip-and-retry covers any family that rejects a replayed signature.
+    Only ``cache_control`` is dropped: stale breakpoints from the captured task would
+    fight the fresh end-of-replay breakpoint (max 4 per request)."""
     out = {k: v for k, v in m.items() if k not in _RESUME_DROP_TOP}
     out["role"] = m.get("role") or "user"
     content = m.get("content")
@@ -54,9 +61,7 @@ def sanitize_turn(m: Dict[str, Any]) -> Dict[str, Any]:
             if not isinstance(b, dict):
                 kept.append(b)
                 continue
-            if b.get("type") in ("thinking", "redacted_thinking", "reasoning"):
-                continue
-            kept.append({k: v for k, v in b.items() if k not in ("signature", "reasoning", "cache_control")})
+            kept.append({k: v for k, v in b.items() if k != "cache_control"})
         out["content"] = kept
     return out
 
