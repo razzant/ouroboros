@@ -1194,9 +1194,26 @@ export function createChatInstance({
         `;
     }
 
+    // True when the timeline scroll sits at (or within a hair of) the bottom, or
+    // has not started overflowing yet. Drives whether live appends and rebuilds
+    // keep following the newest line or leave the owner where they scrolled to.
+    function isTimelinePinnedToBottom(record) {
+        const el = record?.timelineEl;
+        if (!el) return true;
+        return el.scrollHeight - el.scrollTop - el.clientHeight <= 24;
+    }
+
     // Full rebuild for initial render and expand/collapse toggles.
     function renderLiveCardTimeline(record) {
-        record.timelineEl.innerHTML = record.items.map((item) => buildTimelineItemHtml(item, record)).join('');
+        const el = record.timelineEl;
+        // Assigning innerHTML resets scrollTop to 0, which jerks the list to the
+        // top mid-read (toggling a line, fetched full output, patch fallbacks).
+        // Keep the owner's place: re-pin to the bottom if they were following the
+        // newest line, otherwise restore their prior offset.
+        const pinned = isTimelinePinnedToBottom(record);
+        const prevTop = el.scrollTop;
+        el.innerHTML = record.items.map((item) => buildTimelineItemHtml(item, record)).join('');
+        el.scrollTop = pinned ? el.scrollHeight : prevTop;
     }
 
     // P3: fetch the genuinely-full output for a server-truncated timeline line (the WS
@@ -1230,12 +1247,16 @@ export function createChatInstance({
 
     // Append without disturbing existing DOM nodes.
     function appendTimelineItem(item, record) {
+        // Capture BEFORE the DOM grows: only chase the newest line when the owner
+        // was already at the bottom. If they scrolled up to read (common now that
+        // the background card stays expanded across cycles), leave them put.
+        const pinned = isTimelinePinnedToBottom(record);
         const wrapper = document.createElement('div');
         wrapper.innerHTML = buildTimelineItemHtml(item, record).trim();
         const node = wrapper.firstElementChild;
         if (node) {
             record.timelineEl.appendChild(node);
-            if (record.root.dataset.expanded === '1') {
+            if (record.root.dataset.expanded === '1' && pinned) {
                 record.timelineEl.scrollTop = record.timelineEl.scrollHeight;
             }
         }
