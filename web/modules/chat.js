@@ -343,6 +343,12 @@ export function createChatInstance({
     let historySyncPromise = null;
     let welcomeShown = false;
     const liveCardRecords = new Map();
+    // Reusable slots (bg-consciousness, active) destroy+recreate their card on every
+    // new cycle and auto-collapse on each cycle finish. That wipes an expand the owner
+    // just did within a second (the background-consciousness card cycles constantly).
+    // Remember the owner's explicit expand PER SLOT so a cycle finish or the next
+    // cycle's rebuild restores it instead of snapping shut.
+    const stickyExpandedSlots = new Set();
     // Cluster B: a proactively-coined name (task_named) can arrive BEFORE the card's
     // liveCardRecords entry exists (the namer broadcasts as the task starts). Buffer it
     // here so createLiveCardRecord can apply it when the card appears (no lost title).
@@ -837,7 +843,7 @@ export function createChatInstance({
             root.dataset.subagentRole = String(options.role || '');
         }
         root.dataset.finished = '0';
-        root.dataset.expanded = (options.isSubagent && nestedSubagentsExpanded) ? '1' : '0';
+        root.dataset.expanded = ((options.isSubagent && nestedSubagentsExpanded) || stickyExpandedSlots.has(normalizedGroupId)) ? '1' : '0';
         // No "Turn into project" for: subagent cards, non-main panels, or a task that
         // is ALREADY bound to a project (a project-chat follow-up) — see task_bindings
         // from /api/state, surfaced on window.__ouroTaskBindings (P2).
@@ -901,7 +907,14 @@ export function createChatInstance({
         };
         if (isMain && !options.isSubagent) _pendingCardObjective = '';
         record.summaryButtonEl?.addEventListener('click', () => {
-            setLiveCardExpanded(record, record.root.dataset.expanded !== '1');
+            const nowExpanded = record.root.dataset.expanded !== '1';
+            setLiveCardExpanded(record, nowExpanded);
+            // Persist the owner's explicit choice for reusable slots so the constant
+            // cycle churn (finish auto-collapse + next-cycle rebuild) doesn't undo it.
+            if (REUSABLE_TASK_IDS.has(record.groupId)) {
+                if (nowExpanded) stickyExpandedSlots.add(record.groupId);
+                else stickyExpandedSlots.delete(record.groupId);
+            }
         });
         record.turnProjectBtn?.addEventListener('click', (event) => {
             event.stopPropagation();
@@ -1026,7 +1039,7 @@ export function createChatInstance({
         record.timelineEl.innerHTML = '';
         record.root.dataset.finished = '0';
         setLiveCardTypingVisible(record, true);
-        setLiveCardExpanded(record, record.isSubagent && nestedSubagentsExpanded);
+        setLiveCardExpanded(record, (record.isSubagent && nestedSubagentsExpanded) || stickyExpandedSlots.has(record.groupId));
     }
 
     function ensureLiveCardVisible(record, { suppressDomInsert = false } = {}) {
@@ -1392,7 +1405,9 @@ export function createChatInstance({
             setLiveCardTypingVisible(record, false);
             markTaskComplete(nextGroupId, summary.phase || 'done');
             if (justFinished) {
-                setLiveCardExpanded(record, record.isSubagent && nestedSubagentsExpanded);
+                if (!stickyExpandedSlots.has(record.groupId)) {
+                    setLiveCardExpanded(record, record.isSubagent && nestedSubagentsExpanded);
+                }
                 scheduleHistorySync();
             }
             syncLiveCardToggle(record);
@@ -1427,7 +1442,9 @@ export function createChatInstance({
         setLiveCardTypingVisible(record, false);
         markTaskComplete(record.groupId, activePhase);
         if (!wasFinished) {
-            setLiveCardExpanded(record, record.isSubagent && nestedSubagentsExpanded);
+            if (!stickyExpandedSlots.has(record.groupId)) {
+                setLiveCardExpanded(record, record.isSubagent && nestedSubagentsExpanded);
+            }
             scheduleHistorySync();
         }
         syncLiveCardToggle(record);
