@@ -257,7 +257,8 @@ def main() -> int:
     p.add_argument("--settings-path", default=str(_WORKSPACE_ROOT / "data" / "settings.json"))
     p.add_argument("--ouroboros-url", default="http://127.0.0.1:8780")
     p.add_argument("--target-file", required=True, help="file the skill reads for the VM HTTP target (OUROBOROS_CU_HTTP_TARGET_FILE)")
-    p.add_argument("--model", default="anthropic/claude-sonnet-4.6")
+    # NOTE: the solve model is set by the Ouroboros server's settings (OUROBOROS_MODEL);
+    # this runner does not accept a --model flag so provenance can't be misreported.
     p.add_argument("--task_timeout_sec", type=int, default=3600)
     p.add_argument("--startup_timeout_sec", type=int, default=900)
     p.add_argument("--reset_retries", type=int, default=3)

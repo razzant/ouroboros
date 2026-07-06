@@ -4,6 +4,7 @@ description: Local and remote desktop observation/input tools with coordinate no
 version: 0.3.0
 type: extension
 entry: plugin.py
+runtime: python3
 permissions: [tool, subprocess, net]
 env_from_settings: []
 when_to_use: The user asks Ouroboros to inspect a desktop, take a screenshot, click/type/press keys, drag, or operate a local/explicitly configured remote GUI under human or benchmark supervision.

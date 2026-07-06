@@ -58,7 +58,7 @@ def test_connection_registry_and_tool_surface(tmp_path):
     assert impl._active_backend_name() == "local"
 
 
-def test_remote_screenshot_result_uses_uploads_and_transform(tmp_path):
+def test_remote_screenshot_result_confined_and_transform(tmp_path):
     mod = _load_plugin()
     api = _API(tmp_path)
     impl = mod._ComputerUse(api)
@@ -75,7 +75,10 @@ def test_remote_screenshot_result_uses_uploads_and_transform(tmp_path):
     )
 
     assert '"ok": true' in out
-    assert "/uploads/unix_computer_use/" in out
+    # Path confinement: screenshots are returned in place (job/state dir), never
+    # copied to a data/uploads directory (OS-agnostic: check both separators).
+    assert "/uploads/" not in out and "\\uploads\\" not in out
+    assert '"view_image_ready": true' in out
     assert '"sx": 1.0' in out
     assert '"input_w": 1920' in out
 

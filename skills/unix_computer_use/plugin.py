@@ -50,7 +50,6 @@ _AX_MAX_ELEMENTS = 120
 # Remote backend constants. These are dormant unless a non-local connection is
 # explicitly activated in skill state (or by a benchmark runner). The default
 # behavior remains local macOS/Linux computer-use.
-_REMOTE_UPLOAD_SUBDIR = "unix_computer_use"
 _OSWORLD_PKGS_PREFIX = (
     "import pyautogui; import time; import platform; "
     "pyautogui.FAILSAFE = False; "
@@ -331,29 +330,20 @@ class _ComputerUse:
     # remote backend helpers
     # ------------------------------------------------------------------
 
-    def _uploads_dir(self) -> pathlib.Path:
-        try:
-            drive_root = self.state_dir.parents[2]  # <data>/state/skills/unix_computer_use
-            out = drive_root / "uploads" / _REMOTE_UPLOAD_SUBDIR
-        except Exception:
-            out = pathlib.Path.home() / "Ouroboros" / "data" / "uploads" / _REMOTE_UPLOAD_SUBDIR
-        out.mkdir(parents=True, exist_ok=True)
-        return out
-
-    def _copy_to_uploads(self, image_path: pathlib.Path) -> pathlib.Path:
-        try:
-            dest = self._uploads_dir() / image_path.name
-            if dest.resolve() != image_path.resolve():
-                shutil.copy2(image_path, dest)
-            return dest
-        except Exception:
-            return image_path
-
     def _connection_target(self, conn: dict[str, Any]) -> str:
         target = str(conn.get("target") or "").strip()
         if not target and conn.get("target_file"):
+            # Path confinement: only read a target_file that lives inside this
+            # skill's OWN state dir (where add_connection / a benchmark runner
+            # publishes it). Refuse any path outside it so the tool cannot be
+            # used to read arbitrary files elsewhere on disk.
             try:
-                target = pathlib.Path(str(conn["target_file"])).expanduser().read_text(encoding="utf-8").strip()
+                candidate = pathlib.Path(str(conn["target_file"])).expanduser().resolve()
+                base = self.state_dir.resolve()
+                if candidate == base or base in candidate.parents:
+                    target = candidate.read_text(encoding="utf-8").strip()
+                else:
+                    target = ""
             except Exception:
                 target = ""
         return target.rstrip("/")
@@ -473,7 +463,10 @@ class _ComputerUse:
         max_w = max(320, min(int(max_width or _MAX_IMAGE_W), 4096))
         max_h = max(240, min(int(max_height or _MAX_IMAGE_H), 4096))
         img_path, img_w, img_h = self._downscale(raw_path, max_w, max_h)
-        view_path = self._copy_to_uploads(img_path)
+        # Path confinement: the downscaled image already lives under the skill's
+        # own job dir (api.skill_job_dir(...)); return it directly for view_image.
+        # Never copy screenshots outside the skill's job/state dir.
+        view_path = img_path
         result: dict[str, Any] = {
             "ok": True,
             "path": str(view_path),
@@ -485,7 +478,7 @@ class _ComputerUse:
             "input_width": input_w,
             "input_height": input_h,
             "downscaled": img_path != raw_path,
-            "view_image_ready": view_path != img_path,
+            "view_image_ready": True,
         }
         if img_path != raw_path:
             result["full_resolution_path"] = str(raw_path)
@@ -564,6 +557,19 @@ class _ComputerUse:
         dest = f"{user}@{host}" if user else host
         return ["-p", str(port), dest] if port != 22 else [dest]
 
+    def _ssh_scp_source(self, conn: dict[str, Any], remote_path: str) -> list[str]:
+        """scp source args: '-P <port>' (scp uses capital P) plus a SINGLE
+        '<destination>:<remote_path>' token (scp needs the source as one arg)."""
+        alias = str(conn.get("ssh_alias") or "").strip()
+        if alias:
+            return [f"{alias}:{remote_path}"]
+        host = str(conn.get("host") or "").strip()
+        user = str(conn.get("user") or "").strip()
+        port = int(conn.get("port") or 22)
+        dest = f"{user}@{host}" if user else host
+        src = f"{dest}:{remote_path}"
+        return ["-P", str(port), src] if port != 22 else [src]
+
     def _ssh_run(self, conn: dict[str, Any], command: str, *, timeout: int = 30) -> tuple[int, str, str]:
         ssh_cmd = ["ssh", "-o", "BatchMode=yes", "-o", "ConnectTimeout=8", *self._ssh_destination(conn), command]
         return _run(ssh_cmd, timeout=timeout)
@@ -576,7 +582,7 @@ class _ComputerUse:
         if rc != 0:
             return _json({"ok": False, "backend": "ssh_macos", "error": stderr.strip() or stdout.strip() or f"exit {rc}"})
         dest = out_dir / pathlib.Path(remote_path).name
-        scp_cmd = ["scp", "-q", *self._ssh_destination(conn), ":" + remote_path, str(dest)]
+        scp_cmd = ["scp", "-q", *self._ssh_scp_source(conn, remote_path), str(dest)]
         try:
             proc = subprocess.run(scp_cmd, text=True, capture_output=True, timeout=30, stdin=subprocess.DEVNULL)
         except Exception as exc:  # noqa: BLE001
