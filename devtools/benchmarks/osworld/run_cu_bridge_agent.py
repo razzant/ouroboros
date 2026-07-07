@@ -297,6 +297,21 @@ def main() -> int:
         _write_outcome(None, "blocked", "skill_enable_failed", f"{type(exc).__name__}: {exc}")
         return 2
 
+    # Wire OSWorld's proxy pool (e.g. DataImpulse residential) for tasks flagged
+    # "proxy": true. Only enable when a proxy config file actually exists, else
+    # OSWorld raises "No proxy available" and hard-fails those tasks. Non-proxy
+    # tasks are unaffected (OSWorld gates on task_config["proxy"] AND enable_proxy).
+    # PROXY_CONFIG_FILE must be set BEFORE importing desktop_env: setup.py loads
+    # the pool at import time.
+    _proxy_cfg = os.environ.get("PROXY_CONFIG_FILE") or str(
+        osworld_root / "evaluation_examples" / "settings" / "proxy" / "dataimpulse.json"
+    )
+    _enable_proxy = os.path.exists(_proxy_cfg)
+    if _enable_proxy:
+        os.environ["PROXY_CONFIG_FILE"] = os.path.abspath(_proxy_cfg)
+    print(f"[bridge] enable_proxy={_enable_proxy} "
+          f"proxy_cfg={os.environ['PROXY_CONFIG_FILE'] if _enable_proxy else '(none)'}", flush=True)
+
     from desktop_env.desktop_env import DesktopEnv
 
     env = None
@@ -305,6 +320,7 @@ def main() -> int:
             provider_name=args.provider_name, path_to_vm=args.path_to_vm,
             action_space="pyautogui", screen_size=(1920, 1080),
             headless=not args.show_vm, os_type="Ubuntu", require_a11y_tree=False,
+            enable_proxy=_enable_proxy,
         )
         # Reset with retries to a usable screenshot.
         deadline = time.time() + max(1, int(args.startup_timeout_sec))
