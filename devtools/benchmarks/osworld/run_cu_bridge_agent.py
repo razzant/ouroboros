@@ -340,6 +340,12 @@ def main() -> int:
             "\n\nunix_computer_use tools (enable then use; discover exact ext_<n>_ names via "
             "list_available_tools): " + ", ".join(_COMPUTER_USE_SHORT_TOOLS) + ". They act on THIS VM "
             "because the runner activated the osworld-current connection."
+            f"\n\nVM CREDENTIALS: the desktop user is 'user' and its sudo password is "
+            f"'{env.client_password}'. When a task GENUINELY needs root (create system users, "
+            f"start/enable a service, install packages) or a GUI dialog prompts for a password, "
+            f"use it — e.g. run privileged commands as: echo '{env.client_password}' | sudo -S <cmd>. "
+            f"Still prefer the visible GUI for application tasks per the rules above; sudo is for "
+            f"the OS/CLI steps that truly require root."
         )
         (run_dir / "prompt.txt").write_text(prompt, encoding="utf-8")
 
