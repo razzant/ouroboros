@@ -136,27 +136,6 @@ def _ensure_vmrun_on_path() -> None:
         os.environ["PATH"] = os.pathsep.join(parts)
 
 
-def _install_optional_dependency_stubs() -> None:
-    """Avoid heavy optional evaluator imports for tasks that do not need them."""
-    if "easyocr" not in sys.modules:
-        easyocr = types.ModuleType("easyocr")
-
-        class _UnavailableReader:
-            def __init__(self, *_a: Any, **_k: Any) -> None:
-                raise RuntimeError("easyocr is not installed; OCR metrics unavailable")
-
-        easyocr.Reader = _UnavailableReader  # type: ignore[attr-defined]
-        sys.modules["easyocr"] = easyocr
-    if "fastdtw" not in sys.modules:
-        fastdtw_mod = types.ModuleType("fastdtw")
-
-        def _fastdtw_unavailable(*_a: Any, **_k: Any):
-            raise RuntimeError("fastdtw is not installed; audio metrics unavailable")
-
-        fastdtw_mod.fastdtw = _fastdtw_unavailable  # type: ignore[attr-defined]
-        sys.modules["fastdtw"] = fastdtw_mod
-
-
 def _api(server: str, method: str, path: str, body: dict[str, Any] | None = None, timeout: float = 30.0) -> dict[str, Any]:
     data = None
     headers = {"Accept": "application/json"}
@@ -245,7 +224,6 @@ def _publish_target(data_dir: Path, target: str) -> Path:
 
 def main() -> int:
     _ensure_vmrun_on_path()
-    _install_optional_dependency_stubs()
     p = argparse.ArgumentParser(description="OSWorld via host-side Ouroboros computer-use bridge (one run per task).")
     p.add_argument("--osworld-root", default=os.environ.get("OSWORLD_ROOT", str(_WORKSPACE_ROOT / "OSWorld")))
     p.add_argument("--provider_name", default="vmware")

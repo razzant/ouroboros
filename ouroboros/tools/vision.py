@@ -273,9 +273,14 @@ def _allowed_file_roots(ctx: Any = None) -> List["pathlib.Path"]:
     import pathlib
     data_dir = os.environ.get("OUROBOROS_DATA_DIR", "")
     if data_dir:
-        roots = [pathlib.Path(data_dir).expanduser().resolve() / "uploads"]
+        _base = pathlib.Path(data_dir).expanduser().resolve()
     else:
-        roots = [pathlib.Path("~/Ouroboros/data/uploads").expanduser().resolve()]
+        _base = pathlib.Path("~/Ouroboros/data").expanduser().resolve()
+    # uploads PLUS skill job/state outputs (state/skills/<name>/jobs/...): trusted
+    # local files the agent's OWN reviewed skills produce (e.g. computer-use
+    # screenshots). Same trust boundary as read_file; view_image is image-only with
+    # a fail-closed MIME sniff + size cap, so this adds no new exfiltration surface.
+    roots = [_base / "uploads", _base / "state" / "skills"]
     if ctx is not None:
         try:
             from ouroboros.tools.registry import active_repo_dir_for

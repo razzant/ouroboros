@@ -726,6 +726,23 @@ class _ComputerUse:
         new_w = max(1, int(px_w * ratio))
         new_h = max(1, int(px_h * ratio))
         dest = src.with_name(src.stem + f"-{new_w}x{new_h}.png")
+        # PRIMARY: in-process PIL — deterministic and dependency-light so the
+        # downscale (and therefore the stored image->input coord_transform) ALWAYS
+        # happens. Without this the skill silently no-oped on hosts lacking
+        # sips/ImageMagick, returning a full-resolution image with an identity
+        # transform while view_image re-downscaled independently — a coordinate-
+        # space mismatch that made every click land off-target.
+        try:
+            from PIL import Image
+            resample = getattr(Image, "Resampling", Image).LANCZOS
+            with Image.open(src) as im:
+                im.convert("RGB").resize((new_w, new_h), resample).save(dest, format="PNG")
+            gw, gh = _png_dimensions(dest)
+            if dest.exists() and gw > 0 and gh > 0:
+                return dest, gw, gh
+        except Exception:
+            pass
+        # FALLBACK: external resizers (macOS sips / ImageMagick) when PIL is absent.
         if _which("sips"):  # macOS built-in
             cmd = ["sips", "-z", str(new_h), str(new_w), str(src), "--out", str(dest)]
         elif _which("magick"):
