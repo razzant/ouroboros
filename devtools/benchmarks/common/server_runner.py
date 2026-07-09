@@ -74,6 +74,10 @@ _ISO_SETTINGS_ALLOW_EXACT = frozenset({
     "ANTHROPIC_API_KEY",
     "OUROBOROS_WEBSEARCH_MODEL", "OUROBOROS_REVIEW_MODELS",
     "OUROBOROS_SCOPE_REVIEW_MODELS", "OUROBOROS_SCOPE_REVIEW_MODEL",
+    # Review policy knobs (non-secret): must propagate so settings.json's task-acceptance
+    # self-review config is honored by isolated benchmark servers (else it silently
+    # falls back to the "auto" default and the end-of-task review never runs).
+    "OUROBOROS_TASK_REVIEW_MODE", "OUROBOROS_REVIEW_ENFORCEMENT",
     "CLAUDE_CODE_MODEL", "CLAUDE_AGENT_SDK_MODEL",
     "TOTAL_BUDGET", "OUROBOROS_PER_TASK_COST_USD", "OUROBOROS_CONTEXT_MODE",
 })
