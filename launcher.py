@@ -9,6 +9,7 @@ import pathlib
 import shutil
 import subprocess
 import sys
+import tempfile
 import threading
 import time
 from logging.handlers import RotatingFileHandler
@@ -1146,6 +1147,45 @@ def main():
         webview.start()
         return
 
+    def _resolve_bridge_file_url(raw_url: str) -> str:
+        """Validate a loopback file-bridge URL, returning the resolved full URL.
+
+        Shared SSOT for both the download-to-Downloads and open-in-default-app
+        bridge methods so the loopback guard cannot drift between them.
+        """
+        import urllib.parse
+
+        full_url = urllib.parse.urljoin(f"http://127.0.0.1:{actual_port}", str(raw_url or ""))
+        parsed = urllib.parse.urlparse(full_url)
+        if parsed.scheme != "http":
+            raise ValueError("file URL must be http://")
+        if parsed.hostname not in {"127.0.0.1", "localhost"}:
+            raise ValueError("desktop file access is limited to the local Ouroboros server")
+        if parsed.port != actual_port:
+            raise ValueError("file URL port must match the local Ouroboros server")
+        if parsed.path != "/api/files/download" and not parsed.path.startswith("/api/extensions/"):
+            raise ValueError("file URL path must be /api/files/download or /api/extensions/<skill>/...")
+        return full_url
+
+    def _unique_bridge_target(directory: pathlib.Path, filename: str) -> pathlib.Path:
+        safe_name = pathlib.Path(str(filename or "download")).name or "download"
+        directory.mkdir(parents=True, exist_ok=True)
+        target = directory / safe_name
+        stem = target.stem
+        suffix = target.suffix
+        counter = 1
+        while target.exists():
+            target = directory / f"{stem}-{counter}{suffix}"
+            counter += 1
+        return target
+
+    def _fetch_bridge_url_to(full_url: str, target: pathlib.Path) -> None:
+        import urllib.request
+
+        with urllib.request.urlopen(full_url, timeout=60) as resp:  # noqa: S310 - localhost validated above
+            with target.open("wb") as fh:
+                shutil.copyfileobj(resp, fh)
+
     class MainApi:
         def request_runtime_mode_change(self, mode: str) -> dict:
             try:
@@ -1186,39 +1226,40 @@ def main():
 
         def download_file_to_downloads(self, url: str, filename: str, open_external: bool = False) -> dict:
             try:
-                import urllib.parse
-                import urllib.request
-
-                raw_url = str(url or "")
-                full_url = urllib.parse.urljoin(f"http://127.0.0.1:{actual_port}", raw_url)
-                parsed = urllib.parse.urlparse(full_url)
-                if parsed.scheme != "http":
-                    return {"ok": False, "error": "download URL must be http://"}
-                if parsed.hostname not in {"127.0.0.1", "localhost"}:
-                    return {"ok": False, "error": "desktop downloads are limited to the local Ouroboros server"}
-                if parsed.port != actual_port:
-                    return {"ok": False, "error": "download URL port must match the local Ouroboros server"}
-                if parsed.path != "/api/files/download" and not parsed.path.startswith("/api/extensions/"):
-                    return {"ok": False, "error": "download URL path must be /api/files/download or /api/extensions/<skill>/..."}
-                safe_name = pathlib.Path(str(filename or "download")).name or "download"
-                downloads = pathlib.Path.home() / "Downloads"
-                downloads.mkdir(parents=True, exist_ok=True)
-                target = downloads / safe_name
-                stem = target.stem
-                suffix = target.suffix
-                counter = 1
-                while target.exists():
-                    target = downloads / f"{stem}-{counter}{suffix}"
-                    counter += 1
-                with urllib.request.urlopen(full_url, timeout=60) as resp:  # noqa: S310 - localhost validated above
-                    with target.open("wb") as fh:
-                        shutil.copyfileobj(resp, fh)
+                full_url = _resolve_bridge_file_url(url)
+                target = _unique_bridge_target(pathlib.Path.home() / "Downloads", filename)
+                _fetch_bridge_url_to(full_url, target)
                 if open_external:
                     open_path_external(target)
                 return {"ok": True, "path": str(target)}
             except Exception as exc:
                 log.warning("Desktop file download failed: %s", exc, exc_info=True)
                 return {"ok": False, "error": str(exc)}
+
+        def open_file_with_default_app(self, url: str, filename: str) -> dict:
+            """Open a delivered file in the OS default app (external window).
+
+            Fetches the loopback file into a private temp dir (NOT ~/Downloads)
+            and hands it to the platform default handler. This never navigates
+            the in-app WKWebView, which was the original fullscreen-lockup bug.
+            """
+            try:
+                full_url = _resolve_bridge_file_url(url)
+                # Per-open private dir: mkdtemp atomically creates a fresh 0700
+                # directory, so a pre-placed symlink/dir at a shared temp path
+                # cannot redirect the write (hardens over a fixed shared root).
+                open_root = pathlib.Path(tempfile.mkdtemp(prefix="ouroboros-open-"))
+                target = _unique_bridge_target(open_root, filename)
+                _fetch_bridge_url_to(full_url, target)
+                open_path_external(target)
+                return {"ok": True, "path": str(target)}
+            except Exception as exc:
+                log.warning("Desktop open-in-default-app failed: %s", exc, exc_info=True)
+                return {"ok": False, "error": str(exc)}
+
+    # Prune stale externally-opened temp copies from previous sessions (privacy + disk).
+    for _stale_open in pathlib.Path(tempfile.gettempdir()).glob("ouroboros-open-*"):
+        shutil.rmtree(_stale_open, ignore_errors=True)
 
     url = f"http://127.0.0.1:{actual_port}"
     window = webview.create_window(

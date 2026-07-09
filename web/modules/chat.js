@@ -2,6 +2,7 @@ import { escapeHtmlAttr, escapeHtmlText as escapeHtml, formatUsdWhole, renderMar
 import { renderPageHeader } from './page_header.js';
 import { PAGE_ICONS } from './page_icons.js';
 import { showToast } from './toast.js';
+import { downloadViaHostBridge, openViaHostBridge } from './ui_helpers.js';
 import { apiClient, apiFetch } from './api_client.js';
 import {
     compactModel,
@@ -130,6 +131,9 @@ export function createChatInstance({
                     <input type="file" id="chat-file-input" class="chat-file-input-hidden" accept="*/*" multiple>
                     <textarea id="chat-input" placeholder="Message Ouroboros..." rows="1" autocorrect="off" autocapitalize="off" spellcheck="false"></textarea>
                     <div class="chat-send-group">
+                        <button class="chat-scroll-bottom-btn" id="chat-scroll-bottom" type="button" aria-label="Scroll to latest message" title="Scroll to latest message">
+                            <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 5v14"/><path d="M19 12l-7 7-7-7"/></svg>
+                        </button>
                         <button class="chat-send-inline" id="chat-send" title="Send message">Send</button>
                     </div>
                 </div>
@@ -159,6 +163,7 @@ export function createChatInstance({
     const attachBtn = byId('attach');
     const fileInput = byId('file-input');
     const attachmentPreview = byId('attachment-preview');
+    const scrollBottomBtn = byId('scroll-bottom');
     let pendingAttachments = [];
     let attachmentsUploading = false;
     let nestedSubagentsExpanded = false;
@@ -579,6 +584,7 @@ export function createChatInstance({
         const shouldStick = Boolean(options.forceStick) || isNearBottom();
         if (node.parentNode === messagesDiv) {
             if (shouldStick) messagesDiv.scrollTop = messagesDiv.scrollHeight;
+            updateScrollButton();
             return;
         }
         // Scope to THIS instance's column — a global id lookup would resolve to
@@ -587,6 +593,9 @@ export function createChatInstance({
         if (typing && typing.parentNode === messagesDiv) messagesDiv.insertBefore(node, typing);
         else messagesDiv.appendChild(node);
         if (shouldStick) messagesDiv.scrollTop = messagesDiv.scrollHeight;
+        // A new message arriving while the user is scrolled up reveals the
+        // jump-to-newest button instead of silently piling up off-screen.
+        updateScrollButton();
     }
 
     function isBackgroundTaskId(taskId = '') {
@@ -2006,6 +2015,14 @@ export function createChatInstance({
                         continue;
                     }
                     if (msg.system_type === 'task_summary') continue;
+                    // A delivered document is a media bubble, not a task-final
+                    // message — render it BEFORE the taskId/finishLiveCard block so
+                    // a mid-task file delivery replayed while its task is still
+                    // running does not falsely finalize that task's live card.
+                    if (msg.msg_type === 'document') {
+                        appendDocumentBubble(msg);
+                        continue;
+                    }
                     if (taskId && (msg.role === 'assistant' || msg.role === 'system')) {
                         if (subagentChildParents.has(taskId)) {
                             insertCardIfNeeded(taskId);
@@ -2403,25 +2420,57 @@ export function createChatInstance({
     // message in the common case, or the exact spot they'd scrolled back to.
     let _savedScrollTop = 0;
     let _savedStick = true;  // a fresh thread starts pinned to the newest message
+    let _restoring = false;  // suppress saved-state writes during a restore pass
     const isInstanceVisible = () =>
         Boolean(messagesDiv) && messagesDiv.offsetParent !== null && !document.hidden;
     messagesDiv?.addEventListener('scroll', () => {
         // Ignore the spurious scrollTop=0 a browser emits while the column is
         // hidden — that would erase the real position we want to restore.
         if (!isInstanceVisible()) return;
+        // WebKit fires a scrollTop=0 event when a hidden column is re-shown, and
+        // our own re-pin loop writes scrollTop too — neither is a real user
+        // scroll, so during a restore pass we only refresh the button, never the
+        // saved position (which would corrupt a mid-history restore to the top).
+        if (_restoring) { updateScrollButton(); return; }
         _savedScrollTop = messagesDiv.scrollTop;
         _savedStick = isNearBottom();
+        updateScrollButton();
     }, { passive: true });
+
+    // Round glass "jump to newest" affordance — shown only when the user has
+    // scrolled up away from the bottom, for both the main chat and panels.
+    function updateScrollButton() {
+        if (!scrollBottomBtn) return;
+        scrollBottomBtn.classList.toggle('visible', isInstanceVisible() && !isNearBottom());
+    }
+    scrollBottomBtn?.addEventListener('click', () => {
+        _savedStick = true;
+        scrollToBottomAfterLayout();
+        updateScrollButton();
+    });
 
     function restoreScrollPosition() {
         if (!isInstanceVisible()) return;  // hidden column has no geometry yet
-        requestAnimationFrame(() => {
-            if (_savedStick) scrollToBottom();          // keep them at the latest message
-            else messagesDiv.scrollTop = _savedScrollTop;  // or exactly where they were
-            // A second frame settles late card-layout height changes, but only
-            // re-pins when sticky so a restored mid-history spot isn't overridden.
-            requestAnimationFrame(() => { if (_savedStick) scrollToBottom(); });
-        });
+        // WebKit (the desktop WKWebView) leaves a freshly un-hidden flex column's
+        // scrollTop pinned at 0 for a frame or two after the page is shown, so a
+        // single/double rAF re-pin (which is enough in Chromium) lands the user at
+        // the very top. Re-apply the target position across several frames until
+        // the late relayout settles, then keep the button state in sync.
+        _restoring = true;
+        const targetStick = _savedStick;
+        const targetTop = _savedScrollTop;
+        let frames = 0;
+        const apply = () => {
+            if (!isInstanceVisible()) { _restoring = false; return; }
+            // scrollHeight is re-read each frame so a sticky thread tracks late
+            // card-layout growth; a restored mid-history spot re-pins to the exact
+            // saved offset (idempotent, so it isn't overridden).
+            messagesDiv.scrollTop = targetStick ? messagesDiv.scrollHeight : targetTop;
+            updateScrollButton();
+            if (++frames < 12) requestAnimationFrame(apply);
+            else _restoring = false;
+        };
+        requestAnimationFrame(apply);
     }
 
     function updateMessagesPadding(options = {}) {
@@ -2429,9 +2478,12 @@ export function createChatInstance({
         const shouldStick = preserveStickiness && isNearBottom();
         if (inputArea && messagesDiv) {
             const reserve = Math.max(92, Math.ceil(inputArea.offsetHeight || 0) + 16);
-            messagesDiv.style.setProperty('--chat-input-reserve', `${reserve}px`);
+            // Set on the instance page root so it cascades to #chat-messages
+            // (padding) AND the sibling scroll-to-bottom button (bottom offset).
+            page.style.setProperty('--chat-input-reserve', `${reserve}px`);
         }
         if (shouldStick) scrollToBottomAfterLayout();
+        updateScrollButton();
     }
 
     function installChatResizeObservers() {
@@ -2724,6 +2776,120 @@ export function createChatInstance({
         `;
         insertMessageNode(bubble);
         incrementUnreadIfNeeded();
+    });
+
+    // Shared document-bubble builder for both live WS frames and history replay.
+    // Download priority: a durable server download_url routed through
+    // downloadViaHostBridge (desktop host-bridge saves to Downloads instead of
+    // navigating the WKWebView fullscreen; browser falls back to fetch+blob),
+    // else an in-memory base64 blob (live-only), else a disabled label.
+    function buildDocumentBubble(msg) {
+        const role = msg.role === 'user' ? 'user' : 'assistant';
+        const sender = role === 'user'
+            ? getSenderLabel('user', false, '', {
+                source: msg.source || '',
+                senderLabel: msg.sender_label || '',
+                senderSessionId: msg.sender_session_id || '',
+            })
+            : 'Ouroboros';
+        const bubble = document.createElement('div');
+        bubble.className = `chat-bubble ${role}`;
+        const timeFmt = formatMsgTime(msg.ts || new Date().toISOString());
+        const timeHtml = timeFmt ? `<div class="msg-time" title="${escapeHtmlAttr(timeFmt.full)}">${escapeHtml(timeFmt.short)}</div>` : '';
+        const captionHtml = msg.caption ? `<div class="message">${escapeHtml(msg.caption)}</div>` : '';
+        const mime = /^[A-Za-z0-9!#$&^_.+-]+\/[A-Za-z0-9!#$&^_.+-]+$/.test(String(msg.mime || ''))
+            ? String(msg.mime)
+            : 'application/octet-stream';
+        const fileBase64 = /^[A-Za-z0-9+/=\s]+$/.test(String(msg.file_base64 || ''))
+            ? String(msg.file_base64 || '').replace(/\s+/g, '')
+            : '';
+        const downloadUrl = /^\/api\/files\/download\?/.test(String(msg.download_url || ''))
+            ? String(msg.download_url)
+            : '';
+        const filename = String(msg.filename || 'file').replace(/[\r\n]+/g, ' ').slice(0, 200);
+        const canDownload = Boolean(downloadUrl || fileBase64);
+        // Body click = open in default OS app (external window); a separate ↓
+        // button saves to ~/Downloads. Both degrade to a base64 blob when only
+        // the live payload is present (no durable server URL to hand the bridge).
+        const openHtml = canDownload
+            ? `<button type="button" class="chat-file" data-open="1">📎 ${escapeHtml(filename)}</button>`
+            : `<span class="chat-file chat-file-empty">📎 ${escapeHtml(filename)}</span>`;
+        const downloadHtml = canDownload
+            ? `<button type="button" class="chat-file-download" data-download="1" title="Download" aria-label="Download">↓</button>`
+            : '';
+        bubble.innerHTML = `
+            <div class="sender">${escapeHtml(sender)}</div>
+            ${captionHtml}
+            <div class="message"><div class="chat-file-row">${openHtml}${downloadHtml}</div></div>
+            ${timeHtml}
+        `;
+        const saveBlobFallback = () => {
+            const bytes = Uint8Array.from(atob(fileBase64), (c) => c.charCodeAt(0));
+            const blobUrl = URL.createObjectURL(new Blob([bytes], { type: mime }));
+            const tmp = document.createElement('a');
+            Object.assign(tmp, { href: blobUrl, download: filename, rel: 'noopener' });
+            document.body.appendChild(tmp);
+            tmp.click();
+            tmp.remove();
+            setTimeout(() => URL.revokeObjectURL(blobUrl), 1000);
+        };
+        const openBtn = bubble.querySelector('.chat-file[data-open]');
+        if (openBtn && canDownload) {
+            openBtn.addEventListener('click', async () => {
+                try {
+                    if (downloadUrl) {
+                        await openViaHostBridge(downloadUrl, filename);
+                        return;
+                    }
+                    saveBlobFallback();
+                } catch (err) {
+                    showToast(`Could not open file: ${err && err.message ? err.message : err}`, 'error');
+                }
+            });
+        }
+        const dlBtn = bubble.querySelector('.chat-file-download[data-download]');
+        if (dlBtn && canDownload) {
+            dlBtn.addEventListener('click', async () => {
+                try {
+                    if (downloadUrl) {
+                        await downloadViaHostBridge(downloadUrl, filename);
+                        return;
+                    }
+                    saveBlobFallback();
+                } catch (err) {
+                    showToast(`Could not download file: ${err && err.message ? err.message : err}`, 'error');
+                }
+            });
+        }
+        return bubble;
+    }
+
+    // Dedup key shared by the live WS insert and history replay of the SAME
+    // document (send_document uses one ts for both the frame and the persisted
+    // row), so a routine background sync (rebuildAll=false, bubbles not cleared)
+    // does not re-insert an already-rendered file bubble.
+    function documentMessageKey(msg) {
+        return [
+            'document',
+            String(msg.ts || ''),
+            String(msg.download_url || ''),
+            String(msg.filename || ''),
+            String(msg.caption || ''),
+        ].join('|');
+    }
+
+    function appendDocumentBubble(msg) {
+        const key = documentMessageKey(msg);
+        if (key && seenMessageKeys.has(key)) return false;
+        rememberMessageKey(key);
+        insertMessageNode(buildDocumentBubble(msg));
+        return true;
+    }
+
+    ws.on('document', (msg) => {
+        if (!isMyThread(msg)) return;
+        hideTyping();
+        if (appendDocumentBubble(msg)) incrementUnreadIfNeeded();
     });
 
     let wsHasConnectedOnce = false;

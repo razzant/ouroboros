@@ -1496,6 +1496,68 @@ def _send_video(ctx: ToolContext, file_path: str = "", caption: str = "") -> str
     })
     return "OK: video queued for delivery to owner."
 
+
+_MAX_DOCUMENT_FILE_BYTES = 50 * 1024 * 1024  # 50 MB (Telegram bot sendDocument limit)
+
+
+def _detect_document_mime(file_path: str) -> str:
+    """Best-effort MIME for an arbitrary document/file from its extension."""
+    mime, _ = __import__("mimetypes").guess_type(file_path)
+    return mime or "application/octet-stream"
+
+
+def _send_file(ctx: ToolContext, file_path: str = "", caption: str = "") -> str:
+    """Queue an owner-chat document/file (report, archive, code, PDF, etc.) from a local path."""
+    chat_id = getattr(ctx, "current_chat_id", None)
+    if chat_id is None or chat_id == "":
+        return "⚠️ No active chat — cannot send file."
+    if not file_path:
+        return "⚠️ Provide a file_path."
+
+    fp = pathlib.Path(file_path).expanduser().resolve()
+    if not fp.exists() or not fp.is_file():
+        return f"⚠️ File not found: {file_path}"
+    if fp.stat().st_size > _MAX_DOCUMENT_FILE_BYTES:
+        return f"⚠️ File too large ({fp.stat().st_size} bytes). Max: {_MAX_DOCUMENT_FILE_BYTES} bytes."
+
+    try:
+        raw = fp.read_bytes()
+        mime = _detect_document_mime(str(fp))
+        actual_b64 = __import__("base64").b64encode(raw).decode()
+    except Exception as e:
+        return f"⚠️ Failed to read file: {e}"
+
+    # Copy into the task's canonical artifact store so the delivered file stays
+    # downloadable after reload even if the original path is temporary / GC'd,
+    # and derive a loopback download URL from that DURABLE copy (WKWebView-safe
+    # desktop download + base64-free history replay).
+    download_url = ""
+    try:
+        from ouroboros.artifacts import copy_file_to_task_artifacts
+        from ouroboros.gateway.files import download_url_for_local_file
+
+        record = copy_file_to_task_artifacts(ctx, fp, kind="user_file")
+        durable = pathlib.Path(str(record.get("path"))) if record and record.get("path") else fp
+        download_url = download_url_for_local_file(durable)
+    except Exception:
+        download_url = ""  # non-fatal: fall back to base64 blob delivery
+
+    _doc_meta = getattr(ctx, "task_metadata", {})
+    _doc_meta = _doc_meta if isinstance(_doc_meta, dict) else {}
+    ctx.pending_events.append({
+        "type": "send_document",
+        "chat_id": chat_id, "task_id": str(getattr(ctx, "task_id", "") or ""),  # task_id -> bound-task project-panel routing
+        # Lineage so a SUBAGENT's file routes to its root's project thread (C4.4).
+        "parent_task_id": str(_doc_meta.get("parent_task_id") or ""),
+        "root_task_id": str(_doc_meta.get("root_task_id") or ""),
+        "file_base64": actual_b64,
+        "mime": mime,
+        "filename": fp.name,
+        "caption": caption or "",
+        "download_url": download_url,
+    })
+    return f"OK: file '{fp.name}' queued for delivery to owner."
+
 _MAX_SEARCH_RESULTS = 200
 # Search file-skip helper and caps live in ouroboros.code_search_rg (the search
 # module SSOT); imported with the historical private names used by call sites.
@@ -1879,6 +1941,19 @@ def get_tools() -> List[ToolEntry]:
                 "caption": {"type": "string", "description": "Optional caption for the video"},
             }, "required": ["file_path"]},
         }, _send_video),
+        ToolEntry("send_file", {
+            "name": "send_file",
+            "description": (
+                "Send an arbitrary document/file to the owner's chat (e.g. a report, .md/.csv/.html, "
+                "PDF, archive, or code file — anything that is not an image or video). "
+                "Requires a local file_path; max 50 MB. Use this to deliver a finished file result "
+                "the owner can download, rather than only describing it or sending a screenshot."
+            ),
+            "parameters": {"type": "object", "properties": {
+                "file_path": {"type": "string", "description": "Local file path to the document/file"},
+                "caption": {"type": "string", "description": "Optional caption for the file"},
+            }, "required": ["file_path"]},
+        }, _send_file),
         ToolEntry("search_code", {
             "name": "search_code",
             "description": (

@@ -66,6 +66,36 @@ def test_files_pdf_preview_and_download_bridge_are_safe():
     assert "parsed.port != actual_port" in launcher
 
 
+def test_chat_document_bubble_opens_externally_and_downloads_separately():
+    chat = _read("web/modules/chat.js")
+    helper = _read("web/modules/ui_helpers.js")
+    launcher = _read("launcher.py")
+    css = _read("web/style.css")
+
+    # Desktop bridge: open in the OS default app without navigating the WebView.
+    assert "def open_file_with_default_app(self, url: str, filename: str) -> dict:" in launcher
+    assert "open_path_external(target)" in launcher
+    assert 'tempfile.mkdtemp(prefix="ouroboros-open-")' in launcher
+    # Shared loopback guard reused by both bridge methods (DRY).
+    assert "_resolve_bridge_file_url(url)" in launcher
+
+    # JS open helper prefers the native open bridge, degrades to the long-shipped
+    # download_file_to_downloads(open_external=true) bridge when a packaged
+    # launcher predates open_file_with_default_app (version skew), and only falls
+    # back to a new tab on true web.
+    assert "export async function openViaHostBridge(url, filename = 'file')" in helper
+    assert "api?.open_file_with_default_app" in helper
+    assert "api?.download_file_to_downloads" in helper
+    assert "await downloadBridge(url, filename, true)" in helper
+
+    # Bubble body click = open externally; separate ↓ button = download.
+    assert "import { downloadViaHostBridge, openViaHostBridge } from './ui_helpers.js';" in chat
+    assert "await openViaHostBridge(downloadUrl, filename);" in chat
+    assert "await downloadViaHostBridge(downloadUrl, filename);" in chat
+    assert 'class="chat-file-download"' in chat
+    assert ".chat-file-download {" in css
+
+
 def test_files_confirm_dialog_results_are_normalized():
     source = _read("web/modules/files.js")
     helper = _read("web/modules/ui_helpers.js")

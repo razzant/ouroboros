@@ -381,6 +381,7 @@ def _collect_literal_progress_meta_keys(source_path: pathlib.Path) -> set[str]:
 _CHAT_OUTBOUND_REQUIRED = frozenset({"type", "role", "content", "ts"})
 _PHOTO_OUTBOUND_REQUIRED = frozenset({"type", "role", "image_base64", "mime", "ts"})
 _VIDEO_OUTBOUND_REQUIRED = frozenset({"type", "role", "video_base64", "mime", "ts"})
+_DOCUMENT_OUTBOUND_REQUIRED = frozenset({"type", "role", "file_base64", "mime", "filename", "ts"})
 _TYPING_OUTBOUND_REQUIRED = frozenset({"type", "action"})
 _LOG_OUTBOUND_REQUIRED = frozenset({"type", "data"})
 
@@ -529,6 +530,24 @@ def test_video_outbound_matches_message_bus_sends():
         declared_keys=declared,
         required_keys=_VIDEO_OUTBOUND_REQUIRED,
         envelope_name="VideoOutbound",
+    )
+
+
+def test_document_outbound_matches_message_bus_sends():
+    """DocumentOutbound TypedDict must match every document envelope emitted."""
+    from ouroboros.gateway.contracts import DocumentOutbound
+
+    declared = set(DocumentOutbound.__annotations__.keys())
+    assert _DOCUMENT_OUTBOUND_REQUIRED <= declared, (
+        "DocumentOutbound lost a required key: "
+        f"{_DOCUMENT_OUTBOUND_REQUIRED - declared}"
+    )
+    _assert_envelope_parity(
+        REPO_ROOT / "supervisor" / "message_bus.py",
+        discriminator="document",
+        declared_keys=declared,
+        required_keys=_DOCUMENT_OUTBOUND_REQUIRED,
+        envelope_name="DocumentOutbound",
     )
 
 

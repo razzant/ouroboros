@@ -165,6 +165,26 @@
  */
 
 /**
+ * @typedef {Object} DocumentOutbound
+ * @property {"document"} type
+ * @property {"user"|"assistant"} role
+ * @property {string} file_base64
+ * @property {string} mime
+ * @property {string} filename
+ * @property {string} ts
+ * @property {string=} caption
+ * @property {string=} download_url
+ * @property {string=} content
+ * @property {string=} source
+ * @property {string=} sender_label
+ * @property {string=} sender_session_id
+ * @property {string=} client_message_id
+ * @property {Object=} transport
+ * @property {number=} chat_id
+ * @property {number=} telegram_chat_id
+ */
+
+/**
  * @typedef {Object} LogOutbound
  * @property {"log"} type
  * @property {Object} data
@@ -429,4 +449,4 @@
  * @property {boolean=} ok
  */
 
-export const GATEWAY_CONTRACT_VERSION = '6.61.4';
+export const GATEWAY_CONTRACT_VERSION = '6.62.0';

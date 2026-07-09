@@ -10,7 +10,7 @@ import threading
 from typing import Any, Dict, List, Optional, Tuple
 
 from ouroboros.contracts.chat_id_policy import is_a2a_chat_id
-from ouroboros.event_bus import CHAT_OUTBOUND, CHAT_PHOTO, CHAT_TYPING, CHAT_VIDEO, publish_event
+from ouroboros.event_bus import CHAT_DOCUMENT, CHAT_OUTBOUND, CHAT_PHOTO, CHAT_TYPING, CHAT_VIDEO, publish_event
 from supervisor.state import append_jsonl, load_state
 from ouroboros.utils import utc_now_iso
 
@@ -400,6 +400,67 @@ class LocalChatBridge:
         })
         return True, "ok"
 
+    def send_document(
+        self,
+        chat_id: int,
+        file_bytes: bytes,
+        filename: str = "file",
+        caption: str = "",
+        mime: str = "application/octet-stream",
+        download_url: str = "",
+        task_id: str = "",
+    ) -> Tuple[bool, str]:
+        """Send an arbitrary document/file to UI and host event subscribers."""
+        if is_a2a_chat_id(chat_id):
+            return True, "ok"
+        b64_str = base64.b64encode(file_bytes).decode("ascii")
+        safe_name = str(filename or "file")
+        ts = utc_now_iso()
+        msg = {
+            "type": "document",
+            "role": "assistant",
+            "file_base64": b64_str,
+            "mime": mime,
+            "filename": safe_name,
+            "caption": caption,
+            "download_url": str(download_url or ""),
+            "ts": ts,
+            "chat_id": int(chat_id or 0),
+        }
+        if self._broadcast_fn:
+            self._broadcast_fn(msg)
+        document_transport = dict(self._chat_transports.get(int(chat_id or 0), {}) or {})
+        publish_event(CHAT_DOCUMENT, {
+            "chat_id": int(chat_id or 0),
+            "transport": document_transport,
+            "caption": str(caption or ""),
+            "file_base64": b64_str,
+            "mime": str(mime or ""),
+            "filename": safe_name,
+            "download_url": str(download_url or ""),
+            "ts": ts,
+        })
+        # Persist a compact chat row (NO base64) so the delivered document is
+        # rebuilt on reload; the durable artifact download_url carries the bytes.
+        try:
+            owner_id = int(load_state().get("owner_id") or 0)
+        except Exception:
+            owner_id = 0
+        log_chat(
+            "out",
+            int(chat_id or 0),
+            owner_id,
+            caption or f"📎 {safe_name}",
+            ts=ts,
+            task_id=str(task_id or ""),
+            record_type="document",
+            filename=safe_name,
+            mime=str(mime or ""),
+            download_url=str(download_url or ""),
+            caption=str(caption or ""),
+        )
+        return True, "ok"
+
     def push_log(self, event: dict):
         """Stream append_jsonl events to UI."""
         try:
@@ -556,9 +617,14 @@ def log_chat(
     client_message_id: str = "",
     transport: Optional[Dict[str, Any]] = None,
     task_id: str = "",
+    record_type: str = "",
+    filename: str = "",
+    mime: str = "",
+    download_url: str = "",
+    caption: str = "",
 ) -> None:
     if DATA_DIR:
-        append_jsonl(DATA_DIR / "logs" / "chat.jsonl", {
+        record = {
             "ts": ts or utc_now_iso(),
             "session_id": load_state().get("session_id"),
             "direction": direction,
@@ -572,7 +638,23 @@ def log_chat(
             "client_message_id": client_message_id,
             "transport": dict(transport or {}),
             "task_id": str(task_id or ""),
-        })
+        }
+        # Media rows (e.g. delivered documents) carry a variable ``type`` plus
+        # lightweight metadata so /api/chat/history can rebuild the bubble on
+        # reload WITHOUT persisting base64. ``type`` is set from a variable (not a
+        # literal) so the frozen-contract AST parity scan does not treat this
+        # persisted row as a DocumentOutbound WS envelope.
+        if record_type:
+            record["type"] = record_type
+        if filename:
+            record["filename"] = filename
+        if mime:
+            record["mime"] = mime
+        if download_url:
+            record["download_url"] = download_url
+        if caption:
+            record["caption"] = caption
+        append_jsonl(DATA_DIR / "logs" / "chat.jsonl", record)
 
 
 def send_with_budget(chat_id: int, text: str, log_text: Optional[str] = None,

@@ -171,6 +171,31 @@ class VideoOutbound(TypedDict):
     telegram_chat_id: NotRequired[int]
 
 
+class DocumentOutbound(TypedDict):
+    """Outbound WS document/file frame."""
+
+    type: Literal["document"]
+    role: Literal["user", "assistant"]
+    file_base64: str
+    mime: str
+    filename: str
+    ts: str
+    caption: NotRequired[str]
+    # Loopback /api/files/download?path=<root-relative> URL for the durable
+    # artifact copy, used by the desktop host-bridge download (WKWebView-safe)
+    # and to rebuild the bubble on reload without persisting base64.
+    download_url: NotRequired[str]
+    content: NotRequired[str]
+    source: NotRequired[str]
+    sender_label: NotRequired[str]
+    sender_session_id: NotRequired[str]
+    client_message_id: NotRequired[str]
+    transport: NotRequired[TransportMetadata]
+    chat_id: NotRequired[int]
+    # Deprecated compatibility field: runtime emits ``transport`` instead.
+    telegram_chat_id: NotRequired[int]
+
+
 class TypingOutbound(TypedDict):
     """Outbound WS typing indicator."""
 
@@ -736,6 +761,7 @@ WS_MESSAGE_TYPES: tuple[str, ...] = (
     "command",
     "photo",
     "video",
+    "document",
     "typing",
     "log",
     "heartbeat",
@@ -754,6 +780,7 @@ __all__ = [
     "ChatOutbound",
     "PhotoOutbound",
     "VideoOutbound",
+    "DocumentOutbound",
     "TypingOutbound",
     "LogOutbound",
     "HeartbeatOutbound",
