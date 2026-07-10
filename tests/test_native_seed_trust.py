@@ -257,11 +257,21 @@ def test_stamp_helper_ignores_broken_skill(tmp_path, monkeypatch):
     assert review.status != "clean"
 
 
-def test_bundled_unix_computer_use_is_zero_grant():
-    """The shipped skill must stay in the auto-enable class (4c bench-enable)."""
+def test_bundled_unix_computer_use_net_permission_needs_no_grants_but_owner_enable():
+    """The shipped skill declares `net` for its remote backends. `net` needs no
+    owner grant (grants only gate inject_chat/subscribe_event), but it DOES remove
+    the skill from the launcher's native auto-enable class — the owner (or a bench
+    runner via save_enabled) must enable it explicitly. This is deliberate."""
+    from ouroboros.launcher_bootstrap import _NATIVE_AUTO_ENABLE_EXEMPT_PERMISSIONS
+    from ouroboros.skill_loader import requested_skill_permissions
+
     manifest = (
         pathlib.Path(__file__).resolve().parents[1]
         / "skills" / "unix_computer_use" / "SKILL.md"
     ).read_text(encoding="utf-8")
-    assert "permissions: [tool, subprocess]" in manifest
+    assert "permissions: [tool, subprocess, net]" in manifest
     assert "env_from_settings: []" in manifest
+    # net requires no owner grant...
+    assert requested_skill_permissions(["tool", "subprocess", "net"], []) == []
+    # ...but is NOT in the auto-enable-exempt set (so the skill needs owner enable).
+    assert "net" not in _NATIVE_AUTO_ENABLE_EXEMPT_PERMISSIONS

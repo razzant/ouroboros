@@ -160,3 +160,68 @@ disclosure above. Runs without the official V2 checkpoint protocol are
 final-state-only numbers; say so. Preflight-blocked and adapter-error tasks
 stay in the denominator via `result_index.jsonl` (`status=blocked` /
 `adapter_error`).
+
+## 7. cu_bridge runner: protocol deltas and disclosures
+
+`run_cu_bridge_agent.py` is a SECOND runner with a different shape from the
+step-loop `run_step_agent.py`. It reuses the official environment but changes
+the control loop, so its numbers are NOT drop-in comparable to a step-loop or
+leaderboard run without the disclosures below.
+
+1. **Runner identity.** One persistent Ouroboros task per OSWorld task
+   (`--memory-mode empty`, full within-task memory) drives the VM through the
+   bundled `unix_computer_use` skill's `osworld_http` backend — the
+   Terminal-Bench / Pointer shape. The step-loop runner instead has the host
+   call `env.step` with Ouroboros as a stateless per-step action selector.
+2. **Actions bypass `env.step` (same guest channel).** GUI actions are sent
+   straight to the in-VM `/execute` pyautogui server — the SAME guest channel
+   `env.step` uses — so guest mutation is identical, but the official
+   `DesktopEnv.action_history` and `traj.jsonl` are NOT populated. `reset()` and
+   `evaluate()` are the official ones. State evaluators depend only on final VM
+   state, so scoring is state-correct; the one action-history dependency is the
+   infeasible evaluator (below).
+3. **Infeasible = final-answer convention → official `FAIL`.** When the agent's
+   FINAL answer (`final_answer`/`result` field only, standalone line
+   `TASK_INFEASIBLE`) declares infeasibility, the bridge emits an official
+   `env.step("FAIL")` before `evaluate()`. OSWorld scores `infeasible` tasks 1.0
+   iff the last recorded action is `FAIL`, so this matches the official
+   semantics; a `FAIL` on a feasible task scores 0. Detection reads only the
+   terminal answer (never intermediate reasoning) to avoid spurious flips.
+4. **Budget is rounds + wall-clock, NOT leaderboard steps.** There is no
+   per-task step cap; the budget is the bench server's `OUROBOROS_MAX_ROUNDS`
+   (default 200) plus `--task_timeout_sec`. A leaderboard "step" is one model
+   turn (which may batch several pyautogui actions); an Ouroboros round is not
+   step-equivalent. `task_outcome.json` records `budget_counters`
+   (`llm_rounds`, `screenshots`, `gui_action_calls`, `remote_exec_calls`) and
+   `max_rounds_effective`; report these alongside any score. The current
+   Verified leaderboard standard is 100 steps.
+5. **Observation modality.** Screenshot-only by DEFAULT: `ax_tree` is disabled
+   per task unless `--allow-a11y`. A run with `--allow-a11y` must be reported as
+   "Additional a11y tree used: Yes" (the leaderboard separates Screenshot /
+   A11y / Screenshot+A11y / SoM).
+6. **Shell access.** `remote_exec` gives the agent a guest shell (within
+   OSWorld's action space — arbitrary python/subprocess is allowed by the
+   harness). Disclose "Additional coding-based action: Yes" (Pointer, the #1
+   Verified agent, does the same). The GUI-first preamble is advisory only; for
+   a strict GUI-only number, `remote_exec` would have to be hard-disabled, not
+   just discouraged.
+7. **Sudo password injection.** The VM `client_password` is placed in the
+   prompt (`prompt.txt`). This is official practice — the OSWorld baseline
+   prompts (`mm_agents/prompts.py`) say "My computer's password is
+   '{CLIENT_PASSWORD}', feel free to use it when you need sudo rights", and some
+   tasks are unsolvable without sudo. Keep run artifacts access-controlled since
+   the password appears in `prompt.txt`.
+8. **Proxy policy.** OSWorld-Verified flags 52 tasks `"proxy": true`
+   (anti-crawling / regional access). The bridge enables the proxy pool only
+   when a proxy config file exists; otherwise a proxy task runs WITHOUT proxy
+   and may fail on bot-detection. For a clean campaign, either provide a valid
+   proxy config or publish the "proxy unavailable" subset separately rather than
+   counting those as model failures.
+9. **Dataset pin + self-reported vs verified.** The manifest records the
+   checkout `variant` (V1-Verified: 369 tasks, 361 without the 8 Google-Drive
+   tasks; OSWorld-V2: 108 long-horizon tasks) and git commit under
+   `osworld_checkout`. Locally produced numbers are self-reported by definition;
+   the Verified leaderboard requires the maintainers to run the agent code (or a
+   trusted institution to share trajectories + monitoring). The bridge does not
+   emit official `traj.jsonl`, so a Verified submission needs the official
+   step-loop path or maintainer-side execution.

@@ -44,6 +44,14 @@ Files:
   structured action, executes those actions through `env.step(...)`, and records
   the official trajectory plus denominator-preserving ledgers. It is the runnable
   adapter; the skeleton remains a stricter installed-agent preflight path.
+- `run_cu_bridge_agent.py` is the **persistent-agent** OSWorld runner: it resets
+  an official VM, publishes the VM HTTP target into the bench data dir's
+  `unix_computer_use` skill state, submits ONE Ouroboros task (`--memory-mode
+  empty`), and lets the agent drive the VM through the skill's `osworld_http`
+  backend until it finishes. `reset()`/`evaluate()` are the official ones. This
+  is the Terminal-Bench / Pointer shape — see the cu_bridge details below and
+  METHODOLOGY.md §7 for the protocol deltas that make it NOT the official
+  step-loop.
 
 Important step-loop details:
 
@@ -80,7 +88,65 @@ Important step-loop details:
   otherwise stateless Ouroboros steps.
 - `claude_code_edit` is withheld per step by default (`--disable-tools`).
 
-Example smoke:
+Important cu_bridge details (`run_cu_bridge_agent.py`):
+
+- One persistent Ouroboros run per task drives the VM through
+  `unix_computer_use` (osworld_http backend), instead of the host driving
+  `env.step`. GUI actions therefore go straight to the guest `/execute` server
+  and are NOT recorded in the official `DesktopEnv.action_history` /
+  `traj.jsonl` — only the translated `FAIL` is (METHODOLOGY.md §7).
+- Observation modality is **screenshot-only by default**: `ax_tree` (the
+  on-demand accessibility-tree fetch) is added to the per-task disabled tools
+  unless `--allow-a11y` is passed. A run with `--allow-a11y` must be disclosed
+  as "Additional a11y tree used: Yes".
+- `remote_exec` (guest shell) stays available — disclose "Additional
+  coding-based action: Yes" (matches the Pointer leaderboard precedent). The
+  GUI-first preamble is advisory, not enforced. Note `remote_exec` is a
+  computer-use SKILL tool acting on the VM guest, not a host tool.
+- Host-tool lockdown: the OSWorld instruction is untrusted, so the task is
+  submitted with a computed denylist = all core tools minus a small allowlist
+  (skill discovery/enable, `view_image`, read-only inspection). Every host
+  execution/mutation/VCS/GitHub/service/self-mod/chat surface is blocked by
+  construction (`_ALLOWED_CORE_TOOLS` / `_host_denied_tools`); the VM is driven
+  only through the `unix_computer_use` skill's ext_* tools. The skill's
+  connection-SWITCHING ext tools (`add_connection`/`activate_connection`/
+  `use_local`/`clear_active_connection`) are ALSO denied so the task cannot
+  switch the pinned VM connection to `local` and drive the host desktop
+  (`_DENIED_SKILL_EXT_TOOLS`); read-only `list_connections`/`test_connection`
+  and the VM-control tools stay.
+- Guards: refuses `--ouroboros-url` on the live desktop port 8765 unless
+  `--allow-live-server`; unconditionally refuses a `--data-dir` inside the live
+  `~/Ouroboros/data` root (publishing a bench connection there would hijack the
+  owner's real skill).
+- `task_outcome.json` records disclosure counters (`budget_counters`:
+  `llm_rounds`, `screenshots`, `gui_action_calls`, `remote_exec_calls`) and
+  `max_rounds_effective`; the manifest records the OSWorld checkout variant/pin
+  (`osworld_checkout`) and `a11y_enabled`. The budget is the Ouroboros server's
+  `OUROBOROS_MAX_ROUNDS` (default 200) plus `--task_timeout_sec`; this is NOT a
+  100-step leaderboard cap — report both.
+- The VM sudo password is injected into `prompt.txt` (official OSWorld practice;
+  `mm_agents/prompts.py`). Keep run artifacts access-controlled.
+- Proxy: for `"proxy": true` tasks the runner enables OSWorld's proxy pool only
+  when a proxy config file exists; otherwise the task runs without proxy —
+  disclose this in the campaign report.
+
+Example cu_bridge smoke:
+
+```bash
+# ISOLATED bench server (fresh OUROBOROS_DATA_DIR, non-default port). --data-dir
+# must NOT be the live ~/Ouroboros/data. Screenshot-only unless --allow-a11y.
+python devtools/benchmarks/osworld/run_cu_bridge_agent.py \
+  --osworld-root /path/to/OSWorld \
+  --provider_name docker \
+  --path_to_vm /path/to/Ubuntu.qcow2 \
+  --task evaluation_examples/examples/multi_apps/48d05431-6cd5-4e76-82eb-12b60d823f7d.json \
+  --result_dir results/osworld_cu_bridge \
+  --data-dir /path/to/bench_data \
+  --target-file /path/to/bench_data/cu_target.txt \
+  --ouroboros-url http://127.0.0.1:8780
+```
+
+Example step-loop smoke:
 
 ```bash
 # Point at an ISOLATED Ouroboros server (fresh OUROBOROS_DATA_DIR, non-default

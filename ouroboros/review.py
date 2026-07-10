@@ -96,7 +96,11 @@ MAX_FUNCTION_LINES = 300
 # workspace_admission SSOT (validator/room-resolver/preflight-cap/workspace-block),
 # coop_checkpoint pair, project_sources attach/clone, the projects update/delete/
 # fs-dirs gateway handlers, and registry provenance/delete helpers; 3740 -> 3775.
-MAX_TOTAL_FUNCTIONS = 3775
+# unix_computer_use remote backends (OSWorld HTTP / SSH macOS, PR #64): +~29
+# functions in skills/unix_computer_use/plugin.py (connection registry, remote
+# screenshot/input/exec translation, fail-closed guards) — deliberate feature
+# growth for the OSWorld cu_bridge runner; 3775 -> 3805 with the usual headroom.
+MAX_TOTAL_FUNCTIONS = 3805
 GRANDFATHERED_OVERSIZED_FUNCTIONS = {
     ("agent_startup_checks.py", "verify_restart"),  # managed #53 boot diagnostic flow, 307 lines
     ("git.py", "_run_reviewed_stage_cycle"),  # reviewed-commit gate orchestration, 302 lines
@@ -136,9 +140,30 @@ GRANDFATHERED_OVERSIZED_MODULES = {
     "loop.py",
     "shell.py",
     "core.py",
+    # v6.62.0 unix_computer_use remote backends (OSWorld HTTP / SSH macOS, PR #64)
+    # grew skills/unix_computer_use/plugin.py past the 1600 gate: the remote
+    # screenshot/input/exec translation + connection registry + fail-closed guards
+    # live inline with the local backend. Extracting the remote translation layer
+    # into a sibling payload module is a tracked follow-up (the skill loader would
+    # need to import a second payload file); accepted debt until then. Keyed by
+    # REPO-RELATIVE path (not the bare basename) so a future skill's plugin.py is
+    # not silently exempted (SKILL.md convention is `entry: plugin.py`).
+    "skills/unix_computer_use/plugin.py",
 }
 # Bundle-only launcher is not part of the self-editable function budget.
 FUNCTION_COUNT_EXCLUDED_FILES = {"launcher.py"}
+
+
+def module_is_grandfathered(path: str) -> bool:
+    """True if `path` matches GRANDFATHERED_OVERSIZED_MODULES by bare basename OR
+    by repo-relative path. Accepts an optional leading `repo/` (health sections
+    are prefixed `repo/...`) so the SSOT set is matched identically by the smoke
+    gate and the codebase_health metric — the two consumers must never diverge."""
+    posix = pathlib.PurePosixPath(str(path).replace("\\", "/"))
+    rel = posix.as_posix()
+    if rel.startswith("repo/"):
+        rel = rel[len("repo/"):]
+    return posix.name in GRANDFATHERED_OVERSIZED_MODULES or rel in GRANDFATHERED_OVERSIZED_MODULES
 
 
 def compute_complexity_metrics(sections: List[Tuple[str, str]]) -> Dict[str, Any]:
@@ -185,8 +210,8 @@ def compute_complexity_metrics(sections: List[Tuple[str, str]]) -> Dict[str, Any
         "target_drift_functions": [item for item in function_lengths if item[2] > TARGET_FUNCTION_LINES],
         "oversized_functions": [item for item in function_lengths if item[2] > MAX_FUNCTION_LINES],
         "target_drift_modules": target_drift_modules,
-        "grandfathered_modules": [(p, n) for p, n in hard_modules if pathlib.Path(p).name in GRANDFATHERED_OVERSIZED_MODULES],
-        "oversized_modules": [(p, n) for p, n in hard_modules if pathlib.Path(p).name not in GRANDFATHERED_OVERSIZED_MODULES],
+        "grandfathered_modules": [(p, n) for p, n in hard_modules if module_is_grandfathered(p)],
+        "oversized_modules": [(p, n) for p, n in hard_modules if not module_is_grandfathered(p)],
     }
 
 def collect_sections(

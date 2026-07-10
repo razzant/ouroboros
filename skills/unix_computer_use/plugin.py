@@ -23,6 +23,7 @@ support is deferred to a separate skill.
 
 from __future__ import annotations
 
+import base64
 import json
 import os
 import pathlib
@@ -45,7 +46,10 @@ _MAX_IMAGE_H = 800
 _TRANSFORM_FILE = "coord_transform.json"
 _CONNECTIONS_FILE = "connections.json"
 _ACTIVE_CONNECTION_FILE = "active_connection.txt"
+_REMOTE_BACKENDS = {"osworld_http", "ssh_macos"}
 _AX_MAX_ELEMENTS = 120
+# Cap a remote /screenshot download (a 1920x1080 PNG is well under 10 MB).
+_MAX_REMOTE_SHOT_BYTES = 20 * 1024 * 1024
 
 # Remote backend constants. These are dormant unless a non-local connection is
 # explicitly activated in skill state (or by a benchmark runner). The default
@@ -62,9 +66,36 @@ _PYAUTOGUI_MODS = {
     "cmd": "winleft", "command": "winleft", "super": "winleft", "meta": "winleft", "win": "winleft",
     "fn": "fn",
 }
+
+
+def _osworld_result_ok(out: dict[str, Any]) -> tuple[bool, str]:
+    """Fail-closed verdict for an OSWorld /execute round-trip: the in-VM server
+    returns HTTP 200 even on nonzero exit, so require 200 AND (dict body)
+    status=="success" AND returncode==0 when present."""
+    if int(out.get("status") or 0) != 200:
+        return False, f"HTTP {out.get('status')}"
+    result = out.get("result")
+    if not isinstance(result, dict):
+        return False, "unexpected non-JSON /execute response"
+    status = str(result.get("status") or "").strip().lower()
+    if status and status != "success":
+        return False, str(result.get("message") or result.get("error") or f"status={status}")[:1000]
+    returncode = result.get("returncode")
+    if returncode is not None:
+        try:
+            rc = int(returncode)
+        except Exception:
+            return False, f"non-integer returncode {returncode!r}"
+        if rc != 0:
+            err = str(result.get("error") or result.get("output") or "").strip()
+            return False, (err or f"guest command exited {rc}")[:1000]
+    return True, ""
+
+
 _PYAUTOGUI_BASE_ALIASES = {
     "return": "enter", "enter": "enter", "esc": "esc", "escape": "esc",
-    "del": "delete", "delete": "delete", "backspace": "backspace",
+    # Canonical "delete"=BACKWARD (matches _X11_KEY_ALIASES); pyautogui "delete"=FORWARD, so swap.
+    "del": "backspace", "delete": "backspace", "backspace": "backspace", "fwd-delete": "delete",
     "space": "space", "tab": "tab", "home": "home", "end": "end",
     "page-down": "pagedown", "pagedown": "pagedown", "page_down": "pagedown", "pgdn": "pagedown",
     "page-up": "pageup", "pageup": "pageup", "page_up": "pageup", "pgup": "pageup",
@@ -218,16 +249,22 @@ class _ComputerUse:
         except Exception:
             pass
         data["connections"].setdefault("local", {"backend": "local", "enabled": True})
-        if str(data.get("active") or "") not in data["connections"]:
-            data["active"] = "local"
+        # Unknown active name is PRESERVED (not reset to local); _active_connection fails it closed.
         return data
+
+    def _atomic_write(self, path: pathlib.Path, text: str) -> None:
+        """Write+rename: a crash can't leave a torn registry file (which could route remote→local)."""
+        tmp = path.with_name(f"{path.name}.tmp-{uuid.uuid4().hex[:8]}")
+        tmp.write_text(text, encoding="utf-8")
+        os.replace(tmp, path)
 
     def _write_connections(self, data: dict[str, Any]) -> None:
         data.setdefault("connections", {})
         data["connections"].setdefault("local", {"backend": "local", "enabled": True})
-        self._connections_path().write_text(json.dumps(data, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+        # Registry first, active pointer last: a lost second write still names a live connection.
+        self._atomic_write(self._connections_path(), json.dumps(data, ensure_ascii=False, indent=2) + "\n")
         try:
-            self._active_connection_path().write_text(str(data.get("active") or "local"), encoding="utf-8")
+            self._atomic_write(self._active_connection_path(), str(data.get("active") or "local"))
         except Exception:
             pass
 
@@ -235,16 +272,38 @@ class _ComputerUse:
         data = self._read_connections()
         name = str(data.get("active") or "local")
         conn = dict((data.get("connections") or {}).get(name) or {})
-        if not conn.get("enabled", True):
-            return "local", {"backend": "local", "enabled": True}
+        if name == "local":
+            return name, (conn or {"backend": "local", "enabled": True})
+        # FAIL CLOSED: any NON-local active connection that is missing from the
+        # registry (corrupt connections.json), disabled, or carries an unknown
+        # backend is marked disabled — it must NEVER fall back to the local
+        # desktop. _is_remote() below still returns True for such a name, so the
+        # input tools route into _remote_pyautogui (which refuses on "disabled")
+        # rather than silently driving the host.
+        backend = str(conn.get("backend") or "").strip().lower()
+        if not conn or backend not in _REMOTE_BACKENDS or not conn.get("enabled", True):
+            marker = {**conn, "backend": backend or "unknown", "disabled": True}
+            if not conn:
+                marker["missing"] = True
+            return name, marker
         return name, conn
+
+    def _disabled_connection_error(self, name: str, conn: dict[str, Any]) -> str:
+        return _json({
+            "ok": False, "connection": name, "backend": str(conn.get("backend") or "local"),
+            "error": f"active connection {name!r} is unusable (disabled or unknown backend); re-add it via add_connection or switch with use_local/activate_connection",
+        })
 
     def _active_backend_name(self) -> str:
         _name, conn = self._active_connection()
         return str(conn.get("backend") or "local").strip().lower() or "local"
 
     def _is_remote(self) -> bool:
-        return self._active_backend_name() in {"osworld_http", "ssh_macos"}
+        # Any non-local ACTIVE name is "remote" for dispatch purposes: usable
+        # remotes act on the VM; unusable ones (disabled/missing/unknown) are
+        # refused in the remote path — never silently handled locally.
+        name, _conn = self._active_connection()
+        return name != "local"
 
     def list_connections(self) -> str:
         data = self._read_connections()
@@ -366,7 +425,8 @@ class _ComputerUse:
         low = str(key or "").strip().lower()
         return {
             "enter": "return", "return": "return", "esc": "esc", "escape": "esc",
-            "delete": "delete", "backspace": "delete", "pagedown": "page-down",
+            # Input is a PYAUTOGUI key name: its "delete" is forward delete (cliclick fwd-delete).
+            "delete": "fwd-delete", "backspace": "delete", "pagedown": "page-down",
             "pageup": "page-up", "down": "arrow-down", "up": "arrow-up",
             "left": "arrow-left", "right": "arrow-right", "winleft": "cmd",
             "super": "cmd", "meta": "cmd",
@@ -425,12 +485,17 @@ class _ComputerUse:
         return [], f"unsupported pyautogui snippet for ssh_macos/cliclick: {text[:120]}"
 
     def _remote_pyautogui(self, conn: dict[str, Any], code: str, *, note: dict[str, Any] | None = None, timeout: int = 30) -> str:
+        if conn.get("disabled"):
+            return self._disabled_connection_error(str(self._read_connections().get("active") or "?"), conn)
         backend = str(conn.get("backend") or "").lower()
         try:
             if backend == "osworld_http":
                 wrapped = _OSWORLD_PKGS_PREFIX.format(command=code)
                 out = self._osworld_execute(conn, ["python", "-c", wrapped], timeout=timeout)
-                payload: dict[str, Any] = {"ok": out["status"] == 200, "backend": backend, "status": out["status"], "execute_result": out["result"]}
+                ok, err = _osworld_result_ok(out)
+                payload: dict[str, Any] = {"ok": ok, "backend": backend, "status": out["status"], "execute_result": out["result"]}
+                if not ok:
+                    payload["error"] = err
             elif backend == "ssh_macos":
                 cliclick_args, err = self._ssh_macos_cliclick_for_pyautogui(code)
                 if err:
@@ -458,14 +523,20 @@ class _ComputerUse:
         extra: dict[str, Any] | None = None,
     ) -> str:
         px_w, px_h = _png_dimensions(raw_path)
+        if px_w <= 0 or px_h <= 0:
+            # Not a decodable PNG — don't claim success on garbage; drop the file.
+            try:
+                raw_path.unlink()
+            except OSError:
+                pass
+            return _json({"ok": False, "backend": backend, "error": "remote screenshot is not a valid PNG"})
         if input_w <= 0 or input_h <= 0:
             input_w, input_h = px_w, px_h
         max_w = max(320, min(int(max_width or _MAX_IMAGE_W), 4096))
         max_h = max(240, min(int(max_height or _MAX_IMAGE_H), 4096))
         img_path, img_w, img_h = self._downscale(raw_path, max_w, max_h)
         # Path confinement: the downscaled image already lives under the skill's
-        # own job dir (api.skill_job_dir(...)); return it directly for view_image.
-        # Never copy screenshots outside the skill's job/state dir.
+        # own job dir; return it directly for view_image, never copied elsewhere.
         view_path = img_path
         result: dict[str, Any] = {
             "ok": True,
@@ -511,11 +582,13 @@ class _ComputerUse:
         out_path = out_dir / f"screenshot-{int(time.time())}-{uuid.uuid4().hex[:6]}.png"
         try:
             with urllib.request.urlopen(target + "/screenshot", timeout=20) as resp:
-                data = resp.read()
+                data = resp.read(_MAX_REMOTE_SHOT_BYTES + 1)
         except Exception as exc:  # noqa: BLE001
             return _json({"ok": False, "error": f"/screenshot failed: {type(exc).__name__}: {exc}", "target": target})
         if not data:
             return _json({"ok": False, "error": "/screenshot returned empty body", "target": target})
+        if len(data) > _MAX_REMOTE_SHOT_BYTES:
+            return _json({"ok": False, "error": f"/screenshot exceeded {_MAX_REMOTE_SHOT_BYTES} byte cap", "target": target})
         out_path.write_bytes(data)
         px_w, px_h = _png_dimensions(out_path)
         return self._remote_screenshot_result(
@@ -537,7 +610,7 @@ class _ComputerUse:
                 raw = resp.read(32)
             out = self._osworld_execute(conn, ["python", "-c", "import pyautogui; print(pyautogui.size())"], timeout=20)
             return _json({
-                "ok": bool(raw) and out.get("status") == 200,
+                "ok": bool(raw) and _osworld_result_ok(out)[0],
                 "connection": name,
                 "backend": "osworld_http",
                 "target": target,
@@ -763,6 +836,8 @@ class _ComputerUse:
     def screenshot(self, *, job_id: str = "manual", max_width: int = _MAX_IMAGE_W,
                    max_height: int = _MAX_IMAGE_H) -> str:
         _conn_name, conn = self._active_connection()
+        if conn.get("disabled"):
+            return self._disabled_connection_error(_conn_name, conn)
         backend = str(conn.get("backend") or "local").lower()
         if backend == "osworld_http":
             return self._osworld_screenshot(conn, max_width=max_width, max_height=max_height)
@@ -1062,7 +1137,27 @@ class _ComputerUse:
         if self._is_remote():
             _name, conn = self._active_connection()
             interval = max(0, int(interval_ms or 0)) / 1000.0
-            return self._remote_pyautogui(conn, f"pyautogui.typewrite({text!r}, interval={interval!r})", timeout=60)
+            typewrite_code = f"pyautogui.typewrite({text!r}, interval={interval!r})"
+            backend = str(conn.get("backend") or "").lower()
+            # typewrite silently drops non-ASCII, so paste it via the in-VM clipboard
+            # (base64-safe), like official OSWorld agents; ssh_macos `t:` handles unicode.
+            if backend == "osworld_http" and any(ord(ch) > 127 for ch in text):
+                b64 = base64.b64encode(text.encode("utf-8")).decode("ascii")
+                clip_code = (
+                    f"import base64, pyperclip; pyperclip.copy(base64.b64decode('{b64}')"
+                    f".decode('utf-8')); pyautogui.hotkey('ctrl', 'v')"
+                )
+                out = self._remote_pyautogui(conn, clip_code, note={"method": "clipboard"}, timeout=60)
+                try:
+                    if json.loads(out).get("ok"):
+                        return out
+                except Exception:
+                    pass
+                # Clipboard path failed (pyperclip/xclip absent) — typewrite fallback.
+                return self._remote_pyautogui(
+                    conn, typewrite_code, note={"method": "typewrite", "clipboard_fallback": True}, timeout=60,
+                )
+            return self._remote_pyautogui(conn, typewrite_code, note={"method": "typewrite"}, timeout=60)
         if plat == "macos" and _which("cliclick"):
             cmd = ["cliclick", f"t:{text}"]
         elif plat == "linux" and _session_type() == "wayland" and (_which("ydotool") or _which("wtype")):
@@ -1229,12 +1324,12 @@ class _ComputerUse:
         plat = _platform()
         if self._is_remote():
             _name, conn = self._active_connection()
-            units = amount * 100
+            # X11 pyautogui = one wheel detent per unit (like the local path): 1:1, no multiplier.
             if direction in ("up", "down"):
-                delta = units if direction == "up" else -units
+                delta = amount if direction == "up" else -amount
                 return self._remote_pyautogui(conn, f"pyautogui.scroll({delta})")
             if direction in ("left", "right"):
-                delta = units if direction == "right" else -units
+                delta = amount if direction == "right" else -amount
                 return self._remote_pyautogui(conn, f"pyautogui.hscroll({delta})")
             return _json({"ok": False, "error": f"unknown scroll direction {direction!r} (use up/down/left/right)"})
         if plat == "macos":
@@ -1266,6 +1361,8 @@ class _ComputerUse:
         plat = _platform()
         if self._is_remote():
             _name, conn = self._active_connection()
+            if conn.get("disabled"):
+                return self._disabled_connection_error(_name, conn)
             backend = str(conn.get("backend") or "").lower()
             if backend == "osworld_http":
                 return self.remote_exec(command='DISPLAY=:0 wmctrl -lG 2>/dev/null || wmctrl -l 2>/dev/null || true', timeout=15)
@@ -1349,6 +1446,8 @@ end run
         plat = _platform()
         if self._is_remote():
             _name, conn = self._active_connection()
+            if conn.get("disabled"):
+                return self._disabled_connection_error(_name, conn)
             backend = str(conn.get("backend") or "").lower()
             if backend == "osworld_http":
                 target = self._connection_target(conn)
@@ -1464,6 +1563,8 @@ end run
         for local work; remote_exec is for inspecting a selected remote machine.
         """
         _name, conn = self._active_connection()
+        if conn.get("disabled"):
+            return self._disabled_connection_error(_name, conn)
         backend = str(conn.get("backend") or "local").lower()
         cmd = str(command or "").strip()
         if not cmd:
@@ -1472,7 +1573,11 @@ end run
         try:
             if backend == "osworld_http":
                 out = self._osworld_execute(conn, ["bash", "-lc", cmd], timeout=timeout)
-                return _json({"ok": out["status"] == 200, "backend": backend, "status": out["status"], "result": out["result"]})
+                ok, err = _osworld_result_ok(out)
+                payload: dict[str, Any] = {"ok": ok, "backend": backend, "status": out["status"], "result": out["result"]}
+                if not ok:
+                    payload["error"] = err
+                return _json(payload)
             if backend == "ssh_macos":
                 rc, stdout, stderr = self._ssh_run(conn, cmd, timeout=timeout)
                 return _json({"ok": rc == 0, "backend": backend, "returncode": rc, "output": stdout, "error": stderr})

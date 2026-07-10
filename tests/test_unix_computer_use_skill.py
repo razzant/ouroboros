@@ -55,10 +55,11 @@ def test_unix_computer_use_registers_expected_tools(tmp_path):
     } <= set(api.tools)
 
 
-def test_unix_computer_use_manifest_declares_subprocess_permission():
+def test_unix_computer_use_manifest_declares_permissions():
     text = SKILL_PATH.read_text(encoding="utf-8")
 
-    assert "permissions: [tool, subprocess]" in text
+    # `net` is required for the remote OSWorld HTTP / SSH backends.
+    assert "permissions: [tool, subprocess, net]" in text
 
 
 def test_unix_computer_use_screenshot_uses_detected_backend(tmp_path, monkeypatch):

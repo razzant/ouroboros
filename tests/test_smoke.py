@@ -414,10 +414,9 @@ def test_no_env_dumping():
 
 def test_no_oversized_modules():
     """Principle 7: no non-grandfathered module exceeds the hard gate."""
-    from ouroboros.review import GRANDFATHERED_OVERSIZED_MODULES, MAX_MODULE_LINES
+    from ouroboros.review import MAX_MODULE_LINES, module_is_grandfathered
 
     max_lines = MAX_MODULE_LINES
-    grandfathered = set(GRANDFATHERED_OVERSIZED_MODULES)
     violations = []
     for root, dirs, files in os.walk(REPO):
         dirs[:] = [d for d in dirs if d not in _SKIP_DIRS]
@@ -426,8 +425,11 @@ def test_no_oversized_modules():
                 continue
             path = pathlib.Path(root) / f
             lines = len(path.read_text(encoding="utf-8").splitlines())
-            if lines > max_lines and path.name not in grandfathered:
-                violations.append(f"{path.name}: {lines} lines")
+            # Shared matcher (basename OR repo-relative path) — the same one
+            # codebase_health uses, so the two consumers never diverge.
+            rel = path.relative_to(REPO).as_posix()
+            if lines > max_lines and not module_is_grandfathered(rel):
+                violations.append(f"{rel}: {lines} lines")
     assert len(violations) == 0, f"Oversized modules (>{max_lines} lines):\n" + "\n".join(violations)
 
 

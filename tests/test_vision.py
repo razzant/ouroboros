@@ -401,9 +401,11 @@ class TestVlmQueryTool(unittest.TestCase):
                 # We call the real _allowed_file_roots (not patched) here
                 from ouroboros.tools.vision import _allowed_file_roots
                 roots = _allowed_file_roots()
-                # Only one allowed root: the custom uploads
-                self.assertEqual(len(roots), 1)
+                # Two env-derived roots: the custom uploads AND the skill-state
+                # tree (state/skills), where reviewed skills write screenshots.
+                self.assertEqual(len(roots), 2)
                 self.assertEqual(roots[0], pathlib.Path(tmpdir).resolve() / "uploads")
+                self.assertEqual(roots[1], pathlib.Path(tmpdir).resolve() / "state" / "skills")
                 # Attempt to read image from home_uploads_mock — should be rejected
                 with patch("ouroboros.tools.vision._allowed_file_roots", return_value=roots):
                     result = _vlm_query(ctx, prompt="test", file_path=str(img_path))

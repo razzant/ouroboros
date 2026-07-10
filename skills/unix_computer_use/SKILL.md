@@ -73,7 +73,13 @@ Backend matrix (honest limitations):
 - Remote OSWorld HTTP: `screenshot` uses `GET <target>/screenshot`; input and
   `remote_exec` use `POST <target>/execute`, matching OSWorld's in-VM
   `pyautogui` channel. The runner writes an `osworld_http` connection before
-  each task.
+  each task. Honesty guarantees on this backend: `scroll` clicks are 1:1 wheel
+  detents (not multiplied); non-ASCII `type_text` is pasted via the in-VM
+  clipboard (`pyperclip` + `ctrl+v`, ASCII `typewrite` fallback) so Unicode is
+  not silently dropped; every action's `ok` reflects the guest process
+  `returncode`/`status` (HTTP 200 alone is not success); `key` `backspace`
+  presses BackSpace and `fwd-delete` presses forward Delete; screenshots are
+  capped at 20 MB and PNG-validated before use.
 - Remote SSH macOS: `screenshot` uses remote `screencapture` + `scp`; input uses
   a remote input helper path. The remote Mac must have Screen Recording and
   Accessibility grants configured by the owner. This skill does not install or
@@ -90,6 +96,15 @@ Connection registry:
 - Agents should add/test/activate connections only when the user or a benchmark
   runner provides an explicit target. They should not scan for arbitrary remote
   machines.
+- A disabled active connection FAILS CLOSED: action tools return an error rather
+  than silently falling back to the local desktop (an action aimed at a remote
+  target must never land on the host).
+
+Permissions note: the remote backends require the `net` permission. `net` needs
+no owner grant (skill grants only gate `inject_chat`/`subscribe_event`), but it
+does remove this skill from the launcher's native auto-enable class — so on a
+fresh install the owner must ENABLE it explicitly (a benchmark runner does this
+via `save_enabled`). Local-only computer use is unaffected once enabled.
 
 The skill intentionally does not hide OS permission requirements, and missing
 backends produce explicit errors with the capability report instead of
