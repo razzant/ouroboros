@@ -31,6 +31,7 @@ from ouroboros.memory import Memory
 from ouroboros.context import build_llm_messages
 from ouroboros.context_budget import CONTEXT_SOFT_CAP_TOKENS
 from ouroboros.loop import run_llm_loop
+import ouroboros.resume as resume
 from ouroboros.config import resolve_effort
 from ouroboros.agent_startup_checks import (
     inject_crash_report,
@@ -545,6 +546,10 @@ class OuroborosAgent:
             _scope_pid = str(getattr(ctx, "project_id", "") or "").strip()
             if _scope_pid and not str(task.get("project_id") or "").strip():
                 task["project_id"] = _scope_pid
+
+            # Conversation-resume capture (opt-in via OUROBOROS_RESUME_CAPTURE): persist the final
+            # conversation so a later task can continue it via resume_from_task_id.
+            resume.capture(self.env, str(task.get("id") or ""), messages, text)
 
             emit_task_results(
                 self.env, self.memory, self.llm,
