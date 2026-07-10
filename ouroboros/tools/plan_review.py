@@ -100,6 +100,18 @@ def get_tools():
                     "properties": {
                         "plan": {"type": "string", "description": "Describe what you plan to implement: which files you will change, what the key design decisions are, and what you will NOT change."},
                         "goal": {"type": "string", "description": "The high-level goal of the task (what problem is being solved)."},
+                        "plan_class": {
+                            "type": "string",
+                            "enum": ["self_mod", "external", "creative", "research"],
+                            "description": (
+                                "What KIND of plan this is — your own classification: self_mod (changes to the "
+                                "Ouroboros system repo — full governance pack), external (an external codebase/"
+                                "workspace), creative (content/design/site deliverables), research (investigation/"
+                                "analysis). The host STRUCTURALLY escalates to self_mod when files_to_touch resolve "
+                                "under the system repo. Non-self_mod classes get a leaner doc pack (ARCHITECTURE as "
+                                "a navigation map) and task-fit scout framing."
+                            ),
+                        },
                         "files_to_touch": {"type": "array", "description": "Optional list of repo-relative file paths you plan to modify. Their current content (HEAD snapshot) will be injected so reviewers can reason about concrete code, not just abstract plans.", "items": {"type": "string"}},
                         "context_level": {
                             "type": "string",
@@ -108,7 +120,8 @@ def get_tools():
                                 "Agent-chosen repository context level. Choose explicitly: minimal omits generated "
                                 "Atlas context but keeps governance docs and touched-file snapshots; localized adds "
                                 "a small Atlas around files_to_touch; broad is for shared contracts; constitutional "
-                                "is for self-evolution/immune surfaces."
+                                "is for self-evolution/immune surfaces. For non-self_mod plan classes it may be "
+                                "omitted and defaults to minimal."
                             ),
                         },
                         "context_notes": {
@@ -122,7 +135,11 @@ def get_tools():
                             "description": "Whether generated Atlas context may include related tests.",
                         },
                     },
-                    "required": ["plan", "goal", "context_level"],
+                    # context_level is enforced HOST-SIDE by _resolve_plan_context_level:
+                    # explicit-choice for self_mod, optional (defaults minimal) for
+                    # external/creative/research — an unconditional schema `required`
+                    # contradicted that contract (triad r2, self_consistency).
+                    "required": ["plan", "goal"],
                 },
             },
             handler=_handle_plan_task,
@@ -139,11 +156,45 @@ def _handle_plan_task(
     context_level: str = "",
     context_notes: str = "",
     include_tests: bool = False,
+    plan_class: str = "",
 ) -> str:
     if not plan.strip():
         return "ERROR: plan parameter is required and must not be empty."
     if not goal.strip():
         return "ERROR: goal parameter is required and must not be empty."
+
+    # Deadline scaling (v6.54.3, 1.5): with a task deadline, the swarm ceiling is
+    # min(configured ceiling, remaining/4). Below the useful floor, planning cannot
+    # return in time — skip instantly with a typed reason + telemetry instead of
+    # eating the budget tail. Without a deadline: behavior unchanged.
+    from ouroboros.config import get_plan_task_deadline_min_sec
+    from ouroboros.deadline_utils import deadline_remaining_sec
+
+    _remaining = deadline_remaining_sec(ctx)
+    if _remaining > 0:
+        _scaled_ceiling = _remaining / 4.0
+        _min_useful = get_plan_task_deadline_min_sec()
+        if _scaled_ceiling < _min_useful:
+            try:
+                eq = getattr(ctx, "event_queue", None)
+                if eq is not None:
+                    from ouroboros.utils import utc_now_iso
+                    eq.put_nowait({
+                        "type": "plan_task_deadline_skip",
+                        "task_id": str(getattr(ctx, "task_id", "") or ""),
+                        "remaining_sec": round(_remaining, 1),
+                        "scaled_ceiling_sec": round(_scaled_ceiling, 1),
+                        "min_useful_sec": _min_useful,
+                        "ts": utc_now_iso(),
+                    })
+            except Exception:
+                pass
+            return (
+                "PLAN_TASK_SKIPPED_DEADLINE: insufficient time for useful planning — "
+                f"remaining {int(_remaining)}s gives a swarm window of {int(_scaled_ceiling)}s "
+                f"(< {int(get_plan_task_deadline_min_sec())}s useful floor). Proceed with your own "
+                "best plan directly; do not re-call plan_task under this deadline."
+            )
 
     files_to_touch = files_to_touch or []
 
@@ -154,14 +205,14 @@ def _handle_plan_task(
                 result = pool.submit(
                     asyncio.run,
                     asyncio.wait_for(
-                        _run_plan_review_async(ctx, plan, goal, files_to_touch, context_level, context_notes, include_tests),
+                        _run_plan_review_async(ctx, plan, goal, files_to_touch, context_level, context_notes, include_tests, plan_class),
                         timeout=_PLAN_REVIEW_WRAPPER_TIMEOUT_SEC,
                     ),
                 ).result(timeout=_PLAN_REVIEW_WRAPPER_TIMEOUT_SEC + 5)
         except RuntimeError:
             result = asyncio.run(
                 asyncio.wait_for(
-                    _run_plan_review_async(ctx, plan, goal, files_to_touch, context_level, context_notes, include_tests),
+                    _run_plan_review_async(ctx, plan, goal, files_to_touch, context_level, context_notes, include_tests, plan_class),
                     timeout=_PLAN_REVIEW_WRAPPER_TIMEOUT_SEC,
                 )
             )
@@ -246,6 +297,7 @@ def _plan_request_fingerprint(
     files_to_touch: list,
     context_level: str,
     context_notes: str,
+    plan_class: str = "",
 ) -> str:
     payload = {
         "plan": plan,
@@ -254,6 +306,11 @@ def _plan_request_fingerprint(
         "context_level": context_level,
         "context_notes": context_notes or "",
     }
+    # v6.61.0: the class changes the scout framing, so a re-run under a different
+    # class must not resume the other class's handoffs. Only stamped when set —
+    # keeps historical fingerprints (and their resumable handoffs) valid.
+    if str(plan_class or "").strip():
+        payload["plan_class"] = str(plan_class).strip()
     raw = json.dumps(payload, ensure_ascii=False, sort_keys=True, default=str)
     return sha256(raw.encode("utf-8")).hexdigest()
 
@@ -403,6 +460,37 @@ def _all_planning_tasks_known_terminal(task_ids: list[str], tasks: dict) -> bool
     return True
 
 
+def _planning_scout_framing(plan_class: str) -> tuple[str, str]:
+    """v6.61.0 (5.3): scout (objective, constraints) by plan class. self_mod keeps the
+    repo-archaeology framing; external/creative/research scouts are steered to the
+    TASK'S OWN domain — the agent-visible failure was scouts burning their window on
+    Ouroboros internals for a website plan. The scout still chooses its own angle
+    (LLM-first); only the default emphasis changes."""
+    if plan_class == "self_mod" or not plan_class:
+        return (
+            "Independently review the proposed implementation plan before code edits. "
+            "Inspect repo/docs/logs if useful. Focus on missing touchpoints, hidden "
+            "contracts, sequencing risks, and simpler alternatives. Do not implement.",
+            "Readonly planning only. Do not edit files, commit, run shell, or request review gates. "
+            "Use concrete file/symbol references when possible.",
+        )
+    domain = {
+        "external": "the external codebase/workspace this plan targets",
+        "creative": "the creative deliverable (content, design, UX, audience fit)",
+        "research": "the research question (sources, method, evidence quality)",
+    }.get(plan_class, "the task's own domain")
+    return (
+        f"Independently review the proposed plan before execution. This is a {plan_class} "
+        f"plan: scout {domain} — pick the angle that most improves THIS plan (requirements "
+        "coverage, verification strategy, external references, design/content quality), NOT "
+        "Ouroboros-repo archaeology. Focus on missing requirements, risks, sequencing, and "
+        "simpler alternatives. Do not implement.",
+        "Readonly planning only. Do not edit files, commit, run shell, or request review gates. "
+        "Ground findings in the plan's own domain (its files, its sources, its audience); cite "
+        "concrete references when possible.",
+    )
+
+
 def _start_planning_swarm(
     ctx: ToolContext,
     *,
@@ -411,6 +499,7 @@ def _start_planning_swarm(
     files_to_touch: list,
     context_level: str,
     context_notes: str,
+    plan_class: str = "self_mod",
 ) -> dict:
     from ouroboros.config import get_max_workers, get_plan_task_swarm_timeout_sec
     from ouroboros.tools.control import _schedule_task
@@ -421,9 +510,17 @@ def _start_planning_swarm(
         files_to_touch=files_to_touch,
         context_level=context_level,
         context_notes=context_notes,
+        plan_class=plan_class,
     )
     wait_timeout = get_plan_task_swarm_timeout_sec()
     max_wait = _effective_swarm_max_wait()
+    # Deadline scaling (v6.54.3, 1.5): the swarm ceiling never exceeds a quarter of
+    # the remaining deadline (the too-small case already skipped in _handle_plan_task).
+    from ouroboros.deadline_utils import deadline_remaining_sec as _deadline_remaining
+
+    _remaining = _deadline_remaining(ctx)
+    if _remaining > 0:
+        max_wait = min(max_wait, _remaining / 4.0)
     event_queue = getattr(ctx, "event_queue", None)
     live_queue = event_queue is not None and event_queue.__class__.__module__ in {"queue", "multiprocessing.queues"}
     if not live_queue:
@@ -472,16 +569,13 @@ def _start_planning_swarm(
     previous_records = list(getattr(ctx, "_last_scheduled_subagents", []) or [])
     previous_len = len(previous_records)
     count = _planning_swarm_count(context_level, files_to_touch)
+    scout_objective, scout_constraints = _planning_scout_framing(plan_class)
     schedule_outputs: list[str] = []
     for idx in range(count):
         role = f"planning-scout-{idx + 1}"
         output = _schedule_task(
             ctx,
-            objective=(
-                "Independently review the proposed implementation plan before code edits. "
-                "Inspect repo/docs/logs if useful. Focus on missing touchpoints, hidden "
-                "contracts, sequencing risks, and simpler alternatives. Do not implement."
-            ),
+            objective=scout_objective,
             expected_output=(
                 "A concise planning handoff with sections: summary, missed_touchpoints, "
                 "risks, suggested_scope_adjustments, tests_to_run, blockers."
@@ -494,10 +588,7 @@ def _start_planning_swarm(
                 context_level=context_level,
                 context_notes=context_notes,
             ),
-            constraints=(
-                "Readonly planning only. Do not edit files, commit, run shell, or request review gates. "
-                "Use concrete file/symbol references when possible."
-            ),
+            constraints=scout_constraints,
             memory_mode="forked",
             model_lane="light",
         )
@@ -683,6 +774,7 @@ async def _run_plan_review_async(
     context_level: str = "",
     context_notes: str = "",
     include_tests: bool = False,
+    plan_class: str = "",
 ) -> str:
     repo_dir = ctx.repo_dir
 
@@ -702,8 +794,11 @@ async def _run_plan_review_async(
     # REVIEW_REQUIRED. (Coordinative throughout — plan_review never hard-blocks the
     # agent.) Only a truly empty config is an error (handled above).
     models = _get_review_models()
+    resolved_class, escalation_note = _resolve_plan_class(ctx, plan_class, files_to_touch)
+    if escalation_note:
+        ctx.emit_progress_fn(f"📐 plan_task: {escalation_note}")
     try:
-        resolved_context_level = _resolve_plan_context_level(context_level)
+        resolved_context_level = _resolve_plan_context_level(context_level, plan_class=resolved_class)
     except ValueError as exc:
         return f"ERROR: {exc}"
 
@@ -714,6 +809,7 @@ async def _run_plan_review_async(
         files_to_touch=files_to_touch,
         context_level=resolved_context_level,
         context_notes=context_notes,
+        plan_class=resolved_class,
     )
     degraded_scout_note = ""
     if not swarm.get("started"):
@@ -747,6 +843,18 @@ async def _run_plan_review_async(
     dev_md = load_governance_doc(repo_dir, "docs/DEVELOPMENT.md", on_missing="explicit")
     arch_md = load_governance_doc(repo_dir, "docs/ARCHITECTURE.md", on_missing="explicit")
     checklists_md = load_governance_doc(repo_dir, "docs/CHECKLISTS.md", on_missing="explicit")
+    # v6.61.0 (5.2) doc tiering — a GOVERNANCE-contract change approved by owner quiz 19
+    # (DEVELOPMENT.md Core-Governance table + prose updated in the same commit): reviewers
+    # of a NON-self_mod plan keep BIBLE + DEVELOPMENT in full but get ARCHITECTURE as the
+    # LOSSLESS navigation map (every section + line range, full sections on demand) — an
+    # external/creative/research plan needs the self-body's operational map as an index,
+    # not ~45K tokens of inline detail. self_mod keeps today's full pack untouched.
+    if resolved_class != "self_mod" and arch_md.strip():
+        from ouroboros.context_layout import generate_doc_nav_map
+
+        arch_md = generate_doc_nav_map(
+            arch_md, title="ARCHITECTURE.md", rel_path="docs/ARCHITECTURE.md"
+        )
 
     ctx.emit_progress_fn("📐 plan_task: reading planned-touch file snapshots…")
     canonical_docs = {
@@ -766,6 +874,7 @@ async def _run_plan_review_async(
         arch_md,
         checklists_md,
         context_level=resolved_context_level,
+        plan_class=resolved_class,
     )
     placeholder = "__GENERATED_PLAN_ATLAS_PENDING__"
     user_content = _build_user_content(
@@ -1060,6 +1169,7 @@ def _build_system_prompt(
     arch_md: str,
     checklists_md: str = "",
     context_level: str = "",
+    plan_class: str = "self_mod",
 ) -> str:
     atlas_note = (
         f"Repository evidence is bounded by context_level={context_level!r}: "
@@ -1067,6 +1177,15 @@ def _build_system_prompt(
         "without a generated Atlas; `localized`, `broad`, and `constitutional` add "
         "progressively larger generated Atlas context. Use only evidence actually present."
     )
+    if plan_class and plan_class != "self_mod":
+        atlas_note += (
+            f"\nThis plan is classified plan_class={plan_class!r} (NOT a self-modification "
+            "of the Ouroboros system repo): ARCHITECTURE.md is provided as a lossless "
+            "navigation map (sections + line ranges) rather than inline full text — judge "
+            "the plan against ITS OWN domain (the external codebase / creative deliverable / "
+            "research question), and consult the map only where the plan genuinely touches "
+            "the runtime's own surfaces."
+        )
     parts = [(
         "You are a senior design reviewer for Ouroboros, a self-creating AI agent.\n"
         "Your job is to review a proposed implementation plan BEFORE any code is written.\n"
@@ -1148,10 +1267,70 @@ def _build_user_content(
     return "\n".join(parts)
 
 
-def _resolve_plan_context_level(raw_level: str) -> str:
+_PLAN_CLASSES = ("self_mod", "external", "creative", "research")
+
+
+def _resolve_plan_class(ctx: ToolContext, plan_class: str, files_to_touch: list) -> tuple[str, str]:
+    """v6.61.0 (5.1): resolve the plan's CLASS — the agent declares it LLM-first
+    (self_mod | external | creative | research), and the host STRUCTURALLY escalates
+    to self_mod when the planned files resolve under the SYSTEM repo (a path fact,
+    never keyword matching — P5). self_mod keeps today's full-pack review; the other
+    classes get the tiered doc pack (5.2) and task-fit scout framing (5.3).
+    Returns (resolved_class, escalation_note)."""
+    from ouroboros.tool_access import path_is_relative_to
+    from ouroboros.tools.registry import active_repo_dir_for
+
+    declared = str(plan_class or "").strip().lower()
+    if declared not in _PLAN_CLASSES:
+        declared = ""
+    _sys_raw = getattr(ctx, "system_repo_dir", None)
+    if _sys_raw is not None and _sys_raw.__class__.__module__.startswith("unittest.mock"):
+        _sys_raw = None  # same mock guard active_repo_dir_for uses
+    try:
+        system_repo = pathlib.Path(_sys_raw or ctx.repo_dir).resolve(strict=False)
+    except (TypeError, OSError, ValueError):
+        # Unresolvable ctx: fail toward the historically STRICTER class —
+        # self_mod keeps the full pack + the explicit context_level contract.
+        return "self_mod", ""
+    try:
+        active = pathlib.Path(active_repo_dir_for(ctx)).resolve(strict=False)
+    except Exception:
+        active = system_repo
+    touches_system = False
+    if files_to_touch:
+        if active == system_repo:
+            # Relative files_to_touch resolve against the active workspace — here
+            # that IS the system repo, so the plan touches the self-body.
+            touches_system = True
+        else:
+            for raw in files_to_touch:
+                candidate = pathlib.Path(str(raw or ""))
+                resolved = (candidate if candidate.is_absolute() else active / candidate).resolve(strict=False)
+                if resolved == system_repo or path_is_relative_to(resolved, system_repo):
+                    touches_system = True
+                    break
+    if touches_system:
+        note = "" if (declared in ("", "self_mod")) else (
+            f"plan_class escalated {declared!r} -> 'self_mod': files_to_touch resolve "
+            "under the Ouroboros system repo (structural fact)."
+        )
+        return "self_mod", note
+    if declared:
+        return declared, ""
+    # Undeclared: preserve today's behavior for self-repo work; a task planning in
+    # an external workspace defaults to the external class.
+    return ("external" if active != system_repo else "self_mod"), ""
+
+
+def _resolve_plan_context_level(raw_level: str, *, plan_class: str = "self_mod") -> str:
     level = str(raw_level or "").strip().lower()
     valid = {"minimal", "localized", "broad", "constitutional"}
     if level not in valid:
+        # v6.61.0 (5.2): non-self_mod classes default to `minimal` — the generated
+        # Atlas is repo archaeology, which an external/creative/research plan needs
+        # only on explicit request. self_mod keeps the explicit-choice contract.
+        if not level and plan_class in ("external", "creative", "research"):
+            return "minimal"
         allowed = ", ".join(sorted(valid))
         raise ValueError(
             "plan_task requires an explicit context_level chosen by the agent "

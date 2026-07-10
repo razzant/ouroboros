@@ -126,11 +126,113 @@ def normalize_delegation_budget(value: Any) -> Dict[str, Any]:
     }
 
 
+VALID_IMPROVEMENT_POLICIES = ("fixed", "adaptive", "until_deadline")
+
+
+def _opt_pct(value: Any) -> Any:
+    """A 0-100 percentage, or None when unset/blank (meaning 'use the config default')."""
+    if value is None or (isinstance(value, str) and not value.strip()):
+        return None
+    try:
+        return max(0, min(100, int(value)))
+    except (TypeError, ValueError):
+        return None
+
+
+def _opt_cost_hard_stop_pct(value: Any) -> Any:
+    """Like ``_opt_pct`` but FAIL-SAFE for the one percentage whose 0 is the
+    maximally-permissive setting (0 = NO in-task cost stop). A malformed value
+    must NOT silently collapse to 0 and disable the safety stop: a negative
+    number, a non-numeric, or a ``0 < v < 1`` fraction (a likely fraction-vs-
+    percent mix-up, e.g. 0.5 meaning "half") maps to None — the historical 50%
+    default — not to 0. An explicit 0 / 0.0 / "0" is honored verbatim."""
+    if value is None or (isinstance(value, str) and not value.strip()):
+        return None
+    try:
+        num = float(value)
+    except (TypeError, ValueError):
+        return None
+    if num == 0:
+        return 0
+    if num < 1:
+        return None  # negative, or a 0<v<1 fraction — do not silently disable the stop
+    return max(0, min(100, int(num)))
+
+
+def normalize_budget_profile(value: Any) -> Dict[str, Any]:
+    """The typed improvement-pacing block (v6.54.4) — how the acceptance-review
+    improvement loop spends the task's remaining time budget. Lives INSIDE the
+    task contract (no new top-level gateway field); subagents inherit via the
+    parent-contract spread. Absent input -> None fields, meaning the config
+    defaults apply — which reproduce today's behavior exactly (one bounded
+    improvement pass, finalization reserve = the grace window).
+
+    ``improvement_policy``: fixed (default; the configured/max pass cap decides) |
+    adaptive (passes stop early when the remaining window can no longer fit a
+    review comfortably) | until_deadline (passes bounded ONLY by the time gate).
+
+    ``cost_hard_stop_pct`` (v6.56.0, additive): the in-task cost hard-stop as a
+    percentage of the budget remaining at task start. None -> the historical
+    default (50: force-finalize once the task has spent half the remaining
+    budget). 0 -> NO in-task cost stop at all — the deadline/rounds axes and the
+    global between-task budget gate remain the only bounds, and cost milestones
+    become informational against the start snapshot. The ceiling is resolved in
+    ``task_pacing.resolve_cost_ceiling_usd`` (0 maps to no ceiling, never a $0
+    ceiling). A MALFORMED value (negative / non-numeric / a ``0<v<1`` fraction)
+    maps to None (the 50% default), NOT to 0 — it must not silently disable the
+    stop (see ``_opt_cost_hard_stop_pct``).
+    """
+    v = value if isinstance(value, Mapping) else {}
+    policy = str(v.get("improvement_policy") or "").strip().lower()
+    return {
+        "improvement_policy": policy if policy in VALID_IMPROVEMENT_POLICIES else "fixed",
+        "max_improvement_passes": _opt_nonneg_int(v.get("max_improvement_passes")),
+        "reserve_finalization_pct": _opt_pct(v.get("reserve_finalization_pct")),
+        "stall_rounds_threshold": _opt_nonneg_int(v.get("stall_rounds_threshold")),
+        "cost_hard_stop_pct": _opt_cost_hard_stop_pct(v.get("cost_hard_stop_pct")),
+    }
+
+
 def _bounded_claim_text(value: Any, limit: int = 600) -> str:
     text = " ".join(str(value or "").split()).strip()
     if len(text) <= limit:
         return text
     return text[:limit].rstrip() + f" ⚠️(+{len(text) - limit} chars omitted)"
+
+
+_ANSWER_PROTOCOLS = ("", "final_answer_line")
+
+
+def normalize_answer_protocol(value: Any) -> str:
+    """v6.60.0 — typed answer-protocol selector (owner quiz 16b, option C+B).
+
+    ``"final_answer_line"``: the caller (a benchmark adapter, an exact-match
+    consumer) declares that this task's deliverable is a machine-extractable
+    ``FINAL ANSWER: <answer>`` line — the host injects the protocol instruction
+    into the TASK context, and the marker nudges/pacing phrases activate.
+    ``""`` (default): no marker protocol — ordinary chat/self tasks never see
+    'FINAL ANSWER' instructions (the owner's aesthetic ask), while the LATCH and
+    EXTRACTOR stay unconditional (harmless when no marker is ever produced, and
+    they still capture a spontaneous one). Unknown values normalize to ""
+    (fail-open to the no-protocol default, never to an instruction)."""
+    text = str(value or "").strip().lower()
+    return text if text in _ANSWER_PROTOCOLS else ""
+
+
+def answer_protocol_active(ctx: Any) -> bool:
+    """True when the running ctx's task contract declares
+    ``answer_protocol="final_answer_line"``. The ONE gate every marker surface
+    (context instruction, loop nudges, pacing phrases, UI chip semantics) reads,
+    so the protocol can never half-apply. Accepts a ToolContext-like object
+    (reads ``task_contract`` / ``task_metadata``) or a bare contract dict."""
+    if isinstance(ctx, Mapping):
+        return str(ctx.get("answer_protocol") or "").strip() == "final_answer_line"
+    for source in (getattr(ctx, "task_contract", None), getattr(ctx, "task_metadata", None)):
+        if isinstance(source, Mapping):
+            contract = source.get("task_contract") if isinstance(source.get("task_contract"), Mapping) else source
+            if str((contract or {}).get("answer_protocol") or "").strip() == "final_answer_line":
+                return True
+    return False
 
 
 def normalize_acceptance_claims(value: Any) -> list[Dict[str, str]]:
@@ -329,6 +431,20 @@ def build_task_contract(task: Mapping[str, Any] | None) -> Dict[str, Any]:
             if merged.get("delegation_budget") is not None
             else (task.get("delegation_budget") or metadata.get("delegation_budget"))
         ),
+        "budget_profile": normalize_budget_profile(
+            merged.get("budget_profile")
+            if merged.get("budget_profile") is not None
+            else (task.get("budget_profile") or metadata.get("budget_profile"))
+        ),
+        # v6.60.0 additive field: "" (no marker protocol, the default) |
+        # "final_answer_line" (adapter-declared machine-extractable answer line).
+        # Subagents inherit through the same metadata/task propagation as the rest
+        # of the contract fields.
+        "answer_protocol": normalize_answer_protocol(
+            merged.get("answer_protocol")
+            if merged.get("answer_protocol") is not None
+            else (task.get("answer_protocol") or metadata.get("answer_protocol"))
+        ),
     }
     for key in ("notes", "review_notes"):
         if merged.get(key):
@@ -345,4 +461,4 @@ def attach_task_contract(task: Dict[str, Any]) -> Dict[str, Any]:
     return task
 
 
-__all__ = ["attach_task_contract", "build_task_contract", "normalize_acceptance_claims", "normalize_allowed_resources", "normalize_bool", "normalize_delegation_budget", "normalize_disabled_tools", "normalize_resource_policy"]
+__all__ = ["answer_protocol_active", "attach_task_contract", "build_task_contract", "normalize_acceptance_claims", "normalize_allowed_resources", "normalize_answer_protocol", "normalize_bool", "normalize_budget_profile", "normalize_delegation_budget", "normalize_disabled_tools", "normalize_resource_policy"]

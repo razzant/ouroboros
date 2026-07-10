@@ -13,21 +13,26 @@ def _set(monkeypatch, mode, degraded):
 def test_effective_limit_defaults_to_full(monkeypatch):
     monkeypatch.delenv("OUROBOROS_CONTEXT_MODE", raising=False)
     monkeypatch.delenv("OUROBOROS_SCOPE_REVIEW_DEGRADED", raising=False)
-    assert sr._effective_scope_input_limit() == sr._SCOPE_INPUT_TOKEN_LIMIT
+    # The default (non-degraded) cap is the configured reviewer's FULL cap, not the
+    # small degraded window — model-agnostic across the shipped reviewer family
+    # (v6.55.0: the default reviewer fable-5 uses the Claude-family calibrated cap).
+    assert sr._effective_scope_input_limit() > sr._LOW_SCOPE_INPUT_TOKEN_LIMIT
 
 
 def test_normal_scope_limit_stays_full_even_when_degraded_is_requested(monkeypatch):
     _set(monkeypatch, "low", True)
-    assert sr._effective_scope_input_limit() == sr._SCOPE_INPUT_TOKEN_LIMIT
+    # The normal commit-gate path (degraded NOT requested) ignores the degraded env.
+    assert sr._effective_scope_input_limit() > sr._LOW_SCOPE_INPUT_TOKEN_LIMIT
 
 
 def test_supplemental_degraded_requires_both_low_mode_and_optin(monkeypatch):
+    full = sr._effective_scope_input_limit(degraded=False)
     # low but no opt-in -> full (no silent degradation)
     _set(monkeypatch, "low", False)
-    assert sr._effective_scope_input_limit(degraded=True) == sr._SCOPE_INPUT_TOKEN_LIMIT
+    assert sr._effective_scope_input_limit(degraded=True) == full
     # opt-in but max mode -> full (degraded is a low-mode-only fallback)
     _set(monkeypatch, "max", True)
-    assert sr._effective_scope_input_limit(degraded=True) == sr._SCOPE_INPUT_TOKEN_LIMIT
+    assert sr._effective_scope_input_limit(degraded=True) == full
     # both + explicit supplemental pass -> degraded window-fitting cap
     _set(monkeypatch, "low", True)
     assert sr._effective_scope_input_limit(degraded=True) == sr._LOW_SCOPE_INPUT_TOKEN_LIMIT

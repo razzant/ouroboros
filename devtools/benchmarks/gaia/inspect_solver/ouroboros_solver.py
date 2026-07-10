@@ -22,7 +22,8 @@ if str(pathlib.Path(__file__).resolve().parents[4]) not in sys.path:
     sys.path.insert(0, str(pathlib.Path(__file__).resolve().parents[4]))
 
 from devtools.benchmarks.common.run_roots import ensure_outside_repo, run_root
-from devtools.benchmarks.gaia.inspect_solver import GAIA_FORMAT_INSTRUCTION
+from devtools.benchmarks.gaia.inspect_solver import GAIA_ANTI_LEAK_INSTRUCTION, GAIA_FORMAT_INSTRUCTION
+from devtools.benchmarks.gaia.bwrap_isolate import wrap as _bwrap_wrap
 
 _SHARED_FILE_RE = re.compile(r"(?P<path>/shared_files/\S+)")
 
@@ -84,6 +85,10 @@ def run_ouroboros(prompt: str, sample_id: str = "sample", attachments: list[path
     reserve = min(240.0, max(1.0, round(sample_timeout * 0.1)))
     visible_deadline = max(1.0, sample_timeout - reserve)
     cmd.extend(["--timeout", str(visible_deadline)])
+    # v6.60.0: the FINAL ANSWER discipline is a typed CONTRACT field now, not a global
+    # SYSTEM.md rule — declare the protocol so the runtime injects the marker
+    # instruction/nudges for THIS task (the prompt keeps the GAIA-specific format text).
+    cmd.extend(["--task-metadata-json", '{"answer_protocol": "final_answer_line"}'])
     for path in [str(path) for path in (attachments or [])]:
         cmd.extend(["--attach", path])
     # P3: official GAIA answer protocol — append the shared format instruction (SSOT in
@@ -91,7 +96,15 @@ def run_ouroboros(prompt: str, sample_id: str = "sample", attachments: list[path
     # correctly-shaped deliverable (number / few words / no units) instead of prose.
     if "FINAL ANSWER:" not in prompt:
         prompt = prompt + GAIA_FORMAT_INSTRUCTION
+    # Anti-lookup rule (SSOT, identical across harnesses; see METHODOLOGY.md).
+    if GAIA_ANTI_LEAK_INSTRUCTION not in prompt:
+        prompt = prompt + GAIA_ANTI_LEAK_INSTRUCTION
     cmd.append(prompt)
+    # Filesystem isolation: mask the GAIA answer cache from the whole `ouroboros run`
+    # subprocess (server + task share one mount namespace; the dedicated server binds
+    # loopback INSIDE the namespace, so the CLI still reaches it). Symmetric with the
+    # CLI harnesses. No-op if GAIA_BWRAP_ISOLATE=0. See bwrap_isolate.py.
+    cmd = _bwrap_wrap(cmd)
     timeout_sec = sample_timeout  # outer hard-kill backstop (> the visible deadline)
     proc = None
     for attempt in range(5):

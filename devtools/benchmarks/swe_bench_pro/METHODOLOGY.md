@@ -156,13 +156,39 @@ The evolutionary harness is now `e1v2/`. Its hypothesis: solving instances in
 sequence *with one self-improvement cycle between each* beats independent frozen
 runs, because learned memory and reviewed self-modifications carry forward.
 
+Scaffold defaults in the committed templates (v6.55.0, disclosed here):
+`OUROBOROS_RUNTIME_MODE=pro` (the container is a disposable jail; unchanged),
+`OUROBOROS_MAX_WORKERS=4` (was 5 — same-model subagent decomposition slots
+within one instance, aligned with the TB/GAIA templates; NOT independent
+attempts with selection), and `OUROBOROS_SAFETY_MODE=light` (the LLM safety
+pass adds cost/latency inside an isolated jail while the deterministic guards
+do the protecting; the LLM check stays for integration tools).
+`claude_code_edit` stays in the default `--disable-tools` list: benches measure
+the single-model Ouroboros harness.
+
 E1v2 contract:
 
 - The task repository is `/app` inside the official SWE-bench Pro image.
 - `obo-data` and `obo-repo` volumes carry Ouroboros memory and self-modified
   source across tasks.
-- The solve phase runs as one root task without `--workspace` (`dig-direct`) so
-  native post-task evolution can promote improvements between tasks.
+- (v6.56.0) The solve phase runs `/app` as the ACTIVE EXTERNAL WORKSPACE by
+  default: the entrypoint passes `--workspace /app`, so contextual repo tools
+  resolve against the task repo and the runtime records a workspace patch
+  artifact alongside Method C capture (Method C from `/app` remains the
+  OFFICIAL `model_patch` source; the workspace artifact is auditing/telemetry).
+  Global improvement-backlog/promotion signals still flow from workspace tasks
+  (v6.44.0), so native post-task evolution keeps working. Export
+  `OBO_SOLVE_WORKSPACE_ROOT=""` for the legacy rootless `dig-direct` mode.
+- (v6.56.0) Budget/pacing disclosure: the solve task carries
+  `budget_profile = {improvement_policy: until_deadline, cost_hard_stop_pct: 0}`
+  — NO in-task cost stop (cost milestones are informational against the start
+  snapshot); the bounds are the task deadline (`OBO_SOLVE_TIMEOUT`), the round
+  ceiling (`OUROBOROS_MAX_ROUNDS=200`, below the leaderboard-relevant 250-step
+  norms), and the per-task budget reset between instances.
+- (v6.56.0) Per-task memory defaults to an EMPTY child drive
+  (`OBO_MEMORY_MODE=empty` in the entrypoint): the measured artifact is the
+  harness on each task, not memory accreted across tasks. Stateful/evolution
+  runs export `OBO_MEMORY_MODE=shared` explicitly and disclose it.
 - Patch capture uses Method C: `git add -A` then `git diff --cached <base_commit>`
   with validated junk/binary filters.
 - The benchmark-only evolution steer asks for exactly one reviewed commit and a
@@ -174,6 +200,13 @@ E1v2 contract:
   owner-controlled — the steer is NOT "resolved" by hardcoding those findings to
   block (BIBLE P3). This prevents the self-hardening deadlock where every
   evolution commit becomes uncommittable under advisory mode.
+- E1v2 templates deliberately stay `OUROBOROS_REVIEW_ENFORCEMENT=advisory` while
+  every other v6.55.0 bench template runs `blocking`: E1v2 is the only bench
+  with an in-bench `commit_reviewed` lane (the evolution cycle), and under
+  `blocking` the steer-mandated absence of a VERSION bump becomes a
+  conditionally-critical triad finding that blocks the commit — the evolution
+  contract ("one reviewed commit, then restart") would be structurally
+  uncommittable (v6.55.0 scope-review finding).
 - The bench-local "Option A" heal for dangling evolution transactions is kept as
   a belt-and-braces in `entrypoint_pro.sh`: at task start it marks a committed
   transaction restart-verified at the container boundary (with a
@@ -207,17 +240,34 @@ Stateful runs introduce failure classes that frozen baseline runs do not have.
 ### 3.1 Retry-on-transient policy (report this honestly)
 
 `auto_run.py` resamples a task when its result looks like an infrastructure
-transient rather than a genuine model failure. The gate is
-`ok = (patch_bytes is not None) and (patch_bytes > 0 or api_errors == 0)`: a run
-that produced an EMPTY patch AND had ≥1 API error is treated as transient — the
-`obo-data`/`obo-repo` volumes are rolled back to last-good and the SAME task is
-re-run after `--retry-wait` (default 300s), up to `--max-retries` (default 24).
-Because each retry restores memory volumes, it is a fresh sample.
+transient rather than a genuine model failure. The accept gate is
+`ok = (patch_bytes is not None) and (patch_bytes > 0 or genuine_0b or permanent_skip)`:
+
+- a **non-empty** patch is always accepted;
+- an **empty (0-byte)** patch is accepted as a *genuine* model failure only when
+  `genuine_0b` holds — the agent actually ran (`n_events >= 2`), the provider
+  channel was healthy (`api_errors < 3`), and the run was not cut short by infra
+  (no OOM kill, no host `TIMEOUT`);
+- a **`permanent_skip`** (a known non-recoverable environment fault:
+  `pyexpat_abi_mismatch` / `server_import_failed` / `pip_bootstrap_failed` /
+  `libc_skip`) is recorded as a non-run and is NOT retried;
+- **everything else** is a transient — an empty patch with API errors or too few
+  events, an infra-cut run, or a task that did not execute at all (`patch_bytes`
+  is None, e.g. an image-unavailable or musl env-volume skip): the
+  `obo-data`/`obo-repo` volumes are rolled back to last-good and the SAME task is
+  re-run after `--retry-wait` (default 300s), up to `--max-retries` (default 5).
+
+Two consecutive tasks exhausting their retries stop the shard (provider/infra is
+likely down). Because each retry restores memory volumes, it is a fresh sample.
 
 This must be disclosed in any results write-up: it is best-of-N **conditioned on
-empty-patch+API-error failures**, not pass@1. With routine 429 rate-limit
-spikes, a legitimate failure that merely brushed one rate-limit error can be
-resampled, which can inflate patch/resolve rates on the affected subset. State
+infrastructure-transient failures** (an empty patch with ≥3 API errors or too
+few events, an infra-cut run, or a non-run), not pass@1. An empty patch that the
+gate classifies as `genuine_0b` — the agent ran to ≥2 events with <3 API errors
+and no infra cut — is kept as a real model failure and is NOT resampled, so the
+resampling is confined to genuinely infra-degraded attempts; still, under routine
+429 rate-limit spikes an attempt pushed over the API-error/infra thresholds can
+be resampled, which can inflate patch/resolve rates on the affected subset. State
 the retry policy, `--max-retries`, and how many instances were resampled. The
 secret-opt-in gate: a task refused for missing opt-in is classified by the same
 `ok` gate; treat a refused/empty run as not-resolved when reporting, not as a

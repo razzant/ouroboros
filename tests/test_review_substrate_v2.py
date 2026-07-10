@@ -176,7 +176,11 @@ def test_degraded_actor_does_not_poison_acceptance_capsule(tmp_path):
     """v6.36.0 (scope review finding): aggregate_outcome_tier / build_improvement_
     capsule must draw tier/coach/findings ONLY from actors that contributed to the
     aggregate verdict — a single parse-degraded slot carrying a BLOCKED tier must
-    not inject a blocking improvement note into an otherwise-clean quorum PASS."""
+    not inject a blocking improvement note into an otherwise-clean quorum PASS.
+    v6.55.0 (codex/fable-5 cumulative review): a DELIBERATE minority DEGRADED
+    verdict carrying a concrete recommendation now surfaces as ONE labeled
+    non-veto [DISSENT] line (the GAIA 3cef3a44 class) — while the mainline
+    capsule (tier / coach / bullets) stays unpoisoned exactly as before."""
     from ouroboros.review_substrate import aggregate_outcome_tier, build_improvement_capsule
     slots = [ReviewSlot(slot_id=f"s{i}", model=f"m-{i}") for i in range(3)]
     req = ReviewRequest(
@@ -185,12 +189,16 @@ def test_degraded_actor_does_not_poison_acceptance_capsule(tmp_path):
     )
     res = run_review_request(req, slots=slots, drive_root=tmp_path, llm=PoisonDegradedSlotLLM())
     assert res.aggregate_signal == "PASS"
-    # The degraded '-2' slot's BLOCKED tier / coach / finding must NOT surface.
+    # The degraded '-2' slot's BLOCKED tier / coach must NOT surface.
     assert aggregate_outcome_tier(res) == "solved"
     capsule = build_improvement_capsule(res)
-    assert "do not ship this" not in capsule
     assert "STOP everything" not in capsule
     assert "blocked" not in capsule.lower()
+    # ...but its deliberate DEGRADED verdict + concrete recommendation IS the
+    # dissent class: one labeled line, never a mainline bullet.
+    assert "[DISSENT — s2 said DEGRADED]" in capsule
+    assert "do not ship this" in capsule
+    assert "- do not ship this" not in capsule
 
 
 class ContractDegradedPassLLM:

@@ -35,8 +35,13 @@ MODEL_PRICING_STATIC = {
     "anthropic/claude-opus-4-7": (5.0, 0.5, 25.0),
     "anthropic/claude-opus-4.8": (5.0, 0.5, 25.0),
     "anthropic/claude-opus-4-8": (5.0, 0.5, 25.0),
+    "anthropic/claude-fable-5": (10.0, 1.0, 50.0),
     "anthropic/claude-opus-4": (15.0, 1.5, 75.0),
     "anthropic/claude-sonnet-4": (3.0, 0.30, 15.0),
+    # Sonnet 5 sticker price ($3/$15; intro $2/$10 through 2026-08-31 billed by
+    # providers is LOWER, so this static fallback is budget-conservative; live
+    # OpenRouter pricing overrides when fetched).
+    "anthropic/claude-sonnet-5": (3.0, 0.30, 15.0),
     "anthropic/claude-sonnet-4.6": (3.0, 0.30, 15.0),
     "anthropic/claude-sonnet-4-6": (3.0, 0.30, 15.0),
     "anthropic/claude-sonnet-4.5": (3.0, 0.30, 15.0),
@@ -48,8 +53,8 @@ MODEL_PRICING_STATIC = {
     # pricing is fetched.
     "openai/gpt-5.5": (5.0, 0.50, 30.0),
     "openai/gpt-5.5-pro": (30.0, 30.0, 180.0),
-    # Mirrors the previous static mini lane until live OpenRouter pricing is fetched.
-    "openai/gpt-5.5-mini": (0.75, 0.075, 4.50),
+    # gpt-5.4-mini is the live mini lane (the 5.5 family shipped no mini); 0.15x gpt-5.5.
+    "openai/gpt-5.4-mini": (0.75, 0.075, 4.50),
     "openai/gpt-5.2": (1.75, 0.175, 14.0),
     "openai/gpt-5.2-codex": (1.75, 0.175, 14.0),
     "openai/gpt-5.3-codex": (1.75, 0.175, 14.0),

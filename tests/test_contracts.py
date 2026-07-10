@@ -78,10 +78,33 @@ def test_public_api_is_stable():
         "build_task_contract",
         "normalize_acceptance_claims",
         "normalize_allowed_resources",
+        "normalize_budget_profile",
         "normalize_resource_policy",
     }
     missing = expected - set(dir(contracts))
     assert missing == set(), f"contracts package missing public names: {missing}"
+
+
+def test_budget_profile_frozen_key_set():
+    """§11.1 additive ABI pin (v6.56.0): the normalized budget_profile key set.
+
+    ``cost_hard_stop_pct`` is the additive in-task cost hard-stop knob
+    (None -> historical 50%-of-remaining stop; 0 -> no in-task stop, never a
+    $0 ceiling). Removing or renaming any key here is a deliberate ABI break.
+    """
+    from ouroboros.contracts.task_contract import normalize_budget_profile
+
+    profile = normalize_budget_profile(None)
+    assert set(profile) == {
+        "improvement_policy",
+        "max_improvement_passes",
+        "reserve_finalization_pct",
+        "stall_rounds_threshold",
+        "cost_hard_stop_pct",
+    }
+    assert profile["cost_hard_stop_pct"] is None
+    assert normalize_budget_profile({"cost_hard_stop_pct": 0})["cost_hard_stop_pct"] == 0
+    assert normalize_budget_profile({"cost_hard_stop_pct": "37"})["cost_hard_stop_pct"] == 37
 
 
 def test_task_contract_preserves_protected_artifact_policy():
@@ -1123,7 +1146,7 @@ def test_state_response_declares_runtime_and_capability_keys():
     from ouroboros.gateway.contracts import StateResponse
 
     keys = set(StateResponse.__annotations__.keys())
-    for required in ("runtime_mode", "context_mode", "skills_repo_configured", "github_token_configured"):
+    for required in ("runtime_mode", "context_mode", "safety_mode", "skills_repo_configured", "github_token_configured"):
         assert required in keys, (
             f"StateResponse lost the runtime/capability key {required!r}; "
             "ARCHITECTURE.md §11.3 contract is out of sync."

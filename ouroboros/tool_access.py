@@ -12,7 +12,7 @@ import os
 import pathlib
 import re
 from dataclasses import dataclass
-from typing import Any, Iterable, Literal
+from typing import Any, Iterable, Literal, Optional
 
 from ouroboros.artifacts import task_artifact_dir_path, task_id_for_artifacts
 from ouroboros.tool_capabilities import ACTING_SUBAGENT_MODE, LOCAL_READONLY_SUBAGENT_MODE
@@ -344,6 +344,41 @@ def active_tool_profile(ctx: Any) -> ToolProfile:
     return "self_modification"
 
 
+def predicted_subagent_profile(*, write_surface: str = "") -> ToolProfile:
+    """The tool profile a scheduled subagent will resolve to, from schedule-time
+    inputs only (v6.57.0, 1.6). A valid write_surface → acting_subagent; otherwise
+    a read-only subagent. Mirrors active_tool_profile's subagent branches so the
+    parent's schedule result and the child's start context can preview the profile
+    without a live ctx. NOT authoritative — the supervisor's _resolve_subagent_
+    constraint is the real gate; this is a visibility preview."""
+    surface = str(write_surface or "").strip()
+    if surface and surface in VALID_WRITE_SURFACES:
+        return "acting_subagent"
+    return "local_readonly_subagent"
+
+
+def summarize_subagent_profile(profile: ToolProfile, *, effective_lane: str = "") -> str:
+    """Compact, human-readable summary of a subagent's EFFECTIVE tool profile
+    (v6.57.0, 1.6): shell yes/no, writable roots, and model lane — derived from the
+    _POLICY matrix (the same SSOT active_tool_profile resolves), so the parent sees
+    at schedule time (and the child sees first line of its context) what the child
+    CAN and CANNOT do. Prevents the wasted rounds where a prober child hit
+    workspace_blocked on run_script because neither side knew shell was off."""
+    matrix = _POLICY.get(profile, {})
+    shell_roots = sorted(root for root, ops in matrix.items() if "shell" in ops)
+    write_roots = sorted(root for root, ops in matrix.items() if ops & {"write", "edit"})
+    has_shell = bool(shell_roots)
+    bits = [
+        f"profile={profile}",
+        f"shell={'yes (' + ', '.join(shell_roots) + ')' if has_shell else 'no'}",
+        f"writable={', '.join(write_roots) if write_roots else 'none (read-only)'}",
+    ]
+    lane = str(effective_lane or "").strip()
+    if lane:
+        bits.append(f"model_lane={lane}")
+    return "child capabilities — " + " · ".join(bits)
+
+
 def decide_tool_access(
     *,
     profile: ToolProfile,
@@ -431,6 +466,36 @@ def _side_effect_free_process_roots(ctx: Any, operation: Operation) -> list[tupl
     ]
 
 
+def project_room_lens_dir(ctx: Any) -> Optional[pathlib.Path]:
+    """The project-room lens root for the DIRECT-CHAT lane (v6.61.3), or None.
+
+    The robot-room incident: a folder-room's chat lane resolved ``"."`` against the
+    system repo while the room fact named the project folder — the agent narrated
+    the wrong tree. The lens re-points the chat lane's ``active_workspace`` READS
+    and the default shell cwd at the room's registered ``working_dir`` so the
+    affordance matches the room fact (affordance-context coherence).
+
+    STRICT structural key — every leg must hold, else None (byte-identical old
+    behavior): the DIRECT-CHAT lane only (never pooled/workspace/subagent/headless
+    tasks — benchmarks and promoted tasks carry their own workspace wiring), no
+    workspace of its own, and a host-verified room dir injected by the agent at
+    task build (``_project_room_dir`` metadata: registry working_dir, existing dir).
+    """
+    if not bool(getattr(ctx, "is_direct_chat", False)):
+        return None
+    if getattr(ctx, "workspace_root", None):
+        return None
+    meta = getattr(ctx, "task_metadata", None)
+    raw = str(meta.get("_project_room_dir") or "").strip() if isinstance(meta, dict) else ""
+    if not raw:
+        return None
+    try:
+        candidate = pathlib.Path(raw).resolve(strict=False)
+        return candidate if candidate.is_dir() else None
+    except OSError:
+        return None
+
+
 def filesystem_affordance_map(ctx: Any, *, runtime_mode: str = "") -> dict[str, Any]:
     """A compact, side-effect-free projection of filesystem/tool access affordances.
 
@@ -460,7 +525,7 @@ def filesystem_affordance_map(ctx: Any, *, runtime_mode: str = "") -> dict[str, 
         for root in ("active_workspace", "system_repo"):
             if root in policy:
                 light_gated_roots.append(root)
-    return {
+    result = {
         "profile": profile,
         "writable_roots": writable_roots,
         "readonly_roots": readonly_roots,
@@ -471,6 +536,13 @@ def filesystem_affordance_map(ctx: Any, *, runtime_mode: str = "") -> dict[str, 
         "git_readonly_subcommands": git_readonly_subcommands,
         "light_gated_roots": sorted(light_gated_roots),
     }
+    _room = project_room_lens_dir(ctx)
+    if _room is not None:
+        # Room-lens disclosure (v6.61.3): in this chat, active_workspace READS and
+        # the default shell cwd resolve to the PROJECT FOLDER, not the system repo.
+        result["project_room_dir"] = str(_room)
+        result["default_shell_cwd"] = f"project room ({_room})"
+    return result
 
 
 def shell_cwd_block_message(ctx: Any, cwd: str = "", *, operation: Operation = "shell", error: Exception | None = None) -> str:
@@ -478,18 +550,26 @@ def shell_cwd_block_message(ctx: Any, cwd: str = "", *, operation: Operation = "
 
     try:
         allowed = _side_effect_free_process_roots(ctx, operation)
-        allowed_labels = [label for label, _root in allowed]
+        # Show the RESOLVED path per label (deduped): a bare label left the model
+        # guessing absolute paths and re-tripping this same block (v6.54.3, GAIA).
+        seen: set[str] = set()
+        allowed_entries: list[str] = []
+        for label, root in allowed:
+            entry = f"{label}={root}"
+            if entry not in seen:
+                seen.add(entry)
+                allowed_entries.append(entry)
     except Exception:
-        allowed_labels = []
+        allowed_entries = []
     hint = (
-        "Allowed cwd roots for this tool/profile: " + ", ".join(allowed_labels)
-        if allowed_labels else
+        "Allowed cwd roots for this tool/profile: " + ", ".join(allowed_entries)
+        if allowed_entries else
         "No process cwd root is available to this tool/profile."
     )
     detail = f" ({type(error).__name__}: {error})" if error is not None else ""
     return (
         f"⚠️ SHELL_CWD_BLOCKED: CWD_BLOCKED: cwd {str(cwd or '.')} is outside allowed roots for {operation}{detail}. "
-        f"{hint}. Use root/cwd under task_drive, artifact_store, user_files, or an explicit active workspace as appropriate."
+        f"{hint}. Use one of those exact paths as cwd (or root=task_drive/artifact_store/user_files in file tools)."
     )
 
 
@@ -782,8 +862,20 @@ def resolve_user_file_path(
     path: str,
     *,
     allow_protected_descendants: bool = False,
+    allow_outside_home: bool = False,
 ) -> pathlib.Path:
-    """Resolve a user_files path under the user's home and outside Ouroboros control-plane roots."""
+    """Resolve a user_files path under the user's home and outside Ouroboros control-plane roots.
+
+    Absolute paths OUTSIDE the user_files home (and the Deliverables container) are
+    rejected EARLY with an actionable error instead of resolving to a foreign root
+    and failing later with an opaque ``relative_to`` crash (v6.54.3 — the TB2.1
+    ``'/app' is not in the subpath of '/root'`` class). ``allow_outside_home=True``
+    (the ``query_code`` external-target caller) skips only this EARLY actionable
+    check; ``user_files_path_block_reason`` below remains the outside-home
+    AUTHORITY, and it permits outside-home only for external-workspace contexts —
+    the mode the documented query_code contract (benchmark ``/app``) runs in.
+    Neither flag expands authority: a non-external context could not reach
+    outside-home before this check existed either."""
 
     raw_text = str(path or ".").strip() or "."
     try:
@@ -799,6 +891,34 @@ def resolve_user_file_path(
     # does not silently treat a rooted path as home-relative.
     if is_absolute_path_text(raw_text):
         candidate = raw.resolve(strict=False)
+        # External-workspace tasks legitimately reach host scratch outside home
+        # (/tmp, /build, sibling checkouts) — for them the generic
+        # user_files_path_block_reason below stays the authority, mirroring its
+        # own is_external_workspace carve-out.
+        if not allow_outside_home and not is_external_workspace(ctx):
+            home_resolved = home.resolve(strict=False)
+            # Case-insensitive-platform parity with the user_files_path_block_reason
+            # authority: a differently-cased safe home path must not be rejected
+            # early where the casefold-aware guard would accept it (review round 7).
+            inside_home = path_is_relative_to(candidate, home_resolved) or _path_is_relative_to_casefold(
+                candidate, home_resolved
+            )
+            inside_deliverables = False
+            if not inside_home:
+                try:
+                    deliverables_resolved = _deliverables_root().resolve(strict=False)
+                    inside_deliverables = path_is_relative_to(
+                        candidate, deliverables_resolved
+                    ) or _path_is_relative_to_casefold(candidate, deliverables_resolved)
+                except (OSError, ValueError):
+                    inside_deliverables = False
+            if not inside_home and not inside_deliverables:
+                raise ValueError(
+                    "user_files path blocked: absolute path "
+                    f"{raw_text!r} is outside the user_files home ({home_resolved}). "
+                    "Use root='active_workspace' for workspace paths, or a "
+                    "home-relative path (e.g. 'Desktop/file.txt') for user files."
+                )
     elif raw_text.startswith("~"):
         # '~' / '~user' must expand to the CONFIGURED user_files home (the jail), NOT the
         # real OS home — otherwise OUROBOROS_USER_FILES_ROOT isolation is bypassed by a
@@ -851,6 +971,15 @@ def resolve_shell_cwd(ctx: Any, cwd: str = "", *, operation: Operation = "shell"
 
     profile = active_tool_profile(ctx)
     candidates: list[tuple[ResourceRoot, pathlib.Path]] = [("active_workspace", resource_root_path(ctx, "active_workspace"))]
+    _room = project_room_lens_dir(ctx)
+    if _room is not None:
+        # Room lens (v6.61.3): in a folder-room chat the DEFAULT cwd (and relative
+        # cwd resolution) is the project folder — "." must mean the same thing the
+        # room fact and the read tools say. The system repo stays an allowed root
+        # (explicit absolute/relative repo cwds keep working), it just is not the
+        # default anymore. Label rides "active_workspace" so profile access
+        # decisions are unchanged.
+        candidates.insert(0, ("active_workspace", _room))
     if hasattr(ctx, "drive_root"):
         candidates.extend([
             ("task_drive", resource_root_path(ctx, "task_drive")),

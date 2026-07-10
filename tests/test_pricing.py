@@ -155,7 +155,7 @@ class TestEstimateCost:
         assert MODEL_PRICING_STATIC["openai/gpt-5.5"] == (5.0, 0.50, 30.0)
         assert MODEL_PRICING_STATIC["openai/gpt-5.5-pro"] == (30.0, 30.0, 180.0)
         assert MODEL_PRICING_STATIC["openai/o3-pro"] == (20.0, 20.0, 80.0)
-        assert MODEL_PRICING_STATIC["openai/gpt-5.5-mini"] == (0.75, 0.075, 4.50)
+        assert MODEL_PRICING_STATIC["openai/gpt-5.4-mini"] == (0.75, 0.075, 4.50)
         assert MODEL_PRICING_STATIC["anthropic/claude-opus-4.7"] == (5.0, 0.5, 25.0)
         assert MODEL_PRICING_STATIC["anthropic/claude-opus-4-7"] == (5.0, 0.5, 25.0)
         assert MODEL_PRICING_STATIC["x-ai/grok-3-mini"] == (0.30, 0.075, 0.50)

@@ -615,10 +615,26 @@ def find_child_tasks(
     parent_task_id: str = "",
     root_task_id: str = "",
     exclude_task_id: str = "",
+    scope: str = "subtree",
 ) -> List[Dict[str, Any]]:
+    """Collect a task's subagent children.
+
+    ``scope`` selects the matching semantics (structural, never prose-parsed — P5):
+
+    - ``"subtree"`` (default): a row matches if it is a DIRECT child
+      (``parent_task_id == parent``) OR any subagent of the same tree
+      (``root_task_id == root``). This is the whole-subtree view UI/API surfaces
+      (`gateway/tasks.py`, `gateway/logs.py`) render as descendant cards.
+    - ``"direct"``: ONLY direct children (``parent_task_id == parent``); the
+      root-subtree fallback is skipped. This is what per-node absorption/handoff
+      wants — a LEAF task must see only its OWN children (none), not its parent
+      and siblings. The v6.56 root-fallback made a childless grandchild receive a
+      false ``children_unabsorbed`` reminder about its parent/sibling.
+    """
     parent = str(parent_task_id or "").strip()
     root = str(root_task_id or "").strip()
     excluded = str(exclude_task_id or "").strip()
+    direct_only = str(scope or "subtree").strip().lower() == "direct"
     rows: Dict[str, Dict[str, Any]] = {}
     for row in (effective_task_result(pathlib.Path(drive_root), item) for item in list_task_results(pathlib.Path(drive_root))):
         tid = str(row.get("task_id") or "")
@@ -628,7 +644,7 @@ def find_child_tasks(
             continue
         if parent and str(row.get("parent_task_id") or "") == parent:
             rows[tid] = row
-        elif root and str(row.get("root_task_id") or "") == root:
+        elif not direct_only and root and str(row.get("root_task_id") or "") == root:
             rows[tid] = row
 
     snapshot = _load_queue_snapshot(pathlib.Path(drive_root))
@@ -644,7 +660,7 @@ def find_child_tasks(
                 continue
             if parent and str(task.get("parent_task_id") or "") == parent:
                 row = dict(task)
-            elif root and str(task.get("root_task_id") or "") == root:
+            elif not direct_only and root and str(task.get("root_task_id") or "") == root:
                 row = dict(task)
             else:
                 continue
@@ -662,6 +678,41 @@ def find_child_tasks(
                     combined[key] = value
             rows[tid] = combined
     return sorted(rows.values(), key=lambda item: (str(item.get("ts") or ""), str(item.get("task_id") or "")))
+
+
+def compute_cost_with_children(
+    drive_root: pathlib.Path, task_id: str, own_cost_usd: float
+) -> tuple[float, bool]:
+    """Recursive per-task cost rollup (v6.57.0, P6b): own cost PLUS the cost of every
+    direct child. Each child already stored its own ``cost_usd_with_children``, so
+    summing the direct children's rolled-up value makes this correct for the whole
+    subtree without re-walking it. Returns ``(total, partial)`` where ``partial`` is
+    True when any direct child is still non-terminal (its cost is not final yet).
+
+    Why a NEW field and not a change to ``cost_usd``: existing consumers (per-task
+    accounting, the global session budget ledger) read ``cost_usd`` as this task's own
+    spend; the parent card / Logs read the rollup. Never mutate ``cost_usd`` — the
+    site/PB incident showed a parent under-reporting because children weren't summed,
+    but the fix is an ADDITIVE field, not a semantics change (P7 SSOT)."""
+    total = float(own_cost_usd or 0.0)
+    partial = False
+    try:
+        children = find_child_tasks(
+            pathlib.Path(drive_root), parent_task_id=str(task_id), root_task_id="", scope="direct"
+        )
+    except Exception:
+        return round(total, 6), partial
+    for child in children:
+        try:
+            child_total = child.get("cost_usd_with_children")
+            if child_total is None:
+                child_total = child.get("cost_usd") or 0.0
+            total += float(child_total or 0.0)
+        except (TypeError, ValueError):
+            continue
+        if str(child.get("status") or "").strip().lower() not in FINAL_STATUSES:
+            partial = True
+    return round(total, 6), partial
 
 
 def _handoff_snippet(value: Any) -> Dict[str, Any]:

@@ -430,8 +430,18 @@ class TestRunScopeReviewFailClosed:
         assert mod._window_scaled_reserves(1_000_000) == (
             mod._SCOPE_MAX_TOKENS, mod._SCOPE_OUTPUT_MARGIN_TOKENS
         )
-        full = mod._effective_scope_input_limit(scope_model="openai/gpt-5.5")
-        assert full == mod._SCOPE_INPUT_TOKEN_LIMIT
+        # The designated >=1M reviewer keeps the ABSOLUTE reserves (not the
+        # window-scaled ones); its cap is the family-calibrated absolute limit.
+        from ouroboros.tools.review_helpers import calibrated_input_token_limit
+
+        full = mod._effective_scope_input_limit(scope_model=mod._SCOPE_MODEL_DEFAULT)
+        assert full == calibrated_input_token_limit(
+            mod._SCOPE_MODEL_DEFAULT,
+            context_window=mod._SCOPE_MODEL_CONTEXT_WINDOW,
+            output_reserve=mod._SCOPE_MAX_TOKENS,
+            tokenizer_margin=mod._SCOPE_OUTPUT_MARGIN_TOKENS,
+        )
+        assert full > 400_000  # a real 1M window keeps a large workable cap
 
     def test_irreducible_overflow_terminal_split_by_authority(self, tmp_path, monkeypatch):
         """Ladder terminal: the >=1M blocking reviewer fails CLOSED
@@ -918,13 +928,13 @@ class TestScopeReviewModule:
         assert "SCOPE_REVIEW_BLOCKED" in source
         assert "fail" in source.lower() or "block" in source.lower()
 
-    def test_scope_review_uses_opus(self):
+    def test_scope_review_default_is_fable(self):
         mod = _get_module("ouroboros.tools.scope_review")
-        assert "gpt-5.5" in mod._SCOPE_MODEL_DEFAULT
-        # Verify the getter returns opus when no override env var is set
+        assert "fable-5" in mod._SCOPE_MODEL_DEFAULT
+        # Verify the getter returns the shipped default when no override env var is set
         import os
         if not os.environ.get("OUROBOROS_SCOPE_REVIEW_MODEL"):
-            assert "gpt-5.5" in mod._get_scope_model()
+            assert "fable-5" in mod._get_scope_model()
         # else: env override is active — default check not applicable in this env
 
     def test_scope_review_model_configurable_via_env(self):
@@ -1935,11 +1945,11 @@ def test_scope_reviewer_window_fail_closed_on_absent_evidence(monkeypatch, tmp_p
     assert w_designated == sr._SCOPE_MODEL_CONTEXT_WINDOW, w_designated
 
     # Direct-provider and explicit OpenRouter spellings of the same shipped reviewer
-    # are also the designated default. Regression guard for openai::gpt-5.5 being
-    # reduced to bare "gpt-5.5" and then misclassified as off-default.
-    w_direct = sr._scope_reviewer_window("openai::gpt-5.5")
+    # are also the designated default. Regression guard for anthropic::claude-fable-5
+    # being reduced to bare "claude-fable-5" and then misclassified as off-default.
+    w_direct = sr._scope_reviewer_window("anthropic::claude-fable-5")
     assert w_direct == sr._SCOPE_MODEL_CONTEXT_WINDOW, w_direct
-    w_openrouter = sr._scope_reviewer_window("openrouter::openai/gpt-5.5")
+    w_openrouter = sr._scope_reviewer_window("openrouter::anthropic/claude-fable-5")
     assert w_openrouter == sr._SCOPE_MODEL_CONTEXT_WINDOW, w_openrouter
 
 

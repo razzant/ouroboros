@@ -541,6 +541,12 @@ def _handle_llm_usage(evt: Dict[str, Any], ctx: Any) -> None:
     }
     ctx.update_budget_from_usage(usage_for_budget)
 
+    # Server-side web-search citations ({url,title,content}, capped at 20 in
+    # llm.py). Persisted so post-hoc audits (e.g. the GAIA leakage audit) can see
+    # what the native web-search tool actually fetched — the search happens on the
+    # provider side and never appears in tools.jsonl.
+    web_search_sources = usage.get("web_search_sources")
+
     try:
         append_jsonl(ctx.DRIVE_ROOT / "logs" / "events.jsonl", {
             "ts": evt.get("ts", utc_now_iso()),
@@ -565,6 +571,7 @@ def _handle_llm_usage(evt: Dict[str, Any], ctx: Any) -> None:
             "cached_tokens": cached_tokens,
             "cache_write_tokens": cache_write_tokens,
             "prompt_cache_ttl": prompt_cache_ttl,
+            **({"web_search_sources": web_search_sources} if isinstance(web_search_sources, list) and web_search_sources else {}),
         })
     except Exception:
         log.warning("Failed to log llm_usage event to events.jsonl", exc_info=True)
@@ -662,6 +669,32 @@ def _handle_send_message(evt: Dict[str, Any], ctx: Any) -> None:
         )
 
 
+def _checkpoint_coop_roots_on_root_done(ctx: Any, task: Dict[str, Any], task_id: str) -> None:
+    """v6.58.0 (2.4B): when the ROOT of a task tree finalizes, checkpoint-commit any
+    dirty host-minted genesis/coop tree its children built in — durable history instead
+    of an uncommitted pile. Only projects-root trees, never owner-attached folders;
+    skipped while sibling tree tasks are still live; credential-shaped files excluded
+    (disclosed); fail-soft per root. Never raises."""
+    try:
+        from ouroboros.coop_checkpoint import checkpoint_commit_coop_roots
+
+        root_tid = str(task.get("root_task_id") or task.get("id") or task_id or "")
+        live = _active_subagent_count(root_tid, ctx.PENDING, ctx.RUNNING) > 0
+        receipts = checkpoint_commit_coop_roots(
+            ctx.DRIVE_ROOT, root_tid,
+            title=str(task.get("title") or task.get("suggested_name") or ""),
+            has_live_tree_tasks=live,
+        )
+        for receipt in receipts:
+            if receipt.get("committed") or receipt.get("error") or receipt.get("skipped_sensitive"):
+                append_jsonl(ctx.DRIVE_ROOT / "logs" / "events.jsonl", {
+                    "ts": utc_now_iso(), "type": "coop_checkpoint_commit",
+                    "task_id": root_tid, **receipt,
+                })
+    except Exception:
+        log.debug("coop checkpoint-commit failed for %s", task_id, exc_info=True)
+
+
 def _handle_task_done(evt: Dict[str, Any], ctx: Any) -> None:
     task_id = evt.get("task_id")
     wid = evt.get("worker_id")
@@ -691,6 +724,9 @@ def _handle_task_done(evt: Dict[str, Any], ctx: Any) -> None:
                 copy_child_task_result(ctx.DRIVE_ROOT, task)
                 if not task_is_readonly_subagent(task):
                     finalize_task_artifacts(ctx.DRIVE_ROOT, task)
+                # v6.58.0 (2.4B): root finalization checkpoint-commits dirty coop trees.
+                if str(task.get("delegation_role") or "") != "subagent":
+                    _checkpoint_coop_roots_on_root_done(ctx, task, str(task_id or ""))
         except Exception as exc:
             try:
                 from ouroboros.headless import ARTIFACT_STATUS_FAILED

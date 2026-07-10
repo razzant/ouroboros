@@ -49,8 +49,8 @@ def test_apply_runtime_provider_defaults_autofills_official_openai_models():
     }
     assert normalized["OUROBOROS_MODEL"] == "openai::gpt-5.5"
     assert normalized["OUROBOROS_MODEL_HEAVY"] == "openai::gpt-5.5"
-    assert normalized["OUROBOROS_MODEL_LIGHT"] == "openai::gpt-5.5-mini"
-    assert normalized["OUROBOROS_MODEL_FALLBACKS"] == "openai::gpt-5.5-mini"
+    assert normalized["OUROBOROS_MODEL_LIGHT"] == "openai::gpt-5.4-mini"
+    assert normalized["OUROBOROS_MODEL_FALLBACKS"] == "openai::gpt-5.4-mini"
 
     normalized, changed, changed_keys = apply_runtime_provider_defaults({
         "OPENAI_API_KEY": "sk-openai",
@@ -67,16 +67,16 @@ def test_apply_runtime_provider_defaults_autofills_official_openai_models():
     assert "OUROBOROS_MODEL" in changed_keys
     assert normalized["OUROBOROS_MODEL"] == "openai::gpt-5.5"
     assert normalized["OUROBOROS_MODEL_HEAVY"] == "openai::gpt-5.5"
-    assert normalized["OUROBOROS_MODEL_LIGHT"] == "openai::gpt-5.5-mini"
+    assert normalized["OUROBOROS_MODEL_LIGHT"] == "openai::gpt-5.4-mini"
     assert normalized["OUROBOROS_REVIEW_MODELS"] == (
-        "openai::gpt-5.5,openai::gpt-5.5-mini,openai::gpt-5.5-mini"
+        "openai::gpt-5.5,openai::gpt-5.4-mini,openai::gpt-5.4-mini"
     )
     # v4.39.0: direct-provider fallback now seeds `[main, light, light]` —
     # 3 commit-triad slots (preserving the documented 3-reviewer contract)
     # with 2 unique models (so `plan_task`'s quorum gate passes). Replaces
     # the old `[main] * 3` fallback that broke `plan_task` first-run.
     assert normalized["OUROBOROS_REVIEW_MODELS"] == (
-        "openai::gpt-5.5,openai::gpt-5.5-mini,openai::gpt-5.5-mini"
+        "openai::gpt-5.5,openai::gpt-5.4-mini,openai::gpt-5.4-mini"
     )
     assert normalized["OUROBOROS_SCOPE_REVIEW_MODEL"] == "openai::gpt-5.5"
     assert normalized["OUROBOROS_SCOPE_REVIEW_MODELS"] == "openai::gpt-5.5"
@@ -89,8 +89,8 @@ def test_apply_runtime_provider_defaults_autofills_official_openai_models():
     assert "OUROBOROS_MODEL" in changed_keys
     assert normalized["OUROBOROS_MODEL"] == "openai::gpt-5.5"
     assert normalized["OUROBOROS_MODEL_HEAVY"] == "openai::gpt-5.5"
-    assert normalized["OUROBOROS_MODEL_LIGHT"] == "openai::gpt-5.5-mini"
-    assert normalized["OUROBOROS_MODEL_FALLBACKS"] == "openai::gpt-5.5-mini"
+    assert normalized["OUROBOROS_MODEL_LIGHT"] == "openai::gpt-5.4-mini"
+    assert normalized["OUROBOROS_MODEL_FALLBACKS"] == "openai::gpt-5.4-mini"
 
 
 def test_apply_runtime_provider_defaults_migrates_saved_openai_values():
@@ -115,8 +115,8 @@ def test_apply_runtime_provider_defaults_migrates_saved_openai_values():
     }
     assert normalized["OUROBOROS_MODEL"] == "openai::gpt-5.5"
     assert normalized["OUROBOROS_MODEL_HEAVY"] == "openai::gpt-5.5"
-    assert normalized["OUROBOROS_MODEL_LIGHT"] == "openai::gpt-5.5-mini"
-    assert normalized["OUROBOROS_MODEL_FALLBACKS"] == "openai::gpt-5.5-mini"
+    assert normalized["OUROBOROS_MODEL_LIGHT"] == "openai::gpt-5.4-mini"
+    assert normalized["OUROBOROS_MODEL_FALLBACKS"] == "openai::gpt-5.4-mini"
     # v6.36.0 (D4): an explicit provider-matching review list is honored EXACTLY
     # (1 model = 1 slot — a loud single_reviewer_no_diversity degraded mode), not
     # silently expanded to [main, light, light]. Expansion fires only when the
@@ -192,9 +192,12 @@ def test_apply_runtime_provider_defaults_refreshes_retired_gpt54_defaults():
     assert changed
     assert "OUROBOROS_REVIEW_MODELS" in changed_keys
     assert "OUROBOROS_SCOPE_REVIEW_MODELS" in changed_keys
-    assert normalized["OUROBOROS_REVIEW_MODELS"] == "openai/gpt-5.5,openai/gpt-5.5-mini"
+    # gpt-5.4 and gpt-5.4-pro are genuinely retired -> 5.5 / 5.5-pro. But gpt-5.4-mini
+    # is a LIVE model (the 5.5 family has no mini lane), so it must pass through
+    # unchanged rather than be rewritten to a non-existent gpt-5.5-mini.
+    assert normalized["OUROBOROS_REVIEW_MODELS"] == "openai/gpt-5.5,openai/gpt-5.4-mini"
     assert normalized["OUROBOROS_SCOPE_REVIEW_MODEL"] == "openai/gpt-5.5-pro"
-    assert normalized["OUROBOROS_SCOPE_REVIEW_MODELS"] == "openai/gpt-5.5-pro,openai/gpt-5.5-mini"
+    assert normalized["OUROBOROS_SCOPE_REVIEW_MODELS"] == "openai/gpt-5.5-pro,openai/gpt-5.4-mini"
 
 
 def test_apply_runtime_provider_defaults_migrates_legacy_scope_model_for_openai_only():
@@ -217,6 +220,36 @@ def test_apply_runtime_provider_defaults_migrates_legacy_scope_model_for_openai_
         assert changed is should_change
         assert changed_keys == (["OUROBOROS_SCOPE_REVIEW_MODEL"] if should_change else [])
         assert normalized["OUROBOROS_SCOPE_REVIEW_MODEL"] == "openai::gpt-5.5"
+
+
+def test_apply_runtime_provider_defaults_migrates_prior_scope_default_on_general_path():
+    """v6.55.0: the shipped scope-review default moved openai/gpt-5.5 →
+    anthropic/claude-fable-5. An aggregator install whose SAVED scope value equals
+    the old default (never an explicit choice) must pick up the new default on
+    upgrade (scope fable-5 cumulative-review finding); explicit lists and
+    non-default values stay untouched."""
+    normalized, changed, changed_keys = apply_runtime_provider_defaults({
+        "OPENROUTER_API_KEY": "sk-or",
+        "OUROBOROS_SCOPE_REVIEW_MODEL": "openai/gpt-5.5",
+        "OUROBOROS_SCOPE_REVIEW_MODELS": "openai/gpt-5.5",
+    })
+
+    assert changed
+    assert set(changed_keys) == {"OUROBOROS_SCOPE_REVIEW_MODEL", "OUROBOROS_SCOPE_REVIEW_MODELS"}
+    assert normalized["OUROBOROS_SCOPE_REVIEW_MODEL"] == "anthropic/claude-fable-5"
+    assert normalized["OUROBOROS_SCOPE_REVIEW_MODELS"] == "anthropic/claude-fable-5"
+
+    normalized, changed, changed_keys = apply_runtime_provider_defaults({
+        "OPENROUTER_API_KEY": "sk-or",
+        # Non-default single value and a deliberate multi-model list: preserved.
+        "OUROBOROS_SCOPE_REVIEW_MODEL": "openai/gpt-5.5-pro",
+        "OUROBOROS_SCOPE_REVIEW_MODELS": "openai/gpt-5.5,google/gemini-3.5-flash",
+    })
+
+    assert not changed
+    assert changed_keys == []
+    assert normalized["OUROBOROS_SCOPE_REVIEW_MODEL"] == "openai/gpt-5.5-pro"
+    assert normalized["OUROBOROS_SCOPE_REVIEW_MODELS"] == "openai/gpt-5.5,google/gemini-3.5-flash"
 
 
 def test_apply_runtime_provider_defaults_normalizes_anthropic_only_setup():

@@ -112,7 +112,7 @@ def test_time_budget_milestone_injects_once_per_threshold(monkeypatch):
 
     from datetime import datetime, timezone
 
-    monkeypatch.setattr(loop_mod, "utc_now", lambda: datetime(2026, 6, 10, 5, 1, tzinfo=timezone.utc))
+    monkeypatch.setattr("ouroboros.task_pacing.utc_now", lambda: datetime(2026, 6, 10, 5, 1, tzinfo=timezone.utc))
 
     injected = _maybe_inject_time_budget_milestone(
         messages,
@@ -131,14 +131,16 @@ def test_time_budget_milestone_injects_once_per_threshold(monkeypatch):
 
 
 def test_intrinsic_pacing_injects_without_deadline(monkeypatch):
-    """No deadline_at: surface elapsed/rounds/cost once per interval bucket."""
+    """No deadline_at: surface elapsed/rounds/cost once per interval bucket.
+    v6.60.0: the FINAL ANSWER phrase appears ONLY when the task contract declares
+    answer_protocol="final_answer_line" (marker phrases are protocol-gated)."""
     messages = [{"role": "user", "content": "solve"}]
     ctx = SimpleNamespace(task_metadata={"created_at": "2026-06-10T00:00:00Z"})  # no deadline_at
     from datetime import datetime, timezone
 
     monkeypatch.delenv("OUROBOROS_PACING_INTERVAL_SEC", raising=False)
     # 20 min elapsed, default interval 600s -> bucket 2.
-    monkeypatch.setattr(loop_mod, "utc_now", lambda: datetime(2026, 6, 10, 0, 20, tzinfo=timezone.utc))
+    monkeypatch.setattr("ouroboros.task_pacing.utc_now", lambda: datetime(2026, 6, 10, 0, 20, tzinfo=timezone.utc))
 
     injected = _maybe_inject_time_budget_milestone(
         messages, SimpleNamespace(_ctx=ctx), round_idx=7,
@@ -152,7 +154,19 @@ def test_intrinsic_pacing_injects_without_deadline(monkeypatch):
     assert injected_again is False  # same bucket -> not repeated
     assert "[PACING" in messages[-1]["content"]
     assert "Rounds so far: 7" in messages[-1]["content"]
-    assert "FINAL ANSWER:" in messages[-1]["content"]
+    assert "FINAL ANSWER:" not in messages[-1]["content"]  # no protocol declared
+
+    # With the protocol declared, the salvage phrase rides the SAME milestone.
+    proto_ctx = SimpleNamespace(
+        task_metadata={"created_at": "2026-06-10T00:00:00Z"},
+        task_contract={"answer_protocol": "final_answer_line"},
+    )
+    proto_messages = [{"role": "user", "content": "solve"}]
+    assert _maybe_inject_time_budget_milestone(
+        proto_messages, SimpleNamespace(_ctx=proto_ctx), round_idx=7,
+        accumulated_usage={"cost": 1.25}, task_id="t2",
+    ) is True
+    assert "FINAL ANSWER:" in proto_messages[-1]["content"]
 
 
 def test_latch_final_answer_marker_captures_explicit_marker_only():
@@ -242,7 +256,7 @@ def test_intrinsic_pacing_disabled_when_interval_zero(monkeypatch):
     from datetime import datetime, timezone
 
     monkeypatch.setenv("OUROBOROS_PACING_INTERVAL_SEC", "0")
-    monkeypatch.setattr(loop_mod, "utc_now", lambda: datetime(2026, 6, 10, 1, 0, tzinfo=timezone.utc))
+    monkeypatch.setattr("ouroboros.task_pacing.utc_now", lambda: datetime(2026, 6, 10, 1, 0, tzinfo=timezone.utc))
 
     assert _maybe_inject_time_budget_milestone(messages, SimpleNamespace(_ctx=ctx), round_idx=3) is False
 
@@ -258,7 +272,8 @@ def test_deadline_local_finalize_gate(monkeypatch):
         return ("BEST EFFORT", {"reason_code": reason_code}, {})
 
     monkeypatch.setattr(loop_mod, "_forced_final_answer", _fake_final)
-    monkeypatch.setattr(loop_mod, "get_finalization_grace_sec", lambda *a, **k: 120)
+    # v6.54.4: the gate consults the task_pacing effective reserve SSOT.
+    monkeypatch.setattr("ouroboros.task_pacing.effective_finalization_reserve_sec", lambda ctx: 120.0)
     monkeypatch.setattr(loop_mod, "utc_now", lambda: datetime(2026, 6, 10, 9, 59, 0, tzinfo=timezone.utc))
 
     # Far from deadline (10:30 vs now 09:59 -> ~31 min left > 120s) -> no finalize.
@@ -362,7 +377,7 @@ def test_task_acceptance_required_feeds_back_capsule(monkeypatch, tmp_path):
     assert "Do not mention this review" in messages2[-1]["content"]
     # The CAPSULE is bounded (injected once), but the review is NOT yet terminal —
     # so the REVISED final deliverable still gets reviewed (round-4 state-machine fix).
-    assert ctx2._task_acceptance_capsule_injected is True
+    assert getattr(ctx2, '_task_acceptance_improvement_passes', 0) == 1  # v6.54.4: counter replaced the boolean latch
     assert getattr(ctx2, "_task_acceptance_reviewed", False) is False
     assert trace2["acceptance_decision"]["status"] == "revision_requested"
 

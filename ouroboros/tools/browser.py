@@ -548,6 +548,10 @@ def _ensure_browser(ctx: ToolContext, *, engine: str = "chromium", device: str =
     # use clicks/fetches to change the owner-controlled context horizon.
     bs_context.route("**/api/owner/context-mode", _block_context_mode_owner_post)
     bs_context.route("**/api/owner/scope-review-floor", _block_scope_review_floor_owner_post)
+    # Broad glob (any /api/owner/** path): the glob matches the RAW URL, so a
+    # percent-encoded `safety%2Dmode` would slip a literal pattern — the handler
+    # URL-DECODES and aborts only the safety-mode POST (review round 6).
+    bs_context.route("**/api/owner/**", _block_safety_mode_owner_post)
     # Broad glob (any /api/owner/skills/** path) so a percent-encoded `attest%2Dreview`
     # still routes to the handler, which then URL-DECODES and precisely aborts the
     # attestation POST (the glob matches the RAW URL, so it must not assume the literal).
@@ -561,7 +565,7 @@ def _ensure_browser(ctx: ToolContext, *, engine: str = "chromium", device: str =
             "**/*",
             lambda route: route.abort()
             if _is_subagent_blocked_browser_url(route.request.url, ctx)
-            else route.continue_(),
+            else _route_fallback(route),
         )
     else:
         # Main-agent SSRF guard (conservative): block ONLY link-local /
@@ -573,7 +577,7 @@ def _ensure_browser(ctx: ToolContext, *, engine: str = "chromium", device: str =
             "**/*",
             lambda route: route.abort()
             if _is_metadata_blocked_browser_url(route.request.url)
-            else route.continue_(),
+            else _route_fallback(route),
         )
     return bs.page
 
@@ -660,6 +664,24 @@ def _blocks_scope_review_floor_self_lowering_js(value: str) -> bool:
     )
 
 
+def _blocks_safety_mode_self_lowering_js(value: str) -> bool:
+    """Block browser JS that tries to change the owner-only LLM-safety coverage mode
+    (v6.54.3) — the click+fetch bypass of the dedicated owner endpoint. URL-decode
+    first so a percent-encoded path (``safety%2Dmode``) cannot slip the literal
+    match (review round 6; mirrors the owner-attestation guard)."""
+    import urllib.parse
+
+    low = str(value or "").lower()
+    decoded = urllib.parse.unquote(urllib.parse.unquote(low)).lower()
+    text = f"{low} {decoded}"
+    return (
+        "/api/owner/safety-mode" in text
+        or ("ouroboros_safety_mode" in text and (
+            "settings.json" in text or "save_settings" in text or "/api/settings" in text
+        ))
+    )
+
+
 def _blocks_mutative_toggle_js(value: str) -> bool:
     """Block browser JS that tries to enable the owner-only mutative-subagents toggle."""
     low = str(value or "").lower()
@@ -692,6 +714,24 @@ def _blocks_owner_skill_attest_js(value: str) -> bool:
     return "/api/owner/skills/" in text and "attest-review" in text
 
 
+def _route_fallback(route: Any) -> None:
+    """Pass a non-matching request DOWN the guard chain (review round 8).
+
+    Playwright runs route handlers in REVERSE registration order and
+    ``route.continue_()`` FINALIZES the request — a later-registered catch-all
+    that continued would silently skip every earlier-registered owner-endpoint
+    block (they were dead, not merely ordered oddly). ``route.fallback()``
+    defers to the next matching handler and plain-continues when none remain,
+    so every guard in the chain actually evaluates. Older Playwright fakes/
+    versions without ``fallback`` degrade to ``continue_`` (the historical
+    behavior)."""
+    fallback = getattr(route, "fallback", None)
+    if callable(fallback):
+        fallback()
+        return
+    route.continue_()
+
+
 def _is_context_mode_owner_post(request: Any) -> bool:
     try:
         parsed = urlparse(str(request.url or ""))
@@ -705,7 +745,7 @@ def _block_context_mode_owner_post(route: Any) -> None:
     if _is_context_mode_owner_post(route.request):
         route.abort()
         return
-    route.continue_()
+    _route_fallback(route)
 
 
 def _is_scope_review_floor_owner_post(request: Any) -> bool:
@@ -721,7 +761,29 @@ def _block_scope_review_floor_owner_post(route: Any) -> None:
     if _is_scope_review_floor_owner_post(route.request):
         route.abort()
         return
-    route.continue_()
+    _route_fallback(route)
+
+
+def _is_safety_mode_owner_post(request: Any) -> bool:
+    """POST to the owner safety-mode endpoint — decoded, so a percent-encoded
+    path cannot slip past (the broad ``**/api/owner/**`` route registration
+    feeds RAW URLs here; Starlette decodes server-side, so we must too)."""
+    import urllib.parse
+
+    try:
+        parsed = urlparse(str(request.url or ""))
+        method = str(request.method or "").upper()
+    except Exception:
+        return False
+    path = urllib.parse.unquote(urllib.parse.unquote(parsed.path)).rstrip("/")
+    return method == "POST" and path == "/api/owner/safety-mode"
+
+
+def _block_safety_mode_owner_post(route: Any) -> None:
+    if _is_safety_mode_owner_post(route.request):
+        route.abort()
+        return
+    _route_fallback(route)
 
 
 def _is_owner_skill_attest_post(request: Any) -> bool:
@@ -743,7 +805,7 @@ def _block_owner_skill_attest_post(route: Any) -> None:
     if _is_owner_skill_attest_post(route.request):
         route.abort()
         return
-    route.continue_()
+    _route_fallback(route)
 
 
 def _is_owner_settings_self_elevation_post(request: Any) -> bool:
@@ -769,7 +831,7 @@ def _block_owner_settings_post(route: Any) -> None:
     if _is_owner_settings_self_elevation_post(route.request):
         route.abort()
         return
-    route.continue_()
+    _route_fallback(route)
 
 
 _MARKDOWN_JS = """() => {
@@ -1042,6 +1104,13 @@ def _browser_action(ctx: ToolContext, action: str, selector: str = "",
                     "looks like an attempt to weaken OUROBOROS_SCOPE_REVIEW_FLOOR. "
                     "The scope-review floor gates the BIBLE P3 blocking review — it is "
                     "owner-controlled, and the agent must not lower it."
+                )
+            if _blocks_safety_mode_self_lowering_js(value):
+                return (
+                    "⚠️ SAFETY_MODE_SELF_LOWERING_BLOCKED: browser JavaScript "
+                    "looks like an attempt to change OUROBOROS_SAFETY_MODE. "
+                    "LLM-safety coverage is owner-controlled (BIBLE P3) — the agent "
+                    "must not reduce its own supervision."
                 )
             if _blocks_mutative_toggle_js(value):
                 return (

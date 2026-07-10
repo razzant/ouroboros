@@ -184,8 +184,15 @@ def test_user_files_root_blocks_ouroboros_control_plane(tmp_path, monkeypatch):
         {"root": "user_files", "path": str(repo / "README.md"), "content": "bad"},
     )
 
-    assert "WRITE_FILE_ERROR" in result
-    assert "user_files path blocked" in result
+    # v6.54.3 root-label hybrid: a user_files WRITE whose absolute path resolves
+    # under the active workspace now gets the actionable ROOT_REQUIRED redirect
+    # BEFORE the handler (the retry under root=active_workspace passes through the
+    # full light-mode/protected-path discipline). Elsewhere the legacy block stays.
+    # The hard security invariant is identical either way: nothing is written.
+    assert (
+        "ROOT_REQUIRED_ACTIVE_WORKSPACE" in result
+        or ("WRITE_FILE_ERROR" in result and "user_files path blocked" in result)
+    ), result
     assert not (repo / "README.md").exists()
 
     case_variant = pathlib.Path.home() / "ouroboros" / "repo" / "README.md"
@@ -194,8 +201,10 @@ def test_user_files_root_blocks_ouroboros_control_plane(tmp_path, monkeypatch):
         {"root": "user_files", "path": str(case_variant), "content": "bad"},
     )
 
-    assert "WRITE_FILE_ERROR" in case_result
-    assert "user_files path blocked" in case_result
+    assert (
+        "ROOT_REQUIRED_ACTIVE_WORKSPACE" in case_result
+        or ("WRITE_FILE_ERROR" in case_result and "user_files path blocked" in case_result)
+    ), case_result
     assert not case_variant.exists()
 
 
@@ -1024,10 +1033,14 @@ def test_run_command_without_outputs_blocks_absolute_user_file_open_writes(tmp_p
     assert not (data / "task_results" / "artifacts" / "task1" / target.name).exists()
 
 
-def test_run_script_without_outputs_blocks_absolute_user_file_writes_before_execution(tmp_path, monkeypatch):
+def test_run_script_without_outputs_flags_absolute_user_file_writes(tmp_path, monkeypatch):
+    # v6.56.0: run_script body-audit moved to POST-exec stat verification (parity
+    # with run_command), so a script that writes an undeclared absolute user_files
+    # path RUNS (the write happens — a post-exec side effect can't be un-done) and
+    # is then flagged ARTIFACT_OUTPUT_ERROR ("wrote"), not blocked before it runs.
     monkeypatch.setattr("ouroboros.safety.check_safety", lambda *a, **k: (True, ""))
     monkeypatch.setenv("OUROBOROS_RUNTIME_MODE", "light")
-    registry, _repo, _data, desktop = _registry_under_fake_home(tmp_path, monkeypatch)
+    registry, _repo, data, desktop = _registry_under_fake_home(tmp_path, monkeypatch)
     target = desktop / "script-write.html"
 
     result = registry.execute(
@@ -1039,8 +1052,11 @@ def test_run_script_without_outputs_blocks_absolute_user_file_writes_before_exec
     )
 
     assert result.startswith("⚠️ ARTIFACT_OUTPUT_ERROR"), result
-    assert "run_script would write user_files without declaring outputs" in result
-    assert not target.exists()
+    assert "run_script wrote user_files without declaring outputs" in result
+    assert str(target) in result
+    # The write happened (post-exec) but the file is NOT registered as an artifact.
+    assert target.read_text(encoding="utf-8") == "<h1>ok</h1>"
+    assert not (data / "task_results" / "artifacts" / "task1" / target.name).exists()
 
 
 def test_run_command_without_outputs_detects_shell_redirection_to_user_files(tmp_path, monkeypatch):

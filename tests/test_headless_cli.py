@@ -77,7 +77,7 @@ def test_task_api_enqueue_workspace_creates_child_drive(tmp_path, monkeypatch):
 
     monkeypatch.setattr("supervisor.queue.enqueue_task", fake_enqueue)
     monkeypatch.setattr("supervisor.queue.persist_queue_snapshot", lambda reason="": None)
-    monkeypatch.setattr("ouroboros.gateway.tasks.bootstrap_process_path", lambda: bootstrapped.append(True) or [])
+    monkeypatch.setattr("ouroboros.workspace_admission.bootstrap_process_path", lambda: bootstrapped.append(True) or [])
 
     app = Starlette(routes=[Route("/api/tasks", endpoint=api_tasks_create, methods=["POST"])])
     app.state.drive_root = data
@@ -175,7 +175,7 @@ def test_api_tasks_create_rejects_internal_task_types(tmp_path, monkeypatch):
 
     monkeypatch.setattr("supervisor.queue.enqueue_task", lambda task: task)
     monkeypatch.setattr("supervisor.queue.persist_queue_snapshot", lambda reason="": None)
-    monkeypatch.setattr("ouroboros.gateway.tasks.bootstrap_process_path", lambda: [])
+    monkeypatch.setattr("ouroboros.workspace_admission.bootstrap_process_path", lambda: [])
 
     app = Starlette(routes=[Route("/api/tasks", endpoint=api_tasks_create, methods=["POST"])])
     app.state.drive_root = data
@@ -2172,6 +2172,50 @@ def test_cli_run_disable_tools_sent_as_gateway_root_field(monkeypatch, capsys):
     assert captured["path"] == "/api/tasks"
     assert captured["body"]["disabled_tools"] == ["web_search", "browse_page", "claude_code_edit"]
     assert capsys.readouterr().out.strip() == "abc123"
+
+
+def test_cli_run_task_metadata_json_merges_but_cannot_forge_service_keys(monkeypatch, capsys):
+    """--task-metadata-json (v6.56.0) merges user metadata (e.g. budget_profile)
+    into body.metadata, but the host-owned delegation_role/source keys are spread
+    last and can never be overridden by the user JSON (subagent forgery)."""
+    from ouroboros import cli
+
+    captured = {}
+
+    class FakeClient:
+        def request(self, method, path, body=None):
+            captured["body"] = body
+            return {"task_id": "abc123"}
+
+    monkeypatch.setattr(cli, "_client", lambda args, start=False: FakeClient())
+    monkeypatch.setattr(cli, "_watch_task", lambda *args, **kwargs: pytest.fail("detach should not watch"))
+
+    payload = (
+        '{"budget_profile": {"improvement_policy": "until_deadline", "cost_hard_stop_pct": 0},'
+        ' "delegation_role": "subagent", "source": "forged"}'
+    )
+    assert cli.main(["run", "--detach", "--task-metadata-json", payload, "hello"]) == 0
+    metadata = captured["body"]["metadata"]
+    assert metadata["budget_profile"] == {
+        "improvement_policy": "until_deadline",
+        "cost_hard_stop_pct": 0,
+    }
+    assert metadata["delegation_role"] == "root"
+    assert metadata["source"] == "cli"
+    assert capsys.readouterr().out.strip() == "abc123"
+
+
+def test_cli_run_task_metadata_json_rejects_invalid_payloads(monkeypatch):
+    from ouroboros import cli
+
+    monkeypatch.setattr(cli, "_client", lambda *args, **kwargs: pytest.fail("client should not be created"))
+
+    for bad in ("not json", "[1, 2]"):
+        args = SimpleNamespace(
+            prompt=["hello"], delegation_role="root", task_metadata_json=bad,
+        )
+        with pytest.raises(cli.CLIError, match="task-metadata-json"):
+            cli._run_command(args)
 
 
 def test_cli_run_rejects_forged_subagent_role_before_request(monkeypatch):

@@ -1,0 +1,13 @@
+--- /tmp/claude-1006/-home-a-razzhigaev-ouro/5e03c92c-6039-4ed9-86a5-e7ad7739b20f/scratchpad/clb_bundle/clbench-livebridge-handoff-v3-2026-07-05/bench-config/external-adapters/ouroboros/_docker_launcher.py	2026-07-04 10:27:28.119582000 +0000
++++ /home/a.razzhigaev/ouro/benchmarks/continual-learning-bench/src/systems/ouroboros/_docker_launcher.py	2026-07-05 09:59:44.044207376 +0000
+@@ -313,6 +313,10 @@
+             subprocess.run(["docker", "rm", "-f", self._cname], capture_output=True)
+             run = subprocess.run(
+                 ["docker", "run", "-d", "--rm", "--init", "--name", self._cname,
++                 # Operator port (campaign v6.56.0): on the rootful system daemon the
++                 # container must run as the operator uid, else root-owned files in the
++                 # mounted data root are unreadable by the host-side bridge.
++                 "--user", f"{os.getuid()}:{os.getgid()}", "-e", "HOME=/obo/data",
+                  "--add-host=host.docker.internal:host-gateway",
+                  "-p", f"127.0.0.1:{hostport}:8765",
+                  "-v", repo_mount, "-v", f"{self._data_root}:/obo/data", "-w", "/obo/repo",

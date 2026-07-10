@@ -29,6 +29,11 @@ def test_derive_loop_outcome_missing_sentinel_flag():
 
     assert derive_loop_outcome("no marker here", {}, {})["final_answer_missing_sentinel"] is True
     assert derive_loop_outcome("FINAL ANSWER: 42", {}, {})["final_answer_missing_sentinel"] is False
+    # v6.60.0: the sentinel keys on the TYPED payload — a latch-recovered answer is
+    # NOT "missing" even though the final text carries no marker.
+    latched = derive_loop_outcome("prose without a marker", {}, {"best_valid_final_answer": "best"})
+    assert latched["final_answer"] == "best"
+    assert latched["final_answer_missing_sentinel"] is False
 
 
 def test_best_valid_latch_invalidated_by_post_latch_tool_work():

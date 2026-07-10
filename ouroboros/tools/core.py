@@ -11,7 +11,7 @@ import pathlib
 import re
 import subprocess
 import uuid
-from typing import Any, Dict, List
+from typing import Any, Dict, List, Optional
 
 from ouroboros.artifacts import artifact_store_path_block_reason, copy_file_to_task_artifacts
 from ouroboros.project_facts import filter_out_project_store as _filter_out_project_store
@@ -23,6 +23,7 @@ from ouroboros.tool_access import (
     active_tool_profile,
     normalize_root,
     normalize_root_relative,
+    project_room_lens_dir,
     resolve_user_file_path,
     resolve_resource_path,
     resource_root_path,
@@ -160,6 +161,15 @@ def _is_workspace_executor_control_state_path(target: pathlib.Path, data_root: p
     return "state" in lowered and "workspace_executor_processes" in lowered
 
 
+class _ListingFailure(Exception):
+    """A failed list_files state that must surface as a FIRST-CLASS tool error.
+
+    v6.54.3 (review round 4): path-escape / not-found / not-a-directory used to
+    return warning strings INSIDE an ok-shaped JSON list — the exact
+    error-inside-success shape the TB2.1 post-mortem showed silently poisoning
+    reasoning. _list_files renders this as a leading ⚠️ LIST_FILES_ERROR."""
+
+
 def _list_dir(root: pathlib.Path, rel: str, max_entries: int = 500) -> List[str]:
     target = (root / safe_relpath(rel)).resolve()
     # CONFINE to the root before any iterdir: a resolved target that escapes (e.g. an
@@ -168,43 +178,50 @@ def _list_dir(root: pathlib.Path, rel: str, max_entries: int = 500) -> List[str]
     try:
         target.relative_to(root.resolve())
     except ValueError:
-        return [f"⚠️ Path escapes root: {rel}"]
+        raise _ListingFailure(f"Path escapes root: {rel}") from None
     if not target.exists():
-        return [f"⚠️ Directory not found: {rel}"]
+        raise _ListingFailure(f"Directory not found: {rel}")
     if not target.is_dir():
-        return [f"⚠️ Not a directory: {rel}"]
+        raise _ListingFailure(f"Not a directory: {rel}")
     items = []
-    try:
-        for entry in sorted(target.iterdir()):
-            if len(items) >= max_entries:
-                items.append(f"...(truncated at {max_entries})")
-                break
-            suffix = "/" if entry.is_dir() else ""
-            items.append(str(entry.relative_to(root)) + suffix)
-    except Exception as e:
-        items.append(f"⚠️ Error listing: {e}")
+    # A hard iterdir/permission/race failure PROPAGATES: _list_files renders it
+    # as a first-class "⚠️ LIST_FILES_ERROR" tool error, never an ok-shaped JSON
+    # listing carrying an error string inside (v6.54.3, review round 3).
+    for entry in sorted(target.iterdir()):
+        if len(items) >= max_entries:
+            items.append(f"...(truncated at {max_entries})")
+            break
+        suffix = "/" if entry.is_dir() else ""
+        items.append(str(entry.relative_to(root)) + suffix)
     return items
 
 
 def _list_user_files_dir(ctx: ToolContext, root: pathlib.Path, target: pathlib.Path, max_entries: int = 500) -> List[str]:
     if not target.exists():
-        return [f"⚠️ Directory not found: {target}"]
+        raise _ListingFailure(f"Directory not found: {target}")
     if not target.is_dir():
-        return [f"⚠️ Not a directory: {target}"]
+        raise _ListingFailure(f"Not a directory: {target}")
     items: List[str] = []
     hidden = 0
-    try:
-        for entry in sorted(target.iterdir()):
-            if user_files_path_block_reason(ctx, entry):
-                hidden += 1
-                continue
-            if len(items) >= max_entries:
-                items.append(f"...(truncated at {max_entries})")
-                break
-            suffix = "/" if entry.is_dir() else ""
-            items.append(str(entry.relative_to(root)) + suffix)
-    except Exception as e:
-        items.append(f"⚠️ Error listing: {e}")
+    # A hard iterdir/permission/race failure PROPAGATES to the first-class
+    # "⚠️ LIST_FILES_ERROR" path in _list_files (v6.54.3, review round 3).
+    for entry in sorted(target.iterdir()):
+        if user_files_path_block_reason(ctx, entry):
+            hidden += 1
+            continue
+        if len(items) >= max_entries:
+            items.append(f"...(truncated at {max_entries})")
+            break
+        suffix = "/" if entry.is_dir() else ""
+        # An external-workspace listing outside the user_files home has no
+        # home-relative form — render the absolute path instead of crashing
+        # the whole listing on relative_to (v6.54.3: the TB2.1
+        # "'/app/…' is not in the subpath of '/root'" class).
+        try:
+            rendered = str(entry.relative_to(root))
+        except ValueError:
+            rendered = str(entry)
+        items.append(rendered + suffix)
     if hidden:
         items.append(f"⚠️ {hidden} hidden/control entr{'y' if hidden == 1 else 'ies'} omitted from user_files listing.")
     return items
@@ -408,11 +425,9 @@ def _repo_list(ctx: ToolContext, dir: str = ".", max_entries: int = 500) -> str:
     repo_root = active_repo_dir_for(ctx)
     target = ctx.repo_path(dir)
     if is_restricted_subagent_profile(ctx) and _is_subagent_secret_repo_target(target, repo_root):
-        return json.dumps(
-            ["⚠️ REPO_LIST_BLOCKED: this subagent cannot list repo secret or control paths."],
-            ensure_ascii=False,
-            indent=2,
-        )
+        # First-class tool error, not an ok-shaped one-element JSON listing
+        # (v6.54.3, review round 5 — the whole-call block IS the result).
+        return "⚠️ REPO_LIST_BLOCKED: this subagent cannot list repo secret or control paths."
     # ctx.repo_path already normalized absolute/redundant-prefix dirs; pass the
     # resulting root-relative form so _list_dir doesn't re-nest the raw input.
     try:
@@ -525,31 +540,25 @@ def _data_read(
 def _data_list(ctx: ToolContext, dir: str = ".", max_entries: int = 500) -> str:
     task_constraint = normalize_task_constraint(getattr(ctx, "task_constraint", None))
     norm_dir = _normalize_data_read_path(ctx, dir)
+    # Whole-call block states are FIRST-CLASS tool errors, never ok-shaped
+    # one-element JSON listings (v6.54.3, review round 5).
     if (b := _project_store_access_block(norm_dir)):
-        return json.dumps([b], ensure_ascii=False, indent=2)
+        return str(b)
     if is_restricted_subagent_profile(ctx) and _is_subagent_secret_data_path(norm_dir):
-        return json.dumps(
-            ["⚠️ DATA_LIST_BLOCKED: this subagent cannot list secret or owner-control data paths."],
-            ensure_ascii=False,
-            indent=2,
-        )
+        return "⚠️ DATA_LIST_BLOCKED: this subagent cannot list secret or owner-control data paths."
     if is_restricted_subagent_profile(ctx):
         try:
             list_target = ctx.drive_path(norm_dir)
         except ValueError as e:
-            return json.dumps([f"⚠️ DATA_LIST_BLOCKED: {e}"], ensure_ascii=False, indent=2)
+            return f"⚠️ DATA_LIST_BLOCKED: {e}"
         root = pathlib.Path(ctx.drive_root).resolve(strict=False)
         if _is_skill_owner_state_target(list_target, root) or is_skill_owner_state_alias(list_target, root):
-            return json.dumps(
-                ["⚠️ DATA_LIST_BLOCKED: this subagent cannot list secret or owner-control data paths."],
-                ensure_ascii=False,
-                indent=2,
-            )
+            return "⚠️ DATA_LIST_BLOCKED: this subagent cannot list secret or owner-control data paths."
     if task_constraint and task_constraint.mode == "skill_repair" and task_constraint.payload_root:
         try:
             root = resolve_payload_path(pathlib.Path(ctx.drive_root), task_constraint, dir)
         except ValueError as e:
-            return json.dumps([f"⚠️ DATA_LIST_BLOCKED: {e}"], ensure_ascii=False, indent=2)
+            return f"⚠️ DATA_LIST_BLOCKED: {e}"
         items = _list_dir(root, ".", max_entries)
         return json.dumps(items, ensure_ascii=False, indent=2)
     # Drop any projects/<id> entry so a generic root listing never exposes the store.
@@ -949,6 +958,23 @@ def _annotate_reread(ctx: ToolContext, target: Any, start_line: int, max_lines: 
     return result
 
 
+def _room_lens_target(ctx: ToolContext, path: str) -> Optional[pathlib.Path]:
+    """Resolve ``path`` under the project-room lens root (direct-chat folder-room,
+    v6.61.3), confined inside it. None when the lens is inactive."""
+    room = project_room_lens_dir(ctx)
+    if room is None:
+        return None
+    rel = normalize_root_relative(room, str(path or "."))
+    try:
+        resolved = (room / safe_relpath(rel)).resolve(strict=False)
+        resolved.relative_to(room)
+    except (ValueError, OSError):
+        # Traversal/escape out of the room folder: confine to the room root
+        # itself rather than silently reaching elsewhere.
+        return room
+    return resolved
+
+
 def _read_file(
     ctx: ToolContext,
     path: str,
@@ -962,6 +988,23 @@ def _read_file(
     if block:
         return block
     if normalized == "active_workspace":
+        _room_target = _room_lens_target(ctx, path)
+        if _room_target is not None:
+            # Room lens: reads in a folder-room chat resolve to the PROJECT FOLDER,
+            # disclosed via the absolute display path (self-repo reads stay
+            # available through root="system_repo").
+            protected_block = block_reason_for_path(ctx, _room_target, "read_bytes")
+            if protected_block:
+                return protected_block
+            try:
+                content = read_text(_room_target)
+            except FileNotFoundError:
+                return f"⚠️ NOT_FOUND: {_room_target} (project-room folder)"
+            except Exception as exc:
+                return f"⚠️ READ_FILE_ERROR: {type(exc).__name__}: {exc}"
+            return _annotate_reread(ctx, _room_target, start_line, max_lines, _render_line_slice(
+                f"{_room_target} (project room)", content, max_lines=max_lines, start_line=start_line,
+            ))
         target = ctx.repo_path(path)
         protected_block = block_reason_for_path(ctx, target, "read_bytes")
         if protected_block:
@@ -1029,14 +1072,25 @@ def _list_files(
     protected_list_block = _protected_artifact_list_block(ctx, normalized, path, bucket=bucket, skill_name=skill_name)
     if protected_list_block:
         return protected_list_block
-    if normalized == "active_workspace":
-        return _repo_list(ctx, dir=path, max_entries=max_entries)
-    if normalized == "runtime_data":
-        return _data_list(ctx, dir=path, max_entries=max_entries)
     task_constraint = normalize_task_constraint(getattr(ctx, "task_constraint", None))
-    if normalized == "skill_payload" and not bucket and not skill_name and task_constraint and task_constraint.mode == "skill_repair":
-        return _data_list(ctx, dir=path, max_entries=max_entries)
     try:
+        # Every listing branch runs inside this try: a hard iterdir/permission/
+        # race failure from any helper becomes the first-class LIST_FILES_ERROR
+        # below (v6.54.3, review round 3 — helpers no longer swallow it into an
+        # ok-shaped listing).
+        if normalized == "active_workspace":
+            _room = project_room_lens_dir(ctx)
+            if _room is not None:
+                # Room lens: the folder-room chat lists the PROJECT FOLDER (the
+                # robot incident: "." listed the system repo and the agent
+                # narrated the wrong tree). Same JSON-array shape as every root.
+                _rel = normalize_root_relative(_room, str(path or "."))
+                return json.dumps(_list_dir(_room, _rel, max_entries), ensure_ascii=False, indent=2)
+            return _repo_list(ctx, dir=path, max_entries=max_entries)
+        if normalized == "runtime_data":
+            return _data_list(ctx, dir=path, max_entries=max_entries)
+        if normalized == "skill_payload" and not bucket and not skill_name and task_constraint and task_constraint.mode == "skill_repair":
+            return _data_list(ctx, dir=path, max_entries=max_entries)
         base = resource_root_path(ctx, normalized, bucket=bucket, skill_name=skill_name)
         if normalized == "user_files":
             target = resolve_user_file_path(ctx, path, allow_protected_descendants=True)
@@ -1053,8 +1107,13 @@ def _list_files(
             elif normalized in {"task_drive", "skill_payload", "artifact_store", "user_files"}:
                 items = _filter_subagent_secret_listing(items, base)
         return json.dumps(items, ensure_ascii=False, indent=2)
+    except _ListingFailure as exc:
+        return f"⚠️ LIST_FILES_ERROR: {exc}"
     except Exception as exc:
-        return json.dumps([f"⚠️ LIST_FILES_ERROR: {type(exc).__name__}: {exc}"], ensure_ascii=False, indent=2)
+        # A hard failure is a first-class tool error, never a JSON "listing" that
+        # reads as success with an error string inside (v6.54.3: that shape
+        # silently poisoned reasoning in 63% of TB2.1 trials).
+        return f"⚠️ LIST_FILES_ERROR ({type(exc).__name__}): {exc}"
 
 
 def _write_file(
@@ -1095,6 +1154,18 @@ def _write_file(
     )
     if protected_block:
         return protected_block
+    if normalized == "active_workspace" and (_room := project_room_lens_dir(ctx)) is not None:
+        # Room write-guard (v6.61.3): with the lens re-pointing reads at the room
+        # folder, a default-root write silently landing in the SYSTEM REPO would be
+        # a read/write split trap (read game.js from the folder, "fix" it into the
+        # repo). Mutations belong to promoted tasks; deliberate self-repo writes
+        # stay available via the explicit root.
+        return (
+            f"⚠️ ROOM_WRITE_VIA_TASK: this room's files live in {_room} and are edited by "
+            "PROMOTED tasks — call promote_chat_to_task (it inherits the room folder as its "
+            "workspace) for real work there. For a deliberate write to the Ouroboros system "
+            'repo, pass root="system_repo" explicitly.'
+        )
     if normalized in {"active_workspace", "system_repo"}:
         from ouroboros.tools.git import _repo_write
 
@@ -1218,6 +1289,15 @@ def _edit_text(
     )
     if protected_block:
         return protected_block
+    if normalized == "active_workspace" and (_room := project_room_lens_dir(ctx)) is not None:
+        # Room write-guard (v6.61.3) — same rule as write_file: room mutations go
+        # through promoted tasks; explicit root="system_repo" for the self-repo.
+        return (
+            f"⚠️ ROOM_WRITE_VIA_TASK: this room's files live in {_room} and are edited by "
+            "PROMOTED tasks — call promote_chat_to_task (it inherits the room folder as its "
+            "workspace) for real work there. For a deliberate edit of the Ouroboros system "
+            'repo, pass root="system_repo" explicitly.'
+        )
     if normalized in {"active_workspace", "system_repo"}:
         from ouroboros.tools.git import _str_replace_editor
 
@@ -1444,6 +1524,12 @@ def _code_search(ctx: ToolContext, query: str, path: str = ".",
         root_path = resource_root_path(ctx, normalized, bucket=bucket, skill_name=skill_name)
     except Exception as exc:
         return f"⚠️ SEARCH_ERROR: {type(exc).__name__}: {exc}"
+    if normalized == "active_workspace":
+        _room = project_room_lens_dir(ctx)
+        if _room is not None:
+            # Room lens: folder-room chat searches the PROJECT FOLDER (self-repo
+            # searches stay available via root="system_repo").
+            root_path = _room
     if normalized in ("active_workspace", "system_repo"):
         # Accept absolute/redundant-prefix paths inside the repo root (e.g. '/app/x'
         # or 'app/x' under a root at /app); confinement stays via safe_relpath below.

@@ -176,19 +176,150 @@ echo "[pro] server ready in $(( $(date +%s) - T0 ))s" >&2
 "$OBO_PY" -m ouroboros.cli --url http://127.0.0.1:8765 evolve stop >/dev/null 2>&1 || true
 
 cp /opt/oboros-settings-ro.json /obo-data/settings.json   # Close the short window where the model could be overwritten in settings.
+# OPTIONAL pre-task self-evolution phase (default OFF). Runs ONLY when the driver
+# passed --pretask-evolution (OBO_PRETASK_EVOLUTION=1); the baseline path skips
+# this entire block and behaves exactly as before.
+if [ "${OBO_PRETASK_EVOLUTION:-0}" = "1" ]; then
+  git config --global --add safe.directory /obo-repo 2>/dev/null || true
+  git config --global --add safe.directory "$WORK" 2>/dev/null || true
+  echo "[pro] PRETASK-EVOLUTION $IID start (task-specific; repo=/app; wait_max=${OBO_PRETASK_EVOLUTION_WAIT_MAX:-0}s; solve_steps=${OBO_SOLVE_STEP_BUDGET:-0})" >&2
+  PRE_EVO_HEAD0="$(git -C /obo-repo rev-parse HEAD 2>/dev/null || echo '')"
+  "$OBO_PY" -m ouroboros.cli --url http://127.0.0.1:8765 evolve start "$(cat /opt/pretask_evolution_prompt.txt)" \
+    >/out/pretask_evolution_start.json 2>/out/pretask_evolution_start.stderr || true
+  "$OBO_PY" - "${OBO_PRETASK_EVOLUTION_WAIT_MAX:-0}" "$PRE_EVO_HEAD0" >/out/pretask_evolution.json 2>/out/pretask_evolution_wait.stderr <<'PYEOF' || printf '{"absorbed":false,"reason":"error","cycles":0}' >/out/pretask_evolution.json
+import json, os, subprocess, sys, time, urllib.request
+MAX = int(sys.argv[1] or 0)
+SHA0 = str(sys.argv[2] or "")
+IDLE_GRACE = 240
+URL = "http://127.0.0.1:8765/api/state"
+CAMP = "/obo-data/state/evolution_campaign.json"
+def camp():
+    try: return json.load(open(CAMP))
+    except Exception: return {}
+def absorbed():
+    try: return int(camp().get("absorbed_cycles_done") or 0)
+    except Exception: return 0
+def cycles_done():
+    try: return int(camp().get("cycles_done") or 0)
+    except Exception: return 0
+def head():
+    try: return subprocess.run(["git", "-C", "/obo-repo", "rev-parse", "HEAD"], capture_output=True, text=True, timeout=15).stdout.strip()
+    except Exception: return ""
+def state():
+    try:
+        with urllib.request.urlopen(URL, timeout=5) as r: return json.loads(r.read().decode())
+    except Exception: return {}
+def pending_restart():
+    at = camp().get("active_transaction") or {}
+    return bool(str(at.get("commit_sha") or "").strip() and not at.get("restart_verified"))
+def is_idle(st):
+    return bool(st and st.get("supervisor_ready")
+                and int(st.get("pending_count") or 0) == 0
+                and int(st.get("running_count") or 0) == 0)
+EVO0 = absorbed()
+CYC0 = cycles_done()
+t0 = time.time()
+reason = "timeout"
+while MAX <= 0 or time.time() - t0 < MAX:
+    c = absorbed()
+    sha = head()
+    if c > EVO0 and sha and sha != SHA0:
+        d2 = time.time() + 240
+        while time.time() < d2:
+            st = state()
+            if st.get("supervisor_ready") and int(st.get("workers_total") or 0) > 0:
+                break
+            time.sleep(2)
+        reason = "absorbed"
+        break
+    # A no-commit/degraded evolution cycle may complete without increasing the
+    # absorbed counter and the supervisor can immediately enqueue the same
+    # objective again. For pre-task evolution, one completed cycle is enough:
+    # stop and move to solve instead of spending the whole benchmark repeating.
+    if cycles_done() > CYC0:
+        reason = "degraded" if pending_restart() else ("cycle_completed" if sha and sha != SHA0 else "no_commit_cycle")
+        break
+    st = state()
+    if time.time() - t0 > IDLE_GRACE and is_idle(st):
+        if pending_restart():
+            time.sleep(8)
+            if is_idle(state()) and pending_restart() and absorbed() == EVO0:
+                reason = "degraded"
+                break
+        else:
+            reason = "no_promotion"
+            break
+    time.sleep(5)
+at = camp().get("active_transaction") or {}
+print(json.dumps({
+    "absorbed": reason == "absorbed",
+    "reason": reason,
+    "cycles_before": EVO0,
+    "cycles_after": absorbed(),
+    "campaign_cycles_before": CYC0,
+    "campaign_cycles_after": cycles_done(),
+    "degraded": pending_restart(),
+    "active_tx_commit": str(at.get("commit_sha") or "")[:8],
+    "sha_before": SHA0,
+    "sha_after": head(),
+    "elapsed_sec": round(time.time() - t0, 3),
+    "wait_max_sec": MAX,
+}))
+PYEOF
+  "$OBO_PY" -m ouroboros.cli --url http://127.0.0.1:8765 evolve stop >/out/pretask_evolution_stop.json 2>/out/pretask_evolution_stop.stderr || true
+  "$OBO_PY" - <<'PYEOF' >&2 2>/dev/null || true
+import json
+try: d = json.load(open('/out/pretask_evolution.json'))
+except Exception: d = {}
+print(f"[pro] pretask-evolution: absorbed={d.get('absorbed',False)} cycles={d.get('cycles_after',0)} reason={d.get('reason','?')} degraded={d.get('degraded',False)} elapsed={d.get('elapsed_sec','?')}")
+PYEOF
+  if ! PYTHONPATH=/obo-repo "$OBO_PY" -c "import ouroboros.cli, ouroboros.agent, ouroboros.loop, ouroboros.config, ouroboros.subagent_worktrees, ouroboros.tools.subagent_integration, ouroboros.workspace_executor, ouroboros.contracts.task_constraint, ouroboros.retention, server, supervisor.queue" 2>/out/pretask_health.err; then
+    echo "[pro] PRETASK HEALTH-GATE FAILED - rollback self-edit to $PRE_EVO_HEAD0" >&2
+    sed 's/^/[pro]   pretask health: /' /out/pretask_health.err >&2 2>/dev/null | head -8
+    git -C /obo-repo diff "$PRE_EVO_HEAD0" > /out/pretask_rejected_self_edit.diff 2>/dev/null || true
+    git -C /obo-repo reset -q --hard "$PRE_EVO_HEAD0" 2>/dev/null || true
+    git -C /obo-repo clean -qfd 2>/dev/null || true
+    kill "$SRV" 2>/dev/null || true
+    "$OBO_PY" /obo-repo/server.py >>/out/server.log 2>&1 &
+    SRV=$!
+    T0=$(date +%s); R=0
+    while [ $(( $(date +%s) - T0 )) -lt "$READY_MAX" ]; do
+      if ready_probe; then R=1; break; fi
+      kill -0 "$SRV" 2>/dev/null || { echo "[pro] server died after pretask rollback" >&2; tail -30 /out/server.log >&2; exit 1; }
+      sleep 3
+    done
+    [ "$R" = 1 ] || { echo "[pro] not ready after pretask rollback" >&2; tail -30 /out/server.log >&2; exit 1; }
+  else
+    echo "[pro] pretask health-gate OK" >&2
+  fi
+fi
 if [ "${OBO_SELFIMPROVE:-0}" = "1" ]; then
-  echo "[pro] ROOT-RUN $IID (self_modification; root digs /app via user_files (HOME=/); post-task evolution=native)" >&2
+  echo "[pro] ROOT-RUN $IID (self_modification; /app as active external workspace; post-task evolution=native)" >&2
 else
-  echo "[pro] ROOT-RUN $IID (self_modification; root digs /app via user_files (HOME=/); post-task evolution=disabled baseline)" >&2
+  echo "[pro] ROOT-RUN $IID (self_modification; /app as active external workspace; post-task evolution=disabled baseline)" >&2
 fi
 # Tool denylist + per-task memory mode are passthrough knobs (run_pro --disable-tools / --memory-mode).
-# Defaults preserve the original behavior (full web/browser/vision + claude_code_edit disabled; shared memory).
+# Defaults preserve the original tool behavior (full web/browser/vision + claude_code_edit disabled).
 OBO_DISABLE_TOOLS="${OBO_DISABLE_TOOLS:-web_search,browse_page,browser_action,analyze_screenshot,vlm_query,view_image,claude_code_edit}"
-MEMARG=""; [ -n "${OBO_MEMORY_MODE:-}" ] && MEMARG="--memory-mode ${OBO_MEMORY_MODE}"
-echo "[pro] solve tools-disabled=[$OBO_DISABLE_TOOLS] memory=[${OBO_MEMORY_MODE:-default}]" >&2
+# Benchmark default is a FRESH child memory drive (v6.56.0): the measured artifact
+# is the harness on this task, not memory accreted across tasks. Explicitly export
+# OBO_MEMORY_MODE=shared/forked to opt back into carried memory.
+OBO_MEMORY_MODE="${OBO_MEMORY_MODE:-empty}"
+# The solve runs with /app as the ACTIVE EXTERNAL WORKSPACE (v6.56.0): contextual
+# repo tools resolve against the task repo and the runtime captures a workspace
+# patch artifact, instead of the legacy rootless "dig /app via user_files" mode.
+# An explicitly exported EMPTY OBO_SOLVE_WORKSPACE_ROOT restores the legacy mode.
+OBO_SOLVE_WORKSPACE_ROOT="${OBO_SOLVE_WORKSPACE_ROOT-/app}"
+SOLVE_ARGS=(
+  --jsonl --result-json-out /out/solve_result.json --timeout "${OBO_SOLVE_TIMEOUT:-3000}"
+  --disable-tools "$OBO_DISABLE_TOOLS"
+  --memory-mode "$OBO_MEMORY_MODE"
+  --task-metadata-json '{"budget_profile": {"improvement_policy": "until_deadline", "cost_hard_stop_pct": 0}}'
+)
+[ -n "$OBO_SOLVE_WORKSPACE_ROOT" ] && SOLVE_ARGS+=(--workspace "$OBO_SOLVE_WORKSPACE_ROOT")
+echo "[pro] solve tools-disabled=[$OBO_DISABLE_TOOLS] memory=[$OBO_MEMORY_MODE] workspace=[${OBO_SOLVE_WORKSPACE_ROOT:-none}]" >&2
 "$OBO_PY" -m ouroboros.cli --url http://127.0.0.1:8765 run \
-  --jsonl --result-json-out /out/solve_result.json --timeout "${OBO_SOLVE_TIMEOUT:-3000}" \
-  --disable-tools "$OBO_DISABLE_TOOLS" $MEMARG \
+  "${SOLVE_ARGS[@]}" \
   "$(cat /opt/problem_statement.txt)" >/out/solve_events.jsonl 2>/out/solve.stderr || true
 bash /opt/ouroboros-ro/devtools/benchmarks/swe_bench_pro/capture_patch.sh "$WORK" "$OBO_BASE_COMMIT" /out/patch.diff /out/base_untracked.snapshot 2>/out/capture_patch.stderr || true
 cp /out/patch.status.txt /out/app_status.txt 2>/dev/null || true     # ARCHIVE: what the agent left in /app

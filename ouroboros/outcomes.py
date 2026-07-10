@@ -113,6 +113,7 @@ _BLOCKING_TOOL_STATUSES = frozenset({
     "workspace_blocked",
     "write_file_blocked",
     "root_required_user_files",
+    "root_required_active_workspace",
 })
 _RECOVERY_TOOL_NAMES = frozenset({
     "claude_code_edit",
@@ -122,6 +123,39 @@ _RECOVERY_TOOL_NAMES = frozenset({
     "start_service",
     "stop_service",
     "write_file",
+})
+# v6.57.0 — POLICY-denial statuses: the runtime/policy said "no" to an action
+# (a `*_blocked` refusal, on ANY tool incl. writes/shell). This is telemetry, NOT
+# an execution-health failure: the agent either found another way (its work is
+# judged on the objective/review axis) or was honestly blocked. Distinct from the
+# read-only `_NON_BLOCKING_READONLY_BLOCK_STATUSES` (which already demotes resource
+# blocks on read-only tools) — this covers the WRITE/shell/integration blocks that
+# previously forced execution=degraded + a false `tool_failure` headline even when
+# the deliverable succeeded (the site-presentation incident: integration_blocked +
+# LIST_FILES policy → degraded/tool_failure over a shipped site). A structural
+# status partition (Bible P5 — never content matching). Genuine tool/exec failures
+# (`error`, `*_error`, `non_zero_exit`, `shell_error`, `timeout`, `unavailable`) and
+# security-boundary hits (`safety_violation`, `violation`) are intentionally EXCLUDED
+# and stay real failures.
+_POLICY_DENIAL_STATUSES = frozenset({
+    "blocked",
+    "cwd_blocked",
+    "data_blocked",
+    "edit_text_blocked",
+    "elevation_blocked",
+    "git_via_shell_blocked",
+    "heal_mode_blocked",
+    "integration_blocked",
+    "light_mode_blocked",
+    "protected_blocked",
+    "resource_constraint_blocked",
+    "resource_policy_blocked",
+    "run_script_blocked",
+    "skill_payload_blocked",
+    "skill_payload_control_blocked",
+    "skill_state_blocked",
+    "workspace_blocked",
+    "write_file_blocked",
 })
 # T4 (v6.35.0): an unrecovered run_command/run_script non-zero exit / shell
 # error — e.g. an X11-teardown `exit=1` after "138 passed", or an abandoned
@@ -182,6 +216,9 @@ _RECEIPT_RED_RECONCILING_STATUSES = frozenset({"pass", "observed"})
 _LEDGER_NON_FAILURE_STATUSES = (
     frozenset({"", "ok", RESULT_SUCCEEDED, "pass", OBJECTIVE_NOT_EVALUATED, "ignored"})
     | _RECEIPT_GROUNDING_STATUSES
+    # refused_out_of_scope: an artifact_observation whose path is outside the observable
+    # roots is a POLICY refusal (honest telemetry), NOT a verification failure (v6.57.0).
+    | frozenset({"refused_out_of_scope"})
 )
 
 
@@ -358,6 +395,27 @@ def latest_unreconciled_masked_verification(drive_root: Any, task_id: str) -> Op
     return latest_unreconciled_masked_pass(read_verification_receipts(drive_root, task_id))
 
 
+def latest_agent_defined_verification(drive_root: Any, task_id: str) -> Optional[Dict[str, Any]]:
+    """Newest verify receipt whose criterion was AGENT-DEFINED without a stated basis
+    (v6.54.4) — feeds the one-shot advisory criterion-provenance nudge: the check
+    passed, but the success criterion was synthesized by the agent, so the agent is
+    asked once to confirm it is equivalent to what the task actually requires."""
+    receipts = read_verification_receipts(drive_root, task_id)
+    for receipt in reversed(receipts):
+        if not isinstance(receipt, dict):
+            continue
+        if str(receipt.get("status") or "") not in ("pass", "observed"):
+            continue
+        # The LATEST passing receipt decides: a later task_stated check or a
+        # later agent_defined check WITH a stated basis reconciles the concern.
+        if str(receipt.get("criterion_source") or "") != "agent_defined":
+            return None
+        if str(receipt.get("criterion_basis") or "").strip():
+            return None
+        return receipt
+    return None
+
+
 def apply_receipt_absent_flag(
     loop_outcome: Dict[str, Any], llm_trace: Dict[str, Any], drive_root: Any, task_id: str, *, expected_output: str = ""
 ) -> None:
@@ -513,6 +571,7 @@ def _classify_tool_errors(llm_trace: Dict[str, Any]) -> Dict[str, List[Dict[str,
     recovered_items: List[Dict[str, Any]] = []
     cosmetic_items: List[Dict[str, Any]] = []
     ignored_items: List[Dict[str, Any]] = []
+    policy_denials: List[Dict[str, Any]] = []
     for idx, item in enumerate(calls):
         if not item.get("is_error"):
             continue
@@ -532,12 +591,16 @@ def _classify_tool_errors(llm_trace: Dict[str, Any]) -> Dict[str, List[Dict[str,
             continue
         if status not in _BLOCKING_TOOL_STATUSES and tool not in _RECOVERY_TOOL_NAMES:
             continue
-        # ROOT_REQUIRED_USER_FILES is a real user deliverable. It is recovered ONLY
-        # when every blocked file name (path or files[]) is later written via
-        # root=user_files. This branch is terminal: it never falls through to the
-        # generic same-target/artifact_registered recovery, which could otherwise
-        # clear it through a non-user_files write (e.g. a run_command output).
-        if status == "root_required_user_files":
+        # ROOT_REQUIRED_* redirects name a real misrouted deliverable. Each is
+        # recovered ONLY when every blocked file name (path or files[]) is later
+        # written via the root the redirect demanded (user_files ↔ active_workspace).
+        # These branches are terminal: they never fall through to the generic
+        # same-target/artifact_registered recovery, which could otherwise clear
+        # them through a write to the wrong root (e.g. a run_command output).
+        if status in ("root_required_user_files", "root_required_active_workspace"):
+            required_root = (
+                "user_files" if status == "root_required_user_files" else "active_workspace"
+            )
             blocked_args = item.get("args") if isinstance(item.get("args"), dict) else {}
             blocked_names = _user_file_basenames(blocked_args)
             recovered_names: set[str] = set()
@@ -545,9 +608,18 @@ def _classify_tool_errors(llm_trace: Dict[str, Any]) -> Dict[str, List[Dict[str,
                 if not (isinstance(later, dict) and not later.get("is_error")):
                     continue
                 later_args = later.get("args") if isinstance(later.get("args"), dict) else {}
+                later_root = str(later_args.get("root") or "")
+                # active_workspace is these tools' DEFAULT root: a retry that simply
+                # omits root already writes to the demanded place, so it earns the
+                # recovery credit too (scope r2 — the explicit-arg-only match left a
+                # real recovery marked unresolved → false execution-axis degradation).
+                # user_files is never a default and still requires the explicit arg.
+                root_matches = later_root == required_root or (
+                    required_root == "active_workspace" and not later_root
+                )
                 if (
                     str(later.get("tool") or "") in _ROOT_WRITE_TOOLS
-                    and str(later_args.get("root") or "") == "user_files"
+                    and root_matches
                     and str(later.get("status") or "ok") in _OK_TOOL_STATUSES
                 ):
                     recovered_names |= _user_file_basenames(later_args)
@@ -610,8 +682,20 @@ def _classify_tool_errors(llm_trace: Dict[str, Any]) -> Dict[str, List[Dict[str,
             # Unrecovered run_command/run_script non-zero exit: cosmetic, not degrading.
             cosmetic_items.append(_tool_error_record(item))
             continue
+        if status in _POLICY_DENIAL_STATUSES:
+            # v6.57.0 — an unrecovered POLICY refusal (the runtime said "no" to this
+            # action) is telemetry, not an execution-health failure. Recorded for
+            # forensics; does NOT set execution=degraded nor a `tool_failure` headline.
+            policy_denials.append(_tool_error_record(item))
+            continue
         unresolved.append(_tool_error_record(item))
-    return {"unresolved": unresolved, "recovered": recovered_items, "cosmetic": cosmetic_items, "ignored": ignored_items}
+    return {
+        "unresolved": unresolved,
+        "recovered": recovered_items,
+        "cosmetic": cosmetic_items,
+        "ignored": ignored_items,
+        "policy_denials": policy_denials,
+    }
 
 
 def _unresolved_tool_errors(llm_trace: Dict[str, Any]) -> List[Dict[str, Any]]:
@@ -660,6 +744,22 @@ def _aggregate_outcome_tier(tiers: List[str]) -> str:
     return OUTCOME_TIER_SOLVED
 
 
+def _acceptance_decision_projection(acceptance_decision: Dict[str, Any]) -> Dict[str, Any]:
+    out = {
+        "status": str(acceptance_decision.get("status") or ""),
+        "source": str(acceptance_decision.get("source") or ""),
+        "rationale": str(acceptance_decision.get("rationale") or "")[:500],
+        "agent_disposition": str(acceptance_decision.get("agent_disposition") or ""),
+        "agent_rationale": str(acceptance_decision.get("agent_rationale") or "")[:500],
+    }
+    # v6.54.4: dissent + obligations transparency (blocking review policy).
+    if acceptance_decision.get("dissent_noted"):
+        out["dissent_noted"] = True
+    if acceptance_decision.get("open_obligations"):
+        out["open_obligations"] = [str(x) for x in acceptance_decision.get("open_obligations") or []][:10]
+    return out
+
+
 def _review_axis(llm_trace: Dict[str, Any]) -> Dict[str, Any]:
     review_decision = llm_trace.get("review_decision") if isinstance(llm_trace.get("review_decision"), dict) else {}
     acceptance_decision = llm_trace.get("acceptance_decision") if isinstance(llm_trace.get("acceptance_decision"), dict) else {}
@@ -681,13 +781,10 @@ def _review_axis(llm_trace: Dict[str, Any]) -> Dict[str, Any]:
             "run_count": 0,
         }
         if acceptance_decision:
-            axis["acceptance_decision"] = {
-                "status": str(acceptance_decision.get("status") or ""),
-                "source": str(acceptance_decision.get("source") or ""),
-                "rationale": str(acceptance_decision.get("rationale") or "")[:500],
-                "agent_disposition": str(acceptance_decision.get("agent_disposition") or ""),
-                "agent_rationale": str(acceptance_decision.get("agent_rationale") or "")[:500],
-            }
+            axis["acceptance_decision"] = _acceptance_decision_projection(acceptance_decision)
+        _obligations = [o for o in (llm_trace.get("acceptance_obligations") or []) if isinstance(o, dict)]
+        if _obligations:
+            axis["acceptance_obligations"] = _obligations[:20]
         return axis
     signals = [str(run.get("aggregate_signal") or "").upper() for run in runs]
     if "FAIL" in signals:
@@ -709,13 +806,10 @@ def _review_axis(llm_trace: Dict[str, Any]) -> Dict[str, Any]:
     if tier:
         axis["outcome_tier"] = tier
     if acceptance_decision:
-        axis["acceptance_decision"] = {
-            "status": str(acceptance_decision.get("status") or ""),
-            "source": str(acceptance_decision.get("source") or ""),
-            "rationale": str(acceptance_decision.get("rationale") or "")[:500],
-            "agent_disposition": str(acceptance_decision.get("agent_disposition") or ""),
-            "agent_rationale": str(acceptance_decision.get("agent_rationale") or "")[:500],
-        }
+        axis["acceptance_decision"] = _acceptance_decision_projection(acceptance_decision)
+    _obligations = [o for o in (llm_trace.get("acceptance_obligations") or []) if isinstance(o, dict)]
+    if _obligations:
+        axis["acceptance_obligations"] = _obligations[:20]
     return axis
 
 
@@ -766,12 +860,22 @@ def extract_final_answer(text: str) -> str:
     Protocol: the LAST line starting with the exact ``FINAL ANSWER:`` marker
     carries the machine-readable deliverable (separate from reasoning prose).
     Returns "" when the protocol is not used.
+
+    Structural invariant: the snake_case outcome-tier identifiers
+    (``best_effort``/``blocked_with_evidence``) are internal ledger vocabulary
+    from the acceptance-review contract, never a legitimate deliverable — a
+    reviewed GAIA run shipped ``FINAL ANSWER: blocked_with_evidence`` verbatim
+    after an acceptance downgrade. Such an answer counts as missing so the
+    marker nudge / salvage path can recover a real one. ``solved`` is NOT
+    rejected: it is an ordinary English word that can be a real answer.
     """
     answer = ""
     for line in str(text or "").splitlines():
         stripped = line.strip()
         if stripped.startswith(FINAL_ANSWER_MARKER):
             answer = stripped[len(FINAL_ANSWER_MARKER):].strip()
+    if answer.strip().lower() in (OUTCOME_TIER_BEST_EFFORT, OUTCOME_TIER_BLOCKED):
+        return ""
     return answer
 
 
@@ -920,6 +1024,9 @@ def derive_loop_outcome(final_text: str, usage: Dict[str, Any], llm_trace: Dict[
     # A2: read-only access-policy blocks — recorded for forensics, never degrading
     # and (unlike cosmetic) never a residual-warning trigger.
     ignored_tool_errors = tool_error_state.get("ignored") or []
+    # v6.57.0: unrecovered POLICY refusals (write/shell/integration `*_blocked`) —
+    # telemetry only, never degrading and never a `tool_failure` headline.
+    policy_denials = tool_error_state.get("policy_denials") or []
     verification_failures: List[Dict[str, Any]] = []
     for event in llm_trace.get("verification_events") or []:
         if not isinstance(event, dict):
@@ -1040,6 +1147,7 @@ def derive_loop_outcome(final_text: str, usage: Dict[str, Any], llm_trace: Dict[
             "recoveries": recovered_tool_errors[:20],
             "cosmetic_tool_errors": cosmetic_tool_errors[:20],
             "ignored_tool_errors": ignored_tool_errors[:20],
+            "policy_denials": policy_denials[:20],
         },
         "artifacts": {"status": "not_applicable"},
         "objective": objective,
@@ -1062,7 +1170,11 @@ def derive_loop_outcome(final_text: str, usage: Dict[str, Any], llm_trace: Dict[
         # answer under review PRESSURE, which BIBLE Q7 says review must not let DOWNGRADE a
         # produced answer; new grounding (a higher tool count) instead invalidates the latch.
         "final_answer": final_answer_payload,
-        "final_answer_missing_sentinel": not extract_final_answer(text),
+        # v6.60.0: keyed on the TYPED final_answer payload (extracted OR latch-recovered),
+        # not a re-scan of the final text — a task whose earlier-round answer was latched
+        # is not "missing" one; marker-free tasks (no answer_protocol) simply read True,
+        # which downstream consumers must interpret via the contract, not as a failure.
+        "final_answer_missing_sentinel": not final_answer_payload,
         "failure": headline_failure,
         "recoveries": recovered_tool_errors[:20],
         "usage": {
@@ -1315,6 +1427,9 @@ def build_verification_ledger(
                 # real exit code (e.g. `... | tail`, `|| true`). FLAG-ONLY (status unchanged).
                 "check_exit_masking": bool(receipt.get("check_exit_masking")),
                 "check_exit_masking_reasons": (receipt.get("check_exit_masking_reasons") or [])[:10],
+                # v6.54.4 criterion provenance (flag-only): task_stated | agent_defined.
+                "criterion_source": str(receipt.get("criterion_source") or ""),
+                "criterion_basis": _clip(receipt.get("criterion_basis"), 500),
             })
 
     _accept_runs = [r for r in (llm_trace.get("review_runs") or []) if isinstance(r, dict)]

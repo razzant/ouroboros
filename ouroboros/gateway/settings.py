@@ -282,6 +282,11 @@ def _merge_settings_payload(current: Dict[str, Any], body: Dict[str, Any]) -> Di
             # It flows ONLY through the dedicated audited owner endpoint (api_owner_
             # scope_review_floor); the UI uses that, never the generic settings merge.
             "OUROBOROS_SCOPE_REVIEW_FLOOR",
+            # v6.54.3: LLM-safety-supervisor coverage (full/light/off) is likewise an
+            # immune-system control — a generic settings write must not lower it. It
+            # flows ONLY through the dedicated audited owner endpoint
+            # (api_owner_safety_mode); save_settings additionally ratchets lowering.
+            "OUROBOROS_SAFETY_MODE",
         }:
             continue
         if key not in body:
@@ -346,12 +351,18 @@ def _owner_audit(request: Request, action: str, payload: Dict[str, Any]) -> None
         log.debug("Failed to write owner API audit event", exc_info=True)
 
 
-def _owner_write_settings(settings: Dict[str, Any], *, allow_context_lowering: bool = False) -> None:
+def _owner_write_settings(
+    settings: Dict[str, Any],
+    *,
+    allow_context_lowering: bool = False,
+    allow_safety_lowering: bool = False,
+) -> None:
     """Write owner-controlled settings without applying the runtime-mode ratchet."""
     from ouroboros import config as _config
 
     _config._guard_live_settings_write()
     _config._guard_context_mode_lowering(settings, allow_context_lowering=allow_context_lowering)
+    _config._guard_safety_mode_lowering(settings, allow_safety_lowering=allow_safety_lowering)
     _config.DATA_DIR.mkdir(parents=True, exist_ok=True)
     fd = _config._acquire_settings_lock()
     try:
@@ -641,6 +652,36 @@ async def api_owner_scope_review_floor(request: Request) -> JSONResponse:
         {"scope_review_floor": raw, "previous_scope_review_floor": previous},
     )
     return JSONResponse({"ok": True, "scope_review_floor": raw})
+
+
+async def api_owner_safety_mode(request: Request) -> JSONResponse:
+    """Persist the owner-selected LLM-safety-supervisor coverage (full | light | off).
+
+    Owner-only + audited (v6.54.3): safety coverage is an immune-system control, so
+    it is merge-skipped from the generic /api/settings path and its lowering is
+    ratcheted in save_settings — ONLY this dedicated, audited endpoint may lower it.
+    The deterministic registry sandbox, protected paths, and light-mode guards run
+    in every mode (BIBLE P3: the LLM supervisor is a layer, not the floor)."""
+    try:
+        body = await request.json()
+    except Exception:
+        body = {}
+    from ouroboros import config as _config
+
+    raw_mode = str((body or {}).get("mode") or "").strip().lower()
+    if raw_mode not in set(_config.VALID_SAFETY_MODES):
+        return json_error("'mode' must be one of: full, light, off", 400)
+    current = _owner_read_settings_raw()
+    previous = _config.normalize_safety_mode(current.get("OUROBOROS_SAFETY_MODE"))
+    current["OUROBOROS_SAFETY_MODE"] = raw_mode
+    _owner_write_settings(current, allow_safety_lowering=True)
+    os.environ["OUROBOROS_SAFETY_MODE"] = raw_mode
+    _owner_audit(
+        request,
+        "safety_mode",
+        {"safety_mode": raw_mode, "previous_safety_mode": previous},
+    )
+    return JSONResponse({"ok": True, "safety_mode": raw_mode})
 
 
 async def api_acknowledge_capability(request: Request) -> JSONResponse:

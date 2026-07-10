@@ -16,6 +16,7 @@ import stat
 import subprocess
 import sys
 import threading
+import time
 import uuid
 from typing import Any, Dict, List
 
@@ -868,6 +869,10 @@ _USER_FILE_REDIRECT_RE = re.compile(
     rf"(?:^|\s)(?:>|>>|1>|2>|&>)\s*(?:['\"](?P<quoted>{_OUTPUT_REDIRECT_PATH_RE})['\"]|(?P<bare>{_OUTPUT_REDIRECT_PATH_RE}))"
 )
 
+# Undeclared-output stat filter (v6.56.0): a text-scan candidate counts as a real write only if it
+# exists with mtime >= command_start - this slack (covers coarse FS mtime granularity, e.g. FAT 2s).
+_OUTPUT_STAT_SLACK_SEC = 2.0
+
 # Portable grep fix: GNU basic-regex "\|" fails on BSD grep in argv mode.
 _GREP_TOOLS = frozenset(("grep", "egrep", "fgrep"))
 _GREP_REGEX_MODE_FLAGS = frozenset((
@@ -944,13 +949,18 @@ def _resolve_scratch_abs(scratch: List[str] | None, work_dir) -> list[pathlib.Pa
     return out
 
 
-def _scratch_safety_reason(scratch_abs: list[pathlib.Path], work_dir, repo_root) -> str:
-    """Pre-exec gate for declared scratch (v6.52.2): the cwd must be inside a git worktree (so the
-    'NEW + git-untracked' proof is meaningful and the patch-exclusion contract applies), and each
-    path must be CONFINED to the command cwd and be NONEXISTENT + git-UNTRACKED — so an ephemeral
-    verification file can never mask a real pre-existing/tracked edit, and a new user_files
-    deliverable cannot bypass the undeclared-output guard by mislabeling itself scratch. Returns a
-    refusal reason or ''."""
+def _scratch_safety_reason(ctx: ToolContext, scratch_abs: list[pathlib.Path], work_dir, repo_root) -> str:
+    """Pre-exec gate for declared scratch (v6.52.2; v6.56.0 adoptable): the cwd must be inside a git
+    worktree (so the git-untracked proof is meaningful and the patch-exclusion contract applies), and
+    each path must be CONFINED to the command cwd and git-UNTRACKED — so an ephemeral verification
+    file can never mask a real TRACKED edit. Returns a refusal reason or ''.
+
+    v6.56.0: a path is no longer blocked merely because it already EXISTS. Re-declaring the same
+    throwaway across commands, or adopting an untracked file created earlier in THIS task (e.g. via
+    write_file, or a prior command), is a normal verification loop — the git-tracked check still
+    blocks masking a real edit, and headless patch exclusion stays sha-gated (a later real rewrite
+    diverges the sha and is NOT dropped). On adoption we record the current sha through the SSOT
+    writer so the manifest reflects the adopted state at declaration time."""
     if not scratch_abs:
         return ""
     if repo_root is None:
@@ -959,21 +969,36 @@ def _scratch_safety_reason(scratch_abs: list[pathlib.Path], work_dir, repo_root)
         return "scratch requires a git-worktree cwd (it is for in-repo verification); use outputs= for a deliverable"
     base = pathlib.Path(work_dir).resolve(strict=False) if work_dir else None
     tracked: set[str] = set()
-    if repo_root is not None:
-        try:
-            res = subprocess.run(["git", "ls-files"], cwd=str(repo_root), capture_output=True, text=True, timeout=20)
-            if res.returncode == 0:
-                root = pathlib.Path(repo_root).resolve(strict=False)
-                tracked = {str((root / line.strip()).resolve(strict=False)) for line in (res.stdout or "").splitlines() if line.strip()}
-        except Exception:
-            tracked = set()
+    try:
+        res = subprocess.run(["git", "ls-files"], cwd=str(repo_root), capture_output=True, text=True, timeout=20)
+        if res.returncode == 0:
+            root = pathlib.Path(repo_root).resolve(strict=False)
+            tracked = {str((root / line.strip()).resolve(strict=False)) for line in (res.stdout or "").splitlines() if line.strip()}
+    except Exception:
+        tracked = set()
+    adopt: dict = {}
     for cand in scratch_abs:
         if base is not None and not (cand == base or path_is_relative_to(cand, base)):
             return f"scratch path escapes the command cwd ({base}): {cand}"
-        if cand.exists():
-            return f"scratch path already exists — declare a NEW throwaway file, or use outputs= for a deliverable: {cand}"
         if str(cand) in tracked:
             return f"scratch path is git-tracked — not a throwaway (use outputs=, or edit it as a real change): {cand}"
+        # A directory can neither be sha-fingerprinted nor excluded from the patch
+        # file-by-file — silently adopting one would let its contents leak into the
+        # deliverable while SCRATCH_REMAINS nags forever. Refuse explicitly.
+        try:
+            if cand.is_dir():
+                return f"scratch path is a directory — declare the throwaway FILES, not their parent dir: {cand}"
+        except OSError:
+            pass
+        # Adoptable: an existing untracked+confined file — record its current sha now so a
+        # re-declaration is idempotent and the adopted state is captured at declaration.
+        try:
+            if cand.is_file():
+                adopt[str(cand)] = sha256(cand.read_bytes()).hexdigest()
+        except OSError:
+            continue
+    if adopt:
+        record_task_scratch(ctx, adopt)
     return ""
 
 
@@ -996,15 +1021,38 @@ def _record_scratch_fingerprints(ctx: ToolContext, scratch_abs: list[pathlib.Pat
 
 
 def _mentioned_user_file_outputs_without_declaration(
-    ctx: ToolContext, cmd: List[str], outputs: List[str] | None, scratch_abs: list[pathlib.Path] | None = None
+    ctx: ToolContext,
+    cmd: List[str],
+    outputs: List[str] | None,
+    scratch_abs: list[pathlib.Path] | None = None,
+    command_start_ts: float | None = None,
 ) -> list[str]:
-    """Best-effort audit for scripts that write absolute user_files without outputs. Declared
-    ephemeral `scratch` paths (v6.52.2) are exempt — they are transient verification files, not
-    deliverables, and are excluded from the workspace patch."""
+    """Best-effort audit for commands that write absolute user_files without outputs. Declared
+    ephemeral `scratch` paths (v6.52.2) are exempt.
+
+    v6.56.0: the text scan only produces CANDIDATES; a candidate is confirmed a written deliverable
+    only if it now exists on disk with a fresh mtime (>= command start). This grounds the guard in
+    real filesystem effects instead of string shape, so import strings (`/http`, `/zap`), CLI flags
+    (`-run TestX`), and heredoc bodies no longer trip a false ARTIFACT_OUTPUT_ERROR. Pass
+    `command_start_ts` on the POST-exec call (run_command, and the run_script body audit); when it is
+    None the stat filter is skipped (candidate list returned as before). Known limitations (advisory
+    audit, both acceptable): (1) `cp -p` / `tar -x` preserve mtime, so such a copied deliverable is
+    not flagged (false negative); (2) a file created by a PRIOR tool call within the ~2s mtime slack
+    of this command's start and merely MENTIONED here can trip the mtime floor (false positive) — the
+    slack is deliberate to cover coarse FS mtime granularity. In workspace mode, candidates under the
+    active workspace are skipped — real /app edits are captured by the workspace patch, not undeclared
+    user_files deliverables."""
 
     if outputs:
         return []
     scratch_set = {str(p) for p in (scratch_abs or [])}
+    mtime_floor = (command_start_ts - _OUTPUT_STAT_SLACK_SEC) if command_start_ts is not None else None
+    workspace_root: pathlib.Path | None = None
+    if bool(getattr(ctx, "is_workspace_mode", lambda: False)()):
+        try:
+            workspace_root = active_repo_dir_for(ctx).resolve(strict=False)
+        except Exception:
+            workspace_root = None
     mentioned: list[str] = []
     for token in shell_argv_with_inline(cmd):
         token_text = str(token)
@@ -1034,11 +1082,20 @@ def _mentioned_user_file_outputs_without_declaration(
                 continue
             if user_files_path_block_reason(ctx, path):
                 continue
+            if workspace_root is not None and path_is_relative_to(path, workspace_root):
+                continue  # real active-workspace edit — captured by the workspace patch, not a user_files deliverable
             path_text = str(path)
             if path_text in scratch_set:
                 continue  # declared ephemeral scratch (v6.52.2) — not an undeclared deliverable
             if path_text in mentioned:
                 continue
+            if mtime_floor is not None:
+                # Confirm a real filesystem write: the candidate must exist now with a fresh mtime.
+                try:
+                    if not (path.is_file() and path.stat().st_mtime >= mtime_floor):
+                        continue
+                except OSError:
+                    continue
             mentioned.append(path_text)
     return mentioned
 
@@ -1177,6 +1234,23 @@ def _run_shell(
     if not work_dir.exists() or not work_dir.is_dir():
         roots = ", ".join(f"{name}={pathlib.Path(root).resolve(strict=False)}" for name, root in allowed_roots)
         return f"⚠️ SHELL_CWD_BLOCKED: cwd is not a directory: {cwd or work_dir}. allowed_roots: {roots}"
+    # Room-lens cwd disclosure (v6.61.3): the FIRST default-cwd command of a
+    # folder-room chat names where it ran (the room folder is the default now)
+    # so the surface change is never silent. One-shot per task; explicit cwd
+    # calls are the caller's own choice and carry no note.
+    if not str(cwd or "").strip() and not getattr(ctx, "_room_cwd_noted", False):
+        try:
+            from ouroboros.tool_access import project_room_lens_dir
+
+            _room = project_room_lens_dir(ctx)
+        except Exception:
+            _room = None
+        if _room is not None and pathlib.Path(work_dir).resolve(strict=False) == _room:
+            ctx._room_cwd_noted = True
+            autocorrect_note += (
+                f"[project-room cwd: this command ran in {_room} (the room's folder). "
+                'The Ouroboros system repo needs an explicit cwd.]\n\n'
+            )
     repo_root = _resolve_git_root(pathlib.Path(work_dir))
     before_changed = _status_snapshot(repo_root)
     # R5: for a non-git user_files cwd, take a bounded shallow snapshot so the
@@ -1202,12 +1276,13 @@ def _run_shell(
     # undeclared-output guard below and is never registered as a task artifact.
     scratch_abs = _resolve_scratch_abs(scratch, work_dir)
     if scratch_abs:
-        _scratch_reason = _scratch_safety_reason(scratch_abs, pathlib.Path(work_dir), repo_root)
+        _scratch_reason = _scratch_safety_reason(ctx, scratch_abs, pathlib.Path(work_dir), repo_root)
         if _scratch_reason:
             return f"⚠️ SCRATCH_BLOCKED: {_scratch_reason}."
 
     timeout_sec = _resolve_effective_timeout(_RUN_SHELL_DEFAULT_TIMEOUT_SEC, ctx, override_sec=_timeout_override)
     bootstrap_process_path()
+    _command_start_ts = time.time()
     try:
         if _executor_can_run_cwd(ctx, pathlib.Path(work_dir)):
             res = executor_execute(ctx, cmd, pathlib.Path(work_dir), timeout_sec)
@@ -1245,7 +1320,7 @@ def _run_shell(
                 mutation_root=repo_root,
                 source_tool="run_command",
             )
-        undeclared_user_outputs = _mentioned_user_file_outputs_without_declaration(ctx, cmd, outputs, scratch_abs=scratch_abs)
+        undeclared_user_outputs = _mentioned_user_file_outputs_without_declaration(ctx, cmd, outputs, scratch_abs=scratch_abs, command_start_ts=_command_start_ts)
         if undeclared_user_outputs:
             return (
                 autocorrect_note
@@ -1412,6 +1487,28 @@ def _claude_code_executor_block_reason(ctx: ToolContext, work_dir_path: pathlib.
     )
 
 
+def _room_default_cwd_edit_block(ctx: ToolContext, cwd: str) -> str:
+    """Room guard (v6.61.3, same rule as write_file/edit_text): a DEFAULT-cwd SDK
+    edit in a folder-room chat would silently edit the SYSTEM REPO while the room's
+    reads show the project folder. Mutations go through promoted tasks; a
+    deliberate target needs an explicit cwd. Returns "" when not a folder-room."""
+    if str(cwd or "").strip():
+        return ""
+    try:
+        from ouroboros.tool_access import project_room_lens_dir
+
+        _room = project_room_lens_dir(ctx)
+    except Exception:
+        _room = None
+    if _room is None:
+        return ""
+    return (
+        f"⚠️ ROOM_WRITE_VIA_TASK: this room's files live in {_room} and are edited by "
+        "PROMOTED tasks — call promote_chat_to_task (it inherits the room folder as its "
+        "workspace). For a deliberate edit elsewhere, pass an explicit cwd."
+    )
+
+
 def _claude_code_edit(ctx: ToolContext, prompt: str, cwd: str = "", budget: float = 5.0, validate: bool = False, bucket: str = "", skill_name: str = "", outputs: List[str] | None = None) -> str:
     """Delegate SDK edits with cwd and protected-path safety hooks."""
     from ouroboros.tools.git import _acquire_git_lock, _release_git_lock
@@ -1419,6 +1516,8 @@ def _claude_code_edit(ctx: ToolContext, prompt: str, cwd: str = "", budget: floa
     api_key = os.environ.get("ANTHROPIC_API_KEY", "")
     if not api_key:
         return "⚠️ CLAUDE_CODE_UNAVAILABLE: ANTHROPIC_API_KEY not set."
+    if (_room_block := _room_default_cwd_edit_block(ctx, cwd)):
+        return _room_block
 
     active_root = active_repo_dir_for(ctx).resolve(strict=False)
     system_repo_root = pathlib.Path(ctx.repo_dir).resolve(strict=False)
@@ -1734,11 +1833,11 @@ def _run_script(
     body = str(script or "")
     if not body.strip():
         return "⚠️ TOOL_ARG_ERROR (run_script): script is required."
-    # Resolve the early body-audit scratch against the SAME effective cwd the script will execute in
-    # (light + empty cwd -> task_drive; else the declared cwd; else the active workspace) — NOT the raw
-    # `cwd` (often empty) — so a relatively-declared scratch path matches a user_files write in the body
-    # and is not falsely flagged. The authoritative scratch handling still runs in _run_shell against
-    # the resolved work_dir.
+    # The undeclared-output audit of the script BODY (argv only carries the temp script path, so
+    # _run_shell cannot see the body) is POST-exec (v6.56.0): the stat filter needs the files to
+    # exist, and a pre-exec scan on not-yet-written paths would either be a no-op or false-flag
+    # import strings. We resolve the body-audit scratch against the SAME effective cwd the script
+    # executes in so a relatively-declared scratch path matches a user_files write in the body.
     _audit_cwd = str(cwd or "").strip()
     if not _audit_cwd and get_runtime_mode() == "light" and not bool(getattr(ctx, "is_workspace_mode", lambda: False)()):
         try:
@@ -1746,13 +1845,7 @@ def _run_script(
         except Exception:
             _audit_cwd = ""
     _scratch_abs_body = _resolve_scratch_abs(scratch, _audit_cwd or active_repo_dir_for(ctx))
-    undeclared_user_outputs = _mentioned_user_file_outputs_without_declaration(ctx, [interp, "-c", body], outputs, scratch_abs=_scratch_abs_body)
-    if undeclared_user_outputs:
-        return (
-            "⚠️ ARTIFACT_OUTPUT_ERROR: run_script would write user_files without declaring outputs: "
-            + ", ".join(undeclared_user_outputs)
-            + ". Re-run with outputs=[...] or write the canonical deliverable via root=artifact_store."
-        )
+    _body_start_ts = time.time()
     try:
         workdir, _cwd_root, _allowed = resolve_shell_cwd(ctx, cwd)
         resolved_workdir = pathlib.Path(workdir).resolve(strict=False)
@@ -1808,8 +1901,26 @@ def _run_script(
                 script_path.parent.parent.rmdir()
             except OSError:
                 pass
+    # POST-exec body audit: stat-confirmed user_files writes performed by the script
+    # body itself. Runs on EVERY exit path (parity with _record_scratch_fingerprints):
+    # a script that writes an undeclared deliverable and then FAILS (raise/SystemExit/
+    # timeout) still leaves that file on disk, so a `⚠️` result does NOT mean "no
+    # deliverable to declare" — surface both the error and the output-guard note.
+    undeclared_user_outputs = _mentioned_user_file_outputs_without_declaration(
+        ctx, [interp, "-c", body], outputs, scratch_abs=_scratch_abs_body, command_start_ts=_body_start_ts,
+    )
+    audit_note = ""
+    if undeclared_user_outputs:
+        audit_note = (
+            "⚠️ ARTIFACT_OUTPUT_ERROR: run_script wrote user_files without declaring outputs: "
+            + ", ".join(undeclared_user_outputs)
+            + ". Re-run with outputs=[...] or write the canonical deliverable via root=artifact_store."
+        )
     if str(result).lstrip().startswith("⚠️"):
-        return f"{result}\n# script_path={script_path}"
+        tail = f"\n{audit_note}" if audit_note else ""
+        return f"{result}{tail}\n# script_path={script_path}"
+    if audit_note:
+        return f"{audit_note}\n# script_path={script_path}"
     return f"# script_path={script_path}\n{result}"
 
 
@@ -1859,9 +1970,12 @@ def get_tools() -> List[ToolEntry]:
 	                    "default": [],
 	                    "description": (
 	                        "Transient in-repo verification files (e.g. a throwaway test you write, run, and "
-	                        "delete to check your own work). Each must be NEW + untracked and confined to the "
-	                        "cwd; they are exempt from the deliverable-output guard, never registered as "
-	                        "artifacts, and EXCLUDED from the workspace patch. Use outputs=[...] for real deliverables."
+	                        "delete to check your own work) — throwaway verification ONLY, never part of the "
+	                        "solution. Each must be untracked and confined to the cwd: a NEW file, or an existing "
+	                        "untracked file created earlier in THIS task (adopted by sha, so re-declaring is "
+	                        "idempotent); tracked files and directories stay blocked. They are exempt "
+	                        "from the deliverable-output guard, never registered as artifacts, and EXCLUDED "
+	                        "from the workspace patch. Use outputs=[...] for real deliverables."
 	                    ),
 	                },
 	                "timeout_sec": {
@@ -1935,9 +2049,12 @@ def get_tools() -> List[ToolEntry]:
 	                    "default": [],
 	                    "description": (
 	                        "Transient in-repo verification files (e.g. a throwaway test you write, run, and "
-	                        "delete to check your own work). Each must be NEW + untracked and confined to the "
-	                        "cwd; they are exempt from the deliverable-output guard, never registered as "
-	                        "artifacts, and EXCLUDED from the workspace patch. Use outputs=[...] for real deliverables."
+	                        "delete to check your own work) — throwaway verification ONLY, never part of the "
+	                        "solution. Each must be untracked and confined to the cwd: a NEW file, or an existing "
+	                        "untracked file created earlier in THIS task (adopted by sha, so re-declaring is "
+	                        "idempotent); tracked files and directories stay blocked. They are exempt "
+	                        "from the deliverable-output guard, never registered as artifacts, and EXCLUDED "
+	                        "from the workspace patch. Use outputs=[...] for real deliverables."
 	                    ),
 	                },
 	                "timeout_sec": {

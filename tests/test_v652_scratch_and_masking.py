@@ -90,17 +90,127 @@ def test_undeclared_write_still_blocks_without_scratch(tmp_path, monkeypatch):
     assert result.startswith("⚠️ ARTIFACT_OUTPUT_ERROR"), result
 
 
-def test_scratch_preexisting_path_is_blocked(tmp_path, monkeypatch):
-    registry, _repo, _data, desktop = _reg(tmp_path, monkeypatch)
+def test_scratch_adopts_preexisting_untracked_file(tmp_path, monkeypatch):
+    """v6.56.0: an existing UNTRACKED file in the git worktree is ADOPTED as scratch (not blocked);
+    its current sha is recorded so a re-declaration is idempotent and it stays excluded from the patch."""
+    from ouroboros.artifacts import read_task_scratch_fingerprints
+    from hashlib import sha256
+
+    registry, _repo, data, desktop = _reg(tmp_path, monkeypatch)
     ws = _git_ws(desktop)
-    existing = ws / "already.py"
-    existing.write_text("real\n")  # pre-exists -> not a throwaway
+    existing = ws / "adopted.py"
+    existing.write_bytes(b"throwaway v1\n")  # exact bytes (no Windows \n→\r\n) so the sha is stable
     result = registry.execute(
         "run_command",
         {"cmd": [sys.executable, "-c", "print('noop')"], "cwd": str(ws), "scratch": [str(existing)]},
     )
+    assert not result.startswith("⚠️ SCRATCH_BLOCKED"), result
+    assert "exit_code=0" in result
+    # adoption recorded the current sha at declaration
+    fps = read_task_scratch_fingerprints(data, "task1")
+    assert fps.get(str(existing.resolve())) == sha256(b"throwaway v1\n").hexdigest()
+    # re-declaring the same path in a second command is also fine (idempotent)
+    result2 = registry.execute(
+        "run_command",
+        {"cmd": [sys.executable, "-c", "print('noop2')"], "cwd": str(ws), "scratch": [str(existing)]},
+    )
+    assert not result2.startswith("⚠️ SCRATCH_BLOCKED"), result2
+
+
+def test_scratch_tracked_path_still_blocked(tmp_path, monkeypatch):
+    """The masking guard survives adoption: a git-TRACKED file can never be relabeled scratch."""
+    registry, _repo, _data, desktop = _reg(tmp_path, monkeypatch)
+    ws = _git_ws(desktop)
+    tracked = ws / "real_source.py"
+    tracked.write_text("real\n")
+    _git(ws, "add", "real_source.py")
+    _git(ws, "commit", "-q", "-m", "add source")
+    result = registry.execute(
+        "run_command",
+        {"cmd": [sys.executable, "-c", "print('noop')"], "cwd": str(ws), "scratch": [str(tracked)]},
+    )
     assert result.startswith("⚠️ SCRATCH_BLOCKED"), result
-    assert "already exists" in result
+    assert "git-tracked" in result
+
+
+def test_output_guard_ignores_nonexistent_path_candidates(tmp_path, monkeypatch):
+    """v6.56.0 stat-verification: import-string / flag candidates that name no real fresh file are
+    NOT flagged as undeclared user_files outputs (kills the ARTIFACT_OUTPUT_ERROR false-positive class)."""
+    registry, _repo, _data, desktop = _reg(tmp_path, monkeypatch)
+    # The command TEXT mentions absolute '/http'-style tokens after a write marker, but writes nothing
+    # under user_files. Under the old regex-only guard this false-flagged; stat-verification clears it.
+    marker_home = desktop / "note.txt"  # a real user_files path token, but never actually written
+    # Embed with forward slashes so a Windows path's backslashes don't form an invalid
+    # \U escape inside the python -c string literal (the guard normalizes either form).
+    result = registry.execute(
+        "run_command",
+        {"cmd": [sys.executable, "-c", f"print('would write_text to {marker_home.as_posix()} via /http/x import')"], "cwd": str(desktop)},
+    )
+    assert "ARTIFACT_OUTPUT_ERROR" not in result, result
+    assert "exit_code=0" in result
+
+
+def test_output_guard_still_flags_real_fresh_write(tmp_path, monkeypatch):
+    """0-regression for stat-verification: a genuine fresh user_files write is still flagged."""
+    registry, _repo, _data, desktop = _reg(tmp_path, monkeypatch)
+    target = desktop / "real_out.py"
+    result = registry.execute(
+        "run_command",
+        {"cmd": [sys.executable, "-c", f"open({str(target)!r}, 'w').write('x')"], "cwd": str(desktop)},
+    )
+    assert result.startswith("⚠️ ARTIFACT_OUTPUT_ERROR"), result
+
+
+def test_run_script_body_audit_is_post_exec_stat_verified(tmp_path, monkeypatch):
+    """run_script body audit moved to POST-exec (v6.56.0): a real user_files write in the body is
+    flagged, while an import-string in the body is not."""
+    registry, _repo, _data, desktop = _reg(tmp_path, monkeypatch)
+    # (a) body mentions '/http' import but writes nothing -> not flagged
+    ok = registry.execute(
+        "run_script",
+        {"script": "import http.client  # /http/client\nprint('hi')", "interpreter": "python3", "cwd": str(desktop)},
+    )
+    assert "ARTIFACT_OUTPUT_ERROR" not in ok, ok
+    # (b) body actually writes a user_files deliverable -> flagged post-exec
+    target = desktop / "from_body.txt"
+    bad = registry.execute(
+        "run_script",
+        {"script": f"open({str(target)!r}, 'w').write('deliverable')", "interpreter": "python3", "cwd": str(desktop)},
+    )
+    assert "ARTIFACT_OUTPUT_ERROR" in bad, bad
+
+
+def test_run_script_body_audit_runs_on_failure_path(tmp_path, monkeypatch):
+    """v6.56.0 review regression: a script that WRITES an undeclared user_files
+    deliverable and then FAILS (raise/SystemExit) still leaves the file on disk —
+    the post-exec audit must run on the error path too, surfacing BOTH the error
+    and the ARTIFACT_OUTPUT_ERROR (not skipping the audit because the result is ⚠️)."""
+    registry, _repo, _data, desktop = _reg(tmp_path, monkeypatch)
+    target = desktop / "written_then_failed.txt"
+    result = registry.execute(
+        "run_script",
+        {"script": f"open({str(target)!r}, 'w').write('deliverable')\nraise SystemExit(1)",
+         "interpreter": "python3", "cwd": str(desktop)},
+    )
+    assert target.exists()  # the write really happened
+    assert "ARTIFACT_OUTPUT_ERROR" in result, result
+
+
+def test_scratch_directory_declaration_refused(tmp_path, monkeypatch):
+    """v6.56.0 review regression: an existing untracked DIRECTORY declared scratch
+    must be refused (a dir can't be sha-fingerprinted or excluded file-by-file, so
+    silently adopting it would let its contents leak into the deliverable)."""
+    registry, _repo, _data, desktop = _reg(tmp_path, monkeypatch)
+    ws = _git_ws(desktop)
+    scratch_dir = ws / "tmpwork"
+    scratch_dir.mkdir()
+    (scratch_dir / "inner.txt").write_text("x")
+    result = registry.execute(
+        "run_command",
+        {"cmd": [sys.executable, "-c", "print('noop')"], "cwd": str(ws), "scratch": [str(scratch_dir)]},
+    )
+    assert result.startswith("⚠️ SCRATCH_BLOCKED"), result
+    assert "directory" in result
 
 
 def test_scratch_traversal_outside_cwd_is_blocked(tmp_path, monkeypatch):

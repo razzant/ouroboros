@@ -260,9 +260,12 @@ def test_loop_outcome_distinguishes_success_empty_and_provider_failure():
         assert policy_block["failure"] is None
         assert execution["ignored_tool_errors"][0]["status"] == status
 
-    # Boundary: the SAME access-policy block on a NON-read-only effect tool (run_command)
-    # is a real degraded execution — the demotion is scoped to read-only exploratory tools.
-    write_block = derive_loop_outcome(
+    # v6.57.0 (1.3): a POLICY refusal on a write/shell tool (run_command) is telemetry,
+    # NOT a degraded execution and NOT a tool_failure headline — the runtime said "no" to
+    # this action; the agent's work is judged on the objective/review axis. It lands in the
+    # dedicated policy_denials bucket (owner-approved: the site-presentation incident where
+    # integration_blocked/LIST_FILES forced degraded/tool_failure over a shipped site).
+    policy_write_block = derive_loop_outcome(
         "Done.",
         {"rounds": 1},
         {"tool_calls": [{
@@ -272,8 +275,26 @@ def test_loop_outcome_distinguishes_success_empty_and_provider_failure():
             "result": "⚠️ RESOURCE_POLICY_BLOCKED: blocked",
         }]},
     )
-    assert write_block["outcome_axes"]["execution"]["status"] == EXECUTION_DEGRADED
-    assert write_block["reason_code"] == "tool_failure"
+    execution = policy_write_block["outcome_axes"]["execution"]
+    assert execution["status"] == EXECUTION_OK
+    assert policy_write_block["reason_code"] == "final_message"
+    assert policy_write_block["failure"] is None
+    assert execution["policy_denials"][0]["status"] == "resource_policy_blocked"
+
+    # Boundary: a GENUINE tool/exec error (not a policy refusal) on a write/shell tool
+    # STILL degrades — the policy_denials demotion is scoped to `*_blocked` refusals.
+    real_error = derive_loop_outcome(
+        "Done.",
+        {"rounds": 1},
+        {"tool_calls": [{
+            "tool": "run_command",
+            "is_error": True,
+            "status": "error",
+            "result": "⚠️ unexpected error",
+        }]},
+    )
+    assert real_error["outcome_axes"]["execution"]["status"] == EXECUTION_DEGRADED
+    assert real_error["reason_code"] == "tool_failure"
 
 
 def test_forced_finalization_with_answer_is_best_effort():
@@ -431,6 +452,28 @@ def test_final_answer_extraction():
     assert outcome["final_answer"] == "42"
 
 
+def test_final_answer_rejects_internal_outcome_tier_tokens():
+    """Structural invariant: snake_case outcome-tier ledger identifiers are never a
+    deliverable (a v6.56.0 GAIA run shipped `FINAL ANSWER: blocked_with_evidence`
+    verbatim after an acceptance downgrade). They count as missing so the marker
+    nudge / salvage path can recover a real answer. `solved` stays extractable —
+    it is an ordinary English word that can be a legitimate answer."""
+    from ouroboros.outcomes import derive_loop_outcome, extract_final_answer
+
+    assert extract_final_answer("FINAL ANSWER: blocked_with_evidence") == ""
+    assert extract_final_answer("FINAL ANSWER:  Best_Effort ") == ""
+    assert extract_final_answer("FINAL ANSWER: solved") == "solved"
+    # A real answer that merely CONTAINS a tier word is untouched.
+    assert extract_final_answer("FINAL ANSWER: best effort estimate") == "best effort estimate"
+
+    outcome = derive_loop_outcome(
+        "downgraded.\nFINAL ANSWER: blocked_with_evidence", {},
+        {"tool_calls": [], "reasoning_notes": []},
+    )
+    assert outcome["final_answer"] == ""
+    assert outcome["final_answer_missing_sentinel"] is True
+
+
 def test_normalize_outcome_axes_preserves_best_effort_legacy():
     from ouroboros.outcomes import EXECUTION_BEST_EFFORT, normalize_outcome_axes
 
@@ -568,8 +611,24 @@ def test_normalize_outcome_axes_canonicalizes_partial_and_unknown_legacy():
 
 
 def test_t4_cosmetic_partition_guards():
-    # A blocking-status trailing error STILL degrades (partition is structural).
+    # A GENUINE tool error STILL degrades (partition is structural).
     blocking = derive_loop_outcome(
+        "Done",
+        {"rounds": 2},
+        {"tool_calls": [{
+            "tool": "write_file",
+            "args": {"root": "active_workspace", "path": "x.py"},
+            "is_error": True,
+            "status": "error",
+            "result": "⚠️ unexpected write error",
+        }]},
+    )
+    assert blocking["outcome_axes"]["execution"]["status"] == EXECUTION_DEGRADED
+
+    # v6.57.0 (1.3): a POLICY refusal (`write_file_blocked`) is NOT degrading — it lands in
+    # policy_denials telemetry (the runtime declined the write; the deliverable, if any, is
+    # judged on the objective/review axis).
+    policy_blocked = derive_loop_outcome(
         "Done",
         {"rounds": 2},
         {"tool_calls": [{
@@ -580,7 +639,8 @@ def test_t4_cosmetic_partition_guards():
             "result": "⚠️ WRITE_FILE_BLOCKED: protected path",
         }]},
     )
-    assert blocking["outcome_axes"]["execution"]["status"] == EXECUTION_DEGRADED
+    assert policy_blocked["outcome_axes"]["execution"]["status"] == EXECUTION_OK
+    assert policy_blocked["outcome_axes"]["execution"]["policy_denials"][0]["status"] == "write_file_blocked"
 
     # A failed-then-rerun-IDENTICAL run_command is RECOVERED, not cosmetic.
     recovered = derive_loop_outcome(

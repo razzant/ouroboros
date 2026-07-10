@@ -38,7 +38,12 @@ def test_e1v2_auto_run_one_stops_on_secret_and_skips_infra(tmp_path, monkeypatch
     import types as _types
     from devtools.benchmarks.swe_bench_pro.e1v2 import auto_run
 
-    args = _types.SimpleNamespace(total_budget=10.0, per_task_cost=5.0, task_wall_timeout=9000)
+    args = _types.SimpleNamespace(
+        total_budget=10.0, per_task_cost=5.0, task_wall_timeout=9000,
+        volume_suffix="", full_set=False, csv="", settings="", solve_model="",
+        model_name="", review_slots=None, review_effort="", solve_timeout=None,
+        memory_mode="", baseline=False,
+    )
 
     def _popen_writing(payload):
         # run_pro is launched via subprocess.Popen(..., start_new_session=True); the
@@ -61,15 +66,15 @@ def test_e1v2_auto_run_one_stops_on_secret_and_skips_infra(tmp_path, monkeypatch
                         _popen_writing({"patch_bytes": 0, "api_errors": 0, "instance_id": "x",
                                         "secret_opt_in_required": True}))
     with pytest.raises(SystemExit):
-        auto_run.run_one(1, tmp_path, args)
+        auto_run.run_one(1, tmp_path, args, attempt=1)
 
     # generic infra skip -> non-LEGIT (pb=None), so it is retried/stopped not counted ok
     monkeypatch.setattr(auto_run.subprocess, "Popen",
                         _popen_writing({"patch_bytes": 0, "api_errors": 0, "instance_id": "y",
                                         "infra_suspect": True}))
-    pb, _ae, _iid, _degraded, permanent_skip = auto_run.run_one(1, tmp_path, args)
-    assert pb is None
-    assert permanent_skip is False
+    r = auto_run.run_one(1, tmp_path, args, attempt=1)
+    assert r["pb"] is None
+    assert r["permanent_skip"] is False
 
 
 def test_e1v2_cadence_off_disables_post_task_evolution(tmp_path):
@@ -144,7 +149,12 @@ def test_e1v2_auto_run_one_timeout_cleans_up_and_continues(tmp_path, monkeypatch
     import types as _types
     from devtools.benchmarks.swe_bench_pro.e1v2 import auto_run
 
-    args = _types.SimpleNamespace(total_budget=10.0, per_task_cost=5.0, task_wall_timeout=1)
+    args = _types.SimpleNamespace(
+        total_budget=10.0, per_task_cost=5.0, task_wall_timeout=1,
+        volume_suffix="", full_set=False, csv="", settings="", solve_model="",
+        model_name="", review_slots=None, review_effort="", solve_timeout=None,
+        memory_mode="", baseline=False,
+    )
     tl = tmp_path / "timeline.jsonl"
 
     class FakeProc:
@@ -166,12 +176,12 @@ def test_e1v2_auto_run_one_timeout_cleans_up_and_continues(tmp_path, monkeypatch
     # cross-platform process-tree kill is routed through platform_layer; mock it.
     monkeypatch.setattr(auto_run, "kill_process_tree", lambda proc: killed.__setitem__("tree", True))
     monkeypatch.setattr(auto_run, "_rm_obopro_containers",
-                        lambda: cleaned.__setitem__("rm", True))
+                        lambda *_a, **_k: cleaned.__setitem__("rm", True))
 
-    pb, _ae, iid, _degraded, permanent_skip = auto_run.run_one(7, tmp_path, args)
+    r = auto_run.run_one(7, tmp_path, args, attempt=1)
     assert killed["tree"] is True and cleaned["rm"] is True
-    assert pb == 1234 and iid == "z"
-    assert permanent_skip is False
+    assert r["pb"] == 1234 and r["iid"] == "z"
+    assert r["permanent_skip"] is False
 
 
 def test_e1v2_run_instance_runtime_mode_passthrough(tmp_path, monkeypatch):
@@ -181,7 +191,9 @@ def test_e1v2_run_instance_runtime_mode_passthrough(tmp_path, monkeypatch):
     from devtools.benchmarks.swe_bench_pro.e1v2 import run_pro
 
     monkeypatch.setenv("OUROBOROS_BENCH_ALLOW_CONTAINER_SECRETS", "1")
-    monkeypatch.setattr(run_pro, "docker_pull_if_missing", lambda img: None)
+    # bench1 port: docker_pull_if_missing returns PRESENCE (False = image_unavailable
+    # infra skip before the docker run), so the fake must return True.
+    monkeypatch.setattr(run_pro, "docker_pull_if_missing", lambda img: True)
     monkeypatch.setattr(run_pro, "image_libc", lambda img: "glibc")
     monkeypatch.setattr(run_pro, "volume_exists", lambda name: True)
     monkeypatch.setattr(run_pro, "kill_container", lambda name: None)
@@ -189,7 +201,10 @@ def test_e1v2_run_instance_runtime_mode_passthrough(tmp_path, monkeypatch):
     captured = {}
 
     def fake_run(cmd, **kw):
-        captured["cmd"] = list(cmd)
+        # Capture ONLY the solve `docker run` argv: the bench1 result collector also
+        # issues `docker image inspect` afterwards, which must not clobber the capture.
+        if list(cmd[:2]) == ["docker", "run"]:
+            captured["cmd"] = list(cmd)
         for a in cmd:  # write the patch into the host dir mounted at /out
             if isinstance(a, str) and a.endswith(":/out"):
                 Path(a[: -len(":/out")], "patch.diff").write_text("diff --git a/x b/x\n", encoding="utf-8")
@@ -238,3 +253,74 @@ def test_e1v2_strip_gold_history_keeps_base_and_drops_future(tmp_path):
     # no surviving ref reaches beyond base, and the gold commit object is gone
     assert g("rev-list", "--all", "--not", base).stdout.strip() == ""
     assert g("cat-file", "-e", future).returncode != 0
+
+
+def test_e1v2_entrypoint_solve_argv_pins_workspace_and_budget_metadata():
+    """Static harness contract (v6.56.0): the container solve invocation runs /app
+    as the ACTIVE EXTERNAL WORKSPACE by default (empty override = legacy mode),
+    carries the uncapped-cost budget_profile via --task-metadata-json, and the
+    per-task memory default is an EMPTY child drive."""
+    entry = (
+        REPO_ROOT / "devtools" / "benchmarks" / "swe_bench_pro" / "e1v2" / "entrypoint_pro.sh"
+    ).read_text(encoding="utf-8")
+    # /app default via ${VAR-default} (an EXPLICIT empty string keeps legacy mode).
+    assert 'OBO_SOLVE_WORKSPACE_ROOT="${OBO_SOLVE_WORKSPACE_ROOT-/app}"' in entry
+    assert '--workspace "$OBO_SOLVE_WORKSPACE_ROOT"' in entry
+    # Budget metadata: until_deadline pacing + no in-task cost stop.
+    assert "--task-metadata-json" in entry
+    assert '"improvement_policy": "until_deadline"' in entry
+    assert '"cost_hard_stop_pct": 0' in entry
+    # Fresh child memory drive is the explicit entrypoint default.
+    assert 'OBO_MEMORY_MODE="${OBO_MEMORY_MODE:-empty}"' in entry
+    # The solve args are a bash array (quoting-safe), not an interpolated string.
+    assert "SOLVE_ARGS=(" in entry and '"${SOLVE_ARGS[@]}"' in entry
+
+
+def test_workspace_allowlist_includes_acting_integration_tools():
+    """v6.56.0 owner-approved registry change: a workspace parent can absorb acting
+    children's patches (integrate) and compare best-of-N candidates."""
+    from ouroboros.tools.registry import _WORKSPACE_ALLOWED_TOOLS
+
+    assert "integrate_subagent_patch" in _WORKSPACE_ALLOWED_TOOLS
+    assert "compare_subagent_patches" in _WORKSPACE_ALLOWED_TOOLS
+
+
+def test_e1v2_ensure_util_image_preflights_pull_never_dependency(monkeypatch):
+    """v6.56.0 review r6: snapshot/restore/state-read all use `--pull=never alpine:3`.
+    ensure_util_image must be a no-op when present, and FAIL LOUD (not silently
+    leave the image absent → empty-volume restores) when it is missing and unpullable."""
+    from devtools.benchmarks.swe_bench_pro.e1v2 import run_pro
+
+    calls = {"pull": 0}
+
+    # (a) already present → no pull, no raise
+    monkeypatch.setattr(run_pro, "_image_present", lambda img=run_pro.UTIL_IMAGE: True)
+    run_pro.ensure_util_image()
+    assert calls["pull"] == 0
+
+    # (b) absent and pull fails → RuntimeError (fail closed)
+    monkeypatch.setattr(run_pro, "_image_present", lambda img=run_pro.UTIL_IMAGE: False)
+
+    def _fake_pull(cmd, **kw):
+        calls["pull"] += 1
+        import types as _t
+        return _t.SimpleNamespace(returncode=1, stdout=b"", stderr=b"no network")
+
+    monkeypatch.setattr(run_pro.subprocess, "run", _fake_pull)
+    with pytest.raises(RuntimeError, match="utility image"):
+        run_pro.ensure_util_image()
+    assert calls["pull"] == 1
+
+
+def test_e1v2_restore_skips_missing_snapshot_and_reports_failure(tmp_path, monkeypatch):
+    """v6.56.0 review r6: restore must not recreate an EMPTY volume when its snapshot
+    tgz is absent (that would silently blank the retry state); it skips and reports False."""
+    from devtools.benchmarks.swe_bench_pro.e1v2 import auto_run
+
+    # No .tgz files exist in tmp_path → both volumes skipped, no docker calls, returns False.
+    called = {"docker": 0}
+    monkeypatch.setattr(auto_run.subprocess, "run",
+                        lambda *a, **k: called.__setitem__("docker", called["docker"] + 1))
+    ok = auto_run.restore(tmp_path, "-testsuf")
+    assert ok is False
+    assert called["docker"] == 0  # never wiped/recreated a volume with no snapshot to restore

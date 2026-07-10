@@ -21,6 +21,11 @@ DEFAULT_UI_PREFERENCES: dict[str, Any] = {
     # an unread dot when a project's last_active_at is newer than this. MERGED (not
     # replaced) on POST so a single-project update never wipes the others.
     "project_last_viewed": {},
+    # v6.59.0: per-project sidebar visibility ({project_id: true}) — a lightweight
+    # owner "hide" that does NOT resurrect the removed status lifecycle (v6.33.0):
+    # the registry stays untouched; hiding is pure presentation. MERGED on POST;
+    # a `false` value unhides (and is dropped from the stored map).
+    "project_hidden": {},
 }
 _KNOWN_KEYS = frozenset(DEFAULT_UI_PREFERENCES)
 _MAX_WIDGET_ORDER_ITEMS = 200
@@ -91,6 +96,20 @@ def _normalize_preferences(
                     continue
                 cleaned[key] = str(ts or "")[:40]
             prefs["project_last_viewed"] = cleaned
+    if "project_hidden" in raw:
+        value = raw.get("project_hidden")
+        if value is None:
+            prefs["project_hidden"] = {}
+        elif not isinstance(value, dict):
+            raise ValueError("project_hidden must be an object of {project_id: bool}")
+        else:
+            hidden: dict[str, bool] = {}
+            for pid, flag in list(value.items())[:_MAX_PROJECT_LAST_VIEWED]:
+                key = str(pid or "").strip()[:_MAX_PROJECT_ID_LENGTH]
+                if not key:
+                    continue
+                hidden[key] = bool(flag)
+            prefs["project_hidden"] = hidden
     return prefs
 
 
@@ -123,6 +142,11 @@ async def api_ui_preferences_post(request: Request) -> JSONResponse:
                 # Keep the most recent entries by timestamp; bound the map.
                 merged = dict(sorted(merged.items(), key=lambda kv: kv[1], reverse=True)[:_MAX_PROJECT_LAST_VIEWED])
             prefs["project_last_viewed"] = merged
+        if "project_hidden" in incoming:
+            # MERGE like last_viewed; a false flag UNHIDES and is dropped from the map.
+            hidden = dict(prefs.get("project_hidden") or {})
+            hidden.update(incoming.pop("project_hidden"))
+            prefs["project_hidden"] = {pid: True for pid, flag in hidden.items() if flag}
         prefs.update(incoming)
     except ValueError as exc:
         return json_error(str(exc), 400)

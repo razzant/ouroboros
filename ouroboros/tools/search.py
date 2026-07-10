@@ -194,6 +194,7 @@ def _web_search_openrouter(ctx: ToolContext, query: str, model: str = "", search
         )
         return json.dumps({
             "answer": text or "(no answer)",
+            "answer_type": "summary",
             "sources": _extract_sources_from_response(response),
             "backend": "openrouter_server_tool",
         }, ensure_ascii=False, indent=2)
@@ -234,6 +235,7 @@ def _web_search_anthropic(ctx: ToolContext, query: str, model: str = "") -> str:
         )
         return json.dumps({
             "answer": "".join(text_parts).strip() or "(no answer)",
+            "answer_type": "summary",
             "sources": _extract_sources_from_response(response),
             "backend": "anthropic_server_tool",
         }, ensure_ascii=False, indent=2)
@@ -265,6 +267,7 @@ def _web_search_ddgs(query: str, *, _max_attempts: int = 3) -> str:
             )
             return json.dumps({
                 "answer": answer or "(no answer)",
+                "answer_type": "summary",
                 "sources": sources,
                 "backend": "ddgs",
             }, ensure_ascii=False, indent=2)
@@ -357,7 +360,11 @@ def _web_search(
 
     try:
         from openai import OpenAI
-        client = OpenAI(api_key=api_key, base_url=base_url)
+        from ouroboros.config import get_websearch_timeout_sec
+        # Explicit transport timeout (v6.54.3, D): without it the streaming SDK
+        # call had NO client bound, so the ToolEntry 540s outer thread-kill was
+        # the only stop for a wedged stream.
+        client = OpenAI(api_key=api_key, base_url=base_url, timeout=get_websearch_timeout_sec())
 
         # --- Streaming path: emit progress while the search runs ---
         stream = client.responses.create(
@@ -459,7 +466,7 @@ def _web_search(
             except Exception:
                 log.debug("Failed to emit web_search cost event", exc_info=True)
 
-        return json.dumps({"answer": text or "(no answer)", "sources": sources, "backend": "openai_responses"}, ensure_ascii=False, indent=2)
+        return json.dumps({"answer": text or "(no answer)", "answer_type": "summary", "sources": sources, "backend": "openai_responses"}, ensure_ascii=False, indent=2)
     except Exception as e:
         detail = sanitize_tool_result_for_log(str(e))[:500]
         # One retry on a genuine timeout before cascading: web search timeouts are
@@ -488,7 +495,10 @@ def get_tools() -> List[ToolEntry]:
                 "Override any parameter per-call if needed (LLM-first: you decide). "
                 "For a COMPOUND question (several distinct facts/entities/time ranges in one ask), "
                 "issue one focused web_search per sub-question instead of one broad query — "
-                "narrow queries return sharper sources. These read-only searches run in parallel."
+                "narrow queries return sharper sources. These read-only searches run in parallel. "
+                "The returned `answer` is a SUMMARY/lead (answer_type=summary), not a primary source: "
+                "confirm load-bearing facts by opening the returned sources (browse_page) before "
+                "relying on them."
             ),
             "parameters": {"type": "object", "properties": {
                 "query": {"type": "string", "description": "A single focused search query (split compound asks into separate calls)."},

@@ -278,6 +278,16 @@ def _query_code(ctx: ToolContext, op: str, **options: Any) -> str:
             repo_root = pathlib.Path(system_repo_dir_for(ctx)).resolve(strict=False)
         elif normalized_root == "active_workspace":
             repo_root = pathlib.Path(active_repo_dir_for(ctx)).resolve(strict=False)
+            try:
+                from ouroboros.tool_access import project_room_lens_dir
+
+                _room = project_room_lens_dir(ctx)
+                if _room is not None:
+                    # Room lens (v6.61.3): folder-room chat queries the PROJECT
+                    # FOLDER; self-repo queries stay on root="system_repo".
+                    repo_root = _room
+            except Exception:
+                pass
         elif normalized_root == "user_files":
             # Read-only structured intelligence over an EXTERNAL workspace target
             # (e.g. the SWE-bench dig-direct /app) — R1. Restricted subagents must
@@ -295,7 +305,12 @@ def _query_code(ctx: ToolContext, op: str, **options: Any) -> str:
                     "root=user_files requires an explicit path (e.g. '/app' or a project subdir); "
                     "it will not scan the entire home"
                 )
-            target = resolve_user_file_path(ctx, str(path).strip())
+            # Documented external-target contract (v6.47.0): read-only code
+            # intelligence over an absolute path OUTSIDE the user_files home
+            # (e.g. a benchmark /app) stays supported — opt out of the v6.54.3
+            # home-membership rejection; the credential/control-plane block
+            # reasons still apply inside resolve_user_file_path.
+            target = resolve_user_file_path(ctx, str(path).strip(), allow_outside_home=True)
             if target.is_dir():
                 repo_root = target.resolve(strict=False)
                 path = ""

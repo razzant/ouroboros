@@ -195,6 +195,15 @@ def _accept_verification_summary(receipts: list) -> Dict[str, Any]:
         "check_exit_masking_reasons": sorted({
             str(reason) for r in valid for reason in (r.get("check_exit_masking_reasons") or [])
         })[:10],
+        # v6.54.4 criterion provenance: how many checks verified a criterion the
+        # AGENT synthesized vs one the task states. An agent_defined-only summary
+        # asks the reviewer to judge criterion equivalence, not just check results.
+        "criterion_source_counts": {
+            "task_stated": sum(1 for r in valid if str(r.get("criterion_source") or "") == "task_stated"),
+            "agent_defined": sum(1 for r in valid if str(r.get("criterion_source") or "") == "agent_defined"),
+        },
+        "latest_criterion_source": str(latest.get("criterion_source") or ""),
+        "latest_criterion_basis": _accept_redact_cap(str(latest.get("criterion_basis") or ""), 400),
     }
 
 
@@ -454,6 +463,13 @@ def build_task_acceptance_evidence(
         if notes:
             ev["reasoning_notes"] = truncate_review_artifact("\n".join(str(n) for n in notes), limit=_ACCEPT_NOTES_CAP)
             prov["reasoning_notes"] = "agent_supplied"
+        # v6.54.4 CANDIDATES adjudication: when the agent enumerated candidate
+        # interpretations/answers (opt-in latched block), the reviewer sees them
+        # and can adjudicate which one the task actually asks for.
+        candidates = llm_trace.get("candidate_answers") or []
+        if candidates:
+            ev["candidate_answers"] = [str(c)[:300] for c in candidates][:8]
+            prov["candidate_answers"] = "agent_supplied"
     if drive_root is not None and task_id:
         arts = _accept_artifact_manifest(drive_root, task_id, _accept_protected_set(ctx))
         if arts:

@@ -229,10 +229,69 @@ def promote_chat_to_task(evt: dict, ctx: Any) -> None:
                     log.debug("promote: projects_changed broadcast failed for %s", pid, exc_info=True)
         except Exception:
             log.debug("promote: project registration failed for %s", pid, exc_info=True)
-    workspace_root = str(evt.get("workspace_root") or "").strip()
-    if workspace_root:
-        task["workspace_root"] = workspace_root
+    # v6.58.0 (slice 1) — the promote path admits a workspace through the SAME SSOT
+    # as /api/tasks. A task born in a project ROOM defaults to the room's registered
+    # working_dir (workspace="none" on the event opts out); a SET-but-broken
+    # working_dir fails LOUDLY here — never a silent workspace-less task that would
+    # resolve to the self_modification profile over the system repo.
+    from ouroboros.workspace_admission import bounded_workspace_preflight, compose_workspace_block, resolve_room_workspace
+
+    resolved_ws, ws_error = resolve_room_workspace(
+        drive_root=DRIVE_ROOT,
+        system_repo_dir=REPO_DIR,
+        project_id=pid,
+        explicit_workspace=str(evt.get("workspace_root") or "").strip(),
+        workspace_sentinel=str(evt.get("workspace") or ""),
+    )
+    if ws_error:
+        _fail_promoted_task_loudly(ctx, task, ws_error)
+        return
+    if resolved_ws:
+        task["workspace_root"] = resolved_ws
         task["workspace_mode"] = "external"
+        task["memory_mode"] = "forked"
+        # The lease lane keys off task["project_id"]: for a project room it is already
+        # set; for a bare workspace promote, resolve it (registry-first → derived hash)
+        # so one folder is one serialized lane on EVERY entry path (slice 0 invariant).
+        if not str(task.get("project_id") or "").strip():
+            try:
+                from ouroboros.project_facts import resolve_project_id as _resolve_pid
+
+                derived_pid = _resolve_pid({"workspace_root": resolved_ws})
+                if derived_pid:
+                    task["project_id"] = derived_pid
+            except Exception:
+                log.debug("promote: project_id derivation failed for %s", tid, exc_info=True)
+        # Memory-fork parity with /api/tasks: the room task runs on an ISOLATED child
+        # drive (forked seed), with the canonical root kept for budget/status.
+        try:
+            from ouroboros.headless import prepare_task_drive
+
+            child_drive = prepare_task_drive(
+                DRIVE_ROOT, tid, "forked", project_id=str(task.get("project_id") or "")
+            )
+            if child_drive is not None:
+                task["drive_root"] = str(child_drive)
+                task["budget_drive_root"] = str(DRIVE_ROOT)
+        except Exception:
+            log.warning("promote: child drive fork failed for %s", tid, exc_info=True)
+        # Preflight parity, HARD-CAPPED: this runs on the supervisor event-drain
+        # thread, so the git/toolchain snapshot gets a bounded window and degrades
+        # to a disclosed skip note instead of stalling event delivery.
+        preflight_summary = bounded_workspace_preflight(resolved_ws)
+        metadata = task.setdefault("metadata", {})
+        metadata["workspace_root"] = resolved_ws
+        metadata["workspace_preflight"] = preflight_summary
+        task["text"] = (
+            f"{task['text']}\n\n[HEADLESS_WORKSPACE]\n"
+            + compose_workspace_block(
+                workspace_root=resolved_ws,
+                workspace_mode="external",
+                memory_mode="forked",
+                workspace_preflight=preflight_summary,
+            )
+            + "[END_HEADLESS_WORKSPACE]"
+        )
     attach_task_contract(task)
     ctx.enqueue_task(task)
     # v6.40 "name ANY task card": the agent already coined `title` here (zero extra LLM
@@ -248,6 +307,42 @@ def promote_chat_to_task(evt: dict, ctx: Any) -> None:
             _broadcast_task_named({"type": "task_named", "task_id": tid, "suggested_name": title})
         except Exception:
             log.debug("promote: suggested_name persist/broadcast failed for %s", tid, exc_info=True)
+
+
+def _fail_promoted_task_loudly(ctx: Any, task: dict, ws_error: str) -> None:
+    """v6.58.0 loud-fail invariant: a room task whose workspace is SET-but-unusable
+    is terminally FAILED at admission with a visible card + chat message — never
+    silently admitted workspace-less (which would run the self_modification profile
+    over the system repo). Never raises."""
+    tid = str(task.get("id") or "")
+    chat_id = 0
+    try:
+        chat_id = int(task.get("chat_id") or 0)
+    except (TypeError, ValueError):
+        chat_id = 0
+    message = (
+        f"⚠️ WORKSPACE_UNUSABLE: task {tid} was NOT started — {ws_error} "
+        "Fix the project's working folder (Projects → this project) or re-promote with "
+        "workspace='none' for a folder-less task."
+    )
+    try:
+        from ouroboros.task_results import STATUS_FAILED, write_task_result
+
+        write_task_result(
+            DRIVE_ROOT, tid, STATUS_FAILED,
+            reason_code="workspace_unusable",
+            result=message,
+            description=str(task.get("description") or ""),
+            chat_id=chat_id,
+            project_id=str(task.get("project_id") or ""),
+        )
+    except Exception:
+        log.warning("promote loud-fail: task_result write failed for %s", tid, exc_info=True)
+    try:
+        if chat_id:
+            ctx.send_with_budget(chat_id, message)
+    except Exception:
+        log.debug("promote loud-fail: chat message failed for %s", tid, exc_info=True)
 
 
 def ensure_project_scope(evt: dict, ctx: Any) -> None:

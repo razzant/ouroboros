@@ -22,6 +22,7 @@
  * @property {?string} supervisor_error
  * @property {string} runtime_mode
  * @property {string} context_mode
+ * @property {string} safety_mode
  * @property {boolean} skills_repo_configured
  * @property {boolean} github_token_configured
  * @property {Array<Object>} projects  // [{id, name, chat_id, working_dir, last_active_at, has_thread_activity}] (v6.32.0)
@@ -178,6 +179,55 @@
  */
 
 /**
+ * POST /api/projects body (v6.59.0). ONE source: path (attach; optional init_git
+ * attach-snapshot commit — never auto-init), git_url (server-side clone; typed
+ * auth_required), with_workspace (genesis), or none (file-less).
+ * @typedef {Object} ProjectCreateRequest
+ * @property {string=} id
+ * @property {string=} name
+ * @property {string=} path
+ * @property {boolean=} init_git
+ * @property {string=} git_url
+ * @property {boolean=} with_workspace
+ */
+
+/**
+ * @typedef {Object} ProjectEntry
+ * @property {string} id
+ * @property {string=} name
+ * @property {number=} chat_id
+ * @property {string=} working_dir
+ * @property {string=} provenance   // attached | cloned | genesis | none (historical fact)
+ * @property {string=} clone_url
+ * @property {string=} trusted_at
+ * @property {string=} last_active_at
+ */
+
+/**
+ * @typedef {Object} ProjectDeleteResponse
+ * @property {boolean} ok
+ * @property {string} project_id
+ * @property {boolean} folder_untouched
+ */
+
+/**
+ * GET /api/fs/dirs — server-side directory browser (New Project attach picker).
+ * @typedef {Object} FsDirsEntry
+ * @property {string} name
+ * @property {string} path
+ * @property {boolean} is_git
+ */
+
+/**
+ * @typedef {Object} FsDirsResponse
+ * @property {string} path
+ * @property {string} parent
+ * @property {string} home
+ * @property {FsDirsEntry[]} dirs
+ * @property {boolean} truncated  // true when the dir holds more children than the 500-entry cap
+ */
+
+/**
  * @typedef {Object} TaskNamedOutbound
  * @property {"task_named"} type
  * @property {string} task_id
@@ -217,6 +267,12 @@
  * @typedef {Object} OwnerScopeReviewFloorResponse
  * @property {boolean} ok
  * @property {string} scope_review_floor  // blocking_1m | advisory (v6.34.0, CW1)
+ */
+
+/**
+ * @typedef {Object} OwnerSafetyModeResponse
+ * @property {boolean} ok
+ * @property {string} safety_mode  // full | light | off (v6.54.3)
  */
 
 /**
@@ -278,6 +334,7 @@
  * @property {string=} project_id Per-project facts scope id (else derived from the workspace path).
  * @property {Object[]=} attachments
  * @property {Object[]=} acceptance_claims Advisory Observable Acceptance Claims (`claim`/`surface`/`support`/`priority`).
+ * @property {string=} answer_protocol  // "" | "final_answer_line" — machine-extractable answer line (v6.60.0)
  * @property {Object=} allowed_resources
  * @property {Object=} resource_policy
  * @property {string[]=} disabled_tools Declarative tool-policy denylist: tool names withheld from the agent (independent of allowed_resources).
@@ -368,7 +425,8 @@
  * @property {number} sidebar_width  // px; 0 = CSS default (v6.33.0)
  * @property {number} project_panel_width  // px; 0 = CSS default
  * @property {Object.<string,string>} project_last_viewed  // {project_id: ISO ts}; unread dot (v6.33.0)
+ * @property {Object.<string,boolean>} project_hidden  // {project_id: hidden}; sidebar presentation only (v6.59.0)
  * @property {boolean=} ok
  */
 
-export const GATEWAY_CONTRACT_VERSION = '6.54.2';
+export const GATEWAY_CONTRACT_VERSION = '6.61.4';

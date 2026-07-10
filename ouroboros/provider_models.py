@@ -92,8 +92,8 @@ def resolve_credentialed_model(default_model: str) -> str:
 OPENAI_DIRECT_DEFAULTS = {
     "main": "openai::gpt-5.5",
     "heavy": "openai::gpt-5.5",
-    "light": "openai::gpt-5.5-mini",
-    "fallback": "openai::gpt-5.5-mini",
+    "light": "openai::gpt-5.4-mini",
+    "fallback": "openai::gpt-5.4-mini",
 }
 
 CLOUDRU_DIRECT_DEFAULTS = {

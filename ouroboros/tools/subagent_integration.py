@@ -220,6 +220,84 @@ def _patch_touched_paths(patch_path: pathlib.Path, target: pathlib.Path) -> tupl
     return {path for path in touched if path}, ""
 
 
+def _is_host_minted_projects_tree(path: pathlib.Path) -> bool:
+    """True when ``path`` is a host-minted genesis/coop tree — i.e. inside the
+    durable subagent-projects root. Owner-attached folders never live there, so this
+    is the structural boundary for the coop no-op (and the checkpoint-commit)."""
+    try:
+        from ouroboros.config import get_subagent_projects_root
+        from ouroboros.tool_access import path_is_relative_to
+
+        projects_root = pathlib.Path(get_subagent_projects_root()).expanduser().resolve(strict=False)
+        return path_is_relative_to(pathlib.Path(path).resolve(strict=False), projects_root)
+    except Exception:
+        return False
+
+
+def _maybe_coop_noop_verdict(
+    ctx: ToolContext,
+    *,
+    child_task_id: str,
+    reason: str,
+    patch_path: pathlib.Path,
+    manifest: Dict[str, Any],
+    child_result: Dict[str, Any],
+    touched: List[str],
+) -> str:
+    """Recognize the cooperative-build case for a NON-workspace parent and verify it
+    read-only. Conditions (all structural): the child recorded a write_root that is a
+    host-minted coop/genesis tree (under the subagent-projects root), the tree exists
+    with a .git, and the child's patch is ALREADY IN the tree (reverse-apply check
+    passes — the same check `_verify_shared_external_workspace` uses). Returns the
+    successful no-op tool result, or "" when this is not the coop case (the caller
+    then falls through to the parent-missing error). Never applies anything."""
+    child_root = _child_write_root(child_result or {})
+    if not child_root:
+        return ""
+    target = pathlib.Path(child_root).resolve(strict=False)
+    if not _is_host_minted_projects_tree(target):
+        return ""
+    ok, invalid, detail = _verify_shared_external_workspace(target, patch_path, touched)
+    if not ok:
+        verdict_path = _write_verdict(
+            ctx,
+            child_task_id,
+            outcome="coop_tree_verification_failed",
+            reason=reason or detail or "child work not verifiable in the coop tree",
+            files=touched,
+            manifest=manifest,
+            applied=False,
+            conflicts=[detail] if detail else [f"paths escape the coop tree: {invalid[:5]}"],
+            protected=[],
+            target=str(target),
+        )
+        return (
+            "⚠️ INTEGRATE_COOP_VERIFY_FAILED: child "
+            f"{child_task_id} wrote to the shared coop tree {target}, but its recorded patch "
+            f"does not verify against the tree ({detail or 'path escape'}). Inspect the tree "
+            f"and the child result directly. Verdict: {verdict_path or '(unwritten)'}."
+        )
+    verdict_path = _write_verdict(
+        ctx,
+        child_task_id,
+        outcome="coop_already_in_tree",
+        reason=reason or "cooperative child wrote directly into the host-minted shared tree",
+        files=touched,
+        manifest=manifest,
+        applied=False,
+        conflicts=[],
+        protected=[],
+        target=str(target),
+    )
+    return (
+        f"OK: cooperative no-op — child {child_task_id}'s work is ALREADY in the shared "
+        f"coop tree {target} (verified read-only against its patch; nothing to apply). "
+        f"The tree is checkpoint-committed by the host when this task tree finalizes. "
+        f"Touched files: {', '.join(touched[:10]) or '(none listed)'}. "
+        f"Verdict: {verdict_path or '(unwritten)'}."
+    )
+
+
 def _handle_external_workspace_integration(
     ctx: ToolContext,
     *,
@@ -234,6 +312,22 @@ def _handle_external_workspace_integration(
 ) -> str:
     parent_external_root, parent_external_reason = _parent_external_workspace_root(ctx, active_root)
     if parent_external_root is None:
+        # v6.58.0 (2.4A): the COOP case — a NON-workspace parent (e.g. a main-chat root)
+        # whose children built in a HOST-MINTED shared coop/genesis tree. The children
+        # wrote DIRECTLY into that tree, so there is nothing for the parent to apply
+        # anywhere: verify read-only that the child's work is already in the tree and
+        # return a SUCCESSFUL no-op verdict instead of a parent-missing error.
+        coop_result = _maybe_coop_noop_verdict(
+            ctx,
+            child_task_id=child_task_id,
+            reason=reason,
+            patch_path=patch_path,
+            manifest=manifest,
+            child_result=child_result,
+            touched=touched,
+        )
+        if coop_result:
+            return coop_result
         verdict_path = _write_verdict(
             ctx,
             child_task_id,
@@ -470,6 +564,28 @@ def _integrate_subagent_patch(
             child_result=child_result,
             touched=touched,
         )
+
+    # Fail-closed category guard (v6.56.0): a self_worktree child's patch is a
+    # patch AGAINST THE OUROBOROS SYSTEM REPO. A parent running in EXTERNAL
+    # workspace mode has the external project as its active root — applying a
+    # system-repo patch there would target the wrong repository. Refuse instead
+    # of 3-way-applying into the task workspace. A nested acting parent whose
+    # own workspace IS a self_worktree checkout stays legitimate top-only
+    # routing and is not touched by this guard.
+    if child_surface == "self_worktree":
+        parent_ws_mode = str(getattr(ctx, "workspace_mode", "") or "").strip().lower()
+        # Fire STRUCTURALLY whenever the parent's active root is a non-system
+        # workspace (is_workspace_mode()), so an unrecognized external spelling
+        # cannot slip past a fixed allowlist. The one excluded mode is a parent
+        # whose OWN workspace is a self_worktree checkout — it legitimately routes
+        # a system-repo patch (nested acting), as the comment above notes.
+        if ctx.is_workspace_mode() and parent_ws_mode != "self_worktree":
+            return (
+                f"⚠️ INTEGRATE_SELF_WORKTREE_UNDER_WORKSPACE: child {child_task_id} produced a "
+                "self_worktree patch (against the Ouroboros system repo), but this task's active "
+                "root is an external workspace. Refusing to apply a system-repo patch into the "
+                "task workspace; integrate it from a non-workspace parent task instead."
+            )
 
     runtime_mode = get_runtime_mode()
     # Derive the changed-path set from the PATCH ITSELF (not the child-controlled

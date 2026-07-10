@@ -15,7 +15,7 @@
   "OUROBOROS_MODEL_LIGHT": "anthropic/claude-sonnet-4.5",
   "OUROBOROS_MODEL_FALLBACKS": "anthropic/claude-sonnet-4.5",
   "CLAUDE_CODE_MODEL": "claude-opus-4-6[1m]",
-  "OUROBOROS_MAX_WORKERS": 5,
+  "OUROBOROS_MAX_WORKERS": 4,
   "TOTAL_BUDGET": 50.0,
   "OUROBOROS_PER_TASK_COST_USD": 50.0,
   "OUROBOROS_SOFT_TIMEOUT_SEC": 600,
@@ -61,5 +61,6 @@
   "OUROBOROS_POST_TASK_EVOLUTION_CADENCE": "every_n:1",
   "OUROBOROS_POST_TASK_EVOLUTION_BUDGET_USD": 0.0,
   "OUROBOROS_EVOLUTION_PERSISTENT_OBJECTIVE": "At the evolve stage, implement the objective as at most one reviewed commit, then restart once.\n1. Make the smallest safe code change; use advisory_review to surface issues; fold every correctness fix the reviewers raise into that same change before committing.\n2. Land no more than one commit_reviewed for this cycle. An honest no-op is valid when the objective is already solved, unsafe, too broad, or needs owner input.\n3. Normal Ouroboros release/version rules still apply when the reviewed commit path requires them; this benchmark steer is only about avoiding churn.\n4. After the reviewed commit lands (clean working tree, HEAD = that commit), call request_restart once with a short reason, then stop: do not edit, commit, or call request_restart again.",
-  "OUROBOROS_SERVER_PORT": 8765
+  "OUROBOROS_SERVER_PORT": 8765,
+  "OUROBOROS_SAFETY_MODE": "light"
 }

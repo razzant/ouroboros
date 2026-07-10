@@ -11,10 +11,12 @@ from __future__ import annotations
 
 import html as _html
 import json as _json
+import os
 import pathlib
 import re
 import shutil
 import subprocess
+import sys
 from typing import List
 
 from ouroboros.tools.registry import ToolContext, ToolEntry
@@ -179,11 +181,41 @@ def _youtube_transcript(ctx: ToolContext, url: str = "", lang: str = "en") -> st
         return f"⚠️ YOUTUBE_TRANSCRIPT_UNAVAILABLE: fetch failed ({type(exc).__name__})."
 
 
+def _resolve_ffmpeg() -> str | None:
+    """ffmpeg resolver chain (v6.56.0): an ffmpeg binary BESIDE the current
+    interpreter (venv/bundled bin — benchmark servers often start without
+    `activate`, so a venv-installed ffmpeg never reaches PATH) → the
+    imageio-ffmpeg wheel binary (the Terminal-Bench agent-prefix install) →
+    plain PATH lookup. Returns None when no candidate exists."""
+    sibling = pathlib.Path(sys.executable).resolve(strict=False).parent / (
+        "ffmpeg.exe" if os.name == "nt" else "ffmpeg"
+    )
+    try:
+        if sibling.exists() and os.access(sibling, os.X_OK):
+            return str(sibling)
+    except OSError:
+        pass
+    try:
+        import imageio_ffmpeg  # type: ignore[import-not-found]
+
+        exe = str(imageio_ffmpeg.get_ffmpeg_exe() or "")
+        if exe:
+            return exe
+    except Exception:
+        pass
+    return shutil.which("ffmpeg")
+
+
 def _extract_video_frames(ctx: ToolContext, path: str = "", timestamps: str = "", max_frames: int = 5) -> str:
     """Extract selected video frames with ffmpeg when available."""
-    ffmpeg = shutil.which("ffmpeg")
+    ffmpeg = _resolve_ffmpeg()
     if not ffmpeg:
-        return "⚠️ EXTRACT_VIDEO_FRAMES_UNAVAILABLE: ffmpeg is not installed or not on PATH."
+        return (
+            "⚠️ EXTRACT_VIDEO_FRAMES_UNAVAILABLE: no ffmpeg found (venv/bundled bin, "
+            "imageio-ffmpeg, or PATH). Workaround: extract frames yourself with "
+            "python+cv2 (`cv2.VideoCapture` + `cv2.imwrite`) via run_script, then "
+            "inspect the saved frames with view_image."
+        )
     fp, err = _resolve_local_file(ctx, path, max_bytes=_VIDEO_MAX_BYTES)
     if err:
         return err
@@ -282,6 +314,9 @@ def get_tools() -> List[ToolEntry]:
                 "description": (
                     "Extract still frames from a local video file using ffmpeg when available. "
                     "Frames are written under artifact_store/video_frames and can be inspected with view_image. "
+                    "PREFER this + view_image for any question about a video's VISUAL content (what is shown, "
+                    "colors, counts, text on screen) — a clean extracted frame beats a browser screenshot of a "
+                    "compressed player, and transcripts carry no visuals at all. "
                     "Returns a typed EXTRACT_VIDEO_FRAMES_UNAVAILABLE notice when ffmpeg or the file is unavailable."
                 ),
                 "parameters": {

@@ -2,17 +2,18 @@
 
 
 def test_review_query_model_max_tokens():
-    """review.py _query_model must use ≥65536 max_tokens."""
-    import ast
-    from pathlib import Path
+    """review.py _query_model defaults to a 65536-token response reservation.
+    v6.61.1: the literal moved into _review_output_budget (the
+    OUROBOROS_REVIEW_MAX_TOKENS operator knob may LOWER it for mega-diff packs,
+    floor 8192, never raise) — the un-overridden default must stay 65536."""
+    import os
+    from unittest import mock
 
-    src = Path("ouroboros/tools/review.py").read_text(encoding="utf-8")
-    tree = ast.parse(src)
-    for node in ast.walk(tree):
-        if isinstance(node, ast.keyword) and node.arg == "max_tokens":
-            if isinstance(node.value, ast.Constant) and node.value.value >= 65536:
-                return  # found
-    raise AssertionError("Expected max_tokens>=65536 in review.py _query_model")
+    from ouroboros.tools.review import _review_output_budget
+
+    with mock.patch.dict(os.environ, {}, clear=False):
+        os.environ.pop("OUROBOROS_REVIEW_MAX_TOKENS", None)
+        assert _review_output_budget() == 65536
 
 
 def test_project_naming_max_tokens_pinned():

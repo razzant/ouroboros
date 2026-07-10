@@ -9,6 +9,22 @@ the VM. It keeps the official OSWorld rhythm:
 Every action returned by Ouroboros is passed through ``env.step(...)`` and is
 therefore visible in OSWorld's normal trajectory/action history. Screenshots are
 saved under ``data/uploads`` so Ouroboros can inspect them with ``vlm_query``.
+
+Alignment target: OSWorld 2.0 (``ALIGNED_UPSTREAM`` below). The runner mirrors
+the official per-example artifact contract consumed by upstream
+``show_result.py`` / ``lib_run_single.py``:
+
+    <result_dir>/<action_space>/<observation_type>/<model>/<domain>/<example_id>/
+        traj.jsonl          # official per-step rows (step_num, action, response,
+                            # reward, done, info, screenshot_file, ...)
+        step_<n>_<ts>.png   # post-action screenshot per step (official naming)
+        result.txt          # final env.evaluate() score (scoring authority)
+        result.json         # full dict result when evaluate() returns one
+
+Not implemented (be honest when comparing to official 2.0 numbers): inline
+checkpoint evaluations (``--checkpoint_eval_mode inline --checkpoint_steps
+150,300``), multi-phase tasks, the human-in-the-loop user simulator
+(``ASK_USER`` rows), ``recording.mp4``, and cloud providers (aws/azure/gcp).
 """
 
 from __future__ import annotations
@@ -19,6 +35,7 @@ import datetime as _dt
 import json
 import os
 import re
+import shutil
 import subprocess
 import sys
 import time
@@ -53,6 +70,135 @@ VMWARE_FUSION_PATHS = (
 )
 SPECIAL_ACTIONS = {"WAIT", "DONE", "FAIL"}
 
+# The exact upstream this adapter is aligned against. Verified 2026-07-03 from
+# primary sources (repo tree, run scripts, lib_run_single.py, desktop_env.py,
+# show_result.py at this commit; paper arXiv:2606.29537):
+# - Official launch scripts run with ``--max_steps 500`` and inline checkpoint
+#   evaluations at 150/300 (scripts/bash/run_multienv_claude.sh); the bare
+#   ``run.py`` argparse default is the legacy 15.
+# - Evaluation is VM-state-only: ``DesktopEnv.evaluate()`` scores getters over
+#   files/app/OS/browser state; the ONLY agent-message channel is the special
+#   ``FAIL`` action for ``evaluator.func == "infeasible"`` tasks.
+# - ``show_result.py`` consumes ``<result_dir>/<action_space>/<observation_type>/
+#   <model>/<domain>/<example_id>/result.txt``.
+ALIGNED_UPSTREAM = {
+    "repo": "https://github.com/xlang-ai/OSWorld-V2",
+    "commit": "c261cb57a699bd18db128787ca4e71b749141762",
+    "commit_date": "2026-06-30",
+    "paper": "arXiv:2606.29537 (OSWorld 2.0: Benchmarking Computer Use Agents on Long-Horizon Real-World Tasks)",
+    "protocol_max_steps": 500,
+    "protocol_checkpoint_steps": [150, 300],
+    "legacy_repo": "https://github.com/xlang-ai/OSWorld",
+}
+
+# Providers this adapter can actually drive locally. Official OSWorld 2.0 also
+# supports aws/azure/gcp/aliyun/volcengine, but this adapter has no cloud path.
+SUPPORTED_PROVIDERS = ("vmware", "docker")
+
+
+def osworld_checkout_info(osworld_root: Path) -> dict[str, Any]:
+    """Describe an OSWorld checkout: variant (v1/v2), git commit, key modules.
+
+    Variant markers verified against the upstream trees:
+    ``evaluation_examples/test_v2.json`` exists only in OSWorld-V2;
+    ``evaluation_examples/test_all.json`` only in classic OSWorld.
+    """
+
+    root = Path(osworld_root).expanduser().resolve(strict=False)
+    info: dict[str, Any] = {
+        "root": str(root),
+        "exists": root.is_dir(),
+        "variant": "unknown",
+        "git_commit": "",
+        "matches_aligned_commit": False,
+        "has_desktop_env": (root / "desktop_env" / "desktop_env.py").is_file(),
+        "aligned_upstream": dict(ALIGNED_UPSTREAM),
+    }
+    if (root / "evaluation_examples" / "test_v2.json").is_file():
+        info["variant"] = "v2"
+    elif (root / "evaluation_examples" / "test_all.json").is_file():
+        info["variant"] = "v1"
+    elif (root / "evaluation_examples").is_dir():
+        info["variant"] = "examples_only"
+    try:
+        proc = subprocess.run(
+            ["git", "-C", str(root), "rev-parse", "HEAD"],
+            capture_output=True,
+            text=True,
+            timeout=10,
+        )
+        if proc.returncode == 0:
+            info["git_commit"] = proc.stdout.strip()
+    except Exception:
+        pass
+    info["matches_aligned_commit"] = bool(info["git_commit"]) and info["git_commit"] == ALIGNED_UPSTREAM["commit"]
+    return info
+
+
+def provider_preflight_failures(provider_name: str, path_to_vm: str) -> list[str]:
+    """Fail loudly (with what is missing) when the VM provider cannot run here."""
+
+    provider = str(provider_name or "").strip().lower()
+    failures: list[str] = []
+    if provider not in SUPPORTED_PROVIDERS:
+        failures.append(
+            f"provider '{provider}' is not supported by this adapter "
+            f"(supported: {', '.join(SUPPORTED_PROVIDERS)}); official OSWorld 2.0 cloud "
+            "providers (aws/azure/gcp) have no local adapter path"
+        )
+        return failures
+    if provider == "vmware":
+        vm_path = Path(path_to_vm).expanduser()
+        if not vm_path.exists():
+            failures.append(f"VM path not found: {vm_path}")
+        _ensure_vmrun_on_path()
+        if not any((Path(path) / "vmrun").exists() for path in VMWARE_FUSION_PATHS) and not shutil.which("vmrun"):
+            failures.append("vmrun not found (checked VMware Fusion app paths and PATH)")
+    elif provider == "docker":
+        docker = shutil.which("docker")
+        if not docker:
+            failures.append("docker CLI not found on PATH (required by the docker provider)")
+        else:
+            try:
+                proc = subprocess.run(
+                    [docker, "info", "--format", "{{.ServerVersion}}"],
+                    capture_output=True,
+                    text=True,
+                    timeout=15,
+                )
+                if proc.returncode != 0:
+                    failures.append(
+                        "docker daemon not reachable: "
+                        + (proc.stderr or proc.stdout or "").strip()[:200]
+                    )
+            except Exception as exc:  # noqa: BLE001 - preflight diagnostics
+                failures.append(f"docker daemon probe failed: {type(exc).__name__}: {exc}")
+    return failures
+
+
+def _persist_evaluation_result(result: Any, run_dir: Path) -> float:
+    """Persist ``env.evaluate()`` output the way official lib_run_single.py does.
+
+    Upstream (OSWorld-V2 ``_persist_evaluation_result``): the result may be a
+    float (legacy) or a dict whose ``score`` field is the canonical float; dict
+    results are additionally written to ``result.json``. ``result.txt`` is what
+    official ``show_result.py`` scores.
+    """
+
+    if isinstance(result, dict):
+        try:
+            score = float(result.get("score", 0.0))
+        except (TypeError, ValueError):
+            score = 0.0
+        (run_dir / "result.json").write_text(
+            json.dumps(result, ensure_ascii=False, indent=2, default=str) + "\n",
+            encoding="utf-8",
+        )
+    else:
+        score = float(result)
+    (run_dir / "result.txt").write_text(f"{score}\n", encoding="utf-8")
+    return score
+
 
 @dataclass
 class StepAgentConfig:
@@ -67,6 +213,7 @@ class StepAgentConfig:
     timeout_sec: int
     max_obs_chars: int
     screenshot_check_only: bool
+    disable_tools: str = "claude_code_edit"
 
 
 @dataclass
@@ -96,6 +243,8 @@ class PreflightConfig:
     result_root: Path
     ouroboros_url: str
     model: str
+    provider_name: str = "vmware"
+    allow_scaffold_mismatch: bool = False
 
 
 def _install_optional_dependency_stubs() -> None:
@@ -143,20 +292,49 @@ def _http_json(url: str, timeout: float = 5.0) -> dict[str, Any]:
     return json.loads(raw) if raw.strip().startswith("{") else {"raw": raw}
 
 
+_DEFAULT_DESKTOP_PORT = 8765
+_LOOPBACK_HOSTS = frozenset({"127.0.0.1", "localhost", "0.0.0.0", "::1", "[::1]", ""})
+
+
+def _is_default_desktop_server(url: str) -> bool:
+    """True if ``url`` points at the LIVE desktop server's port on any loopback
+    spelling. The guard keyed on the literal ``http://127.0.0.1:8765`` string, so
+    ``localhost:8765`` / ``127.0.0.2:8765`` / ``[::1]:8765`` bypassed it and could
+    still write into the live data root (adversarial review r1)."""
+    from urllib.parse import urlparse
+
+    try:
+        parsed = urlparse(str(url or "").strip())
+    except Exception:
+        return False
+    host = (parsed.hostname or "").strip().lower()
+    port = parsed.port if parsed.port is not None else (443 if parsed.scheme == "https" else 80)
+    is_loopback = host in _LOOPBACK_HOSTS or host.startswith("127.")
+    return is_loopback and port == _DEFAULT_DESKTOP_PORT
+
+
 def _preflight(config: PreflightConfig) -> dict[str, Any]:
     failures: list[str] = []
     details: dict[str, Any] = {}
-    if not config.osworld_root.is_dir():
+    checkout = osworld_checkout_info(config.osworld_root)
+    details["osworld_checkout"] = checkout
+    if not checkout["exists"]:
         failures.append(f"OSWorld checkout not found: {config.osworld_root}")
     if not (config.osworld_root / "evaluation_examples").exists():
         failures.append(f"OSWorld checkout shape not recognized: {config.osworld_root}")
+    if checkout["exists"] and not checkout["has_desktop_env"]:
+        failures.append(
+            f"desktop_env package missing in OSWorld checkout (expected desktop_env/desktop_env.py): {config.osworld_root}"
+        )
+    if checkout["exists"] and not checkout["matches_aligned_commit"]:
+        details["upstream_pin_warning"] = (
+            f"checkout commit {checkout['git_commit'] or '<unknown>'} differs from the aligned "
+            f"OSWorld 2.0 pin {ALIGNED_UPSTREAM['commit']} ({ALIGNED_UPSTREAM['repo']}); "
+            "results are only comparable against the pinned protocol"
+        )
     if not config.task_path.is_file():
         failures.append(f"task JSON not found: {config.task_path}")
-    vm_path = Path(config.path_to_vm).expanduser()
-    if not vm_path.exists():
-        failures.append(f"VM path not found: {vm_path}")
-    if not any((Path(path) / "vmrun").exists() for path in VMWARE_FUSION_PATHS):
-        failures.append("vmrun not found in known VMware Fusion paths")
+    failures.extend(provider_preflight_failures(config.provider_name, config.path_to_vm))
     if not config.repo_dir.is_dir() or not (config.repo_dir / "VERSION").exists():
         failures.append(f"Ouroboros repo shape not recognized: {config.repo_dir}")
     if not config.settings_path.is_file():
@@ -170,8 +348,17 @@ def _preflight(config: PreflightConfig) -> dict[str, Any]:
 
             provider = provider_for_model(selected_model)
             env_key = PROVIDER_ENV_KEYS.get(provider, "OPENROUTER_API_KEY")
+            # The provider key lives on the TARGET server (steps submit over
+            # `ouroboros run --url`); the CLIENT settings/env cannot prove the
+            # server has it, and /api/settings masks it. So a missing client-side
+            # key is a WARNING, not a preflight pass/fail — the server scaffold
+            # check below is the authoritative "is the executing server usable"
+            # gate (adversarial review r1: client-side key check was misleading).
             if not str(os.environ.get(env_key) or settings.get(env_key) or "").strip():
-                failures.append(f"{env_key} missing for model provider {provider}")
+                details["client_provider_key_absent"] = (
+                    f"{env_key} not set client-side for provider {provider}; the TARGET server "
+                    "must carry it (not verifiable here — /api/settings masks secrets)."
+                )
         except Exception as exc:
             failures.append(f"settings.json unreadable: {type(exc).__name__}: {exc}")
     try:
@@ -194,6 +381,44 @@ def _preflight(config: PreflightConfig) -> dict[str, Any]:
         }
         if not state.get("supervisor_ready"):
             failures.append("Ouroboros server reachable but supervisor_ready is false")
+        # The adapter submits over the gateway (`ouroboros run --url`), so env
+        # vars in the CLI subprocess can NOT configure the executing server.
+        # The disclosed scaffold defaults are only real if the TARGET SERVER
+        # already runs them — verify its effective settings and fail loudly on
+        # drift (start the isolated server from osworld/settings_base.json).
+        server_settings = _http_json(config.ouroboros_url.rstrip("/") + "/api/settings", timeout=5)
+        expected = {
+            "OUROBOROS_RUNTIME_MODE": "pro",
+            "OUROBOROS_SAFETY_MODE": "light",
+            "OUROBOROS_MAX_WORKERS": 4,
+            # The scaffold's blocking review lane is only real if the TARGET server
+            # runs it — CLI env cannot configure the executing server, so the
+            # preflight must verify it (adversarial review r2 #6).
+            "OUROBOROS_REVIEW_ENFORCEMENT": "blocking",
+        }
+        mismatches = []
+        for key, want in expected.items():
+            got = server_settings.get(key)
+            if str(got).strip().lower() != str(want).strip().lower():
+                mismatches.append(f"{key}: server={got!r} expected={want!r}")
+        if config.model:
+            server_model = str(server_settings.get("OUROBOROS_MODEL") or "")
+            if server_model != config.model:
+                mismatches.append(f"OUROBOROS_MODEL: server={server_model!r} expected={config.model!r}")
+        details["server_scaffold_settings"] = {
+            k: server_settings.get(k)
+            for k in ("OUROBOROS_RUNTIME_MODE", "OUROBOROS_SAFETY_MODE", "OUROBOROS_MAX_WORKERS", "OUROBOROS_MODEL")
+        }
+        if mismatches:
+            message = (
+                "target server settings do not match the disclosed OSWorld scaffold "
+                "(render devtools/benchmarks/osworld/settings_base.json into an isolated "
+                "server and point --ouroboros-url at it): " + "; ".join(mismatches)
+            )
+            if config.allow_scaffold_mismatch:
+                details["scaffold_mismatch_allowed"] = mismatches
+            else:
+                failures.append(message)
     except Exception as exc:
         failures.append(f"Ouroboros server not reachable: {type(exc).__name__}: {exc}")
     try:
@@ -426,14 +651,21 @@ class OuroborosStepAgent:
         self.timeout_sec = config.timeout_sec
         self.max_obs_chars = config.max_obs_chars
         self.screenshot_check_only = config.screenshot_check_only
+        self.disable_tools = config.disable_tools
         self.step_idx = 0
         self.history: list[dict[str, Any]] = []
         self.notes: list[str] = []
+        self.final_answer = ""
+        self.terminal_action = ""
+        self.last_response = ""
 
     def reset(self) -> None:
         self.step_idx = 0
         self.history.clear()
         self.notes.clear()
+        self.final_answer = ""
+        self.terminal_action = ""
+        self.last_response = ""
 
     def _save_screenshot(self, obs: dict[str, Any]) -> tuple[str, str]:
         screenshot = obs.get("screenshot")
@@ -516,9 +748,20 @@ class OuroborosStepAgent:
                 '{"type":"wait","seconds":1}; '
                 '{"type":"done"}; {"type":"fail"}. '
                 'Use {"type":"python","code":"..."} only when no structured action fits. '
+                "THE GRADER INSPECTS VM STATE ONLY. The OSWorld evaluator scores the virtual machine's "
+                "state after your final step: files saved at the exact requested paths, in-application "
+                "document state, the browser's ACTIVE TAB URL, and OS configuration. Text you write in "
+                "chat is NEVER read by the evaluator. If the task asks a question, navigate the GUI until "
+                "the answer is shown in the expected application/page and LEAVE the environment in that "
+                "state (for example the browser tab open on the page that answers the question) before done. "
+                "If the task edits a document or spreadsheet, SAVE the file to the exact expected path "
+                "before done — an unsaved buffer or a chat answer scores zero. "
                 "In app-named tasks, work in the named app first; if you edit files directly, reopen/verify in that app before done. "
                 "Use done only after independently checking the evaluator-facing state. "
                 "Use fail when demonstrably infeasible (missing hardware/resource, blocked permissions, feature absent); an out-of-app workaround is not success for an in-app task. "
+                'When you return done or fail, ALSO set "final_answer" to your definitive short answer '
+                "(for question-style tasks) or a one-line completion/infeasibility summary — it is recorded "
+                "in the audit ledger, but it never replaces the required VM state. "
                 "Do NOT claim a screenshot or VLM 'confirmed' / 'shows' anything unless you actually called vlm_query (or were given image input) THIS step; otherwise describe only what the accessibility tree and action history establish."
             )
 
@@ -526,7 +769,7 @@ class OuroborosStepAgent:
 Return ONLY a JSON object, with no markdown and no prose outside JSON.
 
 JSON schema:
-{{"response": "short rationale", "notes": "optional cross-step note for yourself", "actions": [{{"type": "shell", "command": "..."}}]}}
+{{"response": "short rationale", "notes": "optional cross-step note for yourself", "final_answer": "REQUIRED with done/fail: definitive short answer or completion summary", "actions": [{{"type": "shell", "command": "..."}}]}}
 
 {task_directive}
 {screenshot_instruction}
@@ -551,12 +794,19 @@ Accessibility tree (may be empty/truncated):
         (self.result_dir / f"prompt_step_{step:03d}.txt").write_text(prompt, encoding="utf-8")
 
         env = os.environ.copy()
+        # NB: `ouroboros run --url` submits over the gateway, so these env vars
+        # configure only the CLI subprocess, NOT the executing server — the
+        # disclosed scaffold defaults are ENFORCED by the preflight check of the
+        # target server's /api/settings (see _preflight). Kept here so any
+        # CLI-local behavior matches the scaffold too.
         env.update({
             "OUROBOROS_REPO_DIR": str(self.repo_dir),
             "OUROBOROS_DATA_DIR": str(self.data_dir),
             "OUROBOROS_SETTINGS_PATH": str(self.settings_path),
             "OUROBOROS_RUNTIME_MODE": "pro",
-            "OUROBOROS_REVIEW_ENFORCEMENT": "advisory",
+            "OUROBOROS_MAX_WORKERS": "4",
+            "OUROBOROS_SAFETY_MODE": "light",
+            "OUROBOROS_REVIEW_ENFORCEMENT": "blocking",
             "PYTHONUNBUFFERED": "1",
         })
         if self.model:
@@ -575,6 +825,7 @@ Accessibility tree (may be empty/truncated):
             "--memory-mode",
             "empty",
             "--quiet",
+            *(["--disable-tools", self.disable_tools] if self.disable_tools else []),
             *([ "--attach", screenshot_path ] if screenshot_path else []),
             prompt,
         ]
@@ -643,6 +894,19 @@ Accessibility tree (may be empty/truncated):
         if self.screenshot_check_only and "DONE" not in actions and "FAIL" not in actions:
             actions = ["WAIT"]
 
+        # Terminal-message capture (the cu_bridge sample-60 defect: agents that
+        # answered "chat-style" left final_answer empty and the run's own
+        # objective ledger degraded to not_evaluated). When the agent ends the
+        # episode, persist its explicit final_answer — falling back to the
+        # terminal response text — so the audit trail always carries the
+        # agent's answer even though official scoring stays VM-state-only.
+        if response.strip():
+            self.last_response = response.strip()
+        if "DONE" in actions or "FAIL" in actions:
+            self.terminal_action = "FAIL" if "FAIL" in actions else "DONE"
+            explicit = str(payload.get("final_answer") or "").strip()
+            self.final_answer = explicit or response.strip()
+
         debug = {
             "step": step,
             "returncode": returncode,
@@ -697,6 +961,8 @@ def _write_task_records(config: TaskRecordConfig) -> dict[str, Any]:
                 "adapter": "external_step_loop",
                 "official_actions": True,
                 "memory_mode": "empty_per_ouroboros_step",
+                "action_space": "pyautogui",
+                "aligned_upstream": dict(ALIGNED_UPSTREAM),
             },
             extra=details,
         ),
@@ -721,22 +987,45 @@ def _write_task_records(config: TaskRecordConfig) -> dict[str, Any]:
     return outcome
 
 
-def main() -> int:
-    _ensure_vmrun_on_path()
-    _install_optional_dependency_stubs()
+def build_arg_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser()
     parser.add_argument("--osworld-root", default=DEFAULT_OSWORLD_ROOT)
-    parser.add_argument("--provider_name", default="vmware")
+    parser.add_argument("--provider_name", default="vmware", help=f"VM provider; this adapter supports: {', '.join(SUPPORTED_PROVIDERS)}")
     parser.add_argument("--path_to_vm", default=DEFAULT_VM)
     parser.add_argument("--task", default=DEFAULT_TASK)
     parser.add_argument("--result_dir", default="results/ouroboros_step_agent")
+    parser.add_argument(
+        "--observation_type",
+        choices=["screenshot", "screenshot_a11y_tree"],
+        default="screenshot_a11y_tree",
+        help="official observation_type path segment; also controls require_a11y_tree",
+    )
     parser.add_argument("--repo-dir", default=DEFAULT_REPO)
     parser.add_argument("--data-dir", default=DEFAULT_DATA)
     parser.add_argument("--settings-path", default=DEFAULT_SETTINGS)
     parser.add_argument("--ouroboros-bin", default=DEFAULT_OUROBOROS_BIN)
-    parser.add_argument("--ouroboros-url", default="http://127.0.0.1:8765")
+    parser.add_argument("--ouroboros-url", default="http://127.0.0.1:8765",
+                        help="Ouroboros server URL. The default is the LIVE desktop server; a real bench "
+                             "run must point at an isolated server (see --allow-live-server).")
+    parser.add_argument("--allow-scaffold-mismatch", action="store_true",
+                        help="explicit ablation opt-in: run even when the target server's effective "
+                             "settings differ from the disclosed scaffold defaults (recorded in the "
+                             "preflight details; the run is then NOT comparable to default-scaffold runs).")
+    parser.add_argument("--allow-live-server", action="store_true",
+                        help="explicit opt-in to run against the default desktop server URL "
+                             "(http://127.0.0.1:8765). Without it, real runs refuse the default: every "
+                             "step submits tasks/screenshots into whichever server answers there, and a "
+                             "LIVE data/ root must never absorb bench writes. Start an isolated server "
+                             "on another port instead.")
     parser.add_argument("--model", default="anthropic/claude-opus-4-7")
-    parser.add_argument("--max_steps", type=int, default=50)
+    # OSWorld 2.0 protocol budget (official launch scripts pass 500; the paper
+    # reports 150/300/500-step curves). The old 15/50 conventions are legacy.
+    parser.add_argument("--max_steps", type=int, default=500)
+    parser.add_argument(
+        "--disable-tools",
+        default="claude_code_edit",
+        help="comma-separated Ouroboros tools withheld per step (bench scaffold default: claude_code_edit)",
+    )
     parser.add_argument("--step_timeout_sec", type=int, default=240)
     parser.add_argument("--sleep_after_execution", type=float, default=1.0)
     parser.add_argument("--wait_after_reset_sec", type=float, default=8.0)
@@ -746,10 +1035,23 @@ def main() -> int:
     parser.add_argument("--max_obs_chars", type=int, default=12000)
     parser.add_argument("--screenshot-check-only", action="store_true")
     parser.add_argument("--show-vm", action="store_true")
-    args = parser.parse_args()
+    return parser
+
+
+def main() -> int:
+    _ensure_vmrun_on_path()
+    _install_optional_dependency_stubs()
+    args = build_arg_parser().parse_args()
 
     osworld_root = Path(args.osworld_root).expanduser().resolve(strict=False)
     sys.path.insert(0, str(osworld_root))
+    if _is_default_desktop_server(args.ouroboros_url) and not args.allow_live_server:
+        raise SystemExit(
+            "refusing the default desktop server port (8765 on a loopback host): bench steps would "
+            "write tasks/screenshots into the LIVE Ouroboros data root. Point --ouroboros-url at an "
+            "isolated server (fresh OUROBOROS_DATA_DIR, non-default port), or pass --allow-live-server "
+            "for an explicit local-debug run."
+        )
     task_path = Path(args.task).expanduser()
     if not task_path.is_absolute():
         task_path = osworld_root / task_path
@@ -759,7 +1061,16 @@ def main() -> int:
     if not result_root.is_absolute():
         result_root = osworld_root / result_root
     result_root = ensure_outside_repo(result_root, Path(args.repo_dir).expanduser().resolve(strict=False))
-    run_dir = result_root / domain / example_id
+    # Official example dir layout consumed by upstream show_result.py:
+    # <result_dir>/<action_space>/<observation_type>/<model>/<domain>/<example_id>
+    run_dir = (
+        result_root
+        / "pyautogui"
+        / args.observation_type
+        / _safe_slug(args.model or "default")
+        / domain
+        / example_id
+    )
     run_dir.mkdir(parents=True, exist_ok=True)
 
     repo_dir = Path(args.repo_dir).expanduser().resolve(strict=False)
@@ -775,6 +1086,8 @@ def main() -> int:
         result_root=result_root,
         ouroboros_url=args.ouroboros_url,
         model=args.model,
+        provider_name=args.provider_name,
+        allow_scaffold_mismatch=bool(args.allow_scaffold_mismatch),
     ))
     write_json(run_dir / "preflight.json", preflight)
     if not preflight["ok"]:
@@ -812,6 +1125,7 @@ def main() -> int:
         timeout_sec=args.step_timeout_sec,
         max_obs_chars=args.max_obs_chars,
         screenshot_check_only=args.screenshot_check_only,
+        disable_tools=args.disable_tools,
     ))
 
     try:
@@ -822,7 +1136,7 @@ def main() -> int:
             screen_size=(1920, 1080),
             headless=not args.show_vm,
             os_type="Ubuntu",
-            require_a11y_tree=True,
+            require_a11y_tree=args.observation_type == "screenshot_a11y_tree",
         )
         obs = _initial_observation_with_retries(
             env,
@@ -843,7 +1157,7 @@ def main() -> int:
                 json.dumps(debug, ensure_ascii=False, indent=2),
                 encoding="utf-8",
             )
-            for action in actions:
+            for action_index, action in enumerate(actions, start=1):
                 ts = _dt.datetime.now().strftime("%Y%m%d@%H%M%S%f")
                 obs, reward, done, info = env.step(action, args.sleep_after_execution)
                 agent.record_action(
@@ -853,6 +1167,15 @@ def main() -> int:
                     done=bool(done),
                     info=dict(info or {}),
                 )
+                # Official convention (lib_run_single.py): save the post-action
+                # screenshot for the last action of a step (or on done) under
+                # step_<n>_<ts>.png and reference it from the traj row.
+                screenshot_file = None
+                if action_index == len(actions) or done:
+                    shot = obs.get("screenshot") if isinstance(obs, dict) else None
+                    if isinstance(shot, (bytes, bytearray)) and shot:
+                        screenshot_file = f"step_{step_idx + 1}_{ts}.png"
+                        (run_dir / screenshot_file).write_bytes(bytes(shot))
                 with (run_dir / "traj.jsonl").open("a", encoding="utf-8") as f:
                     f.write(json.dumps({
                         "step_num": step_idx + 1,
@@ -862,16 +1185,18 @@ def main() -> int:
                         "reward": reward,
                         "done": done,
                         "info": info,
-                        **debug,
-                    }, ensure_ascii=False) + "\n")
+                        "screenshot_file": screenshot_file,
+                        "adapter_debug": debug,
+                    }, ensure_ascii=False, default=str) + "\n")
                 if done:
                     break
             step_idx += 1
             if args.screenshot_check_only:
                 break
 
-        reward = float(env.evaluate())
-        (run_dir / "result.txt").write_text(f"{reward}\n", encoding="utf-8")
+        reward = _persist_evaluation_result(env.evaluate(), run_dir)
+        evaluator_cfg = example.get("evaluator") if isinstance(example, dict) else None
+        evaluator_func = evaluator_cfg.get("func") if isinstance(evaluator_cfg, dict) else None
         outcome = _write_task_records(TaskRecordConfig(
             run_dir=run_dir,
             result_root=result_root,
@@ -883,7 +1208,15 @@ def main() -> int:
             steps=step_idx,
             status="completed",
             reason_code="official_evaluate",
-            extra={"screenshot_check_only": bool(args.screenshot_check_only)},
+            extra={
+                "screenshot_check_only": bool(args.screenshot_check_only),
+                "final_answer": agent.final_answer or agent.last_response,
+                "terminal_action": agent.terminal_action or "max_steps_exhausted",
+                "infeasible_declared": agent.terminal_action == "FAIL",
+                "evaluator_func": evaluator_func,
+                "observation_type": args.observation_type,
+                "max_steps": args.max_steps,
+            },
         ))
         print(json.dumps(outcome, ensure_ascii=False, indent=2))
         return 0
@@ -901,6 +1234,11 @@ def main() -> int:
             status="adapter_error",
             reason_code=type(exc).__name__,
             error=error,
+            extra={
+                "final_answer": agent.final_answer or agent.last_response,
+                "terminal_action": agent.terminal_action,
+                "infeasible_declared": agent.terminal_action == "FAIL",
+            },
         ))
         print(json.dumps(outcome, ensure_ascii=False, indent=2))
         return 1

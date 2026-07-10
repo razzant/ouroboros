@@ -276,6 +276,24 @@ class OuroborosAgent:
         # resolve_project_id(task) in build_llm_messages (Env is frozen — never mutate it).
         _resolved_project_id = resolve_project_id(task)
 
+        # Room lens (v6.61.3): a DIRECT-CHAT turn in a folder-room carries the
+        # host-verified room dir so the chat lane's reads/default shell cwd resolve
+        # to the PROJECT FOLDER (project_room_lens_dir keys on this metadata; the
+        # robot-room incident: "." resolved to the system repo and the agent
+        # narrated the wrong tree). A set-but-broken working_dir rides as a LOUD
+        # note instead (never a silent repo fallback).
+        if bool(task.get("_is_direct_chat")) and _resolved_project_id and not str(task.get("workspace_root") or "").strip():
+            try:
+                from ouroboros.workspace_admission import room_chat_lens_dir
+
+                _room_dir, _room_note = room_chat_lens_dir(self.env.drive_root, _resolved_project_id)
+                if _room_dir:
+                    task_metadata["_project_room_dir"] = _room_dir
+                elif _room_note:
+                    task_metadata["_project_room_note"] = _room_note
+            except Exception:
+                log.debug("room lens resolution failed", exc_info=True)
+
         ctx = ToolContext(
             repo_dir=self.env.repo_dir,
             drive_root=self.env.drive_root,

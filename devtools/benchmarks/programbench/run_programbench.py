@@ -16,7 +16,7 @@ if __package__ in {None, ""}:
     sys.path.insert(0, str(pathlib.Path(__file__).resolve().parents[3]))
 
 from devtools.benchmarks.common.manifests import benchmark_run_manifest, write_json
-from devtools.benchmarks.common.official_commands import programbench_eval_cmd, programbench_info_cmd
+from devtools.benchmarks.common.official_commands import programbench_command_for_manifest
 from devtools.benchmarks.common.result_index import task_result_row, write_result_index
 from devtools.benchmarks.common.run_roots import (
     default_settings_path,
@@ -28,6 +28,8 @@ from devtools.benchmarks.common.run_roots import (
 from devtools.benchmarks.programbench.programbench_adapter import (
     build_ouroboros_task_body,
     create_submission_tarball,
+    prepare_seeded_workspace,
+    default_protected_backend_paths,
     preflight_cleanroom_container,
     run_official_eval,
 )
@@ -87,7 +89,7 @@ def _write_failure_sidecars(
             output_paths=paths,
             dataset="programbench",
             harness={"container_name": container_name, "cleanroom_preflight": preflight},
-            official_command=programbench_eval_cmd(out_root) if eval_requested else programbench_info_cmd(out_root),
+            official_command=programbench_command_for_manifest(out_root, eval_requested=eval_requested),
             isolated_data_root=isolated_data_root,
             settings_path=settings_path,
             extra={
@@ -130,7 +132,7 @@ def main() -> int:
         if args.manifest_output
         else instance_dir / "run_manifest.json"
     )
-    protected_paths = args.protected_path or ["/workspace/executable", "executable"]
+    protected_paths = args.protected_path or default_protected_backend_paths()
     preflight: dict[str, object] = {}
     sidecar_context: dict[str, object] = {
         "ledger_output": str(ledger_output),
@@ -155,6 +157,23 @@ def main() -> int:
             sidecar_context,
             status="blocked",
             reason_code="cleanroom_preflight_failed",
+            official_eval_status="not_run",
+            output_paths={},
+            error=str(exc),
+        )
+        raise
+    try:
+        # Normalize the workspace exactly like the e2e seed path: the reference
+        # binary must live at reference_executable (protected) BEFORE the task
+        # body advertises it and before anything is packaged — a raw cleanroom
+        # workspace otherwise leaves the real reference at ./executable,
+        # unprotected and inside the submission.
+        sidecar_context["reference_layout"] = prepare_seeded_workspace(pathlib.Path(args.workspace))
+    except Exception as exc:
+        _write_failure_sidecars(
+            sidecar_context,
+            status="blocked",
+            reason_code="workspace_prepare_failed",
             official_eval_status="not_run",
             output_paths={},
             error=str(exc),
@@ -240,7 +259,7 @@ def main() -> int:
             },
             dataset="programbench",
             harness={"container_name": args.container_name, "cleanroom_preflight": preflight},
-            official_command=programbench_eval_cmd(out_root) if args.eval else programbench_info_cmd(out_root),
+            official_command=programbench_command_for_manifest(out_root, eval_requested=bool(args.eval)),
             isolated_data_root=args.isolated_data_root,
             settings_path=settings_path,
             extra={"eval_requested": bool(args.eval), "protected_paths": protected_paths},

@@ -81,6 +81,7 @@ def test_runtime_policy_blocks_are_semantic_tool_failures():
         ("read_file", "⚠️ REPO_READ_BLOCKED: protected path.", "blocked"),
         ("write_file", "⚠️ COGNITIVE_TOOL_REQUIRED: use update_identity for memory/identity.md.", "cognitive_tool_required"),
         ("write_file", "⚠️ ROOT_REQUIRED_USER_FILES: pass root='user_files'.", "root_required_user_files"),
+        ("write_file", "⚠️ ROOT_REQUIRED_ACTIVE_WORKSPACE: pass root='active_workspace'.", "root_required_active_workspace"),
     ]
     for tool, text, status in cases:
         assert _is_tool_execution_failure(True, text)

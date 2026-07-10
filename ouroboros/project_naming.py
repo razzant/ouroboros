@@ -268,7 +268,27 @@ def spawn_proactive_namer(
 
     def _work() -> None:
         try:
-            name = llm_project_name(body, drive_root=drive_root, task_id=task_id)
+            # v6.58.0 (§3.4b): HARD total wall-clock bound. The transport timeout bounds
+            # ONE attempt, but llm.chat's retry/fallback chain under a degraded provider
+            # could stretch the whole call to tens of minutes (the incident where the
+            # card was named 24 minutes late). A title is cosmetic: if it hasn't landed
+            # within the transport budget + slack, drop it — the id/title heuristics and
+            # the convert path's own bounded inline call (8s) already cover naming.
+            _result: list[str] = []
+
+            def _call() -> None:
+                try:
+                    _result.append(llm_project_name(body, drive_root=drive_root, task_id=task_id))
+                except Exception:
+                    log.debug("proactive namer inner call failed for %s", task_id, exc_info=True)
+
+            inner = threading.Thread(target=_call, name=f"namer-call-{task_id}", daemon=True)
+            inner.start()
+            inner.join(timeout=_naming_timeout_sec() + 30.0)
+            if inner.is_alive() or not _result:
+                log.debug("proactive namer exceeded its wall-clock bound for %s; skipped", task_id)
+                return
+            name = _result[0]
             if not name:
                 return
             from ouroboros.task_results import (

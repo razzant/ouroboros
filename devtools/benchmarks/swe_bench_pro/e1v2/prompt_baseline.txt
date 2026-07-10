@@ -3,13 +3,15 @@
 A repository ({repo}, language: {repo_language}) is checked out at /app in this container.
 Resolve the issue below by editing the repo's source, and verify the fix passes before finishing.
 
-## Working in /app (under your user_files root)
-- Understand: query_code(root="user_files", path="/app", op=...) for symbol-aware structure
-  (definitions/references/callers/callees/impact); search_code(root="user_files", path="/app") for
-  text/regex; read_file / list_files (root="user_files") likewise.
-- Edit source: write_file / edit_text (root="user_files", "/app/...").
+## Working in /app (your ACTIVE WORKSPACE)
+- /app is your active external workspace: repo-aware tools default to it via
+  root="active_workspace", with WORKSPACE-RELATIVE paths ("pkg/file.go", not "/app/pkg/file.go").
+- Understand: query_code(op=...) (root defaults to active_workspace) for symbol-aware structure
+  (definitions/references/callers/callees/impact); search_code / read_file / list_files
+  (root="active_workspace") for text/regex and file reads.
+- Edit source: write_file / edit_text (root="active_workspace", path="pkg/file.ext").
 - Build/run/test: run_command runs shell INSIDE this container with the project toolchain
-  (go/node/yarn/python/pytest/...). Work in /app; reproduce and run tests with it.
+  (go/node/yarn/python/pytest/...); use cwd="/app" (or a subdir). Reproduce and run tests with it.
 - No git-commit needed — your on-disk edits in /app are captured automatically (read-only git via
   run_command — diff/status/log — is fine).
 - Optional: delegate a heavy parallelizable sub-part with schedule_subagent(...); keep it narrow;

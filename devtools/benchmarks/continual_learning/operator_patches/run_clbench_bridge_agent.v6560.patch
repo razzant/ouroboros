@@ -1,0 +1,30 @@
+--- /tmp/claude-1006/-home-a-razzhigaev-ouro/5e03c92c-6039-4ed9-86a5-e7ad7739b20f/scratchpad/clb_bundle/clbench-livebridge-handoff-v3-2026-07-05/bench-config/external-adapters/ouroboros/run_clbench_bridge_agent.py	2026-07-04 19:37:34.214351400 +0000
++++ /home/a.razzhigaev/ouro/benchmarks/continual-learning-bench/src/systems/ouroboros/run_clbench_bridge_agent.py	2026-07-05 21:15:19.880841251 +0000
+@@ -169,7 +169,13 @@
+     (None == order 0 == CC's baseline order)."""
+     def build():
+         cls = get_task_class(domain)
+-        task = cls(schedule="default", run_index=run_index)
++        # Operator port (campaign v6.56.0): not every task ctor knows run_index
++        # (CodebaseAdaptationTask lacks it) — pass it only when supported.
++        import inspect as _inspect
++        kwargs = {"schedule": "default"}
++        if "run_index" in _inspect.signature(cls.__init__).parameters:
++            kwargs["run_index"] = run_index
++        task = cls(**kwargs)
+         return task, task.reset_baseline_instance(i)
+     return build
+ 
+@@ -331,7 +337,11 @@
+     + NOTICE fire mid-sequence (idx crossing pre_drift_count), exactly as CC's rollout experiences them."""
+     def build():
+         cls = get_task_class(domain)
+-        task = cls(schedule="default", run_index=run_index)
++        import inspect as _inspect2
++        _kw = {"schedule": "default"}
++        if "run_index" in _inspect2.signature(cls.__init__).parameters:
++            _kw["run_index"] = run_index
++        task = cls(**_kw)
+         return task, task.reset()
+     return build
+ 

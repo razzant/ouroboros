@@ -2,6 +2,7 @@
 typed *_UNAVAILABLE string instead of raising."""
 from __future__ import annotations
 
+import os
 import sys
 import types
 
@@ -209,3 +210,46 @@ def test_oversized_attachment_image_not_native_injected(tmp_path):
     blob = json.dumps(build_user_content(task))
     assert "small.png" in blob  # small image natively injected (its _source_path appears)
     assert "big.png" not in blob  # oversized image skipped (manifest-readable only, no data URL)
+
+
+def test_resolve_ffmpeg_chain_sibling_then_imageio_then_path(tmp_path, monkeypatch):
+    """v6.56.0 resolver pin: venv/bundled sibling → imageio-ffmpeg wheel → PATH.
+    TB servers start without `activate`, so the PATH leg alone is dead there."""
+    # 1) an ffmpeg beside the interpreter wins outright. The sibling name must match
+    # what the resolver looks for on this OS (ffmpeg.exe on Windows) or the 3-OS CI
+    # Windows leg sees no sibling and the resolver correctly falls through to None.
+    fake_bin = tmp_path / "bin"
+    fake_bin.mkdir()
+    sibling = fake_bin / ("ffmpeg.exe" if os.name == "nt" else "ffmpeg")
+    sibling.write_text("#!/bin/sh\n")
+    sibling.chmod(0o755)
+    monkeypatch.setattr(media.sys, "executable", str(fake_bin / "python3"))
+    monkeypatch.setattr(media.shutil, "which", lambda name: None)
+    assert media._resolve_ffmpeg() == str(sibling)
+    # 2) no sibling → the imageio-ffmpeg wheel binary (the TB agent-prefix leg).
+    monkeypatch.setattr(media.sys, "executable", str(tmp_path / "nowhere" / "python3"))
+    wheel_exe = str(tmp_path / "wheel-ffmpeg")
+    monkeypatch.setitem(sys.modules, "imageio_ffmpeg", types.SimpleNamespace(get_ffmpeg_exe=lambda: wheel_exe))
+    assert media._resolve_ffmpeg() == wheel_exe
+    # 3) no wheel → PATH; nothing anywhere → None.
+    monkeypatch.setitem(sys.modules, "imageio_ffmpeg", None)  # import raises
+    assert media._resolve_ffmpeg() is None
+    monkeypatch.setattr(media.shutil, "which", lambda name: "/usr/bin/ffmpeg" if name == "ffmpeg" else None)
+    assert media._resolve_ffmpeg() == "/usr/bin/ffmpeg"
+
+
+def test_extract_video_frames_unavailable_hints_cv2_workaround(monkeypatch):
+    monkeypatch.setattr(media, "_resolve_ffmpeg", lambda: None)
+    out = media._extract_video_frames(None, "clip.mp4")
+    assert "EXTRACT_VIDEO_FRAMES_UNAVAILABLE" in out
+    assert "cv2" in out and "view_image" in out
+
+
+def test_harbor_agent_prefix_installs_imageio_ffmpeg():
+    """TB P0-1 pin: the harbor install script puts ffmpeg into the AGENT prefix
+    (pip imageio-ffmpeg) so extract_video_frames works inside task containers."""
+    import pathlib
+
+    src = (pathlib.Path(__file__).resolve().parents[1]
+           / "devtools" / "benchmarks" / "terminal_bench" / "harbor_installed_agent.py").read_text(encoding="utf-8")
+    assert "pip install imageio-ffmpeg" in src

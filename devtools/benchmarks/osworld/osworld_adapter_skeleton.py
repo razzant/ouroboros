@@ -21,6 +21,7 @@ if __package__ in {None, ""}:
 from devtools.benchmarks.common.manifests import benchmark_run_manifest, write_json
 from devtools.benchmarks.common.result_index import task_result_row, write_result_index
 from devtools.benchmarks.common.run_roots import live_data_roots
+from devtools.benchmarks.osworld.run_step_agent import ALIGNED_UPSTREAM, osworld_checkout_info
 
 
 DEFAULT_REPO_ROOT = Path(__file__).resolve().parents[3]
@@ -110,6 +111,7 @@ def preflight(
     data_root: Path,
 ) -> dict[str, Any]:
     failures: list[str] = []
+    checkout = osworld_checkout_info(osworld_root)
     if not osworld_root.is_dir():
         failures.append(f"official OSWorld checkout not found: {osworld_root}")
     if not (osworld_root / "run.py").exists() and not (osworld_root / "evaluation_examples").exists():
@@ -139,7 +141,7 @@ def preflight(
         urllib.request.urlopen(osworld_server_url.rstrip("/") + "/", timeout=5).read(1)
     except Exception as exc:
         failures.append(f"OSWorld desktop/control server is not reachable: {type(exc).__name__}: {exc}")
-    return {"ok": not failures, "failures": failures}
+    return {"ok": not failures, "failures": failures, "details": {"osworld_checkout": checkout}}
 
 
 def main() -> int:
@@ -221,6 +223,7 @@ def main() -> int:
                 "unix_computer_use_payload": str(Path(args.unix_computer_use_payload).expanduser()),
                 "unix_computer_use_state_dir": str(state_dir),
                 "runnable_adapter": False,
+                "aligned_upstream": dict(ALIGNED_UPSTREAM),
             },
             official_command=[],
             isolated_data_root=str(data_root),

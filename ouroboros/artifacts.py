@@ -168,6 +168,13 @@ def stage_task_attachments(
                 "label": label,
                 "root": "artifact_store",
                 "relpath": f"{_ATTACHMENTS_SUBDIR}/{dest.name}",
+                # v6.54.3: the REAL staged path, for process tools (a python/audio
+                # script must open its own staged attachment directly — GAIA showed
+                # models GUESSING a wrong absolute path and hitting light-mode
+                # blocks when only the read_file() form was given). The path is
+                # inside the task's own artifact_store, so scripts reach it under
+                # every runtime mode.
+                "abs_path": str(dest),
                 "mime": mime,
                 "is_image": mime.startswith("image/"),
             })

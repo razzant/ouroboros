@@ -15,7 +15,7 @@ import re
 import shlex
 from typing import Tuple, Dict, Any, List, Optional
 
-from ouroboros.config import get_light_model
+from ouroboros.config import get_light_model, get_safety_call_timeout_sec, get_safety_max_tokens, get_safety_mode
 from ouroboros.llm import LLMClient
 from ouroboros.pricing import emit_llm_usage_event, estimate_cost, infer_provider_from_model
 from ouroboros.utils import utc_now_iso
@@ -451,6 +451,21 @@ def _parse_safety_response(text: str) -> Optional[Dict[str, Any]]:
     return best
 
 
+def _classify_safety_parse_failure(msg: Dict[str, Any], usage: Optional[Dict[str, Any]]) -> str:
+    """Classify an unparseable safety response for the durable event (v6.54.3).
+
+    ``empty`` (no content came back), ``truncated`` (the output budget was
+    exhausted before the JSON closed), or ``unparseable`` (content present but no
+    valid status object). Distinct classes need distinct fixes — model routing vs
+    output budget vs prompt — so the event must not flatten them."""
+    content = str((msg or {}).get("content") or "").strip()
+    if not content:
+        return "empty"
+    if int((usage or {}).get("completion_tokens") or 0) >= get_safety_max_tokens():
+        return "truncated"
+    return "unparseable"
+
+
 _REMOTE_PROVIDER_KEYS = (
     "OPENROUTER_API_KEY",
     "OPENAI_API_KEY",
@@ -651,6 +666,10 @@ def _run_llm_check(
                 ],
                 model=light_model,
                 use_local=_use_local_light,
+                max_tokens=get_safety_max_tokens(),
+                reasoning_effort="none",
+                timeout=get_safety_call_timeout_sec(),
+                response_format={"type": "json_object"},
             )
     except Exception as e:
         from ouroboros.utils import sanitize_tool_result_for_log
@@ -674,18 +693,16 @@ def _run_llm_check(
     result = _parse_safety_response(msg.get("content") or "")
     if result is None:
         raw_content = str(msg.get("content") or "")
-        log.warning("Safety check returned invalid JSON for %s; retrying once with repair prompt", tool_name)
-        try:
-            _eq = getattr(ctx, "event_queue", None) if ctx is not None else None
-            if _eq is not None:
-                _eq.put_nowait({
-                    "type": "safety_parse_retry",
-                    "task_id": str(getattr(ctx, "task_id", "") or ""),
-                    "tool": tool_name,
-                    "ts": utc_now_iso(),
-                })
-        except Exception:
-            pass
+        failure_class = _classify_safety_parse_failure(msg, usage)
+        log.warning(
+            "Safety check returned invalid JSON for %s (class=%s); retrying once with repair prompt",
+            tool_name, failure_class,
+        )
+        _emit_durable_safety_event(ctx, {
+            "type": "safety_parse_retry",
+            "tool": tool_name,
+            "failure_class": failure_class,
+        })
         try:
             repair_prompt = (
                 "Your previous Safety Supervisor response was not parseable as the required JSON object.\n"
@@ -710,14 +727,28 @@ def _run_llm_check(
                     ],
                     model=light_model,
                     use_local=_use_local_light,
+                    max_tokens=get_safety_max_tokens(),
+                    reasoning_effort="none",
+                    timeout=get_safety_call_timeout_sec(),
+                    response_format={"type": "json_object"},
                 )
             _emit_safety_usage(repair_usage)
             result = _parse_safety_response(repair_msg.get("content") or "")
+            if result is None:
+                failure_class = _classify_safety_parse_failure(repair_msg, repair_usage)
         except Exception as exc:
             log.warning("Safety repair retry failed for %s: %s", tool_name, exc, exc_info=True)
         if result is None:
-            log.error(f"Safety check returned invalid JSON for {tool_name}: {raw_content}")
-            return False, "⚠️ SAFETY_VIOLATION: Safety Supervisor returned unparseable response after one repair retry."
+            log.error(f"Safety check returned invalid JSON for {tool_name} (class={failure_class}): {raw_content}")
+            _emit_durable_safety_event(ctx, {
+                "type": "safety_parse_failed",
+                "tool": tool_name,
+                "failure_class": failure_class,
+            })
+            return False, (
+                "⚠️ SAFETY_VIOLATION: Safety Supervisor returned unparseable response "
+                f"(class={failure_class}) after one repair retry."
+            )
 
     status = str(result.get("status", "")).upper()
     reason = result.get("reason", "Unknown")
@@ -740,6 +771,52 @@ def _run_llm_check(
         f"Reason: {reason}\n\n"
         f"You must find a different, safer approach to achieve your goal."
     )
+
+
+def _emit_durable_safety_event(ctx: Optional[Any], event: Dict[str, Any]) -> None:
+    """Emit a safety audit event durably AT THE MOMENT of the decision (v6.54.3).
+
+    The canonical durable pattern (mirrors control._emit_swarm_fanout): a DIRECT
+    append into the drive's events.jsonl — the per-worker log sink forwards
+    appended lines to the live dashboard, so no separate queue put is needed and
+    a queued-but-undrained event can never be lost to a worker death (review
+    round 9, P3). The event_queue is only the last resort for contexts with no
+    drive_logs at all."""
+    payload = {
+        "task_id": str(getattr(ctx, "task_id", "") or "") if ctx is not None else "",
+        "ts": utc_now_iso(),
+        **event,
+    }
+    try:
+        drive_logs = getattr(ctx, "drive_logs", None) if ctx is not None else None
+        if callable(drive_logs):
+            from ouroboros.utils import append_jsonl
+
+            append_jsonl(drive_logs() / "events.jsonl", payload)
+            return
+        eq = getattr(ctx, "event_queue", None) if ctx is not None else None
+        if eq is not None:
+            eq.put_nowait(payload)
+    except Exception:
+        # The durable audit is a P3 invariant for waved-through safety decisions —
+        # a lost emit must not be TRULY silent. Never fatal (a failed audit write
+        # must not break a task), but escalate to error so the loss is itself
+        # traced (adversarial review r1 #21).
+        log.error("failed to emit durable safety event %s", event.get("type") or "?", exc_info=True)
+
+
+def _emit_safety_mode_skip(ctx: Optional[Any], tool_name: str, mode: str, policy: str) -> None:
+    """Durable audit for a safety LLM check waved through by a non-full owner mode.
+
+    P3: an advisory/off mode is legitimate ONLY while every decision it waves
+    through leaves a loud, durable trace at the moment it happens (review round 1)."""
+    log.warning("Safety mode=%s waved through LLM check for %s (policy=%s)", mode, tool_name, policy)
+    _emit_durable_safety_event(ctx, {
+        "type": "safety_mode_skip",
+        "tool": tool_name,
+        "safety_mode": mode,
+        "policy": policy,
+    })
 
 
 # Public entry point.
@@ -771,7 +848,21 @@ def check_safety(
             check = arguments.get("check")
             raw_cmd = check if isinstance(check, (list, tuple)) else None
         if _normalize_safe_shell_subject(raw_cmd):
+            # Whitelist-safe subject: FULL mode allows it without any LLM call,
+            # so non-full modes wave nothing through here — no skip-audit event
+            # (adversarial review r1 #19: audit only real deltas vs full mode).
             return True, ""
-        return _run_llm_check(tool_name, arguments, messages, ctx)
+
+    # Owner-selected LLM-safety coverage (full | light | off). This gates ONLY the
+    # LLM supervisor layer — the deterministic registry sandbox, protected-path
+    # policy, and light-mode write guards run in every mode (BIBLE P3: the LLM
+    # supervisor is a configurable layer, not the immune floor). Non-full modes
+    # emit a durable audit event so a waved-through call is never silent.
+    safety_mode = get_safety_mode()
+    if safety_mode != "full":
+        skip_llm = safety_mode == "off" or (safety_mode == "light" and policy == POLICY_CHECK_CONDITIONAL)
+        if skip_llm:
+            _emit_safety_mode_skip(ctx, tool_name, safety_mode, policy)
+            return True, ""
 
     return _run_llm_check(tool_name, arguments, messages, ctx)

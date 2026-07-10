@@ -77,8 +77,10 @@ OUROBOROS_REPO_DIR=/opt/ouroboros-src
 OUROBOROS_DATA_DIR=/logs/agent/ouroboros-data
 OUROBOROS_SETTINGS_PATH=/logs/agent/ouroboros-data/settings.json
 OUROBOROS_RUNTIME_MODE=pro
-OUROBOROS_REVIEW_ENFORCEMENT=advisory
+OUROBOROS_REVIEW_ENFORCEMENT=blocking
 OUROBOROS_TASK_REVIEW_MODE=required
+OUROBOROS_SAFETY_MODE=light
+OUROBOROS_MAX_WORKERS=4
 OUROBOROS_MODEL_LIGHT=google/gemini-3.5-flash
 OUROBOROS_WORKER_START_METHOD=spawn
 ```
@@ -242,7 +244,7 @@ Setup and environment timeouts are separate:
 > to anything other than the default (null/1.0) makes the run **non-submittable**.
 > The official Harbor leaderboard validator
 > (`harbor/leaderboard/static_validation.py::_check_no_job_overrides`,
-> verified in harbor 0.13.1 and upstream
+> verified in harbor 0.17.1 and upstream
 > <https://github.com/harbor-framework/harbor>) rejects ANY non-null
 > `agent_setup_timeout_multiplier` / `environment_build_timeout_multiplier`
 > ("must not be set"), and **10/10 sampled real accepted submissions leave both
@@ -262,11 +264,11 @@ For heavy Docker builds **in a LOCAL (non-submission) run only**, you may use:
 --agent-setup-timeout-multiplier 4         # LOCAL ONLY — disqualifies a submission
 ```
 
-## Leaderboard Validity Rules (verified 2026-06-30 against primary sources)
+## Leaderboard Validity Rules (verified 2026-07-07 against primary sources)
 
-Triangulated from the OFFICIAL Harbor validator code (the same one the Hub/Supabase
-bot runs), the published submission README, and 10 real accepted submissions. **A
-run is leaderboard-valid ONLY if ALL of these hold; otherwise it is LOCAL-only.**
+Triangulated from the OFFICIAL Harbor validator code (the same one Harbor Hub
+runs on submit), the published submission docs, and real accepted submissions.
+**A run is leaderboard-valid ONLY if ALL of these hold; otherwise it is LOCAL-only.**
 
 | Rule | Requirement | Source |
 |---|---|---|
@@ -284,20 +286,72 @@ run is leaderboard-valid ONLY if ALL of these hold; otherwise it is LOCAL-only.*
 Primary sources (read these before any submission-grade run):
 - Official validator code: <https://github.com/harbor-framework/harbor> →
   `src/harbor/leaderboard/static_validation.py` (`MIN_TRIALS_PER_TASK`,
-  `_check_no_job_overrides`, `_trial_timeout_override_fields`). Installed locally as
-  harbor `0.13.1`.
-- Submission rules + real accepted configs:
+  `_check_no_job_overrides`, `_check_passing_trial_trajectories`). Installed
+  locally as harbor `0.17.1`.
+- **Submission process (OPEN since 2026-06, verified 2026-07-07):** the harbor
+  CLI flow documented at
+  <https://www.harborframework.com/docs/docs/leaderboard/submit> — see
+  "Submitting to the leaderboard" below. TB2.1 is currently the ONLY
+  leaderboard accepting harbor CLI submissions.
+- LEGACY: the HF dataset
   <https://huggingface.co/datasets/harborframework/terminal-bench-2-leaderboard>
-  (browse `submissions/terminal-bench/2.0/<agent>__<model>/.../config.json`).
+  is the FROZEN 2.0 PR-based archive (last merged 2026-05-15). It is still
+  useful to browse real accepted configs, but it is NOT the 2.1 submission
+  channel — do not wait for it to "open".
 - Reward-hacking judge + web policy:
   <https://www.tbench.ai/news/leaderboard-integrity-update>
 - Timeout policy (task timeout must not be changed):
   <https://www.tbench.ai/news/leaderboard-integrity-and-timeouts>
-- Run/submit docs: <https://www.tbench.ai/docs/run-terminal-bench-2-1> ;
+- Run docs: <https://www.tbench.ai/docs/run-terminal-bench-2-1> ;
   leaderboard: <https://www.tbench.ai/leaderboard/terminal-bench/2.1> ;
-  status/news: <https://www.tbench.ai/news>
-- **Submission status (2026-06-30): CLOSED** — "new submission process coming soon";
-  no `2.1/` submission path published yet. Re-check the two links above before running.
+  status/news: <https://www.tbench.ai/news>. Beware: as of 2026-07-07 the
+  tbench.ai docs still say "submission process coming soon" — that page is
+  STALE; the harborframework.com doc above is authoritative (this stale page
+  already caused two false "submissions are closed" conclusions).
+
+## Submitting to the leaderboard (harbor CLI, verified 2026-07-07)
+
+Three commands against Harbor Hub (harbor ≥ 0.17):
+
+```bash
+harbor auth login          # or: export HARBOR_API_KEY=sk-harbor-…  (headless)
+harbor upload <job_dir> --public          # prints the job UUID ("View at …")
+harbor leaderboard submit \
+  --leaderboard terminal-bench/terminal-bench-2-1 \
+  --job-id <JOB_UUID> --metadata ./metadata.yaml -o validation-report.json
+```
+
+Hard-won facts (verified against harbor 0.17.1 source):
+
+- **Every passing trial MUST have `agent/trajectory.json`** (ATIF, schema
+  `ATIF-v1.7`) — `static_validation._check_passing_trial_trajectories` fails
+  the whole submission otherwise. The uploader picks up exactly that
+  hard-coded path (`upload/uploader.py`). Runs from adapters that emit it
+  live are fine; older runs can be backfilled with
+  `build_atif_trajectories.py --job-dir <job> --validate` (builder:
+  `atif.py`, stdlib-only, shared with the adapter's in-container emission).
+- **Trajectories must exist BEFORE the first `harbor upload`**: re-uploads
+  skip trials that already exist server-side, so a trajectory added later is
+  never attached. Generate → validate → only then upload.
+- **Submitted jobs become PUBLIC** so reviewers can inspect trials. If the
+  run used `OUROBOROS_BENCH_ALLOW_CONTAINER_SECRETS=1`, every trial carries
+  live provider keys in `agent/ouroboros-data/settings.json`. ALWAYS run
+  `scrub_submission_secrets.py --root <job_copy> --secrets-from …` on a COPY
+  of the job dir and verify 0 leftovers before uploading.
+- Auth is GitHub-OAuth on Harbor Hub; headless options: `HARBOR_API_KEY`
+  env (API key from the Hub UI, cleanest for servers) or
+  `harbor auth login --no-browser` + `--callback-url`.
+- Multi-job submissions are supported (`-j` repeated / `-s <submission_id>`):
+  min-trials-per-task is evaluated over ALL jobs together — the sanctioned
+  way to attach a rerun of failed/infra trials.
+- `metadata.yaml`: our generated file validates; the extra `role` field is
+  silently dropped by the Hub (pydantic `extra="ignore"`), it is kept for
+  local provenance only.
+- Task-version checking is content-hash based (trial `task.ref` sha256 vs the
+  dataset version registered on the Hub) and runs server-side at submit time.
+- After static validation the Hub queues **dynamic validation** (an LLM judge
+  reads `agent/trajectory.json` per trial) — emit honest, information-rich
+  trajectories, never stubs. A submission stays `pending` until admins review.
 
 ### Cost reality (don't burn money on non-faithful full runs)
 A FULL run is expensive: gpt-5.5-high on TB2.1 (89 tasks) costs **~$1.5/trial
@@ -466,6 +520,38 @@ to the measured model inside the container. `OUROBOROS_MODEL_LIGHT` defaults to
 `--agent-kwarg ouroboros_light_model=<provider/model>` or `run_tb.py
 --light-model ...`. This avoids accidentally running safety checks and
 lightweight JSON decisions on the expensive measured model.
+
+### Why `--all-model` pins the review slots too
+
+`run_tb.py --all-model` pins `OUROBOROS_REVIEW_MODELS` to the solve model
+(lightened to ONE reviewer at low effort). This is intentional and must stay:
+a TB run claims a SINGLE-MODEL measurement, so the acceptance-review content —
+which feeds improvement passes back into the answer — must come from the same
+model. Substituting a stronger/different reviewer would smuggle a second
+reasoning model into the scaffold and invalidate the single-model claim; the
+lone low-effort reviewer slot keeps review ON (part of the measured harness)
+without reviewer diversity. `single_reviewer_no_diversity` stays loud in logs
+by design.
+
+### Scaffold defaults (v6.55.0)
+
+The adapter template pins, and the methodology discloses:
+
+- `OUROBOROS_RUNTIME_MODE=pro` — the container is a disposable jail with a
+  fresh repo copy; pro unlocks the file/self-modification surface the bench
+  legitimately measures.
+- `OUROBOROS_MAX_WORKERS=4` (was 2) — same-model subagent slots for
+  decomposition within one trial; the root agent occupies one lane. Higher
+  values blow container memory (each worker is a full Python process).
+- `OUROBOROS_SAFETY_MODE=light` — the jail is isolated; the LLM safety pass
+  was 34% of all LLM calls in the k=5 run while the deterministic guards do
+  the actual protecting. Light keeps the LLM check for integration tools only.
+- `claude_code_edit` disabled in every trial — benches measure the
+  single-model Ouroboros harness; the embedded Claude-Code delegate is a
+  separate experiment.
+- `_DEADLINE_SAFETY_SEC=105` (was 30) — measured finalization overhead plus a
+  provider-recovery margin, so trials finalize before Harbor's hard deadline
+  instead of losing a finished answer (gpt2-codegolf overran by 26.5s at 30).
 
 ## Infra-Failure Semantics
 

@@ -200,9 +200,16 @@ class OuroborosTerminalBenchAgent(BaseInstalledAgent):
         openrouter_min_credit_usd = float(kwargs.pop("openrouter_min_credit_usd", os.environ.get("OUROBOROS_BENCH_OPENROUTER_MIN_CREDIT_USD", 5.0)))
         # plan_task needs >=2 workers (planning scouts run as pooled subagents);
         # 1 worker forced the capacity-degraded inline fallback on every run.
-        max_workers = int(kwargs.pop("max_workers", 2))
+        max_workers = int(kwargs.pop("max_workers", 4))  # v6.55.0: 3-4 subagent slots (root takes one); 10 would blow container memory (full python proc per worker)
         runtime_mode = str(kwargs.pop("runtime_mode", "pro"))
-        review_enforcement = str(kwargs.pop("review_enforcement", "advisory"))
+        review_enforcement = str(kwargs.pop("review_enforcement", "blocking"))
+        # Safety mode: configurable (full|light|off). Default light keeps the v6.55.0
+        # scaffold behavior (LLM safety for integration tools only); off disables the
+        # LLM safety pass entirely for a fully-disposable jail. Deterministic guards
+        # are unaffected either way.
+        safety_mode = str(kwargs.pop("safety_mode", "light")).strip().lower()
+        if safety_mode not in ("full", "light", "off"):
+            safety_mode = "light"
         task_review_mode = str(kwargs.pop("task_review_mode", "required"))
         disable_agent_web = str(kwargs.pop("disable_agent_web", "true")).strip().lower() not in (
             "0", "false", "no", "off", "",
@@ -233,6 +240,7 @@ class OuroborosTerminalBenchAgent(BaseInstalledAgent):
         self.max_workers = int(max_workers)
         self.runtime_mode = runtime_mode
         self.review_enforcement = review_enforcement
+        self.safety_mode = safety_mode
         self.task_review_mode = task_review_mode
         self.disable_agent_web = bool(disable_agent_web)
         self.ouroboros_model = ouroboros_model
@@ -411,6 +419,12 @@ class OuroborosTerminalBenchAgent(BaseInstalledAgent):
                 "OUROBOROS_REVIEW_ENFORCEMENT": self.review_enforcement,
                 "OUROBOROS_TASK_REVIEW_MODE": self.task_review_mode,
                 "OUROBOROS_MAX_WORKERS": str(self.max_workers),
+                # v6.55.0: the container is an isolated jail — the LLM safety layer
+                # adds cost/latency without protecting anything the deterministic
+                # guards don't (34% of all LLM calls in the k=5 run); light keeps
+                # the LLM check for integration tools only (Owner decision #14).
+                # Configurable via the safety_mode agent-kwarg (full|light|off).
+                "OUROBOROS_SAFETY_MODE": self.safety_mode,
                 "PYTHONUNBUFFERED": "1",
             }
         )
@@ -492,6 +506,11 @@ PY
                 python -m pip install -r /tmp/ouro_reqs_no_treesitter.txt
               }}
               python -m pip install -e {_CONTAINER_SRC} --no-deps
+              # ffmpeg in the AGENT prefix (v6.56.0, P0-1): task images rarely ship
+              # ffmpeg, so extract_video_frames was dead in TB tasks. The wheel binary
+              # is found by media._resolve_ffmpeg via imageio_ffmpeg.get_ffmpeg_exe();
+              # a mirror hiccup degrades gracefully (typed UNAVAILABLE + cv2 hint).
+              python -m pip install imageio-ffmpeg || echo "install: imageio-ffmpeg failed (extract_video_frames degrades to the cv2 workaround)"
               chmod -R a+rX {_CONTAINER_SRC} {_CONTAINER_VENV} /logs/agent
               {_CONTAINER_VENV}/bin/python -c 'import importlib.metadata; print("ouroboros", importlib.metadata.version("ouroboros"))'
               echo "install: complete"
@@ -669,8 +688,7 @@ PY
         if result.return_code != 0:
             raise RuntimeError(f"container cannot reach configured provider endpoint ({provider_name})")
 
-    async def _run_ouroboros_task(self, environment: BaseEnvironment, env: dict[str, str]) -> dict[str, Any]:
-        workspace_root = json.dumps(self.workspace_dir)
+    def _disabled_tools(self) -> list[str]:
         # Reward-hacking guard: faithful TB2.1 runs give the task FULL container network
         # (every task.toml declares allow_internet=true; tasks like build-cython-ext/caffe-cifar-10
         # require `git clone`), so we must NOT block shell egress. We only withhold the agent's OWN
@@ -679,17 +697,29 @@ PY
         # default (network/git/pip available) and never trips the web<->network cross-implication in
         # the registry resource gate. (Previously this set allowed_resources.network=false, which
         # wrongly blocked `git clone` even though the container had working network.)
-        # This is exactly the `_WEB_TOOLS` set (web_search/browse_page/browser_action/analyze_screenshot/
-        # vlm_query), preserving the original disabled set — only the MECHANISM changed (denylist, not
-        # allowed_resources). `view_image` is intentionally NOT disabled: it is a LOCAL image-to-model
-        # tool registered OUTSIDE `_WEB_TOOLS` (it injects a local file into the agent's own model context,
-        # no web/second-model call), so local-image tasks (e.g. financial-document/code-from-image) keep a
-        # legitimate vision affordance a reference agent could also have.
-        disabled_tools_line = (
-            '"disabled_tools": ["web_search", "browse_page", "browser_action", "analyze_screenshot", "vlm_query"],'
-            if getattr(self, "disable_agent_web", True)
-            else ""
-        )
+        # The web group mirrors the registry's `_WEB_TOOLS` set (web_search/
+        # browse_page/browser_action/youtube_transcript — the transcript tool joined
+        # `_WEB_TOOLS` in v6.52.1 and the adapter's list had silently drifted until
+        # v6.55.0; a sync test now pins the mirror). On top of it, web-off runs also
+        # withhold the DELEGATED-vision tools (analyze_screenshot/vlm_query): they
+        # route through an LLM/VLM lookup a reference shell agent would not have.
+        # `view_image` is intentionally NOT disabled: it is a LOCAL image-to-model
+        # tool registered OUTSIDE `_WEB_TOOLS` (it injects a local file into the
+        # agent's own model context, no web/second-model call), so local-image tasks
+        # (e.g. financial-document/code-from-image) keep a legitimate vision
+        # affordance a reference agent could also have.
+        # v6.55.0: claude_code_edit is disabled in EVERY bench run regardless of the
+        # web gate — benches measure Ouroboros as a single-model harness; the embedded
+        # Claude-Code delegate is a separate future experiment.
+        disabled = ["claude_code_edit"]
+        if getattr(self, "disable_agent_web", True):
+            disabled = list(self._WEB_TOOLS_MIRROR) + list(self._DELEGATED_VISION_TOOLS) + disabled
+        return disabled
+
+    async def _run_ouroboros_task(self, environment: BaseEnvironment, env: dict[str, str]) -> dict[str, Any]:
+        workspace_root = json.dumps(self.workspace_dir)
+        disabled_tools_line = f'"disabled_tools": {json.dumps(self._disabled_tools())},'
+
         runner = textwrap.dedent(
             f"""
             import json
@@ -824,6 +854,27 @@ PY
             raise RuntimeError(f"Ouroboros task runner failed: {result.stdout}\n{result.stderr}")
         return parsed if parsed is not None else {"raw_stdout": result.stdout or "", "raw_stderr": result.stderr or ""}
 
+    async def _emit_trajectory(self, environment: BaseEnvironment, env: dict[str, str]) -> None:
+        """Build /logs/agent/trajectory.json in-container from the trial logs.
+
+        Uses the stdlib-only builder shipped with the uploaded source tree, so
+        the exact same mapping serves live runs and the offline backfill
+        converter (build_atif_trajectories.py).
+        """
+        builder = f"{_CONTAINER_SRC}/devtools/benchmarks/terminal_bench/atif.py"
+        model = json.dumps(self.ouroboros_model or "")
+        result = await environment.exec(
+            command=(
+                f"{_CONTAINER_VENV}/bin/python {builder} /logs/agent --model {model}"
+            ),
+            env=env,
+            timeout_sec=120,
+        )
+        if result.return_code != 0:
+            raise RuntimeError(
+                f"trajectory builder exited {result.return_code}: {result.stderr}"
+            )
+
     async def _stop_server(self, environment: BaseEnvironment) -> None:
         await environment.exec(
             command=(
@@ -929,7 +980,16 @@ PY
     # Buffer between the agent's own deadline and Harbor's hard external kill, so the
     # loop's graceful self-finalize (which itself fires get_finalization_grace_sec before
     # the deadline) completes and the partial artifact is written before Harbor terminates.
-    _DEADLINE_SAFETY_SEC = 30
+    # v6.55.0: 30s let gpt2-codegolf overrun the deadline by 26.5s (a 351s
+    # provider-recovery gap + a final round); 105s covers the measured
+    # finalization overhead with margin (owner decision #15, range 90-120).
+    _DEADLINE_SAFETY_SEC = 105
+
+    # Mirror of ouroboros/tools/registry.py::_WEB_TOOLS (the adapter must stay
+    # importable without the runtime package on the harbor host; a sync test in
+    # tests/test_devtools_benchmarks.py pins this against the real set).
+    _WEB_TOOLS_MIRROR = ("web_search", "browse_page", "browser_action", "youtube_transcript")
+    _DELEGATED_VISION_TOOLS = ("analyze_screenshot", "vlm_query")
 
     def _resolve_task_timeout_from_dataset(self, context: Any) -> int | None:
         """Read the per-task agent wall-clock cap from the cached task.toml.
@@ -1035,6 +1095,13 @@ PY
                 )
             except Exception as exc:
                 (getattr(self, "logger", None) or log).warning("Failed to capture in-container Ouroboros task summary: %s", exc)
+            try:
+                # Leaderboard submissions require an ATIF trajectory for every
+                # passing trial (harbor static validation); emit it while the
+                # trial logs are still in the container.
+                await self._emit_trajectory(environment, env)
+            except Exception as exc:
+                (getattr(self, "logger", None) or log).warning("Failed to emit ATIF trajectory: %s", exc)
             if not self.leave_server_running_for_verifier or not reached_terminal_result:
                 try:
                     await self._stop_server(environment)

@@ -106,16 +106,19 @@ class TestBrowserModuleState:
         assert "Chrome/131.0.0.0" in contexts[-1].kwargs["user_agent"]
         assert getattr(ctx.browser_state, "_thread_id", None) is not None
         assert getattr(ctx.browser_state, "_browser_engine", None) == "chromium"
-        assert routes[:4] == [
+        assert routes[:5] == [
             ("**/api/owner/context-mode", browser_mod._block_context_mode_owner_post),
             ("**/api/owner/scope-review-floor", browser_mod._block_scope_review_floor_owner_post),
+            # v6.54.3: the owner-only LLM-safety coverage endpoint is route-blocked too
+            # (broad glob + decoding handler so percent-encoding cannot slip it).
+            ("**/api/owner/**", browser_mod._block_safety_mode_owner_post),
             # C1, v6.39: the owner-only skill attestation endpoint is route-blocked too
             # (broad glob so a percent-encoded path still reaches the decoding handler).
             ("**/api/owner/skills/**", browser_mod._block_owner_skill_attest_post),
             ("**/api/settings", browser_mod._block_owner_settings_post),
         ]
         # v6.26.0: the main agent gets a metadata-only SSRF route guard too.
-        assert len(routes) == 5 and routes[4][0] == "**/*"
+        assert len(routes) == 6 and routes[5][0] == "**/*"
 
         browser_mod._ensure_browser(ctx, engine="webkit", device="iphone 13")
         assert contexts[-1].kwargs["viewport"] == {"width": 390, "height": 844}
@@ -139,6 +142,9 @@ class TestBrowserModuleState:
             request=types.SimpleNamespace(url="http://127.0.0.1:8765/api/settings"),
             abort=lambda: events.append("abort"),
             continue_=lambda: events.append("continue"),
+            # v6.54.3 (review round 8): guard handlers defer non-matching requests
+            # DOWN the chain via fallback so earlier-registered blocks stay live.
+            fallback=lambda: events.append("fallback"),
         )
         routes[-1][1](route)
         route.request.url = "http://192.168.1.1/admin"
@@ -149,7 +155,7 @@ class TestBrowserModuleState:
         routes[-1][1](route)
         route.request.url = "https://example.com/"
         routes[-1][1](route)
-        assert events == ["abort", "abort", "abort", "abort", "continue"]
+        assert events == ["abort", "abort", "abort", "abort", "fallback"]
 
     def test_local_readonly_browser_url_guard_resolves_dns_fail_closed(self, monkeypatch):
         def fake_getaddrinfo(host, *args, **kwargs):

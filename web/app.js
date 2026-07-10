@@ -5,6 +5,8 @@ import { apiFetch } from './modules/api_client.js';
 import { loadVersion, initMatrixRain } from './modules/utils.js';
 import { initChat, createChatInstance } from './modules/chat.js';
 import { initFiles } from './modules/files.js';
+import { apiClient } from './modules/api_client.js';
+import { openNewProjectDialog, openProjectRowMenu } from './modules/project_create.js';
 
 import { initLogs } from './modules/logs.js';
 import { initEvolution } from './modules/evolution.js';
@@ -277,8 +279,9 @@ function renderProjectsNav(projects, projectChatIds) {
         const seen = Date.parse(lastViewed[p.id] || '') || 0;
         return active > 0 && active > seen;
     };
+    const hidden = state.projectHidden || {};
     const rows = all
-        .filter(p => p && p.id && p.has_thread_activity !== false)
+        .filter(p => p && p.id && p.has_thread_activity !== false && !hidden[p.id])
         .map(p => ({ ...p, _unread: isUnread(p) }))
         .sort((a, b) => {
             if (a._unread !== b._unread) return a._unread ? -1 : 1;  // unread to the top
@@ -332,11 +335,57 @@ function paintProjectsNav() {
             btn.appendChild(dot);
             btn.classList.add('has-unread');
         }
+        // v6.59.0: per-row actions (rename / hide / delete) behind a kebab.
+        const kebab = document.createElement('span');
+        kebab.className = 'nav-project-kebab';
+        kebab.textContent = '⋯';
+        kebab.title = 'Project actions';
+        kebab.setAttribute('role', 'button');
+        kebab.addEventListener('click', (event) => {
+            event.stopPropagation();
+            openProjectRowMenu(project, {
+                apiClient,
+                anchorEl: kebab,
+                onChanged: () => { knownProjectsJson = ''; refreshProjectsNav(); },
+                onHide: (projectId) => hideProjectFromSidebar(projectId),
+            });
+        });
+        btn.appendChild(kebab);
         if (project.id === navState.activeProjectId) btn.classList.add('active');
         btn.addEventListener('click', () => openProjectPanel(project));
         navProjectsList.appendChild(btn);
     }
 }
+
+// v6.59.0: presentation-only hide (ui_preferences project_hidden map). The registry
+// row, folder, memory store, and chat history all stay; unhide by re-creating or a
+// future "show hidden" affordance — this is NOT the removed status lifecycle.
+function hideProjectFromSidebar(projectId) {
+    if (!projectId) return;
+    state.projectHidden = state.projectHidden || {};
+    state.projectHidden[projectId] = true;
+    if (navState.activeProjectId === projectId) closeProjectPanel();
+    knownProjectsJson = '';
+    if (Array.isArray(lastProjectRows)) renderProjectsNav(lastProjectRows, Array.from(state.projectChatIds || []));
+    apiFetch('/api/ui/preferences', {
+        method: 'POST', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ project_hidden: { [projectId]: true } }),
+    }).catch(() => {});
+}
+
+document.getElementById('nav-projects-add')?.addEventListener('click', async (event) => {
+    event.stopPropagation();
+    const project = await openNewProjectDialog({
+        apiClient,
+        onCreated: () => { knownProjectsJson = ''; refreshProjectsNav(); },
+    });
+    if (project?.id) {
+        // Fan-out learns the new thread immediately; then open its room.
+        if (Number(project.chat_id)) state.projectChatIds.add(Number(project.chat_id));
+        await refreshProjectsNav();
+        openProjectPanel(project);
+    }
+});
 
 async function refreshProjectsNav() {
     try {
@@ -479,6 +528,7 @@ apiFetch('/api/ui/preferences', { cache: 'no-store' })
     .then((r) => (r.ok ? r.json() : null))
     .then((prefs) => {
         state.projectLastViewed = (prefs && prefs.project_last_viewed) || {};
+        state.projectHidden = (prefs && prefs.project_hidden) || {};
         setupResizablePanels(prefs || {});
         // Re-evaluate unread now that last-viewed is known (sidebar may have painted first).
         if (Array.isArray(lastProjectRows)) { knownProjectsJson = null; renderProjectsNav(lastProjectRows, Array.from(state.projectChatIds || [])); }

@@ -886,7 +886,10 @@ class TestPlanReviewToolRegistration(unittest.TestCase):
         self.assertIn("goal", params)
         self.assertIn("files_to_touch", params)
         self.assertIn("context_level", params)
-        self.assertEqual(tool.schema["parameters"]["required"], ["plan", "goal", "context_level"])
+        # context_level is NOT schema-required (triad r2 self_consistency): the host
+        # enforces explicit choice for self_mod while non-self_mod may omit it
+        # (defaults to minimal) — an unconditional `required` contradicted that.
+        self.assertEqual(tool.schema["parameters"]["required"], ["plan", "goal"])
         self.assertNotIn("auto", params["context_level"].get("enum", []))
 
     def test_plan_review_deduplicates_canonical_docs_from_repo_pack(self):

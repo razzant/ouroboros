@@ -7,6 +7,7 @@ import json
 import logging
 import os
 import re
+import threading
 import time
 import copy
 from typing import Any, Dict, List, Optional, Set, Tuple
@@ -77,6 +78,19 @@ def _resolve_or_provider() -> Dict[str, Any]:
         return {}
     return dict(parsed) if isinstance(parsed, dict) else {}
 _OPTIONAL_SAMPLING_PARAMS = ("temperature", "top_p", "top_k")
+# Droppable optional request params = sampling + structured-output + effort hint.
+# response_format is request INTENT, not required semantics: every consumer keeps a
+# text-parse fallback (e.g. the safety supervisor's bracket-scan). reasoning_effort
+# is likewise a hint — a provider that names-and-rejects it (e.g. an older model
+# refusing "none") gets the same one-shot strip-and-retry instead of failing the
+# call outright (review round 6: a rejected safety call would fail CLOSED and
+# block benign commands).
+# output_config / thinking are the Anthropic-direct adaptive-thinking effort carriers
+# (v6.57.0); an OLDER Claude that rejects them gets the same strip-and-retry rather than
+# a hard 400 — the effort control degrades gracefully to "no forced thinking".
+_OPTIONAL_DROPPABLE_PARAMS = _OPTIONAL_SAMPLING_PARAMS + (
+    "response_format", "reasoning_effort", "output_config", "thinking",
+)
 
 
 class LocalContextTooLargeError(RuntimeError):
@@ -196,7 +210,14 @@ def _compact_local_text(text: str, mode: str) -> str:
 
 
 def normalize_reasoning_effort(value: str, default: str = "medium") -> str:
-    allowed = {"none", "minimal", "low", "medium", "high", "xhigh"}
+    # v6.57.0: the accepted set is the EFFORT_SCALE SSOT (config.py), so adding a
+    # tier (e.g. `max`) happens in one place. Imported lazily to avoid a config
+    # import cycle at module load.
+    try:
+        from ouroboros.config import EFFORT_SCALE as _SCALE
+        allowed = set(_SCALE)
+    except Exception:
+        allowed = {"none", "minimal", "low", "medium", "high", "xhigh", "max"}
     v = str(value or "").strip().lower()
     return v if v in allowed else default
 
@@ -484,12 +505,16 @@ class LLMClient:
         # as "No endpoints found that support the requested parameters: ...".
         # Require an explicit parameter signal so unrelated "no endpoints found"
         # errors (e.g. "...that support tool use") do not falsely match.
+        # "reasoning" covers the OpenRouter NESTED carrier (extra_body.reasoning.*):
+        # its rejections name "reasoning"/"reasoning.effort", never the top-level
+        # "reasoning_effort" spelling (triad r6).
+        _param_names = _OPTIONAL_DROPPABLE_PARAMS + ("reasoning",)
         if "no endpoints found" in text and (
             "requested parameter" in text
-            or any(param in text for param in _OPTIONAL_SAMPLING_PARAMS)
+            or any(param in text for param in _param_names)
         ):
             return True
-        if not any(param in text for param in _OPTIONAL_SAMPLING_PARAMS):
+        if not any(param in text for param in _param_names):
             return False
         return any(
             marker in text
@@ -501,6 +526,9 @@ class LLMClient:
                 "deprecated",
                 "invalid parameter",
                 "extraneous",
+                # Strict pydantic-style servers (Anthropic direct, vLLM/SGLang)
+                # reject unknown fields as "Extra inputs are not permitted".
+                "not permitted",
             )
         )
 
@@ -524,10 +552,121 @@ class LLMClient:
             out.update(cls._REJECTED_PARAMS_CACHE.get(key, set()))
         return out
 
+    # Sentinel for the OpenRouter NESTED effort carrier (extra_body.reasoning) in the
+    # rejected-params cache — top-level pops cannot reach it (triad r6).
+    _NESTED_REASONING_PARAM = "extra_body.reasoning"
+
     @classmethod
     def _apply_rejected_param_cache(cls, payload: Dict[str, Any], model_id: str) -> None:
         for param in cls._known_rejected_params(model_id):
+            if param == cls._NESTED_REASONING_PARAM:
+                eb = payload.get("extra_body")
+                if isinstance(eb, dict):
+                    eb.pop("reasoning", None)
+                continue
             payload.pop(param, None)
+
+    # v6.57.0 — learned reasoning-effort ceilings (Q7). In-process cache is the hot
+    # path; a durable copy in capability_evidence.json (effort_ceilings namespace,
+    # DATA_DIR-scoped) survives restart. Key = normalized model identity. Fail-open.
+    _EFFORT_CEILING_CACHE: Dict[str, str] = {}
+    _EFFORT_CEILING_LOADED: Set[str] = set()
+
+    @classmethod
+    def _effort_ceiling_for(cls, model_id: str) -> str:
+        key = normalize_model_identity(model_id) or str(model_id or "")
+        if not key:
+            return ""
+        if key in cls._EFFORT_CEILING_CACHE:
+            return cls._EFFORT_CEILING_CACHE[key]
+        if key in cls._EFFORT_CEILING_LOADED:
+            return ""
+        cls._EFFORT_CEILING_LOADED.add(key)
+        try:
+            from ouroboros.capability_evidence import get_effort_ceiling
+            from ouroboros.config import DATA_DIR
+            ceil = get_effort_ceiling(DATA_DIR, key)
+            if ceil:
+                cls._EFFORT_CEILING_CACHE[key] = ceil
+            return ceil
+        except Exception:
+            return ""
+
+    def _clamp_effort_for_model(self, model_id: str, effort: str) -> str:
+        """Clamp a requested effort DOWN to the route's learned ceiling. Owner values
+        are honored up to the real ceiling; an ACTUAL clamp is recorded on the client
+        (thread-local) and merged into THIS call's usage dict by the chat methods, so
+        the lowering lands in the durable llm_usage event as
+        ``reasoning_effort_clamped={requested, applied, reason}`` (BIBLE P1 — never a
+        silent lowering; adversarial r1 verified the disclosure was missing)."""
+        if not hasattr(self, "_effort_clamp_tls"):
+            self._effort_clamp_tls = threading.local()
+        # Reset at every payload build: a note left by an ABORTED earlier attempt on
+        # this thread must never mis-attribute a clamp to the next call.
+        self._effort_clamp_tls.pending = None
+        ceiling = self._effort_ceiling_for(model_id)
+        if not ceiling:
+            return effort
+        from ouroboros.config import clamp_effort_to
+        clamped = clamp_effort_to(effort, ceiling)
+        if clamped != effort:
+            self._effort_clamp_tls.pending = {
+                "requested": effort,
+                "applied": clamped,
+                "reason": "learned_ceiling",
+                "model": str(model_id or ""),
+            }
+        return clamped
+
+    def _pop_effort_clamp_disclosure(self) -> Optional[Dict[str, Any]]:
+        """The pending clamp record for THIS thread's in-flight call, if any."""
+        tls = getattr(self, "_effort_clamp_tls", None)
+        pending = getattr(tls, "pending", None) if tls is not None else None
+        if tls is not None:
+            tls.pending = None
+        return pending if isinstance(pending, dict) else None
+
+    @classmethod
+    def _record_effort_ceiling(cls, model_id: str, current_effort: str) -> None:
+        """A provider rejected `current_effort` for this model → the ceiling is one step
+        below it. Record in-process + durably so subsequent calls clamp immediately.
+        FLOOR (adversarial r1): never learn a ceiling below "low" — a rejection of the
+        lowest thinking tiers means the CARRIER is unsupported (the existing drop-param
+        retry handles that); recording "none"/"minimal" would permanently disable
+        thinking for the whole route off one bad request."""
+        from ouroboros.config import effort_one_step_down, effort_rank
+        key = normalize_model_identity(model_id) or str(model_id or "")
+        eff = str(current_effort or "").strip().lower()
+        if not key or not eff:
+            return
+        ceiling = effort_one_step_down(eff)
+        if effort_rank(ceiling) < effort_rank("low"):
+            return
+        prev = cls._EFFORT_CEILING_CACHE.get(key)
+        # A lower ceiling always wins (never silently regain a rejected level).
+        if prev and effort_rank(prev) <= effort_rank(ceiling):
+            return
+        cls._EFFORT_CEILING_CACHE[key] = ceiling
+        try:
+            from ouroboros.capability_evidence import record_effort_ceiling
+            from ouroboros.config import DATA_DIR
+            record_effort_ceiling(DATA_DIR, key, ceiling)
+        except Exception:
+            pass
+
+    @staticmethod
+    def _payload_effort(payload: Dict[str, Any]) -> str:
+        """Read the effort carried by a request payload across provider shapes."""
+        eff = str(payload.get("reasoning_effort") or "").strip().lower()
+        if eff:
+            return eff
+        oc = payload.get("output_config")
+        if isinstance(oc, dict) and str(oc.get("effort") or "").strip():
+            return str(oc.get("effort")).strip().lower()
+        eb = payload.get("extra_body")
+        if isinstance(eb, dict) and isinstance(eb.get("reasoning"), dict):
+            return str(eb["reasoning"].get("effort") or "").strip().lower()
+        return ""
 
     @classmethod
     def _retry_without_optional_sampling(
@@ -538,15 +677,44 @@ class LLMClient:
     ) -> Optional[Dict[str, Any]]:
         if not cls._parameter_rejection_error(exc):
             return None
-        present = {param for param in _OPTIONAL_SAMPLING_PARAMS if param in payload}
+        present = {param for param in _OPTIONAL_DROPPABLE_PARAMS if param in payload}
+        _err_text = str(exc or "").lower()
+        _effort_implicated = any(
+            k in _err_text for k in ("reasoning_effort", "output_config", "thinking", "reasoning", "effort")
+        )
+        # The OpenRouter lane carries effort NESTED as extra_body.reasoning.effort —
+        # invisible to the top-level scan above, so an xhigh/max rejection there
+        # would neither retry nor learn a ceiling nor disclose (triad r6). Treat the
+        # nested carrier as droppable when the error implicates effort.
+        _eb = payload.get("extra_body")
+        _nested_reasoning = isinstance(_eb, dict) and isinstance(_eb.get("reasoning"), dict)
+        if _nested_reasoning and _effort_implicated:
+            present.add(cls._NESTED_REASONING_PARAM)
         if not present:
             return None
+        # v6.57.0: if the error SPECIFICALLY implicates an effort carrier, learn the
+        # route's ceiling as one step below the requested effort so the NEXT call clamps
+        # immediately (converges over calls; this call still degrades by dropping the
+        # carrier). The text check is required: a GENERIC parameter rejection (e.g. a
+        # temperature-only refusal) must NOT teach a phantom effort ceiling.
+        if (
+            present & {"reasoning_effort", "output_config", "thinking", cls._NESTED_REASONING_PARAM}
+            and _effort_implicated
+        ):
+            cls._record_effort_ceiling(model_id, cls._payload_effort(payload))
         cls._remember_rejected_params(model_id, present)
         retry_payload = copy.deepcopy(payload)
         for param in present:
+            if param == cls._NESTED_REASONING_PARAM:
+                # Remove ONLY the nested reasoning carrier; provider routing and any
+                # other extra_body keys must survive the retry.
+                _retry_eb = retry_payload.get("extra_body")
+                if isinstance(_retry_eb, dict):
+                    _retry_eb.pop("reasoning", None)
+                continue
             retry_payload.pop(param, None)
         log.warning(
-            "Retrying %s without optional sampling parameter(s): %s",
+            "Retrying %s without optional request parameter(s): %s",
             model_id or "(unknown model)",
             ", ".join(sorted(present)),
         )
@@ -791,8 +959,12 @@ class LLMClient:
     @staticmethod
     def _no_proxy_timeout(read_timeout: Optional[float] = None):
         import httpx
+        from ouroboros.config import get_llm_transport_read_timeout_sec
 
-        read_write = float(read_timeout) if read_timeout and read_timeout > 0 else 3600.0
+        read_write = (
+            float(read_timeout) if read_timeout and read_timeout > 0
+            else get_llm_transport_read_timeout_sec()
+        )
         return httpx.Timeout(connect=30.0, read=read_write, write=read_write, pool=30.0)
 
     @classmethod
@@ -1315,11 +1487,17 @@ class LLMClient:
         no_proxy: bool = False,
         timeout: Optional[float] = None,
         allow_server_web_search: bool = False,
+        response_format: Optional[Dict[str, Any]] = None,
     ) -> Tuple[Dict[str, Any], Dict[str, Any]]:
-        """Single LLM call returning (message, usage); no_proxy avoids macOS fork proxy crashes."""
+        """Single LLM call returning (message, usage); no_proxy avoids macOS fork proxy crashes.
+
+        ``response_format`` (e.g. ``{"type": "json_object"}``) is optional request
+        intent on the OpenAI-compatible/OpenRouter lanes: local, Anthropic-native,
+        and GigaChat routes ignore it, and a provider rejection strips it via the
+        optional-parameter retry — callers must keep a text-parse fallback."""
         messages = self._normalize_system_message_placement(messages)
         if use_local:
-            return self._chat_local(messages, tools, max_tokens, tool_choice)
+            return self._chat_local(messages, tools, max_tokens, tool_choice, timeout=timeout)
 
         # Central worker policy: any LLM call from a worker process is fork-safe
         # by default (no system proxy lookup). This covers the main agent loop,
@@ -1332,6 +1510,7 @@ class LLMClient:
             no_proxy=no_proxy,
             timeout=timeout,
             allow_server_web_search=allow_server_web_search,
+            response_format=response_format,
         )
 
     async def chat_async(
@@ -1479,6 +1658,7 @@ class LLMClient:
         tools: Optional[List[Dict[str, Any]]],
         max_tokens: int,
         tool_choice: str,
+        timeout: Optional[float] = None,
     ) -> Tuple[Dict[str, Any], Dict[str, Any]]:
         """Send a chat request to the local llama-cpp-python server."""
         client = self._get_local_client()
@@ -1537,6 +1717,11 @@ class LLMClient:
         if clean_tools:
             kwargs["tools"] = clean_tools
             kwargs["tool_choice"] = tool_choice
+        if timeout and timeout > 0:
+            # Honor the caller's per-request timeout on the local lane too
+            # (v6.54.3: the safety-supervisor timeout SSOT must bound every
+            # route safety can use, not only the remote ones).
+            kwargs["timeout"] = float(timeout)
 
         last_exc: Optional[Exception] = None
         for attempt in range(3):
@@ -2020,6 +2205,11 @@ class LLMClient:
             if estimated_cost:
                 usage["cost"] = estimated_cost
                 usage["cost_estimated"] = True
+        # v6.61.1 (Q7 disclosure): a learned-ceiling clamp on this call rides the usage
+        # event — "requested xhigh → applied high (learned_ceiling)" is never silent.
+        _clamp_note = self._pop_effort_clamp_disclosure()
+        if _clamp_note:
+            usage["reasoning_effort_clamped"] = _clamp_note
 
         message: Dict[str, Any] = {
             "role": "assistant",
@@ -2050,14 +2240,31 @@ class LLMClient:
     ) -> Tuple[Dict[str, Any], Dict[str, Any]]:
         import requests
 
-        del reasoning_effort  # Anthropic direct works without an extra effort payload here.
-
         system, anthropic_messages = self._build_anthropic_messages(messages)
         payload: Dict[str, Any] = {
             "model": str(target.get("resolved_model") or ""),
             "messages": anthropic_messages,
             "max_tokens": max_tokens,
         }
+        # v6.57.0 — direct Anthropic honors the configured reasoning effort instead of
+        # silently dropping it (the old `del reasoning_effort` made the effort control a
+        # no-op for direct Opus). Modern Claude (Opus 4.7+/Sonnet 5/Fable-5) uses ADAPTIVE
+        # thinking + top-level `output_config.effort` (manual budget_tokens now 400s), with
+        # levels low|medium|high|xhigh|max — a superset of our scale, so the normalized
+        # value maps 1:1 (none→omit thinking = no forced reasoning). A model that rejects
+        # `output_config`/`thinking` triggers the same param-rejection retry as other
+        # optional params (learned + dropped), so an older Claude never hard-fails on this.
+        _eff = self._clamp_effort_for_model(
+            str(target.get("usage_model") or target.get("resolved_model") or ""),
+            normalize_reasoning_effort(reasoning_effort),
+        )
+        if _eff and _eff != "none":
+            payload["thinking"] = {"type": "adaptive"}
+            # Anthropic's documented effort set is low|medium|high|xhigh|max — it has
+            # no "minimal", so OUR lowest thinking tier maps to the provider's floor
+            # (adversarial r1: the old identity mapping could send an out-of-range
+            # value and poison the route's learned ceiling).
+            payload["output_config"] = {"effort": "low" if _eff == "minimal" else _eff}
         if system:
             payload["system"] = system
         usage_model = str(target.get("usage_model") or target.get("resolved_model") or "")
@@ -2124,7 +2331,7 @@ class LLMClient:
     # ------------------------------------------------------------------
     # GigaChat (native `gigachat` library — NOT OpenAI-compatible)
     # ------------------------------------------------------------------
-    def _get_gigachat_client(self, target: Dict[str, Any]):
+    def _get_gigachat_client(self, target: Dict[str, Any], timeout: Optional[float] = None):
         """Build (and cache) a GigaChat library client for the given target.
 
         Auth is whatever the env provides: an authorization key (``credentials``
@@ -2133,14 +2340,17 @@ class LLMClient:
         automatically, so caching the client across calls is safe. Any other
         ``GIGACHAT_*`` setting present in the environment (e.g.
         ``GIGACHAT_PROFANITY_CHECK``) is picked up by the library itself.
-        """
+        A caller-supplied per-request ``timeout`` becomes part of the cache key
+        (the library takes it at construction), so the safety-supervisor timeout
+        SSOT bounds this lane too (v6.54.3)."""
         credentials = str(target.get("api_key") or "")
         user = str(target.get("user") or "")
         password = str(target.get("password") or "")
         scope = str(target.get("scope") or "GIGACHAT_API_PERS")
         base_url = str(target.get("base_url") or "")
         verify = bool(target.get("verify_ssl_certs", True))
-        cache_key = (credentials, user, password, scope, base_url, verify)
+        timeout_key = float(timeout) if timeout and timeout > 0 else None
+        cache_key = (credentials, user, password, scope, base_url, verify, timeout_key)
 
         client = self._gigachat_clients.get(cache_key)
         if client is None:
@@ -2160,6 +2370,8 @@ class LLMClient:
                 kwargs["password"] = password
             if base_url:
                 kwargs["base_url"] = base_url
+            if timeout_key is not None:
+                kwargs["timeout"] = timeout_key
             client = GigaChat(**kwargs)
             self._gigachat_clients[cache_key] = client
         return client
@@ -2347,13 +2559,14 @@ class LLMClient:
         tool_choice: str,
         temperature: Optional[float] = None,
         no_proxy: bool = False,
+        timeout: Optional[float] = None,
     ) -> Tuple[Dict[str, Any], Dict[str, Any]]:
         # The gigachat library owns its own httpx transport and proxy handling;
         # no_proxy (a macOS fork-safety flag for the OpenAI/requests paths) does
         # not apply here.
         del no_proxy
 
-        client = self._get_gigachat_client(target)
+        client = self._get_gigachat_client(target, timeout=timeout)
 
         payload: Dict[str, Any] = {
             "model": str(target.get("resolved_model") or ""),
@@ -2450,6 +2663,7 @@ class LLMClient:
         tools: Optional[List[Dict[str, Any]]],
         skip_capability_fetch: bool = False,
         allow_server_web_search: bool = False,
+        response_format: Optional[Dict[str, Any]] = None,
     ) -> Dict[str, Any]:
         messages = self._normalize_system_message_placement(messages)
         resolved_model = str(target.get("resolved_model") or "")
@@ -2487,9 +2701,17 @@ class LLMClient:
             if openai_reasoning_model:
                 # Direct-OpenAI route honors the configured OUROBOROS_EFFORT_*
                 # lanes instead of silently dropping them (OpenRouter parity).
-                kwargs["reasoning_effort"] = normalize_reasoning_effort(reasoning_effort)
+                # v6.57.0: clamp to the route's learned ceiling (e.g. a model that
+                # tops out at high never re-errors on a global xhigh — it clamps down).
+                _oa_eff = self._clamp_effort_for_model(
+                    str(target.get("usage_model") or resolved_model),
+                    normalize_reasoning_effort(reasoning_effort),
+                )
+                kwargs["reasoning_effort"] = _oa_eff
             if temperature is not None:
                 kwargs["temperature"] = temperature
+            if response_format:
+                kwargs["response_format"] = dict(response_format)
             if tools:
                 kwargs["tools"] = [
                     {k: v for k, v in tool.items() if k != "cache_control"}
@@ -2499,7 +2721,10 @@ class LLMClient:
             self._apply_rejected_param_cache(kwargs, str(target.get("usage_model") or resolved_model))
             return kwargs
 
-        effort = normalize_reasoning_effort(reasoning_effort)
+        effort = self._clamp_effort_for_model(
+            str(target.get("usage_model") or resolved_model),
+            normalize_reasoning_effort(reasoning_effort),
+        )
         raw_return_reasoning = os.environ.get("OUROBOROS_RETURN_REASONING")
         return_reasoning = (
             True if raw_return_reasoning is None
@@ -2564,6 +2789,8 @@ class LLMClient:
         }
         if temperature is not None:
             kwargs["temperature"] = temperature
+        if response_format:
+            kwargs["response_format"] = dict(response_format)
         server_web_tool = (
             self._openrouter_main_web_search_tool()
             if (tools and allow_server_web_search)
@@ -2594,13 +2821,13 @@ class LLMClient:
         else:
             supported = self._get_supported_parameters(resolved_model)
         if supported is not None:
-            for sampling_param in _OPTIONAL_SAMPLING_PARAMS:
-                if sampling_param not in supported and sampling_param in kwargs:
+            for optional_param in _OPTIONAL_DROPPABLE_PARAMS:
+                if optional_param not in supported and optional_param in kwargs:
                     log.debug(
                         "Model %s does not list %s in supported_parameters; stripping",
-                        resolved_model, sampling_param,
+                        resolved_model, optional_param,
                     )
-                    kwargs.pop(sampling_param, None)
+                    kwargs.pop(optional_param, None)
         return kwargs
 
     def _normalize_remote_response(
@@ -2710,6 +2937,12 @@ class LLMClient:
             if estimated_cost:
                 usage["cost"] = estimated_cost
                 usage["cost_estimated"] = True
+        # v6.61.1 (Q7 disclosure): a learned-ceiling clamp recorded at payload build
+        # (_build_remote_kwargs → _clamp_effort_for_model) rides THIS call's usage —
+        # covers both the OpenRouter and the OpenAI-compatible direct lanes.
+        _clamp_note = self._pop_effort_clamp_disclosure()
+        if _clamp_note:
+            usage["reasoning_effort_clamped"] = _clamp_note
 
         return msg, usage
 
@@ -2851,6 +3084,7 @@ class LLMClient:
         no_proxy: bool = False,
         timeout: Optional[float] = None,
         allow_server_web_search: bool = False,
+        response_format: Optional[Dict[str, Any]] = None,
     ) -> Tuple[Dict[str, Any], Dict[str, Any]]:
         """Send remote chat; no_proxy uses a one-shot client and skips OS proxy lookup."""
         if target.get("provider") == "anthropic":
@@ -2864,6 +3098,7 @@ class LLMClient:
             return self._chat_gigachat(
                 target, messages, tools, reasoning_effort, max_tokens, tool_choice, temperature,
                 no_proxy=no_proxy,
+                timeout=timeout,
             )
 
         if no_proxy:
@@ -2873,6 +3108,7 @@ class LLMClient:
                     target, messages, reasoning_effort, max_tokens, tool_choice, temperature, tools,
                     skip_capability_fetch=True,
                     allow_server_web_search=allow_server_web_search,
+                    response_format=response_format,
                 )
                 prompt_cache_ttl = self._prompt_cache_ttl_from_payload(
                     kwargs.get("messages"),
@@ -2900,6 +3136,7 @@ class LLMClient:
         kwargs = self._build_remote_kwargs(
             target, messages, reasoning_effort, max_tokens, tool_choice, temperature, tools,
             allow_server_web_search=allow_server_web_search,
+            response_format=response_format,
         )
         if timeout and timeout > 0:
             # Cached clients are built without a timeout; honor the caller's

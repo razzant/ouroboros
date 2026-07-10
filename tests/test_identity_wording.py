@@ -31,14 +31,16 @@ def test_live_task_message_marker_uses_my_human_wording():
 
 
 def test_system_prompt_carries_outcome_honesty_and_capability_acquisition():
-    """v6.29.0 doctrine pins: the three-tier outcome lexicon, the FINAL ANSWER
-    protocol line, and the capability-acquisition boldness clause must stay in
-    SYSTEM.md (they are consumed by typed code paths and reviewers)."""
+    """v6.29.0 doctrine pins: the three-tier outcome lexicon and the capability-
+    acquisition boldness clause must stay in SYSTEM.md. v6.60.0: the FINAL ANSWER
+    marker doctrine deliberately MOVED to the per-task contract (answer_protocol) —
+    the default prompt must NOT carry it (ordinary tasks never see the marker)."""
     import pathlib
 
     text = (pathlib.Path(__file__).parent.parent / "prompts" / "SYSTEM.md").read_text(encoding="utf-8")
     assert "blocked_with_evidence" in text
-    assert "FINAL ANSWER:" in text
+    # Whitespace-normalized: a line-wrapped "FINAL\nANSWER" must not slip past.
+    assert "FINAL ANSWER" not in " ".join(text.split())
     assert "## Capability Acquisition" in text
     assert "NOT a \"broad fallback or shim\"" in text
 

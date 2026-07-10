@@ -123,6 +123,60 @@ def _emit_swarm_fanout(
         log.debug("Failed to emit swarm_fanout telemetry", exc_info=True)
 
 
+def _subagent_slot_note(ctx: ToolContext, root_task_id: str) -> str:
+    """Compact slot-occupancy transparency for the schedule_subagent result (v6.54.3, 1.6).
+
+    Read-only queue-snapshot facts — the LLM decides what to do with them (P5);
+    nothing here gates admission (the supervisor stays authoritative). Counts are
+    from the last persisted snapshot, i.e. BEFORE this wave lands."""
+    try:
+        status_root = Path(str(getattr(ctx, "budget_drive_root", "") or ctx.drive_root))
+        snap = json.loads((status_root / "state" / "queue_snapshot.json").read_text(encoding="utf-8"))
+    except Exception:
+        return ""
+
+    def _is_tree_subagent(row: Any) -> bool:
+        if not isinstance(row, dict):
+            return False
+        task = row.get("task") if isinstance(row.get("task"), dict) else row
+        return (
+            str(task.get("delegation_role") or "") == "subagent"
+            and str(task.get("root_task_id") or "") == str(root_task_id or "")
+        )
+
+    active = sum(1 for r in (snap.get("running") or []) if _is_tree_subagent(r))
+    queued = sum(1 for r in (snap.get("pending") or []) if _is_tree_subagent(r))
+    try:
+        from ouroboros.config import get_max_active_subagents_per_root
+        cap = int(get_max_active_subagents_per_root())
+    except Exception:
+        return ""
+    tail = "; children beyond the active cap WAIT for a free slot" if active >= cap else ""
+    return f" [tree slots before this wave: {active}/{cap} active, {queued} queued{tail}]"
+
+
+def _capability_mismatch_message(selected_profile: str, missing_caps: Any) -> str:
+    """v6.57.0 (1.6): name the CORRECT spawn so the parent fixes a capability mismatch
+    in one move instead of burning a round guessing (the prober-without-shell incidents).
+    shell/write/edit/service/vcs need an ACTING child (a write_surface); a read-only child
+    has no shell and no writable roots."""
+    if set(missing_caps) & {"shell", "write", "edit", "service", "vcs"}:
+        hint = (
+            "These need an ACTING child: pass write_surface (self_worktree for a throwaway "
+            "checkout to run shell/build in; external_workspace for the shared project tree; "
+            "genesis for a from-scratch project). A read-only child has no shell/writable roots."
+        )
+    else:
+        hint = (
+            "Adjust the child's profile/lane so the declared capabilities are available, "
+            "or drop capabilities the child does not actually need."
+        )
+    return (
+        "⚠️ SUBAGENT_CAPABILITY_MISMATCH: selected child profile "
+        f"{selected_profile!r} cannot satisfy required_capabilities={missing_caps}. " + hint
+    )
+
+
 def _finalize_schedule_emission(
     ctx: ToolContext,
     *,
@@ -137,6 +191,7 @@ def _finalize_schedule_emission(
     root_task_id: str,
     slot_tasks: list,
     emitted_modes: List[str],
+    write_surface: str = "",
 ) -> str:
     """Record the scheduled wave, emit swarm_fanout telemetry, and build the
     tool-result string. Extracted from _schedule_task to keep that function
@@ -173,14 +228,31 @@ def _finalize_schedule_emission(
     # swarm_fanout telemetry / the child envelope) so it can see when auto resolved
     # to light/heavy without inspecting events.
     effective_lanes = [slot.effective_lane for _tid, slot in slot_tasks]
+    slot_note = _subagent_slot_note(ctx, root_task_id)
+    # v6.57.0 (1.6): preview the child's EFFECTIVE tool profile (shell/writable/lane)
+    # so the parent knows up front whether the child can run shell / write — the wasted
+    # rounds where a prober child hit workspace_blocked came from neither side knowing.
+    def _profile_note(effective_lane: str) -> str:
+        try:
+            from ouroboros.tool_access import predicted_subagent_profile, summarize_subagent_profile
+
+            profile = predicted_subagent_profile(write_surface=write_surface)
+            return "\n" + summarize_subagent_profile(profile, effective_lane=effective_lane)
+        except Exception:
+            return ""
+
     if len(task_ids) == 1:
         eff = effective_lanes[0] if effective_lanes else requested_model_lane
-        return f"Subagent request queued {task_ids[0]}: {objective} (effective_lane={eff}){worker_note}"
+        return (
+            f"Subagent request queued {task_ids[0]}: {objective} (effective_lane={eff})"
+            f"{worker_note}{slot_note}{_profile_note(eff)}"
+        )
     distinct_lanes = list(dict.fromkeys(effective_lanes))
     lanes_note = distinct_lanes[0] if len(distinct_lanes) == 1 else ", ".join(distinct_lanes)
     return (
         f"Subagent group queued {task_group_id}: {', '.join(task_ids)} "
-        f"(requested_lane={requested_model_lane}, effective_lanes=[{lanes_note}], slots={len(task_ids)}){worker_note}"
+        f"(requested_lane={requested_model_lane}, effective_lanes=[{lanes_note}], slots={len(task_ids)})"
+        f"{worker_note}{slot_note}{_profile_note(distinct_lanes[0] if len(distinct_lanes) == 1 else '')}"
     )
 
 
@@ -293,6 +365,106 @@ def _promote_to_stable(ctx: ToolContext, reason: str) -> str:
     return f"Promote to stable requested: {reason}"
 
 
+def _derive_source_project_id(src: str, is_git: bool) -> str:
+    """A filesystem-clean project id from the source itself (repo/folder name) —
+    the `promote_chat_to_task(source=…)` one-liner registers a project even when
+    the agent supplied no project_id/name (triad r2: a main-chat promote used to
+    attach the folder but silently skip registration, breaking the documented
+    capability). Deterministic-hash fallback for non-ASCII names."""
+    import pathlib as _pl
+
+    from ouroboros.project_facts import project_id_from_display_name
+    from ouroboros.project_sources import derive_repo_dir_name
+
+    base = derive_repo_dir_name(src) if is_git else _pl.Path(str(src).rstrip("/")).name
+    return project_id_from_display_name(base or "project")
+
+
+def _resolve_promote_source(ctx: ToolContext, source: str, pid: str) -> tuple[str, str, str, str]:
+    """v6.59.0 (3.3): agent-side attach/clone through the SAME server primitives the
+    New Project dialog uses. ``source`` is a git URL (cloned into the projects root)
+    or an existing folder path (validated attach). Returns (workspace_root, note,
+    error, effective_pid): on success the folder is registered on the project
+    (working_dir + provenance + trusted_at at the canonical DATA_DIR) so the room
+    and later tasks inherit it — a missing pid is DERIVED from the source name so
+    registration never silently skips. Re-sourcing an existing project whose
+    working_dir differs is refused (mirrors the gateway 409, triad r2 scope
+    advisory); a folder-less existing project may gain its first folder. The agent
+    reports loudly; no confirmation wait (owner quiz 13)."""
+    from ouroboros.config import DATA_DIR
+    from ouroboros.project_sources import clone_project_repo, valid_git_url, validate_attach_path
+
+    src = str(source or "").strip()
+    if not src:
+        return "", "", "", pid
+    is_git = valid_git_url(src)
+    pid = str(pid or "").strip() or _derive_source_project_id(src, is_git)
+    try:
+        from ouroboros.projects_registry import get_project
+
+        existing = get_project(DATA_DIR, pid)
+    except Exception:
+        existing = None
+    if is_git:
+        if str((existing or {}).get("working_dir") or "").strip():
+            # Conflict BEFORE the clone side effect (triad r7): a git source always
+            # creates a NEW folder, so it can never match an existing bound folder —
+            # cloning first would leave a dangling directory behind the refusal.
+            return "", "", (
+                f"⚠️ PROJECT_SOURCE_ERROR (conflict): project {pid!r} already has folder "
+                f"{existing.get('working_dir')} — re-sourcing an existing project is not "
+                "supported; pass a different project_id/project_name or omit source to "
+                "work in the existing folder."
+            ), pid
+        cloned, code, detail = clone_project_repo(src, pid or "")
+        if code:
+            return "", "", f"⚠️ PROJECT_SOURCE_ERROR ({code}): {detail}", pid
+        folder, provenance, clone_url = cloned, "cloned", src
+        note = f" [cloned {src} -> {cloned}]"
+    else:
+        from ouroboros.project_sources import is_git_worktree_root
+
+        resolved, err = validate_attach_path(
+            src, system_repo_dir=getattr(ctx, "repo_dir", ""), drive_root=DATA_DIR
+        )
+        if err:
+            return "", "", f"⚠️ PROJECT_SOURCE_ERROR (attach): {err}", pid
+        if not is_git_worktree_root(resolved):
+            # Task admission requires a git worktree root; attaching a non-git
+            # folder would register a project whose room tasks are born dead
+            # (triad r5). Owner opt-in git-init lives in the New Project dialog.
+            return "", "", (
+                f"⚠️ PROJECT_SOURCE_ERROR (attach): {resolved} is not a git repository — "
+                "ask the owner to create the project via New Project with init_git enabled, "
+                "or have them git-init the folder first."
+            ), pid
+        folder, provenance, clone_url = str(resolved), "attached", ""
+        note = f" [attached {resolved} — I now have write+shell there for this project's tasks]"
+    prior_wd = str((existing or {}).get("working_dir") or "").strip()
+    if prior_wd and prior_wd != folder:
+        return "", "", (
+            f"⚠️ PROJECT_SOURCE_ERROR (conflict): project {pid!r} already has folder "
+            f"{prior_wd} — re-sourcing an existing project is not supported; pass a "
+            "different project_id/project_name or omit source to work in the existing folder."
+        ), pid
+    if prior_wd == folder and str((existing or {}).get("provenance") or "").strip() not in ("", "none"):
+        # Same folder, already stamped: idempotent — keep the original trusted_at.
+        return folder, note, "", pid
+    try:
+        from ouroboros.projects_registry import create_project, update_project
+        from ouroboros.utils import utc_now_iso
+
+        create_project(DATA_DIR, pid, origin="promote_chat_to_task")
+        update_project(
+            DATA_DIR, pid,
+            working_dir=folder, provenance=provenance,
+            clone_url=clone_url, trusted_at=utc_now_iso(),
+        )
+    except Exception as exc:
+        return "", "", f"⚠️ PROJECT_SOURCE_ERROR (register): {type(exc).__name__}: {exc}", pid
+    return folder, note, "", pid
+
+
 def _promote_chat_to_task(
     ctx: ToolContext,
     objective: str,
@@ -301,6 +473,8 @@ def _promote_chat_to_task(
     workspace_root: str = "",
     title: str = "",
     project_name: str = "",
+    workspace: str = "",
+    source: str = "",
 ) -> str:
     """Route real work out of the conversation lane into a supervised pooled task.
 
@@ -349,6 +523,14 @@ def _promote_chat_to_task(
         current_chat_id = int(getattr(ctx, "current_chat_id", None) or 0)
     except (TypeError, ValueError):
         current_chat_id = 0
+    # v6.59.0 (3.3): attach/clone the source BEFORE emitting, so the event already
+    # carries the resolved folder ("help me debug this GitHub project" one-liner).
+    # The effective pid comes back: a source given without project_id/name derives
+    # the project from the source name, so registration never silently skips.
+    source_folder, source_note, source_error, pid = _resolve_promote_source(ctx, source, pid)
+    if source_error:
+        return source_error
+    effective_workspace_root = str(workspace_root or "").strip() or source_folder
     tid = uuid.uuid4().hex[:8]
     evt: Dict[str, Any] = {
         "type": "promote_chat_to_task",
@@ -358,7 +540,10 @@ def _promote_chat_to_task(
         "project_id": pid,
         "project_name": display_name,
         "title": str(title or "").strip()[:80],
-        "workspace_root": str(workspace_root or "").strip(),
+        "workspace_root": effective_workspace_root,
+        # v6.58.0: "none" opts a project-room task OUT of the room's working_dir
+        # default (a folder-less task in a folder-ful project stays possible).
+        "workspace": str(workspace or "").strip().lower(),
         "chat_id": current_chat_id,
         "ts": utc_now_iso(),
     }
@@ -370,7 +555,7 @@ def _promote_chat_to_task(
     else:
         scope_note = ""
     return (
-        f"OK: promoted to supervised task {tid}{scope_note} ({mode}). The conversation "
+        f"OK: promoted to supervised task {tid}{scope_note} ({mode}).{source_note} The conversation "
         "lane stays free; the owner sees a live task card and can steer the running "
         "task from chat (messages are delivered to its mailbox). Use wait_task/"
         "get_task_result to follow up if the result is needed in this conversation."
@@ -800,11 +985,7 @@ def _schedule_task(
     selected_profile = profile_from_task_constraint(task_constraint)
     ok, missing_caps = subagent_profile_satisfies(selected_profile, required_caps)
     if not ok:
-        return (
-            "⚠️ SUBAGENT_CAPABILITY_MISMATCH: selected child profile "
-            f"{selected_profile!r} cannot satisfy required_capabilities={missing_caps}. "
-            "Pass an explicit write_surface for an acting child when those capabilities are genuinely required."
-        )
+        return _capability_mismatch_message(selected_profile, missing_caps)
     allowed_resources = normalize_allowed_resources(
         (parent_contract.get("allowed_resources") if isinstance(parent_contract, dict) else {})
         or metadata.get("allowed_resources")
@@ -977,6 +1158,7 @@ def _schedule_task(
         root_task_id=root_task_id_seed or current_task_id,
         slot_tasks=slot_tasks,
         emitted_modes=emitted_modes,
+        write_surface=requested_surface,
     )
     if _lane_downgrade_notes and isinstance(_schedule_result, str):  # P1: not a silent horizon cut
         _schedule_result += "\n⚠️ " + "; ".join(dict.fromkeys(_lane_downgrade_notes))
@@ -1416,7 +1598,10 @@ def get_tools() -> List[ToolEntry]:
                 "not a keyword trigger — I name the project from what they actually want it "
                 "called, and do not just answer or spawn a project-less task). `project_id` "
                 "scopes to an existing project; "
-                "`workspace_root` points at a working folder. Owner follow-ups reach the "
+                "`workspace_root` points at a working folder. A project-scoped task inherits "
+                "the project's working folder as its ACTIVE WORKSPACE by default (its file/"
+                "shell/git tools operate there, not on the Ouroboros repo); pass "
+                "workspace='none' for a folder-less task. Owner follow-ups reach the "
                 "running task via its mailbox."
             ),
             "parameters": {
@@ -1427,7 +1612,9 @@ def get_tools() -> List[ToolEntry]:
                     "project_name": {"type": "string", "description": "Set ONLY to create a brand-new NAMED project now and run this task inside it (e.g. 'airi research'). The display name; a filesystem id is derived from it.", "default": ""},
                     "expected_output": {"type": "string", "description": "What done looks like.", "default": ""},
                     "project_id": {"type": "string", "description": "Optional EXISTING project scope (filesystem-clean id).", "default": ""},
-                    "workspace_root": {"type": "string", "description": "Optional absolute working-folder path.", "default": ""},
+                    "workspace_root": {"type": "string", "description": "Optional absolute working-folder path (validated at admission: must be a git worktree root outside the Ouroboros repo/data). When omitted for a project-scoped task, the project's registered working_dir is used by default.", "default": ""},
+                    "workspace": {"type": "string", "description": "Pass 'none' to opt OUT of the project room's default working folder (a folder-less task in a folder-ful project). Leave empty otherwise.", "default": ""},
+                    "source": {"type": "string", "description": "Attach or clone the project's working folder in ONE move: a git URL (https://... or git@host:path — cloned server-side into the projects root; private repos fail typed auth_required) or an existing folder path (validated attach). The folder is registered on the project (provenance + trusted_at) and becomes this task's active workspace. Use for 'help me debug this GitHub repo / this folder' asks.", "default": ""},
                 },
                 "required": ["objective"],
             },
@@ -1522,7 +1709,11 @@ def get_tools() -> List[ToolEntry]:
                 "BURST + ABSORB: when several children are INDEPENDENT, emit them in ONE batch (parallel "
                 "schedule_subagent calls in the same round) so they run concurrently, then absorb with "
                 "wait_tasks(any_terminal) — handling whichever finishes first — instead of scheduling and "
-                "blocking on them one at a time with serial wait_task calls. Always retrieve "
+                "blocking on them one at a time with serial wait_task calls. "
+                "INDEPENDENT VERIFIER: to check a finished deliverable without builder bias, spawn a "
+                "read-only child with memory_mode=empty whose objective carries ONLY the deliverable "
+                "location + the task's acceptance criteria (NOT your own probes/assumptions) and have it "
+                "verify through the task's own interface. Always retrieve "
                 "the handoff with get_task_result, wait_task, or wait_tasks before relying on its results."
             ),
             "parameters": {"type": "object", "properties": {
@@ -1642,8 +1833,8 @@ def get_tools() -> List[ToolEntry]:
                            "or want to save budget (simple tasks). Takes effect on next round.",
             "parameters": {"type": "object", "properties": {
                 "model": {"type": "string", "description": "Model name (e.g. anthropic/claude-sonnet-4). Leave empty to keep current."},
-                "effort": {"type": "string", "enum": ["low", "medium", "high", "xhigh"],
-                           "description": "Reasoning effort level. Leave empty to keep current."},
+                "effort": {"type": "string", "enum": ["none", "minimal", "low", "medium", "high", "xhigh", "max"],
+                           "description": "Reasoning effort level (clamped to the model's real ceiling). Leave empty to keep current."},
             }, "required": []},
         }, _switch_model),
         ToolEntry("get_task_result", {

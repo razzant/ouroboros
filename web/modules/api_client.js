@@ -74,6 +74,9 @@ export const apiClient = {
     ownerContextMode: (mode) => jsonPost('/api/owner/context-mode', { mode }),
     /** @returns {Promise<import('./api_types.js').OwnerScopeReviewFloorResponse>} */
     ownerScopeReviewFloor: (floor) => jsonPost('/api/owner/scope-review-floor', { floor }),
+    /** @returns {Promise<import('./api_types.js').OwnerSafetyModeResponse>} */
+    ownerSafetyMode: (mode) => jsonPost('/api/owner/safety-mode', { mode }),
+    logsTail: (name, limit = 2000) => fetchJson(`/api/logs/${encodeURIComponent(name)}?limit=${encodeURIComponent(limit)}`, { cache: 'no-store' }),
     ownerCapabilityAck: (payload) => jsonPost('/api/owner/capability-ack', payload),
     /** @returns {Promise<import('./api_types.js').OpenAICompatibleModelsResponse>} */
     openAICompatibleModels: (payload) => jsonPost('/api/openai-compatible/models', payload),
@@ -86,6 +89,13 @@ export const apiClient = {
     skillGrants: (skill, items) => jsonPost(`/api/skills/${encodeURIComponent(skill)}/grants`, { items }),
     chatHistory: (limit = 1000) => fetchJson(`/api/chat/history?limit=${encodeURIComponent(limit)}`, { cache: 'no-store' }),
     projectFromTask: (taskId, id, name, objectiveHint = '') => jsonPost('/api/projects/from-task', { task_id: taskId, id, name, objective_hint: objectiveHint }),
+    /** @param {import('./api_types.js').ProjectCreateRequest} payload */
+    projectCreate: (payload) => jsonPost('/api/projects', payload),
+    projectUpdate: (projectId, name) => jsonPost(`/api/projects/${encodeURIComponent(projectId)}/update`, { name }),
+    /** @returns {Promise<import('./api_types.js').ProjectDeleteResponse>} */
+    projectDelete: (projectId) => jsonPost(`/api/projects/${encodeURIComponent(projectId)}/delete`, {}),
+    /** @returns {Promise<import('./api_types.js').FsDirsResponse>} */
+    fsDirs: (path = '') => fetchJson(`/api/fs/dirs${path ? `?path=${encodeURIComponent(path)}` : ''}`, { cache: 'no-store' }),
     updateStatus: () => fetchJson('/api/update/status', { cache: 'no-store' }),
     updatePreflight: () => jsonPost('/api/update/preflight', {}),
     updateApply: (strategy) => jsonPost('/api/update/apply', { strategy }),

@@ -1089,13 +1089,23 @@ def _enforce_task_timeouts_locked(
         ceiling_reached = runtime_sec >= abs_ceiling
 
         if runtime_sec >= effective_soft and not bool(meta.get("soft_sent")):
-            meta["soft_sent"] = True
-            if owner_chat_id:
-                send_with_budget(
-                    owner_chat_id,
-                    f"⏱️ Task {task_id} running for {int(runtime_sec)}s. "
-                    f"type={task_type}, heartbeat_lag={int(hb_lag_sec)}s, idle={int(idle_sec)}s. Continuing.",
-                )
+            # v6.57.0 — suppress the owner-facing soft heartbeat while a descendant is
+            # actively progressing: a parent WAITING on a live child (grandchild busy)
+            # is not idle in any way the owner needs to see ("idle=243s. Continuing."
+            # while a grandchild generated the deliverable — the site-presentation
+            # incident). Crucially `soft_sent` is NOT latched here, so the message can
+            # still fire later if the task becomes genuinely idle (a real reason to look).
+            # The durable liveness/kill axes are unaffected — this gates only the message.
+            if subtree_progressing:
+                pass
+            else:
+                meta["soft_sent"] = True
+                if owner_chat_id:
+                    send_with_budget(
+                        owner_chat_id,
+                        f"⏱️ Task {task_id} running for {int(runtime_sec)}s. "
+                        f"type={task_type}, heartbeat_lag={int(hb_lag_sec)}s, idle={int(idle_sec)}s. Continuing.",
+                    )
 
         # Hard axes (deadline_at, abs ceiling) stop the task regardless of activity; the
         # idle/subtree gate only spares a task that has NO explicit deadline and is still

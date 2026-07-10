@@ -225,7 +225,7 @@ def test_gigachat_payload_omits_reasoning_effort(monkeypatch):
                 object="chat.completion",
             )
 
-    monkeypatch.setattr(LLMClient, "_get_gigachat_client", lambda self, target: FakeClient())
+    monkeypatch.setattr(LLMClient, "_get_gigachat_client", lambda self, target, timeout=None: FakeClient())
 
     client = LLMClient()
     message, _ = client._chat_gigachat(

@@ -51,8 +51,10 @@ class _StubLLMClient:
         self.usage = usage
         self.calls: list[dict] = []
 
-    def chat(self, *, messages, model, use_local):
-        self.calls.append({"messages": messages, "model": model, "use_local": use_local})
+    def chat(self, *, messages, model, use_local, **kwargs):
+        # v6.54.3 parse-fix params (max_tokens / reasoning_effort / timeout /
+        # response_format) ride through **kwargs and are recorded for assertions.
+        self.calls.append({"messages": messages, "model": model, "use_local": use_local, **kwargs})
         if self.raise_exc is not None:
             raise self.raise_exc
         if isinstance(self.response_content, list):

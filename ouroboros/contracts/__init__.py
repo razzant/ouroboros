@@ -23,10 +23,13 @@ from ouroboros.contracts.schema_versions import (
     read_schema_version,
 )
 from ouroboros.contracts.task_contract import (
+    answer_protocol_active,
     attach_task_contract,
     build_task_contract,
     normalize_acceptance_claims,
     normalize_allowed_resources,
+    normalize_answer_protocol,
+    normalize_budget_profile,
     normalize_disabled_tools,
     normalize_resource_policy,
 )
@@ -57,10 +60,13 @@ __all__ = [
     "SCHEMA_VERSION_KEY",
     "with_schema_version",
     "read_schema_version",
+    "answer_protocol_active",
     "attach_task_contract",
     "build_task_contract",
     "normalize_acceptance_claims",
     "normalize_allowed_resources",
+    "normalize_answer_protocol",
+    "normalize_budget_profile",
     "normalize_disabled_tools",
     "normalize_resource_policy",
     "PluginAPI",

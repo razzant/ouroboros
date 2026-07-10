@@ -163,6 +163,16 @@ def _run_command(args: argparse.Namespace) -> int:
         raise CLIError("run requires a prompt")
     if str(args.delegation_role or "root").strip().lower() != "root":
         raise CLIError("delegation_role=subagent is only allowed through the internal schedule_subagent tool")
+    user_metadata: Dict[str, Any] = {}
+    raw_metadata = str(getattr(args, "task_metadata_json", "") or "").strip()
+    if raw_metadata:
+        try:
+            parsed_metadata = json.loads(raw_metadata)
+        except json.JSONDecodeError as exc:
+            raise CLIError(f"--task-metadata-json is not valid JSON: {exc}")
+        if not isinstance(parsed_metadata, dict):
+            raise CLIError("--task-metadata-json must be a JSON object")
+        user_metadata = parsed_metadata
     client = _client(args, start=args.start)
     attachments = [{"path": str(pathlib.Path(p).expanduser())} for p in args.attach]
     disabled_tools = []
@@ -176,7 +186,9 @@ def _run_command(args: argparse.Namespace) -> int:
         "memory_mode": args.memory_mode or ("forked" if args.workspace else "shared"),
         "attachments": attachments,
         "actor_id": args.actor_id,
-        "metadata": {"delegation_role": args.delegation_role, "source": "cli"},
+        # Host-owned service keys are spread LAST so --task-metadata-json can
+        # never forge delegation_role/source (subagent forgery stays blocked).
+        "metadata": {**user_metadata, "delegation_role": args.delegation_role, "source": "cli"},
         "source": "cli",
     }
     if disabled_tools:
@@ -461,6 +473,12 @@ def build_parser() -> argparse.ArgumentParser:
     run.add_argument("--patch-out", default="", help="write workspace patch to this path")
     run.add_argument("--result-json-out", default="", help="write final task result JSON to this path")
     run.add_argument("--disable-tools", action="append", default=[], help="comma-separated tool names to withhold from this task")
+    run.add_argument(
+        "--task-metadata-json",
+        default="",
+        help="JSON object merged into the task metadata (e.g. budget_profile); "
+        "host-owned keys delegation_role/source cannot be overridden",
+    )
     run.add_argument("--actor-id", default="cli")
     run.add_argument("--delegation-role", default="root")
     run.add_argument("prompt", nargs=argparse.REMAINDER)

@@ -610,11 +610,18 @@ def test_verify_and_record_handler_artifact_and_declared(tmp_path):
     assert "FAIL" in _verify_and_record(ctx, contract_kind="artifact_observation", artifact_paths=["missing.txt"])
     # triad #A: a RELATIVE path that escapes the workspace cannot probe arbitrary host
     # files (no `../../../etc/passwd` existence oracle) — confined post-resolution. The
-    # security invariant is simply that the traversal target is NEVER OBSERVED (it is
-    # refused on POSIX where the confinement path exists, or resolves to a missing
-    # Windows path — either way, not an existence oracle).
-    escaped = _verify_and_record(ctx, contract_kind="artifact_observation", artifact_paths=["../../../../../../etc/passwd"])
-    assert "OBSERVED" not in escaped and "FAIL" in escaped
+    # security invariant is that the traversal target is NEVER OBSERVED. v6.57.0: an
+    # out-of-scope path is now a POLICY refusal (REFUSED_OUT_OF_SCOPE), not a FAIL — it
+    # still never yields an existence oracle.
+    # Deep enough to escape to the FILESYSTEM ROOT on every OS (Windows runners
+    # nest tmp ~7 levels under the user home — six `..` landed INSIDE home there,
+    # where the deliberate user_files read lane made the probe an honest miss
+    # instead of a refusal).
+    escaped = _verify_and_record(
+        ctx, contract_kind="artifact_observation",
+        artifact_paths=["../" * 15 + "etc/passwd"],
+    )
+    assert "OBSERVED" not in escaped and "REFUSED_OUT_OF_SCOPE" in escaped
     # no_visible_machine_contract -> honest declared receipt (grounding)
     assert "DECLARED" in _verify_and_record(ctx, contract_kind="no_visible_machine_contract", check="manual UI review")
     assert read_verification_receipts(ctx.drive_root, "vhandler")[-1]["status"] == "declared"

@@ -57,7 +57,7 @@ from ouroboros.utils import (
 
 log = logging.getLogger(__name__)
 
-_SCOPE_MODEL_DEFAULT = "openai/gpt-5.5"
+_SCOPE_MODEL_DEFAULT = "anthropic/claude-fable-5"
 _SCOPE_MAX_TOKENS = 100_000  # 100K output tokens
 _SCOPE_REVIEW_SLOT_TIMEOUT_SEC = 900
 
@@ -157,7 +157,7 @@ def _scope_reviewer_window(model: str) -> int:
     confirmed/asserted probe (provider metadata or owner-ack) for the reviewer's REAL
     active route gives the real window. With NO evidence, the 1M blocking-floor
     sentinel is granted ONLY to the SHIPPED designated reviewer under ``blocking_1m``
-    (the default for gpt-5.5); any other no-evidence reviewer — including an operator's
+    (the default for fable-5, a real 1M-window model); any other no-evidence reviewer — including an operator's
     off-default ``OUROBOROS_SCOPE_REVIEW_MODEL`` pin — returns a conservative sub-floor
     window so the P3 authority check downgrades it (visibly) instead of silently
     treating a 200K model as 1M and overflowing its real window into a provider 400

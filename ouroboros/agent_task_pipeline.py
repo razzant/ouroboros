@@ -45,9 +45,30 @@ def build_trace_summary(llm_trace: dict) -> str:
     notes = llm_trace.get("reasoning_notes", []) or []
 
     n = len(tool_calls)
-    errors = sum(1 for tc in tool_calls if isinstance(tc, dict) and tc.get("is_error"))
+    # v6.57.0 — honest breakdown so a task that finished with a deliverable is not
+    # mislabeled "43 errors" (the site/PB incidents): separate GENUINE unresolved
+    # errors from POLICY denials, cosmetic non-zero exits, recovered errors, and
+    # ignored read-only blocks. Self-learning (reflection reads this) must not be
+    # poisoned by counting policy refusals or intentional probe exits as failures.
+    from ouroboros.outcomes import _classify_tool_errors
 
-    lines: list[str] = [f"## Tool trace ({n} calls, {errors} errors)"]
+    _buckets = _classify_tool_errors(llm_trace)
+    _unresolved = len(_buckets.get("unresolved") or [])
+    _policy = len(_buckets.get("policy_denials") or [])
+    _cosmetic = len(_buckets.get("cosmetic") or [])
+    _recovered = len(_buckets.get("recovered") or [])
+    _ignored = len(_buckets.get("ignored") or [])
+    _breakdown_bits = [f"{_unresolved} errors"]
+    if _policy:
+        _breakdown_bits.append(f"{_policy} policy-denied")
+    if _recovered:
+        _breakdown_bits.append(f"{_recovered} recovered")
+    if _cosmetic:
+        _breakdown_bits.append(f"{_cosmetic} cosmetic")
+    if _ignored:
+        _breakdown_bits.append(f"{_ignored} ignored")
+
+    lines: list[str] = [f"## Tool trace ({n} calls, {', '.join(_breakdown_bits)})"]
 
     if not tool_calls:
         lines.append("No tool calls.")
@@ -449,6 +470,10 @@ def emit_task_results(
         "artifact_bundle": artifact_bundle,
         "review_status": stored_result.get("review_status") if isinstance(stored_result.get("review_status"), dict) else {},
         "cost_usd": round(float(usage.get("cost") or 0), 6),
+        # v6.57.0 (P6b): recursive cost incl. children (from the stored rollup) so the
+        # parent card / Logs can show the true subtree cost, not just this task's own.
+        "cost_usd_with_children": stored_result.get("cost_usd_with_children"),
+        "cost_with_children_partial": bool(stored_result.get("cost_with_children_partial")),
         "total_rounds": int(usage.get("rounds") or 0),
         "prompt_tokens": int(usage.get("prompt_tokens") or 0),
         "completion_tokens": int(usage.get("completion_tokens") or 0),
@@ -689,12 +714,28 @@ def _store_task_result(env: Any, task: Dict[str, Any], text: str,
                 },
                 cost_usd=round(float(usage.get("cost") or 0), 6),
             )
+        # P6b (v6.57.0): recursive cost rollup INCLUDING children. cost_usd stays this
+        # task's own spend (unchanged for existing consumers); cost_usd_with_children is
+        # the additive parent-visible total, computed from the canonical status root
+        # (budget_drive_root) where child results live.
+        _own_cost = round(float(usage.get("cost") or 0), 6)
+        _cost_status_root = task.get("budget_drive_root") or env.drive_root
+        try:
+            from ouroboros.task_status import compute_cost_with_children
+
+            _cost_with_children, _cost_partial = compute_cost_with_children(
+                _cost_status_root, str(task.get("id") or ""), _own_cost
+            )
+        except Exception:
+            _cost_with_children, _cost_partial = _own_cost, False
         write_task_result(
             env.drive_root,
             str(task.get("id") or ""),
             status,
             reason_code=reason_code,
             outcome_axes=outcome_axes,
+            cost_usd_with_children=_cost_with_children,
+            cost_with_children_partial=_cost_partial,
             task_contract=task_contract,
             loop_outcome=loop_outcome,
             project_id=str(task.get("project_id") or ""),

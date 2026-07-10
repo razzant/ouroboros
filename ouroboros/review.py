@@ -78,7 +78,25 @@ MAX_FUNCTION_LINES = 300
 # v6.53.0 benchmark-generalization hardening adds small typed helpers for Observable Acceptance Claims,
 # support_refs, GAIA profiles, media frame extraction, VLM timeout wrapping, and workspace inheritance.
 # Cap intentionally moves with a small headroom rather than hiding growth elsewhere.
-MAX_TOTAL_FUNCTIONS = 3636
+# v6.54.3 runtime-reliability: +~20 functions for the OUROBOROS_SAFETY_MODE owner-guard set
+# (config ratchet/getters, owner endpoint, registry/browser detectors — mirrors the established
+# context-mode/scope-floor pattern), transport-timeout SSOT getters, the read-vs-write
+# runtime_data scan refinement, and slot-visibility helpers; cap 3636 -> 3690 with small headroom.
+# v6.56.0 cost-axis/bench sprint: +~5 functions (task_pacing cost milestones +
+# ceiling resolver, loop transport wrapper, media ffmpeg resolver chain,
+# protected-artifact round-2 classifiers) — deliberate feature growth; 3690 -> 3699
+# with the usual small headroom.
+# v6.57.0 swarm/outcome-honesty + settings sprint (Phase 1): +~25 functions —
+# find_child_tasks scope + compute_cost_with_children, the policy_denials bucket,
+# verify refused_out_of_scope helpers, the EFFORT_SCALE SSOT (rank/clamp/step-down)
+# + learned per-route effort-ceiling store (capability_evidence) + llm.py clamp/record,
+# the subagent profile-summary + capability-mismatch message, and the Safety-mode
+# UI wiring. Deliberate feature growth; 3699 -> 3740 with the usual small headroom.
+# v6.58.0–v6.59.0 projects foundation + entry (Phases 2–3): +~20 functions —
+# workspace_admission SSOT (validator/room-resolver/preflight-cap/workspace-block),
+# coop_checkpoint pair, project_sources attach/clone, the projects update/delete/
+# fs-dirs gateway handlers, and registry provenance/delete helpers; 3740 -> 3775.
+MAX_TOTAL_FUNCTIONS = 3775
 GRANDFATHERED_OVERSIZED_FUNCTIONS = {
     ("agent_startup_checks.py", "verify_restart"),  # managed #53 boot diagnostic flow, 307 lines
     ("git.py", "_run_reviewed_stage_cycle"),  # reviewed-commit gate orchestration, 302 lines

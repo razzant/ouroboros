@@ -1,0 +1,13 @@
+--- /tmp/claude-1006/-home-a-razzhigaev-ouro/5e03c92c-6039-4ed9-86a5-e7ad7739b20f/scratchpad/clb_bundle/clbench-livebridge-handoff-v3-2026-07-05/bench-config/external-adapters/ouroboros/_launcher.py	2026-06-26 14:51:33.640753000 +0000
++++ /home/a.razzhigaev/ouro/benchmarks/continual-learning-bench/src/systems/ouroboros/_launcher.py	2026-07-05 09:00:10.453973718 +0000
+@@ -165,6 +165,10 @@
+         # spends on expensive models. One model everywhere = cheap + provider-clean + fair.
+         overrides = dict(
+             OUROBOROS_RUNTIME_MODE="advanced",
++            # Operator port (campaign v6.56.0): the declared safety knob must live in the
++            # isolated settings from birth — the v6.56.0 owner-guard refuses env-side
++            # full->light lowering at boot (parity with the effective v6.52.2 reference).
++            OUROBOROS_SAFETY_MODE="light",
+             # Bench mode: skip the pre-push pytest gate. The full 278-file suite takes ~318s > the 300s
+             # preflight cap (and has a pre-existing failing test), which blocks every evolution commit from
+             # absorbing. We measure evolution lift, not ship code — so skip the gate. (off-switch: tools/git.py)

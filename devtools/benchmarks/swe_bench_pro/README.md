@@ -18,7 +18,9 @@ Files:
   `pro_predictions.py` for the prediction/capture phase.
 - `e1v2/` contains the persistent-agent evolutionary harness: sequential Pro
   tasks with carried Ouroboros data/source volumes and native post-task
-  evolution between tasks.
+  evolution between tasks. It also offers an OPTIONAL, default-OFF pre-task
+  evolution phase (`run_pro.py --pretask-evolution`; see `e1v2/README.md`
+  §Pre-task evolution) — the baseline path is unchanged when the flag is absent.
 - `task_order_pro_70.csv` records the 70-task order plus the frozen E0 baseline
   verdicts used for E1v2 comparisons.
 

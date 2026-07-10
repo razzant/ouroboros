@@ -84,3 +84,8 @@ MagicMock/
 /extracted_*/
 /*.pdf
 /*.png
+
+# Repo-root logs/ is NOT a runtime dir (runtime logs live under data/); a stray
+# test writing here must never dirty the tree or enter a release (v6.61.1).
+# Anchored: only the repo-root dir, never nested legitimate logs/ folders.
+/logs/

@@ -44,7 +44,7 @@ from ouroboros.tools.shell_guards import (
     parse_porcelain_paths,
     process_shell_guard_args,
     shell_has_write_indicator,
-    runtime_data_write_targets,
+    runtime_data_guard_targets,
     shell_writer_targets_protected,
     workspace_executor_state_write_block,
     writer_target_tokens,
@@ -281,6 +281,48 @@ def _detect_scope_review_floor_self_lowering(text_lower: str) -> bool:
     )
 
 
+def _compose_execute_result(result: str, route_note: str, safety_msg: str) -> str:
+    """Assemble the final tool result.
+
+    The auto-route note TRAILS the result: failure classification
+    (loop_tool_execution) inspects the FIRST line, so a leading note would mask
+    an underlying tool error on the auto-routed read path (review round 3). The
+    safety warning keeps its historical leading position — its ``---`` separator
+    is an established transcript convention the metadata scan already handles."""
+    if route_note:
+        result = f"{result}\n\n{route_note}"
+    if safety_msg:
+        return f"{safety_msg}\n\n---\n{result}"
+    return result
+
+
+def _detect_safety_mode_self_lowering(text_lower: str) -> bool:
+    """Detect shell/script attempts to lower the owner-controlled LLM-safety coverage
+    (v6.54.3). OUROBOROS_SAFETY_MODE gates the LLM safety supervisor layer; the agent
+    must not switch it to ``light``/``off`` to remove its own supervision friction
+    (BIBLE P3). Mirrors the context-mode/scope-floor self-lowering guards."""
+    import urllib.parse
+
+    # URL-decode so a percent-encoded endpoint (curl .../safety%2Dmode) cannot
+    # slip the literal scan (review round 6; mirrors the attest-endpoint guard).
+    decoded = urllib.parse.unquote(urllib.parse.unquote(text_lower)).lower()
+    text_lower = f"{text_lower} {decoded}"
+    mentions_mode_key = "ouroboros_safety_mode" in text_lower
+    mentions_owner_endpoint = "/api/owner/safety-mode" in text_lower
+    mentions_mode_endpoint = "safety-mode" in text_lower and "/api/owner" in text_lower
+    mentions_mode_cli = "safety-mode" in text_lower and (
+        "ouroboros settings" in text_lower
+        or "ouroboros.cli" in text_lower
+    )
+    mentions_save = "save_settings" in text_lower or "settings.json" in text_lower or "/api/settings" in text_lower
+    return (
+        mentions_owner_endpoint
+        or mentions_mode_endpoint
+        or mentions_mode_cli
+        or (mentions_mode_key and mentions_save)
+    )
+
+
 def _detect_owner_skill_attest_self_call(text_lower: str) -> bool:
     """Detect agent attempts to loopback-call the OWNER-ONLY skill owner-attestation endpoint
     (C1, v6.39). Owner-attestation skips the expensive LLM skill review; it MUST be
@@ -453,6 +495,12 @@ _WORKSPACE_ALLOWED_TOOLS = frozenset({
     "cancel_task",
     "discard_child_result",
     "override_delegation_constraint",
+    # A workspace parent that can schedule ACTING children must be able to absorb
+    # their patches (integrate) and compare best-of-N candidates — else acting
+    # delegation is inert exactly in workspace mode (v6.56.0, owner-approved; the
+    # tools keep their own manifest/sha256/protected-path/lineage gates).
+    "integrate_subagent_patch",
+    "compare_subagent_patches",
     "knowledge_read",
     "knowledge_list",
     "knowledge_write",
@@ -499,28 +547,92 @@ _SHELL_GUARDED_TOOLS = _PROCESS_COMMAND_TOOLS | {"verify_and_record"}
 _PATH_NORMALIZED_TOOLS = frozenset({"read_file", "write_file", "edit_text", "list_files", "search_code", "query_code"})
 
 
-def _normalize_dispatch_path_args(ctx: Any, name: str, args: Dict[str, Any]) -> None:
+def _normalize_dispatch_path_args(ctx: Any, name: str, args: Dict[str, Any]) -> str:
     """ROOT-FIX (v6.35.0): normalize an absolute / redundant-root-basename
     active_workspace|system_repo path arg IN PLACE at the dispatch boundary, so
     the handler AND every downstream guard (protected-path, protected-artifact,
     accidental-truncation shrink guard) resolve the SAME target. One authoritative
-    normalization point is what makes a guard unable to desync from the operation."""
+    normalization point is what makes a guard unable to desync from the operation.
+
+    v6.54.3 root-label fix: returns a dispatch note ("" when nothing rerouted).
+    When ``root='user_files'`` carries an ABSOLUTE path that resolves under the
+    ACTIVE WORKSPACE root, the root label is wrong, not the intent: reads
+    (read_file/list_files/search_code) are auto-routed to
+    ``root='active_workspace'`` with a visible note appended AFTER the result
+    (trailing, so first-line failure classification is never masked),
+    and writes (write_file/edit_text) return an actionable
+    ROOT_REQUIRED_ACTIVE_WORKSPACE redirect instead of a generic access denial.
+    The destination root still passes every downstream gate (profile access
+    decision, protected-path guards, subagent filters) — only the label is
+    corrected, never the authority. ``query_code`` is excluded: its
+    root=user_files external-target contract handles absolute paths natively."""
     if name not in _PATH_NORMALIZED_TOOLS:
-        return
+        return ""
     root_arg = str(args.get("root") or "active_workspace")
-    if root_arg not in ("active_workspace", "system_repo"):
-        return
+    if root_arg in ("active_workspace", "system_repo"):
+        try:
+            norm_root = active_repo_dir_for(ctx) if root_arg == "active_workspace" else system_repo_dir_for(ctx)
+            for _key in ("path", "dir"):
+                if isinstance(args.get(_key), str) and args[_key]:
+                    args[_key] = normalize_root_relative(norm_root, args[_key])
+            if isinstance(args.get("files"), list):
+                for _f in args["files"]:
+                    if isinstance(_f, dict) and isinstance(_f.get("path"), str) and _f["path"]:
+                        _f["path"] = normalize_root_relative(norm_root, _f["path"])
+        except Exception:
+            pass
+        return ""
+    if root_arg != "user_files" or name == "query_code":
+        return ""
     try:
-        norm_root = active_repo_dir_for(ctx) if root_arg == "active_workspace" else system_repo_dir_for(ctx)
+        workspace = pathlib.Path(active_repo_dir_for(ctx)).resolve(strict=False)
+    except Exception:
+        return ""
+
+    def _under_workspace(text: str) -> bool:
+        if not is_absolute_path_text(text):
+            return False
+        try:
+            pathlib.Path(text).expanduser().resolve(strict=False).relative_to(workspace)
+            return True
+        except (ValueError, OSError, RuntimeError):
+            return False
+
+    candidates: list[str] = []
+    for _key in ("path", "dir"):
+        if isinstance(args.get(_key), str) and args[_key]:
+            candidates.append(args[_key])
+    if isinstance(args.get("files"), list):
+        for _f in args["files"]:
+            if isinstance(_f, dict) and isinstance(_f.get("path"), str) and _f["path"]:
+                candidates.append(_f["path"])
+    hits = [text for text in candidates if _under_workspace(text)]
+    if not hits:
+        return ""
+    if name in ("write_file", "edit_text"):
+        return (
+            "⚠️ ROOT_REQUIRED_ACTIVE_WORKSPACE: absolute path "
+            f"{hits[0]!r} is under the active workspace, but root='user_files' does not "
+            "write there. Retry the same call with root='active_workspace' (the same "
+            "path is accepted)."
+        )
+    args["root"] = "active_workspace"
+    try:
         for _key in ("path", "dir"):
             if isinstance(args.get(_key), str) and args[_key]:
-                args[_key] = normalize_root_relative(norm_root, args[_key])
+                args[_key] = normalize_root_relative(workspace, args[_key])
         if isinstance(args.get("files"), list):
             for _f in args["files"]:
                 if isinstance(_f, dict) and isinstance(_f.get("path"), str) and _f["path"]:
-                    _f["path"] = normalize_root_relative(norm_root, _f["path"])
+                    _f["path"] = normalize_root_relative(workspace, _f["path"])
     except Exception:
         pass
+    return (
+        "⚠️ AUTO_ROUTED_TO_ACTIVE_WORKSPACE: absolute path "
+        f"{hits[0]!r} is under the active workspace; the call ran with "
+        "root='active_workspace'. Pass root='active_workspace' directly for "
+        "workspace paths."
+    )
 
 
 _WEB_TOOLS = frozenset({"web_search", "browse_page", "browser_action", "youtube_transcript"})
@@ -1575,7 +1687,8 @@ class ToolRegistry:
             "⚠️ WORKSPACE_SHELL_BLOCKED: shell command targets the Ouroboros runtime "
             "(system repo / data drive) or an owner credential path. External-workspace "
             "tasks may not read or write those; use the gated read_file tool for any "
-            "inspection you need."
+            "inspection you need. Run your command against the task's own surfaces "
+            "instead: the active workspace root (e.g. /app) or scratch such as /tmp."
         )
         protected_texts, allowed_texts, protected_paths, allowed_paths = self._external_runtime_protected_paths()
         # (1) embedded-string boundary match (absolute roots only — no substring secret
@@ -1800,6 +1913,8 @@ class ToolRegistry:
             return "⚠️ CONTEXT_MODE_SELF_LOWERING_BLOCKED: shell command pattern looks like an attempt to lower OUROBOROS_CONTEXT_MODE to low through settings.json or /api/owner/context-mode. Context mode is owner-controlled — ask the owner to change the Low/Max toggle or edit settings while the agent is stopped."
         if _detect_scope_review_floor_self_lowering(cmd_lower):
             return "⚠️ SCOPE_REVIEW_FLOOR_SELF_LOWERING_BLOCKED: shell command pattern looks like an attempt to weaken OUROBOROS_SCOPE_REVIEW_FLOOR (e.g. to ``advisory``) through settings.json, /api/settings, or /api/owner/scope-review-floor. The scope-review floor gates the BIBLE P3 blocking review — it is owner-controlled, and the agent must not lower it to slip its own changes past the gate. Ask the owner to change it, or stop the agent and edit settings.json directly."
+        if _detect_safety_mode_self_lowering(cmd_lower):
+            return "⚠️ SAFETY_MODE_SELF_LOWERING_BLOCKED: shell command pattern looks like an attempt to change OUROBOROS_SAFETY_MODE (e.g. to ``light``/``off``) through settings.json, /api/settings, or /api/owner/safety-mode. LLM-safety coverage is owner-controlled (BIBLE P3) — the agent must not reduce its own supervision. Ask the owner to change it via the dedicated /api/owner/safety-mode endpoint, or stop the agent and edit settings.json directly."
         if _detect_owner_skill_attest_self_call(cmd_lower):
             return "⚠️ OWNER_SKILL_ATTESTATION_SELF_CALL_BLOCKED: shell command pattern looks like an attempt to loopback-POST /api/owner/skills/<skill>/attest-review. Owner-attestation skips the expensive LLM skill review and is OWNER-ONLY — the agent must not self-attest its own skill to bypass the immune system's review. Ask the owner to attest it from the Skills UI."
         if _detect_mutative_toggle_self_change(cmd_lower):
@@ -1848,27 +1963,31 @@ class ToolRegistry:
                     )
                 except Exception as exc:
                     return shell_cwd_block_message(self._ctx, str(args.get("cwd") or ""), operation=operation, error=exc)
-                runtime_data_targets = runtime_data_write_targets(
+                own_task_drive = pathlib.Path(self._ctx.task_drive_root())
+                own_artifact_dir = task_artifact_dir_path(
+                    pathlib.Path(self._ctx.drive_root),
+                    task_id_for_artifacts(self._ctx),
+                    create=False,
+                )
+                runtime_data_targets = runtime_data_guard_targets(
                     raw_cmd,
+                    writeish=writeish,
                     drive_root=pathlib.Path(self._ctx.drive_root),
                     work_dir=pathlib.Path(work_dir),
-                    allowed_roots=[
-                        pathlib.Path(self._ctx.task_drive_root()),
-                        task_artifact_dir_path(
-                            pathlib.Path(self._ctx.drive_root),
-                            task_id_for_artifacts(self._ctx),
-                            create=False,
-                        ),
-                    ],
+                    allowed_roots=[own_task_drive, own_artifact_dir],
                 )
                 if runtime_data_targets:
-                    action = "write under" if writeish else "mention"
+                    action = "write under" if writeish else "write-indicating commands that mention"
+                    # Name the REAL task roots: a mis-guessed absolute path used to
+                    # produce this block with no way to self-correct (v6.54.3).
                     return (
                         "⚠️ LIGHT_MODE_BLOCKED: runtime_mode=light blocks process commands "
-                        f"that {action} runtime_data paths outside this task's task_drive/artifact_store. "
-                        "Use root=artifact_store for canonical deliverables, root=task_drive for "
-                        "scratch, or root=user_files for visible user files. Paths: "
-                        + ", ".join(runtime_data_targets[:5])
+                        f"that {action} runtime_data paths outside this task's own roots. "
+                        f"This task's real roots are: artifact_store={own_artifact_dir}, "
+                        f"task_drive={own_task_drive} — staged attachments live under "
+                        f"{own_artifact_dir / 'attachments'}. Use those absolute paths in scripts, "
+                        "or root=artifact_store / root=task_drive / root=user_files in file tools. "
+                        "Blocked paths: " + ", ".join(runtime_data_targets[:5])
                     )
 
         if protected_shell := self._protected_shell_block(raw_cmd, cmd_path_lower, workspace_mode, acting_self_worktree):
@@ -2176,7 +2295,9 @@ class ToolRegistry:
     def execute(self, name: str, args: Dict[str, Any]) -> str:
         name = str(name or "").strip()
         args = dict(args or {})
-        _normalize_dispatch_path_args(self._ctx, name, args)
+        _route_note = _normalize_dispatch_path_args(self._ctx, name, args)
+        if _route_note.startswith("⚠️ ROOT_REQUIRED_ACTIVE_WORKSPACE"):
+            return _route_note
         task_constraint = normalize_task_constraint(getattr(self._ctx, "task_constraint", None))
         local_readonly_subagent = self._is_local_readonly_subagent()
         acting_subagent = self._is_acting_subagent()
@@ -2468,9 +2589,7 @@ class ToolRegistry:
                 tool_name=name,
             )
 
-        if safety_msg:
-            return f"{safety_msg}\n\n---\n{result}"
-        return result
+        return _compose_execute_result(result, _route_note, safety_msg)
 
     def _worktree_status_snapshot(self) -> str:
         try:

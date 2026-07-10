@@ -268,7 +268,7 @@ def test_build_onboarding_html_contains_multistep_markers():
     assert "Set your budget" in html
     assert "Local model settings" in html
     assert "openai::gpt-5.5" in html
-    assert "openai::gpt-5.5-mini" in html
+    assert "openai::gpt-5.4-mini" in html
     assert "anthropic::claude-sonnet-4-6" in html
     assert "OPENAI_BASE_URL: ''" not in html
     assert "OPENAI_COMPATIBLE_API_KEY: ''" not in html

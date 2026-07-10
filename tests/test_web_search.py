@@ -135,7 +135,7 @@ def test_web_search_uses_official_openai_responses(monkeypatch):
             return _Stream()
 
     class _Client:
-        def __init__(self, api_key=None, base_url=None):
+        def __init__(self, api_key=None, base_url=None, **kwargs):  # v6.54.3: accepts timeout
             calls["api_key"] = api_key
             calls["base_url"] = base_url
             self.responses = _Responses()
@@ -147,7 +147,7 @@ def test_web_search_uses_official_openai_responses(monkeypatch):
         search_module._web_search(request_ctx, "latest news", model="gpt-5.2")
     )
 
-    assert result == {"answer": "fresh answer", "sources": [], "backend": "openai_responses"}
+    assert result == {"answer": "fresh answer", "answer_type": "summary", "sources": [], "backend": "openai_responses"}
     assert calls["api_key"] == "openai-key"
     assert calls["base_url"] is None
     assert calls["kwargs"]["model"] == "gpt-5.2"
@@ -187,7 +187,7 @@ def test_web_search_falls_back_to_openrouter_server_tool(monkeypatch):
         completions = _Completions()
 
     class _Client:
-        def __init__(self, api_key=None, base_url=None):
+        def __init__(self, api_key=None, base_url=None, **kwargs):  # v6.54.3: accepts timeout
             calls["api_key"] = api_key
             calls["base_url"] = base_url
             self.chat = _Chat()
@@ -415,7 +415,7 @@ def test_web_search_sanitizes_provider_errors(ctx, patch_env, monkeypatch):
             raise RuntimeError(f"provider rejected Authorization: Bearer {leaked_secret}")
 
     class _Client:
-        def __init__(self, api_key=None, base_url=None):
+        def __init__(self, api_key=None, base_url=None, **kwargs):  # v6.54.3: accepts timeout
             self.responses = _Responses()
 
     monkeypatch.setitem(sys.modules, "openai", types.SimpleNamespace(OpenAI=_Client))

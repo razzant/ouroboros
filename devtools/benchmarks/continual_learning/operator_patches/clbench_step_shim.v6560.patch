@@ -1,0 +1,22 @@
+--- /tmp/claude-1006/-home-a-razzhigaev-ouro/5e03c92c-6039-4ed9-86a5-e7ad7739b20f/scratchpad/clb_bundle/clbench-livebridge-handoff-v3-2026-07-05/bench-config/external-adapters/ouroboros/clbench_step_shim.py	2026-06-29 10:00:31.340319000 +0000
++++ /home/a.razzhigaev/ouro/benchmarks/continual-learning-bench/src/systems/ouroboros/clbench_step_shim.py	2026-07-05 09:52:50.790184775 +0000
+@@ -20,6 +20,7 @@
+ from __future__ import annotations
+ 
+ import json
++import os
+ import threading
+ from concurrent.futures import ThreadPoolExecutor
+ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+@@ -325,7 +326,10 @@
+     stops serving; call ``driver.close()`` to release the worker thread.
+     Returns ``(server, url, driver)``."""
+     driver = TaskDriver(build, max_validation_retries=max_validation_retries, continuous=continuous)
+-    server = ThreadingHTTPServer(("127.0.0.1", 0), _Handler)
++    # Operator port (campaign v6.56.0): docker containers on this Linux host cannot
++    # reach a host-loopback listener (host-gateway != loopback); bind is overridable.
++    _bind = os.environ.get("CLBENCH_SHIM_BIND", "127.0.0.1")
++    server = ThreadingHTTPServer((_bind, 0), _Handler)
+     server.driver = driver  # type: ignore[attr-defined]
+     host, port = server.server_address
+     url = f"http://{host}:{port}"

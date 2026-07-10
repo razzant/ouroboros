@@ -76,7 +76,7 @@ def test_review_enforcement_default_in_config():
 
 
 def test_scope_review_and_task_review_defaults_in_config():
-    assert SETTINGS_DEFAULTS.get("OUROBOROS_SCOPE_REVIEW_MODELS") == "openai/gpt-5.5"
+    assert SETTINGS_DEFAULTS.get("OUROBOROS_SCOPE_REVIEW_MODELS") == "anthropic/claude-fable-5"
     assert SETTINGS_DEFAULTS.get("OUROBOROS_TASK_REVIEW_MODE") == "auto"
 
 
@@ -167,7 +167,7 @@ def test_get_review_models_falls_back_to_main_light_light_in_openai_only_mode(mo
     2 unique) instead of the legacy [main]*N so both commit triad and
     plan_task have a quorum-safe reviewer list out of the box. The light slot
     picks up the provider default (OPENAI_DIRECT_DEFAULTS['light'] =
-    openai::gpt-5.5-mini) when OUROBOROS_MODEL_LIGHT is not explicitly set."""
+    openai::gpt-5.4-mini) when OUROBOROS_MODEL_LIGHT is not explicitly set."""
     monkeypatch.setenv("OPENAI_API_KEY", "sk-openai")
     monkeypatch.delenv("OPENROUTER_API_KEY", raising=False)
     monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False)
@@ -185,8 +185,8 @@ def test_get_review_models_falls_back_to_main_light_light_in_openai_only_mode(mo
 
     assert models == [
         "openai::gpt-5.5",
-        "openai::gpt-5.5-mini",
-        "openai::gpt-5.5-mini",
+        "openai::gpt-5.4-mini",
+        "openai::gpt-5.4-mini",
     ]
 
 

@@ -126,6 +126,56 @@ def aggregate_outcome_tier(result: ReviewRunResult) -> str:
     return worst
 
 
+def dissent_findings(result: ReviewRunResult, *, limit: int = 1) -> List[str]:
+    """Compact dissent bullets from NON-contributing minority reviewers (v6.54.4).
+
+    A cleanly-parsed reviewer whose verdict differs from the aggregate AND who
+    carries a CONCRETE recommendation/alternative contributes ONE verbatim
+    "[DISSENT — slot N]: ..." line. Not a veto — the aggregate stands; this ends
+    the class where an aggregate-PASS silently discarded a minority FAIL whose
+    concrete recommendation was correct (GAIA 3cef3a44). A DELIBERATE minority
+    DEGRADED — the reviewer's own parsed verdict (the prompt's "cannot judge →
+    return DEGRADED and explain" branch, which is exactly what the 3cef3a44
+    reviewer returned) — may dissent too, but only on the strength of a concrete
+    findings[].recommendation. Parse-fail placeholders (parsed=None),
+    contract-demoted PASSes (their parsed verdict stays PASS — they agree with
+    the aggregate), and coach-only DEGRADED stay excluded (no clean dissenting
+    signal). ONE bullet by design (plan decision #13) — the first concrete
+    dissenter speaks."""
+    agg = str(getattr(result, "aggregate_signal", "") or "").upper()
+    contributing_ids = {str(a.get("slot_id", "")) for a in _contributing_actors(result)}
+    out: List[str] = []
+    for actor in (getattr(result, "actors", None) or []):
+        if not isinstance(actor, dict) or len(out) >= limit:
+            continue
+        slot_id = str(actor.get("slot_id", ""))
+        signal = str(actor.get("signal", "")).upper()
+        if slot_id in contributing_ids or signal == agg:
+            continue
+        parsed = actor.get("parsed") if isinstance(actor.get("parsed"), dict) else {}
+        deliberate_degraded = (
+            signal == "DEGRADED"
+            and str(parsed.get("verdict") or "").strip().upper() == "DEGRADED"
+        )
+        if signal not in ("PASS", "FAIL") and not deliberate_degraded:
+            continue
+        recommendation = ""
+        for finding in (parsed.get("findings") or []):
+            if isinstance(finding, dict):
+                recommendation = str(finding.get("recommendation") or "").strip()
+                if recommendation:
+                    break
+        if not recommendation and not deliberate_degraded:
+            recommendation = str(parsed.get("completion_coach") or "").strip()
+        if not recommendation:
+            continue  # a bare contrary verdict with no concrete alternative is noise
+        compact = " ".join(recommendation.split())
+        if len(compact) > 300:
+            compact = compact[:300].rstrip() + "…"
+        out.append(f"[DISSENT — {slot_id} said {signal}]: check this before finalizing — {compact}")
+    return out
+
+
 def build_improvement_capsule(result: ReviewRunResult) -> str:
     """Compact, anti-derailment "Final improvement note" fed back to the agent:
     tier + up to 3 actionable findings + one completion_coach, framed as optional
@@ -164,16 +214,23 @@ def build_improvement_capsule(result: ReviewRunResult) -> str:
     # would re-loop EVERY clean required review. The capsule is actionable only
     # when there are real findings to act on OR the tier itself is incomplete
     # (best_effort/blocked). The coach is then included as the next step.
-    actionable = bool(bullets) or tier in (OUTCOME_TIER_BEST_EFFORT, OUTCOME_TIER_BLOCKED)
+    dissent = dissent_findings(result)
+    actionable = bool(bullets) or bool(dissent) or tier in (OUTCOME_TIER_BEST_EFFORT, OUTCOME_TIER_BLOCKED)
     if not actionable:
         return ""
     lines = [f"[Final improvement note] Reviewer assessment: {tier or result.aggregate_signal}."]
+    # Dissent rides ON TOP of the capsule (v6.54.4): same anti-derailment frame,
+    # never a veto — a minority reviewer with a concrete recommendation is a
+    # "check this before finalizing" pointer, not a re-litigation of the verdict.
+    lines += dissent
     lines += [f"- {b}" for b in bullets]
     if coach:
         lines.append(f"Highest-value next step: {coach}")
     lines.append(
         "Revise the deliverable only if it genuinely improves the result; otherwise produce "
-        "your normal final answer. Do not mention this review or the reviewer unless the user asked."
+        "your normal final answer. Do not mention this review or the reviewer unless the user asked. "
+        "The assessment tier above is an internal ledger label — never emit an internal ledger "
+        "identifier as the deliverable itself."
     )
     return "\n".join(lines)
 

@@ -169,7 +169,11 @@ per-feature nicety:
   single provider has no 1M-context model, BIBLE P3's AUDITED, owner-opt-in degraded
   advisory scope review (`OUROBOROS_SCOPE_REVIEW_DEGRADED`) is the disclosed fallback;
   the ≥1M floor is never lowered as a code default and the blocking triad still
-  reviews the staged diff in full.
+  reviews the staged diff in full. Since v6.55.0 the no-evidence 1M sentinel keys on
+  the shipped default reviewer (claude-fable-5), so an OpenAI-only install — whose
+  designated scope reviewer stays `openai/gpt-5.5` — runs in the visible sub-floor
+  advisory window until Capability Evidence lands (generative probe or
+  `/api/owner/capability-ack`); the blocking triad is unaffected.
 - **Documented exceptions.** A few provider-specific extras are deliberately NOT
   universal: `web_search` (OpenAI Responses, OpenRouter server tool, Anthropic
   server tool, optional ddgs) and the Claude Agent SDK tools (Anthropic). These
@@ -215,15 +219,33 @@ Concrete requirements:
 | Background consciousness (`consciousness.py`) | ✅ full | ✅ full (max) / navigation map (low) | — (not yet required) |
 | Advisory pre-review (`tools/claude_advisory_review.py`) | ✅ via `load_governance_doc` | ✅ via `load_governance_doc` | ✅ via `load_governance_doc` |
 | Scope review (`tools/scope_review.py`) | full canonical doc + Atlas accounting | full canonical doc + Atlas accounting | full canonical doc + Atlas accounting |
-| Plan review (`tools/plan_review.py`) | full canonical doc + adaptive context level | full canonical doc + adaptive context level | full canonical doc + adaptive context level |
+| Plan review (`tools/plan_review.py`) | ✅ full (every plan class) | full for `plan_class=self_mod`; lossless **navigation map** (sections + line ranges, full sections on demand) for external/creative/research plans (v6.61.0, owner-approved governance change) | ✅ full (every plan class) |
 | Deep self-review (`deep_self_review.py`) | full canonical doc + Atlas accounting | full (max) / navigation map (low) + Atlas accounting | full canonical doc + Atlas accounting |
 
-Plan review always keeps BIBLE.md, ARCHITECTURE.md, DEVELOPMENT.md, the proposed
-plan, touched-file snapshots, and reviewer-slot framing as first-class context.
-The agent must choose `context_level` explicitly; there is no host-side `auto`
-heuristic. That field controls only the generated repository Atlas: `minimal`
+Plan review always keeps BIBLE.md, DEVELOPMENT.md, the proposed plan,
+touched-file snapshots, and reviewer-slot framing as first-class context.
+ARCHITECTURE.md is CLASS-TIERED (v6.61.0, an owner-approved governance
+evolution — quiz 19): the agent declares `plan_class`
+(`self_mod | external | creative | research`), and the host STRUCTURALLY
+escalates to `self_mod` whenever `files_to_touch` resolve under the system repo
+(a path fact, never keyword matching). `self_mod` plans keep the full inline
+ARCHITECTURE.md — unchanged from the historical contract. Non-self_mod plans
+(an external codebase, a creative deliverable, a research question) receive
+ARCHITECTURE.md as the LOSSLESS navigation map (`context_layout.
+generate_doc_nav_map`: every section + line range, full sections readable on
+demand) — their reviewers judge the plan against its own domain, not ~45K
+tokens of self-body detail. Rationale: the full-pack requirement existed to
+protect SELF-modification reasoning; for non-self plans it actively hurt
+review quality (reviewers anchored on runtime internals irrelevant to the
+deliverable) while tripling cost. The agent must choose `context_level`
+explicitly for `self_mod` plans; non-self_mod plans may omit it (defaults to
+`minimal`). That field controls only the generated repository Atlas: `minimal`
 omits Atlas accounting for bounded/local plans, while `localized`, `broad`, and
-`constitutional` add progressively larger Atlas packs.
+`constitutional` add progressively larger Atlas packs. Planning scouts are
+likewise class-framed: `self_mod` scouts keep the repo-archaeology emphasis;
+external/creative/research scouts are steered to the plan's own domain
+(requirements, verification, sources, design) and never default to Ouroboros
+internals.
 
 **Context mode (low / max).** The owner-selected `OUROBOROS_CONTEXT_MODE`
 (layout SSOT: `ouroboros/context_layout.py`) tiers the *reference-doc* layer of
@@ -437,7 +459,7 @@ Before every commit, verify the following:
 #### Light Mode External Deliverables
 - `runtime_mode=light` is a self-modification boundary, not an OS sandbox. User-visible deliverables are allowed when they are outside the Ouroboros repo/control-plane.
 - Preferred flow: `task_drive` for scratch, `artifact_store` for canonical deliverables, and `user_files` for the owner's visible copy (for example `Desktop/report.html`). `write_file(root=user_files)` and declared process `outputs` must register/copy canonical task artifacts. Rewrites of the same user-visible source keep the previous canonical artifact in non-manifest history with last-5 retention; history is for recovery, not a second deliverable list.
-- `run_command`/`run_script` `scratch=[...]` (v6.52.2) is a DISTINCT channel from `outputs=[...]`: it declares EPHEMERAL in-workspace verification files (a throwaway test the agent writes, runs, and deletes — e.g. an in-package test that must live in the repo to compile). Scratch is exempt from the undeclared-output guard, never registered as an artifact, confined to the cwd, honored only when NEW + git-untracked (so it cannot mask a real edit), and excluded from the workspace patch via `.scratch_manifest.json` (`headless.write_workspace_patch_artifacts`). Use `outputs` for deliverables, `scratch` for throwaway verification — never overload one for the other.
+- `run_command`/`run_script` `scratch=[...]` (v6.52.2) is a DISTINCT channel from `outputs=[...]`: it declares EPHEMERAL in-workspace verification files (a throwaway test the agent writes, runs, and deletes — e.g. an in-package test that must live in the repo to compile). Scratch is exempt from the undeclared-output guard, never registered as an artifact, confined to the cwd, honored for NEW files and (v6.56.0) for ADOPTED existing untracked in-cwd files — adoption records the file's sha at declaration time through the SSOT `artifacts.record_task_scratch`, so the patch exclusion applies only while the content still matches (tracked files, paths outside the cwd, and paths outside a git worktree stay blocked; a real edit can never hide behind a scratch declaration) — and excluded from the workspace patch via `.scratch_manifest.json` (`headless.write_workspace_patch_artifacts`). Re-declaring a manifest path is idempotent. The undeclared-output guard verifies candidates POST-exec by stat (exists + mtime ≥ start−slack), so a mere path MENTION (import strings, CLI flags, heredoc bodies) is not a write. Use `outputs` for deliverables, `scratch` for throwaway verification — never overload one for the other.
 - `run_command`/`run_script`/`start_service` may use cwd under `active_workspace`, task-scoped `task_drive`, task-scoped `artifact_store`, and external `user_files` where the active profile permits it. In light direct tasks, omitted `run_script.cwd` defaults to task scratch instead of the Ouroboros repo; long-running services in light must use an explicit external/task/artifact cwd. Declared service `outputs` are copied into the task artifact store when the service stops.
 - `run_script` temporary files are created under the active workspace when the task is workspace/executor-backed, then removed after execution. Do not run workspace scripts from the system repo temp path; relative imports, generated files, and toolchain discovery must observe the same cwd the user requested.
 - Declared process outputs may be files or directories. Directory outputs are copied to the canonical artifact store as a bounded manifest plus zip archive; hidden/control/credential-shaped files, excessive file counts, and excessive byte sizes fail closed instead of leaking through artifact registration.

@@ -18,7 +18,16 @@ def test_ui_preferences_round_trip_and_normalization(tmp_path):
             "sidebar_width": 0,
             "project_panel_width": 0,
             "project_last_viewed": {},
+            "project_hidden": {},
         }
+
+        # v6.59.0: project_hidden merges per-project; a false flag UNHIDES (dropped).
+        hide = client.post("/api/ui/preferences", json={"project_hidden": {"p1": True}})
+        assert hide.status_code == 200 and hide.json()["project_hidden"] == {"p1": True}
+        hide2 = client.post("/api/ui/preferences", json={"project_hidden": {"p2": True}})
+        assert hide2.json()["project_hidden"] == {"p1": True, "p2": True}
+        unhide = client.post("/api/ui/preferences", json={"project_hidden": {"p1": False}})
+        assert unhide.json()["project_hidden"] == {"p2": True}
 
         # project_last_viewed MERGES per-project (a single-project update never wipes
         # the others) — drives the sidebar unread dot (v6.33.0 WS11).

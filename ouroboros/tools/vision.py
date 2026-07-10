@@ -314,8 +314,9 @@ def _load_local_image_payload(ctx: ToolContext, file_path: str) -> Tuple[Optiona
     allowed = _allowed_file_roots(ctx)
     if not any(_path_is_under(fp, root) for root in allowed):
         return None, (
-            f"⚠️ file_path must be inside the uploads directory or the active task "
-            f"workspace. Resolved path: {fp}. Use read_file for other paths."
+            f"⚠️ file_path must be inside the uploads directory, the active task "
+            f"workspace, or the task's artifact_store/task_drive. Resolved path: {fp}. "
+            f"Use read_file for other paths."
         )
     # Honor the task protected-artifact policy: a workspace file may still be a
     # black-box protected artifact whose bytes must not be read (same contract as
@@ -473,7 +474,10 @@ def get_tools() -> List[ToolEntry]:
                     "Analyze the last browser screenshot using a Vision LLM. "
                     "Must call browse_page(output='screenshot') or browser_action(action='screenshot') first. "
                     "Returns a text description and analysis of the screenshot. "
-                    "Use this to verify UI, check for visual errors, or understand page layout."
+                    "Use this to verify UI, check for visual errors, or understand page layout. "
+                    "For MEDIA CONTENT (a video/image inside the page), prefer extract_video_frames + "
+                    "view_image on the source file over screenshotting a compressed player rendering — "
+                    "a clean frame beats a low-res player capture."
                 ),
                 "parameters": {
                     "type": "object",
@@ -502,7 +506,10 @@ def get_tools() -> List[ToolEntry]:
                     "Provide one of: file_path (local file, preferred — avoids large base64 in arguments), "
                     "image_url (public URL), or image_base64 (base64-encoded PNG/JPEG). "
                     "Use file_path for files already on disk (e.g. data/uploads/ attachments). "
-                    "Use for: analyzing charts, reading diagrams, understanding screenshots, checking UI."
+                    "Use for: analyzing charts, reading diagrams, understanding screenshots, checking UI. "
+                    "NOTE: this DELEGATES to a separate vision model — when you are vision-capable "
+                    "yourself, prefer view_image (native inline vision, no second-model handoff) for "
+                    "anything you need to REASON about rather than merely describe."
                 ),
                 "parameters": {
                     "type": "object",
@@ -513,7 +520,7 @@ def get_tools() -> List[ToolEntry]:
                         },
                         "file_path": {
                             "type": "string",
-                            "description": "Local file path to image (preferred — reads from disk, avoids base64 in arguments). Must be inside the uploads directory (data/uploads/) or the active task workspace.",
+                            "description": "Local file path to image (preferred — reads from disk, avoids base64 in arguments). Must be inside the uploads directory (data/uploads/), the active task workspace, or the task's artifact_store/task_drive (e.g. artifact_store/video_frames frames, artifact_store/attachments staged files).",
                         },
                         "image_url": {
                             "type": "string",
@@ -546,8 +553,10 @@ def get_tools() -> List[ToolEntry]:
                     "Bring a LOCAL image file natively into your own context so you can SEE and reason "
                     "about it directly (vision-capable models). Resource class: local_file_to_model — it "
                     "reads a local file and attaches it into your context; it is NOT a web tool and works "
-                    "even when web/network access is disabled. LOCAL PATHS ONLY (inside the task workspace "
-                    "or uploads dir); no URLs. Typical flow: after list_files reveals an image file "
+                    "even when web/network access is disabled. LOCAL PATHS ONLY (inside the task workspace, "
+                    "uploads dir, or the task's artifact_store/task_drive — e.g. frames from "
+                    "extract_video_frames under artifact_store/video_frames, or staged attachments under "
+                    "artifact_store/attachments); no URLs. Typical flow: after list_files reveals an image file "
                     "(.png/.jpg/.jpeg/.gif/.webp) — including one you rendered yourself, e.g. a chart or a "
                     "rendered toolpath — call view_image(path) and then analyze it inline. Prefer this over "
                     "vlm_query when you need to reason about the image yourself rather than ask a separate model."
@@ -557,7 +566,7 @@ def get_tools() -> List[ToolEntry]:
                     "properties": {
                         "path": {
                             "type": "string",
-                            "description": "Local image file path inside the task workspace or uploads dir (e.g. /app/chart.png after list_files finds it).",
+                            "description": "Local image file path inside the task workspace, uploads dir, or the task's artifact_store/task_drive (e.g. /app/chart.png after list_files finds it, or artifact_store/video_frames/frame_001.png from extract_video_frames).",
                         },
                     },
                     "required": ["path"],

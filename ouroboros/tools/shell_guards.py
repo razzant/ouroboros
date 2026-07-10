@@ -49,6 +49,40 @@ INTERPRETER_WRITE_RE = re.compile(
     r"""createwritestream|unlink\(|rename\(|mkdir\(|rmtree\(|remove\(|"""
     r"""open\s*\([^)]*,\s*['"][^'"]*[wax+])"""
 )
+# Wider write-indicator net for the read-vs-write runtime_data scan (v6.54.3):
+# includes filesystem-mutating calls the python AST analysis does NOT model
+# (shutil.copy*/move, touch, symlink/link, chmod/chown, makedirs/removedirs,
+# truncate) — a hit here without AST-resolved targets stays on the conservative
+# full mention scan instead of being treated as a pure read. NB: the leading
+# (?is) of INTERPRETER_WRITE_RE.pattern already applies globally to the whole
+# concatenated expression — a second mid-pattern global flag is a hard
+# re.error on Python 3.11+ (review round 2).
+_INTERPRETER_ANY_WRITE_RE = re.compile(
+    INTERPRETER_WRITE_RE.pattern
+    + r"""|(?:makedirs\(|removedirs\(|rmdir\(|copyfile\(|copy2\(|copytree\(|os\.replace\(|"""
+    + r"""shutil\.(?:copy|move)\(|\.touch\(|symlink\(|os\.link\(|\.link_to\(|hardlink_to\(|"""
+    + r"""chmod\(|chown\(|truncate\(|"""
+    # OPAQUE / unmodeled write-capable calls (adversarial review r2 #1): an
+    # external process (subprocess/os.system/popen) can `rm`/`mv`/`dd` anything,
+    # and archive-extract / db-open write to a directory the AST never resolves.
+    # A hit here has no AST-resolvable target, so it falls through to the
+    # conservative full mention scan (blocks drive paths OUTSIDE the task roots)
+    # instead of being mis-classified as a pure read. Pure reads (open()/read_text
+    # with no write token) still match nothing and stay allowed.
+    + r"""subprocess\.|os\.system\(|os\.popen\(|Popen\(|check_call\(|check_output\(|"""
+    + r"""\.extractall\(|unpack_archive\(|make_archive\(|sqlite3\.connect\(|"""
+    # LIBRARY save-APIs (fable-5 cumulative review F1): to_csv/savefig/.save &co
+    # write files while carrying no base write-token, so an interpreter command
+    # using them was classified as a PURE READ and skipped the runtime_data
+    # mention scan entirely. A false positive here only re-applies the
+    # conservative pre-v6.54.3 always-scan behavior (fail-closed direction).
+    # The mode-shaped single-arg .open("w"/"ab"/"x+") is the pathlib positional
+    # form the comma-anchored open() token above cannot see; the tight 1-3 char
+    # mode lookahead keeps .open("<path>") reads out.
+    + r"""\.save\(|\.to_csv\(|\.to_excel\(|\.to_parquet\(|\.to_json\(|\.to_pickle\(|"""
+    + r"""savefig\(|np\.save|imwrite\(|pickle\.dump\(|json\.dump\(|"""
+    + r"""\.open\(\s*(?:mode\s*=\s*)?['"](?=[a-z+]{1,3}['"])[a-z+]*[wax+][a-z+]*['"])"""
+)
 EMBEDDED_RELATIVE_PATH_RE = re.compile(r"(?<![A-Za-z0-9_.-])(?:\.\.?/)+[^\s'\"\\),;\]]+")
 _REDIRECT_TARGET_TOKENS = frozenset({">", ">>", "1>", "1>>", "2>", "2>>", "&>", "&>>"})
 _SCRIPT_INTERPRETERS = frozenset({"python", "python3", "node", "ruby", "perl", "php"})
@@ -61,6 +95,19 @@ _SCRIPT_LITERAL_WRITE_RE = {
         r"""(?is)(?:File\.write|File\.open|FileUtils\.(?:touch|mkdir_p|rm|rm_rf|remove|copy|cp|mv))\s*\(\s*(['"])(.*?)\1"""
     ),
 }
+
+
+def _pure_path_flavor(text: str):
+    """Pure-path flavor matching the LITERAL's own shape, host-independent.
+
+    A Windows-shaped literal (drive letter, UNC, or backslash-only separators)
+    must derive parent/join with WINDOWS semantics on every host:
+    PurePosixPath('C:\\\\x\\\\y').parent is '.', which turned a real write target
+    into a cwd-shaped false-allow on the windows CI full-test (v6.55.0). POSIX
+    shapes keep POSIX semantics everywhere, so POSIX behavior is unchanged."""
+    if re.match(r"^[A-Za-z]:[\\/]", text) or text.startswith("\\\\") or ("\\" in text and "/" not in text):
+        return pathlib.PureWindowsPath
+    return pathlib.PurePosixPath
 
 
 def _python_literal_path(node: ast.AST, names: dict[str, str]) -> str | None:
@@ -95,7 +142,7 @@ def _python_literal_path(node: ast.AST, names: dict[str, str]) -> str | None:
         left = _python_literal_path(node.left, names)
         right = _python_literal_path(node.right, names)
         if left is not None and right is not None:
-            return str(pathlib.PurePosixPath(left) / right)
+            return str(_pure_path_flavor(left)(left) / right)
     if isinstance(node, ast.BinOp) and isinstance(node.op, ast.Add):
         left = _python_literal_path(node.left, names)
         right = _python_literal_path(node.right, names)
@@ -112,7 +159,7 @@ def _python_literal_path(node: ast.AST, names: dict[str, str]) -> str | None:
     if isinstance(node, ast.Attribute) and node.attr == "parent":
         base = _python_literal_path(node.value, names)
         if base is not None:
-            return str(pathlib.PurePosixPath(base).parent)
+            return str(_pure_path_flavor(base)(base).parent)
     return None
 
 
@@ -237,7 +284,17 @@ def _python_write_targets_and_unknown(inline_code: str) -> tuple[list[str], bool
                 unknown = True
             else:
                 targets.append(target)
-    return list(dict.fromkeys(targets)), unknown
+    resolved = list(dict.fromkeys(targets))
+    # A derivation that collapsed to a degenerate cwd-shape ('.'/'') was NOT
+    # really grounded (e.g. .parent of a literal whose separators the resolver
+    # could not read) — trusting it false-allowed a real runtime_data write on
+    # the windows CI full-test (v6.55.0). Degenerate ⇒ UNKNOWN: the caller falls
+    # back to the conservative full mention scan; benign relative writes mention
+    # no drive paths and still pass that scan untouched.
+    concrete = [t for t in resolved if str(t or "").strip() not in ("", ".", "./")]
+    if len(concrete) != len(resolved):
+        unknown = True
+    return concrete, unknown
 
 
 # Same resolve(strict=False) containment semantics on all platforms (SSOT).
@@ -264,8 +321,16 @@ def runtime_data_write_targets(
     except Exception:
         home = pathlib.Path("~").expanduser()
     blocked: List[str] = []
-    for token in shell_argv_with_inline(raw_cmd):
-        text = str(token or "")
+    scan_texts = [str(token or "") for token in shell_argv_with_inline(raw_cmd)]
+    if isinstance(raw_cmd, str):
+        # POSIX-mode shlex EATS backslashes in UNQUOTED tokens, so a bare Windows
+        # path argv (cp C:\Users\...\data\x D:\y) reaches the token loop mangled
+        # (C:Users...) and matches nothing — the windows CI full-test caught the
+        # resulting false-allow (v6.55.0). The raw command string preserves the
+        # separators; harvesting candidates from it too is a superset on POSIX
+        # shapes (no backslashes to eat) and dedups via the blocked list.
+        scan_texts.append(raw_cmd)
+    for text in scan_texts:
         expanded_texts = {
             text,
             text.replace("$OUROBOROS_DATA_DIR", str(drive))
@@ -297,6 +362,220 @@ def runtime_data_write_targets(
                 if rendered not in blocked:
                     blocked.append(rendered)
     return blocked
+
+
+# SHELL-level write signals only (redirects, pipeline writers, file utilities):
+# the interpreter-CODE tokens of SHELL_WRITE_INDICATORS (open(/.write(/os.remove(
+# etc.) are deliberately absent — for interpreter commands those are re-judged by
+# the regex+AST refinement, and the coarse `open(` token otherwise classified a
+# read-only open() as writeish, keeping the old full mention scan alive for the
+# exact GAIA read class this refinement exists to fix (review round 8).
+_SHELL_LEVEL_WRITE_INDICATORS = (
+    "rm ", "rm\t", ">", "sed -i", "tee ", "truncate",
+    "mv ", "cp ", "chmod ", "chown ", "unlink ", "trash",
+    "rsync ", "sort -o",
+)
+
+
+def _shell_level_write_signal(raw_cmd: Any) -> bool:
+    """shell_has_write_indicator, restricted to SHELL-level signals (see above).
+
+    Also treats any LIGHT_SHELL_WRITER_COMMANDS token (mkdir/touch/rm/...) in the
+    flattened argv as a write signal — a ``sh -c "mkdir … && touch …"`` one-liner
+    carries no indicator substring yet plainly writes."""
+    if isinstance(raw_cmd, list):
+        text = " ".join(str(x) for x in raw_cmd).lower()
+    else:
+        text = str(raw_cmd).lower()
+    tokens = [str(token).lower() for token in shell_argv_with_inline(raw_cmd)]
+    for token in tokens:
+        if pathlib.PurePath(token).name.removesuffix(".exe") in LIGHT_SHELL_WRITER_COMMANDS:
+            return True
+    filtered_tokens: List[str] = []
+    i = 0
+    while i < len(tokens):
+        token = tokens[i]
+        if token in _SAFE_STDIO_REDIRECT_TOKENS:
+            i += 1
+            continue
+        if token in {">", "1>", "2>"} and i + 1 < len(tokens) and tokens[i + 1] == "/dev/null":
+            i += 2
+            continue
+        filtered_tokens.append(token)
+        i += 1
+    filtered_text = " ".join(filtered_tokens)
+    for token in _SAFE_STDIO_REDIRECT_TOKENS:
+        text = text.replace(token, " ")
+    return any(ind in filtered_text for ind in _SHELL_LEVEL_WRITE_INDICATORS) or any(
+        ind in text for ind in _SHELL_LEVEL_WRITE_INDICATORS if ind != ">"
+    )
+
+
+def _secret_runtime_data_mentions(
+    raw_cmd: Any,
+    *,
+    drive_root: pathlib.Path,
+    work_dir: pathlib.Path,
+    allowed_roots: List[pathlib.Path] | None = None,
+) -> List[str]:
+    """Mentioned drive paths whose NAME marks secret/control state (v6.54.3).
+
+    Reuses the subagent secret-name SSOT from tools.core (lazy import — core does
+    not import this module) over every path the mention scanner can extract. The
+    owner's real secret/control state (settings.json, tokens, memory/, .env) lives
+    at the DRIVE ROOT, outside any task's own roots, and stays blocked. The task's
+    OWN task_drive/artifact_store are exempt (adversarial review r2 #2): a staged
+    attachment or own scratch file that merely NAME-matches the secret regex —
+    e.g. ``secret_santa.docx``, ``token_usage.json`` — is the task's own content,
+    not an owner credential, and reading it must not be blocked."""
+    try:
+        from ouroboros.tools.core import _is_subagent_secret_data_path
+    except Exception:
+        return []
+    mentions = runtime_data_write_targets(
+        raw_cmd, drive_root=drive_root, work_dir=work_dir,
+        allowed_roots=list(allowed_roots or []),
+    )
+    try:
+        drive = pathlib.Path(drive_root).resolve(strict=False)
+    except Exception:
+        return []
+    hits: List[str] = []
+    for text in mentions:
+        try:
+            rel = str(pathlib.Path(text).resolve(strict=False).relative_to(drive)).replace("\\", "/")
+        except (OSError, ValueError):
+            continue
+        if _is_subagent_secret_data_path(rel):
+            hits.append(text)
+    return hits
+
+
+def _project_store_runtime_data_mentions(
+    raw_cmd: Any,
+    *,
+    drive_root: pathlib.Path,
+    work_dir: pathlib.Path,
+) -> List[str]:
+    """Mentioned drive paths that target the per-project facts store (``projects/<id>/``).
+
+    Parity with ``read_file(root=runtime_data)`` / ``_data_read``, which deny the
+    per-project store to generic data tools unconditionally (the store is reachable
+    ONLY via the project-scoped knowledge tools — no cross-project peeking). Without
+    this, the light-mode read relaxation let an interpreter read another project's
+    facts through a plain ``open()`` while the file API blocked it (v6.55.0)."""
+    try:
+        from ouroboros.project_facts import project_store_access_block
+    except Exception:
+        return []
+    mentions = runtime_data_write_targets(
+        raw_cmd, drive_root=drive_root, work_dir=work_dir, allowed_roots=[],
+    )
+    try:
+        drive = pathlib.Path(drive_root).resolve(strict=False)
+    except Exception:
+        return []
+    hits: List[str] = []
+    for text in mentions:
+        try:
+            rel = str(pathlib.Path(text).resolve(strict=False).relative_to(drive)).replace("\\", "/")
+        except (OSError, ValueError):
+            continue
+        if project_store_access_block(rel):
+            hits.append(text)
+    return hits
+
+
+def runtime_data_guard_targets(
+    raw_cmd: Any,
+    *,
+    writeish: bool,
+    drive_root: pathlib.Path,
+    work_dir: pathlib.Path,
+    allowed_roots: List[pathlib.Path],
+) -> List[str]:
+    """Structural read-vs-write refinement of the runtime_data mention scan (v6.54.3).
+
+    A WRITEISH command keeps the conservative behavior: every mentioned path under
+    the drive outside the task's own roots blocks. A non-writeish interpreter
+    command is a READ shape — blocking it on a mere path mention recast a would-be
+    file-not-found into a security block (GAIA: scripts opening the task's own
+    staged attachment through a mis-guessed absolute path), teaching the model to
+    distrust the file API. Reads mirror the generic ``read_file(root=runtime_data)``
+    policy, which light mode already permits for the task's own agent, so:
+
+    - no write indicators at all → no block (pure read);
+    - python with LITERAL write targets the AST fully resolved → block only those
+      write targets that land under the drive outside the task roots;
+    - anything else with write indicators (dynamic python write paths, write calls
+      the AST does not model such as shutil.copy*/touch/chmod, non-python
+      interpreters) → fail closed on the full mention scan.
+    """
+    argv = [str(t) for t in shell_argv_with_inline(raw_cmd)]
+    executable = pathlib.PurePath(argv[0]).name.lower().removesuffix(".exe") if argv else ""
+    interpreterish = executable.startswith("python") or executable in {
+        "node", "ruby", "perl", "php", "sh", "bash", "zsh",
+    }
+    # Non-interpreter commands: the caller's coarse writeish decides, as before.
+    # Interpreter commands: the coarse token list contains interpreter-CODE
+    # markers (`open(` matches a read-only open), so the refinement below
+    # re-judges those — only genuine SHELL-level write signals (redirects, tee,
+    # mv/cp pipelines) keep the conservative full scan (review round 8).
+    if writeish and not interpreterish:
+        return runtime_data_write_targets(
+            raw_cmd, drive_root=drive_root, work_dir=work_dir, allowed_roots=allowed_roots,
+        )
+    if interpreterish and _shell_level_write_signal(raw_cmd):
+        return runtime_data_write_targets(
+            raw_cmd, drive_root=drive_root, work_dir=work_dir, allowed_roots=allowed_roots,
+        )
+    # Even a PURE READ never touches secret/control runtime files (settings.json,
+    # tokens, .env, key material): the read-vs-write relaxation mirrors the
+    # generic runtime_data read policy for ordinary files only — secret-named
+    # paths stay blocked on mere mention (review round 2 hardening).
+    secret_hits = _secret_runtime_data_mentions(
+        raw_cmd, drive_root=drive_root, work_dir=work_dir, allowed_roots=allowed_roots,
+    )
+    if secret_hits:
+        return secret_hits
+    # A pure read also never reaches the per-project facts store: parity with the
+    # generic read_file(root=runtime_data) policy (no cross-project peeking), which
+    # the secret-name-only check above did not cover (v6.55.0).
+    project_store_hits = _project_store_runtime_data_mentions(
+        raw_cmd, drive_root=drive_root, work_dir=work_dir,
+    )
+    if project_store_hits:
+        return project_store_hits
+    inline = shell_command_string(shell_argv(raw_cmd)) or " ".join(argv[1:])
+    if not _INTERPRETER_ANY_WRITE_RE.search(inline):
+        return []
+    if executable.startswith("python"):
+        targets, unknown = _python_write_targets_and_unknown(inline)
+        # Trust the AST only when it POSITIVELY resolved every write target
+        # (targets found, nothing unknown). A write indicator with zero AST
+        # targets means a call the AST does not model — stay conservative.
+        if targets and not unknown:
+            try:
+                drive = pathlib.Path(drive_root).resolve(strict=False)
+                cwd = pathlib.Path(work_dir).resolve(strict=False)
+            except Exception:
+                return []
+            allowed = [pathlib.Path(root).resolve(strict=False) for root in allowed_roots]
+            blocked: List[str] = []
+            for candidate in targets:
+                try:
+                    raw_path = pathlib.Path(str(candidate)).expanduser()
+                    path = raw_path.resolve(strict=False) if raw_path.is_absolute() else (cwd / raw_path).resolve(strict=False)
+                except Exception:
+                    continue
+                if _path_inside(path, drive) and not any(_path_inside(path, root) for root in allowed):
+                    rendered = str(path)
+                    if rendered not in blocked:
+                        blocked.append(rendered)
+            return blocked
+    return runtime_data_write_targets(
+        raw_cmd, drive_root=drive_root, work_dir=work_dir, allowed_roots=allowed_roots,
+    )
 
 
 def shell_has_write_indicator(raw_cmd: Any) -> bool:
@@ -400,13 +679,42 @@ def repo_target_mentioned(argv: List[str], *, repo_dir: pathlib.Path, cwd: str =
     return any(_candidate_path_inside(pathlib.Path(repo_dir), work_dir, token) for token in argv[1:])
 
 
+_COMMAND_SEPARATOR_TOKENS = frozenset({"&&", "||", ";", "|", "&"})
+
+
 def writer_target_tokens(argv: List[str]) -> List[str]:
+    """Write TARGETS of a (possibly compound) command line.
+
+    Compound lines are split at shell separators and each segment contributes
+    only its OWN command's targets (v6.56.0): without segmentation, `touch a &&
+    ./program b` credited every token after `&&` to `touch`, so a mere MENTION
+    of a protected/readonly path in a later command read as a write to it."""
+    segments: List[List[str]] = [[]]
+    for token in argv or []:
+        if str(token) in _COMMAND_SEPARATOR_TOKENS:
+            segments.append([])
+            continue
+        segments[-1].append(token)
+    if len(segments) == 1:
+        return _writer_target_tokens_single(segments[0])
+    targets: List[str] = []
+    for segment in segments:
+        if segment:
+            targets.extend(_writer_target_tokens_single(segment))
+    return list(dict.fromkeys(target for target in targets if str(target or "").strip()))
+
+
+def _writer_target_tokens_single(argv: List[str]) -> List[str]:
     if not argv:
         return []
     cmd = pathlib.PurePath(argv[0]).name.lower().removesuffix(".exe")
     operands = [arg for arg in argv[1:] if arg and not arg.startswith("-")]
     targets: List[str] = []
     if cmd == "cp":
+        targets.extend(operands[-1:] if len(operands) >= 2 else [])
+    elif cmd == "ln":
+        # The LINK NAME is the write target; the SOURCE is only pointed at, and
+        # symlink-following reads are containment-checked at resolve time anyway.
         targets.extend(operands[-1:] if len(operands) >= 2 else [])
     elif cmd in {"chmod", "chown"}:
         targets.extend(operands[1:] if len(operands) >= 2 else [])

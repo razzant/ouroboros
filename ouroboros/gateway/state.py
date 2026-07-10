@@ -35,7 +35,7 @@ async def api_state(request: Request) -> JSONResponse:
         from supervisor.state import TOTAL_BUDGET_LIMIT, load_state
         from supervisor.workers import PENDING, RUNNING, WORKERS
         from supervisor.queue import get_evolution_status_snapshot
-        from ouroboros.config import get_context_mode, get_runtime_mode, get_skills_repo_path
+        from ouroboros.config import get_context_mode, get_runtime_mode, get_safety_mode, get_skills_repo_path
         from ouroboros.tools.github import github_token_from_env_or_settings
 
         st = load_state()
@@ -79,6 +79,7 @@ async def api_state(request: Request) -> JSONResponse:
             "supervisor_error": get_supervisor_error() if callable(get_supervisor_error) else None,
             "runtime_mode": get_runtime_mode(),
             "context_mode": get_context_mode(),
+            "safety_mode": get_safety_mode(),
             "skills_repo_configured": bool(get_skills_repo_path()),
             "github_token_configured": bool(github_token_from_env_or_settings()),
             "projects": _projects_summary_safe(request),

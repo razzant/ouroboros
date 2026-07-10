@@ -27,7 +27,7 @@ from typing import Any
 if str(pathlib.Path(__file__).resolve().parents[4]) not in sys.path:
     sys.path.insert(0, str(pathlib.Path(__file__).resolve().parents[4]))
 
-from devtools.benchmarks.gaia.inspect_solver import GAIA_FORMAT_INSTRUCTION  # noqa: E402
+from devtools.benchmarks.gaia.inspect_solver import GAIA_ANTI_LEAK_INSTRUCTION, GAIA_FORMAT_INSTRUCTION  # noqa: E402
 
 # Reuse the proven, hardened staging + prompt extraction from the Ouroboros solver
 # (it stages GAIA attachments and filters repo/data/secret paths — identical needs here).
@@ -37,6 +37,7 @@ from devtools.benchmarks.gaia.inspect_solver.ouroboros_solver import (  # noqa: 
     _state_prompt,
 )
 from devtools.benchmarks.common.run_roots import run_root  # noqa: E402
+from devtools.benchmarks.gaia.bwrap_isolate import wrap as _bwrap_wrap  # noqa: E402
 
 try:
     from inspect_ai.solver import Generate, TaskState, solver
@@ -106,11 +107,30 @@ def _extract_final_answer(text: str) -> str:
     return _clean_answer(lines[-1]) if lines else ""
 
 
+def _parse_stream_json(raw: str) -> dict | None:
+    """Return the final ``type=="result"`` envelope from a stream-json NDJSON dump.
+
+    Non-JSON lines are skipped (the CLI may interleave plain-text warnings)."""
+    final = None
+    for ln in raw.splitlines():
+        ln = ln.strip()
+        if not ln.startswith("{"):
+            continue
+        try:
+            obj = json.loads(ln)
+        except Exception:
+            continue
+        if isinstance(obj, dict) and obj.get("type") == "result":
+            final = obj
+    return final
+
+
 def run_claude_code(
     prompt: str,
     sample_id: str = "sample",
     attachments: list[pathlib.Path] | None = None,
     workdir: pathlib.Path | None = None,
+    trace_path: pathlib.Path | None = None,
 ) -> dict:
     model = os.environ.get("GAIA_CLAUDE_MODEL", "claude-sonnet-4-5")
     max_turns = os.environ.get("GAIA_CLAUDE_MAX_TURNS", "40")
@@ -127,10 +147,18 @@ def run_claude_code(
         full_prompt += f"\n\nProvided file(s) are in your current working directory: {names}"
     if "FINAL ANSWER:" not in full_prompt:
         full_prompt += GAIA_FORMAT_INSTRUCTION
+    # Anti-lookup rule (SSOT, identical across harnesses; see METHODOLOGY.md).
+    if GAIA_ANTI_LEAK_INSTRUCTION not in full_prompt:
+        full_prompt += GAIA_ANTI_LEAK_INSTRUCTION
 
     cmd = [
         "claude", "-p", full_prompt,
-        "--output-format", "json",
+        # stream-json (NDJSON events incl. WebSearch/WebFetch tool calls with inputs
+        # and results) so the leakage audit sees the FULL tool trace; plain `json`
+        # returns only the final result and blinds the audit. --verbose is required
+        # by the CLI for stream-json in print mode.
+        "--output-format", "stream-json",
+        "--verbose",
         "--model", model,
         "--effort", effort,
         "--allowedTools", allowed,
@@ -145,7 +173,7 @@ def run_claude_code(
 
     try:
         proc = subprocess.run(
-            cmd, capture_output=True, text=True, timeout=timeout_sec, cwd=str(work), env=env
+            _bwrap_wrap(cmd), capture_output=True, text=True, timeout=timeout_sec, cwd=str(work), env=env
         )
     except subprocess.TimeoutExpired as exc:  # crash isolation: one hang never aborts the eval
         return {"final_answer": "", "returncode": -1, "raw": "", "stderr_tail": f"TIMEOUT: {str(exc)[:300]}"}
@@ -153,11 +181,22 @@ def run_claude_code(
         return {"final_answer": "", "returncode": -1, "raw": "", "stderr_tail": f"SPAWN ERROR: {type(exc).__name__}: {str(exc)[:300]}"}
 
     raw = proc.stdout or ""
+    if trace_path is not None and raw:
+        try:  # pure NDJSON dump for audit_leakage (stderr stays in stderr_tail)
+            trace_path.parent.mkdir(parents=True, exist_ok=True)
+            trace_path.write_text(raw, encoding="utf-8")
+        except Exception:
+            pass
     result_text = ""
     cost_usd = 0.0
     usage: dict = {}
-    try:
-        env_obj = json.loads(raw)
+    env_obj = _parse_stream_json(raw)
+    if env_obj is None:
+        try:
+            env_obj = json.loads(raw)  # legacy --output-format json envelope
+        except Exception:
+            env_obj = None
+    if isinstance(env_obj, dict):
         result_text = str(env_obj.get("result", "") or "")
         cost_usd = float(env_obj.get("total_cost_usd") or env_obj.get("cost_usd") or 0.0)
         usage = env_obj.get("usage") or {}
@@ -165,7 +204,7 @@ def run_claude_code(
             return {"final_answer": "", "returncode": proc.returncode, "raw": raw[:2000],
                     "cost_usd": cost_usd, "usage": usage,
                     "stderr_tail": f"claude is_error: {result_text[:300]}"}
-    except Exception:
+    else:
         result_text = raw  # non-JSON fallback
     return {
         "final_answer": _extract_final_answer(result_text),
@@ -203,7 +242,8 @@ def claude_code_solver():
                     dest.write_bytes(a.read_bytes())
             except Exception:
                 pass
-        result = run_claude_code(prompt, sample_id=sample_id, attachments=attachments, workdir=workdir)
+        result = run_claude_code(prompt, sample_id=sample_id, attachments=attachments, workdir=workdir,
+                                 trace_path=sample_dir / "claude_code_trace.jsonl")
         if getattr(state, "metadata", None) is None:
             state.metadata = {}
         state.metadata["claude_code_raw"] = result.get("raw", "")

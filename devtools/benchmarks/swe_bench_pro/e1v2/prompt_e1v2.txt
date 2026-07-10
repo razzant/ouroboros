@@ -1,3 +1,8 @@
+# STALE — REFERENCE ONLY (v6.56.0): this evolution-mode prompt is NOT used by the
+# current driver (run_pro.py always renders prompt_baseline.txt; E1v2-vs-baseline is
+# a settings switch, not a prompt switch). It also still describes the legacy
+# "dig /app via user_files" tooling, superseded by the /app active-workspace mode.
+
 # CONTINUOUS EVOLUTION MODE (streaming, no external feedback)
 
 You are a self-improving agent working through a sequence of real software-engineering

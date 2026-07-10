@@ -229,6 +229,52 @@ def test_root_required_recovers_via_user_files_batch_files():
     assert _unresolved_tool_errors(trace) == []
 
 
+def test_root_required_active_workspace_recovers_via_active_workspace_write():
+    # Parity with the user_files contract (cumulative review r2): the
+    # ACTIVE_WORKSPACE redirect is recovered only by a later write of the SAME
+    # file via root=active_workspace.
+    trace = {"tool_calls": [
+        {"tool": "write_file", "is_error": True, "status": "root_required_active_workspace",
+         "args": {"path": "/app/src/main.py"}},
+        {"tool": "write_file", "is_error": False, "status": "ok",
+         "args": {"root": "active_workspace", "path": "src/main.py"}},
+    ]}
+    assert _unresolved_tool_errors(trace) == []
+
+
+def test_root_required_active_workspace_recovers_via_default_root_write():
+    # active_workspace is the DEFAULT root for write_file/edit_text (scope r2
+    # finding): a retry that simply omits root writes to the demanded place and
+    # must earn the recovery credit — no false execution-axis degradation.
+    # user_files stays explicit-only (it is never a default root).
+    trace = {"tool_calls": [
+        {"tool": "write_file", "is_error": True, "status": "root_required_active_workspace",
+         "args": {"path": "/app/src/main.py"}},
+        {"tool": "write_file", "is_error": False, "status": "ok",
+         "args": {"path": "src/main.py"}},
+    ]}
+    assert _unresolved_tool_errors(trace) == []
+    trace_uf = {"tool_calls": [
+        {"tool": "write_file", "is_error": True, "status": "root_required_user_files",
+         "args": {"path": "/home/x/Desktop/a.html"}},
+        {"tool": "write_file", "is_error": False, "status": "ok",
+         "args": {"path": "Desktop/a.html"}},  # rootless != user_files
+    ]}
+    assert len(_unresolved_tool_errors(trace_uf)) == 1
+
+
+def test_root_required_active_workspace_not_recovered_by_user_files_write():
+    trace = {"tool_calls": [
+        {"tool": "write_file", "is_error": True, "status": "root_required_active_workspace",
+         "args": {"path": "/app/src/main.py"}},
+        {"tool": "write_file", "is_error": False, "status": "ok",
+         "args": {"root": "user_files", "path": "main.py"}},
+    ]}
+    unresolved = _unresolved_tool_errors(trace)
+    assert len(unresolved) == 1
+    assert unresolved[0]["status"] == "root_required_active_workspace"
+
+
 def test_root_required_terminal_not_recovered_by_artifact_output():
     # Terminal branch: a run_command with ARTIFACT_OUTPUTS must NOT clear a
     # ROOT_REQUIRED block via the generic recovery path — only a real user_files

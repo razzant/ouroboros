@@ -345,6 +345,19 @@ def build_runtime_section(env: Any, task: Dict[str, Any], *, ctx: Any = None) ->
                 ctx,
                 runtime_mode=str(runtime_mode or ""),
             )
+            # v6.57.0 (1.6): a delegated child sees its OWN effective tool profile
+            # (shell/writable roots/lane) up front — the same summary the parent got at
+            # schedule time — so it never wastes a round discovering shell is off.
+            try:
+                if str(task.get("delegation_role") or "").strip() == "subagent":
+                    from ouroboros.tool_access import active_tool_profile, summarize_subagent_profile
+
+                    runtime_data["capabilities"]["self_profile"] = summarize_subagent_profile(
+                        active_tool_profile(ctx),
+                        effective_lane=str(task.get("effective_model_lane") or task.get("requested_model_lane") or ""),
+                    )
+            except Exception:
+                log.debug("Failed to build subagent self_profile summary", exc_info=True)
     except Exception:
         log.debug("Failed to build capability digest for context", exc_info=True)
     # Live worker/queue load (honesty): derive resource facts from the real snapshot,
@@ -407,6 +420,85 @@ def build_runtime_section(env: Any, task: Dict[str, Any], *, ctx: Any = None) ->
             "your judgment picks the target (or none -> answer inline / promote_chat_to_task). A "
             "message in a project room defaults to that project unless it clearly says otherwise."
         )
+    # v6.58.0 (2.2): a conversation/decision turn in a project ROOM sees the room's
+    # working folder as a structural FACT — it can promote work into that folder
+    # without ITSELF becoming a workspace task (decision turns deliberately keep the
+    # promote/steer/route toolset, which workspace profiles exclude). The default
+    # transport: promote_chat_to_task from this room inherits working_dir unless
+    # workspace='none'. Registry read is anchored at the canonical DATA_DIR.
+    # v6.61.3 room lens: the rule now states the REAL chat-lane affordances (reads +
+    # default shell cwd resolve to the folder; writes go through promoted tasks) —
+    # the robot-room incident was exactly a fact/affordance split. A set-but-broken
+    # working_dir is disclosed loudly instead of a silent system-repo fallback.
+    try:
+        _room_pid = str(task.get("project_id") or "").strip()
+        if _room_pid and not str(task.get("workspace_root") or "").strip():
+            from ouroboros.config import DATA_DIR as _DATA_DIR
+            from ouroboros.projects_registry import get_project as _get_project
+            from ouroboros.workspace_admission import room_chat_lens_dir as _room_lens
+
+            _room = _get_project(_DATA_DIR, _room_pid) or {}
+            _room_wd = str(_room.get("working_dir") or "").strip()
+            if _room_wd:
+                # Same resolver the agent uses for the tool lens, so the stated rule
+                # and the actual tool surface cannot diverge (the robot incident).
+                _lens_dir, _room_note = _room_lens(_DATA_DIR, _room_pid)
+                _lens_active = bool(task.get("_is_direct_chat")) and bool(_lens_dir)
+                runtime_data["project_room"] = {
+                    "project_id": _room_pid,
+                    "working_dir": _room_wd,
+                    "rule": (
+                        (
+                            "This room's chat lane LOOKS AT the project folder: read_file/"
+                            "list_files/search_code/query_code with root=active_workspace and "
+                            "the DEFAULT shell cwd resolve to working_dir. The Ouroboros "
+                            "system repo needs explicit root=\"system_repo\" (reads) or an "
+                            "explicit cwd (shell). File WRITES here go through "
+                            "promote_chat_to_task — the promoted task inherits this folder as "
+                            "its workspace (workspace='none' opts out)."
+                        )
+                        if _lens_active
+                        else (
+                            "This project has a working folder. Tasks promoted from this room "
+                            "run with it as their active workspace by default; pass "
+                            "workspace='none' to promote a folder-less task."
+                        )
+                    ),
+                }
+                if _room_note:
+                    runtime_data["project_room"]["working_dir_warning"] = _room_note
+    except Exception:
+        log.debug("Failed to inject project_room working_dir fact", exc_info=True)
+    # v6.60.0 answer protocol (quiz 16b, C+B): the FINAL ANSWER marker doctrine moved
+    # OUT of SYSTEM.md into a per-task contract field. Only a task whose contract
+    # declares answer_protocol="final_answer_line" (bench adapters, exact-match
+    # consumers) sees the instruction; ordinary chat/self tasks never do. The latch +
+    # extractor machinery stays unconditional (harmless without a marker).
+    try:
+        _contract = task.get("task_contract") if isinstance(task.get("task_contract"), dict) else {}
+        if not _contract:
+            _meta_c = task.get("metadata") if isinstance(task.get("metadata"), dict) else {}
+            _contract = _meta_c.get("task_contract") if isinstance(_meta_c.get("task_contract"), dict) else {}
+        if str(_contract.get("answer_protocol") or "").strip() == "final_answer_line":
+            runtime_data["answer_protocol"] = {
+                "protocol": "final_answer_line",
+                "rule": (
+                    "This task's deliverable is machine-extracted. End your FINAL message "
+                    "with a line `FINAL ANSWER: <answer>` matching the requested format "
+                    "exactly (no extra units, punctuation, or restated context unless asked). "
+                    "If the task is genuinely AMBIGUOUS (several defensible readings/formats "
+                    "survive your research), you may add an optional block before that line: "
+                    "`CANDIDATES:` on its own line, then one `- <candidate> — <why/when it holds>` "
+                    "per line, then the `FINAL ANSWER:` line with your chosen one — the "
+                    "candidates are latched for the acceptance reviewer to adjudicate. "
+                    "The internal review-ledger identifiers `best_effort` and "
+                    "`blocked_with_evidence` are metadata, never the answer: even when "
+                    "blocked, the FINAL ANSWER line must carry your best-supported actual "
+                    "answer to the question itself."
+                ),
+            }
+    except Exception:
+        log.debug("Failed to inject answer_protocol rule", exc_info=True)
     runtime_ctx = json.dumps(runtime_data, ensure_ascii=False, indent=2)
     out = "## Runtime context\n\n" + runtime_ctx
     # Shared task-tree coordination ledger (swarm blackboard): inject the tail so EVERY

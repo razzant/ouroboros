@@ -56,7 +56,7 @@ def test_api_tasks_create_carries_disabled_tools(tmp_path, monkeypatch):
     captured = []
     monkeypatch.setattr("supervisor.queue.enqueue_task", lambda task: captured.append(dict(task)) or task)
     monkeypatch.setattr("supervisor.queue.persist_queue_snapshot", lambda reason="": None)
-    monkeypatch.setattr("ouroboros.gateway.tasks.bootstrap_process_path", lambda: [])
+    monkeypatch.setattr("ouroboros.workspace_admission.bootstrap_process_path", lambda: [])
 
     app = Starlette(routes=[Route("/api/tasks", endpoint=api_tasks_create, methods=["POST"])])
     app.state.drive_root = data
@@ -83,7 +83,7 @@ def test_api_tasks_create_carries_acceptance_claims(tmp_path, monkeypatch):
     captured = []
     monkeypatch.setattr("supervisor.queue.enqueue_task", lambda task: captured.append(dict(task)) or task)
     monkeypatch.setattr("supervisor.queue.persist_queue_snapshot", lambda reason="": None)
-    monkeypatch.setattr("ouroboros.gateway.tasks.bootstrap_process_path", lambda: [])
+    monkeypatch.setattr("ouroboros.workspace_admission.bootstrap_process_path", lambda: [])
 
     app = Starlette(routes=[Route("/api/tasks", endpoint=api_tasks_create, methods=["POST"])])
     app.state.drive_root = data

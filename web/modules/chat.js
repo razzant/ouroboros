@@ -476,6 +476,27 @@ export function createChatInstance({
         };
     }
 
+    // v6.60.0 (answer protocol C+B): a `FINAL ANSWER: <answer>` line in an assistant
+    // message renders as a clean chip instead of a raw ALL-CAPS marker line. Pure
+    // presentation — the stored text and the typed extractor are untouched.
+    function renderAssistantWithAnswerChip(text) {
+        // Mirror the runtime extractor (outcomes.extract_final_answer) exactly:
+        // markers may carry leading whitespace, and the LAST marker line is
+        // authoritative (a self-corrected answer must chip the same value the
+        // runtime extracts, triad r4/r5). The chosen line is removed by INDEX
+        // (String.replace would strip the first identical duplicate instead).
+        const source = String(text || '');
+        const matches = [...source.matchAll(/^[ \t]*FINAL ANSWER:\s*(.+?)\s*$/gm)];
+        if (!matches.length) return renderMarkdown(text);
+        const match = matches[matches.length - 1];
+        const answer = match[1].trim();
+        const stripped = (source.slice(0, match.index) + source.slice(match.index + match[0].length)).trim();
+        return `${stripped ? renderMarkdown(stripped) : ''}` +
+            `<div class="final-answer-chip" title="Machine-extracted final answer">` +
+            `<span class="final-answer-chip-label">Answer</span>` +
+            `<span class="final-answer-chip-value">${escapeHtml(answer)}</span></div>`;
+    }
+
     function renderSkillReviewDisclosure(text) {
         const summary = summarizeSkillReviewMessage(text);
         return `
@@ -1830,7 +1851,7 @@ export function createChatInstance({
             ? escapeHtml(text)
             : (role === 'system' && systemType === 'skill_review'
                 ? renderSkillReviewDisclosure(text)
-                : renderMarkdown(text));
+                : renderAssistantWithAnswerChip(text));
         const timeFmt = formatMsgTime(ts);
         const timeHtml = timeFmt ? `<div class="msg-time" title="${escapeHtmlAttr(timeFmt.full)}">${escapeHtml(timeFmt.short)}</div>` : '';
         const pendingHtml = pending ? `<div class="msg-pending">Queued until reconnect</div>` : '';

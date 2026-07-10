@@ -134,6 +134,20 @@ def get_tools():
                             "default": "",
                             "description": "Optional concise rationale for agent_disposition, especially when rejecting, partially accepting, or deferring reviewer feedback. If rationale is provided without a disposition, the stance defaults to partial.",
                         },
+                        "obligation_dispositions": {
+                            "type": "array",
+                            "default": [],
+                            "description": "Optional per-obligation dispositions when the host surfaced OPEN OBLIGATIONS (blocking review policy): one entry per obligation id with disposition addressed|rejected|deferred and a short reason.",
+                            "items": {
+                                "type": "object",
+                                "properties": {
+                                    "id": {"type": "string"},
+                                    "disposition": {"type": "string", "enum": ["addressed", "rejected", "deferred"]},
+                                    "reason": {"type": "string"},
+                                },
+                                "required": ["id", "disposition"],
+                            },
+                        },
                     },
                     "required": ["claim", "goal"],
                 },
@@ -152,10 +166,17 @@ def _handle_task_acceptance_review(
     checklist: str = "",
     agent_disposition: str = "",
     rationale: str = "",
+    obligation_dispositions: Optional[list] = None,
 ) -> str:
     from ouroboros.config import resolve_effort
     from ouroboros.review_evidence import build_task_acceptance_evidence
-    from ouroboros.review_substrate import ReviewRequest, build_improvement_capsule, run_review_request, reviewer_slots
+    from ouroboros.review_substrate import (
+        ReviewRequest,
+        build_improvement_capsule,
+        dissent_findings,
+        reviewer_slots,
+        run_review_request,
+    )
 
     # v6.51.0 idea-2: build the process-aware evidence packet (full contract +
     # first-class verification_summary + host-collected redacted repo_diff + leak-safe
@@ -169,13 +190,32 @@ def _handle_task_acceptance_review(
     if disposition not in {"accepted", "rejected", "partial", "deferred"}:
         disposition = ""
     agent_rationale = " ".join(str(rationale or "").split()).strip()
+    # v6.54.4 obligations layer: normalized per-obligation dispositions ride the
+    # same agent_decision envelope (the existing v6.54.0 mechanism, extended to
+    # obligation granularity). The host loop applies them to the per-task
+    # acceptance_obligations it collected under blocking enforcement.
+    normalized_ob: list = []
+    for entry in (obligation_dispositions or []):
+        if not isinstance(entry, dict):
+            continue
+        oid = str(entry.get("id") or "").strip()
+        odisp = str(entry.get("disposition") or "").strip().lower()
+        if not oid or odisp not in {"addressed", "rejected", "deferred"}:
+            continue
+        normalized_ob.append({
+            "id": oid[:40],
+            "disposition": odisp,
+            "reason": " ".join(str(entry.get("reason") or "").split())[:500],
+        })
     agent_decision = {}
-    if disposition or agent_rationale:
+    if disposition or agent_rationale or normalized_ob:
         agent_decision = {
             "disposition": disposition or "partial",
             "rationale": agent_rationale[:1000],
             "source": "agent_task_acceptance_review_tool",
         }
+        if normalized_ob:
+            agent_decision["obligation_dispositions"] = normalized_ob
         agent_evidence["agent_decision"] = agent_decision
 
     evidence = build_task_acceptance_evidence(
@@ -191,8 +231,9 @@ def _handle_task_acceptance_review(
         subject=claim,
         evidence=evidence,
         checklist=checklist,
+        # v6.60.0: dead `verdict_is_advisory` removed — enforcement is the single
+        # OUROBOROS_REVIEW_ENFORCEMENT setting (advisory|blocking) via obligations.
         policy={
-            "verdict_is_advisory": True,
             "raw_output_must_be_preserved": True,
             # min_successful_slots is set below from adaptive_quorum(len(slots)) —
             # the SSOT — once the actual reviewer slot count is known.
@@ -209,6 +250,10 @@ def _handle_task_acceptance_review(
     # agent that explicitly asked for detail.
     capsule = build_improvement_capsule(result)
     payload_dict = dict(result.__dict__)
+    # v6.54.4: DISSENT is recorded on EVERY path — the agent-called flow marks it
+    # in the payload so the tool-result capture lands acceptance_decision.dissent_noted
+    # (review round 2: previously only the host-forced path recorded it).
+    payload_dict["dissent_noted"] = bool(dissent_findings(result))
     if agent_decision:
         payload_dict["agent_decision"] = agent_decision
     payload = json.dumps(payload_dict, ensure_ascii=False, indent=2, default=str)
@@ -272,6 +317,20 @@ def _review_query_error_payload(
     return payload
 
 
+def _review_output_budget() -> int:
+    """Reviewer response reservation (default 65536). `OUROBOROS_REVIEW_MAX_TOKENS`
+    lets an operator LOWER it when a mega-diff's input pack plus the default
+    output reservation exceeds a reviewer endpoint's context cap (input + output
+    must fit; a verdict needs ~10K tokens, so shrinking the reservation preserves
+    FULL review input context instead of trimming evidence). Floor 8192 so the
+    knob can never squeeze a verdict into uselessness; never raises the default."""
+    try:
+        raw = int(os.environ.get("OUROBOROS_REVIEW_MAX_TOKENS", "") or 65536)
+    except (TypeError, ValueError):
+        raw = 65536
+    return max(8192, min(raw, 65536))
+
+
 async def _query_model(
     llm_client: LLMClient,
     model: str,
@@ -285,13 +344,14 @@ async def _query_model(
         try:
             from ouroboros.review_substrate import ReviewRequest, ReviewSlot, run_review_request
 
+            _out_budget = _review_output_budget()
             request = ReviewRequest(
                 surface="multi_model_review",
                 goal="Run independent multi-model review over the supplied evidence.",
                 messages=messages,
                 task_id=str(getattr(ctx, "task_id", "") or "multi_model_review") if ctx is not None else "multi_model_review",
                 call_type="multi_model_review",
-                max_tokens=65536,
+                max_tokens=_out_budget,
                 temperature=0.2,
                 no_proxy=True,
             )
@@ -300,7 +360,7 @@ async def _query_model(
                 model=model,
                 effort=_cfg.resolve_effort("review"),
                 timeout_sec=timeout_sec,
-                max_tokens=65536,
+                max_tokens=_out_budget,
                 temperature=0.2,
                 role_hint="multi-model review",
             )

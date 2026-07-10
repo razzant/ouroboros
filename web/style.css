@@ -4917,6 +4917,230 @@ textarea.chat-input {
     padding-left: calc(var(--space-3) + 18px + var(--space-3));
 }
 
+/* v6.59.0 — New Project "+" in the Projects header + per-row kebab actions. */
+.nav-projects {
+    position: relative;
+}
+
+/* v6.61.3: the "+" is absolutely layered OVER the header flex row (a button
+   cannot nest inside the toggle button), so the toggle reserves right-side
+   space for it — previously the "+" landed exactly on the projects-count
+   badge once the count rendered (invisible on fresh installs with 0 projects). */
+.nav-projects > .nav-section-toggle {
+    padding-right: calc(var(--space-3) + 24px);
+}
+
+.nav-projects-add {
+    position: absolute;
+    top: 11px;
+    right: 6px;
+    width: 22px;
+    height: 22px;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    border: none;
+    border-radius: var(--radius-sm);
+    background: transparent;
+    color: var(--text-muted);
+    font-size: 16px;
+    line-height: 1;
+    cursor: pointer;
+}
+
+.nav-projects-add:hover {
+    color: var(--text-primary);
+    background: var(--surface-2, rgba(255, 255, 255, 0.06));
+}
+
+.nav-project-kebab {
+    margin-left: auto;
+    padding: 0 4px;
+    color: var(--text-muted);
+    opacity: 0;
+    cursor: pointer;
+    border-radius: var(--radius-sm);
+}
+
+.nav-project-row:hover .nav-project-kebab {
+    opacity: 1;
+}
+
+.nav-project-kebab:hover {
+    color: var(--text-primary);
+}
+
+.project-row-menu {
+    position: fixed;
+    top: var(--prm-top, 0);
+    left: var(--prm-left, 0);
+    z-index: 120;
+    display: flex;
+    flex-direction: column;
+    min-width: 180px;
+    padding: 4px;
+    border: 1px solid var(--divider);
+    border-radius: var(--radius-md, 8px);
+    background: var(--surface-1, #16181d);
+    box-shadow: 0 8px 24px rgba(0, 0, 0, 0.4);
+}
+
+.project-row-menu button {
+    text-align: left;
+    padding: 7px 10px;
+    border: none;
+    background: transparent;
+    color: var(--text-primary);
+    font-size: 13px;
+    border-radius: var(--radius-sm);
+    cursor: pointer;
+}
+
+.project-row-menu button:hover {
+    background: var(--surface-2, rgba(255, 255, 255, 0.06));
+}
+
+.project-row-menu button.danger {
+    color: var(--danger, #e5534b);
+}
+
+/* New Project dialog */
+.new-project-dialog {
+    max-width: 560px;
+    width: min(560px, 94vw);
+}
+
+.new-project-field {
+    display: flex;
+    flex-direction: column;
+    gap: 4px;
+    margin-bottom: var(--space-3);
+    font-size: 13px;
+}
+
+.new-project-sources {
+    display: flex;
+    flex-direction: column;
+    gap: 6px;
+    margin: 0 0 var(--space-3);
+    padding: var(--space-2) var(--space-3);
+    border: 1px solid var(--divider);
+    border-radius: var(--radius-md, 8px);
+    font-size: 13px;
+}
+
+.new-project-sources legend {
+    padding: 0 6px;
+    color: var(--text-muted);
+    font-size: 12px;
+}
+
+.new-project-sources label {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    cursor: pointer;
+}
+
+.new-project-source-detail {
+    margin-bottom: var(--space-3);
+}
+
+.new-project-browser {
+    border: 1px solid var(--divider);
+    border-radius: var(--radius-md, 8px);
+    margin-bottom: var(--space-2);
+    overflow: hidden;
+}
+
+.new-project-browser-path {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 8px;
+    padding: 6px 10px;
+    border-bottom: 1px solid var(--divider);
+    font-size: 12px;
+    word-break: break-all;
+}
+
+.new-project-browser-list {
+    max-height: 220px;
+    overflow-y: auto;
+    display: flex;
+    flex-direction: column;
+}
+
+.new-project-dir-row {
+    text-align: left;
+    padding: 6px 10px;
+    border: none;
+    background: transparent;
+    color: var(--text-primary);
+    font-size: 13px;
+    cursor: pointer;
+}
+
+.new-project-dir-row:hover {
+    background: var(--surface-2, rgba(255, 255, 255, 0.06));
+}
+
+.new-project-dir-up {
+    color: var(--text-muted);
+}
+
+.new-project-dir-empty {
+    padding: 8px 10px;
+    color: var(--text-muted);
+    font-size: 12px;
+}
+
+.new-project-trust-note {
+    padding: 8px 10px;
+    border: 1px solid var(--warning, #b58900);
+    border-radius: var(--radius-md, 8px);
+    color: var(--text-primary);
+    font-size: 12.5px;
+    margin: 0 0 var(--space-2);
+}
+
+.new-project-error {
+    color: var(--danger, #e5534b);
+    font-size: 12.5px;
+    margin: 0 0 var(--space-2);
+    white-space: pre-wrap;
+}
+
+/* v6.60.0 — FINAL ANSWER chip: the machine-extracted answer line rendered as a
+   clean labelled chip instead of a raw ALL-CAPS marker. */
+.final-answer-chip {
+    display: inline-flex;
+    align-items: baseline;
+    gap: 8px;
+    max-width: 100%;
+    margin-top: 8px;
+    padding: 6px 12px;
+    border: 1px solid var(--project, #7aa2f7);
+    border-radius: 999px;
+    background: rgba(122, 162, 247, 0.08);
+    font-size: 13px;
+}
+
+.final-answer-chip-label {
+    flex: none;
+    font-size: 11px;
+    font-weight: 600;
+    text-transform: uppercase;
+    letter-spacing: 0.06em;
+    color: var(--project, #7aa2f7);
+}
+
+.final-answer-chip-value {
+    font-weight: 600;
+    color: var(--text-primary);
+    word-break: break-word;
+}
+
 .project-panel {
     display: flex;
     flex-direction: column;

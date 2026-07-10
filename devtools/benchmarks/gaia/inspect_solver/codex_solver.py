@@ -29,7 +29,8 @@ from devtools.benchmarks.gaia.inspect_solver.ouroboros_solver import (  # noqa: 
     _state_prompt,
 )
 from devtools.benchmarks.common.run_roots import run_root  # noqa: E402
-from devtools.benchmarks.gaia.inspect_solver import GAIA_FORMAT_INSTRUCTION  # noqa: E402
+from devtools.benchmarks.gaia.inspect_solver import GAIA_ANTI_LEAK_INSTRUCTION, GAIA_FORMAT_INSTRUCTION  # noqa: E402
+from devtools.benchmarks.gaia.bwrap_isolate import wrap as _bwrap_wrap  # noqa: E402
 
 try:
     from inspect_ai.solver import Generate, TaskState, solver
@@ -67,6 +68,7 @@ def run_codex(
     sample_id: str = "sample",
     attachments: list[pathlib.Path] | None = None,
     workdir: pathlib.Path | None = None,
+    trace_path: pathlib.Path | None = None,
 ) -> dict:
     model = os.environ.get("GAIA_CODEX_MODEL", "gpt-5.5")
     # Reasoning effort: codex's own default is "xhigh" (from ~/.codex/config.toml). For an
@@ -83,11 +85,33 @@ def run_codex(
         full_prompt += f"\n\nProvided file(s) are in your current working directory: {names}"
     if "FINAL ANSWER:" not in full_prompt:
         full_prompt += GAIA_FORMAT_INSTRUCTION
+    # Anti-lookup rule (SSOT, identical across harnesses; see METHODOLOGY.md).
+    if GAIA_ANTI_LEAK_INSTRUCTION not in full_prompt:
+        full_prompt += GAIA_ANTI_LEAK_INSTRUCTION
 
     last_msg = work / ".codex_last_message.txt"
-    cmd = ["codex", "exec", full_prompt,
+    # --json streams JSONL events (tool/web-search activity) to stdout: without it
+    # `codex exec` is a black box and the leakage audit scores the row clean by
+    # construction. The final answer still comes from `-o last_message.txt`.
+    cmd = ["codex", "exec", full_prompt, "--json",
            "--skip-git-repo-check", "--dangerously-bypass-approvals-and-sandbox",
            "-C", str(work), "-o", str(last_msg)]
+    # Transport/auth fix (codex-cli >= 0.142): the default `openai` provider uses a
+    # WebSocket transport to /v1/responses that does NOT carry OPENAI_API_KEY for
+    # API-key (non-ChatGPT-login) auth, so a service-account key 401s ("Missing
+    # bearer"). Define a custom HTTP provider hitting the SAME OpenAI endpoint/model
+    # over the `responses` HTTP wire API, which authenticates from OPENAI_API_KEY.
+    # This is transport-only: identical endpoint (api.openai.com), model, and direct
+    # OpenAI routing — it does not align/relocate the endpoint. Disable via
+    # GAIA_CODEX_HTTP_PROVIDER=0 if a future codex build fixes WS API-key auth.
+    if os.environ.get("GAIA_CODEX_HTTP_PROVIDER", "1") != "0":
+        cmd[3:3] = [
+            "-c", 'model_providers.openai_http.name="OpenAI HTTP"',
+            "-c", 'model_providers.openai_http.base_url="https://api.openai.com/v1"',
+            "-c", 'model_providers.openai_http.env_key="OPENAI_API_KEY"',
+            "-c", 'model_providers.openai_http.wire_api="responses"',
+            "-c", 'model_provider="openai_http"',
+        ]
     if effort:
         cmd[2:2] = ["-c", f"model_reasoning_effort={effort}"]  # override config.toml default
     if model:
@@ -99,7 +123,7 @@ def run_codex(
 
     try:
         proc = subprocess.run(
-            cmd, capture_output=True, text=True, timeout=timeout_sec,
+            _bwrap_wrap(cmd), capture_output=True, text=True, timeout=timeout_sec,
             cwd=str(work), env=env, stdin=subprocess.DEVNULL,  # DEVNULL: codex exec else waits on stdin
         )
     except subprocess.TimeoutExpired as exc:
@@ -107,6 +131,12 @@ def run_codex(
     except Exception as exc:  # noqa: BLE001
         return {"final_answer": "", "returncode": -1, "raw": "", "stderr_tail": f"SPAWN ERROR: {type(exc).__name__}: {str(exc)[:300]}"}
 
+    if trace_path is not None and proc.stdout:
+        try:  # pure JSONL event dump for audit_leakage
+            trace_path.parent.mkdir(parents=True, exist_ok=True)
+            trace_path.write_text(proc.stdout, encoding="utf-8")
+        except Exception:
+            pass
     result_text = ""
     try:
         if last_msg.exists():
@@ -150,7 +180,8 @@ def codex_solver():
                     dest.write_bytes(a.read_bytes())
             except Exception:
                 pass
-        result = run_codex(prompt, sample_id=sample_id, attachments=attachments, workdir=workdir)
+        result = run_codex(prompt, sample_id=sample_id, attachments=attachments, workdir=workdir,
+                           trace_path=sample_dir / "codex_trace.jsonl")
         if getattr(state, "metadata", None) is None:
             state.metadata = {}
         state.metadata["codex_raw"] = result.get("raw", "")

@@ -208,8 +208,9 @@ def _load(drive_root: Any) -> Dict[str, Any]:
     if isinstance(data, dict):
         data.setdefault("probes", {})
         data.setdefault("owner_acks", {})
+        data.setdefault("effort_ceilings", {})
         return data
-    return {"probes": {}, "owner_acks": {}}
+    return {"probes": {}, "owner_acks": {}, "effort_ceilings": {}}
 
 
 def _save(drive_root: Any, data: Dict[str, Any]) -> None:
@@ -240,6 +241,60 @@ def _age_seconds(ts: str) -> float:
     if parsed is None:
         return float("inf")
     return max(0.0, (utc_now() - parsed).total_seconds())
+
+
+# --- Learned reasoning-effort ceilings (v6.57.0) -------------------------------
+# A COMPLETELY SEPARATE namespace ("effort_ceilings") from the context-window
+# evidence (probes/owner_acks) — it shares only the store file and the lock.
+# It NEVER touches window records, so the BIBLE P3 ≥1M scope-review floor
+# evidence path is untouched. Value shape:
+#   {"ceiling": "<effort>", "observed_at": iso, "reason": "provider_rejected"}
+# KEYING (deliberate, r4 disclosure): the key is the NORMALIZED MODEL IDENTITY
+# (llm.normalize_model_identity — provider-scoped model id), NOT the full route
+# fingerprint the window evidence uses. Effort-level support is treated as a
+# MODEL property: a ceiling learned on one base_url applies to the model on all
+# routes. Coarser than per-route, and self-healing — the floor in llm.py keeps
+# a bad endpoint from poisoning below "low", and clamps are disclosed per call.
+# The ceiling is the highest effort a route ACCEPTED after a provider rejected a
+# higher one (learned by the reject-and-step-down walk in llm.py). Fail-open:
+# any error → no ceiling (send the requested effort). Owner-configured efforts are
+# still honored UP TO the learned real ceiling; clamping is disclosed in usage.
+
+def record_effort_ceiling(drive_root: Any, fingerprint: str, ceiling: str) -> None:
+    """Persist the learned reasoning-effort ceiling. The key is the normalized
+    model identity (see the namespace note above), not a full route fingerprint.
+    Best-effort, never raises; a lower ceiling always wins (a route never silently
+    regains an effort a provider already rejected within the cache window)."""
+    fp = str(fingerprint or "").strip()
+    ceil = str(ceiling or "").strip().lower()
+    if not fp or not ceil:
+        return
+    try:
+        with _STORE_LOCK:
+            data = _load(drive_root)
+            entry = data.setdefault("effort_ceilings", {}).get(fp) or {}
+            data["effort_ceilings"][fp] = {
+                "ceiling": ceil,
+                "observed_at": utc_now_iso(),
+                "reason": "provider_rejected",
+                "prev": entry.get("ceiling") or "",
+            }
+            _save(drive_root, data)
+    except Exception:
+        log.debug("record_effort_ceiling failed", exc_info=True)
+
+
+def get_effort_ceiling(drive_root: Any, fingerprint: str) -> str:
+    """Return the learned effort ceiling for a normalized model identity, or ""
+    when none. Fail-open (any error → "")."""
+    fp = str(fingerprint or "").strip()
+    if not fp:
+        return ""
+    try:
+        entry = _load(drive_root).get("effort_ceilings", {}).get(fp)
+        return str((entry or {}).get("ceiling") or "").strip().lower()
+    except Exception:
+        return ""
 
 
 # --- Owner acknowledgement (asserted) -----------------------------------------

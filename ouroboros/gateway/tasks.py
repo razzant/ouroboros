@@ -5,7 +5,6 @@ from __future__ import annotations
 import asyncio
 import json
 import pathlib
-import subprocess
 import time
 import uuid
 from datetime import datetime, timezone
@@ -25,11 +24,11 @@ from ouroboros.headless import (
     task_artifacts_dir,
     write_workspace_preflight_artifact,
 )
-from ouroboros.platform_layer import bootstrap_process_path
 from ouroboros.contracts.task_contract import (
     attach_task_contract,
     normalize_acceptance_claims,
     normalize_allowed_resources,
+    normalize_answer_protocol,
     normalize_bool,
     normalize_disabled_tools,
     normalize_resource_policy,
@@ -46,7 +45,6 @@ from ouroboros.tool_access import path_is_relative_to, paths_overlap_casefold
 from ouroboros.utils import iter_jsonl_objects
 from ouroboros.workspace_preflight import (
     collect_workspace_preflight,
-    render_workspace_preflight_summary,
     summarize_workspace_preflight,
 )
 from ouroboros.workspace_executor import normalize_executor_ref
@@ -100,6 +98,36 @@ def _normalize_deadline_at(value: Any) -> str:
     if parsed.tzinfo is None:
         raise ValueError("deadline_at must include a timezone offset or Z")
     return parsed.astimezone(timezone.utc).isoformat().replace("+00:00", "Z")
+
+
+def _fold_contract_policies(body: Dict[str, Any], raw_metadata: Dict[str, Any], metadata: Dict[str, Any]):
+    """Normalize the declarative contract policies from the request body into task
+    metadata (extracted from api_tasks_create for the function-size gate; pure).
+    Returns (allowed_resources, resource_policy, disabled_tools, acceptance_claims,
+    error) — error is non-empty for an invalid service_teardown."""
+    allowed_resources = normalize_allowed_resources(body.get("allowed_resources") or raw_metadata.get("allowed_resources") or {})
+    if allowed_resources:
+        metadata["allowed_resources"] = allowed_resources
+    resource_policy = normalize_resource_policy(body.get("resource_policy") or raw_metadata.get("resource_policy") or {})
+    if resource_policy:
+        metadata["resource_policy"] = resource_policy
+    disabled_tools = normalize_disabled_tools(body.get("disabled_tools") or raw_metadata.get("disabled_tools") or [])
+    if disabled_tools:
+        metadata["disabled_tools"] = disabled_tools
+    acceptance_claims = normalize_acceptance_claims(body.get("acceptance_claims") or raw_metadata.get("acceptance_claims") or [])
+    if acceptance_claims:
+        metadata["acceptance_claims"] = acceptance_claims
+    # v6.60.0: adapter-declared answer protocol ("" | "final_answer_line") — flows into
+    # the task contract (and to subagents via the normal contract inheritance).
+    answer_protocol = normalize_answer_protocol(body.get("answer_protocol") or raw_metadata.get("answer_protocol"))
+    if answer_protocol:
+        metadata["answer_protocol"] = answer_protocol
+    service_teardown = str(body.get("service_teardown") or raw_metadata.get("service_teardown") or "").strip().lower()
+    if service_teardown:
+        if service_teardown not in {"stop", "keep"}:
+            return allowed_resources, resource_policy, disabled_tools, acceptance_claims, "service_teardown must be 'stop' or 'keep'"
+        metadata["service_teardown"] = service_teardown
+    return allowed_resources, resource_policy, disabled_tools, acceptance_claims, ""
 
 
 async def api_tasks_create(request: Request) -> JSONResponse:
@@ -187,23 +215,11 @@ async def api_tasks_create(request: Request) -> JSONResponse:
         # let a caller believe isolation is active while the task runs unscoped.
         return json_error("project_id must be a top-level field, not metadata", 400)
     metadata = {str(k): v for k, v in raw_metadata.items() if str(k) not in _RESERVED_METADATA_KEYS}
-    allowed_resources = normalize_allowed_resources(body.get("allowed_resources") or raw_metadata.get("allowed_resources") or {})
-    if allowed_resources:
-        metadata["allowed_resources"] = allowed_resources
-    resource_policy = normalize_resource_policy(body.get("resource_policy") or raw_metadata.get("resource_policy") or {})
-    if resource_policy:
-        metadata["resource_policy"] = resource_policy
-    disabled_tools = normalize_disabled_tools(body.get("disabled_tools") or raw_metadata.get("disabled_tools") or [])
-    if disabled_tools:
-        metadata["disabled_tools"] = disabled_tools
-    acceptance_claims = normalize_acceptance_claims(body.get("acceptance_claims") or raw_metadata.get("acceptance_claims") or [])
-    if acceptance_claims:
-        metadata["acceptance_claims"] = acceptance_claims
-    service_teardown = str(body.get("service_teardown") or raw_metadata.get("service_teardown") or "").strip().lower()
-    if service_teardown:
-        if service_teardown not in {"stop", "keep"}:
-            return json_error("service_teardown must be 'stop' or 'keep'", 400)
-        metadata["service_teardown"] = service_teardown
+    allowed_resources, resource_policy, disabled_tools, acceptance_claims, policy_error = (
+        _fold_contract_policies(body, raw_metadata, metadata)
+    )
+    if policy_error:
+        return json_error(policy_error, 400)
     if "executor_ref" in raw_metadata or "workspace_executor" in raw_metadata:
         return json_error("metadata.executor_ref/workspace_executor is reserved; pass executor_ref as a top-level task field", 400)
     if "executor_ref" in body:
@@ -623,47 +639,13 @@ def _resolve_workspace_root(
     system_repo_dir: pathlib.Path,
     drive_root: pathlib.Path,
 ) -> Optional[pathlib.Path]:
-    text = str(value or "").strip()
-    if not text:
-        return None
-    root = pathlib.Path(text).expanduser().resolve(strict=False)
-    system_repo = pathlib.Path(system_repo_dir).resolve(strict=False)
-    drive = pathlib.Path(drive_root).resolve(strict=False)
-    for protected_root, label in ((system_repo, "Ouroboros system repo"), (drive, "Ouroboros data drive")):
-        overlaps = False
-        try:
-            root.relative_to(protected_root)
-            overlaps = True
-        except ValueError:
-            try:
-                protected_root.relative_to(root)
-                overlaps = True
-            except ValueError:
-                pass
-        if not overlaps and paths_overlap_casefold(root, protected_root):
-            overlaps = True
-        if overlaps:
-            raise ValueError(f"workspace_root must not overlap the {label}")
-    if not root.exists() or not root.is_dir():
-        raise ValueError(f"workspace_root is not a directory: {text}")
-    bootstrap_process_path()
-    try:
-        res = subprocess.run(
-            ["git", "rev-parse", "--show-toplevel"],
-            cwd=str(root),
-            capture_output=True,
-            text=True,
-            timeout=5,
-        )
-    except Exception:
-        res = None
-    git_root_text = (res.stdout or "").strip() if res is not None and res.returncode == 0 else ""
-    git_root = pathlib.Path(git_root_text).resolve(strict=False) if git_root_text else None
-    if git_root is None:
-        raise ValueError("workspace_root must be a git worktree root")
-    if git_root != root:
-        raise ValueError(f"workspace_root must be the git worktree root: {git_root}")
-    return root
+    """Delegates to the admission SSOT (v6.58.0): the gateway and the promote path
+    validate a workspace root through ONE function (workspace_admission), so the two
+    surfaces can never drift. WorkspaceRootError subclasses ValueError, so existing
+    `except ValueError` call sites keep working unchanged."""
+    from ouroboros.workspace_admission import validate_workspace_root
+
+    return validate_workspace_root(value, system_repo_dir=system_repo_dir, drive_root=drive_root)
 
 
 def _normalize_attachments(value: Any) -> List[Dict[str, str]]:
@@ -695,19 +677,15 @@ def _compose_task_text(
 ) -> str:
     parts = [description]
     if workspace_root is not None:
-        workspace_lines = (
-            f"workspace_root: {workspace_root}\n"
-            f"workspace_mode: {workspace_mode or 'external'}\n"
-            f"memory_mode: {memory_mode}\n"
-            "Use read_file, write_file, list_files, search_code, vcs_status, vcs_diff, and run_command against this target workspace, not the Ouroboros system repo.\n"
-            f"{render_workspace_preflight_summary(workspace_preflight)}\n"
-            "Before editing, account for target-repo docs or root-level instructions if present.\n"
-            "Project-local dependency installs are allowed in external workspace tasks; system/global installs are for runtime_mode=pro only and must be noninteractive.\n"
-            "When work naturally splits into independent branches, or while a long build/download/test is running, use schedule_subagent for a focused parallel handoff instead of serializing every branch yourself.\n"
-            "Before finalizing, re-read the original task and verify each explicit requirement through the interface/path/format/service the task names; do not treat a weaker surrogate self-test as completion.\n"
-            "Final summaries belong in the final answer, not new repo markdown files unless requested.\n"
-            "Task-local git is allowed when the task requires it (clone, branch, commit, push to task-local remotes); "
-            "Ouroboros still protects its own repo/data paths. Workspace artifacts are captured against the preflight git base.\n"
+        from ouroboros.workspace_admission import compose_workspace_block
+
+        # SSOT block (v6.58.0): the same [HEADLESS_WORKSPACE] guidance the promote
+        # path embeds, so the two admission surfaces render identical context.
+        workspace_lines = compose_workspace_block(
+            workspace_root=workspace_root,
+            workspace_mode=workspace_mode,
+            memory_mode=memory_mode,
+            workspace_preflight=workspace_preflight,
         )
         if "[HEADLESS_WORKSPACE]" in description and "[END_HEADLESS_WORKSPACE]" in description:
             marker = "[END_HEADLESS_WORKSPACE]"
@@ -740,8 +718,15 @@ def _render_attachment_lines(attachments: Any) -> str:
         if not relpath:
             continue
         kind = "image" if item.get("is_image") else (str(item.get("mime") or "").strip() or "file")
+        # v6.54.3: also surface the REAL staged path for process tools — scripts
+        # (openpyxl, audio, ffmpeg) open files by OS path, and omitting it made
+        # models GUESS wrong absolute paths that tripped light-mode path guards.
+        # The staged path lives inside this task's own artifact_store, so both
+        # forms address the same file.
+        abs_path = str(item.get("abs_path") or "").strip()
+        script_hint = f" | script/process path: {abs_path}" if abs_path else ""
         lines.append(
-            f"- {label} ({kind}): read_file(root='{root}', path='{relpath}')"
+            f"- {label} ({kind}): read_file(root='{root}', path='{relpath}'){script_hint}"
         )
     return "\n".join(lines)
 

@@ -68,10 +68,41 @@ def explicit_project_id_ok(raw: Any) -> bool:
     return bool(s) and s == s.strip() and s == sanitize_project_id(s)
 
 
+def _normalized_workspace(workspace: str) -> str:
+    """normcase(realpath) of a workspace path — the canonical key used for BOTH the
+    derived-id hash and the registry-first match, so a folder maps to ONE identity on
+    case-insensitive filesystems (identity on case-sensitive Linux)."""
+    import os
+
+    return os.path.normcase(str(pathlib.Path(workspace).resolve(strict=False)))
+
+
+def _registered_project_for_workspace(canon_workspace: str) -> str:
+    """v6.58.0 (slice 0) — registry-first: return the id of a REGISTERED project whose
+    normalized working_dir equals ``canon_workspace``, else "". So a `/api/tasks`
+    workspace task and its owner project resolve to ONE id — one lease lane, one
+    knowledge store — instead of the folder acquiring a second `proj_<hash>` identity.
+    Anchored at the canonical DATA_DIR (where projects.json lives). Fail-open."""
+    if not canon_workspace:
+        return ""
+    try:
+        from ouroboros.config import DATA_DIR
+        from ouroboros.projects_registry import list_projects
+
+        for project in list_projects(DATA_DIR):
+            wd = str(project.get("working_dir") or "").strip()
+            if wd and _normalized_workspace(wd) == canon_workspace:
+                return str(project.get("id") or "")
+    except Exception:
+        return ""
+    return ""
+
+
 def resolve_project_id(task: Dict[str, Any]) -> str:
     """Resolve a task's project id (S7): explicit ``project_id`` wins; else, for a
-    workspace task, a stable hash of the workspace path; else ``""`` (not
-    project-scoped — canonical memory, unchanged behavior)."""
+    workspace task, a REGISTERED project bound to that folder (v6.58.0 registry-first)
+    or a stable hash of the workspace path; else ``""`` (not project-scoped — canonical
+    memory, unchanged behavior)."""
     if not isinstance(task, dict):
         return ""
     pid = sanitize_project_id(task.get("project_id"))
@@ -84,11 +115,11 @@ def resolve_project_id(task: Dict[str, Any]) -> str:
         return ""
     workspace = str(task.get("workspace_root") or "").strip()
     if workspace:
-        import os
-
-        # normcase so the same workspace under different path casing maps to ONE id
-        # on case-insensitive filesystems (identity on case-sensitive Linux).
-        canon = os.path.normcase(str(pathlib.Path(workspace).resolve(strict=False)))
+        canon = _normalized_workspace(workspace)
+        # Registry-first: one folder = one project identity (and thus one lease lane).
+        registered = _registered_project_for_workspace(canon)
+        if registered:
+            return registered
         digest = hashlib.sha256(canon.encode("utf-8")).hexdigest()[:12]
         return f"proj_{digest}"
     return ""

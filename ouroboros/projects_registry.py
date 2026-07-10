@@ -21,6 +21,7 @@ from contextlib import contextmanager
 from typing import Any, Dict, Iterator, List, Optional
 
 from ouroboros.contracts.chat_id_policy import project_chat_id
+from ouroboros.contracts.schema_versions import with_schema_version
 from ouroboros.project_facts import sanitize_project_id
 from ouroboros.utils import atomic_write_json, iter_jsonl_objects, read_json_dict, utc_now_iso
 
@@ -28,6 +29,11 @@ log = logging.getLogger(__name__)
 
 _REGISTRY_NAME = "projects.json"
 _BINDINGS_NAME = "project_task_bindings.json"
+# v6.58.0 (slice 0): projects.json carries an opt-in _schema_version so future
+# additive fields (git provenance, trusted_at) migrate deliberately. Old rows read
+# as version 0; new fields must stay additive with safe-empty defaults because
+# reconcile_projects mints rows that will lack them.
+_REGISTRY_SCHEMA_VERSION = 1
 _LOCK = threading.Lock()
 
 
@@ -77,7 +83,9 @@ def _load(drive_root: Any) -> Dict[str, Any]:
 def _save(drive_root: Any, data: Dict[str, Any]) -> None:
     path = _registry_path(drive_root)
     path.parent.mkdir(parents=True, exist_ok=True)
-    atomic_write_json(path, data)
+    # Stamp the current schema version on every write (idempotent; old files that
+    # never had it are treated as version 0 by read_schema_version).
+    atomic_write_json(path, with_schema_version(dict(data), _REGISTRY_SCHEMA_VERSION))
 
 
 def _load_bindings(drive_root: Any) -> Dict[str, Any]:
@@ -293,11 +301,15 @@ def create_project(
 
 
 def update_project(drive_root: Any, project_id: str, **updates: Any) -> Optional[Dict[str, Any]]:
-    """Update mutable fields (name/working_dir/last_active_at)."""
+    """Update mutable fields. v6.59.0 adds the additive source-provenance facts:
+    ``provenance`` (attached|cloned|genesis|none — how the working_dir came to be),
+    ``clone_url`` (historical fact; live git data is always read from .git), and
+    ``trusted_at`` (stamped automatically on attach/clone — the notification trust
+    model: attaching IS the owner's explicit grant, no second confirmation gate)."""
     pid = sanitize_project_id(project_id)
     if not pid:
         return None
-    allowed = {"name", "working_dir", "last_active_at"}
+    allowed = {"name", "working_dir", "last_active_at", "provenance", "clone_url", "trusted_at"}
     with _file_write_lock(_registry_path(drive_root)):
         data = _load(drive_root)
         for entry in data["projects"]:
@@ -310,6 +322,37 @@ def update_project(drive_root: Any, project_id: str, **updates: Any) -> Optional
             _save(drive_root, data)
             return dict(entry)
     return None
+
+
+def delete_project(drive_root: Any, project_id: str) -> bool:
+    """v6.59.0: remove a project's REGISTRATION + its task bindings. The working
+    folder and the per-project memory store are deliberately NOT touched — delete
+    un-registers, it never destroys owner data (the folder belongs to the owner;
+    the memory store is durable and reconcile could resurrect the row if wanted).
+    Returns True when a row was removed."""
+    pid = sanitize_project_id(project_id)
+    if not pid:
+        return False
+    removed = False
+    with _file_write_lock(_registry_path(drive_root)):
+        data = _load(drive_root)
+        kept = [p for p in data["projects"] if p.get("id") != pid]
+        if len(kept) != len(data["projects"]):
+            data["projects"] = kept
+            _save(drive_root, data)
+            removed = True
+    if removed:
+        with _file_write_lock(_bindings_path(drive_root)):
+            bindings = _load_bindings(drive_root)
+            pruned = {
+                tid: row for tid, row in bindings.get("bindings", {}).items()
+                if not (isinstance(row, dict) and str(row.get("project_id") or "") == pid)
+            }
+            if len(pruned) != len(bindings.get("bindings", {})):
+                bindings["bindings"] = pruned
+                _save_bindings(drive_root, bindings)
+        log.info("Project unregistered: %s (folder and memory store untouched)", pid)
+    return removed
 
 
 def touch_project(drive_root: Any, project_id: str) -> None:
@@ -398,6 +441,11 @@ def projects_summary(drive_root: Any, *, limit: int = 50) -> List[Dict[str, Any]
 
     def _has_thread_activity(project: Dict[str, Any]) -> bool:
         pid = str(project.get("id") or "")
+        # v6.59.0: a project the OWNER explicitly created in the UI is always shown —
+        # the activity filter exists to hide junk reconcile rows, not a fresh project
+        # the owner just made (which has no chat rows yet by definition).
+        if str(project.get("origin") or "") == "owner_ui":
+            return True
         try:
             cid = int(project.get("chat_id") or 0)
         except (TypeError, ValueError):
@@ -428,6 +476,7 @@ def projects_summary(drive_root: Any, *, limit: int = 50) -> List[Dict[str, Any]
             "name": project.get("name"),
             "chat_id": project.get("chat_id"),
             "working_dir": project.get("working_dir") or "",
+            "provenance": project.get("provenance") or "",
             "last_active_at": project.get("last_active_at") or "",
             "has_thread_activity": _has_thread_activity(project),
         })
@@ -438,6 +487,7 @@ __all__ = [
     "all_task_bindings",
     "bind_task_to_project",
     "create_project",
+    "delete_project",
     "ensure_project_workspace",
     "get_project",
     "list_projects",

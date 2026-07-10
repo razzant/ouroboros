@@ -1,0 +1,31 @@
+{
+  "OPENROUTER_API_KEY": "",
+  "OPENAI_API_KEY": "",
+  "ANTHROPIC_API_KEY": "",
+  "OUROBOROS_MODEL": "anthropic/claude-sonnet-4.6",
+  "OUROBOROS_MODEL_HEAVY": "anthropic/claude-sonnet-4.6",
+  "OUROBOROS_MODEL_LIGHT": "anthropic/claude-sonnet-4.6",
+  "OUROBOROS_MODEL_FALLBACKS": "anthropic/claude-sonnet-4.6",
+  "OUROBOROS_REVIEW_MODELS": "anthropic/claude-sonnet-4.6,anthropic/claude-sonnet-4.6,anthropic/claude-sonnet-4.6",
+  "OUROBOROS_SCOPE_REVIEW_MODEL": "anthropic/claude-sonnet-4.6",
+  "OUROBOROS_SCOPE_REVIEW_MODELS": "anthropic/claude-sonnet-4.6",
+  "OUROBOROS_REVIEW_ENFORCEMENT": "blocking",
+  "OUROBOROS_RUNTIME_MODE": "advanced",
+  "OUROBOROS_SAFETY_MODE": "light",
+  "OUROBOROS_MAX_WORKERS": 4,
+  "OUROBOROS_POST_TASK_EVOLUTION": "false",
+  "OUROBOROS_EFFORT_TASK": "low",
+  "OUROBOROS_OR_PROVIDER": "resilience",
+  "TOTAL_BUDGET": 60.0,
+  "CLBENCH_SOLVE_DISABLED_TOOLS": [
+    "vlm_query",
+    "analyze_screenshot",
+    "view_image",
+    "browse_page",
+    "browser_action",
+    "web_search",
+    "youtube_transcript",
+    "send_photo",
+    "claude_code_edit"
+  ]
+}

@@ -6,7 +6,7 @@ TypedDicts document payloads, not runtime validation. Keep discriminating
 
 from __future__ import annotations
 
-from typing import Any, Dict, Optional
+from typing import Any, Dict, List, Optional
 
 try:  # Python 3.11+
     from typing import Literal, NotRequired, Required, TypedDict  # type: ignore[attr-defined]
@@ -220,6 +220,66 @@ class ProjectsChangedOutbound(TypedDict):
     chat_id: NotRequired[int]
 
 
+class ProjectCreateRequest(TypedDict, total=False):
+    """POST /api/projects body (v6.59.0). ONE source: ``path`` (attach an existing
+    owner folder; optional ``init_git`` attach-snapshot commit — never auto-init),
+    ``git_url`` (server-side clone, typed ``auth_required`` on credential failure),
+    ``with_workspace`` (genesis provision), or none (file-less project).
+    ``name``-only creation derives a filesystem id."""
+
+    id: str
+    name: str
+    path: str
+    init_git: bool
+    git_url: str
+    with_workspace: bool
+
+
+class ProjectEntry(TypedDict, total=False):
+    """A registry project row as returned by the projects endpoints. ``provenance``
+    (attached|cloned|genesis|none) and ``clone_url`` are historical facts;
+    operational git data is always read live from ``.git``."""
+
+    id: str
+    name: str
+    chat_id: int
+    working_dir: str
+    provenance: str
+    clone_url: str
+    trusted_at: str
+    origin: str
+    created_at: str
+    last_active_at: str
+
+
+class ProjectDeleteResponse(TypedDict):
+    """POST /api/projects/{project_id}/delete — unregister + unbind; the working
+    folder and per-project memory store are never touched."""
+
+    ok: bool
+    project_id: str
+    folder_untouched: bool
+
+
+class FsDirsEntry(TypedDict):
+    name: str
+    path: str
+    is_git: bool
+
+
+class FsDirsResponse(TypedDict):
+    """GET /api/fs/dirs — owner-facing directory browser for the New Project attach
+    picker (server-side; works in web/Docker). Directories only, confined to the
+    home tree, never file contents. ``truncated`` is True when the directory holds
+    more children than the 500-entry cap (no silent truncation)."""
+
+    path: str
+    parent: str
+    home: str
+    dirs: List[FsDirsEntry]
+    truncated: bool
+
+
 class TaskNamedOutbound(TypedDict):
     """Outbound notice that the proactive card namer coined a project name for a fresh
     main-chat task (v6.40). The client sets the live card's title to ``suggested_name``;
@@ -292,6 +352,7 @@ class StateResponse(TypedDict):
     supervisor_error: Optional[str]
     runtime_mode: str
     context_mode: str
+    safety_mode: str
     skills_repo_configured: bool
     github_token_configured: bool
     # Multi-project sidebar feed (additive, v6.32.0): compact registered
@@ -356,6 +417,11 @@ class OwnerScopeReviewFloorResponse(TypedDict):
     scope_review_floor: str  # blocking_1m | advisory (v6.34.0, CW1)
 
 
+class OwnerSafetyModeResponse(TypedDict):
+    ok: bool
+    safety_mode: str  # full | light | off (v6.54.3)
+
+
 class SkillGrantResponse(TypedDict, total=False):
     ok: bool
     skill: str
@@ -386,6 +452,7 @@ class UiPreferencesResponse(TypedDict):
     sidebar_width: int  # px; 0 = CSS default (resizable side sections, v6.33.0)
     project_panel_width: int  # px; 0 = CSS default
     project_last_viewed: dict[str, str]  # {project_id: ISO ts}; drives the unread dot (v6.33.0)
+    project_hidden: dict[str, bool]  # {project_id: hidden}; sidebar presentation only (v6.59.0)
 
 
 class GitLogResponse(TypedDict):
@@ -513,6 +580,9 @@ class TaskCreateRequest(_TaskCreateRequestRequired, total=False):
     project_id: str
     attachments: list[Dict[str, Any]]
     acceptance_claims: list[Dict[str, Any]]
+    # v6.60.0: "" | "final_answer_line" — adapter-declared machine-extractable answer
+    # protocol; flows into task_contract.answer_protocol and inherits to subagents.
+    answer_protocol: str
     allowed_resources: Dict[str, Any]
     resource_policy: Dict[str, Any]
     disabled_tools: list[str]
@@ -578,6 +648,7 @@ HTTP_ENDPOINTS: tuple[str, ...] = (
     "POST /api/owner/auto-grant",
     "POST /api/owner/context-mode",
     "POST /api/owner/scope-review-floor",
+    "POST /api/owner/safety-mode",
     "POST /api/owner/capability-ack",
     "POST /api/owner/skills/{skill}/attest-review",
     "GET /api/model-catalog",
@@ -604,6 +675,9 @@ HTTP_ENDPOINTS: tuple[str, ...] = (
     "GET /api/projects",
     "POST /api/projects",
     "POST /api/projects/from-task",
+    "POST /api/projects/{project_id}/update",
+    "POST /api/projects/{project_id}/delete",
+    "GET /api/fs/dirs",
     "GET /api/chat/history",
     "GET /api/logs/{name}",
     "POST /api/chat/upload",
@@ -685,6 +759,11 @@ __all__ = [
     "HeartbeatOutbound",
     "ExtensionLifecycleOutbound",
     "ProjectsChangedOutbound",
+    "ProjectCreateRequest",
+    "ProjectEntry",
+    "ProjectDeleteResponse",
+    "FsDirsEntry",
+    "FsDirsResponse",
     "TaskNamedOutbound",
     "ErrorResponse",
     "StatusResponse",
@@ -698,6 +777,7 @@ __all__ = [
     "OwnerAutoGrantResponse",
     "OwnerContextModeResponse",
     "OwnerScopeReviewFloorResponse",
+    "OwnerSafetyModeResponse",
     "SkillGrantResponse",
     "SkillDeleteResponse",
     "UiPreferencesResponse",

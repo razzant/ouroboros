@@ -336,8 +336,6 @@ def _apply_profile_defaults(args: argparse.Namespace) -> None:
             args.disable_tools = "web_search,claude_code_edit"
         args.main_web_search = "openrouter"
         args.main_web_search_engine = args.main_web_search_engine or "auto"
-        if int(getattr(args, "max_workers", 1) or 1) == 1:
-            args.max_workers = 5
     else:  # strict_ddgs
         if not explicit_disable:
             args.disable_tools = "claude_code_edit"
@@ -373,7 +371,7 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--shared-files-root", default="", help="host dir holding GAIA /shared_files attachments (HF cache validation dir)")
     parser.add_argument("--user-files-root", default="", help="scratch home for the user_files sandbox (security isolation)")
     parser.add_argument("--sample-timeout-sec", type=float, default=7200.0)
-    parser.add_argument("--max-workers", type=int, default=1, help="Ouroboros worker pool size inside the GAIA run (1 = strict baseline; >1 is a disclosed scaffold change)")
+    parser.add_argument("--max-workers", type=int, default=4, help="Ouroboros worker pool size inside the GAIA run (v6.55.0 default 4 — owner decision #16: the old strict 1 starved subagent decomposition; pass 1 explicitly for a strict-baseline ablation)")
     parser.add_argument("--epochs", type=int, default=1, help="pass@N best-of-N epochs (inspect)")
     parser.add_argument("--epochs-reducer", default="", help="inspect epochs reducer, e.g. pass_at_1 / mode")
     parser.add_argument("--dry-run", action="store_true", help="write manifest and planned argv without spending")

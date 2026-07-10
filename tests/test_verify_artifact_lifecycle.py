@@ -35,6 +35,51 @@ def test_probe_traversal_is_unavailable_not_probed(tmp_path):
     assert missing == []  # refused path is never reported as "missing" (no arbitrary host probe)
 
 
+# --- v6.57.0 (1.2): refused_out_of_scope + observation on read-only roots -------
+
+
+def test_observe_refused_out_of_scope_is_not_failure(tmp_path):
+    """An artifact_observation on a path outside the observable roots is a POLICY
+    refusal (refused_out_of_scope), NOT a fail — it must not raise has_failures."""
+    from ouroboros.outcomes import build_verification_ledger
+    from ouroboros.tools.verify import _observe_artifacts
+
+    ctx, _work = _ctx(tmp_path)
+    status, detail = _observe_artifacts(ctx, ["/etc/shadow"])
+    assert status == "refused_out_of_scope"
+    assert "refused" in detail
+
+    led = build_verification_ledger(
+        task={"id": "t", "task_contract": {}},
+        loop_outcome={"outcome_axes": {"execution": {"status": "ok"}, "objective": {"status": "not_evaluated"}}},
+        llm_trace={"tool_calls": [], "verification_receipts": [{
+            "status": "refused_out_of_scope", "contract_kind": "artifact_observation",
+            "paths": ["/etc/shadow"], "summary": "path refused",
+        }]},
+        artifact_bundle={},
+    )
+    assert led["summary"]["has_failures"] is False
+
+
+def test_observe_allows_deliverables_root(tmp_path, monkeypatch):
+    """A parent CAN observe a child's deliverable under the read-only deliverables
+    root (existence only) — an artifact_observation there is OBSERVED, not refused."""
+    from ouroboros.tools.verify import _observe_artifacts
+
+    deliverables = tmp_path / "Deliverables"
+    deliverables.mkdir()
+    (deliverables / "site.html").write_text("<html></html>")
+    monkeypatch.setenv("OUROBOROS_DELIVERABLES_ROOT", str(deliverables))
+
+    ctx, _work = _ctx(tmp_path)
+    status, detail = _observe_artifacts(ctx, [str(deliverables / "site.html")])
+    assert status == "observed"
+    assert "1 artifact" in detail
+
+    missing_status, _ = _observe_artifacts(ctx, [str(deliverables / "nope.html")])
+    assert missing_status == "fail"  # inside an observable root but genuinely missing
+
+
 def test_ledger_carries_artifact_lifecycle_flag_only():
     from ouroboros.outcomes import build_verification_ledger
 

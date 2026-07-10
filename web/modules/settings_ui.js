@@ -152,11 +152,20 @@ function modelCard({ title, copy, inputId, toggleId, defaultValue }) {
     `;
 }
 
+// The owner-facing subset of ouroboros/config.py EFFORT_SCALE: `minimal` is a
+// valid runtime tier (bench adapters / agent-side switch_model use it) but is
+// deliberately NOT offered as an owner slot default — sub-`low` thinking is a
+// per-call tactical choice, not a standing configuration. xhigh/max are clamped
+// to each model's real ceiling at the provider boundary (llm.py), so selecting
+// them never errors on a model that tops out lower — it clamps down with a
+// disclosed usage note.
 const EFFORT_OPTIONS = [
     { value: 'none', label: 'None' },
     { value: 'low', label: 'Low' },
     { value: 'medium', label: 'Medium' },
     { value: 'high', label: 'High' },
+    { value: 'xhigh', label: 'X-High' },
+    { value: 'max', label: 'Max' },
 ];
 
 function effortField({ id, label, defaultValue }) {
@@ -431,6 +440,31 @@ export function renderSettingsPage() {
                                     { value: 'max', label: 'Max' },
                                 ],
                             })}
+                        </div>
+                    </div>
+
+                    <div class="form-section">
+                        <h3>Safety Supervisor</h3>
+                        <div class="settings-section-copy">
+                            Coverage of the LLM safety-supervisor layer (a separate axis from Runtime Mode).
+                            <code>Full</code> is today's behavior &mdash; every guarded tool call gets the LLM safety check.
+                            <code>Light</code> keeps the LLM check only for integration-policy tools; conditional shell/verify fall to the deterministic guards.
+                            <code>Off</code> makes no LLM safety calls. In every mode the deterministic registry sandbox, protected-path policy, and light-mode guards STAY ON &mdash; the LLM supervisor is a layer, not the floor. Lowering coverage emits a durable audit event per waved-through call.
+                            <br><strong>Human controlled:</strong> saved via the owner endpoint (the agent cannot lower its own supervision); applies on the next task.
+                        </div>
+                        <div class="settings-effort-card">
+                            <label>Safety Supervisor</label>
+                            <input id="s-safety-mode" type="hidden" value="full">
+                            ${renderSegmentedField({
+                                target: 's-safety-mode',
+                                title: 'Owner-only. Lowering coverage prompts for confirmation.',
+                                options: [
+                                    { value: 'full', label: 'Full' },
+                                    { value: 'light', label: 'Light' },
+                                    { value: 'off', label: 'Off' },
+                                ],
+                            })}
+                            <div id="s-safety-skip-counter" class="settings-section-copy"></div>
                         </div>
                     </div>
 
