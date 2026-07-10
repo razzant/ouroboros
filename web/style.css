@@ -1364,6 +1364,51 @@ body.resizing-panels { user-select: none; }
     flex-shrink: 0;
 }
 
+/* Round glass "jump to newest" button — floats directly above the Send button
+   (right edges aligned), shown only when the user has scrolled up away from the
+   bottom. Anchored inside .chat-send-group (its positioning context) so it glues
+   to Send on desktop and mobile alike, regardless of textarea growth. */
+.chat-scroll-bottom-btn {
+    position: absolute;
+    right: 0;
+    bottom: calc(100% + 12px);
+    z-index: 6;
+    width: 42px;
+    height: 42px;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    border-radius: 50%;
+    color: var(--accent-light);
+    background: rgba(26, 21, 32, 0.72);
+    border: 1px solid rgba(201, 53, 69, 0.42);
+    backdrop-filter: blur(12px);
+    -webkit-backdrop-filter: blur(12px);
+    box-shadow: 0 8px 22px rgba(0, 0, 0, 0.32), inset 0 1px 0 rgba(255, 255, 255, 0.05);
+    cursor: pointer;
+    opacity: 0;
+    transform: translateY(8px) scale(0.9);
+    pointer-events: none;
+    transition: opacity 0.18s ease, transform 0.18s ease, border-color 0.18s ease, background 0.18s ease, color 0.18s ease;
+}
+.chat-scroll-bottom-btn.visible {
+    opacity: 1;
+    transform: translateY(0) scale(1);
+    pointer-events: auto;
+}
+.chat-scroll-bottom-btn:hover {
+    color: #fff;
+    background: rgba(201, 53, 69, 0.16);
+    border-color: rgba(232, 93, 111, 0.6);
+    transform: translateY(0) scale(1.05);
+}
+.chat-scroll-bottom-btn:focus-visible {
+    outline: none;
+    border-color: rgba(232, 93, 111, 0.6);
+    box-shadow: 0 0 0 3px rgba(201, 53, 69, 0.18);
+}
+.chat-scroll-bottom-btn svg { display: block; }
+
 .chat-bubble {
     padding: 10px 14px;
     border-radius: var(--radius-lg);
@@ -1421,6 +1466,72 @@ body.resizing-panels { user-select: none; }
 .chat-video {
     max-width: 100%;
     border-radius: var(--radius-sm);
+}
+
+.chat-file {
+    display: inline-flex;
+    align-items: center;
+    gap: 6px;
+    max-width: 100%;
+    padding: 8px 12px;
+    border-radius: var(--radius-sm);
+    background: rgba(201, 53, 69, 0.12);
+    border: 1px solid rgba(255, 255, 255, 0.08);
+    color: var(--text-primary);
+    font: inherit;
+    text-align: left;
+    text-decoration: none;
+    word-break: break-all;
+    cursor: pointer;
+}
+
+button.chat-file:hover,
+.chat-file:hover {
+    border-color: rgba(232, 93, 111, 0.4);
+}
+
+.chat-file-empty {
+    opacity: 0.6;
+    cursor: default;
+}
+
+.chat-file-row {
+    display: inline-flex;
+    align-items: center;
+    gap: 8px;
+    max-width: 100%;
+}
+
+.chat-file-download {
+    flex: 0 0 auto;
+    width: 30px;
+    height: 30px;
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    border-radius: 50%;
+    color: var(--accent-light);
+    background: rgba(26, 21, 32, 0.72);
+    border: 1px solid rgba(201, 53, 69, 0.42);
+    backdrop-filter: blur(12px);
+    -webkit-backdrop-filter: blur(12px);
+    font-size: 15px;
+    line-height: 1;
+    cursor: pointer;
+    transition: color 0.18s ease, background 0.18s ease, border-color 0.18s ease, transform 0.18s ease;
+}
+
+.chat-file-download:hover {
+    color: #fff;
+    background: rgba(201, 53, 69, 0.16);
+    border-color: rgba(232, 93, 111, 0.6);
+    transform: scale(1.05);
+}
+
+.chat-file-download:focus-visible {
+    outline: none;
+    border-color: rgba(232, 93, 111, 0.6);
+    box-shadow: 0 0 0 3px rgba(201, 53, 69, 0.18);
 }
 
 .chat-bubble.user .message { color: var(--user-text); }
@@ -2427,6 +2538,9 @@ textarea.chat-input::placeholder { color: var(--text-muted); }
     align-items: center;
     gap: 0;
     height: var(--composer-control-height);
+    /* Positioning context for the round "jump to newest" button, which floats
+       directly above the Send button (right edges aligned). */
+    position: relative;
 }
 
 .chat-send-group[data-busy="1"] {

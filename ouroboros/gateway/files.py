@@ -90,6 +90,25 @@ def _get_file_browser_root(request: Request) -> pathlib.Path:
     raise ValueError(f"Configured file browser root does not exist: {root_dir}")
 
 
+def download_url_for_local_file(abs_path: pathlib.Path | str) -> str:
+    """Return a loopback ``/api/files/download`` URL for a local file that lives
+    inside the file-browser root, else ``""``.
+
+    Request-less companion to ``_get_file_browser_root`` (used by chat file
+    delivery, which has no HTTP request in hand). The path is resolved first so
+    a symlink whose target escapes the root cannot leak. The returned URL uses a
+    root-relative, URL-quoted path because ``safe_relpath`` lstrips a leading
+    ``/`` (an absolute ``path=`` would resolve under the root, not to the file).
+    """
+    raw = _configured_root_text()
+    root = _normalize_root(raw) if raw and _normalize_root(raw).is_dir() else pathlib.Path.home().resolve()
+    try:
+        rel = pathlib.Path(abs_path).expanduser().resolve(strict=False).relative_to(root)
+    except (ValueError, OSError):
+        return ""
+    return "/api/files/download?path=" + quote(str(rel))
+
+
 def _resolve_target(request: Request, rel_path: str) -> tuple[pathlib.Path, pathlib.Path, pathlib.Path]:
     root_dir = _get_file_browser_root(request)
     requested = root_dir / safe_relpath(rel_path or ".")

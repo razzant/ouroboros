@@ -29,7 +29,7 @@ CORE_TOOL_NAMES: frozenset[str] = frozenset({
     "web_search",
     "browse_page", "browser_action", "analyze_screenshot", "view_image",
     "ocr_pdf", "youtube_transcript", "extract_video_frames",
-    "send_user_message", "send_photo", "send_video",
+    "send_user_message", "send_photo", "send_video", "send_file",
     "switch_model",
     "request_restart", "promote_to_stable",
     "advisory_review", "review_status", "task_acceptance_review", "verify_and_record",

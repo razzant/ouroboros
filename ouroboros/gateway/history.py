@@ -144,6 +144,63 @@ def make_cost_breakdown_endpoint(data_dir: pathlib.Path):
     return api_cost_breakdown
 
 
+def _read_chat_history_entries(live, adir, want, row_matches_thread):
+    """Read the live chat.jsonl plus a bounded, newest-first archive backfill.
+
+    The live chat.jsonl is rotated to ``archive/chat_<ts>.jsonl`` once it crosses
+    ~800KB. Reading only the live file would erase the visible conversation right
+    after a rotation (and any file bubble delivered before it). Backfill from the
+    most recent archives — newest first, until we have enough human rows to satisfy
+    ``want``, bounded to a few files — then reassemble chronologically (oldest
+    archive -> live). ``row_matches_thread`` is the endpoint's A2A + chat_id/
+    project-thread filter, threaded in so a human row counts toward the backfill
+    quota only if it would survive the same filter applied in the render loop —
+    otherwise a project-thread request whose live file already holds ``want``
+    unrelated main-chat rows would skip the archives and still lose the rotated
+    project messages/documents this backfill exists to recover.
+    """
+    live_entries = list(iter_jsonl_objects(live))
+
+    def _counts_toward_thread(e):
+        if not isinstance(e, dict):
+            return False
+        if str(e.get("direction", "")).lower() not in ("in", "out"):
+            return False
+        if is_a2a_chat_id(e.get("chat_id", 1)):
+            return False
+        try:
+            ec = int(e.get("chat_id", 1) or 1)
+        except (TypeError, ValueError):
+            ec = 1
+        return row_matches_thread(ec, e)
+
+    def _human_count(entries):
+        return sum(1 for e in entries if _counts_toward_thread(e))
+
+    collected = _human_count(live_entries)
+    try:
+        archives = sorted(
+            adir.glob("chat_*.jsonl"), key=lambda p: p.name, reverse=True
+        )
+    except Exception:
+        archives = []
+    chosen: list = []
+    for ap in archives:
+        if collected >= want or len(chosen) >= 3:
+            break
+        try:
+            aents = list(iter_jsonl_objects(ap))
+        except Exception:
+            continue
+        chosen.append(aents)
+        collected += _human_count(aents)
+    ordered: list = []
+    for aents in reversed(chosen):  # oldest archive first
+        ordered.extend(aents)
+    ordered.extend(live_entries)
+    return ordered
+
+
 def make_chat_history_endpoint(data_dir: pathlib.Path):
     async def api_chat_history(request: Request) -> JSONResponse:
         """Return recent chat, system, and progress messages merged chronologically."""
@@ -217,10 +274,14 @@ def make_chat_history_endpoint(data_dir: pathlib.Path):
         combined: list = []
 
         chat_path = data_dir / "logs" / "chat.jsonl"
+        archive_dir = data_dir / "archive"
         try:
-            # WS4: parse the jsonl off the event loop (file read + json decode) so a
-            # large history can't block the loop / delay WS broadcasts on reconnect.
-            _chat_entries = await asyncio.to_thread(lambda p=chat_path: list(iter_jsonl_objects(p)))
+            # WS4: parse the jsonl off the event loop so a large history can't block
+            # the loop. Rotation-aware archive backfill lives in the module-level
+            # _read_chat_history_entries helper (endpoint's thread filter threaded in).
+            _chat_entries = await asyncio.to_thread(
+                _read_chat_history_entries, chat_path, archive_dir, n_human, _row_matches_thread
+            )
             for entry in _chat_entries:
                 # Skip A2A virtual chat_ids so A2A task traffic does not appear in human chat history.
                 if is_a2a_chat_id(entry.get("chat_id", 1)):
@@ -249,6 +310,15 @@ def make_chat_history_endpoint(data_dir: pathlib.Path):
                     "task_id": str(entry.get("task_id", "")),
                     "telegram_chat_id": int(entry.get("telegram_chat_id") or 0),
                 }
+                # Delivered document rows carry lightweight media metadata (no
+                # base64); surface a msg_type + download_url so the frontend
+                # rebuilds the file bubble on reload instead of a bare text line.
+                if entry.get("type") == "document":
+                    rec["msg_type"] = "document"
+                    rec["filename"] = str(entry.get("filename") or "file")
+                    rec["mime"] = str(entry.get("mime") or "application/octet-stream")
+                    rec["download_url"] = str(entry.get("download_url") or "")
+                    rec["caption"] = str(entry.get("caption") or "")
                 # Pass task metadata for task_summary entries so the frontend can decide whether to show a live card.
                 if entry.get("type") == "task_summary":
                     if "tool_calls" in entry:

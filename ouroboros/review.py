@@ -96,7 +96,12 @@ MAX_FUNCTION_LINES = 300
 # workspace_admission SSOT (validator/room-resolver/preflight-cap/workspace-block),
 # coop_checkpoint pair, project_sources attach/clone, the projects update/delete/
 # fs-dirs gateway handlers, and registry provenance/delete helpers; 3740 -> 3775.
-# unix_computer_use remote backends (OSWorld HTTP / SSH macOS, PR #64): +~29
+# v6.62.0 outbound chat file delivery (ported from the 6.57.0–6.58.7 line): +5 functions
+# — _detect_document_mime + _send_file (tools/core.py), send_document (message_bus.py),
+# _handle_send_document (events.py), download_url_for_local_file (gateway/files.py) for the
+# send_file capability + WKWebView-safe download. Measured merged count is 3770 — it fits
+# within the existing 3775 cap (5 headroom), so no bump is needed.
+# v6.63.0 unix_computer_use remote backends (OSWorld HTTP / SSH macOS, PR #64): +~29
 # functions in skills/unix_computer_use/plugin.py (connection registry, remote
 # screenshot/input/exec translation, fail-closed guards) — deliberate feature
 # growth for the OSWorld cu_bridge runner; 3775 -> 3805 with the usual headroom.

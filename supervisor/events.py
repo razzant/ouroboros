@@ -2172,6 +2172,51 @@ def _handle_send_video(evt: Dict[str, Any], ctx: Any) -> None:
         )
 
 
+def _handle_send_document(evt: Dict[str, Any], ctx: Any) -> None:
+    """Send an arbitrary document/file to the owner's chat."""
+    import base64 as b64mod
+    try:
+        # Binding precedence (matches the sibling media handlers): a post-hoc
+        # bound task's file routes to its project panel, not the old main thread.
+        bound_chat = _bound_project_chat_id(
+            ctx, evt.get("task_id"), evt.get("parent_task_id"), evt.get("root_task_id")
+        )
+        raw_chat_id = evt.get("chat_id")
+        if not bound_chat and (raw_chat_id is None or raw_chat_id == ""):
+            return
+        chat_id = bound_chat or int(raw_chat_id)
+        file_b64 = str(evt.get("file_base64") or "")
+        caption = str(evt.get("caption") or "")
+        filename = str(evt.get("filename") or "file")
+        mime = str(evt.get("mime") or "application/octet-stream")
+        download_url = str(evt.get("download_url") or "")
+        task_id = str(evt.get("task_id") or "")
+        if not file_b64:
+            return
+        file_bytes = b64mod.b64decode(file_b64)
+        ok, err = ctx.bridge.send_document(
+            chat_id, file_bytes, filename=filename, caption=caption, mime=mime,
+            download_url=download_url, task_id=task_id,
+        )
+        if not ok:
+            ctx.append_jsonl(
+                ctx.DRIVE_ROOT / "logs" / "supervisor.jsonl",
+                {
+                    "ts": utc_now_iso(),
+                    "type": "send_document_error",
+                    "chat_id": chat_id, "error": err,
+                },
+            )
+    except Exception as e:
+        ctx.append_jsonl(
+            ctx.DRIVE_ROOT / "logs" / "supervisor.jsonl",
+            {
+                "ts": utc_now_iso(),
+                "type": "send_document_event_error", "error": repr(e),
+            },
+        )
+
+
 def _handle_owner_message_injected(evt: Dict[str, Any], ctx: Any) -> None:
     """Log owner injections so health checks can detect duplicate processing."""
     try:
@@ -2246,6 +2291,7 @@ EVENT_HANDLERS = {
     "cancel_task": _handle_cancel_task,
     "send_photo": _handle_send_photo,
     "send_video": _handle_send_video,
+    "send_document": _handle_send_document,
     "toggle_evolution": _handle_toggle_evolution,
     "toggle_consciousness": _handle_toggle_consciousness,
     "owner_message_injected": _handle_owner_message_injected,

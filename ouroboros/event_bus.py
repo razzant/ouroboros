@@ -16,8 +16,9 @@ CHAT_OUTBOUND = "chat.outbound"
 CHAT_TYPING = "chat.typing"
 CHAT_PHOTO = "chat.photo"
 CHAT_VIDEO = "chat.video"
+CHAT_DOCUMENT = "chat.document"
 SKILL_LIFECYCLE = "skill.lifecycle"
-VALID_TOPICS = frozenset({CHAT_OUTBOUND, CHAT_TYPING, CHAT_PHOTO, CHAT_VIDEO, SKILL_LIFECYCLE})
+VALID_TOPICS = frozenset({CHAT_OUTBOUND, CHAT_TYPING, CHAT_PHOTO, CHAT_VIDEO, CHAT_DOCUMENT, SKILL_LIFECYCLE})
 
 
 @dataclass
@@ -107,6 +108,7 @@ def publish_event(topic: str, data: Dict[str, Any]) -> None:
 
 
 __all__ = [
+    "CHAT_DOCUMENT",
     "CHAT_OUTBOUND",
     "CHAT_PHOTO",
     "CHAT_TYPING",
