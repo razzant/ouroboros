@@ -1156,8 +1156,8 @@ Browser-facing backend work goes through `ouroboros/gateway/`.
 ### Pytest marker lanes
 
 Default local pytest excludes costly or environment-dependent lanes:
-`integration`, `browser`, `ui_browser`, `ui_browser_docker`, and
-`portable_detail`. CI opts into them explicitly:
+`integration`, `browser`, `ui_browser`, `ui_browser_docker`,
+`portable_detail`, and `skill_smoke`. CI opts into them explicitly:
 
 - `integration` runs real provider checks, including Cloud.ru when
   `CLOUDRU_FOUNDATION_MODELS_API_KEY` is configured and GigaChat when
@@ -1168,6 +1168,18 @@ Default local pytest excludes costly or environment-dependent lanes:
   skip cleanly when Docker is unavailable locally.
 - `portable_detail` covers build/portable artifact invariants and also runs
   inside Docker in the manual/tag CI tier.
+- `skill_smoke` installs the nine pinned official OuroborosHub skills
+  (list in `tests/test_skill_smoke_official.py`) from the LIVE catalog and
+  validates payload/sha/provenance, manifest contract, offline
+  `skill_preflight`, real pip isolated deps, and keyless command probes. It
+  runs as the dedicated 3-OS `skill-smoke` CI job (stable promote / manual /
+  `v*` tags) in ONE serial pytest invocation with real network + real pip:
+  red means investigate (our runtime or the published catalog broke) — there
+  is deliberately no fallback-skip. Its tests must NOT carry the `serial`
+  marker or join `_SERIAL_TEST_FILES`: the `and not skill_smoke` markexprs
+  in quick/full-test are the barrier that keeps the lane out of those
+  passes, and the no-serial rule keeps each test's lane assignment single
+  and unambiguous (defense-in-depth on top of that barrier).
 
 When adding a new opt-in lane, register the marker in `pyproject.toml`, add
 a collect-only zero-test guard in CI, and keep the default local addopts

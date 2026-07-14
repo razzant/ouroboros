@@ -695,7 +695,7 @@ class TestMacOSSigning:
             for line in release_block.splitlines()
             if line.strip().startswith("needs:")
         )
-        for job in ("marker-guards", "ui-smoke", "docker-ui-smoke", "docker-portable-test"):
+        for job in ("marker-guards", "ui-smoke", "docker-ui-smoke", "docker-portable-test", "skill-smoke"):
             assert job in needs_line, f"release job must wait for {job}"
         assert "OUROBOROS_EXPECT_BROWSER_ENGINES: chromium,webkit" in src
         assert "Run Docker browser tools Chromium/WebKit smoke" in src

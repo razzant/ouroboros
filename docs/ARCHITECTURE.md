@@ -226,7 +226,7 @@ server.py (Starlette+uvicorn) ← HTTP + WebSocket on configurable host:port (de
       port sweeps, Windows Job Objects) are unchanged complements.
 
 # Build & CI (not part of runtime)
-.github/workflows/ci.yml     ← Four-tier CI (quick / full / integration / build+release)
+.github/workflows/ci.yml     ← Five-tier CI (quick / full / integration / skill smoke / build+release)
 build.sh                      ← macOS build (PyInstaller → .dmg)
 build_linux.sh                ← Linux build (PyInstaller → .tar.gz)
 build_windows.ps1             ← Windows build (PyInstaller → .zip)
@@ -1715,14 +1715,15 @@ Claude Runtime Status appears when an Anthropic key exists or when backend/runti
 
 ## 8.1 CI/CD Pipeline (`.github/workflows/ci.yml`)
 
-CI has four tiers:
+CI has five tiers:
 
 1. Quick tests on push to `ouroboros` for code/web/build paths.
 2. Full matrix on stable/manual/tag.
 3. Integration tests on main/ouroboros/stable/manual/tag when provider secrets exist.
-4. Build+release on `v*` tags: PyInstaller artifacts for macOS/Linux/Windows and GitHub Release.
+4. Official-skill install smoke on stable/manual/tag: the `skill_smoke` lane installs the nine pinned official OuroborosHub skills (list in `tests/test_skill_smoke_official.py`) from the live catalog on all three OSes and validates payload/sha/provenance, manifest contract, offline preflight, real pip isolated deps, and keyless command probes; it gates release tags via the `release` job's `needs:`.
+5. Build+release on `v*` tags: PyInstaller artifacts for macOS/Linux/Windows and GitHub Release.
 
-Rationale: normal self-modification needs fast feedback, but release tags must prove cross-platform packaging. Tag triggers are independent from branch path filters so release artifacts are always built.
+Rationale: normal self-modification needs fast feedback, but release tags must prove cross-platform packaging AND that the live official-skill catalog still installs on this runtime (gating a release on live external services is a deliberate owner trade-off, documented in the `skill-smoke` job comment). Tag triggers are independent from branch path filters so release artifacts are always built.
 
 ### Build scripts
 

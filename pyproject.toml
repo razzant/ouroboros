@@ -77,7 +77,7 @@ testpaths = ["tests"]
 python_files = ["test_*.py"]
 python_functions = ["test_*"]
 # Default local pytest excludes token-burning integration/browser suites.
-addopts = "-q --tb=short -m 'not integration and not browser and not ui_browser and not ui_browser_docker and not portable_detail'"
+addopts = "-q --tb=short -m 'not integration and not browser and not ui_browser and not ui_browser_docker and not portable_detail and not skill_smoke'"
 markers = [
     "integration: requires real provider API keys (OPENROUTER_API_KEY / OPENAI_API_KEY / ANTHROPIC_API_KEY / CLOUDRU_FOUNDATION_MODELS_API_KEY); excluded from default local runs, opt in via `pytest -m integration`",
     "browser: launches real Playwright Chromium; excluded from default local runs, opt in via `pytest -m browser`",
@@ -85,6 +85,7 @@ markers = [
     "ui_browser_docker: launches UI smoke checks against Docker runtime; excluded from default local runs",
     "portable_detail: portable/build artifact detail checks; excluded from default local runs",
     "serial: real subprocess / real port / mutable module-global test — run in a serial pass, excluded from the `-n auto` parallel pass via `-m 'not serial'` (see .github/workflows/ci.yml)",
+    "skill_smoke: real-network OuroborosHub official-skill install smoke; excluded from default local runs, opt in via `pytest -m skill_smoke` (canonical lane description: docs/DEVELOPMENT.md 'Pytest marker lanes')",
 ]
 
 [tool.setuptools]

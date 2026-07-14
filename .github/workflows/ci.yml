@@ -1,8 +1,9 @@
-# Ouroboros CI — Four-tier cross-platform testing and release pipeline
+# Ouroboros CI — Five-tier cross-platform testing and release pipeline
 #
 # Tier 1 (Quick):       Push to ouroboros (code paths)                                → Ubuntu-only tests (~1 min)
 # Tier 2 (Full):        Push to ouroboros-stable / manual / tag                       → Full 3-OS matrix          (~5 min)
 # Tier 2.5 (Integration): Push to main / ouroboros / ouroboros-stable / manual / tag  → Real-provider tests       (~2 min)
+# Tier 2.6 (Skill smoke): Push to ouroboros-stable / manual / tag                     → LIVE OuroborosHub official-skill install smoke (3-OS, ~5 min)
 # Tier 3 (Build+Release): Tag v*                                                       → PyInstaller + GitHub Release (~15 min)
 #
 # Tier 2.5 requires OPENROUTER_API_KEY / OPENAI_API_KEY / ANTHROPIC_API_KEY /
@@ -68,9 +69,9 @@ jobs:
       # `not integration and not browser ...` exclusions must be repeated here, then ANDed with
       # the serial split. --timeout guards against a hung test blocking the whole job.
       - name: Run tests (parallel — excludes the costly marker lanes AND the serial real-process suites)
-        run: python -m pytest tests/ -m "not serial and not integration and not browser and not ui_browser and not ui_browser_docker and not portable_detail" -n auto --dist loadscope --max-worker-restart=0 --timeout=300 --timeout-method=thread -q --tb=short
+        run: python -m pytest tests/ -m "not serial and not integration and not browser and not ui_browser and not ui_browser_docker and not portable_detail and not skill_smoke" -n auto --dist loadscope --max-worker-restart=0 --timeout=300 --timeout-method=thread -q --tb=short
       - name: Run tests (serial — real subprocess/port/global-state suites that flake under -n)
-        run: python -m pytest tests/ -m "serial and not integration and not browser and not ui_browser and not ui_browser_docker and not portable_detail" -q --tb=short
+        run: python -m pytest tests/ -m "serial and not integration and not browser and not ui_browser and not ui_browser_docker and not portable_detail and not skill_smoke" -q --tb=short
       - name: Guard extracted transport imports stay out of core
         run: python -m pytest tests/test_no_core_a2a_telegram_imports.py -q
 
@@ -100,9 +101,9 @@ jobs:
       # A command-line `-m` REPLACES the pyproject addopts markexpr, so repeat the default
       # marker-lane exclusions and AND them with the serial split. --timeout guards hangs.
       - name: Run tests (parallel — excludes the costly marker lanes AND the serial real-process suites)
-        run: python -m pytest tests/ -m "not serial and not integration and not browser and not ui_browser and not ui_browser_docker and not portable_detail" -n auto --dist loadscope --max-worker-restart=0 --timeout=300 --timeout-method=thread -q --tb=short
+        run: python -m pytest tests/ -m "not serial and not integration and not browser and not ui_browser and not ui_browser_docker and not portable_detail and not skill_smoke" -n auto --dist loadscope --max-worker-restart=0 --timeout=300 --timeout-method=thread -q --tb=short
       - name: Run tests (serial — real subprocess/port/global-state suites that flake under -n)
-        run: python -m pytest tests/ -m "serial and not integration and not browser and not ui_browser and not ui_browser_docker and not portable_detail" -q --tb=short
+        run: python -m pytest tests/ -m "serial and not integration and not browser and not ui_browser and not ui_browser_docker and not portable_detail and not skill_smoke" -q --tb=short
       - name: Guard extracted transport imports stay out of core
         run: python -m pytest tests/test_no_core_a2a_telegram_imports.py -q
 
@@ -144,6 +145,60 @@ jobs:
           CLOUDRU_FOUNDATION_MODELS_BASE_URL: ${{ secrets.CLOUDRU_FOUNDATION_MODELS_BASE_URL }}
         run: python -m pytest tests/test_provider_integration.py -m integration -q --tb=short
 
+  # ──────────────────────────────────────────────────────────────────
+  # Tier 2.6: Official-skill install smoke against the LIVE OuroborosHub
+  # catalog (https://raw.githubusercontent.com/razzant/OuroborosHub/main/
+  # catalog.json). Purpose: catch regressions in OUR runtime — the
+  # ouroboroshub client, skill_loader/manifest contract, skill_preflight,
+  # and the isolated-deps installer — against the real published catalog.
+  # Red = investigate (either our runtime regressed or the hub published a
+  # broken official skill); there is deliberately NO fallback-skip on
+  # network failure, and gating the release on live external services
+  # (GitHub raw, PyPI, DuckDuckGo, wttr.in) is a deliberate owner decision
+  # — the opposite trade-off from integration-test, which is deliberately
+  # NOT a release need. Runs the `skill_smoke` pytest marker
+  # (pyproject.toml) as ONE serial pytest invocation: real network
+  # installs + real pip installs into per-skill isolated envs are not
+  # xdist-safe — never add -n here (the lane's tests are also kept out of
+  # the quick/full markexprs and must never carry the `serial` marker;
+  # see docs/DEVELOPMENT.md "Pytest marker lanes").
+  # ──────────────────────────────────────────────────────────────────
+  skill-smoke:
+    if: |
+      github.ref == 'refs/heads/ouroboros-stable'
+      || github.event_name == 'workflow_dispatch'
+      || startsWith(github.ref, 'refs/tags/v')
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest, macos-latest]
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 30
+    env:
+      # Windows runners default stdout/subprocess decoding to cp1252; live
+      # DDG/wttr error text and pip/venv diagnostics can be non-ASCII, and a
+      # UnicodeEncodeError in a retry/print path would mask the real failure.
+      PYTHONUTF8: "1"
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.10'
+          cache: 'pip'
+      - name: Install dependencies
+        run: |
+          pip install -r requirements.txt
+          pip install pytest pytest-timeout
+      # -s (no capture): the lane logs provenance (catalog digest, skill
+      # versions, resolved pip sets) that must reach the CI log on green AND
+      # red runs — under default capture, session-fixture prints surface only
+      # when the FIRST test fails. A single serial invocation makes capture-off
+      # safe and streams progress inside the 30-min job bound. Per-test
+      # `timeout` marks govern each phase (900s covers the cold a2a venv+pip);
+      # the CLI --timeout is the fallback default for future unmarked tests.
+      - name: Run official-skill install smoke (real network, serial)
+        run: python -m pytest tests/ -m skill_smoke --timeout=900 --timeout-method=thread -q -s --tb=long
+
   marker-guards:
     if: |
       github.event_name == 'workflow_dispatch'
@@ -183,6 +238,14 @@ jobs:
           # serial file as a deliberate canary (rename it -> update this line).
           python -m pytest tests/ --collect-only -m serial -q | tee /tmp/serial-collect.txt
           grep -q "tests/test_workspace_executor.py" /tmp/serial-collect.txt
+      - name: Guard non-empty skill_smoke marker lane
+        run: |
+          set -euo pipefail
+          # Same positive-anchor pattern as the serial guard above: under -q an
+          # empty lane exits 5 through pipefail, and the file grep pins the
+          # canary so a marker refactor cannot silently empty the lane.
+          python -m pytest tests/ --collect-only -m skill_smoke -q | tee /tmp/skill-smoke-collect.txt
+          grep -q "tests/test_skill_smoke_official.py" /tmp/skill-smoke-collect.txt
 
   ui-smoke:
     if: |
@@ -489,7 +552,7 @@ jobs:
   # ──────────────────────────────────────────────────────────────────
   release:
     if: startsWith(github.ref, 'refs/tags/v')
-    needs: [build, release-preflight, marker-guards, ui-smoke, docker-ui-smoke, docker-portable-test]
+    needs: [build, release-preflight, marker-guards, ui-smoke, docker-ui-smoke, docker-portable-test, skill-smoke]
     runs-on: ubuntu-latest
     permissions:
       contents: write
