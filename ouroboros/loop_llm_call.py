@@ -253,6 +253,8 @@ _CONTEXT_OVERFLOW_MARKERS = (
     "exceeds the context",
     "context window",
     "input is too long",
+    "exceeds max length",
+    "max length",
 )
 _NON_RETRYABLE_PROVIDER_MARKERS = {
     "quota_exhausted": (

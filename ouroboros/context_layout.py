@@ -148,9 +148,10 @@ def reference_doc_sections(
         else:
             on_demand.append("docs/DEVELOPMENT.md")
 
-    # README (user-facing) and CHECKLISTS (reviewers load their own copy) are not
-    # inlined in the agent context in any mode.
-    on_demand.extend(["README.md", "docs/CHECKLISTS.md"])
+    # README (user-facing), CHECKLISTS (reviewers load their own copy), and
+    # ARCHITECTURE_REFERENCE (detailed module descriptions) are not inlined in
+    # the agent context in any mode.
+    on_demand.extend(["README.md", "docs/CHECKLISTS.md", "docs/ARCHITECTURE_REFERENCE.md"])
 
     if on_demand:
         listing = ", ".join(f"`{p}`" for p in on_demand)

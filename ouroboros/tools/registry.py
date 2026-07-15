@@ -1226,10 +1226,29 @@ class ToolRegistry:
                     action_schema["enum"] = [name for name in action_enum if name != "evaluate"]
         return {"type": "function", "function": schema}
 
+    def _compact_schema_for_entry(self, entry: ToolEntry) -> Dict[str, Any]:
+        """Return a compact tool schema stub (name + description only, no parameters).
+
+        Used in compact mode to reduce context window consumption by ~20K tokens
+        when the full parameter schemas are not needed for the current round.
+        The full schema is restored lazily via get_schema_by_name() when the LLM
+        actually calls the tool.
+        """
+        schema = entry.schema
+        compact = {
+            "type": "function",
+            "function": {
+                "name": schema.get("name", entry.name),
+                "description": schema.get("description", ""),
+                "parameters": {"type": "object", "properties": {}},
+            },
+        }
+        return compact
+
     def _schemas_for_entry(self, entry: ToolEntry) -> List[Dict[str, Any]]:
         return [self._schema_for_entry(entry)]
 
-    def schemas(self, core_only: bool = False) -> List[Dict[str, Any]]:
+    def schemas(self, core_only: bool = False, compact: bool = False) -> List[Dict[str, Any]]:
         acting_subagent = self._is_acting_subagent()
         acting_grants = self._acting_tool_grants() if acting_subagent else set()
         workspace_mode = bool(getattr(self._ctx, "is_workspace_mode", lambda: False)()) and not acting_subagent
@@ -1252,7 +1271,11 @@ class ToolRegistry:
             if not local_readonly_subagent or entry.name in LOCAL_READONLY_SUBAGENT_TOOL_NAMES
             if not acting_subagent or entry.name in ACTING_SUBAGENT_TOOL_NAMES
             if not ephemeral_turn or entry.name in _EPHEMERAL_ALLOWED_TOOLS  # CW3: default-deny allowlist
-            for schema in self._schemas_for_entry(entry)
+            for schema in (
+                [self._compact_schema_for_entry(entry)]
+                if compact and entry.name not in CORE_TOOL_NAMES and entry.name not in ("list_available_tools", "enable_tools")
+                else self._schemas_for_entry(entry)
+            )
         ]
         if disabled_tools:
             self._capability_omissions.append({"surface": "tools", "reason": "disabled_by_contract", "tools": sorted(disabled_tools)})
@@ -1281,19 +1304,34 @@ class ToolRegistry:
                 meta = getattr(self._ctx, "task_metadata", {})
                 capability_root = pathlib.Path((meta.get("budget_drive_root") if isinstance(meta, dict) else "") or getattr(self._ctx, "budget_drive_root", "") or getattr(self._ctx, "drive_root", "") or ".").resolve(strict=False)
                 with _ext_lock:
-                    extension_schemas = [
-                        {
-                            "type": "function",
-                            "function": {
-                                "name": tool["name"],
-                                "description": tool.get("description", ""),
-                                "parameters": tool.get("schema", {"type": "object", "properties": {}}),
-                            },
-                        }
-                        for tool in _ext_tools.values()
-                        if _ext_is_live(str(tool.get("skill") or ""), capability_root, repo_path=str(tool.get("skills_repo_path") or "") or None)
-                        and (not acting_subagent or tool["name"] in acting_grants)
-                    ]
+                    if compact:
+                        extension_schemas = [
+                            {
+                                "type": "function",
+                                "function": {
+                                    "name": tool["name"],
+                                    "description": tool.get("description", "")[:200],
+                                    "parameters": {"type": "object", "properties": {}},
+                                },
+                            }
+                            for tool in _ext_tools.values()
+                            if _ext_is_live(str(tool.get("skill") or ""), capability_root, repo_path=str(tool.get("skills_repo_path") or "") or None)
+                            and (not acting_subagent or tool["name"] in acting_grants)
+                        ]
+                    else:
+                        extension_schemas = [
+                            {
+                                "type": "function",
+                                "function": {
+                                    "name": tool["name"],
+                                    "description": tool.get("description", ""),
+                                    "parameters": tool.get("schema", {"type": "object", "properties": {}}),
+                                },
+                            }
+                            for tool in _ext_tools.values()
+                            if _ext_is_live(str(tool.get("skill") or ""), capability_root, repo_path=str(tool.get("skills_repo_path") or "") or None)
+                            and (not acting_subagent or tool["name"] in acting_grants)
+                        ]
             except Exception as exc:
                 self._capability_omissions.append({"surface": "extensions", "reason": "discovery_error", "error": f"{type(exc).__name__}: {exc}"})
 
@@ -1309,14 +1347,24 @@ class ToolRegistry:
                     from ouroboros.mcp_client import ensure_configured_from_settings as _mcp_ensure_configured, get_manager as _mcp_get_manager
                     _mcp_ensure_configured(refresh=True)
                     _mgr = _mcp_get_manager()
-                    mcp_schemas = [
-                        {
-                            "type": "function",
-                            "function": {"name": tool["name"], "description": tool.get("description", ""), "parameters": tool.get("schema", {"type": "object", "properties": {}})},
-                        }
-                        for tool in _mgr.list_tools_for_registry()
-                        if not acting_subagent or tool["name"] in acting_grants
-                    ]
+                    if compact:
+                        mcp_schemas = [
+                            {
+                                "type": "function",
+                                "function": {"name": tool["name"], "description": tool.get("description", "")[:200], "parameters": {"type": "object", "properties": {}}},
+                            }
+                            for tool in _mgr.list_tools_for_registry()
+                            if not acting_subagent or tool["name"] in acting_grants
+                        ]
+                    else:
+                        mcp_schemas = [
+                            {
+                                "type": "function",
+                                "function": {"name": tool["name"], "description": tool.get("description", ""), "parameters": tool.get("schema", {"type": "object", "properties": {}})},
+                            }
+                            for tool in _mgr.list_tools_for_registry()
+                            if not acting_subagent or tool["name"] in acting_grants
+                        ]
                     # D1: an enabled+configured server returning zero tools WITHOUT
                     # raising (unreachable/slow/auth-failed) is otherwise silent. Make
                     # the reason visible so the model/owner learns WHY an expected MCP
@@ -1358,7 +1406,10 @@ class ToolRegistry:
                 or e.name in CORE_TOOL_NAMES
                 or e.name in ("list_available_tools", "enable_tools")
             ):
-                result.extend(self._schemas_for_entry(e))
+                if compact:
+                    result.append(self._compact_schema_for_entry(e))
+                else:
+                    result.extend(self._schemas_for_entry(e))
         ext = extension_schemas
         if disabled_tools:
             ext = [s for s in ext if (s.get("function", {}) or {}).get("name") not in disabled_tools]

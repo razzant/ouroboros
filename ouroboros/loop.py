@@ -20,7 +20,7 @@ from ouroboros.observability import new_call_id, persist_call
 from ouroboros.tool_policy import initial_tool_schemas, list_non_core_tools
 from ouroboros.tools.registry import ToolRegistry
 from ouroboros.context import build_user_content, estimate_context_prompt_tokens
-from ouroboros.context_budget import EMERGENCY_COMPACTION_CHARS, LOW_EMERGENCY_COMPACTION_CHARS
+from ouroboros.context_budget import EMERGENCY_COMPACTION_CHARS, LOW_EMERGENCY_COMPACTION_CHARS, PROACTIVE_COMPACTION_CHARS
 from ouroboros.context_compaction import _tool_round_spans, compact_tool_history_llm
 from ouroboros.deadline_utils import parse_deadline_ts, utc_now
 from ouroboros.utils import estimate_tokens
@@ -2220,6 +2220,28 @@ def _run_round_compaction(
         ctx.emit_progress("⚠️ Emergency compaction skipped: forensic checkpoint could not be persisted.")
         return messages, None
 
+    # Proactive compaction: fire before emergency when context is growing large
+    # in max mode with a known window. Keeps 70% of recent history to avoid
+    # emergency overflow on the next round.
+    if (
+        ctx.active_context_mode == "max"
+        and not ctx.checkpoint_injected
+        and _estimate_messages_chars(messages) > PROACTIVE_COMPACTION_CHARS
+    ):
+        span_count = len(_tool_round_spans(messages))
+        proactive_keep_recent = min(50, max(6, int(span_count * 0.7)), max(1, span_count - 1))
+        if _persist_compaction_checkpoint(
+            messages, drive_root=ctx.drive_root, drive_logs=ctx.drive_logs, task_id=ctx.task_id,
+            reason="proactive_context_size", keep_recent=proactive_keep_recent,
+            round_idx=ctx.round_idx, event_queue=ctx.event_queue,
+        ):
+            return compact_tool_history_llm(
+                messages,
+                keep_recent=proactive_keep_recent,
+                drive_root=ctx.drive_root,
+                task_id=ctx.task_id,
+            )
+
     # Routine compaction runs only when local or in low context mode; never on
     # checkpoint rounds. Max mode relies on emergency compaction alone to preserve
     # prompt-cache hits (mode is the SSOT — no per-model small-window override).
@@ -3389,6 +3411,37 @@ def _cleanup_loop_resources(
         log.debug("Failed to cleanup task mailbox", exc_info=True)
 
 
+def _should_use_compact_tools(context_fit_plan=None) -> bool:
+    """Decide whether to use compact tool schemas (name+description only, no parameters).
+
+    Compact mode saves ~20K tokens by omitting parameter schemas from non-core
+    tools. Enabled when:
+    - OUROBOROS_COMPACT_TOOLS=true env var, OR
+    - Context fit plan projects that MAX mode won't fit the known window
+    """
+    if os.environ.get("OUROBOROS_COMPACT_TOOLS", "").lower() in ("true", "1", "yes"):
+        return True
+    if context_fit_plan is None:
+        return False
+    try:
+        known_window = (
+            str(getattr(context_fit_plan, "evidence_status", "") or "") in {"confirmed", "asserted"}
+            and not bool(getattr(context_fit_plan, "evidence_stale", True))
+            and int(getattr(context_fit_plan, "window_tokens", 0) or 0) > 0
+        )
+        if not known_window:
+            return False
+        max_proj = getattr(context_fit_plan, "max_projection", None)
+        if max_proj is None:
+            return False
+        projected = int(getattr(max_proj, "calibrated_tokens", 0) or 0)
+        output_reserve = int(getattr(context_fit_plan, "output_reserve_tokens", 0) or 0)
+        window = int(getattr(context_fit_plan, "window_tokens", 0) or 0)
+        return projected + output_reserve > window
+    except Exception:
+        return False
+
+
 def _resolve_loop_max_rounds() -> int:
     from ouroboros.config import SETTINGS_DEFAULTS
 
@@ -3448,7 +3501,7 @@ def run_llm_loop(
     from ouroboros.tools import tool_discovery as _td
     _td.set_registry(tools)
 
-    tool_schemas = initial_tool_schemas(tools)
+    tool_schemas = initial_tool_schemas(tools, compact=_should_use_compact_tools(context_fit_plan))
     tool_schemas, _enabled_extra_tools = _setup_dynamic_tools(tools, tool_schemas, messages)
     if context_fit_plan is not None and str(
         getattr(context_fit_plan, "preferred_mode", "")
