@@ -199,6 +199,7 @@ export function createChatInstance({
             className: 'chat-page-header',
             actionsHtml: `
                 <div class="chat-header-actions" id="chat-header-actions">
+                    <button class="chat-header-btn danger" type="button" data-chat-command="cancel" title="Cancel active task">Cancel</button>
                     <button class="chat-header-btn" type="button" data-chat-command="restart" title="Restart agent">Restart</button>
                     <button class="chat-header-btn danger" type="button" data-chat-command="panic" title="Stop all workers">Panic</button>
                     <details class="chat-header-more">
@@ -240,6 +241,7 @@ export function createChatInstance({
                     </button>
                     <input type="file" id="chat-file-input" class="chat-file-input-hidden" accept="*/*" multiple>
                     <textarea id="chat-input" placeholder="Message Ouroboros..." rows="1" autocorrect="off" autocapitalize="off" spellcheck="false"></textarea>
+                    <div class="chat-slash-menu" id="chat-slash-menu" style="display:none"></div>
                     <div class="chat-send-group">
                         <button class="chat-scroll-bottom-btn" id="chat-scroll-bottom" type="button" aria-label="Scroll to latest message" title="Scroll to latest message">
                             <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 5v14"/><path d="M19 12l-7 7-7-7"/></svg>
@@ -1323,19 +1325,25 @@ export function createChatInstance({
         const expandable = isLiveLineExpandable(item);
         const expanded = expandable && record.expandedLineKeys.has(item.lineKey);
         const displayHeadline = expanded && item.fullHeadline ? item.fullHeadline : item.headline;
-        // P3: when expanded, prefer the genuinely-full fetched output, then the capped
-        // fullBody, then the preview body. A server-truncated line shows the fetched full
-        // text in a bounded-scroll box so a huge research output never grows the chat.
         const displayBody = expanded ? (item.fetchedFull || item.fullBody || item.body) : item.body;
         const showingFetched = expanded && Boolean(item.fetchedFull);
         const loadingFull = expanded && Boolean(item.truncated && item.fullRef && !item.fetchedFull);
         const isProgressLine = item.phase === 'working' || item.phase === 'thinking';
         const bodyId = `chat-live-line-body-${String(record.groupId || 'task').replace(/[^A-Za-z0-9_-]/g, '-')}-${String(item.lineKey || '').replace(/[^A-Za-z0-9_-]/g, '-')}`;
+        const isToolCard = Boolean(item.toolName);
+        const hasModel = Boolean(item.model);
         const headContent = `
-            <span class="chat-live-line-title">${isProgressLine ? renderMarkdown(displayHeadline) : escapeHtml(displayHeadline)}</span>
+            <span class="chat-live-line-title${isToolCard ? ' chat-live-line-title-tool' : ''}">${isProgressLine ? renderMarkdown(displayHeadline) : escapeHtml(displayHeadline)}</span>
+            ${hasModel ? `<span class="chat-live-line-model">${escapeHtml(item.model)}</span>` : ''}
             <span class="chat-live-line-repeat" ${item.count > 1 ? '' : 'hidden'}>${item.count > 1 ? `${item.count}x` : ''}</span>
             ${item.ts ? `<span class="chat-live-line-time">${escapeHtml(item.ts)}</span>` : ''}
         `;
+        const toolMetaHtml = isToolCard ? `<div class="chat-tool-meta">
+            ${item.toolDuration ? `<span class="chat-tool-duration">⏱ ${escapeHtml(item.toolDuration)}</span>` : ''}
+            ${item.toolStatus ? `<span class="chat-tool-status">${escapeHtml(item.toolStatus)}</span>` : ''}
+            ${item.toolError ? '<span class="chat-tool-error-badge">error</span>' : ''}
+        </div>` : '';
+        const toolArgsHtml = isToolCard && item.toolArgs ? `<div class="chat-tool-args"><code>${escapeHtml(item.toolArgs.length > 300 ? item.toolArgs.slice(0, 300) + '…' : item.toolArgs)}</code></div>` : '';
         const headHtml = expandable
             ? `
                 <button
@@ -1352,11 +1360,13 @@ export function createChatInstance({
             : `<div class="chat-live-line-head">${headContent}</div>`;
         return `
             <div
-                class="chat-live-line ${item.phase || 'working'}${expandable ? ' expandable' : ''}"
+                class="chat-live-line ${item.phase || 'working'}${expandable ? ' expandable' : ''}${isToolCard ? ' tool-card' : ''}${item.toolError ? ' tool-error' : ''}"
                 data-live-line-key="${escapeHtmlAttr(item.lineKey || '')}"
                 data-expanded="${expanded ? '1' : '0'}"
             >
                 ${headHtml}
+                ${toolMetaHtml}
+                ${toolArgsHtml}
                 ${displayBody ? `<div class="chat-live-line-body${showingFetched ? ' chat-live-line-body-full' : ''}" id="${escapeHtmlAttr(bodyId)}">${renderMarkdown(displayBody)}${loadingFull ? '<div class="chat-live-line-loading">Loading full output…</div>' : ''}</div>` : ''}
             </div>
         `;
@@ -2685,6 +2695,35 @@ export function createChatInstance({
     // Arrow wrappers avoid MouseEvent leaking into sendMessage(planMode).
     sendBtn.addEventListener('click', () => sendMessage(swarmArmed()));
     input.addEventListener('keydown', (e) => {
+        const slashMenu = byId('slash-menu');
+        const menuVisible = slashMenu && slashMenu.style.display !== 'none';
+        if (menuVisible) {
+            const items = slashMenu.querySelectorAll('.chat-slash-menu-item');
+            const activeIdx = [...items].findIndex(i => i.classList.contains('active'));
+            if (e.key === 'ArrowDown') {
+                e.preventDefault();
+                items.forEach(i => i.classList.remove('active'));
+                const next = (activeIdx + 1) % items.length;
+                items[next]?.classList.add('active');
+                items[next]?.scrollIntoView({ block: 'nearest' });
+                return;
+            }
+            if (e.key === 'ArrowUp') {
+                e.preventDefault();
+                items.forEach(i => i.classList.remove('active'));
+                const prev = (activeIdx <= 0 ? items.length - 1 : activeIdx - 1);
+                items[prev]?.classList.add('active');
+                items[prev]?.scrollIntoView({ block: 'nearest' });
+                return;
+            }
+            if (e.key === 'Enter' && !e.shiftKey) {
+                e.preventDefault();
+                const sel = activeIdx >= 0 ? items[activeIdx] : items[0];
+                if (sel) { input.value = sel.dataset.cmd + ' '; hideSlashMenu(); }
+                return;
+            }
+            if (e.key === 'Escape') { hideSlashMenu(); return; }
+        }
         if (e.key === 'Enter' && !e.shiftKey) {
             e.preventDefault();
             sendMessage(swarmArmed());
@@ -2696,6 +2735,57 @@ export function createChatInstance({
             restoreInputHistory(1);
         }
     });
+    input.addEventListener('input', () => {
+        const val = input.value;
+        const slashIdx = val.lastIndexOf('/');
+        if (slashIdx >= 0 && slashIdx === val.length - 1) {
+            showSlashMenu('');
+        } else if (slashIdx >= 0 && slashIdx === val.length - 1 - (val.length - slashIdx - 1)
+                   && !val.substring(slashIdx + 1).includes(' ')) {
+            showSlashMenu(val.substring(slashIdx + 1));
+        } else {
+            hideSlashMenu();
+        }
+    });
+    input.addEventListener('blur', () => {
+        setTimeout(hideSlashMenu, 150);
+    });
+
+    const SLASH_COMMANDS = [
+        { cmd: '/cancel',  desc: 'Cancel active task' },
+        { cmd: '/status',  desc: 'Show agent status' },
+        { cmd: '/model',   desc: 'Show/change model' },
+        { cmd: '/restart', desc: 'Restart agent' },
+        { cmd: '/evolve',  desc: 'Toggle evolution mode' },
+        { cmd: '/bg',      desc: 'Toggle background consciousness' },
+        { cmd: '/review',  desc: 'Run review now' },
+    ];
+    function showSlashMenu(filter) {
+        const slashMenu = byId('slash-menu');
+        if (!slashMenu) return;
+        const q = (filter || '').toLowerCase();
+        const matches = SLASH_COMMANDS.filter(c => !q || c.cmd.includes(q));
+        if (!matches.length) { hideSlashMenu(); return; }
+        slashMenu.innerHTML = matches.map((c, i) =>
+            `<div class="chat-slash-menu-item${i === 0 ? ' active' : ''}" data-cmd="${c.cmd}">
+                <span class="cmd-name">${c.cmd}</span>
+                <span class="cmd-desc">${c.desc}</span>
+            </div>`
+        ).join('');
+        slashMenu.style.display = '';
+        slashMenu.querySelectorAll('.chat-slash-menu-item').forEach(el => {
+            el.addEventListener('mousedown', (e) => {
+                e.preventDefault();
+                input.value = el.dataset.cmd + ' ';
+                input.focus();
+                hideSlashMenu();
+            });
+        });
+    }
+    function hideSlashMenu() {
+        const slashMenu = byId('slash-menu');
+        if (slashMenu) slashMenu.style.display = 'none';
+    }
     // Dynamic CSS reserve keeps the absolute composer from covering messages.
     function scrollToBottom() {
         messagesDiv.scrollTop = messagesDiv.scrollHeight;
@@ -2827,6 +2917,10 @@ export function createChatInstance({
         }
         if (command === 'restart') {
             ws.send({ type: 'command', cmd: '/restart' });
+            return;
+        }
+        if (command === 'cancel') {
+            ws.send({ type: 'command', cmd: '/cancel' });
             return;
         }
         if (command === 'panic' && confirm('Kill all workers immediately?')) {

@@ -1238,6 +1238,26 @@ def _process_bridge_updates(bridge, offset: int, ctx: Any) -> int:
             else:
                 bg_status = "running" if ctx.consciousness.is_running else "stopped"
                 ctx.send_with_budget(chat_id, f"🧠 Background consciousness: {bg_status}")
+        elif lowered.startswith("/cancel"):
+            from supervisor.queue import cancel_task_by_id, RUNNING as _running_tasks
+
+            task_arg = text.split(None, 1)[1].strip() if text.split(None, 1)[1: ] else ""
+            cancelled_ids = []
+            if task_arg:
+                if cancel_task_by_id(task_arg):
+                    cancelled_ids.append(task_arg)
+            else:
+                for tid in list(_running_tasks.keys()):
+                    meta = _running_tasks.get(tid) or {}
+                    task_obj = meta.get("task") if isinstance(meta.get("task"), dict) else meta
+                    t_chat = int(task_obj.get("chat_id", 0) or 0) if isinstance(task_obj, dict) else 0
+                    if t_chat == chat_id or not chat_id:
+                        if cancel_task_by_id(tid):
+                            cancelled_ids.append(tid)
+            if cancelled_ids:
+                ctx.send_with_budget(chat_id, f"🛑 Cancelled task(s): {', '.join(cancelled_ids)}")
+            else:
+                ctx.send_with_budget(chat_id, "ℹ️ No active task to cancel.")
         elif lowered.startswith("/status"):
             from supervisor.state import status_text
             from supervisor.queue import SOFT_TIMEOUT_SEC, HARD_TIMEOUT_SEC

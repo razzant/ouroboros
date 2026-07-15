@@ -484,6 +484,12 @@ function chatView({
     meta = [],
     fullRef = '',
     truncated = false,
+    toolName = '',
+    toolArgs = '',
+    toolDuration = '',
+    toolError = false,
+    toolStatus = '',
+    model = '',
 } = {}) {
     const out = {
         phase,
@@ -498,11 +504,14 @@ function chatView({
     if (fullBody) out.fullBody = fullBody;
     if (fullHeadline) out.fullHeadline = fullHeadline;
     if (Array.isArray(meta) && meta.length) out.meta = meta.filter(Boolean);
-    // P3 uniform contract: when the WS body was truncated server-side, carry a
-    // fetch ref (a task id -> GET /api/tasks/{id}) so the bubble can load the
-    // genuinely-full output on demand instead of showing only the capped preview.
     if (fullRef) out.fullRef = String(fullRef);
     if (truncated) out.truncated = true;
+    if (toolName) out.toolName = toolName;
+    if (toolArgs) out.toolArgs = toolArgs;
+    if (toolDuration) out.toolDuration = toolDuration;
+    if (toolError) out.toolError = true;
+    if (toolStatus) out.toolStatus = toolStatus;
+    if (model) out.model = model;
     return out;
 }
 
@@ -629,11 +638,22 @@ export function summarizeChatLiveEvent(evt) {
     }
 
     if (t === 'llm_round_started') {
-        return chatView({ phase: 'thinking', headline: 'Thinking', dedupeKey: key(evt.round || '', evt.attempt || '') });
+        return chatView({
+            phase: 'thinking',
+            headline: `🧠 Thinking${evt.model ? ` — ${evt.model}` : ''}`,
+            model: evt.model || '',
+            dedupeKey: key(evt.round || '', evt.attempt || ''),
+        });
     }
 
     if (t === 'tool_call_started') {
-        return chatView({ headline: 'Working through the next step', dedupeKey: key(evt.tool || '') });
+        return chatView({
+            headline: `🔧 ${evt.tool || 'tool'}`,
+            toolName: evt.tool || '',
+            toolArgs: typeof evt.args === 'string' ? evt.args : (evt.args ? compactJson(evt.args, 300) : ''),
+            model: evt.model || '',
+            dedupeKey: key(evt.tool || ''),
+        });
     }
 
     if (t === 'task_checkpoint') {
@@ -673,7 +693,9 @@ export function summarizeChatLiveEvent(evt) {
     if (t === 'tool_call_timeout' || t === 'tool_timeout') {
         return chatView({
             phase: 'error',
-            headline: 'One of the steps took too long',
+            headline: `⏱ ${evt.tool || 'tool'} — timed out`,
+            toolName: evt.tool || '',
+            toolDuration: evt.duration_sec ? `${evt.duration_sec}s` : '',
             visible: true,
             promote: true,
             dedupeKey: key(evt.tool || ''),
@@ -693,21 +715,43 @@ export function summarizeChatLiveEvent(evt) {
             const exitCode = Number(evt.exit_code);
             return chatView({
                 phase: 'warn',
-                headline: `A command returned ${Number.isFinite(exitCode) ? `exit code ${exitCode}` : 'a non-zero exit code'}`,
+                headline: `✕ ${evt.tool || 'tool'} — exit code ${Number.isFinite(exitCode) ? exitCode : '?'}`,
                 body: shortText(bodyParts.join(' '), 220),
                 fullBody: fullBodyParts.join('\n\n'),
+                toolName: evt.tool || '',
+                toolArgs: typeof evt.args === 'string' ? evt.args : (evt.args ? compactJson(evt.args, 300) : ''),
+                toolDuration: evt.duration_sec ? `${evt.duration_sec}s` : '',
+                toolError: true,
+                toolStatus: evt.status || '',
                 visible: true,
                 dedupeKey: key(evt.tool || '', evt.status || '', evt.exit_code || '', commandText.full || errorResult.full),
             });
         }
         return chatView({
             phase: 'error',
-            headline: 'One of the steps failed',
+            headline: `✕ ${evt.tool || 'tool'} — failed`,
             body: shortText(bodyParts.join(' '), 220),
             fullBody: fullBodyParts.join('\n\n'),
+            toolName: evt.tool || '',
+            toolArgs: typeof evt.args === 'string' ? evt.args : (evt.args ? compactJson(evt.args, 300) : ''),
+            toolDuration: evt.duration_sec ? `${evt.duration_sec}s` : '',
+            toolError: true,
             visible: true,
             promote: true,
             dedupeKey: key(evt.tool || '', evt.status || '', evt.exit_code || '', commandText.full || errorResult.full),
+        });
+    }
+
+    if (t === 'tool_call_finished') {
+        const resultText = describeText(evt.result_preview || '', 200);
+        return chatView({
+            headline: `✓ ${evt.tool || 'tool'}${evt.duration_sec ? ` — ${evt.duration_sec}s` : ''}`,
+            toolName: evt.tool || '',
+            toolArgs: typeof evt.args === 'string' ? evt.args : (evt.args ? compactJson(evt.args, 300) : ''),
+            toolDuration: evt.duration_sec ? `${evt.duration_sec}s` : '',
+            body: resultText.preview,
+            fullBody: resultText.full,
+            dedupeKey: key(evt.tool || '', evt.duration_sec || ''),
         });
     }
 
