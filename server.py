@@ -1240,6 +1240,7 @@ def _process_bridge_updates(bridge, offset: int, ctx: Any) -> int:
                 ctx.send_with_budget(chat_id, f"🧠 Background consciousness: {bg_status}")
         elif lowered.startswith("/cancel"):
             from supervisor.queue import cancel_task_by_id, RUNNING as _running_tasks
+            from supervisor.workers import chat_turn_liveness
 
             task_arg = text.split(None, 1)[1].strip() if text.split(None, 1)[1: ] else ""
             cancelled_ids = []
@@ -1247,6 +1248,11 @@ def _process_bridge_updates(bridge, offset: int, ctx: Any) -> int:
                 if cancel_task_by_id(task_arg):
                     cancelled_ids.append(task_arg)
             else:
+                # Check for an in-process direct-chat turn first (not in RUNNING dict).
+                busy, direct_task_id, _ = chat_turn_liveness()
+                if busy and direct_task_id:
+                    cancelled_ids.append(str(direct_task_id))
+                # Then scan queued/worker RUNNING tasks.
                 for tid in list(_running_tasks.keys()):
                     meta = _running_tasks.get(tid) or {}
                     task_obj = meta.get("task") if isinstance(meta.get("task"), dict) else meta

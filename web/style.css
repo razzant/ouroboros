@@ -2016,7 +2016,7 @@ button.chat-file:hover,
     overflow-y: auto;
 }
 
-.chat-live-line.loading {
+.chat-live-line-loading {
     margin-top: 6px;
     font-size: 12px;
     font-style: italic;

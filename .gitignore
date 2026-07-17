@@ -89,3 +89,9 @@ MagicMock/
 # test writing here must never dirty the tree or enter a release (v6.61.1).
 # Anchored: only the repo-root dir, never nested legitimate logs/ folders.
 /logs/
+
+# Scratch logs and test scripts at repo root (local debug, never tracked)
+/*.log
+/start.sh
+/run_test.sh
+/test_*.py

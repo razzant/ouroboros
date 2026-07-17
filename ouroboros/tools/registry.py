@@ -1227,20 +1227,27 @@ class ToolRegistry:
         return {"type": "function", "function": schema}
 
     def _compact_schema_for_entry(self, entry: ToolEntry) -> Dict[str, Any]:
-        """Return a compact tool schema stub (name + description only, no parameters).
+        """Return a compact tool schema stub (name + description + param names, no descriptions).
 
         Used in compact mode to reduce context window consumption by ~20K tokens
         when the full parameter schemas are not needed for the current round.
-        The full schema is restored lazily via get_schema_by_name() when the LLM
-        actually calls the tool.
+        Includes parameter names so the LLM knows what arguments to pass; full
+        descriptions are restored lazily via get_schema_by_name().
         """
         schema = entry.schema
+        real_params = (schema.get("parameters") or {}).get("properties") or {}
+        real_required = (schema.get("parameters") or {}).get("required") or []
+        compact_properties = {name: {"type": "string"} for name in real_params}
         compact = {
             "type": "function",
             "function": {
                 "name": schema.get("name", entry.name),
                 "description": schema.get("description", ""),
-                "parameters": {"type": "object", "properties": {}},
+                "parameters": {
+                    "type": "object",
+                    "properties": compact_properties,
+                    **({"required": list(real_required)} if real_required else {}),
+                },
             },
         }
         return compact
@@ -1305,15 +1312,24 @@ class ToolRegistry:
                 capability_root = pathlib.Path((meta.get("budget_drive_root") if isinstance(meta, dict) else "") or getattr(self._ctx, "budget_drive_root", "") or getattr(self._ctx, "drive_root", "") or ".").resolve(strict=False)
                 with _ext_lock:
                     if compact:
-                        extension_schemas = [
-                            {
+                        def _ext_compact_stub(tool):
+                            real_params = (tool.get("schema") or {}).get("properties") or {}
+                            real_required = (tool.get("schema") or {}).get("required") or []
+                            compact_props = {name: {"type": "string"} for name in real_params}
+                            return {
                                 "type": "function",
                                 "function": {
                                     "name": tool["name"],
                                     "description": tool.get("description", "")[:200],
-                                    "parameters": {"type": "object", "properties": {}},
+                                    "parameters": {
+                                        "type": "object",
+                                        "properties": compact_props,
+                                        **({"required": list(real_required)} if real_required else {}),
+                                    },
                                 },
                             }
+                        extension_schemas = [
+                            _ext_compact_stub(tool)
                             for tool in _ext_tools.values()
                             if _ext_is_live(str(tool.get("skill") or ""), capability_root, repo_path=str(tool.get("skills_repo_path") or "") or None)
                             and (not acting_subagent or tool["name"] in acting_grants)
@@ -1348,11 +1364,24 @@ class ToolRegistry:
                     _mcp_ensure_configured(refresh=True)
                     _mgr = _mcp_get_manager()
                     if compact:
-                        mcp_schemas = [
-                            {
+                        def _mcp_compact_stub(tool):
+                            real_params = (tool.get("schema") or {}).get("properties") or {}
+                            real_required = (tool.get("schema") or {}).get("required") or []
+                            compact_props = {name: {"type": "string"} for name in real_params}
+                            return {
                                 "type": "function",
-                                "function": {"name": tool["name"], "description": tool.get("description", "")[:200], "parameters": {"type": "object", "properties": {}}},
+                                "function": {
+                                    "name": tool["name"],
+                                    "description": tool.get("description", "")[:200],
+                                    "parameters": {
+                                        "type": "object",
+                                        "properties": compact_props,
+                                        **({"required": list(real_required)} if real_required else {}),
+                                    },
+                                },
                             }
+                        mcp_schemas = [
+                            _mcp_compact_stub(tool)
                             for tool in _mgr.list_tools_for_registry()
                             if not acting_subagent or tool["name"] in acting_grants
                         ]

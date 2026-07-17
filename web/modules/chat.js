@@ -1533,6 +1533,12 @@ export function createChatInstance({
                 it.fullRef = summary.fullRef || it.fullRef || '';
                 it.truncated = summary.truncated || it.truncated || false;
                 it.ts = ts || it.ts;
+                if (summary.toolName) it.toolName = summary.toolName;
+                if (summary.toolArgs) it.toolArgs = summary.toolArgs;
+                if (summary.toolDuration) it.toolDuration = summary.toolDuration;
+                if (summary.toolError) it.toolError = summary.toolError;
+                if (summary.toolStatus) it.toolStatus = summary.toolStatus;
+                if (summary.model) it.model = summary.model;
                 patchIndex = existingIdx;
                 timelineUpdate = 'patch-at';
             } else if (existingIdx === lastIdx && existingIdx !== -1) {
@@ -1544,6 +1550,12 @@ export function createChatInstance({
                 it.fullBody = summary.fullBody || it.fullBody || it.body;
                 it.fullRef = summary.fullRef || it.fullRef || '';
                 it.truncated = summary.truncated || it.truncated || false;
+                if (summary.toolName) it.toolName = summary.toolName;
+                if (summary.toolArgs) it.toolArgs = summary.toolArgs;
+                if (summary.toolDuration) it.toolDuration = summary.toolDuration;
+                if (summary.toolError) it.toolError = summary.toolError;
+                if (summary.toolStatus) it.toolStatus = summary.toolStatus;
+                if (summary.model) it.model = summary.model;
                 timelineUpdate = 'patch-last';
             } else if (existingIdx !== -1) {
                 // Already rendered earlier in this card (e.g. a historical progress line
@@ -1566,6 +1578,12 @@ export function createChatInstance({
                     count: 1,
                     dedupeKey: syntheticKey,
                     lineKey,
+                    toolName: summary.toolName || '',
+                    toolArgs: summary.toolArgs || '',
+                    toolDuration: summary.toolDuration || '',
+                    toolError: summary.toolError || false,
+                    toolStatus: summary.toolStatus || '',
+                    model: summary.model || '',
                 });
                 timelineUpdate = 'append';
             }

@@ -25,9 +25,9 @@ from __future__ import annotations
 # Remote routine compaction stays off by design; this is the overflow backstop.
 EMERGENCY_COMPACTION_CHARS = 1_200_000
 
-# Proactive compaction trigger (~200K tokens at chars/4). Fires before emergency
-# to reduce context size proactively, avoiding overflow retry costs. Only active
-# when context mode is max and the model has a known window.
+# Proactive compaction trigger (~200K tokens at chars/4). Reserved for
+# low-mode or local-context scenarios where proactive shrinking is safe.
+# Max mode uses emergency-only compaction at 1.2M chars (BIBLE P1).
 PROACTIVE_COMPACTION_CHARS = 800_000
 
 # Background-consciousness assembled-context guards. P1: fail fast, never

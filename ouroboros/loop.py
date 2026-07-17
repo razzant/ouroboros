@@ -2220,31 +2220,13 @@ def _run_round_compaction(
         ctx.emit_progress("⚠️ Emergency compaction skipped: forensic checkpoint could not be persisted.")
         return messages, None
 
-    # Proactive compaction: fire before emergency when context is growing large
-    # in max mode with a known window. Keeps 70% of recent history to avoid
-    # emergency overflow on the next round.
-    if (
-        ctx.active_context_mode == "max"
-        and not ctx.checkpoint_injected
-        and _estimate_messages_chars(messages) > PROACTIVE_COMPACTION_CHARS
-    ):
-        span_count = len(_tool_round_spans(messages))
-        proactive_keep_recent = min(50, max(6, int(span_count * 0.7)), max(1, span_count - 1))
-        if _persist_compaction_checkpoint(
-            messages, drive_root=ctx.drive_root, drive_logs=ctx.drive_logs, task_id=ctx.task_id,
-            reason="proactive_context_size", keep_recent=proactive_keep_recent,
-            round_idx=ctx.round_idx, event_queue=ctx.event_queue,
-        ):
-            return compact_tool_history_llm(
-                messages,
-                keep_recent=proactive_keep_recent,
-                drive_root=ctx.drive_root,
-                task_id=ctx.task_id,
-            )
-
     # Routine compaction runs only when local or in low context mode; never on
     # checkpoint rounds. Max mode relies on emergency compaction alone to preserve
     # prompt-cache hits (mode is the SSOT — no per-model small-window override).
+    # NOTE: proactive compaction was previously attempted here for max mode
+    # (fire at 800K chars, 33% below emergency), but this contradicts the
+    # documented invariant (ARCHITECTURE.md, BIBLE P1) that max mode uses
+    # emergency-only compaction. Removed in v6.64.4.
     if not ctx.checkpoint_injected and (ctx.active_use_local or ctx.active_context_mode == "low"):
         if ctx.round_idx > 6 and len(messages) > 40:
             if _persist_compaction_checkpoint(

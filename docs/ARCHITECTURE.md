@@ -59,6 +59,53 @@ server.py (Starlette+uvicorn) ← HTTP + WebSocket on configurable host:port (de
       ├── memory.py            ← Scratchpad, identity, chat history
       ├── artifacts.py         ← Task-scoped artifact helpers
       ├── tools/               ← Auto-discovered tool plugins (core + extensions)
+      │   ├── __init__.py
+      │   ├── registry.py       ← Tool registry: discovery, schema management, compact-mode stubs
+      │   ├── core.py           ← Core tool definitions (read_file, write_file, edit_text, etc.)
+      │   ├── shell.py          ← Shell execution tools (run_command, run_script)
+      │   ├── shell_guards.py   ← Shell safety classifiers and guard policies
+      │   ├── search.py         ← Code and file search tools
+      │   ├── query_code.py     ← Code query and symbol lookup tools
+      │   ├── browser.py        ← Browser automation tools
+      │   ├── vision.py         ← Vision/image analysis tools
+      │   ├── git.py            ← Git operation tools
+      │   ├── git_pr.py         ← Git PR management tools
+      │   ├── git_rollback.py   ← Git rollback/revert tools
+      │   ├── github.py         ← GitHub API integration tools
+      │   ├── ci.py             ← CI/CD pipeline tools
+      │   ├── control.py        ← Task control tools (cancel, pause, resume)
+      │   ├── control_delegation.py ← Delegation control tools
+      │   ├── review.py         ← Code review tools
+      │   ├── review_helpers.py ← Shared review helpers (section loader, touched/head packs)
+      │   ├── review_revalidation.py ← Reviewed-commit fingerprint revalidation
+      │   ├── review_context_atlas.py ← Review context atlas generation
+      │   ├── review_synthesis.py ← Review synthesis and consolidation
+      │   ├── scope_review.py   ← Scope reviewer (enforcement-aware, budget-aware)
+      │   ├── scope_review_contract.py ← Scope-output parser and validity contract
+      │   ├── plan_review.py    ← Plan review pipeline
+      │   ├── parallel_review.py ← Parallel review orchestration
+      │   ├── claude_advisory_review.py ← Claude advisory review integration
+      │   ├── compact_context.py ← Context compaction tools
+      │   ├── commit_gate.py    ← Pre-commit gate enforcement
+      │   ├── evolution_stats.py ← Evolution statistics tracking
+      │   ├── extension_dispatch.py ← Extension dispatch and routing
+      │   ├── health.py         ← Health check and diagnostics
+      │   ├── join_ledger.py    ← Soft-join decision tools + cancel_task handler
+      │   ├── knowledge.py      ← Knowledge base tools
+      │   ├── media.py          ← Media handling tools
+      │   ├── memory_tools.py   ← Memory/knowledge management tools
+      │   ├── project_journal.py ← Per-project journal/workpad tools
+      │   ├── recent_tasks.py   ← Recent task listing tools
+      │   ├── release_sync.py   ← Release synchronization tools
+      │   ├── services.py       ← Task-scoped service mini-manager
+      │   ├── skill_exec.py     ← External-skill execution surface
+      │   ├── skill_preflight.py ← Skill payload preflight validator
+      │   ├── skill_publish.py  ← Skill publish/submit tools
+      │   ├── subagent_integration.py ← Subagent patch integration
+      │   ├── task_tree.py      ← Task-tree coordination tools
+      │   ├── tool_discovery.py ← Tool auto-discovery utilities
+      │   ├── verify.py         ← Verification and acceptance review tools
+      │   ├── contracts/        ← Frozen ABI: task_contract, skill_manifest, plugin_api
       ├── contracts/           ← Frozen ABI: task_contract, skill_manifest, plugin_api
       ├── gateway/             ← Gateway Boundary v1: HTTP/WS routes + frontend contract
       ├── gateways/            ← External API adapters (Claude SDK)
@@ -87,21 +134,6 @@ server.py (Starlette+uvicorn) ← HTTP + WebSocket on configurable host:port (de
       ├── server_runtime.py    ← Server startup + WebSocket helpers
       ├── utils.py             ← Shared utilities (JSON, hashes, subprocess)
       ├── world_profiler.py    ← System profile generator (WORLD.md)
-      └── platform_layer.py    ← Cross-platform process/path/locking helpers
-
-      ouroboros/process_custody.py ← Supervised spawning + durable orphan ledger stays `pass`), carried through the verification ledger's fixed key-set and surfaced to the ADVISORY acceptance reviewer, catching a check that built then DELETED the deliverable it just attested (e.g. compile+import+rm a `.so`). (v6.52.2) FLAG-ONLY exit-masking sensor (`_check_has_exit_masking`, shlex token-scan of a `["sh"/"bash",-c,text]` check): a pipeline that can launder the real exit code (`... | tail`/`grep`/`sed`, `|| true`, `>/dev/null`) records `check_exit_masking`/`check_exit_masking_reasons` on the receipt (status UNCHANGED) — projected into the verification ledger's fixed key-set, aggregated into the acceptance reviewer's `verification_summary`, and feeding a one-shot advisory masked-verification nudge — so a PASS over a possibly-laundered green is reconsidered (decides nothing; P5)
-      │   ├── review_helpers.py  ← Shared review helpers (section loader, touched/head packs, intent, pytest preflight via agent interpreter)
-      │   ├── review_revalidation.py ← Reviewed-commit fingerprint revalidation helpers (blocks when staged diff changes after review)
-      │   ├── scope_review.py   ← Scope reviewer (enforcement-aware, budget-aware)
-      │   ├── scope_review_contract.py ← Pure scope-output parser and one-pass validity contract; owns no routing, retries, or reviewer state
-      │   ├── services.py        ← Task-scoped long-running service mini-manager: start/status/logs/stop with process-group cleanup and retained private log blobs
-      │   ├── skill_exec.py      ← Phase 3 external-skill surface: list_skills, skill_review, toggle_skill, skill_exec (subprocess runner with cwd confinement, env scrubbing, timeout, runtime allowlist python/python3/bash/node/deno/ruby/go; gated by enabled + fresh executable review + fresh content hash — v5.1.2 Frame A: runtime_mode no longer blocks execution)
-      │   ├── skill_publish.py   ← Agent-callable `submit_skill_to_hub` tool: validates a fresh no-blocker review — `clean` or advisory-only `warnings` (v6.27.1; advisory findings are disclosed in the PR body under `## Known advisory findings`; blockers/pending/stale still refuse) — for a local skill (sources `external`/`self_authored`/`user_repo`/`ouroboroshub`/`clawhub`; `native` only when no `.seed-origin` marker), infers OuroborosHub from `OUROBOROS_HUB_CATALOG_URL`, commits payload + catalog update to the user's fork via GitHub GraphQL, and opens a PR without mutating the local Ouroboros repo. For marketplace-managed sources the generated PR body is force-prefixed with a `## Provenance` block read from the local sidecar (`.ouroboroshub.json` slug / `.clawhub.json` clawhub_slug); when no sidecar exists the source is reclassified as `external` by skill_loader and submit proceeds without the block.
-      │   ├── skill_preflight.py ← v5.7.0 heal-safe, read-only skill payload preflight validator (manifest parse + Python compile() / node --check / bash -n; no review-state mutation)
-      │   ├── project_journal.py ← Thin per-project journal/workpad tools (v6.32.0): journal_write/read (durable milestone memory), workpad_read/write (scratch page), journal_tail_digest (context injection); over-limit writes are rejected, never silently sliced
-      │   ├── task_tree.py     ← (v6.38.0) Task-tree coordination tools tree_note/tree_read (the swarm blackboard + child→parent beacons; storage/kind SSOT in ouroboros/task_tree_ledger.py)
-      │   ├── join_ledger.py   ← (v6.40) D#7 soft-join decision tools peek_task (a PURE READ of a child's status/beacons/result tail) + discard_child_result (explicit, lineage-gated abandon stamping parent_decision); also hosts `override_delegation_constraint` (parent-only structured override of a child-raised constraint), the `cancel_task` handler (moved here from control.py and upgraded with a recorded reason + lineage gate), and the shared child-decision helpers (_is_own_child / _status_drive_root / _record_child_decision_beacon). Extracted from control.py to keep it under the module size gate
-      │   └── subagent_integration.py ← integrate_subagent_patch: parent's manifest-first integration of an acting subagent's workspace.patch. For self_worktree children it applies into ctx.active_repo_dir() (sha256-verified, 3-way --index, protected-path gated, top-only lineage check, genesis refused), stages but never commits. For external_workspace children it verifies the child wrote in the same active external workspace and records an audited verdict without re-applying the patch; (v6.58.0) a NON-workspace parent integrating a COOP child (write_root = a host-minted tree under the subagent-projects root) gets a read-only verification + a SUCCESSFUL `coop_already_in_tree` no-op verdict instead of a parent-missing error — the work is already in the shared tree, which `coop_checkpoint.checkpoint_commit_coop_roots` checkpoint-commits at root finalization. Also compare_subagent_patches: read-only best-of-N helper that shows several children's candidate patches side by side for LLM-first synthesis
       └── platform_layer.py    ← Cross-platform process/path/locking helpers
 
       ouroboros/process_custody.py ← Supervised spawning + durable orphan ledger
