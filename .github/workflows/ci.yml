@@ -3,7 +3,7 @@
 # Tier 1 (Quick):       Push to ouroboros or PR targeting ouroboros                   → Ubuntu-only tests (~1 min)
 # Tier 2 (Full):        Push to ouroboros-stable / manual / tag                       → Full 3-OS matrix          (~5 min)
 # Tier 2.5 (Integration): Push to main / ouroboros / ouroboros-stable / manual / tag  → Real-provider tests       (~2 min)
-# Tier 2.6 (Skill smoke): Push to ouroboros-stable / manual / tag                     → LIVE OuroborosHub official-skill install smoke (3-OS, ~5 min)
+# Tier 2.6 (Skill smoke): Push to ouroboros-stable / manual / tag                     → LIVE OuroborosHub official-skill install smoke (3-OS, ~5 min) + review→grant→enable-persistence flow on one cheap reviewer slot (ubuntu-only step, OPENROUTER_API_KEY, ~$1.2/run)
 # Tier 3 (Build+Release): Tag v*                                                       → PyInstaller + GitHub Release (~15 min)
 #
 # Tier 2.5 requires OPENROUTER_API_KEY / OPENAI_API_KEY / ANTHROPIC_API_KEY /
@@ -166,14 +166,30 @@ jobs:
   # Red = investigate (either our runtime regressed or the hub published a
   # broken official skill); there is deliberately NO fallback-skip on
   # network failure, and gating the release on live external services
-  # (GitHub raw, PyPI, DuckDuckGo, wttr.in) is a deliberate owner decision
-  # — the opposite trade-off from integration-test, which is deliberately
-  # NOT a release need. Runs the `skill_smoke` pytest marker
-  # (pyproject.toml) as ONE serial pytest invocation: real network
-  # installs + real pip installs into per-skill isolated envs are not
-  # xdist-safe — never add -n here (the lane's tests are also kept out of
-  # the quick/full markexprs and must never carry the `serial` marker;
-  # see docs/DEVELOPMENT.md "Pytest marker lanes").
+  # (GitHub raw, PyPI, DuckDuckGo, wttr.in, OpenRouter) is a deliberate
+  # owner decision — the opposite trade-off from integration-test, which is
+  # deliberately NOT a release need. Runs the `skill_smoke` pytest marker
+  # (pyproject.toml) as serial pytest invocations: real network installs +
+  # real pip installs into per-skill isolated envs are not xdist-safe —
+  # never add -n here (the lane's tests are also kept out of the quick/full
+  # markexprs and must never carry the `serial` marker; see
+  # docs/DEVELOPMENT.md "Pytest marker lanes").
+  #
+  # The job is TWO pytest steps as a SECURITY BOUNDARY, not test taxonomy,
+  # and the ORDER is part of the boundary: the review-flow step runs FIRST,
+  # carrying OPENROUTER_API_KEY in a fresh pytest process that never
+  # imports downloaded plugin code (installs + review read payload bytes;
+  # nothing executes them, and the isolated-deps pip subprocess gets a
+  # scrubbed allowlist env). Only AFTER the secret-bearing step finishes
+  # does the install/preflight/deps/command step import downloaded
+  # (sha-verified official) plugin code in-process — secret-free, so the
+  # runner has never executed payload code while the secret was present.
+  # The review step runs Ouroboros's own skill review on ONE cheap
+  # stochastic reviewer slot (google/gemini-3.5-flash, low effort — the
+  # test pins env; production reviewer defaults stay strong and untouched),
+  # ubuntu-only (an LLM verdict is OS-independent), for a 4-skill subset.
+  # Paid lane: ~$1.2/run (~$2.4 with verdict retries). A missing secret is
+  # a hard red by owner directive — forks/mirrors without it stay red.
   # ──────────────────────────────────────────────────────────────────
   skill-smoke:
     if: |
@@ -185,7 +201,7 @@ jobs:
       matrix:
         os: [ubuntu-latest, windows-latest, macos-latest]
     runs-on: ${{ matrix.os }}
-    timeout-minutes: 30
+    timeout-minutes: 45
     env:
       # Windows runners default stdout/subprocess decoding to cp1252; live
       # DDG/wttr error text and pip/venv diagnostics can be non-ASCII, and a
@@ -193,6 +209,10 @@ jobs:
       PYTHONUTF8: "1"
     steps:
       - uses: actions/checkout@v4
+        with:
+          # This job executes downloaded (sha-verified official) plugin code
+          # and never pushes; do not leave GITHUB_TOKEN in .git/config.
+          persist-credentials: false
       - uses: actions/setup-python@v5
         with:
           python-version: '3.10'
@@ -201,15 +221,32 @@ jobs:
         run: |
           pip install -r requirements.txt
           pip install pytest pytest-timeout
+      # Tier 6 (review flow) FIRST — see the job comment: the secret-bearing
+      # step must precede any step that executes downloaded plugin code.
+      # Ubuntu-only: the LLM verdict is OS-independent. --timeout=2100
+      # covers one review + one fresh verdict retry + the post-review COLD
+      # a2a dependency install (this process has its own temp data dir, so
+      # Tier 4's venv is never warm here; production review→deps order).
+      # The 45-min job bound, not the per-test cap, is the effective
+      # worst-case limiter if several skills go pathological at once.
+      - name: Run official-skill review flow smoke (LLM review, ubuntu only)
+        if: matrix.os == 'ubuntu-latest'
+        env:
+          OPENROUTER_API_KEY: ${{ secrets.OPENROUTER_API_KEY }}
+        run: python -m pytest tests/ -m skill_smoke -k "review_grants_and_enable" --timeout=2100 --timeout-method=thread -q -s --tb=long
       # -s (no capture): the lane logs provenance (catalog digest, skill
       # versions, resolved pip sets) that must reach the CI log on green AND
       # red runs — under default capture, session-fixture prints surface only
       # when the FIRST test fails. A single serial invocation makes capture-off
-      # safe and streams progress inside the 30-min job bound. Per-test
-      # `timeout` marks govern each phase (900s covers the cold a2a venv+pip);
-      # the CLI --timeout is the fallback default for future unmarked tests.
+      # safe and streams progress inside the job bound. Per-test `timeout`
+      # marks govern each phase (900s covers the cold a2a venv+pip); the CLI
+      # --timeout is the fallback default for future unmarked tests.
+      # NO provider secret in this step: it imports downloaded plugin code.
+      # !cancelled(): a Tier 6 red must not mask this shard's Tier 1-5 signal
+      # (the secret lives only in the previous step's env either way).
       - name: Run official-skill install smoke (real network, serial)
-        run: python -m pytest tests/ -m skill_smoke --timeout=900 --timeout-method=thread -q -s --tb=long
+        if: ${{ !cancelled() }}
+        run: python -m pytest tests/ -m skill_smoke -k "not review_grants_and_enable" --timeout=900 --timeout-method=thread -q -s --tb=long
 
   marker-guards:
     if: |

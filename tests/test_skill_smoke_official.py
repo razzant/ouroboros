@@ -1,7 +1,8 @@
 # tests/test_skill_smoke_official.py — official OuroborosHub skill install smoke.
 #
 # The `skill_smoke` lane: real-network install of the nine pinned official
-# skills + preflight/deps/command probes. Canonical lane description (purpose,
+# skills + preflight/deps/command probes + the Tier 6 review→grant→
+# enable-persistence flow (CI review step only). Canonical lane description (purpose,
 # triggers, red-means-investigate posture): docs/DEVELOPMENT.md "Pytest marker
 # lanes". No fallback-skip on network failure (owner directive); bounded
 # transient retries are the sole flake mitigation. Never add this file to
@@ -20,20 +21,25 @@
 
 from __future__ import annotations
 
+import asyncio
 import hashlib
 import http.client
 import importlib.util
 import json
+import os
 import pathlib
+import shutil
 import subprocess
 import time
 from typing import Any, Dict
 
 import pytest
 
+from ouroboros import config
 from ouroboros.config import DATA_DIR, get_ouroboroshub_skills_dir
 from ouroboros.contracts.skill_manifest import parse_skill_manifest_text
 from ouroboros.extension_isolated_deps import isolated_site_dirs_scope
+from ouroboros.gateway.marketplace import _apply_hub_review_and_deps
 from ouroboros.marketplace import ouroboroshub
 from ouroboros.marketplace.install_specs import install_specs_hash
 from ouroboros.marketplace.isolated_deps import (
@@ -42,7 +48,14 @@ from ouroboros.marketplace.isolated_deps import (
     read_deps_state,
 )
 from ouroboros.skill_dependencies import auto_install_specs_for_skill
-from ouroboros.skill_loader import _sanitize_skill_name, find_skill
+from ouroboros.skill_loader import (
+    _sanitize_skill_name,
+    find_skill,
+    grant_status_for_skill,
+    load_enabled,
+    save_enabled,
+)
+from ouroboros.skill_readiness import skill_readiness_for_execution
 from ouroboros.tools.registry import ToolContext
 from ouroboros.tools.skill_preflight import _handle_skill_preflight
 
@@ -303,8 +316,10 @@ def test_manifest_parses_and_matches_contract(slug, install_skill):
     if slug in keyed:
         assert "OPENROUTER_API_KEY" in manifest.env_from_settings
     if slug == "telegram-bridge":
-        # The protected bot token is REQUESTED by the manifest; this lane never
-        # grants it and never enables the skill, so nothing can read it.
+        # The protected bot token is REQUESTED by the manifest. The
+        # install/probe tiers never grant it; Tier 6 auto-grants it
+        # request-keyed (empty settings value, temp DATA_DIR) and persists
+        # enablement only — no extension is ever loaded with the token.
         assert "TELEGRAM_BOT_TOKEN" in manifest.env_from_settings
         assert manifest.subscribe_events
     if slug in {"duckduckgo", "weather", "backlog_manager", "a2a"}:
@@ -517,3 +532,218 @@ def test_backlog_manager_summary_offline(install_skill, tmp_path):
 # its companion daemon, which this lane must not start (owner decision). Its
 # coverage is Tier 2 static companion contract + Tier 3 daemon compile +
 # Tier 4 real dependency install.
+
+
+# ---------------------------------------------------------------------------
+# Tier 6 — production review→grant flow + enable-persistence prerequisites
+# (real LLM skill review).
+#
+# Owner directive: CI must exercise the production flow "agent installs a
+# skill → runs Ouroboros's OWN skill review → only if the review is OK the
+# skill gets enabled" for a representative subset of official skills, with
+# the review running on a cheap single reviewer slot (production users keep
+# the strong default reviewer models — untouched here).
+#
+# Runs ONLY in the CI job's dedicated review step (ubuntu shard, secret in
+# env, fresh pytest process): downloaded plugin code (Tier 5) must never
+# share a process with OPENROUTER_API_KEY, so the job runs Tiers 1-5 and
+# Tier 6 as two separate pytest invocations and only the Tier 6 step carries
+# the secret. Missing key = hard red, not a skip (owner directive).
+#
+# Review call goes through the production gateway wrapper
+# `_apply_hub_review_and_deps` (review first, dependency install only after
+# an executable review — the production ordering; auto-grant runs inside
+# review_skill). Enforcement is pinned to `blocking` so auto-grant can only
+# happen on a clean/warnings verdict — under the production default
+# `advisory` even a `blockers` verdict is executable and would auto-grant
+# before this test rejects it. Enablement here is "enable persistence
+# prerequisites" (review gate + grants + deps + enabled.json +
+# skill_readiness_for_execution), NOT live extension loading —
+# reconcile_extension is server runtime, consistent with the Tier 5 posture.
+#
+# Cost (measured 2026-07-17, flash x1 low effort): ~$0.29/skill ≈ $1.15 per
+# CI run for the 4-skill subset on one OS; a verdict retry doubles at most.
+# ---------------------------------------------------------------------------
+
+# Owner-picked subset: telegram-bridge + a2a (mandated) + duckduckgo (core
+# keyless search; exercises the review→deps production ordering) + perplexity
+# (keyed skill; exercises OPENROUTER_API_KEY auto-grant).
+REVIEW_SKILLS = ("telegram-bridge", "a2a", "duckduckgo", "perplexity")
+_REVIEW_MODEL = "google/gemini-3.5-flash"
+# Expected auto-granted settings keys per skill (grants are request-keyed,
+# not value-keyed; empty values grant fine and only bite at runtime).
+_REVIEW_EXPECTED_KEYS = {
+    "telegram-bridge": {"TELEGRAM_BOT_TOKEN", "OPENAI_API_KEY"},
+    "a2a": set(),
+    "duckduckgo": set(),
+    "perplexity": {"OPENROUTER_API_KEY"},
+}
+
+
+class _ProgressStub:
+    """Duck-typed JobProgressTarget: records progress lines for diagnostics."""
+
+    def __init__(self) -> None:
+        self.lines: list[str] = []
+
+    def set(self, text: str) -> None:
+        self.lines.append(str(text))
+
+
+# Session scope on purpose: session fixtures instantiate before any
+# function-scoped fixture, and among session fixtures signature order wins —
+# so listing this BEFORE install_skill makes the missing-key red fire before
+# the live catalog fetch. Only Tier 6 requests it; Tiers 1-5 stay keyless.
+@pytest.fixture(scope="session")
+def review_secret():
+    assert os.environ.get("OPENROUTER_API_KEY"), (
+        "Tier 6 needs OPENROUTER_API_KEY in the environment (CI: the review "
+        "step's secret env; locally: export a key). A missing key is a hard "
+        "red by owner directive — forks/mirrors without the secret stay red."
+    )
+
+
+@pytest.fixture()
+def review_env(monkeypatch, tmp_path):
+    monkeypatch.setenv("OUROBOROS_REVIEW_MODELS", _REVIEW_MODEL)
+    # Cheap + fast verdicts: one reviewer slot (the production-supported
+    # single_reviewer_no_diversity degraded mode) at low reasoning effort.
+    monkeypatch.setenv("OUROBOROS_EFFORT_REVIEW", "low")
+    monkeypatch.setenv("OUROBOROS_REVIEW_ENFORCEMENT", "blocking")
+    monkeypatch.setenv("OUROBOROS_REVIEW_MODEL_TIMEOUT_SEC", "300")
+    monkeypatch.setenv("OUROBOROS_AUTO_GRANT_REVIEWED_SKILLS", "true")
+    # get_auto_grant_enabled reads the settings FILE first; point the module
+    # at a missing path so the env value above is authoritative (the pattern
+    # tests/test_skill_review.py uses).
+    monkeypatch.setattr(config, "SETTINGS_PATH", tmp_path / "missing-settings.json")
+
+
+def _skill_state_dir(name: str) -> pathlib.Path:
+    return DATA_DIR / "state" / "skills" / name
+
+
+def _run_review_flow(slug: str, name: str) -> tuple[str, str, str, Dict[str, Any]]:
+    payload: Dict[str, Any] = {}
+    status, error, deps_status = asyncio.run(
+        _apply_hub_review_and_deps(
+            payload,
+            drive_root=DATA_DIR,
+            repo_dir=REPO_ROOT,
+            skill_name=name,
+            progress=_ProgressStub(),
+            review_log_label=f"skill_smoke review {slug}",
+            deps_log_label=f"skill_smoke deps {slug}",
+        )
+    )
+    return str(status), str(error or ""), str(deps_status), payload
+
+
+def _review_diag(name: str, status: str, error: str, payload: Dict[str, Any]) -> str:
+    """Full findings + raw actor records — reviewer output is never truncated."""
+    parts = [f"status={status!r} error={error!r}"]
+    parts.append(f"review_findings={json.dumps(payload.get('review_findings'), ensure_ascii=False)}")
+    review_path = _skill_state_dir(name) / "review.json"
+    if review_path.exists():
+        review = json.loads(review_path.read_text(encoding="utf-8"))
+        parts.append(f"reviewer_models={review.get('reviewer_models')}")
+        parts.append(
+            "raw_actor_records="
+            + json.dumps(review.get("raw_actor_records"), ensure_ascii=False)
+        )
+    return "\n".join(parts)
+
+
+def _actor_cost_usd(review: Dict[str, Any]) -> float:
+    # SkillReviewOutcome.cost_usd is never populated from actor usage; the
+    # authoritative per-call costs live in raw_actor_records.
+    return sum(float(rec.get("cost_usd") or 0.0) for rec in review.get("raw_actor_records") or [])
+
+
+# 2100s: one review (300s model timeout + pack build) + one fresh verdict
+# retry + the post-review COLD a2a venv+pip (this pytest process has its own
+# temp data dir, so a Tier 4 venv from another step is never warm here).
+@pytest.mark.timeout(2100)
+# review_secret (session) is listed before install_skill (session): among
+# same-scope fixtures signature order wins, so a fork without the secret reds
+# on one crisp message before the live catalog fetch.
+@pytest.mark.parametrize("slug", REVIEW_SKILLS)
+def test_review_grants_and_enable(slug, review_secret, install_skill, review_env):
+    install_skill(slug)
+    name = _sanitize_skill_name(slug)
+    started = time.time()
+
+    def _flow_not_ok(status: str, error: str, deps_status: str) -> bool:
+        # A pip/venv flake after a clean review surfaces only as
+        # deps_status="failed" (review error stays empty) — it deserves the
+        # same single bounded retry as a verdict flake (lane posture: bounded
+        # transient retries, never a skip).
+        if status not in ("clean", "warnings") or error:
+            return True
+        return slug in DEPS_SKILLS and deps_status != "installed"
+
+    status, error, deps_status, payload = _run_review_flow(slug, name)
+    if _flow_not_ok(status, error, deps_status):
+        print(
+            f"{slug}: first review attempt not OK (deps_status={deps_status!r}) — "
+            f"full diagnostics below; wiping skill state for one fresh retry\n"
+            + _review_diag(name, status, error, payload)
+        )
+        shutil.rmtree(_skill_state_dir(name), ignore_errors=True)
+        status, error, deps_status, payload = _run_review_flow(slug, name)
+    assert status in ("clean", "warnings") and not error, (
+        f"{slug}: review not OK after one retry\n" + _review_diag(name, status, error, payload)
+    )
+
+    # Production ordering: dependencies reconcile only AFTER the executable
+    # review, inside the same gateway wrapper.
+    if slug in DEPS_SKILLS:
+        assert deps_status == "installed", f"{slug}: deps_status={deps_status!r}"
+    else:
+        assert deps_status == "not_required", f"{slug}: deps_status={deps_status!r}"
+
+    # Persisted review binds to the reloaded payload (fresh find_skill, not
+    # the pre-review in-memory object).
+    loaded = find_skill(DATA_DIR, name)
+    assert loaded is not None and not loaded.load_error
+    review = json.loads((_skill_state_dir(name) / "review.json").read_text(encoding="utf-8"))
+    assert review.get("content_hash") == loaded.content_hash
+    models = list(review.get("reviewer_models") or [])
+    assert len(models) == 1 and models[0].rsplit("#", 1)[0] == _REVIEW_MODEL, models
+    # Hash-verified official payloads get the official_hub profile (the
+    # severity-downgrade that stabilizes verdicts); losing it silently would
+    # change what this lane proves.
+    assert review.get("review_profile") == "official_hub", review.get("review_profile")
+
+    # Auto-grant ran inside review_skill (blocking enforcement ⇒ only on
+    # clean/warnings). Grants are request-keyed: TELEGRAM_BOT_TOKEN grants
+    # with an empty settings value.
+    grants = grant_status_for_skill(DATA_DIR, loaded)
+    assert grants.get("all_granted") is True, grants
+    expected_keys = _REVIEW_EXPECTED_KEYS[slug]
+    granted_keys = set(grants.get("granted_keys") or [])
+    assert granted_keys == expected_keys, (
+        f"{slug}: granted_keys={sorted(granted_keys)} expected={sorted(expected_keys)}"
+    )
+    if slug == "telegram-bridge":
+        granted_permissions = set(grants.get("granted_permissions") or [])
+        assert "inject_chat" in granted_permissions, grants
+        assert any(p.startswith("subscribe_event:chat.") for p in granted_permissions), grants
+
+    # Enable persistence prerequisites: the production toggle-gate facts plus
+    # the top static readiness gate. Nothing runtime starts here (no server,
+    # temp DATA_DIR) — enabling telegram-bridge/a2a cannot poll or spawn.
+    save_enabled(DATA_DIR, name, True)
+    assert load_enabled(DATA_DIR, name) is True
+    reloaded = find_skill(DATA_DIR, name)
+    assert reloaded is not None, f"{slug}: skill vanished from discovery after enable"
+    readiness = skill_readiness_for_execution(DATA_DIR, reloaded)
+    assert readiness.ready, (
+        f"{slug}: readiness not ready — blockers={readiness.blockers} "
+        f"agent_fixable={readiness.agent_fixable_blockers} "
+        f"owner_action={readiness.owner_action_blockers}"
+    )
+
+    print(
+        f"{slug}: review={status} slots={models} "
+        f"cost=${_actor_cost_usd(review):.4f} elapsed={time.time() - started:.1f}s"
+    )

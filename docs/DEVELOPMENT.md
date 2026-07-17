@@ -1361,13 +1361,32 @@ Default local pytest excludes costly or environment-dependent lanes:
   validates payload/sha/provenance, manifest contract, offline
   `skill_preflight`, real pip isolated deps, and keyless command probes. It
   runs as the dedicated 3-OS `skill-smoke` CI job (stable promote / manual /
-  `v*` tags) in ONE serial pytest invocation with real network + real pip:
+  `v*` tags) in serial pytest invocations with real network + real pip:
   red means investigate (our runtime or the published catalog broke) — there
   is deliberately no fallback-skip. Its tests must NOT carry the `serial`
   marker or join `_SERIAL_TEST_FILES`: the `and not skill_smoke` markexprs
   in quick/full-test are the barrier that keeps the lane out of those
   passes, and the no-serial rule keeps each test's lane assignment single
   and unambiguous (defense-in-depth on top of that barrier).
+  The lane's Tier 6 (`test_review_grants_and_enable`) additionally exercises
+  the production install→review→auto-grant flow plus enable-persistence
+  prerequisites for a 4-skill subset through the real gateway wrapper:
+  Ouroboros's own skill review on ONE cheap stochastic reviewer slot
+  (`google/gemini-3.5-flash`, low effort, `blocking` enforcement — pinned by
+  the test's env; production reviewer defaults stay untouched), with
+  auto-grant inside `review_skill`, then post-review dependency reconcile,
+  enabled persistence (`save_enabled` + the toggle-gate facts — deliberately
+  NOT the lifecycle toggle with `reconcile_extension`, which is server
+  runtime and would execute downloaded plugin code in the secret-bearing
+  process), and `skill_readiness_for_execution`. The
+  CI job runs Tier 6 as a SEPARATE pytest step (fresh process) that alone
+  carries `OPENROUTER_API_KEY`, ORDERED FIRST — the other tiers import
+  downloaded plugin code in-process and must never share a process with the
+  secret, and running the secret step first means the runner has never
+  executed payload code while the secret was present — and only on the
+  ubuntu shard (an LLM verdict is OS-independent). Paid step (~$1.2/run,
+  ~$2.4 with the single fresh verdict retry); a missing key is a hard red,
+  not a skip.
 
 When adding a new opt-in lane, register the marker in `pyproject.toml`, add
 a collect-only zero-test guard in CI, and keep the default local addopts

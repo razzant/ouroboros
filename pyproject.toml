@@ -85,7 +85,7 @@ markers = [
     "ui_browser_docker: launches UI smoke checks against Docker runtime; excluded from default local runs",
     "portable_detail: portable/build artifact detail checks; excluded from default local runs",
     "serial: real subprocess / real port / mutable module-global test — run in a serial pass, excluded from the `-n auto` parallel pass via `-m 'not serial'` (see .github/workflows/ci.yml)",
-    "skill_smoke: real-network OuroborosHub official-skill install smoke; excluded from default local runs, opt in via `pytest -m skill_smoke` (canonical lane description: docs/DEVELOPMENT.md 'Pytest marker lanes')",
+    "skill_smoke: real-network OuroborosHub official-skill install + review-flow smoke; excluded from default local runs, opt in via `pytest -m skill_smoke` (canonical lane description: docs/DEVELOPMENT.md 'Pytest marker lanes')",
 ]
 
 [tool.setuptools]
