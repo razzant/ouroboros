@@ -11,6 +11,9 @@ agent with memory ON, evolution OFF by default.
 
 See `METHODOLOGY.md` for what the benchmark measures, official scoring, our
 scaffold disclosures, the known failure taxonomy, and honest limits.
+See `RUNBOOK.md` for the field-tested at-scale operating recipe (VM memory
+sizing, mandatory companion daemons, one-seed vs leaderboard-submission flow,
+known loss classes).
 
 ## External runner REQUIRED (not vendored)
 
@@ -24,9 +27,13 @@ separately:
   `scripts/generate_leaderboard.py`).
 - The **Ouroboros adapter** is the `src/systems/ouroboros/` subtree of that
   repo (`system.py`, `_launcher.py`, `_docker_launcher.py`,
-  `run_clbench_bridge_agent.py`, `clbench_step_shim.py`). The reference run
-  pinned it at commit `56764d6`; a full copy ships in the run handoff bundle
-  (`clbench-db-40q-2026-07-01.tar.gz`, under
+  `run_clbench_bridge_agent.py`, `clbench_step_shim.py`). The v6.71.1
+  reference campaign pinned it at commit `3ec3761` (adds a network-outage
+  hold that pauses the scope clock instead of forfeiting questions, a
+  format-repair round that re-emits a prose-final answer as typed JSON in the
+  same container, an `OUROBOROS_REVIEW_MAX_PASSES` override, and
+  extra-overrides passthrough); a full copy ships in the run handoff bundle
+  (`clbench-671-full-2026-07-21.tar.gz`, under
   `bench-config/external-adapters/ouroboros/`) together with the adapter's own
   METHODOLOGY. If the adapter is missing from your checkout, restore it from
   that bundle.
@@ -59,10 +66,13 @@ Two separate knobs, deliberately kept apart:
    baseline* arm — each parallel worker boots its own container, so watch
    disk: the runner's default schedules carry `max_workers: 12` and that has
    filled a disk before).
-2. **`OUROBOROS_MAX_WORKERS=4`** (settings template) is the agent's *internal*
-   worker pool — subagent decomposition WITHIN one task. It does not (and must
-   not) create cross-task parallelism; it is disclosed as a scaffold parameter
-   in the manifest.
+2. **`max_workers` (settings template)** is the agent's *internal* worker
+   pool — subagent decomposition WITHIN one task. It does not (and must not)
+   create cross-task parallelism; it is disclosed as a scaffold parameter in
+   the manifest. The validated at-scale value is **3** (not the earlier
+   template's 4/10): pool size drives engine-container RSS, and larger pools
+   OOM the Docker VM when several containers run concurrently — see
+   `RUNBOOK.md` for the sizing formula and the failure signature.
 
 ## Launch
 
