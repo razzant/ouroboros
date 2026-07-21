@@ -54,7 +54,8 @@ Both ship in the run handoff bundle (`bench-config/`).
   scores from `final_results`, public implementation link, eval date, Discord pre-contact.
   Two gotchas: the leaderboard scripts hard-code known run names (`DEFAULT_RUN_NAMES` /
   `SYSTEM_DEFS`) — ask maintainers to add yours in the submission PR; and cohort_studies
-  reference data mixes two reward metrics until pgasawa/continual-learning-bench#9 lands.
+  reference data mixed two reward metrics before pgasawa/continual-learning-bench#9
+  (merged 2026-07-19) — score against a leaderboard checkout that includes it.
 
 ## Known loss classes and their closures
 

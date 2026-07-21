@@ -57,7 +57,8 @@ own steps.
 
 `run_clb.py` (this dir) → external runner (`run_benchmark.py` standard path,
 or the `run_clbench_bridge_agent` whole-question bridge that produced the
-reference full40 numbers) → in-runner Ouroboros adapter (pinned `56764d6`) →
+reference full40 numbers) → in-runner Ouroboros adapter (`56764d6` for the
+§8 reference run; the v6.71.1 campaign pinned `3ec3761` — see README) →
 isolated Ouroboros server (throwaway sub-clone of a dedicated bench clone),
 agent in Docker on the docker path (leak-proof: the task + DB stay host-side;
 the agent reaches data only through counted QUERY actions).
@@ -73,10 +74,13 @@ the agent reaches data only through counted QUERY actions).
 
 ## 4. Scaffold disclosures (ours)
 
-- **`OUROBOROS_MAX_WORKERS=4` is a WITHIN-task subagent pool**, not cross-task
-  parallelism. Cross-task order stays strictly sequential (`--instance-workers
-  1` enforced by the launcher; opt-out only for the independent stateless
-  baseline arm). Recorded in the manifest under `strict_sequential`.
+- **`OUROBOROS_MAX_WORKERS` is a WITHIN-task subagent pool**, not cross-task
+  parallelism: `4` in the 2026-07-01 reference run (§8), `3` validated at
+  scale by the v6.71.1 campaign (larger pools OOM the Docker VM — sizing
+  formula and failure signature in `RUNBOOK.md`). Cross-task order stays
+  strictly sequential (`--instance-workers 1` enforced by the launcher;
+  opt-out only for the independent stateless baseline arm). Recorded in the
+  manifest under `strict_sequential`.
 - **Safety mode `light`** (bench-template decision; see §6 fidelity).
 - **Single-model:** every model slot (main/heavy/light/fallback/review/scope)
   pinned to the solve model — no silent spend on stronger reviewers.
@@ -204,8 +208,8 @@ Raw rewards (rollout / own baseline / gain):
 |---|---|---|---|
 | database_exploration | 0.4917 | 0.1933 | +0.298 |
 | codebase_adaptation | 0.7289 | 0.3197 | +0.409 |
-| black_scholes (bsm) | 0.3453 | 0.2196 | +0.126 |
-| sales_analytics | 0.7286 | 0.4086 | +0.320 |
+| blind_spectrum_monitoring (bsm) | 0.3453 | 0.2196 | +0.126 |
+| sales_prediction | 0.7286 | 0.4086 | +0.320 |
 | exploitable_poker | 2.0442 | 1.5233 | +0.521 |
 | cohort_studies | −0.0180 | −0.0093 | −0.009 |
 
