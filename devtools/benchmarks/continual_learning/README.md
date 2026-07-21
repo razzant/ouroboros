@@ -40,7 +40,9 @@ separately:
 - The adapter needs a **dedicated Ouroboros clone** (`--ouroboros-clone`,
   never the live repo) whose `devtools/benchmarks/common/server_runner.py` it
   imports, plus (docker path) the `clbench-ouroboros:dev` image and the
-  runner-side `clbench_skill/clbench_remote` skill source.
+  runner-side `clbench_skill/remote_work` skill source (renamed from
+  `clbench_remote` 2026-07-09 — bench-identifying tells stripped from the
+  agent-visible surface; same tools get_observation/submit_action).
 - Run under a Python that has the runner's deps (litellm/pydantic/...) AND the
   Ouroboros deps; the launcher defaults to `<runner>/.venv/bin/python` when it
   exists.
