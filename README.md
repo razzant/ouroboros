@@ -14,7 +14,7 @@ Ouroboros is an open-source, general-purpose AI agent whose identity, durable me
 
 It runs as a native desktop app or through a headless CLI. The runtime keeps its repository, durable memory, history, and interface on your machine, while model inference can use remote APIs you configure or a local GGUF model.
 
-Self-creation began on February 16, 2026. In its first day, Ouroboros advanced from v4.1.0 to v4.25.0 through more than 30 self-directed evolution cycles. That first generation ran in Google Colab through Telegram and remains preserved on the [`legacy-google-colab`](https://github.com/razzant/ouroboros/tree/legacy-google-colab) branch; the current generation carries the same identity into a native desktop and headless runtime.
+Ouroboros first booted on February 16, 2026. During the following 48 hours, the repository advanced from the v4.1 line to v6.2.0. The self-authored record preserved from that period counts 32 evolution cycles. That first generation ran in Google Colab through Telegram and remains preserved on the [`legacy-google-colab`](https://github.com/razzant/ouroboros/tree/legacy-google-colab) branch; the current generation carries the same identity into a native desktop and headless runtime.
 
 > ⭐ **[Star Ouroboros](https://github.com/razzant/ouroboros)** to follow its next evolution. A star also helps more people find the project, trace its history, and take part in what it becomes.
 
