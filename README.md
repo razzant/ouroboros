@@ -10,7 +10,7 @@
 [![OuroborosHub](https://img.shields.io/badge/OuroborosHub-skills%20marketplace-8A2BE2.svg)](https://github.com/razzant/OuroborosHub)
 [![Version 6.74.5](https://img.shields.io/badge/version-6.74.5-green.svg)](VERSION)
 
-Ouroboros is an open-source, general-purpose AI agent with persistent identity and memory. It can work on external projects, coordinate a live swarm of specialist agents, and evolve by modifying its own implementation, including code, architecture, prompts, tools, dependencies, and identity.
+Ouroboros is an open-source, general-purpose AI agent whose identity, durable memory, and history continue across tasks and restarts. It works on external projects, coordinates a live swarm of specialist agents, and can rewrite the implementation it runs on, including its code, architecture, prompts, tools, and dependencies. Reflection can also change how it understands itself without severing that continuity.
 
 It runs as a native desktop app or through a headless CLI. The runtime keeps its repository, durable memory, history, and interface on your machine, while model inference can use remote APIs you configure or a local GGUF model.
 
@@ -49,7 +49,7 @@ On macOS, use right-click → **Open** on first launch if Gatekeeper asks. The s
 
 ## What Ouroboros Can Do
 
-- **Modify its implementation.** Ouroboros can revise application code, architecture, prompts, tools, dependencies, and identity instead of stopping at prompt or skill changes.
+- **Modify its implementation.** Its editable surface spans application code, architecture, prompts, tools, and dependencies, while reflection can also reshape its living self-understanding.
 - **Evolve autonomously.** Evolution campaigns turn selected improvements into reviewed changes that remain part of its Git history.
 - **Continue across restarts.** Identity, memory, dialogue, knowledge, reflections, and version history form one ongoing biography.
 - **Think between requests.** Background consciousness supports reflection, initiative, and preparation outside the immediate request-response loop.
