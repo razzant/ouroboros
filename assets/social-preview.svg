@@ -1,0 +1,58 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!-- Reproducible GitHub social-preview layout. -->
+<svg xmlns="http://www.w3.org/2000/svg" width="1280" height="640" viewBox="0 0 1280 640">
+  <metadata><![CDATA[
+Render from the repository root with the existing Ouroboros icon:
+  magick -font /System/Library/Fonts/Supplemental/Arial.ttf \
+    assets/social-preview.svg /tmp/ouroboros-social-layout.png
+  magick assets/icon_1024.png -resize 248x248 /tmp/ouroboros-social-icon.png
+  magick /tmp/ouroboros-social-layout.png /tmp/ouroboros-social-icon.png \
+    -geometry +86+196 -composite -strip assets/social-preview.png
+  pngquant --force --output assets/social-preview.png --quality 80-95 \
+    assets/social-preview.png
+
+Verify at 1280x640, 640x320, and 320x160. GitHub requires the uploaded image
+to remain below 1 MB; this source is intentionally separate from the Pages OG asset.
+  ]]></metadata>
+
+  <defs>
+    <linearGradient id="background" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0" stop-color="#171119"/>
+      <stop offset="0.52" stop-color="#0d0b0f"/>
+      <stop offset="1" stop-color="#09080b"/>
+    </linearGradient>
+    <radialGradient id="signal" cx="0.18" cy="0.5" r="0.44">
+      <stop offset="0" stop-color="#c93545" stop-opacity="0.23"/>
+      <stop offset="0.42" stop-color="#c93545" stop-opacity="0.07"/>
+      <stop offset="1" stop-color="#c93545" stop-opacity="0"/>
+    </radialGradient>
+    <linearGradient id="rule" x1="0" y1="0" x2="1" y2="0">
+      <stop offset="0" stop-color="#f07a86" stop-opacity="0.85"/>
+      <stop offset="1" stop-color="#c93545" stop-opacity="0.08"/>
+    </linearGradient>
+  </defs>
+
+  <rect width="1280" height="640" fill="url(#background)"/>
+  <rect width="1280" height="640" fill="url(#signal)"/>
+
+  <g fill="none" stroke="#f07a86" stroke-width="1" opacity="0.12">
+    <circle cx="210" cy="320" r="146"/>
+    <circle cx="210" cy="320" r="172"/>
+    <path d="M39 320H381"/>
+    <path d="M210 149V491"/>
+  </g>
+
+  <rect x="394" y="114" width="748" height="2" fill="url(#rule)"/>
+
+  <g font-family="-apple-system, BlinkMacSystemFont, 'SF Pro Display', 'Helvetica Neue', Arial, sans-serif">
+    <text x="394" y="184" fill="#f07a86" font-size="28" font-weight="650" letter-spacing="6">OUROBOROS</text>
+
+    <text x="394" y="286" fill="#f4f1f4" font-size="43" font-weight="620">An open-source, general-purpose AI agent</text>
+    <text x="394" y="350" fill="#f4f1f4" font-size="43" font-weight="620">with autonomous evolution and</text>
+    <text x="394" y="414" fill="#f4f1f4" font-size="43" font-weight="620">implementation-level self-modification.</text>
+
+    <text x="394" y="526" fill="#aaa3ad" font-size="23" font-weight="500" letter-spacing="0.15">Persistent identity · memory across restarts · live agent swarm</text>
+  </g>
+
+  <circle cx="1172" cy="526" r="5" fill="#c93545"/>
+</svg>

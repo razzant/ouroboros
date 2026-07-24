@@ -1,0 +1,88 @@
+name: Bug report
+description: Report a reproducible problem in Ouroboros
+title: "[Bug]: "
+labels:
+  - bug
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for taking the time to report a problem. For vulnerabilities or suspected boundary escapes, stop here and follow [SECURITY.md](https://github.com/razzant/ouroboros/blob/ouroboros/SECURITY.md) instead of posting details publicly.
+
+  - type: input
+    id: version
+    attributes:
+      label: Ouroboros version or commit
+      description: Use the release version, tag, or commit SHA you tested.
+      placeholder: v6.x.y or abc1234
+    validations:
+      required: true
+
+  - type: dropdown
+    id: installation
+    attributes:
+      label: Installation
+      options:
+        - macOS app
+        - Linux package
+        - Windows package
+        - Source install
+        - Docker
+        - Google Colab
+        - Other
+    validations:
+      required: true
+
+  - type: input
+    id: environment
+    attributes:
+      label: Environment
+      description: Include the operating system and any runtime detail relevant to the problem.
+      placeholder: macOS 15.5 on Apple Silicon
+    validations:
+      required: true
+
+  - type: textarea
+    id: problem
+    attributes:
+      label: What happened?
+      description: Describe the observable problem and its impact.
+    validations:
+      required: true
+
+  - type: textarea
+    id: reproduce
+    attributes:
+      label: Reproduction steps
+      description: Give the smallest sequence that reproduces the problem.
+      placeholder: |
+        1. Start Ouroboros with ...
+        2. Open ...
+        3. Run ...
+        4. Observe ...
+    validations:
+      required: true
+
+  - type: textarea
+    id: expected
+    attributes:
+      label: Expected behavior
+    validations:
+      required: true
+
+  - type: textarea
+    id: evidence
+    attributes:
+      label: Relevant evidence
+      description: Add a short log excerpt, screenshot, task ID, or other focused evidence. Remove secrets and private data.
+      render: shell
+
+  - type: checkboxes
+    id: checks
+    attributes:
+      label: Before submitting
+      options:
+        - label: I searched existing issues and Discussions for this problem.
+          required: true
+        - label: This report does not contain credentials, private data, or vulnerability details.
+          required: true

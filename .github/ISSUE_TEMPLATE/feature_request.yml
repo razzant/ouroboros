@@ -1,0 +1,54 @@
+name: Feature request
+description: Propose a focused improvement to Ouroboros
+title: "[Feature]: "
+labels:
+  - enhancement
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Explain the concrete need and the behavior you want. Open-ended questions and early design exploration are usually better suited to Discussions.
+
+  - type: textarea
+    id: need
+    attributes:
+      label: What need would this address?
+      description: Describe the task, limitation, or opportunity from the user's point of view.
+    validations:
+      required: true
+
+  - type: textarea
+    id: behavior
+    attributes:
+      label: Proposed behavior
+      description: Describe the smallest useful outcome without prescribing internal architecture unless it is essential.
+    validations:
+      required: true
+
+  - type: textarea
+    id: examples
+    attributes:
+      label: Example use
+      description: Show a concrete flow, command, or interaction if one helps clarify the request.
+
+  - type: textarea
+    id: alternatives
+    attributes:
+      label: Current alternatives
+      description: Explain how you handle this today and where that approach falls short.
+
+  - type: textarea
+    id: scope
+    attributes:
+      label: Scope and constraints
+      description: Note compatibility, privacy, safety, platform, or migration constraints that should shape the design.
+
+  - type: checkboxes
+    id: checks
+    attributes:
+      label: Before submitting
+      options:
+        - label: I searched existing issues and Discussions for related proposals.
+          required: true
+        - label: I kept this request focused on one coherent outcome.
+          required: true

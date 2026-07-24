@@ -1,0 +1,11 @@
+blank_issues_enabled: false
+contact_links:
+  - name: Questions and design discussion
+    url: https://github.com/razzant/ouroboros/discussions
+    about: Ask for help, share an idea, or explore a design before opening a scoped issue.
+  - name: Security report
+    url: https://github.com/razzant/ouroboros/blob/ouroboros/SECURITY.md
+    about: Read the private reporting instructions before sharing vulnerability details.
+  - name: Support guide
+    url: https://github.com/razzant/ouroboros/blob/ouroboros/SUPPORT.md
+    about: Choose the right place for setup help, bugs, proposals, security reports, and patches.
