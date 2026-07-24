@@ -31,6 +31,8 @@ htmlcov/
 # Build artifacts
 dist/
 build/
+site/node_modules/
+site/public/assets/
 *.dmg
 python-standalone/
 node-standalone/

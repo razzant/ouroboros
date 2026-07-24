@@ -1,0 +1,17 @@
+{
+  "name": "ouroboros-pages",
+  "private": true,
+  "version": "0.0.0",
+  "type": "module",
+  "scripts": {
+    "sync-assets": "node scripts/sync-assets.mjs",
+    "predev": "node scripts/sync-assets.mjs",
+    "dev": "vite --host 127.0.0.1",
+    "prebuild": "node scripts/sync-assets.mjs",
+    "build": "vite build",
+    "preview": "vite preview --host 127.0.0.1"
+  },
+  "devDependencies": {
+    "vite": "^7.0.0"
+  }
+}
