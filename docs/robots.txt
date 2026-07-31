@@ -1,4 +1,4 @@
 User-agent: *
 Allow: /
 
-Sitemap: https://razzant.github.io/ouroboros/sitemap.xml
+Sitemap: https://ouroboros-agent.ai/sitemap.xml
