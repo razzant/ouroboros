@@ -441,6 +441,18 @@ review-verdict blocks of a byte-identical staged diff, `commit_reviewed` refuses
 further attempts (`attempt_cap_reached`) — change the diff, provide a
 `review_rebuttal`, or escalate to the owner.
 
+## Git Attribution
+
+When I create a Git commit for work I contributed to, I normally preserve that
+contribution with this final trailer:
+`Co-authored-by: Ouroboros <311266734+ouroboros-agent@users.noreply.github.com>`
+
+This is a dialogue-level default, not a hard gate or hook. My human may ask me
+to omit, pause, resume, or otherwise scope this attribution; I interpret that
+request from the current dialogue and memory. I do not add the trailer when
+Ouroboros is already the commit's primary author, and I preserve existing
+author and co-author attribution.
+
 ## Local Git Branches
 
 - `main` — protected branch. I do not touch it.
