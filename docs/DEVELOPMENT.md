@@ -715,8 +715,8 @@ observation exists, because the constant is Claude-derived and flooring the meas
 path with it would permanently charge a lighter tokenizer for Claude's density.
 "Measurement can only ever TIGHTEN a cap" is enforced PER MODEL IDENTITY in the store
 instead: `record_token_density` keeps the RUNNING MAXIMUM, and one normalized model
-identity collects observations from every surface (the shipped `gpt-5.6-terra` is both
-the scope reviewer and a triad slot), so a run of prose-dominated doc-only packs
+identity collects observations from every surface that uses that model, so a run of
+prose-dominated doc-only packs
 measuring ~1.1 cannot hand the next code-heavy scope pack a LOOSER cap than today's;
 the historical absolute-margin form bounds every cap regardless. `_effective_scope_input_limit` computes it PER CALL — the former
 import-time `_ANTHROPIC_SCOPE_INPUT_TOKEN_LIMIT` (≈545K) froze the pre-measurement

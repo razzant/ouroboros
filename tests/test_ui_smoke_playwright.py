@@ -1791,78 +1791,128 @@ def test_ui_smoke_mobile_composer_toolbar_does_not_overlap_input(direct_server):
         raise
 
 
-def _drawer_swipe_binder_assertions(page) -> None:
-    """Shared body for the drawer swipe-left binder checks (any browser/device).
+def _install_controlled_visual_viewport(page, initial_height: int) -> None:
+    """Install a deterministic viewport-height signal before application JS.
 
-    HONESTY NOTE: this dispatches SYNTHESIZED PointerEvents from JS, so it
-    verifies the gestures.js binder wiring (touch-only filter, pointerup
-    decision, enabled() gating, commit → setMobileDrawerOpen(false)) — it does
-    NOT exercise native touch-scroll/touch-action arbitration, which only a
-    real compositor gesture can.
+    This exercises Ouroboros's viewport/focus state machine, not a native OS
+    keyboard. The assertions below separately inspect the rendered drawer.
     """
-    page.wait_for_selector("#chat-input", timeout=30_000)
-    page.click("[data-mobile-nav-toggle]")
-    page.wait_for_selector("#primary-sidebar.open", timeout=5_000)
-    # A synthesized left swipe on the sidebar surface: pointerdown, a real
-    # ~40ms dwell (the binder times the gesture), then pointerup 120px left.
-    page.evaluate(
-        """async () => {
-            const sidebar = document.getElementById('primary-sidebar');
-            const fire = (type, x, y) => sidebar.dispatchEvent(new PointerEvent(type, {
-                bubbles: true,
-                cancelable: true,
-                composed: true,
-                pointerId: 7,
-                pointerType: 'touch',
-                isPrimary: true,
-                clientX: x,
-                clientY: y,
-            }));
-            fire('pointerdown', 280, 300);
-            await new Promise((resolve) => setTimeout(resolve, 40));
-            fire('pointerup', 160, 306);
-        }"""
+    page.add_init_script(
+        f"""(() => {{
+            let height = {int(initial_height)};
+            const viewport = new EventTarget();
+            Object.defineProperty(viewport, 'height', {{ get: () => height }});
+            Object.defineProperty(window, 'visualViewport', {{
+                configurable: true,
+                value: viewport,
+            }});
+            window.__setTestVisualViewportHeight = (nextHeight) => {{
+                height = Number(nextHeight);
+                viewport.dispatchEvent(new Event('resize'));
+            }};
+        }})()"""
     )
+
+
+def _mobile_keyboard_drawer_assertions(page, url: str, screenshot_path: pathlib.Path) -> None:
+    page.goto(url, wait_until="domcontentloaded", timeout=30_000)
+    page.wait_for_selector("#chat-input", timeout=30_000)
+
+    # A transient Telegram/WebView viewport shrink with no focused editable must
+    # never claim that the software keyboard is open.
+    page.evaluate("() => window.__setTestVisualViewportHeight(500)")
+    page.wait_for_timeout(50)
+    assert not page.locator("body").evaluate("el => el.classList.contains('keyboard-open')")
+
+    # Restore the stable app viewport, then prove the same shrink is recognized
+    # while the composer really owns focus.
+    page.evaluate("() => window.__setTestVisualViewportHeight(844)")
+    page.wait_for_timeout(50)
+    page.focus("#chat-input")
+    page.evaluate("() => window.__setTestVisualViewportHeight(500)")
+    page.wait_for_function("() => document.body.classList.contains('keyboard-open')", timeout=5_000)
+
+    toggle = page.locator("#page-chat [data-mobile-nav-toggle]")
+    toggle.click()
     page.wait_for_function(
-        "() => !document.getElementById('primary-sidebar').classList.contains('open')",
+        "() => document.body.classList.contains('nav-drawer-open')"
+        " && !document.body.classList.contains('keyboard-open')"
+        " && document.activeElement?.id !== 'chat-input'",
         timeout=5_000,
     )
-    # The committed swipe armed a ~400ms scoped click suppressor (a synthetic
-    # dispatch produces no matching click to consume it) — let it expire so the
-    # reopen click below is not the one it swallows.
-    page.wait_for_timeout(450)
-    # The same displacement from a MOUSE pointer must be ignored (touch-only).
-    page.click("[data-mobile-nav-toggle]")
-    page.wait_for_selector("#primary-sidebar.open", timeout=5_000)
-    still_open = page.evaluate(
-        """async () => {
-            const sidebar = document.getElementById('primary-sidebar');
-            const fire = (type, x, y) => sidebar.dispatchEvent(new PointerEvent(type, {
-                bubbles: true,
-                cancelable: true,
-                composed: true,
-                pointerId: 8,
-                pointerType: 'mouse',
-                isPrimary: true,
-                clientX: x,
-                clientY: y,
-            }));
-            fire('pointerdown', 280, 300);
-            await new Promise((resolve) => setTimeout(resolve, 40));
-            fire('pointerup', 160, 306);
-            return document.getElementById('primary-sidebar').classList.contains('open');
+    page.wait_for_timeout(220)  # finish the 180ms drawer transition
+
+    state = page.evaluate(
+        """() => {
+            const sidebar = document.querySelector('#primary-sidebar');
+            const backdrop = document.querySelector('#nav-drawer-backdrop');
+            const toggle = document.querySelector('#page-chat [data-mobile-nav-toggle]');
+            const rect = sidebar.getBoundingClientRect();
+            return {
+                bodyOpen: document.body.classList.contains('nav-drawer-open'),
+                sidebarOpen: sidebar.classList.contains('open'),
+                sidebarDisplay: getComputedStyle(sidebar).display,
+                sidebarVisibility: getComputedStyle(sidebar).visibility,
+                sidebarRect: {left: rect.left, right: rect.right, width: rect.width, height: rect.height},
+                backdropHidden: backdrop.hidden,
+                backdropDisplay: getComputedStyle(backdrop).display,
+                ariaExpanded: toggle.getAttribute('aria-expanded'),
+                activeId: document.activeElement?.id || '',
+                keyboardBody: document.body.classList.contains('keyboard-open'),
+                keyboardRoot: document.documentElement.classList.contains('keyboard-open'),
+            };
         }"""
     )
-    assert still_open, "mouse pointer sequence must not trigger the touch-only swipe binder"
+    assert state["bodyOpen"] and state["sidebarOpen"], state
+    assert state["ariaExpanded"] == "true", state
+    assert not state["backdropHidden"] and state["backdropDisplay"] != "none", state
+    assert state["sidebarDisplay"] != "none" and state["sidebarVisibility"] != "hidden", state
+    assert state["sidebarRect"]["width"] > 200 and state["sidebarRect"]["height"] > 400, state
+    assert state["sidebarRect"]["left"] >= -1 and state["sidebarRect"]["right"] > 0, state
+    assert state["activeId"] != "chat-input", state
+    assert not state["keyboardBody"] and not state["keyboardRoot"], state
+
+    # The now-visible drawer must still own a vertically scrollable content
+    # surface even though the keyboard touch lock was active one frame earlier.
+    scroll = page.evaluate(
+        """() => {
+            const scroller = document.querySelector('#primary-sidebar .sidebar-scroll');
+            for (let i = 0; i < 60; i += 1) {
+                const row = document.createElement('button');
+                row.className = 'nav-row';
+                row.type = 'button';
+                row.textContent = `Drawer overflow probe ${i}`;
+                scroller.appendChild(row);
+            }
+            scroller.scrollTop = scroller.scrollHeight;
+            return {
+                scrollTop: scroller.scrollTop,
+                scrollHeight: scroller.scrollHeight,
+                clientHeight: scroller.clientHeight,
+                overflowY: getComputedStyle(scroller).overflowY,
+            };
+        }"""
+    )
+    assert scroll["scrollHeight"] > scroll["clientHeight"], scroll
+    assert scroll["scrollTop"] > 0, scroll
+    assert scroll["overflowY"] in {"auto", "scroll"}, scroll
+    page.screenshot(path=str(screenshot_path), full_page=True)
+
+    # Exercise the real backdrop click in the visible strip to the right of the
+    # 320px drawer, then require all state/ARIA projections to close together.
+    page.locator("#nav-drawer-backdrop").click(position={"x": 380, "y": 400})
+    page.wait_for_function(
+        "() => !document.body.classList.contains('nav-drawer-open')"
+        " && !document.querySelector('#primary-sidebar').classList.contains('open')"
+        " && document.querySelector('#nav-drawer-backdrop').hidden"
+        " && document.querySelector('#page-chat [data-mobile-nav-toggle]').getAttribute('aria-expanded') === 'false'",
+        timeout=5_000,
+    )
 
 
 @pytest.mark.ui_browser
-def test_ui_smoke_mobile_drawer_swipe_left_binder_closes_drawer_synthetic_pointer(direct_server):
-    """Chromium mobile emulation: synthesized pointer swipe-left closes the drawer.
-
-    Verifies gestures.js BINDER WIRING via synthetic PointerEvents (see
-    _drawer_swipe_binder_assertions), not native gesture arbitration.
-    """
+def test_ui_smoke_mobile_keyboard_state_cannot_hide_open_drawer_chromium(direct_server_with_data):
+    """Controlled visualViewport state plus real Chromium drawer geometry."""
     pytest.importorskip("playwright.sync_api", reason="Playwright is not installed")
     from playwright.sync_api import Error as PlaywrightError
     from playwright.sync_api import sync_playwright
@@ -1872,107 +1922,11 @@ def test_ui_smoke_mobile_drawer_swipe_left_binder_closes_drawer_synthetic_pointe
             browser = pw.chromium.launch(headless=True)
             page = browser.new_page(viewport={"width": 390, "height": 844}, is_mobile=True, has_touch=True)
             try:
-                page.goto(direct_server, wait_until="domcontentloaded", timeout=30_000)
-                _drawer_swipe_binder_assertions(page)
-            finally:
-                browser.close()
-    except PlaywrightError as exc:
-        if "Executable doesn't exist" in str(exc) or "playwright install" in str(exc).lower():
-            pytest.skip(str(exc))
-        raise
-
-
-@pytest.mark.ui_browser
-def test_ui_smoke_chromium_real_touch_closes_both_mobile_surfaces(direct_server):
-    """Compositor touch input, including hit-testing/capture/selection, closes
-    both release-triggered mobile surfaces. This complements the synthetic
-    binder unit above, which cannot reveal lost pointer capture or text
-    selection created while a finger leaves the narrow project header."""
-    pytest.importorskip("playwright.sync_api", reason="Playwright is not installed")
-    from playwright.sync_api import Error as PlaywrightError
-    from playwright.sync_api import sync_playwright
-
-    def touch_swipe(cdp, start, end):
-        sx, sy = start
-        ex, ey = end
-        cdp.send("Input.emulateTouchFromMouseEvent", {
-            "type": "mousePressed", "x": int(sx), "y": int(sy),
-            "button": "left", "clickCount": 1,
-        })
-        for step in range(1, 7):
-            cdp.send("Input.emulateTouchFromMouseEvent", {
-                "type": "mouseMoved",
-                "x": int(sx + (ex - sx) * step / 6),
-                "y": int(sy + (ey - sy) * step / 6),
-                "button": "left", "clickCount": 1,
-            })
-        cdp.send("Input.emulateTouchFromMouseEvent", {
-            "type": "mouseReleased", "x": int(ex), "y": int(ey),
-            "button": "left", "clickCount": 1,
-        })
-
-    try:
-        with sync_playwright() as pw:
-            browser = pw.chromium.launch(headless=True)
-            context = browser.new_context(
-                viewport={"width": 375, "height": 812},
-                is_mobile=True, has_touch=True, device_scale_factor=1,
-            )
-            page = context.new_page()
-            try:
-                page.goto(direct_server, wait_until="domcontentloaded", timeout=30_000)
-                page.wait_for_selector("#chat-input", timeout=30_000)
-                cdp = context.new_cdp_session(page)
-
-                toggle = page.locator("#page-chat [data-mobile-nav-toggle]")
-                toggle.click()
-                page.wait_for_selector("#primary-sidebar.open", timeout=5_000)
-                page.wait_for_timeout(250)  # finish the 180ms drawer transition
-                sidebar = page.locator("#primary-sidebar").bounding_box()
-                assert sidebar
-                touch_swipe(
-                    cdp,
-                    (min(sidebar["x"] + sidebar["width"] - 20, 300), sidebar["y"] + 220),
-                    (sidebar["x"] + 25, sidebar["y"] + 220),
-                )
-                page.wait_for_function(
-                    "() => !document.body.classList.contains('nav-drawer-open')",
-                    timeout=5_000,
-                )
-                page.wait_for_timeout(250)
-
-                created = page.evaluate(
-                    """async () => {
-                        const response = await fetch('/api/projects', {
-                            method: 'POST', headers: {'Content-Type': 'application/json'},
-                            body: JSON.stringify({id: 'touch-project', name: 'Touch Project'}),
-                        });
-                        return {ok: response.ok, body: await response.json()};
-                    }"""
-                )
-                assert created["ok"], created
-                page.reload(wait_until="domcontentloaded", timeout=30_000)
-                toggle = page.locator("#page-chat [data-mobile-nav-toggle]")
-                toggle.click()
-                page.wait_for_timeout(250)
-                project = page.locator('[data-project-id="touch-project"]')
-                project.wait_for(state="visible", timeout=30_000)
-                project.click()
-                page.wait_for_function(
-                    "() => document.body.classList.contains('project-panel-open')",
-                    timeout=5_000,
-                )
-                page.wait_for_timeout(350)
-                bar = page.locator(".project-panel-bar").bounding_box()
-                assert bar
-                touch_swipe(
-                    cdp,
-                    (bar["x"] + bar["width"] / 2, bar["y"] + 15),
-                    (bar["x"] + bar["width"] / 2, bar["y"] + 180),
-                )
-                page.wait_for_function(
-                    "() => !document.body.classList.contains('project-panel-open')",
-                    timeout=5_000,
+                _install_controlled_visual_viewport(page, 844)
+                _mobile_keyboard_drawer_assertions(
+                    page,
+                    direct_server_with_data["url"],
+                    direct_server_with_data["data_dir"].parent / "mobile-keyboard-drawer-chromium.png",
                 )
             finally:
                 browser.close()
@@ -1983,11 +1937,8 @@ def test_ui_smoke_chromium_real_touch_closes_both_mobile_surfaces(direct_server)
 
 
 @pytest.mark.ui_browser
-def test_ui_smoke_webkit_iphone_drawer_swipe_left_binder_synthetic_pointer(direct_server):
-    """WebKit + iPhone descriptor: same synthetic-pointer BINDER wiring check.
-
-    Skips cleanly when the local Playwright install has no WebKit build.
-    """
+def test_ui_smoke_mobile_keyboard_state_cannot_hide_open_drawer_webkit(direct_server_with_data):
+    """Same controlled state-machine check in WebKit with an iPhone profile."""
     pytest.importorskip("playwright.sync_api", reason="Playwright is not installed")
     from playwright.sync_api import Error as PlaywrightError
     from playwright.sync_api import sync_playwright
@@ -2006,8 +1957,14 @@ def test_ui_smoke_webkit_iphone_drawer_swipe_left_binder_synthetic_pointer(direc
             context = browser.new_context(**iphone)
             page = context.new_page()
             try:
-                page.goto(direct_server, wait_until="domcontentloaded", timeout=30_000)
-                _drawer_swipe_binder_assertions(page)
+                # The controller's threshold is driven by our deterministic app
+                # viewport; the iPhone descriptor still owns rendering/input.
+                _install_controlled_visual_viewport(page, 844)
+                _mobile_keyboard_drawer_assertions(
+                    page,
+                    direct_server_with_data["url"],
+                    direct_server_with_data["data_dir"].parent / "mobile-keyboard-drawer-webkit.png",
+                )
             finally:
                 browser.close()
     except PlaywrightError as exc:
@@ -2183,65 +2140,248 @@ def test_ui_smoke_docker_mode_loads_health():
 
 
 @pytest.mark.ui_browser
-def test_ui_smoke_v639_subagent_model_label_and_narrow_layout(direct_server_with_data):
-    # v6.39.1 Phase-5 UI: E2 (the subagent card shows a compact "role · model" label) and
-    # E1 (in a narrow chat column the summary row wraps + the subagent nesting indent is
-    # trimmed). Wide layout must keep the default indent / no-wrap (no regression).
+@pytest.mark.parametrize("browser_engine", ["chromium", "webkit"])
+def test_ui_smoke_live_cards_keep_usable_geometry_at_depth_and_in_project_panel(
+    direct_server_with_data,
+    browser_engine,
+):
+    """Rendered regression for the one-letter-wide nested-card failure.
+
+    A real replayed task tree reaches the configured hard depth of ten. The
+    narrow checks use geometry instead of CSS declarations, then reload to
+    cover replay. Wide Main and a narrow Project panel prove the card-local
+    container responds to its actual consumer width rather than the viewport.
+    """
     pytest.importorskip("playwright.sync_api", reason="Playwright is not installed")
     from playwright.sync_api import Error as PlaywrightError
     from playwright.sync_api import sync_playwright
 
+    from ouroboros.projects_registry import create_project
+
     data_dir = direct_server_with_data["data_dir"]
     url = direct_server_with_data["url"]
+    project = create_project(data_dir, "layout-project", name="Layout Project")
     logs_dir = data_dir / "logs"
     logs_dir.mkdir(parents=True, exist_ok=True)
-    rows = [
-        {"ts": "2026-05-25T10:00:00+00:00", "chat_id": 1, "task_id": "parent1",
-         "content": "Parent task started", "is_progress": True},
-        {"ts": "2026-05-25T10:00:02+00:00", "chat_id": 1, "task_id": "child1",
-         "content": "Subagent running", "is_progress": True, "delegation_role": "subagent",
-         "subagent_event": "running", "subagent_task_id": "child1", "parent_task_id": "parent1",
-         "root_task_id": "parent1", "subagent_role": "planning-scout",
-         "model": "openai::gpt-5.5", "status": "running"},
-        {"ts": "2026-05-25T10:00:03+00:00", "chat_id": 1, "task_id": "child1",
-         "content": "Subagent completed", "is_progress": True, "delegation_role": "subagent",
-         "subagent_event": "completed", "subagent_task_id": "child1", "parent_task_id": "parent1",
-         "root_task_id": "parent1", "subagent_role": "planning-scout",
-         "model": "openai::gpt-5.5", "status": "completed", "result": "done"},
-    ]
+    rows = [{
+        "ts": "2026-05-25T10:00:00+00:00",
+        "chat_id": 1,
+        "task_id": "layout-root",
+        "content": "Root task started",
+        "suggested_name": "Deep nested layout regression",
+        "is_progress": True,
+    }]
+    long_url = "https://example.com/" + "nested-segment-without-breaks-" * 18 + "final"
+    parent_id = "layout-root"
+    for depth in range(1, 11):
+        child_id = f"layout-child-{depth:02d}"
+        rows.append({
+            "ts": f"2026-05-25T10:00:{depth:02d}+00:00",
+            "chat_id": 1,
+            "task_id": child_id,
+            "content": f"Depth {depth} subagent completed",
+            "is_progress": True,
+            "delegation_role": "subagent",
+            "subagent_event": "completed",
+            "subagent_task_id": child_id,
+            "parent_task_id": parent_id,
+            "root_task_id": "layout-root",
+            "subagent_role": "pty-tests",
+            "model": "google/gemini-3.6-flash",
+            "status": "completed",
+            "result": f"Depth {depth} complete. Full evidence: {long_url}",
+        })
+        parent_id = child_id
+    panel_row = {
+        "ts": "2026-05-25T10:01:00+00:00",
+        "chat_id": project["chat_id"],
+        "task_id": "panel-root",
+        "content": "Inspecting a narrow Project panel with a long unbroken reference " + long_url,
+        "suggested_name": "Narrow Project panel keeps a usable title column",
+        "is_progress": True,
+    }
     (logs_dir / "progress.jsonl").write_text(
-        "".join(json.dumps(r) + "\n" for r in rows), encoding="utf-8")
+        "".join(json.dumps(row) + "\n" for row in rows),
+        encoding="utf-8",
+    )
+
+    mobile_geometry = """() => {
+        const messages = document.querySelector('#page-chat #chat-messages');
+        const messagesStyle = getComputedStyle(messages);
+        const usableMessageWidth = messages.clientWidth
+            - parseFloat(messagesStyle.paddingInlineStart || messagesStyle.paddingLeft || '0')
+            - parseFloat(messagesStyle.paddingInlineEnd || messagesStyle.paddingRight || '0');
+        const cards = [...messages.querySelectorAll('.chat-live-card')];
+        const root = messages.querySelector(':scope > .chat-live-card[data-task-id="layout-root"]');
+        const deepest = messages.querySelector('.chat-live-card[data-task-id="layout-child-10"]');
+        const cardFacts = cards.map((card) => {
+            const title = card.querySelector(':scope > .chat-live-summary-button [data-live-title]');
+            const style = getComputedStyle(title);
+            const lineHeight = parseFloat(style.lineHeight);
+            const titleRect = title.getBoundingClientRect();
+            return {
+                id: card.dataset.taskId,
+                clientWidth: card.clientWidth,
+                scrollWidth: card.scrollWidth,
+                titleWidth: titleRect.width,
+                titleHeight: titleRect.height,
+                titleLines: lineHeight > 0 ? titleRect.height / lineHeight : 99,
+            };
+        });
+        const main = root.querySelector(':scope > .chat-live-summary-button .chat-live-summary-main').getBoundingClientRect();
+        const side = root.querySelector(':scope > .chat-live-summary-button .chat-live-summary-side').getBoundingClientRect();
+        return {
+            messageWidth: usableMessageWidth,
+            rootWidth: root.getBoundingClientRect().width,
+            deepestWidth: deepest.getBoundingClientRect().width,
+            rootMainBottom: main.bottom,
+            rootSideTop: side.top,
+            cardFacts,
+        };
+    }"""
+
+    def assert_mobile_geometry(page):
+        page.wait_for_selector(
+            '#page-chat .chat-live-card[data-task-id="layout-root"]',
+            state="attached",
+            timeout=30_000,
+        )
+        page.wait_for_timeout(500)
+        rendered_ids = page.locator("#page-chat .chat-live-card").evaluate_all(
+            "cards => cards.map(card => card.dataset.taskId)"
+        )
+        assert len(rendered_ids) == 11, rendered_ids
+        facts = page.evaluate(mobile_geometry)
+        assert facts["rootWidth"] >= facts["messageWidth"] * 0.95, facts
+        assert facts["rootWidth"] - facts["deepestWidth"] <= 40, facts
+        assert facts["rootSideTop"] >= facts["rootMainBottom"] - 1, facts
+        assert all(card["scrollWidth"] <= card["clientWidth"] + 1 for card in facts["cardFacts"]), facts
+        assert min(card["titleWidth"] for card in facts["cardFacts"]) >= 160, facts
+        assert max(card["titleLines"] for card in facts["cardFacts"]) <= 3.2, facts
+        deepest = page.locator('.chat-live-card[data-task-id="layout-child-10"]')
+        assert "pty-tests · gemini-3.6-flash" in deepest.inner_text()
+        deepest.locator(":scope > [data-live-summary-button]").click()
+        line_toggle = deepest.locator(":scope > [data-live-timeline] .chat-live-line-toggle").last
+        line_toggle.wait_for(state="visible", timeout=5_000)
+        line_toggle.click()
+        expanded = deepest.evaluate(
+            """card => {
+                const line = card.querySelector(':scope > [data-live-timeline] .chat-live-line');
+                const title = line.querySelector('.chat-live-line-title');
+                return {
+                    cardClient: card.clientWidth,
+                    cardScroll: card.scrollWidth,
+                    lineClient: line.clientWidth,
+                    lineScroll: line.scrollWidth,
+                    titleWidth: title.getBoundingClientRect().width,
+                    text: line.innerText,
+                };
+            }"""
+        )
+        assert expanded["cardScroll"] <= expanded["cardClient"] + 1, expanded
+        assert expanded["lineScroll"] <= expanded["lineClient"] + 1, expanded
+        assert expanded["titleWidth"] >= 150, expanded
+        assert long_url in expanded["text"], expanded
 
     try:
         with sync_playwright() as pw:
-            browser = pw.chromium.launch(headless=True)
+            browser_type = getattr(pw, browser_engine)
             try:
-                # Narrow viewport -> the chat column is <=620px so the @container rule applies.
-                page = browser.new_page(viewport={"width": 420, "height": 900})
-                page.goto(url, wait_until="domcontentloaded", timeout=30_000)
-                child_sel = '.chat-live-card.subagent[data-parent-task-id="parent1"]'
-                page.wait_for_selector(child_sel, state="attached", timeout=30_000)
-                child = page.locator(child_sel).first
-                assert child.is_visible()
-                # E2: compact "role · model" label — provider prefix dropped for both the
-                # OpenRouter "provider/model" and direct "provider::model" id forms.
-                assert "planning-scout · gpt-5.5" in child.inner_text()
-                # E1: narrow container trims the subagent indent + wraps the summary row.
-                page.wait_for_function(
-                    "() => getComputedStyle(document.querySelector('.chat-subagents')).marginLeft === '12px'",
-                    timeout=10_000)
-                narrow_wrap = page.eval_on_selector(
-                    ".chat-live-summary-main", "el => getComputedStyle(el).flexWrap")
-                assert narrow_wrap == "wrap", narrow_wrap
+                browser = browser_type.launch(headless=True)
+            except PlaywrightError as exc:
+                if "Executable doesn't exist" in str(exc) or "playwright install" in str(exc).lower():
+                    pytest.skip(f"Playwright {browser_engine} browser is not installed: {exc}")
+                raise
+            try:
+                mobile_context = browser.new_context(
+                    viewport={"width": 390, "height": 844},
+                    is_mobile=True,
+                    has_touch=True,
+                )
+                mobile = mobile_context.new_page()
+                mobile.goto(url, wait_until="domcontentloaded", timeout=30_000)
+                assert_mobile_geometry(mobile)
+                mobile.screenshot(
+                    path=str(data_dir.parent / f"live-card-depth-10-{browser_engine}.png"),
+                    full_page=True,
+                )
+                mobile.reload(wait_until="domcontentloaded", timeout=30_000)
+                assert_mobile_geometry(mobile)
+                mobile_context.close()
 
-                # Wide viewport -> default layout, no E1 wrapping/trim (no regression).
-                page.set_viewport_size({"width": 1280, "height": 900})
-                page.wait_for_function(
-                    "() => getComputedStyle(document.querySelector('.chat-subagents')).marginLeft === '24px'",
-                    timeout=10_000)
-                wide_wrap = page.eval_on_selector(
-                    ".chat-live-summary-main", "el => getComputedStyle(el).flexWrap")
-                assert wide_wrap == "nowrap", wide_wrap
+                wide = browser.new_page(viewport={"width": 1280, "height": 900})
+                wide.goto(url, wait_until="domcontentloaded", timeout=30_000)
+                wide.wait_for_selector(
+                    '#page-chat .chat-live-card[data-task-id="layout-root"]',
+                    state="attached",
+                    timeout=30_000,
+                )
+                wide.wait_for_timeout(500)
+                rendered_ids = wide.locator("#page-chat .chat-live-card").evaluate_all(
+                    "cards => cards.map(card => card.dataset.taskId)"
+                )
+                assert len(rendered_ids) == 11, rendered_ids
+                wide_facts = wide.evaluate(
+                    """() => {
+                        const root = document.querySelector('#page-chat #chat-messages > .chat-live-card[data-task-id="layout-root"]');
+                        const summary = root.querySelector(':scope > .chat-live-summary-button .chat-live-summary');
+                        const main = summary.querySelector('.chat-live-summary-main').getBoundingClientRect();
+                        const side = summary.querySelector('.chat-live-summary-side').getBoundingClientRect();
+                        return {
+                            wrap: getComputedStyle(summary).flexWrap,
+                            mainTop: main.top,
+                            mainBottom: main.bottom,
+                            sideTop: side.top,
+                            sideBottom: side.bottom,
+                            rootClient: root.clientWidth,
+                            rootScroll: root.scrollWidth,
+                        };
+                    }"""
+                )
+                assert wide_facts["wrap"] == "nowrap", wide_facts
+                assert min(wide_facts["mainBottom"], wide_facts["sideBottom"]) \
+                    > max(wide_facts["mainTop"], wide_facts["sideTop"]), wide_facts
+                assert wide_facts["rootScroll"] <= wide_facts["rootClient"] + 1, wide_facts
+
+                with (logs_dir / "progress.jsonl").open("a", encoding="utf-8") as handle:
+                    handle.write(json.dumps(panel_row) + "\n")
+                wide.evaluate(
+                    "() => document.documentElement.style.setProperty('--project-panel-width', '440px')"
+                )
+                project_row = wide.locator('[data-project-id="layout-project"]')
+                project_row.wait_for(state="visible", timeout=30_000)
+                project_row.click()
+                panel_card = wide.locator(
+                    '.chat-instance-panel .chat-live-card[data-task-id="panel-root"]'
+                )
+                panel_card.wait_for(state="visible", timeout=30_000)
+                panel_facts = panel_card.evaluate(
+                    """card => {
+                        const panel = card.closest('.chat-instance-panel');
+                        const summary = card.querySelector(':scope > .chat-live-summary-button .chat-live-summary');
+                        const main = summary.querySelector('.chat-live-summary-main').getBoundingClientRect();
+                        const side = summary.querySelector('.chat-live-summary-side').getBoundingClientRect();
+                        const title = summary.querySelector('[data-live-title]').getBoundingClientRect();
+                        return {
+                            panelWidth: panel.getBoundingClientRect().width,
+                            cardWidth: card.getBoundingClientRect().width,
+                            cardClient: card.clientWidth,
+                            cardScroll: card.scrollWidth,
+                            titleWidth: title.width,
+                            mainBottom: main.bottom,
+                            sideTop: side.top,
+                        };
+                    }"""
+                )
+                assert panel_facts["panelWidth"] <= 620, panel_facts
+                assert panel_facts["cardWidth"] >= panel_facts["panelWidth"] * 0.9, panel_facts
+                assert panel_facts["cardScroll"] <= panel_facts["cardClient"] + 1, panel_facts
+                assert panel_facts["titleWidth"] >= 180, panel_facts
+                assert panel_facts["sideTop"] >= panel_facts["mainBottom"] - 1, panel_facts
+                wide.screenshot(
+                    path=str(data_dir.parent / f"live-card-project-panel-{browser_engine}.png"),
+                    full_page=True,
+                )
             finally:
                 browser.close()
     except PlaywrightError as exc:

@@ -37,6 +37,7 @@ from devtools.benchmarks.common.run_roots import (
     safe_join_under,
 )
 from devtools.benchmarks.terminal_bench.run_harbor_smoke import AGENT_IMPORT
+from ouroboros.config import SETTINGS_DEFAULTS
 
 
 DEFAULT_DATASET = "terminal-bench/terminal-bench-2-1"
@@ -127,9 +128,9 @@ def _effective_helper_models(measured_model: str, light_model: str, *, disable_a
     (env override else the shipped config defaults) so the declared set matches
     reality. Returns ordered (model_id, role) pairs, deduped by model id.
     """
-    review_default = "openai/gpt-5.5,google/gemini-3.5-flash,anthropic/claude-opus-4.8"
-    websearch_default = "gpt-5.2"
-    scope_default = "openai/gpt-5.5"
+    review_default = str(SETTINGS_DEFAULTS["OUROBOROS_REVIEW_MODELS"])
+    websearch_default = str(SETTINGS_DEFAULTS["OUROBOROS_WEBSEARCH_MODEL"])
+    scope_default = str(SETTINGS_DEFAULTS["OUROBOROS_SCOPE_REVIEW_MODELS"])
     review = os.environ.get("OUROBOROS_REVIEW_MODELS", review_default) or review_default
     scope = (os.environ.get("OUROBOROS_SCOPE_REVIEW_MODELS")
              or os.environ.get("OUROBOROS_SCOPE_REVIEW_MODEL") or scope_default)

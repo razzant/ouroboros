@@ -81,9 +81,9 @@ def test_review_models_default_in_config():
     assert val  # non-empty
     models = [m.strip() for m in val.split(",") if m.strip()]
     assert models == [
-        "openai/gpt-5.6-terra",
+        "openai/gpt-5.6-luna",
         "google/gemini-3.6-flash",
-        "deepseek/deepseek-v4-pro",
+        "anthropic/claude-sonnet-5",
     ]
 
 
@@ -318,7 +318,7 @@ def test_from_zero_local_only_review_slots_inherit_main_and_stay_local(monkeypat
     monkeypatch.setenv("OUROBOROS_MODEL", "owner/local-main")
     monkeypatch.setenv(
         "OUROBOROS_REVIEW_MODELS",
-        "openai/gpt-5.6-terra,google/gemini-3.6-flash,deepseek/deepseek-v4-pro",
+        "openai/gpt-5.6-luna,google/gemini-3.6-flash,anthropic/claude-sonnet-5",
     )
     monkeypatch.setenv("OUROBOROS_SCOPE_REVIEW_MODELS", "openai/gpt-5.6-terra")
 

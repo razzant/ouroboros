@@ -19,7 +19,6 @@ import { initActivity } from './modules/activity.js';
 import { initUpdateStatus } from './modules/update_status.js';
 import { initDashboard } from './modules/dashboard.js';
 import { hydrateNavIcons } from './modules/page_icons.js';
-import { bindSwipe } from './modules/gestures.js';
 
 import { initOnboardingOverlay } from './modules/onboarding_overlay.js';
 
@@ -64,9 +63,12 @@ const projectPaintRequests = new Map();
 let knownProjectsJson = '';
 let lastProjectRows = [];
 let projectPanelHideTimer = null;
+let releaseMobileKeyboardForDrawer = () => {};
 
 function setMobileDrawerOpen(open, { sync = true } = {}) {
-    navState.mobileDrawerOpen = Boolean(open);
+    const nextOpen = Boolean(open);
+    if (nextOpen) releaseMobileKeyboardForDrawer();
+    navState.mobileDrawerOpen = nextOpen;
     if (sync) syncNavigationState();
 }
 
@@ -185,40 +187,6 @@ document.addEventListener('click', (event) => {
 });
 navDrawerBackdrop?.addEventListener('click', () => setMobileDrawerOpen(false));
 hydrateNavIcons();
-
-// ---------------------------------------------------------------------------
-// Mobile dismiss gestures (v6.82.0 P3): exactly two release-triggered swipes.
-// One shared matchMedia instance per gesture surface — the drawer collapses at
-// ≤640px while the project overlay takes over at ≤900px; these deliberately
-// stay separate per-surface queries (no invented global "mobile" predicate).
-// Both gestures yield to the soft-keyboard lock (body.keyboard-open owns
-// document-level touch while the keyboard is up). The touch-action arbitration
-// classes live in web/style.css and are applied here at bind time so
-// index.html markup pins stay untouched.
-// ---------------------------------------------------------------------------
-const drawerSwipeMedia = window.matchMedia('(max-width: 640px)');
-const projectOverlaySwipeMedia = window.matchMedia('(max-width: 900px)');
-if (primarySidebar) {
-    primarySidebar.classList.add('gesture-surface-swipe-x');
-    bindSwipe(primarySidebar, {
-        direction: 'left',
-        enabled: () => navState.mobileDrawerOpen
-            && drawerSwipeMedia.matches
-            && !document.body.classList.contains('keyboard-open'),
-        onCommit: () => setMobileDrawerOpen(false),
-    });
-}
-const projectPanelBar = projectPanel?.querySelector('.project-panel-bar');
-if (projectPanelBar) {
-    projectPanelBar.classList.add('gesture-surface-swipe-y');
-    bindSwipe(projectPanelBar, {
-        direction: 'down',
-        enabled: () => Boolean(navState.activeProjectId)
-            && projectOverlaySwipeMedia.matches
-            && !document.body.classList.contains('keyboard-open'),
-        onCommit: () => closeProjectPanel(),
-    });
-}
 
 const ctx = {
     ws,
@@ -678,27 +646,68 @@ initMatrixRain();
 loadVersion();
 syncNavigationState();
 
-// Mobile soft-keyboard handling: --vvh + keyboard-open without inline styles.
+// Mobile soft-keyboard handling: viewport shrink counts only while an editable
+// owns focus. Drawer opening clears that state explicitly before navigation is
+// rendered, so stale WebView geometry cannot hide an otherwise-open sidebar.
 (function () {
     const vvhStyle = document.createElement('style');
     vvhStyle.id = 'runtime-vvh';
     document.head.appendChild(vvhStyle);
 
-    let wasKeyboardOpen = false;
+    const keyboardEditableSelector = [
+        'textarea',
+        'select',
+        'input:not([type])',
+        'input[type="text"]',
+        'input[type="search"]',
+        'input[type="email"]',
+        'input[type="url"]',
+        'input[type="tel"]',
+        'input[type="password"]',
+        'input[type="number"]',
+        '[contenteditable]:not([contenteditable="false"])',
+    ].join(',');
+
+    let keyboardOpen = false;
     let keyboardTouchStartY = 0;
-    let frozenBaseline = 0;
+    let stableViewportHeight = 0;
+    let focusBaselineHeight = 0;
+    let focusRevision = 0;
+    let baselineFrame = 0;
+
+    function keyboardEditable(node) {
+        if (!(node instanceof Element)) return null;
+        const editable = node.closest(keyboardEditableSelector);
+        if (!editable) return null;
+        if (editable.matches('input, textarea, select') && (editable.disabled || editable.readOnly)) {
+            return null;
+        }
+        return editable;
+    }
+
+    function focusedKeyboardEditable() {
+        return keyboardEditable(document.activeElement);
+    }
+
+    function viewportHeight() {
+        const candidates = [
+            window.visualViewport?.height,
+            window.innerHeight,
+            document.documentElement.clientHeight,
+        ];
+        return Number(candidates.find((value) => Number.isFinite(value) && value > 0) || 0);
+    }
 
     function findScrollableKeyboardNode(target) {
         let el = target;
         while (el && el !== document.body) {
-            // Class twins cover secondary chat instances (project panels);
-            // the main chat keeps its historic ids.
             if (
                 el.id === 'chat-messages'
                 || el.id === 'chat-input'
                 || el.classList?.contains('chat-messages')
                 || el.classList?.contains('chat-input')
                 || el.classList?.contains('chat-live-timeline')
+                || el.classList?.contains('sidebar-scroll')
             ) return el;
             el = el.parentElement;
         }
@@ -709,7 +718,6 @@ syncNavigationState();
         if (e.touches && e.touches.length) keyboardTouchStartY = e.touches[0].clientY;
     }
 
-    // Stop chat overscroll from moving the document while the keyboard is open.
     function lockBoundaryTouch(e) {
         const touch = e.touches && e.touches.length ? e.touches[0] : null;
         const scrollable = findScrollableKeyboardNode(e.target);
@@ -722,66 +730,90 @@ syncNavigationState();
         e.preventDefault();
     }
 
-    function captureFrozenBaseline() {
-        if (window.innerWidth > 640 || wasKeyboardOpen) return;
-        const candidates = [
-            document.documentElement.clientHeight,
-            window.innerHeight,
-            window.screen.availHeight || 0,
-            window.screen.height || 0,
-        ];
-        const best = Math.max(...candidates);
-        if (best > frozenBaseline) frozenBaseline = best;
+    function applyKeyboardState(visible) {
+        const nextVisible = Boolean(visible);
+        if (nextVisible && !keyboardOpen) {
+            window.scrollTo(0, 0);
+            document.addEventListener('touchstart', lockTouchStart, { passive: true });
+            document.addEventListener('touchmove', lockBoundaryTouch, { passive: false });
+        } else if (!nextVisible && keyboardOpen) {
+            document.removeEventListener('touchstart', lockTouchStart);
+            document.removeEventListener('touchmove', lockBoundaryTouch);
+        }
+        document.documentElement.classList.toggle('keyboard-open', nextVisible);
+        document.body.classList.toggle('keyboard-open', nextVisible);
+        keyboardOpen = nextVisible;
     }
 
-    captureFrozenBaseline();
+    function cancelBaselineFrame() {
+        if (!baselineFrame) return;
+        cancelAnimationFrame(baselineFrame);
+        baselineFrame = 0;
+    }
+
+    function rememberStableViewport(height) {
+        cancelBaselineFrame();
+        const revision = focusRevision;
+        baselineFrame = requestAnimationFrame(() => {
+            baselineFrame = 0;
+            if (revision !== focusRevision || focusedKeyboardEditable()) return;
+            stableViewportHeight = height;
+        });
+    }
 
     const updateVvh = () => {
-        const viewport = window.visualViewport;
-        const h = viewport ? viewport.height : window.innerHeight;
-
+        const h = viewportHeight();
         if (window.innerWidth <= 640) {
-            const safeHeight = Math.max(320, Math.ceil(h || window.innerHeight || 0));
-            vvhStyle.textContent = ':root{--vvh:' + safeHeight + 'px}';
-            if (!wasKeyboardOpen) captureFrozenBaseline();
-            const stableHeight = frozenBaseline || document.documentElement.clientHeight;
-            const keyboardVisible = viewport
-                ? (stableHeight - h) > Math.max(120, stableHeight * 0.25)
-                : false;
-
-            if (keyboardVisible && !wasKeyboardOpen) {
-                window.scrollTo(0, 0);
-                document.addEventListener('touchstart', lockTouchStart, { passive: true });
-                document.addEventListener('touchmove', lockBoundaryTouch, { passive: false });
+            vvhStyle.textContent = ':root{--vvh:' + Math.max(320, Math.ceil(h)) + 'px}';
+            if (!focusedKeyboardEditable()) {
+                applyKeyboardState(false);
+                rememberStableViewport(h);
+                return;
             }
-            if (!keyboardVisible && wasKeyboardOpen) {
-                document.removeEventListener('touchstart', lockTouchStart);
-                document.removeEventListener('touchmove', lockBoundaryTouch);
-            }
-            document.documentElement.classList.toggle('keyboard-open', keyboardVisible);
-            document.body.classList.toggle('keyboard-open', keyboardVisible);
-            wasKeyboardOpen = keyboardVisible;
-        } else {
-            if (wasKeyboardOpen) {
-                document.removeEventListener('touchstart', lockTouchStart);
-                document.removeEventListener('touchmove', lockBoundaryTouch);
-            }
-            document.documentElement.classList.remove('keyboard-open');
-            document.body.classList.remove('keyboard-open');
-            wasKeyboardOpen = false;
-            vvhStyle.textContent = ':root{--vvh:100dvh}';
+            cancelBaselineFrame();
+            if (!focusBaselineHeight) focusBaselineHeight = stableViewportHeight || h;
+            const shrink = focusBaselineHeight - h;
+            applyKeyboardState(shrink > Math.max(120, focusBaselineHeight * 0.25));
+            return;
         }
+        cancelBaselineFrame();
+        applyKeyboardState(false);
+        stableViewportHeight = h;
+        focusBaselineHeight = 0;
+        vvhStyle.textContent = ':root{--vvh:100dvh}';
     };
+
+    document.addEventListener('focusin', (event) => {
+        if (!keyboardEditable(event.target)) return;
+        focusRevision += 1;
+        cancelBaselineFrame();
+        focusBaselineHeight = stableViewportHeight || viewportHeight();
+        updateVvh();
+    });
+    document.addEventListener('focusout', (event) => {
+        if (!keyboardEditable(event.target)) return;
+        focusRevision += 1;
+        const revision = focusRevision;
+        cancelBaselineFrame();
+        requestAnimationFrame(() => {
+            if (revision !== focusRevision || focusedKeyboardEditable()) return;
+            applyKeyboardState(false);
+            focusBaselineHeight = 0;
+        });
+    });
+
+    releaseMobileKeyboardForDrawer = () => {
+        const editable = focusedKeyboardEditable();
+        if (editable && typeof editable.blur === 'function') editable.blur();
+        applyKeyboardState(false);
+    };
+
     if (window.visualViewport) {
         window.visualViewport.addEventListener('resize', updateVvh);
         window.visualViewport.addEventListener('scroll', updateVvh);
     }
     window.addEventListener('resize', updateVvh);
-    window.addEventListener('orientationchange', () => {
-        frozenBaseline = 0;
-        captureFrozenBaseline();
-        updateVvh();
-    });
+    stableViewportHeight = viewportHeight();
     updateVvh();
 }());
 

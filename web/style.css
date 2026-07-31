@@ -1320,10 +1320,6 @@ body.resizing-panels { user-select: none; }
         max-height: none;
     }
 
-    .chat-live-card {
-        max-width: 100%;
-        margin-right: 0;
-    }
 }
 
 #chat-messages,
@@ -1338,22 +1334,10 @@ body.resizing-panels { user-select: none; }
     display: flex;
     flex-direction: column;
     gap: 8px;
-    /* Container for width-aware bubble gutters: the narrow project panel (on a
-       wide viewport) must drop the 20% gutters too, which a viewport @media can't
-       see. The @container rule below keys on THIS column's width. */
+    /* Container for the late live-card width override. A narrow project panel
+       must respond to this column's width, not to the outer viewport. */
     container-type: inline-size;
     container-name: chatcol;
-}
-
-/* When the chat COLUMN (not the viewport) is narrow — e.g. a project panel beside
-   the main chat — bubbles and live cards go full-width instead of keeping the
-   wide-layout 20% gutters that would squish them. */
-@container chatcol (max-width: 620px) {
-    .chat-bubble { max-width: 100%; }
-    .chat-bubble.user { margin-left: 0; }
-    .chat-bubble.assistant,
-    .chat-bubble.system { margin-right: 0; }
-    .chat-live-card { max-width: 100%; margin-right: 0; }
 }
 
 /* The transcript is a scrolling column, so rows must keep their natural
@@ -1713,7 +1697,7 @@ button.chat-file:hover,
     align-self: flex-start;
     width: min(100%, 760px);
     max-width: calc(100% - 20%);
-    margin-right: 20%;
+    margin-inline-end: 20%;
     padding: 0;
     border-radius: var(--radius-lg);
     border: 1px solid var(--accent-dim);
@@ -1721,6 +1705,8 @@ button.chat-file:hover,
     backdrop-filter: blur(12px);
     box-shadow: 0 8px 24px rgba(0, 0, 0, 0.18), inset 0 1px 0 rgba(255, 200, 210, 0.03);
     overflow: hidden;
+    container-type: inline-size;
+    container-name: livecard;
     /* So the convert-to-project recolor (.is-project) fades in calmly (P3). */
     transition: border-color 250ms ease, background-color 250ms ease, box-shadow 250ms ease;
 }
@@ -1928,31 +1914,96 @@ button.chat-file:hover,
     display: flex;
     flex-direction: column;
     gap: 8px;
-    margin: 2px 14px 12px 24px;
-    padding-left: 14px;
-    border-left: 1px solid rgba(201, 53, 69, 0.28);
+    margin-block: 2px 12px;
+    margin-inline: 24px 14px;
+    padding-inline-start: 14px;
+    border-inline-start: 1px solid rgba(201, 53, 69, 0.28);
 }
 
 .chat-subagents:empty {
     display: none;
 }
 
-/* E1 (v6.39 UI): in a narrow chat column the phase/title row squeezes the title to a sliver
-   and deep subagent nesting eats the width. Let the summary row wrap so the title (and any
-   long URL) gets its own full-width line, and trim the nesting indent. This block MUST sit
-   AFTER the base .chat-live-title (flex:1) / .chat-subagents (margin shorthand) rules so its
-   longhands win at equal specificity (source order) when the container condition matches. */
+/* The root card width is owned by the CHAT COLUMN and therefore stays late
+   enough to beat the base 80% rule above. Ordinary bubble gutters are separate. */
 @container chatcol (max-width: 620px) {
-    .chat-live-summary-main { flex-wrap: wrap; }
-    .chat-live-title { flex-basis: 100%; overflow-wrap: anywhere; }
-    .chat-live-line-title { overflow-wrap: anywhere; }
-    .chat-subagents { margin-left: 12px; padding-left: 8px; }
+    .chat-bubble {
+        max-width: 100%;
+    }
+
+    .chat-bubble.user {
+        margin-inline-start: 0;
+    }
+
+    .chat-bubble.assistant,
+    .chat-bubble.system {
+        margin-inline-end: 0;
+    }
+
+    .chat-live-card {
+        width: 100%;
+        max-width: 100%;
+        margin-inline-end: 0;
+    }
+}
+
+/* Internal card geometry is owned by the CARD'S actual width. This catches a
+   deeply nested child even when the outer chat column is wide. The main row
+   takes a real 100% flex basis; flex-wrap alone leaves flex:1 at a zero basis
+   and recreates the one-letter-wide title. Nested indentation is paid once,
+   then flattened so depth cannot consume the text column. */
+@container livecard (max-width: 620px) {
+    .chat-live-summary {
+        flex-wrap: wrap;
+    }
+
+    .chat-live-summary-main {
+        flex: 1 1 100%;
+        flex-wrap: wrap;
+    }
+
+    .chat-live-title {
+        flex: 1 1 100%;
+        overflow-wrap: anywhere;
+    }
+
+    .chat-live-summary-side {
+        margin-inline-start: auto;
+        max-width: 100%;
+        flex-wrap: wrap;
+        justify-content: flex-end;
+    }
+
+    .chat-live-line-toggle {
+        flex-wrap: wrap;
+    }
+
+    .chat-live-line-head {
+        flex: 1 1 100%;
+    }
+
+    .chat-live-line-title {
+        overflow-wrap: anywhere;
+    }
+
+    .chat-live-line-expand-label {
+        margin-inline-start: auto;
+    }
+
+    .chat-subagents {
+        margin-inline: 0;
+        padding-inline-start: 8px;
+    }
+
+    .chat-subagents .chat-subagents {
+        padding-inline-start: 0;
+    }
 }
 
 .chat-live-card.subagent {
     width: 100%;
     max-width: 100%;
-    margin-right: 0;
+    margin-inline-end: 0;
     border-color: rgba(201, 53, 69, 0.20);
     background: rgba(255, 255, 255, 0.025);
     box-shadow: inset 0 1px 0 rgba(255, 200, 210, 0.03);
@@ -2159,15 +2210,6 @@ button.chat-file:hover,
 
 /* Early mobile overrides; late-defined selectors are handled at file end. */
 @media (max-width: 640px) {
-    /* P3 (v6.82): gesture-surface touch-action arbitration — the drawer keeps
-       vertical panning (its .sidebar-scroll child scrolls on y) while the
-       browser yields horizontal pans to the swipe-to-close binder. */
-    #primary-sidebar.gesture-surface-swipe-x {
-        touch-action: pan-y;
-        -webkit-user-select: none;
-        user-select: none;
-    }
-
     /* Prevent iOS zoom on input focus. */
     textarea, input[type="text"], input[type="password"], input[type="email"], select {
         font-size: 16px !important;
@@ -5138,10 +5180,6 @@ textarea.chat-input {
         overscroll-behavior: none;
     }
 
-    body.keyboard-open #primary-sidebar {
-        display: none;
-    }
-
     body.keyboard-open #content {
         position: fixed;
         inset: 0;
@@ -5732,15 +5770,6 @@ textarea.chat-input {
 }
 
 @media (max-width: 900px) {
-    /* P3 (v6.82): the project-panel HEADER gives up vertical panning (it has
-       no vertical scroll of its own); the panel body below is deliberately
-       NOT a gesture surface. */
-    .project-panel-bar.gesture-surface-swipe-y {
-        touch-action: pan-x;
-        -webkit-user-select: none;
-        user-select: none;
-    }
-
     /* Mobile/narrow: the project thread overlays the content area. */
     .project-panel {
         position: fixed;

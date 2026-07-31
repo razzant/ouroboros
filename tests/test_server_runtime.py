@@ -81,8 +81,8 @@ def test_apply_runtime_provider_defaults_autofills_official_openai_models():
     assert normalized["OUROBOROS_SCOPE_REVIEW_MODEL"] == "openai::gpt-5.6-terra"
     assert normalized["OUROBOROS_SCOPE_REVIEW_MODELS"] == "openai::gpt-5.6-terra"
 
-    # v6.82.0 triad-expansion contract: the SETTINGS_DEFAULTS-fed case — the shipped
-    # OpenRouter triad (terra/gemini/deepseek) is foreign to an OpenAI-only install,
+    # Triad-expansion contract: the SETTINGS_DEFAULTS-fed case — the shipped
+    # mixed-provider triad is foreign to an OpenAI-only install,
     # so it expands to the new OPENAI_DIRECT_DEFAULTS [main, light, light] fallback.
     payload = dict(SETTINGS_DEFAULTS)
     payload["OPENAI_API_KEY"] = "sk-openai"
@@ -346,10 +346,24 @@ def test_apply_runtime_provider_defaults_keeps_new_triad_on_openrouter():
     assert normalized["OUROBOROS_MODEL_LIGHT"] == "google/gemini-3.6-flash"
     assert normalized["OUROBOROS_MODEL_FALLBACKS"] == "openai/gpt-5.6-luna"
     assert normalized["OUROBOROS_REVIEW_MODELS"] == (
-        "openai/gpt-5.6-terra,google/gemini-3.6-flash,deepseek/deepseek-v4-pro"
+        "openai/gpt-5.6-luna,google/gemini-3.6-flash,anthropic/claude-sonnet-5"
     )
     assert normalized["OUROBOROS_SCOPE_REVIEW_MODEL"] == "openai/gpt-5.6-terra"
     assert normalized["OUROBOROS_SCOPE_REVIEW_MODELS"] == "openai/gpt-5.6-terra"
+
+
+def test_apply_runtime_provider_defaults_preserves_saved_outgoing_triad_on_openrouter():
+    """A changed shipped default must not migrate an existing owner value."""
+    outgoing = "openai/gpt-5.6-terra,google/gemini-3.6-flash,deepseek/deepseek-v4-pro"
+    payload = dict(SETTINGS_DEFAULTS)
+    payload["OPENROUTER_API_KEY"] = "sk-or"
+    payload["OUROBOROS_REVIEW_MODELS"] = outgoing
+
+    normalized, changed, changed_keys = apply_runtime_provider_defaults(payload)
+
+    assert not changed
+    assert changed_keys == []
+    assert normalized["OUROBOROS_REVIEW_MODELS"] == outgoing
 
 
 def test_apply_runtime_provider_defaults_skips_non_official_or_custom_configs():
