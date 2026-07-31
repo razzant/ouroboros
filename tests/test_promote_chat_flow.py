@@ -177,6 +177,49 @@ def test_promote_event_enqueues_first_class_task(tmp_path, monkeypatch):
     assert all_task_bindings(tmp_path).get("abc12345") == project["chat_id"]
 
 
+def test_route_to_project_event_emits_route_receipt_action(tmp_path, monkeypatch):
+    """route_to_project reuses promote admission but must retain its distinct
+    host receipt action instead of rendering the task as a fresh promotion."""
+    import supervisor.workers as workers
+    from ouroboros.projects_registry import create_project
+    from supervisor.events import _handle_promote_chat_to_task
+
+    monkeypatch.setattr(workers, "DRIVE_ROOT", tmp_path)
+    create_project(tmp_path, "racer", name="Racer")
+    receipts = []
+    enqueued = []
+
+    class Bridge:
+        def send_routing_ack(self, *args, **kwargs):
+            receipts.append((args, kwargs))
+
+        def broadcast(self, *args, **kwargs):
+            pass
+
+    ctx = types.SimpleNamespace(
+        DRIVE_ROOT=tmp_path,
+        WORKERS={0: types.SimpleNamespace()},
+        bridge=Bridge(),
+        enqueue_task=lambda task: enqueued.append(task),
+        load_state=lambda: {"owner_chat_id": 1},
+        append_jsonl=lambda *args, **kwargs: None,
+    )
+
+    _handle_promote_chat_to_task({
+        "type": "promote_chat_to_task",
+        "task_id": "route01",
+        "objective": "Continue the racer",
+        "project_id": "racer",
+        "chat_id": 1,
+        "client_message_id": "owner-route-receipt-1",
+        "routed_from_main": True,
+    }, ctx)
+
+    assert enqueued and enqueued[0]["project_id"] == "racer"
+    assert receipts[-1][1]["action"] == "route_to_project"
+    assert receipts[-1][1]["status"] == "scheduled"
+
+
 def test_promoted_skill_repair_is_canonical_confined_managed_task(tmp_path, monkeypatch):
     import supervisor.workers as workers
 

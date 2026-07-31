@@ -285,6 +285,109 @@ def test_ephemeral_decision_progress_marker_survives_history_replay(tmp_path):
     assert progress["ephemeral_decision"] is True
 
 
+def test_ephemeral_routing_keeps_annotation_and_final_in_history_projection(tmp_path, monkeypatch):
+    """Finalization→supervisor→chat-log keeps one durable answer beside the
+    routing annotation; progress remains marked for Web card suppression."""
+    from ouroboros import agent_task_pipeline as pipeline
+    from ouroboros.gateway.history import make_chat_history_endpoint
+    from ouroboros.project_dialogue import append_chat_annotation
+    from supervisor import message_bus
+    from supervisor.events import _handle_send_message
+
+    logs = tmp_path / "logs"
+    logs.mkdir()
+    monkeypatch.setattr(message_bus, "DATA_DIR", tmp_path)
+    monkeypatch.setattr(
+        message_bus,
+        "load_state",
+        lambda: {"owner_id": 1, "session_id": "session-1"},
+    )
+    monkeypatch.setattr(message_bus, "_send_markdown", lambda *args, **kwargs: (True, ""))
+    for name in (
+        "_store_task_result",
+        "_run_chat_consolidation",
+        "_run_scratchpad_consolidation",
+        "_run_post_task_processing_async",
+    ):
+        monkeypatch.setattr(pipeline, name, lambda *args, **kwargs: None)
+
+    message_bus.log_chat(
+        "in",
+        1,
+        1,
+        "Start the robot task",
+        client_message_id="owner-route-1",
+    )
+    assert append_chat_annotation(
+        tmp_path,
+        "owner-route-1",
+        action="promote_chat_to_task",
+        target="robot01",
+        status="scheduled",
+    )
+
+    pending_events = []
+    pipeline.emit_task_results(
+        env=SimpleNamespace(drive_root=tmp_path),
+        memory=object(),
+        llm=object(),
+        pending_events=pending_events,
+        task={
+            "id": "decision-route-1",
+            "type": "task",
+            "chat_id": 1,
+            "text": "Start the robot task",
+            "_is_direct_chat": True,
+            "_ephemeral_turn": True,
+        },
+        text="The robot task was submitted as robot01.",
+        usage={"rounds": 2, "cost": 0.01},
+        llm_trace={"tool_calls": [{"tool": "promote_chat_to_task"}], "reasoning_notes": []},
+        start_time=0.0,
+        drive_logs=logs,
+        ctx=SimpleNamespace(
+            pending_restart_reason="",
+            _typed_routing_action_emitted="promote_chat_to_task",
+        ),
+    )
+
+    event_ctx = SimpleNamespace(
+        DRIVE_ROOT=tmp_path,
+        send_with_budget=message_bus.send_with_budget,
+        append_jsonl=lambda *args, **kwargs: None,
+    )
+    _handle_send_message({
+        "type": "send_message",
+        "chat_id": 1,
+        "task_id": "decision-route-1",
+        "text": "Submitting the robot task",
+        "log_text": "Submitting the robot task",
+        "format": "markdown",
+        "is_progress": True,
+        "progress_meta": {"ephemeral_decision": True},
+    }, event_ctx)
+    final_event = next(event for event in pending_events if event["type"] == "send_message")
+    _handle_send_message(final_event, event_ctx)
+
+    response = asyncio.run(
+        make_chat_history_endpoint(tmp_path)(SimpleNamespace(query_params={"chat_id": "1"}))
+    )
+    messages = json.loads(response.body.decode("utf-8"))["messages"]
+    owner = next(message for message in messages if message.get("client_message_id") == "owner-route-1")
+    assert owner["chat_annotation"] == {
+        "action": "promote_chat_to_task",
+        "target": "robot01",
+        "status": "scheduled",
+    }
+    finals = [
+        message for message in messages
+        if message.get("text") == "The robot task was submitted as robot01."
+    ]
+    assert len(finals) == 1
+    progress = next(message for message in messages if message.get("is_progress"))
+    assert progress["ephemeral_decision"] is True
+
+
 def test_ephemeral_decision_web_frames_never_create_task_card_or_second_receipt():
     from pathlib import Path
 
@@ -322,7 +425,7 @@ def test_ephemeral_decision_web_frames_never_create_task_card_or_second_receipt(
         chat.index("ws.on('message_annotation'")
     ]
     # Inline ephemeral answers are not blanket-suppressed. Typed routing turns
-    # omit their redundant send_message in the backend pipeline instead.
+    # retain any non-empty final answer while their progress/card stays hidden.
     assert fanout.count("if (ephemeralDecision) return;") == 1  # progress/card path only
     assert fanout.index("showTaskIncidentToast(msg);") < fanout.index("if (ephemeralDecision) return;")
     assert "addMessage(msg.content" in fanout

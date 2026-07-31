@@ -269,7 +269,10 @@ _DECISION_TURN_OUTCOME_RULE = (
     "write) MUST either become a real supervised task via promote_chat_to_task "
     "or be explicitly declined in the answer. Ending this turn with a promise "
     "of future work that no tool call actually scheduled is a forbidden "
-    "outcome — an unscheduled promise reads to the owner as work in motion."
+    "outcome — an unscheduled promise reads to the owner as work in motion. "
+    "After any routing tool call, the final no-tool response MUST be self-contained: "
+    "state what was attempted and the outcome known to you, because prose from the "
+    "tool-call round is transient progress and is not durable conversation history."
 )
 
 

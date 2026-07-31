@@ -280,10 +280,10 @@ def _emit_control_event(ctx: ToolContext, evt: Dict[str, Any]) -> str:
         event_type = str(evt.get("type") or "")
         if event_type not in {"promote_chat_to_task", "routing_manual_target", "steer_task"}:
             return
-        # A decision turn's final prose normally repeats this typed receipt.  Keep
-        # a turn-local fact on the existing ToolContext so finalization can omit
-        # that redundant bubble.  This is presentation metadata, not routing
-        # state: the emitted control event + supervisor receipt remain authority.
+        # Keep a turn-local fact on the existing ToolContext so finalization can
+        # expose the typed action on task_done. The supervisor receipt remains the
+        # routing authority, while any non-empty final model prose is a separate
+        # conversational answer and must stay durable across every transport.
         action = (
             "route_to_project"
             if event_type == "promote_chat_to_task" and bool(evt.get("routed_from_main"))
@@ -634,7 +634,8 @@ def _route_to_project(
 
     LLM-first: the model decides WHEN to route (its judgment is the gate, never a
     keyword rule); this verb just delivers the decision and returns a visible
-    receipt. Exactly one owner-visible outcome per call (the routed project turn).
+    receipt. The receipt is host metadata on the owner message; any non-empty
+    final decision-turn explanation remains a separate conversational reply.
     """
     from ouroboros.project_facts import explicit_project_id_ok, sanitize_project_id
     from ouroboros.projects_registry import get_project

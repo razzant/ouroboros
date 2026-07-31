@@ -1992,6 +1992,10 @@ def _handle_promote_chat_to_task(evt: Dict[str, Any], ctx: Any) -> None:
     conversation lane that emitted the event stays free.
     """
     from supervisor.workers import promote_chat_to_task
+    receipt_action = (
+        "route_to_project" if bool(evt.get("routed_from_main"))
+        else "promote_chat_to_task"
+    )
 
     try:
         outcome = promote_chat_to_task(evt, ctx)
@@ -1999,7 +2003,7 @@ def _handle_promote_chat_to_task(evt: Dict[str, Any], ctx: Any) -> None:
         _emit_routing_receipt(
             ctx,
             evt,
-            action="promote_chat_to_task",
+            action=receipt_action,
             target=str(outcome.get("task_id") or evt.get("task_id") or ""),
             status=str(outcome.get("status") or "needs_manual_target"),
         )
@@ -2019,7 +2023,7 @@ def _handle_promote_chat_to_task(evt: Dict[str, Any], ctx: Any) -> None:
         _emit_routing_receipt(
             ctx,
             evt,
-            action="promote_chat_to_task",
+            action=receipt_action,
             target=str(evt.get("task_id") or ""),
             status="needs_manual_target",
         )

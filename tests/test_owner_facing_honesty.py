@@ -7,6 +7,7 @@ ground-truth probe guidance, and the decision-turn outcome contract."""
 from __future__ import annotations
 
 import logging
+from pathlib import Path
 import subprocess
 import sys
 from types import SimpleNamespace
@@ -308,8 +309,21 @@ def test_ephemeral_turn_gets_decision_rule(tmp_path):
     section = build_runtime_section(env, {"_ephemeral_turn": True, "id": "t"})
     assert "decision_turn_rule" in section
     assert "promise" in section
+    assert "final no-tool response MUST be self-contained" in section
+    assert "not durable conversation history" in section
     plain = build_runtime_section(env, {"id": "t"})
     assert "decision_turn_rule" not in plain
+
+
+def test_system_prompt_separates_routing_annotation_from_final_reply():
+    system_prompt = (
+        Path(__file__).resolve().parents[1] / "prompts" / "SYSTEM.md"
+    ).read_text(encoding="utf-8")
+    normalized = " ".join(system_prompt.split())
+    assert "exactly ONE routing decision" in normalized
+    assert "A typed routing annotation is metadata" in normalized
+    assert "one self-contained final response" in normalized
+    assert "exactly ONE owner-visible outcome" not in normalized
 
 
 # ---------------------------------------------------------------------------

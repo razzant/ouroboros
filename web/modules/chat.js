@@ -680,8 +680,8 @@ export function createChatInstance({
     const taskUiStates = new Map();
     // Busy-chat decision turns reuse the normal agent/event path for ordering and
     // observability, but they are not user tasks. Their structural backend marker
-    // suppresses the transient card while preserving either one inline answer or
-    // the existing typed routing annotation.
+    // suppresses the transient card while preserving the typed routing annotation
+    // and any non-empty final conversational answer as separate UI roles.
     const ephemeralDecisionTaskIds = new Set();
     // Finished task ids hidden from routine syncs until reload/reconnect rebuilds history.
     const retiredTaskIds = new Set();

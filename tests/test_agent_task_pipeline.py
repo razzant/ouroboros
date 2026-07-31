@@ -572,10 +572,9 @@ def test_emit_task_results_ephemeral_turn_skips_all_durable_memory(tmp_path, mon
     assert done.get("ephemeral_decision") is True
 
 
-def test_ephemeral_typed_routing_receipt_replaces_final_assistant_bubble(tmp_path, monkeypatch):
-    """A structural routing control event already creates the typed owner receipt.
-    Final model prose is therefore not a second assistant bubble; task finalization
-    still flows so transient bookkeeping resolves."""
+def test_ephemeral_typed_routing_delivers_nonempty_final_and_keeps_receipt_metadata(tmp_path, monkeypatch):
+    """A typed receipt annotates the owner message; normalized final model prose
+    remains one durable assistant reply for every routing action."""
     monkeypatch.setattr(pipeline, "_store_task_result", lambda *args, **kwargs: None)
     monkeypatch.setattr(pipeline, "_run_chat_consolidation", lambda *args, **kwargs: None)
     monkeypatch.setattr(pipeline, "_run_scratchpad_consolidation", lambda *args, **kwargs: None)
@@ -583,7 +582,12 @@ def test_ephemeral_typed_routing_receipt_replaces_final_assistant_bubble(tmp_pat
     drive_logs = tmp_path / "routing-logs"
     drive_logs.mkdir(parents=True)
 
-    for action in ("route_to_project", "steer_task", "promote_chat_to_task"):
+    for action in (
+        "route_to_project",
+        "steer_task",
+        "promote_chat_to_task",
+        "routing_manual_target",
+    ):
         pending_events = []
         pipeline.emit_task_results(
             env=SimpleNamespace(drive_root=tmp_path),
@@ -608,8 +612,13 @@ def test_ephemeral_typed_routing_receipt_replaces_final_assistant_bubble(tmp_pat
                 _typed_routing_action_emitted=action,
             ),
         )
-        assert "send_message" not in [evt["type"] for evt in pending_events]
+        sends = [evt for evt in pending_events if evt["type"] == "send_message"]
+        assert len(sends) == 1
+        assert sends[0]["text"] == f"Receipt prose for {action}"
+        assert sends[0]["log_text"] == f"Receipt prose for {action}"
+        assert sends[0]["progress_meta"] == {"ephemeral_decision": True}
         done = next(evt for evt in pending_events if evt["type"] == "task_done")
+        assert pending_events.index(sends[0]) < pending_events.index(done)
         assert done["ephemeral_decision"] is True
         assert done["typed_routing_action"] == action
 

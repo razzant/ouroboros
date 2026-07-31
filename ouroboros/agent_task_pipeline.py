@@ -709,29 +709,29 @@ def emit_task_results(
     # (reflection/consolidation/letters-home) are already gated further below; this
     # closes the remaining durable task-record writes. An inline answer + card
     # resolution (send_message/task_done) and budget metrics still flow so the reply
-    # is visible. When a routing control event already produced the typed receipt,
-    # only task_done flows: repeating the tool's prose as a second assistant bubble
-    # would give one owner message two visible outcomes.
+    # is visible. A typed routing receipt is presentation metadata attached to the
+    # owner's message, not a replacement for the agent's conversational answer.
+    # Agent.run_task normalizes blank model output before this boundary, so every
+    # finalized response follows the same durable send_message path.
     _ephemeral = bool(task.get("_ephemeral_turn"))
     _typed_routing_action = (
         str(getattr(ctx, "_typed_routing_action_emitted", "") or "").strip()
         if ctx is not None else ""
     )
-    _typed_routing_receipt = bool(_ephemeral and _typed_routing_action)
+    _has_typed_routing_action = bool(_ephemeral and _typed_routing_action)
     _decision_meta = {"ephemeral_decision": True} if _ephemeral else {}
-    if not _typed_routing_receipt:
-        send_event = {
-            "type": "send_message", "chat_id": task["chat_id"],
-            "text": text or "\u200b", "log_text": text or "",
-            "format": "markdown",
-            "task_id": task.get("id"), "ts": utc_now_iso(),
-        }
-        if _decision_meta:
-            # MessageBus already carries progress_meta on both progress and final
-            # frames.  The Web client uses this only to suppress the transient
-            # task card; the inline conversational answer itself remains visible.
-            send_event["progress_meta"] = dict(_decision_meta)
-        pending_events.append(send_event)
+    send_event = {
+        "type": "send_message", "chat_id": task["chat_id"],
+        "text": text or "\u200b", "log_text": text or "",
+        "format": "markdown",
+        "task_id": task.get("id"), "ts": utc_now_iso(),
+    }
+    if _decision_meta:
+        # MessageBus already carries progress_meta on both progress and final
+        # frames.  The Web client uses this only to suppress the transient
+        # task card; the inline conversational answer itself remains visible.
+        send_event["progress_meta"] = dict(_decision_meta)
+    pending_events.append(send_event)
 
     duration_sec = round(time.time() - start_time, 3)
     n_tool_calls = len(llm_trace.get("tool_calls", []))
@@ -823,7 +823,7 @@ def emit_task_results(
         # the action/receipt authority; this keeps a transient decision task from
         # becoming a visible task card (and a bogus "Turn into project" target).
         "ephemeral_decision": _ephemeral,
-        **({"typed_routing_action": _typed_routing_action} if _typed_routing_receipt else {}),
+        **({"typed_routing_action": _typed_routing_action} if _has_typed_routing_action else {}),
         # Carry the thread so the terminal card finalizes in its project panel
         # (per-thread fan-out), not just the main chat.
         "chat_id": int(task.get("chat_id") or 0),
