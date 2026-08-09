@@ -1,7 +1,7 @@
 :root {
   color-scheme: dark;
-  --bg: #0b0910;
-  --panel: rgba(20, 18, 28, 0.92);
+  --bg: #131315;
+  --panel: rgba(26, 26, 29, 0.92);
   --panel-2: rgba(255, 255, 255, 0.04);
   --panel-3: rgba(255, 255, 255, 0.03);
   --border: rgba(255, 255, 255, 0.10);
@@ -9,14 +9,14 @@
   --ui-card-border: var(--border);
   --ui-tone-ok: var(--green);
   --ui-tone-danger: var(--red);
-  --border-strong: rgba(232, 93, 111, 0.35);
-  --text: #edf2f7;
-  --muted: rgba(237, 242, 247, 0.62);
-  --ghost: rgba(237, 242, 247, 0.28);
-  --accent: #e85d6f;
-  --accent-2: #fb7185;
-  --green: #34d399;
-  --green-dim: rgba(52, 211, 153, 0.14);
+  --border-strong: rgba(212, 72, 90, 0.35);
+  --text: #e7e7ea;
+  --muted: rgba(255, 255, 255, 0.55);
+  --ghost: rgba(255, 255, 255, 0.35);
+  --accent: #c93545;
+  --accent-2: #d4485a;
+  --green: #22c55e;
+  --green-dim: rgba(34, 197, 94, 0.14);
   --amber: #f59e0b;
   --amber-dim: rgba(245, 158, 11, 0.12);
   --red: #ef4444;
@@ -24,10 +24,10 @@
   --shadow: 0 28px 64px rgba(0, 0, 0, 0.45);
   /* Shared design-system vocabulary (C7.2): the onboarding page is inlined
      standalone (it cannot import style.css), so it mirrors the same role tokens
-     by VALUE — project fuchsia and the owner-voice blue match style.css exactly,
+     by VALUE — the project teal and the owner-voice blue match style.css exactly,
      and the role names (task/system/user/project, ok/warn/danger) read the same
-     on both surfaces. The base brand red/green stay as defined above. */
-  --project: #e879f9;
+     on both surfaces. Values only: the wizard keeps its own blur formulas. */
+  --project: #2dd4bf;
   --user: #6e96d2;
   --accent-task: var(--accent);
   --accent-system: var(--amber);
@@ -52,8 +52,8 @@ body {
   min-height: 100vh;
   padding: 16px;
   background:
-    radial-gradient(circle at top left, rgba(232, 93, 111, 0.12), transparent 35%),
-    radial-gradient(circle at top right, rgba(232, 121, 249, 0.12), transparent 30%),
+    radial-gradient(circle at top left, rgba(212, 72, 90, 0.12), transparent 35%),
+    radial-gradient(circle at top right, rgba(45, 212, 191, 0.10), transparent 30%),
     var(--bg);
   color: var(--text);
   font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
@@ -136,12 +136,12 @@ textarea::placeholder {
 
 .wizard-step.active {
   border-color: var(--border-strong);
-  background: rgba(232, 93, 111, 0.09);
-  box-shadow: inset 0 0 0 1px rgba(232, 93, 111, 0.12);
+  background: rgba(212, 72, 90, 0.09);
+  box-shadow: inset 0 0 0 1px rgba(212, 72, 90, 0.12);
 }
 
 .wizard-step.done {
-  border-color: rgba(52, 211, 153, 0.22);
+  border-color: rgba(34, 197, 94, 0.22);
 }
 
 .wizard-step-index {
@@ -160,7 +160,7 @@ textarea::placeholder {
 }
 
 .wizard-step.active .wizard-step-index {
-  background: rgba(232, 93, 111, 0.18);
+  background: rgba(212, 72, 90, 0.18);
   color: var(--text);
 }
 
@@ -342,7 +342,7 @@ textarea::placeholder {
 }
 
 .field label {
-  color: rgba(237, 242, 247, 0.68);
+  color: rgba(255, 255, 255, 0.68);
   font-size: 12px;
   font-weight: 600;
   text-transform: uppercase;
@@ -353,7 +353,7 @@ textarea::placeholder {
   padding: 0;
   border: none;
   background: transparent;
-  color: rgba(237, 242, 247, 0.48);
+  color: rgba(255, 255, 255, 0.48);
   cursor: pointer;
   font-size: 11px;
 }
@@ -369,7 +369,7 @@ select {
   padding: 10px 12px;
   border-radius: 12px;
   border: 1px solid var(--border);
-  background: rgba(11, 9, 16, 0.72);
+  background: rgba(19, 19, 21, 0.72);
   color: var(--text);
   outline: none;
 }
@@ -397,7 +397,7 @@ select {
 input:focus,
 select:focus {
   border-color: var(--border-strong);
-  box-shadow: 0 0 0 3px rgba(232, 93, 111, 0.12);
+  box-shadow: 0 0 0 3px rgba(212, 72, 90, 0.12);
 }
 
 .selection-row,
@@ -423,7 +423,7 @@ select:focus {
 }
 
 .selection-pill.active {
-  background: rgba(232, 93, 111, 0.16);
+  background: rgba(212, 72, 90, 0.16);
   border-color: var(--border-strong);
 }
 
@@ -477,7 +477,7 @@ select:focus {
 
 .wizard-choice.active {
   border-color: var(--border-strong);
-  background: rgba(232, 93, 111, 0.09);
+  background: rgba(212, 72, 90, 0.09);
 }
 
 .wizard-choice .tone {
@@ -493,12 +493,12 @@ select:focus {
 
 .wizard-choice.advisory .tone {
   background: var(--amber-dim);
-  color: #fbbf24;
+  color: var(--amber);
 }
 
 .wizard-choice.blocking .tone {
   background: var(--green-dim);
-  color: #6ee7b7;
+  color: var(--green);
 }
 
 .wizard-runtime-strip {
@@ -534,13 +534,13 @@ select:focus {
 }
 
 .wizard-test-result[data-tone="ok"] {
-  border-color: rgba(52, 211, 153, 0.22);
-  color: #86efac;
+  border-color: rgba(34, 197, 94, 0.22);
+  color: var(--green);
 }
 
 .wizard-test-result[data-tone="warn"] {
   border-color: rgba(245, 158, 11, 0.18);
-  color: #fcd34d;
+  color: var(--amber);
 }
 
 .wizard-test-result[data-tone="error"] {
@@ -563,7 +563,7 @@ select:focus {
 }
 
 .summary-kv strong {
-  color: rgba(237, 242, 247, 0.72);
+  color: rgba(255, 255, 255, 0.72);
   font-weight: 600;
 }
 
@@ -597,7 +597,7 @@ select:focus {
 .btn-primary {
   min-width: 170px;
   background: linear-gradient(135deg, var(--accent), var(--accent-2));
-  border-color: rgba(251, 113, 133, 0.55);
+  border-color: rgba(212, 72, 90, 0.55);
   color: #fff;
   font-weight: 700;
 }

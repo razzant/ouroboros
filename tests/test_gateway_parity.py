@@ -16,6 +16,7 @@ from ouroboros.gateway.contracts import (
     StateResponse,
     TaskCostBreakdown,
     TaskDetailResponse,
+    TaskDiffResponse,
     UpdateApplyErrorResponse,
     UpdateApplyRequest,
     UpdateApplySuccessResponse,
@@ -100,6 +101,7 @@ def test_gateway_contract_endpoint_index_matches_router_and_types(tmp_path):
         "TaskCostBreakdown",
         "TaskDetailResponse",
         "TaskCancelResponse",
+        "TaskDiffResponse",
         "LogTailResponse",
         "SkillDeleteResponse",
         "UpdateMergePlan",
@@ -115,6 +117,7 @@ def test_gateway_contract_endpoint_index_matches_router_and_types(tmp_path):
         encoding="utf-8"
     )
     assert "openAICompatibleModels" in api_client
+    assert "taskDiff" in api_client
     # v6.80.0: the two contracts extended this release join the FIELD-level parity list. The name-level
     # loop above cannot see a new @property, so an ABI field added on the Python side would otherwise
     # never have to appear in the browser's typedef (ARCHITECTURE.md §11.3).
@@ -123,7 +126,7 @@ def test_gateway_contract_endpoint_index_matches_router_and_types(tmp_path):
                 UpdatePreflightRequest, UpdatePreflightResponse, UpdateApplyRequest,
                 UpdateApplySuccessResponse, UpdateApplyErrorResponse,
                 UpdateStatusReadyOutbound, TaskCostBreakdown, TaskDetailResponse,
-                ClaudexorStatusReads, ClaudexorStatusResponse):
+                ClaudexorStatusReads, ClaudexorStatusResponse, TaskDiffResponse):
         expected = set(get_type_hints(cls, include_extras=True))
         actual = _js_typedef_fields(text, cls.__name__)
         assert actual == expected, f"{cls.__name__} JSDoc fields drifted: missing={sorted(expected - actual)}, extra={sorted(actual - expected)}"
@@ -182,6 +185,37 @@ def test_gateway_contract_endpoint_index_matches_router_and_types(tmp_path):
         "suppress_bubble",
         "ts",
     }
+
+
+def test_task_diff_contract_declares_typed_lifecycle_in_both_mirrors():
+    """The diff ABI must stay typed and stat-free in BOTH mirrors.
+
+    The client derives the file list and +/- counts from the patch bytes, so the
+    envelope must never grow a server-side stats field (a second, silently
+    diverging truth), and the four lifecycle statuses plus the boolean HEAD-drift
+    disclosure must be visible to a browser contributor.
+    """
+    repo = pathlib.Path(__file__).resolve().parents[1]
+    python_contract = (repo / "ouroboros" / "gateway" / "contracts.py").read_text(encoding="utf-8")
+    js_contract = (repo / "web" / "modules" / "api_types.js").read_text(encoding="utf-8")
+
+    assert set(get_type_hints(TaskDiffResponse, include_extras=True)) == {
+        "status", "source", "base_commit", "head_advanced", "blockers", "patch", "patch_sha256", "error",
+    }
+    assert "GET /api/tasks/{task_id}/diff" in HTTP_ENDPOINTS
+    assert '"pending"|"ready"|"empty"|"blocked"' in js_contract
+    assert '"workspace_patch"|"mutation_baseline"' in js_contract
+    # REQUIREDNESS mirrors too, not just the field names and their vocabularies: the
+    # Python side is `total=False` (an additive frozen surface promises nothing as
+    # required), so the JSDoc marks the same fields optional with `=`. Pinned in this
+    # spelling because the two sides drifted here once — the contract said "assume
+    # nothing" while the browser mirror said "always present".
+    assert "@property {boolean=} head_advanced" in js_contract
+    assert "@property {string[]=} blockers" in js_contract
+    assert not TaskDiffResponse.__required_keys__
+    declaration = python_contract.split("class TaskDiffResponse")[1].split("\nclass ")[0]
+    for banned in ("files:", "diffstat:", "add:", "del:", "truncated:"):
+        assert banned not in declaration, f"TaskDiffResponse must not carry server-side stats ({banned})"
 
 
 def test_gateway_money_contracts_keep_unavailable_distinct_from_zero():

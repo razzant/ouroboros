@@ -1,4 +1,4 @@
-import { escapeHtmlText, formatUsd2 } from './utils.js';
+import { chartColorAlpha, escapeHtmlText, formatUsd2, readThemeTokens } from './utils.js';
 import { apiFetch } from './api_client.js';
 import { openConfirmDialog } from './confirm_dialog.js';
 
@@ -20,6 +20,50 @@ export async function promptCampaignObjective({ dialogImpl = openConfirmDialog }
     });
     if (!answer?.confirmed) return { confirmed: false, objective: '' };
     return { confirmed: true, objective: String(answer.value || '').trim() };
+}
+
+// Chart.js paints on a canvas and cannot resolve CSS variables, so every colour
+// and the mono stack are READ from the :root design tokens (web/style.css)
+// through the shared `readThemeTokens` seam (web/modules/utils.js) — never
+// pasted here as hexes. Every name below must be DEFINED in `:root`: the seam
+// returns computed values (an alias resolves through fine), but an undefined
+// token comes back as `''` and a canvas handed `''` drops the series silently.
+// Six series need six DISTINGUISHABLE lanes, so the ramp names ROLE tokens
+// (task red, owner blue, ok green, notice amber, project teal, accent) instead
+// of shades of one hue — a neutral text ladder collapses into "three grays" at
+// 2px stroke width on a canvas.
+const CHART_TOKENS = {
+    seriesRamp: [
+        '--accent-light',
+        '--user',
+        '--green',
+        '--amber',
+        '--project',
+        '--accent',
+    ],
+    axis: '--text-muted',
+    axisTitle: '--text-secondary',
+    grid: '--divider',
+    surface: '--bg-elevated',
+    border: '--surface-border',
+    strong: '--text-primary',
+    mono: '--font-mono',
+};
+
+const CHART_SCALAR_KEYS = ['axis', 'axisTitle', 'grid', 'surface', 'border', 'strong', 'mono'];
+
+/** Resolve the evolution chart theme from the live design tokens. */
+export function evolutionChartTheme(root = document.documentElement) {
+    const ramp = CHART_TOKENS.seriesRamp;
+    const values = readThemeTokens(
+        [...ramp, ...CHART_SCALAR_KEYS.map((key) => CHART_TOKENS[key])],
+        root,
+    );
+    const theme = { series: values.slice(0, ramp.length) };
+    CHART_SCALAR_KEYS.forEach((key, idx) => {
+        theme[key] = values[ramp.length + idx];
+    });
+    return theme;
 }
 
 export function initEvolution({ ws, state, mount }) {
@@ -77,14 +121,16 @@ export function initEvolution({ ws, state, mount }) {
     const consciousnessPill = document.getElementById('evo-bg-pill');
     const tagsList = document.getElementById('evo-tags-list');
 
-    const COLORS = {
-        code_lines: '#60a5fa',
-        bible_kb:   '#f97316',
-        system_kb:  '#a78bfa',
-        identity_kb:'#34d399',
-        scratchpad_kb: '#fbbf24',
-        memory_kb:  '#fb7185',
-    };
+    // Dataset order is the identity of a series (the tooltip resolves a key by
+    // dataset index), so the keys stay fixed and only the colour ramp is themed.
+    const SERIES_KEYS = [
+        'code_lines',
+        'bible_kb',
+        'system_kb',
+        'identity_kb',
+        'scratchpad_kb',
+        'memory_kb',
+    ];
     const LABELS = {
         code_lines: 'Code (lines)',
         bible_kb:   'BIBLE.md (KB)',
@@ -240,19 +286,23 @@ export function initEvolution({ ws, state, mount }) {
     }
 
     function renderChart(points) {
+        const theme = evolutionChartTheme();
         const labels = points.map(p => p.tag);
-        const datasets = Object.keys(COLORS).map(key => ({
-            label: LABELS[key],
-            data: points.map(p => p[key] ?? null),
-            borderColor: COLORS[key],
-            backgroundColor: COLORS[key] + '22',
-            borderWidth: 2,
-            pointRadius: 4,
-            pointHoverRadius: 6,
-            tension: 0.3,
-            fill: false,
-            yAxisID: key === 'code_lines' ? 'y' : 'y1',
-        }));
+        const datasets = SERIES_KEYS.map((key, idx) => {
+            const color = theme.series[idx];
+            return {
+                label: LABELS[key],
+                data: points.map(p => p[key] ?? null),
+                borderColor: color,
+                backgroundColor: chartColorAlpha(color, 0.13),
+                borderWidth: 2,
+                pointRadius: 3,
+                pointHoverRadius: 5,
+                tension: 0.3,
+                fill: false,
+                yAxisID: key === 'code_lines' ? 'y' : 'y1',
+            };
+        });
         const ctx = document.getElementById('evo-chart').getContext('2d');
         if (evoChart) evoChart.destroy();
         evoChart = new Chart(ctx, {
@@ -269,21 +319,21 @@ export function initEvolution({ ws, state, mount }) {
                     legend: {
                         position: 'top',
                         labels: {
-                            color: '#94a3b8',
+                            color: theme.axisTitle,
                             usePointStyle: true,
                             pointStyle: 'circle',
                             padding: 16,
-                            font: { size: 12, family: 'JetBrains Mono, monospace' },
+                            font: { size: 11, family: theme.mono },
                         },
                     },
                     tooltip: {
-                        backgroundColor: 'rgba(26, 21, 32, 0.95)',
-                        titleColor: '#e2e8f0',
-                        bodyColor: '#94a3b8',
-                        borderColor: 'rgba(201, 53, 69, 0.18)',
+                        backgroundColor: theme.surface,
+                        titleColor: theme.strong,
+                        bodyColor: theme.axisTitle,
+                        borderColor: theme.border,
                         borderWidth: 1,
-                        titleFont: { family: 'JetBrains Mono, monospace', size: 12 },
-                        bodyFont: { family: 'JetBrains Mono, monospace', size: 11 },
+                        titleFont: { family: theme.mono, size: 11 },
+                        bodyFont: { family: theme.mono, size: 11 },
                         callbacks: {
                             title: function(items) {
                                 if (!items.length) return '';
@@ -293,7 +343,7 @@ export function initEvolution({ ws, state, mount }) {
                             label: function(ctx) {
                                 const val = ctx.parsed.y;
                                 if (val === null || val === undefined) return null;
-                                const key = Object.keys(COLORS)[ctx.datasetIndex];
+                                const key = SERIES_KEYS[ctx.datasetIndex];
                                 if (key === 'code_lines') return ' ' + ctx.dataset.label + ': ' + val.toLocaleString() + ' lines';
                                 return ' ' + ctx.dataset.label + ': ' + val.toFixed(1) + ' KB';
                             },
@@ -302,21 +352,21 @@ export function initEvolution({ ws, state, mount }) {
                 },
                 scales: {
                     x: {
-                        ticks: { color: '#64748b', font: { size: 10, family: 'JetBrains Mono, monospace' }, maxRotation: 45 },
-                        grid: { color: '#1e293b' },
+                        ticks: { color: theme.axis, font: { size: 10, family: theme.mono }, maxRotation: 45 },
+                        grid: { color: theme.grid },
                     },
                     y: {
                         type: 'linear',
                         position: 'left',
-                        title: { display: true, text: 'Lines of Code', color: '#60a5fa', font: { size: 11 } },
-                        ticks: { color: '#60a5fa', font: { size: 10 } },
-                        grid: { color: '#1e293b' },
+                        title: { display: true, text: 'Lines of Code', color: theme.series[0], font: { size: 11 } },
+                        ticks: { color: theme.axis, font: { size: 10, family: theme.mono } },
+                        grid: { color: theme.grid },
                     },
                     y1: {
                         type: 'linear',
                         position: 'right',
-                        title: { display: true, text: 'Size (KB)', color: '#94a3b8', font: { size: 11 } },
-                        ticks: { color: '#94a3b8', font: { size: 10 } },
+                        title: { display: true, text: 'Size (KB)', color: theme.axisTitle, font: { size: 11 } },
+                        ticks: { color: theme.axis, font: { size: 10, family: theme.mono } },
                         grid: { drawOnChartArea: false },
                     },
                 },

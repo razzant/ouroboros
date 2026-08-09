@@ -46,6 +46,15 @@ from ouroboros.contracts.task_contract import (
     normalize_resource_policy,
 )
 from ouroboros.outcomes import public_task_result
+# The diff projection and the shared task-artifact resolver live in ONE module
+# (`gateway/task_diff.py`); this module keeps only the routes over them, and the
+# import runs in ONE direction so the containment guard has a single copy.
+from ouroboros.gateway.task_diff import (
+    diff_gate,
+    is_workspace_result,
+    resolve_task_artifact_path,
+    task_diff_payload,
+)
 from ouroboros.task_results import (
     STATUS_FAILED,
     STATUS_SCHEDULED,
@@ -899,20 +908,33 @@ async def api_task_artifact(request: Request):
     result = load_effective_task_result(drive_root, task_id)
     if not result:
         return json_error("task not found", 404)
-    artifact = _artifact_by_name(result, name)
-    if artifact is None:
-        return json_error("artifact not found", 404, task_id=task_id, artifact=name)
-    base = task_artifacts_dir(drive_root, task_id).resolve(strict=False)
-    path = pathlib.Path(str(artifact.get("path") or "")).resolve(strict=False)
-    if path.name != name:
-        return json_error("artifact metadata path does not match requested name", 500)
-    try:
-        path.relative_to(base)
-    except ValueError:
-        return json_error("artifact path is outside task artifact directory", 500)
-    if not path.is_file():
-        return json_error("artifact file is missing", 404, task_id=task_id, artifact=name)
+    path, refusal = resolve_task_artifact_path(drive_root, task_id, result, name)
+    if refusal is not None:
+        extra = {"task_id": task_id, "artifact": name} if refusal.status == 404 else {}
+        return json_error(refusal.message, refusal.status, **extra)
     return FileResponse(path)
+
+
+async def api_task_diff(request: Request) -> JSONResponse:
+    """Thin route over `task_diff.task_diff_payload` (all decisions live there)."""
+    try:
+        task_id = validate_task_id(request.path_params.get("task_id"))
+    except ValueError as exc:
+        return json_error(str(exc), 400)
+    drive_root = request_drive_root(request)
+    repo_dir = request_repo_dir(request)
+    try:
+        # Whole worker off the loop: it reads artifact bytes and shells out to git.
+        # The gate is what keeps a browser that opens the Changes screen and the
+        # inspector at once from fanning out one git process per request against
+        # the owner's repo — requests QUEUE here, they are never refused for load.
+        async with diff_gate():
+            payload = await asyncio.to_thread(task_diff_payload, drive_root, repo_dir, task_id)
+    except Exception as exc:
+        return json_exception(exc, 503)
+    if payload is None:
+        return json_error("task not found", 404, task_id=task_id)
+    return JSONResponse(payload)
 
 
 def _record_cascade_incident(task_id: str, kind: str, detail: str = "") -> None:
@@ -1185,15 +1207,6 @@ def _render_attachment_lines(attachments: Any) -> str:
     return "\n".join(lines)
 
 
-def _artifact_by_name(result: Dict[str, Any], name: str) -> Optional[Dict[str, Any]]:
-    for artifact in result.get("artifacts") or []:
-        if not isinstance(artifact, dict):
-            continue
-        if str(artifact.get("name") or pathlib.Path(str(artifact.get("path") or "")).name) == name:
-            return artifact
-    return None
-
-
 def _queue_snapshot(drive_root: pathlib.Path) -> Dict[str, Any]:
     path = pathlib.Path(drive_root) / "state" / "queue_snapshot.json"
     try:
@@ -1233,6 +1246,7 @@ def _supervisor_ready_error(request: Request) -> Optional[JSONResponse]:
 __all__ = [
     "api_task_artifact",
     "api_task_cancel",
+    "api_task_diff",
     "api_task_resume",
     "api_task_events",
     "api_task_get",

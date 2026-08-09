@@ -1,12 +1,18 @@
+import { chipLabel, parseContent, serializeParts } from './composer_parts.js';
 import { formatUsd4 } from './utils.js';
 
+// Label only. The per-category HUE lives in CSS (`.log-type.<category>` in
+// web/style.css) because the category key is also the class name — a `color`
+// field here would be a second, unread copy of that palette, and the values it
+// used to carry had already drifted from the stylesheet (llm was --accent here
+// and --user there). Nothing reads a category beyond `.label`.
 export const LOG_CATEGORIES = {
-    tools: { label: 'Tools', color: 'var(--blue)' },
-    llm: { label: 'LLM', color: 'var(--accent)' },
-    errors: { label: 'Errors', color: 'var(--red)' },
-    tasks: { label: 'Tasks', color: 'var(--amber)' },
-    system: { label: 'System', color: 'var(--text-muted)' },
-    consciousness: { label: 'Consciousness', color: 'var(--accent)' },
+    tools: { label: 'Tools' },
+    llm: { label: 'LLM' },
+    errors: { label: 'Errors' },
+    tasks: { label: 'Tasks' },
+    system: { label: 'System' },
+    consciousness: { label: 'Consciousness' },
 };
 
 export function categorizeLogEvent(evt) {
@@ -34,6 +40,34 @@ export function normalizeLogTs(isoStr, now = new Date()) {
     } catch {
         return '';
     }
+}
+
+/**
+ * Owner text with its `[context:]` captures shown the way the composer and the
+ * transcript already show them: `[loop.py · 12 lines]` instead of the marker plus
+ * the fenced bytes it carries.
+ *
+ * These summarizers read the message the owner actually SENT, so a capture arrives
+ * here as raw grammar — and a 200-line fence inside a 240-char preview means the
+ * headline is a torn-off backtick block rather than the request. The projection
+ * comes from the codec itself (`parseContent` + `chipLabel`), so there is no second
+ * definition of the grammar to drift: this module never learns what a marker looks
+ * like, it only asks.
+ *
+ * LOSSLESS-OR-RAW, the same rule the transcript holds: text is rewritten only when
+ * the parse re-serializes byte for byte, which is the proof the grammar was
+ * understood rather than guessed at. Anything else is the owner's exact bytes,
+ * truncated by the caller as before.
+ */
+export function compactContextMarkers(text) {
+    const raw = String(text ?? '');
+    // The overwhelming case is a message with no capture in it at all.
+    if (!raw.includes('[context:')) return raw;
+    const parts = parseContent(raw);
+    if (serializeParts(parts) !== raw) return raw;
+    return parts
+        .map((part) => (part.type === 'chip' ? `[${chipLabel(part)}]` : part.text))
+        .join('\n');
 }
 
 function shortText(text, maxLen = 180) {
@@ -353,7 +387,7 @@ export function summarizeLogEvent(evt) {
             const event = String(evt.subagent_event || 'update').toLowerCase();
             const role = String(evt.subagent_role || '').trim();
             return view(event === 'completed' ? 'done' : event === 'failed' || event === 'rejected' ? 'warn' : 'progress', subagentHeadline(sid, role, event, evt.model), {
-                body: shortText(String(evt.content || evt.text || '').replace(/^💬\s*/, ''), 240),
+                body: shortText(compactContextMarkers(String(evt.content || evt.text || '').replace(/^💬\s*/, '')), 240),
                 meta: [
                     sid ? `task=${sid}` : '',
                     role ? `role=${role}` : '',
@@ -366,7 +400,7 @@ export function summarizeLogEvent(evt) {
         }
         return view(
             evt.task_id === 'bg-consciousness' ? 'thought' : 'progress',
-            shortText(String(evt.content || evt.text || '').replace(/^💬\s*/, ''), 240) || 'Progress update',
+            shortText(compactContextMarkers(String(evt.content || evt.text || '').replace(/^💬\s*/, '')), 240) || 'Progress update',
             { meta: [evt.task_id === 'bg-consciousness' ? 'background' : 'task'] },
         );
     }
@@ -667,7 +701,7 @@ function chatView({
 export function summarizeChatLiveEvent(evt) {
     const t = evt.type || evt.event || 'unknown';
     const groupId = getLogTaskGroupId(evt);
-    const progressText = describeText(String(evt.content || evt.text || '').replace(/^💬\s*/, ''), 240);
+    const progressText = describeText(compactContextMarkers(String(evt.content || evt.text || '').replace(/^💬\s*/, '')), 240);
     const key = (...parts) => [t, groupId, ...parts].join(':');
 
     if (evt.lifecycle && typeof evt.lifecycle === 'object') {

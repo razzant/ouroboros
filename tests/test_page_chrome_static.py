@@ -35,6 +35,72 @@ def test_shared_page_header_helper_has_no_inline_styles():
     assert "app-tab-strip" in source
 
 
+def _css_rule_body(css: str, selector_list: str) -> str:
+    """Body of the first rule whose selector list matches, whitespace-tolerantly.
+
+    The old version split on a literal ``".app-tab.active,\\n.app-tab.is-active {"``,
+    so reformatting the selector list broke the test instead of the design.
+    """
+    pattern = r"\s*,\s*".join(re.escape(part.strip()) for part in selector_list.split(","))
+    match = re.search(pattern + r"\s*\{([^}]*)\}", css)
+    assert match, f"no rule found for selector list {selector_list!r}"
+    return match.group(1)
+
+
+def test_page_tabs_are_underline_tabs_not_pills():
+    """Design pin (flat redesign, Phase D): the ONE shared tab strip is an
+    underline strip — a flat label row over a divider with a 2px accent rule
+    under the active tab — and no page stylesheet re-declares tab shape.
+    Dashboard, Skills and Settings are its only consumers; Skills passes
+    activeClass 'is-active', so both selectors carry the marker.
+
+    What is pinned is the underline GRAMMAR: the divider under the strip, the
+    accent rule under the active tab, and the absence of pill chrome. The
+    transparent background is inherited from the base `.app-tab` rule, so the
+    active rule must NOT be required to restate it — a redundant declaration is
+    not a design contract, and pinning it forbade the obvious cleanup.
+    """
+    css = _read("web/style.css")
+    settings_css = _read("web/settings.css")
+
+    base_rule = _css_rule_body(css, ".app-tab")
+    assert "background: transparent;" in base_rule
+    assert "border-bottom: 2px solid transparent;" in base_rule
+    assert "border-radius: 0;" in base_rule
+
+    active_rule = _css_rule_body(css, ".app-tab.active, .app-tab.is-active")
+    assert "border-bottom-color: var(--accent);" in active_rule
+    # No pill chrome creeps back in through the active state.
+    assert "border-radius" not in active_rule
+    assert "background:" not in active_rule
+
+    strip = _css_rule_body(css, ".app-tab-strip")
+    assert "border-bottom: 1px solid var(--divider);" in strip
+
+    # Settings really is a consumer of the shared control, so the negative sweep
+    # below is about something that exists.
+    settings_ui = _read("web/modules/settings_ui.js")
+    assert "stripClass: 'settings-tabs'" in settings_ui
+    assert "tabClass: 'settings-tab'" in settings_ui
+
+    # No per-page tab SHAPE: the settings stylesheet may add its own class names to
+    # the shared strip, but must not re-declare the control's geometry. The sweep is
+    # scoped to the settings TAB rules, so an unrelated 999px pill elsewhere in the
+    # file cannot fail this pin — and cannot pass it by being renamed either.
+    # Comments are stripped first (prose naming the classes is not a rule), and
+    # `(?![\w-])` keeps `.settings-tabs-bar` — the page-level wrapper DIV, not the
+    # strip — out of the sweep.
+    settings_rules = re.sub(r"/\*.*?\*/", "", settings_css, flags=re.DOTALL)
+    tab_blocks = re.findall(
+        r"\.settings-tabs?(?![\w-])[^{};]*\{([^}]*)\}", settings_rules
+    )
+    for block in tab_blocks:
+        for forbidden in ("border-radius", "font-size", "padding", "border-bottom"):
+            assert forbidden not in block, (
+                f"settings.css re-declares shared tab {forbidden}: {block!r}"
+            )
+
+
 def test_primary_pages_use_shared_header_helper():
     for rel in [
         "web/modules/settings_ui.js",
@@ -225,7 +291,9 @@ def test_server_navigation_and_chat_static_contracts():
     assert "result?.status !== 'sent'" in chat_source
     assert "data-attachment-remove" in chat_source
     assert "Promise.allSettled" in chat_source
-    assert '>Loading…</span>' in chat_source
+    # The budget meter moved to the sidebar bottom, so its pre-first-read label
+    # is pinned in the shell markup now (chat.js no longer renders a pill).
+    assert '>Loading…</span>' in _read("web/index.html")
     assert "syncHeaderControlState({ accounting: { available: false } });" in chat_source
     assert "budget_text: 'Connecting...'" not in chat_source
     assert "send(msg, options = {})" in _read("web/modules/ws.js")
@@ -239,6 +307,13 @@ def test_server_navigation_and_chat_static_contracts():
     assert "currentSettings?.[field.settingKey]" in settings
     assert "window.addEventListener('ouro:settings-updated'" in settings
     assert "source: 'settings'" in settings
+    # Read-only consumers (e.g. the composer model chip) read the already-fetched
+    # snapshot through one getter and refresh on the event, which now fires after
+    # BOTH load and save — no second /api/settings fetch, no new /api/state field.
+    assert "export function getSettingsSnapshot()" in settings
+    assert "lastSettingsSnapshot = data;" in settings
+    assert "reason: 'settings loaded'" in settings
+    assert "reason: 'settings saved'" in settings
     assert "Budget values must be at least 0.01." in costs
     assert "COST_BUDGET_INPUTS" in costs
     assert "s?._meta?.setup_contract?.budgetFields" in costs

@@ -45,6 +45,69 @@ export function safeExternalHrefAttr(value) {
     return '';
 }
 
+/**
+ * Read design tokens off the live computed style — the ONE seam where CSS
+ * custom properties cross into JS.
+ *
+ * Chart.js paints on a canvas and cannot resolve `var(...)`, so every canvas
+ * palette resolves its colours THROUGH here at call time instead of keeping a
+ * hand-synced copy of the hexes next to the chart code.
+ *
+ * `getPropertyValue` hands back the COMPUTED value, so an alias resolves
+ * THROUGH: `--accent-system: var(--amber)` reads as `#f59e0b`, same as naming
+ * `--amber` directly (verified in Chromium and WebKit). The single failure mode
+ * is a name that is not DEFINED in `:root` at all — that returns `''`, and a
+ * canvas handed `''` silently drops the series. So the invariant callers owe
+ * this seam is "every token you name exists in :root", not "name only leaves".
+ *
+ * @param {string[]|string} names CSS custom-property names, in order.
+ * @param {Element} [root] Element to resolve against; defaults to `:root`.
+ * @returns {string[]} Trimmed values, positionally matching `names`.
+ */
+export function readThemeTokens(names, root = document.documentElement) {
+    const wanted = Array.isArray(names) ? names : [names];
+    const styles = getComputedStyle(root);
+    return wanted.map((name) => String(styles.getPropertyValue(name) || '').trim());
+}
+
+/**
+ * Same colour at a lower alpha, for dataset fills.
+ *
+ * Lives here, next to `readThemeTokens`: it is the other half of the same seam
+ * (token string in, canvas paint value out) and BOTH chart modules use it, so
+ * neither owns it — `widgets.js` importing it from `evolution.js` made Widgets
+ * depend on the Evolution page for a colour utility.
+ *
+ * Accepts `#rgb`, `#rrggbb`, legacy `rgb()/rgba()` (comma-separated) and the
+ * modern space-separated `rgb(r g b / a)` syntax a browser may hand back. Any
+ * input whose first three channels are not plain numbers (percentages, `none`,
+ * `color-mix(...)`, or the `''` of an undefined token) falls back to the colour
+ * UNCHANGED — a fully opaque fill is a visible imperfection, a `rgba(NaN, …)`
+ * string is an invisible one Chart.js silently drops.
+ */
+export function chartColorAlpha(color, alpha) {
+    const value = String(color || '').trim();
+    const hex = /^#([0-9a-f]{3}|[0-9a-f]{6})$/i.exec(value);
+    if (hex) {
+        const digits = hex[1].length === 3
+            ? hex[1].split('').map((ch) => ch + ch).join('')
+            : hex[1];
+        const [r, g, b] = [0, 2, 4].map((offset) => parseInt(digits.slice(offset, offset + 2), 16));
+        return `rgba(${r}, ${g}, ${b}, ${alpha})`;
+    }
+    const channels = /^rgba?\(([^)]+)\)$/i.exec(value);
+    if (channels) {
+        // One splitter for both syntaxes: `1, 2, 3, .4` and `1 2 3 / .4`.
+        const parts = channels[1].split(/[\s,/]+/).map((part) => part.trim()).filter(Boolean);
+        const rgb = parts.slice(0, 3).map(Number);
+        if (rgb.length === 3 && rgb.every((channel) => Number.isFinite(channel))) {
+            const [r, g, b] = rgb;
+            return `rgba(${r}, ${g}, ${b}, ${alpha})`;
+        }
+    }
+    return value;
+}
+
 /** Bound untrusted text with a visible marker before it reaches DOM surfaces. */
 export function boundedText(value, maxLen = 1200) {
     const text = String(value ?? '');
@@ -288,44 +351,4 @@ export async function loadVersion() {
         const navVer = document.getElementById('nav-version');
         if (navVer) navVer.textContent = `v${runtimeVersion}`;
     } catch {}
-}
-
-export function initMatrixRain() {
-    const canvas = document.createElement('canvas');
-    canvas.id = 'matrix-rain';
-    document.getElementById('app').prepend(canvas);
-
-    const ctx = canvas.getContext('2d');
-    const chars = '\u30A2\u30A4\u30A6\u30A8\u30AA\u30AB\u30AD\u30AF\u30B1\u30B3\u30B5\u30B7\u30B9\u30BB\u30BD\u30BF\u30C1\u30C4\u30C6\u30C8\u30CA\u30CB\u30CC\u30CD\u30CE\u30CF\u30D2\u30D5\u30D8\u30DB\u30DE\u30DF\u30E0\u30E1\u30E2\u30E4\u30E6\u30E8\u30E9\u30EA\u30EB\u30EC\u30ED\u30EF\u30F2\u30F3ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789\u03A8\u03A9\u03A6\u0394\u039B\u039E\u03A3\u0398\u0430\u0431\u0432\u0433\u0434\u0435\u0436\u0437\u0438\u043A\u043B\u043C\u043D\u043E\u043F\u0440\u0441\u0442\u0443\u0444\u0445\u0446\u0447\u0448\u0449\u044D\u044E\u044F'.split('');
-    const fontSize = 14;
-    let columns = [];
-    let w = 0, h = 0;
-
-    function resize() {
-        w = canvas.width = window.innerWidth;
-        h = canvas.height = window.innerHeight;
-        const colCount = Math.floor(w / fontSize);
-        while (columns.length < colCount) columns.push(Math.random() * h / fontSize | 0);
-        columns.length = colCount;
-    }
-    resize();
-    window.addEventListener('resize', resize);
-
-    function draw() {
-        ctx.fillStyle = 'rgba(13, 11, 15, 0.06)';
-        ctx.fillRect(0, 0, w, h);
-        ctx.fillStyle = '#ee3344';
-        ctx.font = fontSize + 'px monospace';
-
-        for (let i = 0; i < columns.length; i++) {
-            const ch = chars[Math.random() * chars.length | 0];
-            ctx.fillText(ch, i * fontSize, columns[i] * fontSize);
-            if (columns[i] * fontSize > h && Math.random() > 0.975) {
-                columns[i] = 0;
-            }
-            columns[i]++;
-        }
-    }
-
-    setInterval(draw, 66);
 }

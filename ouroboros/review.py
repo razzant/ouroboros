@@ -196,6 +196,19 @@ GRANDFATHERED_OVERSIZED_MODULES = {
     # bare basename), following the skills/unix_computer_use/plugin.py precedent,
     # so a future chat.js anywhere else is not silently exempted.
     "web/modules/chat.js",
+    # 2026-08-09 web-UI redesign rebase: config.py was sitting at EXACTLY 1600
+    # upstream, so the Changes screen's one new owner setting
+    # (OUROBOROS_TASK_DIFF_GIT_TIMEOUT_SEC — the clamped per-invocation `git`
+    # timeout behind GET /api/tasks/{id}/diff) plus its clamped getter does not
+    # fit: the module has no reclaimable line left. config.py is a settings
+    # REGISTRY that grows with every owner-facing knob, and its accessors are
+    # bound to SETTINGS_DEFAULTS and the private clamp helper, so relocating one
+    # getter to its consumer would either duplicate the clamp or reach through a
+    # private API. Splitting the registry from the accessors is the tracked
+    # follow-up; same "at the ceiling, crossed with a feature" class as
+    # loop/shell/core above. NOTE: agent_task_pipeline.py hit the same wall in
+    # this rebase and was made to FIT (no debt) — only config.py had no room.
+    "config.py",
 }
 # Bundle-only launcher is not part of the self-editable function budget.
 FUNCTION_COUNT_EXCLUDED_FILES = {"launcher.py"}

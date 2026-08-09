@@ -989,11 +989,11 @@ Before every commit, verify the following:
 - Primary page actions, including Refresh, live in the `renderPageHeader({ actionsHtml })` slot on the right. Do not add ad-hoc refresh rows inside scroll bodies.
 - Non-chat top-level pages use `.app-page-glass` for the shared dim/brand backdrop. Header padding should stay compact; if a page needs more space, simplify its copy rather than growing the chrome.
 - A new top-level page that scrolls its header together with content violates the architecture mirror: fix the layout, not the symptom.
-- Top-level tab/pill buttons are a single design-system control: `renderTabStrip` + `.app-tab-strip` + `.app-tab` + the `--pill-*` CSS variables in `web/style.css`. Do not redeclare per-page tab padding, font size, border radius, or active styling in page CSS files.
+- Top-level page tabs are a single design-system control: `renderTabStrip` + `.app-tab-strip` + `.app-tab` in `web/style.css`, consumed by Dashboard, Skills and Settings. They are **underline tabs, not pills** — a flat label row over one `--divider` rule, with a 2px `--accent` bottom border marking the active tab (`.active`, or the Skills strip's `is-active`). Dimensions come from `--pill-padding-y` and `--pill-font-size` (legacy names from the retired pill strip; `.app-tab` is their only consumer). Do not redeclare per-page tab padding, font size, border radius, or active styling in page CSS files — a page stylesheet may add extra class names to the shared strip, but the geometry, including any mobile variant, is restyled on the shared classes. Pinned by `tests/test_page_chrome_static.py::test_page_tabs_are_underline_tabs_not_pills`.
 - Scrollable page bodies use the shared `.scroll-fade-y` mask when content can pass under fixed page chrome. Do not copy/paste custom gradient masks into page modules; extend the shared class if the fade rhythm changes.
 - Masonry-style widget packing uses `web/modules/masonry.js::applyMasonry`. Do not reintroduce CSS Grid row packing (`align-items: start`) for unequal-height widget cards; it leaves row gaps under shorter cards.
 - Widget card ordering is a host UI preference. Persist it through `/api/ui/preferences` and `data/state/ui_preferences.json`; never rewrite extension manifests or widget declarations to store owner layout.
-- New visual dimensions should become CSS variables first (`--pill-*`, `--button-*`, `--page-header-*`, etc.) and then be consumed by shared classes. Hardcoded page-local dimensions are review debt unless the component is genuinely unique.
+- New visual dimensions should become CSS variables first (`--button-*`, `--page-header-*`, etc.) and then be consumed by shared classes. Hardcoded page-local dimensions are review debt unless the component is genuinely unique.
 
 #### Setup / Onboarding Layout
 - The first-run wizard is a compact multi-step flow. At the default desktop
@@ -1284,6 +1284,81 @@ settings state.
 SSOT. Documentation keeps semantic roles and failure-prevention rules, not a
 copied color/radius/dimension inventory.
 
+Ouroboros uses a **flat neutral-gray + red developer-tool** visual language.
+Every surface is a SOLID background token plus a 1px border. There is no
+glassmorphism and **no `backdrop-filter` anywhere in the main SPA** — depth
+comes from the background ladder, borders, and (sparingly) shadow:
+
+```css
+background: var(--bg-elevated);           /* cards, menus, composer, controls */
+border: 1px solid var(--surface-border);
+```
+
+`grep -n "backdrop-filter" web/style.css` must return NO declaration — the only
+match is the token banner at the top of the file stating that there is none. If a component
+appears to need a blur to separate itself from what is behind it, it needs a
+higher background token or a border — not a filter (removing a
+`backdrop-filter` also dissolves the stacking context it silently created, so
+components that relied on that get an explicit `isolation` / positioned
+`z-index` instead).
+
+**Onboarding is the one deliberate exception.** `web/onboarding.css` styles the
+standalone first-run wizard, which is served as its own page and cannot import
+`web/style.css`. It keeps its own translucency and blur formulas; only its
+`:root` COLOR VALUES are kept in sync with the palette below. Do not "fix" its
+blur, and do not copy it back into the SPA.
+
+### Token families
+
+All of these live in ONE `:root` block in `web/style.css`. A component rule
+references a token for every COLOR it paints; it never hardcodes a literal.
+Adding a visual dimension means adding a token first.
+
+**Two deliberate exceptions, both `rgba(0, 0, 0, …)`.** Neither is a palette
+color, and neither can be expressed as one:
+
+* **Drop shadows** (`box-shadow`) are a depth cue, not a hue. They must darken
+  whatever is behind them on any surface in the ladder, so they take true black at
+  a per-elevation alpha. `--bg-primary-rgb` would tint them toward the page
+  background and flatten the elevation they exist to signal.
+* **Overlay scrims** — the `position: fixed; inset: 0` backdrops behind modals,
+  the mobile nav drawer, the reconnect overlay and the panel dismiss layers —
+  darken the whole app so the layer above reads as separate. Routing them through
+  `rgba(var(--bg-primary-rgb), α)` does not work *arithmetically*: over
+  `--bg-primary` that composites to exactly `#131315` at **every** alpha, so the
+  scrim becomes invisible, and over `--bg-panel`/`--bg-elevated` it lands within a
+  few units of the page background. The dim is the whole point, so these stay
+  black.
+
+A new `rgba()` literal anywhere else — a text alpha, a surface tint, a border, an
+accent wash — is token debt. Take the nearest rung of the existing ladder and
+record the delta in a comment (see `.nav-budget-label` and `.app-tab`, both of
+which land a `0.45` handoff spec on `--text-secondary` at `0.55`) rather than
+introducing an off-ladder value in shared chrome.
+
+| Family | Tokens | Role |
+|---|---|---|
+| Backgrounds | `--bg-primary` `#131315`, `--bg-sidebar` `#0f0f11`, `--bg-panel` `#151517`, `--bg-elevated` `#1a1a1d` | page → sidebar → rails/panels → cards/controls |
+| Background channel | `--bg-primary-rgb` | the one hue every gradient/edge FADE interpolates (not the scrims — see above) |
+| Text | `--text-primary` `#e7e7ea`, `--text-secondary`, `--text-muted` | body / secondary / hint |
+| Lines | `--divider`, `--surface-border`, `--surface-border-soft` | separators and surface edges |
+| Accent | `--accent` `#c93545`, `--accent-hover` `#d4485a`, `--accent-light`, `--accent-chip-text`, `--accent-hover-rgb`, `--accent-04…55` alpha ladder | brand red: primary actions, active nav, task identity |
+| Roles | `--accent-task`, `--accent-system`, `--accent-user`, `--accent-project`, `--tone-ok/warn/danger` | name the SIGNAL, not the hue |
+| Voices | `--user` `#6e96d2` (owner), `--project` `#2dd4bf` (project identity), `--system-*` amber | who is speaking |
+| Status | `--green` `--amber` `--red` `--blue` (+ `-dim`, `--blue-08`) | outcome hues |
+| Diff | `--diff-add-bg` `--diff-del-bg` `--diff-add-num` `--diff-del-num` `--diff-add-text` `--diff-del-text` `--diff-ctx-*` `--diff-hunk-bg` | unified AND split render from the same pair |
+| Syntax | `--code-keyword` `--code-self` `--code-string` `--code-number` `--code-comment` `--code-default` | the in-house highlighter names lexeme roles |
+| Type | `--font-mono` = `ui-monospace, Menlo, monospace` | every code/path/number/amount surface |
+| Shell | `--sidebar-width`, `--project-panel-width`, `--inspector-width`, `--nav-item-radius` | app shell geometry |
+| Spacing | `--space-1…6` (8pt scale) | never ad-hoc pixels |
+
+The project identity hue moved from fuchsia to teal in the flat redesign: the
+role (and every consumer) is unchanged, only the value moved, because that is
+what a token layer is for.
+
+Mono text uses `var(--font-mono)`. Do not paste a new font stack
+(`'SF Mono', 'JetBrains Mono', …`) into a component rule.
+
 ### Layout and controls
 
 - Top-level pages use a fixed `renderPageHeader` outside an independently
@@ -1297,9 +1372,110 @@ copied color/radius/dimension inventory.
   shared toast host unless status belongs to a permanently reserved control
   row. Working, warning, error, and destructive states keep consistent meaning
   across Chat, Logs, Settings, and Skills.
-- Floating chrome combines gradient and masked backdrop blur so the blur edge
-  does not become a visible seam. The chat composer intentionally keeps blur on
-  the input surface and reserves measured message padding around the dock.
+- Floating chrome is a flat darkening gradient with **no** blur band, and the
+  scrolling surface reserves measured padding around it rather than hiding
+  content underneath — see *Docks and page-chrome overlays* below.
+
+### Docks and page-chrome overlays
+
+Chrome that floats over scrolling content (the chat header, the chat input
+dock, sticky tab strips) is a **flat darkening gradient with no blur band**:
+
+1. The element is `position: absolute` on its edge (`top: 0` for headers,
+   `bottom: 0` for docks) and spans the horizontal axis.
+2. Its background is a single multi-stop `linear-gradient` from
+   `rgba(var(--bg-primary-rgb), …)` at the anchor edge to fully transparent at
+   the far edge, so the transcript fades out instead of hitting a hard line.
+   The intermediate stops are anchored to the FAR edge as a fixed length
+   (`calc(100% - 30px)`), never as percentages. This chrome changes height — the
+   chat header wraps from one row (56px) to three (~129px at 375px) — and
+   percentage stops stretch with the box, which is what left the whole wrapped
+   control row sitting over effectively unmasked transcript text. A fixed tail
+   keeps the controls on a solid backdrop at any height and always spends the
+   same distance softening the edge.
+3. **No `backdrop-filter`, and therefore no companion `mask-image`.** The mask
+   only ever existed to fade a blur in lockstep; with the blur gone the mask is
+   dead weight (`.chat-page-header` pins `mask-image: none` for exactly this
+   reason).
+4. The control surface INSIDE the dock is a normal flat surface
+   (`--bg-elevated` + 1px border + accent focus ring), not a frosted pane.
+5. The scrollable surface reserves space for the chrome instead of hiding
+   content under it: `#chat-messages` reserves bottom padding through
+   `--chat-input-reserve` and top padding through `--chat-header-reserve`, both
+   set from the REAL measured height by the `updateMessagesPadding()` /
+   `ResizeObserver` pair (mobile adds safe-area on top). The header reserve reads
+   `getBoundingClientRect().height`, not `offsetHeight`: the latter is already
+   rounded down to an integer, so a fractional wrapped header (129.39px at 375px)
+   would reserve one pixel too little. `updateMessagesPadding()` preserves scroll
+   stickiness only; it must not mutate DOM padding.
+
+Do NOT introduce a separate `.chat-bottom-fade` (or analogous overlay) layer.
+A second fade layer compounds the gradient and can produce a visible "double
+dim", especially over short messages. One gradient, on the chrome element.
+
+### Control rules
+
+- Composer, toolbar, segmented, and widget-reorder controls share one flat
+  grammar: a solid background token, a subtle 1px border, and a bounded radius
+  from the scale. Do not add transparent text-only pills for primary actions.
+- Top-level page tabs are **underline tabs**, not pills — see "Page Header
+  Layout" above for the full rule.
+- Chat-header controls are **ghost buttons** (`.chat-header-btn`: transparent
+  background, `rgba(255,255,255,0.10)` border, `--radius-7`, hover
+  `rgba(255,255,255,0.06)`) with exactly one danger variant
+  (`.chat-header-btn.danger`, accent-tinted) for Panic. Overflow lives in the
+  slim `.chat-header-more` `<details>` menu, which must auto-dismiss on an
+  outside click and on Escape.
+- The chat composer is one flat 12px box: a control row (Swarm, Low/Max, and the
+  READ-ONLY model chip pushed to the end) sits above a text row holding the attach
+  button, the `composer_parts` mount, and Send. Send is the composer's one PRIMARY
+  action (solid `--accent`), not a ghost pill. The model chip rides the control row
+  rather than the field because at 390px a mono model id inside the text row eats
+  the usable input width; it is hidden entirely until the Settings snapshot names a
+  model (never a guessed default).
+- Button and segmented-control labels use `letter-spacing: 0` and stable
+  dimensions. If a label does not fit on mobile, shrink the control group or
+  move it to another row; do not reserve a large textarea padding gutter.
+- Drag/drop affordances are stateful CSS classes (`drag-active`, `drag-over`,
+  etc.) on the host control/card. Do not use inline styles for visual feedback.
+- Context-capture chips (⌘L) are one shared DOM contract in
+  `web/modules/composer_parts.js` + the `.composer-part-*` classes. Every
+  composer (chat, Changes dock, Files dock) mounts that module rather than
+  restyling its own chip. The same chip appears again in the sent message as
+  `.chat-context-chip` — same mono/accent grammar, no second look for the same
+  thing.
+
+### Flat chat transcript
+
+The transcript is one centred reading column (max 760px, gutters via
+`padding-inline: max(…, calc((100% - 760px) / 2))` — no wrapper element, so every
+insertion path stays untouched). The owner's message is the ONLY bubble left; agent
+prose and task cards are plain rows with a sender line. Task activity is mono rows
+behind a 2px left rule, and the `✓`/`●`/`✕` status glyph is a `::before` keyed off
+the row's phase class — add a status by adding a phase rule, never by adding markup
+to the row (the `data-live-line-*` disclosure contract is pinned). Row titles wrap;
+do not ellipsize owner-facing narration. Only transient status events (awakened /
+reconnected, marked `.chat-status-event`) collapse into a centred pill — a rich
+system renderer keeps its full disclosure.
+
+### CSS ownership anchors
+
+`web/style.css` carries `/* ===== [stream …] ===== */` banner comments marking
+which screen owns which region (app shell, chat, changes/inspector, files,
+dashboard/skills/settings/widgets, plus the shared composer-parts contract).
+Add a rule inside the region that owns it. `web/app.js` carries the matching
+append-only `/* [anchor:phase-…] */` regions for cross-screen registrations
+(right-panel kinds, the global capture hotkey).
+
+A rule that two screens genuinely share belongs in a `[shared: …]` region, NOT in
+whichever screen's region it was written in first. `[shared: status tone ladder]`
+is the worked example: the done / warn / error tones for small status pills are
+read by the chat's phase pills, the Logs grid's phase column and the Evolution
+runtime pills, so one screen's region deciding another's colours is the thing the
+banners exist to prevent. Every rule there is at least two classes, which is what
+lets it outrank the per-surface pill bases on SPECIFICITY rather than on where the
+region happens to sit in the file — a shared region must never depend on file
+order, because the regions around it are independently owned and get reordered.
 
 ### Responsive and accessible behavior
 
@@ -1333,6 +1509,271 @@ lost on remount.
 Every timer, listener, observer, stream, abort controller, chart, and mounted
 widget has a paired disposer. UI preferences such as widget order belong in
 host state, never in extension manifests.
+
+### Navigation sidebar (v6.32.0 redesign; sections + brand + budget in the flat-UI redesign)
+
+The desktop navigation is a left `#primary-sidebar` of ROWS (not an icon
+rail): each destination is a `.nav-row` (16px icon + 13px label, 34px tall) and
+the Projects group is a `.nav-section-toggle` that expands a data-driven list of
+project rows (`renderProjectsNav` in `web/app.js`, fed by `/api/state`).
+`syncNavigationState` keeps the active row, the Projects expand/collapse, and the
+open right panel in sync. A project opens as a right split panel on desktop and a
+full-width overlay with backdrop on mobile, hosting a full chat instance over the
+ONE shared WebSocket (client-side fan-out by `chat_id`). On mobile the sidebar
+collapses behind an "Open navigation" toggle (drawer), NOT a horizontal bottom
+bar. Spacing/typography come from the shared design tokens in `web/style.css`
+(no per-screen hardcoding); global agent controls (Evolve/Review/Restart ghost
+buttons + Panic, and the slim "More" menu holding Consciousness) live in the chat
+header, not the sidebar.
+
+The sidebar has three fixed parts:
+
+- **Brand row** (`.nav-brand`, outside the scroll region): the 26px app mark
+  (`/static/favicon.png`, `--radius-7`), the product name, and one sub line
+  carrying `#nav-version` (filled by `loadVersion()` — the ONE version span) plus
+  the live socket state and a `.nav-status-dot` driven from the shared WS
+  `open`/`close` events. There is no second version label anywhere.
+- **Scrolling rows** (`.sidebar-scroll`): Main Chat, the Projects section
+  (mechanics unchanged), then `.nav-section-label` groups — **Workspace**
+  (Changes, Files) and **System** (Dashboard, Skills, Widgets, Settings). Section
+  labels are 10px/600 uppercase; page glyphs come from
+  `web/modules/page_icons.js` and are hydrated by `hydrateNavIcons()`. A new
+  destination needs a `PAGE_ICONS` entry, not a pasted SVG.
+- **Budget meter** (`.nav-budget`, pinned to the bottom): label row + mono amount
+  + a 3px bar. It renders `chat.js::headerBudgetPresentation` — the ONE budget
+  formatting projection, which fails closed to "Unavailable" and never shows a
+  fabricated `$0`. The bar fill is written as the `--budget-fill` CSS custom
+  property (the accepted dynamic-value exception below), never `style.width`.
+  There is exactly one budget meter in the app; the old chat-header pill is gone.
+
+Every consumer of `/api/state` (sidebar budget, chat header controls, projects
+nav, task bindings) reads ONE app-owned snapshot: `refreshState()` in
+`web/app.js` publishes to `subscribeState` handlers on a single self-scheduling
+timer (~3s while Chat is visible, ~20s elsewhere, paused while
+`document.hidden`), forced on WS `open`, `projects_changed`, and owner-control
+writes. Do not add a module-local `/api/state` poll or a second timer.
+
+The right panel is ONE slot with mutually exclusive kinds (`project` today, plus
+whatever registers via `registerRightPanel(kind, {mount, unmount})`). Opening one
+kind closes the other, and navigating away closes the panel. The project kind
+keeps its persisted drag width; the task inspector is fixed at
+`--inspector-width`.
+
+The compact Projects header keeps the shared layers icon, label, unread pill,
+chevron, and an always-visible `+`. Project rows expose one sibling Rename/Delete
+menu, reachable by pointer and keyboard; Enter/Space open, Escape closes, focus
+order stays logical, click-outside closes, and placement is viewport-safe. Name
+validation uses the backend `PROJECT_NAME_MAX` SSOT (80), never a divergent UI
+constant. Unread is `visible_revision > project_seen_revision`; acknowledge only
+after the room has painted, and make cursor writes monotonic/server-clamped.
+Routine task heartbeat telemetry must never create a bubble or unread revision.
+Only typed real incidents may enter the live card/Activity plus one deduplicated
+toast.
+
+Project history is a projection of canonical chat rows, not a mirror log. A
+presentation annotation sidecar may store the latest routing action/target/status
+for a `client_message_id`, but it must never become routing or Project-state
+authority. Deletion is fenced `active → deleting → tombstoned`; preserve id,
+bindings, chat/history, folder, and memory, and never permit resurrection.
+
+<!-- Historical (pre-v6.32.0 icon rail; superseded by the sidebar above):
+The desktop `#nav-rail` used Material 3 / Apple HIG navigation-rail
+spacing norms: `padding: 28px 0 16px; gap: 10px;`. The previous
+`12px / 4px` was visibly cramped (the first button hugged the top edge
+of the viewport). Bump these values together when adding new nav
+buttons; resist tightening them.
+
+On mobile (`@media (max-width: 640px)`) the rail flips to a horizontal
+bottom bar with `justify-content: safe center`. The `safe` keyword
+keeps the row centered when content fits and gracefully degrades to
+flex-start when content overflows on very narrow phones. `min-width:
+60px` per `.nav-btn` keeps labels like "Dashboard" from truncating in
+space-evenly mode.
+-->
+
+The mobile `.scroll-tabs` pattern (settings/dashboard/skills) uses
+horizontal-scroll pills with `scrollIntoView({ inline: 'center' })`
+on activation so the active pill is always visible. Do not reintroduce
+the v5.6.0 drill-down accordion (`settings-subtab-open` /
+`settings-mobile-back`) — it traded one tap for two.
+
+### Notifications
+
+Transient status must use `web/modules/toast.js::showToast()`, which renders
+fixed-position notifications in `#toast-stack`, top-right but below page chrome.
+The offset is intentional: toasts must never cover the Chat composer or primary
+page actions. Toasts must not be inserted into page content or headers, because
+that shifts the interface while the person is reading or clicking. Use reserved
+inline status rows only when the status belongs to a specific control group and
+that row is always present (for example marketplace search status). Do not
+create page-prepended banners or local wrapper aliases such as `showBanner` for
+short-lived events such as review started, install queued, or grant saved.
+
+### Accent colors
+
+| Role | Token | Value | Usage |
+|------|-------|-------|-------|
+| Primary | `--accent` | `#c93545` | Primary buttons, active nav, task identity, borders |
+| Hover | `--accent-hover` | `#d4485a` | Primary-button hover |
+| Light | `--accent-light` | `#f07a86` | Agent sender name, "Working" phase, keywords |
+| Chip text | `--accent-chip-text` | `#f0a3ab` | Text on accent-tinted chips |
+| Alpha ladder | `--accent-04` … `--accent-55` | `rgba(201,53,69,α)` | tinted fills and borders |
+| Focus | `--focus-accent-border` / `--focus-accent-ring` | derived from `--accent-hover-rgb` | focus border + ring |
+
+Use these for new features. Do not introduce additional red/crimson shades, and
+do not write a raw `rgba(232, 93, 111, …)` / `rgba(201, 53, 69, …)` literal — the
+hue lives once, in `--accent-hover-rgb` and the alpha ladder.
+
+### Border radius scale
+
+| Token | Value | Usage |
+|-------|-------|-------|
+| `--radius-xs` | `3px` | Micro accents (progress bars) |
+| `--radius-4` | `4px` | Inline code, tightest chips |
+| `--radius-5` | `5px` | Micro selects, dense controls |
+| `--radius-6` | `6px` | Context chips, activity rows |
+| `--radius-7` | `7px` | Ghost buttons, brand mark, diff file rows |
+| `--radius-sm` | `8px` | Nav rows, small controls, filter chips |
+| `--radius-9` | `9px` | Send button, mid controls |
+| `--radius-md` | `10px` | Chips, log-counter pills, page-fade rules |
+| `--radius` | `12px` | Inputs, composer box, inner cards |
+| `--radius-lg` | `16px` | Live cards, large cards |
+| `--radius-xl` | `20px` | Logo images, large media |
+| *(no token)* | `18px` | Section cards (settings, form panels) |
+| *(no token)* | `24px` | Modal/wizard shells |
+
+Use CSS variables where possible. Do not introduce new hardcoded radius values.
+When a new radius value is needed, add it to `:root` in `web/style.css` first.
+`999px` (pill) stays a literal — it is a shape, not a step on the scale.
+
+### Interactive states
+
+```css
+hover:  border-color +1 step + background rgba(255,255,255,0.06)
+active: background var(--accent-12) + color var(--text-primary)
+focus:  border-color var(--focus-accent-border)
+        + box-shadow 0 0 0 3px var(--accent-10)
+```
+
+Flat surfaces do not scale on hover; they change border/background. A hover
+`transform: scale(...)` on a card or row is legacy and should not spread.
+
+### Button conventions
+
+All normal application buttons use the shared `.btn` base class plus exactly
+one semantic variant:
+
+| Variant | Purpose |
+|---------|---------|
+| `.btn-primary` | Primary action in the current surface: enable, install, update, start |
+| `.btn-secondary` | Neutral secondary action next to a primary action: reload, cancel, install runtime |
+| `.btn-default` | Low-emphasis utility action: refresh, details, open related view |
+| `.btn-ghost` | Very quiet action on an already-strong surface |
+| `.btn-save` | Persist settings or budget changes |
+| `.btn-danger` | Destructive or emergency action |
+
+Size modifiers are `.btn-xs` and `.btn-sm`; omit a size modifier for the
+default medium size. Do not combine semantic variants (for
+example, `.btn-default.btn-primary` is invalid), and do not invent one-off
+button schemes in feature modules. Onboarding and modal buttons use the same
+`.btn` variants as the main SPA.
+
+Buttons are horizontally centered by default. If a control intentionally uses a
+menu-row layout, use a named menu-item class (for example `.skills-menu-item`)
+rather than overloading `.btn`.
+
+### "Working" phase color
+
+Use **crimson** — `var(--accent-light)` / `rgba(248, 130, 140, ...)` — for
+active/working states everywhere, not blue. The Logs page phase badges match the
+Chat live card colors, and the pulsing "Working" pill uses the same hue over an
+`--accent-12` fill.
+
+### No inline styles in JS
+
+JS modules that generate HTML must use CSS class names, not `style=""` attributes.
+This is enforced by reviewer policy — `.style.*` assignments on DOM elements (e.g.
+`element.style.display`, `element.style.color`) will produce a REVIEW_BLOCKED finding.
+**Accepted exception — dynamic CSS custom properties.** Setting a CSS variable for a
+genuinely DYNAMIC value (`root.style.setProperty('--sidebar-width', w + 'px')` for a
+live drag) is the idiomatic CSS-variable theming API, not a static inline style — it
+feeds a stylesheet rule rather than hard-coding a visual property on the element, and
+routing it through a managed `<style>` rule re-parsed each frame would be strictly
+worse. CSS-variable mutation via `setProperty('--x', …)` is therefore allowed; static
+visual properties (`display`/`color`/`width`/…) remain blocked. (v6.34.0, CW10)
+The sidebar budget bar is the second sanctioned instance: `app.js` writes
+`setProperty('--budget-fill', pct)` and `.nav-budget-bar-fill` consumes it as
+`width: var(--budget-fill, 0%)`. Progress/meter fills follow that shape — never a
+`.style.width` assignment.
+Existing classes (`.stat-card`, `.page-header`, `.app-page-*`, `.app-tab-*`, `.about-*`, `.costs-*`) cover common layouts.
+For new top-level pages, prefer `web/modules/page_header.js` over bespoke header/tab markup.
+Add new classes to `web/style.css` when needed.
+Before staging any `web/modules/*.js` file: `grep -n "\.style\." web/modules/*.js`
+and fix any hits.
+Legacy inline assignments that already existed before a scoped change are tracked
+debt, not an automatic release blocker, when the diff does not add or worsen that
+style usage. Prefer paying them down opportunistically instead of expanding the
+scope of unrelated UI work.
+
+### Declarative widget UI
+
+Extension widgets should prefer host-owned declarative render schemas.
+`web/modules/widgets.js` is the single host for `register_ui_tab`
+declarations: `iframe` remains sandboxed with no relaxed tokens, and
+`kind: "declarative"` / `schema_version: 1` covers forms, actions, markdown,
+JSON, key/value summaries, tables, progress, files, galleries,
+image/audio/video media, map/calendar/kanban, and the additive `group`,
+`metric`, and `callout` composition components. New common widget capabilities
+should extend that declarative schema and its tests, not introduce arbitrary
+skill HTML, CSS, JavaScript, chart options, or cross-widget bindings.
+
+v5.7.0 adds one deliberate exception for rare custom UI: `kind: "module"`
+loads reviewed skill-provided `widget.js` into a sandboxed `srcdoc` iframe
+(`sandbox="allow-scripts"`, **no** `allow-same-origin`). The parent host
+fetches the reviewed JS from `/api/extensions/<skill>/module/<entry>` and
+injects a constrained `fetch` bridge that only proxies
+`/api/extensions/<skill>/...` routes. This is not same-origin SPA execution;
+the module cannot access app cookies or `localStorage`.
+
+Rules for widget changes:
+
+- `group.components` and `tabs[].components` may contain interactive
+  components. Give every mounted component an explicit `id` or let the host use
+  its stable tree path; never key lifecycle state by a top-level array index.
+  `subscription.render` is transitively passive: forms, actions, pollers,
+  streams, subscriptions, and mutating kanban remain forbidden anywhere below
+  it. One widget-level disposer owns timers, streams, abort controllers, charts,
+  and snapshots, and inactive tabs do not restart lifecycle work.
+- Escape by HTML context: use `escapeHtmlText()` for text-node content and
+  markdown fallbacks, `escapeHtmlAttr()` for interpolated attribute values
+  (`data-*`, `src`, `alt`, `title`, `href`, `value`) and mixed template
+  snippets, and DOMPurify only for markdown blocks.
+- Media sources must be extension routes under `/api/extensions/<skill>/...`
+  or explicitly safe `data:` URLs for image/audio/video MIME types.
+- Long-running user actions (image/music/research generation) must use the
+  declarative async job contract: start route returns `job_id`, status route
+  returns `queued|running|done|error`, and the widget host resumes polling by
+  `job_id` after tab switches. Do not implement long generation as a single
+  foreground HTTP request that can be lost when the widget remounts.
+- Download controls must use the host download helper (`data-widget-download-url`
+  / desktop bridge / fetch-blob fallback). Raw in-app navigation links are not
+  acceptable for downloads because desktop WebView may replace the Ouroboros UI
+  with the media file.
+- Forms and Settings reuse the safe field renderer/value collector in
+  `web/modules/ui_helpers.js`; Settings keeps its narrow route/component
+  contract. Password values never persist across renders, duplicate submit is
+  blocked, and busy/error cleanup must restore the control state.
+- Charts preserve unknown/non-finite values as `null`, keep `spanGaps=false`,
+  expose an ARIA label and an expandable semantic table built from the same
+  data, and fall back to that table when Chart.js is unavailable. Kanban drag
+  and native `Move to` use the same route and `{card_id, column_id}` payload.
+- Do not load arbitrary JS modules from skill directories into the SPA origin.
+  `kind: "module"` is allowed only through the sandboxed iframe + parent fetch
+  bridge above, and must be covered by the `widget_module_safety` review item.
+- Add/update `tests/test_widgets_ui_static.py` for every new component kind or
+  media policy.
+
+---
 
 ## MCP Client Integration
 

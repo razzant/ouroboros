@@ -9,7 +9,9 @@ import {
     extensionRoutePrefix,
 } from './api_client.js';
 import {
+    chartColorAlpha,
     escapeHtmlAttr as escapeHtml,
+    readThemeTokens,
     renderMarkdownSafe,
 } from './utils.js';
 import {
@@ -330,12 +332,20 @@ function renderTableCell(row, column) {
     return escapeHtml(raw ?? '');
 }
 
-const CHART_PALETTE = [
-    ['#e85d6f', 'rgba(232, 93, 111, 0.22)'],
-    ['#60a5fa', 'rgba(96, 165, 250, 0.22)'],
-    ['#34d399', 'rgba(52, 211, 153, 0.22)'],
-    ['#fbbf24', 'rgba(251, 191, 36, 0.22)'],
-];
+// Widget series colours. Chart.js paints on a canvas and cannot resolve CSS
+// variables, so the palette is RESOLVED from the design tokens at chart-BUILD
+// time through the shared `readThemeTokens` seam (web/modules/utils.js). No hue
+// is copied here, so nothing can drift out of step with web/style.css :root.
+// Every name in these lists must be DEFINED in `:root` — aliases resolve
+// through the seam fine, an UNDEFINED token resolves to `''` and drops a series.
+const CHART_SERIES_TOKENS = ['--accent-light', '--user', '--green', '--amber'];
+const CHART_GRID_TOKEN = '--surface-border-soft';
+const CHART_FILL_ALPHA = 0.22;
+
+/** `[borderColor, backgroundColor]` per series, from already-resolved tokens. */
+function chartPalette(series) {
+    return series.map((color) => [color, chartColorAlpha(color, CHART_FILL_ALPHA)]);
+}
 
 export function finiteChartValue(value) {
     if (typeof value === 'number') return Number.isFinite(value) ? value : null;
@@ -349,12 +359,16 @@ function chartConfig(component, data) {
     const labels = component.labels || getPath(data, component.labels_path || 'labels', []);
     const datasets = component.datasets || getPath(data, component.datasets_path || 'datasets', []);
     const unit = String(component.unit || '');
+    // ONE `getComputedStyle` round-trip per chart build for every token this
+    // chart needs — grid first, then the series ramp, in list order.
+    const [gridColor, ...series] = readThemeTokens([CHART_GRID_TOKEN, ...CHART_SERIES_TOKENS]);
+    const palette = chartPalette(series);
     return {
         type,
         data: {
             labels: Array.isArray(labels) ? labels.map((item) => String(item ?? '')) : [],
             datasets: Array.isArray(datasets) ? datasets.map((dataset, idx) => {
-                const [borderColor, backgroundColor] = CHART_PALETTE[idx % CHART_PALETTE.length];
+                const [borderColor, backgroundColor] = palette[idx % palette.length];
                 return {
                     label: String(dataset?.label ?? 'Series'),
                     data: Array.isArray(dataset?.data) ? dataset.data.map(finiteChartValue) : [],
@@ -370,9 +384,9 @@ function chartConfig(component, data) {
             spanGaps: false,
             plugins: { legend: { display: true } },
             scales: {
-                x: { grid: { color: 'rgba(255, 255, 255, 0.06)' } },
+                x: { grid: { color: gridColor } },
                 y: {
-                    grid: { color: 'rgba(255, 255, 255, 0.06)' },
+                    grid: { color: gridColor },
                     title: { display: Boolean(unit), text: unit },
                 },
             },

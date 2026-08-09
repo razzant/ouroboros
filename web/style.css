@@ -1,14 +1,40 @@
+/* =========================================================================
+   Ouroboros design tokens — FLAT gray + red (see docs/DEVELOPMENT.md
+   "Design System"). Surfaces are a solid background token plus a 1px border;
+   the main SPA carries NO `backdrop-filter`. The standalone onboarding wizard
+   (web/onboarding.css) keeps its own blur formulas and only syncs the COLOR
+   values below. Tokens are frozen after the redesign foundation phase: add a
+   new one here, never a hardcoded literal in a component rule.
+
+   Two documented exceptions, both `rgba(0, 0, 0, …)` and neither a palette hue:
+   `box-shadow` depth cues, and the fixed `inset: 0` OVERLAY SCRIMS. A scrim
+   cannot use --bg-primary-rgb — over --bg-primary that composites to exactly
+   #131315 at every alpha, i.e. no dim at all. See docs/DEVELOPMENT.md
+   "Token families".
+   ========================================================================= */
 :root {
-    --bg-primary: #0d0b0f;
-    --bg-secondary: #1a1520;
-    --bg-tertiary: #201828;
+    /* Background ladder: page → sidebar → rails/panels → cards/controls. */
+    --bg-primary: #131315;
+    --bg-sidebar: #0f0f11;
+    --bg-panel: #151517;
+    --bg-elevated: #1a1a1d;
+    /* Channel form of --bg-primary so gradients and edge FADES derive from ONE
+       hue. Not for overlay scrims: those must actually darken the page, and this
+       hue cannot (see the exception note in the banner above). */
+    --bg-primary-rgb: 19, 19, 21;
     --bg-card: rgba(255, 255, 255, 0.06);
     --bg-hover: rgba(255, 255, 255, 0.08);
-    --text-primary: #e2e8f0;
-    --text-secondary: rgba(255, 255, 255, 0.54);
-    --text-muted: rgba(255, 255, 255, 0.38);
+    --text-primary: #e7e7ea;
+    --text-secondary: rgba(255, 255, 255, 0.55);
+    --text-muted: rgba(255, 255, 255, 0.35);
     --accent: #c93545;
+    --accent-hover: #d4485a;
+    /* Channel form of --accent-hover: hover/focus rings interpolate the SAME
+       hue instead of the old raw rgba(var(--accent-hover-rgb), …) literals. */
+    --accent-hover-rgb: 212, 72, 90;
     --accent-light: #f07a86;
+    /* Text color for accent-tinted chips (context chips, capture pills). */
+    --accent-chip-text: #f0a3ab;
     --accent-dim: rgba(201, 53, 69, 0.15);
     --accent-glow: rgba(201, 53, 69, 0.08);
     /* Accent alpha tokens; keep future tweaks off hardcoded rgba literals. */
@@ -21,21 +47,22 @@
     --accent-22: rgba(201, 53, 69, 0.22);
     --accent-25: rgba(201, 53, 69, 0.25);
     --accent-55: rgba(201, 53, 69, 0.55);
-    /* Project identity (vivid fuchsia): a converted task card, its sidebar marker,
+    /* Project identity (muted teal): a converted task card, its sidebar marker,
        and the project panel header share this so "this is a project" reads as a
        deliberate state — never the red task accent (looked like an error, P3) and
-       never the blue owner voice. The old calm-indigo sat next to the user-message
-       blue and the two blurred together; fuchsia is unmistakably its own role.
-       Base is legible-on-dark fuchsia-400; every tint shares the SAME hue (C7.3). */
-    --project: #e879f9;
-    --project-light: #f0abfc;
-    --project-dim: rgba(232, 121, 249, 0.15);
-    --project-08: rgba(232, 121, 249, 0.08);
-    --project-12: rgba(232, 121, 249, 0.12);
-    --project-18: rgba(232, 121, 249, 0.18);
-    --project-25: rgba(232, 121, 249, 0.25);
+       never the blue owner voice. The flat gray+red theme retired the vivid
+       fuchsia (it fought the neutral grays); teal-400 keeps the role distinct
+       from both the red accent and the blue owner voice, and every tint shares
+       the SAME hue (C7.3). */
+    --project: #2dd4bf;
+    --project-light: #5eead4;
+    --project-dim: rgba(45, 212, 191, 0.15);
+    --project-08: rgba(45, 212, 191, 0.08);
+    --project-12: rgba(45, 212, 191, 0.12);
+    --project-18: rgba(45, 212, 191, 0.18);
+    --project-25: rgba(45, 212, 191, 0.25);
     /* User / owner voice: the owner's chat bubble + sender accents. Tokenized so
-       the hue lives in one place and stays clear of the project fuchsia (C7.2). */
+       the hue lives in one place and stays clear of the project teal (C7.2). */
     --user: #6e96d2;
     --user-light: #9bb9f0;
     --user-bubble-from: rgba(80, 120, 190, 0.14);
@@ -52,13 +79,33 @@
     --system-text: rgba(255, 240, 210, 0.78);
     --blue: #3b82f6;
     --blue-dim: rgba(30, 64, 175, 0.3);
+    --blue-08: rgba(59, 130, 246, 0.08);
     --amber: #f59e0b;
     --amber-dim: rgba(245, 158, 11, 0.15);
     --green: #22c55e;
     --green-dim: rgba(34, 197, 94, 0.15);
     --red: #ef4444;
     --red-dim: rgba(239, 68, 68, 0.15);
-    --divider: rgba(255, 255, 255, 0.06);
+    /* Diff surfaces (Changes screen + inline diffs): one pair of row tints plus
+       gutter/number and text colors, so unified and split render the same truth. */
+    --diff-del-bg: rgba(239, 68, 68, 0.09);
+    --diff-add-bg: rgba(34, 197, 94, 0.08);
+    --diff-del-num: rgba(239, 68, 68, 0.6);
+    --diff-add-num: rgba(34, 197, 94, 0.6);
+    --diff-del-text: rgba(255, 210, 210, 0.85);
+    --diff-add-text: rgba(210, 255, 225, 0.9);
+    --diff-ctx-num: rgba(255, 255, 255, 0.25);
+    --diff-ctx-text: rgba(255, 255, 255, 0.75);
+    --diff-hunk-bg: rgba(255, 255, 255, 0.03);
+    /* Syntax tokens for the in-house highlighter. Named by LEXEME ROLE so the
+       highlighter never hardcodes a hue. */
+    --code-keyword: var(--accent-light);
+    --code-self: var(--user);
+    --code-string: #e5b567;
+    --code-number: var(--amber);
+    --code-comment: var(--text-muted);
+    --code-default: rgba(255, 255, 255, 0.75);
+    --divider: rgba(255, 255, 255, 0.07);
     --surface-border: rgba(255, 255, 255, 0.08);
     --surface-border-soft: rgba(255, 255, 255, 0.06);
     --surface-card: rgba(255, 255, 255, 0.03);
@@ -74,7 +121,7 @@
     /* Semantic role palette (SSOT, C7.2): name a color by the ROLE it signals, so
        a component references the role rather than a raw hue. task = red accent (a
        running task), system = amber (system / owner-control notices), user = blue
-       (the owner's voice), project = fuchsia (a project identity). Tones map ok /
+       (the owner's voice), project = teal (a project identity). Tones map ok /
        warn / danger. Re-point a role here and every surface follows. */
     --accent-task: var(--accent);
     --accent-system: var(--amber);
@@ -83,31 +130,54 @@
     --tone-ok: var(--green);
     --tone-warn: var(--amber);
     --tone-danger: var(--red);
-    --focus-accent-border: rgba(232, 93, 111, 0.4);
-    --focus-accent-ring: rgba(232, 93, 111, 0.10);
+    --focus-accent-border: rgba(var(--accent-hover-rgb), 0.4);
+    --focus-accent-ring: rgba(var(--accent-hover-rgb), 0.10);
+    /* Radius scale. The named steps are historical; the numeric steps below were
+       added for the flat redesign (inline code, chips, nav rows, ghost buttons,
+       brand mark). Never hardcode a radius in a component rule — add the step
+       here first (see docs/DEVELOPMENT.md "Border radius scale"). */
     --radius-xs: 3px;
+    --radius-4: 4px;
+    --radius-5: 5px;
+    --radius-6: 6px;
+    --radius-7: 7px;
     --radius-sm: 8px;
+    --radius-9: 9px;
     /* In-between radius used by chips, counters, and fade rules. */
     --radius-md: 10px;
     --radius: 12px;
     --radius-lg: 16px;
     --radius-xl: 20px;
+    /* One mono stack for every code/number surface (transcripts, diffs, file
+       viewer, budget amount, log grids). */
+    --font-mono: ui-monospace, Menlo, monospace;
     --page-header-padding-y: 10px;
     --page-header-padding-x: 20px;
     --page-header-padding-bottom: 6px;
+    /* Tab-strip dimensions. `.app-tab` is the SOLE consumer of these two, so the
+       12px the design handoff specifies for an underline tab lives here rather
+       than as a per-page override. The `--pill-*` prefix is a legacy name from the
+       retired pill strip; the two steps only that strip consumed
+       (`--pill-padding-x`, `--pill-strip-padding`) are DELETED rather than left as
+       dead tokens a later reader might consume by mistake. */
     --pill-padding-y: 7px;
-    --pill-padding-x: 14px;
-    --pill-font-size: 13px;
+    --pill-font-size: 12px;
+    /* The stadium radius, for the things that really are still pills: status-tone
+       pills, tone chips, runtime pills. Every rule that wants that shape reads this
+       instead of repeating the 999px literal. */
     --pill-radius: 999px;
-    --pill-strip-padding: 6px 0 8px;
     --button-padding-y: 8px;
     --button-padding-x: 16px;
     --button-font-size: 13px;
     --button-min-height: 34px;
-    /* App shell: persistent desktop sidebar + optional project detail pane. */
-    --sidebar-width: 280px;
+    /* App shell: persistent desktop sidebar + optional right panel. The right
+       panel is ONE slot with mutually exclusive kinds (project | inspector):
+       the project panel keeps its persisted drag width, the task inspector is
+       fixed-width per the design handoff (no resize state). */
+    --sidebar-width: 224px;
     --project-panel-width: clamp(340px, 36vw, 440px);
-    --nav-item-radius: 10px;
+    --inspector-width: 320px;
+    --nav-item-radius: 8px;
     /* 8pt spacing scale (Apple HIG / common 8pt grid) — use these instead of
        ad-hoc pixel values so spacing stays consistent across components. */
     --space-1: 4px;
@@ -140,16 +210,7 @@ body {
     position: relative;
 }
 
-#matrix-rain {
-    position: fixed;
-    top: 0;
-    left: 0;
-    width: 100%;
-    height: 100%;
-    opacity: 0.12;
-    pointer-events: none;
-    z-index: 0;
-}
+/* ===== [stream 0: app shell, navigation sidebar, shared page chrome] ===== */
 
 /* App navigation shell: desktop persistent sidebar, mobile drawer below. */
 .mobile-nav-toggle {
@@ -165,10 +226,8 @@ body {
     display: flex;
     flex-direction: column;
     min-width: 0;
-    padding: var(--space-4) var(--space-3) var(--space-3);
-    background:
-        linear-gradient(180deg, rgba(13, 11, 15, 0.62), rgba(13, 11, 15, 0.32)),
-        radial-gradient(circle at 8% 0%, rgba(201, 53, 69, 0.08), transparent 260px);
+    padding: 14px 10px 10px;
+    background: var(--bg-sidebar);
     border-right: 1px solid var(--divider);
     z-index: 10;
     position: relative;  /* positioning context for the resize handle */
@@ -205,16 +264,163 @@ body.resizing-panels { user-select: none; }
     scrollbar-width: thin;
 }
 
-#nav-version {
-    display: block;
-    max-width: 100%;
-    text-align: left;
-    line-height: 1.15;
-    white-space: normal;
-    font-size: 8px;
+/* Brand row: app mark + name, with the runtime version and the live socket
+   state on one sub line. #nav-version is the SSOT span loadVersion() fills. */
+.nav-brand {
+    display: flex;
+    align-items: center;
+    gap: var(--space-2);
+    flex: 0 0 auto;
+    padding: 0 var(--space-1) 10px;
+    min-width: 0;
+}
+
+.nav-brand-mark {
+    flex: 0 0 26px;
+    width: 26px;
+    height: 26px;
+    border-radius: var(--radius-7);
+    object-fit: cover;
+}
+
+.nav-brand-text {
+    display: flex;
+    flex-direction: column;
+    gap: 1px;
+    min-width: 0;
+}
+
+.nav-brand-name {
+    font-size: 13px;
+    font-weight: 600;
+    color: var(--text-primary);
+    line-height: 1.2;
+}
+
+.nav-brand-sub {
+    display: flex;
+    align-items: center;
+    gap: 5px;
+    font-size: 10px;
     color: var(--text-muted);
-    padding: var(--space-2) var(--space-2) 0;
-    opacity: 0.6;
+    line-height: 1.2;
+    min-width: 0;
+}
+
+#nav-version {
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+}
+
+.nav-brand-status {
+    white-space: nowrap;
+}
+
+.nav-status-dot {
+    flex: 0 0 auto;
+    width: 7px;
+    height: 7px;
+    border-radius: 50%;
+    background: var(--text-muted);
+}
+
+.nav-brand[data-online="true"] .nav-status-dot {
+    background: var(--green);
+    box-shadow: 0 0 6px rgba(34, 197, 94, 0.6);
+}
+
+/* Budget meter, pinned to the sidebar bottom. The fill width is a DYNAMIC CSS
+   custom property (--budget-fill) written by app.js — the accepted exception to
+   the no-inline-styles rule; never a .style.width assignment. */
+/* Update-pill footer slot: an own row above the budget meter. */
+.nav-update-slot {
+    flex: 0 0 auto;
+    display: flex;
+    min-width: 0;
+}
+
+.nav-update-slot:empty {
+    display: none;
+}
+
+.nav-update-slot .update-pill {
+    margin: 6px 0 0;
+    min-width: 0;
+    max-width: 100%;
+}
+
+.nav-budget {
+    flex: 0 0 auto;
+    display: flex;
+    flex-direction: column;
+    gap: 6px;
+    width: 100%;
+    margin-top: var(--space-2);
+    padding: var(--space-2) var(--space-2) var(--space-1);
+    border: none;
+    border-top: 1px solid var(--divider);
+    border-radius: 0;
+    background: transparent;
+    font: inherit;
+    text-align: left;
+    cursor: pointer;
+}
+
+.nav-budget:hover .nav-budget-amount {
+    color: var(--text-primary);
+}
+
+.nav-budget-row {
+    display: flex;
+    align-items: baseline;
+    justify-content: space-between;
+    gap: var(--space-2);
+    min-width: 0;
+}
+
+.nav-budget-label {
+    font-size: 11px;
+    /* Same decision as `.app-tab` below: the handoff spec is white @ 0.45, the
+       ladder has no 0.45 step, and its two neighbours are EQUIDISTANT
+       (--text-secondary 0.55, --text-muted 0.35), so the brighter one wins — the
+       whole `.nav-budget` row is a click target into the costs tab and its caption
+       has to stay readable at 11px. Delta: +0.10 alpha vs. the handoff, which also
+       levels the caption with `.nav-budget-amount` at rest; the amount keeps its own
+       emphasis on hover (--text-primary, above). A literal rgba(255,255,255,0.45)
+       here would be a new off-ladder value in shared sidebar chrome — the exact
+       debt the token system exists to prevent. */
+    color: var(--text-secondary);
+}
+
+.nav-budget-amount {
+    font-family: var(--font-mono);
+    font-size: 11px;
+    color: var(--text-secondary);
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+}
+
+.nav-budget-bar {
+    height: 3px;
+    width: 100%;
+    border-radius: var(--radius-xs);
+    background: rgba(255, 255, 255, 0.08);
+    overflow: hidden;
+}
+
+.nav-budget-bar-fill {
+    display: block;
+    height: 100%;
+    width: var(--budget-fill, 0%);
+    background: var(--accent);
+    transition: width 0.4s ease;
+}
+
+.nav-budget-bar[data-budget-state="unavailable"] .nav-budget-bar-fill,
+.nav-budget-bar[data-budget-state="loading"] .nav-budget-bar-fill {
+    background: var(--text-muted);
 }
 
 .nav-row,
@@ -223,9 +429,9 @@ body.resizing-panels { user-select: none; }
     flex-direction: row;
     align-items: center;
     justify-content: flex-start;
-    gap: var(--space-3);
-    min-height: 44px;
-    padding: 0 var(--space-3);
+    gap: 10px;
+    min-height: 34px;
+    padding: 0 var(--space-2);
     width: 100%;
     border: 1px solid transparent;
     background: transparent;
@@ -242,8 +448,8 @@ body.resizing-panels { user-select: none; }
 .nav-row svg,
 .nav-section-toggle svg {
     flex: 0 0 auto;
-    width: 18px;
-    height: 18px;
+    width: 16px;
+    height: 16px;
 }
 
 .nav-row-icon {
@@ -323,7 +529,7 @@ body.resizing-panels { user-select: none; }
 .nav-section-toggle.active {
     background: var(--accent-12);
     border-color: transparent;
-    color: var(--accent);
+    color: var(--text-primary);
 }
 
 .nav-row:focus,
@@ -342,17 +548,10 @@ body.resizing-panels { user-select: none; }
     box-shadow: inset 0 0 0 2px rgba(96, 165, 250, 0.65);
 }
 
-.chat-live-actions {
-    display: flex;
-    justify-content: flex-end;
-    gap: var(--space-2);
-    padding: 0 var(--space-3) var(--space-2);
-}
-
 .chat-live-project-btn {
     min-height: 30px;
     padding: 0 var(--space-3);
-    border-radius: 999px;
+    border-radius: var(--pill-radius);
     border: 1px solid var(--accent-18);
     background: var(--accent-04);
     color: var(--text-secondary);
@@ -371,15 +570,6 @@ body.resizing-panels { user-select: none; }
     cursor: default;
 }
 
-
-/* P3 — a converted card becomes a calm "project identity" chip. The whole card
-   recolors from the red task accent to the project fuchsia over ~250ms; the live
-   timeline is gone (the project panel owns it now), so the main chat is freed. */
-.chat-live-card.is-project {
-    border-color: var(--project-18);
-    background: var(--project-08);
-    box-shadow: 0 8px 24px rgba(0, 0, 0, 0.18), inset 0 1px 0 rgba(240, 171, 252, 0.05);
-}
 
 .chat-live-project-card-btn {
     display: flex;
@@ -422,7 +612,7 @@ body.resizing-panels { user-select: none; }
 }
 
 /* F4 — a bound (project-chat) card keeps its live timeline above and gets the
-   project pointer as a calm fuchsia footer, so a divider sets it apart. */
+   project pointer as a calm teal footer, so a divider sets it apart. */
 .chat-live-bound-pointer {
     border-top: 1px solid var(--project-18);
     background: var(--project-08);
@@ -436,10 +626,11 @@ body.resizing-panels { user-select: none; }
 }
 
 .nav-section-label {
-    padding: var(--space-3) var(--space-3) var(--space-1);
-    color: var(--text-muted);
+    padding: 14px var(--space-2) 6px;
+    color: rgba(255, 255, 255, 0.3);
     font-size: 10px;
-    letter-spacing: 0.12em;
+    font-weight: 600;
+    letter-spacing: 0.08em;
     text-transform: uppercase;
 }
 
@@ -480,9 +671,7 @@ body.resizing-panels { user-select: none; }
 .page.active { display: flex; }
 
 .app-page-glass {
-    background:
-        linear-gradient(180deg, rgba(13, 11, 15, 0.76) 0%, rgba(13, 11, 15, 0.34) 170px, rgba(13, 11, 15, 0.08) 100%),
-        radial-gradient(circle at 18% 0%, rgba(232, 93, 111, 0.10), transparent 300px);
+    background: var(--bg-primary);
 }
 
 /* Containment for narrow screens and unbroken runtime text. */
@@ -519,250 +708,248 @@ body.resizing-panels { user-select: none; }
     overflow-wrap: anywhere;
 }
 
+/* ===== [stream C: files (tree rail, viewer, code highlighting)] =====
+   The files page is READ-ONLY (decision 18): a lazy tree rail, a per-line
+   highlighted viewer, and a context-capture dock. There is no editor surface,
+   no upload overlay and no context menu, so none of those rules exist here. */
+
 .files-layout {
     position: relative;
     display: grid;
-    grid-template-columns: minmax(280px, 360px) minmax(0, 1fr);
-    grid-template-areas: "sidebar preview";
+    grid-template-columns: 280px minmax(0, 1fr);
+    grid-template-rows: minmax(0, 1fr) auto;
+    grid-template-areas:
+        "rail viewer"
+        "dock dock";
     flex: 1;
-    height: auto;
     min-height: 0;
     overflow: hidden;
 }
 
-.files-sidebar {
-    grid-area: sidebar;
+/* --- Tree rail ---------------------------------------------------------- */
+
+.files-rail {
+    grid-area: rail;
     display: flex;
     flex-direction: column;
     min-width: 0;
     min-height: 0;
     overflow: hidden;
+    background: var(--bg-panel);
     border-right: 1px solid var(--divider);
-    background: rgba(255, 255, 255, 0.02);
 }
 
-.files-toolbar {
-    display: flex;
-    gap: 8px;
-    padding: 12px 16px 10px;
-    border-bottom: 1px solid rgba(255, 255, 255, 0.04);
+.files-rail-head {
     flex-shrink: 0;
+    padding: var(--space-3) var(--space-3) 10px;
+    border-bottom: 1px solid var(--divider);
 }
 
-.files-toolbar input {
-    flex: 1;
+.files-filter {
+    width: 100%;
     min-width: 0;
-    background: rgba(255, 255, 255, 0.04);
-    border: 1px solid var(--divider);
+    padding: 7px 10px;
+    background: var(--surface-control);
+    border: 1px solid var(--surface-border);
+    border-radius: var(--radius-7);
     color: var(--text-primary);
-    border-radius: var(--radius-md);
-    padding: 10px 12px;
-}
-
-.files-browser-header {
-    display: flex;
-    align-items: center;
-    justify-content: space-between;
-    flex-wrap: wrap;
-    gap: 10px;
-    padding: 12px 16px;
-    border-bottom: 1px solid rgba(255, 255, 255, 0.04);
-    flex-shrink: 0;
-}
-
-.files-breadcrumb {
-    display: flex;
-    flex-wrap: wrap;
-    gap: 6px;
-    flex: 1 1 280px;
-    min-width: 0;
-    overflow: hidden;
-}
-
-.files-browser-actions {
-    display: inline-flex;
-    gap: 8px;
-    flex-shrink: 0;
-    margin-left: auto;
-}
-
-.files-crumb {
-    border: none;
-    background: transparent;
-    color: var(--text-secondary);
-    cursor: pointer;
+    font-family: var(--font-mono);
     font-size: 12px;
-    max-width: min(360px, 70vw);
-    overflow: hidden;
-    text-overflow: ellipsis;
-    white-space: nowrap;
 }
 
-.files-crumb:hover {
-    color: var(--text-primary);
+.files-filter:focus {
+    outline: none;
+    border-color: var(--focus-accent-border);
+    box-shadow: 0 0 0 3px var(--focus-accent-ring);
 }
 
-.files-crumb-sep {
+.files-rail-hint {
+    margin-top: var(--space-2);
+    font-size: 10.5px;
+    line-height: 1.45;
     color: var(--text-muted);
-    font-size: 12px;
 }
 
-.files-list {
+.files-tree {
     flex: 1;
     min-height: 0;
     overflow: auto;
     overscroll-behavior: contain;
-    padding: 8px;
+    padding: var(--space-2) 6px;
 }
 
-.files-entry {
+/* Nesting depth arrives as the `--files-indent` custom property (the documented
+   exception to "no element.style.* mutations in UI JS"), never as inline CSS. */
+.files-tree-row {
     width: 100%;
     display: grid;
-    grid-template-columns: 20px minmax(0, 1fr) auto;
-    gap: 10px;
+    grid-template-columns: 14px minmax(0, 1fr);
+    gap: var(--space-1);
     align-items: center;
-    border: none;
+    padding: 3px 6px;
+    padding-left: calc(6px + var(--files-indent, 0) * 12px);
+    border: 1px solid transparent;
+    border-radius: var(--radius-6);
     background: transparent;
-    color: var(--text-primary);
-    border-radius: var(--radius-md);
-    padding: 10px 12px;
-    cursor: pointer;
-    text-align: left;
-}
-
-.files-entry:hover {
-    background: rgba(255, 255, 255, 0.04);
-}
-
-.files-entry.parent-link {
-    opacity: 0.88;
-}
-
-.files-entry.selected {
-    background: var(--accent-10);
-    box-shadow: inset 0 0 0 1px var(--accent-22);
-}
-
-.files-entry-icon {
-    color: var(--accent);
+    color: var(--text-secondary);
+    font-family: var(--font-mono);
     font-size: 12px;
+    line-height: 1.6;
+    text-align: left;
+    cursor: pointer;
 }
 
-.files-entry-name {
-    min-width: 0;
+.files-tree-row:hover {
+    background: rgba(255, 255, 255, 0.04);
+    color: var(--text-primary);
+}
+
+.files-tree-row.is-active {
+    background: var(--accent-10);
+    border-color: var(--accent-22);
+    color: var(--text-primary);
+}
+
+.files-tree-twist {
+    color: var(--text-muted);
+    font-size: 10px;
+}
+
+.files-tree-name {
     overflow: hidden;
     text-overflow: ellipsis;
     white-space: nowrap;
 }
 
-.files-entry-meta {
+.files-tree-note {
+    padding: var(--space-2) 10px;
     color: var(--text-muted);
-    font-size: 11px;
+    font-size: 11.5px;
+    line-height: 1.45;
 }
 
-.files-empty {
-    padding: 18px 12px;
-    color: var(--text-muted);
-    font-size: 13px;
-}
+/* --- Viewer ------------------------------------------------------------- */
 
-.files-preview {
-    grid-area: preview;
-    min-width: 0;
-    min-height: 0;
+.files-viewer {
+    grid-area: viewer;
+    /* Positioning context for the sticky selection-capture button. */
+    position: relative;
     display: flex;
     flex-direction: column;
-    background:
-        linear-gradient(180deg, var(--accent-05), transparent 120px),
-        rgba(255, 255, 255, 0.015);
+    min-width: 0;
+    min-height: 0;
+    overflow: hidden;
+    background: var(--bg-primary);
 }
 
-.files-preview-header {
-    padding: 16px 20px 12px;
-    border-bottom: 1px solid var(--divider);
+.files-viewer-head {
+    flex-shrink: 0;
     display: flex;
     align-items: flex-start;
     justify-content: space-between;
-    gap: 16px;
-    flex-shrink: 0;
+    gap: var(--space-4);
+    padding: 12px 20px;
+    border-bottom: 1px solid var(--divider);
 }
 
-.files-preview-actions {
-    display: inline-flex;
-    gap: 8px;
-    flex-shrink: 0;
+.files-viewer-ident {
+    min-width: 0;
 }
 
-.files-preview-path {
-    font-size: 14px;
-    font-weight: 600;
+.files-viewer-path {
+    font-family: var(--font-mono);
+    font-size: 13px;
     color: var(--text-primary);
-    word-break: break-all;
+    overflow-wrap: anywhere;
 }
 
-.files-preview-meta {
-    margin-top: 4px;
-    font-size: 12px;
+.files-viewer-meta {
+    margin-top: 3px;
+    font-family: var(--font-mono);
+    font-size: 11px;
+    color: var(--text-muted);
+}
+
+.files-viewer-actions {
+    display: inline-flex;
+    gap: var(--space-2);
+    flex-shrink: 0;
+}
+
+.files-kbd {
+    padding: 1px 5px;
+    border: 1px solid rgba(255, 255, 255, 0.12);
+    border-radius: var(--radius-4);
     color: var(--text-secondary);
+    font-family: var(--font-mono);
+    font-size: 10px;
 }
 
-.files-preview-content {
+.files-viewer-body {
     flex: 1;
     min-height: 0;
     overflow: auto;
-    overflow-wrap: anywhere;
     overscroll-behavior: contain;
-    margin: 0;
-    padding: 20px;
-    color: #d9dee8;
-    font-size: 12px;
-    line-height: 1.55;
-    font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", monospace;
-    white-space: pre-wrap;
-    word-break: break-word;
+    padding: 12px 0 24px;
 }
 
-.files-editor-shell {
-    display: flex;
-    flex-direction: column;
-    min-height: 100%;
+.files-viewer-placeholder {
+    padding: 18px 20px;
+    color: var(--text-muted);
+    font-size: 12.5px;
+    line-height: 1.5;
+}
+
+/* One row per source line. `data-line-number` on the row is the substrate the
+   selection→range mapping resolves against, and the number cell is
+   `user-select: none` so a dragged selection never contains gutter digits. */
+.files-code {
+    min-width: 0;
+}
+
+.files-code-row {
+    display: grid;
+    grid-template-columns: 52px minmax(0, 1fr);
     gap: 12px;
+    font-family: var(--font-mono);
+    font-size: 12px;
+    line-height: 1.7;
 }
 
-.files-editor-name {
-    width: 100%;
-    border: 1px solid var(--divider);
-    border-radius: var(--radius-md);
-    padding: 10px 12px;
-    background: rgba(255, 255, 255, 0.04);
-    color: var(--text-primary);
-    font: inherit;
+.files-code-num {
+    text-align: right;
+    color: rgba(255, 255, 255, 0.22);
+    -webkit-user-select: none;
+    user-select: none;
 }
 
-.files-editor {
-    width: 100%;
-    flex: 1;
-    min-height: 320px;
-    border: 0;
-    outline: none;
-    resize: none;
-    margin: 0;
-    padding: 0;
-    background: transparent;
-    color: inherit;
-    font: inherit;
-    line-height: inherit;
-    white-space: pre;
+.files-code-text {
+    min-width: 0;
+    padding-right: 20px;
+    color: var(--code-default);
+    white-space: pre-wrap;
+    overflow-wrap: anywhere;
     tab-size: 4;
 }
+
+/* Lexeme roles emitted by web/modules/code_highlight.js. The highlighter names
+   a ROLE; the hue lives only in the syntax tokens. */
+.tok-keyword { color: var(--code-keyword); }
+.tok-self { color: var(--code-self); }
+.tok-string { color: var(--code-string); }
+.tok-number { color: var(--code-number); }
+.tok-comment { color: var(--code-comment); }
+.tok-default { color: var(--code-default); }
 
 .files-preview-image {
     display: block;
     max-width: 100%;
-    max-height: 100%;
     margin: 0 auto;
     border-radius: var(--radius);
-    box-shadow: 0 18px 50px rgba(0, 0, 0, 0.28);
+}
+
+.files-preview-frame-host {
+    padding: 0 20px;
 }
 
 .files-preview-frame {
@@ -770,71 +957,111 @@ body.resizing-panels { user-select: none; }
     min-height: 70vh;
     border: 1px solid var(--divider);
     border-radius: var(--radius);
-    background: #111827;
+    background: var(--bg-elevated);
 }
 
-.files-drop-overlay {
+/* Sticky capture affordance: the GUARANTEED path when the browser reserves ⌘L
+   (decision 10). It sits above the scrolling code, centered on the viewer. */
+.files-selection-btn {
     position: absolute;
-    inset: 0;
-    display: none;
+    bottom: 18px;
+    left: 50%;
+    transform: translateX(-50%);
+    z-index: 2;
+    display: inline-flex;
     align-items: center;
-    justify-content: center;
-    background: rgba(12, 14, 18, 0.72);
-    backdrop-filter: blur(3px);
-    z-index: 5;
-    pointer-events: none;
-}
-
-.files-layout.drag-active .files-drop-overlay {
-    display: flex;
-}
-
-.files-drop-card {
-    padding: 22px 28px;
-    border-radius: var(--radius-lg);
-    border: 1px dashed var(--accent-55);
-    background: var(--accent-10);
-    color: var(--text-primary);
-    font-size: 14px;
-    font-weight: 600;
-    letter-spacing: 0.01em;
-    box-shadow: 0 18px 50px rgba(0, 0, 0, 0.24);
-}
-
-.files-context-menu {
-    position: fixed;
-    min-width: 160px;
-    padding: 6px;
-    border-radius: var(--radius);
-    border: 1px solid var(--divider);
-    background: rgba(18, 20, 26, 0.96);
-    box-shadow: 0 20px 45px rgba(0, 0, 0, 0.35);
-    z-index: 20;
-}
-
-.files-context-item {
-    width: 100%;
-    border: none;
+    gap: 6px;
+    padding: 7px 14px;
+    border: 1px solid var(--accent-55);
     border-radius: var(--radius-sm);
-    padding: 10px 12px;
+    background: var(--bg-elevated);
+    color: var(--accent-chip-text);
+    font-size: 12px;
+    font-weight: 600;
+    cursor: pointer;
+    box-shadow: 0 8px 24px rgba(0, 0, 0, 0.5);
+}
+
+.files-selection-btn:hover {
+    background: var(--accent-12);
+}
+
+/* --- Capture dock (a composer_parts instance) --------------------------- */
+
+.files-dock {
+    grid-area: dock;
+    padding: 10px 20px 14px;
+    border-top: 1px solid var(--divider);
+    background: var(--bg-primary);
+}
+
+.files-dock-field {
+    display: flex;
+    align-items: flex-end;
+    gap: var(--space-2);
+    padding: 8px 8px 8px 12px;
+    border: 1px solid var(--surface-border);
+    border-radius: var(--radius);
+    background: var(--bg-elevated);
+}
+
+.files-dock-field:focus-within {
+    border-color: var(--focus-accent-border);
+}
+
+.files-dock-input {
+    max-height: 120px;
+    padding: 4px 0;
+    border: none;
     background: transparent;
     color: var(--text-primary);
-    text-align: left;
-    cursor: pointer;
+    font-family: inherit;
+    font-size: 13px;
+    line-height: 1.5;
+    resize: none;
 }
 
-.files-context-item:hover {
-    background: rgba(255, 255, 255, 0.06);
+.files-dock-input:focus {
+    outline: none;
 }
 
-.files-context-item-danger {
-    color: #fca5a5;
+.files-dock-send {
+    flex-shrink: 0;
 }
 
-.files-context-item-danger:hover {
-    background: rgba(239, 68, 68, 0.12);
-    color: #fecaca;
+@media (max-width: 980px) {
+    .files-layout {
+        grid-template-columns: minmax(0, 1fr);
+        grid-template-rows: minmax(160px, 240px) minmax(0, 1fr) auto;
+        grid-template-areas:
+            "rail"
+            "viewer"
+            "dock";
+    }
+
+    .files-rail {
+        border-right: none;
+        border-bottom: 1px solid var(--divider);
+        max-height: none;
+    }
+
+    /* The path is the identity of what you are reading: give it the full width
+       and let the two actions sit on their own row rather than squeezing it. */
+    .files-viewer-head {
+        flex-direction: column;
+        align-items: stretch;
+        gap: var(--space-2);
+        padding: 10px 14px;
+    }
+
+    .files-code-row {
+        grid-template-columns: 36px minmax(0, 1fr);
+        gap: var(--space-2);
+    }
 }
+
+/* Shared dialog input (legacy `.files-*` name): confirm_dialog.js and
+   project_create.js render it, so it outlives the files-page editor. */
 
 .files-modal-input {
     width: 100%;
@@ -847,6 +1074,9 @@ body.resizing-panels { user-select: none; }
     font: inherit;
 }
 
+/* ===== [shared page chrome: page header + tab strip] =====
+   The tab strip's only consumers are the Dashboard, Skills and Settings pages
+   (stream D), so its look is defined ONCE here rather than overridden per page. */
 .page-header,
 .app-page-header {
     display: grid;
@@ -858,7 +1088,6 @@ body.resizing-panels { user-select: none; }
     gap: var(--space-2) var(--space-3);
     padding: var(--page-header-padding-y) var(--page-header-padding-x) var(--page-header-padding-bottom);
     background: transparent;
-    backdrop-filter: none;
     flex-shrink: 0;
     border-bottom: none;
 }
@@ -936,12 +1165,15 @@ body.resizing-panels { user-select: none; }
     min-width: 0;
 }
 
+/* Underline tabs: a flat label row over one divider rule, with a 2px accent rule
+   under the active tab. No pill chrome (docs/DEVELOPMENT.md "Control rules"). */
 .app-tab-strip {
     display: flex;
     flex-wrap: nowrap;
-    gap: 10px;
+    gap: 2px;
     overflow-x: auto;
-    padding: var(--pill-strip-padding);
+    padding: 4px 0 0;
+    border-bottom: 1px solid var(--divider);
     scrollbar-width: none;
 }
 
@@ -952,26 +1184,42 @@ body.resizing-panels { user-select: none; }
 .app-tab {
     flex: 0 0 auto;
     white-space: nowrap;
-    border: 1px solid var(--surface-border);
-    background: var(--surface-card);
+    border: 0;
+    border-bottom: 2px solid transparent;
+    border-radius: 0;
+    background: transparent;
+    /* Handoff spec for an inactive tab is white @ 0.45. The token ladder has no
+       0.45 step and its two neighbours are EQUIDISTANT (--text-secondary 0.55,
+       --text-muted 0.35), so the brighter one wins: an inactive tab is still a
+       click target and must stay readable. Delta: +0.10 alpha vs. the handoff.
+       A literal rgba(255,255,255,0.45) here would be a new off-ladder value in
+       shared chrome — the exact debt the token system exists to prevent. */
     color: var(--text-secondary);
-    border-radius: var(--pill-radius);
-    padding: var(--pill-padding-y) var(--pill-padding-x);
+    padding: var(--pill-padding-y) var(--space-3);
+    /* The tab's 2px rule OVERLAPS the strip's 1px divider instead of stacking a
+       second line under it — otherwise the active marker sits 1px low and the
+       strip reads as two rules. */
+    margin-bottom: -1px;
     font: inherit;
     font-size: var(--pill-font-size);
     font-weight: 600;
     cursor: pointer;
-    transition: color 0.15s ease, border-color 0.15s ease, background 0.15s ease;
+    transition: color 0.15s ease, border-color 0.15s ease;
 }
 
-.app-tab:hover,
+.app-tab:hover {
+    color: var(--text-primary);
+    border-bottom-color: var(--surface-border);
+}
+
+/* The Skills strip passes activeClass 'is-active'; both markers mean active. */
 .app-tab.active,
 .app-tab.is-active {
     color: var(--text-primary);
-    border-color: var(--focus-accent-border);
-    background: rgba(232, 93, 111, 0.12);
+    border-bottom-color: var(--accent);
 }
 
+/* Counter pill inside a tab label (Skills tabs): mono, amber notice tone. */
 .app-tab-pill {
     display: inline-flex;
     align-items: center;
@@ -980,11 +1228,21 @@ body.resizing-panels { user-select: none; }
     padding: 0 6px;
     min-width: 18px;
     height: 18px;
-    border-radius: 9px;
-    background: rgba(245, 158, 11, 0.15);
-    color: #f59e0b;
-    font-size: 11px;
-    font-family: 'JetBrains Mono', monospace;
+    border-radius: var(--radius-9);
+    background: var(--amber-dim);
+    color: var(--amber);
+    font-size: 10.5px;
+    font-family: var(--font-mono);
+}
+
+/* The ONE mobile variant of the shared tab: a comfortable touch target. It lives
+   with the control it modifies rather than in a page stylesheet — the Settings
+   copy of this rule (settings.css) also re-stated flex/wrap/gap/padding values
+   the base rule already sets, which is exactly how a per-page tab shape drifts. */
+@media (max-width: 640px) {
+    .app-tab {
+        min-height: 36px;
+    }
 }
 
 .scroll-fade-y {
@@ -1011,6 +1269,9 @@ body.resizing-panels { user-select: none; }
     align-items: center;
 }
 
+/* ===== [stream A: chat (header, transcript, live cards, composer)] ===== */
+
+
 .chat-page-header {
     position: absolute;
     top: 0;
@@ -1019,16 +1280,24 @@ body.resizing-panels { user-select: none; }
     z-index: 5;
     row-gap: 10px;
     pointer-events: none;
-    /* Fade to transparent so the transcript scrolls under without a hard edge. */
+    /* Fade to transparent so the transcript scrolls under without a hard edge.
+       The fade is a FIXED-LENGTH TAIL anchored to the bottom edge, not a set of
+       percentage stops. The header is a variable-height box: 56px on desktop, but
+       it wraps to the "leading/title + toolbar + tabs" stack on a narrow viewport
+       (measured 129px at 375px). Percentage stops stretch with that box, so at
+       mobile height everything below ~80% — the whole control row and the status
+       badge — sat over transcript text at under 0.38 alpha, i.e. fully legible
+       text running through the buttons with no perceptible fade. Anchoring the
+       stops to the bottom keeps the rows on a solid backdrop at ANY header height
+       and always spends the same ~30px softening the edge. Still exactly ONE fade
+       (DEVELOPMENT.md forbids stacking a second layer on this header). */
     background: linear-gradient(
         180deg,
-        rgba(13, 11, 15, 0.92) 0%,
-        rgba(13, 11, 15, 0.78) 45%,
-        rgba(13, 11, 15, 0.38) 80%,
-        rgba(13, 11, 15, 0.00) 100%
+        rgba(var(--bg-primary-rgb), 0.97) 0%,
+        rgba(var(--bg-primary-rgb), 0.97) calc(100% - 30px),
+        rgba(var(--bg-primary-rgb), 0.45) calc(100% - 12px),
+        rgba(var(--bg-primary-rgb), 0.00) 100%
     );
-    backdrop-filter: blur(10px);
-    -webkit-backdrop-filter: blur(10px);
     /* Dropdowns/menus must not fade under a header mask; the background
        gradient is enough to soften the transcript edge. */
     -webkit-mask-image: none;
@@ -1051,12 +1320,11 @@ body.resizing-panels { user-select: none; }
 }
 
 .chat-header-btn {
-    border: 1px solid rgba(255,255,255,0.12);
-    background: rgba(13, 11, 15, 0.55);
-    backdrop-filter: blur(8px);
-    color: var(--text-secondary);
-    border-radius: 999px;
-    padding: 7px 14px;
+    border: 1px solid rgba(255, 255, 255, 0.10);
+    background: transparent;
+    color: rgba(255, 255, 255, 0.65);
+    border-radius: var(--radius-7);
+    padding: 5px 12px;
     font-size: 12px;
     line-height: 1.2;
     font-weight: 600;
@@ -1066,24 +1334,27 @@ body.resizing-panels { user-select: none; }
 }
 
 .chat-header-btn:hover {
-    border-color: rgba(255,255,255,0.16);
+    border-color: rgba(255, 255, 255, 0.16);
+    background: rgba(255, 255, 255, 0.06);
     color: var(--text-primary);
 }
 
 .chat-header-btn.on {
-    border-color: rgba(201, 53, 69, 0.38);
-    background: rgba(201, 53, 69, 0.14);
+    border-color: var(--accent-25);
+    background: var(--accent-12);
     color: var(--accent-light);
 }
 
 .chat-header-btn.danger {
-    border-color: rgba(239, 68, 68, 0.22);
-    color: rgba(248, 113, 113, 0.95);
+    border-color: var(--accent-25);
+    background: var(--accent-10);
+    color: var(--accent-light);
+    font-weight: 600;
 }
 
 .chat-header-btn.danger:hover {
-    border-color: rgba(239, 68, 68, 0.40);
-    background: rgba(239, 68, 68, 0.08);
+    border-color: var(--accent-55);
+    background: var(--accent-18);
 }
 
 .chat-header-more {
@@ -1108,9 +1379,7 @@ body.resizing-panels { user-select: none; }
     padding: var(--space-2);
     border: 1px solid var(--surface-border);
     border-radius: var(--radius-md);
-    background: rgba(13, 11, 15, 0.92);
-    backdrop-filter: blur(18px);
-    -webkit-backdrop-filter: blur(18px);
+    background: var(--bg-elevated);
     box-shadow: 0 18px 44px rgba(0, 0, 0, 0.34);
     display: flex;
     flex-direction: column;
@@ -1134,7 +1403,7 @@ body.resizing-panels { user-select: none; }
     background: var(--surface-control);
 }
 
-/* Evolve/Consciousness live in this menu now; show their on-state in place. */
+/* Consciousness lives in this menu; show its on-state in place. */
 .chat-header-menu-item.on {
     color: var(--accent-light);
     font-weight: 700;
@@ -1144,11 +1413,11 @@ body.resizing-panels { user-select: none; }
     color: rgba(248, 113, 113, 0.95);
 }
 
-/* When a mode inside More is active, mark the collapsed More pill with a dot. */
+/* When the mode inside More is active, mark the collapsed More pill with a dot. */
 .chat-header-more > summary.has-active {
     position: relative;
-    border-color: rgba(201, 53, 69, 0.38);
-    background: rgba(201, 53, 69, 0.14);
+    border-color: var(--accent-25);
+    background: var(--accent-12);
     color: var(--accent-light);
 }
 
@@ -1163,64 +1432,11 @@ body.resizing-panels { user-select: none; }
     background: var(--accent);
 }
 
-.chat-budget-pill {
-    appearance: none;
-    display: flex;
-    flex-direction: column;
-    align-items: center;
-    gap: 3px;
-    padding: 4px 12px;
-    border-radius: 999px;
-    border: 1px solid rgba(245, 158, 11, 0.18);
-    background: rgba(13, 11, 15, 0.55);
-    backdrop-filter: blur(8px);
-    cursor: pointer;
-    min-width: 100px;
-    font: inherit;
-    transition: border-color 0.15s ease, background 0.15s ease, transform 0.15s ease;
-}
-
-.chat-budget-pill:hover {
-    border-color: rgba(245, 158, 11, 0.34);
-    background: rgba(245, 158, 11, 0.08);
-    transform: scale(1.02);
-}
-
-.chat-budget-pill:active {
-    transform: scale(0.98);
-}
-
-.chat-budget-text {
-    font-size: 11px;
-    font-weight: 600;
-    color: var(--amber);
-    white-space: nowrap;
-    letter-spacing: 0.02em;
-}
-
-.chat-budget-bar {
-    width: 100%;
-    height: 2px;
-    border-radius: 1px;
-    background: rgba(245, 158, 11, 0.12);
-    overflow: hidden;
-}
-
-.chat-budget-bar-fill {
-    height: 100%;
-    border-radius: 1px;
-    background: var(--amber);
-    transition: width 0.4s ease;
-    width: 0;
-}
-
 .status-badge {
     padding: 4px 10px;
     font-size: 11px;
     font-weight: 500;
-    background: rgba(26, 21, 32, 0.78);
-    backdrop-filter: blur(8px);
-    -webkit-backdrop-filter: blur(8px);
+    background: var(--bg-elevated);
 }
 .status-badge.online { color: var(--green); }
 .status-badge.starting { color: var(--amber); }
@@ -1299,8 +1515,7 @@ body.resizing-panels { user-select: none; }
 .onboarding-overlay-backdrop {
     position: absolute;
     inset: 0;
-    background: rgba(6, 7, 10, 0.78);
-    backdrop-filter: blur(10px);
+    background: rgba(0, 0, 0, 0.72);
 }
 
 .onboarding-frame {
@@ -1320,7 +1535,7 @@ body.resizing-panels { user-select: none; }
     padding: 24px;
     border: 1px solid var(--divider);
     border-radius: var(--radius-sm);
-    background: var(--bg-secondary);
+    background: var(--bg-elevated);
     color: var(--text-primary);
     box-shadow: 0 24px 80px rgba(0, 0, 0, 0.38);
 }
@@ -1336,35 +1551,22 @@ body.resizing-panels { user-select: none; }
     line-height: 1.5;
 }
 
-@media (max-width: 980px) {
-    .files-layout {
-        grid-template-columns: 1fr;
-        grid-template-rows: minmax(220px, 320px) minmax(0, 1fr);
-        grid-template-areas:
-            "sidebar"
-            "preview";
-    }
-
-    .files-sidebar {
-        border-right: none;
-        border-bottom: 1px solid var(--divider);
-        max-height: none;
-    }
-
-}
-
 #chat-messages,
 .chat-messages {
     flex: 1;
     min-height: 0;
     overflow-y: auto;
     overflow-x: hidden;
-    padding: 20px;
+    /* ONE centred reading column (max 760px, 24px side gutters) so a wide window
+       does not stretch the transcript into an unreadable line length. The column
+       is pure padding — no wrapper element — so every existing insertion path
+       (insertTimelineNode, live cards, media bubbles) is untouched. */
+    padding: 20px max(var(--space-5), calc((100% - 760px) / 2));
     padding-top: var(--chat-header-reserve, 56px);
     padding-bottom: var(--chat-input-reserve, 108px);
     display: flex;
     flex-direction: column;
-    gap: 8px;
+    gap: var(--space-5);
     /* Container for the late live-card width override. A narrow project panel
        must respond to this column's width, not to the outer viewport. */
     container-type: inline-size;
@@ -1396,11 +1598,9 @@ body.resizing-panels { user-select: none; }
     justify-content: center;
     border-radius: 50%;
     color: var(--accent-light);
-    background: rgba(26, 21, 32, 0.72);
-    border: 1px solid rgba(201, 53, 69, 0.42);
-    backdrop-filter: blur(12px);
-    -webkit-backdrop-filter: blur(12px);
-    box-shadow: 0 8px 22px rgba(0, 0, 0, 0.32), inset 0 1px 0 rgba(255, 255, 255, 0.05);
+    background: var(--bg-elevated);
+    border: 1px solid var(--accent-25);
+    box-shadow: 0 8px 22px rgba(0, 0, 0, 0.32);
     cursor: pointer;
     opacity: 0;
     transform: translateY(8px) scale(0.9);
@@ -1415,62 +1615,132 @@ body.resizing-panels { user-select: none; }
 .chat-scroll-bottom-btn:hover {
     color: #fff;
     background: rgba(201, 53, 69, 0.16);
-    border-color: rgba(232, 93, 111, 0.6);
+    border-color: rgba(var(--accent-hover-rgb), 0.6);
     transform: translateY(0) scale(1.05);
 }
 .chat-scroll-bottom-btn:focus-visible {
     outline: none;
-    border-color: rgba(232, 93, 111, 0.6);
+    border-color: rgba(var(--accent-hover-rgb), 0.6);
     box-shadow: 0 0 0 3px rgba(201, 53, 69, 0.18);
 }
 .chat-scroll-bottom-btn svg { display: block; }
 
+/* FLAT transcript: the owner's message is the only bubble left. Agent prose and
+   task cards are plain rows in the reading column — the gradients and 20%
+   gutters they used to carry were what made the timeline read as nested boxes. */
 .chat-bubble {
-    padding: 10px 14px;
-    border-radius: var(--radius-lg);
-    max-width: 80%;
+    max-width: 100%;
     word-wrap: break-word;
     overflow-wrap: anywhere;
     min-width: 0;
 }
 
 .chat-bubble.user {
-    background: linear-gradient(135deg, var(--user-bubble-from), var(--user-bubble-to));
-    border: 1px solid var(--user-border);
-    box-shadow: inset 0 1px 0 var(--user-glow);
     align-self: flex-end;
-    margin-left: 20%;
+    max-width: 80%;
+    padding: 10px 14px;
+    /* Asymmetric tail on the sending corner (handoff §2). */
+    border-radius: var(--radius) var(--radius) var(--radius-4) var(--radius);
+    border: 1px solid var(--surface-border);
+    background: var(--bg-card);
 }
 
 .chat-bubble.assistant {
-    background: linear-gradient(135deg, var(--accent-18), rgba(120, 24, 36, 0.18));
-    border: 1px solid rgba(240, 122, 134, 0.24);
-    box-shadow: inset 0 1px 0 rgba(255, 214, 220, 0.05);
-    align-self: flex-start;
-    margin-right: 20%;
+    align-self: stretch;
+    padding: 0;
+    border: 0;
+    background: none;
+    box-shadow: none;
 }
 
 .chat-bubble.system {
+    align-self: stretch;
+    padding: 10px 14px;
+    border-radius: var(--radius-sm);
     background: var(--system-bubble-bg);
     border-left: 2px solid var(--system-border);
-    align-self: flex-start;
-    margin-right: 20%;
 }
 
 .chat-bubble .sender {
     font-size: 11px;
     font-weight: 600;
-    margin-bottom: 4px;
+    margin-bottom: var(--space-1);
 }
 .chat-bubble.user .sender { color: var(--user-sender); }
-.chat-bubble.assistant .sender { color: rgba(250, 125, 125, 0.95); }
+.chat-bubble.assistant .sender { color: var(--accent-light); }
 .chat-bubble.system .sender { color: var(--system-sender); }
 
 .chat-bubble .message {
-    font-size: 15.5px;
-    line-height: 1.5;
+    font-size: 13.5px;
+    line-height: 1.55;
     color: var(--text-primary);
     white-space: pre-wrap;
+}
+
+/* Agent prose is a measured text column, not a full-width wall. */
+.chat-bubble.assistant .message {
+    line-height: 1.6;
+    max-width: 64ch;
+}
+
+/* An owner message that carried ⌘L context markers renders them as the same
+   chips the composer showed, in order, interleaved with the typed text. The RAW
+   serialized string stays the message identity (see chat.js renderUserContent).
+
+   A BLOCK with `pre-wrap`, not a flex row: the renderer joins the segments with
+   the same `\n` that separates them in the serialized string, so the separators
+   are real owner bytes and must lay out as the line breaks they are. Chips stay
+   `inline-flex` boxes inside that text flow. */
+.chat-user-parts {
+    display: block;
+    white-space: pre-wrap;
+}
+
+.chat-user-part-text {
+    overflow-wrap: anywhere;
+}
+
+/* Transcript delta over the shared chip box (`:is(.composer-part-chip,
+   .chat-context-chip)`, [shared: composer parts] region): no remove button here,
+   so the label itself is what ellipsizes. */
+.chat-context-chip {
+    padding: 1px 6px;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+}
+
+/* Simple status events (awakened / reconnected) are a centred pill: transient,
+   never persisted, and not part of the conversation. Rich system renderers
+   (skill_review above all) are persisted disclosures and keep their full body. */
+.chat-bubble.chat-status-event {
+    align-self: center;
+    display: flex;
+    align-items: baseline;
+    gap: 6px;
+    max-width: 100%;
+    padding: 4px 12px;
+    border: 1px solid var(--surface-border-soft);
+    border-radius: var(--pill-radius);
+    background: var(--surface-control);
+}
+
+.chat-bubble.chat-status-event .sender {
+    display: none;
+}
+
+.chat-bubble.chat-status-event .message,
+.chat-bubble.chat-status-event .msg-time {
+    margin: 0;
+    font-size: 11px;
+    line-height: 1.45;
+    color: var(--text-secondary);
+    opacity: 1;
+    text-align: left;
+}
+
+.chat-bubble.chat-status-event .msg-time::before {
+    content: '· ';
 }
 
 .chat-photo {
@@ -1503,7 +1773,7 @@ body.resizing-panels { user-select: none; }
 
 button.chat-file:hover,
 .chat-file:hover {
-    border-color: rgba(232, 93, 111, 0.4);
+    border-color: rgba(var(--accent-hover-rgb), 0.4);
 }
 
 .chat-file-empty {
@@ -1527,10 +1797,8 @@ button.chat-file:hover,
     justify-content: center;
     border-radius: 50%;
     color: var(--accent-light);
-    background: rgba(26, 21, 32, 0.72);
-    border: 1px solid rgba(201, 53, 69, 0.42);
-    backdrop-filter: blur(12px);
-    -webkit-backdrop-filter: blur(12px);
+    background: var(--bg-elevated);
+    border: 1px solid var(--accent-25);
     font-size: 15px;
     line-height: 1;
     cursor: pointer;
@@ -1540,18 +1808,18 @@ button.chat-file:hover,
 .chat-file-download:hover {
     color: #fff;
     background: rgba(201, 53, 69, 0.16);
-    border-color: rgba(232, 93, 111, 0.6);
+    border-color: rgba(var(--accent-hover-rgb), 0.6);
     transform: scale(1.05);
 }
 
 .chat-file-download:focus-visible {
     outline: none;
-    border-color: rgba(232, 93, 111, 0.6);
+    border-color: rgba(var(--accent-hover-rgb), 0.6);
     box-shadow: 0 0 0 3px rgba(201, 53, 69, 0.18);
 }
 
 .chat-bubble.user .message { color: var(--user-text); }
-.chat-bubble.assistant .message { color: rgba(255, 235, 238, 0.96); }
+.chat-bubble.assistant .message { color: var(--text-primary); }
 .chat-bubble.system .message { color: var(--system-text); }
 
 /* Shared rich-content contract (v6.71.0): rendered markdown/lists inside
@@ -1677,7 +1945,7 @@ button.chat-file:hover,
 }
 
 .msg-time {
-    font-size: 0.65rem;
+    font-size: 10px;
     color: var(--text-secondary, #666);
     opacity: 0.4;
     margin-top: 6px;
@@ -1704,37 +1972,44 @@ button.chat-file:hover,
     text-align: left;
 }
 
-/* Subdued progress messages. */
+/* Subdued progress messages (standalone "Thought" rows outside a task card). */
 .chat-bubble.progress {
-    border-left: 2px solid rgba(220, 38, 38, 0.2);
-    padding-left: 14px;
-    max-width: min(100%, 760px);
+    align-self: stretch;
+    border-left: 2px solid var(--accent-18);
+    padding: 0 0 0 14px;
+    max-width: 100%;
     margin-right: 0;
     opacity: 0.72;
 }
 
 .chat-bubble.progress .sender {
     font-size: 10px;
-    color: rgba(248, 113, 113, 0.6);
+    color: var(--accent-light);
 }
 
 .chat-bubble.progress .message {
-    font-size: 13px;
-    line-height: 1.45;
-    color: rgba(255, 228, 232, 0.55);
+    font-size: 12.5px;
+    line-height: 1.5;
+    color: var(--text-secondary);
 }
 
+/* A task card is a FLAT agent turn: no box, no card border, no side padding —
+   sender row, phase pill, meta, then the mono activity log behind a left rule.
+   The DOM contract (data-task-id / data-finished / data-expanded, the summary
+   button, timeline and subagent containers) is unchanged: this is a restyle, and
+   every behaviour built on it — nesting, lazy expansion, cancel, conversion —
+   keeps working. The one exception is a card CONVERTED into a project
+   (`.is-project` below), which becomes a surface again because it is no longer a
+   turn but a pointer. */
 .chat-live-card {
-    align-self: flex-start;
-    width: min(100%, 760px);
-    max-width: calc(100% - 20%);
-    margin-inline-end: 20%;
+    align-self: stretch;
+    width: 100%;
+    max-width: 100%;
+    margin-inline-end: 0;
     padding: 0;
-    border-radius: var(--radius-lg);
-    border: 1px solid var(--accent-dim);
-    background: var(--accent-04);
-    backdrop-filter: blur(12px);
-    box-shadow: 0 8px 24px rgba(0, 0, 0, 0.18), inset 0 1px 0 rgba(255, 200, 210, 0.03);
+    border: 0;
+    border-radius: 0;
+    background: none;
     overflow: hidden;
     container-type: inline-size;
     container-name: livecard;
@@ -1742,13 +2017,53 @@ button.chat-file:hover,
     transition: border-color 250ms ease, background-color 250ms ease, box-shadow 250ms ease;
 }
 
+/* A resolved turn steps back visually; it never disappears or loses controls. */
 .chat-live-card[data-finished="1"] {
-    border-color: var(--accent-08);
-    background: rgba(201, 53, 69, 0.02);
+    opacity: 0.88;
 }
 
 .chat-live-card[hidden] {
     display: none;
+}
+
+/* A converted card is a project identity chip, not an agent turn: the run moved to
+   its project panel, so this deliberately re-adds the box the flat card dropped —
+   flat, though, with no glass shadow. Owned HERE, in one definition: the multi-
+   project region used to carry a competing base that this had to outrank with a
+   doubled class, which made the chat's own card depend on a rule two thousand
+   lines away. */
+.chat-live-card.is-project {
+    border: 1px solid var(--project-18);
+    border-radius: var(--radius-md);
+    background: var(--project-08);
+    box-shadow: none;
+    opacity: 1;
+}
+
+/* Card actions ("Turn into project", "Inspect") sit under the turn, left-aligned
+   with the reading column. Every producer appends this element as a direct child
+   of the card root (`chat.js::ensureLiveActionsEl` and the project-action markup),
+   so ONE flat definition here replaces the base-plus-override pair the two regions
+   used to split it into. */
+.chat-live-actions {
+    display: flex;
+    justify-content: flex-start;
+    gap: var(--space-2);
+    padding: var(--space-1) 0 0;
+}
+
+/* "Inspect" is a peer of the other card actions — a calm ghost, because opening a
+   panel is never the primary thing to do with a running task. The descendant
+   selector is deliberate: it must outrank the later `.btn` base border reset. */
+.chat-live-actions .chat-live-inspect-btn {
+    border: 1px solid var(--surface-border);
+    background: var(--surface-control);
+    color: var(--text-secondary);
+}
+
+.chat-live-actions .chat-live-inspect-btn:hover {
+    border-color: var(--accent-25);
+    color: var(--accent-light);
 }
 
 .chat-live-summary-button {
@@ -1757,16 +2072,25 @@ button.chat-file:hover,
     background: transparent;
     color: inherit;
     cursor: pointer;
-    padding: 11px 14px;
+    padding: 2px 0;
     display: flex;
     flex-direction: column;
-    gap: 8px;
+    gap: var(--space-1);
     user-select: none;
     text-align: left;
+    border-radius: var(--radius-6);
 }
 
 .chat-live-summary-button:hover {
-    background: rgba(201, 53, 69, 0.06);
+    background: var(--surface-card-soft);
+}
+
+/* Same voice as a plain assistant message — that is the point of a flat turn. */
+.chat-live-sender {
+    flex: 0 0 auto;
+    color: var(--accent-light);
+    font-size: 11px;
+    font-weight: 600;
 }
 
 .chat-live-summary {
@@ -1789,59 +2113,37 @@ button.chat-file:hover,
     align-items: center;
     gap: 8px;
     flex-shrink: 0;
+    min-width: 0;
 }
 
 .chat-live-phase,
 .chat-live-line-phase {
     display: inline-flex;
     align-items: center;
-    padding: 2px 8px;
-    border-radius: 999px;
-    border: 1px solid rgba(255,255,255,0.08);
-    background: rgba(255,255,255,0.04);
+    padding: 1px 7px;
+    border-radius: var(--pill-radius);
+    border: 1px solid var(--surface-border);
+    background: var(--surface-control);
     color: var(--text-secondary);
-    font-size: 11px;
+    font-size: 10px;
     font-weight: 600;
     text-transform: none;
 }
 
 .chat-live-phase:is(.start, .calling, .context, .progress, .working, .thought, .thinking, .boot),
 .chat-live-line-phase:is(.start, .calling, .context, .progress, .working, .thought, .thinking, .boot) {
-    color: rgba(248, 130, 140, 0.95);
-    border-color: rgba(201, 53, 69, 0.24);
-    background: var(--accent-10);
+    color: var(--accent-light);
+    border-color: var(--accent-25);
+    background: var(--accent-12);
 }
 
 .chat-live-card:not([data-finished="1"]) .chat-live-phase:is(.working, .thinking, .progress, .calling, .context) {
     animation: thinking-pulse 1.5s ease-in-out infinite;
 }
 
-.chat-live-phase:is(.done, .ready, .ok, .result, .usage, .metrics),
-.chat-live-line-phase:is(.done, .ready, .ok, .result, .usage, .metrics),
-.log-entry .log-phase:is(.done, .ready, .ok, .result, .usage, .metrics),
-.evo-runtime-pill.online {
-    color: var(--green);
-    border-color: rgba(34, 197, 94, 0.22);
-    background: rgba(34, 197, 94, 0.10);
-}
-
-.chat-live-phase:is(.warn, .alive, .empty, .cancelled),
-.chat-live-line-phase:is(.warn, .alive, .empty, .cancelled),
-.log-entry .log-phase:is(.warn, .alive, .empty, .cancelled),
-.evo-runtime-pill.starting {
-    color: var(--amber);
-    border-color: rgba(245, 158, 11, 0.25);
-    background: rgba(245, 158, 11, 0.10);
-}
-
-.chat-live-phase:is(.error, .timeout, .lifecycle_error),
-.chat-live-line-phase:is(.error, .timeout, .lifecycle_error),
-.log-entry .log-phase:is(.error, .timeout, .lifecycle_error),
-.evo-runtime-pill.error {
-    color: var(--red);
-    border-color: rgba(239, 68, 68, 0.25);
-    background: rgba(239, 68, 68, 0.10);
-}
+/* The done / warn / error tones for these pills are NOT owned here: they are the
+   shared status-tone ladder, which the chat, the Logs grid and the Evolution
+   runtime card all read. See the `[shared: status tone ladder]` region below. */
 
 /* Live-card typing dots. */
 .chat-live-typing {
@@ -1869,7 +2171,7 @@ button.chat-file:hover,
 .chat-live-title {
     font-size: 13px;
     font-weight: 400;
-    color: rgba(226, 232, 240, 0.68);
+    color: var(--text-secondary);
     flex: 1;
     min-width: 0;
     line-height: 1.45;
@@ -1911,17 +2213,26 @@ button.chat-file:hover,
 
 .chat-live-count {
     color: var(--text-muted);
-    font-size: 11px;
+    font-size: 10.5px;
     white-space: nowrap;
 }
 
 .chat-live-toggle {
-    color: var(--text-secondary);
-    font-size: 12px;
+    color: var(--text-muted);
+    font-size: 10.5px;
     white-space: nowrap;
 }
 
+/* The flat turn has no card padding, so the disclosure chevron would otherwise
+   sit ON the column edge — and MID-ROTATION a 14px square sweeps a ~19.8px
+   bounding box (14·√2), which scrolls the whole card sideways for the duration of
+   the animation. A fixed box plus a 4px end inset keeps the sweep inside the card
+   and stops the controls touching the edge. */
 .chat-live-chevron {
+    flex: 0 0 auto;
+    width: 14px;
+    height: 14px;
+    margin-inline-end: var(--space-1);
     color: var(--text-muted);
     transition: transform 0.18s ease;
 }
@@ -1930,67 +2241,67 @@ button.chat-file:hover,
     transform: rotate(180deg);
 }
 
+/* Card meta is the REAL evidence the frames carried (phase, round, sticky cost,
+   latest-activity clock) — mono because it is numbers and identifiers. There is
+   deliberately no "step N of M": no such field exists (owner decision 8). */
 .chat-live-meta {
     display: flex;
     flex-wrap: wrap;
-    gap: 6px;
+    gap: var(--space-2);
 }
 
 .chat-live-meta-text {
     display: inline-flex;
     align-items: center;
-    color: var(--text-secondary);
-    font-size: 12px;
+    color: var(--text-muted);
+    font-family: var(--font-mono);
+    font-size: 10px;
 }
 
+/* Activity log: mono rows behind a thin left rule, the way a build log reads. */
 .chat-live-timeline {
-    padding: 0 14px 12px;
+    padding: 0 0 0 14px;
+    margin-inline-start: 2px;
+    border-inline-start: 2px solid var(--surface-border);
     display: none;
     flex-direction: column;
-    gap: 8px;
+    gap: 1px;
 }
 
 .chat-live-card[data-expanded="1"] > .chat-live-timeline {
     display: flex;
-    border-top: 1px solid rgba(255,255,255,0.05);
     max-height: 420px;
     overflow-y: auto;
 }
 
+/* Subagents are an indented flat GROUP, not cards inside a card. Depth is paid
+   once (the livecard container query below flattens further levels) so a deep
+   tree keeps a usable text column. */
 .chat-subagents {
     display: flex;
     flex-direction: column;
-    gap: 8px;
-    margin-block: 2px 12px;
-    margin-inline: 24px 14px;
+    gap: var(--space-2);
+    margin-block: var(--space-1) var(--space-2);
+    margin-inline: 0;
     padding-inline-start: 14px;
-    border-inline-start: 1px solid rgba(201, 53, 69, 0.28);
+    border-inline-start: 2px solid var(--accent-18);
 }
 
 .chat-subagents:empty {
     display: none;
 }
 
-/* The root card width is owned by the CHAT COLUMN and therefore stays late
-   enough to beat the base 80% rule above. Ordinary bubble gutters are separate. */
+/* Bubble gutters respond to the CHAT COLUMN's real width, not the viewport, so a
+   narrow project panel behaves like a narrow screen. Task cards no longer need a
+   rule here: a flat turn is always the full column. */
 @container chatcol (max-width: 620px) {
     .chat-bubble {
         max-width: 100%;
     }
 
     .chat-bubble.user {
+        max-width: 92%;
         margin-inline-start: 0;
-    }
-
-    .chat-bubble.assistant,
-    .chat-bubble.system {
-        margin-inline-end: 0;
-    }
-
-    .chat-live-card {
-        width: 100%;
-        max-width: 100%;
-        margin-inline-end: 0;
     }
 }
 
@@ -2053,41 +2364,86 @@ button.chat-file:hover,
     width: 100%;
     max-width: 100%;
     margin-inline-end: 0;
-    border-color: rgba(201, 53, 69, 0.20);
-    background: rgba(255, 255, 255, 0.025);
-    box-shadow: inset 0 1px 0 rgba(255, 200, 210, 0.03);
+    border: 0;
+    background: none;
+    box-shadow: none;
 }
 
 .chat-live-card.subagent .chat-live-summary-button {
-    padding: 9px 12px;
+    padding: 2px 0;
 }
 
+/* One activity row. The status glyph is a `::before` keyed off the row's phase
+   class, so the row markup (and every pinned data-live-line-* attribute) is
+   untouched: column 1 is the glyph, column 2 is the head and the body. */
 .chat-live-line {
-    border-top: 1px solid rgba(255,255,255,0.05);
-    padding-top: 10px;
-    display: flex;
-    flex-direction: column;
-    gap: 6px;
+    display: grid;
+    grid-template-columns: 12px minmax(0, 1fr);
+    column-gap: var(--space-2);
+    align-items: baseline;
+    padding: var(--space-1) var(--space-2);
+    border-radius: var(--radius-6);
+    font-family: var(--font-mono);
+    font-size: 12px;
+    transition: background 0.18s ease;
 }
 
-.chat-live-line:first-child {
-    border-top: none;
-    padding-top: 0;
+.chat-live-line::before {
+    content: '●';
+    grid-column: 1;
+    color: var(--accent-light);
+    font-size: 9px;
+    line-height: 1.9;
+}
+
+.chat-live-line:is(.done, .ready, .ok, .result, .usage, .metrics)::before {
+    content: '✓';
+    color: var(--green);
+    font-size: 11px;
+}
+
+.chat-live-line:is(.warn, .alive, .empty, .cancelled)::before {
+    color: var(--amber);
+}
+
+.chat-live-line:is(.error, .timeout, .lifecycle_error)::before {
+    content: '✕';
+    color: var(--red);
+    font-size: 11px;
+}
+
+/* Only a LIVE card pulses; a resolved run's rows are static history. */
+.chat-live-card:not([data-finished="1"]) .chat-live-line:is(.working, .thinking, .progress, .calling, .context)::before {
+    animation: thinking-pulse 1.5s ease-in-out infinite;
+}
+
+.chat-live-card:not([data-finished="1"]) .chat-live-line:is(.working, .thinking, .progress, .calling, .context) {
+    background: var(--accent-05);
+}
+
+/* A grid item's automatic minimum size is min-content, so one long unbroken URL
+   in an expanded body would push past the `minmax(0, 1fr)` track and scroll the
+   whole card sideways. min-width:0 hands the wrapping back to the text. */
+.chat-live-line-toggle,
+.chat-live-line > .chat-live-line-head,
+.chat-live-line-body {
+    grid-column: 2;
+    min-width: 0;
+}
+
+/* Only an EXPANDABLE row reacts to hover: a row with nothing behind it must not
+   advertise a disclosure it does not have. */
+.chat-live-line.expandable:hover {
+    background: var(--surface-control);
 }
 
 .chat-live-line.expandable {
     /* The whole non-interactive row surface toggles the line (v6.71.0). */
     cursor: pointer;
-    border-radius: var(--radius);
-    transition: background 0.18s ease;
-}
-
-.chat-live-line.expandable:hover {
-    background: rgba(255,255,255,0.02);
 }
 
 .chat-live-line.expandable[data-expanded="1"] {
-    background: rgba(59, 130, 246, 0.08);
+    background: var(--accent-08);
 }
 
 .chat-live-line-toggle {
@@ -2100,8 +2456,9 @@ button.chat-file:hover,
     display: flex;
     align-items: flex-start;
     justify-content: space-between;
-    gap: 12px;
+    gap: var(--space-3);
     text-align: left;
+    font: inherit;
 }
 
 .chat-live-line-head {
@@ -2113,28 +2470,33 @@ button.chat-file:hover,
     min-width: 0;
 }
 
+/* The row title WRAPS rather than ellipsizing: it is owner-facing narration, and
+   a CSS ellipsis would hide cognitive text with no disclosure (BIBLE P1). The
+   row already offers Expand for the full companion text. */
 .chat-live-line-title {
-    color: rgba(226, 232, 240, 0.72);
-    font-size: 13px;
+    color: var(--text-secondary);
+    font-size: 12px;
     font-weight: 400;
-    line-height: 1.45;
+    line-height: 1.6;
     white-space: pre-wrap;
 }
 
 .chat-live-line-repeat {
     color: var(--text-muted);
-    font-size: 11px;
+    font-size: 10.5px;
 }
 
+/* The row's clock, right-aligned. It is the event's real timestamp — there is no
+   per-row duration in the frames, and inventing one would be a fabricated field. */
 .chat-live-line-time {
     margin-left: auto;
     color: var(--text-muted);
-    font-size: 11px;
+    font-size: 10.5px;
 }
 
 .chat-live-line-expand-label {
-    color: var(--text-secondary);
-    font-size: 12px;
+    color: var(--text-muted);
+    font-size: 10.5px;
     white-space: nowrap;
     flex-shrink: 0;
     padding-top: 1px;
@@ -2142,11 +2504,12 @@ button.chat-file:hover,
 
 
 .chat-live-line-body {
-    color: rgba(226, 232, 240, 0.64);
+    color: var(--text-secondary);
     white-space: pre-wrap;
     word-break: break-word;
-    font-size: 13px;
-    line-height: 1.5;
+    overflow-wrap: anywhere;
+    font-size: 12px;
+    line-height: 1.6;
 }
 
 /* P3: the genuinely-full fetched output is shown in a bounded, scrollable box so a
@@ -2158,42 +2521,45 @@ button.chat-file:hover,
 
 .chat-live-line-loading {
     margin-top: 6px;
-    font-size: 12px;
+    font-size: 11px;
     font-style: italic;
-    color: rgba(148, 163, 184, 0.8);
+    color: var(--text-muted);
 }
 
-.chat-live-line[data-expanded="1"] .chat-live-line-title {
-    color: rgba(239, 246, 255, 0.9);
-}
-
+.chat-live-line[data-expanded="1"] .chat-live-line-title,
 .chat-live-line[data-expanded="1"] .chat-live-line-body {
-    color: rgba(239, 246, 255, 0.82);
+    color: var(--text-primary);
+}
+
+/* A running row reads at full strength — it is what is happening now. */
+.chat-live-card:not([data-finished="1"]) .chat-live-line:is(.working, .thinking, .progress, .calling, .context) .chat-live-line-title {
+    color: var(--text-primary);
 }
 
 .chat-live-line.error .chat-live-line-title,
 .chat-live-line.timeout .chat-live-line-title {
-    color: #fda4af;
+    color: var(--accent-light);
 }
 
 .chat-bubble .message pre {
-    background: rgba(0, 0, 0, 0.3);
-    border-radius: 6px;
+    background: var(--bg-elevated);
+    border: 1px solid var(--surface-border-soft);
+    border-radius: var(--radius-6);
     padding: 8px 10px;
     margin: 6px 0;
     overflow-x: auto;
-    font-size: 13px;
+    font-size: 12.5px;
     line-height: 1.5;
 }
 .chat-bubble .message code {
-    font-family: 'SF Mono', 'Fira Code', 'Consolas', monospace;
-    font-size: 13px;
+    font-family: var(--font-mono);
+    font-size: 12.5px;
 }
 .chat-bubble .message .inline-code {
-    background: rgba(255, 255, 255, 0.08);
+    background: var(--bg-hover);
     padding: 1px 5px;
-    border-radius: 4px;
-    font-size: 14px;
+    border-radius: var(--radius-4);
+    font-size: 12.5px;
 }
 .chat-bubble .message del {
     opacity: 0.5;
@@ -2265,14 +2631,11 @@ button.chat-file:hover,
     }
 
     .chat-bubble {
-        max-width: 92%;
+        max-width: 100%;
     }
     .chat-bubble.user {
-        margin-left: 8%;
-    }
-    .chat-bubble.assistant,
-    .chat-bubble.system {
-        margin-right: 8%;
+        max-width: 92%;
+        margin-left: 0;
     }
     .chat-bubble.progress {
         max-width: 100%;
@@ -2293,10 +2656,8 @@ button.chat-file:hover,
         justify-content: center;
         border: 1px solid var(--surface-border);
         border-radius: var(--radius-md);
-        background: rgba(13, 11, 15, 0.76);
+        background: var(--bg-elevated);
         color: var(--text-primary);
-        backdrop-filter: blur(14px);
-        -webkit-backdrop-filter: blur(14px);
     }
 
     .nav-drawer-backdrop {
@@ -2304,9 +2665,7 @@ button.chat-file:hover,
         inset: 0;
         z-index: 68;
         display: block;
-        background: rgba(0, 0, 0, 0.48);
-        backdrop-filter: blur(2px);
-        -webkit-backdrop-filter: blur(2px);
+        background: rgba(0, 0, 0, 0.56);
     }
 
     .nav-drawer-backdrop[hidden] {
@@ -2323,9 +2682,7 @@ button.chat-file:hover,
         transition: transform 0.18s ease;
         box-shadow: 24px 0 60px rgba(0, 0, 0, 0.36);
         padding-top: calc(64px + env(safe-area-inset-top, 0px));
-        background:
-            linear-gradient(180deg, rgba(13, 11, 15, 0.94), rgba(13, 11, 15, 0.86)),
-            radial-gradient(circle at 8% 0%, rgba(201, 53, 69, 0.10), transparent 260px);
+        background: var(--bg-sidebar);
     }
 
     #primary-sidebar.open {
@@ -2340,7 +2697,6 @@ button.chat-file:hover,
         font-size: 9px;
     }
 
-    #nav-version,
     .nav-spacer {
         display: none;
     }
@@ -2352,7 +2708,7 @@ button.chat-file:hover,
 
     .chat-page-header {
         /* Keep the desktop overlay header (position:absolute + fade-to-transparent
-           gradient + blur): the transcript scrolls under it. Only restack the grid
+           gradient): the transcript scrolls under it. Only restack the grid
            for narrow widths — never switch to position:static / a flat background,
            which is what removed the gradient and made mobile look heavy. */
         row-gap: 6px;
@@ -2385,18 +2741,8 @@ button.chat-file:hover,
         gap: 6px;
     }
 
-    .chat-page-header .chat-budget-pill,
     .chat-page-header .status-badge {
         order: 0;
-    }
-
-    .chat-budget-pill {
-        min-width: 0;
-        padding: 3px 10px;
-    }
-
-    .chat-budget-text {
-        font-size: 10px;
     }
 
     .page-header,
@@ -2413,11 +2759,17 @@ button.chat-file:hover,
 
 #chat-input-area,
 .chat-input-area {
-    /* Bottom fade darkens transcript before the frosted input without trapping scroll. */
+    /* Flat darkening gradient (never a blur band) so the transcript fades out
+       under the dock instead of hitting a hard line; the transcript reserves the
+       dock's REAL height through --chat-input-reserve rather than sliding under it.
+       Side padding tracks the transcript's centred reading column: the horizontal
+       gutter is the SAME token as #chat-messages (--space-5), so the composer box
+       lines up with the messages above it at every width instead of sitting 8px
+       wider once the viewport drops below the 760px column. */
     display: flex;
     flex-direction: column;
-    gap: 4px;
-    padding: 32px 16px 16px;
+    gap: var(--space-1);
+    padding: 32px max(var(--space-5), calc((100% - 760px) / 2)) var(--space-4);
     align-items: stretch;
     position: absolute;
     bottom: 0;
@@ -2427,10 +2779,10 @@ button.chat-file:hover,
     pointer-events: none;
     background: linear-gradient(
         0deg,
-        rgba(13, 11, 15, 0.82) 0%,
-        rgba(13, 11, 15, 0.58) 48%,
-        rgba(13, 11, 15, 0.22) 78%,
-        rgba(13, 11, 15, 0.00) 100%
+        rgba(var(--bg-primary-rgb), 0.82) 0%,
+        rgba(var(--bg-primary-rgb), 0.58) 48%,
+        rgba(var(--bg-primary-rgb), 0.22) 78%,
+        rgba(var(--bg-primary-rgb), 0.00) 100%
     );
 }
 
@@ -2455,29 +2807,28 @@ button.chat-file:hover,
 .chat-text-row {
     order: 2;
     display: flex;
-    align-items: center;
+    /* Controls align to the TOP of the field: the parts area wraps chips onto more
+       lines and the textarea grows, so a centred attach/Send would drift downward
+       with the content instead of staying where the owner reaches for it. */
+    align-items: flex-start;
     gap: var(--space-2);
     min-width: 0;
-    padding: var(--space-2);
-    /* Oval (pill) composer: the send/attach controls are vertically CENTERED so they
-       never bulge out of the rounded corners as the textarea grows multi-line (the
-       earlier flex-end + 999px pushed them past the curve; centering fixes that). */
-    border-radius: 999px;
-    border: 1px solid rgba(255, 255, 255, 0.10);
-    background: rgba(26, 21, 32, 0.68);
-    backdrop-filter: blur(20px);
-    -webkit-backdrop-filter: blur(20px);
-    box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.04);
+    /* Flat box (handoff §2): 12px radius, --bg-elevated, 1px border, accent focus.
+       The left inset is larger because text starts there, not a control. */
+    padding: var(--space-2) var(--space-2) var(--space-2) 14px;
+    border-radius: var(--radius);
+    border: 1px solid var(--surface-border);
+    background: var(--bg-elevated);
     transition: border-color 0.2s, box-shadow 0.2s, background 0.2s;
 }
 
 .chat-text-row:focus-within {
     border-color: var(--focus-accent-border);
-    background: rgba(26, 21, 32, 0.86);
-    box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.04), 0 0 0 3px var(--accent-10);
+    background: var(--bg-elevated);
+    box-shadow: 0 0 0 3px var(--accent-10);
 }
 
-/* "Chat freed" cue (P3): a brief fuchsia brighten when a task moves out to a
+/* "Chat freed" cue (P3): a brief teal brighten when a task moves out to a
    project, signalling the main chat is free again. Self-clears after ~900ms. */
 .chat-text-row.chat-freed {
     border-color: var(--project);
@@ -2498,19 +2849,19 @@ button.chat-file:hover,
 #chat-input-area.drag-active .chat-input-wrap,
 .chat-input-area.drag-active .chat-input-wrap {
     border-radius: 24px;
-    box-shadow: 0 0 0 1px rgba(232, 93, 111, 0.45), 0 0 0 4px var(--accent-10);
+    box-shadow: 0 0 0 1px rgba(var(--accent-hover-rgb), 0.45), 0 0 0 4px var(--accent-10);
 }
 
 /* Attach button: a flow item at the left of the text row (no absolute float). */
 .chat-attach-btn {
     flex: 0 0 auto;
-    align-self: center;
+    align-self: flex-start;
     width: 32px;
     height: 32px;
     border-radius: var(--radius-sm);
     border: none;
     background: transparent;
-    color: rgba(226, 232, 240, 0.45);
+    color: var(--text-secondary);
     display: flex;
     align-items: center;
     justify-content: center;
@@ -2520,7 +2871,7 @@ button.chat-file:hover,
 }
 
 .chat-attach-btn:hover {
-    color: rgba(226, 232, 240, 0.85);
+    color: var(--text-primary);
     background: rgba(255, 255, 255, 0.06);
 }
 
@@ -2552,13 +2903,11 @@ button.chat-file:hover,
     align-items: center;
     gap: 6px;
     padding: 4px 8px 4px 6px;
-    background: rgba(26, 21, 32, 0.78);
-    border: 1px solid rgba(201, 53, 69, 0.35);
-    backdrop-filter: blur(8px);
-    -webkit-backdrop-filter: blur(8px);
+    background: var(--bg-elevated);
+    border: 1px solid var(--accent-25);
     border-radius: var(--radius-sm);
     font-size: 12px;
-    color: rgba(226, 232, 240, 0.85);
+    color: var(--text-primary);
     max-width: 100%;
 }
 
@@ -2573,7 +2922,7 @@ button.chat-file:hover,
     flex-shrink: 0;
     border: none;
     background: none;
-    color: rgba(226, 232, 240, 0.5);
+    color: var(--text-secondary);
     cursor: pointer;
     font-size: 16px;
     line-height: 1;
@@ -2581,18 +2930,19 @@ button.chat-file:hover,
 }
 
 .attach-remove:hover {
-    color: rgba(226, 232, 240, 0.9);
+    color: var(--text-primary);
 }
 
 #chat-input,
 textarea.chat-input {
-    /* Bare text surface inside the .chat-input-wrap card (the card owns the
-       border / background / focus ring), so no fixed side paddings to reserve
-       room for floated controls — the row flexes at any width. */
-    flex: 1 1 auto;
-    width: 100%;
+    /* Bare text surface: the .chat-text-row box owns the border / background /
+       focus ring, and the parts host around it owns the chip flow. A fixed width
+       would push the live input onto its own line once chips wrap, so it flexes
+       (basis from the shared .composer-parts-host rule) instead. */
+    flex: 1 1 60px;
+    width: auto;
     min-width: 0;
-    padding: 5px 4px;
+    padding: 5px 2px;
     border: none;
     background: transparent;
     box-shadow: none;
@@ -2608,7 +2958,14 @@ textarea.chat-input {
 #chat-input::placeholder,
 textarea.chat-input::placeholder { color: var(--text-muted); }
 
-/* Composer pills (Swarm + Low|Max), left of the absolute send button. */
+/* The chat's ordered-parts area. The shared `.composer-parts` contract (added by
+   composer_parts.js at mount) supplies the chip flow; the chat only pins a
+   min-height so an EMPTY field still lines up with the attach/Send controls. */
+.chat-parts {
+    min-height: var(--composer-control-height);
+}
+
+/* Composer pills (Swarm + Low|Max) on the row above the text field. */
 .chat-composer-pills {
     display: flex;
     align-items: center;
@@ -2616,16 +2973,48 @@ textarea.chat-input::placeholder { color: var(--text-muted); }
     min-width: 0;
 }
 
+/* READ-ONLY model chip (owner decision 24): it names the MAIN model and opens
+   Settings → Models. It rides the control row rather than the text row because
+   at 390px a mono model id inside the field would eat the usable input width.
+   Hidden entirely until the Settings snapshot exists — never a guessed default. */
+.chat-model-chip {
+    margin-inline-start: auto;
+    flex: 0 0 auto;
+    max-width: 52%;
+    padding: 2px 6px;
+    border: 1px solid transparent;
+    border-radius: var(--radius-6);
+    background: transparent;
+    color: var(--text-muted);
+    font-family: var(--font-mono);
+    font-size: 11px;
+    line-height: 1.5;
+    cursor: pointer;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+    transition: color 0.15s, border-color 0.15s, background 0.15s;
+}
+
+.chat-model-chip:hover {
+    color: var(--text-secondary);
+    border-color: var(--surface-border);
+    background: var(--surface-control);
+}
+
+.chat-model-chip:focus-visible {
+    outline: none;
+    border-color: var(--focus-accent-border);
+}
+
 /* One-shot Swarm arm pill: dim when idle, accent when armed. */
 .chat-swarm {
     height: var(--composer-control-height);
     padding: 0 12px;
-    border: 1px solid rgba(226, 232, 240, 0.12);
-    border-radius: 999px;
-    background: rgba(26, 21, 32, 0.38);
-    color: rgba(226, 232, 240, 0.68);
-    backdrop-filter: blur(18px);
-    -webkit-backdrop-filter: blur(18px);
+    border: 1px solid var(--surface-border);
+    border-radius: var(--pill-radius);
+    background: var(--surface-control);
+    color: var(--text-secondary);
     box-shadow: var(--composer-control-shadow);
     font-size: var(--composer-control-font-size);
     font-weight: 700;
@@ -2637,13 +3026,13 @@ textarea.chat-input::placeholder { color: var(--text-muted); }
 }
 .chat-swarm:hover {
     color: var(--accent);
-    border-color: rgba(232, 93, 111, 0.40);
+    border-color: rgba(var(--accent-hover-rgb), 0.40);
     background: rgba(38, 25, 34, 0.58);
 }
 .chat-swarm[data-armed="true"] {
     color: var(--accent);
-    border-color: rgba(232, 93, 111, 0.44);
-    background: rgba(232, 93, 111, 0.14);
+    border-color: rgba(var(--accent-hover-rgb), 0.44);
+    background: rgba(var(--accent-hover-rgb), 0.14);
     box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.06), 0 0 0 3px var(--accent-10);
 }
 
@@ -2652,12 +3041,10 @@ textarea.chat-input::placeholder { color: var(--text-muted); }
     display: inline-flex;
     align-items: center;
     height: var(--composer-control-height);
-    border: 1px solid rgba(226, 232, 240, 0.12);
-    border-radius: 999px;
+    border: 1px solid var(--surface-border);
+    border-radius: var(--pill-radius);
     overflow: hidden;
-    background: rgba(26, 21, 32, 0.38);
-    backdrop-filter: blur(18px);
-    -webkit-backdrop-filter: blur(18px);
+    background: var(--surface-control);
     box-shadow: var(--composer-control-shadow);
     font-size: var(--composer-control-font-size);
     font-weight: 700;
@@ -2672,7 +3059,7 @@ textarea.chat-input::placeholder { color: var(--text-muted); }
     padding: 0 12px;
     border: none;
     background: transparent;
-    color: rgba(226, 232, 240, 0.45);
+    color: var(--text-secondary);
     font: inherit;
     cursor: pointer;
     transition: color 0.15s, background 0.15s;
@@ -2682,7 +3069,7 @@ textarea.chat-input::placeholder { color: var(--text-muted); }
 }
 /* Active segment: Max glows accent (full context); Low glows amber (reduced). */
 .chat-context-mode[data-context-mode="max"] .chat-seg[data-mode="max"] {
-    background: rgba(232, 93, 111, 0.16);
+    background: rgba(var(--accent-hover-rgb), 0.16);
     color: var(--accent);
 }
 .chat-context-mode[data-context-mode="low"] .chat-seg[data-mode="low"] {
@@ -2692,7 +3079,7 @@ textarea.chat-input::placeholder { color: var(--text-muted); }
 
 .chat-send-group {
     flex: 0 0 auto;
-    align-self: center;
+    align-self: flex-start;
     display: flex;
     align-items: center;
     gap: 0;
@@ -2706,34 +3093,110 @@ textarea.chat-input::placeholder { color: var(--text-muted); }
     opacity: 0.72;
 }
 
+/* Send is the composer's one PRIMARY action: solid accent, not a ghost pill. */
 .chat-send-inline {
-    border: 1px solid rgba(232, 93, 111, 0.28);
-    background: rgba(232, 93, 111, 0.08);
-    color: var(--accent);
-    font-size: var(--composer-control-font-size);
-    font-weight: 700;
+    border: 1px solid var(--accent);
+    background: var(--accent);
+    color: #fff;
+    font-size: 12.5px;
+    font-weight: 600;
     font-family: inherit;
     letter-spacing: 0;
     cursor: pointer;
     padding: 0 13px;
     height: 100%;
-    border-radius: 999px;
-    backdrop-filter: blur(16px);
-    -webkit-backdrop-filter: blur(16px);
-    box-shadow: var(--composer-control-shadow);
+    border-radius: var(--radius-sm);
     transition: color 0.18s, background 0.18s, border-color 0.18s, opacity 0.18s;
-    opacity: 0.88;
     display: flex;
     align-items: center;
 }
 .chat-send-inline:hover {
-    opacity: 1;
-    background: var(--accent-18);
-    border-color: rgba(232, 93, 111, 0.48);
+    background: var(--accent-hover);
+    border-color: var(--accent-hover);
 }
 .chat-send-inline:active {
-    background: var(--accent-18);
+    background: var(--accent-hover);
+}
+.chat-send-inline:focus-visible {
+    outline: none;
+    box-shadow: 0 0 0 3px var(--focus-accent-ring);
+}
+
+/* ===== [shared: composer parts] =====
+   The ordered chip/text parts area rendered INSIDE a composer field. One DOM
+   contract (web/modules/composer_parts.js) serves the chat composer and the
+   Changes / Files bottom docks, so a context chip looks identical everywhere.
+   Chips are mono because they name real paths and line ranges. */
+.composer-parts {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    gap: 6px;
+    flex: 1 1 auto;
+    min-width: 0;
+}
+
+.composer-part-text {
+    font-size: 13px;
+    line-height: 1.5;
+    color: var(--text-primary);
+    white-space: pre-wrap;
+    overflow-wrap: anywhere;
+    max-width: 100%;
+}
+
+/* A context chip is ONE visual object seen in two places — live in a composer
+   field and replayed in the transcript — so its box is declared ONCE here.
+   `:is()` takes the specificity of a single class, and the two per-site rules
+   below/above declare only DELTAS (no property appears in both), so the cascade
+   result does not depend on which rule the file happens to reach first. */
+:is(.composer-part-chip, .chat-context-chip) {
+    display: inline-flex;
+    align-items: center;
+    max-width: 100%;
+    border: 1px solid var(--accent-25);
+    border-radius: var(--radius-6);
+    background: var(--accent-10);
+    color: var(--accent-chip-text);
+    font-family: var(--font-mono);
+    font-size: 11px;
+    line-height: 1.5;
+}
+
+/* Composer delta: a removal button rides beside the label, so the chip needs an
+   inner gap and a touch more padding than the read-only transcript chip. */
+.composer-part-chip {
+    gap: 5px;
+    padding: 2px 6px;
+}
+
+.composer-part-chip-label {
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+}
+
+.composer-part-remove {
+    flex: 0 0 auto;
+    border: none;
+    background: transparent;
+    color: inherit;
+    font: inherit;
+    line-height: 1;
+    padding: 0 1px;
+    cursor: pointer;
+    opacity: 0.65;
+}
+
+.composer-part-remove:hover {
     opacity: 1;
+}
+
+/* The live input keeps shrinking rather than pushing chips out of the field. */
+.composer-parts-host > textarea,
+.composer-parts-host > input {
+    flex: 1 1 60px;
+    min-width: 0;
 }
 
 /* Shared UI components. */
@@ -2754,7 +3217,7 @@ textarea.chat-input::placeholder { color: var(--text-muted); }
     display: inline-flex;
     align-items: center;
     gap: 6px;
-    border-radius: 999px;
+    border-radius: var(--pill-radius);
     white-space: nowrap;
 }
 
@@ -2795,40 +3258,44 @@ textarea.chat-input::placeholder { color: var(--text-muted); }
 }
 
 .stat-card {
-    background: linear-gradient(180deg, rgba(255, 255, 255, 0.05), rgba(255, 255, 255, 0.02));
+    background: var(--bg-elevated);
     border-radius: var(--radius);
     padding: 16px 20px;
-    border: 1px solid var(--accent-08);
-    backdrop-filter: blur(14px);
-    box-shadow: 0 12px 32px rgba(0, 0, 0, 0.18);
+    border: 1px solid var(--surface-border);
     transition: border-color 0.3s;
 }
 .stat-card:hover {
     border-color: rgba(201, 53, 69, 0.2);
 }
 
+/* The Costs stat cards are the only .stat-card consumer: label 10.5px uppercase
+   muted, value 20px/600 mono (an amount is a number, so it is mono). */
 .stat-card .label {
-    font-size: 12px;
+    font-size: 10.5px;
     font-weight: 600;
-    color: var(--text-secondary);
+    color: var(--text-muted);
     text-transform: uppercase;
-    letter-spacing: 0.5px;
-    margin-bottom: 8px;
+    letter-spacing: 0.06em;
+    margin-bottom: 6px;
     display: flex;
     align-items: center;
     gap: 6px;
 }
 
 .stat-card .value {
+    font-family: var(--font-mono);
     font-size: 20px;
-    font-weight: 700;
+    font-weight: 600;
+    font-variant-numeric: tabular-nums;
 }
 
+/* Card title line for the Evolution runtime + Updates cards (its only two
+   consumers): the same 13px/600 heading the Skills cards use. */
 .section-title {
-    font-size: 14px;
+    font-size: 13px;
     font-weight: 600;
-    color: var(--text-secondary);
-    margin: 16px 0 12px;
+    color: var(--text-primary);
+    margin: 0 0 8px;
 }
 
 .btn {
@@ -2871,7 +3338,7 @@ textarea.chat-input::placeholder { color: var(--text-muted); }
 }
 .btn-primary:hover {
     background: var(--accent-25);
-    border-color: rgba(232, 93, 111, 0.35);
+    border-color: rgba(var(--accent-hover-rgb), 0.35);
 }
 .btn-secondary {
     background: rgba(255, 255, 255, 0.04);
@@ -2881,7 +3348,7 @@ textarea.chat-input::placeholder { color: var(--text-muted); }
 .btn-secondary:hover {
     background: rgba(255, 255, 255, 0.07);
     color: var(--text-primary);
-    border-color: rgba(232, 93, 111, 0.28);
+    border-color: rgba(var(--accent-hover-rgb), 0.28);
 }
 .btn-ghost {
     background: transparent;
@@ -2952,7 +3419,7 @@ textarea.chat-input::placeholder { color: var(--text-muted); }
     padding: 8px 12px;
     border-radius: var(--radius-sm);
     border: 1px solid var(--divider);
-    background: var(--bg-secondary);
+    background: var(--bg-elevated);
     color: var(--text-primary);
     font-size: 14px;
     font-family: inherit;
@@ -2996,6 +3463,11 @@ textarea.chat-input::placeholder { color: var(--text-muted); }
     padding: 0;
 }
 
+/* ===== [stream D: dashboard — logs] =====
+   Dashboard CSS carried no ownership banner after the foundation phase; the
+   Logs / Evolution / Costs / Updates / Activity rules below (and the second
+   dashboard band further down) belong to the same stream as the Skills /
+   Settings / Widgets region at the bottom of this file. */
 .logs-filters {
     display: flex;
     flex-wrap: wrap;
@@ -3009,97 +3481,137 @@ textarea.chat-input::placeholder { color: var(--text-muted); }
 }
 
 .filter-chip {
-    padding: 4px 12px;
-    border-radius: var(--radius-lg);
-    border: 1px solid var(--divider);
+    padding: 4px 10px;
+    border-radius: var(--radius-6);
+    border: 1px solid var(--surface-border);
     background: transparent;
     color: var(--text-secondary);
-    font-size: 12px;
-    font-family: inherit;
+    font-size: 11.5px;
+    font-family: var(--font-mono);
     cursor: pointer;
-    transition: all 0.15s;
+    transition: color 0.15s ease, border-color 0.15s ease, background 0.15s ease;
 }
 
+/* Most filters are on by default, so "on" is a calm tinted chip, not six loud
+   red pills: the accent only tints the surface, the label stays neutral. */
 .filter-chip.active {
-    border-color: var(--accent);
-    color: var(--accent);
-    background: var(--accent-dim);
+    border-color: var(--accent-18);
+    color: var(--text-primary);
+    background: var(--accent-08);
 }
 
+/* Log stream: a mono log, not a stack of cards. Rows are flat lines on the page
+   background with fixed time/type columns (so the columns line up down the
+   stream) and a hover tint; only the grouped task card keeps a marker. */
 #log-entries {
     flex: 1;
     overflow-y: auto;
-    padding: 12px;
-    font-family: 'SF Mono', 'Fira Code', 'Consolas', monospace;
+    padding: 4px 8px 12px;
+    font-family: var(--font-mono);
     font-size: 12px;
-    line-height: 1.55;
-    background: rgba(255, 255, 255, 0.02);
+    line-height: 1.9;
+    background: transparent;
     margin: 0 12px 12px;
-    border-radius: var(--radius-sm);
+    border-radius: 0;
 }
 
 .log-entry {
-    padding: 10px 12px;
-    border-radius: var(--radius-sm);
+    position: relative;
+    padding: 2px 60px 2px 8px;
+    border-radius: var(--radius-6);
     display: flex;
     flex-direction: column;
-    gap: 6px;
-    border: 1px solid rgba(255,255,255,0.04);
-    background: rgba(255,255,255,0.015);
-    margin-bottom: 8px;
+    gap: 4px;
+    border: 1px solid transparent;
+    background: transparent;
+    margin-bottom: 1px;
 }
 
+/* Hover tints the surface only: a `border-color` here would erase the grouped
+   task card's left accent rule (and its accent-04 fill's edge) on hover. */
 .log-entry:hover {
-    background: rgba(255, 255, 255, 0.03);
-    border-color: rgba(255,255,255,0.08);
+    background: var(--surface-control);
 }
 
+/* Real grid, so the time and type columns START at the same x down the whole
+   stream — track 1 is FIXED and track 2 has an 84px FLOOR, so unlike a flex row
+   with `min-width` short values still line up instead of collapsing.
+   Track 2 is `minmax(84px, max-content)` rather than a hard 84px because the
+   type cell is a whole PHRASE on grouped task cards (`task <8 hex>` → `TASK
+   A1B2C3D4`, ~91px uppercased with letter-spacing): a fixed 84px wrapped that
+   NORMAL case onto two lines on every task card, and a bare `CONSCIOUSNESS`
+   (one unwrappable word) overflowed into the phase pill. The floor keeps the
+   common short labels aligned; `white-space: nowrap` below keeps the long ones
+   on one line, at the cost of those rows pushing their own phase pill right.
+   Every child is placed EXPLICITLY: task-timeline rows omit `.log-type`, and an
+   implicitly-flowed grid would slide their phase pill into the type column.
+   Honest limit: each row is its own grid (there is no shared parent to subgrid
+   against), so the intrinsically-sized phase track still shifts the headline's
+   start by the pill's own width. Pinning that track to a fixed width instead
+   would truncate the long phase labels (`lifecycle_error`), which is the worse
+   trade — but the wiggle it buys is not "a few px": measured at 1280px over a
+   stream mixing `done` / `working` / `lifecycle_error`, the headline start
+   spreads ~80px. */
 .log-main {
-    display: flex;
+    display: grid;
+    grid-template-columns: minmax(62px, max-content) minmax(84px, max-content) auto minmax(0, 1fr) auto;
     gap: 8px;
     align-items: baseline;
-    flex-wrap: wrap;
 }
 
+.log-main > .log-ts { grid-column: 1; }
+.log-main > .log-type { grid-column: 2; }
+.log-main > .log-phase { grid-column: 3; }
+.log-main > .log-headline { grid-column: 4; }
+.log-main > .log-repeat { grid-column: 5; }
+
+/* Column widths belong to the grid above; these rules carry type only. */
 .log-entry .log-ts {
     color: var(--text-muted);
-    flex-shrink: 0;
+    font-variant-numeric: tabular-nums;
+    /* `normalizeLogTs` prepends the DATE for anything not from today ("Aug 2, 2026,
+       15:02:00"), which is most of a real stream the moment it crosses midnight. A
+       fixed 62px track sized for `HH:MM:SS` wrapped exactly those rows onto three
+       lines. Same trade the type column above already takes: nowrap plus a
+       max-content ceiling, so today's rows stay aligned at the 62px floor and a
+       dated row widens only itself. */
+    white-space: nowrap;
 }
 
 .log-entry .log-type {
-    font-weight: 700;
-    flex-shrink: 0;
-    min-width: 78px;
+    font-weight: 600;
     text-transform: uppercase;
-    letter-spacing: 0.03em;
-    font-size: 11px;
+    letter-spacing: 0.04em;
+    font-size: 10.5px;
+    /* `TASK A1B2C3D4` is one label, not two words to break apart. */
+    white-space: nowrap;
 }
 
 .log-entry .log-phase {
-    padding: 1px 8px;
-    border-radius: 999px;
-    font-size: 11px;
-    border: 1px solid rgba(255,255,255,0.08);
+    padding: 0 7px;
+    border-radius: var(--pill-radius);
+    font-size: 10.5px;
+    border: 1px solid var(--surface-border);
     color: var(--text-secondary);
-    background: rgba(255,255,255,0.04);
+    background: var(--surface-control);
 }
 
 .log-entry .log-phase:is(.start, .calling, .context, .progress, .thought, .boot, .working, .thinking) {
-    color: rgba(248, 130, 140, 0.95);
+    color: var(--accent-light);
     border-color: var(--accent-25);
     background: var(--accent-10);
 }
 
 .log-entry .log-headline {
     color: var(--text-primary);
-    font-weight: 600;
+    font-weight: 500;
     word-break: break-word;
 }
 
 .log-entry .log-repeat {
-    margin-left: auto;
+    justify-self: end;
     color: var(--text-muted);
-    font-size: 11px;
+    font-size: 10.5px;
 }
 
 .log-meta {
@@ -3111,12 +3623,12 @@ textarea.chat-input::placeholder { color: var(--text-muted); }
 .log-pill {
     display: inline-flex;
     align-items: center;
-    padding: 1px 8px;
-    border-radius: 999px;
-    background: rgba(255,255,255,0.05);
+    padding: 0 7px;
+    border-radius: var(--pill-radius);
+    background: var(--surface-control);
     color: var(--text-secondary);
-    border: 1px solid rgba(255,255,255,0.05);
-    font-size: 11px;
+    border: 1px solid var(--surface-border-soft);
+    font-size: 10.5px;
 }
 
 .log-body {
@@ -3126,48 +3638,61 @@ textarea.chat-input::placeholder { color: var(--text-muted); }
 }
 
 .log-actions {
+    position: absolute;
+    top: 2px;
+    right: 8px;
     display: flex;
     justify-content: flex-end;
 }
 
 .log-raw-toggle {
-    border: 1px solid rgba(255,255,255,0.08);
+    border: 1px solid transparent;
     background: transparent;
     color: var(--text-muted);
-    border-radius: 6px;
-    padding: 3px 8px;
-    font-size: 11px;
+    border-radius: var(--radius-6);
+    padding: 1px 8px;
+    font-family: var(--font-mono);
+    font-size: 10.5px;
     cursor: pointer;
 }
 
-.log-raw-toggle:hover {
+.log-raw-toggle:hover,
+.log-raw-toggle:focus-visible {
     color: var(--text-primary);
-    border-color: rgba(255,255,255,0.14);
+    border-color: var(--surface-border);
 }
 
 .log-raw {
     margin: 0;
     padding: 10px;
-    border-radius: var(--radius-sm);
-    background: rgba(0, 0, 0, 0.25);
+    border-radius: var(--radius-6);
+    border: 1px solid var(--divider);
+    background: var(--bg-primary);
     color: var(--text-secondary);
     overflow-x: auto;
     white-space: pre-wrap;
     word-break: break-word;
 }
 
-.log-type.tools { color: var(--blue); }
-.log-type.llm { color: var(--accent); }
+/* Event-type hues come from the ROLE palette (docs/DEVELOPMENT.md "Roles"):
+   task lane = the red task accent, LLM rounds = the owner-blue lane, background
+   consciousness + review notices = amber, tools/system = muted. The per-event
+   outcome (start / done / error) is carried by the phase pill above, which is
+   where the design handoff's task_start → accent-light and task_done → green
+   live — so a row never needs a JS-side hex. */
+.log-type.tools { color: var(--text-muted); }
+.log-type.llm { color: var(--user); }
 .log-type.errors { color: var(--red); }
-.log-type.tasks { color: var(--amber); }
+.log-type.tasks { color: var(--accent-light); }
 .log-type.system { color: var(--text-muted); }
-.log-type.consciousness { color: #d68cff; }
+.log-type.consciousness { color: var(--amber); }
 
 .log-task-card {
-    border-color: var(--accent-12);
-    background:
-        linear-gradient(135deg, rgba(201, 53, 69, 0.07), rgba(255,255,255,0.01)),
-        rgba(255,255,255,0.015);
+    border-color: transparent;
+    border-left: 2px solid var(--accent-25);
+    border-radius: 0 var(--radius-6) var(--radius-6) 0;
+    padding-left: 10px;
+    background: var(--accent-04);
 }
 
 .log-task-summary {
@@ -3179,20 +3704,20 @@ textarea.chat-input::placeholder { color: var(--text-muted); }
 .log-task-review {
     margin-top: 8px;
     padding: 8px 10px;
-    border: 1px solid rgba(255,255,255,0.06);
-    border-radius: var(--radius-sm);
-    background: rgba(0,0,0,0.14);
+    border: 1px solid var(--surface-border-soft);
+    border-radius: var(--radius-6);
+    background: var(--bg-primary);
 }
 
 .log-task-details {
-    border-top: 1px solid rgba(255,255,255,0.05);
-    padding-top: 8px;
+    border-top: 1px solid var(--divider);
+    padding-top: 6px;
 }
 
 .log-task-details summary {
     cursor: pointer;
     color: var(--text-secondary);
-    font-size: 11px;
+    font-size: 10.5px;
     user-select: none;
 }
 
@@ -3204,14 +3729,68 @@ textarea.chat-input::placeholder { color: var(--text-muted); }
 }
 
 .log-task-event {
-    padding: 8px 10px;
-    border-radius: var(--radius-sm);
-    background: rgba(0, 0, 0, 0.16);
-    border: 1px solid rgba(255,255,255,0.04);
+    position: relative;
+    padding: 4px 60px 4px 8px;
+    border-radius: var(--radius-6);
+    background: var(--surface-card-soft);
+    border: 1px solid var(--surface-border-soft);
     display: flex;
     flex-direction: column;
-    gap: 6px;
+    gap: 4px;
 }
+
+/* ===== [shared: status tone ladder] =====
+   ONE place decides what "this finished", "this needs attention" and "this failed"
+   look like on a small status pill, for every surface that shows one: the chat's
+   turn/activity phase pills (chat region), the Logs grid's phase column (dashboard
+   region) and the Evolution runtime pills. The tones were a chat-region block that
+   the dashboard's selectors had quietly joined — one owner's region deciding
+   another's colours — so they are hoisted here instead, and neither region has to
+   reach into the other to keep a status readable.
+
+   Each rule is at least two classes, so it outranks the per-surface pill BASES
+   (`.log-entry .log-phase`, `.evo-runtime-pill`) on specificity and never on where
+   this region happens to sit in the file. Phase-name lists differ per surface
+   because the event vocabularies differ; the three tones do not.
+
+   The `.start/.calling/.progress` ACCENT tone stays with each surface: it is the
+   design's "work is happening" colour, and each region tunes its own alpha. */
+
+.chat-live-phase:is(.done, .ready, .ok, .result, .usage, .metrics),
+.chat-live-line-phase:is(.done, .ready, .ok, .result, .usage, .metrics),
+.log-entry .log-phase:is(.done, .ready, .ok, .result, .usage, .metrics),
+.evo-runtime-pill.online {
+    color: var(--green);
+    border-color: rgba(34, 197, 94, 0.22);
+    background: rgba(34, 197, 94, 0.10);
+}
+
+.chat-live-phase:is(.warn, .alive, .empty, .cancelled),
+.chat-live-line-phase:is(.warn, .alive, .empty, .cancelled),
+.log-entry .log-phase:is(.warn, .alive, .empty, .cancelled),
+.evo-runtime-pill.starting {
+    color: var(--amber);
+    border-color: rgba(245, 158, 11, 0.25);
+    background: rgba(245, 158, 11, 0.10);
+}
+
+.chat-live-phase:is(.error, .timeout, .lifecycle_error),
+.chat-live-line-phase:is(.error, .timeout, .lifecycle_error),
+.log-entry .log-phase:is(.error, .timeout, .lifecycle_error),
+.evo-runtime-pill.error {
+    color: var(--red);
+    border-color: rgba(239, 68, 68, 0.25);
+    background: rgba(239, 68, 68, 0.10);
+}
+
+/* The fourth runtime state: an idle/disabled lane is deliberately toneless gray,
+   which is why it is a colour DECISION worth sitting beside the other three
+   rather than a leftover in the evolution card. */
+.evo-runtime-pill.offline {
+    color: var(--text-muted);
+}
+
+/* ===== [shared: scrollbars + reconnect overlay] ===== */
 
 ::-webkit-scrollbar { width: 6px; }
 ::-webkit-scrollbar-track { background: transparent; }
@@ -3243,41 +3822,53 @@ textarea.chat-input::placeholder { color: var(--text-muted); }
 }
 @keyframes spin { to { transform: rotate(360deg); } }
 
+/* ===== [stream D: dashboard — cost tables, evolution, costs, updates, activity] =====
+   `.btn-sm` / `.btn-xs` below are SHARED button sizes (every page uses them);
+   they live here only because that is where they were defined. */
+
 .cost-table {
     width: 100%;
     border-collapse: collapse;
-    font-size: 13px;
+    font-size: 12px;
+    font-family: var(--font-mono);
 }
 .cost-table th {
     text-align: left;
-    font-weight: 500;
+    font-weight: 600;
     color: var(--text-muted);
-    font-size: 11px;
+    font-size: 10.5px;
+    text-transform: uppercase;
+    letter-spacing: 0.06em;
     padding: 4px 8px;
     border-bottom: 1px solid var(--divider);
 }
 .cost-table td {
     padding: 5px 8px;
-    border-bottom: 1px solid rgba(255,255,255,0.04);
+    border-bottom: 1px solid var(--surface-border-soft);
     color: var(--text-secondary);
+    font-variant-numeric: tabular-nums;
 }
 .cost-table tbody tr:hover td {
-    background: rgba(255,255,255,0.03);
+    background: var(--surface-card);
 }
 
 /* Settings LAN reachability hint. */
 .settings-lan-hint {
     margin-top: 8px;
     padding: 8px 12px;
-    border-radius: var(--radius-sm);
-    font-size: 0.84em;
-    background: rgba(255,255,255,0.04);
-    border: 1px solid rgba(255,255,255,0.08);
-    color: var(--text-secondary, rgba(255,255,255,0.65));
+    border-radius: var(--radius-6);
+    font-size: 12px;
+    line-height: 1.5;
+    background: var(--surface-control);
+    border: 1px solid var(--surface-border);
+    color: var(--text-secondary);
 }
-.settings-lan-hint[data-tone="ok"] { border-color: rgba(100,200,100,0.25); }
-.settings-lan-hint[data-tone="warn"] { border-color: rgba(220,180,50,0.35); }
-.settings-lan-hint[data-tone="info"] { border-color: rgba(100,150,220,0.25); }
+/* A hint is a hint: the tinted 1px edge uses the dim ladder, matching the
+   toasts and `.marketplace-state-*`, so a full-strength role hue never fences a
+   paragraph of body copy. (`info` has no dim step, so it keeps the role token.) */
+.settings-lan-hint[data-tone="ok"] { border-color: var(--green-dim); }
+.settings-lan-hint[data-tone="warn"] { border-color: var(--amber-dim); }
+.settings-lan-hint[data-tone="info"] { border-color: var(--accent-user); }
 .settings-lan-hint a { color: inherit; text-decoration: underline; opacity: 0.9; }
 .btn-sm {
     padding: calc(var(--button-padding-y) - 4px) calc(var(--button-padding-x) - 4px);
@@ -3300,17 +3891,13 @@ textarea.chat-input::placeholder { color: var(--text-muted); }
 
 .evo-runtime-card,
 .evo-chart-wrap {
-    background:
-        linear-gradient(180deg, var(--accent-05), rgba(255, 255, 255, 0.02)),
-        rgba(255, 255, 255, 0.02);
-    border: 1px solid var(--accent-12);
-    border-radius: var(--radius-lg);
-    box-shadow: 0 14px 36px rgba(0, 0, 0, 0.18);
-    backdrop-filter: blur(14px);
+    background: var(--bg-elevated);
+    border: 1px solid var(--surface-border);
+    border-radius: var(--radius);
 }
 
 .evo-runtime-card {
-    padding: 16px 18px;
+    padding: var(--space-4);
     display: flex;
     flex-direction: column;
     gap: 12px;
@@ -3326,7 +3913,8 @@ textarea.chat-input::placeholder { color: var(--text-muted); }
 
 .evo-runtime-detail {
     color: var(--text-secondary);
-    line-height: 1.6;
+    font-size: 12px;
+    line-height: 1.55;
     max-width: 880px;
 }
 
@@ -3344,16 +3932,24 @@ textarea.chat-input::placeholder { color: var(--text-muted); }
 
 .evo-runtime-pill,
 .evo-runtime-chip {
-    padding: 6px 10px;
-    border: 1px solid rgba(255, 255, 255, 0.08);
-    background: rgba(255, 255, 255, 0.04);
+    padding: 5px 10px;
+    border: 1px solid var(--surface-border);
+    background: var(--surface-control);
     color: var(--text-secondary);
-    font-size: 12px;
+    font-size: 11.5px;
+}
+
+/* The runtime pill's four states live together in the `[shared: status tone
+   ladder]` region — this card owns the pill's SHAPE, not its tones. */
+
+.evo-runtime-chip {
+    font-family: var(--font-mono);
+    font-size: 11px;
 }
 
 .evo-runtime-chip strong {
     font-weight: 600;
-    color: var(--text-primary);
+    color: var(--text-secondary);
 }
 
 .evo-chart-wrap {
@@ -3374,10 +3970,11 @@ textarea.chat-input::placeholder { color: var(--text-muted); }
 
 .evo-empty {
     padding: 18px;
-    border-radius: 14px;
-    border: 1px dashed rgba(255, 255, 255, 0.12);
-    background: rgba(255, 255, 255, 0.03);
+    border-radius: var(--radius);
+    border: 1px dashed var(--surface-border);
+    background: var(--surface-card);
     color: var(--text-secondary);
+    font-size: 13px;
     line-height: 1.6;
 }
 
@@ -3418,11 +4015,10 @@ textarea.chat-input::placeholder { color: var(--text-muted); }
 
 .costs-scroll { overflow-y: auto; flex: 1; padding: 16px 20px; }
 .costs-budget-card {
-    backdrop-filter: blur(12px);
-    padding: 20px 24px;
+    padding: var(--space-4) var(--space-5);
     margin-bottom: 20px;
 }
-.costs-budget-title { font-size: 15px; font-weight: 600; margin: 0; color: var(--text-primary); }
+.costs-budget-title { font-size: 14px; font-weight: 600; margin: 0; color: var(--text-primary); }
 /* Budget card head row hosts title plus embedded Refresh. */
 .costs-budget-head { display: flex; align-items: center; justify-content: space-between; gap: 12px; margin-bottom: 16px; }
 .costs-budget-refresh { flex: 0 0 auto; }
@@ -3441,13 +4037,29 @@ textarea.chat-input::placeholder { color: var(--text-muted); }
     grid-template-columns: 1fr 1fr;
     gap: 20px;
 }
-.costs-table-label { font-size: 14px; color: var(--text-secondary); margin: 0 0 8px; }
+.costs-table-label {
+    font-size: 10.5px;
+    font-weight: 600;
+    text-transform: uppercase;
+    letter-spacing: 0.06em;
+    color: var(--text-muted);
+    margin: 0 0 8px;
+}
 .cost-cell-name { font-size: 12px; max-width: 160px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .cost-cell-right { text-align: right; }
 .cost-top-model { font-size: 12px; }
-.cost-bar-cell { width: 60px; }
-.cost-bar { width: 60px; height: 6px; border: 0; border-radius: var(--radius-xs); overflow: hidden; opacity: 0.7; }
-.cost-bar::-webkit-progress-bar { background: rgba(255, 255, 255, 0.08); }
+/* Share-of-total bar: a thin flat accent rule inside the row, no gloss. */
+.cost-bar-cell { width: 72px; }
+.cost-bar {
+    display: block;
+    width: 72px;
+    height: 6px;
+    border: 0;
+    border-radius: var(--radius-xs);
+    overflow: hidden;
+    background: var(--bg-hover);
+}
+.cost-bar::-webkit-progress-bar { background: var(--bg-hover); }
 .cost-bar::-webkit-progress-value { background: var(--accent); }
 .cost-bar::-moz-progress-bar { background: var(--accent); }
 .cost-empty-cell { color: var(--text-muted); text-align: center; }
@@ -3463,8 +4075,7 @@ textarea.chat-input::placeholder { color: var(--text-muted); }
 }
 
 .updates-card {
-    backdrop-filter: blur(12px);
-    padding: 18px;
+    padding: var(--space-4);
 }
 
 .updates-card-head {
@@ -3489,7 +4100,8 @@ textarea.chat-input::placeholder { color: var(--text-muted); }
 
 .updates-summary {
     color: var(--text-secondary);
-    line-height: 1.55;
+    font-size: 12px;
+    line-height: 1.5;
     overflow-wrap: break-word;
     word-break: normal;
 }
@@ -3514,8 +4126,6 @@ textarea.chat-input::placeholder { color: var(--text-muted); }
     padding: 0 20px 18px;
     overflow: hidden;
 }
-
-/* Dashboard tabs inherit shared .app-tab* styling. */
 
 .dashboard-panels,
 .dashboard-panel {
@@ -3556,11 +4166,11 @@ textarea.chat-input::placeholder { color: var(--text-muted); }
 
 .activity-h {
     margin: 0 0 8px;
-    font-size: 13px;
+    font-size: 10.5px;
     font-weight: 600;
-    color: rgba(226, 232, 240, 0.78);
+    color: var(--text-muted);
     text-transform: uppercase;
-    letter-spacing: 0.04em;
+    letter-spacing: 0.06em;
 }
 
 .activity-row {
@@ -3569,10 +4179,10 @@ textarea.chat-input::placeholder { color: var(--text-muted); }
     justify-content: space-between;
     gap: 12px;
     padding: 9px 12px;
-    border: 1px solid rgba(255, 255, 255, 0.07);
-    border-radius: 8px;
+    border: 1px solid var(--divider);
+    border-radius: var(--radius-sm);
     margin-bottom: 6px;
-    background: rgba(255, 255, 255, 0.02);
+    background: var(--bg-elevated);
 }
 
 .activity-row.off {
@@ -3586,16 +4196,17 @@ textarea.chat-input::placeholder { color: var(--text-muted); }
 }
 
 .activity-name {
-    font-size: 13px;
-    color: rgba(239, 246, 255, 0.9);
+    font-family: var(--font-mono);
+    font-size: 12.5px;
+    color: var(--text-primary);
     white-space: nowrap;
     overflow: hidden;
     text-overflow: ellipsis;
 }
 
 .activity-sub {
-    font-size: 12px;
-    color: rgba(148, 163, 184, 0.85);
+    font-size: 11.5px;
+    color: var(--text-secondary);
     white-space: nowrap;
     overflow: hidden;
     text-overflow: ellipsis;
@@ -3609,42 +4220,48 @@ textarea.chat-input::placeholder { color: var(--text-muted); }
 }
 
 .activity-tag {
-    font-size: 11px;
-    color: rgba(148, 163, 184, 0.8);
-    font-style: italic;
+    font-size: 10.5px;
+    color: var(--text-muted);
 }
 
 .activity-empty,
 .activity-loading {
-    font-size: 13px;
-    color: rgba(148, 163, 184, 0.75);
+    font-size: 12px;
+    color: var(--text-muted);
     padding: 8px 2px;
 }
 
 /* P2: main-screen Update pill + staged choice dialog. */
+/* An available update is a NOTICE, not an error: the amber notice tone (role
+   token --accent-system), off the status ladder. The `--system-*` tokens are the
+   VOICES family — the system speaker's bubble and sender name — and a chrome pill
+   is not a speaker, so they do not belong here. The old sky-blue literals
+   belonged to the retired palette. */
 .update-pill {
     display: inline-flex;
     align-items: center;
     gap: 6px;
     margin: 6px 8px;
-    padding: 5px 11px;
-    border-radius: 999px;
-    border: 1px solid rgba(56, 189, 248, 0.5);
-    background: rgba(56, 189, 248, 0.14);
-    color: #bae6fd;
-    font-size: 12px;
+    padding: 4px 10px;
+    border-radius: var(--pill-radius);
+    border: 1px solid var(--amber-dim);
+    background: var(--amber-dim);
+    color: var(--accent-system);
+    font-size: 11.5px;
     font-weight: 600;
     cursor: pointer;
 }
 
+/* Hover brightens the EDGE in the same family the resting pill uses; the old
+   hover swapped families (Voices surface → status tint) for a 0.03 alpha step. */
 .update-pill:hover {
-    background: rgba(56, 189, 248, 0.22);
+    border-color: var(--accent-system);
 }
 
 .update-pill.has-local {
-    border-color: rgba(251, 191, 36, 0.55);
-    background: rgba(251, 191, 36, 0.14);
-    color: #fde68a;
+    border-color: var(--accent-25);
+    background: var(--accent-12);
+    color: var(--accent-chip-text);
 }
 
 .update-dialog-overlay {
@@ -3654,28 +4271,28 @@ textarea.chat-input::placeholder { color: var(--text-muted); }
     display: flex;
     align-items: center;
     justify-content: center;
-    background: rgba(2, 6, 23, 0.6);
+    background: rgba(0, 0, 0, 0.55);
 }
 
 .update-dialog {
     width: min(560px, calc(100vw - 32px));
     max-height: calc(100vh - 64px);
     overflow-y: auto;
-    background: #0f172a;
-    border: 1px solid rgba(255, 255, 255, 0.1);
-    border-radius: 12px;
+    background: var(--ui-modal-bg);
+    border: 1px solid var(--surface-border);
+    border-radius: var(--radius);
     padding: 20px;
-    color: rgba(226, 232, 240, 0.92);
+    color: var(--text-primary);
 }
 
 .update-dialog-title {
     margin: 0 0 6px;
-    font-size: 16px;
+    font-size: 15px;
 }
 
 .update-dialog-meta {
-    font-size: 13px;
-    color: rgba(148, 163, 184, 0.9);
+    font-size: 12px;
+    color: var(--text-secondary);
     margin-bottom: 10px;
 }
 
@@ -3684,13 +4301,14 @@ textarea.chat-input::placeholder { color: var(--text-muted); }
     padding-left: 18px;
     max-height: 180px;
     overflow-y: auto;
-    font-size: 12px;
-    color: rgba(226, 232, 240, 0.78);
+    font-family: var(--font-mono);
+    font-size: 11.5px;
+    color: var(--text-secondary);
 }
 
 .update-dialog-note {
     font-size: 12px;
-    color: rgba(148, 163, 184, 0.85);
+    color: var(--text-muted);
     margin-bottom: 14px;
     line-height: 1.5;
 }
@@ -3703,8 +4321,8 @@ textarea.chat-input::placeholder { color: var(--text-muted); }
 
 .update-dialog-status {
     margin-top: 12px;
-    font-size: 13px;
-    color: rgba(148, 163, 184, 0.95);
+    font-size: 12px;
+    color: var(--text-secondary);
 }
 
 .settings-embedded-content {
@@ -3747,10 +4365,18 @@ textarea.chat-input::placeholder { color: var(--text-muted); }
     overflow-y: auto;
 }
 
+/* A version row is a ROW: these reuse .log-entry (a column) for the mono row
+   look, so the direction and the log stream's right gutter are reset here. */
 .evo-versions-row {
     display: flex;
+    flex-direction: row;
+    flex-wrap: wrap;
     align-items: center;
     gap: 8px;
+    padding-right: var(--space-2);
+    font-family: var(--font-mono);
+    font-size: 12px;
+    line-height: 1.7;
 }
 
 .evo-versions-row-label {
@@ -3758,8 +4384,12 @@ textarea.chat-input::placeholder { color: var(--text-muted); }
     text-align: center;
 }
 
+/* In the narrow three-column recovery lists the message gets its own line under
+   the sha + date pair instead of being squeezed into a 60px column. */
 .evo-versions-row-msg {
-    flex: 1;
+    flex: 1 1 100%;
+    min-width: 0;
+    color: var(--text-secondary);
 }
 
 .btn-xs {
@@ -3771,6 +4401,12 @@ textarea.chat-input::placeholder { color: var(--text-muted); }
 .evo-empty-error {
     color: var(--red);
 }
+
+/* ===== [stream D: dashboard, skills, settings, widgets] =====
+   The `.toast-stack` / `.toast` / `.toast-*` rules further down are SHARED
+   notification chrome — chat, activity, settings, skills and updates all call
+   `web/modules/toast.js` — and they live inside this band only because that is
+   where they were defined. Restyle them as app chrome, not as a Settings detail. */
 
 /* Skills page. */
 #page-skills,
@@ -3804,8 +4440,12 @@ textarea.chat-input::placeholder { color: var(--text-muted); }
     gap: 12px;
 }
 
+/* Skill card (design handoff §8): a flat elevated card, radius 12, padding 16.
+   The name is mono because it is an identifier; the description is calm 12px
+   secondary text; the meta line under it is a 10.5px muted footnote. */
 .skills-card {
-    padding: 16px 18px;
+    padding: var(--space-4);
+    background: var(--bg-elevated);
     display: flex;
     flex-direction: column;
     gap: 12px;
@@ -3825,21 +4465,23 @@ textarea.chat-input::placeholder { color: var(--text-muted); }
 
 .skills-card-title h3 {
     margin: 0;
-    font-size: 16px;
+    font-family: var(--font-mono);
+    font-size: 13px;
     font-weight: 600;
-    letter-spacing: -0.01em;
+    letter-spacing: 0;
 }
 
 .skills-card-desc {
-    margin: 4px 0 0;
-    color: rgba(250, 250, 250, 0.65);
-    font-size: 13px;
-    line-height: 1.45;
+    margin: 6px 0 0;
+    color: var(--text-secondary);
+    font-size: 12px;
+    line-height: 1.5;
 }
 
 .skills-card-installed {
-    margin-top: 5px;
-    font-size: 11.5px;
+    margin-top: 6px;
+    font-size: 10.5px;
+    color: var(--text-muted);
 }
 
 .skills-card-toggle {
@@ -3853,10 +4495,10 @@ textarea.chat-input::placeholder { color: var(--text-muted); }
 }
 
 .skills-status-chip {
-    padding: 4px 10px;
-    font-size: 12px;
-    font-weight: 500;
-    letter-spacing: 0.01em;
+    padding: 3px 9px;
+    font-size: 10.5px;
+    font-weight: 600;
+    letter-spacing: 0.02em;
     border: 1px solid transparent;
 }
 
@@ -3870,28 +4512,29 @@ textarea.chat-input::placeholder { color: var(--text-muted); }
     filter: brightness(1.12);
 }
 
+/* Status pills reuse the ONE tone system (ok / warn / danger / muted). */
 .skills-status-ok {
-    background: rgba(34, 197, 94, 0.12);
-    color: #4ade80;
-    border-color: rgba(34, 197, 94, 0.3);
+    background: var(--green-dim);
+    color: var(--tone-ok);
+    border-color: var(--green-dim);
 }
 
 .skills-status-warn {
-    background: rgba(245, 158, 11, 0.12);
-    color: #fbbf24;
-    border-color: rgba(245, 158, 11, 0.3);
+    background: var(--amber-dim);
+    color: var(--tone-warn);
+    border-color: var(--amber-dim);
 }
 
 .skills-status-danger {
-    background: rgba(239, 68, 68, 0.12);
-    color: #f87171;
-    border-color: rgba(239, 68, 68, 0.3);
+    background: var(--red-dim);
+    color: var(--tone-danger);
+    border-color: var(--red-dim);
 }
 
 .skills-status-muted {
-    background: rgba(250, 250, 250, 0.06);
-    color: rgba(250, 250, 250, 0.65);
-    border-color: rgba(250, 250, 250, 0.12);
+    background: var(--surface-control);
+    color: var(--text-secondary);
+    border-color: var(--surface-border);
 }
 
 .skills-switch {
@@ -3917,8 +4560,8 @@ textarea.chat-input::placeholder { color: var(--text-muted); }
     display: inline-block;
     width: 40px;
     height: 22px;
-    border-radius: 999px;
-    background: rgba(250, 250, 250, 0.12);
+    border-radius: var(--pill-radius);
+    background: var(--bg-hover);
     transition: background 120ms ease;
 }
 
@@ -3929,13 +4572,13 @@ textarea.chat-input::placeholder { color: var(--text-muted); }
     width: 18px;
     height: 18px;
     border-radius: 50%;
-    background: #f8fafc;
+    background: var(--text-primary);
     box-shadow: 0 1px 3px rgba(0, 0, 0, 0.4);
     transition: transform 140ms ease, background 120ms ease;
 }
 
 .skills-switch input:checked + .skills-switch-track {
-    background: #22c55e;
+    background: var(--green);
 }
 
 .skills-switch input:checked + .skills-switch-track .skills-switch-thumb {
@@ -3943,7 +4586,7 @@ textarea.chat-input::placeholder { color: var(--text-muted); }
 }
 
 .skills-switch input:focus-visible + .skills-switch-track {
-    outline: 2px solid rgba(34, 197, 94, 0.6);
+    outline: 2px solid var(--green);
     outline-offset: 2px;
 }
 
@@ -3954,19 +4597,19 @@ textarea.chat-input::placeholder { color: var(--text-muted); }
 
 .skills-switch.is-locked .skills-switch-track,
 .skills-switch input:disabled + .skills-switch-track {
-    background: rgba(245, 158, 11, 0.18);
+    background: var(--amber-dim);
     opacity: 0.7;
 }
 
 .skills-switch.is-locked .skills-switch-thumb,
 .skills-switch input:disabled + .skills-switch-track .skills-switch-thumb {
-    background: rgba(245, 158, 11, 0.85);
+    background: var(--amber);
 }
 
 /* Inline hint for switches locked by review/grants. */
 .skills-lock-hint {
-    font-size: 12px;
-    color: #fbbf24;
+    font-size: 11.5px;
+    color: var(--amber);
     margin-left: 2px;
     display: flex;
     align-items: center;
@@ -3993,20 +4636,20 @@ textarea.chat-input::placeholder { color: var(--text-muted); }
     align-items: center;
     gap: 8px;
     align-self: flex-start;
-    padding: 6px 10px;
-    border-radius: 999px;
-    border: 1px solid rgba(201, 53, 69, 0.24);
+    padding: 5px 10px;
+    border-radius: var(--pill-radius);
+    border: 1px solid var(--accent-25);
     background: var(--accent-08);
-    color: rgba(255, 220, 226, 0.86);
-    font-size: 12px;
+    color: var(--accent-chip-text);
+    font-size: 11.5px;
 }
 
 .skills-review-spinner {
     width: 10px;
     height: 10px;
     border-radius: 50%;
-    border: 2px solid rgba(255, 220, 226, 0.24);
-    border-top-color: rgba(255, 220, 226, 0.9);
+    border: 2px solid var(--accent-25);
+    border-top-color: var(--accent-chip-text);
     animation: skills-review-spin 900ms linear infinite;
 }
 
@@ -4022,31 +4665,32 @@ textarea.chat-input::placeholder { color: var(--text-muted); }
     height: 10px;
     margin-left: 8px;
     border-radius: 50%;
-    border: 2px solid rgba(250, 250, 250, 0.25);
-    border-top-color: rgba(250, 250, 250, 0.9);
+    border: 2px solid var(--surface-border);
+    border-top-color: var(--text-secondary);
     animation: skills-review-spin 900ms linear infinite;
     vertical-align: -1px;
 }
 
 .skills-access {
-    border: 1px solid rgba(250, 250, 250, 0.1);
-    border-radius: var(--radius-md);
+    border: 1px solid var(--surface-border);
+    border-radius: var(--radius-sm);
     padding: 10px 12px;
-    background: rgba(255, 255, 255, 0.02);
+    background: var(--surface-card-soft);
     display: flex;
     flex-direction: column;
     gap: 6px;
-    font-size: 13px;
+    font-size: 12px;
 }
 
+/* Grant panels stay on the neutral card surface; only the edge carries the tone,
+   off the dim ladder (a full-strength role hue around a whole panel fought the
+   flat grays — same calm-down as `.marketplace-state-*`). */
 .skills-access-warn {
-    border-color: rgba(245, 158, 11, 0.35);
-    background: rgba(245, 158, 11, 0.06);
+    border-color: var(--amber-dim);
 }
 
 .skills-access-ok {
-    border-color: rgba(34, 197, 94, 0.3);
-    background: rgba(34, 197, 94, 0.05);
+    border-color: var(--green-dim);
 }
 
 .skills-access-row {
@@ -4057,15 +4701,15 @@ textarea.chat-input::placeholder { color: var(--text-muted); }
 }
 
 .skills-access-label {
-    color: rgba(250, 250, 250, 0.5);
-    font-size: 12px;
+    color: var(--text-muted);
+    font-size: 10.5px;
     text-transform: uppercase;
-    letter-spacing: 0.05em;
+    letter-spacing: 0.06em;
     margin-right: 4px;
 }
 
 .skills-access-status {
-    color: rgba(250, 250, 250, 0.85);
+    color: var(--text-secondary);
 }
 
 .skills-access-actions {
@@ -4074,22 +4718,23 @@ textarea.chat-input::placeholder { color: var(--text-muted); }
 
 .skills-access code {
     padding: 1px 6px;
-    border-radius: 4px;
-    background: rgba(255, 255, 255, 0.06);
-    font-size: 11.5px;
+    border-radius: var(--radius-4);
+    background: var(--bg-card);
+    font-family: var(--font-mono);
+    font-size: 11px;
 }
 
 .skills-details {
     margin-top: 4px;
-    border-top: 1px solid rgba(250, 250, 250, 0.06);
+    border-top: 1px solid var(--divider);
     padding-top: 10px;
 }
 
 .skills-details > summary {
     cursor: pointer;
     user-select: none;
-    color: rgba(250, 250, 250, 0.55);
-    font-size: 12px;
+    color: var(--text-secondary);
+    font-size: 11.5px;
     list-style: none;
     display: inline-flex;
     align-items: center;
@@ -4116,24 +4761,25 @@ textarea.chat-input::placeholder { color: var(--text-muted); }
     flex-wrap: wrap;
     gap: 6px;
     align-items: baseline;
-    font-size: 12.5px;
-    color: rgba(250, 250, 250, 0.7);
+    font-size: 12px;
+    color: var(--text-secondary);
     padding: 4px 0;
 }
 
 .skills-detail-label {
-    color: rgba(250, 250, 250, 0.5);
-    font-size: 11.5px;
+    color: var(--text-muted);
+    font-size: 10.5px;
     text-transform: uppercase;
-    letter-spacing: 0.05em;
+    letter-spacing: 0.06em;
     min-width: 90px;
 }
 
 .skills-detail-row code {
     padding: 1px 6px;
-    border-radius: 4px;
-    background: rgba(255, 255, 255, 0.05);
-    font-size: 11.5px;
+    border-radius: var(--radius-4);
+    background: var(--surface-control);
+    font-family: var(--font-mono);
+    font-size: 11px;
 }
 
 .skills-card-actions {
@@ -4167,9 +4813,9 @@ textarea.chat-input::placeholder { color: var(--text-muted); }
 .skills-card-menu-trigger {
     width: 32px;
     min-height: 32px;
-    border-radius: var(--radius-sm);
-    border: 1px solid rgba(255, 255, 255, 0.08);
-    background: rgba(255, 255, 255, 0.04);
+    border-radius: var(--radius-7);
+    border: 1px solid var(--surface-border);
+    background: var(--surface-control);
     color: var(--text-secondary);
     display: inline-flex;
     align-items: center;
@@ -4183,7 +4829,7 @@ textarea.chat-input::placeholder { color: var(--text-muted); }
 }
 
 .skills-card-menu-trigger:hover {
-    border-color: rgba(232, 93, 111, 0.30);
+    border-color: rgba(var(--accent-hover-rgb), 0.30);
     color: var(--text-primary);
 }
 
@@ -4196,9 +4842,9 @@ textarea.chat-input::placeholder { color: var(--text-muted); }
     margin: 0;
     min-width: 160px;
     padding: 6px;
-    border-radius: var(--radius);
-    border: 1px solid rgba(255, 255, 255, 0.08);
-    background: rgba(18, 20, 26, 0.96);
+    border-radius: var(--radius-md);
+    border: 1px solid var(--surface-border);
+    background: var(--ui-modal-bg);
     color: var(--text-primary);
     box-shadow: 0 18px 44px rgba(0, 0, 0, 0.32);
     z-index: 50;
@@ -4239,7 +4885,7 @@ textarea.chat-input::placeholder { color: var(--text-muted); }
     display: inline-block;
     margin-left: 6px;
     padding: 1px 8px;
-    border-radius: 999px;
+    border-radius: var(--pill-radius);
     font-size: 10.5px;
     font-weight: 500;
     text-transform: uppercase;
@@ -4249,15 +4895,15 @@ textarea.chat-input::placeholder { color: var(--text-muted); }
 }
 
 .skills-source-warn {
-    background: rgba(245, 158, 11, 0.1);
-    color: #fbbf24;
-    border-color: rgba(245, 158, 11, 0.25);
+    background: var(--amber-dim);
+    color: var(--tone-warn);
+    border-color: var(--amber-dim);
 }
 
 .skills-source-muted {
-    background: rgba(250, 250, 250, 0.05);
-    color: rgba(250, 250, 250, 0.55);
-    border-color: rgba(250, 250, 250, 0.1);
+    background: var(--surface-control);
+    color: var(--text-secondary);
+    border-color: var(--surface-border);
 }
 
 .skills-load-error {
@@ -4268,17 +4914,17 @@ textarea.chat-input::placeholder { color: var(--text-muted); }
 
 .skills-badge {
     padding: 2px 8px;
-    border-radius: var(--radius-xs);
-    font-size: 11px;
-    font-family: 'JetBrains Mono', monospace;
+    border-radius: var(--radius-4);
+    font-size: 10.5px;
+    font-family: var(--font-mono);
     text-transform: uppercase;
-    letter-spacing: 0.5px;
+    letter-spacing: 0.06em;
 }
 
-.skills-badge-ok { background: rgba(34, 197, 94, 0.15); color: #22c55e; }
-.skills-badge-danger { background: rgba(239, 68, 68, 0.15); color: #ef4444; }
-.skills-badge-warn { background: rgba(245, 158, 11, 0.15); color: #f59e0b; }
-.skills-badge-muted { background: rgba(250, 250, 250, 0.06); color: rgba(250, 250, 250, 0.55); }
+.skills-badge-ok { background: var(--green-dim); color: var(--tone-ok); }
+.skills-badge-danger { background: var(--red-dim); color: var(--tone-danger); }
+.skills-badge-warn { background: var(--amber-dim); color: var(--tone-warn); }
+.skills-badge-muted { background: var(--surface-control); color: var(--text-secondary); }
 
 .toast-stack {
     position: fixed;
@@ -4293,15 +4939,16 @@ textarea.chat-input::placeholder { color: var(--text-muted); }
 }
 
 .toast {
+    display: flex;
+    align-items: baseline;
+    gap: 8px;
     max-width: min(420px, calc(100vw - 112px));
     padding: 11px 14px;
-    border-radius: var(--radius);
-    border: 1px solid rgba(255, 255, 255, 0.10);
-    background: rgba(18, 20, 26, 0.94);
+    border-radius: var(--radius-md);
+    border: 1px solid var(--surface-border);
+    background: var(--bg-elevated);
     color: var(--text-primary);
     box-shadow: 0 18px 42px rgba(0, 0, 0, 0.34);
-    backdrop-filter: blur(14px);
-    -webkit-backdrop-filter: blur(14px);
     font-size: 13px;
     line-height: 1.45;
     pointer-events: auto;
@@ -4309,15 +4956,39 @@ textarea.chat-input::placeholder { color: var(--text-muted); }
     animation: toast-in 160ms ease-out;
 }
 
+.toast-text {
+    min-width: 0;
+}
+
 .toast.is-hiding {
     animation: toast-out 160ms ease-in forwards;
 }
 
-.toast-ok { border-color: rgba(34, 197, 94, 0.28); color: #bbf7d0; }
-.toast-danger { border-color: rgba(239, 68, 68, 0.35); color: #fecaca; }
-.toast-warn { border-color: rgba(245, 158, 11, 0.35); color: #fde68a; }
-.toast-muted,
-.toast-info { color: rgba(250, 250, 250, 0.78); }
+/* Tone rides the EDGE and the GLYPH, not the copy: the message keeps `.toast`'s
+   --text-primary so it is read at full contrast, and the tint comes off the dim
+   ladder — the same calm-down as `.marketplace-state-*` below. Saturating a whole
+   sentence in --red / --green made the toast the loudest thing on screen and cost
+   the words their legibility. Because a 0.15-alpha edge is a weak signal on its
+   own, `.toast-glyph` (web/modules/toast.js) carries the tone as a SHAPE too, and
+   that mark is the only element allowed to wear the full-strength role hue. */
+.toast-glyph {
+    flex: 0 0 auto;
+    font-family: var(--font-mono);
+    font-weight: 600;
+    color: var(--text-secondary);
+}
+
+.toast-ok { border-color: var(--green-dim); }
+.toast-danger { border-color: var(--red-dim); }
+.toast-warn { border-color: var(--amber-dim); }
+.toast-ok .toast-glyph { color: var(--tone-ok); }
+.toast-danger .toast-glyph { color: var(--tone-danger); }
+.toast-warn .toast-glyph { color: var(--tone-warn); }
+/* `.toast-info` / `.toast-muted` deliberately carry NO colour rule: they keep
+   `.toast`'s --text-primary. Dimming them to --text-secondary made the neutral
+   toast the least legible one on screen, and neutrality is already signalled by
+   the absence of a `.toast-glyph` (TONE_GLYPHS in web/modules/toast.js only maps
+   ok/warn/danger). */
 
 @keyframes toast-in {
     from { opacity: 0; transform: translateY(8px); }
@@ -4356,25 +5027,25 @@ textarea.chat-input::placeholder { color: var(--text-muted); }
     height: 36px;
     min-height: 36px;
     padding: 6px 10px;
-    border: 1px solid rgba(250, 250, 250, 0.1);
-    background: rgba(255, 255, 255, 0.03);
+    border: 1px solid var(--surface-border);
+    background: var(--surface-card);
     color: inherit;
-    border-radius: 6px;
+    border-radius: var(--radius-6);
     font: inherit;
     font-size: 13px;
 }
 
 .marketplace-search:focus {
     outline: none;
-    border-color: rgba(250, 250, 250, 0.3);
-    background: rgba(255, 255, 255, 0.05);
+    border-color: var(--surface-border);
+    background: var(--bg-card);
 }
 
 .marketplace-checkbox {
     display: inline-flex;
     align-items: center;
     gap: 6px;
-    color: rgba(250, 250, 250, 0.7);
+    color: var(--text-secondary);
     font-size: 13px;
 }
 
@@ -4390,23 +5061,25 @@ textarea.chat-input::placeholder { color: var(--text-muted); }
 }
 
 .marketplace-card {
-    padding: 14px;
+    padding: var(--space-4);
     display: flex;
     flex-direction: column;
     gap: 10px;
 }
 
+/* Long install/adapt/review/deps work pulses the card EDGE in the amber notice
+   tone; the surface stays flat (the old two-stop amber wash predated the flat
+   theme and could not be expressed in tokens). The pulse breathes between the
+   amber dim step and the neutral card edge — a card is not a speaker, so the
+   `--system-*` Voices tokens have no business here. */
 .marketplace-card.is-working {
-    border-color: rgba(245, 158, 11, 0.35);
-    background: linear-gradient(135deg, rgba(245, 158, 11, 0.08), rgba(255, 255, 255, 0.02));
-    /* Pulse during long install/adapt/review/deps work. */
+    border-color: var(--amber-dim);
     animation: marketplace-card-pulse 2.4s ease-in-out infinite;
 }
 
 @keyframes marketplace-card-pulse {
-    0%   { background: linear-gradient(135deg, rgba(245, 158, 11, 0.06), rgba(255, 255, 255, 0.02)); }
-    50%  { background: linear-gradient(135deg, rgba(245, 158, 11, 0.14), rgba(255, 255, 255, 0.04)); }
-    100% { background: linear-gradient(135deg, rgba(245, 158, 11, 0.06), rgba(255, 255, 255, 0.02)); }
+    0%, 100% { border-color: var(--amber-dim); }
+    50%      { border-color: var(--surface-border); }
 }
 
 /* Marketplace filter row; real input preserves keyboard/a11y. */
@@ -4443,8 +5116,8 @@ textarea.chat-input::placeholder { color: var(--text-muted); }
     width: 36px;
     height: 20px;
     border-radius: var(--radius-md);
-    background: rgba(255, 255, 255, 0.12);
-    border: 1px solid rgba(255, 255, 255, 0.06);
+    background: var(--bg-hover);
+    border: 1px solid var(--surface-border-soft);
     position: relative;
     flex-shrink: 0;
     transition: background 0.18s ease;
@@ -4458,22 +5131,22 @@ textarea.chat-input::placeholder { color: var(--text-muted); }
     width: 14px;
     height: 14px;
     border-radius: 50%;
-    background: rgba(255, 255, 255, 0.85);
+    background: var(--text-primary);
     transition: transform 0.18s ease;
 }
 
 .marketplace-filter-toggle input[type="checkbox"]:checked + .marketplace-filter-track {
-    background: rgba(232, 93, 111, 0.55);
-    border-color: rgba(232, 93, 111, 0.65);
+    background: rgba(var(--accent-hover-rgb), 0.55);
+    border-color: rgba(var(--accent-hover-rgb), 0.65);
 }
 
 .marketplace-filter-toggle input[type="checkbox"]:checked + .marketplace-filter-track::after {
     transform: translateX(16px);
-    background: #fff;
+    background: var(--text-primary);
 }
 
 .marketplace-filter-toggle input[type="checkbox"]:focus-visible + .marketplace-filter-track {
-    outline: 2px solid rgba(232, 93, 111, 0.45);
+    outline: 2px solid rgba(var(--accent-hover-rgb), 0.45);
     outline-offset: 2px;
 }
 
@@ -4485,14 +5158,15 @@ textarea.chat-input::placeholder { color: var(--text-muted); }
 }
 
 .marketplace-card-title strong {
-    font-size: 14px;
+    font-family: var(--font-mono);
+    font-size: 13px;
     margin-right: 8px;
     display: block;
 }
 
 .marketplace-card-title .muted {
     font-size: 12px;
-    color: rgba(250, 250, 250, 0.55);
+    color: var(--text-secondary);
     word-break: break-all;
 }
 
@@ -4507,18 +5181,18 @@ textarea.chat-input::placeholder { color: var(--text-muted); }
 }
 
 .marketplace-card-body {
-    color: rgba(250, 250, 250, 0.8);
-    font-size: 13px;
-    line-height: 1.45;
+    color: var(--text-secondary);
+    font-size: 12px;
+    line-height: 1.5;
     min-height: 38px;
 }
 
 .marketplace-card-state {
-    border: 1px solid rgba(255, 255, 255, 0.08);
+    border: 1px solid var(--surface-border);
     border-radius: var(--radius);
     padding: 10px 12px;
     font-size: 12px;
-    background: rgba(255, 255, 255, 0.035);
+    background: var(--surface-card);
 }
 
 .marketplace-card-state strong {
@@ -4532,38 +5206,38 @@ textarea.chat-input::placeholder { color: var(--text-muted); }
     width: 12px;
     height: 12px;
     border-radius: 50%;
-    border: 2px solid rgba(245, 158, 11, 0.22);
-    border-top-color: rgba(245, 158, 11, 0.95);
+    border: 2px solid var(--amber-dim);
+    border-top-color: var(--amber);
     animation: skills-review-spin 900ms linear infinite;
 }
 
 .marketplace-card-state-hint {
-    color: rgba(250, 250, 250, 0.68);
+    color: var(--text-secondary);
     line-height: 1.45;
 }
 
 .marketplace-state-ok {
-    border-color: rgba(34, 197, 94, 0.25);
+    border-color: var(--green-dim);
 }
 
 .marketplace-state-warn {
-    border-color: rgba(245, 158, 11, 0.30);
+    border-color: var(--amber-dim);
 }
 
 .marketplace-state-danger {
-    border-color: rgba(239, 68, 68, 0.30);
+    border-color: var(--red-dim);
 }
 
 .marketplace-card-meta {
     display: flex;
     flex-wrap: wrap;
     gap: 10px;
-    font-size: 12px;
-    color: rgba(250, 250, 250, 0.55);
+    font-size: 10.5px;
+    color: var(--text-muted);
 }
 
 .marketplace-card-meta a {
-    color: rgba(250, 250, 250, 0.75);
+    color: var(--text-secondary);
 }
 
 .marketplace-card-actions {
@@ -4638,7 +5312,7 @@ textarea.chat-input::placeholder { color: var(--text-muted); }
 .marketplace-modal-body section h4 {
     margin: 0 0 4px 0;
     font-size: 13px;
-    color: rgba(250, 250, 250, 0.75);
+    color: var(--text-secondary);
     text-transform: uppercase;
     letter-spacing: 0.5px;
 }
@@ -4649,23 +5323,24 @@ textarea.chat-input::placeholder { color: var(--text-muted); }
     gap: 8px;
 }
 
-.marketplace-block-list h4 { color: #ef4444; }
-.marketplace-block-list ul { margin: 4px 0 0 0; padding-left: 18px; color: #ef4444; font-size: 12px; }
-.marketplace-warn-list h4 { color: #f59e0b; }
-.marketplace-warn-list ul { margin: 4px 0 0 0; padding-left: 18px; color: #f59e0b; font-size: 12px; }
+.marketplace-block-list h4 { color: var(--tone-danger); }
+.marketplace-block-list ul { margin: 4px 0 0 0; padding-left: 18px; color: var(--tone-danger); font-size: 12px; }
+.marketplace-warn-list h4 { color: var(--tone-warn); }
+.marketplace-warn-list ul { margin: 4px 0 0 0; padding-left: 18px; color: var(--tone-warn); font-size: 12px; }
 
-/* Installed-card provenance and adapter warnings. */
+/* Installed-card provenance and adapter warnings: the card's footer meta line. */
 .skills-card-provenance {
     display: flex;
     flex-wrap: wrap;
-    gap: 8px 14px;
+    gap: 6px 12px;
     align-items: center;
     margin-top: 4px;
-    font-size: 12px;
+    font-family: var(--font-mono);
+    font-size: 10.5px;
 }
 .skills-card-warnings {
     margin-top: 4px;
-    font-size: 12px;
+    font-size: 11.5px;
 }
 .skills-card-warnings summary {
     cursor: pointer;
@@ -4687,8 +5362,8 @@ textarea.chat-input::placeholder { color: var(--text-muted); }
     position: absolute;
     left: 0;
     top: 0;
-    padding: 14px;
-    backdrop-filter: blur(12px);
+    padding: var(--space-4);
+    background: var(--bg-elevated);
 }
 
 .widgets-card.dragging {
@@ -4696,7 +5371,7 @@ textarea.chat-input::placeholder { color: var(--text-muted); }
 }
 
 .widgets-card.drag-over {
-    border-color: rgba(232, 93, 111, 0.48);
+    border-color: rgba(var(--accent-hover-rgb), 0.48);
     box-shadow: 0 0 0 3px var(--accent-10);
 }
 
@@ -4731,11 +5406,9 @@ textarea.chat-input::placeholder { color: var(--text-muted); }
     width: 28px;
     height: 28px;
     border-radius: var(--radius-xs);
-    border: 1px solid rgba(226, 232, 240, 0.14);
-    background: rgba(26, 21, 32, 0.48);
-    color: rgba(226, 232, 240, 0.54);
-    backdrop-filter: blur(10px);
-    -webkit-backdrop-filter: blur(10px);
+    border: 1px solid var(--surface-border);
+    background: var(--surface-control);
+    color: var(--text-secondary);
     cursor: grab;
     font: inherit;
     font-size: 14px;
@@ -4743,7 +5416,7 @@ textarea.chat-input::placeholder { color: var(--text-muted); }
 }
 
 .widgets-card-drag:hover {
-    border-color: rgba(232, 93, 111, 0.44);
+    border-color: rgba(var(--accent-hover-rgb), 0.44);
     color: var(--text-primary);
 }
 
@@ -4752,8 +5425,9 @@ textarea.chat-input::placeholder { color: var(--text-muted); }
 }
 
 .widgets-card-source {
-    color: rgba(250, 250, 250, 0.5);
-    font-size: 12px;
+    color: var(--text-muted);
+    font-family: var(--font-mono);
+    font-size: 10.5px;
 }
 
 .widgets-card-body > :first-child {
@@ -4763,9 +5437,9 @@ textarea.chat-input::placeholder { color: var(--text-muted); }
 .widgets-frame {
     width: 100%;
     min-height: 320px;
-    border: 1px solid rgba(255, 255, 255, 0.08);
+    border: 1px solid var(--surface-border);
     border-radius: var(--radius);
-    background: rgba(13, 11, 15, 0.88);
+    background: var(--bg-primary);
 }
 
 .widget-form,
@@ -4827,7 +5501,7 @@ textarea.chat-input::placeholder { color: var(--text-muted); }
     display: flex;
     flex-direction: column;
     gap: 5px;
-    color: rgba(250, 250, 250, 0.72);
+    color: var(--text-secondary);
     font-size: 13px;
 }
 
@@ -4840,9 +5514,9 @@ textarea.chat-input::placeholder { color: var(--text-muted); }
 .widget-field textarea,
 .widget-field select {
     min-width: 0;
-    border: 1px solid rgba(255, 255, 255, 0.09);
+    border: 1px solid var(--surface-border);
     border-radius: var(--radius-sm);
-    background: rgba(13, 11, 15, 0.74);
+    background: rgba(var(--bg-primary-rgb), 0.74);
     color: var(--text-primary);
     padding: 8px 10px;
     font: inherit;
@@ -4857,7 +5531,7 @@ textarea.chat-input::placeholder { color: var(--text-muted); }
 }
 
 .widget-group {
-    border: 1px solid rgba(255, 255, 255, 0.07);
+    border: 1px solid var(--surface-border);
     border-radius: var(--radius-sm);
     padding: 10px;
 }
@@ -4890,7 +5564,7 @@ textarea.chat-input::placeholder { color: var(--text-muted); }
 
 .widget-metric,
 .widget-callout {
-    border: 1px solid rgba(255, 255, 255, 0.08);
+    border: 1px solid var(--surface-border);
     border-left-width: 3px;
     border-radius: var(--radius-sm);
     padding: 9px 10px;
@@ -4898,20 +5572,20 @@ textarea.chat-input::placeholder { color: var(--text-muted); }
 
 .widget-metric { display: flex; justify-content: space-between; align-items: baseline; gap: 12px; }
 .widget-metric > span { color: var(--text-secondary); font-size: 12px; }
-.widget-metric > strong { font-size: 18px; }
+.widget-metric > strong { font-family: var(--font-mono); font-size: 18px; font-weight: 600; }
 .widget-metric small { color: var(--text-secondary); font-size: 11px; font-weight: 500; }
-.widget-callout { font-size: 13px; line-height: 1.45; background: rgba(96, 165, 250, 0.06); }
-.widget-metric[data-tone="ok"], .widget-callout[data-tone="ok"] { border-left-color: #34d399; }
-.widget-metric[data-tone="warn"], .widget-callout[data-tone="warn"] { border-left-color: #fbbf24; }
-.widget-metric[data-tone="danger"], .widget-callout[data-tone="danger"] { border-left-color: #e85d6f; }
-.widget-metric[data-tone="info"], .widget-callout[data-tone="info"] { border-left-color: #60a5fa; }
+.widget-callout { font-size: 13px; line-height: 1.45; background: var(--blue-08); }
+.widget-metric[data-tone="ok"], .widget-callout[data-tone="ok"] { border-left-color: var(--tone-ok); }
+.widget-metric[data-tone="warn"], .widget-callout[data-tone="warn"] { border-left-color: var(--tone-warn); }
+.widget-metric[data-tone="danger"], .widget-callout[data-tone="danger"] { border-left-color: var(--tone-danger); }
+.widget-metric[data-tone="info"], .widget-callout[data-tone="info"] { border-left-color: var(--accent-user); }
 
 .widget-kv-row {
     display: flex;
     justify-content: space-between;
     gap: 12px;
     padding: 6px 0;
-    border-bottom: 1px solid rgba(255, 255, 255, 0.06);
+    border-bottom: 1px solid var(--surface-border-soft);
 }
 
 .widget-table-wrap {
@@ -4927,7 +5601,7 @@ textarea.chat-input::placeholder { color: var(--text-muted); }
 .widget-table th,
 .widget-table td {
     padding: 7px 8px;
-    border-bottom: 1px solid rgba(255, 255, 255, 0.06);
+    border-bottom: 1px solid var(--surface-border-soft);
     text-align: left;
     overflow-wrap: break-word;
     word-break: normal;
@@ -4936,11 +5610,11 @@ textarea.chat-input::placeholder { color: var(--text-muted); }
 .widget-table th,
 .widget-table-status { white-space: nowrap; }
 
-.widget-table a { color: #93c5fd; overflow-wrap: anywhere; }
+.widget-table a { color: var(--user-light); overflow-wrap: anywhere; }
 .widget-table-status { font-weight: 600; }
-.widget-table-status[data-tone="ok"] { color: #6ee7b7; }
-.widget-table-status[data-tone="warn"] { color: #fcd34d; }
-.widget-table-status[data-tone="danger"] { color: #fb7185; }
+.widget-table-status[data-tone="ok"] { color: var(--tone-ok); }
+.widget-table-status[data-tone="warn"] { color: var(--tone-warn); }
+.widget-table-status[data-tone="danger"] { color: var(--tone-danger); }
 
 .widget-media img,
 .widget-media video {
@@ -4960,10 +5634,10 @@ textarea.chat-input::placeholder { color: var(--text-muted); }
 
 /* Host-owned map/calendar/kanban defaults without extra dependencies. */
 .widget-map {
-    border: 1px solid rgba(255, 255, 255, 0.06);
+    border: 1px solid var(--surface-border-soft);
     border-radius: var(--radius-sm);
     padding: 10px;
-    background: rgba(255, 255, 255, 0.02);
+    background: var(--surface-card-soft);
 }
 .widget-map-list { margin: 0; padding-left: 18px; font-size: 13px; }
 .widget-map-list li { padding: 2px 0; }
@@ -4975,7 +5649,7 @@ textarea.chat-input::placeholder { color: var(--text-muted); }
     gap: 8px;
     align-items: baseline;
     padding: 6px 8px;
-    border-bottom: 1px solid rgba(255, 255, 255, 0.05);
+    border-bottom: 1px solid var(--surface-border-soft);
 }
 
 .widget-kanban {
@@ -4986,7 +5660,7 @@ textarea.chat-input::placeholder { color: var(--text-muted); }
 }
 .widget-kanban-col {
     align-self: start;
-    background: rgba(255, 255, 255, 0.03);
+    background: var(--surface-card);
     border-radius: var(--radius-sm);
     padding: 10px;
     min-height: 120px;
@@ -4998,9 +5672,9 @@ textarea.chat-input::placeholder { color: var(--text-muted); }
     display: flex;
     flex-direction: column;
     gap: 7px;
-    background: rgba(232, 93, 111, 0.12);
-    border: 1px solid rgba(232, 93, 111, 0.25);
-    border-radius: 6px;
+    background: rgba(var(--accent-hover-rgb), 0.12);
+    border: 1px solid rgba(var(--accent-hover-rgb), 0.25);
+    border-radius: var(--radius-6);
     padding: 6px 8px;
     margin: 4px 0;
     cursor: grab;
@@ -5020,9 +5694,9 @@ textarea.chat-input::placeholder { color: var(--text-muted); }
 .widget-kanban-move select {
     min-width: 0;
     max-width: 112px;
-    border: 1px solid rgba(255, 255, 255, 0.1);
-    border-radius: 5px;
-    background: rgba(13, 11, 15, 0.82);
+    border: 1px solid var(--surface-border);
+    border-radius: var(--radius-5);
+    background: rgba(var(--bg-primary-rgb), 0.82);
     color: var(--text-primary);
     font: inherit;
     padding: 3px 5px;
@@ -5043,7 +5717,7 @@ textarea.chat-input::placeholder { color: var(--text-muted); }
 }
 
 .widget-code-label {
-    color: rgba(250, 250, 250, 0.65);
+    color: var(--text-secondary);
     font-size: 12px;
     margin-bottom: 6px;
 }
@@ -5074,7 +5748,7 @@ textarea.chat-input::placeholder { color: var(--text-muted); }
     bottom: -2px;
     height: 2px;
     border-radius: 1px;
-    background: var(--accent, #7c5cff);
+    background: var(--accent);
     opacity: 0.5;
     animation: widget-refresh-pulse 1.2s ease-in-out infinite;
 }
@@ -5091,17 +5765,17 @@ textarea.chat-input::placeholder { color: var(--text-muted); }
 }
 
 .widget-tab-btn {
-    border: 1px solid rgba(255, 255, 255, 0.08);
-    border-radius: 999px;
-    background: rgba(255, 255, 255, 0.03);
+    border: 1px solid var(--surface-border);
+    border-radius: var(--pill-radius);
+    background: var(--surface-card);
     color: var(--text-secondary);
     cursor: pointer;
     padding: 5px 10px;
 }
 
 .widget-tab-btn.active {
-    border-color: rgba(232, 93, 111, 0.4);
-    background: rgba(232, 93, 111, 0.12);
+    border-color: rgba(var(--accent-hover-rgb), 0.4);
+    background: rgba(var(--accent-hover-rgb), 0.12);
     color: var(--text-primary);
 }
 
@@ -5142,7 +5816,7 @@ textarea.chat-input::placeholder { color: var(--text-muted); }
     .widget-table td { display: block; width: 100%; }
     .widget-table thead { display: none; }
     .widget-table tr {
-        border: 1px solid rgba(255, 255, 255, 0.07);
+        border: 1px solid var(--surface-border);
         border-radius: var(--radius-sm);
         margin-bottom: 8px;
         padding: 5px 8px;
@@ -5151,7 +5825,7 @@ textarea.chat-input::placeholder { color: var(--text-muted); }
         display: grid;
         grid-template-columns: minmax(72px, 38%) minmax(0, 1fr);
         gap: 8px;
-        border-bottom: 1px solid rgba(255, 255, 255, 0.04);
+        border-bottom: 1px solid var(--surface-border-soft);
         padding: 6px 0;
     }
     .widget-table td::before {
@@ -5293,6 +5967,45 @@ textarea.chat-input {
         overflow-x: hidden;
     }
 
+    /* No room for a right-edge gutter at this width: the Raw toggle returns to
+       the flow instead of overlapping a wrapped event type. */
+    .log-entry,
+    .log-task-event {
+        padding-right: var(--space-2);
+    }
+
+    /* Nor room for four content tracks: 62px + the type track + a phase pill leaves
+       the headline ~80px, which wraps mid-WORD. So the metadata keeps its one aligned
+       row and the headline drops to a full-width line beneath it — the same two-line
+       shape the old `flex-wrap: wrap` produced here, now deliberate instead of
+       incidental. Track 2 mirrors the desktop rule (`minmax(84px, max-content)`):
+       the same `TASK A1B2C3D4` phrase must not wrap here either, and the headline
+       already has its own row to fall back to. */
+    .log-main {
+        grid-template-columns: 62px minmax(84px, max-content) minmax(0, 1fr) auto;
+    }
+
+    /* `grid-row: 1` is load-bearing: the headline spans the full width, so an
+       auto-placed repeat counter would be pushed onto a THIRD line of its own. */
+    .log-main > .log-repeat {
+        grid-column: 4;
+        grid-row: 1;
+    }
+
+    .log-main > .log-headline {
+        grid-column: 1 / -1;
+        grid-row: 2;
+    }
+
+    .log-entry .log-phase {
+        justify-self: start;
+    }
+
+    .log-actions {
+        position: static;
+        justify-content: flex-start;
+    }
+
     .evo-versions-cols {
         flex-direction: column;
         gap: 16px;
@@ -5349,6 +6062,724 @@ textarea.chat-input {
     }
 
 }
+
+/* ===== [stream B: changes screen + task inspector] =====
+   Reserved region. The Changes screen (`#page-changes`), its diff renderers and
+   `web/modules/task_inspector.js` own everything added below this banner; the
+   inspector width is the `--inspector-width` token and the panel registers
+   against the app-level right-panel state machine (kinds project | inspector,
+   mutually exclusive). Keep additions inside this region so the stream merge
+   stays a append-only CSS diff. */
+
+/* Changes screen: 260px task/file rail + diff pane + a sticky parts dock. */
+.changes-layout {
+    display: grid;
+    grid-template-columns: 260px minmax(0, 1fr);
+    flex: 1;
+    min-height: 0;
+}
+
+.changes-rail {
+    display: grid;
+    grid-template-rows: auto minmax(0, 1fr) auto minmax(0, 1.4fr);
+    min-height: 0;
+    min-width: 0;
+    background: var(--bg-panel);
+    border-right: 1px solid var(--divider);
+}
+
+.changes-rail-head,
+.changes-file-head {
+    display: flex;
+    align-items: baseline;
+    justify-content: space-between;
+    gap: var(--space-2);
+    padding: 10px 12px 6px;
+    border-bottom: 1px solid var(--divider);
+}
+
+.changes-file-head {
+    border-top: 1px solid var(--divider);
+}
+
+.changes-rail-title {
+    font-size: 12px;
+    font-weight: 600;
+    color: var(--text-primary);
+}
+
+.changes-rail-meta {
+    font-family: var(--font-mono);
+    font-size: 10.5px;
+    color: var(--text-muted);
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+    min-width: 0;
+}
+
+.changes-task-list,
+.changes-file-list {
+    overflow-y: auto;
+    min-height: 0;
+    padding: 6px;
+    display: flex;
+    flex-direction: column;
+    gap: 2px;
+}
+
+.changes-task-row,
+.changes-file-row {
+    display: block;
+    width: 100%;
+    text-align: left;
+    border: 1px solid transparent;
+    border-radius: var(--radius-7);
+    background: transparent;
+    color: var(--text-secondary);
+    font: inherit;
+    padding: 6px 8px;
+    cursor: pointer;
+    min-width: 0;
+}
+
+.changes-task-row:hover,
+.changes-file-row:hover {
+    background: var(--surface-control);
+    color: var(--text-primary);
+}
+
+.changes-task-row.active,
+.changes-file-row.active {
+    background: var(--accent-10);
+    border-color: var(--accent-18);
+    color: var(--text-primary);
+}
+
+.changes-task-title {
+    display: block;
+    font-size: 12px;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+}
+
+.changes-task-meta {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    margin-top: 2px;
+    font-family: var(--font-mono);
+    font-size: 10px;
+    color: var(--text-muted);
+    min-width: 0;
+}
+
+.changes-task-id {
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+    max-width: 44%;
+}
+
+.changes-task-project {
+    flex: 0 0 auto;
+    padding: 0 5px;
+    border: 1px solid var(--project-25);
+    border-radius: var(--radius-4);
+    background: var(--project-12);
+    color: var(--project-light);
+    max-width: 40%;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+}
+
+.changes-task-status {
+    margin-left: auto;
+    flex: 0 0 auto;
+}
+
+/* File rows are mono: they name real paths and real counts. */
+.changes-file-row {
+    display: grid;
+    grid-template-columns: 14px minmax(0, 1fr) auto;
+    align-items: center;
+    gap: 8px;
+    font-family: var(--font-mono);
+    font-size: 12px;
+}
+
+.changes-file-status {
+    font-weight: 600;
+    text-align: center;
+}
+
+.changes-file-status.is-added { color: var(--green); }
+.changes-file-status.is-deleted { color: var(--red); }
+.changes-file-status.is-modified { color: var(--amber); }
+.changes-file-status.is-renamed { color: var(--user); }
+
+.changes-file-path {
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+    direction: rtl;
+    text-align: left;
+}
+
+.changes-file-counts {
+    display: inline-flex;
+    gap: 6px;
+    white-space: nowrap;
+    font-size: 10.5px;
+}
+
+.changes-add { color: var(--green); }
+.changes-del { color: var(--red); }
+.changes-file-binary { color: var(--text-muted); }
+
+.changes-main {
+    display: flex;
+    flex-direction: column;
+    min-width: 0;
+    min-height: 0;
+    /* The sticky capture button is positioned against this pane. */
+    position: relative;
+}
+
+.changes-main-head {
+    display: flex;
+    align-items: center;
+    gap: var(--space-3);
+    padding: 10px 16px;
+    border-bottom: 1px solid var(--divider);
+}
+
+.changes-path {
+    font-family: var(--font-mono);
+    font-size: 13px;
+    color: var(--text-primary);
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+    min-width: 0;
+    flex: 1 1 auto;
+}
+
+.changes-counts {
+    display: inline-flex;
+    gap: 8px;
+    flex: 0 0 auto;
+    font-family: var(--font-mono);
+    font-size: 11px;
+    white-space: nowrap;
+}
+
+/* Compact segmented control over the shared .ui-segment base look. */
+.changes-mode {
+    display: inline-flex;
+    flex: 0 0 auto;
+    gap: 2px;
+    padding: 2px;
+    border: 1px solid var(--surface-border);
+    border-radius: var(--radius-sm);
+    background: var(--surface-card);
+}
+
+.changes-mode .ui-segment {
+    min-height: 24px;
+    padding: 2px 10px;
+    border: none;
+    border-radius: var(--radius-6);
+    background: transparent;
+    color: var(--text-muted);
+    font-size: 11.5px;
+}
+
+.changes-mode .ui-segment.active {
+    background: var(--bg-hover);
+    color: var(--text-primary);
+}
+
+/* Disclosure banners. A diff the server could not produce is NEVER silent. */
+.changes-banners:empty {
+    display: none;
+}
+
+.changes-banner {
+    display: flex;
+    align-items: baseline;
+    gap: var(--space-2);
+    padding: 8px 16px;
+    border-bottom: 1px solid var(--divider);
+    font-size: 12px;
+    color: var(--text-secondary);
+    background: var(--surface-card-soft);
+}
+
+.changes-banner[data-tone='blocked'] {
+    background: var(--red-dim);
+    color: var(--text-primary);
+}
+
+.changes-banner[data-tone='drift'],
+.changes-banner[data-tone='pending'] {
+    background: var(--amber-dim);
+}
+
+.changes-banner-detail {
+    font-family: var(--font-mono);
+    font-size: 10.5px;
+    color: var(--text-muted);
+    overflow-wrap: anywhere;
+}
+
+.changes-diff {
+    flex: 1;
+    min-height: 0;
+    overflow: auto;
+    font-family: var(--font-mono);
+    font-size: 12px;
+    line-height: 1.7;
+}
+
+.changes-empty {
+    padding: 10px 12px;
+    font-family: inherit;
+    font-size: 12px;
+    color: var(--text-muted);
+}
+
+.changes-diff-empty {
+    padding: var(--space-5) var(--space-4);
+}
+
+/* Unified: old№ / new№ / text. Split: old№ / old text / new№ / new text. */
+.changes-unified .changes-row {
+    display: grid;
+    grid-template-columns: 44px 44px minmax(0, 1fr);
+}
+
+.changes-split .changes-row {
+    display: grid;
+    grid-template-columns: 40px minmax(0, 1fr) 40px minmax(0, 1fr);
+}
+
+.changes-split .changes-row > .changes-text:nth-child(2) {
+    border-right: 1px solid var(--divider);
+}
+
+.changes-num {
+    padding: 0 6px;
+    text-align: right;
+    color: var(--diff-ctx-num);
+    user-select: none;
+}
+
+.changes-text {
+    padding: 0 8px;
+    color: var(--diff-ctx-text);
+    white-space: pre-wrap;
+    overflow-wrap: anywhere;
+}
+
+.changes-row.is-del,
+.changes-text.is-del {
+    background: var(--diff-del-bg);
+    color: var(--diff-del-text);
+}
+
+.changes-row.is-add,
+.changes-text.is-add {
+    background: var(--diff-add-bg);
+    color: var(--diff-add-text);
+}
+
+.changes-row.is-del .changes-num,
+.changes-num.is-del {
+    color: var(--diff-del-num);
+}
+
+.changes-row.is-add .changes-num,
+.changes-num.is-add {
+    color: var(--diff-add-num);
+}
+
+.changes-text.is-empty-counterpart {
+    background: var(--surface-card-soft);
+}
+
+.changes-hunk {
+    padding: 2px 8px;
+    background: var(--diff-hunk-bg);
+    color: var(--text-muted);
+    white-space: pre-wrap;
+    overflow-wrap: anywhere;
+}
+
+/* The GUARANTEED capture path: ⌘L is best-effort (some browsers keep it for the
+   address bar), so a visible button sits over the diff whenever a selection is
+   live. It floats above the dock rather than in the header, next to the bytes it
+   is about to capture. */
+.changes-selection-btn {
+    position: absolute;
+    bottom: 78px;
+    left: 50%;
+    transform: translateX(-50%);
+    z-index: 2;
+    display: inline-flex;
+    align-items: center;
+    gap: 6px;
+    padding: 7px 14px;
+    border: 1px solid var(--accent-55);
+    border-radius: var(--radius-sm);
+    background: var(--bg-elevated);
+    color: var(--accent-chip-text);
+    font-size: 12px;
+    font-weight: 600;
+    cursor: pointer;
+    box-shadow: 0 8px 24px rgba(0, 0, 0, 0.5);
+}
+
+.changes-selection-btn:hover {
+    background: var(--accent-12);
+}
+
+.changes-kbd {
+    font-family: var(--font-mono);
+    font-size: 10.5px;
+    color: var(--text-muted);
+}
+
+/* The dock is the ONE composer-parts field; "Request edits" is the only action. */
+.changes-dock {
+    display: flex;
+    align-items: flex-end;
+    gap: var(--space-2);
+    padding: var(--space-2) var(--space-4) var(--space-3);
+    border-top: 1px solid var(--divider);
+    background: var(--bg-primary);
+}
+
+.changes-dock-field {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    gap: 6px;
+    flex: 1 1 auto;
+    min-width: 0;
+    padding: 8px 12px;
+    border: 1px solid var(--surface-border);
+    border-radius: var(--radius);
+    background: var(--bg-elevated);
+}
+
+.changes-dock-field:focus-within {
+    border-color: var(--focus-accent-border);
+}
+
+.changes-dock-input {
+    border: none;
+    background: transparent;
+    color: var(--text-primary);
+    font: inherit;
+    font-size: 13px;
+    outline: none;
+}
+
+/* Task inspector: fixed-width right panel (no resize state, per the handoff). */
+.inspector-panel {
+    display: flex;
+    flex-direction: column;
+    position: fixed;
+    top: 0;
+    right: 0;
+    bottom: 0;
+    width: var(--inspector-width);
+    z-index: 58;
+    border-left: 1px solid var(--divider);
+    background: var(--bg-panel);
+    box-shadow: -24px 0 64px rgba(0, 0, 0, 0.34);
+    transform: translateX(18px);
+    opacity: 0;
+    pointer-events: none;
+    transition: transform 180ms ease, opacity 180ms ease;
+}
+
+.inspector-panel.open {
+    transform: translateX(0);
+    opacity: 1;
+    pointer-events: auto;
+}
+
+.inspector-panel[hidden],
+.inspector-backdrop[hidden] {
+    display: none;
+}
+
+.inspector-backdrop {
+    position: fixed;
+    top: 0;
+    right: 0;
+    bottom: 0;
+    left: var(--sidebar-width);
+    z-index: 55;
+    background: rgba(0, 0, 0, 0.34);
+    opacity: 0;
+    pointer-events: none;
+    transition: opacity 180ms ease;
+}
+
+.inspector-backdrop.open {
+    opacity: 1;
+    pointer-events: auto;
+}
+
+.inspector-bar {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: var(--space-2);
+    padding: 10px 14px;
+    border-bottom: 1px solid var(--divider);
+}
+
+.inspector-title {
+    font-family: var(--font-mono);
+    font-size: 12px;
+    font-weight: 600;
+    color: var(--text-primary);
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+    min-width: 0;
+}
+
+.inspector-close {
+    flex: 0 0 auto;
+    width: 24px;
+    height: 24px;
+    border: 1px solid var(--surface-border);
+    border-radius: var(--radius-6);
+    background: transparent;
+    color: var(--text-secondary);
+    font-size: 15px;
+    line-height: 1;
+    cursor: pointer;
+}
+
+.inspector-close:hover {
+    color: var(--text-primary);
+    border-color: var(--accent);
+}
+
+/* The inspector's tabs ARE the shared underline-tab control (`.app-tab-strip` +
+   `.app-tab`, see the page-chrome region); this class only re-solves the width
+   problem a 320px panel has and a page header does not. Two tabs in a fixed narrow
+   panel read as a segmented header when they split the width, so the strip becomes
+   an equal-columns grid and its tabs drop the horizontal padding they would
+   otherwise centre inside. Colour, weight, font size, the 2px accent underline,
+   the hover rule and the divider overlap are all INHERITED — a change to the tab
+   grammar reaches the inspector without a second edit. */
+.inspector-tabs {
+    display: grid;
+    grid-auto-flow: column;
+    grid-auto-columns: 1fr;
+    border-bottom: 1px solid var(--divider);
+    padding: 0;
+}
+
+.inspector-tabs > .app-tab {
+    padding-inline: 0;
+    text-align: center;
+}
+
+.inspector-body {
+    flex: 1;
+    min-height: 0;
+    overflow-y: auto;
+    padding: 8px;
+    display: flex;
+    flex-direction: column;
+    gap: 2px;
+}
+
+.inspector-empty,
+.inspector-cost-note {
+    padding: 8px 6px;
+    font-size: 11.5px;
+    color: var(--text-muted);
+}
+
+.inspector-blockers,
+.inspector-drift {
+    margin: 0 6px 6px;
+    padding: 6px 8px;
+    border-radius: var(--radius-6);
+    background: var(--amber-dim);
+    color: var(--text-secondary);
+    font-size: 11px;
+    overflow-wrap: anywhere;
+}
+
+.inspector-blockers {
+    font-family: var(--font-mono);
+    background: var(--red-dim);
+}
+
+.inspector-file-row {
+    display: grid;
+    grid-template-columns: 12px minmax(0, 1fr) auto;
+    align-items: center;
+    gap: 8px;
+    width: 100%;
+    padding: 6px 8px;
+    border: 1px solid transparent;
+    border-radius: var(--radius-7);
+    background: transparent;
+    color: var(--text-secondary);
+    font-family: var(--font-mono);
+    font-size: 11.5px;
+    text-align: left;
+    cursor: pointer;
+}
+
+.inspector-file-row:hover {
+    background: var(--surface-control);
+    color: var(--text-primary);
+}
+
+.inspector-file-status.is-a { color: var(--green); }
+.inspector-file-status.is-d { color: var(--red); }
+.inspector-file-status.is-m { color: var(--amber); }
+.inspector-file-status.is-r { color: var(--user); }
+
+.inspector-file-path {
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+    direction: rtl;
+    text-align: left;
+}
+
+.inspector-file-counts {
+    display: inline-flex;
+    gap: 6px;
+    white-space: nowrap;
+    font-size: 10.5px;
+}
+
+.inspector-file-binary {
+    color: var(--text-muted);
+}
+
+.inspector-open-full {
+    margin: 8px 6px 0;
+    border: none;
+    background: transparent;
+    color: var(--accent-light);
+    font: inherit;
+    font-size: 11.5px;
+    text-align: left;
+    padding: 4px 0;
+    cursor: pointer;
+}
+
+.inspector-cost-row {
+    display: flex;
+    align-items: baseline;
+    justify-content: space-between;
+    gap: var(--space-2);
+    padding: 5px 8px;
+    font-size: 11.5px;
+    color: var(--text-secondary);
+}
+
+.inspector-cost-value {
+    font-family: var(--font-mono);
+    color: var(--text-primary);
+}
+
+.inspector-cost-row[data-tone='unavailable'] .inspector-cost-value,
+.inspector-cost-row[data-tone='pending'] .inspector-cost-value {
+    color: var(--amber);
+}
+
+.inspector-footer {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: var(--space-2);
+    padding: 8px 12px;
+    border-top: 1px solid var(--divider);
+    font-family: var(--font-mono);
+    font-size: 11px;
+    color: var(--text-secondary);
+    white-space: nowrap;
+}
+
+.inspector-footer-files {
+    display: inline-flex;
+    gap: 6px;
+    white-space: nowrap;
+}
+
+/* No counted diff yet: a dash reads as "unknown", `+0 −0` would read as a fact. */
+.inspector-footer-unknown {
+    color: var(--text-muted);
+}
+
+@media (max-width: 980px) {
+    /* Narrow: the rail collapses above the diff pane. */
+    .changes-layout {
+        grid-template-columns: minmax(0, 1fr);
+        grid-template-rows: minmax(120px, 34vh) minmax(0, 1fr);
+    }
+
+    .changes-rail {
+        border-right: none;
+        border-bottom: 1px solid var(--divider);
+    }
+}
+
+@media (max-width: 900px) {
+    /* Mobile: the inspector overlays the content area, like the project panel. */
+    .inspector-panel {
+        inset: 0;
+        width: 100%;
+        z-index: 60;
+        border-left: none;
+        transform: translateY(14px);
+    }
+
+    .inspector-panel.open {
+        transform: translateY(0);
+    }
+
+    /* A full-screen panel PAINTS over the drawer toggle, which is not the same as
+       removing it: left in the layout the toggle stays tabbable, so a keyboard user
+       can focus and fire a control they cannot see. The project panel already does
+       this at its own breakpoint; the inspector only goes full-screen HERE, so its
+       rule belongs here rather than beside that one. This is also the one consumer
+       of `body.inspector-open`, which the panel has toggled all along. */
+    body.inspector-open .mobile-nav-toggle {
+        display: none;
+    }
+
+    .inspector-backdrop {
+        left: 0;
+    }
+}
+
+@media (prefers-reduced-motion: reduce) {
+    .inspector-panel,
+    .inspector-backdrop {
+        transition: none;
+    }
+}
+
+/* ===== [stream 0: multi-project navigation + right panel state machine] ===== */
 
 /* ===========================================================================
    Multi-project sidebar + right thread panel (v6.32.0)
@@ -5673,11 +7104,7 @@ textarea.chat-input {
     width: var(--project-panel-width);
     z-index: 58;
     border-left: 1px solid var(--divider);
-    background:
-        linear-gradient(180deg, rgba(13, 11, 15, 0.74), rgba(13, 11, 15, 0.64)),
-        radial-gradient(circle at 15% 0%, var(--project-12), transparent 300px);
-    backdrop-filter: blur(22px) saturate(130%);
-    -webkit-backdrop-filter: blur(22px) saturate(130%);
+    background: var(--bg-panel);
     box-shadow: -24px 0 64px rgba(0, 0, 0, 0.34);
     transform: translateX(18px);
     opacity: 0;
@@ -5751,9 +7178,7 @@ textarea.chat-input {
     left: var(--sidebar-width);
     z-index: 55;
     cursor: default;
-    background: rgba(0, 0, 0, 0.18);
-    backdrop-filter: blur(1.5px);
-    -webkit-backdrop-filter: blur(1.5px);
+    background: rgba(0, 0, 0, 0.34);
     opacity: 0;
     pointer-events: none;
     transition: opacity 180ms ease;
@@ -5813,9 +7238,9 @@ textarea.chat-input {
 }
 
 /* Project threads hide the GLOBAL controls (evolution/consciousness/restart/
-   panic/budget belong to the one agent, not to a project thread). */
-.chat-instance-panel .chat-header-actions,
-.chat-instance-panel .chat-budget-pill {
+   panic belong to the one agent, not to a project thread; the budget meter
+   lives once in the sidebar). */
+.chat-instance-panel .chat-header-actions {
     display: none;
 }
 

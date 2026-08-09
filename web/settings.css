@@ -11,7 +11,6 @@
 .settings-tabs-bar {
     padding: 0;
     background: transparent;
-    backdrop-filter: none;
 }
 
 .settings-mobile-back {
@@ -50,7 +49,8 @@
     display: flex;
     flex-direction: column;
     gap: 14px;
-    padding: 18px;
+    padding: var(--space-4);
+    background: var(--bg-elevated);
 }
 
 .settings-shell .form-section {
@@ -61,9 +61,16 @@
     margin-top: 0;
 }
 
+/* Destructive zone. A 1px --red-dim edge alone made "Reset All Data" look like
+   any other section, so the tone also gets a 2px left rule at FULL --red — the
+   same "tone rides the edge" grammar as the grouped task card and the system
+   quote block, and the one channel loud enough to be unmissable at a glance.
+   Chosen over restoring the old rgba(239,68,68,0.05) wash: there is no 0.05 step
+   in the token ladder, and the nearest one (--red-dim, 0.15) reads as an active
+   error state on a section the owner merely scrolled past. */
 .settings-shell .form-section.danger {
-    border-color: rgba(220, 38, 38, 0.18);
-    background: rgba(239, 68, 68, 0.05);
+    border-color: var(--red-dim);
+    border-left: 2px solid var(--red);
 }
 
 .settings-shell .form-section h3 {
@@ -83,6 +90,16 @@
 
 .settings-provider-card {
     overflow: hidden;
+    background: var(--bg-elevated);
+    transition: border-color 0.15s ease;
+}
+
+.settings-provider-card:hover {
+    border-color: var(--surface-border);
+}
+
+.settings-provider-card[open] {
+    border-color: var(--accent-25);
 }
 
 .settings-provider-card summary {
@@ -92,7 +109,7 @@
     align-items: center;
     justify-content: space-between;
     gap: 16px;
-    padding: 16px 18px;
+    padding: 14px var(--space-4);
 }
 
 .settings-provider-card summary::-webkit-details-marker {
@@ -102,7 +119,8 @@
 .settings-provider-title {
     display: flex;
     align-items: center;
-    gap: 12px;
+    gap: 10px;
+    font-size: 13px;
     font-weight: 600;
     color: var(--text-primary);
 }
@@ -115,12 +133,12 @@
 
 .settings-provider-hint {
     color: var(--text-muted);
-    font-size: 12px;
+    font-size: 11.5px;
     text-align: right;
 }
 
 .settings-provider-body {
-    padding: 0 18px 18px;
+    padding: 0 var(--space-4) var(--space-4);
 }
 
 /* Collapsed "More providers" wrapper: rarely used provider cards (Cloud.ru,
@@ -134,12 +152,18 @@
     align-items: center;
     justify-content: space-between;
     gap: 16px;
-    padding: 16px 18px;
+    padding: 14px var(--space-4);
     border: 1px solid var(--ui-card-border);
     border-radius: var(--radius);
-    background: var(--ui-card-bg);
+    background: var(--bg-elevated);
+    font-size: 13px;
     font-weight: 600;
     color: var(--text-primary);
+    transition: border-color 0.15s ease;
+}
+
+.settings-more-providers > summary:hover {
+    border-color: var(--surface-border);
 }
 
 .settings-more-providers > summary::-webkit-details-marker {
@@ -212,9 +236,9 @@
 }
 
 .settings-shell .form-field label {
-    font-size: 12px;
+    font-size: 10.5px;
     font-weight: 600;
-    color: rgba(255, 255, 255, 0.68);
+    color: var(--text-muted);
     text-transform: uppercase;
     letter-spacing: 0.06em;
 }
@@ -225,13 +249,13 @@
 .model-picker input {
     width: 100%;
     min-width: 0;
-    padding: 10px 12px;
-    border-radius: 12px;
+    padding: 9px 12px;
+    border-radius: var(--radius-sm);
     border: 1px solid var(--surface-border);
-    background: rgba(26, 21, 32, 0.88);
+    background: var(--bg-primary);
     color: var(--text-primary);
-    font-size: 14px;
-    font-family: inherit;
+    font-size: 13px;
+    font-family: var(--font-mono);
     outline: none;
     transition: border-color 0.2s, box-shadow 0.2s, background 0.2s;
 }
@@ -240,7 +264,7 @@
 .settings-shell .form-field textarea::placeholder,
 .secret-input::placeholder,
 .model-picker input::placeholder {
-    color: rgba(255, 255, 255, 0.24);
+    color: var(--text-muted);
 }
 
 .settings-shell .form-field input:focus,
@@ -259,7 +283,7 @@
 .settings-shell .form-field select {
     appearance: none;
     padding-right: 36px;
-    background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='14' height='14' viewBox='0 0 14 14'%3E%3Cpath d='M3 5l4 4 4-4' fill='none' stroke='%23e2e8f0' stroke-width='1.5' stroke-linecap='round' stroke-linejoin='round'/%3E%3C/svg%3E");
+    background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='14' height='14' viewBox='0 0 14 14'%3E%3Cpath d='M3 5l4 4 4-4' fill='none' stroke='%23e7e7ea' stroke-width='1.5' stroke-linecap='round' stroke-linejoin='round'/%3E%3C/svg%3E");
     background-repeat: no-repeat;
     background-position: right 12px center;
 }
@@ -301,8 +325,9 @@
 .mcp-server-status {
     width: fit-content;
     padding: 3px 8px;
-    font-size: 12px;
-    background: rgba(255, 255, 255, 0.06);
+    font-size: 10.5px;
+    font-weight: 600;
+    background: var(--bg-card);
 }
 
 .mcp-server-status-ok { color: var(--green); }
@@ -311,8 +336,8 @@
 .mcp-server-status-muted { color: var(--text-muted); }
 
 .mcp-tools-disclosure {
-    border-radius: 12px;
-    border: 1px solid rgba(255, 255, 255, 0.06);
+    border-radius: var(--radius-sm);
+    border: 1px solid var(--surface-border-soft);
     padding: 10px 12px;
 }
 
@@ -353,7 +378,7 @@
     margin-top: 8px;
     height: 6px;
     border-radius: var(--radius-xs);
-    background: rgba(255, 255, 255, 0.08);
+    background: var(--bg-hover);
     overflow: hidden;
 }
 
@@ -398,8 +423,12 @@
     justify-content: space-between;
     gap: 14px;
     padding: 14px 2px 0;
-    border-top: 1px solid rgba(255, 255, 255, 0.06);
-    background: linear-gradient(180deg, rgba(13, 11, 15, 0), rgba(13, 11, 15, 0.92) 55%);
+    border-top: 1px solid var(--surface-border-soft);
+    background: linear-gradient(
+        180deg,
+        rgba(var(--bg-primary-rgb), 0),
+        rgba(var(--bg-primary-rgb), 0.92) 55%
+    );
 }
 
 .settings-footer-actions,
@@ -437,19 +466,21 @@
 }
 
 .settings-ghost-btn {
-    border: 1px solid rgba(255, 255, 255, 0.1);
-    background: rgba(255, 255, 255, 0.04);
+    border: 1px solid var(--surface-border);
+    background: var(--surface-control);
     color: var(--text-secondary);
-    border-radius: 12px;
+    border-radius: var(--radius-sm);
     padding: 0 14px;
-    min-height: 42px;
+    min-height: 40px;
     cursor: pointer;
-    font-size: 13px;
+    font-size: 12.5px;
 }
 
+/* Hover is DECORATION, not focus: `--focus-accent-border` is reserved for the
+   real focus ring so a keyboard user can still tell the two apart. */
 .settings-ghost-btn:hover {
     color: var(--text-primary);
-    border-color: rgba(232, 93, 111, 0.35);
+    border-color: var(--accent-25);
 }
 
 .settings-secret-list {
@@ -524,9 +555,9 @@
     overflow-y: auto;
     overscroll-behavior: contain;
     padding: 8px;
-    border-radius: 16px;
-    border: 1px solid rgba(255, 255, 255, 0.08);
-    background: rgba(18, 20, 26, 0.98);
+    border-radius: var(--radius);
+    border: 1px solid var(--surface-border);
+    background: var(--ui-modal-bg);
     box-shadow: 0 18px 44px rgba(0, 0, 0, 0.32);
 }
 
@@ -539,17 +570,18 @@
     background: transparent;
     color: var(--text-primary);
     text-align: left;
-    padding: 10px 12px;
-    border-radius: 12px;
+    padding: 9px 12px;
+    border-radius: var(--radius-sm);
     cursor: pointer;
 }
 
 .model-picker-item:hover {
-    background: rgba(255, 255, 255, 0.06);
+    background: var(--bg-card);
 }
 
 .model-picker-item-value {
-    font-size: 13px;
+    font-family: var(--font-mono);
+    font-size: 12.5px;
     font-weight: 600;
 }
 
@@ -563,9 +595,9 @@
 }
 
 .settings-effort-card label {
-    font-size: 12px;
+    font-size: 10.5px;
     font-weight: 600;
-    color: rgba(255, 255, 255, 0.68);
+    color: var(--text-muted);
     text-transform: uppercase;
     letter-spacing: 0.06em;
 }
@@ -585,23 +617,24 @@
     align-items: center;
     justify-content: center;
     text-align: center;
-    min-height: 38px;
+    min-height: 36px;
     line-height: 1.2;
-    border: 1px solid rgba(255, 255, 255, 0.08);
-    background: rgba(255, 255, 255, 0.04);
+    border: 1px solid var(--surface-border);
+    background: var(--surface-control);
     color: var(--text-secondary);
-    border-radius: 12px;
-    padding: 10px 12px;
+    border-radius: var(--radius-7);
+    padding: 9px 12px;
     cursor: pointer;
-    font-size: 13px;
+    font-size: 12.5px;
     font-weight: 600;
 }
 
+/* Selected/hover is DECORATION: the accent alpha ladder, not the focus token. */
 .settings-effort-btn.active,
 .settings-effort-btn:hover {
     color: var(--text-primary);
-    border-color: rgba(232, 93, 111, 0.35);
-    background: rgba(232, 93, 111, 0.12);
+    border-color: var(--accent-25);
+    background: var(--accent-12);
 }
 
 /* Review enforcement toggle: 2 columns. */
@@ -629,25 +662,28 @@
     opacity: 0.55;
 }
 .settings-effort-btn:disabled:hover {
-    background: rgba(255, 255, 255, 0.04);
-    border-color: rgba(255, 255, 255, 0.08);
+    background: var(--surface-control);
+    border-color: var(--surface-border);
     color: var(--text-secondary);
     transform: none;
 }
 
 
+/* Advisory review is a NOTICE, so it wears the amber status tone end to end —
+   `--system-border` is the Voices family (the system speaker's bubble edge) and
+   a segmented button is not a speaker. */
 [data-enforcement-group] .settings-effort-btn[data-effort-value="advisory"].active,
 [data-enforcement-group] .settings-effort-btn[data-effort-value="advisory"]:hover {
     color: var(--amber);
-    border-color: rgba(245, 158, 11, 0.4);
-    background: rgba(245, 158, 11, 0.12);
+    border-color: var(--amber-dim);
+    background: var(--amber-dim);
 }
 
 [data-enforcement-group] .settings-effort-btn[data-effort-value="blocking"].active,
 [data-enforcement-group] .settings-effort-btn[data-effort-value="blocking"]:hover {
     color: var(--text-primary);
-    border-color: rgba(232, 93, 111, 0.5);
-    background: rgba(201, 53, 69, 0.18);
+    border-color: var(--accent-25);
+    background: var(--accent-18);
 }
 
 .local-toggle {
@@ -733,29 +769,12 @@
 }
 
 @media (max-width: 640px) {
-    /* Mobile settings keep horizontal tab pills; back element remains hidden compat. */
+    /* Settings declares NO tab shape at any width: `.settings-tabs` /
+       `.settings-tab` are only extra class names on the shared `.app-tab-strip` /
+       `.app-tab`, and the mobile touch target lives with that shared control in
+       style.css. The back element stays hidden for compat. */
     .settings-shell {
         padding: 0 10px 10px;
-    }
-
-    .settings-tabs-bar {
-        padding: 0;
-    }
-
-    .settings-tabs {
-        flex-wrap: nowrap;
-        gap: 8px;
-        padding: 8px 2px 10px;
-        overflow-x: auto;
-    }
-
-    .settings-tab {
-        flex: 0 0 auto;
-        min-height: 38px;
-        padding: 8px 14px;
-        font-size: 13px;
-        white-space: nowrap;
-        border-radius: 999px;
     }
 
     .settings-mobile-back {

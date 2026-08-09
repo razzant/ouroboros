@@ -507,6 +507,38 @@ def test_chat_outbound_review_projection_is_frozen_optional_abi():
     assert get_origin(annotation) is NotRequired
 
 
+def test_task_diff_response_is_frozen_additive_abi():
+    """§11.1: the task-diff envelope is an additive frozen surface.
+
+    Every field is optional (``total=False``) so the shape can never be a hard
+    break for an older client, the four typed lifecycle statuses and both sources
+    are the ones the endpoint actually emits, and the envelope stays free of
+    server-side file stats — the client parses the patch it is shown, so a second
+    stats source would be a second truth that can silently disagree (decision 13).
+    """
+    from ouroboros.gateway.contracts import HTTP_ENDPOINTS, TaskDiffResponse
+    # The vocabularies live with the projection logic (`gateway/task_diff.py`);
+    # `gateway/tasks.py` is only the route over it.
+    from ouroboros.gateway import task_diff as gateway_task_diff
+
+    assert TaskDiffResponse.__required_keys__ == frozenset()
+    assert set(TaskDiffResponse.__annotations__) == {
+        "status", "source", "base_commit", "head_advanced", "blockers",
+        "patch", "patch_sha256", "error",
+    }
+    assert "GET /api/tasks/{task_id}/diff" in HTTP_ENDPOINTS
+    assert {
+        gateway_task_diff.DIFF_STATUS_PENDING,
+        gateway_task_diff.DIFF_STATUS_READY,
+        gateway_task_diff.DIFF_STATUS_EMPTY,
+        gateway_task_diff.DIFF_STATUS_BLOCKED,
+    } == {"pending", "ready", "empty", "blocked"}
+    assert {
+        gateway_task_diff.DIFF_SOURCE_WORKSPACE,
+        gateway_task_diff.DIFF_SOURCE_MUTATION_BASELINE,
+    } == {"workspace_patch", "mutation_baseline"}
+
+
 def test_photo_outbound_matches_message_bus_sends():
     """PhotoOutbound TypedDict must match every photo envelope emitted."""
     from ouroboros.gateway.contracts import PhotoOutbound

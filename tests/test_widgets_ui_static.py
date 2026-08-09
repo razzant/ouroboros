@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import re
 from pathlib import Path
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
@@ -270,6 +271,50 @@ def test_widgets_forms_charts_and_kanban_keep_host_owned_contracts():
     assert "{ card_id: cardId, column_id: columnId }" in source
     assert "SAFE_FIELD_TYPES" in helper
     assert "autocomplete=\"new-password\"" in helper
+
+
+def test_canvas_palettes_read_only_defined_root_tokens():
+    """Canvas token seam (flat redesign, Phase D).
+
+    Chart.js paints on a canvas and cannot resolve `var(...)`, so both chart
+    palettes resolve their colours through `readThemeTokens` at build time.
+    `getComputedStyle().getPropertyValue('--x')` returns the COMPUTED value, so an
+    alias like `--accent-system: var(--amber)` resolves THROUGH to the hex and is
+    perfectly paintable (verified in Chromium and WebKit). The real failure mode
+    is a token that is not DEFINED in :root: that comes back as the empty string,
+    and a canvas handed '' silently drops the series. So this pins EXISTENCE —
+    every token name these modules hand to the seam is defined in :root — and
+    deliberately says nothing about leaves vs aliases.
+    """
+    style = _read("web/style.css")
+    root_block = style.split(":root {", 1)[1].split("\n}", 1)[0]
+    definitions = dict(
+        re.findall(r"^\s*(--[\w-]+)\s*:\s*([^;]+);", root_block, flags=re.MULTILINE)
+    )
+    assert definitions, "could not parse the :root token block"
+
+    named: set[str] = set()
+    for rel in ("web/modules/evolution.js", "web/modules/widgets.js"):
+        source = _read(rel)
+        # Both modules keep their token names in flat string lists / maps, so the
+        # names are literal source text by construction (that is the point of the
+        # seam: no computed token names, nothing to resolve at runtime).
+        for block in re.findall(
+            r"const (?:CHART_TOKENS|CHART_SERIES_TOKENS|CHART_GRID_TOKEN)\b[^;]*;",
+            source,
+            flags=re.DOTALL,
+        ):
+            named.update(re.findall(r"'(--[\w-]+)'", block))
+    # Sanity: the sweep actually found the ramps, not an empty set that trivially
+    # passes (six evolution series + four widget series + axes/grid/surface/mono).
+    assert len(named) >= 12, f"token sweep found too few names: {sorted(named)}"
+    assert "--accent-light" in named and "--font-mono" in named
+
+    for token in sorted(named):
+        assert token in definitions, (
+            f"{token} is read by a chart but not defined in :root: readThemeTokens "
+            f"would hand Chart.js '' and the series would vanish without an error."
+        )
 
 
 def test_widgets_responsive_design_system_styles_are_host_owned():

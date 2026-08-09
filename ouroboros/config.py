@@ -166,6 +166,10 @@ SETTINGS_DEFAULTS = {**UPDATE_SETTINGS_DEFAULTS,
     "OUROBOROS_SUPERVISOR_LIVENESS_DEADLINE_SEC": SUPERVISOR_LIVENESS_DEADLINE_DEFAULT_SEC,
     "OUROBOROS_PACING_INTERVAL_SEC": PACING_INTERVAL_DEFAULT_SEC,
     "OUROBOROS_TOOL_TIMEOUT_SEC": 600,
+    # Wall clock for ONE `git` invocation behind GET /api/tasks/{id}/diff. It bounds an
+    # owner-facing READ, not a task: a repo whose git is wedged must fail the request
+    # with a blocker rather than hold the thread.
+    "OUROBOROS_TASK_DIFF_GIT_TIMEOUT_SEC": 30,
     "OUROBOROS_VISION_CAPTION_TIMEOUT_SEC": 90,
     "OUROBOROS_BG_MAX_ROUNDS": 10,
     "OUROBOROS_BG_WAKEUP_MIN": 30,
@@ -1000,6 +1004,14 @@ def get_safety_max_tokens() -> int:
 def get_safety_call_timeout_sec() -> float:
     """Transport timeout for safety-supervisor LLM calls (prevents indefinite hang)."""
     return _clamped_number_setting("OUROBOROS_SAFETY_CALL_TIMEOUT_SEC", low=5.0, high=600.0)
+
+
+def get_task_diff_git_timeout_sec() -> float:
+    """Per-invocation `git` timeout for the task-diff endpoint (see SETTINGS_DEFAULTS).
+
+    Clamped, like its siblings, so a hand-edited setting cannot turn an owner-facing
+    read into an unbounded wait (or into a timeout too short for a large repo)."""
+    return _clamped_number_setting("OUROBOROS_TASK_DIFF_GIT_TIMEOUT_SEC", low=5.0, high=300.0)
 
 
 def get_websearch_timeout_sec() -> float:

@@ -552,6 +552,36 @@
  */
 
 /**
+ * One task's owner-facing diff projection (GET /api/tasks/{task_id}/diff).
+ * The client parses `patch` itself — the server sends no file stats and never
+ * truncates the patch, so the file list, per-file status and +/- counts come
+ * from the exact bytes the owner is shown (one snapshot = one truth).
+ * EVERY field is optional here, mirroring `TaskDiffResponse(total=False)` in
+ * contracts.py FIELD for field: the envelope is an additive frozen surface (§11.1)
+ * that must never become a hard break for an older client, so a consumer is promised
+ * only what it existence-checks. The live endpoint does emit all seven on every 200 —
+ * a blocked or empty answer still carries `patch: ''` and `blockers: []` — but that
+ * is behaviour, not the contract, and the two sides state the same weaker promise so
+ * neither can drift into assuming more than the other.
+ * @typedef {Object} TaskDiffResponse
+ * @property {("pending"|"ready"|"empty"|"blocked")=} status
+ *   pending = artifacts are not finalized yet; ready = `patch` holds the full
+ *   unified diff; empty = the task changed nothing; blocked = `blockers` names
+ *   why no trustworthy patch can be shown.
+ * @property {("workspace_patch"|"mutation_baseline")=} source
+ *   workspace_patch = durable artifact bytes; mutation_baseline = a LIVE
+ *   self-repo projection over the paths attributed to the task window.
+ * @property {string=} base_commit  the baseline commit the patch is computed against
+ * @property {boolean=} head_advanced
+ *   HEAD differs from the task baseline. A boolean disclosure only — no commit
+ *   counts and no exclusive-ownership claim (attribution is evidence, not exclusion).
+ * @property {string[]=} blockers  typed attribution/artifact blockers, always disclosed
+ * @property {string=} patch  the full unified diff ('' unless status is ready)
+ * @property {string=} patch_sha256  digest of the exact patch bytes served
+ * @property {string=} error
+ */
+
+/**
  * @typedef {Object} LogTailResponse
  * @property {string} name
  * @property {Object[]} entries

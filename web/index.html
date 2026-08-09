@@ -15,6 +15,17 @@
     <div id="app">
         <div id="nav-drawer-backdrop" class="nav-drawer-backdrop" hidden></div>
         <aside id="primary-sidebar" class="primary-sidebar" aria-label="Ouroboros navigation">
+            <div class="nav-brand" id="nav-brand" data-online="false">
+                <img class="nav-brand-mark" src="/static/favicon.png" alt="" width="26" height="26">
+                <div class="nav-brand-text">
+                    <span class="nav-brand-name">Ouroboros</span>
+                    <span class="nav-brand-sub">
+                        <span id="nav-version"></span>
+                        <span class="nav-brand-status" id="nav-brand-status">offline</span>
+                        <span class="nav-status-dot" aria-hidden="true"></span>
+                    </span>
+                </div>
+            </div>
             <div class="sidebar-scroll">
             <button class="nav-row nav-row-main active" data-nav-page="chat" title="Main Ouroboros chat">
                 <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M22 17a2 2 0 0 1-2 2H6.828a2 2 0 0 0-1.414.586l-2.202 2.202A.71.71 0 0 1 2 21.286V5a2 2 0 0 1 2-2h16a2 2 0 0 1 2 2z"/><path d="M7 11h10"/><path d="M7 15h6"/><path d="M7 7h8"/></svg>
@@ -35,13 +46,23 @@
                 </div>
                 <div id="nav-projects-list" class="nav-projects-list"></div>
             </section>
-            <div class="nav-section nav-utilities">
-                <div class="nav-section-label">Utilities</div>
+            <div class="nav-section nav-workspace">
+                <div class="nav-section-label">Workspace</div>
+            <button class="nav-row" data-nav-page="changes" title="Changes">
+                <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><line x1="6" x2="6" y1="3" y2="15"/><circle cx="18" cy="6" r="3"/><circle cx="6" cy="18" r="3"/><path d="M18 9a9 9 0 0 1-9 9"/></svg>
+                <span class="nav-row-label">Changes</span>
+            </button>
             <button class="nav-row" data-nav-page="files" title="Files">
                 <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="m6 14 1.5-2.9A2 2 0 0 1 9.24 10H20a2 2 0 0 1 1.94 2.5l-1.54 6a2 2 0 0 1-1.95 1.5H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h3.9a2 2 0 0 1 1.69.9l.81 1.2a2 2 0 0 0 1.67.9H18a2 2 0 0 1 2 2v2"/></svg>
                 <span class="nav-row-label">Files</span>
             </button>
-
+            </div>
+            <div class="nav-section nav-system">
+                <div class="nav-section-label">System</div>
+            <button class="nav-row" data-nav-page="dashboard" title="Dashboard">
+                <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="m12 14 4-4"/><path d="M3.34 19a10 10 0 1 1 17.32 0"/></svg>
+                <span class="nav-row-label">Dashboard</span>
+            </button>
             <button class="nav-row" data-nav-page="skills" title="Skills">
                 <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 2v4"/><path d="M12 18v4"/><path d="M4.93 4.93l2.83 2.83"/><path d="M16.24 16.24l2.83 2.83"/><path d="M2 12h4"/><path d="M18 12h4"/><path d="M4.93 19.07l2.83-2.83"/><path d="M16.24 7.76l2.83-2.83"/></svg>
                 <span class="nav-row-label">Skills</span>
@@ -50,17 +71,24 @@
                 <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="3" width="7" height="7" rx="1"/><rect x="14" y="3" width="7" height="7" rx="1"/><rect x="3" y="14" width="7" height="7" rx="1"/><rect x="14" y="14" width="7" height="7" rx="1"/></svg>
                 <span class="nav-row-label">Widgets</span>
             </button>
-            <button class="nav-row" data-nav-page="dashboard" title="Dashboard">
-                <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="m12 14 4-4"/><path d="M3.34 19a10 10 0 1 1 17.32 0"/></svg>
-                <span class="nav-row-label">Dashboard</span>
-            </button>
             <button class="nav-row" data-nav-page="settings" title="Settings">
                 <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M9.671 4.136a2.34 2.34 0 0 1 4.659 0 2.34 2.34 0 0 0 3.319 1.915 2.34 2.34 0 0 1 2.33 4.033 2.34 2.34 0 0 0 0 3.831 2.34 2.34 0 0 1-2.33 4.033 2.34 2.34 0 0 0-3.319 1.915 2.34 2.34 0 0 1-4.659 0 2.34 2.34 0 0 0-3.32-1.915 2.34 2.34 0 0 1-2.33-4.033 2.34 2.34 0 0 0 0-3.831A2.34 2.34 0 0 1 6.35 6.051a2.34 2.34 0 0 0 3.319-1.915"/><circle cx="12" cy="12" r="3"/></svg>
                 <span class="nav-row-label">Settings</span>
             </button>
             </div>
             </div>
-            <span id="nav-version"></span>
+            <!-- Sidebar footer slot for the managed-update pill. It is its own row
+                 so the pill can never inflate the compact brand sub line. -->
+            <div class="nav-update-slot" id="nav-update-slot"></div>
+            <button class="nav-budget" id="nav-budget" type="button" title="Open budget controls" aria-label="Open budget controls">
+                <span class="nav-budget-row">
+                    <span class="nav-budget-label">Budget</span>
+                    <span class="nav-budget-amount" id="nav-budget-amount">Loading…</span>
+                </span>
+                <span class="nav-budget-bar" id="nav-budget-bar" data-budget-state="loading">
+                    <span class="nav-budget-bar-fill"></span>
+                </span>
+            </button>
         </aside>
         <div id="divider"></div>
         <main id="content">

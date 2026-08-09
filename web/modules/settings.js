@@ -18,6 +18,15 @@ import { apiClient, apiFetch, cleanExtensionRoute, extensionRoutePath } from './
 import { collectSafeFieldValues, renderSafeField, setInlineStatus } from './ui_helpers.js';
 
 let markSettingsDirty = () => {};
+// Last snapshot of /api/settings this module fetched. Read-only consumers (e.g.
+// the composer's model chip) use this getter plus the 'ouro:settings-updated'
+// event instead of adding a second fetch or a new /api/state field.
+let lastSettingsSnapshot = null;
+
+/** The last-fetched /api/settings payload, or null before the first load. */
+export function getSettingsSnapshot() {
+    return lastSettingsSnapshot;
+}
 const BASE_SECRET_KEYS = new Set(SECRET_KEYS.map(([key]) => key));
 const pendingExtensionSettings = new Set();
 let setupContract = {};
@@ -645,6 +654,7 @@ export function initSettings({ state, setBeforePageLeave, ws } = {}) {
             ? extData.live.settings_sections
             : [];
         currentSettings = data;
+        lastSettingsSnapshot = data;
         applySettings(data);
         renderExtensionSettingsSections(page, sections);
         renderRequestedSkillSecrets(page, extData.skills || [], data);
@@ -660,6 +670,9 @@ export function initSettings({ state, setBeforePageLeave, ws } = {}) {
         markSettingsDirty = updateSettingsDirtyState;
         syncSettingsLoadState();
         startClaudeCodePolling();
+        // Same event the save path fires, so a consumer refreshes on the FIRST
+        // load too instead of rendering an empty chip until the owner saves.
+        window.dispatchEvent(new CustomEvent('ouro:settings-updated', { detail: { reason: 'settings loaded', source: 'settings' } }));
     }
 
     async function reloadSettingsWithFeedback() {

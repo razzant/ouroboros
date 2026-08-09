@@ -731,8 +731,32 @@ def test_ui_smoke_phase3_declarative_widgets_and_settings(direct_server_with_dat
                 callout = card.locator('.widget-callout')
                 assert metric.get_attribute("data-tone") == "ok"
                 assert callout.get_attribute("data-tone") == "warn"
-                assert metric.evaluate("element => getComputedStyle(element).borderLeftColor") == "rgb(52, 211, 153)"
-                assert callout.evaluate("element => getComputedStyle(element).borderLeftColor") == "rgb(251, 191, 36)"
+                # The tone EDGE is the contract: `data-tone` must resolve through the
+                # shared tone tokens. Compared against the tokens' own computed values
+                # rather than a hex literal — the flat redesign moved --green from
+                # emerald #34d399 to #22c55e (decision 28: pins follow the design), and
+                # a literal here just re-rots on the next palette decision.
+                tone_rgb = page.evaluate(
+                    """() => {
+                        const probe = document.createElement('span');
+                        document.body.appendChild(probe);
+                        const read = (token) => {
+                            probe.style.color = `var(${token})`;
+                            return getComputedStyle(probe).color;
+                        };
+                        const out = { ok: read('--tone-ok'), warn: read('--tone-warn') };
+                        probe.remove();
+                        return out;
+                    }"""
+                )
+                assert metric.evaluate(
+                    "element => getComputedStyle(element).borderLeftColor"
+                ) == tone_rgb["ok"]
+                assert callout.evaluate(
+                    "element => getComputedStyle(element).borderLeftColor"
+                ) == tone_rgb["warn"]
+                # ...and the tones stay DISTINGUISHABLE, which is the reason they exist.
+                assert tone_rgb["ok"] != tone_rgb["warn"]
 
                 emitted = page.evaluate(
                     """async (skill) => {
@@ -2788,19 +2812,46 @@ def test_ui_smoke_live_cards_keep_usable_geometry_at_depth_and_in_project_panel(
                     "cards => cards.map(card => card.dataset.taskId)"
                 )
                 assert len(rendered_ids) == 11, rendered_ids
+                # Wide-viewport half, re-expressed for the FLAT redesign (owner
+                # decision 28 + the post-rebase addendum): adapt the constants to the
+                # new geometry, never weaken the invariant they protect.
+                #
+                # Redesign geometry, as measured here: the transcript is ONE centred
+                # reading column capped at 760px (`#chat-messages` side padding is
+                # `max(24px, (100% - 760px) / 2)`), and nesting is a FLAT 16px indent
+                # per level (`.chat-subagents` = 14px padding + a 2px rule) which the
+                # per-CARD `@container livecard (max-width: 560px)` query — not the
+                # viewport — flattens once a card actually becomes narrow. So in a
+                # 1100px window this tree renders 760 / 744 / 728px with a uniform 16px
+                # step, and nothing is narrow enough to wrap.
+                #
+                # Upstream's boxed cards measured 622 / 567 / 512px with a 40px indent
+                # per level, which is why it could pin literals: "child-02 must have
+                # flex-wrap:wrap" and "each level must move >= 30px". Both described the
+                # OLD box, not the invariant. The invariant this test exists for — the
+                # one-letter-wide nested-card regression — is: a deeply nested live card
+                # must stay READABLE at depth, and its nesting must stay VISUALLY
+                # DISTINGUISHABLE. That is what the assertions below state directly:
+                # a usable width/title floor at the DEEPEST card in the tree, a
+                # per-level indent that is strictly positive and uniform, and the
+                # unchanged no-sideways-scroll / summary-stays-one-row checks.
+                # (The narrow half above is deliberately byte-unchanged: it is the half
+                # that reproduced the original regression, and it still passes.)
                 wide_facts = wide.evaluate(
                     """() => {
-                        const ids = ['layout-root', 'layout-child-01', 'layout-child-02'];
+                        const ids = ['layout-root', 'layout-child-01', 'layout-child-02', 'layout-child-10'];
                         return ids.map((id) => {
                             const card = document.querySelector(`#page-chat .chat-live-card[data-task-id="${id}"]`);
                             const summary = card.querySelector(':scope > .chat-live-summary-button .chat-live-summary');
                             const main = summary.querySelector('.chat-live-summary-main').getBoundingClientRect();
                             const side = summary.querySelector('.chat-live-summary-side').getBoundingClientRect();
+                            const title = summary.querySelector('[data-live-title]').getBoundingClientRect();
                             const rect = card.getBoundingClientRect();
                             return {
                                 id,
                                 left: rect.left,
                                 width: rect.width,
+                                titleWidth: title.width,
                                 wrap: getComputedStyle(summary).flexWrap,
                                 mainTop: main.top,
                                 mainBottom: main.bottom,
@@ -2812,11 +2863,34 @@ def test_ui_smoke_live_cards_keep_usable_geometry_at_depth_and_in_project_panel(
                         });
                     }"""
                 )
-                assert [card["wrap"] for card in wide_facts] == ["nowrap", "nowrap", "wrap"], wide_facts
-                assert wide_facts[1]["left"] - wide_facts[0]["left"] >= 30, wide_facts
-                assert wide_facts[2]["left"] - wide_facts[1]["left"] >= 30, wide_facts
+                by_id = {card["id"]: card for card in wide_facts}
+                deepest = by_id["layout-child-10"]
+                # Readable at depth: ten levels cost 10 * 16px out of the 760px column,
+                # so the deepest card measures 600px and still gives its title a ~455px
+                # column. The floors are set at 400px / 240px — comfortably below the
+                # measured values, but far above the ~200px / ~60px at which a summary
+                # row starts squeezing its title into a one-word column. They leave room
+                # for the indent token to grow to 36px per level before tripping, and
+                # they fail loudly if nesting ever goes back to compounding a per-level
+                # box inset (upstream's 40px/level would breach the width floor at this
+                # depth).
+                assert deepest["width"] >= 400, wide_facts
+                assert deepest["titleWidth"] >= 240, wide_facts
+                # Nesting stays visually distinguishable: every level is indented by a
+                # real, IDENTICAL step (16px measured; 4px is the smallest step that
+                # still reads as a nesting rule, and the uniformity check is what
+                # catches a level silently collapsing to zero).
+                steps = [
+                    by_id["layout-child-01"]["left"] - by_id["layout-root"]["left"],
+                    by_id["layout-child-02"]["left"] - by_id["layout-child-01"]["left"],
+                    (deepest["left"] - by_id["layout-child-02"]["left"]) / 8,
+                ]
+                assert min(steps) >= 4, (steps, wide_facts)
+                assert max(steps) - min(steps) <= 1, (steps, wide_facts)
                 assert all(card["scroll"] <= card["client"] + 1 for card in wide_facts), wide_facts
-                for card in wide_facts[:2]:
+                # Nothing in this tree is narrow enough to need the wrapping fallback,
+                # so every sampled summary keeps its meta on the title's own row.
+                for card in wide_facts:
                     assert min(card["mainBottom"], card["sideBottom"]) \
                         > max(card["mainTop"], card["sideTop"]), wide_facts
 
@@ -3740,6 +3814,437 @@ def test_ui_smoke_cancel_run_button_eligibility_and_cancelled_state(direct_serve
                 dialog.wait_for(state="detached", timeout=10_000)
                 assert cancel_btn.is_enabled()
                 page.screenshot(path=str(data_dir.parent / "cancel-run.png"), full_page=True)
+            finally:
+                browser.close()
+    except PlaywrightError as exc:
+        if "Executable doesn't exist" in str(exc) or "playwright install" in str(exc).lower():
+            pytest.skip(str(exc))
+        raise
+
+
+@pytest.fixture()
+def files_browser_root(tmp_path, monkeypatch):
+    """A deterministic root for the Files smoke to walk.
+
+    `gateway/files.py::_configured_root_text` reads OUROBOROS_FILE_BROWSER_DEFAULT
+    from the process environment, and the server fixtures snapshot `os.environ`
+    when they boot — so seeding it HERE works as long as this fixture is requested
+    before the server one (pytest resolves same-scope fixtures in signature
+    order). Without it the browser root falls back to the developer's home
+    directory, which no assertion could pin.
+    """
+    root = tmp_path / "files-root"
+    (root / "pkg").mkdir(parents=True)
+    (root / "pkg" / "loop.py").write_text(
+        "\n".join(
+            [
+                "def loop(state):",
+                '    """Run one supervisor pass over the pending queue."""',
+                "    pending = [task for task in state.tasks if not task.done]",
+                "    for task in pending:",
+                "        task.run(deadline=state.deadline, retries=3)",
+                "    return len(pending)",
+            ]
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+    (root / "README.md").write_text("# files smoke root\n", encoding="utf-8")
+    monkeypatch.setenv("OUROBOROS_FILE_BROWSER_DEFAULT", str(root))
+    return root
+
+
+@pytest.mark.ui_browser
+def test_ui_smoke_files_selection_capture_lands_in_the_dock(files_browser_root, direct_server):
+    """Files read-only page: tree → viewer → selection → chip in its own dock.
+
+    Three drags, because the gutter is where the mapping can lie:
+
+      1. a drag STARTED over the line-number gutter selects nothing at all —
+         `user-select: none` means Chromium never begins a selection there — so no
+         capture is offered rather than a wrong one;
+      2. a plain two-row drag through the code must read exactly `name · 2 lines`;
+      3. a drag ENDING over a later row's gutter is the element-boundary case the
+         browser really produces (`endContainer` = the `.files-code-text` ELEMENT,
+         whose offset is a CHILD INDEX, not a character offset): the boundary
+         precedes every character of that row, so the row is excluded.
+
+    Nothing is sent — Enter is never pressed — so the page must still be Files
+    with both chips waiting in the dock.
+    """
+    pytest.importorskip("playwright.sync_api", reason="Playwright is not installed")
+    from playwright.sync_api import Error as PlaywrightError
+    from playwright.sync_api import sync_playwright
+
+    try:
+        with sync_playwright() as pw:
+            browser = pw.chromium.launch(headless=True)
+            page = browser.new_page(viewport={"width": 1280, "height": 800})
+            try:
+                page.goto(direct_server, wait_until="domcontentloaded", timeout=30_000)
+                page.wait_for_selector("#chat-input", timeout=30_000)
+                page.click('[data-nav-page="files"]')
+                page.wait_for_selector("#page-files.active", timeout=10_000)
+
+                # The rail lists the seeded root; expanding a dir is one lazy call.
+                page.wait_for_selector('.files-tree-row[data-path="pkg"]', timeout=10_000)
+                page.click('.files-tree-row[data-path="pkg"]')
+                file_row = page.locator('.files-tree-row[data-path="pkg/loop.py"]')
+                file_row.wait_for(state="visible", timeout=10_000)
+                file_row.click()
+
+                # Per-line rows are the capture substrate.
+                page.wait_for_selector('.files-code-row[data-line-number="6"]', timeout=10_000)
+                assert page.locator(".files-code-row").count() == 6
+                assert "6 lines" in page.locator("#files-viewer-meta").inner_text()
+
+                rows = {
+                    n: page.locator(f'.files-code-row[data-line-number="{n}"]').bounding_box()
+                    for n in (2, 3, 4, 5)
+                }
+
+                def drag(start_row, start_dx, end_row, end_dx):
+                    page.mouse.move(rows[start_row]["x"] + start_dx, rows[start_row]["y"] + 10)
+                    page.mouse.down()
+                    page.mouse.move(rows[end_row]["x"] + end_dx, rows[end_row]["y"] + 10, steps=10)
+                    page.mouse.up()
+
+                sticky = page.locator("#files-capture-selection")
+                chips = page.locator("#files-dock-parts .composer-part-chip")
+                labels = page.locator("#files-dock-parts .composer-part-chip-label")
+
+                # (1) Gutter-started drag: the digits are unselectable, so there is
+                # no selection and no capture affordance.
+                drag(3, 8, 4, 130)
+                assert sticky.is_hidden()
+                assert chips.count() == 0
+
+                # (2) Two rows through the code. The sticky button is the
+                # GUARANTEED capture path (decision 10).
+                drag(3, 60, 4, 130)
+                sticky.wait_for(state="visible", timeout=5_000)
+                sticky.click()
+                labels.first.wait_for(state="visible", timeout=5_000)
+                assert chips.count() == 1
+                assert labels.nth(0).inner_text().strip() == "loop.py · 2 lines"
+
+                # (3) Drag ending over row 5's gutter: the end boundary is the
+                # `.files-code-text` ELEMENT at child index 0, i.e. before line 5's
+                # first character — L2-L4, three lines, not four.
+                drag(2, 60, 5, 8)
+                sticky.wait_for(state="visible", timeout=5_000)
+                sticky.click()
+                page.wait_for_function(
+                    "() => document.querySelectorAll('#files-dock-parts .composer-part-chip').length === 2",
+                    timeout=5_000,
+                )
+                assert labels.nth(1).inner_text().strip() == "loop.py · 3 lines"
+
+                # Enter-less: the draft waits in the dock, nothing was handed to chat.
+                assert page.locator("#page-files.active").count() == 1
+                assert page.locator("#page-chat.active").count() == 0
+                assert page.locator("#page-chat .chat-bubble.user").count() == 0
+                assert page.locator("#files-dock-input").input_value() == ""
+            finally:
+                browser.close()
+    except PlaywrightError as exc:
+        if "Executable doesn't exist" in str(exc) or "playwright install" in str(exc).lower():
+            pytest.skip(str(exc))
+        raise
+
+
+@pytest.mark.ui_browser
+def test_ui_smoke_changes_screen_and_task_inspector(direct_server_with_data):
+    """Phase B: the Changes screen renders a real diff from the patch bytes, the
+    Unified/Split toggle re-renders the same hunks, and the task inspector opens
+    on `ouro:inspect-task` as a right panel that is MUTUALLY EXCLUSIVE with the
+    project panel. A seeded workspace task keeps the diff deterministic (its
+    durable patch artifact is the source), so this asserts presentation, not git.
+    """
+    pytest.importorskip("playwright.sync_api", reason="Playwright is not installed")
+    from playwright.sync_api import Error as PlaywrightError
+    from playwright.sync_api import sync_playwright
+
+    from ouroboros.projects_registry import create_project
+
+    url = direct_server_with_data["url"]
+    data_dir = direct_server_with_data["data_dir"]
+    # A project exists so the right-panel slot can be contested from BOTH sides.
+    create_project(data_dir, "alpha", name="Alpha project")
+    artifacts = data_dir / "task_results" / "artifacts" / "diff-smoke"
+    artifacts.mkdir(parents=True, exist_ok=True)
+    patch_text = (
+        "diff --git a/ouroboros/loop.py b/ouroboros/loop.py\n"
+        "--- a/ouroboros/loop.py\n"
+        "+++ b/ouroboros/loop.py\n"
+        "@@ -1,3 +1,3 @@\n"
+        " keep_me = 1\n"
+        "-window = COOLDOWN_S\n"
+        "+window = self._window_for(provider)\n"
+        " return window\n"
+        "diff --git a/tests/test_new_case.py b/tests/test_new_case.py\n"
+        "new file mode 100644\n"
+        "--- /dev/null\n"
+        "+++ b/tests/test_new_case.py\n"
+        "@@ -0,0 +1,2 @@\n"
+        "+import pytest\n"
+        "+assert True\n"
+    )
+    (artifacts / "workspace.patch").write_text(patch_text, encoding="utf-8")
+    (artifacts / "workspace_patch.json").write_text(json.dumps({
+        "status": "ready_with_changes", "base_head": "beef", "current_head": "beef", "errors": [],
+    }) + "\n", encoding="utf-8")
+    (data_dir / "task_results" / "diff-smoke.json").write_text(json.dumps({
+        "task_id": "diff-smoke",
+        "status": "completed",
+        "description": "Tighten the retry window",
+        "workspace_root": str(data_dir / "ws"),
+        "artifact_status": "ready_with_changes",
+        "duration_sec": 95.0,
+        "cost_usd": 0.42,
+        "cost_accounting_status": "available",
+        "cost_final": True,
+        "total_rounds": 4,
+        "prompt_tokens": 1200,
+        "completion_tokens": 300,
+        "artifacts": [
+            {"kind": "workspace_patch", "name": "workspace.patch",
+             "path": str(artifacts / "workspace.patch")},
+            {"kind": "workspace_patch_manifest", "name": "workspace_patch.json",
+             "path": str(artifacts / "workspace_patch.json")},
+        ],
+    }) + "\n", encoding="utf-8")
+
+    try:
+        with sync_playwright() as pw:
+            browser = pw.chromium.launch(headless=True)
+            page = browser.new_page(viewport={"width": 1440, "height": 1000})
+            try:
+                page.goto(url, wait_until="domcontentloaded", timeout=30_000)
+                page.click('[data-nav-page="changes"]')
+                task_row = page.locator('[data-changes-task="diff-smoke"]')
+                task_row.wait_for(state="visible", timeout=30_000)
+                task_row.click()
+                # The file list is derived from the patch BYTES: two files, real
+                # statuses, real counts — no server-side stat source involved.
+                file_rows = page.locator('[data-changes-file]')
+                file_rows.first.wait_for(state="visible", timeout=30_000)
+                assert file_rows.count() == 2
+                assert page.locator('[data-changes-file="ouroboros/loop.py"] .changes-file-status')\
+                    .inner_text().strip() == "M"
+                assert page.locator('[data-changes-file="tests/test_new_case.py"] .changes-file-status')\
+                    .inner_text().strip() == "A"
+                assert "2 files · +3 −1" in page.locator('[data-changes-file-meta]').inner_text()
+                # Unified rows carry both number columns; Split renders paired sides.
+                unified = page.locator('.changes-unified .changes-row')
+                assert unified.count() == 4
+                page.click('[data-changes-mode="split"]')
+                page.locator('.changes-split .changes-row').first.wait_for(state="visible", timeout=10_000)
+                assert page.locator('.changes-unified').count() == 0
+                page.screenshot(path=str(data_dir.parent / "changes-split.png"), full_page=True)
+                page.click('[data-changes-mode="unified"]')
+                assert page.locator('.changes-unified .changes-row').count() == 4
+                # There is deliberately NO approve control on this screen.
+                assert page.locator('[data-changes-request]').inner_text().strip() == "Request edits"
+                assert page.get_by_text("Approve", exact=False).count() == 0
+
+                # ⌘L capture: the dock IS the capture dock, and this page consumes
+                # the CANCELABLE `ouro:capture-selection` event — that consumption is
+                # what licenses the global handler to suppress the browser default.
+                assert page.locator('[data-changes-dock-field][data-capture-dock]').count() == 1
+                consumed = page.evaluate(
+                    """() => {
+                        const cells = [...document.querySelectorAll(
+                            '#page-changes .changes-unified [data-diff-row]')];
+                        const range = document.createRange();
+                        range.setStart(cells[2].firstChild, 0);
+                        range.setEnd(cells[3].firstChild, cells[3].textContent.length);
+                        const sel = window.getSelection();
+                        sel.removeAllRanges();
+                        sel.addRange(range);
+                        const event = new CustomEvent('ouro:capture-selection', {
+                            detail: {page: 'changes'}, cancelable: true});
+                        window.dispatchEvent(event);
+                        return event.defaultPrevented;
+                    }"""
+                )
+                assert consumed is True, "the Changes page must consume the capture event"
+                chip = page.locator('[data-changes-dock-field] .composer-part-chip')
+                chip_label = page.locator('[data-changes-dock-field] .composer-part-chip-label')
+                chip.first.wait_for(state="visible", timeout=10_000)
+                assert chip.first.get_attribute("title") == "ouroboros/loop.py"
+                # Rows 2..3 of the unified render are the ADDITION (new line 2) and
+                # the trailing context line (new line 3), so the chip is named by the
+                # NEW-side range and carries those two lines.
+                assert chip_label.first.inner_text().strip() == "loop.py · 2 lines"
+                # A capture with NO selection is the whole file: one bare marker.
+                page.evaluate("() => window.getSelection().removeAllRanges()")
+                page.evaluate(
+                    "() => window.dispatchEvent(new CustomEvent('ouro:capture-selection',"
+                    " { detail: { page: 'changes' }, cancelable: true }))"
+                )
+                assert chip.count() == 2
+                assert chip_label.nth(1).inner_text().strip() == "loop.py"
+
+                # The inspector opens on the card event and is a right panel.
+                page.evaluate(
+                    "() => window.dispatchEvent(new CustomEvent('ouro:inspect-task',"
+                    " { detail: { taskId: 'diff-smoke' } }))"
+                )
+                panel = page.locator('#task-inspector')
+                panel.wait_for(state="visible", timeout=15_000)
+                panel.locator('[data-inspector-file="ouroboros/loop.py"]')\
+                    .wait_for(state="visible", timeout=15_000)
+                footer = panel.locator('.inspector-footer')
+                assert "+3" in footer.inner_text() and "−1" in footer.inner_text()
+                assert "$0.42" in footer.inner_text()
+                assert "1m 35s" in footer.inner_text()
+                panel.locator('[data-inspector-tab="cost"]').click()
+                cost_text = panel.locator('.inspector-body').inner_text()
+                assert "Task cost" in cost_text and "$0.42" in cost_text
+                assert "LLM rounds" in cost_text and "1200 / 300" in cost_text
+                page.screenshot(path=str(data_dir.parent / "inspector-cost.png"), full_page=True)
+
+                # Mutual exclusion: opening the inspector while a project panel is
+                # open closes that panel, and leaving Chat/Changes closes the
+                # inspector (it belongs to the chat surface).
+                page.click('[data-nav-page="chat"]')
+                page.evaluate(
+                    "() => window.dispatchEvent(new CustomEvent('ouro:inspect-task',"
+                    " { detail: { taskId: 'diff-smoke' } }))"
+                )
+                panel.wait_for(state="visible", timeout=15_000)
+
+                # The right side is ONE slot: a project panel opened while the
+                # inspector is up evicts it, and the inspector opened over a project
+                # panel evicts that. Asserting only the second direction would leave
+                # the shared slot half-tested.
+                project_panel = page.locator('#project-panel')
+                project_row = page.locator('.nav-project-row[data-project-id="alpha"]')
+                project_row.wait_for(state="visible", timeout=15_000)
+                project_row.click()
+                project_panel.wait_for(state="visible", timeout=15_000)
+                panel.wait_for(state="hidden", timeout=15_000)
+                page.evaluate(
+                    "() => window.dispatchEvent(new CustomEvent('ouro:inspect-task',"
+                    " { detail: { taskId: 'diff-smoke' } }))"
+                )
+                panel.wait_for(state="visible", timeout=15_000)
+                project_panel.wait_for(state="hidden", timeout=15_000)
+
+                page.click('[data-nav-page="settings"]')
+                panel.wait_for(state="hidden", timeout=15_000)
+            finally:
+                browser.close()
+    except PlaywrightError as exc:
+        if "Executable doesn't exist" in str(exc) or "playwright install" in str(exc).lower():
+            pytest.skip(str(exc))
+        raise
+
+
+@pytest.mark.ui_browser
+def test_ui_smoke_composer_parts_chip_dom_behaviours(direct_server):
+    """The composer_parts DOM MOUNT, which the pure node tests cannot reach.
+
+    The reducer and the codec are node-tested; what needs a real browser is the four
+    mount interactions, each of which can only go wrong in the DOM:
+
+      1. a capture renders as a `.composer-part-chip` BEFORE the live input, so the
+         field previews what will be sent, in order, with the fenced bytes HIDDEN;
+      2. the chip's `×` removes that chip and nothing else, and hands focus back to
+         the input so typing continues uninterrupted;
+      3. Backspace pops the trailing part only when the input is EMPTY — with text in
+         it, Backspace is still ordinary text editing;
+      4. ArrowUp recall refills the WHOLE field, chips included, rather than letting a
+         recalled capture degrade into a marker's worth of plain text.
+
+    Recall is also how the chips get here: seeding the session history with the exact
+    bytes a capture sends drives the same path the owner's ArrowUp does, so no test-only
+    hook into the controller is needed. Nothing is sent, so the composer must survive.
+    """
+    pytest.importorskip("playwright.sync_api", reason="Playwright is not installed")
+    from playwright.sync_api import Error as PlaywrightError
+    from playwright.sync_api import sync_playwright
+
+    # Exactly what the composer serializes for "capture 3 lines, then type a question":
+    # marker + fence + a comment. `ouro_chat_input_history` is read at instance
+    # construction, so this must be in place BEFORE the page scripts run.
+    captured = (
+        "[context: ouroboros/loop.py L10-L12]\n"
+        "```\n"
+        "    window = COOLDOWN_S\n"
+        "    window += jitter\n"
+        "    return window\n"
+        "```\n"
+        "why this window?"
+    )
+
+    try:
+        with sync_playwright() as pw:
+            browser = pw.chromium.launch(headless=True)
+            page = browser.new_page(viewport={"width": 1280, "height": 800})
+            try:
+                page.add_init_script(
+                    "sessionStorage.setItem('ouro_chat_input_history', %s);"
+                    % json.dumps(json.dumps([captured]))
+                )
+                page.goto(direct_server, wait_until="domcontentloaded", timeout=30_000)
+                page.wait_for_selector("#chat-input", timeout=30_000)
+                assert page.locator("#chat-parts").count() == 1
+
+                # (4 + 1) ArrowUp recalls the whole field: the capture comes back as a
+                # CHIP plus the typed comment, not as raw grammar.
+                page.click("#chat-input")
+                page.press("#chat-input", "ArrowUp")
+                page.wait_for_selector("#chat-parts .composer-part-chip", timeout=5_000)
+                label = page.locator("#chat-parts .composer-part-chip-label")
+                assert label.count() == 1
+                # The label counts the BYTES the chip carries and shows the basename.
+                assert label.first.inner_text() == "loop.py · 3 lines"
+                # The comment recalled as the live input, where the caret belongs.
+                assert page.input_value("#chat-input") == "why this window?"
+                # The fenced bytes ride the payload, never the visible field.
+                parts_text = page.locator("#chat-parts").inner_text()
+                assert "COOLDOWN_S" not in parts_text
+                assert "```" not in parts_text
+                # Order is the message: every committed part precedes the live input.
+                assert page.evaluate(
+                    """() => {
+                        const nodes = [...document.querySelectorAll('#chat-parts [data-composer-part]')];
+                        const input = document.getElementById('chat-input');
+                        return nodes.length > 0 && nodes.every((n) => Boolean(
+                            n.compareDocumentPosition(input) & Node.DOCUMENT_POSITION_FOLLOWING));
+                    }"""
+                )
+
+                # (3) Backspace with text in the field edits TEXT, not the parts.
+                page.fill("#chat-input", "ab")
+                page.press("#chat-input", "Backspace")
+                assert page.input_value("#chat-input") == "a"
+                assert page.locator("#chat-parts .composer-part-chip").count() == 1
+                page.press("#chat-input", "Backspace")
+                assert page.input_value("#chat-input") == ""
+
+                # ...and only on an EMPTY input does it pop the trailing part.
+                page.press("#chat-input", "Backspace")
+                page.wait_for_function(
+                    "() => document.querySelectorAll('#chat-parts .composer-part-chip').length === 0"
+                )
+                assert page.input_value("#chat-input") == "", "popping a part must not type"
+
+                # (2) Recall again, then remove the chip with its own × control.
+                page.press("#chat-input", "ArrowUp")
+                page.wait_for_selector("#chat-parts .composer-part-chip", timeout=5_000)
+                page.locator("#chat-parts .composer-part-chip .composer-part-remove").first.click()
+                page.wait_for_function(
+                    "() => document.querySelectorAll('#chat-parts .composer-part-chip').length === 0"
+                )
+                # Focus returns to the input: removing a chip is mid-composition.
+                assert page.evaluate("() => document.activeElement.id") == "chat-input"
+
+                # Nothing was sent, and the composer is still the composer.
+                assert page.locator("#chat-input").count() == 1
+                assert page.locator("#chat-send").count() == 1
             finally:
                 browser.close()
     except PlaywrightError as exc:

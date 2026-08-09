@@ -61,9 +61,12 @@ export function initUpdateStatus({ showPage, openDashboardTab, ws } = {}) {
             pill.className = 'update-pill';
             pill.hidden = true;
             pill.addEventListener('click', openUpdateDialog);
-            const anchor = document.getElementById('nav-version');
-            if (anchor && anchor.parentNode) {
-                anchor.parentNode.insertBefore(pill, anchor.nextSibling);
+            // Dedicated sidebar footer slot: the pill is a full row of its own, so
+            // it cannot inflate the compact brand sub line that carries the
+            // version + liveness dot.
+            const slot = document.getElementById('nav-update-slot');
+            if (slot) {
+                slot.appendChild(pill);
             } else {
                 document.body.appendChild(pill);
             }

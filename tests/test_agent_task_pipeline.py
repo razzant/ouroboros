@@ -554,6 +554,10 @@ def test_task_result_and_task_done_mirror_authoritative_review_status(tmp_path, 
     assert stored["review_status"]["status"] == "pass"
     done = next(row for row in pending_events if row["type"] == "task_done")
     assert done["review_status"] == stored["review_status"]
+    # The durable elapsed scalar is the SAME value the task_metrics event carries,
+    # never an independently re-derived second timing.
+    metrics = next(row for row in pending_events if row["type"] == "task_metrics")
+    assert stored["duration_sec"] == metrics["duration_sec"]
 
 
 def test_emit_task_results_ephemeral_turn_skips_all_durable_memory(tmp_path, monkeypatch):
@@ -1260,6 +1264,70 @@ def test_store_task_result_persists_review_evidence(tmp_path):
     payload = json.loads((tmp_path / "task_results" / "task-store.json").read_text(encoding="utf-8"))
     assert payload["review_evidence"]["has_evidence"] is True
     assert payload["review_evidence"]["open_obligations"][0]["item"] == "tests_affected"
+
+
+def test_store_task_result_persists_duration_sec_on_completed_and_failed(tmp_path):
+    """Elapsed time must be durable, not only a live ``task_metrics`` event field.
+
+    An owner surface reading ``task_results/<id>.json`` (the task inspector footer)
+    can otherwise never show elapsed honestly for a task whose event stream it never
+    saw. Both terminal paths persist the SAME scalar ``emit_task_results`` computed,
+    and a caller without timing omits the key rather than writing a fabricated 0.
+    """
+    env = SimpleNamespace(drive_root=tmp_path)
+
+    pipeline._store_task_result(
+        env=env,
+        task={"id": "task-duration-ok", "type": "task", "text": "hi"},
+        text="done",
+        usage={"rounds": 1, "cost": 0.0},
+        llm_trace={"tool_calls": [], "reasoning_notes": []},
+        result_fields={"duration_sec": 12.5},
+    )
+    payload = json.loads((tmp_path / "task_results" / "task-duration-ok.json").read_text(encoding="utf-8"))
+    assert payload["status"] == pipeline.STATUS_COMPLETED
+    assert payload["duration_sec"] == 12.5
+
+    # Failed path: the pre-existing failed status is preserved AND still timed.
+    pipeline.write_task_result(tmp_path, "task-duration-failed", pipeline.STATUS_FAILED)
+    pipeline._store_task_result(
+        env=env,
+        task={"id": "task-duration-failed", "type": "task", "text": "hi"},
+        text="broke",
+        usage={"rounds": 1, "cost": 0.0},
+        llm_trace={"tool_calls": [], "reasoning_notes": []},
+        result_fields={"duration_sec": 3.25},
+    )
+    payload = json.loads((tmp_path / "task_results" / "task-duration-failed.json").read_text(encoding="utf-8"))
+    assert payload["status"] == pipeline.STATUS_FAILED
+    assert payload["duration_sec"] == 3.25
+
+    pipeline._store_task_result(
+        env=env,
+        task={"id": "task-duration-absent", "type": "task", "text": "hi"},
+        text="done",
+        usage={"rounds": 1, "cost": 0.0},
+        llm_trace={"tool_calls": [], "reasoning_notes": []},
+    )
+    payload = json.loads((tmp_path / "task_results" / "task-duration-absent.json").read_text(encoding="utf-8"))
+    assert "duration_sec" not in payload
+
+
+def test_public_task_result_keeps_persisted_duration_sec(tmp_path):
+    """The public projection strips only result_status keys — elapsed survives."""
+    from ouroboros.outcomes import public_task_result
+
+    env = SimpleNamespace(drive_root=tmp_path)
+    pipeline._store_task_result(
+        env=env,
+        task={"id": "task-duration-public", "type": "task", "text": "hi"},
+        text="done",
+        usage={"rounds": 1, "cost": 0.0},
+        llm_trace={"tool_calls": [], "reasoning_notes": []},
+        result_fields={"duration_sec": 7.0},
+    )
+    stored = pipeline.load_task_result(tmp_path, "task-duration-public")
+    assert public_task_result(stored)["duration_sec"] == 7.0
 
 
 def test_store_task_result_persists_only_compact_review_projection(tmp_path):

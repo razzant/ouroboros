@@ -210,9 +210,16 @@ def test_repair_prompt_has_make_runnable_conversion_hint():
 
 def test_files_header_does_not_duplicate_directory_description():
     src = _web("modules/files.js")
-    # The file-manager blurb stays in the preview pane, not the page header.
+    # v6.12 bug: the directory blurb was rendered TWICE — once in the page header
+    # and once in the preview pane. The read-only Files page has no directory meta
+    # blurb at all (`defaultDirectoryMeta()` went with the file manager), so the
+    # duplication is now structurally impossible rather than merely avoided. The
+    # negative assertion stays as the standing guarantee; the old positive pin on
+    # `defaultDirectoryMeta()` is dropped because the function no longer exists —
+    # requiring a deleted helper would only re-fail the day someone deletes it
+    # again. The whole name is asserted absent so a reintroduced blurb is caught.
     assert "description: defaultDirectoryMeta()" not in src
-    assert "defaultDirectoryMeta()" in src  # still used for the preview default
+    assert "defaultDirectoryMeta" not in src
 
 
 def test_mcp_settings_imports_apifetch_for_status_refresh():

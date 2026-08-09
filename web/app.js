@@ -2,8 +2,8 @@
 
 import { createWS } from './modules/ws.js';
 import { apiFetch, fetchJson } from './modules/api_client.js';
-import { loadVersion, initMatrixRain } from './modules/utils.js';
-import { initChat, createChatInstance } from './modules/chat.js';
+import { loadVersion } from './modules/utils.js';
+import { initChat, createChatInstance, headerBudgetPresentation } from './modules/chat.js';
 import { initFiles } from './modules/files.js';
 import { apiClient } from './modules/api_client.js';
 import { openNewProjectDialog, openProjectRowMenu } from './modules/project_create.js';
@@ -19,6 +19,7 @@ import { initActivity } from './modules/activity.js';
 import { initUpdateStatus } from './modules/update_status.js';
 import { initDashboard } from './modules/dashboard.js';
 import { hydrateNavIcons } from './modules/page_icons.js';
+import { createStatePoll } from './modules/state_poll.js';
 
 import { initOnboardingOverlay } from './modules/onboarding_overlay.js';
 
@@ -50,7 +51,13 @@ const navState = {
     activeProjectId: null,
     projectsExpanded: true,
     mobileDrawerOpen: false,
+    // Right panel = ONE slot with mutually exclusive kinds. 'project' is the
+    // existing project thread; other kinds (e.g. 'inspector') register their
+    // mount/unmount against the state machine below.
+    panelKind: null,
 };
+// kind -> { mount(opts) => boolean|Promise<boolean>, unmount() }
+const rightPanelRegistry = {};
 const primarySidebar = document.getElementById('primary-sidebar');
 const navDrawerBackdrop = document.getElementById('nav-drawer-backdrop');
 const projectPanelBackdrop = document.getElementById('project-panel-backdrop');
@@ -61,6 +68,11 @@ const navProjects = document.getElementById('nav-projects');
 const navProjectsToggle = document.getElementById('nav-projects-toggle');
 const navProjectsCount = document.getElementById('nav-projects-count');
 const navProjectsList = document.getElementById('nav-projects-list');
+const navBrand = document.getElementById('nav-brand');
+const navBrandStatus = document.getElementById('nav-brand-status');
+const navBudget = document.getElementById('nav-budget');
+const navBudgetAmount = document.getElementById('nav-budget-amount');
+const navBudgetBar = document.getElementById('nav-budget-bar');
 const projectInstances = new Map();
 const projectPaintRequests = new Map();
 let knownProjectsJson = '';
@@ -196,6 +208,100 @@ hydrateNavIcons();
 // lives in chat.js), so a fast project open never competes with Main replay.
 let projectPanelOpeningSince = 0;
 
+// ---------------------------------------------------------------------------
+// Single /api/state poll owner. Before this there were TWO timers —
+// app.js polled every 20s for the projects nav and every chat instance polled
+// every 3s for the header controls — so an open project panel multiplied the
+// request rate. Now ONE app-owned fetch publishes the same snapshot to every
+// consumer through `subscribeState`, and ONE self-scheduling timer sets the
+// cadence: ~3s while the Chat page is visible (live budget/mode feedback),
+// ~20s elsewhere, and paused entirely while the document is hidden.
+//
+// This consolidates TIMERS ONLY. The refresh ENTRY POINTS are unchanged: the
+// startup barrier below still awaits `refreshProjectsNav()` before opening the
+// socket, `projects_changed` still adds its chat_id synchronously and then
+// refreshes, and create/delete still force an imperative refresh.
+// ---------------------------------------------------------------------------
+// The subscriber fan-out, the single-flight coalescing and the cadence decision are
+// the `state_poll.js` core (node-tested there against fake timers). What stays HERE is
+// the impure half: the fetch itself, plus the nav/bindings side effects only this
+// module can perform. `activePage` and `hidden` are passed as GETTERS, so each arming
+// decides the cadence from live state instead of a value captured at startup.
+
+// The ONE /api/state read. A failed read resolves to an explicitly unavailable
+// accounting shape so money surfaces render "Unavailable" rather than a convincing $0
+// (fail closed); it never REJECTS, because a transient network blip must not be
+// indistinguishable from "there is no budget".
+async function readStateSnapshot() {
+    try {
+        const resp = await apiFetch('/api/state', { cache: 'no-store' });
+        if (!resp.ok) return { accounting: { available: false } };
+        const data = await resp.json();
+        renderProjectsNav(data.projects || [], data.project_chat_ids);
+        applyTaskBindings(data.task_bindings || {});
+        return data;
+    } catch {
+        return { accounting: { available: false } };
+    }
+}
+
+const statePoll = createStatePoll({
+    read: readStateSnapshot,
+    activePage: () => state.activePage,
+    hidden: () => document.hidden,
+    setTimer: (fn, ms) => setTimeout(fn, ms),
+    clearTimer: (handle) => clearTimeout(handle),
+});
+
+const subscribeState = statePoll.subscribe;
+const refreshState = () => statePoll.refresh();
+const scheduleStatePoll = () => statePoll.schedule();
+
+// Historical name kept because it is the startup barrier's contract and the
+// imperative create/delete refresh call-site name.
+function refreshProjectsNav() {
+    return refreshState();
+}
+
+// The poll core owns its timer HANDLE (`createStatePoll` closes over it), so the
+// pause is `statePoll.stop()` — the seam the module exports for exactly this.
+// Consolidation moved that handle inside the core, which is why no module-scope
+// timer variable may be named here: it would be a ReferenceError on every tab
+// hide, not a dead line. The static pin in test_navigation_shell_static.py holds
+// the old identifier out of this file entirely.
+document.addEventListener('visibilitychange', () => {
+    if (document.hidden) {
+        statePoll.stop();  // paused, not backed off: a hidden tab spends nothing
+        return;
+    }
+    // Catch up on what was missed; the read's SETTLE re-arms the timer itself.
+    refreshState();
+});
+// Entering/leaving Chat changes the cadence, so re-arm on navigation.
+window.addEventListener('ouro:page-shown', () => scheduleStatePoll());
+
+// Sidebar budget meter: `headerBudgetPresentation` stays the ONE budget
+// formatting projection (fail-closed "Unavailable", never a fake $0); the bar
+// fill is a dynamic CSS custom property, never a .style.width assignment.
+function renderSidebarBudget(data) {
+    const budget = headerBudgetPresentation(data);
+    if (navBudgetAmount) navBudgetAmount.textContent = budget.label;
+    if (navBudgetBar) {
+        navBudgetBar.dataset.budgetState = budget.state;
+        navBudgetBar.style.setProperty('--budget-fill', `${budget.fillPct}%`);
+    }
+}
+subscribeState(renderSidebarBudget);
+navBudget?.addEventListener('click', () => openDashboardTab('costs'));
+
+// Brand-row liveness: the green dot mirrors the ONE shared socket's state.
+function setBrandOnline(online) {
+    if (navBrand) navBrand.dataset.online = online ? 'true' : 'false';
+    if (navBrandStatus) navBrandStatus.textContent = online ? 'online' : 'offline';
+}
+ws.on('open', () => setBrandOnline(true));
+ws.on('close', () => setBrandOnline(false));
+
 const ctx = {
     ws,
     state,
@@ -212,10 +318,118 @@ const ctx = {
             if (idx >= 0) beforePageLeaveHandlers.splice(idx, 1);
         };
     },
+    // The ONE /api/state snapshot: subscribe for updates, or force a read after
+    // an owner control write. No module opens its own poll timer.
+    subscribeState,
+    refreshState: () => refreshState(),
+    // Right-panel state machine (kinds are mutually exclusive).
+    registerRightPanel,
+    openRightPanel: (kind, opts) => openRightPanel(kind, opts),
+    closeRightPanel: (opts) => closeRightPanel(opts),
 };
 
-initChat(ctx);
+// The main chat controller is KEPT (it used to be discarded): other screens
+// hand ordered composer parts to the chat through `setDraftParts`/`sendParts`
+// instead of reaching into chat.js internals.
+const chatController = initChat(ctx);
+
+export function getChatController() {
+    return chatController;
+}
+ctx.getChatController = getChatController;
+
+// Empty `changes` page container. The Changes screen module replaces its
+// contents; the nav row already routes here through the normal showPage path.
+const changesPage = document.createElement('section');
+changesPage.id = 'page-changes';
+changesPage.className = 'page';
+document.getElementById('content')?.appendChild(changesPage);
+
 initFiles(ctx);
+
+// "Is the user typing into this?" — ONE selector list and ONE disabled/readOnly
+// rule, shared by the mobile soft-keyboard geometry code (which needs to know
+// whether a viewport shrink belongs to a focused field) and by the ⌘L capture
+// handler (which must let a focused field keep the keystroke). Returns the
+// editable ELEMENT so callers can ask further questions about it — the capture
+// handler checks whether it lives inside a capture dock.
+const KEYBOARD_EDITABLE_SELECTOR = [
+    'textarea',
+    'select',
+    'input:not([type])',
+    'input[type="text"]',
+    'input[type="search"]',
+    'input[type="email"]',
+    'input[type="url"]',
+    'input[type="tel"]',
+    'input[type="password"]',
+    'input[type="number"]',
+    '[contenteditable]:not([contenteditable="false"])',
+].join(',');
+
+function isKeyboardEditable(node) {
+    if (!(node instanceof Element)) return null;
+    const editable = node.closest(KEYBOARD_EDITABLE_SELECTOR);
+    if (!editable) return null;
+    if (editable.matches('input, textarea, select') && (editable.disabled || editable.readOnly)) {
+        return null;
+    }
+    return editable;
+}
+
+/* [anchor:phase-B] right-panel registrations */
+// The Changes screen fills the `page-changes` container created above; the task
+// inspector registers itself as the `inspector` right-panel kind (mutually
+// exclusive with the project panel) and opens on `ouro:inspect-task`.
+// The imports live in this region deliberately: ES module imports are hoisted, so
+// keeping them here makes the whole phase-B wiring one append-only block instead
+// of a second edit in the shared import header.
+import { initChanges } from './modules/changes.js';
+import { initTaskInspector } from './modules/task_inspector.js';
+
+// The Changes screen owns its own dock, and the CANCELABLE `ouro:capture-selection`
+// event (`[anchor:phase-C]`) is the ONE capture seam: the global handler names the
+// active page, the owning page consumes it. Nothing here holds a handle into the
+// module, so there is no second path into that dock that could silently diverge.
+initChanges(ctx);
+initTaskInspector(ctx);
+
+/* [anchor:phase-C] global capture hotkey */
+// ⌘L / Ctrl+L = "add what I'm looking at to chat context". This handler knows
+// NOTHING about Files or Changes internals: it decides only WHETHER a capture is
+// wanted and names the active page in one `ouro:capture-selection` event; the
+// page that owns the surface listens and does the capture (files.js today, the
+// Changes dock next). With no listener the event is a harmless noop.
+//
+// The hotkey is best-effort by decision 10 — some browsers reserve ⌘L for the
+// address bar and never deliver it — so the always-visible "Add to chat" /
+// "Add selection" buttons remain the guaranteed path, not a convenience.
+//
+// Typing must win: while an editable other than a capture dock has focus, the
+// keystroke belongs to that editable. The test is the shared `isKeyboardEditable`
+// above — one selector list for the whole app, no second definition to drift.
+//
+// Suppressing the browser default is conditional on somebody actually CONSUMING
+// the capture: the event is dispatched cancelable, and only a listener that calls
+// preventDefault (i.e. the page owning the surface really captured) earns the
+// `event.preventDefault()` here. With no such listener ⌘L falls through to the
+// browser, which is the honest outcome — silently swallowing the address-bar
+// shortcut to do nothing would be worse than not handling it.
+const CAPTURE_PAGES = new Set(['files', 'changes']);
+
+document.addEventListener('keydown', (event) => {
+    if (!(event.metaKey || event.ctrlKey) || event.altKey || event.shiftKey) return;
+    if (String(event.key).toLowerCase() !== 'l') return;
+    if (!CAPTURE_PAGES.has(state.activePage)) return;
+    const editable = isKeyboardEditable(document.activeElement);
+    if (editable && !editable.closest('[data-capture-dock]')) return;
+    const request = new CustomEvent('ouro:capture-selection', {
+        detail: { page: state.activePage },
+        cancelable: true,
+    });
+    window.dispatchEvent(request);
+    if (request.defaultPrevented) event.preventDefault();
+});
 
 // ---------------------------------------------------------------------------
 // Multi-project navigation + right thread panel (v6.32.0). Projects come from
@@ -248,7 +462,47 @@ function destroyProjectInstance(pid) {
     projectPaintRequests.delete(pid);
 }
 
-function closeProjectPanel({ sync = true } = {}) {
+// The right panel is ONE slot. `openRightPanel`/`closeRightPanel` are the state
+// machine; a later module registers its own kind (e.g. the task inspector) via
+// `registerRightPanel` and gets mutual exclusion for free. The project kind
+// keeps its exact previous behaviour, including its persisted drag width.
+function registerRightPanel(kind, handlers) {
+    const name = String(kind || '').trim();
+    if (!name || name === 'project') return () => {};
+    rightPanelRegistry[name] = handlers || {};
+    return () => {
+        if (navState.panelKind === name) closeRightPanel();
+        delete rightPanelRegistry[name];
+    };
+}
+
+async function openRightPanel(kind, opts = {}) {
+    if (kind === 'project') return openProjectPanel(opts.project, opts);
+    const entry = rightPanelRegistry[kind];
+    if (!entry || typeof entry.mount !== 'function') return false;
+    if (navState.panelKind && navState.panelKind !== kind) closeRightPanel({ sync: false });
+    navState.panelKind = kind;
+    let mounted = true;
+    try {
+        mounted = (await entry.mount(opts)) !== false;
+    } catch {
+        mounted = false;
+    }
+    if (!mounted) navState.panelKind = null;
+    syncNavigationState();
+    return mounted;
+}
+
+// Closing the slot runs the registered kind's unmount AND the project teardown:
+// the project kind's single-live-panel policy (destroy the active instance,
+// stash its scroll intent, keep pending-work survivors hidden) is unchanged —
+// it just lives behind the generalized close now.
+function closeRightPanel({ sync = true } = {}) {
+    const kind = navState.panelKind;
+    if (kind && kind !== 'project') {
+        try { rightPanelRegistry[kind]?.unmount?.(); } catch {}
+    }
+    navState.panelKind = null;
     const activeId = navState.activeProjectId;
     navState.activeProjectId = null;
     if (activeId) destroyProjectInstance(activeId);
@@ -260,12 +514,19 @@ function closeProjectPanel({ sync = true } = {}) {
     if (sync) syncNavigationState();
 }
 
+// Historical name kept: it is what every project-close call site says.
+function closeProjectPanel(options = {}) {
+    closeRightPanel(options);
+}
+
 async function openProjectPanel(project, { closeDrawer = true } = {}) {
     if (!project?.id || String(project.lifecycle || 'active') !== 'active') return;
     if (navState.activeProjectId === project.id) {
         closeProjectPanel();
         return;
     }
+    // Mutual exclusion: any other right-panel kind vacates the ONE slot first.
+    if (navState.panelKind && navState.panelKind !== 'project') closeRightPanel({ sync: false });
     // perf2 P4.2: signal chat.js that a panel open is in flight so Main's
     // deferred first hydration yields the CPU to this build/paint.
     projectPanelOpeningSince = Date.now();
@@ -273,6 +534,7 @@ async function openProjectPanel(project, { closeDrawer = true } = {}) {
         const movedToChat = await showPage('chat', { closeProject: false, closeDrawer: false });
         if (movedToChat === false) return;
         navState.activeProjectId = project.id;
+        navState.panelKind = 'project';
         projectPanelTitle.textContent = project.name || project.id;
         // One live panel: every OTHER project instance is destroyed (or hidden and
         // marked when it holds pending work) before the target is created/shown.
@@ -527,16 +789,6 @@ document.getElementById('nav-projects-add')?.addEventListener('click', async (ev
     }
 });
 
-async function refreshProjectsNav() {
-    try {
-        const resp = await apiFetch('/api/state', { cache: 'no-store' });
-        if (!resp.ok) return;
-        const data = await resp.json();
-        renderProjectsNav(data.projects || [], data.project_chat_ids);
-        applyTaskBindings(data.task_bindings || {});
-    } catch {}
-}
-
 // A task bound to a project (e.g. a project-chat follow-up) is ALREADY a project
 // task. Its main-chat card drops the stray "turn into project" affordance (P2)
 // and instead shows a calm pointer that opens the bound project's panel (F4).
@@ -685,7 +937,6 @@ ws.on('projects_changed', (msg) => {
     if (cid) state.projectChatIds.add(cid);
     refreshProjectsNav();
 });
-setInterval(refreshProjectsNav, 20000);
 settingsControls = initSettings(ctx);
 dashboardControls = initDashboard(ctx);
 initLogs({ ...ctx, mount: document.getElementById('dashboard-panel-logs') });
@@ -699,7 +950,6 @@ initUpdateStatus(ctx);
 
 initOnboardingOverlay();
 
-initMatrixRain();
 loadVersion();
 syncNavigationState();
 
@@ -711,20 +961,6 @@ syncNavigationState();
     vvhStyle.id = 'runtime-vvh';
     document.head.appendChild(vvhStyle);
 
-    const keyboardEditableSelector = [
-        'textarea',
-        'select',
-        'input:not([type])',
-        'input[type="text"]',
-        'input[type="search"]',
-        'input[type="email"]',
-        'input[type="url"]',
-        'input[type="tel"]',
-        'input[type="password"]',
-        'input[type="number"]',
-        '[contenteditable]:not([contenteditable="false"])',
-    ].join(',');
-
     let keyboardOpen = false;
     let keyboardTouchStartY = 0;
     let stableViewportHeight = 0;
@@ -732,18 +968,10 @@ syncNavigationState();
     let focusRevision = 0;
     let baselineFrame = 0;
 
-    function keyboardEditable(node) {
-        if (!(node instanceof Element)) return null;
-        const editable = node.closest(keyboardEditableSelector);
-        if (!editable) return null;
-        if (editable.matches('input, textarea, select') && (editable.disabled || editable.readOnly)) {
-            return null;
-        }
-        return editable;
-    }
-
+    // The editable test is the module-scope `isKeyboardEditable` (shared with the
+    // ⌘L capture handler); this IIFE only asks the question about focus.
     function focusedKeyboardEditable() {
-        return keyboardEditable(document.activeElement);
+        return isKeyboardEditable(document.activeElement);
     }
 
     function viewportHeight() {
@@ -841,14 +1069,14 @@ syncNavigationState();
     };
 
     document.addEventListener('focusin', (event) => {
-        if (!keyboardEditable(event.target)) return;
+        if (!isKeyboardEditable(event.target)) return;
         focusRevision += 1;
         cancelBaselineFrame();
         focusBaselineHeight = stableViewportHeight || viewportHeight();
         updateVvh();
     });
     document.addEventListener('focusout', (event) => {
-        if (!keyboardEditable(event.target)) return;
+        if (!isKeyboardEditable(event.target)) return;
         focusRevision += 1;
         const revision = focusRevision;
         cancelBaselineFrame();
