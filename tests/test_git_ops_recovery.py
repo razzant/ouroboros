@@ -4,6 +4,8 @@ import subprocess
 import time
 from types import SimpleNamespace
 
+import pytest
+
 import supervisor.git_ops as git_ops
 
 
@@ -505,26 +507,22 @@ def test_checkout_and_reset_blocks_when_status_read_is_unreadable(monkeypatch, t
     monkeypatch.setattr(git_ops, "REPO_DIR", tmp_path)
     monkeypatch.setattr(git_ops, "DRIVE_ROOT", tmp_path / "data")
     monkeypatch.setattr(git_ops, "_has_remote", lambda name=None: False)
-    monkeypatch.setattr(git_ops, "load_state", lambda: {})
-    monkeypatch.setattr(
-        git_ops,
-        "_collect_repo_sync_state",
-        lambda: {
-            "current_branch": "ouroboros",
-            "dirty_lines": [],
-            "unpushed_lines": [],
-            "warnings": ["status_error:fatal: unreadable index"],
-        },
-    )
     events = []
     monkeypatch.setattr(git_ops, "append_jsonl", lambda path, payload: events.append(payload))
 
-    def fake_run(cmd, cwd=None, capture_output=False, text=False, check=False, env=None):
-        if cmd[:2] == ["git", "rev-parse"] and cmd[-1] == "HEAD":
-            return subprocess.CompletedProcess(cmd, 0, stdout="abc123\n", stderr="")
+    def fake_capture(cmd):
+        if cmd == ["git", "rev-parse", "--abbrev-ref", "HEAD"]:
+            return 0, "ouroboros", ""
+        if cmd == ["git", "status", "--porcelain"]:
+            return -9, "", ""
         raise AssertionError(cmd)
 
-    monkeypatch.setattr(git_ops.subprocess, "run", fake_run)
+    monkeypatch.setattr(git_ops, "git_capture", fake_capture)
+    monkeypatch.setattr(
+        git_ops,
+        "_run_git_resilient",
+        lambda *args, **kwargs: (_ for _ in ()).throw(AssertionError((args, kwargs))),
+    )
 
     ok, message = git_ops.checkout_and_reset(
         "ouroboros", reason="restart", unsynced_policy="block",
@@ -534,7 +532,40 @@ def test_checkout_and_reset_blocks_when_status_read_is_unreadable(monkeypatch, t
     assert "status_unreadable" in message
     assert events and events[-1]["type"] == "reset_blocked_unsynced_state"
     assert events[-1]["dirty_count"] == 0
-    assert events[-1]["warnings"] == ["status_error:fatal: unreadable index"]
+    assert events[-1]["warnings"] == ["status_error:git status exited -9 without stderr"]
+
+
+@pytest.mark.serial
+def test_checkout_and_reset_blocks_clean_merge_in_linked_worktree(monkeypatch, tmp_path):
+    """A linked worktree stores MERGE_HEAD outside its .git pointer file."""
+    repo = tmp_path / "repo"
+    linked = tmp_path / "linked"
+    repo.mkdir()
+    _git(repo, "init", "-q")
+    _git(repo, "config", "user.name", "Test")
+    _git(repo, "config", "user.email", "test@ouroboros")
+    _git(repo, "commit", "--allow-empty", "-qm", "base")
+    _git(repo, "branch", "-M", "main")
+    _git(repo, "branch", "side")
+    _git(repo, "commit", "--allow-empty", "-qm", "main")
+    _git(repo, "worktree", "add", "-q", str(linked), "side")
+    _git(linked, "commit", "--allow-empty", "-qm", "side")
+    _git(linked, "merge", "--no-commit", "--no-ff", "main")
+
+    assert _git(linked, "status", "--porcelain") == ""
+    merge_head = linked / _git(linked, "rev-parse", "--git-path", "MERGE_HEAD")
+    assert merge_head.is_file()
+
+    monkeypatch.setattr(git_ops, "REPO_DIR", linked)
+    monkeypatch.setattr(git_ops, "DRIVE_ROOT", tmp_path / "data")
+
+    ok, message = git_ops.checkout_and_reset(
+        "side", reason="restart", unsynced_policy="block",
+    )
+
+    assert ok is False
+    assert "merge_in_progress" in message
+    assert merge_head.is_file()
 
 
 def test_checkout_and_reset_blocks_on_unreadable_merge_head(monkeypatch, tmp_path):

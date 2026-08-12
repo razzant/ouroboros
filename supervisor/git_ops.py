@@ -442,8 +442,9 @@ def _collect_repo_sync_state() -> Dict[str, Any]:
     rc, dirty, err = git_capture(["git", "status", "--porcelain"])
     if rc == 0 and dirty:
         state["dirty_lines"] = [ln for ln in dirty.splitlines() if ln.strip()]
-    elif rc != 0 and err:
-        state["warnings"].append(f"status_error:{err}")
+    elif rc != 0:
+        detail = err or f"git status exited {rc} without stderr"
+        state["warnings"].append(f"status_error:{detail}")
 
     upstream = ""
     current_branch = str(state.get("current_branch") or "")
@@ -872,12 +873,23 @@ def _admission_gate_for_unsynced_tree(
     status_unreadable = any(
         str(w).startswith("status_error:") for w in (repo_state.get("warnings") or [])
     )
-    # Read MERGE_HEAD directly (no git process) since this runs on every call.
-    # A present file whose content is not a SHA is unreadable, not absent, per
-    # the issue's fix direction.
-    merge_head_path = _git_dir() / "MERGE_HEAD"
     merge_in_progress = False
     merge_head_unreadable = False
+    # Keep the process-free path for normal clones.  Linked worktrees use a
+    # .git pointer file, so ask Git for the worktree-specific admin path there.
+    git_dir = _git_dir()
+    merge_head_path = git_dir / "MERGE_HEAD"
+    if git_dir.is_file():
+        rc_path, merge_head_rel, _path_err = git_capture(
+            ["git", "rev-parse", "--git-path", "MERGE_HEAD"]
+        )
+        if rc_path == 0 and merge_head_rel:
+            merge_head_path = REPO_DIR / merge_head_rel
+        else:
+            merge_head_unreadable = True
+
+    # A present file whose content is not a SHA is unreadable, not absent, per
+    # the issue's fix direction.
     if merge_head_path.is_file():
         try:
             merge_head_content = merge_head_path.read_text(encoding="utf-8").strip()
