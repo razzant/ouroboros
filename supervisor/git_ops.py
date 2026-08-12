@@ -854,6 +854,173 @@ def _run_git_resilient(cmd, **kwargs):
     return subprocess.run(cmd, check=check, **kwargs)
 
 
+def _admission_gate_for_unsynced_tree(
+    branch: str, reason: str, policy: str, update_intent_target: str,
+) -> Optional[Tuple[bool, str]]:
+    """Apply unsynced_policy's block/rescue rules for checkout_and_reset.
+
+    Returns ``(False, msg)`` when the reset must stop here, or ``None`` to proceed.
+    """
+    repo_state = _collect_repo_sync_state()
+    dirty_lines = list(repo_state.get("dirty_lines") or [])
+    unpushed_lines = list(repo_state.get("unpushed_lines") or [])
+    unpushed_needs_rescue = bool(update_intent_target and unpushed_lines)
+
+    # A failed status read or an unconsulted MERGE_HEAD used to read as a clean
+    # tree; force the same rescue/block branch a dirty tree takes, matching the
+    # fail-closed read already used for the managed-update rollback path.
+    status_unreadable = any(
+        str(w).startswith("status_error:") for w in (repo_state.get("warnings") or [])
+    )
+    # Read MERGE_HEAD directly (no git process) since this runs on every call.
+    # A present file whose content is not a SHA is unreadable, not absent, per
+    # the issue's fix direction.
+    merge_head_path = _git_dir() / "MERGE_HEAD"
+    merge_in_progress = False
+    merge_head_unreadable = False
+    if merge_head_path.is_file():
+        try:
+            merge_head_content = merge_head_path.read_text(encoding="utf-8").strip()
+        except Exception:
+            merge_head_content = ""
+        if re.fullmatch(r"[0-9a-fA-F]{7,64}", merge_head_content):
+            merge_in_progress = True
+        else:
+            merge_head_unreadable = True
+
+    if dirty_lines or unpushed_needs_rescue or status_unreadable or merge_in_progress \
+            or merge_head_unreadable:
+        bits: List[str] = []
+        if unpushed_lines and (dirty_lines or unpushed_needs_rescue):
+            bits.append(f"unpushed={len(unpushed_lines)}")
+        if dirty_lines:
+            bits.append(f"dirty={len(dirty_lines)}")
+        if status_unreadable:
+            bits.append("status_unreadable")
+        if merge_in_progress:
+            bits.append("merge_in_progress")
+        if merge_head_unreadable:
+            bits.append("merge_head_unreadable")
+        detail = ", ".join(bits) if bits else "unsynced"
+        rescue_info: Dict[str, Any] = {}
+        if policy in {"rescue_and_block", "rescue_and_reset"}:
+            try:
+                rescue_info = _create_rescue_snapshot(
+                    branch=branch, reason=reason, repo_state=repo_state)
+            except Exception as e:
+                rescue_info = {"error": repr(e)}
+            if policy == "rescue_and_reset" and rescue_info.get("error"):
+                msg = (
+                    f"Reset blocked ({detail}) because rescue snapshot failed: "
+                    f"{rescue_info.get('error')}. Local changes were left untouched."
+                )
+                append_jsonl(
+                    DRIVE_ROOT / "logs" / "supervisor.jsonl",
+                    {
+                        "ts": utc_now_iso(),
+                        "type": "reset_blocked_rescue_failed",
+                        "target_branch": branch, "reason": reason, "policy": policy,
+                        "current_branch": repo_state.get("current_branch"),
+                        "dirty_count": len(dirty_lines),
+                        "unpushed_count": len(unpushed_lines),
+                        "dirty_preview": dirty_lines[:20],
+                        "unpushed_preview": unpushed_lines[:20],
+                        "warnings": list(repo_state.get("warnings") or []),
+                        "rescue": rescue_info,
+                        "incomplete_reason": "snapshot_error",
+                    },
+                )
+                return False, msg
+            if policy == "rescue_and_reset" and rescue_info.get("diff_error"):
+                msg = (
+                    f"Reset blocked ({detail}) because rescue diff capture failed: "
+                    f"{rescue_info.get('diff_error')}. Local changes were left untouched."
+                )
+                append_jsonl(
+                    DRIVE_ROOT / "logs" / "supervisor.jsonl",
+                    {
+                        "ts": utc_now_iso(),
+                        "type": "reset_blocked_rescue_incomplete",
+                        "target_branch": branch, "reason": reason, "policy": policy,
+                        "current_branch": repo_state.get("current_branch"),
+                        "dirty_count": len(dirty_lines),
+                        "unpushed_count": len(unpushed_lines),
+                        "dirty_preview": dirty_lines[:20],
+                        "unpushed_preview": unpushed_lines[:20],
+                        "warnings": list(repo_state.get("warnings") or []),
+                        "rescue": rescue_info,
+                        "incomplete_reason": "diff_error",
+                    },
+                )
+                return False, msg
+            untracked_rescue_error = _rescue_untracked_incomplete(rescue_info)
+            if policy == "rescue_and_reset" and untracked_rescue_error:
+                msg = (
+                    f"Reset blocked ({detail}) because untracked-file rescue was incomplete: "
+                    f"{untracked_rescue_error}. Local changes were left untouched."
+                )
+                append_jsonl(
+                    DRIVE_ROOT / "logs" / "supervisor.jsonl",
+                    {
+                        "ts": utc_now_iso(),
+                        "type": "reset_blocked_rescue_incomplete",
+                        "target_branch": branch, "reason": reason, "policy": policy,
+                        "current_branch": repo_state.get("current_branch"),
+                        "dirty_count": len(dirty_lines),
+                        "unpushed_count": len(unpushed_lines),
+                        "dirty_preview": dirty_lines[:20],
+                        "unpushed_preview": unpushed_lines[:20],
+                        "warnings": list(repo_state.get("warnings") or []),
+                        "rescue": rescue_info,
+                        "incomplete_reason": "untracked_rescue",
+                        "incomplete_detail": untracked_rescue_error,
+                    },
+                )
+                return False, msg
+        rescue_suffix = ""
+        rescue_path = str(rescue_info.get("path") or "").strip()
+        if rescue_path:
+            rescue_suffix = f" Rescue saved to {rescue_path}."
+        elif policy in {"rescue_and_block", "rescue_and_reset"} and rescue_info.get("error"):
+            rescue_suffix = f" Rescue failed: {rescue_info.get('error')}."
+
+        if policy in {"block", "rescue_and_block"}:
+            msg = f"Reset blocked ({detail}) to protect local changes.{rescue_suffix}"
+            append_jsonl(
+                DRIVE_ROOT / "logs" / "supervisor.jsonl",
+                {
+                    "ts": utc_now_iso(),
+                    "type": "reset_blocked_unsynced_state",
+                    "target_branch": branch, "reason": reason, "policy": policy,
+                    "current_branch": repo_state.get("current_branch"),
+                    "dirty_count": len(dirty_lines),
+                    "unpushed_count": len(unpushed_lines),
+                    "dirty_preview": dirty_lines[:20],
+                    "unpushed_preview": unpushed_lines[:20],
+                    "warnings": list(repo_state.get("warnings") or []),
+                    "rescue": rescue_info,
+                },
+            )
+            return False, msg
+
+        append_jsonl(
+            DRIVE_ROOT / "logs" / "supervisor.jsonl",
+            {
+                "ts": utc_now_iso(),
+                "type": "reset_unsynced_rescued_then_reset",
+                "target_branch": branch, "reason": reason, "policy": policy,
+                "current_branch": repo_state.get("current_branch"),
+                "dirty_count": len(dirty_lines),
+                "unpushed_count": len(unpushed_lines),
+                "dirty_preview": dirty_lines[:20],
+                "unpushed_preview": unpushed_lines[:20],
+                "warnings": list(repo_state.get("warnings") or []),
+                "rescue": rescue_info,
+            },
+        )
+    return None
+
+
 def checkout_and_reset(branch: str, reason: str = "unspecified",
                        unsynced_policy: str = "ignore") -> Tuple[bool, str]:
     managed_meta = _read_managed_repo_meta()
@@ -938,163 +1105,10 @@ def checkout_and_reset(branch: str, reason: str = "unspecified",
         policy = "ignore"
 
     if policy != "ignore":
-        repo_state = _collect_repo_sync_state()
-        dirty_lines = list(repo_state.get("dirty_lines") or [])
-        unpushed_lines = list(repo_state.get("unpushed_lines") or [])
-        unpushed_needs_rescue = bool(update_intent_target and unpushed_lines)
-
-        # A failed status read or an unconsulted MERGE_HEAD used to read as a clean
-        # tree; force the same rescue/block branch a dirty tree takes, matching the
-        # fail-closed read already used for the managed-update rollback path.
-        status_unreadable = any(
-            str(w).startswith("status_error:") for w in (repo_state.get("warnings") or [])
-        )
-        # Read MERGE_HEAD directly (no git process) since this runs on every call.
-        # A present file whose content is not a SHA is unreadable, not absent, per
-        # the issue's fix direction.
-        merge_head_path = _git_dir() / "MERGE_HEAD"
-        merge_in_progress = False
-        merge_head_unreadable = False
-        if merge_head_path.is_file():
-            try:
-                merge_head_content = merge_head_path.read_text(encoding="utf-8").strip()
-            except Exception:
-                merge_head_content = ""
-            if re.fullmatch(r"[0-9a-fA-F]{7,64}", merge_head_content):
-                merge_in_progress = True
-            else:
-                merge_head_unreadable = True
-
-        if dirty_lines or unpushed_needs_rescue or status_unreadable or merge_in_progress \
-                or merge_head_unreadable:
-            bits: List[str] = []
-            if unpushed_lines and (dirty_lines or unpushed_needs_rescue):
-                bits.append(f"unpushed={len(unpushed_lines)}")
-            if dirty_lines:
-                bits.append(f"dirty={len(dirty_lines)}")
-            if status_unreadable:
-                bits.append("status_unreadable")
-            if merge_in_progress:
-                bits.append("merge_in_progress")
-            if merge_head_unreadable:
-                bits.append("merge_head_unreadable")
-            detail = ", ".join(bits) if bits else "unsynced"
-            rescue_info: Dict[str, Any] = {}
-            if policy in {"rescue_and_block", "rescue_and_reset"}:
-                try:
-                    rescue_info = _create_rescue_snapshot(
-                        branch=branch, reason=reason, repo_state=repo_state)
-                except Exception as e:
-                    rescue_info = {"error": repr(e)}
-                if policy == "rescue_and_reset" and rescue_info.get("error"):
-                    msg = (
-                        f"Reset blocked ({detail}) because rescue snapshot failed: "
-                        f"{rescue_info.get('error')}. Local changes were left untouched."
-                    )
-                    append_jsonl(
-                        DRIVE_ROOT / "logs" / "supervisor.jsonl",
-                        {
-                            "ts": utc_now_iso(),
-                            "type": "reset_blocked_rescue_failed",
-                            "target_branch": branch, "reason": reason, "policy": policy,
-                            "current_branch": repo_state.get("current_branch"),
-                            "dirty_count": len(dirty_lines),
-                            "unpushed_count": len(unpushed_lines),
-                            "dirty_preview": dirty_lines[:20],
-                            "unpushed_preview": unpushed_lines[:20],
-                            "warnings": list(repo_state.get("warnings") or []),
-                            "rescue": rescue_info,
-                            "incomplete_reason": "snapshot_error",
-                        },
-                    )
-                    return False, msg
-                if policy == "rescue_and_reset" and rescue_info.get("diff_error"):
-                    msg = (
-                        f"Reset blocked ({detail}) because rescue diff capture failed: "
-                        f"{rescue_info.get('diff_error')}. Local changes were left untouched."
-                    )
-                    append_jsonl(
-                        DRIVE_ROOT / "logs" / "supervisor.jsonl",
-                        {
-                            "ts": utc_now_iso(),
-                            "type": "reset_blocked_rescue_incomplete",
-                            "target_branch": branch, "reason": reason, "policy": policy,
-                            "current_branch": repo_state.get("current_branch"),
-                            "dirty_count": len(dirty_lines),
-                            "unpushed_count": len(unpushed_lines),
-                            "dirty_preview": dirty_lines[:20],
-                            "unpushed_preview": unpushed_lines[:20],
-                            "warnings": list(repo_state.get("warnings") or []),
-                            "rescue": rescue_info,
-                            "incomplete_reason": "diff_error",
-                        },
-                    )
-                    return False, msg
-                untracked_rescue_error = _rescue_untracked_incomplete(rescue_info)
-                if policy == "rescue_and_reset" and untracked_rescue_error:
-                    msg = (
-                        f"Reset blocked ({detail}) because untracked-file rescue was incomplete: "
-                        f"{untracked_rescue_error}. Local changes were left untouched."
-                    )
-                    append_jsonl(
-                        DRIVE_ROOT / "logs" / "supervisor.jsonl",
-                        {
-                            "ts": utc_now_iso(),
-                            "type": "reset_blocked_rescue_incomplete",
-                            "target_branch": branch, "reason": reason, "policy": policy,
-                            "current_branch": repo_state.get("current_branch"),
-                            "dirty_count": len(dirty_lines),
-                            "unpushed_count": len(unpushed_lines),
-                            "dirty_preview": dirty_lines[:20],
-                            "unpushed_preview": unpushed_lines[:20],
-                            "warnings": list(repo_state.get("warnings") or []),
-                            "rescue": rescue_info,
-                            "incomplete_reason": "untracked_rescue",
-                            "incomplete_detail": untracked_rescue_error,
-                        },
-                    )
-                    return False, msg
-            rescue_suffix = ""
-            rescue_path = str(rescue_info.get("path") or "").strip()
-            if rescue_path:
-                rescue_suffix = f" Rescue saved to {rescue_path}."
-            elif policy in {"rescue_and_block", "rescue_and_reset"} and rescue_info.get("error"):
-                rescue_suffix = f" Rescue failed: {rescue_info.get('error')}."
-
-            if policy in {"block", "rescue_and_block"}:
-                msg = f"Reset blocked ({detail}) to protect local changes.{rescue_suffix}"
-                append_jsonl(
-                    DRIVE_ROOT / "logs" / "supervisor.jsonl",
-                    {
-                        "ts": utc_now_iso(),
-                        "type": "reset_blocked_unsynced_state",
-                        "target_branch": branch, "reason": reason, "policy": policy,
-                        "current_branch": repo_state.get("current_branch"),
-                        "dirty_count": len(dirty_lines),
-                        "unpushed_count": len(unpushed_lines),
-                        "dirty_preview": dirty_lines[:20],
-                        "unpushed_preview": unpushed_lines[:20],
-                        "warnings": list(repo_state.get("warnings") or []),
-                        "rescue": rescue_info,
-                    },
-                )
-                return False, msg
-
-            append_jsonl(
-                DRIVE_ROOT / "logs" / "supervisor.jsonl",
-                {
-                    "ts": utc_now_iso(),
-                    "type": "reset_unsynced_rescued_then_reset",
-                    "target_branch": branch, "reason": reason, "policy": policy,
-                    "current_branch": repo_state.get("current_branch"),
-                    "dirty_count": len(dirty_lines),
-                    "unpushed_count": len(unpushed_lines),
-                    "dirty_preview": dirty_lines[:20],
-                    "unpushed_preview": unpushed_lines[:20],
-                    "warnings": list(repo_state.get("warnings") or []),
-                    "rescue": rescue_info,
-                },
-            )
+        admission_result = _admission_gate_for_unsynced_tree(
+            branch, reason, policy, update_intent_target)
+        if admission_result is not None:
+            return admission_result
 
     remote_ref_exists = False
     if target_ref:
