@@ -942,12 +942,42 @@ def checkout_and_reset(branch: str, reason: str = "unspecified",
         dirty_lines = list(repo_state.get("dirty_lines") or [])
         unpushed_lines = list(repo_state.get("unpushed_lines") or [])
         unpushed_needs_rescue = bool(update_intent_target and unpushed_lines)
-        if dirty_lines or unpushed_needs_rescue:
+
+        # A failed status read or an unconsulted MERGE_HEAD used to read as a clean
+        # tree; force the same rescue/block branch a dirty tree takes, matching the
+        # fail-closed read already used for the managed-update rollback path.
+        status_unreadable = any(
+            str(w).startswith("status_error:") for w in (repo_state.get("warnings") or [])
+        )
+        # Read MERGE_HEAD directly (no git process) since this runs on every call.
+        # A present file whose content is not a SHA is unreadable, not absent, per
+        # the issue's fix direction.
+        merge_head_path = _git_dir() / "MERGE_HEAD"
+        merge_in_progress = False
+        merge_head_unreadable = False
+        if merge_head_path.is_file():
+            try:
+                merge_head_content = merge_head_path.read_text(encoding="utf-8").strip()
+            except Exception:
+                merge_head_content = ""
+            if re.fullmatch(r"[0-9a-fA-F]{7,64}", merge_head_content):
+                merge_in_progress = True
+            else:
+                merge_head_unreadable = True
+
+        if dirty_lines or unpushed_needs_rescue or status_unreadable or merge_in_progress \
+                or merge_head_unreadable:
             bits: List[str] = []
             if unpushed_lines and (dirty_lines or unpushed_needs_rescue):
                 bits.append(f"unpushed={len(unpushed_lines)}")
             if dirty_lines:
                 bits.append(f"dirty={len(dirty_lines)}")
+            if status_unreadable:
+                bits.append("status_unreadable")
+            if merge_in_progress:
+                bits.append("merge_in_progress")
+            if merge_head_unreadable:
+                bits.append("merge_head_unreadable")
             detail = ", ".join(bits) if bits else "unsynced"
             rescue_info: Dict[str, Any] = {}
             if policy in {"rescue_and_block", "rescue_and_reset"}:
