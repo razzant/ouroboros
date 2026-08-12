@@ -232,12 +232,49 @@ async def api_state(request: Request) -> JSONResponse:
         return json_exception(exc)
 
 
+def live_thread_chat_ids() -> set:
+    """Chat ids with a task queued or running RIGHT NOW (never raises).
+
+    The ONE reader of the supervisor queue for thread visibility, kept here
+    rather than inside the registry projection: a sidebar read must not make
+    every registry consumer depend on the queue lock. An unreadable queue answers
+    the empty set — the consequence is that an archived thread with live work
+    hides one tick early, which is a display lag, not a lost message.
+    """
+    try:
+        from supervisor.queue import _queue_lock
+        from supervisor.workers import PENDING, RUNNING
+
+        with _queue_lock:
+            rows = [task for task in PENDING if isinstance(task, dict)]
+            rows.extend(
+                meta["task"] for meta in RUNNING.values()
+                if isinstance(meta, dict) and isinstance(meta.get("task"), dict)
+            )
+        out = set()
+        for task in rows:
+            try:
+                chat_id = int(task.get("chat_id") or 0)
+            except (TypeError, ValueError):
+                continue
+            if chat_id:
+                out.add(chat_id)
+        return out
+    except Exception:
+        return set()
+
+
 def _projects_summary_safe(request: Request) -> list:
-    """Compact registered-projects list for the sidebar (never raises)."""
+    """Compact registered-projects list for the sidebar (never raises).
+
+    Archived threads are filtered by the projection, EXCEPT while a task is still
+    live in them (X10) — so this hands it the live chat-id set rather than
+    letting the sidebar hide a room that is still emitting output.
+    """
     try:
         from ouroboros.projects_registry import projects_summary
 
-        return projects_summary(request_drive_root(request))
+        return projects_summary(request_drive_root(request), live_chat_ids=live_thread_chat_ids())
     except Exception:
         return []
 
@@ -271,4 +308,4 @@ def _project_chat_ids_safe(request: Request) -> list:
         return []
 
 
-__all__ = ["api_health", "api_state"]
+__all__ = ["api_health", "api_state", "live_thread_chat_ids"]

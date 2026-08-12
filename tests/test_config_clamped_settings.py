@@ -26,6 +26,7 @@ from ouroboros import config
 # whose clamps guard an owner-facing read.
 CLAMPED = [
     ("OUROBOROS_TASK_DIFF_GIT_TIMEOUT_SEC", 5.0, 300.0, float),
+    ("OUROBOROS_THREAD_GIT_TIMEOUT_SEC", 5.0, 300.0, float),
     ("OUROBOROS_SAFETY_CALL_TIMEOUT_SEC", 5.0, 600.0, float),
     ("OUROBOROS_SAFETY_MAX_TOKENS", 256, 16384, int),
     ("OUROBOROS_ACCEPTANCE_RESERVE_PCT", 0, 50, int),
@@ -103,3 +104,34 @@ def test_task_diff_git_timeout_default_and_clamp(monkeypatch):
     assert config.get_task_diff_git_timeout_sec() == 30.0
     monkeypatch.setenv("OUROBOROS_TASK_DIFF_GIT_TIMEOUT_SEC", "45.5")
     assert config.get_task_diff_git_timeout_sec() == 45.5
+
+
+def test_thread_git_timeout_is_its_own_knob_with_its_own_default(monkeypatch):
+    """Branch off / merge back bound their `git` calls SEPARATELY from the diff.
+
+    Same clamp, different default and a different key on purpose: the diff
+    endpoint runs one bounded READ against a commit, while branch-off's
+    `@snapshot` base runs `git add -A` + `git commit` over the owner's whole
+    working tree. Pointing the write at the read's 30s ceiling satisfied the SSOT
+    gate and quietly made a large repository's snapshot time out where it had
+    succeeded, which is the failure branch-off's refusals exist to contain.
+    """
+    assert config.SETTINGS_DEFAULTS["OUROBOROS_THREAD_GIT_TIMEOUT_SEC"] == 120
+
+    monkeypatch.delenv("OUROBOROS_THREAD_GIT_TIMEOUT_SEC", raising=False)
+    assert config.get_thread_git_timeout_sec() == 120.0
+
+    monkeypatch.setenv("OUROBOROS_THREAD_GIT_TIMEOUT_SEC", "0")
+    assert config.get_thread_git_timeout_sec() == 5.0
+    monkeypatch.setenv("OUROBOROS_THREAD_GIT_TIMEOUT_SEC", "100000")
+    assert config.get_thread_git_timeout_sec() == 300.0
+    monkeypatch.setenv("OUROBOROS_THREAD_GIT_TIMEOUT_SEC", "not-a-number")
+    assert config.get_thread_git_timeout_sec() == 120.0
+    monkeypatch.setenv("OUROBOROS_THREAD_GIT_TIMEOUT_SEC", "45.5")
+    assert config.get_thread_git_timeout_sec() == 45.5
+
+    # The two knobs are INDEPENDENT: moving one must not move the other.
+    monkeypatch.delenv("OUROBOROS_THREAD_GIT_TIMEOUT_SEC", raising=False)
+    monkeypatch.setenv("OUROBOROS_TASK_DIFF_GIT_TIMEOUT_SEC", "12")
+    assert config.get_thread_git_timeout_sec() == 120.0
+    assert config.get_task_diff_git_timeout_sec() == 12.0

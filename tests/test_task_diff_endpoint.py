@@ -667,6 +667,12 @@ def test_untracked_projection_beyond_the_cap_is_refused_not_truncated(tmp_path):
     One git subprocess per untracked file is the cost model here, so the count is
     bounded. Truncating to the first N would render as a COMPLETE diff, so the
     untracked projection is dropped entirely and named instead.
+
+    T3R-6: and the ANSWER is `blocked` with an EMPTY patch, exactly like
+    `patch_too_large`. Serving the tracked half beside a `ready` status was the
+    same silent clip one level up — the tracked half of a diff renders precisely
+    like a whole one, and a blocker code carried as a footnote is not a disclosure
+    an owner reads while reviewing. Two caps, one rule: complete, or not served.
     """
     repo = tmp_path / "repo"
     base = _init_repo(repo)
@@ -682,9 +688,9 @@ def test_untracked_projection_beyond_the_cap_is_refused_not_truncated(tmp_path):
     with _client(drive_root, repo) as client:
         payload = client.get("/api/tasks/flood/diff").json()
     assert "untracked_projection_capped" in payload["blockers"]
-    # The TRACKED half is real and complete, so it is still served.
-    assert "+b = 3" in payload["patch"]
-    assert "new_0000.py" not in payload["patch"]
+    assert payload["status"] == "blocked"
+    assert payload["patch"] == ""
+    assert payload["patch_sha256"] == ""
 
 
 def test_patch_over_the_byte_cap_is_blocked_and_never_clipped(tmp_path):
@@ -879,3 +885,53 @@ def test_concurrent_diff_reads_are_gated_to_the_declared_slot_count(tmp_path):
 
     peak = asyncio.run(_exercise())
     assert peak == gateway_task_diff.DIFF_WORKER_SLOTS
+
+
+def test_a_rename_record_is_two_tokens_even_when_the_origin_looks_like_one(tmp_path):
+    """T3R-16. `git status --porcelain -z` has a RECORD structure, not a per-token
+    shape: a rename or copy is the record plus a bare ORIGIN token.
+
+    Guessed per token — "does this start with a status code and a space" — most
+    origin paths happened to parse, and the rest were mis-sliced: an origin whose
+    third character is a space (`ab cd.txt`) was read as a record and cut down to
+    `cd.txt`, so the fingerprint watched a path that does not exist and stopped
+    watching one that does. Parsed positionally, the guess is gone.
+    """
+    paths = gateway_task_diff._status_paths(
+        "R  after.txt\0ab cd.txt\0 M plain.txt\0?? new one.txt\0"
+    )
+
+    assert paths == ["after.txt", "ab cd.txt", "plain.txt", "new one.txt"]
+
+
+def test_a_status_path_whose_own_third_char_is_a_space_still_parses(tmp_path):
+    """The record form is unambiguous; only the origin token ever was."""
+    assert gateway_task_diff._status_paths("?? a b c.txt\0") == ["a b c.txt"]
+    # A copy record carries its origin the same way a rename does.
+    assert gateway_task_diff._status_paths("C  dst.txt\0x y.txt\0") == ["dst.txt", "x y.txt"]
+    # A rename staged AND modified: `R` sits in the first column, `M` in the second.
+    assert gateway_task_diff._status_paths("RM dst.txt\0src.txt\0") == ["dst.txt", "src.txt"]
+    assert gateway_task_diff._status_paths("") == []
+
+
+def test_a_thread_checkout_diff_names_its_branch_on_every_answer(tmp_path):
+    """T3R-12. The Changes header shows "thread · branch" and learns the branch
+    from the diff — which the payload did not actually carry, so the client's
+    assignment was dead and the header silently lost the label."""
+    from ouroboros.thread_worktrees import provision_thread_worktree
+
+    repo = tmp_path / "repo"
+    _init_repo(repo)
+    drive_root = tmp_path / "drive"
+    # Not branched off: still an answer, and still named.
+    unbranched = gateway_task_diff.thread_checkout_diff_payload(drive_root, "proj", 7)
+    assert unbranched["blockers"] == ["thread_not_branched"]
+    assert unbranched["branch"] == ""
+
+    handle = provision_thread_worktree(
+        repo_dir=repo, project_id="proj", thread_id=1,
+        data_dir=drive_root, worktree_root=tmp_path / "wts",
+    )
+    payload = gateway_task_diff.thread_checkout_diff_payload(drive_root, "proj", 1)
+    assert payload["branch"] == handle.branch
+    assert payload["source"] == "thread_checkout"

@@ -11,12 +11,19 @@ export async function apiFetch(url, init = {}) {
 export async function fetchJson(url, init = {}, options = {}) {
     const response = await apiFetch(url, init);
     let data = null;
+    let unparseable = false;
     try {
         data = await response.json();
     } catch {
         data = { error: `non-json response (HTTP ${response.status})` };
+        // A 2xx whose body cannot be parsed is NOT an answer, and returning it as
+        // one made `{error: …}` look like a payload: `threadOps.bases` handed that
+        // object back, `listed.ok` was false, and branch-off rendered an EMPTY base
+        // offer and asked the owner to type one (I16). A body we could not read is
+        // a transport failure whatever the status line says.
+        unparseable = true;
     }
-    if (!response.ok || (options.rejectOkFalse && data && data.ok === false)) {
+    if (unparseable || !response.ok || (options.rejectOkFalse && data && data.ok === false)) {
         const message = (data && (data.error || data.message)) || `HTTP ${response.status}`;
         const error = new Error(message);
         error.status = response.status;
@@ -56,6 +63,15 @@ export function cleanExtensionRoute(value) {
         return '';
     }
     return parts.map(encodeURIComponent).join('/');
+}
+
+/**
+ * The one place a thread's route prefix is spelled. Six T3 routes hang off it,
+ * and hand-building the path per call is how one of them ends up missing an
+ * `encodeURIComponent` on a project id the owner typed.
+ */
+export function threadPath(projectId, threadId) {
+    return `/api/projects/${encodeURIComponent(projectId)}/threads/${encodeURIComponent(threadId)}`;
 }
 
 export function extensionRoutePrefix(skill) {
@@ -113,11 +129,135 @@ export const apiClient = {
     skillGrants: (skill, items) => jsonPost(`/api/skills/${encodeURIComponent(skill)}/grants`, { items }),
     chatHistory: (limit = 1000) => fetchJson(`/api/chat/history?limit=${encodeURIComponent(limit)}`, { cache: 'no-store' }),
     projectFromTask: (taskId, id, name, objectiveHint = '') => jsonPost('/api/projects/from-task', { task_id: taskId, id, name, objective_hint: objectiveHint }),
+    /**
+     * The projects list, optionally INCLUDING archived threads.
+     *
+     * `/api/state` carries the sidebar's own copy, where archived threads are
+     * hidden. This is the one call that can ask for them, and it is the only way
+     * `threadRestore` is reachable at all: a thread no surface can show is a
+     * thread no owner can restore (T3R-8).
+     */
+    projectsList: (includeArchived = false) => fetchJson(
+        includeArchived ? '/api/projects?include_archived=1' : '/api/projects',
+        { cache: 'no-store' },
+    ),
     /** @param {import('./api_types.js').ProjectCreateRequest} payload */
     projectCreate: (payload) => jsonPost('/api/projects', payload),
     projectUpdate: (projectId, name) => jsonPost(`/api/projects/${encodeURIComponent(projectId)}/update`, { name }),
     /** @returns {Promise<import('./api_types.js').ProjectDeleteResponse>} */
     projectDelete: (projectId) => jsonPost(`/api/projects/${encodeURIComponent(projectId)}/delete`, {}),
+    /**
+     * The owner's YES to a git_init_required offer: start tracking the project's
+     * working folder with one attach-snapshot commit. Never called automatically —
+     * admission raises the offer and stops; only the owner answers it.
+     * @returns {Promise<import('./api_types.js').ProjectInitGitResponse>}
+     */
+    projectInitGit: (projectId) => jsonPost(`/api/projects/${encodeURIComponent(projectId)}/init-git`, {}),
+    /**
+     * Create a new empty thread in a project (a chat sharing its folder).
+     * @returns {Promise<import('./api_types.js').ThreadResponse>}
+     */
+    projectThreadCreate: (projectId, name = '') => jsonPost(
+        `/api/projects/${encodeURIComponent(projectId)}/threads`, name ? { name } : {},
+    ),
+    /** @returns {Promise<import('./api_types.js').ThreadResponse>} */
+    projectThreadUpdate: (projectId, threadId, name) => jsonPost(
+        `/api/projects/${encodeURIComponent(projectId)}/threads/${encodeURIComponent(threadId)}/update`,
+        { name },
+    ),
+    /**
+     * Fork a thread. The source is untouched: the new thread stores a cursor
+     * into its rows, never a copy.
+     * @returns {Promise<import('./api_types.js').ThreadResponse>}
+     */
+    projectThreadFork: (projectId, threadId) => jsonPost(
+        `/api/projects/${encodeURIComponent(projectId)}/threads/${encodeURIComponent(threadId)}/fork`, {},
+    ),
+    /**
+     * The bases this thread may branch off from (A8) — current branch, other
+     * branches, tags, plus the always-present "exactly as it is now" entry.
+     * @returns {Promise<import('./api_types.js').ThreadBranchBasesResponse>}
+     */
+    threadBranchBases: (projectId, threadId) => fetchJson(
+        `${threadPath(projectId, threadId)}/branch-bases`, { cache: 'no-store' },
+    ),
+    /**
+     * BRANCH OFF (A7): give this thread its own git worktree from `baseRef`
+     * (a branch, tag, commit-ish, or '@snapshot' for "exactly as it is now").
+     * @returns {Promise<import('./api_types.js').ThreadWorktreeResponse>}
+     */
+    threadBranchOff: (projectId, threadId, baseRef = '') => jsonPost(
+        `${threadPath(projectId, threadId)}/branch-off`, baseRef ? { base_ref: baseRef } : {},
+    ),
+    /**
+     * MERGE BACK (A7/A9). A conflict comes back as ok:false with `conflicts`;
+     * the merge is already aborted by then and the thread keeps its branch.
+     *
+     * `acknowledgeCheckoutDirty` IS the owner's answer to the `checkout_dirty`
+     * refusal, mirroring `threadWorktreeRemove`'s `acknowledgeUnmerged`. Without
+     * it the server's only escape from that refusal had NO producer in any client
+     * code, so one stray `build.log` in a checkout made merge-back permanently
+     * unreachable — the exact failure the refusal was written to prevent.
+     * @returns {Promise<import('./api_types.js').ThreadWorktreeResponse>}
+     */
+    threadMergeBack: (projectId, threadId, acknowledgeCheckoutDirty = false) => jsonPost(
+        `${threadPath(projectId, threadId)}/merge-back`,
+        acknowledgeCheckoutDirty ? { acknowledge_checkout_dirty: true } : {},
+    ),
+    /**
+     * What removing this checkout would DESTROY — read before offering removal
+     * (A10), never after.
+     * @returns {Promise<import('./api_types.js').ThreadWorktreeResponse>}
+     */
+    threadWorktree: (projectId, threadId) => fetchJson(
+        `${threadPath(projectId, threadId)}/worktree`, { cache: 'no-store' },
+    ),
+    /**
+     * Remove this thread's checkout. `acknowledgeUnmerged` IS the owner's
+     * consent: without it, unmerged work refuses with its inspection attached.
+     * @returns {Promise<import('./api_types.js').ThreadWorktreeResponse>}
+     */
+    threadWorktreeRemove: (projectId, threadId, acknowledgeUnmerged = false) => jsonPost(
+        `${threadPath(projectId, threadId)}/worktree/remove`,
+        { acknowledge_unmerged: !!acknowledgeUnmerged },
+    ),
+    /**
+     * A branched thread's own checkout diff (A13) — same envelope as taskDiff.
+     * @returns {Promise<import('./api_types.js').ThreadDiffResponse>}
+     */
+    threadDiff: (projectId, threadId) => fetchJson(
+        `${threadPath(projectId, threadId)}/diff`, { cache: 'no-store' },
+    ),
+    /**
+     * Archive a thread: HIDE it. Nothing is removed and `threadRestore` puts it
+     * back. A thread with a task still running stays visible until that task is
+     * terminal — the answer says so via `visible_until_terminal`.
+     * @returns {Promise<import('./api_types.js').ThreadLifecycleResponse>}
+     */
+    threadArchive: (projectId, threadId) => jsonPost(`${threadPath(projectId, threadId)}/archive`, {}),
+    /** @returns {Promise<import('./api_types.js').ThreadLifecycleResponse>} */
+    threadRestore: (projectId, threadId) => jsonPost(`${threadPath(projectId, threadId)}/restore`, {}),
+    /**
+     * Delete a thread: fence routing, cancel its tasks, then tombstone. The id is
+     * never reused and the journal rows honestly remain. The checkout goes with
+     * the thread (`worktree_removed`) — a tombstoned thread is invisible on every
+     * surface, so one left behind is a folder and a branch nothing can reach.
+     *
+     * Two refusals, and only one of them is a question. Work at RISK (unmerged
+     * commits, changes to tracked files, an unreadable checkout) refuses with
+     * `checkout_holds_work` and names the removal route; nothing overrides it. A
+     * checkout holding only ignored or untracked files answers
+     * `checkout_holds_rebuildable_files`, and `acknowledgeUnmerged` is the owner's
+     * yes to exactly that — the same argument shape `threadWorktreeRemove` and
+     * `threadMergeBack` already take. Without a producer here the server's escape
+     * would have no client at all and one `node_modules/` would make deleting a
+     * thread a three-step detour (T3R2-H6 is precisely that class of defect).
+     * @returns {Promise<import('./api_types.js').ThreadLifecycleResponse>}
+     */
+    threadDelete: (projectId, threadId, acknowledgeUnmerged = false) => jsonPost(
+        `${threadPath(projectId, threadId)}/delete`,
+        { acknowledge_unmerged: !!acknowledgeUnmerged },
+    ),
     /** @returns {Promise<import('./api_types.js').FsDirsResponse>} */
     fsDirs: (path = '') => fetchJson(`/api/fs/dirs${path ? `?path=${encodeURIComponent(path)}` : ''}`, { cache: 'no-store' }),
     /**

@@ -199,19 +199,24 @@ export function openNewProjectDialog({ apiClient, onCreated }) {
 
 let closeOpenProjectRowMenu = null;
 
-// Accessible row menu: Rename/Delete only. `project` is a sidebar read model;
-// callbacks refresh the authoritative registry projection.
-export async function openProjectRowMenu(project, { apiClient, anchorEl, onChanged }) {
-    const maxNameLength = PROJECT_NAME_MAX;
+/**
+ * The ONE row-menu shell: markup contract (`role=menu` + `[role=menuitem]`),
+ * keyboard model (Escape / ArrowUp / ArrowDown / Home / End), click-outside
+ * dismissal, focus restoration and viewport-safe placement. Project rows and
+ * project THREAD rows (`modules/project_threads.js`) both mount through it, so
+ * there is one accessible menu behaviour to keep correct rather than two that
+ * drift. `itemsHtml` supplies the `[data-prm]` items; `onSelect(action)` runs
+ * after the menu has closed.
+ *
+ * @returns {{ close: (opts?: {restoreFocus?: boolean}) => void }}
+ */
+export function openRowMenu({ anchorEl, ariaLabel, itemsHtml, onSelect }) {
     closeOpenProjectRowMenu?.();
     const menu = document.createElement('div');
     menu.className = 'project-row-menu';
     menu.setAttribute('role', 'menu');
-    menu.setAttribute('aria-label', `Actions for ${project.name || project.id}`);
-    menu.innerHTML = `
-        <button type="button" role="menuitem" data-prm="rename">Rename…</button>
-        <button type="button" role="menuitem" class="danger" data-prm="delete">Delete project…</button>
-    `;
+    menu.setAttribute('aria-label', ariaLabel);
+    menu.innerHTML = itemsHtml;
     const rect = anchorEl.getBoundingClientRect();
     const close = ({ restoreFocus = false } = {}) => {
         menu.remove();
@@ -243,53 +248,7 @@ export async function openProjectRowMenu(project, { apiClient, anchorEl, onChang
         const action = event.target.closest('[data-prm]')?.dataset?.prm;
         if (!action) return;
         close();
-        if (action === 'rename') {
-            const res = await openConfirmDialog({
-                title: 'Rename project',
-                body: `New name for “${project.name || project.id}”:`,
-                input: true,
-                initialValue: project.name || project.id,
-                confirmLabel: 'Rename',
-            });
-            const newName = res?.confirmed ? String(res.value || '').trim() : '';
-            if (newName.length > maxNameLength) {
-                await openConfirmDialog({
-                    title: 'Rename project',
-                    body: `Project names are limited to ${maxNameLength} characters.`,
-                    alert: true,
-                });
-            } else if (newName && newName !== project.name) {
-                try { await apiClient.projectUpdate(project.id, newName); onChanged?.(); }
-                catch (e) {
-                    await openConfirmDialog({
-                        title: 'Rename failed',
-                        body: `Rename failed: ${e?.body?.error || e?.message || e}`,
-                        alert: true,
-                    });
-                }
-            }
-            if (anchorEl.isConnected) anchorEl.focus();
-        } else if (action === 'delete') {
-            const ok = await openConfirmDialog({
-                title: 'Delete project',
-                body: `Delete “${project.name || project.id}”? Running work will be cancelled. The Project will be removed from the active UI; its id, chat history, task bindings, memory, and working folder are preserved.`,
-                confirmLabel: 'Delete',
-                danger: true,
-            });
-            if (ok === true) {
-                onChanged?.({ projectId: project.id, lifecycle: 'deleting', optimistic: true });
-                try { await apiClient.projectDelete(project.id); }
-                catch (e) {
-                    await openConfirmDialog({
-                        title: 'Delete did not finish',
-                        body: `Delete did not finish: ${e?.body?.error || e?.message || e}`,
-                        alert: true,
-                    });
-                }
-                finally { onChanged?.({ authoritative: true }); }
-            }
-            if (anchorEl.isConnected) anchorEl.focus();
-        }
+        await onSelect?.(action);
     });
     document.body.appendChild(menu);
     const menuRect = menu.getBoundingClientRect();
@@ -305,4 +264,113 @@ export async function openProjectRowMenu(project, { apiClient, anchorEl, onChang
     menu.style.setProperty('--prm-top', `${Math.round(top)}px`);
     menu.style.setProperty('--prm-left', `${Math.round(left)}px`);
     menu.querySelector('[role="menuitem"]')?.focus();
+    return { close };
+}
+
+// Accessible row menu: Rename/Fork/Delete. `project` is a sidebar read model;
+// callbacks refresh the authoritative registry projection. The project row IS
+// thread #0's row (T1), so Fork here forks the project's main thread — the one
+// thing the global Main chat cannot do (A3).
+export async function openProjectRowMenu(project, {
+    apiClient, anchorEl, onChanged, extraItemsHtml = '', onExtraSelect = null,
+} = {}) {
+    const maxNameLength = PROJECT_NAME_MAX;
+    // `extraItemsHtml`/`onExtraSelect` let a caller append project-level rows this
+    // module does not own — today the archived-thread list (T4), which belongs to
+    // the thread vocabulary in `project_threads.js`. Passed IN rather than
+    // imported, because that module already imports `openRowMenu` from here and an
+    // import back would close a cycle. `onExtraSelect` returning true means "this
+    // was mine"; anything else falls through to the rows below.
+    openRowMenu({
+        anchorEl,
+        ariaLabel: `Actions for ${project.name || project.id}`,
+        itemsHtml: `
+        <button type="button" role="menuitem" data-prm="rename">Rename…</button>
+        <button type="button" role="menuitem" data-prm="fork">Fork thread</button>
+        ${extraItemsHtml}
+        <button type="button" role="menuitem" class="danger" data-prm="delete">Delete project…</button>
+    `,
+        onSelect: async (action) => {
+            if (onExtraSelect && (await onExtraSelect(action)) === true) return;
+            await runProjectRowAction(action, project, {
+                apiClient, anchorEl, onChanged, maxNameLength,
+            });
+        },
+    });
+}
+
+async function runProjectRowAction(action, project, { apiClient, anchorEl, onChanged, maxNameLength }) {
+    if (action === 'rename') {
+        const res = await openConfirmDialog({
+            title: 'Rename project',
+            body: `New name for “${project.name || project.id}”:`,
+            input: true,
+            initialValue: project.name || project.id,
+            confirmLabel: 'Rename',
+        });
+        const newName = res?.confirmed ? String(res.value || '').trim() : '';
+        if (newName.length > maxNameLength) {
+            await openConfirmDialog({
+                title: 'Rename project',
+                body: `Project names are limited to ${maxNameLength} characters.`,
+                alert: true,
+            });
+        } else if (newName && newName !== project.name) {
+            try { await apiClient.projectUpdate(project.id, newName); onChanged?.(); }
+            catch (e) {
+                await openConfirmDialog({
+                    title: 'Rename failed',
+                    body: `Rename failed: ${e?.body?.error || e?.message || e}`,
+                    alert: true,
+                });
+                // A failure is a reason to RE-READ, not to stop: the commonest one
+                // is a 404 for a project another tab just deleted, so the row we
+                // are painting no longer exists. Without this it survives the alert
+                // and stays clickable until the next poll tick.
+                onChanged?.({ authoritative: true });
+            }
+        }
+        if (anchorEl.isConnected) anchorEl.focus();
+    } else if (action === 'delete') {
+        const ok = await openConfirmDialog({
+            title: 'Delete project',
+            // The last sentence is the one that was missing (I1): a project's
+            // threads can each own a git CHECKOUT and a `thread/<name>` branch,
+            // and a tombstoned project leaves no surface that could reach them —
+            // so they go with it. Saying "your working folder is preserved" and
+            // nothing else described a deletion that also destroyed N folders.
+            body: `Delete “${project.name || project.id}”? Running work will be cancelled. The Project will be removed from the active UI; its id, chat history, task bindings, memory, and working folder are preserved. Any checkouts its threads branched off — and their thread/… branches — are removed with it; if one still holds work the project folder never received, the delete stops and says which thread.`,
+            confirmLabel: 'Delete',
+            danger: true,
+        });
+        if (ok === true) {
+            onChanged?.({ projectId: project.id, lifecycle: 'deleting', optimistic: true });
+            try { await apiClient.projectDelete(project.id); }
+            catch (e) {
+                await openConfirmDialog({
+                    title: 'Delete did not finish',
+                    body: `Delete did not finish: ${e?.body?.error || e?.message || e}`,
+                    alert: true,
+                });
+            }
+            finally { onChanged?.({ authoritative: true }); }
+        }
+        if (anchorEl.isConnected) anchorEl.focus();
+    } else if (action === 'fork') {
+        // Thread #0 of a project — NOT the global Main chat, which has no
+        // forkable spelling. The fork stores a cursor into this thread's
+        // rows; nothing is copied and the source is untouched (A3).
+        try {
+            const payload = await apiClient.projectThreadFork(project.id, 0);
+            onChanged?.({ authoritative: true, thread: payload?.thread || null });
+        } catch (e) {
+            await openConfirmDialog({
+                title: 'Fork failed',
+                body: `Fork failed: ${e?.body?.error || e?.message || e}`,
+                alert: true,
+            });
+            onChanged?.({ authoritative: true });  // same reason as rename
+        }
+        if (anchorEl.isConnected) anchorEl.focus();
+    }
 }

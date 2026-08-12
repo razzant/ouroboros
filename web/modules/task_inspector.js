@@ -441,10 +441,15 @@ export function initTaskInspector(ctx = {}) {
         }
     });
 
-    // The inspector belongs to the Chat page; the full Changes screen replaces it.
+    // The inspector belongs to the CHAT SURFACES; the full Changes screen replaces
+    // it. `thread` is a chat surface too (project threads, T1): it holds the
+    // CENTRE while the inspector holds the right slot, so closing the inspector
+    // the moment a thread opens would make inspecting the very task that thread
+    // is discussing impossible — the pairing splitting the two surfaces enables.
+    const CHAT_SURFACES = new Set(['chat', 'thread']);
     window.addEventListener('ouro:page-shown', (event) => {
         if (!openState) return;
-        if (event?.detail?.page === 'chat') return;
+        if (CHAT_SURFACES.has(event?.detail?.page)) return;
         if (typeof closeRightPanel === 'function') closeRightPanel();
         else setOpen(false);
     });

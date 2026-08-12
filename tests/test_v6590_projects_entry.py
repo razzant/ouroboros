@@ -228,10 +228,19 @@ def test_api_fs_dirs_confined_to_home(tmp_path):
     assert resp4.status_code == 404
 
 
-def test_api_projects_create_attach_requires_git_unless_init(tmp_path, monkeypatch):
-    """Triad r5: task admission requires a git worktree root, so attaching a
-    non-git folder WITHOUT init_git must refuse (actionable 400) BEFORE any
-    registry mutation — never a project whose room tasks are born dead."""
+def test_api_projects_create_attaches_a_plain_folder_and_never_auto_inits(tmp_path, monkeypatch):
+    """A11/A12 (T2), REPLACING the pinned `attach_requires_git` refusal.
+
+    The old rule made "give this project a place" and "put that place under git"
+    one decision, taken on the owner's behalf by refusing the folder outright. A11
+    says every project must have a place; A12 says git is offered, never forced. So
+    a plain folder now ATTACHES and is PERSISTED as the project's working_dir, and
+    the git question moves to task admission as a typed offer.
+
+    The refusal that is NOT weakened: nothing runs `git init` in the owner's folder.
+    This test asserts the absence of `.git` after the attach, which the old test
+    never checked — a bug where attach silently initialised git would have passed
+    the old assertions and fails this one."""
     import asyncio
     import json
     from types import SimpleNamespace
@@ -254,14 +263,71 @@ def test_api_projects_create_attach_requires_git_unless_init(tmp_path, monkeypat
 
     resp = asyncio.run(api_projects_create(_Req({"name": "Plain", "path": str(plain)})))
     payload = json.loads(resp.body)
-    assert resp.status_code == 400
-    assert payload["error_code"] == "attach_requires_git"
-    assert get_project(data, "plain") is None  # no registry mutation
-    # With init_git the same folder attaches (snapshot-init makes it a git root).
-    resp2 = asyncio.run(api_projects_create(_Req({"name": "Plain", "path": str(plain), "init_git": True})))
+    assert resp.status_code == 200
+    assert payload["project"]["provenance"] == "attached"
+    entry = get_project(data, "plain")
+    assert entry is not None and entry["working_dir"] == str(plain.resolve())
+    assert not (plain / ".git").exists(), "attach must NEVER auto-init git in the owner's folder"
+
+    # The opt-in path is unchanged and is what the owner's later "yes" runs too.
+    plain2 = tmp_path / "plain_folder_2"
+    plain2.mkdir()
+    resp2 = asyncio.run(api_projects_create(_Req({"name": "Plain Two", "path": str(plain2), "init_git": True})))
     payload2 = json.loads(resp2.body)
     assert resp2.status_code == 200 and payload2["project"]["provenance"] == "attached"
-    assert (plain / ".git").exists()
+    assert (plain2 / ".git").exists()
+
+
+def test_api_projects_create_keeps_every_non_git_attach_guard(tmp_path):
+    """Dropping the git REQUIREMENT drops nothing else: the resolved-realpath
+    guards (exists / is a directory / not the home root / no overlap with the
+    Ouroboros repo or data drive) still refuse before any registry mutation.
+
+    The last case is the CONTAINMENT guard, which REPLACED the git requirement
+    rather than being replaced by it. A subdirectory of somebody's repository is
+    not a place: persisting it registers a working_dir that task admission then
+    refuses forever ("must be the git worktree root") with no offer attached and no
+    repair route, and the only thing that could make it admissible is a shadow repo
+    nested inside the owner's."""
+    import asyncio
+    import json
+    import pathlib as _pathlib
+    import subprocess
+    from types import SimpleNamespace
+
+    from ouroboros.gateway.projects import api_projects_create
+    from ouroboros.projects_registry import get_project
+
+    data = tmp_path / "data"
+    data.mkdir()
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    owner_repo = tmp_path / "owner_repo"
+    owner_repo.mkdir()
+    subprocess.run(["git", "init", "-q"], cwd=str(owner_repo), check=True)
+    nested = owner_repo / "packages" / "web"
+    nested.mkdir(parents=True)
+
+    class _Req:
+        def __init__(self, body):
+            self._body = body
+            self.app = SimpleNamespace(state=SimpleNamespace(drive_root=data, repo_dir=repo))
+
+        async def json(self):
+            return self._body
+
+    for name, path, marker in (
+        ("Missing", str(tmp_path / "no-such-folder"), "does not exist"),
+        ("Home", str(_pathlib.Path.home()), "home directory"),
+        ("InRepo", str(repo), "Ouroboros system repo"),
+        ("InData", str(data), "Ouroboros data drive"),
+        ("Nested", str(nested), "inside the git repository at"),
+    ):
+        resp = asyncio.run(api_projects_create(_Req({"name": name, "path": path})))
+        payload = json.loads(resp.body)
+        assert resp.status_code == 400, f"{name} must still be refused"
+        assert marker in payload["error"], f"{name}: {payload['error']}"
+        assert get_project(data, name.lower()) is None  # no registry mutation
 
 
 # --- create: existing id + new source is a 409, checked before any clone -----------
@@ -345,12 +411,23 @@ def test_promote_source_registers_derived_project_and_mirrors_conflict(tmp_path,
     subprocess.run(["git", "init", "-q"], cwd=str(folder), check=True)
     ctx = SimpleNamespace(repo_dir=str(tmp_path / "repo"))
 
-    # A NON-git folder is refused with an actionable error (triad r5: task
-    # admission requires a git worktree root — no born-dead project rooms).
+    # A11/A12 (T2), REPLACING the pinned "not a git repository" refusal: the
+    # agent-side attach now PERSISTS a plain folder as the project's place, exactly
+    # like the UI path, and leaves it untracked. The git question is asked at task
+    # admission instead (workspace_admission's typed git_init_required offer), so a
+    # research/chat room in a plain folder is no longer impossible to create.
     nogit = tmp_path / "plain_folder"
     nogit.mkdir()
-    ws0, _, err0, _ = resolve_promote_source(ctx, str(nogit), "")
-    assert ws0 == "" and "not a git repository" in err0
+    ws0, _, err0, pid0 = resolve_promote_source(ctx, str(nogit), "")
+    assert err0 == "" and ws0 == str(nogit.resolve()) and pid0 == "plain_folder"
+    plain_entry = get_reg_project(data, "plain_folder")
+    assert plain_entry is not None and plain_entry["working_dir"] == ws0
+    assert plain_entry["provenance"] == "attached"
+    assert not (nogit / ".git").exists(), "promote-attach must NEVER auto-init git"
+
+    # The attach guards it shares with the UI path are untouched.
+    ws_bad, _, err_bad, _ = resolve_promote_source(ctx, str(tmp_path / "no-such-folder"), "")
+    assert ws_bad == "" and "does not exist" in err_bad
 
     # No pid given: derived from the folder name, registered with provenance facts.
     ws, note, err, pid = resolve_promote_source(ctx, str(folder), "")

@@ -343,19 +343,24 @@ def _project_room_fact(task: Dict[str, Any]) -> Optional[Dict[str, Any]]:
             if _room_wd:
                 # Same resolver the agent uses for the tool lens, so the stated rule
                 # and the actual tool surface cannot diverge (the robot incident).
-                _lens_dir, _room_note = _room_lens(_DATA_DIR, _room_pid)
+                # The ROOM's chat id goes in: a thread that branched off reads its
+                # OWN checkout, and the rule below must name the folder that was
+                # actually resolved rather than the project's working_dir (I7).
+                _lens_dir, _room_note = _room_lens(_DATA_DIR, _room_pid, task.get("chat_id"))
                 _lens_active = bool(task.get("_is_direct_chat")) and bool(_lens_dir)
                 fact = {
                     "project_id": _room_pid,
                     "working_dir": _room_wd,
                     "rule": (
                         (
-                            "This room's chat lane LOOKS AT the project folder: read_file/"
-                            "list_files/search_code/query_code with root=active_workspace and "
-                            "the DEFAULT shell cwd resolve to working_dir. The Ouroboros "
+                            "This room's chat lane LOOKS AT the folder named in room_dir: "
+                            "read_file/list_files/search_code/query_code with "
+                            "root=active_workspace and the DEFAULT shell cwd resolve to it. "
+                            "For a thread that has BRANCHED OFF, room_dir is that thread's "
+                            "own checkout and not the project's working_dir. The Ouroboros "
                             "system repo needs explicit root=\"system_repo\" (reads) or an "
                             "explicit cwd (shell). File WRITES here go through "
-                            "promote_chat_to_task — the promoted task inherits this folder as "
+                            "promote_chat_to_task — the promoted task inherits room_dir as "
                             "its workspace (workspace='none' opts out)."
                         )
                         if _lens_active
@@ -366,6 +371,12 @@ def _project_room_fact(task: Dict[str, Any]) -> Optional[Dict[str, Any]]:
                         )
                     ),
                 }
+                if _lens_active:
+                    # The RESOLVED folder. Stating `working_dir` as the room's own
+                    # folder was a falsehood for a branched thread — its reads, its
+                    # shell and its promoted tasks all land here instead, while the
+                    # project's own folder is where its SIBLINGS write.
+                    fact["room_dir"] = _lens_dir
                 if _room_note:
                     fact["working_dir_warning"] = _room_note
                 return fact
@@ -835,6 +846,143 @@ def _entry_chat_id(entry: Any) -> int:
 _PROJECT_THREAD_SCAN = 4000
 
 
+def _ancestor_reach(
+    scanned: List[Dict[str, Any]], chat: int, cutoff: str, bound: Dict[str, int],
+) -> Optional[int]:
+    """Index of the OLDEST row in ``scanned`` this ancestor's window admits.
+
+    ``None`` when the window holds none of that ancestor's rows at all. Ownership
+    is resolved exactly as ``admits_row`` resolves it — the durable task BINDING
+    first, the row's own ``chat_id`` otherwise — so a post-hoc bound task's rows
+    count for the ancestor that owns them rather than for the main chat their
+    ``chat_id`` still names.
+    """
+    from ouroboros.thread_history import _entry_chat, bound_chat_for_row
+
+    for index, entry in enumerate(scanned):
+        if (bound_chat_for_row(entry, bound) or _entry_chat(entry)) != chat:
+            continue
+        if not cutoff or str((entry or {}).get("ts") or "") <= cutoff:
+            return index
+    return None
+
+
+def _shared_past_beyond_scan(
+    lens: Any, scanned: List[Dict[str, Any]], bound: Optional[Dict[str, int]] = None,
+) -> str:
+    """Did a FORK's shared past fall out of the scanned tail entirely? (A3b, P8)
+
+    The focused thread view reads one bounded tail of the shared live
+    ``chat.jsonl`` (``_PROJECT_THREAD_SCAN``) and then filters it through the
+    lens, while ``gateway/history.py`` reads per-thread with archive backfill. So
+    a busy install pushes an ancestor's rows out of the tail before the lens ever
+    sees them: reproduced with a fork whose ancestor row sits at position 0 behind
+    4050 unrelated Main rows — the agent gets ONLY its own message while
+    ``lens.admits(ancestor_row)`` is ``True``.
+
+    This is the DISCLOSURE half only, by owner decision. Building per-ancestor
+    bounded reads across archives would overlap §C+'s deliberately deferred
+    archive-cap work, so the fix here is to say what is missing rather than to go
+    and get it.
+
+    Evaluated PER ANCESTOR, and only the ancestors it actually applies to are
+    named. Every condition is one-directional: they establish that rows were not
+    READ, never that rows existed, so the wording says the shared past is not in
+    this view rather than asserting a loss.
+
+    * The oldest scanned row is NEWER than that ancestor's cutoff. Rows are
+      appended in timestamp order, so nothing of that ancestor's window is in the
+      scan at all — and if the live file was not even capped, those rows are in
+      the rotated archive this reader does not open.
+    * The scan hit its CAP — so rows below its oldest were not read — AND the
+      window shows no sign of having reached back past that ancestor's beginning:
+      either it holds NONE of that ancestor's admitted rows, or the oldest one it
+      holds is the oldest row the scan read at all, i.e. the window edge cuts
+      straight through that ancestor's stream.
+
+    The cap ALONE used to be the whole test, and that made the section fire on
+    every fork on any install whose live journal has reached 4000 rows —
+    permanently, including when the ancestor's entire shared past sits inside the
+    window with thousands of older rows read behind it. A disclosure that is
+    always on is one the reader learns to skip, which costs exactly the warning
+    A3b exists to give. So the cap is now necessary and not sufficient: the scan
+    must also fail to account for that ancestor's beginning.
+
+    DISCLOSED residual, not a silent one: an ancestor that was SILENT across the
+    oldest rows of the window and active before it reads here as "the window
+    reached back past its beginning" and is not named. Telling that apart needs a
+    read BELOW the window — per-ancestor bounded reads across the archives — which
+    is §C+'s deliberately deferred archive-cap work, the same reason this function
+    discloses rather than fetches. The residual is bounded by the same fact:
+    whatever is not named here is also not fetched by any other reader on this
+    surface today.
+    """
+    if not bool(getattr(lens, "has_ancestors", False)) or not scanned:
+        return ""
+    own = 0
+    try:
+        own = int(getattr(lens, "chat_id", 0) or 0)
+    except (TypeError, ValueError):
+        own = 0
+    ancestors = []
+    for chat, cutoff in (getattr(lens, "cutoffs", None) or {}).items():
+        try:
+            other = int(chat)
+        except (TypeError, ValueError):
+            continue
+        if other != own:
+            ancestors.append((other, str(cutoff or "")))
+    if not ancestors:
+        return ""
+    oldest = str((scanned[0] or {}).get("ts") or "")
+    capped = len(scanned) >= _PROJECT_THREAD_SCAN
+    bindings = bound or {}
+    out_of_window, not_reached = [], []
+    for chat, cutoff in sorted(ancestors):
+        if oldest and cutoff and oldest > cutoff:
+            out_of_window.append(chat)
+            continue
+        if not capped:
+            continue
+        reach = _ancestor_reach(scanned, chat, cutoff, bindings)
+        if reach is None or reach == 0:
+            not_reached.append(chat)
+    beyond = sorted(out_of_window + not_reached)
+    if not beyond:
+        return ""
+    named = ", ".join(str(chat) for chat in beyond)
+    # Each GROUP carries its OWN reason. One reason covering every named ancestor
+    # stopped being true the moment two of them qualified differently — a fork of
+    # a fork whose grandparent is wholly out of the window while its parent's rows
+    # run into the window edge was told, in one sentence, something that could
+    # only be true of one of them.
+    reasons = []
+    if out_of_window:
+        reasons.append(
+            f"for chat {', '.join(str(c) for c in out_of_window)}, this window begins "
+            f"at {oldest}, after the point the fork was taken"
+        )
+    if not_reached:
+        # Deliberately NOT "older rows exist": a live file of exactly the cap length
+        # with no archive behind it has none, and a disclosure must not assert what
+        # it cannot see. "Anything older was not read" is true either way.
+        reasons.append(
+            f"for chat {', '.join(str(c) for c in not_reached)}, the {len(scanned)}-row "
+            "window scanned here is full and does not reach back past where those rows "
+            "begin, so anything older than it was not read"
+        )
+    why = "; and ".join(reasons)
+    return (
+        f"This thread is a FORK of chat {named}, and the shared past it inherits may "
+        f"not be complete below: {why}. This view filters ONE bounded tail of the "
+        "live journal, which is shared by every chat and rotates into on-disk "
+        "archives it does not read, so the owner's own history view can reach "
+        "further back than this one. Treat the conversation here as possibly "
+        "incomplete, do not reconstruct the missing part by guessing, and ask the "
+        "owner if the task depends on it."
+    )
+
+
 def build_recent_sections(
     memory: Memory, env: Any, task_id: str = "", thread_chat_id: int = 0
 ) -> List[str]:
@@ -855,6 +1003,11 @@ def build_recent_sections(
 
     _context_mode = get_context_mode()
     _chat_tail = MAX_RECENT_CHAT_TAIL
+    #: What this focused thread view could NOT cover, in the agent's own words.
+    #: A3b applied to the agent surface: the history window has `truncated_by`, and
+    #: the context had no equivalent at all, so every degradation on this path was
+    #: silent to the one reader who acts on it.
+    _thread_omissions: list = []
 
     if thread_chat_id and thread_chat_id in _project_chat_ids:
         # Project task: a FOCUSED working view of its OWN thread (reduces
@@ -868,12 +1021,57 @@ def build_recent_sections(
             _bound = all_task_bindings(memory.drive_root)
         except Exception:
             _bound = {}
+        # THE SAME lens gateway/history.py serves the owner, asked THE SAME
+        # question: a forked thread's shared past is defined ONCE (ancestors +
+        # intersected inclusive cutoffs + the ancestors' binding source refs),
+        # and the row test is the shared thread_history.admits_row /
+        # bound_chat_for_row pair. The post-hoc binding used to be compared
+        # DIRECTLY against this thread's own chat id here while the history
+        # endpoint routed the same binding THROUGH the lens — so a task bound to
+        # a parent thread appeared in a fork's UI history and was invisible to
+        # the agent working in that fork. Both surfaces now resolve the binding
+        # by task LINEAGE and admit it through the lens, and both build the lens
+        # with source refs, so neither can answer from a differently-built lens.
+        try:
+            from ouroboros.thread_history import thread_ancestry_lens
+
+            _lens = thread_ancestry_lens(
+                memory.drive_root, thread_chat_id, with_source_refs=True
+            )
+        except Exception:
+            log.warning("Thread ancestry lens unavailable; own thread only", exc_info=True)
+            _lens = None
+        if _lens is None or bool(getattr(_lens, "lens_unavailable", False)):
+            # The AGENT half of the same disclosure the history window makes as its
+            # `lens_unavailable` cause. Degrading to own-thread rows is the right
+            # narrowing, but doing it SILENTLY meant a fork whose registry had just
+            # become unreadable was handed a context that looked complete — no
+            # exception, no marker, the shared past simply absent (BIBLE P1).
+            _thread_omissions.append(
+                "This thread's fork history could not be read just now. If it is a "
+                "fork, the shared past it inherits from its parent thread is NOT "
+                "included below. Treat the conversation here as incomplete, say so if "
+                "the task depends on that history, and do not reconstruct it by guessing."
+            )
         recent = memory.read_jsonl_tail("chat.jsonl", _PROJECT_THREAD_SCAN)
-        chat_entries = [
-            e for e in recent
-            if _entry_chat_id(e) == thread_chat_id
-            or _bound.get(str((e or {}).get("task_id") or "")) == thread_chat_id
-        ][-_chat_tail:]
+        if _lens is not None:
+            from ouroboros.thread_history import admits_row, bound_chat_for_row
+
+            chat_entries = [
+                e for e in recent
+                if admits_row(_lens, e, bound_chat_for_row(e, _bound))
+            ][-_chat_tail:]
+            _shared_past_note = _shared_past_beyond_scan(_lens, recent, _bound)
+            if _shared_past_note:
+                _thread_omissions.append(_shared_past_note)
+        else:
+            # Lens unavailable (unreadable registry): degrade to this thread's
+            # OWN rows plus its own directly-bound tasks — narrower, never wider.
+            chat_entries = [
+                e for e in recent
+                if _entry_chat_id(e) == thread_chat_id
+                or _bound.get(str((e or {}).get("task_id") or "")) == thread_chat_id
+            ][-_chat_tail:]
     else:
         dialogue_meta = memory.load_dialogue_meta()
         try:
@@ -906,6 +1104,13 @@ def build_recent_sections(
         )
     # Pass the same tail intent down: summarize_chat's internal default cap
     # would silently re-cut the low-mode full-window read to 1000 lines.
+    if _thread_omissions:
+        # BEFORE the conversation, not after it: a caveat the agent reads only once
+        # it has already treated the rows as the whole story is not a disclosure.
+        sections.append(
+            "## Conversation gaps in this view\n\n"
+            + "\n".join(f"- {line}" for line in _thread_omissions)
+        )
     chat_summary = memory.summarize_chat(chat_entries, limit=_chat_tail)
     if chat_summary:
         sections.append("## Recent chat\n\n" + chat_summary)

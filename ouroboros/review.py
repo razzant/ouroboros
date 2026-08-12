@@ -209,6 +209,41 @@ GRANDFATHERED_OVERSIZED_MODULES = {
     # loop/shell/core above. NOTE: agent_task_pipeline.py hit the same wall in
     # this rebase and was made to FIT (no debt) — only config.py had no room.
     "config.py",
+    # 2026-08-10 project-threads integration review (I4): supervisor/queue.py was
+    # sitting at EXACTLY 1600, and the fix is ONE behavioural line — the enqueue
+    # SSOT must STRIP the writer-lane pin, because a task in PENDING holds no lane
+    # and the in-process crash retry re-enqueues the very dict `assign_tasks`
+    # stamped, so attempt 2 held a folder it does not write in while the next
+    # candidate for the folder it DOES write in read that folder as free. The line
+    # has to live there: `enqueue_task` is the one door every requeue path goes
+    # through, and putting the strip in a single caller reopens the others. Its
+    # explanation was moved into `project_lease`'s docstring and the comment cut to
+    # two lines, which still leaves the module 4 over.
+    #
+    # Why an exemption and not a trim, stated honestly — "it has no reclaimable
+    # line" was the earlier wording and it is only half true. There is no SMALL
+    # one: every private helper in the module has a live caller (checked one by
+    # one — `queue_has_task_type`, `_kept_service_pids`, `_schedule_running_or_
+    # queued` and the rest are all reached), and the remaining comments are prose
+    # about defects. But there IS a large separable block: the ~320-line scheduled
+    # tasks half, `_scheduled_tasks_path` through `check_scheduled_tasks`, which is
+    # precisely the follow-up named below. So this entry is a deliberate decision
+    # NOT to move 320 lines out of the queue SSOT — the module that owns
+    # `_queue_lock`, the PENDING/RUNNING refs, cancellation and timeout enforcement
+    # — inside a fix round, where P7 forbids the refactor and this feature's own
+    # two-stack synthesis is the standing evidence of what a careless module move
+    # costs. The precedent it rides is exact rather than approximate: `config.py`
+    # sat at EXACTLY 1600 and crossed on one owner setting plus its clamped getter;
+    # `workers.py`/`events.py`/`control.py`/`registry.py` sat at ~1591 and crossed
+    # on the acting-subagent gating. Each records a reason and a tracked follow-up,
+    # and so does this. The counter-example in `config.py`'s entry
+    # (`agent_task_pipeline.py` hit the same wall and was made to FIT, no debt) is
+    # the test that was applied here first: fitting this module needs the split,
+    # not a trim, so the debt is taken deliberately and named. Splitting the
+    # evolution/scheduling half out of the queue is the tracked follow-up (same "at
+    # the ceiling, crossed by a one-line safety fix" class as config.py above).
+    # Keyed by REPO-RELATIVE path so no other queue.py is silently exempted.
+    "supervisor/queue.py",
 }
 # Bundle-only launcher is not part of the self-editable function budget.
 FUNCTION_COUNT_EXCLUDED_FILES = {"launcher.py"}

@@ -252,6 +252,39 @@ def test_worktree_prune_guards_outside_root(tmp_path):
     assert outside.exists() and (outside / "keep.txt").exists()  # guard prevented deletion
 
 
+def test_prune_orphans_never_re_enters_its_own_root_lock(tmp_path, monkeypatch):
+    """A registry row with an EMPTY ``repo_dir`` made the per-repo lock fall back
+    to ``_ops_lock(root)`` — the SAME O_EXCL lockfile the sweep is already
+    holding, in the same thread. The in-process RLock is re-entrant and hides
+    it; the cross-process file lock is not, so startup blocked for the full lock
+    timeout and then raised, discarding the entire sweep."""
+    import time
+
+    monkeypatch.setattr(sw, "_LOCK_TIMEOUT_SEC", 2.0)
+    repo = tmp_path / "repo"
+    _init_repo(repo, {"a.txt": "hi\n"})
+    data = tmp_path / "data"; data.mkdir()
+    wtroot = tmp_path / "wtroot"
+    live = sw.provision_worktree(
+        repo_dir=repo, task_id="live", worktree_root=wtroot, data_dir=data,
+    )
+    sw._save_registry(
+        [
+            {"task_id": "rootless", "path": "", "branch": "", "repo_dir": "", "created_at": 0.0},
+            *sw.list_worktrees(data),
+        ],
+        data_dir=data,
+    )
+
+    started = time.monotonic()
+    res = sw.prune_orphans(worktree_root=wtroot, data_dir=data, retention_days=9999)
+    assert time.monotonic() - started < 2.0, "the sweep waited on its own lock"
+    # The whole sweep survived: the rootless row is gone, the live one kept.
+    assert res == {"removed": 1, "kept": 1}
+    assert [row["task_id"] for row in sw.list_worktrees(data)] == ["live"]
+    assert pathlib.Path(live.path).is_dir()
+
+
 def test_worktree_prune_missing(tmp_path):
     repo = tmp_path / "repo"
     _init_repo(repo, {"a.txt": "hi\n"})

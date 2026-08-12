@@ -224,7 +224,10 @@ def test_context_fact_matches_lens_state(tmp_path, monkeypatch):
     )
     task = {"id": "t1", "project_id": "p1", "_is_direct_chat": True}
     rendered = build_runtime_section(env, task)
-    assert "LOOKS AT the project folder" in rendered
+    # I7: the rule names the RESOLVED folder (`room_dir`), which equals the
+    # project's own working_dir only for a thread that has NOT branched off.
+    assert "LOOKS AT the folder named in room_dir" in rendered
+    assert "room_dir" in rendered and str(folder.resolve()) in rendered
 
     update_project(data, "p1", working_dir=str(tmp_path / "vanished"))
     rendered2 = build_runtime_section(env, task)

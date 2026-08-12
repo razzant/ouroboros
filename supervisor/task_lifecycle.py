@@ -12,13 +12,32 @@ import itertools
 import logging
 import pathlib
 import threading
+import time
 from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional, Tuple
 
-from ouroboros.utils import utc_now_iso
+from ouroboros.utils import truncate_review_artifact, utc_now_iso
 
 log = logging.getLogger(__name__)
 
+#: Character budget for the orphaned-checkout disclosure written onto a tombstoned
+#: project row and sent to the owner. A bound, never a silent cut: entries are
+#: dropped whole and declared by count and thread id (see
+#: :func:`_orphaned_checkouts_note`), and prose goes through the
+#: ``truncate_review_artifact`` SSOT, which carries the omission marker.
+ORPHANED_NOTE_LIMIT = 2000
+
+
+#: How long a quiesce pass waits before re-reading the live set.
+#:
+#: Cancellation is a REQUEST, not an instant: `cancel_task_by_id` flags a task
+#: and the worker settles on its own schedule. Re-reading with no pause spun a
+#: daemon thread at full speed against the queue lock the workers need to
+#: finish, and — worse — reached the "did not shrink" verdict on a millisecond
+#: timescale, so a deletion could be declared stuck before anything had had a
+#: chance to stop. Small enough that a real deletion is not noticeably slower,
+#: long enough that a settling task gets a turn (T3R-17).
+_QUIESCE_SETTLE_SEC = 0.05
 
 _PROJECT_DELETE_WORKERS_LOCK = threading.Lock()
 _PROJECT_DELETE_WORKERS: set[tuple[str, str]] = set()
@@ -1120,22 +1139,170 @@ def _broadcast_projects_changed(project_id: str, chat_id: Any) -> None:
         _queue_module().log.debug("projects_changed broadcast failed for %s", project_id, exc_info=True)
 
 
+def _sweep_project_checkouts(drive_root: object, project_id: str) -> str:
+    """Take any thread checkout that outlived the delete route's own attempt.
+
+    Best-effort and never raising: a checkout that still cannot be removed is not
+    a reason to fail the deletion — the project row's own teardown has already
+    succeeded by here. But it must not VANISH either, so this returns a disclosure
+    sentence ("" when nothing was left behind) that the caller writes onto the
+    tombstoned row and sends to the owner. A ``log.warning`` was the whole of the
+    previous disclosure and it reaches no owner surface at all.
+
+    The sweep no longer acknowledges unmerged work on the owner's behalf (see
+    ``thread_worktrees.remove_project_thread_worktrees``), so a checkout that
+    became at-risk AFTER the owner's pre-fence look now survives here deliberately
+    — which is precisely why the survivors have to be disclosed.
+    """
+    try:
+        from ouroboros.thread_worktrees import remove_project_thread_worktrees
+
+        swept = remove_project_thread_worktrees(drive_root, project_id)
+        if not swept["kept"]:
+            return ""
+        _queue_module().log.warning(
+            "Project %s tombstoned with %d thread checkout(s) still on disk: %s",
+            project_id, len(swept["kept"]), swept["kept"],
+        )
+        return _orphaned_checkouts_note(swept["kept"])
+    except Exception as exc:
+        _queue_module().log.warning(
+            "Project %s: thread checkout sweep failed", project_id, exc_info=True,
+        )
+        return truncate_review_artifact(
+            "the thread checkouts could not be swept "
+            f"({type(exc).__name__}: {exc}), so any that exist are still on disk.",
+            limit=ORPHANED_NOTE_LIMIT,
+        )
+
+
+def _orphaned_checkouts_note(kept: List[Dict[str, Any]]) -> str:
+    """What was left behind, and WHERE — the sentence the owner is owed.
+
+    Names each folder and branch rather than counting them: the project is about to
+    become invisible on every surface, so this text is the only thing that can
+    still point the owner at work only they can reach now.
+
+    Which is exactly why it may not be cut silently (BIBLE P1, DEVELOPMENT.md "No
+    silent truncation"). A flat ``[:2000]`` over the joined lines dropped whole
+    checkouts out of the only record that names them — reproduced at 30 survivors,
+    where 13 vanished and the sentence ended mid-word — with no marker saying so.
+    A disclosure about work the owner can no longer reach through the app is the
+    last text that may lose part of itself in silence. So the bound is taken at an
+    ENTRY boundary, never mid-entry, and whatever does not fit is DECLARED: the
+    count, the thread ids (short, and the key to finding the folder), and where the
+    unabridged list is. ``log.warning`` in the caller writes that full list, and
+    says so here rather than being a record nobody knows exists.
+    """
+    lines = []
+    for item in kept:
+        path = str(item.get("path") or "").strip() or "(path unknown)"
+        branch = str(item.get("branch") or "").strip()
+        reason = str(item.get("reason") or "removal_failed")
+        lines.append((
+            item.get("thread_id"),
+            f"thread {item.get('thread_id')}: {path}"
+            + (f" (branch {branch})" if branch else "")
+            + f" — {reason}",
+        ))
+    count = len(lines)
+    head = (
+        f"{count} thread checkout{'' if count == 1 else 's'} could not be removed and "
+        f"{'is' if count == 1 else 'are'} still on disk; the project is deleted, so "
+        "nothing in the app can reach them any more. "
+    )
+    named: List[str] = []
+    omitted: List[str] = []
+    used = len(head)
+    for thread_id, line in lines:
+        if named and used + len(line) + 2 > ORPHANED_NOTE_LIMIT:
+            omitted.append(str(thread_id))
+            continue
+        named.append(line)
+        used += len(line) + 2
+    text = head + "; ".join(named)
+    if omitted:
+        text += (
+            f". {len(omitted)} more are still on disk and NOT named above "
+            f"(thread{'' if len(omitted) == 1 else 's'} {', '.join(omitted)}); "
+            "their full paths and branches are in the app log, on the "
+            "\"tombstoned with … thread checkout(s) still on disk\" warning."
+        )
+    return text
+
+
+def _tell_owner_about_orphaned_checkouts(project_id: str, note: str) -> None:
+    """Send the disclosure to the one surface a tombstoned project still has.
+
+    A tombstoned row is filtered out of ``list_sidebar_projects``, so writing the
+    note onto the row makes it durable and checkable but shows it to nobody. The
+    owner's chat is where every other background lifecycle reports itself
+    (``evolution_lifecycle.notify_owner_cycle_outcome`` is the precedent) and this
+    is the same class of fact: a teardown that finished in a way the owner has to
+    know about. Fully guarded — a disclosure that cannot be SENT must not take the
+    deletion down with it, and the note is on the row either way.
+    """
+    try:
+        from supervisor.message_bus import send_with_budget
+        from supervisor.state import load_state
+
+        owner_chat_id = int(load_state().get("owner_chat_id") or 0)
+        if not owner_chat_id:
+            return
+        send_with_budget(owner_chat_id, f"⚠️ Project “{project_id}” was deleted, but {note}")
+    except Exception:
+        _queue_module().log.warning(
+            "Project %s: could not tell the owner about the checkouts left behind: %s",
+            project_id, note, exc_info=True,
+        )
+
+
 def run_project_deletion(
     drive_root: object,
     project_id: str,
     chat_id: Any,
     worker_key: tuple[str, str] | None = None,
 ) -> None:
-    """Cancel a fenced Project tree and tombstone only after quiescence."""
+    """Cancel a fenced Project tree and tombstone only after quiescence.
+
+    The LAST act before the tombstone is taking any thread checkout the route
+    could not take yet (I1): ``api_project_delete`` refuses on work at risk and
+    removes what it can, but a checkout with a task still writing in it refuses
+    ``project_busy`` there and would otherwise be left behind — a folder and a
+    ``thread/*`` branch that a tombstoned project has no surface to reach. Here the
+    tasks are gone, so the removal's own busy judge lets it through.
+
+    What it does NOT do is acknowledge unmerged work for the owner. The pre-fence
+    inspection is a fact about a moment that has passed by the time this runs: the
+    task that made the route refuse ``project_busy`` went on to commit work and edit
+    tracked files in that checkout, and the sweep's hardcoded acknowledgement
+    destroyed both (P1). Each row is re-inspected by the same judge the route used,
+    so a newly at-risk checkout SURVIVES — and then rides the tombstone as a
+    disclosure, naming the folder and the branch, plus a chat note to the owner. The
+    project is still tombstoned: keeping it alive because a folder survived was
+    rejected as owner direction (§I M2), so the answer is disclosure, never silence.
+    """
     from ouroboros.projects_registry import complete_project_deletion, fail_project_deletion
 
     q = _queue_module()
+
+    def _finish() -> None:
+        # The sweep's own answer rides the tombstone. A checkout it could not take
+        # is now KEPT rather than force-removed (the sweep stopped acknowledging
+        # unmerged work on the owner's behalf), so "what was left behind and where"
+        # is a fact the tombstone has to carry — and the owner has to be told,
+        # because a tombstoned project is on no surface that could show them.
+        left_behind = _sweep_project_checkouts(drive_root, project_id)
+        complete_project_deletion(drive_root, project_id, delete_error=left_behind)
+        _broadcast_projects_changed(project_id, chat_id)
+        if left_behind:
+            _tell_owner_about_orphaned_checkouts(project_id, left_behind)
+
     try:
         while True:
             live_ids = _live_project_task_ids(drive_root, project_id)
             if not live_ids:
-                complete_project_deletion(drive_root, project_id)
-                _broadcast_projects_changed(project_id, chat_id)
+                _finish()
                 return
             errors: list[str] = []
             for task_id in live_ids:
@@ -1145,12 +1312,14 @@ def run_project_deletion(
                     errors.append(f"{task_id}: {type(exc).__name__}: {exc}")
             remaining = _live_project_task_ids(drive_root, project_id)
             if not remaining:
-                complete_project_deletion(drive_root, project_id)
-                _broadcast_projects_changed(project_id, chat_id)
+                _finish()
                 return
             if set(remaining) >= set(live_ids):
                 detail = "; ".join(errors) if errors else "cancel_task_by_id left tasks live"
                 raise RuntimeError(f"Project deletion did not quiesce ({', '.join(remaining)}): {detail}")
+            # It SHRANK, so cancellation is working — give the rest a turn to
+            # settle instead of spinning against the lock they need.
+            time.sleep(_QUIESCE_SETTLE_SEC)
     except Exception as exc:
         q.log.exception("Project deletion failed for %s", project_id)
         fail_project_deletion(drive_root, project_id, f"{type(exc).__name__}: {exc}")
@@ -1190,4 +1359,186 @@ def resume_project_deletions(drive_root: object) -> int:
             str(project.get("id") or ""),
             project.get("chat_id"),
         ))
+    return started
+
+
+# --------------------------------------------------------------------------- #
+# Thread deletion (X10): fence -> cancel/quiesce by EXACT thread chat id ->
+# tombstone. The project pattern one level down, deliberately reusing its shape
+# rather than inventing a second teardown with its own bugs.
+# --------------------------------------------------------------------------- #
+
+_THREAD_DELETE_WORKERS_LOCK = threading.Lock()
+_THREAD_DELETE_WORKERS: set[tuple[str, str, int]] = set()
+
+
+def _live_thread_task_ids(chat_id: int) -> list[str]:
+    """Queued/running tasks belonging to ONE thread, plus their subtrees.
+
+    Selection is by EXACT thread chat id, never by project (X10): a project can
+    hold several threads, and cancelling the project's whole queue because one
+    thread was deleted would kill work the owner never touched. Children are
+    pulled in by lineage rather than by chat id, because a subagent inherits its
+    parent's tree but not necessarily its chat.
+
+    Children are returned FIRST so a cascade cancels from the leaves up, matching
+    the project path's ordering.
+    """
+    q = _queue_module()
+    with q._queue_lock:
+        rows = [dict(task) for task in q.PENDING if isinstance(task, dict)]
+        rows.extend(
+            dict(meta.get("task"))
+            for meta in q.RUNNING.values()
+            if isinstance(meta, dict) and isinstance(meta.get("task"), dict)
+        )
+    by_id: dict[str, dict] = {}
+    associated: set[str] = set()
+    for task in rows:
+        task_id = str(task.get("id") or task.get("task_id") or "").strip()
+        if not task_id:
+            continue
+        by_id[task_id] = task
+        try:
+            task_chat = int(task.get("chat_id") or 0)
+        except (TypeError, ValueError):
+            task_chat = 0
+        # A falsy chat id is "this task has no room", not "this task belongs to
+        # room 0": without the guard, `_live_thread_task_ids(0)` selected every
+        # chat-less task in the queue — every headless subagent — and cancelled
+        # them. Unreachable today because thread #0 is the project and
+        # `begin_thread_deletion` refuses it, but the selection is one caller away
+        # from being wrong about the owner's whole swarm.
+        if task_chat and task_chat == int(chat_id):
+            associated.add(task_id)
+    changed = True
+    while changed:
+        changed = False
+        for task_id, task in by_id.items():
+            if task_id in associated:
+                continue
+            if (
+                str(task.get("parent_task_id") or "") in associated
+                or str(task.get("root_task_id") or "") in associated
+            ):
+                associated.add(task_id)
+                changed = True
+    return sorted(
+        associated,
+        key=lambda task_id: bool(str(by_id.get(task_id, {}).get("parent_task_id") or "")),
+        reverse=True,
+    )
+
+
+def run_thread_deletion(
+    drive_root: object,
+    project_id: str,
+    thread_id: int,
+    chat_id: int,
+    worker_key: tuple | None = None,
+) -> None:
+    """Cancel a fenced thread's tasks and tombstone only after quiescence.
+
+    The thread is already fenced against routing by the time this runs, so no new
+    work can enter while it drains. A tree that refuses to quiesce records its
+    reason on the row and stays fenced — never rolled back to active, because the
+    owner asked for this thread to go and silently re-opening it would put
+    messages back into a room they had written off.
+    """
+    from ouroboros.projects_registry import complete_thread_deletion, fail_thread_deletion
+
+    q = _queue_module()
+    try:
+        while True:
+            live_ids = _live_thread_task_ids(chat_id)
+            if not live_ids:
+                complete_thread_deletion(drive_root, project_id, thread_id)
+                _broadcast_projects_changed(project_id, chat_id)
+                return
+            errors: list[str] = []
+            for task_id in live_ids:
+                try:
+                    q.cancel_task_by_id(task_id, cascade=True)
+                except Exception as exc:
+                    errors.append(f"{task_id}: {type(exc).__name__}: {exc}")
+            remaining = _live_thread_task_ids(chat_id)
+            if not remaining:
+                complete_thread_deletion(drive_root, project_id, thread_id)
+                _broadcast_projects_changed(project_id, chat_id)
+                return
+            if set(remaining) >= set(live_ids):
+                detail = "; ".join(errors) if errors else "cancel_task_by_id left tasks live"
+                raise RuntimeError(
+                    f"thread deletion did not quiesce ({', '.join(remaining)}): {detail}"
+                )
+            # It SHRANK, so cancellation is working — give the rest a turn to
+            # settle instead of spinning against the lock they need.
+            time.sleep(_QUIESCE_SETTLE_SEC)
+    except Exception as exc:
+        q.log.exception("Thread deletion failed for %s#%s", project_id, thread_id)
+        try:
+            # Recording WHY must not itself raise out of a daemon thread. The
+            # project row can have moved between the fence and here (its own
+            # deletion started), and losing this note is better than losing the
+            # traceback that explains what actually went wrong.
+            fail_thread_deletion(drive_root, project_id, thread_id, f"{type(exc).__name__}: {exc}")
+        except Exception:
+            q.log.debug("Could not record the thread-deletion failure", exc_info=True)
+        _broadcast_projects_changed(project_id, chat_id)
+    finally:
+        if worker_key is not None:
+            with _THREAD_DELETE_WORKERS_LOCK:
+                _THREAD_DELETE_WORKERS.discard(worker_key)
+
+
+def start_thread_deletion(drive_root: object, project_id: str, thread_id: int, chat_id: int) -> bool:
+    """Start one cancellation worker per thread and server generation."""
+    key = (str(drive_root), str(project_id), int(thread_id))
+    with _THREAD_DELETE_WORKERS_LOCK:
+        if key in _THREAD_DELETE_WORKERS:
+            return False
+        _THREAD_DELETE_WORKERS.add(key)
+    threading.Thread(
+        target=run_thread_deletion,
+        args=(drive_root, project_id, thread_id, chat_id, key),
+        name=f"thread-delete-{project_id}-{thread_id}",
+        daemon=True,
+    ).start()
+    return True
+
+
+def resume_thread_deletions(drive_root: object) -> int:
+    """Resume interrupted THREAD deletions from durable registry state.
+
+    Same reason the project version exists: a restart between the fence and the
+    tombstone would otherwise leave a thread fenced forever — invisible to
+    routing, still on screen, never finishing.
+
+    Thread #0 is SKIPPED: it is the project, its synthesized lifecycle mirrors the
+    project's, and `list_sidebar_projects` includes deleting projects. So a
+    project mid-deletion produced a bogus thread-deletion worker for its own
+    thread #0 that cancelled the project's whole tree in parallel with
+    `resume_project_deletions` and then raised `thread_zero_is_the_project`,
+    logging a traceback on every restart. Thread #0 belongs to the project path.
+    """
+    from ouroboros.projects_registry import (
+        MAIN_THREAD_ID,
+        THREAD_DELETING,
+        list_sidebar_projects,
+        project_threads,
+    )
+
+    started = 0
+    for project in list_sidebar_projects(drive_root):
+        for thread in project_threads(project):
+            if int(thread.get("id") or 0) == MAIN_THREAD_ID:
+                continue
+            if str(thread.get("lifecycle") or "") != THREAD_DELETING:
+                continue
+            started += int(start_thread_deletion(
+                drive_root,
+                str(project.get("id") or ""),
+                int(thread.get("id") or 0),
+                int(thread.get("chat_id") or 0),
+            ))
     return started

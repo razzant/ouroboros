@@ -170,10 +170,11 @@
     --button-padding-x: 16px;
     --button-font-size: 13px;
     --button-min-height: 34px;
-    /* App shell: persistent desktop sidebar + optional right panel. The right
-       panel is ONE slot with mutually exclusive kinds (project | inspector):
-       the project panel keeps its persisted drag width, the task inspector is
-       fixed-width per the design handoff (no resize state). */
+    /* App shell: persistent desktop sidebar + optional right panel. A project
+       thread takes over the CENTRE (project threads, T1), so the right panel is
+       the task inspector's alone — fixed-width per the design handoff, no resize
+       state. `--project-panel-width` is kept only as a compatibility token for a
+       stored preference; nothing lays out against it. */
     --sidebar-width: 224px;
     --project-panel-width: clamp(340px, 36vw, 440px);
     --inspector-width: 320px;
@@ -233,8 +234,8 @@ body {
     position: relative;  /* positioning context for the resize handle */
 }
 
-/* Resizable side-section drag handles (v6.33.0). Thin edge strips that set
-   --sidebar-width / --project-panel-width; hidden under the mobile drawer. */
+/* Resizable side-section drag handle (v6.33.0). A thin edge strip that sets
+   --sidebar-width; hidden under the mobile drawer. */
 /* CW10 (v6.34.0): suppress text selection while dragging via a class, not a JS
    inline style (DEVELOPMENT.md: no element.style.* property mutations in UI JS). */
 body.resizing-panels { user-select: none; }
@@ -2717,10 +2718,6 @@ button.chat-file:hover,
             "leading title"
             "toolbar toolbar"
             "tabs tabs";
-    }
-
-    body.project-panel-open .mobile-nav-toggle {
-        display: none;
     }
 
     /* Restart / Panic / More is a short control set — let it wrap instead of
@@ -6815,10 +6812,30 @@ textarea.chat-input {
    no left active bar) — a dropdown list, not standalone tabs. */
 .nav-project-item {
     display: grid;
-    grid-template-columns: minmax(0, 1fr) 28px;
+    /* Row + ONE trailing slot. The slot holds the thread "+" and the kebab, so
+       the row stays a single button with a single sibling action node. */
+    grid-template-columns: minmax(0, 1fr) auto;
     align-items: center;
     width: 100%;
     border-radius: var(--radius-sm);
+}
+
+.nav-project-actions {
+    display: inline-flex;
+    align-items: center;
+    justify-self: end;
+}
+
+/* Two actions now share the trailing slot, so each is narrower than the single
+   26px kebab was: the slot must not grow at the label's expense (a project row
+   at the default 224px sidebar has ~120px of label to spend). */
+.nav-project-actions .nav-project-kebab {
+    width: 22px;
+}
+
+.nav-thread-add {
+    font-size: 15px;
+    line-height: 1;
 }
 
 .nav-project-row {
@@ -6942,8 +6959,91 @@ textarea.chat-input {
 }
 
 .nav-project-item:hover .nav-project-kebab,
-.nav-project-item:focus-within .nav-project-kebab {
+.nav-project-item:focus-within .nav-project-kebab,
+.nav-thread-item:hover .nav-thread-kebab,
+.nav-thread-item:focus-within .nav-thread-kebab {
     opacity: 1;
+}
+
+/* ---------------------------------------------------------------------------
+   Thread rows (project threads, T1).
+   A SIBLING container after the project row, not a child of it: the project row
+   is one button, and a button may not contain interactive UI. Threads are
+   indented one more step so the grouping reads as "these belong to that project"
+   (Codex-like), and each carries its OWN unread dot — the project row above
+   shows the aggregate.
+   --------------------------------------------------------------------------- */
+.nav-thread-list {
+    display: flex;
+    flex-direction: column;
+    gap: 1px;
+    width: 100%;
+}
+
+.nav-thread-item {
+    display: grid;
+    grid-template-columns: minmax(0, 1fr) auto;
+    align-items: center;
+    width: 100%;
+    border-radius: var(--radius-sm);
+}
+
+.nav-thread-row {
+    min-height: 28px;
+    font-size: 12.5px;
+    color: var(--text-muted);
+    padding-left: calc(var(--space-3) + 18px + var(--space-3) + var(--space-3));
+    padding-right: var(--space-1);
+    border-radius: var(--radius-sm);
+    position: relative;
+}
+
+.nav-thread-row:hover {
+    color: var(--text-primary);
+}
+
+.nav-thread-row.active {
+    color: var(--project);
+}
+
+/* THREE thread lifecycles, painted apart (D4/X10). `deleting` is the deliberate
+   end of a deletion that would not quiesce and stays on screen so the owner can
+   retry it; `archived` reaches the sidebar only while a task is still live in it.
+   Sharing one greyed-out look told the owner the wrong thing about which of the
+   two their instruction had produced, so the state is also spelled in words. */
+.nav-thread-item.is-deleting .nav-thread-row {
+    color: var(--text-muted);
+    opacity: 0.62;
+}
+
+.nav-thread-item.is-archived .nav-thread-row {
+    color: var(--text-muted);
+    font-style: italic;
+}
+
+.nav-thread-state {
+    margin-left: auto;
+    padding-left: var(--space-2);
+    color: var(--text-muted);
+    font-size: 10px;
+    white-space: nowrap;
+}
+
+/* Drag-and-drop reordering feedback (D3). The insertion point is an edge, not a
+   moved element: nothing is reordered until the drop actually commits. */
+.nav-project-item.is-dragging,
+.nav-thread-item.is-dragging {
+    opacity: 0.5;
+}
+
+.nav-project-item.drop-before,
+.nav-thread-item.drop-before {
+    box-shadow: inset 0 2px 0 0 var(--project);
+}
+
+.nav-project-item.drop-after,
+.nav-thread-item.drop-after {
+    box-shadow: inset 0 -2px 0 0 var(--project);
 }
 
 .nav-project-kebab:hover,
@@ -6985,6 +7085,24 @@ textarea.chat-input {
 
 .project-row-menu button.danger {
     color: var(--danger, #e5534b);
+}
+
+/* An UNAVAILABLE thread action is GREYED, not merely inert. Those rows carry
+   `disabled` plus a `title` naming the reason — but with no rule here they
+   rendered at full contrast, with `cursor: pointer` and a live hover, so
+   `Merge back` on a thread with no checkout looked exactly like `Fork` and its
+   reason lived only in a tooltip nobody has cause to open. The DOM assertions
+   were green throughout; it was found by LOOKING at the rendered menu, which is
+   what the vision pass is for. Same shape as `.skills-menu-item:disabled`
+   above, neutralised hover included — a row that lights up under the pointer
+   reads as clickable whatever its attributes say. */
+.project-row-menu button:disabled {
+    opacity: 0.55;
+    cursor: not-allowed;
+}
+
+.project-row-menu button:disabled:hover {
+    background: transparent;
 }
 
 /* New Project dialog */
@@ -7094,34 +7212,6 @@ textarea.chat-input {
     white-space: pre-wrap;
 }
 
-.project-panel {
-    display: flex;
-    flex-direction: column;
-    position: fixed;
-    top: 0;
-    right: 0;
-    bottom: 0;
-    width: var(--project-panel-width);
-    z-index: 58;
-    border-left: 1px solid var(--divider);
-    background: var(--bg-panel);
-    box-shadow: -24px 0 64px rgba(0, 0, 0, 0.34);
-    transform: translateX(18px);
-    opacity: 0;
-    pointer-events: none;
-    transition: transform 180ms ease, opacity 180ms ease;
-}
-
-.project-panel.open {
-    transform: translateX(0);
-    opacity: 1;
-    pointer-events: auto;
-}
-
-.project-panel[hidden] {
-    display: none;
-}
-
 .project-panel-bar {
     display: flex;
     align-items: center;
@@ -7163,34 +7253,59 @@ textarea.chat-input {
     border-color: var(--accent);
 }
 
-.project-panel-body {
+/* ---------------------------------------------------------------------------
+   The CENTRE thread stage (project threads, T1).
+   A thread is a conversation, so it takes the centre column exactly like Main
+   Chat — not a second full-screen surface stacked over the content area, which
+   is what the retired right panel became on a phone. The stage is a plain
+   `.page`: an in-flow bar (mobile nav toggle, project/thread title, thread menu,
+   close) above the mount point one chat instance fills.
+   --------------------------------------------------------------------------- */
+.thread-stage-bar {
+    flex: 0 0 auto;
+    gap: var(--space-2);
+}
+
+.thread-stage-heading {
+    display: flex;
+    flex-direction: column;
+    justify-content: center;
+    flex: 1 1 auto;
+    min-width: 0;
+    gap: 1px;
+}
+
+/* The project name is the CONTEXT line above a thread's own name; thread #0 IS
+   the project, so the stage hides it there rather than printing one name twice. */
+.thread-stage-project {
+    font-size: 11px;
+    color: var(--text-muted);
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+}
+
+.thread-stage-project[hidden] {
+    display: none;
+}
+
+.thread-stage-title {
+    margin: 0;
+    font-size: 14px;
+}
+
+.thread-stage-menu {
+    /* Sibling row kebabs reveal on hover; a header action is always reachable. */
+    opacity: 1;
+    flex: 0 0 auto;
+}
+
+.thread-stage-body {
     display: flex;
     flex-direction: column;
     flex: 1;
     min-height: 0;
-}
-
-.project-panel-backdrop {
-    position: fixed;
-    top: 0;
-    right: 0;
-    bottom: 0;
-    left: var(--sidebar-width);
-    z-index: 55;
-    cursor: default;
-    background: rgba(0, 0, 0, 0.34);
-    opacity: 0;
-    pointer-events: none;
-    transition: opacity 180ms ease;
-}
-
-.project-panel-backdrop.open {
-    opacity: 1;
-    pointer-events: auto;
-}
-
-.project-panel-backdrop[hidden] {
-    display: none;
+    position: relative;
 }
 
 .chat-instance-panel {
@@ -7237,38 +7352,29 @@ textarea.chat-input {
     padding-bottom: max(12px, env(safe-area-inset-bottom, 0px));
 }
 
+/* A CENTRE-mounted thread is as wide as Main Chat, so it reads with the SAME
+   centred 760px column and the SAME composer gutters. The two rules above are
+   tuned for the narrow right rail the panel used to be; inheriting them here
+   would stretch a thread's transcript to the full centre width while Main Chat
+   beside it stayed readable. These come AFTER (equal specificity, source order
+   decides) and restore the shared reading column. */
+.chat-instance-centre .chat-messages {
+    padding: 20px max(var(--space-5), calc((100% - 760px) / 2));
+    /* No overlay header here (the stage bar is in flow), so no top reserve. */
+    padding-top: var(--space-3);
+    padding-bottom: var(--chat-input-reserve, 108px);
+}
+
+.chat-instance-centre .chat-input-area {
+    padding: 32px max(var(--space-5), calc((100% - 760px) / 2)) var(--space-4);
+    padding-bottom: max(var(--space-4), env(safe-area-inset-bottom, 0px));
+}
+
 /* Project threads hide the GLOBAL controls (evolution/consciousness/restart/
    panic belong to the one agent, not to a project thread; the budget meter
    lives once in the sidebar). */
 .chat-instance-panel .chat-header-actions {
     display: none;
-}
-
-@media (max-width: 900px) {
-    /* Mobile/narrow: the project thread overlays the content area. */
-    .project-panel {
-        position: fixed;
-        inset: 0;
-        width: 100%;
-        z-index: 60;
-        border-left: none;
-        transform: translateY(14px);
-    }
-
-    .project-panel-backdrop {
-        left: 0;
-    }
-
-    .project-panel.open {
-        transform: translateY(0);
-    }
-}
-
-@media (prefers-reduced-motion: reduce) {
-    .project-panel,
-    .project-panel-backdrop {
-        transition: none;
-    }
 }
 
 /* Reviewer Slots (6.2) + Harness Accounts (D30).

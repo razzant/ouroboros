@@ -745,16 +745,16 @@ class OuroborosAgent:
         _resolved_project_id = resolve_project_id(task)
 
         # Room lens (v6.61.3): a DIRECT-CHAT turn in a folder-room carries the
-        # host-verified room dir so the chat lane's reads/default shell cwd resolve
-        # to the PROJECT FOLDER (project_room_lens_dir keys on this metadata; the
-        # robot-room incident: "." resolved to the system repo and the agent
-        # narrated the wrong tree). A set-but-broken working_dir rides as a LOUD
-        # note instead (never a silent repo fallback).
+        # host-verified room dir so the chat lane's reads/default shell cwd resolve to the ROOM's OWN FOLDER
+        # (project_room_lens_dir keys on this metadata; the robot-room incident: "." resolved to the system repo and
+        # the agent narrated the wrong tree). A set-but-broken working_dir rides as a LOUD note instead (never a silent
+        # repo fallback). The ROOM's chat id goes in because a branched thread's folder is its own checkout, and
+        # reading the project folder there is the same fact/affordance split (I7).
         if bool(task.get("_is_direct_chat")) and _resolved_project_id and not str(task.get("workspace_root") or "").strip():
             try:
                 from ouroboros.workspace_admission import room_chat_lens_dir
 
-                _room_dir, _room_note = room_chat_lens_dir(self.env.drive_root, _resolved_project_id)
+                _room_dir, _room_note = room_chat_lens_dir(self.env.drive_root, _resolved_project_id, self._current_chat_id)
                 if _room_dir:
                     task_metadata["_project_room_dir"] = _room_dir
                 elif _room_note:

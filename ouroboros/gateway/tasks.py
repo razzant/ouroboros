@@ -387,6 +387,62 @@ def _complete_api_task_admission(
     return JSONResponse({"ok": True, "task_id": task_id, "status": STATUS_SCHEDULED})
 
 
+def _explicit_project_id_refusal(raw_project_id: str):
+    """Refuse an explicit ``project_id`` that is not already filesystem-clean.
+
+    The UNSTRIPPED value is validated, so leading/trailing whitespace — which would
+    collapse two inputs into one store — is rejected rather than silently
+    normalized. Fail CLOSED: normalizing (or emptying to the canonical id) would
+    let two inputs land in one store and defeat isolation. ``None`` means fine.
+    """
+    if not raw_project_id:
+        return None
+    from ouroboros.project_facts import explicit_project_id_ok
+
+    if explicit_project_id_ok(raw_project_id):
+        return None
+    return json_error(
+        "project_id must be filesystem-safe (alphanumeric/_/-/., no spaces or slashes)", 400,
+    )
+
+
+def _room_workspace_for_task(
+    *, drive_root: Any, repo_dir: Any, project_id: str, workspace_sentinel: str, chat_id: int,
+) -> tuple:
+    """The folder a project-scoped `POST /api/tasks` task should be admitted into.
+
+    THE SECOND ADMISSION PATH (T4). The promote/room path resolves a room's folder
+    through ``resolve_room_workspace``; this one resolved none at all, so a
+    project-scoped task created here ran folder-less — and a task born in a thread
+    that BRANCHED OFF never reached that thread's checkout, which is the only thing
+    that gives it a writer lane of its own. Branching then bought the owner a second
+    copy of their files and no concurrency, and nothing on any surface said so: the
+    loss is visible only through the lane. ``room_chat_id`` is what tells the
+    resolver WHICH thread is asking.
+
+    Returns ``(workspace_root_or_None, refusal_response_or_None)``. The A12 offer is
+    returned in the SAME shape the explicit-`workspace_root` arm above uses — one
+    folder raises one question, whichever door the caller came through.
+    """
+    from ouroboros.workspace_admission import GIT_INIT_REQUIRED, resolve_room_workspace
+
+    room_root, room_error, room_decision = resolve_room_workspace(
+        drive_root=drive_root,
+        system_repo_dir=repo_dir,
+        project_id=project_id,
+        workspace_sentinel=workspace_sentinel,
+        room_chat_id=chat_id,
+    )
+    if room_decision:
+        return None, json_error(
+            str(room_decision.get("message") or "this folder is not tracked by git"),
+            400, error_code=GIT_INIT_REQUIRED, decision=room_decision,
+        )
+    if room_error:
+        return None, json_error(room_error, 400)
+    return (pathlib.Path(room_root) if room_root else None), None
+
+
 async def api_tasks_create(request: Request) -> JSONResponse:
     """POST /api/tasks — enqueue a managed headless task."""
 
@@ -411,32 +467,47 @@ async def api_tasks_create(request: Request) -> JSONResponse:
         return json_error(f"task_id already exists: {task_id}", 409)
     if (drive_root / HEADLESS_TASKS_DIR / task_id).exists() or (drive_root / ARTIFACTS_DIR / task_id).exists():
         return json_error(f"task_id already has headless state: {task_id}", 409)
+    from ouroboros.workspace_admission import GIT_INIT_REQUIRED, GitInitRequiredError
+
     try:
         workspace_root = _resolve_workspace_root(
             body.get("workspace_root"),
             system_repo_dir=repo_dir,
             drive_root=drive_root,
         )
+    except GitInitRequiredError as exc:
+        # A12: the folder is fine — it is simply untracked. The task is NOT queued
+        # (file work with no diff/rollback is not what the caller asked for) and the
+        # browser gets the typed OFFER to render, not a refusal to decode. Ordered
+        # before the ValueError arm because it IS a ValueError subclass.
+        return json_error(str(exc), 400, error_code=GIT_INIT_REQUIRED, decision=exc.decision)
     except ValueError as exc:
         return json_error(str(exc), 400)
+    raw_project_id = str(body.get("project_id") or "")
+    project_id_refusal = _explicit_project_id_refusal(raw_project_id)
+    if project_id_refusal is not None:
+        return project_id_refusal
+    task_type = str(body.get("type") or "task")
+    try:
+        chat_id = int(body.get("chat_id") if body.get("chat_id") is not None else 0)
+        depth = int(body.get("depth") or 0)
+    except (TypeError, ValueError):
+        return json_error("chat_id and depth must be integers", 400)
+    if workspace_root is None and raw_project_id and task_type == "task":
+        workspace_root, room_refusal = _room_workspace_for_task(
+            drive_root=drive_root, repo_dir=repo_dir,
+            project_id=raw_project_id,
+            workspace_sentinel=str(body.get("workspace") or ""),
+            chat_id=chat_id,
+        )
+        if room_refusal is not None:
+            return room_refusal
     workspace_mode = str(body.get("workspace_mode") or ("external" if workspace_root else "")).strip()
     memory_mode = str(body.get("memory_mode") or ("forked" if workspace_root else "shared")).strip().lower()
     if memory_mode not in {"forked", "empty", "shared"}:
         return json_error("memory_mode must be one of forked, empty, shared", 400)
     if workspace_root and memory_mode == "shared":
         return json_error("memory_mode=shared is not allowed for external workspaces; use forked or empty", 400)
-    raw_project_id = str(body.get("project_id") or "")
-    if raw_project_id:
-        from ouroboros.project_facts import explicit_project_id_ok
-
-        # Validate the UNSTRIPPED value so leading/trailing whitespace (which would
-        # collapse two inputs into one store) is rejected, not silently normalized.
-        if not explicit_project_id_ok(raw_project_id):
-            # Fail closed: an explicit project_id must already be filesystem-clean.
-            # Reject (rather than silently normalize/empty -> canonical), so two
-            # inputs never collapse to one store and isolation is never defeated.
-            return json_error(
-                "project_id must be filesystem-safe (alphanumeric/_/-/., no spaces or slashes)", 400)
     from ouroboros.project_facts import resolve_project_id as _resolve_pid
 
     _task_project_id = _resolve_pid({"project_id": raw_project_id, "workspace_root": str(workspace_root or "")})
@@ -447,7 +518,6 @@ async def api_tasks_create(request: Request) -> JSONResponse:
     # --project-id task never shows the memory_mode line, so the recorded mode stays
     # purely informational while post-task writes still land on the isolated child.
     effective_drive_mode = "forked" if (_task_project_id and memory_mode == "shared") else memory_mode
-    task_type = str(body.get("type") or "task")
     if task_type in {"evolution", "review", "deep_self_review"}:
         return json_error(
             f"task type {task_type!r} is internal-only and cannot be created via the task API "
@@ -456,11 +526,6 @@ async def api_tasks_create(request: Request) -> JSONResponse:
         )
     if workspace_root and task_type != "task":
         return json_error("external workspace tasks must use type='task'", 400)
-    try:
-        chat_id = int(body.get("chat_id") if body.get("chat_id") is not None else 0)
-        depth = int(body.get("depth") or 0)
-    except (TypeError, ValueError):
-        return json_error("chat_id and depth must be integers", 400)
 
     raw_metadata = dict(body.get("metadata") or {}) if isinstance(body.get("metadata"), dict) else {}
     if _external_subagent_label(body, raw_metadata):

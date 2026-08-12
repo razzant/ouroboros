@@ -170,6 +170,13 @@ SETTINGS_DEFAULTS = {**UPDATE_SETTINGS_DEFAULTS,
     # owner-facing READ, not a task: a repo whose git is wedged must fail the request
     # with a blocker rather than hold the thread.
     "OUROBOROS_TASK_DIFF_GIT_TIMEOUT_SEC": 30,
+    # Wall clock for ONE `git` invocation behind the thread BRANCH OFF / MERGE BACK
+    # gestures (`thread_branching._git`). Deliberately NOT the task-diff ceiling
+    # above: that one bounds a bounded READ (`git diff` against one commit), while
+    # this one bounds `git add -A` + `git commit` over a working tree of unknown
+    # size, and a snapshot that times out is the exact failure the branch-off
+    # refusals exist to contain. Same clamp, its own knob.
+    "OUROBOROS_THREAD_GIT_TIMEOUT_SEC": 120,
     "OUROBOROS_VISION_CAPTION_TIMEOUT_SEC": 90,
     "OUROBOROS_BG_MAX_ROUNDS": 10,
     "OUROBOROS_BG_WAKEUP_MIN": 30,
@@ -1012,6 +1019,17 @@ def get_task_diff_git_timeout_sec() -> float:
     Clamped, like its siblings, so a hand-edited setting cannot turn an owner-facing
     read into an unbounded wait (or into a timeout too short for a large repo)."""
     return _clamped_number_setting("OUROBOROS_TASK_DIFF_GIT_TIMEOUT_SEC", low=5.0, high=300.0)
+
+
+def get_thread_git_timeout_sec() -> float:
+    """Per-invocation `git` timeout for thread BRANCH OFF / MERGE BACK (see SETTINGS_DEFAULTS).
+
+    Clamped 5-300 exactly like the task-diff sibling, but a SEPARATE knob with a
+    higher default: branch-off's snapshot runs `git add -A` and `git commit` over
+    the owner's whole working tree, where the diff endpoint runs one bounded read.
+    Borrowing the diff's 30s ceiling silently narrowed this path and made a large
+    repository's snapshot time out where it used to succeed."""
+    return _clamped_number_setting("OUROBOROS_THREAD_GIT_TIMEOUT_SEC", low=5.0, high=300.0)
 
 
 def get_websearch_timeout_sec() -> float:

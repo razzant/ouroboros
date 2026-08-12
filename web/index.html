@@ -92,20 +92,12 @@
         </aside>
         <div id="divider"></div>
         <main id="content">
-            <!-- Pages injected by JS -->
+            <!-- Pages injected by JS, including the #page-thread centre stage a
+                 project thread's chat mounts into (modules/project_threads.js).
+                 The retired right-side project panel used to live here; a thread
+                 now takes over the centre, and the right slot is the task
+                 inspector's alone (it mounts its own .inspector-panel aside). -->
         </main>
-        <div id="project-panel-backdrop" class="project-panel-backdrop" hidden></div>
-        <aside id="project-panel" class="project-panel" hidden>
-            <div class="project-panel-bar app-page-header project-inspector-header">
-                <div class="app-page-title-block">
-                    <div class="app-page-title-row">
-                        <h2 id="project-panel-title" class="project-panel-title app-page-title"></h2>
-                    </div>
-                </div>
-                <button id="project-panel-close" class="project-panel-close" type="button" title="Close project thread" aria-label="Close project thread">×</button>
-            </div>
-            <div id="project-panel-body" class="project-panel-body"></div>
-        </aside>
     </div>
     <div id="reconnect-overlay">
         <div class="spinner"></div>

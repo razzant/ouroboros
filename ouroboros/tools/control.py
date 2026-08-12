@@ -930,10 +930,28 @@ def _promote_chat_to_task(
 
 def _list_projects(ctx: ToolContext, limit: int = 50) -> str:
     """Enumerate the owner's projects (id, name, recency) so the one mind can
-    decide whether a main-chat message belongs to an existing project."""
+    decide whether a main-chat message belongs to an existing project.
+
+    Fed the SAME live chat-id set the gateway hands the projection. Without it,
+    an archived thread with a task still running counted as hidden here and
+    visible in the UI (X10) — the agent's list and the owner's disagreeing about
+    which rooms exist, in exactly the case the projection's docstring says they
+    must not. The queue read fails soft: no live set is the old behaviour, not an
+    error, because listing projects must not depend on the supervisor.
+    """
     try:
         from ouroboros.projects_registry import projects_summary
-        rows = projects_summary(Path(ctx.drive_root), limit=max(1, min(int(limit or 50), 200)))
+        try:
+            from ouroboros.gateway.state import live_thread_chat_ids
+
+            live = live_thread_chat_ids()
+        except Exception:
+            live = set()
+        rows = projects_summary(
+            Path(ctx.drive_root),
+            limit=max(1, min(int(limit or 50), 200)),
+            live_chat_ids=live,
+        )
     except Exception as exc:
         return f"⚠️ PROJECTS_ERROR: {type(exc).__name__}: {exc}"
     if not rows:

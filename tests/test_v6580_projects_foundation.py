@@ -68,7 +68,11 @@ def test_projects_registry_stamps_schema_version(tmp_path):
 # --- 2.2 admission SSOT + loud-fail -------------------------------------------
 
 def test_validate_workspace_root_is_shared_ssot(tmp_path):
-    from ouroboros.workspace_admission import WorkspaceRootError, validate_workspace_root
+    from ouroboros.workspace_admission import (
+        GitInitRequiredError,
+        WorkspaceRootError,
+        validate_workspace_root,
+    )
 
     ws = tmp_path / "repo"
     _init_git_repo(ws)
@@ -82,6 +86,48 @@ def test_validate_workspace_root_is_shared_ssot(tmp_path):
     sub.mkdir()
     with pytest.raises(WorkspaceRootError):
         validate_workspace_root(str(sub), system_repo_dir=tmp_path / "sys", drive_root=tmp_path / "data")
+    # ...and that rejection must NOT be the git-init offer: initialising git inside
+    # someone else's worktree would nest a second repository (A12 offers only where
+    # saying yes is actually the right answer).
+    with pytest.raises(WorkspaceRootError) as sub_exc:
+        validate_workspace_root(str(sub), system_repo_dir=tmp_path / "sys", drive_root=tmp_path / "data")
+    assert not isinstance(sub_exc.value, GitInitRequiredError)
+
+
+def test_validate_workspace_root_offers_git_init_for_an_untracked_folder(tmp_path):
+    """A12 (T2): an untracked folder still does NOT admit a file task — the
+    admission SSOT raises, so no caller can queue file work with no diff, no
+    rollback and no way back. What changed is WHAT it raises: the typed
+    GitInitRequiredError carrying the owner's offer, instead of a flat refusal.
+    It stays a WorkspaceRootError subclass so a caller that never learns about the
+    offer keeps refusing exactly as it did before."""
+    from ouroboros.workspace_admission import (
+        GIT_INIT_REQUIRED,
+        GitInitRequiredError,
+        WorkspaceRootError,
+        validate_workspace_root,
+    )
+
+    plain = tmp_path / "plain"
+    plain.mkdir()
+    with pytest.raises(GitInitRequiredError) as exc:
+        validate_workspace_root(str(plain), system_repo_dir=tmp_path / "sys", drive_root=tmp_path / "data")
+    assert isinstance(exc.value, WorkspaceRootError)  # still a refusal to admit
+    decision = exc.value.decision
+    assert decision["decision"] == GIT_INIT_REQUIRED
+    assert decision["workspace_root"] == str(plain.resolve())
+    assert decision["enables"] == ["diff", "rollback", "branching"]
+    assert "not tracked by git" in decision["message"]
+    # NOTHING was initialised: git in the owner's folder needs the owner's yes.
+    assert not (plain / ".git").exists()
+
+    # The safety guards are ahead of the offer, not behind it: an untracked folder
+    # that overlaps the Ouroboros data drive is a plain refusal, never an offer.
+    inside = tmp_path / "data" / "nested"
+    inside.mkdir(parents=True)
+    with pytest.raises(WorkspaceRootError) as overlap:
+        validate_workspace_root(str(inside), system_repo_dir=tmp_path / "sys", drive_root=tmp_path / "data")
+    assert not isinstance(overlap.value, GitInitRequiredError)
 
 
 def test_resolve_room_workspace_defaults_to_project_working_dir(tmp_path):
@@ -95,25 +141,55 @@ def test_resolve_room_workspace_defaults_to_project_working_dir(tmp_path):
     create_project(data, "room", name="Room", origin="test")
     update_project(data, "room", working_dir=str(ws))
 
-    resolved, error = resolve_room_workspace(
+    resolved, error, decision = resolve_room_workspace(
         drive_root=data, system_repo_dir=tmp_path / "sys", project_id="room"
     )
-    assert error == ""
+    assert error == "" and decision == {}
     assert resolved == str(ws.resolve())
 
     # workspace="none" opts out even when the room has a working_dir.
-    resolved_none, error_none = resolve_room_workspace(
+    resolved_none, error_none, decision_none = resolve_room_workspace(
         drive_root=data, system_repo_dir=tmp_path / "sys", project_id="room",
         workspace_sentinel="none",
     )
-    assert (resolved_none, error_none) == ("", "")
+    assert (resolved_none, error_none, decision_none) == ("", "", {})
 
     # A file-less project admits a workspace-less task with NO error.
     create_project(data, "fileless", name="Fileless", origin="test")
-    resolved_fl, error_fl = resolve_room_workspace(
+    resolved_fl, error_fl, decision_fl = resolve_room_workspace(
         drive_root=data, system_repo_dir=tmp_path / "sys", project_id="fileless"
     )
-    assert (resolved_fl, error_fl) == ("", "")
+    assert (resolved_fl, error_fl, decision_fl) == ("", "", {})
+
+
+def test_resolve_room_workspace_offers_git_init_for_an_untracked_room(tmp_path):
+    """A12 (T2): an untracked room folder is a THIRD outcome — not a resolved
+    workspace (that would queue undiffable file work) and not an error (the folder
+    is not broken; the owner simply has not answered yet)."""
+    from ouroboros.projects_registry import create_project, update_project
+    from ouroboros.workspace_admission import GIT_INIT_REQUIRED, resolve_room_workspace
+
+    data = tmp_path / "data"
+    data.mkdir()
+    plain = tmp_path / "plain_room"
+    plain.mkdir()
+    create_project(data, "plainroom", name="Plain Room", origin="test")
+    update_project(data, "plainroom", working_dir=str(plain))
+
+    resolved, error, decision = resolve_room_workspace(
+        drive_root=data, system_repo_dir=tmp_path / "sys", project_id="plainroom"
+    )
+    assert resolved == "" and error == ""
+    assert decision["decision"] == GIT_INIT_REQUIRED
+    assert decision["project_id"] == "plainroom"
+    assert decision["workspace_root"] == str(plain.resolve())
+    assert not (plain / ".git").exists()  # never auto-initialised
+
+    # workspace="none" still opts out ahead of the offer.
+    assert resolve_room_workspace(
+        drive_root=data, system_repo_dir=tmp_path / "sys", project_id="plainroom",
+        workspace_sentinel="none",
+    ) == ("", "", {})
 
 
 def test_resolve_room_workspace_loud_fails_on_broken_working_dir(tmp_path):
@@ -140,11 +216,13 @@ def test_resolve_room_workspace_loud_fails_on_broken_working_dir(tmp_path):
 
     shutil.rmtree(gone, onerror=_chmod_and_retry)  # the folder disappears after registration
 
-    resolved, error = resolve_room_workspace(
+    resolved, error, decision = resolve_room_workspace(
         drive_root=data, system_repo_dir=tmp_path / "sys", project_id="broken"
     )
     assert resolved == ""
     assert "unusable" in error and "broken" in error
+    # A MISSING folder is a breakage, never the git offer — there is nothing to init.
+    assert decision == {}
 
 
 def test_resolve_room_workspace_loud_fails_when_registry_is_unreadable(tmp_path, monkeypatch):
@@ -165,21 +243,22 @@ def test_resolve_room_workspace_loud_fails_when_registry_is_unreadable(tmp_path,
 
     monkeypatch.setattr(projects_registry, "get_project", _boom)
 
-    resolved, error = resolve_room_workspace(
+    resolved, error, decision = resolve_room_workspace(
         drive_root=data, system_repo_dir=tmp_path / "sys", project_id="room"
     )
     assert resolved == ""
     assert error, "an unreadable registry must NOT resolve to a silent workspace-less task"
     assert "unreadable" in error and "room" in error
+    assert decision == {}, "an unreadable registry is a failure, not an owner decision"
 
     # An explicit workspace_root never consults the registry, so it is unaffected.
     ws = tmp_path / "explicit"
     _init_git_repo(ws)
-    resolved_x, error_x = resolve_room_workspace(
+    resolved_x, error_x, decision_x = resolve_room_workspace(
         drive_root=data, system_repo_dir=tmp_path / "sys", project_id="room",
         explicit_workspace=str(ws),
     )
-    assert error_x == "" and resolved_x == str(ws.resolve())
+    assert error_x == "" and resolved_x == str(ws.resolve()) and decision_x == {}
 
 
 # --- canonical source-ref truncation guard -------------------------------------

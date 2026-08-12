@@ -869,36 +869,75 @@ def _project_id_for_registered_chat(ctx: Any, chat_id: int) -> str:
     (task_metadata.project_id) and routed to its panel. This active-only lookup is
     paired with ``_reserved_project_for_chat`` for deleting/tombstoned IDs, so a
     reserved chat cannot be resurrected through ordinary routing.
-    """
-    try:
-        from ouroboros.projects_registry import list_projects
 
-        cid = int(chat_id or 0)
-        for project in list_projects(ctx.DRIVE_ROOT):
-            try:
-                if int(project.get("chat_id") or 0) == cid:
-                    return str(project.get("id") or "").strip()
-            except (TypeError, ValueError):
-                continue
+    Both helpers resolve through the ONE ``resolve_chat_binding`` seam so EVERY
+    thread of a project is recognized, not only thread #0 — comparing a chat id
+    against ``project["chat_id"]`` here is what would misroute a non-primary
+    thread's messages to Main.
+
+    BOTH lifecycles are checked (X10). A thread can be fenced for deletion or
+    already tombstoned inside a perfectly healthy project, and reading only the
+    project's state would keep delivering messages into a room the owner deleted
+    — which is exactly the fence the thread-deletion flow raises FIRST, before it
+    cancels anything.
+    """
+    from ouroboros.projects_registry import PROJECT_ACTIVE, THREAD_ACTIVE, THREAD_ARCHIVED
+
+    binding = _chat_binding(ctx, chat_id)
+    if str(binding.get("lifecycle") or "") != PROJECT_ACTIVE:
+        return ""
+    # An ARCHIVED thread still routes: archiving hides a thread from the list, it
+    # does not close it, and an owner who opens an archived thread can keep
+    # talking in it. Only `deleting` and `tombstoned` are fenced.
+    if str(binding.get("thread_lifecycle") or THREAD_ACTIVE) not in {THREAD_ACTIVE, THREAD_ARCHIVED}:
+        return ""
+    return str(binding.get("project_id") or "").strip()
+
+
+def _chat_binding(ctx: Any, chat_id: int) -> Dict[str, Any]:
+    """The canonical project/thread binding of ``chat_id`` (``{}`` for Main)."""
+    try:
+        from ouroboros.projects_registry import resolve_chat_binding
+
+        return resolve_chat_binding(ctx.DRIVE_ROOT, chat_id)
     except Exception:
         log.debug("Project chat_id lookup failed", exc_info=True)
-    return ""
+        return {}
 
 
 def _reserved_project_for_chat(ctx: Any, chat_id: int) -> Dict[str, Any]:
-    try:
-        from ouroboros.projects_registry import list_reserved_projects
+    binding = _chat_binding(ctx, chat_id)
+    project = binding.get("project")
+    return dict(project) if isinstance(project, dict) else {}
 
-        cid = int(chat_id or 0)
-        for project in list_reserved_projects(ctx.DRIVE_ROOT):
-            try:
-                if int(project.get("chat_id") or 0) == cid:
-                    return dict(project)
-            except (TypeError, ValueError):
-                continue
-    except Exception:
-        log.debug("Reserved Project chat lookup failed", exc_info=True)
-    return {}
+
+def _reserved_thread_is_open(ctx: Any, chat_id: int) -> bool:
+    """Is this chat's own THREAD still open to owner messages? (X10's fence.)
+
+    The admission gate for an inbound owner message read the PROJECT's lifecycle
+    only, so the thread fence that ``begin_thread_deletion`` raises — the first of
+    X10's three steps, the one that is supposed to close routing BEFORE any
+    cancellation starts — fenced nothing at this layer. A message landed in a
+    thread marked ``deleting``, and in one already ``tombstoned``, carrying
+    project scope; a promotion could then queue a task whose ``chat_id`` is a room
+    that is gone from every surface, after ``run_thread_deletion`` had already
+    seen an empty live set and tombstoned. ``_project_id_for_registered_chat``
+    honoured the thread lifecycle, but that helper is a CLASSIFIER, not the gate.
+
+    ARCHIVED still routes, exactly as it does there: archiving hides a thread from
+    the list, it does not close it.
+
+    The binding index is memoized on the registry file's stamp, so asking here as
+    well as in the classifier costs a dict lookup, not a second registry read.
+    """
+    from ouroboros.projects_registry import THREAD_ACTIVE, THREAD_ARCHIVED
+
+    binding = _chat_binding(ctx, chat_id)
+    if not binding:
+        return True
+    return str(binding.get("thread_lifecycle") or THREAD_ACTIVE) in {
+        THREAD_ACTIVE, THREAD_ARCHIVED,
+    }
 
 
 def _record_routing_receipt(
@@ -1031,9 +1070,15 @@ def _route_owner_message(bridge: Any, ctx: Any, incoming: Dict[str, Any]) -> Non
                 log.debug("Repair promotion refusal notification failed", exc_info=True)
         return
     reserved_project = _reserved_project_for_chat(ctx, chat_id)
+    # BOTH lifecycles, because either one can have closed this room: a thread can
+    # be fenced for deletion or already tombstoned inside a perfectly healthy
+    # project, and the prose of `begin_thread_deletion` and `api_thread_delete`
+    # both promise that marking `deleting` closes routing before cancellation
+    # starts. It only did in the classifier; THIS is the admission gate.
     project_id = (
         str(reserved_project.get("id") or "")
         if str((reserved_project or {}).get("lifecycle") or "active") == "active"
+        and _reserved_thread_is_open(ctx, chat_id)
         else ""
     )
     if reserved_project and not project_id:
@@ -1528,9 +1573,13 @@ def _periodic_zombie_reconcile() -> None:
 
 def _resume_interrupted_project_deletions() -> None:
     try:
-        from supervisor.task_lifecycle import resume_project_deletions
+        from supervisor.task_lifecycle import resume_project_deletions, resume_thread_deletions
 
         resume_project_deletions(DATA_DIR)
+        # THREAD deletions resume for the same reason: a restart between the
+        # fence and the tombstone would leave a thread fenced forever — closed to
+        # routing, still on screen, never finishing.
+        resume_thread_deletions(DATA_DIR)
     except Exception:
         log.debug("Project deletion recovery failed", exc_info=True)
 

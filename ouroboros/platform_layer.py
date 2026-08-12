@@ -22,10 +22,36 @@ IS_MACOS = sys.platform == "darwin"
 IS_LINUX = sys.platform.startswith("linux")
 
 PATH_SEP = ";" if IS_WINDOWS else ":"
+
+#: Does the DEFAULT filesystem compare paths case-INSENSITIVELY?
+#:
+#: ``os.path.normcase`` lowercases on win32 alone, so it cannot answer this on
+#: macOS, whose default filesystem is case-insensitive but case-PRESERVING:
+#: ``/Users/x/Repo`` and ``/Users/x/repo`` are ONE folder there while normcase
+#: leaves them as two different strings. Anything comparing two paths as strings
+#: needs that fact, and it is a PLATFORM fact — so it lives here beside
+#: ``IS_WINDOWS``/``IS_MACOS`` instead of being re-derived from ``sys.platform``
+#: in each consumer (the writer lane was doing exactly that; T0R2-4).
+PATH_CASE_INSENSITIVE = IS_MACOS or IS_WINDOWS
+
 _SUBPROCESS_NO_WINDOW = (
     getattr(subprocess, "CREATE_NO_WINDOW", 0x08000000) if IS_WINDOWS else 0
 )
 _PATH_BOOTSTRAPPED = False
+
+
+def casefold_path(path: Any) -> str:
+    """The case-normalized comparison form of a path string.
+
+    ``normcase`` plus a ``casefold`` wherever :data:`PATH_CASE_INSENSITIVE` says
+    the filesystem does not distinguish case. PURE: it never touches the
+    filesystem, resolves no symlink and asks the OS nothing, because its caller
+    (the writer lane) runs under the supervisor queue lock on every assignment
+    pass and may not do any of those things. Path SEPARATOR normalization is the
+    caller's own ``normpath`` — this helper only answers the case question.
+    """
+    normalized = os.path.normcase(str(path or ""))
+    return normalized.casefold() if PATH_CASE_INSENSITIVE else normalized
 
 
 def executable_name_candidates(name: str) -> List[str]:

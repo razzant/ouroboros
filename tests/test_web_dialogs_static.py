@@ -57,8 +57,12 @@ def _code_lines(source: str) -> list[tuple[int, str]]:
 
 
 def test_no_native_dialog_calls_in_web_modules() -> None:
-    sources = sorted(WEB_MODULES.glob("**/*.js"))
+    # `web/app.js` is the LARGEST client file and it is not under `web/modules`, so
+    # it sat outside the only automated enforcement this class ban has. Nothing in
+    # it violates the ban today; the hole is the finding, not a breach (I15).
+    sources = sorted(WEB_MODULES.glob("**/*.js")) + [REPO_ROOT / "web" / "app.js"]
     assert sources, f"no JS modules found under {WEB_MODULES}"
+    assert (REPO_ROOT / "web" / "app.js").is_file(), "web/app.js moved; the scan lost its largest file"
     violations: list[str] = []
     for path in sources:
         for lineno, line in _code_lines(path.read_text(encoding="utf-8")):

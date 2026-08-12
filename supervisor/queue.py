@@ -29,6 +29,7 @@ from ouroboros.config import (
     get_task_idle_timeout_sec,
 )
 from ouroboros.contracts.task_contract import attach_task_contract, build_task_contract, normalize_allowed_resources
+from ouroboros.project_lease import LANE_PIN_FIELD
 from ouroboros.schedule_contract import RESERVED_TEMPLATE_FIELDS, schedule_slug
 from ouroboros.outcomes import normalize_outcome_axes, terminal_outcome_axes
 from ouroboros.utils import atomic_write_json, read_json_dict, utc_now_iso
@@ -209,6 +210,9 @@ def enqueue_task(
     with the supervisor main loop, so the mutation must hold the queue lock)."""
     t = dict(task)
     attach_task_contract(t)
+    # A task in PENDING holds no writer lane, so a pin from a PREVIOUS attempt is not a claim (I4 — see
+    # `project_lease`'s docstring). Stripped in the enqueue SSOT so every requeue path is covered at once.
+    t.pop(LANE_PIN_FIELD, None)
     with _queue_lock:
         require_unique_id = bool(t.pop("_require_unique_task_id", False))
         require_worker_pool = bool(t.pop("_require_worker_pool", False))

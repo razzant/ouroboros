@@ -22,10 +22,42 @@ import threading
 from contextlib import contextmanager
 from typing import Any, Dict, Iterator, List, Optional
 
-from ouroboros.contracts.chat_id_policy import project_chat_id
+from ouroboros.contracts.chat_id_policy import MAIN_THREAD_ID, project_chat_id
 from ouroboros.contracts.schema_versions import with_schema_version
 from ouroboros.project_facts import sanitize_project_id
-from ouroboros.utils import atomic_write_json, iter_jsonl_objects, read_json_dict, utc_now_iso
+
+# The thread block lives in its own module (module-size gate) but stays part of
+# THIS module's public surface: every name below is importable from
+# ``ouroboros.projects_registry`` exactly as before, so no caller moved. The
+# borrow is one-way — project_threads_registry imports the registry's locking/IO
+# primitives inside the functions that need them, never at module level.
+from ouroboros.project_threads_registry import (
+    THREAD_ACTIVE,
+    THREAD_ARCHIVED,
+    THREAD_DELETING,
+    THREAD_TOMBSTONED,
+    ThreadLifecycleError,
+    _chat_id_owners,
+    _normalize_thread_rows,
+    _report_duplicate_chat_ids,
+    _row_chat_ids,
+    archive_thread,
+    begin_thread_deletion,
+    complete_thread_deletion,
+    create_thread,
+    duplicate_chat_ids,
+    fail_thread_deletion,
+    fork_thread,
+    get_thread,
+    project_thread_note_for_task,
+    project_threads,
+    rename_thread,
+    restore_thread,
+    thread_is_visible,
+)
+from ouroboros.utils import (
+    atomic_write_json, iter_jsonl_objects, read_json_dict, truncate_review_artifact, utc_now_iso,
+)
 
 log = logging.getLogger(__name__)
 
@@ -44,8 +76,22 @@ PROJECT_NAME_MAX = 80
 PROJECT_ACTIVE = "active"
 PROJECT_DELETING = "deleting"
 PROJECT_TOMBSTONED = "tombstoned"
+
+#: Character bound for the durable ``delete_error`` disclosure. A BOUND, not a
+#: silent cut: overflow rides the ``truncate_review_artifact`` omission marker.
+DELETE_ERROR_LIMIT = 4000
 PROJECT_LIFECYCLES = frozenset({PROJECT_ACTIVE, PROJECT_DELETING, PROJECT_TOMBSTONED})
 _DEPRECATED_CHAT_IDS_EVENTS: set[str] = set()
+
+# Threads (project-threads T0). A project row carries an ADDITIVE ``threads: []``
+# list of EXTRA threads; thread #0 is never stored — it is projected at read time
+# from the project's own chat_id/name/timestamps/revision, and the top-level
+# ``chat_id`` stays its compatibility alias. Nothing is rewritten on disk, so a
+# legacy row (and any row minted by reconcile) reads as a one-thread project.
+# The thread members themselves live in ``project_threads_registry``; the bound
+# stays HERE because it is the project name bound (one rule, one constant) and
+# reading it from there would need an import-time borrow in the wrong direction.
+THREAD_NAME_MAX = PROJECT_NAME_MAX
 
 
 @contextmanager
@@ -92,6 +138,7 @@ def _load(drive_root: Any) -> Dict[str, Any]:
         for p in data["projects"]
         if isinstance(p, dict) and p.get("id")
     ]
+    _report_duplicate_chat_ids(drive_root, data["projects"])
     return data
 
 
@@ -106,6 +153,22 @@ def _normalize_project_row(value: Dict[str, Any]) -> Dict[str, Any]:
         except (TypeError, ValueError):
             row[field] = 0
     row["delete_error"] = str(row.get("delete_error") or "")
+    # Thread #0 owns its OWN revision counter; `visible_revision` stays the
+    # project-wide AGGREGATE the flat `project_seen_revision` cursor compares
+    # against. Sharing one number made every extra thread's activity mark thread
+    # #0 unread as well. A legacy row seeds thread #0 from the aggregate: while a
+    # project had exactly one thread the two numbers WERE the same fact, so the
+    # seed is exact and no unread state is invented or lost.
+    if "thread0_visible_revision" not in row:
+        row["thread0_visible_revision"] = row["visible_revision"]
+    else:
+        try:
+            row["thread0_visible_revision"] = max(
+                0, int(row.get("thread0_visible_revision") or 0)
+            )
+        except (TypeError, ValueError):
+            row["thread0_visible_revision"] = 0
+    row["threads"] = _normalize_thread_rows(row.get("threads"))
     return row
 
 
@@ -122,6 +185,11 @@ def _save(drive_root: Any, data: Dict[str, Any]) -> None:
     # Stamp the current schema version on every write (idempotent; old files that
     # never had it are treated as version 0 by read_schema_version).
     atomic_write_json(path, with_schema_version(dict(data), _REGISTRY_SCHEMA_VERSION))
+    # Monotonic in-process write counter feeding the chat-binding index memo:
+    # a same-size rewrite inside one mtime tick is otherwise indistinguishable
+    # from no write at all (see _CHAT_BINDING_INDEX).
+    key = str(path)
+    _REGISTRY_WRITE_SEQ[key] = _REGISTRY_WRITE_SEQ.get(key, 0) + 1
 
 
 def _load_bindings(drive_root: Any) -> Dict[str, Any]:
@@ -397,6 +465,77 @@ def list_sidebar_projects(drive_root: Any) -> List[Dict[str, Any]]:
     ]
 
 
+# project_id -> canonical working_dir, memoized on the same registry version
+# stamp as _CHAT_BINDING_INDEX (see that comment for what the stamp can and
+# cannot prove).
+_WORKING_DIR_INDEX: Dict[str, tuple] = {}
+
+
+def project_working_dirs(drive_root: Any) -> Optional[Dict[str, str]]:
+    """``project_id -> registered working_dir`` for every RESERVED project.
+
+    The writer-lease lane resolver (``ouroboros.project_lease``) needs this and
+    must stay filesystem-free under the supervisor queue lock, so the map is
+    built HERE and handed in. A task scoped post-hoc through
+    ``mark_task_project`` carries no ``workspace_root`` of its own; without this
+    map its lane would not match the room task already writing the SAME folder
+    and two top-level writers would enter it. File-less projects are omitted —
+    the lease then keys such a task on its project alone, which is narrower than
+    a folder lane and is documented as such rather than assumed equivalent.
+
+    ``None`` means the folders are UNKNOWN, and it is a different fact from an
+    empty map. ``{}`` says "no project has a registered folder", which the lane
+    is entitled to act on: it keys those tasks on their project alone and
+    serializes them against each other. An unreadable registry says nothing at
+    all — and collapsing the two made a truncated write, a partial
+    ``atomic_write`` on a full disk or a hand-edit read as "no project has a
+    folder", after which a folder-bearing candidate was compared against a
+    narrow lane, matched nothing, and a SECOND writer entered the folder (I3).
+    No exception is required to reach that: the parse simply yields no
+    ``projects`` list. So an existing registry path that does not parse into one,
+    and any failure while reading it, answer ``None``; a registry that is not
+    there yet answers ``{}``, because "this install has no projects" is a fact.
+
+    Values are canonicalized here as well as at write time. New rows are stored
+    resolved, but a registry written BEFORE that could hold an unresolved
+    spelling — and against a task's already-realpath'd ``workspace_root`` that
+    is a DIFFERENT string, i.e. a second concrete lane and the very split this
+    map exists to close. The resolve is memoized on the registry file's version
+    stamp, so the filesystem is touched once per registry write rather than once
+    per assignment pass. ``None`` is deliberately NOT memoized: it describes a
+    file this process could not read, and the next caller should look again.
+    """
+    path = _registry_path(drive_root)
+    key = str(path)
+    try:
+        stat = path.stat()
+        stamp: tuple = (stat.st_mtime_ns, stat.st_size, _REGISTRY_WRITE_SEQ.get(key, 0))
+    except OSError:
+        stamp = (0, 0, _REGISTRY_WRITE_SEQ.get(key, 0))
+    cached = _WORKING_DIR_INDEX.get(key)
+    if cached is not None and cached[0] == stamp:
+        return dict(cached[1])
+    out: Dict[str, str] = {}
+    try:
+        raw = read_json_dict(path)
+        if path.exists() and not (isinstance(raw, dict) and isinstance(raw.get("projects"), list)):
+            # The file is THERE and holds no project list. `_load` fails open to
+            # `{"projects": []}` for every other reader, which is right for them
+            # and wrong for the lane: see the docstring.
+            log.warning("project_working_dirs: %s holds no readable projects list", path)
+            return None
+        for project in list_reserved_projects(drive_root):
+            pid = str(project.get("id") or "")
+            folder = _canonical_working_dir(project.get("working_dir"))
+            if pid and folder:
+                out[pid] = folder
+    except Exception:
+        log.debug("project_working_dirs failed", exc_info=True)
+        return None
+    _WORKING_DIR_INDEX[key] = (stamp, dict(out))
+    return out
+
+
 def reserved_project_chat_ids(drive_root: Any) -> set:
     """The set of chat_ids reserved by every Project lifecycle state.
 
@@ -409,12 +548,16 @@ def reserved_project_chat_ids(drive_root: Any) -> set:
     history/fan-out partition that organizes threads into panels, (b) message
     routing, and (c) the project TASK's FOCUSED passive context (build_recent_
     sections shows the task its own thread).
+
+    Covers EVERY thread of every project (thread #0 included, via the canonical
+    projection) — one widening makes threads visible to history, ``/api/state``
+    and the agent's context at once.
     """
     out = set()
     try:
         for project in list_reserved_projects(drive_root):
             try:
-                out.add(int(project.get("chat_id") or 0))
+                out.update(_row_chat_ids(project))
             except (TypeError, ValueError):
                 continue
     except Exception:
@@ -466,6 +609,117 @@ def get_reserved_project(drive_root: Any, project_id: str) -> Optional[Dict[str,
     return None
 
 
+# chat_id -> binding index, memoized on the registry file's
+# (mtime_ns, size, in-process write counter). C4: "which project/thread owns this
+# chat" is asked once per inbound message and per history request, and with
+# threads the naive scan is projects x threads.
+#
+# Invalidation is a HEURISTIC, not a proof. atomic_write_json renames into place,
+# so a write normally changes the mtime; but a same-size rewrite landing inside
+# one filesystem timestamp tick (coarse mtime granularity on some filesystems)
+# can produce an identical (mtime_ns, size) pair. The monotonic counter closes
+# that window for writes made by THIS process — the case a request-path read is
+# actually racing. A concurrent write by ANOTHER process within the same tick can
+# still be missed for the remainder of it; the index is a routing cache, and the
+# next differing stamp repairs it.
+_CHAT_BINDING_INDEX: Dict[str, tuple] = {}
+# Bumped by _save on every registry write; part of the memo stamp above.
+_REGISTRY_WRITE_SEQ: Dict[str, int] = {}
+
+
+def _chat_binding_index(drive_root: Any) -> Dict[int, Dict[str, Any]]:
+    path = _registry_path(drive_root)
+    key = str(path)
+    try:
+        stat = path.stat()
+        stamp: tuple = (stat.st_mtime_ns, stat.st_size, _REGISTRY_WRITE_SEQ.get(key, 0))
+    except OSError:
+        stamp = (0, 0, _REGISTRY_WRITE_SEQ.get(key, 0))
+    cached = _CHAT_BINDING_INDEX.get(key)
+    if cached is not None and cached[0] == stamp:
+        return cached[1]
+    index: Dict[int, Dict[str, Any]] = {}
+    for project in list_reserved_projects(drive_root):
+        pid = str(project.get("id") or "")
+        for thread in project_threads(project):
+            index.setdefault(int(thread["chat_id"]), {
+                "project_id": pid,
+                "thread_id": int(thread["id"]),
+                "chat_id": int(thread["chat_id"]),
+                "lifecycle": str(project.get("lifecycle") or PROJECT_ACTIVE),
+                # The THREAD's own lifecycle, beside the project's. Routing must
+                # be able to refuse a fenced or tombstoned thread inside a
+                # perfectly healthy project (X10) — reading only the project's
+                # state would deliver messages into a room the owner deleted.
+                "thread_lifecycle": str(thread.get("lifecycle") or THREAD_ACTIVE),
+                "name": str(thread.get("name") or ""),
+                "project": dict(project),
+            })
+    _CHAT_BINDING_INDEX[key] = (stamp, index)
+    return index
+
+
+def resolve_chat_binding(
+    drive_root: Any, chat_id: Any, *, strict: bool = False
+) -> Dict[str, Any]:
+    """THE canonical "who owns this chat id" lookup (R3).
+
+    Returns ``{project_id, thread_id, chat_id, lifecycle, thread_lifecycle,
+    name, project}`` for ANY thread of ANY project in ANY lifecycle state, or
+    ``{}`` for the main chat / an external transport id. Callers that must not
+    resurrect a fenced room filter on BOTH lifecycles — a thread can be fenced or
+    tombstoned inside a perfectly healthy project — and they must NOT compare a
+    chat id against ``project["chat_id"]`` themselves; that comparison sees
+    thread #0 only and misroutes every other thread to Main.
+
+    ``strict=True`` makes an unreadable registry RAISE instead of answering ``{}``,
+    and nothing else changes. Routing wants the fail-closed ``{}`` — a message that
+    cannot be placed belongs in Main. But ``thread_history.thread_ancestry_lens``
+    reads this to decide whether a chat HAS ancestors, and there ``{}`` for a read
+    failure is a lie with consequences: an unreadable registry made a fork
+    indistinguishable from Main, so its whole shared past vanished and the window
+    still called itself complete (P6). One seam, two honest answers, rather than a
+    second lookup that could drift from this one.
+    """
+    try:
+        cid = int(chat_id or 0)
+    except (TypeError, ValueError):
+        return {}
+    if not cid:
+        return {}
+    try:
+        row = _chat_binding_index(drive_root).get(cid)
+    except Exception:
+        if strict:
+            raise
+        log.debug("resolve_chat_binding failed", exc_info=True)
+        return {}
+    return dict(row) if row else {}
+
+
+def _canonical_working_dir(raw: Any) -> str:
+    """Symlink-resolved spelling of a project's folder, stored at WRITE time.
+
+    The writer-lease lane compares a task's ``workspace_root`` against this
+    value and must stay filesystem-free under the queue lock (see
+    ``ouroboros.project_lease``), so the one place allowed to touch the disk is
+    here — the record write. ``workspace_admission.validate_workspace_root``
+    already resolves the task-side carrier the same way, so both spellings meet
+    as realpaths and the pure ``normpath``/``normcase`` comparison is enough.
+    CASE is preserved: this value is also shown to the owner, and
+    ``normcase`` would lowercase it on a case-insensitive filesystem.
+    Fail-open — an unresolvable path is stored as given rather than dropped.
+    """
+    text = str(raw or "").strip()
+    if not text:
+        return ""
+    try:
+        return str(pathlib.Path(text).expanduser().resolve(strict=False))
+    except (OSError, RuntimeError, ValueError):
+        log.debug("working_dir canonicalization failed for %r", text, exc_info=True)
+        return text
+
+
 def create_project(
     drive_root: Any,
     project_id: str,
@@ -493,17 +747,31 @@ def create_project(
                         f"{existing.get('lifecycle')} project"
                     )
                 return dict(existing)
+        # Registry-WIDE chat-id reservation (X1). A project's chat id is
+        # deterministic from its id, so a collision cannot be retried away —
+        # refuse loudly instead of silently merging two histories. Every
+        # creation path funnels through here under the same file lock.
+        chat_id = project_chat_id(pid)
+        clash = _chat_id_owners(data["projects"]).get(chat_id)
+        if clash:
+            raise ValueError(
+                f"chat id {chat_id} for project {pid!r} is already reserved by "
+                f"{clash} — pick a different project id"
+            )
         entry = {
             "id": pid,
             "name": _validated_name(name, pid),
-            "chat_id": project_chat_id(pid),
-            "working_dir": str(working_dir or "").strip(),
+            "chat_id": chat_id,
+            "working_dir": _canonical_working_dir(working_dir),
             "origin": str(origin or "owner"),
             "created_at": utc_now_iso(),
             "last_active_at": utc_now_iso(),
             "lifecycle": PROJECT_ACTIVE,
             "routing_generation": 0,
+            # Project-wide AGGREGATE (the flat project_seen_revision cursor)…
             "visible_revision": 0,
+            # …and thread #0's OWN counter, which siblings must not advance.
+            "thread0_visible_revision": 0,
             "delete_error": "",
         }
         data["projects"].append(entry)
@@ -537,10 +805,124 @@ def update_project(drive_root: Any, project_id: str, **updates: Any) -> Optional
                     continue
                 if key == "name":
                     value = _validated_name(value, str(entry.get("id") or ""))
+                elif key == "working_dir":
+                    # Record-write-time canonicalization (see the helper): the
+                    # lease compares this path purely, so symlinks resolve here.
+                    value = _canonical_working_dir(value)
                 entry[key] = value
             _save(drive_root, data)
             return dict(entry)
     return None
+
+
+def set_working_dir_if_absent(
+    drive_root: Any,
+    project_id: str,
+    working_dir: str,
+    *,
+    provenance: str = "",
+    trusted_at: str = "",
+) -> tuple[str, bool]:
+    """Bind a project's working_dir ONLY if it has none — check and write under ONE lock.
+
+    "Never overwrites an existing working_dir/provenance" was true of the code but
+    not of the timeline: both places that promised it (``adopt_task_workspace``,
+    ``ensure_project_workspace``) read the entry with ``get_project`` and wrote it
+    back with ``update_project``, two separately-locked operations with an unbounded
+    gap between them — a folder validation in one, a whole genesis provisioning in
+    the other. Two writers interleaving there both saw "no working_dir" and both
+    wrote, so the loser's folder was silently replaced; when the loser was
+    ``ensure_project_workspace`` the abandoned genesis tree sits under the durable
+    projects root, which is deliberately never GC-pruned, i.e. it is orphaned for
+    good. Doing the test and the write inside the same ``_file_write_lock`` makes
+    the promise atomic across threads AND processes.
+
+    ``provenance``/``trusted_at`` follow the same historical-fact rule as elsewhere:
+    written only when the row carries nothing (or ``"none"``) yet.
+
+    Returns ``(effective_working_dir, claimed)`` — ``claimed`` is True only for the
+    writer that actually bound the folder, so the loser can report the truth instead
+    of assuming its own value landed. An unknown/inactive project answers ``("", False)``.
+    """
+    pid = sanitize_project_id(project_id)
+    folder = str(working_dir or "").strip()
+    if not pid or not folder:
+        return "", False
+    with _file_write_lock(_registry_path(drive_root)):
+        data = _load(drive_root)
+        for entry in data["projects"]:
+            if entry.get("id") != pid or entry.get("lifecycle") != PROJECT_ACTIVE:
+                continue
+            existing = str(entry.get("working_dir") or "").strip()
+            if existing:
+                return existing, False
+            entry["working_dir"] = folder
+            if provenance and str(entry.get("provenance") or "").strip() in ("", "none"):
+                entry["provenance"] = provenance
+                if trusted_at and not str(entry.get("trusted_at") or "").strip():
+                    entry["trusted_at"] = trusted_at
+            _save(drive_root, data)
+            return folder, True
+    return "", False
+
+
+def replace_working_dir_if_unchanged(
+    drive_root: Any,
+    project_id: str,
+    expected: str,
+    working_dir: str,
+    *,
+    provenance: str = "",
+) -> tuple[str, bool]:
+    """Compare-and-swap a project's working_dir — compare and write under ONE lock.
+
+    The sibling of :func:`set_working_dir_if_absent` for the case that function
+    deliberately declines: the row NAMES a folder which has since vanished, and
+    replacing it is the whole point of the call. "Only if absent" is wrong there,
+    but so was the unconditional ``update_project`` that replaced it, for the same
+    reason ``set_working_dir_if_absent`` exists at all — the read and the write were
+    separately locked with an entire genesis provisioning between them.
+
+    Reproduced: two callers both observe the same vanished ``working_dir``, both
+    provision (``genesis_1``, ``genesis_2``), both write, so the registry ends on
+    one and the OTHER is orphaned under the never-pruned durable projects root —
+    while BOTH callers are handed their own path back, so one of them reports a
+    binding that does not exist. Second reproduction: an owner attach landing
+    between the read and the write is silently overwritten.
+
+    ``expected`` is the value the caller OBSERVED. The write happens only while the
+    row still holds it; otherwise the row is left alone and the current value is
+    returned. ``(effective_working_dir, claimed)`` — ``claimed`` is True only for
+    the writer that actually swapped, so a loser reports the winner's path and logs
+    its orphan instead of assuming its own value landed. An unknown or inactive
+    project answers ``("", False)``, exactly as the sibling does.
+
+    ``provenance`` follows the same historical-fact rule, and is judged from the row
+    UNDER THE LOCK rather than from the caller's stale read: how a folder came to be
+    is only written when the row carries nothing.
+    """
+    pid = sanitize_project_id(project_id)
+    folder = str(working_dir or "").strip()
+    want = str(expected or "").strip()
+    if not pid or not folder:
+        return "", False
+    with _file_write_lock(_registry_path(drive_root)):
+        data = _load(drive_root)
+        for entry in data["projects"]:
+            if entry.get("id") != pid or entry.get("lifecycle") != PROJECT_ACTIVE:
+                continue
+            existing = str(entry.get("working_dir") or "").strip()
+            if existing != want:
+                # Somebody else moved it: an owner attach, or another provisioner
+                # that won. Either way this caller's observation is stale and its
+                # write would destroy a NEWER binding.
+                return existing, False
+            entry["working_dir"] = folder
+            if provenance and str(entry.get("provenance") or "").strip() in ("", "none"):
+                entry["provenance"] = provenance
+            _save(drive_root, data)
+            return folder, True
+    return "", False
 
 
 def begin_project_deletion(drive_root: Any, project_id: str) -> Optional[Dict[str, Any]]:
@@ -576,17 +958,40 @@ def fail_project_deletion(
         data = _load(drive_root)
         for entry in data["projects"]:
             if entry.get("id") == pid and entry.get("lifecycle") == PROJECT_DELETING:
-                entry["delete_error"] = str(error or "deletion did not quiesce")[:2000]
+                entry["delete_error"] = truncate_review_artifact(
+                    str(error or "deletion did not quiesce"), limit=DELETE_ERROR_LIMIT,
+                )
                 _save(drive_root, data)
                 return dict(entry)
     return None
 
 
-def complete_project_deletion(drive_root: Any, project_id: str) -> Optional[Dict[str, Any]]:
-    """Commit the tombstone after the supervisor proves subtree quiescence."""
+def complete_project_deletion(
+    drive_root: Any, project_id: str, *, delete_error: str = ""
+) -> Optional[Dict[str, Any]]:
+    """Commit the tombstone after the supervisor proves subtree quiescence.
+
+    ``delete_error`` records what the teardown could NOT take — today, thread
+    checkouts that outlived the sweep. The tombstone still happens: keeping the
+    project alive because a folder survived was considered and REJECTED by the
+    owner (it collides with §I M2 and with "deleting a thread with its worktree
+    must be easy"). But a tombstoned project is invisible on every surface, so a
+    surviving checkout would be a folder and a ``thread/*`` branch nothing can
+    reach, previously announced by a ``log.warning`` alone. It is written onto the
+    row here, and the caller also tells the owner in chat — never silently.
+
+    The field is BOUNDED, never silently cut: a flat ``[:2000]`` over a note that
+    names surviving folders and branches dropped whole checkouts out of the only
+    record that points at them, and ended the sentence mid-word. The caller
+    already bounds its list at an entry boundary and declares what it left out;
+    this is the string backstop for anything else written here, and it goes
+    through the ``truncate_review_artifact`` SSOT so an overflow arrives with its
+    omission marker attached (DEVELOPMENT.md "No silent truncation").
+    """
     pid = sanitize_project_id(project_id)
     if not pid:
         return None
+    note = truncate_review_artifact(str(delete_error or ""), limit=DELETE_ERROR_LIMIT)
     with _file_write_lock(_registry_path(drive_root)):
         data = _load(drive_root)
         for entry in data["projects"]:
@@ -598,11 +1003,11 @@ def complete_project_deletion(drive_root: Any, project_id: str) -> Optional[Dict
                 raise ValueError(f"project {pid!r} is not deleting")
             entry["lifecycle"] = PROJECT_TOMBSTONED
             entry["tombstoned_at"] = utc_now_iso()
-            entry["delete_error"] = ""
+            entry["delete_error"] = note
             _save(drive_root, data)
             log.info(
-                "Project tombstoned: %s (history, bindings, folder and memory preserved)",
-                pid,
+                "Project tombstoned: %s (history, bindings, folder and memory preserved)%s",
+                pid, f" — LEFT BEHIND: {note}" if note else "",
             )
             return dict(entry)
     return None
@@ -627,7 +1032,17 @@ def increment_project_visible_revision(
     project_id: str = "",
     chat_id: Any = 0,
 ) -> Optional[Dict[str, Any]]:
-    """Advance unread state for one newly-appended owner-visible canonical row."""
+    """Advance unread state for one newly-appended owner-visible canonical row.
+
+    EVERY thread — thread #0 included — advances its OWN counter AND the
+    project's aggregate. The aggregate is what today's flat
+    ``project_seen_revision`` cursor compares against, so leaving it untouched
+    would make a non-primary thread's activity silently unread-invisible; the
+    per-thread counters are the numbers T1's nested cursor will read. Thread #0
+    keeps its own number in ``thread0_visible_revision`` rather than borrowing
+    the aggregate — otherwise a message in ANY sibling thread would also mark
+    thread #0 unread.
+    """
     pid = sanitize_project_id(project_id)
     try:
         cid = int(chat_id or 0)
@@ -640,14 +1055,30 @@ def increment_project_visible_revision(
         for entry in data["projects"]:
             if entry.get("lifecycle") != PROJECT_ACTIVE:
                 continue
-            try:
-                matches_chat = cid and int(entry.get("chat_id") or 0) == cid
-            except (TypeError, ValueError):
-                matches_chat = False
-            if (pid and entry.get("id") == pid) or matches_chat:
-                entry["visible_revision"] = int(entry.get("visible_revision") or 0) + 1
-                _save(drive_root, data)
-                return dict(entry)
+            thread_hit = None
+            if cid:
+                thread_hit = next(
+                    (t for t in project_threads(entry) if int(t["chat_id"]) == cid), None
+                )
+            if not ((pid and entry.get("id") == pid) or thread_hit is not None):
+                continue
+            entry["visible_revision"] = int(entry.get("visible_revision") or 0) + 1
+            hit_id = int(thread_hit["id"]) if thread_hit is not None else MAIN_THREAD_ID
+            if hit_id == MAIN_THREAD_ID:
+                # Thread #0's own counter. `entry` came through
+                # _normalize_project_row, which seeds a legacy row's value from
+                # the aggregate, so this never silently restarts at 0.
+                entry["thread0_visible_revision"] = int(
+                    entry.get("thread0_visible_revision") or 0
+                ) + 1
+            else:
+                threads = _normalize_thread_rows(entry.get("threads"))
+                for row in threads:
+                    if int(row["id"]) == hit_id:
+                        row["visible_revision"] = int(row.get("visible_revision") or 0) + 1
+                entry["threads"] = threads
+            _save(drive_root, data)
+            return dict(entry)
     return None
 
 
@@ -672,16 +1103,30 @@ def reconcile_projects(drive_root: Any) -> int:
             with _file_write_lock(_registry_path(drive_root)):
                 data = _load(drive_root)
                 known = {p.get("id") for p in data["projects"]}
+                reserved = _chat_id_owners(data["projects"])
                 for entry in sorted(projects_root.iterdir()):
                     if not entry.is_dir() or entry.name.startswith("."):
                         continue
                     pid = sanitize_project_id(entry.name)
                     if not pid or pid in known:
                         continue
+                    # Same registry-wide reservation invariant as create_project
+                    # (X1): reconcile mints hashed ids too, so an unchecked
+                    # append here could collide with an existing project OR
+                    # thread. Skip loudly — a reconcile must never merge two
+                    # histories, and the store stays on disk for the owner.
+                    chat_id = project_chat_id(pid)
+                    if chat_id in reserved:
+                        log.error(
+                            "Project reconcile SKIPPED %s: chat id %s already reserved by %s",
+                            pid, chat_id, reserved[chat_id],
+                        )
+                        continue
+                    reserved[chat_id] = [(pid, MAIN_THREAD_ID)]
                     data["projects"].append({
                         "id": pid,
                         "name": pid,
-                        "chat_id": project_chat_id(pid),
+                        "chat_id": chat_id,
                         "working_dir": "",
                         "origin": "reconcile",
                         "created_at": utc_now_iso(),
@@ -706,6 +1151,10 @@ def reconcile_projects(drive_root: Any) -> int:
 # The scan is a boot-reconcile concern: once per process per root is enough,
 # because everything AFTER the backfill is covered by the registry-facts
 # derivation in projects_summary (visible_revision/bindings/origin).
+# Named "thread activity", but it stays in the REGISTRY on purpose: it touches no
+# thread row at all — it reads the project's own chat_id (thread #0), is driven by
+# reconcile_projects, and writes through update_project. Moving it to the thread
+# module would borrow four registry internals across a seam it never crosses.
 _ACTIVITY_BACKFILL_DONE: set = set()
 
 
@@ -804,6 +1253,38 @@ def ensure_project_workspace(drive_root: Any, project_id: str, repo_dir: Any) ->
     durable projects root (never GC-pruned, isolated from repo/ and data/).
     Returns the absolute path ("" when provisioning failed). File-less
     projects simply never call this.
+
+    The folder is stamped ``provenance="genesis"`` in the SAME write that binds
+    it (A11). Without that stamp the row said only that the project has SOME
+    working_dir, which is what made the auto-provisioned place invisible: the
+    owner asked for a project, a folder appeared somewhere under the durable
+    projects root, and no surface could tell them Ouroboros had made it rather
+    than that they had pointed at it themselves. An existing provenance is never
+    overwritten — how a folder came to be is a historical fact, and this branch
+    only runs when the project had no usable folder at all.
+
+    Provisioning is slow (a real ``git init`` + seed commit), so a FIRST bind is
+    ATOMIC (``set_working_dir_if_absent``, T2-7) rather than a second unlocked
+    write: if another writer bound a place while this one was digging, the winner's
+    folder is returned untouched and the abandoned genesis tree is LOGGED — it lives
+    under the durable projects root, which is never GC-pruned, so an unreported loss
+    would be an orphan forever.
+
+    A REPLACEMENT is a different write, but it is not an UNCONDITIONAL one. This
+    function also runs when the row already names a folder that has since VANISHED,
+    and there the "only if absent" rule is exactly wrong: it declines, the caller
+    reports a concurrent bind that never happened, and the path handed back is the
+    non-existent one — while the tree just provisioned is orphaned under a root
+    nothing ever prunes. So the empty case claims atomically through
+    ``set_working_dir_if_absent`` and the stale case COMPARE-AND-SWAPS through
+    ``replace_working_dir_if_unchanged``, writing only while the row still holds the
+    path that was observed vanished. A plain ``update_project`` there had the same
+    read-then-write gap the atomic bind exists to close: two callers both observed
+    the same stale path, both provisioned, both wrote, one durable tree was orphaned
+    for good and both callers were told their own path had been bound — and an owner
+    attach landing in that window was silently overwritten. Provenance still follows
+    the historical-fact rule and is now judged under the lock: it is stamped only
+    when the row carries nothing.
     """
     entry = get_project(drive_root, project_id)
     if entry is None:
@@ -822,15 +1303,147 @@ def ensure_project_workspace(drive_root: Any, project_id: str, repo_dir: Any) ->
             # recognizable shared root (binding identity stays the task_id). (I, v6.39)
             dir_name=str(entry.get("name") or ""),
         )
-        update_project(drive_root, entry["id"], working_dir=str(handle.path))
-        return str(handle.path)
+        if existing:
+            # The row names a folder; it is simply GONE. Replacing it is the whole
+            # point of this call — but as a COMPARE-AND-SWAP against the value that
+            # was observed vanished, not as an unconditional write. Two callers both
+            # observing the same stale path both provisioned and both wrote, so one
+            # durable tree was orphaned under the never-pruned projects root while
+            # BOTH were told their own path had been bound; and an owner attach
+            # landing in that window was silently overwritten.
+            bound, claimed = replace_working_dir_if_unchanged(
+                drive_root, entry["id"], existing, str(handle.path),
+                provenance="genesis",
+            )
+            if claimed:
+                return str(handle.path)
+            if bound:
+                log.warning(
+                    "Project %s was re-bound concurrently (%s); the genesis tree "
+                    "provisioned here is abandoned and NOT auto-removed: %s",
+                    entry["id"], bound, handle.path,
+                )
+                return bound
+            log.warning(
+                "Project %s is no longer active; genesis tree %s was not bound",
+                entry["id"], handle.path,
+            )
+            return ""
+        bound, claimed = set_working_dir_if_absent(
+            drive_root, entry["id"], str(handle.path), provenance="genesis"
+        )
+        if claimed:
+            return str(handle.path)
+        if bound:
+            log.warning(
+                "Project %s was given a folder concurrently (%s); the genesis tree "
+                "provisioned here is abandoned and NOT auto-removed: %s",
+                entry["id"], bound, handle.path,
+            )
+            return bound
+        # A project that stopped being active mid-provision: the entry that asked
+        # for the folder is gone, so there is nothing to bind it to.
+        log.warning(
+            "Project %s is no longer active; genesis tree %s was not bound",
+            entry["id"], handle.path,
+        )
+        return ""
     except Exception:
         log.warning("Project workspace provisioning failed for %s", project_id, exc_info=True)
         return ""
 
 
-def projects_summary(drive_root: Any, *, limit: int = 50) -> List[Dict[str, Any]]:
-    """Compact list for /api/state and the sidebar."""
+def adopt_task_workspace(
+    drive_root: Any, project_id: str, workspace_root: Any, *, system_repo_dir: Any
+) -> tuple[str, str]:
+    """Give a project born FROM A TASK the folder that task was already working in.
+
+    A11: a project must have a designated place. Both conversion paths — the UI
+    "turn into project" card and the in-task ``ensure_project_scope`` — used to
+    register a project and drop the task's ``workspace_root`` on the floor, so a
+    project made out of work happening in a real folder came out folder-less and
+    the NEXT task in it auto-provisioned a different, empty tree somewhere else.
+    The task's own folder is the obvious place; nothing else has a better claim.
+
+    Adopting is an ATTACH, so it re-runs the attach guards rather than trusting the
+    task record: the same resolved-realpath checks (exists, real dir, not the home
+    root, disjoint from the Ouroboros repo/data roots, not nested inside another
+    repository), and deliberately NO git requirement (A12 — a plain folder is a
+    legitimate place). An EXISTING working_dir is never overwritten; a project that
+    already has a place keeps it.
+
+    It also applies a rule the attach surfaces do not need. An attach path is typed
+    by the owner; an ADOPTED path arrives from a task record, and a task's workspace
+    is precisely where Ouroboros's own EPHEMERAL checkouts live — an acting
+    subagent's ``self_worktree``, a thread's branch-off worktree. Those are linked
+    worktrees and age-swept roots: adopting one would give the project a place that
+    a ``git worktree remove`` or a retention sweep can delete underneath it. So
+    ``ephemeral_checkout_reason`` refuses them through the same disclosure channel.
+
+    Returns ``(working_dir, error)``. ``error`` is a disclosure, not a failure the
+    caller must abort on: conversion's job is to create the project, and a folder
+    that has since moved is worth reporting rather than either hiding or fatal.
+    """
+    pid = sanitize_project_id(project_id)
+    raw = str(workspace_root or "").strip()
+    if not pid or not raw:
+        return "", ""
+    entry = get_project(drive_root, pid)
+    if entry is None:
+        return "", ""
+    if str(entry.get("working_dir") or "").strip():
+        return str(entry["working_dir"]), ""
+    from ouroboros.project_sources import ephemeral_checkout_reason, validate_attach_path
+
+    resolved, error = validate_attach_path(
+        raw, system_repo_dir=system_repo_dir, drive_root=drive_root
+    )
+    if error or resolved is None:
+        return "", f"the task's workspace {raw} was not adopted as the project folder: {error}"
+    ephemeral = ephemeral_checkout_reason(resolved)
+    if ephemeral:
+        return "", f"the task's workspace {raw} was not adopted as the project folder: {ephemeral}"
+    # The owner chose this folder when they started the work there; the conversion
+    # inherits that grant rather than asking for it a second time. The claim is
+    # ATOMIC (T2-7): the "does it already have a place" check and the write happen
+    # inside ONE registry lock, so a conversion racing an auto-provision cannot
+    # overwrite the winner's folder and orphan a genesis tree nothing ever GCs.
+    bound, claimed = set_working_dir_if_absent(
+        drive_root, pid, str(resolved), provenance="attached", trusted_at=utc_now_iso()
+    )
+    if claimed:
+        return str(resolved), ""
+    if bound:
+        # Another writer bound a place first. That project HAS its place; saying so
+        # is the truth, and overwriting it would be the very race this closes.
+        return bound, ""
+    return "", (
+        f"the task's workspace {raw} was not adopted as the project folder: "
+        f"project {pid!r} is no longer registered as active"
+    )
+
+
+def projects_summary(
+    drive_root: Any, *, limit: int = 50, live_chat_ids: Any = None,
+    include_archived: bool = False,
+) -> List[Dict[str, Any]]:
+    """Compact list for /api/state and the sidebar.
+
+    ``live_chat_ids`` is the set of chat ids with a task running right now, and
+    the ONLY reason this projection takes it: an ARCHIVED thread stays VISIBLE
+    until its task is terminal (X10), because hiding a room that is still
+    emitting output leaves the owner watching nothing while work continues. The
+    caller supplies it because reading the supervisor queue belongs at the
+    gateway, not inside a registry projection that every read path touches;
+    omitting it simply means no archived thread is treated as live.
+
+    ``include_archived`` asks for them ON PURPOSE, and it exists because this is
+    the ONLY projection that lists threads. With archived ones filtered out of it
+    unconditionally, no surface the owner could reach ever carried an archived
+    thread, which made ``POST …/restore`` and the ``restore`` row in the thread
+    menu unreachable BY CONSTRUCTION: archive was a one-way trip. Restoring
+    something requires a surface that can show it, so the caller asks for one.
+    """
     out: List[Dict[str, Any]] = []
     bindings = _load_bindings(drive_root).get("bindings", {})
 
@@ -869,6 +1482,16 @@ def projects_summary(drive_root: Any, *, limit: int = 50) -> List[Dict[str, Any]
             "visible_revision": int(project.get("visible_revision") or 0),
             "delete_error": project.get("delete_error") or "",
             "has_thread_activity": _has_thread_activity(project),
+            # Canonical projection, thread #0 first (X7). ``chat_id`` above stays
+            # its compatibility alias, so a client that never learns about
+            # threads keeps working unchanged. Archived and tombstoned threads
+            # are FILTERED here rather than at every consumer — a surface that
+            # forgot the filter would show the owner a thread they archived, and
+            # one that hard-coded it would hide a live archived thread (X10).
+            "threads": [
+                thread for thread in project_threads(project)
+                if thread_is_visible(thread, live_chat_ids, include_archived=include_archived)
+            ],
         })
     return out
 
@@ -878,16 +1501,36 @@ __all__ = [
     "PROJECT_DELETING",
     "PROJECT_NAME_MAX",
     "PROJECT_TOMBSTONED",
+    "THREAD_NAME_MAX",
+    "adopt_task_workspace",
     "all_task_bindings",
     "begin_project_deletion",
     "bind_task_to_project",
     "complete_project_deletion",
     "create_project",
+    "THREAD_ACTIVE",
+    "THREAD_ARCHIVED",
+    "THREAD_DELETING",
+    "THREAD_TOMBSTONED",
+    "ThreadLifecycleError",
+    "archive_thread",
+    "begin_thread_deletion",
+    "complete_thread_deletion",
+    "create_thread",
+    "fail_thread_deletion",
     "delete_project",
+    "duplicate_chat_ids",
     "ensure_project_workspace",
     "fail_project_deletion",
+    "fork_thread",
     "get_project",
     "get_reserved_project",
+    "get_thread",
+    "project_threads",
+    "rename_thread",
+    "restore_thread",
+    "thread_is_visible",
+    "resolve_chat_binding",
     "increment_project_visible_revision",
     "list_projects",
     "list_reserved_projects",
@@ -897,43 +1540,13 @@ __all__ = [
     "project_thread_note_for_task",
     "project_chat_for_task_tree",
     "project_task_bindings",
+    "project_working_dirs",
     "registered_project_chat_ids",
+    "replace_working_dir_if_unchanged",
     "reserved_project_chat_ids",
     "projects_summary",
     "reconcile_projects",
+    "set_working_dir_if_absent",
     "touch_project",
     "update_project",
 ]
-
-
-def project_thread_note_for_task(task: Any) -> str:
-    """One-line pointer to the Project thread when a task is project-bound.
-
-    The raw final answer of a bound task lives in the PROJECT room while the
-    initiating (Main) chat receives only the task summary — twice in one night
-    the owner read that silence as a hung agent. The pointer names where the
-    full result lives (v6.70.0); an unbound task gets no extra text."""
-    try:
-        import pathlib as _pathlib
-
-        from ouroboros.config import DATA_DIR
-
-        chat_id = project_chat_for_task_tree(
-            _pathlib.Path(DATA_DIR),
-            str(task.get("id") or ""),
-            str(task.get("parent_task_id") or ""),
-            str(task.get("root_task_id") or ""),
-        )
-        if not chat_id or int(task.get("chat_id") or 0) == int(chat_id):
-            return ""
-        name = next(
-            (
-                str(project.get("name") or "").strip()
-                for project in list_projects(_pathlib.Path(DATA_DIR))
-                if int(project.get("chat_id") or 0) == int(chat_id)
-            ),
-            "",
-        )
-        return f" Full result in the '{name}' project thread." if name else " Full result in the project thread."
-    except Exception:
-        return ""

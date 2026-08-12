@@ -222,6 +222,45 @@ export function insertTimelineNode(messages, node, typing = null, { stickToBotto
 
 const CHAT_STORAGE_KEY = 'ouro_chat';
 const CHAT_DRAFT_KEY = 'ouro_chat_draft';
+
+/**
+ * The per-thread transcript cache key — the same scoping `storeKey` applies
+ * inside an instance, spelled once so a caller outside the instance can name it.
+ */
+export function threadTranscriptCacheKey(chatId) {
+    const id = Number(chatId) || 0;
+    return !id || id === 1 ? CHAT_STORAGE_KEY : `${CHAT_STORAGE_KEY}:${id}`;
+}
+
+/**
+ * Forget a destroyed thread's cached transcript.
+ *
+ * sessionStorage is one small shared quota, these entries are per THREAD, and
+ * nothing ever removed them — so a long session that opens many threads fills
+ * it and from then on EVERY write throws and is swallowed. The draft write is
+ * one of them, which quietly breaks the promise that typed-but-unsent text
+ * survives. Of the three per-thread keys the transcript cache is the only one
+ * the server can rebuild (it exists to make the next open paint instantly); the
+ * draft and the input recall hold text nobody else has. So the accelerator is
+ * what a destroy drops, and the irreplaceable text is what it keeps.
+ *
+ * Main (chat #1) is never dropped: it is not a thread and it is never destroyed.
+ * Returns whether anything was removed; storage is injectable for tests.
+ */
+export function forgetThreadTranscriptCache(chatId, storage = undefined) {
+    const id = Number(chatId) || 0;
+    if (!id || id === 1) return false;
+    const store = storage !== undefined
+        ? storage
+        : (typeof sessionStorage === 'undefined' ? null : sessionStorage);
+    if (!store) return false;
+    try {
+        store.removeItem(threadTranscriptCacheKey(id));
+        return true;
+    } catch {
+        return false;
+    }
+}
 const CHAT_INPUT_HISTORY_KEY = 'ouro_chat_input_history';
 const CHAT_SESSION_ID_KEY = 'ouro_chat_session_id';
 const MAX_PENDING_ATTACHMENTS = 10;
@@ -539,18 +578,24 @@ function projectIdFromTask(taskId = '') {
     return (seed ? `task-${seed}` : `task-${Date.now().toString(36)}`).slice(0, 64);
 }
 
-function loadInputHistory() {
+// Composer recall (↑/↓ through what you last sent) is PER THREAD, so the key is
+// supplied by the instance's `storeKey` — the same scoping the transcript cache
+// and the draft already used. It was the one composer store still reading the
+// bare global key, which meant every project thread recalled (and appended to)
+// the main chat's sent messages, and vice versa: a leak across rooms that only
+// grew more visible once one project could hold many threads.
+function loadInputHistory(key) {
     try {
-        const raw = JSON.parse(sessionStorage.getItem(CHAT_INPUT_HISTORY_KEY) || '[]');
+        const raw = JSON.parse(sessionStorage.getItem(key) || '[]');
         return Array.isArray(raw) ? raw.filter(Boolean).slice(-50) : [];
     } catch {
         return [];
     }
 }
 
-function saveInputHistory(entries) {
+function saveInputHistory(key, entries) {
     try {
-        sessionStorage.setItem(CHAT_INPUT_HISTORY_KEY, JSON.stringify(entries.slice(-50)));
+        sessionStorage.setItem(key, JSON.stringify(entries.slice(-50)));
     } catch {}
 }
 
@@ -563,7 +608,7 @@ export function createChatInstance({
     ws, state, updateUnreadBadge, openSettingsTab, openDashboardTab,
     subscribeState = null, refreshState = null,
     chatId = 1, projectId = '', idPrefix = 'chat', mountEl = null,
-    asPanel = false, title = 'Chat', initialScrollState = null,
+    asPanel = false, layout = '', chrome = '', title = 'Chat', initialScrollState = null,
     // perf2 P4.2: app.js signal "a project panel is opening right now" — Main
     // defers its first hydration to it (bounded by an unconditional deadline).
     isProjectOpening = null,
@@ -577,16 +622,35 @@ export function createChatInstance({
     // Per-thread storage so a project thread never bleeds into the main chat.
     const storeKey = (base) => (isMain ? base : `${base}:${chatId}`);
 
+    // TWO independent questions, decoupled (X8). `asPanel` used to answer both,
+    // which made "no global agent controls" inseparable from "live in the right
+    // panel" — so a project thread could not be mounted in the CENTRE without
+    // either duplicating the global Evolve/Review/Restart/Panic chrome or
+    // pretending to be a right panel.
+    //   layout: 'page'   -> the app's own full page (`#page-chat`, Main only)
+    //           'panel'  -> a hosted, fill-its-container instance
+    //           'centre' -> the same hosted shape, mounted in the centre stage
+    //   chrome: 'global' -> the overlay page header with the ONE agent's controls
+    //           'thread' -> a status-only bar; the host supplies title + actions
+    // `asPanel` stays the back-compat shorthand for ('panel','thread').
+    const layoutMode = String(layout || (asPanel ? 'panel' : 'page'));
+    const chromeMode = String(chrome || (asPanel ? 'thread' : 'global'));
+    const hostedLayout = layoutMode !== 'page';
+
     const page = document.createElement('div');
-    page.id = asPanel ? `panel-${idPrefix}` : 'page-chat';
-    page.className = asPanel ? 'chat-instance-panel' : 'page active';
-    // A project panel reuses the lean `.project-panel-bar` (title + close) from
-    // index.html, so it renders a minimal status-only header — NOT the overlay
-    // page header (that would duplicate the title and drag in the GLOBAL
-    // Evolve/Review/Restart/Panic chrome, which belongs to the one agent, not a
+    page.id = hostedLayout ? `panel-${idPrefix}` : 'page-chat';
+    // `.chat-instance-panel` is the hosted FILL shape (flex:1, min-height:0,
+    // position:relative) — correct in the right panel and in the centre alike;
+    // `.chat-instance-centre` is the modifier the centre stage styles through.
+    page.className = hostedLayout
+        ? `chat-instance-panel${layoutMode === 'centre' ? ' chat-instance-centre' : ''}`
+        : 'page active';
+    // Thread chrome renders a minimal status-only header — NOT the overlay page
+    // header (that would duplicate the host's title and drag in the GLOBAL
+    // Evolve/Review/Restart/Panic controls, which belong to the one agent, not a
     // single project thread). The main chat keeps the full overlay header; the
     // budget meter is not here at all — it lives once in the sidebar.
-    const headerHtml = asPanel
+    const headerHtml = chromeMode === 'thread'
         ? `<div class="chat-panel-statusbar"><span id="chat-status" class="status-badge offline">Connecting...</span></div>`
         : renderPageHeader({
             title: title,
@@ -907,7 +971,7 @@ export function createChatInstance({
     const seenMessageKeys = new Set();
     const messageKeyOrder = [];
     const pendingUserBubbles = new Map();
-    const inputHistory = loadInputHistory();
+    const inputHistory = loadInputHistory(storeKey(CHAT_INPUT_HISTORY_KEY));
     let inputHistoryIndex = inputHistory.length;
     let inputDraft = '';
     let historyLoaded = false;
@@ -1656,6 +1720,12 @@ export function createChatInstance({
             const payload = await apiClient.projectFromTask(taskId, projectId, '', record.objectiveHint || '');
             const project = payload.project || { id: projectId, name: projectId };
             showToast(`Project created: ${project.name || project.id}`, 'ok');
+            // A11 disclosure (ProjectFromTaskResponse.working_dir_error): the project
+            // exists but did NOT inherit the task's folder, so it has no place yet.
+            // Silence here is what let a placeless project look like a working one.
+            if (payload.working_dir_error) {
+                showToast(payload.working_dir_error, 'warn');
+            }
             window.dispatchEvent(new CustomEvent('ouro:project-created', { detail: { project } }));
             markCardConverted(record, project);
         } catch (exc) {
@@ -1747,10 +1817,10 @@ export function createChatInstance({
     // registered that right-panel kind decides what to mount. No listener ⇒ the
     // click is a no-op, so the action can never point at a missing surface.
     //
-    // MAIN chat only in v1: the inspector is a right panel that is mutually
-    // exclusive with the project panel, so offering the action from inside a
-    // project thread would advertise a surface that closes the thread it was
-    // clicked in. Project cards keep every other action.
+    // MAIN chat only in v1. Since a thread moved to the CENTRE, the inspector's
+    // right panel no longer competes with it, so extending the action to thread
+    // cards is a SCOPING decision — it is not in this phase's scope — rather
+    // than a layout constraint. Project cards keep every other action.
     function syncInspectButton(record) {
         if (!record?.root) return;
         const groupId = String(record.groupId || '').trim();
@@ -3306,7 +3376,12 @@ export function createChatInstance({
             if (optionLabels.length) return `Choose a target · ${optionLabels.join(' / ')}`;
             return target ? `Choose a target · ${target}` : 'Choose a target';
         }
-        if (status === 'project_unavailable') return 'Project is unavailable';
+        // TWO different facts wear this one status, and naming only the project
+        // told the owner the wrong one: `server.py`'s own comment says a THREAD
+        // can be fenced for deletion or tombstoned inside a perfectly healthy
+        // project, and that is the commoner case now (I12). The sentence has to be
+        // true of both.
+        if (status === 'project_unavailable') return 'This room is no longer available';
         const labels = {
             mailbox_delivery: 'Delivered to task',
             steer_task: 'Steered task',
@@ -3776,7 +3851,7 @@ export function createChatInstance({
                     }
                     inputHistory.length = 0;
                     inputHistory.push(...deduped.slice(-50));
-                    saveInputHistory(inputHistory);
+                    saveInputHistory(storeKey(CHAT_INPUT_HISTORY_KEY), inputHistory);
                     inputHistoryIndex = inputHistory.length;
                     inputHistorySeededFromServer = true;
                 }
@@ -3911,7 +3986,7 @@ export function createChatInstance({
     function rememberInput(text) {
         if (!text) return;
         if (inputHistory[inputHistory.length - 1] !== text) inputHistory.push(text);
-        saveInputHistory(inputHistory);
+        saveInputHistory(storeKey(CHAT_INPUT_HISTORY_KEY), inputHistory);
         inputHistoryIndex = inputHistory.length;
         inputDraft = '';
     }
@@ -4404,7 +4479,7 @@ export function createChatInstance({
     // Handler refs are kept so destroy() can remove them (P3 lifecycle).
     let documentClickHandler = null;
     let documentKeydownHandler = null;
-    if (!asPanel) {
+    if (chromeMode !== 'thread') {
         const collapseHeaderMenus = (predicate) => {
             page.querySelectorAll('details.chat-header-more[open]').forEach((details) => {
                 if (predicate(details)) details.removeAttribute('open');
@@ -4423,8 +4498,8 @@ export function createChatInstance({
     // The budget affordance itself lives in the SIDEBAR now (`#nav-budget` in
     // app.js), which owns the same `openDashboardTab('costs')` click. The chat
     // header no longer renders a budget pill, so there is nothing to bind here.
-    if (asPanel) {
-        // The panel has no global controls/budget to poll; seed the status from
+    if (chromeMode === 'thread') {
+        // Thread chrome has no global controls/budget to poll; seed the status from
         // the live socket so a late-created panel never gets stuck on
         // "Connecting…" (the one-shot WS `open` already fired before it existed;
         // future reconnects still update it via the shared `open` handler).

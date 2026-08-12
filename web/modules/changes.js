@@ -1,11 +1,22 @@
 /**
- * Changes screen: review one task's diff and ask for edits.
+ * Changes screen: review one task's diff — or one branched thread's checkout —
+ * and ask for edits.
  *
  * Left rail = the recent task list (newest first) with a project badge; middle =
  * the file list of the selected task, derived from the patch bytes by
  * `patch_parse.js`; main pane = the unified or split renderer over the same
  * parsed hunks; bottom dock = an ordered composer-parts field whose "Request
  * edits" hands the parts to the chat controller.
+ *
+ * TWO SOURCES, one renderer (X9). This page was task-centric, and the per-task
+ * diff route structurally cannot answer for a thread that branched off into its
+ * own git worktree: that checkout is persistent, has no task, no artifact and no
+ * attributed path set. `view.sourceMode` is therefore EXPLICIT state — 'task' or
+ * 'thread' — rather than something inferred from whichever id happens to be set,
+ * selecting either clears the other, and a late answer from the source the owner
+ * just left is dropped instead of painted under the new header. Everything below
+ * the fetch (parsing, file list, capture, hand-off) is shared, because both
+ * sources speak the same patch envelope.
  *
  * Two honesty rules shape this module:
  *   1. The file list, per-file status and +/- counts come from the SAME patch the
@@ -100,16 +111,95 @@ export function diffLacksBaselineOnly(diff) {
 }
 
 /**
+ * Was this blocked because a WHOLE diff could not be served? (T3R-6.)
+ *
+ * `untracked_projection_capped` means the projection dropped EVERY new-file
+ * section rather than showing a prefix of them; `patch_too_large` means the patch
+ * was refused for its size. Both are the SAME promise kept — a diff is complete
+ * or it is not served — and both leave the owner with no patch at all. They get
+ * their own sentence because "no trustworthy diff can be shown" reads as a fault
+ * in the read, and neither is one: the files are fine, the answer is just too big
+ * to show honestly.
+ *
+ * `untracked_projection_capped` used to ride along as a footnote beside a
+ * rendered patch, which is exactly the silent clip the no-clipping rule forbids:
+ * the tracked half of a diff looks precisely like a whole one.
+ */
+export function diffTooBigRefusal(diff) {
+    if (String(diff?.status || '') !== 'blocked') return null;
+    const blockers = Array.isArray(diff?.blockers) ? diff.blockers.filter(Boolean) : [];
+    if (blockers.includes('untracked_projection_capped')) {
+        return {
+            reason: 'untracked_projection_capped',
+            meta: 'too many new files to diff',
+            text: 'There are too many new files here to show a complete diff, so none of it '
+                + 'is shown rather than part of it. Nothing is wrong with the files — open '
+                + 'the folder to see them.',
+        };
+    }
+    if (blockers.includes('patch_too_large')) {
+        return {
+            reason: 'patch_too_large',
+            meta: 'diff too large to show',
+            text: 'This diff is too large to serve, so it is not shown at all rather than '
+                + 'shortened into something that would read as complete.',
+        };
+    }
+    return null;
+}
+
+/**
  * The rail/header meta line for one loaded diff: `N files · +A −R`.
  * A diff that is not `ready` reports its lifecycle instead of a fake `0 files`.
  */
 export function diffSummaryMeta(diff, parsed) {
     const status = String(diff?.status || '');
     if (status === 'pending') return 'waiting for the task to finalize its changes';
-    if (status === 'blocked') return diffLacksBaselineOnly(diff) ? 'no diff baseline recorded' : 'diff unavailable';
+    if (status === 'blocked') {
+        const threadReason = threadCheckoutRefusal(diff);
+        if (threadReason) return threadReason.meta;
+        const tooBig = diffTooBigRefusal(diff);
+        if (tooBig) return tooBig.meta;
+        return diffLacksBaselineOnly(diff) ? 'no diff baseline recorded' : 'diff unavailable';
+    }
     if (status === 'empty') return 'no changes';
     const files = parsed?.files?.length || 0;
     return `${files} file${files === 1 ? '' : 's'} · +${parsed?.added || 0} −${parsed?.removed || 0}`;
+}
+
+/** The two source modes Changes can be looking at (X9). */
+export const SOURCE_TASK = 'task';
+export const SOURCE_THREAD = 'thread';
+
+/**
+ * A thread-checkout refusal that is a STATE, not a fault, or null.
+ *
+ * `thread_not_branched` is the common and entirely healthy case: the thread works
+ * in the project folder, so there is no separate checkout to diff. Rendering that
+ * as "no trustworthy diff can be shown" would teach the owner to read alarm into
+ * the normal arrangement — and "no changes" would be an outright lie, because the
+ * thread's work is in the project folder where its tasks' own diffs already live.
+ */
+export function threadCheckoutRefusal(diff) {
+    if (String(diff?.status || '') !== 'blocked') return null;
+    const blockers = Array.isArray(diff?.blockers) ? diff.blockers.filter(Boolean) : [];
+    if (blockers.includes('thread_not_branched')) {
+        return {
+            reason: 'thread_not_branched',
+            meta: 'works in the project folder',
+            text: 'This thread works in the project folder, so it has no checkout of its '
+                + 'own to compare. Branch it off to give it one.',
+        };
+    }
+    if (blockers.includes('checkout_missing')) {
+        return {
+            reason: 'checkout_missing',
+            meta: 'checkout missing',
+            text: 'This thread\'s checkout is no longer on disk. Its branch still holds '
+                + 'every commit that was made in it.',
+        };
+    }
+    return null;
 }
 
 /**
@@ -128,16 +218,38 @@ export function diffBanners(diff) {
         });
     }
     if (status === 'blocked') {
+        // A thread that is not branched off (or whose checkout is gone) is a
+        // STATE the owner can act on, not a failed read: it gets its own sentence
+        // and no blocker codes, exactly like a missing baseline does.
+        const threadReason = threadCheckoutRefusal(diff);
         // A missing baseline is an absence, not a broken read: it gets the neutral
         // sentence and no blocker code, because `baseline_missing` is not an
         // owner-actionable fault.
-        rows.push(diffLacksBaselineOnly(diff)
-            ? { tone: 'neutral', text: NO_BASELINE_NOTICE }
-            : {
-                tone: 'blocked',
-                text: 'No trustworthy diff can be shown for this task.',
-                detail: blockers.join(', '),
-            });
+        // A diff refused for its SIZE is not a failed read either: the answer
+        // exists, it is just too big to show whole, and showing part of it is the
+        // one thing the no-clipping rule forbids.
+        const tooBig = diffTooBigRefusal(diff);
+        if (threadReason) {
+            rows.push({ tone: 'neutral', text: threadReason.text });
+        } else if (tooBig) {
+            rows.push({ tone: 'blocked', text: tooBig.text, detail: blockers.join(', ') });
+        } else {
+            // The NOUN follows the SOURCE, exactly as the notes label below
+            // already does. A thread-checkout diff blocked for anything other
+            // than the two states named above is still a checkout, and "for this
+            // task" pointed the owner at something a thread worktree does not
+            // have — there is no task here to go and look at.
+            const subject = String(diff?.source || '') === 'thread_checkout'
+                ? 'this checkout'
+                : 'this task';
+            rows.push(diffLacksBaselineOnly(diff)
+                ? { tone: 'neutral', text: NO_BASELINE_NOTICE }
+                : {
+                    tone: 'blocked',
+                    text: `No trustworthy diff can be shown for ${subject}.`,
+                    detail: blockers.join(', '),
+                });
+        }
     }
     // Drift is a LIVE-projection fact: it means the repo's HEAD moved away from the
     // baseline the patch is taken against. A workspace task's patch is durable
@@ -147,7 +259,13 @@ export function diffBanners(diff) {
         rows.push({ tone: 'drift', text: HEAD_DRIFT_NOTICE });
     }
     if (status !== 'blocked' && blockers.length) {
-        rows.push({ tone: 'evidence', text: 'Attribution notes', detail: blockers.join(', ') });
+        // A thread checkout has no attribution: nothing was attributed to a task
+        // window, the whole tree is in scope. Calling its notes "attribution"
+        // would name a mechanism that is not involved.
+        const label = String(diff?.source || '') === 'thread_checkout'
+            ? 'Notes on this checkout'
+            : 'Attribution notes';
+        rows.push({ tone: 'evidence', text: label, detail: blockers.join(', ') });
     }
     return rows;
 }
@@ -239,11 +357,27 @@ export function requestEditsPrefix(task) {
 }
 
 /**
+ * The handoff line for a THREAD checkout. A thread's diff belongs to a branch,
+ * not to a task, so naming a task id here would send the agent looking for a
+ * record that does not exist; the branch is the thing both sides can find.
+ */
+export function requestEditsThreadPrefix(ref) {
+    const label = String(ref?.label || '').trim();
+    const branch = String(ref?.branch || '').trim();
+    const named = label || `thread ${String(ref?.threadId ?? '')}`;
+    return branch
+        ? `Re the "${named}" thread's branch ${branch}: `
+        : `Re the "${named}" thread's own checkout: `;
+}
+
+/**
  * Ordered parts for the handoff: the task line, then everything in the dock.
  * The dock's own order is preserved — a chip/comment interleaving is the message.
  */
-export function requestEditsParts(task, dockParts) {
-    const prefix = makeTextPart(requestEditsPrefix(task));
+export function requestEditsParts(task, dockParts, { sourceMode = SOURCE_TASK, threadRef = null } = {}) {
+    const prefix = makeTextPart(sourceMode === SOURCE_THREAD
+        ? requestEditsThreadPrefix(threadRef)
+        : requestEditsPrefix(task));
     return normalizeParts([prefix, ...(Array.isArray(dockParts) ? dockParts : [])].filter(Boolean));
 }
 
@@ -330,6 +464,14 @@ export function initChanges(ctx = {}) {
         tasks: [],
         taskId: '',
         task: null,
+        // X9: Changes has TWO sources now, and which one is loaded is EXPLICIT
+        // state rather than something inferred from whichever id happens to be
+        // set. `sourceMode` is 'task' or 'thread'; `threadRef` carries the thread
+        // being shown ({projectId, threadId, label, branch}) and is null in task
+        // mode. Selecting one clears the other, so a stale patch from the
+        // previous source can never be painted under the new one's header.
+        sourceMode: SOURCE_TASK,
+        threadRef: null,
         diff: null,
         parsed: { files: [], added: 0, removed: 0 },
         filePath: '',
@@ -397,7 +539,11 @@ export function initChanges(ctx = {}) {
     function paintFileList() {
         fileMetaEl.textContent = view.diff ? diffSummaryMeta(view.diff, view.parsed) : '';
         fileListEl.textContent = '';
-        if (!view.taskId) {
+        // "Nothing selected" is a question about the SOURCE, not about the task
+        // id: a thread checkout has no task id at all, so reading the emptiness
+        // off `taskId` alone left every thread diff showing "pick a task" in
+        // place of its own file list.
+        if (!view.taskId && !view.threadRef) {
             const row = document.createElement('div');
             row.className = 'changes-empty';
             row.textContent = 'Pick a task to review its changes.';
@@ -471,9 +617,7 @@ export function initChanges(ctx = {}) {
         if (selectionBtn) selectionBtn.hidden = true;
         // With no file to name (empty / pending / blocked diff) the header keeps the
         // task's identity instead of going blank.
-        pathEl.textContent = file
-            ? file.path
-            : (view.taskId ? taskShortTitle(view.task || { task_id: view.taskId }) : 'Changes');
+        pathEl.textContent = file ? file.path : sourceHeading();
         countsEl.textContent = '';
         if (file && !file.binary) {
             const add = document.createElement('span');
@@ -489,7 +633,7 @@ export function initChanges(ctx = {}) {
         if (!file) {
             const empty = document.createElement('div');
             empty.className = 'changes-empty changes-diff-empty';
-            empty.textContent = view.taskId
+            empty.textContent = (view.taskId || view.threadRef)
                 ? diffSummaryMeta(view.diff, view.parsed)
                 : 'Select a task on the left to see what it changed.';
             diffEl.appendChild(empty);
@@ -601,6 +745,27 @@ export function initChanges(ctx = {}) {
         return grid;
     }
 
+    /** The header line when no single file is selected — whichever source is loaded. */
+    function sourceHeading() {
+        if (view.sourceMode === SOURCE_THREAD && view.threadRef) {
+            const named = view.threadRef.label || `thread ${view.threadRef.threadId}`;
+            return view.threadRef.branch ? `${named} · ${view.threadRef.branch}` : named;
+        }
+        return view.taskId ? taskShortTitle(view.task || { task_id: view.taskId }) : 'Changes';
+    }
+
+    /** Re-load whatever source is on screen (page re-entry, refresh). */
+    function reselectCurrentSource() {
+        if (view.sourceMode === SOURCE_THREAD && view.threadRef) {
+            return selectThreadCheckout(view.threadRef.projectId, view.threadRef.threadId, {
+                label: view.threadRef.label,
+                branch: view.threadRef.branch,
+                filePath: view.filePath,
+            });
+        }
+        return view.taskId ? selectTask(view.taskId, { filePath: view.filePath }) : null;
+    }
+
     function paintAll() {
         paintTaskRail();
         paintFileList();
@@ -620,11 +785,15 @@ export function initChanges(ctx = {}) {
         paintTaskRail();
     }
 
-    async function selectTask(taskId, { filePath = '' } = {}) {
-        const id = String(taskId || '');
-        if (!id) return;
-        view.taskId = id;
-        view.task = view.tasks.find((task) => String(task.task_id || task.id || '') === id) || { task_id: id };
+    /**
+     * Load one diff into the view, whichever source produced it.
+     *
+     * `token` identifies the selection that started the load; the answer is
+     * dropped unless it is still the one on screen. Both sources share this so a
+     * task answer arriving after the owner switched to a thread (or the reverse)
+     * can never be painted under the other one's header.
+     */
+    async function loadDiff({ token, fetchDiff, filePath = '' }) {
         view.diff = null;
         view.parsed = { files: [], added: 0, removed: 0 };
         view.filePath = '';
@@ -632,7 +801,7 @@ export function initChanges(ctx = {}) {
         paintAll();
         let diff = null;
         try {
-            diff = await apiClient.taskDiff(id);
+            diff = await fetchDiff();
         } catch (err) {
             diff = {
                 status: 'blocked',
@@ -641,13 +810,62 @@ export function initChanges(ctx = {}) {
                 patch: '',
             };
         }
-        if (view.taskId !== id) return;  // a newer selection won
+        if (selectionToken() !== token) return;  // a newer selection won
         view.loading = false;
         view.diff = diff;
         view.parsed = parsePatch(diff?.patch || '');
         const wanted = view.parsed.files.find((file) => file.path === filePath);
         view.filePath = (wanted || view.parsed.files[0] || {}).path || '';
         paintAll();
+    }
+
+    function selectionToken() {
+        return view.sourceMode === SOURCE_THREAD
+            ? `thread:${view.threadRef?.projectId}/${view.threadRef?.threadId}`
+            : `task:${view.taskId}`;
+    }
+
+    async function selectTask(taskId, { filePath = '' } = {}) {
+        const id = String(taskId || '');
+        if (!id) return;
+        view.sourceMode = SOURCE_TASK;
+        view.threadRef = null;
+        view.taskId = id;
+        view.task = view.tasks.find((task) => String(task.task_id || task.id || '') === id) || { task_id: id };
+        await loadDiff({
+            token: `task:${id}`,
+            fetchDiff: () => apiClient.taskDiff(id),
+            filePath,
+        });
+    }
+
+    /**
+     * A13/X9: show a branched THREAD's own checkout instead of a task's diff.
+     *
+     * The exported seam T1's thread menu calls ("Show this thread's changes").
+     * A thread that is not branched off is NOT an error here — the route answers
+     * with the typed `thread_not_branched` blocker and the banner says where that
+     * thread's work actually lives.
+     */
+    async function selectThreadCheckout(projectId, threadId, { label = '', branch = '', filePath = '' } = {}) {
+        const pid = String(projectId || '');
+        const tid = String(threadId ?? '');
+        if (!pid || tid === '') return;
+        view.sourceMode = SOURCE_THREAD;
+        view.threadRef = { projectId: pid, threadId: tid, label: String(label || ''), branch: String(branch || '') };
+        view.taskId = '';
+        view.task = null;
+        await loadDiff({
+            token: `thread:${pid}/${tid}`,
+            fetchDiff: async () => {
+                const answer = await apiClient.threadDiff(pid, tid);
+                // The branch only comes back with the diff, so the header learns
+                // it here rather than requiring the caller to know it up front.
+                if (view.threadRef && answer?.branch) view.threadRef.branch = String(answer.branch);
+                return answer;
+            },
+            filePath,
+        });
     }
 
     // -----------------------------------------------------------------------
@@ -805,7 +1023,10 @@ export function initChanges(ctx = {}) {
             dock.focus();
             return;
         }
-        const parts = requestEditsParts(view.task || { task_id: view.taskId }, dockParts);
+        const parts = requestEditsParts(view.task || { task_id: view.taskId }, dockParts, {
+            sourceMode: view.sourceMode,
+            threadRef: view.threadRef,
+        });
         const sent = await controller.sendParts(parts);
         // The draft is the owner's only copy until the handoff succeeded.
         if (sent === false) return;
@@ -837,7 +1058,7 @@ export function initChanges(ctx = {}) {
         }
         if (event.target.closest('[data-changes-refresh]')) {
             event.preventDefault();
-            loadTasks().then(() => (view.taskId ? selectTask(view.taskId, { filePath: view.filePath }) : null));
+            loadTasks().then(reselectCurrentSource);
         }
     });
 
@@ -897,7 +1118,7 @@ export function initChanges(ctx = {}) {
     window.addEventListener('ouro:page-shown', (event) => {
         if (event?.detail?.page !== 'changes') return;
         loadTasks();
-        if (view.taskId) selectTask(view.taskId, { filePath: view.filePath });
+        reselectCurrentSource();
     });
 
     // Opening a specific task (inspector → "open full diff") lands here.
@@ -909,6 +1130,23 @@ export function initChanges(ctx = {}) {
         await selectTask(taskId, { filePath: String(event?.detail?.filePath || '') });
     });
 
+    // ...and the thread-checkout equivalent, so a thread menu can open its own
+    // diff without holding a reference to this controller. Same shape as the
+    // task event on purpose: one page owns Changes, and both ways in land on the
+    // same two source-mode entry points rather than a third code path.
+    window.addEventListener('ouro:open-thread-changes', async (event) => {
+        const detail = event?.detail || {};
+        const projectId = String(detail.projectId || '');
+        const threadId = String(detail.threadId ?? '');
+        if (!projectId || threadId === '') return;
+        if (typeof showPage === 'function') await showPage('changes');
+        await selectThreadCheckout(projectId, threadId, {
+            label: String(detail.label || ''),
+            branch: String(detail.branch || ''),
+            filePath: String(detail.filePath || ''),
+        });
+    });
+
     paintAll();
     loadTasks();
 
@@ -916,6 +1154,14 @@ export function initChanges(ctx = {}) {
         page,
         dock,
         selectTask,
+        /**
+         * Open a branched thread's own checkout diff (A13), for a caller that
+         * already holds this controller. A caller that does not — the T1 thread
+         * menu — dispatches `ouro:open-thread-changes` instead
+         * (`project_thread_actions.openThreadChanges`). Both land here: there is
+         * one entry point per source mode and no third path.
+         */
+        selectThreadCheckout,
         refresh: loadTasks,
         /** Capture the current diff selection (or the whole file) into the dock. */
         capture: (options) => capture(options || {}),

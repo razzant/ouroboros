@@ -129,6 +129,18 @@ export function nextQuotaEscalation(current = null) {
  * - notice: nothing more can be loaded from here — the honest boundary text
  *   names BOTH the on-disk archive floor and the subagent lineage cap
  *   [GPT#11], so a short-history user is never told about phantom archives.
+ *
+ * `ancestry_depth` (project threads, T0) is a DIFFERENT boundary: part of a
+ * FORKED thread's shared past was not read at all — the fork chain hit its
+ * depth cap, closed in a cycle, or named an ancestor with no project binding.
+ * A larger quota cannot recover it, and the archive/lineage wording would
+ * misname where the missing conversation is, so it gets its own sentence
+ * (plan A3b: a shared past out of reach is disclosed, never a silent gap).
+ * `lens_unavailable` is narrower still: the lens could not be BUILT (the registry
+ * was unreadable), so whether this thread HAS a shared past is unknown. It rides
+ * alongside `ancestry_depth` and adds its own clause.
+ * Causes accumulate: a notice carries ONE sentence per present cause, because
+ * a window can be cut by the fork chain and the archive floor at once.
  */
 export function loadOlderControlState(windowInfo = null, quota = null) {
     if (!windowInfo || typeof windowInfo !== 'object' || windowInfo.complete === true) {
@@ -140,9 +152,36 @@ export function loadOlderControlState(windowInfo = null, quota = null) {
     if (causes.includes('quota') && nextQuotaEscalation(quota)) {
         return { mode: 'button', label: 'Load older messages' };
     }
-    return {
-        mode: 'notice',
-        label: 'Older messages stay in on-disk archives, and deep subagent lineage '
+    // Causes ACCUMULATE: a forked thread can hit its ancestry cap AND the
+    // on-disk archive floor in the same window. Stopping at the first match
+    // named one boundary and silently swallowed the other, which is the same
+    // silent gap the disclosure exists to prevent — so every present cause
+    // contributes its own sentence.
+    const sentences = [];
+    if (causes.includes('ancestry_depth')) {
+        sentences.push(
+            'Part of this thread’s shared past could not be read: the fork '
+            + 'chain is too deep, or one of its parent threads is unavailable.',
+        );
+    }
+    // A DIFFERENT fact from `ancestry_depth`, and it must not borrow the
+    // archive/lineage wording: the lens could not be BUILT at all, so whether this
+    // thread even HAS a shared past is unknown rather than known-and-cut. The
+    // server sets both causes together, so this refines the sentence.
+    if (causes.includes('lens_unavailable')) {
+        sentences.push(
+            'Its fork history could not be looked up just now, so a shared past '
+            + 'may be missing from this view rather than absent.',
+        );
+    }
+    const others = causes.filter(
+        (cause) => cause !== 'ancestry_depth' && cause !== 'lens_unavailable',
+    );
+    if (others.length || !sentences.length) {
+        sentences.push(
+            'Older messages stay in on-disk archives, and deep subagent lineage '
             + 'is capped per window — this view is at its maximum depth.',
-    };
+        );
+    }
+    return { mode: 'notice', label: sentences.join(' ') };
 }

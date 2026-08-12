@@ -9,6 +9,7 @@ import {
     diffChipDecision,
     diffLacksBaselineOnly,
     diffSummaryMeta,
+    diffTooBigRefusal,
     requestEditsParts,
     requestEditsPrefix,
     taskProjectBadge,
@@ -127,6 +128,40 @@ test('a missing baseline reads as a neutral absence, not an untrustworthy diff',
     // No blocker code is shown: there is nothing here for the owner to act on.
     assert.equal(NO_BASELINE_NOTICE, 'No diff baseline was recorded for this task');
     assert.ok(!/trust|fail|error/i.test(NO_BASELINE_NOTICE));
+});
+
+test('a diff that could not be served WHOLE says so, and shows no patch (T3R-6)', () => {
+    // Two caps, one rule: complete, or not served. `untracked_projection_capped`
+    // used to ride along as a footnote beside a rendered patch — but the TRACKED
+    // half of a diff renders exactly like a whole one, so the owner reviewed a
+    // clipped diff believing it complete. That is the silent clip the no-clipping
+    // rule exists to forbid, and it is now `blocked` on both sides of the wire.
+    const capped = diffTooBigRefusal({ status: 'blocked', blockers: ['untracked_projection_capped'] });
+    assert.equal(capped.reason, 'untracked_projection_capped');
+    assert.match(capped.text, /too many new files/);
+    assert.match(capped.text, /none of it is shown rather than part of it/);
+    assert.equal(
+        diffSummaryMeta({ status: 'blocked', blockers: ['untracked_projection_capped'] }, null),
+        'too many new files to diff',
+    );
+
+    const tooLarge = diffTooBigRefusal({ status: 'blocked', blockers: ['patch_too_large'] });
+    assert.equal(tooLarge.reason, 'patch_too_large');
+    assert.match(tooLarge.text, /not shown at all rather than shortened/);
+    assert.equal(
+        diffSummaryMeta({ status: 'blocked', blockers: ['patch_too_large'] }, null),
+        'diff too large to show',
+    );
+
+    // Neither is a failed READ, so neither gets the "no trustworthy diff" copy.
+    const rows = diffBanners({ status: 'blocked', blockers: ['untracked_projection_capped'] });
+    assert.deepEqual(rows.map((row) => row.tone), ['blocked']);
+    assert.ok(!/trustworthy/.test(rows[0].text));
+    assert.equal(rows[0].detail, 'untracked_projection_capped');
+
+    // A cap named on a NON-blocked answer is not this: only the refusal counts.
+    assert.equal(diffTooBigRefusal({ status: 'ready', blockers: ['patch_too_large'] }), null);
+    assert.equal(diffTooBigRefusal({ status: 'blocked', blockers: ['baseline_missing'] }), null);
 });
 
 test('drift is disclosed for the LIVE projection only, never for a durable patch', () => {

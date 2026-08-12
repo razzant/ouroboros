@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import os
 from types import SimpleNamespace
 
 import pytest
@@ -44,17 +45,31 @@ def test_mark_task_project_running_and_pending():
         candidate_is_leasable,
         mark_task_project,
         running_project_ids,
+        running_project_lanes,
     )
 
     running = {"t1": {"task": {"id": "t1", "project_id": ""}}}
     pending = [{"id": "t2", "project_id": ""}]  # PENDING holds bare task dicts
-    assert running_project_ids(running.values()) == set()           # no lane yet
+    assert running_project_lanes(running.values()) == set()          # no lane yet
 
-    # RUNNING task -> occupies the lane immediately
-    assert mark_task_project(running, pending, "t1", "proj-x") is True
+    # RUNNING task -> occupies the lane immediately, and PINS it: the conversion
+    # ACQUIRES a lane rather than drifting out of one, which is the single case
+    # the write-once pin admits.
+    folders = {"proj-x": "/w/proj-x"}
+    assert mark_task_project(running, pending, "t1", "proj-x", folders) is True
     assert running["t1"]["task"]["project_id"] == "proj-x"
+    # It stamps the project id ONLY — the folder comes from the caller's map, so
+    # the converted task takes the SAME folder lane as the room task already
+    # writing there instead of a second lane beside it.
+    assert running_project_lanes(running.values()) == {("", os.path.normcase("/w/proj-x"))}
     assert running_project_ids(running.values()) == {"proj-x"}
-    assert candidate_is_leasable({"id": "z", "project_id": "proj-x"}, {"proj-x"}) is False
+    assert candidate_is_leasable(
+        {"id": "z", "project_id": "proj-x"}, running_project_lanes(running.values()), folders
+    ) is False
+    # Bare project ids are a MISUSE, not a quietly permissive lease: every
+    # candidate would read as leasable and two writers could enter one folder.
+    with pytest.raises(TypeError):
+        candidate_is_leasable({"id": "z", "project_id": "proj-x"}, {"proj-x"})
 
     # PENDING task -> its own dict is scoped, so when assigned it will carry the lane
     # (assign_tasks reads the candidate's project_id and copies it into RUNNING)
@@ -69,7 +84,11 @@ def test_mark_task_project_running_and_pending():
 
 def test_ui_conversion_marks_running_task_as_lease_holder(tmp_path, monkeypatch):
     from ouroboros.gateway.projects import api_project_from_task
-    from ouroboros.project_lease import candidate_is_leasable, running_project_ids
+    from ouroboros.project_lease import (
+        candidate_is_leasable,
+        running_project_ids,
+        running_project_lanes,
+    )
     import supervisor.workers as workers
 
     (tmp_path / "logs").mkdir()
@@ -88,7 +107,36 @@ def test_ui_conversion_marks_running_task_as_lease_holder(tmp_path, monkeypatch)
     assert workers.RUNNING["tlive"]["task"]["project_id"] == pid
     assert pid in running_project_ids(workers.RUNNING.values())
     # so a concurrent same-project task is held out of assignment (one writer)
-    assert candidate_is_leasable({"id": "other", "project_id": pid}, running_project_ids(workers.RUNNING.values())) is False
+    assert candidate_is_leasable(
+        {"id": "other", "project_id": pid}, running_project_lanes(workers.RUNNING.values()),
+    ) is False
+
+
+def test_ensure_project_scope_logs_a_registry_refusal_loudly(tmp_path, monkeypatch, caplog):
+    """The registry-wide chat-id reservation refuses an unresolvable project
+    collision by RAISING. That refusal used to land in the generic
+    ``except Exception: log.debug(...)`` at the bottom of the handler, so the
+    loud half of "a project collision is refused loudly" was swallowed and the
+    task simply kept running unscoped with nothing above DEBUG to show for it."""
+    import supervisor.workers as workers
+    from ouroboros.projects_registry import create_project
+
+    monkeypatch.setattr(workers, "DRIVE_ROOT", tmp_path)
+    create_project(tmp_path, "taken")
+
+    def _refuse(*args, **kwargs):
+        raise ValueError("chat id 123 for project 'clash' is already reserved by taken")
+
+    monkeypatch.setattr("ouroboros.projects_registry.create_project", _refuse)
+
+    with caplog.at_level("ERROR"):
+        workers.ensure_project_scope(
+            {"task_id": "t-clash", "project_id": "clash", "project_name": "Clash"},
+            SimpleNamespace(RUNNING={}),
+        )
+
+    assert "ensure_project_scope REFUSED" in caplog.text
+    assert "already reserved" in caplog.text
 
 
 def test_ui_conversion_scopes_a_pending_task(tmp_path, monkeypatch):

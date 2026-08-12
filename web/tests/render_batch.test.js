@@ -135,6 +135,64 @@ test('load-older control follows the SERVER window verdict', () => {
     // The notice names BOTH boundaries: on-disk archives AND the lineage cap.
     assert.match(floor.label, /archive/i);
     assert.match(floor.label, /lineage/i);
+    // A FORK whose shared past was not fully read is a DIFFERENT boundary: those
+    // rows are not "in the archive", the chain was never followed to them.
+    // Reusing the archive wording would misname where the conversation is (A3b).
+    const ancestry = loadOlderControlState(
+        { complete: false, truncated_by: ['ancestry_depth'] }, null,
+    );
+    assert.equal(ancestry.mode, 'notice');
+    assert.match(ancestry.label, /shared past/i);
+    assert.doesNotMatch(ancestry.label, /archive/i);
+    // Quota headroom still wins: that part of the window IS loadable.
+    assert.equal(
+        loadOlderControlState(
+            { complete: false, truncated_by: ['quota', 'ancestry_depth'] }, null,
+        ).mode,
+        'button',
+    );
+    // TWO unescalatable causes at once: both boundaries get named. Stopping at
+    // the first match told a forked thread about its fork chain while silently
+    // dropping the on-disk archive floor that was ALSO cutting its window.
+    const both = loadOlderControlState(
+        { complete: false, truncated_by: ['archive_floor', 'ancestry_depth'] }, null,
+    );
+    assert.equal(both.mode, 'notice');
+    assert.match(both.label, /shared past/i);
+    assert.match(both.label, /archive/i);
+    assert.match(both.label, /lineage/i);
+    // ...and order of the causes cannot change what is disclosed.
+    assert.equal(
+        loadOlderControlState(
+            { complete: false, truncated_by: ['ancestry_depth', 'archive_floor'] }, null,
+        ).label,
+        both.label,
+    );
+    // A capped quota alongside a fork gap names both too.
+    const cappedFork = loadOlderControlState(
+        { complete: false, truncated_by: ['quota', 'ancestry_depth'] },
+        { n_human: 1500, n_progress: 600 },
+    );
+    assert.equal(cappedFork.mode, 'notice');
+    assert.match(cappedFork.label, /shared past/i);
+    assert.match(cappedFork.label, /archive/i);
+    // P6: `lens_unavailable` is a THIRD boundary — the lens could not be BUILT, so
+    // whether this thread has a shared past is unknown rather than known-and-cut.
+    // The server sets it together with `ancestry_depth`; it must add its own
+    // clause and must NOT fall through to the archive/lineage wording.
+    const unavailable = loadOlderControlState(
+        { complete: false, truncated_by: ['ancestry_depth', 'lens_unavailable'] }, null,
+    );
+    assert.equal(unavailable.mode, 'notice');
+    assert.match(unavailable.label, /shared past/i);
+    assert.match(unavailable.label, /could not be looked up/i);
+    assert.doesNotMatch(unavailable.label, /archive/i);
+    // On its own it still says the right thing rather than borrowing the archive text.
+    const alone = loadOlderControlState(
+        { complete: false, truncated_by: ['lens_unavailable'] }, null,
+    );
+    assert.match(alone.label, /could not be looked up/i);
+    assert.doesNotMatch(alone.label, /archive/i);
 });
 
 // ─────────────── source pins: routine path & sticky boundary ───────────────

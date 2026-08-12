@@ -11,12 +11,32 @@ from ouroboros.gateway.contracts import (
     ChatOutbound,
     OwnerScopeReviewFloorResponse,
     PhotoOutbound,
+    ProjectDeleteResponse,
+    ProjectEntry,
+    ProjectFromTaskResponse,
+    ProjectInitGitResponse,
     SkillDeleteResponse,
     SkillLifecycleQueueResponse,
     StateResponse,
     TaskCostBreakdown,
     TaskDetailResponse,
     TaskDiffResponse,
+    ThreadBranchBase,
+    ThreadBranchBasesResponse,
+    ThreadBranchOffRequest,
+    ThreadCreateRequest,
+    ThreadDeleteRequest,
+    ThreadDiffResponse,
+    ThreadEntry,
+    ThreadLifecycleResponse,
+    ThreadQueueNotice,
+    ThreadLocation,
+    ThreadMergeBackRequest,
+    ThreadResponse,
+    ThreadUpdateRequest,
+    ThreadWorktreeRemoveRequest,
+    ThreadWorktreeResponse,
+    UiPreferencesResponse,
     UpdateApplyErrorResponse,
     UpdateApplyRequest,
     UpdateApplySuccessResponse,
@@ -25,6 +45,7 @@ from ouroboros.gateway.contracts import (
     UpdatePreflightResponse,
     UpdateStatusReadyOutbound,
     VideoOutbound,
+    WorkspaceGitInitDecision,
     ClaudexorStatusReads,
     ClaudexorStatusResponse,
 )
@@ -111,6 +132,24 @@ def test_gateway_contract_endpoint_index_matches_router_and_types(tmp_path):
         "UpdateApplySuccessResponse",
         "UpdateApplyErrorResponse",
         "UpdateStatusReadyOutbound",
+        "ThreadEntry",
+        "ThreadCreateRequest",
+        "ThreadUpdateRequest",
+        "ThreadResponse",
+        "ThreadLocation",
+        "ThreadBranchBase",
+        "ThreadBranchBasesResponse",
+        "ThreadBranchOffRequest",
+        "ThreadMergeBackRequest",
+        "ThreadWorktreeRemoveRequest",
+        "ThreadDeleteRequest",
+        "ThreadWorktreeResponse",
+        "ThreadDiffResponse",
+        "ThreadLifecycleResponse",
+        "ThreadQueueNotice",
+        "WorkspaceGitInitDecision",
+        "ProjectInitGitResponse",
+        "ProjectFromTaskResponse",
     ):
         assert re.search(rf"@typedef \{{Object\}} {name}\b", text), f"api_types.js missing {name}"
     api_client = (pathlib.Path(__file__).resolve().parent.parent / "web" / "modules" / "api_client.js").read_text(
@@ -118,15 +157,47 @@ def test_gateway_contract_endpoint_index_matches_router_and_types(tmp_path):
     )
     assert "openAICompatibleModels" in api_client
     assert "taskDiff" in api_client
+    # Thread lifecycle: the browser must reach every route the gateway mounts,
+    # or the UI phase would hand-roll fetches outside the api_client seam.
+    for call in ("projectThreadCreate", "projectThreadUpdate", "projectThreadFork"):
+        assert call in api_client, f"api_client.js missing {call}"
+    # T3: branching, the inspected removal and the thread-checkout diff ride the
+    # SAME seam. A UI phase that hand-rolls one of these fetches loses the shared
+    # path builder and, with it, the encoding of an owner-typed project id.
+    for call in (
+        "threadBranchBases", "threadBranchOff", "threadMergeBack",
+        "threadWorktree", "threadWorktreeRemove", "threadDiff",
+        "threadArchive", "threadRestore", "threadDelete",
+    ):
+        assert call in api_client, f"api_client.js missing {call}"
+    # T2: the owner's YES to the git_init_required offer must be reachable through
+    # the one client seam, or the UI phase hand-rolls a fetch for the single route
+    # that writes into the owner's own folder.
+    assert "projectInitGit" in api_client, "api_client.js missing projectInitGit"
     # v6.80.0: the two contracts extended this release join the FIELD-level parity list. The name-level
     # loop above cannot see a new @property, so an ABI field added on the Python side would otherwise
     # never have to appear in the browser's typedef (ARCHITECTURE.md §11.3).
+    # Project threads (T0): UiPreferencesResponse and ProjectEntry were BOTH missing from this loop —
+    # ProjectEntry's JSDoc had already drifted (no `origin`, no `created_at`) with nothing to catch it,
+    # and UiPreferencesResponse is the surface the nested per-thread read cursor will migrate.
     for cls in (ChatInbound, ChatOutbound, PhotoOutbound, VideoOutbound,
                 StateResponse, OwnerScopeReviewFloorResponse, UpdateMergePlan,
                 UpdatePreflightRequest, UpdatePreflightResponse, UpdateApplyRequest,
                 UpdateApplySuccessResponse, UpdateApplyErrorResponse,
                 UpdateStatusReadyOutbound, TaskCostBreakdown, TaskDetailResponse,
-                ClaudexorStatusReads, ClaudexorStatusResponse, TaskDiffResponse):
+                ClaudexorStatusReads, ClaudexorStatusResponse, TaskDiffResponse,
+                UiPreferencesResponse, ProjectEntry,
+                ThreadEntry, ThreadCreateRequest, ThreadUpdateRequest, ThreadResponse,
+                ThreadLocation, ThreadBranchBase, ThreadBranchBasesResponse,
+                ThreadBranchOffRequest, ThreadMergeBackRequest, ThreadWorktreeRemoveRequest,
+                ThreadDeleteRequest,
+                ThreadWorktreeResponse, ThreadDiffResponse, ThreadLifecycleResponse, ThreadQueueNotice,
+                WorkspaceGitInitDecision, ProjectInitGitResponse,
+                # I1: the project delete answers what happened to its threads' checkouts,
+                # and this class was only in the NAME-level loop above — so the new
+                # fields could have landed on one side alone.
+                ProjectDeleteResponse,
+                ProjectFromTaskResponse):
         expected = set(get_type_hints(cls, include_extras=True))
         actual = _js_typedef_fields(text, cls.__name__)
         assert actual == expected, f"{cls.__name__} JSDoc fields drifted: missing={sorted(expected - actual)}, extra={sorted(actual - expected)}"
@@ -142,6 +213,17 @@ def test_gateway_contract_endpoint_index_matches_router_and_types(tmp_path):
     )
     assert re.search(r"@property \{string\} deprecation_notice\b", text), (
         "OwnerScopeReviewFloorResponse.deprecation_notice must be declared for the browser"
+    )
+    # The bounded-listing count: a `[:N]` slice on an owner-facing envelope must
+    # travel with the TRUE size of the set (DEVELOPMENT.md, "No silent
+    # truncation"). It is a NUMBER on both sides — a client left to reach for
+    # `dirty_files.length` is a client that states the CAP as the magnitude,
+    # which is exactly what the removal refusal did with 800 modified files.
+    assert "dirty_files_total" in get_type_hints(ThreadWorktreeResponse, include_extras=True), (
+        "ThreadWorktreeResponse must declare dirty_files_total beside dirty_files"
+    )
+    assert re.search(r"@property \{number=\} dirty_files_total\b", text), (
+        "ThreadWorktreeResponse.dirty_files_total must be a JSDoc number in the browser mirror"
     )
     assert re.search(r"@property \{boolean=\} force_plan\b", text), "ChatInbound missing force_plan"
     for field in ("model_lane", "requested_model_lane", "effective_model_lane", "model", "task_group_id"):
@@ -303,3 +385,36 @@ def test_task_detail_cost_breakdown_emission_matches_contract(monkeypatch, tmp_p
     detail_hints = get_type_hints(TaskDetailResponse, include_extras=True)
     assert detail_hints["cost_breakdown"] is TaskCostBreakdown
     assert TaskDetailResponse.__required_keys__ == frozenset()
+
+
+def test_thread_entry_declares_every_field_the_projection_actually_ships(tmp_path):
+    """T3R2-B3: the field-level mirror cannot catch two sides that are equally wrong.
+
+    Live rows carry `lifecycle`, `archived_at` and `delete_error` on `/api/state`,
+    on `GET /api/projects` and inside every `ThreadResponse` — the canonical
+    projection normalises all three onto every row, and the client already reads
+    `thread.lifecycle` to decide what a thread menu may offer. Neither the Python
+    contract nor the JS typedef declared them, and ARCHITECTURE §11.3 asserted
+    that T3 had added them. Parity passed because both mirrors were wrong
+    identically, so this pins the projection ITSELF against the contract.
+    """
+    from ouroboros.project_threads_registry import project_threads
+    from ouroboros.projects_registry import create_project, create_thread
+
+    declared = set(get_type_hints(ThreadEntry, include_extras=True))
+    create_project(tmp_path, "racer", name="Racer")
+    forked_source = create_thread(tmp_path, "racer", name="Tuning")
+    from ouroboros.projects_registry import archive_thread, fork_thread, get_project
+
+    fork_thread(tmp_path, "racer", forked_source["id"])
+    archive_thread(tmp_path, "racer", forked_source["id"])
+    rows = project_threads(get_project(tmp_path, "racer"))
+
+    assert len(rows) >= 3, rows
+    shipped: set = set()
+    for row in rows:
+        shipped |= set(row)
+    assert shipped <= declared, f"ThreadEntry does not declare: {sorted(shipped - declared)}"
+    # And the three the lifecycle actually adds are really on every row.
+    for row in rows:
+        assert {"lifecycle", "archived_at", "delete_error"} <= set(row)

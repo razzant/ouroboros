@@ -74,25 +74,44 @@ def source_refs_for_project(drive_root: Any, project_chat_id: int) -> List[Dict[
     return refs
 
 
-def project_origin_rows(drive_root: Any, project_chat_id: int) -> List[Dict[str, Any]]:
-    """Origin rows a Project lens can SYNTHESIZE when the canonical row is gone.
+def origin_rows_by_chat(
+    drive_root: Any, project_chat_ids: Iterable[Any]
+) -> Dict[int, List[Dict[str, Any]]]:
+    """Origin rows for SEVERAL project chats, bucketed, in ONE bindings read.
 
-    Only bindings that carry ``source_text`` qualify (cross-thread origins — the
-    binding is the retention-proof copy of the message that started the project).
-    Deduplicated by complete origin identity so several bindings created from one
-    owner message yield one row."""
+    A fork's history needs its own origins AND every ancestor's; asking
+    :func:`project_origin_rows` per chat re-read
+    ``state/project_task_bindings.json`` once per link in the chain. Identity
+    dedupe is GLOBAL across the requested chats and uses the same identity
+    tuple, so ONE owner message several threads bind to yields ONE row rather
+    than one per ancestor.
+
+    Only bindings carrying ``source_text`` qualify (cross-thread origins — the
+    binding is the retention-proof copy of the message that started the
+    project).
+    """
     from ouroboros.projects_registry import project_task_bindings
 
-    rows: List[Dict[str, Any]] = []
+    wanted: set = set()
+    for value in project_chat_ids or ():
+        try:
+            wanted.add(int(value or 0))
+        except (TypeError, ValueError):
+            continue
+    out: Dict[int, List[Dict[str, Any]]] = {}
+    if not wanted:
+        return out
     seen: set = set()
     for row in project_task_bindings(drive_root).values():
         try:
-            same_chat = int(row.get("project_chat_id") or 0) == int(project_chat_id or 0)
+            owner = int(row.get("project_chat_id") or 0)
         except (TypeError, ValueError):
-            same_chat = False
+            continue
+        if owner not in wanted:
+            continue
         ref = row.get("source_ref")
         text = row.get("source_text")
-        if not (same_chat and isinstance(ref, dict) and ref and isinstance(text, str) and text):
+        if not (isinstance(ref, dict) and ref and isinstance(text, str) and text):
             continue
         identity = (
             str(ref.get("chat_id") or ""),
@@ -103,8 +122,20 @@ def project_origin_rows(drive_root: Any, project_chat_id: int) -> List[Dict[str,
         if identity in seen:
             continue
         seen.add(identity)
-        rows.append({"ref": dict(ref), "text": text})
-    return rows
+        out.setdefault(owner, []).append({"ref": dict(ref), "text": text})
+    return out
+
+
+def project_origin_rows(drive_root: Any, project_chat_id: int) -> List[Dict[str, Any]]:
+    """Origin rows a Project lens can SYNTHESIZE when the canonical row is gone.
+
+    Single-chat projection of :func:`origin_rows_by_chat` (kept as the stable
+    name for callers that read exactly one lens)."""
+    try:
+        chat = int(project_chat_id or 0)
+    except (TypeError, ValueError):
+        return []
+    return origin_rows_by_chat(drive_root, (chat,)).get(chat, [])
 
 
 def entry_matches_source_ref(entry: Dict[str, Any], refs: Iterable[Dict[str, Any]]) -> bool:
@@ -249,6 +280,7 @@ __all__ = [
     "chat_annotation_receipt",
     "entry_matches_source_ref",
     "latest_chat_annotations",
+    "origin_rows_by_chat",
     "project_origin_rows",
     "source_refs_for_project",
 ]

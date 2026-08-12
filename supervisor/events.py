@@ -2940,6 +2940,69 @@ def _reject_if_no_chat_target(
     return False
 
 
+def _project_lane_wait_suffix(task: Any, running_ref: Any, drive_root: Any = None) -> str:
+    """The honest "this will WAIT" sentence for a task whose folder is busy (A14).
+
+    The sentence itself is ``thread_branching.QUEUE_NOTICE`` — IMPORTED, never
+    re-authored (T3R-9). A14's whole point is that one wording exists and is
+    true; a second copy here drifted the moment either was edited, and the two
+    surfaces then explained the same wait in different words. This function
+    decides WHETHER to say it. It does not get to decide what it says.
+
+    Never raises and never guesses: an unreadable queue answers "" rather than
+    warning about a wait that may not exist. A false warning here costs trust; a
+    missing one costs a few seconds of surprise.
+
+    A task is never its OWN obstacle. Without self-exclusion, a task that is
+    already RUNNING holds the folder's lane itself, the lane read comes back
+    occupied, and the owner is told their running task is queued behind "another
+    task in this folder" — a task that does not exist. That is exactly the false
+    warning the paragraph above forbids.
+
+    ``drive_root`` supplies the project->folder map the SCHEDULER uses. Without
+    it a task that names no folder is compared as ``(project_id, "")`` here and
+    as ``("", registered_folder)`` in ``assign_tasks``, so this notice and the
+    queue disagree about the very wait it exists to explain (T3 B4).
+    """
+    try:
+        from ouroboros.project_lease import candidate_is_leasable, running_project_lanes
+        from ouroboros.thread_branching import QUEUE_NOTICE
+
+        if not isinstance(task, dict) or not str(task.get("project_id") or "").strip():
+            return ""
+        # None, never {}: the lane treats "the folders are unknown" differently
+        # from "no project has one" (I3), and this notice has to reach the same
+        # verdict the scheduler will — that is the whole reason it is handed the
+        # same map. No drive_root means unknown, not empty.
+        folders: Optional[Dict[str, str]] = None
+        if drive_root is not None:
+            try:
+                from ouroboros.projects_registry import project_working_dirs
+
+                folders = project_working_dirs(drive_root)
+            except Exception:
+                log.debug("Could not read the project folder map for the queue notice", exc_info=True)
+        rows = list(running_ref.values()) if hasattr(running_ref, "values") else list(running_ref or ())
+        own_id = str(task.get("id") or task.get("task_id") or "").strip()
+        if own_id:
+            rows = [row for row in rows if _lane_row_task_id(row) != own_id]
+        lanes = running_project_lanes(rows, folders)
+        if candidate_is_leasable(task, lanes, folders):
+            return ""
+    except Exception:
+        log.debug("Could not read the writer lane for a scheduled task", exc_info=True)
+        return ""
+    return f" ({QUEUE_NOTICE})"
+
+
+def _lane_row_task_id(row: Any) -> str:
+    """The task id of one RUNNING entry, whether wrapped in the meta shape or not."""
+    task = row.get("task") if isinstance(row, dict) and isinstance(row.get("task"), dict) else row
+    if not isinstance(task, dict):
+        return ""
+    return str(task.get("id") or task.get("task_id") or "").strip()
+
+
 def _handle_schedule_task(evt: Dict[str, Any], ctx: Any) -> None:
     st = ctx.load_state()
     owner_chat_id = st.get("owner_chat_id")
@@ -3364,6 +3427,13 @@ def _handle_schedule_task(evt: Dict[str, Any], ctx: Any) -> None:
         if delegation_role == "subagent" and queued_behind_active_cap:
             suffix = (
                 f" (queued behind active subagent cap {max_active}; it will start when a slot frees)"
+            )
+        elif not suffix and delegation_role != "subagent":
+            # A14, said at the moment it becomes true. Reuses THIS notice rather
+            # than the assignment loop, so it costs one lane read per scheduled
+            # task instead of one per pass, and adds no ABI field.
+            suffix = _project_lane_wait_suffix(
+                admitted, running_ref, getattr(ctx, "DRIVE_ROOT", None)
             )
         # A subagent's scheduled notice routes to its root project thread by lineage (C4.4); else its own chat; a headless subagent (chat_id=0, no bound root) still skips.
         _notice_chat = (_bound_project_chat_id(ctx, tid, parent_id, root_task_id)

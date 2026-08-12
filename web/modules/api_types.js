@@ -274,6 +274,54 @@
  */
 
 /**
+ * The typed git_init_required OFFER (A12) — not an error report. Admission raises
+ * it BEFORE queueing a file task in a folder that is safe and valid but not tracked
+ * by git. It reaches a client as an OBJECT on exactly one surface: the POST
+ * /api/tasks 400 body (alongside error_code: 'git_init_required'). The project-room
+ * promote path carries the same object in its supervisor-internal outcome, but the
+ * halted task's chat message and result carry the reason code plus this object's
+ * message, not its fields. `enables`
+ * is the plain-language answer to "what does saying yes buy me" and `offer` names
+ * the operation the yes calls (POST /api/projects/{project_id}/init-git). Nothing
+ * is initialised in the owner's folder without that answer, and Ouroboros never
+ * runs `git init` there itself.
+ * @typedef {Object} WorkspaceGitInitDecision
+ * @property {'git_init_required'=} decision
+ * @property {string=} workspace_root
+ * @property {string=} project_id
+ * @property {'init_git'=} offer
+ * @property {string[]=} enables
+ * @property {string=} message
+ */
+
+/**
+ * One THREAD of a project — an empty chat sharing the project's working folder.
+ * Thread 0 is the project's OWN chat (its chat_id equals the project's) and is
+ * synthesized from the project row rather than stored; the project's top-level
+ * chat_id stays its compatibility alias. fork_of_chat_id + fork_before_ts are a
+ * CURSOR into the source thread's rows (rows are never copied) and appear
+ * together or not at all.
+ *
+ * lifecycle/archived_at/delete_error are D4's thread lifecycle. They were SHIPPED
+ * on /api/state, GET /api/projects and every ThreadResponse before either side
+ * declared them — the canonical projection normalises all three onto every row,
+ * and project_thread_actions.js already reads thread.lifecycle — so field parity
+ * passed with both sides equally wrong. Thread #0 mirrors the PROJECT's lifecycle
+ * (it IS the project) and never carries an archived_at of its own.
+ * @typedef {Object} ThreadEntry
+ * @property {number=} id
+ * @property {number=} chat_id
+ * @property {string=} name
+ * @property {string=} created_at
+ * @property {number=} visible_revision
+ * @property {number=} fork_of_chat_id
+ * @property {string=} fork_before_ts
+ * @property {"active"|"archived"|"deleting"|"tombstoned"=} lifecycle
+ * @property {string=} archived_at
+ * @property {string=} delete_error
+ */
+
+/**
  * @typedef {Object} ProjectEntry
  * @property {string} id
  * @property {string=} name
@@ -282,18 +330,317 @@
  * @property {string=} provenance   // attached | cloned | genesis | none (historical fact)
  * @property {string=} clone_url
  * @property {string=} trusted_at
+ * @property {string=} origin
+ * @property {string=} created_at
  * @property {string=} last_active_at
  * @property {"active"|"deleting"|"tombstoned"=} lifecycle
  * @property {number=} routing_generation
  * @property {number=} visible_revision
  * @property {string=} delete_error
+ * @property {ThreadEntry[]=} threads  // canonical projection, thread 0 first
  */
 
 /**
+ * POST /api/projects/{project_id}/init-git response — the owner's YES to the
+ * git_init_required offer, and the only caller of the attach snapshot besides the
+ * create dialog's init_git. init_git_skipped names credential-shaped files
+ * deliberately left OUT of the snapshot and still untracked; it is absent when
+ * nothing was skipped.
+ * @typedef {Object} ProjectInitGitResponse
+ * @property {ProjectEntry=} project
+ * @property {string=} working_dir
+ * @property {string[]=} init_git_skipped
+ */
+
+/**
+ * POST /api/projects/from-task response — "turn this task into a project".
+ * working_dir is the folder the new project ADOPTED from the converted task (A11:
+ * work already happening somewhere brings its place with it); working_dir_error is
+ * the disclosure when it could not — the folder moved, overlaps the Ouroboros
+ * roots, sits inside another repository, or is one of Ouroboros's own ephemeral
+ * checkouts. The conversion still succeeds, so a client that ignores this field
+ * shows a project that silently has no place.
+ * @typedef {Object} ProjectFromTaskResponse
+ * @property {ProjectEntry=} project
+ * @property {Object=} binding
+ * @property {string=} working_dir
+ * @property {string=} working_dir_error
+ */
+
+/**
+ * POST /api/projects/{project_id}/threads body. name is optional — an unnamed
+ * thread gets a neutral default (no model call).
+ * @typedef {Object} ThreadCreateRequest
+ * @property {string=} name
+ */
+
+/**
+ * POST /api/projects/{project_id}/threads/{thread_id}/update body.
+ * @typedef {Object} ThreadUpdateRequest
+ * @property {string} name
+ */
+
+/**
+ * Envelope of every thread lifecycle route (create / update / fork). The
+ * affected thread's chat_id also rides the projects_changed broadcast, so the
+ * client adds it to its known-chat set before any live frame for it arrives.
+ * @typedef {Object} ThreadResponse
+ * @property {string} project_id
+ * @property {ThreadEntry} thread
+ */
+
+/**
+ * WHERE a thread works — DERIVED, never stored (A7). where is 'project_folder'
+ * or 'worktree', and it answers exactly one question: does a durable worktree
+ * exist for this thread? There is no toggle to read, so no client can be shown a
+ * location the filesystem disagrees with. The other fields appear only for a
+ * worktree.
+ * @typedef {Object} ThreadLocation
+ * @property {string=} where
+ * @property {string=} path
+ * @property {string=} branch
+ * @property {string=} base_sha
+ * @property {string=} created_at
+ */
+
+/**
+ * One base the owner may branch off from (A8). kind is 'branch', 'tag' or
+ * 'snapshot'. The snapshot entry — "exactly as it is now" — is not a git ref:
+ * creates_commit discloses whether choosing it would make a snapshot commit (a
+ * dirty tree) or simply reuse HEAD (a clean one). A commit-ish the owner types is
+ * accepted by the branch-off route and is deliberately not enumerated here.
+ * @typedef {Object} ThreadBranchBase
+ * @property {string=} ref
+ * @property {string=} kind
+ * @property {string=} label
+ * @property {boolean=} dirty
+ * @property {boolean=} creates_commit
+ */
+
+/**
+ * Would a task started in this thread WAIT, and what should be said (A14)?
+ * queued is the fact; message is the ONE sentence every surface uses, and it says
+ * the TRUE thing — the task is queued behind the running one and will run when it
+ * finishes. It is not rejected. remedy is 'branch_off' only where branching would
+ * actually help: a thread already working in its own checkout is waiting on
+ * ITSELF, and offering to branch again there would be advice that does not work.
+ * @typedef {Object} ThreadQueueNotice
+ * @property {boolean=} queued
+ * @property {string=} reason
+ * @property {string=} message
+ * @property {string=} remedy
+ */
+
+/**
+ * GET /api/projects/{project_id}/threads/{thread_id}/branch-bases.
+ * @typedef {Object} ThreadBranchBasesResponse
+ * @property {string=} project_id
+ * @property {number=} thread_id
+ * @property {string=} current_branch
+ * @property {ThreadBranchBase[]=} bases
+ * @property {ThreadBranchBase=} snapshot
+ * @property {ThreadLocation=} location
+ * @property {ThreadQueueNotice=} queue_notice
+ * @property {boolean=} ok
+ * @property {string=} reason
+ * @property {string=} message
+ */
+
+/**
+ * Branch-off body. base_ref is a branch, a tag, any commit-ish, or the
+ * '@snapshot' sentinel meaning "exactly as it is now"; empty means HEAD.
+ * @typedef {Object} ThreadBranchOffRequest
+ * @property {string=} base_ref
+ */
+
+/**
+ * Worktree-removal body. acknowledge_unmerged IS the owner's consent (A10): a
+ * checkout holding unmerged commits or uncommitted edits refuses without it, and
+ * there is no other path into the removal.
+ * @typedef {Object} ThreadWorktreeRemoveRequest
+ * @property {boolean=} acknowledge_unmerged
+ */
+
+/**
+ * Thread-delete body, entirely optional — a bare POST is the ordinary call.
+ * acknowledge_unmerged IS the owner's consent to delete a thread whose checkout
+ * still holds ignored or untracked files (a node_modules/, a build.log): the
+ * default answers checkout_holds_rebuildable_files naming exactly what is there,
+ * and this flag is the yes. The SAME name the removal route uses — one consent
+ * idiom, not three. It is NOT an override for work at risk: unmerged commits,
+ * changes to tracked files and an unreadable checkout refuse with
+ * checkout_holds_work whatever this says.
+ * @typedef {Object} ThreadDeleteRequest
+ * @property {boolean=} acknowledge_unmerged
+ */
+
+/**
+ * ONE envelope for every branch/merge/remove answer, success or refusal. ok is
+ * the only field to read first. A refusal carries a typed reason, owner-facing
+ * message copy, and whatever evidence that reason has: conflicts for a stopped
+ * merge, dirty_files for a local tree that must be settled, inspection for a
+ * removal that would destroy work, decision for the git_init_required offer.
+ * worktree_kept is stated explicitly on a successful merge because A10 turns on
+ * it: merging back never removes the checkout.
+ * dirty_files_total is the TRUE size of whichever bounded listing rides along
+ * (dirty_files, checkout_left_behind, and the inspection's own dirty_files):
+ * the lists are capped so the envelope cannot grow without bound, the count
+ * never is. Render the count from it, never from list.length — counting the
+ * slice told an owner "200 uncommitted file changes" about 800 of them, in the
+ * sentence immediately before an irreversible removal.
+ * @typedef {Object} ThreadWorktreeResponse
+ * @property {boolean=} ok
+ * @property {string=} reason
+ * @property {string=} message
+ * @property {string=} project_id
+ * @property {number=} thread_id
+ * @property {ThreadLocation=} location
+ * @property {string=} branch
+ * @property {string=} path
+ * @property {string=} base_ref
+ * @property {string=} base_sha
+ * @property {string=} working_dir
+ * @property {WorkspaceGitInitDecision=} decision
+ * @property {Object=} snapshot_commit
+ * @property {string[]=} conflicts
+ * @property {string[]=} dirty_files
+ * @property {number=} dirty_files_total present whenever a bounded file listing
+ *   is — the number every owner-facing sentence states
+ * @property {boolean=} merged
+ * @property {string=} head_before
+ * @property {string=} head_after
+ * @property {boolean=} worktree_kept
+ * @property {boolean=} removed
+ * @property {boolean=} branch_removed a CLEAN removal deletes the thread/<name>
+ *   branch too, so the same thread can branch off again
+ * @property {string=} branch_kept_reason why a branch SURVIVED a removal — it is
+ *   exactly what the next branch-off would refuse on
+ * @property {string=} checkout_branch on `checkout_head_off_branch`: the branch
+ *   the thread's checkout is actually standing on, which is not the one merged
+ * @property {boolean=} folder_left_mid_merge on `merge_abort_failed`: the merge
+ *   could neither complete NOR be undone, so the project folder is stopped
+ *   part-way through it and says so rather than claiming it was untouched
+ * @property {string=} abort_detail
+ * @property {boolean=} acknowledgeable this refusal carries an owner-answerable
+ *   flag, so the owner is never stuck with only "no": checkout_dirty is answered
+ *   by acknowledge_checkout_dirty (merge-back body), unmerged_work by
+ *   acknowledge_unmerged (removal body). checkout_head_off_branch deliberately
+ *   does not set it — that is not work left behind, it is a merge that would do
+ *   nothing while reporting success
+ * @property {string[]=} checkout_left_behind named on a SUCCESSFUL merge: what the
+ *   checkout still holds and the merge did not bring — non-empty only when the
+ *   owner acknowledged it, because acknowledging is not forgetting
+ * @property {Object=} inspection
+ * @property {string=} error
+ */
+
+/**
+ * POST /api/projects/{project_id}/threads/{thread_id}/merge-back body. Entirely
+ * optional — a bare POST is the ordinary call. acknowledge_checkout_dirty is the
+ * owner's consent to merge while the checkout still holds uncommitted work, in
+ * the same shape as the removal's acknowledge_unmerged.
+ * @typedef {Object} ThreadMergeBackRequest
+ * @property {boolean=} acknowledge_checkout_dirty
+ */
+
+/**
+ * GET /api/projects/{project_id}/threads/{thread_id}/diff (A13). The SAME
+ * envelope as TaskDiffResponse — same statuses, same no-clipping rule, same
+ * patch/patch_sha256 contract — plus the thread identity, because Changes is
+ * otherwise task-centric and its per-task route structurally cannot answer for a
+ * persistent checkout that has no task. source is always 'thread_checkout'; a
+ * thread that is not branched off answers blocked with the typed
+ * thread_not_branched blocker, because "works in the project folder" is not
+ * "changed nothing".
+ * @typedef {Object} ThreadDiffResponse
+ * @property {string=} project_id
+ * @property {number=} thread_id
+ * @property {string=} status
+ * @property {string=} source
+ * @property {string=} base_commit
+ * @property {boolean=} head_advanced
+ * @property {string[]=} blockers
+ * @property {string=} patch
+ * @property {string=} patch_sha256
+ * @property {string=} branch the checkout's branch, on EVERY answer including
+ *   the refusals — the Changes header shows "thread · branch" and learns the
+ *   branch here rather than requiring whoever opened the screen to know it
+ * @property {string=} error
+ */
+
+/**
+ * Archive / restore / delete answer (D4 with X10's admission fencing). lifecycle
+ * is 'active' | 'archived' | 'deleting' | 'tombstoned'. Delete answers
+ * 'deleting', not 'tombstoned': the fence is up and routing into the thread is
+ * already closed, but its tasks are still being cancelled and the thread stays
+ * VISIBLE until they quiesce — the same shape a deleting project has.
+ *
+ * The three disclosures ride the response rather than living in a docstring no
+ * owner reads. journal_rows_retained is always true and says so: the chat journal
+ * is shared by every chat and nothing rewrites it, so a deleted thread's rows
+ * physically remain and claiming erasure would be a lie. worktree_kept says the
+ * thread still has a checkout afterwards; worktree_removed (delete) says a CLEAN
+ * one went with the thread, naming its branch and whether that went too — a
+ * tombstoned thread is invisible on every surface and branch/merge refuse it, so
+ * a checkout left behind is a folder and a branch nothing can reach any more.
+ *
+ * Two refusals guard that and they are NOT the same answer. Work at risk —
+ * unmerged commits, changes to TRACKED files, an unreadable checkout — refuses
+ * with checkout_holds_work and names the removal route; no flag overrides it. A
+ * checkout holding only ignored or untracked content answers
+ * checkout_holds_rebuildable_files with acknowledgeable true, which is a question
+ * the owner answers by re-sending with acknowledge_unmerged. Both carry the
+ * inspection.
+ * visible_until_terminal (archive) says the thread was archived while a task was
+ * still running, so it stays on screen until that task finishes.
+ * @typedef {Object} ThreadLifecycleResponse
+ * @property {boolean=} ok
+ * @property {string=} reason
+ * @property {string=} message
+ * @property {string=} project_id
+ * @property {number=} thread_id
+ * @property {number=} chat_id
+ * @property {string=} lifecycle
+ * @property {string=} archived_at
+ * @property {boolean=} visible_until_terminal
+ * @property {boolean=} journal_rows_retained
+ * @property {boolean=} worktree_kept
+ * @property {boolean=} worktree_removed
+ * @property {string=} branch
+ * @property {boolean=} branch_removed
+ * @property {boolean=} acknowledgeable a refusal the owner can ANSWER
+ *   (checkout_holds_rebuildable_files), in the same field name the merge-back
+ *   envelope uses for checkout_dirty; checkout_holds_work never sets it
+ * @property {Object=} inspection
+ * @property {ThreadLocation=} location
+ */
+
+/**
+ * POST /api/projects/{project_id}/delete. The project's own folder, history,
+ * bindings, memory and id are preserved; its threads' CHECKOUTS are not. A
+ * tombstoned project is invisible on every surface and branch/merge refuse a
+ * thread that is not live, so a checkout left behind is a folder and a thread/…
+ * branch nothing can reach — it goes WITH the project and is disclosed here
+ * rather than removed silently. worktrees_pending names the ones a task was still
+ * writing in, which the cancellation worker takes once the project quiesces; ok
+ * stays true because the deletion did start.
+ *
+ * A checkout holding work that cannot be REBUILT refuses instead: ok false,
+ * reason 'threads_hold_checkouts' under a 409, carrying the sentence a single
+ * thread's deletion gives for the same fact and threads naming each one.
  * @typedef {Object} ProjectDeleteResponse
  * @property {boolean} ok
  * @property {string} project_id
  * @property {boolean} folder_untouched
+ * @property {number[]=} worktrees_removed thread ids whose checkout went with it
+ * @property {string[]=} branches_removed thread/<name> branches deleted with them
+ * @property {Object[]=} worktrees_pending [{thread_id, path, branch, reason}] — not
+ *   takeable yet; the folder is named because a tombstoned project has no surface
+ *   left that could point at it
+ * @property {string=} reason
+ * @property {string=} message
+ * @property {Object[]=} threads on threads_hold_checkouts: [{thread_id, path,
+ *   branch, inspection}]
  */
 
 /**
@@ -605,7 +952,9 @@
  * @property {boolean} nested_subagents_expanded
  * @property {number} sidebar_width  // px; 0 = CSS default (v6.33.0)
  * @property {number} project_panel_width  // px; 0 = CSS default
- * @property {Object.<string,number>} project_seen_revision  // monotonic paint ACK
+ * @property {Object.<string,Object.<string,number>>} project_seen_revision  // monotonic paint ACK, NESTED per thread since T1: {project_id: {thread_id: revision}}. A flat {project_id: revision} is accepted for one minor and reads back as {project_id: {"0": revision}}.
+ * @property {string[]} project_order  // owner drag-and-drop order; unlisted projects keep the default order
+ * @property {Object.<string,string[]>} project_thread_order  // owner drag-and-drop thread order per project
  * @property {Object.<string,string>} project_last_viewed  // deprecated accepted no-op
  * @property {Object.<string,boolean>} project_hidden  // deprecated accepted no-op
  * @property {boolean=} ok

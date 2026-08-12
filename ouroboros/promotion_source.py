@@ -25,7 +25,12 @@ def resolve_promote_source(
     disabled but before the queued event was rejected.
     """
     from ouroboros.config import DATA_DIR
-    from ouroboros.project_sources import clone_project_repo, valid_git_url, validate_attach_path
+    from ouroboros.project_sources import (
+        clone_project_repo,
+        ephemeral_checkout_reason,
+        valid_git_url,
+        validate_attach_path,
+    )
 
     src = str(source or "").strip()
     pid = str(project_id or "").strip()
@@ -55,8 +60,12 @@ def resolve_promote_source(
         folder, provenance, clone_url = cloned, "cloned", src
         note = f"cloned {src} -> {cloned}"
     else:
-        from ouroboros.project_sources import is_git_worktree_root
-
+        # A11/A12: the folder becomes the project's PLACE on the strength of the
+        # safety guards alone (exists, real dir, not the home root, disjoint from
+        # the Ouroboros repo/data roots). Being a git worktree is NOT one of them
+        # any more — an untracked folder is admitted and STAYS untracked until the
+        # owner answers the typed `git_init_required` offer that task admission
+        # raises before any file work is queued (workspace_admission).
         resolved, err = validate_attach_path(
             src,
             system_repo_dir=getattr(ctx, "REPO_DIR", getattr(ctx, "repo_dir", "")),
@@ -64,8 +73,17 @@ def resolve_promote_source(
         )
         if err:
             return "", "", f"attach: {err}", pid
-        if not is_git_worktree_root(resolved):
-            return "", "", f"attach: {resolved} is not a git repository", pid
+        # The DURABLE-place rule, not just the attach guards. `source` here is typed
+        # by an AGENT, not by the owner clicking a folder, and the paths an agent has
+        # in hand are exactly the checkouts Ouroboros makes for itself: a linked
+        # worktree, a subagent `self_worktree`, a thread's branch-off. Any of those
+        # becomes a project's permanent home that a `git worktree remove` or the
+        # orphan sweep can delete underneath it. `adopt_task_workspace` applies this
+        # rule for the same reason; this surface needs it MORE, because no owner ever
+        # looked at the path.
+        ephemeral = ephemeral_checkout_reason(resolved)
+        if ephemeral:
+            return "", "", f"attach: {ephemeral}", pid
         folder, provenance, clone_url = str(resolved), "attached", ""
         note = f"attached {resolved}"
     prior_wd = str((existing or {}).get("working_dir") or "").strip()

@@ -129,13 +129,15 @@ def test_ui_projects_sidebar_unread_and_keyboard_menu(direct_server_with_data):
                 assert row.locator(".nav-unread-dot").count() == 1
 
                 # A real room paint advances the monotonic cursor and clears unread.
+                # The thread opens in the CENTRE now (project threads, T1), not in
+                # a right split panel.
                 row.click()
-                page.wait_for_selector('#project-panel:not([hidden])', timeout=30_000)
+                page.wait_for_selector('#page-thread.active', timeout=30_000)
                 page.wait_for_function(
                     "() => document.querySelector('#nav-projects-count')?.textContent === ''",
                     timeout=30_000,
                 )
-                page.click("#project-panel-close")
+                page.click("#thread-stage-close")
 
                 kebab = page.locator('.nav-project-kebab[aria-label="Actions for Alpha project"]')
                 kebab.focus()
@@ -159,6 +161,238 @@ def test_ui_projects_sidebar_unread_and_keyboard_menu(direct_server_with_data):
                 assert toggle.get_attribute("aria-expanded") == "false"
                 assert page.locator("#nav-projects-list").is_hidden()
                 assert add.is_visible()
+            finally:
+                browser.close()
+    except PlaywrightError as exc:
+        if "Executable doesn't exist" in str(exc) or "playwright install" in str(exc).lower():
+            pytest.skip(str(exc))
+        raise
+
+
+@pytest.mark.ui_browser
+def test_ui_project_threads_create_rename_fork_open_in_centre(direct_server_with_data):
+    """The T1 thread journey end to end, at desktop AND at phone width.
+
+    create -> rename -> fork -> open in the CENTRE -> per-thread unread dot.
+    The mobile leg is the reason this phase exists: a thread used to open as a
+    right panel that became a second full-screen overlay on a phone. Here it must
+    be the centre PAGE, with the sidebar drawer closed and no panel over it.
+
+    Writes the desktop and phone states to `OUROBOROS_UI_EVIDENCE_DIR` as the
+    phase's vision-inspection evidence, in the repo's own form (the
+    `v679-depth-*` precedent). Geometry assertions cannot see a layout that is
+    correct and unreadable; a saved screenshot is not verification on its own
+    either (docs/DEVELOPMENT.md "Responsive and accessible behavior") — it is
+    what makes the inspection re-runnable by the next reader.
+    """
+    pytest.importorskip("playwright.sync_api", reason="Playwright is not installed")
+    from playwright.sync_api import Error as PlaywrightError
+    from playwright.sync_api import sync_playwright
+
+    from ouroboros.projects_registry import create_project
+
+    url = direct_server_with_data["url"]
+    data_dir = direct_server_with_data["data_dir"]
+    create_project(data_dir, "threaded", name="Threaded project")
+    # A second project exists only so the PROJECT-row drag leg below has
+    # something to drag past; nothing before that leg looks at it.
+    create_project(data_dir, "second", name="Second project")
+    evidence_dir = pathlib.Path(
+        os.environ.get("OUROBOROS_UI_EVIDENCE_DIR", str(data_dir.parent))
+    )
+    evidence_dir.mkdir(parents=True, exist_ok=True)
+
+    try:
+        with sync_playwright() as pw:
+            browser = pw.chromium.launch(headless=True)
+            page = browser.new_page(viewport={"width": 1280, "height": 800})
+            try:
+                page.goto(url, wait_until="domcontentloaded", timeout=30_000)
+                row = page.locator('.nav-project-row[data-project-id="threaded"]')
+                row.wait_for(state="visible", timeout=30_000)
+                # A project with no extra threads renders NO thread list at all —
+                # the sidebar of someone who never uses threads is unchanged.
+                assert page.locator('[data-threads-for="threaded"]').count() == 0
+
+                # "+" creates a thread (A5) and opens it in the centre.
+                page.click('.nav-thread-add[aria-label="New thread in Threaded project"]')
+                page.wait_for_selector("#page-thread.active", timeout=30_000)
+                thread_list = page.locator('[data-threads-for="threaded"]')
+                thread_list.wait_for(state="visible", timeout=30_000)
+                assert thread_list.locator(".nav-thread-item").count() == 1
+                thread_row = thread_list.locator(".nav-thread-row").first
+                created_id = thread_row.get_attribute("data-thread-id")
+                assert created_id and created_id != "0"
+
+                # The chat instance lives in the CENTRE stage, not in a right panel.
+                assert page.locator("#thread-stage-body .chat-instance-panel").count() == 1
+                assert page.locator("#thread-stage-body .chat-instance-centre").count() == 1
+                assert page.locator("#project-panel").count() == 0
+                page.screenshot(path=str(evidence_dir / "threads-05-thread-in-centre-desktop.png"),
+                                full_page=True)
+                # DOM ids are namespaced per THREAD, not per project: the single
+                # live instance has one sanctioned exception (a hidden
+                # pending-work survivor), and two threads of one project sharing
+                # a prefix would then be two live subtrees on the same ids.
+                assert page.locator(
+                    f'[id="panel-pchat-threaded-{created_id}"]'
+                ).count() == 1
+                # A thread carries NO global agent controls (they belong to the one
+                # agent, not to one room) — that is the chrome half of the X8 split.
+                assert page.locator("#page-thread [data-chat-command='panic']").count() == 0
+                assert page.locator("#page-thread .chat-panel-statusbar").count() == 1
+                # The stage names the project above the thread's own name.
+                assert page.locator("#thread-stage-project").inner_text() == "Threaded project"
+
+                # Rename through the per-thread menu (A4) — Codex still cannot.
+                kebab = thread_list.locator(".nav-thread-kebab").first
+                kebab.click()
+                menu = page.locator('.project-row-menu[role="menu"]')
+                menu.wait_for(state="visible", timeout=5_000)
+                assert page.locator(":focus").get_attribute("data-prm") == "rename"
+                menu.locator('[data-prm="rename"]').click()
+                dialog_input = page.locator("[data-confirm-input]")
+                dialog_input.wait_for(state="visible", timeout=5_000)
+                dialog_input.fill("Renamed thread")
+                page.click(".confirm-dialog [data-confirm-ok]")
+                page.wait_for_function(
+                    "() => [...document.querySelectorAll('.nav-thread-label')]"
+                    ".some(el => el.textContent === 'Renamed thread')",
+                    timeout=30_000,
+                )
+
+                # Fork (D2): a NEW thread named "Copy of …"; the source is untouched.
+                thread_list.locator(".nav-thread-kebab").first.click()
+                page.locator('.project-row-menu [data-prm="fork"]').click()
+                page.wait_for_function(
+                    "() => [...document.querySelectorAll('.nav-thread-label')]"
+                    ".some(el => el.textContent === 'Copy of Renamed thread')",
+                    timeout=30_000,
+                )
+                labels = page.locator('[data-threads-for="threaded"] .nav-thread-label')
+                assert labels.count() == 2
+                # D3: the newest thread sits on TOP within its project.
+                assert labels.first.inner_text() == "Copy of Renamed thread"
+
+                # Per-thread unread: activity in ONE thread dots only that thread,
+                # and the project row aggregates it.
+                from ouroboros.projects_registry import (
+                    get_project,
+                    increment_project_visible_revision,
+                    project_threads,
+                )
+
+                threads = project_threads(get_project(data_dir, "threaded"))
+                other = next(t for t in threads if str(t["id"]) not in {"0", created_id})
+                increment_project_visible_revision(data_dir, chat_id=int(other["chat_id"]))
+                page.wait_for_function(
+                    "id => {"
+                    "  const row = document.querySelector("
+                    "    `.nav-thread-row[data-thread-id='${id}']`);"
+                    "  return row && row.querySelector('.nav-unread-dot');"
+                    "}",
+                    arg=str(other["id"]),
+                    timeout=30_000,
+                )
+                assert page.locator("#nav-projects-count").inner_text() == "1"
+
+                # Opening THAT thread clears its dot and leaves the sibling alone.
+                page.click(f'.nav-thread-row[data-thread-id="{other["id"]}"]')
+                page.wait_for_function(
+                    "() => document.querySelector('#nav-projects-count')?.textContent === ''",
+                    timeout=30_000,
+                )
+                assert page.locator("#thread-stage-title").inner_text() \
+                    == "Copy of Renamed thread"
+
+                # D3: drag the BOTTOM thread onto the top. The committed order is
+                # the full displayed list (no duplicates — the drag rows are the
+                # item wrappers, not their inner row buttons) and it persists
+                # through the same UI-preferences surface widget_order uses.
+                items = page.locator('[data-threads-for="threaded"] .nav-thread-item')
+                before = page.locator(
+                    '[data-threads-for="threaded"] .nav-thread-label'
+                ).all_inner_texts()
+                src = items.last.bounding_box()
+                dst = items.first.bounding_box()
+                page.mouse.move(src["x"] + 40, src["y"] + src["height"] / 2)
+                page.mouse.down()
+                page.mouse.move(dst["x"] + 40, dst["y"] + 2, steps=12)
+                page.mouse.up()
+                page.wait_for_function(
+                    "first => document.querySelector("
+                    "  '[data-threads-for=\"threaded\"] .nav-thread-label'"
+                    ").textContent !== first",
+                    arg=before[0],
+                    timeout=15_000,
+                )
+                after = page.locator(
+                    '[data-threads-for="threaded"] .nav-thread-label'
+                ).all_inner_texts()
+                assert after[0] == before[-1], (before, after)
+                assert sorted(after) == sorted(before), (before, after)
+                stored = json.loads(
+                    (data_dir / "state" / "ui_preferences.json").read_text(encoding="utf-8")
+                )["project_thread_order"]["threaded"]
+                assert len(stored) == len(set(stored)) == len(after), stored
+
+                # D3, PROJECT rows: the same drag one level up. Asserted
+                # IMMEDIATELY after the drop, because the bug this leg exists for
+                # was invisible to a poll-tolerant assertion: the order persisted
+                # but the sidebar kept painting the pre-drop cache, so the row
+                # snapped back and only the next /api/state repaint (up to 3s)
+                # made it look right. The thread leg above cannot catch it —
+                # `renderThreadList` applies the manual order at paint time.
+                project_order = """() =>
+                    [...document.querySelectorAll('#nav-projects-list .nav-project-item')]
+                        .map(el => el.dataset.projectId)"""
+                page.wait_for_function(
+                    f"() => ({project_order})().length === 2", timeout=30_000
+                )
+                projects_before = page.evaluate(project_order)
+                p_items = page.locator("#nav-projects-list .nav-project-item")
+                p_src = p_items.last.bounding_box()
+                p_dst = p_items.first.bounding_box()
+                page.mouse.move(p_src["x"] + 40, p_src["y"] + p_src["height"] / 2)
+                page.mouse.down()
+                page.mouse.move(p_dst["x"] + 40, p_dst["y"] + 2, steps=12)
+                page.mouse.up()
+                # No wait_for_function: the drop handler repaints synchronously,
+                # so the very next read must already show the new order.
+                projects_after = page.evaluate(project_order)
+                assert projects_after[0] == projects_before[-1], (
+                    projects_before, projects_after
+                )
+                assert sorted(projects_after) == sorted(projects_before), (
+                    projects_before, projects_after
+                )
+                # ...and a full poll cycle later (3s on a chat/thread page) the
+                # authoritative repaint AGREES rather than reshuffling.
+                page.wait_for_timeout(4_000)
+                assert page.evaluate(project_order) == projects_after
+                stored_projects = json.loads(
+                    (data_dir / "state" / "ui_preferences.json").read_text(encoding="utf-8")
+                )["project_order"]
+                assert stored_projects == projects_after, stored_projects
+                browser.close()
+
+                # --- the mobile fix -------------------------------------------
+                browser = pw.chromium.launch(headless=True)
+                page = browser.new_page(viewport={"width": 375, "height": 812})
+                page.goto(url, wait_until="domcontentloaded", timeout=30_000)
+                page.click("[data-mobile-nav-toggle]")
+                page.wait_for_selector(".primary-sidebar.open", timeout=15_000)
+                page.click('.nav-thread-row[data-thread-id="%s"]' % other["id"])
+                page.wait_for_selector("#page-thread.active", timeout=30_000)
+                # The drawer closed, the thread is the PAGE (not an overlay over it),
+                # and it fills the viewport without a second close affordance.
+                assert not page.locator(".primary-sidebar.open").count()
+                box = page.locator("#page-thread").bounding_box()
+                assert box is not None and box["width"] <= 375 + 1, box
+                assert box["x"] >= -1, box
+                assert page.locator("#page-thread .chat-input-area").is_visible()
+                page.screenshot(path=str(evidence_dir / "threads-06-thread-as-page-phone.png"),
+                                full_page=True)
             finally:
                 browser.close()
     except PlaywrightError as exc:
@@ -198,7 +432,19 @@ def test_ui_smoke_project_panel_lifecycle_does_not_leak(direct_server_with_data)
     }"""
     live_panels = """() => [...document.querySelectorAll('.chat-instance-panel')]
         .filter((panel) => panel.dataset.pendingWork !== '1').length"""
-    dom_count = "() => document.getElementsByTagName('*').length"
+    # SCOPED to the surfaces this test exercises. Counting the whole document made
+    # the assertion depend on how much of Skills / Logs / Costs had lazily
+    # hydrated in the background between the two samples — an unrelated screen
+    # finishing its first paint mid-run reads as a panel leak (measured: ~95
+    # nodes of skills cards, log rows and cost cells, and ZERO from any chat
+    # surface). What the test claims to catch is an accumulated panel or card
+    # timeline, which is hundreds of nodes INSIDE these roots.
+    dom_count = """() => ['#page-thread', '#page-chat', '#nav-projects-list']
+        .map((sel) => document.querySelector(sel))
+        .filter(Boolean)
+        .reduce((total, root) => total + root.getElementsByTagName('*').length, 0)
+        + [...document.querySelectorAll('.chat-instance-panel')]
+            .reduce((total, panel) => total + 1 + panel.getElementsByTagName('*').length, 0)"""
 
     try:
         with sync_playwright() as pw:
@@ -213,16 +459,18 @@ def test_ui_smoke_project_panel_lifecycle_does_not_leak(direct_server_with_data)
 
                 def open_project(project_id):
                     page.click(f'.nav-project-row[data-project-id="{project_id}"]')
-                    page.wait_for_selector("#project-panel:not([hidden])", timeout=30_000)
+                    page.wait_for_selector("#page-thread.active", timeout=30_000)
                     page.wait_for_selector(
-                        f'[id="panel-pchat-{project_id}"]:not([hidden])', timeout=30_000
+                        # Instance ids are namespaced per THREAD since T1; a
+                        # project row opens its own thread #0.
+                        f'[id="panel-pchat-{project_id}-0"]:not([hidden])', timeout=30_000
                     )
 
                 def close_project():
-                    page.click("#project-panel-close")
+                    page.click("#thread-stage-close")
                     page.wait_for_function(
-                        "() => !document.getElementById('project-panel')"
-                        ".classList.contains('open')",
+                        "() => !document.getElementById('page-thread')"
+                        ".classList.contains('active')",
                         timeout=30_000,
                     )
 
@@ -246,6 +494,13 @@ def test_ui_smoke_project_panel_lifecycle_does_not_leak(direct_server_with_data)
                     cycle_dom = page.evaluate(dom_count)
                     assert cycle_dom <= dom_baseline + dom_slack, (dom_baseline, cycle_dom)
                     assert page.evaluate(count_listeners) == listeners_baseline
+                    # The row menus this phase adds (project kebab, thread kebab)
+                    # mount on document.body, OUTSIDE every root `dom_count`
+                    # measures, so an unclosed one would be invisible to the
+                    # count above. Assert their absence directly.
+                    assert page.evaluate(
+                        "() => document.querySelectorAll('.project-row-menu').length"
+                    ) == 0
 
                 # Direct project-to-project switch (no explicit close) also
                 # destroys the previous instance: one live panel, ever.
@@ -2896,41 +3151,78 @@ def test_ui_smoke_live_cards_keep_usable_geometry_at_depth_and_in_project_panel(
 
                 with (logs_dir / "progress.jsonl").open("a", encoding="utf-8") as handle:
                     handle.write(json.dumps(panel_row) + "\n")
-                wide.evaluate(
-                    "() => document.documentElement.style.setProperty('--project-panel-width', '440px')"
-                )
-                project_row = wide.locator('[data-project-id="layout-project"]')
+                # The project thread mounts in the CENTRE now, so its width is the
+                # shell's centre column (viewport minus the sidebar), not a
+                # separately-sized right panel.
+                project_row = wide.locator('.nav-project-row[data-project-id="layout-project"]')
                 project_row.wait_for(state="visible", timeout=30_000)
                 project_row.click()
                 panel_card = wide.locator(
                     '.chat-instance-panel .chat-live-card[data-task-id="panel-root"]'
                 )
                 panel_card.wait_for(state="visible", timeout=30_000)
-                panel_facts = panel_card.evaluate(
-                    """card => {
+                read_panel_facts = """card => {
                         const panel = card.closest('.chat-instance-panel');
                         const summary = card.querySelector(':scope > .chat-live-summary-button .chat-live-summary');
                         const main = summary.querySelector('.chat-live-summary-main').getBoundingClientRect();
                         const side = summary.querySelector('.chat-live-summary-side').getBoundingClientRect();
                         const title = summary.querySelector('[data-live-title]').getBoundingClientRect();
+                        const column = card.closest('.chat-messages');
+                        const colStyle = getComputedStyle(column);
                         return {
                             panelWidth: panel.getBoundingClientRect().width,
+                            columnWidth: column.clientWidth
+                                - parseFloat(colStyle.paddingLeft)
+                                - parseFloat(colStyle.paddingRight),
                             cardWidth: card.getBoundingClientRect().width,
                             cardClient: card.clientWidth,
                             cardScroll: card.scrollWidth,
                             titleWidth: title.width,
                             mainBottom: main.bottom,
                             sideTop: side.top,
+                            sideBottom: side.bottom,
+                            mainTop: main.top,
                         };
                     }"""
-                )
-                assert panel_facts["panelWidth"] <= 560, panel_facts
-                assert panel_facts["cardWidth"] >= panel_facts["panelWidth"] * 0.9, panel_facts
+                panel_facts = panel_card.evaluate(read_panel_facts)
+                # Still narrower than the viewport: the card must respond to its
+                # actual CONSUMER width (the centre column, viewport minus the
+                # sidebar) rather than the window.
+                assert panel_facts["panelWidth"] <= 1100 - 180, panel_facts
+                # A thread reads through the SAME centred 760px column as Main Chat
+                # now that it mounts in the centre, so the card fills the COLUMN, not
+                # the whole instance — comparing it to the instance would pin the
+                # narrow rail's edge-to-edge padding that the centre deliberately
+                # dropped.
+                assert panel_facts["columnWidth"] < panel_facts["panelWidth"], panel_facts
+                assert panel_facts["cardWidth"] >= panel_facts["columnWidth"] * 0.9, panel_facts
                 assert panel_facts["cardScroll"] <= panel_facts["cardClient"] + 1, panel_facts
                 assert panel_facts["titleWidth"] >= 180, panel_facts
-                assert panel_facts["sideTop"] >= panel_facts["mainBottom"] - 1, panel_facts
+                # A thread used to mount in a ~440px right rail, so this leg pinned
+                # the WRAPPING fallback (meta below the title). In the centre the
+                # same thread is ~870px wide, where the meta belongs on the title's
+                # own row — asserting the wrap here would now pin a squeeze that no
+                # longer happens. The wrap is still covered, one step below.
+                assert min(panel_facts["mainBottom"], panel_facts["sideBottom"]) \
+                    > max(panel_facts["mainTop"], panel_facts["sideTop"]), panel_facts
                 wide.screenshot(
-                    path=str(data_dir.parent / f"live-card-project-panel-{browser_engine}.png"),
+                    path=str(data_dir.parent / f"live-card-project-thread-{browser_engine}.png"),
+                    full_page=True,
+                )
+
+                # The narrow CONSUMER is now a narrow window. Shrink it and the same
+                # card must fall back to the stacked layout, still without
+                # overflowing — the container query reads the chat column, so the
+                # fallback has to follow the column at whatever width it appears.
+                wide.set_viewport_size({"width": 560, "height": 750})
+                wide.wait_for_timeout(400)
+                narrow_facts = panel_card.evaluate(read_panel_facts)
+                assert narrow_facts["panelWidth"] < panel_facts["panelWidth"], narrow_facts
+                assert narrow_facts["columnWidth"] < panel_facts["columnWidth"], narrow_facts
+                assert narrow_facts["cardScroll"] <= narrow_facts["cardClient"] + 1, narrow_facts
+                assert narrow_facts["sideTop"] >= narrow_facts["mainBottom"] - 1, narrow_facts
+                wide.screenshot(
+                    path=str(data_dir.parent / f"live-card-thread-narrow-{browser_engine}.png"),
                     full_page=True,
                 )
             finally:
@@ -4105,9 +4397,8 @@ def test_ui_smoke_changes_screen_and_task_inspector(direct_server_with_data):
                 assert "LLM rounds" in cost_text and "1200 / 300" in cost_text
                 page.screenshot(path=str(data_dir.parent / "inspector-cost.png"), full_page=True)
 
-                # Mutual exclusion: opening the inspector while a project panel is
-                # open closes that panel, and leaving Chat/Changes closes the
-                # inspector (it belongs to the chat surface).
+                # Leaving Chat/Changes closes the inspector (it belongs to the chat
+                # surface).
                 page.click('[data-nav-page="chat"]')
                 page.evaluate(
                     "() => window.dispatchEvent(new CustomEvent('ouro:inspect-task',"
@@ -4115,22 +4406,24 @@ def test_ui_smoke_changes_screen_and_task_inspector(direct_server_with_data):
                 )
                 panel.wait_for(state="visible", timeout=15_000)
 
-                # The right side is ONE slot: a project panel opened while the
-                # inspector is up evicts it, and the inspector opened over a project
-                # panel evicts that. Asserting only the second direction would leave
-                # the shared slot half-tested.
-                project_panel = page.locator('#project-panel')
+                # Project threads (T1): a thread is no longer a right-panel kind —
+                # it takes the CENTRE — so a thread and the inspector are NOT
+                # mutually exclusive any more. Inspecting the task a thread is
+                # talking about while that thread stays open is the whole point of
+                # splitting the two surfaces, so pin that they coexist rather than
+                # re-pinning an eviction that would now be a regression.
+                thread_stage = page.locator('#page-thread')
                 project_row = page.locator('.nav-project-row[data-project-id="alpha"]')
                 project_row.wait_for(state="visible", timeout=15_000)
                 project_row.click()
-                project_panel.wait_for(state="visible", timeout=15_000)
-                panel.wait_for(state="hidden", timeout=15_000)
+                thread_stage.wait_for(state="visible", timeout=15_000)
+                panel.wait_for(state="visible", timeout=15_000)
                 page.evaluate(
                     "() => window.dispatchEvent(new CustomEvent('ouro:inspect-task',"
                     " { detail: { taskId: 'diff-smoke' } }))"
                 )
                 panel.wait_for(state="visible", timeout=15_000)
-                project_panel.wait_for(state="hidden", timeout=15_000)
+                assert thread_stage.is_visible()
 
                 page.click('[data-nav-page="settings"]')
                 panel.wait_for(state="hidden", timeout=15_000)
@@ -4245,6 +4538,135 @@ def test_ui_smoke_composer_parts_chip_dom_behaviours(direct_server):
                 # Nothing was sent, and the composer is still the composer.
                 assert page.locator("#chat-input").count() == 1
                 assert page.locator("#chat-send").count() == 1
+            finally:
+                browser.close()
+    except PlaywrightError as exc:
+        if "Executable doesn't exist" in str(exc) or "playwright install" in str(exc).lower():
+            pytest.skip(str(exc))
+        raise
+
+
+@pytest.mark.ui_browser
+def test_ui_thread_menu_offers_the_branch_rows_and_archive_round_trips(direct_server_with_data):
+    """T4: the seams T1 could not consume and T3 could not reach.
+
+    Two things this proves that no unit test can. First, the thread menu now
+    RENDERS the branch/merge/checkout rows — availability from
+    `threadActions`, an unavailable one greyed WITH its reason rather than
+    omitted. Second, and the reason it exists at all: archive → restore is a
+    ROUND TRIP. The sidebar paints `/api/state`, whose projection filters
+    archived threads, so an archived thread was on no surface the owner could
+    reach and `POST …/restore` — routed, contracted and tested on the server —
+    could not be invoked by anything. Archive was a one-way trip with a
+    documented inverse nobody could press.
+
+    It also carries this phase's VISION-INSPECTION evidence, in the repo's own
+    form (`OUROBOROS_UI_EVIDENCE_DIR`, the `v679-depth-*` precedent). Stated
+    precisely, because evidence that overclaims is worse than none:
+
+    * the CAPTURES below are four states — the thread menu with every row's
+      enabled state and its reason, the project row's own menu, the archived row
+      that offers restore, and the thread back in the sidebar after it;
+    * the manual pass that produced this test covered more than the captures do
+      (a project attached to a real git folder, a thread branched into its own
+      worktree, and the centre-chat and phone layouts — the last two captured by
+      `test_ui_project_threads_create_rename_fork_open_in_centre`). Branch-off
+      has no capture here because this fixture's project has no git folder to
+      branch from.
+
+    What no assertion could have found is what that pass found: the archived
+    row's tooltip read "Restore this thread — restore it to act on it", a
+    tautology beside the word "Restore" that told the owner nothing, and its own
+    test had pinned that exact wording. Fixed in `1fffc240`, whose test now
+    asserts the substance. A saved screenshot is not verification on its own
+    (docs/DEVELOPMENT.md "Responsive and accessible behavior"); it is what makes
+    the inspection re-runnable by the next reader.
+    """
+    pytest.importorskip("playwright.sync_api", reason="Playwright is not installed")
+    from playwright.sync_api import Error as PlaywrightError
+    from playwright.sync_api import sync_playwright
+
+    from ouroboros.projects_registry import create_project, create_thread
+
+    url = direct_server_with_data["url"]
+    data_dir = direct_server_with_data["data_dir"]
+    create_project(data_dir, "wired", name="Wired project")
+    thread = create_thread(data_dir, "wired", name="Spike")
+    evidence_dir = pathlib.Path(
+        os.environ.get("OUROBOROS_UI_EVIDENCE_DIR", str(data_dir.parent))
+    )
+    evidence_dir.mkdir(parents=True, exist_ok=True)
+
+    try:
+        with sync_playwright() as pw:
+            browser = pw.chromium.launch(headless=True)
+            page = browser.new_page(viewport={"width": 1280, "height": 800})
+            try:
+                page.goto(url, wait_until="domcontentloaded", timeout=30_000)
+                thread_row = f'.nav-thread-row[data-thread-id="{thread["id"]}"]'
+                page.wait_for_selector(thread_row, timeout=30_000)
+
+                # --- the menu rows -------------------------------------------
+                page.locator('[data-threads-for="wired"] .nav-thread-kebab').first.click()
+                menu = page.locator('.project-row-menu[role="menu"]')
+                menu.wait_for(state="visible", timeout=15_000)
+                # A thread working in the project folder CAN branch off...
+                assert menu.locator('[data-prm="branch_off"]:not([disabled])').count() == 1
+                # ...and the rows that need a checkout are greyed WITH the reason,
+                # never silently missing: a missing item teaches nothing.
+                assert menu.locator('[data-prm="merge_back"][disabled]').count() == 1
+                assert menu.locator('[data-prm="remove_worktree"][disabled]').count() == 1
+                assert "no checkout" in (
+                    menu.locator('[data-prm="remove_worktree"]').get_attribute("title") or ""
+                )
+                assert menu.locator('[data-prm="archive"]:not([disabled])').count() == 1
+                page.screenshot(path=str(evidence_dir / "threads-01-thread-menu-rows.png"))
+                page.keyboard.press("Escape")
+
+                # --- archive hides it ----------------------------------------
+                page.locator('[data-threads-for="wired"] .nav-thread-kebab').first.click()
+                page.locator('.project-row-menu [data-prm="archive"]').click()
+                page.wait_for_function(
+                    "sel => !document.querySelector(sel)", arg=thread_row, timeout=30_000,
+                )
+
+                # --- ...and the project menu is the way back ------------------
+                page.locator(
+                    '.nav-project-item[data-project-id="wired"] .nav-project-kebab:not(.nav-thread-add)'
+                ).last.click()
+                project_menu = page.locator('.project-row-menu[role="menu"]')
+                project_menu.wait_for(state="visible", timeout=15_000)
+                # The project row IS thread #0's row, so its menu carries thread
+                # #0's own checkout rows too. Without them A7 held for every
+                # thread EXCEPT the one the project opens by default, and no
+                # refusal would ever have said so — the routes accept thread #0
+                # perfectly well; nothing was asking them.
+                assert project_menu.locator('[data-prm="branch_off"]:not([disabled])').count() == 1
+                assert project_menu.locator('[data-prm="merge_back"][disabled]').count() == 1
+                # ...but NOT a lifecycle of its own: thread #0 IS the project and
+                # the server refuses archiving or deleting it by name, so those
+                # rows are left out of THIS menu entirely — it already carries
+                # `Delete project…`, and two delete-shaped rows meaning different
+                # things is worse than one row missing an operation nobody can run.
+                assert project_menu.locator('[data-prm="archive"]').count() == 0
+                assert project_menu.locator('[data-prm="delete"]').count() == 1
+                assert "Delete project" in project_menu.locator('[data-prm="delete"]').inner_text()
+                page.screenshot(path=str(evidence_dir / "threads-02-project-row-menu.png"))
+                project_menu.locator('[data-prm="archived_threads"]').click()
+                archived = page.locator('.project-row-menu[role="menu"]')
+                archived.wait_for(state="visible", timeout=15_000)
+                assert archived.locator(f'[data-prm="restore:{thread["id"]}"]').count() == 1
+                # The row the inspection actually corrected: its tooltip is the
+                # only place the owner learns WHY restore is the one thing on
+                # offer, and a rendered capture is how a reader sees it read
+                # badly. Assertions had pinned the tautology it used to carry.
+                page.screenshot(path=str(evidence_dir / "threads-03-archived-restore-row.png"))
+                archived.locator(f'[data-prm="restore:{thread["id"]}"]').click()
+
+                # Back on the surface it was archived from, under its own name.
+                page.wait_for_selector(thread_row, timeout=30_000)
+                assert page.locator(thread_row).inner_text().startswith("Spike")
+                page.screenshot(path=str(evidence_dir / "threads-04-restored-in-sidebar.png"))
             finally:
                 browser.close()
     except PlaywrightError as exc:

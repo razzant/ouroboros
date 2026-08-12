@@ -536,7 +536,56 @@ def test_task_diff_response_is_frozen_additive_abi():
     assert {
         gateway_task_diff.DIFF_SOURCE_WORKSPACE,
         gateway_task_diff.DIFF_SOURCE_MUTATION_BASELINE,
-    } == {"workspace_patch", "mutation_baseline"}
+        gateway_task_diff.DIFF_SOURCE_THREAD_CHECKOUT,
+    } == {"workspace_patch", "mutation_baseline", "thread_checkout"}
+
+
+def test_thread_worktree_surface_is_indexed_and_typed():
+    """T3 (X9/R10): the branch/merge/remove/diff routes are OWNER surfaces.
+
+    Three claims, because each has already been broken once somewhere in this
+    codebase: the routes are in the contract index (a route the index does not
+    know is a route no client contract covers), the thread diff reuses the TASK
+    diff envelope field-for-field (a second envelope is a second truth about the
+    same patch), and none of it is reachable as an LLM-callable tool — these
+    gestures rewrite the owner's own folder and history.
+    """
+    from ouroboros.gateway.contracts import (
+        HTTP_ENDPOINTS,
+        TaskDiffResponse,
+        ThreadDiffResponse,
+        ThreadWorktreeResponse,
+    )
+
+    for route in (
+        "GET /api/projects/{project_id}/threads/{thread_id}/branch-bases",
+        "POST /api/projects/{project_id}/threads/{thread_id}/branch-off",
+        "POST /api/projects/{project_id}/threads/{thread_id}/merge-back",
+        "GET /api/projects/{project_id}/threads/{thread_id}/worktree",
+        "POST /api/projects/{project_id}/threads/{thread_id}/worktree/remove",
+        "GET /api/projects/{project_id}/threads/{thread_id}/diff",
+    ):
+        assert route in HTTP_ENDPOINTS, route
+    # The thread diff IS the task diff envelope plus the thread's identity — and
+    # its BRANCH, which the Changes header shows beside the thread's name and
+    # learns from the diff rather than from whoever opened the screen (T3R-12).
+    assert set(TaskDiffResponse.__annotations__) < set(ThreadDiffResponse.__annotations__)
+    assert set(ThreadDiffResponse.__annotations__) - set(TaskDiffResponse.__annotations__) == {
+        "project_id", "thread_id", "branch",
+    }
+    # Additive frozen surfaces: no field of either is ever required (§11.1).
+    assert ThreadDiffResponse.__required_keys__ == frozenset()
+    assert ThreadWorktreeResponse.__required_keys__ == frozenset()
+    # Owner surfaces only — never an agent tool. Grepping the tool package is
+    # the honest check: a tool is registered by a `get_tools()` entry, so a new
+    # module could add one without any registry constant changing.
+    import pathlib as _pathlib
+
+    tools_dir = _pathlib.Path(__file__).resolve().parent.parent / "ouroboros" / "tools"
+    for source in tools_dir.rglob("*.py"):
+        text = source.read_text(encoding="utf-8", errors="replace")
+        for forbidden in ("branch_off_thread", "merge_back_thread", "provision_thread_worktree"):
+            assert forbidden not in text, f"{source.name} exposes {forbidden} to the agent"
 
 
 def test_photo_outbound_matches_message_bus_sends():
@@ -1407,3 +1456,32 @@ def test_owner_scope_review_floor_deprecation_notice_crosses_the_wire(tmp_path, 
     assert "context mode" in notice.lower(), "the notice must name the control that now decides"
     # The owner's customization is stored even though it is enforcement-inert.
     assert json.loads(settings_path.read_text(encoding="utf-8"))["OUROBOROS_SCOPE_REVIEW_FLOOR"] == "advisory"
+
+
+def test_every_frozen_endpoint_has_a_row_in_the_ARCHITECTURE_route_table():
+    """T3R-7. `HTTP_ENDPOINTS` is the frozen index; §11.3 requires the doc to name
+    every frozen surface. Nine thread routes landed in the index with no row in
+    the route table, which is how a route table stops being a map and becomes a
+    list of the routes somebody remembered.
+
+    Checked programmatically rather than by eye, so it cannot drift again: the
+    doc's rows are parsed and compared to the index itself.
+    """
+    import pathlib
+    import re
+
+    from ouroboros.gateway.contracts import HTTP_ENDPOINTS
+
+    doc = (pathlib.Path(__file__).resolve().parent.parent / "docs" / "ARCHITECTURE.md")
+    rows = {
+        f"{m.group(1)} {m.group(2)}"
+        for m in re.finditer(
+            r"^\|\s*(GET|POST|PUT|DELETE|PATCH|ANY|WS)\s*\|\s*`([^`]+)`",
+            doc.read_text(encoding="utf-8"),
+            re.M,
+        )
+    }
+
+    missing = sorted(endpoint for endpoint in HTTP_ENDPOINTS if endpoint not in rows)
+
+    assert missing == [], f"routes in HTTP_ENDPOINTS with no ARCHITECTURE row: {missing}"

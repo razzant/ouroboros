@@ -372,10 +372,67 @@ class ProjectCreateRequest(TypedDict, total=False):
     with_workspace: bool
 
 
+class WorkspaceGitInitDecision(TypedDict, total=False):
+    """The typed ``git_init_required`` OFFER (A12), not an error report.
+
+    Raised by ``workspace_admission`` BEFORE a file task is queued in a folder that
+    is safe and valid but not tracked by git. It reaches a CLIENT as an object on
+    exactly ONE surface: the ``POST /api/tasks`` 400 body (``error_code`` +
+    ``decision``). The project-room promote path carries the same object in its
+    supervisor-internal outcome dict, but the halted task's chat message and
+    persisted result carry the reason code and this object's ``message``, not its
+    fields. ``enables`` is the plain-language answer to "what does saying yes buy me"
+    — diff, rollback, branching — and ``offer`` names the operation the owner's yes
+    calls (``POST /api/projects/{project_id}/init-git``). Nothing is ever
+    initialised without that answer.
+    """
+
+    decision: Literal["git_init_required"]
+    workspace_root: str
+    project_id: str
+    offer: Literal["init_git"]
+    enables: List[str]
+    message: str
+
+
+class ThreadEntry(TypedDict, total=False):
+    """One THREAD of a project — an empty chat sharing the project's folder.
+
+    Thread ``0`` is the project's own chat (its ``chat_id`` equals the
+    project's) and is SYNTHESIZED at read time from the project row, never
+    stored; the project's top-level ``chat_id`` stays its compatibility alias.
+    ``fork_of_chat_id`` + ``fork_before_ts`` are a CURSOR into the source
+    thread's rows (rows are never copied) and appear together or not at all.
+
+    ``lifecycle``/``archived_at``/``delete_error`` are D4's thread lifecycle, and
+    they were SHIPPED on ``/api/state``, ``GET /api/projects`` and every
+    ``ThreadResponse`` before they were declared here: the canonical projection
+    normalises all three onto every row, and the client already reads
+    ``thread.lifecycle`` to decide what a thread menu may offer. Field-level
+    parity passed because both sides were equally wrong, which is the one failure
+    mode a mirror cannot catch on its own — so the projection's own key set is
+    pinned against this class as well. Thread #0 mirrors the PROJECT's lifecycle
+    (it IS the project) and never carries an ``archived_at`` of its own.
+    """
+
+    id: int
+    chat_id: int
+    name: str
+    created_at: str
+    visible_revision: int
+    fork_of_chat_id: int
+    fork_before_ts: str
+    lifecycle: Literal["active", "archived", "deleting", "tombstoned"]
+    archived_at: str
+    delete_error: str
+
+
 class ProjectEntry(TypedDict, total=False):
     """A registry project row as returned by the projects endpoints. ``provenance``
     (attached|cloned|genesis|none) and ``clone_url`` are historical facts;
-    operational git data is always read live from ``.git``."""
+    operational git data is always read live from ``.git``. ``threads`` is the
+    canonical projection (thread #0 first); a client that ignores it keeps
+    working off ``chat_id`` exactly as before."""
 
     id: str
     name: str
@@ -391,15 +448,372 @@ class ProjectEntry(TypedDict, total=False):
     routing_generation: int
     visible_revision: int
     delete_error: str
+    threads: List[ThreadEntry]
 
 
-class ProjectDeleteResponse(TypedDict):
+class ProjectInitGitResponse(TypedDict, total=False):
+    """``POST /api/projects/{project_id}/init-git`` — the owner's YES to the typed
+    ``git_init_required`` offer, and the ONLY caller of the attach snapshot besides
+    the create dialog's ``init_git``. ``init_git_skipped`` names credential-shaped
+    files deliberately left OUT of the snapshot and still untracked (disclosed
+    omission, P1); it is absent when nothing was skipped.
+    """
+
+    project: ProjectEntry
+    working_dir: str
+    init_git_skipped: List[str]
+
+
+class ProjectFromTaskResponse(TypedDict, total=False):
+    """``POST /api/projects/from-task`` — the "turn this task into a project" reply.
+
+    ``working_dir`` is the folder the new project ADOPTED from the converted task
+    (A11: a project born from work already happening somewhere inherits that place),
+    and ``working_dir_error`` is the disclosure when it could not: the folder has
+    moved, overlaps the Ouroboros roots, sits inside another repository, or is one
+    of Ouroboros's own ephemeral checkouts. The conversion still succeeds — making
+    the project is its job — which is exactly why the disclosure has to be typed.
+    Untyped it was free text no contract knew about and no client read, so a
+    conversion that quietly produced a PLACELESS project looked identical to one
+    that worked, and the next task in that project provisioned a different empty
+    tree somewhere else.
+    """
+
+    project: ProjectEntry
+    binding: Dict[str, Any]
+    working_dir: str
+    working_dir_error: str
+
+
+class ThreadCreateRequest(TypedDict, total=False):
+    """POST /api/projects/{project_id}/threads body. ``name`` is optional — an
+    unnamed thread gets a neutral default, with no model call."""
+
+    name: str
+
+
+class ThreadUpdateRequest(TypedDict):
+    """POST /api/projects/{project_id}/threads/{thread_id}/update body."""
+
+    name: str
+
+
+class ThreadResponse(TypedDict):
+    """Envelope of every thread lifecycle route (create / update / fork).
+
+    These are OWNER surfaces reached through the gateway, deliberately not
+    LLM-callable tools. The affected thread's ``chat_id`` also rides the
+    `projects_changed` broadcast, so an open client adds it to its known-chat
+    set before any live frame for it can arrive.
+    """
+
+    project_id: str
+    thread: ThreadEntry
+
+
+class ThreadLocation(TypedDict, total=False):
+    """WHERE a thread works — DERIVED, never stored (A7).
+
+    ``where`` is ``project_folder`` or ``worktree``, and it is the answer to one
+    question: does a durable worktree exist for this thread? There is no toggle
+    to read, so no client can be shown a location the filesystem disagrees with.
+    The remaining fields are present only in the ``worktree`` case.
+    """
+
+    where: str
+    path: str
+    branch: str
+    base_sha: str
+    created_at: str
+
+
+class ThreadBranchBase(TypedDict, total=False):
+    """One base the owner may branch off from (A8).
+
+    ``kind`` is ``branch``, ``tag`` or ``snapshot``. The snapshot entry — "exactly
+    as it is now" — is not a git ref: ``creates_commit`` discloses whether
+    choosing it would make a snapshot commit (a dirty tree) or simply reuse HEAD
+    (a clean one). A commit-ish the owner types is accepted by the branch-off
+    route and is deliberately not enumerated here; listing every commit is not an
+    offer.
+    """
+
+    ref: str
+    kind: str
+    label: str
+    dirty: bool
+    creates_commit: bool
+
+
+class ThreadQueueNotice(TypedDict, total=False):
+    """Would a task started in this thread WAIT, and what should be said (A14)?
+
+    ``queued`` is the fact; ``message`` is the ONE sentence every surface uses,
+    and it says the TRUE thing — the task is queued behind the running one and
+    will run when it finishes. It is not rejected. Earlier copy claimed rejection,
+    which is the kind of wrong that teaches an owner to stop trusting the queue.
+    ``remedy`` is ``branch_off`` only where branching would actually help: a
+    thread already working in its own checkout is waiting on ITSELF, and offering
+    to branch again there would be advice that does not work.
+    """
+
+    queued: bool
+    reason: str
+    message: str
+    remedy: str
+
+
+class ThreadBranchBasesResponse(TypedDict, total=False):
+    """``GET /api/projects/{project_id}/threads/{thread_id}/branch-bases``."""
+
+    project_id: str
+    thread_id: int
+    current_branch: str
+    bases: List[ThreadBranchBase]
+    snapshot: ThreadBranchBase
+    location: ThreadLocation
+    queue_notice: ThreadQueueNotice
+    ok: bool
+    reason: str
+    message: str
+
+
+class ThreadBranchOffRequest(TypedDict, total=False):
+    """Branch-off body. ``base_ref`` is a branch, a tag, any commit-ish, or the
+    ``@snapshot`` sentinel meaning "exactly as it is now"; empty means HEAD."""
+
+    base_ref: str
+
+
+class ThreadMergeBackRequest(TypedDict, total=False):
+    """Merge-back body, entirely optional — a bare POST is the ordinary call.
+
+    ``acknowledge_checkout_dirty`` IS the owner's consent to merge while the
+    thread's checkout still holds uncommitted work: that work does not travel
+    with the merge, so the default refuses (``checkout_dirty``) and the files are
+    named again on the success. The same shape as the removal's
+    ``acknowledge_unmerged`` — one consent idiom, not two."""
+
+    acknowledge_checkout_dirty: bool
+
+
+class ThreadWorktreeRemoveRequest(TypedDict, total=False):
+    """Worktree-removal body. ``acknowledge_unmerged`` IS the owner's consent
+    (A10): a checkout holding unmerged commits or uncommitted edits refuses
+    without it, and there is no other path into the removal."""
+
+    acknowledge_unmerged: bool
+
+
+class ThreadDeleteRequest(TypedDict, total=False):
+    """Thread-delete body, entirely optional — a bare POST is the ordinary call.
+
+    ``acknowledge_unmerged`` IS the owner's consent to delete a thread whose
+    checkout still holds ignored or untracked files (a ``node_modules/``, a
+    ``build.log``): the default answers ``checkout_holds_rebuildable_files``,
+    naming exactly what is there, and this flag is the yes. The SAME name the
+    removal route uses, deliberately — one consent idiom, not three.
+
+    It is NOT an override for work at risk. Unmerged commits, changes to tracked
+    files and an unreadable checkout refuse with ``checkout_holds_work`` whatever
+    this says, and are answered through the explicit removal route."""
+
+    acknowledge_unmerged: bool
+
+
+class ThreadWorktreeResponse(TypedDict, total=False):
+    """ONE envelope for every branch/merge/remove answer, success or refusal.
+
+    ``ok`` is the only field a client must read first. A refusal carries a TYPED
+    ``reason`` plus owner-facing ``message`` copy and whatever evidence that
+    reason has: ``conflicts`` for a stopped merge, ``dirty_files`` for a local
+    tree that must be settled first, ``inspection`` for a removal that would
+    destroy work, ``decision`` for T2's ``git_init_required`` offer. Sharing one
+    envelope is deliberate — three near-identical shapes would drift, and the
+    client renders refusals the same way whichever operation produced them.
+
+    ``worktree_kept`` is stated explicitly on a successful merge because A10 turns
+    on it: merging back never removes the checkout.
+
+    ``dirty_files_total`` is the TRUE size of whichever bounded file listing this
+    envelope carries — ``dirty_files`` on a refusal, ``checkout_left_behind`` on
+    a merge that acknowledged work staying put, and the same number the
+    ``inspection`` sub-object states. The lists are capped so an envelope cannot
+    grow without bound; the count never is, because every owner-facing sentence
+    that names a magnitude names this one. Counting the slice told an owner "200
+    uncommitted file changes" about 800 of them, in the sentence immediately
+    before an irreversible removal.
+    """
+
+    ok: bool
+    reason: str
+    message: str
+    project_id: str
+    thread_id: int
+    location: ThreadLocation
+    branch: str
+    path: str
+    base_ref: str
+    base_sha: str
+    working_dir: str
+    decision: WorkspaceGitInitDecision
+    snapshot_commit: Dict[str, Any]
+    conflicts: List[str]
+    dirty_files: List[str]
+    #: Present whenever a bounded file listing is — the count the copy states.
+    dirty_files_total: int
+    merged: bool
+    head_before: str
+    head_after: str
+    worktree_kept: bool
+    removed: bool
+    #: A CLEAN removal deletes the ``thread/<name>`` branch too, so the same
+    #: thread can branch off again; a branch that SURVIVED reports why, because it
+    #: is exactly what the next branch-off would refuse on.
+    branch_removed: bool
+    branch_kept_reason: str
+    #: ``checkout_head_off_branch``: the branch the thread's checkout is actually
+    #: standing on, which is not the one being merged.
+    checkout_branch: str
+    #: ``merge_abort_failed``: a merge that could neither complete NOR be undone
+    #: left the project folder mid-merge, and says so rather than claiming the
+    #: folder was left as it was.
+    folder_left_mid_merge: bool
+    abort_detail: str
+    #: This refusal has an owner-answerable flag, so the owner is never stuck with
+    #: only "no": ``checkout_dirty`` is answered by ``acknowledge_checkout_dirty``
+    #: in the merge-back body, and ``unmerged_work`` by ``acknowledge_unmerged`` in
+    #: the removal body. Documenting it for ``checkout_dirty`` alone was how the
+    #: removal route came to build its refusal without the field at all, while its
+    #: own sentence ended "or confirm you want it gone" and the client had no way
+    #: to (I9). ``checkout_head_off_branch`` deliberately does NOT set it: that is
+    #: not work left behind, it is a merge that would do nothing while reporting
+    #: success.
+    acknowledgeable: bool
+    #: Named on a SUCCESSFUL merge: what the checkout still holds and the merge
+    #: did not bring. Only ever non-empty when the owner acknowledged it —
+    #: acknowledging is not the same as forgetting.
+    checkout_left_behind: List[str]
+    inspection: Dict[str, Any]
+    error: str
+
+
+class ThreadDiffResponse(TypedDict, total=False):
+    """``GET /api/projects/{project_id}/threads/{thread_id}/diff`` (A13/X9).
+
+    The SAME envelope as ``TaskDiffResponse`` — same statuses, same no-clipping
+    rule, same ``patch``/``patch_sha256`` contract — plus the thread identity,
+    because Changes is otherwise task-centric and its per-task route structurally
+    cannot answer for a persistent checkout that has no task. ``source`` is always
+    ``thread_checkout``; a thread that is not branched off answers ``blocked``
+    with the typed ``thread_not_branched`` blocker rather than an empty diff,
+    because "works in the project folder" is not "changed nothing".
+    """
+
+    project_id: str
+    thread_id: int
+    status: str
+    source: str
+    base_commit: str
+    head_advanced: bool
+    blockers: list[str]
+    patch: str
+    patch_sha256: str
+    #: The checkout's branch, on EVERY answer including the refusals: the Changes
+    #: header shows "thread · branch", and it learns the branch from the diff
+    #: rather than requiring whoever opened the screen to already know it.
+    branch: str
+    error: str
+
+
+class ThreadLifecycleResponse(TypedDict, total=False):
+    """Archive / restore / delete answer (D4 with X10's admission fencing).
+
+    ``lifecycle`` is ``active | archived | deleting | tombstoned``. Delete answers
+    ``deleting``, not ``tombstoned``: the fence is up and routing into the thread
+    is already closed, but its tasks are still being cancelled and the thread
+    stays VISIBLE until they quiesce — the same shape a deleting PROJECT has.
+
+    The three disclosures ride the response rather than living in a docstring no
+    owner reads. ``journal_rows_retained`` is always true and says so: the chat
+    journal is shared by every chat and nothing here rewrites it, so a deleted
+    thread's rows physically remain and claiming erasure would be a lie.
+    ``worktree_kept`` says the thread still has a checkout after the operation.
+    ``worktree_removed`` (delete) says the checkout went with the thread, naming
+    the ``branch`` and whether it went too: a tombstoned thread is invisible on
+    every surface and branch/merge refuse it, so a checkout left behind is a
+    folder and a branch that A10's explicit removal can no longer reach.
+
+    Two refusals guard that, and they are NOT the same answer. Work at risk —
+    unmerged commits, changes to TRACKED files, an unreadable checkout — refuses
+    with ``checkout_holds_work`` and names the removal route; there is no flag
+    that overrides it. A checkout holding only ignored or untracked content
+    answers ``checkout_holds_rebuildable_files`` with ``acknowledgeable`` true,
+    which is a question the owner answers by re-sending with
+    ``acknowledge_unmerged`` (``ThreadDeleteRequest``). Both carry the
+    ``inspection``: nothing here may destroy anything the owner has not been shown.
+    ``visible_until_terminal`` (archive) says the thread was archived while a
+    task was still running, so it stays on screen until that task finishes rather
+    than hiding live output.
+    """
+
+    ok: bool
+    reason: str
+    message: str
+    project_id: str
+    thread_id: int
+    chat_id: int
+    lifecycle: str
+    archived_at: str
+    visible_until_terminal: bool
+    journal_rows_retained: bool
+    worktree_kept: bool
+    worktree_removed: bool
+    branch: str
+    branch_removed: bool
+    #: A refusal the owner can ANSWER (``checkout_holds_rebuildable_files``), in
+    #: the same field name the merge-back envelope uses for ``checkout_dirty``.
+    #: ``checkout_holds_work`` deliberately never sets it: that is not a question.
+    acknowledgeable: bool
+    inspection: Dict[str, Any]
+    location: ThreadLocation
+
+
+class ProjectDeleteResponse(TypedDict, total=False):
     """POST /api/projects/{project_id}/delete — fence, quiesce, and tombstone;
-    the immutable binding, working folder, history, and memory are preserved."""
+    the immutable binding, working folder, history, and memory are preserved.
+
+    Its threads' CHECKOUTS are not (I1). A tombstoned project is invisible on
+    every surface and branch/merge refuse a thread that is not live, so a checkout
+    left behind is a folder and a ``thread/*`` branch nothing can reach — it goes
+    WITH the project and is disclosed here rather than removed silently.
+    ``worktrees_pending`` names the ones a task was still writing in, which the
+    cancellation worker takes once the project quiesces; ``ok`` stays true because
+    the deletion did start.
+
+    A checkout holding work that cannot be REBUILT refuses instead: ``ok: false``,
+    ``reason: "threads_hold_checkouts"`` under a 409, carrying the sentence a
+    single thread's deletion gives for the same fact and ``threads`` naming each
+    one. Same envelope shape as every other typed refusal, so a client reads
+    ``ok`` first here as everywhere else.
+    """
 
     ok: bool
     project_id: str
     folder_untouched: bool
+    #: Thread ids whose checkout was removed with the project.
+    worktrees_removed: List[int]
+    #: ``thread/<name>`` branches deleted along with those checkouts.
+    branches_removed: List[str]
+    #: ``[{thread_id, path, branch, reason}]`` — a checkout that could not be
+    #: taken yet. ``path``/``branch`` are named because the cancellation worker
+    #: may not manage to take it either, and a tombstoned project has no surface
+    #: left that could point the owner at the folder.
+    worktrees_pending: List[Dict[str, Any]]
+    reason: str
+    message: str
+    #: On ``threads_hold_checkouts``: ``[{thread_id, path, branch, inspection}]``.
+    threads: List[Dict[str, Any]]
 
 
 class FsDirsEntry(TypedDict):
@@ -603,7 +1017,13 @@ class UiPreferencesResponse(TypedDict):
     nested_subagents_expanded: bool
     sidebar_width: int  # px; 0 = CSS default (resizable side sections, v6.33.0)
     project_panel_width: int  # px; 0 = CSS default
-    project_seen_revision: dict[str, int]  # monotonic paint ACK per active Project
+    # BREAKING since project threads (T1): the monotonic paint ACK is NESTED per
+    # thread — {project_id: {thread_id: revision}}. A stored or posted FLAT
+    # {project_id: revision} is accepted for one minor and normalized to
+    # {project_id: {"0": revision}} (thread #0 IS the project's original chat).
+    project_seen_revision: dict[str, dict[str, int]]
+    project_order: list[str]  # owner drag-and-drop order; unlisted projects keep the default order
+    project_thread_order: dict[str, list[str]]  # owner drag-and-drop thread order per project
     project_last_viewed: dict[str, str]  # deprecated one-minor accepted no-op
     project_hidden: dict[str, bool]  # deprecated one-minor accepted no-op
 
@@ -935,6 +1355,19 @@ HTTP_ENDPOINTS: tuple[str, ...] = (
     "POST /api/projects/from-task",
     "POST /api/projects/{project_id}/update",
     "POST /api/projects/{project_id}/delete",
+    "POST /api/projects/{project_id}/init-git",
+    "POST /api/projects/{project_id}/threads",
+    "POST /api/projects/{project_id}/threads/{thread_id}/update",
+    "POST /api/projects/{project_id}/threads/{thread_id}/fork",
+    "GET /api/projects/{project_id}/threads/{thread_id}/branch-bases",
+    "POST /api/projects/{project_id}/threads/{thread_id}/branch-off",
+    "POST /api/projects/{project_id}/threads/{thread_id}/merge-back",
+    "GET /api/projects/{project_id}/threads/{thread_id}/worktree",
+    "POST /api/projects/{project_id}/threads/{thread_id}/worktree/remove",
+    "GET /api/projects/{project_id}/threads/{thread_id}/diff",
+    "POST /api/projects/{project_id}/threads/{thread_id}/archive",
+    "POST /api/projects/{project_id}/threads/{thread_id}/restore",
+    "POST /api/projects/{project_id}/threads/{thread_id}/delete",
     "GET /api/fs/dirs",
     "GET /api/chat/history",
     "GET /api/logs/{name}",
@@ -1038,6 +1471,23 @@ __all__ = [
     "UpdateStatusReadyOutbound",
     "ProjectCreateRequest",
     "ProjectEntry",
+    "ProjectFromTaskResponse",
+    "ProjectInitGitResponse",
+    "WorkspaceGitInitDecision",
+    "ThreadCreateRequest",
+    "ThreadBranchBase",
+    "ThreadBranchBasesResponse",
+    "ThreadBranchOffRequest",
+    "ThreadDiffResponse",
+    "ThreadEntry",
+    "ThreadLifecycleResponse",
+    "ThreadLocation",
+    "ThreadQueueNotice",
+    "ThreadMergeBackRequest",
+    "ThreadWorktreeRemoveRequest",
+    "ThreadWorktreeResponse",
+    "ThreadResponse",
+    "ThreadUpdateRequest",
     "ProjectDeleteResponse",
     "FsDirsEntry",
     "FsDirsResponse",

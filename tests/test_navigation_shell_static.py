@@ -119,11 +119,20 @@ def test_project_panel_composer_and_welcome_contracts():
     # own formulas in web/onboarding.css).
     assert "backdrop-filter" not in css.split("*/", 1)[1]
     assert "background: var(--bg-panel);" in css
-    assert 'id="project-panel-backdrop" class="project-panel-backdrop"' in _read("web/index.html")
-    assert ".project-panel-backdrop" in css
-    assert "transition: transform 180ms ease, opacity 180ms ease;" in css
-    assert ".project-panel.open" in css
-    assert "left: var(--sidebar-width);" in css  # sidebar stays clickable under backdrop
+    # Project threads (T1): the right-side project panel is RETIRED — a thread
+    # opens in the CENTRE stage instead, so the panel aside, its backdrop and
+    # their slide-in transition must be gone rather than merely unused. The
+    # backdrop was the mobile failure this phase fixes: a second full-screen
+    # surface stacked over the content area with its own close affordance.
+    html = _read("web/index.html")
+    assert "project-panel-backdrop" not in html
+    assert 'id="project-panel"' not in html
+    assert ".project-panel-backdrop" not in css
+    assert ".project-panel.open" not in css
+    assert "body.project-panel-open" not in css
+    # The lean bar/title/close chrome SURVIVES: the centre stage reuses it.
+    assert ".project-panel-bar" in css
+    assert ".thread-stage-bar" in css
     assert ".chat-header-actions {\n        display: none;" not in css
     # Gateway Boundary: chat.js consumes the endpoint via the api_client wrapper,
     # and the raw route lives in api_client.js (not a raw fetch in chat.js).
@@ -203,7 +212,8 @@ def test_single_api_state_poll_owner():
     assert "read: readStateSnapshot," in app_js
     # Live GETTERS: the cadence must follow navigation and tab visibility, so a value
     # captured once at startup would silently freeze the interval.
-    assert "activePage: () => state.activePage," in app_js
+    # An open project THREAD takes the chat cadence: it IS a chat surface.
+    assert "activePage: () => (state.activePage === 'thread' ? 'chat' : state.activePage)," in app_js
     assert "hidden: () => document.hidden," in app_js
     assert "async function readStateSnapshot()" in app_js
     # The cadence and the pause are the CORE's decisions now — pinned where they live.
@@ -240,7 +250,11 @@ def test_right_panel_state_machine_and_stream_anchors():
     assert "function registerRightPanel(kind, handlers)" in app_js
     assert "async function openRightPanel(kind, opts = {})" in app_js
     assert "function closeRightPanel({ sync = true } = {})" in app_js
-    assert "navState.panelKind = 'project';" in app_js
+    # `project` is no longer a right-panel kind — a thread owns the centre — but
+    # the NAME stays reserved so a module cannot re-register the retired panel.
+    assert "navState.panelKind = 'project';" not in app_js
+    assert "if (!name || name === 'project') return () => {};" in app_js
+    assert "const threadStage = createThreadStage({" in app_js
     assert "--inspector-width: 320px;" in css
     # Append-only ownership anchors for the parallel streams.
     assert "/* [anchor:phase-B] right-panel registrations */" in app_js
@@ -307,3 +321,27 @@ def test_inline_nav_glyphs_byte_match_the_canonical_page_icons():
         )
         checked += 1
     assert checked == 6
+
+
+def test_an_unavailable_thread_menu_row_is_greyed_not_only_inert():
+    """T4 vision pass: `disabled` in the DOM is not a visible state.
+
+    The thread menu greys an action it cannot offer and keeps its reason on the
+    row (rather than omitting it, which teaches nothing). `.project-row-menu
+    button` had no `:disabled` rule at all, so `Merge back` on a thread with no
+    checkout rendered at full contrast with `cursor: pointer` and a live hover —
+    indistinguishable from `Fork` beside it, with the reason only in a tooltip.
+    Every DOM assertion was green; only the rendered menu showed it.
+
+    Pinned here because the failure is invisible to the Playwright DOM checks
+    that already cover this menu: `[disabled]` was — and still is — present.
+    """
+    css = _read("web/style.css")
+    assert ".project-row-menu button:disabled {" in css
+    disabled_rule = css.split(".project-row-menu button:disabled {", 1)[1].split("}", 1)[0]
+    assert "opacity" in disabled_rule
+    assert "cursor: not-allowed" in disabled_rule
+    # ...and the hover must not light a row the owner cannot use.
+    assert ".project-row-menu button:disabled:hover {" in css
+    hover_rule = css.split(".project-row-menu button:disabled:hover {", 1)[1].split("}", 1)[0]
+    assert "background: transparent" in hover_rule
