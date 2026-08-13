@@ -1,6 +1,7 @@
 # Ouroboros
 
 [![GitHub stars](https://img.shields.io/github/stars/razzant/ouroboros?style=flat&logo=github)](https://github.com/razzant/ouroboros/stargazers)
+[![GitHub Trending: highest observed #9 in Python weekly, August 2026](assets/github-trending.svg)](#recognition)
 [![Downloads](https://img.shields.io/endpoint?url=https%3A%2F%2Fraw.githubusercontent.com%2Frazzant%2Fouroboros%2Fbadges%2Fdownloads.json)](https://github.com/razzant/ouroboros/releases)
 [![Website](https://img.shields.io/badge/website-ouroboros--agent.ai-c93545.svg)](https://ouroboros-agent.ai/)
 [![Technical report](https://img.shields.io/badge/technical_report-arXiv%3A2608.08311-b31b1b.svg)](https://arxiv.org/abs/2608.08311)
@@ -30,6 +31,10 @@ The charts below are self-reported results on Terminal-Bench 2.1, OSWorld-Verifi
   <a href="https://ouroboros-agent.ai/benchmarks/"><img src="assets/bench-osworld.svg" width="375" alt="OSWorld-Verified: Ouroboros against the public leaderboard, including the matched Claude Sonnet-4.6 pair"></a>
   <a href="https://ouroboros-agent.ai/benchmarks/"><img src="assets/bench-cl-bench.svg" width="375" alt="CL-Bench: Ouroboros against in-context learning baselines, Claude Code, and Codex on matched models"></a>
 </p>
+
+## Recognition
+
+In August 2026, Ouroboros reached the highest independently observed rank of **#9** on GitHub's weekly Python Trending list. The result is preserved in an [ordered archive snapshot from August 4](https://github.com/oslook/github-trending/blob/1d61d20a46f66a9590286bf23a8ce8db99be3acf/2026-08-04/python_weekly_trending.json), an [independent archive snapshot from August 10](https://github.com/findmio/github-trending-api/blob/664b2aac5ce7c10fa31fa33b6a7b16a50b04ef44/raw/archives/2026-08-10/Python.week.json), and a [contemporary screenshot of GitHub Trending](https://t.me/abstractDL/437). Because GitHub Trending changes throughout the day, this is an observed historical rank rather than a claim of an official all-time maximum.
 
 ## Install
 

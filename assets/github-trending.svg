@@ -1,0 +1,23 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="280" height="20" role="img" aria-label="GitHub Trending: number 9 in Python weekly, August 2026">
+  <title>GitHub Trending: #9 in Python weekly, August 2026</title>
+  <linearGradient id="s" x2="0" y2="100%">
+    <stop offset="0" stop-color="#fff" stop-opacity=".7"/>
+    <stop offset=".1" stop-color="#aaa" stop-opacity=".1"/>
+    <stop offset=".9" stop-color="#000" stop-opacity=".3"/>
+    <stop offset="1" stop-color="#000" stop-opacity=".5"/>
+  </linearGradient>
+  <clipPath id="r">
+    <rect width="280" height="20" rx="3"/>
+  </clipPath>
+  <g clip-path="url(#r)">
+    <rect width="103" height="20" fill="#555"/>
+    <rect x="103" width="177" height="20" fill="#d4af37"/>
+    <rect width="280" height="20" fill="url(#s)"/>
+  </g>
+  <g fill="#fff" text-anchor="middle" font-family="Verdana,DejaVu Sans,sans-serif" font-size="11">
+    <text x="52.5" y="15" fill="#010101" fill-opacity=".3">GitHub Trending</text>
+    <text x="52.5" y="14">GitHub Trending</text>
+    <text x="191.5" y="15" fill="#010101" fill-opacity=".3">#9 Python weekly · Aug 2026</text>
+    <text x="191.5" y="14">#9 Python weekly · Aug 2026</text>
+  </g>
+</svg>
