@@ -1,7 +1,8 @@
 # Ouroboros
 
+<a href="#recognition"><img src="assets/github-trending.svg" width="250" height="55" alt="Highest independently observed rank: #9 on GitHub's weekly Python Trending list, August 2026"></a>
+
 [![GitHub stars](https://img.shields.io/github/stars/razzant/ouroboros?style=flat&logo=github)](https://github.com/razzant/ouroboros/stargazers)
-[![GitHub Trending: highest observed #9 in Python weekly, August 2026](assets/github-trending.svg)](#recognition)
 [![Downloads](https://img.shields.io/endpoint?url=https%3A%2F%2Fraw.githubusercontent.com%2Frazzant%2Fouroboros%2Fbadges%2Fdownloads.json)](https://github.com/razzant/ouroboros/releases)
 [![Website](https://img.shields.io/badge/website-ouroboros--agent.ai-c93545.svg)](https://ouroboros-agent.ai/)
 [![Technical report](https://img.shields.io/badge/technical_report-arXiv%3A2608.08311-b31b1b.svg)](https://arxiv.org/abs/2608.08311)
