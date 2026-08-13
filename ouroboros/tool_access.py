@@ -216,7 +216,7 @@ _USER_FILES_ALLOWED_DOTNAMES = frozenset({
 _TOP_LEVEL_PRINCIPAL_POLICY: dict[str, set[str]] = {
     "active_workspace": {"read", "list", "search", "write", "edit", "shell", "vcs", "review", "service"},
     "system_repo": {"read", "list", "search", "write", "edit", "shell", "vcs", "review", "service"},
-    "runtime_data": {"read", "list", "write", "edit"},
+    "runtime_data": {"read", "list", "search", "write", "edit"},
     "task_drive": {"read", "list", "write", "edit", "shell", "service"},
     "skill_payload": {"read", "list", "search", "write", "edit", "review", "shell"},
     "artifact_store": {"read", "list", "write", "shell", "service"},
