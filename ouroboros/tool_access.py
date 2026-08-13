@@ -277,7 +277,6 @@ _POLICY: dict[str, dict[str, set[str]]] = {
         **{root: {"read", "list", "search"} for root in _READONLY_RESOURCE_ROOTS},
     },
 }
-
 _SUBAGENT_CAPABILITY_TO_OPERATION: dict[str, Operation] = {
     "write": "write",
     "edit": "edit",
@@ -393,9 +392,10 @@ def decide_tool_access(
     allowed = operation in _POLICY.get(profile, {}).get(root, set())
     if allowed:
         return ToolAccessDecision(True, guard=f"{profile}:{root}:{operation}")
+    allowed_roots = ", ".join(sorted(r for r, ops in _POLICY.get(profile, {}).items() if operation in ops)) or "(none)"
     return ToolAccessDecision(
         False,
-        reason=f"profile={profile} cannot {operation} root={root}",
+        reason=f"profile={profile} cannot {operation} root={root}. Roots your profile can {operation}: {allowed_roots}.",
         guard=f"{profile}:{root}:{operation}",
     )
 
@@ -573,6 +573,7 @@ def filesystem_affordance_map(ctx: Any, *, runtime_mode: str = "") -> dict[str, 
         "profile": profile,
         "writable_roots": writable_roots,
         "readonly_roots": readonly_roots,
+        "searchable_roots": sorted(root for root, ops in policy.items() if "search" in ops),
         # Environment fact, not another policy gate.
         "invisible_roots": sorted(_ALL_ROOTS - set(policy)),
         "root_paths": root_paths,

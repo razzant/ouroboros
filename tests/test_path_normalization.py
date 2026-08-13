@@ -129,7 +129,7 @@ def test_search_code_runtime_data_redundant_prefix_cannot_reach_project_store(tm
         p.mkdir()
     (data / "settings.json").write_text("{}", encoding="utf-8")
     reg = ToolRegistry(repo_dir=system, drive_root=data)
-    # runtime_data `search` is an operator_control (direct-chat) capability.
+    # runtime_data `search` is a top-level managed/operator capability.
     ctx = ToolContext(repo_dir=system, drive_root=data)
     ctx.is_direct_chat = True
     reg.set_context(ctx)

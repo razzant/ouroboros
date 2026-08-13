@@ -1012,7 +1012,7 @@ def _access_or_block(ctx: ToolContext, root: str, operation: str) -> tuple[str, 
     profile = active_tool_profile(ctx)
     decision = decide_tool_access(profile=profile, root=normalized, operation=operation)  # type: ignore[arg-type]
     if not decision.allow:
-        return "", f"⚠️ TOOL_ACCESS_BLOCKED: {str(decision.reason).rstrip('.')}.{_profile_roots_hint(ctx, operation)}"
+        return "", f"⚠️ TOOL_ACCESS_BLOCKED: {str(decision.reason).rstrip('.')}."
     return normalized, ""
 
 

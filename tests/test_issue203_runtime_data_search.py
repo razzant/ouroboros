@@ -1,36 +1,85 @@
-"""Regression test for Issue #203:
-Promoted managed tasks (self_modification profile) must be able to search runtime_data.
-"""
+"""Issue #203: promoted managed tasks can search ordinary runtime data."""
 
-from types import SimpleNamespace
-from ouroboros.tool_access import active_tool_profile, _POLICY, _TOP_LEVEL_PRINCIPAL_POLICY
+from __future__ import annotations
 
+import pytest
 
-def test_top_level_policy_includes_search_for_runtime_data():
-    assert "search" in _TOP_LEVEL_PRINCIPAL_POLICY["runtime_data"]
-    assert "search" in _POLICY["self_modification"]["runtime_data"]
-    assert "search" in _POLICY["workspace_task"]["runtime_data"]
-    assert "search" in _POLICY["external_workspace_task"]["runtime_data"]
+from ouroboros.contracts.task_constraint import TaskConstraint
+from ouroboros.tool_access import active_tool_profile, filesystem_affordance_map
+from ouroboros.tool_capabilities import LOCAL_READONLY_SUBAGENT_MODE
+from ouroboros.tools.registry import ToolContext, ToolRegistry
 
 
-def test_promoted_task_active_profile_resolution():
-    ctx = SimpleNamespace(
-        is_workspace_mode=lambda: False,
-        is_direct_chat=False,
-        task_constraint=None,
+@pytest.mark.parametrize("runtime_mode", ["light", "advanced"])
+def test_promoted_task_can_read_search_read_runtime_data(
+    tmp_path, monkeypatch, runtime_mode,
+):
+    from ouroboros import config
+
+    monkeypatch.setattr(config, "_BOOT_RUNTIME_MODE", runtime_mode, raising=True)
+    repo = tmp_path / "repo"
+    data = tmp_path / "data"
+    logs = data / "logs"
+    repo.mkdir()
+    logs.mkdir(parents=True)
+    marker = "ISSUE_203_RUNTIME_SEARCH_MARKER"
+    (logs / "events.jsonl").write_text(
+        f'{{"event":"before"}}\n{{"event":"{marker}"}}\n',
+        encoding="utf-8",
     )
-    profile = active_tool_profile(ctx)
-    assert profile == "self_modification"
-    assert "search" in _POLICY[profile]["runtime_data"]
 
+    registry = ToolRegistry(repo_dir=repo, drive_root=data)
+    ctx = ToolContext(repo_dir=repo, drive_root=data)
+    registry.set_context(ctx)
 
-def test_workspace_task_active_profile_resolution():
-    ctx = SimpleNamespace(
-        is_workspace_mode=lambda: True,
-        workspace_mode="internal",
-        is_direct_chat=False,
-        task_constraint=None,
+    assert active_tool_profile(ctx) == "self_modification"
+    first_read = registry.execute(
+        "read_file",
+        {"root": "runtime_data", "path": "logs/events.jsonl", "start_line": 1, "max_lines": 1},
     )
-    profile = active_tool_profile(ctx)
-    assert profile == "workspace_task"
-    assert "search" in _POLICY[profile]["runtime_data"]
+    search = registry.execute(
+        "search_code",
+        {"root": "runtime_data", "path": "logs", "query": marker},
+    )
+    second_read = registry.execute(
+        "read_file",
+        {"root": "runtime_data", "path": "logs/events.jsonl", "start_line": 2, "max_lines": 1},
+    )
+
+    assert '"event":"before"' in first_read
+    assert marker in search
+    assert marker in second_read
+
+    affordances = filesystem_affordance_map(ctx, runtime_mode=runtime_mode)
+    assert "runtime_data" in affordances["searchable_roots"]
+    assert "task_drive" not in affordances["searchable_roots"]
+    assert "artifact_store" not in affordances["searchable_roots"]
+
+
+def test_specialized_child_stays_blocked_with_searchable_root_hint(tmp_path):
+    repo = tmp_path / "repo"
+    data = tmp_path / "data"
+    logs = data / "logs"
+    repo.mkdir()
+    logs.mkdir(parents=True)
+    (logs / "events.jsonl").write_text("CHILD_MUST_NOT_FIND\n", encoding="utf-8")
+
+    registry = ToolRegistry(repo_dir=repo, drive_root=data)
+    ctx = ToolContext(
+        repo_dir=repo,
+        drive_root=data,
+        task_constraint=TaskConstraint(mode=LOCAL_READONLY_SUBAGENT_MODE),
+    )
+    registry.set_context(ctx)
+
+    result = registry.execute(
+        "search_code",
+        {"root": "runtime_data", "path": "logs", "query": "CHILD_MUST_NOT_FIND"},
+    )
+
+    assert result.startswith("⚠️ TOOL_ACCESS_BLOCKED"), result
+    assert "CHILD_MUST_NOT_FIND" not in result
+    assert "Roots your profile can search:" in result
+    assert "active_workspace" in result
+    assert "system_repo" in result
+    assert "skill_payload" in result

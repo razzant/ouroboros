@@ -11,7 +11,7 @@ from ouroboros.tools.registry import ToolContext, ToolRegistry
 _EXPECTED_TOP_LEVEL_POLICY = {
     "active_workspace": {"read", "list", "search", "write", "edit", "shell", "vcs", "review", "service"},
     "system_repo": {"read", "list", "search", "write", "edit", "shell", "vcs", "review", "service"},
-    "runtime_data": {"read", "list", "write", "edit"},
+    "runtime_data": {"read", "list", "search", "write", "edit"},
     "task_drive": {"read", "list", "write", "edit", "shell", "service"},
     "skill_payload": {"read", "list", "search", "write", "edit", "review", "shell"},
     "artifact_store": {"read", "list", "write", "shell", "service"},
@@ -35,6 +35,8 @@ def test_shared_top_level_principal_does_not_widen_specialized_profiles():
     assert "shell" not in _POLICY["local_readonly_subagent"]["skill_payload"]
     assert "shell" not in _POLICY["skill_repair"]["skill_payload"]
     assert "skill_payload" not in _POLICY["acting_subagent"]
+    for profile in ("local_readonly_subagent", "skill_repair", "acting_subagent"):
+        assert "search" not in _POLICY[profile]["runtime_data"]
     assert "delegate" in _POLICY["operator_control"]["active_workspace"]
 
 
