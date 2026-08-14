@@ -1,6 +1,6 @@
 # Ouroboros
 
-<a href="#recognition"><img src="assets/github-trending.svg" width="250" height="55" alt="Highest independently observed rank: #9 on GitHub's weekly Python Trending list, August 2026"></a>
+<a href="https://github.com/oslook/github-trending/blob/1d61d20a46f66a9590286bf23a8ce8db99be3acf/2026-08-04/python_weekly_trending.json"><img src="assets/github-trending.svg" width="250" height="55" alt="GitHub Trending: #9 Python weekly, August 2026"></a>
 
 [![GitHub stars](https://img.shields.io/github/stars/razzant/ouroboros?style=flat&logo=github)](https://github.com/razzant/ouroboros/stargazers)
 [![Downloads](https://img.shields.io/endpoint?url=https%3A%2F%2Fraw.githubusercontent.com%2Frazzant%2Fouroboros%2Fbadges%2Fdownloads.json)](https://github.com/razzant/ouroboros/releases)
@@ -32,10 +32,6 @@ The charts below are self-reported results on Terminal-Bench 2.1, OSWorld-Verifi
   <a href="https://ouroboros-agent.ai/benchmarks/"><img src="assets/bench-osworld.svg" width="375" alt="OSWorld-Verified: Ouroboros against the public leaderboard, including the matched Claude Sonnet-4.6 pair"></a>
   <a href="https://ouroboros-agent.ai/benchmarks/"><img src="assets/bench-cl-bench.svg" width="375" alt="CL-Bench: Ouroboros against in-context learning baselines, Claude Code, and Codex on matched models"></a>
 </p>
-
-## Recognition
-
-In August 2026, Ouroboros reached the highest independently observed rank of **#9** on GitHub's weekly Python Trending list. The result is preserved in an [ordered archive snapshot from August 4](https://github.com/oslook/github-trending/blob/1d61d20a46f66a9590286bf23a8ce8db99be3acf/2026-08-04/python_weekly_trending.json), an [independent archive snapshot from August 10](https://github.com/findmio/github-trending-api/blob/664b2aac5ce7c10fa31fa33b6a7b16a50b04ef44/raw/archives/2026-08-10/Python.week.json), and a [contemporary screenshot of GitHub Trending](https://t.me/abstractDL/437). Because GitHub Trending changes throughout the day, this is an observed historical rank rather than a claim of an official all-time maximum.
 
 ## Install
 

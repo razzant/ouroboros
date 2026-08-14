@@ -1,6 +1,6 @@
 <svg xmlns="http://www.w3.org/2000/svg" width="250" height="55" viewBox="0 0 250 55" role="img" aria-labelledby="title desc">
   <title id="title">GitHub Trending: #9 in Python, this week</title>
-  <desc id="desc">Highest independently observed rank in August 2026</desc>
+  <desc id="desc">Ranked #9 in Python weekly in August 2026</desc>
   <rect x="0.5" y="0.5" width="249" height="54" rx="10" fill="#fff" stroke="#4a0e99"/>
   <g fill="none" stroke="#49278e" stroke-linecap="round" stroke-width="1.5">
     <path d="M31 44C20 42 13 35 12 25"/>
@@ -20,6 +20,6 @@
   <g fill="#432787" font-family="Arial,Helvetica,sans-serif">
     <text x="64" y="16" font-size="9" letter-spacing="0.35">GITHUB TRENDING</text>
     <text x="64" y="34" font-size="14" font-weight="700">#9 Python · This Week</text>
-    <text x="64" y="47" font-size="8" letter-spacing="0.25">AUG 2026 · HIGHEST OBSERVED</text>
+    <text x="64" y="47" font-size="8" letter-spacing="0.25">AUGUST 2026</text>
   </g>
 </svg>
