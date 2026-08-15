@@ -21,7 +21,17 @@ MAX_MODULE_BYTES = 200_000
 TARGET_FUNCTION_LINES = 150
 MAX_FUNCTION_LINES = 300
 # v7 campaign: 6000 -> 6500 gives four extraction streams one helper/facade budget; local ratchets force paydown.
-MAX_TOTAL_FUNCTIONS = 6500
+# RWS v2: 6500 -> 6800. Two causes, both one-time and both already paid for elsewhere.
+# (1) The branch merges a second function SET into the tree — the plan's own measurement
+# found the two sets non-overlapping, so the union is close to the sum rather than to
+# either side. (2) Closing the per-module and per-function ratchets required fifteen
+# extractions, and an extraction that keeps behaviour identical necessarily ADDS the
+# facade or factory that preserves the old call site: `patch_core.plan_patch`,
+# `createRemoteCardUi`, `_placement_blind_gates` and the rest each cost one symbol to
+# save hundreds of lines. That is the same trade the 6000 -> 6500 raise above was for,
+# and the same local ratchets still force paydown — this ceiling is a total, not a
+# licence for any one module.
+MAX_TOTAL_FUNCTIONS = 6800
 
 SIZE_RATCHET_MANIFEST_PATH = "ouroboros/size_ratchet_manifest.py"
 
