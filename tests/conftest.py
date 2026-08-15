@@ -196,6 +196,30 @@ _SERIAL_TEST_FILES = frozenset({
     # under -n the replace-family no-side-effect pins (replace_env["calls"] == []) intermittently
     # observe git calls leaked by co-located modules. Same module-global class -> serial lane.
     "test_update_apply_routing.py",
+    # (RWS v2) Starts real broker I/O threads and multiprocessing Pipes, and
+    # asserts on TIMING (panic must not wait on the broker lock) — both hostile
+    # to a shared xdist worker.
+    "test_remote_broker_lifecycle.py",
+    # Spawns real ssh forward children, binds loopback ports, and asserts that
+    # panic cleanup does not wait on a held lock.
+    "test_remote_browser_forward.py",
+    # Spawns real subprocesses and reasons about DESCRIPTOR NUMBERS, which only
+    # holds when no sibling xdist worker is opening files in the same process.
+    "test_remote_panic_descriptors.py",
+    # (RWS v2) Races TWO real threads through queue admission and shells out to real
+    # `git` in every fixture. The race asserts on interleaving under a lock, and one
+    # case stubs the preflight with `time.sleep(30)` to prove the cap fires — both
+    # are timing claims a shared, loaded xdist worker can invalidate.
+    "test_admission_invariants.py",
+    # (RWS v2) Builds a Docker sshd container, spawns a REAL worker process over a
+    # multiprocessing Pipe, and mutates the supervisor's module-global PENDING /
+    # WORKERS / queue refs. Additionally gated on OUROBOROS_RUN_REMOTE_SSH_TESTS=1.
+    "test_remote_task_session_wiring.py",
+    # Spawns a real helper process that itself forks a watchdog and a tunnel child,
+    # then asserts the watchdog reaps BOTH by pid after the companion dies hard.
+    # Real process trees plus pid-liveness polling: a sibling xdist worker's own
+    # children and load change what this test observes.
+    "test_telegram_miniapp_tunnel_watchdog.py",
 })
 
 

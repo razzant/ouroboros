@@ -1251,6 +1251,52 @@ def test_self_consistency_listed_as_critical_in_severity_rules():
     assert "narrative" in content.lower()
 
 
+def test_the_critical_surface_whitelist_names_the_remote_placement_surfaces():
+    """A reviewer's severity ceiling is set by this list, so absence is invisibility.
+
+    The whitelist had six categories and no remote one. The consequence was concrete
+    rather than theoretical: a diff that broke placement sealing or moved an export
+    filter to AFTER the fetch could not be raised above `advisory` by any reviewer —
+    triad, scope or advisory — because the binding rule says "a mismatch outside the
+    whitelist is advisory". The five surfaces are asserted by name so a later edit
+    cannot quietly drop one, and each named regression suite must exist, since a
+    whitelist citing a gate that does not exist is worse than one citing none.
+    """
+    import pathlib
+
+    content = (pathlib.Path(__file__).parent.parent / "docs" / "CHECKLISTS.md").read_text(
+        encoding="utf-8"
+    )
+    assert "Remote placement surfaces" in content
+    for surface in (
+        "placement sealing",
+        "the export boundary",
+        "session binding",
+        "target confinement",
+        "panic / lease",
+    ):
+        assert surface in content, f"the whitelist stopped naming {surface!r}"
+    # The two enumerating cross-references must agree with the list they point at, or a
+    # reviewer reading item 13 learns a shorter list than the one that binds it.
+    assert content.count("remote placement surface") + content.count(
+        "REMOTE PLACEMENT surface"
+    ) >= 2
+    suites = [
+        "tests/test_placement_root_matrix.py",
+        "tests/test_remote_export_policy.py",
+        "tests/test_registry_remote_dispatch.py",
+        "tests/test_handler_policy_registry.py",
+        "tests/test_remote_panic_descriptors.py",
+    ]
+    repo = pathlib.Path(__file__).parent.parent
+    for suite in suites:
+        assert suite in content, f"{suite} is no longer cited as a remote regression suite"
+        assert (repo / suite).is_file(), f"the whitelist cites a gate that does not exist: {suite}"
+    assert list((repo / "tests" / "golden_traces" / "fixtures").glob("ssh_*.json")), (
+        "the whitelist cites the ssh golden fixtures and none exist"
+    )
+
+
 def test_development_compliance_checklist_expanded():
     """development_compliance description must include specific concrete checks."""
     import pathlib

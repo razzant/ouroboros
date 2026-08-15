@@ -48,7 +48,8 @@ on:
     tags:
       - 'v*'
   # Fork-safe PR validation: no provider secrets and no pull_request_target.
-  # Only the deterministic quick-test job matches pull_request refs below.
+  # The deterministic quick-test and the real SSH executor lane match
+  # pull_request refs below; both are hermetic and secret-free.
   pull_request:
     branches: [ouroboros]
   workflow_dispatch:
@@ -92,6 +93,18 @@ jobs:
           node-version: '22'
           cache: 'pnpm'
           cache-dependency-path: site/pnpm-lock.yaml
+      # This lane downloads NO execd artifact, on purpose. Its four gates — Pages
+      # reproducibility, the `ruff --select F` gate, both pytest lines and the
+      # transport import guard — need no build output, and a `download-artifact` step
+      # for `ouroboros-execd-linux` could not succeed on EITHER of this job's two
+      # triggers: `execd-bundle` does not run at all on a push to `ouroboros`, and on
+      # a pull request this job has no `needs:` on it, so the download would race a
+      # ~40-minute bundle build and fail in the first minute. Such a step fails BEFORE
+      # the four gates, which is how they came to be executing nowhere at all —
+      # `full-test` has neither the Pages check nor ruff. The bundle-versus-tree check
+      # the download was reaching for now lives in `execd-bundle`, the job that
+      # provably HAS the bundle; see "Manifest identity is checked, not assumed" in
+      # docs/DEVELOPMENT.md.
       - name: Verify generated Pages output
         run: |
           pnpm --dir site install --frozen-lockfile
@@ -141,6 +154,412 @@ jobs:
         run: python -m pytest tests/ -m "serial and not integration and not browser and not ui_browser and not ui_browser_docker and not portable_detail and not skill_smoke" -q --tb=short
       - name: Guard extracted transport imports stay out of core
         run: python -m pytest tests/test_no_core_a2a_telegram_imports.py -q
+
+  # Architecture-native remote executor artifacts. Each stage is assembled
+  # exclusively from the checked-in SHA-256 lock, then exercised at the exact
+  # supported glibc floor with the container's system Python removed.
+  execd-stage:
+    if: |
+      (github.event_name == 'pull_request' && github.base_ref == 'ouroboros')
+      || github.event_name == 'workflow_dispatch'
+      || startsWith(github.ref, 'refs/tags/v')
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - architecture: x86_64
+            runner: ubuntu-24.04
+            platform: linux/amd64
+            loader: /lib64/ld-linux-x86-64.so.2
+            baseline: amd64/centos@sha256:dead07b4d8ed7e29e98de0f4504d87e8880d4347859d839686a31da35a3b532f
+          - architecture: aarch64
+            runner: ubuntu-24.04-arm
+            platform: linux/arm64
+            loader: /lib/ld-linux-aarch64.so.1
+            baseline: arm64v8/centos@sha256:73f11afcbb50d8bc70eab9f0850b3fa30e61a419bc48cf426e63527d14a8373b
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Assemble pinned execd stage
+        run: |
+          set -euo pipefail
+          python -m scripts.assemble_execd_stage \
+            --repo-root . \
+            --architecture "${{ matrix.architecture }}" \
+            --output "build/execd-stage-${{ matrix.architecture }}" \
+            --cache "$RUNNER_TEMP/execd-download-cache"
+      - name: Smoke complete artifact on architecture-native runner
+        run: |
+          set -euo pipefail
+          "build/execd-stage-${{ matrix.architecture }}/bin/ouroboros-execd" --version
+          "build/execd-stage-${{ matrix.architecture }}/runtime/bin/python3" \
+            -I -B scripts/smoke_execd_stage.py \
+            "build/execd-stage-${{ matrix.architecture }}"
+      - name: Smoke complete artifact at glibc 2.17 without system Python
+        run: |
+          set -euo pipefail
+          docker run --rm \
+            --platform "${{ matrix.platform }}" \
+            -v "$PWD/build/execd-stage-${{ matrix.architecture }}:/stage:ro" \
+            -v "$PWD/scripts/smoke_execd_stage.py:/smoke.py:ro" \
+            "${{ matrix.baseline }}" sh -c '
+              set -eu
+              test "$(getconf GNU_LIBC_VERSION)" = "glibc 2.17"
+              test -x "${{ matrix.loader }}"
+              sed -i \
+                -e "s|^mirrorlist=|#mirrorlist=|" \
+                -e "s|^#baseurl=http://mirror.centos.org|baseurl=http://vault.centos.org|" \
+                /etc/yum.repos.d/CentOS-*.repo
+              yum -y -q install git
+              if command -v python >/dev/null 2>&1; then
+                mv "$(command -v python)" /usr/bin/python.disabled
+              fi
+              if command -v python3 >/dev/null 2>&1; then
+                mv "$(command -v python3)" /usr/bin/python3.disabled
+              fi
+              hash -r
+              ! command -v python
+              ! command -v python3
+              /stage/bin/ouroboros-execd --version
+              initialized_host_id="$(
+                /stage/bin/ouroboros-execd \
+                  --state-root /tmp/ouroboros-execd-smoke --initialize-host-id
+              )"
+              printed_host_id="$(
+                /stage/bin/ouroboros-execd \
+                  --state-root /tmp/ouroboros-execd-smoke --print-host-id
+              )"
+              test "$printed_host_id" = "$initialized_host_id"
+              /stage/bin/rg --version
+              /stage/runtime/bin/python3 -I -B /smoke.py /stage
+            '
+      - name: Pack architecture stage preserving executable modes
+        run: |
+          set -euo pipefail
+          tar -C build -cf \
+            "build/execd-stage-${{ matrix.architecture }}.tar" \
+            "execd-stage-${{ matrix.architecture }}"
+      - name: Upload architecture stage
+        uses: actions/upload-artifact@v4
+        with:
+          name: execd-stage-${{ matrix.architecture }}
+          path: build/execd-stage-${{ matrix.architecture }}.tar
+          retention-days: 7
+          if-no-files-found: error
+
+  execd-bundle:
+    if: |
+      (github.event_name == 'pull_request' && github.base_ref == 'ouroboros')
+      || github.event_name == 'workflow_dispatch'
+      || startsWith(github.ref, 'refs/tags/v')
+    needs: execd-stage
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - uses: actions/download-artifact@v4
+        with:
+          name: execd-stage-x86_64
+          path: build/transfers/x86_64
+      - uses: actions/download-artifact@v4
+        with:
+          name: execd-stage-aarch64
+          path: build/transfers/aarch64
+      - name: Safely restore executable stage modes
+        run: |
+          set -euo pipefail
+          python - <<'PY'
+          import pathlib
+          import tarfile
+
+          root = pathlib.Path("build")
+          for architecture in ("x86_64", "aarch64"):
+              archive = root / "transfers" / architecture / f"execd-stage-{architecture}.tar"
+              with tarfile.open(archive, "r:") as bundle:
+                  bundle.extractall(root, filter="data")
+              stage = root / f"execd-stage-{architecture}"
+              required = [
+                  stage / "bin" / "ouroboros-execd",
+                  stage / "bin" / "rg",
+                  stage / "runtime" / "bin" / "python3",
+              ]
+              ffmpeg = list(stage.glob(
+                  "runtime/lib/python3.12/site-packages/"
+                  "imageio_ffmpeg/binaries/ffmpeg-*"
+              ))
+              if len(ffmpeg) != 1:
+                  raise SystemExit(f"{architecture}: expected one ffmpeg, got {ffmpeg}")
+              required.extend(ffmpeg)
+              blocked = [str(path) for path in required if not path.is_file() or not path.stat().st_mode & 0o111]
+              if blocked:
+                  raise SystemExit(f"{architecture}: executable modes lost: {blocked}")
+          PY
+      - name: Build and reproduce deterministic dual-architecture bundle
+        run: |
+          set -euo pipefail
+          python -m scripts.build_execd_bundle \
+            --version "$(tr -d '[:space:]' < VERSION)" \
+            --x86-stage build/execd-stage-x86_64 \
+            --aarch64-stage build/execd-stage-aarch64 \
+            --dependency-lock scripts/execd_dependency_lock.json \
+            --output-dir build/execd-assets
+          python -m scripts.build_execd_bundle \
+            --version "$(tr -d '[:space:]' < VERSION)" \
+            --x86-stage build/execd-stage-x86_64 \
+            --aarch64-stage build/execd-stage-aarch64 \
+            --dependency-lock scripts/execd_dependency_lock.json \
+            --output-dir build/execd-assets-rebuilt
+          diff -qr build/execd-assets build/execd-assets-rebuilt
+      - name: Verify release manifest identity, contract set, filenames, sizes and SHA-256
+        run: |
+          set -euo pipefail
+          python - <<'PY'
+          import hashlib
+          import json
+          import pathlib
+          import sys
+
+          # The contract set the bundle declares must be the one THIS tree speaks.
+          # `remote_contracts` is stdlib-only by design, so the authority is IMPORTED
+          # here rather than restated — the check that used to be attempted by pulling
+          # the artifact back into `quick-test`, where it could not run at all.
+          sys.path.insert(0, ".")
+          from ouroboros.remote_contracts import CONTRACT_SET_VERSION
+
+          assets = pathlib.Path("build/execd-assets")
+          version = pathlib.Path("VERSION").read_text(encoding="utf-8").strip()
+          manifest_path = assets / "manifest.json"
+          versioned_path = assets / f"ouroboros-execd-{version}-manifest.json"
+          if manifest_path.read_bytes() != versioned_path.read_bytes():
+              raise SystemExit("generic and versioned execd manifests differ")
+          manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+          dependency_lock = json.loads(
+              pathlib.Path("scripts/execd_dependency_lock.json").read_text(
+                  encoding="utf-8"
+              )
+          )
+          if (
+              manifest.get("schema_version") != 1
+              or manifest.get("build") != version
+              or manifest.get("dependency_lock") != dependency_lock
+          ):
+              raise SystemExit("execd release manifest identity is invalid")
+          if manifest.get("contract_set_version") != CONTRACT_SET_VERSION:
+              raise SystemExit(
+                  "execd release manifest declares contract set "
+                  f"{manifest.get('contract_set_version')!r} but this tree requires "
+                  f"{CONTRACT_SET_VERSION}"
+              )
+          expected = {
+              "linux-x86_64": {
+                  "archive": f"ouroboros-execd-{version}-linux-gnu-x86_64.tar.gz",
+                  "loader": "/lib64/ld-linux-x86-64.so.2",
+              },
+              "linux-aarch64": {
+                  "archive": f"ouroboros-execd-{version}-linux-gnu-aarch64.tar.gz",
+                  "loader": "/lib/ld-linux-aarch64.so.1",
+              },
+          }
+          rows = manifest.get("assets")
+          if not isinstance(rows, dict) or set(rows) != set(expected):
+              raise SystemExit("execd release manifest platform set is invalid")
+          for platform, identity in expected.items():
+              row = rows[platform]
+              archive = assets / identity["archive"]
+              digest = hashlib.sha256(archive.read_bytes()).hexdigest()
+              if (
+                  row.get("archive") != identity["archive"]
+                  or row.get("loader") != identity["loader"]
+                  or row.get("glibc_min") != "2.17"
+                  or row.get("size") != archive.stat().st_size
+                  or row.get("sha256") != digest
+              ):
+                  raise SystemExit(f"{platform}: release asset identity is invalid")
+          PY
+      - name: Refuse a live Alpine musl host before any bundle upload
+        env:
+          ALPINE_IMAGE: alpine@sha256:d9e853e87e55526f6b2917df91a2115c36dd7c696a35be12163d44e6e2a4b6bc
+          ALPINE_CONTAINER: ouroboros-execd-musl-${{ github.run_id }}-${{ github.run_attempt }}
+        run: |
+          set -euo pipefail
+          docker run -d --name "$ALPINE_CONTAINER" --platform linux/amd64 \
+            "$ALPINE_IMAGE" sleep 120 >/dev/null
+          trap 'docker rm -f "$ALPINE_CONTAINER" >/dev/null 2>&1 || true' EXIT
+          python - <<'PY'
+          import os
+          import pathlib
+          import subprocess
+          import types
+
+          from ouroboros.remote_ssh import OpenSSHExecdTransport
+
+          calls = []
+          transport = object.__new__(OpenSSHExecdTransport)
+          transport.request = types.SimpleNamespace(
+              bundle_dir=pathlib.Path("build/execd-assets")
+          )
+
+          def run_remote(argv, *, input_bytes=None, timeout_sec=30):
+              calls.append((list(argv), input_bytes))
+              if input_bytes is not None:
+                  raise AssertionError("bundle upload reached the musl host")
+              return subprocess.run(
+                  ["docker", "exec", os.environ["ALPINE_CONTAINER"], *argv],
+                  stdin=subprocess.DEVNULL,
+                  stdout=subprocess.PIPE,
+                  stderr=subprocess.PIPE,
+                  timeout=timeout_sec,
+                  check=True,
+              )
+
+          transport._run_remote = run_remote
+          try:
+              transport.bootstrap(timeout_sec=10)
+          except Exception as exc:
+              if getattr(exc, "code", "") != "remote_libc_unsupported":
+                  raise
+          else:
+              raise SystemExit("Alpine/musl bootstrap was unexpectedly accepted")
+          if len(calls) != 1 or calls[0][1] is not None:
+              raise SystemExit(f"musl refusal performed unexpected remote calls: {calls}")
+          PY
+      - name: Verify final archive modes and execute downloaded x86 bundle
+        run: |
+          set -euo pipefail
+          python - <<'PY'
+          import json
+          import pathlib
+          import tarfile
+
+          assets = pathlib.Path("build/execd-assets")
+          manifest = json.loads((assets / "manifest.json").read_text())
+          for architecture in ("x86_64", "aarch64"):
+              row = manifest["assets"][f"linux-{architecture}"]
+              with tarfile.open(assets / row["archive"], "r:gz") as bundle:
+                  members = {item.name: item for item in bundle.getmembers()}
+              required = [
+                  "bin/ouroboros-execd",
+                  "bin/rg",
+                  "runtime/bin/python3",
+              ]
+              ffmpeg = [
+                  name for name in members
+                  if "imageio_ffmpeg/binaries/ffmpeg-" in name
+              ]
+              if len(ffmpeg) != 1:
+                  raise SystemExit(f"{architecture}: final ffmpeg missing")
+              required.extend(ffmpeg)
+              blocked = [
+                  name for name in required
+                  if name not in members or not members[name].mode & 0o111
+              ]
+              if blocked:
+                  raise SystemExit(
+                      f"{architecture}: final executable modes invalid: {blocked}"
+                  )
+          PY
+          mkdir -p build/final-x86
+          tar -xzf \
+            "build/execd-assets/ouroboros-execd-$(tr -d '[:space:]' < VERSION)-linux-gnu-x86_64.tar.gz" \
+            -C build/final-x86
+          docker run --rm --platform linux/amd64 \
+            -v "$PWD/build/final-x86:/stage:ro" \
+            amd64/centos@sha256:dead07b4d8ed7e29e98de0f4504d87e8880d4347859d839686a31da35a3b532f \
+            sh -c '
+              set -eu
+              if command -v python >/dev/null 2>&1; then
+                mv "$(command -v python)" /usr/bin/python.disabled
+              fi
+              hash -r
+              ! command -v python
+              /stage/bin/ouroboros-execd --version
+              /stage/bin/rg --version
+            '
+      - name: Upload release-ready execd assets
+        uses: actions/upload-artifact@v4
+        with:
+          name: ouroboros-execd-linux
+          path: build/execd-assets/
+          retention-days: 30
+          if-no-files-found: error
+
+  # Real Docker/OpenSSH contract lane. It is deliberately separate from the
+  # ordinary serial suite so a missing Docker daemon cannot silently skip the
+  # release-critical remote executor path. Raw logs never reach CI output or
+  # uploaded artifacts; Ouroboros's own redactor runs first.
+  ssh-executor-smoke:
+    if: |
+      (github.event_name == 'pull_request' && github.base_ref == 'ouroboros')
+      || (github.event_name == 'push' && github.ref == 'refs/heads/ouroboros')
+      || (github.event_name == 'push' && github.ref == 'refs/heads/ouroboros-stable')
+      || github.event_name == 'workflow_dispatch'
+      || startsWith(github.ref, 'refs/tags/v')
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    env:
+      OUROBOROS_RUN_REMOTE_SSH_TESTS: "1"
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.10'
+          cache: 'pip'
+      - name: Install dependencies
+        run: |
+          pip install -r requirements.txt
+          pip install pytest pytest-timeout
+      - name: Run real SSH executor smoke with redacted diagnostics
+        run: |
+          set -euo pipefail
+          raw_log="$RUNNER_TEMP/ssh-executor-smoke.raw"
+          redacted_log="$RUNNER_TEMP/ssh-executor-smoke.log"
+          trap 'rm -f "$raw_log"' EXIT
+          set +e
+          python -m pytest tests/test_remote_workspace_ssh.py \
+            -m serial -q --tb=long --timeout=300 --timeout-method=thread \
+            >"$raw_log" 2>&1
+          pytest_rc=$?
+          set -e
+          RAW_LOG="$raw_log" REDACTED_LOG="$redacted_log" python - <<'PY'
+          import os
+          import pathlib
+
+          from ouroboros.observability import redact_projection
+
+          raw = pathlib.Path(os.environ["RAW_LOG"]).read_text(
+              encoding="utf-8",
+              errors="replace",
+          )
+          target = pathlib.Path(os.environ["REDACTED_LOG"])
+          target.write_text(
+              str(redact_projection(raw).value),
+              encoding="utf-8",
+          )
+          target.chmod(0o600)
+          PY
+          cat "$redacted_log"
+          exit "$pytest_rc"
+      - name: Upload redacted SSH failure log
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: ssh-executor-smoke-redacted-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/ssh-executor-smoke.log
+          retention-days: 7
+          if-no-files-found: error
 
   # ──────────────────────────────────────────────────────────────────
   # Tier 2.5: Integration tests against real provider APIs
@@ -268,14 +687,23 @@ jobs:
       - name: Guard non-empty browser marker lanes
         run: |
           set -euo pipefail
+          # Positive anchors, for the reason the serial guard below already states and
+          # this step did not follow: under `-q` pytest NEVER prints "no tests
+          # collected", so `! grep -q` on it was true for every non-empty lane, and an
+          # EMPTY lane exits 5 (EXIT_NOTESTSCOLLECTED) which `pipefail` surfaces
+          # through `tee` and kills the step BEFORE any grep runs. Both branches were
+          # unreachable — four checks that had never judged anything. The exit-5 path
+          # is the real emptiness gate; each grep below pins a known-stable member of
+          # its lane as a canary, so a marker refactor that moves tests out of a lane
+          # is caught too (rename a canary -> update its line here).
           python -m pytest tests/ --collect-only -m browser -q | tee /tmp/browser-collect.txt
           python -m pytest tests/ --collect-only -m ui_browser -q | tee /tmp/ui-collect.txt
           python -m pytest tests/ --collect-only -m ui_browser_docker -q | tee /tmp/ui-docker-collect.txt
           python -m pytest tests/ --collect-only -m portable_detail -q | tee /tmp/portable-collect.txt
-          ! grep -q "no tests collected" /tmp/browser-collect.txt
-          ! grep -q "no tests collected" /tmp/ui-collect.txt
-          ! grep -q "no tests collected" /tmp/ui-docker-collect.txt
-          ! grep -q "no tests collected" /tmp/portable-collect.txt
+          grep -q "tests/test_browser_tools_smoke.py" /tmp/browser-collect.txt
+          grep -q "tests/test_ui_browser_smoke.py" /tmp/ui-collect.txt
+          grep -q "tests/test_ui_smoke_playwright.py" /tmp/ui-docker-collect.txt
+          grep -q "tests/test_windows_zip_path_length.py" /tmp/portable-collect.txt
       - name: Guard non-empty serial marker lane
         run: |
           set -euo pipefail
@@ -394,7 +822,7 @@ jobs:
 
   build:
     if: startsWith(github.ref, 'refs/tags/v')
-    needs: [full-test, release-preflight]
+    needs: [full-test, release-preflight, execd-bundle]
     permissions:
       contents: read
       id-token: write
@@ -457,6 +885,58 @@ jobs:
       - uses: ./.github/actions/setup-python-env
         with:
           profile: build
+
+      # —— Remote executor payload ——
+      # `assets/execd` is gitignored, so the daemon a Bootstrap uploads exists in a
+      # release ONLY if it is fetched here. `needs: execd-bundle` alone bought
+      # nothing: this job declared the dependency and then never downloaded, so
+      # `Ouroboros.spec`'s ('assets', 'assets') packed an `assets/` tree with no
+      # execd in it and every platform archive shipped without the remote executor.
+      # The download runs on all three matrix legs because the bundle is the same
+      # Linux-target payload on each: it is what the HOME app uploads to a remote
+      # host, not something the host OS executes.
+      - name: Install verified remote executor assets into app payload
+        uses: actions/download-artifact@v4
+        with:
+          name: ouroboros-execd-linux
+          path: assets/execd
+      - name: Refuse to package a release with no remote executor
+        shell: bash
+        run: |
+          set -euo pipefail
+          python - <<'PY'
+          import json
+          import pathlib
+          import sys
+
+          sys.path.insert(0, ".")
+          from ouroboros.remote_contracts import CONTRACT_SET_VERSION
+
+          version = pathlib.Path("VERSION").read_text(encoding="utf-8").strip()
+          manifest_path = pathlib.Path("assets/execd/manifest.json")
+          if not manifest_path.is_file():
+              raise SystemExit("assets/execd holds no manifest: the payload is empty")
+          manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+          if manifest.get("build") != version:
+              raise SystemExit(
+                  f"execd payload was built for {manifest.get('build')!r}, not {version}"
+              )
+          if manifest.get("contract_set_version") != CONTRACT_SET_VERSION:
+              raise SystemExit(
+                  "execd payload declares contract set "
+                  f"{manifest.get('contract_set_version')!r} but this tree requires "
+                  f"{CONTRACT_SET_VERSION}"
+              )
+          rows = manifest.get("assets")
+          if not isinstance(rows, dict) or not rows:
+              raise SystemExit("execd payload manifest lists no platform assets")
+          for platform, row in rows.items():
+              archive = manifest_path.parent / str(row.get("archive") or "")
+              if not archive.is_file():
+                  raise SystemExit(f"{platform}: {archive} is absent from the payload")
+              if archive.stat().st_size != row.get("size"):
+                  raise SystemExit(f"{platform}: {archive} size differs from the manifest")
+          PY
 
       # —— Download embedded Python interpreter ——
       - name: Download python-standalone (macOS/Linux)
@@ -1107,7 +1587,7 @@ jobs:
   # ──────────────────────────────────────────────────────────────────
   release:
     if: startsWith(github.ref, 'refs/tags/v')
-    needs: [build, release-preflight, marker-guards, ui-smoke, docker-ui-smoke, docker-portable-test, skill-smoke]
+    needs: [build, execd-bundle, ssh-executor-smoke, release-preflight, marker-guards, ui-smoke, docker-ui-smoke, docker-portable-test, skill-smoke]
     runs-on: ubuntu-latest
     concurrency:
       group: release-${{ github.ref }}
@@ -1129,6 +1609,7 @@ jobs:
       - name: Download all artifacts
         uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
         with:
+          pattern: ouroboros-*
           path: release-artifacts/
           merge-multiple: true
 
@@ -1233,6 +1714,9 @@ jobs:
             release-artifacts/ouroboros-*-1.x86_64.rpm
             release-artifacts/ouroboros-*-1.red80.x86_64.rpm
             release-artifacts/Ouroboros-*-windows-x64.zip
+            release-artifacts/ouroboros-execd-*-linux-gnu-x86_64.tar.gz
+            release-artifacts/ouroboros-execd-*-linux-gnu-aarch64.tar.gz
+            release-artifacts/ouroboros-execd-*-manifest.json
             release-artifacts/release-smoke-macos-arm64.json
             release-artifacts/release-smoke-linux-x86_64.json
             release-artifacts/release-smoke-linux-appimage-x86_64.json

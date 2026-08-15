@@ -13,6 +13,7 @@ Run: python -m pytest tests/test_smoke.py -v
 import os
 import pathlib
 import re
+import shutil
 import sys
 import tempfile
 
@@ -466,30 +467,71 @@ def test_js_module_gate_buckets_and_grandfathering():
     assert not module_is_grandfathered("web/other/chat.js")
 
 
-def test_no_bare_except_pass():
-    """No bare `except: pass` (not even except Exception: pass with just pass).
-    
-    v4.9.0 hardened exceptions — but checks the STRICTEST form:
-    bare except (no Exception class) followed by pass.
+def _bare_except_pass_violations(root: pathlib.Path) -> list:
+    """Sites under `root` spelling a BARE `except:` swallowed by `pass`.
+
+    BOUNDARY, stated because this scan's docstring used to claim otherwise
+    ("not even except Exception: pass"): `except <Class>: pass` is NOT flagged,
+    and `ouroboros/` holds hundreds of those. Only the classless form — which
+    swallows `KeyboardInterrupt` and `SystemExit` as well — is a hard error here.
+    Widening it to typed swallows is a policy change over a few hundred existing
+    sites, not a test fix.
     """
+
     violations = []
-    for root, dirs, files in os.walk(REPO / "ouroboros"):
+    for base, dirs, files in os.walk(root):
         dirs[:] = [d for d in dirs if d != "__pycache__"]
         for f in files:
             if not f.endswith(".py"):
                 continue
-            path = pathlib.Path(root) / f
+            path = pathlib.Path(base) / f
             lines = path.read_text(encoding="utf-8").splitlines()
             for i, line in enumerate(lines, 1):
-                stripped = line.strip()
-                # Only flag bare `except:` (no class specified)
-                if stripped == "except:":
-                    # Check next non-empty line is just `pass`
-                    for j in range(i, min(i + 3, len(lines))):
-                        next_line = lines[j].strip()
-                        if next_line and next_line == "pass":
-                            violations.append(f"{path.name}:{i}: bare except: pass")
-                            break
+                if line.strip() != "except:":
+                    continue
+                for j in range(i, min(i + 3, len(lines))):
+                    next_line = lines[j].strip()
+                    if next_line and next_line == "pass":
+                        violations.append(f"{path.name}:{i}: bare except: pass")
+                        break
+    return violations
+
+
+def test_the_bare_except_scan_flags_one():
+    """The scan must be shown FLAGGING a violation, not only finding none.
+
+    `ouroboros/` contains zero bare `except:`, so this detector has never had a
+    candidate and passing proved nothing about whether it can fire. Both the
+    matched shape and the deliberately unmatched ones are pinned here.
+    """
+
+    root = pathlib.Path(tempfile.mkdtemp())
+    try:
+        (root / "offender.py").write_text(
+            "try:\n    go()\nexcept:\n    pass\n", encoding="utf-8"
+        )
+        (root / "typed.py").write_text(
+            "try:\n    go()\nexcept ValueError:\n    pass\n", encoding="utf-8"
+        )
+        (root / "reraised.py").write_text(
+            "try:\n    go()\nexcept:\n    raise\n", encoding="utf-8"
+        )
+        assert _bare_except_pass_violations(root) == [
+            "offender.py:3: bare except: pass"
+        ]
+    finally:
+        shutil.rmtree(root, ignore_errors=True)
+
+
+def test_no_bare_except_pass():
+    """No bare `except:` swallowed by `pass` in `ouroboros/`.
+
+    A classless `except` also swallows `KeyboardInterrupt`/`SystemExit`; paired
+    with `pass` it is silent and unkillable-looking at once. What this does NOT
+    cover is stated on `_bare_except_pass_violations`.
+    """
+
+    violations = _bare_except_pass_violations(REPO / "ouroboros")
     assert len(violations) == 0, "Bare except:pass found:\n" + "\n".join(violations)
 
 
@@ -497,7 +539,12 @@ def test_no_bare_except_pass():
 
 
 def _get_function_sizes():
-    """Return exact path/qualname tuples from the production iterator."""
+    """Return exact path/qualname tuples from the production iterator.
+
+    The path is REPO-RELATIVE, not the bare basename: the function-size waiver in
+    `FUNCTION_DEBT` is keyed the same way, and keying it by basename exempted a
+    (name, function) pair in every directory at once.
+    """
     from ouroboros.review import iter_gated_functions
 
     return [(item.path, item.qualname, item.line_count) for item in iter_gated_functions(REPO)]
@@ -515,6 +562,44 @@ def test_no_extremely_oversized_functions():
             violations.append(f"{path}:{qualname} = {size} lines")
     assert len(violations) == 0, \
         f"Functions exceeding {MAX_FUNCTION_LINES} lines:\n" + "\n".join(violations)
+
+
+def test_waivers_are_keyed_by_exact_repo_relative_path():
+    """A same-named file in another directory inherits NO size waiver.
+
+    Both waiver sets used to be keyed by bare basename, so `ouroboros/probe/llm.py`
+    at 1701 lines and a 402-line `_run_reviewed_stage_cycle` in some other `git.py`
+    passed the hard gates without anyone accepting that debt. The ratchet manifest
+    keys debt by exact repo-relative path; this pins that it stays one.
+    """
+    from ouroboros.review import (
+        FUNCTION_DEBT,
+        GIANT_PATHS,
+        function_is_grandfathered,
+        module_is_grandfathered,
+    )
+
+    # Every entry names a real file, so the waiver list cannot drift into fiction.
+    for rel in GIANT_PATHS:
+        assert (REPO / rel).is_file(), f"giant path {rel} does not exist"
+    for rel, _qualname in FUNCTION_DEBT:
+        assert (REPO / rel).is_file(), f"function debt module {rel} does not exist"
+
+    # A file that merely shares the NAME of a debt entry is not exempt.
+    for impostor in (
+        "ouroboros/probe/llm.py",
+        "ouroboros/mut_probe_dir/git.py",
+        "ouroboros/core.py",
+        "skills/other_skill/plugin.py",
+    ):
+        assert not module_is_grandfathered(impostor), impostor
+
+    # …and neither is a (path, qualname) pair reused in another directory.
+    for rel, qualname in FUNCTION_DEBT:
+        assert function_is_grandfathered(rel, qualname)
+        if "/" in rel:
+            assert not function_is_grandfathered(pathlib.PurePosixPath(rel).name, qualname)
+            assert not function_is_grandfathered(f"ouroboros/mut_probe_dir/{rel}", qualname)
 
 
 def test_function_count_has_sanity_floor():

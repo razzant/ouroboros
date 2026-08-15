@@ -38,6 +38,8 @@ python-standalone/
 node-standalone/
 ripgrep-standalone/
 /claudexor-runtime/
+# Verified CI-built remote executor payload: bundled by PyInstaller, never git.
+/assets/execd/
 
 # OS
 .DS_Store

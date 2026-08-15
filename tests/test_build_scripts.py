@@ -973,10 +973,14 @@ def _pkg_read(rel: str) -> str:
 @pytest.mark.skipif(not _BUNDLE_FILES_PRESENT, reason=_PACKAGING_SKIP_REASON)
 def test_spec_bundles_assets_and_icon():
     source = _pkg_read("Ouroboros.spec")
+    gitignore = _pkg_read(".gitignore")
     assert "('repo.bundle', '.')" in source
     assert "('repo_bundle_manifest.json', '.')" in source
     assert "('assets', 'assets')" in source
     assert "icon='assets/icon.icns'" in source
+    # (RWS v2) The execd payload is a CI-verified artifact downloaded into the
+    # bundle at build time, never a checked-in binary.
+    assert "/assets/execd/" in gitignore
 
 
 @pytest.mark.skipif(not _BUNDLE_FILES_PRESENT, reason=_PACKAGING_SKIP_REASON)
@@ -1050,6 +1054,310 @@ def test_release_builds_embed_the_exact_claudexor_runtime_seed():
     spec = _pkg_read("Ouroboros.spec")
     assert "('claudexor-runtime', 'claudexor-runtime')" in spec
     assert "/claudexor-runtime/" in _pkg_read(".gitignore")
+
+
+def test_execd_build_scripts_and_dependency_lock_are_present():
+    assert (_REPO_PATH / "scripts" / "assemble_execd_stage.py").exists()
+    assert (_REPO_PATH / "scripts" / "build_execd_bundle.py").exists()
+    assert (_REPO_PATH / "scripts" / "smoke_execd_stage.py").exists()
+    assert (_REPO_PATH / "scripts" / "execd_dependency_lock.json").exists()
+
+
+def test_execd_stage_smoke_asserts_the_attested_release_identity():
+    """The smoke must ASSERT the attested identity, not merely hand it in.
+
+    A stage that starts but misreports which release and which artifact bytes it
+    is would pass a naive smoke and then fail admission against Home's manifest.
+    This test used to check only that the values were PASSED to `ExecdService`,
+    while `docs/ARCHITECTURE.md` said the smoke "asserts the ATTESTED identity
+    (continuity host id, release id, artifact SHA-256)" — three facts, none of
+    which the smoke compared to anything. So the assertion is on the comparison.
+    """
+
+    source = _pkg_read("scripts/smoke_execd_stage.py")
+    assert 'host_id = initialize_continuity_host_id(base / "state")' in source
+    for fact, expected in (
+        ("host_id", "host_id"),
+        ("release_id", "release_id"),
+        ("artifact_sha256", "artifact_sha256"),
+    ):
+        assert f'handshake["{fact}"] != {expected}' in source, (
+            f"the stage smoke does not assert the handshake's {fact}"
+        )
+        assert f'prepared["{fact}"] != {expected}' in source, (
+            f"the stage smoke does not assert a prepared object's {fact}"
+        )
+    # And it must refuse to grade an artifact from outside it: run under a host
+    # Python, the stage's `lib/` is imported into the host runtime and everything
+    # passes while proving nothing about the interpreter that reaches the target.
+    assert "must run under the staged interpreter" in source
+
+
+def test_ci_release_publishes_only_named_execd_assets():
+    workflow = _ci_workflow()
+
+    release_job = workflow.split("\n  release:\n", 1)[1]
+    assert "pattern: ouroboros-*" in release_job
+    files = release_job.split("files: |", 1)[1].split(
+        "generate_release_notes:", 1
+    )[0]
+    assert "release-artifacts/Ouroboros-*" in files
+    assert "release-artifacts/ouroboros-execd-*-linux-gnu-x86_64.tar.gz" in files
+    assert "release-artifacts/ouroboros-execd-*-linux-gnu-aarch64.tar.gz" in files
+    assert "release-artifacts/ouroboros-execd-*-manifest.json" in files
+    # A wildcard would publish whatever happened to land in the directory.
+    assert "release-artifacts/*" not in files
+
+
+def test_ci_execd_jobs_run_for_target_pr_manual_or_tag_builds():
+    workflow = _ci_workflow()
+
+    stage_header = workflow.split("\n  execd-stage:\n", 1)[1].split(
+        "\n    strategy:", 1
+    )[0]
+    bundle_header = workflow.split("\n  execd-bundle:\n", 1)[1].split(
+        "\n    needs:", 1
+    )[0]
+    for header in (stage_header, bundle_header):
+        assert "github.event_name == 'pull_request'" in header
+        assert "github.base_ref == 'ouroboros'" in header
+        assert "github.event_name == 'workflow_dispatch'" in header
+        assert "startsWith(github.ref, 'refs/tags/v')" in header
+
+
+def test_ci_ssh_smoke_covers_target_and_stable_pushes():
+    workflow = _ci_workflow()
+    smoke_header = workflow.split("\n  ssh-executor-smoke:\n", 1)[1].split(
+        "\n    runs-on:", 1
+    )[0]
+
+    assert "refs/heads/ouroboros')" in smoke_header
+    assert "refs/heads/ouroboros-stable')" in smoke_header
+    assert "startsWith(github.ref, 'refs/tags/v')" in smoke_header
+
+
+def test_ci_execd_release_gating_requires_the_verified_bundle():
+    workflow = _ci_workflow()
+
+    build_needs = workflow.split("\n  build:\n", 1)[1].split("needs:", 1)[1].splitlines()[0]
+    release_needs = workflow.split("\n  release:\n", 1)[1].split("needs:", 1)[1].splitlines()[0]
+    # A packaged app must never ship an unverified execd payload, and a release
+    # must never ship without the real Docker/OpenSSH lane having run.
+    assert "execd-bundle" in build_needs
+    assert "execd-bundle" in release_needs
+    assert "ssh-executor-smoke" in release_needs
+    # `needs:` alone bought NOTHING here for a year: `build` declared the
+    # dependency and then never downloaded the artifact, so `Ouroboros.spec`
+    # packed an `assets/` tree with no execd in it and every platform archive
+    # shipped without the remote executor. Declaring a dependency is not
+    # consuming it — require the download AND the refusal that makes an empty
+    # payload fatal instead of silent.
+    build_job = workflow.split("\n  build:\n", 1)[1].split("\n  release:\n", 1)[0]
+    assert "name: ouroboros-execd-linux" in build_job, (
+        "the build job needs execd-bundle but never downloads its artifact"
+    )
+    assert "path: assets/execd" in build_job
+    assert "Refuse to package a release with no remote executor" in build_job
+
+
+# ── CI reachability: a step that cannot run is not a gate ────────────────────
+#
+# Two halves of ONE defect were found by an external review, and both are the
+# same shape as the vacuous guards the Guard Proof Rule is about: a step that is
+# structurally unable to execute looks identical, from the outside, to a step
+# that passes. `quick-test` downloaded `ouroboros-execd-linux` with no `needs:`
+# on the job that produces it, so on a push to `ouroboros` (where `execd-bundle`
+# does not run at all) and on a pull request (where it races a ~40-minute build)
+# the step failed FIRST — taking the Pages reproducibility check, the
+# `ruff --select F` gate, both pytest lanes and the transport import guard down
+# with it. Four gates executing nowhere, on the branch they exist to protect.
+#
+# So this is enforced mechanically rather than by reading: the trigger conditions
+# are evaluated, and every artifact a job downloads by name must be produced by a
+# job that BOTH runs on the same trigger and is in the downloader's `needs`
+# closure. The evaluator refuses an `if:` expression it does not fully
+# understand, so a future exotic condition fails loudly instead of being read as
+# "always runs".
+
+_CI_TRIGGERS: dict[str, dict[str, str]] = {
+    "push:main": {
+        "event_name": "push", "ref": "refs/heads/main", "base_ref": "",
+    },
+    "push:ouroboros": {
+        "event_name": "push", "ref": "refs/heads/ouroboros", "base_ref": "",
+    },
+    "push:ouroboros-stable": {
+        "event_name": "push", "ref": "refs/heads/ouroboros-stable", "base_ref": "",
+    },
+    "pull_request:ouroboros": {
+        "event_name": "pull_request", "ref": "refs/pull/1/merge",
+        "base_ref": "ouroboros",
+    },
+    "tag:v": {
+        "event_name": "push", "ref": "refs/tags/v9.9.9", "base_ref": "",
+    },
+    "workflow_dispatch": {
+        "event_name": "workflow_dispatch", "ref": "refs/heads/ouroboros",
+        "base_ref": "",
+    },
+}
+
+
+def _ci_job_runs(condition, trigger: dict[str, str]) -> bool:
+    """Evaluate a job-level `if:` for one trigger, or refuse to guess."""
+
+    if condition is None:
+        return True
+    expression = " ".join(str(condition).split())
+    for name, value in (
+        ("github.event_name", trigger["event_name"]),
+        ("github.ref", trigger["ref"]),
+        ("github.base_ref", trigger["base_ref"]),
+    ):
+        expression = expression.replace(name, repr(value))
+    expression = re.sub(
+        r"startsWith\(\s*([^,]+?)\s*,\s*([^)]+?)\s*\)",
+        r"(\1).startswith(\2)",
+        expression,
+    )
+    expression = expression.replace("||", " or ").replace("&&", " and ")
+    # Everything left must be quoted text, parentheses, whitespace, the two
+    # comparison operators, the boolean words, and `.startswith`. Anything else
+    # is a construct this evaluator has not been taught.
+    residue = re.sub(r"'[^']*'", "", expression)
+    residue = residue.replace(".startswith", "")
+    for token in ("==", "!=", " or ", " and ", " not ", "(", ")"):
+        residue = residue.replace(token, " ")
+    assert not residue.strip(), (
+        f"ci.yml job condition {condition!r} contains {residue.strip()!r}, which "
+        "this reachability gate cannot evaluate — teach it the construct rather "
+        "than letting an unreadable condition count as 'always runs'"
+    )
+    return bool(eval(expression, {"__builtins__": {}}, {}))  # noqa: S307
+
+
+def _ci_artifact_names(job: dict, template: str) -> set[str]:
+    """Expand `${{ matrix.key }}` in an artifact name over the job's matrix.
+
+    `execd-stage` uploads `execd-stage-${{ matrix.architecture }}`; without the
+    expansion the producer of `execd-stage-x86_64` looks like nobody.
+    """
+
+    if "${{" not in template:
+        return {template}
+    matrix = ((job.get("strategy") or {}).get("matrix") or {})
+    rows = list(matrix.get("include") or [])
+    for key, values in matrix.items():
+        if key == "include" or not isinstance(values, list):
+            continue
+        rows.extend({key: value} for value in values)
+    names = set()
+    for row in rows:
+        expanded = template
+        for key, value in row.items():
+            expanded = re.sub(
+                r"\$\{\{\s*matrix\." + re.escape(str(key)) + r"\s*\}\}",
+                str(value),
+                expanded,
+            )
+        if "${{" not in expanded:
+            names.add(expanded)
+    return names
+
+
+def _ci_needs_closure(jobs: dict, job: str) -> set[str]:
+    declared = jobs[job].get("needs") or []
+    if isinstance(declared, str):
+        declared = [declared]
+    closure: set[str] = set()
+    for parent in declared:
+        closure.add(parent)
+        closure |= _ci_needs_closure(jobs, parent)
+    return closure
+
+
+def test_ci_every_downloaded_artifact_is_reachable_on_every_trigger():
+    """A `download-artifact` step must be able to find its artifact."""
+
+    yaml = pytest.importorskip("yaml")
+    workflow = yaml.safe_load(_ci_workflow())
+    jobs = workflow["jobs"]
+
+    producers: dict[str, set[str]] = {}
+    for name, job in jobs.items():
+        for step in job.get("steps") or []:
+            uses = str(step.get("uses") or "")
+            with_block = step.get("with") or {}
+            if "actions/upload-artifact" in uses and with_block.get("name"):
+                for artifact in _ci_artifact_names(job, str(with_block["name"])):
+                    producers.setdefault(artifact, set()).add(name)
+
+    consumers: list[tuple[str, str]] = []
+    for name, job in jobs.items():
+        for step in job.get("steps") or []:
+            uses = str(step.get("uses") or "")
+            with_block = step.get("with") or {}
+            if "actions/download-artifact" in uses and with_block.get("name"):
+                for artifact in _ci_artifact_names(job, str(with_block["name"])):
+                    consumers.append((name, artifact))
+    assert consumers, "no named artifact download found — this gate has gone stale"
+
+    unreachable: list[str] = []
+    for job_name, artifact in consumers:
+        closure = _ci_needs_closure(jobs, job_name)
+        upstream = producers.get(artifact, set())
+        if not upstream:
+            unreachable.append(f"{job_name} downloads {artifact}, which nothing uploads")
+            continue
+        ordered = upstream & closure
+        if not ordered:
+            unreachable.append(
+                f"{job_name} downloads {artifact} without any of {sorted(upstream)} "
+                "in its needs closure, so the download races the build"
+            )
+            continue
+        for label, trigger in _CI_TRIGGERS.items():
+            if not _ci_job_runs(jobs[job_name].get("if"), trigger):
+                continue
+            if not any(_ci_job_runs(jobs[producer].get("if"), trigger) for producer in ordered):
+                unreachable.append(
+                    f"{job_name} runs on {label} and downloads {artifact}, which "
+                    f"none of {sorted(ordered)} produces on that trigger"
+                )
+    assert not unreachable, "\n".join(unreachable)
+
+
+def test_ci_marker_lane_canaries_really_carry_their_marker():
+    """The marker guards pin canary FILENAMES; the markers must agree.
+
+    Every `! grep -q "no tests collected"` in that job was doubly unreachable —
+    an empty lane exits 5 through `pipefail` and kills the step before grep, and
+    a non-empty lane never prints that text under `-q`. The replacement pins a
+    known member of each lane, which is a restated fact, so it gets the liveness
+    check a restated fact needs: the file must really be selected by the marker.
+    """
+
+    workflow = _ci_workflow()
+    guard = workflow.split("Guard non-empty browser marker lanes", 1)[1].split(
+        "\n      - name: Guard non-empty serial marker lane", 1
+    )[0]
+    lanes = re.findall(r"--collect-only -m (\w+) -q \| tee (\S+)", guard)
+    anchors = dict(re.findall(r'grep -q "(tests/\S+?\.py)" (\S+)', guard))
+    assert len(lanes) == 4, f"expected four browser-family lanes, found {lanes}"
+    assert "no tests collected" not in guard, (
+        "the vacuous `no tests collected` check is back: pytest never prints it "
+        "under -q, and an empty lane dies at exit 5 before grep runs"
+    )
+    by_file = {path: marker for marker, path in lanes}
+    for anchor, path in anchors.items():
+        marker = by_file[path]
+        # `pytestmark = pytest.mark.<name>` and a bare decorator both spell the
+        # marker the same way, so one pattern covers module- and test-level use.
+        declared = set(re.findall(r"pytest\.mark\.(\w+)", _pkg_read(anchor)))
+        assert marker in declared, (
+            f"ci.yml pins {anchor} as the {marker} lane canary, but that file "
+            f"declares {sorted(declared)} and not {marker}"
+        )
 
 
 def test_build_sh_supports_unsigned_macos_release():

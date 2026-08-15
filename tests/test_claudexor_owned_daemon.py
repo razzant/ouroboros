@@ -969,6 +969,7 @@ def test_first_spawn_loser_attaches_to_the_winners_endpoint(monkeypatch, tmp_pat
     assert manager.stop() is False
 
 
+@pytest.mark.serial
 def test_dead_owned_daemon_is_restarted_and_reconciled(monkeypatch, tmp_path):
     """The stale case end-to-end: descriptor exists, daemon dead, ownership
     marker OURS -> ensure_running restarts under the same supervision
@@ -1065,6 +1066,7 @@ def test_dead_owned_daemon_is_restarted_and_reconciled(monkeypatch, tmp_path):
             server.shutdown()
 
 
+@pytest.mark.serial
 def test_foreign_responder_on_stale_port_is_disclosed_not_killed(monkeypatch, tmp_path):
     """A live daemon that REFUSES our token on the stale port is foreign:
     typed disclosure, no kill — and it does not block restarting OUR daemon."""

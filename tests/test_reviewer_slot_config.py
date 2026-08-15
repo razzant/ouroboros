@@ -328,6 +328,7 @@ def test_session_executor_prefers_the_slots_own_target(monkeypatch):
 # ---------------------------------------------------------------------------
 
 
+@pytest.mark.serial
 def test_the_two_surfaces_that_run_concurrently_do_not_erase_each_others_rows(monkeypatch):
     """`run_parallel_review` runs the triad and the scope surfaces CONCURRENTLY (its
     own first line says so), in two threads of one process, and each finishes by
