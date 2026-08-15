@@ -356,7 +356,15 @@ def test_run_script_directory_output_blocks_sensitive_members(tmp_path, monkeypa
     )
 
     assert "ARTIFACT_OUTPUT_ERROR" in result
-    assert "hidden/control output path component .ssh" in result
+    # The reason moved to the MORE SPECIFIC rule and the refusal did not move at all.
+    # `.ssh` is named by the document's `sensitive_components` table, which applies under
+    # BOTH profiles — so the honest reason is `sensitive_file`, not the deliverable
+    # catch-all for "this component looks credential-ish". It used to read as the
+    # catch-all because this door asked the component rule GROUP and nothing else, which
+    # is the same defect that let `dist/id_rsa` export on the remote route: the group
+    # cannot see the credential-name rules above it. Both routes now ask the whole ladder
+    # and therefore give the same reason for the same path.
+    assert ".ssh/config: credential-like file, excluded from export by policy" in result
     artifact_dir = data / "task_results" / "artifacts" / "workspace-sensitive-dir-output"
     assert not list(artifact_dir.glob("site.*.zip"))
 

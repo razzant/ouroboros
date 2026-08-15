@@ -35,6 +35,42 @@ from ouroboros.platform_layer import (
 )
 from ouroboros.tool_access import path_is_relative_to
 from ouroboros.utils import atomic_write_json, utc_now_iso
+from ouroboros.workspace_ref import (
+    SshWorkspaceRef,
+    normalize_remote_root,
+    workspace_ref_for,
+)
+
+# Typed unavailability code for the ssh executor kind, meaning EXACTLY ONE thing:
+# no remote workspace broker is registered in THIS process (a CLI, a worker before
+# the server lifespan, a build without the transport). It is never a fallback and
+# never a stand-in for a remote refusal — a registered broker's failures keep their
+# own `RemoteWorkspaceError` codes, because "the remote said no" and "this process
+# can reach no remote at all" are different answers the owner must tell apart.
+SSH_EXECUTOR_UNAVAILABLE = "SSH_EXECUTOR_UNAVAILABLE"
+
+
+class SshExecutorUnavailableError(RuntimeError):
+    """Raised when an ssh execution is requested in a process with no broker.
+
+    Carries the owner ACTION for its code, out of the same register every other
+    remote refusal reads (``remote_refusal_actions``). This one reaches the MODEL as
+    prose — ``dispatch_prepare`` folds it into ``PreparedCall.unavailable``, which
+    lands in the task transcript verbatim — so the reader least able to look a code
+    up was the one getting a sentence with no next step in it.
+    """
+
+    code = SSH_EXECUTOR_UNAVAILABLE
+
+    def __init__(self, detail: str = ""):
+        from ouroboros.remote_refusal_actions import REFUSAL_ACTIONS
+
+        message = SSH_EXECUTOR_UNAVAILABLE
+        if detail:
+            message = f"{SSH_EXECUTOR_UNAVAILABLE}: {detail}"
+        self.action = REFUSAL_ACTIONS.get(SSH_EXECUTOR_UNAVAILABLE.lower(), "retry")
+        super().__init__(message)
+
 
 @dataclass(frozen=True)
 class PathMapping:
@@ -48,6 +84,10 @@ class ExecutorRef:
     network: str
     mappings: tuple[PathMapping, ...]
     container_name: str = ""
+    # ssh projection fields (derived from the persisted WorkspaceRef; an ssh
+    # ExecutorRef is never stored — WorkspaceRef is the only durable placement).
+    connection_id: str = ""
+    remote_root: str = ""
 
 @dataclass
 class ExecutorResult:
@@ -90,8 +130,18 @@ _PROCESS_RECORD_OWNER = "ouroboros_workspace_executor"
 _PROCESS_RECORD_SCHEMA_VERSION = 1
 
 def executor_ref_from_ctx(ctx: Any) -> ExecutorRef | None:
-    """Return a normalized executor ref from ToolContext/task metadata."""
+    """Return the executor projection for a ToolContext/task record.
 
+    RWS3-03 derivation order: a sealed ``WorkspaceRef`` in task metadata is the
+    placement authority — an ssh ref yields a DERIVED ssh ExecutorRef (nothing
+    stores an ssh executor_ref independently). A local ref (and the legacy
+    no-ref case) keeps today's behavior: the operator/runtime ``executor_ref``
+    from context/metadata, or None for plain host execution.
+    """
+
+    sealed = workspace_ref_for(ctx)
+    if isinstance(sealed, SshWorkspaceRef):
+        return executor_ref_from_workspace_ref(sealed)
     accessor = getattr(ctx, "workspace_executor_ref", None)
     if callable(accessor):
         raw = accessor()
@@ -106,19 +156,53 @@ def executor_ref_from_ctx(ctx: Any) -> ExecutorRef | None:
     return normalize_executor_ref(raw)
 
 
+def executor_ref_from_workspace_ref(ref: SshWorkspaceRef) -> ExecutorRef:
+    """Project the persisted ssh placement into the immutable executor facade ref.
+
+    Public because the Home CHANNELS (attachment staging, media import, the snapshot
+    bridge) hold a sealed ``SshWorkspaceRef`` without holding a ``ToolContext`` — task
+    admission has a placement long before there is a tool context to read it from.
+    Reaching for the private name from those call sites would have made this seam
+    private in name only."""
+
+    return ExecutorRef(
+        kind="ssh",
+        executor_id=ref.workspace_id,
+        network="host",
+        mappings=(),
+        connection_id=ref.connection_id,
+        remote_root=ref.remote_root,
+    )
+
+
 def normalize_executor_ref(raw: dict[str, Any]) -> ExecutorRef | None:
     if not raw:
         return None
     kind = str(raw.get("type") or raw.get("kind") or "").strip().lower()
     if not kind:
         raise ValueError("executor_ref.type is required")
-    if kind not in {"local", "docker_exec"}:
+    if kind not in {"local", "docker_exec", "ssh"}:
         raise ValueError(f"unsupported executor_ref.type: {kind}")
     network = str(raw.get("network") or "host").strip().lower()
     if network not in {"host", "none"}:
         raise ValueError("executor_ref.network must be 'host' or 'none'")
     if kind == "local" and network == "none":
         raise ValueError("local executor_ref cannot enforce network=none; use docker_exec")
+    if kind == "ssh":
+        if network == "none":
+            raise ValueError("ssh executor_ref cannot enforce network=none")
+        connection_id = str(raw.get("connection_id") or "").strip()
+        if not connection_id:
+            raise ValueError("ssh executor_ref requires connection_id")
+        remote_root = normalize_remote_root(raw.get("remote_root"))
+        return ExecutorRef(
+            kind="ssh",
+            executor_id=str(raw.get("id") or raw.get("workspace_id") or connection_id),
+            network=network,
+            mappings=(),
+            connection_id=connection_id,
+            remote_root=remote_root,
+        )
 
     mappings: list[PathMapping] = []
     workspace_host = str(raw.get("workspace_host_path") or "").strip()
@@ -206,10 +290,256 @@ def map_backend_path(executor: ExecutorRef, path_text: str) -> pathlib.Path:
     raise ValueError(f"path is outside executor backend mappings: {path_text}")
 
 
+def covers(executor: ExecutorRef | None, path: pathlib.Path) -> bool:
+    """Whether the executor's path mappings cover host ``path``.
+
+    The ONE coverage predicate every process surface routes through: True means
+    "run this cwd through the executor backend", False (including any mapping
+    failure — non-coverage is never an error here) means "fall back to host
+    execution"."""
+    if executor is None:
+        return False
+    try:
+        map_host_path(executor, pathlib.Path(path).resolve(strict=False))
+    except Exception:
+        return False
+    return True
+
+
+def covering_host_path(executor: ExecutorRef | None, backend_path_text: str) -> pathlib.Path | None:
+    """Guard-side backend→host projection of ``covers``: the host path a
+    backend-absolute path maps to when the executor covers it, else ``None``
+    (never raises), so shell guards can judge backend tokens by host policy."""
+    if executor is None:
+        return None
+    try:
+        return map_backend_path(executor, backend_path_text)
+    except Exception:
+        return None
+
+
+def ensure_execution_cwd(executor: ExecutorRef | None, resolved_cwd: pathlib.Path, *, cwd_root: str = "") -> pathlib.Path:
+    """Materialize a resolved process cwd — the ONLY place a cwd directory is
+    created (``resolve_shell_cwd`` is a pure fact resolver). Called once per
+    operation at the execution boundary, after resolution and before any
+    exists-check or process start.
+
+    Policy (the resolver's former side effects, unchanged): only the task-owned
+    data roots (task_drive / artifact_store) and the unnamed-deliverables
+    container are auto-created; every other cwd must already exist. Local and
+    docker_exec backends both see host paths (docker mounts the host mapping),
+    so host-side mkdir is authoritative for both; a remote backend would own
+    materialization here instead — hence the executor parameter."""
+    path = pathlib.Path(resolved_cwd)
+    label = str(cwd_root or "")
+    if label in {"task_drive", "artifact_store"}:
+        try:
+            path.mkdir(parents=True, exist_ok=True)
+        except OSError as exc:
+            raise ValueError(f"could not create {label} cwd {path}: {exc}") from exc
+    elif label == "user_files":
+        from ouroboros.tool_access import _deliverables_root
+
+        if path.resolve(strict=False) == _deliverables_root():
+            path.mkdir(parents=True, exist_ok=True)
+    return path
+
+
+def ssh_workspace_ref_payload(executor: ExecutorRef) -> dict[str, str]:
+    """Rebuild the sealed placement payload an ssh ExecutorRef was projected FROM.
+
+    The projection is lossless by construction (`_executor_ref_from_workspace_ref`),
+    so this is a round-trip, not a second placement authority: the broker is
+    addressed by the same descriptor `workspace_admission` sealed.
+    """
+    if executor.kind != "ssh":
+        raise ValueError("ssh_workspace_ref_payload is for ssh placement")
+    return SshWorkspaceRef(
+        connection_id=executor.connection_id,
+        remote_root=executor.remote_root,
+        workspace_id=executor.executor_id,
+    ).to_payload()
+
+
+def _remote_service(executor: ExecutorRef, phase: str):
+    """The broker facade, or the honest "this process has no transport" refusal.
+
+    `SSH_EXECUTOR_UNAVAILABLE` survives synthesis for exactly ONE condition: no
+    broker is registered in this process (a build without the ssh transport, or a
+    process that never ran the server lifespan). A registered broker's own
+    failures are typed `RemoteWorkspaceError`s and are NOT flattened into this
+    code — "the remote refused" and "this build cannot reach any remote" are
+    different answers and the owner must be able to tell them apart.
+    """
+    from ouroboros.remote_workspace import get_remote_workspace_service
+    from ouroboros.workspace_diagnostics import RemoteWorkspaceError
+
+    try:
+        return get_remote_workspace_service()
+    except RemoteWorkspaceError as exc:
+        raise SshExecutorUnavailableError(
+            f"no remote workspace broker is registered in this process "
+            f"({phase}, connection_id={executor.connection_id}): {exc}"
+        ) from exc
+
+
+def prepare_native_operation(
+    executor: ExecutorRef | None,
+    tool: str,
+    *,
+    args: Any = None,
+    blobs: Any = None,
+    task_id: str = "",
+    parent_task_id: str = "",
+    project_id: str = "",
+    request_id: str = "",
+    operation_id: str = "",
+    deadline_ms: int | None = None,
+) -> Any:
+    """ONE bundled prepare for a NATIVE (ssh) operation — the §3.1 step-2 door.
+
+    The target answers with every fact the authorize phase needs in a single
+    round trip (cwd kind, git toplevel, interpreter candidates, protected-path
+    stats, path canonicalizations) plus the token binding of the
+    target-canonical execution args; there is deliberately no per-fact RPC
+    (codex #17). Local and docker placements prepare on Home and never call
+    this.
+
+    Returns the broker's :class:`~ouroboros.remote_workspace.PreparedRemoteCall`.
+    """
+    if executor is None or executor.kind != "ssh":
+        raise ValueError("prepare_native_operation is for ssh placement; local/docker prepare on Home")
+    return _remote_service(executor, "prepare").prepare(
+        ssh_workspace_ref_payload(executor),
+        request_id=str(request_id or uuid.uuid4().hex[:16]),
+        operation_id=str(operation_id or uuid.uuid4().hex[:16]),
+        tool=str(tool),
+        args=dict(args or {}),
+        blobs=dict(blobs or {}),
+        deadline_ms=deadline_ms,
+        task_id=str(task_id or ""),
+        parent_task_id=str(parent_task_id or ""),
+        project_id=str(project_id or ""),
+    )
+
+
+def fetch_native_blob(
+    executor: ExecutorRef | None,
+    blob_id: str,
+    *,
+    max_bytes: int,
+    task_id: str = "",
+) -> bytes:
+    """Fetch ONE content-addressed blob a prepared operation declared.
+
+    On-demand only, and only for a blob some manifest named: a snapshot's manifest
+    arrives first and its entries are what authorize each fetch, so nothing is
+    transferred that Home has not already been told the size and hash of."""
+    if executor is None or executor.kind != "ssh":
+        raise ValueError("fetch_native_blob is for native (ssh) placements")
+    return bytes(
+        _remote_service(executor, "import").fetch_blob(
+            ssh_workspace_ref_payload(executor),
+            str(blob_id),
+            max_bytes=int(max_bytes),
+            task_id=str(task_id or ""),
+        )
+    )
+
+
+def abort_prepared_operation(
+    executor: ExecutorRef | None,
+    prepared: Any,
+    *,
+    task_id: str = "",
+    reason: str = "denied",
+) -> bool:
+    """Withdraw a prepared native operation that must NOT be executed.
+
+    The third member of the prepare/execute pair, and the one a Home channel needs
+    when its own pre-execution check fails: an operation the target has prepared but
+    Home refuses must be told so, or the target holds a reserved token and its
+    staged blobs until expiry."""
+    if executor is None or executor.kind != "ssh":
+        raise ValueError("abort_prepared_operation is for native (ssh) prepared operations")
+    return bool(
+        _remote_service(executor, "authorize").abort_prepared(
+            ssh_workspace_ref_payload(executor),
+            prepared,
+            task_id=str(task_id or ""),
+            reason=str(reason or "denied"),
+        )
+    )
+
+
+def execute_prepared(
+    executor: ExecutorRef | None,
+    prepared: Any,
+    *,
+    canonical_args: Any = None,
+    task_id: str = "",
+    timeout_sec: float | None = None,
+    import_kind: str = "",
+    import_context: Any = None,
+) -> Any:
+    """Execute a token-bound prepared native operation; return its envelope.
+
+    The narrow sibling of ``execute``: the authorized token goes to the target,
+    which revalidates the binding and the path confinement as execution
+    INTEGRITY — not as a second policy authority. Local/docker keep ``execute``
+    unchanged.
+
+    The return value is the target's :class:`ToolExecutionEnvelope`, already
+    Home-imported by the transport (declared blobs verified, published through the
+    artifact authority, remote provenance kept in the private receipt). It is
+    deliberately NOT flattened into an ``ExecutorResult``: the envelope's ``text``
+    IS the operation's model-facing answer — for a native read it is the file, and
+    for a process it is the ONE rendered process result both placements produce
+    (`workspace_native_contract.render_process_result_text`). A returncode-shaped
+    projection would throw that text away and make the dispatcher re-render, badly,
+    what the target already rendered correctly.
+
+    ``canonical_args`` defaults to the prepared call's own ``execution_args``:
+    the argv Home authorized IS the argv that runs, and passing anything else is
+    the caller explicitly re-declaring what it authorized (the target rejects a
+    mismatch against the token binding).
+
+    ``import_kind``/``import_context`` name which CLOSED import channel the result
+    belongs to (`remote_protocol.IMPORT_CHANNELS`). The default is the ordinary tool
+    result; a Home channel whose result means something else — an attachment set
+    whose manifest must be checked against what Home authorized — declares its own,
+    because the import contract is what decides how the returned bytes are believed.
+    """
+    if executor is None or executor.kind != "ssh":
+        raise ValueError("execute_prepared is for native (ssh) prepared operations; local/docker use execute()")
+    if prepared is None or not getattr(prepared, "prepared_token", ""):
+        raise ValueError("execute_prepared requires a bound PreparedRemoteCall")
+    args = canonical_args if canonical_args is not None else getattr(prepared, "execution_args", {})
+    return _remote_service(executor, "execute").execute_prepared(
+        ssh_workspace_ref_payload(executor),
+        prepared,
+        canonical_args=dict(args or {}),
+        task_id=str(task_id or ""),
+        timeout_sec=timeout_sec,
+        import_kind=str(import_kind or ""),
+        import_context=import_context,
+    )
+
+
 def execute(ctx: Any, cmd: list[str], cwd: pathlib.Path, timeout_sec: int) -> ExecutorResult:
     executor = executor_ref_from_ctx(ctx)
     if executor is None:
         raise ValueError("no executor_ref configured")
+    if executor.kind == "ssh":
+        # NOT an unavailability: this door takes a Home `cwd` and a Home argv, so
+        # an ssh placement reaching it would mean the dispatch skipped the native
+        # route — a wiring error, not a missing transport. It is refused the same
+        # way `execute_prepared` refuses a local ref: the two doors are exclusive,
+        # and `SSH_EXECUTOR_UNAVAILABLE` keeps meaning only "no broker here".
+        raise ValueError(
+            "ssh placement executes prepared native operations; route the "
+            f"operation through execute_prepared() (connection_id={executor.connection_id})"
+        )
     bootstrap_process_path()
     cwd_path = pathlib.Path(cwd).resolve(strict=False)
     backend_cwd = map_host_path(executor, cwd_path)
