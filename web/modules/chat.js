@@ -28,6 +28,8 @@ import {
     loadOlderControlState,
     nextQuotaEscalation,
 } from './chat_render_batch.js';
+import { createDocumentBubble } from './document_bubble.js';
+import { createRemoteCardUi } from './remote_card_ui.js';
 
 // Row-surface disclosure guard (v6.71.0), pure for node tests: returns the
 // lineKey to toggle for a click landing on `target`, or '' when the click must
@@ -778,6 +780,9 @@ export function createChatInstance({
     const isInstanceVisible = () =>
         Boolean(messagesDiv) && messagesDiv.offsetParent !== null && !document.hidden;
     const liveCardRecords = new Map();
+    // taskId → remote state, so a live SSH frame survives history repaints and a
+    // terminal task keeps its last known connection state instead of resetting.
+    let remoteTaskStates = new Map();
     // Reusable slots (bg-consciousness, active) destroy+recreate their card on every
     // new cycle and auto-collapse on each cycle finish. Remember the owner's explicit
     // expand per slot so cycle churn restores it instead of snapping the card shut.
@@ -1401,6 +1406,30 @@ export function createChatInstance({
         return taskState;
     }
 
+    // ── Remote (SSH-placed) task state in the live card ──────────────────────
+    // The DECISIONS live in remote_task_state.js and the RENDERING in
+    // remote_card_ui.js; this is only the wiring that hands the view the few chat
+    // capabilities it may use. Naming them here, in one object, is the point: the
+    // card renderer cannot reach further into this module than this list.
+    const { buildDocumentBubble, documentMessageKey } = createDocumentBubble({
+        formatMsgTime, getSenderLabel, stampNodeTimestamp,
+    });
+    const remoteCardUi = createRemoteCardUi({
+        getStates: () => remoteTaskStates,
+        setStates: (states) => { remoteTaskStates = states; },
+        getProjectId: () => projectId,
+        liveCardRecords,
+        forceTaskCard,
+        queueTaskLiveUpdate,
+        normalizeLogTs,
+        setLiveCardTypingVisible,
+        cancelTask,
+        showToast,
+        openConfirmDialog,
+        apiClient,
+    });
+    const { applyRemoteConnectionEvent } = remoteCardUi;
+
     function markAssistantReply(taskId = '') {
         const resolvedTaskId = taskId || '';
         if (!resolvedTaskId) return;
@@ -1657,7 +1686,11 @@ export function createChatInstance({
             // record through the same terminal seam replay uses — idempotent with
             // a later event, so double resolution is harmless.
             try {
-                const stored = await apiFetch(`/api/tasks/${encodeURIComponent(taskId)}`).then(
+                // `cache: 'no-store'` is load-bearing, not hygiene: this read exists to see the
+                // FRESH terminal status, and a cached pre-cancel 200 makes
+                // `taskTerminalPhase(stored)` non-terminal — leaving the card "Working" behind a
+                // dead disabled button, the exact failure this reconciliation was added to stop.
+                const stored = await apiFetch(`/api/tasks/${encodeURIComponent(taskId)}`, { cache: 'no-store' }).then(
                     (resp) => (resp && typeof resp.json === 'function' && resp.ok !== false) ? resp.json() : null,
                 );
                 reconcileCancelCardFromDetail(record, taskId, stored);
@@ -1684,7 +1717,11 @@ export function createChatInstance({
                 // sit "Working" forever. Ask the durable record and resolve the
                 // card through the same terminal seam replay uses.
                 try {
-                    const stored = await apiFetch(`/api/tasks/${encodeURIComponent(taskId)}`).then(
+                    // `cache: 'no-store'` is load-bearing, not hygiene: this read exists to see the
+                    // FRESH terminal status, and a cached pre-cancel 200 makes
+                    // `taskTerminalPhase(stored)` non-terminal — leaving the card "Working" behind a
+                    // dead disabled button, the exact failure this reconciliation was added to stop.
+                    const stored = await apiFetch(`/api/tasks/${encodeURIComponent(taskId)}`, { cache: 'no-store' }).then(
                         (resp) => (resp && typeof resp.json === 'function' && resp.ok !== false) ? resp.json() : null,
                     );
                     reconcileCancelCardFromDetail(record, taskId, stored);
@@ -2430,6 +2467,9 @@ export function createChatInstance({
             || syntheticKey.startsWith('subagent-lifecycle:')
             || syntheticKey.startsWith('subagent-progress:')
             || syntheticKey.startsWith('subagent-result:')
+            // One remote-connection line per task, updated in place: a flapping
+            // connection must not stack a new row on every frame.
+            || syntheticKey.startsWith('remote-connection:')
             || syntheticKey.startsWith('task_done|');
         if (!isLegacyParentSubagentKey) {
             record.finished = isTerminalTaskPhase(nextPhase, summary.terminal);
@@ -2696,6 +2736,9 @@ export function createChatInstance({
             `task_done|${taskId}`,
             { suppressDomInsert, rawTs },
         );
+        remoteCardUi.settleTerminalTask(taskId, String(
+            msg?.status || (failedResult ? 'failed' : 'completed'),
+        ).toLowerCase());
         finishLiveCard(taskId, terminalPhase);
         scheduleTaskUiCleanup(taskState);
     }
@@ -3582,6 +3625,8 @@ export function createChatInstance({
                     _historyReplayActive = false;
                 }
 
+                if (rebuildAll) remoteCardUi.reconcileAfterRebuild();
+
                 // After first load, unfinished foreground cards still show typing.
                 if (!historyLoaded) {
                     const hasOngoingTask = Array.from(liveCardRecords.values()).some(isForegroundLiveCard);
@@ -4437,6 +4482,12 @@ export function createChatInstance({
         applySuggestedName(msg?.task_id || '', msg?.suggested_name || '');
     });
 
+    // Owner-scoped live remote state; applyRemoteConnectionEvent drops frames
+    // belonging to another Project thread.
+    onWs('connection_state', (event) => {
+        applyRemoteConnectionEvent(event);
+    });
+
     onWs('outbound_sent', (evt) => {
         markPendingDelivered(evt?.clientMessageId || '');
     });
@@ -4516,103 +4567,6 @@ export function createChatInstance({
     // downloadViaHostBridge (desktop host-bridge saves to Downloads instead of
     // navigating the WKWebView fullscreen; browser falls back to fetch+blob),
     // else an in-memory base64 blob (live-only), else a disabled label.
-    function buildDocumentBubble(msg) {
-        const role = msg.role === 'user' ? 'user' : 'assistant';
-        const sender = role === 'user'
-            ? getSenderLabel('user', false, '', {
-                source: msg.source || '',
-                senderLabel: msg.sender_label || '',
-                senderSessionId: msg.sender_session_id || '',
-            })
-            : 'Ouroboros';
-        const bubble = document.createElement('div');
-        bubble.className = `chat-bubble ${role}`;
-        const rawTs = msg.ts || new Date().toISOString();
-        const timeFmt = formatMsgTime(rawTs);
-        const timeHtml = timeFmt ? `<div class="msg-time" title="${escapeHtmlAttr(timeFmt.full)}">${escapeHtml(timeFmt.short)}</div>` : '';
-        const captionHtml = msg.caption ? `<div class="message">${escapeHtml(msg.caption)}</div>` : '';
-        const mime = /^[A-Za-z0-9!#$&^_.+-]+\/[A-Za-z0-9!#$&^_.+-]+$/.test(String(msg.mime || ''))
-            ? String(msg.mime)
-            : 'application/octet-stream';
-        const fileBase64 = /^[A-Za-z0-9+/=\s]+$/.test(String(msg.file_base64 || ''))
-            ? String(msg.file_base64 || '').replace(/\s+/g, '')
-            : '';
-        const downloadUrl = /^\/api\/files\/download\?/.test(String(msg.download_url || ''))
-            ? String(msg.download_url)
-            : '';
-        const filename = String(msg.filename || 'file').replace(/[\r\n]+/g, ' ').slice(0, 200);
-        const canDownload = Boolean(downloadUrl || fileBase64);
-        // Body click = open in default OS app (external window); a separate ↓
-        // button saves to ~/Downloads. Both degrade to a base64 blob when only
-        // the live payload is present (no durable server URL to hand the bridge).
-        const openHtml = canDownload
-            ? `<button type="button" class="chat-file" data-open="1">📎 ${escapeHtml(filename)}</button>`
-            : `<span class="chat-file chat-file-empty">📎 ${escapeHtml(filename)}</span>`;
-        const downloadHtml = canDownload
-            ? `<button type="button" class="chat-file-download" data-download="1" title="Download" aria-label="Download">↓</button>`
-            : '';
-        bubble.innerHTML = `
-            <div class="sender">${escapeHtml(sender)}</div>
-            ${captionHtml}
-            <div class="message"><div class="chat-file-row">${openHtml}${downloadHtml}</div></div>
-            ${timeHtml}
-        `;
-        const saveBlobFallback = () => {
-            const bytes = Uint8Array.from(atob(fileBase64), (c) => c.charCodeAt(0));
-            const blobUrl = URL.createObjectURL(new Blob([bytes], { type: mime }));
-            const tmp = document.createElement('a');
-            Object.assign(tmp, { href: blobUrl, download: filename, rel: 'noopener' });
-            document.body.appendChild(tmp);
-            tmp.click();
-            tmp.remove();
-            setTimeout(() => URL.revokeObjectURL(blobUrl), 1000);
-        };
-        const openBtn = bubble.querySelector('.chat-file[data-open]');
-        if (openBtn && canDownload) {
-            openBtn.addEventListener('click', async () => {
-                try {
-                    if (downloadUrl) {
-                        await openViaHostBridge(downloadUrl, filename);
-                        return;
-                    }
-                    saveBlobFallback();
-                } catch (err) {
-                    showToast(`Could not open file: ${err && err.message ? err.message : err}`, 'error');
-                }
-            });
-        }
-        const dlBtn = bubble.querySelector('.chat-file-download[data-download]');
-        if (dlBtn && canDownload) {
-            dlBtn.addEventListener('click', async () => {
-                try {
-                    if (downloadUrl) {
-                        await downloadViaHostBridge(downloadUrl, filename);
-                        return;
-                    }
-                    saveBlobFallback();
-                } catch (err) {
-                    showToast(`Could not download file: ${err && err.message ? err.message : err}`, 'error');
-                }
-            });
-        }
-        stampNodeTimestamp(bubble, rawTs);
-        return bubble;
-    }
-
-    // Dedup key shared by the live WS insert and history replay of the SAME
-    // document (send_document uses one ts for both the frame and the persisted
-    // row), so a routine background sync (rebuildAll=false, bubbles not cleared)
-    // does not re-insert an already-rendered file bubble.
-    function documentMessageKey(msg) {
-        return [
-            'document',
-            String(msg.ts || ''),
-            String(msg.download_url || ''),
-            String(msg.filename || ''),
-            String(msg.caption || ''),
-        ].join('|');
-    }
-
     function appendDocumentBubble(msg) {
         const key = documentMessageKey(msg);
         if (key && seenMessageKeys.has(key)) return false;

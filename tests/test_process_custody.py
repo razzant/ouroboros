@@ -5,8 +5,10 @@ import multiprocessing
 import os
 import pathlib
 import re
+import shutil
 import subprocess
 import sys
+import tempfile
 import time
 
 import pytest
@@ -45,9 +47,11 @@ _POPEN_ALLOWLIST = {
     "ouroboros/process_containment.py",
     "ouroboros/packaged_cli.py",          # user-facing CLI wrapper (foreground)
     "ouroboros/cli.py",                   # dev CLI (foreground)
-    "ouroboros/server_control.py",        # restart exec path
     "ouroboros/headless.py",              # waited synchronous child
-    "ouroboros/preflight_runner.py",      # waited hermetic pytest child
+    # NOTE: `ouroboros/preflight_runner.py` used to sit here as a "waited hermetic
+    # pytest child". It now spawns through `container.spawn`, not raw `Popen`, so the
+    # waiver is dead and `test_the_custody_allowlist_holds_no_dead_exemptions` rejects
+    # it — a stale exemption silently pardons the next raw spawn in that file.
     "ouroboros/tools/shell.py",           # bounded foreground commands (waited + tracked)
     "ouroboros/tools/skill_exec.py",      # bounded skill run (waited + tracked)
     "ouroboros/tools/skill_preflight.py", # waited preflight child
@@ -57,10 +61,25 @@ _POPEN_ALLOWLIST = {
     "ouroboros/workspace_executor.py",    # custody write-through added at spawn
     "ouroboros/local_model.py",           # custody record added at spawn
     "ouroboros/extension_companion.py",   # custody write-through added at spawn
-    "ouroboros/tools/services.py",        # routed through spawn_supervised
     "supervisor/update_merge.py",        # bounded pre-restart import/compile smoke
     "supervisor/git_ops.py",             # shared bounded Git/dependency helpers (waited + panic-tracked)
     "ouroboros/colab_bootstrap.py",      # bounded Colab clone/fetch helper
+    # (RWS v2) Execd-side spawns are custodied by the EXECD ledger, not Home's.
+    # Appendix E §5.4 is explicit: remote PID/PGID values live only in the
+    # execd/custodian ledger and never cross into Home process custody, so
+    # routing these through spawn_supervised would create exactly the
+    # cross-machine escape hatch the transport spec forbids. Both sites run
+    # children in task-scoped process groups under NativeExecutionControl /
+    # LeaseCustody (register → run → release on one ownership path across
+    # normal return, timeout, cancellation and panic).
+    "ouroboros/workspace_native.py",      # native foreground/service groups
+    "ouroboros/execd.py",                 # custodian child + owned groups
+    # Same execd-side rule, unchanged ownership path: the media channel's ffmpeg
+    # child was extracted OUT of `workspace_native.py` at the module-size gate and
+    # kept its custody exactly — its own process group under the same
+    # NativeExecutionControl register → run → release path, with the group-kill
+    # injected by the caller rather than reimplemented here.
+    "ouroboros/workspace_media_native.py",  # native media frame extraction
 }
 
 
@@ -77,20 +96,76 @@ def _spawn_service_from_worker_process(drive_root: str, result_queue) -> None:
     result_queue.put(proc.pid)
 
 
-def test_popen_sites_are_custodied_or_allowlisted():
-    pattern = re.compile(r"subprocess\.Popen\(|[^.\w]Popen\(")
-    offenders = []
+_POPEN_PATTERN = re.compile(r"subprocess\.Popen\(|[^.\w]Popen\(")
+
+
+def _popen_sites(root: pathlib.Path) -> list[str]:
+    """Repo-relative paths under `root` that spell a raw Popen call."""
+
+    sites = []
     for base in ("ouroboros", "supervisor"):
-        for path in (REPO_ROOT / base).rglob("*.py"):
-            rel = path.relative_to(REPO_ROOT).as_posix()
+        for path in (root / base).rglob("*.py"):
             text = path.read_text(encoding="utf-8", errors="replace")
-            if pattern.search(text) and rel not in _POPEN_ALLOWLIST:
-                offenders.append(rel)
+            if _POPEN_PATTERN.search(text):
+                sites.append(path.relative_to(root).as_posix())
     for name in ("server.py", "launcher.py"):
-        path = REPO_ROOT / name
-        if path.exists() and pattern.search(path.read_text(encoding="utf-8", errors="replace")):
-            if name not in _POPEN_ALLOWLIST:
-                offenders.append(name)
+        path = root / name
+        if path.exists() and _POPEN_PATTERN.search(
+            path.read_text(encoding="utf-8", errors="replace")
+        ):
+            sites.append(name)
+    return sorted(sites)
+
+
+def test_the_custody_scan_flags_an_uncustodied_spawn():
+    """The scan must be shown FLAGGING one, not only finding nothing.
+
+    A conformance scan that passes because it matches nothing is
+    indistinguishable from one that passes because the rule holds. This runs it
+    over a synthetic tree that really does spawn raw, and over the legal
+    spellings, so the pattern is known to discriminate.
+    """
+
+    root = pathlib.Path(tempfile.mkdtemp())
+    try:
+        (root / "ouroboros").mkdir()
+        (root / "supervisor").mkdir()
+        (root / "ouroboros" / "offender.py").write_text(
+            "import subprocess\nsubprocess.Popen(['sleep', '1'])\n", encoding="utf-8"
+        )
+        (root / "ouroboros" / "bare.py").write_text(
+            "from subprocess import Popen\n\n\ndef go():\n    return Popen(['x'])\n",
+            encoding="utf-8",
+        )
+        (root / "ouroboros" / "clean.py").write_text(
+            "from ouroboros.process_custody import spawn_supervised\n"
+            "spawn_supervised(['x'], drive_root=None, purpose='p', scope='task')\n"
+            "PROC: 'subprocess.Popen'\n",
+            encoding="utf-8",
+        )
+        assert _popen_sites(root) == ["ouroboros/bare.py", "ouroboros/offender.py"]
+    finally:
+        shutil.rmtree(root, ignore_errors=True)
+
+
+def test_the_custody_allowlist_holds_no_dead_exemptions():
+    """An exemption for a file that no longer spawns raw pardons a future one.
+
+    `ouroboros/server_control.py` and `ouroboros/tools/services.py` had both
+    moved to `spawn_supervised` while keeping their waivers, so a raw `Popen`
+    reintroduced in either would have passed the scan unnoticed.
+    """
+
+    live = set(_popen_sites(REPO_ROOT))
+    dead = sorted(_POPEN_ALLOWLIST - live)
+    assert not dead, (
+        "these files are exempted from the custody scan but no longer spawn raw: "
+        f"{dead}. Drop the entry — a stale waiver silently pardons the next one."
+    )
+
+
+def test_popen_sites_are_custodied_or_allowlisted():
+    offenders = [rel for rel in _popen_sites(REPO_ROOT) if rel not in _POPEN_ALLOWLIST]
     assert not offenders, (
         "New raw Popen call sites outside the custody allowlist: "
         f"{offenders}. Route long-lived spawns through "
@@ -124,6 +199,73 @@ def test_spawn_supervised_records_ledger_entry(tmp_path):
     finally:
         proc.kill()
         proc.wait(timeout=5)
+
+
+def test_required_custody_kills_the_child_when_the_ledger_write_fails(
+    tmp_path, monkeypatch
+):
+    """(RWS v2 §5.4) An unledgered long-lived SSH child would survive panic.
+
+    A false append and a raising append are treated identically: kill the newborn
+    group and return no live child. Upstream since made that unconditional, which
+    is strictly stronger than the narrow mode this branch asked for — so
+    ``required_custody`` no longer selects the behaviour, it asserts the remaining
+    precondition (an isolated process group, checked separately below). The
+    guarantee this test exists for is unchanged and now covers every caller.
+    """
+    monkeypatch.setattr(process_custody, "append_jsonl", lambda *_a, **_k: False)
+    escaped = []
+
+    with pytest.raises(RuntimeError, match="could not enter durable custody"):
+        escaped.append(
+            spawn_supervised(
+                [sys.executable, "-c", "import time; time.sleep(30)"],
+                drive_root=tmp_path,
+                purpose="required-custody-sleeper",
+                scope="session",
+                required_custody=True,
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+            )
+        )
+
+    assert escaped == []
+
+
+def test_required_custody_refuses_a_shared_process_group(tmp_path):
+    with pytest.raises(ValueError, match="isolated process group"):
+        spawn_supervised(
+            [sys.executable, "-c", "pass"],
+            drive_root=tmp_path,
+            purpose="required-custody-no-group",
+            scope="session",
+            required_custody=True,
+            new_process_group=False,
+        )
+
+
+def test_a_failed_ledger_write_fails_closed_for_ORDINARY_callers_too(
+    tmp_path, monkeypatch
+):
+    """The fail-soft lane is gone, and that is the direction that matters.
+
+    This branch asked for fail-closed only in the narrow required-custody mode and
+    left everyone else soft. Upstream then closed it for every caller: a child that
+    could not enter the ledger is killed and the spawn raises, so no live process is
+    ever returned that the reaper cannot see. Nothing about the remote lane needs the
+    soft variant back, and asserting it would be asking for a weaker guarantee than
+    the code gives.
+    """
+    monkeypatch.setattr(process_custody, "append_jsonl", lambda *_a, **_k: False)
+    with pytest.raises(RuntimeError, match="could not enter durable custody"):
+        spawn_supervised(
+            [sys.executable, "-c", "import time; time.sleep(30)"],
+            drive_root=tmp_path,
+            purpose="ordinary-caller-sleeper",
+            scope="task",
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+        )
 
 
 @_POSIX_ONLY

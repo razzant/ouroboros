@@ -18,8 +18,14 @@ import uuid
 from dataclasses import dataclass, field
 from typing import Any, Dict, List, Tuple
 
-from ouroboros.utils import atomic_write_json, utc_now_iso
+from ouroboros.utils import (
+    atomic_write_json,
+    sanitize_tool_result_for_log,
+    sha256_text,
+    utc_now_iso,
+)
 
+_LOG = logging.getLogger(__name__)
 
 OBSERVABILITY_DIR = "observability"
 SCHEMA_VERSION = 1
@@ -444,6 +450,78 @@ def _redact_any(value: Any, records: List[RedactionRecord], path: str) -> Any:
 def redact_projection(value: Any) -> RedactionResult:
     records: List[RedactionRecord] = []
     return RedactionResult(_redact_any(value, records, "$"), records)
+
+
+# Key NAMES whose value is replaced wholesale in a log projection. Moved here with
+# the function below; nothing else read them.
+_SECRET_LOG_KEY_NAMES = frozenset({
+    "token", "api_key", "apikey", "authorization", "secret", "password",
+    "passwd", "passphrase",
+})
+
+
+def sanitize_tool_args_for_log(
+    fn_name: str, args: Dict[str, Any], threshold: int = 3000,
+) -> Dict[str, Any]:
+    """Sanitize tool arguments for logging: redact secrets, truncate large fields.
+
+    Lives HERE, beside the redactor it needs, and no longer in `ouroboros/utils.py`
+    where it sat behind a function-local `from ouroboros.observability import
+    redact_projection`. `ouroboros.utils` is a declared member of
+    `REMOTE_NATIVE_KERNEL_MODULES` and really travels in the execd bundle;
+    `ouroboros.observability` is a `home_policy_authority` and does not travel. So
+    a kernel module named a Home authority it could never import on the target,
+    and the §3.3 gate could not see the edge because it was inside a function
+    body. Every caller is Home-side (`consciousness`, `loop_tool_execution`) —
+    there was never a target-side reader to serve.
+    """
+
+    def _redact_public_string(value: str) -> tuple[str, bool]:
+        try:
+            redacted = redact_projection(value)
+            return str(redacted.value), bool(redacted.records)
+        except Exception:
+            _LOG.debug("Failed to run observability redactor for tool args", exc_info=True)
+            fallback = sanitize_tool_result_for_log(value)
+            return fallback, fallback != value
+
+    def _sanitize_value(key: str, value: Any, depth: int) -> Any:
+        if depth > 3:
+            return {"_depth_limit": True}
+        if key.lower() in _SECRET_LOG_KEY_NAMES:
+            return "*** REDACTED ***"
+        if isinstance(value, str):
+            redacted, did_redact = _redact_public_string(value)
+            if did_redact:
+                if len(redacted) > threshold:
+                    return f"<REDACTED_TRUNCATED:{key}:{len(redacted)}ch>"
+                return redacted
+            if len(value) > threshold:
+                return f"<TRUNCATED:{key}:{len(value)}ch:sha={sha256_text(value)[:12]}>"
+            return value
+        if isinstance(value, dict):
+            return {k: _sanitize_value(k, v, depth + 1) for k, v in value.items()}
+        if isinstance(value, list):
+            sanitized = [_sanitize_value(key, item, depth + 1) for item in value[:50]]
+            if len(value) > 50:
+                sanitized.append({"_truncated": f"... {len(value) - 50} more items"})
+            return sanitized
+        try:
+            json.dumps(value, ensure_ascii=False)
+            return value
+        except (TypeError, ValueError):
+            _LOG.debug("Failed to JSON serialize value in sanitize_tool_args", exc_info=True)
+            return {"_repr": repr(value)}
+
+    try:
+        return {k: _sanitize_value(k, v, 0) for k, v in args.items()}
+    except Exception:
+        _LOG.debug("Failed to sanitize tool arguments for logging", exc_info=True)
+        try:
+            return json.loads(json.dumps(args, ensure_ascii=False, default=str))
+        except Exception:
+            _LOG.debug("Tool argument sanitization failed completely", exc_info=True)
+            return {"_error": "sanitization_failed"}
 
 
 def persist_call(

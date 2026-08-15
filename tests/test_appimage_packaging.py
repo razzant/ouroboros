@@ -174,6 +174,7 @@ def test_apprun_custodian_refuses_unrelated_private_runtime(tmp_path: pathlib.Pa
     assert appdir.is_dir()
 
 
+@pytest.mark.serial
 def test_apprun_unmarked_desktop_path_keeps_exec_pid_and_appdir(tmp_path: pathlib.Path):
     appdir = tmp_path / "AppDir"
     pid_output = tmp_path / "launcher.pid"

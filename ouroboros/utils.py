@@ -125,6 +125,8 @@ def write_text_atomic(
     content: str,
     *,
     fsync: bool = False,
+    mode: int | None = None,
+    fsync_directory: bool = False,
 ) -> None:
     """Atomically overwrite ``path`` with ``content`` via a sibling temp file + os.replace.
 
@@ -136,7 +138,12 @@ def write_text_atomic(
 
     The existing file's permission bits are PRESERVED across the replace (os.replace
     creates a new inode, so without this a tracked executable script would lose its +x);
-    a brand-new file defaults to the platform mode (0644 minus umask).
+    a brand-new file defaults to the platform mode (0644 minus umask), unless ``mode``
+    explicitly requests a tighter contract (owner-only durable state does). The tight
+    mode is applied to the TEMP file before the rename, so the bytes are never briefly
+    world-readable. ``fsync_directory`` additionally persists the rename itself on POSIX,
+    which is the durability tier a fail-closed journal needs: write → fsync → rename →
+    parent fsync, and only then may its handler start.
 
     Note: a symlink at ``path`` is REPLACED with a regular file (os.replace acts on the
     link, not its target). This is intentional and confinement-preserving — writing
@@ -149,13 +156,18 @@ def write_text_atomic(
         existing_mode = os.stat(path).st_mode & 0o7777
     except OSError:
         existing_mode = None  # new file -> keep the platform default
+    target_mode = (int(mode) & 0o7777) if mode is not None else existing_mode
     tmp_name = (
         f".{path.name}.tmp.{os.getpid()}.{threading.get_ident()}.{uuid.uuid4().hex[:8]}"
     )
     tmp = path.with_name(tmp_name)
     try:
         if fsync:
-            fd = os.open(str(tmp), os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o644)
+            fd = os.open(
+                str(tmp),
+                os.O_WRONLY | os.O_CREAT | os.O_TRUNC,
+                target_mode if target_mode is not None else 0o644,
+            )
             try:
                 os.write(fd, content.encode("utf-8"))
                 os.fsync(fd)
@@ -163,12 +175,21 @@ def write_text_atomic(
                 os.close(fd)
         else:
             tmp.write_text(content, encoding="utf-8")
-        if existing_mode is not None:
+        if target_mode is not None:
             try:
-                os.chmod(tmp, existing_mode)
+                os.chmod(tmp, target_mode)
             except OSError:
                 pass
         os.replace(tmp, path)
+        if fsync_directory and os.name != "nt":
+            directory_fd = os.open(
+                str(path.parent),
+                os.O_RDONLY | getattr(os, "O_DIRECTORY", 0),
+            )
+            try:
+                os.fsync(directory_fd)
+            finally:
+                os.close(directory_fd)
     except Exception:
         try:
             tmp.unlink()
@@ -183,12 +204,20 @@ def atomic_write_json(
     *,
     trailing_newline: bool = False,
     fsync: bool = False,
+    mode: int | None = None,
+    fsync_directory: bool = False,
 ) -> None:
     """Atomically persist a JSON value (object or list) via a sibling temp file."""
     content = json.dumps(payload, ensure_ascii=False, indent=2)
     if trailing_newline:
         content += "\n"
-    write_text_atomic(pathlib.Path(path), content, fsync=fsync)
+    write_text_atomic(
+        pathlib.Path(path),
+        content,
+        fsync=fsync,
+        mode=mode,
+        fsync_directory=fsync_directory,
+    )
 
 
 def sweep_stale_temp_files(root: pathlib.Path, *, min_age_sec: float = 3600.0) -> int:
@@ -596,10 +625,6 @@ def sanitize_task_for_event(
         return task
 
 
-_SECRET_KEYS = frozenset([
-    "token", "api_key", "apikey", "authorization", "secret", "password", "passwd", "passphrase",
-])
-
 import re as _re
 _SECRET_PATTERNS = _re.compile(
     r'ghp_[A-Za-z0-9]{30,}'       # GitHub personal access token
@@ -742,60 +767,6 @@ def contains_real_secret_value(text: str) -> tuple[bool, List[str]]:
         if _secret_key_name(key) and not _secret_placeholder_value(value)
     )
     return bool(matches), list(matches)
-
-
-def sanitize_tool_args_for_log(
-    fn_name: str, args: Dict[str, Any], threshold: int = 3000,
-) -> Dict[str, Any]:
-    """Sanitize tool arguments for logging: redact secrets, truncate large fields."""
-
-    def _redact_public_string(value: str) -> tuple[str, bool]:
-        try:
-            from ouroboros.observability import redact_projection
-
-            redacted = redact_projection(value)
-            return str(redacted.value), bool(redacted.records)
-        except Exception:
-            log.debug("Failed to run observability redactor for tool args", exc_info=True)
-            return sanitize_tool_result_for_log(value), sanitize_tool_result_for_log(value) != value
-
-    def _sanitize_value(key: str, value: Any, depth: int) -> Any:
-        if depth > 3:
-            return {"_depth_limit": True}
-        if key.lower() in _SECRET_KEYS:
-            return "*** REDACTED ***"
-        if isinstance(value, str):
-            redacted, did_redact = _redact_public_string(value)
-            if did_redact:
-                if len(redacted) > threshold:
-                    return f"<REDACTED_TRUNCATED:{key}:{len(redacted)}ch>"
-                return redacted
-            if len(value) > threshold:
-                return f"<TRUNCATED:{key}:{len(value)}ch:sha={sha256_text(value)[:12]}>"
-            return value
-        if isinstance(value, dict):
-            return {k: _sanitize_value(k, v, depth + 1) for k, v in value.items()}
-        if isinstance(value, list):
-            sanitized = [_sanitize_value(key, item, depth + 1) for item in value[:50]]
-            if len(value) > 50:
-                sanitized.append({"_truncated": f"... {len(value) - 50} more items"})
-            return sanitized
-        try:
-            json.dumps(value, ensure_ascii=False)
-            return value
-        except (TypeError, ValueError):
-            log.debug("Failed to JSON serialize value in sanitize_tool_args", exc_info=True)
-            return {"_repr": repr(value)}
-
-    try:
-        return {k: _sanitize_value(k, v, 0) for k, v in args.items()}
-    except Exception:
-        log.debug("Failed to sanitize tool arguments for logging", exc_info=True)
-        try:
-            return json.loads(json.dumps(args, ensure_ascii=False, default=str))
-        except Exception:
-            log.debug("Tool argument sanitization failed completely", exc_info=True)
-            return {"_error": "sanitization_failed"}
 
 
 async def collect_evolution_metrics(repo_dir: str, data_dir: str | None = None) -> list[dict]:

@@ -297,8 +297,12 @@ def test_chat_scrolls_to_bottom_after_first_history_load():
     assert "insertTimelineNode(messagesDiv, node, typing" in source, \
         "insertMessageNode must route through chronological insertTimelineNode"
     # Media producers (photo, video, document) must each stamp sortable
-    # data-ts from the raw source timestamp; text bubbles stamp msg.ts.
-    assert source.count("stampNodeTimestamp(bubble, rawTs);") >= 3, \
+    # data-ts from the raw source timestamp; text bubbles stamp msg.ts. The
+    # document bubble moved to its own module, so the three producers are counted
+    # across the pair — the contract is "every media producer stamps", not "they
+    # all live in one file".
+    media_source = source + _read("web/modules/document_bubble.js")
+    assert media_source.count("stampNodeTimestamp(bubble, rawTs);") >= 3, \
         "photo/video/document bubbles must carry raw-timestamp data-ts"
     assert "stampNodeTimestamp(bubble, ts);" in source, \
         "chat text bubbles must carry raw-timestamp data-ts"

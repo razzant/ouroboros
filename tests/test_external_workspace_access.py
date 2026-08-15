@@ -18,7 +18,8 @@ from ouroboros.tool_access import (
     resolve_shell_cwd,
     user_files_path_block_reason,
 )
-from ouroboros.tools.registry import ToolContext, ToolRegistry, _command_mentions_protected_root
+from ouroboros.tools.registry import ToolContext, ToolRegistry
+from ouroboros.tools.shell_guards import _command_mentions_protected_root
 
 
 @pytest.fixture(autouse=True)

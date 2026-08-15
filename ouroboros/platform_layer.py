@@ -14,18 +14,39 @@ import time
 from dataclasses import dataclass
 from typing import Any, Callable, List, Optional
 
+from ouroboros.platform_flags import (  # noqa: F401 -- re-exported: the layer is ONE surface
+    BOOT_IDENTITY_UNKNOWN,
+    IS_LINUX,
+    IS_MACOS,
+    IS_WINDOWS,
+)
+from ouroboros.platform_layer_proc import (  # noqa: F401,E402 -- the layer is ONE import surface
+    LINUX_PROC_ROOT,
+    has_proc_filesystem,
+    proc_pid_path,
+    proc_entries,
+    _proc_start_ticks,
+    boot_anchored_monotonic_ms,
+    process_fingerprint,
+    process_group_status,
+)
+
 log = logging.getLogger(__name__)
 
-# Platform flags.
-IS_WINDOWS = sys.platform == "win32"
-IS_MACOS = sys.platform == "darwin"
-IS_LINUX = sys.platform.startswith("linux")
 
 PATH_SEP = ";" if IS_WINDOWS else ":"
+# The POSIX controlling-terminal device. A path, not an opener, because opening it needs
+# nothing platform-specific — `os.open` is portable and the fd behaves like any other.
+# The device NAME is the whole platform fact, and Windows has no equivalent to name,
+# which is why every caller here reaches this only after handling Windows on its own.
+POSIX_CONTROLLING_TERMINAL = "/dev/tty"
 _SUBPROCESS_NO_WINDOW = (
     getattr(subprocess, "CREATE_NO_WINDOW", 0x08000000) if IS_WINDOWS else 0
 )
 _PATH_BOOTSTRAPPED = False
+_AGENT_CHILD_ENV_DENYLIST = frozenset({
+    "OUROBOROS_NETWORK_PASSWORD",
+})
 
 
 def executable_name_candidates(name: str) -> List[str]:
@@ -167,6 +188,46 @@ def scrub_repo_from_pythonpath(env: dict[str, str], repo_dir: "str | pathlib.Pat
     return out
 
 
+def scrub_agent_child_env(env: dict[str, str]) -> dict[str, str]:
+    """Remove owner-control credentials from an agent-controlled child env.
+
+    This is intentionally a narrow denylist, not a generic provider-secret
+    policy: provider subprocesses may legitimately need their credentials,
+    while the Network Password exists only to authenticate owner actions
+    against the Home gateway. Match case-insensitively for Windows parity.
+    """
+
+    return {
+        str(key): str(value)
+        for key, value in dict(env).items()
+        if str(key).upper() not in _AGENT_CHILD_ENV_DENYLIST
+    }
+
+
+def best_effort_nonblocking_pipe_write(stream_or_fd: Any, payload: bytes) -> bool:
+    """Attempt a panic/control write without ever falling back to a blocking write.
+
+    ``os.set_blocking`` did not support Windows pipes before Python 3.12.  Panic
+    must still continue to transport teardown on every supported Python, so an
+    unavailable or failed non-blocking primitive is reported as ``False`` rather
+    than escaping into the caller.
+    """
+
+    try:
+        fd = (
+            int(stream_or_fd)
+            if isinstance(stream_or_fd, int)
+            else int(stream_or_fd.fileno())
+        )
+        set_blocking = getattr(os, "set_blocking", None)
+        if not callable(set_blocking):
+            return False
+        set_blocking(fd, False)
+        return os.write(fd, bytes(payload)) == len(payload)
+    except Exception:
+        return False
+
+
 def acquire_exclusive_file_lock(
     lock_path: pathlib.Path,
     *,
@@ -174,6 +235,7 @@ def acquire_exclusive_file_lock(
     stale_sec: float = 90.0,
     metadata: str = "",
     poll_sec: float = 0.05,
+    mode: int = 0o644,
 ) -> Optional[int]:
     """Acquire a portable lockfile using O_EXCL and return its file descriptor."""
     lock_path = pathlib.Path(lock_path)
@@ -181,7 +243,11 @@ def acquire_exclusive_file_lock(
     started = time.time()
     while (time.time() - started) < timeout_sec:
         try:
-            fd = os.open(str(lock_path), os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o644)
+            fd = os.open(
+                str(lock_path),
+                os.O_CREAT | os.O_EXCL | os.O_WRONLY,
+                int(mode) & 0o7777,
+            )
             try:
                 text = metadata or f"pid={os.getpid()} ts={time.time()}\n"
                 os.write(fd, text.encode("utf-8"))
@@ -590,14 +656,29 @@ def terminate_process_group_id(pgid: int) -> None:
         pass
 
 
-def kill_process_group_id(pgid: int) -> None:
-    """Force-kill a Unix process group by id."""
+def kill_process_group_id(pgid: int, *, checked: bool = False) -> bool:
+    """Force-kill a Unix process group by id.
+
+    Best-effort callers keep the historical no-throw behavior. Custody callers
+    can request checked failure propagation and use the boolean to distinguish
+    a delivered signal from a group that was already gone.
+    """
+
     if IS_WINDOWS:
-        return
+        if checked:
+            raise OSError("process-group signalling is unavailable on Windows")
+        return False
     try:
         os.killpg(int(pgid), signal.SIGKILL)
-    except (ProcessLookupError, PermissionError, OSError, ValueError):
-        pass
+        return True
+    except ProcessLookupError:
+        return False
+    except (PermissionError, OSError, ValueError):
+        if checked:
+            raise
+        return False
+
+
 
 
 def process_group_id(pid: int) -> int:
@@ -659,14 +740,14 @@ def process_start_time(pid: int) -> str:
     return str(ticks) if ticks else ""
 
 
-def _proc_start_ticks(pid: int) -> int:
-    """Boot-relative start time (``/proc/<pid>/stat`` field 22), or 0 when it cannot be read."""
-    try:
-        with open(f"/proc/{int(pid)}/stat", "rb") as handle:
-            fields = handle.read().rpartition(b")")[2].split()
-        return int(fields[19]) if len(fields) >= 20 else 0  # rpartition dropped fields 1-2
-    except (OSError, ValueError):
-        return 0
+
+
+
+
+
+
+
+
 
 
 def process_command(pid: int) -> str:
@@ -1232,6 +1313,18 @@ def get_cpu_info() -> str:
     except Exception:
         pass
     return platform.processor()
+
+
+# Boot-anchored monotonic time.
+
+# The identity `boot_anchored_monotonic_ms` and `process_fingerprint` both report for a
+# host whose boot they cannot name. Shared, because the two are compared against each
+# other's records and a second spelling of the same convention is a bug waiting to be
+# written.
+
+
+
+
 
 
 # Process session isolation.

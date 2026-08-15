@@ -469,6 +469,13 @@ def start_agent(port: int = AGENT_SERVER_PORT) -> subprocess.Popen:
     # bundled payloads (node, ripgrep) are invisible to it (platform_layer.
     # bundled_resource_bases).
     env[BUNDLE_DIR_ENV] = str(_bundle_dir())
+    # The managed repo is self-editable, while release assets live in the
+    # immutable application bundle. Seal the asset location at the launcher
+    # boundary so a stale or inherited environment cannot redirect execd
+    # bootstrap at a payload Ouroboros itself could have rewritten.
+    env["OUROBOROS_EXECD_BUNDLE_DIR"] = str(
+        (_bundle_dir() / "assets" / "execd").resolve(strict=False)
+    )
 
     server_py = REPO_DIR / "server.py"
     log.info("Starting agent: %s %s (port=%d)", EMBEDDED_PYTHON, server_py, port)

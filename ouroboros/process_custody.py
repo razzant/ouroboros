@@ -34,8 +34,8 @@ import uuid
 from typing import Any, Dict, List, Optional
 
 from ouroboros.platform_layer import (
-    kill_process_tree,
     kill_process_group_id,
+    kill_process_tree,
     pid_is_alive,
     process_command,
     process_group_id,
@@ -113,8 +113,15 @@ def record_process(
     scope: str,
     owner_task_id: str = "",
     reap_process_group: bool = True,
-) -> Dict[str, Any]:
-    """Append a custody record for an already-spawned process."""
+) -> Optional[Dict[str, Any]]:
+    """Append a custody record for an already-spawned process.
+
+    ``None`` means the ledger write itself failed. Existing callers stay
+    fail-soft; a process owner that cannot safely tolerate an unledgered child
+    (the OpenSSH transport does not — an invisible SSH child survives panic)
+    opts into ``spawn_supervised(required_custody=True)`` instead of inspecting
+    a success-shaped entry that was never durable.
+    """
     if scope not in _VALID_SCOPES:
         raise ValueError(f"process custody scope must be one of {_VALID_SCOPES}, got {scope!r}")
     try:
@@ -141,6 +148,8 @@ def record_process(
     return entry
 
 
+
+
 def spawn_supervised(
     cmd: Any,
     *,
@@ -149,6 +158,7 @@ def spawn_supervised(
     scope: str,
     owner_task_id: str = "",
     new_process_group: bool = True,
+    required_custody: bool = False,
     **popen_kwargs: Any,
 ) -> subprocess.Popen:
     """Popen + durable custody record (the single supervised chokepoint).
@@ -156,7 +166,17 @@ def spawn_supervised(
     The record is written immediately after spawn, so even a SIGKILL of the
     spawning worker cannot orphan the child invisibly — the reaper finds it
     in the ledger on the next generation.
+
+    A failed or throwing ledger write kills the newborn process group and
+    re-raises for EVERY caller, so no live child is ever returned unledgered —
+    which is what RWS v2 §5.4 needs (a long-lived OpenSSH child that panic
+    cannot see is a breach of the emergency-stop invariant). ``required_custody``
+    therefore no longer selects that behaviour; it asserts the remaining
+    precondition, that such a child is spawned into its own process group so the
+    kill can reach the whole tree.
     """
+    if required_custody and not new_process_group:
+        raise ValueError("required custody needs an isolated process group")
     if new_process_group:
         merged = dict(subprocess_new_group_kwargs())
         merged.update(popen_kwargs)

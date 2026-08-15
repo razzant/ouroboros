@@ -42,9 +42,9 @@ def pid_marker_state(pid: int, marker: str) -> str:
     UNREADABLE means unanswerable — ``reap`` treats it as a leak. Windows: ABSENT (job = membership)."""
     if _pl.IS_WINDOWS or not marker or int(pid) <= 0:
         return MARKER_ABSENT
-    if os.path.isdir("/proc"):
+    if _pl.has_proc_filesystem():
         try:
-            with open(f"/proc/{int(pid)}/environ", "rb") as handle:
+            with open(_pl.proc_pid_path(pid, "environ"), "rb") as handle:
                 data = handle.read()
         except OSError as exc:
             if exc.errno in (errno.ENOENT, errno.ESRCH, errno.ENOTDIR):
@@ -75,9 +75,9 @@ def pid_is_zombie(pid: int) -> bool:
     if _pl.IS_WINDOWS or int(pid) <= 0:
         return False
     try:
-        if os.path.isdir("/proc"):
+        if _pl.has_proc_filesystem():
             # comm is parenthesised and may contain ')', so state is the field after the LAST.
-            with open(f"/proc/{int(pid)}/stat", "rb") as handle:
+            with open(_pl.proc_pid_path(pid, "stat"), "rb") as handle:
                 fields = handle.read().rpartition(b")")[2].split()
             return bool(fields) and fields[0] == b"Z"
         out = subprocess.run(["ps", "-o", "state=", "-p", str(int(pid))],
@@ -102,7 +102,7 @@ def _could_be_hidden_member(pid: int, since_ticks: int) -> bool:
     if since_ticks > 0 and 0 < started < since_ticks:
         return False
     try:
-        with open(f"/proc/{int(pid)}/status", "rb") as handle:
+        with open(_pl.proc_pid_path(pid, "status"), "rb") as handle:
             for line in handle:
                 if line.startswith(b"Uid:"):  # real, EFFECTIVE, saved, fs
                     return int(line.split()[2]) == os.geteuid()
@@ -124,9 +124,9 @@ def pids_with_env_marker(marker: str, pgid: int = 0, since_ticks: int = 0) -> "O
     if _pl.IS_WINDOWS or not marker:
         return []
     found: List[int] = []
-    if os.path.isdir("/proc"):
+    if _pl.has_proc_filesystem():
         try:
-            entries = os.listdir("/proc")
+            entries = _pl.proc_entries()
         except OSError:
             return None
         for name in entries:

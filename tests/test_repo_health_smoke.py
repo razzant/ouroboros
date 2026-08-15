@@ -358,8 +358,12 @@ def test_total_function_cap_checks_staged_and_live_projections(tmp_path: Path) -
     _git(repo, "add", ".")
     _git(repo, "commit", "-qm", "bootstrap ratchet")
     paths = [f"batch_{index}.py" for index in range(7)]
-    source = "".join(f"def f{index}(): pass\n" for index in range(929))
-    total = len(paths) * 929
+    # DERIVED from the cap, not a magic number: a hardcoded per-file count silently
+    # stops testing anything the moment the cap is raised — the fixture went under
+    # the limit and the test asserted a cap breach that no longer happened.
+    per_file = MAX_TOTAL_FUNCTIONS // len(paths) + 1
+    source = "".join(f"def f{index}(): pass\n" for index in range(per_file))
+    total = len(paths) * per_file
     assert total > MAX_TOTAL_FUNCTIONS
 
     for rel in paths:

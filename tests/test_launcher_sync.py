@@ -341,6 +341,14 @@ def test_start_agent_unix_uses_process_group_and_writes_server_record(monkeypatc
     monkeypatch.setattr(launcher, "DATA_DIR", data_dir)
     monkeypatch.setattr(launcher, "REPO_DIR", repo_dir)
     monkeypatch.setattr(launcher, "EMBEDDED_PYTHON", sys.executable)
+    bundle_dir = tmp_path / "immutable-bundle"
+    monkeypatch.setattr(launcher, "_bundle_dir", lambda: bundle_dir)
+    # An inherited value must NOT win: the asset path is sealed by the launcher,
+    # not read from whatever environment the process happened to start in.
+    monkeypatch.setenv(
+        "OUROBOROS_EXECD_BUNDLE_DIR",
+        str(tmp_path / "untrusted-inherited-path"),
+    )
     monkeypatch.setattr(launcher, "_load_settings", lambda: {})
     monkeypatch.setattr(launcher, "_apply_settings_to_env", lambda _settings: None)
     monkeypatch.setattr(launcher, "subprocess_new_group_kwargs", lambda: {"start_new_session": True})
@@ -351,6 +359,9 @@ def test_start_agent_unix_uses_process_group_and_writes_server_record(monkeypatc
 
     assert proc.pid == 12345
     assert captured["kwargs"]["start_new_session"] is True
+    assert captured["kwargs"]["env"]["OUROBOROS_EXECD_BUNDLE_DIR"] == str(
+        (bundle_dir / "assets" / "execd").resolve()
+    )
     record = json.loads((data_dir / "state" / "server_process.json").read_text(encoding="utf-8"))
     assert record["pid"] == 12345
     assert record["pgid"] == 12345

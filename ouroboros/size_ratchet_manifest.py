@@ -148,7 +148,6 @@ BAND_PATHS = {
     "ouroboros/loop_llm_call.py": None,
     "ouroboros/loop_tool_execution.py": None,
     "ouroboros/outcomes.py": None,
-    "ouroboros/platform_layer.py": None,
     "ouroboros/preflight_runner.py": None,
     "ouroboros/projects_registry.py": "upstream registry plus the sealed remote placement field",
     "ouroboros/protected_artifacts.py": None,
@@ -162,7 +161,6 @@ BAND_PATHS = {
     "ouroboros/tools/shell.py": "process execution; shed 409 lines to ouroboros/tools/declared_outputs.py in this change",
     "ouroboros/tools/skill_exec.py": None,
     "ouroboros/tools/subagent_integration.py": "patch integration; shed 212 lines to ouroboros/tools/integration_verdicts.py in this change",
-    "ouroboros/utils.py": None,
     "ouroboros/workspace_executor.py": None,
     "ouroboros/workspace_payload_native.py": "RWS v2: the target's payload staging and declared-output snapshots",
     "ouroboros/workspace_query_native.py": "RWS v2: the target's search and code-query operations",
@@ -217,5 +215,5 @@ BYTE_DEBT = {
     "supervisor/events.py": 202887,
     "tests/test_delegated_subagent_transport.py": 320627,
     "tests/test_devtools_benchmarks.py": 328786,
-    "web/modules/chat.js": 234467,
+    "web/modules/chat.js": 232554,
 }

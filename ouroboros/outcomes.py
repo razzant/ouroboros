@@ -61,6 +61,7 @@ from ouroboros.headless import (
     ARTIFACT_STATUS_PENDING,
     ARTIFACT_STATUS_READY,
 )
+from ouroboros.remote_export_policy import apply_export_ledger_entry, bundle_export_fields
 from ouroboros.task_results import STATUS_CANCEL_REQUESTED, STATUS_REJECTED_DUPLICATE, validate_task_id
 from ouroboros.utils import atomic_write_json, utc_now_iso
 
@@ -190,12 +191,11 @@ _RECEIPT_RED_RECONCILING_STATUSES = _outcome_receipts.RED_RECONCILING_STATUSES
 _LEDGER_NON_FAILURE_STATUSES = (
     frozenset({"", "ok", RESULT_SUCCEEDED, "pass", OBJECTIVE_NOT_EVALUATED, "ignored"})
     | _RECEIPT_GROUNDING_STATUSES
-    # refused_out_of_scope: an artifact_observation whose path is outside the observable
-    # roots is a POLICY refusal (honest telemetry), NOT a verification failure (v6.57.0).
-    | frozenset({"refused_out_of_scope"})
-    # tool_reported_failure: the tool RAN and answered honestly ({"ok": false} — a
-    # diagnostic reporting what it was called to find). A finding, not a failure.
-    | frozenset({"tool_reported_failure"})
+    # Honest telemetry, never verification failures: refused_out_of_scope (an
+    # artifact_observation outside the observable roots, v6.57.0), policy_filtered (an
+    # owner-policy export omission, D7), tool_reported_failure (the tool RAN and
+    # answered {"ok": false} — a finding, not a failure).
+    | frozenset({"refused_out_of_scope", "policy_filtered", "tool_reported_failure"})
 )
 
 
@@ -1170,7 +1170,7 @@ def artifact_bundle_from_result(result: Dict[str, Any]) -> Dict[str, Any]:
         "schema_version": 1,
         "status": status,
         "artifacts": records,
-        "errors": errors,
+        "errors": errors, **bundle_export_fields(result),  # D7: additive, status untouched
     }
 
 
@@ -1184,7 +1184,7 @@ def refresh_verification_ledger_artifacts(
         return ledger
     entries = [
         item for item in (ledger.get("entries") or [])
-        if not (isinstance(item, dict) and item.get("kind") == "artifact_bundle")
+        if not (isinstance(item, dict) and item.get("kind") in {"artifact_bundle", "remote_export"})
     ]
     artifact_status = str((artifact_bundle or {}).get("status") or "")
     if artifact_status in {ARTIFACT_STATUS_FAILED, ARTIFACT_STATUS_PENDING, ARTIFACT_STATUS_FINALIZING, "missing"}:
@@ -1194,7 +1194,7 @@ def refresh_verification_ledger_artifacts(
             "errors": (artifact_bundle or {}).get("errors") or [],
         })
     updated = dict(ledger)
-    updated["entries"] = entries
+    updated["entries"] = entries = apply_export_ledger_entry(entries, artifact_bundle)
     axes = normalize_outcome_axes({"outcome_axes": updated.get("outcome_axes") if isinstance(updated.get("outcome_axes"), dict) else {}})
     if artifact_status:
         artifact_axis = dict(axes.get("artifacts") or {})

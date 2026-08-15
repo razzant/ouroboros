@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import logging
 import mimetypes
+import os
 import pathlib
 import shutil
 import uuid
@@ -62,6 +63,8 @@ def stage_task_attachments(
     drive_root: Union[pathlib.Path, str],
     task_id: str,
     attachments: Any,
+    *,
+    omitted: Optional[List[Dict[str, str]]] = None,
 ) -> List[Dict[str, Any]]:
     """Stage input attachments into the task artifact store and return a manifest.
 
@@ -72,10 +75,25 @@ def stage_task_attachments(
     ``ouroboros.tool_access`` secret blocklist). Never raises — a per-file error
     skips just that file.
 
+    ``omitted`` is an optional out-parameter: when a list is passed, every SKIPPED
+    source appends one ``{"name", "reason"}`` row to it. Skipping used to be a log
+    line and nothing else, so the owner attached a file, got no error, and simply
+    never saw it again — an omission nobody is told about reads exactly like an
+    omission that did not happen. The rows are the same disclosure the remote
+    export boundary emits, so one attachment set produces ONE omission story
+    regardless of which of the two doors dropped a file.
+
     Returns a list of manifest entries::
 
-        {"label", "root": "artifact_store", "relpath": "attachments/<safe>",
-         "mime", "is_image"}
+        {"attachment_id", "label", "root": "artifact_store",
+         "relpath": "attachments/<safe>", "source_name", "mime", "is_image",
+         "size", "sha256", "stage_status": "ready"}
+
+    ``attachment_id``/``size``/``sha256``/``stage_status``/``source_name`` are the
+    fields the remote attachment contract (``execd_task_files``) validates: the
+    target admits a content-addressed set, so an entry with no hash cannot cross
+    the boundary at all. They are additive for a local task, which reads the same
+    manifest by ``root``/``relpath`` as before.
     """
 
     items: List[Dict[str, Any]] = []
@@ -128,22 +146,32 @@ def stage_task_attachments(
 
     manifest: List[Dict[str, Any]] = []
     staged = 0
+
+    def _omit(name: str, reason: str) -> None:
+        if omitted is not None:
+            omitted.append({"name": str(name)[:200], "reason": reason})
+
     for item in items:
         if staged >= _MAX_STAGED_ATTACHMENTS:
             log.info("stage_task_attachments: hit max staged attachments (%d); skipping rest", _MAX_STAGED_ATTACHMENTS)
+            _omit(str(item.get("path") or ""), "attachment_count_limit")
             break
         try:
             source = pathlib.Path(item["path"]).expanduser().resolve(strict=False)
             if not source.is_file():
+                _omit(source.name, "source_not_a_file")
                 continue
             if _is_secret_source(source):
                 log.info("stage_task_attachments: skipped secret source %s", source.name)
+                _omit(source.name, "credential_like_source")
                 continue
             try:
                 if source.stat().st_size > _MAX_STAGED_ATTACHMENT_BYTES:
                     log.info("stage_task_attachments: skipped oversized source %s", source.name)
+                    _omit(source.name, "source_too_large")
                     continue
             except OSError:
+                _omit(source.name, "source_unreadable")
                 continue
             attach_dir.mkdir(parents=True, exist_ok=True)
             # The stored filename derives from the SOURCE basename (it carries the
@@ -164,10 +192,25 @@ def stage_task_attachments(
             # crafted filename cannot inject extra prompt lines or break the rendered read_file line.
             _raw_label = str(item.get("label") or "").strip() or source.name
             label = " ".join("".join(c for c in _raw_label if c.isprintable()).split())[:120] or "attachment"
+            payload_size = dest.stat().st_size
+            digest = _sha256_file(dest)
             manifest.append({
+                # A content-addressed identity, stable across a replay of the same
+                # staging: the remote attachment contract admits a SET keyed by these
+                # ids, and a random one would make every task admission a new set.
+                "attachment_id": "att-" + _sha256_hex("\0".join((task_id, dest.name, digest)))[:16],
                 "label": label,
                 "root": "artifact_store",
                 "relpath": f"{_ATTACHMENTS_SUBDIR}/{dest.name}",
+                # The ORIGINAL basename, kept because the staged one is sanitized:
+                # `_safe_attachment_name` rewrites a leading dot, so `.env` lands as
+                # `_.env` and every rule that judges credential-shaped names would
+                # read the sanitized spelling as innocent. The export boundary judges
+                # BOTH spellings, which needs this one recorded.
+                "source_name": source.name[:200],
+                "size": payload_size,
+                "sha256": digest,
+                "stage_status": "ready",
                 # v6.54.3: the REAL staged path, for process tools (a python/audio
                 # script must open its own staged attachment directly — GAIA showed
                 # models GUESSING a wrong absolute path and hitting light-mode
@@ -335,6 +378,24 @@ def read_task_scratch_fingerprints(drive_root: Union[pathlib.Path, str], task_id
     return {str(k): str(v) for k, v in vals.items()} if isinstance(vals, dict) else {}
 
 
+def _read_artifact_manifest(artifact_dir: pathlib.Path) -> Dict[str, Dict[str, Any]]:
+    """Read the task's `.artifact_manifest.json` registry (SSOT reader)."""
+
+    data = read_json_dict(artifact_dir / _ARTIFACT_MANIFEST) or {}
+    manifest = data.get("artifacts") if isinstance(data.get("artifacts"), dict) else {}
+    return {str(key): dict(value) for key, value in manifest.items() if isinstance(value, dict)}
+
+
+def _write_artifact_manifest(artifact_dir: pathlib.Path, manifest: Dict[str, Dict[str, Any]]) -> None:
+    """Atomically persist the task's `.artifact_manifest.json` registry (SSOT writer)."""
+
+    atomic_write_json(
+        artifact_dir / _ARTIFACT_MANIFEST,
+        {"schema_version": 1, "artifacts": manifest},
+        trailing_newline=True,
+    )
+
+
 def artifact_record(path: pathlib.Path, *, kind: str = "task_artifact", source_path: str = "") -> Dict[str, Any]:
     raw = pathlib.Path(path).read_bytes()
     record: Dict[str, Any] = {
@@ -392,9 +453,7 @@ def copy_file_to_task_artifacts(ctx: Any, source_path: Union[pathlib.Path, str],
         return None
     task_id = task_id_for_artifacts(ctx)
     artifact_dir = task_artifact_dir_path(pathlib.Path(getattr(ctx, "drive_root")), task_id, create=True)
-    data = read_json_dict(artifact_dir / _ARTIFACT_MANIFEST) or {}
-    manifest = data.get("artifacts") if isinstance(data.get("artifacts"), dict) else {}
-    manifest = {str(key): dict(value) for key, value in manifest.items() if isinstance(value, dict)}
+    manifest = _read_artifact_manifest(artifact_dir)
     dest = artifact_dir / source.name
     reused_existing_source = False
     for existing in manifest.values():
@@ -418,7 +477,7 @@ def copy_file_to_task_artifacts(ctx: Any, source_path: Union[pathlib.Path, str],
         shutil.copy2(source, dest)
     record = artifact_record(dest, kind=kind, source_path=str(source))
     manifest[pathlib.Path(str(record.get("path") or record.get("name") or "")).name] = dict(record)
-    atomic_write_json(artifact_dir / _ARTIFACT_MANIFEST, {"schema_version": 1, "artifacts": manifest}, trailing_newline=True)
+    _write_artifact_manifest(artifact_dir, manifest)
     return record
 
 
@@ -436,9 +495,7 @@ def copy_directory_to_task_artifacts(
         return []
     task_id = task_id_for_artifacts(ctx)
     artifact_dir = task_artifact_dir_path(pathlib.Path(getattr(ctx, "drive_root")), task_id, create=True)
-    data = read_json_dict(artifact_dir / _ARTIFACT_MANIFEST) or {}
-    manifest = data.get("artifacts") if isinstance(data.get("artifacts"), dict) else {}
-    manifest = {str(key): dict(value) for key, value in manifest.items() if isinstance(value, dict)}
+    manifest = _read_artifact_manifest(artifact_dir)
     root = source.resolve(strict=False)
     if member_paths is None:
         members = sorted(p for p in source.rglob("*") if p.is_file() and not p.is_symlink())
@@ -506,8 +563,118 @@ def copy_directory_to_task_artifacts(
     ]
     for record in records:
         manifest[pathlib.Path(str(record.get("path") or record.get("name") or "")).name] = dict(record)
-    atomic_write_json(artifact_dir / _ARTIFACT_MANIFEST, {"schema_version": 1, "artifacts": manifest}, trailing_newline=True)
+    _write_artifact_manifest(artifact_dir, manifest)
     return records
+
+
+class PublishedArtifactConflictError(ValueError):
+    """A replayed import targets an existing published artifact with a DIFFERENT hash."""
+
+
+def publish_verified_task_artifact(
+    drive_root: Union[pathlib.Path, str],
+    task_id: str,
+    import_id: str,
+    canonical_name: str,
+    verified_tmp_path: Union[pathlib.Path, str],
+    *,
+    size: int,
+    sha256: str,
+) -> Dict[str, Any]:
+    """Canonical publication seam for VERIFIED imported bytes (RWSB2-02, D9).
+
+    The transfer service stops at a verified Home temp file + a private import
+    receipt; THIS is the one door those bytes take into the task artifact
+    store. Contract:
+
+    - deterministic destination derived from ``{task_id, import_id,
+      canonical_name}`` — a replay of the same import always lands on the same
+      path;
+    - streaming atomic publish (temp-sibling + ``os.replace``), NO reread of
+      the payload — ``size``/``sha256`` arrive verified by the caller; publish
+      integrity is confirmed by a post-publish size stat;
+    - same-hash replay returns the existing manifest record (idempotent);
+      a different hash for the same destination raises
+      :class:`PublishedArtifactConflictError` loudly;
+    - the PUBLIC record carries no remote source path — provenance stays in
+      the private import receipt (D9).
+    """
+
+    task_id = validate_task_id(task_id)
+    import_token = str(import_id or "").strip()
+    if not import_token:
+        raise ValueError("publish_verified_task_artifact requires import_id")
+    expected_size = int(size)
+    if expected_size < 0:
+        raise ValueError("publish_verified_task_artifact requires a non-negative size")
+    digest = str(sha256 or "").strip().lower()
+    if len(digest) != 64 or any(c not in "0123456789abcdef" for c in digest):
+        raise ValueError("publish_verified_task_artifact requires a hex sha256")
+    verified_tmp = pathlib.Path(verified_tmp_path)
+
+    safe_name = _safe_attachment_name(canonical_name)
+    identity = _sha256_hex(f"{task_id}\0{import_token}\0{safe_name}")[:12]
+    suffix = pathlib.Path(safe_name).suffix
+    stem = safe_name[: -len(suffix)] if suffix else safe_name
+    artifact_dir = task_artifact_dir_path(pathlib.Path(drive_root), task_id, create=True)
+    dest = artifact_dir / f"{stem}.{identity}{suffix}"
+
+    manifest = _read_artifact_manifest(artifact_dir)
+    existing = manifest.get(dest.name)
+    if isinstance(existing, dict) and str(existing.get("sha256") or ""):
+        if str(existing.get("sha256")) == digest:
+            return dict(existing)
+        raise PublishedArtifactConflictError(
+            f"import {import_token!r} replayed with a different hash for "
+            f"{dest.name}: recorded {existing.get('sha256')}, got {digest}"
+        )
+
+    if not verified_tmp.is_file():
+        raise ValueError(f"verified temp file is missing: {verified_tmp}")
+    # Deterministic sibling temp: a leftover from a crashed publish of the SAME
+    # import is simply overwritten, so repeated publication stays clean.
+    publish_tmp = dest.with_name(f".{dest.name}.publish.tmp")
+    shutil.copyfile(verified_tmp, publish_tmp)
+    os.replace(publish_tmp, dest)
+    published_size = dest.stat().st_size
+    if published_size != expected_size:
+        try:
+            dest.unlink()
+        except OSError:
+            pass
+        raise ValueError(
+            f"published artifact size mismatch for {dest.name}: "
+            f"expected {expected_size}, found {published_size}"
+        )
+
+    record: Dict[str, Any] = {
+        "kind": "remote_import",
+        "name": dest.name,
+        "path": str(dest),
+        "size": expected_size,
+        "sha256": digest,
+        "status": ARTIFACT_STATUS_READY,
+        "errors": [],
+        "import_id": import_token,
+        "canonical_name": safe_name,
+    }
+    manifest[dest.name] = dict(record)
+    _write_artifact_manifest(artifact_dir, manifest)
+    return record
+
+
+def _sha256_hex(text: str) -> str:
+    return sha256(text.encode("utf-8", errors="replace")).hexdigest()
+
+
+def _sha256_file(path: pathlib.Path) -> str:
+    """Stream one file's digest; an attachment may be 50 MB and must not be slurped."""
+
+    hasher = sha256()
+    with pathlib.Path(path).open("rb") as stream:
+        for chunk in iter(lambda: stream.read(1024 * 1024), b""):
+            hasher.update(chunk)
+    return hasher.hexdigest()
 
 
 def collect_task_artifact_records(drive_root: Union[pathlib.Path, str], task_id: str) -> List[Dict[str, Any]]:
@@ -520,9 +687,7 @@ def collect_task_artifact_records(drive_root: Union[pathlib.Path, str], task_id:
     records: List[Dict[str, Any]] = []
     if not artifact_dir.exists():
         return records
-    data = read_json_dict(artifact_dir / _ARTIFACT_MANIFEST) or {}
-    raw_manifest = data.get("artifacts") if isinstance(data.get("artifacts"), dict) else {}
-    manifest = {str(key): dict(value) for key, value in raw_manifest.items() if isinstance(value, dict)}
+    manifest = _read_artifact_manifest(artifact_dir)
     artifact_root = artifact_dir.resolve(strict=False)
     for path in sorted(p for p in artifact_dir.rglob("*") if p.is_file() and not p.is_symlink()):
         # Internal task-metadata files (the artifact manifest and the v6.52.2 scratch manifest)

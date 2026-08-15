@@ -67,7 +67,9 @@ def test_files_pdf_preview_and_download_bridge_are_safe():
 
 
 def test_chat_document_bubble_opens_externally_and_downloads_separately():
-    chat = _read("web/modules/chat.js")
+    # The document bubble moved to its own module; the transcript-rendering source
+    # this test is about is now the pair, so read both rather than pinning the split.
+    chat = _read("web/modules/chat.js") + _read("web/modules/document_bubble.js")
     helper = _read("web/modules/ui_helpers.js")
     launcher = _read("launcher.py")
     css = _read("web/style.css")
