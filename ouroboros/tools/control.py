@@ -34,6 +34,7 @@ from ouroboros.tools.control_delegation import (
     resolve_cooperative_write_root,
 )
 from ouroboros.tools.registry import active_repo_dir_for, system_repo_dir_for
+from ouroboros.workspace_ref import workspace_ref_for
 from ouroboros.outcomes import normalize_outcome_axes
 from ouroboros.task_results import (
     STATUS_COMPLETED,
@@ -1256,6 +1257,7 @@ def _select_subagent_constraint(write_surface, write_root, protected_paths_grant
 def _populate_subagent_event_extras(
     evt: Dict[str, Any], *, current_chat_id: Any, child_drive: Any, workspace_root: str,
     workspace_mode: str, executor_ref: Any, context: str, parent_task_id: str,
+    workspace_ref: Any = None,
 ) -> None:
     """Add the optional fields of a schedule_subagent event in place (extracted from
     _schedule_task to keep it under the method gate; pure field assignment)."""
@@ -1266,6 +1268,12 @@ def _populate_subagent_event_extras(
         evt["child_drive_root"] = str(child_drive)
     if workspace_root:
         evt["workspace_root"] = workspace_root
+    if workspace_ref is not None:
+        # (RWS v2) A child runs WHERE ITS PARENT RUNS, so the parent's SEALED placement
+        # rides along instead of only its root spelling: a remote parent's target spelling
+        # arriving alone would normalize as the LOCAL variant in the child — a fabricated
+        # Home path, the silent fallback the placement contract forbids (C-2:963).
+        evt["workspace_ref"] = workspace_ref.to_payload()
     if workspace_mode:
         evt["workspace_mode"] = workspace_mode
     if executor_ref:
@@ -1670,6 +1678,10 @@ def _schedule_task(ctx: ToolContext, internal: Dict[str, Any] | None = None, /, 
     workspace_root = str(getattr(ctx, "workspace_root", "") or metadata.get("workspace_root") or "").strip()
     workspace_mode = str(getattr(ctx, "workspace_mode", "") or metadata.get("workspace_mode") or "").strip()
     workspace_root, workspace_mode = _inherited_workspace_from_active_repo(ctx, workspace_root, workspace_mode)
+    # Read ONCE here: the parent's sealed placement is what every child of this wave
+    # inherits, and re-deriving it per child is how two children of one parent end up
+    # disagreeing about where they run.
+    parent_placement = workspace_ref_for(ctx)
     parent_project_id = str(getattr(ctx, "project_id", "") or "").strip()
     requested_surface = str(params.get("write_surface") or "").strip().lower()
     # `read_only` is a first-class, provider-safe alias for "omit write_surface" (NOT a
@@ -1784,6 +1796,7 @@ def _schedule_task(ctx: ToolContext, internal: Dict[str, Any] | None = None, /, 
         evt, current_chat_id=current_chat_id, child_drive=child_drive,
         workspace_root=workspace_root, workspace_mode=workspace_mode,
         executor_ref=executor_ref, context=context, parent_task_id=parent_task_id,
+        workspace_ref=parent_placement,
     )
     try:
         write_task_result(

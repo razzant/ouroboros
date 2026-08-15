@@ -35,6 +35,10 @@ _VERIFY_RUN_KINDS = frozenset({"visible_verifier", "explicit_command", "explicit
 _VERIFIED_RESOLUTIONS = frozenset(
     {
         ("reviewed_skill_environment", "isolated_skill"),
+        # (RWS v2) A target-native interpreter proven by the bundled prepare
+        # response is evidence of the SAME strength as a Home probe: it comes
+        # from the host that will run the process.
+        ("remote_prepare_interpreter", "target_native"),
         ("executor_backend_python3", "backend_path"),
         ("project_venv", "project_venv"),
         ("agent_python", "ouroboros_agent"),
@@ -101,6 +105,26 @@ def _python_request(tool_name: str, args: Mapping[str, Any]) -> tuple[str, list[
 
 def _usable_executable(path_text: str) -> str:
     """Validate an interpreter while preserving venv symlink semantics."""
+def _effective_cwd_text(ctx: Any, tool_name: str, args: Mapping[str, Any], runtime_mode: str) -> str:
+    cwd = str(args.get("cwd") or "")
+    if (
+        tool_name == "run_script"
+        and not cwd.strip()
+        and str(runtime_mode or "").strip() == "light"
+        and not bool(getattr(ctx, "is_workspace_mode", lambda: False)())
+    ):
+        try:
+            return str(ctx.task_drive_root())
+        except Exception:
+            return cwd
+    return cwd
+
+
+def usable_executable(path_text: str) -> str:
+    """Validate an interpreter while preserving venv symlink semantics.
+
+    The SINGLE interpreter-provability probe: ``execution_facts`` exposes it as
+    the placement-neutral ``interpreter_fact`` rather than re-implementing it."""
 
     text = str(path_text or "").strip()
     if not text:
@@ -158,7 +182,7 @@ def _reviewed_skill_python(
         if str(deps_state.get("status") or "") != "installed":
             return "", "reviewed_skill_environment_unavailable"
         candidate = python_runtime_binary(loaded.skill_dir)
-        usable = _usable_executable(str(candidate or ""))
+        usable = usable_executable(str(candidate or ""))
         if usable:
             return usable, ""
     except Exception:
@@ -167,18 +191,18 @@ def _reviewed_skill_python(
 
 
 def _executor_covers(ctx: Any, work_dir: pathlib.Path) -> tuple[bool, str]:
-    try:
-        from ouroboros.workspace_executor import executor_ref_from_ctx, map_host_path
+    """Coverage via the shared predicate; only the resolver's own ctx-error
+    taxonomy stays local (ValueError = malformed ref reads as plain non-coverage,
+    anything else is surfaced as a fallback_reason breadcrumb)."""
+    from ouroboros.workspace_executor import covers, executor_ref_from_ctx
 
+    try:
         executor = executor_ref_from_ctx(ctx)
-        if executor is None:
-            return False, ""
-        map_host_path(executor, pathlib.Path(work_dir).resolve(strict=False))
-        return True, ""
     except ValueError:
         return False, ""
     except Exception:
         return False, "executor_resolution_failed"
+    return covers(executor, work_dir), ""
 
 
 def _surface_for(
@@ -246,8 +270,15 @@ def resolve_process_python(
     runtime_mode: str,
     effective_constraint: Optional[TaskConstraint] = None,
     resolved_binding: ResolvedResourceBinding | None = None,
+    facts: Any = None,
 ) -> tuple[Dict[str, Any], Optional[PythonResolutionTrace]]:
-    """Resolve an exact ``python``/``python3`` request for one process tool."""
+    """Resolve an exact ``python``/``python3`` request for one process tool.
+
+    ``facts`` is the operation's prepare fact door. For a non-local placement the
+    interpreter is a TARGET fact and is read from there: probing Home for the
+    interpreter of a process that will run elsewhere is the same category error as
+    probing Home for its cwd, and `check_safety` must see evidence of equal
+    strength on both placements (RWS-02)."""
 
     name = str(tool_name or "").strip()
     original = dict(args or {})
@@ -256,6 +287,8 @@ def resolve_process_python(
     requested, argv = _python_request(name, original)
     if not requested:
         return original, None
+    if facts is not None and str(getattr(facts, "placement", "local")) != "local":
+        return _resolve_target_native_python(name, original, argv, requested, facts)
 
     constraint = normalize_task_constraint(effective_constraint)
     cwd_text = str(original.get("cwd") or "")
@@ -347,10 +380,10 @@ def resolve_process_python(
         )
         return original, trace
 
-    configured_agent_python = _usable_executable(
+    configured_agent_python = usable_executable(
         os.environ.get("OUROBOROS_AGENT_PYTHON", "")
     )
-    agent_python = configured_agent_python or _usable_executable(sys.executable or "")
+    agent_python = configured_agent_python or usable_executable(sys.executable or "")
     if agent_python:
         trace = PythonResolutionTrace(
             tool=name,
@@ -379,6 +412,58 @@ def resolve_process_python(
         **_trace_target(binding),
     )
     return original, trace
+
+
+def _resolve_target_native_python(
+    name: str,
+    original: Dict[str, Any],
+    argv: list[str] | None,
+    requested: str,
+    facts: Any,
+) -> tuple[Dict[str, Any], Optional[PythonResolutionTrace]]:
+    """Interpreter selection for a non-local placement, from prepare facts only.
+
+    The fact comes from the bundled prepare block, where execd recorded the
+    interpreter it resolved ON the target — a venv under the workspace root if there
+    is one, else the target's PATH. If the bundle cannot answer, the typed
+    unresolved trace is returned and the dispatcher surfaces
+    PYTHON_INTERPRETER_UNAVAILABLE: a Home interpreter is never smuggled into a
+    remote launch, because a path that exists here says nothing about there.
+    """
+    try:
+        fact = facts.interpreter_fact(requested)
+    except Exception:
+        return original, PythonResolutionTrace(
+            tool=name,
+            requested_interpreter=requested,
+            resolved_interpreter=requested,
+            surface=str(getattr(facts, "placement", "remote")),
+            environment="target_path",
+            reason="target_path_fallback",
+            fallback_reason="remote_prepare_unavailable",
+            error_reason="remote_prepare_unavailable",
+        )
+    surface = str(getattr(facts, "placement", "remote"))
+    if not fact.usable:
+        return original, PythonResolutionTrace(
+            tool=name,
+            requested_interpreter=requested,
+            resolved_interpreter=requested,
+            surface=surface,
+            environment="target_path",
+            reason="target_path_fallback",
+            fallback_reason="remote_interpreter_unavailable",
+            error_reason="remote_interpreter_unavailable",
+        )
+    trace = PythonResolutionTrace(
+        tool=name,
+        requested_interpreter=requested,
+        resolved_interpreter=fact.resolved,
+        surface=surface,
+        environment="target_native",
+        reason="remote_prepare_interpreter",
+    )
+    return _replace_request(name, original, argv, fact.resolved), trace
 
 
 def record_python_resolution(ctx: Any, trace: Optional[PythonResolutionTrace]) -> None:
@@ -419,4 +504,5 @@ __all__ = [
     "PythonResolutionTrace",
     "record_python_resolution",
     "resolve_process_python",
+    "usable_executable",
 ]

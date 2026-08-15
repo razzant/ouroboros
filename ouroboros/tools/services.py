@@ -5,7 +5,6 @@ from __future__ import annotations
 import json
 import os
 import pathlib
-import re
 import stat
 import subprocess
 import threading
@@ -29,9 +28,14 @@ from ouroboros.tool_access import (
     shell_cwd_block_message,
 )
 from ouroboros.utils import append_jsonl, utc_now_iso
+# The service-name rule is the CONTRACT's, not this module's: the target turns a name into
+# a log filename, so a second copy here is how the two routes came to disagree — this one
+# REFUSED an illegal name and the target's `re.sub` silently rewrote it.
+from ouroboros.workspace_native_contract import SERVICE_NAME_PATTERN as _SERVICE_NAME_RE
+from ouroboros.workspace_executor import covers as executor_covers
+from ouroboros.workspace_executor import ensure_execution_cwd
 from ouroboros.workspace_executor import executor_ref_from_ctx
 from ouroboros.workspace_executor import kill_all_services as executor_kill_all_services
-from ouroboros.workspace_executor import map_host_path as executor_map_host_path
 from ouroboros.workspace_executor import service_logs as executor_service_logs
 from ouroboros.workspace_executor import service_status as executor_service_status
 from ouroboros.workspace_executor import start_service as executor_start_service
@@ -63,7 +67,6 @@ class ServiceRecord:
 
 _LOCK = threading.Lock()
 _SERVICES: Dict[str, ServiceRecord] = {}
-_SERVICE_NAME_RE = re.compile(r"^[A-Za-z0-9_.-]{1,80}$")
 _MAX_SERVICE_LOG_BLOB_BYTES = 5_000_000
 _MAX_SERVICE_LOG_TAIL_CHARS = 80_000
 
@@ -107,17 +110,6 @@ def _service_output_binding(
         skill_name=str(skill_name or ""),
         state_drive_root=canonical_data_root(ctx),
     )
-
-
-def _executor_can_run_cwd(ctx: ToolContext, workdir: pathlib.Path) -> bool:
-    executor_ref = executor_ref_from_ctx(ctx)
-    if executor_ref is None:
-        return False
-    try:
-        executor_map_host_path(executor_ref, pathlib.Path(workdir).resolve(strict=False))
-        return True
-    except Exception:
-        return False
 
 
 def _tail(path: pathlib.Path, chars: int) -> str:
@@ -391,8 +383,9 @@ def _start_service(
             operation="service",
             process_cwd=cwd,
         )
-        workdir = pathlib.Path(binding.target_path)
+        workdir = pathlib.Path(binding.target_path).resolve(strict=False)
         cwd_root = binding.root
+        ensure_execution_cwd(executor_ref_from_ctx(ctx), workdir, cwd_root=cwd_root)
     except Exception as exc:
         # One failure class, one message (v6.54.3 SSOT): the canonical cwd block
         # names every allowed root as label=path instead of a bare rootless
@@ -427,7 +420,7 @@ def _start_service(
     # kills it once the task ends — breaking the keep contract for a service a
     # verifier still needs (triad review r1, gpt-5.5 critical).
     keep_alive = bool(keep_alive) or task_service_teardown(ctx) == "keep"
-    if _executor_can_run_cwd(ctx, workdir):
+    if executor_covers(executor_ref_from_ctx(ctx), workdir):
         try:
             payload = executor_start_service(
                 ctx,

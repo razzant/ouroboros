@@ -1068,16 +1068,33 @@ class TestToolContextReviewState:
 
 # --- Registry sandbox covers repo_write ---
 
+def _dispatch_pipeline_source():
+    """Source of the whole dispatch pipeline.
+
+    (RWS v2 §3.1) ``execute`` is now the operation-scope boundary and the guard
+    chain lives in ``_dispatch``; the sandbox claim is about the PIPELINE, so
+    both halves are inspected.
+    """
+    registry = _get_registry_module()
+    return "\n".join(
+        inspect.getsource(getattr(registry.ToolRegistry, name))
+        for name in ("execute", "_dispatch")
+    )
+
+
 class TestSandboxCoversRepoWrite:
     def test_sandbox_mentions_repo_write(self):
         registry = _get_registry_module()
-        source = inspect.getsource(registry.ToolRegistry.execute)
+        # (RWS v2 §3.1) The guard chain moved out of `execute` into `_dispatch`, so the
+        # claim is inspected over the whole pipeline rather than one method.
+        source = _dispatch_pipeline_source()
         assert "_ROOT_ARG_REPO_WRITE_TOOLS" in source
         assert "write_file" in registry._ROOT_ARG_REPO_WRITE_TOOLS
 
     def test_sandbox_checks_files_param(self):
         """Sandbox must check files array for safety-critical paths."""
         registry = _get_registry_module()
+        assert "files" in _dispatch_pipeline_source()
         assert registry._payload_write_paths(
             "write_file",
             {"files": [{"path": "BIBLE.md", "content": "x"}]},

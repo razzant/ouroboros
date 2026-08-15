@@ -28,12 +28,15 @@ from ouroboros.tool_access import (
     build_resolved_resource_binding,
 )
 from ouroboros.tools.registry import ToolContext, ToolEntry, active_repo_dir_for
+from ouroboros.tools.shell_guards import VERIFY_RUN_KINDS
 from ouroboros.utils import utc_now_iso
 
 # Durable receipt evidence is bounded but the truncation is DISCLOSED (BIBLE P1, never
 # silent); the tool-result preview is bounded separately for transport.
 _RECEIPT_OUTPUT_CAP = 20000
 _TOOL_OUTPUT_CAP = 4000
+# How many artifact rows a receipt carries before it discloses the remainder as a count.
+_RECEIPT_ARTIFACT_ROWS = 20
 # The `no_visible_machine_contract` receipt carries the agent's OWN stated proxy and
 # residual risk — decision-shaping cognitive evidence a reviewer reads, so it goes
 # through the same disclosed bound as every other durable receipt field.
@@ -53,7 +56,10 @@ _CONTRACT_KINDS = (
     "artifact_observation",
     "no_visible_machine_contract",
 )
-_RUN_KINDS = frozenset({"visible_verifier", "explicit_command", "explicit_metric"})
+# The same set the dispatch's cwd and shell-guard gates read — imported, not restated:
+# three copies of "does this kind run anything" is how two of them came to answer
+# differently from the tables that gate the call.
+_RUN_KINDS = VERIFY_RUN_KINDS
 # How `expected` is matched against the check output. `substring` is the DEFAULT
 # and keeps the historical behavior byte-identical when the param is omitted.
 # `bytes_equal` (v6.60.0) compares TWO FILES byte-for-byte (artifact_paths[0] vs
@@ -398,6 +404,195 @@ def _probe_artifact_lifecycle(
     return lifecycle, missing_after
 
 
+# The export channel a target-side verification is judged under. A check produces
+# process output and probes DECLARED paths, which is exactly the declared-output
+# channel's shape; naming it here rather than leaving the operation to the default is
+# what keeps the probe policed by the same document every other export is.
+_VERIFY_EXPORT_CHANNEL = "declared_output"
+_VERIFY_REMOTE_OPERATION = "verify_remote_check"
+
+
+def _verify_on_remote_target(
+    ctx: ToolContext,
+    *,
+    receipt: dict,
+    kind: str,
+    argv: List[str],
+    cwd: str,
+    expected: str,
+    match_mode: str,
+    artifact_paths: Any,
+    timeout_sec: Any,
+    drive_root: Any,
+    task_id: str,
+) -> str:
+    """Run the declared check ON THE TARGET and write the durable receipt on HOME.
+
+    The split is the design (plan §3.3). The check must run where the work is — a Home
+    run would verify the wrong filesystem — and the receipt must be written where the
+    evidence lives, because a target-side check with no Home receipt is a verification
+    whose proof disappears with the session. So the target executes and ATTESTS
+    (returncode, output, the `bytes_equal` comparison, the after-check existence probe
+    of each declared path), and Home records those attested facts as its own receipt,
+    labelled with the surface they came from.
+
+    `bytes_equal` is compared on the target on purpose (design-partner P2): comparing
+    on Home would mean transferring both files in full, which is exactly what D7/D9
+    forbid for a fact that is one boolean plus a bounded divergence window.
+    """
+
+    from ouroboros.remote_export_policy import build_export_policy
+    from ouroboros.remote_transfer import RemoteTransferService
+    from ouroboros.workspace_diagnostics import RemoteWorkspaceError
+    from ouroboros.workspace_executor import (
+        SshExecutorUnavailableError,
+        executor_ref_from_ctx,
+    )
+    from ouroboros.workspace_ref import workspace_ref_for
+
+    all_declared = [str(p) for p in (artifact_paths or []) if str(p or "").strip()]
+    declared = all_declared[:_RECEIPT_ARTIFACT_ROWS]
+    if len(all_declared) > len(declared):
+        # Only the bounded prefix is sent to the target, so the paths beyond it are
+        # never probed at all. Recording the shortfall keeps "all declared artifacts
+        # survived the check" from being read off a list that never asked (BIBLE P1).
+        receipt["artifact_paths_unprobed_count"] = len(all_declared) - len(declared)
+    ref = workspace_ref_for(ctx)
+    policy = build_export_policy(
+        ctx, channel=_VERIFY_EXPORT_CHANNEL, workspace_root=ref.remote_root
+    )
+    args = {
+        "cmd": list(argv),
+        "cwd": str(cwd or ""),
+        "artifact_paths": declared,
+        "expected_match": str(match_mode or ""),
+        **policy.arg_payload(),
+    }
+    try:
+        envelope = RemoteTransferService().export_operation(
+            executor_ref_from_ctx(ctx),
+            _VERIFY_REMOTE_OPERATION,
+            args,
+            task_id=str(getattr(ctx, "task_id", "") or ""),
+            # The target canonicalizes the cwd and may pre-resolve the interpreter, so
+            # echoing the request back would compare it with its own resolution. The
+            # argv Home authorized is the argv the prepared token binds, which the
+            # target revalidates itself.
+            echo_args=False,
+            timeout_sec=timeout_sec,
+        )
+    # Both arms print the refusal's own ACTION, on the same terms as
+    # `tools/dispatch_prepare` — a typed refusal derives the one owner action that
+    # removes it, and dropping it here made verify the one surface that told the
+    # model what went wrong without telling it what to do about it.
+    except SshExecutorUnavailableError as exc:
+        return (
+            f"⚠️ VERIFY_REMOTE_UNAVAILABLE: the check must run on this task's remote "
+            f"workspace and no transport is available in this process ({exc}) "
+            f"[action: {exc.action}]. "
+            "NOTHING was recorded — a receipt for a check that never ran would be worse "
+            "than no receipt."
+        )
+    except RemoteWorkspaceError as exc:
+        action = getattr(exc, "action", "retry")
+        suffix = f" [action: {action}]" if action and action != "retry" else ""
+        return (
+            f"⚠️ VERIFY_REMOTE_FAILED: {exc.code} (phase={exc.phase}, "
+            f"completion={exc.completion}): {exc}{suffix}. NOTHING was recorded."
+        )
+    return _record_remote_verification(
+        envelope,
+        receipt=receipt,
+        kind=kind,
+        argv=argv,
+        expected=expected,
+        match_mode=match_mode,
+        declared=declared,
+        drive_root=drive_root,
+        task_id=task_id,
+    )
+
+
+def _record_remote_verification(
+    envelope: Any,
+    *,
+    receipt: dict,
+    kind: str,
+    argv: List[str],
+    expected: str,
+    match_mode: str,
+    declared: List[str],
+    drive_root: Any,
+    task_id: str,
+) -> str:
+    """Turn the target's attested facts into ONE Home receipt.
+
+    Every fact in the receipt is labelled with the surface that produced it, because a
+    receipt that reads identically for a Home run and a target run makes the two
+    incomparable later while looking comparable.
+    """
+
+    trace = getattr(envelope, "trace", None)
+    trace = trace if isinstance(trace, dict) else {}
+    verification = trace.get("verification")
+    verification = verification if isinstance(verification, dict) else {}
+    process = getattr(envelope, "process", None)
+    returncode = getattr(process, "returncode", None)
+    out = str(getattr(envelope, "text", "") or "")
+    if match_mode == "bytes_equal":
+        # The target compared the bytes; Home records its verdict and its bounded
+        # divergence window rather than re-deriving a fact it does not have the files for.
+        comparison = verification.get("bytes_equal")
+        comparison = comparison if isinstance(comparison, dict) else {}
+        matched = bool(comparison.get("matched"))
+        out = (out + "\n\n[bytes_equal] " + str(comparison.get("detail") or "")).strip()
+    else:
+        matched = (not expected) or _expected_matches(out, expected, match_mode)
+    passed = returncode == 0 and matched
+    receipt.update({
+        "status": "pass" if passed else "fail",
+        "returncode": returncode,
+        "matched": bool(matched),
+        "check": shlex.join(argv),
+        "check_rendering": CHECK_RENDERING_SHLEX_JOIN,
+        "summary": _bounded(out, _RECEIPT_OUTPUT_CAP),
+        # The attestation surface, recorded so a remote green and a Home green are never
+        # silently treated as the same evidence.
+        "execution_surface": "remote_target",
+        "attested_by": str(trace.get("host_id") or trace.get("workspace_id") or "remote_target"),
+    })
+    # Both lists are bounded, and each bound discloses its own remainder as a sibling
+    # count key: a receipt is graded evidence, so "20 artifacts, all present" must not
+    # be indistinguishable from "20 of 60 shown, the rest unexamined" (BIBLE P1).
+    lifecycle = verification.get("artifact_lifecycle")
+    if isinstance(lifecycle, list) and lifecycle:
+        receipt["artifact_lifecycle"] = lifecycle[:_RECEIPT_ARTIFACT_ROWS]
+        if len(lifecycle) > _RECEIPT_ARTIFACT_ROWS:
+            receipt["artifact_lifecycle_undisclosed_count"] = (
+                len(lifecycle) - _RECEIPT_ARTIFACT_ROWS
+            )
+    missing = verification.get("artifacts_missing_after")
+    if isinstance(missing, list) and missing:
+        receipt["artifacts_missing_after"] = missing[:_RECEIPT_ARTIFACT_ROWS]
+        if len(missing) > _RECEIPT_ARTIFACT_ROWS:
+            receipt["artifacts_missing_after_undisclosed_count"] = (
+                len(missing) - _RECEIPT_ARTIFACT_ROWS
+            )
+    masked, reasons = _check_has_exit_masking(argv)
+    if masked:
+        receipt["check_exit_masking"] = True
+        receipt["check_exit_masking_reasons"] = reasons
+    append_verification_receipt(drive_root, task_id, receipt)
+    del declared
+    verdict = "PASS" if passed else "FAIL"
+    exp_note = f" expected={expected!r}" if expected else ""
+    return (
+        f"verify_and_record [{kind}] {verdict}: exit={returncode}{exp_note}. The check ran "
+        f"on this task's REMOTE workspace; the host-attested receipt was recorded on Home.\n\n"
+        f"{_bounded(out, _TOOL_OUTPUT_CAP)}"
+    )
+
+
 def _verify_and_record(
     ctx: ToolContext,
     contract_kind: str = "",
@@ -470,12 +665,15 @@ def _verify_and_record(
             )
         from ouroboros.tools.shell import (
             _RUN_SHELL_DEFAULT_TIMEOUT_SEC,
-            _executor_can_run_cwd,
             _resolve_effective_timeout,
             _shell_env_for_cwd,
             _tracked_subprocess_run,
         )
+        from ouroboros.workspace_executor import covers as executor_covers
+        from ouroboros.workspace_executor import ensure_execution_cwd
         from ouroboros.workspace_executor import execute as executor_execute
+        from ouroboros.workspace_executor import executor_ref_from_ctx
+        from ouroboros.workspace_ref import RemoteWorkspacePathError
 
         try:
             binding = _resolved_binding or build_resolved_resource_binding(
@@ -486,6 +684,29 @@ def _verify_and_record(
                 skill_name=skill_name,
             )
             work_dir = pathlib.Path(binding.target_path)
+            ensure_execution_cwd(
+                executor_ref_from_ctx(ctx), work_dir, cwd_root=binding.root
+            )
+        except RemoteWorkspacePathError:
+            # A remote placement is NOT "the cwd escapes allowed roots": the cwd is
+            # perfectly legal, it simply lives on another host. The check RUNS there,
+            # through the same prepared path every other target operation takes, and
+            # the durable receipt is still written HERE — which is the whole point of
+            # the tool. Splitting it that way is what makes the evidence survive: run
+            # the check on the target and record nothing, and the proof disappears.
+            return _verify_on_remote_target(
+                ctx,
+                receipt=receipt,
+                kind=kind,
+                argv=argv,
+                cwd=cwd,
+                expected=expected_s,
+                match_mode=match_mode,
+                artifact_paths=artifact_paths,
+                timeout_sec=timeout_sec,
+                drive_root=drive_root,
+                task_id=task_id,
+            )
         except (OSError, ValueError) as exc:
             return f"⚠️ VERIFY_CWD_BLOCKED: check cwd escapes allowed roots: {exc}."
         receipt["resource_binding"] = {
@@ -497,7 +718,7 @@ def _verify_and_record(
         }
         timeout = _resolve_effective_timeout(_RUN_SHELL_DEFAULT_TIMEOUT_SEC, ctx, override_sec=timeout_sec)
         bootstrap_process_path()  # mirror run_command: ensure the check sees the full PATH
-        use_executor = _executor_can_run_cwd(ctx, pathlib.Path(work_dir))
+        use_executor = executor_covers(executor_ref_from_ctx(ctx), pathlib.Path(work_dir))
         try:
             if use_executor:
                 # Route the check through the host-owned executor backend (e.g. docker_exec

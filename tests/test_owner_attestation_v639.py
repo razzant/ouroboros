@@ -47,7 +47,7 @@ def _write_owner_attested_review(state_dir, content_hash, with_marker):
 def test_owner_attest_self_call_is_blocked_in_shell_and_browser():
     # The agent must not loopback-call the owner-only attestation endpoint through any
     # channel (otherwise it could self-bypass the immune system's skill review).
-    from ouroboros.tools.registry import _detect_owner_skill_attest_self_call
+    from ouroboros.tools.shell_guards import _detect_owner_skill_attest_self_call
     from ouroboros.tools.browser import _blocks_owner_skill_attest_js
     cmd = "curl -X post http://127.0.0.1:8765/api/owner/skills/myskill/attest-review"
     assert _detect_owner_skill_attest_self_call(cmd.lower()) is True

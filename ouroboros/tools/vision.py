@@ -504,6 +504,40 @@ def _read_file_parity_block(ctx: Any, fp: "pathlib.Path") -> str:
     return ""
 
 
+def home_file_root_for(ctx: Any = None, path: str = "") -> Optional["pathlib.Path"]:
+    """The allowed HOME root that OWNS this reference, or None if none does.
+
+    The SAME root facts `_load_local_image_payload` and `media._resolve_local_file`
+    enforce, asked as a QUESTION instead of applied as a verdict — so a remote task and
+    a local one classify one path identically instead of two resolvers drifting. The
+    remote media predispatch is the caller that needs the question form: under an ssh
+    placement `_allowed_file_roots` yields exactly the Home-native roots (the active
+    workspace is target-native there and raises out), so "some root owns it" is exactly
+    "Home already has these bytes".
+
+    ABSOLUTE: containment under a root, decided from the roots themselves — never from
+    the shape of the string. RELATIVE: the root where the file actually IS, which is how
+    the media resolver already reads a manifest-relative spelling like
+    `attachments/doc.pdf`; a relative name that exists under no Home root belongs to no
+    Home root, and on a remote task that is precisely the target's own workspace.
+    """
+
+    import pathlib
+    text = str(path or "").strip()
+    if not text:
+        return None
+    roots = _allowed_file_roots(ctx)
+    raw = pathlib.Path(text).expanduser()
+    if raw.is_absolute():
+        resolved = raw.resolve(strict=False)
+        return next((root for root in roots if _path_is_under(resolved, root)), None)
+    for root in roots:
+        candidate = (root / text).resolve(strict=False)
+        if _path_is_under(candidate, root) and candidate.exists():
+            return root
+    return None
+
+
 def _load_local_image_payload(ctx: ToolContext, file_path: str) -> Tuple[Optional[Dict[str, str]], str]:
     """Validate a LOCAL image path against the SAME trust boundary the agent already
     holds via read_file/run_command (allowed roots + protected-artifact read_bytes

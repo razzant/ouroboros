@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import base64
+import functools
 import ipaddress
 import logging
 import os
@@ -75,6 +76,252 @@ def _is_subagent_blocked_browser_url(url: str, ctx: Any = None) -> bool:
     if ip.is_loopback:
         return _is_blocked_loopback_port(parsed)
     return _is_blocked_subagent_ip(ip)
+
+
+# ── remote placement: the ONE named exemption to the all-bytes boundary ──────
+#
+# A remote task's dev server listens on the TARGET's loopback interface, and
+# `browse_page` runs a Playwright browser on HOME. Without the forward below, a
+# remote task asking for `http://localhost:5173` was silently shown HOME's
+# loopback — the same silent-wrong-host class the root matrix closed for file
+# reads, and worse here because a page renders and nothing says whose it is.
+#
+# So a loopback URL on a remote placement is resolved through a task-owned
+# `ssh -L` child (`remote_browser_forward.SSHBrowserForwardManager`, owned by the
+# broker) and the URL is rewritten to the LOCAL end of that forward. This is the
+# documented exemption from the "every byte crosses through the transfer service"
+# rule: what travels is a live TCP session to a service the task itself started,
+# with no file, artifact or manifest to filter (ARCHITECTURE, "Browser loopback
+# forwarding is the ONE named exemption").
+_REMOTE_FORWARDS_ATTR = "_remote_browser_forwards"
+
+
+def _remote_forward_origins(ctx: Any) -> dict[int, str]:
+    """This task's open forwards as {target_port: local origin}, live and mutable.
+
+    Kept on `browser_state` but deliberately NOT cleared by `cleanup_browser`: the
+    forward's lifetime is the TASK's (the broker closes it on finish, cancel and
+    panic), while the browser is torn down and rebuilt mid-task on a thread switch
+    or an engine change. Clearing it there would leak one `ssh -L` child per
+    rebuild and hand the model a dead origin.
+    """
+
+    state = getattr(ctx, "browser_state", None)
+    if state is None:
+        return {}
+    forwards = getattr(state, _REMOTE_FORWARDS_ATTR, None)
+    if not isinstance(forwards, dict):
+        forwards = {}
+        setattr(state, _REMOTE_FORWARDS_ATTR, forwards)
+    return forwards
+
+
+def _is_remote_placement(ctx: Any) -> bool:
+    try:
+        from ouroboros.workspace_ref import is_remote_workspace
+
+        return bool(is_remote_workspace(ctx))
+    except Exception:
+        # A lightweight test context with no sealed placement is local by
+        # construction; never let this decide "remote" by accident.
+        return False
+
+
+def _url_loopback_port(url: str) -> int | None:
+    """The port a loopback http(s) URL addresses, or None when it is not loopback."""
+
+    parsed = urlparse(str(url or ""))
+    if parsed.scheme not in {"http", "https"}:
+        return None
+    host = (parsed.hostname or "").strip().rstrip(".").lower()
+    if not host:
+        return None
+    if not (host == "localhost" or is_loopback_host(host)):
+        try:
+            if not ipaddress.ip_address(host).is_loopback:
+                return None
+        except ValueError:
+            return None
+    try:
+        port = parsed.port
+    except ValueError:
+        return None
+    return int(port) if port is not None else (443 if parsed.scheme == "https" else 80)
+
+
+def _rewrite_to_origin(url: str, origin: str) -> str:
+    """Same path/query/fragment, the forward's local origin as the authority."""
+
+    parsed = urlparse(str(url or ""))
+    tail = parsed.path or "/"
+    if parsed.query:
+        tail += "?" + parsed.query
+    if parsed.fragment:
+        tail += "#" + parsed.fragment
+    return str(origin).rstrip("/") + tail
+
+
+def _open_remote_forward(ctx: Any, remote_port: int) -> tuple[str, str]:
+    """Open (or reuse) this task's forward to `remote_port`; returns (origin, refusal).
+
+    The forward is opened through the broker facade, so the worker never creates a
+    transport and the task must already be BOUND to its remote session — the same
+    admission the rest of the remote road goes through. A process with no broker is
+    a typed refusal rather than a fall back to Home's own loopback, because that
+    fall back is precisely the wrong-host read this exists to prevent.
+    """
+
+    forwards = _remote_forward_origins(ctx)
+    cached = forwards.get(int(remote_port))
+    if cached:
+        return str(cached), ""
+
+    task_id = str(getattr(ctx, "task_id", "") or "").strip()
+    if not task_id:
+        return "", (
+            "⚠️ BROWSER_REMOTE_FORWARD_UNAVAILABLE: a loopback forward is owned by a "
+            "task and this call carries no task id."
+        )
+    try:
+        from ouroboros.remote_workspace import get_remote_workspace_service
+        from ouroboros.workspace_diagnostics import RemoteWorkspaceError
+        from ouroboros.workspace_executor import (
+            executor_ref_from_ctx,
+            ssh_workspace_ref_payload,
+        )
+    except ImportError as exc:  # pragma: no cover - build without the ssh transport
+        return "", (
+            f"⚠️ BROWSER_REMOTE_FORWARD_UNAVAILABLE: this build carries no SSH "
+            f"transport ({exc})."
+        )
+    try:
+        payload = ssh_workspace_ref_payload(executor_ref_from_ctx(ctx))
+        record = get_remote_workspace_service().open_browser_forward(
+            payload, remote_port=int(remote_port), task_id=task_id
+        )
+    except RemoteWorkspaceError as exc:
+        return "", (
+            f"⚠️ BROWSER_REMOTE_FORWARD_UNAVAILABLE: no loopback forward to this "
+            f"task's remote workspace ({exc}). The page would otherwise have been "
+            f"HOME's own port {remote_port}, which is a different machine's service."
+        )
+    except Exception as exc:  # noqa: BLE001 - a transport failure is not a page error
+        return "", (
+            f"⚠️ BROWSER_REMOTE_FORWARD_FAILED: could not forward the target's "
+            f"loopback port {remote_port} ({type(exc).__name__}: {exc}). Check that "
+            "the service is listening on the target's 127.0.0.1."
+        )
+    origin = str((record or {}).get("origin") or "").strip()
+    if not origin:
+        return "", (
+            "⚠️ BROWSER_REMOTE_FORWARD_FAILED: the forward reported no local origin."
+        )
+    forwards[int(remote_port)] = origin
+    return origin, ""
+
+
+def _resolve_placement_url(ctx: Any, url: str) -> tuple[str, str]:
+    """(url_to_open, refusal) after applying placement. Local placement: unchanged.
+
+    Three answers on a remote placement, and each is about WHOSE machine the URL
+    names. Loopback is the target's own service and is forwarded. A private/LAN
+    address is genuinely ambiguous — Home's LAN and the target's LAN are different
+    networks and the sealed placement cannot say which was meant — so it is refused
+    instead of quietly resolved against Home. A public host is the same host from
+    either machine, and a `file://` names Home's filesystem, where this task's
+    artifact store, task drive and the owner's files all still live.
+    """
+
+    text = str(url or "")
+    if not _is_remote_placement(ctx):
+        return text, ""
+    remote_port = _url_loopback_port(text)
+    if remote_port is not None:
+        origin, refusal = _open_remote_forward(ctx, remote_port)
+        if refusal:
+            return "", refusal
+        return _rewrite_to_origin(text, origin), ""
+    parsed = urlparse(text)
+    if parsed.scheme == "file":
+        return text, _remote_file_url_refusal(parsed)
+    host = (parsed.hostname or "").strip().rstrip(".").lower()
+    if parsed.scheme in {"http", "https"} and host:
+        try:
+            ip = ipaddress.ip_address(host)
+        except ValueError:
+            return text, ""
+        if _is_blocked_subagent_ip(ip) and not ip.is_loopback:
+            return "", (
+                "⚠️ BROWSER_REMOTE_PRIVATE_HOST_AMBIGUOUS: this task's workspace is on "
+                f"another host, and {host} is a private address on BOTH machines — "
+                "Ouroboros will not guess which network you meant. Only the target's "
+                "own loopback is forwarded (use 127.0.0.1:<port> for a service the "
+                "task started there); reach anything else from the target with "
+                "run_command."
+            )
+    return text, ""
+
+
+def _remote_file_url_refusal(parsed: Any) -> str:
+    """A `file://` on a remote task: fine for Home roots, honest about the rest.
+
+    Home roots are Home-native on every placement, so viewing a deliverable under
+    the artifact store or the owner's files is correct and stays allowed. A path
+    that does NOT exist on Home almost certainly exists on the TARGET, and a bare
+    "file not found" would send the owner looking for a file that is right there on
+    their server — the same disclosure rule the edit bridge follows for a withheld
+    path. There is no `file://` bridge across the boundary yet (deferred).
+    """
+
+    try:
+        from urllib.request import url2pathname
+
+        if pathlib.Path(url2pathname(parsed.path)).exists():
+            return ""
+    except (ValueError, OSError):
+        return ""
+    return (
+        "⚠️ BROWSER_REMOTE_FILE_URL_UNSUPPORTED: no such file on this machine, and "
+        "this task's workspace lives on another host — a file:// bridge across the "
+        "placement boundary is not implemented yet. Read the file with read_file or "
+        "render it through a service on the target's loopback and browse that."
+    )
+
+
+def _remote_foreign_origin_blocked(url: str, ctx: Any) -> bool:
+    """True when a remote task's page reaches a loopback/private origin not its own.
+
+    This is the compensating control the exemption is documented WITH: a raw
+    `ssh -L` is not a filtered byte channel, so what keeps it narrow is that the
+    bridged page can talk to its OWN forward and to the public internet, and to no
+    other loopback or private origin — not Home's control plane, not Home's other
+    dev servers, not either machine's LAN. Playwright routing re-runs per request,
+    so a redirect, an XHR, a websocket upgrade or a click cannot smuggle one in.
+    """
+
+    if not _is_remote_placement(ctx):
+        return False
+    parsed = urlparse(str(url or ""))
+    if parsed.scheme not in {"http", "https"}:
+        return False
+    port = _url_loopback_port(url)
+    if port is not None:
+        # Compared by PORT, not by origin string: the forward's local end is
+        # 127.0.0.1 and the page may address it as `localhost`, `127.0.0.1`, or
+        # `[::1]`. Any loopback port that is not one this task forwarded is foreign.
+        allowed_ports = {
+            urlparse(origin).port
+            for origin in _remote_forward_origins(ctx).values()
+            if origin
+        }
+        return port not in allowed_ports
+    host = (parsed.hostname or "").strip().rstrip(".").lower()
+    if not host:
+        return False
+    try:
+        return _is_blocked_subagent_ip(ipaddress.ip_address(host))
+    except ValueError:
+        return False
 
 
 def _control_plane_loopback_ports() -> set[int]:
@@ -563,30 +810,28 @@ def _ensure_browser(ctx: ToolContext, *, engine: str = "chromium", device: str =
     # click+Save path (POST /api/settings) for them, not just evaluate-JS. Applies to
     # every browser session (root + subagents).
     bs_context.route("**/api/settings", _block_owner_settings_post)
+    # The remote-placement origin block is a SEPARATE route on purpose: it is
+    # evaluated per request against the set of forwards open AT THAT MOMENT, and a
+    # forward may be opened long after this context was built. Registering it here
+    # for both profiles keeps one rule for the bridged page — its own forward and
+    # the public internet, nothing else loopback or private on either machine.
+    bs_context.route("**/*", functools.partial(_route_remote_origin_block, ctx=ctx))
     if readonly_subagent:
-        bs_context.route(
-            "**/*",
-            lambda route: route.abort()
-            if _is_subagent_blocked_browser_url(route.request.url, ctx)
-            else _route_fallback(route),
-        )
+        bs_context.route("**/*", functools.partial(_route_subagent_block, ctx=ctx))
     else:
-        # Main-agent SSRF guard (conservative): block ONLY link-local /
-        # cloud-metadata endpoints (169.254.0.0/16 incl. decimal/hex spellings,
-        # fd00:ec2::254). Private/LAN stays reachable — owners legitimately
-        # browse their own LAN services. Route interception re-validates every
-        # hop, so redirects cannot smuggle a metadata fetch.
-        bs_context.route(
-            "**/*",
-            lambda route: route.abort()
-            if _is_metadata_blocked_browser_url(route.request.url)
-            else _route_fallback(route),
-        )
+        bs_context.route("**/*", _route_metadata_block)
     return bs.page
 
 
 def cleanup_browser(ctx: ToolContext) -> None:
-    """Close page/browser and stop the Playwright instance."""
+    """Close page/browser and stop the Playwright instance.
+
+    `_remote_browser_forwards` is deliberately left alone. A forward is owned by the
+    TASK — the broker closes it on finish, cancel and panic, and its custody record
+    is `scope="task"` — while this function also runs mid-task on a thread switch or
+    an engine change. Clearing the map here would leak one `ssh -L` child per
+    browser rebuild and then hand the next call a dead origin.
+    """
     bs = ctx.browser_state
     try:
         if bs.page is not None:
@@ -735,6 +980,49 @@ def _route_fallback(route: Any) -> None:
         fallback()
         return
     route.continue_()
+
+
+# The three catch-alls are NAMED, and that is not style. As anonymous lambdas the only
+# assertions that could reach them were a route COUNT and a pattern STRING — so the
+# suite could not tell which handler sat at which index, and when the remote-origin
+# block was inserted ahead of the SSRF guard, the one behavioural test kept driving
+# `routes[-1]` and silently stopped covering the guard it was written for. Inverting
+# the origin block left 323 tests green. A name is what an assertion can hold onto.
+
+
+def _route_remote_origin_block(route: Any, ctx: ToolContext) -> None:
+    """A bridged page reaches its own forward and the public internet, nothing else.
+
+    Evaluated per request against the forwards open AT THAT MOMENT — a forward may be
+    opened long after the context was built, which is why this is its own route rather
+    than a check folded into the others.
+    """
+    if _remote_foreign_origin_blocked(route.request.url, ctx):
+        route.abort()
+        return
+    _route_fallback(route)
+
+
+def _route_subagent_block(route: Any, ctx: ToolContext) -> None:
+    """The readonly-subagent guard: no loopback, no private range, no metadata."""
+    if _is_subagent_blocked_browser_url(route.request.url, ctx):
+        route.abort()
+        return
+    _route_fallback(route)
+
+
+def _route_metadata_block(route: Any) -> None:
+    """Main-agent SSRF guard (conservative).
+
+    Blocks ONLY link-local / cloud-metadata endpoints (169.254.0.0/16 including the
+    decimal and hex spellings, fd00:ec2::254). Private/LAN stays reachable — owners
+    legitimately browse their own LAN services. Route interception re-validates every
+    hop, so a redirect cannot smuggle a metadata fetch.
+    """
+    if _is_metadata_blocked_browser_url(route.request.url):
+        route.abort()
+        return
+    _route_fallback(route)
 
 
 def _is_context_mode_owner_post(request: Any) -> bool:
@@ -1016,6 +1304,13 @@ def _browse_page(ctx: ToolContext, url: str, output: str = "text",
     readonly_subagent = _readonly_subagent(ctx)
     if readonly_subagent and _is_subagent_blocked_browser_url(str(url or ""), ctx):
         return "⚠️ BROWSER_LOCAL_READONLY_BLOCKED: subagents may browse external HTTP(S), localhost (non-Ouroboros ports), and file:// under their workspace — not the Ouroboros API ports, private/link-local IPs, or other schemes."
+    # Placement resolution happens ONCE, before the browser exists: on a remote task
+    # a loopback URL names the TARGET's service, and the forward that makes it
+    # reachable must be open before the page is asked for. A local placement returns
+    # the URL unchanged and takes no new code path at all.
+    url, placement_refusal = _resolve_placement_url(ctx, url)
+    if placement_refusal:
+        return placement_refusal
     try:
         page = _ensure_browser(ctx, engine=engine, device=device)
         if viewport:

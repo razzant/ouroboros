@@ -297,7 +297,6 @@ def test_light_run_script_default_cwd_uses_active_workspace_agent_python(tmp_pat
 
 def test_registry_guard_and_handler_receive_same_resolved_verify_argv(tmp_path, monkeypatch):
     import ouroboros.safety as safety
-    import ouroboros.tools.registry as registry_module
 
     ctx = _context(tmp_path)
     agent_python = _executable(tmp_path / "agent" / "bin" / "python")
@@ -312,7 +311,11 @@ def test_registry_guard_and_handler_receive_same_resolved_verify_argv(tmp_path, 
     registry = ToolRegistry(repo_dir=ctx.repo_dir, drive_root=ctx.drive_root)
     registry.set_context(ctx)
     captured: dict[str, list[str]] = {}
-    original_guard = registry_module.process_shell_guard_args
+    # (RWS v2 §3.1) the guard projection is built by dispatch_args, not inline
+    # in the registry: patch the seam that actually produces guard_args.
+    from ouroboros.tools import dispatch_args as dispatch_args_module
+
+    original_guard = dispatch_args_module.process_shell_guard_args
 
     def capture_guard(name, args, **kwargs):
         guarded = original_guard(name, args, **kwargs)
@@ -325,7 +328,7 @@ def test_registry_guard_and_handler_receive_same_resolved_verify_argv(tmp_path, 
         captured["handler"] = list(check)
         return "ok"
 
-    monkeypatch.setattr(registry_module, "process_shell_guard_args", capture_guard)
+    monkeypatch.setattr(dispatch_args_module, "process_shell_guard_args", capture_guard)
     monkeypatch.setattr(registry, "_run_shell_safety_check", lambda *args, **kwargs: "")
     registry._entries["verify_and_record"].handler = capture_handler
 

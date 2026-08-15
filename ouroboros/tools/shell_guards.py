@@ -8,6 +8,7 @@ import pathlib
 import re
 from typing import Any, Dict, List
 
+from ouroboros.contracts.skill_payload_policy import SKILL_OWNER_STATE_STEMS
 from ouroboros.runtime_mode_policy import FROZEN_CONTRACT_PATH_PREFIXES, PROTECTED_RUNTIME_PATHS
 from ouroboros.shell_parse import (
     EMBEDDED_WINDOWS_ABSOLUTE_PATH_RE,
@@ -880,6 +881,63 @@ def shell_has_write_indicator(raw_cmd: Any) -> bool:
     )
 
 
+PROCESS_COMMAND_TOOLS = frozenset({"run_command", "run_script", "start_service"})
+# verify_and_record runs the agent's declared `check` like a command, so it must clear the
+# same PRE-EXECUTION shell guards (subagent-secret read, protected-artifact read, sudo,
+# protected-root / workspace-state / light-mode writes) — that pre-exec filter is the
+# security boundary and blocks a forbidden mutation BEFORE the handler runs, so a guarded
+# check cannot mutate protected state and then leave a host-attested PASS receipt. It is
+# deliberately NOT in PROCESS_COMMAND_TOOLS: those POST-execution checks (owner-file
+# restore, light-repo diff, git-ref tripwire) run AFTER the handler has already written the
+# receipt, so they would only annotate the returned text, not gate the durable receipt —
+# adding them would give false assurance while the pre-exec guards already do the gating.
+SHELL_GUARDED_TOOLS = PROCESS_COMMAND_TOOLS | {"verify_and_record"}
+# Tools whose dispatch resolves a process/edit cwd; claude_code_edit qualifies
+# because its light-mode arm and its handler both resolve one.
+CWD_BEARING_TOOLS = SHELL_GUARDED_TOOLS | {"claude_code_edit"}
+
+# `verify_and_record` is the one guarded tool whose CONTRACT KIND decides whether it
+# launches anything: the run kinds execute the declared `check`, while the others record
+# a receipt over declared paths (`artifact_observation`, confined by
+# `verify._confine_artifact_path`) or over the owner's own words
+# (`no_visible_machine_contract`), running nothing at all.
+#
+# ONE authority. This set was hand-restated in `tools/verify` and again in
+# `tools/registry`, and the membership tables above read NEITHER — so the non-run kinds
+# were cwd-resolved and shell-guarded as though they ran a command, fabricating refusals
+# about facts the operation does not have: `contract_kind="artifact_observation",
+# cwd="/etc"` answered `SHELL_CWD_BLOCKED` about a cwd nothing would use, and the honest
+# escape hatch `check="reviewed the rendered page by hand; sudo not used"` was parsed as
+# argv and answered `SUDO_INTERACTIVE_BLOCKED`. Nothing that RUNS loses a guard.
+VERIFY_RUN_KINDS = frozenset({"visible_verifier", "explicit_command", "explicit_metric"})
+
+
+def launches_a_command(name: str, args: Dict[str, Any]) -> bool:
+    """Whether this call actually executes something on a host.
+
+    True for every tool but `verify_and_record`, whose answer is its contract kind.
+    """
+    if name != "verify_and_record":
+        return True
+    return str(args.get("contract_kind") or "") in VERIFY_RUN_KINDS
+
+
+def operation_cwd_keys(name: str, args: Dict[str, Any]) -> tuple[tuple[str, str], ...]:
+    """The (cwd, operation) pairs a dispatch resolves EAGERLY (RWS v2 §3.1 step 2).
+
+    Only the operation's own DECLARED cwd, and only for tools that actually run
+    something: priming a cwd for a call that never uses one (read_file) would
+    fabricate a fact — and a possible refusal — the operation does not have.
+    Surfaces that deliberately judge a SUBSTITUTED cwd (run_script's light-mode
+    task drive below, a verify check with its own cwd) resolve on first use and
+    are memoized by the same operation scope.
+    """
+    if name not in CWD_BEARING_TOOLS or not launches_a_command(name, args):
+        return ()
+    operation = "service" if name == "start_service" else "shell"
+    return ((str(args.get("cwd") or ""), operation),)
+
+
 def process_shell_guard_args(name: str, args: Dict[str, Any], *, ctx: Any = None, runtime_mode: str = "") -> Dict[str, Any]:
     """Normalize process-tool arguments into the command shape inspected by shell guards."""
 
@@ -1350,3 +1408,185 @@ def light_shell_repo_mutation(
     if any(ind in cmd_lower for ind in (" > ", " >> ", " | tee ")):
         return repo_target_mentioned(argv, repo_dir=repo_dir, cwd=cwd, work_dir=work_dir)
     return False
+
+
+# --------------------------------------------------------------------------- #
+# run_command safety-check orchestration (moved from tools/registry.py):
+# owner-control self-change detectors and the pre-execution shell filter.
+# --------------------------------------------------------------------------- #
+def _detect_runtime_mode_elevation(text_lower: str) -> bool:
+    """Detect shell/script attempts to change ``OUROBOROS_RUNTIME_MODE``."""
+    has_save = "save_settings" in text_lower
+    has_mode_key = "ouroboros_runtime_mode" in text_lower
+    has_dotted_path = "ouroboros.config.save_settings" in text_lower
+    return (has_save and has_mode_key) or has_dotted_path
+
+
+_SUBAGENT_SHELL_SECRET_MARKERS = (
+    # Ouroboros owner secrets/control state. The relative form (no leading slash)
+    # closes the interpreter-string bypass (CW4, v6.34.0): the whole-command
+    # substring scan already catches "/data/settings.json" and "../../data/..",
+    # but a bare "data/settings.json" (e.g. python -c "open('data/settings.json')"
+    # from a workspace cwd) needs the slash-less marker too.
+    "/data/settings.json", "data/settings.json", "ouroboros/data/settings", "file1.txt",
+    # Universal credential/secret/control files (relative or absolute).
+    ".env", ".git/config", ".git/credentials", "credentials.json", "tokens.json",
+    "/.ssh/", ".ssh/", "id_rsa", "id_ed25519", ".netrc", ".npmrc", ".pgpass", ".aws/",
+)
+
+
+def _subagent_shell_targets_secret(cmd_path_lower: str) -> bool:
+    """Deterministic guard: a shell command referencing Ouroboros secrets/credentials
+    or owner-control state (settings.json, ssh keys, token/credential files)."""
+    return any(marker in cmd_path_lower for marker in _SUBAGENT_SHELL_SECRET_MARKERS)
+
+
+def _command_mentions_protected_root(cmd_path_lower: str, root_text: str) -> bool:
+    """Boundary-aware path containment for the workspace shell guard.
+
+    True only when ``root_text`` (a normalised, lower-cased protected root path)
+    appears in the command as a whole path or a parent prefix at a real path
+    boundary — NOT as an incidental substring of an unrelated path that merely
+    shares the prefix (e.g. protected ``/x/data`` must not match ``/x/database``).
+    Used as a coarse catch-all for runtime paths embedded in non-tokenised text
+    (e.g. inside a ``python -c`` string); the precise per-token containment loop
+    still does the authoritative active/protected classification.
+    """
+    if not root_text:
+        return False
+    norm = root_text.rstrip("/")
+    if not norm:
+        return False
+    span = len(norm)
+    limit = len(cmd_path_lower)
+    start = 0
+    while True:
+        idx = cmd_path_lower.find(norm, start)
+        if idx < 0:
+            return False
+        end = idx + span
+        nxt = cmd_path_lower[end] if end < limit else ""
+        # Boundary = end-of-string, a path separator (child path), or a shell
+        # token delimiter (the exact path). A trailing path char (letter/digit/
+        # ``.``/``-``/``_``) means a DIFFERENT sibling path → keep scanning.
+        if nxt == "" or nxt == "/" or nxt in " \t\"')(;:,&|<>":
+            return True
+        start = end
+
+
+def _detect_mutative_toggle_self_change(text_lower: str) -> bool:
+    """Detect shell/script/CLI attempts to change the owner-only mutative-subagents toggle."""
+    has_key = "ouroboros_allow_mutative_subagents" in text_lower
+    has_write = (
+        "save_settings" in text_lower
+        or "settings.json" in text_lower
+        or "/api/settings" in text_lower
+        or "settings set" in text_lower  # `ouroboros settings set <key> <value>` CLI path
+        or "ouroboros.cli" in text_lower
+    )
+    return has_key and has_write
+
+
+def _detect_evolution_owner_control_self_change(text_lower: str) -> bool:
+    """Detect shell/script/CLI attempts to set the owner-only self-evolution controls:
+    the post-task evolution toggle OR the persistent evolution-objective steer (which
+    biases every evolution campaign, so it is owner-only like the toggle)."""
+    has_key = (
+        "ouroboros_post_task_evolution" in text_lower
+        or "ouroboros_evolution_persistent_objective" in text_lower
+    )
+    has_write = (
+        "save_settings" in text_lower
+        or "settings.json" in text_lower
+        or "/api/settings" in text_lower
+        or "settings set" in text_lower
+        or "ouroboros.cli" in text_lower
+    )
+    return has_key and has_write
+
+
+def _detect_context_mode_self_lowering(text_lower: str) -> bool:
+    """Detect shell/script attempts to lower the owner-controlled context mode."""
+    mentions_context_key = "ouroboros_context_mode" in text_lower
+    mentions_owner_endpoint = "/api/owner/context-mode" in text_lower
+    mentions_context_endpoint = "context-mode" in text_lower and "/api/owner" in text_lower
+    mentions_context_cli = "context-mode" in text_lower and (
+        "ouroboros settings" in text_lower
+        or "ouroboros.cli" in text_lower
+    )
+    mentions_save = "save_settings" in text_lower or "settings.json" in text_lower
+    mentions_owner_lowering_flag = "allow_context_lowering" in text_lower
+    return (
+        mentions_owner_endpoint
+        or mentions_context_endpoint
+        or mentions_context_cli
+        or mentions_owner_lowering_flag
+        or (mentions_context_key and mentions_save)
+    )
+
+
+def _detect_safety_mode_self_lowering(text_lower: str) -> bool:
+    """Detect shell/script attempts to lower the owner-controlled LLM-safety coverage
+    (v6.54.3). OUROBOROS_SAFETY_MODE gates the LLM safety supervisor layer; the agent
+    must not switch it to ``light``/``off`` to remove its own supervision friction
+    (BIBLE P3). Mirrors the context-mode/scope-floor self-lowering guards."""
+    import urllib.parse
+
+    # URL-decode so a percent-encoded endpoint (curl .../safety%2Dmode) cannot
+    # slip the literal scan (review round 6; mirrors the attest-endpoint guard).
+    decoded = urllib.parse.unquote(urllib.parse.unquote(text_lower)).lower()
+    text_lower = f"{text_lower} {decoded}"
+    mentions_mode_key = "ouroboros_safety_mode" in text_lower
+    mentions_owner_endpoint = "/api/owner/safety-mode" in text_lower
+    mentions_mode_endpoint = "safety-mode" in text_lower and "/api/owner" in text_lower
+    mentions_mode_cli = "safety-mode" in text_lower and (
+        "ouroboros settings" in text_lower
+        or "ouroboros.cli" in text_lower
+    )
+    mentions_save = "save_settings" in text_lower or "settings.json" in text_lower or "/api/settings" in text_lower
+    return (
+        mentions_owner_endpoint
+        or mentions_mode_endpoint
+        or mentions_mode_cli
+        or (mentions_mode_key and mentions_save)
+    )
+
+
+def _detect_owner_skill_attest_self_call(text_lower: str) -> bool:
+    """Detect agent attempts to loopback-call the OWNER-ONLY skill owner-attestation endpoint
+    (C1, v6.39). Owner-attestation skips the expensive LLM skill review; it MUST be
+    owner-issued, never agent self-callable — otherwise the agent could self-bypass the
+    immune system's review for its own skill. Mirrors the context-mode/scope-floor guards.
+
+    URL-DECODE first so a percent-encoded path (e.g. ``%61ttest-review`` / ``attest%2Dreview``)
+    — which Starlette decodes back to ``attest-review`` before routing — cannot slip past the
+    literal match (decode twice to catch double-encoding)."""
+    import urllib.parse
+    decoded = urllib.parse.unquote(urllib.parse.unquote(text_lower)).lower()
+    text = f"{text_lower} {decoded}"
+    return "/api/owner/skills/" in text and "attest-review" in text
+
+
+_SKILL_OWNER_STATE_STEMS = SKILL_OWNER_STATE_STEMS
+
+
+_DETACHED_PROCESS_MARKERS = ("start_new_session", "new_session", "setsid", "preexec_fn", "nohup")
+
+
+def _mentions_skill_owner_state(text_lower: str) -> bool:
+    if "state" not in text_lower or "skills" not in text_lower:
+        return False
+    for stem in _SKILL_OWNER_STATE_STEMS:
+        if f"{stem}.json" in text_lower:
+            return True
+        if stem in text_lower and ".json" in text_lower:
+            return True
+    return False
+
+
+def _mentions_detached_process(text_lower: str) -> bool:
+    return any(marker in text_lower for marker in _DETACHED_PROCESS_MARKERS)
+
+
+
+

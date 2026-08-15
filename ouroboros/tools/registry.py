@@ -39,8 +39,11 @@ from ouroboros.shell_parse import (
 )
 from ouroboros.tools.shell_guards import (
     LIGHT_SHELL_WRITER_COMMANDS,
+    PROCESS_COMMAND_TOOLS as _PROCESS_COMMAND_TOOLS,
     PROTECTED_RUNTIME_PATHS_LOWER,
+    SHELL_GUARDED_TOOLS as _SHELL_GUARDED_TOOLS,
     interpreter_family,
+    launches_a_command as _launches_a_command,
     light_shell_repo_mutation,
     parse_porcelain_paths,
     process_shell_guard_args,
@@ -50,9 +53,57 @@ from ouroboros.tools.shell_guards import (
     workspace_executor_state_write_block,
     writer_target_tokens,
 )
+from ouroboros.tools.shell_guards import (
+    _command_mentions_protected_root,
+    _detect_context_mode_self_lowering,
+    _detect_evolution_owner_control_self_change,
+    _detect_mutative_toggle_self_change,
+    _detect_owner_skill_attest_self_call,
+    _detect_runtime_mode_elevation,
+    _detect_safety_mode_self_lowering,
+    _mentions_detached_process,
+    _mentions_skill_owner_state,
+    _subagent_shell_targets_secret,
+)
+from ouroboros.tools.shell_guards_runtime import external_shell_runtime_or_secret_block
+from ouroboros.tools.shell_guards_target import native_shell_target, native_shell_write_block
+from ouroboros.tools.tool_args import (
+    _entry_has_public_param_schema,
+    _entry_public_params,
+    _format_tool_arg_error,
+    _normalize_tool_call_args,
+)
+from ouroboros.tools.dispatch_args import project_dispatch_args
+from ouroboros.tools.dispatch_execute import (
+    execute_native_operation,
+    withdraw_outstanding_prepare,
+)
+from ouroboros.tools.dispatch_policy import (
+    filter_native_listing,
+    script_interpreter_refusal,
+    subagent_secret_path_refusal,
+)
+from ouroboros.tools.dispatch_prepare import (
+    OutstandingPrepare,
+    bind_execution_args,
+    native_execution_cwd,
+    prepare_operation,
+    reconcile_target_args,
+)
+from ouroboros.remote_task_files import MEDIA_PATH_ARGS, remote_media_predispatch
+from ouroboros.workspace_ref import (
+    RemoteWorkspacePathError,
+    SshWorkspaceRef,
+    normalize_remote_root_relative,
+    workspace_ref_for,
+)
 from ouroboros.artifacts import task_artifact_dir_path, task_id_for_artifacts
 from ouroboros.protected_artifacts import shell_block_reason as protected_artifact_shell_block_reason
-from ouroboros.git_shell_policy import run_shell_git_block_reason, workspace_git_safety_violation
+from ouroboros.git_shell_policy import (
+    run_shell_git_block_reason,
+    target_native_git_violation,
+    workspace_git_safety_violation,
+)
 from ouroboros.tool_access import (
     binding_targets_system_repo,
     build_resolved_resource_binding,
@@ -71,7 +122,6 @@ from ouroboros.utils import safe_relpath
 from ouroboros.contracts.task_constraint import TaskConstraint, VALID_WRITE_SURFACES, normalize_task_constraint
 from ouroboros.contracts.skill_payload_policy import (
     SKILL_OWNER_STATE_FILENAMES,
-    SKILL_OWNER_STATE_STEMS,
     SKILL_PAYLOAD_CONTROL_DIRNAMES,
     SKILL_PAYLOAD_CONTROL_FILENAMES,
     constraint_bucket_skill,
@@ -92,7 +142,20 @@ def _coerce_real_path(value: Any) -> pathlib.Path | None:
     except TypeError:
         return None
 def active_repo_dir_for(ctx: Any) -> pathlib.Path:
-    """Return the active repo/workspace root for real and lightweight test contexts."""
+    """Return the active repo/workspace root for real and lightweight test contexts.
+
+    (RWS v2 §3.1/P1) An SSH placement has NO Home path, so the refusal happens
+    HERE, typed, instead of falling through to ``ctx.repo_dir``: that fallback
+    would silently aim a remote task's active workspace at the live Ouroboros
+    repo, which is precisely the "an SSH binding never degrades to system-repo
+    execution" invariant. A malformed sealed placement fails loudly for the same
+    reason — a durable record this build cannot honor must not be coerced.
+    """
+    if isinstance(workspace_ref_for(ctx), SshWorkspaceRef):
+        raise RemoteWorkspacePathError(
+            "active_workspace is target-native for an ssh placement and has no Home "
+            "path; route the operation through the executor instead of resolving a path"
+        )
     active = getattr(ctx, "active_repo_dir", None)
     if callable(active):
         try:
@@ -114,31 +177,14 @@ def active_repo_dir_for(ctx: Any) -> pathlib.Path:
 
 
 def system_repo_dir_for(ctx: Any) -> pathlib.Path:
-    """Return the Ouroboros system repo root, not an external active workspace."""
+    """Return the Ouroboros system repo root, not an external active workspace.
+
+    Home-native under EVERY placement (root matrix, Q2а): the system repo is
+    Home by definition, so an ssh placement changes nothing here."""
 
     return pathlib.Path(getattr(ctx, "system_repo_dir", None) or getattr(ctx, "repo_dir"))
 
 
-def _executor_backend_candidate_allowed(ctx: Any, candidate: str, allowed_roots: List[pathlib.Path]) -> bool:
-    try:
-        from ouroboros.workspace_executor import executor_ref_from_ctx as _executor_ref_from_ctx
-        from ouroboros.workspace_executor import map_backend_path as _executor_map_backend_path
-
-        executor_ref = _executor_ref_from_ctx(ctx)
-        if executor_ref is None:
-            return False
-        resolved = _executor_map_backend_path(executor_ref, candidate)
-        return any(resolved.is_relative_to(root) for root in allowed_roots)
-    except Exception:
-        return False
-
-
-def _detect_runtime_mode_elevation(text_lower: str) -> bool:
-    """Detect shell/script attempts to change ``OUROBOROS_RUNTIME_MODE``."""
-    has_save = "save_settings" in text_lower
-    has_mode_key = "ouroboros_runtime_mode" in text_lower
-    has_dotted_path = "ouroboros.config.save_settings" in text_lower
-    return (has_save and has_mode_key) or has_dotted_path
 
 
 _SUBAGENT_SHELL_SECRET_MARKERS = (
@@ -154,43 +200,6 @@ _SUBAGENT_SHELL_SECRET_MARKERS = (
 )
 
 
-def _subagent_shell_targets_secret(cmd_path_lower: str) -> bool:
-    """Deterministic guard: a shell command referencing Ouroboros secrets/credentials
-    or owner-control state (settings.json, ssh keys, token/credential files)."""
-    return any(marker in cmd_path_lower for marker in _SUBAGENT_SHELL_SECRET_MARKERS)
-
-
-def _command_mentions_protected_root(cmd_path_lower: str, root_text: str) -> bool:
-    """Boundary-aware path containment for the workspace shell guard.
-
-    True only when ``root_text`` (a normalised, lower-cased protected root path)
-    appears in the command as a whole path or a parent prefix at a real path
-    boundary — NOT as an incidental substring of an unrelated path that merely
-    shares the prefix (e.g. protected ``/x/data`` must not match ``/x/database``).
-    Used as a coarse catch-all for runtime paths embedded in non-tokenised text
-    (e.g. inside a ``python -c`` string); the precise per-token containment loop
-    still does the authoritative active/protected classification.
-    """
-    if not root_text:
-        return False
-    norm = root_text.rstrip("/")
-    if not norm:
-        return False
-    span = len(norm)
-    limit = len(cmd_path_lower)
-    start = 0
-    while True:
-        idx = cmd_path_lower.find(norm, start)
-        if idx < 0:
-            return False
-        end = idx + span
-        nxt = cmd_path_lower[end] if end < limit else ""
-        # Boundary = end-of-string, a path separator (child path), or a shell
-        # token delimiter (the exact path). A trailing path char (letter/digit/
-        # ``.``/``-``/``_``) means a DIFFERENT sibling path → keep scanning.
-        if nxt == "" or nxt == "/" or nxt in " \t\"')(;:,&|<>":
-            return True
-        start = end
 
 
 def _stray_skill_payload_failsoft(root_arg: str, workspace_mode: bool, task_constraint: Any) -> bool:
@@ -206,17 +215,6 @@ def _stray_skill_payload_failsoft(root_arg: str, workspace_mode: bool, task_cons
     return bool(workspace_mode and not skill_payload_intent)
 
 
-def _detect_mutative_toggle_self_change(text_lower: str) -> bool:
-    """Detect shell/script/CLI attempts to change the owner-only mutative-subagents toggle."""
-    has_key = "ouroboros_allow_mutative_subagents" in text_lower
-    has_write = (
-        "save_settings" in text_lower
-        or "settings.json" in text_lower
-        or "/api/settings" in text_lower
-        or "settings set" in text_lower  # `ouroboros settings set <key> <value>` CLI path
-        or "ouroboros.cli" in text_lower
-    )
-    return has_key and has_write
 
 
 def _managed_update_code_tool_block(ctx: Any, name: str) -> str:
@@ -257,42 +255,6 @@ def _authorized_managed_update_resolver(ctx: Any) -> bool:
         return False
 
 
-def _detect_evolution_owner_control_self_change(text_lower: str) -> bool:
-    """Detect shell/script/CLI attempts to set the owner-only self-evolution controls:
-    the post-task evolution toggle OR the persistent evolution-objective steer (which
-    biases every evolution campaign, so it is owner-only like the toggle)."""
-    has_key = (
-        "ouroboros_post_task_evolution" in text_lower
-        or "ouroboros_evolution_persistent_objective" in text_lower
-    )
-    has_write = (
-        "save_settings" in text_lower
-        or "settings.json" in text_lower
-        or "/api/settings" in text_lower
-        or "settings set" in text_lower
-        or "ouroboros.cli" in text_lower
-    )
-    return has_key and has_write
-
-
-def _detect_context_mode_self_lowering(text_lower: str) -> bool:
-    """Detect shell/script attempts to lower the owner-controlled context mode."""
-    mentions_context_key = "ouroboros_context_mode" in text_lower
-    mentions_owner_endpoint = "/api/owner/context-mode" in text_lower
-    mentions_context_endpoint = "context-mode" in text_lower and "/api/owner" in text_lower
-    mentions_context_cli = "context-mode" in text_lower and (
-        "ouroboros settings" in text_lower
-        or "ouroboros.cli" in text_lower
-    )
-    mentions_save = "save_settings" in text_lower or "settings.json" in text_lower
-    mentions_owner_lowering_flag = "allow_context_lowering" in text_lower
-    return (
-        mentions_owner_endpoint
-        or mentions_context_endpoint
-        or mentions_context_cli
-        or mentions_owner_lowering_flag
-        or (mentions_context_key and mentions_save)
-    )
 
 
 # Commands that can only READ. This is an ALLOWLIST on purpose: an unrecognised
@@ -499,46 +461,6 @@ def _compose_execute_result(result: str, route_note: str, safety_msg: str) -> st
     return result
 
 
-def _detect_safety_mode_self_lowering(text_lower: str) -> bool:
-    """Detect shell/script attempts to lower the owner-controlled LLM-safety coverage
-    (v6.54.3). OUROBOROS_SAFETY_MODE gates the LLM safety supervisor layer; the agent
-    must not switch it to ``light``/``off`` to remove its own supervision friction
-    (BIBLE P3). Mirrors the context-mode/scope-floor self-lowering guards."""
-    import urllib.parse
-
-    # URL-decode so a percent-encoded endpoint (curl .../safety%2Dmode) cannot
-    # slip the literal scan (review round 6; mirrors the attest-endpoint guard).
-    decoded = urllib.parse.unquote(urllib.parse.unquote(text_lower)).lower()
-    text_lower = f"{text_lower} {decoded}"
-    mentions_mode_key = "ouroboros_safety_mode" in text_lower
-    mentions_owner_endpoint = "/api/owner/safety-mode" in text_lower
-    mentions_mode_endpoint = "safety-mode" in text_lower and "/api/owner" in text_lower
-    mentions_mode_cli = "safety-mode" in text_lower and (
-        "ouroboros settings" in text_lower
-        or "ouroboros.cli" in text_lower
-    )
-    mentions_save = "save_settings" in text_lower or "settings.json" in text_lower or "/api/settings" in text_lower
-    return (
-        mentions_owner_endpoint
-        or mentions_mode_endpoint
-        or mentions_mode_cli
-        or (mentions_mode_key and mentions_save)
-    )
-
-
-def _detect_owner_skill_attest_self_call(text_lower: str) -> bool:
-    """Detect agent attempts to loopback-call the OWNER-ONLY skill owner-attestation endpoint
-    (C1, v6.39). Owner-attestation skips the expensive LLM skill review; it MUST be
-    owner-issued, never agent self-callable — otherwise the agent could self-bypass the
-    immune system's review for its own skill. Mirrors the context-mode/scope-floor guards.
-
-    URL-DECODE first so a percent-encoded path (e.g. ``%61ttest-review`` / ``attest%2Dreview``)
-    — which Starlette decodes back to ``attest-review`` before routing — cannot slip past the
-    literal match (decode twice to catch double-encoding)."""
-    import urllib.parse
-    decoded = urllib.parse.unquote(urllib.parse.unquote(text_lower)).lower()
-    text = f"{text_lower} {decoded}"
-    return "/api/owner/skills/" in text and "attest-review" in text
 
 
 def _task_constraint_path_allowed(path_text: str, constraint: Optional[TaskConstraint], drive_root: pathlib.Path) -> bool:
@@ -607,30 +529,14 @@ _HEAL_MODE_ALLOWED_TOOLS = frozenset({
 _HEAL_PROTECTED_PAYLOAD_FILENAMES = SKILL_PAYLOAD_CONTROL_FILENAMES
 
 
-_SKILL_OWNER_STATE_STEMS = SKILL_OWNER_STATE_STEMS
-_DETACHED_PROCESS_MARKERS = ("start_new_session", "new_session", "setsid", "preexec_fn", "nohup")
 
 
-def _mentions_skill_owner_state(text_lower: str) -> bool:
-    if "state" not in text_lower or "skills" not in text_lower:
-        return False
-    for stem in _SKILL_OWNER_STATE_STEMS:
-        if f"{stem}.json" in text_lower:
-            return True
-        if stem in text_lower and ".json" in text_lower:
-            return True
-    return False
-
-
-def _mentions_detached_process(text_lower: str) -> bool:
-    return any(marker in text_lower for marker in _DETACHED_PROCESS_MARKERS)
 
 
 def _heal_protected_payload_sidecar(path_text: str) -> bool:
     return is_skill_payload_control_filename(path_text)
 
 
-_PROCESS_COMMAND_TOOLS = frozenset({"run_command", "run_script", "start_service"})
 # verify_and_record runs the agent's declared `check` like a command, so it must clear the
 # same PRE-EXECUTION shell guards (subagent-secret read, protected-artifact read, sudo,
 # protected-root / workspace-state / light-mode writes) — that pre-exec filter is the
@@ -640,7 +546,6 @@ _PROCESS_COMMAND_TOOLS = frozenset({"run_command", "run_script", "start_service"
 # restore, light-repo diff, git-ref tripwire) run AFTER the handler has already written the
 # receipt, so they would only annotate the returned text, not gate the durable receipt —
 # adding them would give false assurance while the pre-exec guards already do the gating.
-_SHELL_GUARDED_TOOLS = _PROCESS_COMMAND_TOOLS | {"verify_and_record"}
 # Path-bearing file tools whose active_workspace/system_repo path arg is normalized
 # ONCE at dispatch (execute) so the handler AND every guard (protected-path,
 # protected-artifact, shrink) resolve the identical target — no desync bypass.
@@ -694,6 +599,39 @@ def _payload_write_paths(name: str, args: Dict[str, Any]) -> List[str]:
     return [p for p in paths if str(p or "").strip()]
 
 
+def _executor_backend_candidate_allowed(ctx: Any, candidate: str, allowed_roots: List[pathlib.Path]) -> bool:
+    try:
+        from ouroboros.workspace_executor import executor_ref_from_ctx as _executor_ref_from_ctx
+        from ouroboros.workspace_executor import map_backend_path as _executor_map_backend_path
+
+        executor_ref = _executor_ref_from_ctx(ctx)
+        if executor_ref is None:
+            return False
+        resolved = _executor_map_backend_path(executor_ref, candidate)
+        return any(resolved.is_relative_to(root) for root in allowed_roots)
+    except Exception:
+        return False
+
+
+
+def _root_relative_normalizer(ctx: Any, root_arg: str) -> Callable[[str], str]:
+    """Path-arg normalizer for ``root_arg`` IN THAT ROOT'S NATIVE SPELLING SPACE.
+
+    (RWS-05) For an ssh placement `active_workspace` normalizes against the
+    sealed ref's target root with pure posix semantics; every other root — and
+    every local/docker placement — keeps the Home resolver byte-for-byte.
+    """
+    if root_arg == "active_workspace":
+        ref = workspace_ref_for(ctx)
+        if isinstance(ref, SshWorkspaceRef):
+            remote_root = ref.remote_root
+            return lambda text: normalize_remote_root_relative(remote_root, text)
+        root = active_repo_dir_for(ctx)
+    else:
+        root = system_repo_dir_for(ctx)
+    return lambda text: normalize_root_relative(root, text)
+
+
 def _normalize_dispatch_path_args(ctx: Any, name: str, args: Dict[str, Any]) -> str:
     """ROOT-FIX (v6.35.0): normalize an absolute / redundant-root-basename
     active_workspace|system_repo path arg IN PLACE at the dispatch boundary, so
@@ -718,18 +656,24 @@ def _normalize_dispatch_path_args(ctx: Any, name: str, args: Dict[str, Any]) -> 
     root_arg = str(args.get("root") or "active_workspace")
     if root_arg in ("active_workspace", "system_repo"):
         try:
-            norm_root = active_repo_dir_for(ctx) if root_arg == "active_workspace" else system_repo_dir_for(ctx)
+            _norm = _root_relative_normalizer(ctx, root_arg)
             for _key in ("path", "dir"):
                 if isinstance(args.get(_key), str) and args[_key]:
-                    args[_key] = normalize_root_relative(norm_root, args[_key])
+                    args[_key] = _norm(args[_key])
             if isinstance(args.get("files"), list):
                 for _f in args["files"]:
                     if isinstance(_f, dict) and isinstance(_f.get("path"), str) and _f["path"]:
-                        _f["path"] = normalize_root_relative(norm_root, _f["path"])
+                        _f["path"] = _norm(_f["path"])
         except Exception:
             pass
         return ""
     if root_arg != "user_files" or name == "query_code":
+        return ""
+    if isinstance(workspace_ref_for(ctx), SshWorkspaceRef):
+        # `user_files` is Home-native and the workspace lives on the target, so a
+        # Home absolute path can never be "under the active workspace" — there is
+        # nothing to auto-route, and a Home path must never be compared against a
+        # target spelling (root matrix, Q2а).
         return ""
     try:
         workspace = pathlib.Path(active_repo_dir_for(ctx)).resolve(strict=False)
@@ -917,11 +861,6 @@ _SKILL_LIFECYCLE_TARGET_TOOLS = frozenset({
     "submit_skill_to_hub",
 })
 _PROCESS_TARGET_TOOLS = frozenset({"run_command", "run_script", "start_service"})
-_VERIFY_RUN_KINDS = frozenset({
-    "visible_verifier",
-    "explicit_command",
-    "explicit_metric",
-})
 
 
 def _target_binding_operation(name: str, args: dict[str, Any]) -> str | None:
@@ -932,7 +871,7 @@ def _target_binding_operation(name: str, args: dict[str, Any]) -> str | None:
         return "review"
     if name in _PROCESS_TARGET_TOOLS:
         return "service" if name == "start_service" else "shell"
-    if name == "verify_and_record" and str(args.get("contract_kind") or "") in _VERIFY_RUN_KINDS:
+    if name == "verify_and_record" and _launches_a_command(name, args):
         return "shell"
     return None
 
@@ -965,44 +904,6 @@ def _builtin_tool_availability(name: str, ctx: Any = None) -> tuple[bool, str, s
     return True, "", ""
 
 
-def _handler_public_params(handler: Callable[..., Any]) -> list[str]:
-    try:
-        params = list(inspect.signature(handler).parameters)
-    except (TypeError, ValueError):
-        return []
-    return [name for name in params if name not in {"ctx", "_resolved_binding"}]
-
-
-def _entry_public_params(entry: "ToolEntry") -> list[str]:
-    try:
-        params = entry.schema.get("parameters") or {}
-        props = params.get("properties")
-        if isinstance(props, dict):
-            return [str(name) for name in props]
-    except Exception:
-        pass
-    return _handler_public_params(entry.handler)
-
-
-def _entry_has_public_param_schema(entry: "ToolEntry") -> bool:
-    try:
-        params = entry.schema.get("parameters") or {}
-        return isinstance(params.get("properties"), dict)
-    except Exception:
-        return False
-
-
-def _normalize_tool_call_args(entry: "ToolEntry", args: dict[str, Any]) -> None:
-    tool_name = entry.name
-    accepted = set(_entry_public_params(entry))
-    aliases: dict[str, str] = {}
-    aliases.update(_TOOL_ARG_ALIASES.get("*", {}))
-    aliases.update(_TOOL_ARG_ALIASES.get(tool_name, {}))
-    for alias, canonical in aliases.items():
-        if alias in args and canonical in accepted and alias not in accepted and canonical not in args:
-            args[canonical] = args.pop(alias)
-    if tool_name in _IGNORE_ROOT_ARG_TOOLS and "root" in args and "root" not in accepted:
-        args.pop("root", None)
 
 
 def _prepare_public_builtin_args(entry: "ToolEntry", args: dict[str, Any]) -> str:
@@ -1084,6 +985,22 @@ def _binding_items(binding: Any) -> tuple[Any, ...]:
     if binding is None:
         return ()
     return binding if isinstance(binding, tuple) else (binding,)
+
+
+def _authorized_process_roots(binding: Any) -> list[pathlib.Path]:
+    """The binding roots that are an AUTHORIZED process target, as plain paths.
+
+    An explicitly selected system repo or exact skill payload was chosen by the
+    caller, so the runtime guard must not re-block it merely because the task also
+    has an external workspace focus. Projecting it here keeps the guard itself free
+    of the binding type — and free of any second cwd resolution (D1).
+    """
+    return [
+        pathlib.Path(item.base_path)
+        for item in _binding_items(binding)
+        if item.root in {"system_repo", "skill_payload"}
+    ]
+
 
 
 def _binding_set_targets_system_repo(ctx: Any, binding: Any) -> bool:
@@ -1217,13 +1134,6 @@ def _payload_dispatch_constraint(
     return synthesized or task_constraint, ""
 
 
-def _format_tool_arg_error(entry: "ToolEntry") -> str:
-    params = _entry_public_params(entry)
-    accepted = ", ".join(params) if params else "none"
-    return (
-        f"⚠️ TOOL_ARG_ERROR ({entry.name}): invalid arguments for {entry.name}. "
-        f"Accepted parameters: {accepted}."
-    )
 
 
 def _light_repo_snapshot(repo_dir: pathlib.Path) -> Optional[Dict[str, Any]]:
@@ -1407,16 +1317,33 @@ class ToolContext:
     _review_history: list = field(default_factory=list)
 
     def active_repo_dir(self) -> pathlib.Path:
+        # Home-local contract (§3.1): legal for local placements and materialized
+        # snapshots only. An ssh placement has no Home path and refuses TYPED at the
+        # ref seam rather than handing back the system repo.
+        if isinstance(workspace_ref_for(self), SshWorkspaceRef):
+            raise RemoteWorkspacePathError(
+                "active_repo_dir is Home-local; an ssh workspace has no Home path — "
+                "route the operation through the executor"
+            )
         if self.is_workspace_mode():
             return pathlib.Path(self.workspace_root)
         return pathlib.Path(self.repo_dir)
 
     def is_workspace_mode(self) -> bool:
-        return (
-            self.workspace_root is not None
-            and bool(str(self.workspace_mode or "").strip())
-            and not workspace_mode_block_reason(self)
-        )
+        """Whether this task runs in an EXTERNAL workspace (placement-blind flag).
+
+        (RWS v2) The predicate reads the SEALED placement, not the Home path: an ssh
+        placement has no ``workspace_root`` by construction, and answering False for it
+        would put a remote task on the workspace-less ``self_modification`` profile over
+        the live Ouroboros repo — exactly the degradation the placement contract forbids.
+        ``workspace_mode_block_reason`` guards overlap with HOME roots, which is
+        structurally impossible for a target-native root, so it stays local-only.
+        """
+        if not bool(str(self.workspace_mode or "").strip()):
+            return False
+        if isinstance(workspace_ref_for(self), SshWorkspaceRef):
+            return True
+        return self.workspace_root is not None and not workspace_mode_block_reason(self)
 
     def repo_path(self, rel: str) -> pathlib.Path:
         root = self.active_repo_dir()
@@ -1470,6 +1397,27 @@ class ToolEntry:
     # advisory freshness when the worktree ACTUALLY changed — covering error
     # and timeout paths uniformly, and never invalidating for read-only runs.
     mutates_worktree: bool = False
+
+
+@dataclass(frozen=True)
+class _DispatchGates:
+    """What the placement-BLIND half of the dispatch decided.
+
+    A frozen record rather than a tuple on purpose: eleven values cross this seam,
+    and a positional unpack would let a twelfth silently shift every caller.
+    """
+
+    route_note: str
+    task_constraint: Any
+    entry: Any
+    ext_tool: Any
+    is_mcp: bool
+    acting_subagent: bool
+    acting_self_worktree: bool
+    acting_protected_grant: bool
+    workspace_mode: bool
+    effective_constraint: Any
+    runtime_mode: str
 
 
 class ToolRegistry:
@@ -1774,6 +1722,53 @@ class ToolRegistry:
             ext = [s for s in ext if (s.get("function", {}) or {}).get("name") not in disabled_tools]
         return result + ext
 
+    def workspace_capability_manifest(
+        self,
+        *,
+        repo_root: pathlib.Path,
+    ) -> Dict[str, Any]:
+        """Build the Home/execd capability contract from the unfiltered built-ins.
+
+        Per-task visibility and dynamic filtering are bypassed ON PURPOSE: the
+        manifest is a property of the BUILD, not of a task. If it were filtered,
+        two tasks on the same server would compute different digests and a target
+        admitted by one would be refused by the other. Every schema still comes
+        from the one `_entries` SSOT, so the contract cannot drift from the tools
+        that actually exist.
+
+        Which is why the envelope is built HERE from `entry.schema` and not through
+        `_schema_for_entry`. That method is the PER-TASK projection: it narrows `root`
+        enums and drops fields for a local-readonly or an acting subagent
+        (`_is_local_readonly_subagent`/`_is_acting_subagent` read the live `ToolContext`),
+        so calling it made this "unfiltered" only for the contexts that happen not to
+        filter. The same build could then produce two different manifests — and
+        `manifest_sha256` is a Home↔execd compatibility identity that admission
+        compares, so the drift would surface as a target admitted by one task and
+        refused by another with no fact about the target having changed. The schemas are
+        deep-copied because the manifest builder canonicalizes them and `_entries` is
+        the SSOT the live tool surface reads.
+        """
+
+        from ouroboros.tool_capabilities import (
+            WORKSPACE_TOOL_EXECUTION_AFFINITY,
+            build_workspace_capability_manifest,
+        )
+
+        missing = sorted(set(WORKSPACE_TOOL_EXECUTION_AFFINITY) - set(self._entries))
+        if missing:
+            raise ValueError(
+                "the workspace capability surface names tools this registry does "
+                f"not register: {missing}"
+            )
+        public_schemas = [
+            {"type": "function", "function": copy.deepcopy(self._entries[name].schema)}
+            for name in sorted(WORKSPACE_TOOL_EXECUTION_AFFINITY)
+        ]
+        return build_workspace_capability_manifest(
+            public_schemas,
+            repo_root=pathlib.Path(repo_root),
+        )
+
     def capability_omissions(self) -> List[Dict[str, Any]]:
         return [dict(item) for item in self._capability_omissions]
 
@@ -2058,176 +2053,7 @@ class ToolRegistry:
             return f"⚠️ RESOURCE_CONSTRAINT_BLOCKED: {git_violation}."
         return f"⚠️ WORKSPACE_GIT_BLOCKED: {git_violation}."
 
-    def _external_runtime_protected_paths(
-        self, binding: Any = None,
-    ) -> tuple[list, list, list, list]:
-        """Ouroboros runtime roots that an EXTERNAL-workspace task must not touch via
-        shell (system repo + EVERY data drive incl child/budget + owner credential
-        locations) plus the task's own exempt task_drive/artifact_store roots. Returns
-        (protected_texts, allowed_texts, protected_paths, allowed_paths): the *_texts
-        feed the embedded-string boundary check; the *_paths feed token resolution
-        (relative->cwd, ~->home, symlink canonicalization) so relative/symlink bypasses
-        are closed. SSOT for the read + write guards."""
-        meta = getattr(self._ctx, "task_metadata", {}) if isinstance(getattr(self._ctx, "task_metadata", {}), dict) else {}
-        protected_values = [getattr(self._ctx, "system_repo_dir", None) or getattr(self._ctx, "repo_dir", None),
-                            getattr(self._ctx, "drive_root", None)]
-        try:
-            from ouroboros.config import DATA_DIR as _PARENT_DATA_DIR
-            protected_values.append(_PARENT_DATA_DIR)
-        except Exception:
-            pass
-        for _dk in ("drive_root", "child_drive_root", "headless_child_drive_root", "budget_drive_root"):
-            if meta.get(_dk):
-                protected_values.append(meta.get(_dk))
-        # Owner/runtime credential locations, as ABSOLUTE paths. Blocking by
-        # absolute containment (not a substring marker) means the OWNER's personal
-        # secrets (~/.ssh/id_rsa, ~/.aws, ~/file1.txt) are off-limits while a
-        # project-relative file merely NAMED like a credential (site/.ssh/config, a
-        # project .env) stays the task's own — and a non-path token like
-        # "os.environ" can never spuriously match.
-        try:
-            _home = pathlib.Path.home()
-            for _rel in (".ssh", ".aws", ".gnupg", ".netrc", ".pgpass", ".config/gcloud",
-                         ".docker/config.json", ".kube/config", ".npmrc", "file1.txt"):
-                protected_values.append(_home / _rel)
-        except Exception:
-            pass
-        def _text_forms(value: Any) -> list:
-            # Both the as-given and the symlink-resolved form, so a command using
-            # /var/... matches a root resolved to /private/var/... (macOS) and vice
-            # versa. In production ($HOME paths) the two coincide.
-            out = []
-            for variant in (value, None):
-                try:
-                    p = pathlib.Path(value)
-                    if variant is None:
-                        p = p.resolve(strict=False)
-                    t = str(p).replace("\\", "/").lower().rstrip("/")
-                    if t and t not in out:
-                        out.append(t)
-                except Exception:
-                    continue
-            return out
 
-        def _resolved(value: Any):
-            try:
-                return pathlib.Path(value).resolve(strict=False)
-            except Exception:
-                return None
-
-        protected_texts: list = []
-        protected_paths: list = []
-        for v in protected_values:
-            if not v:
-                continue
-            for t in _text_forms(v):
-                if t not in protected_texts:
-                    protected_texts.append(t)
-            rp = _resolved(v)
-            if rp is not None and rp not in protected_paths:
-                protected_paths.append(rp)
-        allowed_texts: list = []
-        allowed_paths: list = []
-        task_id = task_id_for_artifacts(self._ctx)
-        for data_root in (getattr(self._ctx, "drive_root", None), meta.get("drive_root"), meta.get("budget_drive_root")):
-            if not data_root:
-                continue
-            for rp_src in (pathlib.Path(data_root) / "task_drives" / task_id, task_artifact_dir_path(pathlib.Path(data_root), task_id, create=False)):
-                for t in _text_forms(rp_src):
-                    if t not in allowed_texts:
-                        allowed_texts.append(t)
-                rp = _resolved(rp_src)
-                if rp is not None and rp not in allowed_paths:
-                    allowed_paths.append(rp)
-        # An explicitly selected system repo or exact skill payload is an
-        # authorized process target. Keep every other runtime/credential root
-        # protected, but do not re-block that exact binding merely because the
-        # task also has an external workspace focus.
-        for item in _binding_items(binding):
-            if item.root not in {"system_repo", "skill_payload"}:
-                continue
-            selected = pathlib.Path(item.base_path)
-            for t in _text_forms(selected):
-                if t not in allowed_texts:
-                    allowed_texts.append(t)
-            rp = _resolved(selected)
-            if rp is not None and rp not in allowed_paths:
-                allowed_paths.append(rp)
-        return protected_texts, allowed_texts, protected_paths, allowed_paths
-
-    def _external_shell_runtime_or_secret_block(
-        self, raw_cmd: Any, cmd_path_lower: str, args: Dict[str, Any],
-        work_dir: Optional[pathlib.Path] = None,
-        binding: Any = None,
-    ) -> Optional[str]:
-        """External-workspace shell guard for READ and write commands alike: block any
-        command that targets the Ouroboros runtime (system repo / any data drive) or an
-        owner credential path. read_file/user_files already enforce this; raw shell
-        (cat, python -c open(...), etc.) would otherwise bypass it. Two layers, because
-        string matching alone is bypassable by relative paths and symlinks:
-          (1) embedded-string boundary match of ABSOLUTE protected roots (catches a path
-              literal inside e.g. python -c "open('/abs/data/settings.json')");
-          (2) path-token RESOLUTION — every path-like arg is expanduser'd, joined to the
-              command cwd when relative, and resolve()'d (canonicalizing symlinks + ..),
-              then containment-checked. This closes a relative path passed as its own
-              argv token (`cat ../../data/settings.json`) and a workspace-internal symlink
-              to the data drive (round-2 review).
-        Both layers are best-effort DEFENSE-IN-DEPTH, not the primary control: a relative
-        path hidden INSIDE an interpreter one-liner string (e.g. node -e
-        "readFileSync('../../data/settings.json')") is not a standalone token, so it is
-        not extracted here — and that residual is deliberately NOT chased with a regex
-        over code strings (an unwinnable arms race; BIBLE P5 / no-string-gate doctrine).
-        The PRIMARY control is the gated read_file/user_files path, which fully resolves
-        and containment-checks every read against the protected drives, plus the LLM
-        safety supervisor judging intent on each shell call."""
-        _BLOCK = (
-            "⚠️ WORKSPACE_SHELL_BLOCKED: shell command targets the Ouroboros runtime "
-            "(system repo / data drive) or an owner credential path. External-workspace "
-            "tasks may not read or write those; use the gated read_file tool for any "
-            "inspection you need. Run your command against the task's own surfaces "
-            "instead: the active workspace root (e.g. /app) or scratch such as /tmp."
-        )
-        protected_texts, allowed_texts, protected_paths, allowed_paths = (
-            self._external_runtime_protected_paths(binding)
-        )
-        # (1) embedded-string boundary match (absolute roots only — no substring secret
-        # markers, which would false-block the task's own project files / "os.environ").
-        for pt in protected_texts:
-            if _command_mentions_protected_root(cmd_path_lower, pt) and not any(
-                _command_mentions_protected_root(cmd_path_lower, t) for t in allowed_texts
-            ):
-                return _BLOCK
-        # (2) path-token resolution (relative -> cwd, ~ -> home, symlinks canonicalized).
-        # The cwd is resolved ONCE per safety check by the caller (D1); resolve here
-        # only when this guard is used standalone.
-        if work_dir is None:
-            resolved_cwd = self._resolved_shell_cwd(args, binding)
-            if isinstance(resolved_cwd, str):
-                return resolved_cwd
-            work_dir = pathlib.Path(resolved_cwd)
-        work_dir = pathlib.Path(work_dir)
-
-        def _within(child: pathlib.Path, parent: pathlib.Path) -> bool:
-            try:
-                child.relative_to(parent)
-                return True
-            except ValueError:
-                return False
-
-        for tok in shell_argv_with_path_tokens(raw_cmd):
-            tok_text = str(tok or "").strip()
-            if not tok_text or tok_text.startswith("-") or tok_text in {"|", "&&", "||", ";", ">", ">>", "<", "<<", "&"}:
-                continue
-            try:
-                p = pathlib.Path(tok_text).expanduser()
-                resolved = p.resolve(strict=False) if p.is_absolute() else (work_dir / p).resolve(strict=False)
-            except Exception:
-                continue
-            if any(_within(resolved, ap) for ap in allowed_paths):
-                continue
-            if any(_within(resolved, pp) for pp in protected_paths):
-                return _BLOCK
-        return None
 
     def _workspace_shell_write_block(
         self,
@@ -2395,10 +2221,18 @@ class ToolRegistry:
 
     def _run_shell_safety_check(
         self, args: Dict[str, Any], runtime_mode: str, binding: Any = None,
+        target: Any = None,
     ) -> Optional[str]:
-        """Pre-execution run_command filter; returns a block message or ``None``."""
+        """Pre-execution run_command filter; returns a block message or ``None``.
+
+        ``target`` is the TARGET-NATIVE fact object, present for exactly the
+        dispatches that will run on another machine. The placement-BLIND arms —
+        every rule that reads command TEXT: elevation, self-lowering, skill-state,
+        GitHub — run unchanged. The arms that resolve a HOME path are swapped for
+        their target spelling, because a Home path is not a fact a target-native
+        command can address."""
         raw_cmd = args.get("cmd", args.get("command", ""))
-        if binding is None:
+        if binding is None and target is None:
             operation = (
                 "service"
                 if str(args.get("__tool_name") or "") == "start_service"
@@ -2457,37 +2291,52 @@ class ToolRegistry:
         # their family (`ruby3.2` is `ruby`), so a versioned basename is exactly as
         # write-suspect as the unversioned one (XG-2R.2).
         writeish = shell_has_write_indicator(raw_cmd) or (bool(argv_for_write) and (interpreter_family(argv_executable) or argv_executable) in LIGHT_SHELL_WRITER_COMMANDS) or bool(explicit_write_targets)
-        work_dir = self._resolved_shell_cwd(args, binding)
-        if isinstance(work_dir, str):
-            return work_dir
-        if protected_artifact_block := protected_artifact_shell_block_reason(
-            self._ctx,
-            raw_cmd,
-            cwd=str(work_dir),
-            default_cwd=pathlib.Path(work_dir),
-            binding=_binding_items(binding)[0] if _binding_items(binding) else None,
-        ):
-            return protected_artifact_block
-        if writeish and (executor_state_block := workspace_executor_state_write_block(
-            raw_cmd,
-            drive_root=pathlib.Path(self._ctx.drive_root),
-            cwd=str(work_dir),
-            default_cwd=pathlib.Path(work_dir),
-        )):
-            return executor_state_block
-        if workspace_mode and writeish:
-            workspace_write_block = self._workspace_shell_write_block(
-                args,
+        work_dir = None
+        if target is not None:
+            # The three Home-path arms below, in ONE target-spelling arm: protected
+            # artifacts and workspace write-containment are the rules that still mean
+            # something where the command actually runs. The executor-state arm is
+            # absent because it guards Home's own `data/state/...` process ledger,
+            # which no target-native command can address.
+            if native_block := native_shell_write_block(
+                target, raw_cmd,
+                writeish=writeish,
+                explicit_write_targets=explicit_write_targets,
+                executable_path_tokens=executable_path_tokens,
+            ):
+                return native_block
+        else:
+            work_dir = self._resolved_shell_cwd(args, binding)
+            if isinstance(work_dir, str):
+                return work_dir
+            if protected_artifact_block := protected_artifact_shell_block_reason(
+                self._ctx,
                 raw_cmd,
-                cmd_path_lower,
-                explicit_write_targets,
-                executable_path_tokens,
-                runtime_mode,
-                acting_subagent,
-                binding,
-            )
-            if workspace_write_block:
-                return workspace_write_block
+                cwd=str(work_dir),
+                default_cwd=pathlib.Path(work_dir),
+                binding=_binding_items(binding)[0] if _binding_items(binding) else None,
+            ):
+                return protected_artifact_block
+            if writeish and (executor_state_block := workspace_executor_state_write_block(
+                raw_cmd,
+                drive_root=pathlib.Path(self._ctx.drive_root),
+                cwd=str(work_dir),
+                default_cwd=pathlib.Path(work_dir),
+            )):
+                return executor_state_block
+            if workspace_mode and writeish:
+                workspace_write_block = self._workspace_shell_write_block(
+                    args,
+                    raw_cmd,
+                    cmd_path_lower,
+                    explicit_write_targets,
+                    executable_path_tokens,
+                    runtime_mode,
+                    acting_subagent,
+                    binding,
+                )
+                if workspace_write_block:
+                    return workspace_write_block
 
         # Elevation pattern: blocked in all modes.
         if _detect_runtime_mode_elevation(cmd_lower):
@@ -2519,8 +2368,11 @@ class ToolRegistry:
             )
 
         # Light-mode checks follow the selected physical target, not whether a
-        # project workspace happens to be attached.
-        if runtime_mode == "light":
+        # project workspace happens to be attached. `target is None` because this
+        # whole arm is about the Ouroboros runtime's OWN repo and data drives: it
+        # exists to keep the agent from mutating its own body, and a target-native
+        # command cannot reach either — the body it could mutate is on Home.
+        if runtime_mode == "light" and target is None:
             if light_shell_repo_mutation(
                 raw_cmd,
                 repo_dir=system_repo_dir_for(self._ctx),
@@ -2596,12 +2448,13 @@ class ToolRegistry:
 
         return self._shell_git_and_runtime_block(
             raw_cmd, args, cmd_path_lower, workspace_mode,
-            acting_self_worktree, binding,
+            acting_self_worktree, binding, target,
         )
 
     def _shell_git_and_runtime_block(
         self, raw_cmd: Any, args: Dict[str, Any], cmd_path_lower: str,
         workspace_mode: bool, acting_self_worktree: bool, binding: Any,
+        target: Any = None,
     ) -> Optional[str]:
         """Direct-git-via-shell policy + the external-workspace runtime/secret read
         guard. External workspaces AND the default (non-workspace) lane get full
@@ -2613,6 +2466,16 @@ class ToolRegistry:
 
         if not shell_argv(raw_cmd):
             return None
+        if target is not None:
+            # Target-native. Every arm below protects HOME state — system repo, data
+            # drives, owner credentials — none of which exists on the target, so
+            # neither containment question has an answer there. What survives is the
+            # resource contract: `allowed_resources.network=false` must not become
+            # satisfiable by running the fetch on another host.
+            git_violation = target_native_git_violation(
+                raw_cmd, allow_network=_resource_allowed(self._ctx, "network")
+            )
+            return f"⚠️ RESOURCE_CONSTRAINT_BLOCKED: {git_violation}." if git_violation else None
         if workspace_mode and not acting_self_worktree:
             work_dir = self._resolved_shell_cwd(args, binding)
             if isinstance(work_dir, str):  # a cwd block message, not a path
@@ -2638,9 +2501,10 @@ class ToolRegistry:
             # or `--no-index` (which reads arbitrary host files), so neither a
             # runtime write nor a settings.json dump can ride "read-only git".
             if is_external_workspace(self._ctx) and not is_readonly_git_command(raw_cmd):
-                if ext_block := self._external_shell_runtime_or_secret_block(
-                    raw_cmd, cmd_path_lower, args, work_dir=work_dir,
-                    binding=binding,
+                if ext_block := external_shell_runtime_or_secret_block(
+                    self._ctx, raw_cmd, cmd_path_lower, args,
+                    work_dir=work_dir,
+                    authorized_roots=_authorized_process_roots(binding),
                 ):
                     return ext_block
             return None
@@ -2985,11 +2849,14 @@ class ToolRegistry:
         runtime_mode: str,
         effective_constraint: Any,
         resolved_binding: Any = None,
+        facts: Any = None,
     ) -> tuple[Dict[str, Any], Any, str]:
         """Resolve an exact python/python3 request ONCE, before the shell guard.
 
         Every downstream guard and the handler therefore see byte-identical
-        argv; launchers must not select an interpreter after this boundary.
+        argv; launchers must not select an interpreter after this boundary. The
+        interpreter comes from the operation's PREPARE facts, so a non-local
+        placement is answered by its target, never by a Home probe (RWS-02).
         """
         args, python_resolution = resolve_process_python(
             self._ctx,
@@ -2998,6 +2865,7 @@ class ToolRegistry:
             runtime_mode=runtime_mode,
             effective_constraint=effective_constraint,
             resolved_binding=resolved_binding,
+            facts=facts,
         )
         record_python_resolution(self._ctx, python_resolution)
         if python_resolution is not None and python_resolution.error_reason:
@@ -3058,6 +2926,11 @@ class ToolRegistry:
                 except TypeError:
                     return _format_tool_arg_error(entry), None
                 return None, entry.handler(self._ctx, **handler_args)
+            except RemoteWorkspacePathError:
+                # A PLACEMENT answer, not a tool error: it goes to the one
+                # classifier in `execute` rather than being flattened into a generic
+                # TOOL_ERROR with a Home-shaped sentence the model cannot act on.
+                raise
             except TypeError as e:
                 return f"⚠️ TOOL_ERROR ({name}): {e}", None
             except Exception as e:
@@ -3078,8 +2951,58 @@ class ToolRegistry:
                 self._invalidate_advisory_if_worktree_changed(name, worktree_before)
 
     def execute(self, name: str, args: Dict[str, Any]) -> str:
+        """Dispatch boundary (RWS v2 §3.1): run the whole pipeline inside ONE
+        operation scope, so a prepared operation is always released.
+
+        The catch is Appendix C-2's fourth classification: a consumer that asks a
+        remote placement for a Home path gets a typed refusal at the seam, and if
+        nothing above claimed it, that must still reach the model as a RESULT — an
+        exception escaping the dispatch is a crash in the tool loop, not a policy
+        answer. Local placements never raise it, so no Home bug can hide here.
+
+        The `finally` is what makes the abort structural instead of a list of
+        refusal sites to keep in sync with the pipeline: whatever the dispatch
+        answered, and even if it raised, an operation the target prepared and Home
+        did not execute is released here (see
+        `dispatch_execute.withdraw_outstanding_prepare`)."""
         name = str(name or "").strip()
         args = dict(args or {})
+        outstanding = OutstandingPrepare()
+        try:
+            return self._dispatch(name, args, outstanding)
+        except RemoteWorkspacePathError as exc:
+            return (
+                f"⚠️ PLACEMENT_UNSUPPORTED_TOOL: {name!r} needs a Home path this task's "
+                f"workspace does not have ({exc}). Use a tool that runs on the target "
+                "(files, search, git, shell and services all do), or move the work to a "
+                "task whose workspace is local."
+            )
+        finally:
+            withdraw_outstanding_prepare(self._ctx, outstanding)
+
+    def _placement_blind_gates(
+        self, name: str, args: Dict[str, Any],
+    ) -> "tuple[Optional[_DispatchGates], str]":
+        """Everything decidable BEFORE we know which machine this runs on.
+
+        Identity and contract gates, capability availability, the resource fences,
+        workspace-metadata validation, the public-schema refusal and the two
+        placement-blind refusals (`subagent_secret_path_refusal`,
+        `script_interpreter_refusal`), then skill-repair and payload constraint.
+
+        Not one of them ROUTES on the placement, and that is the whole reason they are
+        a unit: a call this half refuses is refused identically on every host, so it
+        must never reach `prepare_operation` and reserve a token on someone else's
+        machine first. Returns ``(gates, "")`` to continue or ``(None, refusal)``.
+
+        "Blind" is about the DECISION, not about the read. Two of these gates DO consult
+        the sealed ref — path normalization, to pick which vocabulary a path argument is
+        spelled in, and the workspace-mode predicate — and the flat claim that none of
+        them reads it was false in a way a reader would have believed. What makes them
+        blind is that neither answer can change WHERE the call executes. Every such read
+        is enumerated, with the reason for each, in
+        `test_dispatch_prepare.py::_DECLARED_PLACEMENT_READS`.
+        """
         _route_note = ""
         task_constraint = normalize_task_constraint(getattr(self._ctx, "task_constraint", None))
         local_readonly_subagent = self._is_local_readonly_subagent()
@@ -3116,51 +3039,71 @@ class ToolRegistry:
         is_mcp = bool(_mcp_is_name and _mcp_is_name(name))
         _eph = self._ephemeral_block(name, ext_tool, is_mcp)  # CW3: built-in deny set + extension/MCP
         if _eph:
-            return _eph
+            return None, _eph
         if name in _disabled_tools(self._ctx):
-            return f"⚠️ RESOURCE_CONSTRAINT_BLOCKED: task_contract.disabled_tools withholds {name!r} for this task."
+            return None, f"⚠️ RESOURCE_CONSTRAINT_BLOCKED: task_contract.disabled_tools withholds {name!r} for this task."
         available, unavailable_reason, unavailable_detail = _builtin_tool_availability(name, self._ctx)
         if not available:
             suffix = f" ({unavailable_detail})" if unavailable_detail else ""
-            return f"⚠️ CAPABILITY_UNAVAILABLE: {name!r} is unavailable: {unavailable_reason}{suffix}."
+            return None, f"⚠️ CAPABILITY_UNAVAILABLE: {name!r} is unavailable: {unavailable_reason}{suffix}."
         if name == "vlm_query" and str(args.get("image_url") or "").strip() and (
             not _resource_allowed(self._ctx, "web") or not _resource_allowed(self._ctx, "network")
         ):
-            return "⚠️ RESOURCE_CONSTRAINT_BLOCKED: remote image_url for vlm_query requires allowed_resources.web/network."
+            return None, "⚠️ RESOURCE_CONSTRAINT_BLOCKED: remote image_url for vlm_query requires allowed_resources.web/network."
         if name in _WEB_TOOLS and not _resource_allowed(self._ctx, "web"):
-            return f"⚠️ RESOURCE_CONSTRAINT_BLOCKED: task_contract.allowed_resources.web=false blocks {name!r}."
+            return None, f"⚠️ RESOURCE_CONSTRAINT_BLOCKED: task_contract.allowed_resources.web=false blocks {name!r}."
         if name == "vcs_pull_ff" and not _resource_allowed(self._ctx, "network"):
-            return "⚠️ RESOURCE_CONSTRAINT_BLOCKED: task_contract.allowed_resources.network=false blocks 'vcs_pull_ff'."
+            return None, "⚠️ RESOURCE_CONSTRAINT_BLOCKED: task_contract.allowed_resources.network=false blocks 'vcs_pull_ff'."
         if (is_mcp or ext_tool) and not _resource_allowed(self._ctx, "network"):
-            return f"⚠️ RESOURCE_CONSTRAINT_BLOCKED: task_contract.allowed_resources.network=false blocks external tool {name!r}."
+            return None, f"⚠️ RESOURCE_CONSTRAINT_BLOCKED: task_contract.allowed_resources.network=false blocks external tool {name!r}."
         _gate = self._subagent_and_update_gate(
             name, entry, ext_tool, is_mcp, local_readonly_subagent, acting_subagent, acting_tool_grants
         )
         if _gate:
-            return _gate
+            return None, _gate
         workspace_block_reason = ""
         try:
             workspace_block_reason = workspace_mode_block_reason(self._ctx)
         except Exception as exc:
             workspace_block_reason = f"workspace metadata validation failed: {type(exc).__name__}: {exc}"
         if workspace_block_reason:
-            return (
+            return None, (
                 "⚠️ WORKSPACE_MODE_BLOCKED: invalid external workspace metadata: "
                 f"{workspace_block_reason}. Workspace tasks must not overlap the "
                 "Ouroboros repo, runtime data, or control plane."
             )
         if entry is not None:
+            # The PUBLIC-SCHEMA refusal: ONE site for both routes, placement-BLIND,
+            # and ahead of prepare so a malformed call never reserves a token on
+            # another machine. It also canonicalizes argument aliases, which prepare
+            # depends on — prepare tells the target which paths the operation is
+            # about (rationale in `tools/tool_args`).
             public_arg_error = _prepare_public_builtin_args(entry, args)
             if public_arg_error:
-                return public_arg_error
+                return None, public_arg_error
             _route_note = _normalize_dispatch_path_args(self._ctx, name, args)
             if _route_note.startswith("⚠️ ROOT_REQUIRED_ACTIVE_WORKSPACE"):
-                return _route_note
+                return None, _route_note
+            # The restricted-subagent secret/control denial (rationale in
+            # `tools/dispatch_policy`): a PLACEMENT-BLIND decision — it answers the same
+            # on every host, and it is taken before the placement is RESOLVED — because
+            # the very same guard living inside the Home handler body was absent from
+            # the native route entirely. (The line above it does read the sealed ref, to
+            # choose a spelling space; see this method's docstring.)
+            _secret_block = subagent_secret_path_refusal(self._ctx, name, args)
+            if _secret_block:
+                return None, _secret_block
+            # Same class, same seam: `run_script`'s interpreter allowlist was a
+            # handler-body rule, and the target takes the interpreter verbatim into
+            # its argv.
+            _interpreter_block = script_interpreter_refusal(name, args)
+            if _interpreter_block:
+                return None, _interpreter_block
         heal_no_enable = bool(task_constraint and task_constraint.mode == "skill_repair")
         if heal_no_enable:
             heal_block = self._heal_mode_block(name, args, task_constraint, ext_tool, is_mcp)
             if heal_block:
-                return heal_block
+                return None, heal_block
         workspace_mode = bool(getattr(self._ctx, "is_workspace_mode", lambda: False)())
         effective_constraint = task_constraint
         if entry is not None:
@@ -3172,41 +3115,20 @@ class ToolRegistry:
                 workspace_mode=workspace_mode,
             )
             if payload_error:
-                return payload_error
-        resolved_binding = None
-        if entry is not None and _target_binding_operation(name, args) is not None:
-            try:
-                resolved_binding = _build_builtin_target_binding(self._ctx, name, args)
-            except Exception as exc:
-                redirect = _light_binding_failure_redirect(name, args)
-                if redirect:
-                    return redirect
-                operation = _target_binding_operation(name, args)
-                if operation in {"shell", "service"}:
-                    return shell_cwd_block_message(
-                        self._ctx,
-                        str(args.get("cwd") or ""),
-                        operation=operation,
-                        error=exc,
-                    )
-                return _binding_error_text(
-                    name,
-                    str(args.get("root") or "active_workspace"),
-                    exc,
-                )
+                return None, payload_error
         # Fail-closed: an acting child WITHOUT a resolved isolated workspace would
         # have active_workspace/system_repo fall back to the LIVE repo. Confine it
         # to data roots and block shell/coding/service (whose default target is the repo).
         if acting_subagent and not workspace_mode:
             if name in _ROOT_ARG_REPO_WRITE_TOOLS and str(args.get("root", "") or "active_workspace") in ("active_workspace", "system_repo"):
-                return (
+                return None, (
                     "⚠️ ACTING_NO_WORKSPACE_BLOCKED: this acting subagent has no resolved isolated "
                     "workspace; write only to root=task_drive, root=artifact_store, or root=user_files. "
                     "active_workspace/system_repo map to the live Ouroboros repo and are blocked."
                 )
             if name in ("run_command", "run_script", "start_service",
                         "integrate_subagent_patch", "integrate_delegated_patch"):
-                return (
+                return None, (
                     "⚠️ ACTING_NO_WORKSPACE_BLOCKED: shell/coding/service/integration tools need an "
                     "isolated workspace (their default target is the live repo). Schedule a self_worktree "
                     "/ external_workspace child for that work."
@@ -3218,6 +3140,90 @@ class ToolRegistry:
             _runtime_mode = _get_runtime_mode()
         except Exception:
             _runtime_mode = "advanced"
+        return _DispatchGates(
+            route_note=_route_note,
+            task_constraint=task_constraint,
+            entry=entry,
+            ext_tool=ext_tool,
+            is_mcp=is_mcp,
+            acting_subagent=acting_subagent,
+            acting_self_worktree=acting_self_worktree,
+            acting_protected_grant=acting_protected_grant,
+            workspace_mode=workspace_mode,
+            effective_constraint=effective_constraint,
+            runtime_mode=_runtime_mode,
+        ), ""
+    def _home_resolved_binding(
+        self, name: str, args: Dict[str, Any], prepared: Any,
+    ) -> "tuple[Any, str]":
+        """The HOME path this operation names, or the typed reason there is none.
+
+        Returns ``(binding, "")`` to continue or ``(None, refusal)``. A ``None`` binding
+        with no refusal means the operation genuinely has no Home path — it runs on the
+        target — and every guard below is written to read that.
+
+        A resolved binding names a HOME path, and every guard keyed on it asks about
+        Home. So the question this gate must ask is "does this operation address Home?"
+        and NOT "is the task remote?" — a remote task calling against a HOME-native root
+        (`system_repo`, `runtime_data`, `artifact_store`, the owner's files) keeps its
+        Home handler by the ratified root matrix (`dispatch_prepare`) and needs the same
+        single Home resolution a local task gets. Gating on the PLACEMENT skipped it for
+        exactly those calls, and the `resolved_binding is None` fallbacks then read
+        `workspace_mode` — true for any admitted remote task — so `runtime_mode=light`
+        silently stopped protecting Home's own repo and data drive for every ssh task.
+        One policy, two doors: the class this pipeline exists to close.
+
+        `native_routed` is the honest question because it is the EXECUTE-phase fact —
+        true only when the operation really runs on the target, where there is no Home
+        path to resolve. It is read off the PREPARE, not from the sealed placement: the
+        pipeline has exactly ONE placement-resolution site and this is not it. Asking
+        `is_remote_workspace(ctx)` here would be a second door into the placement, and
+        the whole point of the sealed read is that no guard gets its own. Pinned by
+        `test_dispatch_prepare.py::test_the_dispatch_pipeline_has_exactly_one_placement_resolution_site`.
+        """
+        if prepared.native_routed or _target_binding_operation(name, args) is None:
+            return None, ""
+        try:
+            return _build_builtin_target_binding(self._ctx, name, args), ""
+        except RemoteWorkspacePathError:
+            # The one honest "Home has no answer" case: a PROCESS cwd on a remote task
+            # resolves on the machine. The tools whose cwd is target-native but which
+            # the routing table gives no native counterpart — `verify_and_record`'s run
+            # kinds — arrive here, and their equivalent target facts come from the
+            # prepare. The binding stays None for this TYPED seam error only, never as a
+            # blanket placement exemption.
+            return None, ""
+        except Exception as exc:
+            redirect = _light_binding_failure_redirect(name, args)
+            if redirect:
+                return None, redirect
+            operation = _target_binding_operation(name, args)
+            if operation in {"shell", "service"}:
+                return None, shell_cwd_block_message(
+                    self._ctx,
+                    str(args.get("cwd") or ""),
+                    operation=operation,
+                    error=exc,
+                )
+            return None, _binding_error_text(
+                name, str(args.get("root") or "active_workspace"), exc,
+            )
+
+    def _dispatch(self, name: str, args: Dict[str, Any], outstanding: Any) -> str:
+        gates, refusal = self._placement_blind_gates(name, args)
+        if gates is None:
+            return refusal
+        _route_note = gates.route_note
+        task_constraint = gates.task_constraint
+        entry = gates.entry
+        ext_tool = gates.ext_tool
+        is_mcp = gates.is_mcp
+        acting_subagent = gates.acting_subagent
+        acting_self_worktree = gates.acting_self_worktree
+        acting_protected_grant = gates.acting_protected_grant
+        workspace_mode = gates.workspace_mode
+        effective_constraint = gates.effective_constraint
+        _runtime_mode = gates.runtime_mode
 
         if is_mcp:
             return self._dispatch_mcp_tool(name, args)
@@ -3225,11 +3231,33 @@ class ToolRegistry:
             if ext_tool and callable(ext_tool.get("handler")):
                 return self._dispatch_extension_tool(name, ext_tool, args)
             return f"⚠️ Unknown tool: {name}. Available: {', '.join(sorted(self._entries.keys()))}"
+        # PREPARE (§3.1 step 2) — the pipeline's ONE placement-resolution site. It
+        # follows the placement-INDEPENDENT identity/contract gates above, whose
+        # precedence is a fixed contract, and precedes every guard that judges a
+        # path, a cwd or an interpreter.
+        _prepared = prepare_operation(self._ctx, name, args, outstanding=outstanding)
+        if not _prepared.available:
+            return f"⚠️ REMOTE_EXECUTION_UNAVAILABLE: {_prepared.unavailable}"
+        resolved_binding, binding_refusal = self._home_resolved_binding(name, args, _prepared)
+        if binding_refusal:
+            return binding_refusal
+        # MEDIA IMPORT (D1: vision runs on Home, so the bytes come here first;
+        # rationale in `remote_task_files`). Before every path-judging guard, so they
+        # judge the Home path that will actually be opened.
+        if _prepared.placement == "ssh" and name in MEDIA_PATH_ARGS:
+            media_block = remote_media_predispatch(self._ctx, name, args)
+            if media_block:
+                return media_block
         args, python_resolution, python_block = self._resolve_python_predispatch(
             name, args, _runtime_mode, effective_constraint, resolved_binding,
+            facts=_prepared.facts,
         )
         if python_block:
             return python_block
+        # ARGV RECONCILIATION (§3.1 step 3 precondition; rationale in `dispatch_prepare`).
+        _argv_note, _argv_block = reconcile_target_args(_prepared, args)
+        if _argv_block:
+            return _argv_block
         allow_short_relative = bool(
             effective_constraint and effective_constraint.mode == "skill_repair"
         )
@@ -3253,6 +3281,10 @@ class ToolRegistry:
             )
         elif name in _SYSTEM_INTRINSIC_REPO_MUTATION_TOOLS:
             light_targets_system = True
+        elif _prepared.native_routed:
+            # The Ouroboros body lives on Home; a target-native operation cannot
+            # reach it, so light mode has nothing to protect on this route.
+            light_targets_system = False
         else:
             light_targets_system = not workspace_mode or acting_self_worktree
         if (
@@ -3285,6 +3317,10 @@ class ToolRegistry:
                     _binding_set_targets_system_repo(self._ctx, resolved_binding)
                     or acting_self_worktree
                 )
+            elif _prepared.native_routed:
+                # Same reason as the light arm: the protected paths this guard knows
+                # are Home's own, and no target-native write can address them.
+                protected_target = False
             else:
                 protected_root = root_name in {"active_workspace", "system_repo"}
                 protected_target = (
@@ -3305,7 +3341,10 @@ class ToolRegistry:
                     action=f"run tool {name!r} against",
                 )
 
-        if name in _SHELL_GUARDED_TOOLS:
+        # `_launches_a_command` and not membership alone: `verify_and_record`'s
+        # non-run contract kinds execute nothing, so judging their declared prose as
+        # argv produced refusals about a command that does not exist.
+        if name in _SHELL_GUARDED_TOOLS and _launches_a_command(name, args):
             if (
                 name == "start_service"
                 and _runtime_mode == "light"
@@ -3315,13 +3354,31 @@ class ToolRegistry:
                 )
             ):
                 return ("⚠️ LIGHT_MODE_BLOCKED: runtime_mode=light refuses start_service against the Ouroboros repository because long-running services can mutate after initial tool checks. For external services, set cwd under user_files, task_drive, or artifact_store; switch to advanced/pro only for reviewed Ouroboros self-modification.")
+            # AUTHORIZE (§3.1 step 3) runs over the three NAMED projections the
+            # prepared token is bound to, so the set that is authorized and the set
+            # that is executed cannot be two look-alike objects one rename apart
+            # (codex #2).
+            _prepared = bind_execution_args(
+                _prepared, self._ctx, args,
+                runtime_mode=_runtime_mode, binding=resolved_binding,
+            )
             block_msg = self._run_shell_safety_check(
-                process_shell_guard_args(name, args, ctx=self._ctx, runtime_mode=_runtime_mode),
+                _prepared.projections.guard_args if _prepared.bound
+                else process_shell_guard_args(name, args, ctx=self._ctx, runtime_mode=_runtime_mode),
                 _runtime_mode,
                 resolved_binding,
+                native_shell_target(_prepared),
             )
             if block_msg:
                 return block_msg
+        elif _prepared.native_routed:
+            # EVERY native operation leaves Home token-bound, not only the
+            # shell-guarded ones: a remote read/write/vcs call crosses a wire too.
+            # No local placement takes this branch, so the golden traces are intact.
+            _prepared = bind_execution_args(
+                _prepared, self._ctx, args,
+                runtime_mode=_runtime_mode, binding=resolved_binding,
+            )
 
         # LLM safety supervisor.
         from ouroboros.safety import check_safety
@@ -3334,6 +3391,43 @@ class ToolRegistry:
         )
         if not is_safe:
             return safety_msg
+        if _prepared.bound:
+            # EXECUTE integrity (§3.1 step 4): the command about to run must still be
+            # the one the guards authorized. Nothing between AUTHORIZE and here is
+            # supposed to rewrite argv or cwd — and the prepared token is what makes
+            # "supposed to" checkable instead of assumed. The remote target repeats
+            # this same check on the token it receives.
+            if not _prepared.binds(
+                project_dispatch_args(
+                    self._ctx, name, args, runtime_mode=_runtime_mode,
+                    facts=_prepared.facts, target_cwd=native_execution_cwd(_prepared),
+                    binding=resolved_binding,
+                ).execution_args
+            ):
+                return (
+                    "⚠️ PREPARED_CALL_BINDING_MISMATCH: the execution arguments changed "
+                    "after authorization; the process was not started."
+                )
+        if _prepared.native_routed:
+            # EXECUTE (§3.1 step 4). It lands HERE — after the whole guard pipeline
+            # and the binding check — and REPLACES the local handler rather than
+            # running beside it: that handler resolves `active_workspace` as a Home
+            # path, so calling it for a remote operation would answer about the
+            # Ouroboros checkout instead of the project the task was pointed at.
+            # Nothing below applies either: the owner-file/light-repo/git-ref
+            # snapshots and post-checks all guard HOME state, which a target-native
+            # command cannot touch, and the target owns its own equivalents.
+            return _compose_execute_result(
+                filter_native_listing(
+                    self._ctx,
+                    name,
+                    execute_native_operation(
+                        self._ctx, _prepared, timeout_sec=getattr(entry, "timeout_sec", None), outstanding=outstanding,
+                    ),
+                ),
+                "\n".join(part for part in (_route_note, _argv_note) if part),
+                safety_msg,
+            )
         state_drive_root = _binding_state_drive_root(self._ctx, resolved_binding)
         owner_snapshot = (
             self._snapshot_owner_files(state_drive_root)

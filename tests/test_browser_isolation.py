@@ -117,8 +117,20 @@ class TestBrowserModuleState:
             ("**/api/owner/skills/**", browser_mod._block_owner_skill_attest_post),
             ("**/api/settings", browser_mod._block_owner_settings_post),
         ]
-        # v6.26.0: the main agent gets a metadata-only SSRF route guard too.
-        assert len(routes) == 6 and routes[5][0] == "**/*"
+        # TWO catch-alls, in registration order: the remote-placement origin block
+        # (RWS v2 — a bridged page may reach its own forward and the public internet,
+        # nothing else loopback or private on either machine), then v6.26.0's
+        # metadata-only SSRF guard. Playwright evaluates them in REVERSE order and
+        # `_route_fallback` defers to the next handler, so both actually run.
+        #
+        # Asserted by HANDLER IDENTITY, not by pattern string. Both catch-alls answer
+        # `"**/*"`, so a pattern assertion cannot tell them apart — and when the origin
+        # block was inserted ahead of the SSRF guard, the behavioural check below kept
+        # driving `routes[-1]` and silently stopped covering the handler it names.
+        assert len(routes) == 7
+        assert [pattern for pattern, _ in routes[5:]] == ["**/*", "**/*"]
+        assert routes[5][1].func is browser_mod._route_remote_origin_block
+        assert routes[6][1] is browser_mod._route_metadata_block
 
         browser_mod._ensure_browser(ctx, engine="webkit", device="iphone 13")
         assert contexts[-1].kwargs["viewport"] == {"width": 390, "height": 844}
@@ -136,7 +148,7 @@ class TestBrowserModuleState:
             )
         )
         assert browser_mod._ensure_browser(subagent_ctx) is fake_page
-        assert routes and routes[-1][0] == "**/*"
+        assert routes[-1][1].func is browser_mod._route_subagent_block
         events = []
         route = types.SimpleNamespace(
             request=types.SimpleNamespace(url="http://127.0.0.1:8765/api/settings"),

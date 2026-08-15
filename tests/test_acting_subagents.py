@@ -583,6 +583,38 @@ def test_integrate_self_worktree_patch_refused_under_external_workspace(tmp_path
     assert "INTEGRATE_SELF_WORKTREE_UNDER_WORKSPACE" not in out2
 
 
+def test_integrate_self_worktree_patch_refused_on_a_REMOTE_workspace_too(tmp_path):
+    """The same category guard, on the placement that used to skip it.
+
+    The guard sat BELOW the `is_remote_workspace(ctx)` fork, and the fork's comment
+    claimed only that everything ABOVE it was placement-independent — which said nothing
+    about what was below. A remote task is ALWAYS workspace mode, so this guard's own
+    condition holds there by construction: it was precisely the case walking past it, and
+    the system-repo patch would have gone to `_integrate_remote_subagent_patch` and been
+    applied into the remote PROJECT workspace. The guard is hoisted above the fork now, so
+    the refusal arrives before any transport is consulted — which is also why this test
+    needs no broker: reaching one would itself be the bug.
+    """
+    from ouroboros.tools.subagent_integration import _integrate_subagent_patch
+    from ouroboros.workspace_ref import SEALED_WORKSPACE_REF_KEY, SshWorkspaceRef
+
+    system_repo = tmp_path / "system_repo"
+    _init_repo(system_repo, {"a.txt": "hi\n"})
+    drive = tmp_path / "data"; drive.mkdir()
+    _make_child_patch(system_repo, drive, "childr", "a.txt", "hi\npatched\n", surface="self_worktree")
+    ctx = ToolContext(
+        repo_dir=system_repo, drive_root=drive, task_id="parent1",
+        workspace_root="/srv/project", workspace_mode="external",
+    )
+    ctx.task_metadata[SEALED_WORKSPACE_REF_KEY] = SshWorkspaceRef(
+        connection_id="conn-1", remote_root="/srv/project", workspace_id="ws-1",
+    ).to_payload()
+    out = _integrate_subagent_patch(ctx, task_id="childr")
+    assert "INTEGRATE_SELF_WORKTREE_UNDER_WORKSPACE" in out
+    # Not the remote branch's own refusal: the guard answered, so no transport was needed.
+    assert "INTEGRATE_REMOTE_REFUSED" not in out
+
+
 def test_acting_no_workspace_blocks_live_repo_write_and_shell(tmp_path):
     repo = tmp_path / "repo"; repo.mkdir()
     drive = tmp_path / "data"; drive.mkdir()
@@ -1055,7 +1087,7 @@ def test_external_workspace_unborn_first_commit_keeps_artifact(tmp_path, monkeyp
 
 
 def test_mutative_toggle_self_change_detected():
-    from ouroboros.tools.registry import _detect_mutative_toggle_self_change
+    from ouroboros.tools.shell_guards import _detect_mutative_toggle_self_change
     assert _detect_mutative_toggle_self_change('echo true >> data/settings.json # ouroboros_allow_mutative_subagents')
     assert _detect_mutative_toggle_self_change('save_settings({"ouroboros_allow_mutative_subagents": "true"})')
     # CLI settings-set path must also be caught.
@@ -1064,7 +1096,7 @@ def test_mutative_toggle_self_change_detected():
 
 
 def test_evolution_owner_control_self_change_detected():
-    from ouroboros.tools.registry import _detect_evolution_owner_control_self_change as d
+    from ouroboros.tools.shell_guards import _detect_evolution_owner_control_self_change as d
     assert d('echo true >> data/settings.json # ouroboros_post_task_evolution')
     assert d('save_settings({"ouroboros_post_task_evolution": "true"})')
     assert d("ouroboros settings set ouroboros_post_task_evolution true")
@@ -1105,7 +1137,7 @@ def test_pro_acting_shell_write_outside_surface_blocked(tmp_path):
 
 
 def test_subagent_shell_secret_markers_cover_relative_paths():
-    from ouroboros.tools.registry import _subagent_shell_targets_secret
+    from ouroboros.tools.shell_guards import _subagent_shell_targets_secret
     assert _subagent_shell_targets_secret("cat .env")
     assert _subagent_shell_targets_secret("cat .git/config")
     assert _subagent_shell_targets_secret("cat .git/credentials")

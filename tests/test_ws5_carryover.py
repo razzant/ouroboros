@@ -357,7 +357,7 @@ def test_non_ephemeral_turn_allows_durable_mutators(tmp_path, monkeypatch):
 # --- CW4: the external-shell secret guard catches relative interpreter paths ---
 
 def test_secret_guard_catches_relative_interpreter_path():
-    from ouroboros.tools.registry import _subagent_shell_targets_secret
+    from ouroboros.tools.shell_guards import _subagent_shell_targets_secret
 
     assert _subagent_shell_targets_secret("python -c \"open('data/settings.json')\"") is True
     assert _subagent_shell_targets_secret("node -e \"readfilesync('../../data/settings.json')\"") is True

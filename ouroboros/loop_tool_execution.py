@@ -30,10 +30,10 @@ from ouroboros.tool_capabilities import (
 from ouroboros.tools.registry import ToolRegistry
 from ouroboros.tools.review_synthesis import PLAN_REVIEW_CONTROL_PREFIX
 from ouroboros.usage_accounting import UsageAccountingError
+from ouroboros.observability import sanitize_tool_args_for_log
 from ouroboros.utils import (
     append_jsonl,
     emit_log_event,
-    sanitize_tool_args_for_log,
     sanitize_tool_result_for_log,
     truncate_for_log,
     truncate_review_artifact,

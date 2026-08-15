@@ -16,11 +16,11 @@ if TYPE_CHECKING:
     from ouroboros.tools.registry import ToolRegistry
 
 from ouroboros.loop_tool_execution import StatefulToolExecutor, _truncate_tool_result
+from ouroboros.observability import sanitize_tool_args_for_log
 from ouroboros.utils import (
     append_jsonl,
     emit_log_event,
     read_text,
-    sanitize_tool_args_for_log,
     sanitize_tool_result_for_log,
     truncate_for_log,
     utc_now_iso,

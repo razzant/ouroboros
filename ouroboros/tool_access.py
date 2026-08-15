@@ -11,7 +11,6 @@ from __future__ import annotations
 import os
 import pathlib
 import re
-from dataclasses import dataclass
 from typing import Any, Iterable, Literal, Optional
 
 from ouroboros.artifacts import (delegated_capture_read_target,
@@ -20,6 +19,25 @@ from ouroboros.tool_capabilities import ACTING_SUBAGENT_MODE, LOCAL_READONLY_SUB
 from ouroboros.contracts.task_constraint import VALID_WRITE_SURFACES, normalize_task_constraint
 from ouroboros.shell_parse import is_absolute_path_text
 from ouroboros.utils import safe_relpath
+from ouroboros.tool_access_policy import (  # noqa: F401 -- re-exported
+    ToolProfile,
+    ResourceRoot,
+    Operation,
+    ToolAccessDecision,
+    ResolvedResourceBinding,
+    _ALL_ROOTS,
+    _READONLY_RESOURCE_ROOTS,
+    _TOP_LEVEL_PRINCIPAL_POLICY,
+    _TOP_LEVEL_PRINCIPAL_PROFILES,
+    _READ_OPS,
+    _POLICY,
+    _SUBAGENT_CAPABILITY_TO_OPERATION,
+)
+from ouroboros.workspace_ref import (
+    RemoteWorkspacePathError,
+    root_is_target_native,
+    workspace_ref_for,
+)
 
 
 def _user_files_root() -> pathlib.Path:
@@ -60,38 +78,6 @@ def _deliverables_root() -> pathlib.Path:
     return pathlib.Path(get_deliverables_root()).expanduser().resolve(strict=False)
 
 
-ToolProfile = Literal[
-    "self_modification",
-    "workspace_task",
-    "external_workspace_task",
-    "acting_subagent",
-    "skill_repair",
-    "local_readonly_subagent",
-    "operator_control",
-]
-ResourceRoot = Literal[
-    "active_workspace",
-    "system_repo",
-    "runtime_data",
-    "task_drive",
-    "skill_payload",
-    "artifact_store",
-    "user_files",
-    "subagent_projects",
-    "deliverables",
-]
-Operation = Literal[
-    "read",
-    "list",
-    "search",
-    "write",
-    "edit",
-    "shell",
-    "vcs",
-    "review",
-    "delegate",
-    "service",
-]
 SubagentCapability = Literal[
     "write",
     "edit",
@@ -103,52 +89,12 @@ SubagentCapability = Literal[
 ]
 
 
-@dataclass(frozen=True)
-class ToolAccessDecision:
-    allow: bool
-    reason: str = ""
-    guard: str = ""
 
 
-@dataclass(frozen=True)
-class ResolvedResourceBinding:
-    """One dispatch-selected logical root and its exact physical target."""
-
-    profile: ToolProfile
-    root: ResourceRoot
-    operation: Operation
-    base_path: pathlib.Path
-    target_path: pathlib.Path
-    source: str
-    skill_name: str
-    state_drive_root: pathlib.Path
 
 
-_ALL_ROOTS: frozenset[str] = frozenset({
-    "active_workspace",
-    "system_repo",
-    "runtime_data",
-    "task_drive",
-    "skill_payload",
-    "artifact_store",
-    "user_files",
-    "subagent_projects",
-    "deliverables",
-})
 
-# Deferral 1: orchestrator-visible READ-ONLY roots — durable subagent (genesis) projects
-# and the unnamed-deliverables container. Only ever granted {read,list,search}; NEVER
-# write/edit/shell/vcs (no mutation, no shell-cwd — deliberately absent from
-# resolve_shell_cwd candidates) and NEVER to acting/readonly subagents (a child must not
-# read sibling projects). operator_control is capped to read-only on these too.
-_READONLY_RESOURCE_ROOTS: frozenset[str] = frozenset({"subagent_projects", "deliverables"})
-_TOP_LEVEL_PRINCIPAL_PROFILES: frozenset[str] = frozenset({
-    "workspace_task",
-    "external_workspace_task",
-    "self_modification",
-})
 
-_READ_OPS = frozenset({"read", "list", "search"})
 _USER_FILES_SECRET_COMPONENTS = frozenset({
     ".aws",
     ".azure",
@@ -213,79 +159,8 @@ _USER_FILES_ALLOWED_DOTNAMES = frozenset({
     ".editorconfig",
 })
 
-_TOP_LEVEL_PRINCIPAL_POLICY: dict[str, set[str]] = {
-    "active_workspace": {"read", "list", "search", "write", "edit", "shell", "vcs", "review", "service"},
-    "system_repo": {"read", "list", "search", "write", "edit", "shell", "vcs", "review", "service"},
-    "runtime_data": {"read", "list", "search", "write", "edit"},
-    "task_drive": {"read", "list", "write", "edit", "shell", "service"},
-    "skill_payload": {"read", "list", "search", "write", "edit", "review", "shell"},
-    "artifact_store": {"read", "list", "write", "shell", "service"},
-    "user_files": {"read", "list", "search", "write", "edit", "shell", "service"},
-    "subagent_projects": {"read", "list", "search"},
-    "deliverables": {"read", "list", "search"},
-}
 
 
-_POLICY: dict[str, dict[str, set[str]]] = {
-    "local_readonly_subagent": {
-        # Read-only child VCS names still need their target binding to resolve.
-        "active_workspace": set(_READ_OPS) | {"vcs"},
-        "system_repo": set(_READ_OPS) | {"vcs"},
-        "runtime_data": {"read", "list"},
-        "task_drive": {"read", "list"},
-        "artifact_store": {"read", "list"},
-        # v6.70.0 (owner-approved): read-only scouts sent to review a skill were
-        # structurally blind to its payload — a scout literally reported
-        # "reviewing blind", and a correct "skill does not exist" answer was
-        # indistinguishable from an access block. Payloads are skill CODE
-        # (data/skills/...); grants/secrets live in data/state/skills, which
-        # stays invisible to this profile.
-        "skill_payload": {"read", "list", "search"},
-    },
-    "skill_repair": {
-        "skill_payload": {"read", "list", "search", "write", "edit", "review"},
-        "runtime_data": {"read", "list"},
-        "task_drive": {"read", "list"},
-        "artifact_store": {"read", "list"},
-    },
-    # Top-level preset names remain observable, but workspace focus never narrows
-    # the ordinary principal. Independent path/credential/child/runtime guards
-    # still apply after this shared operation matrix.
-    "workspace_task": _TOP_LEVEL_PRINCIPAL_POLICY,
-    "external_workspace_task": _TOP_LEVEL_PRINCIPAL_POLICY,
-    # Mutative (acting) subagents write only inside their isolated active
-    # workspace (self_worktree / external_workspace / genesis). No vcs-commit /
-    # review here; the parent integrates and commits. self_worktree additionally
-    # keeps protected-path discipline active in the registry (it is the system
-    # repo). runtime_data stays read-only.
-    "acting_subagent": {
-        # Acting children write ONLY inside their isolated surface (active_workspace =
-        # the self_worktree / external_workspace / genesis). task_drive / artifact_store
-        # are read-only here (no extra write surface); the deliverable is a workspace.patch.
-        "active_workspace": {"read", "list", "search", "write", "edit", "shell", "vcs", "service"},
-        "runtime_data": {"read", "list"},
-        "task_drive": {"read", "list"},
-        "artifact_store": {"read", "list"},
-    },
-    "self_modification": _TOP_LEVEL_PRINCIPAL_POLICY,
-    # operator_control gets full authority on every mutable root, but the orchestrator
-    # read-only roots stay read-only even here (they are deliverables/durable projects,
-    # not a control surface).
-    "operator_control": {
-        **{root: {"read", "list", "search", "write", "edit", "shell", "vcs", "review", "delegate", "service"}
-           for root in _ALL_ROOTS if root not in _READONLY_RESOURCE_ROOTS},
-        **{root: {"read", "list", "search"} for root in _READONLY_RESOURCE_ROOTS},
-    },
-}
-_SUBAGENT_CAPABILITY_TO_OPERATION: dict[str, Operation] = {
-    "write": "write",
-    "edit": "edit",
-    "shell": "shell",
-    "vcs": "vcs",
-    "review": "review",
-    "delegate": "delegate",
-    "service": "service",
-}
 SUBAGENT_CAPABILITIES: tuple[str, ...] = tuple(_SUBAGENT_CAPABILITY_TO_OPERATION.keys())
 
 
@@ -448,16 +323,21 @@ def _process_root_candidates(
 ) -> list[tuple[ResourceRoot, pathlib.Path, str, str]]:
     """Return side-effect-free ``(root, base, source, skill)`` candidates."""
 
+    from ouroboros.workspace_ref import is_remote_workspace
+
     profile = active_tool_profile(ctx)
-    active = resource_root_path(ctx, "active_workspace")
+    remote_workspace = is_remote_workspace(ctx)
+    # An SSH active workspace has NO Home path: it executes through its remote
+    # backend, so it never joins the local process-cwd inventory, and asking
+    # `resource_root_path` for it would itself raise RemoteWorkspacePathError.
+    active = None if remote_workspace else resource_root_path(ctx, "active_workspace")
     candidates: list[tuple[ResourceRoot, pathlib.Path, str, str]] = []
     room = project_room_lens_dir(ctx)
     if room is not None:
         candidates.append(("active_workspace", room, "active_workspace", ""))
-    candidates += [
-        ("active_workspace", active, "active_workspace", ""),
-        ("system_repo", resource_root_path(ctx, "system_repo"), "system_repo", ""),
-    ]
+    if active is not None:
+        candidates.append(("active_workspace", active, "active_workspace", ""))
+    candidates.append(("system_repo", resource_root_path(ctx, "system_repo"), "system_repo", ""))
 
     def _add_task_roots(drive: pathlib.Path) -> None:
         task_id = task_id_for_artifacts(ctx)
@@ -1105,6 +985,22 @@ def _select_process_target(
     materialize: bool,
 ) -> tuple[ResourceRoot, pathlib.Path, pathlib.Path, str, str, list[tuple[str, pathlib.Path]]]:
     """Select one process target from the shared candidate inventory."""
+    from ouroboros.workspace_ref import RemoteWorkspacePathError, is_remote_workspace
+
+    if is_remote_workspace(ctx):
+        # EVERY candidate root below is a Home path, so under a remote placement this
+        # inventory has no correct answer to give — whatever cwd was asked for. The
+        # refusal is therefore about the PLACEMENT and comes FIRST, before the label
+        # is even parsed. Refusing only the default/`active_workspace` spellings would
+        # let `cwd="task_drive"` resolve to a Home task drive and a bare relative cwd
+        # resolve under `system_repo` — a remote-intended command executing inside the
+        # live Ouroboros checkout, which is precisely the silent degradation the sealed
+        # placement exists to prevent. Typed, so `ToolRegistry.execute` can turn it
+        # into a placement ANSWER instead of a crash in the tool loop.
+        raise RemoteWorkspacePathError(
+            "process cwd for an ssh workspace resolves on the target; Home roots are "
+            "not process cwds under a remote placement"
+        )
     profile = active_tool_profile(ctx)
     text = str(cwd or "").strip()
     normalized = text.replace("\\", "/")
@@ -1329,6 +1225,14 @@ def resource_root_path(
     skill_name: str = "",
 ) -> pathlib.Path:
     if root == "active_workspace":
+        if root_is_target_native(workspace_ref_for(ctx), root):
+            # The ONE SSH-native root (matrix Q2а): its bytes live on the target,
+            # so there is no Home path to return. Refusing here is what keeps a
+            # remote read/write from silently landing on the Ouroboros repo.
+            raise RemoteWorkspacePathError(
+                "root=active_workspace is target-native for an ssh workspace; the "
+                "operation must be routed through its executor, not a Home path"
+            )
         active = getattr(ctx, "active_repo_dir", None)
         candidate = None
         if callable(active):

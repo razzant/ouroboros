@@ -436,6 +436,42 @@ def run_shell_git_block_reason(raw_cmd: Any, *, allow_network: bool = True) -> s
     return ""
 
 
+def target_native_git_violation(raw_cmd: Any, *, allow_network: bool = True) -> str:
+    """The git policy that survives a TARGET-NATIVE placement: the network gate.
+
+    `external_workspace_git_violation` protects exactly two things — the Ouroboros
+    runtime roots, and the network resource contract. On a remote target the first
+    is not reachable: the system repo, the data drives and the owner's credential
+    files are HOME state, and there is no Ouroboros install on the target to
+    retarget `GIT_DIR` at. So the runtime arms are vacuous there, while the
+    resource contract is a Home POLICY decision that binds wherever the command
+    runs — `allowed_resources.network=false` must not be satisfiable by moving the
+    fetch to another host. This states that reduction explicitly instead of
+    passing the Home guard a fabricated remote `Path`, which would resolve
+    symlinks and existence against the wrong filesystem and quietly succeed.
+    """
+
+    for segment in shell_segments(raw_cmd):
+        if not segment:
+            continue
+        _env, command = collect_leading_env(segment)
+        if not command:
+            continue
+        name = pathlib.PurePath(str(command[0]).strip("`'\"")).name.lower()
+        if name in {"bash", "sh", "zsh"}:
+            inline = shell_command_string(command)
+            nested = target_native_git_violation(inline, allow_network=allow_network) if inline else ""
+            if nested:
+                return nested
+            continue
+        if name != "git" or allow_network:
+            continue
+        subcmd, _args = _git_subcommand_and_args(command)
+        if subcmd in GIT_NETWORK_SUBCOMMANDS:
+            return f"task_contract.allowed_resources.network=false blocks git {subcmd}"
+    return ""
+
+
 def _resolve_workspace_shell_cwd(active_root: pathlib.Path, cwd: str = "") -> pathlib.Path:
     root = pathlib.Path(active_root).resolve(strict=False)
     if cwd and str(cwd).strip() not in ("", ".", "./"):

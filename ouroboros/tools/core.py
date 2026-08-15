@@ -293,6 +293,8 @@ _SUBAGENT_SECRET_FILE_NAMES = frozenset({
     "credentials",
     "credentials.json",
     "keys.json",
+    "remote_connections.json",
+    "remote_connections.json.lock",
     "secret.json",
     "secrets.json",
     "settings.json",
@@ -390,22 +392,54 @@ def _is_subagent_secret_repo_target(target: pathlib.Path, repo_root: pathlib.Pat
     )
 
 
-def _filter_subagent_secret_repo_listing(items: List[str], repo_root: pathlib.Path) -> List[str]:
+def _filter_subagent_secret_repo_listing(
+    items: List[str], repo_root: pathlib.Path | None
+) -> List[str]:
+    """Drop secret/control entries from a listing, disclosing an exact count.
+
+    ``repo_root=None`` judges SPELLINGS only and skips the FS-alias probe. That is
+    the placement-blind form the dispatch pipeline uses for a listing produced on a
+    remote target (`tools/dispatch_policy`): the names came over a wire and there is
+    no Home directory to `samefile` them against, so the rule that can be applied is
+    applied and the one that cannot is not silently claimed.
+    """
     filtered: List[str] = []
     redacted = 0
-    root = pathlib.Path(repo_root).resolve(strict=False)
+    root = None if repo_root is None else pathlib.Path(repo_root).resolve(strict=False)
     for item in items:
         marker = item.rstrip("/")
         if marker.startswith("⚠️") or marker.startswith("...("):
             filtered.append(item)
             continue
-        if _is_subagent_secret_repo_path(marker) or _is_subagent_secret_repo_target(root / marker, root):
+        if _is_subagent_secret_repo_path(marker) or (
+            root is not None and _is_subagent_secret_repo_target(root / marker, root)
+        ):
             redacted += 1
             continue
         filtered.append(item)
     if redacted:
         filtered.append(f"⚠️ {redacted} secret/control entr{'y' if redacted == 1 else 'ies'} hidden from this subagent.")
     return filtered
+
+
+def _filter_out_connection_store(items: List[str], root: pathlib.Path) -> List[str]:
+    """Drop connection-store entries from a runtime_data listing.
+
+    ONE filter for every exit of ``_data_list``. It used to live inline on the only
+    exit there was; upstream then added the resolved-binding fast path, which
+    returned before reaching it — so a listing taken through the binding named the
+    store holding the owner's SSH connection secrets while the same listing taken
+    the other way did not. The identical shape this branch exists to prevent: one
+    policy, two doors, enforced at one of them.
+    """
+    from ouroboros.connection_store import is_connection_store_path
+
+    base = pathlib.Path(root)
+    return [
+        item
+        for item in items
+        if not is_connection_store_path(base / str(item).rstrip("/"))
+    ]
 
 
 def _filter_subagent_secret_listing(items: List[str], data_root: pathlib.Path) -> List[str]:
@@ -543,6 +577,10 @@ def _data_read(
             return f"⚠️ DATA_READ_BLOCKED: {e}"
     else:
         target = ctx.drive_path(norm)
+    from ouroboros.connection_store import is_connection_store_path
+
+    if is_connection_store_path(target):
+        return "⚠️ DATA_READ_BLOCKED: remote connection state is owner-only."
     if is_restricted_subagent_profile(ctx):
         root = (
             _resolved_binding.base_path
@@ -639,6 +677,7 @@ def _data_list(
         except ValueError:
             return "⚠️ DATA_LIST_BLOCKED: resolved target escapes runtime_data root."
         items = _filter_out_project_store(norm_dir, _list_dir(root, rel, max_entries))
+        items = _filter_out_connection_store(items, root)
         if is_restricted_subagent_profile(ctx):
             items = _filter_subagent_secret_listing(items, root)
         return json.dumps(items, ensure_ascii=False, indent=2)
@@ -651,6 +690,7 @@ def _data_list(
         return json.dumps(items, ensure_ascii=False, indent=2)
     # Drop any projects/<id> entry so a generic root listing never exposes the store.
     items = _filter_out_project_store(_normalize_data_read_path(ctx, dir), _list_dir(ctx.drive_root, dir, max_entries))
+    items = _filter_out_connection_store(items, pathlib.Path(ctx.drive_root))
     if is_restricted_subagent_profile(ctx):
         items = _filter_subagent_secret_listing(items, pathlib.Path(ctx.drive_root))
     return json.dumps(items, ensure_ascii=False, indent=2)
@@ -772,6 +812,13 @@ def _data_write(
     # not-yet-existing case variants.
     from ouroboros import config as _cfg
     target_path = pathlib.Path(p)
+    from ouroboros.connection_store import is_connection_store_path
+
+    if is_connection_store_path(target_path):
+        return (
+            "⚠️ DATA_WRITE_BLOCKED: remote connection trust and lifecycle state "
+            "is owner-only; use Settings or the connections CLI."
+        )
     settings_path = pathlib.Path(_cfg.SETTINGS_PATH)
     data_root = (
         _resolved_binding.state_drive_root
@@ -1024,10 +1071,16 @@ def _local_readonly_resource_block(
     *,
     action: str,
 ) -> str:
-    # Resource (active_workspace/system_repo) restriction is for STRICT read-only
-    # subagents only — acting children legitimately write their isolated surface.
-    from ouroboros.tool_access import active_tool_profile
-    if active_tool_profile(ctx) != "local_readonly_subagent":
+    # READ denial, so the profile test is the fail-closed SSOT and not the
+    # narrower read-only one. Every caller of this helper is a READ or a SEARCH;
+    # an acting child legitimately WRITES its isolated surface (that distinction
+    # lives in the write guards) but is barred from READING owner secrets exactly
+    # like a read-only child — `is_restricted_subagent_profile` says so, and
+    # `_repo_read`/`_data_read` already applied it. Only the SEARCH walk did not,
+    # so an acting subagent's `search_code` returned the contents of a
+    # `secrets/db.txt` its own `read_file` refused, and the remote placement's
+    # export policy refused it a third way. One authority, one answer.
+    if not is_restricted_subagent_profile(ctx):
         return ""
     if normalized in {"active_workspace", "system_repo"}:
         if _is_subagent_secret_repo_target(target, pathlib.Path(base)):
@@ -1530,6 +1583,15 @@ def _edit_text(
         if normalized == "runtime_data":
             if (b := _project_store_access_block(_normalize_data_read_path(ctx, path))):
                 return b
+            from ouroboros.connection_store import is_connection_store_path
+
+            # Owner-only remote connection state (D6): trust/lifecycle records are
+            # never model-editable, on any root.
+            if is_connection_store_path(target):
+                return (
+                    "⚠️ EDIT_TEXT_BLOCKED: remote connection trust and lifecycle "
+                    "state is owner-only; use Settings or the connections CLI."
+                )
             if (
                 _is_workspace_executor_control_state_path(target, binding.base_path)
                 or _is_workspace_executor_control_state_path(target, binding.state_drive_root)
