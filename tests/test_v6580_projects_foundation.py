@@ -85,8 +85,11 @@ def test_validate_workspace_root_is_shared_ssot(tmp_path):
 
     ws = tmp_path / "repo"
     _init_git_repo(ws)
+    # RWS v2: the SSOT returns the SEALED placement. The local branch's decisions and
+    # messages are unchanged, so the Home path is read off the ref's own projection.
     resolved = validate_workspace_root(str(ws), system_repo_dir=tmp_path / "sys", drive_root=tmp_path / "data")
-    assert resolved == ws.resolve()
+    assert resolved.kind == "local"
+    assert resolved.home_path() == ws.resolve()
 
     with pytest.raises(WorkspaceRootError):
         validate_workspace_root(str(tmp_path / "missing"), system_repo_dir=tmp_path / "sys", drive_root=tmp_path / "data")
@@ -112,21 +115,21 @@ def test_resolve_room_workspace_defaults_to_project_working_dir(tmp_path):
         drive_root=data, system_repo_dir=tmp_path / "sys", project_id="room"
     )
     assert error == ""
-    assert resolved == str(ws.resolve())
+    assert str(resolved.home_path()) == str(ws.resolve())
 
     # workspace="none" opts out even when the room has a working_dir.
     resolved_none, error_none = resolve_room_workspace(
         drive_root=data, system_repo_dir=tmp_path / "sys", project_id="room",
         workspace_sentinel="none",
     )
-    assert (resolved_none, error_none) == ("", "")
+    assert (resolved_none, error_none) == (None, "")
 
     # A file-less project admits a workspace-less task with NO error.
     create_project(data, "fileless", name="Fileless", origin="test")
     resolved_fl, error_fl = resolve_room_workspace(
         drive_root=data, system_repo_dir=tmp_path / "sys", project_id="fileless"
     )
-    assert (resolved_fl, error_fl) == ("", "")
+    assert (resolved_fl, error_fl) == (None, "")
 
 
 def test_resolve_room_workspace_loud_fails_on_broken_working_dir(tmp_path):
@@ -161,7 +164,7 @@ def test_resolve_room_workspace_loud_fails_on_broken_working_dir(tmp_path):
     resolved, error = resolve_room_workspace(
         drive_root=data, system_repo_dir=tmp_path / "sys", project_id="broken"
     )
-    assert resolved == ""
+    assert resolved is None
     assert "unusable" in error and "broken" in error
 
 
@@ -186,7 +189,7 @@ def test_resolve_room_workspace_loud_fails_when_registry_is_unreadable(tmp_path,
     resolved, error = resolve_room_workspace(
         drive_root=data, system_repo_dir=tmp_path / "sys", project_id="room"
     )
-    assert resolved == ""
+    assert resolved is None
     assert error, "an unreadable registry must NOT resolve to a silent workspace-less task"
     assert "unreadable" in error and "room" in error
 
@@ -197,7 +200,7 @@ def test_resolve_room_workspace_loud_fails_when_registry_is_unreadable(tmp_path,
         drive_root=data, system_repo_dir=tmp_path / "sys", project_id="room",
         explicit_workspace=str(ws),
     )
-    assert error_x == "" and resolved_x == str(ws.resolve())
+    assert error_x == "" and str(resolved_x.home_path()) == str(ws.resolve())
 
 
 # --- canonical source-ref truncation guard -------------------------------------

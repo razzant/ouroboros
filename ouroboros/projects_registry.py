@@ -6,6 +6,21 @@ per-project memory (``data/projects/<id>/``) + chat thread (its own positive
 durable projects root). File-less research projects are valid. Projects are
 NEVER age-pruned; the owner curates by archive/delete.
 
+**Placement (RWS v2 §3.1/§3.3).** A project's WORKING FOLDER may live on another
+host. The optional ``placement`` field carries the sealed
+:class:`~ouroboros.workspace_ref.SshWorkspaceRef` of a REMOTE project, and it is
+stored for remote projects ONLY: a local project's placement IS its
+``working_dir``, and persisting the same fact twice is how two authorities start
+disagreeing about where a project lives. A row without ``placement`` therefore
+reads as local — which is exactly what every pre-RWS row is. Placement lives on
+the PROJECT and never on a task because this is the record that carries
+``routing_generation``: every placement change advances it (see
+:func:`set_project_placement`), and ``supervisor/queue.py`` revalidates that
+generation under ``_queue_lock`` before a task becomes PENDING, so work resolved
+against a target the owner has since rebound is refused rather than run on the
+wrong host. A task that could name its own remote target would be a placement
+with no generation to fence.
+
 State lives in ``data/state/projects.json`` via the canonical durable-JSON
 pattern (mirrors ``subagent_worktrees.py``). Deletion keeps a durable tombstone
 so chat history, bindings, memory and the owner folder remain addressable and a
@@ -26,6 +41,7 @@ from ouroboros.contracts.chat_id_policy import project_chat_id
 from ouroboros.contracts.schema_versions import with_schema_version
 from ouroboros.project_facts import sanitize_project_id
 from ouroboros.utils import atomic_write_json, iter_jsonl_objects, read_json_dict, utc_now_iso
+from ouroboros.workspace_ref import SshWorkspaceRef, normalize_workspace_ref
 
 log = logging.getLogger(__name__)
 
@@ -107,6 +123,35 @@ def _normalize_project_row(value: Dict[str, Any]) -> Dict[str, Any]:
             row[field] = 0
     row["delete_error"] = str(row.get("delete_error") or "")
     return row
+
+
+def _normalized_placement(value: Any) -> Optional[SshWorkspaceRef]:
+    """Seal a REMOTE placement for durable storage, or ``None`` when there is none.
+
+    A LOCAL ref is refused rather than silently mirrored: ``working_dir`` already is
+    the local placement, so accepting one here would create a second authority for
+    the same fact. Anything malformed raises (``normalize_workspace_ref``) — a
+    placement this build cannot honor must never be coerced into one it can.
+    """
+    ref = normalize_workspace_ref(value)
+    if ref is None:
+        return None
+    if not isinstance(ref, SshWorkspaceRef):
+        raise ValueError(
+            "a local project's placement is its working_dir; only a remote placement is stored"
+        )
+    return ref
+
+
+def project_placement(project: Any) -> Optional[SshWorkspaceRef]:
+    """The SEALED remote placement of a registry row, or ``None`` for a local project.
+
+    Raises ``ValueError`` LOUDLY for a durable row whose placement this build cannot
+    honor. The alternative — reading it as absent — would read a remote project as a
+    local one and run its work on the wrong host (the no-silent-fallback invariant).
+    """
+    raw = project.get("placement") if isinstance(project, dict) else None
+    return _normalized_placement(raw)
 
 
 def _validated_name(value: Any, fallback: str = "") -> str:
@@ -473,16 +518,26 @@ def create_project(
     name: str = "",
     working_dir: str = "",
     origin: str = "owner",
+    placement: Any = None,
 ) -> Dict[str, Any]:
     """Register (or idempotently return) a project entry.
 
     ``working_dir`` is optional — file-less projects (research, presentations
     drafted in chat) are first-class. The per-project chat id is derived
     deterministically from the id (one allocator-free SSOT).
+
+    ``placement`` is the sealed REMOTE placement of a project whose folder lives on
+    another host (already admitted by ``workspace_admission`` — this registry stores
+    placements, it does not validate targets). It is mutually exclusive with
+    ``working_dir``: a remote project has no Home folder, so offering one would be a
+    Home path standing in for a target the caller never verified.
     """
     pid = sanitize_project_id(project_id)
     if not pid:
         raise ValueError(f"unusable project id: {project_id!r}")
+    placement_ref = _normalized_placement(placement)
+    if placement_ref is not None and str(working_dir or "").strip():
+        raise ValueError("a remote project has no Home working_dir")
     with _file_write_lock(_registry_path(drive_root)):
         data = _load(drive_root)
         for existing in data["projects"]:
@@ -506,6 +561,8 @@ def create_project(
             "visible_revision": 0,
             "delete_error": "",
         }
+        if placement_ref is not None:
+            entry["placement"] = placement_ref.to_payload()
         data["projects"].append(entry)
         _save(drive_root, data)
         log.info("Project registered: %s (chat_id=%s)", pid, entry["chat_id"])
@@ -517,7 +574,12 @@ def update_project(drive_root: Any, project_id: str, **updates: Any) -> Optional
     ``provenance`` (attached|cloned|genesis|none — how the working_dir came to be),
     ``clone_url`` (historical fact; live git data is always read from .git), and
     ``trusted_at`` (stamped automatically on attach/clone — the notification trust
-    model: attaching IS the owner's explicit grant, no second confirmation gate)."""
+    model: attaching IS the owner's explicit grant, no second confirmation gate).
+
+    ``placement`` is deliberately NOT updatable here: every placement change must
+    advance ``routing_generation``, which is what :func:`set_project_placement` is
+    for. A placement that moved through this door would leave the fence pointing at
+    a target that no longer exists."""
     pid = sanitize_project_id(project_id)
     if not pid:
         return None
@@ -539,10 +601,85 @@ def update_project(drive_root: Any, project_id: str, **updates: Any) -> Optional
             for key, value in updates.items():
                 if key not in allowed:
                     continue
+                if key == "working_dir" and entry.get("placement"):
+                    # A remote project with a Home working_dir would give every
+                    # `working_dir` reader a local folder to prefer over the target.
+                    raise ValueError(
+                        f"project {pid!r} is remote: rebind its placement instead of "
+                        "setting a Home working_dir"
+                    )
                 if key == "name":
                     value = _validated_name(value, str(entry.get("id") or ""))
                 entry[key] = value
             _save(drive_root, data)
+            return dict(entry)
+    return None
+
+
+def set_project_placement(
+    drive_root: Any,
+    project_id: str,
+    placement: Any,
+    *,
+    expected_routing_generation: Optional[int] = None,
+) -> Optional[Dict[str, Any]]:
+    """REBIND a project's remote placement and advance its routing generation.
+
+    Separate from :func:`update_project` for one reason: every placement change MUST
+    advance ``routing_generation``. That counter is the fence
+    ``supervisor/queue.py`` revalidates under ``_queue_lock`` before a task becomes
+    PENDING, so a placement that moved without advancing it would let work resolved
+    against the previous target be inserted as though nothing had changed.
+
+    ``expected_routing_generation`` is a compare-and-set: two owner rebinds racing
+    each other must not interleave silently, and the loser is TOLD it lost
+    (``project_routing_generation_changed``) instead of overwriting the winner.
+
+    An identical placement is a no-op that does NOT advance the generation — a
+    resubmitted form must not invalidate placements that are still correct. A
+    project holding a Home ``working_dir`` is refused: dropping that binding to make
+    room for a remote one would discard the owner's folder attachment silently.
+
+    Returns the updated row, ``None`` for an unknown/inactive project, and raises
+    ``ValueError`` for a refused rebind.
+    """
+    pid = sanitize_project_id(project_id)
+    if not pid:
+        return None
+    ref = _normalized_placement(placement)
+    if ref is None:
+        raise ValueError("set_project_placement requires a remote placement")
+    with _file_write_lock(_registry_path(drive_root)):
+        data = _load(drive_root)
+        for entry in data["projects"]:
+            if entry.get("id") != pid or entry.get("lifecycle") != PROJECT_ACTIVE:
+                continue
+            generation = int(entry.get("routing_generation") or 0)
+            if (
+                expected_routing_generation is not None
+                and generation != int(expected_routing_generation)
+            ):
+                raise ValueError("project_routing_generation_changed")
+            if str(entry.get("working_dir") or "").strip():
+                raise ValueError(
+                    f"project {pid!r} is bound to a Home folder; a remote placement "
+                    "would silently discard that binding"
+                )
+            try:
+                current = project_placement(entry)
+            except ValueError:
+                # A durable placement this build cannot parse is exactly the row an
+                # owner needs to REPAIR, so it must not block its own replacement.
+                current = None
+            if current == ref:
+                return dict(entry)
+            entry["placement"] = ref.to_payload()
+            entry["routing_generation"] = generation + 1
+            _save(drive_root, data)
+            log.info(
+                "Project placement rebound: %s (routing_generation=%s)",
+                pid, entry["routing_generation"],
+            )
             return dict(entry)
     return None
 
@@ -866,6 +1003,9 @@ def projects_summary(drive_root: Any, *, limit: int = 50) -> List[Dict[str, Any]
             "name": project.get("name"),
             "chat_id": project.get("chat_id"),
             "working_dir": project.get("working_dir") or "",
+            # The sealed remote placement, or None for a local/file-less project —
+            # the sidebar has to be able to say WHERE a project's work will run.
+            "placement": project.get("placement") or None,
             "provenance": project.get("provenance") or "",
             "last_active_at": project.get("last_active_at") or "",
             "lifecycle": project.get("lifecycle") or PROJECT_ACTIVE,
@@ -898,6 +1038,8 @@ __all__ = [
     "list_sidebar_projects",
     "project_binding_for_task",
     "project_chat_for_task",
+    "project_placement",
+    "set_project_placement",
     "project_thread_note_for_task",
     "project_chat_for_task_tree",
     "project_task_bindings",

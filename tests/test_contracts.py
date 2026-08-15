@@ -1253,6 +1253,171 @@ def test_task_create_request_declares_executor_ref_contract():
 
 
 # ---------------------------------------------------------------------------
+# RWS v2 placement contract pins (Appendix C-3): WorkspaceRef is the SINGLE
+# persisted placement descriptor; ExecutorRef is a derived projection.
+# ---------------------------------------------------------------------------
+
+
+def test_workspace_ref_is_the_single_persisted_placement_contract():
+    """Pin the WorkspaceRef discriminated union: local|ssh round-trip, legacy
+    normalization to the local variant, reserved docker_exec, sealed
+    immutability, and the no-Home-Path rule for ssh."""
+    import dataclasses
+
+    from ouroboros.workspace_ref import (
+        LocalWorkspaceRef,
+        RemoteWorkspacePathError,
+        SEALED_WORKSPACE_REF_KEY,
+        SshWorkspaceRef,
+        normalize_legacy_workspace_ref,
+        normalize_workspace_ref,
+    )
+
+    # local round-trip: payload -> ref -> payload
+    local = normalize_workspace_ref({"kind": "local", "local_root": tempfile.gettempdir()})
+    assert isinstance(local, LocalWorkspaceRef)
+    assert normalize_workspace_ref(local.to_payload()) == local
+    assert local.home_path().is_absolute()
+
+    # ssh round-trip + typed Home-path refusal
+    ssh_payload = {
+        "kind": "ssh",
+        "connection_id": "conn-1",
+        "remote_root": "/srv/project",
+        "workspace_id": "ws-1",
+    }
+    ssh = normalize_workspace_ref(ssh_payload)
+    assert isinstance(ssh, SshWorkspaceRef)
+    assert ssh.to_payload() == ssh_payload
+    with pytest.raises(RemoteWorkspacePathError):
+        ssh.home_path()
+
+    # sealed/immutable: variants are frozen dataclasses
+    with pytest.raises(dataclasses.FrozenInstanceError):
+        ssh.remote_root = "/other"  # type: ignore[misc]
+
+    # legacy durable records (bare workspace_root, no ref) normalize to local
+    legacy = normalize_legacy_workspace_ref(None, tempfile.gettempdir())
+    assert isinstance(legacy, LocalWorkspaceRef)
+    assert normalize_legacy_workspace_ref(None, "") is None
+    assert normalize_legacy_workspace_ref(ssh_payload, tempfile.gettempdir()) == ssh
+
+    # absent / unknown / reserved kinds
+    assert normalize_workspace_ref(None) is None
+    assert normalize_workspace_ref({}) is None
+    with pytest.raises(ValueError, match="kind must be"):
+        normalize_workspace_ref({"kind": "carrier_pigeon"})
+    with pytest.raises(ValueError, match="reserved"):
+        normalize_workspace_ref({"kind": "docker_exec"})
+    with pytest.raises(ValueError, match="unknown fields"):
+        normalize_workspace_ref({**ssh_payload, "extra": 1})
+    with pytest.raises(ValueError, match="traversal"):
+        normalize_workspace_ref({**ssh_payload, "remote_root": "/srv/../etc"})
+
+    # the sealed metadata key is a stable durable spelling
+    assert SEALED_WORKSPACE_REF_KEY == "_sealed_workspace_ref"
+
+
+def test_executor_ref_is_a_derived_projection_of_workspace_ref():
+    """Pin the ssh ExecutorRef projection: normalize_executor_ref accepts ssh
+    (connection_id + remote_root required, network rules enforced), old
+    local/docker payloads normalize byte-identically, execute() fails typed,
+    and executor_ref_from_ctx derives the ssh projection from the sealed ref."""
+    import types
+
+    from ouroboros.workspace_executor import (
+        SSH_EXECUTOR_UNAVAILABLE,
+        SshExecutorUnavailableError,
+        execute,
+        executor_ref_from_ctx,
+        normalize_executor_ref,
+        prepare_native_operation,
+    )
+    from ouroboros.workspace_ref import SEALED_WORKSPACE_REF_KEY
+
+    # ssh form validation
+    ssh_ref = normalize_executor_ref(
+        {"type": "ssh", "connection_id": "conn-1", "remote_root": "/srv/project"}
+    )
+    assert ssh_ref is not None
+    assert (ssh_ref.kind, ssh_ref.connection_id, ssh_ref.remote_root) == (
+        "ssh", "conn-1", "/srv/project",
+    )
+    assert ssh_ref.mappings == ()
+    with pytest.raises(ValueError, match="requires connection_id"):
+        normalize_executor_ref({"type": "ssh", "remote_root": "/srv/project"})
+    with pytest.raises(ValueError, match="remote_root"):
+        normalize_executor_ref({"type": "ssh", "connection_id": "conn-1"})
+    with pytest.raises(ValueError, match="network=none"):
+        normalize_executor_ref(
+            {"type": "ssh", "connection_id": "conn-1", "remote_root": "/srv/p", "network": "none"}
+        )
+
+    # old payloads keep normalizing byte-identically (an explicit id pins the
+    # whole ref; an absent id has always minted a fresh uuid per normalize)
+    legacy_payload = {
+        "type": "local",
+        "id": "legacy-exec",
+        "path_mappings": [{"host_path": tempfile.gettempdir(), "backend_path": "/workspace"}],
+    }
+    before = normalize_executor_ref(dict(legacy_payload))
+    after = normalize_executor_ref(dict(legacy_payload))
+    assert before == after
+    assert before.kind == "local" and before.connection_id == "" and before.remote_root == ""
+
+    # derivation: a sealed ssh WorkspaceRef in metadata yields the projection,
+    # and nothing was written back as executor_ref (WorkspaceRef stays the
+    # only durable placement)
+    metadata = {
+        SEALED_WORKSPACE_REF_KEY: {
+            "kind": "ssh",
+            "connection_id": "conn-1",
+            "remote_root": "/srv/project",
+            "workspace_id": "ws-1",
+        }
+    }
+    ctx = types.SimpleNamespace(task_metadata=metadata)
+    derived = executor_ref_from_ctx(ctx)
+    assert derived is not None and derived.kind == "ssh"
+    assert derived.connection_id == "conn-1" and derived.remote_root == "/srv/project"
+    assert derived.executor_id == "ws-1"
+    assert "executor_ref" not in metadata
+
+    # execute() on ssh placement REFUSES (never a silent host fallback). It is a
+    # plain ValueError, NOT SSH_EXECUTOR_UNAVAILABLE: this door takes a Home cwd and
+    # a Home argv, so an ssh placement reaching it means the dispatch skipped the
+    # native route — a wiring error. `SSH_EXECUTOR_UNAVAILABLE` is reserved for the
+    # one condition ARCHITECTURE promises it means, and that is what the native
+    # seams raise in a process with no broker.
+    with pytest.raises(ValueError) as excinfo:
+        execute(ctx, ["true"], pathlib.Path(tempfile.gettempdir()), 5)
+    assert not isinstance(excinfo.value, SshExecutorUnavailableError)
+    assert "execute_prepared" in str(excinfo.value)
+    with pytest.raises(SshExecutorUnavailableError) as unavailable:
+        prepare_native_operation(derived, "read_file")
+    assert unavailable.value.code == SSH_EXECUTOR_UNAVAILABLE
+    assert SSH_EXECUTOR_UNAVAILABLE in str(unavailable.value)
+
+
+def test_schedule_reserved_template_fields_cover_placement_keys():
+    """Pin C-3 #10: every placement spelling is reserved in schedule templates
+    (placement resolves at fire time through admission; templates carry
+    project_id only)."""
+    from ouroboros.schedule_contract import RESERVED_TEMPLATE_FIELDS
+    from ouroboros.workspace_ref import SEALED_WORKSPACE_REF_KEY
+
+    placement_keys = {
+        "workspace_root",
+        "workspace_mode",
+        "executor_ref",
+        "workspace_ref",
+        "connection_id",
+        SEALED_WORKSPACE_REF_KEY,
+    }
+    assert placement_keys <= RESERVED_TEMPLATE_FIELDS
+
+
+# ---------------------------------------------------------------------------
 # v6.80.0 frozen-ABI extensions: assert the shape that CROSSES THE WIRE.
 #
 # ARCHITECTURE.md §11.3 requires every ABI extension to update this suite. The
