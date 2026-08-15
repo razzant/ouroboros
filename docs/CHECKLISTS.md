@@ -168,7 +168,7 @@ Used by `commit_reviewed` for all changes to the Ouroboros repository.
 | 10 | tool_registration | New tool function added but not exported in `get_tools()` OR missing explicit entry in `ouroboros/safety.py::TOOL_POLICY`? (PASS if no new tool.) Both surfaces are required: `get_tools()` makes the tool visible; `TOOL_POLICY` makes the per-call safety routing explicit and is guarded by the `test_tool_policy_covers_all_builtin_tools` invariant. | critical |
 | 11 | context_building | New data/memory files that should appear in LLM context (context.py) but don't? | advisory |
 | 12 | knowledge_index | Knowledge base topics changed but memory/knowledge/index-full.md not updated? | advisory |
-| 13 | self_consistency | Does this change affect behavior described in `BIBLE.md`, `prompts/`, `docs/`, or this checklist itself? Check explicitly: (a) version in `ARCHITECTURE.md` header matches `VERSION` file; (b) tool names/descriptions in `prompts/SYSTEM.md` match tools actually exported by `get_tools()`; (c) JSONL log/memory file formats described in `ARCHITECTURE.md` match all readers/writers; (d) any behavioral change reflected in `prompts/CONSCIOUSNESS.md` if it affects background loop behavior; (e) DEVELOPMENT.md rules still accurate after the change. Severity must follow the shared `Critical surface whitelist` below — release metadata, tool schema, module map, behavioural documentation, or safety contracts are critical; commentary/prose/stylistic mismatches are advisory. | critical |
+| 13 | self_consistency | Does this change affect behavior described in `BIBLE.md`, `prompts/`, `docs/`, or this checklist itself? Check explicitly: (a) version in `ARCHITECTURE.md` header matches `VERSION` file; (b) tool names/descriptions in `prompts/SYSTEM.md` match tools actually exported by `get_tools()`; (c) JSONL log/memory file formats described in `ARCHITECTURE.md` match all readers/writers; (d) any behavioral change reflected in `prompts/CONSCIOUSNESS.md` if it affects background loop behavior; (e) DEVELOPMENT.md rules still accurate after the change. Severity must follow the shared `Critical surface whitelist` below — release metadata, tool schema, module map, behavioural documentation, safety contracts, frozen contracts, or a REMOTE PLACEMENT surface (placement sealing, the export boundary, session binding, target confinement, panic/lease) are critical; commentary/prose/stylistic mismatches are advisory. | critical |
 | 14 | light_external_artifacts | If tool/runtime policy changed, does light mode still allow external user deliverables via `user_files`, task-scoped `task_drive`/`artifact_store`, and process `outputs` while blocking Ouroboros repo/control-plane mutation? (The external `claude_code_edit` cwd lane retired with the tool — D10.) Do review prompts avoid recommending `runtime_data/uploads` or skill payloads as generic artifact transport? | critical |
 | 15 | cross_platform | Does the diff use platform-specific APIs (`os.kill`, `os.setsid`, `os.killpg`, `os.getpgid`, `fcntl`, `msvcrt`, `signal.SIGKILL`, `signal.SIGTERM`, `subprocess` with `start_new_session`/`creationflags`, hardcoded `/` or `\\` in filesystem paths) outside of `ouroboros/platform_layer.py`? Does it import Unix-only or Windows-only modules (`fcntl`, `msvcrt`, `winreg`, `resource`) at any level without a platform guard (`sys.platform`/`IS_WINDOWS` check)? | critical |
 | 16 | changelog_accuracy | Do the exact wording, test counts, and minor description details in the README Version History row match what the diff actually does? Wording drift, off-by-one test counts, minor inaccuracies in descriptive prose — these belong here, NOT in `self_consistency` or `changelog_and_badge`. This item exists so reviewers have a dedicated advisory bucket for prose-level changelog imprecision that does not affect release metadata, runtime behavior, or safety contracts. | advisory |
@@ -274,6 +274,45 @@ mismatch as **critical**, the mismatch MUST live in one of these categories:
    to pin against this surface. Non-breaking *additions* are not critical.
    The regression suites are `tests/test_contracts.py` and
    `tests/test_gateway_parity.py`.
+7. **Remote placement surfaces** — the five contracts that make an SSH-placed
+   task safe, when the documented rule and the code disagree, or when a diff
+   changes one of them without saying so. Named individually because "it looks
+   like an ordinary path bug" is exactly how each of them reads from inside a
+   diff, which is why none of them reached `critical` before:
+   - **placement sealing** — a task's workspace placement is decided ONCE at
+     admission and sealed (`workspace_ref.SEALED_WORKSPACE_REF_KEY`). A change
+     that lets placement be re-derived, defaulted, or read from a mutable field
+     mid-task is critical, because every guard below trusts it.
+   - **the export boundary** — the closed channel registry, the hashed policy
+     document, its application at the SOURCE before any blob exists, and Home's
+     revalidation of the returned manifest (`export_policy_contract`,
+     `remote_export_policy`). A new blob channel with no registry entry, a door
+     that skips the evaluator, or a filter moved to AFTER the fetch is critical:
+     filtering a blob that already crossed removes the evidence, not the bytes.
+   - **session binding** — the prepared token binding argv, cwd and paths
+     (`dispatch_prepare.bind_execution_args`) and the one-prepare-per-operation
+     bound. Widening what the target may substitute, or executing arguments the
+     guards did not authorize, is critical.
+   - **target confinement** — the target-side workspace containment plus the
+     policies that run THERE because Home cannot spell them for a remote path
+     (`workspace_native_paths.native_target`/`native_mutation_target`, which
+     resolve AND apply `export_policy_contract.refuse_excluded_target`). The
+     standing failure class is a guard added only to a Home handler BODY: the
+     native route REPLACES that handler, so such a guard is a guard only local
+     placements have. `tests/test_handler_policy_registry.py` is the registry that
+     must classify every such refusal, and its `escapes` ceiling is 0. The SECOND
+     class, found by review after all of the above passed: a policy applied to the
+     requested SPELLING and then a different file resolved and handed over. So ask
+     which IDENTITY a door judges, not only whether it judges — the alias axis in
+     `tests/test_route_refusal_parity.py`.
+   - **panic / lease** — the custody contract: task leases, the custodian tick,
+     and `panic` teardown of every remote process tree and forward. A path that
+     leaves a target holding a token, a process or an `ssh -L` with nothing on
+     Home owning it is critical.
+   The regression suites are `tests/test_placement_root_matrix.py`,
+   `tests/test_remote_export_policy.py`, `tests/test_registry_remote_dispatch.py`,
+   `tests/test_handler_policy_registry.py`, `tests/test_remote_panic_descriptors.py`
+   and the `ssh_*` fixtures under `tests/golden_traces/`.
 
 **All OTHER mismatches are advisory, not critical.** Including:
 
@@ -485,7 +524,7 @@ native launcher-seeded skills.
 
 ### Output contract
 
-Reviewers return a JSON array covering every item below (16 items total).
+Reviewers return a JSON array covering every item below (16 items total). The count and the names are the SSOT `_SKILL_REVIEW_ITEMS` in `ouroboros/skill_review.py`, and `tests/test_skill_review_checklist_ssot.py` fails if this table and that tuple disagree — the table used to claim 17 while the code required 16, so a reviewer was handed a contradiction in its own context and a 17th item (`execution_affinity`) describing a manifest field that was never implemented.
 Each entry carries `item`, `verdict` (`PASS`/`FAIL`), `severity`
 (`critical`/`advisory`), and `reason`. If one item has multiple distinct
 concrete problems, reviewers may return multiple `FAIL` entries for that
@@ -811,7 +850,7 @@ clean response.
 |---|------|---------------|--------------------|
 | 1 | intent_alignment | Does the staged change actually fulfill the intended transformation, not merely touch related files? | critical if the incompleteness is concrete and evidenced; otherwise advisory |
 | 2 | forgotten_touchpoints | Are there specific coupled files, tests, prompts, docs, configs, or sibling paths that must also change? Name the exact file(s) or symbol(s). | critical if a required touchpoint is concretely omitted; otherwise advisory |
-| 3 | cross_surface_consistency | If behavior changed, are adjacent surfaces still consistent: prompts, docs, comments, tool descriptions, automation, or user-visible workflow? Apply the shared `Critical surface whitelist` — only release metadata, tool schema, module map, behavioural documentation, or safety contracts count as critical; commentary and prose mismatches are advisory. | critical if the mismatch is in a whitelisted surface AND concrete; otherwise advisory |
+| 3 | cross_surface_consistency | If behavior changed, are adjacent surfaces still consistent: prompts, docs, comments, tool descriptions, automation, or user-visible workflow? Apply the shared `Critical surface whitelist` — only release metadata, tool schema, module map, behavioural documentation, safety contracts, frozen contracts, or a remote placement surface count as critical; commentary and prose mismatches are advisory. | critical if the mismatch is in a whitelisted surface AND concrete; otherwise advisory |
 | 4 | regression_surface | Does wider repository context show a concrete sibling path, migration edge, or parallel flow that remains broken or incomplete after this change? | critical if it leaves a concrete broken/incomplete path; otherwise advisory |
 | 5 | prompt_doc_sync | If prompts or docs are relevant to the changed behavior, are they still accurate and mutually consistent? Apply the shared `Critical surface whitelist` — behavioural documentation describing what a tool/command DOES at runtime is critical; wording/style of comments is advisory. | critical if a whitelisted prompt/doc artifact becomes false; otherwise advisory |
 | 6 | architecture_fit | Does the change solve the class of problem, or is it a narrow patch that leaves the underlying pattern unresolved? | advisory |

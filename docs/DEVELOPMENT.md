@@ -22,6 +22,12 @@ prevents.
   `PascalCase`, and constants use `UPPER_SNAKE_CASE`.
 - Name the observable responsibility and authority, not the implementation
   fashion. Prefer a clear function module over a class with no lifecycle.
+- The skill-review checklist in `docs/CHECKLISTS.md` and `_SKILL_REVIEW_ITEMS` in
+  `ouroboros/skill_review.py` are ONE list, pinned by
+  `tests/test_skill_review_checklist_ssot.py`. The table is loaded into the
+  reviewing model's context and the tuple is what the parser demands back, so a
+  disagreement (it said "17 items total" and numbered 17 rows while the code
+  required 16) puts a contradiction in the reviewer's own context.
 
 The repository has two deliberately different gateway directions:
 
@@ -59,6 +65,178 @@ transport-specific decisions do not flow back into core policy.
   installs remain safety-reviewed, and `sudo` is non-interactive (`sudo -n`).
 - Do not add a second scheduler for operator tooling or a generic CLI file
   manager. Use the task queue, attachments, logs, and artifact endpoints.
+
+### Remote placement and the target boundary
+
+One mind on Home, hands on the target: a Project can be placed on a remote Linux
+host and its tasks execute there through a restricted `ouroboros-execd`. These rules
+keep that a placement, not a second runtime.
+
+- An SSH workspace has NO native Home path. Read the sealed `workspace_ref`
+  (`ouroboros/workspace_ref.py`) — never derive placement, and never write an
+  ssh `ExecutorRef` independently of it. A Home `Path` request for a remote
+  placement must fail loudly; falling back to the system repo is the failure
+  mode this design exists to make impossible. Local and SSH placement must
+  expose the same model-facing tool names and schemas at equal
+  role/runtime/resource policy.
+- Do not add a placement branch ahead of the guard pipeline. Remote work goes
+  through prepare → authorize → execute: prepare gathers target-native facts and
+  a bound token, the FULL existing guard set runs once over the three
+  projections, and only then does the executor facade run the authorized token.
+  A guard must consume a facts object, not call `Path` itself. A second guard,
+  registry, policy engine, or artifact authority on the remote side is a
+  regression, not a feature.
+- Never narrow a gate's scope by pointing at a compensating control that does not
+  exist. The §3.3 isolation gate read module-scope imports only and justified it
+  in a comment — "a clean-subprocess invocation smoke covers those per native
+  operation" — which was never written; two real violations lived in that gap for
+  exactly as long as the sentence did. If a scope is genuinely out of reach, say
+  so plainly and name what is therefore unchecked. If a compensating control is
+  claimed, it must be a test that has been SEEN red.
+- A bundle/transport module must not name a Home authority in ANY scope, function
+  bodies included. When one needs a value from Home settings, move the value to
+  the module that needs it (if it needs nothing from Home) or move the consumer
+  out of the bundle — do not paper over it with a late import.
+- Home-only consumers of remote source must go through the shared snapshot
+  bridge, verify every declared blob, and clean the temporary mirror on success
+  AND failure. A policy-filtered snapshot may omit only disclosed
+  sensitive/protected paths and stays explicitly PARTIAL; it is usable only when
+  the independent integrity axis reports no read/walk/limit/stability failure.
+  Integrity failures stay fail-closed.
+- Export filtering happens SOURCE-SIDE, before a blob is constructed. Filtering
+  after a fetch has already leaked. Home re-validates every returned manifest
+  against the same policy before import, every blob kind that crosses the
+  boundary is enumerated in the closed registry, and an unknown kind fails
+  closed. Fetch externalized blobs only from envelope-declared size/SHA refs
+  under per-blob and aggregate caps.
+- A filter that does not DISCLOSE is not a safe filter — it is a false answer.
+  Every channel that drops a path by policy must return the omission in the same
+  disclosure block (`complete=false`, `policy_scope=policy_filtered`, exact
+  `excluded_count`, bounded `excluded[]`) AND name it in the owner/model-facing
+  text. This is not decoration: a silently filtered `search_code` returned "No
+  matches found … (2 files searched)" over a workspace whose `.env` held the very
+  string searched for, while the same query on a LOCAL workspace returned the
+  line — so the model concluded "the key is not here" from a premise the filter
+  invented. Never add a `continue`-on-policy without a recorded reason. Exception,
+  and only this one: exclusions of the infrastructure-directory class (`.git`,
+  `__pycache__`) are pruned identically by BOTH placements, so disclosing them
+  adds noise without describing any divergence.
+- Publish an imported artifact through the existing artifact authority
+  (`artifacts.publish_verified_task_artifact`), never by reimplementing a copy:
+  the destination is derived from `{task_id, import_id, canonical_name}`, so a
+  same-hash retry is idempotent and a changed-hash conflict is loud. The public
+  record carries NO remote source path — provenance belongs in the private
+  import receipt. An integrity or import failure must not ACK the remote side.
+- A remote mutation imported from a Home model requires the exact
+  source/HEAD/index precondition, a complete before→after change manifest,
+  `git apply --check`, an expected post-content fingerprint, and explicit
+  rollback evidence. Never copy Home model or provider credentials to execd.
+- Remote loopback browsing is the ONE documented exemption to the all-bytes
+  rule and uses only the broker-owned non-multiplexed local forward. Reject
+  inherited SSH forwards/commands/environment effects before spawn, bind only
+  Home and remote loopback, require process custody, retry a bounded
+  ephemeral-port race, and route-block the bridged page from unrelated
+  Home/private origins. Do not add SOCKS, generic private-network proxying, or a
+  browser-only model schema.
+  The exemption has exactly ONE consumer seam, `tools/browser.py::_resolve_placement_url`,
+  and placement is resolved there BEFORE the browser exists. Keep the three answers
+  distinct when touching it: a loopback URL is the TARGET's service and is forwarded
+  and rewritten; a private non-loopback address is refused as ambiguous (Home's LAN
+  and the target's LAN are different networks and the URL names neither, so resolving
+  it against Home is the wrong-host read one hop out); a public host and every URL on
+  a local placement are untouched. The origin block is a per-request Playwright route,
+  not a check at `goto` time — a redirect, XHR, websocket upgrade or click must
+  re-evaluate it. The forward is owned by the TASK, so `cleanup_browser` must NOT drop
+  the forward map: it also runs mid-task on a thread switch or engine change, and
+  clearing it leaks one `ssh -L` child per browser rebuild.
+- **`file://` across the placement boundary is DEFERRED.** There is no
+  `remote_file_bridge` module and no filtered `file://` channel; do not document one
+  as existing. A `file://` URL reads HOME's filesystem, which is correct for the roots
+  that stay Home-native on every placement. A path that exists only on the target gets
+  a typed refusal naming the deferral — never a bare "file not found", which would
+  send the owner hunting for a file that is on their server.
+- Connection administration stays owner-only and thin: the same authenticated
+  gateway backs Settings and the CLI. `test` is a read-only transport/platform
+  probe and must never initialize or change the continuity pin; only the first
+  successful `bootstrap` may pin it. Selectability needs TWO pieces of evidence
+  and they are split by what the fact is ABOUT, not by convenience: bootstrap
+  COMPATIBILITY ("a compatible executor is installed on that host") is owner
+  state, recorded durably by `connection_store.record_bootstrap` and cleared only
+  by `retrust`/`retire`, because it does not stop being true when Home restarts;
+  health FRESHNESS ("the target answered in the last few minutes") is a claim
+  about THIS run over a monotonic clock and stays process-local in
+  `gateway/connections.py`. So after a Home restart a plain `test` restores
+  selectability, and `bootstrap` is needed again only when the executor itself
+  must be replaced. Do not describe the compatibility half as process-local: it
+  was, once, and the New Project picker came back permanently empty while the
+  dialog's own copy promised that Test would refresh it. The store contains no
+  SSH key, password, token, or raw option. "Owner-only"
+  describes authenticated administration and mutation authority, NOT secrecy
+  from arbitrary code already running as the same Home Unix user: the path
+  guards are defense in depth, and a real confidentiality boundary would need a
+  separate OS user/process boundary or a credential vault. Do not add a remote
+  task runner, terminal emulator, TUI, SSH password store, or per-tool SSH
+  command path.
+- Before sending a remote `CONTINUE`, Home must fsync one bounded reconciliation
+  intent under `state/remote_reconciliation/`, recording only operation/session
+  identity plus a closed import kind — never args, prepared tokens, blobs, SSH
+  settings, or credentials. The execd journal remains the sole execution truth;
+  Home asks it to reconcile after a restart and removes the intent only after a
+  verified import plus ACK, or a proved `not_started` result. Pending
+  `*.pending.json` records and retained terminal-evidence `*.json` records are
+  distinct: evidence retention must never prune an unacknowledged intent.
+- The dispatch golden traces (`tests/golden_traces/`, checked by
+  `tests/test_dispatch_golden_traces.py`) must cover every executor KIND the
+  pipeline can route to, not only `local`. §9 asks for byte-identity on local plus
+  docker mapped/unmapped, and for a while all 21 scenarios were `kind=local` —
+  `workspace_executor_local` IS the local branch, so the docker executor had no
+  coverage at all. `docker_exec_mapped_cwd` and `docker_exec_unmapped_root` close
+  that behind a STUB `docker` on PATH (`scenarios.docker_stub_env`): a fixture must
+  not depend on a daemon, a registry or a network, and the stub echoes only
+  `--workdir` and the container name because the real argv wraps the command in a
+  shell whose pidfile carries a fresh uuid4 per run. A stub is sufficient for what
+  a golden trace pins — the routing decision, the host→backend cwd projection, the
+  container/network fields, the recorded executor trace — and insufficient for
+  anything about the container itself; the projection's agreement with a REAL
+  `docker exec` is checked in the `integration` lane instead. When adding an
+  executor kind, add its scenarios in the same change.
+- `ssh` is the THIRD executor kind, and it went uncovered longest for the reason that
+  makes it matter most: it is the only one that REPLACES the built-in handler, so its
+  guard sequence is a different sequence — `_invoke_builtin_handler` never appears and
+  `execute_native_operation` does — and a fixture set that never takes the placement
+  fork cannot see the whole class of "a policy that stopped at the fork". The four
+  `ssh_*` scenarios pin the remote order and the remote result TEXT: the two read doors
+  with the D7 disclosure block the target emits on every call plus a Home-native root
+  that must NOT route, the two write doors under the bound export policy, a process with
+  a post-prepare shell refusal and the interpreter allowlist answering ahead of prepare,
+  and a restricted subagent whose secret read is refused BEFORE prepare while its
+  ordinary listing routes and comes back filtered AND disclosed. The wire is fake and the
+  target is not — the `tests/test_registry_remote_dispatch` harness runs the real
+  `workspace_native` kernel against a real temp worktree, and it is REUSED rather than
+  restated, because two copies of the wiring drift and the fixture would then pin the
+  copy. The remote-seam guards are recorded per SCENARIO (`ScenarioRun.remote_seam`), not
+  per call: `prepare_operation` and `bind_execution_args` run on a local dispatch too, so
+  an unconditional wrapper would have rewritten every existing fixture, and byte-identity
+  of the local and docker fixtures is the property this directory exists to hold.
+- `covers()` returning False means HOST fallback, not an error: a cwd outside every
+  executor mapping runs locally even under a docker-backed workspace. That is a
+  deliberate contract, it is pinned by `docker_exec_unmapped_root`, and inverting
+  it (into a refusal, or worse into running host paths inside the container) is a
+  behaviour change that must be argued, not slipped in.
+- Every registered built-in needs an explicit placement: a workspace affinity in
+  `WORKSPACE_TOOL_EXECUTION_AFFINITY` or a declaration in `HOME_ONLY_TOOL_NAMES`.
+  Doing neither fails `tests/test_workspace_capability_manifest.py` by name.
+  Exhaustiveness is checked against the REGISTRY on purpose — comparing the
+  affinity table to `_WORKSPACE_ALLOWED_TOOLS` proved only that two hand-written
+  constants agreed, while a tool in neither was classified Home-only by silence.
+- **Skills on remote placement are a DEFERRED phase and the manifest field is not
+  introduced.** There is no `scripts[].execution_affinity` and no
+  `tool_execution_affinity`: no loader reads them, nothing validates them, and
+  nothing blocks loading on a bad value. Do not document, review against, or write
+  code that assumes them. When the phase lands, the field arrives together with
+  loader validation, fail-closed behaviour and its own review item — a placement
+  the manifest asserts while the runtime ignores it is a false safety claim, which
+  is exactly what the docs promised before this correction.
 
 ### Cognitive quality
 
@@ -1389,6 +1567,275 @@ Before every commit, verify the following:
   a round only after actual start, write one terminal row per `job_id`, and
   compute legacy ordinals at read time without rewriting history.
 
+## Guard Proof Rule
+
+**A guard that forbids something must be shown REFUSING something.** Passing valid
+input proves nothing about a prohibition: a guard can be structurally unable to
+fire and look identical from the outside. This branch produced three, all found by
+hand and none by the suite — an elision gate behind `if False and ...`, an absent
+symlink-confinement case, and `build_execd_bundle`'s Home-module list, which held
+repo-relative spellings (`ouroboros/config.py`) and compared them against stage
+paths (`lib/ouroboros/config.py`), so it had never refused anything since it was
+written. Call the family a **vacuous guard**, and note what it costs: the artifact
+looks gated and is not.
+
+Rules:
+
+- **Every prohibition needs a negative case.** A test that feeds the guard a real
+  violation and asserts the refusal — by message, not merely by exception type, so
+  a refusal from a DIFFERENT guard cannot stand in for it. The positive case
+  (valid input still passes) is necessary too, and is not a substitute.
+- **Compare in the namespace the data actually exists in.** The packager's list was
+  written in repo-relative paths for a tree that only ever holds stage-relative
+  ones. Where a prohibition already has a source of truth, IMPORT it instead of
+  restating it (`FORBIDDEN_REMOTE_IMPORT_PREFIXES`), and where the data carries its
+  own declaration, judge against that declaration (the stage provenance's
+  `kernel_modules`). A restated list is a list that can drift.
+- **Prefer an allowlist closure to a denylist.** "Only these modules may be under
+  `lib/`" refuses the leak nobody predicted; "not these seven files" refuses only
+  what someone remembered.
+- **Say so mechanically, not in a list.** `tests/test_execd_packaging_guard_proofs.py`
+  is the worked example for the packaging line: it reads every `raise` out of the
+  three scripts' ASTs and demands that each message is either produced by a
+  constructed violation or carries a written reason it cannot be (real Linux runner,
+  live service). A guard that cannot fire never produces its message and fails
+  there; so does a guard added later with no case; and so does a reason that has
+  become false. Copy that shape when a surface's guards are worth this much — it
+  costs one module and needs no hand-kept inventory.
+- **An exemption list needs its own liveness check.** A waiver for a file that no
+  longer violates anything silently pardons the next one that does.
+  `tests/test_process_custody.py::test_the_custody_allowlist_holds_no_dead_exemptions`
+  is the pattern: subtract the live findings from the waiver set and fail on the
+  remainder. Two entries there had gone stale exactly this way.
+- **Ask which AXIS the rule set covers.** A gate hardened four times along one axis
+  can still be blind along another: `tests/test_platform_guard.py` grew four rounds
+  of new SPELLINGS for reaching a fixed list of forbidden identifiers, and never a
+  new KIND of platform dependency — so a `/proc` read, which spells no identifier,
+  passed every rule while `platform_layer` was reading that same file three lines
+  from its own constant. When a category is added, prove each one fires (that file's
+  `test_each_forbidden_category_actually_produces_a_finding`), or the next category
+  arrives dead. The second instance is `tests/test_remote_doc_claims.py`, hardened
+  four times along DOC → CODE and blind to CODE → DOC, so a map that OMITTED a real
+  module told no lie any rule could read; see the Document Truth Rule below. The
+  THIRD is the export-policy appliers, and it is the one that shipped a real leak:
+  every symlink test asked about CONFINEMENT (does a link out of the root get
+  refused) and none asked about POLICY (a link that stays inside, onto an excluded
+  file), so `read_file("safe.txt")` returned the `.env` bytes that `read_file(".env")`
+  refused, and one test PINNED the permissive half as correct. Both the axis and the
+  masking generalize: **ask what a guard judges, not only whether it judges.** A
+  policy applied to the requested SPELLING and a resolver that then hands over a
+  different file is one guard with two subjects; the honest subject is the IDENTITY
+  the bytes will come from (`export_policy_contract.judged_exclusion`, and the
+  alias table in `tests/test_route_refusal_parity.py`). The FOURTH instance is the FIX
+  for the third, and it earns the sharpest form of the clause: **two mechanics for one
+  question is a guarantee that the weaker one becomes the hole.** The alias fix gave the
+  WALK channels a recursive inode seed and left the single-source doors on a root-only
+  `scandir` probe — two answers to "which file is this" — and a paid reviewer found the
+  weaker one leaking in five places on a branch whose commit message said the class was
+  closed: a hardlink to `sub/.env` excluded from `search_code` and returned verbatim by
+  `read_file`, a hardlink to a nested protected artifact appended to and edited THROUGH,
+  and a declared-output door that called the spelling evaluator with no identity check at
+  all. The same round also produced the corollary about ARGUMENTS: the door was made
+  compulsory (`question` a required keyword) while the judging ladder stayed PUBLIC, so
+  eight call sites simply used the ladder — a mandatory door with an exported bypass is
+  not a door. Both halves are now structural: one `judged_exclusion` for every producer
+  of bytes, the ladder private, and an AST gate that recomputes the execd import closure
+  and fails if any module inside it names a second judging function
+  (`tests/test_export_policy_contract.py`). Four independent gates failing the same way
+  is the argument for asking the question routinely rather than after a paid review: name
+  the axis, then name what is off it — and when a fix leaves TWO answers to one question,
+  say which one every caller gets and prove the other is unreachable.
+  The FIFTH instance is the clause turned on the TESTS, and it is the one that explains why
+  the class survived two rounds. **Ask which axis a FIXTURE varies.** Every entry in
+  `tests/test_route_refusal_parity.py::_ALIAS_KINDS` nested the ALIAS and left the SECRET at
+  `root / <name>`, so the `nested_*` rows only ever proved that a deep alias to a ROOT secret
+  is caught — which the root-bounded probe managed anyway. The axis had two ends and the
+  table varied one, so a green table and an open hole were the same picture. Three sibling
+  gates in the same round could not fail at all: a completeness sweep whose candidate set was
+  FILTERED to the already-classified names (so its `missing` was empty by construction), a
+  syntactic mutation sweep that only entered its scan for an `ast.Attribute` callee (so a
+  builtin `open(path, "w")` was invisible and the branch written for it was dead code), and a
+  door list kept by hand with `if not path.exists(): continue`. The rule that catches all
+  four: **a guard must be shown failing on the case it was written for, and a fixture must
+  vary every end of the axis it names.** Deriving the door list from an authority instead of
+  restating it immediately found a sixth copy of the rule table nobody had listed.
+- **A file with zero behavioural coverage has zero proven guards.** Whether a
+  reject branch has ever executed is a measurable fact, not an opinion. With
+  `pytest-cov` installed (a local audit tool, not a runtime dependency), run the
+  default lane AND the `serial` lane under `--cov=ouroboros --cov=scripts
+  --cov=supervisor --cov=server --cov-branch --cov-append`, then cross the
+  `raise` line numbers from each file's AST against `coverage.CoverageData`. Both
+  lanes, or the answer is wrong: measuring only the parallel lane reported the
+  browser-forward and OpenSSH guards as never-fired when their proofs simply live
+  in the serial pass. That sweep is what found the three defects above; the whole
+  execd packaging line came back at 0 of 64 before it was fixed.
+
+## Refusal Action Rule
+
+**A refusal that ADVISES something must be shown that the advice WORKS.** The Guard
+Proof Rule above covers half a refusal — that it fires. This is the other half. A
+refusal whose proposed action cannot remove the block is worse than one with no action
+at all: the owner presses what they were told to press, it SUCCEEDS, and nothing
+changes, so the surface has taught them that its own advice is noise. Call the family a
+**dead-end refusal**. This branch shipped one to the owner and it was measured, not
+guessed: with an executor built against an older Home↔execd contract set, New Project
+said "run Bootstrap (or Test to refresh health)", `Test` returned `ok` with
+`health_fresh: true`, and the connection stayed unselectable — only Bootstrap writes the
+contract-set stamp the picker reads.
+
+Rules:
+
+- **Derive the action from the same structure as the block, never from the call site.**
+  `ouroboros/remote_refusal_actions.REFUSAL_ACTIONS` maps code → the one action that
+  removes it, and `RemoteWorkspaceError.__init__` reads it. That is why ~40 raise sites
+  gained a correct action with none of them edited, and why a new code cannot ship
+  without a decision about what cures it. A handler that writes `action="..."` as a
+  literal is choosing on behalf of every condition its `except` arm can catch —
+  `gateway/tasks` and `gateway/projects` both did, and both said `bootstrap_connection`
+  for an absent broker, a replaced host identity and a stale bundle alike.
+- **Name ONE action, not the union of every cure.** A message that lists everything
+  that might help has said nothing about what does, and the owner will pick the cheapest
+  item. Two actions that BOTH genuinely clear a block are fine (`wait_or_cancel_tasks`);
+  an action that cannot is not. Where an owner has already been misled, say what will
+  NOT work and why — the `remote_execd_outdated` hint names Test explicitly and says it
+  will report healthy and change nothing.
+- **Several blocks at once: name the one blocking NOW, in removal order.**
+  `connection_blocker` is an ordered ladder returning the first match; the rank it
+  reports is the position, so a surface choosing among several blocked rows can pick the
+  one nearest to ready without deciding anything itself.
+- **One vocabulary of action names, closed and checked.** Two spellings of one action
+  are indistinguishable from two different actions to the reader. There were two such
+  pairs here (`rebind_project`/`choose_active_connection`,
+  `retry_reconnect`/`reconnect_connection`), and an AST sweep over every `action=`
+  literal now fails on a third.
+- **Prove it by TAKING the action.** `tests/test_remote_refusal_action_proofs.py` is the
+  worked example: for each blocking state it brings a real store into that state, reads
+  the server's proposed action, looks THAT action up in a table of what performing it
+  does, performs it, and requires the same blocker to be gone. Keying the cure by the
+  PROPOSED action is the whole mechanism — a hint that advised Test for a stale executor
+  makes the test run a health probe and find the block still there. Assert the failure
+  message, not just the exception: the test prints `DEAD END: <state> proposed <action>,
+  it succeeded, and the same block is still there`.
+- **Cross-check against any independent authority that already exists.** The suite found
+  fourteen codes that proposed `retry` while `cli_connections._UNSERVABLE_CODES` mapped
+  them to exit 4, "retrying will not help" — and one (`broker_overloaded`) where the SET
+  was the wrong half of the contradiction. Two tables that describe one taxonomy should
+  be compared by a test, not by a reader.
+- **Every rung needs a reachable state.** A hint nobody can bring about is the vacuous
+  guard wearing a remedy: the first draft of the ladder had a `connection_connecting`
+  rung, and the proofs could not produce it (`_record_runtime_health` never records
+  `connecting`), so it was replaced with the state that is actually reachable.
+
+## Route Parity Rule
+
+**Where two routes execute the same operation, the second must REFUSE everything the
+first refuses — and a guard that fails must fail CLOSED.** The Guard Proof Rule above
+asks whether a guard fires; the Refusal Action Rule asks whether its advice works. This
+asks the question neither of them can: is the guard even THERE on the other route. Call
+the family a **one-sided guard**, and note that it is invisible to both rules above,
+because on the route that HAS it every test passes.
+
+It is the PR 79 failure class ("one policy × N doors") on a new axis — not two copies of
+a rule that drifted apart, but one rule that only ever existed on one side. Four
+instances, all confirmed by review and all the same sentence:
+
+- `write_file` with `mode="append"` followed a symlink in the final path component out of
+  the workspace on the target. The local route resolves the whole spelling and refuses.
+  Reproduced live: the file outside the workspace grew.
+- `start_service` SANITIZED (`re.sub`) a service name the local route REFUSES, so `a/b`
+  and `a_b` shared one log file and `service_logs` could return the other's output.
+- `native_relative_spelling` accepted NUL and control characters that `utils.safe_relpath`
+  has rejected locally since before there was a remote route.
+- the public argument-schema refusal ran AFTER `prepare_operation` on the native branch,
+  so a malformed call reserved a token on someone else's machine before Home refused.
+
+Rules:
+
+- **One door per intent, and the rule lives in the door.** The append escape was not a
+  missing check — it was a check whose PLACEMENT let one caller decide differently. The
+  parent-only confinement was correct for `_atomic_write` (where `os.replace` substitutes
+  the link rather than following it) and wrong as a rule, so the next open site reopened
+  the hole. The fix is `workspace_native_paths.native_mutation_target`: every native
+  mutation goes through it, and `tests/test_target_confinement_and_disclosure` FAILS when
+  a new mutation site does not. A per-mode test only ever covers the modes someone
+  thought of.
+- **A shared rule has ONE owner and both routes import it.** `SERVICE_NAME_PATTERN` lives
+  in `workspace_native_contract` and `tools/services` imports it; the parity test asserts
+  object IDENTITY, not that two regexes happen to agree. Two spellings of one rule is how
+  the sanitize/refuse split happened in the first place.
+- **Compare the routes in a TEST, not in a reader's head.** What made this a class is
+  that nobody was comparing them at all, so the comparison is the artifact:
+  `tests/test_route_refusal_parity.py` asks both resolvers the same refusable question and
+  requires the same verdict. Half the cases are ACCEPTANCES — a door that refused
+  everything would satisfy a refusal-only table, and the in-root-symlink case caught a
+  wrong first draft of the fix that would have been a new asymmetry pointing the other
+  way.
+- **Declare an asymmetry you are not closing.** One remains: an absolute spelling is
+  refused natively and silently rebased locally (`safe_relpath`'s `lstrip("/")`). It is
+  asserted AS an asymmetry, with the reason, so aligning them later is a decision rather
+  than a surprise.
+- **A guard that cannot answer must answer NO.** `except Exception: return False` where
+  `False` means "permitted" is a guard that opens exactly when it breaks — and a failing
+  live-task lookup and a busy queue are hardly independent events. Three answers, not
+  two: `gateway/connections._live_connection_tasks` returns `None` for "could not tell"
+  and `_connection_busy` treats it as busy; `gateway/projects._project_has_live_tasks` and
+  `gateway/settings._has_running_agent_tasks` now agree. Inject the failure at the SEAM
+  the function imports, so the real `except` arm is what runs and not a stub standing in
+  for it.
+- **Silently ignoring an owner's declaration is worse than refusing it.**
+  `metadata.workspace_ref` was stripped and `metadata.connection_id` was stored and then
+  ignored, so an owner could name a placement nothing honoured. Both are typed 400s now,
+  from ONE loop that checks the body and `metadata` together — the body was checked and
+  `metadata` was not, which is the same one-sided shape at the level of a request field.
+
+## Document Truth Rule
+
+**A document that names something must be checkable against the thing it names, and a
+map that claims to be complete must be checked in the direction of the CODE.** The three
+rules above are about guards that do not fire. This is about the other authority in the
+repository: a sentence. `prompts/SYSTEM.md` is resident context, so a stale claim there
+does not misinform a reader, it STEERS the agent — it once named two of the
+target-executing tools as having no remote path, and the model dutifully hand-rolled
+weaker substitutes for two tools whose remote routes were complete and gate-covered.
+Call the family a **document lie**, and note what makes it expensive: the
+prose reads more confidently than the code, and nothing was watching.
+
+`tests/test_remote_doc_claims.py` is the worked example, and it earned this rule by
+FAILING: it existed precisely to keep the documents honest, was hardened four times, and
+then let four lies through at once. So the first rule is the one the Guard Proof Rule
+already states, applied to itself.
+
+Rules:
+
+- **Ask which AXIS the checks cover, and expect the answer to be "doc → code".** That is
+  the easy direction, and every check written by instinct lands there. A map that OMITS a
+  real module makes no false statement — `tools/dispatch_policy.py` and
+  `state/remote_reconciliation/` were simply not there, and silence is unreadable to any
+  rule that reads what the text SAYS. The code → doc direction needs its own checks, and
+  its authority is the filesystem or the module, never the document.
+- **Judge a name by RESOLUTION, never by spelling.** A rule keyed to
+  `(remote|execd|workspace|connection|cli)_*\.py` can only ever judge names that were
+  already thought of; a plain-named module, a directory, a new subcommand and a bare
+  `module.symbol` all sailed past. Resolve the path, resolve the symbol, and ask the
+  argparse parser for the subcommand set instead of restating seven names — the same
+  "import the authority" clause the Guard Proof Rule makes for prohibitions.
+- **An inventory is checkable in both directions; say so and check both.** A module map,
+  a state layout, a field list, a tool list. Each has a code-side authority, and the
+  interesting failure is always the missing entry rather than the invented one.
+- **What cannot be mechanized must be written down as such, keyed so it cannot rot.** A
+  BEHAVIOURAL promise ("streams rather than buffering whole blobs") and a PROCESS promise
+  ("a Home restart requires Bootstrap again") are claims about what the code DOES; no
+  reading of the text settles them, and matching their phrasing would gate wording rather
+  than truth. `CLAIM_KINDS` in that module is the register: each kind maps either to the
+  check that judges it or to a written reason none can, it fails when a named check
+  disappears, and it fails when a check belongs to no declared kind — so the next rule
+  added has to say which axis it closes. Both of the two lies above were caught by a human
+  comparing a paragraph to a docstring, and pretending otherwise is how a gate stops being
+  believed.
+- **Do not describe such a gate as making the documents true.** It makes their
+  IDENTIFIERS and their INVENTORIES true. That is most of the mechanizable half, and
+  claiming more of it would itself be a document lie.
+
 ## Process Custody Rule
 
 Long-lived OS processes (anything `subprocess.Popen`-ed or `mp.Process`-ed
@@ -1417,9 +1864,53 @@ a dev instance reap a packaged instance's processes.
 `tests/test_process_custody.py` enforces the chokepoint with an explicit
 allowlist for bounded synchronous helpers.
 
+Remote processes are never written into Home's PID ledger: a remote PID or PGID
+belongs only to execd/custodian state, where it means something. What Home
+records and owns through the same required-custody rule are its LOCAL children —
+the OpenSSH transport, broker, and forward processes — registered under `session`
+scope so the orphan reaper covers abrupt server death. The current Home server
+generation owns every remote task and service lease. Task cancel and service
+stop preserve the connection; a full-app Panic stops lease renewal, sends
+priority kills, and closes local custody immediately without waiting for an
+acknowledgement. The independent remote custodian is the ONLY authority for the
+physically-partitioned lease ceiling, and that ceiling is a failure-detection
+bound — never a grace period a reachable kill may wait out.
+
 ## Platform Abstraction Rule
 
 All platform-specific code **MUST** go through `ouroboros/platform_layer.py`.
+
+`tests/test_platform_guard.py` enforces this by AST over `ouroboros/`,
+`supervisor/`, `scripts/` and `server.py` (`tests/` is excluded — probing platform
+behaviour is legitimate there — and `web/` has no Python). It rejects every form
+that spells a forbidden name LITERALLY, not just the obvious one: a forbidden
+import in any scope (`fcntl`, `msvcrt`, `winreg`, `resource`, `select`,
+`selectors`, `termios`, `pty`), the same import reached via
+`importlib.import_module("fcntl")` or `__import__("pty")`, a forbidden `os.*` /
+`signal.*` attribute under its own name OR an alias (`import os as o; o.kill`),
+the same attribute reached by literal name (`getattr(os, "set_blocking")`,
+`os.__dict__["killpg"]`), and a platform-conditional subprocess kwarg passed
+either as a literal keyword (`start_new_session=...`) or splatted from a literal
+dict (`**{"start_new_session": True}`). Splatting a helper CALL
+(`**subprocess_new_group_kwargs()`) is the prescribed pattern and stays legal
+because no literal key appears in the source.
+
+It also rejects two categories that are not identifiers at all, which is how the
+boot-id read escaped it: a platform-EXCLUSIVE filesystem path handed to a
+filesystem entry point (`/proc`, `/sys`, `/dev`, the Windows `\\.\` and `\\?\`
+namespaces, the DOS device names — in literal, f-string or leading-concatenation
+form), and a platform-exclusive clock (`time.clock_gettime`, `CLOCK_BOOTTIME`,
+`CLOCK_UPTIME`). A kernel pseudo-filesystem is an API reached by PATH, so a rule
+set made only of forbidden NAMES is structurally unable to see it. Shell text
+built for a remote POSIX target is not a host reach and stays legal — the
+entry-point condition is what makes that distinction, and both directions are
+pinned.
+
+Its boundary is stated in the test's own docstring and must stay stated: `**kw`
+where `kw` is a variable, and an attribute name assembled at runtime, cannot be
+resolved without executing the program and are NOT detected. Do not describe the
+gate as complete coverage, and do not silence a new finding by weakening a rule —
+route the code through `platform_layer` or add an allowlist entry with a reason.
 
 ### Shared State-File Helpers
 
@@ -1435,7 +1926,12 @@ them over a bare `Path.write_text` for any full-file overwrite. Appends are
 intentionally NOT atomic (they extend in place). Lockfile acquisition should go through
 `platform_layer.acquire_exclusive_file_lock` /
 `release_exclusive_file_lock` rather than reimplementing `O_CREAT|O_EXCL`
-loops in feature modules.
+loops in feature modules. Owner-state files that must not be world-readable pass
+`mode=0o600` (`atomic_write_json` / `write_text_atomic`, and
+`acquire_exclusive_file_lock` for the lock beside them); callers that need
+rename durability additionally pass `fsync=True, fsync_directory=True`. Those
+are narrow parameters on the SHARED helpers precisely so an owner-state module
+never grows its own atomic-write sequence.
 
 Narrow exceptions are allowed only when the file's contract is not JSON-object
 state or intentionally has extra durability semantics: `supervisor/state.py`
@@ -1451,6 +1947,7 @@ settings state.
 - Windows-only modules: `msvcrt`, `winreg`, `ctypes.windll`
 - `subprocess` with platform-conditional flags: `start_new_session`, `creationflags`
 - Hardcoded path separators (`/` or `\\`) in filesystem logic (use `pathlib` instead)
+- A path into `/proc`, `/sys`, `/dev`, or a Windows device namespace; a platform-exclusive `time.CLOCK_*` constant
 
 ### Rules
 
@@ -1465,13 +1962,19 @@ settings state.
   - Top-level imports of platform-specific modules (`fcntl`, `msvcrt`, `winreg`, `resource`)
   - Direct `os.kill`, `os.killpg`, `os.setsid`, `os.getpgid` attribute access
   - Direct `signal.SIGKILL`, `signal.SIGTERM` attribute access
-  
-  Not scanned by the AST guard: `launcher.py` (release-reviewed outer launcher,
-  intentionally excluded) and subprocess flag patterns (`creationflags`,
-  `start_new_session`). For subprocess isolation, use
-  `subprocess_new_group_kwargs()` and `subprocess_hidden_kwargs()` from
-  `platform_layer.py` — enforced by code review and the `cross_platform`
-  checklist item.
+  - Function-LOCAL imports of those modules, and the aliases `termios` / `pty` /
+    module-level `select` (a `select.select`/`select.poll` on a non-socket fd is
+    Unix-only)
+  - `os.set_blocking`
+  - Literal subprocess platform flag keywords (`creationflags`,
+    `start_new_session`) — callers must splat `subprocess_new_group_kwargs()` /
+    `subprocess_hidden_kwargs()` from `platform_layer.py` instead
+
+  `launcher.py` remains intentionally excluded as the immutable outer shell.
+  The guard was extended to the evasions above after three consecutive review
+  rounds found platform-specific calls that the earlier narrower scan could not
+  see; the `cross_platform` checklist item is now defense in depth rather than
+  the only line of defense.
 - **Pre-commit review**: checklist item `cross_platform` (#15) catches violations during code review.
 - **CI matrix**: tests run on Ubuntu, Windows, and macOS to catch runtime failures.
 
@@ -1615,9 +2118,61 @@ Default local pytest excludes costly or environment-dependent lanes:
 `integration`, `browser`, `ui_browser`, `ui_browser_docker`,
 `portable_detail`, and `skill_smoke`. CI opts into them explicitly:
 
+Lane membership is ENFORCED by discovery, not by memory:
+`tests/test_serial_lane_contract.py` scans every test for real subprocesses, real
+sockets, `threading.Thread` and load-bearing `time.sleep` calls, and requires each
+candidate to be classified — in the serial lane, in another lane, or in
+`PARALLEL_SAFE_CONCURRENCY_TESTS` with the reason it is safe there. A real
+subprocess or socket has NO exemption (those share resources across processes, so an
+xdist sibling can take one or be mistaken for the test's own child); threads and
+timing may stay parallel, but only on the record, and the exemption set is checked
+for exact equality so a stale entry fails too. Two suites had escaped the hand-
+maintained list this way — `test_admission_invariants.py` (two threads racing queue
+admission plus real `git` per fixture) and the `test_execd_state.py` custodian pair
+(`assert thread.is_alive()` after a sleep) — and both ran in the `-n auto` pass where
+a loaded worker can invalidate the exact timing they assert. The scan reads source, so
+a subprocess spawned from inside a string of Python that a tool executes is invisible
+to it; the exemption list is where that judgement is recorded.
+
+**Where that gate stops, stated so nobody mistakes it for total coverage.** The
+detector looks for `subprocess.Popen` and the three `socket` constructors. The
+`subprocess.run` FAMILY — `run`, `call`, `check_output`, `check_call`, and
+`os.system` — is **not** detected: a test that shells out through them produces no
+signal and is never asked to classify itself, so a planted
+`subprocess.run([sys.executable, …])` passes the gate even though it forks a real
+child. This is a deliberate, named limitation, not an oversight. The reason is
+arithmetic: nearly every such call site in `tests/` is a short-lived hermetic helper
+in a `tmp_path` (`git init`, `git commit`, one `grep`, the clean-subprocess import
+smoke) that finishes in milliseconds, shares nothing across processes and asserts
+nothing about the clock — and adding the family to the detector would move ~114 tests
+across 33 files, almost all of them predating the current work, out of the `-n auto`
+pass into the serial one, lengthening CI for the whole project to reclassify code that
+was never the problem. What the lane split actually guards against is a long-lived
+child, a bound port, and an assertion that depends on wall-clock time; `Popen` and
+`socket` are the shapes those take.
+
+The consequence for contributors: **if your test shells out to something
+long-running, the gate will not tell you — classify it yourself.** The RWS v2 suites
+that genuinely do were classified by hand:
+`test_remote_broker_lifecycle.py`, `test_remote_browser_forward.py`,
+`test_remote_panic_descriptors.py`, `test_remote_task_session_wiring.py` and
+`test_admission_invariants.py` are whole-file entries in
+`tests/conftest.py::_SERIAL_TEST_FILES`; `test_execd_spool.py`,
+`test_execd_state.py`, `test_remote_workspace_ssh.py`,
+`test_docker_executor_real_container.py` and `test_dispatch_prepare.py` carry
+per-test `serial` markers. `tests/test_serial_lane_contract.py` pins both halves of
+this note — that the boundary is still admitted in its own docstring, that the named
+blind spot is still blind, and that each of those suites still carries its
+classification — so the admission cannot rot into a false claim of coverage.
+
 - `integration` runs real provider checks, including Cloud.ru when
   `CLOUDRU_FOUNDATION_MODELS_API_KEY` is configured and GigaChat when
-  `GIGACHAT_CREDENTIALS` is configured.
+  `GIGACHAT_CREDENTIALS` is configured. It also holds
+  `tests/test_docker_executor_real_container.py`, the one place a REAL container
+  checks that the docker executor's host→backend cwd projection is the spelling
+  `docker exec` actually honours (the golden traces prove only that the stub
+  agreed with itself). It skips — never pulls — when the daemon or the image is
+  absent, because a test that hangs on a registry is worse than a skipped one.
 - `browser` launches real Playwright Chromium/WebKit for agent browser tools.
 - `ui_browser` launches the host-side web UI under Playwright.
 - `ui_browser_docker` talks to an `ouroboros-web:test` container and must
@@ -1660,6 +2215,130 @@ When adding a new opt-in lane, register the marker in `pyproject.toml`, add
 a collect-only zero-test guard in CI, and keep the default local addopts
 token-safe and Docker-safe.
 
+### Remote executor lanes (Docker/OpenSSH + execd bundle)
+
+The remote SSH executor has two build/test lanes. Both are deliberately separate
+CI jobs rather than markers folded into the ordinary suite: a missing Docker
+daemon must not silently skip a release-critical path.
+
+**Docker/OpenSSH contract lane.** `tests/test_remote_workspace_ssh.py` drives a
+real OpenSSH server in a container against a real assembled executor. It is
+opt-in by environment variable and `serial` (real processes, real ports):
+
+```bash
+OUROBOROS_RUN_REMOTE_SSH_TESTS=1 python -m pytest \
+  tests/test_remote_workspace_ssh.py -m serial -q \
+  --timeout=300 --timeout-method=thread
+```
+
+Without `OUROBOROS_RUN_REMOTE_SSH_TESTS=1` the lane skips cleanly, so a
+developer without Docker is not blocked. **Never print raw lane output into CI
+logs or an uploaded artifact:** run it through Ouroboros's own redactor
+(`observability.redact_projection`) first and write the result `0o600`. SSH
+diagnostics carry host names, paths, and occasionally credential-shaped
+material, and a CI log is a public artifact. Every test in this lane that spawns
+a process, binds a port, or drives Docker belongs under the `serial` contract
+(`@pytest.mark.serial` or `tests/conftest.py::_SERIAL_TEST_FILES`); hermetic
+protocol tests stay in the fast parallel pass. Classify it yourself — the lane
+contract's detector does not see the `subprocess.run` family (see "Where that gate
+stops" above).
+
+**execd bundle.** The remote executor ships as a standalone, dependency-locked
+stage per architecture — the target needs no Python, no `sudo`, no systemd, no
+listening port, and no outbound internet. Assemble a stage exclusively from the
+checked-in SHA-256 lock, then build the dual-architecture bundle:
+
+```bash
+python -m scripts.assemble_execd_stage --repo-root . \
+  --architecture x86_64 --output build/execd-stage-x86_64
+python -m scripts.assemble_execd_stage --repo-root . \
+  --architecture aarch64 --output build/execd-stage-aarch64
+python -m scripts.build_execd_bundle \
+  --version "$(tr -d '[:space:]' < VERSION)" \
+  --x86-stage build/execd-stage-x86_64 \
+  --aarch64-stage build/execd-stage-aarch64 \
+  --dependency-lock scripts/execd_dependency_lock.json \
+  --output-dir build/execd-assets
+```
+
+Rules the CI jobs enforce, and which a local build should respect:
+
+- **Deterministic.** Build twice into different output directories and
+  `diff -qr` them; a bundle that is not byte-reproducible is not shippable.
+- **glibc floor, verified at the floor.** Supported targets are GNU/glibc Linux
+  `x86_64` and `aarch64` at glibc 2.17+. The stage smoke runs inside a
+  glibc-2.17 baseline image **with the container's system Python removed**, so a
+  hidden dependency on a target-side interpreter fails the build instead of a
+  customer's Bootstrap.
+- **`lib/` carries exactly the declared kernel, judged as modules.** The packager
+  maps every file under the stage's `lib/` to the module an interpreter would import
+  from it and refuses anything matching `FORBIDDEN_REMOTE_IMPORT_PREFIXES` or absent
+  from the stage provenance's `kernel_modules`. Both sides come from outside the
+  packager, which is why it runs as `python -m scripts.build_execd_bundle`; the
+  refusals are proven in `tests/test_execd_packaging_guard_proofs.py` (see the Guard
+  Proof Rule) rather than assumed.
+- **Manifest identity is checked, not assumed.** The generic and versioned
+  manifests must be byte-identical, and every asset row's archive name, loader
+  path, `glibc_min`, size, and SHA-256 must match the file on disk. The
+  `contract_set_version` the bundle declares must equal
+  `remote_contracts.CONTRACT_SET_VERSION`, and the check IMPORTS that constant
+  rather than restating it. It lives in `execd-bundle`, the job that provably
+  has the bundle: it was once attempted by pulling the artifact back into
+  `quick-test`, which has no `needs:` on the bundle and does not even see one on
+  a push, so the download failed before any of that job's four gates ran (see
+  "CI reachability" below).
+- **A release must not be packable without the daemon.** `assets/execd` is
+  gitignored, so `build` fetches the verified artifact and then REFUSES to
+  proceed unless the payload's manifest exists, was built for this `VERSION`,
+  declares this tree's contract set, and lists platform archives that are
+  present at the recorded size. `needs: execd-bundle` on its own proved nothing
+  — the job declared the dependency and never downloaded, and
+  `Ouroboros.spec`'s `('assets', 'assets')` happily packed an `assets/` tree
+  with no execd in it.
+- **musl is refused before upload, on a live host.** Bootstrap against an Alpine
+  container must fail with `remote_libc_unsupported` and must perform NO upload —
+  there is no fallback to remote Python, and "it probably refuses" is not
+  evidence.
+- **Executable modes survive transport.** Stages are packed with `tar` (not a CI
+  artifact upload, which drops the mode bits) and the restore step re-asserts
+  that the executor, `rg`, the bundled interpreter, and ffmpeg are still
+  executable.
+
+### CI reachability: a step that cannot run is not a gate
+
+A workflow step that is structurally unable to execute looks, from the outside,
+exactly like a step that passes — the vacuous-guard family from the Guard Proof
+Rule, in YAML. Two instances shipped together, and both cost real coverage:
+
+- `quick-test` downloaded `ouroboros-execd-linux` with no `needs:` on the job
+  that produces it. On a push to `ouroboros`, `execd-bundle` does not run at all;
+  on a pull request it runs but takes ~40 minutes, and `download-artifact` does
+  not wait. Either way the step failed FIRST, and it took the Pages
+  reproducibility check, the `ruff --select F` gate, both pytest lanes and the
+  transport import guard with it. `full-test` has neither the Pages check nor
+  ruff, so those two were executing NOWHERE.
+- Four `! grep -q "no tests collected"` checks in `marker-guards` were
+  unreachable in BOTH directions: an empty lane makes pytest exit 5 through
+  `pipefail` and the step dies before grep, and a non-empty lane never prints
+  that string under `-q`, so the negated grep was vacuously true.
+
+Rules:
+
+- **Every artifact download must be reachable on every trigger the downloading
+  job fires on.** `tests/test_build_scripts.py::test_ci_every_downloaded_artifact_is_reachable_on_every_trigger`
+  evaluates the job conditions and requires the producer to be both in the
+  downloader's `needs` closure and running on the same trigger. Its evaluator
+  REFUSES an `if:` expression it cannot fully parse, so a new construct fails
+  loudly instead of being read as "always runs".
+- **`needs:` is a declaration, not a consumption.** A job that depends on an
+  artifact and never downloads it is the same defect wearing the opposite mask;
+  that is why `build` both fetches the execd payload and refuses to package
+  without it.
+- **A shell assertion about tool output must be checked against the tool.** Both
+  branches of the dead greps were verifiable in one command. When a check pins a
+  restated fact — a canary filename, say — give it a liveness test
+  (`test_ci_marker_lane_canaries_really_carry_their_marker`).
+
 ### Parallel CI and the `serial` marker
 
 CI runs the full default suite **in parallel** — `pytest -m "not serial" -n auto --dist loadscope
@@ -1673,6 +2352,10 @@ that:
   `--max-worker-restart=0`) fails that worker's WHOLE co-located batch and shows up as spurious
   failures in unrelated files. Mark such a test `@pytest.mark.serial` (or add its file to
   `_SERIAL_TEST_FILES` in `tests/conftest.py`) so it runs in the serial pass instead.
+  `tests/test_serial_lane_contract.py` finds most candidates for you, but it is a
+  candidate finder with a documented blind spot: the `subprocess.run` family is not
+  detected. If your test shells out to something long-running, the gate stays green
+  and the decision is yours.
 - **Keep every other test parallel-safe** so it stays in the fast pass: use `tmp_path` (never a fixed
   path like `/tmp/foo.pid`); use `monkeypatch.setenv` / `monkeypatch.setattr` (never a bare
   `os.environ[...] = ...`, which leaks to other tests on the same worker); never assume execution

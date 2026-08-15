@@ -352,9 +352,40 @@ server.py (Starlette+uvicorn) ← HTTP + WebSocket on configurable host:port (de
       extension runner, claude readonly child) a ppid watchdog that
       group-suicides when the parent dies. Panic layers (`_active_subprocesses`,
       port sweeps, Windows Job Objects) are unchanged complements.
+      (RWS v2 §5.4) `record_process` returns `None` when the ledger append did
+      not durably succeed, instead of a success-shaped entry, and
+      `spawn_supervised(required_custody=True)` is the NARROW mode for an owner
+      whose child must be reapable: a false append and a raising append are
+      treated identically — kill the newborn process group and return no live
+      child. The long-lived OpenSSH transport child uses it, because a child the
+      reaper cannot see would survive panic, which the emergency-stop invariant
+      forbids. Every unrelated caller keeps its fail-soft behavior; this never
+      becomes the global default.
 
 # Build, CI & public metadata (not part of runtime)
 .github/workflows/ci.yml     ← Five-tier CI (quick / full / integration / skill smoke / build+release)
+                              (RWS v2 §4.5) plus the remote-executor lanes: `execd-stage` (both
+                              architectures, assembled ONLY from the checked-in SHA-256 lock, then
+                              smoked at the exact glibc 2.17 floor in a container with the system
+                              Python removed — proving the bundle needs no target Python);
+                              `execd-bundle` (deterministic build + a byte-for-byte reproducibility
+                              diff of a second build, release-manifest identity/size/SHA-256
+                              verification, and a live Alpine/musl host proven REFUSED before any
+                              upload); and `ssh-executor-smoke` (the real Docker/OpenSSH lane, kept
+                              separate from the ordinary serial suite so a missing Docker daemon
+                              cannot silently skip the release-critical path, with raw logs passed
+                              through Ouroboros's own redactor before they can reach CI output).
+                              The lane itself is `tests/test_remote_workspace_ssh.py`, whose docstring
+                              carries the NAMED CASE REGISTRY (RWS-101…RWS-110 plus the §3.4 panic
+                              ledger RWS-111…RWS-114). The donor numbered two cases RWS-108 and two
+                              RWS-107; ids are unique here because the id is the handle used in
+                              reports. Its skip is honest by construction: with
+                              `OUROBOROS_RUN_REMOTE_SSH_TESTS=1` set, a missing Docker daemon or ssh
+                              client FAILS rather than skipping — a green zero on a release-critical
+                              path is worse than a red one.
+                              `build` needs `execd-bundle` (a packaged app never ships an unverified
+                              payload) and `release` additionally needs `ssh-executor-smoke`;
+                              release assets are named explicitly rather than globbed.
 .github/workflows/claudexor-platform-gate.yml ← 3-OS delegated-execution gate: fixture lane (fake harness, offline, $0) + live lane on explicit API keys (subscription auth deliberately out of CI — verified by a live local run, D26)
 .github/workflows/dependency-graph.yml ← Pin-derived GitHub dependency snapshot for the bundled Claudexor runtime; runs only when the pin or workflow changes on `main` / `ouroboros`, or by manual dispatch
 .github/workflows/scorecard.yml ← OpenSSF Scorecard on `main` pushes and weekly; full action SHA pins, read-only defaults, OIDC result publication, and SARIF artifact/code-scanning upload
@@ -461,6 +492,20 @@ without creating ad-hoc browser contracts.
 
 `ouroboros.cli` is a first-class client of the same gateway, queue, scheduler, supervisor, and durable task-result owners as the web UI; it does not implement a second task engine. The parser is the command-surface SSOT: source/server startup and status; managed `run`; task list/show/watch/cancel; chat send/history; log tail/follow; Evolution start/stop/status/watch; scheduled-task list/add/remove; settings and owner runtime/context/auto-grant controls; skill lifecycle, marketplace, local-model, and MCP wrappers. Task-streaming commands reserve stdout for the final answer, patch, result object, or JSONL stream and send human progress to stderr; administrative commands may print their own summaries.
 
+`ouroboros connections …` (`ouroboros/cli_connections.py`, RWS v2) is the
+headless owner client for `/api/owner/connections`. It is the same thin-client
+rule under an owner-gated namespace: the password is prompted on the controlling
+terminal only, so it never reaches argv, stdin, or the environment; with no
+terminal the command refuses locally without issuing a request. The gateway
+remains the sole authority for the store, trust pinning, and lease checks — the
+CLI adds no logic of its own, only stable exit codes and a legible retrust
+confirmation.
+
+`ouroboros projects list/rebind` (`ouroboros/cli_projects.py`, RWS v2) is the same shape
+over `/api/projects/{id}/update`: it is the caller that lets an owner move a Project's
+placement between hosts, and it shares the connections client's exit-code table rather
+than restating it.
+
 The headless task transport is explicit. `POST /api/tasks` admits an ordinary managed root, `GET /api/tasks` returns a non-materializing list projection, `GET /api/tasks/<id>` reads the effective durable result, `GET /api/tasks/<id>/events` performs the archive-aware replay/live SSE flow described under Chat, and `GET /api/tasks/<id>/artifacts/<name>` serves only an artifact declared by that result. Artifact names are simple filenames and the resolved file must remain inside `data/task_results/artifacts/<task_id>/`; a stored arbitrary path is not a download capability. Cancellation and blocked-review continuation use their dedicated task endpoints rather than CLI-local state.
 
 External task admission cannot mint child authority. The CLI refuses any `delegation_role` other than `root`, and the gateway also rejects caller-supplied parent/root lineage, subagent labels, and internal task types; only the internal `schedule_subagent` path creates children. Reserved service metadata is written after caller metadata so it cannot be forged. Admission first reserves the task id and worker-pool slot, then persists the queue snapshot and scheduled result under one queue lock; failure rolls back only the token-owned row and returns a loud typed refusal instead of acknowledging work that is absent after restart. Attachments are copied into the effective task drive before enqueue and the task receives artifact-store references rather than authority over the original host paths.
@@ -502,6 +547,975 @@ The child drive is execution state, not the durable handoff. On completion, the 
 System self-modification, external workspace delivery, and `genesis` remain distinct. Reviewed system changes land through the commit gate. External workspace work leaves the selected target tree and returns its patch/manifest. An acting genesis child builds a durable standalone repository under the configured projects root and also receives `deliverable_manifest.json`: a bounded content listing of at most 10,000 files, with streamed hashes through 64 MiB and size-only disclosure above that threshold. Project-local dependencies are ordinary target work; global/system installation remains runtime-policy reviewed, and `sudo` is always non-interactive (`sudo -n`).
 
 Startup garbage collection uses the common retention policy and removes a headless child drive only when the canonical parent result is terminal, artifact finalization is terminal, the retention window has elapsed, and the recorded child path matches the expected task directory. Canonical task results, artifacts, durable genesis/project repositories, and explicit memory exports survive. This is why all information required after child-drive deletion must cross the canonical handoff before a task is presented as settled.
+
+### Remote SSH workspace placement
+
+One mind on Home, one worker abroad. Models, identity, durable memory, policy,
+review authority, scheduling, task state, provider/MCP credentials, and the
+UI/CLI never leave the machine running Ouroboros; a restricted
+`ouroboros-execd` performs native file, Git, and process operations inside the
+selected remote Git worktree. Local and SSH placement expose the SAME
+model-facing tool names and schemas at equal role/runtime/resource policy —
+placement changes the executor, not the agent's faculty set. SSH is a third
+executor kind, not a tool family, and there is no second registry, policy
+engine, planner, or artifact authority on the remote side.
+
+**Placement is one persisted authority.** `ouroboros/workspace_ref.py` holds the
+single serialized placement descriptor with a discriminated `local | ssh` union,
+sealed at admission and persisted in task metadata, queue snapshots, and the
+project registry. The executor-facing `ExecutorRef` is an IMMUTABLE PROJECTION
+derived from it — nothing writes an ssh executor ref independently, so the two
+cannot disagree. A local ref materializes to a real `pathlib.Path`; an SSH ref
+has NO Home path and raises if one is requested. `ToolContext.active_repo_dir()`
+keeps its Home-local contract and is legal only for local placement or a
+materialized snapshot; a remote path string is never handed to a `Path`
+consumer, and a stale or malformed ref is a typed error, never a silent fall
+back to the system repo.
+
+**Root-placement matrix.** Only `active_workspace` is SSH-native
+(`workspace_ref.SSH_NATIVE_ROOTS`). All EIGHT other roots stay Home-native on every
+placement (`workspace_ref.HOME_NATIVE_ROOTS`): `system_repo`, `runtime_data`,
+`task_drive`, `artifact_store`, `user_files`, `subagent_projects`, `deliverables`,
+`skill_payload` — so governance context, runtime state, scratch, deliverables, the
+read-only orchestrator roots and reviewed skill payloads keep exactly their current
+meaning. The two sets are the whole matrix and the code is the SSOT; enumerate all
+nine rows here or none, because a reader checks a routing decision against this
+paragraph and a missing row reads as an unanswered case. Docker is absent from the
+matrix on purpose: docker execution is an executor-derived projection of a LOCAL
+placement, so all its roots are Home paths the executor maps, and its existing
+mapped-cwd / unmapped-root behavior is preserved byte-identically.
+
+**The matrix decides the HOST, not only the path.** It is consulted at TWO seams and
+needs both to mean anything. The path accessors are the obvious one:
+`resource_root_path` / `resolve_resource_path` / `resolve_shell_cwd` refuse
+`active_workspace` typed under an ssh placement while continuing to serve every
+Home-native root. The other is DISPATCH ROUTING — which host runs the operation at all
+— and without it the matrix had no force where it mattered most. Routing consulted only
+the per-TOOL table, and per tool is structurally unable to answer the question:
+`read_file` is the same tool whether it reads the target's worktree or Home's artifact
+store, and only its `root` argument says which. So both went to the target; the target
+does not model `root` at all, resolved the path in its own workspace, and even labelled
+the answer `active_workspace:`. A remote task asking for its own artifact was handed a
+same-named file from the remote project — a silent wrong-file read, worse than a refusal
+because nothing in the result says so, and invisible to tests because each half was
+individually correct.
+
+An operation therefore leaves Home only when BOTH halves hold: the routing table names a
+native counterpart for the tool (`tool_capabilities.REMOTE_NATIVE_TOOL_OPERATION`) AND
+this CALL's root is target-native (`workspace_ref.root_is_target_native`). The per-call
+root comes from `tool_capabilities.dispatch_resource_root`, which reads the tool's root
+argument as declared in `ROOT_LABELLED_TOOL_ARG`; a tool absent from that map carries no
+root label as a positive statement rather than a gap — a process cwd, the workspace's own
+git, a workspace-relative media path are about the active workspace by construction, so
+the placement alone decides them. A Home-native root on a remote task is the NORMAL path
+and not a degradation: `prepare_operation` returns before touching the wire, the ordinary
+Home handler answers, and the task's artifacts, its scratch and the owner's files keep
+living on Home exactly as they do under a local placement. Nothing degrades silently in
+the other direction either, because the accessor seams still refuse `active_workspace`
+typed. Both halves are pinned as a table — every root-labelled tool × every root — by a
+transport COUNTER, so "where did the operation run" is asserted rather than inferred from
+the answer's text.
+
+**Policy before placement: prepare → authorize → execute.** There is ONE guard
+pipeline, and it is placement-blind. For an SSH operation, a single bundled
+prepare RPC returns target-native facts (cwd existence/kind, git toplevel,
+interpreter candidates, protected-path stats, canonicalizations) plus an
+immutable prepared-call token binding target-canonical arguments, a hash, and an
+expiry; for local placement the same accessor interface is backed by direct
+filesystem calls. The full existing guard set then runs ONCE over three explicit
+immutable projections — `handler_args` (public schema shape), `guard_args`
+(guard projection), `execution_args` (token-bound target-canonical argv) — whose
+agreement is contract-tested. Only then does the authorized token reach the
+executor facade — `ouroboros/tools/dispatch_execute.py`, the one producer of the
+execute phase, which for a target-native operation REPLACES the local built-in
+handler instead of running beside it and returns the target's envelope text as the
+ordinary tool result. execd revalidates token binding and path confinement as
+execution INTEGRITY, never as a second policy authority. Which OPERATIONS are
+target-native is a declared table (`tool_capabilities.REMOTE_NATIVE_TOOL_OPERATION`)
+CONJOINED with the root matrix, not "everything on a remote task": a tool absent from
+the table stays Home-local under every placement, because sending the target an
+operation it never declared would turn a working Home faculty into a remote refusal —
+and a call whose root is Home-native stays Home-local for the second reason, because the
+target does not model `root` and would answer about its own workspace instead (see “the
+matrix decides the HOST” above). This is the structural answer
+to the failure class that sank the first attempt: an interception layer ahead of
+the guard pipeline forced every guard to be mirrored by hand, and the ones that
+were missed were the vulnerabilities.
+
+**Home and execd are ONE contract set, checked at admission.** Home is the running
+application; execd is a frozen bundle built from this same tree, shipped in
+`assets/execd` and installed on the target under `releases/<build>/<sha>` with a
+`current` symlink. They are independently updated artifacts sharing MORE THAN ONE
+contract — the wire framing and its closed control shapes, the native operation
+allowlist, the capability manifest, the export-policy document, the closed
+import-channel registry, the prepared-call shape and its hash, the attachment staging
+envelope, execd's durable journal/spool/custody schemas, the lease, the execution
+envelope, the reconciliation ledger. `ouroboros/remote_contracts.py` is the REGISTER
+of exactly those, and every one of them fails CLOSED on a member it does not
+recognize, which is correct and unchanged.
+
+What was missing is that a pair whose contracts disagree was allowed to open a session
+at all. Both halves already knew each other's identity at the handshake and nothing
+compared anything, so a Home that had added ONE rule field to the export document met
+a target built without it and the disagreement surfaced far from its cause: at PREPARE,
+inside an unrelated tool call, as `⚠️ REMOTE_EXECUTION_UNAVAILABLE: ValueError: export
+policy has unknown fields: ['marker_scoped_suffixes']`. Correct, and unactionable.
+
+`CONTRACT_SET_VERSION` is the SINGLE carrier of "may these two builds cooperate". It
+moves when any contract in the register changes shape — not per Home release (most
+release changes no shared contract, and a release-id comparison would call every connection
+stale after every upgrade) and not per contract (a session either understands the whole
+set or must not be opened). It is deliberately NOT a new wire field:
+`remote_protocol.PROTOCOL_MINOR` **is** this number, so it already travels in the
+session PREAMBLE and in both handshake frames of every build ever shipped — which is
+what lets Home refuse a target installed before the check existed, because such a
+target announces contract set 0 without being asked. A brand-new handshake field would
+have been invisible on exactly the builds the check exists to catch. The wire keeps its
+own looser question: `protocol_compatible` asks "can I PARSE this peer?" and tolerates
+an older minor (which is what makes reading the old preamble, and saying something
+exact about it, possible at all), while `contract_set_compatible` asks "may we WORK
+together?" and requires equality. Two predicates over one number; there is no second
+version to keep in step, and the test suite pins the coupling.
+
+FOUR seams ask, all of them before any work is authorized, and they live together in
+`ouroboros/remote_contract_admission.py` so one condition cannot be reported four ways:
+(1) BUNDLE SELECTION — `remote_ssh_bootstrap.select_and_install` refuses an asset whose
+manifest declares another contract set, before a byte reaches the target. This is the
+seam the live failure actually needed: the target install faithfully mirrors the asset,
+so "the server runs an outdated execd" was really "this Home build ships an execd older
+than its own contracts", and re-installing the same artifact cannot fix it — hence the
+one refusal whose action is `rebuild_execd_bundle` rather than `bootstrap_connection`.
+The number is carried from the STAGE's own provenance through the bundle manifest, so
+it describes the artifact and not the machine that packaged it. (2) The session
+PREAMBLE, the earliest byte that can answer, before Home writes a single frame — which
+is also what keeps an older target from failing mysteriously, since such a target
+refuses our handshake frame on its own protocol-version rule and dies, and we never
+send it. (3) The handshake RESPONSE, so a target cannot announce one contract set in
+its preamble and act on another. (4) execd's FIRST FRAME, covering the direction Home
+cannot: a target running a newer execd than the Home talking to it, where that Home may
+predate the check entirely. Seam (4) answers on STDERR rather than a control frame,
+because a handshake carries no `request_id` for the diagnostic answer to use and no
+control kind an older Home recognizes exists — and the transport attaches stderr to
+`details.stderr` of the session error, so the sentence arrives regardless of vintage.
+
+Refusals are typed, and say what to do. `remote_execd_outdated` / `remote_execd_incompatible`
+diagnose behind/ahead and both resolve by Bootstrap; `execd_bundle_contract_outdated` is
+the packaging fault above. Every unrecognized MEMBER of every registered contract raises
+`ContractDriftError` — a `ValueError` subclass, so boundaries that already guard a
+normalization with `except ValueError` are unchanged — carrying which contract, which
+members, what this build understands, and the owner's `action`. The wire's variant is
+additionally a `ProtocolError` so the transport still tears the session down by the same
+path as any other malformed frame. `execd_state.exception_diagnostic` is the ONE
+projection of an escaped exception into a wire diagnostic (it replaced three copies of
+`code=type(exc).__name__`, which is precisely how a contract disagreement came to wear
+a Python class name); `RemoteWorkspaceError` derives its `action` from `details`, the
+only slot that already reaches the browser and `--json`, so a refusal no longer tells
+the owner to `retry` the one thing retrying cannot fix.
+
+**A derived action is written into the PROJECTION, not left on the attribute.** Deriving
+it in the constructor is only half the move: `diagnostic()` used to serialize
+`dict(self.details)` unchanged, so a refusal that NAMED an action carried it and every one
+that derives its own from the code carried nothing — which is precisely the ~40 raise
+sites the derivation was written for. Both halves of the pair now write it into `details`
+in their `diagnostic()` (`workspace_diagnostics.RemoteWorkspaceError` on Home,
+`execd_state.ExecdError` on the target, which derived none at all and so had an action
+only because `gateway/connections` re-derived one AFTER arrival). `self.details` stays the
+raiser's own words — the durable journal and the private receipt record it verbatim — and
+the projection owns the derived fact. Every surface that carries a refusal now READS the
+one derived value rather than recomputing it: `remote_worker_proxy.error_dict` publishes it
+top-level, `reconnect_failure` consumes that instead of guessing
+`reconnect_connection if retryable else readmit_project` (which advised READMIT for a
+changed host identity — an action that succeeds and clears nothing), the recovery report's
+scope rows carry it, and `tools/dispatch_execute` + `tools/verify` print it to the model
+the way `tools/dispatch_prepare` always did. `tests/test_remote_refusal_action_proofs.py`
+asserts it by SERIALIZING every projection for every code in the register, because reading
+a constructor cannot answer whether its value crosses a wire.
+
+**Which action removes a refusal is a property of the CODE, and one register owns it.**
+`ouroboros/remote_refusal_actions.py` maps every refusal code this feature can emit to
+the single owner action that clears it, and `RemoteWorkspaceError.__init__` reads it when
+`details` names none — so the ~40 raise sites across the broker, the transport, the
+bootstrap and the worker proxy answer correctly without any of them being edited. Before
+it, they all reported `retry`, fourteen of them for codes `cli_connections._UNSERVABLE_CODES`
+already classified as exit 4, "retrying will not help": two authorities in one codebase
+saying opposite things about one condition, which is now a mechanical test rather than a
+matter of noticing. The same module owns the action VOCABULARY, because one condition had
+been called `rebind_project` at two gateway seams and `choose_active_connection` at a
+third, and one action had been called both `retry_reconnect` and `reconnect_connection` —
+and an owner cannot tell two names for one action apart from two different actions.
+
+It also owns `connection_blocker`: an ORDERED ladder (retired → host identity changed →
+never bootstrapped → executor outdated → degraded → health stale → not ready) that returns
+the blocker in front of a connection right now, the action that removes it, and the owner
+sentence naming that action — `{}` exactly when the connection is selectable, which makes
+"has no blocker" and `connections_ui.isSelectableRemoteConnection` one predicate instead of
+two that agree by habit. `api_connections_list` layers it after the evidence, and every
+transport action answer carries it too, so a Test that succeeds and leaves a block in place
+says so in the same response. Surfaces RENDER `blocker_hint`; none composes its own remedy
+sentence. That rule is what the New Project picker violated: it listed every conceivable
+cure ("run Bootstrap (or Test to refresh health)"), the owner pressed Test on an outdated
+executor, Test answered `ok` with `health_fresh: true`, and nothing changed —
+docs/DEVELOPMENT.md § Refusal Action Rule.
+
+The owner surfaces carry it durably. `connection_store.record_bootstrap` records
+`bootstrap_contract_set` beside `bootstrap_build`: the release id says WHICH artifact is
+installed, and only the contract set can be compared against anything, so
+`gateway/connections._runtime_evidence_fields` derives `execd_outdated` from it. That
+field rides BESIDE `bootstrap_compatible` rather than inside it, because "never
+bootstrapped" and "bootstrapped against an older contract set" are different sentences
+with the same next step. Connections shows the badge, the row reads `warn` rather than
+green, the connection leaves the New Project picker (a task must not be routed onto a
+host that cannot run it), `connections list` grows a sixth column — whose text is the
+server's own `blocked_by`/`blocker_action`, so it is blind to no other way a connection
+can be unselectable — and the CLI maps the three codes to exit 4. One Bootstrap clears
+all of it, and the picker's empty state says exactly that instead of listing alternatives.
+
+**One export/import boundary.** `ouroboros/remote_export_policy.py` computes a
+hash-bound export policy per operation and channel, projecting Home's existing
+sensitive/protected exclusion rules onto target spellings. execd applies that
+projection MECHANICALLY **before constructing any blob** — source-side
+filtering, because protected bytes that leave the host and are filtered after
+arrival have already leaked. Home re-validates every returned manifest against
+the same policy before import. `ouroboros/remote_transfer.py` is the single Home
+import/export executor (snapshots, declared outputs, artifact import, subagent
+patches, spool logs, media, attachments); one blob is BUFFERED WHOLE in memory and
+bounded rather than streamed — `remote_ssh.fetch_blob` accumulates a `bytearray` and
+returns `bytes(...)`, so the peak is briefly twice the blob — and the ceilings are what
+make that safe rather than the transfer shape: per-stream 16 MiB and declared outputs
+32 MiB aggregate in `remote_reconciliation`, and for the snapshot channel the TARGET's
+own production caps (`workspace_snapshot_native`: 25 000 files, 256 MiB), which
+`remote_transfer.MAX_ACCEPTED_SNAPSHOT_*` now DERIVE from rather than restate. This
+paragraph used to claim it "streams rather than buffering whole blobs", which was
+false, and the restated ceilings disagreed with the producer's in both directions —
+20 000 files against the target's 25 000, so a CLEAN snapshot of a 22k-file workspace
+was refused as "exceeds the Home file limit" with nothing about the target to fix, and
+512 MiB against the target's 256 MiB, a bound that could never bind. Real streaming
+would change the `HomeImporter` seam (it takes verified BYTES) and is a design decision,
+not a doc fix. It emits one typed PRIVATE import receipt per object, and STOPS at a
+verified Home temp file — canonical publication goes through the existing
+artifact authority via `artifacts.publish_verified_task_artifact`, whose
+destination is derived deterministically from `{task_id, import_id,
+canonical_name}` so a same-hash replay returns the existing record and a
+changed-hash conflict is loud. Every blob kind crossing the boundary is
+enumerated in a closed registry; an unknown kind fails closed, and a
+deterministic test asserts that every fetch site routes through the transfer
+service.
+
+That grep-proof is keyed per (file, enclosing function) with a justification on each
+row, not per file. The file-level shape it replaced exempted eleven whole modules —
+including `workspace_executor.py`, `remote_workspace.py` and `execd.py`, the three the
+remote work edits most — so a new bypass anywhere inside them was pre-approved and the
+gate's own claim was untrue of exactly the code most likely to break it; five of those
+eleven rows had additionally gone stale and exempted files with no blob site left, which
+a staleness test now forbids. The scan also reads the INDIRECT spellings of the same
+reach, in the shapes the platform gate already closed for `os.*`: `getattr(svc,
+"fetch_blob")`, `svc.__dict__["fetch_blob"]`, `vars(svc)[...]`, and a blob mapping
+splatted from a literal dict (`svc.ship(**{"blobs": …})`) — which carries no
+`keyword.arg` and was therefore invisible. A name assembled at runtime stays out of
+reach, and the test says so rather than implying coverage it does not have. A synthetic
+bypass planted in each formerly-exempt file is asserted to redden the gate.
+
+The registry's liveness claim is checked against TWO producer tables:
+`OPERATION_EXPORT_CHANNEL` (the operations the tool dispatch routes) and
+`HOME_CHANNEL_PRODUCERS` (the doors Home starts itself — task admission, a vision
+faculty, a patch integration — which bind their channel at the call site because there
+is no tool name to look up). A channel declared in the registry with a producer in
+neither is a contract with one end missing, which is exactly what task attachments, the
+edit bridge and subagent patches were before their Home halves landed; the two kinds
+that legitimately have no export door are the wire-internal ones (process output and the
+externalized envelope), which the transport names itself.
+
+**A bound policy that nothing applies is worse than no policy.** `read_file` and
+`list_files` were declared on the `workspace_query` channel beside `search_code`, their
+policy travelled with the prepare and its echo hash was verified at the prepare boundary
+— and neither door ever called the evaluator. `read_file` shipped whatever byte it was
+pointed at and `list_files` named every entry, while the sibling on the same channel
+both filtered and disclosed. The failure mode is not the leak alone but the
+indistinguishability: a reader could not tell "the policy ran and allowed this" from
+"the policy never ran", and the second looks exactly like the first. Both now apply it at
+the SOURCE and disclose. `read_file` has exactly one source, so an excluded path is a
+typed `REMOTE_EXPORT_POLICY_EXCLUDED` refusal naming the reason — an empty success would
+read as "the file was empty". `list_files` is a tree channel, so an excluded entry is
+disclosed work (D7): the array drops it, `LIST_POLICY_FILTERED` states the exact count
+and the reason per path, `completion` becomes `partial`, and the wire block
+(`export_disclosure_block`) is emitted on every call so its presence never encodes
+whether anything was filtered. One rule is deliberately NOT applied to either: the
+bulk-only excluded-dirs rule (the `named_source` question). It exists so a tree
+export does not ship `.git` or `__pycache__`; `read_file('.git/config')` is legal on a
+local placement, so refusing it remotely would manufacture a placement divergence out of
+a rule aimed at enumeration.
+
+The WRITE side of the same gap: `resource_policy` black-box protection was enforced only
+inside `tools/core._write_file`/`_edit_text`, which the native route replaces, so a
+protected artifact in a remote workspace could be overwritten. Home cannot spell that
+check for a target path — it has no Home path to ask `protected_artifacts` about — and
+the document already carries those paths projected to target spellings for exactly this
+purpose (`workspace_relative_protected_paths`), so the SOURCE applies it
+(the `mutation` question, typed `REMOTE_PROTECTED_ARTIFACT_BLOCKED`). Only the
+protected-artifact class participates: a task writing a `.env` into its own workspace is
+ordinary locally, and applying the credential-name rules to a write would be an export
+rule answering a question it was not asked. A batch is judged in full before its first
+byte, because a refusal halfway has already applied the rows before it.
+
+**Argv reconciliation** (§3.1 step 3 precondition). The target canonicalizes a command
+during prepare: it resolves an interpreter, and it autocorrects a shell-quoting mistake
+(`grep 'a\|b'` → `grep -E 'a|b'`, disclosed in `autocorrect_note`). Home was
+authorizing its own spelling while the target executed its own, and nothing detected it
+— the prepared token binds HOME's hash and the target revalidates against ITS args, so
+both sides agreed with themselves and no one compared the two.
+`dispatch_prepare.reconcile_target_argv` runs after python pre-resolution (so the
+interpreter fact is folded in) and before every guard, and splits on whether the target
+was HONEST about the rewrite, because those are two different facts. A DISCLOSED rewrite
+is adopted into the arguments there, so the FULL guard pipeline authorizes the command
+that will actually run and the disclosure travels to the model — stricter than the local
+placement, where the same autocorrect happens inside the handler after the guards have
+seen the original. An UNDISCLOSED difference is a typed refusal: a target that rewrites a
+command without saying so has no honest reason to, and "authorized one thing, ran
+another" is exactly the class the three-phase protocol exists to make impossible.
+
+**Path reconciliation, and the residue** (§3.1 step 3). The argv half of "authorized
+one thing, ran another" shipped; the PATH half did not, and the prepared token made that
+invisible. `ExecutionArgs` carried argv and cwd and no path field, so the execution hash
+of a `read_file` was a CONSTANT per tool — every file in the workspace produced the same
+digest — while `workspace_executor.execute_prepared` replays the TARGET's own
+`execution_args` by default. A target answering a prepare with a different `path` was
+therefore authorized for one file and ran on another with nothing anywhere disagreeing:
+Home authorized `write_file path="ok.txt"` and `PWNED.txt` was written,
+`edit_text path="hello.txt"` edited `victim.txt`, `read_file path="hello.txt"` returned
+`SECRET.txt`. `ExecutionArgs` now carries `resource_root` plus the call's target-canonical
+`paths`, so the token binds the file as tightly as it binds the command, and two paths of
+one tool have two hashes (pinned as a contract, because the whole class was reachable only
+while that was false).
+
+The accept/refuse split is NOT "did the target disclose it", which is what the argv side
+had to settle for. `workspace_native_contract.native_relative_spelling` is the pure
+canonicalization BOTH sides share, so Home derives the target's normalization itself: a
+target path equal to Home's own canonical spelling is a tidied spelling (`./x` → `x`) and
+is adopted into the authorized set before the guards run; anything else is a typed
+`REMOTE_PATH_SUBSTITUTED` refusal, and no disclosure a target could write buys it a
+different file. An absent path is not filled in either — that would promote a
+public-schema refusal into an executed operation — and a target substituting for an absent
+one is still refused. Finally the RESIDUE is closed rather than enumerated: the target may
+canonicalize its argv, its path and its cwd, and every other argument it hands back must be
+the one Home authorized (`REMOTE_ARGS_SUBSTITUTED`). Enumerating permitted keys one at a
+time is exactly how the path key came to be missing for six tools, so `edit_text`'s
+`old_str`/`new_str` and `write_file`'s `content` are covered by the closed rule instead of
+by a table entry each.
+
+**A guard inside a Home handler is a guard only local placements have**
+(`ouroboros/tools/dispatch_policy.py`). The native route REPLACES the built-in handler, so
+every policy that lived in a handler BODY silently stopped applying the moment a task was
+pointed at a remote workspace — the postmortem's "one policy × N doors" class, with the
+second door being a placement rather than a channel. The restricted-subagent secret/control
+denial was exactly this: `is_restricted_subagent_profile` is the fail-closed SSOT for "this
+child may not read owner secrets", `tools/core._repo_read`/`_repo_list` enforced it in their
+bodies, and on an ssh placement a restricted subagent read `.env`, `credentials.json` and
+`secrets/db.txt` out of the remote workspace and listed `secrets/` while the byte-identical
+local call was refused. The critical checklist item `subagent_isolation` was therefore false
+on one of the two placements, and no test in the repo had ever put a subagent profile and an
+ssh placement in the same room.
+
+The DECISION is lifted into the pipeline, ahead of the placement read, which is what makes
+it placement-blind by construction rather than by care: `subagent_secret_path_refusal` is
+pure over (profile, tool, root, workspace-relative spelling), runs before `prepare_operation`
+so a refused call never reaches the target at all, and returns the refusal texts the Home
+handlers already returned byte-for-byte. Its scope is `active_workspace`, the one
+target-native root; `system_repo` and the data roots are declared Home-only, since a native
+route cannot reach them and duplicating their guards would create a second authority for no
+gain. The handlers keep their checks as DEFENCE IN DEPTH. Two further halves complete the
+parity: a listing of an ordinary directory is filtered with the same predicate and the same
+exact hidden-count disclosure (`filter_native_listing`), and the operation's export policy is
+TIGHTENED for a restricted reader (`remote_export_policy.restricted_reader_rules`) so the
+target never reads those files during a search or query walk in the first place — expressed
+as rule TOKENS on the one hashed document, not as a second predicate on the source, so the
+export boundary keeps exactly one mechanical evaluator. Remote additionally DISCLOSES what it
+skipped, where local's walk filter is silent; the decision is identical and the disclosure is
+the stronger side.
+
+Two things that lift left behind, and the shape of both is worth keeping. First, the FS-ALIAS
+probe (`samefile` against a hardlink to `.env`) was declared "Home-only because only Home can
+perform it". That is true of the PIPELINE, which holds no filesystem at all, and it was then
+read as if it were true of the remote ROUTE — which is false: the target holds the workspace,
+so the probe is performable exactly where the bytes are. It is performed there,
+`export_policy_contract.judged_exclusion`, against the same document. It was first bounded
+to the workspace root's direct children as Home's own probe is, on the argument that an
+unbounded inode scan on every read would be a denial-of-service door inside a guard; that
+bound was itself the hole (see the identity section below), and the cost is now bounded by
+`st_nlink` and by proximity instead of by a boundary drawn around the root. Second, the tightening travels as
+tokens, and the denial's marker PATTERN (`db_password.conf`, `api_key.yaml`, `x.env`) is not
+enumerable as tokens — so a restricted subagent's remote `search_code` read the contents of a
+file its own `read_file` refused, on the one channel where the pipeline's spelling rule cannot
+help (a WALK names no path for it to judge). The pattern therefore became a rule FIELD,
+`marker_scoped_suffixes`: matched delimited (`[._-]` or an end of the name) and suffix-scoped,
+which is what makes it the same predicate `tools/core._is_subagent_secret_repo_path` applies
+on Home rather than a broader one that would exclude `token_bucket.py` on the target only. It
+is empty by default, so the default tree profile is unchanged. Named residue: the `.env.`
+INFIX form (`staging.env.old`) has no rule field of its shape — the document's fields are
+prefix, suffix, exact-name, component and marker shaped — and inventing one for a single
+spelling would be a rule no reader could predict; the two ANCHORED forms are covered
+(`.env*` by prefix, `*.env` by suffix).
+
+**Identity, not spelling — the same class one layer down, and the layer everything above
+missed.** Every applier described so far judged the path the CALLER ASKED FOR, and then a
+resolver handed over whatever that path pointed at. Those are two different files whenever an
+alias exists, and a model can build one for itself with a single `run_command` (`ln -s`).
+Reproduced live on the default profile: `read_file("safe.txt")` returned the bytes of `.env`
+— the file `read_file(".env")` had just refused — because the alias probe short-circuits on
+`st_nlink < 2`, which is sound for a hardlink and blind to a symlink, since a symlink never
+raises the link count. The write side was worse: it had no alias check of any shape, so
+`innocent.bin -> golden.bin` overwrote, appended to and edited a path Home had declared
+PROTECTED, and the operation reported success. And the declared-output door asked
+`component_exclusion_reason` — one rule GROUP out of a document carrying two — so
+`dist/id_rsa` exported (the credential-PREFIX rule lives in the ladder, not in that group)
+and a path listed in `protected_paths` exported beside it with no disclosure at all.
+
+A FOURTH instance found by asking the same question of the walk channels: `search_code`
+returned `SECRET_TOKEN=…` as a matched LINE from a `notes.txt` sharing `.env`'s inode,
+while disclosing `.env` as excluded two lines below. The snapshot walk got this right and
+was the only one that did, because it seeded excluded inodes INLINE — a rule that lives in
+one walk is a rule the next walk does not have.
+
+**And a FIFTH round, on the fix itself: TWO MECHANICS FOR ONE QUESTION.** Sharing that
+seeding across the walks left the single-source doors on the root-only `scandir` probe —
+two answers to "which file is this", one recursive and one bounded — and a paid reviewer
+found the weaker one leaking in five places at once, on a branch whose commit message said
+the class was closed. A hardlink `sub/ordinary.txt` → `sub/.env` was excluded from
+`search_code` and returned VERBATIM by `read_file`; so was a root-level name for a nested
+secret; a hardlink to a nested `sub/golden.bin` was appended to and edited THROUGH, with the
+protected artifact's sha256 changing under a success message; and `collect_declared_outputs`
+had no identity check of ANY kind (it called the spelling evaluator directly), so a hardlink
+into the delivery directory shipped the root `.env` and a root protected artifact with
+`excluded: []` — past a Home backstop that PASSED, correctly, because Home re-evaluates the
+clean STRING the source honestly declared and has no inode to stat. Two further defects rode
+along: `edit_text` asked `QUESTION_MUTATION` on its READ half, and that question deliberately
+drops the credential classes, so a refused `.env` came back as `File preview (first 2000
+chars)` with the whole file (likewise `id_rsa`, `credentials.json`, `.env.prod`); and
+`resolve(strict=True)` ran BEFORE the policy, so an absent excluded name answered
+`FileNotFoundError` where a present one answered `ExportPolicyExcludedError` — the refusal
+had become an existence oracle.
+
+There is now ONE mechanic. `export_policy_contract.judged_exclusion` answers spelling,
+resolved identity and RECURSIVE hardlink alias for every door and every producer of bytes,
+and the alias search is bounded by `st_nlink` and by PROXIMITY rather than by a boundary drawn
+around the root: a single-named file short-circuits on one `stat` (the ordinary case), the
+file's own directory and the workspace root are listed next (which answers every shape that
+occurs, including thousands of excluded names in one directory), and only a genuinely distant
+alias costs a traversal — memoized per operation in `AliasIndex`, so it happens at most once.
+That is also what retired the eager seed, whose cost was the reviewer's other finding: a
+`search_code(path="scope")` over one file paid a 24 000-file traversal (44 ms measured, now
+0.7 ms). Deferring it retires the ORDERING hazard too — the seed had to run before anything
+was read so an alias sorting earlier than its target could not be admitted first, and a
+per-file question has no order to get wrong. `list_files`' hardlink residue is closed with it,
+because the DoS argument that justified the residue no longer holds. `edit_text` now asks BOTH
+questions (its read half asks the READ question — reading in order to write is still reading,
+and the stated cost is that an excluded file can be written but not edited), and existence is
+checked AFTER the policy in both path doors.
+
+**A THIRD paid round, and it found the guards rather than the code.** Three models and a
+scope reviewer independently re-derived the root-only alias bound above, and then produced
+nineteen further items, every one verified on a pristine checkout. What the round is
+actually about is that the AXIS clause has to be asked of the TESTS too, because four of
+its findings were guards that could not fail:
+
+* `test_every_native_path_entry_is_in_the_alias_table` built its candidate set by FILTERING
+  the operation registry down to the names already classified, so `missing` was the empty
+  set for any registry and a newly registered path-bearing operation passed. It is
+  exhaustive over the whole registry now, with a third declared class for the operations
+  carrying no workspace source path, staleness checks on both reason registries, and a test
+  that shows it failing on an unclassified name;
+* `_mutation_call_sites` entered its scan only for an `ast.Attribute` callee, so a BUILTIN
+  `open(path, "w")` was invisible and the `elif verb == "open"` branch under it was dead
+  code for that form; its verb tables also omitted `Path.chmod` and `os.link` while this
+  file's own text says `_restore_rows` "chmods" a path;
+* `_EXPORT_DOOR_MODULES` was a hand-written list of nine with `if not path.exists():
+  continue`, so a renamed or new door was skipped in silence. The target-side half is
+  derived from `remote_native_import_closure` now, and deriving it immediately found a
+  SIXTH copy of the credential-name table in `code_intelligence`;
+* and the fixtures themselves had the same one-ended axis: every `_ALIAS_KINDS` entry nested
+  the ALIAS and left the SECRET at the root, so `nested_hardlink` only ever proved that a
+  deep alias to a ROOT secret is caught — which the root-bounded probe managed anyway. Both
+  positions vary now (`nested_secret_*`, `crossing_down_*`, `crossing_up_*`).
+
+The production findings from that round, and what each one was:
+
+* **The inventory read what the policy excludes and filtered the ROWS afterwards.**
+  `build_code_inventory` was handed `protected_paths` only, so every `id_rsa`,
+  `credentials.json` and `.netrc` in the tree was opened and parsed — symbols, imports and
+  routes extracted — before `visible` dropped it. It gets the policy's whole excluded set
+  now, derived from `policy_excluded_git_paths` because that is the same `git ls-files`
+  enumeration the builder walks.
+* **`vcs_status`/`vcs_diff` disclosed nothing.** They were pathspec-filtered and returned
+  `trace={"completion": "complete"}` with no policy block, so a filtered diff read as an
+  authoritative complete one and Home's check found no fields to re-evaluate — on a byte
+  channel, where a reviewer had read `+SECRET_TOKEN=hunter2` through a tracked hardlink
+  before the identity fix landed. Both emit the shared D7 block, a `VCS_POLICY_FILTERED`
+  note, and `partial`.
+* **`_list_files` and the query walk declared no `exported` paths at all**, so the backstop
+  fixed for reads and declared outputs was still arithmetic over an empty set for every
+  listing and every search. The query collector records what it ADMITTED, not only what it
+  dropped.
+* **`exported[]` shared the 200-entry exclusion bound** and `exported_disclosure_truncated`
+  was computed by the source and read by nobody — a policy-excluded path at index 200 of a
+  201-path export passed Home. The two lists have different jobs: the exclusion list is a
+  SAMPLE for a human, the exported list is EVIDENCE for a mechanical re-check, and a sample
+  of evidence is not evidence. `MAX_EXPORTED_PATHS` bounds it separately, above every
+  per-channel result cap, and Home refuses outright if the bound is reached.
+* **Home accepted a FALSE exclusion claim.** It checked that a reason code was in the closed
+  set, never that the policy produces that reason for that path, so a target could claim
+  `src/app.py` was excluded and the owner would read an omission that never happened — the
+  lie the owner cannot detect, because nothing is missing to notice. Every row is re-derived
+  now, and every row carries `judged` (declared once as `MANIFEST_EXCLUSION_ROW_FIELDS`) so
+  an HONEST alias row stays verifiable: `path` is the innocent `notes.txt` and `judged` is
+  the `.env` Home has no filesystem to resolve.
+* **Source and Home applied different PROJECTIONS of one document.** `read_file` asks
+  `QUESTION_NAMED_SOURCE`, which drops the bulk-only excluded-dirs rule so
+  `read_file('.git/config')` matches the local route — and Home re-evaluated under the
+  default question and raised a violation AFTER the bytes crossed. The question travels in
+  the block, is validated against the closed set, and an unknown one fails closed.
+* **`snapshot_declared_outputs` took no policy argument at all** and runs at PREPARE, so it
+  `read_bytes()` and hashed a path Home had listed in `protected_paths`. A digest is not the
+  file but it is a byte-derived fact about one, and it confirms a guess. Excluded outputs are
+  recorded as `policy_excluded` and never opened.
+* **The refusal was an ORACLE.** `_raise_policy_refusal` named the resolved target, so
+  `read_file` on a symlink into `.ssh` answered "probe_hit.txt (which resolves to
+  .ssh/real_key)" — a filename inside a directory `list_files` had just refused to show,
+  learned from an error message. The line is which fact the caller already holds:
+  `protected_paths` are IN the document the operation carries, so a MUTATION refusal still
+  names the artifact; the credential rules are NAME SHAPES, so an EXPORT refusal now says
+  only that the path is another name for something excluded, and the resolved spelling
+  reaches the owner through the disclosure block instead.
+* **TOCTOU: the authorization was bound to a NAME.** Both path doors return a path and the
+  caller opens it later, so a reviewer swapped `frame.png` for a symlink to `.env` inside the
+  applier call and the media channel exported `SECRET_TOKEN=hunter2` under `mime: image/png`.
+  `workspace_native_paths.open_confined_source` is the third door: it judges the name, opens
+  `O_NOFOLLOW`, applies the policy to `os.fstat(fd)` and hands back the DESCRIPTOR, so the
+  identity judged is the identity read. Used by the two byte-returning single-source channels
+  (`read_file`, the media/file bridge). RESIDUAL: the other two doors still return a path, so
+  every caller that opens one later keeps the window; converting the write side means
+  `openat`-style plumbing through every mutation site.
+* **The declared-output caps bounded the ANSWER, not the cost.** Members were read in full and
+  totalled afterwards, so refusing a 96 MiB output against a 32 MiB cap peaked at 100.7 MB of
+  Python heap; 33.6 MB after checking the declared size against a running reservation first.
+
+Two items are deliberately NOT closed, and each says why. `remote_export_policy.
+workspace_relative_protected_paths` `.strip()`s a protected path, so a filename with leading
+or trailing whitespace projects to a different spelling — but `protected_artifacts` strips the
+same way on Home, so the two placements agree and changing only the remote side would
+manufacture the cross-placement divergence this branch exists to prevent; it is an upstream
+property of the artifact register, not of the export boundary. And `Path.replace` is not in
+the mutation sweep's verb table because `str.replace` is the same attribute name, so sweeping
+it by name flags every string substitution in the kernel and the exemptions needed to quiet
+that would be a bigger hole than the verb.
+
+The gate that makes ONE mechanic structural rather than a habit is in
+`tests/test_export_policy_contract.py`: the ladder and its rule groups are PRIVATE (eight call
+sites had reached `exclusion_reason` directly and skipped the mandatory `question` — the door
+was made compulsory and the way around the door was left exported), and an AST sweep recomputes
+`tool_capabilities.remote_native_import_closure` and fails if any module INSIDE that closure
+names a judging function other than `judged_exclusion`/`refuse_excluded_target`. The
+spelling-only `unaliased_exclusion` may only be named by modules that cannot run on the target,
+so a future door reaching for the weaker question either fails that gate or moves itself out of
+the closure and fails the bundle-isolation gate instead. The behavioural half is
+`tests/test_export_alias_identity_matrix.py`: every door × every alias kind — direct, symlink
+root, symlink nested, symlink crossing in both directions, hardlink root, hardlink nested,
+hardlink crossing in both directions, hardlink into the delivery directory — plus the two rows
+that are not alias kinds (a missing excluded name must answer identically to a present one, and
+a symlink CYCLE must be a typed `PermissionError(EACCES)` rather than the bare `RuntimeError`
+`pathlib` raises, which escaped both path doors untyped and never reached the diagnostic map).
+
+The fix is structural in three places rather than patched in three places. (1) The two path
+doors in `workspace_native_paths` now APPLY the policy: `question` and `facts` are REQUIRED
+keywords, so a door cannot resolve a workspace path without stating which of the closed
+`EXPORT_QUESTIONS` its caller is asking, and the judgement happens where the resolution does.
+In-root symlinks stay traversable — that is correct, and matches the local route — but the
+TARGET is what gets judged, so the refusal names it (`innocent.bin (which resolves to
+src/golden.bin)`). (2) There is ONE applier, `refuse_excluded_target`, and it judges the
+requested spelling, the resolved identity and the hardlink alias in that order; the four it
+replaced were each free to ask a different subset of the document, which is how one of them
+came to ask one rule group. The sub-rules AND the ladder are private now, so selecting a
+subset is not expressible and neither is skipping the `question`; the applier is
+`judged_exclusion` plus a raise, so a door that discloses and a door that refuses cannot
+answer differently. (3) The disclosure block declares `exported[]` as well as `excluded[]`, and
+Home's leak check derives its field list from `MANIFEST_EXPORTED_PATH_FIELDS` instead of
+restating one — it had restated three fields, the disclosure block carried none of them, so
+`validate_returned_manifest` re-evaluated the policy over an EMPTY list and passed on hash
+and arithmetic alone. That was the Home-side backstop for exactly the source-side hole above,
+and it was vacuous by the Guard Proof Rule's own definition while sitting directly behind it.
+
+Why nothing caught it. Every symlink test on the branch asked about CONFINEMENT: does a link
+that points OUT of the root get refused. Not one asked what happens when the link stays
+inside and points at a file the policy excludes, and one test
+(`test_an_in_root_symlink_is_written_through_only_when_its_target_is_permitted`, then named
+for its permissive half alone) actively PINNED that half as correct with no policy dimension
+at all. The route-parity gate had the same blind spot for the same reason: its `_PATH_CASES`
+is a containment table. The axis clause of the Guard Proof Rule is exactly the question that
+would have found this, and it now names policy appliers as its third instance; the gate
+carries an alias table (symlink, hardlink, nested, per native entry, derived from the
+operation registry so a new entry cannot be silently absent), and the pinning test asserts a
+CONJUNCTION — an ordinary target is written through, a protected target is refused with its
+bytes intact.
+
+**The same class, over the other seven policies** (`tests/test_handler_policy_registry.py`).
+The audit that named this class registered every policy refusal reachable from a dual-route
+handler with one of three verdicts — `travels`, `home_only_vacuous`, `escapes` — and recorded
+nine escapes. The recount against the tree those verdicts actually describe found four already
+closed and two miscounted at the LEAF: `extract_video_frames`'s target kernel does say it
+applies no confinement and no policy, because its CALLER applies both (prepare's
+`_target(root, …, question=QUESTION_EXPORT, channel='media_frames')`, which is both at once), and the
+target's process prepare has always carried two of the four declared-scratch rules. The rest
+are closed structurally, each at the seam that makes it placement-blind rather than one
+instance at a time. `run_script`'s interpreter allowlist is now
+`dispatch_policy.script_interpreter_refusal`, judged on the RAW argument before prepare,
+because `workspace_payload_native.execute_inline_script` takes the interpreter verbatim into
+its argv and an arbitrary executable name therefore reached the target unchecked.
+`integrate_subagent_patch`'s `INTEGRATE_SELF_WORKTREE_UNDER_WORKSPACE` category guard is
+HOISTED above the placement fork it used to sit below — a remote task is always workspace
+mode, so its condition held there by construction and it was exactly the case being skipped,
+and the fork's own comment claimed only that everything ABOVE it was placement-independent.
+The two missing scratch rules (confinement to the COMMAND CWD rather than to the workspace
+root, and the directory refusal) are in the target's prepare, so all four run where the
+process will. And `bytes_equal` — a byte-read oracle that reports sizes and a hexdump around
+the first divergence — now runs both declared operands through the operation's own bound
+export document on the target, whose `protected_paths` are the resource policy's protected
+artifacts in target spellings; before that a remote comparison could hexdump a black-box
+reference binary the identical Home call refuses. The registry's `escapes` count is ZERO and
+its ceiling is 0, so a new one is a gate failure rather than a line item, and the six
+`TOOL_ACCESS_BLOCKED` vacuity verdicts are re-DERIVED from `tool_access._POLICY` on every run
+instead of resting on a sentence that admitted it was "a property of the CURRENT matrix".
+
+One member of the class was a divergence between two LOCAL calls, which is worth recording
+because it is the same defect without a placement in it: `tools/core._list_files`'s ROOM-LENS
+branch returned before reaching `_repo_list`, so a restricted subagent listing a folder-room
+saw the `.env` and `secrets/` the very next branch refuses. The lens changes which directory
+is listed and nothing else, and it now applies both halves of the denial.
+
+Adjacent, and NOT this class: `runtime_mode_policy.protected_paths_in` — the runtime-mode
+protected core/contract/release list — is enforced in the pipeline and disabled for every
+WORKSPACE task, local and remote alike. Its paths name Ouroboros' own repo files, and
+`system_repo` is Home-native under every placement, so a target workspace can never be the
+tree it describes. It reads like a remote gap and is not one; the authority that governs a
+workspace path is the task contract's `protected_artifacts`, and that one travels.
+
+**A prepared operation Home refuses is WITHDRAWN, not left to expire** (§3.1 step 3).
+The prepare/execute pair has a third member, `abort_prepared`, and the transport and
+execd sides of it were finished while nothing in production ever called it: every Home
+refusal that lands AFTER a successful prepare — the LLM safety supervisor, a
+shell/light-mode/protected-path guard, the argv reconciliation, a
+`PREPARED_CALL_BINDING_MISMATCH`, an argument-schema error — returned its text and left
+the target holding a reserved token and whatever blobs the prepare staged until the TTL
+ran out. The withdrawal is REGISTERED rather than spelled at each refusal site, because
+those sites are a dozen returns inside a ~300-line pipeline and a hand-kept list of them
+is a list that drifts: `dispatch_prepare.OutstandingPrepare` is a per-dispatch register
+that `prepare_operation` CLAIMS when it leaves state on the target and
+`execute_native_operation` RELEASES at hand-off, and `ToolRegistry.execute` withdraws
+whatever is still held in a `finally` — so refusal paths nobody enumerated, and
+exceptions, are covered by construction. Two properties are deliberate. The register is
+released BEFORE the transport call, so a second withdrawal is a no-op rather than a
+second abort. And a failed withdrawal is SWALLOWED entirely: the owner is being told why
+the operation was refused, a dead transport is exactly when both the operation and the
+cleanup fail together, and replacing the diagnosis with a cleanup error would hide the
+answer behind a token that expires on its own anyway. Past the hand-off Home does not
+withdraw at all — an execute that is refused or lost in flight belongs to the target and
+the reconciliation path, and a Home abort there would be a second authority over one
+operation's completion.
+
+**`verify_and_record` across the boundary** (§3.3). The tool is a HYBRID and is
+deliberately absent from the native routing table: routing it whole would run the check
+on the target and record nothing, so the proof would vanish with the session, and
+refusing it (as this build did) leaves a remote task unable to verify anything. So the
+two halves are wired separately. The check runs on the target through the same prepared
+path every other operation takes; `bytes_equal` is compared THERE (design-partner P2 —
+comparing on Home would transfer both files in full for a fact that is one boolean plus
+a bounded divergence window); the after-check existence probe of each declared path is
+the target's; and Home writes the durable receipt from those attested facts, stamped
+with the surface that produced them (`execution_surface: remote_target`) so a remote
+green and a Home green are never silently the same evidence. When no transport is
+available NOTHING is recorded — a receipt for a check that never ran is worse than no
+receipt.
+
+**The Home mirror.** Three Home faculties are unavoidably filesystem-shaped — the
+Claude Agent SDK edits files, plan review reads them, and the subagent-patch
+integration must know what a patch would DO before the target is touched. None can be
+taught a wire protocol and none may be handed a Home path pretending to be a target
+path, so `remote_transfer.materialize_remote_snapshot` writes a verified mirror: the
+manifest arrives first and authorizes every fetch, each blob is accepted only against
+its own declared size and hash, and both fingerprints are recomputed from the bytes
+that actually landed. A mirror that cannot prove it is the target is not evidence.
+`complete=False` is NOT an error here (D7): a policy exclusion is disclosed work, the
+mirror says exactly which paths are missing and why, and every consumer carries that
+sentence forward — one `.env` in a remote repo must not take plan review and the edit
+bridge down with it. An INTEGRITY failure (unstable observation, walk error, partial
+read) stays fail-closed, because nobody can say what the tree was. The lifecycle is an
+explicit context manager the CALLER owns; the donor cached it on `ctx` as
+`_remote_plan_review_snapshot`, which made "is there a snapshot" a property of a
+mutable attribute two unrelated modules read and one deleted.
+
+The boundary is symmetric. Most channels carry bytes INWARD, but task attachments
+carry them outward, and the policy applies at the same point in both directions:
+before the blob is constructed, on whichever side is the source. For an outgoing
+channel that side is Home, so `ouroboros/remote_task_files.py` filters the staged
+attachment set against the same document, and the movement itself goes through the
+service's one export door (`RemoteTransferService.export_operation`) rather than
+through a per-channel upload — the same reason every import goes through
+`complete_import`. That door also carries the channel's declared import kind
+(`remote_protocol.IMPORT_CHANNELS`) down to the durable intent, so a result whose
+meaning is not "an ordinary tool result" is believed according to its own contract:
+an attachment-staging reply is verified against the manifest Home authorized and
+publishes nothing, where routing it through the result importer would have published
+an envelope as a task artifact and called the staging verified because it parsed.
+
+**Browser loopback forwarding is the ONE named exemption** to the all-bytes
+rule. A task-owned loopback HTTP/WS forward is raw `ssh -L`, not a filtered
+byte channel, and it is documented as an exemption rather than quietly
+excluded. Rationale: the thing being forwarded is a live TCP session to a
+service the task itself started on the remote loopback interface — there is no
+file, artifact, or manifest to filter, and interposing a byte filter on an
+interactive socket would either break the protocol or amount to writing a
+second proxy. The compensating controls are all structural: owner gating,
+loopback-only endpoints on BOTH sides, rejection of inherited SSH
+forwards/commands/environment effects before spawn (`ssh -G` is read twice and
+compared, so an alias whose effective config changes mid-preparation is
+refused), `process_custody` registration of the forward child under `task`
+scope, route-blocking of the bridged page from unrelated Home/private origins,
+and synchronous teardown on Panic. No SOCKS and no general private-network
+proxying.
+
+**Where the exemption is CONSUMED.** `browse_page` resolves the URL against the
+placement before the browser exists (`tools/browser.py::_resolve_placement_url`),
+and the answer is about whose machine the URL names. A LOOPBACK URL on an ssh
+placement is the target's own service: the forward is opened through the broker
+facade (`open_browser_forward` — the worker never creates a transport, and the task
+must already be BOUND to its remote session), one forward per target port and
+reused, and the URL is rewritten onto the forward's local end with its path, query
+and fragment intact. `http://localhost:5173` therefore means port 5173 on the
+TARGET, which is what it means to the model that started the dev server there. Until
+this landed the same call opened HOME's loopback — the silent-wrong-host class the
+root matrix closed for file reads, and worse here, because a screenshot of the wrong
+service is indistinguishable from a screenshot of the right one. A PRIVATE
+non-loopback address is refused as ambiguous rather than resolved: Home's LAN and the
+target's LAN are different networks and the URL names neither, so guessing Home
+would be the same wrong-host read one hop out. A PUBLIC host is the same host from
+either machine and is untouched, as is every URL on a local placement — that path
+takes no new code at all.
+
+The ORIGIN BLOCK is a Playwright route registered for every profile and evaluated
+per request against the forwards open at that moment: the bridged page may talk to
+its OWN forward and to the public internet, and to nothing else loopback or private
+on either machine — not Home's control plane, not Home's other dev servers, neither
+LAN. Because routing re-runs per request, a redirect, an XHR, a websocket upgrade or
+a click cannot smuggle one in. The forward's lifetime is the TASK's, not the
+browser's: `finish_task`, both cancel paths, project-session close, connection
+retirement, Panic and lifespan teardown each drop it, while `cleanup_browser`
+deliberately does NOT — it also runs mid-task on a thread switch or an engine change,
+and clearing the map there would leak one `ssh -L` child per browser rebuild.
+
+**`file://` across the boundary is DEFERRED, not filtered.** There is no
+`remote_file_bridge`; a `file://` URL still reads HOME's filesystem, which is the
+right answer for the roots that stay Home-native on every placement (a deliverable
+under the artifact store, the task drive, the owner's files). What a remote task
+cannot do is open a `file://` path that exists only on the target. That case is a
+typed refusal naming the deferral rather than a bare "file not found", for the same
+disclosure reason the edit bridge names a withheld path: otherwise the owner goes
+looking for a file that is sitting right there on their server. Render it through a
+service on the target's loopback and browse that, or read it with `read_file`.
+
+**The remote artifact has exactly one public identity.** An imported Home
+artifact record is the SOLE identity the model, CLI, UI, and review evidence
+ever see (`home_ref`); remote source paths survive only as provenance inside the
+private import receipt. A snapshot may omit sensitive/protected paths and stay
+usable, but only as an explicitly PARTIAL one: the wire keeps `complete=false`
+with `integrity_complete=true`, and the partiality plus an exact excluded count,
+a bounded disclosed exclusion list, and the hash of the export POLICY
+(`export_policy_hash`) propagate additively into the artifact bundle,
+verification ledger, task-acceptance evidence, CLI output, and owner-facing
+results. Integrity failures — read, walk, limit, or stability — remain
+fail-closed; only policy exclusions are allowed to proceed. `verify_and_record`'s
+byte comparison for an SSH placement runs ON the target with a bounded redacted
+divergence record, so full file bytes never cross to Home just to be compared.
+
+**Limitation, stated rather than implied: the disclosed omission is a COUNT and a
+LIST, not a cryptographic commitment.** `remote_export_policy` computes a
+`full_manifest_sha256` — the fingerprint of the unfiltered manifest — when it
+validates a single channel's returned manifest, and that is where the value stops.
+`merge_export_disclosures` folds several channels into the one owner-facing block
+and does not carry it (there is no single unfiltered manifest for a multi-channel
+operation, so folding several hashes would need a defined combination rule), and
+`bundle_export_fields` does not forward it either. So what reaches the bundle,
+ledger, acceptance evidence and CLI is: `partial`, the exact `excluded_count`, the
+bounded `excluded[]` list, `excluded_disclosure_truncated`, and
+`export_policy_hash` — which binds WHICH POLICY was applied, not WHICH BYTES were
+withheld. A reader can therefore verify the policy that produced an omission and
+see exactly what was omitted by path, but cannot verify against a hash that the
+disclosed list is the complete set of what the target actually held. Closing that
+gap means defining a hash-combination rule across channels and threading the
+result through both seams; it is not done, and the disclosure should not be read
+as a proof of completeness.
+
+**Trust boundary: the OS account, documented rather than simulated.** The
+connection store holds no key, password, token, or raw SSH option — key material
+stays in the operator's own OpenSSH configuration and agent, and
+`ForwardAgent=no` is retained. Remote Git uses credentials already configured on
+the remote account, with a typed failure when they are absent. Any process
+running as the owner's Home account can physically read any file that account
+can, so "owner-only" here means authenticated ADMINISTRATION and mutation
+authority, not secrecy from co-resident code: the guarantees are the
+deterministic accidental-access guards (see §10's owner-only surface note), not
+command blacklists over a boundary they cannot move. Shell commands on the
+target run with the selected remote Unix account's authority; execd is a
+placement and custody boundary, not a container sandbox.
+
+**Panic reaches the remote host.** Processes Ouroboros started on a remote host
+are agent processes owned by the current Home server generation and stop under
+the same Panic. Home immediately stops reasoning and background work, stops all
+lease renewals, sends priority kill requests, and tears down the broker and its
+OpenSSH children WITHOUT waiting for an acknowledgement; local Panic never
+blocks on a remote ACK. A reachable execd or custodian kills the owned process
+groups immediately on Panic or transport EOF. Only when a physical partition
+makes delivery and detection impossible does the independent remote custodian's
+lease ceiling apply — measured on the remote host's own monotonic clock as
+elapsed time since the last received Home renewal, never as a cross-host
+timestamp comparison, so clock drift can neither fire nor delay it. That ceiling
+is a maximum physical failure-detection bound and may never be used to delay a
+reachable kill.
+
+Concretely, and this is the on-target half of the same rule: the deadline lives on
+`platform_layer.boot_anchored_monotonic_ms()` — Linux `CLOCK_BOOTTIME` paired with the
+kernel boot id, `time.monotonic()` elsewhere — and not on the target's WALL clock. It was
+on the wall clock (`renew` wrote `time.time()*1000 + ttl`, `expire` compared a fresh
+`time.time()`), so an NTP step or a manual `date` ON THE TARGET fired the ceiling early
+when the clock jumped forward and held it past the constitutional limit when it jumped
+back; the cross-host half was already right, since Home's clock never crosses the wire
+and a TTL travels as a duration. `CLOCK_BOOTTIME` rather than `CLOCK_MONOTONIC` because a
+suspended host has not paused its own failure detection. The scale has to survive the
+execd → custodian process boundary through the JSON state file, which is what the ANCHOR
+is for: the boot identity is stored beside the deadlines (custody schema v3), and a
+mismatch reads FAIL-CLOSED — the leases are treated as already expired so the custodian
+kills the owned groups, because believing an undatable number would turn the 15-second
+physical bound into an unbounded one, which the invariant forbids more strongly than it
+forbids an early kill. The bound is proved on an injected clock, without sleeping. Connection configuration, trust history, and durable
+logs/evidence may survive for manual restart and reconciliation; no live broker,
+OpenSSH child, or owned process may.
+
+**Broker topology.** Exactly one `RemoteSessionBroker` per server generation,
+created in `server.py`'s lifespan before worker recovery, handed to workers via
+per-worker Pipe proxies, closed first at teardown, and called non-blockingly by
+panic. Workers never create transports; `respawn_worker` mints a fresh proxy
+endpoint and a stale-generation call fails with a typed `BROKER_GENERATION_STALE`
+rather than hanging. Long-lived SSH transport children (including ControlMaster
+and forward processes) are registered in `process_custody` under `session` scope
+so the orphan reaper covers abrupt server death.
+
+**Task↔session lifecycle: bound at ASSIGNMENT.** A remote session is keyed
+`(connection, project, workspace, server generation)` and the broker answers a
+worker's operation only for a task it has already BOUND to one of those keys
+(`remote_session_admission.session_for_ref`, `broker._task_sessions`). That
+binding is laid by `ouroboros/remote_task_binding.py`, called from
+`supervisor/workers.py::assign_tasks` — the moment the supervisor hands a task to
+a worker — and nowhere else. Three places could have carried it and two are
+wrong:
+
+- *not at task creation.* `/api/tasks` seals the placement and writes the durable
+  record, but a task can wait in the queue across a restart, and `_task_sessions`
+  is in-memory server-generation state. A binding laid at creation is simply gone
+  by the time the work starts, so the hole reappears one restart later. (This is
+  also why the fix is not "carry a project id down to the broker": the project
+  session may not exist in the generation that runs the task, and no queue-road
+  step would re-open it.)
+- *not lazily inside the broker.* Opening a session needs the owner's connection
+  row, and the broker must not import Home authorities — the same reason durable
+  recovery is an injected HOOK (`remote_transfer.recover_pending_scopes`) rather
+  than something the broker does itself. A broker that reached for the connection
+  store would be a second admission authority.
+- *at assignment*, which happens exactly once per attempt, in the generation that
+  will run the work, AFTER any restart, in a process that legitimately holds both
+  the connection store and the broker. The SEALED placement is the only thing
+  consulted about WHERE the task goes, so the binding can never disagree with the
+  routing the owner approved.
+
+The admission runs OUTSIDE `_queue_lock` (it talks to the target over SSH, and
+that lock also serves cancels, heartbeats and terminal writes); the lock is taken
+only to snapshot the candidates and to drop a refused one — the same "resolve
+outside the lock, fence under it" shape the creation surface uses. An unbound
+remote task is SKIPPED by the candidate loop rather than dispatched, so a worker is
+never handed a task the broker has never heard of. Admission is idempotent per
+session key, so N tasks of one project share ONE session and each holds its own
+binding; a subagent carries its parent's `project_id` on its own task record and
+therefore binds to the parent's session instead of opening a second one. A
+transient retryable failure keeps the task queued for a few assignment ticks
+(`MAX_BIND_ATTEMPTS`) and then ends it terminally with the target's own typed
+code — never a silent wait. Release is the mirror image and distinguishes the two
+endings: a CANCEL reaches the target FIRST because killing only the Home worker
+would leave remote work running, while an ordinary terminal releases just the
+lease and the Home import staging (`finish_remote_task`) and leaves the project
+session open for the next task. A cancel uses BOTH broker doors, in order —
+`cancel_admission` for an admission still IN FLIGHT and `cancel` for a bound
+session's process groups — because binding at assignment means a cancel can land
+while the task is still in PENDING, a window the durable "queue miss" latch
+(`task_lifecycle._finalize_cancel_intent_on_miss`) by definition never sees; using
+`cancel` alone raised `task_session_unbound` and the target kept whatever the
+admission had started. The three ABNORMAL endings — crash storm, worker death,
+hard timeout — all pop `RUNNING` before the event dispatcher reads it, so their
+release happens where the sealed placement is still in hand:
+`workers._emit_task_done_terminal` is the single chokepoint every one of them
+already goes through. The binding receipt is transient by construction —
+`persist_queue_snapshot` keeps an explicit key whitelist and does not carry it —
+so a task restored after a restart correctly reads as unbound and is bound again
+against the live broker. The receipt names its own TASK ID as well as the
+generation, because a timeout retry is `dict(task)` under a NEW id and an
+inherited receipt would be precisely the "already bound" answer that lets an
+unbound task dispatch. The timeout reaper releases beside its service-log archive
+(`task_reaper._release_out_of_process_work`) — the two are the same act, letting
+go of everything the dead task owned outside its worker process — because the
+transport keeps renewing the task's lease for as long as the session lives, so
+its remote process groups would otherwise outlive the timeout.
+
+The whole road is pinned end to end by
+`tests/test_remote_task_session_wiring.py` (Docker sshd + a REAL spawned worker
+process over a `multiprocessing` Pipe proxy): the previous suites ran broker,
+dispatch and "worker" in ONE process and called `admit_workspace(task_id=…)`
+themselves in a fixture, which is exactly the wire production never laid — so
+they were green while a real remote project could not execute a single tool.
+
+**Scope of v1.** execd targets GNU/glibc Linux `x86_64` and `aarch64` (glibc
+2.17+). Out of scope: macOS/Windows execd targets, Alpine/musl, non-Git remote
+folders, SSHFS or any virtual filesystem, per-tool SSH commands, a persistent
+daemon beyond execd, a key vault, Home migration or sync, live task handover
+between machines, remote desktop, a remote terminal or TUI, system-service
+install, interactive auth prompts inside tasks, forwarding provider/MCP/Home
+credentials, arbitrary remote environment injection, and a general remote MCP
+bridge.
+
+**DEFERRED in v1 — three capabilities the design names and this build does not
+have.** Each is listed because a reader who finds the machinery half-present should
+know it is a decision, not an oversight; none is load-bearing for the road that
+works.
+
+- **On-demand materialization of a sealed spool log.** The process-log spool is
+  complete: reaching a per-stream / per-task / host-wide quota TERMINATES the process
+  group before any accepted byte is discarded, emits the typed
+  `PROCESS_LOG_QUOTA` note (that is the code — `spool_quota_exceeded` appears only in
+  the plan), and seals every accepted byte into a hashed artifact that Home imports
+  eagerly and publishes as an ordinary task artifact. What is missing is only the
+  convenience: a placement-neutral ACTION the model could invoke to materialize a
+  sealed blob on demand. The log is stored and reachable without it. `fetchable: True`
+  and `spool_state: "remote_available"` used to ride in the artifact record and were
+  read by nothing — a field asserting a capability the runtime lacks is the same class
+  of lie as a silent filter — so they were removed; the state travels with the action
+  when the action lands.
+- **A `file://` bridge across the placement boundary** (`remote_file_bridge`). See the
+  browser-forwarding section: a `file://` URL reads Home's filesystem, which is right
+  for the roots that stay Home-native, and a path that exists only on the target is a
+  typed refusal naming the deferral.
+- **Skills on remote placement.** `skill_exec` is Home-only in v1 and there is no
+  `execution_affinity` field on a skill manifest. The execd-side reviewed-payload
+  capability exists, but Home does not route skills to it — see
+  `tool_capabilities.HOME_ONLY_TOOL_NAMES` and the DEVELOPMENT note.
+
+Project-local dependency installs are ordinary workspace work. In
+`runtime_mode=pro`, system/global dependency installs may be attempted through
+`run_command` and the safety supervisor when needed by the external workspace;
+sudo must be noninteractive (`sudo -n`) and password-prompting sudo is blocked.
+
 ### Runtime topology
 
 The top level has two continuity roles, not merely two possible processes:
@@ -560,11 +1574,14 @@ A pre-existing cross-platform residual remains: shutdown admission is not atomic
 	│   │   │   └── <artifact files> ← Canonical task artifacts, including workspace patches, verification ledgers, and copied external deliverables
 	│   │   └── artifact_versions/<task_id>/ ← Non-manifest recovery history for overwritten user-visible deliverables (last 5 versions per artifact name)
 	│   ├── task_drives/<task_id>/ ← Task-scoped scratch for direct tasks and explicit task_drive process targets; startup prunes terminal tasks after the headless retention window
+	│   ├── remote_imports/<task_id>/ ← (RWS v2) PRE-PUBLICATION staging for bytes arriving from a remote target (`remote_transfer._import_tmp_dir`, mode 0700). Every inbound blob lands here first, is verified against the size and hash the authorized manifest declared, and only then goes to the artifact authority — so this directory holds nothing that is yet an artifact, and never the only copy of anything. It is ON the drive deliberately: publication is then a same-filesystem rename-scale copy rather than a cross-device move. Scoped per task and dropped when that task's remote lease ends (`remote_transfer` cleanup, called from `finish_remote_task`) — per task rather than by a broader sweep, which would race a sibling task mid-import on the same drive. Cleanup runs even when the lease release fails, because leftover temp files are not evidence and a failed release must not also be a disk leak
 	│   ├── task_trees/<root_task_id>/blackboard.jsonl ← (v6.38.0) Task-tree coordination ledger: append-only swarm blackboard + child→parent beacons (tree_note/tree_read), scoped to the whole tree; EPHEMERAL coordination (distinct from the durable project journal)
 	│   ├── state/
 │   │   ├── state.json  ← Runtime state and compatibility cost projection (never the monetary authority)
 │   │   ├── usage_attempts.jsonl ← Append-only monetary authority; every physical provider send has its own attempt id and state transition. A settled attempt with `cost=None` and a numeric reservation upper bound is counted at that bound as unresolved (protecting real spend of an unknown-price success from under-count); a zero-usage HTTP-200 body-error (429/5xx passed through the body) is instead settled at a confirmed $0 so its bound is released, not accumulated into phantom budget exhaustion under a provider storm (v6.65.4)
 │   │   ├── usage_attempts.quarantine.jsonl ← Loud quarantine evidence for a proven corrupt final ledger row; the validated prefix remains readable
+│   │   ├── acceptance_fence_acks/ ← One-shot IPC sidecar for split-drive acceptance-fence acknowledgement; not a lifecycle authority — rows older than an hour compact and retention is bounded to 256
+│   │   ├── pycache/               ← Hermetic `__pycache__` redirect for the packaged CLI, so a read-only install image never writes bytecode beside its own source
 │   │   ├── usage_import_watermark.json ← Resumable/idempotent legacy-import watermark plus source hashes and archive reference
 │   │   ├── server_port ← Active HTTP port used by the launcher/browser handoff
 │   │   ├── server_process.json ← Launcher-owned server PID/process-group identity record for relaunch cleanup
@@ -577,16 +1594,18 @@ A pre-existing cross-platform residual remains: shutdown admission is not atomic
 │   │   ├── post_task_evolution_request.json ← Durable post-task self-evolution promotion signal (worker-written on the canonical drive; the supervisor idle tick consumes it to set the campaign objective + enable evolution, then deletes it; one-shot). When the durable owner-stop sentinel `state.evolution_owner_stopped` is set, `apply_pending_request` DROPS this request instead of consuming it, so an owner stop is never silently undone by a queued promotion.
 │   │   ├── post_task_evolution_counter.json ← Per-drive task counter for the post-task evolution `every_n` cadence
 │   │   ├── scheduled_tasks.json ← Queue-backed cron schedules (5-field cron, timezone, last/next run, task template)
-│   │   ├── projects.json ← Project registry: immutable id/chat identity, optional working folder, lifecycle/routing fence, visible revision, and deletion error; tombstones are durable and never age-pruned
+│   │   ├── projects.json ← Project registry: immutable id/chat identity, optional working folder OR sealed remote `placement` (never both — RWS v2), lifecycle/routing fence, visible revision, and deletion error; tombstones are durable and never age-pruned
 │   │   ├── project_task_bindings.json ← Task→project bindings (schema v1) with a REQUIRED typed origin: the ingress-captured source-row ref (+`source_text`, the retention-proof full copy, stored only for CROSS-thread origins — i.e. the message that started the project) or a closed-enum `origin_absent` reason. Immutable except ONE-WAY enrichment (a same-project re-bind may fill a missing ref; a valid ref is never changed); one root belongs to at most one Project and tombstoning never removes the binding. The retention-proof invariant is FORWARD-ONLY by owner decision: pre-v6.73.0 bindings (no `source_text`) are not migrated and their start messages remain rotation-vulnerable as before
 │   │   ├── ui_preferences.json ← Owner-local layout preferences and monotonic `project_seen_revision` paint ACKs; legacy `project_last_viewed`/`project_hidden` are one-minor deprecated no-ops
 │   │   ├── queue_snapshot.json ← Durable PENDING/RUNNING recovery projection plus actual worker/reaping/idle counts and explicit `worker_pool_disabled_reason` (empty during ordinary operation; typed crash-storm cause when user-facing task admission must refuse)
 │   │   ├── cancel_intents.json ← (Poltergeist phase A) Compact locked projection of ACTIVE durable cancel intents (requested → claimed, with request id + claim generation; settled rows leave the file). Every cancel ingress writes here; custody claims/settles; the watchdog re-feeds. The forensic trail is typed `cancel_intent` rows in `logs/supervisor.jsonl`, never read back for state
 │   │   ├── terminal_deliveries.json ← (Poltergeist phase A2) Durable terminal-answer delivery registry: bounded `delivered` delivery-id dedupe (restart-surviving) plus the bounded PENDING outbox of answers registered as OWED before enqueue — replayed with backoff on boot/tick, cleared in the same write that marks delivery; BOTH drop shapes are disclosed (replay exhaustion AND capacity eviction of the oldest owed row: full text preserved, typed event with a distinct reason, owner notice), never a silent drop
+│   │   ├── remote_connections.json ← (RWS v2, D6) OWNER-STATE remote SSH connection metadata, schema v1, file and `.lock` at 0o600. The stored row is EXACTLY these twelve fields, and the map lists all twelve so a silent thirteenth cannot appear: `id`, display `name`, validated `ssh_alias` host token (never argv), pinned `expected_host_id` plus the full trust history in `host_id_history`, the soft `active|retired` `lifecycle` with `created_at`/`updated_at`/`retired_at`, and the bootstrap claim `bootstrapped_at` + `bootstrap_build` + `bootstrap_contract_set` (`record_bootstrap`, cleared by retrust and retire). `bootstrap_contract_set` is what makes the claim CHECKABLE rather than merely present: the release id alone would report every connection as stale after every upgrade, since most releases change no shared contract, and a row written before the field existed reads as 0, which is exactly right for an install that predates the versioning. NO secrets — key material stays in the operator's own OpenSSH configuration. `ouroboros/connection_store.py` is the ONLY module that reads or writes it; the agent-facing surfaces refuse it (structured file/data tools, the gateway file browser), and its HTTP surface (`/api/owner/connections`) is owner-authenticated even on loopback. Live SESSION state is deliberately NOT persisted here (process-local projection only), and the line between the two halves is what the fact is ABOUT: "a compatible executor is installed on that host" is a fact about the host, established by an owner action, and it does not stop being true because Home restarted — so it is durable, and `bootstrap_compatible` is derived from it. "The target answered within the last few minutes" (`health_fresh`) is a statement about THIS run over a monotonic clock, so it stays process-local. Getting that line wrong is how a restart used to leave "New Project → SSH" permanently empty while the dialog's own copy promised that Test would refresh it
 │   │   ├── extension_companions.json ← Runtime snapshot for live extension companion processes
 │   │   ├── extension_reconcile/ ← Worker-written extension reconcile markers consumed by the server lifespan pickup task
 │   │   ├── review_continuations/ ← Per-task blocked-review continuation payloads (+ quarantined corrupt files under `corrupt/`)
 │   │   │   └── archived/ ← Durable, runtime-unread retirement for continuations whose task is settled, whose recorded obligations are no longer open, and which remained un-resumed for at least seven days. Retirement is a collision-safe move; fresh or still-actionable records and any move error stay live, while malformed files go to `corrupt/`. Archived records are never deleted.
+│   │   ├── remote_reconciliation/<scope>/ ← (RWS v2 §3.2) The durable journal of in-flight remote MUTATIONS, one fsynced `*.pending.json` intent per mutation written BEFORE Home may send CONTINUE, grouped by the `{connection, project, workspace}` scope it belongs to (`remote_pending_operations.pending_scope_root`). Records carry ONLY identities, the prepared hash and the closed import contract — no prepared token, no canonical argv, no blob bytes, no connection secret: the journal is EVIDENCE, not a replay buffer, and a satisfied intent is removed with the same fsync discipline. Terminal evidence for a `completed` mutation whose stored result is unavailable is retained here too, under retention pruning that can never touch a live `*.pending.json`
 │   │   ├── workspace_executor_processes/ ← Durable local/docker executor foreground/service cleanup records for panic/shutdown recovery
 │   │   ├── cx/ ← Managed Claudexor runtime store: immutable `<version>-<sha12>/` trees (each with its `managed-runtime.json`), `node/` exact managed Node copies, `cache/` verified archives, `install.lock`
 │   │   └── skills/              ← Phase 3 external-skill state plane (sibling of advisory_review.json, not shared)
@@ -699,6 +1718,10 @@ Primary navigation exposes Chat (Main), a collapsible Projects group, Files, Ski
 Each active or deleting Project has a sidebar row. Active rows can be opened, renamed, or deleted through pointer- and keyboard-operable controls; the backend owns the 80-character name limit and lifecycle truth. Unread Projects sort ahead of read Projects and then by durable activity. A deleting Project becomes non-openable and visibly remains in the transitional state until the server publishes authoritative registry state. On narrow screens navigation becomes an explicit drawer and the Project chat becomes a full-width overlay with a backdrop. There is no gesture-only navigation layer competing with message scroll, text selection, or the software keyboard.
 
 Shared frontend primitives prevent pages from acquiring competing contracts. `page_header.js` owns page headers and tab strips; `page_icons.js` owns navigation/header icons; `api_client.js` owns browser API calls and typed error propagation; `api_types.js` mirrors the browser-facing contract shapes; `ui_helpers.js` owns shared status, safe-field, and host-bridge behavior; `skill_card_renderer.js` owns installed-skill cards; `log_events.js` owns event classification and task/review presentation shared by Chat and Logs; `toast.js`, `masonry.js`, and CSS tokens own common notifications and layout. The reason is dependency control: frontend work should not require reimplementing supervisor, review, marketplace, extension, and provider semantics in each page.
+
+Remote (SSH-placed) work has its own shared frontend contracts (RWS v2). `remote_task_state.js` is the browser's ONE authority on what a remote status means: pure reducers over `connection_state` frames and durable task rows, the placement read (`remotePlacementFromTask` — the SEALED `WorkspaceRef` in task metadata is the authority, `executor_ref` only its derived projection), the offered-action rule, and the bounded diagnostic/log projection. With no live frame it derives from the one admission evidence Home writes, the remote arm of the sealed `metadata.workspace_preflight`, and keeps `answered`, `refused`, and `no evidence` as three states rather than two, so a model failure on a healthy target cannot read as SSH damage; it has no DOM, no fetch, and no imports, so both surfaces that use it are unit-tested against the same reducers. `remote_card_ui.js` is its VIEW half — the chat live card's buttons, headline and phase colour — and it decides nothing: it takes the few chat capabilities it may touch as one explicit host object, so the renderer cannot reach further into the chat module than that list and the same view can be driven by a stub in a test. `connections_ui.js` renders Settings → Connections over `api_client.js` and holds NO trust logic — the gateway pins identities, refuses changed ones, and demands the observed old/new pair for a retrust, while the page never holds a private key, an SSH password, or the Network Password; its row badge, tone, and "what removes it" line all READ the server's refusal ladder rather than deriving one. `project_create.js` gained a fifth Project source — a folder on a remote host — reusing the same server-side browser shape, because a native picker cannot browse another machine. `activity.js` adds an SSH-tasks section with per-row remote status/diagnostics.
+
+Remote presentation is deliberately PRESENTATION-only: task lifecycle stays queue-owned, the Activity subtab and the Chat live card read the same reducers so one task cannot be "degraded" in one surface and "unknown" in the other, and the only remote control offered is the owner-level connection reconnect, which repairs transport and never replays work. A task-scoped `connection_state` frame is scoped to its Project thread and a connection-wide frame fans out through ONE reducer; a degraded or terminal remote task stops pulsing the typing indicator; one remote-connection live line per task is updated in place so a flapping connection cannot stack rows; `remote_transport_unavailable` is a settled fact that offers no Reconnect; only a same-origin `/api/...` log ref becomes a link, so a remote-supplied ref cannot navigate; and the remote card's Cancel CASCADES through the shared cancel helper, like the root card and Activity, so cancelling a remote orchestrator cannot leave its subagents running on the target.
 
 `confirm_dialog.js::openConfirmDialog` is the one browser-dialog authority. Confirm mode resolves a strict boolean; input mode resolves `{confirmed, value}` and returns an empty value on cancellation; alert mode renders one acknowledgement button. Cancel, Close, backdrop, Escape, and supersession by a newer dialog all resolve as non-confirmation. Native `window.prompt`, `window.confirm`, and `window.alert` are forbidden in `web/modules`: they are visually and behaviorally inconsistent across shells, block the browser event loop, and `window.prompt` silently returns `null` in the macOS PyWebView shell because that backend has no prompt delegate. Critical controls therefore act only on the exact confirmed result; Panic's confirm-and-send sequence is one testable operation rather than a confirmation call detached from the command it guards.
 
@@ -871,11 +1894,19 @@ Every `/api/files/*` operation resolves its requested path and refuses the opera
 | POST | `/api/owner/scope-review-floor` | `gateway.settings.api_owner_scope_review_floor` (DEPRECATED and ENFORCEMENT-INERT since v6.80.0; still mounted, still stores and audits — see below) |
 | POST | `/api/owner/safety-mode` | `gateway.settings.api_owner_safety_mode` |
 | POST | `/api/owner/capability-ack` | `gateway.settings.api_acknowledge_capability` |
+| GET | `/api/owner/connections` | `gateway.connections.api_connections_list` (RWS v2, D6: OWNER-ONLY — store rows + bounded live projection; works without the ssh transport) |
+| POST | `/api/owner/connections` | `gateway.connections.api_connections_add` |
+| POST | `/api/owner/connections/{connection_id}/test` | `gateway.connections.api_connection_test` (reachability probe; never pins trust) |
+| POST | `/api/owner/connections/{connection_id}/bootstrap` | `gateway.connections.api_connection_bootstrap` (the ONLY path that pins `expected_host_id`) |
+| POST | `/api/owner/connections/{connection_id}/reconnect` | `gateway.connections.api_connection_reconnect` |
+| POST | `/api/owner/connections/{connection_id}/retrust` | `gateway.connections.api_connection_retrust` (requires `confirm` + the exact old/new identity pair observed live; fail-closed on active tasks/leases) |
+| GET | `/api/owner/connections/{connection_id}/dirs` | `gateway.connections.api_connection_dirs` |
+| DELETE | `/api/owner/connections/{connection_id}` | `gateway.connections.api_connection_retire` (SOFT retire; never deletes trust history) |
 | GET | `/api/ui/preferences` | `gateway.ui_preferences.api_ui_preferences_get` |
 | POST | `/api/ui/preferences` | `gateway.ui_preferences.api_ui_preferences_post` |
 | GET | `/api/model-catalog` | `gateway.models.api_model_catalog` |
 | POST | `/api/openai-compatible/models` | `gateway.models.api_openai_compatible_models` |
-| POST | `/api/tasks` | `gateway.tasks.api_tasks_create` |
+| POST | `/api/tasks` | `gateway.tasks.api_tasks_create` (RWS v2: a remote placement is INHERITED from `project_id`, never named per task. An unreachable target is the SAME typed refusal `/api/projects` gives — 503 `remote_transport_unavailable` + `action: bootstrap_connection` — which requires catching `RemoteWorkspaceUnavailableError` BEFORE the generic `except ValueError` it subclasses) |
 | GET | `/api/tasks` | `gateway.tasks.api_tasks_list` |
 | GET | `/api/tasks/{task_id}` | `gateway.tasks.api_task_get` |
 | GET | `/api/tasks/{task_id}/events` | `gateway.tasks.api_task_events` |
@@ -929,9 +1960,13 @@ Rationale: `server.py` should own process startup/lifespan/static mounting, whil
 
 `/ws` is the live browser delivery channel, not a durable state owner. Queue, task, Project, review, skill, settings, cost, and update modules persist their own truth; REST/history endpoints reconstruct that truth after reload or disconnection. `gateway/contracts.py` describes the frozen envelope shapes and message-type index for Python/JavaScript parity, but it is not a runtime parser. `gateway/ws.py` performs the actual transport checks: incoming text must decode to a JSON object, extension types must parse as an owned namespace, and built-in `chat` or `command` frames must carry a non-empty payload before they enter the message bridge.
 
+`connection_state` (RWS v2) is the live remote-connection projection: status/phase/completion plus SCRUBBED and breadth-bounded diagnostics and log refs — durable trust facts and secrets are structurally absent from the frame, and the frame never carries the store's contents. Its `status` is exactly the contract's five words (`connecting|ready|degraded|disconnected|unknown`) in EVERY producer: a sixth word is not additive but invisible, because `gateway/connections.py::_record_runtime_health` ignores what it does not know and `web/modules/remote_task_state.js` reads an unrecognised status as *no typed status at all* and falls back to derivation — which withdraws the Reconnect button at the one moment a reconnect is the fix. So `remote_worker_proxy.reconnect_failure` maps a raised reconnect onto `degraded` (the same word the gateway's own exception projection uses) instead of inventing `error` — and the invariant is ENFORCED at the one boundary every producer crosses rather than trusted from each of them: `gateway/connections._public_live_fields` clamps an unrecognised `status` to `unknown`, the contract's own word for "no typed statement". It had the guard on one branch only (the exception branch hardcodes `degraded`) while the MAPPING branch passed a producer's `status` through untouched, and those mappings come from the broker, the transport's own `health()` and the service envelope. The closed vocabulary now lives as a runtime value beside the `Literal` that declares it (`gateway/contracts.CONNECTION_STATUSES`), because a `Literal` is a type-checker fact and every producer of this frame is a runtime one. `diagnostic` is likewise a MAPPING and never a message string: all three carrying layers (`connections.py::_public_live_fields`, `connections_ui.js`, `remote_task_state.js`) drop a non-object, so a string diagnostic is a reason that is computed, shipped, and then silently discarded one hop before the owner. And `error_code` has exactly ONE wire spelling — lower-case, normalized at the boundary by `gateway/_helpers.py::wire_error_code` — because the authorities disagree by construction (`workspace_admission.REMOTE_TRANSPORT_UNAVAILABLE` is a Python constant; the transport's codes are already lower-case) while every consumer compares case-SENSITIVELY (`remote_task_state.js`, `cli_connections._UNSERVABLE_CODES`); a `.lower()` per response site is how one of the two spellings escaped.
+
 When the optional network password is configured, the surrounding authentication middleware admits loopback clients directly, accepts a valid expiring session or request credential for non-loopback clients, and closes an unauthenticated WebSocket with code 4401 before `ws_endpoint` accepts it. With no password the socket follows the operator's explicitly open network posture. The public socket never receives the Host Service token or the owned Claudexor daemon token.
 
 The browser constructs one socket for the whole SPA. Feature modules subscribe before connection; the initial complete Project chat-id set is fetched before the first open so an early Project frame cannot be mistaken for Main traffic. `ws.on(type, listener)` stores listeners in insertion-ordered sets and returns a disposer. Emission uses a listener snapshot: a listener added during dispatch does not receive the current frame, and disposing one listener cannot skip its neighbor. Every decoded frame first reaches the generic `message` event and then its type-specific event, which lets Widgets consume reviewed namespaced events without duplicating the socket.
+
+`/api/owner/connections/**` (RWS v2, D6) is the owner-only remote-connection surface, and it is the ONE namespace that is authenticated **even on loopback**: `server_auth.NetworkAuthGate` matches it with the bounded twice-decoded predicate `is_owner_connections_path` (so `/api%2Fowner%2Fconnections/…` and `%252Fapi%252Fowner…` are the same namespace, while `/api/owner/connectionsevil` is NOT) and answers a typed `401 owner_auth_required` before any handler parses a body, or `503 owner_auth_not_configured` when no `OUROBOROS_NETWORK_PASSWORD` exists at all — an owner-only surface with no owner credential is refused, never opened. Because of that, `/auth/login` and `/auth/logout` are handled BEFORE the ordinary loopback bypass: Settings establishes the signed session through the normal login flow instead of retaining the password in JavaScript. **Rationale (D6) — the trust boundary is the OS ACCOUNT, and it is documented rather than simulated.** The store holds no secrets, and a process running as the operator's account can physically read any file that account can; so the v1 command blacklists (shell detectors for `cat data/state/remote_connections.json`, `curl …/api/owner/connections`, `ouroboros connections …`, `python -c` bypass hunting) were theater over a boundary they could not move, and are deliberately NOT part of v2. What v2 guarantees instead is the deterministic ACCIDENTAL-access guard set, each enforced structurally at one authority: `connection_store.py` owns the path/schema/lock/atomic writer; `tools/core.py` refuses the store plus its lock/temp/hardlink aliases for `read_file`/`list_files`/`write_file`/`edit_text`; `gateway/files.py::_is_owner_only_file` makes it owner-only state for the file browser (hidden from listings, refused for read/write/delete/transfer, including as a recursive-operation parent); and this endpoint family never echoes the store's location, so a UI or CLI consumer has no path to hand to a file tool. The currently observed host identity is read from exactly THREE places, each with a producer — the envelope's own `host_id`, the `handshake` block, and a typed `diagnostic` — and the gateway, `connections_ui.js::observedHostId` and `cli_connections._observed_cli_host_id` must look in the same three, or a retrust confirmation pair is assembled from a field one of them cannot see. Trust changes are owner-explicit: only a successful bootstrap pins `expected_host_id`, a differing observed identity is a typed `host_identity_changed`/409, and `retrust` requires `confirm:true` plus the exact old/new identity pair observed on a live probe (a stale pair ⇒ `host_identity_confirmation_stale`). Retire is SOFT (history is never destroyed) and both retrust and retire re-check the live-task/lease state under `supervisor/queue.py::_queue_lock`, treating any lookup failure as BUSY.
 
 A browser `chat` frame contains the owner text and may add `sender_session_id`, `client_message_id`, `force_plan`, uploaded attachment references, `chat_id`, and `project_id`. The client generates a message id when absent and uses it to reconcile its pending local bubble, the echoed canonical user row, routing annotations, and mailbox delivery retries. The id is evidence for reconciliation and selected idempotent routes; a successful browser `send()` call means only that the frame was accepted by the current socket, not that a task was durably admitted.
 
@@ -1637,7 +2672,7 @@ above. Four things follow, and they are one mechanism, not four:
   DIFFERENT NUMBERS ON PURPOSE: an engine between them serves read-only and refuses
   mutating. What this floor is NOT is a proxy for "a boundary was applied" — it was pinned
   at 3.3.2 for exactly that reason and the proxy lied, because Claudexor's boundary is
-  macOS-only (`docs/DELEGATED_CONFINEMENT.md` §8) and a build declares the same number on
+  macOS-only (see the delegated-confinement notes in this file) and a build declares the same number on
   every host. Threat model, measured bands and non-coverage:
   `docs/DELEGATED_ADMISSION.md`.
 - **What was APPLIED is asked of the attempt, never of the OS.** Claudexor records the
@@ -2072,7 +3107,7 @@ Only the root runs full post-task synthesis once. Split non-project work uses th
 
 Ouroboros remains one identity across Main, project rooms, and Background Consciousness. A project is a focused working room, not an isolated sub-mind: unified dialogue memory remains available to the one agent, while an executing project task preferentially receives its own thread, journal, workpad, and project knowledge. `project_facts.py` routes project facts to `projects/<id>/knowledge`; subagents inherit the root's resolved project id and never derive a new one. There is no per-project identity or scratchpad, and only the current project's fact store is injected into its focused task context.
 
-The projects registry owns immutable project identity, canonical chat id, optional working directory, lifecycle/tombstone state, routing generation, and activity revision. Admission persists the resolved project id in the task itself, and `project_lease.py` permits one top-level writer per project while allowing that task's own subagent tree. Binding/history files support routing and presentation; they are not the lease authority. Delete closes routing, cancels/quiesces the tree, and tombstones only after settlement, preserving the id, history, bindings, folder, journal, workpad, and memory for recovery.
+The projects registry owns immutable project identity, canonical chat id, optional working directory, lifecycle/tombstone state, routing generation, and activity revision. Admission persists the resolved project id in the task itself, and `project_lease.py` permits one top-level writer per project while allowing that task's own subagent tree. Binding/history files support routing and presentation; they are not the lease authority. Delete closes routing, cancels/quiesces the tree, and tombstones only after settlement, preserving the id, history, bindings, folder, journal, workpad, and memory for recovery. (RWS v2) Project creation gained a fifth source — a folder on a remote host (`connection_id` + `remote_root`) — whose sealed `SshWorkspaceRef` is stored in the row's `placement`, so that Project's tasks run on the target; a row without `placement` is local, which is what every pre-RWS row is. A rebind replaces that placement through `set_project_placement` and advances `routing_generation`, so work already resolved against the previous target is refused at insertion instead of run on the new one.
 
 `ensure_project_scope` can create or bind the current root to one project during execution. It marks the live queue/lease surface under the queue lock before persisting the binding, is idempotent for the same project, refuses a second scope, and cannot be invoked by a child to escape the inherited scope. This makes mid-task project creation a structural capability rather than a bare directory convention.
 
@@ -2243,6 +3278,7 @@ Runtime floors:
 | OUROBOROS_OR_PROVIDER | "" | OpenRouter `provider` routing (v6.46.0): `resilience` (same-model failover on rate-limit/5xx, prompt-cache stays warm), `repro` (pin, no failover — fixed-model reproducibility runs), or a raw JSON provider object. Gap-merged so it never overrides the anthropic `require_parameters` pin or the (unverified-family) reasoning-continuity `allow_fallbacks=false` pin; affects same-model provider routing only (never the model, so the P3 reviewer floor is untouched). |
 | OUROBOROS_SEARCH_CODE_WALL_SEC | 45 | Total wall-clock budget for one `search_code` call, bounding BOTH the directory-walk enumeration and the batched rg loop so a search whose root resolves to a very large tree cannot run unbounded. |
 | OUROBOROS_USER_FILES_ROOT | "" (home) | **Env-only operational override** (NOT a `settings.json`/UI carrier — like `OUROBOROS_DATA_DIR`; deliberately absent from `SETTINGS_DEFAULTS`/`apply_settings_to_env`, whose pop-on-absent would erase an injected value). Filesystem base for the `user_files` resource root, read directly by `tool_access._user_files_root`. Defaults to the owner's real home; a jailed or isolated runtime sets a scratch dir so a task cannot read the owner's real home (e.g. secret files), and unnamed deliverables then derive under that jail (`tool_access._deliverables_root`). Any unusable value falls back to home (fail-safe). |
+| OUROBOROS_REMOTE_CONNECTIONS_PATH | `<data>/state/remote_connections.json` | **Env-only path override** (NOT a `settings.json`/UI carrier — deliberately absent from `SETTINGS_DEFAULTS`/`apply_settings_to_env`, like `OUROBOROS_DATA_DIR`, whose pop-on-absent would erase an injected value). Location of the OWNER-STATE remote-connection store (`config.REMOTE_CONNECTIONS_PATH`, read only by `ouroboros/connection_store.py`, which also owns the sibling `.lock`; both files are `0o600`). It exists so an isolated or benchmark runtime gets its own store instead of touching the owner's real connections, exactly as `OUROBOROS_USER_FILES_ROOT` jails `user_files`. It holds no secret in any case — key material stays in the operator's own OpenSSH configuration. |
 | OUROBOROS_OBSERVABILITY_KEEP_RAW | unset | **Env-only operator debug override** (NOT a `settings.json`/UI carrier — deliberately absent from `SETTINGS_DEFAULTS`/`apply_settings_to_env` so a self-change or non-owner save can NEVER enable secret logging). When set, persist the RAW LLM/tool payload as the authoritative observability blob. Default OFF: the authoritative blob is REDACTED (secret values masked, structure/route/non-secret text preserved per BIBLE P1) so no secret lands on disk; `full_payload_redacted` declares it honestly. |
 | OUROBOROS_GENERATIVE_PROBE | 1 (on) | Enables the generative context-window probe (`capability_evidence`): on an explicit Max toggle/Save, when provider metadata gives no window, an over-window request empirically confirms ≥1M from a FREE pre-inference reject. `OUROBOROS_GENERATIVE_PROBE_CHARS` (default 5,000,000) sizes the padding. A 200 (possibly-paid accept) never auto-confirms — it routes to owner-ack. |
 | OUROBOROS_REVIEW_MODELS | openai/gpt-5.6-luna,google/gemini-3.6-flash,anthropic/claude-sonnet-5 | Ordered reviewer slots shared by triad/plan/task/skill review; duplicate model IDs are independent slots. When OUROBOROS_REVIEWER_SLOTS is set this key becomes a runtime PROJECTION of its api_chat triad rows (for the API-pinned surfaces, D15) — never a second write |
@@ -2323,6 +3359,30 @@ Direct-provider review fallback (formerly OpenAI-only review fallback): when exa
 GigaChat provider specifics (`gigachat::`): GigaChat is routed through the native `gigachat` library (NOT OpenAI-compatible) in `llm.py::_chat_gigachat`. OpenAI `tools` map to GigaChat `functions`; GigaChat returns at most ONE `function_call` per turn, so parallel OpenAI `tool_calls` collapse to the first. Role `tool` results become role `function` and must be valid JSON (plain text is wrapped as `{"result": ...}`); the `system` message must be first, so later system-reminders are demoted to `user`. `reasoning_effort` is intentionally omitted on the GigaChat path — GigaChat-3 can otherwise spend the whole `max_tokens` budget on hidden reasoning and return empty content/tool_calls. Fresh direct-only installs use `GigaChat-2-Max` for every ordinary/review slot: the newer `GigaChat-3-Ultra` is currently limited to personal Freemium, while Max is available across the supported personal and legal-entity tariff scopes. GigaChat exposes no automatic live cost source, so its cost remains nullable/unknown rather than coming from a hand-maintained tariff. GigaChat models are below the 1M scope-review context floor; a GigaChat-only setup fills the scope-reviewer slot with its GigaChat model exactly like the Cloud.ru direct-provider pattern. Since v6.80.0 the disclosed fallback where no ≥1M reviewer is configured is the owner-selected `low` context mode — whole-repository scope review is then declaredly not performed and every commit records a typed `skipped_low_context_mode` evidence row — replacing the removed owner-opt-in degraded advisory scope review; the v6.87.6 P3 amendment adds a second declared path, implemented in v6.89.0 (an owner-selected retrieving scope slot at ≥200K sourced evidence); the blocking triad still reviews the full staged diff in both modes.
 
 Claude Runtime Status appears when an Anthropic key exists or when backend/runtime checks or browser-side `refreshClaudeCodeStatus` transport failure paths set an error. This keeps Claude Code advisory/edit readiness visible even when the failure is UI transport rather than SDK installation.
+
+### Operational SSH bounds (env-only, RWS v2)
+
+Deliberately NOT in `SETTINGS_DEFAULTS`: every key listed there is settable through the
+`/api/settings` POST surface, and Appendix E §4.4 keeps these rare operator repairs out of
+Settings. They are read ONLY through `get_ssh_timeout_sec(kind)`, which bounds each
+kind against its own hard max and RAISES on an unknown kind so a typo at a transport call
+site cannot borrow another phase's timeout. Protocol/frame limits and the fixed 15s
+lost-lease ceiling are not configurable at all — they are a protocol/safety contract.
+The TABLE lives in `ouroboros/remote_ssh_config.py`, the transport module that builds the
+`-o` options; `config.get_ssh_timeout_sec` delegates to it so Home callers are unchanged.
+It used to live in `config.py` and be reached by a function-local import from the
+transport, which put a `settings_or_owner_state` module on the transport's dependency list
+— a §3.3 reverse-gate violation invisible while the gate read module-scope imports only.
+
+| Env var | Default | Purpose |
+|---|---|---|
+| OUROBOROS_SSH_CONNECT_TIMEOUT_SEC | 20 | (RWS v2) OPERATIONAL bound for a remote-connection probe/handshake/directory listing (hard max 300). Read through `config.get_ssh_timeout_sec("connect")`; protocol and security limits stay CODE constants and are deliberately not settings. |
+| OUROBOROS_SSH_KEEPALIVE_INTERVAL_SEC | 5 | (RWS v2) SSH `ServerAliveInterval` for remote sessions (hard max 60) |
+| OUROBOROS_SSH_KEEPALIVE_COUNT | 3 | (RWS v2) SSH `ServerAliveCountMax` before a session is declared dead (hard max 12) |
+| OUROBOROS_SSH_BOOTSTRAP_TIMEOUT_SEC | 120 | (RWS v2) Bound for the execd bootstrap/install round trip (hard max 900) |
+| OUROBOROS_SSH_ADMISSION_TIMEOUT_SEC | 60 | (RWS v2) Bound for remote workspace admission (hard max 300) |
+| OUROBOROS_SSH_RECONCILE_TIMEOUT_SEC | 20 | (RWS v2) Bound for session reconnect/reconciliation (hard max 120) |
+| OUROBOROS_SSH_SHUTDOWN_TIMEOUT_SEC | 5 | (RWS v2) Bound for graceful remote session teardown (hard max 30) |
 
 ---
 
@@ -2429,6 +3489,7 @@ via `tests/test_contracts.py`.
 | `TaskDetailResponse` + optional root-only `TaskCostBreakdown` — an open stored-result envelope plus a read-time, never-persisted physical-ledger projection. When available it contains every frozen field: `own_usd`, `children_usd`, `unattributed_usd`, `delegated_disclosed_usd`, `accounted_upper_bound_usd` (C2: the explicit subtree total under its honest name — own + children + unattributed, an accounted UPPER BOUND, never a settled receipt), `subscription_sessions`, `unknown_unmetered`, `non_final_rows`, `cost_final`, and `authority="physical_attempt_ledger"`; delegated is a filter, not a third sum. Non-root or unavailable/unattributable accounting omits the whole object rather than reporting `$0`. Phase A adds the additive-optional `cancel_state` projection: `"pending"` while a durable cancel intent is open and the supervisor teardown has not settled (status itself honestly stays running/scheduled); absent otherwise. `cancel_reason` rides beside it (additive-optional, GR2-11) when the intent carries a reason — the WHY of the pending cancellation; absent when no reason was recorded. The browser's ONE consumer path is `log_events.taskCancelPending` (chat's interim "Cancelling…"). | `ouroboros/gateway/contracts.py`, `ouroboros/gateway/tasks.py`, `web/modules/api_types.js`, `web/modules/log_events.js` | `tests/test_gateway_parity.py` pins type parity, exact keys, root-only emission, full optionality, and the `cancel_state` + `cancel_reason` mirrors + runtime emission; `web/tests/cancel_run.test.js` pins the helper and its chat wiring. |
 | Managed update gateway ABI — the empty preflight request, exact channel-bound `UpdateMergePlan`, pinned apply request (`strategy`, base/target SHAs, recovery confirmation), typed success/error variants, and `update_status_ready` WS notice that refreshes the boot-time cache in the UI. | `ouroboros/gateway/contracts.py`, `web/modules/api_types.js` | `tests/test_gateway_parity.py` pins every field and message type in both mirrors; `tests/test_update_apply_routing.py` drives pin, strategy, recovery-confirmation, and response routing. |
 | `ChatOutbound.review_projection` (v6.65.0) — optional compact panel/actor truth for Chat and Logs: transport status, parse status, semantic verdict, task-acceptance `outcome_tier`, model/provider/role, coverage, quorum/enforcement impact, the complete redacted reason, a forensic `response_ref` (flat content hashes, no host paths — v6.70.0), and exact candidate/evidence/fence binding hashes; v6.74.0 adds additive optional keys — per-actor `dialogue_status`, per-panel `dialogue` ({status, votes}) and the `single_reviewer_no_diversity` label; raw reviewer output remains in private audit storage. | `ouroboros/gateway/contracts.py`, `ouroboros/review_substrate.py` | `tests/test_contracts.py` pins the field as optional frozen ABI; `tests/test_gateway_parity.py` pins the field in both Python and JavaScript contracts; `tests/test_review_substrate_v2.py` pins the bounded actor projection including `outcome_tier`; `web/tests/review_truth.test.js` pins the shared renderer. |
+| Connection contract family (RWS v2, D6) — `ConnectionEntry`, `ConnectionAddRequest`, `ConnectionListResponse`, `ConnectionActionResponse`, `ConnectionDirsResponse`, the `connection_state` WS envelope `ConnectionStateOutbound`, and the placement mirror `ProjectWorkspaceRef`; `ExecutorRef` gains the `ssh` arm as an immutable DERIVED projection of the persisted `WorkspaceRef` (nothing stores an ssh executor_ref independently). Every row is a NEW name, so the rule is purely ADDITIVE evolution: optional keys only, old records normalize on read. Each entry keeps its durable half (store rows: identity, `ssh_alias`, pinned `expected_host_id` + trust history, soft lifecycle — never a secret) structurally separate from its bounded live half (`status`/`phase`/`platform`/`architecture`/`build`/`completion`/`error_code`/`action`/`diagnostic`/`log_refs`/`warnings` plus the Home-only admission evidence `bootstrap_compatible`/`health_fresh`, the first DERIVED from the durable `bootstrapped_at`/`bootstrap_build`). | `ouroboros/gateway/contracts.py`, mirrored as JSDoc in `web/modules/api_types.js`, reached only through the named `web/modules/api_client.js` methods | `tests/test_gateway_parity.py::test_connection_contract_family_is_additive_and_indexed` pins the endpoint index, the required-key sets, the ssh discriminator, and the absence of any secret-shaped key; `tests/test_gateway_parity.py::test_connection_contracts_are_mirrored_for_the_browser` makes the JSDoc mirrors MANDATORY (exact field-set equality per typedef) and asserts one named client method per owner route |
 | `chat_id_policy` — SSOT for A2A/synthetic chat-id filtering across message bus, history, memory, and consolidation | `ouroboros/contracts/chat_id_policy.py` | `tests/test_chat_id_policy.py` pins boundaries and human/transport positive ids |
 | `task_contract` — canonical, durable normalization for objective/output, constraints, resources, disabled tools, workspace/lineage, delegation budget, deadline, answer protocol, budget profile, and acceptance claims. `effective_acceptance_claims(task, closed_plan_wave)` is the pure read-time binder: ingress claims win, otherwise the current closed plan wave's frozen claims apply; it neither mutates nor rebuilds the running contract. Child builders must restate every intentionally narrowed field after the parent spread. Pacing interprets the normalized budget profile separately through typed `task_pacing.CostCeiling`. | `ouroboros/contracts/task_contract.py` | Contract, delegation-budget, disabled-tool, task/outcome, and acceptance-evidence tests pin the public helpers, normalization, propagation, and claim provenance. |
 | `PluginAPI` (Phase 4, v1.3) + `ExtensionRegistrationError` + `FORBIDDEN_EXTENSION_SETTINGS` + `VALID_EXTENSION_PERMISSIONS` + `VALID_EXTENSION_ROUTE_METHODS` — the surface every `type: extension` skill's `plugin.py::register(api)` binds against (`register_tool`, `register_route`, `register_ws_handler`, `register_ui_tab`, `register_settings_section`, `register_supervised_task`, `register_companion_process`, `subscribe_event`, `get_skill_token`, `send_ws_message`, `on_unload`, `log`, `get_settings`, `get_state_dir`, `skill_job_dir`, `get_runtime_info`). `skill_job_dir(job_id)` creates isolated `jobs/<sanitized_id>-<hash>/{assets,output,tmp}` state folders so generation skills do not overwrite their own assets across jobs. `VALID_EXTENSION_PERMISSIONS` includes host-mediated permissions (`companion_process`, `supervised_task`, `subscribe_event`, `inject_chat`) that require review/owner grants as documented in CHECKLISTS.md. The `ExecutionMode` capability matrix (`MATRIX_CAPABILITIES` / `OUT_OF_PROCESS_UNAVAILABLE_CAPABILITIES` / `capability_available` / `available_capabilities`) is the SSOT for which side-effect surfaces an out-of-process child may use and is pinned by the contract test. | `ouroboros/contracts/plugin_api.py` | `tests/test_contracts.py::test_plugin_api_surface_is_frozen` pins the frozen method set; `tests/test_contracts.py::test_extension_route_methods_contract_matches_server_dispatch` pins the route-methods tuple; `tests/test_extension_loader.py::test_plugin_api_impl_matches_protocol` asserts the concrete `PluginAPIImpl` structurally satisfies the runtime-checkable Protocol |

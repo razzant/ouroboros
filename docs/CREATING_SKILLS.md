@@ -135,6 +135,24 @@ the other, both readiness and extension loading fail closed with a typed
 conflict until the owner disables one. Ouroboros never resolves a conflict by
 automatically disabling, deleting, or moving either payload.
 
+### Execution affinity (where an invocation runs) — DEFERRED, not available
+
+Every skill invocation runs on Home. There is no manifest field for placing one
+elsewhere: `scripts[].execution_affinity` and `tool_execution_affinity` are NOT
+read by the loader, do not validate, and do not block loading — writing either
+one has no effect whatsoever.
+
+This section previously documented both fields as working, including "an invalid
+value, or a mapping naming a tool the extension does not actually register, blocks
+loading". Nothing implemented any of it. An author following those instructions
+would have declared `active_workspace` and quietly kept running on Home, which is
+worse than having no feature: a placement the manifest asserts and the runtime
+ignores is a false safety claim.
+
+Marrying skills to remote placement is a deferred phase (owner decision). When it
+lands, the field arrives together with its loader validation, its fail-closed
+behaviour and its review item — not before.
+
 ## Lifecycle: install → review → enable → execute
 
 ```mermaid
