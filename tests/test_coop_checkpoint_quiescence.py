@@ -243,7 +243,12 @@ def test_spawned_checkpoint_revalidation_survives_a_racing_running_pop(tmp_path,
     running = {f"sib{i}": {"task": _subagent_task(f"sib{i}", "rootR")} for i in range(6)}
     ctx = _ctx(data, running=running)
     observed: dict = {}
-    real_predicate = events._is_active_subagent_task
+    # The predicate and its caller both live in `supervisor.subagent_admission` now,
+    # so patch it THERE: a name re-exported through `events` binds at import time and
+    # the real caller would never see the substitute.
+    from supervisor import subagent_admission
+
+    real_predicate = subagent_admission._is_active_subagent_task
 
     def _racing_predicate(task, root_task_id):
         # Model a racing pop landing mid-count, as the drain thread does.
@@ -256,7 +261,7 @@ def test_spawned_checkpoint_revalidation_survives_a_racing_running_pop(tmp_path,
         observed["live"] = has_live_tree_tasks
         return [{"committed": True, "root": str(root_tid)}]
 
-    monkeypatch.setattr(events, "_is_active_subagent_task", _racing_predicate)
+    monkeypatch.setattr(subagent_admission, "_is_active_subagent_task", _racing_predicate)
     monkeypatch.setattr(coop, "checkpoint_commit_coop_roots", _fake_commit)
     thread = events._spawn_coop_checkpoint(ctx, "rootR", title="", trigger="tree_quiescence")
     assert thread is not None

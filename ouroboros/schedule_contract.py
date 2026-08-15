@@ -14,6 +14,11 @@ RESERVED_TEMPLATE_FIELDS = frozenset({
     "child_drive_root", "budget_drive_root", "parent_task_id",
     "root_task_id", "delegation_role", "task_constraint",
     "task_id", "session_id", "actor_id", "headless_child_drive_root",
+    # Placement keys (RWS v2, Appendix C-3 #10): schedule templates persist
+    # project_id ONLY — placement is resolved and sealed at fire time through
+    # the same admission path as ordinary task creation. A template smuggling
+    # any placement spelling is rejected fail-closed.
+    "executor_ref", "workspace_ref", "connection_id", "_sealed_workspace_ref",
 })
 
 

@@ -542,6 +542,25 @@ def _finish_self_finalized_task(
         })
     except Exception:
         log.debug("Reaper: failed to emit task_done for self-finalized %s", task_id, exc_info=True)
+def _release_out_of_process_work(q: Any, task_id: str, task: Dict[str, Any]) -> None:
+    """Let go of everything the dead task owned OUTSIDE its worker process.
+
+    Its service logs are archived, and for a REMOTE placement the target is told
+    the task is over: killing the worker stops Home only, and the transport keeps
+    renewing this task's lease for as long as the session lives, so its remote
+    process groups would outlive the timeout. The release also drops the local
+    binding receipt, so a retry (which is `dict(task)` under a new id) is admitted
+    again instead of dispatched against a binding that is gone.
+    """
+    from ouroboros.remote_task_binding import release_remote_task_session
+
+    try:
+        from ouroboros.tools.services import archive_task_service_logs
+
+        archive_task_service_logs(pathlib.Path(q.DRIVE_ROOT), task_id, task)
+    except Exception:
+        log.debug("Reaper: failed to archive service logs for %s", task_id, exc_info=True)
+    release_remote_task_session(task, cancelled=True)
 
 
 def reap_timed_out_task(job: Dict[str, Any]) -> None:
@@ -593,12 +612,7 @@ def reap_timed_out_task(job: Dict[str, Any]) -> None:
                             _incident_chat_id(task, owner_chat_id))
         return
 
-    try:
-        from ouroboros.tools.services import archive_task_service_logs
-
-        archive_task_service_logs(pathlib.Path(_q.DRIVE_ROOT), task_id, task)
-    except Exception:
-        log.debug("Reaper: failed to archive service logs for %s", task_id, exc_info=True)
+    _release_out_of_process_work(_q, task_id, task)
 
     # GR5-2: the killed worker's graceful ``release_task_runs`` never ran, so
     # its open delegated (Claudexor) runs would keep mutating while the retry

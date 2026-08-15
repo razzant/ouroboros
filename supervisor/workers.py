@@ -746,10 +746,11 @@ def _admit_promoted_workspace(evt: dict, ctx: Any, task: dict, *, pid: str, tid:
     # resolve to the self_modification profile over the system repo.
     from ouroboros.workspace_admission import (
         WORKSPACE_NONE,
-        bounded_workspace_preflight,
-        compose_workspace_block,
+        placement_preflight_summary,
         resolve_room_workspace,
+        seal_admitted_placement,
     )
+    from ouroboros.workspace_ref import workspace_display_root
 
     # Q10=A (owner, 2026-08-08): a project promoted with NO working folder gets one
     # AUTO-PROVISIONED via the existing ensure_project_workspace seam (an idempotent
@@ -770,17 +771,27 @@ def _admit_promoted_workspace(evt: dict, ctx: Any, task: dict, *, pid: str, tid:
         and str(evt.get("workspace") or "").strip().lower() != WORKSPACE_NONE
     ):
         provisioned_now = ""
+        _is_remote_room = False
         try:
             from ouroboros.projects_registry import get_project as _get_project_entry
 
-            _existing_wd = str((_get_project_entry(DRIVE_ROOT, pid) or {}).get("working_dir") or "").strip()
+            _entry = _get_project_entry(DRIVE_ROOT, pid) or {}
+            _existing_wd = str(_entry.get("working_dir") or "").strip()
+            # (RWS v2) A REMOTE room carries its sealed placement and NO working_dir BY
+            # CONSTRUCTION, so an empty working_dir there is not the file-less shape this
+            # auto-provision exists for. Provisioning would mint a Home genesis repo for a
+            # project whose tree lives on the target — and update_project refuses to bind a
+            # working_dir over a placement, so the ensure would fail and turn a perfectly
+            # admissible remote promote into a loud provisioning failure. The placement is
+            # the room's workspace; resolve_room_workspace below reads it.
+            _is_remote_room = bool(_entry.get("placement"))
         except Exception:
             # Registry read failure: do NOT provision (a blind ensure here could
             # mint a fresh empty repo over a project whose working_dir merely
             # failed to load). resolve_room_workspace re-reads and decides.
             _existing_wd = "unreadable"
             log.warning("promote: project working_dir lookup failed for %s", pid, exc_info=True)
-        if not _existing_wd:
+        if not _existing_wd and not _is_remote_room:
             try:
                 from ouroboros.projects_registry import ensure_project_workspace
 
@@ -804,7 +815,7 @@ def _admit_promoted_workspace(evt: dict, ctx: Any, task: dict, *, pid: str, tid:
                 }
             task.setdefault("metadata", {})["workspace_autoprovisioned"] = True
 
-    resolved_ws, ws_error = resolve_room_workspace(
+    resolved_ref, ws_error = resolve_room_workspace(
         drive_root=DRIVE_ROOT,
         system_repo_dir=REPO_DIR,
         project_id=pid,
@@ -814,14 +825,19 @@ def _admit_promoted_workspace(evt: dict, ctx: Any, task: dict, *, pid: str, tid:
     if ws_error:
         _fail_promoted_task_loudly(ctx, task, ws_error)
         return {"status": "needs_manual_target", "reason": "workspace_unusable", "task_id": tid}
+    # SEALED placement, same authority and same seal key as `/api/tasks` (RWS v2): the
+    # promote path was the DEGRADED twin once and must never become one again, so it
+    # writes the ref rather than re-deriving a placement from a string later.
+    resolved_ws = workspace_display_root(resolved_ref)
+    is_remote_room = getattr(resolved_ref, "kind", "") == "ssh"
     if resolved_ws:
-        task["workspace_root"] = resolved_ws
-        task["workspace_mode"] = "external"
-        task["memory_mode"] = "forked"
         # The lease lane keys off task["project_id"]: for a project room it is already
         # set; for a bare workspace promote, resolve it (registry-first → derived hash)
         # so one folder is one serialized lane on EVERY entry path (slice 0 invariant).
-        if not str(task.get("project_id") or "").strip():
+        # A REMOTE room always HAS a project (the placement comes from it), and its
+        # target spelling must never be hashed by Home `pathlib` into an identity — so
+        # the derivation is local-only by construction.
+        if not str(task.get("project_id") or "").strip() and not is_remote_room:
             try:
                 from ouroboros.project_facts import resolve_project_id as _resolve_pid
 
@@ -843,22 +859,16 @@ def _admit_promoted_workspace(evt: dict, ctx: Any, task: dict, *, pid: str, tid:
                 task["budget_drive_root"] = str(DRIVE_ROOT)
         except Exception:
             log.warning("promote: child drive fork failed for %s", tid, exc_info=True)
-        # Preflight parity, HARD-CAPPED: this runs on the supervisor event-drain
-        # thread, so the git/toolchain snapshot gets a bounded window and degrades
-        # to a disclosed skip note instead of stalling event delivery.
-        preflight_summary = bounded_workspace_preflight(resolved_ws)
-        metadata = task.setdefault("metadata", {})
-        metadata["workspace_root"] = resolved_ws
-        metadata["workspace_preflight"] = preflight_summary
-        task["text"] = (
-            f"{task['text']}\n\n[HEADLESS_WORKSPACE]\n"
-            + compose_workspace_block(
-                workspace_root=resolved_ws,
-                workspace_mode="external",
-                memory_mode="forked",
-                workspace_preflight=preflight_summary,
-            )
-            + "[END_HEADLESS_WORKSPACE]"
+        # Preflight parity, HARD-CAPPED: this runs on the supervisor event-drain thread,
+        # so the git/toolchain snapshot gets a bounded window and degrades to a disclosed
+        # skip note instead of stalling event delivery. The seal itself is the SHARED
+        # composition, identical to the one the schedule-fire path uses.
+        seal_admitted_placement(
+            task, resolved_ref,
+            # `project_id` is what scopes the target's session key. Omitting it falls
+            # back to the workspace id, so promote would open a SECOND session for a
+            # project the gateway already has one for, instead of reusing it.
+            preflight_summary=placement_preflight_summary(resolved_ref, project_id=str(pid or "")),
         )
     return None
 
@@ -1326,8 +1336,59 @@ def _prepare_worker_task_runtime() -> None:
     import supervisor.update_merge  # noqa: F401
 
 
+def _remote_broker() -> Any:
+    """The live server-generation broker, or None on a local-only install."""
+    try:
+        from ouroboros.remote_workspace import get_remote_workspace_service
+
+        broker = get_remote_workspace_service()
+    except Exception:
+        return None
+    return broker if callable(getattr(broker, "create_worker_pipe_proxy", None)) else None
+
+
+def _worker_proxy_owner(wid: int) -> str:
+    return f"worker:{int(wid)}"
+
+
+def _new_worker_remote_proxy(broker: Any, wid: int) -> Any:
+    """Mint this worker's broker channel, RETIRING any channel it already had.
+
+    Keying by worker id is what makes respawn safe: the broker closes the dead
+    worker's endpoint as it hands out the new one, so a crashed worker never
+    leaves a second live channel behind for the poll loop to answer into.
+    """
+    if broker is None:
+        return None
+    try:
+        return broker.create_worker_pipe_proxy(_worker_proxy_owner(wid))
+    except Exception:
+        log.warning("Remote broker worker channel creation failed", exc_info=True)
+        return None
+
+
+def _close_worker_remote_proxy(broker: Any, wid: int) -> None:
+    if broker is None:
+        return
+    try:
+        broker.close_worker_pipe_proxy(_worker_proxy_owner(wid))
+    except Exception:
+        log.debug("Remote broker worker channel close failed", exc_info=True)
+
+
+def _effective_worker_start_method(broker: Any) -> str:
+    """A live broker forces `spawn`.
+
+    The broker owns threads plus OpenSSH pipe and session descriptors. Forking
+    that state into a worker would duplicate live fds into a process that must
+    never own them — so when a broker exists, workers start from a clean
+    interpreter and receive ONLY their pickle-safe Pipe endpoint.
+    """
+    return "spawn" if broker is not None else _WORKER_START_METHOD
+
+
 def worker_main(wid: int, in_q: Any, out_q: Any, repo_dir: str, drive_root: str,
-                custody_session_id: str = "") -> None:
+                custody_session_id: str = "", remote_proxy: Any = None) -> None:
     import os as _os
     # Mark this process as a worker BEFORE importing the agent/LLM stack so the
     # central network-transport policy disables system proxy resolution
@@ -1338,6 +1399,13 @@ def worker_main(wid: int, in_q: Any, out_q: Any, repo_dir: str, drive_root: str,
     # Before ANY import that resolves the update-tx marker through git_ops (see
     # _bind_worker_repo_root): a spawned child would otherwise gate on the hardcoded default repo.
     _bind_worker_repo_root(repo_dir, drive_root)
+    # The worker's ONLY remote handle: a Pipe proxy, never a transport.
+    try:
+        from ouroboros.remote_workspace import set_remote_workspace_service
+
+        set_remote_workspace_service(remote_proxy)
+    except Exception:
+        pass
     # Adopt the server's custody session id. Under the 'spawn' start method this
     # process re-imported process_custody and minted a fresh _SESSION_ID; without
     # adopting the server's id, every service/process this worker records looks
@@ -1550,9 +1618,20 @@ def _emit_task_done_terminal(
     than re-declared field by field. Three times a key was added to that
     projection and a hand-maintained mirror here was missed; a signature that
     names no cost field cannot be missed again. Callers with no reconstructed
-    cost pass nothing and the event says so instead of reporting zeros as fact."""
+    cost pass nothing and the event says so instead of reporting zeros as fact.
+
+    (RWS v2) This is also THE chokepoint for letting go of an abnormally-ended
+    task's remote session: `_finish_task_done_dispatch` covers the ordinary
+    ending, but a crash storm, a worker death and a hard timeout all pop RUNNING
+    before the event dispatcher reads it, so the sealed placement is in hand HERE
+    and nowhere downstream. Without it the binding leaks for the generation (the
+    connection reads busy forever) and the target keeps renewing the dead task's
+    lease instead of reaping its process groups."""
     if not task_id:
         return False
+    from ouroboros.remote_task_binding import release_remote_task_session
+
+    release_remote_task_session(task or {}, cancelled=True)
     try:
         chat_id = int((task or {}).get("chat_id") or 0)
     except (TypeError, ValueError):
@@ -1823,7 +1902,11 @@ def spawn_workers(n: int = 0) -> None:
     # would inherit it owned by a vanished thread.  The dedicated lifecycle lock
     # is not used by worker code and serializes competing full-pool starts/kills.
     reap_orphaned_workers()
-    _CTX = mp.get_context(_WORKER_START_METHOD)
+    broker = _remote_broker()
+    # A live broker owns OpenSSH descriptors and broker threads: forking those into a
+    # worker duplicates fds the worker must never hold, so the method is forced.
+    worker_start_method = _effective_worker_start_method(broker)
+    _CTX = mp.get_context(worker_start_method)
     event_q = get_event_q()
     events_path = DRIVE_ROOT / "logs" / "events.jsonl"
     try:
@@ -1837,7 +1920,7 @@ def spawn_workers(n: int = 0) -> None:
         {
             "ts": utc_now_iso(),
             "type": "worker_spawn_start",
-            "start_method": _WORKER_START_METHOD,
+            "start_method": worker_start_method,
             "count": count,
             "event_queue_generation": event_queue_generation(),
             "event_queue_transport": "manager",
@@ -1847,11 +1930,19 @@ def spawn_workers(n: int = 0) -> None:
     try:
         for i in range(count):
             in_q = _CTX.Queue()
+            remote_proxy = _new_worker_remote_proxy(broker, i)
             proc = _CTX.Process(target=worker_main,
                                args=(i, in_q, event_q, str(REPO_DIR), str(DRIVE_ROOT),
-                                     _current_custody_session_id()))
+                                     _current_custody_session_id(), remote_proxy))
             proc.daemon = True
-            proc.start()
+            try:
+                proc.start()
+            finally:
+                # The parent's copy of the child end is dead weight once the child
+                # holds it; leaving it open would keep the pipe alive after the
+                # worker dies and hide the EOF the broker relies on.
+                if remote_proxy is not None:
+                    remote_proxy.close_parent_copy()
             new_workers[i] = Worker(wid=i, proc=proc, in_q=in_q, busy_task_id=None)
     except Exception:
         for worker in new_workers.values():
@@ -1907,6 +1998,12 @@ def kill_workers(
         for w in WORKERS.values():
             w.proc.join(timeout=3)
         _kill_survivors()
+        # Every worker channel dies with its pool. The broker itself survives —
+        # it belongs to the server generation, not to a worker pool.
+        broker = _remote_broker()
+        if broker is not None:
+            for w in WORKERS.values():
+                _close_worker_remote_proxy(broker, w.wid)
         WORKERS.clear()
         orphaned_ids = []
         drained_ids = []
@@ -2049,11 +2146,19 @@ def respawn_worker(wid: int) -> bool:
         old = WORKERS.get(wid)
     if old is None:
         return False
+    broker = _remote_broker()
     ctx = _get_ctx()
+    if broker is not None and ctx.get_start_method() != "spawn":
+        raise RuntimeError(
+            "remote broker workers require a spawn context; respawn the full worker pool"
+        )
     in_q = ctx.Queue()
+    # Minting replaces this worker id's channel: the dead worker's endpoint is
+    # closed by the broker before the fresh one is handed out.
+    remote_proxy = _new_worker_remote_proxy(broker, wid)
     proc = ctx.Process(target=worker_main,
                        args=(wid, in_q, get_event_q(), str(REPO_DIR), str(DRIVE_ROOT),
-                             _current_custody_session_id()))
+                             _current_custody_session_id(), remote_proxy))
     proc.daemon = True
     try:
         proc.start()
@@ -2064,7 +2169,15 @@ def respawn_worker(wid: int) -> bool:
         except Exception:
             pass
         raise
+    finally:
+        # The parent's copy of the child end is dead weight once the child holds it,
+        # and on a failed start it would keep the pipe alive past the worker that
+        # never existed — either way the broker would never see EOF.
+        if remote_proxy is not None:
+            remote_proxy.close_parent_copy()
     installed = False
+    # Swap under _queue_lock (an RLock — safe even when the caller already holds
+    # it) so a concurrent assign_tasks cannot enqueue into the slot mid-swap.
     with _queue_lock:
         if WORKERS.get(wid) is old:
             WORKERS[wid] = Worker(wid=wid, proc=proc, in_q=in_q, busy_task_id=None)
@@ -2141,6 +2254,7 @@ def _drop_cancelled_pending() -> None:
             return {}
     survivors: List[Dict[str, Any]] = []
     dropped: List[str] = []
+    dropped_tasks: List[Dict[str, Any]] = []
     for t in PENDING:
         tid = str(t.get("id") or "")
         status = ""
@@ -2226,13 +2340,22 @@ def _drop_cancelled_pending() -> None:
             # must resolve to what actually happened (completion wins).
             _emit_task_done_terminal(t, tid, stored_status, cost_fields=cost_fields)
             dropped.append(tid)
+            dropped_tasks.append(t)
             continue
         if status in _TRULY_TERMINAL_STATUSES:
             dropped.append(tid)
+            dropped_tasks.append(t)
             continue
         survivors.append(t)
     if dropped:
         PENDING[:] = survivors
+        # A task dropped as ALREADY TERMINAL never reaches `_emit_task_done_terminal`
+        # (only the cancel-requested arm above does), so its remote binding is
+        # released here or not at all.
+        from ouroboros.remote_task_binding import release_remote_task_session
+
+        for t in dropped_tasks:
+            release_remote_task_session(t, cancelled=True)
         append_jsonl(
             DRIVE_ROOT / "logs" / "supervisor.jsonl",
             {"ts": utc_now_iso(), "type": "pending_cancelled_dropped", "task_ids": dropped},
@@ -2295,9 +2418,67 @@ def _cancel_unauthorized_evolution(task: Dict[str, Any], reason: str) -> bool:
     return True
 
 
+def _bind_pending_remote_sessions() -> None:
+    """Bind every pending REMOTE task to its target session BEFORE dispatch.
+
+    Assignment is the one moment that happens exactly once per attempt, in the
+    generation that will run the work; see `ouroboros/remote_task_binding.py` for
+    why the binding lives here and not at task creation or inside the broker.
+
+    The admission itself runs OUTSIDE `_queue_lock` — it talks to the target over
+    SSH, and that lock also serves cancels, heartbeats and terminal writes. The
+    lock is taken only to snapshot the candidates and to drop a refused task,
+    mirroring how the creation surface resolves a placement outside the lock and
+    fences it under it.
+    """
+    from ouroboros.remote_task_binding import (
+        bind_remote_task_session,
+        remote_binding_pending,
+    )
+    from supervisor.state import budget_remaining
+
+    with _queue_lock:
+        candidates = [
+            t for t in PENDING
+            if remote_binding_pending(t) and not isinstance(t.get("_budget_pause"), dict)
+        ]
+    if not candidates:
+        # The ordinary tick: an in-memory read and nothing else. The budget is read
+        # only when there is remote work to admit, so a local-only install pays no
+        # extra state load per loop pass.
+        return
+    try:
+        if budget_remaining(load_state(), strict=True) <= 0:
+            # No session is opened for work the budget gate is about to stop, so
+            # the budget's own terminal projection can never leave a bound task
+            # behind — it only ever sees unbound ones.
+            return
+    except Exception:
+        return
+    for task in candidates:
+        try:
+            outcome = bind_remote_task_session(task)
+        except Exception:
+            # A binding failure must never become a SUPERVISOR crash: the loop
+            # counts three of those and then stops assigning work at all. The task
+            # stays unbound, so the candidate gate simply keeps it queued.
+            log.warning("Remote session binding raised for %s", task.get("id"), exc_info=True)
+            continue
+        if str(outcome.get("status") or "") != "refused":
+            continue
+        task_id = str(task.get("id") or "")
+        with _queue_lock:
+            PENDING[:] = [t for t in PENDING if str(t.get("id") or "") != task_id]
+        _write_failure_result(task_id, reason=str(outcome.get("message") or ""))
+        _emit_task_done_terminal(
+            task, task_id, "failed", reason_code=str(outcome.get("code") or ""),
+        )
+
+
 def assign_tasks() -> None:
     from supervisor import queue
     from supervisor.state import budget_remaining, EVOLUTION_BUDGET_RESERVE
+    _bind_pending_remote_sessions()
     with _queue_lock:
         st = load_state()
         try:
@@ -2414,6 +2595,7 @@ def assign_tasks() -> None:
             queue.persist_queue_snapshot(reason="evolution_blocked_light")
 
         from ouroboros.project_lease import candidate_is_leasable, running_project_ids
+        from ouroboros.remote_task_binding import remote_binding_pending
         from ouroboros.config import get_max_active_subagents_per_root
 
         def _running_subagent_count(root_task_id: str) -> int:
@@ -2472,6 +2654,11 @@ def assign_tasks() -> None:
                     if str(candidate.get("type") or "") == "evolution" and remaining < EVOLUTION_BUDGET_RESERVE:
                         continue
                     if not candidate_is_leasable(candidate, leased):
+                        continue
+                    # A remote task whose session is still being bound (or is
+                    # retrying) WAITS: dispatching it would hand the worker a
+                    # task the broker has never heard of.
+                    if remote_binding_pending(candidate):
                         continue
                     if str(candidate.get("delegation_role") or "") == "subagent":
                         root_task_id = str(candidate.get("root_task_id") or "")

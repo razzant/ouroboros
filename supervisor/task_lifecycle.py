@@ -15,6 +15,8 @@ from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional, Tuple
 
 from ouroboros.utils import utc_now_iso
+from ouroboros.workspace_admission import PLACEMENT_FENCE_KEY, placement_fence_stale_reason
+from ouroboros.workspace_ref import isolate_sealed_placement
 
 # Cancellation settlement PUBLICATION (typed outcome vocabulary, cancelled
 # result fields, owed-before-settle registration, stored-truth publication,
@@ -22,6 +24,17 @@ from ouroboros.utils import utc_now_iso
 # code boundary exactly like supervisor.queue_transitions. Imported here so
 # this module keeps ONE public surface for callers, tests, and the
 # supervisor.queue re-exports.
+from supervisor.cancel_custody_ledger import (  # noqa: F401 -- re-exported
+    _queue_module,
+    _active_intent,
+    _reaping_owner_abandoned,
+    _recover_stranded_reaping_slot,
+    _claim_intent,
+    _settle_intent,
+    _release_intent_claim,
+    _intent_outcome_fields,
+    _restore_custody,
+)
 from supervisor.cancel_publication import (  # noqa: F401 -- intentional public re-exports
     CANCEL_ALREADY_SETTLED,
     CANCEL_CANCELLED,
@@ -53,15 +66,25 @@ BUDGET_ROOT_FENCES: Dict[str, Dict[str, Any]] = {}
 # ago; the registry is per-process by design (a restart has no live descendants to
 # admit, and terminal task results are the durable truth).
 CANCELLED_ROOT_FENCES: Dict[str, str] = {}
-_CANCELLED_ROOT_FENCE_CAP = 4096
-_CANCELLED_ROOT_FENCE_GRACE_SEC = 300.0
+
+
 # Ids fenced by cascades that are STILL RUNNING. Pruning protects the union, not
 # just the caller's own set: a second large cascade could otherwise push the cap
 # over and evict an older in-flight cascade's fences, re-opening admission into a
 # tree that is still being torn down. Add-only within a cascade; the whole entry
 # is dropped when that cascade returns.
 _ACTIVE_CASCADE_FENCES: Dict[str, set[str]] = {}
+
+
+_CANCELLED_ROOT_FENCE_CAP = 4096
+
+
+_CANCELLED_ROOT_FENCE_GRACE_SEC = 300.0
+
+
 _CASCADE_TOKEN_SEQ = itertools.count()
+
+
 
 
 def _next_cascade_token(task_id: str) -> str:
@@ -143,6 +166,58 @@ def root_cancellation_fenced(task: Dict[str, Any], root_task_id: str = "") -> bo
     return False
 
 
+def apply_late_admission_fences(task: Dict[str, Any]) -> str:
+    """The checks that must run at the LAST moment before a task becomes runnable.
+
+    ``enqueue_task`` calls this under ``_queue_lock``, after the identity/project/budget/
+    acceptance fences and immediately before the append. Two things can only be judged
+    here, because both concern events that happen DURING admission:
+
+    1. **Cancellation owns an in-flight admission.** A creation surface resolves the
+       placement, writes the durable SCHEDULED record, and only then enqueues. If the
+       owner cancels inside that window the durable record is cancel-latched, and a task
+       that appeared in the queue after being cancelled would be the worst kind of ghost:
+       one the owner believes is gone. The durable record is the lifecycle authority
+       (``task_results`` keeps it monotonic and cancel-sticky), so it decides.
+    2. **The placement fence** (RWSB2-05): a schedule resolves its placement at fire
+       time, and the owner can delete the project, rebind it, or retire the connection
+       before insertion. A stale placement is REFUSED, never re-resolved — re-resolving
+       would let a rebind retroactively move work scheduled against the previous target.
+
+    Finally the sealed placement payload is ISOLATED from the caller's dict, so a caller
+    that keeps mutating the task it handed over cannot rewrite the placement of a task
+    that is already queued.
+
+    Returns the typed reason (also latched onto the task) or "".
+    """
+    q = _queue_module()
+    task_id = str(task.get("id") or "").strip()
+    if task_id:
+        from ouroboros.task_results import (
+            STATUS_CANCEL_REQUESTED,
+            _TRULY_TERMINAL_STATUSES,
+            load_task_result,
+        )
+
+        try:
+            durable = str((load_task_result(q.DRIVE_ROOT, task_id) or {}).get("status") or "")
+        except Exception:
+            durable = ""
+        if durable == STATUS_CANCEL_REQUESTED or durable in _TRULY_TERMINAL_STATUSES:
+            task["_admission_blocked"] = "task_cancelled_during_admission"
+            task["_durable_status"] = durable
+            return "task_cancelled_during_admission"
+    fence = task.get(PLACEMENT_FENCE_KEY)
+    if isinstance(fence, dict):
+        stale = placement_fence_stale_reason(q.DRIVE_ROOT, fence)
+        if stale:
+            task["_admission_blocked"] = stale
+            task["_project_id"] = str(fence.get("project_id") or "")
+            return stale
+    isolate_sealed_placement(task)
+    return ""
+
+
 def apply_budget_root_admission_fence(task: Dict[str, Any], root_task_id: str) -> bool:
     """Reject new work while a root is explicitly budget-paused OR being cancelled.
 
@@ -220,10 +295,66 @@ def restore_queue_fences(
     return fenced_roots, malformed_acceptance, malformed_budget
 
 
-def _queue_module():
-    from supervisor import queue
 
-    return queue
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+def _release_remote_task_session(task: Dict[str, Any], *, cancelled: bool) -> None:
+    """Release a cancelled task's remote binding, fail-soft.
+
+    A CANCEL reaches the target (killing the task's process groups); an ordinary
+    terminal release only drops the lease and the Home import staging. Conflating
+    them is how a cancelled task keeps working abroad. Swallowing is correct for
+    the same reason as `_signal_remote_admission_cancel`: a local task has no
+    binding at all, and a cancel must not fail because this process has no broker.
+    """
+    if not isinstance(task, dict) or not task:
+        return
+    try:
+        from ouroboros.remote_task_binding import release_remote_task_session
+
+        release_remote_task_session(task, cancelled=cancelled)
+    except Exception:
+        log.debug("Remote session release failed for %s", task.get("id"), exc_info=True)
+
+
+def _signal_remote_admission_cancel(task_id: str) -> bool:
+    """Tell the broker to abandon an admission that is already in flight.
+
+    Best effort ON PURPOSE, and swallowing is the correct behaviour here: a cancel
+    must never fail because no broker is registered in this process (the common
+    case — the task was never remote), and it must never block, because the owner
+    asked for a stop. The durable latch is what GUARANTEES the task cannot appear
+    in the queue afterwards; this is what makes the stop reach the target too.
+    """
+
+    try:
+        from ouroboros.remote_workspace import get_remote_workspace_service
+
+        service = get_remote_workspace_service()
+    except Exception:
+        return False
+    cancel = getattr(service, "cancel_admission", None)
+    if not callable(cancel):
+        return False
+    try:
+        return bool(cancel(task_id))
+    except Exception:
+        return False
+
+
 
 
 def record_scheduled_admission(
@@ -756,198 +887,20 @@ def _worker_possibly_alive(worker: Any) -> bool:
         return True
 
 
-def _active_intent(q: Any, task_id: str) -> Dict[str, Any]:
-    """The durable intent row for this task, or ``{}`` (fail-soft)."""
-    try:
-        from ouroboros.cancel_intents import active_intent
-
-        return active_intent(q.DRIVE_ROOT, task_id) or {}
-    except Exception:
-        log.debug("cancel-intent read failed for %s", task_id, exc_info=True)
-        return {}
 
 
-def _reaping_owner_abandoned(intent: Dict[str, Any]) -> bool:
-    """Whether a ``reaping`` slot's custody owner is provably gone.
-
-    The ONLY takeover signal. A slot marked by the REAPER carries no claim, and a
-    live custody's claim is fresh — neither is taken. An abandoned CLAIM (dead
-    process or aged past ``CLAIM_STALE_SEC``) names a custody attempt that will
-    never come back, and leaving its marker in place skips that worker slot for
-    the rest of the process's life while the watchdog re-feeds the same intent
-    into a permanent ``failed``.
-    """
-    try:
-        from ouroboros.cancel_intents import claim_is_abandoned
-
-        return bool(intent) and claim_is_abandoned(intent)
-    except Exception:
-        log.debug("cancel-intent abandonment check failed", exc_info=True)
-        return False
 
 
-def _recover_stranded_reaping_slot(q: Any, task_id: str, intent: Dict[str, Any]) -> bool:
-    """Clear (and respawn) a worker slot a DEAD custody attempt left ``reaping``.
-
-    Mirrors the reaper's own self-heal: assignment, ``ensure_workers_healthy``
-    and the crash detector all skip a ``reaping`` slot, so a marker whose owner
-    crashed removes a worker from the pool permanently. Gated on the same
-    abandoned-claim proof as the takeover — the reaper's own markers are never
-    touched.
-    """
-    if not _reaping_owner_abandoned(intent):
-        return False
-    from supervisor import workers
-
-    target = None
-    with q._queue_lock:
-        for worker in list(workers.WORKERS.values()):
-            if worker.busy_task_id == task_id and getattr(worker, "reaping", False):
-                target = worker
-                break
-        if target is None:
-            return False
-        try:
-            alive = bool(target.proc.is_alive())
-        except Exception:
-            alive = False
-        if alive:
-            # The process outlived its custody: releasing the marker alone would
-            # hand a live process back to assignment, so leave the slot owned and
-            # let the next custody attempt kill it.
-            return False
-    log.warning(
-        "Recovering worker slot %s stranded at reaping by an abandoned cancellation custody (task %s)",
-        getattr(target, "wid", "?"), task_id,
-    )
-    try:
-        workers.respawn_worker(target.wid)
-    except Exception:
-        log.warning("Respawn of stranded slot for %s failed; clearing the marker", task_id, exc_info=True)
-        with q._queue_lock:
-            slot = workers.WORKERS.get(target.wid)
-            if slot is not None:
-                slot.reaping = False
-    return True
 
 
-def _claim_intent(q: Any, task_id: str) -> Dict[str, Any]:
-    """Claim the durable intent for this custody attempt.
-
-    Called BEFORE any custody mutation (GR2-2 claim-first): a refused claim
-    (another LIVE custody owns the teardown) comes back with
-    ``claim_refused: True`` and the caller exits ``failed`` having touched
-    nothing — the interleaving where a capture-miss loser settled in parallel
-    with the capture winner is structurally impossible once the claim is the
-    first move.
-
-    The two remaining shapes are deliberately DISTINCT (AR2-2):
-
-    - ``{}`` means NO ACTIVE INTENT exists — the legacy/no-intent path. Custody
-      may proceed: capture under the queue lock is the mutual exclusion for a
-      task nobody minted an intent for (pre-migration legacy latches, direct
-      custody callers), and the later ``_settle_intent`` no-ops harmlessly.
-    - A claim attempt that RAISED cannot tell whether a live owner exists, so
-      it is treated as refused: proceeding would settle without the exclusivity
-      the fence exists to prove.
-    """
-    try:
-        from ouroboros.cancel_intents import claim_intent
-
-        return claim_intent(q.DRIVE_ROOT, task_id, owner="cancel_task_custody") or {}
-    except Exception:
-        log.warning("cancel-intent claim failed for %s; refusing custody", task_id, exc_info=True)
-        return {"claim_refused": True, "claim_error": "claim_read_failed"}
 
 
-def _settle_intent(
-    q: Any, task_id: str, *, outcome: str, detail: str = "",
-    intent: Optional[Dict[str, Any]] = None,
-) -> None:
-    """Settle (remove) the durable intent with its terminal outcome (fail-soft).
-
-    ``intent`` is the row this custody CLAIMED: its generation fences the write,
-    so a custody attempt that was taken over cannot delete an intent the new
-    owner is still working.
-
-    CASCADE OWNERSHIP (GR3-1, superseding the GR2-1e live-descendants gate): a
-    ``scope=cascade`` intent is the WHOLE TREE's watchdog replay trigger AND
-    the postcondition's summary obligation — per-task custody NEVER settles
-    it, even when every descendant is already dead. A per-task settle over a
-    dead-descendants cascade root would skip the tree's one owed summary (the
-    incident's replay-to-silence shape). The refusal is enforced ATOMICALLY
-    inside ``cancel_intents.settle_intent`` against the CURRENT durable scope
-    — so a stale claim snapshot of an intent widened to cascade mid-flight
-    cannot settle it either — and this caller's fenced claim is released in
-    the same write, keeping the intent watchdog-replayable.
-    """
-    try:
-        from ouroboros.cancel_intents import settle_intent
-
-        settle_intent(
-            q.DRIVE_ROOT, task_id, outcome=outcome, detail=detail,
-            expected_generation=(intent or {}).get("generation"),
-            request_id=str((intent or {}).get("request_id") or ""),
-        )
-    except Exception:
-        log.debug("cancel-intent settle failed for %s", task_id, exc_info=True)
 
 
-def _release_intent_claim(
-    q: Any, task_id: str, *, error: str,
-    expected_generation: Optional[int] = None, request_id: str = "",
-    intent: Optional[Dict[str, Any]] = None,
-) -> None:
-    """Return a claimed intent to ``requested`` so the watchdog retries (fail-soft)."""
-    if intent is not None:
-        expected_generation = intent.get("generation")
-        request_id = str(intent.get("request_id") or "")
-    try:
-        from ouroboros.cancel_intents import release_claim
-
-        release_claim(
-            q.DRIVE_ROOT, task_id, error=error,
-            expected_generation=expected_generation, request_id=request_id,
-        )
-    except Exception:
-        log.debug("cancel-intent claim release failed for %s", task_id, exc_info=True)
 
 
-def _intent_outcome_fields(intent: Dict[str, Any]) -> Dict[str, Any]:
-    """``parent_decision`` written only at OUTCOME (phase A): a parent-requested
-    cancel stamps its decision on the SETTLED cancelled result, never at intent
-    time — so a child that finished first keeps a decision-free completed record."""
-    if not isinstance(intent, dict) or not intent.get("requested_by"):
-        return {}
-    fields: Dict[str, Any] = {"parent_decision": "cancelled"}
-    if intent.get("reason"):
-        fields["parent_decision_reason"] = str(intent.get("reason") or "")
-    return fields
 
 
-def _restore_custody(
-    task_id: str, *, pending: Any = None, worker: Any = None,
-    worker_reaping: bool = False,
-) -> None:
-    """Release custody after a failed cancellation.
-
-    A captured PENDING task is put back in the queue. A RUNNING task needs no
-    re-insert — capture never removed its row, so there is no ghost state to
-    reconstruct; releasing the slot marker is the whole restore (a stranded
-    ``reaping`` slot is skipped by assign and the health check forever).
-
-    ``worker_reaping`` is the marker value to restore. The default False is
-    right for the OWNING custody (it set the marker itself and its claim is
-    released for the watchdog); a LOSER whose claim was refused passes the
-    as-found value instead, because a True it found belongs to the concurrent
-    winner still mid-kill (AR2-11).
-    """
-    q = _queue_module()
-    with q._queue_lock:
-        if pending is not None and all(str(t.get("id")) != task_id for t in q.PENDING):
-            q.PENDING.append(pending)
-        if worker is not None:
-            worker.reaping = worker_reaping
 
 
 def _finish_captured_pending(
@@ -980,6 +933,10 @@ def _finish_captured_pending(
         return CANCEL_ALREADY_SETTLED
     _settle_intent(q, task_id, outcome="cancelled", detail="cancelled while pending", intent=intent)
     q._emit_cancel_task_done(task, task_id, cost_fields=cost_fields)
+    # A pending remote task may already be BOUND (assignment binds before
+    # dispatch), so its session goes with it or the connection reads as busy
+    # forever.
+    _release_remote_task_session(task, cancelled=True)
     q.persist_queue_snapshot(reason="cancel_pending")
     return CANCEL_CANCELLED
 
@@ -1008,6 +965,11 @@ def _finish_captured_running(
     from ouroboros.task_results import STATUS_CANCELLED, load_task_result, write_task_result
 
     task = meta.get("task") if isinstance(meta.get("task"), dict) else {}
+
+    # Reach the TARGET before Home's own teardown: killing the worker only stops
+    # Home, and a cancelled remote task whose process groups keep running on
+    # another host is the emergency-stop invariant read too narrowly.
+    _release_remote_task_session(task, cancelled=True)
 
     # ---- phase 2: kill and join OUTSIDE the lock ---------------------------
     # EVERY exit from this phase restores custody: an exception from the platform
@@ -1280,7 +1242,8 @@ def _finalize_cancel_intent_on_miss(
     """
     q = _queue_module()
     from ouroboros.task_results import (
-        STATUS_CANCEL_REQUESTED, STATUS_CANCELLED, load_task_result, write_task_result,
+        STATUS_CANCEL_REQUESTED, STATUS_CANCELLED, STATUS_SCHEDULED,
+        load_task_result, write_task_result,
     )
 
     try:
@@ -1288,7 +1251,26 @@ def _finalize_cancel_intent_on_miss(
         if not active:
             active = _active_intent(q, task_id)
         existing = load_task_result(q.DRIVE_ROOT, task_id) or {}
-        legacy_latch = str(existing.get("status") or "") == STATUS_CANCEL_REQUESTED
+        durable = str(existing.get("status") or "")
+        legacy_latch = durable == STATUS_CANCEL_REQUESTED
+        if durable in {STATUS_SCHEDULED, STATUS_CANCEL_REQUESTED}:
+            # For a REMOTE placement the durable latch alone is not enough: the
+            # admission may already be talking to the target, so the broker's
+            # in-flight admission is signalled too and the target kills whatever
+            # the task already started. Otherwise the owner's cancel would stop
+            # Home while remote work continued — the emergency-stop invariant
+            # read narrowly.
+            _signal_remote_admission_cancel(task_id)
+        if durable == STATUS_SCHEDULED:
+            write_task_result(
+                q.DRIVE_ROOT, task_id, STATUS_CANCEL_REQUESTED,
+                **q._cancel_result_fields(
+                    existing, existing=existing,
+                    result="Task cancelled while its admission was still in flight.",
+                ),
+            )
+            q.persist_queue_snapshot(reason="cancel_admission_window")
+            return CANCEL_CANCELLED
         if not active and not legacy_latch:
             return CANCEL_NOT_FOUND
         if not existing:
@@ -1589,6 +1571,7 @@ def _append_cascade_snapshot_log(
 # unchanged. The dependency is one-way: that module imports nothing from here.
 from supervisor.queue_transitions import (  # noqa: E402, F401 -- intentional public re-exports
     _live_descendants_locked,
+    _live_project_task_ids,
     clear_acceptance_fence_for_root,
     resume_budget_paused_task,
     resume_project_deletions,

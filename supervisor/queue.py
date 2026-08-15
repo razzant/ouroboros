@@ -46,7 +46,8 @@ from supervisor.evolution_lifecycle import (
     start_evolution_campaign,  # noqa: F401 -- historical queue API re-export
 )
 from supervisor.task_lifecycle import (  # noqa: F401 -- public queue API re-exports
-    BUDGET_ROOT_FENCES, apply_budget_root_admission_fence, cancel_task_by_id,
+    BUDGET_ROOT_FENCES, apply_budget_root_admission_fence,
+    apply_late_admission_fences, cancel_task_by_id,
     clear_acceptance_fence_for_root, record_scheduled_admission,
     resume_budget_paused_task, restore_queue_fences, transition_acceptance_fence,
 )
@@ -298,6 +299,10 @@ def enqueue_task(
             if ADMISSION_RESERVATIONS.get(task_id) == admission_token:
                 ADMISSION_RESERVATIONS.pop(task_id, None)
             return t
+        # RWSB2-05 — the placement fence, revalidated at the LAST moment before the task
+        # becomes runnable, inside the same lock that owns the transition.
+        if apply_late_admission_fences(t):
+            return t
         QUEUE_SEQ_COUNTER_REF["value"] += 1
         seq = QUEUE_SEQ_COUNTER_REF["value"]
         t.setdefault("priority", _task_priority(str(t.get("type") or "")))
@@ -529,6 +534,13 @@ def _task_from_schedule(record: Dict[str, Any]) -> Dict[str, Any]:
         "session_id": session_id,
         "actor_id": "scheduler",
         "delegation_role": "root",
+        # (RWS v2 §7) The template's ONLY placement input: which project this work belongs
+        # to. Where that project lives is resolved when the schedule FIRES, never persisted
+        # in the row — `RESERVED_TEMPLATE_FIELDS` rejects a template that tries to. Carried
+        # VERBATIM (no strip/normalize): fire-time validation must judge what the row
+        # actually says, so a stored `"PROD"` cannot quietly become the live `prod`
+        # project's work, and the refusal record shows the owner the id they wrote.
+        "project_id": str(template.get("project_id") or ""),
         "metadata": metadata,
     }
     for key in ("attachments", "context", "expected_output", "constraints", "deadline_at"):
@@ -609,31 +621,17 @@ def check_scheduled_tasks() -> None:
                 if str(record.get("skill") or "") in collision_names:
                     continue
             task = _task_from_schedule(record)
-            try:
-                from ouroboros.task_results import STATUS_SCHEDULED, write_task_result
+            # The fire-time adapter owns placement resolution + the durable SCHEDULED
+            # record; the queue keeps owning admission. (RWS v2 §7)
+            from supervisor.scheduled_dispatch import dispatch_scheduled_task
 
-                write_task_result(
-                    DRIVE_ROOT,
-                    str(task["id"]),
-                    STATUS_SCHEDULED,
-                    root_task_id=str(task["id"]),
-                    actor_id="scheduler",
-                    delegation_role="root",
-                    description=str(task.get("description") or task.get("text") or ""),
-                    expected_output=str(task.get("expected_output") or ""),
-                    constraints=str(task.get("constraints") or ""),
-                    context=str(task.get("context") or ""),
-                    allowed_resources=task.get("allowed_resources") if isinstance(task.get("allowed_resources"), dict) else {},
-                    deadline_at=str(task.get("deadline_at") or ""),
-                    task_contract=task.get("task_contract") if isinstance(task.get("task_contract"), dict) else {},
-                    result="Scheduled task queued.",
-                    metadata=dict(task.get("metadata") or {}),
-                    schedule_id=schedule_id,
-                    schedule_name=str(record.get("name") or ""),
-                )
-            except Exception:
-                log.debug("Failed to persist scheduled task result before enqueue", exc_info=True)
-            admitted = enqueue_task(task)
+            admitted = dispatch_scheduled_task(
+                task,
+                drive_root=DRIVE_ROOT,
+                schedule_id=schedule_id,
+                schedule_name=str(record.get("name") or ""),
+                enqueue=enqueue_task,
+            )
             record["last_run_at"] = now.isoformat()
             record["last_task_id"] = task["id"]
             record_scheduled_admission(task, admitted, record)
