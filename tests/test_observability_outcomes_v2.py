@@ -24,7 +24,7 @@ from ouroboros.outcomes import (
     normalize_outcome_axes,
     refresh_verification_ledger_artifacts,
 )
-from ouroboros.utils import sanitize_tool_args_for_log
+from ouroboros.observability import sanitize_tool_args_for_log
 
 
 def _read_gzip_json(path):

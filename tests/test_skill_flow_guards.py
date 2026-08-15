@@ -7,7 +7,7 @@ import queue
 from ouroboros import loop as loop_mod
 from ouroboros.contracts.task_constraint import TaskConstraint, normalize_task_constraint
 from ouroboros.skill_review_runner import _heal_mode
-from ouroboros.utils import sanitize_tool_args_for_log
+from ouroboros.observability import sanitize_tool_args_for_log
 
 
 def test_task_constraint_controls_heal_mode_not_prompt_text():

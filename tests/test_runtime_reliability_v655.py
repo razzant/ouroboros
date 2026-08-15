@@ -178,7 +178,7 @@ def test_classify_safety_parse_failure_classes():
 
 
 def test_registry_detects_safety_mode_self_lowering():
-    from ouroboros.tools.registry import _detect_safety_mode_self_lowering as det
+    from ouroboros.tools.shell_guards import _detect_safety_mode_self_lowering as det
 
     assert det("curl -x post http://127.0.0.1:8765/api/owner/safety-mode -d off")
     assert det("python -c \"...ouroboros_safety_mode...\" >> settings.json".lower())
