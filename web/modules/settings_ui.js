@@ -10,6 +10,7 @@ import { renderSubagentsSection } from './subagents_settings.js';
 // narrower word named only one of their uses.
 const SETTINGS_TABS = [
     { value: 'providers', label: 'Providers' },
+    { value: 'connections', label: 'Connections' },
     { value: 'secrets', label: 'Secrets' },
     { value: 'models', label: 'Models' },
     { value: 'agents', label: 'Agents' },
@@ -319,6 +320,15 @@ export function renderSettingsPage() {
                         <div class="settings-inline-note">Adds a password wall only for non-localhost app and API access. If you expose Ouroboros on LAN or Docker, set a password before sharing the URL.</div>
                         <div id="settings-lan-hint" class="settings-lan-hint" hidden></div>
                     </div>
+                </section>
+
+                <section class="settings-panel" data-settings-panel="connections">
+                    <div class="settings-section-copy">
+                        Saved SSH aliases are owner metadata. Ouroboros uses your local
+                        OpenSSH configuration and agent; it never stores private keys or SSH
+                        passwords. This surface is owner-authenticated even on localhost.
+                    </div>
+                    <div id="settings-connections-root"></div>
                 </section>
 
                 <section class="settings-panel" data-settings-panel="secrets">
@@ -875,6 +885,10 @@ export function bindSettingsTabs(root, options = {}) {
         tabs.forEach((button) => {
             const isActive = button.dataset.settingsTab === tabName;
             button.classList.toggle('active', isActive);
+            // renderTabStrip emits role="tab" + aria-selected, so the attribute
+            // has to follow the class or a screen reader keeps announcing the
+            // first-rendered tab as the selected one.
+            button.setAttribute('aria-selected', isActive ? 'true' : 'false');
             if (isActive) activeButton = button;
         });
         panels.forEach((panel) => {

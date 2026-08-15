@@ -122,15 +122,53 @@ export const apiClient = {
         payload_root: payloadRoot,
     }),
     skillGrants: (skill, items) => jsonPost(`/api/skills/${encodeURIComponent(skill)}/grants`, { items }),
-    chatHistory: (limit = 1000) => fetchJson(`/api/chat/history?limit=${encodeURIComponent(limit)}`, { cache: 'no-store' }),
     projectFromTask: (taskId, id, name, objectiveHint = '') => jsonPost('/api/projects/from-task', { task_id: taskId, id, name, objective_hint: objectiveHint }),
     /** @param {import('./api_types.js').ProjectCreateRequest} payload */
     projectCreate: (payload) => jsonPost('/api/projects', payload),
-    projectUpdate: (projectId, name) => jsonPost(`/api/projects/${encodeURIComponent(projectId)}/update`, { name }),
+    // A bare string stays the rename shorthand; an object is forwarded verbatim so
+    // additive registry fields need no new client method. The server's allowed-field
+    // set remains the authority and answers a typed 400 for anything it does not take.
+    // A remote REBIND rides this same door as {connection_id, remote_root}: a second
+    // named method would be a second client-side spelling of one endpoint.
+    /** @param {string|import('./api_types.js').ProjectUpdateRequest} update */
+    projectUpdate: (projectId, update) => jsonPost(
+        `/api/projects/${encodeURIComponent(projectId)}/update`,
+        typeof update === 'string' ? { name: update } : (update || {}),
+    ),
     /** @returns {Promise<import('./api_types.js').ProjectDeleteResponse>} */
     projectDelete: (projectId) => jsonPost(`/api/projects/${encodeURIComponent(projectId)}/delete`, {}),
     /** @returns {Promise<import('./api_types.js').FsDirsResponse>} */
     fsDirs: (path = '') => fetchJson(`/api/fs/dirs${path ? `?path=${encodeURIComponent(path)}` : ''}`, { cache: 'no-store' }),
+    // Owner-only connections surface (RWS v2, D6). Every route below is behind the
+    // owner session gate (ouroboros/server_auth.py); a build without the ssh
+    // transport answers a typed 503 `remote_transport_unavailable`.
+    /** @returns {Promise<import('./api_types.js').ConnectionListResponse>} */
+    connections: () => fetchJson('/api/owner/connections', { cache: 'no-store' }),
+    /**
+     * @param {import('./api_types.js').ConnectionAddRequest} payload
+     * @returns {Promise<import('./api_types.js').ConnectionActionResponse>}
+     */
+    connectionAdd: (payload) => jsonPost('/api/owner/connections', payload),
+    /** @returns {Promise<import('./api_types.js').ConnectionActionResponse>} */
+    connectionTest: (connectionId) => jsonPost(`/api/owner/connections/${encodeURIComponent(connectionId)}/test`, {}),
+    /** @returns {Promise<import('./api_types.js').ConnectionActionResponse>} */
+    connectionBootstrap: (connectionId) => jsonPost(`/api/owner/connections/${encodeURIComponent(connectionId)}/bootstrap`, {}),
+    /** @returns {Promise<import('./api_types.js').ConnectionActionResponse>} */
+    connectionReconnect: (connectionId) => jsonPost(`/api/owner/connections/${encodeURIComponent(connectionId)}/reconnect`, {}),
+    // Retrust demands confirm:true plus the exact old/new identity pair a live probe
+    // observed; the gateway refuses a blind re-pin.
+    /** @returns {Promise<import('./api_types.js').ConnectionActionResponse>} */
+    connectionRetrust: (connectionId, payload) => jsonPost(`/api/owner/connections/${encodeURIComponent(connectionId)}/retrust`, payload),
+    /** @returns {Promise<import('./api_types.js').ConnectionActionResponse>} */
+    connectionRetire: (connectionId) => fetchJson(`/api/owner/connections/${encodeURIComponent(connectionId)}`, { method: 'DELETE' }),
+    /** @returns {Promise<import('./api_types.js').ConnectionDirsResponse>} */
+    connectionDirs: (connectionId, path = '') => fetchJson(
+        `/api/owner/connections/${encodeURIComponent(connectionId)}/dirs${path ? `?path=${encodeURIComponent(path)}` : ''}`,
+        { cache: 'no-store' },
+    ),
+    // Middleware route (ouroboros/server_auth.py), not a gateway endpoint: exchanges
+    // the Network Password for an HttpOnly owner session cookie.
+    ownerLogin: (password) => jsonPost('/auth/login', { password, next: '/' }),
     updateStatus: () => fetchJson('/api/update/status', { cache: 'no-store' }),
     updateCheck: () => jsonPost('/api/update/check', {}),
     /** @returns {Promise<import('./api_types.js').UpdatePreflightResponse>} */

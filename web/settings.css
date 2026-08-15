@@ -76,6 +76,152 @@
     margin: 0;
 }
 
+/* Settings → Connections (RWS v2, D6). */
+.connections-card {
+    gap: 18px;
+}
+
+.connections-add-form {
+    display: grid;
+    grid-template-columns: minmax(160px, 1fr) minmax(180px, 1.2fr) auto;
+    align-items: end;
+    gap: 12px;
+}
+
+.connection-auth-form {
+    display: grid;
+    grid-template-columns: minmax(220px, 420px) auto;
+    align-items: end;
+    gap: 12px;
+}
+
+/* The honest "no ssh transport in this build" state: a settled note, never a
+   spinner. Amber, because nothing here is in progress and nothing is broken. */
+.connection-transport-note {
+    padding: 9px 12px;
+    border: 1px solid var(--amber-dim);
+    border-radius: var(--radius-sm);
+    color: var(--tone-warn);
+    background: var(--amber-dim);
+    font-size: 12px;
+}
+
+.connections-list {
+    display: flex;
+    flex-direction: column;
+    gap: 10px;
+}
+
+.connection-row {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 16px;
+    padding: 13px 14px;
+    border: 1px solid var(--surface-border);
+    border-radius: var(--radius);
+    background: var(--surface-control);
+}
+
+.connection-row-body {
+    display: flex;
+    min-width: 0;
+    flex: 1;
+    flex-direction: column;
+    gap: 8px;
+}
+
+.connection-row-main,
+.connection-row-actions {
+    display: flex;
+    align-items: center;
+    flex-wrap: wrap;
+    gap: 9px;
+}
+
+.connection-state {
+    color: var(--text-muted);
+    font-size: 12px;
+}
+
+.connection-state[data-tone="ready"],
+.connection-state[data-tone="ok"] {
+    color: var(--tone-ok);
+}
+
+.connection-state[data-tone="connecting"],
+.connection-state[data-tone="info"] {
+    color: var(--accent-light);
+}
+
+.connection-state[data-tone="degraded"],
+.connection-state[data-tone="disconnected"],
+.connection-state[data-tone="warn"] {
+    color: var(--tone-warn);
+}
+
+.connection-details {
+    color: var(--text-muted);
+    font-size: 12px;
+}
+
+.connection-details summary {
+    cursor: pointer;
+    width: max-content;
+}
+
+.connection-details dl,
+.connection-details pre {
+    margin: 8px 0 0;
+}
+
+.connection-details dl > div {
+    display: grid;
+    grid-template-columns: minmax(110px, auto) minmax(0, 1fr);
+    gap: 10px;
+}
+
+.connection-details dt {
+    color: var(--text-secondary);
+}
+
+.connection-details dd {
+    min-width: 0;
+    margin: 0;
+    overflow-wrap: anywhere;
+}
+
+.connection-details h4 {
+    margin: 10px 0 0;
+}
+
+.connection-details pre {
+    max-height: 220px;
+    overflow: auto;
+    white-space: pre-wrap;
+    overflow-wrap: anywhere;
+}
+
+@media (max-width: 760px) {
+    .connections-add-form,
+    .connection-auth-form {
+        grid-template-columns: 1fr;
+    }
+
+    .connections-card .settings-card-head {
+        align-items: flex-start;
+    }
+
+    .connection-row {
+        align-items: flex-start;
+        flex-direction: column;
+    }
+
+    .connection-row-actions {
+        width: 100%;
+    }
+}
+
 .settings-card-head {
     display: flex;
     align-items: flex-start;

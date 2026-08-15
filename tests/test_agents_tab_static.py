@@ -126,7 +126,8 @@ def test_agents_tab_sits_between_models_and_behavior() -> None:
     labels = re.findall(r"\{ value: '([a-z]+)', label: '([A-Za-z]+)' \}", strip)
     values = [value for value, _ in labels]
     assert values == [
-        "providers", "secrets", "models", "agents", "behavior", "advanced", "about",
+        "providers", "connections", "secrets", "models", "agents", "behavior",
+        "advanced", "about",
     ], f"unexpected settings tab order: {values}"
     assert ("agents", "Agents") in labels, (
         "the tab is named 'Agents', not 'Coding agents' (D-10, owner verbatim: "

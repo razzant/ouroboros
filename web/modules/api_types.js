@@ -340,7 +340,12 @@
 /**
  * POST /api/projects body (v6.59.0). ONE source: path (attach; optional init_git
  * attach-snapshot commit — never auto-init), git_url (server-side clone; typed
- * auth_required), with_workspace (genesis), or none (file-less).
+ * auth_required), with_workspace (genesis), connection_id + remote_root (a folder on
+ * a remote host — RWS v2), or none (file-less).
+ * The remote source is the TWO HALVES the owner can know and deliberately NOT a
+ * serialized workspace_ref: the placement's workspace identity is allocated by the
+ * TARGET at admission, so a client that could name it could claim a workspace it
+ * never opened.
  * @typedef {Object} ProjectCreateRequest
  * @property {string=} id
  * @property {string=} name
@@ -348,6 +353,19 @@
  * @property {boolean=} init_git
  * @property {string=} git_url
  * @property {boolean=} with_workspace
+ * @property {string=} connection_id An owner connection the store already trusts.
+ * @property {string=} remote_root Target-native git worktree root; never a Home path.
+ */
+
+/**
+ * POST /api/projects/{project_id}/update body. Two optional, combinable mutations:
+ * `name` renames, and `connection_id` + `remote_root` REBIND the remote placement
+ * (the same two halves create takes). A rebind advances routing_generation, so work
+ * already resolved against the previous target is refused at queue insertion.
+ * @typedef {Object} ProjectUpdateRequest
+ * @property {string=} name
+ * @property {string=} connection_id
+ * @property {string=} remote_root
  */
 
 /**
@@ -356,9 +374,12 @@
  * @property {string=} name
  * @property {number=} chat_id
  * @property {string=} working_dir
- * @property {string=} provenance   // attached | cloned | genesis | none (historical fact)
+ * @property {?ProjectWorkspaceRef=} placement  // present ONLY for a remote project; working_dir is then empty
+ * @property {string=} provenance   // attached | cloned | genesis | remote | none (historical fact)
  * @property {string=} clone_url
  * @property {string=} trusted_at
+ * @property {string=} origin
+ * @property {string=} created_at
  * @property {string=} last_active_at
  * @property {"active"|"deleting"|"tombstoned"=} lifecycle
  * @property {number=} routing_generation
@@ -477,14 +498,179 @@
  */
 
 /**
+ * The executor projection. "ssh" is DERIVED from the persisted ProjectWorkspaceRef
+ * (RWS v2) — nothing stores an ssh executor_ref independently, and Home path
+ * mappings are forbidden on that arm.
  * @typedef {Object} ExecutorRef
- * @property {"local"|"docker_exec"} type
+ * @property {"local"|"docker_exec"|"ssh"} type
  * @property {string=} id
  * @property {"host"|"none"=} network
  * @property {string=} workspace_host_path
  * @property {string=} workspace_backend_path
  * @property {string=} container_name Required when type is "docker_exec".
  * @property {Object[]=} path_mappings
+ * @property {string=} connection_id Required when type is "ssh".
+ * @property {string=} remote_root Target-native root; never a Home path.
+ * @property {string=} workspace_id
+ */
+
+/**
+ * Wire mirror of the persisted placement descriptor (ouroboros/workspace_ref.py).
+ * An "ssh" ref has NO Home path: `remote_root` is target-native.
+ * @typedef {Object} ProjectWorkspaceRef
+ * @property {"local"|"ssh"} kind
+ * @property {string=} local_root
+ * @property {string=} connection_id
+ * @property {string=} remote_root
+ * @property {string=} workspace_id
+ */
+
+/**
+ * One owner connection row: the durable half comes from ouroboros/connection_store.py
+ * and NEVER carries a secret (the OS account is the documented trust boundary, D6);
+ * the status/evidence half is a bounded process-local live projection that is never
+ * persisted back. `bootstrap_compatible`/`health_fresh` are Home admission evidence —
+ * a transport status projection cannot manufacture them. `bootstrap_compatible` is
+ * DERIVED from the durable `bootstrapped_at` (the executor stays installed on that
+ * host across a Home restart), while `health_fresh` is inherently process-local.
+ * @typedef {Object} ConnectionEntry
+ * @property {string} id
+ * @property {string} name
+ * @property {string} ssh_alias
+ * @property {string=} expected_host_id Pinned remote host identity (set by bootstrap only).
+ * @property {Object[]=} host_id_history
+ * @property {"active"|"retired"=} lifecycle Retire is SOFT; trust history survives.
+ * @property {?string=} retired_at
+ * @property {?string=} bootstrapped_at Durable: when a bootstrap last succeeded (cleared by retrust/retire).
+ * @property {string=} bootstrap_build Durable: the executor build that bootstrap installed.
+ * @property {number=} bootstrap_contract_set Durable: the Home<->execd contract set that bootstrap installed.
+ * @property {string=} created_at
+ * @property {string=} updated_at
+ * @property {"connecting"|"ready"|"degraded"|"disconnected"|"unknown"=} status
+ * @property {string=} phase
+ * @property {string=} project_id Project whose live session the broker reported for this connection.
+ * @property {string=} platform
+ * @property {string=} architecture
+ * @property {string=} build
+ * @property {boolean=} bootstrap_compatible
+ * @property {boolean=} health_fresh
+ * @property {boolean=} execd_outdated Installed executor predates a shared-contract change; Bootstrap is the action.
+ * @property {number=} required_contract_set The contract set this Home build requires.
+ * @property {number=} bootstrap_contract_set The contract set the installed executor was built from.
+ * @property {string=} blocked_by THE one blocker in front of this connection; ABSENT exactly when it is selectable.
+ * @property {string=} blocker_action The single owner action that removes `blocked_by` — never a menu of maybes.
+ * @property {string=} blocker_hint The owner sentence for `blocked_by`, rendered verbatim; no surface composes its own.
+ * @property {number=} blocker_rank Position in the removal ladder; HIGHER means fewer remaining steps.
+ * @property {string=} completion
+ * @property {string=} error_code
+ * @property {string=} action
+ * @property {Object=} diagnostic
+ * @property {Object[]=} log_refs
+ * @property {Object[]=} warnings Bounded non-fatal transport observations.
+ * @property {number=} log_refs_count TOTAL before the cap; truncation is count > log_refs.length.
+ * @property {number=} warnings_count TOTAL before the cap; truncation is count > warnings.length.
+ */
+
+/**
+ * @typedef {Object} ConnectionAddRequest
+ * @property {string} name
+ * @property {string} ssh_alias
+ */
+
+/**
+ * @typedef {Object} ConnectionListResponse
+ * @property {ConnectionEntry[]=} connections
+ * @property {string=} error
+ * @property {string=} error_code
+ * @property {string=} action
+ */
+
+/**
+ * Response of every transport-dependent owner connection action. A build without
+ * the ssh transport answers a typed 503 `remote_transport_unavailable` here — the
+ * UI must render that as an honest state, never as a pending spinner.
+ *
+ * `host_id`/`handshake` are what retrust rests on: they are the only way this page
+ * learns the CURRENTLY observed host identity (see `observedHostId` in
+ * connections_ui.js, and its twins in cli_connections.py and gateway/connections.py —
+ * all three read the same three places, or a confirmation pair gets assembled from a
+ * field one of them cannot see).
+ * @typedef {Object} ConnectionActionResponse
+ * @property {boolean=} ok
+ * @property {ConnectionEntry=} connection
+ * @property {string=} connection_id
+ * @property {string=} status
+ * @property {string=} phase
+ * @property {string=} completion
+ * @property {string=} error
+ * @property {string=} error_code
+ * @property {string=} action
+ * @property {string=} host_id Host identity this live answer observed.
+ * @property {Object=} handshake Target handshake block; also carries `host_id`.
+ * @property {string=} platform
+ * @property {string=} architecture
+ * @property {string=} build
+ * @property {boolean=} bootstrap_compatible
+ * @property {boolean=} health_fresh
+ * @property {boolean=} execd_outdated Installed executor predates a shared-contract change; Bootstrap is the action.
+ * @property {number=} required_contract_set The contract set this Home build requires.
+ * @property {number=} bootstrap_contract_set The contract set the installed executor was built from.
+ * @property {string=} blocked_by THE one blocker in front of this connection; ABSENT exactly when it is selectable.
+ * @property {string=} blocker_action The single owner action that removes `blocked_by` — never a menu of maybes.
+ * @property {string=} blocker_hint The owner sentence for `blocked_by`, rendered verbatim; no surface composes its own.
+ * @property {number=} blocker_rank Position in the removal ladder; HIGHER means fewer remaining steps.
+ * @property {Object=} diagnostic
+ * @property {Object[]=} log_refs
+ * @property {Object[]=} warnings
+ * @property {number=} log_refs_count TOTAL before the cap; truncation is count > log_refs.length.
+ * @property {number=} warnings_count TOTAL before the cap; truncation is count > warnings.length.
+ */
+
+/**
+ * @typedef {Object} ConnectionDirsResponse
+ * @property {string=} connection_id
+ * @property {string=} path
+ * @property {string=} parent
+ * @property {FsDirsEntry[]=} dirs
+ * @property {boolean=} truncated
+ * @property {string=} error
+ * @property {string=} error_code
+ * @property {string=} action
+ */
+
+/**
+ * Live connection/admission WS frame. Durable secrets are absent by construction.
+ * Every field comes out of the SAME projection that fills ConnectionEntry's live half
+ * (gateway/connections.py::_public_live_fields), so the frame carries the target and
+ * evidence fields too. `task_id`/`project_id` are present on the task-SCOPED frames
+ * the gateway fans out per live task on the connection.
+ * @typedef {Object} ConnectionStateOutbound
+ * @property {"connection_state"} type
+ * @property {string} connection_id
+ * @property {string=} task_id
+ * @property {string=} project_id
+ * @property {"connecting"|"ready"|"degraded"|"disconnected"|"unknown"=} status
+ * @property {string=} phase
+ * @property {string=} completion
+ * @property {string=} error_code
+ * @property {string=} action
+ * @property {string=} platform
+ * @property {string=} architecture
+ * @property {string=} build
+ * @property {boolean=} bootstrap_compatible
+ * @property {boolean=} health_fresh
+ * @property {boolean=} execd_outdated Installed executor predates a shared-contract change; Bootstrap is the action.
+ * @property {number=} required_contract_set The contract set this Home build requires.
+ * @property {number=} bootstrap_contract_set The contract set the installed executor was built from.
+ * @property {string=} blocked_by THE one blocker in front of this connection; ABSENT exactly when it is selectable.
+ * @property {string=} blocker_action The single owner action that removes `blocked_by` — never a menu of maybes.
+ * @property {string=} blocker_hint The owner sentence for `blocked_by`, rendered verbatim; no surface composes its own.
+ * @property {number=} blocker_rank Position in the removal ladder; HIGHER means fewer remaining steps.
+ * @property {Object=} diagnostic
+ * @property {Object[]=} log_refs
+ * @property {Object[]=} warnings
+ * @property {number=} log_refs_count TOTAL before the cap; truncation is count > log_refs.length.
+ * @property {number=} warnings_count TOTAL before the cap; truncation is count > warnings.length.
  */
 
 /**

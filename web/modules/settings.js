@@ -15,6 +15,7 @@ import { SECRET_KEYS, bindSecretInputs, bindSettingsTabs, renderSettingsPage } f
 import { showToast } from './toast.js';
 import { escapeHtmlAttr as escapeHtml, formatDualVersion } from './utils.js';
 import { apiClient, apiFetch, cleanExtensionRoute, extensionRoutePath } from './api_client.js';
+import { initConnectionsUI } from './connections_ui.js';
 import { collectSafeFieldValues, renderSafeField, setInlineStatus } from './ui_helpers.js';
 
 let markSettingsDirty = () => {};
@@ -349,6 +350,7 @@ export function initSettings({ state, setBeforePageLeave, ws } = {}) {
     bindSecretInputs(page);
     bindEffortSegments(page);
     bindLocalModelControls({ state });
+    initConnectionsUI({ root: page, apiClient, ws });
     // Best-effort About version from /api/health.
     apiFetch('/api/health')
         .then((r) => (r.ok ? r.json() : Promise.reject(new Error(`HTTP ${r.status}`))))

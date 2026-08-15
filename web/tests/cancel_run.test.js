@@ -167,7 +167,14 @@ test('a 404 cancel reconciles the card from the durable record', () => {
     // card through the SAME terminal seam replay uses — not merely hide a button.
     const chat = readFileSync(new URL('../modules/chat.js', import.meta.url), 'utf8');
     const branch = chat.slice(chat.indexOf('cancelableTaskIds.delete(taskId)'));
-    assert.match(branch.slice(0, 1200), /apiFetch\(`\/api\/tasks\/\$\{encodeURIComponent\(taskId\)\}`\)/);
+    // …and NOT from cache: the whole point is to see the fresh terminal status, and a
+    // cached pre-cancel 200 leaves the card "Working" behind a dead disabled button.
+    assert.match(
+        branch.slice(0, 1600),
+        /apiFetch\(`\/api\/tasks\/\$\{encodeURIComponent\(taskId\)\}`, \{ cache: 'no-store' \}\)/,
+    );
+    // The terminal resolution itself now lives in the shared reconcile helper
+    // (finishLiveCard is called there), so the branch is pinned on the helper.
     assert.match(branch.slice(0, 1600), /reconcileCancelCardFromDetail\(record, taskId, stored\)/);
 });
 
@@ -177,7 +184,12 @@ test('a successful cancel also reconciles when task_done publication is lost', (
     const chat = readFileSync(new URL('../modules/chat.js', import.meta.url), 'utf8');
     const success = chat.slice(chat.indexOf('await cancelTask(taskId, { cascade: true })'));
     const beforeCatch = success.slice(0, success.indexOf('} catch (exc)'));
-    assert.match(beforeCatch, /apiFetch\(`\/api\/tasks\/\$\{encodeURIComponent\(taskId\)\}`\)/);
+    // Fresh, not cached: a cached pre-cancel 200 would leave the card "Working"
+    // behind a dead disabled button — the exact failure this reconcile prevents.
+    assert.match(
+        beforeCatch,
+        /apiFetch\(`\/api\/tasks\/\$\{encodeURIComponent\(taskId\)\}`, \{ cache: 'no-store' \}\)/,
+    );
     assert.match(beforeCatch, /reconcileCancelCardFromDetail\(record, taskId, stored\)/);
 });
 
@@ -220,4 +232,37 @@ test('a failed cancel reconciles through the shared helper before touching the b
     assert.match(branch, /if \(record\.finished \|\| stillPending\) return;/);
     assert.match(branch, /taskCancelPending\(stored\)/);
     assert.match(branch, /restoreLiveCardPhase\(record, priorPhase\)/);
+});
+
+test('every cancel button on a task cascades, and none of them can forget to', () => {
+    // The class: a NEW call to an existing API that omits a parameter every
+    // neighbouring call passes. `cancelRemoteTask` called the duplicate
+    // `apiClient.taskCancel` spelling — which took no options at all — so cancelling
+    // a remote orchestrator from its own card left its subagents running on the
+    // target, while the two other buttons for the same action cascaded.
+    const chat = readFileSync(new URL('../modules/chat.js', import.meta.url), 'utf8');
+    const activity = readFileSync(new URL('../modules/activity.js', import.meta.url), 'utf8');
+    const client = readFileSync(new URL('../modules/api_client.js', import.meta.url), 'utf8');
+    // Every cancel POST goes through the ONE helper, and every one of them cascades.
+    for (const source of [chat, activity]) {
+        const calls = source.match(/cancelTask\([^)]*\)/g) || [];
+        assert.ok(calls.length > 0);
+        for (const call of calls) assert.match(call, /cascade: true/);
+        // The duplicate spelling that could not express cascade is gone from the
+        // client, so no caller can reach for it again.
+        assert.doesNotMatch(source, /taskCancel\(/);
+    }
+    assert.doesNotMatch(client, /taskCancel:/);
+    // The chat prompt names the consequence, like Activity's does for the same task.
+    assert.match(chat, /Cancel this task and all its subagents\?/);
+    // And the optimistic status is one the state vocabulary actually knows: the old
+    // `cancel_requested` was in neither CANCELLABLE nor TERMINAL, so the card sat in
+    // a limbo that offered no Cancel and never read as finished.
+    const remote = chat.slice(chat.indexOf('async function cancelRemoteTask'));
+    const body = remote.slice(0, remote.indexOf('async function reconnectRemoteTask'));
+    assert.match(body, /taskStatus: 'cancelled'/);
+    // Matched on the ASSIGNMENT, not the word: the comment above it explains what the
+    // old status was, and a prose ban would forbid saying so.
+    assert.doesNotMatch(body, /taskStatus: 'cancel_requested'/);
+    assert.doesNotMatch(body, /completion: 'cancel_requested'/);
 });

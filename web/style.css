@@ -372,6 +372,10 @@ body.resizing-panels { user-select: none; }
     padding: 0 var(--space-3) var(--space-2);
 }
 
+.chat-live-remote-actions {
+    flex-wrap: wrap;
+}
+
 .chat-live-project-btn {
     min-height: 30px;
     padding: 0 var(--space-3);
@@ -3637,6 +3641,7 @@ textarea.chat-input::placeholder { color: var(--text-muted); }
     display: flex;
     flex-direction: column;
     min-width: 0;
+    flex: 1;
 }
 
 .activity-name {
@@ -3668,11 +3673,116 @@ textarea.chat-input::placeholder { color: var(--text-muted); }
     font-style: italic;
 }
 
+/* RWS v2: remote (SSH-placed) task presentation in the Activity subtab. */
+.activity-notice {
+    padding: 9px 12px;
+    border: 1px solid var(--blue-dim);
+    border-radius: var(--radius-sm);
+    color: var(--text-primary);
+    background: var(--blue-dim);
+    font-size: 12px;
+}
+
+.activity-notice[data-tone="warn"] {
+    border-color: var(--amber-dim);
+    color: var(--tone-warn);
+    background: var(--amber-dim);
+}
+
+.activity-connection-state {
+    padding: 2px 7px;
+    border-radius: 999px;
+    color: var(--text-primary);
+    background: var(--blue-dim);
+    font-size: 11px;
+    white-space: nowrap;
+}
+
+.activity-connection-state[data-state="ready"] {
+    color: var(--tone-ok);
+    background: var(--green-dim);
+}
+
+.activity-connection-state[data-state="warn"],
+.activity-connection-state[data-state="unknown"] {
+    color: var(--tone-warn);
+    background: var(--amber-dim);
+}
+
+/* The honest note ("no ssh transport in this build") wraps instead of
+   ellipsising: a state the owner cannot act on must at least be readable. */
+.activity-remote-note {
+    color: var(--tone-warn);
+    white-space: normal;
+    overflow: visible;
+    text-overflow: clip;
+}
+
+.activity-remote-details {
+    max-width: min(760px, 100%);
+    margin-top: 6px;
+    font-size: 11px;
+    color: var(--text-secondary);
+}
+
+.activity-remote-details > summary {
+    cursor: pointer;
+}
+
+.activity-remote-evidence {
+    margin-top: 6px;
+}
+
+.activity-remote-evidence > div {
+    display: flex;
+    align-items: baseline;
+    justify-content: space-between;
+    gap: 8px;
+}
+
+.activity-remote-evidence a {
+    color: var(--user-light);
+}
+
+.activity-remote-evidence pre {
+    max-height: 180px;
+    margin: 4px 0 0;
+    padding: 8px;
+    overflow: auto;
+    border-radius: var(--radius-xs);
+    background: var(--bg-primary);
+    color: var(--text-primary);
+    font: 11px/1.45 ui-monospace, SFMono-Regular, Menlo, monospace;
+    white-space: pre-wrap;
+    overflow-wrap: anywhere;
+}
+
 .activity-empty,
 .activity-loading {
     font-size: 13px;
     color: rgba(148, 163, 184, 0.75);
     padding: 8px 2px;
+}
+
+@media (max-width: 640px) {
+    .activity-scroll {
+        padding: 12px;
+    }
+
+    .activity-row {
+        align-items: stretch;
+        flex-direction: column;
+    }
+
+    .activity-row-actions {
+        flex-wrap: wrap;
+        justify-content: flex-start;
+    }
+
+    .activity-sub {
+        white-space: normal;
+        overflow-wrap: anywhere;
+    }
 }
 
 /* P2: main-screen Update pill + staged choice dialog. */
@@ -5693,6 +5803,14 @@ textarea.chat-input {
 
 .new-project-dir-up {
     color: var(--text-muted);
+}
+
+/* Git-root verdict for the current folder in the SSH picker (RWS v2). Advisory:
+   the target's own `git rev-parse` decides at creation. */
+.new-project-dir-status {
+    color: var(--text-muted);
+    font-size: 11.5px;
+    white-space: nowrap;
 }
 
 .new-project-dir-empty {
