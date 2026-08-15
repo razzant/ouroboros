@@ -158,6 +158,8 @@ BAND_PATHS = {
     "ouroboros/tools/skill_exec.py": None,
     "ouroboros/utils.py": None,
     "ouroboros/workspace_executor.py": None,
+    "ouroboros/workspace_payload_native.py": "RWS v2: the target's payload staging and declared-output snapshots",
+    "ouroboros/workspace_query_native.py": "RWS v2: the target's search and code-query operations",
     "scripts/run_external_review.py": None,
     "skills/telegram/plugin.py": None,
     "skills/telegram/scripts/companion.py": None,

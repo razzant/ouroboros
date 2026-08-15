@@ -336,3 +336,41 @@ def test_media_split_drive_child_canonical_owner_state_blocked(tmp_path, monkeyp
     # overlap user_files denial first. Blocked-by-a-typed-path-guard is the pin.
     assert "PATH_BLOCKED" in err
     assert ("secret or owner-control" in err) or ("overlaps the Ouroboros repo/runtime workspace" in err)
+
+
+def test_the_pinned_ffmpeg_digest_is_verified_on_every_call(tmp_path):
+    """A cached verification verifies the bytes that were there once.
+
+    `ffmpeg_binary` was `@functools.lru_cache(maxsize=4)`, so the SHA-256 ran on the
+    first call with a given `(configured, expected_sha256)` pair and every later call
+    in the process returned the memo. Detecting a swap AFTER the first verification is
+    exactly what pinning a digest is FOR, so the cache made the check a no-op for the
+    case it exists to catch. Swapping the bytes between two identical calls is the
+    proof; under the cache the second call returned the path happily.
+    """
+    import hashlib
+    import os
+    import stat
+
+    import pytest
+
+    from ouroboros.workspace_media_native import ffmpeg_binary
+
+    helper = tmp_path / "ffmpeg"
+    helper.write_bytes(b"the pinned helper.")
+    helper.chmod(helper.stat().st_mode | stat.S_IXUSR)
+    pinned = hashlib.sha256(helper.read_bytes()).hexdigest()
+
+    assert ffmpeg_binary(str(helper), pinned) == str(helper.resolve())
+
+    # Same arguments, different bytes. Size preserved AND mtime restored, because a
+    # `(path, mtime_ns, size)` cache key was the rejected alternative: anyone who can
+    # write here can also `utime`, so metadata-keyed caching restores the same hole.
+    before = helper.stat()
+    helper.write_bytes(b"the SWAPPED helper")  # same length as above
+    os.utime(helper, ns=(before.st_atime_ns, before.st_mtime_ns))
+    assert helper.stat().st_size == before.st_size
+    assert helper.stat().st_mtime_ns == before.st_mtime_ns
+
+    with pytest.raises(PermissionError, match="failed integrity verification"):
+        ffmpeg_binary(str(helper), pinned)

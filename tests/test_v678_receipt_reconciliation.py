@@ -1106,8 +1106,8 @@ def test_a_legacy_check_receipt_is_never_the_same_verification_as_a_versioned_on
 
 def test_every_receipt_writer_that_renders_a_check_stamps_its_rendering():
     """The class, not the instance: the hole was one writer changing its renderer without
-    saying so, and `verify.py` has THREE receipt writers that store a `check`. A fourth
-    must not be able to reintroduce it silently."""
+    saying so, and `verify.py` has FOUR receipt writers that store a `check` (the fourth
+    records a check the REMOTE target ran). A fifth must not reintroduce it silently."""
     import ast
     import pathlib
 
@@ -1128,7 +1128,7 @@ def test_every_receipt_writer_that_renders_a_check_stamps_its_rendering():
             continue
         stamped += 1
         assert "check_rendering" in keys, "a receipt writer stores a check with no rendering stamp"
-    assert stamped == 3, f"expected 3 check-writing receipt updates, found {stamped}"
+    assert stamped == 4, f"expected 4 check-writing receipt updates, found {stamped}"
 
 
 def test_the_masked_and_path_identities_have_no_mixed_version_hole():
