@@ -31,6 +31,16 @@ def collect_turn_diff(ctx: Any, *, limit: int = 20000, include_recent_commit: bo
     (``include_recent_commit``, derived from a commit_reviewed status=ok signal),
     that commit's patch is also appended so committed work is judged too."""
 
+    from ouroboros.workspace_ref import is_remote_workspace
+
+    if is_remote_workspace(ctx):
+        # The diff is computed ON the target and memoized for the tick. Before this the
+        # `active_repo_dir()` call below raised for a remote placement and the except
+        # arm fell back to `ctx.repo_dir` — so a remote task's review evidence was a
+        # diff of the OUROBOROS repository, presented as the task's own working tree.
+        from ouroboros.remote_plan_review import remote_turn_diff
+
+        return remote_turn_diff(ctx, limit=limit)
     repo = None
     try:
         getter = getattr(ctx, "active_repo_dir", None)
@@ -1576,3 +1586,5 @@ def _debt_to_dict(item: Any) -> Dict[str, Any]:
     data["source_obligation_ids"] = [str(x) for x in (getattr(item, "source_obligation_ids", []) or [])]
     data["evidence"] = [str(x) for x in (getattr(item, "evidence", []) or [])]
     return data
+
+

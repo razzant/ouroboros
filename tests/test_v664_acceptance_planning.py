@@ -12,7 +12,10 @@ from ouroboros.review_substrate import (
     run_review_request,
 )
 from ouroboros import task_pacing
-from ouroboros.tools.plan_review import _planning_evidence_horizon, _resolve_plan_roots
+# The evidence horizon moved to `review_evidence`, whose whole job is assembling review
+# evidence; `plan_review` was at its module ceiling and the function was in the wrong place.
+from ouroboros.planning_evidence import planning_evidence_horizon as _planning_evidence_horizon
+from ouroboros.tools.plan_review_setup import _resolve_plan_roots
 from ouroboros.tools.registry import ToolContext
 from ouroboros.usage_accounting import _claim_physical_dispatch
 from ouroboros.utils import append_jsonl

@@ -1278,7 +1278,8 @@ def test_expired_deadline_releases_existing_open_wave(monkeypatch, tmp_path):
         scout_roles=[],
         cutoff_at="2099-01-01T00:00:00+00:00",
     )
-    monkeypatch.setattr(pr, "_resolve_plan_roots", lambda *_a, **_k: (tmp_path, tmp_path))
+    from ouroboros.tools import plan_review_setup as pr_setup
+    monkeypatch.setattr(pr_setup, "_resolve_plan_roots", lambda *_a, **_k: (tmp_path, tmp_path))
 
     out = asyncio.run(pr._run_plan_review_async(ctx, request))
 
@@ -3121,7 +3122,10 @@ class TestPlanReviewToolRegistration(unittest.TestCase):
         import inspect
         import ouroboros.tools.plan_review as pr
 
-        source = inspect.getsource(pr._run_plan_review_async)
+        # The body, not the resource-scope wrapper: `_run_plan_review_async` now owns
+        # the review's ExitStack (a remote review holds a materialized mirror) and
+        # delegates the review itself to `_run_plan_review_body`.
+        source = inspect.getsource(pr._run_plan_review_body)
         assert '"BIBLE.md"' in source
         assert '"docs/DEVELOPMENT.md"' in source
         assert '"docs/ARCHITECTURE.md"' in source

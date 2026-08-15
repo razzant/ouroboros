@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import concurrent.futures
+import contextlib
 import json
 import logging
 import pathlib
@@ -13,7 +14,17 @@ from datetime import timedelta
 
 from ouroboros.config import SETTINGS_DEFAULTS
 from ouroboros.deadline_utils import parse_deadline_ts, utc_now as _planning_now
-from ouroboros.review_substrate import review_repo_dirs_for
+from ouroboros.tools.plan_review_runtime import (  # noqa: F401 -- re-exported for callers and tests
+    resolve_plan_class as _resolve_plan_class,
+)
+from ouroboros.tools.review_synthesis import (  # noqa: F401 -- re-exported for callers and tests
+    resolve_plan_context_level as _resolve_plan_context_level,
+)
+from ouroboros.tools.plan_review_setup import (
+    _open_plan_subject_roots,
+    _resolve_plan_shape,
+)
+from ouroboros.planning_evidence import planning_evidence_horizon
 from ouroboros.task_results import (
     load_plan_review_state,
     mark_current_plan_review_unavailable,
@@ -42,7 +53,6 @@ from ouroboros.tools.plan_review_runtime import (
     plan_deadline_skip as _plan_deadline_skip,
     record_raw_plan_request_attempt as _record_raw_plan_request_attempt,
     reviewed_handoff_hashes as _reviewed_handoff_hashes,
-    resolve_plan_class as _resolve_plan_class,
     run_plan_review_slots as _run_plan_review_slots,
     validate_plan_request_envelope as _validate_plan_request_envelope,
 )
@@ -74,7 +84,6 @@ from ouroboros.tools.review_synthesis import (
     completed_planning_handoffs as _completed_planning_handoffs,
     format_planning_handoffs as _format_planning_handoffs,
     format_plan_review_output as _format_output,
-    normalize_plan_scope as _normalize_plan_scope,
     parse_plan_review_signal,
     minted_plan_slot_ids as _minted_plan_slot_ids,  # noqa: F401 — test-compat re-export
     per_slot_input_token_limits as _per_slot_input_token_limits,
@@ -82,7 +91,6 @@ from ouroboros.tools.review_synthesis import (
     plan_context_target_tokens as _plan_context_target_tokens,
     plan_slot_fit_with_identity as _plan_slot_fit_with_identity,
     plan_text_fingerprint,
-    resolve_plan_context_level as _resolve_plan_context_level,
     quorum_input_token_limit as _quorum_input_token_limit,
     planning_handoff_selection as _planning_handoff_selection,
     planning_scout_framing as _planning_scout_framing,
@@ -875,82 +883,6 @@ def _capture_late_planning_audit(ctx: ToolContext, handoffs: dict) -> None:
     handoffs["artifact"] = _persist_planning_handoffs(ctx, handoffs)
 
 
-def _resolve_plan_roots(
-    ctx: ToolContext, files_to_touch: list,
-) -> tuple[pathlib.Path, pathlib.Path]:
-    """Resolve governance and subject roots without silently mixing them."""
-    governance, subject = review_repo_dirs_for(ctx)
-    for raw in files_to_touch or []:
-        candidate = pathlib.Path(str(raw or ""))
-        resolved = (candidate if candidate.is_absolute() else subject / candidate).resolve(strict=False)
-        try:
-            resolved.relative_to(subject)
-        except ValueError as exc:
-            raise ValueError(
-                f"planned path {raw!r} escapes active subject root {subject}"
-            ) from exc
-    return governance, subject
-
-
-def _planning_evidence_horizon(
-    ctx: ToolContext,
-    *,
-    governance_repo: pathlib.Path,
-    subject_repo: pathlib.Path,
-    scope: dict | None = None,
-) -> str:
-    """One compact planning-evidence manifest; no second context pipeline. Contributes the
-    durable task contract, lineage aliases, raw forensic refs and disclosed omissions exactly
-    once to the shared reviewer prompt; plan and goal stay the canonical inline intent."""
-    from ouroboros.observability import redact_projection
-
-    meta = getattr(ctx, "task_metadata", {})
-    meta = meta if isinstance(meta, dict) else {}
-    contract = getattr(ctx, "task_contract", {})
-    contract = contract if isinstance(contract, dict) else {}
-    task_id = str(getattr(ctx, "task_id", "") or meta.get("task_id") or "")
-    root_id = str(meta.get("root_task_id") or task_id)
-    refs: list[dict] = []
-    if task_id:
-        candidates = (
-            pathlib.Path(ctx.drive_root) / "task_results" / f"{task_id}.json",
-            _planning_handoff_path(ctx),
-        )
-        for candidate in candidates:
-            if candidate.is_file():
-                refs.append({"kind": candidate.stem, "path": str(candidate)})
-    omissions: list[dict] = []
-    if not contract:
-        omissions.append({
-            "section": "task_contract",
-            "reason": "not_available_in_tool_context",
-        })
-    payload = {
-        "schema_version": 1,
-        "canonical_intent": {
-            "goal_ref": "Implementation Plan Under Review.Goal",
-            "plan_ref": "Implementation Plan Under Review.Proposed Plan",
-            "scope": _normalize_plan_scope(scope),
-            "task_contract": redact_projection(contract).value if contract else {},
-        },
-        "aliases": {
-            "task_id": task_id,
-            "root_task_id": root_id,
-            "parent_task_id": str(meta.get("parent_task_id") or ""),
-            "project_id": str(getattr(ctx, "project_id", "") or meta.get("project_id") or ""),
-        },
-        "roots": {
-            "governance": str(governance_repo),
-            "subject": str(subject_repo),
-        },
-        "forensic_refs": refs,
-        "omissions_manifest": omissions,
-    }
-    return (
-        "## Planning Evidence Horizon\n\n```json\n"
-        + json.dumps(payload, ensure_ascii=False, indent=2, default=str)
-        + "\n```"
-    )
 
 
 def _apply_review_disposition(
@@ -1305,6 +1237,35 @@ async def _run_plan_review_async(
     planning_handoff_override: tuple[str, str] | None = None,
     additional_context: str = "",
 ) -> str:
+    """Own the review's resources for exactly the review's lifetime.
+
+    The stack is passed EXPLICITLY into the body rather than stashed on ctx: a remote
+    review holds a materialized mirror, and the donor made that mirror's lifetime a
+    property of a mutable ctx attribute that a decorator deleted and two unrelated
+    modules read. A parameter cannot be deleted by someone else."""
+
+    with contextlib.ExitStack() as stack:
+        return await _run_plan_review_body(
+            ctx,
+            request,
+            exit_stack=stack,
+            planning_handoff_override=planning_handoff_override,
+            additional_context=additional_context,
+        )
+
+
+
+
+
+
+async def _run_plan_review_body(
+    ctx: ToolContext,
+    request: _PlanReviewRequest,
+    *,
+    exit_stack: contextlib.ExitStack,
+    planning_handoff_override: tuple[str, str] | None = None,
+    additional_context: str = "",
+) -> str:
     plan = request.plan
     goal = request.goal
     files_to_touch = request.files_to_touch
@@ -1344,20 +1305,17 @@ async def _run_plan_review_async(
     except (OSError, TimeoutError, ValueError) as exc:
         return f"ERROR: PLAN_REVIEW_STATE_PERSIST_FAILED: {exc}"
     if not deadline_blocked or has_prior_state:
-        try:
-            governance_repo, subject_repo = _resolve_plan_roots(ctx, files_to_touch)
-        except ValueError as exc:
-            return f"ERROR: PLAN_SUBJECT_ROOT_INVALID: {exc}"
-        resolved_class, escalation_note = _resolve_plan_class(ctx, plan_class, files_to_touch)
-        if escalation_note:
-            ctx.emit_progress_fn(f"📐 plan_task: {escalation_note}")
-        try:
-            resolved_context_level = _resolve_plan_context_level(context_level, plan_class=resolved_class)
-        except ValueError as exc:
-            return f"ERROR: {exc}"
-        resolved_request = replace(
-            request, context_level=resolved_context_level, plan_class=resolved_class, scope=scope,
+        remote_snapshot, governance_repo, subject_repo, roots_error = _open_plan_subject_roots(
+            ctx, files_to_touch, exit_stack,
         )
+        if roots_error:
+            return roots_error
+        resolved_request, shape_error = _resolve_plan_shape(
+            ctx, request, plan_class=plan_class, context_level=context_level,
+            files_to_touch=files_to_touch, scope=scope,
+        )
+        if shape_error:
+            return shape_error
         if deadline_blocked:
             try:
                 decision = plan_review_gate_projection(
@@ -1443,7 +1401,7 @@ async def _run_plan_review_async(
     arch_md = load_governance_doc(governance_repo, "docs/ARCHITECTURE.md", on_missing="explicit")
     checklists_md = load_governance_doc(governance_repo, "docs/CHECKLISTS.md", on_missing="explicit")
     # Non-self-mod plans use the lossless ARCHITECTURE navigation map; self-mod keeps it whole.
-    if resolved_class != "self_mod" and arch_md.strip():
+    if resolved_request.plan_class != "self_mod" and arch_md.strip():
         from ouroboros.context_layout import generate_doc_nav_map
 
         arch_md = generate_doc_nav_map(
@@ -1455,9 +1413,11 @@ async def _run_plan_review_async(
     snapshot_included: frozenset[str] = frozenset()
     if files_to_touch:
         head_snapshots, snapshot_included = build_head_snapshot_section(
-            subject_repo, files_to_touch
+            subject_repo,
+            files_to_touch,
+            verified_filesystem_snapshot=remote_snapshot is not None,
         )
-    requested_context_level = resolved_context_level
+    requested_context_level = resolved_request.context_level
     effective_context_level = requested_context_level
     context_degradation_reason = ""
     placeholder = "__GENERATED_PLAN_ATLAS_PENDING__"
@@ -1466,7 +1426,7 @@ async def _run_plan_review_async(
         effective_request = replace(resolved_request, context_level=level)
         system = _build_system_prompt(
             checklist, bible_text, dev_md, arch_md, checklists_md,
-            context_level=level, plan_class=resolved_class,
+            context_level=level, plan_class=resolved_request.plan_class,
         )
         user, stable_len = _build_user_content(
             effective_request, head_snapshots,
@@ -1475,7 +1435,7 @@ async def _run_plan_review_async(
                 requested_context_level, level, degradation_reason,
             ),
         )
-        user += "\n\n" + _planning_evidence_horizon(
+        user += "\n\n" + planning_evidence_horizon(
             ctx, governance_repo=governance_repo, subject_repo=subject_repo, scope=scope,
         )
         if planning_handoff_raw:

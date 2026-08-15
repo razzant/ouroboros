@@ -150,6 +150,7 @@ BAND_PATHS = {
     "ouroboros/preflight_runner.py": None,
     "ouroboros/projects_registry.py": "upstream registry plus the sealed remote placement field",
     "ouroboros/protected_artifacts.py": None,
+    "ouroboros/remote_transfer.py": "RWS v2: the Home side of the import boundary, where returned manifests are validated",
     "ouroboros/remote_workspace.py": "RWS v2: the Home-side remote workspace service",
     "ouroboros/skill_loader.py": None,
     "ouroboros/skill_review_runner.py": None,
