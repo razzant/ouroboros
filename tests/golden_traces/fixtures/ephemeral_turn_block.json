@@ -1,0 +1,25 @@
+{
+ "calls": [
+  {
+   "args": {
+    "content": "no\n",
+    "path": "x.txt",
+    "root": "active_workspace"
+   },
+   "events": [
+    {
+     "call": 1,
+     "fn": "_ephemeral_block",
+     "is_mcp": false,
+     "ret": "⚠️ EPHEMERAL_TURN_RESTRICTED: 'write_file' is not in the decision-turn allowlist (read/inspect + answer/route/spawn/steer only) — a short same-route turn must not do durable/control/review/skill work or run shell. Answer inline, or promote_chat_to_task to do it in a supervised task.",
+     "tool": "write_file"
+    }
+   ],
+   "result": "⚠️ EPHEMERAL_TURN_RESTRICTED: 'write_file' is not in the decision-turn allowlist (read/inspect + answer/route/spawn/steer only) — a short same-route turn must not do durable/control/review/skill work or run shell. Answer inline, or promote_chat_to_task to do it in a supervised task.",
+   "tool": "write_file"
+  }
+ ],
+ "description": "ephemeral decision turn blocks non-allowlisted write_file",
+ "guard_calls_total": 1,
+ "scenario": "ephemeral_turn_block"
+}

@@ -1,0 +1,197 @@
+{
+ "calls": [
+  {
+   "args": {
+    "cmd": [
+     "echo",
+     "executor-local"
+    ]
+   },
+   "events": [
+    {
+     "call": 1,
+     "fn": "_ephemeral_block",
+     "is_mcp": false,
+     "ret": "",
+     "tool": "run_command"
+    },
+    {
+     "call": 2,
+     "fn": "_disabled_tools",
+     "ret": []
+    },
+    {
+     "call": 3,
+     "fn": "_builtin_tool_availability",
+     "ret": [
+      true,
+      "",
+      ""
+     ],
+     "tool": "run_command"
+    },
+    {
+     "acting": false,
+     "call": 4,
+     "fn": "_subagent_and_update_gate",
+     "local_readonly": false,
+     "ret": "",
+     "tool": "run_command"
+    },
+    {
+     "call": 5,
+     "fn": "workspace_mode_block_reason",
+     "ret": ""
+    },
+    {
+     "arg_keys": [
+      "cmd"
+     ],
+     "call": 6,
+     "fn": "_normalize_dispatch_path_args",
+     "ret": "",
+     "tool": "run_command"
+    },
+    {
+     "call": 7,
+     "fn": "workspace_mode_block_reason",
+     "ret": ""
+    },
+    {
+     "call": 8,
+     "fn": "workspace_mode_block_reason",
+     "ret": ""
+    },
+    {
+     "call": 9,
+     "fn": "workspace_mode_block_reason",
+     "ret": ""
+    },
+    {
+     "call": 10,
+     "fn": "workspace_mode_block_reason",
+     "ret": ""
+    },
+    {
+     "call": 11,
+     "fn": "workspace_mode_block_reason",
+     "ret": ""
+    },
+    {
+     "call": 12,
+     "fn": "workspace_mode_block_reason",
+     "ret": ""
+    },
+    {
+     "call": 13,
+     "fn": "workspace_mode_block_reason",
+     "ret": ""
+    },
+    {
+     "call": 14,
+     "fn": "workspace_mode_block_reason",
+     "ret": ""
+    },
+    {
+     "arg_keys": [
+      "cmd"
+     ],
+     "block": "",
+     "call": 15,
+     "fn": "_resolve_python_predispatch",
+     "resolution_error": "",
+     "runtime_mode": "advanced",
+     "tool": "run_command"
+    },
+    {
+     "call": 16,
+     "fn": "workspace_mode_block_reason",
+     "ret": ""
+    },
+    {
+     "call": 17,
+     "fn": "_resource_allowed",
+     "key": "network",
+     "ret": true
+    },
+    {
+     "call": 18,
+     "fn": "workspace_mode_block_reason",
+     "ret": ""
+    },
+    {
+     "arg_keys": [
+      "__tool_name",
+      "cmd"
+     ],
+     "call": 19,
+     "fn": "_run_shell_safety_check",
+     "ret": "",
+     "runtime_mode": "advanced"
+    },
+    {
+     "arg_keys": [
+      "cmd"
+     ],
+     "call": 20,
+     "fn": "check_safety",
+     "tool": "run_command"
+    },
+    {
+     "call": 21,
+     "entries": 1,
+     "fn": "_snapshot_owner_files"
+    },
+    {
+     "call": 22,
+     "fn": "_worktree_status_snapshot",
+     "ret_shape": "str"
+    },
+    {
+     "arg_keys": [
+      "cmd"
+     ],
+     "args": {
+      "cmd": "['echo', 'executor-local']"
+     },
+     "call": 23,
+     "fn": "_invoke_builtin_handler",
+     "tool": "run_command"
+    },
+    {
+     "call": 24,
+     "fn": "workspace_mode_block_reason",
+     "ret": ""
+    },
+    {
+     "call": 25,
+     "fn": "workspace_mode_block_reason",
+     "ret": ""
+    },
+    {
+     "call": 26,
+     "fn": "_worktree_status_snapshot",
+     "ret_shape": "str"
+    },
+    {
+     "call": 27,
+     "fn": "_run_shell_post_checks",
+     "light_snapshot": "none",
+     "refs_snapshot": "none",
+     "tool": "run_command"
+    },
+    {
+     "call": 28,
+     "fn": "_compose_execute_result",
+     "route_note": "",
+     "safety_msg": ""
+    }
+   ],
+   "result": "exit_code=0 (cwd={WS}); root=active_workspace, source=active_workspace\nSTDOUT:\nexecutor-local\n\n\nEXECUTOR_TRACE:\n{\n  \"executor_id\": \"{ID}\",\n  \"executor_type\": \"local\",\n  \"network\": \"host\",\n  \"cwd\": \"{WS}\",\n  \"cmd\": [\n    \"echo\",\n    \"executor-local\"\n  ],\n  \"returncode\": 0,\n  \"elapsed_sec\": {DUR},\n  \"ts\": \"{TS}\"\n}",
+   "tool": "run_command"
+  }
+ ],
+ "description": "external workspace with executor_ref kind=local path mapping, run_command",
+ "guard_calls_total": 28,
+ "scenario": "workspace_executor_local"
+}

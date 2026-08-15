@@ -1,0 +1,87 @@
+{
+ "calls": [
+  {
+   "args": {
+    "content": "HACK\n",
+    "path": "prompts/SAFETY.md",
+    "root": "active_workspace"
+   },
+   "events": [
+    {
+     "call": 1,
+     "fn": "_ephemeral_block",
+     "is_mcp": false,
+     "ret": "",
+     "tool": "write_file"
+    },
+    {
+     "call": 2,
+     "fn": "_disabled_tools",
+     "ret": []
+    },
+    {
+     "call": 3,
+     "fn": "_builtin_tool_availability",
+     "ret": [
+      true,
+      "",
+      ""
+     ],
+     "tool": "write_file"
+    },
+    {
+     "acting": false,
+     "call": 4,
+     "fn": "_subagent_and_update_gate",
+     "local_readonly": false,
+     "ret": "",
+     "tool": "write_file"
+    },
+    {
+     "call": 5,
+     "fn": "workspace_mode_block_reason",
+     "ret": ""
+    },
+    {
+     "arg_keys": [
+      "content",
+      "path",
+      "root"
+     ],
+     "call": 6,
+     "fn": "_normalize_dispatch_path_args",
+     "ret": "",
+     "tool": "write_file"
+    },
+    {
+     "arg_keys": [
+      "content",
+      "path",
+      "root"
+     ],
+     "block": "",
+     "call": 7,
+     "fn": "_resolve_python_predispatch",
+     "resolution_error": "",
+     "runtime_mode": "advanced",
+     "tool": "write_file"
+    },
+    {
+     "call": 8,
+     "fn": "protected_paths_in",
+     "matches": [
+      "prompts/SAFETY.md"
+     ],
+     "paths": [
+      "prompts/SAFETY.md"
+     ]
+    }
+   ],
+   "result": "⚠️ CORE_PROTECTION_BLOCKED: runtime_mode='advanced' refuses to run tool 'write_file' against protected safety-critical path: prompts/SAFETY.md. Switch to runtime_mode='pro' and let the normal triad + scope review cover the protected core/contract/release change before commit.",
+   "tool": "write_file"
+  }
+ ],
+ "description": "advanced mode write_file to protected prompts/SAFETY.md blocked",
+ "guard_calls_total": 8,
+ "scenario": "protected_path_write_block"
+}

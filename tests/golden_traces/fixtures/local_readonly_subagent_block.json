@@ -1,0 +1,48 @@
+{
+ "calls": [
+  {
+   "args": {
+    "content": "no\n",
+    "path": "x.txt",
+    "root": "active_workspace"
+   },
+   "events": [
+    {
+     "call": 1,
+     "fn": "_ephemeral_block",
+     "is_mcp": false,
+     "ret": "",
+     "tool": "write_file"
+    },
+    {
+     "call": 2,
+     "fn": "_disabled_tools",
+     "ret": []
+    },
+    {
+     "call": 3,
+     "fn": "_builtin_tool_availability",
+     "ret": [
+      true,
+      "",
+      ""
+     ],
+     "tool": "write_file"
+    },
+    {
+     "acting": false,
+     "call": 4,
+     "fn": "_subagent_and_update_gate",
+     "local_readonly": true,
+     "ret": "⚠️ LOCAL_READONLY_SUBAGENT_BLOCKED: this subagent may inspect local repo/data/history plus web/browser surfaces and enabled external tools, but may not call first-party local tool 'write_file'. Parent tasks must perform writes, commits, review gates, tool expansion, runtime control, shell, and skills. Nested readonly delegation is allowed only through schedule_subagent within configured depth/cap limits.",
+     "tool": "write_file"
+    }
+   ],
+   "result": "⚠️ LOCAL_READONLY_SUBAGENT_BLOCKED: this subagent may inspect local repo/data/history plus web/browser surfaces and enabled external tools, but may not call first-party local tool 'write_file'. Parent tasks must perform writes, commits, review gates, tool expansion, runtime control, shell, and skills. Nested readonly delegation is allowed only through schedule_subagent within configured depth/cap limits.",
+   "tool": "write_file"
+  }
+ ],
+ "description": "local readonly subagent blocked from write_file",
+ "guard_calls_total": 4,
+ "scenario": "local_readonly_subagent_block"
+}

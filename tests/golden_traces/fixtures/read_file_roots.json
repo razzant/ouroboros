@@ -1,0 +1,292 @@
+{
+ "calls": [
+  {
+   "args": {
+    "path": "hello.txt",
+    "root": "active_workspace"
+   },
+   "events": [
+    {
+     "call": 1,
+     "fn": "_ephemeral_block",
+     "is_mcp": false,
+     "ret": "",
+     "tool": "read_file"
+    },
+    {
+     "call": 2,
+     "fn": "_disabled_tools",
+     "ret": []
+    },
+    {
+     "call": 3,
+     "fn": "_builtin_tool_availability",
+     "ret": [
+      true,
+      "",
+      ""
+     ],
+     "tool": "read_file"
+    },
+    {
+     "acting": false,
+     "call": 4,
+     "fn": "_subagent_and_update_gate",
+     "local_readonly": false,
+     "ret": "",
+     "tool": "read_file"
+    },
+    {
+     "call": 5,
+     "fn": "workspace_mode_block_reason",
+     "ret": ""
+    },
+    {
+     "arg_keys": [
+      "path",
+      "root"
+     ],
+     "call": 6,
+     "fn": "_normalize_dispatch_path_args",
+     "ret": "",
+     "tool": "read_file"
+    },
+    {
+     "arg_keys": [
+      "path",
+      "root"
+     ],
+     "block": "",
+     "call": 7,
+     "fn": "_resolve_python_predispatch",
+     "resolution_error": "",
+     "runtime_mode": "advanced",
+     "tool": "read_file"
+    },
+    {
+     "arg_keys": [
+      "path",
+      "root"
+     ],
+     "call": 8,
+     "fn": "check_safety",
+     "tool": "read_file"
+    },
+    {
+     "arg_keys": [
+      "path",
+      "root"
+     ],
+     "args": {
+      "path": "'hello.txt'",
+      "root": "'active_workspace'"
+     },
+     "call": 9,
+     "fn": "_invoke_builtin_handler",
+     "tool": "read_file"
+    },
+    {
+     "call": 10,
+     "fn": "_compose_execute_result",
+     "route_note": "",
+     "safety_msg": ""
+    }
+   ],
+   "result": "# active_workspace:hello.txt — lines 1–1 of 1\nhello golden\n",
+   "tool": "read_file"
+  },
+  {
+   "args": {
+    "path": "hello.txt",
+    "root": "system_repo"
+   },
+   "events": [
+    {
+     "call": 1,
+     "fn": "_ephemeral_block",
+     "is_mcp": false,
+     "ret": "",
+     "tool": "read_file"
+    },
+    {
+     "call": 2,
+     "fn": "_disabled_tools",
+     "ret": []
+    },
+    {
+     "call": 3,
+     "fn": "_builtin_tool_availability",
+     "ret": [
+      true,
+      "",
+      ""
+     ],
+     "tool": "read_file"
+    },
+    {
+     "acting": false,
+     "call": 4,
+     "fn": "_subagent_and_update_gate",
+     "local_readonly": false,
+     "ret": "",
+     "tool": "read_file"
+    },
+    {
+     "call": 5,
+     "fn": "workspace_mode_block_reason",
+     "ret": ""
+    },
+    {
+     "arg_keys": [
+      "path",
+      "root"
+     ],
+     "call": 6,
+     "fn": "_normalize_dispatch_path_args",
+     "ret": "",
+     "tool": "read_file"
+    },
+    {
+     "arg_keys": [
+      "path",
+      "root"
+     ],
+     "block": "",
+     "call": 7,
+     "fn": "_resolve_python_predispatch",
+     "resolution_error": "",
+     "runtime_mode": "advanced",
+     "tool": "read_file"
+    },
+    {
+     "arg_keys": [
+      "path",
+      "root"
+     ],
+     "call": 8,
+     "fn": "check_safety",
+     "tool": "read_file"
+    },
+    {
+     "arg_keys": [
+      "path",
+      "root"
+     ],
+     "args": {
+      "path": "'hello.txt'",
+      "root": "'system_repo'"
+     },
+     "call": 9,
+     "fn": "_invoke_builtin_handler",
+     "tool": "read_file"
+    },
+    {
+     "call": 10,
+     "fn": "_compose_execute_result",
+     "route_note": "",
+     "safety_msg": ""
+    }
+   ],
+   "result": "# system_repo:hello.txt — lines 1–1 of 1\nhello golden\n\n\nℹ️ This exact view is unchanged since you already read it this task — re-reading is usually wasted budget; act on what you have.",
+   "tool": "read_file"
+  },
+  {
+   "args": {
+    "path": "note.txt",
+    "root": "task_drive"
+   },
+   "events": [
+    {
+     "call": 1,
+     "fn": "_ephemeral_block",
+     "is_mcp": false,
+     "ret": "",
+     "tool": "read_file"
+    },
+    {
+     "call": 2,
+     "fn": "_disabled_tools",
+     "ret": []
+    },
+    {
+     "call": 3,
+     "fn": "_builtin_tool_availability",
+     "ret": [
+      true,
+      "",
+      ""
+     ],
+     "tool": "read_file"
+    },
+    {
+     "acting": false,
+     "call": 4,
+     "fn": "_subagent_and_update_gate",
+     "local_readonly": false,
+     "ret": "",
+     "tool": "read_file"
+    },
+    {
+     "call": 5,
+     "fn": "workspace_mode_block_reason",
+     "ret": ""
+    },
+    {
+     "arg_keys": [
+      "path",
+      "root"
+     ],
+     "call": 6,
+     "fn": "_normalize_dispatch_path_args",
+     "ret": "",
+     "tool": "read_file"
+    },
+    {
+     "arg_keys": [
+      "path",
+      "root"
+     ],
+     "block": "",
+     "call": 7,
+     "fn": "_resolve_python_predispatch",
+     "resolution_error": "",
+     "runtime_mode": "advanced",
+     "tool": "read_file"
+    },
+    {
+     "arg_keys": [
+      "path",
+      "root"
+     ],
+     "call": 8,
+     "fn": "check_safety",
+     "tool": "read_file"
+    },
+    {
+     "arg_keys": [
+      "path",
+      "root"
+     ],
+     "args": {
+      "path": "'note.txt'",
+      "root": "'task_drive'"
+     },
+     "call": 9,
+     "fn": "_invoke_builtin_handler",
+     "tool": "read_file"
+    },
+    {
+     "call": 10,
+     "fn": "_compose_execute_result",
+     "route_note": "",
+     "safety_msg": ""
+    }
+   ],
+   "result": "# task_drive:note.txt — lines 1–1 of 1\ndrive note\n",
+   "tool": "read_file"
+  }
+ ],
+ "description": "read_file across active_workspace / system_repo / task_drive",
+ "guard_calls_total": 30,
+ "scenario": "read_file_roots"
+}

@@ -1,0 +1,258 @@
+{
+ "calls": [
+  {
+   "args": {
+    "query": "golden_fn",
+    "root": "active_workspace"
+   },
+   "events": [
+    {
+     "call": 1,
+     "fn": "_ephemeral_block",
+     "is_mcp": false,
+     "ret": "",
+     "tool": "search_code"
+    },
+    {
+     "call": 2,
+     "fn": "_disabled_tools",
+     "ret": []
+    },
+    {
+     "call": 3,
+     "fn": "_builtin_tool_availability",
+     "ret": [
+      true,
+      "",
+      ""
+     ],
+     "tool": "search_code"
+    },
+    {
+     "acting": false,
+     "call": 4,
+     "fn": "_subagent_and_update_gate",
+     "local_readonly": false,
+     "ret": "",
+     "tool": "search_code"
+    },
+    {
+     "call": 5,
+     "fn": "workspace_mode_block_reason",
+     "ret": ""
+    },
+    {
+     "arg_keys": [
+      "query",
+      "root"
+     ],
+     "call": 6,
+     "fn": "_normalize_dispatch_path_args",
+     "ret": "",
+     "tool": "search_code"
+    },
+    {
+     "arg_keys": [
+      "query",
+      "root"
+     ],
+     "block": "",
+     "call": 7,
+     "fn": "_resolve_python_predispatch",
+     "resolution_error": "",
+     "runtime_mode": "advanced",
+     "tool": "search_code"
+    },
+    {
+     "arg_keys": [
+      "query",
+      "root"
+     ],
+     "call": 8,
+     "fn": "check_safety",
+     "tool": "search_code"
+    },
+    {
+     "arg_keys": [
+      "query",
+      "root"
+     ],
+     "args": {
+      "query": "'golden_fn'",
+      "root": "'active_workspace'"
+     },
+     "call": 9,
+     "fn": "_invoke_builtin_handler",
+     "tool": "search_code"
+    },
+    {
+     "call": 10,
+     "fn": "_compose_execute_result",
+     "route_note": "",
+     "safety_msg": ""
+    }
+   ],
+   "result": "Found 1 match in active_workspace:. (ripgrep)\n\nactive_workspace:src/mod.py:1: def golden_fn():",
+   "tool": "search_code"
+  },
+  {
+   "args": {
+    "path": ".",
+    "query": "hello",
+    "root": "system_repo"
+   },
+   "events": [
+    {
+     "call": 1,
+     "fn": "_ephemeral_block",
+     "is_mcp": false,
+     "ret": "",
+     "tool": "search_code"
+    },
+    {
+     "call": 2,
+     "fn": "_disabled_tools",
+     "ret": []
+    },
+    {
+     "call": 3,
+     "fn": "_builtin_tool_availability",
+     "ret": [
+      true,
+      "",
+      ""
+     ],
+     "tool": "search_code"
+    },
+    {
+     "acting": false,
+     "call": 4,
+     "fn": "_subagent_and_update_gate",
+     "local_readonly": false,
+     "ret": "",
+     "tool": "search_code"
+    },
+    {
+     "call": 5,
+     "fn": "workspace_mode_block_reason",
+     "ret": ""
+    },
+    {
+     "arg_keys": [
+      "path",
+      "query",
+      "root"
+     ],
+     "call": 6,
+     "fn": "_normalize_dispatch_path_args",
+     "ret": "",
+     "tool": "search_code"
+    },
+    {
+     "arg_keys": [
+      "path",
+      "query",
+      "root"
+     ],
+     "block": "",
+     "call": 7,
+     "fn": "_resolve_python_predispatch",
+     "resolution_error": "",
+     "runtime_mode": "advanced",
+     "tool": "search_code"
+    },
+    {
+     "arg_keys": [
+      "path",
+      "query",
+      "root"
+     ],
+     "call": 8,
+     "fn": "check_safety",
+     "tool": "search_code"
+    },
+    {
+     "arg_keys": [
+      "path",
+      "query",
+      "root"
+     ],
+     "args": {
+      "path": "'.'",
+      "query": "'hello'",
+      "root": "'system_repo'"
+     },
+     "call": 9,
+     "fn": "_invoke_builtin_handler",
+     "tool": "search_code"
+    },
+    {
+     "call": 10,
+     "fn": "_compose_execute_result",
+     "route_note": "",
+     "safety_msg": ""
+    }
+   ],
+   "result": "Found 1 match in system_repo:. (ripgrep)\n\nsystem_repo:hello.txt:1: hello golden",
+   "tool": "search_code"
+  },
+  {
+   "args": {
+    "query": "drive note",
+    "root": "task_drive"
+   },
+   "events": [
+    {
+     "call": 1,
+     "fn": "_ephemeral_block",
+     "is_mcp": false,
+     "ret": "",
+     "tool": "search_code"
+    },
+    {
+     "call": 2,
+     "fn": "_disabled_tools",
+     "ret": []
+    },
+    {
+     "call": 3,
+     "fn": "_builtin_tool_availability",
+     "ret": [
+      true,
+      "",
+      ""
+     ],
+     "tool": "search_code"
+    },
+    {
+     "acting": false,
+     "call": 4,
+     "fn": "_subagent_and_update_gate",
+     "local_readonly": false,
+     "ret": "",
+     "tool": "search_code"
+    },
+    {
+     "call": 5,
+     "fn": "workspace_mode_block_reason",
+     "ret": ""
+    },
+    {
+     "arg_keys": [
+      "query",
+      "root"
+     ],
+     "call": 6,
+     "fn": "_normalize_dispatch_path_args",
+     "ret": "",
+     "tool": "search_code"
+    }
+   ],
+   "result": "⚠️ TOOL_ACCESS_BLOCKED: profile=self_modification cannot search root=task_drive. Roots your profile can search: active_workspace, deliverables, runtime_data, skill_payload, subagent_projects, system_repo, user_files.",
+   "tool": "search_code"
+  }
+ ],
+ "description": "search_code across active_workspace / system_repo / task_drive",
+ "guard_calls_total": 26,
+ "scenario": "search_code_roots"
+}

@@ -1,0 +1,202 @@
+{
+ "calls": [
+  {
+   "args": {
+    "content": "ok\n",
+    "path": "feature.txt",
+    "root": "active_workspace"
+   },
+   "events": [
+    {
+     "call": 1,
+     "fn": "_ephemeral_block",
+     "is_mcp": false,
+     "ret": "",
+     "tool": "write_file"
+    },
+    {
+     "call": 2,
+     "fn": "_disabled_tools",
+     "ret": []
+    },
+    {
+     "call": 3,
+     "fn": "_builtin_tool_availability",
+     "ret": [
+      true,
+      "",
+      ""
+     ],
+     "tool": "write_file"
+    },
+    {
+     "acting": false,
+     "call": 4,
+     "fn": "_subagent_and_update_gate",
+     "local_readonly": false,
+     "ret": "",
+     "tool": "write_file"
+    },
+    {
+     "call": 5,
+     "fn": "workspace_mode_block_reason",
+     "ret": ""
+    },
+    {
+     "call": 6,
+     "fn": "workspace_mode_block_reason",
+     "ret": ""
+    },
+    {
+     "arg_keys": [
+      "content",
+      "path",
+      "root"
+     ],
+     "call": 7,
+     "fn": "_normalize_dispatch_path_args",
+     "ret": "",
+     "tool": "write_file"
+    },
+    {
+     "call": 8,
+     "fn": "workspace_mode_block_reason",
+     "ret": ""
+    },
+    {
+     "call": 9,
+     "fn": "workspace_mode_block_reason",
+     "ret": ""
+    },
+    {
+     "call": 10,
+     "fn": "workspace_mode_block_reason",
+     "ret": ""
+    },
+    {
+     "call": 11,
+     "fn": "workspace_mode_block_reason",
+     "ret": ""
+    },
+    {
+     "call": 12,
+     "fn": "workspace_mode_block_reason",
+     "ret": ""
+    },
+    {
+     "arg_keys": [
+      "content",
+      "path",
+      "root"
+     ],
+     "block": "",
+     "call": 13,
+     "fn": "_resolve_python_predispatch",
+     "resolution_error": "",
+     "runtime_mode": "advanced",
+     "tool": "write_file"
+    },
+    {
+     "call": 14,
+     "fn": "workspace_mode_block_reason",
+     "ret": ""
+    },
+    {
+     "arg_keys": [
+      "content",
+      "path",
+      "root"
+     ],
+     "call": 15,
+     "fn": "check_safety",
+     "tool": "write_file"
+    },
+    {
+     "arg_keys": [
+      "content",
+      "path",
+      "root"
+     ],
+     "args": {
+      "content": "'ok\\n'",
+      "path": "'feature.txt'",
+      "root": "'active_workspace'"
+     },
+     "call": 16,
+     "fn": "_invoke_builtin_handler",
+     "tool": "write_file"
+    },
+    {
+     "call": 17,
+     "fn": "workspace_mode_block_reason",
+     "ret": ""
+    },
+    {
+     "call": 18,
+     "fn": "workspace_mode_block_reason",
+     "ret": ""
+    },
+    {
+     "call": 19,
+     "fn": "workspace_mode_block_reason",
+     "ret": ""
+    },
+    {
+     "call": 20,
+     "fn": "_compose_execute_result",
+     "route_note": "",
+     "safety_msg": ""
+    }
+   ],
+   "result": "✅ Written 1 file(s): active_workspace:feature.txt (3 chars)\nFiles are on disk in the active workspace. Do not commit; the headless runner will emit a patch artifact.\nResolved root: {WS}",
+   "tool": "write_file"
+  },
+  {
+   "args": {
+    "message": "not allowed in workspace mode"
+   },
+   "events": [
+    {
+     "call": 1,
+     "fn": "_ephemeral_block",
+     "is_mcp": false,
+     "ret": "",
+     "tool": "commit_reviewed"
+    },
+    {
+     "call": 2,
+     "fn": "_disabled_tools",
+     "ret": []
+    },
+    {
+     "call": 3,
+     "fn": "_builtin_tool_availability",
+     "ret": [
+      true,
+      "",
+      ""
+     ],
+     "tool": "commit_reviewed"
+    },
+    {
+     "acting": false,
+     "call": 4,
+     "fn": "_subagent_and_update_gate",
+     "local_readonly": false,
+     "ret": "",
+     "tool": "commit_reviewed"
+    },
+    {
+     "call": 5,
+     "fn": "workspace_mode_block_reason",
+     "ret": ""
+    }
+   ],
+   "result": "⚠️ TOOL_ARG_ERROR (commit_reviewed): invalid arguments for commit_reviewed. Accepted parameters: commit_message, paths, skip_tests, review_rebuttal, skip_advisory_review, goal, scope.",
+   "tool": "commit_reviewed"
+  }
+ ],
+ "description": "external workspace: allowed write_file + commit_reviewed outside allowlist",
+ "guard_calls_total": 25,
+ "scenario": "workspace_allowlist_block"
+}

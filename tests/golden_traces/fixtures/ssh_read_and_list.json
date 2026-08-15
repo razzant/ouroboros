@@ -1,0 +1,361 @@
+{
+ "calls": [
+  {
+   "args": {
+    "path": "hello.txt",
+    "root": "active_workspace"
+   },
+   "events": [
+    {
+     "call": 1,
+     "fn": "_ephemeral_block",
+     "is_mcp": false,
+     "ret": "",
+     "tool": "read_file"
+    },
+    {
+     "call": 2,
+     "fn": "_disabled_tools",
+     "ret": []
+    },
+    {
+     "call": 3,
+     "fn": "_builtin_tool_availability",
+     "ret": [
+      true,
+      "",
+      ""
+     ],
+     "tool": "read_file"
+    },
+    {
+     "acting": false,
+     "call": 4,
+     "fn": "_subagent_and_update_gate",
+     "local_readonly": false,
+     "ret": "",
+     "tool": "read_file"
+    },
+    {
+     "call": 5,
+     "fn": "workspace_mode_block_reason",
+     "ret": ""
+    },
+    {
+     "arg_keys": [
+      "path",
+      "root"
+     ],
+     "call": 6,
+     "fn": "_normalize_dispatch_path_args",
+     "ret": "",
+     "tool": "read_file"
+    },
+    {
+     "call": 7,
+     "fn": "subagent_secret_path_refusal",
+     "ret": "",
+     "tool": "read_file"
+    },
+    {
+     "call": 8,
+     "fn": "script_interpreter_refusal",
+     "ret": "",
+     "tool": "read_file"
+    },
+    {
+     "available": true,
+     "call": 9,
+     "fn": "prepare_operation",
+     "native_routed": true,
+     "operation": "read_file",
+     "placement": "ssh",
+     "tool": "read_file"
+    },
+    {
+     "arg_keys": [
+      "path",
+      "root"
+     ],
+     "block": "",
+     "call": 10,
+     "fn": "_resolve_python_predispatch",
+     "resolution_error": "",
+     "runtime_mode": "advanced",
+     "tool": "read_file"
+    },
+    {
+     "bound": true,
+     "call": 11,
+     "fn": "bind_execution_args"
+    },
+    {
+     "arg_keys": [
+      "path",
+      "root"
+     ],
+     "call": 12,
+     "fn": "check_safety",
+     "tool": "read_file"
+    },
+    {
+     "call": 13,
+     "fn": "execute_native_operation",
+     "operation": "read_file"
+    },
+    {
+     "call": 14,
+     "changed": false,
+     "fn": "filter_native_listing",
+     "tool": "read_file"
+    },
+    {
+     "call": 15,
+     "fn": "_compose_execute_result",
+     "route_note": "",
+     "safety_msg": ""
+    }
+   ],
+   "result": "# active_workspace:hello.txt — lines 1–1 of 1\nhello target\n",
+   "tool": "read_file"
+  },
+  {
+   "args": {
+    "path": ".",
+    "root": "active_workspace"
+   },
+   "events": [
+    {
+     "call": 1,
+     "fn": "_ephemeral_block",
+     "is_mcp": false,
+     "ret": "",
+     "tool": "list_files"
+    },
+    {
+     "call": 2,
+     "fn": "_disabled_tools",
+     "ret": []
+    },
+    {
+     "call": 3,
+     "fn": "_builtin_tool_availability",
+     "ret": [
+      true,
+      "",
+      ""
+     ],
+     "tool": "list_files"
+    },
+    {
+     "acting": false,
+     "call": 4,
+     "fn": "_subagent_and_update_gate",
+     "local_readonly": false,
+     "ret": "",
+     "tool": "list_files"
+    },
+    {
+     "call": 5,
+     "fn": "workspace_mode_block_reason",
+     "ret": ""
+    },
+    {
+     "arg_keys": [
+      "path",
+      "root"
+     ],
+     "call": 6,
+     "fn": "_normalize_dispatch_path_args",
+     "ret": "",
+     "tool": "list_files"
+    },
+    {
+     "call": 7,
+     "fn": "subagent_secret_path_refusal",
+     "ret": "",
+     "tool": "list_files"
+    },
+    {
+     "call": 8,
+     "fn": "script_interpreter_refusal",
+     "ret": "",
+     "tool": "list_files"
+    },
+    {
+     "available": true,
+     "call": 9,
+     "fn": "prepare_operation",
+     "native_routed": true,
+     "operation": "list_files",
+     "placement": "ssh",
+     "tool": "list_files"
+    },
+    {
+     "arg_keys": [
+      "path",
+      "root"
+     ],
+     "block": "",
+     "call": 10,
+     "fn": "_resolve_python_predispatch",
+     "resolution_error": "",
+     "runtime_mode": "advanced",
+     "tool": "list_files"
+    },
+    {
+     "bound": true,
+     "call": 11,
+     "fn": "bind_execution_args"
+    },
+    {
+     "arg_keys": [
+      "path",
+      "root"
+     ],
+     "call": 12,
+     "fn": "check_safety",
+     "tool": "list_files"
+    },
+    {
+     "call": 13,
+     "fn": "execute_native_operation",
+     "operation": "list_files"
+    },
+    {
+     "call": 14,
+     "changed": false,
+     "fn": "filter_native_listing",
+     "tool": "list_files"
+    },
+    {
+     "call": 15,
+     "fn": "_compose_execute_result",
+     "route_note": "",
+     "safety_msg": ""
+    }
+   ],
+   "result": "[\n  \".git/\",\n  \"hello.txt\",\n  \"src/\"\n]",
+   "tool": "list_files"
+  },
+  {
+   "args": {
+    "path": "note.txt",
+    "root": "task_drive"
+   },
+   "events": [
+    {
+     "call": 1,
+     "fn": "_ephemeral_block",
+     "is_mcp": false,
+     "ret": "",
+     "tool": "read_file"
+    },
+    {
+     "call": 2,
+     "fn": "_disabled_tools",
+     "ret": []
+    },
+    {
+     "call": 3,
+     "fn": "_builtin_tool_availability",
+     "ret": [
+      true,
+      "",
+      ""
+     ],
+     "tool": "read_file"
+    },
+    {
+     "acting": false,
+     "call": 4,
+     "fn": "_subagent_and_update_gate",
+     "local_readonly": false,
+     "ret": "",
+     "tool": "read_file"
+    },
+    {
+     "call": 5,
+     "fn": "workspace_mode_block_reason",
+     "ret": ""
+    },
+    {
+     "arg_keys": [
+      "path",
+      "root"
+     ],
+     "call": 6,
+     "fn": "_normalize_dispatch_path_args",
+     "ret": "",
+     "tool": "read_file"
+    },
+    {
+     "call": 7,
+     "fn": "subagent_secret_path_refusal",
+     "ret": "",
+     "tool": "read_file"
+    },
+    {
+     "call": 8,
+     "fn": "script_interpreter_refusal",
+     "ret": "",
+     "tool": "read_file"
+    },
+    {
+     "available": true,
+     "call": 9,
+     "fn": "prepare_operation",
+     "native_routed": false,
+     "operation": "",
+     "placement": "ssh",
+     "tool": "read_file"
+    },
+    {
+     "arg_keys": [
+      "path",
+      "root"
+     ],
+     "block": "",
+     "call": 10,
+     "fn": "_resolve_python_predispatch",
+     "resolution_error": "",
+     "runtime_mode": "advanced",
+     "tool": "read_file"
+    },
+    {
+     "arg_keys": [
+      "path",
+      "root"
+     ],
+     "call": 11,
+     "fn": "check_safety",
+     "tool": "read_file"
+    },
+    {
+     "arg_keys": [
+      "path",
+      "root"
+     ],
+     "args": {
+      "path": "'note.txt'",
+      "root": "'task_drive'"
+     },
+     "call": 12,
+     "fn": "_invoke_builtin_handler",
+     "tool": "read_file"
+    },
+    {
+     "call": 13,
+     "fn": "_compose_execute_result",
+     "route_note": "",
+     "safety_msg": ""
+    }
+   ],
+   "result": "# task_drive:note.txt — lines 1–1 of 1\nhome drive note\n",
+   "tool": "read_file"
+  }
+ ],
+ "description": "ssh placement: read_file + list_files routed to the target with the D7 block, and a Home-native root that does not route",
+ "guard_calls_total": 43,
+ "scenario": "ssh_read_and_list"
+}

@@ -1,0 +1,447 @@
+{
+ "calls": [
+  {
+   "args": {
+    "cmd": [
+     "echo",
+     "golden-remote"
+    ]
+   },
+   "events": [
+    {
+     "call": 1,
+     "fn": "_ephemeral_block",
+     "is_mcp": false,
+     "ret": "",
+     "tool": "run_command"
+    },
+    {
+     "call": 2,
+     "fn": "_disabled_tools",
+     "ret": []
+    },
+    {
+     "call": 3,
+     "fn": "_builtin_tool_availability",
+     "ret": [
+      true,
+      "",
+      ""
+     ],
+     "tool": "run_command"
+    },
+    {
+     "acting": false,
+     "call": 4,
+     "fn": "_subagent_and_update_gate",
+     "local_readonly": false,
+     "ret": "",
+     "tool": "run_command"
+    },
+    {
+     "call": 5,
+     "fn": "workspace_mode_block_reason",
+     "ret": ""
+    },
+    {
+     "arg_keys": [
+      "cmd"
+     ],
+     "call": 6,
+     "fn": "_normalize_dispatch_path_args",
+     "ret": "",
+     "tool": "run_command"
+    },
+    {
+     "call": 7,
+     "fn": "subagent_secret_path_refusal",
+     "ret": "",
+     "tool": "run_command"
+    },
+    {
+     "call": 8,
+     "fn": "script_interpreter_refusal",
+     "ret": "",
+     "tool": "run_command"
+    },
+    {
+     "available": true,
+     "call": 9,
+     "fn": "prepare_operation",
+     "native_routed": true,
+     "operation": "run_command",
+     "placement": "ssh",
+     "tool": "run_command"
+    },
+    {
+     "arg_keys": [
+      "cmd"
+     ],
+     "block": "",
+     "call": 10,
+     "fn": "_resolve_python_predispatch",
+     "resolution_error": "",
+     "runtime_mode": "advanced",
+     "tool": "run_command"
+    },
+    {
+     "bound": true,
+     "call": 11,
+     "fn": "bind_execution_args"
+    },
+    {
+     "call": 12,
+     "fn": "_resource_allowed",
+     "key": "network",
+     "ret": true
+    },
+    {
+     "arg_keys": [
+      "__tool_name",
+      "cmd"
+     ],
+     "call": 13,
+     "fn": "_run_shell_safety_check",
+     "ret": "",
+     "runtime_mode": "advanced"
+    },
+    {
+     "arg_keys": [
+      "cmd"
+     ],
+     "call": 14,
+     "fn": "check_safety",
+     "tool": "run_command"
+    },
+    {
+     "call": 15,
+     "fn": "execute_native_operation",
+     "operation": "run_command"
+    },
+    {
+     "call": 16,
+     "changed": false,
+     "fn": "filter_native_listing",
+     "tool": "run_command"
+    },
+    {
+     "call": 17,
+     "fn": "_compose_execute_result",
+     "route_note": "",
+     "safety_msg": ""
+    }
+   ],
+   "result": "exit_code=0 (cwd={TARGET})\nSTDOUT:\ngolden-remote\n",
+   "tool": "run_command"
+  },
+  {
+   "args": {
+    "cmd": [
+     "sudo",
+     "whoami"
+    ]
+   },
+   "events": [
+    {
+     "call": 1,
+     "fn": "_ephemeral_block",
+     "is_mcp": false,
+     "ret": "",
+     "tool": "run_command"
+    },
+    {
+     "call": 2,
+     "fn": "_disabled_tools",
+     "ret": []
+    },
+    {
+     "call": 3,
+     "fn": "_builtin_tool_availability",
+     "ret": [
+      true,
+      "",
+      ""
+     ],
+     "tool": "run_command"
+    },
+    {
+     "acting": false,
+     "call": 4,
+     "fn": "_subagent_and_update_gate",
+     "local_readonly": false,
+     "ret": "",
+     "tool": "run_command"
+    },
+    {
+     "call": 5,
+     "fn": "workspace_mode_block_reason",
+     "ret": ""
+    },
+    {
+     "arg_keys": [
+      "cmd"
+     ],
+     "call": 6,
+     "fn": "_normalize_dispatch_path_args",
+     "ret": "",
+     "tool": "run_command"
+    },
+    {
+     "call": 7,
+     "fn": "subagent_secret_path_refusal",
+     "ret": "",
+     "tool": "run_command"
+    },
+    {
+     "call": 8,
+     "fn": "script_interpreter_refusal",
+     "ret": "",
+     "tool": "run_command"
+    },
+    {
+     "available": true,
+     "call": 9,
+     "fn": "prepare_operation",
+     "native_routed": true,
+     "operation": "run_command",
+     "placement": "ssh",
+     "tool": "run_command"
+    },
+    {
+     "arg_keys": [
+      "cmd"
+     ],
+     "block": "",
+     "call": 10,
+     "fn": "_resolve_python_predispatch",
+     "resolution_error": "",
+     "runtime_mode": "advanced",
+     "tool": "run_command"
+    },
+    {
+     "bound": true,
+     "call": 11,
+     "fn": "bind_execution_args"
+    },
+    {
+     "arg_keys": [
+      "__tool_name",
+      "cmd"
+     ],
+     "call": 12,
+     "fn": "_run_shell_safety_check",
+     "ret": "⚠️ SUDO_INTERACTIVE_BLOCKED: sudo must be noninteractive. Use sudo -n for commands that can run without a password; if sudo -n fails, report validation/install blocked by environment.",
+     "runtime_mode": "advanced"
+    }
+   ],
+   "result": "⚠️ SUDO_INTERACTIVE_BLOCKED: sudo must be noninteractive. Use sudo -n for commands that can run without a password; if sudo -n fails, report validation/install blocked by environment.",
+   "tool": "run_command"
+  },
+  {
+   "args": {
+    "interpreter": "/bin/not-allowed",
+    "script": "print(1)"
+   },
+   "events": [
+    {
+     "call": 1,
+     "fn": "_ephemeral_block",
+     "is_mcp": false,
+     "ret": "",
+     "tool": "run_script"
+    },
+    {
+     "call": 2,
+     "fn": "_disabled_tools",
+     "ret": []
+    },
+    {
+     "call": 3,
+     "fn": "_builtin_tool_availability",
+     "ret": [
+      true,
+      "",
+      ""
+     ],
+     "tool": "run_script"
+    },
+    {
+     "acting": false,
+     "call": 4,
+     "fn": "_subagent_and_update_gate",
+     "local_readonly": false,
+     "ret": "",
+     "tool": "run_script"
+    },
+    {
+     "call": 5,
+     "fn": "workspace_mode_block_reason",
+     "ret": ""
+    },
+    {
+     "arg_keys": [
+      "interpreter",
+      "script"
+     ],
+     "call": 6,
+     "fn": "_normalize_dispatch_path_args",
+     "ret": "",
+     "tool": "run_script"
+    },
+    {
+     "call": 7,
+     "fn": "subagent_secret_path_refusal",
+     "ret": "",
+     "tool": "run_script"
+    },
+    {
+     "call": 8,
+     "fn": "script_interpreter_refusal",
+     "ret": "⚠️ RUN_SCRIPT_BLOCKED: interpreter must be one of ['bash', 'node', 'python', 'python.exe', 'python3', 'python3.exe', 'ruby', 'sh'].",
+     "tool": "run_script"
+    }
+   ],
+   "result": "⚠️ RUN_SCRIPT_BLOCKED: interpreter must be one of ['bash', 'node', 'python', 'python.exe', 'python3', 'python3.exe', 'ruby', 'sh'].",
+   "tool": "run_script"
+  },
+  {
+   "args": {
+    "interpreter": "python3",
+    "script": "print('golden-remote-script')"
+   },
+   "events": [
+    {
+     "call": 1,
+     "fn": "_ephemeral_block",
+     "is_mcp": false,
+     "ret": "",
+     "tool": "run_script"
+    },
+    {
+     "call": 2,
+     "fn": "_disabled_tools",
+     "ret": []
+    },
+    {
+     "call": 3,
+     "fn": "_builtin_tool_availability",
+     "ret": [
+      true,
+      "",
+      ""
+     ],
+     "tool": "run_script"
+    },
+    {
+     "acting": false,
+     "call": 4,
+     "fn": "_subagent_and_update_gate",
+     "local_readonly": false,
+     "ret": "",
+     "tool": "run_script"
+    },
+    {
+     "call": 5,
+     "fn": "workspace_mode_block_reason",
+     "ret": ""
+    },
+    {
+     "arg_keys": [
+      "interpreter",
+      "script"
+     ],
+     "call": 6,
+     "fn": "_normalize_dispatch_path_args",
+     "ret": "",
+     "tool": "run_script"
+    },
+    {
+     "call": 7,
+     "fn": "subagent_secret_path_refusal",
+     "ret": "",
+     "tool": "run_script"
+    },
+    {
+     "call": 8,
+     "fn": "script_interpreter_refusal",
+     "ret": "",
+     "tool": "run_script"
+    },
+    {
+     "available": true,
+     "call": 9,
+     "fn": "prepare_operation",
+     "native_routed": true,
+     "operation": "run_script",
+     "placement": "ssh",
+     "tool": "run_script"
+    },
+    {
+     "arg_keys": [
+      "interpreter",
+      "script"
+     ],
+     "block": "",
+     "call": 10,
+     "fn": "_resolve_python_predispatch",
+     "resolution_error": "",
+     "runtime_mode": "advanced",
+     "tool": "run_script"
+    },
+    {
+     "bound": true,
+     "call": 11,
+     "fn": "bind_execution_args"
+    },
+    {
+     "call": 12,
+     "fn": "_resource_allowed",
+     "key": "network",
+     "ret": true
+    },
+    {
+     "arg_keys": [
+      "__tool_name",
+      "cmd",
+      "cwd"
+     ],
+     "call": 13,
+     "fn": "_run_shell_safety_check",
+     "ret": "",
+     "runtime_mode": "advanced"
+    },
+    {
+     "arg_keys": [
+      "interpreter",
+      "script"
+     ],
+     "call": 14,
+     "fn": "check_safety",
+     "tool": "run_script"
+    },
+    {
+     "call": 15,
+     "fn": "execute_native_operation",
+     "operation": "run_script"
+    },
+    {
+     "call": 16,
+     "changed": false,
+     "fn": "filter_native_listing",
+     "tool": "run_script"
+    },
+    {
+     "call": 17,
+     "fn": "_compose_execute_result",
+     "route_note": "",
+     "safety_msg": ""
+    }
+   ],
+   "result": "# script_path={TARGET}/.ouroboros/tmp_scripts/script_{HEX}.py\nexit_code=0 (cwd={TARGET})\nSTDOUT:\ngolden-remote-script\n",
+   "tool": "run_script"
+  }
+ ],
+ "description": "ssh placement: a process on the target through the full guard chain, plus a pre-dispatch sudo refusal that never prepares",
+ "guard_calls_total": 54,
+ "scenario": "ssh_run_command"
+}

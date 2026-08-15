@@ -1,0 +1,292 @@
+{
+ "calls": [
+  {
+   "args": {
+    "path": ".",
+    "root": "active_workspace"
+   },
+   "events": [
+    {
+     "call": 1,
+     "fn": "_ephemeral_block",
+     "is_mcp": false,
+     "ret": "",
+     "tool": "list_files"
+    },
+    {
+     "call": 2,
+     "fn": "_disabled_tools",
+     "ret": []
+    },
+    {
+     "call": 3,
+     "fn": "_builtin_tool_availability",
+     "ret": [
+      true,
+      "",
+      ""
+     ],
+     "tool": "list_files"
+    },
+    {
+     "acting": false,
+     "call": 4,
+     "fn": "_subagent_and_update_gate",
+     "local_readonly": false,
+     "ret": "",
+     "tool": "list_files"
+    },
+    {
+     "call": 5,
+     "fn": "workspace_mode_block_reason",
+     "ret": ""
+    },
+    {
+     "arg_keys": [
+      "path",
+      "root"
+     ],
+     "call": 6,
+     "fn": "_normalize_dispatch_path_args",
+     "ret": "",
+     "tool": "list_files"
+    },
+    {
+     "arg_keys": [
+      "path",
+      "root"
+     ],
+     "block": "",
+     "call": 7,
+     "fn": "_resolve_python_predispatch",
+     "resolution_error": "",
+     "runtime_mode": "advanced",
+     "tool": "list_files"
+    },
+    {
+     "arg_keys": [
+      "path",
+      "root"
+     ],
+     "call": 8,
+     "fn": "check_safety",
+     "tool": "list_files"
+    },
+    {
+     "arg_keys": [
+      "path",
+      "root"
+     ],
+     "args": {
+      "path": "'.'",
+      "root": "'active_workspace'"
+     },
+     "call": 9,
+     "fn": "_invoke_builtin_handler",
+     "tool": "list_files"
+    },
+    {
+     "call": 10,
+     "fn": "_compose_execute_result",
+     "route_note": "",
+     "safety_msg": ""
+    }
+   ],
+   "result": "[\n  \".git/\",\n  \"hello.txt\",\n  \"out.txt\",\n  \"src/\"\n]",
+   "tool": "list_files"
+  },
+  {
+   "args": {
+    "path": "src",
+    "root": "system_repo"
+   },
+   "events": [
+    {
+     "call": 1,
+     "fn": "_ephemeral_block",
+     "is_mcp": false,
+     "ret": "",
+     "tool": "list_files"
+    },
+    {
+     "call": 2,
+     "fn": "_disabled_tools",
+     "ret": []
+    },
+    {
+     "call": 3,
+     "fn": "_builtin_tool_availability",
+     "ret": [
+      true,
+      "",
+      ""
+     ],
+     "tool": "list_files"
+    },
+    {
+     "acting": false,
+     "call": 4,
+     "fn": "_subagent_and_update_gate",
+     "local_readonly": false,
+     "ret": "",
+     "tool": "list_files"
+    },
+    {
+     "call": 5,
+     "fn": "workspace_mode_block_reason",
+     "ret": ""
+    },
+    {
+     "arg_keys": [
+      "path",
+      "root"
+     ],
+     "call": 6,
+     "fn": "_normalize_dispatch_path_args",
+     "ret": "",
+     "tool": "list_files"
+    },
+    {
+     "arg_keys": [
+      "path",
+      "root"
+     ],
+     "block": "",
+     "call": 7,
+     "fn": "_resolve_python_predispatch",
+     "resolution_error": "",
+     "runtime_mode": "advanced",
+     "tool": "list_files"
+    },
+    {
+     "arg_keys": [
+      "path",
+      "root"
+     ],
+     "call": 8,
+     "fn": "check_safety",
+     "tool": "list_files"
+    },
+    {
+     "arg_keys": [
+      "path",
+      "root"
+     ],
+     "args": {
+      "path": "'src'",
+      "root": "'system_repo'"
+     },
+     "call": 9,
+     "fn": "_invoke_builtin_handler",
+     "tool": "list_files"
+    },
+    {
+     "call": 10,
+     "fn": "_compose_execute_result",
+     "route_note": "",
+     "safety_msg": ""
+    }
+   ],
+   "result": "[\n  \"src/mod.py\"\n]",
+   "tool": "list_files"
+  },
+  {
+   "args": {
+    "path": ".",
+    "root": "task_drive"
+   },
+   "events": [
+    {
+     "call": 1,
+     "fn": "_ephemeral_block",
+     "is_mcp": false,
+     "ret": "",
+     "tool": "list_files"
+    },
+    {
+     "call": 2,
+     "fn": "_disabled_tools",
+     "ret": []
+    },
+    {
+     "call": 3,
+     "fn": "_builtin_tool_availability",
+     "ret": [
+      true,
+      "",
+      ""
+     ],
+     "tool": "list_files"
+    },
+    {
+     "acting": false,
+     "call": 4,
+     "fn": "_subagent_and_update_gate",
+     "local_readonly": false,
+     "ret": "",
+     "tool": "list_files"
+    },
+    {
+     "call": 5,
+     "fn": "workspace_mode_block_reason",
+     "ret": ""
+    },
+    {
+     "arg_keys": [
+      "path",
+      "root"
+     ],
+     "call": 6,
+     "fn": "_normalize_dispatch_path_args",
+     "ret": "",
+     "tool": "list_files"
+    },
+    {
+     "arg_keys": [
+      "path",
+      "root"
+     ],
+     "block": "",
+     "call": 7,
+     "fn": "_resolve_python_predispatch",
+     "resolution_error": "",
+     "runtime_mode": "advanced",
+     "tool": "list_files"
+    },
+    {
+     "arg_keys": [
+      "path",
+      "root"
+     ],
+     "call": 8,
+     "fn": "check_safety",
+     "tool": "list_files"
+    },
+    {
+     "arg_keys": [
+      "path",
+      "root"
+     ],
+     "args": {
+      "path": "'.'",
+      "root": "'task_drive'"
+     },
+     "call": 9,
+     "fn": "_invoke_builtin_handler",
+     "tool": "list_files"
+    },
+    {
+     "call": 10,
+     "fn": "_compose_execute_result",
+     "route_note": "",
+     "safety_msg": ""
+    }
+   ],
+   "result": "[\n  \"note.txt\"\n]",
+   "tool": "list_files"
+  }
+ ],
+ "description": "list_files across active_workspace / system_repo / task_drive",
+ "guard_calls_total": 30,
+ "scenario": "list_files_roots"
+}

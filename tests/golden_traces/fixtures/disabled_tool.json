@@ -1,0 +1,34 @@
+{
+ "calls": [
+  {
+   "args": {
+    "cmd": [
+     "echo",
+     "nope"
+    ]
+   },
+   "events": [
+    {
+     "call": 1,
+     "fn": "_ephemeral_block",
+     "is_mcp": false,
+     "ret": "",
+     "tool": "run_command"
+    },
+    {
+     "call": 2,
+     "fn": "_disabled_tools",
+     "ret": [
+      "run_command",
+      "web_search"
+     ]
+    }
+   ],
+   "result": "⚠️ RESOURCE_CONSTRAINT_BLOCKED: task_contract.disabled_tools withholds 'run_command' for this task.",
+   "tool": "run_command"
+  }
+ ],
+ "description": "task_contract.disabled_tools withholds run_command",
+ "guard_calls_total": 2,
+ "scenario": "disabled_tool"
+}

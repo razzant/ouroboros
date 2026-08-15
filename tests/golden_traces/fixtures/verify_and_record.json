@@ -1,0 +1,248 @@
+{
+ "calls": [
+  {
+   "args": {
+    "artifact_paths": [
+     "out.txt"
+    ],
+    "check": [
+     "echo",
+     "verify-ok"
+    ],
+    "contract_kind": "explicit_command",
+    "expected": "verify-ok"
+   },
+   "events": [
+    {
+     "call": 1,
+     "fn": "_ephemeral_block",
+     "is_mcp": false,
+     "ret": "",
+     "tool": "verify_and_record"
+    },
+    {
+     "call": 2,
+     "fn": "_disabled_tools",
+     "ret": []
+    },
+    {
+     "call": 3,
+     "fn": "_builtin_tool_availability",
+     "ret": [
+      true,
+      "",
+      ""
+     ],
+     "tool": "verify_and_record"
+    },
+    {
+     "acting": false,
+     "call": 4,
+     "fn": "_subagent_and_update_gate",
+     "local_readonly": false,
+     "ret": "",
+     "tool": "verify_and_record"
+    },
+    {
+     "call": 5,
+     "fn": "workspace_mode_block_reason",
+     "ret": ""
+    },
+    {
+     "arg_keys": [
+      "artifact_paths",
+      "check",
+      "contract_kind",
+      "expected"
+     ],
+     "call": 6,
+     "fn": "_normalize_dispatch_path_args",
+     "ret": "",
+     "tool": "verify_and_record"
+    },
+    {
+     "arg_keys": [
+      "artifact_paths",
+      "check",
+      "contract_kind",
+      "expected"
+     ],
+     "block": "",
+     "call": 7,
+     "fn": "_resolve_python_predispatch",
+     "resolution_error": "",
+     "runtime_mode": "advanced",
+     "tool": "verify_and_record"
+    },
+    {
+     "arg_keys": [
+      "__tool_name",
+      "cmd",
+      "cwd"
+     ],
+     "call": 8,
+     "fn": "_run_shell_safety_check",
+     "ret": "",
+     "runtime_mode": "advanced"
+    },
+    {
+     "arg_keys": [
+      "artifact_paths",
+      "check",
+      "contract_kind",
+      "expected"
+     ],
+     "call": 9,
+     "fn": "check_safety",
+     "tool": "verify_and_record"
+    },
+    {
+     "call": 10,
+     "fn": "_worktree_status_snapshot",
+     "ret_shape": "str"
+    },
+    {
+     "arg_keys": [
+      "artifact_paths",
+      "check",
+      "contract_kind",
+      "expected"
+     ],
+     "args": {
+      "artifact_paths": "['out.txt']",
+      "check": "['echo', 'verify-ok']",
+      "contract_kind": "'explicit_command'",
+      "expected": "'verify-ok'"
+     },
+     "call": 11,
+     "fn": "_invoke_builtin_handler",
+     "tool": "verify_and_record"
+    },
+    {
+     "call": 12,
+     "fn": "_worktree_status_snapshot",
+     "ret_shape": "str"
+    },
+    {
+     "call": 13,
+     "fn": "_compose_execute_result",
+     "route_note": "",
+     "safety_msg": ""
+    }
+   ],
+   "result": "verify_and_record [explicit_command] PASS: exit=0 expected='verify-ok'; root=active_workspace, cwd={REPO}. Host-attested receipt recorded.\n\nverify-ok",
+   "tool": "verify_and_record"
+  },
+  {
+   "args": {
+    "artifact_paths": [
+     "out.txt",
+     "missing.bin"
+    ],
+    "contract_kind": "artifact_observation"
+   },
+   "events": [
+    {
+     "call": 1,
+     "fn": "_ephemeral_block",
+     "is_mcp": false,
+     "ret": "",
+     "tool": "verify_and_record"
+    },
+    {
+     "call": 2,
+     "fn": "_disabled_tools",
+     "ret": []
+    },
+    {
+     "call": 3,
+     "fn": "_builtin_tool_availability",
+     "ret": [
+      true,
+      "",
+      ""
+     ],
+     "tool": "verify_and_record"
+    },
+    {
+     "acting": false,
+     "call": 4,
+     "fn": "_subagent_and_update_gate",
+     "local_readonly": false,
+     "ret": "",
+     "tool": "verify_and_record"
+    },
+    {
+     "call": 5,
+     "fn": "workspace_mode_block_reason",
+     "ret": ""
+    },
+    {
+     "arg_keys": [
+      "artifact_paths",
+      "contract_kind"
+     ],
+     "call": 6,
+     "fn": "_normalize_dispatch_path_args",
+     "ret": "",
+     "tool": "verify_and_record"
+    },
+    {
+     "arg_keys": [
+      "artifact_paths",
+      "contract_kind"
+     ],
+     "block": "",
+     "call": 7,
+     "fn": "_resolve_python_predispatch",
+     "resolution_error": "",
+     "runtime_mode": "advanced",
+     "tool": "verify_and_record"
+    },
+    {
+     "arg_keys": [
+      "artifact_paths",
+      "contract_kind"
+     ],
+     "call": 8,
+     "fn": "check_safety",
+     "tool": "verify_and_record"
+    },
+    {
+     "call": 9,
+     "fn": "_worktree_status_snapshot",
+     "ret_shape": "str"
+    },
+    {
+     "arg_keys": [
+      "artifact_paths",
+      "contract_kind"
+     ],
+     "args": {
+      "artifact_paths": "['out.txt', 'missing.bin']",
+      "contract_kind": "'artifact_observation'"
+     },
+     "call": 10,
+     "fn": "_invoke_builtin_handler",
+     "tool": "verify_and_record"
+    },
+    {
+     "call": 11,
+     "fn": "_worktree_status_snapshot",
+     "ret_shape": "str"
+    },
+    {
+     "call": 12,
+     "fn": "_compose_execute_result",
+     "route_note": "",
+     "safety_msg": ""
+    }
+   ],
+   "result": "verify_and_record [artifact_observation] FAIL: missing: missing.bin. Host-attested receipt recorded.",
+   "tool": "verify_and_record"
+  }
+ ],
+ "description": "verify_and_record run-kind check + artifact_observation",
+ "guard_calls_total": 25,
+ "scenario": "verify_and_record"
+}

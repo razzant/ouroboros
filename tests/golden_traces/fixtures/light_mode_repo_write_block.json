@@ -1,0 +1,83 @@
+{
+ "calls": [
+  {
+   "args": {
+    "content": "blocked\n",
+    "path": "notes.md",
+    "root": "active_workspace"
+   },
+   "events": [
+    {
+     "call": 1,
+     "fn": "_ephemeral_block",
+     "is_mcp": false,
+     "ret": "",
+     "tool": "write_file"
+    },
+    {
+     "call": 2,
+     "fn": "_disabled_tools",
+     "ret": []
+    },
+    {
+     "call": 3,
+     "fn": "_builtin_tool_availability",
+     "ret": [
+      true,
+      "",
+      ""
+     ],
+     "tool": "write_file"
+    },
+    {
+     "acting": false,
+     "call": 4,
+     "fn": "_subagent_and_update_gate",
+     "local_readonly": false,
+     "ret": "",
+     "tool": "write_file"
+    },
+    {
+     "call": 5,
+     "fn": "workspace_mode_block_reason",
+     "ret": ""
+    },
+    {
+     "arg_keys": [
+      "content",
+      "path",
+      "root"
+     ],
+     "call": 6,
+     "fn": "_normalize_dispatch_path_args",
+     "ret": "",
+     "tool": "write_file"
+    },
+    {
+     "arg_keys": [
+      "content",
+      "path",
+      "root"
+     ],
+     "block": "",
+     "call": 7,
+     "fn": "_resolve_python_predispatch",
+     "resolution_error": "",
+     "runtime_mode": "light",
+     "tool": "write_file"
+    },
+    {
+     "call": 8,
+     "fn": "light_cognitive_or_root_redirect",
+     "ret": null,
+     "tool": "write_file"
+    }
+   ],
+   "result": "⚠️ LIGHT_MODE_BLOCKED: runtime_mode=light blocks Ouroboros self-repo/control-plane mutation via 'write_file'. For user-visible deliverables use root=user_files (for example Desktop/file.html), root=artifact_store for the canonical task artifact, or root=task_drive for scratch. Skill payload edits remain allowed only through root=skill_payload with bucket and skill_name (data/skills/<bucket>/<skill>/) or skill_repair constraints. Switch to advanced/pro only for reviewed Ouroboros self-modification.",
+   "tool": "write_file"
+  }
+ ],
+ "description": "runtime_mode=light blocks write_file into the repo",
+ "guard_calls_total": 8,
+ "scenario": "light_mode_repo_write_block"
+}

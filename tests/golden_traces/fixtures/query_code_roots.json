@@ -1,0 +1,209 @@
+{
+ "calls": [
+  {
+   "args": {
+    "op": "symbols",
+    "path": "src",
+    "root": "active_workspace"
+   },
+   "events": [
+    {
+     "call": 1,
+     "fn": "_ephemeral_block",
+     "is_mcp": false,
+     "ret": "",
+     "tool": "query_code"
+    },
+    {
+     "call": 2,
+     "fn": "_disabled_tools",
+     "ret": []
+    },
+    {
+     "call": 3,
+     "fn": "_builtin_tool_availability",
+     "ret": [
+      true,
+      "",
+      ""
+     ],
+     "tool": "query_code"
+    },
+    {
+     "acting": false,
+     "call": 4,
+     "fn": "_subagent_and_update_gate",
+     "local_readonly": false,
+     "ret": "",
+     "tool": "query_code"
+    },
+    {
+     "call": 5,
+     "fn": "workspace_mode_block_reason",
+     "ret": ""
+    },
+    {
+     "arg_keys": [
+      "op",
+      "path",
+      "root"
+     ],
+     "call": 6,
+     "fn": "_normalize_dispatch_path_args",
+     "ret": "",
+     "tool": "query_code"
+    },
+    {
+     "arg_keys": [
+      "op",
+      "path",
+      "root"
+     ],
+     "block": "",
+     "call": 7,
+     "fn": "_resolve_python_predispatch",
+     "resolution_error": "",
+     "runtime_mode": "advanced",
+     "tool": "query_code"
+    },
+    {
+     "arg_keys": [
+      "op",
+      "path",
+      "root"
+     ],
+     "call": 8,
+     "fn": "check_safety",
+     "tool": "query_code"
+    },
+    {
+     "arg_keys": [
+      "op",
+      "path",
+      "root"
+     ],
+     "args": {
+      "op": "'symbols'",
+      "path": "'src'",
+      "root": "'active_workspace'"
+     },
+     "call": 9,
+     "fn": "_invoke_builtin_handler",
+     "tool": "query_code"
+    },
+    {
+     "call": 10,
+     "fn": "_compose_execute_result",
+     "route_note": "",
+     "safety_msg": ""
+    }
+   ],
+   "result": "symbols `src` — 1 of 1\n\nsrc/mod.py:1 function golden_fn()\n\nNext: query_code(op=definition/references, query=<name>) on a symbol of interest.",
+   "tool": "query_code"
+  },
+  {
+   "args": {
+    "op": "definition",
+    "query": "golden_fn",
+    "root": "system_repo"
+   },
+   "events": [
+    {
+     "call": 1,
+     "fn": "_ephemeral_block",
+     "is_mcp": false,
+     "ret": "",
+     "tool": "query_code"
+    },
+    {
+     "call": 2,
+     "fn": "_disabled_tools",
+     "ret": []
+    },
+    {
+     "call": 3,
+     "fn": "_builtin_tool_availability",
+     "ret": [
+      true,
+      "",
+      ""
+     ],
+     "tool": "query_code"
+    },
+    {
+     "acting": false,
+     "call": 4,
+     "fn": "_subagent_and_update_gate",
+     "local_readonly": false,
+     "ret": "",
+     "tool": "query_code"
+    },
+    {
+     "call": 5,
+     "fn": "workspace_mode_block_reason",
+     "ret": ""
+    },
+    {
+     "arg_keys": [
+      "op",
+      "query",
+      "root"
+     ],
+     "call": 6,
+     "fn": "_normalize_dispatch_path_args",
+     "ret": "",
+     "tool": "query_code"
+    },
+    {
+     "arg_keys": [
+      "op",
+      "query",
+      "root"
+     ],
+     "block": "",
+     "call": 7,
+     "fn": "_resolve_python_predispatch",
+     "resolution_error": "",
+     "runtime_mode": "advanced",
+     "tool": "query_code"
+    },
+    {
+     "arg_keys": [
+      "op",
+      "query",
+      "root"
+     ],
+     "call": 8,
+     "fn": "check_safety",
+     "tool": "query_code"
+    },
+    {
+     "arg_keys": [
+      "op",
+      "query",
+      "root"
+     ],
+     "args": {
+      "op": "'definition'",
+      "query": "'golden_fn'",
+      "root": "'system_repo'"
+     },
+     "call": 9,
+     "fn": "_invoke_builtin_handler",
+     "tool": "query_code"
+    },
+    {
+     "call": 10,
+     "fn": "_compose_execute_result",
+     "route_note": "",
+     "safety_msg": ""
+    }
+   ],
+   "result": "definition `golden_fn` — 1 of 1\n\nsrc/mod.py:1 function golden_fn()\n\nNext: query_code(op=references/callers, query=<name>) to see how it is used.",
+   "tool": "query_code"
+  }
+ ],
+ "description": "query_code symbols (active_workspace) + definition (system_repo)",
+ "guard_calls_total": 20,
+ "scenario": "query_code_roots"
+}

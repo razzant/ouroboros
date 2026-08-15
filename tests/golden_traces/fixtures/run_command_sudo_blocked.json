@@ -1,0 +1,84 @@
+{
+ "calls": [
+  {
+   "args": {
+    "cmd": [
+     "sudo",
+     "whoami"
+    ]
+   },
+   "events": [
+    {
+     "call": 1,
+     "fn": "_ephemeral_block",
+     "is_mcp": false,
+     "ret": "",
+     "tool": "run_command"
+    },
+    {
+     "call": 2,
+     "fn": "_disabled_tools",
+     "ret": []
+    },
+    {
+     "call": 3,
+     "fn": "_builtin_tool_availability",
+     "ret": [
+      true,
+      "",
+      ""
+     ],
+     "tool": "run_command"
+    },
+    {
+     "acting": false,
+     "call": 4,
+     "fn": "_subagent_and_update_gate",
+     "local_readonly": false,
+     "ret": "",
+     "tool": "run_command"
+    },
+    {
+     "call": 5,
+     "fn": "workspace_mode_block_reason",
+     "ret": ""
+    },
+    {
+     "arg_keys": [
+      "cmd"
+     ],
+     "call": 6,
+     "fn": "_normalize_dispatch_path_args",
+     "ret": "",
+     "tool": "run_command"
+    },
+    {
+     "arg_keys": [
+      "cmd"
+     ],
+     "block": "",
+     "call": 7,
+     "fn": "_resolve_python_predispatch",
+     "resolution_error": "",
+     "runtime_mode": "advanced",
+     "tool": "run_command"
+    },
+    {
+     "arg_keys": [
+      "__tool_name",
+      "cmd"
+     ],
+     "call": 8,
+     "fn": "_run_shell_safety_check",
+     "ret": "⚠️ SUDO_INTERACTIVE_BLOCKED: sudo must be noninteractive. Use sudo -n for commands that can run without a password; if sudo -n fails, report validation/install blocked by environment.",
+     "runtime_mode": "advanced"
+    }
+   ],
+   "result": "⚠️ SUDO_INTERACTIVE_BLOCKED: sudo must be noninteractive. Use sudo -n for commands that can run without a password; if sudo -n fails, report validation/install blocked by environment.",
+   "tool": "run_command"
+  }
+ ],
+ "description": "run_command sudo WITHOUT -n blocked pre-dispatch (no process spawned)",
+ "guard_calls_total": 8,
+ "scenario": "run_command_sudo_blocked"
+}

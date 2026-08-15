@@ -1,0 +1,135 @@
+{
+ "calls": [
+  {
+   "args": {
+    "interpreter": "python3",
+    "script": "print('golden script')"
+   },
+   "events": [
+    {
+     "call": 1,
+     "fn": "_ephemeral_block",
+     "is_mcp": false,
+     "ret": "",
+     "tool": "run_script"
+    },
+    {
+     "call": 2,
+     "fn": "_disabled_tools",
+     "ret": []
+    },
+    {
+     "call": 3,
+     "fn": "_builtin_tool_availability",
+     "ret": [
+      true,
+      "",
+      ""
+     ],
+     "tool": "run_script"
+    },
+    {
+     "acting": false,
+     "call": 4,
+     "fn": "_subagent_and_update_gate",
+     "local_readonly": false,
+     "ret": "",
+     "tool": "run_script"
+    },
+    {
+     "call": 5,
+     "fn": "workspace_mode_block_reason",
+     "ret": ""
+    },
+    {
+     "arg_keys": [
+      "interpreter",
+      "script"
+     ],
+     "call": 6,
+     "fn": "_normalize_dispatch_path_args",
+     "ret": "",
+     "tool": "run_script"
+    },
+    {
+     "arg_keys": [
+      "interpreter",
+      "script"
+     ],
+     "block": "",
+     "call": 7,
+     "fn": "_resolve_python_predispatch",
+     "resolution_error": "",
+     "runtime_mode": "advanced",
+     "tool": "run_script"
+    },
+    {
+     "arg_keys": [
+      "__tool_name",
+      "cmd",
+      "cwd"
+     ],
+     "call": 8,
+     "fn": "_run_shell_safety_check",
+     "ret": "",
+     "runtime_mode": "advanced"
+    },
+    {
+     "arg_keys": [
+      "interpreter",
+      "script"
+     ],
+     "call": 9,
+     "fn": "check_safety",
+     "tool": "run_script"
+    },
+    {
+     "call": 10,
+     "entries": 1,
+     "fn": "_snapshot_owner_files"
+    },
+    {
+     "call": 11,
+     "fn": "_worktree_status_snapshot",
+     "ret_shape": "str"
+    },
+    {
+     "arg_keys": [
+      "interpreter",
+      "script"
+     ],
+     "args": {
+      "interpreter": "'{PYTHON}'",
+      "script": "\"print('golden script')\""
+     },
+     "call": 12,
+     "fn": "_invoke_builtin_handler",
+     "tool": "run_script"
+    },
+    {
+     "call": 13,
+     "fn": "_worktree_status_snapshot",
+     "ret_shape": "str"
+    },
+    {
+     "call": 14,
+     "fn": "_run_shell_post_checks",
+     "light_snapshot": "none",
+     "refs_snapshot": "none",
+     "tool": "run_script"
+    },
+    {
+     "call": 15,
+     "fn": "_compose_execute_result",
+     "route_note": "",
+     "safety_msg": ""
+    }
+   ],
+   "result": "# script_path={REPO}/.ouroboros/tmp_scripts/script_{HEX}.py\nexit_code=0 (cwd={REPO}); root=active_workspace, source=active_workspace\nSTDOUT:\ngolden script\n",
+   "tool": "run_script"
+  }
+ ],
+ "description": "run_script with resolved python3 interpreter",
+ "guard_calls_total": 15,
+ "scenario": "run_script_python"
+}

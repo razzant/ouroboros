@@ -1,0 +1,326 @@
+{
+ "calls": [
+  {
+   "args": {
+    "cmd": [
+     "sleep",
+     "5"
+    ],
+    "name": "goldensvc"
+   },
+   "events": [
+    {
+     "call": 1,
+     "fn": "_ephemeral_block",
+     "is_mcp": false,
+     "ret": "",
+     "tool": "start_service"
+    },
+    {
+     "call": 2,
+     "fn": "_disabled_tools",
+     "ret": []
+    },
+    {
+     "call": 3,
+     "fn": "_builtin_tool_availability",
+     "ret": [
+      true,
+      "",
+      ""
+     ],
+     "tool": "start_service"
+    },
+    {
+     "acting": false,
+     "call": 4,
+     "fn": "_subagent_and_update_gate",
+     "local_readonly": false,
+     "ret": "",
+     "tool": "start_service"
+    },
+    {
+     "call": 5,
+     "fn": "workspace_mode_block_reason",
+     "ret": ""
+    },
+    {
+     "arg_keys": [
+      "cmd",
+      "name"
+     ],
+     "call": 6,
+     "fn": "_normalize_dispatch_path_args",
+     "ret": "",
+     "tool": "start_service"
+    },
+    {
+     "arg_keys": [
+      "cmd",
+      "name"
+     ],
+     "block": "",
+     "call": 7,
+     "fn": "_resolve_python_predispatch",
+     "resolution_error": "",
+     "runtime_mode": "advanced",
+     "tool": "start_service"
+    },
+    {
+     "arg_keys": [
+      "__tool_name",
+      "cmd",
+      "name"
+     ],
+     "call": 8,
+     "fn": "_run_shell_safety_check",
+     "ret": "",
+     "runtime_mode": "advanced"
+    },
+    {
+     "arg_keys": [
+      "cmd",
+      "name"
+     ],
+     "call": 9,
+     "fn": "check_safety",
+     "tool": "start_service"
+    },
+    {
+     "call": 10,
+     "entries": 1,
+     "fn": "_snapshot_owner_files"
+    },
+    {
+     "call": 11,
+     "fn": "_worktree_status_snapshot",
+     "ret_shape": "str"
+    },
+    {
+     "arg_keys": [
+      "cmd",
+      "name"
+     ],
+     "args": {
+      "cmd": "['sleep', '5']",
+      "name": "'goldensvc'"
+     },
+     "call": 12,
+     "fn": "_invoke_builtin_handler",
+     "tool": "start_service"
+    },
+    {
+     "call": 13,
+     "fn": "_worktree_status_snapshot",
+     "ret_shape": "str"
+    },
+    {
+     "call": 14,
+     "fn": "_run_shell_post_checks",
+     "light_snapshot": "none",
+     "refs_snapshot": "none",
+     "tool": "start_service"
+    },
+    {
+     "call": 15,
+     "fn": "_compose_execute_result",
+     "route_note": "",
+     "safety_msg": ""
+    }
+   ],
+   "result": "{\n  \"service_id\": \"golden-task:goldensvc\",\n  \"name\": \"goldensvc\",\n  \"task_id\": \"golden-task\",\n  \"pid\": {PID},\n  \"pgid\": {PID},\n  \"state\": \"running\",\n  \"ready\": true,\n  \"returncode\": null,\n  \"uptime_sec\": {DUR},\n  \"cwd\": \"{REPO}\",\n  \"cwd_root\": \"active_workspace\",\n  \"cwd_base\": \"{REPO}\",\n  \"cwd_source\": \"active_workspace\",\n  \"skill_name\": \"\",\n  \"cmd\": [\n    \"sleep\",\n    \"5\"\n  ],\n  \"outputs\": [],\n  \"keep_alive\": false,\n  \"log_path\": \"{DRIVE}/services/golden-task/goldensvc.log\",\n  \"ts\": \"{TS}\"\n}",
+   "tool": "start_service"
+  },
+  {
+   "args": {
+    "name": "goldensvc"
+   },
+   "events": [
+    {
+     "call": 1,
+     "fn": "_ephemeral_block",
+     "is_mcp": false,
+     "ret": "",
+     "tool": "service_status"
+    },
+    {
+     "call": 2,
+     "fn": "_disabled_tools",
+     "ret": []
+    },
+    {
+     "call": 3,
+     "fn": "_builtin_tool_availability",
+     "ret": [
+      true,
+      "",
+      ""
+     ],
+     "tool": "service_status"
+    },
+    {
+     "acting": false,
+     "call": 4,
+     "fn": "_subagent_and_update_gate",
+     "local_readonly": false,
+     "ret": "",
+     "tool": "service_status"
+    },
+    {
+     "call": 5,
+     "fn": "workspace_mode_block_reason",
+     "ret": ""
+    },
+    {
+     "arg_keys": [
+      "name"
+     ],
+     "call": 6,
+     "fn": "_normalize_dispatch_path_args",
+     "ret": "",
+     "tool": "service_status"
+    },
+    {
+     "arg_keys": [
+      "name"
+     ],
+     "block": "",
+     "call": 7,
+     "fn": "_resolve_python_predispatch",
+     "resolution_error": "",
+     "runtime_mode": "advanced",
+     "tool": "service_status"
+    },
+    {
+     "arg_keys": [
+      "name"
+     ],
+     "call": 8,
+     "fn": "check_safety",
+     "tool": "service_status"
+    },
+    {
+     "arg_keys": [
+      "name"
+     ],
+     "args": {
+      "name": "'goldensvc'"
+     },
+     "call": 9,
+     "fn": "_invoke_builtin_handler",
+     "tool": "service_status"
+    },
+    {
+     "call": 10,
+     "fn": "_compose_execute_result",
+     "route_note": "",
+     "safety_msg": ""
+    }
+   ],
+   "result": "{\n  \"service_id\": \"golden-task:goldensvc\",\n  \"name\": \"goldensvc\",\n  \"task_id\": \"golden-task\",\n  \"pid\": {PID},\n  \"pgid\": {PID},\n  \"state\": \"running\",\n  \"ready\": true,\n  \"returncode\": null,\n  \"uptime_sec\": {DUR},\n  \"cwd\": \"{REPO}\",\n  \"cwd_root\": \"active_workspace\",\n  \"cwd_base\": \"{REPO}\",\n  \"cwd_source\": \"active_workspace\",\n  \"skill_name\": \"\",\n  \"cmd\": [\n    \"sleep\",\n    \"5\"\n  ],\n  \"outputs\": [],\n  \"keep_alive\": false,\n  \"log_path\": \"{DRIVE}/services/golden-task/goldensvc.log\",\n  \"ts\": \"{TS}\"\n}",
+   "tool": "service_status"
+  },
+  {
+   "args": {
+    "name": "goldensvc"
+   },
+   "events": [
+    {
+     "call": 1,
+     "fn": "_ephemeral_block",
+     "is_mcp": false,
+     "ret": "",
+     "tool": "stop_service"
+    },
+    {
+     "call": 2,
+     "fn": "_disabled_tools",
+     "ret": []
+    },
+    {
+     "call": 3,
+     "fn": "_builtin_tool_availability",
+     "ret": [
+      true,
+      "",
+      ""
+     ],
+     "tool": "stop_service"
+    },
+    {
+     "acting": false,
+     "call": 4,
+     "fn": "_subagent_and_update_gate",
+     "local_readonly": false,
+     "ret": "",
+     "tool": "stop_service"
+    },
+    {
+     "call": 5,
+     "fn": "workspace_mode_block_reason",
+     "ret": ""
+    },
+    {
+     "arg_keys": [
+      "name"
+     ],
+     "call": 6,
+     "fn": "_normalize_dispatch_path_args",
+     "ret": "",
+     "tool": "stop_service"
+    },
+    {
+     "arg_keys": [
+      "name"
+     ],
+     "block": "",
+     "call": 7,
+     "fn": "_resolve_python_predispatch",
+     "resolution_error": "",
+     "runtime_mode": "advanced",
+     "tool": "stop_service"
+    },
+    {
+     "arg_keys": [
+      "name"
+     ],
+     "call": 8,
+     "fn": "check_safety",
+     "tool": "stop_service"
+    },
+    {
+     "call": 9,
+     "fn": "_worktree_status_snapshot",
+     "ret_shape": "str"
+    },
+    {
+     "arg_keys": [
+      "name"
+     ],
+     "args": {
+      "name": "'goldensvc'"
+     },
+     "call": 10,
+     "fn": "_invoke_builtin_handler",
+     "tool": "stop_service"
+    },
+    {
+     "call": 11,
+     "fn": "_worktree_status_snapshot",
+     "ret_shape": "str"
+    },
+    {
+     "call": 12,
+     "fn": "_compose_execute_result",
+     "route_note": "",
+     "safety_msg": ""
+    }
+   ],
+   "result": "{\n  \"service_id\": \"golden-task:goldensvc\",\n  \"name\": \"goldensvc\",\n  \"task_id\": \"golden-task\",\n  \"pid\": {PID},\n  \"pgid\": {PID},\n  \"state\": \"exited\",\n  \"ready\": false,\n  \"returncode\": -9,\n  \"uptime_sec\": {DUR},\n  \"cwd\": \"{REPO}\",\n  \"cwd_root\": \"active_workspace\",\n  \"cwd_base\": \"{REPO}\",\n  \"cwd_source\": \"active_workspace\",\n  \"skill_name\": \"\",\n  \"cmd\": [\n    \"sleep\",\n    \"5\"\n  ],\n  \"outputs\": [],\n  \"keep_alive\": false,\n  \"log_path\": \"{DRIVE}/services/golden-task/goldensvc.log\",\n  \"ts\": \"{TS}\",\n  \"log_finalization\": {\n    \"deleted_live_log\": true,\n    \"full_log_ref\": {\n      \"sha256\": \"e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855\",\n      \"path\": \"{DRIVE}/observability/blobs/e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855.txt.gz\",\n      \"kind\": \"txt\",\n      \"encoding\": \"gzip\",\n      \"size\": 0,\n      \"compressed_size\": {SIZE}\n    },\n    \"tail\": \"\",\n    \"errors\": []\n  },\n  \"artifact_output_failed\": false\n}",
+   "tool": "stop_service"
+  }
+ ],
+ "description": "start_service + service_status + stop_service on a sleeper",
+ "guard_calls_total": 37,
+ "scenario": "services_lifecycle"
+}

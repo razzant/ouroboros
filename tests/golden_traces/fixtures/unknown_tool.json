@@ -1,0 +1,51 @@
+{
+ "calls": [
+  {
+   "args": {
+    "anything": 1
+   },
+   "events": [
+    {
+     "call": 1,
+     "fn": "_ephemeral_block",
+     "is_mcp": false,
+     "ret": "",
+     "tool": "definitely_not_a_tool"
+    },
+    {
+     "call": 2,
+     "fn": "_disabled_tools",
+     "ret": []
+    },
+    {
+     "call": 3,
+     "fn": "_builtin_tool_availability",
+     "ret": [
+      true,
+      "",
+      ""
+     ],
+     "tool": "definitely_not_a_tool"
+    },
+    {
+     "acting": false,
+     "call": 4,
+     "fn": "_subagent_and_update_gate",
+     "local_readonly": false,
+     "ret": "",
+     "tool": "definitely_not_a_tool"
+    },
+    {
+     "call": 5,
+     "fn": "workspace_mode_block_reason",
+     "ret": ""
+    }
+   ],
+   "result": "⚠️ Unknown tool: definitely_not_a_tool. Available: advisory_review, analyze_screenshot, apply_patch, browse_page, browser_action, cancel_task, chat_history, cherry_pick_pr_commits, close_github_issue, codebase_health, comment_on_issue, comment_on_pr, commit_reviewed, compact_context, compare_subagent_patches, create_github_issue, create_integration_branch, delegate_answer, delegate_cancel, delegate_start, delegate_wait, discard_child_result, edit_batch, edit_text, enable_tools, ensure_project_scope, extract_video_frames, fetch_pr_ref, forward_to_worker, generate_evolution_stats, get_github_issue, get_github_pr, get_task_result, integrate_delegated_patch, integrate_subagent_patch, journal_read, journal_write, knowledge_list, knowledge_read, knowledge_write, list_available_tools, list_files, list_github_issues, list_github_prs, list_projects, list_skills, memory_map, memory_update_registry, ocr_pdf, override_delegation_constraint, peek_task, plan_task, promote_chat_to_task, promote_to_stable, query_code, read_file, recent_tasks, request_deep_self_review, request_restart, review_status, route_to_project, run_ci_tests, run_command, run_script, schedule_subagent, search_code, send_file, send_photo, send_user_message, send_video, service_logs, service_status, set_tool_timeout, skill_exec, skill_preflight, skill_review, stage_adaptations, stage_pr_merge, start_service, steer_task, stop_service, submit_skill_to_hub, switch_model, task_acceptance_review, toggle_consciousness, toggle_evolution, toggle_skill, tree_note, tree_read, update_identity, update_scratchpad, vcs_commit_reviewed, vcs_diff, vcs_pull_ff, vcs_restore, vcs_revert, vcs_rollback, vcs_status, verify_and_record, view_image, vlm_query, wait_task, wait_tasks, web_search, workpad_read, workpad_write, write_file, youtube_transcript",
+   "tool": "definitely_not_a_tool"
+  }
+ ],
+ "description": "unknown tool name early exit listing available tools",
+ "guard_calls_total": 5,
+ "scenario": "unknown_tool"
+}
