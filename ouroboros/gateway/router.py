@@ -14,6 +14,61 @@ from typing import Any
 from starlette.routing import BaseRoute, Route, WebSocketRoute
 
 
+def _connection_routes() -> "list[Route]":
+    """The owner's remote-connection surface, as its own group.
+
+    Split out of `collect_routes` for size, but the grouping is the honest one: every
+    route here is owner-gated on loopback and none of them is reachable by a task —
+    they administer the SSH connections a remote workspace is later placed on, which
+    is a different authority from anything else in the table.
+    """
+    from ouroboros.gateway.connections import (
+        api_connection_bootstrap,
+        api_connection_dirs,
+        api_connection_reconnect,
+        api_connection_retire,
+        api_connection_retrust,
+        api_connection_test,
+        api_connections_add,
+        api_connections_list,
+    )
+
+    return [
+        Route("/api/owner/connections", endpoint=api_connections_list, methods=["GET"]),
+        Route("/api/owner/connections", endpoint=api_connections_add, methods=["POST"]),
+        Route(
+            "/api/owner/connections/{connection_id}/test",
+            endpoint=api_connection_test,
+            methods=["POST"],
+        ),
+        Route(
+            "/api/owner/connections/{connection_id}/bootstrap",
+            endpoint=api_connection_bootstrap,
+            methods=["POST"],
+        ),
+        Route(
+            "/api/owner/connections/{connection_id}/reconnect",
+            endpoint=api_connection_reconnect,
+            methods=["POST"],
+        ),
+        Route(
+            "/api/owner/connections/{connection_id}/retrust",
+            endpoint=api_connection_retrust,
+            methods=["POST"],
+        ),
+        Route(
+            "/api/owner/connections/{connection_id}/dirs",
+            endpoint=api_connection_dirs,
+            methods=["GET"],
+        ),
+        Route(
+            "/api/owner/connections/{connection_id}",
+            endpoint=api_connection_retire,
+            methods=["DELETE"],
+        ),
+    ]
+
+
 def collect_routes(
     *,
     data_dir: pathlib.Path,
@@ -215,6 +270,7 @@ def collect_routes(
         Route("/api/owner/scope-review-floor", endpoint=api_owner_scope_review_floor, methods=["POST"]),
         Route("/api/owner/safety-mode", endpoint=api_owner_safety_mode, methods=["POST"]),
         Route("/api/owner/capability-ack", endpoint=api_acknowledge_capability, methods=["POST"]),
+        *_connection_routes(),
         Route("/api/model-catalog", endpoint=api_model_catalog),
         Route("/api/projects", endpoint=api_projects_list, methods=["GET"]),
         Route("/api/projects", endpoint=api_projects_create, methods=["POST"]),

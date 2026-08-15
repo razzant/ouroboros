@@ -293,6 +293,171 @@ ouroboros schedule list
 
 External workspaces must be separate Git worktree roots and may not overlap Ouroboros's own repository or data directory. Patch, streaming, detached-task, and schedule semantics are documented in the CLI help and the canonical [architecture](docs/ARCHITECTURE.md).
 
+### Remote SSH Projects
+
+A remote SSH workspace keeps one Ouroboros mind on **Home**: models, identity,
+durable memory, policy, review, scheduling, task state, provider credentials,
+and the UI/CLI all stay on the machine running Ouroboros. A restricted
+`ouroboros-execd` performs native file, Git, and process work inside the
+selected remote Git worktree. Local and SSH Projects expose the same tool names
+and schemas to the agent — placement changes the executor, not what the agent
+can do.
+
+Concretely, on a remote Project these run **on the target**: `read_file`,
+`write_file`, `edit_text`, `apply_patch`, `edit_batch`, `list_files`,
+`search_code`, `query_code`,
+`run_command`, `run_script`, `start_service` / `service_status` /
+`service_logs` / `stop_service`, `vcs_status`, `vcs_diff`, and
+`extract_video_frames`. Memory, knowledge, the task tree, review, scheduling and
+web tools stay on Home, because that is where the state they are about lives —
+and so does every call whose `root` is a Home root: a `read_file` from
+`artifact_store` is answered by Home on a remote task too, because the target
+does not model resource roots and would otherwise answer about its own workspace.
+
+Two tools are **split across the boundary** rather than routed whole, because each
+is a Home contract wrapped around work that must happen on the target:
+
+- `verify_and_record` runs your declared check **on the target** and writes the
+  durable receipt **on Home**, stamped `execution_surface: remote_target` with the
+  host that attested it — so a remote green and a Home green are never mistaken for
+  the same evidence. A `bytes_equal` comparison is made on the target on purpose
+  (comparing on Home would transfer both files in full for one boolean plus a
+  bounded divergence window). If no transport is available, **nothing** is
+  recorded: a receipt for a check that never ran is worse than no receipt. The
+  `artifact_observation` kind still needs a Home path and refuses typed on a
+  remote Project.
+- `claude_code_edit` materializes a **verified mirror** of the remote workspace on
+  Home, lets the Claude Agent SDK edit the mirror, and applies exactly that
+  difference back through one guarded patch that is refused unless the target still
+  matches the tree the edit was made against. The mirror arrives already filtered at
+  the source, so a policy-excluded file is not there to be read — and if you ask to
+  edit one, the refusal says the file exists on the target and was withheld, by
+  name. Home-only arguments are refused rather than ignored: a skill payload lives in
+  Home's data tree, and declared `outputs` are Home artifact paths.
+
+You can also **browse a dev server the task started on the target**: a loopback URL
+on a remote Project (`http://localhost:5173`) is forwarded over SSH and opened
+against the target's port, not Home's. A private, non-loopback address is refused as
+ambiguous instead of quietly resolved against Home's own network.
+
+Setup is owner-driven:
+
+1. Configure an ordinary alias in Home's `~/.ssh/config` and complete its first
+   host-key, password, or MFA interaction **in a normal terminal**. Ouroboros
+   uses your local OpenSSH and `ssh-agent`; it never stores, uploads, or answers
+   prompts for SSH credentials.
+2. Set an Ouroboros **Network Password** and restart. The owner-only connection
+   API requires it even on loopback. This password authenticates Settings and
+   the CLI to Ouroboros; it has nothing to do with SSH authentication.
+3. Open **Settings → Connections**, add the alias, then **Test** and
+   **Bootstrap**. Bootstrap uploads the matching standalone executor from Home,
+   so the target needs no Python, `sudo`, systemd, listening port, or outbound
+   internet. Test is only a transport and platform probe — it does not pin
+   target identity. The first successful Bootstrap performs the handshake, pins
+   the target's continuity identity, and durably records that this host carries a
+   compatible executor. Selectability then needs that durable fact **plus** fresh
+   health, and only the freshness half is per-process: "a compatible executor is
+   installed there" is a fact about the host and survives a restart, while "the
+   target answered in the last few minutes" is a claim about this run. So after
+   restarting Home a plain **Test** brings the Connection back into the picker —
+   Bootstrap again is needed only when the executor itself must be replaced.
+4. Create a Project, choose **SSH**, pick the healthy connection, browse to the
+   remote folder, and attach its Git worktree. Remote tasks are Project-only and
+   keep their placement for their whole lifetime.
+
+The thin CLI offers the same owner administration:
+
+```bash
+ouroboros connections list [--json]
+ouroboros connections add --name NAME --ssh-alias ALIAS [--json]
+ouroboros connections test ID [--json]
+ouroboros connections bootstrap ID [--json]
+ouroboros connections reconnect ID [--json]
+ouroboros connections retrust ID [--json]
+ouroboros connections retire ID [--json]
+```
+
+These commands read the Network Password only from a controlling terminal —
+never from argv, an environment variable, or a pipe — and with no terminal
+attached they attempt no request at all. There is deliberately no remote task
+runner, terminal, or TUI: a remote Project is worked in its ordinary Project
+room, and every task created there runs on the target.
+
+**Creating one.** New Project → *Use a folder on a remote host over SSH*: pick a
+bootstrapped Connection, browse the host, select the repository root. The path is
+validated **on the target** (`git rev-parse`) before the Project exists, so a folder
+that is not the canonical worktree root is refused with the root it should have named
+instead. Only bootstrapped, currently-healthy Connections are offered — after
+restarting Home, one **Test** refreshes the health half and the Connection is
+selectable again (the bootstrap fact is durable).
+
+**Moving one.** A remote Project can be rebound to a different host or path, from
+the CLI or the API:
+
+```bash
+ouroboros projects list [--json]
+ouroboros projects rebind <project_id> --connection ID --remote-root /path [--json]
+```
+
+or `POST /api/projects/{project_id}/update` with `connection_id` + `remote_root`,
+which is what the CLI calls. The rebind is refused while the Project has queued or
+running tasks — their placement was sealed at their own admission and cannot be
+redirected — and it advances the Project's routing generation, so work already
+resolved against the previous target is refused at queue admission instead of running
+there. There is **no UI control for the rebind yet**; the CLI and the endpoint are the
+whole surface today.
+
+**Retiring a Connection** does not quietly demote its Projects to local ones. They
+keep their placement, and both task admission and the queue fence refuse with a typed
+reason until the Connection is trusted again.
+
+**Trust.** OpenSSH `known_hosts` remains the transport trust authority.
+Ouroboros additionally pins the executor's continuity identity after the first
+successful Bootstrap; Test never changes that pin, and it is neither a hardware
+identity nor a replacement for `known_hosts`. If it changes, verify the host
+through normal OpenSSH **first**, then use **Retrust** and confirm the old and
+new identities while no task or lease is active. **Retrust** also clears the
+bootstrap claim, because a newly proven host identity has never been shown to
+carry a compatible executor — that one really does need Bootstrap again. Health
+FRESHNESS is process-local (no durable record can assert "the target answered
+minutes ago"), so after an ordinary restart a **Test** is what a Connection
+needs, not a re-Bootstrap. **Reconnect** rebuilds and
+reconciles already-admitted Project sessions; it repairs the connection and
+never replays finished work.
+
+**What a remote task can and cannot reach.** Remote work runs with the selected
+remote Unix account's authority; execd is a placement and custody boundary, not
+a container sandbox. Provider, MCP, and Home credentials are never forwarded.
+Deliverables come back as ordinary Home task artifacts — the imported Home
+record is the only artifact identity you or the agent ever see. A snapshot that
+omits sensitive or protected paths is reported as explicitly **partial**, with an
+exact count and a disclosed exclusion list, rather than quietly shortened. A
+**Panic** stops remote work too: Home stops reasoning, stops lease renewals,
+sends priority kills, and tears down its SSH children without waiting for an
+acknowledgement.
+
+Common setup failures are intentionally fail-closed:
+
+- **Auth or host trust:** run `ssh ALIAS true` in a normal Home terminal,
+  resolve the prompt there, then Test again.
+- **Owner auth not configured:** set the Network Password in Settings, restart,
+  sign in, and reopen Connections.
+- **Unsupported platform or missing bundle:** use a supported GNU/glibc target
+  (`x86_64` or `aarch64`, glibc 2.17+) and a build that carries the matching
+  executor asset. Bootstrap never falls back to remote Python.
+- **Host or workspace identity changed:** do not bypass the mismatch. Verify the
+  machine or worktree replacement, then Retrust or rebind the Project.
+- **`completion_unknown`:** the transport ended after a mutation may have
+  started. Read the task's diagnostic, request id, output, and imported
+  artifacts before retrying — Ouroboros will not blindly repeat it.
+
+macOS/Windows targets, Alpine/musl, non-Git folders, remote desktop, generic
+private-network proxying, arbitrary remote environment injection, and task
+handoff between machines are not supported. For placement rules, the transfer
+boundary, the browser-forwarding exemption, trust boundaries, and Panic
+semantics, see
+[Remote SSH workspace placement](docs/ARCHITECTURE.md#remote-ssh-workspace-placement).
+
 #### For Agents
 
 Another agent, script, or CI job can invoke Ouroboros through the same gateway-backed CLI:

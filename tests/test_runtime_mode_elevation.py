@@ -843,6 +843,40 @@ def test_owner_context_mode_idle_predicate_covers_pending_and_direct_chat_busy(m
     assert settings_mod._has_running_agent_tasks() is False
 
 
+def test_owner_context_mode_idle_predicate_fails_closed_when_it_cannot_tell(monkeypatch):
+    """A BROKEN idle check must read as busy, not as idle.
+
+    `_has_running_agent_tasks` ended `except Exception: return False`, and `False` is the
+    value that permits the Max->Low downgrade the endpoint's own refusal text says can only
+    happen while idle. A failing queue lookup and a busy queue are hardly independent
+    events, so the guard opened in the one case it most needed to hold. Its neighbour
+    `_apply_max_context_auto_downgrade` already resolves every uncertainty CLOSED, and
+    `gateway/projects`/`gateway/connections` answer the same shape of question the same
+    way; this pins the agreement.
+
+    Injected at the SEAM the function imports, so the real `except` arm is what is under
+    test rather than a stub standing in for it.
+    """
+    from ouroboros.gateway import settings as settings_mod
+    import supervisor.workers as workers
+
+    class Exploding:
+        def __bool__(self):
+            raise RuntimeError("queue state unreadable")
+
+    monkeypatch.setattr(workers, "PENDING", Exploding())
+    assert settings_mod._has_running_agent_tasks() is True
+
+    monkeypatch.setattr(workers, "PENDING", [])
+    monkeypatch.setattr(workers, "RUNNING", {})
+
+    def exploding_agent():
+        raise RuntimeError("chat agent unavailable")
+
+    monkeypatch.setattr(workers, "_get_chat_agent", exploding_agent)
+    assert settings_mod._has_running_agent_tasks() is True
+
+
 def test_save_settings_refuses_context_mode_lowering_without_owner_flag(isolated_settings, monkeypatch):
     from ouroboros.config import save_settings
 
@@ -2032,6 +2066,7 @@ def test_run_shell_blocks_obfuscated_skill_owner_state_write(filename, tmp_path,
     assert not (skill_state_dir / filename).exists()
 
 
+@pytest.mark.serial
 def test_run_shell_blocks_delayed_skill_owner_state_writer(tmp_path, monkeypatch):
     from ouroboros.tools.registry import ToolRegistry
     import sys

@@ -13,13 +13,153 @@ from typing import Any
 from starlette.requests import Request
 from starlette.responses import JSONResponse
 
-from ouroboros.gateway._helpers import json_exception, request_drive_root, request_repo_dir
+from ouroboros.gateway._helpers import (
+    json_exception,
+    request_drive_root,
+    request_repo_dir,
+    wire_error_code,
+)
+from ouroboros.remote_refusal_actions import REFUSAL_ACTIONS
 
 log = logging.getLogger(__name__)
 
 # Project name auto-derived from the task objective is capped here so the
 # sidebar label stays readable; the live card keeps showing full progress.
 _MAX_DERIVED_NAME = 60
+
+
+def _remote_placement_halves(body: dict) -> tuple[str, str, Any]:
+    """Read the remote source from a create/update body: ``(connection_id, root, error)``.
+
+    Two halves of ONE placement, so half a request is a refusal rather than a
+    silently-ignored field: a body naming a connection with no path (or the reverse)
+    has told us where but not what, and guessing either would pick a target the owner
+    did not name.
+    """
+    connection_id = str(body.get("connection_id") or "").strip()
+    remote_root = str(body.get("remote_root") or "").strip()
+    if bool(connection_id) != bool(remote_root):
+        return "", "", JSONResponse(
+            {
+                "error": (
+                    "connection_id and remote_root are the two halves of one remote "
+                    "placement — send both or neither"
+                ),
+                "error_code": "invalid_remote_placement",
+            },
+            status_code=400,
+        )
+    return connection_id, remote_root, None
+
+
+async def _admit_remote_placement(
+    connection_id: str, remote_root: str, project_id: str
+) -> tuple[Any, Any]:
+    """Admit a remote placement off the event loop: ``(sealed_ref, error_response)``.
+
+    The admission SSOT is the authority (``workspace_admission.admit_remote_placement``):
+    it validates the form, checks the connection against the owner store, consults the
+    TARGET through the one broker session admission, and returns the sealed ref. This
+    handler only maps its typed refusals onto status codes — a gateway that judged
+    placements itself would be the second admission authority the postmortem warns about.
+    """
+    import asyncio
+
+    from ouroboros.workspace_admission import (
+        REMOTE_TRANSPORT_UNAVAILABLE,
+        RemoteWorkspaceUnavailableError,
+        WorkspaceRootError,
+        admit_remote_placement,
+    )
+
+    try:
+        ref = await asyncio.to_thread(
+            admit_remote_placement,
+            connection_id=connection_id,
+            remote_root=remote_root,
+            project_id=project_id,
+        )
+    except RemoteWorkspaceUnavailableError as exc:
+        # 503, not 400: the request is well formed and the target is simply not
+        # answering, so the honest advice is a next step, not "fix your input".
+        #
+        # The step comes from the REFUSAL (`exc.action`), not from this line. It used
+        # to be the literal `"bootstrap_connection"` for every reason a target can be
+        # unreachable, so an owner whose host identity had changed, or whose execd
+        # bundle was the stale artifact, was sent to press a button that could not
+        # move their block — the same dead end the New Project picker offered.
+        return None, JSONResponse(
+            {
+                "error": str(exc),
+                "error_code": wire_error_code(REMOTE_TRANSPORT_UNAVAILABLE),
+                "action": str(getattr(exc, "action", "") or "retry"),
+            },
+            status_code=503,
+        )
+    except WorkspaceRootError as exc:
+        return None, JSONResponse(
+            {"error": str(exc), "error_code": "invalid_remote_placement"},
+            status_code=400,
+        )
+    return ref, None
+
+
+async def _close_provisional_project_session(request: Request, ref: Any, project_id: str) -> None:
+    """Close a session Home opened for an admission that never became the placement.
+
+    Admitting a remote placement OPENS a broker session on the target; if the commit
+    that was supposed to make that session the project's placement then fails, the
+    session is a leak that outlives the request and keeps the connection busy. So the
+    close is best-effort but unconditional on that path — and it re-reads the registry
+    first, because a concurrent request may have made this very ref authoritative in
+    the meantime, in which case closing it would tear down a live project's session.
+    """
+    from ouroboros.projects_registry import get_project, project_placement
+
+    try:
+        current = project_placement(get_project(request_drive_root(request), project_id) or {})
+    except Exception:
+        log.debug("provisional session check failed for %s", project_id, exc_info=True)
+        current = None
+    if current is not None and current == ref:
+        return
+    try:
+        from ouroboros.gateway.connections import _remote_service, _service_call
+
+        service = _remote_service(request)
+        if service is not None:
+            await _service_call(
+                service, "close_project_session", ref.to_payload(), project_id=project_id
+            )
+    except Exception:
+        log.debug("provisional session close failed for %s", project_id, exc_info=True)
+
+
+def _project_has_live_tasks(drive_root: object, project_id: str) -> bool | None:
+    """Whether a rebind would move the target out from under work already running.
+
+    A running task's placement is SEALED at its own admission and nothing re-resolves
+    it, so a rebind cannot redirect it — which is exactly the problem: the owner would
+    believe they moved the project while work kept writing to the old host. Refuse and
+    say so instead.
+
+    THREE answers, not two, and the third is the point: ``None`` means the question
+    could not be ANSWERED. It used to be reported as ``False`` — "no live tasks" — so
+    any failure inside this lookup turned the guard into a green light for the exact
+    rebind its docstring promises to refuse. A guard that opens when it breaks is worse
+    than no guard, because the surface claims a check that is not happening.
+    ``gateway/connections._live_connection_tasks`` already answers this shape of
+    question this way and ``_connection_busy`` already treats "could not tell" as
+    "busy"; the two owner-destructive lifecycle paths now agree.
+    """
+    try:
+        from supervisor.task_lifecycle import _live_project_task_ids
+
+        return bool(_live_project_task_ids(drive_root, project_id))
+    except Exception:
+        log.debug("live-task check failed for %s", project_id, exc_info=True)
+        return None
+
 
 def _task_from_live_queue(drive_root: object, task_id: str) -> dict:
     """The task dict of a still-RUNNING/PENDING task from the queue snapshot.
@@ -281,7 +421,7 @@ async def api_projects_list(request: Request) -> JSONResponse:
 
 
 async def api_projects_create(request: Request) -> JSONResponse:
-    """POST /api/projects — create a project from one of FOUR sources (v6.59.0):
+    """POST /api/projects — create a project from one of FIVE sources (v6.59.0):
 
     - ``path=``       attach an existing owner folder (validated on the RESOLVED
                       realpath; optional ``init_git`` makes an attach-snapshot
@@ -289,11 +429,15 @@ async def api_projects_create(request: Request) -> JSONResponse:
     - ``git_url=``    server-side clone into the durable projects root (atomic
                       tmp→rename, non-interactive, typed ``auth_required``);
     - ``with_workspace`` provision a fresh genesis folder (pre-v6.59 behavior);
+    - ``connection_id`` + ``remote_root`` bind the project to a git worktree on a
+                      remote host (RWS v2): the placement is admitted on the TARGET's
+                      evidence and sealed into the registry row, and every task born
+                      in this project's room then runs there;
     - none of these   a file-less project (research/chat-only).
 
-    ``provenance`` (attached|cloned|genesis|none) + ``clone_url`` are recorded as
-    historical facts; ``trusted_at`` is stamped automatically for attach/clone
-    (the notification trust model — attaching IS the owner's explicit grant).
+    ``provenance`` (attached|cloned|genesis|remote|none) + ``clone_url`` are recorded
+    as historical facts; ``trusted_at`` is stamped automatically for attach/clone/remote
+    (the notification trust model — choosing the folder IS the owner's explicit grant).
     """
     try:
         import asyncio
@@ -335,9 +479,20 @@ async def api_projects_create(request: Request) -> JSONResponse:
         attach_path = str(body.get("path") or "").strip()
         git_url = str(body.get("git_url") or "").strip()
         with_workspace = bool(body.get("with_workspace"))
-        if sum(1 for flag in (bool(attach_path), bool(git_url), with_workspace) if flag) > 1:
+        remote_connection, remote_root, halves_error = _remote_placement_halves(body)
+        if halves_error is not None:
+            return halves_error
+        if sum(
+            1 for flag in (bool(attach_path), bool(git_url), with_workspace, bool(remote_connection))
+            if flag
+        ) > 1:
             return JSONResponse(
-                {"error": "choose ONE source: path= (attach) | git_url= (clone) | with_workspace (genesis)"},
+                {
+                    "error": (
+                        "choose ONE source: path= (attach) | git_url= (clone) | "
+                        "with_workspace (genesis) | connection_id+remote_root (remote)"
+                    )
+                },
                 status_code=400,
             )
         drive_root = request_drive_root(request)
@@ -350,7 +505,7 @@ async def api_projects_create(request: Request) -> JSONResponse:
         from ouroboros.projects_registry import get_project
 
         _existing = get_project(drive_root, sanitize_project_id(raw_id))
-        if _existing and (attach_path or git_url or with_workspace):
+        if _existing and (attach_path or git_url or with_workspace or remote_connection):
             return JSONResponse(
                 {
                     "error": (
@@ -404,13 +559,32 @@ async def api_projects_create(request: Request) -> JSONResponse:
                 return JSONResponse({"error": detail, "error_code": code}, status_code=status)
             working_dir, provenance, clone_url = cloned, "cloned", git_url
 
-        entry = create_project(
-            drive_root,
-            sanitize_project_id(raw_id),
-            name=name,
-            working_dir=working_dir,
-            origin="owner_ui",
-        )
+        placement = None
+        if remote_connection:
+            placement, remote_error = await _admit_remote_placement(
+                remote_connection, remote_root, sanitize_project_id(raw_id)
+            )
+            if remote_error is not None:
+                return remote_error
+            provenance = "remote"
+        try:
+            entry = create_project(
+                drive_root,
+                sanitize_project_id(raw_id),
+                name=name,
+                working_dir=working_dir,
+                origin="owner_ui",
+                placement=placement,
+            )
+        except Exception:
+            # The admission already OPENED a session on the target; a registry write
+            # that never happened must not leave that session behind holding the
+            # connection (donor finding 2.4).
+            if placement is not None:
+                await _close_provisional_project_session(
+                    request, placement, sanitize_project_id(raw_id)
+                )
+            raise
         if with_workspace:
             workspace = ensure_project_workspace(drive_root, entry["id"], repo_dir)
             if workspace:
@@ -429,7 +603,10 @@ async def api_projects_create(request: Request) -> JSONResponse:
             drive_root, entry["id"],
             provenance=provenance,
             clone_url=clone_url,
-            trusted_at=utc_now_iso() if provenance in ("attached", "cloned") else str(entry.get("trusted_at") or ""),
+            trusted_at=(
+                utc_now_iso() if provenance in ("attached", "cloned", "remote")
+                else str(entry.get("trusted_at") or "")
+            ),
         )
         payload: dict = {"project": stamped or entry}
         if init_git_skipped:
@@ -445,7 +622,16 @@ async def api_projects_create(request: Request) -> JSONResponse:
 
 
 async def api_project_update(request: Request) -> JSONResponse:
-    """POST /api/projects/{project_id}/update — rename (the only mutable UI field)."""
+    """POST /api/projects/{project_id}/update — rename and/or REBIND the placement.
+
+    ``connection_id`` + ``remote_root`` move a remote project to a different target:
+    the new placement is admitted exactly like a fresh one, and the registry advances
+    ``routing_generation`` so anything already resolved against the old target is
+    refused at queue insertion instead of run there. Live tasks block the rebind —
+    their placement was sealed at their own admission and nothing re-resolves it, so a
+    rebind could not redirect them and the owner would believe the project had moved
+    while work kept writing to the old host.
+    """
     try:
         from ouroboros.projects_registry import PROJECT_NAME_MAX, get_project, update_project
 
@@ -454,21 +640,105 @@ async def api_project_update(request: Request) -> JSONResponse:
         if not isinstance(body, dict):
             return JSONResponse({"error": "body must be a JSON object"}, status_code=400)
         drive_root = request_drive_root(request)
-        if get_project(drive_root, project_id) is None:
+        project = get_project(drive_root, project_id)
+        if project is None:
             return JSONResponse({"error": f"unknown project: {project_id}"}, status_code=404)
+        remote_connection, remote_root, halves_error = _remote_placement_halves(body)
+        if halves_error is not None:
+            return halves_error
         name = str(body.get("name") or "").strip()
-        if not name:
-            return JSONResponse({"error": "name is required"}, status_code=400)
+        if not name and not remote_connection:
+            return JSONResponse(
+                {"error": "name or connection_id+remote_root is required"}, status_code=400
+            )
         if len(name) > PROJECT_NAME_MAX:
             return JSONResponse(
                 {"error": f"name must be <= {PROJECT_NAME_MAX} characters"},
                 status_code=400,
             )
-        entry = update_project(drive_root, project_id, name=name)
+        entry = project
+        if remote_connection:
+            rebound, rebind_error = await _rebind_project_placement(
+                request, project, remote_connection, remote_root
+            )
+            if rebind_error is not None:
+                return rebind_error
+            entry = rebound or entry
+        if name:
+            entry = update_project(drive_root, project_id, name=name) or entry
         _broadcast_projects_changed(str((entry or {}).get("id") or project_id), (entry or {}).get("chat_id"))
         return JSONResponse({"project": entry})
     except Exception as exc:
         return json_exception(exc)
+
+
+async def _rebind_project_placement(
+    request: Request, project: dict, connection_id: str, remote_root: str
+) -> tuple[Any, Any]:
+    """Admit and commit a new remote placement: ``(entry, error_response)``.
+
+    The generation the registry is asked to advance is the one READ BEFORE admission,
+    so a rebind that raced another one loses the compare-and-set instead of quietly
+    overwriting the winner — and the session this admission opened is closed on every
+    path where it did not become the project's placement.
+    """
+    from ouroboros.projects_registry import set_project_placement
+
+    drive_root = request_drive_root(request)
+    project_id = str(project.get("id") or "")
+    live = _project_has_live_tasks(drive_root, project_id)
+    if live is None or live:
+        # ONE code for both, deliberately: the OWNER's next step is the same either way
+        # ("wait or cancel"), and a second code for "the lookup broke" would be a second
+        # entry in the action vocabulary answering with the same action. The MESSAGE
+        # distinguishes them, so a failure is still diagnosable without the refusal
+        # pretending to know something it does not.
+        return None, JSONResponse(
+            {
+                "error": (
+                    "project has queued or running tasks"
+                    if live
+                    else "could not determine whether this project has running work"
+                ),
+                "error_code": "project_has_live_tasks",
+                "action": REFUSAL_ACTIONS["project_has_live_tasks"],
+            },
+            status_code=409,
+        )
+    expected_generation = int(project.get("routing_generation") or 0)
+    ref, admit_error = await _admit_remote_placement(connection_id, remote_root, project_id)
+    if admit_error is not None:
+        return None, admit_error
+    try:
+        entry = set_project_placement(
+            drive_root, project_id, ref,
+            expected_routing_generation=expected_generation,
+        )
+    except ValueError as exc:
+        await _close_provisional_project_session(request, ref, project_id)
+        code = str(exc)
+        return None, JSONResponse(
+            {
+                "error": code,
+                "error_code": (
+                    "project_routing_generation_changed"
+                    if code == "project_routing_generation_changed"
+                    else "invalid_remote_placement"
+                ),
+                "action": REFUSAL_ACTIONS["project_routing_generation_changed"],
+            },
+            status_code=409 if code == "project_routing_generation_changed" else 400,
+        )
+    except Exception:
+        await _close_provisional_project_session(request, ref, project_id)
+        raise
+    if entry is None:
+        await _close_provisional_project_session(request, ref, project_id)
+        return None, JSONResponse(
+            {"error": f"unknown project: {project_id}", "error_code": "project_not_active"},
+            status_code=404,
+        )
+    return entry, None
 
 
 async def api_project_delete(request: Request) -> JSONResponse:

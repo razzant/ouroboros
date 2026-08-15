@@ -2535,6 +2535,111 @@ def _run_startup_task_recovery(
         log.warning("Root post-task synthesis recovery at startup failed", exc_info=True)
 
 
+def _recover_remote_workspace_service(service: Any) -> None:
+    try:
+        service.recover()
+    except Exception:
+        log.warning("Remote workspace broker recovery failed", exc_info=True)
+
+
+def _initialize_remote_workspace_service(drive_root: pathlib.Path) -> Any:
+    """Create the ONE broker for this server generation (RWS v2 §3.1).
+
+    Created here, before worker recovery, because workers must receive Pipe
+    endpoints from an already-live broker rather than building transports of
+    their own — one owner of every remote child is what makes panic complete.
+
+    The capability manifest is Home's authority, not the broker's: without it
+    there is nothing to compare a handshake against, so a manifest that cannot be
+    built means remote placement is simply unavailable. Inventing one here would
+    create a second capability authority.
+    """
+
+    service = None
+    try:
+        from ouroboros.process_custody import current_custody_session_id
+        from ouroboros.remote_workspace import (
+            RemoteSessionBroker,
+            set_remote_workspace_service,
+        )
+        from ouroboros.tools.registry import ToolRegistry
+
+        registry = ToolRegistry(repo_dir=REPO_DIR, drive_root=drive_root)
+        configured_bundle_dir = str(
+            os.environ.get("OUROBOROS_EXECD_BUNDLE_DIR", "") or ""
+        ).strip()
+        service = RemoteSessionBroker(
+            drive_root=drive_root,
+            server_generation=current_custody_session_id(),
+            capability_manifest=registry.workspace_capability_manifest(
+                repo_root=REPO_DIR
+            ),
+            bundle_dir=(
+                pathlib.Path(configured_bundle_dir)
+                if configured_bundle_dir
+                else None
+            ),
+        )
+        service.start()
+        set_remote_workspace_service(service)
+        # Recovery reconciles durable pending operations and can block on a
+        # remote host, so it never sits on the startup path.
+        threading.Thread(
+            target=_recover_remote_workspace_service,
+            args=(service,),
+            daemon=True,
+            name="remote-workspace-recovery",
+        ).start()
+        return service
+    except Exception:
+        log.warning("Remote workspace broker startup failed", exc_info=True)
+        if service is not None:
+            try:
+                service.close(timeout_sec=0)
+            except Exception:
+                pass
+        try:
+            from ouroboros.remote_workspace import set_remote_workspace_service
+
+            set_remote_workspace_service(None)
+        except Exception:
+            pass
+        return None
+
+
+def _start_remote_workspace_service(
+    app: Any, drive_root: pathlib.Path, *, skip: bool
+) -> Any:
+    service = None if skip else _initialize_remote_workspace_service(drive_root)
+    app.state.remote_workspace_service = service
+    return service
+
+
+def _stop_remote_workspace_service(app: Any, service: Any) -> None:
+    """Close the broker FIRST at teardown.
+
+    While the broker is still reachable its sessions close cleanly; after any
+    later shutdown step an OpenSSH child could be left owned by a generation
+    that no longer exists.
+    """
+
+    app.state.remote_workspace_service = None
+    try:
+        from ouroboros.remote_workspace import set_remote_workspace_service
+
+        set_remote_workspace_service(None)
+    except Exception:
+        pass
+    if service is None:
+        return
+    try:
+        from ouroboros.config import get_ssh_timeout_sec
+
+        service.close(timeout_sec=float(get_ssh_timeout_sec("shutdown")))
+    except Exception:
+        log.warning("Remote workspace broker shutdown failed", exc_info=True)
+
+
 @asynccontextmanager
 async def lifespan(app):
     global _event_loop
@@ -2575,6 +2680,7 @@ async def lifespan(app):
         and not os.environ.get("OUROBOROS_DATA_DIR")
     )
 
+    remote_workspace_service = _start_remote_workspace_service(app, lifespan_drive_root, skip=pytest_default_real_data_dir)
     # Source-mode must seed native skills too, matching packaged launcher layout.
     try:
         if pytest_default_real_data_dir:
@@ -2729,6 +2835,7 @@ async def lifespan(app):
     try:
         yield
     finally:
+        _stop_remote_workspace_service(app, remote_workspace_service)  # FIRST at teardown
         if extension_reconcile_task is not None:
             extension_reconcile_task.cancel()
             with suppress(asyncio.CancelledError, asyncio.TimeoutError):
@@ -2826,6 +2933,7 @@ app.app.state.bind_host = _BIND_HOST  # type: ignore[attr-defined]
 app.app.state.port_file = PORT_FILE  # type: ignore[attr-defined]
 app.app.state.default_port = DEFAULT_PORT  # type: ignore[attr-defined]
 app.app.state.start_supervisor_if_needed = _start_supervisor_if_needed  # type: ignore[attr-defined]
+app.app.state.remote_workspace_service = None  # type: ignore[attr-defined]
 
 
 _ACTUAL_BOUND_PORT: Optional[int] = None
@@ -2838,6 +2946,14 @@ def _actual_bound_port() -> int:
 
 def _emergency_process_cleanup(*, port_sweep: bool = True) -> None:
     """Kill child processes, workers, companions, and runtime port holders."""
+    # Remote children first and non-blockingly: a reachable execd is killed now,
+    # and an unreachable one is the custodian's problem, never a wait here.
+    try:
+        from ouroboros.remote_workspace import RemoteSessionBroker
+
+        RemoteSessionBroker.panic_close_all()
+    except Exception:
+        pass
     try:
         from ouroboros.tools.shell import kill_all_tracked_subprocesses
         kill_all_tracked_subprocesses()

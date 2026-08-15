@@ -52,6 +52,18 @@ async def api_schedules_upsert(request: Request) -> JSONResponse:
             return json_error("scheduled task template metadata cannot include reserved lineage/workspace fields", 400)
         if str(task.get("type") or "task") != "task":
             return json_error("scheduled task templates must use type='task'", 400)
+        if "project_id" in task:
+            from ouroboros.project_facts import explicit_project_id_ok
+
+            # (RWS v2 §7) The template's ONLY placement input. It is validated for SHAPE
+            # here and for EXISTENCE at fire time — a project can be created, deleted or
+            # rebound between writing the row and running it, so existence now would be a
+            # promise this surface cannot keep.
+            if not explicit_project_id_ok(str(task.get("project_id") or "")):
+                return json_error(
+                    "scheduled task project_id must be filesystem-safe (alphanumeric/_/-/., no spaces or slashes)",
+                    400,
+                )
         if "priority" in task:
             try:
                 int(task.get("priority"))

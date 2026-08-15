@@ -12,17 +12,22 @@ import pathlib
 import secrets
 import time
 from http.cookies import SimpleCookie
-from urllib.parse import parse_qs
+from urllib.parse import parse_qs, unquote, urlsplit
 
 from starlette.requests import Request
 from starlette.responses import HTMLResponse, JSONResponse, RedirectResponse
 from starlette.types import ASGIApp, Receive, Scope, Send
 
 from ouroboros.config import load_settings
+from ouroboros.remote_refusal_actions import (
+    ACTION_AUTHENTICATE_OWNER,
+    ACTION_CONFIGURE_NETWORK_PASSWORD,
+)
 
 NETWORK_PASSWORD_KEY = "OUROBOROS_NETWORK_PASSWORD"
 AUTH_COOKIE_NAME = "ouroboros_auth"
 _PUBLIC_HTTP_PATHS = {"/api/health", "/auth/login", "/auth/logout"}
+_OWNER_CONNECTIONS_PATH = "/api/owner/connections"
 
 
 def get_configured_network_password() -> str:
@@ -191,6 +196,25 @@ def _request_wants_html(scope: Scope) -> bool:
     return path == "/" or "text/html" in accept
 
 
+def is_owner_connections_path(path: str) -> bool:
+    """Match the bounded twice-decoded owner namespace and reject lookalikes."""
+
+    text = str(path or "").strip()
+    try:
+        parsed = urlsplit(text)
+        if parsed.scheme or parsed.netloc:
+            text = parsed.path
+    except ValueError:
+        pass
+    # Starlette and user agents may each decode one layer. Two bounded passes
+    # align the auth and file-surface defense-in-depth predicates without an
+    # open-ended decoder loop.
+    text = unquote(unquote(text)).rstrip("/") or "/"
+    return text == _OWNER_CONNECTIONS_PATH or text.startswith(
+        _OWNER_CONNECTIONS_PATH + "/"
+    )
+
+
 def _build_next_url(scope: Scope) -> str:
     raw_path = scope.get("path", "/") or "/"
     query_string = scope.get("query_string", b"")
@@ -318,21 +342,51 @@ class NetworkAuthGate:
             await self.app(scope, receive, send)
             return
 
+        path = scope.get("path", "") or "/"
         password = get_configured_network_password()
+        if scope["type"] == "http" and is_owner_connections_path(path):
+            if not password:
+                response = JSONResponse(
+                    {
+                        "error": "Owner authentication is not configured.",
+                        "error_code": "owner_auth_not_configured",
+                        "action": ACTION_CONFIGURE_NETWORK_PASSWORD,
+                    },
+                    status_code=503,
+                )
+                await response(scope, receive, send)
+                return
+            if not _is_authenticated(scope, password):
+                response = JSONResponse(
+                    {
+                        "error": "Owner authentication is required.",
+                        "error_code": "owner_auth_required",
+                        "action": ACTION_AUTHENTICATE_OWNER,
+                    },
+                    status_code=401,
+                )
+                await response(scope, receive, send)
+                return
+            await self.app(scope, receive, send)
+            return
+
         if not password:
             await self.app(scope, receive, send)
             return
 
-        if is_loopback_host(_scope_client_host(scope)):
-            await self.app(scope, receive, send)
-            return
-
-        path = scope.get("path", "") or "/"
+        # Owner-only loopback surfaces use the same signed browser session as
+        # non-local access.  Handle login/logout before the ordinary loopback
+        # bypass so Settings can establish that session without ever retaining
+        # the submitted password in JavaScript.
         if scope["type"] == "http" and path == "/auth/login":
             await _handle_login(scope, receive, send, password)
             return
         if scope["type"] == "http" and path == "/auth/logout":
             await _handle_logout(scope, receive, send)
+            return
+
+        if is_loopback_host(_scope_client_host(scope)):
+            await self.app(scope, receive, send)
             return
 
         if scope["type"] == "http" and path in _PUBLIC_HTTP_PATHS:

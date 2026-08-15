@@ -18,6 +18,21 @@ from ouroboros.platform_layer import pid_lock_acquire as _compat_pid_lock_acquir
 from ouroboros.provider_models import compute_direct_review_models_fallback, local_only_review_route_env, migrate_model_value, review_model_uses_local as review_model_uses_local
 from ouroboros.secret_masking import strip_masked_secrets
 from ouroboros.update_channels import UPDATE_SETTINGS_DEFAULTS, normalize_update_channel
+# The closed settings vocabularies live in a pure sibling; `as` marks the ones this
+# module does not itself call as deliberate re-exports for `config.*` callers.
+from ouroboros.settings_vocabulary import (
+    EFFORT_SCALE,
+    RUNTIME_MODE_RANK,
+    SAFETY_MODE_RANK,
+    VALID_CONTEXT_MODES,
+    VALID_RUNTIME_MODES,
+    VALID_SAFETY_MODES,
+    migrate_legacy_slot_keys,
+    parse_model_list,
+)
+from ouroboros.settings_vocabulary import clamp_effort_to as clamp_effort_to
+from ouroboros.settings_vocabulary import effort_one_step_down as effort_one_step_down
+from ouroboros.settings_vocabulary import effort_rank as effort_rank
 
 
 # Paths
@@ -28,6 +43,9 @@ DATA_DIR = pathlib.Path(os.environ.get("OUROBOROS_DATA_DIR", APP_ROOT / "data"))
 SETTINGS_PATH = pathlib.Path(os.environ.get("OUROBOROS_SETTINGS_PATH", DATA_DIR / "settings.json"))
 PID_FILE = pathlib.Path(os.environ.get("OUROBOROS_PID_FILE", APP_ROOT / "ouroboros.pid"))
 PORT_FILE = pathlib.Path(os.environ.get("OUROBOROS_PORT_FILE", DATA_DIR / "state" / "server_port"))
+REMOTE_CONNECTIONS_PATH = pathlib.Path(os.environ.get(
+    "OUROBOROS_REMOTE_CONNECTIONS_PATH", DATA_DIR / "state" / "remote_connections.json",
+))
 
 RESTART_EXIT_CODE = 42
 PANIC_EXIT_CODE = 99
@@ -399,7 +417,7 @@ def parse_fallback_chain() -> list[str]:
         str(os.environ.get("OUROBOROS_MODEL_FALLBACKS", "") or "").strip()
         or str(os.environ.get("OUROBOROS_MODEL_FALLBACK", "") or "").strip()
     )
-    return [m.strip() for m in _parse_model_list(raw) if str(m or "").strip()]
+    return [m.strip() for m in parse_model_list(raw) if str(m or "").strip()]
 
 
 def get_fallback_models(active_model: str = "") -> list[str]:
@@ -415,71 +433,11 @@ def get_fallback_models(active_model: str = "") -> list[str]:
     return out
 
 
-# v6.39 slot rename-alias migration (same shape as the retention-key rename):
-# OUROBOROS_MODEL_CODE -> _HEAVY, USE_LOCAL_CODE -> USE_LOCAL_HEAVY,
-# OUROBOROS_MODEL_FALLBACK -> _FALLBACKS.
-_LEGACY_SLOT_RENAMES = (
-    ("OUROBOROS_MODEL_CODE", "OUROBOROS_MODEL_HEAVY"),
-    ("OUROBOROS_VISION_MODEL", "OUROBOROS_MODEL_VISION"),
-    ("USE_LOCAL_CODE", "USE_LOCAL_HEAVY"),
-    ("OUROBOROS_MODEL_FALLBACK", "OUROBOROS_MODEL_FALLBACKS"),
-)
-
-
-def migrate_legacy_slot_keys(settings: dict) -> dict:
-    """In-place settings migration, applied BEFORE defaults are merged.
-
-    Preserves a stored value (never orphans an owner customization), then drops the legacy
-    key. Shared SSOT for every settings entry point (load_settings AND the Colab builder).
-    Order matters: the singular scope-review pin is promoted HERE, before ``SETTINGS_DEFAULTS``
-    supplies the plural that WINS in get_scope_review_models."""
-    for _old, _new in _LEGACY_SLOT_RENAMES:
-        if _new not in settings and _old in settings:
-            settings[_new] = settings[_old]
-        settings.pop(_old, None)
-    _pin = str(settings.get("OUROBOROS_SCOPE_REVIEW_MODEL") or "").strip()
-    if _pin and not str(settings.get("OUROBOROS_SCOPE_REVIEW_MODELS") or "").strip():
-        settings["OUROBOROS_SCOPE_REVIEW_MODELS"] = _pin
-    return settings
-
-
 def get_consciousness_model() -> str:
     """Return the high-horizon background-consciousness model slot."""
     return str(os.environ.get("OUROBOROS_MODEL_CONSCIOUSNESS", "") or "").strip() or _main_model()
 
-# v6.57.0 — EFFORT_SCALE: ORDERED reasoning-effort SSOT (low→high), the single place a tier
-# is defined (settings, llm.py builder, switch_model enum, subagent lanes). xhigh/max extend
-# none..high; llm.py clamps a request DOWN to each model's learned ceiling (BIBLE P1: disclosed).
-EFFORT_SCALE: tuple[str, ...] = ("none", "minimal", "low", "medium", "high", "xhigh", "max")
-
-
-def effort_rank(value: str) -> int:
-    """Index of an effort in EFFORT_SCALE (−1 if unknown). Strength-ordering SSOT."""
-    v = str(value or "").strip().lower()
-    return EFFORT_SCALE.index(v) if v in EFFORT_SCALE else -1
-
-
-def clamp_effort_to(value: str, ceiling: str) -> str:
-    """Clamp ``value`` down to ``ceiling`` on EFFORT_SCALE; unknown inputs pass through."""
-    vi, ci = effort_rank(value), effort_rank(ceiling)
-    return ceiling if (vi >= 0 and ci >= 0 and vi > ci) else str(value or "").strip().lower()
-
-
-def effort_one_step_down(value: str) -> str:
-    """Next-lower effort on EFFORT_SCALE (reject-and-retry walk); floors at `none`."""
-    idx = effort_rank(value)
-    return EFFORT_SCALE[idx - 1] if idx > 0 else ("none" if idx == 0 else "medium")
-
-
 _DIRECT_PROVIDER_REVIEW_RUNS = 3
-
-# Runtime mode and review enforcement are separate axes.
-VALID_RUNTIME_MODES = ("light", "advanced", "pro")
-
-# Context mode is an independent, owner-controlled working-context size profile
-# (low/max). Unlike runtime mode it is NOT boot-pinned — it is not a privilege
-# boundary, so it hot-applies on the next task.
-VALID_CONTEXT_MODES = ("low", "max")
 
 # Lower rank = stricter scope. ``save_settings`` refuses agent self-elevation.
 _RUNTIME_MODE_RANK = {"light": 0, "advanced": 1, "pro": 2}
@@ -488,6 +446,12 @@ _RUNTIME_MODE_RANK = {"light": 0, "advanced": 1, "pro": 2}
 # out-of-process settings edit from becoming the new baseline through a later load/save round-trip.
 # The pin is exported via ``OUROBOROS_BOOT_RUNTIME_MODE`` so fresh subprocess imports inherit the
 # same ratchet; a child can clobber only its own env, not the parent's in-memory pin.
+
+# Boot-time runtime-mode baseline. Pinning the owner-selected mode after
+# settings load prevents an out-of-process settings edit from becoming the new
+# baseline through a later load/save round-trip. The pin is also exported via
+# ``OUROBOROS_BOOT_RUNTIME_MODE`` so fresh subprocess imports inherit the same
+# ratchet; a child can clobber only its own env, not the parent's in-memory pin.
 _BOOT_RUNTIME_MODE: Optional[str] = None
 BOOT_RUNTIME_MODE_ENV_KEY = "OUROBOROS_BOOT_RUNTIME_MODE"
 
@@ -523,10 +487,6 @@ def reset_runtime_mode_baseline_for_tests() -> None:
     global _BOOT_RUNTIME_MODE
     _BOOT_RUNTIME_MODE = None
     os.environ.pop(BOOT_RUNTIME_MODE_ENV_KEY, None)
-
-
-def _parse_model_list(value: str) -> list[str]:
-    return [item.strip() for item in str(value or "").split(",") if item.strip()]
 
 
 def _exclusive_direct_remote_provider_env() -> str:
@@ -632,7 +592,7 @@ def get_review_models() -> list[str]:
     """Return the configured pre-commit review model list."""
     default_str = SETTINGS_DEFAULTS["OUROBOROS_REVIEW_MODELS"]
     models_str = os.environ.get("OUROBOROS_REVIEW_MODELS", default_str) or default_str
-    models = _parse_model_list(models_str)
+    models = parse_model_list(models_str)
     models = [_main_model()] * max(1, len(models)) if local_only_review_route_env() else models
     provider = _exclusive_direct_remote_provider_env()
     if not provider:
@@ -666,12 +626,12 @@ def get_scope_review_models() -> list[str]:
     raw = os.environ.get("OUROBOROS_SCOPE_REVIEW_MODELS", "") or ""
     if not raw.strip():
         raw = os.environ.get("OUROBOROS_SCOPE_REVIEW_MODEL", default_str) or default_str
-    models = _parse_model_list(raw)
+    models = parse_model_list(raw)
     singular = str(os.environ.get("OUROBOROS_SCOPE_REVIEW_MODEL", SETTINGS_DEFAULTS["OUROBOROS_SCOPE_REVIEW_MODEL"]) or "").strip()
     if not models and singular:
         models = [singular]
     if not models:
-        models = _parse_model_list(default_str)
+        models = parse_model_list(default_str)
     models = [_main_model()] * max(1, len(models)) if local_only_review_route_env() else models
     provider = _exclusive_direct_remote_provider_env()
     if not provider:
@@ -792,6 +752,23 @@ def _bounded_positive_int_setting(key: str, *, default: int, hard_max: int, min_
 
 # ONE per-root subagent ceiling (v6.82: 50->500): clamp below, supervisor/events.py, wait_tasks; ARCHITECTURE §7.
 MAX_ACTIVE_SUBAGENTS_HARD_CAP = 500
+
+
+def get_ssh_timeout_sec(kind: str) -> int:
+    """Operational SSH bounds (RWS v2 §4.4). The TABLE now lives in the transport.
+
+    It was defined here and read by a function-local `from ouroboros.config import
+    get_ssh_timeout_sec` inside `remote_ssh_config`, which put a
+    `settings_or_owner_state` module on the transport's dependency list — what the
+    §3.3 reverse gate forbids, and invisible to it while the gate read module-scope
+    imports only. Nothing about these values needs Home: they are env-only bounded
+    integers, deliberately absent from `SETTINGS_DEFAULTS` because they are rare
+    operator repairs rather than Settings controls. This wrapper stays so every
+    existing Home caller keeps reading ONE table; its import is function-local
+    because `config` loads at startup and must not drag the SSH transport in."""
+    from ouroboros.remote_ssh_config import get_ssh_timeout_sec as _ssh_timeout_sec
+
+    return _ssh_timeout_sec(kind)
 
 
 def get_max_active_subagents_per_root() -> int:
@@ -955,9 +932,6 @@ def get_runtime_mode() -> str:
     if inherited is not None:
         return normalize_runtime_mode(inherited)
     return normalize_runtime_mode(os.environ.get("OUROBOROS_RUNTIME_MODE", default_val) or default_val)
-
-
-VALID_SAFETY_MODES = ("full", "light", "off")
 
 
 def normalize_safety_mode(value: Any) -> str:
@@ -1148,9 +1122,6 @@ def prepare_settings_for_persist(settings: dict, *, authored_keys: Sequence[str]
     return strip_masked_secrets(prepared, known_setting_keys=SETTINGS_DEFAULTS)
 
 
-_SAFETY_MODE_RANK = {"full": 2, "light": 1, "off": 0}
-
-
 def _guard_safety_mode_lowering(settings: dict, *, allow_safety_lowering: bool = False) -> None:
     """Refuse agent-reachable settings writes that lower LLM-safety coverage.
 
@@ -1158,7 +1129,7 @@ def _guard_safety_mode_lowering(settings: dict, *, allow_safety_lowering: bool =
     owner-only (mirrors the context-mode ratchet, BIBLE P3)."""
     previous_mode = normalize_safety_mode(_settings_file_value("OUROBOROS_SAFETY_MODE", "full"))
     next_mode = normalize_safety_mode(settings.get("OUROBOROS_SAFETY_MODE", previous_mode))
-    if _SAFETY_MODE_RANK[next_mode] < _SAFETY_MODE_RANK[previous_mode] and not allow_safety_lowering:
+    if SAFETY_MODE_RANK[next_mode] < SAFETY_MODE_RANK[previous_mode] and not allow_safety_lowering:
         raise PermissionError(
             f"OUROBOROS_SAFETY_MODE lowering refused: {previous_mode!r} -> {next_mode!r}. "
             "Safety mode is owner-controlled — use the dedicated /api/owner/safety-mode endpoint."
@@ -1437,12 +1408,12 @@ def save_settings(
         baseline_inherited_from_env = inherited_baseline is not None
         disk_baseline = normalize_runtime_mode(_settings_file_value("OUROBOROS_RUNTIME_MODE", "advanced"))
         baseline_mode = _BOOT_RUNTIME_MODE or min(
-            [m for m in (inherited_baseline, disk_baseline) if m], key=_RUNTIME_MODE_RANK.__getitem__)
+            [m for m in (inherited_baseline, disk_baseline) if m], key=RUNTIME_MODE_RANK.__getitem__)
         new_mode = normalize_runtime_mode(settings.get("OUROBOROS_RUNTIME_MODE"))
         # Once a boot baseline is pinned, allow_elevation is inert.
         baseline_pinned = baseline_pinned_in_process or baseline_inherited_from_env
         consent_honoured = allow_elevation and not baseline_pinned
-        if (_RUNTIME_MODE_RANK[new_mode] > _RUNTIME_MODE_RANK[baseline_mode]
+        if (RUNTIME_MODE_RANK[new_mode] > RUNTIME_MODE_RANK[baseline_mode]
                 and not consent_honoured):
             if baseline_pinned and allow_elevation:
                 hint = (

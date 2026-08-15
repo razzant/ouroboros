@@ -139,7 +139,24 @@ def json_exception(exc: BaseException, status: int = 500) -> JSONResponse:
     return json_error(str(exc), status)
 
 
+def wire_error_code(value: Any) -> str:
+    """THE wire spelling of a typed refusal code: lower-case, bounded, stripped.
+
+    The authorities disagree on case by construction — a code that is a Python
+    CONSTANT reads naturally as ``REMOTE_TRANSPORT_UNAVAILABLE``
+    (``workspace_admission``) while a code the transport raises is already
+    ``remote_transport_unavailable``. Consumers compare it case-SENSITIVELY (the
+    browser's ``remote_task_state.js``, the CLI's exit-code sets), so the
+    normalization has to happen ONCE, at the boundary where the code becomes a
+    wire field. Every gateway module that writes ``error_code`` goes through here
+    rather than sprinkling ``.lower()`` at the call sites, which is how one of the
+    two spellings escaped to the browser in the first place.
+    """
+    return str(value or "").strip().lower()[:128]
+
+
 __all__ = (
     "coerce_bool", "coerce_int", "iter_jsonl_objects", "json_error", "json_exception",
     "read_rotated_jsonl_entries", "request_json_or", "request_drive_root", "request_repo_dir",
+    "wire_error_code",
 )

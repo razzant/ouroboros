@@ -78,6 +78,37 @@ def test_network_auth_gate_accepts_header_and_login_cookie(monkeypatch):
         assert cookie_resp.json() == {"ok": True}
 
 
+def test_loopback_login_cookie_unlocks_owner_connections(monkeypatch):
+    """The owner-only connections namespace is authenticated even on loopback.
+
+    Settings establishes the signed browser session through the ordinary
+    ``/auth/login`` flow — which is why login/logout are handled BEFORE the
+    loopback bypass — so the submitted password is never retained in JavaScript
+    (RWS v2, D6).
+    """
+
+    monkeypatch.setenv(server_auth.NETWORK_PASSWORD_KEY, "secret")
+    monkeypatch.setattr(server_auth, "load_settings", lambda: {})
+    inner = Starlette(routes=[
+        Route("/api/owner/connections", endpoint=_ok),
+    ])
+    client = TestClient(
+        server_auth.NetworkAuthGate(inner),
+        client=("127.0.0.1", 12345),
+    )
+
+    locked = client.get("/api/owner/connections")
+    assert locked.status_code == 401
+    assert locked.json()["error_code"] == "owner_auth_required"
+
+    login = client.post(
+        "/auth/login",
+        json={"password": "secret", "next": "/"},
+    )
+    assert login.status_code == 200
+    assert client.get("/api/owner/connections").json() == {"ok": True}
+
+
 def test_login_next_url_is_escaped(monkeypatch):
     with _make_client(monkeypatch) as client:
         resp = client.get('/auth/login?next=/"><script>alert(1)</script>', follow_redirects=False)

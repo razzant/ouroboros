@@ -36,10 +36,37 @@ class ConnectionCLIError(CLIError):
     pass
 
 
+class GatewayHTTPError(CLIError):
+    """A gateway refusal that KEEPS its typed payload.
+
+    A plain ``CLIError`` string loses ``error_code``/``phase``/``action``, and the
+    typed refusal is exactly what the caller has to react to (owner auth vs
+    conflict vs an incompatible or absent remote). Commands that map codes to
+    exit codes catch this; every other caller still sees a normal ``CLIError``.
+    """
+
+    def __init__(self, status_code: int, payload: Any):
+        self.status_code = int(status_code)
+        self.payload = payload if isinstance(payload, dict) else {
+            "error": str(payload or "HTTP request failed")
+        }
+        super().__init__(
+            f"HTTP {self.status_code}: "
+            f"{self.payload.get('error') or self.payload.get('error_code') or 'request failed'}"
+        )
+
+
 class OuroborosHTTPClient:
-    def __init__(self, base_url: str = "", timeout: float = 30.0):
+    def __init__(
+        self,
+        base_url: str = "",
+        timeout: float = 30.0,
+        *,
+        owner_password: str = "",
+    ):
         self.base_url = (base_url or _default_base_url()).rstrip("/")
         self.timeout = timeout
+        self.owner_password = str(owner_password or "")
 
     def request(
         self,
@@ -51,6 +78,8 @@ class OuroborosHTTPClient:
     ) -> Any:
         data = None
         headers = {"Accept": "application/json"}
+        if self.owner_password:
+            headers["X-Ouroboros-Password"] = self.owner_password
         if body is not None:
             data = json.dumps(body, ensure_ascii=False).encode("utf-8")
             headers["Content-Type"] = "application/json"
@@ -65,12 +94,16 @@ class OuroborosHTTPClient:
                 raw = resp.read().decode("utf-8", errors="replace")
         except urllib.error.HTTPError as exc:
             raw = exc.read().decode("utf-8", errors="replace")
+            payload: Any = {}
             try:
                 payload = json.loads(raw)
                 message = payload.get("error") or raw
             except Exception:
                 message = raw or str(exc)
-            raise CLIError(f"HTTP {exc.code}: {message}") from exc
+            raise GatewayHTTPError(
+                exc.code,
+                payload if isinstance(payload, dict) else {"error": message},
+            ) from exc
         except urllib.error.URLError as exc:
             raise ConnectionCLIError(f"cannot reach Ouroboros server at {self.base_url}: {exc}") from exc
         except TimeoutError as exc:
@@ -598,6 +631,14 @@ def build_parser() -> argparse.ArgumentParser:
     _add_marketplace_parser(subparsers)
     _add_local_model_parser(subparsers)
     _add_mcp_parser(subparsers)
+    # RWS v2: the owner connections family and the projects/rebind family each live
+    # in their own thin module (ouroboros/cli_connections.py, cli_projects.py) so
+    # this module stays under the size target.
+    from ouroboros.cli_connections import add_connections_parser
+    from ouroboros.cli_projects import add_projects_parser
+
+    add_connections_parser(subparsers)
+    add_projects_parser(subparsers)
     return parser
 
 
@@ -842,8 +883,33 @@ def _render_event_for_stderr(event: Dict[str, Any]) -> str:
     if etype == "tool_call":
         return f"tool: {data.get('tool', '?')}"
     if etype in {"task_done", "task_metrics"}:
-        return f"{etype}: {data.get('task_id', '')}"
+        line = f"{etype}: {data.get('task_id', '')}"
+        return f"{line}\n{export_policy_note(data)}".rstrip()
     return ""
+
+
+def export_policy_note(data: Dict[str, Any]) -> str:
+    """The D7 disclosure line, or nothing. Never a status change.
+
+    The CLI is one of the five surfaces D7 names, and it is the one the owner
+    actually watches: a filtered export visible only inside a JSON trace is a
+    filtered export nobody sees.
+    """
+
+    bundle = data.get("artifact_bundle") if isinstance(data.get("artifact_bundle"), dict) else {}
+    count = int(bundle.get("excluded_count") or 0)
+    if not count:
+        return ""
+    names = [
+        str(row.get("path") or "")
+        for row in list(bundle.get("excluded") or [])[:3]
+        if isinstance(row, dict)
+    ]
+    tail = f" ({', '.join(name for name in names if name)}…)" if names else ""
+    return (
+        f"  export policy excluded {count} path(s) from the remote transfer; "
+        f"everything else transferred and verified{tail}"
+    )
 
 
 def _patch_from_result(

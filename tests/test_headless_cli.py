@@ -16,13 +16,15 @@ from starlette.testclient import TestClient
 
 from ouroboros.gateway.tasks import (
     _compose_task_text,
-    _resolve_workspace_root,
     api_task_artifact,
     api_task_events,
     api_task_get,
     api_tasks_create,
     api_tasks_list,
     iter_task_events,
+)
+from ouroboros.gateway.task_placement import (
+    _resolve_workspace_root,
 )
 from ouroboros.headless import (
     ARTIFACT_STATUS_FAILED,

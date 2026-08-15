@@ -17,7 +17,21 @@ from typing import Any, Dict, List, Optional
 from starlette.requests import Request
 from starlette.responses import FileResponse, JSONResponse
 
-from ouroboros.gateway._helpers import coerce_int, json_error, json_exception, request_drive_root, request_json_or, request_repo_dir
+from ouroboros.gateway.task_placement import (
+    _fold_request_executor_ref,
+    _seal_placement_into_metadata,
+    _place_attachments,
+    _admit_task_placement,
+)
+from ouroboros.gateway._helpers import (
+    coerce_int,
+    json_error,
+    json_exception,
+    request_drive_root,
+    request_json_or,
+    request_repo_dir,
+    wire_error_code,
+)
 # Re-exported SSE surface (split out by the 1600-line module gate): route
 # wiring, the CLI, and long-standing monkeypatch pins address these names on
 # gateway.tasks; task_events resolves its patched collaborators back through
@@ -35,7 +49,6 @@ from ouroboros.headless import (
     HEADLESS_TASKS_DIR,
     prepare_task_drive,
     task_artifacts_dir,
-    write_workspace_preflight_artifact,
 )
 from ouroboros.contracts.task_contract import (
     attach_task_contract,
@@ -62,12 +75,14 @@ from ouroboros.task_status import (
     load_effective_task_result,
 )
 from ouroboros.utils import read_json_dict
-from ouroboros.tool_access import path_is_relative_to, paths_overlap_casefold
-from ouroboros.workspace_preflight import (
-    collect_workspace_preflight,
-    summarize_workspace_preflight,
+from ouroboros.workspace_admission import (
+    REMOTE_TRANSPORT_UNAVAILABLE,
+    RemoteWorkspaceUnavailableError,
 )
-from ouroboros.workspace_executor import normalize_executor_ref
+from ouroboros.workspace_ref import (
+    SEALED_WORKSPACE_REF_KEY,
+    workspace_display_root,
+)
 
 
 log = logging.getLogger(__name__)
@@ -90,6 +105,17 @@ _RESERVED_METADATA_KEYS = frozenset({
     "executor_ref",
     "workspace_executor",
     "project_id",
+    # RWS v2: the placement is SEALED by admission. A client-supplied placement in
+    # metadata would be a second placement authority that no fence can revalidate.
+    # BOTH halves are listed, and neither is reachable through this handler any more:
+    # `_admit_task_placement` refuses them in `metadata` with a typed 400 before the
+    # strip runs. This stays as the belt — a stripped key is still better than a stored
+    # one — but the REFUSAL is the rule, because a silent strip is what let a caller
+    # believe they had chosen a placement (`connection_id` was missing here entirely, so
+    # it was kept and ignored, which is worse than being dropped).
+    "workspace_ref",
+    "connection_id",
+    SEALED_WORKSPACE_REF_KEY,
 })
 
 
@@ -173,7 +199,9 @@ def _admission_rejection_response(
     drive_root: pathlib.Path,
     task_id: str,
     project_id: str,
-    workspace_root: Optional[pathlib.Path],
+    # Presence-only (drives artifact_status): the placement's display spelling, so a
+    # REMOTE workspace task is recognized as a workspace task here too.
+    workspace_root: Any,
     child_drive: Optional[pathlib.Path],
     status_code: int = 409,
     detail: str = "Task was not scheduled because its admission fence is closed.",
@@ -286,7 +314,26 @@ def _complete_api_task_admission(
     artifacts: List[Dict[str, Any]],
     metadata: Dict[str, Any],
 ) -> JSONResponse:
-    """Publish one API admission or roll back only its token-owned queue row."""
+    """Publish one API admission or roll back only its token-owned queue row.
+
+    ``workspace_root`` is the LOCAL Home path of the sealed placement (``None`` for a
+    remote one), so it gates the preflight-artifact status. The refusal path is told
+    about the placement through the task's DISPLAY spelling instead, so a remote
+    workspace task is terminalized as a workspace task rather than a bare one.
+
+    That asymmetry is DELIBERATE here and the reason belongs beside it, because the
+    local key reads like an oversight: `artifact_status` is a claim that a HOME-side
+    workspace-patch artifact is coming, and the only producer of one
+    (``headless.write_workspace_patch_artifacts``) needs a local Home path and is
+    therefore not the producer on a remote placement — a remote task's patch is
+    evidence gathered on the target through ``remote_patch_bridge``. So ``""`` is the
+    true answer rather than a lost one: ``outcomes`` reads it as ``not_applicable``,
+    the CLI's terminal-success and patch-extraction checks treat it as settled (they
+    gate on ``pending``/``finalizing``/``failed``/``missing``), and a PENDING marker
+    here would promise an artifact nothing on this path will ever finalize — which is
+    the shape that leaves a task waiting on its own bookkeeping. Whether a remote
+    placement should grow its own artifact lifecycle is a design question, not this
+    line's bug."""
     result_fields = {
         "parent_task_id": task.get("parent_task_id"),
         "root_task_id": task.get("root_task_id"),
@@ -328,7 +375,7 @@ def _complete_api_task_admission(
             drive_root=drive_root,
             task_id=task_id,
             project_id=project_id,
-            workspace_root=workspace_root,
+            workspace_root=task.get("workspace_root"),
             child_drive=child_drive,
             status_code=503 if snapshot_failed else 409,
             detail=(
@@ -404,18 +451,39 @@ async def api_tasks_create(request: Request) -> JSONResponse:
     if (drive_root / HEADLESS_TASKS_DIR / task_id).exists() or (drive_root / ARTIFACTS_DIR / task_id).exists():
         return json_error(f"task_id already has headless state: {task_id}", 409)
     try:
-        workspace_root = _resolve_workspace_root(
-            body.get("workspace_root"),
+        workspace_ref = _admit_task_placement(
+            body,
             system_repo_dir=repo_dir,
             drive_root=drive_root,
         )
+    # ORDER MATTERS. `RemoteWorkspaceUnavailableError` subclasses ValueError on
+    # purpose (so every legacy `except ValueError` admission site keeps refusing
+    # loudly), which means the generic arm below silently swallowed it into a bare
+    # 400 whose only clue was an UPPERCASE constant embedded in English prose. The
+    # request was well formed and the target simply could not be consulted, and
+    # `/api/projects` already answers exactly that with 503 + a typed code + a next
+    # step — two answers to one condition, differing only by which door was used.
+    except RemoteWorkspaceUnavailableError as exc:
+        # The action rides on the refusal (`remote_refusal_actions`): this line used
+        # to hardcode `bootstrap_connection` for every reason a target can be
+        # unreachable, which is correct for a stale executor and a dead end for a
+        # changed host identity, a stale bundle, or an absent broker.
+        return json_error(
+            str(exc), 503,
+            error_code=wire_error_code(REMOTE_TRANSPORT_UNAVAILABLE),
+            action=str(getattr(exc, "action", "") or "retry"),
+        )
     except ValueError as exc:
         return json_error(str(exc), 400)
-    workspace_mode = str(body.get("workspace_mode") or ("external" if workspace_root else "")).strip()
-    memory_mode = str(body.get("memory_mode") or ("forked" if workspace_root else "shared")).strip().lower()
+    # Home path of the ADMITTED placement: a real path for a local workspace, None for a
+    # remote one. Nothing below may reconstruct a Home path for a remote placement — the
+    # sealed ref is the only placement authority from here on.
+    workspace_root = workspace_ref.home_path() if getattr(workspace_ref, "kind", "") == "local" else None
+    workspace_mode = str(body.get("workspace_mode") or ("external" if workspace_ref else "")).strip()
+    memory_mode = str(body.get("memory_mode") or ("forked" if workspace_ref else "shared")).strip().lower()
     if memory_mode not in {"forked", "empty", "shared"}:
         return json_error("memory_mode must be one of forked, empty, shared", 400)
-    if workspace_root and memory_mode == "shared":
+    if workspace_ref and memory_mode == "shared":
         return json_error("memory_mode=shared is not allowed for external workspaces; use forked or empty", 400)
     raw_project_id = str(body.get("project_id") or "")
     if raw_project_id:
@@ -446,7 +514,7 @@ async def api_tasks_create(request: Request) -> JSONResponse:
             "(use /evolve or /review); evolution additionally requires advanced/pro runtime mode",
             400,
         )
-    if workspace_root and task_type != "task":
+    if workspace_ref and task_type != "task":
         return json_error("external workspace tasks must use type='task'", 400)
     try:
         chat_id = int(body.get("chat_id") if body.get("chat_id") is not None else 0)
@@ -472,34 +540,16 @@ async def api_tasks_create(request: Request) -> JSONResponse:
     if "executor_ref" in raw_metadata or "workspace_executor" in raw_metadata:
         return json_error("metadata.executor_ref/workspace_executor is reserved; pass executor_ref as a top-level task field", 400)
     if "executor_ref" in body:
-        raw_executor_ref = body.get("executor_ref")
-        if not isinstance(raw_executor_ref, dict) or not raw_executor_ref:
-            return json_error("executor_ref must be a JSON object", 400)
-        if workspace_root is None:
-            return json_error("executor_ref requires an external workspace_root", 400)
-        try:
-            normalized_executor = normalize_executor_ref(raw_executor_ref)
-        except ValueError as exc:
-            return json_error(str(exc), 400)
-        if normalized_executor is not None:
-            for mapping in normalized_executor.mappings:
-                for protected_root, label in ((repo_dir, "Ouroboros system repo"), (drive_root, "Ouroboros data drive")):
-                    if paths_overlap_casefold(mapping.host_path, protected_root):
-                        return json_error(f"executor_ref mapping must not overlap the {label}", 400)
-            if not any(path_is_relative_to(workspace_root, mapping.host_path) for mapping in normalized_executor.mappings):
-                return json_error("executor_ref mappings must cover workspace_root", 400)
-            metadata["executor_ref"] = {
-                "type": normalized_executor.kind,
-                "id": normalized_executor.executor_id,
-                "network": normalized_executor.network,
-                "workspace_host_path": str(normalized_executor.mappings[0].host_path),
-                "workspace_backend_path": normalized_executor.mappings[0].backend_path,
-                "container_name": normalized_executor.container_name,
-                "path_mappings": [
-                    {"host_path": str(mapping.host_path), "backend_path": mapping.backend_path}
-                    for mapping in normalized_executor.mappings
-                ],
-            }
+        executor_error = _fold_request_executor_ref(
+            body,
+            metadata,
+            workspace_ref=workspace_ref,
+            workspace_root=workspace_root,
+            repo_dir=repo_dir,
+            drive_root=drive_root,
+        )
+        if executor_error:
+            return json_error(executor_error, 400)
     try:
         deadline_at = _normalize_deadline_at(body.get("deadline_at") or raw_metadata.get("deadline_at") or "")
     except ValueError as exc:
@@ -541,23 +591,24 @@ async def api_tasks_create(request: Request) -> JSONResponse:
     except Exception as exc:
         _cleanup_api_admission_attempt(drive_root, task_id, admission_token)
         return json_exception(exc, 503)
-    # v6.52.0 (P1): stage attachments into the SAME drive the task will read from at
-    # runtime — the child drive when forked/empty, else the shared drive (matches the
-    # task['drive_root'] set at the end of this handler). The returned manifest renders
-    # READY read_file(root='artifact_store', ...) lines and feeds native image blocks.
-    from ouroboros.artifacts import stage_task_attachments
-
+    # Attachments land on the host that will DO the work: the task's own drive for a
+    # local placement, the target's task-file cache for a remote one.
     effective_drive = child_drive or drive_root
     try:
-        attachment_manifest = stage_task_attachments(
-            effective_drive, task_id, _normalize_attachments(body.get("attachments"))
+        attachment_manifest, attachment_images, _attachment_note = _place_attachments(
+            body.get("attachments"), workspace_ref,
+            metadata=metadata, drive_root=effective_drive, task_id=task_id,
         )
     except Exception as exc:
+        # Refusing the task is the honest answer: its prompt would otherwise
+        # advertise attachment paths that do not exist on the host doing the work.
         _cleanup_api_admission_attempt(
             drive_root, task_id, admission_token, child_drive
         )
-        return json_exception(exc, 503)
-    attachment_images = [m for m in attachment_manifest if m.get("is_image")]
+        return json_error(
+            f"remote attachment staging failed: {exc}", 502,
+            error_code="remote_attachment_stage_failed",
+        )
     metadata.setdefault("session_id", str(body.get("session_id") or uuid.uuid4().hex))
     metadata.setdefault("actor_id", str(body.get("actor_id") or "cli"))
     metadata.setdefault("source", str(body.get("source") or "api_task"))
@@ -567,31 +618,20 @@ async def api_tasks_create(request: Request) -> JSONResponse:
     metadata.setdefault("task_id", task_id)
     metadata.setdefault("parent_task_id", parent_task_id or "")
     metadata.setdefault("root_task_id", root_task_id)
-    artifacts: List[Dict[str, Any]] = []
-    workspace_preflight_summary: Dict[str, Any] = {}
-    if workspace_root:
-        metadata["workspace_root"] = str(workspace_root)
-        try:
-            preflight = collect_workspace_preflight(workspace_root)
-            workspace_preflight_summary = summarize_workspace_preflight(preflight)
-            metadata["workspace_preflight"] = workspace_preflight_summary
-            artifacts.append(write_workspace_preflight_artifact(drive_root, task_id, preflight))
-        except Exception as exc:
-            workspace_preflight_summary = {
-                "schema_version": 1,
-                "workspace_root": str(workspace_root),
-                "error": f"{type(exc).__name__}: {exc}",
-            }
-            metadata["workspace_preflight"] = workspace_preflight_summary
+    display_root = workspace_display_root(workspace_ref)
+    artifacts, workspace_preflight_summary = _seal_placement_into_metadata(
+        metadata, workspace_ref, drive_root=drive_root, task_id=task_id
+    )
 
     try:
         task_text = _compose_task_text(
             description,
-            workspace_root=workspace_root,
+            workspace_root=display_root or None,
             workspace_mode=workspace_mode,
             memory_mode=memory_mode,
             workspace_preflight=workspace_preflight_summary,
             attachments=attachment_manifest,
+            attachment_note=_attachment_note,
         )
     except Exception as exc:
         _cleanup_api_admission_attempt(
@@ -619,7 +659,11 @@ async def api_tasks_create(request: Request) -> JSONResponse:
         "session_id": metadata["session_id"],
         "actor_id": metadata["actor_id"],
         "delegation_role": metadata["delegation_role"],
-        "workspace_root": str(workspace_root) if workspace_root else "",
+        # The DISPLAY spelling of the sealed placement (a Home path for local, the
+        # target-native POSIX root for ssh). Presence still means "this is a workspace
+        # task" for every existing string-plumbing consumer; the sealed ref in metadata
+        # is what decides whether the spelling may become a `pathlib.Path`.
+        "workspace_root": display_root,
         "workspace_mode": workspace_mode,
         "memory_mode": memory_mode,
         "project_id": _task_project_id,
@@ -636,6 +680,18 @@ async def api_tasks_create(request: Request) -> JSONResponse:
         "_require_worker_pool": True,
         "_admission_token": admission_token,
     }
+    if getattr(workspace_ref, "kind", "") == "ssh":
+        # RWSB2-05 for the HTTP surface: this handler resolves the project's placement
+        # and only then enqueues, so the owner can rebind the project or retire the
+        # connection inside that window. The fence records the routing facts that were
+        # TRUE at resolution; `supervisor/queue.py` refuses a stale one under
+        # `_queue_lock` rather than inserting work aimed at the previous target. Set for
+        # a REMOTE placement only, so the local path keeps its exact refusal codes.
+        from ouroboros.workspace_admission import PLACEMENT_FENCE_KEY, placement_fence_for
+
+        task[PLACEMENT_FENCE_KEY] = placement_fence_for(
+            drive_root, _task_project_id, workspace_ref
+        )
     try:
         task = attach_task_contract(task)
     except Exception as exc:
@@ -1198,47 +1254,29 @@ async def api_task_resume(request: Request) -> JSONResponse:
 # so route wiring, the CLI, and monkeypatch pins keep addressing gateway.tasks.
 
 
-def _resolve_workspace_root(
-    value: Any,
-    *,
-    system_repo_dir: pathlib.Path,
-    drive_root: pathlib.Path,
-) -> Optional[pathlib.Path]:
-    """Delegates to the admission SSOT (v6.58.0): the gateway and the promote path
-    validate a workspace root through ONE function (workspace_admission), so the two
-    surfaces can never drift. WorkspaceRootError subclasses ValueError, so existing
-    `except ValueError` call sites keep working unchanged."""
-    from ouroboros.workspace_admission import validate_workspace_root
-
-    return validate_workspace_root(value, system_repo_dir=system_repo_dir, drive_root=drive_root)
 
 
-def _normalize_attachments(value: Any) -> List[Dict[str, str]]:
-    if not value:
-        return []
-    if not isinstance(value, list):
-        return []
-    out: List[Dict[str, str]] = []
-    for item in value:
-        if isinstance(item, dict):
-            path = str(item.get("path") or "").strip()
-            label = str(item.get("label") or item.get("display_name") or pathlib.Path(path).name).strip()
-        else:
-            path = str(item or "").strip()
-            label = pathlib.Path(path).name
-        if path:
-            out.append({"path": path, "label": label})
-    return out
+
+
+
+
+
+
+
+
 
 
 def _compose_task_text(
     description: str,
     *,
-    workspace_root: Optional[pathlib.Path],
+    # The placement's DISPLAY spelling (str for a remote root, Path for a local one) —
+    # rendered into the prompt block, never resolved.
+    workspace_root: Any,
     workspace_mode: str,
     memory_mode: str,
     workspace_preflight: Dict[str, Any],
     attachments: Any,
+    attachment_note: str = "",
 ) -> str:
     parts = [description]
     if workspace_root is not None:
@@ -1259,9 +1297,15 @@ def _compose_task_text(
         else:
             parts.append(f"\n\n[HEADLESS_WORKSPACE]\n{workspace_lines}[END_HEADLESS_WORKSPACE]")
     rendered = _render_attachment_lines(attachments)
-    if rendered:
-        parts.append(f"\n\n[ATTACHMENTS]\n{rendered}\n[END_ATTACHMENTS]")
+    # An omission note without any surviving attachment still gets its block: the
+    # owner attached files and is owed the sentence saying why none arrived, and an
+    # empty [ATTACHMENTS] section is exactly the silence D7 forbids.
+    if rendered or attachment_note:
+        body = "\n".join(part for part in (rendered, attachment_note.strip()) if part)
+        parts.append(f"\n\n[ATTACHMENTS]\n{body}\n[END_ATTACHMENTS]")
     return "".join(parts)
+
+
 
 
 def _render_attachment_lines(attachments: Any) -> str:

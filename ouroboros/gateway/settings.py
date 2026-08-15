@@ -324,6 +324,17 @@ async def _json_body_or_empty(request: Request) -> Any:
 
 
 def _has_running_agent_tasks() -> bool:
+    """Whether any queued/running work exists. FAIL-CLOSED: unknown counts as busy.
+
+    Same shape as `gateway/projects._project_has_live_tasks` and
+    `gateway/connections._connection_busy`, for the same reason: this answer is the only
+    thing between the owner and a Max->Low context downgrade taken mid-flight, which the
+    refusal text at the call site promises cannot happen. Reporting `False` when the
+    lookup itself broke turned the guard into a green light exactly when it mattered most
+    — a failing queue lookup and a busy queue are hardly independent events. The
+    neighbouring `_apply_max_context_auto_downgrade` already resolves every uncertainty
+    CLOSED; this now agrees with it.
+    """
     try:
         from supervisor.workers import PENDING, RUNNING, _get_chat_agent
         if PENDING or RUNNING:
@@ -331,7 +342,8 @@ def _has_running_agent_tasks() -> bool:
         agent = _get_chat_agent()
         return bool(getattr(agent, "_busy", False))
     except Exception:
-        return False
+        log.debug("running-task check failed; treating as busy", exc_info=True)
+        return True
 
 
 def _has_started_agent_tasks() -> bool:

@@ -14,7 +14,8 @@ from ouroboros.provider_models import (
     compute_direct_review_models_fallback,
     migrate_model_value,
 )
-from ouroboros.config import SETTINGS_DEFAULTS, _DIRECT_PROVIDER_REVIEW_RUNS, _parse_model_list
+from ouroboros.config import SETTINGS_DEFAULTS, _DIRECT_PROVIDER_REVIEW_RUNS
+from ouroboros.settings_vocabulary import parse_model_list
 from ouroboros.utils import utc_now_iso
 
 
@@ -215,7 +216,7 @@ def _refresh_retired_model_defaults(settings: dict) -> tuple[dict, list[str]]:
     if review_value:
         models = [
             _RETIRED_MODEL_DEFAULT_REPLACEMENTS.get(item, item)
-            for item in _parse_model_list(review_value)
+            for item in parse_model_list(review_value)
         ]
         serialized = _serialize_model_list(models)
         if serialized != review_value:
@@ -225,7 +226,7 @@ def _refresh_retired_model_defaults(settings: dict) -> tuple[dict, list[str]]:
     if scope_review_value:
         models = [
             _RETIRED_MODEL_DEFAULT_REPLACEMENTS.get(item, item)
-            for item in _parse_model_list(scope_review_value)
+            for item in parse_model_list(scope_review_value)
         ]
         serialized = _serialize_model_list(models)
         if serialized != scope_review_value:
@@ -279,7 +280,7 @@ def _exclusive_direct_remote_provider(settings: dict) -> str:
 
 def _normalize_direct_review_models(settings: dict, provider: str) -> str:
     main_model = migrate_model_value(provider, _setting_text(settings, "OUROBOROS_MODEL"))
-    current_models = _parse_model_list(_setting_text(settings, "OUROBOROS_REVIEW_MODELS"))
+    current_models = parse_model_list(_setting_text(settings, "OUROBOROS_REVIEW_MODELS"))
     migrated_models = [migrate_model_value(provider, model) for model in current_models]
     provider_prefix = _provider_prefix(provider)
 
@@ -332,7 +333,7 @@ def _normalize_direct_scope_review_model(settings: dict, provider: str) -> str:
 
 def _normalize_direct_scope_review_models(settings: dict, provider: str) -> str:
     raw = _setting_text(settings, "OUROBOROS_SCOPE_REVIEW_MODELS")
-    models = _parse_model_list(raw)
+    models = parse_model_list(raw)
     if not models:
         singular = _normalize_direct_scope_review_model(settings, provider)
         return _serialize_model_list([singular] if singular else [])

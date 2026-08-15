@@ -301,6 +301,75 @@ class ProjectsChangedOutbound(TypedDict):
     chat_id: NotRequired[int]
 
 
+#: The CLOSED status vocabulary of `connection_state`, as a runtime value beside the
+#: `Literal` that declares it — a `Literal` is a type-checker fact and every producer
+#: of this frame is a runtime one. `gateway/connections._public_live_fields` clamps to
+#: it at the single boundary they all cross, because a sixth word is not additive but
+#: INVISIBLE: `_record_runtime_health` drops a status it does not know, and
+#: `web/modules/remote_task_state.js` reads one as *no typed status at all* and falls
+#: back to derivation — which withdraws the Reconnect button at the one moment a
+#: reconnect is the fix.
+CONNECTION_STATUSES: frozenset[str] = frozenset(
+    {"connecting", "ready", "degraded", "disconnected", "unknown"}
+)
+
+
+class ConnectionStateOutbound(TypedDict, total=False):
+    """Bounded live connection/admission projection; durable secrets are absent.
+
+    Every field here comes out of ONE projection
+    (``gateway/connections.py::_public_live_fields``), which is also what fills
+    ``ConnectionEntry``'s live half and ``ConnectionActionResponse`` — so the frame
+    carries the target-identity and evidence fields too, and declaring less than the
+    projection emits would leave the browser mirror pinned to a shape the server does
+    not send. ``task_id``/``project_id`` are present on the task-SCOPED frames
+    ``_broadcast_connection_state`` fans out per live task on the connection.
+    """
+
+    type: Required[Literal["connection_state"]]
+    connection_id: Required[str]
+    task_id: NotRequired[str]
+    project_id: NotRequired[str]
+    status: NotRequired[
+        Literal["connecting", "ready", "degraded", "disconnected", "unknown"]
+    ]
+    phase: NotRequired[str]
+    completion: NotRequired[str]
+    error_code: NotRequired[str]
+    action: NotRequired[str]
+    platform: NotRequired[str]
+    architecture: NotRequired[str]
+    build: NotRequired[str]
+    bootstrap_compatible: NotRequired[bool]
+    health_fresh: NotRequired[bool]
+    # The bootstrap claim CHECKED against this build's contract set: True means the
+    # host carries an execd that predates a shared-contract change, so every remote
+    # tool call on it would fail and Bootstrap is the action. It rides beside
+    # `bootstrap_compatible` rather than inside it because "never bootstrapped" and
+    # "bootstrapped too long ago" are different sentences with the same next step.
+    execd_outdated: NotRequired[bool]
+    required_contract_set: NotRequired[int]
+    bootstrap_contract_set: NotRequired[int]
+    # THE one blocker in front of this connection, derived server-side from the
+    # evidence above (``remote_refusal_actions.connection_blocker``) and absent
+    # exactly when the connection is selectable. `blocker_action` is the single
+    # action that removes it and `blocker_hint` the owner sentence naming it; no
+    # surface composes its own, which is how the New Project picker came to offer
+    # "run Bootstrap (or Test to refresh health)" for a block Test cannot move.
+    # `blocker_rank` is the position in the removal ladder: a HIGHER rank means
+    # fewer remaining steps, so a picker advising about one of several blocked
+    # connections picks the highest.
+    blocked_by: NotRequired[str]
+    blocker_action: NotRequired[str]
+    blocker_hint: NotRequired[str]
+    blocker_rank: NotRequired[int]
+    diagnostic: NotRequired[Dict[str, Any]]
+    log_refs: NotRequired[List[Dict[str, Any]]]
+    warnings: NotRequired[List[Dict[str, Any]]]
+    log_refs_count: NotRequired[int]
+    warnings_count: NotRequired[int]
+
+
 class MessageAnnotationOutbound(TypedDict):
     """Bubble-free presentation update for one canonical owner message."""
 
@@ -384,8 +453,15 @@ class ProjectCreateRequest(TypedDict, total=False):
     """POST /api/projects body (v6.59.0). ONE source: ``path`` (attach an existing
     owner folder; optional ``init_git`` attach-snapshot commit — never auto-init),
     ``git_url`` (server-side clone, typed ``auth_required`` on credential failure),
-    ``with_workspace`` (genesis provision), or none (file-less project).
-    ``name``-only creation derives a filesystem id."""
+    ``with_workspace`` (genesis provision), ``connection_id`` + ``remote_root`` (a
+    folder on a remote host — RWS v2), or none (file-less project).
+    ``name``-only creation derives a filesystem id.
+
+    The remote source is the TWO HALVES the owner can know, deliberately not a
+    serialized ``workspace_ref``: the placement's third field (the workspace
+    identity) is allocated by the TARGET at admission, so a client that could name it
+    could claim a workspace it never opened, and a client that picked the
+    discriminated variant itself would be choosing its own placement authority."""
 
     id: str
     name: str
@@ -393,17 +469,38 @@ class ProjectCreateRequest(TypedDict, total=False):
     init_git: bool
     git_url: str
     with_workspace: bool
+    connection_id: str
+    remote_root: str
+
+
+class ProjectUpdateRequest(TypedDict, total=False):
+    """POST /api/projects/{project_id}/update body.
+
+    Two mutations, both optional and combinable: ``name`` renames the project, and
+    ``connection_id`` + ``remote_root`` REBIND its remote placement (the same two
+    halves ``ProjectCreateRequest`` takes, admitted the same way). A rebind advances
+    ``routing_generation``, so work already resolved against the previous target is
+    refused at queue insertion rather than run there."""
+
+    name: str
+    connection_id: str
+    remote_root: str
 
 
 class ProjectEntry(TypedDict, total=False):
     """A registry project row as returned by the projects endpoints. ``provenance``
-    (attached|cloned|genesis|none) and ``clone_url`` are historical facts;
-    operational git data is always read live from ``.git``."""
+    (attached|cloned|genesis|remote|none) and ``clone_url`` are historical facts;
+    operational git data is always read live from ``.git``.
+
+    ``placement`` is the sealed remote placement (RWS v2) and is present ONLY for a
+    remote project — ``working_dir`` is then empty, because a remote project has no
+    Home folder and offering one would be a local path standing in for the target."""
 
     id: str
     name: str
     chat_id: int
     working_dir: str
+    placement: Optional[ProjectWorkspaceRef]
     provenance: str
     clone_url: str
     trusted_at: str
@@ -730,7 +827,9 @@ class ChatHistoryResponse(TypedDict, total=False):
 
 
 class ExecutorRef(TypedDict, total=False):
-    type: Required[Literal["local", "docker_exec"]]
+    # "ssh" is a DERIVED projection of the persisted WorkspaceRef (RWS v2);
+    # nothing stores an ssh executor_ref independently — see workspace_ref.py.
+    type: Required[Literal["local", "docker_exec", "ssh"]]
     id: NotRequired[str]
     network: NotRequired[Literal["host", "none"]]
     workspace_host_path: NotRequired[str]
@@ -738,6 +837,171 @@ class ExecutorRef(TypedDict, total=False):
     # Required at runtime when type == "docker_exec".
     container_name: NotRequired[str]
     path_mappings: NotRequired[list[Dict[str, str]]]
+    # Required at runtime when type == "ssh"; Home path mappings are forbidden
+    # for that arm (workspace_executor.normalize_executor_ref).
+    connection_id: NotRequired[str]
+    remote_root: NotRequired[str]
+    workspace_id: NotRequired[str]
+
+
+class ProjectWorkspaceRef(TypedDict, total=False):
+    """Wire mirror of the persisted placement descriptor (workspace_ref.py)."""
+
+    kind: Required[Literal["local", "ssh"]]
+    local_root: NotRequired[str]
+    connection_id: NotRequired[str]
+    remote_root: NotRequired[str]
+    workspace_id: NotRequired[str]
+
+
+class ConnectionEntry(TypedDict, total=False):
+    """One owner connection: durable store row + bounded live projection.
+
+    Durable fields come from ``connection_store.py`` (never secrets). The live
+    status/diagnostic fields are process-local projections and are never persisted
+    back into the store. ``bootstrap_compatible`` is DERIVED from the durable
+    ``bootstrapped_at``: a compatible executor stays installed on that host across a
+    Home restart, so the claim is owner state. ``health_fresh`` is inherently
+    process-local — "the target answered within the last few minutes" is a statement
+    about this run, which no durable record can make.
+    """
+
+    id: Required[str]
+    name: Required[str]
+    ssh_alias: Required[str]
+    expected_host_id: NotRequired[str]
+    host_id_history: NotRequired[List[Dict[str, Any]]]
+    lifecycle: NotRequired[Literal["active", "retired"]]
+    retired_at: NotRequired[Optional[str]]
+    bootstrapped_at: NotRequired[Optional[str]]
+    bootstrap_build: NotRequired[str]
+    # The Home↔execd contract set the last bootstrap installed. `bootstrap_build`
+    # says WHICH artifact is on the host; this says whether it can still talk to this
+    # Home, which is the only one of the two a status surface can compare against
+    # anything (`connection_store.record_bootstrap` states why the release id cannot).
+    bootstrap_contract_set: NotRequired[int]
+    created_at: NotRequired[str]
+    updated_at: NotRequired[str]
+    status: NotRequired[
+        Literal["connecting", "ready", "degraded", "disconnected", "unknown"]
+    ]
+    phase: NotRequired[str]
+    # The project whose live session the broker reported for this connection
+    # (``remote_workspace.status`` rows carry it, and ``api_connections_list``
+    # merges the bounded live projection of those rows).
+    project_id: NotRequired[str]
+    platform: NotRequired[str]
+    architecture: NotRequired[str]
+    build: NotRequired[str]
+    bootstrap_compatible: NotRequired[bool]
+    health_fresh: NotRequired[bool]
+    # The bootstrap claim CHECKED against this build's contract set: True means the host
+    # carries an execd that predates a shared-contract change, so every remote tool call
+    # on it would fail and Bootstrap is the action. It rides BESIDE
+    # `bootstrap_compatible` rather than inside it, because "never bootstrapped" and
+    # "bootstrapped against an older contract set" are different sentences with the same
+    # next step, and a surface that says only "incompatible" cannot say which it means.
+    execd_outdated: NotRequired[bool]
+    required_contract_set: NotRequired[int]
+    # The one blocker in front of this connection and the single action that
+    # removes it, derived server-side (``remote_refusal_actions.connection_blocker``)
+    # and ABSENT exactly when the row is selectable — so "has no blocker" and
+    # "may be offered in the New Project picker" are one fact, not two opinions.
+    blocked_by: NotRequired[str]
+    blocker_action: NotRequired[str]
+    blocker_hint: NotRequired[str]
+    blocker_rank: NotRequired[int]
+    completion: NotRequired[str]
+    error_code: NotRequired[str]
+    action: NotRequired[str]
+    diagnostic: NotRequired[Dict[str, Any]]
+    log_refs: NotRequired[List[Dict[str, Any]]]
+    # Bounded non-fatal transport observations (e.g. an ssh alias whose
+    # forwarding directives were neutralized). ``gateway/connections.py``
+    # ``_public_live_fields`` already emits these on the wire.
+    warnings: NotRequired[List[Dict[str, Any]]]
+    # The TOTAL each bounded list above was capped from. A silent cap makes "four
+    # warnings" indistinguishable from "four of nine warnings"; the count is one
+    # number rather than a number plus a `*_truncated` flag that could disagree
+    # with it, since truncation IS ``count > len(list)``.
+    log_refs_count: NotRequired[int]
+    warnings_count: NotRequired[int]
+
+
+class ConnectionAddRequest(TypedDict):
+    name: str
+    ssh_alias: str
+
+
+class ConnectionListResponse(TypedDict, total=False):
+    connections: List[ConnectionEntry]
+    error: str
+    error_code: str
+    action: str
+
+
+class ConnectionActionResponse(TypedDict, total=False):
+    """The answer of every transport-dependent owner connection action.
+
+    ``gateway/connections.py::_connection_action`` returns the broker's envelope
+    with Home's own fields merged in, so this declares the keys a CONSUMER reads
+    (the Settings card, the CLI, the retrust flow) rather than every key a broker
+    may happen to include.
+
+    ``host_id`` and ``handshake`` are load-bearing and were both undeclared:
+    retrust exists to accept a REPLACEMENT host identity, and the only way any
+    surface learns the currently observed one is by reading them off this response
+    (``connections_ui.js::observedHostId``,
+    ``cli_connections._observed_cli_host_id``, and the gateway's own
+    ``_observed_host_id`` — the three must agree, or a retrust confirmation pair is
+    assembled from a field one of them cannot see).
+    """
+
+    ok: bool
+    connection: ConnectionEntry
+    connection_id: str
+    status: str
+    phase: str
+    completion: str
+    error: str
+    error_code: str
+    action: str
+    host_id: str
+    handshake: Dict[str, Any]
+    platform: str
+    architecture: str
+    build: str
+    bootstrap_compatible: bool
+    health_fresh: bool
+    # `_connection_action` merges Home's own evidence into every answer, so a Test
+    # or Bootstrap response carries the contract-set verdict AND what is still in
+    # the way after it succeeded. That last part is the whole point: a Test on a
+    # host with an outdated executor answers `ok` with `health_fresh: true`, and
+    # without these fields the surface had nothing with which to correct the advice
+    # it had already given.
+    execd_outdated: bool
+    required_contract_set: int
+    bootstrap_contract_set: int
+    blocked_by: str
+    blocker_action: str
+    blocker_hint: str
+    blocker_rank: int
+    diagnostic: Dict[str, Any]
+    log_refs: List[Dict[str, Any]]
+    warnings: List[Dict[str, Any]]
+    log_refs_count: int
+    warnings_count: int
+
+
+class ConnectionDirsResponse(TypedDict, total=False):
+    connection_id: str
+    path: str
+    parent: str
+    dirs: List[FsDirsEntry]
+    truncated: bool
+    error: str
+    error_code: str
+    action: str
 
 
 class _TaskCreateRequestRequired(TypedDict):
@@ -985,6 +1249,14 @@ HTTP_ENDPOINTS: tuple[str, ...] = (
     "POST /api/owner/safety-mode",
     "POST /api/owner/capability-ack",
     "POST /api/owner/skills/{skill}/attest-review",
+    "GET /api/owner/connections",
+    "POST /api/owner/connections",
+    "POST /api/owner/connections/{connection_id}/test",
+    "POST /api/owner/connections/{connection_id}/bootstrap",
+    "POST /api/owner/connections/{connection_id}/reconnect",
+    "POST /api/owner/connections/{connection_id}/retrust",
+    "GET /api/owner/connections/{connection_id}/dirs",
+    "DELETE /api/owner/connections/{connection_id}",
     "GET /api/model-catalog",
     "POST /api/tasks",
     "GET /api/tasks",
@@ -1092,6 +1364,7 @@ WS_MESSAGE_TYPES: tuple[str, ...] = (
     "projects_changed",
     "task_named",
     "update_status_ready",
+    "connection_state",
 )
 
 
@@ -1110,6 +1383,8 @@ __all__ = [
     "HeartbeatOutbound",
     "ExtensionLifecycleOutbound",
     "ProjectsChangedOutbound",
+    "CONNECTION_STATUSES",
+    "ConnectionStateOutbound",
     "MessageAnnotationOutbound",
     "UpdateMergePlan",
     "UpdatePreflightRequest",
@@ -1119,6 +1394,7 @@ __all__ = [
     "UpdateApplyErrorResponse",
     "UpdateStatusReadyOutbound",
     "ProjectCreateRequest",
+    "ProjectUpdateRequest",
     "ProjectEntry",
     "ProjectDeleteResponse",
     "FsDirsEntry",
@@ -1161,6 +1437,12 @@ __all__ = [
     "FileBrowserListResponse",
     "ChatHistoryResponse",
     "ExecutorRef",
+    "ProjectWorkspaceRef",
+    "ConnectionEntry",
+    "ConnectionAddRequest",
+    "ConnectionListResponse",
+    "ConnectionActionResponse",
+    "ConnectionDirsResponse",
     "TaskCreateRequest",
     "TaskCreateResponse",
     "TaskListResponse",

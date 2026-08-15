@@ -151,6 +151,10 @@ def _is_owner_only_settings_file(target: pathlib.Path) -> bool:
 def _is_owner_only_file(target: pathlib.Path) -> bool:
     if _is_owner_only_settings_file(target):
         return True
+    from ouroboros.connection_store import is_connection_store_path
+
+    if is_connection_store_path(target):
+        return True
     if _is_skill_owner_state_target(target):
         return True
     from ouroboros import config as _cfg
