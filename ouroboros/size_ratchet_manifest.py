@@ -134,6 +134,7 @@ BAND_PATHS = {
     "ouroboros/agent_startup_checks.py": None,
     "ouroboros/claudexor_runtime.py": None,
     "ouroboros/context.py": None,
+    "ouroboros/export_policy_contract.py": "the ONE export judge; splitting it would recreate the multi-door shape it exists to end",
     "ouroboros/extension_process_runner.py": None,
     "ouroboros/gateway/contracts.py": None,
     "ouroboros/gateway/extensions.py": None,

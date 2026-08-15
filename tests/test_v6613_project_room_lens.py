@@ -229,3 +229,59 @@ def test_context_fact_matches_lens_state(tmp_path, monkeypatch):
     update_project(data, "p1", working_dir=str(tmp_path / "vanished"))
     rendered2 = build_runtime_section(env, task)
     assert "working_dir_warning" in rendered2 and "unusable" in rendered2
+
+
+# --- the lens changes the BASE, never the policy ----------------------------------
+
+
+def test_the_room_lens_still_applies_the_subagent_secret_denial(tmp_path):
+    """The lens branch returned before reaching the guard the next branch applies.
+
+    `_list_files` sends an active_workspace listing down one of two paths: the room
+    lens, or `_repo_list`. `_repo_list` refuses a secret TARGET outright and filters a
+    secret ENTRY out of an ordinary listing with an exact hidden count; the lens branch
+    did neither, because it returned two lines above. So a delegated child in a
+    folder-room saw the `.env` and `secrets/` that the byte-identical call one branch
+    over refuses — the same "one policy, two doors" defect as the placement version of
+    it, with no placement in it.
+
+    The lens re-points which DIRECTORY is listed. That is all it was ever for.
+    """
+    from ouroboros.contracts.task_constraint import TaskConstraint
+    from ouroboros.tool_access import project_room_lens_dir
+    from ouroboros.tools.core import _list_files, is_restricted_subagent_profile
+
+    ctx, room, _ = _room_ctx(tmp_path)
+    (room / ".env").write_text("TOKEN=room-secret\n", encoding="utf-8")
+    (room / "secrets").mkdir(exist_ok=True)
+    (room / "secrets" / "db.txt").write_text("room-db-password\n", encoding="utf-8")
+    ctx.task_constraint = TaskConstraint(mode="local_readonly_subagent")
+    # The premise: the lens IS active and the reader IS restricted. Without both, this
+    # test would pass by never entering the branch it is about.
+    assert project_room_lens_dir(ctx) == room.resolve()
+    assert is_restricted_subagent_profile(ctx) is True
+
+    listing = _list_files(ctx, path=".", root="active_workspace")
+    entries = json.loads(listing)
+    assert "game.js" in entries, listing
+    assert ".env" not in entries and "secrets/" not in entries, listing
+    assert any("secret/control" in row for row in entries), (
+        "the hidden entries must be DISCLOSED with a count, not silently absent"
+    )
+
+    # A listing whose TARGET is the secret directory is refused outright, exactly as
+    # `_repo_list` refuses it.
+    blocked = _list_files(ctx, path="secrets", root="active_workspace")
+    assert "REPO_LIST_BLOCKED" in blocked, blocked
+    assert "room-db-password" not in blocked
+
+
+def test_an_unrestricted_room_chat_still_sees_its_own_project_files(tmp_path):
+    """The denial is about the READER: the owner's own chat keeps the whole folder."""
+    from ouroboros.tools.core import _list_files
+
+    ctx, room, _ = _room_ctx(tmp_path)
+    (room / ".env").write_text("TOKEN=room-secret\n", encoding="utf-8")
+
+    entries = json.loads(_list_files(ctx, path=".", root="active_workspace"))
+    assert {".env", "game.js"} <= set(entries), entries
