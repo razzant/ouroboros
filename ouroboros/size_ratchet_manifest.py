@@ -149,7 +149,6 @@ BAND_PATHS = {
     "ouroboros/tools/browser.py": None,
     "ouroboros/tools/shell_guards.py": None,
     "ouroboros/tools/skill_exec.py": None,
-    "ouroboros/utils.py": None,
     "ouroboros/workspace_executor.py": None,
     "scripts/run_external_review.py": None,
     "skills/telegram/plugin.py": None,

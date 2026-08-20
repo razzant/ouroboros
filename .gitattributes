@@ -9,3 +9,6 @@
 # CRLF, `uv` rewrites LF, and the later clean-tree bundle gate sees a false
 # modification even though Git's normalized content is unchanged.
 requirements-runtime.lock text eol=lf
+
+# Golden scanner slices are SHA-pinned and must keep identical bytes on Windows.
+tests/fixtures/skill_publish_scanner/*.fixture text eol=lf
