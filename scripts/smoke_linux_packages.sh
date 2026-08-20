@@ -24,6 +24,7 @@
 # Usage: bash smoke_linux_packages.sh <official|vendor> <deb> <rpm> <red80-rpm>
 set -euo pipefail
 
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 LANE="$1"
 DEB="$2"
 RPM="$3"
@@ -38,6 +39,7 @@ smoke_package() {
     echo "--- Smoking $name in $image ---"
     docker run --rm \
         --volume "$(cd "$(dirname "$package")" && pwd)/$name:/tmp/$name:ro" \
+        --volume "$SCRIPT_DIR/betterleaks_platform_smoke.py:/tmp/betterleaks_platform_smoke.py:ro" \
         "$image" sh -c "
             set -eu
             $install_cmd /tmp/$name
@@ -52,6 +54,10 @@ smoke_package() {
             ! grep -q '^Restart=' /usr/lib/systemd/user/ouroboros.service
             test -x /opt/ouroboros/Ouroboros
             ouroboros --help >/dev/null
+            PYTHONPATH=/opt/ouroboros/_internal \
+              /opt/ouroboros/_internal/python-standalone/bin/python3 \
+              /tmp/betterleaks_platform_smoke.py \
+              --bundle-root /opt/ouroboros/_internal
             mkdir -p /tmp/ouroboros-smoke-home /tmp/ouroboros-smoke-data
             set +e
             HOME=/tmp/ouroboros-smoke-home \

@@ -142,6 +142,36 @@ jobs:
       - name: Guard extracted transport imports stay out of core
         run: python -m pytest tests/test_no_core_a2a_telegram_imports.py -q
 
+  # Fork-safe PR proof for the one native secret-scanner dependency. This job
+  # carries no provider or repository secret: it exercises the explicit pinned
+  # installer, managed resolver, license/version checks, and redaction-safe real
+  # scanner smoke on each supported desktop OS family.
+  betterleaks-platform-smoke:
+    if: |
+      (github.event_name == 'push' && github.ref == 'refs/heads/ouroboros')
+      || (github.event_name == 'pull_request' && github.base_ref == 'ouroboros')
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest, macos-latest]
+    runs-on: ${{ matrix.os }}
+    env:
+      PYTHONUTF8: "1"
+      OUROBOROS_DATA_DIR: ${{ runner.temp }}/ouroboros-betterleaks-data
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.10'
+      - name: Install exact Betterleaks runtime
+        shell: bash
+        run: python -m ouroboros.betterleaks_runtime install
+      - name: Smoke managed Betterleaks runtime
+        shell: bash
+        run: python scripts/betterleaks_platform_smoke.py --managed-runtime
+
   # ──────────────────────────────────────────────────────────────────
   # Tier 2.5: Integration tests against real provider APIs
   # Triggered on push to main / ouroboros / ouroboros-stable, manual,
@@ -616,8 +646,12 @@ jobs:
               --managed-runtime --lane fixture --max-seconds 300
           if [ "${{ needs.release-preflight.outputs.is_prerelease }}" != "true" ] \
               && [ "$HAS_APPLE_SIGNING" = "true" ]; then
+            codesign --verify --strict \
+              "$MOUNT/Ouroboros.app/Contents/Resources/betterleaks-standalone/bin/betterleaks"
             codesign --verify --deep --strict "$MOUNT/Ouroboros.app"
           fi
+          python scripts/betterleaks_platform_smoke.py \
+            --bundle-root "$MOUNT/Ouroboros.app/Contents/Resources"
           rm -rf "$SBOM_ROOT"
           mkdir -p "$SBOM_ROOT"
           ditto "$MOUNT" "$SBOM_ROOT"
@@ -648,6 +682,8 @@ jobs:
             OUROBOROS_BUNDLE_DIR="$SMOKE_ROOT/Ouroboros/_internal" \
             python scripts/claudexor_platform_smoke.py \
               --managed-runtime --lane fixture --max-seconds 300
+          python scripts/betterleaks_platform_smoke.py \
+            --bundle-root "$SMOKE_ROOT/Ouroboros/_internal"
           echo "sbom_path=$SMOKE_ROOT" >> "$GITHUB_OUTPUT"
 
       - name: Smoke final Linux AppImage
@@ -801,6 +837,8 @@ jobs:
             OUROBOROS_BUNDLE_DIR="$APPDIR/usr/lib/ouroboros/_internal" \
             python scripts/claudexor_platform_smoke.py \
               --managed-runtime --lane fixture --max-seconds 300
+          python scripts/betterleaks_platform_smoke.py \
+            --bundle-root "$APPDIR/usr/lib/ouroboros/_internal"
           echo "artifact_path=$APPIMAGE" >> "$GITHUB_OUTPUT"
           echo "sbom_path=$APPDIR" >> "$GITHUB_OUTPUT"
 
@@ -833,6 +871,8 @@ jobs:
           $env:OUROBOROS_BUNDLE_DIR = "$SmokeRoot\Ouroboros\_internal"
           python scripts/claudexor_platform_smoke.py --managed-runtime --lane fixture --max-seconds 300
           if ($LASTEXITCODE -ne 0) { throw "packaged Claudexor runtime smoke failed: $LASTEXITCODE" }
+          python scripts/betterleaks_platform_smoke.py --bundle-root "$SmokeRoot\Ouroboros\_internal"
+          if ($LASTEXITCODE -ne 0) { throw "packaged Betterleaks runtime smoke failed: $LASTEXITCODE" }
           Add-Content -Path $env:GITHUB_OUTPUT -Value "sbom_path=$SmokeRoot"
 
       - name: Record packaged artifact smoke
@@ -850,6 +890,7 @@ jobs:
             --tag "$GITHUB_REF_NAME" \
             --check embedded_repo_bundle \
             --check embedded_claudexor_runtime \
+            --check embedded_betterleaks_runtime \
             --check packaged_cli_help \
             "${EXTRA_CHECKS[@]}"
 
@@ -863,6 +904,7 @@ jobs:
             --output dist/release-smoke-linux-appimage-x86_64.json \
             --commit "$GITHUB_SHA" --tag "$GITHUB_REF_NAME" \
             --check embedded_repo_bundle --check embedded_claudexor_runtime \
+            --check embedded_betterleaks_runtime \
             --check packaged_cli_help --check appimage_extract_and_run \
             --check appimage_metadata --check product_version \
             --check browser_fallback_start --check gateway_readiness \
@@ -981,6 +1023,7 @@ jobs:
               --tag "$GITHUB_REF_NAME" \
               --check package_install \
               --check runtime_dependency \
+              --check embedded_betterleaks_runtime \
               --check packaged_cli_help \
               --check desktop_entry \
               --check systemd_user_unit \

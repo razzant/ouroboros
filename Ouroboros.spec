@@ -75,6 +75,20 @@ else:
           'search_code will rely on PATH rg or the Python fallback. Run '
           'scripts/download_ripgrep_standalone.sh (or .ps1) before PyInstaller for a release build.')
 
+# Betterleaks is the one secret-scanning engine for outbound skill publication.
+# The package-local installer stages one checksum-pinned platform binary, its
+# license, and identity metadata in this normalized layout. Release build
+# scripts guarantee it is present; ad-hoc PyInstaller runs remain possible but
+# Publish will then report the exact explicit repair command instead of
+# downloading at runtime.
+if os.path.isdir('betterleaks-standalone'):
+    _extra_datas.append(('betterleaks-standalone', 'betterleaks-standalone'))
+else:
+    print('WARNING: betterleaks-standalone/ not found — packaged skill publication '
+          'will report scanner_missing. Run python -m '
+          'ouroboros.betterleaks_runtime install --build-output '
+          'betterleaks-standalone before PyInstaller for a release build.')
+
 # Seed the exact reviewed Claudexor engine closure. The archive stays compressed
 # inside the app and is extracted into Ouroboros's writable data plane on first
 # delegated use; Node remains a separate host-owned bundled runtime.

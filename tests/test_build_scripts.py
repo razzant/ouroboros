@@ -376,6 +376,7 @@ class TestBuildWindowsPs1:
             "Node.js runtime download",
             "Launcher dependency installation",
             "ripgrep runtime download",
+            "Betterleaks runtime installation",
             "Agent dependency installation",
             "Claudexor runtime seed fetch",
             "Chromium installation",
@@ -1052,6 +1053,31 @@ def test_release_builds_embed_the_exact_claudexor_runtime_seed():
     assert "/claudexor-runtime/" in _pkg_read(".gitignore")
 
 
+def test_release_builds_stage_one_pinned_betterleaks_runtime_before_bundle_and_pyinstaller():
+    module_command = "-m ouroboros.betterleaks_runtime install"
+    for name in ("build.sh", "build_linux.sh", "build_windows.ps1"):
+        source = _pkg_read(name)
+        install_pos = source.find(module_command)
+        bundle_pos = source.find("scripts/build_repo_bundle.py")
+        pyinstaller_pos = _find_pyinstaller_cmd_pos(source)
+        assert install_pos != -1, f"{name} must invoke the package-local installer"
+        assert "--build-output betterleaks-standalone" in source
+        assert bundle_pos != -1 and install_pos < bundle_pos, (
+            f"{name} must stage Betterleaks before the clean-tree repo bundle gate"
+        )
+        assert pyinstaller_pos != -1 and install_pos < pyinstaller_pos
+
+    windows = _pkg_read("build_windows.ps1")
+    assert 'Invoke-NativeChecked "Betterleaks runtime installation"' in windows
+    macos = _pkg_read("build.sh")
+    assert macos.find(module_command) < macos.find("=== Signing Ouroboros.app ===")
+
+    spec = _pkg_read("Ouroboros.spec")
+    assert "('betterleaks-standalone', 'betterleaks-standalone')" in spec
+    assert "ouroboros.betterleaks_runtime install --build-output" in spec
+    assert "/betterleaks-standalone/" in _pkg_read(".gitignore")
+
+
 def test_build_sh_supports_unsigned_macos_release():
     build_source = _pkg_read("build.sh")
     assert 'OUROBOROS_SIGN' in build_source
@@ -1106,3 +1132,16 @@ def test_ci_release_smokes_the_exact_embedded_claudexor_archive_in_all_assets():
     assert workflow.count("scripts/claudexor_platform_smoke.py") == 4
     assert workflow.count("--managed-runtime --lane fixture") == 4
     assert "embedded_claudexor_runtime" in workflow
+
+
+def test_ci_has_fork_safe_three_os_betterleaks_candidate_matrix():
+    workflow = _ci_workflow()
+    start = workflow.index("  betterleaks-platform-smoke:")
+    job = workflow[start : workflow.index("\n  # ─", start)]
+    assert "github.event_name == 'pull_request'" in job
+    assert "github.base_ref == 'ouroboros'" in job
+    assert "pull_request_target" not in job
+    assert "os: [ubuntu-latest, windows-latest, macos-latest]" in job
+    assert "python -m ouroboros.betterleaks_runtime install" in job
+    assert "python scripts/betterleaks_platform_smoke.py --managed-runtime" in job
+    assert "secrets." not in job

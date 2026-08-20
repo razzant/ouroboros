@@ -66,6 +66,12 @@ if (-not (Test-Path "ripgrep-standalone\rg.exe")) {
     }
 }
 
+Write-Host "--- Verifying bundled Betterleaks runtime ---"
+Invoke-NativeChecked "Betterleaks runtime installation" {
+    & "python-standalone\python.exe" -m ouroboros.betterleaks_runtime install `
+        --build-output betterleaks-standalone
+}
+
 Write-Host "--- Installing agent dependencies into python-standalone ---"
 Invoke-NativeChecked "Agent dependency installation" {
     uv pip install --python "python-standalone\python.exe" -q -r requirements-runtime.lock

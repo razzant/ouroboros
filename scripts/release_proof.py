@@ -53,7 +53,12 @@ RELEASE_GATES = (
     "packaged-artifact-smoke",
 )
 COMMON_SMOKE_CHECKS = frozenset(
-    {"embedded_repo_bundle", "embedded_claudexor_runtime", "packaged_cli_help"}
+    {
+        "embedded_repo_bundle",
+        "embedded_claudexor_runtime",
+        "embedded_betterleaks_runtime",
+        "packaged_cli_help",
+    }
 )
 # The native packages are proven by a real install in a stock distro container,
 # not by unpacking an archive, so they carry their own check set. Only the
@@ -63,6 +68,7 @@ PACKAGE_SMOKE_CHECKS = frozenset(
     {
         "package_install",
         "runtime_dependency",
+        "embedded_betterleaks_runtime",
         "packaged_cli_help",
         "desktop_entry",
         "systemd_user_unit",

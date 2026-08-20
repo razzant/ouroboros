@@ -40,6 +40,10 @@ if [ ! -f "ripgrep-standalone/bin/rg" ]; then
     bash scripts/download_ripgrep_standalone.sh
 fi
 
+echo "--- Verifying bundled Betterleaks runtime ---"
+"$PORTABLE_PYTHON" -m ouroboros.betterleaks_runtime install \
+    --build-output betterleaks-standalone
+
 rm -rf build dist
 
 echo "--- Creating portable-Python launcher build environment ---"

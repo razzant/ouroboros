@@ -37,6 +37,7 @@ site/public/assets/
 python-standalone/
 node-standalone/
 ripgrep-standalone/
+/betterleaks-standalone/
 /claudexor-runtime/
 
 # OS

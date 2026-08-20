@@ -49,6 +49,10 @@ if [ ! -f "ripgrep-standalone/bin/rg" ]; then
     bash scripts/download_ripgrep_standalone.sh
 fi
 
+echo "--- Verifying bundled Betterleaks runtime ---"
+python-standalone/bin/python3 -m ouroboros.betterleaks_runtime install \
+    --build-output betterleaks-standalone
+
 echo "--- Installing launcher dependencies ---"
 BUILD_REQUIREMENTS="$(mktemp "${TMPDIR:-/tmp}/ouroboros-build-requirements.XXXXXX")"
 trap 'rm -f "$BUILD_REQUIREMENTS"' EXIT
