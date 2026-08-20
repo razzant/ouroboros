@@ -236,9 +236,9 @@ def test_search_code_has_result_limit():
     for _handoff_tool in ("wait_task", "wait_tasks", "get_task_result"):
         assert _handoff_tool in UNTRUNCATED_TOOL_RESULTS
     from ouroboros.tool_capabilities import FOREGROUND_MUTATIVE_TOOLS
-    # D10 retired claude_code_edit — the only foreground-mutative tool. The
-    # CLASS stays wired (an empty set) so a successor lands as one entry.
-    assert FOREGROUND_MUTATIVE_TOOLS == frozenset()
+    # Publication can create a remote branch/commit/PR. Its outer timeout must
+    # not return while that foreground mutator is still running.
+    assert FOREGROUND_MUTATIVE_TOOLS == frozenset({"submit_skill_to_hub"})
 
 
 def test_extract_video_frames_visible_where_media_siblings_are_visible():

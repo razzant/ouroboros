@@ -169,7 +169,7 @@ def init_queue_refs(pending: List[Dict[str, Any]], running: Dict[str, Dict[str, 
 
 def _task_priority(task_type: str) -> int:
     t = str(task_type or "").strip().lower()
-    if t in ("task", "review", "deep_self_review"):
+    if t in ("skill_publish", "task", "review", "deep_self_review"):
         return 0
     if t == "evolution":
         return 1

@@ -233,9 +233,8 @@ def test_live_tool_log_payload_includes_structured_result_metadata(tmp_path, mon
     drive_logs = tmp_path / "logs"
     drive_logs.mkdir()
     live_events = []
-    # D10 emptied FOREGROUND_MUTATIVE_TOOLS (claude_code_edit was its only
-    # member); the terminal-wait plumbing stays wired for a successor, so pin
-    # it with a fixture member.
+    # Pin the generic terminal-wait plumbing with a fixture-only mutator; the
+    # production registration is exercised by test_skill_publish_result.
     monkeypatch.setattr(
         loop_tool_execution, "FOREGROUND_MUTATIVE_TOOLS", frozenset({"fake_code_tool"})
     )

@@ -516,6 +516,10 @@ def _extract_result_metadata(fn_name: str, result: Any, is_error: bool) -> Dict[
             meta["status"] = "ok_autocorrected"
         else:
             meta["status"] = "ok"
+    if fn_name == "submit_skill_to_hub":
+        from ouroboros.skill_publish_result import extract_skill_publish_result_metadata
+
+        meta.update(extract_skill_publish_result_metadata(result))
     return meta
 
 

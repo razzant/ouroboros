@@ -207,6 +207,8 @@ REVIEWED_MUTATIVE_TOOLS: frozenset[str] = frozenset({
 
 # Foreground mutative tools may keep editing files after Python future timeout;
 # the loop must wait for terminal completion instead of returning while they run.
-# Empty since D10 retired the SDK edit gateway (the one foreground tool that
-# kept editing after a Python-future timeout); the seam stays for successors.
-FOREGROUND_MUTATIVE_TOOLS: frozenset[str] = frozenset()
+# D10 retired the SDK edit gateway; publication is now the foreground mutator
+# whose remote branch/commit/PR effects must settle before control returns.
+FOREGROUND_MUTATIVE_TOOLS: frozenset[str] = frozenset({
+    "submit_skill_to_hub",
+})
