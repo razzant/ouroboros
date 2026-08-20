@@ -38,11 +38,10 @@ _SUCCESS_OBJECTIVE_STATUSES = frozenset({"pass", "best_effort"})
 _FINDING_TEXT_LIMITS = {
     "path": 320,
     "detector": 128,
-    "rule_id": 128,
-    "confidence": 32,
-    "classification": 64,
     "reason": 320,
 }
+_FINDING_CONFIDENCES = frozenset({"low", "medium", "high", "unknown"})
+_FINDING_DISPOSITIONS = frozenset({"blocker", "warning", "audited_false_positive"})
 _EFFECT_TEXT_LIMITS = {
     "kind": 64,
     "repository": 160,
@@ -70,10 +69,7 @@ def _loads_unique(text: str) -> Any:
 
 
 def _bounded_text(value: Any, limit: int, *, required: bool = False) -> str:
-    text = "".join(
-        " " if ord(ch) < 0x20 or ord(ch) == 0x7F else ch
-        for ch in str(value or "").strip()
-    )
+    text = "".join(" " if ord(ch) < 0x20 or ord(ch) == 0x7F else ch for ch in str(value or "").strip())
     if required and not text:
         raise ValueError("required text field is empty")
     return text[:limit]
@@ -139,18 +135,35 @@ def _normalize_scanner(scanner: Mapping[str, Any] | None) -> Dict[str, Any]:
 def _normalize_finding(finding: Mapping[str, Any]) -> Dict[str, Any]:
     if not isinstance(finding, Mapping):
         raise ValueError("findings must contain JSON objects")
-    result: Dict[str, Any] = {}
-    for key, limit in _FINDING_TEXT_LIMITS.items():
-        if key in finding and str(finding.get(key) or "").strip():
-            result[key] = _bounded_text(finding.get(key), limit)
-    for key in ("line", "column"):
-        if key not in finding or finding.get(key) in (None, ""):
-            continue
-        value = _nonnegative_int(finding.get(key), field=key)
-        if value <= 0:
-            raise ValueError(f"{key} must be positive")
-        result[key] = value
-    return result
+    line = _nonnegative_int(finding.get("line"), field="line")
+    if line <= 0:
+        raise ValueError("line must be positive")
+    confidence = _bounded_text(finding.get("confidence"), 32, required=True)
+    if confidence not in _FINDING_CONFIDENCES:
+        raise ValueError("invalid finding confidence")
+    verification = _bounded_text(finding.get("verification"), 32, required=True)
+    if verification != "not_attempted":
+        raise ValueError("invalid finding verification")
+    disposition = _bounded_text(finding.get("disposition"), 64, required=True)
+    if disposition not in _FINDING_DISPOSITIONS:
+        raise ValueError("invalid finding disposition")
+    return {
+        "path": _bounded_text(finding.get("path"), _FINDING_TEXT_LIMITS["path"], required=True),
+        "line": line,
+        "detector": _bounded_text(
+            finding.get("detector"),
+            _FINDING_TEXT_LIMITS["detector"],
+            required=True,
+        ),
+        "confidence": confidence,
+        "reason": _bounded_text(
+            finding.get("reason"),
+            _FINDING_TEXT_LIMITS["reason"],
+            required=True,
+        ),
+        "verification": verification,
+        "disposition": disposition,
+    }
 
 
 def _normalize_findings(findings: Sequence[Mapping[str, Any]] | None) -> list[Dict[str, Any]]:
@@ -159,11 +172,7 @@ def _normalize_findings(findings: Sequence[Mapping[str, Any]] | None) -> list[Di
     if isinstance(findings, (str, bytes)) or not isinstance(findings, Sequence):
         raise ValueError("findings must be a sequence")
     normalized = [_normalize_finding(finding) for finding in findings]
-    normalized.sort(
-        key=lambda row: json.dumps(
-            row, ensure_ascii=False, sort_keys=True, separators=(",", ":")
-        )
-    )
+    normalized.sort(key=lambda row: json.dumps(row, ensure_ascii=False, sort_keys=True, separators=(",", ":")))
     return normalized
 
 
@@ -215,8 +224,13 @@ def validate_skill_publish_receipt(
     if not isinstance(receipt, Mapping):
         return None
     expected_keys = {
-        "kind", "repository", "url", "number", "skill",
-        "snapshot_hash", "ruleset_sha256",
+        "kind",
+        "repository",
+        "url",
+        "number",
+        "skill",
+        "snapshot_hash",
+        "ruleset_sha256",
     }
     if set(receipt) != expected_keys:
         return None
@@ -248,12 +262,7 @@ def validate_skill_publish_receipt(
         ):
             return None
         segments = parsed.path.split("/")
-        if (
-            len(segments) != 5
-            or segments[0] != ""
-            or segments[3] != "pull"
-            or not segments[4].isdigit()
-        ):
+        if len(segments) != 5 or segments[0] != "" or segments[3] != "pull" or not segments[4].isdigit():
             return None
         url_repository = f"{segments[1]}/{segments[2]}"
         if (
@@ -265,13 +274,9 @@ def validate_skill_publish_receipt(
             return None
         if expected_skill and skill != _bounded_identifier(expected_skill, field="skill"):
             return None
-        if expected_snapshot_hash and snapshot_hash != _normalized_hash(
-            expected_snapshot_hash, required=True
-        ):
+        if expected_snapshot_hash and snapshot_hash != _normalized_hash(expected_snapshot_hash, required=True):
             return None
-        if expected_ruleset_sha256 and ruleset_sha256 != _normalized_hash(
-            expected_ruleset_sha256, required=True
-        ):
+        if expected_ruleset_sha256 and ruleset_sha256 != _normalized_hash(expected_ruleset_sha256, required=True):
             return None
     except (TypeError, ValueError):
         return None
@@ -371,9 +376,7 @@ def serialize_skill_publish_result(
     limit = tool_result_limit("submit_skill_to_hub")
     while True:
         envelope["omitted_count"] = total_findings - len(envelope["findings"])
-        encoded = json.dumps(
-            envelope, ensure_ascii=False, sort_keys=True, separators=(",", ":")
-        )
+        encoded = json.dumps(envelope, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
         if len(encoded) < limit:
             parsed = _loads_unique(encoded)
             if not isinstance(parsed, dict):
@@ -402,9 +405,7 @@ def extract_skill_publish_result_metadata(result: Any) -> Dict[str, Any]:
         completed_stage = _bounded_text(payload.get("completed_stage"), 64)
         if completed_stage and completed_stage not in _STAGE_INDEX:
             return {}
-        effects = _normalize_effects(
-            payload.get("completed_effects"), completed_stage=completed_stage
-        )
+        effects = _normalize_effects(payload.get("completed_effects"), completed_stage=completed_stage)
         attempt = {
             "ok": payload["ok"],
             "status": status,
@@ -414,15 +415,9 @@ def extract_skill_publish_result_metadata(result: Any) -> Dict[str, Any]:
             "ruleset_sha256": str(scanner.get("ruleset_sha256") or ""),
             "completed_stage": completed_stage,
             "completed_effects": effects,
-            "omitted_count": _nonnegative_int(
-                payload.get("omitted_count", 0), field="omitted_count"
-            ),
-            "blocker_count": _nonnegative_int(
-                payload.get("blocker_count", 0), field="blocker_count"
-            ),
-            "warning_count": _nonnegative_int(
-                payload.get("warning_count", 0), field="warning_count"
-            ),
+            "omitted_count": _nonnegative_int(payload.get("omitted_count", 0), field="omitted_count"),
+            "blocker_count": _nonnegative_int(payload.get("blocker_count", 0), field="blocker_count"),
+            "warning_count": _nonnegative_int(payload.get("warning_count", 0), field="warning_count"),
             "audited_false_positive_count": _nonnegative_int(
                 payload.get("audited_false_positive_count", 0),
                 field="audited_false_positive_count",
@@ -432,8 +427,7 @@ def extract_skill_publish_result_metadata(result: Any) -> Dict[str, Any]:
         receipt = payload.get("receipt")
         valid_receipt = validate_skill_publish_receipt(
             receipt,
-            expected_repository=(receipt or {}).get("repository", "")
-            if isinstance(receipt, Mapping) else "",
+            expected_repository=(receipt or {}).get("repository", "") if isinstance(receipt, Mapping) else "",
             expected_skill=skill,
             expected_snapshot_hash=snapshot_hash,
             expected_ruleset_sha256=str(scanner.get("ruleset_sha256") or ""),
@@ -481,10 +475,7 @@ def apply_skill_publish_receipt_veto(
         return loop_outcome
     axes = loop_outcome.get("outcome_axes") if isinstance(loop_outcome, dict) else None
     objective = axes.get("objective") if isinstance(axes, dict) else None
-    if (
-        not isinstance(objective, dict)
-        or str(objective.get("status") or "") not in _SUCCESS_OBJECTIVE_STATUSES
-    ):
+    if not isinstance(objective, dict) or str(objective.get("status") or "") not in _SUCCESS_OBJECTIVE_STATUSES:
         return loop_outcome
 
     target = skill_publish_target_from_task(task)
@@ -507,9 +498,11 @@ def apply_skill_publish_receipt_veto(
                     expected_repository=target["repository"],
                     expected_skill=target["skill"],
                     expected_snapshot_hash=str((attempt or {}).get("snapshot_hash") or "")
-                    if isinstance(attempt, Mapping) else "",
+                    if isinstance(attempt, Mapping)
+                    else "",
                     expected_ruleset_sha256=str((attempt or {}).get("ruleset_sha256") or "")
-                    if isinstance(attempt, Mapping) else "",
+                    if isinstance(attempt, Mapping)
+                    else "",
                 )
                 if (
                     receipt is not None
@@ -533,18 +526,20 @@ def apply_skill_publish_receipt_veto(
         reason = "skill_publish_receipt_absent"
     else:
         reason = "skill_publish_not_attempted"
-    objective.update({
-        "status": "fail",
-        # Keep the existing objective-authority source vocabulary: the receipt is
-        # a veto over an acceptance result, not a second positive oracle.  The
-        # normalizer intentionally rejects every positive/negative objective whose
-        # source is not task_acceptance_review, so the host veto is carried as a
-        # typed negative fact alongside that source rather than minting authority.
-        "source": "task_acceptance_review",
-        "outcome_tier": "blocked_with_evidence",
-        "reason": reason,
-        "receipt_veto": {"status": "failed", "reason": reason},
-    })
+    objective.update(
+        {
+            "status": "fail",
+            # Keep the existing objective-authority source vocabulary: the receipt is
+            # a veto over an acceptance result, not a second positive oracle.  The
+            # normalizer intentionally rejects every positive/negative objective whose
+            # source is not task_acceptance_review, so the host veto is carried as a
+            # typed negative fact alongside that source rather than minting authority.
+            "source": "task_acceptance_review",
+            "outcome_tier": "blocked_with_evidence",
+            "reason": reason,
+            "receipt_veto": {"status": "failed", "reason": reason},
+        }
+    )
     return loop_outcome
 
 

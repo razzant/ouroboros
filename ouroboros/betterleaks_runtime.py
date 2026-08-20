@@ -38,12 +38,8 @@ from ouroboros import platform_layer
 
 BETTERLEAKS_VERSION = "1.8.1"
 BETTERLEAKS_RELEASE_COMMIT = "5eab48332cc48565864514e3bc6de89df091a7c4"
-BETTERLEAKS_LICENSE_SHA256 = (
-    "caea114592a8f8e5e05a116d63a99e0ccd79a3ff74f4ddf270bcf4c929eb021e"
-)
-BETTERLEAKS_RELEASE_BASE_URL = (
-    "https://github.com/betterleaks/betterleaks/releases/download/v1.8.1"
-)
+BETTERLEAKS_LICENSE_SHA256 = "caea114592a8f8e5e05a116d63a99e0ccd79a3ff74f4ddf270bcf4c929eb021e"
+BETTERLEAKS_RELEASE_BASE_URL = "https://github.com/betterleaks/betterleaks/releases/download/v1.8.1"
 BETTERLEAKS_INSTALL_COMMAND = "python -m ouroboros.betterleaks_runtime install"
 
 STANDALONE_DIRNAME = "betterleaks-standalone"
@@ -184,6 +180,7 @@ class BetterleaksRuntimeState:
     platform_key: str
     version: str = BETTERLEAKS_VERSION
     binary_path: str = ""
+    binary_sha256: str = ""
     license_path: str = ""
     source: str = ""
     reason_code: str = ""
@@ -198,9 +195,7 @@ _VALIDATION_CACHE: dict[tuple[object, ...], BetterleaksRuntimeState] = {}
 _VALIDATION_CACHE_LOCK = threading.Lock()
 
 
-def platform_key(
-    *, system: Optional[str] = None, machine: Optional[str] = None
-) -> str:
+def platform_key(*, system: Optional[str] = None, machine: Optional[str] = None) -> str:
     """Return the six-platform release key for this host, or ``""``."""
     if system is None:
         if platform_layer.IS_WINDOWS:
@@ -289,9 +284,7 @@ def _sha256_file(path: pathlib.Path) -> str:
             for chunk in iter(lambda: handle.read(1024 * 1024), b""):
                 digest.update(chunk)
     except OSError as exc:
-        raise BetterleaksRuntimeError(
-            "runtime_unreadable", "Betterleaks runtime file could not be read"
-        ) from exc
+        raise BetterleaksRuntimeError("runtime_unreadable", "Betterleaks runtime file could not be read") from exc
     return digest.hexdigest()
 
 
@@ -319,13 +312,9 @@ def _probe_version(binary: pathlib.Path) -> str:
             **platform_layer.subprocess_hidden_kwargs(),
         )
     except (OSError, UnicodeError, subprocess.SubprocessError) as exc:
-        raise BetterleaksRuntimeError(
-            "runtime_probe_failed", "Betterleaks version probe failed"
-        ) from exc
+        raise BetterleaksRuntimeError("runtime_probe_failed", "Betterleaks version probe failed") from exc
     if completed.returncode != 0:
-        raise BetterleaksRuntimeError(
-            "runtime_probe_failed", "Betterleaks version probe returned a nonzero exit"
-        )
+        raise BetterleaksRuntimeError("runtime_probe_failed", "Betterleaks version probe returned a nonzero exit")
     return str(completed.stdout or "").strip()
 
 
@@ -333,13 +322,9 @@ def _read_metadata(path: pathlib.Path) -> dict[str, object]:
     try:
         raw = json.loads(path.read_text(encoding="utf-8"))
     except (OSError, UnicodeError, ValueError) as exc:
-        raise BetterleaksRuntimeError(
-            "runtime_metadata_invalid", "Betterleaks install metadata is invalid"
-        ) from exc
+        raise BetterleaksRuntimeError("runtime_metadata_invalid", "Betterleaks install metadata is invalid") from exc
     if not isinstance(raw, dict):
-        raise BetterleaksRuntimeError(
-            "runtime_metadata_invalid", "Betterleaks install metadata is not an object"
-        )
+        raise BetterleaksRuntimeError("runtime_metadata_invalid", "Betterleaks install metadata is not an object")
     return raw
 
 
@@ -357,17 +342,11 @@ def _validate_runtime_root(
     metadata_path = root / INSTALL_METADATA_FILENAME
     try:
         if root.is_symlink():
-            raise BetterleaksRuntimeError(
-                "runtime_layout_invalid", "Betterleaks runtime root must not be a symlink"
-            )
+            raise BetterleaksRuntimeError("runtime_layout_invalid", "Betterleaks runtime root must not be a symlink")
         if any(path.is_symlink() for path in (binary, license_path, metadata_path)):
-            raise BetterleaksRuntimeError(
-                "runtime_layout_invalid", "Betterleaks runtime files must not be symlinks"
-            )
+            raise BetterleaksRuntimeError("runtime_layout_invalid", "Betterleaks runtime files must not be symlinks")
         if not binary.is_file() or not license_path.is_file() or not metadata_path.is_file():
-            raise BetterleaksRuntimeError(
-                "runtime_layout_invalid", "Betterleaks runtime files are incomplete"
-            )
+            raise BetterleaksRuntimeError("runtime_layout_invalid", "Betterleaks runtime files are incomplete")
         fingerprint = (
             str(root.resolve()),
             source,
@@ -404,50 +383,38 @@ def _validate_runtime_root(
         "license_sha256": artifact.license_sha256,
     }
     if any(metadata.get(key) != value for key, value in expected.items()):
-        raise BetterleaksRuntimeError(
-            "runtime_metadata_invalid", "Betterleaks install metadata does not match the pin"
-        )
+        raise BetterleaksRuntimeError("runtime_metadata_invalid", "Betterleaks install metadata does not match the pin")
     if metadata.get("install_kind") not in {"managed", "build"}:
-        raise BetterleaksRuntimeError(
-            "runtime_metadata_invalid", "Betterleaks install kind is invalid"
-        )
+        raise BetterleaksRuntimeError("runtime_metadata_invalid", "Betterleaks install kind is invalid")
     if source == "managed" and metadata.get("install_kind") != "managed":
         raise BetterleaksRuntimeError(
             "runtime_metadata_invalid", "managed Betterleaks metadata has the wrong install kind"
         )
     installed_binary_sha = str(metadata.get("binary_sha256") or "")
     if not _SHA256_RE.fullmatch(installed_binary_sha):
-        raise BetterleaksRuntimeError(
-            "runtime_metadata_invalid", "Betterleaks binary digest metadata is invalid"
-        )
+        raise BetterleaksRuntimeError("runtime_metadata_invalid", "Betterleaks binary digest metadata is invalid")
     if _sha256_file(license_path) != artifact.license_sha256:
-        raise BetterleaksRuntimeError(
-            "runtime_license_mismatch", "Betterleaks license digest does not match the pin"
-        )
+        raise BetterleaksRuntimeError("runtime_license_mismatch", "Betterleaks license digest does not match the pin")
+    actual_binary_sha = _sha256_file(binary)
 
     # Nested codesign legitimately changes the staged Mach-O bytes.  A packaged
     # macOS runtime is instead bound by pinned build acquisition, this metadata,
     # exact version/license/ruleset probes, and the final app's codesign seal.
     # Managed installs and every non-macOS package still verify installed bytes.
-    skip_signed_macos_digest = (
-        source == "bundled"
-        and platform_layer.IS_MACOS
-        and allow_signed_macos_digest
-    )
-    if not skip_signed_macos_digest and _sha256_file(binary) != installed_binary_sha:
+    skip_signed_macos_digest = source == "bundled" and platform_layer.IS_MACOS and allow_signed_macos_digest
+    if not skip_signed_macos_digest and actual_binary_sha != installed_binary_sha:
         raise BetterleaksRuntimeError(
             "runtime_binary_mismatch", "Betterleaks binary digest does not match its install metadata"
         )
     observed_version = _probe_version(binary)
     if observed_version != artifact.version:
-        raise BetterleaksRuntimeError(
-            "runtime_version_mismatch", "Betterleaks binary version does not match the pin"
-        )
+        raise BetterleaksRuntimeError("runtime_version_mismatch", "Betterleaks binary version does not match the pin")
 
     state = BetterleaksRuntimeState(
         status="ready",
         platform_key=artifact.platform_key,
         binary_path=str(binary),
+        binary_sha256=actual_binary_sha,
         license_path=str(license_path),
         source=source,
     )
@@ -501,9 +468,7 @@ def resolve_betterleaks(
                 # Explicit roots are extracted/installed package evidence. The
                 # default source-repo base is only pre-sign build staging and
                 # must retain the ordinary installed-byte digest check.
-                allow_signed_macos_digest=(
-                    bundle_bases is not None or not is_source_staging
-                ),
+                allow_signed_macos_digest=(bundle_bases is not None or not is_source_staging),
             )
         except BetterleaksRuntimeError as exc:
             corrupt_code = corrupt_code or exc.code
@@ -532,24 +497,15 @@ def _safe_archive_member(value: str) -> bool:
     if not text or "\\" in text or "\x00" in text:
         return False
     path = pathlib.PurePosixPath(text)
-    return (
-        not path.is_absolute()
-        and ".." not in path.parts
-        and ":" not in path.parts[0]
-        and path.as_posix() == text
-    )
+    return not path.is_absolute() and ".." not in path.parts and ":" not in path.parts[0] and path.as_posix() == text
 
 
-def verify_archive(
-    path: "str | pathlib.Path", artifact: Optional[BetterleaksArtifact] = None
-) -> pathlib.Path:
+def verify_archive(path: "str | pathlib.Path", artifact: Optional[BetterleaksArtifact] = None) -> pathlib.Path:
     selected = artifact or current_artifact()
     selected.validate()
     archive = pathlib.Path(path)
     if not archive.is_file():
-        raise BetterleaksRuntimeError(
-            "archive_missing", "the pinned Betterleaks archive is unavailable"
-        )
+        raise BetterleaksRuntimeError("archive_missing", "the pinned Betterleaks archive is unavailable")
     if _sha256_file(archive) != selected.archive_sha256:
         raise BetterleaksRuntimeError(
             "archive_checksum_mismatch", "Betterleaks archive checksum does not match the pin"
@@ -561,13 +517,9 @@ def _validate_archive_names(names: Sequence[str], artifact: BetterleaksArtifact)
     seen: set[str] = set()
     for name in names:
         if not _safe_archive_member(name):
-            raise BetterleaksRuntimeError(
-                "archive_unsafe", "Betterleaks archive contains an unsafe member path"
-            )
+            raise BetterleaksRuntimeError("archive_unsafe", "Betterleaks archive contains an unsafe member path")
         if name in seen:
-            raise BetterleaksRuntimeError(
-                "archive_duplicate", "Betterleaks archive contains a duplicate member"
-            )
+            raise BetterleaksRuntimeError("archive_duplicate", "Betterleaks archive contains a duplicate member")
         seen.add(name)
     if seen != set(artifact.expected_members):
         raise BetterleaksRuntimeError(
@@ -609,9 +561,7 @@ def _extract_archive(
                     member = bundle.getmember(member_name)
                     source = bundle.extractfile(member)
                     if source is None:
-                        raise BetterleaksRuntimeError(
-                            "archive_invalid", "Betterleaks archive member could not be read"
-                        )
+                        raise BetterleaksRuntimeError("archive_invalid", "Betterleaks archive member could not be read")
                     with source:
                         _copy_member(source, target)
         elif artifact.archive_kind == "zip":
@@ -621,10 +571,15 @@ def _extract_archive(
                 for info in infos:
                     mode = int(info.external_attr >> 16)
                     member_type = stat.S_IFMT(mode)
-                    if info.is_dir() or member_type == stat.S_IFLNK or member_type not in {
-                        0,
-                        stat.S_IFREG,
-                    }:
+                    if (
+                        info.is_dir()
+                        or member_type == stat.S_IFLNK
+                        or member_type
+                        not in {
+                            0,
+                            stat.S_IFREG,
+                        }
+                    ):
                         raise BetterleaksRuntimeError(
                             "archive_unsafe",
                             "Betterleaks archive contains a link or non-regular member",
@@ -636,15 +591,11 @@ def _extract_archive(
                     with bundle.open(member_name) as source:
                         _copy_member(source, target)
         else:
-            raise BetterleaksRuntimeError(
-                "archive_kind_unsupported", "Betterleaks archive kind is unsupported"
-            )
+            raise BetterleaksRuntimeError("archive_kind_unsupported", "Betterleaks archive kind is unsupported")
     except BetterleaksRuntimeError:
         raise
     except (KeyError, OSError, RuntimeError, tarfile.TarError, zipfile.BadZipFile) as exc:
-        raise BetterleaksRuntimeError(
-            "archive_invalid", "Betterleaks archive could not be extracted"
-        ) from exc
+        raise BetterleaksRuntimeError("archive_invalid", "Betterleaks archive could not be extracted") from exc
 
 
 def _download_archive(artifact: BetterleaksArtifact, target: pathlib.Path) -> pathlib.Path:
@@ -674,9 +625,7 @@ def _download_archive(artifact: BetterleaksArtifact, target: pathlib.Path) -> pa
     except BetterleaksRuntimeError:
         raise
     except Exception as exc:
-        raise BetterleaksRuntimeError(
-            "archive_download_failed", "Betterleaks archive download failed"
-        ) from exc
+        raise BetterleaksRuntimeError("archive_download_failed", "Betterleaks archive download failed") from exc
     finally:
         try:
             temporary.unlink(missing_ok=True)
@@ -761,9 +710,7 @@ def install_betterleaks(
     selected.validate()
     install_kind = "build" if build_output is not None else "managed"
     target = (
-        pathlib.Path(build_output)
-        if build_output is not None
-        else managed_runtime_dir(selected, data_root=data_root)
+        pathlib.Path(build_output) if build_output is not None else managed_runtime_dir(selected, data_root=data_root)
     )
     validation_source = "bundled" if install_kind == "build" else "managed"
 
@@ -785,9 +732,7 @@ def install_betterleaks(
         archive = _download_archive(selected, cache)
 
     target.parent.mkdir(parents=True, exist_ok=True)
-    staging = pathlib.Path(
-        tempfile.mkdtemp(prefix=f".{target.name}.tmp.", dir=str(target.parent))
-    )
+    staging = pathlib.Path(tempfile.mkdtemp(prefix=f".{target.name}.tmp.", dir=str(target.parent)))
     try:
         _extract_archive(archive, staging, selected)
         binary = _runtime_binary(staging, selected)
@@ -817,17 +762,13 @@ def install_betterleaks(
         _promote_directory(
             staging,
             target,
-            validate=lambda root: _validate_runtime_root(
-                root, selected, source=validation_source
-            ),
+            validate=lambda root: _validate_runtime_root(root, selected, source=validation_source),
         )
         return _validate_runtime_root(target, selected, source=validation_source)
     except BetterleaksRuntimeError:
         raise
     except Exception as exc:
-        raise BetterleaksRuntimeError(
-            "runtime_install_failed", "Betterleaks installation failed"
-        ) from exc
+        raise BetterleaksRuntimeError("runtime_install_failed", "Betterleaks installation failed") from exc
     finally:
         if _path_exists(staging):
             _remove_path(staging)

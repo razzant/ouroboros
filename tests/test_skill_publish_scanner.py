@@ -13,6 +13,7 @@ from dataclasses import dataclass
 
 import pytest
 
+from ouroboros import betterleaks_runtime
 import ouroboros.skill_publish_scanner as scanner
 from ouroboros.platform_layer import IS_WINDOWS
 from ouroboros.skill_publish_scanner import (
@@ -391,8 +392,25 @@ def test_missing_and_corrupt_resolved_executable_are_typed(tmp_path):
     assert missing.reason_code == "scanner_missing"
     assert corrupt.reason_code == "scanner_corrupt"
     assert corrupt_without_path.reason_code == "scanner_corrupt"
-    assert missing.repair_hint
-    assert corrupt.repair_hint
+    assert betterleaks_runtime.BETTERLEAKS_INSTALL_COMMAND in missing.repair_hint
+    assert betterleaks_runtime.BETTERLEAKS_INSTALL_COMMAND in corrupt.repair_hint
+
+
+@pytest.mark.parametrize(
+    "reason_code",
+    [
+        "scanner_missing",
+        "scanner_corrupt",
+        "scanner_timeout",
+        "scanner_report_invalid",
+        "scanner_ruleset_invalid",
+    ],
+)
+def test_runtime_repair_hints_use_the_one_exact_installer_command(reason_code):
+    result = scanner._failure(reason_code)
+
+    assert betterleaks_runtime.BETTERLEAKS_INSTALL_COMMAND in result.repair_hint
+    assert scanner.BETTERLEAKS_VERSION == betterleaks_runtime.BETTERLEAKS_VERSION
 
 
 def test_private_projection_and_raw_reports_are_removed_on_return(tmp_path, monkeypatch):

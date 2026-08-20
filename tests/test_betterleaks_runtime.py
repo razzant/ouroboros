@@ -75,9 +75,7 @@ def _zip(
         for name, payload, kind in rows:
             info = zipfile.ZipInfo(name)
             info.create_system = 3
-            info.external_attr = (
-                (stat.S_IFLNK | 0o777) if kind == "symlink" else (stat.S_IFREG | 0o755)
-            ) << 16
+            info.external_attr = ((stat.S_IFLNK | 0o777) if kind == "symlink" else (stat.S_IFREG | 0o755)) << 16
             bundle.writestr(info, payload)
     return path
 
@@ -103,6 +101,7 @@ def _install_fixture(
         artifact=artifact,
     )
     assert state.ready
+    assert state.binary_sha256 == _sha(_BINARY)
     return archive, artifact, target
 
 
@@ -132,8 +131,7 @@ def test_pin_matrix_is_immutable_complete_and_bound_to_official_v181_release():
         assert artifact.version == "1.8.1"
         assert artifact.release_commit == "5eab48332cc48565864514e3bc6de89df091a7c4"
         assert artifact.archive_url == (
-            "https://github.com/betterleaks/betterleaks/releases/download/v1.8.1/"
-            + artifact.archive_name
+            "https://github.com/betterleaks/betterleaks/releases/download/v1.8.1/" + artifact.archive_name
         )
         assert artifact.archive_sha256 == expected_checksums[key]
         assert artifact.license_sha256 == runtime.BETTERLEAKS_LICENSE_SHA256
@@ -161,9 +159,7 @@ def test_platform_key_maps_only_the_six_supported_targets(system, machine, expec
 
 
 @pytest.mark.parametrize("kind", ["tar.gz", "zip"])
-def test_installer_extracts_only_binary_license_and_writes_bound_metadata(
-    tmp_path, monkeypatch, kind
-):
+def test_installer_extracts_only_binary_license_and_writes_bound_metadata(tmp_path, monkeypatch, kind):
     _, artifact, target = _install_fixture(tmp_path, monkeypatch, kind=kind)
 
     binary_name = "betterleaks.exe" if kind == "zip" else "betterleaks"
@@ -196,9 +192,7 @@ def test_existing_valid_target_wins_without_reading_a_new_archive(tmp_path, monk
     assert pathlib.Path(state.binary_path).read_bytes() == _BINARY
 
 
-def test_managed_resolver_uses_exact_versioned_location_and_never_path(
-    tmp_path, monkeypatch
-):
+def test_managed_resolver_uses_exact_versioned_location_and_never_path(tmp_path, monkeypatch):
     archive = _tar(tmp_path / "fixture.tar.gz")
     artifact = _artifact(archive, kind="tar.gz", binary_member="betterleaks")
     monkeypatch.setattr(runtime, "current_artifact", lambda: artifact)
@@ -213,24 +207,20 @@ def test_managed_resolver_uses_exact_versioned_location_and_never_path(
         lambda *_args, **_kwargs: pytest.fail("read-only resolution must never download"),
     )
 
-    missing = runtime.resolve_betterleaks(
-        data_root=tmp_path / "data", bundle_bases=[]
-    )
+    missing = runtime.resolve_betterleaks(data_root=tmp_path / "data", bundle_bases=[])
     assert missing.status == "missing"
+    assert missing.binary_sha256 == ""
 
     installed = runtime.install_betterleaks(
         data_root=tmp_path / "data",
         archive_path=archive,
         artifact=artifact,
     )
-    resolved = runtime.resolve_betterleaks(
-        data_root=tmp_path / "data", bundle_bases=[]
-    )
+    resolved = runtime.resolve_betterleaks(data_root=tmp_path / "data", bundle_bases=[])
     assert resolved.ready and resolved.source == "managed"
+    assert resolved.binary_sha256 == _sha(_BINARY)
     assert pathlib.Path(resolved.binary_path) == pathlib.Path(installed.binary_path)
-    assert pathlib.Path(resolved.binary_path).is_relative_to(
-        tmp_path / "data" / "state" / "betterleaks" / "v1.8.1"
-    )
+    assert pathlib.Path(resolved.binary_path).is_relative_to(tmp_path / "data" / "state" / "betterleaks" / "v1.8.1")
     assert pathlib.Path(resolved.binary_path) != random_path_binary
 
 
@@ -245,13 +235,9 @@ def test_bundled_runtime_precedes_managed_runtime(tmp_path, monkeypatch):
         archive_path=archive,
         artifact=artifact,
     )
-    runtime.install_betterleaks(
-        data_root=tmp_path / "data", archive_path=archive, artifact=artifact
-    )
+    runtime.install_betterleaks(data_root=tmp_path / "data", archive_path=archive, artifact=artifact)
 
-    resolved = runtime.resolve_betterleaks(
-        data_root=tmp_path / "data", bundle_bases=[bundle_root]
-    )
+    resolved = runtime.resolve_betterleaks(data_root=tmp_path / "data", bundle_bases=[bundle_root])
 
     assert resolved.ready and resolved.source == "bundled"
     assert resolved.binary_path == bundled.binary_path
@@ -262,22 +248,17 @@ def test_managed_resolver_rejects_binary_digest_drift(tmp_path, monkeypatch):
     artifact = _artifact(archive, kind="tar.gz", binary_member="betterleaks")
     monkeypatch.setattr(runtime, "current_artifact", lambda: artifact)
     monkeypatch.setattr(runtime, "_probe_version", lambda _binary: runtime.BETTERLEAKS_VERSION)
-    installed = runtime.install_betterleaks(
-        data_root=tmp_path / "data", archive_path=archive, artifact=artifact
-    )
+    installed = runtime.install_betterleaks(data_root=tmp_path / "data", archive_path=archive, artifact=artifact)
     pathlib.Path(installed.binary_path).write_bytes(b"changed executable\n")
 
-    resolved = runtime.resolve_betterleaks(
-        data_root=tmp_path / "data", bundle_bases=[]
-    )
+    resolved = runtime.resolve_betterleaks(data_root=tmp_path / "data", bundle_bases=[])
 
     assert resolved.status == "corrupt"
     assert resolved.reason_code == "runtime_binary_mismatch"
+    assert resolved.binary_sha256 == ""
 
 
-def test_packaged_macos_accepts_post_staging_codesign_digest_change(
-    tmp_path, monkeypatch
-):
+def test_packaged_macos_accepts_post_staging_codesign_digest_change(tmp_path, monkeypatch):
     _, artifact, target = _install_fixture(tmp_path, monkeypatch)
     pathlib.Path(target / "bin" / "betterleaks").write_bytes(b"signed Mach-O bytes\n")
     monkeypatch.setattr(runtime.platform_layer, "IS_MACOS", True)
@@ -294,15 +275,14 @@ def test_packaged_macos_accepts_post_staging_codesign_digest_change(
     )
 
     assert state.ready
+    assert state.binary_sha256 == _sha(b"signed Mach-O bytes\n")
 
 
 @pytest.mark.parametrize(
     "bad_name",
     ["../escape", "/absolute", "C:/drive", "folder\\member"],
 )
-def test_tar_extraction_rejects_traversal_and_absolute_members(
-    tmp_path, bad_name
-):
+def test_tar_extraction_rejects_traversal_and_absolute_members(tmp_path, bad_name):
     archive = _tar(
         tmp_path / "unsafe.tar.gz",
         entries=[
@@ -383,9 +363,7 @@ def test_archive_checksum_is_verified_before_extraction(tmp_path):
     assert excinfo.value.code == "archive_checksum_mismatch"
 
 
-def test_download_path_reuses_a_verified_durable_cache_without_network(
-    tmp_path, monkeypatch
-):
+def test_download_path_reuses_a_verified_durable_cache_without_network(tmp_path, monkeypatch):
     archive = _tar(tmp_path / "fixture.tar.gz")
     artifact = _artifact(archive, kind="tar.gz", binary_member="betterleaks")
     monkeypatch.setattr(
@@ -397,18 +375,14 @@ def test_download_path_reuses_a_verified_durable_cache_without_network(
     assert runtime._download_archive(artifact, archive) == archive
 
 
-def test_installer_rejects_license_and_version_mismatch_without_replacing_target(
-    tmp_path, monkeypatch
-):
+def test_installer_rejects_license_and_version_mismatch_without_replacing_target(tmp_path, monkeypatch):
     target = tmp_path / runtime.STANDALONE_DIRNAME
     target.mkdir()
     sentinel = target / "old-tree"
     sentinel.write_bytes(b"keep")
     archive = _tar(tmp_path / "fixture.tar.gz")
     artifact = _artifact(archive, kind="tar.gz", binary_member="betterleaks")
-    wrong_license = runtime.BetterleaksArtifact(
-        **{**artifact.__dict__, "license_sha256": "0" * 64}
-    )
+    wrong_license = runtime.BetterleaksArtifact(**{**artifact.__dict__, "license_sha256": "0" * 64})
     monkeypatch.setattr(runtime, "_probe_version", lambda _binary: runtime.BETTERLEAKS_VERSION)
 
     with pytest.raises(runtime.BetterleaksRuntimeError) as license_error:
@@ -473,6 +447,4 @@ def test_module_cli_exposes_only_explicit_install_command():
     )
     assert args.command == "install"
     assert args.build_output == pathlib.Path("betterleaks-standalone")
-    assert runtime.BETTERLEAKS_INSTALL_COMMAND == (
-        "python -m ouroboros.betterleaks_runtime install"
-    )
+    assert runtime.BETTERLEAKS_INSTALL_COMMAND == ("python -m ouroboros.betterleaks_runtime install")

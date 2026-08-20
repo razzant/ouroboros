@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import dataclasses
 import json
 import pathlib
 import time
@@ -20,6 +21,7 @@ from ouroboros.skill_publish_result import (
     serialize_skill_publish_result,
     validate_skill_publish_receipt,
 )
+from ouroboros.skill_publish_scanner import SecretFinding
 from ouroboros.tool_capabilities import FOREGROUND_MUTATIVE_TOOLS, tool_result_limit
 
 SNAPSHOT_HASH = "a" * 64
@@ -122,11 +124,14 @@ def test_bounded_result_is_deterministic_parseable_and_exact_about_omissions():
         {
             "path": f"payload/{index:04d}-" + "x" * 500,
             "line": index + 1,
-            "column": 2,
             "detector": "generic-password-" + "d" * 200,
             "confidence": "medium",
-            "classification": "warning",
             "reason": "safe reason " + "r" * 500,
+            "verification": "not_attempted",
+            "disposition": "warning",
+            "column": 2,
+            "rule_id": "obsolete-rule-id",
+            "classification": "obsolete-warning",
             "match": candidate,
             "raw": {"secret": candidate},
         }
@@ -162,9 +167,7 @@ def test_bounded_result_is_deterministic_parseable_and_exact_about_omissions():
     }
 
     encoded = serialize_skill_publish_result(**kwargs)
-    reversed_encoded = serialize_skill_publish_result(
-        **{**kwargs, "findings": list(reversed(findings))}
-    )
+    reversed_encoded = serialize_skill_publish_result(**{**kwargs, "findings": list(reversed(findings))})
     assert encoded == reversed_encoded
     assert len(encoded) < tool_result_limit("submit_skill_to_hub")
     parsed = json.loads(encoded)
@@ -172,16 +175,53 @@ def test_bounded_result_is_deterministic_parseable_and_exact_about_omissions():
     assert parsed["omitted_count"] > 0
     assert candidate not in encoded
     assert all(
-        set(row) <= {
-            "path", "line", "column", "detector", "rule_id",
-            "confidence", "classification", "reason",
+        set(row)
+        == {
+            "path",
+            "line",
+            "detector",
+            "confidence",
+            "reason",
+            "verification",
+            "disposition",
         }
         for row in parsed["findings"]
     )
     assert [row["stage"] for row in parsed["completed_effects"]] == [
-        "branch_created", "commit_created",
+        "branch_created",
+        "commit_created",
     ]
     assert len(parsed["repair_hint"]) == 600
+
+
+def test_result_finding_vocabulary_matches_scanner_and_preserves_audited_high():
+    finding = SecretFinding(
+        path="fixtures/provider.txt",
+        line=7,
+        detector="provider-key",
+        confidence="high",
+        reason="Inline allowance was surfaced by the audit pass.",
+        verification="not_attempted",
+        disposition="audited_false_positive",
+    )
+
+    encoded = serialize_skill_publish_result(
+        ok=False,
+        status="scanner_findings",
+        reason_code="scanner_findings",
+        skill="demo",
+        findings=[dataclasses.asdict(finding)],
+        blocker_count=0,
+        audited_false_positive_count=1,
+    )
+
+    row = json.loads(encoded)["findings"][0]
+    assert set(row) == set(dataclasses.asdict(finding))
+    assert row["confidence"] == "high"
+    assert row["disposition"] == "audited_false_positive"
+    assert "column" not in row
+    assert "rule_id" not in row
+    assert "classification" not in row
 
 
 def test_success_has_one_nested_authority_and_no_top_level_pr_aliases():
@@ -211,25 +251,34 @@ def test_success_has_one_nested_authority_and_no_top_level_pr_aliases():
 )
 def test_receipt_rejects_wrong_host_repo_path_number_or_empty_text(changes, expected_repository):
     receipt = {**_receipt(), **changes}
-    assert validate_skill_publish_receipt(
-        receipt,
-        expected_repository=expected_repository,
-        expected_skill="demo",
-    ) is None
+    assert (
+        validate_skill_publish_receipt(
+            receipt,
+            expected_repository=expected_repository,
+            expected_skill="demo",
+        )
+        is None
+    )
 
 
 def test_receipt_validation_is_case_insensitive_only_for_repository():
     receipt = _receipt(repository="OuroborosHub/OuroborosHub")
-    assert validate_skill_publish_receipt(
-        receipt,
-        expected_repository="ouroboroshub/ouroboroshub",
-        expected_skill="demo",
-    ) is not None
-    assert validate_skill_publish_receipt(
-        receipt,
-        expected_repository=REPOSITORY,
-        expected_skill="DEMO",
-    ) is None
+    assert (
+        validate_skill_publish_receipt(
+            receipt,
+            expected_repository="ouroboroshub/ouroboroshub",
+            expected_skill="demo",
+        )
+        is not None
+    )
+    assert (
+        validate_skill_publish_receipt(
+            receipt,
+            expected_repository=REPOSITORY,
+            expected_skill="DEMO",
+        )
+        is None
+    )
 
 
 def test_canonical_unicode_skill_identifier_is_preserved_and_matches_exactly():
@@ -294,16 +343,18 @@ def test_typed_failed_publish_is_delivered_to_the_next_llm_turn():
     messages: list = []
     trace = {"tool_calls": []}
     errors = process_tool_results(
-        [{
-            "tool_call_id": "publish-1",
-            "fn_name": "submit_skill_to_hub",
-            "result": result,
-            "is_error": is_error,
-            "tool_args": {"skill": "demo"},
-            "args_for_log": {"skill": "demo"},
-            "is_code_tool": False,
-            "result_meta": result_meta,
-        }],
+        [
+            {
+                "tool_call_id": "publish-1",
+                "fn_name": "submit_skill_to_hub",
+                "result": result,
+                "is_error": is_error,
+                "tool_args": {"skill": "demo"},
+                "args_for_log": {"skill": "demo"},
+                "is_code_tool": False,
+                "result_meta": result_meta,
+            }
+        ],
         messages,
         trace,
         emit_progress=lambda _message: None,
@@ -326,12 +377,16 @@ def test_unrelated_json_ok_false_keeps_current_nonblocking_execution_semantics(t
     outcome = derive_loop_outcome(
         "Diagnostic reported.",
         {},
-        {"tool_calls": [{
-            "tool": tool,
-            "is_error": True,
-            "result": result,
-            **metadata,
-        }]},
+        {
+            "tool_calls": [
+                {
+                    "tool": tool,
+                    "is_error": True,
+                    "result": result,
+                    **metadata,
+                }
+            ]
+        },
     )
     assert outcome["outcome_axes"]["execution"]["status"] == "ok"
     assert outcome["outcome_axes"]["objective"]["status"] == "not_evaluated"
@@ -382,11 +437,15 @@ def test_receipt_without_its_validated_attempt_metadata_cannot_satisfy_veto():
     apply_skill_publish_receipt_veto(
         outcome,
         _task(),
-        {"tool_calls": [{
-            "tool": "submit_skill_to_hub",
-            "is_error": False,
-            "skill_publish_receipt": _receipt(),
-        }]},
+        {
+            "tool_calls": [
+                {
+                    "tool": "submit_skill_to_hub",
+                    "is_error": False,
+                    "skill_publish_receipt": _receipt(),
+                }
+            ]
+        },
     )
     assert outcome["outcome_axes"]["objective"]["status"] == "fail"
     assert outcome["outcome_axes"]["objective"]["reason"] == "skill_publish_receipt_mismatch"
@@ -455,7 +514,8 @@ def test_foreground_publish_timeout_waits_until_fake_mutator_terminalizes(tmp_pa
 
 
 def test_api_preserves_literal_type_without_workspace_and_queue_gives_priority_zero(
-    tmp_path, monkeypatch,
+    tmp_path,
+    monkeypatch,
 ):
     import ouroboros.gateway.tasks as gateway_tasks
     import supervisor.queue as queue
@@ -499,17 +559,22 @@ def test_api_preserves_literal_type_without_workspace_and_queue_gives_priority_z
     assert captured["type"] == "skill_publish"
     assert captured["workspace_root"] == ""
     assert captured["task_contract"]["task_type"] == "skill_publish"
-    assert captured["metadata"][SKILL_PUBLISH_TARGET_METADATA_KEY] == payload["metadata"][SKILL_PUBLISH_TARGET_METADATA_KEY]
+    assert (
+        captured["metadata"][SKILL_PUBLISH_TARGET_METADATA_KEY]
+        == payload["metadata"][SKILL_PUBLISH_TARGET_METADATA_KEY]
+    )
 
     monkeypatch.setattr(queue, "PENDING", [])
     monkeypatch.setattr(queue, "RUNNING", {})
     monkeypatch.setattr(queue, "QUEUE_SEQ_COUNTER_REF", {"value": 0})
     monkeypatch.setattr(queue, "ADMISSION_RESERVATIONS", {})
-    admitted = queue.enqueue_task({
-        "id": "queued-publish",
-        "type": captured["type"],
-        "metadata": captured["metadata"],
-    })
+    admitted = queue.enqueue_task(
+        {
+            "id": "queued-publish",
+            "type": captured["type"],
+            "metadata": captured["metadata"],
+        }
+    )
     assert admitted["type"] == "skill_publish"
     assert admitted["priority"] == 0
     assert admitted["task_contract"]["task_type"] == "skill_publish"
@@ -525,7 +590,11 @@ def test_pipeline_uses_leaf_veto_and_stays_below_hard_module_ceiling(monkeypatch
         lambda *_args: _loop_outcome("pass"),
     )
     outcome = pipeline._derive_host_bound_loop_outcome(
-        SimpleNamespace(), _task(), "done", {}, {"tool_calls": []},
+        SimpleNamespace(),
+        _task(),
+        "done",
+        {},
+        {"tool_calls": []},
     )
     assert outcome["outcome_axes"]["objective"]["status"] == "fail"
     assert len(pathlib.Path(pipeline.__file__).read_text(encoding="utf-8").splitlines()) < 1600

@@ -13,6 +13,10 @@ import tempfile
 from dataclasses import dataclass
 from typing import Iterable, Literal, Mapping
 
+from ouroboros.betterleaks_runtime import (
+    BETTERLEAKS_INSTALL_COMMAND,
+    BETTERLEAKS_VERSION,
+)
 from ouroboros.platform_layer import (
     kill_process_tree,
     merge_hidden_kwargs,
@@ -21,7 +25,6 @@ from ouroboros.platform_layer import (
 from ouroboros.process_custody import spawn_supervised
 
 BETTERLEAKS_ENGINE = "betterleaks"
-BETTERLEAKS_VERSION = "1.8.1"
 
 _HOST_CONFIG_BYTES = b'title = "Ouroboros skill publish"\n\n[extend]\nuseDefault = true\n'
 _HOST_CONFIG_SHA256 = hashlib.sha256(_HOST_CONFIG_BYTES).hexdigest()
@@ -135,11 +138,9 @@ class _ReportInvalid(RuntimeError):
 
 
 def _repair_hint(reason_code: str) -> str:
-    if reason_code == "scanner_missing":
-        return "Install the checksum-pinned Betterleaks runtime, then retry."
     if reason_code == "scanner_input_invalid":
         return "Capture canonical unique payload paths, then retry."
-    return "Repair the checksum-pinned Betterleaks runtime, then retry."
+    return f"Run `{BETTERLEAKS_INSTALL_COMMAND}`, then retry."
 
 
 def _failure(
