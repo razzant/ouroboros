@@ -254,24 +254,27 @@ def test_pinned_engine_scans_one_archive_and_decode_layer(tmp_path):
     inner = f"token = {candidate!r}\n".encode("utf-8")
     archive_buffer = io.BytesIO()
     with zipfile.ZipFile(archive_buffer, "w") as archive:
-        archive.writestr("inner.py", inner)
+        archive.writestr(f"members/{candidate}!inner.py", inner)
     encoded = base64.b64encode(inner)
 
     result = scan_named_bytes(
         {
-            "archive.zip": archive_buffer.getvalue(),
+            "archive!outer.zip": archive_buffer.getvalue(),
             "encoded.txt": encoded,
+            "plain!outer.py": inner,
         },
         executable=_executable(binary),
         drive_root=tmp_path / "drive",
     )
 
-    assert result.blocker_count == 2
+    assert result.blocker_count == 3
     assert {item.path for item in result.findings} == {
-        "archive.zip!inner.py",
+        "archive!outer.zip",
         "encoded.txt",
+        "plain!outer.py",
     }
-    _safe_absence(candidate, json.dumps(dataclasses.asdict(result)))
+    serialized = json.dumps(dataclasses.asdict(result), sort_keys=True)
+    _safe_absence(candidate, serialized)
 
 
 def _raw_findings(

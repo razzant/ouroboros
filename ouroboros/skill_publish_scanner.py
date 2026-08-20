@@ -124,13 +124,21 @@ class _ScannerContract:
 @dataclass(frozen=True)
 class _ParsedFinding:
     path: str
+    archive_member_identity_sha256: str
     line: int
     column: int
     detector: str
     confidence: FindingConfidence
 
-    def coordinate(self) -> tuple[str, int, int, str, str]:
-        return (self.path, self.line, self.column, self.detector, self.confidence)
+    def coordinate(self) -> tuple[str, str, int, int, str, str]:
+        return (
+            self.path,
+            self.archive_member_identity_sha256,
+            self.line,
+            self.column,
+            self.detector,
+            self.confidence,
+        )
 
 
 class _ReportInvalid(RuntimeError):
@@ -413,38 +421,56 @@ def _report_original_path(
     *,
     projection: pathlib.Path,
     path_map: dict[str, str],
-) -> str:
+) -> tuple[str, str]:
     if not isinstance(raw_path, str) or not raw_path or "\x00" in raw_path:
         raise _ReportInvalid
-    outer_path, separator, archive_member = raw_path.partition("!")
-    if separator:
-        member = pathlib.PurePosixPath(archive_member.replace("\\", "/"))
+
+    projection_root = projection.resolve()
+
+    def captured_outer(candidate_path: str) -> str | None:
+        normalized = candidate_path.replace("\\", os.sep)
+        candidate = pathlib.Path(normalized)
+        try:
+            resolved = (
+                candidate.resolve(strict=False)
+                if candidate.is_absolute()
+                else (projection / candidate).resolve(strict=False)
+            )
+            physical = resolved.relative_to(projection_root).as_posix()
+        except (OSError, RuntimeError, ValueError):
+            return None
+        return path_map.get(physical)
+
+    # A captured outer filename may itself contain ``!``. Prefer the complete
+    # scanner path when it names a projected file exactly, then locate an
+    # archive delimiter only by a verified projected-prefix match. Searching
+    # from the right also leaves any ``!`` inside the member path untouched.
+    if original := captured_outer(raw_path):
+        return original, ""
+    for index in range(len(raw_path) - 1, -1, -1):
+        if raw_path[index] != "!":
+            continue
+        original = captured_outer(raw_path[:index])
+        if original is None:
+            continue
+        archive_member = raw_path[index + 1 :]
+        normalized_member = archive_member.replace("\\", "/")
+        member = pathlib.PurePosixPath(normalized_member)
         if (
             not archive_member
-            or "!" in archive_member
             or member.is_absolute()
             or pathlib.PureWindowsPath(archive_member).is_absolute()
             or any(part in {"", ".", ".."} for part in member.parts)
         ):
             raise _ReportInvalid
-        archive_suffix = "!" + member.as_posix()
-    else:
-        archive_suffix = ""
-    normalized = outer_path.replace("\\", os.sep)
-    candidate = pathlib.Path(normalized)
-    try:
-        resolved = (
-            candidate.resolve(strict=False)
-            if candidate.is_absolute()
-            else (projection / candidate).resolve(strict=False)
-        )
-        physical = resolved.relative_to(projection.resolve()).as_posix()
-    except (OSError, RuntimeError, ValueError):
-        raise _ReportInvalid from None
-    original = path_map.get(physical)
-    if original is None:
-        raise _ReportInvalid
-    return original + archive_suffix
+        try:
+            member_identity = hashlib.sha256(
+                b"ouroboros-betterleaks-archive-member\x00" + archive_member.encode("utf-8")
+            ).hexdigest()
+        except UnicodeEncodeError:
+            raise _ReportInvalid from None
+        return original, member_identity
+    raise _ReportInvalid
 
 
 def _sanitize_detector(raw: object) -> str:
@@ -482,7 +508,7 @@ def _parse_report(
         report_path = attributes.get("path")
         if report_path in (None, ""):
             report_path = row.get("File")
-        original_path = _report_original_path(
+        original_path, archive_member_identity = _report_original_path(
             report_path,
             projection=projection,
             path_map=path_map,
@@ -503,6 +529,7 @@ def _parse_report(
         findings.append(
             _ParsedFinding(
                 path=original_path,
+                archive_member_identity_sha256=archive_member_identity,
                 line=line,
                 column=column,
                 detector=_sanitize_detector(row.get("RuleID")),

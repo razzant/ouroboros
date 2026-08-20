@@ -190,6 +190,58 @@ def test_safe_finding_allowlist_discards_candidate_bearing_schema(tmp_path):
     assert str(tmp_path) not in serialized
 
 
+def test_plain_outer_bang_survives_fake_scanner_projection(tmp_path):
+    fake = _fake_scanner(tmp_path)
+
+    result = _scan(
+        fake,
+        tmp_path,
+        {"plain!outer.py": b"FAKE_FIND:provider-key:high\n"},
+    )
+
+    assert result.blocker_count == 1
+    assert result.findings[0].path == "plain!outer.py"
+
+
+def test_archive_members_are_private_but_internal_coordinates_remain_distinct(tmp_path):
+    projection = tmp_path / "projection"
+    projection.mkdir()
+    physical_outer = "physical!archive.zip"
+    captured_outer = "captured!archive.zip"
+    (projection / physical_outer).write_bytes(b"archive bytes")
+    member_paths = (
+        "members/first!candidate.py",
+        "members/second!candidate.py",
+    )
+    rows = [
+        {
+            "RuleID": "provider-key",
+            "StartLine": 1,
+            "StartColumn": 1,
+            "Attributes": {
+                "path": f"{projection / physical_outer}!{member}",
+                "confidence": "high",
+            },
+        }
+        for member in member_paths
+    ]
+
+    parsed = scanner._parse_report(
+        json.dumps(rows).encode("utf-8"),
+        projection=projection,
+        path_map={physical_outer: captured_outer},
+    )
+
+    assert {item.path for item in parsed} == {captured_outer}
+    assert len({item.coordinate() for item in parsed}) == 2
+    assert all(len(item.archive_member_identity_sha256) == 64 for item in parsed)
+    safe_serialized = json.dumps(
+        [dataclasses.asdict(scanner._safe_finding(item)) for item in parsed],
+        sort_keys=True,
+    )
+    assert all(member not in safe_serialized for member in member_paths)
+
+
 def test_duplicate_multiset_is_preserved_and_audit_difference_is_exact(tmp_path):
     fake = _fake_scanner(tmp_path)
     files = {
