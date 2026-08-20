@@ -22,6 +22,23 @@ from ouroboros.skill_publish_snapshot import (
 )
 
 
+class _ObservedBinaryReader:
+    def __init__(self, stream, record):
+        self._stream = stream
+        self._record = record
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, exc_type, exc_value, traceback):
+        return self._stream.__exit__(exc_type, exc_value, traceback)
+
+    def read(self, size=-1):
+        data = self._stream.read(size)
+        self._record(size, len(data))
+        return data
+
+
 def _write_skill(root: pathlib.Path, *, manifest: str | None = None) -> pathlib.Path:
     root.mkdir(parents=True)
     (root / "SKILL.md").write_text(
@@ -118,20 +135,28 @@ def test_manifest_precedence_and_each_inventory_file_read_once(tmp_path, monkeyp
     (skill_dir / "payload.txt").write_bytes(b"once")
     loaded = _reviewed_skill(skill_dir, drive_root)
     loaded.manifest.version = "stale-loaded-projection"
-    real_read_bytes = pathlib.Path.read_bytes
+    real_open = pathlib.Path.open
+    opens: dict[pathlib.Path, int] = {}
     reads: dict[pathlib.Path, int] = {}
 
-    def counted(path: pathlib.Path) -> bytes:
+    def counted_open(path: pathlib.Path, *args, **kwargs):
         resolved = path.resolve()
-        reads[resolved] = reads.get(resolved, 0) + 1
-        return real_read_bytes(path)
+        opens[resolved] = opens.get(resolved, 0) + 1
 
-    monkeypatch.setattr(pathlib.Path, "read_bytes", counted)
+        def record(_requested: int, _returned: int) -> None:
+            reads[resolved] = reads.get(resolved, 0) + 1
+
+        return _ObservedBinaryReader(real_open(path, *args, **kwargs), record)
+
+    monkeypatch.setattr(pathlib.Path, "open", counted_open)
     snapshot = capture_skill_publish_snapshot(loaded)
 
     assert snapshot.manifest.path == "SKILL.md"
     assert snapshot.manifest.version == "1.2.3"
-    assert set(reads) == {path.resolve() for path in skill_dir.iterdir() if path.is_file()}
+    expected = {path.resolve() for path in skill_dir.iterdir() if path.is_file()}
+    assert set(opens) == expected
+    assert set(reads) == expected
+    assert set(opens.values()) == {1}
     assert set(reads.values()) == {1}
 
 
@@ -189,6 +214,51 @@ def test_snapshot_enforces_existing_public_limit_only(tmp_path, monkeypatch):
     assert caught.value.reason_code == "snapshot_payload_too_large"
 
 
+def test_snapshot_oversized_public_stream_reads_only_remaining_plus_one(tmp_path, monkeypatch):
+    drive_root = tmp_path / "drive"
+    skill_dir = _write_skill(drive_root / "skills" / "external" / "demo")
+    payload = skill_dir / "payload.bin"
+    payload_size = 1024 * 1024 + 1
+    with payload.open("wb") as stream:
+        stream.seek(payload_size - 1)
+        stream.write(b"x")
+    loaded = _reviewed_skill(skill_dir, drive_root)
+    manifest_size = len((skill_dir / "SKILL.md").read_bytes())
+    remaining = 8
+    monkeypatch.setattr(
+        "ouroboros.skill_publish_snapshot.MAX_PUBLIC_PAYLOAD_BYTES",
+        manifest_size + remaining,
+    )
+
+    real_open = pathlib.Path.open
+    opened = 0
+    requested: list[int] = []
+    returned: list[int] = []
+
+    def tracked_open(path: pathlib.Path, *args, **kwargs):
+        nonlocal opened
+        stream = real_open(path, *args, **kwargs)
+        if path.resolve() != payload.resolve():
+            return stream
+        opened += 1
+
+        def record(read_size: int, byte_count: int) -> None:
+            requested.append(read_size)
+            returned.append(byte_count)
+
+        return _ObservedBinaryReader(stream, record)
+
+    monkeypatch.setattr(pathlib.Path, "open", tracked_open)
+    with pytest.raises(SkillPublishSnapshotError) as caught:
+        capture_skill_publish_snapshot(loaded)
+
+    assert caught.value.reason_code == "snapshot_payload_too_large"
+    assert opened == 1
+    assert requested == [remaining + 1]
+    assert returned == [remaining + 1]
+    assert returned[0] < payload_size
+
+
 def test_snapshot_fails_closed_on_sensitive_or_unreadable_payload(tmp_path, monkeypatch):
     drive_root = tmp_path / "drive"
     sensitive = _write_skill(drive_root / "skills" / "external" / "sensitive")
@@ -205,14 +275,14 @@ def test_snapshot_fails_closed_on_sensitive_or_unreadable_payload(tmp_path, monk
     payload = unreadable / "payload.txt"
     payload.write_bytes(b"fixture")
     loaded = _reviewed_skill(unreadable, drive_root)
-    real_read_bytes = pathlib.Path.read_bytes
+    real_open = pathlib.Path.open
 
-    def fail_selected(path: pathlib.Path) -> bytes:
+    def fail_selected(path: pathlib.Path, *args, **kwargs):
         if path.resolve() == payload.resolve():
             raise OSError("fixture read failure")
-        return real_read_bytes(path)
+        return real_open(path, *args, **kwargs)
 
-    monkeypatch.setattr(pathlib.Path, "read_bytes", fail_selected)
+    monkeypatch.setattr(pathlib.Path, "open", fail_selected)
     with pytest.raises(SkillPublishSnapshotError) as caught:
         capture_skill_publish_snapshot(loaded)
     assert caught.value.reason_code == "snapshot_payload_unreadable"

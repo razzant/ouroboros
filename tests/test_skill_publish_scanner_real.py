@@ -21,10 +21,19 @@ from ouroboros.skill_publish_scanner import ScannerExecutable, scan_named_bytes
 pytestmark = pytest.mark.serial
 
 _FIXTURE_ROOT = pathlib.Path(__file__).parent / "fixtures" / "skill_publish_scanner"
-_FIXTURE_DIGESTS = {
-    "google_workspace_context.py": "26e330659241958418e3513dd000f3a4d65680e5d23619bdbe11e7760d51b4de",
-    "email_context.py": "681188f4713d4d240f615a16e2d4496aa0182449d3280280b726a1c29d0cb564",
-    "read_ai_context.py": "5bc0608c1fbb3d011d8226b72a914421ea93996800c2797b72c2f8c7c3101c5e",
+_CONTEXT_FIXTURES = {
+    "google_workspace_context.fixture": (
+        "google_workspace_context.py",
+        "26e330659241958418e3513dd000f3a4d65680e5d23619bdbe11e7760d51b4de",
+    ),
+    "email_context.fixture": (
+        "email_context.py",
+        "681188f4713d4d240f615a16e2d4496aa0182449d3280280b726a1c29d0cb564",
+    ),
+    "read_ai_context.fixture": (
+        "read_ai_context.py",
+        "5bc0608c1fbb3d011d8226b72a914421ea93996800c2797b72c2f8c7c3101c5e",
+    ),
 }
 _EXPECTED_RULESET_BYTES = 287882
 _EXPECTED_RULESET_SHA256 = "7c34b6ee2980139a97156b9b7e818813c8c13b7bc3d15b11704115f1f7d5027a"
@@ -92,10 +101,10 @@ def test_pinned_engine_version_ruleset_and_contextual_fixture_multiset(tmp_path)
     assert hashlib.sha256(shown.stdout).hexdigest() == _EXPECTED_RULESET_SHA256
 
     files = {}
-    for name, expected_digest in _FIXTURE_DIGESTS.items():
-        content = (_FIXTURE_ROOT / name).read_bytes()
+    for physical_name, (logical_name, expected_digest) in _CONTEXT_FIXTURES.items():
+        content = (_FIXTURE_ROOT / physical_name).read_bytes()
         assert hashlib.sha256(content).hexdigest() == expected_digest
-        files[name] = content
+        files[logical_name] = content
     result = scan_named_bytes(
         files,
         executable=_executable(binary),

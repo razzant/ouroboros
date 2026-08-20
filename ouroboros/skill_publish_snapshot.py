@@ -97,11 +97,19 @@ class SkillPublishSnapshot:
         return next((item for item in self.full_files if item.path == path), None)
 
 
-def _read_captured_file(path: pathlib.Path, relpath: str) -> CapturedSkillFile:
+def _read_captured_file(
+    path: pathlib.Path,
+    relpath: str,
+    *,
+    max_bytes: int | None = None,
+) -> CapturedSkillFile:
     try:
-        content = path.read_bytes()
+        with path.open("rb") as stream:
+            content = stream.read() if max_bytes is None else stream.read(max_bytes + 1)
     except (OSError, RuntimeError) as exc:
         raise SkillPublishSnapshotError("snapshot_payload_unreadable") from exc
+    if max_bytes is not None and len(content) > max_bytes:
+        raise SkillPublishSnapshotError("snapshot_payload_too_large")
     return CapturedSkillFile.from_bytes(relpath, content)
 
 
@@ -175,7 +183,11 @@ def capture_skill_publish_snapshot(loaded: LoadedSkill) -> SkillPublishSnapshot:
         raise SkillPublishSnapshotError("snapshot_skill_unreadable") from exc
 
     manifest_path, manifest_rel = _select_manifest_path(skill_dir)
-    manifest_file = _read_captured_file(manifest_path, manifest_rel)
+    manifest_file = _read_captured_file(
+        manifest_path,
+        manifest_rel,
+        max_bytes=MAX_PUBLIC_PAYLOAD_BYTES,
+    )
     try:
         manifest_text = manifest_file.content.decode("utf-8")
     except UnicodeDecodeError as exc:
@@ -196,13 +208,28 @@ def capture_skill_publish_snapshot(loaded: LoadedSkill) -> SkillPublishSnapshot:
         raise SkillPublishSnapshotError("snapshot_payload_unreadable") from exc
 
     captured: list[CapturedSkillFile] = []
+    public: list[CapturedSkillFile] = []
+    control: list[CapturedSkillFile] = []
+    public_bytes = manifest_file.byte_count
     for file_path in inventory:
         try:
             rel = file_path.relative_to(skill_dir).as_posix()
         except ValueError as exc:
             raise SkillPublishSnapshotError("snapshot_payload_unreadable") from exc
-        item = manifest_file if rel == manifest_rel else _read_captured_file(file_path, rel)
+        is_control = pathlib.PurePosixPath(rel).name.lower() in SKILL_PAYLOAD_CONTROL_FILENAMES
+        if rel == manifest_rel:
+            item = manifest_file
+        elif is_control:
+            item = _read_captured_file(file_path, rel)
+        else:
+            item = _read_captured_file(
+                file_path,
+                rel,
+                max_bytes=MAX_PUBLIC_PAYLOAD_BYTES - public_bytes,
+            )
+            public_bytes += item.byte_count
         captured.append(item)
+        (control if is_control else public).append(item)
 
     if not any(item.path == manifest_rel for item in captured):
         raise SkillPublishSnapshotError("snapshot_manifest_unreadable")
@@ -211,18 +238,6 @@ def capture_skill_publish_snapshot(loaded: LoadedSkill) -> SkillPublishSnapshot:
     stored_review_hash = str(getattr(loaded.review, "content_hash", "") or "")
     if not stored_review_hash or content_hash != stored_review_hash:
         raise SkillPublishSnapshotError("snapshot_review_stale")
-
-    public: list[CapturedSkillFile] = []
-    control: list[CapturedSkillFile] = []
-    public_bytes = 0
-    for item in captured:
-        if pathlib.PurePosixPath(item.path).name.lower() in SKILL_PAYLOAD_CONTROL_FILENAMES:
-            control.append(item)
-            continue
-        public_bytes += item.byte_count
-        if public_bytes > MAX_PUBLIC_PAYLOAD_BYTES:
-            raise SkillPublishSnapshotError("snapshot_payload_too_large")
-        public.append(item)
 
     return SkillPublishSnapshot(
         skill=str(loaded.name or skill_dir.name),
