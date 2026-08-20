@@ -11,6 +11,7 @@ Two claims a benchmark artefact must never make falsely:
   and got it wrong in both directions at once (see
   `test_truncation_vocabulary_is_derived_from_the_runtime_not_restated`).
 """
+
 from __future__ import annotations
 
 import json
@@ -23,12 +24,12 @@ from devtools.benchmarks.common.result_index import (
     runtime_terminal_disclosure,
     task_result_row,
 )
-from ouroboros.outcomes import BEST_EFFORT_REASON_CODES
 from devtools.benchmarks.common.secrets import (
     credential_disclosure,
     isolated_credential_grants,
 )
 from devtools.benchmarks.common.server_runner import build_isolated_settings
+from ouroboros.outcomes import BEST_EFFORT_REASON_CODES
 from ouroboros.provider_models import (
     PROVIDER_CREDENTIAL_GROUPS,
     PROVIDER_PREFIXES,
@@ -75,11 +76,17 @@ def test_isolated_settings_grant_only_the_declared_providers_credentials():
     """
     out = build_isolated_settings(_LIVE, OUROBOROS_RUNTIME_MODE="advanced")
 
-    assert out["OPENROUTER_API_KEY"] == "or-value"      # every declared slot routes here
-    assert out["ANTHROPIC_API_KEY"] == "an-value"       # CLAUDE_CODE_MODEL's SDK transport
-    for never in ("OPENAI_API_KEY", "OPENAI_BASE_URL", "OPENAI_COMPATIBLE_API_KEY",
-                  "CLOUDRU_FOUNDATION_MODELS_API_KEY", "CLOUDRU_FOUNDATION_MODELS_BASE_URL",
-                  "GIGACHAT_CREDENTIALS", "GIGACHAT_PASSWORD"):
+    assert out["OPENROUTER_API_KEY"] == "or-value"  # every declared slot routes here
+    assert out["ANTHROPIC_API_KEY"] == "an-value"  # CLAUDE_CODE_MODEL's SDK transport
+    for never in (
+        "OPENAI_API_KEY",
+        "OPENAI_BASE_URL",
+        "OPENAI_COMPATIBLE_API_KEY",
+        "CLOUDRU_FOUNDATION_MODELS_API_KEY",
+        "CLOUDRU_FOUNDATION_MODELS_BASE_URL",
+        "GIGACHAT_CREDENTIALS",
+        "GIGACHAT_PASSWORD",
+    ):
         assert never not in out, f"{never} was not declared by any model slot"
     # Unchanged: owner/control and transport secrets were never copied and must stay out.
     for owner_secret in ("GITHUB_TOKEN", "OUROBOROS_NETWORK_PASSWORD", "TELEGRAM_BOT_TOKEN"):
@@ -99,11 +106,13 @@ def test_isolated_settings_forward_explicit_context_intent_and_normalize_legacy_
     assert explicit_max["OUROBOROS_CONTEXT_MODE"] == "max"
     assert explicit_max["OUROBOROS_CONTEXT_MODE_AUTO_LOW"] == "false"
 
-    legacy = build_isolated_settings({
-        **_LIVE,
-        "OUROBOROS_CONTEXT_MODE": "low",
-        "OUROBOROS_CONTEXT_MODE_AUTO_LOW": "true",
-    })
+    legacy = build_isolated_settings(
+        {
+            **_LIVE,
+            "OUROBOROS_CONTEXT_MODE": "low",
+            "OUROBOROS_CONTEXT_MODE_AUTO_LOW": "true",
+        }
+    )
     assert legacy["OUROBOROS_CONTEXT_MODE"] == "max"
     assert legacy["OUROBOROS_CONTEXT_MODE_AUTO_LOW"] == "false"
 
@@ -131,8 +140,9 @@ def test_paired_credentials_travel_together_or_not_at_all():
     `GIGACHAT_` blanket prefix used to smuggle exactly half of one in unconditionally."""
     from devtools.benchmarks.common.server_runner import _ISO_SETTINGS_ALLOW_PREFIX
 
-    assert "GIGACHAT_" not in _ISO_SETTINGS_ALLOW_PREFIX, \
+    assert "GIGACHAT_" not in _ISO_SETTINGS_ALLOW_PREFIX, (
         "the GigaChat family must be gated on the declared slots, not copied by prefix"
+    )
 
     giga = build_isolated_settings(_LIVE, OUROBOROS_MODEL="gigachat::GigaChat-3-Ultra")
     assert giga["GIGACHAT_CREDENTIALS"] == "gc-value"
@@ -190,11 +200,15 @@ def test_manifest_discloses_granted_credentials_by_fingerprint_never_by_value(tm
         assert value not in blob, "a disclosure must never carry a credential value"
 
     # The same key fingerprints identically across runs — that IS the audit question.
-    assert (credential_disclosure({"OPENROUTER_API_KEY": "or-value"})["OPENROUTER_API_KEY"]
-            == disclosure["granted"]["OPENROUTER_API_KEY"])
+    assert (
+        credential_disclosure({"OPENROUTER_API_KEY": "or-value"})["OPENROUTER_API_KEY"]
+        == disclosure["granted"]["OPENROUTER_API_KEY"]
+    )
     # An absent settings path is a STATED gap, never a silently empty grant list.
     assert provider_credential_disclosure(tmp_path / "nope.json") == {
-        "available": False, "reason": "settings_path_absent"}
+        "available": False,
+        "reason": "settings_path_absent",
+    }
 
 
 def test_isolated_credential_grants_reports_the_file_not_the_intent():
@@ -217,8 +231,11 @@ _BUDGET_TRUNCATED = {
     "total_rounds": 13,
     "loop_outcome": {
         "reason_code": "budget_exhausted",
-        "resource_limit": {"status": "resource_limited", "scope": "root",
-                           "resume_policy": "increase_or_reset_budget_then_retry"},
+        "resource_limit": {
+            "status": "resource_limited",
+            "scope": "root",
+            "resume_policy": "increase_or_reset_budget_then_retry",
+        },
     },
     "outcome_axes": {"execution": {"status": "failed", "reason_code": "budget_exhausted"}},
 }
@@ -250,20 +267,25 @@ def test_task_result_row_publishes_the_runtime_reason_alongside_the_adapter_stag
     aggregator records 2/3 with no indication that a third of the run was cost-truncated.
     """
     row = task_result_row(
-        benchmark="osworld", instance_id="chrome/abc", status="completed",
-        reason_code="official_evaluate", official_eval_status="completed",
-        runtime_result=_BUDGET_TRUNCATED, details={"reward": 0.0},
+        benchmark="osworld",
+        instance_id="chrome/abc",
+        status="completed",
+        reason_code="official_evaluate",
+        official_eval_status="completed",
+        runtime_result=_BUDGET_TRUNCATED,
+        details={"reward": 0.0},
     )
-    assert row["status"] == "completed"                      # unchanged: not demoted
-    assert row["official_eval_status"] == "completed"        # unchanged: the eval DID run
-    assert row["reason_code"] == "official_evaluate"         # unchanged: adapter stage
+    assert row["status"] == "completed"  # unchanged: not demoted
+    assert row["official_eval_status"] == "completed"  # unchanged: the eval DID run
+    assert row["reason_code"] == "official_evaluate"  # unchanged: adapter stage
     assert row["runtime_outcome"]["reason_code"] == "budget_exhausted"
     assert row["runtime_outcome"]["truncated"] is True
 
     # Every row carries the field, so an auditor never has to guess whether it was omitted
     # because nothing happened or because the writer forgot.
-    assert task_result_row(benchmark="gaia", instance_id="x",
-                           status="failed")["runtime_outcome"] == {"available": False}
+    assert task_result_row(benchmark="gaia", instance_id="x", status="failed")["runtime_outcome"] == {
+        "available": False
+    }
 
 
 # ------------------------------------------------------- FIX B: the vocabulary is DERIVED
@@ -285,7 +307,6 @@ _TRUNCATION_DECISIONS: dict[str, tuple[bool, str]] = {
     # reward 0 is an owner decision, never a fair-shot capability fact (CF-02:
     # reusing finalization_grace would persist the deadline's false reason).
     "owner_requested_finalization": (True, "loop.py _handle_owner_stop_finalization; owner-requested stop"),
-
     # -- not truncating: a real terminal the agent reached, or a rejected tool call --------
     # An explicit `executor=harness` request that could not be honored ends the CHILD
     # unrun rather than silently spending metered money on the native path. It is a
@@ -299,8 +320,14 @@ _TRUNCATION_DECISIONS: dict[str, tuple[bool, str]] = {
     # Q1A preflight (2026-08-10 amendments): an explicit harness pin whose child toolset
     # hides the delegate verbs ends the CHILD unrun before any LLM spend — the same
     # subagent-terminal class as subagent_executor_unavailable, never a trial's code.
-    "delegate_tools_invisible": (False, "agent.py executor_blocked_outcome / preflight_delegate_visibility; a subagent terminal, never a trial's"),
-    "delegate_visibility_unverified": (False, "agent.py preflight_delegate_visibility broken-introspection path; a subagent terminal, never a trial's"),
+    "delegate_tools_invisible": (
+        False,
+        "agent.py executor_blocked_outcome / preflight_delegate_visibility; a subagent terminal, never a trial's",
+    ),
+    "delegate_visibility_unverified": (
+        False,
+        "agent.py preflight_delegate_visibility broken-introspection path; a subagent terminal, never a trial's",
+    ),
     "task_exception": (False, "agent.py:777 the attempt ran and crashed; an honest failure"),
     "capability_profile_mismatch": (False, "control_delegation.py:81 rejected delegate call"),
     "delegation_constraint_block_surface": (False, "control_delegation.py:116 rejected call"),
@@ -317,19 +344,41 @@ _TRUNCATION_DECISIONS: dict[str, tuple[bool, str]] = {
     "cancel_intent_write_failed": (False, "gateway/tasks.py fail-closed cancel ingress refusal; never a task terminal"),
     # GR4-8: the corrupt-projection flavor of the same ingress refusal — still a
     # refusal about a CANCEL request (503), never a task terminal.
-    "cancel_intent_projection_corrupt": (False, "gateway/tasks.py fail-closed cancel ingress refusal (corrupt projection); never a task terminal"),
+    "cancel_intent_projection_corrupt": (
+        False,
+        "gateway/tasks.py fail-closed cancel ingress refusal (corrupt projection); never a task terminal",
+    ),
     # S3 hurry ingress (POST /api/tasks/<id>/hurry): all four are refusals about
     # a HURRY request — the task itself keeps running untouched, so no trial
     # ever terminalizes with any of them.
     "request_id_required": (False, "gateway/task_hurry.py hurry ingress refusal (400); never a task terminal"),
-    "unexpected_fields": (False, "gateway/task_hurry.py hurry ingress refusal (400, text-free contract); never a task terminal"),
+    "unexpected_fields": (
+        False,
+        "gateway/task_hurry.py hurry ingress refusal (400, text-free contract); never a task terminal",
+    ),
     "task_not_live": (False, "gateway/task_hurry.py hurry ingress refusal (404); never a task terminal"),
-    "mailbox_write_failed": (False, "gateway/task_hurry.py fail-closed hurry ingress refusal (503); never a task terminal"),
+    "mailbox_write_failed": (
+        False,
+        "gateway/task_hurry.py fail-closed hurry ingress refusal (503); never a task terminal",
+    ),
+    # Issue #265: these are structured failures of one recoverable publish-tool
+    # call. They return to the next LLM turn with a repair hint; none is the
+    # managed task's terminal reason or evidence that a benchmark trial was cut
+    # off before the agent could act.
+    "upstream_read_failed": (
+        False,
+        "skill_publish_github.py recoverable read-only tool failure; never a task terminal",
+    ),
+    "branch_create_failed": (False, "skill_publish_github.py recoverable branch tool failure; never a task terminal"),
+    "commit_create_failed": (False, "skill_publish_github.py recoverable commit tool failure; never a task terminal"),
+    "pr_open_indeterminate": (
+        False,
+        "skill_publish_github.py typed ambiguous remote effect; task receipt veto remains separate",
+    ),
+    "unexpected_publish_error": (False, "tools/skill_publish.py recoverable typed tool failure; never a task terminal"),
 }
 
-_REASON_CODE_LITERAL = re.compile(
-    r"""reason_code(?:=|["']\s*:\s*)\s*["']([a-z0-9_]+)["']"""
-)
+_REASON_CODE_LITERAL = re.compile(r"""reason_code(?:=|["']\s*:\s*)\s*["']([a-z0-9_]+)["']""")
 
 
 def _runtime_reason_code_literals() -> dict[str, str]:
@@ -354,8 +403,9 @@ def test_truncation_vocabulary_is_derived_from_the_runtime_not_restated():
     under `genuine_failure_count`: a false capability claim made by the very field added to
     prevent false capability claims. Nothing pinned that, so nothing caught it.
     """
-    assert BEST_EFFORT_REASON_CODES <= RUNTIME_TRUNCATION_REASON_CODES, \
+    assert BEST_EFFORT_REASON_CODES <= RUNTIME_TRUNCATION_REASON_CODES, (
         "every forced-finalization code must be disclosed as truncation"
+    )
     assert {"round_limit", "deadline_local"} <= RUNTIME_TRUNCATION_REASON_CODES
 
     emitted = _runtime_reason_code_literals()
@@ -369,9 +419,8 @@ def test_every_runtime_reason_code_has_a_recorded_truncation_decision():
     fails until the decision is written down, so the omission cannot pass as a judgement."""
     emitted = _runtime_reason_code_literals()
     undecided = sorted(set(emitted) - set(_TRUNCATION_DECISIONS))
-    assert not undecided, (
-        "new runtime reason code(s) with no recorded decision in _TRUNCATION_DECISIONS: "
-        + ", ".join(f"{code} ({emitted[code]})" for code in undecided)
+    assert not undecided, "new runtime reason code(s) with no recorded decision in _TRUNCATION_DECISIONS: " + ", ".join(
+        f"{code} ({emitted[code]})" for code in undecided
     )
     stale = sorted(set(_TRUNCATION_DECISIONS) - set(emitted))
     assert not stale, f"decision recorded for code(s) the runtime no longer emits: {stale}"
@@ -403,16 +452,16 @@ def test_the_two_out_of_tree_mirrors_stay_pinned_to_the_derived_vocabulary():
     """
     repo = pathlib.Path(__file__).resolve().parents[1]
 
-    harbor = (repo / "devtools/benchmarks/terminal_bench/harbor_installed_agent.py"
-              ).read_text(encoding="utf-8")
+    harbor = (repo / "devtools/benchmarks/terminal_bench/harbor_installed_agent.py").read_text(encoding="utf-8")
     assert "truncated = reason_code in {truncation_codes_literal}" in harbor
     assert "truncation_codes_literal = repr(tuple(sorted(RUNTIME_TRUNCATION_REASON_CODES)))" in harbor
     assert "max_rounds_exceeded" not in harbor
 
-    patch = (repo / "devtools/benchmarks/continual_learning/operator_patches"
-                    "/clb_multi_instance_outcomes.v6746.patch").read_text(encoding="utf-8")
+    patch = (
+        repo / "devtools/benchmarks/continual_learning/operator_patches/clb_multi_instance_outcomes.v6746.patch"
+    ).read_text(encoding="utf-8")
     mirrored = re.search(r'"truncated": reason_code in \((.*?)\),', patch, re.S)
     assert mirrored, "the CL-Bench mirror's truncation expression is no longer parseable"
-    assert set(re.findall(r'"([a-z0-9_]+)"', mirrored.group(1))) == set(
-        RUNTIME_TRUNCATION_REASON_CODES
-    ), "the CL-Bench operator patch has drifted from RUNTIME_TRUNCATION_REASON_CODES"
+    assert set(re.findall(r'"([a-z0-9_]+)"', mirrored.group(1))) == set(RUNTIME_TRUNCATION_REASON_CODES), (
+        "the CL-Bench operator patch has drifted from RUNTIME_TRUNCATION_REASON_CODES"
+    )
