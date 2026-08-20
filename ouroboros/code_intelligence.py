@@ -21,7 +21,6 @@ from typing import Any, Dict, Iterable, List
 
 from ouroboros.utils import atomic_write_json, utc_now_iso
 
-
 CODE_INTELLIGENCE_SCHEMA_VERSION = 2
 
 SKIP_DIRS = frozenset({
@@ -278,6 +277,92 @@ def _resolve_relative_import(rel_path: pathlib.PurePosixPath, module: str, level
     if module:
         parts.extend(str(module).split("."))
     return ".".join(part for part in parts if part)
+
+
+def collect_top_level_python_imports(
+    text: str,
+    rel_path: pathlib.PurePosixPath,
+) -> List[str]:
+    """Collect imports executed while a Python module is initialized.
+
+    Compound statements and class bodies execute at module import time, so their
+    imports participate in the static dependency graph. Function, async-function,
+    lambda, and ``TYPE_CHECKING``-only bodies do not.
+    """
+    tree = ast.parse(text)
+    imports: List[str] = []
+    type_checking_names = {"TYPE_CHECKING"}
+    typing_module_names = {"typing", "typing_extensions"}
+    for node in tree.body:
+        if isinstance(node, ast.ImportFrom) and node.module in {"typing", "typing_extensions"}:
+            type_checking_names.update(
+                alias.asname or alias.name
+                for alias in node.names
+                if alias.name == "TYPE_CHECKING"
+            )
+        elif isinstance(node, ast.Import):
+            typing_module_names.update(
+                alias.asname or alias.name
+                for alias in node.names
+                if alias.name in {"typing", "typing_extensions"}
+            )
+
+    try_nodes = (ast.Try,)
+    if hasattr(ast, "TryStar"):
+        try_nodes += (ast.TryStar,)
+    stack: list[ast.AST] = list(reversed(tree.body))
+    while stack:
+        node = stack.pop()
+        if isinstance(node, ast.Import):
+            imports.extend(alias.name for alias in node.names)
+            continue
+        if isinstance(node, ast.ImportFrom):
+            base = _resolve_relative_import(rel_path, node.module or "", int(node.level or 0))
+            if base:
+                imports.append(base)
+            imports.extend(
+                ".".join(part for part in (base, alias.name) if part)
+                for alias in node.names
+                if alias.name and alias.name != "*"
+            )
+            continue
+        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.Lambda)):
+            continue
+
+        children: list[ast.AST] = []
+        if isinstance(node, ast.ClassDef):
+            children = list(node.body)
+        elif isinstance(node, ast.If):
+            test = node.test
+            negated = isinstance(test, ast.UnaryOp) and isinstance(test.op, ast.Not)
+            guarded = test.operand if negated else test
+            is_type_checking = (
+                isinstance(guarded, ast.Name) and guarded.id in type_checking_names
+            ) or (
+                isinstance(guarded, ast.Attribute)
+                and isinstance(guarded.value, ast.Name)
+                and guarded.value.id in typing_module_names
+                and guarded.attr == "TYPE_CHECKING"
+            )
+            if is_type_checking:
+                children = list(node.body if negated else node.orelse)
+            else:
+                children = [*node.body, *node.orelse]
+        elif isinstance(node, try_nodes):
+            children = [
+                *node.body,
+                *(item for handler in node.handlers for item in handler.body),
+                *node.orelse,
+                *node.finalbody,
+            ]
+        elif isinstance(node, (ast.For, ast.While)):
+            children = [*node.body, *node.orelse]
+        elif isinstance(node, ast.With):
+            children = list(node.body)
+        elif isinstance(node, ast.Match):
+            children = [item for case in node.cases for item in case.body]
+        stack.extend(reversed(children))
+    return sorted(set(imports))
 
 
 def _call_name(node: ast.AST) -> str:

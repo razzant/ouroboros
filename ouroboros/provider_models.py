@@ -7,6 +7,9 @@ from __future__ import annotations
 
 import os
 
+from ouroboros.model_slots import parse_fallback_chain
+from ouroboros.settings_defaults import OPENROUTER_DEFAULTS, OPENROUTER_REVIEW_DEFAULTS, SETTINGS_DEFAULTS  # noqa: F401
+
 # MiniMax exposes the same OpenAI-compatible API on two regional hosts. Keep the
 # mapping centralized so transport, capability evidence, and settings diagnostics
 # fingerprint the exact endpoint selected by the owner.
@@ -161,9 +164,7 @@ def resolve_credentialed_model(default_model: str) -> str:
     # LIGHT/MAIN/HEAVY are single-model slots; FALLBACKS is a comma chain expanded via the
     # shared SSOT parser (which also honors the legacy singular OUROBOROS_MODEL_FALLBACK)
     # instead of testing the whole comma-string as one broken model id. Empty Heavy/Light
-    # (default -> Main) simply contribute nothing here. Lazy import: config imports this
-    # module, so importing config at module load would be circular.
-    from ouroboros.config import parse_fallback_chain
+    # (default -> Main) simply contribute nothing here.
     candidates: list[str] = []
     light = str(os.environ.get("OUROBOROS_MODEL_LIGHT", "") or "").strip()
     if light:
@@ -183,10 +184,8 @@ def declared_model_settings(settings: dict) -> dict[str, str]:
     """Return the model slots a settings mapping DECLARES, with runtime defaults filled in.
 
     An absent or empty slot is not "unused": the server falls back to
-    ``config.SETTINGS_DEFAULTS`` for it, so the default's provider is genuinely reachable and
-    must be declared.  Lazy config import (config imports this module)."""
-    from ouroboros.config import SETTINGS_DEFAULTS
-
+    ``SETTINGS_DEFAULTS`` for it, so the default's provider is genuinely reachable and
+    must be declared."""
     declared: dict[str, str] = {}
     for key in (*MODEL_SETTING_KEYS, *CLAUDE_SDK_MODEL_SETTING_KEYS):
         value = str((settings or {}).get(key) or "").strip()
@@ -256,32 +255,6 @@ def provider_credential_plan(settings: dict) -> dict:
         "planned_keys": sorted(planned),
         "fail_open": fail_open,
     }
-
-
-# Shipped router profile. Keeping the root-loop role policy beside the direct
-# provider profiles gives onboarding, runtime defaults, and tests one vocabulary
-# instead of repeating model ids across those surfaces.
-OPENROUTER_DEFAULTS = {
-    "main": "google/gemini-3.7-flash",
-    "heavy": "",
-    "light": "openai/gpt-5.6-luna",
-    "vision": "",
-    "consciousness": "",
-    "fallback": "openai/gpt-5.6-luna",
-    "deep_self_review": "openai/gpt-5.6-sol-pro",
-}
-
-OPENROUTER_REVIEW_DEFAULTS = {
-    "triad": (
-        "google/gemini-3.7-flash",
-        "openai/gpt-5.6-terra",
-        "anthropic/claude-opus-5",
-    ),
-    "scope": ("openai/gpt-5.6-terra",),
-    # Claude Agent SDK spelling, not an OpenRouter model id. With no direct
-    # Anthropic key the existing advisory gate records an audited bypass.
-    "advisory": "claude-sonnet-5",
-}
 
 
 OPENAI_DIRECT_DEFAULTS = {

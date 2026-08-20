@@ -22,14 +22,11 @@ from types import SimpleNamespace
 import pytest
 
 import ouroboros.loop as loop_mod
-from ouroboros.loop import (
-    ACCEPTANCE_DECISION_REASONS,
-    _apply_task_acceptance_result,
-    _record_acceptance_infra_failure,
-    _set_acceptance_decision,
-    _supersede_task_acceptance_for_evidence_change,
-    _supersede_task_acceptance_for_owner_followup,
-)
+from ouroboros import loop_nudges
+from ouroboros import loop_acceptance_review
+from ouroboros.loop_acceptance import _set_acceptance_decision, _supersede_task_acceptance_for_evidence_change, _supersede_task_acceptance_for_owner_followup
+from ouroboros.loop_acceptance_review import _apply_task_acceptance_result, _record_acceptance_infra_failure
+from ouroboros.loop_acceptance import ACCEPTANCE_DECISION_REASONS
 from ouroboros.outcomes import (
     ACCEPTANCE_ACCEPTED,
     ACCEPTANCE_FINALIZED_UNACCEPTED,
@@ -77,7 +74,7 @@ def _apply_ctx(tmp_path, *, prior_trace=None, passes_done=0, budget_profile=None
     )
     trace = dict(prior_trace or {})
     trace.setdefault("tool_calls", [{"tool": "write_file", "args": {"path": "x.py"}}])
-    return loop_mod._TaskAcceptanceContext(
+    return loop_acceptance_review._TaskAcceptanceContext(
         tools=SimpleNamespace(_ctx=tool_ctx),
         content="done",
         task_id="t",
@@ -548,7 +545,7 @@ def test_semantically_different_green_yields_one_advisory_nudge_and_no_gate(monk
     tools = SimpleNamespace(_ctx=tool_ctx)
     trace = {"reasoning_notes": [], "tool_calls": [{"tool": "write_file", "args": {"path": "x.py"}}]}
     messages: list = []
-    monkeypatch.setattr(loop_mod, "_skill_finalization_message", lambda *_a, **_k: "")
+    monkeypatch.setattr(loop_nudges, "_skill_finalization_message", lambda *_a, **_k: "")
 
     fired = [
         loop_mod._maybe_inject_finalization_nudges(
@@ -571,7 +568,7 @@ def test_red_receipt_reconciled_by_the_same_check_raises_no_nudge(monkeypatch, t
 
     append_verification_receipt(tmp_path, "t", {"status": "fail", "check": "pytest tests/x.py"})
     append_verification_receipt(tmp_path, "t", {"status": "pass", "check": "pytest  tests/x.py "})
-    monkeypatch.setattr(loop_mod, "_skill_finalization_message", lambda *_a, **_k: "")
+    monkeypatch.setattr(loop_nudges, "_skill_finalization_message", lambda *_a, **_k: "")
     tools = SimpleNamespace(_ctx=SimpleNamespace(drive_root=str(tmp_path)))
     trace = {"reasoning_notes": [], "tool_calls": [{"tool": "write_file", "args": {"path": "x.py"}}]}
     assert loop_mod._maybe_inject_finalization_nudges(
@@ -827,7 +824,10 @@ def test_merge_point_is_the_only_status_writer_outside_the_agent_stance_merge():
         if 'llm_trace["acceptance_decision"] =' in path.read_text(encoding="utf-8")
         or '["acceptance_decision"] = _dec' in path.read_text(encoding="utf-8")
     )
-    assert writers == ["loop.py", "loop_tool_execution.py"], writers
+    # The v7 L-B split moved `_set_acceptance_decision` (and with it the single
+    # host-status assignment) into the loop_acceptance leaf; the loop.py name is
+    # a facade re-export of the same object.
+    assert writers == ["loop_acceptance.py", "loop_tool_execution.py"], writers
     trace: dict = {}
     _set_acceptance_decision(trace, {"status": ACCEPTANCE_ACCEPTED, "reason": "clean_pass"})
     assert trace["acceptance_decision"]["status"] == ACCEPTANCE_ACCEPTED

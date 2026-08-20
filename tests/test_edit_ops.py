@@ -640,7 +640,7 @@ def test_acting_subagent_without_workspace_cannot_touch_the_live_repo(tmp_path, 
 
 
 def test_acting_subagent_schema_narrows_root_for_every_repo_write_tool():
-    from ouroboros.tools.registry import _ROOT_ARG_REPO_WRITE_TOOLS
+    from ouroboros.tools.tool_resolution import _ROOT_ARG_REPO_WRITE_TOOLS
 
     assert {"write_file", "edit_text", "apply_patch", "edit_batch"} == set(_ROOT_ARG_REPO_WRITE_TOOLS)
 
@@ -806,11 +806,13 @@ def test_managed_update_resolver_keeps_its_exemption(tmp_path, monkeypatch):
     git._repo_write carries this exemption; withholding it here would make these
     tools the one lane that cannot finish a conflict resolution.
     """
-    from ouroboros.tools import registry as registry_mod
+    from ouroboros.tools import registry as registry_facade
+    from ouroboros.tools import registry_guards
 
     reg, repo = _guard_registry(tmp_path)
     (repo / "BIBLE.md").write_text("P1 honest\n", encoding="utf-8")
-    monkeypatch.setattr(registry_mod, "_authorized_managed_update_resolver", lambda ctx: True)
+    monkeypatch.setattr(registry_guards, "_authorized_managed_update_resolver", lambda ctx: True)
+    monkeypatch.setattr(registry_facade, "_authorized_managed_update_resolver", lambda ctx: True)
     result = str(reg.execute("apply_patch", {
         "patch": "*** Update File: BIBLE.md\n-P1 honest\n+P1 resolved\n",
     }))

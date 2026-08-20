@@ -11,6 +11,7 @@ import pathlib
 
 import pytest
 
+import ouroboros.tools.registry_guards as registry_guards
 from ouroboros.tool_access import (
     active_tool_profile,
     decide_tool_access,
@@ -18,7 +19,8 @@ from ouroboros.tool_access import (
     resolve_shell_cwd,
     user_files_path_block_reason,
 )
-from ouroboros.tools.registry import ToolContext, ToolRegistry, _command_mentions_protected_root
+from ouroboros.tools.registry import ToolContext, ToolRegistry
+from ouroboros.tools.registry_guard_process import _run_shell_safety_check
 
 
 @pytest.fixture(autouse=True)
@@ -81,7 +83,7 @@ def test_workspace_task_uses_same_top_level_principal(tmp_path):
 def test_subagent_inherits_active_external_workspace_when_metadata_missing(tmp_path, monkeypatch):
     from types import SimpleNamespace
 
-    import ouroboros.tools.control as control
+    import ouroboros.tools.control_scheduling as control
 
     system = tmp_path / "system"
     active = tmp_path / "app"
@@ -173,19 +175,22 @@ def test_external_shell_read_cannot_reach_runtime_or_secrets(tmp_path):
     reg = ToolRegistry(repo_dir=system, drive_root=data)
     reg.set_context(ToolContext(repo_dir=system, drive_root=data, workspace_root=workspace, workspace_mode="external"))
 
-    # Runtime repo read -> blocked.
-    assert "WORKSPACE_SHELL_BLOCKED" in (reg._run_shell_safety_check({"cmd": ["cat", str(system / "BIBLE.md")]}, "advanced") or "")
-    # Data drive read -> blocked.
-    assert "WORKSPACE_SHELL_BLOCKED" in (reg._run_shell_safety_check({"cmd": ["cat", str(data / "settings.json")]}, "advanced") or "")
-    # Credential path read -> blocked (secret markers).
-    assert "WORKSPACE_SHELL_BLOCKED" in (reg._run_shell_safety_check({"cmd": ["cat", str(pathlib.Path.home() / ".ssh" / "id_rsa")]}, "advanced") or "")
-    # Embedded-string read of a secret -> blocked.
-    assert "WORKSPACE_SHELL_BLOCKED" in (reg._run_shell_safety_check({"cmd": ["python", "-c", f"open({str(data / 'settings.json')!r})"]}, "advanced") or "")
+    blocked_commands = (
+        ["cat", str(system / "BIBLE.md")],
+        ["cat", str(data / "settings.json")],
+        ["cat", str(pathlib.Path.home() / ".ssh" / "id_rsa")],
+        ["python", "-c", f"open({str(data / 'settings.json')!r})"],
+    )
+    for command in blocked_commands:
+        result = _run_shell_safety_check(reg, {"cmd": command}, "advanced")
+        assert result is not None
+        assert result.code == "WORKSPACE_BLOCKED"
+        assert "WORKSPACE_SHELL_BLOCKED" in result.text
     # A genuine host-scratch read -> allowed (None).
     scratch = tmp_path / "scratch"
     scratch.mkdir()
     (scratch / "note.txt").write_text("hi", encoding="utf-8")
-    assert reg._run_shell_safety_check({"cmd": ["cat", str(scratch / "note.txt")]}, "advanced") is None
+    assert _run_shell_safety_check(reg, {"cmd": ["cat", str(scratch / "note.txt")]}, "advanced") is None
 
 
 def test_external_shell_write_protects_child_drive(tmp_path):
@@ -204,21 +209,27 @@ def test_external_shell_write_protects_child_drive(tmp_path):
     ))
     # pro mode would otherwise pass an absolute outside-workspace write; the child
     # drive control path must still be blocked.
-    out = reg._run_shell_safety_check({"cmd": ["touch", str(child / "memory" / "x")]}, "pro")
-    assert "WORKSPACE_SHELL_BLOCKED" in (out or "")
+    out = _run_shell_safety_check(reg, {"cmd": ["touch", str(child / "memory" / "x")]}, "pro")
+    assert out is not None
+    assert out.code == "WORKSPACE_BLOCKED"
+    assert "WORKSPACE_SHELL_BLOCKED" in out.text
 
 
 def test_command_mentions_protected_root_is_boundary_aware():
     root = "/x/ouroboros/data"
     # Whole path or a child path → match (the real protected-path cases).
-    assert _command_mentions_protected_root(f"touch {root}", root)
-    assert _command_mentions_protected_root(f"touch {root}/state.json", root)
-    assert _command_mentions_protected_root(f"cat '{root}/x' ", root)
+    assert registry_guards._command_mentions_protected_root(f"touch {root}", root)
+    assert registry_guards._command_mentions_protected_root(f"touch {root}/state.json", root)
+    assert registry_guards._command_mentions_protected_root(f"cat '{root}/x' ", root)
     # A different sibling path that merely shares the string prefix → NOT a match.
-    assert not _command_mentions_protected_root("touch /x/ouroboros/database/x", root)
-    assert not _command_mentions_protected_root("touch /x/ouroboros/data-backup", root)
-    assert not _command_mentions_protected_root("", root)
-    assert not _command_mentions_protected_root("touch /other/path", root)
+    assert not registry_guards._command_mentions_protected_root(
+        "touch /x/ouroboros/database/x", root,
+    )
+    assert not registry_guards._command_mentions_protected_root(
+        "touch /x/ouroboros/data-backup", root,
+    )
+    assert not registry_guards._command_mentions_protected_root("", root)
+    assert not registry_guards._command_mentions_protected_root("touch /other/path", root)
 
 
 def test_external_shell_read_blocks_relative_and_symlink_traversal(tmp_path):
@@ -234,19 +245,23 @@ def test_external_shell_read_blocks_relative_and_symlink_traversal(tmp_path):
     reg.set_context(ToolContext(repo_dir=system, drive_root=data, workspace_root=workspace, workspace_mode="external"))
 
     # Relative traversal from the workspace cwd into the sibling data drive.
-    rel = reg._run_shell_safety_check({"cmd": ["cat", "../data/settings.json"], "cwd": str(workspace)}, "advanced")
-    assert "WORKSPACE_SHELL_BLOCKED" in (rel or ""), rel
+    rel = _run_shell_safety_check(reg, {"cmd": ["cat", "../data/settings.json"], "cwd": str(workspace)}, "advanced")
+    assert rel is not None
+    assert rel.code == "WORKSPACE_BLOCKED"
+    assert "WORKSPACE_SHELL_BLOCKED" in rel.text
 
     # Intra-workspace symlink pointing at the data drive.
     try:
         (workspace / "evil").symlink_to(data, target_is_directory=True)
     except OSError:
         return  # platform without symlinks
-    sym = reg._run_shell_safety_check({"cmd": ["cat", "evil/settings.json"], "cwd": str(workspace)}, "advanced")
-    assert "WORKSPACE_SHELL_BLOCKED" in (sym or ""), sym
+    sym = _run_shell_safety_check(reg, {"cmd": ["cat", "evil/settings.json"], "cwd": str(workspace)}, "advanced")
+    assert sym is not None
+    assert sym.code == "WORKSPACE_BLOCKED"
+    assert "WORKSPACE_SHELL_BLOCKED" in sym.text
     # A legitimate relative read inside the workspace stays allowed.
     (workspace / "ok.txt").write_text("x", encoding="utf-8")
-    assert reg._run_shell_safety_check({"cmd": ["cat", "ok.txt"], "cwd": str(workspace)}, "advanced") is None
+    assert _run_shell_safety_check(reg, {"cmd": ["cat", "ok.txt"], "cwd": str(workspace)}, "advanced") is None
 
 
 def test_readonly_git_exemption_does_not_open_a_runtime_write_or_secret_read(tmp_path):
@@ -266,7 +281,11 @@ def test_readonly_git_exemption_does_not_open_a_runtime_write_or_secret_read(tmp
     reg.set_context(ToolContext(repo_dir=system, drive_root=data, workspace_root=workspace, workspace_mode="external"))
 
     def _check(cmd):
-        return reg._run_shell_safety_check({"cmd": cmd, "cwd": str(workspace)}, "advanced") or ""
+        result = _run_shell_safety_check(reg, {"cmd": cmd, "cwd": str(workspace)}, "advanced")
+        if result is None:
+            return ""
+        assert result.code == "WORKSPACE_BLOCKED"
+        return result.text
 
     # WRITE via the diff `--output` option — glued, split, and through `-C`.
     assert _check(["git", "log", f"--output={data / 'settings.json'}"])

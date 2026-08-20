@@ -23,8 +23,8 @@ same guard chain as ``edit_text``: path canonicalization FIRST (see
 ``_resolve_edit_target`` — a guard that judges a different spelling than the
 write uses is not a guard), then root access, protected artifact paths,
 project-room write guard, protected runtime paths. Because their paths ride
-inside the payload rather than a ``path`` arg, the dispatch gates in
-``registry.py`` read them back out through ``_payload_write_paths`` so the
+inside the payload rather than a ``path`` arg, the dispatch preparation owner in
+``tool_resolution.py`` reads them back out through ``_payload_write_paths`` so the
 acting-subagent and protected-write fences apply identically.
 
 (An ``edit_sketch`` fast-apply tool — strong-model sketch merged by the cheap
@@ -94,10 +94,8 @@ def _resolve_edit_target(
     spellings of one file inside a single call collapse to one entry instead of
     two writes where the last silently discards the first.
     """
-    from ouroboros.tools.core import (
-        _access_or_block,
-        project_room_lens_dir,
-    )
+    from ouroboros.tools.core_file_tools import _access_or_block
+    from ouroboros.tool_access import project_room_lens_dir
 
     if not path or not str(path).strip():
         return None, "", None, f"⚠️ {error_tag}: path is required."

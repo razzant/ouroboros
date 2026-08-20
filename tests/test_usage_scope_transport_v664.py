@@ -310,7 +310,7 @@ def test_vlm_child_payload_carries_usage_scope(tmp_path, monkeypatch):
 
 
 def test_provider_owned_web_search_disables_sdk_retries(monkeypatch):
-    from ouroboros import llm
+    from ouroboros import llm, llm_attempt
 
     captured = {}
 
@@ -334,7 +334,7 @@ def test_provider_owned_web_search_disables_sdk_retries(monkeypatch):
 
     monkeypatch.setitem(sys.modules, "openai", types.SimpleNamespace(OpenAI=FakeOpenAI))
     monkeypatch.setitem(sys.modules, "anthropic", types.SimpleNamespace(Anthropic=FakeAnthropic))
-    monkeypatch.setattr(llm, "execute_physical_attempt", lambda request, send: send())
+    monkeypatch.setattr(llm_attempt, "execute_physical_attempt", lambda request, send: send())
 
     llm.openrouter_web_search_server_tool(
         api_key="test",

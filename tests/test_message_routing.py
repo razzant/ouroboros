@@ -85,7 +85,7 @@ class TestOwnerInjectPerTask(unittest.TestCase):
         """The loop drain returns the typed control instead of injecting it
         as owner prose."""
         import queue as _q
-        from ouroboros.loop import _drain_incoming_messages
+        from ouroboros.loop_round_limits import _drain_incoming_messages
         from ouroboros.owner_mailbox import KIND_FINALIZE_NOW, write_owner_message
 
         write_owner_message(self.drive_root, "hard_timeout", task_id="t10", kind=KIND_FINALIZE_NOW)

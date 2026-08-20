@@ -601,8 +601,9 @@ def test_scope_review_refuses_a_pack_that_did_not_assemble(monkeypatch, tmp_path
     section is refused, and the manifest disclosure is recorded BEFORE the
     refusal so it accompanies it rather than replacing it."""
     from ouroboros.tools import scope_review as sr
+    from ouroboros.tools import scope_review_pack as scope_pack
 
-    monkeypatch.setattr(sr, "compile_review_context_atlas", lambda req: _not_assembled_pack())
+    monkeypatch.setattr(scope_pack, "compile_review_context_atlas", lambda req: _not_assembled_pack())
     sr._SCOPE_CONTEXT_MANIFEST.set({})
 
     with pytest.raises(sr._ScopeAtlasNotAssembled) as excinfo:

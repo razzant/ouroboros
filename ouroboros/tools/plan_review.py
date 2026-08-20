@@ -29,6 +29,7 @@ from __future__ import annotations
 
 import asyncio
 import concurrent.futures
+import contextvars
 from hashlib import sha256
 import inspect
 import json
@@ -40,9 +41,14 @@ from typing import Any, Callable, Dict, List, Optional
 from ouroboros.config import adaptive_quorum, get_review_enforcement
 from ouroboros.review_cycles import emit_review_cycles_exhausted, review_max_cycles
 from ouroboros.task_results import (
-    load_plan_review_state, load_task_result, mark_current_plan_review_unavailable,
-    mark_plan_review_cycles_exhausted, plan_review_wave, current_plan_review_wave,
-    record_plan_review_attempt, record_plan_review_dispositions, record_plan_review_wave,
+    load_plan_review_state,
+    load_task_result,
+    mark_current_plan_review_unavailable,
+    mark_plan_review_cycles_exhausted,
+    plan_review_wave,
+    record_plan_review_attempt,
+    record_plan_review_dispositions,
+    record_plan_review_wave,
 )
 from ouroboros.tools import plan_evidence, plan_spec
 from ouroboros.tools.plan_render import _next_step, _quote_control_lines, _render_wave  # noqa: F401 — engine renderers
@@ -54,6 +60,9 @@ from ouroboros.tools.plan_review_runtime import (
     PLAN_NO_SNAPSHOT as _PLAN_NO_SNAPSHOT,
     PLAN_REVIEW_MAX_TOKENS as _PLAN_REVIEW_MAX_TOKENS,
     PLAN_REVIEW_SLOT_TIMEOUT_SEC as _PLAN_REVIEW_SLOT_TIMEOUT_SEC,
+    VACUOUS_CLAIMS_NOTE as _VACUOUS_CLAIMS_NOTE,  # noqa: F401 — wrapper-note contract surface
+    VACUOUS_DISPOSITION_NOTE as _VACUOUS_DISPOSITION_NOTE,  # noqa: F401 — wrapper-note contract surface
+    apply_plan_compat_notes as _apply_plan_compat_notes,
     emit_plan_review_advisory_open as _emit_plan_review_advisory_open,
     plan_deadline_skip as _plan_deadline_skip,
     plan_health_epoch as _plan_health_epoch,
@@ -61,22 +70,24 @@ from ouroboros.tools.plan_review_runtime import (
     plan_panel_health_snapshot as _plan_panel_health_snapshot,
     plan_payload_roots as _plan_payload_roots,
     plan_quorum_unreachable_facts as _plan_quorum_unreachable_facts,
-    plan_review_slots as _plan_review_slots, plan_row_typed_facts as _plan_row_typed_facts,
+    plan_review_cycles_exhausted as _cycles_exhausted,
+    plan_review_slots as _plan_review_slots,
     plan_reviewer_config_fingerprint as _plan_reviewer_config_fingerprint,
+    plan_row_typed_facts as _plan_row_typed_facts,
     plan_slot_fit as _plan_slot_fit,
     plan_wave_replay_decision as _plan_wave_replay_decision,
+    publish_plan_review_projection as _publish_plan_review_projection,  # noqa: F401 — typed D02 seam, test-pinned module surface
+    publish_rendered_wave as _publish_wave,
     record_raw_plan_request_attempt as _record_raw_plan_request_attempt,
     root_exploration_log as _root_exploration_log,
     run_plan_review_slots as _run_plan_review_slots,
+    vacuous_review_disposition as _vacuous_disposition,
 )
 from ouroboros.tools.registry import ToolContext, ToolEntry
 from ouroboros.tools.review_helpers import (
     load_checklist_section,
     load_governance_doc,
     review_wave_budget_gate,
-)
-from ouroboros.tools.review_synthesis import (
-    PLAN_REVIEW_CONTROL_PREFIX,
 )
 from ouroboros.utils import truncate_review_artifact, utc_now_iso
 
@@ -238,17 +249,11 @@ def get_tools():
 # --------------------------------------------------------------------------- handler
 
 
-def _vacuous_disposition(value: object) -> bool:
-    """A schema-shaped but empty disposition (models fill optional objects with defaults)."""
-    if not isinstance(value, dict) or set(value) - {"review_fingerprint", "items"}:
-        return False
-    return not str(value.get("review_fingerprint") or "").strip() and not value.get("items")
-
-
 def _handle_plan_task(ctx: ToolContext, **params) -> str:
     raw_disposition = params.get("review_disposition")
+    vacuous_disposition = _vacuous_disposition(raw_disposition)
     envelope_fields = sorted(set(params) - {"review_disposition"})
-    if raw_disposition is not None and not _vacuous_disposition(raw_disposition):
+    if raw_disposition is not None and not vacuous_disposition:
         if envelope_fields:
             return (
                 "ERROR: PLAN_REVIEW_DISPOSITION_MIXED_ENVELOPE: disposition mode accepts "
@@ -257,7 +262,11 @@ def _handle_plan_task(ctx: ToolContext, **params) -> str:
             )
         if not isinstance(raw_disposition, dict):
             return "ERROR: PLAN_REVIEW_DISPOSITION_INVALID: review_disposition must be an object"
-        return _apply_disposition(ctx, raw_disposition)
+        claimed = str(raw_disposition.get("review_fingerprint") or "").strip()
+        return (
+            _reuse_or_disposition_plan_review(ctx, claimed, raw_disposition)
+            or "ERROR: PLAN_REVIEW_DISPOSITION_UNBINDABLE: stored review disappeared"
+        )
     if "review_disposition" in params and not envelope_fields:
         return (
             "ERROR: PLAN_REVIEW_DISPOSITION_EMPTY: submit goal, plan and spec for review "
@@ -270,14 +279,19 @@ def _handle_plan_task(ctx: ToolContext, **params) -> str:
         try:
             asyncio.get_running_loop()
             with concurrent.futures.ThreadPoolExecutor(max_workers=1) as pool:
-                return pool.submit(
-                    asyncio.run,
+                # copy_context: the registry's tool-result sidecar is a ContextVar,
+                # and the published native plan result must reach the dispatching
+                # thread's slot (D02) — a bare pool thread would publish into the void.
+                result = pool.submit(
+                    contextvars.copy_context().run, asyncio.run,
                     asyncio.wait_for(_run_plan_review_async(ctx, request), timeout=_PLAN_REVIEW_WRAPPER_TIMEOUT_SEC),
                 ).result(timeout=_PLAN_REVIEW_WRAPPER_TIMEOUT_SEC + 5)
         except RuntimeError:
-            return asyncio.run(
+            result = asyncio.run(
                 asyncio.wait_for(_run_plan_review_async(ctx, request), timeout=_PLAN_REVIEW_WRAPPER_TIMEOUT_SEC)
             )
+        return _apply_plan_compat_notes(
+            ctx, result, vacuous_disposition=vacuous_disposition, spec=params.get("spec"))
     except (concurrent.futures.TimeoutError, asyncio.TimeoutError):
         return _plan_unavailable(
             ctx, f"ERROR: Plan review timed out after {_PLAN_REVIEW_WRAPPER_TIMEOUT_SEC}s.", "review_timeout")
@@ -545,8 +559,9 @@ async def _run_plan_review_async(ctx: ToolContext, request: _PlanRequest) -> str
             # — and the commit gates re-review the implementation anyway. A roster
             # change is configuration hygiene for FUTURE panels, never a
             # retroactive void of already-settled review authority.
-            return _render_wave(existing, cap=cap, cycles_paid=cycles_paid, enforcement=enforcement,
-                                cached=True, reminder=reminder)
+            return _reuse_or_disposition_plan_review(
+                ctx, fingerprint, None, existing, cap=cap, cycles_paid=cycles_paid,
+                enforcement=enforcement, reminder=reminder)
         else:  # stale ⇒ replay authority lapsed: the identical envelope re-dispatches fresh
             stale, replay_snapshot = _plan_wave_replay_decision(_plan_review_slots, existing)
             if not stale:
@@ -555,7 +570,9 @@ async def _run_plan_review_async(ctx: ToolContext, request: _PlanRequest) -> str
                     # at record time retries on replay (memo only on success ⇒ landed dedups).
                     _emit_plan_review_advisory_open(ctx, state_root, task_id=task_id,
                                                     wave=existing, cycles_paid=cycles_paid, cap=cap)
-                return _render_wave(existing, cap=cap, cycles_paid=cycles_paid, enforcement=enforcement, cached=True, reminder=reminder)
+                return _reuse_or_disposition_plan_review(
+                    ctx, fingerprint, None, existing, cap=cap, cycles_paid=cycles_paid,
+                    enforcement=enforcement, reminder=reminder)
     deadline_skip = _plan_deadline_skip(ctx)
     if deadline_skip:
         try:
@@ -737,7 +754,7 @@ async def _run_plan_review_async(ctx: ToolContext, request: _PlanRequest) -> str
         f"{agg['counts']['note']} note / {agg['counts']['need_evidence']} need_evidence; "
         f"cycles paid {paid_now}{'' if cap is None else f'/{cap}'}"
     )
-    return _render_wave(stored, cap=cap, cycles_paid=paid_now, enforcement=enforcement, reminder=reminder)
+    return _publish_wave(ctx, stored, cap=cap, cycles_paid=paid_now, enforcement=enforcement, reminder=reminder)
 
 
 def _last_paid_wave(state: dict) -> Optional[dict]:
@@ -841,84 +858,33 @@ def _build_packet(
     return system_prompt, user_content, session_task
 
 
-def _cycles_exhausted(
-    ctx: ToolContext, state: dict, state_root: pathlib.Path, task_id: str, *,
-    cap: int, cycles_paid: int, enforcement: str, reminder: str,
-    request_fingerprint: str = "",
-) -> str:
-    """The typed cap result (D10/D27): no panel, the current wave stays open, the typed
-    event fires; blocking exits are owner unstick or a blocked_with_evidence terminal."""
-    current = current_plan_review_wave(state)
-    # C-01: a CLOSED wave recorded for a DIFFERENT envelope is history, never this
-    # request's answer — rendering it would hand a changed, unreviewed spec the old
-    # GREEN. An OPEN wave is the live obligation and still carries the hold, so it is
-    # marked and rendered with the cap head above it.
-    stale_closed = bool(
-        current
-        and current.get("closed")
-        and str(current.get("request_fingerprint") or "") != str(request_fingerprint or "")
-    )
-    if stale_closed:
-        current = None
-    if current is None and request_fingerprint:
-            # A NEW envelope at a spent cap has no wave of its own; the live obligation is
-        # the last open wave, and the CURRENT attempt records the cap so the gate
-        # releases finalization honestly (D27).
-        current = next(
-            (w for w in reversed(list(state.get("waves") or [])) if isinstance(w, dict) and not w.get("closed")),
-            None,
-        )
-    fingerprint = str((current or {}).get("request_fingerprint") or "")
-    if fingerprint and not (current or {}).get("closed"):
-        try:
-            current = mark_plan_review_cycles_exhausted(state_root, task_id, fingerprint=fingerprint) or current
-        except (OSError, TimeoutError, ValueError) as exc:
-            return f"ERROR: PLAN_REVIEW_STATE_PERSIST_FAILED: {exc}"
-    if request_fingerprint:
-        try:
-            record_plan_review_attempt(
-                state_root, task_id, fingerprint=request_fingerprint, status="cycles_exhausted",
-                reason=f"{cycles_paid}/{cap} paid plan-review cycles spent")
-        except (OSError, TimeoutError, ValueError) as exc:
-            return f"ERROR: PLAN_REVIEW_STATE_PERSIST_FAILED: {exc}"
-    emit_review_cycles_exhausted(
-        getattr(ctx, "event_queue", None), state_root, surface="plan_review", task_id=task_id,
-        cycles_paid=cycles_paid, cap=cap, enforcement=enforcement, fingerprint=fingerprint,
-    )
-    ctx.emit_progress_fn(
-        f"📐 plan_task: PLAN_REVIEW_CYCLES_EXHAUSTED — {cycles_paid}/{cap} paid cycles spent ({enforcement})."
-    )
-    body = (
-        _render_wave(current, cap=cap, cycles_paid=cycles_paid, enforcement=enforcement,
-                     cached=True, reminder=reminder)
-        if current
-        # No live wave for THIS envelope (a fresh spec submitted at a spent cap): the
-        # host still owns exactly one control line, and it can never be a closed one.
-        else (f"{reminder}\n\n" if reminder else "") + PLAN_REVIEW_CONTROL_PREFIX + json.dumps(
-            {"outcome": "REVISE_PLAN", "closed": False}, ensure_ascii=False
-        )
-    )
-    head = (
-        f"⚠️ PLAN_REVIEW_CYCLES_EXHAUSTED: {cycles_paid} of {cap} paid plan-review cycles are spent "
-        "for this task; no reviewer was called and no cycle was consumed. "
-    )
-    if enforcement == "blocking":
-        head += (
-            "Blocking enforcement: the plan review stays OPEN, so implementation stays held — but "
-            "finalization is RELEASED so the task can end honestly instead of waiting for a panel it "
-            "can no longer buy (owner decision D27). Your exits are an owner unstick (Swarm/hurry), a "
-            "revised spec once the owner raises OUROBOROS_REVIEW_MAX_CYCLES, or finalizing now with "
-            "outcome_tier=blocked_with_evidence. Do not start the work under an open blocking review."
-        )
-    else:
-        head += (
-            "Advisory enforcement: you may proceed with the review open; the host records and "
-            "discloses it loudly (typed event review_cycles_exhausted)."
-        )
-    return head + "\n\n" + body
-
-
 # ---------------------------------------------------------------------- disposition
+
+
+def _reuse_or_disposition_plan_review(
+    ctx: ToolContext,
+    fingerprint: str,
+    review_disposition: Optional[dict],
+    existing: Optional[dict] = None,
+    *,
+    cap: Optional[int] = None,
+    cycles_paid: int = 0,
+    enforcement: str = "",
+    reminder: str = "",
+) -> Optional[str]:
+    """The two $0 no-panel answers about one recorded wave (D02 seam).
+
+    A disposition envelope answers the named wave's findings; an identical
+    fingerprint replays the recorded wave (``existing``, supplied by the engine
+    with its rendering context). Either way the answer leaves through the typed
+    projection, so the rendered text and the structured control state travel
+    together; ``None`` means "no reuse — run the panel"."""
+    if review_disposition is not None:
+        return _apply_disposition(ctx, review_disposition)
+    if existing is None or str(existing.get("request_fingerprint") or "") != fingerprint:
+        return None
+    return _publish_wave(ctx, existing, cap=cap, cycles_paid=cycles_paid,
+                         enforcement=enforcement, cached=True, reminder=reminder)
 
 
 def _apply_disposition(ctx: ToolContext, disposition: dict) -> str:
@@ -953,8 +919,8 @@ def _apply_disposition(ctx: ToolContext, disposition: dict) -> str:
             "No plan attempt was recorded."
         )
     if wave.get("closed"):
-        return _render_wave(wave, cap=cap, cycles_paid=cycles_paid, enforcement=enforcement, cached=True,
-                            notes=["already_closed: this wave is closed; the disposition is not re-applied"])
+        return _publish_wave(ctx, wave, cap=cap, cycles_paid=cycles_paid, enforcement=enforcement, cached=True,
+                             notes=["already_closed: this wave is closed; the disposition is not re-applied"])
     raw_items = disposition.get("items")
     if not isinstance(raw_items, list):
         return "ERROR: PLAN_REVIEW_DISPOSITION_INVALID: items must be an array"
@@ -990,10 +956,8 @@ def _apply_disposition(ctx: ToolContext, disposition: dict) -> str:
         f"📐 plan_task: disposition recorded — {'closed' if closure['closed'] else 'still open'} "
         f"({len(closure['open_ids'])} open finding id(s); no reviewer call, no cycle)."
     )
-    return _render_wave(stored, cap=cap, cycles_paid=cycles_paid, enforcement=enforcement,
-                        notes=list(closure["notes"]))
+    return _publish_wave(ctx, stored, cap=cap, cycles_paid=cycles_paid, enforcement=enforcement,
+                         notes=list(closure["notes"]))
 
 
 # ------------------------------------------------------------------------ rendering
-
-

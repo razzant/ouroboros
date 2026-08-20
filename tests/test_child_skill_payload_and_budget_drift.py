@@ -362,7 +362,7 @@ class TestBudgetDriftOpenRouterOnly:
         )
         sup_state.update_budget_from_usage({})
 
-        text = sup_state.status_text(sup_state.load_state(), [], {}, 60, 120)
+        text = sup_state.status_text(sup_state.load_state(), [], {})
         assert "budget_drift" in text
         assert "openrouter tracked: $30.00" in text
         # The all-provider delta ($130) must not masquerade as the tracked side.

@@ -21,6 +21,10 @@ import logging
 from ouroboros import model_concurrency
 from ouroboros.deadline_utils import seconds_until
 from ouroboros.llm import LLMClient, LocalContextTooLargeError, add_usage
+from ouroboros.llm_attempt import (  # the typed-refusal contract's owner, not a copy of it
+    PROVIDER_POLICY_REFUSAL,
+    _is_provider_policy_refusal,
+)
 from ouroboros.observability import new_call_id, new_execution_id, persist_call
 from ouroboros.pricing import emit_llm_usage_event, estimate_cost_optional, infer_model_category
 from ouroboros.usage_accounting import (
@@ -561,6 +565,20 @@ def classify_llm_exception(exc: Exception, safe_error: str = "") -> LlmErrorClas
         )
     status_code = _exception_status_code(exc)
     provider_code = _exception_provider_code(exc, safe)
+    # Same structured contract, a different fact: a policy layer would not let this
+    # call reach a provider at all. Nothing upstream answered, so retrying the
+    # UNCHANGED request only re-runs the refusal — the class is permanent by type,
+    # exactly as the recovery ladder already treats it (llm_attempt.
+    # ProviderPolicyRefusal). Read through the owner's predicate so class and
+    # declared-code shapes stay one contract, and so it outranks every heuristic
+    # below: a refusal carries no provider prose worth guessing from.
+    if _is_provider_policy_refusal(exc):
+        return LlmErrorClassification(
+            PROVIDER_POLICY_REFUSAL,
+            False,
+            status_code,
+            provider_code or PROVIDER_POLICY_REFUSAL,
+        )
     low = str(safe or "").lower()
     if provider_code.lower() in _STRUCTURED_CONTEXT_OVERFLOW_CODES:
         return LlmErrorClassification("context_overflow", False, status_code, provider_code)

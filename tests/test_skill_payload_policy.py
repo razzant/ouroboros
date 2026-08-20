@@ -37,7 +37,7 @@ def test_resolve_payload_path_legacy_wrapper_matches_policy(tmp_path):
 def test_owner_state_policy_matches_legacy_wrappers(tmp_path, monkeypatch):
     from ouroboros import config as cfg
     from ouroboros.gateway import files as gateway_files
-    from ouroboros.tools import core
+    from ouroboros.tools import core_file_tools as core
 
     data_root = tmp_path / "data"
     monkeypatch.setattr(cfg, "DATA_DIR", data_root, raising=True)
@@ -128,20 +128,24 @@ def test_registry_heal_sidecar_wrapper_uses_shared_control_filenames():
 
 def test_registry_shell_guard_keeps_legacy_control_dir_subset(tmp_path):
     from ouroboros.tools.registry import ToolRegistry
+    from ouroboros.tools.registry_guard_process import _run_shell_safety_check
 
     repo = tmp_path / "repo"
     drive = tmp_path / "data"
     repo.mkdir()
     drive.mkdir()
     reg = ToolRegistry(repo_dir=repo, drive_root=drive)
-    blocked = reg._run_shell_safety_check(
+    blocked = _run_shell_safety_check(
+        reg,
         {"cmd": "rm data/skills/external/alpha/.self_authored.json"},
         "advanced",
     )
     assert blocked is not None
-    assert "SAFETY_VIOLATION" in blocked
+    assert blocked.code == "SAFETY_VIOLATION"
+    assert "SAFETY_VIOLATION" in blocked.text
 
-    allowed = reg._run_shell_safety_check(
+    allowed = _run_shell_safety_check(
+        reg,
         {"cmd": "rm data/skills/external/alpha/__pycache__/plugin.pyc"},
         "advanced",
     )

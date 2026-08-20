@@ -409,7 +409,7 @@ def _read_file_parity_block(ctx: Any, fp: "pathlib.Path") -> str:
     import pathlib as _pl
     restricted = False
     try:
-        from ouroboros.tools.core import is_restricted_subagent_profile
+        from ouroboros.tools.core_file_tools import is_restricted_subagent_profile
         restricted = bool(is_restricted_subagent_profile(ctx))
     except Exception:
         restricted = False
@@ -469,11 +469,8 @@ def _read_file_parity_block(ctx: Any, fp: "pathlib.Path") -> str:
             pass
         if restricted:
             try:
-                from ouroboros.tools.core import (
-                    _is_skill_owner_state_target,
-                    _is_subagent_secret_data_path,
-                    is_skill_owner_state_alias,
-                )
+                from ouroboros.contracts.skill_payload_policy import is_skill_owner_state_alias
+                from ouroboros.tools.core_file_tools import _is_skill_owner_state_target, _is_subagent_secret_data_path
                 if (
                     _is_subagent_secret_data_path(rel)
                     or _is_skill_owner_state_target(fp, data_root)
@@ -484,7 +481,7 @@ def _read_file_parity_block(ctx: Any, fp: "pathlib.Path") -> str:
                 pass
     if restricted:
         try:
-            from ouroboros.tools.core import _is_subagent_secret_repo_target
+            from ouroboros.tools.core_file_tools import _is_subagent_secret_repo_target
             from ouroboros.tools.registry import active_repo_dir_for
             repo_roots = []
             try:
@@ -654,7 +651,7 @@ def attach_local_image_to_context(ctx: ToolContext, path: str) -> Tuple[bool, st
         source_path = str(pathlib.Path(path).expanduser().resolve())
 
     caption = f"[image: {src_name}]"
-    from ouroboros.loop import _append_or_merge_user_content
+    from ouroboros.loop_messages import _append_or_merge_user_content
 
     _append_or_merge_user_content(messages, [
         {"type": "text", "text": caption},

@@ -1,18 +1,31 @@
 import importlib.util
 import pathlib
 import struct
+import sys
+
+
+SKILL_DIR = pathlib.Path(__file__).resolve().parents[1] / "skills" / "unix_computer_use"
 
 
 def _load_plugin():
-    root = pathlib.Path(__file__).resolve().parents[1]
+    # Package-style spec, exactly as ouroboros/extension_loader.py loads a skill
+    # entry point: plugin.py imports its sibling leaves under
+    # skills/unix_computer_use/lib/, which needs submodule search locations.
     spec = importlib.util.spec_from_file_location(
         "unix_computer_use_plugin",
-        root / "skills" / "unix_computer_use" / "plugin.py",
+        SKILL_DIR / "plugin.py",
+        submodule_search_locations=[str(SKILL_DIR)],
     )
     mod = importlib.util.module_from_spec(spec)
     assert spec and spec.loader
+    sys.modules[spec.name] = mod
     spec.loader.exec_module(mod)
     return mod
+
+
+def _remote_owner(mod):
+    """The module that now owns the remote-backend methods (v7 stream W split)."""
+    return sys.modules[mod.__name__ + ".lib.cu_remote_backends"]
 
 
 class _API:
@@ -224,7 +237,13 @@ def test_disabled_active_connection_fails_closed(tmp_path, monkeypatch):
     impl.add_connection(name="osw", backend="osworld_http", target="http://127.0.0.1:5000", activate=True, enabled=False)
 
     # Local backends must never be invoked for a disabled remote connection.
-    monkeypatch.setattr(mod, "_run", lambda *a, **k: (_ for _ in ()).throw(AssertionError("local _run called")))
+    # `_run` now has one owner (lib/cu_runtime) and two importers, so guard both
+    # the plugin's local-input path and the remote-backend leaf.
+    def _no_local_run(*_a, **_k):
+        raise AssertionError("local _run called")
+
+    monkeypatch.setattr(mod, "_run", _no_local_run)
+    monkeypatch.setattr(_remote_owner(mod), "_run", _no_local_run)
 
     for out in (impl.click(x=1, y=1), impl.screenshot(), impl.remote_exec(command="ls")):
         parsed = _json_mod.loads(out)

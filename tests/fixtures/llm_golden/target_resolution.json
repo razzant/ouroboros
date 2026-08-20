@@ -1,0 +1,395 @@
+{
+  "cases": [
+    {
+      "id": "target.openrouter_default",
+      "route": "un-prefixed model -> OpenRouter target with the Ouroboros header set",
+      "spec": {
+        "env": {
+          "OPENROUTER_API_KEY": "or-fixture-key"
+        },
+        "call": {
+          "kind": "resolve_target",
+          "model": "x-ai/grok-4.5"
+        }
+      },
+      "expected": {
+        "returned": {
+          "value": {
+            "provider": "openrouter",
+            "resolved_model": "x-ai/grok-4.5",
+            "usage_model": "x-ai/grok-4.5",
+            "api_key": "or-fixture-key",
+            "base_url": "https://openrouter.ai/api/v1",
+            "default_headers": {
+              "HTTP-Referer": "https://ouroboros.local/",
+              "X-Title": "Ouroboros"
+            },
+            "supports_openrouter_extensions": true,
+            "supports_generation_cost": true
+          },
+          "value_sha256": "b95fcebc3e3fe2cef1159d778825776764a9201528a0f1aac8017e89e9bea7bc"
+        },
+        "sends": [],
+        "unused_script_steps": 0
+      }
+    },
+    {
+      "id": "target.openrouter_explicit_prefix",
+      "route": "openrouter:: prefix strips to the bare OpenRouter model",
+      "spec": {
+        "env": {
+          "OPENROUTER_API_KEY": "or-fixture-key"
+        },
+        "call": {
+          "kind": "resolve_target",
+          "model": "openrouter::anthropic/claude-sonnet-4.6"
+        }
+      },
+      "expected": {
+        "returned": {
+          "value": {
+            "provider": "openrouter",
+            "resolved_model": "anthropic/claude-sonnet-4.6",
+            "usage_model": "anthropic/claude-sonnet-4.6",
+            "api_key": "or-fixture-key",
+            "base_url": "https://openrouter.ai/api/v1",
+            "default_headers": {
+              "HTTP-Referer": "https://ouroboros.local/",
+              "X-Title": "Ouroboros"
+            },
+            "supports_openrouter_extensions": true,
+            "supports_generation_cost": true
+          },
+          "value_sha256": "506c9281eefe9c7959d90e198f8582d0433fa313594e17747274d41c0f3c5fd9"
+        },
+        "sends": [],
+        "unused_script_steps": 0
+      }
+    },
+    {
+      "id": "target.openrouter_client_override",
+      "route": "constructor api_key/base_url override the env-resolved route",
+      "spec": {
+        "env": {
+          "OPENROUTER_API_KEY": "or-fixture-key"
+        },
+        "client": {
+          "api_key": "explicit-fixture-key",
+          "base_url": "https://proxy.invalid/v1"
+        },
+        "call": {
+          "kind": "resolve_target",
+          "model": "x-ai/grok-4.5"
+        }
+      },
+      "expected": {
+        "returned": {
+          "value": {
+            "provider": "openrouter",
+            "resolved_model": "x-ai/grok-4.5",
+            "usage_model": "x-ai/grok-4.5",
+            "api_key": "explicit-fixture-key",
+            "base_url": "https://proxy.invalid/v1",
+            "default_headers": {
+              "HTTP-Referer": "https://ouroboros.local/",
+              "X-Title": "Ouroboros"
+            },
+            "supports_openrouter_extensions": true,
+            "supports_generation_cost": true
+          },
+          "value_sha256": "849997cee2f8c38cefbbe6a5de699350b63f319e639557e8a177d7ac34335e5b"
+        },
+        "sends": [],
+        "unused_script_steps": 0
+      }
+    },
+    {
+      "id": "target.openai_direct",
+      "route": "openai:: resolves the direct OpenAI route",
+      "spec": {
+        "env": {
+          "OPENAI_API_KEY": "openai-fixture-key"
+        },
+        "call": {
+          "kind": "resolve_target",
+          "model": "openai::gpt-5.5"
+        }
+      },
+      "expected": {
+        "returned": {
+          "value": {
+            "provider": "openai",
+            "resolved_model": "gpt-5.5",
+            "usage_model": "openai/gpt-5.5",
+            "api_key": "openai-fixture-key",
+            "base_url": "https://api.openai.com/v1",
+            "default_headers": {},
+            "supports_openrouter_extensions": false,
+            "supports_generation_cost": false
+          },
+          "value_sha256": "e43c41c3ae4d31acbffa76949c1bd754f9401e457ef76a9ff353024ac3ad1e6b"
+        },
+        "sends": [],
+        "unused_script_steps": 0
+      }
+    },
+    {
+      "id": "target.anthropic_direct_alias",
+      "route": "anthropic:: normalises the model id and pins the native base url",
+      "spec": {
+        "env": {
+          "ANTHROPIC_API_KEY": "anthropic-fixture-key"
+        },
+        "call": {
+          "kind": "resolve_target",
+          "model": "anthropic::claude-sonnet-4-6"
+        }
+      },
+      "expected": {
+        "returned": {
+          "value": {
+            "provider": "anthropic",
+            "resolved_model": "claude-sonnet-4-6",
+            "usage_model": "anthropic/claude-sonnet-4-6",
+            "api_key": "anthropic-fixture-key",
+            "base_url": "https://api.anthropic.com/v1",
+            "default_headers": {},
+            "supports_openrouter_extensions": false,
+            "supports_generation_cost": false
+          },
+          "value_sha256": "d6566566250b8ec2e636099df8cf6e1712c9dea201117b8d83015dbda5b26de0"
+        },
+        "sends": [],
+        "unused_script_steps": 0
+      }
+    },
+    {
+      "id": "target.minimax_region",
+      "route": "minimax:: resolves the region endpoint",
+      "spec": {
+        "env": {
+          "MINIMAX_API_KEY": "minimax-fixture-key",
+          "MINIMAX_REGION": "global"
+        },
+        "call": {
+          "kind": "resolve_target",
+          "model": "minimax::MiniMax-M2"
+        }
+      },
+      "expected": {
+        "returned": {
+          "value": {
+            "provider": "minimax",
+            "resolved_model": "MiniMax-M2",
+            "usage_model": "minimax/MiniMax-M2",
+            "api_key": "minimax-fixture-key",
+            "base_url": "https://api.minimax.io/v1",
+            "default_headers": {},
+            "supports_openrouter_extensions": false,
+            "supports_generation_cost": false
+          },
+          "value_sha256": "061c2af07a016a1509b3976d923e58357dc1bd3c80a32f25a9c6c55c004a91ed"
+        },
+        "sends": [],
+        "unused_script_steps": 0
+      }
+    },
+    {
+      "id": "target.cloudru_env_base_url",
+      "route": "cloudru:: honours the configured catalog base url",
+      "spec": {
+        "env": {
+          "CLOUDRU_FOUNDATION_MODELS_API_KEY": "cloudru-fixture-key",
+          "CLOUDRU_FOUNDATION_MODELS_BASE_URL": "https://fm.fixture.invalid/v1"
+        },
+        "call": {
+          "kind": "resolve_target",
+          "model": "cloudru::GLM-5"
+        }
+      },
+      "expected": {
+        "returned": {
+          "value": {
+            "provider": "cloudru",
+            "resolved_model": "GLM-5",
+            "usage_model": "cloudru/GLM-5",
+            "api_key": "cloudru-fixture-key",
+            "base_url": "https://fm.fixture.invalid/v1",
+            "default_headers": {},
+            "supports_openrouter_extensions": false,
+            "supports_generation_cost": false
+          },
+          "value_sha256": "b887776394f3c9f528e9603b20e1a06cd1b174c50bf8e57be3c9c1c2ac42af8f"
+        },
+        "sends": [],
+        "unused_script_steps": 0
+      }
+    },
+    {
+      "id": "target.cloudru_default_base_url",
+      "route": "cloudru:: falls back to the shipped catalog endpoint",
+      "spec": {
+        "env": {
+          "CLOUDRU_FOUNDATION_MODELS_API_KEY": "cloudru-fixture-key"
+        },
+        "call": {
+          "kind": "resolve_target",
+          "model": "cloudru::GLM-5"
+        }
+      },
+      "expected": {
+        "returned": {
+          "value": {
+            "provider": "cloudru",
+            "resolved_model": "GLM-5",
+            "usage_model": "cloudru/GLM-5",
+            "api_key": "cloudru-fixture-key",
+            "base_url": "https://foundation-models.api.cloud.ru/v1",
+            "default_headers": {},
+            "supports_openrouter_extensions": false,
+            "supports_generation_cost": false
+          },
+          "value_sha256": "96963b265e7d38a998725d776580e942da64e97585e2a9b0e5b54d3aca633f02"
+        },
+        "sends": [],
+        "unused_script_steps": 0
+      }
+    },
+    {
+      "id": "target.gigachat_oauth",
+      "route": "gigachat:: carries credentials/scope/verify for the native library",
+      "spec": {
+        "env": {
+          "GIGACHAT_CREDENTIALS": "gigachat-fixture-key",
+          "GIGACHAT_SCOPE": "GIGACHAT_API_CORP",
+          "GIGACHAT_VERIFY_SSL_CERTS": "0"
+        },
+        "call": {
+          "kind": "resolve_target",
+          "model": "gigachat::GigaChat-3-Pro"
+        }
+      },
+      "expected": {
+        "returned": {
+          "value": {
+            "provider": "gigachat",
+            "resolved_model": "GigaChat-3-Pro",
+            "usage_model": "gigachat/GigaChat-3-Pro",
+            "api_key": "gigachat-fixture-key",
+            "user": "",
+            "password": "",
+            "base_url": "https://api.giga.chat/v1",
+            "scope": "GIGACHAT_API_CORP",
+            "verify_ssl_certs": false,
+            "default_headers": {},
+            "supports_openrouter_extensions": false,
+            "supports_generation_cost": false
+          },
+          "value_sha256": "453d1026d62dfc53db7dd596e6431686e076f63dd1509193795f35cc7d7479d7"
+        },
+        "sends": [],
+        "unused_script_steps": 0
+      }
+    },
+    {
+      "id": "target.gigachat_basic_auth",
+      "route": "gigachat:: user/password basic auth against an internal endpoint",
+      "spec": {
+        "env": {
+          "GIGACHAT_USER": "fixture-user",
+          "GIGACHAT_PASSWORD": "fixture-password",
+          "GIGACHAT_BASE_URL": "https://giga.fixture.invalid/v1"
+        },
+        "call": {
+          "kind": "resolve_target",
+          "model": "gigachat::GigaChat-3-Pro"
+        }
+      },
+      "expected": {
+        "returned": {
+          "value": {
+            "provider": "gigachat",
+            "resolved_model": "GigaChat-3-Pro",
+            "usage_model": "gigachat/GigaChat-3-Pro",
+            "api_key": "",
+            "user": "fixture-user",
+            "password": "fixture-password",
+            "base_url": "https://giga.fixture.invalid/v1",
+            "scope": "GIGACHAT_API_PERS",
+            "verify_ssl_certs": true,
+            "default_headers": {},
+            "supports_openrouter_extensions": false,
+            "supports_generation_cost": false
+          },
+          "value_sha256": "d60f7ebb59dcfbefbbe1fbb0495edb16dd75cdd598e99cd9a095371a1a53b7f0"
+        },
+        "sends": [],
+        "unused_script_steps": 0
+      }
+    },
+    {
+      "id": "target.openai_compatible_explicit",
+      "route": "openai-compatible:: prefers its own key/base url",
+      "spec": {
+        "env": {
+          "OPENAI_COMPATIBLE_API_KEY": "compatible-fixture-key",
+          "OPENAI_COMPATIBLE_BASE_URL": "https://vllm.fixture.invalid/v1",
+          "OPENAI_API_KEY": "openai-fixture-key",
+          "OPENAI_BASE_URL": "https://legacy.fixture.invalid/v1"
+        },
+        "call": {
+          "kind": "resolve_target",
+          "model": "openai-compatible::glm-5"
+        }
+      },
+      "expected": {
+        "returned": {
+          "value": {
+            "provider": "openai-compatible",
+            "resolved_model": "glm-5",
+            "usage_model": "openai-compatible/glm-5",
+            "api_key": "compatible-fixture-key",
+            "base_url": "https://vllm.fixture.invalid/v1",
+            "default_headers": {},
+            "supports_openrouter_extensions": false,
+            "supports_generation_cost": false
+          },
+          "value_sha256": "b1a9cac753fd05a4d392dfacb460da2019ac80c00206bc3da3691f0981bc5ad8"
+        },
+        "sends": [],
+        "unused_script_steps": 0
+      }
+    },
+    {
+      "id": "target.openai_compatible_legacy_env",
+      "route": "openai-compatible:: falls back to the legacy OPENAI_* pair",
+      "spec": {
+        "env": {
+          "OPENAI_API_KEY": "openai-fixture-key",
+          "OPENAI_BASE_URL": "https://legacy.fixture.invalid/v1"
+        },
+        "call": {
+          "kind": "resolve_target",
+          "model": "openai-compatible::glm-5"
+        }
+      },
+      "expected": {
+        "returned": {
+          "value": {
+            "provider": "openai-compatible",
+            "resolved_model": "glm-5",
+            "usage_model": "openai-compatible/glm-5",
+            "api_key": "openai-fixture-key",
+            "base_url": "https://legacy.fixture.invalid/v1",
+            "default_headers": {},
+            "supports_openrouter_extensions": false,
+            "supports_generation_cost": false
+          },
+          "value_sha256": "0b251390b23910d43711ca7ca4045c4a9868db9b6a09f2ad7ec33a8cf9c5ef9e"
+        },
+        "sends": [],
+        "unused_script_steps": 0
+      }
+    }
+  ]
+}

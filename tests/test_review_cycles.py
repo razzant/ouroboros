@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import json
 import logging
+import os
 import pathlib
 import types
 
@@ -35,6 +36,22 @@ def _clean_env(monkeypatch):
     monkeypatch.delenv(LEGACY, raising=False)
     monkeypatch.setattr(rc, "_WARNED", set())
     yield
+
+
+@pytest.fixture()
+def isolated_environ():
+    """Own the whole environment copy for tests that drive the REAL
+    ``config.apply_settings_to_env`` (it writes ``os.environ`` directly for every
+    registered settings key — that is its job in the server, so the test must
+    contain it). ``monkeypatch.delenv(KEY, raising=False)`` on an ABSENT key
+    records nothing to undo, so it cannot restore what the projection writes.
+    Proven leak: the roundtrip test below left ``OUROBOROS_REVIEW_MAX_CYCLES="3"``
+    behind, silently raising the shared-cap default under
+    ``test_review_verification_v6544.py::test_improvement_passes_bounded_by_count_without_deadline``."""
+    before = dict(os.environ)
+    yield
+    os.environ.clear()
+    os.environ.update(before)
 
 
 # ---------------------------------------------------------------------------
@@ -94,10 +111,10 @@ def test_getter_env_or_default_and_fail_closed_logged_once(monkeypatch, caplog):
     assert rc.review_max_cycles() == 2
 
 
-def test_settings_file_roundtrip_projects_unlimited_into_env(monkeypatch, tmp_path):
-    # apply_settings_to_env writes os.environ directly; register the key with monkeypatch
-    # first so the projected value is restored after the test (no cross-test leak).
-    monkeypatch.delenv(KEY, raising=False)
+def test_settings_file_roundtrip_projects_unlimited_into_env(monkeypatch, tmp_path, isolated_environ):
+    # apply_settings_to_env writes os.environ directly for EVERY registered settings
+    # key; isolated_environ owns the whole copy (a delenv on an absent key records
+    # nothing and restored nothing — the projected "3" used to leak process-wide).
     settings_path = tmp_path / "settings.json"
     settings_path.write_text(json.dumps({KEY: "unlimited"}), encoding="utf-8")
     monkeypatch.setattr(cfg, "SETTINGS_PATH", settings_path)
@@ -309,7 +326,7 @@ def test_settings_ui_knob_and_js_binding():
     assert ui.index("<h3>Task Result Review</h3>") < ui.index("<h3>Max Review Cycles</h3>") < ui.index("<h3>Image Input</h3>")
 
 
-def test_legacy_acceptance_key_migrates_into_the_shared_knob(tmp_path, monkeypatch):
+def test_legacy_acceptance_key_migrates_into_the_shared_knob(tmp_path, monkeypatch, isolated_environ):
     """The deprecated acceptance key is a RENAME ALIAS, migrated at load like the retention
     keys — never a runtime branch that could not tell a deliberate "2" from an untouched
     default (production gate finding, 2026-08-16)."""

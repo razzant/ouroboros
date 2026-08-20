@@ -65,7 +65,11 @@ def _post(payload):
 
 
 def _bypass_accounting(monkeypatch):
-    import ouroboros.llm as llm_module
+    # The v7 split moved the candidate executor out of llm.py: `_execute_candidate`
+    # lives in llm_attempt.py and reads `execute_physical_attempt` from THAT module,
+    # so patching the name llm.py merely re-exports would be a dead patch that never
+    # intercepts anything. Same seam, named at its owner.
+    import ouroboros.llm_attempt as llm_attempt
 
     observed = []
 
@@ -73,7 +77,7 @@ def _bypass_accounting(monkeypatch):
         observed.append((request, current_usage_scope()))
         return send()
 
-    monkeypatch.setattr(llm_module, "execute_physical_attempt", execute)
+    monkeypatch.setattr(llm_attempt, "execute_physical_attempt", execute)
     return observed
 
 

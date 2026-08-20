@@ -207,25 +207,29 @@ def test_server_navigation_and_chat_static_contracts():
     assert 'request.query_params.get("force")' in control_source
     assert "window.dispatchEvent(new CustomEvent('ouro:page-shown', { detail: { page: pageName } }));" in app_source
     assert "evo-runtime-detail" in evo_source
-    assert "data?.evolution_state?.detail" in chat_source
-    assert "data?.bg_consciousness_state?.detail" in chat_source
+    header_controls = _read("web/modules/chat_header_controls.js")
+    assert "data?.evolution_state?.detail" in header_controls
+    assert "data?.bg_consciousness_state?.detail" in header_controls
     assert re.search(r'<input[^>]+id="chat-file-input"[^>]+multiple', chat_source)
-    assert "MAX_PENDING_ATTACHMENTS = 10" in chat_source
-    assert "MAX_ATTACHMENT_FILE_BYTES = 50 * 1024 * 1024" in chat_source
-    assert "MAX_PENDING_ATTACHMENT_BYTES = 100 * 1024 * 1024" in chat_source
-    assert "pendingAttachments" in chat_source
-    assert "attachmentsUploading" in chat_source
+    # The attachment staging cluster moved to its own owner (W3 wave D); the
+    # pinned strings are unchanged and chat.js keeps the send-path consumers.
+    attachments_source = _read("web/modules/chat_attachments.js")
+    assert "MAX_PENDING_ATTACHMENTS = 10" in attachments_source
+    assert "MAX_ATTACHMENT_FILE_BYTES = 50 * 1024 * 1024" in attachments_source
+    assert "MAX_PENDING_ATTACHMENT_BYTES = 100 * 1024 * 1024" in attachments_source
+    assert "pendingAttachments" in attachments_source
+    assert "attachmentsUploading" in attachments_source
     assert "setAttachmentUploadState" in chat_source
-    assert "attachBtn.classList.toggle('uploading', uploading)" in chat_source
-    assert "input.disabled = uploading;" in chat_source
+    assert "attachBtn.classList.toggle('uploading', uploading)" in attachments_source
+    assert "input.disabled = uploading;" in attachments_source
     assert "cleanupUploadedAttachments" in chat_source
-    assert "method: 'DELETE'" in chat_source
+    assert "method: 'DELETE'" in attachments_source
     assert "await cleanupUploadedAttachments(uploaded);" in chat_source
     assert "await cleanupUploadedAttachments(uploadedAttachments);" in chat_source
     assert "ws.send({" in chat_source and "{ queue: false }" in chat_source
     assert "result?.status !== 'sent'" in chat_source
-    assert "data-attachment-remove" in chat_source
-    assert "Promise.allSettled" in chat_source
+    assert "data-attachment-remove" in attachments_source
+    assert "Promise.allSettled" in attachments_source
     assert '>Loading…</span>' in chat_source
     assert "syncHeaderControlState({ accounting: { available: false } });" in chat_source
     assert "budget_text: 'Connecting...'" not in chat_source

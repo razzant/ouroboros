@@ -1,7 +1,7 @@
 """Phase B of the delegation-substrate sprint (owner decisions 2A/3A/5A/7A).
 
-B1: the dispatch-time executor note (moved whole to `subagent_dispatch_notes`,
-re-exported by `agent`) conditionally supersedes native-self-execution framing —
+B1: the dispatch-time executor note (v7 home `agent_dispatch`, re-exported by
+`agent`) conditionally supersedes native-self-execution framing —
 and ONLY on the final post-preflight harness dispatch. B2: the frozen acting
 preamble states the write-root boundary without the "do it yourself" imperative.
 B3: a really-INJECTED finalization nudge is durably stamped by the worker, and a
@@ -43,7 +43,7 @@ def _resolution(executor="harness", reason="harness_ready", route="claude"):
 
 
 def test_dispatch_note_override_rides_only_the_harness_branch():
-    from ouroboros.subagent_dispatch_notes import dispatch_executor_note
+    from ouroboros.agent_dispatch import dispatch_executor_note
 
     note = dispatch_executor_note(_resolution())
     # The conditional supersede paragraph (owner decision 2A, verbatim wording).
@@ -66,11 +66,11 @@ def test_dispatch_note_override_rides_only_the_harness_branch():
 
 
 def test_agent_reexports_the_moved_note_pair():
-    # F7: the pair moved whole to the new module; the byte-pinned transport
+    # F7: the pair lives in the v7 dispatch-seam leaf; the byte-pinned transport
     # suite imports both from ouroboros.agent, so the re-export must be the
     # SAME objects under the same names.
     import ouroboros.agent as agent
-    import ouroboros.subagent_dispatch_notes as notes
+    import ouroboros.agent_dispatch as notes
 
     assert agent.dispatch_executor_note is notes.dispatch_executor_note
     assert agent.executor_blocked_outcome is notes.executor_blocked_outcome

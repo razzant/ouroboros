@@ -10,11 +10,12 @@ import types as _t
 from pathlib import Path
 
 from ouroboros import loop as L
+from ouroboros import loop_nudges
 
 
 def _ctx_tools(monkeypatch, expected_output="The answer is 42", answer_protocol="final_answer_line"):
     # Pre-latch the earlier nudges so we exercise the A3 / marker decision in isolation.
-    monkeypatch.setattr(L, "_skill_finalization_message", lambda *a, **k: "")
+    monkeypatch.setattr(loop_nudges, "_skill_finalization_message", lambda *a, **k: "")
     contract = {"expected_output": expected_output}
     if answer_protocol:
         contract["answer_protocol"] = answer_protocol

@@ -1,0 +1,378 @@
+{
+  "cases": [
+    {
+      "id": "openai.payload.reasoning_model",
+      "route": "direct OpenAI reasoning model: max_completion_tokens, reasoning_effort, prompt_cache_key",
+      "spec": {
+        "env": {
+          "OPENAI_API_KEY": "openai-fixture-key"
+        },
+        "call": {
+          "kind": "build_kwargs",
+          "model": "openai::gpt-5.5",
+          "args": {
+            "messages": [
+              {
+                "role": "system",
+                "content": [
+                  {
+                    "type": "text",
+                    "text": "stable policy prefix",
+                    "cache_control": {
+                      "type": "ephemeral"
+                    }
+                  }
+                ]
+              },
+              {
+                "role": "user",
+                "content": "hello"
+              }
+            ],
+            "reasoning_effort": "high",
+            "tools": [
+              {
+                "type": "function",
+                "function": {
+                  "name": "read_file",
+                  "description": "read",
+                  "parameters": {
+                    "type": "object",
+                    "properties": {
+                      "path": {
+                        "type": "string"
+                      }
+                    }
+                  }
+                }
+              },
+              {
+                "type": "function",
+                "function": {
+                  "name": "apply_patch",
+                  "description": [
+                    "two ",
+                    "parts"
+                  ],
+                  "parameters": {
+                    "type": "object"
+                  }
+                }
+              }
+            ],
+            "response_format": {
+              "type": "json_object"
+            },
+            "temperature": 0.2
+          }
+        }
+      },
+      "expected": {
+        "returned": {
+          "value": {
+            "model": "gpt-5.5",
+            "messages": [
+              {
+                "role": "system",
+                "content": [
+                  {
+                    "type": "text",
+                    "text": "stable policy prefix"
+                  }
+                ]
+              },
+              {
+                "role": "user",
+                "content": "hello"
+              }
+            ],
+            "max_completion_tokens": 1024,
+            "prompt_cache_key": "ouroboros-64f555a52bd55e9c12f936a6d7f54e8f",
+            "reasoning_effort": "high",
+            "temperature": 0.2,
+            "response_format": {
+              "type": "json_object"
+            },
+            "tools": [
+              {
+                "type": "function",
+                "function": {
+                  "name": "apply_patch",
+                  "description": "two parts",
+                  "parameters": {
+                    "type": "object"
+                  }
+                }
+              },
+              {
+                "type": "function",
+                "function": {
+                  "name": "read_file",
+                  "description": "read",
+                  "parameters": {
+                    "type": "object",
+                    "properties": {
+                      "path": {
+                        "type": "string"
+                      }
+                    }
+                  }
+                }
+              }
+            ],
+            "tool_choice": "auto"
+          },
+          "value_sha256": "6d66f9cd4dee0965d63f0923a6e861eb00f0b4288a25a2cd2ec07c76de6fabf0"
+        },
+        "sends": [],
+        "unused_script_steps": 0
+      }
+    },
+    {
+      "id": "openai.payload.legacy_model_keeps_max_tokens",
+      "route": "a non-reasoning OpenAI model keeps max_tokens and gets no effort carrier",
+      "spec": {
+        "env": {
+          "OPENAI_API_KEY": "openai-fixture-key"
+        },
+        "call": {
+          "kind": "build_kwargs",
+          "model": "openai::gpt-4.1",
+          "args": {
+            "messages": [
+              {
+                "role": "system",
+                "content": "stable policy prefix"
+              },
+              {
+                "role": "user",
+                "content": "hello"
+              }
+            ]
+          }
+        }
+      },
+      "expected": {
+        "returned": {
+          "value": {
+            "model": "gpt-4.1",
+            "messages": [
+              {
+                "role": "system",
+                "content": "stable policy prefix"
+              },
+              {
+                "role": "user",
+                "content": "hello"
+              }
+            ],
+            "max_tokens": 1024,
+            "prompt_cache_key": "ouroboros-dba6c20b213262d1491e5af73f258c9e"
+          },
+          "value_sha256": "d367fe2399f63fb02637615d60362b7843fc4e062cb0b997c950b2766593d8be"
+        },
+        "sends": [],
+        "unused_script_steps": 0
+      }
+    },
+    {
+      "id": "openai.payload.reasoning_metadata_stripped",
+      "route": "the direct lane scrubs replayed reasoning artefacts strict servers reject",
+      "spec": {
+        "env": {
+          "OPENAI_API_KEY": "openai-fixture-key"
+        },
+        "call": {
+          "kind": "build_kwargs",
+          "model": "openai::gpt-5.5",
+          "args": {
+            "messages": [
+              {
+                "role": "user",
+                "content": "hi"
+              },
+              {
+                "role": "assistant",
+                "content": "a",
+                "reasoning": "r",
+                "reasoning_details": [
+                  {
+                    "type": "x"
+                  }
+                ],
+                "reasoning_content": "rc",
+                "response_id": "resp_1"
+              }
+            ]
+          }
+        }
+      },
+      "expected": {
+        "returned": {
+          "value": {
+            "model": "gpt-5.5",
+            "messages": [
+              {
+                "role": "user",
+                "content": "hi"
+              },
+              {
+                "role": "assistant",
+                "content": "a"
+              }
+            ],
+            "max_completion_tokens": 1024,
+            "reasoning_effort": "medium"
+          },
+          "value_sha256": "7420df08de724e6bc9e1f8675d15a99d6e9ee2ee90b51a6caf18a2625db44ce1"
+        },
+        "sends": [],
+        "unused_script_steps": 0
+      }
+    },
+    {
+      "id": "openai.dispatch.happy_path",
+      "route": "chat -> direct OpenAI with the estimated-cost projection",
+      "spec": {
+        "env": {
+          "OPENAI_API_KEY": "openai-fixture-key"
+        },
+        "transport": [
+          {
+            "kind": "response",
+            "body": {
+              "id": "gen-fixture-2",
+              "choices": [
+                {
+                  "index": 0,
+                  "finish_reason": "stop",
+                  "message": {
+                    "role": "assistant",
+                    "content": "ok"
+                  }
+                }
+              ],
+              "usage": {
+                "prompt_tokens": 200,
+                "completion_tokens": 10
+              }
+            }
+          }
+        ],
+        "pricing_estimate": 0.0125,
+        "call": {
+          "kind": "method",
+          "name": "chat",
+          "kwargs": {
+            "messages": [
+              {
+                "role": "system",
+                "content": [
+                  {
+                    "type": "text",
+                    "text": "stable policy prefix",
+                    "cache_control": {
+                      "type": "ephemeral"
+                    }
+                  }
+                ]
+              },
+              {
+                "role": "user",
+                "content": "hello"
+              }
+            ],
+            "model": "openai::gpt-5.5",
+            "reasoning_effort": "xhigh"
+          }
+        }
+      },
+      "expected": {
+        "returned": {
+          "message": {
+            "role": "assistant",
+            "content": "ok",
+            "response_id": "gen-fixture-2"
+          },
+          "usage": {
+            "prompt_tokens": 200,
+            "completion_tokens": 10,
+            "provider": "openai",
+            "resolved_model": "openai/gpt-5.5",
+            "cost": 0.0125,
+            "cost_estimated": true,
+            "cost_final": false
+          },
+          "ledger_attempt_count": 1
+        },
+        "sends": [
+          {
+            "transport": "openai.chat.completions.create",
+            "client": {
+              "api_key": "openai-fixture-key",
+              "base_url": "https://api.openai.com/v1",
+              "default_headers": null,
+              "max_retries": 0,
+              "http_client": null
+            },
+            "payload": {
+              "model": "gpt-5.5",
+              "messages": [
+                {
+                  "role": "system",
+                  "content": [
+                    {
+                      "type": "text",
+                      "text": "stable policy prefix"
+                    }
+                  ]
+                },
+                {
+                  "role": "user",
+                  "content": "hello"
+                }
+              ],
+              "max_completion_tokens": 65536,
+              "prompt_cache_key": "ouroboros-64f555a52bd55e9c12f936a6d7f54e8f",
+              "reasoning_effort": "xhigh"
+            },
+            "payload_sha256": "732a821605016ae4837f3619bff61cab76ebe9a5463e3fcb5f3a802bc8e0d2e8"
+          }
+        ],
+        "pricing_calls": [
+          {
+            "model": "openai/gpt-5.5",
+            "prompt_tokens": 200,
+            "completion_tokens": 10,
+            "cache_usage": {
+              "cached_tokens": 0,
+              "cache_write_tokens": 0,
+              "prompt_cache_ttl": null,
+              "cache_write_tokens_by_ttl": null
+            },
+            "allow_live_fetch": true,
+            "provider": "openai"
+          }
+        ],
+        "physical_attempts": [
+          {
+            "source": "llm.chat",
+            "model": "openai/gpt-5.5",
+            "provider": "openai",
+            "candidate_raw_sha256": "732a821605016ae4837f3619bff61cab76ebe9a5463e3fcb5f3a802bc8e0d2e8",
+            "candidate_raw_size_bytes": 263,
+            "candidate_measurement_kind": "canonical_json_v1",
+            "states": [
+              "reserved",
+              "dispatched",
+              "settled"
+            ],
+            "prompt_cache_ttl": "",
+            "cost_final": false
+          }
+        ],
+        "unused_script_steps": 0
+      }
+    }
+  ]
+}

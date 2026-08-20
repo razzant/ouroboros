@@ -5,10 +5,12 @@ avoid duplicated boilerplate (extension-loader cleanup, claude_agent_sdk
 mock installation). They are intentionally plain module-level callables,
 not fixtures — many callers need them at module import time.
 """
+
 from __future__ import annotations
 
 import sys
 import types
+from pathlib import Path
 from unittest.mock import MagicMock
 
 
@@ -47,6 +49,7 @@ def ensure_claude_agent_sdk_mock() -> None:
     import time.
     """
     import importlib.util as _ilu
+
     try:
         spec = _ilu.find_spec("claude_agent_sdk")
         sdk_available = spec is not None
@@ -79,3 +82,18 @@ def make_safe_mock_ctx(tmp_path, *, repo_dir=None):
     ctx.emit_progress_fn = lambda *a, **kw: None
     ctx.task_id = "test-task"
     return ctx
+
+
+def configure_frozen_tool_registry(monkeypatch, tmp_path):
+    """Materialize one build manifest and return the frozen registry class."""
+
+    from ouroboros.tool_module_inventory import build_frozen_tool_manifest
+    from ouroboros.tools import registry as registry_module
+    from ouroboros.tools import registry_core
+
+    manifest = tmp_path / "frozen-tool-modules.json"
+    tools_dir = Path(__file__).resolve().parents[1] / "ouroboros" / "tools"
+    build_frozen_tool_manifest(tools_dir, manifest)
+    monkeypatch.setattr(registry_core, "_FROZEN_TOOL_MANIFEST_PATH", manifest)
+    monkeypatch.setattr(sys, "frozen", True, raising=False)
+    return registry_module.ToolRegistry

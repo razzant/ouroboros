@@ -10,7 +10,13 @@ python-standalone interpreter then runs the agent as a subprocess.
 """
 
 import os
+import pathlib as _pathlib
 import sys
+
+from ouroboros.tool_module_inventory import (
+    FROZEN_TOOL_MANIFEST_NAME as _FROZEN_TOOL_MANIFEST_NAME,
+    build_frozen_tool_manifest as _build_frozen_tool_manifest,
+)
 
 block_cipher = None
 
@@ -52,6 +58,20 @@ from PyInstaller.utils.hooks import collect_all as _collect_all
 _extra_datas = []
 _extra_binaries = []
 _extra_hiddenimports = []
+
+# One side-effect-free source scan owns both PyInstaller's complete direct
+# tools-package closure and the transient handler manifest read by a genuinely
+# frozen ToolRegistry. The manifest is generated only after the build's clean
+# repository gate and is written below the ignored PyInstaller work directory.
+_frozen_tool_manifest_path = (
+    _pathlib.Path("build") / "generated" / _FROZEN_TOOL_MANIFEST_NAME
+)
+_tool_module_inventory = _build_frozen_tool_manifest(
+    _pathlib.Path("ouroboros") / "tools",
+    _frozen_tool_manifest_path,
+)
+_extra_datas.append((str(_frozen_tool_manifest_path), "ouroboros"))
+_extra_hiddenimports.extend(_tool_module_inventory.package_modules)
 
 # Bundle the official, notarized Node.js runtime (pruned to bin/node[.exe]) so
 # skill payloads with runtime=node and the `node --check` preflight work out of

@@ -3,13 +3,12 @@
 from __future__ import annotations
 
 import ast
-import contextlib
 import hashlib
 import os
 import pathlib
 import subprocess
 import tempfile
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace as _dataclass_replace
 from typing import Any, Dict, Iterable, Iterator, List, Mapping, Tuple
 
 from ouroboros.tools.review_helpers import _VENDORED_NAMES, _VENDORED_SUFFIXES
@@ -70,7 +69,11 @@ class GatedFunction:
 
 @dataclass(frozen=True)
 class SizeRatchetManifest:
-    """Parsed data-only size ratchet manifest."""
+    """Parsed data-only size ratchet manifest.
+
+    ``module_debt_1500`` is the optional v7 layer: ``None`` means the layer is
+    not activated; any tuple (including an empty one) means it is active.
+    """
 
     baseline_source_sha: str
     giant_paths: frozenset[str]
@@ -79,6 +82,7 @@ class SizeRatchetManifest:
     band_paths: Mapping[str, str | None]
     byte_baseline_debt: Mapping[str, int]
     byte_debt: Mapping[str, int]
+    module_debt_1500: frozenset[str] | None = None
 
 
 @dataclass(frozen=True)
@@ -91,6 +95,7 @@ class SizeRatchetInventory:
     function_debt: frozenset[tuple[str, str]]
     band_paths: frozenset[str]
     byte_debt: Mapping[str, int]
+    module_debt_1500: frozenset[str]
 
 
 def _exact_repo_relative_path(raw: str | pathlib.Path) -> str:
@@ -170,6 +175,17 @@ def candidate_repo_paths(repo_dir: pathlib.Path) -> tuple[str, ...]:
     return tuple(sorted(path for path in paths if root.joinpath(*pathlib.PurePosixPath(path).parts).exists()))
 
 
+def _gated_module_from_bytes(path: str, raw: bytes) -> GatedModule:
+    """Build one inventory module from exact source bytes.
+
+    Canonical POSIX line endings are applied before counting so checkout policy
+    cannot change the inventory. This is the single decoding/counting owner for
+    both the working tree and immutable Git blobs.
+    """
+    text = raw.decode("utf-8").replace("\r\n", "\n").replace("\r", "\n")
+    return GatedModule(path, len(text.splitlines()), len(text.encode("utf-8")), text)
+
+
 def iter_gated_modules(
     repo_dir: pathlib.Path,
     *,
@@ -202,9 +218,7 @@ def iter_gated_modules(
             path.resolve().relative_to(root)
         except ValueError as exc:
             raise ValueError(f"gated source path escapes repository: {rel}") from exc
-        raw = path.read_bytes()
-        text = raw.decode("utf-8").replace("\r\n", "\n").replace("\r", "\n")
-        yield GatedModule(rel, len(text.splitlines()), len(text.encode("utf-8")), text)
+        yield _gated_module_from_bytes(rel, path.read_bytes())
 
 
 def _iter_lexical_functions(tree: ast.AST, path: str) -> Iterator[GatedFunction]:
@@ -271,6 +285,10 @@ def _iter_gated_functions_from_modules(modules: Iterable[GatedModule]) -> Iterat
             continue
         if any(part in _FUNCTION_SKIP_DIR_NAMES for part in posix.parts[:-1]):
             continue
+        if module.line_count > 0 and not module._source_text:
+            # A ref inventory served from the blob cache carries no source; a
+            # caller re-deriving functions from it must fail here, not report zero.
+            raise ValueError(f"gated Python module carries no source text: {module.path}")
         for function in _module_functions(module):
             key = (function.path, function.qualname)
             if key in seen_keys:
@@ -297,6 +315,69 @@ def collect_size_ratchet_inventory(
     injected = tuple(repo_paths) if repo_paths is not None else None
     modules = tuple(iter_gated_modules(repo_dir, repo_paths=injected))
     functions = tuple(_iter_gated_functions_from_modules(modules))
+    return _inventory_from_members(modules, functions)
+
+
+def _iter_ref_gated_blobs(root: pathlib.Path, ref: str) -> list[tuple[str, str, bytes]]:
+    """Return ``(path, blob id, exact bytes)`` for every gated module at ``ref``."""
+    tree = subprocess.run(
+        ["git", "ls-tree", "-rz", "--full-tree", ref],
+        cwd=root,
+        check=True,
+        capture_output=True,
+    )
+    entries: list[tuple[str, bytes]] = []
+    for record in tree.stdout.split(b"\0"):
+        if not record:
+            continue
+        try:
+            metadata, raw_path = record.split(b"\t", 1)
+            mode, object_type, object_id = metadata.split(b" ", 2)
+        except ValueError as exc:
+            raise ValueError(f"git ls-tree returned a malformed entry at {ref}") from exc
+        path = _exact_repo_relative_path(raw_path.decode("utf-8"))
+        if not _is_gated_module_path(path):
+            continue
+        if object_type != b"blob" or mode not in {b"100644", b"100755"}:
+            raise ValueError(f"gated source at {ref} must be a regular file: {path}")
+        entries.append((path, object_id))
+
+    batch = subprocess.run(
+        ["git", "cat-file", "--batch"],
+        cwd=root,
+        check=True,
+        input=b"".join(object_id + b"\n" for _path, object_id in entries),
+        capture_output=True,
+    ).stdout
+    blobs: list[tuple[str, str, bytes]] = []
+    cursor = 0
+    for path, expected_id in entries:
+        header_end = batch.find(b"\n", cursor)
+        if header_end < 0:
+            raise ValueError(f"git cat-file omitted the header for {path} at {ref}")
+        header = batch[cursor:header_end].split(b" ")
+        if len(header) != 3 or header[0] != expected_id or header[1] != b"blob":
+            raise ValueError(f"git cat-file returned the wrong object for {path} at {ref}")
+        try:
+            size = int(header[2])
+        except ValueError as exc:
+            raise ValueError(f"git cat-file returned an invalid size for {path} at {ref}") from exc
+        blob_start = header_end + 1
+        blob_end = blob_start + size
+        if blob_end >= len(batch) or batch[blob_end : blob_end + 1] != b"\n":
+            raise ValueError(f"git cat-file returned a truncated blob for {path} at {ref}")
+        blobs.append((path, expected_id.decode("ascii"), batch[blob_start:blob_end]))
+        cursor = blob_end + 1
+    if cursor != len(batch):
+        raise ValueError(f"git cat-file returned unexpected trailing data at {ref}")
+    return blobs
+
+
+def _inventory_from_members(
+    modules: tuple[GatedModule, ...],
+    functions: tuple[GatedFunction, ...],
+) -> SizeRatchetInventory:
+    """Assemble the exact inventory projections from one module/function set."""
     return SizeRatchetInventory(
         modules=modules,
         functions=functions,
@@ -308,74 +389,49 @@ def collect_size_ratchet_inventory(
             item.path for item in modules if TARGET_MODULE_LINES < item.line_count <= BAND_MODULE_MAX_LINES
         ),
         byte_debt={item.path: item.utf8_bytes for item in modules if item.utf8_bytes > MAX_MODULE_BYTES},
+        module_debt_1500=frozenset(item.path for item in modules if item.line_count > BAND_MODULE_MAX_LINES),
     )
 
 
-@contextlib.contextmanager
-def _git_source_snapshot(repo_dir: pathlib.Path, ref: str) -> Iterator[tuple[pathlib.Path, tuple[str, ...]]]:
+def collect_size_ratchet_inventory_at_ref(
+    repo_dir: pathlib.Path,
+    ref: str,
+    *,
+    blob_facts: dict[str, tuple[int, int, tuple[GatedFunction, ...]]] | None = None,
+) -> SizeRatchetInventory:
+    """Collect the canonical inventory from immutable Git blobs at ``ref``.
+
+    ``blob_facts`` is an optional caller-owned cache keyed by Git blob id. A
+    blob id is content-addressed, so a cached entry is the same bytes by
+    construction; reusing it across refs makes a multi-commit audit cost only
+    the blobs that actually changed. The projections are byte-identical to a
+    cold walk; only ``GatedModule._source_text`` is not carried for cached
+    blobs, so functions are always taken from the cached parse (re-deriving
+    them from a cached module raises rather than reporting zero).
+    """
     root = pathlib.Path(repo_dir).resolve()
-    with tempfile.TemporaryDirectory(prefix="ouroboros-size-ratchet-") as raw_temp:
-        snapshot = pathlib.Path(raw_temp)
-        tree = subprocess.run(
-            ["git", "ls-tree", "-rz", "--full-tree", ref],
-            cwd=root,
-            check=True,
-            capture_output=True,
-        )
-        entries: list[tuple[str, bytes]] = []
-        for record in tree.stdout.split(b"\0"):
-            if not record:
-                continue
-            try:
-                metadata, raw_path = record.split(b"\t", 1)
-                mode, object_type, object_id = metadata.split(b" ", 2)
-            except ValueError as exc:
-                raise ValueError(f"git ls-tree returned a malformed entry at {ref}") from exc
-            path = _exact_repo_relative_path(raw_path.decode("utf-8"))
-            if not _is_gated_module_path(path):
-                continue
-            if object_type != b"blob" or mode not in {b"100644", b"100755"}:
-                raise ValueError(f"gated source at {ref} must be a regular file: {path}")
-            entries.append((path, object_id))
-
-        batch = subprocess.run(
-            ["git", "cat-file", "--batch"],
-            cwd=root,
-            check=True,
-            input=b"".join(object_id + b"\n" for _path, object_id in entries),
-            capture_output=True,
-        ).stdout
-        cursor = 0
-        paths: list[str] = []
-        for path, expected_id in entries:
-            header_end = batch.find(b"\n", cursor)
-            if header_end < 0:
-                raise ValueError(f"git cat-file omitted the header for {path} at {ref}")
-            header = batch[cursor:header_end].split(b" ")
-            if len(header) != 3 or header[0] != expected_id or header[1] != b"blob":
-                raise ValueError(f"git cat-file returned the wrong object for {path} at {ref}")
-            try:
-                size = int(header[2])
-            except ValueError as exc:
-                raise ValueError(f"git cat-file returned an invalid size for {path} at {ref}") from exc
-            blob_start = header_end + 1
-            blob_end = blob_start + size
-            if blob_end >= len(batch) or batch[blob_end : blob_end + 1] != b"\n":
-                raise ValueError(f"git cat-file returned a truncated blob for {path} at {ref}")
-            destination = snapshot.joinpath(*pathlib.PurePosixPath(path).parts)
-            destination.parent.mkdir(parents=True, exist_ok=True)
-            destination.write_bytes(batch[blob_start:blob_end])
-            paths.append(path)
-            cursor = blob_end + 1
-        if cursor != len(batch):
-            raise ValueError(f"git cat-file returned unexpected trailing data at {ref}")
-        yield snapshot, tuple(paths)
-
-
-def collect_size_ratchet_inventory_at_ref(repo_dir: pathlib.Path, ref: str) -> SizeRatchetInventory:
-    """Collect the canonical inventory from immutable Git blobs at ``ref``."""
-    with _git_source_snapshot(repo_dir, ref) as (snapshot, paths):
-        return collect_size_ratchet_inventory(snapshot, repo_paths=paths)
+    cache = blob_facts if blob_facts is not None else {}
+    modules: list[GatedModule] = []
+    functions: list[GatedFunction] = []
+    seen_keys: set[tuple[str, str]] = set()
+    for path, object_id, raw in sorted(_iter_ref_gated_blobs(root, ref)):
+        cached = cache.get(object_id)
+        if cached is None:
+            module = _gated_module_from_bytes(path, raw)
+            parsed = tuple(_iter_gated_functions_from_modules((module,)))
+            cache[object_id] = (module.line_count, module.utf8_bytes, parsed)
+        else:
+            line_count, utf8_bytes, parsed = cached
+            module = GatedModule(path, line_count, utf8_bytes)
+        modules.append(module)
+        for function in parsed:
+            stamped = function if function.path == path else _dataclass_replace(function, path=path)
+            key = (stamped.path, stamped.qualname)
+            if key in seen_keys:
+                raise ValueError(f"duplicate function ratchet key: {key!r}")
+            seen_keys.add(key)
+            functions.append(stamped)
+    return _inventory_from_members(tuple(modules), tuple(functions))
 
 
 def module_is_grandfathered(path: str) -> bool:
@@ -429,10 +485,12 @@ def parse_size_ratchet_manifest(text: str) -> SizeRatchetManifest:
         "BYTE_BASELINE_DEBT",
         "BYTE_DEBT",
     }
+    # Pre-v7 manifests omit the optional >1500 layer; absence means "not activated".
+    optional = {"MODULE_DEBT_1500"}
     missing = sorted(required - values.keys())
     if missing:
         raise ValueError(f"size manifest missing assignments: {', '.join(missing)}")
-    extra = sorted(values.keys() - required)
+    extra = sorted(values.keys() - required - optional)
     if extra:
         raise ValueError(f"size manifest has unexpected assignments: {', '.join(extra)}")
 
@@ -456,6 +514,13 @@ def parse_size_ratchet_manifest(text: str) -> SizeRatchetManifest:
         return frozenset(paths)
 
     giant_paths = exact_paths(values["GIANT_PATHS"], "GIANT_PATHS")
+    module_debt_1500 = (
+        exact_paths(values["MODULE_DEBT_1500"], "MODULE_DEBT_1500") if "MODULE_DEBT_1500" in values else None
+    )
+    if module_debt_1500 is not None:
+        missing_giants = sorted(giant_paths - module_debt_1500)
+        if missing_giants:
+            raise ValueError(f"MODULE_DEBT_1500 must contain every GIANT_PATHS entry: {', '.join(missing_giants)}")
     band_baseline_paths = exact_paths(values["BAND_BASELINE_PATHS"], "BAND_BASELINE_PATHS")
     raw_functions = values["FUNCTION_DEBT"]
     if not isinstance(raw_functions, tuple):
@@ -523,6 +588,7 @@ def parse_size_ratchet_manifest(text: str) -> SizeRatchetManifest:
         band_paths=band_paths,
         byte_baseline_debt=byte_map(values["BYTE_BASELINE_DEBT"], "BYTE_BASELINE_DEBT"),
         byte_debt=byte_map(values["BYTE_DEBT"], "BYTE_DEBT"),
+        module_debt_1500=module_debt_1500,
     )
 
 
@@ -532,6 +598,7 @@ def load_size_ratchet_manifest(path: pathlib.Path) -> SizeRatchetManifest:
 
 _CHECKED_IN_MANIFEST = load_size_ratchet_manifest(pathlib.Path(__file__).with_name("size_ratchet_manifest.py"))
 GIANT_PATHS = _CHECKED_IN_MANIFEST.giant_paths
+MODULE_DEBT_1500 = _CHECKED_IN_MANIFEST.module_debt_1500
 FUNCTION_DEBT = _CHECKED_IN_MANIFEST.function_debt
 # Compatibility names remain public during the v7 migration; their keys are now exact.
 GRANDFATHERED_OVERSIZED_MODULES = GIANT_PATHS
@@ -541,8 +608,15 @@ GRANDFATHERED_OVERSIZED_FUNCTIONS = FUNCTION_DEBT
 def validate_manifest_transition(
     current: SizeRatchetManifest,
     previous: SizeRatchetManifest,
+    *,
+    parent_inventory_1500: frozenset[str] | None = None,
 ) -> list[str]:
-    """Validate shrink-only debt and rationale authority against the parent tree."""
+    """Validate shrink-only debt and rationale authority against the parent tree.
+
+    ``parent_inventory_1500`` is the exact first-parent >1500-line census. It is
+    the only authority that may admit paths into ``MODULE_DEBT_1500`` at
+    activation; after activation the layer is shrink-only and irrevocable.
+    """
     errors: list[str] = []
     if current.baseline_source_sha != previous.baseline_source_sha:
         errors.append("BASELINE_SOURCE_SHA is immutable")
@@ -553,8 +627,37 @@ def validate_manifest_transition(
 
     for path in sorted(current.giant_paths - previous.giant_paths):
         errors.append(f"new module debt above {MAX_MODULE_LINES} lines: {path}")
-    for path, qualname in sorted(current.function_debt - previous.function_debt):
+    added_functions = current.function_debt - previous.function_debt
+    removed_functions = previous.function_debt - current.function_debt
+    # A same-qualname relocation — the function left exactly one path and appeared
+    # at exactly one other in the same transition — moves existing debt, it does
+    # not create it: the count is unchanged and the ratchet still names the
+    # function. A fresh >300-line function, a swap onto a different qualname, or
+    # an ambiguous many-to-one move is still refused.
+    relocated_functions = {
+        (path, qualname)
+        for path, qualname in added_functions
+        if sum(1 for _p, q in removed_functions if q == qualname) == 1
+        and sum(1 for _p, q in added_functions if q == qualname) == 1
+    }
+    for path, qualname in sorted(added_functions - relocated_functions):
         errors.append(f"new function debt above {MAX_FUNCTION_LINES} lines: {path}:{qualname}")
+
+    if previous.module_debt_1500 is None:
+        if current.module_debt_1500 is not None:
+            if parent_inventory_1500 is None:
+                errors.append(
+                    "MODULE_DEBT_1500 activation authority unavailable: "
+                    "exact first-parent >1500 inventory is required"
+                )
+            else:
+                for path in sorted(current.module_debt_1500 - parent_inventory_1500):
+                    errors.append(f"MODULE_DEBT_1500 activation exceeds first-parent authority: {path}")
+    elif current.module_debt_1500 is None:
+        errors.append("MODULE_DEBT_1500 deactivation is not allowed")
+    else:
+        for path in sorted(current.module_debt_1500 - previous.module_debt_1500):
+            errors.append(f"new module debt above {BAND_MODULE_MAX_LINES} lines: {path}")
 
     previous_band = set(previous.band_paths)
     for path in sorted(set(current.band_paths) - previous_band):
@@ -588,6 +691,8 @@ def _manifest_inventory_errors(
             errors.append(f"{label} contains stale entry: {item!r}")
 
     compare_set("GIANT_PATHS", inventory.giant_paths, manifest.giant_paths)
+    if manifest.module_debt_1500 is not None:
+        compare_set("MODULE_DEBT_1500", inventory.module_debt_1500, manifest.module_debt_1500)
     compare_set("FUNCTION_DEBT", inventory.function_debt, manifest.function_debt)
     compare_set("BAND_PATHS", inventory.band_paths, frozenset(manifest.band_paths))
     if dict(inventory.byte_debt) != dict(manifest.byte_debt):
@@ -643,11 +748,11 @@ def _audit_committed_manifest_history(
     repo_dir: pathlib.Path,
     head: str,
     manifest_path: str,
-) -> tuple[list[str], SizeRatchetManifest | None, str | None]:
+) -> tuple[list[str], SizeRatchetManifest | None, str | None, SizeRatchetInventory | None]:
     errors: list[str] = []
     head_text = _git_show_manifest(repo_dir, head, manifest_path)
     if head_text is None:
-        return ["size-ratchet transition authority unavailable: HEAD manifest is inaccessible"], None, None
+        return ["size-ratchet transition authority unavailable: HEAD manifest is inaccessible"], None, None, None
     head_manifest = parse_size_ratchet_manifest(head_text)
     baseline = head_manifest.baseline_source_sha
     ancestor = subprocess.run(
@@ -661,18 +766,24 @@ def _audit_committed_manifest_history(
             ["size-ratchet transition authority unavailable: BASELINE_SOURCE_SHA ancestry is inaccessible"],
             None,
             None,
+            None,
         )
     if _git_show_manifest(repo_dir, baseline, manifest_path) is not None:
         return (
             ["size-ratchet transition authority invalid: BASELINE_SOURCE_SHA already contains the manifest"],
             None,
             None,
+            None,
         )
+    # One content-addressed cache for the whole first-parent walk: consecutive
+    # commits share nearly every blob, so each commit costs only its own
+    # changed sources instead of a full re-census of the tree.
+    blob_facts: dict[str, tuple[int, int, tuple[GatedFunction, ...]]] = {}
     try:
-        baseline_inventory = collect_size_ratchet_inventory_at_ref(repo_dir, baseline)
+        baseline_inventory = collect_size_ratchet_inventory_at_ref(repo_dir, baseline, blob_facts=blob_facts)
     except (OSError, ValueError, subprocess.CalledProcessError):
         errors.append("size-ratchet transition authority unavailable: BASELINE_SOURCE_SHA tree is not accessible")
-        return errors, None, None
+        return errors, None, None, None
 
     commits = subprocess.run(
         ["git", "rev-list", "--first-parent", "--reverse", f"{baseline}..{head}"],
@@ -683,10 +794,11 @@ def _audit_committed_manifest_history(
     ).stdout.splitlines()
     if not commits:
         errors.append("size-ratchet transition authority unavailable: incomplete first-parent manifest history")
-        return errors, None, None
+        return errors, None, None, None
 
     bootstrap_commit: str | None = None
     previous: SizeRatchetManifest | None = None
+    previous_inventory: SizeRatchetInventory | None = None
     latest_text: str | None = None
     for commit in commits:
         text = _git_show_manifest(repo_dir, commit, manifest_path)
@@ -708,18 +820,29 @@ def _audit_committed_manifest_history(
                 errors.append("committed manifest bootstrap must name its exact first parent SHA")
             errors.extend(f"bootstrap: {error}" for error in _bootstrap_inventory_errors(manifest, baseline_inventory))
         elif previous is not None:
-            errors.extend(f"{commit[:12]}: {error}" for error in validate_manifest_transition(manifest, previous))
+            errors.extend(
+                f"{commit[:12]}: {error}"
+                for error in validate_manifest_transition(
+                    manifest,
+                    previous,
+                    parent_inventory_1500=(
+                        None if previous_inventory is None else previous_inventory.module_debt_1500
+                    ),
+                )
+            )
+        inventory: SizeRatchetInventory | None = None
         try:
-            inventory = collect_size_ratchet_inventory_at_ref(repo_dir, commit)
+            inventory = collect_size_ratchet_inventory_at_ref(repo_dir, commit, blob_facts=blob_facts)
         except (OSError, ValueError, subprocess.CalledProcessError):
             errors.append(f"{commit[:12]}: committed source tree is not accessible")
         else:
             errors.extend(f"{commit[:12]}: {error}" for error in _manifest_inventory_errors(manifest, inventory))
         previous = manifest
+        previous_inventory = inventory
         latest_text = text
     if bootstrap_commit is None:
         errors.append("size-ratchet transition authority unavailable: manifest bootstrap commit is not accessible")
-    return errors, previous, latest_text
+    return errors, previous, latest_text, previous_inventory
 
 
 def _staged_tree_without_index_lock(root: pathlib.Path) -> str:
@@ -817,13 +940,18 @@ def validate_size_ratchet(
                     )
         return errors
 
-    history_errors, head_authority, latest_text = _audit_committed_manifest_history(root, head, manifest_path)
+    history_errors, head_authority, latest_text, head_inventory = _audit_committed_manifest_history(
+        root, head, manifest_path
+    )
     errors.extend(history_errors)
+    head_authority_1500 = None if head_inventory is None else head_inventory.module_debt_1500
     if head_authority is None or latest_text != head_text:
         if not history_errors:
             errors.append("size-ratchet transition authority unavailable: HEAD manifest is not in first-parent history")
     elif current_text != head_text:
-        errors.extend(validate_manifest_transition(current, head_authority))
+        errors.extend(
+            validate_manifest_transition(current, head_authority, parent_inventory_1500=head_authority_1500)
+        )
 
     if index_tree != head_tree:
         staged_text, staged, staged_inventory = _staged_manifest_inventory(
@@ -842,7 +970,10 @@ def validate_size_ratchet(
                     )
             elif staged_text != head_text:
                 errors.extend(
-                    f"staged: {error}" for error in validate_manifest_transition(staged, head_authority)
+                    f"staged: {error}"
+                    for error in validate_manifest_transition(
+                        staged, head_authority, parent_inventory_1500=head_authority_1500
+                    )
                 )
     return errors
 
@@ -853,7 +984,11 @@ def _metrics_from_inventory(inventory: SizeRatchetInventory) -> Dict[str, Any]:
     func_lens = [item.line_count for item in functions]
     py_files = [item for item in modules if item.path.endswith(".py")]
     js_files = [item for item in modules if item.path.endswith(".js")]
-    hard_modules = [item for item in modules if item.line_count > MAX_MODULE_LINES]
+    module_debt_1500_active = MODULE_DEBT_1500 is not None
+    module_hard_limit = BAND_MODULE_MAX_LINES if module_debt_1500_active else MAX_MODULE_LINES
+    module_debt_paths = MODULE_DEBT_1500 if MODULE_DEBT_1500 is not None else GIANT_PATHS
+    hard_modules = [item for item in modules if item.line_count > module_hard_limit]
+    legacy_hard_modules = [item for item in modules if item.line_count > MAX_MODULE_LINES]
     hard_functions = [item for item in functions if item.line_count > MAX_FUNCTION_LINES]
     return {
         "total_files": len(modules),
@@ -889,8 +1024,20 @@ def _metrics_from_inventory(inventory: SizeRatchetInventory) -> Dict[str, Any]:
         "target_drift_modules": [
             (item.path, item.line_count) for item in modules if item.line_count > TARGET_MODULE_LINES
         ],
-        "grandfathered_modules": [(item.path, item.line_count) for item in hard_modules if item.path in GIANT_PATHS],
-        "oversized_modules": [(item.path, item.line_count) for item in hard_modules if item.path not in GIANT_PATHS],
+        "module_debt_1500_active": module_debt_1500_active,
+        "module_hard_limit": module_hard_limit,
+        "grandfathered_modules": [
+            (item.path, item.line_count) for item in hard_modules if item.path in module_debt_paths
+        ],
+        "oversized_modules": [
+            (item.path, item.line_count) for item in hard_modules if item.path not in module_debt_paths
+        ],
+        "legacy_grandfathered_modules": [
+            (item.path, item.line_count) for item in legacy_hard_modules if item.path in GIANT_PATHS
+        ],
+        "legacy_oversized_modules": [
+            (item.path, item.line_count) for item in legacy_hard_modules if item.path not in GIANT_PATHS
+        ],
     }
 
 
@@ -931,6 +1078,7 @@ def compute_complexity_metrics(sections: List[Tuple[str, str]]) -> Dict[str, Any
             item.path for item in modules if TARGET_MODULE_LINES < item.line_count <= BAND_MODULE_MAX_LINES
         ),
         byte_debt={item.path: item.utf8_bytes for item in modules if item.utf8_bytes > MAX_MODULE_BYTES},
+        module_debt_1500=frozenset(item.path for item in modules if item.line_count > BAND_MODULE_MAX_LINES),
     )
     return _metrics_from_inventory(inventory)
 

@@ -764,8 +764,8 @@ def reconstruct_task_cost(
     )
 
 
-def status_text(workers_dict: Dict[int, Any], pending_list: list, running_dict: Dict[str, Dict[str, Any]],
-                soft_timeout_sec: int, hard_timeout_sec: int) -> str:
+def status_text(workers_dict: Dict[int, Any], pending_list: list,
+                running_dict: Dict[str, Dict[str, Any]]) -> str:
     """Build status text from worker and queue state."""
     st = load_state()
     now = time.time()
@@ -902,11 +902,7 @@ def status_text(workers_dict: Dict[int, Any], pending_list: list, running_dict: 
         + f"enabled={int(bool(st.get('evolution_mode_enabled')))}, "
         + f"cycle={int(st.get('evolution_cycle') or 0)}")
     lines.append(f"last_owner_message_at: {st.get('last_owner_message_at') or '-'}")
-    lines.append(
-        "legacy_timeouts_ignored: "
-        f"soft={soft_timeout_sec}s, hard={hard_timeout_sec}s; "
-        "active_liveness=idle+deadline+absolute_ceiling+reaper"
-    )
+    lines.append("active_liveness: idle+deadline+absolute_ceiling+reaper")
     return "\n".join(lines)
 
 

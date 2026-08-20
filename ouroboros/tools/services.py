@@ -21,6 +21,10 @@ from ouroboros.platform_layer import (
     process_group_id,
 )
 from ouroboros.tools.registry import ToolContext, ToolEntry
+from ouroboros.tools.tool_result import (
+    ToolResult,
+    _publish_tool_result,
+)
 from ouroboros.tool_access import (
     ResolvedResourceBinding,
     active_tool_profile,
@@ -627,6 +631,7 @@ def _stop_service(ctx: ToolContext, name: str = "service") -> str:
         payload["log_finalization"] = _finalize_service_log_for_drive(pathlib.Path(ctx.drive_root), record)
         artifact_note = ""
         artifact_failed = False
+        artifact_registered = False
         if record.outputs:
             try:
                 from ouroboros.tools.shell import _register_process_outputs
@@ -639,7 +644,7 @@ def _stop_service(ctx: ToolContext, name: str = "service") -> str:
                     cwd_source=record.cwd_source,
                     skill_name=record.skill_name,
                 )
-                artifact_note, artifact_failed = _register_process_outputs(
+                artifact_note, artifact_failed, artifact_registered = _register_process_outputs(
                     ctx,
                     record.outputs,
                     pathlib.Path(record.cwd),
@@ -661,8 +666,24 @@ def _stop_service(ctx: ToolContext, name: str = "service") -> str:
         payload["artifact_output_failed"] = bool(artifact_failed)
         rendered = json.dumps(payload, ensure_ascii=False, indent=2)
         if artifact_failed:
-            return "⚠️ ARTIFACT_OUTPUT_ERROR (stop_service): declared service outputs were not finalized.\n\n" + rendered
-        return rendered
+            text = "⚠️ ARTIFACT_OUTPUT_ERROR (stop_service): declared service outputs were not finalized.\n\n" + rendered
+            return _publish_tool_result(
+                ctx,
+                ToolResult(
+                    status="error",
+                    code="ARTIFACT_OUTPUT_ERROR",
+                    text=text,
+                ),
+            )
+        return _publish_tool_result(
+            ctx,
+            ToolResult(
+                status="ok",
+                code="OK",
+                text=rendered,
+                meta={"artifact_registered": True} if artifact_registered else {},
+            ),
+        )
     if executor_ref_from_ctx(ctx) is not None:
         payload = executor_stop_service(ctx, service_name)
         if payload is None:
@@ -671,6 +692,7 @@ def _stop_service(ctx: ToolContext, name: str = "service") -> str:
             return "⚠️ SERVICE_STOP_ERROR (stop_service): executor backend did not confirm service termination.\n\n" + json.dumps(payload, ensure_ascii=False, indent=2)
         artifact_note = ""
         artifact_failed = False
+        artifact_registered = False
         before_outputs = payload.pop("_before_outputs", {})
         if payload.get("outputs"):
             try:
@@ -684,7 +706,7 @@ def _stop_service(ctx: ToolContext, name: str = "service") -> str:
                     cwd_source=str(payload.get("cwd_source") or ""),
                     skill_name=str(payload.get("skill_name") or ""),
                 )
-                artifact_note, artifact_failed = _register_process_outputs(
+                artifact_note, artifact_failed, artifact_registered = _register_process_outputs(
                     ctx,
                     [str(item) for item in (payload.get("outputs") or [])],
                     pathlib.Path(str(payload.get("host_cwd") or ".")),
@@ -700,8 +722,24 @@ def _stop_service(ctx: ToolContext, name: str = "service") -> str:
         payload["artifact_output_failed"] = bool(artifact_failed)
         rendered = json.dumps(payload, ensure_ascii=False, indent=2)
         if artifact_failed:
-            return "⚠️ ARTIFACT_OUTPUT_ERROR (stop_service): declared executor service outputs were not finalized.\n\n" + rendered
-        return rendered
+            text = "⚠️ ARTIFACT_OUTPUT_ERROR (stop_service): declared executor service outputs were not finalized.\n\n" + rendered
+            return _publish_tool_result(
+                ctx,
+                ToolResult(
+                    status="error",
+                    code="ARTIFACT_OUTPUT_ERROR",
+                    text=text,
+                ),
+            )
+        return _publish_tool_result(
+            ctx,
+            ToolResult(
+                status="ok",
+                code="OK",
+                text=rendered,
+                meta={"artifact_registered": True} if artifact_registered else {},
+            ),
+        )
     return f"⚠️ SERVICE_NOT_FOUND: {name}"
 
 

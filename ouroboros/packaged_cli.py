@@ -209,11 +209,22 @@ def _hidden_run(command: Sequence[str], **kwargs: object) -> subprocess.Complete
 
 
 def _save_settings(path: pathlib.Path, settings: dict) -> None:
+    """The packaged bootstrap's settings writer — same prologue, same bytes.
+
+    It is a THIRD writer only in the sense that it owns its own path and its own
+    atomic rename; what it persists goes through the one persistence prologue (which
+    proves the owner-only context/safety ratchets against the value on disk) and the
+    one serializer, so a bootstrap save cannot be the save that skips them. The path
+    it writes is the path the prologue reads: the packaged runtime resolves its data
+    dir to ``~/Ouroboros/data``, which is exactly what ``config`` resolves in a
+    process that was given no path overrides — pinned by
+    tests/test_settings_read_seam.py."""
+    from ouroboros.config import prepare_settings_for_persist, serialize_settings
     from ouroboros.utils import replace_atomic
 
     path.parent.mkdir(parents=True, exist_ok=True)
     tmp = path.with_suffix(path.suffix + ".tmp")
-    tmp.write_text(json.dumps(settings, indent=2), encoding="utf-8")
+    tmp.write_text(serialize_settings(prepare_settings_for_persist(dict(settings))), encoding="utf-8")
     replace_atomic(tmp, path)
 
 

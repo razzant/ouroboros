@@ -497,11 +497,158 @@ def test_service_outputs_register_artifacts_on_stop(tmp_path, monkeypatch):
     })
     assert "LIGHT_MODE_BLOCKED" not in start
 
-    stopped = json.loads(registry.execute("stop_service", {"name": "artifact_service"}))
+    stopped_result = registry.execute_result("stop_service", {"name": "artifact_service"})
+    stopped = json.loads(stopped_result.text)
 
     assert "ARTIFACT_OUTPUTS" in stopped["artifact_outputs"]
+    assert (stopped_result.status, stopped_result.code) == ("ok", "OK")
+    assert dict(stopped_result.meta) == {"artifact_registered": True}
+    assert "exit_code" not in stopped_result.meta
     artifact_path = drive / "task_results" / "artifacts" / "task-service-output" / "service.html"
     assert artifact_path.read_text(encoding="utf-8") == "<h1>ok</h1>"
+
+
+def test_stop_service_unchanged_output_is_not_registered(
+    tmp_path, monkeypatch,
+):
+    _force_light_runtime(monkeypatch)
+    monkeypatch.setattr("ouroboros.safety.check_safety", lambda *a, **k: (True, ""))
+    repo = tmp_path / "repo"
+    drive = tmp_path / "data"
+    repo.mkdir()
+    registry = ToolRegistry(repo_dir=repo, drive_root=drive)
+    registry._ctx.task_id = "task-service-unchanged-output"
+    task_drive = drive / "task_drives" / "task-service-unchanged-output"
+    task_drive.mkdir(parents=True)
+    (task_drive / "existing.txt").write_text("same", encoding="utf-8")
+
+    registry.execute("start_service", {
+        "name": "unchanged_output_service",
+        "cmd": [sys.executable, "-c", "print('READY', flush=True)"],
+        "cwd": str(task_drive),
+        "outputs": ["existing.txt"],
+        "readiness": {"timeout_sec": 1},
+    })
+    stopped_result = registry.execute_result(
+        "stop_service", {"name": "unchanged_output_service"},
+    )
+    stopped = json.loads(stopped_result.text)
+
+    assert (stopped_result.status, stopped_result.code) == ("ok", "OK")
+    assert dict(stopped_result.meta) == {}
+    assert "unchanged output (cosmetic)" in stopped["artifact_outputs"]
+
+
+def test_stop_service_partial_output_failure_never_claims_registration(
+    tmp_path, monkeypatch,
+):
+    _force_light_runtime(monkeypatch)
+    monkeypatch.setattr("ouroboros.safety.check_safety", lambda *a, **k: (True, ""))
+    repo = tmp_path / "repo"
+    drive = tmp_path / "data"
+    repo.mkdir()
+    registry = ToolRegistry(repo_dir=repo, drive_root=drive)
+    registry._ctx.task_id = "task-service-partial-output"
+    task_drive = drive / "task_drives" / "task-service-partial-output"
+    task_drive.mkdir(parents=True)
+
+    registry.execute("start_service", {
+        "name": "partial_output_service",
+        "cmd": [
+            sys.executable,
+            "-c",
+            "from pathlib import Path; Path('present.txt').write_text('ok'); print('READY', flush=True)",
+        ],
+        "cwd": str(task_drive),
+        "outputs": ["present.txt", "missing.txt"],
+        "readiness": {"timeout_sec": 1},
+    })
+    stopped_result = registry.execute_result(
+        "stop_service", {"name": "partial_output_service"},
+    )
+
+    assert (stopped_result.status, stopped_result.code) == (
+        "error",
+        "ARTIFACT_OUTPUT_ERROR",
+    )
+    assert dict(stopped_result.meta) == {}
+    assert "registered output" in stopped_result.text
+    assert "missing output" in stopped_result.text
+
+
+def test_executor_stop_service_publishes_actual_registration_only(
+    tmp_path, monkeypatch,
+):
+    from ouroboros.tools import services as services_mod
+    from ouroboros.tools import shell as shell_mod
+    from ouroboros.tools.tool_result import ToolResult
+
+    ctx = SimpleNamespace(
+        task_id="task-executor-stop",
+        _active_builtin_tool_result=object(),
+    )
+    monkeypatch.setattr(
+        services_mod,
+        "executor_ref_from_ctx",
+        lambda _ctx: {"type": "fixture"},
+    )
+    monkeypatch.setattr(
+        services_mod,
+        "_service_output_binding",
+        lambda *_args, **_kwargs: None,
+    )
+
+    def stopped_payload(_ctx, _name):
+        return {
+            "state": "stopped",
+            "outputs": ["report.txt"],
+            "cwd_root": "active_workspace",
+            "cwd_base": str(tmp_path),
+            "cwd_source": "active_workspace",
+            "skill_name": "",
+            "host_cwd": str(tmp_path),
+            "_before_outputs": {},
+        }
+
+    monkeypatch.setattr(services_mod, "executor_stop_service", stopped_payload)
+    monkeypatch.setattr(
+        shell_mod,
+        "_register_process_outputs",
+        lambda *_args, **_kwargs: (
+            "\n\nARTIFACT_OUTPUTS:\n- registered output",
+            False,
+            True,
+        ),
+    )
+
+    success_text = services_mod._stop_service(ctx, "fixture")
+    success = ctx._active_builtin_tool_result
+    assert isinstance(success, ToolResult)
+    assert success.text == success_text
+    assert (success.status, success.code) == ("ok", "OK")
+    assert dict(success.meta) == {"artifact_registered": True}
+    assert "exit_code" not in success.meta
+
+    ctx._active_builtin_tool_result = object()
+    monkeypatch.setattr(
+        shell_mod,
+        "_register_process_outputs",
+        lambda *_args, **_kwargs: (
+            "\n\n⚠️ ARTIFACT_OUTPUT_ERROR:\n- partial failure",
+            True,
+            True,
+        ),
+    )
+
+    failed_text = services_mod._stop_service(ctx, "fixture")
+    failed = ctx._active_builtin_tool_result
+    assert isinstance(failed, ToolResult)
+    assert failed.text == failed_text
+    assert (failed.status, failed.code) == (
+        "error",
+        "ARTIFACT_OUTPUT_ERROR",
+    )
+    assert dict(failed.meta) == {}
 
 
 def test_stop_task_services_preserves_output_finalization_failure(tmp_path, monkeypatch):

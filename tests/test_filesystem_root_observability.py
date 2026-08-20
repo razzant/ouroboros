@@ -11,7 +11,8 @@ import subprocess
 
 import pytest
 
-from ouroboros.tools.core import _code_search, _edit_text, _is_search_skippable, _read_file, _write_file
+from ouroboros.tools.core import _code_search, _edit_text, _is_search_skippable, _write_file
+from ouroboros.tools import core_file_tools
 from ouroboros.tools.registry import ToolContext
 
 
@@ -33,8 +34,8 @@ def test_read_file_headers_are_root_qualified(tmp_path):
     ctx = _make_ctx(tmp_path)
     (ctx.drive_root / "notes.txt").write_text("hello data\n", encoding="utf-8")
 
-    workspace = _read_file(ctx, "README.md", root="active_workspace")
-    runtime = _read_file(ctx, "notes.txt", root="runtime_data")
+    workspace = core_file_tools._read_file(ctx, "README.md", root="active_workspace")
+    runtime = core_file_tools._read_file(ctx, "notes.txt", root="runtime_data")
 
     assert workspace.startswith("# active_workspace:README.md")
     assert runtime.startswith("# runtime_data:notes.txt")
@@ -88,7 +89,7 @@ def test_absolute_path_under_root_is_not_double_prefixed(tmp_path):
     # (anchor is "/" on POSIX, "C:\\" on Windows, where str().lstrip("/") is a no-op).
     assert not (root / root.relative_to(root.anchor)).exists()
     # And reading the same absolute path returns it (no NOT_FOUND detour).
-    read_back = _read_file(ctx, abs_path, root="active_workspace")
+    read_back = core_file_tools._read_file(ctx, abs_path, root="active_workspace")
     assert "answer-payload" in read_back
     # Path traversal stays blocked.
     assert ctx.repo_path(str(root / "sub" / "f.py")) == root / "sub" / "f.py"

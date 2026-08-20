@@ -59,7 +59,7 @@ def test_does_not_mutate_message():
 
 
 def test_visible_round_text_string_and_list_never_reprs():
-    from ouroboros.loop import _visible_round_text
+    from ouroboros.loop_messages import _visible_round_text
 
     assert _visible_round_text("  hi  ") == "hi"
     # a list of provider blocks joins ONLY text blocks — never a raw Python list repr.

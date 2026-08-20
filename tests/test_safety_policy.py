@@ -15,6 +15,7 @@ from __future__ import annotations
 import json
 import pathlib
 import tempfile
+import types
 
 import pytest
 
@@ -955,9 +956,12 @@ def test_usage_event_uses_direct_provider_when_resolved_by_client(monkeypatch):
 
 def test_no_event_queue_preserves_unknown_cost_in_budget_fallback(monkeypatch):
     """When ctx is None (or ctx.event_queue is missing), the safety path must
-    attribute spend via ``supervisor.state.update_budget_from_usage`` instead
-    of emitting an ``llm_usage`` event — otherwise direct-provider safety
-    calls made outside the supervisor context would never be counted."""
+    attribute spend to the ledger instead of emitting an ``llm_usage`` event —
+    otherwise direct-provider safety calls made outside the supervisor context
+    would never be counted. The ledger writer is INJECTED by the context when it
+    has one; a context without one still reaches this process's supervisor
+    state, which the safety module now imports at call time rather than at
+    import time."""
     from ouroboros.safety import check_safety
     import ouroboros.safety as safety_mod
 
@@ -983,9 +987,11 @@ def test_no_event_queue_preserves_unknown_cost_in_budget_fallback(monkeypatch):
     def _record(usage):
         captured.append(dict(usage))
 
-    monkeypatch.setattr(safety_mod, "update_budget_from_usage", _record)
+    import supervisor.state as state_mod
 
-    # ctx=None path
+    monkeypatch.setattr(state_mod, "update_budget_from_usage", _record)
+
+    # ctx=None path: no context, so the process's own supervisor state is charged.
     ok, _ = check_safety("create_github_issue", {"title": "x"}, ctx=None)
     assert ok is True
     assert len(captured) == 1
@@ -1003,6 +1009,60 @@ def test_no_event_queue_preserves_unknown_cost_in_budget_fallback(monkeypatch):
     ok2, _ = check_safety("create_github_issue", {"title": "y"}, ctx=_CtxNoQueue())
     assert ok2 is True
     assert len(captured) == 1
+
+    # A context that OWNS its accounting is charged there, and the supervisor
+    # module is not touched at all.
+    injected: list[dict] = []
+
+    class _CtxWithSink:
+        task_id = "t-injected"
+
+        @staticmethod
+        def update_budget_from_usage(usage):
+            injected.append(dict(usage))
+
+    captured.clear()
+    stub.calls.clear()
+    ok3, _ = check_safety("create_github_issue", {"title": "z"}, ctx=_CtxWithSink())
+    assert ok3 is True
+    assert len(injected) == 1 and captured == []
+
+
+def test_safety_module_has_no_import_time_dependency_on_the_supervisor():
+    """The safety supervisor runs inside every worker; an import-time edge into
+    the supervisor package makes the agent core depend on the host process it is
+    supposed to be isolated from."""
+    import ast
+    import pathlib
+
+    tree = ast.parse((pathlib.Path(__file__).resolve().parents[1]
+                      / "ouroboros" / "safety.py").read_text(encoding="utf-8"))
+    top_level = [node for node in tree.body if isinstance(node, (ast.Import, ast.ImportFrom))]
+    modules = {getattr(node, "module", "") or "" for node in top_level}
+    modules |= {alias.name for node in top_level if isinstance(node, ast.Import)
+                for alias in node.names}
+    assert not any(name.startswith("supervisor") for name in modules), sorted(modules)
+
+
+def test_safety_observability_root_is_absolute_never_cwd_relative(tmp_path, monkeypatch):
+    """Same class as the review coordinator's ISO-DRIP default: a cwd-relative
+    ``../data`` names the live data root's SIBLING from any cwd under a repo/,
+    so records either drip into a live root or are lost. The default must be the
+    absolute config SSOT, and a context's own root must win over it."""
+    import ouroboros.config as config
+    from ouroboros.safety import _safety_drive_root
+
+    configured = tmp_path / "configured_data"
+    repo = tmp_path / "apphome" / "repo"
+    repo.mkdir(parents=True)
+    monkeypatch.setattr(config, "DATA_DIR", configured)
+    monkeypatch.chdir(repo)
+
+    assert _safety_drive_root(None) == configured
+    assert _safety_drive_root(types.SimpleNamespace(task_id="t")) == configured
+
+    owned = tmp_path / "task_drive"
+    assert _safety_drive_root(types.SimpleNamespace(drive_root=owned)) == owned
 
 
 def test_usage_event_uses_local_provider_when_use_local_light(monkeypatch):

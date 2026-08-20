@@ -367,6 +367,7 @@ def _enforce_harness(monkeypatch, tmp_path, running, *, idle=900, grace=300):
     import queue as _stdqueue
 
     from supervisor import events as events_mod
+    from supervisor import events_budget, events_chat_delivery, events_task_done
     from supervisor import queue as queue_mod
     from supervisor import task_reaper, workers as workers_mod
 
@@ -386,7 +387,11 @@ def _enforce_harness(monkeypatch, tmp_path, running, *, idle=900, grace=300):
 
     clock = [0.0]
     delivered = []
-    monkeypatch.setattr(events_mod, "time", types.SimpleNamespace(time=lambda: clock[0]))
+    # The dispatch table's handlers are owned by their own modules, so the harness
+    # clock has to reach every owner the pump can enter — a handler left on the real
+    # clock would measure a world the wire never produces.
+    for _owner in (events_mod, events_budget, events_chat_delivery, events_task_done):
+        monkeypatch.setattr(_owner, "time", types.SimpleNamespace(time=lambda: clock[0]))
     ctx = types.SimpleNamespace(
         DRIVE_ROOT=tmp_path, RUNNING=running, PENDING=[], WORKERS={},
         send_with_budget=lambda _cid, text, **_k: delivered.append(str(text)),
@@ -732,7 +737,7 @@ def test_revoked_mailbox_control_is_never_delivered(tmp_path):
 # --------------------------------------------------------------------------
 
 def test_cancel_and_timeout_paths_share_one_salvage_helper():
-    lifecycle = (REPO_ROOT / "supervisor" / "task_lifecycle.py").read_text(encoding="utf-8")
+    lifecycle = (REPO_ROOT / "supervisor" / "cancel_custody.py").read_text(encoding="utf-8")
     reaper = (REPO_ROOT / "supervisor" / "task_reaper.py").read_text(encoding="utf-8")
     delivery = (REPO_ROOT / "supervisor" / "terminal_delivery.py").read_text(encoding="utf-8")
     assert "salvaged_output_note" in reaper

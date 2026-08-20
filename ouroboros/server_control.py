@@ -93,8 +93,14 @@ def execute_panic_stop(
     data_dir: pathlib.Path,
     panic_exit_code: int,
     log: Any,
+    bound_port: int | None = None,
 ) -> None:
     """Full emergency stop: kill everything, write panic flag, hard-exit.
+
+    ``bound_port`` is the main port the server actually bound. The caller owns
+    that fact and passes it in; this leaf does not reach back into the server
+    module for it. Omitted (or falsy), the sweep falls back to the default
+    install port — see the sweep below.
 
     Known limit (disclosed residual): an ATTACHED Claudexor daemon — one this
     process did not spawn — is left alive, because ``get_owned_daemon().stop()``
@@ -209,11 +215,11 @@ def execute_panic_stop(
             except (ProcessLookupError, PermissionError):
                 pass
         # Sweep the actually bound main port (not hardcoded 8765/8766 — a
-        # custom-port install would panic-kill an unrelated listener).
+        # custom-port install would panic-kill an unrelated listener). The
+        # default install port stays the last resort, for a caller that has no
+        # bound port to give and for a sweep that fails.
         try:
-            import server as _server_mod
-
-            kill_process_on_port(_server_mod._actual_bound_port())
+            kill_process_on_port(bound_port or 8765)
         except Exception:
             kill_process_on_port(8765)
         kill_process_on_port(host_service_port())

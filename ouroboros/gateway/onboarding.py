@@ -47,6 +47,7 @@ from ouroboros.gateway.owner_settings import (
     _owner_audit,
     _owner_write_settings,
     post_commit_failure_response,
+    settings_document_digest,
     settings_document_mutation,
     unsaved_error,
 )
@@ -560,29 +561,11 @@ def _settings_fingerprint() -> str:
     request read, while the owner is told the save succeeded. The fingerprint
     turns that into something the locked precondition can notice.
 
-    A digest of the raw bytes, not of a parsed dict: it is the file this write
-    replaces.
-
-    Exactly two answers can ever COMPARE EQUAL: a digest, and the absent
-    sentinel. An unreadable file is neither — it is returned as a value that
-    never equals anything, itself included, because a stable
-    ``unreadable:PermissionError`` token on both sides would let a swap between
-    two different unreadable files satisfy the check. That is fail-OPEN, and it
-    is reachable: the loader silently falls back to defaults when it cannot
-    read, while the atomic rename still lands because the parent directory is
-    writable. So an unreadable settings file refuses the write.
+    The digest itself is ``owner_settings.settings_document_digest``: the same
+    staleness question the single-decision owner endpoints ask, so it has one
+    answer rather than one per transaction.
     """
-    from hashlib import sha256
-    from uuid import uuid4
-
-    from ouroboros.config import SETTINGS_PATH
-
-    try:
-        return sha256(SETTINGS_PATH.read_bytes()).hexdigest()
-    except FileNotFoundError:
-        return "absent"
-    except OSError as exc:
-        return f"unreadable:{type(exc).__name__}:{uuid4()}"
+    return settings_document_digest()
 
 
 def _prepared_settings(body: Dict[str, Any]) -> Tuple[Dict[str, Any], Dict[str, Any], str]:

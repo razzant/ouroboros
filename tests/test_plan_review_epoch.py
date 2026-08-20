@@ -16,10 +16,11 @@ import dataclasses
 import json
 import logging
 
-from tests.test_plan_review_engine import (
-    CLEAN, _DEAD_PANEL, _call, _control, _finding, _patch_health, _slots, _state,
+from tests._plan_review_engine_shared import (
+    CLEAN, _call, _control, _finding, _slots, _state,
 )
-from tests.test_plan_review_engine import harness as _engine_harness  # shared fixture
+from tests.test_plan_review_health import _DEAD_PANEL, _patch_health
+from tests._plan_review_engine_shared import harness as _engine_harness  # shared fixture
 
 harness = _engine_harness  # noqa: F811 — pytest registers the fixture here too
 

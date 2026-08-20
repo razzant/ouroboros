@@ -692,8 +692,8 @@ def _secret_runtime_data_mentions(
 ) -> List[str]:
     """Mentioned drive paths whose NAME marks secret/control state (v6.54.3).
 
-    Reuses the subagent secret-name SSOT from tools.core (lazy import — core does
-    not import this module) over every path the mention scanner can extract. The
+    Reuses the subagent secret-name SSOT from tools.core_file_tools through a
+    lazy import over every path the mention scanner can extract. The
     owner's real secret/control state (settings.json, tokens, memory/, .env) lives
     at the DRIVE ROOT, outside any task's own roots, and stays blocked. The task's
     OWN task_drive/artifact_store are exempt (adversarial review r2 #2): a staged
@@ -701,7 +701,7 @@ def _secret_runtime_data_mentions(
     e.g. ``secret_santa.docx``, ``token_usage.json`` — is the task's own content,
     not an owner credential, and reading it must not be blocked."""
     try:
-        from ouroboros.tools.core import _is_subagent_secret_data_path
+        from ouroboros.tools.core_file_tools import _is_subagent_secret_data_path
     except Exception:
         return []
     mentions = runtime_data_write_targets(

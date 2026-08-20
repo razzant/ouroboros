@@ -423,7 +423,7 @@ def test_deferred_child_suffix_is_not_misclassified_as_delivery_control_failure(
 def test_delivery_acceptance_binding_uses_exact_active_host_verdict(tmp_path):
     import hashlib
 
-    import ouroboros.loop as loop
+    from ouroboros import loop_delivery
     from ouroboros.tools.registry import ToolRegistry
 
     registry = ToolRegistry(repo_dir=tmp_path, drive_root=tmp_path)
@@ -431,7 +431,7 @@ def test_delivery_acceptance_binding_uses_exact_active_host_verdict(tmp_path):
     registry._ctx._task_acceptance_sealed_fence_token = "current-fence"
     answer_hash = hashlib.sha256(b"exact answer").hexdigest()
 
-    incomplete = loop._delivery_acceptance_binding(
+    incomplete = loop_delivery._delivery_acceptance_binding(
         registry,
         {
             "review_runs": [{
@@ -445,7 +445,7 @@ def test_delivery_acceptance_binding_uses_exact_active_host_verdict(tmp_path):
     assert incomplete["acceptance_status"] == "unaccepted"
     assert incomplete["authoritative"] is False
 
-    complete_but_historical = loop._delivery_acceptance_binding(
+    complete_but_historical = loop_delivery._delivery_acceptance_binding(
         registry,
         {
             "review_runs": [{
@@ -481,7 +481,7 @@ def test_delivery_acceptance_binding_uses_exact_active_host_verdict(tmp_path):
             }],
         }
 
-        binding = loop._delivery_acceptance_binding(registry, trace, answer_hash)
+        binding = loop_delivery._delivery_acceptance_binding(registry, trace, answer_hash)
 
         assert binding["candidate_sha256"] == answer_hash
         assert binding["evidence_revision"] == 7
@@ -557,6 +557,7 @@ def test_same_text_replacement_after_evidence_change_does_not_inherit_old_pass(
     import hashlib
 
     import ouroboros.loop as loop
+    from ouroboros import loop_delivery
     from ouroboros.tools.registry import ToolRegistry
 
     answer = "Same complete text across evidence revisions."
@@ -598,7 +599,7 @@ def test_same_text_replacement_after_evidence_change_does_not_inherit_old_pass(
             "aggregate_signal": "PASS",
         }],
     })
-    original.acceptance_binding = loop._delivery_acceptance_binding(
+    original.acceptance_binding = loop_delivery._delivery_acceptance_binding(
         registry, trace, answer_hash,
     )
     assert original.acceptance_binding["authoritative"] is True

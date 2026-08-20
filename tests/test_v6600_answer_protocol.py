@@ -107,7 +107,7 @@ def _result(signal, findings, tiers=("solved",)):
 
 
 def test_obligations_widen_to_high_only_on_failing_aggregate():
-    from ouroboros.loop import _collect_acceptance_obligations
+    from ouroboros.loop_acceptance import _collect_acceptance_obligations
 
     high_finding = {"severity": "high", "slot_id": "s0", "item": "missed requirement", "recommendation": "implement X"}
     critical_finding = {"severity": "critical", "slot_id": "s0", "item": "broken", "recommendation": "fix Y"}

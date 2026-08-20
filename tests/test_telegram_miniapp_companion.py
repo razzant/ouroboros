@@ -4,26 +4,11 @@ import asyncio
 import json
 import socket
 import sys
-import tempfile
 import time
-import uuid
 from pathlib import Path
 from typing import Any
 
 import pytest
-
-
-def _nonexistent_state_dir() -> Path:
-    """A state_dir that provably does not exist, unique per call.
-
-    A FIXED literal (/tmp/nonexistent-telegram-test) broke on a shared host:
-    another user's run had squatted the exact name with mode 700, so stat()
-    raised PermissionError where the scenario needs FileNotFoundError. A
-    per-call unique name under the system tmp dir cannot be squatted and
-    creates nothing.
-    """
-    return Path(tempfile.gettempdir()) / f"nonexistent-telegram-test-{uuid.uuid4().hex}"
-
 
 
 SCRIPTS_DIR = Path(__file__).parents[1] / "skills" / "telegram" / "scripts"
@@ -170,11 +155,14 @@ def test_parent_lifeline_requests_stop_then_cancels_hard_kill(
     asyncio.run(scenario())
 
 
-def test_core_health_retries_cold_boot(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_core_health_retries_cold_boot(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     attempts = [0]
 
     class Bridge:
-        state_dir = _nonexistent_state_dir()
+        state_dir = tmp_path / "observer-state"
         def owner_chat_id(self) -> int:
             return 12345
 

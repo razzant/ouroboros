@@ -320,7 +320,7 @@ def test_dissent_still_excludes_parse_fail_demoted_and_coach_only_degraded():
 
 
 def test_collect_acceptance_obligations_critical_contributing_only():
-    from ouroboros.loop import _collect_acceptance_obligations, _open_acceptance_obligations
+    from ouroboros.loop_acceptance import _collect_acceptance_obligations, _open_acceptance_obligations
 
     actors = [
         {"slot_id": "slot_1", "signal": "FAIL", "parsed": {}},
@@ -351,11 +351,7 @@ def test_agent_disposed_obligation_lifecycle_stays_pending_until_host_settles():
     """Triad r3 + codex v6.71.1: an agent disposition (a rebuttal) is a CLAIM, not a
     settlement — the row stays PENDING until a host panel adjudicates it. A panel
     re-raise reopens the row outright; a clean PASS settles it (disposed_by_re_review)."""
-    from ouroboros.loop import (
-        _collect_acceptance_obligations,
-        _dispose_obligations_on_clean_pass,
-        _open_acceptance_obligations,
-    )
+    from ouroboros.loop_acceptance import _collect_acceptance_obligations, _dispose_obligations_on_clean_pass, _open_acceptance_obligations
 
     actors = [{"slot_id": "slot_1", "signal": "FAIL", "parsed": {}}]
     findings = [{"slot_id": "slot_1", "severity": "critical", "item": "broken_output",
@@ -398,7 +394,7 @@ def test_agent_disposed_obligation_lifecycle_stays_pending_until_host_settles():
 
 
 def test_obligations_clause_formats_ids():
-    from ouroboros.loop import _format_obligations_clause
+    from ouroboros.loop_acceptance import _format_obligations_clause
 
     clause = _format_obligations_clause([
         {"id": "ob-12345678", "item": "broken_output", "recommendation": "Fix the CSV header"},
@@ -448,7 +444,7 @@ def test_latest_agent_defined_verification_helper(tmp_path):
 
 
 def test_candidates_block_latched_with_final_answer():
-    from ouroboros.loop import _latch_final_answer_marker
+    from ouroboros.loop_acceptance import _latch_final_answer_marker
 
     llm_trace: dict = {"tool_calls": []}
     content = (
@@ -464,7 +460,7 @@ def test_candidates_block_latched_with_final_answer():
 
 
 def test_no_candidates_block_leaves_trace_unchanged():
-    from ouroboros.loop import _latch_final_answer_marker
+    from ouroboros.loop_acceptance import _latch_final_answer_marker
 
     llm_trace: dict = {"tool_calls": []}
     _latch_final_answer_marker(llm_trace, "FINAL ANSWER: 7")
@@ -476,7 +472,7 @@ def test_candidates_marker_only_ignores_inline_prose_mention():
     """Adversarial r2 #4: a mid-sentence 'CANDIDATES:' followed later by an
     ordinary markdown bullet list must NOT latch those bullets — the marker is
     line-anchored and the items must be adjacent to it."""
-    from ouroboros.loop import _latch_final_answer_marker
+    from ouroboros.loop_acceptance import _latch_final_answer_marker
 
     llm_trace: dict = {"tool_calls": []}
     content = (
@@ -490,7 +486,7 @@ def test_candidates_marker_only_ignores_inline_prose_mention():
 
 def test_candidates_marker_only_stops_at_first_non_item_line():
     """The block ends at the first non-'- ' line even when items follow later."""
-    from ouroboros.loop import _latch_final_answer_marker
+    from ouroboros.loop_acceptance import _latch_final_answer_marker
 
     llm_trace: dict = {"tool_calls": []}
     content = (
@@ -800,7 +796,7 @@ def test_no_obligations_when_contributing_set_empty():
     """Adversarial r1 #8: a no-quorum review (empty contributing set) has no
     authoritative verdict — it must manufacture NO blocking obligations, even
     from a parse-degraded slot's critical finding."""
-    from ouroboros.loop import _collect_acceptance_obligations, _open_acceptance_obligations
+    from ouroboros.loop_acceptance import _collect_acceptance_obligations, _open_acceptance_obligations
 
     # All actors DEGRADED (no PASS/FAIL) -> _contributing_actors == [].
     actors = [

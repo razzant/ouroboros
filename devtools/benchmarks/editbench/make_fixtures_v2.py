@@ -51,16 +51,18 @@ def _compile_check(path: pathlib.Path) -> None:
 # ---------------------------------------------------------------------------
 
 def build_t2() -> None:
-    src = _read("ouroboros/review_state.py")
+    # The v7 split moved the digest/timestamp bodies out of the review_state.py
+    # facade into the records owner; the fixture follows the material it renames.
+    src = _read("ouroboros/review_state_records.py")
     ws = OUT / "t2_surgical" / "workspace"
     exp = OUT / "t2_surgical" / "expected"
-    _write(ws / "review_state.py", src)
+    _write(ws / "review_state_records.py", src)
     out = src
-    out = _count_replace(out, "_stable_digest", "_content_digest", 6, "t2 rename1")
-    out = _count_replace(out, "_max_iso_ts", "_latest_iso_ts", 3, "t2 rename2")
+    out = _count_replace(out, "_stable_digest", "_content_digest", 3, "t2 rename1")
+    out = _count_replace(out, "_max_iso_ts", "_latest_iso_ts", 1, "t2 rename2")
     out = _count_replace(out, "_MAX_RUN_HISTORY = 10", "_MAX_RUN_HISTORY = 25", 1, "t2 const1")
     out = _count_replace(out, "_REVIEW_ATTEMPT_TTL_SEC = 1800", "_REVIEW_ATTEMPT_TTL_SEC = 2400", 1, "t2 const2")
-    _write(exp / "review_state.py", out)
+    _write(exp / "review_state_records.py", out)
     ast.parse(out)
     changed = sum(1 for a, b in zip(src.splitlines(), out.splitlines()) if a != b)
     print(f"t2_surgical: {changed} changed lines of {len(src.splitlines())}")

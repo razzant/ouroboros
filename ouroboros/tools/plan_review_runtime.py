@@ -22,6 +22,12 @@ from ouroboros.config import review_model_uses_local
 from ouroboros.deadline_utils import parse_deadline_ts, utc_now
 from ouroboros.llm import LLMClient
 from ouroboros.tools.registry import ToolContext, active_repo_dir_for
+from ouroboros.tools.tool_result import (
+    ToolResult,
+    _publish_tool_result,
+    _published_tool_result,
+    _replace_tool_result,
+)
 from ouroboros.utils import utc_now_iso
 
 
@@ -35,6 +41,215 @@ HOST_FILE_READ_ASSEMBLED = "host_assembled_packet"
 HOST_FILE_READ_UNOBSERVED = "unobserved"
 
 log = logging.getLogger(__name__)
+
+
+def append_plan_output_note(ctx: ToolContext, text: str, note: str) -> str:
+    """Keep native plan metadata bound when compatibility notes append."""
+    rendered = text + note
+    base = _published_tool_result(ctx, None)
+    if isinstance(base, ToolResult) and base.text == text:
+        return _publish_tool_result(ctx, _replace_tool_result(base, text=rendered))
+    return rendered
+
+
+VACUOUS_DISPOSITION_NOTE = (
+    "\n\nNOTE: an empty review_disposition was ignored in this review-mode call. "
+    "Omit the field when submitting a plan; to close REVIEW_REQUIRED, make a separate "
+    "call containing a complete review_disposition only."
+)
+
+VACUOUS_CLAIMS_NOTE = (
+    "\n\nNOTE: spec.acceptance_claims was empty/blank and was treated as absent. "
+    "Omit the field unless you can state concrete, checkable claims of what 'done' "
+    "means for this plan."
+)
+
+
+def vacuous_review_disposition(value: object) -> bool:
+    """True for a schema-shaped but semantically empty disposition: models routinely
+    fill an optional object param with an empty default instead of omitting it. An
+    empty disposition has no closing power by construction, so it means "absent" —
+    never a stale-disposition failure. A populated-but-wrong disposition (non-empty
+    fingerprint or items) is NOT vacuous and keeps failing closed in the validator."""
+    if not isinstance(value, dict) or set(value) - {"review_fingerprint", "items"}:
+        return False
+    return not str(value.get("review_fingerprint") or "").strip() and not value.get("items")
+
+
+def vacuous_acceptance_claims(spec: object) -> bool:
+    """True when the raw spec CARRIES an acceptance_claims key that normalizes to
+    absent (None / [] / blank strings / claim-less objects) — the caller appends
+    ``VACUOUS_CLAIMS_NOTE`` so the treatment is disclosed, never an error (the
+    v6.65.1/.2 lesson, carried onto the spec envelope)."""
+    if not isinstance(spec, dict) or "acceptance_claims" not in spec:
+        return False
+    value = spec.get("acceptance_claims")
+    if value is None:
+        return True
+    if not isinstance(value, list):
+        return False  # shape errors surface through spec normalization instead
+
+    def _claim_text(item: object) -> str:
+        if isinstance(item, str):
+            return item
+        if isinstance(item, dict):
+            return str(item.get("claim") or "")
+        return ""
+
+    return not any(_claim_text(item).strip() for item in value)
+
+
+def apply_plan_compat_notes(
+    ctx: ToolContext, result: object, *, vacuous_disposition: bool, spec: object,
+) -> object:
+    """Append the wrapper's compatibility disclosures to a finished plan answer
+    while keeping the native plan metadata bound to the final text (D02)."""
+    if isinstance(result, str) and vacuous_disposition:
+        result = append_plan_output_note(ctx, result, VACUOUS_DISPOSITION_NOTE)
+    if isinstance(result, str) and vacuous_acceptance_claims(spec):
+        result = append_plan_output_note(ctx, result, VACUOUS_CLAIMS_NOTE)
+    return result
+
+
+def publish_plan_review_projection(
+    ctx: ToolContext,
+    review: dict,
+    text: str,
+) -> str:
+    """Publish control metadata only from validated structured review state."""
+    aggregate = review.get("aggregate_signal")
+    closed = review.get("closed")
+    if aggregate not in {"GREEN", "REVIEW_REQUIRED", "REVISE_PLAN", "DEGRADED"}:
+        raise ValueError(f"invalid plan review aggregate signal: {aggregate!r}")
+    if type(closed) is not bool:
+        raise ValueError("plan review closed state must be boolean")
+    if (aggregate == "GREEN" and not closed) or (
+        aggregate in {"REVISE_PLAN", "DEGRADED"} and closed
+    ):
+        raise ValueError(
+            f"invalid plan review control state: outcome={aggregate}, closed={closed}"
+        )
+    return _publish_tool_result(
+        ctx,
+        ToolResult(
+            status="ok",
+            code="OK",
+            text=text,
+            meta={
+                "plan_review_outcome": aggregate,
+                "plan_review_closed": closed,
+            },
+        ),
+    )
+
+
+def publish_rendered_wave(
+    ctx: ToolContext, wave: dict, *, cap, cycles_paid: int, enforcement: str,
+    cached: bool = False, notes=None, reminder: str = "", head: str = "",
+) -> str:
+    """Render one recorded wave and publish it as the typed plan result (D02).
+
+    The public text and the native structured control leave in ONE ``ToolResult``:
+    ``plan_render.wave_control_state`` is the same projection the rendered
+    ``PLAN_REVIEW_CONTROL_JSON`` footer reads, so the loop's trusted metadata can
+    never diverge from the text the model sees."""
+    from ouroboros.tools.plan_render import _render_wave, wave_control_state
+
+    outcome, closed = wave_control_state(wave)
+    text = head + _render_wave(
+        wave, cap=cap, cycles_paid=cycles_paid, enforcement=enforcement,
+        cached=cached, notes=notes, reminder=reminder,
+    )
+    return publish_plan_review_projection(
+        ctx, {"aggregate_signal": outcome, "closed": closed}, text)
+
+
+def plan_review_cycles_exhausted(
+    ctx: ToolContext, state: dict, state_root: pathlib.Path, task_id: str, *,
+    cap: int, cycles_paid: int, enforcement: str, reminder: str,
+    request_fingerprint: str = "",
+) -> str:
+    """The typed cap result (D10/D27): no panel, the current wave stays open, the typed
+    event fires; blocking exits are owner unstick or a blocked_with_evidence terminal."""
+    from ouroboros.review_cycles import emit_review_cycles_exhausted
+    from ouroboros.task_results import (
+        current_plan_review_wave,
+        mark_plan_review_cycles_exhausted,
+        record_plan_review_attempt,
+    )
+    from ouroboros.tools.review_synthesis import PLAN_REVIEW_CONTROL_PREFIX
+
+    current = current_plan_review_wave(state)
+    # C-01: a CLOSED wave recorded for a DIFFERENT envelope is history, never this
+    # request's answer — rendering it would hand a changed, unreviewed spec the old
+    # GREEN. An OPEN wave is the live obligation and still carries the hold, so it is
+    # marked and rendered with the cap head above it.
+    stale_closed = bool(
+        current
+        and current.get("closed")
+        and str(current.get("request_fingerprint") or "") != str(request_fingerprint or "")
+    )
+    if stale_closed:
+        current = None
+    if current is None and request_fingerprint:
+        # A NEW envelope at a spent cap has no wave of its own; the live obligation is
+        # the last open wave, and the CURRENT attempt records the cap so the gate
+        # releases finalization honestly (D27).
+        current = next(
+            (w for w in reversed(list(state.get("waves") or [])) if isinstance(w, dict) and not w.get("closed")),
+            None,
+        )
+    fingerprint = str((current or {}).get("request_fingerprint") or "")
+    if fingerprint and not (current or {}).get("closed"):
+        try:
+            current = mark_plan_review_cycles_exhausted(state_root, task_id, fingerprint=fingerprint) or current
+        except (OSError, TimeoutError, ValueError) as exc:
+            return f"ERROR: PLAN_REVIEW_STATE_PERSIST_FAILED: {exc}"
+    if request_fingerprint:
+        try:
+            record_plan_review_attempt(
+                state_root, task_id, fingerprint=request_fingerprint, status="cycles_exhausted",
+                reason=f"{cycles_paid}/{cap} paid plan-review cycles spent")
+        except (OSError, TimeoutError, ValueError) as exc:
+            return f"ERROR: PLAN_REVIEW_STATE_PERSIST_FAILED: {exc}"
+    emit_review_cycles_exhausted(
+        getattr(ctx, "event_queue", None), state_root, surface="plan_review", task_id=task_id,
+        cycles_paid=cycles_paid, cap=cap, enforcement=enforcement, fingerprint=fingerprint,
+    )
+    ctx.emit_progress_fn(
+        f"📐 plan_task: PLAN_REVIEW_CYCLES_EXHAUSTED — {cycles_paid}/{cap} paid cycles spent ({enforcement})."
+    )
+    head = (
+        f"⚠️ PLAN_REVIEW_CYCLES_EXHAUSTED: {cycles_paid} of {cap} paid plan-review cycles are spent "
+        "for this task; no reviewer was called and no cycle was consumed. "
+    )
+    if enforcement == "blocking":
+        head += (
+            "Blocking enforcement: the plan review stays OPEN, so implementation stays held — but "
+            "finalization is RELEASED so the task can end honestly instead of waiting for a panel it "
+            "can no longer buy (owner decision D27). Your exits are an owner unstick (Swarm/hurry), a "
+            "revised spec once the owner raises OUROBOROS_REVIEW_MAX_CYCLES, or finalizing now with "
+            "outcome_tier=blocked_with_evidence. Do not start the work under an open blocking review."
+        )
+    else:
+        head += (
+            "Advisory enforcement: you may proceed with the review open; the host records and "
+            "discloses it loudly (typed event review_cycles_exhausted)."
+        )
+    if current:
+        return publish_rendered_wave(
+            ctx, current, cap=cap, cycles_paid=cycles_paid, enforcement=enforcement,
+            cached=True, reminder=reminder, head=head + "\n\n",
+        )
+    # No live wave for THIS envelope (a fresh spec submitted at a spent cap): the
+    # host still owns exactly one control line, and it can never be a closed one.
+    text = (
+        head + "\n\n" + (f"{reminder}\n\n" if reminder else "")
+        + PLAN_REVIEW_CONTROL_PREFIX
+        + json.dumps({"outcome": "REVISE_PLAN", "closed": False}, ensure_ascii=False)
+    )
+    return publish_plan_review_projection(
+        ctx, {"aggregate_signal": "REVISE_PLAN", "closed": False}, text)
 
 
 def plan_deadline_skip(ctx: ToolContext, *, emit: bool = False) -> str:

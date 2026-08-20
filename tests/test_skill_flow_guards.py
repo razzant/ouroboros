@@ -5,6 +5,7 @@ from types import SimpleNamespace
 import queue
 
 from ouroboros import loop as loop_mod
+from ouroboros import loop_nudges
 from ouroboros.contracts.task_constraint import TaskConstraint, normalize_task_constraint
 from ouroboros.skill_review_runner import _heal_mode
 from ouroboros.utils import sanitize_tool_args_for_log
@@ -67,6 +68,8 @@ def test_long_tool_args_log_as_placeholder_not_content_object():
 
 
 def test_skill_finalization_rearms_after_tool_round(monkeypatch, tmp_path):
+    from ouroboros.tools.tool_result import ToolResult
+
     calls = iter([
         ({"content": "done", "tool_calls": []}, {}),
         ({"content": "", "tool_calls": [{"id": "c1", "function": {"name": "noop", "arguments": "{}"}}]}, {}),
@@ -103,8 +106,8 @@ def test_skill_finalization_rearms_after_tool_round(monkeypatch, tmp_path):
         def get_timeout(self, _name):
             return 1
 
-        def execute(self, _name, _args):
-            return "OK"
+        def execute_result(self, _name, _args):
+            return ToolResult(status="ok", code="OK", text="OK")
 
         def override_handler(self, _name, _handler):
             return None
@@ -114,7 +117,7 @@ def test_skill_finalization_rearms_after_tool_round(monkeypatch, tmp_path):
             return "test-model"
 
     monkeypatch.setenv("OUROBOROS_MAX_ROUNDS", "6")
-    monkeypatch.setattr(loop_mod, "_skill_finalization_message", lambda *_args, **_kwargs: "SKILL_NOT_FINALIZED")
+    monkeypatch.setattr(loop_nudges, "_skill_finalization_message", lambda *_args, **_kwargs: "SKILL_NOT_FINALIZED")
     def fake_call(_llm, messages, *_args, **_kwargs):
         seen_message_tails.append([m.get("role") for m in messages[-3:]])
         seen_messages.append([dict(m) for m in messages])
@@ -149,6 +152,8 @@ def test_skill_finalization_rearms_after_tool_round(monkeypatch, tmp_path):
 
 
 def test_skill_action_and_effect_round_cannot_erase_complete_candidate(monkeypatch, tmp_path):
+    from ouroboros.tools.tool_result import ToolResult
+
     original = "Complete skill delivery answer with all required details."
     responses = iter([
         ({"content": original, "tool_calls": []}, {}),
@@ -189,10 +194,10 @@ def test_skill_action_and_effect_round_cannot_erase_complete_candidate(monkeypat
         def get_timeout(self, _name):
             return 1
 
-        def execute(self, name, _args):
+        def execute_result(self, name, _args):
             assert name == "finalize_skill"
             finalized["value"] = True
-            return "OK"
+            return ToolResult(status="ok", code="OK", text="OK")
 
         def override_handler(self, _name, _handler):
             return None
@@ -208,7 +213,7 @@ def test_skill_action_and_effect_round_cannot_erase_complete_candidate(monkeypat
     monkeypatch.setenv("OUROBOROS_MAX_ROUNDS", "7")
     monkeypatch.setenv("OUROBOROS_TASK_REVIEW_MODE", "off")
     monkeypatch.setattr(
-        loop_mod,
+        loop_nudges,
         "_skill_finalization_message",
         lambda *_args, **_kwargs: "" if finalized["value"] else "SKILL_NOT_FINALIZED",
     )
@@ -279,7 +284,7 @@ def test_skill_finalization_empty_text_does_not_append_empty_assistant(monkeypat
         return next(calls)
 
     monkeypatch.setenv("OUROBOROS_MAX_ROUNDS", "3")
-    monkeypatch.setattr(loop_mod, "_skill_finalization_message", lambda *_args, **_kwargs: "SKILL_NOT_FINALIZED")
+    monkeypatch.setattr(loop_nudges, "_skill_finalization_message", lambda *_args, **_kwargs: "SKILL_NOT_FINALIZED")
     monkeypatch.setattr(loop_mod, "call_llm_with_retry", fake_call)
 
     result, _usage, _trace = loop_mod.run_llm_loop(

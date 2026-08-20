@@ -18,11 +18,12 @@ import types
 import pytest
 
 from supervisor import events as events_mod
+from supervisor import events_task_done as task_done_mod
 
 
 @pytest.fixture()
 def sent_and_ctx(tmp_path, monkeypatch):
-    monkeypatch.setattr(events_mod, "_PROVIDER_DEATH_NOTIFIED", set())
+    monkeypatch.setattr(task_done_mod, "_PROVIDER_DEATH_NOTIFIED", set())
     sent: list[tuple[int, str]] = []
 
     def make_ctx(running):
@@ -118,7 +119,7 @@ def test_raising_send_keeps_cleanup_and_allows_a_later_retry(sent_and_ctx):
         task_done_event=_provider_death_event("rootF"),
     )
     assert "rootF" not in running, "cleanup must run despite the failed send"
-    assert "rootF" not in events_mod._PROVIDER_DEATH_NOTIFIED
+    assert "rootF" not in task_done_mod._PROVIDER_DEATH_NOTIFIED
 
     # A later dispatch (e.g. the duplicate already_done terminal) retries and
     # registers the id only now, on the successful send.
@@ -128,7 +129,7 @@ def test_raising_send_keeps_cleanup_and_allows_a_later_retry(sent_and_ctx):
         task_done_event=_provider_death_event("rootF"),
     )
     assert len(_outage_lines(sent)) == 1
-    assert "rootF" in events_mod._PROVIDER_DEATH_NOTIFIED
+    assert "rootF" in task_done_mod._PROVIDER_DEATH_NOTIFIED
 
 
 def test_reaper_delivered_child_terminal_stamps_parent_activity(sent_and_ctx):
@@ -165,7 +166,7 @@ def test_ephemeral_decision_turn_gets_no_duplicate_outage_ping(sent_and_ctx):
     )
 
     assert not _outage_lines(sent)
-    assert "rootH" not in events_mod._PROVIDER_DEATH_NOTIFIED
+    assert "rootH" not in task_done_mod._PROVIDER_DEATH_NOTIFIED
 
 
 def test_subagent_provider_death_never_pings_the_owner(sent_and_ctx):

@@ -286,7 +286,7 @@ def test_incomplete_evolution_stop_leaves_the_campaign_open_until_settle(tmp_pat
     from supervisor import evolution_lifecycle as el
 
     state.init(tmp_path)
-    q.init(tmp_path, 600, 1800)
+    q.init(tmp_path)
     assert el.start_evolution_campaign("Improve", source="test").get("status") == "active"
     state.update_state(lambda live: live.update(
         owner_chat_id=7, evolution_mode_enabled=True, evolution_owner_stopped=False,
@@ -328,7 +328,7 @@ def test_owner_evolution_stop_gates_closure_on_completeness(tmp_path, monkeypatc
     from supervisor import evolution_lifecycle as el
 
     state.init(tmp_path)
-    q.init(tmp_path, 600, 1800)
+    q.init(tmp_path)
     assert el.start_evolution_campaign("Improve", source="test").get("status") == "active"
     ctx = types.SimpleNamespace(
         DRIVE_ROOT=tmp_path,

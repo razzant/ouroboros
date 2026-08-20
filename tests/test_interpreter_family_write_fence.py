@@ -4,7 +4,7 @@ INFRA-1 fixed the versioned-basename bypass for python alone (`startswith("pytho
 beside an exact set), so the versioned spellings every OTHER interpreter family
 ships under — ruby3.2, php8.3, perl5.38, node18 — still bypassed the light-mode
 inline-write fence (`shell_guards.light_shell_repo_mutation`), the registry
-runtime_data scan trigger (`ToolRegistry._run_shell_safety_check`), and the
+runtime_data scan trigger (`registry_guard_process._run_shell_safety_check`), and the
 protected-artifact high-risk-interpreter check. That patched one interpreter, not
 the failure class (BIBLE P2).
 
@@ -15,7 +15,7 @@ a versioned spelling must classify and guard exactly like its unversioned family
 name. They fail on the pre-fix tree (exact-set + python-only startswith).
 
 XG-7B3.1 (second half of the same class, two reviewers converged): classification was
-fixed, REACHABILITY was not. `_run_shell_safety_check` passed
+fixed, REACHABILITY was not. `registry_guard_process._run_shell_safety_check` passed
 `detect_interpreter_inline=False` for `run_command`, and inline code was parsed only
 behind `-c`, so in light mode `run_command(["node18", "-e", "...writeFileSync(...)"])`
 mutated an ordinary repo file BEFORE the post-execution tripwire — which reports

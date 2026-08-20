@@ -297,7 +297,8 @@ def test_light_run_script_default_cwd_uses_active_workspace_agent_python(tmp_pat
 
 def test_registry_guard_and_handler_receive_same_resolved_verify_argv(tmp_path, monkeypatch):
     import ouroboros.safety as safety
-    import ouroboros.tools.registry as registry_module
+    import ouroboros.tools.registry_guard_process as registry_guard_process
+    import ouroboros.tools.shell_guards as shell_guards
 
     ctx = _context(tmp_path)
     agent_python = _executable(tmp_path / "agent" / "bin" / "python")
@@ -312,7 +313,8 @@ def test_registry_guard_and_handler_receive_same_resolved_verify_argv(tmp_path, 
     registry = ToolRegistry(repo_dir=ctx.repo_dir, drive_root=ctx.drive_root)
     registry.set_context(ctx)
     captured: dict[str, list[str]] = {}
-    original_guard = registry_module.process_shell_guard_args
+    original_guard = shell_guards.process_shell_guard_args
+    original_process_guard = registry_guard_process._run_shell_safety_check
 
     def capture_guard(name, args, **kwargs):
         guarded = original_guard(name, args, **kwargs)
@@ -325,9 +327,13 @@ def test_registry_guard_and_handler_receive_same_resolved_verify_argv(tmp_path, 
         captured["handler"] = list(check)
         return "ok"
 
-    monkeypatch.setattr(registry_module, "process_shell_guard_args", capture_guard)
-    monkeypatch.setattr(registry, "_run_shell_safety_check", lambda *args, **kwargs: "")
-    registry._entries["verify_and_record"].handler = capture_handler
+    def capture_process_guard(owner, guarded_args, runtime_mode, binding=None):
+        captured["process_guard"] = list(guarded_args["cmd"])
+        return original_process_guard(owner, guarded_args, runtime_mode, binding)
+
+    monkeypatch.setattr(shell_guards, "process_shell_guard_args", capture_guard)
+    monkeypatch.setattr(registry_guard_process, "_run_shell_safety_check", capture_process_guard)
+    registry.override_handler("verify_and_record", capture_handler)
 
     result = registry.execute(
         "verify_and_record",
@@ -336,7 +342,7 @@ def test_registry_guard_and_handler_receive_same_resolved_verify_argv(tmp_path, 
 
     expected = [str(agent_python), "-m", "pytest", "--version"]
     assert result == "ok"
-    assert captured == {"guard": expected, "handler": expected}
+    assert captured == {"guard": expected, "process_guard": expected, "handler": expected}
     events_path = ctx.drive_logs() / "events.jsonl"
     event = json.loads(events_path.read_text(encoding="utf-8").splitlines()[-1])
     assert event["type"] == "python_interpreter_resolution"
@@ -364,7 +370,7 @@ def test_registry_uses_current_process_python_before_server_bootstrap(
         observed["cmd"] = cmd
         return "ok"
 
-    registry._entries["run_command"].handler = handler
+    registry.override_handler("run_command", handler)
 
     result = registry.execute("run_command", {"cmd": ["python", "-V"]})
 
@@ -386,7 +392,6 @@ def test_run_script_accepts_registry_attested_versioned_agent_python(
 
     registry = ToolRegistry(repo_dir=ctx.repo_dir, drive_root=ctx.drive_root)
     registry.set_context(ctx)
-    monkeypatch.setattr(registry, "_run_shell_safety_check", lambda *args, **kwargs: "")
 
     result = registry.execute(
         "run_script",
@@ -489,3 +494,143 @@ def test_resolution_trace_failure_is_fail_soft(tmp_path, monkeypatch):
     monkeypatch.setattr(resolver, "append_jsonl", lambda *args, **kwargs: (_ for _ in ()).throw(OSError("full")))
 
     resolver.record_python_resolution(_context(tmp_path), trace)
+
+
+@pytest.mark.parametrize(
+    ("reason", "expected_status", "expected_code", "legacy_status"),
+    (
+        (
+            "agent_python_unavailable",
+            "unavailable",
+            "CAPABILITY_UNAVAILABLE",
+            "unavailable",  # T1 §A.18: unavailability is named; the report bucket is unchanged
+        ),
+        (
+            "cwd_resolution_failed",
+            "blocked",
+            "SHELL_CWD_BLOCKED",
+            "cwd_blocked",
+        ),
+    ),
+)
+def test_python_predispatch_keeps_native_or_centralized_legacy_projection(
+    reason,
+    expected_status,
+    expected_code,
+    legacy_status,
+    tmp_path,
+    monkeypatch,
+):
+    import ouroboros.safety as safety
+    import ouroboros.tools.tool_resolution as tool_resolution
+    from ouroboros.loop_tool_execution import _execute_single_tool
+    from ouroboros.python_interpreter import PythonResolutionTrace
+    from ouroboros.tool_access import shell_cwd_block_message
+    from ouroboros.tools.tool_result import LegacyTextResultAdapter, ToolResult
+
+    ctx = _context(tmp_path)
+    logs = ctx.drive_logs()
+    registry = ToolRegistry(repo_dir=ctx.repo_dir, drive_root=ctx.drive_root)
+    registry.set_context(ctx)
+    args = {"cmd": ["python", "-V"], "cwd": ""}
+    trace = PythonResolutionTrace(
+        tool="run_command",
+        requested_interpreter="python",
+        resolved_interpreter="python",
+        surface="system_repo",
+        environment="unavailable",
+        reason="unavailable",
+        error_reason=reason,
+    )
+    downstream_calls: list[str] = []
+
+    def forbidden(label):
+        def fail(*_args, **_kwargs):
+            downstream_calls.append(label)
+            raise AssertionError(f"python predispatch denial reached {label}")
+
+        return fail
+
+    registry.override_handler("run_command", forbidden("handler"))
+    monkeypatch.setattr(safety, "check_safety", forbidden("safety"))
+    monkeypatch.setattr(
+        tool_resolution,
+        "resolve_process_python",
+        lambda *_args, **_kwargs: (dict(args), trace),
+    )
+    monkeypatch.setattr(
+        tool_resolution,
+        "record_python_resolution",
+        lambda *_args, **_kwargs: None,
+    )
+
+    if reason == "cwd_resolution_failed":
+        expected_text = shell_cwd_block_message(ctx, args["cwd"], operation="shell")
+        expected_meta = {}
+    else:
+        expected_text = (
+            "⚠️ PYTHON_INTERPRETER_UNAVAILABLE: Ouroboros could not prove "
+            "the target interpreter for this launch surface "
+            "(agent_python_unavailable). The process was not started."
+        )
+        expected_meta = {"reason": reason}
+        monkeypatch.setattr(
+            LegacyTextResultAdapter,
+            "from_text",
+            forbidden("legacy adapter"),
+        )
+
+    expected = ToolResult(
+        status=expected_status,
+        code=expected_code,
+        text=expected_text,
+        meta=expected_meta,
+    )
+    if reason == "cwd_resolution_failed":
+        with monkeypatch.context() as local_patch:
+            local_patch.setattr(
+                LegacyTextResultAdapter,
+                "from_text",
+                forbidden("producer-local legacy adapter"),
+            )
+            resolved_args, resolved_trace, block = tool_resolution._resolve_python_predispatch(
+                registry,
+                "run_command",
+                dict(args),
+                "advanced",
+                None,
+            )
+        assert block == expected_text
+    else:
+        resolved_args, resolved_trace, block = tool_resolution._resolve_python_predispatch(
+            registry,
+            "run_command",
+            dict(args),
+            "advanced",
+            None,
+        )
+        assert block == expected
+    assert resolved_args == args
+    assert resolved_trace is trace
+
+    assert registry.execute_result("run_command", dict(args)) == expected
+    assert registry.execute("run_command", dict(args)) == expected_text
+    row = _execute_single_tool(
+        registry,
+        {
+            "id": f"python-predispatch-{reason}",
+            "function": {"name": "run_command", "arguments": json.dumps(args)},
+        },
+        logs,
+        f"task-python-predispatch-{reason}",
+    )
+    assert row["tool_result"] == expected
+    assert row["result"] == expected_text
+    assert row["is_error"] is True
+    assert row["result_meta"] == {
+        "status": legacy_status,
+        "tool_result_status": expected_status,
+        "tool_result_code": expected_code,
+        "tool_result_meta": expected_meta,
+    }
+    assert downstream_calls == []

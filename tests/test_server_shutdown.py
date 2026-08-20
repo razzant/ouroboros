@@ -32,6 +32,7 @@ def test_shutdown_task_cleanup_args_never_reports_crash_storm():
 
 def test_managed_update_restart_preserves_pending_queue(monkeypatch, tmp_path):
     import server
+    from ouroboros import server_restart
 
     worker_calls = []
     state = {"owner_chat_id": 0}
@@ -47,11 +48,11 @@ def test_managed_update_restart_preserves_pending_queue(monkeypatch, tmp_path):
         REPO_DIR=tmp_path,
     )
     monkeypatch.setattr(
-        server,
+        server_restart,
         "_managed_update_pending_kwargs",
         lambda: {"preserve_pending": True},
     )
-    monkeypatch.setattr(server, "_request_restart_exit", lambda: None)
+    monkeypatch.setattr(server_restart, "_request_restart_exit", lambda: None)
 
     server._perform_supervisor_restart(ctx)
 

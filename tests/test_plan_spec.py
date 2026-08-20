@@ -12,7 +12,7 @@ import pathlib
 import pytest
 
 from ouroboros.config import adaptive_quorum
-from ouroboros.loop_tool_execution import _parse_plan_review_control
+from ouroboros.tools.plan_render import _parse_plan_review_control
 from ouroboros.tools import plan_evidence, plan_packet, plan_spec
 from ouroboros.tools.review_synthesis import PLAN_REVIEW_CONTROL_PREFIX
 

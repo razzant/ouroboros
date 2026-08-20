@@ -12,7 +12,7 @@ from ouroboros.skill_review import SkillReviewOutcome
 from ouroboros.skill_review_runner import run_skill_review_lifecycle_blocking
 from ouroboros.tool_access import build_resolved_resource_binding, load_bound_skill
 from ouroboros.tools import core as core_tools
-from ouroboros.tools import git as git_tools
+from ouroboros.tools import git_plumbing
 from ouroboros.tools.registry import ToolContext, ToolRegistry
 from ouroboros.tools.skill_preflight import _handle_skill_preflight
 
@@ -315,7 +315,7 @@ def test_protected_name_is_judged_by_physical_repo_target(tmp_path, monkeypatch)
         workspace_root=workspace,
         workspace_mode="external",
     )
-    monkeypatch.setattr(git_tools, "get_runtime_mode", lambda: "light")
+    monkeypatch.setattr(git_plumbing, "get_runtime_mode", lambda: "light")
 
     workspace_result = core_tools._write_file(
         ctx, path="BIBLE.md", content="project changed\n",

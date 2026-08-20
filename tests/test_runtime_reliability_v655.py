@@ -178,7 +178,7 @@ def test_classify_safety_parse_failure_classes():
 
 
 def test_registry_detects_safety_mode_self_lowering():
-    from ouroboros.tools.registry import _detect_safety_mode_self_lowering as det
+    from ouroboros.tools.registry_guard_process import _detect_safety_mode_self_lowering as det
 
     assert det("curl -x post http://127.0.0.1:8765/api/owner/safety-mode -d off")
     assert det("python -c \"...ouroboros_safety_mode...\" >> settings.json".lower())
@@ -569,7 +569,7 @@ def test_resolve_user_file_path_rejects_absolute_outside_home(tmp_path, monkeypa
 
 
 def test_dispatch_auto_routes_user_files_read_under_workspace(tmp_path):
-    from ouroboros.tools.registry import _normalize_dispatch_path_args
+    from ouroboros.tools.tool_resolution import _normalize_dispatch_path_args
 
     ctx = _ctx(tmp_path)
     target = tmp_path / "system" / "src" / "x.py"
@@ -580,7 +580,7 @@ def test_dispatch_auto_routes_user_files_read_under_workspace(tmp_path):
 
 
 def test_dispatch_redirects_user_files_write_under_workspace(tmp_path):
-    from ouroboros.tools.registry import _normalize_dispatch_path_args
+    from ouroboros.tools.tool_resolution import _normalize_dispatch_path_args
 
     ctx = _ctx(tmp_path)
     target = tmp_path / "system" / "src" / "x.py"
@@ -591,7 +591,7 @@ def test_dispatch_redirects_user_files_write_under_workspace(tmp_path):
 
 
 def test_dispatch_leaves_query_code_and_true_user_files_alone(tmp_path, monkeypatch):
-    from ouroboros.tools.registry import _normalize_dispatch_path_args
+    from ouroboros.tools.tool_resolution import _normalize_dispatch_path_args
 
     ctx = _ctx(tmp_path)
     target = tmp_path / "system" / "src" / "x.py"
@@ -740,7 +740,7 @@ def test_safety_mode_skip_falls_back_to_drive_logs(tmp_path, monkeypatch):
 def test_list_files_hard_failure_is_first_class_error(tmp_path, monkeypatch):
     """Review round 3: an iterdir/permission failure inside a listing helper must
     surface as the first-class LIST_FILES_ERROR string, never ok-shaped JSON."""
-    from ouroboros.tools import core as core_mod
+    from ouroboros.tools import core_file_tools as core_mod
 
     ctx = _ctx(tmp_path)
     boom = tmp_path / "data" / "task_drives" / "t-v655"
@@ -778,6 +778,9 @@ def test_safety_parse_failed_event_is_durable_without_queue(tmp_path):
 
 def test_route_note_trails_result_for_failure_classification():
     from ouroboros.tools.registry import _compose_execute_result
+    from ouroboros.tools.tool_result import _compose_execute_result as owner
+
+    assert _compose_execute_result is owner
 
     out = _compose_execute_result(
         "⚠️ TOOL_ERROR: File not found: x.py",

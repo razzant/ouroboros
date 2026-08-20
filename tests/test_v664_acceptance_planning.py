@@ -75,7 +75,7 @@ def test_acceptance_review_reserve_uses_existing_event_ewma(tmp_path, monkeypatc
 
 
 def test_acceptance_panel_persists_timing_to_canonical_root(tmp_path, monkeypatch):
-    import ouroboros.loop as loop
+    from ouroboros import loop_acceptance_review
     import ouroboros.review_evidence as evidence_mod
     import ouroboros.review_substrate as substrate
 
@@ -93,7 +93,7 @@ def test_acceptance_panel_persists_timing_to_canonical_root(tmp_path, monkeypatc
         "run_review_request",
         lambda *_a, **_k: SimpleNamespace(aggregate_signal="PASS"),
     )
-    ctx = loop._TaskAcceptanceContext(
+    ctx = loop_acceptance_review._TaskAcceptanceContext(
         tools=SimpleNamespace(_ctx=tool_ctx),
         content="deliverable",
         task_id="root-timing",
@@ -108,7 +108,7 @@ def test_acceptance_panel_persists_timing_to_canonical_root(tmp_path, monkeypatc
         passes_done=2,
     )
 
-    loop._execute_task_acceptance_panel(ctx)
+    loop_acceptance_review._execute_task_acceptance_panel(ctx)
 
     rows = [json.loads(line) for line in (canonical / "logs" / "events.jsonl").read_text().splitlines()]
     assert rows[-1]["task_id"] == "root-timing"
@@ -138,7 +138,7 @@ def test_normalized_stall_default_does_not_emit_deprecation_noise(tmp_path):
 
 
 def test_child_task_never_becomes_host_acceptance_authority():
-    from ouroboros.loop import _task_acceptance_eligible
+    from ouroboros.loop_acceptance import _task_acceptance_eligible
 
     assert _task_acceptance_eligible(
         "required", {"tool_calls": [{"tool": "write_file"}]}, False,
@@ -147,7 +147,7 @@ def test_child_task_never_becomes_host_acceptance_authority():
 
 
 def test_queue_owned_acceptance_fence_uses_only_optional_ctx_hooks():
-    from ouroboros.loop import _begin_task_acceptance_fence, _end_task_acceptance_fence
+    from ouroboros.loop_acceptance import _begin_task_acceptance_fence, _end_task_acceptance_fence
 
     calls = []
 
@@ -172,7 +172,7 @@ def test_queue_owned_acceptance_fence_uses_only_optional_ctx_hooks():
 
 
 def test_acceptance_quiescence_does_not_treat_cancel_requested_as_settled(tmp_path, monkeypatch):
-    from ouroboros.loop import _task_acceptance_subtree_snapshot
+    from ouroboros.loop_acceptance import _task_acceptance_subtree_snapshot
     import ouroboros.task_status as task_status
 
     monkeypatch.setattr(
@@ -196,7 +196,7 @@ def test_acceptance_quiescence_does_not_treat_cancel_requested_as_settled(tmp_pa
 def test_acceptance_subtree_uses_canonical_budget_root_for_split_drive(
     tmp_path, monkeypatch,
 ):
-    from ouroboros.loop import _task_acceptance_subtree_snapshot
+    from ouroboros.loop_acceptance import _task_acceptance_subtree_snapshot
     from ouroboros.tools.join_ledger import _child_result_sha256
     import ouroboros.task_status as task_status
 
@@ -243,7 +243,7 @@ def test_acceptance_subtree_uses_canonical_budget_root_for_split_drive(
 
 
 def test_acceptance_quiescence_requires_empty_supervisor_snapshot(tmp_path, monkeypatch):
-    from ouroboros.loop import _task_acceptance_subtree_snapshot
+    from ouroboros.loop_acceptance import _task_acceptance_subtree_snapshot
     import ouroboros.task_status as task_status
 
     monkeypatch.setattr(task_status, "find_child_tasks", lambda *_args, **_kwargs: [{
@@ -584,5 +584,3 @@ def test_clean_acceptance_requires_per_criterion_evidence(tmp_path):
         request, slots=slots, drive_root=tmp_path, llm=_CriterionLLM(structured=True),
     )
     assert clean.aggregate_signal == "PASS"
-
-

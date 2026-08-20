@@ -11,16 +11,20 @@ and subagent inheritance via the parent-contract spread.
 from __future__ import annotations
 
 import json
+from types import SimpleNamespace
 
+import pytest
 from starlette.applications import Starlette
 from starlette.routing import Route
 from starlette.testclient import TestClient
 
+from ouroboros.contracts.task_constraint import TaskConstraint
 from ouroboros.contracts.task_contract import (
     build_task_contract,
     normalize_disabled_tools,
 )
 from ouroboros.tools.registry import ToolContext, ToolRegistry
+from ouroboros.tools.tool_result import ToolResult
 
 WEB_TOOLS = ["web_search", "browse_page", "browser_action", "analyze_screenshot", "vlm_query"]
 
@@ -164,6 +168,415 @@ def test_registry_hides_missing_credential_tools(tmp_path, monkeypatch):
         and "submit_skill_to_hub" in item.get("tools", [])
         for item in omissions
     )
+
+
+def test_capability_resource_guard_owner_facades_preserve_identity():
+    from ouroboros.tools import registry, registry_guards
+
+    for name in (
+        "_WEB_TOOLS",
+        "_resource_allowed",
+        "_disabled_tools",
+        "_GITHUB_TOKEN_TOOLS",
+        "_builtin_tool_availability",
+    ):
+        assert getattr(registry, name) is getattr(registry_guards, name)
+
+
+@pytest.mark.parametrize(
+    (
+        "name",
+        "args",
+        "contract",
+        "expected_status",
+        "expected_code",
+        "legacy_status",
+        "expected_text",
+    ),
+    (
+        (
+            "create_github_issue",
+            {},
+            {
+                "disabled_tools": ["create_github_issue"],
+                "allowed_resources": {"network": False},
+            },
+            "blocked",
+            "RESOURCE_CONSTRAINT_BLOCKED",
+            "resource_constraint_blocked",
+            (
+                "⚠️ RESOURCE_CONSTRAINT_BLOCKED: task_contract.disabled_tools "
+                "withholds 'create_github_issue' for this task."
+            ),
+        ),
+        (
+            "create_github_issue",
+            {},
+            {},
+            "unavailable",
+            "CAPABILITY_UNAVAILABLE",
+            "unavailable",  # T1 §A.18
+            (
+                "⚠️ CAPABILITY_UNAVAILABLE: 'create_github_issue' is unavailable: "
+                "missing_credential (GITHUB_TOKEN)."
+            ),
+        ),
+        (
+            "web_search",
+            {"query": "x"},
+            {"allowed_resources": {"web": False}},
+            "unavailable",
+            "CAPABILITY_UNAVAILABLE",
+            "unavailable",  # T1 §A.18
+            (
+                "⚠️ CAPABILITY_UNAVAILABLE: 'web_search' is unavailable: "
+                "missing_credential (web_search_backend)."
+            ),
+        ),
+        (
+            "vlm_query",
+            {"image_url": "https://example.test/image.png"},
+            {"allowed_resources": {"web": False}},
+            "blocked",
+            "RESOURCE_CONSTRAINT_BLOCKED",
+            "resource_constraint_blocked",
+            (
+                "⚠️ RESOURCE_CONSTRAINT_BLOCKED: remote image_url for vlm_query "
+                "requires allowed_resources.web/network."
+            ),
+        ),
+        (
+            "youtube_transcript",
+            {},
+            {"allowed_resources": {"web": False}},
+            "blocked",
+            "RESOURCE_CONSTRAINT_BLOCKED",
+            "resource_constraint_blocked",
+            (
+                "⚠️ RESOURCE_CONSTRAINT_BLOCKED: task_contract.allowed_resources.web=false "
+                "blocks 'youtube_transcript'."
+            ),
+        ),
+        (
+            "vcs_pull_ff",
+            {},
+            {"allowed_resources": {"network": False}},
+            "blocked",
+            "RESOURCE_CONSTRAINT_BLOCKED",
+            "resource_constraint_blocked",
+            (
+                "⚠️ RESOURCE_CONSTRAINT_BLOCKED: task_contract.allowed_resources.network=false "
+                "blocks 'vcs_pull_ff'."
+            ),
+        ),
+        (
+            "delegate_start",
+            {"prompt": "x"},
+            {
+                "disabled_tools": ["claude_code_edit"],
+                "allowed_resources": {"network": False},
+            },
+            "blocked",
+            "RESOURCE_CONSTRAINT_BLOCKED",
+            "resource_constraint_blocked",
+            (
+                "⚠️ RESOURCE_CONSTRAINT_BLOCKED: task_contract.disabled_tools "
+                "withholds 'delegate_start' for this task."
+            ),
+        ),
+    ),
+)
+def test_builtin_capability_resource_guards_are_native_and_never_dispatch(
+    name,
+    args,
+    contract,
+    expected_status,
+    expected_code,
+    legacy_status,
+    expected_text,
+    tmp_path,
+    monkeypatch,
+):
+    import ouroboros.loop_tool_execution as execution
+    from ouroboros.tools import search
+
+    monkeypatch.delenv("GITHUB_TOKEN", raising=False)
+    monkeypatch.setattr(search, "_available_web_search_backends", lambda: [])
+    calls = {"handler": 0, "safety": 0}
+
+    def _physical(*_args, **_kwargs):
+        calls["handler"] += 1
+        raise AssertionError("a denied built-in tool must not dispatch")
+
+    repo = tmp_path / "repo"
+    data = tmp_path / "data"
+    repo.mkdir()
+    data.mkdir()
+    registry = ToolRegistry(repo_dir=repo, drive_root=data)
+    assert name in registry._entries
+    registry.override_handler(name, _physical)
+    monkeypatch.setattr(
+        "ouroboros.safety.check_safety",
+        lambda *_a, **_k: calls.__setitem__("safety", calls["safety"] + 1) or (True, ""),
+    )
+    monkeypatch.setattr(execution, "persist_call", lambda *_a, **_k: {})
+    registry.set_context(ToolContext(
+        repo_dir=repo,
+        drive_root=data,
+        task_id="task-capability-resource",
+        task_metadata={"task_contract": contract},
+    ))
+    logs = tmp_path / "logs"
+    logs.mkdir()
+
+    typed = registry.execute_result(name, args)
+    assert typed == ToolResult(
+        status=expected_status,
+        code=expected_code,
+        text=expected_text,
+    )
+    assert registry.execute(name, args) == expected_text
+    row = execution._execute_single_tool(
+        registry,
+        {"id": "call-resource", "function": {"name": name, "arguments": json.dumps(args)}},
+        logs,
+        "task-capability-resource",
+    )
+    assert calls == {"handler": 0, "safety": 0}
+    assert row["result"] == expected_text
+    assert row["is_error"] is True
+    assert row["result_meta"] == {
+        "status": legacy_status,
+        "tool_result_status": expected_status,
+        "tool_result_code": expected_code,
+        "tool_result_meta": {},
+    }
+
+
+def test_capability_resource_guard_allows_an_admitted_call():
+    from ouroboros.tools.registry_guards import _capability_resource_guard_result
+
+    ctx = SimpleNamespace(
+        task_id="task-admitted",
+        task_metadata={
+            "task_contract": {"allowed_resources": {"web": True, "network": True}},
+        },
+        task_contract={},
+    )
+    assert _capability_resource_guard_result(ctx, "vcs_pull_ff", {}) is None
+
+
+@pytest.mark.parametrize("failure", (ImportError("missing"), RuntimeError("broken")))
+def test_builtin_availability_probe_fail_open(failure, monkeypatch):
+    from ouroboros.tools import search
+    from ouroboros.tools.registry_guards import _builtin_tool_availability
+
+    def _fail():
+        raise failure
+
+    monkeypatch.setattr(search, "_available_web_search_backends", _fail)
+    ctx = SimpleNamespace(task_id="task-probe", task_metadata={}, task_contract={})
+    assert _builtin_tool_availability("web_search", ctx) == (True, "", "")
+
+
+def test_builtin_availability_bare_registry_skips_runtime_probes(monkeypatch):
+    from ouroboros.tools import search
+    from ouroboros.tools.registry_guards import _builtin_tool_availability
+
+    monkeypatch.setattr(
+        search,
+        "_available_web_search_backends",
+        lambda: pytest.fail("bare structural inventory must not probe credentials"),
+    )
+    ctx = SimpleNamespace(task_id="", task_metadata={}, task_contract={})
+    assert _builtin_tool_availability("web_search", ctx) == (True, "", "")
+
+
+@pytest.mark.parametrize(
+    ("provider", "ephemeral", "expected_code", "legacy_error", "legacy_status"),
+    (
+        # T1 §A.4: the ephemeral-turn denial is a denial, not a clean call.
+        ("extension", True, "ACCESS_BLOCKED", True, "blocked"),
+        ("extension", False, "RESOURCE_CONSTRAINT_BLOCKED", True, "resource_constraint_blocked"),
+        ("mcp", False, "RESOURCE_CONSTRAINT_BLOCKED", True, "resource_constraint_blocked"),
+    ),
+)
+def test_external_resource_guard_precedes_child_policy_and_never_dispatches(
+    provider,
+    ephemeral,
+    expected_code,
+    legacy_error,
+    legacy_status,
+    tmp_path,
+    monkeypatch,
+):
+    import ouroboros.loop_tool_execution as execution
+    from ouroboros import extension_loader, mcp_client
+    from ouroboros.tools import extension_dispatch
+
+    repo = tmp_path / "repo"
+    data = tmp_path / "data"
+    repo.mkdir()
+    data.mkdir()
+    registry = ToolRegistry(repo_dir=repo, drive_root=data)
+    calls = {"discovery": 0, "physical": 0, "safety": 0}
+
+    def _physical(*_args, **_kwargs):
+        calls["physical"] += 1
+        raise AssertionError("a denied external tool must not dispatch")
+
+    name = "ext_4_demo_ping" if provider == "extension" else "mcp_demo__ping"
+    if provider == "extension":
+        descriptor = {"name": name, "skill": "demo", "handler": _physical}
+
+        def _get_tool(candidate):
+            calls["discovery"] += 1
+            return descriptor if candidate == name else None
+
+        monkeypatch.setattr(extension_loader, "get_tool", _get_tool)
+        monkeypatch.setattr(extension_loader, "is_extension_live", lambda *_a, **_k: True)
+    else:
+        monkeypatch.setattr(
+            mcp_client,
+            "ensure_configured_from_settings",
+            lambda **_kwargs: calls.__setitem__("discovery", calls["discovery"] + 1),
+        )
+        monkeypatch.setattr(mcp_client, "is_mcp_tool_name", lambda candidate: candidate == name)
+        monkeypatch.setattr(extension_dispatch, "_dispatch_mcp_tool_result", _physical)
+
+    monkeypatch.setattr(
+        "ouroboros.safety.check_safety",
+        lambda *_a, **_k: calls.__setitem__("safety", calls["safety"] + 1) or (True, ""),
+    )
+    monkeypatch.setattr(execution, "persist_call", lambda *_a, **_k: {})
+    ctx = ToolContext(
+        repo_dir=repo,
+        drive_root=data,
+        task_id="task-external-resource",
+        task_metadata={"task_contract": {"allowed_resources": {"network": False}}},
+        task_constraint=TaskConstraint(
+            mode="acting_subagent",
+            allow_enable=False,
+            surface="external_workspace",
+        ),
+    )
+    ctx.is_ephemeral_turn = ephemeral
+    registry.set_context(ctx)
+    logs = tmp_path / "logs"
+    logs.mkdir()
+
+    row = execution._execute_single_tool(
+        registry,
+        {"id": "call-resource", "function": {"name": name, "arguments": "{}"}},
+        logs,
+        "task-external-resource",
+    )
+
+    assert calls["discovery"] > 0
+    assert calls["physical"] == 0
+    assert calls["safety"] == 0
+    assert row["is_error"] is legacy_error
+    assert row["result_meta"] == {
+        "status": legacy_status,
+        "tool_result_status": "blocked",
+        "tool_result_code": expected_code,
+        "tool_result_meta": {},
+    }
+    if expected_code == "RESOURCE_CONSTRAINT_BLOCKED":
+        assert row["result"] == (
+            "⚠️ RESOURCE_CONSTRAINT_BLOCKED: task_contract.allowed_resources.network=false "
+            f"blocks external tool {name!r}."
+        )
+    else:
+        assert row["result"].startswith("⚠️ EPHEMERAL_TURN_RESTRICTED: external tool ")
+
+
+@pytest.mark.parametrize(
+    ("provider", "expected_status", "expected_code", "expected_meta"),
+    (
+        ("extension", "unavailable", "EXTENSION_UNAVAILABLE", {"dynamic_provider": True}),
+        ("mcp", "error", "UNKNOWN_TOOL", {}),
+    ),
+)
+def test_external_discovery_failure_does_not_fabricate_a_resource_denial(
+    provider,
+    expected_status,
+    expected_code,
+    expected_meta,
+    tmp_path,
+    monkeypatch,
+):
+    import ouroboros.loop_tool_execution as execution
+    from ouroboros import extension_loader, mcp_client
+    from ouroboros.tools import extension_dispatch
+
+    repo = tmp_path / "repo"
+    data = tmp_path / "data"
+    repo.mkdir()
+    data.mkdir()
+    registry = ToolRegistry(repo_dir=repo, drive_root=data)
+    calls = {"discovery": 0, "physical": 0, "safety": 0}
+    name = "ext_4_demo_ping" if provider == "extension" else "mcp_demo__ping"
+
+    def _physical(*_args, **_kwargs):
+        calls["physical"] += 1
+        raise AssertionError("an unavailable external tool must not dispatch")
+
+    if provider == "extension":
+        descriptor = {"name": name, "skill": "demo", "handler": _physical}
+
+        def _get_tool(candidate):
+            calls["discovery"] += 1
+            return descriptor if candidate == name else None
+
+        monkeypatch.setattr(extension_loader, "get_tool", _get_tool)
+        monkeypatch.setattr(extension_loader, "is_extension_live", lambda *_a, **_k: False)
+        monkeypatch.setattr(mcp_client, "ensure_configured_from_settings", lambda **_k: None)
+        monkeypatch.setattr(mcp_client, "is_mcp_tool_name", lambda _candidate: False)
+    else:
+        def _configuration_failure(**_kwargs):
+            calls["discovery"] += 1
+            raise RuntimeError("configuration unavailable")
+
+        monkeypatch.setattr(mcp_client, "ensure_configured_from_settings", _configuration_failure)
+        monkeypatch.setattr(mcp_client, "is_mcp_tool_name", lambda candidate: candidate == name)
+    monkeypatch.setattr(extension_dispatch, "_dispatch_mcp_tool_result", _physical)
+    monkeypatch.setattr(
+        "ouroboros.safety.check_safety",
+        lambda *_a, **_k: calls.__setitem__("safety", calls["safety"] + 1) or (True, ""),
+    )
+    monkeypatch.setattr(execution, "persist_call", lambda *_a, **_k: {})
+    registry.set_context(ToolContext(
+        repo_dir=repo,
+        drive_root=data,
+        task_id="task-external-unavailable",
+        task_metadata={"task_contract": {"allowed_resources": {"network": False}}},
+    ))
+    logs = tmp_path / "logs"
+    logs.mkdir()
+
+    row = execution._execute_single_tool(
+        registry,
+        {"id": "call-unavailable", "function": {"name": name, "arguments": "{}"}},
+        logs,
+        "task-external-unavailable",
+    )
+    expected_text = f"⚠️ Unknown tool: {name}. Available: {', '.join(sorted(registry._entries))}"
+
+    assert calls["discovery"] > 0
+    assert calls["physical"] == 0
+    assert calls["safety"] == 0
+    # T1 §A.1/§A.3: an unavailable extension and a tool that does not exist are both
+    # honest failures of the call; the text alone carried no marker, so both used to
+    # be recorded as clean.
+    assert row["result"] == expected_text
+    assert row["is_error"] is True
+    assert row["result_meta"] == {
+        "status": "unavailable" if expected_status == "unavailable" else "unknown_tool",
+        "tool_result_status": expected_status,
+        "tool_result_code": expected_code,
+        "tool_result_meta": expected_meta,
+    }
 
 
 def test_registry_arg_aliases_and_public_tool_arg_errors(tmp_path):

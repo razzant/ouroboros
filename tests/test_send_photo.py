@@ -3,7 +3,7 @@ import base64
 import types
 
 
-from ouroboros.tools.core import _send_photo, _detect_image_mime, _MAX_PHOTO_FILE_BYTES
+from ouroboros.tools import core_artifacts
 
 
 def _make_ctx(chat_id=123, screenshot_b64=None):
@@ -20,7 +20,7 @@ class TestSendPhotoFilePath:
         png.write_bytes(b'\x89PNG\r\n\x1a\n' + b'\x00' * 100)
 
         ctx = _make_ctx()
-        result = _send_photo(ctx, file_path=str(png), caption="test shot")
+        result = core_artifacts._send_photo(ctx, file_path=str(png), caption="test shot")
 
         assert "OK" in result
         assert len(ctx.pending_events) == 1
@@ -29,20 +29,22 @@ class TestSendPhotoFilePath:
 
     def test_file_not_found(self):
         ctx = _make_ctx()
-        result = _send_photo(ctx, file_path="/nonexistent/image.png")
+        result = core_artifacts._send_photo(ctx, file_path="/nonexistent/image.png")
         assert "not found" in result.lower()
 
     def test_file_too_large(self, tmp_path):
         big = tmp_path / "huge.png"
-        big.write_bytes(b'\x89PNG\r\n\x1a\n' + b'\x00' * (_MAX_PHOTO_FILE_BYTES + 1))
+        big.write_bytes(
+            b'\x89PNG\r\n\x1a\n' + b'\x00' * (core_artifacts._MAX_PHOTO_FILE_BYTES + 1)
+        )
 
         ctx = _make_ctx()
-        result = _send_photo(ctx, file_path=str(big))
+        result = core_artifacts._send_photo(ctx, file_path=str(big))
         assert "too large" in result.lower()
 
     def test_no_input_returns_error(self):
         ctx = _make_ctx()
-        result = _send_photo(ctx)
+        result = core_artifacts._send_photo(ctx)
         assert "Provide either" in result
 
 
@@ -50,34 +52,34 @@ class TestSendPhotoBase64Fallback:
     def test_base64_still_works(self):
         ctx = _make_ctx()
         b64 = base64.b64encode(b'\x00' * 200).decode()
-        result = _send_photo(ctx, image_base64=b64)
+        result = core_artifacts._send_photo(ctx, image_base64=b64)
         assert "OK" in result
         assert len(ctx.pending_events) == 1
 
     def test_last_screenshot_reference(self):
         b64 = base64.b64encode(b'\x00' * 200).decode()
         ctx = _make_ctx(screenshot_b64=b64)
-        result = _send_photo(ctx, image_base64="__last_screenshot__")
+        result = core_artifacts._send_photo(ctx, image_base64="__last_screenshot__")
         assert "OK" in result
 
     def test_last_screenshot_missing(self):
         ctx = _make_ctx(screenshot_b64=None)
-        result = _send_photo(ctx, image_base64="__last_screenshot__")
+        result = core_artifacts._send_photo(ctx, image_base64="__last_screenshot__")
         assert "No screenshot" in result
 
 
 class TestDetectImageMime:
     def test_png(self):
-        assert _detect_image_mime(b'\x89PNG\r\n\x1a\n\x00') == "image/png"
+        assert core_artifacts._detect_image_mime(b'\x89PNG\r\n\x1a\n\x00') == "image/png"
 
     def test_jpeg(self):
-        assert _detect_image_mime(b'\xff\xd8\xff\xe0') == "image/jpeg"
+        assert core_artifacts._detect_image_mime(b'\xff\xd8\xff\xe0') == "image/jpeg"
 
     def test_gif(self):
-        assert _detect_image_mime(b'GIF89a') == "image/gif"
+        assert core_artifacts._detect_image_mime(b'GIF89a') == "image/gif"
 
     def test_webp(self):
-        assert _detect_image_mime(b'RIFF\x00\x00\x00\x00WEBP') == "image/webp"
+        assert core_artifacts._detect_image_mime(b'RIFF\x00\x00\x00\x00WEBP') == "image/webp"
 
     def test_unknown(self):
-        assert _detect_image_mime(b'\x00\x00\x00\x00') == "application/octet-stream"
+        assert core_artifacts._detect_image_mime(b'\x00\x00\x00\x00') == "application/octet-stream"

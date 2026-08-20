@@ -208,5 +208,66 @@ class TestBackgroundConsciousnessCost(unittest.TestCase):
         self.assertFalse(thought["cost_final"])
 
 
+def test_background_tool_dispatches_typed_result_once_and_preserves_text(tmp_path):
+    from types import SimpleNamespace
+
+    from ouroboros.consciousness import BackgroundConsciousness
+    from ouroboros.loop_tool_execution import StatefulToolExecutor
+    from ouroboros.tools.tool_result import ToolResult
+
+    calls = []
+    exact_text = "blocked but byte-exact \u2603\nsecond line"
+
+    class FakeRegistry:
+        _ctx = SimpleNamespace()
+
+        def get_timeout(self, _name):
+            return 5
+
+        def execute_result(self, name, args):
+            calls.append((name, args))
+            self._ctx.pending_events.append({"type": "fixture_event"})
+            return ToolResult(
+                status="blocked",
+                code="ACCESS_BLOCKED",
+                text=exact_text,
+            )
+
+        def execute(self, _name, _args):
+            raise AssertionError("the typed consumer must not dispatch twice")
+
+    drive_root = tmp_path / "drive"
+    (drive_root / "logs").mkdir(parents=True)
+    background = object.__new__(BackgroundConsciousness)
+    background._drive_root = drive_root
+    background._event_queue = queue.Queue()
+    background._owner_chat_id_fn = lambda: 42
+    background._registry = FakeRegistry()
+    background._tool_executor = StatefulToolExecutor()
+    pending_events = []
+
+    try:
+        result = background._execute_tool(
+            {
+                "id": "call-bg",
+                "function": {"name": "read_file", "arguments": '{"path":"x"}'},
+            },
+            pending_events,
+        )
+    finally:
+        background._tool_executor.shutdown()
+
+    assert result == exact_text
+    assert calls == [("read_file", {"path": "x"})]
+    assert pending_events == [{"type": "fixture_event"}]
+    live = []
+    while not background._event_queue.empty():
+        live.append(background._event_queue.get_nowait()["data"])
+    finished = next(event for event in live if event["type"] == "tool_call_finished")
+    assert finished["is_error"] is False
+    tool_log = json.loads((drive_root / "logs" / "tools.jsonl").read_text().strip())
+    assert tool_log["result_preview"] == exact_text
+
+
 if __name__ == "__main__":
     unittest.main()

@@ -266,7 +266,7 @@ def _fault_ctx(tmp_path, running):
 
 
 def _fault_probes(monkeypatch):
-    import supervisor.events as events_mod
+    import supervisor.events_task_done as task_done_mod
     import supervisor.update_merge as um
 
     probes = {"abort": 0, "gate": 0, "root_done": 0, "quiesce": 0}
@@ -279,11 +279,11 @@ def _fault_probes(monkeypatch):
         lambda meta: probes.__setitem__("gate", probes["gate"] + 1),
     )
     monkeypatch.setattr(
-        events_mod, "_checkpoint_coop_roots_on_root_done",
+        task_done_mod, "_checkpoint_coop_roots_on_root_done",
         lambda ctx, task, tid: probes.__setitem__("root_done", probes["root_done"] + 1),
     )
     monkeypatch.setattr(
-        events_mod, "_maybe_checkpoint_coop_on_tree_quiescence",
+        task_done_mod, "_maybe_checkpoint_coop_on_tree_quiescence",
         lambda ctx, task, tid: probes.__setitem__("quiesce", probes["quiesce"] + 1),
     )
     return probes
@@ -374,7 +374,7 @@ def test_gr4_4_cascade_digest_reports_the_current_durable_child_state(tmp_path, 
 
 
 def test_gr4_5_failed_detail_fetch_keeps_cancel_disabled_and_pending():
-    src = (REPO_ROOT / "web" / "modules" / "chat.js").read_text(encoding="utf-8")
+    src = (REPO_ROOT / "web" / "modules" / "chat_card_actions.js").read_text(encoding="utf-8")
     body_at = src.index("async function cancelRunFromCard")
     guard_at = src.index("if (stored === null) {", body_at)
     restore_at = src.index("restoreLiveCardPhase(record, priorPhase);", body_at)
@@ -445,7 +445,7 @@ def test_gr4_6_backstop_defers_while_another_evolution_task_is_live(tmp_path, mo
     from supervisor import evolution_lifecycle as el
 
     state.init(tmp_path)
-    q.init(tmp_path, 600, 1800)
+    q.init(tmp_path)
     assert el.start_evolution_campaign("Improve", source="test").get("status") == "active"
     state.update_state(lambda live: live.update(evolution_owner_stopped=True))
     monkeypatch.setattr(q, "PENDING", [])

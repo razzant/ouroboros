@@ -409,6 +409,7 @@ def test_auto_low_source_inventory_has_no_true_writer_or_ghost_reader():
     key_paths = {path for path, text in sources.items() if key in text}
     assert key_paths == {
         "ouroboros/config.py",
+        "ouroboros/settings_defaults.py",
         "ouroboros/context_mode_compat.py",
         "ouroboros/gateway/owner_settings.py",
         "ouroboros/gateway/settings.py",

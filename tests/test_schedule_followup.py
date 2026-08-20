@@ -15,6 +15,13 @@ import datetime
 import pathlib
 
 from ouroboros.tools.registry import ToolContext
+from ouroboros.tools.tool_result import (
+    LegacyTextResultAdapter,
+    ToolResult,
+    _install_tool_result_sidecar,
+    _published_tool_result,
+    _restore_tool_result_sidecar,
+)
 
 UTC = datetime.timezone.utc
 
@@ -44,7 +51,7 @@ def test_once_due_selection_logic_with_a_fake_clock():
 def _queue(tmp_path):
     from supervisor import queue
 
-    queue.init(tmp_path, 600, 1800)
+    queue.init(tmp_path)  # v7 retired the three timeout parameters (D04)
     pending: list = []
     queue.init_queue_refs(pending, {}, {"value": 0})
     return queue, pending
@@ -155,18 +162,43 @@ def _ctx(tmp_path, *, task_id="root-1", role="root"):
 
 
 def _followup(ctx, **kw):
+    """One registration, returning the NATIVE result the producer published.
+
+    ``registry_core`` installs a per-invocation sentinel and accepts a published
+    result only when its text is exactly the string the handler returned, so the
+    helper pins both halves: the string ABI the model sees is unchanged, and the
+    typed answer beside it is the producer's own. Callers read ``.text`` for every
+    assertion they made before.
+    """
     from ouroboros.tools.followup import _handle_schedule_followup
 
     params = {"run_at": "2030-01-01T00:00:00+00:00",
               "objective": "Re-run the plan panel once the reviewer window resets."}
     params.update(kw)
-    return _handle_schedule_followup(ctx, **params)
+    sentinel = object()
+    token = _install_tool_result_sidecar(ctx, sentinel)
+    try:
+        text = _handle_schedule_followup(ctx, **params)
+        published = _published_tool_result(ctx, sentinel)
+    finally:
+        _restore_tool_result_sidecar(token)
+    assert isinstance(published, ToolResult), "schedule_followup published no typed result"
+    assert published.text == text, "published text is not the returned text"
+    # Owner item A.22 (owner decision 2026-08-19, "B"): EVERY sentence this tool
+    # writes is markerless, so the single adapter answers `ok` for all of them and
+    # a refused follow-up used to read exactly like a registered one. Asserted here
+    # rather than restated per call site: the divergence the owner approved has to
+    # be real at every terminal, and a marker quietly added to one of these texts
+    # would make the adapter agree by accident and hide the producer's own answer.
+    assert LegacyTextResultAdapter.from_text("schedule_followup", text).code == "OK"
+    return published
 
 
 def test_schedule_followup_registers_a_one_shot_entry(tmp_path):
     ctx = _ctx(tmp_path)
     out = _followup(ctx, context="plan review for root-1 was quorum-unreachable")
-    assert out.startswith("FOLLOWUP_SCHEDULED")
+    assert out.text.startswith("FOLLOWUP_SCHEDULED")
+    assert (out.code, out.status) == ("OK", "ok")
     from supervisor.queue import list_scheduled_tasks
 
     root = pathlib.Path(tmp_path / "data").resolve()
@@ -183,13 +215,16 @@ def test_schedule_followup_registers_a_one_shot_entry(tmp_path):
 
 def test_schedule_followup_cap_refusal_is_typed_and_disclosed(tmp_path):
     ctx = _ctx(tmp_path)
-    assert _followup(ctx).startswith("FOLLOWUP_SCHEDULED")
-    assert _followup(ctx, run_at="2030-02-01T00:00:00+00:00").startswith("FOLLOWUP_SCHEDULED")
+    assert _followup(ctx).text.startswith("FOLLOWUP_SCHEDULED")
+    assert _followup(ctx, run_at="2030-02-01T00:00:00+00:00").text.startswith("FOLLOWUP_SCHEDULED")
     third = _followup(ctx, run_at="2030-03-01T00:00:00+00:00")
-    assert third.startswith("ERROR: FOLLOWUP_CAP_REACHED")
-    assert "2 pending" in third  # discloses the pending records, never silent
+    assert third.text.startswith("ERROR: FOLLOWUP_CAP_REACHED")
+    # The per-task budget refused to mint the future task: the same code the
+    # subtask depth limit publishes, because it is the same kind of refusal.
+    assert (third.code, third.status) == ("RESOURCE_CONSTRAINT_BLOCKED", "blocked")
+    assert "2 pending" in third.text  # discloses the pending records, never silent
     # another task keeps its own budget
-    assert _followup(_ctx(tmp_path, task_id="root-2")).startswith("FOLLOWUP_SCHEDULED")
+    assert _followup(_ctx(tmp_path, task_id="root-2")).text.startswith("FOLLOWUP_SCHEDULED")
 
 
 def test_schedule_followup_overlong_text_is_a_typed_refusal_never_truncated(tmp_path):
@@ -200,34 +235,78 @@ def test_schedule_followup_overlong_text_is_a_typed_refusal_never_truncated(tmp_
 
     ctx = _ctx(tmp_path)
     long_objective = _followup(ctx, objective="x" * (_MAX_OBJECTIVE_CHARS + 1))
-    assert long_objective.startswith("ERROR: FOLLOWUP_TEXT_TOO_LONG")
-    assert str(_MAX_OBJECTIVE_CHARS) in long_objective
+    assert long_objective.text.startswith("ERROR: FOLLOWUP_TEXT_TOO_LONG")
+    assert str(_MAX_OBJECTIVE_CHARS) in long_objective.text
+    assert (long_objective.code, long_objective.status) == ("TOOL_ARG_ERROR", "error")
     long_context = _followup(ctx, context="y" * (_MAX_CONTEXT_CHARS + 1))
-    assert long_context.startswith("ERROR: FOLLOWUP_TEXT_TOO_LONG")
-    assert str(_MAX_CONTEXT_CHARS) in long_context
+    assert long_context.text.startswith("ERROR: FOLLOWUP_TEXT_TOO_LONG")
+    assert str(_MAX_CONTEXT_CHARS) in long_context.text
+    assert (long_context.code, long_context.status) == ("TOOL_ARG_ERROR", "error")
     from supervisor.queue import list_scheduled_tasks
 
     assert list_scheduled_tasks(pathlib.Path(tmp_path / "data").resolve())["tasks"] == []
     # At-limit text is accepted whole, byte-for-byte.
     ok = _followup(ctx, objective="z" * _MAX_OBJECTIVE_CHARS)
-    assert ok.startswith("FOLLOWUP_SCHEDULED")
+    assert ok.text.startswith("FOLLOWUP_SCHEDULED")
+    assert (ok.code, ok.status) == ("OK", "ok")
     record = list_scheduled_tasks(pathlib.Path(tmp_path / "data").resolve())["tasks"][0]
     assert record["task"]["text"] == "z" * _MAX_OBJECTIVE_CHARS
 
 
 def test_schedule_followup_guards_authority_and_inputs(tmp_path):
-    # narrower-than-parent: a delegated subagent may not mint future root tasks
+    # narrower-than-parent: a delegated subagent may not mint future root tasks.
+    # An authority denial, like the acting-child guards in control_scheduling.
     sub = _followup(_ctx(tmp_path, role="subagent"))
-    assert sub.startswith("ERROR: FOLLOWUP_SUBAGENT_REFUSED")
-    # a real task id is required for the durable per-task cap
+    assert sub.text.startswith("ERROR: FOLLOWUP_SUBAGENT_REFUSED")
+    assert (sub.code, sub.status) == ("ACCESS_BLOCKED", "blocked")
+    # a real task id is required for the durable per-task cap. The agent cannot
+    # supply one, so this is the substrate saying no, not a malformed call.
     no_task = _followup(_ctx(tmp_path, task_id=""))
-    assert no_task.startswith("ERROR: FOLLOWUP_TASK_ID_REQUIRED")
+    assert no_task.text.startswith("ERROR: FOLLOWUP_TASK_ID_REQUIRED")
+    assert (no_task.code, no_task.status) == ("LEGACY_UNAVAILABLE", "unavailable")
+    # The agent's own malformed call stays a degrading argument error.
     ctx = _ctx(tmp_path)
-    assert _followup(ctx, run_at="soon").startswith("ERROR: FOLLOWUP_RUN_AT_INVALID")
-    assert _followup(ctx, objective="  ").startswith("ERROR: FOLLOWUP_OBJECTIVE_REQUIRED")
+    bad_run_at = _followup(ctx, run_at="soon")
+    assert bad_run_at.text.startswith("ERROR: FOLLOWUP_RUN_AT_INVALID")
+    assert (bad_run_at.code, bad_run_at.status) == ("TOOL_ARG_ERROR", "error")
+    no_objective = _followup(ctx, objective="  ")
+    assert no_objective.text.startswith("ERROR: FOLLOWUP_OBJECTIVE_REQUIRED")
+    assert (no_objective.code, no_objective.status) == ("TOOL_ARG_ERROR", "error")
     from supervisor.queue import list_scheduled_tasks
 
     assert list_scheduled_tasks(pathlib.Path(tmp_path / "data").resolve())["tasks"] == []
+
+
+def test_schedule_followup_host_failures_are_typed_and_register_nothing(tmp_path, monkeypatch):
+    """The two host failures name themselves instead of riding out as ok text.
+
+    A drive root that would not resolve and a table that refused the write are
+    both `nothing was registered` — the agent must not go on waiting for an
+    instant no record will ever fire at."""
+    import ouroboros.tool_access as tool_access
+    from supervisor import queue
+
+    ctx = _ctx(tmp_path)
+
+    def _no_root(_ctx):
+        raise ValueError("task drive root is not under the owner data root")
+
+    monkeypatch.setattr(tool_access, "canonical_data_root", _no_root)
+    unresolved = _followup(ctx)
+    assert unresolved.text.startswith("ERROR: FOLLOWUP_DATA_ROOT_UNRESOLVED")
+    assert (unresolved.code, unresolved.status) == ("TOOL_ERROR", "error")
+
+    monkeypatch.undo()
+
+    def _no_space(_record, drive_root=None):
+        raise OSError(28, "No space left on device")
+
+    monkeypatch.setattr(queue, "upsert_scheduled_task", _no_space)
+    persist = _followup(ctx)
+    assert persist.text.startswith("ERROR: FOLLOWUP_PERSIST_FAILED")
+    assert (persist.code, persist.status) == ("TOOL_ERROR", "error")
+    monkeypatch.undo()
+    assert queue.list_scheduled_tasks(pathlib.Path(tmp_path / "data").resolve())["tasks"] == []
 
 
 def test_schedule_followup_root_id_falls_back_to_task_id_never_the_string_none(tmp_path):
@@ -241,7 +320,7 @@ def test_schedule_followup_root_id_falls_back_to_task_id_never_the_string_none(t
         task_metadata={"delegation_role": "root"},  # no root_task_id key
         task_contract={"objective": "x", "delegation_role": "root"},
     )
-    assert _followup(ctx).startswith("FOLLOWUP_SCHEDULED")
+    assert _followup(ctx).text.startswith("FOLLOWUP_SCHEDULED")
     from supervisor.queue import list_scheduled_tasks
 
     record = list_scheduled_tasks(pathlib.Path(tmp_path / "data").resolve())["tasks"][0]
@@ -262,7 +341,7 @@ def test_schedules_gateway_accepts_and_validates_once_triggers(tmp_path):
     from ouroboros.gateway.schedules import api_schedules_list, api_schedules_upsert
     from supervisor import queue
 
-    queue.init(tmp_path, 600, 1800)
+    queue.init(tmp_path)  # v7 retired the three timeout parameters (D04)
     app = Starlette(routes=[
         Route("/api/schedules", endpoint=api_schedules_list, methods=["GET"]),
         Route("/api/schedules", endpoint=api_schedules_upsert, methods=["POST"]),
@@ -302,7 +381,7 @@ def test_gateway_rearm_of_completed_once_requires_a_fresh_run_at(tmp_path):
     from ouroboros.gateway.schedules import api_schedules_upsert
     from supervisor import queue
 
-    queue.init(tmp_path, 600, 1800)
+    queue.init(tmp_path)  # v7 retired the three timeout parameters (D04)
     pending: list = []
     queue.init_queue_refs(pending, {}, {"value": 0})
     fired = datetime.datetime(2020, 1, 1, tzinfo=UTC).isoformat()
@@ -353,7 +432,7 @@ def test_scheduled_tasks_digest_projects_run_at_for_once_records(tmp_path):
     from ouroboros.context import _scheduled_tasks_digest
     from supervisor import queue
 
-    queue.init(tmp_path, 600, 1800)
+    queue.init(tmp_path)  # v7 retired the three timeout parameters (D04)
     queue.upsert_scheduled_task({
         "id": "fu", "name": "Follow-up", "enabled": True,
         "trigger": {"type": "once", "run_at": "2030-01-01T00:00:00+00:00"},
@@ -429,8 +508,13 @@ def test_identical_last_error_does_not_rewrite_the_table_every_tick(tmp_path, mo
         "task": {"type": "task", "text": "never fires either"},
     })
     writes = []
-    real_write = queue._write_scheduled_tasks
-    monkeypatch.setattr(queue, "_write_scheduled_tasks",
+    # v7 split: check_scheduled_tasks and the durable writer both live in
+    # supervisor/queue_schedules.py (queue re-exports the writer), so the tick is
+    # intercepted at its OWNER — patching the facade name would never be called.
+    from supervisor import queue_schedules
+
+    real_write = queue_schedules._write_scheduled_tasks
+    monkeypatch.setattr(queue_schedules, "_write_scheduled_tasks",
                         lambda data, drive_root=None: (writes.append(1), real_write(data, drive_root))[1])
     queue.check_scheduled_tasks()
     assert len(writes) == 1  # first tick records both typed errors
@@ -463,6 +547,17 @@ def test_schedule_followup_registration_surfaces():
     assert "schedule_followup" in CORE_TOOL_NAMES
     assert "schedule_followup" not in LOCAL_READONLY_SUBAGENT_TOOL_NAMES
     assert "schedule_followup" not in ACTING_SUBAGENT_TOOL_NAMES
-    from ouroboros.tools.registry import ToolRegistry
+    # v7 derives the frozen module list by AST scan instead of carrying a literal
+    # (ouroboros/tool_module_inventory.py), and ToolRegistry only caches it once a
+    # registry loads its catalog — so the inventory itself is what to assert.
+    import pathlib as _pathlib
 
-    assert "followup" in ToolRegistry._FROZEN_TOOL_MODULES
+    from ouroboros.tool_module_inventory import tool_modules_for_runtime
+    from ouroboros.tools.registry_core import _FROZEN_TOOL_MANIFEST_PATH
+
+    modules, inventory_errors = tool_modules_for_runtime(
+        _pathlib.Path(__file__).resolve().parents[1] / "ouroboros" / "tools",
+        _FROZEN_TOOL_MANIFEST_PATH,
+    )
+    assert not inventory_errors
+    assert "followup" in modules

@@ -27,10 +27,12 @@ from ouroboros.gateway.owner_settings import (
     _CONTEXT_MODE_KEYS,
     _owner_audit,
     _owner_read_settings_raw,
+    _owner_update_settings,
     _owner_write_settings,
     settings_document_mutation,
     owner_write_guard,
     post_commit_failure_response,
+    settings_document_digest,
     unsaved_error,
 )
 from ouroboros.onboarding_wizard import build_onboarding_html
@@ -181,8 +183,6 @@ def _rehydrate_mcp_servers_payload(incoming: Any, current: Any) -> list:
 
 _IMMEDIATE_KEYS = frozenset({
     "TOTAL_BUDGET",
-    "OUROBOROS_SOFT_TIMEOUT_SEC",
-    "OUROBOROS_HARD_TIMEOUT_SEC",
     "OUROBOROS_TOOL_TIMEOUT_SEC",
     "GITHUB_TOKEN",
     "GITHUB_REPO",
@@ -374,6 +374,9 @@ def _api_owner_runtime_mode_sync(request: Request, body: Any) -> JSONResponse:
     raw_mode = str((body or {}).get("mode") or "").strip().lower()
     if raw_mode not in set(_config.VALID_RUNTIME_MODES):
         return unsaved_error("'mode' must be one of: light, advanced, pro", 400)
+    # The digest is taken BEFORE the read that decides, so a write landing between the
+    # two is refused rather than silently reverted by this request's write.
+    digest = settings_document_digest()
     old_settings = _owner_read_settings_raw()
     previous_mode = _config.normalize_runtime_mode(old_settings.get("OUROBOROS_RUNTIME_MODE"))
     active_mode = _config.get_runtime_mode()
@@ -383,13 +386,17 @@ def _api_owner_runtime_mode_sync(request: Request, body: Any) -> JSONResponse:
         # A no-change POST must not rewrite settings.json: the rewrite raced a
         # concurrent generic save (last-writer-wins over a stale read) for zero
         # information gain. The audit and the response stay identical either way.
-        # Re-read under the document lock: the pre-lock read above only decided
-        # whether to write at all, and a threaded generic save may be mid
-        # read-merge-write on the same document.
-        with settings_document_mutation():
-            current = dict(_owner_read_settings_raw())
+        def _set_runtime_mode(current: Dict[str, Any]) -> Dict[str, Any]:
             current["OUROBOROS_RUNTIME_MODE"] = next_mode
-            _owner_write_settings(current)
+            return current
+
+        # Under the seam-wide document lock, because a threaded generic save may
+        # be mid read-merge-write on the same document. The transform's own read
+        # happens inside the settings lock, so there is no second stale read to
+        # refresh here; the digest keeps this request's PRE-lock decision bound to
+        # the document that decision was taken from.
+        with settings_document_mutation():
+            _owner_update_settings(_set_runtime_mode, digest)
     _owner_audit(
         request,
         "runtime_mode",
@@ -421,14 +428,21 @@ def _api_owner_auto_grant_sync(request: Request, body: Any) -> JSONResponse:
     if not isinstance(body, dict) or not isinstance(body.get("enabled"), bool):
         return unsaved_error("'enabled' must be a boolean", 400)
     enabled = bool(body.get("enabled"))
+    value = "true" if enabled else "false"
+
+    # No digest: this endpoint decides nothing from the stored document — the body
+    # carries the whole decision — so refusing a concurrent unrelated write would
+    # cost the owner a retry and buy nothing.
+    def _set_auto_grant(current: Dict[str, Any]) -> Dict[str, Any]:
+        current["OUROBOROS_AUTO_GRANT_REVIEWED_SKILLS"] = value
+        return current
+
     with settings_document_mutation():
-        current = _owner_read_settings_raw()
-        current["OUROBOROS_AUTO_GRANT_REVIEWED_SKILLS"] = "true" if enabled else "false"
-        _owner_write_settings(current)
+        _owner_update_settings(_set_auto_grant)
         # Projected under the SAME lock as the commit: released first, two
         # writers can commit A->B and project B->A, stranding the live
         # environment on the loser's value.
-        os.environ["OUROBOROS_AUTO_GRANT_REVIEWED_SKILLS"] = current["OUROBOROS_AUTO_GRANT_REVIEWED_SKILLS"]
+        os.environ["OUROBOROS_AUTO_GRANT_REVIEWED_SKILLS"] = value
     _owner_audit(request, "auto_grant", {"enabled": enabled})
     return JSONResponse({"ok": True, "enabled": enabled})
 
@@ -696,6 +710,7 @@ def _api_owner_context_mode_sync(request: Request, body: Any) -> JSONResponse:
     if raw_mode not in set(VALID_CONTEXT_MODES):
         return unsaved_error("'mode' must be one of: low, max", 400)
     next_mode = _config.normalize_context_mode(raw_mode)
+    digest = settings_document_digest()
     previous_mode = _config.get_owner_context_mode()
     if previous_mode == "max" and next_mode == "low" and _has_running_agent_tasks():
         return unsaved_error(
@@ -703,6 +718,15 @@ def _api_owner_context_mode_sync(request: Request, body: Any) -> JSONResponse:
             "Wait until no queued or running work remains, then switch Low/Max.",
             409,
         )
+
+    def _set_context_mode(current: Dict[str, Any]) -> Dict[str, Any]:
+        current["OUROBOROS_CONTEXT_MODE"] = next_mode
+        # The retired marker survives one compatibility window only as explicit false
+        # provenance, so owner Low still means "scope review not performed" while a bare
+        # forwarded env Low remains owner Max.
+        current["OUROBOROS_CONTEXT_MODE_AUTO_LOW"] = "false"
+        return current
+
     with settings_document_mutation():
         # The idle guard is re-proved UNDER the lock: this thread can block on
         # it behind a long generic save, and a task started in that window
@@ -710,6 +734,8 @@ def _api_owner_context_mode_sync(request: Request, body: Any) -> JSONResponse:
         # BOTH halves of the predicate re-proved under the lock: the pre-lock
         # answer above is only a fast path, and a writer that committed while
         # this thread waited can have changed the very mode being lowered FROM.
+        # The digest cannot stand in for this: the queue changes without ever
+        # touching the settings document.
         previous_mode = _config.get_owner_context_mode()
         if previous_mode == "max" and next_mode == "low" and _has_running_agent_tasks():
             return unsaved_error(
@@ -717,14 +743,10 @@ def _api_owner_context_mode_sync(request: Request, body: Any) -> JSONResponse:
                 "Wait until no queued or running work remains, then switch Low/Max.",
                 409,
             )
-        current = _owner_read_settings_raw()
-        current["OUROBOROS_CONTEXT_MODE"] = next_mode
-        # The retired marker survives one compatibility window only as explicit false
-        # provenance, so owner Low still means "scope review not performed" while a bare
-        # forwarded env Low remains owner Max.
-        current["OUROBOROS_CONTEXT_MODE_AUTO_LOW"] = "false"
         # This endpoint IS the author of both keys, so they persist even at the shipped default.
-        _owner_write_settings(current, authored_keys=_CONTEXT_MODE_KEYS, allow_context_lowering=True)
+        # The digest binds the idle refusal above to the document this write replaces.
+        _owner_update_settings(_set_context_mode, digest,
+                               authored_keys=_CONTEXT_MODE_KEYS, allow_context_lowering=True)
         # Same-lock projection: see api_owner_auto_grant.
         os.environ["OUROBOROS_CONTEXT_MODE"] = next_mode
         os.environ["OUROBOROS_CONTEXT_MODE_AUTO_LOW"] = "false"
@@ -769,11 +791,16 @@ def _api_owner_scope_review_floor_sync(request: Request, body: Any) -> JSONRespo
     raw = str((body or {}).get("floor") or "").strip().lower()
     if raw not in {"blocking_1m", "advisory"}:
         return unsaved_error("'floor' must be one of: blocking_1m, advisory", 400)
-    with settings_document_mutation():
-        current = _owner_read_settings_raw()
-        previous = str(current.get("OUROBOROS_SCOPE_REVIEW_FLOOR") or "blocking_1m").strip().lower()
+    def _set_scope_review_floor(current: Dict[str, Any]) -> Dict[str, Any]:
         current["OUROBOROS_SCOPE_REVIEW_FLOOR"] = raw
-        _owner_write_settings(current)
+        return current
+
+    with settings_document_mutation():
+        digest = settings_document_digest()
+        previous = str(
+            _owner_read_settings_raw().get("OUROBOROS_SCOPE_REVIEW_FLOOR") or "blocking_1m"
+        ).strip().lower()
+        _owner_update_settings(_set_scope_review_floor, digest)
         # Same-lock projection: see api_owner_auto_grant.
         os.environ["OUROBOROS_SCOPE_REVIEW_FLOOR"] = raw
     _owner_audit(
@@ -814,12 +841,16 @@ def _api_owner_safety_mode_sync(request: Request, body: Any) -> JSONResponse:
     raw_mode = str((body or {}).get("mode") or "").strip().lower()
     if raw_mode not in set(_config.VALID_SAFETY_MODES):
         return unsaved_error("'mode' must be one of: full, light, off", 400)
-    with settings_document_mutation():
-        current = _owner_read_settings_raw()
-        previous = _config.normalize_safety_mode(current.get("OUROBOROS_SAFETY_MODE"))
+    def _set_safety_mode(current: Dict[str, Any]) -> Dict[str, Any]:
         current["OUROBOROS_SAFETY_MODE"] = raw_mode
-        _owner_write_settings(
-            current, authored_keys=("OUROBOROS_SAFETY_MODE",), allow_safety_lowering=True)
+        return current
+
+    with settings_document_mutation():
+        digest = settings_document_digest()
+        previous = _config.normalize_safety_mode(
+            _owner_read_settings_raw().get("OUROBOROS_SAFETY_MODE"))
+        _owner_update_settings(_set_safety_mode, digest,
+                               authored_keys=("OUROBOROS_SAFETY_MODE",), allow_safety_lowering=True)
         # Same-lock projection: see api_owner_auto_grant.
         os.environ["OUROBOROS_SAFETY_MODE"] = raw_mode
     _owner_audit(

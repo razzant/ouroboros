@@ -17,10 +17,12 @@ import pathlib
 from typing import Any, Dict, List
 
 _BLOCKING_TOOL_STATUSES = frozenset({
+    # T1: the statuses below the blank line were produced but partitioned nowhere,
+    # so a call could be an honest error while every bucket of the honest breakdown
+    # stayed empty. Each is homed by its nearest existing analogue (owner batch #4).
     "artifact_output_error",
     "artifact_output_undeclared",
     "blocked",
-    "claude_code_error",
     "cwd_blocked",
     "data_blocked",
     "edit_ops_blocked",
@@ -29,7 +31,6 @@ _BLOCKING_TOOL_STATUSES = frozenset({
     "error",
     "git_via_shell_blocked",
     "heal_mode_blocked",
-    "install_error",
     "integration_blocked",
     "light_mode_blocked",
     "non_zero_exit",
@@ -40,7 +41,6 @@ _BLOCKING_TOOL_STATUSES = frozenset({
     "safety_violation",
     "shell_error",
     "skill_payload_blocked",
-    "skill_payload_control_blocked",
     "skill_state_blocked",
     "timeout",
     "unavailable",
@@ -50,6 +50,43 @@ _BLOCKING_TOOL_STATUSES = frozenset({
     "write_file_blocked",
     "root_required_user_files",
     "root_required_active_workspace",
+
+    "argument_error",            # nearest analogue: `error` (a malformed call)
+    "executor_error",            # nearest analogue: `error` (the executor crashed)
+    "extension_error",           # nearest analogue: `error` (the extension raised)
+    "git_error",                 # nearest analogue: `error`; is_error stays false, so unreachable here
+    "mcp_error",                 # nearest analogue: `error` (the provider reported one)
+    "review_blocked",            # nearest analogue: `blocked`; is_error stays false, so unreachable here
+    "run_script_error",          # nearest analogue: `error`
+    # A tool that RAN and answered `{"ok": false}`: walked like a failure so the
+    # recovery credit still applies, then routed to `policy_denials` below rather
+    # than `unresolved`. It stays is_error=True for the counters and the anti-loop
+    # scan, and it does NOT degrade the execution axis — which is what
+    # `outcomes._LEDGER_NON_FAILURE_STATUSES` has declared about the SAME status
+    # since v6.83.0 ("the tool ran and answered honestly; a finding, not a
+    # failure"). Homing it as blocking-only made the two consumers contradict each
+    # other on every unrecovered ext_/mcp_/read `{"ok": false}`.
+    "tool_reported_failure",
+    "unknown_tool",              # nearest analogue: `error` (the tool does not exist)
+
+    # Retired CODES, surviving STATUS names: `root_required`, `resource_blocked`
+    # and `safety_error` are no longer published by any code (the merged parents
+    # split, and the safety separator count is gone), but a task result written
+    # before this change still carries the string, and this classifier reads those
+    # traces back. Names stay; nothing new can produce them.
+    "resource_blocked",
+    "root_required",
+    "safety_error",
+})
+# Buckets deliberately left OUT of every partition, each with its reason. The
+# totality assertion in tests/test_tool_classification_differential.py fails if a
+# new code acquires a bucket that appears in neither a partition nor this set, so
+# an unclassified outcome can no longer arrive silently.
+_UNPARTITIONED_BUCKETS = frozenset({
+    # `vlm_error` (image too large / no vision model) is unpartitioned TODAY and
+    # T1 preserves that: homing it would newly degrade execution health on two
+    # image refusals that currently affect nothing, which no owner decision covers.
+    "vlm_error",
 })
 _RECOVERY_TOOL_NAMES = frozenset({
     "edit_text", "apply_patch", "edit_batch",
@@ -69,9 +106,10 @@ _RECOVERY_TOOL_NAMES = frozenset({
 # the deliverable succeeded (the site-presentation incident: integration_blocked +
 # LIST_FILES policy → degraded/tool_failure over a shipped site). A structural
 # status partition (Bible P5 — never content matching). Genuine tool/exec failures
-# (`error`, `*_error`, `non_zero_exit`, `shell_error`, `timeout`, `unavailable`) and
-# security-boundary hits (`safety_violation`, `violation`) are intentionally EXCLUDED
-# and stay real failures.
+# (`error`, `*_error`, `non_zero_exit`, `shell_error`, `timeout`) and security-
+# boundary hits (`safety_violation`, `violation`) are intentionally EXCLUDED and
+# stay real failures. `unavailable` moved buckets in v7 (owner decision, spec
+# §1.15): see its entry below.
 _POLICY_DENIAL_STATUSES = frozenset({
     # v6.90.x (submarine unwind): the three confinement surfaces that leaked past
     # the partition as generic errors are now typed — the user_files path block on
@@ -92,9 +130,24 @@ _POLICY_DENIAL_STATUSES = frozenset({
     "resource_constraint_blocked",
     "resource_policy_blocked",
     "run_script_blocked",
+    "resource_blocked",
+    "review_blocked",
     "skill_payload_blocked",
-    "skill_payload_control_blocked",
     "skill_state_blocked",
+    # T1 (owner batch #4, operator homing): a provider that RAN and answered
+    # `{"ok": false}` is honest telemetry on the execution axis, matching the
+    # ledger's v6.83.0 declaration of the same status. It is NOT a runtime "no",
+    # so it is named here by its EFFECT — recorded, never degrading — and the
+    # bucket-level assertion in tests/test_tool_classification_differential.py
+    # pins that effect rather than the membership.
+    "tool_reported_failure",
+    # v7 (owner §1.15): a target the runtime cannot serve — a control surface that
+    # is off, a task id this tree never registered, a dead extension — is the
+    # SUBSTRATE's answer, not the agent's mistake. It stays is_error=True and
+    # blocking (the counters and anti-loop scan need it), but it must not degrade
+    # execution health. `argument_error` deliberately stays OUT: a malformed call
+    # is the agent's own defect and feeds reflection.
+    "unavailable",
     "user_files_path_blocked",
     "workspace_blocked",
     "write_file_blocked",
@@ -141,7 +194,10 @@ def _is_ignored_readonly_block(tool: str, status: str) -> bool:
 # here, on the leaf, and ``outcomes`` imports them back rather than each side
 # keeping its own copy.
 _ROOT_WRITE_TOOLS = frozenset({"write_file", "edit_text", "apply_patch", "edit_batch"})  # patch/batch refuse scratch roots: any success is a reviewable effect
-_OK_TOOL_STATUSES = frozenset({"", "ok", "ok_autocorrected"})
+# `untyped` is the ok-status a dynamic provider body carries when nothing typed
+# it; leaving it out would disqualify a successful extension call from crediting
+# a recovery, which is not what "we could not type it" means.
+_OK_TOOL_STATUSES = frozenset({"", "ok", "ok_autocorrected", "untyped"})
 
 
 def _user_file_basenames(args: Dict[str, Any]) -> set[str]:
@@ -204,6 +260,8 @@ def _classify_tool_errors(llm_trace: Dict[str, Any]) -> Dict[str, List[Dict[str,
         # a self-initiated cognitive write through the wrong tool must never fail the
         # task (that was the original "Привет fails" regression). Skip it entirely.
         if status == "cognitive_tool_required":
+            # Kept for traces authored before the redirect stopped carrying an
+            # error flag at its source; no live producer reaches this branch.
             continue
         # A2: an access-policy block on a READ-ONLY exploratory tool is honest
         # telemetry, not a degraded execution — fully ignored (recorded for
@@ -258,7 +316,7 @@ def _classify_tool_errors(llm_trace: Dict[str, Any]) -> Dict[str, List[Dict[str,
                 continue
             later_tool = str(later.get("tool") or "")
             later_status = str(later.get("status") or "ok")
-            if later_status not in {"", "ok", "ok_autocorrected"}:
+            if later_status not in _OK_TOOL_STATUSES:
                 continue
             later_args = later.get("args") if isinstance(later.get("args"), dict) else {}
             later_key, later_paths = _call_target_signature(later_args)

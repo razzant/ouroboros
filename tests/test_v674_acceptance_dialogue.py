@@ -16,6 +16,7 @@ from types import SimpleNamespace as NS
 import pytest
 
 import ouroboros.loop as loop_mod
+from ouroboros import loop_acceptance_review
 from ouroboros import task_pacing
 from ouroboros.review_substrate import (
     DIALOGUE_CONTINUE,
@@ -271,17 +272,17 @@ def test_reused_panel_application_leaves_obligation_rows_byte_identical(monkeypa
         task_metadata={}, task_contract={}, drive_root=str(tmp_path),
     )
     trace = {"review_runs": [], "reasoning_notes": []}
-    ctx = loop_mod._TaskAcceptanceContext(
+    ctx = loop_acceptance_review._TaskAcceptanceContext(
         tools=NS(_ctx=tool_ctx), content="candidate", task_id="t-reuse",
         task_type="task", llm_trace=trace, drive_root=None, messages=[],
         emit_progress=lambda _m: None, mode="required", subtree_statuses=[],
         budget_profile={}, passes_done=0,
     )
-    loop_mod._apply_task_acceptance_result(ctx, result)
+    loop_acceptance_review._apply_task_acceptance_result(ctx, result)
     rows_after_first = copy.deepcopy(trace["acceptance_obligations"])
     assert int(rows_after_first[0].get("reopened_count") or 0) == 0
     # the reused application of the SAME panel must be a pure re-read
-    loop_mod._apply_task_acceptance_result(ctx, result, record_run=False, reused=True)
+    loop_acceptance_review._apply_task_acceptance_result(ctx, result, record_run=False, reused=True)
     assert trace["acceptance_obligations"] == rows_after_first
 
 
@@ -404,7 +405,7 @@ def _apply_harness(monkeypatch, result, *, obligations=None, tmp_path=None):
     trace = {"review_runs": [], "reasoning_notes": []}
     if obligations is not None:
         trace["acceptance_obligations"] = obligations
-    ctx = loop_mod._TaskAcceptanceContext(
+    ctx = loop_acceptance_review._TaskAcceptanceContext(
         tools=NS(_ctx=tool_ctx),
         content="candidate",
         task_id="t-dialogue",
@@ -419,7 +420,7 @@ def _apply_harness(monkeypatch, result, *, obligations=None, tmp_path=None):
         passes_done=0,
         rails_line="rails",
     )
-    another = loop_mod._apply_task_acceptance_result(ctx, result)
+    another = loop_acceptance_review._apply_task_acceptance_result(ctx, result)
     return another, trace, tool_ctx, fences
 
 
@@ -606,8 +607,8 @@ def test_dialogue_quorum_fallback_uses_adaptive_quorum():
     # Pins the fallback branch (record without policy.min_successful_slots) and
     # with it the adaptive_quorum import in loop.py (commit triad advisory).
     result = NS(request={}, actors=[_actor(f"s{i}", "FAIL", {"verdict": "FAIL"}) for i in range(3)])
-    assert loop_mod._acceptance_dialogue_quorum(result) == 2  # adaptive_quorum(3)
-    assert loop_mod._acceptance_dialogue_quorum(NS(request=None, actors=[])) == 1
+    assert loop_acceptance_review._acceptance_dialogue_quorum(result) == 2  # adaptive_quorum(3)
+    assert loop_acceptance_review._acceptance_dialogue_quorum(NS(request=None, actors=[])) == 1
 
 
 def test_contract_demoted_actor_cannot_vote_terminal():

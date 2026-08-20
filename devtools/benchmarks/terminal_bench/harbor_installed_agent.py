@@ -397,8 +397,6 @@ class OuroborosTerminalBenchAgent(BaseInstalledAgent):
             "OUROBOROS_CONTEXT_MODE_AUTO_LOW",
             "TOTAL_BUDGET",
             "OUROBOROS_PER_TASK_COST_USD",
-            "OUROBOROS_SOFT_TIMEOUT_SEC",
-            "OUROBOROS_HARD_TIMEOUT_SEC",
             "OUROBOROS_TOOL_TIMEOUT_SEC",
         ]
         if allow_secrets:

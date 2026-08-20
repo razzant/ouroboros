@@ -21,11 +21,12 @@ def _redirect_queue_snapshot(tmp_path, monkeypatch):
     ``supervisor.queue``'s snapshot writer to a throwaway temp path so no test can write
     (or silently swallow a failed write to) the live ``state/queue_snapshot.json`` under
     the real data root. A test that asserts on the snapshot re-points it explicitly."""
+    from supervisor import state as state_mod
     import supervisor.queue as queue
 
     snap = tmp_path / "_queue_isolation" / "queue_snapshot.json"
     snap.parent.mkdir(parents=True, exist_ok=True)
-    monkeypatch.setattr(queue, "QUEUE_SNAPSHOT_PATH", snap)
+    monkeypatch.setattr(state_mod, "QUEUE_SNAPSHOT_PATH", snap)
     monkeypatch.setattr(queue, "DRIVE_ROOT", tmp_path)
 
 
@@ -122,6 +123,7 @@ def test_ui_conversion_persists_pending_scope_across_restart(tmp_path, monkeypat
     bindings). So the convert path must persist the snapshot right after the in-memory
     mark — otherwise a restart in the window (the snapshot is only rewritten on the next
     queue event) restores the task UNSCOPED and it never holds its lane."""
+    from supervisor import state as state_mod
     from ouroboros.gateway.projects import api_project_from_task
     import supervisor.queue as queue
     import supervisor.workers as workers
@@ -139,7 +141,7 @@ def test_ui_conversion_persists_pending_scope_across_restart(tmp_path, monkeypat
     monkeypatch.setattr(workers, "RUNNING", {})
     monkeypatch.setattr(queue, "PENDING", pending_list)
     monkeypatch.setattr(queue, "RUNNING", {})
-    monkeypatch.setattr(queue, "QUEUE_SNAPSHOT_PATH", snap)
+    monkeypatch.setattr(state_mod, "QUEUE_SNAPSHOT_PATH", snap)
     monkeypatch.setattr(queue, "DRIVE_ROOT", tmp_path)
     monkeypatch.setattr(queue, "QUEUE_SEQ_COUNTER_REF", {"value": 0})
 

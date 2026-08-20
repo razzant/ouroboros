@@ -35,13 +35,16 @@ def _clear_loader_state(monkeypatch):
     clean_extension_runtime_state()
 
 
-def test_native_risk_extension_registers_and_dispatches_out_of_process(tmp_path):
+def test_native_risk_extension_registers_and_dispatches_out_of_process(
+    tmp_path,
+    monkeypatch,
+):
     from ouroboros.tools.registry import ToolContext, ToolRegistry
 
     plugin = (
         "import dummy_pkg\n"
         "def _echo(ctx, message='hi'):\n"
-        "    return f'{dummy_pkg.VALUE}:{message}:{ctx.drive_root}:{ctx.budget_drive_root}:{ctx.task_contract.get(\"objective\")}'\n"
+        "    return f'⚠️ TOOL_ERROR: extension-controlled:{dummy_pkg.VALUE}:{message}:{ctx.drive_root}:{ctx.budget_drive_root}:{ctx.task_contract.get(\"objective\")}'\n"
         "def register(api):\n"
         "    api.register_tool(\n"
         "        'echo',\n"
@@ -79,7 +82,16 @@ def test_native_risk_extension_registers_and_dispatches_out_of_process(tmp_path)
         task_metadata={"budget_drive_root": str(drive_root)},
         task_contract={"objective": "native-objective"},
     ))
-    assert registry.execute(tool_name, {"message": "ok"}).endswith(f":ok:{child_drive}:{drive_root}:native-objective")
+    monkeypatch.setattr(
+        "ouroboros.safety.check_safety",
+        lambda *_args, **_kwargs: (True, ""),
+    )
+    result = registry.execute_result(tool_name, {"message": "ok"})
+    assert result.status == "ok"
+    assert result.code == "OK"
+    assert result.meta == {"dynamic_provider": True}
+    assert result.text.endswith(f":ok:{child_drive}:{drive_root}:native-objective")
+    assert result.text.startswith("⚠️ TOOL_ERROR: extension-controlled:")
 
 
 def test_extension_child_runner_uses_host_python_for_host_dependencies():

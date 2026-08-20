@@ -4,6 +4,7 @@ import json
 import hashlib
 import os
 import subprocess
+import sys
 import zipfile
 from pathlib import Path
 from types import SimpleNamespace
@@ -12,7 +13,7 @@ import pytest
 
 from scripts.contributor_review_evidence import finalize_contributor_outcome
 from scripts.run_external_review import (
-    _REVIEW_SUBSTRATE_PATHS,
+    _RELEASE_MACHINERY_PATHS,
     _apply_contributor_landing_obligations,
     _apply_contributor_review_env,
     _assert_contributor_review_config,
@@ -20,12 +21,14 @@ from scripts.run_external_review import (
     _configured_openrouter_models,
     _contributor_snapshot,
     _contributor_execution_receipts,
+    _contributor_result,
     _create_isolated_checkout,
     _freeze_contributor_slots,
     _openrouter_key_health,
     _openrouter_pool,
     _remove_isolated_checkout,
     _require_contributor_budget,
+    _run_on_trusted_base,
     _prepare_review_configuration,
     _resolved_review_config,
     _review_evidence_and_cost,
@@ -34,46 +37,204 @@ from scripts.run_external_review import (
 )
 
 
-def test_contributor_trust_boundary_covers_functional_review_dependencies():
-    from ouroboros.tools.scope_review import _CANONICAL_CONTEXT_DOCS
+# Stands in for the review script in the seeded repo's BASE commit, so the
+# base-side run is really executed and reports which tree it ran from.
+_BASE_SIDE_PROBE = """import json, os, pathlib, subprocess, sys
 
-    assert set(_CANONICAL_CONTEXT_DOCS).issubset(_REVIEW_SUBSTRATE_PATHS)
-    assert {
-        "docs/ARCHITECTURE.md",
-        "ouroboros/capability_evidence.py",
-        "ouroboros/code_intelligence.py",
-        "ouroboros/claudexor_daemon.py",
-        "ouroboros/deadline_utils.py",
-        "ouroboros/delegate_custody.py",
-        "ouroboros/delegate_output.py",
-        "ouroboros/gateways/claudexor.py",
-        "ouroboros/outcomes.py",
-        "ouroboros/platform_layer.py",
-        "ouroboros/pricing.py",
-        # The v6.87.21 seam split moved route vocabulary, transport dispatch and
-        # api_chat prompt rendering BELOW the substrate into review_execution.py;
-        # a PR editing the route/executor seam there must still trip a trusted
-        # rerun, exactly as one editing review_substrate.py does (XG-5R4.1).
-        "ouroboros/review_execution.py",
-        "ouroboros/review_slot_cancel.py",
-        "ouroboros/review_evidence.py",
-        "ouroboros/reviewer_slot_config.py",
-        "ouroboros/reviewer_window.py",
+out = os.environ.get("REVIEW_PROBE_OUT", "")
+if out:
+    here = pathlib.Path(__file__).resolve().parents[1]
+    pathlib.Path(out).write_text(json.dumps({
+        "argv": sys.argv[1:],
+        "machinery_sha": subprocess.run(
+            ["git", "rev-parse", "HEAD"], cwd=str(here),
+            capture_output=True, text=True,
+        ).stdout.strip(),
+        "machinery_root": str(here),
+        "cwd": os.getcwd(),
+        "data_dir": os.environ.get("OUROBOROS_DATA_DIR", ""),
+    }), encoding="utf-8")
+raise SystemExit(1)
+"""
+
+
+def _probe_path(monkeypatch, tmp_path: Path) -> Path:
+    probe = tmp_path / "base-side-run.json"
+    monkeypatch.setenv("REVIEW_PROBE_OUT", str(probe))
+    return probe
+
+
+@pytest.mark.parametrize(
+    "changed_path",
+    [
+        # A proposal that touches nothing review-related...
+        "a.txt",
+        # ...and proposals that rewrite the review machinery itself take the
+        # SAME path. That identity IS the contract: the lane never asks what a
+        # diff contains before deciding whose review code runs.
         "ouroboros/review_substrate.py",
-        "ouroboros/review_state.py",
-        "ouroboros/runtime_mode_policy.py",
-        "ouroboros/usage_accounting.py",
-        "ouroboros/utils.py",
-        "ouroboros/tools/claude_advisory_review.py",
-        "ouroboros/tools/registry.py",
-        "ouroboros/tools/release_sync.py",
-        "ouroboros/tools/review_synthesis.py",
-        "ouroboros/tools/review_binary_context.py",
-        "ouroboros/tools/scope_review_session.py",
-        "ouroboros/tools/scope_window.py",
-        "ouroboros/subagents.py",
-        "scripts/contributor_review_evidence.py",
-    }.issubset(_REVIEW_SUBSTRATE_PATHS)
+        "scripts/run_external_review.py",
+    ],
+)
+def test_contributor_review_always_runs_on_the_trusted_base(
+    tmp_path, monkeypatch, changed_path
+):
+    """Owner decision (2026-08-19): review always runs on the old version.
+
+    The proposal is still the reviewed subject — the base-side run is handed the
+    same base/head commits — but the machinery executing the review is the
+    target base's own, whatever the proposal touches, and the base-side exit
+    code is the review's exit code. The base script really runs here: it reports
+    the tree it was loaded from.
+    """
+    repo = _init_contributor_repo(tmp_path, monkeypatch)
+    probe = _probe_path(monkeypatch, tmp_path)
+    path = repo / changed_path
+    path.write_text("# proposal\n", encoding="utf-8")
+    _git(repo, "add", "-A")
+    _git(repo, "commit", "-m", f"proposal touches {changed_path}")
+    base_sha = _git(repo, "rev-parse", "base").strip()
+    head_sha = _git(repo, "rev-parse", "HEAD").strip()
+
+    exit_code = _run_on_trusted_base(SimpleNamespace(
+        base_ref="base", head_ref="HEAD", commit_message="PR title",
+        goal="goal", scope="scope", output="", drive_root="",
+    ))
+
+    assert exit_code == 1  # the base-side verdict is this review's verdict
+    ran = json.loads(probe.read_text(encoding="utf-8"))
+    assert ran["machinery_sha"] == base_sha != head_sha
+    assert Path(ran["machinery_root"]) != repo
+    assert ran["cwd"] == ran["machinery_root"]
+    assert ran["data_dir"]
+    assert "--contributor" in ran["argv"]
+    # Commits, not refs: a moving ref cannot re-point the trusted run.
+    options = _forwarded_options(ran["argv"])
+    assert options["base-ref"] == base_sha
+    assert options["head-ref"] == head_sha
+    assert ran["argv"][-2:] == ["--", "PR title"]
+    # The trusted worktree is temporary: it is removed once the review returns.
+    assert not Path(ran["machinery_root"]).exists()
+
+
+def _forwarded_options(argv: list[str]) -> dict[str, str]:
+    return dict(
+        item[2:].split("=", 1) for item in argv if item.startswith("--") and "=" in item
+    )
+
+
+def test_the_handoff_forwards_artifact_paths_the_child_can_still_reach(
+    tmp_path, monkeypatch
+):
+    """Relative artifact paths must not resolve inside the temporary checkout.
+
+    The child runs with cwd set to the materialized base worktree, which is
+    deleted when the review returns; a verbatim relative --output/--drive-root
+    would put the operator's results there and lose them. They are absolutized
+    against the INVOKING cwd instead. Options travel in equals form so a value
+    starting with "-" reaches the child as a value, not as a broken flag.
+    """
+    _init_contributor_repo(tmp_path, monkeypatch)
+    probe = _probe_path(monkeypatch, tmp_path)
+    monkeypatch.chdir(tmp_path)
+
+    _run_on_trusted_base(SimpleNamespace(
+        base_ref="base", head_ref="HEAD", commit_message="-title-like-a-flag",
+        goal="--goal-like-a-flag", scope="-s", output="artifacts/run",
+        drive_root="~/drive",
+    ))
+
+    ran = json.loads(probe.read_text(encoding="utf-8"))
+    options = _forwarded_options(ran["argv"])
+    assert options["output"] == str(tmp_path / "artifacts" / "run")
+    # A quoted "~/..." keeps its home meaning: the parent expands it exactly
+    # the way the in-place lane's own resolution would have.
+    assert options["drive-root"] == os.path.abspath(os.path.expanduser("~/drive"))
+    for key in ("output", "drive-root"):
+        assert not Path(options[key]).is_relative_to(Path(ran["machinery_root"]))
+    # Values that look like flags survive as values.
+    assert options["goal"] == "--goal-like-a-flag"
+    assert options["scope"] == "-s"
+    assert ran["argv"][-2:] == ["--", "-title-like-a-flag"]
+
+
+def test_contributor_review_invoked_from_the_target_base_runs_in_place(
+    tmp_path, monkeypatch
+):
+    """No re-run when the executing tree already IS the target base."""
+    repo = _init_contributor_repo(tmp_path, monkeypatch)
+    probe = _probe_path(monkeypatch, tmp_path)
+    head_sha = _git(repo, "rev-parse", "HEAD").strip()
+    _git(repo, "checkout", "--detach", "base")
+
+    assert _run_on_trusted_base(SimpleNamespace(
+        base_ref="base", head_ref=head_sha, commit_message="",
+        goal="", scope="", output="", drive_root="",
+    )) is None
+    assert not probe.exists()
+
+
+def test_the_real_wrapper_hands_off_before_it_reviews_anything(tmp_path, monkeypatch):
+    """End-to-end pin of the main() wiring, not just the helper.
+
+    The REAL script is invoked as a process from a checkout that is not the
+    target base, exactly as a contributor runs it. Reaching any review work
+    without handing off first would leave the base-side probe unexecuted, so
+    deleting the main() hook fails here even while the helper stays perfect.
+    """
+    repo = _init_contributor_repo(tmp_path, monkeypatch)
+    probe = _probe_path(monkeypatch, tmp_path)
+    wrapper = Path(__file__).resolve().parent.parent / "scripts" / "run_external_review.py"
+    # The base commit keeps the probe; the proposal carries the real wrapper.
+    (repo / "scripts" / "run_external_review.py").write_text(
+        wrapper.read_text(encoding="utf-8"), encoding="utf-8"
+    )
+    _git(repo, "add", "-A")
+    _git(repo, "commit", "-m", "proposal adopts the real wrapper")
+    base_sha = _git(repo, "rev-parse", "base").strip()
+
+    proc = subprocess.run(
+        [
+            sys.executable, str(repo / "scripts" / "run_external_review.py"),
+            "--contributor", "--base-ref=base", "--head-ref=HEAD", "--", "PR title",
+        ],
+        cwd=str(repo), capture_output=True, text=True, timeout=300,
+        env={**os.environ, "REVIEW_PROBE_OUT": str(probe)},
+    )
+
+    assert probe.exists(), f"the base-side run never happened: {proc.stderr[-2000:]}"
+    ran = json.loads(probe.read_text(encoding="utf-8"))
+    assert ran["machinery_sha"] == base_sha
+    assert proc.returncode == 1  # the probe's exit code, passed through
+
+
+def test_contributor_review_refuses_a_dirty_authoring_worktree(tmp_path, monkeypatch):
+    """The uncommitted half of a proposal must not silently drop out.
+
+    The base-side run sees a freshly materialized (always clean) worktree, so
+    this is read in the authoring worktree before the re-run leaves it.
+    """
+    repo = _init_contributor_repo(tmp_path, monkeypatch)
+    probe = _probe_path(monkeypatch, tmp_path)
+    (repo / "uncommitted.txt").write_text("work in progress\n", encoding="utf-8")
+
+    with pytest.raises(RuntimeError, match="not clean"):
+        _run_on_trusted_base(SimpleNamespace(
+            base_ref="base", head_ref="HEAD", commit_message="",
+            goal="", scope="", output="", drive_root="",
+        ))
+    assert not probe.exists()
+
+
+def test_contributor_result_is_decided_by_the_exit_code_alone():
+    """The retired D31 classifier is not a gate anywhere in the outcome path.
+
+    A proposal rewriting the review machinery gets the same result vocabulary as
+    any other, because nothing but the review's exit code reaches this decision.
+    """
+    assert _contributor_result(0) == "READY_FOR_INTEGRATION"
+    assert _contributor_result(1) == "BLOCKED"
+    assert _contributor_result(3) == "INCOMPLETE"
 
 
 def test_external_review_script_delegates_verdict_to_production_gate():
@@ -194,9 +355,21 @@ def _init_contributor_repo(tmp_path: Path, monkeypatch) -> Path:
     _git(repo, "config", "user.email", "test@example.com")
     _git(repo, "config", "user.name", "Test")
     _git(repo, "config", "core.autocrlf", "false")
+    # Same ignores as the real repository: importing from a checkout writes
+    # bytecode into it, which would otherwise read as an unclean worktree.
+    (repo / ".gitignore").write_text("__pycache__/\n*.pyc\n", encoding="utf-8")
     (repo / "scripts").mkdir()
-    (repo / "scripts" / "run_external_review.py").write_text("# base script\n", encoding="utf-8")
+    (repo / "scripts" / "run_external_review.py").write_text(
+        _BASE_SIDE_PROBE, encoding="utf-8"
+    )
     _write_target_config(repo)
+    # A real (not namespace) package, so a wrapper executed out of this repo
+    # imports its module-level dependency from here and not from whatever
+    # ouroboros the host interpreter happens to have installed.
+    (repo / "ouroboros" / "__init__.py").write_text("", encoding="utf-8")
+    (repo / "ouroboros" / "runtime_mode_policy.py").write_text(
+        "GIT_OPS_FAMILY_PATHS = frozenset()\n", encoding="utf-8"
+    )
     (repo / "ouroboros" / "review_substrate.py").write_text(
         "# trusted review substrate\n", encoding="utf-8"
     )
@@ -358,8 +531,11 @@ def test_contributor_snapshot_binds_clean_base_head_and_tree(tmp_path, monkeypat
     assert snapshot["target_version"] == "1.2.3"
     assert snapshot["head_tree_sha"] == _git(repo, "rev-parse", "HEAD^{tree}").strip()
     assert snapshot["changed_paths"] == ["a.txt"]
-    assert snapshot["review_substrate_changed"] == []
     assert snapshot["diff_sha256"]
+    # The retired trust-boundary classification leaves no snapshot residue.
+    assert not {"review_substrate_changed", "review_substrate_matches_base"} & set(
+        snapshot
+    )
 
     (repo / "dirty.txt").write_text("not committed\n", encoding="utf-8")
     with pytest.raises(RuntimeError, match="not clean"):
@@ -423,27 +599,41 @@ def test_contributor_snapshot_checks_each_duplicate_installer_link(
 
 @pytest.mark.parametrize(
     "relative_path",
-    [
-        "ouroboros/review_substrate.py",
-        "ouroboros/review_execution.py",
-        "ouroboros/utils.py",
-        "ouroboros/tools/registry.py",
-    ],
+    ["Ouroboros.spec", "ouroboros/tool_module_inventory.py"],
 )
-def test_contributor_snapshot_flags_transitive_review_substrate_changes(
+def test_contributor_snapshot_flags_frozen_inventory_release_machinery(
     tmp_path, monkeypatch, relative_path
 ):
+    assert relative_path in _RELEASE_MACHINERY_PATHS
     repo = _init_contributor_repo(tmp_path, monkeypatch)
     path = repo / relative_path
-    path.write_text("# proposal changes trusted review substrate\n", encoding="utf-8")
+    path.write_text("# proposal changes release machinery\n", encoding="utf-8")
     _git(repo, "add", str(path.relative_to(repo)))
-    _git(repo, "commit", "-m", "change review substrate")
+    _git(repo, "commit", "-m", "change release machinery")
 
     snapshot = _contributor_snapshot("base", "HEAD")
 
-    assert snapshot["review_substrate_changed"] == [relative_path]
-    assert snapshot["review_substrate_matches_base"] is False
+    assert snapshot["release_metadata_or_machinery_changed"] is True
+    assert snapshot["release_sensitive_changes"]["machinery_paths"] == [relative_path]
 
+
+def test_contributor_snapshot_rejects_release_carrier_changes_without_version_file(
+    tmp_path, monkeypatch
+):
+    repo = _init_contributor_repo(tmp_path, monkeypatch)
+    path = repo / "pyproject.toml"
+    path.write_text(
+        '[project]\nname = "test-project"\nversion = "1.2.4"\n',
+        encoding="utf-8",
+    )
+    _git(repo, "add", "pyproject.toml")
+    _git(repo, "commit", "-m", "change package carrier only")
+
+    with pytest.raises(
+        RuntimeError,
+        match=r"must not change release-version carriers \(pyproject\.project\.version\)",
+    ):
+        _contributor_snapshot("base", "HEAD")
 
 def test_contributor_landing_obligations_are_exact_typed_items_only():
     version_only = {
@@ -489,7 +679,8 @@ def test_contributor_packet_is_redacted_and_shareable(tmp_path):
         snapshot={
             "base_sha": "a" * 40,
             "head_sha": "b" * 40,
-            "review_substrate_changed": [],
+            # A proposal rewriting the review script is packeted like any other.
+            "changed_paths": ["scripts/run_external_review.py"],
         },
         resolved_config={"triad_models": ["anthropic/fable"]},
         outcome={"status": "passed", "path": local_root, "api_key": "test-secret-value"},
@@ -522,6 +713,12 @@ def test_contributor_packet_is_redacted_and_shareable(tmp_path):
     assert "$REPO" in evidence_text + full_text
     assert "production_triad_quorum_plus_authoritative_scope" in evidence_text
     assert '"execution_receipts_consistent": true' in evidence_text
+    # Evidence records the unconditional contract, never a per-proposal verdict
+    # about whose review code ran.
+    assert public_evidence["result"] == "READY_FOR_INTEGRATION"
+    assert public_evidence["trust"]["review_machinery"] == "target_base_unconditional"
+    assert "owner decision 2026-08-19" in public_evidence["trust"]["note"]
+    assert "rerun" not in evidence_text
     assert "triad:slot_1:observed_model_is_display_label" in evidence_text
     assert "quorum still met" in evidence_text
     assert "transcript EOF_MARK" in full_text
@@ -596,20 +793,19 @@ def test_exit_classification_separates_infra_from_genuine_blocks():
         assert _classify_exit({"status": "blocked", "block_reason": infra_reason}) == 3, infra_reason
 
 
-def test_contributor_outcome_fails_closed_on_receipt_or_trust_drift():
+def test_contributor_outcome_fails_closed_on_receipt_drift_only():
     exit_code, outcome = finalize_contributor_outcome(
-        snapshot={"review_substrate_changed": []}, outcome={"status": "passed"},
-        exit_code=0, mismatches=["provider_mismatch:triad:t1"],
+        outcome={"status": "passed"}, exit_code=0,
+        mismatches=["provider_mismatch:triad:t1"],
     )
     assert exit_code == 3
     assert outcome["block_reason"] == "execution_receipt_mismatch"
 
-    exit_code, outcome = finalize_contributor_outcome(
-        snapshot={"review_substrate_changed": ["scripts/run_external_review.py"]},
+    # Nothing about the proposal's contents downgrades a clean run any more: the
+    # machinery that produced it was the target base's either way.
+    assert finalize_contributor_outcome(
         outcome={"status": "passed"}, exit_code=0, mismatches=[],
-    )
-    assert exit_code == 3
-    assert outcome["block_reason"] == "trusted_base_rerun_required"
+    ) == (0, {"status": "passed"})
 
 
 def test_openrouter_pool_orders_hope_keys_last(monkeypatch, tmp_path):

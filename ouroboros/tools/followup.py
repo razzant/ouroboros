@@ -14,6 +14,12 @@ mint future root tasks (typed refusal), the objective is the agent's own plain
 text (no host template), and a task may hold at most ``_MAX_PENDING_FOLLOWUPS``
 pending follow-ups — past the cap the refusal is typed and discloses the pending
 records.
+
+Every terminal publishes a NATIVE ``ToolResult`` (owner decision 2026-08-19, "B"):
+the sentences below carry no ``⚠️`` identifier, so the single adapter answered ``ok``
+for each of them and a follow-up that was refused looked to the caller exactly like
+one that had been registered. The bytes are unchanged; only the code beside them is
+new, and it is the producer's own.
 """
 
 from __future__ import annotations
@@ -23,6 +29,7 @@ from typing import Any, Dict, List
 
 from ouroboros.deadline_utils import parse_deadline_ts
 from ouroboros.tools.registry import ToolContext, ToolEntry
+from ouroboros.tools.tool_result import ToolResult, _publish_tool_result
 
 _MAX_PENDING_FOLLOWUPS = 2
 FOLLOWUP_SOURCE = "task_followup"
@@ -102,55 +109,90 @@ def _pending_followups(records: List[Dict[str, Any]], task_id: str) -> List[Dict
 
 def _handle_schedule_followup(ctx: ToolContext, **params) -> str:
     if _is_delegated_subagent(ctx):
-        return (
+        # An authority denial, exactly like the acting-child guards in
+        # control_scheduling: the call was refused by policy, not mis-argued.
+        return _publish_tool_result(ctx, ToolResult(
+            status="blocked", code="ACCESS_BLOCKED",
+            text=(
             "ERROR: FOLLOWUP_SUBAGENT_REFUSED: a delegated subagent holds narrower-than-parent "
             "authority and may not mint future root tasks. Report the wait instant to your "
             "parent instead; the parent (or the owner) decides whether to schedule a follow-up."
-        )
+            ),
+        ))
     task_id = str(getattr(ctx, "task_id", "") or "").strip()
     if not task_id:
-        return "ERROR: FOLLOWUP_TASK_ID_REQUIRED: a durable follow-up must belong to a real task."
+        # The SUBSTRATE says no (spec §1.15): the agent cannot supply a task id,
+        # there simply is no task to own a durable record — the same shape as
+        # control_artifacts' "no active chat" and control_task_results' unknown id.
+        return _publish_tool_result(ctx, ToolResult(
+            status="unavailable", code="LEGACY_UNAVAILABLE",
+            text="ERROR: FOLLOWUP_TASK_ID_REQUIRED: a durable follow-up must belong to a real task.",
+        ))
     run_at_raw = str(params.get("run_at") or "").strip()
     instant = parse_deadline_ts(run_at_raw)
     if instant is None:
-        return (
+        # The remaining input refusals are the agent's own malformed call, which
+        # §1.15 keeps degrading so reflection sees it: TOOL_ARG_ERROR throughout.
+        return _publish_tool_result(ctx, ToolResult(
+            status="error", code="TOOL_ARG_ERROR",
+            text=(
             f"ERROR: FOLLOWUP_RUN_AT_INVALID: {run_at_raw!r} is not a parseable ISO 8601 "
             "instant. Example: 2026-08-19T12:20:00+03:00 (naive times read as UTC)."
-        )
+            ),
+        ))
     objective = str(params.get("objective") or "").strip()
     if not objective:
-        return "ERROR: FOLLOWUP_OBJECTIVE_REQUIRED: write the future task's objective in plain language."
+        return _publish_tool_result(ctx, ToolResult(
+            status="error", code="TOOL_ARG_ERROR",
+            text="ERROR: FOLLOWUP_OBJECTIVE_REQUIRED: write the future task's objective in plain language.",
+        ))
     # Typed refusal, never a silent cut: the text rides VERBATIM into the future
     # task, so truncating it here would silently change what that task is.
     if len(objective) > _MAX_OBJECTIVE_CHARS:
-        return (
+        return _publish_tool_result(ctx, ToolResult(
+            status="error", code="TOOL_ARG_ERROR",
+            text=(
             f"ERROR: FOLLOWUP_TEXT_TOO_LONG: objective is {len(objective)} chars; the limit is "
             f"{_MAX_OBJECTIVE_CHARS}. Shorten it — nothing was truncated and nothing was scheduled."
-        )
+            ),
+        ))
     context = str(params.get("context") or "").strip()
     if len(context) > _MAX_CONTEXT_CHARS:
-        return (
+        return _publish_tool_result(ctx, ToolResult(
+            status="error", code="TOOL_ARG_ERROR",
+            text=(
             f"ERROR: FOLLOWUP_TEXT_TOO_LONG: context is {len(context)} chars; the limit is "
             f"{_MAX_CONTEXT_CHARS}. Shorten it — nothing was truncated and nothing was scheduled."
-        )
+            ),
+        ))
     from ouroboros.tool_access import canonical_data_root
     from supervisor.queue import list_scheduled_tasks, upsert_scheduled_task
 
     try:
         drive_root = canonical_data_root(ctx)
     except Exception as exc:
-        return f"ERROR: FOLLOWUP_DATA_ROOT_UNRESOLVED: {exc}"
+        # A host resolution that raised is an internal tool error, the same code
+        # control_scheduling publishes when the child drive cannot be prepared.
+        return _publish_tool_result(ctx, ToolResult(
+            status="error", code="TOOL_ERROR",
+            text=f"ERROR: FOLLOWUP_DATA_ROOT_UNRESOLVED: {exc}",
+        ))
     records = [r for r in (list_scheduled_tasks(drive_root).get("tasks") or []) if isinstance(r, dict)]
     pending = _pending_followups(records, task_id)
     if len(pending) >= _MAX_PENDING_FOLLOWUPS:
         listing = "; ".join(
             f"{r.get('id')} (fires at/after { (r.get('trigger') or {}).get('run_at') })" for r in pending
         )
-        return (
+        # A per-task budget refused to mint the future task — the same answer the
+        # subtask depth limit publishes for the same kind of refusal.
+        return _publish_tool_result(ctx, ToolResult(
+            status="blocked", code="RESOURCE_CONSTRAINT_BLOCKED",
+            text=(
             f"ERROR: FOLLOWUP_CAP_REACHED: this task already holds {len(pending)} pending "
             f"follow-up(s) of the {_MAX_PENDING_FOLLOWUPS} allowed: {listing}. Each fires once; "
             "wait for one to fire, or the owner can disable/delete records from the Schedules surface."
-        )
+            ),
+        ))
     run_at_iso = instant.isoformat()
     metadata_src = getattr(ctx, "task_metadata", None)
     root_task_id = metadata_src.get("root_task_id") if isinstance(metadata_src, dict) else None
@@ -180,12 +222,20 @@ def _handle_schedule_followup(ctx: ToolContext, **params) -> str:
     try:
         stored = upsert_scheduled_task(record, drive_root=drive_root)
     except Exception as exc:
-        return f"ERROR: FOLLOWUP_PERSIST_FAILED: {type(exc).__name__}: {exc}"
-    return (
+        # Nothing was registered: the same TOOL_ERROR the sibling scheduler
+        # publishes when a requested child could not be persisted.
+        return _publish_tool_result(ctx, ToolResult(
+            status="error", code="TOOL_ERROR",
+            text=f"ERROR: FOLLOWUP_PERSIST_FAILED: {type(exc).__name__}: {exc}",
+        ))
+    return _publish_tool_result(ctx, ToolResult(
+        status="ok", code="OK",
+        text=(
         f"FOLLOWUP_SCHEDULED: one-shot follow-up {stored.get('id')} registered to fire at/after "
         f"{run_at_iso} (next scheduler tick at/after that instant). It will enqueue an ordinary "
         f"root task through the supervisor scheduler under normal admission; pending follow-ups "
         f"for this task: {len(pending) + 1}/{_MAX_PENDING_FOLLOWUPS}. The record is durable in "
         "state/scheduled_tasks.json and fires exactly once; the owner can disable or delete it "
         "from the Schedules surface."
-    )
+        ),
+    ))

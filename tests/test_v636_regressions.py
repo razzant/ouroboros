@@ -1,7 +1,7 @@
 """v6.36.0 regression guards: boundary resilience (WA1), terminalization (WA2),
 reviewer-slot SSOT (WA3), tool robustness (WA5). Each new fix class gets an
 executable guard so a future change that re-opens it goes red. (WA4 acceptance
-capsule and WA6 build-signing are guarded in test_loop_misc / test_build_scripts.)"""
+capsule and WA6 build-signing are guarded in test_loop_acceptance_gate / test_build_scripts.)"""
 import subprocess
 import sys
 from types import SimpleNamespace

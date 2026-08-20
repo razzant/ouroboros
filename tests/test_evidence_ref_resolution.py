@@ -446,7 +446,10 @@ def test_panel_call_site_does_not_swallow_the_resolution_pass():
 def test_require_criterion_evidence_knob_is_deleted():
     import pathlib
 
-    for rel in ("ouroboros/loop.py", "ouroboros/tools/review.py"):
+    loop_family = tuple(
+        f"ouroboros/{path.name}" for path in sorted(pathlib.Path("ouroboros").glob("loop*.py"))
+    )
+    for rel in (*loop_family, "ouroboros/tools/review.py"):
         source = pathlib.Path(rel).read_text(encoding="utf-8")
         assert '"require_criterion_evidence"' not in source, rel
     # The evidence condition is unconditional: a solved PASS without criteria is

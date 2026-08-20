@@ -16,6 +16,7 @@ from starlette.routing import Route
 from starlette.testclient import TestClient
 
 from ouroboros import mcp_client
+from ouroboros.tools.tool_result import ToolResult
 
 
 @pytest.fixture(autouse=True)
@@ -39,7 +40,12 @@ class _FakeTransport:
 
     async def call_tool(self, cfg, name, arguments, timeout):
         self.call_calls.append((cfg.id, name, dict(arguments or {}), timeout))
-        return f"echo({cfg.id}/{name})"
+        return ToolResult(
+            status="ok",
+            code="OK",
+            text=f"echo({cfg.id}/{name})",
+            meta={"mcp_is_error": False},
+        )
 
 
 def _wire_singleton(transport):

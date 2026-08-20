@@ -2,6 +2,8 @@ from __future__ import annotations
 
 import importlib.util
 import json
+import subprocess
+import sys
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -12,9 +14,17 @@ SKILL_PATH = REPO_ROOT / "skills" / "unix_computer_use" / "SKILL.md"
 
 
 def _load_plugin():
-    spec = importlib.util.spec_from_file_location("unix_computer_use_plugin", PLUGIN_PATH)
+    # Package-style spec, exactly as ouroboros/extension_loader.py loads a skill
+    # entry point: plugin.py imports its sibling leaves under
+    # skills/unix_computer_use/lib/, which needs submodule search locations.
+    spec = importlib.util.spec_from_file_location(
+        "unix_computer_use_plugin",
+        PLUGIN_PATH,
+        submodule_search_locations=[str(PLUGIN_PATH.parent)],
+    )
     assert spec and spec.loader
     module = importlib.util.module_from_spec(spec)
+    sys.modules[spec.name] = module
     spec.loader.exec_module(module)
     return module
 
@@ -75,7 +85,7 @@ def test_unix_computer_use_screenshot_uses_detected_backend(tmp_path, monkeypatc
         out.write_bytes(b"png")
         return SimpleNamespace(returncode=0, stdout="", stderr="")
 
-    monkeypatch.setattr(module.subprocess, "run", fake_run)
+    monkeypatch.setattr(subprocess, "run", fake_run)
 
     result = json.loads(api.tools["screenshot"]["handler"](job_id="case1"))
 
@@ -109,7 +119,7 @@ def test_unix_computer_use_window_list_uses_linux_backend(tmp_path, monkeypatch)
         assert cmd == ["wmctrl", "-l"]
         return SimpleNamespace(returncode=0, stdout="0x001 host Browser\n", stderr="")
 
-    monkeypatch.setattr(module.subprocess, "run", fake_run)
+    monkeypatch.setattr(subprocess, "run", fake_run)
 
     result = json.loads(api.tools["window_list"]["handler"]())
 
@@ -125,8 +135,8 @@ def _macos_impl(tmp_path, monkeypatch, captured):
 
     def fake_run(cmd, *a, **k):
         captured.append(list(cmd))
-        return module.subprocess.CompletedProcess(cmd, 0, "", "")
-    monkeypatch.setattr(module.subprocess, "run", fake_run)
+        return subprocess.CompletedProcess(cmd, 0, "", "")
+    monkeypatch.setattr(subprocess, "run", fake_run)
     return module._ComputerUse(_API(tmp_path))
 
 
@@ -247,8 +257,8 @@ def test_wayland_click_routes_through_ydotool(tmp_path, monkeypatch):
 
     def fake_run(cmd, *a, **k):
         captured.append(list(cmd))
-        return module.subprocess.CompletedProcess(cmd, 0, "", "")
-    monkeypatch.setattr(module.subprocess, "run", fake_run)
+        return subprocess.CompletedProcess(cmd, 0, "", "")
+    monkeypatch.setattr(subprocess, "run", fake_run)
     impl = module._ComputerUse(_API(tmp_path))
 
     result = json.loads(impl.click(x=10, y=20, raw=True))
@@ -294,7 +304,7 @@ def test_macos_multi_display_clean_ratio_still_flags_approx(tmp_path, monkeypatc
     def fake_run(cmd, **_kwargs):
         Path(cmd[-1]).write_bytes(b"png")
         return SimpleNamespace(returncode=0, stdout="", stderr="")
-    monkeypatch.setattr(module.subprocess, "run", fake_run)
+    monkeypatch.setattr(subprocess, "run", fake_run)
 
     impl = module._ComputerUse(_API(tmp_path))
     result = json.loads(impl.screenshot(job_id="multi"))
@@ -315,8 +325,8 @@ def test_linux_type_text_terminates_option_parsing(tmp_path, monkeypatch):
 
     def fake_run(cmd, *a, **k):
         captured.append(list(cmd))
-        return module.subprocess.CompletedProcess(cmd, 0, "", "")
-    monkeypatch.setattr(module.subprocess, "run", fake_run)
+        return subprocess.CompletedProcess(cmd, 0, "", "")
+    monkeypatch.setattr(subprocess, "run", fake_run)
     impl = module._ComputerUse(_API(tmp_path))
 
     json.loads(impl.type_text(text="--help"))
@@ -339,7 +349,7 @@ def test_macos_screenshot_without_logical_size_flags_approx(tmp_path, monkeypatc
     def fake_run(cmd, **_kwargs):
         Path(cmd[-1]).write_bytes(b"png")
         return SimpleNamespace(returncode=0, stdout="", stderr="")
-    monkeypatch.setattr(module.subprocess, "run", fake_run)
+    monkeypatch.setattr(subprocess, "run", fake_run)
 
     impl = module._ComputerUse(_API(tmp_path))
     result = json.loads(impl.screenshot(job_id="tcc"))
@@ -360,8 +370,8 @@ def test_key_alias_maps_to_x11_names(tmp_path, monkeypatch):
 
     def fake_run(cmd, *a, **k):
         captured.append(list(cmd))
-        return module.subprocess.CompletedProcess(cmd, 0, "", "")
-    monkeypatch.setattr(module.subprocess, "run", fake_run)
+        return subprocess.CompletedProcess(cmd, 0, "", "")
+    monkeypatch.setattr(subprocess, "run", fake_run)
     impl = module._ComputerUse(_API(tmp_path))
 
     json.loads(impl.key(keys="ctrl+pagedown"))
@@ -420,8 +430,8 @@ def test_wayland_key_is_honest_unsupported(tmp_path, monkeypatch):
 
     def fake_run(cmd, *a, **k):
         captured.append(list(cmd))
-        return module.subprocess.CompletedProcess(cmd, 0, "", "")
-    monkeypatch.setattr(module.subprocess, "run", fake_run)
+        return subprocess.CompletedProcess(cmd, 0, "", "")
+    monkeypatch.setattr(subprocess, "run", fake_run)
     impl = module._ComputerUse(_API(tmp_path))
 
     result = json.loads(impl.key(keys="ctrl+l"))
@@ -445,8 +455,8 @@ def test_wayland_drag_and_press_use_mask_codes(tmp_path, monkeypatch):
 
     def fake_run(cmd, *a, **k):
         captured.append(list(cmd))
-        return module.subprocess.CompletedProcess(cmd, 0, "", "")
-    monkeypatch.setattr(module.subprocess, "run", fake_run)
+        return subprocess.CompletedProcess(cmd, 0, "", "")
+    monkeypatch.setattr(subprocess, "run", fake_run)
     impl = module._ComputerUse(_API(tmp_path))
 
     result = json.loads(impl.left_click_drag(start_x=1, start_y=2, end_x=3, end_y=4, raw=True))
@@ -476,8 +486,8 @@ def test_x11_function_keys_and_case_preserved(tmp_path, monkeypatch):
 
     def fake_run(cmd, *a, **k):
         captured.append(list(cmd))
-        return module.subprocess.CompletedProcess(cmd, 0, "", "")
-    monkeypatch.setattr(module.subprocess, "run", fake_run)
+        return subprocess.CompletedProcess(cmd, 0, "", "")
+    monkeypatch.setattr(subprocess, "run", fake_run)
     impl = module._ComputerUse(_API(tmp_path))
 
     json.loads(impl.key(keys="F5"))
@@ -510,8 +520,8 @@ def test_ax_tree_parses_set_of_marks(tmp_path, monkeypatch):
     )
 
     def fake_run(cmd, *a, **k):
-        return module.subprocess.CompletedProcess(cmd, 0, ax_output, "")
-    monkeypatch.setattr(module.subprocess, "run", fake_run)
+        return subprocess.CompletedProcess(cmd, 0, ax_output, "")
+    monkeypatch.setattr(subprocess, "run", fake_run)
     impl = module._ComputerUse(_API(tmp_path))
 
     result = json.loads(impl.ax_tree())

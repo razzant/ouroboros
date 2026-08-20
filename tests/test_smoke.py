@@ -13,7 +13,6 @@ Run: python -m pytest tests/test_smoke.py -v
 import os
 import pathlib
 import re
-import sys
 import tempfile
 
 import pytest
@@ -210,12 +209,12 @@ def test_tool_execute_basic(registry):
     assert "hello" in result.lower() or "⚠️" in result, "Should return output or error"
 
 
-def test_frozen_registry_includes_packaged_tool_modules(monkeypatch):
+def test_frozen_registry_includes_packaged_tool_modules(monkeypatch, tmp_path):
     """Frozen-mode registry must still load packaged tool modules."""
-    from ouroboros.tools.registry import ToolRegistry
-    tmp = pathlib.Path(tempfile.mkdtemp())
-    monkeypatch.setattr(sys, "frozen", True, raising=False)
-    registry = ToolRegistry(repo_dir=tmp, drive_root=tmp)
+    from tests._shared import configure_frozen_tool_registry
+
+    registry_cls = configure_frozen_tool_registry(monkeypatch, tmp_path)
+    registry = registry_cls(repo_dir=tmp_path, drive_root=tmp_path)
     available = {t["function"]["name"] for t in registry.schemas()}
     expected_subset = {
         "memory_map",
@@ -225,7 +224,7 @@ def test_frozen_registry_includes_packaged_tool_modules(monkeypatch):
         "plan_task",
         "vcs_rollback",
         "run_ci_tests",
-        # github.py is in _FROZEN_TOOL_MODULES — PR inspection tools must work in frozen builds
+        # Build-derived frozen membership keeps PR inspection tools packaged.
         "list_github_prs",
         "get_github_pr",
         "comment_on_pr",
@@ -418,16 +417,43 @@ def test_no_env_dumping():
 
 
 def test_no_oversized_modules():
-    """Principle 7: exact-path debt is the only exception to the hard gate."""
-    from ouroboros.review import GIANT_PATHS, MAX_MODULE_LINES, iter_gated_modules
+    """Principle 7: exact-path debt is the only exception to the hard gates.
 
-    max_lines = MAX_MODULE_LINES
-    violations = [
-        f"{module.path}: {module.line_count} lines"
-        for module in iter_gated_modules(REPO)
-        if module.line_count > max_lines and module.path not in GIANT_PATHS
-    ]
-    assert len(violations) == 0, f"Oversized modules (>{max_lines} lines):\n" + "\n".join(violations)
+    Both layers are enforced independently: >1600 requires legacy GIANT_PATHS
+    membership, and once MODULE_DEBT_1500 is active, >1500 requires membership
+    there too (new/non-debt paths are capped at 1500).
+    """
+    from ouroboros.review import (
+        BAND_MODULE_MAX_LINES,
+        GIANT_PATHS,
+        MAX_MODULE_LINES,
+        MODULE_DEBT_1500,
+        iter_gated_modules,
+    )
+
+    violations = []
+    for module in iter_gated_modules(REPO):
+        if module.line_count > MAX_MODULE_LINES and module.path not in GIANT_PATHS:
+            violations.append(f"{module.path}: {module.line_count} lines (>{MAX_MODULE_LINES})")
+        if (
+            MODULE_DEBT_1500 is not None
+            and module.line_count > BAND_MODULE_MAX_LINES
+            and module.path not in MODULE_DEBT_1500
+        ):
+            violations.append(f"{module.path}: {module.line_count} lines (>{BAND_MODULE_MAX_LINES})")
+    assert len(violations) == 0, "Oversized modules:\n" + "\n".join(violations)
+
+
+def test_size_ratchet_1500_layer_census_is_active_and_exact():
+    """The active v7 debt sets stay exact while legal paydown shrinks them."""
+    from ouroboros.review import GIANT_PATHS, MODULE_DEBT_1500, collect_size_ratchet_inventory
+
+    assert MODULE_DEBT_1500 is not None
+    assert GIANT_PATHS <= MODULE_DEBT_1500
+
+    inventory = collect_size_ratchet_inventory(REPO)
+    assert inventory.module_debt_1500 == MODULE_DEBT_1500
+    assert inventory.giant_paths == GIANT_PATHS
 
 
 def test_size_ratchet_manifest_matches_live_tree():
@@ -438,13 +464,19 @@ def test_size_ratchet_manifest_matches_live_tree():
     assert not errors, "Size-ratchet manifest violations:\n" + "\n".join(errors)
 
 
-def test_js_module_gate_buckets_and_grandfathering():
-    """The JS size gate sees web/tests and exempts debt by exact rel-path only."""
+def test_js_module_gate_buckets_and_grandfathering(monkeypatch):
+    """The JS size gate sees web/tests and exempts debt by exact rel-path only.
+
+    chat.js paid its giant debt in wave D, so the LIVE registry must gate it
+    again — a 4000-line regression lands in oversized, not grandfathered. The
+    exact-rel-path exemption machinery is pinned through a synthetic registry
+    entry, so this test no longer depends on any real module staying in debt."""
+    import ouroboros.review as review_mod
     from ouroboros.review import compute_complexity_metrics, module_is_grandfathered
 
     sections = [
         ("repo/web/app.js", "x\n" * 2000),                   # gated, over hard gate, not grandfathered
-        ("repo/web/modules/chat.js", "x\n" * 4000),          # gated, grandfathered by rel-path
+        ("repo/web/modules/chat.js", "x\n" * 4000),          # debt paid — a regression is gated again
         ("repo/web/vendor/chart.umd.min.js", "x\n" * 9000),  # vendored/minified — excluded
         ("repo/web/tests/foo.test.js", "x\n" * 9000),        # web/tests/ — gated
         ("repo/ouroboros/small.py", "x\n" * 10),
@@ -455,16 +487,32 @@ def test_js_module_gate_buckets_and_grandfathering():
     oversized = {p for p, _n in metrics["oversized_modules"]}
     grandfathered = {p for p, _n in metrics["grandfathered_modules"]}
     assert "web/app.js" in oversized
-    assert "web/modules/chat.js" in grandfathered
-    assert "web/modules/chat.js" not in oversized
+    assert "web/modules/chat.js" in oversized
+    assert "web/modules/chat.js" not in grandfathered
     assert "web/tests/foo.test.js" in oversized
     assert "web/vendor/chart.umd.min.js" not in oversized
     assert "web/vendor/chart.umd.min.js" not in grandfathered
+    assert not module_is_grandfathered("web/modules/chat.js")
 
-    # Grandfather entry is rel-path-keyed: a chat.js anywhere else stays gated.
-    assert module_is_grandfathered("web/modules/chat.js")
-    assert not module_is_grandfathered("repo/web/modules/chat.js")
-    assert not module_is_grandfathered("web/other/chat.js")
+    # The exemption is rel-path-keyed: pinned via a synthetic registry entry so
+    # a fixture module anywhere else stays gated.
+    monkeypatch.setattr(
+        review_mod, "GIANT_PATHS",
+        frozenset(review_mod.GIANT_PATHS | {"web/modules/giant_fixture.js"}),
+    )
+    if review_mod.MODULE_DEBT_1500 is not None:
+        monkeypatch.setattr(
+            review_mod, "MODULE_DEBT_1500",
+            frozenset(review_mod.MODULE_DEBT_1500 | {"web/modules/giant_fixture.js"}),
+        )
+    synthetic = compute_complexity_metrics(
+        [("repo/web/modules/giant_fixture.js", "x\n" * 4000)]
+    )
+    assert {p for p, _n in synthetic["grandfathered_modules"]} == {"web/modules/giant_fixture.js"}
+    assert {p for p, _n in synthetic["oversized_modules"]} == set()
+    assert module_is_grandfathered("web/modules/giant_fixture.js")
+    assert not module_is_grandfathered("repo/web/modules/giant_fixture.js")
+    assert not module_is_grandfathered("web/other/giant_fixture.js")
 
 
 def test_no_bare_except_pass():

@@ -50,7 +50,8 @@ def test_artifact_rebase_flags_missing_source(tmp_path):
 # ──────────────── #1/#2/#20: subagent lineage rebuilt on replay ──────────────
 
 def test_replay_clears_and_rebuilds_subagent_lineage():
-    src = _read("web/modules/chat.js")
+    # The replay pre-pass moved to chat_history_sync.js (wave D).
+    src = _read("web/modules/chat_history_sync.js")
     # Cleared on rebuild so stale cross-session lineage cannot persist.
     assert "subagentChildParents.clear();" in src
     assert "subagentTerminalChildren.clear();" in src
@@ -68,7 +69,8 @@ def test_progress_dedup_uses_full_array_not_last_item():
     just the last item — otherwise a background syncHistory re-feeds historical
     progress and the 'Notes' count grows without bound (BUGREPORT-panic-working-notes).
     """
-    src = _read("web/modules/chat.js")
+    # applyLiveCardState moved to chat_live_cards.js (wave D).
+    src = _read("web/modules/chat_live_cards.js")
     # full-array dedup
     assert "const existingIdx = record.items.findIndex((it) => it.dedupeKey === syntheticKey);" in src
     # the old last-item-only check is gone

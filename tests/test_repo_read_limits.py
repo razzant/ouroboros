@@ -24,7 +24,7 @@ def _make_ctx(tmp_path):
 
 
 def test_repo_read_full_file_has_header(tmp_path):
-    from ouroboros.tools.core import _repo_read
+    from ouroboros.tools.core_file_tools import _repo_read
     f = tmp_path / "hello.py"
     f.write_text("line1\nline2\nline3\n", encoding="utf-8")
     ctx = _make_ctx(tmp_path)
@@ -33,7 +33,7 @@ def test_repo_read_full_file_has_header(tmp_path):
 
 
 def test_repo_read_max_lines_slice(tmp_path):
-    from ouroboros.tools.core import _repo_read
+    from ouroboros.tools.core_file_tools import _repo_read
     f = tmp_path / "big.py"
     f.write_text("\n".join(f"line{i}" for i in range(1, 101)) + "\n", encoding="utf-8")
     ctx = _make_ctx(tmp_path)
@@ -50,7 +50,7 @@ def test_data_read_memory_file_never_truncated():
 
 
 def test_data_read_cold_start_returns_sentinel(tmp_path):
-    from ouroboros.tools.core import _data_read
+    from ouroboros.tools.core_file_tools import _data_read
 
     ctx = MagicMock()
     ctx.drive_path.side_effect = lambda p: tmp_path / p
@@ -62,7 +62,7 @@ def test_data_read_cold_start_returns_sentinel(tmp_path):
 
 
 def test_data_read_existing_file_still_read_verbatim(tmp_path):
-    from ouroboros.tools.core import _data_read
+    from ouroboros.tools.core_file_tools import _data_read
 
     target = tmp_path / "memory" / "scratchpad.md"
     target.parent.mkdir(parents=True)
@@ -76,8 +76,8 @@ def test_data_read_existing_file_still_read_verbatim(tmp_path):
 
 def test_data_read_propagates_non_filenotfound_errors(tmp_path, monkeypatch):
     import pytest
-    import ouroboros.tools.core as core_mod
-    from ouroboros.tools.core import _data_read
+    import ouroboros.tools.core_file_tools as core_mod
+    from ouroboros.tools.core_file_tools import _data_read
 
     ctx = MagicMock()
     ctx.drive_path.side_effect = lambda p: tmp_path / p
@@ -98,8 +98,8 @@ def test_data_read_propagates_non_filenotfound_errors(tmp_path, monkeypatch):
 
 
 def test_data_read_toctou_race_handled_by_sentinel(tmp_path, monkeypatch):
-    import ouroboros.tools.core as core_mod
-    from ouroboros.tools.core import _data_read
+    import ouroboros.tools.core_file_tools as core_mod
+    from ouroboros.tools.core_file_tools import _data_read
 
     target = tmp_path / "memory" / "racy.md"
     target.parent.mkdir(parents=True)
@@ -119,7 +119,7 @@ def test_data_read_toctou_race_handled_by_sentinel(tmp_path, monkeypatch):
 
 
 def test_data_read_sentinel_narrower_for_non_memory_paths(tmp_path):
-    from ouroboros.tools.core import _data_read
+    from ouroboros.tools.core_file_tools import _data_read
 
     ctx = MagicMock()
     ctx.drive_path.side_effect = lambda p: tmp_path / p
@@ -151,7 +151,7 @@ def test_repo_commit_results_never_truncated():
 
 
 def test_self_check_returns_bool_and_interval_15():
-    from ouroboros.loop import _maybe_inject_self_check
+    from ouroboros.loop_nudges import _maybe_inject_self_check
     messages = []
     usage = {"cost": 0}
     progress_calls = []
@@ -190,7 +190,7 @@ def test_child_task_handoff_results_never_truncated():
 def test_repo_read_default_max_lines_is_2000(tmp_path):
     """Default max_lines must be 2000 so ARCHITECTURE.md (~1285 lines) fits in one call."""
     import inspect
-    from ouroboros.tools.core import _repo_read
+    from ouroboros.tools.core_file_tools import _repo_read
     sig = inspect.signature(_repo_read)
     default = sig.parameters["max_lines"].default
     assert default == 2000, (
@@ -213,7 +213,7 @@ def test_repo_read_schema_default_is_2000():
 
 def test_repo_read_can_read_architecture_md_in_one_call(tmp_path):
     """A file of ARCHITECTURE.md length (~1285 lines) is returned fully with default max_lines."""
-    from ouroboros.tools.core import _repo_read
+    from ouroboros.tools.core_file_tools import _repo_read
     # Simulate a file slightly longer than the old 1050-line default
     n_lines = 1300
     content = "\n".join(f"line {i}" for i in range(1, n_lines + 1)) + "\n"

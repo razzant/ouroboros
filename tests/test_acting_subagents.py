@@ -16,6 +16,7 @@ from ouroboros.contracts.task_constraint import (
 from ouroboros.tool_access import active_tool_profile
 from ouroboros.tool_capabilities import ACTING_SUBAGENT_MODE, ACTING_SUBAGENT_TOOL_NAMES
 from ouroboros.runtime_mode_policy import mode_allows_protected_write
+from ouroboros.tools.registry_guard_process import _run_shell_safety_check
 from ouroboros.tools.registry import ToolContext, ToolRegistry
 from ouroboros import subagent_worktrees as sw
 
@@ -1055,7 +1056,7 @@ def test_external_workspace_unborn_first_commit_keeps_artifact(tmp_path, monkeyp
 
 
 def test_mutative_toggle_self_change_detected():
-    from ouroboros.tools.registry import _detect_mutative_toggle_self_change
+    from ouroboros.tools.registry_guard_process import _detect_mutative_toggle_self_change
     assert _detect_mutative_toggle_self_change('echo true >> data/settings.json # ouroboros_allow_mutative_subagents')
     assert _detect_mutative_toggle_self_change('save_settings({"ouroboros_allow_mutative_subagents": "true"})')
     # CLI settings-set path must also be caught.
@@ -1064,7 +1065,7 @@ def test_mutative_toggle_self_change_detected():
 
 
 def test_evolution_owner_control_self_change_detected():
-    from ouroboros.tools.registry import _detect_evolution_owner_control_self_change as d
+    from ouroboros.tools.registry_guard_process import _detect_evolution_owner_control_self_change as d
     assert d('echo true >> data/settings.json # ouroboros_post_task_evolution')
     assert d('save_settings({"ouroboros_post_task_evolution": "true"})')
     assert d("ouroboros settings set ouroboros_post_task_evolution true")
@@ -1100,12 +1101,14 @@ def test_pro_acting_shell_write_outside_surface_blocked(tmp_path):
     )
     reg = ToolRegistry(repo_dir=repo, drive_root=drive)
     reg._ctx = ctx
-    block = reg._run_shell_safety_check({"cmd": "echo x > ../outside.txt"}, "pro")
-    assert block and "WORKSPACE_SHELL_BLOCKED" in block
+    block = _run_shell_safety_check(reg, {"cmd": "echo x > ../outside.txt"}, "pro")
+    assert block is not None
+    assert block.code == "WORKSPACE_BLOCKED"
+    assert "WORKSPACE_SHELL_BLOCKED" in block.text
 
 
 def test_subagent_shell_secret_markers_cover_relative_paths():
-    from ouroboros.tools.registry import _subagent_shell_targets_secret
+    from ouroboros.tools.registry_guard_process import _subagent_shell_targets_secret
     assert _subagent_shell_targets_secret("cat .env")
     assert _subagent_shell_targets_secret("cat .git/config")
     assert _subagent_shell_targets_secret("cat .git/credentials")
@@ -1133,8 +1136,10 @@ def test_acting_subagent_cannot_shell_read_secrets(tmp_path):
     )
     reg = ToolRegistry(repo_dir=repo, drive_root=drive)
     reg._ctx = ctx
-    block = reg._run_shell_safety_check({"cmd": "cat ~/Ouroboros/data/settings.json"}, "pro")
-    assert block and "SUBAGENT_SECRET_READ_BLOCKED" in block
+    block = _run_shell_safety_check(reg, {"cmd": "cat ~/Ouroboros/data/settings.json"}, "pro")
+    assert block is not None
+    assert block.code == "SUBAGENT_SECRET_READ_BLOCKED"
+    assert "SUBAGENT_SECRET_READ_BLOCKED" in block.text
 
 
 def test_integrate_counts_as_reviewable_effect():
@@ -1185,7 +1190,7 @@ def test_no_workspace_acting_integrate_blocked(tmp_path):
 
 def test_acting_subagent_cannot_read_secrets(tmp_path):
     # Acting children may write their surface but must NOT read owner secrets.
-    from ouroboros.tools.core import _data_read
+    from ouroboros.tools.core_file_tools import _data_read
     repo = tmp_path / "repo"; repo.mkdir()
     drive = tmp_path / "data"; drive.mkdir()
     (drive / "settings.json").write_text('{"OPENAI_API_KEY": "sk-secret-xyz"}', encoding="utf-8")
@@ -1199,7 +1204,7 @@ def test_acting_subagent_cannot_read_secrets(tmp_path):
 
 def test_acting_subagent_keeps_workspace_access(tmp_path):
     # The strict-readonly resource block must NOT restrict acting children's worktree.
-    from ouroboros.tools.core import _local_readonly_resource_block
+    from ouroboros.tools.core_file_tools import _local_readonly_resource_block
     repo = tmp_path / "repo"; repo.mkdir()
     drive = tmp_path / "data"; drive.mkdir()
     ctx = ToolContext(

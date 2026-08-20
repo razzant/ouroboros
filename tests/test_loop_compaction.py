@@ -124,7 +124,7 @@ def _failed_capture(*, profile="owner_max", mode="max", reserve=65_536, size=1_0
 
 
 def _candidate_request(disposition, *, size, reserve=65_536):
-    from ouroboros import loop
+    from ouroboros import loop_model_call
     from ouroboros.usage_accounting import AttemptRequest
 
     return AttemptRequest(
@@ -136,12 +136,12 @@ def _candidate_request(disposition, *, size, reserve=65_536):
         candidate_context_sha256="new-context",
         candidate_context_size_bytes=size,
         candidate_measurement_kind="canonical_json_v1",
-        physical_context=loop._physical_context_for_fit(disposition),
+        physical_context=loop_model_call._physical_context_for_fit(disposition),
     )
 
 
 def test_fallback_success_preserves_complete_candidate_fit_facts(tmp_path):
-    from ouroboros import loop
+    from ouroboros import loop_model_call
 
     candidate_plan = SimpleNamespace(route_fp="fallback-route")
     messages = [{"role": "user", "content": "primary"}]
@@ -157,7 +157,7 @@ def test_fallback_success_preserves_complete_candidate_fit_facts(tmp_path):
         "_context_automatic_pass_used": True,
     }
     expected = dict(usage)
-    loop._adopt_fallback_route(
+    loop_model_call._adopt_fallback_route(
         SimpleNamespace(active_model="primary"), SimpleNamespace(_ctx=inner),
         "fallback", False, messages, fallback_messages, candidate_plan, "low", [], usage,
     )
@@ -167,7 +167,7 @@ def test_fallback_success_preserves_complete_candidate_fit_facts(tmp_path):
 
 
 def test_failed_fallback_restores_entire_primary_fit_bundle():
-    from ouroboros import loop
+    from ouroboros import loop_model_call
 
     usage = {
         "_context_route_fp": "primary",
@@ -176,15 +176,15 @@ def test_failed_fallback_restores_entire_primary_fit_bundle():
         "_context_target_total_tokens": None,
         "unrelated": "kept",
     }
-    snapshot = loop._snapshot_context_fit_usage(usage)
+    snapshot = loop_model_call._snapshot_context_fit_usage(usage)
     usage.update({
         "_context_route_fp": "rejected",
         "_context_profile": "task_local_low",
         "_context_target_miss": True,
         "_context_reclaim_goal_tokens": 999,
     })
-    loop._restore_context_fit_usage(usage, snapshot)
-    assert loop._snapshot_context_fit_usage(usage) == snapshot
+    loop_model_call._restore_context_fit_usage(usage, snapshot)
+    assert loop_model_call._snapshot_context_fit_usage(usage) == snapshot
     assert usage["unrelated"] == "kept"
 
 
@@ -192,6 +192,7 @@ def test_checkpoint_proves_automatic_materializer_attempt_even_on_binding_mismat
     tmp_path, monkeypatch,
 ):
     from ouroboros import loop
+    from ouroboros import loop_model_call
     from ouroboros.context_budget import ContextReclaimReceipt
 
     context = _ctx(tmp_path, preferred="low", mode="low")
@@ -216,12 +217,13 @@ def test_checkpoint_proves_automatic_materializer_attempt_even_on_binding_mismat
     )
     monkeypatch.setattr(loop, "_account_compaction_usage", lambda *_a, **_kw: None)
     monkeypatch.setattr(loop, "_emit_checkpoint_event", lambda *_a, **_kw: None)
-    loop._run_main_reclaim(context, disposition)
+    loop_model_call._run_main_reclaim(context, disposition)
     assert ("route-a", "exec:round:1") in context.tools._ctx._context_reclaim_materializations
 
 
 def test_predicted_reclaim_runs_once_then_sends_target_miss(tmp_path, monkeypatch):
     from ouroboros import loop
+    from ouroboros import loop_model_call
 
     context = _ctx(tmp_path, preferred="low", mode="low")
     fits = iter([
@@ -233,7 +235,7 @@ def test_predicted_reclaim_runs_once_then_sends_target_miss(tmp_path, monkeypatc
 
     def measure(ctx, **_kwargs):
         disposition = next(fits)
-        loop._remember_main_fit(ctx, disposition)
+        loop_model_call._remember_main_fit(ctx, disposition)
         return disposition
 
     reclaimed = []
@@ -248,9 +250,9 @@ def test_predicted_reclaim_runs_once_then_sends_target_miss(tmp_path, monkeypatc
         dispatched.append((disposition, kwargs))
         return {"role": "assistant", "content": "ok", "tool_calls": []}, 0.0
 
-    monkeypatch.setattr(loop, "_measure_round_main_fit", measure)
-    monkeypatch.setattr(loop, "_run_main_reclaim", reclaim)
-    monkeypatch.setattr(loop, "_dispatch_round_model", dispatch)
+    monkeypatch.setattr(loop_model_call, "_measure_round_main_fit", measure)
+    monkeypatch.setattr(loop_model_call, "_run_main_reclaim", reclaim)
+    monkeypatch.setattr(loop_model_call, "_dispatch_round_model", dispatch)
     msg, _cost, mode = loop._call_round_model(context)
     assert msg["content"] == "ok"
     assert mode == "low"
@@ -262,6 +264,7 @@ def test_predicted_reclaim_runs_once_then_sends_target_miss(tmp_path, monkeypatc
 
 def test_actual_max_overflow_reprojects_and_retries_only_smaller_context(tmp_path, monkeypatch):
     from ouroboros import loop
+    from ouroboros import loop_model_call
 
     context = _ctx(tmp_path)
     fits = iter([
@@ -272,7 +275,7 @@ def test_actual_max_overflow_reprojects_and_retries_only_smaller_context(tmp_pat
 
     def measure(ctx, **_kwargs):
         disposition = next(fits)
-        loop._remember_main_fit(ctx, disposition)
+        loop_model_call._remember_main_fit(ctx, disposition)
         return disposition
 
     def reclaim(ctx, _disposition, **kwargs):
@@ -291,9 +294,9 @@ def test_actual_max_overflow_reprojects_and_retries_only_smaller_context(tmp_pat
         sends.append("smaller-retry")
         return {"role": "assistant", "content": "fits", "tool_calls": []}, 0.0
 
-    monkeypatch.setattr(loop, "_measure_round_main_fit", measure)
-    monkeypatch.setattr(loop, "_run_main_reclaim", reclaim)
-    monkeypatch.setattr(loop, "_dispatch_round_model", dispatch)
+    monkeypatch.setattr(loop_model_call, "_measure_round_main_fit", measure)
+    monkeypatch.setattr(loop_model_call, "_run_main_reclaim", reclaim)
+    monkeypatch.setattr(loop_model_call, "_dispatch_round_model", dispatch)
     monkeypatch.setattr(loop, "last_physical_attempt_capture", lambda: _failed_capture())
     msg, _cost, mode = loop._call_round_model(context)
     assert msg["content"] == "fits"
@@ -305,6 +308,7 @@ def test_actual_max_overflow_reprojects_and_retries_only_smaller_context(tmp_pat
 
 def test_equal_context_releases_retry_before_provider_send(tmp_path, monkeypatch):
     from ouroboros import loop
+    from ouroboros import loop_model_call
     from ouroboros.usage_accounting import PhysicalAttemptPreconditionFailed
 
     context = _ctx(tmp_path)
@@ -318,7 +322,7 @@ def test_equal_context_releases_retry_before_provider_send(tmp_path, monkeypatch
 
     def measure(ctx, **_kwargs):
         disposition = next(fits)
-        loop._remember_main_fit(ctx, disposition)
+        loop_model_call._remember_main_fit(ctx, disposition)
         return disposition
 
     def reclaim(ctx, _disposition, **_kwargs):
@@ -335,9 +339,9 @@ def test_equal_context_releases_retry_before_provider_send(tmp_path, monkeypatch
         provider_sends += 1
         raise AssertionError("equal context must not dispatch")
 
-    monkeypatch.setattr(loop, "_measure_round_main_fit", measure)
-    monkeypatch.setattr(loop, "_run_main_reclaim", reclaim)
-    monkeypatch.setattr(loop, "_dispatch_round_model", dispatch)
+    monkeypatch.setattr(loop_model_call, "_measure_round_main_fit", measure)
+    monkeypatch.setattr(loop_model_call, "_run_main_reclaim", reclaim)
+    monkeypatch.setattr(loop_model_call, "_dispatch_round_model", dispatch)
     monkeypatch.setattr(loop, "last_physical_attempt_capture", lambda: _failed_capture())
     monkeypatch.setattr(loop, "_emit_checkpoint_event", lambda *_a, **kw: events.append(kw or _a[-1]))
     msg, _cost, mode = loop._call_round_model(context)
@@ -349,6 +353,7 @@ def test_equal_context_releases_retry_before_provider_send(tmp_path, monkeypatch
 
 def test_already_low_overflow_never_emits_max_to_low_toast(tmp_path, monkeypatch):
     from ouroboros import loop
+    from ouroboros import loop_model_call
 
     context = _ctx(tmp_path, preferred="low", mode="low")
     fits = iter([
@@ -361,7 +366,7 @@ def test_already_low_overflow_never_emits_max_to_low_toast(tmp_path, monkeypatch
 
     def measure(ctx, **_kwargs):
         disposition = next(fits)
-        loop._remember_main_fit(ctx, disposition)
+        loop_model_call._remember_main_fit(ctx, disposition)
         return disposition
 
     def reclaim(ctx, _disposition, **_kwargs):
@@ -376,9 +381,9 @@ def test_already_low_overflow_never_emits_max_to_low_toast(tmp_path, monkeypatch
         assert candidate_predicate(_candidate_request(disposition, size=700))
         return {"role": "assistant", "content": "fits", "tool_calls": []}, 0.0
 
-    monkeypatch.setattr(loop, "_measure_round_main_fit", measure)
-    monkeypatch.setattr(loop, "_run_main_reclaim", reclaim)
-    monkeypatch.setattr(loop, "_dispatch_round_model", dispatch)
+    monkeypatch.setattr(loop_model_call, "_measure_round_main_fit", measure)
+    monkeypatch.setattr(loop_model_call, "_run_main_reclaim", reclaim)
+    monkeypatch.setattr(loop_model_call, "_dispatch_round_model", dispatch)
     monkeypatch.setattr(
         loop, "last_physical_attempt_capture",
         lambda: _failed_capture(profile="owner_low", mode="low"),
@@ -392,6 +397,7 @@ def test_already_low_overflow_never_emits_max_to_low_toast(tmp_path, monkeypatch
 
 def test_one_route_round_materialization_pass_is_latched(tmp_path, monkeypatch):
     from ouroboros import loop
+    from ouroboros import loop_model_call
     from ouroboros.context_budget import ContextReclaimReceipt
 
     context = _ctx(tmp_path, preferred="low", mode="low")
@@ -418,16 +424,16 @@ def test_one_route_round_materialization_pass_is_latched(tmp_path, monkeypatch):
         return messages, receipt, None
 
     monkeypatch.setattr(loop, "compact_tool_history_llm", compact)
-    loop._run_main_reclaim(context, disposition)
-    assert loop._run_main_reclaim(context, disposition) is None
+    loop_model_call._run_main_reclaim(context, disposition)
+    assert loop_model_call._run_main_reclaim(context, disposition) is None
     assert calls == 1
 
 
 def test_strict_shrink_predicate_uses_failed_physical_reserve():
-    from ouroboros import loop
+    from ouroboros import loop_model_call
 
     failed = _failed_capture(reserve=2_048)
-    predicate = loop._strict_context_shrink_predicate(failed)
+    predicate = loop_model_call._strict_context_shrink_predicate(failed)
     disposition = _fit(profile="task_local_low", mode="low")
     assert predicate(_candidate_request(disposition, size=900, reserve=65_536)) is False
     assert predicate(_candidate_request(disposition, size=900, reserve=2_048)) is True
@@ -436,6 +442,7 @@ def test_strict_shrink_predicate_uses_failed_physical_reserve():
 def test_failed_main_capture_is_snapshotted_before_reclaim_attempt(tmp_path, monkeypatch):
     """A receipted summarizer must not replace the failed Main comparison candidate."""
     from ouroboros import loop
+    from ouroboros import loop_model_call
 
     context = _ctx(tmp_path)
     fits = iter([
@@ -447,7 +454,7 @@ def test_failed_main_capture_is_snapshotted_before_reclaim_attempt(tmp_path, mon
 
     def measure(ctx, **_kwargs):
         disposition = next(fits)
-        loop._remember_main_fit(ctx, disposition)
+        loop_model_call._remember_main_fit(ctx, disposition)
         return disposition
 
     def reclaim(ctx, _disposition, **_kwargs):
@@ -465,12 +472,12 @@ def test_failed_main_capture_is_snapshotted_before_reclaim_attempt(tmp_path, mon
         request = _candidate_request(disposition, size=800)
         assert candidate_predicate is not None
         assert candidate_predicate(request) is True  # smaller than failed Main (1000)
-        assert loop._strict_context_shrink_predicate(current_capture["value"])(request) is False
+        assert loop_model_call._strict_context_shrink_predicate(current_capture["value"])(request) is False
         return {"role": "assistant", "content": "fits", "tool_calls": []}, 0.0
 
-    monkeypatch.setattr(loop, "_measure_round_main_fit", measure)
-    monkeypatch.setattr(loop, "_run_main_reclaim", reclaim)
-    monkeypatch.setattr(loop, "_dispatch_round_model", dispatch)
+    monkeypatch.setattr(loop_model_call, "_measure_round_main_fit", measure)
+    monkeypatch.setattr(loop_model_call, "_run_main_reclaim", reclaim)
+    monkeypatch.setattr(loop_model_call, "_dispatch_round_model", dispatch)
     monkeypatch.setattr(loop, "last_physical_attempt_capture", lambda: current_capture["value"])
 
     msg, _cost, mode = loop._call_round_model(context)
@@ -480,10 +487,10 @@ def test_failed_main_capture_is_snapshotted_before_reclaim_attempt(tmp_path, mon
 
 
 def test_strict_shrink_predicate_requires_entire_physical_tuple():
-    from ouroboros import loop
+    from ouroboros import loop_model_call
 
     failed = _failed_capture(size=1_000)
-    predicate = loop._strict_context_shrink_predicate(failed)
+    predicate = loop_model_call._strict_context_shrink_predicate(failed)
     disposition = _fit(profile="task_local_low", mode="low")
     accepted = _candidate_request(disposition, size=900)
     assert predicate(accepted) is True

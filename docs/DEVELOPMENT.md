@@ -295,6 +295,16 @@ When adding or changing a provider, update one coherent route contract:
 5. review and scope routing, including sourced context-window evidence;
 6. direct-provider and single-provider regression tests.
 
+Each route's wire projection is pinned by the golden fixtures in
+`tests/fixtures/llm_golden/`: per route they record the resolved target, the
+client (base url, header set, retry policy, proxy trust), every request payload
+with its canonical digest, the physical-attempt ledger rows, and the returned
+`(message, usage)`. They replay against recording fakes — never the network, and
+never a real credential — so a changed payload byte, header, model-slot
+resolution or fallback order fails `tests/test_llm_provider_golden.py` instead of
+reaching a provider. A deliberate route change re-records them with
+`python tests/test_llm_provider_golden.py --write` and explains every diff.
+
 Local-only installs keep their local route. Unreachable shipped remote defaults
 may be cleared, but explicit owner values are not. Scope authority follows the
 BIBLE P3 policy: in owner-selected Max it requires the applicable sourced window
@@ -324,6 +334,19 @@ P7 makes context fit a maintenance constraint, not a line-count aesthetic.
   iterator drives smoke, health, census, and the 200,000-byte ratchet. Sources
   decode as strict UTF-8 and normalize line endings to canonical POSIX LF before
   line and UTF-8-byte counts, so checkout policy cannot change the inventory.
+- The second module layer is the optional `MODULE_DEBT_1500` manifest field:
+  absent until activated (absence means "not activated"; presence, even as
+  an empty tuple, means active). Once active, every exact path above 1500 lines
+  must be listed there, so new/non-debt paths are capped at 1500 while every
+  path above 1600 additionally stays in legacy `GIANT_PATHS`; both layers are
+  enforced independently for the live tree, the staged index, bootstrap, and
+  every audited first-parent transition. Activation happens exactly once via
+  `scripts/regenerate_size_ratchet.py --activate-1500-layer`; its only admission
+  authority is the activation commit's exact first-parent >1500 inventory, which
+  permits same-commit paydown and rejects same-commit self-authorization of a
+  fresh 1501-line path. Afterwards the set is shrink-only and irrevocable:
+  ordinary regeneration and `--check` preserve and enforce it without the flag,
+  and additions, retired-path re-entry, or deactivation fail validation.
 - The exact-current 1001-1500-line band lives in `BAND_PATHS`. A new or
   re-entered path requires a nonblank rationale. `BYTE_DEBT` stores exact counts
   above 200,000 UTF-8 bytes and is shrink-only; regenerate both with
@@ -331,17 +354,38 @@ P7 makes context fit a maintenance constraint, not a line-count aesthetic.
 - Every non-grandfathered Python function or method fails the deterministic gate
   above 300 lines; exceptions live in
   exact `(repo-relative path, lexical qualname)` keys in
-  `ouroboros/size_ratchet_manifest.py::FUNCTION_DEBT`. Methods above 150
-  lines are a decomposition signal. JavaScript currently has only the module
-  line-count gate.
+  `ouroboros/size_ratchet_manifest.py::FUNCTION_DEBT`. The set is shrink-only,
+  with one non-growing move allowed: a debt function whose exact qualname leaves
+  one path and appears at exactly one other path in the same transition keeps
+  its row (an extraction may carry it into a leaf); a fresh oversized function,
+  a swap onto another qualname, or an ambiguous many-to-one move is refused.
+  Methods above 150 lines are a decomposition signal. JavaScript currently has
+  only the module line-count gate.
 - Runtime Python function/method count is checked against
   `ouroboros/review.py::MAX_TOTAL_FUNCTIONS`; the function iterator preserves
-  the pre-v7 runtime scope (tests/devtools excluded) while module gates include
+  the runtime scope it always had (tests/devtools excluded) while module gates include
   those trees.
 - More than eight parameters is a decomposition signal applied by BIBLE and
   reviewer checklist 2(c), not a deterministic size-test gate. Existing
   baseline debt is not retroactively a failing tree. Any advisory ratchet must
   publish its AST counting scope and bind its baseline to the final SHA.
+- The committed first-parent history is audited with the same exact inventory
+  as the live tree: every commit's manifest must match its own tree, so a
+  giant that appears and disappears inside history is still caught. The walk
+  reuses one cache keyed by Git blob id — content-addressed, therefore a hit is
+  the same bytes by construction — so a multi-commit audit costs only the blobs
+  that changed rather than a full census per commit. Sampling commits instead
+  would be cheaper and wrong: it would retire that transient-giant guard.
+- Splitting a module records every moved or retired symbol in `MIGRATION_v7.md`,
+  one row per identity, and the row's semantic-delta note is a claim under test.
+  `tests/test_v7_verbatim_moves.py` compares the declaration at the old identity
+  in the ledger's recorded merge base against the declaration at the new identity
+  in the working tree, so a note that calls its move verbatim must hold
+  byte-for-byte — modulo the one indentation level a method legitimately loses
+  when it becomes a module-level function. Text that changes after a move (a
+  widened signature, a typed return, a retargeted call site, an edited docstring)
+  belongs in the note, which names what changed and why; leaving the word on a
+  row whose text has since moved on is the failure this gate exists to catch.
 - Prefer deleting dead/duplicate authority before raising a cap. Add an
   abstraction only when it removes concrete coupling or preserves a stable
   extension seam.
@@ -761,8 +805,15 @@ terminal settlement and capability-delta facts, telemetry limitations, and
 full redacted agent-session transcripts. Missing, tampered, drifted,
 unprovable, or contradictory identity/terminal receipts make the packet
 `INCOMPLETE`. Non-identity capability deltas remain explicit degradation
-evidence and do not override the production actor-status/quorum result. A
-proposal changing this review substrate still requires a trusted-target rerun.
+evidence and do not override the production actor-status/quorum result. The
+review machinery is always the target base's own (owner decision, 2026-08-19):
+unless the invoking checkout already is the target base, the lane materializes
+that commit in a detached worktree and re-runs the review from it, so a proposal
+is never trusted to review itself and no per-proposal trust classification
+remains. The proposal stays the reviewed subject in the frozen checkout. The
+guarantee is scoped: the wrapper deciding to hand off is itself read from the
+invoking checkout, so run it from a trusted one. That trust root is the same as
+before the change; it is now stated instead of assumed.
 
 This evidence establishes readiness; it does not authorize commit, push, merge,
 or publication. Maintainers choose the landing parent and release version,
@@ -812,14 +863,14 @@ Before every commit, verify the following:
 - [ ] **Tool** (`{verb}_{noun}`): thin LLM-callable wrapper. Validates input, formats output.
 
 #### Module Size & Complexity
-- [ ] Module stays near one context window (~1000 lines target; exact-path 1600 hard-gate debt is checked in, stale entries fail, and new/re-entered 1001-1500 paths carry a rationale)
+- [ ] Module stays near one context window (~1000 lines target; exact-path 1600 hard-gate debt is checked in, stale entries fail, and new/re-entered 1001-1500 paths carry a rationale; with the v7 `MODULE_DEBT_1500` layer active, non-debt paths are additionally capped at 1500 lines and the active set is shrink-only)
 - [ ] No non-grandfathered Python function or method exceeds the 300-line hard gate (`FUNCTION_DEBT` exact `(path, qualname)` keys are the exception SSOT); methods above 150 lines trigger decomposition review
 - [ ] Total Python function count stays under the current smoke hard gate (consult `ouroboros/review.py::MAX_TOTAL_FUNCTIONS` for the active value; bump with a comment if a feature requires more headroom)
 - [ ] More than eight parameters is a decomposition signal; consider a typed context object, but do not claim a hard gate or mark existing baseline debt noncompliant
 - [ ] No gratuitous abstract layers (Bible P7)
 
 #### Structural Rules
-- [ ] New Tool? `get_tools()` exports it using the `ToolEntry` pattern from `registry.py`, an explicit entry is added to `ouroboros/safety.py::TOOL_POLICY` (`POLICY_SKIP` for trusted built-ins, `POLICY_CHECK` for opaque or outward-facing ones), and the intended capability class is declared in `ouroboros/tool_capabilities.py` (`CORE_TOOL_NAMES`, local-readonly/acting child profiles, parallel/truncation sets as appropriate). Ordinary top-level tasks share the registered built-in surface; add a tool to a child profile only when that narrower principal should receive it, and test schema plus execution behavior rather than mirroring names into another catalog. Without the policy entry the tool falls through to `DEFAULT_POLICY = POLICY_CHECK` and pays a light-model LLM call per invocation. **A tool that WRITES the repo working tree needs the GUARD surfaces too, not only the visibility ones:** add it to `_ROOT_ARG_REPO_WRITE_TOOLS` (the single set behind the acting-no-workspace fence, the protected-write gate and the acting root-enum narrowing) and make sure its target paths are canonicalized — via `_PATH_NORMALIZED_TOOLS` if it takes a top-level `path`, or via `canonical_repo_relative_path` + `_payload_write_paths` if its paths ride inside the payload. Visibility checks can all be green while these are missing, so tests must exercise the real guard chain, not only a mocked resolver.
+- [ ] New Tool? `get_tools()` exports it using the shallow-frozen `ToolEntry` descriptor owned by `ouroboros/tools/tool_catalog.py` and re-exported by `registry.py`, while `ouroboros/tools/registry_core.py` owns ordered `ToolRegistry` orchestration and builtin invocation; `tool_resolution.py` owns public-argument/target preparation, `registry_guards.py` owns payload and access policy, `extension_dispatch.py` owns dynamic extension/MCP dispatch, and `registry.py` remains compatibility-only. Private tests and patches bind canonical owners; ordinary imports are not promoted into facade ABI. An explicit entry is added to `ouroboros/safety.py::TOOL_POLICY` (`POLICY_SKIP` for trusted built-ins, `POLICY_CHECK` for opaque or outward-facing ones), and the intended capability class is declared in `ouroboros/tool_capabilities.py` (`CORE_TOOL_NAMES`, local-readonly/acting child profiles, parallel/truncation sets as appropriate). First-party and task-scoped duplicate names fail closed with both registration origins. Extension/MCP collisions do not replace catalog entries or break installation/refresh: the dynamic projection is omitted with a loud log and visible capability omission. Ordinary top-level tasks share the registered built-in surface; add a tool to a child profile only when that narrower principal should receive it, and test schema plus execution behavior rather than mirroring names into another catalog. Without the policy entry the tool falls through to `DEFAULT_POLICY = POLICY_CHECK` and pays a light-model LLM call per invocation. **A tool that WRITES the repo working tree needs the GUARD surfaces too, not only the visibility ones:** add it to `tool_resolution._ROOT_ARG_REPO_WRITE_TOOLS` (the single set behind the acting-no-workspace fence, the protected-write gate and the acting root-enum narrowing) and make sure its target paths are canonicalized — via `_PATH_NORMALIZED_TOOLS` if it takes a top-level `path`, or via `canonical_repo_relative_path` + `tool_resolution._payload_write_paths` if its paths ride inside the payload. Visibility checks can all be green while these are missing, so tests must exercise the real guard chain, not only a mocked resolver.
 - [ ] New Gateway (if extracted)? Contains no business logic, only transport.
 - [ ] New memory/data files? Should they appear in LLM context (`context.py`)?
 
@@ -1074,7 +1125,9 @@ Before every commit, verify the following:
   rejected by owner scope); the secondary settle
   sites (pre-assignment pending drop, budget-drain `fail_tasks` — whose intent
   reads resolve at the CANONICAL supervisor root, never a child's
-  `budget_drive_root`) hold the SAME
+  `budget_drive_root`; note `fail_tasks` has no production caller today —
+  budget exhaustion pauses tasks before dispatch rather than draining them,
+  and the fence there is pinned by tests against future wiring) hold the SAME
   claim/generation fence and yield to a live claim owner. A `scope=cascade`
   intent is settled EXCLUSIVELY by the cascade's no-live postcondition: every
   other settle site is refused atomically against the CURRENT durable scope
@@ -1094,7 +1147,11 @@ Before every commit, verify the following:
   normal path — never a silent gap. On the natural path the owed row is
   registered immediately BEFORE the durable result write (projection-over-
   replay: a crash in the window leaves an owed row boot replay delivers; no
-  boot scan over task_results).   The intent and delivery registries read STRICT:
+  boot scan over task_results).   The intent and delivery registries read STRICT
+  in every mutator, not only at the ingress — claim, release, settle and scope
+  fail closed on the same typed error the mint raises, because a mutator that
+  read softly would answer "no active intent" over an unreadable file and drop
+  the claim-first fence:
   a corrupt projection refuses the mutation loudly instead of collapsing to
   `{}` and overwriting every active row — and strictness reaches ROWS, not
   just containers (GR6-3): a malformed pending/intent row or `delivered`
@@ -1715,6 +1772,23 @@ Default local pytest excludes costly or environment-dependent lanes:
 When adding a new opt-in lane, register the marker in `pyproject.toml`, add
 a collect-only zero-test guard in CI, and keep the default local addopts
 token-safe and Docker-safe.
+
+An opt-in lane may also be gated by an environment variable instead of a
+marker of its own, for a suite whose cost is a real server rather than a
+provider key. `tests/test_e2e_cancellation_scenarios.py` (E1-E12: cancel,
+cascade, graceful stop, hurry) is gated by `OUROBOROS_E2E_CANCEL`:
+`mock` spawns a real isolated `server.py` against a LOCAL stub model
+(`tests/fixtures_e2e_cancellation.py`) and contacts no external host, while
+`paid` adds the scenarios whose subject is a real delegated-run transport or
+real cost accounting and needs one provider credential, named through
+`OUROBOROS_E2E_PAID_KEY_ENV` and a slug in `OUROBOROS_E2E_PAID_MODEL`. Unset,
+the whole server-driven part skips and only the driver/gateway contract tests
+run. Every scenario asserts the durable artifacts — `state/cancel_intents.json`,
+the `cancel_intent` forensics in `logs/supervisor.jsonl`, `task_results/<id>.json`,
+`state/terminal_deliveries.json`, the `owner_hurry` projection — never an HTTP
+status alone. The driver is `devtools/benchmarks/common/server_runner.py`
+(`IsolatedServer.cancel_task` / `hurry_task`), which posts the same bodies
+`web/modules/api_client.js` does.
 
 ### Parallel CI and the `serial` marker
 

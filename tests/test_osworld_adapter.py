@@ -8,6 +8,8 @@ persistence contract, and the cu_bridge sample-60 final_answer fix.
 from __future__ import annotations
 
 import json
+import shutil
+import subprocess
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -101,7 +103,7 @@ def test_provider_preflight_vmware_missing_vm(tmp_path):
 
 
 def test_provider_preflight_docker_missing_cli(monkeypatch):
-    monkeypatch.setattr(rsa.shutil, "which", lambda name: None)
+    monkeypatch.setattr(shutil, "which", lambda name: None)
     failures = rsa.provider_preflight_failures("docker", "")
     assert any("docker CLI not found" in failure for failure in failures)
 
@@ -131,7 +133,7 @@ def test_prompt_declares_vm_state_grading_and_final_answer(tmp_path):
 
 def test_predict_captures_final_answer_on_done(tmp_path, monkeypatch):
     agent = _agent(tmp_path)
-    monkeypatch.setattr(rsa.subprocess, "run", _fake_run({
+    monkeypatch.setattr(subprocess, "run", _fake_run({
         "response": "Navigated to the answer page; finishing.",
         "final_answer": "Henry, Charles, Mason",
         "actions": [{"type": "done"}],
@@ -145,7 +147,7 @@ def test_predict_captures_final_answer_on_done(tmp_path, monkeypatch):
 
 def test_predict_falls_back_to_terminal_response_when_final_answer_missing(tmp_path, monkeypatch):
     agent = _agent(tmp_path)
-    monkeypatch.setattr(rsa.subprocess, "run", _fake_run({
+    monkeypatch.setattr(subprocess, "run", _fake_run({
         "response": "Done. The names are Henry and Charles.",
         "actions": ["DONE"],
     }))
@@ -156,7 +158,7 @@ def test_predict_falls_back_to_terminal_response_when_final_answer_missing(tmp_p
 
 def test_predict_records_fail_as_infeasible_terminal(tmp_path, monkeypatch):
     agent = _agent(tmp_path)
-    monkeypatch.setattr(rsa.subprocess, "run", _fake_run({
+    monkeypatch.setattr(subprocess, "run", _fake_run({
         "response": "Spotify cannot be installed here.",
         "final_answer": "TASK_INFEASIBLE",
         "actions": [{"type": "fail"}],
@@ -178,7 +180,7 @@ def test_predict_passes_disable_tools_to_ouroboros_cli(tmp_path, monkeypatch):
         seen["cmd"] = list(cmd)
         return SimpleNamespace(returncode=0, stdout=json.dumps({"response": "ok", "actions": ["WAIT"]}), stderr="")
 
-    monkeypatch.setattr(rsa.subprocess, "run", fake)
+    monkeypatch.setattr(subprocess, "run", fake)
     agent.predict("task", {}, max_steps=500)
     cmd = seen["cmd"]
     assert "--disable-tools" in cmd

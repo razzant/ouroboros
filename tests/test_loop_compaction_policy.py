@@ -75,7 +75,12 @@ def test_manual_request_uses_the_shared_typed_materializer(tmp_path, monkeypatch
 def test_old_main_trigger_authorities_are_deleted():
     from pathlib import Path
 
-    source = Path("ouroboros/loop.py").read_text(encoding="utf-8")
+    # v7 L-B split: the negative sweeps the whole loop family so no leaf
+    # revives a deleted trigger authority.
+    source = "".join(
+        path.read_text(encoding="utf-8")
+        for path in [Path("ouroboros/loop.py"), *sorted(Path("ouroboros").glob("loop_*.py"))]
+    )
     budget = Path("ouroboros/context_budget.py").read_text(encoding="utf-8")
     for symbol in (
         "EMERGENCY_COMPACTION_CHARS",

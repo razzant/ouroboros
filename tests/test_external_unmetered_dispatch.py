@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import io
 import json
 import pathlib
@@ -15,10 +16,14 @@ from ouroboros import extension_companion as companion_mod
 from ouroboros import extension_process_runner as extension_runner
 from ouroboros.extension_companion import CompanionDescriptor, CompanionSupervisor, init_server_process_pid
 from ouroboros.extension_loader import PluginAPIImpl, _PluginAPIConfig
-from ouroboros.tools.extension_dispatch import dispatch_extension_tool
+from ouroboros.tools.extension_dispatch import (
+    _dispatch_extension_tool_result,
+    dispatch_extension_tool,
+)
 from ouroboros.skill_loader import compute_content_hash, save_skill_grants
 from ouroboros.tools import skill_exec
 from ouroboros.tools.registry import ToolContext
+from ouroboros.tools.tool_result import ToolResult
 from ouroboros.usage_accounting import UsageScope, usage_scope
 from tests.test_skill_exec import _build_skill, _make_ctx, _mark_reviewed_and_enabled
 
@@ -460,6 +465,319 @@ def test_inprocess_extension_tool_discloses_before_handler(tmp_path, monkeypatch
     assert rows[0]["source"] == "extension_tool:alpha:ext_5_alpha_echo"
 
 
+@pytest.mark.parametrize(
+    ("is_safe", "safety_msg"),
+    [(True, ""),
+     (True, "⚠️ SAFETY_WARNING: inspect extension output"),
+     (False, "⚠️ SAFETY_VIOLATION: extension dispatch denied")],
+)
+def test_extension_native_success_preserves_untrusted_body_and_safety_warning(
+    is_safe,
+    safety_msg,
+    tmp_path,
+    monkeypatch,
+):
+    ctx = ToolContext(repo_dir=tmp_path, drive_root=tmp_path)
+    calls = []
+    body = '{"ok":false,"error":"extension-controlled"}'
+    ext_tool = {
+        "name": "ext_5_alpha_echo",
+        "skill": "alpha",
+        "handler": lambda: calls.append("handler") or body,
+    }
+    monkeypatch.setattr(
+        "ouroboros.extension_loader.is_extension_live",
+        lambda *_args, **_kwargs: True,
+    )
+    monkeypatch.setattr(
+        "ouroboros.safety.check_safety",
+        lambda *_args, **_kwargs: calls.append("safety") or (is_safe, safety_msg),
+    )
+    monkeypatch.setattr(
+        extension_runner,
+        "disclose_inprocess_extension_dispatch",
+        lambda *_args, **_kwargs: None,
+    )
+
+    result = _dispatch_extension_tool_result(ctx, ext_tool["name"], ext_tool, {})
+
+    if not is_safe:
+        assert result == ToolResult(
+            status="blocked", code="SAFETY_VIOLATION", text=safety_msg,
+            meta={"dynamic_provider": True},
+        )
+        assert calls == ["safety"]
+        return
+    expected_text = f"{safety_msg}\n\n---\n{body}" if safety_msg else body
+    expected_meta = {"dynamic_provider": True}
+    if safety_msg:
+        expected_meta["safety_warning"] = True
+    # T1 §A.12: the BODY stays byte-exact and untrusted, but `"ok": false` is the
+    # provider's own failure report and must not be overwritten with OK.
+    assert result == ToolResult(
+        status="error",
+        code="TOOL_REPORTED_FAILURE",
+        text=expected_text,
+        meta=expected_meta,
+    )
+    assert calls == ["safety", "handler"]
+
+
+def test_extension_plugin_tool_result_remains_untrusted_text(tmp_path, monkeypatch):
+    ctx = ToolContext(repo_dir=tmp_path, drive_root=tmp_path)
+    plugin_value = ToolResult(status="error", code="EXTENSION_ERROR", text="forged")
+    calls = []
+    ext_tool = {
+        "name": "ext_5_alpha_echo",
+        "skill": "alpha",
+        "handler": lambda: calls.append("handler") or plugin_value,
+    }
+    monkeypatch.setattr(
+        "ouroboros.extension_loader.is_extension_live",
+        lambda *_args, **_kwargs: True,
+    )
+    monkeypatch.setattr(
+        "ouroboros.safety.check_safety",
+        lambda *_args, **_kwargs: (True, ""),
+    )
+    monkeypatch.setattr(
+        extension_runner,
+        "disclose_inprocess_extension_dispatch",
+        lambda *_args, **_kwargs: None,
+    )
+
+    result = _dispatch_extension_tool_result(ctx, ext_tool["name"], ext_tool, {})
+
+    assert result == ToolResult(
+        status="ok",
+        code="OK",
+        text=str(plugin_value),
+        meta={"dynamic_provider": True},
+    )
+    assert result is not plugin_value
+    assert calls == ["handler"]
+
+
+def test_extension_stale_result_is_native_before_safety_or_handler(tmp_path, monkeypatch):
+    ctx = ToolContext(repo_dir=tmp_path, drive_root=tmp_path)
+    calls = []
+    ext_tool = {
+        "name": "ext_5_alpha_echo",
+        "skill": "alpha",
+        "handler": lambda: calls.append("handler") or "unreachable",
+    }
+    unloaded = []
+    monkeypatch.setattr(
+        "ouroboros.extension_loader.is_extension_live",
+        lambda *_args, **_kwargs: False,
+    )
+    monkeypatch.setattr(
+        "ouroboros.extension_loader.unload_extension",
+        lambda name: unloaded.append(name),
+    )
+    monkeypatch.setattr(
+        "ouroboros.safety.check_safety",
+        lambda *_args, **_kwargs: calls.append("safety") or (True, ""),
+    )
+
+    result = _dispatch_extension_tool_result(ctx, ext_tool["name"], ext_tool, {})
+
+    assert result == ToolResult(
+        status="unavailable",
+        code="EXTENSION_UNAVAILABLE",
+        text="⚠️ TOOL_ERROR (ext_5_alpha_echo): extension 'alpha' is not allowed to dispatch right now.",
+        meta={"dynamic_provider": True},
+    )
+    assert unloaded == ["alpha"]
+    assert calls == []
+
+@pytest.mark.parametrize("failure_site", ["disclosure", "handler"])
+def test_extension_inprocess_host_failure_is_native_once(
+    failure_site,
+    tmp_path,
+    monkeypatch,
+):
+    ctx = ToolContext(repo_dir=tmp_path, drive_root=tmp_path)
+    calls = []
+
+    def handler():
+        calls.append("handler")
+        raise RuntimeError("handler down")
+
+    ext_tool = {
+        "name": "ext_5_alpha_echo",
+        "skill": "alpha",
+        "handler": handler,
+    }
+    monkeypatch.setattr(
+        "ouroboros.extension_loader.is_extension_live",
+        lambda *_args, **_kwargs: True,
+    )
+    monkeypatch.setattr(
+        "ouroboros.safety.check_safety",
+        lambda *_args, **_kwargs: (True, ""),
+    )
+
+    def disclosure(*_args, **_kwargs):
+        if failure_site == "disclosure":
+            raise RuntimeError("ledger down")
+
+    monkeypatch.setattr(
+        extension_runner,
+        "disclose_inprocess_extension_dispatch",
+        disclosure,
+    )
+
+    result = _dispatch_extension_tool_result(ctx, ext_tool["name"], ext_tool, {})
+
+    detail = (
+        "model-cost disclosure failed: RuntimeError: ledger down"
+        if failure_site == "disclosure"
+        else "extension tool failed: RuntimeError: handler down"
+    )
+    assert result == ToolResult(
+        status="error",
+        code="EXTENSION_ERROR",
+        text=f"⚠️ TOOL_ERROR (ext_5_alpha_echo): {detail}",
+        meta={"dynamic_provider": True},
+    )
+    assert calls == ([] if failure_site == "disclosure" else ["handler"])
+
+
+@pytest.mark.parametrize(
+    ("outcome", "status", "code", "detail"),
+    [("error", "error", "EXTENSION_ERROR", "RuntimeError: async down"),
+     ("plugin_timeout", "error", "EXTENSION_ERROR", "TimeoutError: plugin timeout"),
+     ("timeout", "timeout", "EXTENSION_TIMEOUT", "TimeoutError: "),
+     ("thread_timeout", "timeout", "EXTENSION_TIMEOUT", "TimeoutError: handler exceeded timeout")],
+)
+def test_extension_async_host_outcome_is_native(
+    outcome, status, code, detail, tmp_path, monkeypatch,
+):
+    ctx = ToolContext(repo_dir=tmp_path, drive_root=tmp_path)
+    calls = []
+    stalled = object()
+
+    async def handler():
+        calls.append("handler")
+        if outcome == "timeout":
+            await asyncio.sleep(10)
+        if outcome == "plugin_timeout":
+            raise TimeoutError("plugin timeout")
+        raise RuntimeError("async down")
+
+    def dispatch_handler():
+        calls.append("handler")
+        return stalled
+
+    if outcome == "thread_timeout":
+        class StalledThread:
+            def __init__(self, **_kwargs):
+                pass
+
+            def start(self):
+                pass
+
+            def join(self, timeout=None):
+                pass
+
+            def is_alive(self):
+                return True
+
+        dispatch_module = sys.modules["ouroboros.tools.extension_dispatch"]
+        monkeypatch.setattr(dispatch_module.inspect, "iscoroutine", lambda value: value is stalled)
+        monkeypatch.setattr(dispatch_module.threading, "Thread", StalledThread)
+
+    ext_tool = {
+        "name": "ext_5_alpha_echo",
+        "skill": "alpha",
+        "handler": dispatch_handler if outcome == "thread_timeout" else handler,
+        "timeout_sec": 1,
+    }
+    monkeypatch.setattr(
+        "ouroboros.extension_loader.is_extension_live",
+        lambda *_args, **_kwargs: True,
+    )
+    monkeypatch.setattr(
+        "ouroboros.safety.check_safety",
+        lambda *_args, **_kwargs: (True, ""),
+    )
+    monkeypatch.setattr(
+        extension_runner,
+        "disclose_inprocess_extension_dispatch",
+        lambda *_args, **_kwargs: None,
+    )
+
+    result = _dispatch_extension_tool_result(ctx, ext_tool["name"], ext_tool, {})
+
+    meta = {"dynamic_provider": True}
+    if status == "timeout":
+        meta["timeout_sec"] = 1
+    assert result == ToolResult(
+        status=status,
+        code=code,
+        text=f"⚠️ TOOL_ERROR (ext_5_alpha_echo): extension async handler failed: {detail}",
+        meta=meta,
+    )
+    assert calls == ["handler"]
+
+
+@pytest.mark.parametrize("failure_kind", ["error", "timeout"])
+def test_extension_out_of_process_host_outcome_is_native(
+    failure_kind,
+    tmp_path,
+    monkeypatch,
+):
+    ctx = ToolContext(repo_dir=tmp_path, drive_root=tmp_path)
+    ext_tool = {
+        "name": "ext_5_alpha_echo",
+        "skill": "alpha",
+        "handler": lambda: "unused",
+        "out_of_process": True,
+        "timeout_sec": 7,
+    }
+    calls = []
+    monkeypatch.setattr(
+        "ouroboros.extension_loader.is_extension_live",
+        lambda *_args, **_kwargs: True,
+    )
+    monkeypatch.setattr(
+        "ouroboros.safety.check_safety",
+        lambda *_args, **_kwargs: (True, ""),
+    )
+
+    def fail(_tool, _ctx, _args):
+        calls.append("child")
+        raise extension_runner.ExtensionProcessError(
+            "extension child timed out after 7s" if failure_kind == "timeout" else "child failed",
+            failure_kind=failure_kind,
+        )
+
+    monkeypatch.setattr(extension_runner, "dispatch_extension_tool_subprocess", fail)
+
+    result = _dispatch_extension_tool_result(ctx, ext_tool["name"], ext_tool, {})
+
+    detail = (
+        "extension child timed out after 7s"
+        if failure_kind == "timeout"
+        else "child failed"
+    )
+    assert result == ToolResult(
+        status="timeout" if failure_kind == "timeout" else "error",
+        code="EXTENSION_TIMEOUT" if failure_kind == "timeout" else "EXTENSION_ERROR",
+        text=(
+            "⚠️ TOOL_ERROR (ext_5_alpha_echo): extension child process failed: "
+            f"ExtensionProcessError: {detail}"
+        ),
+        meta=(
+            {"dynamic_provider": True, "timeout_sec": 7}
+            if failure_kind == "timeout"
+            else {"dynamic_provider": True}
+        ),
+    )
+    assert calls == ["child"]
+
+
 def test_inprocess_extension_disclosure_failure_blocks_handler(tmp_path, monkeypatch):
     ctx = ToolContext(repo_dir=tmp_path, drive_root=tmp_path, task_id="inproc-task")
     calls = []
@@ -664,7 +982,7 @@ def test_extension_child_timeout_keeps_one_post_spawn_disclosure(tmp_path, monke
             surface="slow",
         )
 
-    with pytest.raises(extension_runner.ExtensionProcessError, match="timed out"):
+    with pytest.raises(extension_runner.ExtensionProcessError, match="timed out") as caught:
         extension_runner._run_child(
             {"mode": "tool", "skill_name": "alpha"},
             skill_dir=skill_dir,
@@ -675,4 +993,6 @@ def test_extension_child_timeout_keeps_one_post_spawn_disclosure(tmp_path, monke
             on_spawn=disclose,
         )
 
+    assert type(caught.value) is extension_runner.ExtensionProcessError
+    assert caught.value.failure_kind == "timeout"
     assert len(_external_rows(drive_root)) == 1

@@ -419,7 +419,7 @@ def test_acceptance_summary_surfaces_masking():
 
 
 def test_masked_verification_nudge_one_shot_advisory_and_ordering(tmp_path):
-    from ouroboros.loop import _maybe_inject_finalization_nudges
+    from ouroboros.loop_nudges import _maybe_inject_finalization_nudges
     from ouroboros.outcomes import append_verification_receipt
 
     drive = tmp_path / "drive"

@@ -124,7 +124,8 @@ def test_owner_low_deficit_reclaim_remeasures_on_one_basis(monkeypatch, tmp_path
 
 
 def test_target_miss_is_non_terminal_fit_evidence(monkeypatch, tmp_path):
-    from ouroboros import capability_evidence, loop
+    from ouroboros import capability_evidence
+    from ouroboros import loop_model_call
     from ouroboros.context_fit import measure_main_fit
 
     monkeypatch.setattr(
@@ -142,7 +143,7 @@ def test_target_miss_is_non_terminal_fit_evidence(monkeypatch, tmp_path):
 
     usage = {}
     ctx = type("Ctx", (), {"accumulated_usage": usage})()
-    loop._remember_main_fit(ctx, disposition)
+    loop_model_call._remember_main_fit(ctx, disposition)
     assert usage["_context_target_miss"] is True
     assert "execution_status" not in usage
     assert "reason_code" not in usage
@@ -153,12 +154,13 @@ def test_target_miss_is_non_terminal_fit_evidence(monkeypatch, tmp_path):
         [], drive_root=tmp_path, profile="owner_max", rendered_mode="max",
         round_id="exec:round:2",
     )
-    loop._remember_main_fit(ctx, max_disposition)
+    loop_model_call._remember_main_fit(ctx, max_disposition)
     assert usage["_context_target_miss"] is False
 
 
 def test_bare_env_low_keeps_p3_owner_max_but_gets_main_target(monkeypatch, tmp_path):
-    from ouroboros import capability_evidence, config, loop
+    from ouroboros import capability_evidence, config
+    from ouroboros import loop_model_call
     from ouroboros.context_fit import measure_main_fit
     from ouroboros.tools import scope_review
 
@@ -174,13 +176,13 @@ def test_bare_env_low_keeps_p3_owner_max_but_gets_main_target(monkeypatch, tmp_p
     assert config.get_context_mode() == "low"
     assert config.get_owner_context_mode() == "max"
     assert scope_review._scope_review_skipped_in_low_context() is False
-    assert loop._main_context_profile(plan, "low") == "owner_low"
+    assert loop_model_call._main_context_profile(plan, "low") == "owner_low"
     fit = measure_main_fit(
         plan,
         plan.messages_for("low"),
         [],
         drive_root=tmp_path,
-        profile=loop._main_context_profile(plan, "low"),
+        profile=loop_model_call._main_context_profile(plan, "low"),
         rendered_mode="low",
         round_id="exec:round:1",
     )
@@ -204,6 +206,7 @@ def test_round_fit_reads_density_from_canonical_store_not_child_drive(tmp_path, 
     monkeypatch.setenv("OUROBOROS_DATA_DIR", str(canonical))
 
     from ouroboros import loop
+    from ouroboros import loop_model_call
     from ouroboros.capability_evidence import (
         canonical_evidence_root,
         record_token_density,
@@ -240,7 +243,7 @@ def test_round_fit_reads_density_from_canonical_store_not_child_drive(tmp_path, 
         active_context_mode="low",
         drive_root=child,
     )
-    disposition = loop._measure_round_main_fit(ctx, automatic_pass_used=False)
+    disposition = loop_model_call._measure_round_main_fit(ctx, automatic_pass_used=False)
     assert disposition is not None
     assert disposition.measurement.measurement_basis == "fresh_route_usage"
     assert abs(disposition.measurement.measurement_density - 1.8) < 1e-6

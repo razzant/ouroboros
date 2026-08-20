@@ -32,36 +32,43 @@ def test_ws_queues_outbound_messages_when_disconnected():
 
 def test_chat_marks_pending_messages_until_reconnect():
     source = _read("web/modules/chat.js")
+    # The pending-bubble copy moved with addMessage into chat_history_sync.js (wave D).
+    history_sync = _read("web/modules/chat_history_sync.js")
     assert "pendingUserBubbles" in source
-    assert "Queued until reconnect" in source
+    assert "Queued until reconnect" in history_sync
     assert "result?.status === 'queued'" in source
 
 
 def test_chat_resyncs_history_after_reconnect():
-    source = _read("web/modules/chat.js")
-    assert "async function syncHistory" in source
+    # syncHistory and its fetch/disconnect handling moved to chat_history_sync.js (wave D).
+    history_sync = _read("web/modules/chat_history_sync.js")
+    assert "async function syncHistory" in history_sync
     # perf2 P3: the default history request sends NO quota params — the server's
     # window constants govern; the dead `?limit=1000` placebo is gone.
-    assert "`/api/chat/history${isMain ? '' : `?chat_id=${chatId}`}`" in source
-    assert "limit=1000" not in source
-    assert "cache: 'no-store'" in source
-    assert "syncHistory({ includeUser: !historyLoaded, fromReconnect: isReconnect })" in source
-    assert "const expectedDisconnect = socketState !== WebSocket.OPEN" in source
-    assert "if (expectedDisconnect && err instanceof TypeError)" in source
+    assert "`/api/chat/history${isMain ? '' : `?chat_id=${chatId}`}`" in history_sync
+    assert "limit=1000" not in history_sync
+    assert "limit=1000" not in _read("web/modules/chat.js")
+    assert "cache: 'no-store'" in history_sync
+    assert "syncHistory({ includeUser: !historyLoaded, fromReconnect: isReconnect })" in history_sync
+    assert "const expectedDisconnect = socketState !== WebSocket.OPEN" in history_sync
+    assert "if (expectedDisconnect && err instanceof TypeError)" in history_sync
 
 
 def test_final_answer_marker_uses_ordinary_message_presentation():
     source = _read("web/modules/chat.js")
+    # addMessage and the history replay paths moved to chat_history_sync.js (wave D).
+    history_sync = _read("web/modules/chat_history_sync.js")
     css = _read("web/style.css")
 
     assert "renderAssistantWithAnswerChip" not in source
+    assert "renderAssistantWithAnswerChip" not in history_sync
     assert "final-answer-chip" not in css
-    assert ": renderMarkdown(text));" in source
+    assert ": renderMarkdown(text));" in history_sync
     # Both live and history assistant/system paths feed the same addMessage renderer;
     # reconnect notices do too, so marker-shaped text never gets a separate capsule.
     assert "addMessage(msg.content, msg.role" in source
-    assert "addMessage(msg.text, msg.role" in source
-    assert "systemType: 'reconnect'" in source
+    assert "addMessage(msg.text, msg.role" in history_sync
+    assert "systemType: 'reconnect'" in history_sync
 
 
 def test_server_enables_ws_ping_and_heartbeat():
@@ -196,17 +203,18 @@ def test_find_free_port_raises_when_range_stays_busy(monkeypatch):
 
 def test_chat_shows_reconnect_banner_after_reconnect_and_reload():
     """chat.js should show reconnect status after both soft reconnect and restart reload."""
-    source = _read("web/modules/chat.js")
-    assert "wsHasConnectedOnce" in source, "Missing reconnect-once tracking flag"
-    assert "Reconnected" in source, "Missing reconnect banner text"
+    # The reconnect banner path moved with syncHistory into chat_history_sync.js (wave D).
+    history_sync = _read("web/modules/chat_history_sync.js")
+    assert "wsHasConnectedOnce" in history_sync, "Missing reconnect-once tracking flag"
+    assert "Reconnected" in history_sync, "Missing reconnect banner text"
     # reconnectBannerText moved verbatim to chat_activity.js (chat.js byte ceiling).
     assert "Restart complete" in _read("web/modules/chat_activity.js"), (
         "Missing restart-complete banner text"
     )
-    assert "_ouro_reason" in source, "Missing restart reload reason handling"
-    assert "history.replaceState" in source, "Reconnect params should be cleared after showing banner"
+    assert "_ouro_reason" in history_sync, "Missing restart reload reason handling"
+    assert "history.replaceState" in history_sync, "Reconnect params should be cleared after showing banner"
     # Ensure banner is ephemeral (not persisted to history)
-    assert "ephemeral: true" in source
+    assert "ephemeral: true" in history_sync
 
 
 def test_progress_bubbles_have_subdued_styling():
@@ -227,11 +235,12 @@ def test_working_live_cards_are_subdued_and_expandable():
 
 def test_live_card_blocks_can_expand_to_full_text():
     """chat.js should preserve expansion state and render per-block toggles."""
-    source = _read("web/modules/chat.js")
-    assert "expandedLineKeys" in source, "Missing per-line expansion state"
-    assert "data-live-line-toggle" in source, "Missing per-block toggle markup"
-    assert "fullHeadline" in source, "Missing full headline preservation"
-    assert "fullBody" in source, "Missing full body preservation"
+    # Live-card expansion state moved to chat_live_cards.js (wave D).
+    live_cards = _read("web/modules/chat_live_cards.js")
+    assert "expandedLineKeys" in live_cards, "Missing per-line expansion state"
+    assert "data-live-line-toggle" in live_cards, "Missing per-block toggle markup"
+    assert "fullHeadline" in live_cards, "Missing full headline preservation"
+    assert "fullBody" in live_cards, "Missing full body preservation"
 
 
 def test_live_event_summaries_preserve_full_text_for_expansion():
@@ -261,18 +270,21 @@ def test_task_done_live_summary_distinguishes_typed_failure():
 
 
 def test_chat_warning_task_summaries_force_visible_cards():
-    source = _read("web/modules/chat.js")
-    assert "summary.terminal && summary.phase === 'warn'" in source
+    # The buffered-card reveal predicate moved to chat_live_cards.js; the
+    # needs-visible-terminal filter moved with history replay (wave D).
+    live_cards = _read("web/modules/chat_live_cards.js")
+    assert "summary.terminal && summary.phase === 'warn'" in live_cards
     assert (
         "const needsVisibleTerminal = severity === 'error' || severity === 'warn'"
         " || severity === 'cancelled';"
-    ) in source
+    ) in _read("web/modules/chat_history_sync.js")
 
 
 def test_chat_scrolls_to_bottom_after_first_history_load():
     """syncHistory must scroll to bottom on first load (restart/open) but
     respect user scroll position on subsequent reconnect syncs."""
-    source = _read("web/modules/chat.js")
+    # syncHistory and its scroll policy moved to chat_history_sync.js (wave D).
+    source = _read("web/modules/chat_history_sync.js")
     # First-load guard: wasFirstLoad captures pre-call state
     assert "wasFirstLoad = !historyLoaded" in source, \
         "Missing first-load detection before setting historyLoaded"
@@ -282,17 +294,21 @@ def test_chat_scrolls_to_bottom_after_first_history_load():
     assert "anchor: captureVisibleTimelineAnchor()" in source
     assert "restoreVisibleTimelineAnchor(scrollBeforeSync.anchor)" in source, \
         "Reconnect must restore a visible DOM anchor, not apply total height growth"
-    assert "taskId: card.dataset?.taskId || ''" in source, \
+    # The anchor pair is owned by web/modules/chat_timeline_anchor.js; the
+    # behavioural counterparts live in web/tests/timeline_anchor.test.js.
+    anchors = _read("web/modules/chat_timeline_anchor.js")
+    assert "taskId: card.dataset?.taskId || ''" in anchors, \
         "Nested viewport anchors must retain stable task identity"
-    assert "liveCardRecords.get(entry.taskId)" in source, \
+    assert "liveCardRecords.get(entry.taskId)" in anchors, \
         "A rebuilt live card whose earliest timestamp changed needs canonical task lookup"
-    assert "reorderExisting: anchorMovedEarlier" in source, \
+    live_cards = _read("web/modules/chat_live_cards.js")
+    assert "reorderExisting: anchorMovedEarlier" in live_cards, \
         "A mounted task card must be re-sorted if a later event lowers its anchor"
-    assert "record._anchorOrderDirty = true;" in source
+    assert "record._anchorOrderDirty = true;" in live_cards
     assert "reorderDirtyCardIfNeeded(rec);" in source, \
         "Pass 2 must re-sort connected cards dirtied by routine history sync"
-    assert "const parent = liveCardRecords.get(record.parentGroupId);" in source
-    assert "seen.has(record.groupId)" in source, \
+    assert "const parent = liveCardRecords.get(record.parentGroupId);" in live_cards
+    assert "seen.has(record.groupId)" in live_cards, \
         "Nested subagent timestamps must propagate to the top-level ancestor safely"
     assert "messagesDiv.scrollTop = messagesDiv.scrollHeight" in source
     # Pin the chronological insertion call-site: a revert to plain append would
@@ -301,7 +317,13 @@ def test_chat_scrolls_to_bottom_after_first_history_load():
         "insertMessageNode must route through chronological insertTimelineNode"
     # Media producers (photo, video, document) must each stamp sortable
     # data-ts from the raw source timestamp; text bubbles stamp msg.ts.
-    assert source.count("stampNodeTimestamp(bubble, rawTs);") >= 3, \
+    # photo/video bubble bodies moved to chat_media_bubbles.js (wave D).
+    media_stamps = _read("web/modules/chat_media_bubbles.js").count(
+        "stampNodeTimestamp(bubble, rawTs);"
+    ) + _read(
+        "web/modules/chat_document_bubble.js"
+    ).count("stampNodeTimestamp(bubble, rawTs);")
+    assert media_stamps >= 3, \
         "photo/video/document bubbles must carry raw-timestamp data-ts"
     assert "stampNodeTimestamp(bubble, ts);" in source, \
         "chat text bubbles must carry raw-timestamp data-ts"

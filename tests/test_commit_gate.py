@@ -33,8 +33,9 @@ def _get_git_module():
     return importlib.import_module("ouroboros.tools.git")
 
 
-def _get_registry_module():
-    return importlib.import_module("ouroboros.tools.registry")
+def _get_git_review_cycle_module():
+    """Owner of the non-committing review cycle these tests drive."""
+    return importlib.import_module("ouroboros.tools.git_review_cycle")
 
 
 def _get_git_ops_module():
@@ -128,7 +129,7 @@ def test_tests_preflight_block_recorded_with_preflight_phase():
     record to "blocking_review" and the identical-diff cap would count a flaky
     test failure as a review verdict (inflating the streak same-task) or break
     the streak from a new task (empty inherited fingerprint)."""
-    git_mod = _get_git_module()
+    git_mod = _get_git_review_cycle_module()
     source = inspect.getsource(git_mod)
     idx = source.find('block_reason="tests_preflight_blocked"')
     assert idx != -1
@@ -138,8 +139,8 @@ def test_tests_preflight_block_recorded_with_preflight_phase():
 
 
 def test_blocked_attempt_cap_ignores_tests_preflight_blocks(tmp_path, monkeypatch):
-    """A tests-preflight block recorded the way ouroboros/tools/git.py records
-    it (block_reason=tests_preflight_blocked, phase=preflight) neither inflates
+    """A tests-preflight block recorded the way ouroboros/tools/git_review_cycle.py
+    records it (block_reason=tests_preflight_blocked, phase=preflight) neither inflates
     nor resets the identical-diff streak — in BOTH directions: same-task with
     an inherited fingerprint, and new-task with an empty fingerprint."""
     import pathlib
@@ -203,7 +204,7 @@ def test_non_committing_review_cycle_exists_and_reuses_shared_stage_cycle():
 
 
 def test_non_committing_review_cycle_runtime_unstages_on_success(monkeypatch):
-    git_mod = _get_git_module()
+    git_mod = _get_git_review_cycle_module()
     reset_calls = []
     recorded = []
     released = []
@@ -246,7 +247,7 @@ def test_non_committing_review_cycle_runtime_unstages_on_success(monkeypatch):
 
 
 def test_non_committing_review_cycle_runtime_unstages_on_block(monkeypatch):
-    git_mod = _get_git_module()
+    git_mod = _get_git_review_cycle_module()
     reset_calls = []
     released = []
 
@@ -356,9 +357,10 @@ def test_configure_remote_uses_clean_url():
 # --- CORE_TOOL_NAMES ---
 
 def test_new_tools_in_core_tool_names():
-    registry = _get_registry_module()
+    from ouroboros.tool_capabilities import CORE_TOOL_NAMES
+
     for name in ("vcs_pull_ff", "vcs_restore", "vcs_revert"):
-        assert name in registry.CORE_TOOL_NAMES, (
+        assert name in CORE_TOOL_NAMES, (
             f"{name} must be in CORE_TOOL_NAMES"
         )
 

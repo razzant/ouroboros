@@ -48,7 +48,7 @@ class _FakeCtx:
     "deep_review.md",
 ])
 def test_repo_read_memory_artifact_returns_hint(tmp_path, name):
-    from ouroboros.tools.core import _repo_read
+    from ouroboros.tools.core_file_tools import _repo_read
 
     ctx = _FakeCtx(
         repo_dir=tmp_path / "repo",
@@ -67,7 +67,7 @@ def test_repo_read_memory_artifact_returns_hint(tmp_path, name):
 
 def test_repo_read_normal_file_unchanged(tmp_path):
     """Non-memory files at repo root behave normally."""
-    from ouroboros.tools.core import _repo_read
+    from ouroboros.tools.core_file_tools import _repo_read
 
     ctx = _FakeCtx(
         repo_dir=tmp_path / "repo",
@@ -88,7 +88,7 @@ def test_repo_read_normal_file_unchanged(tmp_path):
 ])
 def test_repo_read_real_memory_named_file_at_repo_root_wins(tmp_path, name):
     """The friendly hint is only for missing files, not real repo files."""
-    from ouroboros.tools.core import _repo_read
+    from ouroboros.tools.core_file_tools import _repo_read
 
     ctx = _FakeCtx(
         repo_dir=tmp_path / "repo",
@@ -109,7 +109,7 @@ def test_repo_read_real_memory_named_file_at_repo_root_wins(tmp_path, name):
 ])
 def test_repo_read_memory_hint_does_not_claim_artifact_is_loaded(tmp_path, name):
     """Hints for partial/not-always-loaded artifacts must not discourage raw reads."""
-    from ouroboros.tools.core import _repo_read
+    from ouroboros.tools.core_file_tools import _repo_read
 
     ctx = _FakeCtx(
         repo_dir=tmp_path / "repo",
@@ -127,7 +127,7 @@ def test_repo_read_memory_hint_does_not_claim_artifact_is_loaded(tmp_path, name)
 def test_repo_read_subdirectory_path_unchanged(tmp_path):
     """Memory artifact requested with a directory prefix is treated as a
     regular request — only bare-name lookups at repo root trigger the hint."""
-    from ouroboros.tools.core import _repo_read
+    from ouroboros.tools.core_file_tools import _repo_read
 
     ctx = _FakeCtx(
         repo_dir=tmp_path / "repo",
@@ -150,7 +150,7 @@ def test_data_read_strips_tmp_data_prefix(tmp_path):
     """When the agent (or operator) passes the full ``.tmp-data-XXX/data/
     memory/identity.md`` path, drive_path() would double it. Strip the
     prefix and resolve correctly."""
-    from ouroboros.tools.core import _data_read
+    from ouroboros.tools.core_file_tools import _data_read
 
     drive = tmp_path / ".tmp-data-test" / "data"
     drive.mkdir(parents=True, exist_ok=True)
@@ -169,7 +169,7 @@ def test_data_read_strips_tmp_data_prefix(tmp_path):
 
 def test_data_read_strips_absolute_drive_prefix(tmp_path):
     """Same idea but the agent passes the full absolute path."""
-    from ouroboros.tools.core import _data_read
+    from ouroboros.tools.core_file_tools import _data_read
 
     drive = tmp_path / "data"
     drive.mkdir(parents=True, exist_ok=True)
@@ -188,7 +188,7 @@ def test_data_read_strips_absolute_drive_prefix(tmp_path):
 
 def test_data_read_normal_relative_path_unchanged(tmp_path):
     """The well-formed call ``data_read('memory/identity.md')`` must still work."""
-    from ouroboros.tools.core import _data_read
+    from ouroboros.tools.core_file_tools import _data_read
 
     drive = tmp_path / "data"
     drive.mkdir(parents=True, exist_ok=True)
@@ -205,7 +205,7 @@ def test_data_read_normal_relative_path_unchanged(tmp_path):
 
 def test_data_read_missing_memory_path_returns_sentinel(tmp_path):
     """Missing memory paths get the cold-start sentinel, not raw ENOENT."""
-    from ouroboros.tools.core import _data_read
+    from ouroboros.tools.core_file_tools import _data_read
 
     drive = tmp_path / "data"
     drive.mkdir(parents=True, exist_ok=True)
@@ -222,7 +222,7 @@ def test_data_read_missing_memory_path_returns_sentinel(tmp_path):
 
 def test_data_read_missing_non_memory_path_uses_narrower_sentinel(tmp_path):
     """Non-memory paths should not overclaim lazy creation."""
-    from ouroboros.tools.core import _data_read
+    from ouroboros.tools.core_file_tools import _data_read
 
     drive = tmp_path / "data"
     drive.mkdir(parents=True, exist_ok=True)

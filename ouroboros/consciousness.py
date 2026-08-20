@@ -628,7 +628,7 @@ class BackgroundConsciousness:
         def _run_tool():
             nonlocal result, error
             try:
-                result = self._registry.execute(fn_name, args)
+                result = self._registry.execute_result(fn_name, args).text
             except Exception as e:
                 error = e
 

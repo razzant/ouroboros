@@ -67,7 +67,9 @@ def test_files_pdf_preview_and_download_bridge_are_safe():
 
 
 def test_chat_document_bubble_opens_externally_and_downloads_separately():
-    chat = _read("web/modules/chat.js")
+    # The document bubble is owned by web/modules/chat_document_bubble.js; its
+    # behavioural counterpart is web/tests/document_bubble.test.js.
+    chat = _read("web/modules/chat_document_bubble.js")
     helper = _read("web/modules/ui_helpers.js")
     launcher = _read("launcher.py")
     css = _read("web/style.css")

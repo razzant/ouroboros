@@ -105,7 +105,10 @@ def test_project_rows_use_slots_not_generic_spans():
 def test_project_panel_composer_and_welcome_contracts():
     chat_js = _read("web/modules/chat.js")
     css = _read("web/style.css")
-    assert "if (!isMain) return;" in chat_js  # ensureWelcomeMessage is main-only
+    # ensureWelcomeMessage moved to chat_history_sync.js (wave D).
+    assert "if (!isMain) return;" in _read(
+        "web/modules/chat_history_sync.js"
+    )  # ensureWelcomeMessage is main-only
     assert "padding: 10px 292px" not in css
     assert "right: 8px;\n    bottom: 6px" not in css
     assert ".chat-text-row:focus-within" in css
@@ -120,9 +123,9 @@ def test_project_panel_composer_and_welcome_contracts():
     assert ".project-panel.open" in css
     assert "left: var(--sidebar-width);" in css  # sidebar stays clickable under backdrop
     assert ".chat-header-actions {\n        display: none;" not in css
-    # Gateway Boundary: chat.js consumes the endpoint via the api_client wrapper,
-    # and the raw route lives in api_client.js (not a raw fetch in chat.js).
-    assert "projectFromTask" in chat_js
+    # Gateway Boundary: the conversion owner consumes the endpoint via the
+    # api_client wrapper, and the raw route lives in api_client.js (not a raw fetch).
+    assert "projectFromTask" in _read("web/modules/chat_card_actions.js")
     assert "/api/projects/from-task" in _read("web/modules/api_client.js")
 
 

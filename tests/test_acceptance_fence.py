@@ -9,6 +9,7 @@ import pytest
 
 
 def _isolated_queue(monkeypatch, tmp_path):
+    from supervisor import state as state_mod
     from supervisor import queue as queue_mod
 
     pending = []
@@ -16,7 +17,7 @@ def _isolated_queue(monkeypatch, tmp_path):
     queue_mod.init_queue_refs(pending, running, {"value": 0})
     queue_mod.ACCEPTANCE_FENCES.clear()
     monkeypatch.setattr(queue_mod, "DRIVE_ROOT", tmp_path)
-    monkeypatch.setattr(queue_mod, "QUEUE_SNAPSHOT_PATH", tmp_path / "state" / "queue_snapshot.json")
+    monkeypatch.setattr(state_mod, "QUEUE_SNAPSHOT_PATH", tmp_path / "state" / "queue_snapshot.json")
     return queue_mod, pending
 
 

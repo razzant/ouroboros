@@ -163,7 +163,7 @@ def acknowledge_staged_output_read(ctx: ToolContext, target: Any, content: str,
     """
     try:
         from ouroboros.tool_access import resource_root_path
-        from ouroboros.tools.core import _coerce_line_window, _coerce_start_char
+        from ouroboros.tools.core_file_tools import _coerce_line_window, _coerce_start_char
 
         path = pathlib.Path(target)
         artifact_dir = (resource_root_path(ctx, "task_drive") / _ARTIFACT_SUBDIR).resolve(strict=False)

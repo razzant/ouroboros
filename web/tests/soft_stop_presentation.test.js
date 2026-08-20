@@ -16,8 +16,10 @@ import {
     taskStoppedWithSummary,
     taskTerminalPhase,
 } from '../modules/log_events.js';
+import { createMessageIdentity } from '../modules/chat_message_identity.js';
 
 const chat = readFileSync(new URL('../modules/chat.js', import.meta.url), 'utf8');
+const messageIdentity = readFileSync(new URL('../modules/chat_message_identity.js', import.meta.url), 'utf8');
 
 // The terminal frame shape a soft-stopped task actually publishes: best_effort
 // execution (the generic warn trigger) plus the typed owner-requested reason.
@@ -70,12 +72,14 @@ test('an expiry kill still reads Cancelled — honesty outranks the soft-stop la
 test('the chat.js terminal seam consumes the shared soft-stop branch', () => {
     // Pinned at source: the live-card done headline branches through the SAME
     // shared predicate/constants (no divergent inline string), and the details
-    // panel body carries the owner-request marker.
-    assert.match(chat, /taskStoppedWithSummary\(msg \|\| \{\}\)/);
-    assert.match(chat, /\? OWNER_STOP_DONE_HEADLINE/);
-    assert.match(chat, /softStopped \? OWNER_STOP_DETAIL_MARKER : ''/);
-    assert.match(chat, /\[softStopDetail, reviewDetails\]\.filter\(Boolean\)\.join\('\\n'\)/);
-    assert.match(chat, /visible: Boolean\(softStopDetail \|\| reviewDetails\)/);
+    // panel body carries the owner-request marker. The seam moved with
+    // appendTaskSummaryToLiveCard into the task-frame router (W3 wave D).
+    const frames = readFileSync(new URL('../modules/chat_task_frames.js', import.meta.url), 'utf8');
+    assert.match(frames, /taskStoppedWithSummary\(msg \|\| \{\}\)/);
+    assert.match(frames, /\? OWNER_STOP_DONE_HEADLINE/);
+    assert.match(frames, /softStopped \? OWNER_STOP_DETAIL_MARKER : ''/);
+    assert.match(frames, /\[softStopDetail, reviewDetails\]\.filter\(Boolean\)\.join\('\\n'\)/);
+    assert.match(frames, /visible: Boolean\(softStopDetail \|\| reviewDetails\)/);
 });
 
 // --- MINOR 7 (Q4): cancel_receipt rendered as 📋 System, not assistant ---
@@ -85,7 +89,12 @@ test('a system cancel_receipt row renders the 📋 System sender label', () => {
     // (supervisor/terminal_delivery.py). getSenderLabel has no special case for
     // it, so it must fall through to the generic system label — pin the branch
     // so a future mapping cannot silently restyle receipts as assistant text.
-    const senderFn = chat.slice(chat.indexOf('function getSenderLabel'));
+    // getSenderLabel is owned by web/modules/chat_message_identity.js.
+    const { getSenderLabel } = createMessageIdentity({
+        chatSessionId: 'session-a', seenMessageKeys: new Set(), messageKeyOrder: [],
+    });
+    assert.equal(getSenderLabel('system', false, 'cancel_receipt'), '📋 System');
+    const senderFn = messageIdentity.slice(messageIdentity.indexOf('function getSenderLabel'));
     const systemBranch = senderFn.slice(0, senderFn.indexOf("if (isProgress)"));
     assert.match(systemBranch, /if \(role === 'system'\) \{/);
     assert.match(systemBranch, /return '📋 System';/);
@@ -97,8 +106,10 @@ test('the bubble keeps the system style class and the system_type marker', () =>
     // Rendered style, not just transported role: the bubble class is derived
     // from the role (`chat-bubble system`, never the assistant class), and the
     // system_type lands on the dataset for targeted styling.
-    assert.match(chat, /bubble\.className = `chat-bubble \$\{role\}`/);
-    assert.match(chat, /if \(systemType\) bubble\.dataset\.systemType = systemType;/);
+    // addMessage and the history replay moved with the feed owner (W3 wave D).
+    const feed = readFileSync(new URL('../modules/chat_history_sync.js', import.meta.url), 'utf8');
+    assert.match(feed, /bubble\.className = `chat-bubble \$\{role\}`/);
+    assert.match(feed, /if \(systemType\) bubble\.dataset\.systemType = systemType;/);
     // History replay forwards system_type through to the renderer.
-    assert.match(chat, /systemType: msg\.system_type \|\| ''/);
+    assert.match(feed, /systemType: msg\.system_type \|\| ''/);
 });

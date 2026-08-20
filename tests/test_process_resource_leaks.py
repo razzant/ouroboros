@@ -109,10 +109,10 @@ def test_remove_subagent_drive_does_not_promote_custom_late_result(tmp_path):
 
 
 def test_cancel_running_subagent_removes_drive_source():
-    # The cancellation custody family lives in task_lifecycle; its settlement
-    # PUBLICATION half (where the drive cleanup runs) was split into
+    # The cancellation custody family lives in supervisor/cancel_custody.py; its
+    # settlement PUBLICATION half (where the drive cleanup runs) was split into
     # supervisor/cancel_publication.py at the module-size boundary.
-    custody_src = _read("supervisor/task_lifecycle.py")
+    custody_src = _read("supervisor/cancel_custody.py")
     publish_src = _read("supervisor/cancel_publication.py")
     assert "remove_subagent_task_drive(q.DRIVE_ROOT, str(task_id))" in publish_src
     assert "delegation_role" in publish_src  # gated on subagent role
@@ -186,7 +186,8 @@ def test_record_worker_pids_roundtrip(tmp_path, monkeypatch):
 # ───────────────────── #4/#6 + #7: source contracts ─────────────────────────
 
 def test_respawn_closes_old_queue_under_lock():
-    src = _read("supervisor/workers.py")
+    # respawn moved to the pool-lifecycle owner; the pool still spawns.
+    src = _read("supervisor/worker_pool_lifecycle.py")
     assert "with _queue_lock:" in src
     assert "old.in_q.close()" in src
     assert "old.in_q.cancel_join_thread()" in src
@@ -197,7 +198,7 @@ def test_spawn_reaps_orphans_and_records_pids():
     assert "reap_orphaned_workers()" in src
     assert "_record_worker_pids()" in src
     # reap guards against PID reuse and only group-kills its own setsid session
-    assert "if pgid and pgid == pid:" in src
+    assert "if pgid and pgid == pid:" in _read("supervisor/worker_pool_lifecycle.py")
 
 
 def test_emergency_cleanup_joins_children():

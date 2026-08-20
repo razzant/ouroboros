@@ -3,6 +3,13 @@
 import { apiFetch } from './api_client.js';
 export { fetchJson } from './api_client.js';
 
+/** Convert a raw source timestamp to sortable epoch milliseconds. */
+export function rawTimestampEpoch(raw) {
+    if (raw == null || raw === '') return NaN;
+    const epoch = typeof raw === 'number' ? raw : Date.parse(String(raw));
+    return Number.isFinite(epoch) ? epoch : NaN;
+}
+
 export function escapeHtmlText(text) {
     const div = document.createElement('div');
     div.textContent = text;

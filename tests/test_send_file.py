@@ -2,8 +2,8 @@
 import base64
 import types
 
-from ouroboros.tools.core import _send_file, _detect_document_mime, _MAX_DOCUMENT_FILE_BYTES
 from ouroboros.gateway.files import download_url_for_local_file
+from ouroboros.tools import core_artifacts
 
 
 def _make_ctx(chat_id=123, drive_root=None):
@@ -22,7 +22,9 @@ class TestSendFile:
         doc.write_text("a,b,c\n1,2,3\n", encoding="utf-8")
 
         ctx = _make_ctx()
-        result = _send_file(ctx, file_path=str(doc), caption="quarterly report")
+        result = core_artifacts._send_file(
+            ctx, file_path=str(doc), caption="quarterly report"
+        )
 
         assert "OK" in result
         assert len(ctx.pending_events) == 1
@@ -38,7 +40,7 @@ class TestSendFile:
         blob.write_bytes(b"\x00\x01\x02\x03")
 
         ctx = _make_ctx()
-        result = _send_file(ctx, file_path=str(blob))
+        result = core_artifacts._send_file(ctx, file_path=str(blob))
 
         assert "OK" in result
         assert ctx.pending_events[0]["mime"] == "application/octet-stream"
@@ -48,7 +50,7 @@ class TestSendFile:
         doc.write_text("hi", encoding="utf-8")
 
         ctx = _make_ctx(chat_id=0)
-        result = _send_file(ctx, file_path=str(doc))
+        result = core_artifacts._send_file(ctx, file_path=str(doc))
 
         assert "OK" in result
         assert ctx.pending_events[0]["chat_id"] == 0
@@ -58,33 +60,33 @@ class TestSendFile:
         doc.write_text("hi", encoding="utf-8")
 
         ctx = _make_ctx(chat_id=None)
-        result = _send_file(ctx, file_path=str(doc))
+        result = core_artifacts._send_file(ctx, file_path=str(doc))
 
         assert "no active chat" in result.lower()
         assert ctx.pending_events == []
 
     def test_file_not_found(self):
         ctx = _make_ctx()
-        result = _send_file(ctx, file_path="/nonexistent/report.pdf")
+        result = core_artifacts._send_file(ctx, file_path="/nonexistent/report.pdf")
         assert "not found" in result.lower()
 
     def test_directory_is_rejected(self, tmp_path):
         ctx = _make_ctx()
-        result = _send_file(ctx, file_path=str(tmp_path))
+        result = core_artifacts._send_file(ctx, file_path=str(tmp_path))
         assert "not found" in result.lower()
         assert ctx.pending_events == []
 
     def test_file_too_large(self, tmp_path):
         big = tmp_path / "huge.bin"
-        big.write_bytes(b"\x00" * (_MAX_DOCUMENT_FILE_BYTES + 1))
+        big.write_bytes(b"\x00" * (core_artifacts._MAX_DOCUMENT_FILE_BYTES + 1))
 
         ctx = _make_ctx()
-        result = _send_file(ctx, file_path=str(big))
+        result = core_artifacts._send_file(ctx, file_path=str(big))
         assert "too large" in result.lower()
 
     def test_no_input_returns_error(self):
         ctx = _make_ctx()
-        result = _send_file(ctx)
+        result = core_artifacts._send_file(ctx)
         assert "provide" in result.lower()
 
     def test_event_carries_download_url_from_durable_artifact(self, tmp_path, monkeypatch):
@@ -95,7 +97,7 @@ class TestSendFile:
         doc.write_bytes(b"%PDF-1.4 test")
 
         ctx = _make_ctx(drive_root=tmp_path)
-        result = _send_file(ctx, file_path=str(doc), caption="q4")
+        result = core_artifacts._send_file(ctx, file_path=str(doc), caption="q4")
 
         assert "OK" in result
         event = ctx.pending_events[0]
@@ -112,7 +114,7 @@ class TestSendFile:
         doc.write_text("x", encoding="utf-8")
 
         ctx = _make_ctx(drive_root=tmp_path / "drive")
-        result = _send_file(ctx, file_path=str(doc))
+        result = core_artifacts._send_file(ctx, file_path=str(doc))
 
         assert "OK" in result
         assert ctx.pending_events[0]["download_url"] == ""
@@ -139,10 +141,12 @@ class TestDownloadUrlForLocalFile:
 
 class TestDetectDocumentMime:
     def test_pdf_extension(self):
-        assert _detect_document_mime("report.pdf") == "application/pdf"
+        assert core_artifacts._detect_document_mime("report.pdf") == "application/pdf"
 
     def test_csv_extension(self):
-        assert _detect_document_mime("data.csv") == "text/csv"
+        assert core_artifacts._detect_document_mime("data.csv") == "text/csv"
 
     def test_unknown_extension(self):
-        assert _detect_document_mime("blob.unknownext") == "application/octet-stream"
+        assert core_artifacts._detect_document_mime(
+            "blob.unknownext"
+        ) == "application/octet-stream"

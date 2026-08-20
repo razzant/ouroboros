@@ -1,6 +1,9 @@
 from __future__ import annotations
 
+import inspect
 import pathlib
+from dataclasses import FrozenInstanceError
+from types import SimpleNamespace
 
 import pytest
 
@@ -19,6 +22,161 @@ _EXPECTED_TOP_LEVEL_POLICY = {
     "subagent_projects": {"read", "list", "search"},
     "deliverables": {"read", "list", "search"},
 }
+
+
+def test_registry_tool_resolution_owner_facades_preserve_identity():
+    from ouroboros.tools import registry, tool_resolution
+
+    names = (
+        "_coerce_real_path",
+        "active_repo_dir_for",
+        "system_repo_dir_for",
+        "_PATH_NORMALIZED_TOOLS",
+        "_normalize_dispatch_path_args",
+        "_GENERIC_VCS_TARGET_TOOLS",
+        "_TARGET_BINDING_OPERATIONS",
+        "_SKILL_LIFECYCLE_TARGET_TOOLS",
+        "_PROCESS_TARGET_TOOLS",
+        "_VERIFY_RUN_KINDS",
+        "_target_binding_operation",
+        "_build_builtin_target_binding",
+        "_binding_items",
+        "_binding_set_targets_system_repo",
+        "_binding_set_is_light_restricted",
+        "_binding_state_drive_root",
+    )
+    for name in names:
+        assert getattr(registry, name) is getattr(tool_resolution, name)
+
+    callables = {
+        "_coerce_real_path": "(value: 'Any') -> 'pathlib.Path | None'",
+        "active_repo_dir_for": "(ctx: 'Any') -> 'pathlib.Path'",
+        "system_repo_dir_for": "(ctx: 'Any') -> 'pathlib.Path'",
+        "_normalize_dispatch_path_args": "(ctx: 'Any', name: 'str', args: 'Dict[str, Any]') -> 'str'",
+        "_target_binding_operation": "(name: 'str', args: 'dict[str, Any]') -> 'str | None'",
+        "_build_builtin_target_binding": "(ctx: 'Any', name: 'str', args: 'dict[str, Any]') -> 'Any'",
+        "_binding_items": "(binding: 'Any') -> 'tuple[Any, ...]'",
+        "_binding_set_targets_system_repo": "(ctx: 'Any', binding: 'Any') -> 'bool'",
+        "_binding_set_is_light_restricted": "(ctx: 'Any', binding: 'Any') -> 'bool'",
+        "_binding_state_drive_root": "(ctx: 'Any', binding: 'Any') -> 'pathlib.Path'",
+    }
+    assert {
+        name: str(inspect.signature(getattr(tool_resolution, name)))
+        for name in callables
+    } == callables
+
+
+def test_dispatch_path_normalization_typed_fact_and_compatibility_projection(tmp_path):
+    from ouroboros.tools import tool_resolution
+
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    target = workspace / "src" / "x.py"
+    ctx = SimpleNamespace(
+        repo_dir=workspace,
+        active_repo_dir=lambda: workspace,
+    )
+
+    no_hit_args = {"root": "user_files", "path": "notes.txt"}
+    no_hit = tool_resolution._normalize_dispatch_path_args_result(
+        ctx,
+        "read_file",
+        no_hit_args,
+    )
+    assert no_hit == tool_resolution._DispatchPathNormalization()
+    assert no_hit_args == {"root": "user_files", "path": "notes.txt"}
+
+    read_text = (
+        "⚠️ AUTO_ROUTED_TO_ACTIVE_WORKSPACE: absolute path "
+        f"{str(target)!r} is under the active workspace; the call ran with "
+        "root='active_workspace'. Pass root='active_workspace' directly for "
+        "workspace paths."
+    )
+    read_args = {"root": "user_files", "path": str(target)}
+    read_result = tool_resolution._normalize_dispatch_path_args_result(
+        ctx,
+        "read_file",
+        read_args,
+    )
+    assert read_result == tool_resolution._DispatchPathNormalization(text=read_text)
+    assert read_args == {"root": "active_workspace", "path": "src/x.py"}
+
+    compat_read_args = {"root": "user_files", "path": str(target)}
+    assert (
+        tool_resolution._normalize_dispatch_path_args(
+            ctx,
+            "read_file",
+            compat_read_args,
+        )
+        == read_text
+    )
+    assert compat_read_args == read_args
+
+    write_text = (
+        "⚠️ ROOT_REQUIRED_ACTIVE_WORKSPACE: absolute path "
+        f"{str(target)!r} is under the active workspace, but root='user_files' does not "
+        "write there. Retry the same call with root='active_workspace' (the same "
+        "path is accepted)."
+    )
+    write_args = {"root": "user_files", "path": str(target)}
+    write_result = tool_resolution._normalize_dispatch_path_args_result(
+        ctx,
+        "write_file",
+        write_args,
+    )
+    assert write_result == tool_resolution._DispatchPathNormalization(
+        text=write_text,
+        required_root="active_workspace",
+    )
+    assert write_args == {"root": "user_files", "path": str(target)}
+
+    compat_write_args = dict(write_args)
+    assert (
+        tool_resolution._normalize_dispatch_path_args(
+            ctx,
+            "write_file",
+            compat_write_args,
+        )
+        == write_text
+    )
+    assert compat_write_args == write_args
+
+    with pytest.raises(FrozenInstanceError):
+        write_result.required_root = None
+
+
+def test_binding_set_projections_preserve_ordered_all_member_semantics(tmp_path, monkeypatch):
+    from ouroboros.tools import tool_resolution
+
+    ctx = SimpleNamespace(drive_root=tmp_path / "ctx-drive")
+    first = SimpleNamespace(
+        targets_system=True,
+        root="runtime_data",
+        source="runtime_data",
+        state_drive_root=tmp_path / "first-drive",
+    )
+    second = SimpleNamespace(
+        targets_system=False,
+        root="user_files",
+        source="user_files",
+        state_drive_root=tmp_path / "second-drive",
+    )
+    pair = (first, second)
+    monkeypatch.setattr(
+        tool_resolution,
+        "binding_targets_system_repo",
+        lambda _ctx, item: item.targets_system,
+    )
+
+    assert tool_resolution._binding_items(None) == ()
+    assert tool_resolution._binding_items(first) == (first,)
+    assert tool_resolution._binding_items(pair) is pair
+    assert tool_resolution._binding_set_targets_system_repo(ctx, first) is True
+    assert tool_resolution._binding_set_targets_system_repo(ctx, pair) is False
+    assert tool_resolution._binding_set_is_light_restricted(ctx, first) is True
+    assert tool_resolution._binding_set_is_light_restricted(ctx, pair) is False
+    assert tool_resolution._binding_state_drive_root(ctx, pair) == first.state_drive_root
+    assert tool_resolution._binding_state_drive_root(ctx, None) == ctx.drive_root
 
 
 def test_ordinary_top_level_presets_share_one_exact_principal_matrix():
@@ -209,7 +367,7 @@ def test_binding_synthesizes_only_manifest_first_external_write_target(tmp_path)
 
 def test_registry_builds_once_and_injects_the_same_private_object(tmp_path, monkeypatch):
     import ouroboros.safety as safety
-    import ouroboros.tools.registry as registry_module
+    import ouroboros.tools.tool_resolution as resolution_module
 
     repo = tmp_path / "repo"
     data = tmp_path / "data"
@@ -217,7 +375,7 @@ def test_registry_builds_once_and_injects_the_same_private_object(tmp_path, monk
     data.mkdir()
     (repo / "README.md").write_text("hello\n", encoding="utf-8")
     registry = ToolRegistry(repo_dir=repo, drive_root=data)
-    original = registry_module.build_resolved_resource_binding
+    original = resolution_module.build_resolved_resource_binding
     built = []
     observed = []
 
@@ -230,7 +388,7 @@ def test_registry_builds_once_and_injects_the_same_private_object(tmp_path, monk
         observed.append(_resolved_binding)
         return "OK"
 
-    monkeypatch.setattr(registry_module, "build_resolved_resource_binding", counted)
+    monkeypatch.setattr(resolution_module, "build_resolved_resource_binding", counted)
     monkeypatch.setattr(safety, "check_safety", lambda *args, **kwargs: (True, ""))
     registry.override_handler("read_file", handler)
 
@@ -240,7 +398,7 @@ def test_registry_builds_once_and_injects_the_same_private_object(tmp_path, monk
 
 
 def test_forged_private_argument_is_rejected_before_binding(tmp_path, monkeypatch):
-    import ouroboros.tools.registry as registry_module
+    import ouroboros.tools.tool_resolution as resolution_module
 
     repo = tmp_path / "repo"
     data = tmp_path / "data"
@@ -249,7 +407,7 @@ def test_forged_private_argument_is_rejected_before_binding(tmp_path, monkeypatc
     registry = ToolRegistry(repo_dir=repo, drive_root=data)
     calls = []
     monkeypatch.setattr(
-        registry_module,
+        resolution_module,
         "build_resolved_resource_binding",
         lambda *args, **kwargs: calls.append((args, kwargs)),
     )
@@ -280,7 +438,7 @@ def test_target_sensitive_override_without_private_keyword_fails_loudly(tmp_path
 
 
 def test_direct_handler_fallback_builds_once(tmp_path, monkeypatch):
-    import ouroboros.tools.core as core
+    import ouroboros.tools.core_file_tools as core
 
     repo = tmp_path / "repo"
     data = tmp_path / "data"

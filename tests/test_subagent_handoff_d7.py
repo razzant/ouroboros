@@ -36,7 +36,7 @@ def _write_child(tmp_path, child_id, status="running", **fields):
 def test_prose_does_not_suppress_handoff(tmp_path):
     """Even when the final text 'acknowledges' the child in prose, an undecided
     nonterminal child still surfaces the handoff reminder (P5: no keyword gate)."""
-    from ouroboros.loop import _compute_subagent_handoff
+    from ouroboros.loop_delivery import _compute_subagent_handoff
 
     _write_child(tmp_path, "childA", status="running")
     prose = "All set. I am leaving childA running / pending; not complete yet."
@@ -47,7 +47,7 @@ def test_prose_does_not_suppress_handoff(tmp_path):
 
 def test_structured_discard_suppresses_handoff(tmp_path):
     """A hash-bound discard is excluded while that exact result is unchanged."""
-    from ouroboros.loop import _compute_subagent_handoff
+    from ouroboros.loop_delivery import _compute_subagent_handoff
     from ouroboros.tools.join_ledger import _discard_child_result
 
     _write_child(tmp_path, "childA", status="running")
@@ -58,7 +58,7 @@ def test_structured_discard_suppresses_handoff(tmp_path):
 
 
 def test_legacy_task_result_discard_fields_are_not_authority(tmp_path):
-    from ouroboros.loop import _compute_subagent_handoff
+    from ouroboros.loop_delivery import _compute_subagent_handoff
 
     _write_child(tmp_path, "legacy", parent_decision="discarded")
     out = _compute_subagent_handoff(_tools(tmp_path), tmp_path, "root", "done")

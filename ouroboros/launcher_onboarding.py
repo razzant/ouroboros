@@ -12,7 +12,6 @@ import logging
 from ouroboros.config import (
     apply_settings_to_env as _apply_settings_to_env,
     load_settings,
-    save_settings,
 )
 from ouroboros.server_runtime import apply_runtime_provider_defaults, has_startup_ready_provider
 
@@ -28,20 +27,15 @@ def prepare_first_run_settings() -> tuple[dict, bool]:
     launcher shows once it is healthy. The onboarding SURFACE is not rendered
     here: the live server serves it (``present_first_run_onboarding``).
     """
-    settings, provider_defaults_changed, _provider_default_keys = apply_runtime_provider_defaults(load_settings())
-    # Persist the pre-server normalization ONLY for an install that already has a
-    # settings file. On a FRESH install this save would CREATE the file before the
-    # owner's first onboarding save, and every fresh-install proof is gated on
-    # that freshness — safety-light authorship, install-time agent presets (a
-    # local-first launch with LOCAL_MODEL_SOURCE in the environment reaches here
-    # with changed=True and would silently lose Light). Nothing is dropped: the
-    # completion save persists the same normalization, and the managed server
-    # keeps the mirror-image guard in its lifespan.
-    from ouroboros.config import SETTINGS_PATH as _settings_path
-
-    if provider_defaults_changed and _settings_path.exists():
-        # Owner-process boundary: a first-run/provider save may elevate runtime mode.
-        save_settings(settings, allow_elevation=True)
+    settings, _provider_defaults_changed, _provider_default_keys = apply_runtime_provider_defaults(load_settings())
+    # The normalization is APPLIED, not persisted. Startup is a read, and a read that
+    # rewrites the file it read is how a normalization becomes an owner decision: the
+    # fresh-install case already had to be carved out of this save (it would create
+    # settings.json before the owner's own onboarding write and lose safety-light
+    # authorship and the install-time agent presets), which is the same objection in a
+    # narrower dress. Nothing is dropped, because nothing here was the only place the
+    # normalization happens: every reader re-derives it (`/api/settings`, `/onboarding`,
+    # the onboarding host, the plan-review script), and the completion save persists it.
     _apply_settings_to_env(settings)
     return settings, not has_startup_ready_provider(settings)
 

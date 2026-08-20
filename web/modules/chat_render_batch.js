@@ -3,6 +3,49 @@
 // so node tests can exercise them directly.
 
 /**
+ * Insert a top-level timeline node chronologically while keeping typing last.
+ * Equal timestamps preserve arrival order; timestamp-free nodes append.
+ */
+export function insertTimelineNode(messages, node, typing = null, { stickToBottom = false } = {}) {
+    const previousScrollTop = Number(messages?.scrollTop) || 0;
+    const previousScrollHeight = Number(messages?.scrollHeight) || 0;
+    const rawNodeTs = node?.dataset?.ts;
+    const nodeTs = rawNodeTs == null || rawNodeTs === '' ? NaN : Number(rawNodeTs);
+    let before = null;
+    if (Number.isFinite(nodeTs)) {
+        for (const child of Array.from(messages?.children || [])) {
+            if (child === node || child === typing) continue;
+            const rawChildTs = child?.dataset?.ts;
+            const childTs = rawChildTs == null || rawChildTs === '' ? NaN : Number(rawChildTs);
+            if (Number.isFinite(childTs) && childTs > nodeTs) {
+                before = child;
+                break;
+            }
+        }
+    }
+    let insertedAboveViewport = false;
+    if (
+        before
+        && !stickToBottom
+        && typeof before.getBoundingClientRect === 'function'
+        && typeof messages.getBoundingClientRect === 'function'
+    ) {
+        insertedAboveViewport = before.getBoundingClientRect().top <= messages.getBoundingClientRect().top;
+    }
+    if (before) messages.insertBefore(node, before);
+    else if (typing && typing.parentNode === messages) messages.insertBefore(node, typing);
+    else messages.appendChild(node);
+
+    const nextScrollHeight = Number(messages?.scrollHeight) || 0;
+    if (stickToBottom) {
+        messages.scrollTop = nextScrollHeight;
+    } else if (insertedAboveViewport) {
+        messages.scrollTop = previousScrollTop + Math.max(0, nextScrollHeight - previousScrollHeight);
+    }
+    return { before, insertedAboveViewport };
+}
+
+/**
  * perf2 P4 follow-up (double-fetch fix): the debounced post-completion resync
  * behind chat.js's scheduleHistorySync. Finished transitions REPLAYED by
  * syncHistory itself (pass 1 suppressed task summaries, pass 2 / terminal-
@@ -44,44 +87,6 @@ export function createHistoryResyncScheduler({
  * Equal timestamps preserve arrival order; timestamp-free nodes append.
  * (Moved verbatim from chat.js — that module sits at its byte ceiling.)
  */
-export function insertTimelineNode(messages, node, typing = null, { stickToBottom = false } = {}) {
-    const previousScrollTop = Number(messages?.scrollTop) || 0;
-    const previousScrollHeight = Number(messages?.scrollHeight) || 0;
-    const rawNodeTs = node?.dataset?.ts;
-    const nodeTs = rawNodeTs == null || rawNodeTs === '' ? NaN : Number(rawNodeTs);
-    let before = null;
-    if (Number.isFinite(nodeTs)) {
-        for (const child of Array.from(messages?.children || [])) {
-            if (child === node || child === typing) continue;
-            const rawChildTs = child?.dataset?.ts;
-            const childTs = rawChildTs == null || rawChildTs === '' ? NaN : Number(rawChildTs);
-            if (Number.isFinite(childTs) && childTs > nodeTs) {
-                before = child;
-                break;
-            }
-        }
-    }
-    let insertedAboveViewport = false;
-    if (
-        before
-        && !stickToBottom
-        && typeof before.getBoundingClientRect === 'function'
-        && typeof messages.getBoundingClientRect === 'function'
-    ) {
-        insertedAboveViewport = before.getBoundingClientRect().top <= messages.getBoundingClientRect().top;
-    }
-    if (before) messages.insertBefore(node, before);
-    else if (typing && typing.parentNode === messages) messages.insertBefore(node, typing);
-    else messages.appendChild(node);
-
-    const nextScrollHeight = Number(messages?.scrollHeight) || 0;
-    if (stickToBottom) {
-        messages.scrollTop = nextScrollHeight;
-    } else if (insertedAboveViewport) {
-        messages.scrollTop = previousScrollTop + Math.max(0, nextScrollHeight - previousScrollHeight);
-    }
-    return { before, insertedAboveViewport };
-}
 
 /**
  * Sort key for a top-level timeline node: its stamped `data-ts` epoch, or

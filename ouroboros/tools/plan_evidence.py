@@ -245,5 +245,3 @@ def evidence_manifest_hash(manifest: Mapping[str, Any]) -> str:
             for o in manifest.get("omissions") or []
         ],
     })
-
-

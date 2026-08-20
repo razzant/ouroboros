@@ -77,7 +77,8 @@ test('the live progress path forwards every progress field the endpoint emits an
     // Every LIVE call site that ENUMERATES fields instead of spreading the frame is
     // a whitelist, and a whitelist silently drops whatever it forgot — which is how
     // a chip came back on reload and was missing while the task ran.
-    const chat = moduleFile('chat.js');
+    // The enumerated live call site moved into the task-frame router (W3 wave D).
+    const chat = moduleFile('chat_task_frames.js');
     const whitelists = chat.split('summarizeChatLiveEvent({').slice(1)
         .map((chunk) => chunk.slice(0, chunk.indexOf('});')))
         .filter((chunk) => !chunk.includes('...evt'));

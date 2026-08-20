@@ -6,7 +6,7 @@ import {
     boundActivityPreview,
     clearStickyCardState,
     projectCollapsedActivity,
-} from '../modules/chat.js';
+} from '../modules/chat_card_state.js';
 import { summarizeChatLiveEvent } from '../modules/log_events.js';
 
 test('named root card shows the latest activity headline under the coined title', () => {

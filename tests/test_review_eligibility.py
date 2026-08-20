@@ -14,7 +14,7 @@ from ouroboros.outcomes import (
     turn_has_reviewable_effects,
     _unresolved_tool_errors,
 )
-from ouroboros.loop import _task_acceptance_eligible
+from ouroboros.loop_acceptance import _task_acceptance_eligible
 
 
 def _call(tool, *, is_error=False, status="ok", root=None):
@@ -364,9 +364,16 @@ def test_loop_outcome_defaults_when_no_decision():
 # longer touches the transcript at all. -----
 
 def test_acceptance_review_is_label_only_no_transcript_injection():
-    src = (pathlib.Path(__file__).resolve().parents[1] / "ouroboros" / "loop.py").read_text(encoding="utf-8")
+    # v7 L-B split: the negatives sweep the whole loop family so no leaf can
+    # revive the injection; the verdict recording lives with the acceptance
+    # review owner, which loop.py re-exports.
+    loop_dir = pathlib.Path(__file__).resolve().parents[1] / "ouroboros"
+    src = "".join(
+        path.read_text(encoding="utf-8")
+        for path in [loop_dir / "loop.py", *sorted(loop_dir.glob("loop_*.py"))]
+    )
     # The old injection strings are gone (no draft re-commit, no review payload).
     assert "Do NOT replace your user-facing answer with a status report" not in src
     assert "[TASK ACCEPTANCE REVIEW]" not in src
     # The verdict is still recorded on the objective axis (immune signal kept).
-    assert "review_runs" in src
+    assert "review_runs" in (loop_dir / "loop_acceptance_review.py").read_text(encoding="utf-8")

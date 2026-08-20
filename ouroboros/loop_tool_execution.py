@@ -5,7 +5,6 @@ from __future__ import annotations
 import json
 import os
 import pathlib
-import re
 import time
 import concurrent.futures
 import contextvars
@@ -28,7 +27,11 @@ from ouroboros.tool_capabilities import (
     tool_result_limit as _tool_result_limit,
 )
 from ouroboros.tools.registry import ToolRegistry
-from ouroboros.tools.review_synthesis import PLAN_REVIEW_CONTROL_PREFIX
+from ouroboros.tools.tool_result import (
+    TOOL_CODE_SPECS,
+    LegacyTextResultAdapter,
+    ToolResult,
+)
 from ouroboros.usage_accounting import UsageAccountingError
 from ouroboros.utils import (
     append_jsonl,
@@ -42,83 +45,9 @@ from ouroboros.utils import (
 
 log = logging.getLogger(__name__)
 
-_FAILURE_PREFIXES = (
-    "⚠️ TOOL_",
-    "⚠️ SHELL_",
-    "⚠️ RUN_SCRIPT_",
-    "⚠️ CLAUDE_CODE_",
-    "⚠️ VLM_",
-    "⚠️ LIGHT_MODE_",
-    "⚠️ WORKSPACE_",
-    "⚠️ ELEVATION_",
-    "⚠️ SKILL_STATE_",
-    "⚠️ SKILL_REDIRECT_",
-    # The undeclared-outputs nudge: is_error for trace/UI honesty (the ⚠️ is
-    # real), but its typed status is partitioned as a policy denial so it never
-    # degrades execution health ("_UNDECLARED" matches no generic marker).
-    "⚠️ ARTIFACT_OUTPUT_UNDECLARED",
-    "⚠️ SKILL_PAYLOAD_ARG_",
-    "⚠️ DATA_WRITE_",
-    "⚠️ DATA_READ_BLOCKED",
-    "⚠️ DATA_LIST_BLOCKED",
-    "⚠️ WRITE_FILE_",
-    "⚠️ EDIT_TEXT_",
-    "⚠️ ARTIFACT_OUTPUT_ERROR",
-    "⚠️ CORE_PROTECTION_BLOCKED",
-    "⚠️ SKILL_PAYLOAD_CONTROL_BLOCKED",
-    "⚠️ COGNITIVE_TOOL_REQUIRED",
-    "⚠️ ROOT_REQUIRED_USER_FILES",
-    "⚠️ ROOT_REQUIRED_ACTIVE_WORKSPACE",
-    "⚠️ RESOURCE_CONSTRAINT_BLOCKED",
-    "⚠️ RESOURCE_POLICY_BLOCKED",
-    "⚠️ INTEGRATE_",
+_PROCESS_RESULT_TOOLS = frozenset(
+    {"run_command", "run_script", "start_service", "stop_service"}
 )
-
-# B2 (honest DEGRADED): the no-quorum aggregate is a legal, always-OPEN control
-# outcome — the render layer no longer launders it into REVIEW_REQUIRED.
-_PLAN_REVIEW_OUTCOMES = frozenset({"GREEN", "REVIEW_REQUIRED", "REVISE_PLAN", "DEGRADED"})
-
-
-def _parse_plan_review_control(text: str) -> tuple[str, bool] | None:
-    """Parse one exact host-owned plan-review control marker fail-closed."""
-    markers = [
-        line[len(PLAN_REVIEW_CONTROL_PREFIX):]
-        for line in str(text or "").splitlines()
-        if line.startswith(PLAN_REVIEW_CONTROL_PREFIX)
-    ]
-    if len(markers) != 1:
-        return None
-
-    def _unique_object(pairs: list[tuple[str, Any]]) -> Dict[str, Any]:
-        result: Dict[str, Any] = {}
-        for key, value in pairs:
-            if key in result:
-                raise ValueError(f"duplicate key: {key}")
-            result[key] = value
-        return result
-
-    try:
-        payload = json.loads(markers[0], object_pairs_hook=_unique_object)
-    except (TypeError, ValueError, json.JSONDecodeError):
-        return None
-    if not isinstance(payload, dict) or set(payload) != {"outcome", "closed"}:
-        return None
-    outcome = str(payload.get("outcome") or "")
-    closed = payload.get("closed")
-    if outcome not in _PLAN_REVIEW_OUTCOMES or type(closed) is not bool:
-        return None
-    if (outcome == "GREEN" and not closed) or (outcome in {"REVISE_PLAN", "DEGRADED"} and closed):
-        return None
-    return outcome, closed
-_FAILURE_MARKERS = (
-    "_BLOCKED",
-    "_ERROR",
-    "_FAILED",
-    "_UNAVAILABLE",
-    "_VIOLATION",
-)
-_EXIT_CODE_RE = re.compile(r"exit_code=(-?\d+)")
-_SIGNAL_RE = re.compile(r"signal=([A-Z0-9_]+)")
 
 # Reviewed mutative tools get a hard ceiling after their soft timeout.
 _REVIEWED_MUTATIVE_HARD_CEILING = 1800
@@ -348,175 +277,127 @@ def _truncate_tool_result(
     return s[:limit] + f"\n... (truncated from {len(s)} chars, limit={limit})"
 
 
-def _structured_tool_failure(result: Any) -> bool:
-    """True when a tool's own JSON payload declares the call failed (``ok: false``).
-
-    The ⚠️-prefix convention below only covers results the CORE composes. Extension
-    (skill) tools return a JSON envelope instead, so a failed call arrived carrying
-    `{"ok": false, "error": ...}` with no marker — and was recorded as a SUCCESS.
-    Measured in the v6.81.1 OSWorld run: 329 such rows (302 remote_exec, 20
-    screenshot, 5 key, 2 click), including screenshot HTTP 500s after an agent
-    killed the guest control server and then kept "working" blind. Everything that
-    reads outcomes — the error counter, the anti-loop heuristic, monitoring, the
-    reflection trace — believed those calls worked.
-
-    Deliberately narrow: the payload must be a JSON OBJECT whose top-level `ok` is
-    exactly False. A tool returning prose, a list, or `ok` as data-not-status is
-    untouched.
-    """
-    text = str(result or "").lstrip()
-    if not text.startswith("{") or '"ok"' not in text:
-        return False
-    try:
-        payload = json.loads(text)
-    except Exception:  # noqa: BLE001 - not JSON, not our case
-        return False
-    return isinstance(payload, dict) and payload.get("ok") is False
+def _typed_or_adapted(fn_name: str, result: Any, tool_result: ToolResult | None) -> ToolResult:
+    """The typed result the producer published, or the ONE adapter's reading of its
+    text. A caller holding only text therefore gets the same classification the loop
+    gets, because there is only one place that classification is written."""
+    if isinstance(tool_result, ToolResult):
+        return tool_result
+    return LegacyTextResultAdapter.from_text(fn_name, str(result or ""))
 
 
-def _is_tool_execution_failure(tool_ok: bool, result: Any) -> bool:
-    """Treat only executor/runtime failures as UI tool failures."""
+def _is_tool_execution_failure(
+    tool_ok: bool,
+    result: Any,
+    tool_result: ToolResult | None = None,
+    *,
+    fn_name: str = "",
+) -> bool:
+    """Whether the call failed, read from the published code."""
+    return _typed_execution_failure(tool_ok, _typed_or_adapted(fn_name, result, tool_result))
+
+
+def _extract_result_metadata(
+    fn_name: str,
+    result: Any,
+    is_error: bool,
+    tool_result: ToolResult | None = None,
+) -> Dict[str, Any]:
+    """Structured outcome facts for summaries and reflections."""
+    return _typed_result_metadata(
+        fn_name,
+        result,
+        is_error,
+        _typed_or_adapted(fn_name, result, tool_result),
+    )
+
+
+def _typed_execution_failure(tool_ok: bool, tool_result: ToolResult | None) -> bool:
+    """Whether the call failed, read from the published code instead of its text."""
     if not tool_ok:
         return True
-    if _structured_tool_failure(result):
-        return True
-    text = str(result or "")
-    if text.startswith("⚠️ SHELL_REGEX_AUTO_CORRECTED"):
-        remainder = text.split("\n", 1)[1] if "\n" in text else ""
-        if any(prefix in remainder for prefix in _FAILURE_PREFIXES):
-            return True
+    if not isinstance(tool_result, ToolResult):
         return False
-    if text.startswith("⚠️ REVIEW_BLOCKED") or text.startswith("⚠️ GIT_ERROR"):
-        return False
-    if text.startswith(_FAILURE_PREFIXES):
-        return True
-    first_line = text.splitlines()[0] if text.startswith("⚠️ ") else ""
-    return bool(first_line and any(marker in first_line for marker in _FAILURE_MARKERS))
+    return TOOL_CODE_SPECS[tool_result.code].status != "ok"
 
 
-def _extract_result_metadata(fn_name: str, result: Any, is_error: bool) -> Dict[str, Any]:
-    """Extract structured outcome facts for summaries and reflections."""
+def _typed_result_metadata(
+    fn_name: str,
+    result: Any,
+    is_error: bool,
+    tool_result: ToolResult | None = None,
+) -> Dict[str, Any]:
+    """Outcome facts for summaries and reflections, taken from the typed result.
+
+    The status is the code's ``outcome_bucket``, which IS the trace vocabulary the
+    outcome classifier, the reflection scan and the web client already read, so the
+    cutover replaces the PRODUCER of the field, not its consumers.
+
+    The three rules below are deliberately NOT text classification and stay here:
+    the untruncated artifact-registration fallback, the plan-review metadata, and
+    the process facts with the ``run_command`` exit-0 override. None of them can be
+    expressed by a code table — they are keyed on the tool name and on trusted meta.
+    """
     text = str(result or "")
-    status = "error" if is_error else "ok"
-    if _structured_tool_failure(result):
-        # A typed status, not the generic "error": an extension tool that answered
-        # honestly is a different fact from an executor crash, and the trace should
-        # say which happened.
-        status = "tool_reported_failure"
-    elif text.startswith("⚠️ TOOL_TIMEOUT"):
-        status = "timeout"
-    elif text.startswith("⚠️ SHELL_REGEX_AUTO_CORRECTED") and "⚠️ ARTIFACT_OUTPUT_UNDECLARED" in text:
-        status = "artifact_output_undeclared"
-    elif text.startswith("⚠️ SHELL_REGEX_AUTO_CORRECTED") and "⚠️ ARTIFACT_OUTPUT_ERROR" in text:
-        status = "artifact_output_error"
-    elif text.startswith("⚠️ SHELL_REGEX_AUTO_CORRECTED") and "⚠️ SHELL_EXIT_ERROR" not in text:
-        status = "ok_autocorrected"
-    elif text.startswith("⚠️ SHELL_EXIT_ERROR"):
-        status = "non_zero_exit"
-    elif text.startswith("⚠️ SHELL_CWD_BLOCKED"):
-        status = "cwd_blocked"
-    elif text.startswith("⚠️ SHELL_"):
-        status = "shell_error"
-    elif text.startswith("⚠️ RUN_SCRIPT_BLOCKED"):
-        status = "run_script_blocked"
-    elif text.startswith("⚠️ CLAUDE_CODE_TIMEOUT"):
-        status = "timeout"
-    elif text.startswith("⚠️ CLAUDE_CODE_INSTALL_ERROR"):
-        status = "install_error"
-    elif text.startswith("⚠️ CLAUDE_CODE_UNAVAILABLE"):
-        status = "unavailable"
-    elif text.startswith("⚠️ CLAUDE_CODE_"):
-        status = "claude_code_error"
-    elif text.startswith("⚠️ VLM_"):
-        status = "vlm_error"
-    elif text.startswith("⚠️ CORE_PROTECTION_BLOCKED"):
-        status = "protected_blocked"
-    elif text.startswith("⚠️ SKILL_PAYLOAD_CONTROL_BLOCKED"):
-        status = "skill_payload_control_blocked"
-    elif text.startswith("⚠️ LIGHT_MODE_REPO_WRITE_BLOCKED") or text.startswith("⚠️ LIGHT_MODE_BLOCKED"):
-        status = "light_mode_blocked"
-    elif text.startswith("⚠️ COGNITIVE_TOOL_REQUIRED"):
-        status = "cognitive_tool_required"
-    elif text.startswith("⚠️ ROOT_REQUIRED_USER_FILES"):
-        status = "root_required_user_files"
-    elif text.startswith("⚠️ ROOT_REQUIRED_ACTIVE_WORKSPACE"):
-        status = "root_required_active_workspace"
-    elif text.startswith("⚠️ RESOURCE_CONSTRAINT_BLOCKED"):
-        status = "resource_constraint_blocked"
-    elif text.startswith("⚠️ RESOURCE_POLICY_BLOCKED"):
-        status = "resource_policy_blocked"
-    elif text.startswith("⚠️ INTEGRATE_"):
-        status = "integration_blocked"
-    elif text.startswith("⚠️ WORKSPACE_"):
-        status = "workspace_blocked"
-    elif text.startswith("⚠️ ELEVATION_"):
-        status = "elevation_blocked"
-    elif text.startswith("⚠️ SKILL_STATE_"):
-        status = "skill_state_blocked"
-    elif text.startswith("⚠️ SKILL_REDIRECT_") or text.startswith("⚠️ SKILL_PAYLOAD_ARG_"):
-        status = "skill_payload_blocked"
-    elif text.startswith("⚠️ DATA_WRITE_") or text.startswith("⚠️ DATA_READ_BLOCKED") or text.startswith("⚠️ DATA_LIST_BLOCKED"):
-        status = "data_blocked"
-    elif text.startswith("⚠️ WRITE_FILE_"):
-        status = "write_file_blocked"
-    elif text.startswith("⚠️ EDIT_TEXT_"):
-        status = "edit_text_blocked"
-    elif text.startswith("⚠️ APPLY_PATCH_") or text.startswith("⚠️ EDIT_BATCH_"):
-        # Counted/context refusals are these tools' DESIGNED path (a miscount is
-        # an atomic refusal, not a corruption) and are user-correctable exactly
-        # like edit_text's "old_str not found". Without a typed status they fall
-        # through to the generic `error` and become an execution-health failure,
-        # which is the false `tool_failure` headline v6.57.0 removed for writes.
-        status = "edit_ops_blocked"
-    elif text.startswith("⚠️ ARTIFACT_OUTPUT_UNDECLARED"):
-        # The undeclared-outputs NUDGE on a SUCCEEDED (exit_code=0) command —
-        # split from the real registration failure below so the policy-denial
-        # partition can absorb it (v6.57.0 class).
-        status = "artifact_output_undeclared"
-    elif text.startswith("⚠️ ARTIFACT_OUTPUT_ERROR"):
-        status = "artifact_output_error"
-    elif text.startswith("⚠️ USER_FILES_PATH_BLOCKED"):
-        status = "user_files_path_blocked"
-    elif text.startswith("⚠️ SAFETY_VIOLATION") or text.startswith("⚠️ CRITICAL SAFETY_VIOLATION"):
-        status = "safety_violation"
-    elif text.startswith("⚠️ HEAL_MODE_BLOCKED"):
-        status = "heal_mode_blocked"
-    elif text.startswith("⚠️ GIT_VIA_SHELL_BLOCKED"):
-        status = "git_via_shell_blocked"
-    elif text.startswith("⚠️ ") and "_BLOCKED" in text.splitlines()[0]:
-        status = "blocked"
-    elif text.startswith("⚠️ ") and "_VIOLATION" in text.splitlines()[0]:
-        status = "violation"
-    elif text.startswith("⚠️ ") and any(marker in text.splitlines()[0] for marker in ("_ERROR", "_FAILED", "_UNAVAILABLE")):
-        status = "error"
+    if isinstance(tool_result, ToolResult):
+        status = TOOL_CODE_SPECS[tool_result.code].outcome_bucket
+    else:
+        status = "error" if is_error else "ok"
 
     meta: Dict[str, Any] = {"status": status}
-    # Structured deliverable signal captured from the FULL result (before the trace
-    # preview is truncated to 700 chars) so effect detection never misses a
-    # late ARTIFACT_OUTPUTS marker (e.g. a stopped service after a long log tail).
-    if not is_error and "ARTIFACT_OUTPUTS" in text:
+    # Legacy non-process deliverable fallback reads the FULL result before trace
+    # truncation. Process producers must supply the typed fact below.
+    if (
+        fn_name not in _PROCESS_RESULT_TOOLS
+        and not is_error
+        and "ARTIFACT_OUTPUTS" in text
+    ):
         meta["artifact_registered"] = True
-    # Same full-result capture for the swarm force-plan gate.  Only the exact
-    # host-appended typed control closes force-plan; raw reviewer prose and the
-    # legacy AGGREGATE line are never treated as authority.
-    plan_control = _parse_plan_review_control(text) if fn_name == "plan_task" and not is_error else None
-    if plan_control is not None:
-        meta["plan_review_outcome"], meta["plan_review_closed"] = plan_control
-    exit_match = _EXIT_CODE_RE.search(text)
-    if exit_match:
-        try:
-            meta["exit_code"] = int(exit_match.group(1))
-        except ValueError:
-            pass
-    signal_match = _SIGNAL_RE.search(text)
-    if signal_match:
-        meta["signal"] = signal_match.group(1)
+    if fn_name == "plan_task" and not is_error and isinstance(tool_result, ToolResult):
+        plan_outcome = tool_result.meta.get("plan_review_outcome")
+        plan_closed = tool_result.meta.get("plan_review_closed")
+        if (
+            plan_outcome in {"GREEN", "REVIEW_REQUIRED", "REVISE_PLAN", "DEGRADED"}
+            and type(plan_closed) is bool
+            and not (plan_outcome == "GREEN" and not plan_closed)
+            and not (plan_outcome in {"REVISE_PLAN", "DEGRADED"} and plan_closed)
+        ):
+            meta["plan_review_outcome"] = plan_outcome
+            meta["plan_review_closed"] = plan_closed
+    if fn_name in _PROCESS_RESULT_TOOLS and isinstance(tool_result, ToolResult):
+        exit_code = tool_result.meta.get("exit_code")
+        if isinstance(exit_code, int) and not isinstance(exit_code, bool):
+            meta["exit_code"] = exit_code
+        signal_name = tool_result.meta.get("signal")
+        if isinstance(signal_name, str) and signal_name:
+            meta["signal"] = signal_name
+        if tool_result.meta.get("artifact_registered") is True:
+            meta["artifact_registered"] = True
+    if (
+        meta["status"] == "ok"
+        and isinstance(tool_result, ToolResult)
+        and tool_result.meta.get("shell_regex_auto_corrected") is True
+    ):
+        # The autocorrection is a producer FACT carried in meta, not a text prefix.
+        # A shell producer that also has a more specific code (no-match, exit error,
+        # undeclared outputs) keeps that code; only an otherwise-plain success is
+        # relabelled, which is what the retired text scan did for every shape.
+        meta["status"] = "ok_autocorrected"
     if fn_name == "run_command" and not is_error and meta.get("exit_code") == 0:
-        if status == "ok_autocorrected":
+        if meta["status"] == "ok_autocorrected":
             meta["status"] = "ok_autocorrected"
         else:
             meta["status"] = "ok"
     return meta
+
+
+def _tool_result_fields(result: ToolResult) -> Dict[str, Any]:
+    """Return the JSON-safe typed projection without shadowing legacy fields."""
+    return {
+        "tool_result_status": result.status,
+        "tool_result_code": result.code,
+        "tool_result_meta": dict(result.meta),
+    }
 
 
 def _execute_single_tool(
@@ -540,6 +421,11 @@ def _execute_single_tool(
         args = json.loads(tc["function"]["arguments"] or "{}")
     except (json.JSONDecodeError, ValueError) as e:
         result = f"⚠️ TOOL_ARG_ERROR: Could not parse arguments for '{requested_fn_name}': {e}"
+        tool_result = ToolResult(status="error", code="TOOL_ARG_ERROR", text=result)
+        result_meta = {
+            **_extract_result_metadata(fn_name, result, True, tool_result),
+            **_tool_result_fields(tool_result),
+        }
         trace_ref = {}
         try:
             trace_ref = persist_call(
@@ -555,6 +441,7 @@ def _execute_single_tool(
                     "round_id": correlation.get("round_id"),
                     "raw_arguments": tc.get("function", {}).get("arguments"),
                     "result": result,
+                    "result_meta": result_meta,
                 },
                 manifest={
                     "execution_id": correlation.get("execution_id"),
@@ -576,27 +463,39 @@ def _execute_single_tool(
             "args_for_log": {},
             "is_code_tool": is_code_tool,
             "trace_ref": trace_ref,
-            "result_meta": _extract_result_metadata(fn_name, result, True),
+            "result_meta": result_meta,
+            "tool_result": tool_result,
         }
 
     args_for_log = sanitize_tool_args_for_log(fn_name, args if isinstance(args, dict) else {})
 
     tool_ok = True
     try:
-        result = tools.execute(fn_name, args)
+        tool_result = tools.execute_result(fn_name, args)
+        result = tool_result.text
     except UsageAccountingError:
         raise
     except Exception as e:
         tool_ok = False
         safe_error = sanitize_tool_result_for_log(f"{type(e).__name__}: {e}")
         result = f"⚠️ TOOL_ERROR ({fn_name}): {safe_error}"
+        tool_result = ToolResult(status="error", code="EXECUTOR_ERROR", text=result)
         append_jsonl(drive_logs / "events.jsonl", _with_correlation({
             "ts": utc_now_iso(), "type": "tool_error", "task_id": task_id,
             "tool": fn_name, "args": args_for_log, "error": safe_error,
         }, correlation, tool_call_id=tool_call_id))
 
-    is_error = _is_tool_execution_failure(tool_ok, result)
-    result_meta = _extract_result_metadata(fn_name, result, is_error)
+    # `status`/`is_error` are READ from the published code, never re-derived from
+    # the text; process exit, signal and artifact-registration facts come from
+    # typed meta, so producer-controlled stdout can forge none of them. The tool
+    # name travels with the call even though the dispatcher always publishes a
+    # typed result here: the fallback adapter classifies ext_/mcp_ bodies by name,
+    # and a nameless fallback would silently answer for a different surface.
+    is_error = _is_tool_execution_failure(tool_ok, result, tool_result, fn_name=fn_name)
+    result_meta = {
+        **_extract_result_metadata(fn_name, result, is_error, tool_result),
+        **_tool_result_fields(tool_result),
+    }
 
     trace_ref = {}
     try:
@@ -650,6 +549,7 @@ def _execute_single_tool(
         "is_code_tool": is_code_tool,
         "trace_ref": trace_ref,
         "result_meta": result_meta,
+        "tool_result": tool_result,
     }
 
 
@@ -704,6 +604,16 @@ def _make_timeout_result(
         f"The tool is still running in background but control is returned to you. "
         f"{reset_msg}Try a different approach or inform the user{' about the issue' if not reset_msg else ''}."
     )
+    tool_result = ToolResult(
+        status="timeout",
+        code="TOOL_TIMEOUT",
+        text=result,
+        meta={"timeout_sec": timeout_sec},
+    )
+    result_meta = {
+        **_extract_result_metadata(fn_name, result, True, tool_result),
+        **_tool_result_fields(tool_result),
+    }
     trace_ref = {}
     corr = dict(correlation or {})
     try:
@@ -722,6 +632,7 @@ def _make_timeout_result(
                 "args": raw_args,
                 "args_redacted_preview": args_for_log,
                 "result": result,
+                "result_meta": result_meta,
             },
             manifest={
                 "execution_id": corr.get("execution_id"),
@@ -758,7 +669,8 @@ def _make_timeout_result(
         "args_for_log": args_for_log,
         "is_code_tool": is_code_tool,
         "trace_ref": trace_ref,
-        "result_meta": _extract_result_metadata(fn_name, result, True),
+        "result_meta": result_meta,
+        "tool_result": tool_result,
     }
 
 
@@ -1053,19 +965,30 @@ def handle_tool_calls(
                     requested_fn_name = tc.get("function", {}).get("name", "unknown")
                     fn_name = str(requested_fn_name or "").strip()
                     safe_error = sanitize_tool_result_for_log(str(exc))
+                    result_text = f"⚠️ TOOL_ERROR: Unexpected error: {safe_error}"
+                    tool_result = ToolResult(
+                        status="error",
+                        code="EXECUTOR_ERROR",
+                        text=result_text,
+                    )
                     results[idx] = {
                         "tool_call_id": tc.get("id", ""),
                         "fn_name": fn_name,
-                        "result": f"⚠️ TOOL_ERROR: Unexpected error: {safe_error}",
+                        "result": result_text,
                         "is_error": True,
                         "tool_args": {},
                         "args_for_log": {},
                         "is_code_tool": fn_name in tools.CODE_TOOLS,
-                        "result_meta": _extract_result_metadata(
-                            fn_name,
-                            f"⚠️ TOOL_ERROR: Unexpected error: {safe_error}",
-                            True,
-                        ),
+                        "result_meta": {
+                            **_extract_result_metadata(
+                                fn_name,
+                                result_text,
+                                True,
+                                tool_result,
+                            ),
+                            **_tool_result_fields(tool_result),
+                        },
+                        "tool_result": tool_result,
                     }
         finally:
             executor.shutdown(wait=False, cancel_futures=True)
@@ -1108,8 +1031,11 @@ def _maybe_auto_attach_image(
     if not str(exec_result.get("fn_name") or "").startswith("ext_"):
         return
     # A payload that declares its own failure must not have an image lifted out of
-    # it, even when the executor call itself did not raise.
-    if _structured_tool_failure(exec_result.get("result")):
+    # it, even when the executor call itself did not raise. Read the typed code the
+    # dispatcher published rather than re-deriving the JSON fact here: this guard
+    # is the SECOND consumer of that fact and must not drift from the first.
+    typed = exec_result.get("tool_result")
+    if isinstance(typed, ToolResult) and typed.code == "TOOL_REPORTED_FAILURE":
         return
     raw = exec_result.get("result")
     if not isinstance(raw, str) or '"auto_attach_image"' not in raw:

@@ -30,7 +30,12 @@ def test_architecture_mentions_shared_log_grouping_and_direct_provider_review_fa
     # silently re-expand to claim symmetric coverage it does not have yet.
     assert "Direct-provider review fallback" in arch
     assert "OpenAI-only review fallback" in arch  # legacy name still referenced for discoverability
-    assert "official OpenAI, Anthropic, MiniMax, Cloud.ru, and GigaChat" in arch
+    # v6.103.0 rewrote the fallback to compile each provider's declarative
+    # reviewer-role sequence; the provider scope is pinned via the roles the
+    # paragraph names rather than the retired list sentence.
+    assert "declarative reviewer-role sequence" in arch
+    assert "OpenAI and Anthropic run three independent Main-model slots" in arch
+    assert "Cloud.ru and GigaChat use their one available role model" in arch
     assert "_exclusive_direct_remote_provider_env" in arch
     # v4.34.0: direct-provider fallback now documents the
     # `main_model.startswith(provider_prefix)` guard in get_review_models —

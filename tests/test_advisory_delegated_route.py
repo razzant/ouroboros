@@ -15,7 +15,7 @@ import subprocess
 import pytest
 
 import ouroboros.tools.claude_advisory_review as advisory
-from tests.test_review_agent_session_route import FakeGateway, _terminal_detail
+from tests._review_session_route_shared import FakeGateway, _terminal_detail
 
 
 @pytest.fixture(autouse=True)

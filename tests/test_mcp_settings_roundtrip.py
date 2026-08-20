@@ -20,10 +20,13 @@ def _isolate_settings(tmp_path, monkeypatch):
 
     importlib.reload(cfg)
     yield cfg
-    # Restore by reloading once more without the override on teardown so
-    # downstream tests in the same process see the real settings path.
-    monkeypatch.delenv("OUROBOROS_SETTINGS_PATH", raising=False)
-    monkeypatch.delenv("OUROBOROS_DATA_DIR", raising=False)
+    # Undo the env overrides FIRST, then reload: the old delenv+reload order
+    # dropped the session's own OUROBOROS_* values too, so the reload
+    # resurrected the pre-pytest LIVE default and every later test in the
+    # worker inherited a poisoned config.DATA_DIR (the conftest invariant
+    # now names exactly this). monkeypatch.undo() restores the session env,
+    # and the reload lands the module back on the pytest root.
+    monkeypatch.undo()
     importlib.reload(cfg)
 
 

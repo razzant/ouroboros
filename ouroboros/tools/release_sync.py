@@ -10,7 +10,7 @@ from __future__ import annotations
 
 import re
 from pathlib import Path
-from typing import List, Tuple
+from typing import List, NamedTuple, Optional, Tuple
 
 _MAX_MAJOR = 2
 _MAX_MINOR = 5
@@ -60,6 +60,89 @@ _UV_LOCK_ROOT_RE = re.compile(
     r'("\nsource = \{ editable = "\." \})',
     re.MULTILINE,
 )
+
+
+class VersionCarrierSpan(NamedTuple):
+    """One version-carrying span in one release-carrier file.
+
+    ``pattern`` must match EXACTLY ONCE in a well-formed copy of ``path``:
+    zero matches is a malformed anchor, more than one is a duplicate anchor.
+    """
+
+    carrier_id: str
+    path: str
+    pattern: "re.Pattern[str]"
+
+
+# Version-carrier span descriptors — the SSOT the carrier-aware update engine
+# reads (owner-ratified: spec §1.9-10, batch №8 answer 6=A). The managed-update
+# resolver (supervisor/update_carriers.py) and the tactical-rebase helper
+# (scripts/carrier_rebase_helper.py) resolve merge conflicts INSIDE these spans
+# by span substitution; a malformed or duplicate anchor degrades the file to
+# the ordinary assisted-conflict path (never a crash, never silent adoption),
+# and a conflict OUTSIDE a span keeps the file an ordinary conflict. README.md
+# carries two spans (the badge and the Version History block); together the
+# descriptors cover the 7 release carriers plus README-history.
+VERSION_CARRIER_SPANS: Tuple[VersionCarrierSpan, ...] = (
+    VersionCarrierSpan(
+        "version_file", "VERSION",
+        re.compile(r'\A\d+\.\d+\.\d+' + _PRE_SUFFIX + r'\n?\Z', re.IGNORECASE),
+    ),
+    VersionCarrierSpan(
+        "pyproject_version", "pyproject.toml",
+        re.compile(r'^version\s*=\s*"[^"\n]*"', re.MULTILINE),
+    ),
+    VersionCarrierSpan(
+        "web_package_version", "web/package.json",
+        re.compile(r'^\s*"version"\s*:\s*"[^"\n]*"', re.MULTILINE),
+    ),
+    VersionCarrierSpan(
+        "gateway_contract_version", "web/modules/api_types.js",
+        re.compile(r"GATEWAY_CONTRACT_VERSION\s*=\s*'[^'\n]*'"),
+    ),
+    VersionCarrierSpan("readme_badge", "README.md", _README_BADGE_RE),
+    VersionCarrierSpan(
+        "readme_history", "README.md",
+        re.compile(
+            r'(?:^\|\s*\d+\.\d+\.\d+' + _PRE_SUFFIX + r'\s*\|.*(?:\n|\Z))+',
+            re.MULTILINE | re.IGNORECASE,
+        ),
+    ),
+    VersionCarrierSpan("architecture_header", "docs/ARCHITECTURE.md", _ARCH_HEADER_RE),
+    # uv.lock mirrors the editable root package version (ARCHITECTURE "Version
+    # carriers"); the descriptor rides the same structural regex sync_version
+    # already writes through, so a managed-update or tactical-rebase conflict in
+    # this section resolves by span policy instead of falling to assisted.
+    VersionCarrierSpan("uv_lock_root_package", "uv.lock", _UV_LOCK_ROOT_RE),
+)
+
+CARRIER_SPAN_PATHS = frozenset(span.path for span in VERSION_CARRIER_SPANS)
+
+
+def carrier_spans_for(path: str) -> Tuple[VersionCarrierSpan, ...]:
+    """Return every declared carrier span for a repo-relative path ('' -> none)."""
+    normalized = str(path or "").replace("\\", "/")
+    if normalized.startswith("./"):
+        normalized = normalized[2:]
+    return tuple(span for span in VERSION_CARRIER_SPANS if span.path == normalized)
+
+
+def locate_carrier_span(
+    text: str, span: VersionCarrierSpan
+) -> Tuple[str, Optional[Tuple[int, int]]]:
+    """Locate one carrier span in *text*.
+
+    Returns ``("ok", (start, end))`` for exactly one match,
+    ``("malformed_anchor", None)`` for zero and ``("duplicate_anchor", None)``
+    for several — the two degradation reasons the update engine surfaces.
+    """
+    matches = span.pattern.finditer(str(text or ""))
+    first = next(matches, None)
+    if first is None:
+        return "malformed_anchor", None
+    if next(matches, None) is not None:
+        return "duplicate_anchor", None
+    return "ok", (first.start(), first.end())
 
 # Public installer names are part of the release metadata projection. Keeping
 # them beside VERSION normalization gives README, the public install page, and

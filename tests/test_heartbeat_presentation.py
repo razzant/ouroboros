@@ -40,33 +40,164 @@ def test_retired_timeout_defaults_are_quiet_but_custom_value_is_loud(tmp_path, m
     from supervisor import queue
 
     monkeypatch.setattr(queue, "_timeout_deprecation_emitted", False)
-    queue.init(tmp_path, 600, 1800)
+    queue.init(tmp_path)
     events = tmp_path / "logs" / "events.jsonl"
     assert not events.exists()
 
-    queue.init(tmp_path, 601, 1800)
+    monkeypatch.setenv("OUROBOROS_SOFT_TIMEOUT_SEC", "601")
+    queue.init(tmp_path)
     row = json.loads(events.read_text(encoding="utf-8"))
     assert row["type"] == "deprecated_settings_ignored"
     assert row["keys"] == ["OUROBOROS_SOFT_TIMEOUT_SEC"]
 
 
-def test_retired_planning_heartbeat_key_is_silent_and_dropped_on_load(
+def test_the_deprecation_notice_now_reads_the_environment_not_a_parameter(
     tmp_path, monkeypatch,
 ) -> None:
-    """The planning-scout heartbeat knob is RETIRED with the scout swarm (plan-review
-    redesign 2026-08-15): ``config.RETIRED_SETTING_KEYS`` drops it on settings load, so
-    there is no saved value left to be loud about, and the supervisor's timeout
-    deprecation path no longer names it (deleted consistently, not kept half-loud)."""
-    from ouroboros import config
+    """`load_settings` drops every retired key before a reader sees it, so a
+    settings document can no longer carry a non-default value and the parameters
+    that used to ferry one were always the two defaults. The environment is the
+    only surviving source, so that is where the notice looks."""
+    import json
+
     from supervisor import queue
 
-    assert "OUROBOROS_PLAN_TASK_SWARM_HEARTBEAT_STALE_SEC" in config.RETIRED_SETTING_KEYS
+    monkeypatch.setattr(queue, "_timeout_deprecation_emitted", False)
+    for key, default in queue.RETIRED_LIVENESS_ENV_DEFAULTS:
+        monkeypatch.setenv(key, default)
+    queue.init(tmp_path)
+    events = tmp_path / "logs" / "events.jsonl"
+    assert not events.exists(), "the defaults must stay quiet"
+
+    monkeypatch.setattr(queue, "_timeout_deprecation_emitted", False)
+    monkeypatch.setenv("OUROBOROS_HARD_TIMEOUT_SEC", "1801")
+    queue.init(tmp_path)
+    row = json.loads(events.read_text(encoding="utf-8"))
+    assert row["type"] == "deprecated_settings_ignored"
+    assert row["keys"] == ["OUROBOROS_HARD_TIMEOUT_SEC"]
+
+
+def test_a_reload_no_longer_probes_the_settings_document_for_retired_keys() -> None:
+    """A document cannot answer either way once the key is stripped from it; a
+    probe there would be a question with no possible answer."""
+    import inspect
+
+    from supervisor import queue
+
+    source = inspect.getsource(queue.refresh_timeouts_from_settings)
+    for key, _default in queue.RETIRED_LIVENESS_ENV_DEFAULTS:
+        assert key not in source, key
+    assert "get_finalization_grace_sec(settings)" in source
+
+
+def test_retired_planning_heartbeat_default_is_quiet_but_custom_value_is_loud(
+    tmp_path, monkeypatch,
+) -> None:
+    """The planning-scout heartbeat knob is retired: ``RETIRED_SETTING_KEYS`` strips it
+    from the settings document before any reader sees it, so the ENVIRONMENT is the only
+    surviving source of a value. That is what the notice reads, and it distinguishes the
+    two cases honestly — the shipped default stays quiet (nothing was customized), while
+    a non-default env value still earns exactly one ``deprecated_settings_ignored`` row
+    naming the key. Silence for a value the owner really set would lose the fact that a
+    knob they tuned no longer does anything."""
+    from supervisor import queue
+
+    monkeypatch.setattr(queue, "_timeout_deprecation_emitted", False)
+    monkeypatch.setenv("OUROBOROS_PLAN_TASK_SWARM_HEARTBEAT_STALE_SEC", "120")
+    queue.init(tmp_path)
+    events = tmp_path / "logs" / "events.jsonl"
+    assert not events.exists()
+
     monkeypatch.setattr(queue, "_timeout_deprecation_emitted", False)
     monkeypatch.setenv("OUROBOROS_PLAN_TASK_SWARM_HEARTBEAT_STALE_SEC", "121")
-    queue.init(tmp_path, 600, 1800)
-    assert not (tmp_path / "logs" / "events.jsonl").exists()
-    queue.refresh_timeouts_from_settings({"OUROBOROS_PLAN_TASK_SWARM_HEARTBEAT_STALE_SEC": 121})
-    assert not (tmp_path / "logs" / "events.jsonl").exists()
+    queue.init(tmp_path)
+    row = json.loads(events.read_text(encoding="utf-8"))
+    assert row["type"] == "deprecated_settings_ignored"
+    assert row["keys"] == ["OUROBOROS_PLAN_TASK_SWARM_HEARTBEAT_STALE_SEC"]
+
+
+def test_status_text_names_the_live_rails_and_not_the_retired_numbers(tmp_path, monkeypatch) -> None:
+    """The owner status line printed `soft=600s, hard=1800s` beside a note that
+    they were ignored — two numbers no rail has read since idle/deadline/ceiling/
+    reaper replaced them. Naming the live rails is the whole truth; the numbers
+    were an invitation to tune something that does not exist."""
+    from supervisor import state
+
+    monkeypatch.setattr(state, "load_state", lambda: {"owner_id": 1, "session_id": "s"})
+    monkeypatch.setattr(state, "budget_remaining", lambda: (0.0, 0.0, 0.0))
+    text = state.status_text({}, [], {})
+
+    assert "active_liveness: idle+deadline+absolute_ceiling+reaper" in text
+    assert "soft=" not in text and "hard=" not in text
+    assert "legacy_timeouts_ignored" not in text
+    # ...and the two arguments are gone from the signature, not merely ignored.
+    assert set(inspect.signature(state.status_text).parameters) == {
+        "workers_dict", "pending_list", "running_dict"}
+
+
+def test_the_worker_pool_keeps_no_copy_of_the_retired_or_budget_globals() -> None:
+    """Three module globals nothing read: two retired liveness keys and a third
+    copy of the budget limit whose live authority is supervisor.state. A global
+    that is written and never read reads as configuration to the next person."""
+    from supervisor import workers
+
+    for name in ("SOFT_TIMEOUT_SEC", "HARD_TIMEOUT_SEC", "TOTAL_BUDGET_LIMIT"):
+        assert not hasattr(workers, name), name
+    source = inspect.getsource(workers.init)
+    for name in ("SOFT_TIMEOUT_SEC", "HARD_TIMEOUT_SEC", "TOTAL_BUDGET_LIMIT"):
+        assert name not in source, name
+    # ...and no longer accepts them either: the pool binds what it reads.
+    parameters = set(inspect.signature(workers.init).parameters)
+    assert parameters == {"repo_dir", "drive_root", "max_workers",
+                          "branch_dev", "branch_stable"}
+    assert "queue.init(drive_root)" in source
+
+
+def test_the_queue_never_rebinds_the_retired_timeout_constants() -> None:
+    """They are constants, not state: whatever settings carry, the rails see the
+    same two numbers, so ``init`` must not perform a binding that suggests it
+    could be otherwise."""
+    from supervisor import queue
+
+    source = inspect.getsource(queue.init)
+    assert "global DRIVE_ROOT, FINALIZATION_GRACE_SEC" in source
+    assert set(inspect.signature(queue.init).parameters) == {"drive_root"}
+    for name in ("SOFT_TIMEOUT_SEC", "HARD_TIMEOUT_SEC"):
+        assert not hasattr(queue, name), name
+
+
+def test_the_queue_snapshot_path_has_one_owner(tmp_path, monkeypatch) -> None:
+    """The queue kept a private copy of the snapshot path, rebound by ITS init.
+    Two inits, two answers: whichever ran last for a given root won, and a test or
+    boot path that ran only one of them read or wrote the wrong file. The path
+    belongs to supervisor.state with the other state paths; the queue reads it
+    through the module at use time."""
+    import inspect
+
+    from supervisor import queue, state
+
+    assert not hasattr(queue, "QUEUE_SNAPSHOT_PATH")
+    assert "QUEUE_SNAPSHOT_PATH" not in inspect.getsource(queue.init)
+    for reader in (queue.persist_queue_snapshot, queue.restore_pending_from_snapshot):
+        assert "_state.QUEUE_SNAPSHOT_PATH" in inspect.getsource(reader), reader.__name__
+
+    # Rebinding the one owner is what the readers see — at use time, not import time.
+    monkeypatch.setattr(state, "QUEUE_SNAPSHOT_PATH", tmp_path / "state" / "snap.json")
+    monkeypatch.setattr(queue, "PENDING", [])
+    monkeypatch.setattr(queue, "RUNNING", {})
+    (tmp_path / "state").mkdir(parents=True, exist_ok=True)
+    assert queue.persist_queue_snapshot(reason="one-owner-probe") is True
+    assert (tmp_path / "state" / "snap.json").is_file()
+
+
+def test_the_bench_container_no_longer_carries_the_retired_liveness_keys() -> None:
+    """A forwarded no-op key makes a benchmark run look configured when it is not."""
+    repo = pathlib.Path(__file__).resolve().parents[1]
+    source = (repo / "devtools" / "benchmarks" / "terminal_bench"
+              / "harbor_installed_agent.py").read_text("utf-8")
+    assert '"OUROBOROS_SOFT_TIMEOUT_SEC"' not in source
+    assert '"OUROBOROS_HARD_TIMEOUT_SEC"' not in source
+    assert '"OUROBOROS_TOOL_TIMEOUT_SEC"' in source  # the live one stays
 
 
 def test_owner_visible_incidents_use_canonical_message_seam() -> None:

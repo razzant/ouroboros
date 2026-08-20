@@ -46,9 +46,9 @@ _POPEN_ALLOWLIST = {
     "ouroboros/packaged_cli.py",          # user-facing CLI wrapper (foreground)
     "ouroboros/cli.py",                   # dev CLI (foreground)
     "ouroboros/server_control.py",        # restart exec path
-    "ouroboros/headless.py",              # waited synchronous child
+    "ouroboros/workspace_patch_capture.py",  # waited synchronous child
     "ouroboros/preflight_runner.py",      # waited hermetic pytest child
-    "ouroboros/tools/shell.py",           # bounded foreground commands (waited + tracked)
+    "ouroboros/tools/shell_process.py",   # bounded foreground commands (waited + tracked)
     "ouroboros/tools/skill_exec.py",      # bounded skill run (waited + tracked)
     "ouroboros/tools/skill_preflight.py", # waited preflight child
     "ouroboros/marketplace/isolated_deps.py",  # waited installer child
@@ -60,6 +60,7 @@ _POPEN_ALLOWLIST = {
     "ouroboros/tools/services.py",        # routed through spawn_supervised
     "supervisor/update_merge.py",        # bounded pre-restart import/compile smoke
     "supervisor/git_ops.py",             # shared bounded Git/dependency helpers (waited + panic-tracked)
+    "supervisor/git_ops_reset.py",       # dependency sync moved here by the G1 split (waited + panic-tracked)
     "ouroboros/colab_bootstrap.py",      # bounded Colab clone/fetch helper
 }
 

@@ -11,7 +11,7 @@ def _install_queue(tmp_path, monkeypatch):
     from supervisor import queue, state, workers
 
     state.init(tmp_path, total_budget_limit=10.0)
-    queue.init(tmp_path, 600, 1800)
+    queue.init(tmp_path)
     workers.DRIVE_ROOT = tmp_path
     queue.DRIVE_ROOT = tmp_path
     workers.PENDING[:] = []

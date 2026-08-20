@@ -69,7 +69,12 @@ def test_owner_scope_review_floor_endpoint_validates_persists_and_discloses_depr
     monkeypatch.setenv("OUROBOROS_SCOPE_REVIEW_FLOOR", "blocking_1m")
     monkeypatch.setattr(smod, "_owner_read_settings_raw", lambda: {})
     written = {}
-    monkeypatch.setattr(smod, "_owner_write_settings", lambda s, **k: written.update(s))
+    # The endpoint hands a TRANSFORM to the locked read-modify-write primitive instead of
+    # handing a finished document to the writer; the stub applies it exactly as the lock
+    # would, so the assertion below is unchanged.
+    monkeypatch.setattr(
+        smod, "_owner_update_settings",
+        lambda transform, *a, **k: written.update(transform(dict(written)) or {}))
     monkeypatch.setattr(smod, "_owner_audit", lambda *a, **k: None)
 
     class _Req:
@@ -104,7 +109,12 @@ def test_owner_floor_write_changes_no_scope_review_behaviour(monkeypatch, tmp_pa
     monkeypatch.setenv("OUROBOROS_SCOPE_REVIEW_FLOOR", "blocking_1m")
     monkeypatch.setattr(smod, "_owner_read_settings_raw", lambda: {})
     written = {}
-    monkeypatch.setattr(smod, "_owner_write_settings", lambda s, **k: written.update(s))
+    # The endpoint hands a TRANSFORM to the locked read-modify-write primitive instead of
+    # handing a finished document to the writer; the stub applies it exactly as the lock
+    # would, so the assertion below is unchanged.
+    monkeypatch.setattr(
+        smod, "_owner_update_settings",
+        lambda transform, *a, **k: written.update(transform(dict(written)) or {}))
     monkeypatch.setattr(smod, "_owner_audit", lambda *a, **k: None)
 
     calls: list = []
@@ -146,7 +156,7 @@ def test_owner_floor_write_changes_no_scope_review_behaviour(monkeypatch, tmp_pa
 # --- CW1: the scope-review-floor self-lowering shell detector ---
 
 def test_scope_review_floor_self_lowering_detector():
-    from ouroboros.tools.registry import _detect_scope_review_floor_self_lowering as det
+    from ouroboros.tools.registry_guard_process import _detect_scope_review_floor_self_lowering as det
     from ouroboros.tools.shell_guards import shell_has_write_indicator
 
     def verdict(cmd: str) -> bool:
@@ -233,7 +243,7 @@ def test_read_exemption_is_option_aware_not_head_only():
     sufficient: options are validated per command, assignments are refused rather than
     stripped, and the executable must resolve to a bare name or a system bin.
     """
-    from ouroboros.tools.registry import _detect_scope_review_floor_self_lowering as det
+    from ouroboros.tools.registry_guard_process import _detect_scope_review_floor_self_lowering as det
     from ouroboros.tools.shell_guards import shell_has_write_indicator
 
     def verdict(cmd: str) -> bool:
@@ -281,7 +291,7 @@ def test_read_exemption_is_option_aware_not_head_only():
 
     # Pin the MECHANISM, not just the verdict: the classifier itself must refuse these,
     # so a future change to the write-shape fact cannot silently mask the exemption hole.
-    from ouroboros.tools.registry import _is_pure_read_inspection as pure
+    from ouroboros.tools.registry_guard_process import _is_pure_read_inspection as pure
 
     for hostile in (
         "find . -name '*.py' -exec sh -c ':' ;",
@@ -357,7 +367,7 @@ def test_non_ephemeral_turn_allows_durable_mutators(tmp_path, monkeypatch):
 # --- CW4: the external-shell secret guard catches relative interpreter paths ---
 
 def test_secret_guard_catches_relative_interpreter_path():
-    from ouroboros.tools.registry import _subagent_shell_targets_secret
+    from ouroboros.tools.registry_guard_process import _subagent_shell_targets_secret
 
     assert _subagent_shell_targets_secret("python -c \"open('data/settings.json')\"") is True
     assert _subagent_shell_targets_secret("node -e \"readfilesync('../../data/settings.json')\"") is True
@@ -399,7 +409,8 @@ def test_predicted_route_downgrade_seam_stays_deleted():
 # --- CW3: the ephemeral deny surface is complete (core envelope + non-core mutators) ---
 
 def test_ephemeral_allowlist_excludes_every_mutator_class():
-    from ouroboros.tools.registry import _EPHEMERAL_ALLOWED_TOOLS, _REPO_MUTATION_TOOLS
+    from ouroboros.tools.registry_core import _REPO_MUTATION_TOOLS
+    from ouroboros.tools.registry_guards import _EPHEMERAL_ALLOWED_TOOLS
 
     # CW3 default-deny: no durable repo/git mutator is in the allowlist...
     assert not (_REPO_MUTATION_TOOLS & _EPHEMERAL_ALLOWED_TOOLS)
@@ -457,15 +468,28 @@ def test_switch_model_does_not_blanket_gate_on_context_window(monkeypatch, tmp_p
 
 def test_ephemeral_blocks_extension_and_mcp_tools(tmp_path):
     from ouroboros.tools.registry import ToolContext, ToolRegistry
+    from ouroboros.tools.registry_guards import _ephemeral_block_result
 
     reg = ToolRegistry(repo_dir=tmp_path, drive_root=tmp_path)
     reg.set_context(ToolContext(repo_dir=tmp_path, drive_root=tmp_path, is_ephemeral_turn=True))
     # an extension tool (resolved ext_tool) and an MCP tool both fail closed at execute()
-    assert "EPHEMERAL_TURN_RESTRICTED" in reg._ephemeral_block("skill__do", ext_tool={"name": "skill__do"})
-    assert "EPHEMERAL_TURN_RESTRICTED" in reg._ephemeral_block("mcp__srv__x", is_mcp=True)
+    assert "EPHEMERAL_TURN_RESTRICTED" in _ephemeral_block_result(
+        reg._ctx,
+        "skill__do",
+        ext_tool={"name": "skill__do"},
+    ).text
+    assert "EPHEMERAL_TURN_RESTRICTED" in _ephemeral_block_result(
+        reg._ctx,
+        "mcp__srv__x",
+        is_mcp=True,
+    ).text
     # a normal turn does not block external tools
     reg.set_context(ToolContext(repo_dir=tmp_path, drive_root=tmp_path, is_ephemeral_turn=False))
-    assert reg._ephemeral_block("skill__do", ext_tool={"name": "skill__do"}) == ""
+    assert _ephemeral_block_result(
+        reg._ctx,
+        "skill__do",
+        ext_tool={"name": "skill__do"},
+    ) is None
 
 
 def test_ephemeral_schemas_omit_extension_and_mcp_surfaces(tmp_path, monkeypatch):
@@ -703,8 +727,8 @@ def test_read_exemption_fails_closed_on_nested_execution_constructs():
     (`$()`, backticks, process substitution, subshells) rather than enumerated: the writer
     inside it need not be a shape anybody listed.
     """
-    from ouroboros.tools.registry import _detect_scope_review_floor_self_lowering as det
-    from ouroboros.tools.registry import _is_pure_read_inspection as pure
+    from ouroboros.tools.registry_guard_process import _detect_scope_review_floor_self_lowering as det
+    from ouroboros.tools.registry_guard_process import _is_pure_read_inspection as pure
     from ouroboros.tools.shell_guards import shell_has_write_indicator
 
     ep = "http://127.0.0.1:8765/api/owner/scope-review-floor"

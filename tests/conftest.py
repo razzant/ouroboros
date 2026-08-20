@@ -20,10 +20,26 @@ _PYTEST_DATA_DIR = None
 # so the hermetic lane never leaves an unused temp dir behind (see pytest_sessionfinish).
 _PYTEST_REPO_FALLBACK = None
 if os.environ.get("OUROBOROS_ALLOW_LIVE_DATA_TESTS") != "1":
+    # The union of roots the fail-closed invariant defends. The canonical home
+    # root is computed INDEPENDENTLY of the isolating env — same semantics as
+    # supervisor.state.assert_test_data_path: an operator battery that exports
+    # OUROBOROS_DATA_DIR=$TMP/data must not aim the guard at its own temp root
+    # while the real live tree goes unwatched (that is exactly the invocation
+    # every hermetic battery uses, so an env-derived-only guard was blind to
+    # the poisoner class it exists to name).
+    _LIVE_DATA_ROOTS = [str((pathlib.Path.home() / "Ouroboros" / "data").resolve(strict=False))]
+    for _candidate in (
+        os.environ.get("OUROBOROS_TEST_LIVE_DATA_ROOT"),
+        os.environ.get("OUROBOROS_DATA_DIR"),
+    ):
+        if _candidate:
+            _resolved_candidate = str(pathlib.Path(_candidate).resolve(strict=False))
+            if _resolved_candidate not in _LIVE_DATA_ROOTS:
+                _LIVE_DATA_ROOTS.append(_resolved_candidate)
     _LIVE_DATA_ROOT = (
         os.environ.get("OUROBOROS_TEST_LIVE_DATA_ROOT")
         or os.environ.get("OUROBOROS_DATA_DIR")
-        or str(pathlib.Path.home() / "Ouroboros" / "data")
+        or _LIVE_DATA_ROOTS[0]
     )
     _PYTEST_DATA_DIR = pathlib.Path(tempfile.mkdtemp(prefix="ouroboros-pytest-data-"))
     os.environ["OUROBOROS_PYTEST_ACTIVE"] = "1"
@@ -112,6 +128,56 @@ def _bind_pytest_repo_root() -> None:
     git_ops.REPO_DIR.mkdir(parents=True, exist_ok=True)
 
 
+def _assert_runtime_roots_off_live():
+    """Fail-closed invariant (spec 487/783): no runtime-root module global may
+    END a test resolving into the operator's LIVE data root. The session binder
+    above starts every root on the pytest temp root; a test that rebinds one
+    without restoring it poisons every later test in its worker — the observed
+    symptom was a later, correctly-written test appending to the LIVE
+    supervisor log. This names the poisoning test instead of the victim.
+
+    Called from the pytest_runtest_teardown hook wrapper (below), not an
+    autouse fixture: the check must run AFTER every function-scoped finalizer —
+    an autouse fixture's teardown ran before the test's own monkeypatch.undo,
+    flagging properly-restored fuse tests.
+    """
+    if _PYTEST_DATA_DIR is None:
+        return
+    live_roots = [
+        pathlib.Path(entry).resolve(strict=False)
+        for entry in globals().get("_LIVE_DATA_ROOTS") or []
+    ]
+    if not live_roots:
+        return
+    import ouroboros.config as config
+    from supervisor import git_ops, message_bus, queue, state, workers
+
+    offenders = []
+    for name, value in (
+        ("config.DATA_DIR", config.DATA_DIR),
+        ("config.SETTINGS_PATH", config.SETTINGS_PATH),
+        ("git_ops.DRIVE_ROOT", git_ops.DRIVE_ROOT),
+        ("message_bus.DATA_DIR", message_bus.DATA_DIR),
+        ("workers.DRIVE_ROOT", workers.DRIVE_ROOT),
+        ("state.DRIVE_ROOT", state.DRIVE_ROOT),
+        ("queue.DRIVE_ROOT", getattr(queue, "DRIVE_ROOT", None)),
+    ):
+        if not value:
+            continue
+        try:
+            resolved = pathlib.Path(value).resolve(strict=False)
+        except (TypeError, ValueError):
+            continue  # a non-pathlike stand-in (injected fake) cannot name a live root
+        for live in live_roots:
+            if resolved == live or live in resolved.parents:
+                offenders.append(f"{name}={value} (live root {live})")
+                break
+    assert not offenders, (
+        "runtime root(s) left resolving into a LIVE data root by this test: "
+        + ", ".join(offenders)
+    )
+
+
 def git_ops_repo_root() -> pathlib.Path:
     """The repo root this pytest session binds git_ops (and worker children) to."""
     from supervisor import git_ops
@@ -126,13 +192,20 @@ def _bind_pytest_runtime_roots() -> None:
         return
     root = _PYTEST_DATA_DIR.resolve(strict=False)
     import ouroboros.config as config
-    from supervisor import queue, state, workers
+    from supervisor import git_ops, message_bus, queue, state, workers
 
     config.DATA_DIR = root
     config.SETTINGS_PATH = root / "settings.json"
     state.init(root, state.TOTAL_BUDGET_LIMIT)
-    queue.init(root, queue.SOFT_TIMEOUT_SEC, queue.HARD_TIMEOUT_SEC)
+    queue.init(root)
     workers.DRIVE_ROOT = root
+    # The two root globals the spec baseline names as missing from this binder
+    # (spec 783): git_ops.DRIVE_ROOT freezes config.DATA_DIR at import time, so
+    # a pre-conftest import keeps the operator's root and any test that reaches
+    # a git_ops logging branch appends to the LIVE supervisor log (observed);
+    # message_bus.DATA_DIR has the same import-order exposure.
+    git_ops.DRIVE_ROOT = root
+    message_bus.DATA_DIR = root
     # spawn_workers hands str(workers.REPO_DIR) to every child, and the child binds git_ops to
     # it — so leaving this at the live default would send workers started BY A TEST back at the
     # operator's checkout, undoing the isolation above.
@@ -170,6 +243,11 @@ def _mock_pollution_files(root: pathlib.Path) -> set[pathlib.Path]:
 # See docs/DEVELOPMENT.md "Pytest marker lanes".
 _SERIAL_TEST_FILES = frozenset({
     "test_workspace_executor.py",
+    # Themed siblings of test_workspace_executor.py; they spawn the same real
+    # processes, so the whole family stays in the serial lane.
+    "test_workspace_executor_services.py",
+    "test_workspace_executor_docker.py",
+    "test_workspace_executor_admission.py",
     "test_workspace_executor_cleanup.py",
     "test_process_custody.py",
     "test_kill_process_tree_orphans.py",
@@ -181,6 +259,17 @@ _SERIAL_TEST_FILES = frozenset({
     # trees / sweeps processes referencing a temp root → can collateral-damage sibling xdist
     # workers under -n (their unrelated tests then fail as a crashed-worker batch).
     "test_preflight_runner.py",
+    # Themed siblings of test_preflight_runner.py. The whole family stays in the serial
+    # lane: the gate they cover is one subject, several of them spawn the same real pytest
+    # subprocesses and reapers, and letting the split decide the lane per theme would move
+    # tests out of the serial pass as a side effect of tidying the file.
+    "test_preflight_diagnosis.py",
+    "test_preflight_pass_orchestration.py",
+    "test_preflight_candidate_capture.py",
+    "test_preflight_commit_gate.py",
+    "test_preflight_hermetic_runs.py",
+    "test_preflight_process_containment.py",
+    "test_preflight_process_reaping.py",
     # Imports/mutates the process-global server settings facade; when xdist
     # reuses a worker after unrelated server tests, cached route/probe state can
     # escape monkeypatch restoration and turn the mocked capability probe into
@@ -450,6 +539,7 @@ def pytest_runtest_teardown(item, nextitem):  # noqa: ARG001
     yield  # fixture finalizers and teardown run here
     teardown_loop.close()
     asyncio.set_event_loop(None)
+    _assert_runtime_roots_off_live()
 
 
 # Pre-v5.15 conftest exported four fixtures (``make_git_repo``, ``tool_context``,

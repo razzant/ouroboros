@@ -210,8 +210,8 @@ class TestBuildAdvisoryChangedContextNoDuplicateGitStatus:
             result.stdout = b""
             return result
 
-        with patch("ouroboros.tools.review_helpers.subprocess.run", side_effect=mock_subprocess_run):
-            with patch("ouroboros.tools.review_helpers.build_touched_file_pack", return_value=("(touched files)", [])):
+        with patch("ouroboros.tools.review_file_pack.subprocess.run", side_effect=mock_subprocess_run):
+            with patch("ouroboros.tools.review_file_pack.build_touched_file_pack", return_value=("(touched files)", [])):
                 resolved, touched, omitted = build_advisory_changed_context(
                     tmp_path,
                     changed_files_text=porcelain_text,
@@ -233,7 +233,7 @@ class TestBuildAdvisoryChangedContextNoDuplicateGitStatus:
         explicit_paths = ["ouroboros/agent.py"]
         porcelain_text = "M  ouroboros/loop.py\n"
 
-        with patch("ouroboros.tools.review_helpers.build_touched_file_pack", return_value=("(pack)", [])):
+        with patch("ouroboros.tools.review_file_pack.build_touched_file_pack", return_value=("(pack)", [])):
             resolved, touched, omitted = build_advisory_changed_context(
                 tmp_path,
                 changed_files_text=porcelain_text,

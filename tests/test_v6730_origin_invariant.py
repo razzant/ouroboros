@@ -157,7 +157,7 @@ def test_promote_tool_passes_origin_by_value_despite_rewritten_objective(tmp_pat
     from ouroboros.tools.control import _promote_chat_to_task
 
     monkeypatch.setattr(
-        "ouroboros.tools.control._wait_for_promotion_admission",
+        "ouroboros.tools.control_events._wait_for_promotion_admission",
         lambda *_args, **_kwargs: {"status": "scheduled"},
     )
     events = []
@@ -441,6 +441,7 @@ def test_ensure_worker_falls_back_to_task_record_origin(tmp_path, monkeypatch):
 
 def test_queue_snapshot_preserves_origin_fields(tmp_path, monkeypatch):
     """Restart-while-pending must not strip the by-value origin (adversarial r1)."""
+    from supervisor import state as state_mod
     import supervisor.queue as queue_mod
 
     task = {
@@ -452,7 +453,7 @@ def test_queue_snapshot_preserves_origin_fields(tmp_path, monkeypatch):
     monkeypatch.setattr(queue_mod, "DRIVE_ROOT", tmp_path, raising=False)
     snapshot_path = tmp_path / "state" / "queue_snapshot.json"
     snapshot_path.parent.mkdir(parents=True, exist_ok=True)
-    monkeypatch.setattr(queue_mod, "QUEUE_SNAPSHOT_PATH", snapshot_path, raising=False)
+    monkeypatch.setattr(state_mod, "QUEUE_SNAPSHOT_PATH", snapshot_path, raising=False)
     queue_mod.persist_queue_snapshot(reason="test")
     snap = json.loads(snapshot_path.read_text(encoding="utf-8"))
     row = snap["pending"][0]["task"]

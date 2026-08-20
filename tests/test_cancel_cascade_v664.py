@@ -774,7 +774,7 @@ def test_a_natural_task_done_in_the_kill_window_keeps_one_owner(monkeypatch, tmp
     restore leaves no RUNNING ghost and no freed slot."""
     import types
 
-    import supervisor.events as events_mod
+    import supervisor.events_task_done as task_done_mod
     import supervisor.queue as q
 
     _isolate_queue(monkeypatch, tmp_path, [])
@@ -799,5 +799,5 @@ def test_a_natural_task_done_in_the_kill_window_keeps_one_owner(monkeypatch, tmp
     assert "racer2" not in ctx.RUNNING, "completion-wins still consumes the row"
     # ...and the handler's real source implements exactly that guard.
     import pathlib as _pl
-    src = _pl.Path(events_mod.__file__).read_text(encoding="utf-8")
+    src = _pl.Path(task_done_mod.__file__).read_text(encoding="utf-8")
     assert 'if not getattr(ctx.WORKERS[worker_id], "reaping", False):' in src

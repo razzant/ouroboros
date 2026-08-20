@@ -76,16 +76,19 @@ def test_history_marks_bg_consciousness_terminal_on_replay(tmp_path):
 
 
 def test_reusable_live_card_preserves_explicit_expansion_across_cycles():
+    # The sticky-slot consumers moved to chat_live_cards.js (wave D); the Set
+    # itself stays in the chat shell and is passed into the factory.
     src = _read("web/modules/chat.js")
+    live_cards = _read("web/modules/chat_live_cards.js")
     assert "const stickyExpandedSlots = new Set();" in src
-    assert "stickyExpandedSlots.has(normalizedGroupId)" in src
-    assert "stickyExpandedSlots.add(record.groupId)" in src
-    assert "stickyExpandedSlots.delete(record.groupId)" in src
-    assert "if (!stickyExpandedSlots.has(record.groupId))" in src
+    assert "stickyExpandedSlots.has(normalizedGroupId)" in live_cards
+    assert "stickyExpandedSlots.add(record.groupId)" in live_cards
+    assert "stickyExpandedSlots.delete(record.groupId)" in live_cards
+    assert "if (!stickyExpandedSlots.has(record.groupId))" in live_cards
 
 
 def test_live_card_timeline_only_follows_when_pinned():
-    src = _read("web/modules/chat.js")
+    src = _read("web/modules/chat_live_card_view.js")
     assert "function isTimelinePinnedToBottom(record)" in src
     assert "const prevTop = el.scrollTop;" in src
     assert "el.scrollTop = pinned ? el.scrollHeight : prevTop;" in src
@@ -95,7 +98,8 @@ def test_live_card_timeline_only_follows_when_pinned():
 # ───────────────────── Bug 3: reconnect feed rebuild ─────────────────────────
 
 def test_reconnect_rebuilds_feed_and_clears_dedupe():
-    src = _read("web/modules/chat.js")
+    # The history rebuild moved to chat_history_sync.js (wave D).
+    src = _read("web/modules/chat_history_sync.js")
     assert "const renderUser = includeUser || fromReconnect || offlineBootstrapPainted;" in src
     assert "seenMessageKeys.clear();" in src
     assert "messageKeyOrder.length = 0;" in src

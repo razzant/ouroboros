@@ -2,9 +2,9 @@
 
 Probe transports deliberately do not use the ordinary chat retry, fallback,
 reasoning, cache, or capability-learning paths.  Target resolution and client
-construction remain owned by :class:`ouroboros.llm.LLMClient`; this module only
-builds the final probe candidate and dispatches it through the existing
-physical-attempt accounting seam.
+construction remain owned by the routing leaf the client composes
+(:mod:`ouroboros.llm_routing`); this module only builds the final probe candidate
+and dispatches it through the existing physical-attempt accounting seam.
 """
 
 from __future__ import annotations
@@ -33,9 +33,11 @@ def _accounted_send(
     *,
     source: str,
 ) -> Any:
-    # Lazy import is intentional: llm.py exposes thin compatibility methods
-    # that import this module only after its own helpers are fully initialized.
-    from ouroboros.llm import (
+    # Named at the owner leaf, not through the llm.py facade: an llm_* leaf never
+    # imports its parent (the composition would cycle), and a test that patches the
+    # executor patches llm_attempt, which is where `_execute_candidate` reads it.
+    # The import stays lazy so importing this module costs nothing at startup.
+    from ouroboros.llm_attempt import (
         _attempt_request,
         _candidate_before_dispatch,
         _execute_candidate,

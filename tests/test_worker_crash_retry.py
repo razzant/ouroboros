@@ -139,7 +139,7 @@ def test_crash_retry_admission_block_terminalizes_task(tmp_path):
     ), patch.object(sq, "persist_queue_snapshot", MagicMock()), patch(
         "supervisor.workers.respawn_worker"
     ), patch(
-        "supervisor.workers._emit_task_done_terminal",
+        "supervisor.worker_health._emit_task_done_terminal",
         side_effect=lambda *args, **kwargs: terminal.append((args, kwargs)),
     ), patch(
         "ouroboros.task_results.load_task_result", return_value=None

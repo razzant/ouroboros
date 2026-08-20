@@ -21,6 +21,14 @@ cascade, boot migration of legacy latch files) writes an intent through
 owner: it CLAIMS the intent before teardown and SETTLES it with the terminal
 outcome; the supervisor-tick watchdog only re-feeds unclaimed/stale intents back
 into custody. The canonical ``status`` never carries intent again.
+
+Corruption has one rule for the whole module, split by what a call is DOING
+rather than by which function it is: authoring a record (the mint and the four
+lifecycle mutators) fails CLOSED on a projection that cannot be read — typed
+``CancelIntentProjectionCorrupt``, bytes never rewritten — while reading for
+behaviour (``active_intents`` and everything built on it) fails soft and loud,
+so one unreadable file discloses itself instead of wedging the supervisor tick.
+Absence stays an ordinary empty projection in both directions.
 """
 
 from __future__ import annotations
@@ -110,15 +118,14 @@ def _valid_task_id(task_id: Any) -> str:
 def _load_intents(data: Dict[str, Any], *, strict: bool = False) -> Dict[str, Any]:
     """The active-intent rows; ``strict`` refuses a malformed nested value.
 
-    GR5-6: the MINTING mutator (``request_cancel``) passes ``strict=True`` — a
-    present-but-non-dict ``intents`` under a valid top-level dict used to be
-    coerced to ``{}``, so the next mint rewrote the file and silently dropped
-    every other active intent, the exact loss the top-level
-    ``strict_existing_dict`` check refuses. The raise is the same typed
-    ``ValueError``, so the caller's existing corrupt-projection handling
-    (refuse + forensic row + ``CancelIntentProjectionCorrupt``) applies. The
-    non-minting mutators find no row in ``{}`` and abort without overwriting;
-    read paths disclose separately (``active_intents``)."""
+    GR5-6: every MUTATOR passes ``strict=True`` — a present-but-non-dict
+    ``intents`` under a valid top-level dict used to be coerced to ``{}``, so
+    the next mint rewrote the file and silently dropped every other active
+    intent (the exact loss the top-level ``strict_existing_dict`` check
+    refuses), and the non-minting mutators read that same ``{}`` as "nobody
+    requested a cancel". The raise is the typed ``ValueError`` each mutator
+    turns into ``CancelIntentProjectionCorrupt``. Read paths disclose
+    separately and stay fail-soft (``active_intents``)."""
     intents = data.get("intents")
     if isinstance(intents, dict):
         return intents
@@ -127,6 +134,29 @@ def _load_intents(data: Dict[str, Any], *, strict: bool = False) -> Dict[str, An
             "cancel-intent projection 'intents' is malformed (not an object)"
         )
     return {}
+
+
+def _refuse_corrupt(
+    drive_root: Any, task_id: str, op: str, exc: Exception,
+) -> CancelIntentProjectionCorrupt:
+    """Disclose a corrupt projection and build the typed refusal for ``op``.
+
+    Every mutation of the projection AUTHORS a durable record, so all of them
+    fail closed on a file they could not read — the mint refuses to record an
+    intent, and the four lifecycle mutators refuse to claim, release, settle or
+    re-scope one. Reading the file for BEHAVIOUR is the separate, deliberately
+    fail-soft path (``active_intents``): the split is what keeps one unreadable
+    file from wedging the supervisor tick while still never letting corruption
+    masquerade as "no cancel was requested".
+    """
+    _forensic(drive_root, {
+        "event": "projection_corrupt_refused", "task_id": task_id,
+        "op": op, "error": str(exc)[:200],
+    })
+    log.error(
+        "cancel-intent projection is corrupt; refusing %s for %s", op, task_id,
+    )
+    return CancelIntentProjectionCorrupt(str(exc))
 
 
 def settled_status(drive_root: Any, task_id: str) -> str:
@@ -269,14 +299,7 @@ def request_cancel(
         # write) is unaffected.
         update_json_locked(_intents_path(drive_root), _mutate, strict_existing_dict=True)
     except ValueError as exc:
-        _forensic(drive_root, {
-            "event": "projection_corrupt_refused", "task_id": tid,
-            "op": "request_cancel", "error": str(exc)[:200],
-        })
-        log.error(
-            "cancel-intent projection is corrupt; refusing to record intent for %s", tid,
-        )
-        raise CancelIntentProjectionCorrupt(str(exc)) from exc
+        raise _refuse_corrupt(drive_root, tid, "request_cancel", exc) from exc
     if not minted.get("already_requested"):
         _forensic(drive_root, {
             "event": "requested", "task_id": tid,
@@ -308,8 +331,11 @@ def mark_finalize_control_drained(
     (``supervisor/owner_stop.py``). FIRST DRAIN WINS: a restart re-drain (the
     control is replayable until terminal cleanup) never moves the stamp, so a
     worker crash cannot resurrect an unlimited episode. No-op for absent
-    intents and for non-finalize policies. Fail-soft: a projection failure
-    never breaks the round loop. Returns whether THIS call recorded the stamp.
+    intents and for non-finalize policies. Fail-soft for ordinary write
+    failures (a projection error never breaks the round loop) but fail-CLOSED
+    for a corrupt projection: ``CancelIntentProjectionCorrupt`` is raised
+    rather than answering "no intent" over a file nobody could read. Returns
+    whether THIS call recorded the stamp.
     """
     try:
         tid = _valid_task_id(task_id)
@@ -320,7 +346,7 @@ def mark_finalize_control_drained(
 
     def _mutate(current: Dict[str, Any]) -> Optional[Dict[str, Any]]:
         recorded.clear()
-        intents = _load_intents(current)
+        intents = _load_intents(current, strict=True)
         row = intents.get(tid)
         if not isinstance(row, dict) or stop_policy(row) != STOP_POLICY_FINALIZE:
             return None
@@ -331,7 +357,11 @@ def mark_finalize_control_drained(
         return {"schema_version": _SCHEMA_VERSION, "intents": intents}
 
     try:
-        update_json_locked(_intents_path(drive_root), _mutate)
+        update_json_locked(_intents_path(drive_root), _mutate, strict_existing_dict=True)
+    except ValueError as exc:
+        raise _refuse_corrupt(
+            drive_root, tid, "mark_finalize_control_drained", exc,
+        ) from exc
     except Exception:
         log.debug(
             "finalize-control drain stamp failed for %s", task_id, exc_info=True,
@@ -358,6 +388,10 @@ def mark_intent_scope(drive_root: Any, task_id: str, scope: str) -> bool:
     ``cascade`` → ``single`` is refused as a no-op plus a forensic row — a
     narrowed record would make the watchdog replay the root alone while its
     descendants kept running, exactly the shape the scope exists to prevent.
+
+    A CORRUPT projection raises ``CancelIntentProjectionCorrupt``: the caller
+    (the cascade's scope stamp) already treats a failure here as loud, and
+    "no intent to widen" is not an answer this file can honestly give.
     """
     try:
         tid = _valid_task_id(task_id)
@@ -371,7 +405,7 @@ def mark_intent_scope(drive_root: Any, task_id: str, scope: str) -> bool:
 
     def _mutate(current: Dict[str, Any]) -> Optional[Dict[str, Any]]:
         narrowed.clear()
-        intents = _load_intents(current)
+        intents = _load_intents(current, strict=True)
         row = intents.get(tid)
         if not isinstance(row, dict) or str(row.get("scope") or "") == scope_text:
             return None
@@ -383,7 +417,9 @@ def mark_intent_scope(drive_root: Any, task_id: str, scope: str) -> bool:
         return {"schema_version": _SCHEMA_VERSION, "intents": intents}
 
     try:
-        update_json_locked(_intents_path(drive_root), _mutate)
+        update_json_locked(_intents_path(drive_root), _mutate, strict_existing_dict=True)
+    except ValueError as exc:
+        raise _refuse_corrupt(drive_root, tid, "mark_intent_scope", exc) from exc
     except Exception:
         log.debug("cancel-intent scope update failed for %s", task_id, exc_info=True)
         return False
@@ -522,7 +558,11 @@ def claim_intent(drive_root: Any, task_id: str, *, owner: str) -> Optional[Dict[
     An ABANDONED claim (its process is gone, or it aged past ``CLAIM_STALE_SEC``)
     is taken over and the generation is bumped, which is exactly what makes the
     old holder's late ``settle``/``release`` a no-op (see ``expected_generation``).
-    Returns None when no active intent exists.
+    Returns None when no active intent exists — and raises
+    ``CancelIntentProjectionCorrupt`` when the projection cannot be read, which
+    is a DIFFERENT fact: custody maps a raised claim onto "treat as refused"
+    (it cannot prove exclusivity) while ``None`` is the legacy no-intent path
+    where capture under the queue lock is the exclusion.
     """
     try:
         tid = _valid_task_id(task_id)
@@ -532,7 +572,7 @@ def claim_intent(drive_root: Any, task_id: str, *, owner: str) -> Optional[Dict[
     refused: Dict[str, Any] = {}
 
     def _mutate(current: Dict[str, Any]) -> Optional[Dict[str, Any]]:
-        intents = _load_intents(current)
+        intents = _load_intents(current, strict=True)
         row = intents.get(tid)
         if not isinstance(row, dict):
             return None
@@ -549,7 +589,10 @@ def claim_intent(drive_root: Any, task_id: str, *, owner: str) -> Optional[Dict[
         claimed.update(row)
         return {"schema_version": _SCHEMA_VERSION, "intents": intents}
 
-    update_json_locked(_intents_path(drive_root), _mutate)
+    try:
+        update_json_locked(_intents_path(drive_root), _mutate, strict_existing_dict=True)
+    except ValueError as exc:
+        raise _refuse_corrupt(drive_root, tid, "claim_intent", exc) from exc
     if claimed:
         _forensic(drive_root, {
             "event": "claimed", "task_id": tid,
@@ -601,6 +644,9 @@ def release_claim(
 
     Fenced by ``expected_generation``/``request_id``: a stale claimant's release
     must never revert the claim of the custody attempt that took over from it.
+    A corrupt projection raises ``CancelIntentProjectionCorrupt``; the caller
+    logs it and the intent stays CLAIMED for the watchdog, which is the same
+    conservative outcome an unwritable projection already produces.
     """
     try:
         tid = _valid_task_id(task_id)
@@ -610,7 +656,7 @@ def release_claim(
     mismatch: Dict[str, Any] = {}
 
     def _mutate(current: Dict[str, Any]) -> Optional[Dict[str, Any]]:
-        intents = _load_intents(current)
+        intents = _load_intents(current, strict=True)
         row = intents.get(tid)
         if not isinstance(row, dict) or row.get("state") != INTENT_CLAIMED:
             return None
@@ -628,7 +674,10 @@ def release_claim(
         released.update(row)
         return {"schema_version": _SCHEMA_VERSION, "intents": intents}
 
-    update_json_locked(_intents_path(drive_root), _mutate)
+    try:
+        update_json_locked(_intents_path(drive_root), _mutate, strict_existing_dict=True)
+    except ValueError as exc:
+        raise _refuse_corrupt(drive_root, tid, "release_claim", exc) from exc
     if released:
         _forensic(drive_root, {
             "event": "claim_released", "task_id": tid,
@@ -663,6 +712,10 @@ def settle_intent(
     trigger. When the refused caller holds the matching fenced claim, that
     claim is RELEASED in the same write (state back to ``requested``) so the
     watchdog can re-feed the cascade instead of waiting out a dead claim.
+
+    A corrupt projection raises ``CancelIntentProjectionCorrupt`` instead of
+    reporting the no-op every settle caller reads as "nothing left to settle":
+    the intent must stay OPEN for the watchdog when nobody could read the file.
     """
     try:
         tid = _valid_task_id(task_id)
@@ -676,7 +729,7 @@ def settle_intent(
         settled.clear()
         mismatch.clear()
         cascade_deferred.clear()
-        intents = _load_intents(current)
+        intents = _load_intents(current, strict=True)
         row = intents.get(tid)
         if not isinstance(row, dict):
             return None
@@ -710,7 +763,10 @@ def settle_intent(
         settled.update(row)
         return {"schema_version": _SCHEMA_VERSION, "intents": intents}
 
-    update_json_locked(_intents_path(drive_root), _mutate)
+    try:
+        update_json_locked(_intents_path(drive_root), _mutate, strict_existing_dict=True)
+    except ValueError as exc:
+        raise _refuse_corrupt(drive_root, tid, "settle_intent", exc) from exc
     if settled:
         _forensic(drive_root, {
             "event": "settled", "task_id": tid,

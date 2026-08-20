@@ -48,12 +48,15 @@ def _codebase_health(ctx: ToolContext) -> str:
             TARGET_FUNCTION_LINES,
             TARGET_MODULE_LINES,
         )
+        module_hard_limit = int(metrics.get("module_hard_limit") or MAX_MODULE_LINES)
+        module_debt_1500_active = bool(metrics.get("module_debt_1500_active"))
+        module_debt_label = "MODULE_DEBT_1500" if module_debt_1500_active else "GIANT_PATHS"
 
         # Largest files
         if metrics.get("largest_files"):
             lines.append("\n### Largest Files")
             for path, size in metrics["largest_files"][:10]:
-                if size > MAX_MODULE_LINES:
+                if size > module_hard_limit:
                     marker = " 🚫 HARD LIMIT"
                 elif size > TARGET_MODULE_LINES:
                     marker = " ⚠️ TARGET DRIFT"
@@ -80,6 +83,8 @@ def _codebase_health(ctx: ToolContext) -> str:
         grandfathered_mods = metrics.get("grandfathered_modules", [])
         oversized_funcs = metrics.get("oversized_functions", [])
         oversized_mods = metrics.get("oversized_modules", [])
+        legacy_grandfathered_mods = metrics.get("legacy_grandfathered_modules", [])
+        legacy_oversized_mods = metrics.get("legacy_oversized_modules", [])
         function_count_violation = int(metrics.get("total_functions") or 0) > MAX_TOTAL_FUNCTIONS
 
         if (
@@ -107,20 +112,40 @@ def _codebase_health(ctx: ToolContext) -> str:
                 for path, start, length in grandfathered_funcs:
                     lines.append(f"    - {path}:{start} ({length} lines)")
             if oversized_mods:
-                lines.append(f"  Hard-limit modules > {MAX_MODULE_LINES} lines: {len(oversized_mods)}")
+                lines.append(
+                    f"  Hard-limit modules > {module_hard_limit} lines outside "
+                    f"{module_debt_label}: {len(oversized_mods)}"
+                )
                 for path, size in oversized_mods:
                     lines.append(f"    - {path} ({size} lines)")
             if grandfathered_mods:
-                lines.append(f"  Grandfathered modules still above {MAX_MODULE_LINES} lines: {len(grandfathered_mods)}")
+                lines.append(
+                    f"  {module_debt_label} modules still above {module_hard_limit} lines: "
+                    f"{len(grandfathered_mods)}"
+                )
                 for path, size in grandfathered_mods:
                     lines.append(f"    - {path} ({size} lines)")
             elif target_drift_mods:
                 lines.append(f"  Target-drift modules > {TARGET_MODULE_LINES} lines: {len(target_drift_mods)}")
+            if module_debt_1500_active and legacy_oversized_mods:
+                lines.append(
+                    f"  Legacy hard-limit modules > {MAX_MODULE_LINES} lines outside "
+                    f"GIANT_PATHS: {len(legacy_oversized_mods)}"
+                )
+                for path, size in legacy_oversized_mods:
+                    lines.append(f"    - {path} ({size} lines)")
+            if module_debt_1500_active and legacy_grandfathered_mods:
+                lines.append(
+                    f"  Legacy GIANT_PATHS modules still above {MAX_MODULE_LINES} lines: "
+                    f"{len(legacy_grandfathered_mods)}"
+                )
+                for path, size in legacy_grandfathered_mods:
+                    lines.append(f"    - {path} ({size} lines)")
         else:
             lines.append(
                 "\n✅ No hard P7 limit violations detected "
                 f"(all functions <= {MAX_FUNCTION_LINES} lines, total function count <= {MAX_TOTAL_FUNCTIONS}, "
-                f"all non-grandfathered modules <= {MAX_MODULE_LINES} lines)"
+                f"all modules outside {module_debt_label} <= {module_hard_limit} lines)"
             )
 
         return "\n".join(lines)

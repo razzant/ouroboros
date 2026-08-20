@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
 
-import { liveLineRowToggleKey } from '../modules/chat.js';
+import { liveLineRowToggleKey } from '../modules/chat_card_state.js';
 
 // Minimal element stubs: enough of the DOM contract (closest/dataset/contains)
 // for the pure guard, without jsdom.

@@ -7,7 +7,8 @@ from unittest.mock import MagicMock, patch
 
 from ouroboros import task_pacing
 from ouroboros.contracts.task_contract import normalize_budget_profile
-from ouroboros.loop import _RoundLimitContext, _check_budget_limits
+from ouroboros.loop_budget import _check_budget_limits
+from ouroboros.loop_round_limits import _RoundLimitContext
 
 
 def _make_args(**overrides):

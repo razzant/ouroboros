@@ -81,11 +81,11 @@ def test_openrouter_uses_session_id_without_replacing_existing_extra_body(monkey
 
 
 def test_named_openai_cache_parameter_gets_one_exact_retry(monkeypatch):
-    import ouroboros.llm as llm_mod
+    import ouroboros.llm_attempt as llm_attempt_mod
     from ouroboros.llm import LLMClient
 
     monkeypatch.setattr(
-        llm_mod,
+        llm_attempt_mod,
         "execute_physical_attempt",
         lambda _request, send: send(),
     )
@@ -122,13 +122,13 @@ def test_named_openai_cache_parameter_gets_one_exact_retry(monkeypatch):
 
 
 def test_named_openrouter_session_id_gets_one_exact_async_retry(monkeypatch):
-    import ouroboros.llm as llm_mod
+    import ouroboros.llm_attempt as llm_attempt_mod
     from ouroboros.llm import LLMClient
 
     async def passthrough(_request, send):
         return await send()
 
-    monkeypatch.setattr(llm_mod, "execute_physical_attempt_async", passthrough)
+    monkeypatch.setattr(llm_attempt_mod, "execute_physical_attempt_async", passthrough)
     client = LLMClient(api_key="unused")
     calls = []
     expected = object()
@@ -167,11 +167,11 @@ def test_named_openrouter_session_id_gets_one_exact_async_retry(monkeypatch):
 
 
 def test_generic_403_does_not_trigger_cache_retry_or_provider_hop(monkeypatch):
-    import ouroboros.llm as llm_mod
+    import ouroboros.llm_attempt as llm_attempt_mod
     from ouroboros.llm import LLMClient
 
     monkeypatch.setattr(
-        llm_mod,
+        llm_attempt_mod,
         "execute_physical_attempt",
         lambda _request, send: send(),
     )

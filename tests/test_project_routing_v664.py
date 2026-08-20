@@ -527,9 +527,11 @@ def test_project_swarm_keeps_host_scope_when_registry_recheck_is_unavailable(
     tmp_path, monkeypatch,
 ):
     import server
+    from ouroboros import server_routing_context
 
     ctx = _ctx(tmp_path)
-    monkeypatch.setattr(server, "_project_id_for_registered_chat", lambda *_args: "")
+    monkeypatch.setattr(
+        server_routing_context, "_project_id_for_registered_chat", lambda *_args: "")
 
     metadata = server._decision_turn_metadata(
         ctx,

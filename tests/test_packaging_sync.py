@@ -3,6 +3,7 @@ import re
 
 import pytest
 
+from ouroboros.runtime_mode_policy import SAFETY_CRITICAL_PATHS
 from ouroboros.tools.release_sync import (
     RELEASE_ASSET_TEMPLATES,
     _normalize_pep440,
@@ -207,19 +208,28 @@ def test_architecture_doc_describes_build_script_release_tag_check():
 
 
 def test_system_prompt_lists_bible_in_safety_critical_set():
-    """prompts/SYSTEM.md ``Immutable Safety Files`` section must match
-    ``ouroboros.runtime_mode_policy.SAFETY_CRITICAL_PATHS`` — including
-    ``BIBLE.md``, which is protected by the hardcoded sandbox."""
+    """Both LLM-facing safety inventories must match the runtime SSOT."""
     system_md = (REPO / "prompts" / "SYSTEM.md").read_text(encoding="utf-8")
+    safety_md = (REPO / "prompts" / "SAFETY.md").read_text(encoding="utf-8")
 
     safety_section_start = system_md.find("## Immutable Safety Files")
     assert safety_section_start != -1
     safety_section_end = system_md.find("##", safety_section_start + 1)
     safety_section = system_md[safety_section_start:safety_section_end]
-    assert "`BIBLE.md`" in safety_section
-    assert "`ouroboros/safety.py`" in safety_section
-    assert "`prompts/SAFETY.md`" in safety_section
-    assert "`ouroboros/tools/registry.py`" in safety_section
+    system_paths = {
+        match.group(1)
+        for line in safety_section.splitlines()
+        if (match := re.match(r"^- `([^`]+)`", line))
+    }
+    assert system_paths == SAFETY_CRITICAL_PATHS
+
+    safety_inventory = re.search(
+        r"safety-critical files \((.*?)\), frozen contracts",
+        safety_md,
+    )
+    assert safety_inventory is not None
+    safety_paths = set(re.findall(r"`([^`]+)`", safety_inventory.group(1)))
+    assert safety_paths == SAFETY_CRITICAL_PATHS
 
 
 def test_architecture_doc_does_not_claim_ensure_managed_repo_fetches():

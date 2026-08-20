@@ -72,6 +72,9 @@ def _render(manifest: SizeRatchetManifest) -> str:
         "",
     ]
     lines.extend(_tuple_lines("GIANT_PATHS", sorted(manifest.giant_paths)))
+    if manifest.module_debt_1500 is not None:
+        lines.append("")
+        lines.extend(_tuple_lines("MODULE_DEBT_1500", sorted(manifest.module_debt_1500)))
     lines.extend(("", "FUNCTION_DEBT = ("))
     lines.extend(
         f"    ({json.dumps(path)}, {json.dumps(qualname)})," for path, qualname in sorted(manifest.function_debt)
@@ -97,12 +100,18 @@ def _render(manifest: SizeRatchetManifest) -> str:
 def _next_manifest(
     rationales: dict[str, str],
     *,
+    activate_1500_layer: bool = False,
     checked_candidate: SizeRatchetManifest | None = None,
 ) -> SizeRatchetManifest:
     head = _git("rev-parse", "HEAD").stdout.strip()
     prior_result = _git("show", f"HEAD:{SIZE_RATCHET_MANIFEST_PATH}", check=False)
     previous = parse_size_ratchet_manifest(prior_result.stdout) if prior_result.returncode == 0 else None
 
+    # --check inherits only the activation *state* from the checked-in candidate;
+    # the active set contents always derive from the production inventory below.
+    activate = activate_1500_layer or (
+        checked_candidate is not None and checked_candidate.module_debt_1500 is not None
+    )
     unused = set(rationales)
     if previous is None:
         inventory = collect_size_ratchet_inventory_at_ref(REPO_ROOT, head)
@@ -116,9 +125,16 @@ def _next_manifest(
             band_paths=band_paths,
             byte_baseline_debt=dict(inventory.byte_debt),
             byte_debt=dict(inventory.byte_debt),
+            module_debt_1500=inventory.module_debt_1500 if activate else None,
         )
     else:
+        if activate_1500_layer and previous.module_debt_1500 is not None:
+            raise ValueError("MODULE_DEBT_1500 is already active; --activate-1500-layer is one-time")
         inventory = collect_size_ratchet_inventory(REPO_ROOT, repo_paths=_tracked_paths())
+        if previous.module_debt_1500 is not None or activate:
+            module_debt_1500 = inventory.module_debt_1500
+        else:
+            module_debt_1500 = None
         band_paths: dict[str, str | None] = {}
         for path in sorted(inventory.band_paths):
             if path in previous.band_paths:
@@ -135,8 +151,14 @@ def _next_manifest(
             band_paths=band_paths,
             byte_baseline_debt=previous.byte_baseline_debt,
             byte_debt=dict(inventory.byte_debt),
+            module_debt_1500=module_debt_1500,
         )
-        transition_errors = validate_manifest_transition(current, previous)
+        parent_inventory_1500 = None
+        if previous.module_debt_1500 is None and module_debt_1500 is not None:
+            parent_inventory_1500 = collect_size_ratchet_inventory_at_ref(REPO_ROOT, head).module_debt_1500
+        transition_errors = validate_manifest_transition(
+            current, previous, parent_inventory_1500=parent_inventory_1500
+        )
         if transition_errors:
             raise ValueError("\n".join(transition_errors))
 
@@ -155,6 +177,11 @@ def main(argv: list[str] | None = None) -> int:
         metavar="PATH=TEXT",
         help="authorize one new or re-entered 1001-1500-line path",
     )
+    parser.add_argument(
+        "--activate-1500-layer",
+        action="store_true",
+        help="one-time activation of the v7 MODULE_DEBT_1500 layer from the exact first-parent >1500 inventory",
+    )
     args = parser.parse_args(argv)
     try:
         rationales = _parse_rationales(args.band_rationale)
@@ -162,7 +189,13 @@ def main(argv: list[str] | None = None) -> int:
         checked_candidate = (
             parse_size_ratchet_manifest(path.read_text(encoding="utf-8")) if args.check and path.exists() else None
         )
-        rendered = _render(_next_manifest(rationales, checked_candidate=checked_candidate))
+        rendered = _render(
+            _next_manifest(
+                rationales,
+                activate_1500_layer=args.activate_1500_layer,
+                checked_candidate=checked_candidate,
+            )
+        )
     except (OSError, ValueError, subprocess.CalledProcessError) as exc:
         print(f"size-ratchet regeneration failed: {exc}", file=sys.stderr)
         return 2

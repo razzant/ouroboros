@@ -107,7 +107,7 @@ CONFIGS: dict[str, list[str]] = {
 _V2_CONFIGS = ["edit_text_only", "apply_patch_only", "edit_batch_only", "full"]
 
 T2_PROMPT = """\
-In review_state.py apply EXACTLY these four changes and nothing else (the file \
+In review_state_records.py apply EXACTLY these four changes and nothing else (the file \
 must stay byte-identical everywhere else — no reformatting, no other renames):
 1. Rename the helper function `_stable_digest` to `_content_digest` — the def and every reference.
 2. Rename the helper function `_max_iso_ts` to `_latest_iso_ts` — the def and every reference. \
@@ -188,7 +188,7 @@ TASKS: dict[str, dict] = {
     "t2_surgical": {
         "workspace": V2 / "t2_surgical" / "workspace",
         "expected": V2 / "t2_surgical" / "expected",
-        "files": ["review_state.py"],
+        "files": ["review_state_records.py"],
         "prompt": T2_PROMPT,
         "check": None,
         "check_pythonpath": False,

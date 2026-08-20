@@ -88,7 +88,7 @@ def test_generic_data_tools_deny_project_store():
 
 def test_generic_tools_deny_project_store_live(tmp_path, monkeypatch):
     monkeypatch.setattr(cfg, "DATA_DIR", tmp_path / "data")
-    from ouroboros.tools import core
+    from ouroboros.tools import core, core_file_tools
     from ouroboros.tools.registry import ToolContext
 
     (cfg.DATA_DIR / "projects" / "proj_x" / "knowledge").mkdir(parents=True)
@@ -98,10 +98,10 @@ def test_generic_tools_deny_project_store_live(tmp_path, monkeypatch):
     ctx = ToolContext(repo_dir=tmp_path / "repo", drive_root=cfg.DATA_DIR)
 
     # read/list/write deny the project store (incl. ./ and traversal forms)
-    assert "ACCESS_DENIED" in core._data_read(ctx, "projects/proj_x/knowledge/secret.md")
-    assert "ACCESS_DENIED" in core._data_read(ctx, "./projects/proj_x/knowledge/secret.md")
-    assert "ACCESS_DENIED" in core._data_read(ctx, "memory/../projects/proj_x/knowledge/secret.md")
-    assert "ACCESS_DENIED" in core._data_list(ctx, "projects")
+    assert "ACCESS_DENIED" in core_file_tools._data_read(ctx, "projects/proj_x/knowledge/secret.md")
+    assert "ACCESS_DENIED" in core_file_tools._data_read(ctx, "./projects/proj_x/knowledge/secret.md")
+    assert "ACCESS_DENIED" in core_file_tools._data_read(ctx, "memory/../projects/proj_x/knowledge/secret.md")
+    assert "ACCESS_DENIED" in core_file_tools._data_list(ctx, "projects")
     assert "ACCESS_DENIED" in core._data_write(ctx, "projects/proj_x/k.md", "data")
 
 

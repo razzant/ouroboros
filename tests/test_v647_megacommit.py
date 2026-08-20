@@ -354,9 +354,10 @@ def test_artifact_observation_reconciliation_clears_the_red_nudge(tmp_path, monk
     from types import SimpleNamespace
 
     import ouroboros.loop as loop_mod
+    from ouroboros import loop_nudges
     from ouroboros.outcomes import append_verification_receipt
 
-    monkeypatch.setattr(loop_mod, "_skill_finalization_message", lambda *_a, **_k: "")
+    monkeypatch.setattr(loop_nudges, "_skill_finalization_message", lambda *_a, **_k: "")
 
     def _fires(drive, receipts):
         for receipt in receipts:
@@ -527,9 +528,10 @@ def test_red_verification_nudge_one_shot_and_before_receipt_absent(monkeypatch):
     that is a property of the call site, not exercised here.)"""
     import types as _t
     from ouroboros import loop as L
+    from ouroboros import loop_nudges
     from ouroboros import outcomes as O
 
-    monkeypatch.setattr(L, "_skill_finalization_message", lambda *a, **k: "")
+    monkeypatch.setattr(loop_nudges, "_skill_finalization_message", lambda *a, **k: "")
     dr = Path(tempfile.mkdtemp())
     O.append_verification_receipt(dr, "redt", {"status": "fail", "check": "pytest", "returncode": 1})
     ctx = _t.SimpleNamespace(task_contract={}, task_metadata={})
@@ -665,6 +667,7 @@ def test_verify_and_record_check_is_shell_guarded_against_subagent_secret_read()
     # shell guard as run_command.
     from ouroboros.contracts.task_constraint import TaskConstraint
     from ouroboros.tools.registry import ToolRegistry
+    from ouroboros.tools.registry_guard_process import _run_shell_safety_check
     from ouroboros.tools.shell_guards import process_shell_guard_args
 
     reg = ToolRegistry(repo_dir=".", drive_root=tempfile.mkdtemp())
@@ -672,8 +675,10 @@ def test_verify_and_record_check_is_shell_guarded_against_subagent_secret_read()
     mapped = process_shell_guard_args("verify_and_record", {"check": "cat data/settings.json", "cwd": ""})
     # v6.51.0: normalized via the SSOT (non-login `sh -c`); the guard still inspects the inner command.
     assert mapped["cmd"] == ["sh", "-c", "cat data/settings.json"]
-    block = reg._run_shell_safety_check(mapped, "advanced")
-    assert block and "SECRET" in block.upper()
+    block = _run_shell_safety_check(reg, mapped, "advanced")
+    assert block is not None
+    assert block.code == "SUBAGENT_SECRET_READ_BLOCKED"
+    assert "SECRET" in block.text.upper()
 
 
 def test_verify_string_check_no_safe_subject_bypass(monkeypatch):
@@ -710,7 +715,7 @@ def test_verify_and_record_is_shell_guarded_not_process_command():
     # boundary, which blocks a forbidden mutation before the handler runs) but is NOT in
     # _PROCESS_COMMAND_TOOLS — those POST-execution checks run AFTER the handler already
     # wrote the receipt, so they would not gate the durable receipt (an ordering inversion).
-    from ouroboros.tools.registry import _PROCESS_COMMAND_TOOLS, _SHELL_GUARDED_TOOLS
+    from ouroboros.tools.registry_core import _PROCESS_COMMAND_TOOLS, _SHELL_GUARDED_TOOLS
 
     assert "verify_and_record" in _SHELL_GUARDED_TOOLS
     assert "verify_and_record" not in _PROCESS_COMMAND_TOOLS

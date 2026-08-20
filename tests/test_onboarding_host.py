@@ -313,45 +313,84 @@ def test_the_launcher_never_authors_settings_during_first_run(monkeypatch, tmp_p
     assert not (tmp_path / "settings.json").exists()
 
 
-def test_pre_server_normalization_never_creates_the_settings_file(monkeypatch, tmp_path):
-    """The launcher normalizes provider defaults before starting the server, but
-    on a FRESH install it must not persist them: creating settings.json here
-    would destroy the freshness every install-time proof is gated on."""
+def test_pre_server_normalization_never_writes_the_settings_file(monkeypatch, tmp_path):
+    """The launcher normalizes provider defaults before starting the server and
+    persists NONE of it — on a fresh install OR on an existing one.
+
+    The fresh-install half was always the rule (creating settings.json here would
+    destroy the freshness every install-time proof is gated on); the existing-install
+    half is the same objection without the carve-out. Startup is a read, and a read
+    that rewrites the file it read turns a normalization into an owner decision.
+    Nothing is lost: the normalization is applied to the environment here and
+    re-derived by every reader, and the completion save persists it."""
     from ouroboros import config as cfg
     from ouroboros import launcher_onboarding
 
     monkeypatch.setattr(cfg, "SETTINGS_PATH", tmp_path / "settings.json")
     monkeypatch.setattr(cfg, "DATA_DIR", tmp_path)
     monkeypatch.setattr(launcher_onboarding, "load_settings", lambda: {})
-    monkeypatch.setattr(launcher_onboarding, "_apply_settings_to_env", lambda settings: None)
+    applied: list = []
+    monkeypatch.setattr(launcher_onboarding, "_apply_settings_to_env", applied.append)
     monkeypatch.setattr(
         launcher_onboarding,
         "apply_runtime_provider_defaults",
         lambda settings: (dict(settings), True, ["OUROBOROS_MODEL_LIGHT"]),
     )
-    saved: list = []
-    monkeypatch.setattr(
-        launcher_onboarding, "save_settings", lambda settings, **kwargs: saved.append(settings)
+    assert not hasattr(launcher_onboarding, "save_settings"), (
+        "the launcher bound a settings writer again"
     )
 
     _settings, onboarding_required = launcher_onboarding.prepare_first_run_settings()
 
     assert onboarding_required is True
-    assert saved == []
+    assert len(applied) == 1, "the normalization must still reach the environment"
     assert not (tmp_path / "settings.json").exists()
 
-    # An install that ALREADY has a settings file still persists normalization.
+    # An install that ALREADY has a settings file is not a licence to rewrite it.
     (tmp_path / "settings.json").write_text("{}", encoding="utf-8")
+    before = (tmp_path / "settings.json").read_bytes()
     launcher_onboarding.prepare_first_run_settings()
-    assert len(saved) == 1
+    assert (tmp_path / "settings.json").read_bytes() == before
+    assert len(applied) == 2
 
 
-def test_server_boot_normalization_carries_the_same_guard():
-    """Mirror of the launcher guard: with the server now starting BEFORE
-    onboarding, its own boot normalization must not author the file either."""
-    source = (REPO / "server.py").read_text(encoding="utf-8")
+def test_server_boot_never_writes_the_settings_file():
+    """The server's boot normalization is APPLIED in-process and persisted
+    nowhere (spec 4.3.5: start-time mutators are retired). Every reader
+    re-derives the same normalization through the shared read seam, so a
+    start-time write would only make boot a second author of settings.json —
+    on a host where the server now starts BEFORE first-run onboarding, that
+    author would create the file the wizard is proved not to have yet."""
+    import ast
+    import inspect
+    import textwrap
 
-    assert "if provider_defaults_changed and _settings_path.exists():" in source
+    import server
+
+    source = inspect.getsource(server.lifespan)
+    tree = ast.parse(textwrap.dedent(source))
+
+    # Asserted on the syntax, not on the text: a comment that merely mentions
+    # save_settings must not be able to fail or to satisfy this.
+    called = {
+        node.func.attr if isinstance(node.func, ast.Attribute) else getattr(node.func, "id", "")
+        for node in ast.walk(tree)
+        if isinstance(node, ast.Call)
+    }
+    assert "save_settings" not in called
+    imported = {
+        alias.name
+        for node in ast.walk(tree)
+        if isinstance(node, ast.ImportFrom)
+        for alias in node.names
+    }
+    assert "SETTINGS_PATH" not in imported
+    # The normalization still runs, still reaches the environment, and only then
+    # is the owner's runtime-mode baseline pinned against it.
+    applied_at = source.index("apply_runtime_provider_defaults(load_settings())")
+    env_at = source.index("_apply_settings_to_env(settings)")
+    baseline_at = source.index("initialize_runtime_mode_baseline()")
+    assert applied_at < env_at < baseline_at
 
 
 # --------------------------------------------------------------------------

@@ -16,6 +16,7 @@ from ouroboros.review_state import (
     save_state,
 )
 from ouroboros.tools import scope_review as scope_review_mod
+from ouroboros.tools import scope_review_pack as scope_pack
 from ouroboros.tools.review import _build_review_history_section as triad_hist
 from ouroboros.tools.review_helpers import (
     format_obligation_excerpt,
@@ -395,27 +396,27 @@ def test_scope_build_prompt_loads_obligations_from_drive_root(tmp_path, monkeypa
 
     # Stub the heavy scope-pack / git I/O helpers so the prompt builder succeeds.
     monkeypatch.setattr(
-        scope_review_mod,
+        scope_pack,
         "_parse_staged_name_status",
         lambda _rd: [("M", "file.py", "file.py")],
     )
     monkeypatch.setattr(
-        scope_review_mod,
+        scope_pack,
         "build_touched_file_pack",
         lambda _rd, _paths, **_kwargs: ("(touched file pack)", []),
     )
     monkeypatch.setattr(
-        scope_review_mod,
+        scope_pack,
         "_inline_deleted_file_pack",
         lambda pack, _deleted, _rd, **_kwargs: pack,
     )
     monkeypatch.setattr(
-        scope_review_mod,
+        scope_pack,
         "_gather_scope_packs",
         lambda _rd, _paths, fixed_prompt_tokens=0: "(generated scope atlas)",
     )
     monkeypatch.setattr(
-        scope_review_mod,
+        scope_pack,
         "run_cmd",
         lambda *args, **kwargs: "diff --git a/file.py b/file.py\n",
     )

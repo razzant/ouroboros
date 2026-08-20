@@ -851,7 +851,7 @@ def test_direct_chat_budget_exhaustion_requires_budget_change_before_retry():
 def test_direct_chat_loop_budget_exhaustion_never_suggests_new_run(data_root, monkeypatch):
     from types import SimpleNamespace
 
-    from ouroboros.loop import _handle_budget_exceeded, _LoopExitContext
+    from ouroboros.loop_budget import _handle_budget_exceeded, _LoopExitContext
 
     monkeypatch.setattr(
         ua,

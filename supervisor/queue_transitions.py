@@ -714,3 +714,61 @@ def resume_project_deletions(drive_root: object) -> int:
             project.get("chat_id"),
         ))
     return started
+
+
+def _close_campaign_after_owner_stop(exclude_task_id: str = "") -> None:
+    """GR3-3 owner-stop backstop: close the campaign once its live task settled.
+
+    An INCOMPLETE ``/evolve off`` / ``toggle_evolution(False)`` deliberately
+    leaves the campaign OPEN over the still-live evolution task (closing it
+    would declare a clean terminal that did not happen); the durable
+    ``evolution_owner_stopped`` state flag blocks new cycles meanwhile. Every
+    evolution terminal routes through ``_handle_evolution_task_done``, so this
+    runs at exactly the moment the deferred close becomes honest — and no-ops
+    whenever the owner never stopped or the campaign is already terminal.
+    Never raises.
+
+    GR4-6: the close is gated on NO OTHER evolution task being live — the
+    multi-live incomplete-stop shape settles ONE task at a time, and closing
+    on the first terminal would declare a clean stop over the others.
+    ``exclude_task_id`` names the task whose terminal is being processed (its
+    RUNNING row is popped only later, by ``_finish_task_done_dispatch``).
+    """
+    try:
+        from supervisor.evolution_lifecycle import (
+            _read_evolution_campaign,
+            complete_evolution_campaign,
+        )
+        from supervisor.state import load_state
+
+        if not bool(load_state().get("evolution_owner_stopped")):
+            return
+        if _read_evolution_campaign().get("status") not in {"active", "paused"}:
+            return
+        from supervisor.queue import PENDING, RUNNING, _queue_lock
+
+        with _queue_lock:
+            live = [
+                str(task.get("id") or "")
+                for task in PENDING
+                if isinstance(task, dict) and str(task.get("type") or "") == "evolution"
+            ] + [
+                str(tid)
+                for tid, meta in RUNNING.items()
+                if isinstance(meta, dict)
+                and isinstance(meta.get("task"), dict)
+                and str(meta["task"].get("type") or "") == "evolution"
+            ]
+        live = [tid for tid in live if tid and tid != str(exclude_task_id or "")]
+        if live:
+            log.info(
+                "owner-stop campaign close deferred: evolution task(s) still live: %s",
+                live,
+            )
+            return
+        complete_evolution_campaign(
+            "owner stop completed after the live evolution task settled",
+            status="stopped",
+        )
+    except Exception:
+        log.debug("owner-stop campaign close backstop failed", exc_info=True)

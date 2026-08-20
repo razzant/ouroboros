@@ -69,7 +69,8 @@ def test_lens_key_requires_all_legs(tmp_path):
 # --- reads resolve to the ROOM folder; self-repo stays reachable explicitly --------
 
 def test_room_reads_resolve_to_room_folder(tmp_path):
-    from ouroboros.tools.core import _code_search, _list_files, _read_file
+    from ouroboros.tools.core_file_tools import _list_files, _read_file
+    from ouroboros.tools.core import _code_search
 
     ctx, room, repo = _room_ctx(tmp_path)
 
@@ -89,7 +90,7 @@ def test_room_reads_resolve_to_room_folder(tmp_path):
 
 
 def test_room_read_confined_to_room(tmp_path):
-    from ouroboros.tools.core import _read_file
+    from ouroboros.tools.core_file_tools import _read_file
 
     ctx, room, repo = _room_ctx(tmp_path)
     escaped = _read_file(ctx, "../repo/BIBLE.md")
@@ -98,7 +99,7 @@ def test_room_read_confined_to_room(tmp_path):
 
 
 def test_fileless_room_and_workspace_task_unchanged(tmp_path):
-    from ouroboros.tools.core import _list_files
+    from ouroboros.tools.core_file_tools import _list_files
 
     ctx, _, repo = _room_ctx(tmp_path, with_room=False)
     listing = json.loads(_list_files(ctx, path="."))

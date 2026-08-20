@@ -63,7 +63,11 @@ def test_call_sites_consume_the_ssot_at_runtime():
 
 
 def test_call_sites_import_the_ssot_names():
-    loop_src = _src("ouroboros/loop.py")
+    # v7 L-B split: sweep the whole loop family so no leaf revives the old names.
+    loop_src = "".join(
+        _src(f"ouroboros/{path.name}")
+        for path in sorted(pathlib.Path("ouroboros").glob("loop*.py"))
+    )
     for name in (
         "EMERGENCY_COMPACTION_CHARS",
         "LOW_EMERGENCY_COMPACTION_CHARS",
@@ -92,7 +96,8 @@ def test_call_sites_import_the_ssot_names():
 
 def test_old_bare_literals_are_gone_from_call_sites():
     """The decisive anti-drift check: no bare literal can outlive the SSOT."""
-    assert "> 1_200_000" not in _src("ouroboros/loop.py")
+    for path in sorted(pathlib.Path("ouroboros").glob("loop*.py")):
+        assert "> 1_200_000" not in _src(f"ouroboros/{path.name}"), path.name
 
     consc = _src("ouroboros/consciousness.py")
     assert "= 1_200_000" not in consc

@@ -90,7 +90,7 @@ class TestWebAttachmentBlocks:
 
 class TestImageEviction:
     def test_keeps_only_newest_k(self):
-        from ouroboros.loop import _append_or_merge_user_content
+        from ouroboros.loop_messages import _append_or_merge_user_content
 
         messages = []
         for idx in range(MAX_LIVE_IMAGE_BLOCKS + 2):
@@ -116,7 +116,7 @@ class TestImageEviction:
         assert "[image evicted: shot-1]" in rendered
 
     def test_placeholder_includes_reviewable_path(self):
-        from ouroboros.loop import _evict_stale_image_blocks
+        from ouroboros.loop_messages import _evict_stale_image_blocks
 
         block = _image_block("a", caption="screen")
         block["_source_path"] = "/data/uploads/screenshots/x.png"

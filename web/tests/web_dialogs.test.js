@@ -8,7 +8,7 @@ import test from 'node:test';
 
 import { promptUpdateVersion } from '../modules/marketplace.js';
 import { promptCampaignObjective } from '../modules/evolution.js';
-import { confirmAndSendPanic, shouldFirePanic } from '../modules/chat.js';
+import { confirmAndSendPanic, shouldFirePanic } from '../modules/chat_controls.js';
 import { shouldPollStatus } from '../modules/claudexor_status_store.js';
 import {
     JOB_POLL_GIVE_UP_FAILURES,

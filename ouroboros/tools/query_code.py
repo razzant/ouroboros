@@ -94,7 +94,7 @@ def _visible_file(
     except Exception:
         return False
     try:
-        from ouroboros.tools.core import is_restricted_subagent_profile as _is_local_readonly_subagent, _is_subagent_secret_repo_target
+        from ouroboros.tools.core_file_tools import is_restricted_subagent_profile as _is_local_readonly_subagent, _is_subagent_secret_repo_target
 
         if _is_local_readonly_subagent(ctx) and _is_subagent_secret_repo_target(target, repo_root):
             return False
@@ -386,7 +386,7 @@ def _query_code(
                 # in the live code-intel cache.
                 persist = False
             try:
-                from ouroboros.tools.core import is_restricted_subagent_profile as _is_local_readonly_subagent, _is_subagent_secret_repo_target
+                from ouroboros.tools.core_file_tools import is_restricted_subagent_profile as _is_local_readonly_subagent, _is_subagent_secret_repo_target
 
                 if _is_local_readonly_subagent(ctx):
                     persist = False

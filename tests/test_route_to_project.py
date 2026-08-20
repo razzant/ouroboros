@@ -58,7 +58,7 @@ def test_route_to_existing_project_emits_event_and_receipt(tmp_path):
 def test_main_swarm_route_carries_intent_and_emits_only_once(tmp_path, monkeypatch):
     create_project(tmp_path, "racer", name="Racer")
     monkeypatch.setattr(
-        "ouroboros.tools.control._wait_for_promotion_admission",
+        "ouroboros.tools.control_events._wait_for_promotion_admission",
         lambda *_args, **_kwargs: {"status": "unconfirmed", "reason": "confirmation_timeout"},
     )
     events = []

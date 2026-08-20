@@ -186,7 +186,7 @@ def test_revert_protects_plain_default_when_active_workspace_is_system(tmp_path)
 
 
 def test_pull_uses_the_same_selected_binding_as_other_generic_vcs(tmp_path, monkeypatch):
-    from ouroboros.tools import git as git_tools
+    from ouroboros.tools import git_vcs_ops as git_tools
 
     registry, _ctx, system, project = _registry(tmp_path)
     seen = []

@@ -32,7 +32,7 @@ from ouroboros.tools.registry import ToolContext
 from ouroboros.memory import Memory
 from ouroboros.context import build_llm_messages
 from ouroboros.loop import run_llm_loop
-from ouroboros.config import EFFORT_SCALE, resolve_effort
+from ouroboros.config import EFFORT_SCALE, resolve_effort  # noqa: F401 -- the agent module keeps its historical import surface for the L-C2 leaf
 from ouroboros.agent_startup_checks import (
     inject_crash_report,
     verify_restart,
@@ -46,404 +46,44 @@ from ouroboros.contracts.task_constraint import normalize_task_constraint
 from ouroboros.contracts.task_contract import attach_task_contract
 from ouroboros.outcomes import infra_failed_axes
 from ouroboros.subagents import (
-    CapabilityDelta,
-    SubagentExecutorResolution,
-    SUBAGENT_RESOLUTION_FIELDS,
+    CapabilityDelta,  # noqa: F401 -- the agent module keeps its historical import surface for the L-C2 leaf
+    SubagentExecutorResolution,  # noqa: F401 -- the agent module keeps its historical import surface for the L-C2 leaf
+    SubagentLaneResolution,  # noqa: F401 -- the agent module keeps its historical import surface for the L-C2 leaf
+    SUBAGENT_RESOLUTION_FIELDS,  # noqa: F401 -- the agent module keeps its historical import surface for the L-C2 leaf
     SubagentDispatch,
-    capability_delta_disclosures,
-    envelope_from_task,
-    resolve_subagent_dispatch,
+    capability_delta_disclosures,  # noqa: F401 -- the agent module keeps its historical import surface for the L-C2 leaf
+    envelope_from_task,  # noqa: F401 -- the agent module keeps its historical import surface for the L-C2 leaf
+    resolve_subagent_dispatch,  # noqa: F401 -- the agent module keeps its historical import surface for the L-C2 leaf
 )
 
 
 _worker_boot_logged = False
 _worker_boot_lock = threading.Lock()
 
-# Re-exports under the historical names (B1/F7): the pair moved WHOLE to
-# `subagent_dispatch_notes` at this module's size ceiling; the byte-pinned
-# transport suite (and every other caller) keeps importing them from here.
-from ouroboros.subagent_dispatch_notes import (  # noqa: E402
+
+# v7 L-C2 split: the delegated-child dispatch seam (executor resolution and its
+# disclosures, the delegate-visibility preflight, budget-rail owner messages,
+# early origin persistence) lives in ouroboros/agent_dispatch.py. Re-exported
+# under the historical names so callers and monkeypatching tests keep working
+# unchanged (facade identity pinned in tests/test_lc2_owner_facades.py).
+from ouroboros.agent_dispatch import (  # noqa: F401 -- intentional public re-exports
+    _DELEGATE_VERBS,
+    _blocked_executor_terminal,
+    _budget_exhausted_message,
+    _budget_resume_policy,
+    _initial_effort_for,
+    _persist_early_origin_stub,
+    _physical_calls_after_budget_rail,
+    _queued_budget_exhausted_message,
+    _record_executor_resolution,
+    capability_delta_prompt_block,
     dispatch_executor_note,
+    emit_dispatch_resolution,
     executor_blocked_outcome,
+    preflight_delegate_visibility,
+    reset_nanny_economics_marks,
+    resolve_dispatch_axes,
 )
-
-
-def _record_executor_resolution(
-    drive_logs: Any, task: Dict[str, Any], dispatch: Optional[SubagentDispatch],
-) -> None:
-    """Durably record the typed substrate decision (re-homed from the retired
-    `_announce_dispatch_executor`): who was asked for, who runs it, why, and —
-    when every plan window is spent — the instant it heals."""
-    if dispatch is None or dispatch.executor_resolution is None:
-        return
-    res = dispatch.executor_resolution
-    row = {
-        "ts": utc_now_iso(), "type": "subagent_executor_resolved",
-        "task_id": str(task.get("id") or ""),
-        "requested": res.requested,
-        "executor": res.executor,
-        "reason": res.reason,
-        "reset_at": res.reset_at,
-        "route": res.route.route_id if res.route else "",
-    }
-    append_jsonl(drive_logs / "events.jsonl", row)
-    # ALSO the canonical events log: a delegated child's forked drive is pruned
-    # with the task, so this used to be the ONLY copy of the substrate decision
-    # (submarine forensics: zero subagent_executor_resolved rows in the canonical
-    # events.jsonl). The accounting axis the task already carries names the
-    # canonical root; the root agent's own drive IS canonical, so skip the dup.
-    try:
-        budget_root = str(task.get("budget_drive_root") or "").strip()
-        if budget_root:
-            canonical_logs = pathlib.Path(budget_root) / "logs"
-            if canonical_logs.resolve(strict=False) != pathlib.Path(drive_logs).resolve(strict=False):
-                append_jsonl(canonical_logs / "events.jsonl", row)
-    except Exception:
-        log.debug("Failed to mirror executor resolution to canonical events", exc_info=True)
-    # D28 exhaustion beacon: surface the spent-window fact to the WAITING parent
-    # NOW (via the task-tree attention channel the wait tools already poll),
-    # not at absorption after the wait window burned.
-    if res.reason == "subscription_window_exhausted" and str(task.get("parent_task_id") or "").strip():
-        root_id = str(task.get("root_task_id") or "").strip()
-        if root_id:
-            try:
-                from ouroboros.task_tree_ledger import record_subscription_window_exhausted
-
-                record_subscription_window_exhausted(
-                    root_id,
-                    child_task_id=str(task.get("id") or ""),
-                    reset_at=res.reset_at,
-                    route=res.route.route_id if res.route else "",
-                    executor=res.executor,
-                )
-            except Exception:
-                log.debug("Failed to append subscription-window beacon", exc_info=True)
-
-
-def _blocked_executor_terminal(cap_info: Dict[str, Any]) -> Tuple[str, Dict[str, Any], Dict[str, Any]]:
-    """p34's typed terminal for a blocked executor pin, rebuilt from the facts
-    cap_info carried across the (ctx, messages, cap_info) seam. The placeholder
-    method p2 kept for exactly this synthesis is deleted; this is the one body."""
-    text, usage = executor_blocked_outcome(SubagentExecutorResolution(
-        requested=str(cap_info.get("executor_blocked_requested") or "harness"),
-        executor="blocked",
-        reason=str(cap_info.get("executor_blocked_reason") or ""),
-        reset_at=str(cap_info.get("executor_blocked_reset_at") or ""),
-    ))
-    return text, usage, {"reasoning_notes": ["subagent_executor_unavailable"], "tool_calls": []}
-
-
-def _persist_early_origin_stub(drive_root: Any, task: Dict[str, Any]) -> None:
-    """Durably persist the ingress-captured origin BEFORE the convertible card
-    exists (v6.73.0). Merge-write only; the full RUNNING write follows and
-    overlays it. Ephemeral decision turns write no durable record by design
-    (they are never convertible), and tasks without an origin write nothing.
-
-    A persistence failure is LOUD (warning + typed events.jsonl anomaly) but
-    deliberately non-fatal: the owner's task is worth more than its start
-    message, and the same storage fault would fail the full RUNNING write
-    moments later anyway — the residual convert-in-window exposure requires a
-    disk fault racing an instant owner click."""
-    if bool(task.get("_ephemeral_turn")):
-        return
-    ref = task.get("origin_message_ref")
-    if not (isinstance(ref, dict) and ref):
-        return
-    for _attempt in range(2):
-        try:
-            write_task_result(
-                drive_root,
-                str(task.get("id") or ""),
-                STATUS_RUNNING,
-                chat_id=task.get("chat_id"),
-                origin_message_ref=dict(ref),
-                origin_message_text=task.get("origin_message_text"),
-                result="Task is starting.",
-            )
-            return
-        except Exception:
-            if _attempt:
-                log.warning("Early origin stub persistence failed", exc_info=True)
-    try:
-        from ouroboros.utils import append_jsonl
-
-        append_jsonl(pathlib.Path(drive_root) / "logs" / "events.jsonl", {
-            "ts": utc_now_iso(),
-            "type": "origin_stub_persist_failed",
-            "task_id": str(task.get("id") or ""),
-        })
-    except Exception:
-        log.debug("origin_stub_persist_failed event write failed", exc_info=True)
-
-
-def _budget_exhausted_message() -> str:
-    return (
-        "🚫 Model budget exhausted before another dispatch. Increase or reset the "
-        "global/root budget, then retry or resume this task. Starting a new run before "
-        "changing the exhausted budget will hit the same limit."
-    )
-
-
-def _budget_resume_policy(*, replay_safe: bool, direct_chat: bool) -> str:
-    if direct_chat:
-        return "increase_or_reset_budget_then_retry"
-    if replay_safe:
-        return "manual_same_generation"
-    return "cancel_or_new_run"
-
-
-def _queued_budget_exhausted_message() -> str:
-    return (
-        "🚫 Resource limit reached before another model dispatch. The task was not "
-        "auto-resumed; cancel it or start a new run unless the recorded checkpoint "
-        "is explicitly replay-safe."
-    )
-
-
-def _physical_calls_after_budget_rail(budget_root: Any, task_id: str) -> Optional[int]:
-    """How many provider sends this task really made, for an honest budget-rail message.
-
-    ``None`` means UNKNOWN, and an integrity-degraded ledger yields exactly that rather
-    than a count that might be missing a paid tail — "0 calls" and "we cannot tell" must
-    not read the same to the owner.
-    """
-    try:
-        from ouroboros.usage_accounting import usage_breakdown
-
-        evidence = usage_breakdown(pathlib.Path(budget_root), task_id=task_id)
-        if evidence.get("integrity_degraded"):
-            return None
-        return int(evidence.get("physical_calls") or 0)
-    except Exception:
-        log.exception("Could not inspect task attempts after agent budget rail")
-        return None
-
-
-def _initial_effort_for(task: Dict[str, Any], task_type: str) -> str:
-    """The effort a task starts on.
-
-    For a delegated child this is what ``resolve_subagent_dispatch`` derived and
-    wrote onto the record moments ago, which is ``resolve_effort(task_type)`` — read
-    back rather than recomputed so the loop runs the effort the record states. For
-    everything else, and for an unrecognized STORED value (durable data outlives the
-    schema that wrote it), it is the task-type default directly.
-    """
-    stored = str(task.get("reasoning_effort") or "").strip().lower()
-    return stored if stored in EFFORT_SCALE else resolve_effort(task_type)
-
-
-def resolve_dispatch_axes(task: Dict[str, Any]) -> Optional[SubagentDispatch]:
-    """Resolve WHAT THIS CHILD GETS, once, and stamp it onto the record it came from.
-
-    ``None`` when the task is not a delegated child. This is the ONE place a child's
-    model, effort, route, tool profile and effective executor are decided, and the
-    one author of its ``capability_delta``. It writes back onto the live task dict so
-    every downstream surface — the RUNNING task result, the task-metadata projection
-    the loop reads, the completion write, the envelope — describes the SAME
-    resolution instead of each re-deriving its own from whatever it happens to hold.
-    """
-    if str(task.get("delegation_role") or "").lower() != "subagent":
-        return None
-    dispatch = resolve_subagent_dispatch(task, task_type=str(task.get("type") or "task"))
-    task.update(dispatch.record_fields())
-    # The envelope is the child's public description, so it is rebuilt from the
-    # record the resolution just wrote rather than left holding the requested-status
-    # copy the scheduler made — through the ONE record->envelope mapping, so it
-    # cannot describe a different child than the record does.
-    task["subagent_envelope"] = envelope_from_task(task, status=STATUS_RUNNING)
-    return dispatch
-
-
-# The dispatched harness contract needs the whole CUSTODY verb set: a child that
-# can start a run but not wait on or cancel it is still broken. `delegate_answer`
-# is deliberately NOT part of this preflight — a nanny without it is degraded
-# (questions benign-decline at the engine timeout), never custody-broken, and
-# failing a dispatch over a missing convenience verb would cost real work.
-_DELEGATE_VERBS = ("delegate_start", "delegate_wait", "delegate_cancel")
-
-
-def preflight_delegate_visibility(
-    tools: Any, task: Dict[str, Any], dispatch: Optional[SubagentDispatch],
-) -> Tuple[Optional[SubagentDispatch], bool]:
-    """Verify a harness dispatch can actually SEE its delegate verbs — after the
-    real toolset is materialized, BEFORE the first paid LLM round.
-
-    The dispatch resolution proves the ROUTE is healthy; it does not prove the
-    child's toolset carries the delegate verbs (its delegated-child profile,
-    contract disabled_tools, credential/resource availability, or future policy
-    drift can hide them). The e9108a09c6574184
-    audit: nine children dispatched as nannies with the verbs invisible made zero
-    delegated runs and burned ~$29-54 of metered API while telemetry said harness.
-
-    One check at toolset materialization (owner decision Q1A): an AUTO-resolved
-    executor falls back LOUDLY to native — the amended ``capability_delta``
-    (reason ``delegate_tools_invisible``, ``reduced=True``) and the corrected
-    dispatch fields are re-stamped onto the task record so telemetry does not
-    lie; an EXPLICIT ``harness`` pin becomes the typed blocked outcome that
-    terminalizes with zero spend (``executor_blocked_outcome``). A broken
-    introspection follows the same split: a pinned harness fails CLOSED (a probe
-    that cannot prove visibility cannot prove the pinned contract is executable),
-    an auto one proceeds fail-open with the probe failure disclosed as a
-    ``capability_delta`` note. Returns the (possibly amended) dispatch and
-    whether it amended.
-    """
-    if (
-        dispatch is None
-        or dispatch.executor_resolution is None
-        or dispatch.executor_resolution.executor != "harness"
-    ):
-        return dispatch, False
-    import dataclasses
-
-    def _stamp(amended: SubagentDispatch) -> Tuple[SubagentDispatch, bool]:
-        # The same two writes resolve_dispatch_axes made: the record fields and
-        # the envelope rebuilt from them, so every downstream surface describes
-        # the amended resolution instead of the one the preflight just falsified.
-        task.update(amended.record_fields())
-        task["subagent_envelope"] = envelope_from_task(task, status=STATUS_RUNNING)
-        return amended, True
-
-    def _append_reason(delta: CapabilityDelta, note: str, **changes: Any) -> CapabilityDelta:
-        from ouroboros.subagents import derive_capability_reason
-
-        # Seed from the legacy string when the typed list is empty but a reason
-        # exists (a stored pre-lists delta): rebuilding purely from the list
-        # would silently DISCARD that disclosure text (P1).
-        base = delta.reduction_reasons or ((delta.reason,) if delta.reason else ())
-        reasons = (*base, note)
-        return dataclasses.replace(
-            delta, reduction_reasons=reasons,
-            reason=derive_capability_reason(reasons, delta.substrate_disclosures),
-            **changes)
-
-    pinned = str(task.get("requested_executor") or "auto").strip().lower() == "harness"
-    reason = "delegate_tools_invisible"
-    try:
-        available = set(tools.available_tools())
-        if all(verb in available for verb in _DELEGATE_VERBS):
-            return dispatch, False
-    except Exception:
-        log.warning("delegate visibility preflight: introspection failed", exc_info=True)
-        if not pinned:
-            # Fail-open for auto, but never silently: the note rides the delta.
-            return _stamp(dataclasses.replace(
-                dispatch,
-                delta=_append_reason(dispatch.delta, "delegate_visibility_unverified")))
-        # Pinned + broken probe blocks with the honest reason: visibility is
-        # UNKNOWN, not disproven.
-        reason = "delegate_visibility_unverified"
-
-    if not pinned:
-        # F10 (sol #2): the auto fallback runs NATIVE, so lane/model/effort are
-        # re-resolved WITHOUT the harness light-lane policy — a native child of
-        # a heavy parent must not stay on policy-light with a cheap model. The
-        # re-resolution lives with the other dispatch policy in `subagents`.
-        from ouroboros.subagents import preflight_native_fallback_dispatch
-
-        return _stamp(preflight_native_fallback_dispatch(task, dispatch, reason))
-    return _stamp(dataclasses.replace(
-        dispatch,
-        executor="blocked",
-        route="",
-        delta=_append_reason(dispatch.delta, reason,
-                             effective_executor="blocked", reduced=True),
-        executor_resolution=dataclasses.replace(
-            dispatch.executor_resolution,
-            executor="blocked", reason=reason, reset_at="",
-        ),
-    ))
-
-
-def reset_nanny_economics_marks(ctx: Any, *, route_dispatched: bool) -> None:
-    """Reset EVERY nanny-economics mark for a fresh dispatch (F4).
-
-    DEFENSIVE, not load-bearing: ``_prepare_task_context`` builds a FRESH
-    ToolContext per task, so nothing stale can leak today — this states the
-    marks' lifecycle in one place and keeps it true even if a refactor ever
-    reuses a context (leaked cursors would mute or misfire the reminder)."""
-    ctx._nanny_route_dispatched = bool(route_dispatched)
-    ctx._nanny_finalization_injected = False
-    ctx._nanny_metered_progress = None
-    ctx._nanny_delegate_baseline = None
-    ctx._nanny_reminder_mark = None
-
-
-def emit_dispatch_resolution(
-    event_queue: Any, task: Dict[str, Any], dispatch: Optional[SubagentDispatch],
-) -> None:
-    """Report the dispatch-time resolution back to the supervisor (XG-2R.1).
-
-    ``resolve_dispatch_axes`` stamps the WORKER process's clone of the task; the
-    supervisor's RUNNING copy — the one ``persist_queue_snapshot`` serializes — is a
-    separate dict made at assignment, so without this report a restart restored the
-    unresolved intent and lost `effective_model_lane`, `reasoning_effort`, the
-    executor fields and `capability_delta`. The report rides the SAME worker event
-    channel every other worker fact uses (no second channel);
-    ``supervisor/events.py::_handle_task_dispatch_resolved`` merges exactly
-    ``SUBAGENT_RESOLUTION_FIELDS`` into RUNNING under the queue lock. Best-effort by
-    design: the durable task_result written moments before this remains the record
-    of authority — the merge keeps the supervisor's live mirror and its snapshot
-    telling the same story.
-    """
-    if dispatch is None or event_queue is None:
-        return
-    try:
-        event_queue.put({
-            "type": "task_dispatch_resolved",
-            "task_id": str(task.get("id") or ""),
-            "resolution": {
-                key: task.get(key) for key in SUBAGENT_RESOLUTION_FIELDS if key in task
-            },
-            "ts": utc_now_iso(),
-        })
-    except Exception:
-        log.debug("Failed to report dispatch resolution to the supervisor", exc_info=True)
-
-
-def capability_delta_prompt_block(dispatch: Optional[SubagentDispatch]) -> str:
-    """What the CHILD is told about the gap between what was asked and what it got.
-
-    The child is the only actor that can say "I could not do this well at this
-    strength", and it cannot say so about a fact it was never given. Composed here,
-    at dispatch, because that is when the fact exists: the supervisor builds the
-    child's prompt text before the child is admitted, so a reduction discovered when
-    the child actually starts could never reach that copy.
-    """
-    if dispatch is None:
-        return ""
-    delta = dispatch.delta.as_dict()
-    parts: list[str] = []
-    disclosures = capability_delta_disclosures(delta) if delta.get("reduced") else []
-    if disclosures:
-        # `reduced` with NO disclosable axis is the executor-only case (an `auto`
-        # fallback the axis renderer deliberately keeps out of this list) — that
-        # fact reaches the child through `dispatch_executor_note` beside this
-        # block, so rendering "BELOW what your parent asked for:" over an empty
-        # list here told the child nothing and read as a broken sentence.
-        # The parenthetical carries the typed DISPATCH axes only (B4): substrate
-        # facts are completion-seam and never fuse into this dispatch sentence
-        # (a fresh resolution carries none anyway).
-        reduction = delta.get("reduction_reasons")
-        reason_text = (
-            "; ".join(reduction) if isinstance(reduction, list) and reduction
-            else (delta.get("reason") or "unspecified")
-        )
-        action = (
-            "Do the work anyway — routed through your delegated run "
-            "(delegate_start / delegate_wait), not your own metered rounds — but say "
-            if delta.get("effective_executor") == "harness"
-            else "Do the work anyway, but say "
-        )
-        parts.append(
-            "You are running BELOW what your parent asked for: "
-            + "; ".join(disclosures)
-            + f" ({reason_text}). " + action
-            + "so in blockers if the gap actually limited your answer — do not quietly "
-            "return a weaker result as if it were full strength."
-        )
-    if delta.get("legacy_note"):
-        parts.append(f"Ignored on your record: {delta['legacy_note']}.")
-    return "[CAPABILITY DELTA]\n" + "\n".join(parts) if parts else ""
 
 
 @dataclass(frozen=True)

@@ -982,22 +982,19 @@ def test_the_launcher_onboarding_module_authors_no_onboarding_settings():
     default. That callback is gone: every host completes through
     `POST /api/onboarding/complete`, which authors the default itself.
 
-    What is worth pinning now is the inverse — the module keeps ONLY its
-    pre-server normalization writer and hands the setup window a lifecycle
-    bridge with no persistence at all. `save_settings` stays bound because
-    `prepare_first_run_settings` still uses it for an install that already has a
-    settings file."""
+    What is worth pinning now is the inverse, and it has since gone all the way:
+    the module persists NOTHING. Its pre-server normalization is applied to the
+    process environment and re-derived by every reader, so `save_settings` is no
+    longer bound at all and the setup window gets a lifecycle bridge with no
+    persistence."""
     from ouroboros import launcher_onboarding
 
-    assert callable(getattr(launcher_onboarding, "save_settings", None))
+    assert getattr(launcher_onboarding, "save_settings", None) is None
     source = pathlib.Path(launcher_onboarding.__file__).read_text(encoding="utf-8")
     assert "def save_wizard" not in source
     assert "onboarding_safety_default" not in source
     assert "prepare_onboarding_settings" not in source
-    # The only remaining write is the pre-server normalization, and only for an
-    # install whose settings file already exists.
-    assert source.count("save_settings(") == 1
-    assert "if provider_defaults_changed and _settings_path.exists():" in source
+    assert "save_settings(" not in source
 
 
 def test_wizard_rejects_a_newly_typed_short_key():

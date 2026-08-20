@@ -59,7 +59,16 @@ Files:
   the result directory, calls `ouroboros run --attach <screenshot>` for the next
   structured action, executes those actions through `env.step(...)`, and records
   the official trajectory plus denominator-preserving ledgers. It is the runnable
-  adapter; the skeleton remains a stricter installed-agent preflight path.
+  adapter; the skeleton remains a stricter installed-agent preflight path. Its
+  owner leaves are re-exported by it, so behaviour, flags and reward semantics
+  are unchanged: `step_agent_common.py` (run configuration dataclasses and two
+  shared primitives), `step_agent_env.py` (aligned upstream pin, provider
+  preflight, DesktopEnv construction/teardown, live-server guard),
+  `step_agent_claims.py` (cross-lane task claims and the scored-claim ledger of
+  METHODOLOGY §7.9), `step_agent_actions.py` (action translation and the
+  `WAIT`/`DONE`/`FAIL` specials) and `step_agent_policy.py`
+  (`OuroborosStepAgent`). `_preflight` deliberately stays in the launcher: its
+  runtime attestation is pinned to that file by the devtools test suite.
 - `run_cu_bridge_agent.py` is the **persistent-agent** OSWorld runner: it resets
   an official VM, publishes the VM HTTP target into the bench data dir's
   `unix_computer_use` skill state, submits ONE Ouroboros task (`--memory-mode
@@ -67,7 +76,14 @@ Files:
   backend until it finishes. `reset()`/`evaluate()` are the official ones. This
   is the Terminal-Bench / Pointer shape — see the cu_bridge details below and
   METHODOLOGY.md §7 for the protocol deltas that make it NOT the official
-  step-loop.
+  step-loop. Its owner leaves carry the parts that are not the launcher itself
+  and are re-exported by it, so behaviour, flags and reward semantics are
+  unchanged: `cu_bridge_runtime.py` (shared bench-server call and terminal-answer
+  reading), `cu_bridge_prompts.py` (gate/working preambles and acceptance
+  claims), `cu_bridge_tool_policy.py` (core-tool allowlist, computed host
+  denylist, GUI action set, denied connection tools), `cu_bridge_gate.py` (the
+  read-only premise gate) and `cu_bridge_budget.py` (step/round budgets, proxy
+  configuration, dataset and step-claim refusals, disclosure counters).
 
 Important step-loop details:
 

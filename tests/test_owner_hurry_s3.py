@@ -318,7 +318,9 @@ def test_post_pass_hurry_drain_never_supersedes_acceptance(tmp_path, monkeypatch
     from tests.test_delivery_forced_finalization import _forced_test_context
 
     loop, registry, ctx, trace = _forced_test_context(tmp_path)
-    monkeypatch.setattr(loop, "_compute_subagent_handoff", lambda *_a, **_k: None)
+    from ouroboros import loop_delivery
+
+    monkeypatch.setattr(loop_delivery, "_compute_subagent_handoff", lambda *_a, **_k: None)
     monkeypatch.setattr(loop, "_maybe_inject_finalization_nudges", lambda *_a, **_k: False)
     monkeypatch.setattr(loop, "_run_task_acceptance_review_once", lambda **_k: False)
     superseded = []

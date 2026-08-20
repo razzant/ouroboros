@@ -489,7 +489,7 @@ def test_corrupt_or_integrity_degraded_ledger_never_permits_budget_resume(
     from supervisor import queue, state, workers
 
     state.init(tmp_path, total_budget_limit=10.0)
-    queue.init(tmp_path, 600, 1800)
+    queue.init(tmp_path)
     monkeypatch.setattr(queue, "DRIVE_ROOT", tmp_path)
     monkeypatch.setattr(queue, "PENDING", [{
         "id": "replay-risk",
@@ -680,7 +680,7 @@ def _install_supervisor(tmp_path, monkeypatch):
     from supervisor import queue, state, workers
 
     state.init(tmp_path, total_budget_limit=10.0)
-    queue.init(tmp_path, 600, 1800)
+    queue.init(tmp_path)
     monkeypatch.setattr(workers, "DRIVE_ROOT", tmp_path)
     monkeypatch.setattr(queue, "DRIVE_ROOT", tmp_path)
     workers.PENDING[:] = []

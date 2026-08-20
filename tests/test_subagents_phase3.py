@@ -91,7 +91,7 @@ def test_schedule_subagent_emits_intent_only_and_no_task_group(monkeypatch, tmp_
 def test_schedule_subagent_drive_failure_is_fail_closed(monkeypatch, tmp_path):
     """A drive that cannot be prepared leaves NOTHING behind: no event, no durable record,
     no half-provisioned state directory."""
-    import ouroboros.tools.control as control
+    import ouroboros.tools.control_scheduling as control
     from ouroboros.headless import HEADLESS_TASKS_DIR
     from ouroboros.tools.registry import ToolContext
 

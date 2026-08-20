@@ -118,7 +118,7 @@ def test_light_mode_versioned_interpreter_runtime_data_write_is_registry_blocked
     """Registry-level twin of ``test_versioned_interpreter_basename_still_classified``.
 
     The unit test above pins shell_guards' inline-write fence; this pins the
-    OTHER half of INFRA-1 — ``ToolRegistry._run_shell_safety_check``'s
+    OTHER half of INFRA-1 — ``registry_guard_process._run_shell_safety_check``'s
     ``runtime_data_scan`` classifier — which that unit test cannot see. The
     four public-surface light-fence tests run ``sys.executable``, whose
     basename on CI is unversioned, so reverting the registry classifier to the

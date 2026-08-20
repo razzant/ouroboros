@@ -241,7 +241,8 @@ test('wiring: non-review bubbles are left untouched', () => {
 });
 
 test('chat layout callback ignores late skill-review completion after destroy', () => {
-    const source = readFileSync(new URL('../modules/chat.js', import.meta.url), 'utf8');
+    // addMessage moved with the feed/history owner (W3 wave D).
+    const source = readFileSync(new URL('../modules/chat_history_sync.js', import.meta.url), 'utf8');
     assert.match(
         source,
         /wireSkillReviewDisclosure\(bubble,[\s\S]*?requestAnimationFrame\(\s*\(\) => !destroyed && updateMessagesPadding/,

@@ -60,6 +60,10 @@ _POSIX_SIGABRT = 6
 class ExtensionProcessError(RuntimeError):
     """A child extension process failed without crashing the host."""
 
+    def __init__(self, message: str, *, failure_kind: str = "error") -> None:
+        super().__init__(message)
+        self.failure_kind = failure_kind
+
 
 def _format_child_returncode(returncode: int) -> str:
     """Render child deaths in operator-readable form without trusting stderr."""
@@ -408,7 +412,10 @@ def _run_child(
                 raise ExtensionProcessError("extension child output exceeded safety cap")
             if time.monotonic() >= deadline:
                 _kill_process_group(proc)
-                raise ExtensionProcessError(f"extension child timed out after {timeout_sec}s")
+                raise ExtensionProcessError(
+                    f"extension child timed out after {timeout_sec}s",
+                    failure_kind="timeout",
+                )
             time.sleep(0.05)
         out_thread.join(timeout=2)
         err_thread.join(timeout=2)

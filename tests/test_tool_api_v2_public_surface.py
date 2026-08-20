@@ -126,8 +126,10 @@ def test_runtime_prompts_do_not_advertise_legacy_public_tool_names():
 
 
 def test_frozen_registry_includes_service_tools(monkeypatch, tmp_path):
-    monkeypatch.setattr(__import__("sys"), "frozen", True, raising=False)
-    registry = ToolRegistry(repo_dir=pathlib.Path(tmp_path), drive_root=pathlib.Path(tmp_path))
+    from tests._shared import configure_frozen_tool_registry
+
+    registry_cls = configure_frozen_tool_registry(monkeypatch, tmp_path)
+    registry = registry_cls(repo_dir=tmp_path, drive_root=tmp_path)
     schemas = registry.schemas()
     names = {schema["function"]["name"] for schema in schemas}
     assert {"start_service", "service_status", "service_logs", "stop_service"} <= names

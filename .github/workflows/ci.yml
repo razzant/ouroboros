@@ -92,6 +92,9 @@ jobs:
           node-version: '22'
           cache: 'pnpm'
           cache-dependency-path: site/pnpm-lock.yaml
+      - name: Run web unit tests
+        working-directory: web
+        run: npm test
       - name: Verify generated Pages output
         run: |
           pnpm --dir site install --frozen-lockfile
@@ -607,6 +610,12 @@ jobs:
           test -x "$MOUNT/Install CLI.command"
           APP_EXECUTABLE="$(/usr/libexec/PlistBuddy -c 'Print :CFBundleExecutable' "$MOUNT/Ouroboros.app/Contents/Info.plist")"
           lipo -archs "$MOUNT/Ouroboros.app/Contents/MacOS/$APP_EXECUTABLE" | tr ' ' '\n' | grep -qx arm64
+          TOOL_TOC="$RUNNER_TEMP/ouroboros-macos-tool-pyz.txt"
+          python -m PyInstaller.utils.cliutils.archive_viewer -r -b \
+            "$MOUNT/Ouroboros.app/Contents/MacOS/$APP_EXECUTABLE" > "$TOOL_TOC"
+          python -m ouroboros.tool_module_inventory verify-artifact \
+            "$MOUNT/Ouroboros.app/Contents/Resources/ouroboros/_frozen_tool_modules.v1.json" \
+            ouroboros/tools "$TOOL_TOC"
           HOME="$HOME_DIR" XDG_CACHE_HOME="$HOME_DIR/.cache" \
             "$MOUNT/Ouroboros.app/Contents/Resources/bin/ouroboros" --help >/dev/null
           HOME="$HOME_DIR" XDG_CACHE_HOME="$HOME_DIR/.cache" \
@@ -639,6 +648,12 @@ jobs:
           # the bundle root itself — packaged_cli walks Resources/Frameworks/_internal).
           test -f "$SMOKE_ROOT/Ouroboros/_internal/repo.bundle"
           test -f "$SMOKE_ROOT/Ouroboros/_internal/repo_bundle_manifest.json"
+          TOOL_TOC="$RUNNER_TEMP/ouroboros-linux-tool-pyz.txt"
+          python -m PyInstaller.utils.cliutils.archive_viewer -r -b \
+            "$SMOKE_ROOT/Ouroboros/Ouroboros" > "$TOOL_TOC"
+          python -m ouroboros.tool_module_inventory verify-artifact \
+            "$SMOKE_ROOT/Ouroboros/_internal/ouroboros/_frozen_tool_modules.v1.json" \
+            ouroboros/tools "$TOOL_TOC"
           python scripts/fetch_claudexor_runtime.py --verify-only \
             --output-dir "$SMOKE_ROOT/Ouroboros/_internal/claudexor-runtime"
           HOME="$HOME_DIR" XDG_CACHE_HOME="$HOME_DIR/.cache" \
@@ -675,6 +690,12 @@ jobs:
           test -f "$APPDIR/ouroboros.png"
           test -f "$APPDIR/usr/lib/ouroboros/_internal/repo.bundle"
           test -f "$APPDIR/usr/lib/ouroboros/_internal/repo_bundle_manifest.json"
+          TOOL_TOC="$RUNNER_TEMP/ouroboros-appimage-tool-pyz.txt"
+          python -m PyInstaller.utils.cliutils.archive_viewer -r -b \
+            "$APPDIR/usr/lib/ouroboros/Ouroboros" > "$TOOL_TOC"
+          python -m ouroboros.tool_module_inventory verify-artifact \
+            "$APPDIR/usr/lib/ouroboros/_internal/ouroboros/_frozen_tool_modules.v1.json" \
+            ouroboros/tools "$TOOL_TOC"
           python scripts/fetch_claudexor_runtime.py --verify-only \
             --output-dir "$APPDIR/usr/lib/ouroboros/_internal/claudexor-runtime"
 
@@ -818,6 +839,11 @@ jobs:
           # the bundle root itself — packaged_cli walks Resources/Frameworks/_internal).
           if (-not (Test-Path "$SmokeRoot\Ouroboros\_internal\repo.bundle")) { throw "repo.bundle missing" }
           if (-not (Test-Path "$SmokeRoot\Ouroboros\_internal\repo_bundle_manifest.json")) { throw "repo bundle manifest missing" }
+          $ToolToc = Join-Path $env:RUNNER_TEMP "ouroboros-windows-tool-pyz.txt"
+          python -m PyInstaller.utils.cliutils.archive_viewer -r -b "$SmokeRoot\Ouroboros\Ouroboros.exe" > $ToolToc
+          if ($LASTEXITCODE -ne 0) { throw "PyInstaller archive inspection failed: $LASTEXITCODE" }
+          python -m ouroboros.tool_module_inventory verify-artifact "$SmokeRoot\Ouroboros\_internal\ouroboros\_frozen_tool_modules.v1.json" "ouroboros\tools" $ToolToc
+          if ($LASTEXITCODE -ne 0) { throw "frozen tool inventory verification failed: $LASTEXITCODE" }
           python scripts/fetch_claudexor_runtime.py --verify-only --output-dir "$SmokeRoot\Ouroboros\_internal\claudexor-runtime"
           if ($LASTEXITCODE -ne 0) { throw "embedded Claudexor runtime verification failed: $LASTEXITCODE" }
           $env:HOME = $HomeDir

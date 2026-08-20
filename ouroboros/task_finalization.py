@@ -93,7 +93,11 @@ def register_final_answer_owed(
 ) -> None:
     """GR2-5 (§8-A2, ONE outbox for EVERY root): owe the final answer durably.
 
-    Called right after durable result persistence for every non-ephemeral ROOT,
+    Called immediately BEFORE durable result persistence for every non-ephemeral
+    ROOT (``agent_task_pipeline.emit_task_results`` registers, then stores), so a
+    crash in that window leaves an owed row the boot replay delivers instead of
+    a persisted result nobody was told about — the cancel lanes are the ones that
+    write first and owe before they SETTLE the intent. Registration happens
     regardless of the blocking/nonblocking post-task split: the nonblocking
     lane used to buffer the send with NO delivery_id and NO owed registration,
     so a worker crash before the buffered drain lost the owner's answer with

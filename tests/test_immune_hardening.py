@@ -189,8 +189,9 @@ class TestScopeChecklistFailClosed:
         import pytest
 
         import ouroboros.tools.scope_review as scope_review
+        from ouroboros.tools import scope_review_pack as scope_pack
 
-        monkeypatch.setattr(scope_review, "load_checklist_section", lambda *_a, **_k: "")
+        monkeypatch.setattr(scope_pack, "load_checklist_section", lambda *_a, **_k: "")
         with pytest.raises(RuntimeError, match="fail-closed"):
             scope_review._build_scope_prompt(pathlib.Path("."), "msg")
 

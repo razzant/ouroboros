@@ -3,12 +3,13 @@ import test from 'node:test';
 import { readFileSync } from 'node:fs';
 
 import {
+    costDashboardPresentation,
     headerBudgetPresentation,
     mergeStickyCostMeta,
     taskCostMeta,
     taskCostProjection,
-} from '../modules/chat.js';
-import { costDashboardPresentation } from '../modules/costs.js';
+    withTaskCostMeta,
+} from '../modules/costs.js';
 import { summarizeLogEvent } from '../modules/log_events.js';
 import {
     accountedUpperBound,
@@ -16,7 +17,9 @@ import {
     formatUsd4,
 } from '../modules/utils.js';
 
-test('header starts loading and fails closed when ledger money is unavailable', () => {
+// The nullable-money contract now belongs to costs.js, which owns the single
+// optionalFiniteNumber helper: a null ledger reading must never render as $0.
+function assertNullableCostPresentation() {
     assert.deepEqual(headerBudgetPresentation(), {
         state: 'loading', label: 'Loading…', fillPct: 0,
     });
@@ -27,6 +30,12 @@ test('header starts loading and fails closed when ledger money is unavailable', 
         headerBudgetPresentation({ accounting: { available: true }, spent_usd: null, budget_limit: 10 }).state,
         'unavailable',
     );
+    assert.equal(costDashboardPresentation({ accounting: { available: true, accounted_usd: null } }).state,
+        'unavailable');
+}
+
+test('header starts loading and fails closed when ledger money is unavailable', () => {
+    assertNullableCostPresentation();
 });
 
 test('header accepts the legacy numeric state shape without fabricating null as zero', () => {
@@ -216,8 +225,11 @@ test('a cost-only frame never moves the card’s Latest clock', () => {
     // no narration, so letting it move the clock would make a silent card look
     // freshly active. Pinned at source: the meta line reads the activity clock, and
     // only a human/activity-bearing frame advances it.
-    const source = readFileSync(new URL('../modules/chat.js', import.meta.url), 'utf8');
-    assert.match(source, /record\.latestActivityTs \? `Latest \$\{record\.latestActivityTs\}`/);
+    const view = readFileSync(new URL('../modules/chat_live_card_view.js', import.meta.url), 'utf8');
+    // The clock writer moved with applyLiveCardStateMutation into the
+    // live-card store (W3 wave D); the pinned pattern is unchanged.
+    const source = readFileSync(new URL('../modules/chat_live_cards.js', import.meta.url), 'utf8');
+    assert.match(view, /record\.latestActivityTs \? `Latest \$\{record\.latestActivityTs\}`/);
     assert.match(source, /if \(ts && \(summary\.human \|\| activityCandidate\)\) record\.latestActivityTs = ts/);
 });
 
@@ -258,4 +270,32 @@ test('log events read the shared cost names and stop hiding a real $0', () => {
         cost_accounting_status: 'available',
     });
     assert.ok(done.meta.includes('$0.0000'), JSON.stringify(done.meta));
+});
+
+// A live frame's cost evidence, presented for the card. Money renders ONLY from
+// the card's sticky projection, so any summarizer-built `cost=` string is
+// dropped — a frame without task-scope accounting shows no money at all rather
+// than a bare per-call number.
+function presentedFrame(summary, payload, options) {
+    return withTaskCostMeta(summary, payload, options);
+}
+
+test('a summarizer cost string is dropped unconditionally; other meta survives', () => {
+    const out = presentedFrame(
+        { headline: 'Working', meta: ['cost=$0.02', 'rounds=3'] },
+        { cost_usd: 0.5, cost_accounting_status: 'available', cost_final: true },
+        { rawTs: '2026-08-17T00:00:00Z' },
+    );
+    assert.deepEqual(out.meta, ['rounds=3']);
+    assert.deepEqual(out.costProjection.meta, taskCostMeta({
+        cost_usd: 0.5, cost_accounting_status: 'available', cost_final: true,
+    }));
+});
+
+test('a replace frame keeps no summarizer meta at all, and the source object is untouched', () => {
+    const summary = { headline: 'Done', meta: ['rounds=3'] };
+    const out = presentedFrame(summary, {}, { replace: true });
+    assert.deepEqual(out.meta, []);
+    assert.deepEqual(summary.meta, ['rounds=3'], 'the presentation never mutates the summarizer output');
+    assert.equal('costProjection' in out, false, 'no accounting evidence attaches no projection');
 });

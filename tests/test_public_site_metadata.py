@@ -7,6 +7,7 @@ import struct
 import xml.etree.ElementTree as ET
 from html.parser import HTMLParser
 from pathlib import Path
+from urllib.parse import urlsplit
 
 import yaml
 
@@ -35,6 +36,7 @@ class _HeadParser(HTMLParser):
         self.canonical: str | None = None
         self.meta: dict[str, str] = {}
         self.json_ld: list[str] = []
+        self.asset_refs: set[str] = set()
         self._json_parts: list[str] | None = None
 
     def handle_starttag(self, tag: str, attrs: list[tuple[str, str | None]]) -> None:
@@ -47,6 +49,10 @@ class _HeadParser(HTMLParser):
                 self.meta[key] = values["content"]  # type: ignore[index]
         if tag == "script" and values.get("type") == "application/ld+json":
             self._json_parts = []
+        for attribute in ("href", "src"):
+            path = urlsplit(values.get(attribute) or "").path
+            if path.startswith("/assets/"):
+                self.asset_refs.add(path.removeprefix("/"))
 
     def handle_data(self, data: str) -> None:
         if self._json_parts is not None:
@@ -269,6 +275,17 @@ def test_benchmark_assets_expose_status_and_accessible_text():
 def test_generated_public_files_match_source():
     for name in ("CNAME", "robots.txt", "sitemap.xml", "llms.txt", "install.json"):
         assert (SITE / "public" / name).read_bytes() == (DOCS / name).read_bytes()
+
+
+def test_generated_public_asset_references_resolve():
+    referenced: set[str] = set()
+    for page in sorted(DOCS.rglob("*.html")):
+        for asset in _parse(page).asset_refs:
+            assert (DOCS / asset).is_file(), f"{page.relative_to(DOCS)} -> {asset}"
+            referenced.add(asset)
+
+    assert "assets/home-sxLf4sZL.js" in referenced
+    assert "assets/ouroboros-CMTHrJbp.css" in referenced
 
 
 def test_install_visual_is_synced_valid_and_cache_busted():

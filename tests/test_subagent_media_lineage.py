@@ -22,7 +22,7 @@ def _ctx_with_lineage():
 
 
 def test_send_photo_event_carries_lineage():
-    from ouroboros.tools.core import _send_photo
+    from ouroboros.tools.core_artifacts import _send_photo
 
     ctx = _ctx_with_lineage()
     _send_photo(ctx, image_base64=_B64)
@@ -32,7 +32,7 @@ def test_send_photo_event_carries_lineage():
 
 
 def test_send_video_event_carries_lineage(tmp_path):
-    from ouroboros.tools.core import _send_video
+    from ouroboros.tools.core_artifacts import _send_video
 
     ctx = _ctx_with_lineage()
     vid_file = tmp_path / "clip.mp4"

@@ -1,0 +1,507 @@
+{
+  "cases": [
+    {
+      "id": "local.dispatch.tool_call_from_text",
+      "route": "local llama.cpp lane: flattened text, capped max_tokens, XML tool-call upgrade",
+      "spec": {
+        "env": {
+          "LOCAL_MODEL_PORT": "8799"
+        },
+        "local_context_length": 8192,
+        "transport": [
+          {
+            "kind": "response",
+            "body": {
+              "id": "local-1",
+              "choices": [
+                {
+                  "index": 0,
+                  "finish_reason": "stop",
+                  "message": {
+                    "role": "assistant",
+                    "content": "<think>deciding</think><tool_call>{\"name\": \"read_file\", \"arguments\": {\"path\": \"a.txt\"}}</tool_call>"
+                  }
+                }
+              ],
+              "usage": {
+                "prompt_tokens": 30,
+                "completion_tokens": 9
+              }
+            }
+          }
+        ],
+        "call": {
+          "kind": "method",
+          "name": "chat",
+          "kwargs": {
+            "messages": [
+              {
+                "role": "system",
+                "content": "policy"
+              },
+              {
+                "role": "user",
+                "content": [
+                  {
+                    "type": "text",
+                    "text": "look"
+                  },
+                  {
+                    "type": "image_url",
+                    "image_url": {
+                      "url": "u"
+                    }
+                  }
+                ]
+              }
+            ],
+            "model": "local",
+            "use_local": true,
+            "tools": [
+              {
+                "type": "function",
+                "function": {
+                  "name": "read_file",
+                  "description": "read",
+                  "parameters": {
+                    "type": "object",
+                    "properties": {
+                      "path": {
+                        "type": "string"
+                      }
+                    }
+                  }
+                }
+              },
+              {
+                "type": "function",
+                "function": {
+                  "name": "apply_patch",
+                  "description": [
+                    "two ",
+                    "parts"
+                  ],
+                  "parameters": {
+                    "type": "object"
+                  }
+                }
+              }
+            ],
+            "max_tokens": 65536
+          }
+        }
+      },
+      "expected": {
+        "returned": {
+          "message": {
+            "role": "assistant",
+            "content": "deciding",
+            "tool_calls": [
+              {
+                "id": "call_local_0",
+                "type": "function",
+                "function": {
+                  "name": "read_file",
+                  "arguments": "{\"path\": \"a.txt\"}"
+                }
+              }
+            ]
+          },
+          "usage": {
+            "prompt_tokens": 30,
+            "completion_tokens": 9,
+            "cost": 0.0,
+            "cost_final": true
+          },
+          "ledger_attempt_count": 1
+        },
+        "sends": [
+          {
+            "transport": "openai.chat.completions.create",
+            "client": {
+              "api_key": "local",
+              "base_url": "http://127.0.0.1:8799/v1",
+              "default_headers": null,
+              "max_retries": 0,
+              "http_client": null
+            },
+            "payload": {
+              "model": "local-model",
+              "messages": [
+                {
+                  "role": "system",
+                  "content": "policy"
+                },
+                {
+                  "role": "user",
+                  "content": "look\n\n[image omitted: model has no vision]"
+                }
+              ],
+              "max_tokens": 2048,
+              "tools": [
+                {
+                  "type": "function",
+                  "function": {
+                    "name": "read_file",
+                    "description": "read",
+                    "parameters": {
+                      "type": "object",
+                      "properties": {
+                        "path": {
+                          "type": "string"
+                        }
+                      }
+                    }
+                  }
+                },
+                {
+                  "type": "function",
+                  "function": {
+                    "name": "apply_patch",
+                    "description": [
+                      "two ",
+                      "parts"
+                    ],
+                    "parameters": {
+                      "type": "object"
+                    }
+                  }
+                }
+              ],
+              "tool_choice": "auto"
+            },
+            "payload_sha256": "99947884ed392199768931171855459c863d127fbc5ee9cca45d2b29572cbe38"
+          }
+        ],
+        "physical_attempts": [
+          {
+            "source": "llm.local",
+            "model": "local-model",
+            "provider": "local",
+            "candidate_raw_sha256": "99947884ed392199768931171855459c863d127fbc5ee9cca45d2b29572cbe38",
+            "candidate_raw_size_bytes": 455,
+            "candidate_measurement_kind": "canonical_json_v1",
+            "states": [
+              "reserved",
+              "dispatched",
+              "settled"
+            ],
+            "prompt_cache_ttl": "",
+            "cost_final": true
+          }
+        ],
+        "unused_script_steps": 0
+      }
+    },
+    {
+      "id": "local.dispatch.transient_failure_surfaces_after_one_attempt",
+      "route": "local lane: a transient failure surfaces to the caller's retry policy after ONE physical attempt — no in-lane resend, no sleep",
+      "spec": {
+        "env": {
+          "LOCAL_MODEL_PORT": "8799"
+        },
+        "local_context_length": 0,
+        "transport": [
+          {
+            "kind": "error",
+            "message": "connection reset by peer"
+          }
+        ],
+        "call": {
+          "kind": "method",
+          "name": "chat",
+          "kwargs": {
+            "messages": [
+              {
+                "role": "system",
+                "content": "stable policy prefix"
+              },
+              {
+                "role": "user",
+                "content": "hello"
+              }
+            ],
+            "model": "local",
+            "use_local": true
+          }
+        }
+      },
+      "expected": {
+        "raised": {
+          "type": "FixtureProviderError",
+          "message": "connection reset by peer"
+        },
+        "sends": [
+          {
+            "transport": "openai.chat.completions.create",
+            "client": {
+              "api_key": "local",
+              "base_url": "http://127.0.0.1:8799/v1",
+              "default_headers": null,
+              "max_retries": 0,
+              "http_client": null
+            },
+            "payload": {
+              "model": "local-model",
+              "messages": [
+                {
+                  "role": "system",
+                  "content": "stable policy prefix"
+                },
+                {
+                  "role": "user",
+                  "content": "hello"
+                }
+              ],
+              "max_tokens": 2048
+            },
+            "payload_sha256": "7ecca22acedaaa8ee40464b2cbb1738b638e637950bdc029942931429919f427"
+          }
+        ],
+        "physical_attempts": [
+          {
+            "source": "llm.local",
+            "model": "local-model",
+            "provider": "local",
+            "candidate_raw_sha256": "7ecca22acedaaa8ee40464b2cbb1738b638e637950bdc029942931429919f427",
+            "candidate_raw_size_bytes": 139,
+            "candidate_measurement_kind": "canonical_json_v1",
+            "states": [
+              "reserved",
+              "dispatched",
+              "unresolved"
+            ]
+          }
+        ],
+        "unused_script_steps": 0
+      }
+    },
+    {
+      "id": "local.dispatch.no_second_physical_attempt",
+      "route": "local lane: the second and third scripted failures are never reached because the lane never re-sends a candidate itself",
+      "spec": {
+        "env": {
+          "LOCAL_MODEL_PORT": "8799"
+        },
+        "local_context_length": 0,
+        "transport": [
+          {
+            "kind": "error",
+            "message": "connection reset by peer"
+          },
+          {
+            "kind": "error",
+            "message": "connection reset by peer"
+          },
+          {
+            "kind": "error",
+            "message": "connection reset by peer"
+          }
+        ],
+        "call": {
+          "kind": "method",
+          "name": "chat",
+          "kwargs": {
+            "messages": [
+              {
+                "role": "system",
+                "content": "stable policy prefix"
+              },
+              {
+                "role": "user",
+                "content": "hello"
+              }
+            ],
+            "model": "local",
+            "use_local": true
+          }
+        }
+      },
+      "expected": {
+        "raised": {
+          "type": "FixtureProviderError",
+          "message": "connection reset by peer"
+        },
+        "sends": [
+          {
+            "transport": "openai.chat.completions.create",
+            "client": {
+              "api_key": "local",
+              "base_url": "http://127.0.0.1:8799/v1",
+              "default_headers": null,
+              "max_retries": 0,
+              "http_client": null
+            },
+            "payload": {
+              "model": "local-model",
+              "messages": [
+                {
+                  "role": "system",
+                  "content": "stable policy prefix"
+                },
+                {
+                  "role": "user",
+                  "content": "hello"
+                }
+              ],
+              "max_tokens": 2048
+            },
+            "payload_sha256": "7ecca22acedaaa8ee40464b2cbb1738b638e637950bdc029942931429919f427"
+          }
+        ],
+        "physical_attempts": [
+          {
+            "source": "llm.local",
+            "model": "local-model",
+            "provider": "local",
+            "candidate_raw_sha256": "7ecca22acedaaa8ee40464b2cbb1738b638e637950bdc029942931429919f427",
+            "candidate_raw_size_bytes": 139,
+            "candidate_measurement_kind": "canonical_json_v1",
+            "states": [
+              "reserved",
+              "dispatched",
+              "unresolved"
+            ]
+          }
+        ],
+        "unused_script_steps": 2
+      }
+    },
+    {
+      "id": "local.dispatch.context_overflow_is_typed",
+      "route": "a structured context-overflow failure becomes LocalContextTooLargeError without a retry",
+      "spec": {
+        "env": {
+          "LOCAL_MODEL_PORT": "8799"
+        },
+        "local_context_length": 0,
+        "transport": [
+          {
+            "kind": "error",
+            "message": "prompt is too long",
+            "status_code": 400,
+            "code": "context_length_exceeded"
+          }
+        ],
+        "call": {
+          "kind": "method",
+          "name": "chat",
+          "kwargs": {
+            "messages": [
+              {
+                "role": "system",
+                "content": "stable policy prefix"
+              },
+              {
+                "role": "user",
+                "content": "hello"
+              }
+            ],
+            "model": "local",
+            "use_local": true
+          }
+        }
+      },
+      "expected": {
+        "raised": {
+          "type": "LocalContextTooLargeError",
+          "message": "prompt is too long"
+        },
+        "sends": [
+          {
+            "transport": "openai.chat.completions.create",
+            "client": {
+              "api_key": "local",
+              "base_url": "http://127.0.0.1:8799/v1",
+              "default_headers": null,
+              "max_retries": 0,
+              "http_client": null
+            },
+            "payload": {
+              "model": "local-model",
+              "messages": [
+                {
+                  "role": "system",
+                  "content": "stable policy prefix"
+                },
+                {
+                  "role": "user",
+                  "content": "hello"
+                }
+              ],
+              "max_tokens": 2048
+            },
+            "payload_sha256": "7ecca22acedaaa8ee40464b2cbb1738b638e637950bdc029942931429919f427"
+          }
+        ],
+        "physical_attempts": [
+          {
+            "source": "llm.local",
+            "model": "local-model",
+            "provider": "local",
+            "candidate_raw_sha256": "7ecca22acedaaa8ee40464b2cbb1738b638e637950bdc029942931429919f427",
+            "candidate_raw_size_bytes": 139,
+            "candidate_measurement_kind": "canonical_json_v1",
+            "states": [
+              "reserved",
+              "dispatched",
+              "unresolved"
+            ]
+          }
+        ],
+        "unused_script_steps": 0
+      }
+    },
+    {
+      "id": "local.dispatch.compaction_then_overflow",
+      "route": "safe compaction runs first and an unfittable context raises before any send",
+      "spec": {
+        "env": {
+          "LOCAL_MODEL_PORT": "8799"
+        },
+        "local_context_length": 1024,
+        "transport": [],
+        "call": {
+          "kind": "method",
+          "name": "chat",
+          "kwargs": {
+            "messages": [
+              {
+                "role": "system",
+                "content": [
+                  {
+                    "type": "text",
+                    "text": "## BIBLE.md\npolicy line\npolicy line\npolicy line\npolicy line\npolicy line\npolicy line\npolicy line\npolicy line\npolicy line\npolicy line\npolicy line\npolicy line\npolicy line\npolicy line\npolicy line\npolicy line\npolicy line\npolicy line\npolicy line\npolicy line\npolicy line\npolicy line\npolicy line\npolicy line\npolicy line\npolicy line\npolicy line\npolicy line\npolicy line\npolicy line\npolicy line\npolicy line\npolicy line\npolicy line\npolicy line\npolicy line\npolicy line\npolicy line\npolicy line\npolicy line\npolicy line\npolicy line\npolicy line\npolicy line\npolicy line\npolicy line\npolicy line\npolicy line\npolicy line\npolicy line\npolicy line\npolicy line\npolicy line\npolicy line\npolicy line\npolicy line\npolicy line\npolicy line\npolicy line\npolicy line\npolicy line\npolicy line\npolicy line\npolicy line\npolicy line\npolicy line\npolicy line\npolicy line\npolicy line\npolicy line\npolicy line\npolicy line\npolicy line\npolicy line\npolicy line\npolicy line\npolicy line\npolicy line\npolicy line\npolicy line\npolicy line\npolicy line\npolicy line\npolicy line\npolicy line\npolicy line\npolicy line\npolicy line\npolicy line\npolicy line\npolicy line\npolicy line\npolicy line\npolicy line\npolicy line\npolicy line\npolicy line\npolicy line\npolicy line\npolicy line\npolicy line\npolicy line\npolicy line\npolicy line\npolicy line\npolicy line\npolicy line\npolicy line\npolicy line\npolicy line\npolicy line\npolicy line\npolicy line\npolicy line\npolicy line\npolicy line\npolicy line\npolicy line\npolicy line\npolicy line\npolicy line\npolicy line\npolicy line\npolicy line\npolicy line\npolicy line\npolicy line\npolicy line\npolicy line\npolicy line\npolicy line\npolicy line\npolicy line\npolicy line\npolicy line\npolicy line\npolicy line\npolicy line\npolicy line\npolicy line\npolicy line\npolicy line\npolicy line\npolicy line\npolicy line\npolicy line\npolicy line\npolicy line\npolicy line\npolicy line\npolicy line\npolicy line\npolicy line\npolicy line\npolicy line\npolicy line\npolicy line\npolicy line\npolicy line\npolicy line\npolicy line\npolicy line\npolicy line\npolicy line\npolicy line\npolicy line\npolicy line\npolicy line\npolicy line\npolicy line\npolicy line\npolicy line\npolicy line\npolicy line\npolicy line\npolicy line\npolicy line\npolicy line\npolicy line\npolicy line\npolicy line\npolicy line\npolicy line\npolicy line\npolicy line\npolicy line\npolicy line\npolicy line\npolicy line\npolicy line\npolicy line\npolicy line\npolicy line\npolicy line\npolicy line\npolicy line\npolicy line\npolicy line\npolicy line\npolicy line\n"
+                  },
+                  {
+                    "type": "text",
+                    "text": "## Identity\nidentity line\nidentity line\nidentity line\nidentity line\nidentity line\nidentity line\nidentity line\nidentity line\nidentity line\nidentity line\nidentity line\nidentity line\nidentity line\nidentity line\nidentity line\nidentity line\nidentity line\nidentity line\nidentity line\nidentity line\nidentity line\nidentity line\nidentity line\nidentity line\nidentity line\nidentity line\nidentity line\nidentity line\nidentity line\nidentity line\nidentity line\nidentity line\nidentity line\nidentity line\nidentity line\nidentity line\nidentity line\nidentity line\nidentity line\nidentity line\nidentity line\nidentity line\nidentity line\nidentity line\nidentity line\nidentity line\nidentity line\nidentity line\nidentity line\nidentity line\nidentity line\nidentity line\nidentity line\nidentity line\nidentity line\nidentity line\nidentity line\nidentity line\nidentity line\nidentity line\nidentity line\nidentity line\nidentity line\nidentity line\nidentity line\nidentity line\nidentity line\nidentity line\nidentity line\nidentity line\nidentity line\nidentity line\nidentity line\nidentity line\nidentity line\nidentity line\nidentity line\nidentity line\nidentity line\nidentity line\nidentity line\nidentity line\nidentity line\nidentity line\nidentity line\nidentity line\nidentity line\nidentity line\nidentity line\nidentity line\nidentity line\nidentity line\nidentity line\nidentity line\nidentity line\nidentity line\nidentity line\nidentity line\nidentity line\nidentity line\nidentity line\nidentity line\nidentity line\nidentity line\nidentity line\nidentity line\nidentity line\nidentity line\nidentity line\nidentity line\nidentity line\nidentity line\nidentity line\nidentity line\nidentity line\nidentity line\nidentity line\nidentity line\nidentity line\nidentity line\nidentity line\nidentity line\nidentity line\nidentity line\nidentity line\nidentity line\nidentity line\nidentity line\nidentity line\nidentity line\nidentity line\nidentity line\nidentity line\nidentity line\nidentity line\nidentity line\nidentity line\nidentity line\nidentity line\nidentity line\nidentity line\nidentity line\nidentity line\nidentity line\nidentity line\nidentity line\nidentity line\nidentity line\nidentity line\nidentity line\nidentity line\nidentity line\nidentity line\nidentity line\nidentity line\nidentity line\nidentity line\nidentity line\nidentity line\nidentity line\nidentity line\nidentity line\nidentity line\nidentity line\nidentity line\nidentity line\nidentity line\nidentity line\nidentity line\nidentity line\nidentity line\nidentity line\nidentity line\nidentity line\nidentity line\nidentity line\nidentity line\nidentity line\nidentity line\nidentity line\nidentity line\nidentity line\nidentity line\nidentity line\nidentity line\nidentity line\nidentity line\nidentity line\nidentity line\nidentity line\nidentity line\nidentity line\nidentity line\nidentity line\nidentity line\nidentity line\nidentity line\nidentity line\nidentity line\nidentity line\n"
+                  },
+                  {
+                    "type": "text",
+                    "text": "## Scratchpad\nscratch line\nscratch line\nscratch line\nscratch line\nscratch line\nscratch line\nscratch line\nscratch line\nscratch line\nscratch line\nscratch line\nscratch line\nscratch line\nscratch line\nscratch line\nscratch line\nscratch line\nscratch line\nscratch line\nscratch line\nscratch line\nscratch line\nscratch line\nscratch line\nscratch line\nscratch line\nscratch line\nscratch line\nscratch line\nscratch line\nscratch line\nscratch line\nscratch line\nscratch line\nscratch line\nscratch line\nscratch line\nscratch line\nscratch line\nscratch line\nscratch line\nscratch line\nscratch line\nscratch line\nscratch line\nscratch line\nscratch line\nscratch line\nscratch line\nscratch line\nscratch line\nscratch line\nscratch line\nscratch line\nscratch line\nscratch line\nscratch line\nscratch line\nscratch line\nscratch line\nscratch line\nscratch line\nscratch line\nscratch line\nscratch line\nscratch line\nscratch line\nscratch line\nscratch line\nscratch line\nscratch line\nscratch line\nscratch line\nscratch line\nscratch line\nscratch line\nscratch line\nscratch line\nscratch line\nscratch line\nscratch line\nscratch line\nscratch line\nscratch line\nscratch line\nscratch line\nscratch line\nscratch line\nscratch line\nscratch line\nscratch line\nscratch line\nscratch line\nscratch line\nscratch line\nscratch line\nscratch line\nscratch line\nscratch line\nscratch line\nscratch line\nscratch line\nscratch line\nscratch line\nscratch line\nscratch line\nscratch line\nscratch line\nscratch line\nscratch line\nscratch line\nscratch line\nscratch line\nscratch line\nscratch line\nscratch line\nscratch line\nscratch line\nscratch line\nscratch line\nscratch line\nscratch line\nscratch line\nscratch line\nscratch line\nscratch line\nscratch line\nscratch line\nscratch line\nscratch line\nscratch line\nscratch line\nscratch line\nscratch line\nscratch line\nscratch line\nscratch line\nscratch line\nscratch line\nscratch line\nscratch line\nscratch line\nscratch line\nscratch line\nscratch line\nscratch line\nscratch line\nscratch line\nscratch line\nscratch line\nscratch line\nscratch line\nscratch line\nscratch line\nscratch line\nscratch line\nscratch line\nscratch line\nscratch line\nscratch line\nscratch line\nscratch line\nscratch line\nscratch line\nscratch line\nscratch line\nscratch line\nscratch line\nscratch line\nscratch line\nscratch line\nscratch line\nscratch line\nscratch line\nscratch line\nscratch line\nscratch line\nscratch line\nscratch line\nscratch line\nscratch line\nscratch line\nscratch line\nscratch line\nscratch line\nscratch line\nscratch line\nscratch line\nscratch line\nscratch line\nscratch line\nscratch line\nscratch line\nscratch line\nscratch line\nscratch line\nscratch line\nscratch line\nscratch line\nscratch line\n"
+                  }
+                ]
+              },
+              {
+                "role": "user",
+                "content": "xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx"
+              }
+            ],
+            "model": "local",
+            "use_local": true,
+            "max_tokens": 256
+          }
+        }
+      },
+      "expected": {
+        "raised": {
+          "type": "LocalContextTooLargeError",
+          "message": "Local model context too large after safe compaction (11835 chars > target 2112)."
+        },
+        "sends": [],
+        "unused_script_steps": 0
+      }
+    }
+  ]
+}

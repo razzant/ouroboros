@@ -44,8 +44,9 @@ def _normalize_browser_engine(engine: str = "") -> str:
 
 # Subagent browse restrictions (no loopback/private/non-HTTP) apply to ALL
 # delegated subagents — read-only, acting, and fail-closed missing-constraint.
-# Same fail-closed predicate as secret/control READ denials (SSOT in tools.core).
-from ouroboros.tools.core import is_restricted_subagent_profile as _readonly_subagent
+# Same fail-closed predicate as secret/control READ denials (SSOT in
+# tools.core_file_tools).
+from ouroboros.tools.core_file_tools import is_restricted_subagent_profile
 
 
 def _is_subagent_blocked_browser_url(url: str, ctx: Any = None) -> bool:
@@ -524,7 +525,7 @@ def _ensure_browser(ctx: ToolContext, *, engine: str = "chromium", device: str =
             log.debug("Browser connection check failed", exc_info=True)
         cleanup_browser(ctx)
 
-    readonly_subagent = _readonly_subagent(ctx)
+    readonly_subagent = is_restricted_subagent_profile(ctx)
     _ensure_playwright_installed(engine=engine, allow_install=not readonly_subagent)
 
     if bs.pw_instance is None:
@@ -904,7 +905,7 @@ def _inject_native_screenshot(ctx: ToolContext, b64: str) -> str:
         shot_path = shot_dir / f"{ts}.png"
         shot_path.write_bytes(base64.b64decode(b64))
         caption = f"[browser screenshot {ts}]"
-        from ouroboros.loop import _append_or_merge_user_content
+        from ouroboros.loop_messages import _append_or_merge_user_content
 
         _append_or_merge_user_content(messages, [
             {"type": "text", "text": caption},
@@ -986,7 +987,7 @@ def _extract_page_output(page: Any, output: str, ctx: ToolContext) -> str:
         ctx.browser_state.last_screenshot_b64 = b64
         health = _page_health_snapshot(page)
         health_note = (f"Page health: {health}. " if health else "")
-        if _readonly_subagent(ctx):
+        if is_restricted_subagent_profile(ctx):
             return (
                 f"Screenshot captured ({len(b64)} bytes base64). "
                 + health_note
@@ -1013,7 +1014,7 @@ def _extract_page_output(page: Any, output: str, ctx: ToolContext) -> str:
 def _browse_page(ctx: ToolContext, url: str, output: str = "text",
                  wait_for: str = "", timeout: int = 30000,
                  viewport: str = "", engine: str = "chromium", device: str = "") -> str:
-    readonly_subagent = _readonly_subagent(ctx)
+    readonly_subagent = is_restricted_subagent_profile(ctx)
     if readonly_subagent and _is_subagent_blocked_browser_url(str(url or ""), ctx):
         return "⚠️ BROWSER_LOCAL_READONLY_BLOCKED: subagents may browse external HTTP(S), localhost (non-Ouroboros ports), and file:// under their workspace — not the Ouroboros API ports, private/link-local IPs, or other schemes."
     try:
@@ -1056,7 +1057,7 @@ def _browser_action(ctx: ToolContext, action: str, selector: str = "",
                     value: str = "", timeout: int = 5000,
                     engine: str = "", device: str = "") -> str:
     normalized_action = str(action or "").strip().lower()
-    readonly_subagent = _readonly_subagent(ctx)
+    readonly_subagent = is_restricted_subagent_profile(ctx)
     if readonly_subagent and normalized_action == "evaluate":
         return "⚠️ BROWSER_LOCAL_READONLY_BLOCKED: subagents cannot run arbitrary browser JavaScript."
 

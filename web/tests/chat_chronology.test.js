@@ -1,11 +1,9 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
 
-import {
-    insertTimelineNode,
-    rawTimestampEpoch,
-} from '../modules/chat.js';
+import { insertTimelineNode } from '../modules/chat_render_batch.js';
 import { normalizeLogTs } from '../modules/log_events.js';
+import { rawTimestampEpoch } from '../modules/utils.js';
 
 function makeNode(id, ts = null, { height = 20, top = 100 } = {}) {
     return {

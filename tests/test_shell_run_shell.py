@@ -23,6 +23,7 @@ from types import SimpleNamespace
 import pytest
 
 from ouroboros.tools.shell import _resolve_effective_timeout, _run_shell
+from ouroboros.tools.tool_result import ToolResult
 
 
 # ---------------------------------------------------------------------------
@@ -39,6 +40,18 @@ def _ctx(tmp_path):
         drive_root=tmp_path,
         drive_logs=lambda: pathlib.Path(str(tmp_path)),
     )
+
+
+def _typed_ctx(tmp_path):
+    ctx = _ctx(tmp_path)
+    ctx._active_builtin_tool_result = object()
+    return ctx
+
+
+def _published(ctx) -> ToolResult:
+    result = ctx._active_builtin_tool_result
+    assert isinstance(result, ToolResult)
+    return result
 
 
 def test_run_shell_preserves_leading_stdout_whitespace(tmp_path, fake_subprocess):
@@ -84,7 +97,7 @@ def fake_subprocess(monkeypatch):
             _run_shell(...)
             assert calls[0]["cmd"] == [...]
     """
-    monkeypatch.setattr("ouroboros.tools.shell.load_settings", lambda: {})
+    monkeypatch.setattr("ouroboros.tools.shell_process.load_settings", lambda: {})
 
     def _install(*, returncode: int = 0, stdout: str = "", stderr: str = ""):
         calls: list[dict] = []
@@ -224,7 +237,7 @@ class TestShellArgContract:
         assert "exit_code=0" in result
 
     def test_posix_bracket_test_command_still_recovers_via_shlex(self, tmp_path, monkeypatch):
-        monkeypatch.setattr("ouroboros.tools.shell.load_settings", lambda: {})
+        monkeypatch.setattr("ouroboros.tools.shell_process.load_settings", lambda: {})
 
         def fake_run(cmd, **kwargs):
             assert cmd == ["[", "-f", "file.txt", "]"]
@@ -273,11 +286,61 @@ def test_run_shell_nonzero_exit_is_reported_as_failure(tmp_path, fake_subprocess
     assert "permission denied" in result
 
 
+@pytest.mark.parametrize(
+    ("returncode", "stdout", "stderr", "code", "status", "expected_meta"),
+    (
+        (
+            0,
+            "exit_code=93 signal=SIGKILL ARTIFACT_OUTPUTS\n",
+            "",
+            "OK",
+            "ok",
+            {"exit_code": 0},
+        ),
+        (
+            3,
+            "",
+            "permission denied",
+            "SHELL_EXIT_ERROR",
+            "error",
+            {"exit_code": 3},
+        ),
+        (
+            -15,
+            "",
+            "terminated",
+            "SHELL_EXIT_ERROR",
+            "error",
+            {"exit_code": -15, "signal": "SIGTERM"},
+        ),
+    ),
+)
+def test_run_shell_publishes_only_actual_process_facts(
+    returncode,
+    stdout,
+    stderr,
+    code,
+    status,
+    expected_meta,
+    tmp_path,
+    fake_subprocess,
+):
+    fake_subprocess(returncode=returncode, stdout=stdout, stderr=stderr)
+    ctx = _typed_ctx(tmp_path)
+
+    text = _run_shell(ctx, ["fixture-command"])
+    typed = _published(ctx)
+
+    assert typed.text == text
+    assert (typed.status, typed.code) == (status, code)
+    assert dict(typed.meta) == expected_meta
+
+
 def test_run_shell_timeout_uses_settings_timeout(tmp_path, monkeypatch):
     def fake_timeout(cmd, **kwargs):
         raise __import__("subprocess").TimeoutExpired(cmd=cmd, timeout=kwargs["timeout"])
 
-    monkeypatch.setattr("ouroboros.tools.shell.load_settings", lambda: {"OUROBOROS_TOOL_TIMEOUT_SEC": 42})
+    monkeypatch.setattr("ouroboros.tools.shell_process.load_settings", lambda: {"OUROBOROS_TOOL_TIMEOUT_SEC": 42})
     monkeypatch.delenv("OUROBOROS_TOOL_TIMEOUT_SEC", raising=False)
     monkeypatch.setattr("ouroboros.tools.shell._tracked_subprocess_run", fake_timeout)
     result = _run_shell(_ctx(tmp_path), ["sleep", "999"])
@@ -290,7 +353,7 @@ def test_run_shell_timeout_uses_settings_timeout(tmp_path, monkeypatch):
 def test_run_shell_deadline_derived_timeout_is_used_when_no_explicit_setting(monkeypatch):
     from datetime import datetime, timezone
 
-    monkeypatch.setattr("ouroboros.tools.shell.load_settings", lambda: {"OUROBOROS_TOOL_TIMEOUT_SEC": 0})
+    monkeypatch.setattr("ouroboros.tools.shell_process.load_settings", lambda: {"OUROBOROS_TOOL_TIMEOUT_SEC": 0})
     monkeypatch.delenv("OUROBOROS_TOOL_TIMEOUT_SEC", raising=False)
     monkeypatch.setattr("ouroboros.deadline_utils.utc_now", lambda: datetime(2026, 6, 10, 0, 0, tzinfo=timezone.utc))
     ctx = SimpleNamespace(task_metadata={"deadline_at": "2026-06-10T00:20:00Z"})
@@ -301,7 +364,7 @@ def test_run_shell_deadline_derived_timeout_is_used_when_no_explicit_setting(mon
 def test_run_shell_deadline_caps_real_default_timeout(monkeypatch):
     from datetime import datetime, timezone
 
-    monkeypatch.setattr("ouroboros.tools.shell.load_settings", lambda: {"OUROBOROS_TOOL_TIMEOUT_SEC": 600})
+    monkeypatch.setattr("ouroboros.tools.shell_process.load_settings", lambda: {"OUROBOROS_TOOL_TIMEOUT_SEC": 600})
     monkeypatch.delenv("OUROBOROS_TOOL_TIMEOUT_SEC", raising=False)
     monkeypatch.setattr("ouroboros.deadline_utils.utc_now", lambda: datetime(2026, 6, 10, 0, 0, tzinfo=timezone.utc))
     ctx = SimpleNamespace(task_metadata={"deadline_at": "2026-06-10T00:10:00Z"})
@@ -310,7 +373,7 @@ def test_run_shell_deadline_caps_real_default_timeout(monkeypatch):
 
 
 def test_run_shell_explicit_timeout_wins_over_deadline(monkeypatch):
-    monkeypatch.setattr("ouroboros.tools.shell.load_settings", lambda: {"OUROBOROS_TOOL_TIMEOUT_SEC": 42})
+    monkeypatch.setattr("ouroboros.tools.shell_process.load_settings", lambda: {"OUROBOROS_TOOL_TIMEOUT_SEC": 42})
     monkeypatch.delenv("OUROBOROS_TOOL_TIMEOUT_SEC", raising=False)
     ctx = SimpleNamespace(task_metadata={"deadline_at": "2026-06-10T00:20:00Z"})
 
@@ -334,6 +397,24 @@ def test_grep_or_rg_exit_one_without_stderr_is_no_match(cmd, tmp_path, fake_subp
     assert "exit_code=1" in result
     assert f"cwd={tmp_path.resolve()}" in result
     assert "no matches" in result
+
+
+def test_search_no_match_and_autocorrect_publish_native_facts(
+    tmp_path, fake_subprocess,
+):
+    fake_subprocess(returncode=1, stdout="", stderr="")
+    ctx = _typed_ctx(tmp_path)
+
+    text = _run_shell(ctx, ["grep", "A\\|B", "file.py"])
+    typed = _published(ctx)
+
+    assert typed.text == text
+    assert (typed.status, typed.code) == ("ok", "SHELL_NO_MATCH")
+    assert dict(typed.meta) == {
+        "exit_code": 1,
+        "shell_regex_auto_corrected": True,
+    }
+    assert text.startswith("⚠️ SHELL_REGEX_AUTO_CORRECTED:")
 
 
 def test_grep_exit_one_with_stderr_still_surfaces_shell_error(tmp_path, fake_subprocess):
@@ -398,3 +479,119 @@ class TestGrepRegexHint:
         fake_subprocess()
         result = _run_shell(_ctx(tmp_path), argv)
         assert "SHELL_REGEX_HINT" not in result, reason
+
+
+def test_run_script_republishes_exact_wrapped_text_and_process_facts(
+    tmp_path, fake_subprocess,
+):
+    from ouroboros.tools.shell import _run_script
+
+    fake_subprocess(stdout="script ok\n")
+    ctx = _typed_ctx(tmp_path)
+
+    text = _run_script(ctx, "print('script ok')")
+    typed = _published(ctx)
+
+    assert typed.text == text
+    assert text.startswith("# script_path=")
+    assert "\nexit_code=0" in text
+    assert (typed.status, typed.code) == ("ok", "OK")
+    assert dict(typed.meta) == {"exit_code": 0}
+
+
+def test_run_script_failure_wrapper_preserves_signal_fact(
+    tmp_path, fake_subprocess,
+):
+    from ouroboros.tools.shell import _run_script
+
+    fake_subprocess(returncode=-15, stderr="terminated")
+    ctx = _typed_ctx(tmp_path)
+
+    text = _run_script(ctx, "raise SystemExit(1)")
+    typed = _published(ctx)
+
+    assert typed.text == text
+    assert text.startswith("⚠️ SHELL_EXIT_ERROR:")
+    assert text.rstrip().endswith(".py")
+    assert (typed.status, typed.code) == ("error", "SHELL_EXIT_ERROR")
+    assert dict(typed.meta) == {
+        "exit_code": -15,
+        "signal": "SIGTERM",
+    }
+
+
+def test_executor_and_local_shell_results_publish_identical_exit_facts(
+    tmp_path, fake_subprocess, monkeypatch,
+):
+    from types import SimpleNamespace
+
+    fake_subprocess(returncode=-9, stderr="killed")
+    local_ctx = _typed_ctx(tmp_path)
+    _run_shell(local_ctx, ["fixture-command"])
+
+    executor_ctx = _typed_ctx(tmp_path)
+    monkeypatch.setattr(
+        "ouroboros.tools.shell._executor_can_run_cwd",
+        lambda *_args, **_kwargs: True,
+    )
+    monkeypatch.setattr(
+        "ouroboros.tools.shell.executor_execute",
+        lambda _ctx, cmd, _cwd, _timeout: SimpleNamespace(
+            args=cmd,
+            returncode=-9,
+            stdout="",
+            stderr="killed",
+            backend_trace={"backend": "fixture"},
+        ),
+    )
+    _run_shell(executor_ctx, ["fixture-command"])
+
+    assert dict(_published(local_ctx).meta) == {
+        "exit_code": -9,
+        "signal": "SIGKILL",
+    }
+    assert dict(_published(executor_ctx).meta) == dict(_published(local_ctx).meta)
+    assert _published(executor_ctx).code == _published(local_ctx).code == "SHELL_EXIT_ERROR"
+
+
+def test_artifact_registration_fact_uses_registration_result(
+    tmp_path, fake_subprocess, monkeypatch,
+):
+    fake_subprocess(stdout="ok")
+    monkeypatch.setattr(
+        "ouroboros.tools.shell._register_process_outputs",
+        lambda *_args, **_kwargs: (
+            "\n\nARTIFACT_OUTPUTS:\n- registered output",
+            False,
+            True,
+        ),
+    )
+    ctx = _typed_ctx(tmp_path)
+
+    _run_shell(ctx, ["fixture-command"], outputs=["report.txt"])
+
+    assert dict(_published(ctx).meta) == {
+        "artifact_registered": True,
+        "exit_code": 0,
+    }
+
+
+def test_partial_artifact_failure_never_claims_registration(
+    tmp_path, fake_subprocess, monkeypatch,
+):
+    fake_subprocess(stdout="ok")
+    monkeypatch.setattr(
+        "ouroboros.tools.shell._register_process_outputs",
+        lambda *_args, **_kwargs: (
+            "\n\n⚠️ ARTIFACT_OUTPUT_ERROR:\n- one copied\n- one failed",
+            True,
+            True,
+        ),
+    )
+    ctx = _typed_ctx(tmp_path)
+
+    _run_shell(ctx, ["fixture-command"], outputs=["one.txt", "two.txt"])
+
+    typed = _published(ctx)
+    assert typed.code == "ARTIFACT_OUTPUT_ERROR"
+    assert dict(typed.meta) == {"exit_code": 0}

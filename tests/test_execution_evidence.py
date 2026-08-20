@@ -359,7 +359,7 @@ class TestEvidenceReadHonesty:
     def test_nanny_never_accuses_on_unreadable_evidence(self, tmp_path):
         from types import SimpleNamespace
         from ouroboros import delegate_custody as custody
-        from ouroboros.loop import _maybe_inject_finalization_nudges
+        from ouroboros.loop_nudges import _maybe_inject_finalization_nudges
 
         log_path = custody.event_log_path(tmp_path)
         log_path.parent.mkdir(parents=True, exist_ok=True)
