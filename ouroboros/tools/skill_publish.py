@@ -52,6 +52,7 @@ from ouroboros.skill_review_status import normalize_skill_review_status
 from ouroboros.tool_access import (
     ResolvedResourceBinding,
     build_resolved_resource_binding,
+    canonical_data_root,
     load_bound_skill,
 )
 from ouroboros.tools.github import github_token_from_env_or_settings
@@ -217,7 +218,7 @@ def _validate_local_skill(
         SKILL_SOURCE_OUROBOROSHUB,
         SKILL_SOURCE_CLAWHUB,
     }
-    if loaded.source == SKILL_SOURCE_NATIVE and (loaded.skill_dir / ".seed-origin").is_file():
+    if loaded.source == SKILL_SOURCE_NATIVE and not (loaded.skill_dir / ".seed-origin").is_file():
         allowed_sources.add(SKILL_SOURCE_NATIVE)
     if loaded.source not in allowed_sources:
         raise _PublishFailure(
@@ -283,7 +284,39 @@ def _catalog_entry(
     return entry
 
 
-def _update_catalog(catalog: Dict[str, Any], entry: Dict[str, Any]) -> Tuple[str, Dict[str, Any]]:
+def _catalog_file_paths(entry: Mapping[str, Any]) -> set[str]:
+    files = entry.get("files")
+    if files is None:
+        return set()
+    if not isinstance(files, list):
+        raise _PublishFailure(
+            "upstream_catalog_invalid",
+            "Repair the upstream Hub catalog, then retry.",
+        )
+    paths: set[str] = set()
+    for item in files:
+        raw = item.get("path") if isinstance(item, Mapping) else None
+        path = str(raw or "")
+        pure = pathlib.PurePosixPath(path)
+        if (
+            not path
+            or pure.is_absolute()
+            or path != pure.as_posix()
+            or any(part in {"", ".", ".."} for part in pure.parts)
+            or path in paths
+        ):
+            raise _PublishFailure(
+                "upstream_catalog_invalid",
+                "Repair the upstream Hub catalog, then retry.",
+            )
+        paths.add(path)
+    return paths
+
+
+def _update_catalog(
+    catalog: Dict[str, Any],
+    entry: Dict[str, Any],
+) -> Tuple[str, Dict[str, Any], Tuple[str, ...]]:
     skills = catalog.get("skills")
     if not isinstance(skills, list):
         raise _PublishFailure(
@@ -297,6 +330,7 @@ def _update_catalog(catalog: Dict[str, Any], entry: Dict[str, Any]) -> Tuple[str
     )
     if existing_index is None:
         mode = "add"
+        obsolete_paths: Tuple[str, ...] = ()
         skills.append(entry)
     else:
         existing = skills[existing_index]
@@ -306,10 +340,11 @@ def _update_catalog(catalog: Dict[str, Any], entry: Dict[str, Any]) -> Tuple[str
                 "Bump the skill version, run a fresh review, then retry.",
             )
         mode = "update"
+        obsolete_paths = tuple(sorted(_catalog_file_paths(existing) - _catalog_file_paths(entry)))
         skills[existing_index] = entry
     skills.sort(key=lambda item: str(item.get("slug") or "") if isinstance(item, dict) else "")
     catalog["skills"] = skills
-    return mode, catalog
+    return mode, catalog, obsolete_paths
 
 
 def _captured_control_json(snapshot: SkillPublishSnapshot, filename: str) -> Dict[str, Any] | None:
@@ -426,6 +461,23 @@ def _strip_generated_h2_sections(body: str, headings: Sequence[str]) -> str:
     return "".join(output)
 
 
+def _close_unterminated_fence(body: str) -> str:
+    """Keep the next independently rendered Markdown component outside a fence."""
+    fence: Tuple[str, int] | None = None
+    for raw_line in body.splitlines():
+        marker = _fence_marker(raw_line)
+        if marker is None:
+            continue
+        if fence is None:
+            fence = (marker[0], marker[1])
+        elif marker[0] == fence[0] and marker[1] >= fence[1] and not marker[2].strip():
+            fence = None
+    if fence is None:
+        return body
+    separator = "" if body.endswith(("\n", "\r")) else "\n"
+    return f"{body}{separator}{fence[0] * fence[1]}\n"
+
+
 def _author_checklist(review: Any) -> str:
     advisory = bool(_advisory_findings_section(review))
     review_line = (
@@ -502,7 +554,7 @@ def _record_llm_usage(ctx: ToolContext, model: str, usage: Mapping[str, Any]) ->
 
 
 def _scanner_executable(ctx: ToolContext) -> ScannerExecutable:
-    runtime = resolve_betterleaks(data_root=ctx.drive_root)
+    runtime = resolve_betterleaks(data_root=canonical_data_root(ctx))
     path = pathlib.Path(runtime.binary_path) if runtime.binary_path else None
     status = runtime.status if runtime.status in {"ready", "missing", "corrupt"} else "corrupt"
     return ScannerExecutable(path=path, identity=runtime.binary_sha256, status=status)
@@ -555,7 +607,7 @@ def _select_optional_pr_core(
         {"pr-body-model-prompt.txt": prompt.encode("utf-8")},
         honor_inline_allowances=False,
     )
-    if prompt_scan.findings:
+    if prompt_scan.blocker_count:
         return fallback
     try:
         model = get_light_model()
@@ -581,7 +633,7 @@ def _select_optional_pr_core(
         {"optional-pr-body.md": body.encode("utf-8")},
         honor_inline_allowances=False,
     )
-    return fallback if body_scan.findings else body
+    return fallback if body_scan.blocker_count else body
 
 
 def _scan_public_derived(
@@ -631,10 +683,10 @@ def _render_pr_body(
     )
     prefix_parts = []
     if provenance:
-        prefix_parts.append(provenance.strip())
+        prefix_parts.append(_close_unterminated_fence(provenance.strip()).rstrip())
     if note.strip():
-        prefix_parts.append(f"## Note\n{note.strip()}")
-    prefix_parts.append(core.strip())
+        prefix_parts.append(_close_unterminated_fence(f"## Note\n{note.strip()}").rstrip())
+    prefix_parts.append(_close_unterminated_fence(core.strip()).rstrip())
     selected = "\n\n".join(prefix_parts) + "\n"
     selected = _strip_generated_h2_sections(selected, _GENERATED_H2_HEADINGS).rstrip()
     host_sections = [_author_checklist(review).strip()]
@@ -726,7 +778,7 @@ def _submit_skill_to_hub(
         catalog, base_sha = fetch_upstream_catalog(ctx, owner, repo, base_branch)
         payload_files = _payload_files(snapshot)
         entry = _catalog_entry(safe_skill, snapshot, payload_files)
-        mode, updated_catalog = _update_catalog(catalog, entry)
+        mode, updated_catalog, obsolete_paths = _update_catalog(catalog, entry)
         try:
             catalog_bytes = json.dumps(
                 updated_catalog,
@@ -799,6 +851,7 @@ def _submit_skill_to_hub(
                 "contents": base64.b64encode(catalog_bytes).decode("ascii"),
             }
         )
+        deletions = [{"path": f"skills/{safe_skill}/{path}"} for path in obsolete_paths]
         commit_sha, commit_url = commit_payload(
             ctx,
             login,
@@ -807,6 +860,7 @@ def _submit_skill_to_hub(
             branch_sha,
             title,
             additions,
+            deletions,
         )
         attempt.mark(
             "commit_created",

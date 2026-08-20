@@ -162,15 +162,16 @@ jobs:
       - uses: actions/checkout@v4
         with:
           persist-credentials: false
-      - uses: actions/setup-python@v5
-        with:
-          python-version: '3.10'
+      - uses: ./.github/actions/setup-python-env
       - name: Install exact Betterleaks runtime
         shell: bash
         run: python -m ouroboros.betterleaks_runtime install
       - name: Smoke managed Betterleaks runtime
         shell: bash
         run: python scripts/betterleaks_platform_smoke.py --managed-runtime
+      - name: Run full pinned Betterleaks scanner contract
+        shell: bash
+        run: python -m pytest tests/test_skill_publish_scanner_real.py -q
 
   # ──────────────────────────────────────────────────────────────────
   # Tier 2.5: Integration tests against real provider APIs

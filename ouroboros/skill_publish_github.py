@@ -96,7 +96,7 @@ def fetch_upstream_catalog(ctx: ToolContext, owner: str, repo: str, base_branch:
         )
     content = _json_object(
         ctx,
-        ["api", f"/repos/{owner}/{repo}/contents/catalog.json?ref={base_branch}"],
+        ["api", f"/repos/{owner}/{repo}/contents/catalog.json?ref={base_sha}"],
         reason_code="upstream_read_failed",
     )
     try:
@@ -202,6 +202,7 @@ def commit_payload(
     base_sha: str,
     headline: str,
     additions: List[Dict[str, str]],
+    deletions: List[Dict[str, str]] | None = None,
 ) -> Tuple[str, str]:
     query = """
 mutation($input: CreateCommitOnBranchInput!) {
@@ -210,6 +211,9 @@ mutation($input: CreateCommitOnBranchInput!) {
   }
 }
 """.strip()
+    file_changes: Dict[str, Any] = {"additions": additions}
+    if deletions:
+        file_changes["deletions"] = deletions
     payload = {
         "query": query,
         "variables": {
@@ -222,7 +226,7 @@ mutation($input: CreateCommitOnBranchInput!) {
                     "headline": headline,
                     "body": ("Co-authored-by: Ouroboros <311266734+ouroboros-agent@users.noreply.github.com>"),
                 },
-                "fileChanges": {"additions": additions},
+                "fileChanges": file_changes,
                 "expectedHeadOid": base_sha,
             }
         },

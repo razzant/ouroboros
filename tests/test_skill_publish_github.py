@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import base64
 import json
 import types
 
@@ -67,7 +68,8 @@ def test_commit_payload_hardcodes_ouroboros_coauthor(monkeypatch):
         "submit/demo-v1.0.0",
         BASE_SHA,
         "Add skill: demo v1.0.0",
-        [],
+        [{"path": "skills/demo/SKILL.md", "contents": "YQ=="}],
+        [{"path": "skills/demo/removed.py"}],
     )
     message = captured["variables"]["input"]["message"]
     assert sha == COMMIT_SHA
@@ -76,6 +78,33 @@ def test_commit_payload_hardcodes_ouroboros_coauthor(monkeypatch):
         "headline": "Add skill: demo v1.0.0",
         "body": ("Co-authored-by: Ouroboros <311266734+ouroboros-agent@users.noreply.github.com>"),
     }
+    assert captured["variables"]["input"]["fileChanges"] == {
+        "additions": [{"path": "skills/demo/SKILL.md", "contents": "YQ=="}],
+        "deletions": [{"path": "skills/demo/removed.py"}],
+    }
+
+
+def test_upstream_catalog_is_read_from_the_exact_resolved_base_sha(monkeypatch):
+    calls = []
+
+    def fake_json(_ctx, args, **_kwargs):
+        calls.append(args)
+        if "/git/refs/heads/" in args[-1]:
+            return {"object": {"sha": BASE_SHA}}
+        return {
+            "content": base64.b64encode(b'{"skills":[]}').decode("ascii"),
+        }
+
+    monkeypatch.setattr(github, "_json_object", fake_json)
+    catalog, base_sha = github.fetch_upstream_catalog(
+        types.SimpleNamespace(),
+        "hub",
+        "project",
+        "main",
+    )
+    assert catalog == {"skills": []}
+    assert base_sha == BASE_SHA
+    assert calls[-1][-1] == f"/repos/hub/project/contents/catalog.json?ref={BASE_SHA}"
 
 
 def test_owner_actor_skips_fork_and_sync(monkeypatch):

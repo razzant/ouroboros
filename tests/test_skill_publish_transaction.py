@@ -112,7 +112,13 @@ def _install_transaction_fakes(
     model_body: str = "## Summary\nModel summary.\n\n## What This Skill Does\nSafe.",
 ):
     events = []
-    captured = {"prompts": [], "additions": [], "pr_body": "", "llm_calls": 0}
+    captured = {
+        "prompts": [],
+        "additions": [],
+        "deletions": [],
+        "pr_body": "",
+        "llm_calls": 0,
+    }
     review = SkillReviewState(
         status="warnings",
         content_hash=SNAPSHOT_SHA,
@@ -161,9 +167,10 @@ def _install_transaction_fakes(
         events.append(("mutation", "branch"))
         return BASE_SHA
 
-    def commit(_ctx, _login, _repo, _branch, _sha, _title, additions):
+    def commit(_ctx, _login, _repo, _branch, _sha, _title, additions, deletions):
         events.append(("mutation", "commit"))
         captured["additions"] = additions
+        captured["deletions"] = deletions
         return COMMIT_SHA, "https://github.com/alice/project/commit/" + COMMIT_SHA
 
     def create(_ctx, attempt, **kwargs):
@@ -281,7 +288,7 @@ def test_medium_payload_warning_and_audited_high_do_not_block(monkeypatch, tmp_p
     assert result["audited_false_positive_count"] == 1
 
 
-def test_any_prompt_finding_skips_optional_model_but_keeps_high_only_policy(monkeypatch, tmp_path):
+def test_medium_prompt_finding_keeps_optional_model_and_high_only_policy(monkeypatch, tmp_path):
     def scanner(named):
         if "pr-body-model-prompt.txt" in named:
             return _scan_result(_finding("pr-body-model-prompt.txt"))
@@ -297,10 +304,33 @@ def test_any_prompt_finding_skips_optional_model_but_keeps_high_only_policy(monk
     )
     result = _submit(ctx)
     assert result["ok"] is True
-    assert captured["llm_calls"] == 0
-    assert "A safe test skill" not in captured["pr_body"]
-    assert "Ambiguous but publishable text" in captured["pr_body"]
+    assert captured["llm_calls"] == 1
+    assert "Model summary" in captured["pr_body"]
     assert result["warning_count"] == 1
+
+
+def test_high_prompt_finding_skips_optional_model_and_uses_fallback(monkeypatch, tmp_path):
+    def scanner(named):
+        if "pr-body-model-prompt.txt" in named:
+            return _scan_result(
+                _finding(
+                    "pr-body-model-prompt.txt",
+                    confidence="high",
+                    disposition="blocker",
+                )
+            )
+        return _scan_result()
+
+    ctx, _events, captured = _install_transaction_fakes(
+        monkeypatch,
+        tmp_path,
+        snapshot=_snapshot(),
+        scanner=scanner,
+    )
+    result = _submit(ctx)
+    assert result["ok"] is True
+    assert captured["llm_calls"] == 0
+    assert "A safe test skill" in captured["pr_body"]
 
 
 def test_model_finding_discards_optional_prose_without_retry(monkeypatch, tmp_path):
@@ -327,6 +357,85 @@ def test_model_finding_discards_optional_prose_without_retry(monkeypatch, tmp_pa
     assert captured["llm_calls"] == 1
     assert "MODEL_CANDIDATE" not in captured["pr_body"]
     assert "A safe test skill" in captured["pr_body"]
+
+
+def test_medium_model_finding_keeps_optional_prose(monkeypatch, tmp_path):
+    def scanner(named):
+        if "optional-pr-body.md" in named or "pull-request-body.md" in named:
+            return _scan_result(_finding(next(iter(named))))
+        return _scan_result()
+
+    ctx, _events, captured = _install_transaction_fakes(
+        monkeypatch,
+        tmp_path,
+        snapshot=_snapshot(),
+        scanner=scanner,
+        model_body="## Summary\nMODEL_WARNING\n\n## What This Skill Does\nSafe.",
+    )
+    result = _submit(ctx)
+    assert result["ok"] is True
+    assert captured["llm_calls"] == 1
+    assert "MODEL_WARNING" in captured["pr_body"]
+    assert result["warning_count"] == 1
+
+
+@pytest.mark.parametrize(
+    ("note", "model_body"),
+    [
+        ("```python\nnote example", "## Summary\nSafe summary."),
+        ("", "## Summary\n~~~~ text\nmodel example"),
+    ],
+)
+def test_unterminated_component_fence_cannot_capture_host_sections(
+    monkeypatch,
+    tmp_path,
+    note,
+    model_body,
+):
+    ctx, _events, captured = _install_transaction_fakes(
+        monkeypatch,
+        tmp_path,
+        snapshot=_snapshot(),
+        model_body=model_body,
+    )
+    result = _submit(ctx, note=note)
+    assert result["ok"] is True
+    for heading in (
+        "## Author Checklist",
+        "## Known advisory findings",
+        "## Secret scan attestation",
+    ):
+        prefix = captured["pr_body"].split(heading, 1)[0]
+        assert skill_publish._close_unterminated_fence(prefix) == prefix
+
+
+def test_update_deletes_files_absent_from_exact_snapshot(monkeypatch, tmp_path):
+    ctx, _events, captured = _install_transaction_fakes(
+        monkeypatch,
+        tmp_path,
+        snapshot=_snapshot(),
+    )
+    old_catalog = {
+        "skills": [
+            {
+                "slug": "demo",
+                "version": "0.9.0",
+                "files": [
+                    {"path": "skill.json"},
+                    {"path": "SKILL.md"},
+                    {"path": "removed.py"},
+                ],
+            }
+        ]
+    }
+    monkeypatch.setattr(
+        skill_publish,
+        "fetch_upstream_catalog",
+        lambda *_args: (old_catalog, BASE_SHA),
+    )
+    result = _submit(ctx)
+    assert result["ok"] is True
+    assert captured["deletions"] == [{"path": "skills/demo/removed.py"}]
 
 
 def test_high_author_note_blocks_before_github(monkeypatch, tmp_path):

@@ -13,8 +13,8 @@ from dataclasses import dataclass
 
 import pytest
 
-from ouroboros import betterleaks_runtime
 import ouroboros.skill_publish_scanner as scanner
+from ouroboros import betterleaks_runtime
 from ouroboros.platform_layer import IS_WINDOWS
 from ouroboros.skill_publish_scanner import (
     ScannerExecutable,

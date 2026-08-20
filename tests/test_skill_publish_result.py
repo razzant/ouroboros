@@ -194,6 +194,45 @@ def test_bounded_result_is_deterministic_parseable_and_exact_about_omissions():
     assert len(parsed["repair_hint"]) == 600
 
 
+def test_bounded_result_keeps_blockers_ahead_of_nonblocking_findings():
+    base = {
+        "line": 1,
+        "detector": "provider-key",
+        "confidence": "high",
+        "reason": "Scanner finding requires review before publication.",
+        "verification": "not_attempted",
+    }
+    findings = [
+        {
+            **base,
+            "path": f"fixtures/{index:03d}/" + "x" * 250,
+            "disposition": "audited_false_positive",
+        }
+        for index in range(160)
+    ]
+    findings.append(
+        {
+            **base,
+            "path": "payload/real-blocker.txt",
+            "disposition": "blocker",
+        }
+    )
+    parsed = json.loads(
+        serialize_skill_publish_result(
+            ok=False,
+            status="scanner_blocked",
+            reason_code="scanner_high_confidence",
+            skill="demo",
+            findings=findings,
+            blocker_count=1,
+            audited_false_positive_count=160,
+        )
+    )
+    assert parsed["omitted_count"] > 0
+    assert parsed["findings"][0]["disposition"] == "blocker"
+    assert any(row["path"] == "payload/real-blocker.txt" for row in parsed["findings"])
+
+
 def test_result_finding_vocabulary_matches_scanner_and_preserves_audited_high():
     finding = SecretFinding(
         path="fixtures/provider.txt",

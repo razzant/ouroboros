@@ -7,7 +7,7 @@ import types
 
 import pytest
 
-from ouroboros.config import SKILL_SOURCE_EXTERNAL
+from ouroboros.config import SKILL_SOURCE_EXTERNAL, SKILL_SOURCE_NATIVE
 from ouroboros.skill_loader import LoadedSkill, SkillReviewState
 from ouroboros.skill_publish_snapshot import (
     CapturedPublishManifest,
@@ -103,6 +103,33 @@ def test_validate_rejects_owner_attested(monkeypatch):
     assert caught.value.reason_code == "review_owner_attested"
 
 
+def test_validate_accepts_user_managed_native_without_seed_marker(monkeypatch, tmp_path):
+    loaded = _loaded(status=STATUS_CLEAN, source=SKILL_SOURCE_NATIVE)
+    loaded.skill_dir = tmp_path / "demo"
+    loaded.skill_dir.mkdir()
+    _patch_validate(monkeypatch, loaded)
+    safe, returned = skill_publish._validate_local_skill(
+        types.SimpleNamespace(drive_root=tmp_path),
+        "demo",
+    )
+    assert safe == "demo"
+    assert returned is loaded
+
+
+def test_validate_rejects_launcher_seeded_native(monkeypatch, tmp_path):
+    loaded = _loaded(status=STATUS_CLEAN, source=SKILL_SOURCE_NATIVE)
+    loaded.skill_dir = tmp_path / "demo"
+    loaded.skill_dir.mkdir()
+    (loaded.skill_dir / ".seed-origin").write_text("builtin\n", encoding="utf-8")
+    _patch_validate(monkeypatch, loaded)
+    with pytest.raises(skill_publish._PublishFailure) as caught:
+        skill_publish._validate_local_skill(
+            types.SimpleNamespace(drive_root=tmp_path),
+            "demo",
+        )
+    assert caught.value.reason_code == "skill_source_unsupported"
+
+
 def test_schema_deletes_permission_statement():
     tool = skill_publish.get_tools()[0]
     parameters = tool.schema["parameters"]
@@ -175,6 +202,15 @@ def test_strip_no_target_is_byte_identical():
     assert skill_publish._strip_generated_h2_sections(body, skill_publish._GENERATED_H2_HEADINGS) == body
 
 
+@pytest.mark.parametrize("opening", ["```python", "~~~~ text"])
+def test_close_unterminated_fence_is_minimal_and_idempotent(opening):
+    body = f"## Summary\n{opening}\nexample\n"
+    closed = skill_publish._close_unterminated_fence(body)
+    expected_marker = "```" if opening.startswith("`") else "~~~~"
+    assert closed == body + expected_marker + "\n"
+    assert skill_publish._close_unterminated_fence(closed) == closed
+
+
 def test_prompt_contains_structured_facts_not_payload_or_review_reasons():
     snapshot = _snapshot(description="Public description")
     review = SkillReviewState(
@@ -202,3 +238,23 @@ def test_catalog_and_payload_use_exact_snapshot_bytes():
     entry = skill_publish._catalog_entry("demo", snapshot, files)
     assert entry["version"] == "1.0.0"
     assert entry["files"][1]["sha256"] == snapshot.public_files[1].sha256
+
+
+def test_scanner_resolver_uses_canonical_budget_data_root(monkeypatch, tmp_path):
+    child_root = tmp_path / "child"
+    canonical_root = tmp_path / "canonical"
+    seen = []
+
+    def fake_resolve(**kwargs):
+        seen.append(pathlib.Path(kwargs["data_root"]))
+        return types.SimpleNamespace(binary_path="", binary_sha256="", status="missing")
+
+    monkeypatch.setattr(skill_publish, "resolve_betterleaks", fake_resolve)
+    ctx = types.SimpleNamespace(
+        drive_root=child_root,
+        budget_drive_root=str(canonical_root),
+        task_metadata={"budget_drive_root": str(canonical_root)},
+    )
+    executable = skill_publish._scanner_executable(ctx)
+    assert executable.status == "missing"
+    assert seen == [canonical_root.resolve(strict=False)]

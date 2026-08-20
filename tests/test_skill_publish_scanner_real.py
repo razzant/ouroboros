@@ -16,6 +16,7 @@ import zipfile
 import pytest
 
 import ouroboros.skill_publish_scanner as scanner
+from ouroboros.betterleaks_runtime import resolve_betterleaks
 from ouroboros.skill_publish_scanner import ScannerExecutable, scan_named_bytes
 
 pytestmark = pytest.mark.serial
@@ -41,8 +42,21 @@ _EXPECTED_RULESET_SHA256 = "7c34b6ee2980139a97156b9b7e818813c8c13b7bc3d15b117041
 
 def _binary() -> pathlib.Path:
     configured = str(os.environ.get("OUROBOROS_BETTERLEAKS_TEST_BINARY") or "").strip()
+    data_root = str(
+        os.environ.get("OUROBOROS_TEST_LIVE_DATA_ROOT") or os.environ.get("OUROBOROS_DATA_DIR") or ""
+    ).strip()
+    managed_state = (
+        resolve_betterleaks(
+            data_root=pathlib.Path(data_root),
+            bundle_bases=[],
+            include_managed=True,
+        )
+        if data_root
+        else None
+    )
     candidates = [
         pathlib.Path(configured).expanduser() if configured else None,
+        pathlib.Path(managed_state.binary_path) if managed_state is not None and managed_state.ready else None,
         pathlib.Path.home() / ".claudexor" / "cache" / "betterleaks" / "v1.8.1" / "betterleaks",
     ]
     for candidate in candidates:

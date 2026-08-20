@@ -42,6 +42,11 @@ _FINDING_TEXT_LIMITS = {
 }
 _FINDING_CONFIDENCES = frozenset({"low", "medium", "high", "unknown"})
 _FINDING_DISPOSITIONS = frozenset({"blocker", "warning", "audited_false_positive"})
+_FINDING_DISPLAY_PRIORITY = {
+    "blocker": 0,
+    "warning": 1,
+    "audited_false_positive": 2,
+}
 _EFFECT_TEXT_LIMITS = {
     "kind": 64,
     "repository": 160,
@@ -172,7 +177,12 @@ def _normalize_findings(findings: Sequence[Mapping[str, Any]] | None) -> list[Di
     if isinstance(findings, (str, bytes)) or not isinstance(findings, Sequence):
         raise ValueError("findings must be a sequence")
     normalized = [_normalize_finding(finding) for finding in findings]
-    normalized.sort(key=lambda row: json.dumps(row, ensure_ascii=False, sort_keys=True, separators=(",", ":")))
+    normalized.sort(
+        key=lambda row: (
+            _FINDING_DISPLAY_PRIORITY[row["disposition"]],
+            json.dumps(row, ensure_ascii=False, sort_keys=True, separators=(",", ":")),
+        )
+    )
     return normalized
 
 
