@@ -1140,10 +1140,12 @@ def test_ci_has_fork_safe_three_os_betterleaks_candidate_matrix():
     job = workflow[start : workflow.index("\n  # ─", start)]
     assert "github.event_name == 'pull_request'" in job
     assert "github.base_ref == 'ouroboros'" in job
+    assert "github.event_name == 'workflow_dispatch'" in job
     assert "pull_request_target" not in job
     assert "os: [ubuntu-latest, windows-latest, macos-latest]" in job
     assert "uses: ./.github/actions/setup-python-env" in job
     assert "python -m ouroboros.betterleaks_runtime install" in job
     assert "python scripts/betterleaks_platform_smoke.py --managed-runtime" in job
     assert "python -m pytest tests/test_skill_publish_scanner_real.py -q" in job
+    assert 'OUROBOROS_BETTERLEAKS_REQUIRE_REAL: "1"' in job
     assert "secrets." not in job

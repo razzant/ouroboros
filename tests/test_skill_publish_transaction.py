@@ -438,6 +438,30 @@ def test_update_deletes_files_absent_from_exact_snapshot(monkeypatch, tmp_path):
     assert captured["deletions"] == [{"path": "skills/demo/removed.py"}]
 
 
+def test_duplicate_target_slug_is_typed_before_mutation(monkeypatch, tmp_path):
+    ctx, events, _captured = _install_transaction_fakes(
+        monkeypatch,
+        tmp_path,
+        snapshot=_snapshot(),
+    )
+    duplicate_catalog = {
+        "skills": [
+            {"slug": "demo", "version": "0.8.0", "files": []},
+            {"slug": "demo", "version": "0.9.0", "files": []},
+        ]
+    }
+    monkeypatch.setattr(
+        skill_publish,
+        "fetch_upstream_catalog",
+        lambda *_args: (duplicate_catalog, BASE_SHA),
+    )
+
+    result = _submit(ctx)
+
+    assert result["reason_code"] == "upstream_catalog_invalid"
+    assert not any(row[0] == "mutation" for row in events)
+
+
 def test_high_author_note_blocks_before_github(monkeypatch, tmp_path):
     def scanner(named):
         if "author-note.md" in named:

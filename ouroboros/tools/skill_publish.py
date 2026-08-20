@@ -324,10 +324,15 @@ def _update_catalog(
             "Repair the upstream Hub catalog, then retry.",
         )
     slug = str(entry.get("slug") or "")
-    existing_index = next(
-        (index for index, item in enumerate(skills) if isinstance(item, dict) and item.get("slug") == slug),
-        None,
-    )
+    matching_indexes = [
+        index for index, item in enumerate(skills) if isinstance(item, dict) and item.get("slug") == slug
+    ]
+    if len(matching_indexes) > 1:
+        raise _PublishFailure(
+            "upstream_catalog_invalid",
+            "Repair the upstream Hub catalog, then retry.",
+        )
+    existing_index = matching_indexes[0] if matching_indexes else None
     if existing_index is None:
         mode = "add"
         obsolete_paths: Tuple[str, ...] = ()

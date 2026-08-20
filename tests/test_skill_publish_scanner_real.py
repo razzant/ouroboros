@@ -1,4 +1,4 @@
-"""Pinned Betterleaks v1.8.1 contract; skips when no explicit cache exists."""
+"""Pinned Betterleaks v1.8.1 contract; CI requires it, local runs may skip."""
 
 from __future__ import annotations
 
@@ -62,6 +62,8 @@ def _binary() -> pathlib.Path:
     for candidate in candidates:
         if candidate is not None and candidate.is_file():
             return candidate.resolve()
+    if os.environ.get("OUROBOROS_BETTERLEAKS_REQUIRE_REAL") == "1":
+        pytest.fail("required Betterleaks v1.8.1 binary is not provisioned", pytrace=False)
     pytest.skip("pinned Betterleaks v1.8.1 binary is not provisioned")
 
 
@@ -75,6 +77,16 @@ def _executable(binary: pathlib.Path) -> ScannerExecutable:
 def _safe_absence(candidate: str, serialized: str) -> None:
     if candidate in serialized:
         pytest.fail("a generated candidate survived safe result projection", pytrace=False)
+
+
+def test_required_mode_fails_instead_of_skipping_without_binary(tmp_path, monkeypatch):
+    monkeypatch.delenv("OUROBOROS_BETTERLEAKS_TEST_BINARY", raising=False)
+    monkeypatch.setenv("OUROBOROS_TEST_LIVE_DATA_ROOT", str(tmp_path / "empty-data"))
+    monkeypatch.setenv("OUROBOROS_BETTERLEAKS_REQUIRE_REAL", "1")
+    monkeypatch.setattr(pathlib.Path, "home", lambda: tmp_path / "empty-home")
+
+    with pytest.raises(pytest.fail.Exception, match="required Betterleaks"):
+        _binary()
 
 
 def test_pinned_engine_version_ruleset_and_contextual_fixture_multiset(tmp_path):

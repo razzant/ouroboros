@@ -150,6 +150,7 @@ jobs:
     if: |
       (github.event_name == 'push' && github.ref == 'refs/heads/ouroboros')
       || (github.event_name == 'pull_request' && github.base_ref == 'ouroboros')
+      || github.event_name == 'workflow_dispatch'
     strategy:
       fail-fast: false
       matrix:
@@ -158,6 +159,7 @@ jobs:
     env:
       PYTHONUTF8: "1"
       OUROBOROS_DATA_DIR: ${{ runner.temp }}/ouroboros-betterleaks-data
+      OUROBOROS_BETTERLEAKS_REQUIRE_REAL: "1"
     steps:
       - uses: actions/checkout@v4
         with:
