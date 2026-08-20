@@ -12,7 +12,7 @@ import hashlib
 import logging
 import pathlib
 from dataclasses import dataclass, field
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, Iterable, List, Optional
 
 from ouroboros.contracts.skill_manifest import SkillManifest, SkillManifestError, canonical_skill_name, parse_skill_manifest_text
 from ouroboros.contracts.plugin_api import FORBIDDEN_SKILL_SETTINGS
@@ -429,6 +429,16 @@ class SkillPayloadUnreadable(RuntimeError):
         self.err = err
 
 
+def reduce_skill_content_hash(file_digests: Iterable[tuple[str, bytes]]) -> str:
+    """Reduce canonically ordered relative paths and file digests."""
+    digest = hashlib.sha256()
+    for rel, file_digest in file_digests:
+        digest.update(rel.encode("utf-8"))
+        digest.update(b"\0")
+        digest.update(file_digest)
+    return digest.hexdigest()
+
+
 def compute_content_hash(
     skill_dir: pathlib.Path,
     *,
@@ -443,8 +453,8 @@ def compute_content_hash(
     ``include_control_files=True`` reproduces the legacy pre-v6.31 hash for
     one-shot state migration only.
     """
-    digest = hashlib.sha256()
     skill_dir = skill_dir.resolve()
+    file_digests: List[tuple[str, bytes]] = []
     for file_path in _iter_payload_files(
         skill_dir,
         manifest_entry=manifest_entry,
@@ -464,10 +474,8 @@ def compute_content_hash(
         except OSError as exc:
             log.warning("Failed to read skill payload file %s", file_path, exc_info=True)
             raise SkillPayloadUnreadable(rel, exc) from exc
-        digest.update(rel.encode("utf-8"))
-        digest.update(b"\0")
-        digest.update(file_digest.digest())
-    return digest.hexdigest()
+        file_digests.append((rel, file_digest.digest()))
+    return reduce_skill_content_hash(file_digests)
 
 
 # State persistence
@@ -1387,7 +1395,7 @@ def summarize_skills(drive_root: pathlib.Path) -> Dict[str, Any]:
 __all__ = [
     "AutoGrantOutcome", "LoadedSkill", "HASH_EXEMPT_CONTROL_FILENAMES",
     "SkillReviewState", "auto_grant_if_enabled",
-    "VALID_REVIEW_STATUSES", "compute_content_hash", "discover_skills", "find_skill",
+    "VALID_REVIEW_STATUSES", "compute_content_hash", "reduce_skill_content_hash", "discover_skills", "find_skill",
     "enabled_skill_conflicts", "skill_conflict_status",
     "grant_status_for_skill", "is_self_authored_skill_dir", "list_available_for_execution",
     "load_enabled", "load_review_state", "load_skill_grants", "load_skill",
