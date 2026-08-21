@@ -28,6 +28,7 @@ def pending_invocations(
                 "route": str(row.get("route") or ""),
                 "project_id": str(row.get("project_id") or ""),
                 "project_owned": bool(row.get("project_owned")),
+                "project_persistent": bool(row.get("project_persistent")),
                 "idempotency_key": str(row.get("idempotency_key") or ""),
                 "root_task_id": str(row.get("root_task_id") or ""),
                 "parent_task_id": str(row.get("parent_task_id") or ""),

@@ -90,7 +90,14 @@ from ouroboros.delegate_interactions import (  # noqa: F401
 from ouroboros.delegate_shared import (  # noqa: F401
     _emit,
     _fail,
+    engine_supports_workspace_root,
+    is_legacy_workspace_root_request,
     _owned_run,
+)
+from ouroboros.delegate_start_binding import (  # noqa: F401
+    FreshStartBinding,
+    prepare_fresh_start,
+    start_request as _start_request,
 )
 # The C1 integration seam (mutation authority, execution snapshots, retry binding,
 # terminal patch capture) lives in its own module (size gate); re-exported here
@@ -586,73 +593,6 @@ def _delivered_terminal_payload(ctx: ToolContext, run_id: str, detail: Dict[str,
                             full_ok=full_ok, full_note=full_note)
 
 
-# -- tools --------------------------------------------------------------------
-
-
-def _start_request(ctx: ToolContext, route: Any, authority: "DelegatedRunShape",
-                   root: str, text: str, seconds: int, instructions: str) -> Dict[str, Any]:
-    """The POST body for one delegated run, built from the derived SHAPE.
-
-    Extracted so the caller stays inside the method-size gate, and so the body has ONE
-    author: the shape decides the mode and whether the delegated marker rides along,
-    and nothing here re-derives either.
-
-    ``seconds`` and ``instructions`` arrive PRE-BUILT rather than being derived here:
-    a transport retry of a pending invocation must present a byte-identical body for
-    the engine's replay match, and both the deadline-derived bound and the
-    contract-derived instructions can change between calls, so the caller decides
-    whether to recompute them or replay the recorded ones (the retry path never calls
-    this function at all — it replays the stored canonical body verbatim).
-    """
-    request: Dict[str, Any] = {
-        "prompt": text,
-        # Built from the SHAPE plus the task contract, so a mutating delegated
-        # child is told that its boundary is a request and not a fact — the same
-        # disclosure the durable record and the parent's result carry, in the one
-        # place the child can read — and the nanny's own objective rides along
-        # structurally (`_assignment_instructions`).
-        "instructions": instructions,
-        # The engine's default authPreference is `auto` = subscription-first WITH
-        # policy fallback to a paid API key. That fallback is invisible to us and
-        # would be settled at a confident $0.00 — the one shape the ledger must
-        # never produce. Ask for the substrate we are actually claiming.
-        "authPreference": "subscription",
-        # The run SHAPE comes from the derived authority, not from re-deriving it
-        # here: one predicate decides what this child may do, and the mode follows it.
-        "mode": authority.mode,
-        "scope": {"kind": "project", "root": root},
-        # PIN, not preference: `primaryHarness` only fronts the engine's
-        # auto-pool, which still holds every other doctor-OK harness — the run
-        # could fail over onto a route the owner never configured. The
-        # explicit one-element `harnesses` pool is the engine's pinning
-        # contract (its own MCP surface spells a forced route exactly this
-        # way): the child rides THIS route or the start refuses typed.
-        "harnesses": [route.route_id],
-        "primaryHarness": route.route_id,
-        "access": authority.access,
-    }
-    if authority.isolation:
-        # `delegated` rides WITH the isolation, from the same record, because they
-        # are the same decision: `live` is in-place, and in place is exactly where
-        # Claudexor would otherwise hand the harness the operator's real `$HOME`
-        # — daemon control token included. Sending one without the other is the
-        # containment hole, so neither is assembled separately.
-        request["execution"] = {
-            "isolation": authority.isolation,
-            "delegated": authority.delegated,
-        }
-    if route.model:
-        request["model"] = route.model
-    if route.effort:
-        request["effort"] = route.effort
-    if route.profile_id:
-        # Account pin (D-U5), reviewer-slot wire contract; strict (D-U6). In the stored canonical body, so a retry_of replay stays byte-identical, pin included.
-        request["credentialProfileId"] = route.profile_id
-    if seconds:
-        request["maxSeconds"] = seconds
-    return request
-
-
 def _delegate_start(ctx: ToolContext, prompt: str, max_seconds: Optional[int] = None,
                     retry_of: Optional[str] = None, root: Optional[str] = None,
                     bucket: Optional[str] = None, skill_name: Optional[str] = None, _resolved_binding: Any = None) -> str:
@@ -679,8 +619,10 @@ def _delegate_start(ctx: ToolContext, prompt: str, max_seconds: Optional[int] = 
 
     drive = custody.custody_root(ctx)
     owned_project_id = ""
+    project_persistent = False
     invocation_id = ""
     snapshot_id = ""
+    execution_root = ""
     baseline_sha = ""
     target_root = ""
     authority_source = ""
@@ -704,8 +646,9 @@ def _delegate_start(ctx: ToolContext, prompt: str, max_seconds: Optional[int] = 
         binding, refusal = _resolve_retry_invocation(ctx, drive, retry_token, text)
         if refusal:
             return refusal
-        (request_body, route, authority, root, key, project_id, owned_project_id,
-         seconds, snapshot_id, target_root, baseline_sha, authority_source,
+        (request_body, route, authority, root, execution_root, key, project_id,
+         owned_project_id, project_persistent, seconds, snapshot_id, target_root,
+         baseline_sha, authority_source,
          resource_ref) = binding
         invocation_id = retry_token
         payload_auth = None
@@ -730,10 +673,18 @@ def _delegate_start(ctx: ToolContext, prompt: str, max_seconds: Optional[int] = 
         return _fail("delegate_start", exc.code, str(exc), executor=resolution.executor)
 
     try:
+        workspace_root_supported = engine_supports_workspace_root(gateway)
         # Health checks the stored route/confinement shape on retries, never current
         # environment defaults; blockers stay typed instead of falling through to API spend.
+        retry_execution = (request_body.get("execution") if recovering
+                           and isinstance(request_body.get("execution"), dict) else {})
         unavailable, reset_at = route_health(
-            gateway, route.route_id, authority, route_model=route.model, pinned_profile=route.profile_id)
+            gateway, route.route_id, authority, route_model=route.model,
+            pinned_profile=route.profile_id,
+            workspace_root_required=(
+                ("workspaceRoot" in retry_execution)
+                if recovering else
+                (workspace_root_supported and authority.access == "workspace_write")))
         resolution = resolve_subagent_executor(
             "harness", route=route, unavailable_reason=unavailable, reset_at=reset_at,
         )
@@ -748,52 +699,19 @@ def _delegate_start(ctx: ToolContext, prompt: str, max_seconds: Optional[int] = 
             )
 
         if not recovering:
-            if payload_auth is not None:
-                record_auth = payload_auth
-            else:
-                record_auth, root_error = _mutation_authority(ctx, authority)
-                if root_error:
-                    return root_error
-            invocation_id = custody.new_invocation_id()
-            root = record_auth["target_root"]
-            if authority.access == "workspace_write":
-                # C1: the run executes in a PRIVATE snapshot of the authority target,
-                # never in the shared tree. Provisioned (and durably registered)
-                # BEFORE the start intent below; scope.root becomes the snapshot.
-                # A payload target gets the STANDALONE snapshot (the live payload
-                # is never initialized as Git); a Git target keeps the worktree
-                # snapshot byte-identically.
-                target_root = record_auth["target_root"]
-                authority_source = record_auth["source"]
-                if authority_source == "skill_payload":
-                    snapshot, snap_error = _provision_payload_snapshot(
-                        ctx, drive, record_auth, invocation_id)
-                else:
-                    snapshot, snap_error = _provision_snapshot(ctx, drive, target_root, invocation_id)
-                if snap_error:
-                    return snap_error
-                snapshot_id = snapshot.snapshot_id
-                baseline_sha = snapshot.baseline_sha
-                root = snapshot.path
-                resource_ref = dict(record_auth.get("resource_ref") or {})
-            existing_project = gateway.find_project_id(root)
-            project_id = existing_project or gateway.register_project(root)
-            owned_project_id = "" if existing_project else project_id
-            # The canonical ASSIGNMENT — prompt plus host-authored instructions —
-            # is digested together: two starts whose prompts agree but whose
-            # contract blocks differ are two different logical starts. The digest
-            # is the LOOKUP identity only; the wire key stays the invocation id,
-            # and a retry replays the STORED body byte-identically regardless.
-            instructions = _host_instructions(
-                authority, "" if bool(actor.get("compiled_work_order")) else _assignment_instructions(ctx),
-                payload_skill=(str((record_auth.get("resource_ref") or {})
-                                   .get("skill_name") or "")
-                               if payload_auth is not None else ""))
-            key = custody.idempotency_key(getattr(ctx, "task_id", ""), route.route_id, access,
-                                          authority.mode, authority.isolation, root, text,
-                                          instructions)
-            seconds = _bounded_max_seconds(ctx, max_seconds)
-            request_body = _start_request(ctx, route, authority, root, text, seconds, instructions)
+            binding, refusal = prepare_fresh_start(
+                ctx, drive, gateway, route, authority, actor, text, max_seconds,
+                payload_auth, workspace_root_supported,
+                host_instructions=_host_instructions,
+                assignment_instructions=_assignment_instructions,
+                bounded_max_seconds=_bounded_max_seconds,
+            )
+            if refusal:
+                return refusal
+            assert binding is not None
+            (request_body, root, execution_root, invocation_id, key, project_id,
+             owned_project_id, project_persistent, seconds, snapshot_id, target_root,
+             baseline_sha, authority_source, resource_ref) = binding
         lineage = getattr(ctx, "task_metadata", {}) or {}
         lineage = lineage if isinstance(lineage, dict) else {}
         # Fresh payload run: busy check + durable write = ONE atomic claim (fix 5).
@@ -803,7 +721,8 @@ def _delegate_start(ctx: ToolContext, prompt: str, max_seconds: Optional[int] = 
             run_id="", task_id=str(getattr(ctx, "task_id", "") or ""),
             idempotency_key=key, invocation_id=invocation_id,
             max_seconds=seconds, request=request_body, project_id=project_id,
-            project_owned=bool(owned_project_id), route=route.route_id,
+            project_owned=bool(owned_project_id), project_persistent=project_persistent,
+            route=route.route_id,
             # Lineage rides the request row so a run RECOVERED from a pending
             # invocation (P34R.2) can still attribute its ledger row to the tree.
             root_task_id=str(lineage.get("root_task_id") or ""),
@@ -811,7 +730,7 @@ def _delegate_start(ctx: ToolContext, prompt: str, max_seconds: Optional[int] = 
             # The C1 isolation binding, durable BEFORE the POST: these name the
             # snapshot, baseline and authority target so a retry reproduces the
             # exact binding and the startup GC can see the pending snapshot.
-            snapshot_id=snapshot_id, execution_root=(root if snapshot_id else ""),
+            snapshot_id=snapshot_id, execution_root=execution_root,
             baseline_sha=baseline_sha, target_root=target_root,
             authority_source=authority_source, resource_ref=resource_ref,
             # Same pre-POST row as the request: crash recovery can prove the
@@ -827,11 +746,13 @@ def _delegate_start(ctx: ToolContext, prompt: str, max_seconds: Optional[int] = 
                 "check and the start-request write are one atomic claim). Finish "
                 "that run before starting another delegation against the same "
                 "skill.", holder=claim_holder,
-                **_retire_orphaned_registration(ctx, gateway, owned_project_id,
-                                                definite_refusal=True,
-                                                reason="payload_delegation_busy",
-                                                invocation_id=invocation_id,
-                                                snapshot_id=snapshot_id))
+                **_retire_orphaned_registration(
+                    ctx, gateway, owned_project_id,
+                    project_persistent=project_persistent,
+                    definite_refusal=True,
+                    reason="payload_delegation_busy",
+                    invocation_id=invocation_id,
+                    snapshot_id=snapshot_id))
         if not requested:
             # The POST is CONDITIONAL on the durable request row: a run started
             # without it is live and unfindable if this worker dies. A fresh
@@ -843,15 +764,15 @@ def _delegate_start(ctx: ToolContext, prompt: str, max_seconds: Optional[int] = 
                 "The durable start-request row could not be written, so the run was "
                 "NOT started: a run launched without its custody trail would be "
                 "unfindable if this worker died. Fix the drive/event log and retry.",
-                **_retire_orphaned_registration(ctx, gateway, owned_project_id,
-                                                definite_refusal=not recovering,
-                                                reason="start_request_row_unwritable",
-                                                invocation_id=invocation_id,
-                                                snapshot_id=("" if recovering else snapshot_id)))
+                **_retire_orphaned_registration(
+                    ctx, gateway, owned_project_id,
+                    project_persistent=project_persistent,
+                    definite_refusal=not recovering,
+                    reason="start_request_row_unwritable",
+                    invocation_id=invocation_id,
+                    snapshot_id=("" if recovering else snapshot_id)))
         handle = gateway.start_run(request_body, idempotency_key=invocation_id)
-        # A 202 answers with `jobId` and no `runId` when the run has not bound a run
-        # dir inside the daemon's start timeout; `jobId` is a usable GET/control
-        # handle — discarding it left a live run nobody could wait on or cancel.
+        # A queued `jobId` is a usable GET/control handle.
         run_id = str(handle.get("runId") or handle.get("jobId") or "")
         if not run_id:
             # The POST SUCCEEDED, so a run is more likely live here than on the
@@ -863,6 +784,7 @@ def _delegate_start(ctx: ToolContext, prompt: str, max_seconds: Optional[int] = 
                                     "delegate_start(prompt=..., "
                                     "retry_of=pending_invocation_id); a plain call starts a NEW run",
                          **_retire_orphaned_registration(ctx, gateway, owned_project_id,
+                                                         project_persistent=project_persistent,
                                                          definite_refusal=False,
                                                          reason="queued_without_run_id",
                                                          invocation_id=invocation_id))
@@ -871,6 +793,19 @@ def _delegate_start(ctx: ToolContext, prompt: str, max_seconds: Optional[int] = 
         # It used to be left behind with nothing anywhere naming its id.
         status = int(getattr(exc, "status_code", 0) or 0)
         definite = 400 <= status < 500
+        if recovering and is_legacy_workspace_root_request(request_body) \
+                and exc.code == "execution_workspace_required":
+            return _fail(
+                "delegate_start", "legacy_workspace_root_requires_compatible_retry",
+                "This legacy mutating invocation was not accepted before the engine "
+                "started requiring execution.workspaceRoot. Its exact retry token is "
+                "preserved; drain it on the legacy engine or use the engine's "
+                "server-owned Exact Retry path before upgrading.",
+                pending_invocation_id=invocation_id,
+                retry_hint="retry this same invocation after the compatible engine is available",
+                engine_version=str(getattr(gateway, "engine_version", "") or ""),
+                project_id=project_id,
+            )
         # An UNKNOWN outcome hands back the retry token: only the caller can say
         # whether the next call is a retry of this intention or a new intention, and
         # without the token every next call is a new one. A definite refusal retires
@@ -883,6 +818,7 @@ def _delegate_start(ctx: ToolContext, prompt: str, max_seconds: Optional[int] = 
         return _fail("delegate_start", exc.code, str(exc), executor="blocked",
                      reset_at=getattr(exc, "reset_at", ""), **pending,
                      **_retire_orphaned_registration(ctx, gateway, owned_project_id,
+                                                     project_persistent=project_persistent,
                                                      definite_refusal=definite,
                                                      reason=str(getattr(exc, "code", "")),
                                                      invocation_id=invocation_id,
@@ -894,6 +830,7 @@ def _delegate_start(ctx: ToolContext, prompt: str, max_seconds: Optional[int] = 
         # may be live against it. Named with a typed reason so the sweep's
         # pending-invocation recovery finds it, then re-raised — disclosure, not a swallow.
         _retire_orphaned_registration(ctx, gateway, owned_project_id,
+                                      project_persistent=project_persistent,
                                       definite_refusal=False,
                                       reason=f"pre_custody_exit_{type(exc).__name__}",
                                       invocation_id=invocation_id)
@@ -913,6 +850,7 @@ def _delegate_start(ctx: ToolContext, prompt: str, max_seconds: Optional[int] = 
         profile_id=route.profile_id,  # requested account pin, beside the requested model it mirrors
         project_id=project_id,
         project_owned=bool(owned_project_id),
+        project_persistent=project_persistent,
         root_task_id=str(metadata.get("root_task_id") or ""),
         parent_task_id=str(metadata.get("parent_task_id") or ""),
         # The CANONICAL (budget) root, the same one the custody rows themselves live
@@ -927,7 +865,7 @@ def _delegate_start(ctx: ToolContext, prompt: str, max_seconds: Optional[int] = 
         work_order_fingerprint=work_order_fingerprint,
         authority_fingerprint=authority_fingerprint,
         snapshot_id=snapshot_id,
-        execution_root=(root if snapshot_id else ""),
+        execution_root=execution_root,
         baseline_sha=baseline_sha,
         target_root=target_root,
         authority_source=authority_source,
@@ -944,20 +882,22 @@ def _delegate_start(ctx: ToolContext, prompt: str, max_seconds: Optional[int] = 
         # `max_seconds` rides too: delegate_wait reports elapsed-vs-cap from this row.
         "effort": route.effort, "access": access, "mode": authority.mode,
         "isolation": authority.isolation, "delegated": authority.delegated, "root": root,
+        "execution_root": execution_root,
         "max_seconds": seconds,
         "capture_mode": (_CAPTURE_DELEGATED_SNAPSHOT if snapshot_id else ""),
     })
     return _started_payload(handle, run_id, route, access, authority, root,
                             durable=durable, recovering=recovering,
                             invocation_id=invocation_id,
-                            snapshot_id=snapshot_id, target_root=target_root,
+                            snapshot_id=snapshot_id, execution_root=execution_root,
+                            target_root=target_root,
                             baseline_sha=baseline_sha)
 
 
 def _started_payload(handle: Dict[str, Any], run_id: str, route: Any, access: str,
                      authority: "DelegatedRunShape", root: str, *, durable: bool,
-                     recovering: bool, invocation_id: str, snapshot_id: str, target_root: str,
-                     baseline_sha: str) -> str:
+                     recovering: bool, invocation_id: str, snapshot_id: str,
+                     execution_root: str, target_root: str, baseline_sha: str) -> str:
     """The one author of delegate_start's started result (note + payload).
 
     The AUTHORITY guidance and the CUSTODY warning are independent facts about the same
@@ -1009,10 +949,9 @@ def _started_payload(handle: Dict[str, Any], run_id: str, route: Any, access: st
     if not durable:
         payload["pending_invocation_id"] = str(invocation_id or "")
     if snapshot_id:
-        # The C1 binding, stated where the nanny can read it: the run's scope.root is
-        # the EXECUTION snapshot; the authority target receives nothing until the
-        # explicit apply.
-        payload["execution_root"] = root
+        # Stable project identity remains the public root; the private execution
+        # workspace is disclosed separately and receives no automatic apply.
+        payload["execution_root"] = execution_root
         payload["authority_target_root"] = target_root
         payload["baseline_id"] = baseline_sha
     return json.dumps(payload, ensure_ascii=False, indent=2)
@@ -1021,7 +960,8 @@ def _started_payload(handle: Dict[str, Any], run_id: str, route: Any, access: st
 def _retire_orphaned_registration(ctx: ToolContext, gateway: Any, project_id: str, *,
                                   definite_refusal: bool, reason: str,
                                   invocation_id: str = "",
-                                  snapshot_id: str = "") -> Dict[str, Any]:
+                                  snapshot_id: str = "",
+                                  project_persistent: bool = False) -> Dict[str, Any]:
     """Retire a registration this start created but never bound to a run.
 
     Only when the daemon gave a DEFINITE negative answer (a 4xx refusal): a transport
@@ -1050,7 +990,12 @@ def _retire_orphaned_registration(ctx: ToolContext, gateway: Any, project_id: st
             log.warning("Failed to retire delegated execution snapshot %s", snapshot_id,
                         exc_info=True)
     retired = False
-    if project_id and definite_refusal:
+    if project_persistent:
+        # Stable project registrations intentionally outlive this invocation,
+        # including a definite start refusal. The next attempt reuses the same
+        # scope.root registration and trust/history identity.
+        retired = False
+    elif project_id and definite_refusal:
         try:
             gateway.remove_project(project_id)
             retired = True

@@ -221,9 +221,11 @@ class _RetryBinding(NamedTuple):
     route: Any          # DelegationRoute
     authority: Any      # DelegatedRunShape
     root: str
+    execution_root: str
     key: str
     project_id: str
     owned_project_id: str
+    project_persistent: bool
     seconds: int
     snapshot_id: str
     target_root: str
@@ -264,7 +266,14 @@ def _resolve_retry_invocation(ctx: ToolContext, drive: pathlib.Path, retry_token
                                   mode=str(request_body.get("mode") or ""),
                                   isolation=str(execution.get("isolation") or ""),
                                   delegated=bool(execution.get("delegated")))
+    # New-shape requests keep the stable project in scope.root and put the
+    # disposable snapshot in execution.workspaceRoot. Historical requests may
+    # have scoped the engine directly at the private snapshot; preserve those
+    # bytes on explicit retry rather than rewriting their body.
     root = str(scope.get("root") or "")
+    execution_root = str(execution.get("workspaceRoot") or "")
+    if not execution_root:
+        execution_root = str(record.get("execution_root") or "")
     project_id = str(record.get("project_id") or "")
     # The C1 isolation binding recorded at the original attempt. Pre-C1 rows
     # carry none; their scope.root IS the authority target (in-place regime).
@@ -321,9 +330,11 @@ def _resolve_retry_invocation(ctx: ToolContext, drive: pathlib.Path, retry_token
         route=route,
         authority=authority,
         root=root,
+        execution_root=execution_root,
         key=str(record.get("idempotency_key") or ""),
         project_id=project_id,
         owned_project_id=(project_id if record.get("project_owned") else ""),
+        project_persistent=bool(record.get("project_persistent")),
         seconds=int(request_body.get("maxSeconds") or 0),
         snapshot_id=snapshot_id,
         target_root=target_root,

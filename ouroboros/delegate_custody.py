@@ -115,6 +115,8 @@ class RunCustody:
     profile_id: str = ""
     project_id: str = ""
     project_owned: bool = False
+    # Stable target registration persists; absent on legacy one-shot rows.
+    project_persistent: bool = False
     root_task_id: str = ""
     parent_task_id: str = ""
     ledger_root: str = ""
@@ -324,6 +326,7 @@ def _merge_started_into(entry: RunCustody, previous: RunCustody) -> None:
     for attr in _STARTED_PROGRESS_FLAGS:
         setattr(entry, attr, getattr(previous, attr))
     entry.project_owned = previous.project_owned and entry.project_owned
+    entry.project_persistent = previous.project_persistent or entry.project_persistent
     for attr in _STARTED_FIRST_WINS_FACTS:
         prior = getattr(previous, attr)
         if prior:
@@ -344,6 +347,7 @@ def _apply(state: Dict[str, RunCustody], row: Dict[str, Any]) -> None:
         entry = RunCustody(
             run_id=run_id,
             project_owned=bool(row.get("project_owned")),
+            project_persistent=bool(row.get("project_persistent")),
             delegated=row.get("delegated") is True,
             resource_ref=dict(ref) if isinstance(ref, dict) else {},
             **{attr: str(row.get(key) or "") for attr, key in _STARTED_STR_FIELDS},
@@ -628,6 +632,7 @@ def invocation_record(drive_root: Any, invocation_id: str) -> Optional[Dict[str,
                 "route": str(row.get("route") or ""),
                 "project_id": str(row.get("project_id") or ""),
                 "project_owned": bool(row.get("project_owned")),
+                "project_persistent": bool(row.get("project_persistent")),
                 "idempotency_key": str(row.get("idempotency_key") or ""),
                 # The C1 isolation binding: a retry reproduces EXACTLY these — the
                 # snapshot, the execution root, the baseline and the authority
@@ -673,8 +678,6 @@ def record_started(drive_root: Any, custody: RunCustody,
     The memo update goes through the SAME first-wins merge the replay uses (gate
     fix 8): a duplicate start must not diverge the in-process view from replay.
     """
-    # Fold the row-only shape onto the object first (the row spreads it last),
-    # so the memo and a replay of this same row start from identical facts.
     for attr in ("access", "mode", "isolation"):
         if shape and attr in shape:
             setattr(custody, attr, str(shape.get(attr) or ""))
@@ -684,11 +687,9 @@ def record_started(drive_root: Any, custody: RunCustody,
     if previous is not None and previous is not custody:
         _merge_started_into(custody, previous)
     _CUSTODY[custody.run_id] = custody
-    # The C1 binding and the resource reference ride the SAME row (a binding
-    # recorded separately can lose half of itself to a crash); shape spreads LAST.
     return emit(drive_root, STARTED, {
         "run_id": custody.run_id,
-        "project_owned": custody.project_owned,
+        "project_owned": custody.project_owned, "project_persistent": custody.project_persistent,
         "resource_ref": custody.resource_ref or {},
         **{key: getattr(custody, attr) for attr, key in _STARTED_STR_FIELDS},
         **(shape or {}),
@@ -810,6 +811,10 @@ def retire_project(drive_root: Any, gateway: Any, custody: RunCustody) -> None:
     attempts, so mutual deferral cannot deadlock, and once the canonical sharer
     removes the project the others discharge on the daemon's 404.
     """
+    if custody.project_persistent:
+        # Stable target identity outlives an individual run.
+        custody.project_owned = False
+        return
     if not (custody.project_owned and custody.project_id):
         return
     try:
@@ -886,7 +891,9 @@ def settle_run(drive_root: Any, gateway: Any, custody: RunCustody, detail: Dict[
     call returned.
     """
     if custody.settled:
-        return {"settled": True, "ledger_recorded": True, "project_retired": True, "retried": False}
+        return {"settled": True, "ledger_recorded": True,
+                "project_retired": not custody.project_persistent, "project_persistent": custody.project_persistent,
+                "retried": False}
     summary = summary_of(detail)
     # Claudexor reports CASH in `spendUsd` and its EXACTNESS in `spendEstimated`. A
     # delegated run is only free when the amount is really zero AND really settled: an
@@ -973,7 +980,8 @@ def settle_run(drive_root: Any, gateway: Any, custody: RunCustody, detail: Dict[
     return {
         "settled": custody.settled,
         "ledger_recorded": custody.ledger_recorded,
-        "project_retired": not custody.project_owned,
+        "project_retired": not custody.project_owned and not custody.project_persistent,
+        "project_persistent": custody.project_persistent,
         "retried": True,
     }
 
@@ -1352,19 +1360,31 @@ def _recover_pending_invocation(drive_root: Any, gateway: Any,
                                 record: Dict[str, Any]) -> Dict[str, Any]:
     """Recover the run (if any) behind an orphaned pending invocation, idempotently.
 
-    The stored canonical body is re-POSTed under the invocation's own wire key:
-    the engine returns the ORIGINAL handle when the first POST was accepted, and
-    starts fresh only when the daemon truly never saw it. A definite 4xx retires
-    the invocation and its registration; an unknown outcome stays pending.
+    Re-POST the stored body under its own key. Accepted keys replay; unknown
+    outcomes stay pending, while definite 4xx responses retire the invocation.
     """
+    from ouroboros.delegate_shared import (
+        is_legacy_workspace_root_request, workspace_root_recovery_block,
+    )
     from ouroboros.gateways.claudexor import ClaudexorUnavailable
 
     invocation_id = str(record["invocation_id"])
     task_id = str(record["task_id"])
+    if blocked := workspace_root_recovery_block(gateway, record):
+        emit(drive_root, RECONCILED, blocked)
+        return blocked
     try:
         handle = gateway.start_run(dict(record["request"]), idempotency_key=invocation_id)
     except ClaudexorUnavailable as exc:
         status = int(getattr(exc, "status_code", 0) or 0)
+        if (is_legacy_workspace_root_request(record.get("request"))
+                and exc.code == "execution_workspace_required"):
+            result = {"invocation_id": invocation_id, "task_id": task_id,
+                      "action": "recovery_blocked",
+                      "reason": "legacy_workspace_root_requires_compatible_retry",
+                      "engine_version": str(getattr(gateway, "engine_version", "") or "")}
+            emit(drive_root, RECONCILED, result)
+            return result
         if 400 <= status < 500:
             retired = _retire_recovered_registration(gateway, record)
             emit(drive_root, START_FAILED, {
@@ -1381,8 +1401,7 @@ def _recover_pending_invocation(drive_root: Any, gateway: Any,
         return result
     run_id = str(handle.get("runId") or handle.get("jobId") or "")
     if not run_id:
-        # Queued without an id: durably enqueued, still unnameable. Leave the
-        # invocation pending; the next sweep replays the same key and tries again.
+        # Leave a queued-without-id invocation pending for the next sweep.
         result = {"invocation_id": invocation_id, "task_id": task_id,
                   "action": "recovery_pending"}
         emit(drive_root, RECONCILED, result)
@@ -1396,6 +1415,7 @@ def _recover_pending_invocation(drive_root: Any, gateway: Any,
         model=str(body.get("model") or ""),
         profile_id=str(body.get("credentialProfileId") or ""),
         project_id=record["project_id"], project_owned=bool(record["project_owned"]),
+        project_persistent=bool(record.get("project_persistent")),
         root_task_id=str(record.get("root_task_id") or ""),
         parent_task_id=str(record.get("parent_task_id") or ""),
         # The sweep runs against the canonical root; a recovered run's ledger row
@@ -1406,11 +1426,7 @@ def _recover_pending_invocation(drive_root: Any, gateway: Any,
         config_fingerprint=str(record.get("config_fingerprint") or ""),
         work_order_fingerprint=str(record.get("work_order_fingerprint") or ""),
         authority_fingerprint=str(record.get("authority_fingerprint") or ""),
-        # The C1 isolation binding survives recovery VERBATIM: the recovered run
-        # executes in the snapshot the original attempt provisioned (the replayed
-        # body's scope.root), so its STARTED row must name that binding or the
-        # snapshot — and the child's work in it — becomes GC food the moment the
-        # invocation stops being pending.
+        # Recovery preserves the original snapshot/workspace binding verbatim.
         snapshot_id=str(record.get("snapshot_id") or ""),
         execution_root=str(record.get("execution_root") or ""),
         baseline_sha=str(record.get("baseline_sha") or ""),
@@ -1418,15 +1434,12 @@ def _recover_pending_invocation(drive_root: Any, gateway: Any,
         authority_source=str(record.get("authority_source") or ""),
         # Carried opaquely VERBATIM — recovery never re-authorizes a target (R1-2).
         resource_ref=record.get("resource_ref") if isinstance(record.get("resource_ref"), dict) else {},
-        # The GRANTED shape on the recovered OBJECT too, not only the row (gate
-        # fix 8c): the memo must answer the same lookups the replay does.
+        # Keep the granted shape on the recovered object as well as the row.
         access=str(body.get("access") or ""),
         mode=str(body.get("mode") or ""),
         isolation=str(execution.get("isolation") or ""),
         delegated=bool(execution.get("delegated")))
     record_started(drive_root, custody, shape={
-        # The stored invocation is the single source of a replay's facts — the same
-        # doctrine the explicit retry path follows.
         "effort": str(body.get("effort") or ""), "access": str(body.get("access") or ""),
         "mode": str(body.get("mode") or ""), "isolation": str(execution.get("isolation") or ""),
         "delegated": bool(execution.get("delegated")), "root": str(scope.get("root") or ""),
@@ -1437,7 +1450,7 @@ def _recover_pending_invocation(drive_root: Any, gateway: Any,
 
 def _retire_recovered_registration(gateway: Any, record: Dict[str, Any]) -> bool:
     """Discharge the registration an ORIGINAL attempt owned, when its invocation dies."""
-    if not (record.get("project_owned") and record.get("project_id")):
+    if record.get("project_persistent") or not (record.get("project_owned") and record.get("project_id")):
         return False
     try:
         gateway.remove_project(record["project_id"])

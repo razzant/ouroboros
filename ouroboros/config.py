@@ -355,10 +355,9 @@ CLAUDEXOR_MIN_VERSION: str = "3.2.0"
 # declares the same number on a host where it applies nothing — and a version describes a
 # BUILD, never what THIS attempt did. That question goes to the attempt record
 # (`gateways.claudexor.attempt_containment`), and a run reporting no mechanism is DISCLOSED,
-# not refused: the child already holds a shell here, so the step to "shell plus token" does
-# not buy a lane-wide refusal (AGENTS.md "Disclose instead of forbid"). Two gates, two
-# questions, no overlap; bands: docs/DELEGATED_ADMISSION.md.
+# Not refused: "shell plus token" buys no lane-wide refusal; see docs/DELEGATED_ADMISSION.md.
 CLAUDEXOR_DELEGATED_MARKER_MIN_VERSION: str = "3.3.0"
+CLAUDEXOR_DELEGATED_WORKSPACE_ROOT_MIN_VERSION: str = "3.8.1"  # PR216 field; next patch after pinned 3.8.0.
 
 
 def _main_model() -> str:

@@ -1249,10 +1249,16 @@ artifact has been read in full.
 
 **Project registration is a required step, not an optimization.** The first
 `delegate_start` against an unregistered root is answered with HTTP 404
-`project_not_registered`, so the nanny registers the root first. Claudexor has had
-`RunScope.ephemeral` — a one-shot root that never enters the durable registry — since
-3.3.0, but Ouroboros does not yet use it, so a registration WE created is retired when
-the run settles; a pre-existing registration is left alone.
+`project_not_registered`. On an engine satisfying
+`CLAUDEXOR_DELEGATED_WORKSPACE_ROOT_MIN_VERSION`, the nanny therefore registers the
+stable target root first: a mutating delegated run keeps that target in `scope.root`
+and puts its private execution snapshot in `execution.workspaceRoot`; the registration
+remains available for later attempts and is not retired as per-run cleanup. The pinned
+3.8.0 engine and older engines retain the legacy one-root shape, where the private
+snapshot itself is `scope.root` and the registration is retired with the run. Claudexor
+has had `RunScope.ephemeral` — a one-shot root that never enters the durable registry —
+since 3.3.0, but Ouroboros does not use it. Historical one-root custody rows retain
+their old retirement behavior.
 
 **Daemon lifecycle is owned, explicit, and lazy.** Reading status, booting the app,
 and `delegate_wait`/`delegate_cancel` never install or spawn anything. Connect,
@@ -1553,8 +1559,12 @@ veto the workspace-patch capture applies, DECIDED BEFORE ANYTHING IS HASHED (a
 blanket `git add -A` would write a blob for every untracked file, `.env` included,
 into the object database the execution worktree shares) — into a synthetic baseline
 commit pinned by a `refs/ouroboros/delegated/` ref, checks out a detached worktree of it under the
-subagent-worktree root (`subagent_worktrees.provision_execution_snapshot`), and
-scopes the run there: `scope.root` IS the snapshot. The typed binding
+subagent-worktree root (`subagent_worktrees.provision_execution_snapshot`). On a
+future engine satisfying `CLAUDEXOR_DELEGATED_WORKSPACE_ROOT_MIN_VERSION`, it scopes
+the run with the stable target in `scope.root` plus the snapshot in
+`execution.workspaceRoot`; on the pinned/legacy engine it scopes the run at the
+snapshot in `scope.root` because the strict schema cannot accept the new field. The
+typed binding
 `{target_root, execution_root, baseline_sha, authority_source, snapshot_id}` is recorded durably on the
 custody request/start rows BEFORE the POST, the canonical request carries it, and an
 explicit retry reproduces it exactly (a GC-collected snapshot is a typed
@@ -1703,9 +1713,18 @@ above. Four things follow, and they are one mechanism, not four:
   exists. It is checked inside `subagents.route_health`, the ONE health reader, so the
   DISPATCHER refuses that engine before a token is spent and the nanny's own
   `delegate_start` gives the identical typed `engine_rejects_delegated_marker` blocker. It
-  has to be a version and not a capability probe: `RunExecution` is STRICT (an unknown key
+  has to be a version and not a capability probe for this historical marker: `RunExecution` is STRICT (an unknown key
   is a 400, not an ignored field) and the catalog's `runControlKeys` are TOP-LEVEL request
-  keys only, so a nested marker is undiscoverable. READ-ONLY delegation sends no marker
+  keys only, so a nested marker is undiscoverable. Fresh mutating delegation uses the
+  explicit release contract `CLAUDEXOR_DELEGATED_WORKSPACE_ROOT_MIN_VERSION` (3.8.1),
+  which is the next compatible semver release carrying PR216 after the pinned 3.8.0.
+  Engines below that contract retain the legacy snapshot-in-`scope.root` shape; engines
+  at or above it receive stable target `scope.root` plus `execution.workspaceRoot`.
+  Retries always replay the stored body byte-identically. An accepted idempotency key
+  may replay across the upgrade; an unknown legacy pending body that the future schema
+  rejects remains pending with a typed compatibility reason, and a future-shaped body
+  is held back from an old engine.
+  READ-ONLY delegation sends no marker
   and keeps the lower transport floor (`CLAUDEXOR_MIN_VERSION` = 3.2.0, the oldest engine
   that serves that lane and the one the operator actually runs). THE TWO FLOORS ARE
   DIFFERENT NUMBERS ON PURPOSE: an engine between them serves read-only and refuses

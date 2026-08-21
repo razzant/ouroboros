@@ -27,6 +27,44 @@ def _fail(tool: str, code: str, detail: str, **extra: Any) -> str:
     return json.dumps(payload, ensure_ascii=False, indent=2)
 
 
+def engine_supports_workspace_root(gateway: Any) -> bool:
+    from ouroboros.config import CLAUDEXOR_DELEGATED_WORKSPACE_ROOT_MIN_VERSION
+    from ouroboros.gateways.claudexor import engine_at_least
+
+    return engine_at_least(
+        str(getattr(gateway, "engine_version", "") or ""),
+        CLAUDEXOR_DELEGATED_WORKSPACE_ROOT_MIN_VERSION,
+    )
+
+
+def is_legacy_workspace_root_request(request: Any) -> bool:
+    execution = request.get("execution") if isinstance(request, dict) else None
+    return bool(
+        isinstance(execution, dict)
+        and request.get("mode", "agent") == "agent"
+        and request.get("access") != "readonly"
+        and execution.get("delegated") is True
+        and execution.get("isolation") == "live"
+        and "workspaceRoot" not in execution
+    )
+
+
+def workspace_root_recovery_block(gateway: Any, record: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+    request = record.get("request") if isinstance(record, dict) else None
+    execution = request.get("execution") if isinstance(request, dict) else None
+    if not isinstance(execution, dict) or "workspaceRoot" not in execution:
+        return None
+    if engine_supports_workspace_root(gateway):
+        return None
+    return {
+        "invocation_id": str(record.get("invocation_id") or ""),
+        "task_id": str(record.get("task_id") or ""),
+        "action": "recovery_blocked",
+        "reason": "engine_rejects_delegated_workspace_root",
+        "engine_version": str(getattr(gateway, "engine_version", "") or ""),
+    }
+
+
 def _emit(ctx: ToolContext, kind: str, payload: Dict[str, Any]) -> None:
     custody.emit(custody.custody_root(ctx), kind, {
         "task_id": str(getattr(ctx, "task_id", "") or ""), **payload,
@@ -57,4 +95,7 @@ def _owned_run(ctx: ToolContext, tool: str, run_id: str) -> Tuple[Optional[str],
     return None, entry
 
 
-__all__ = ["_emit", "_fail", "_owned_run"]
+__all__ = [
+    "_emit", "_fail", "_owned_run", "engine_supports_workspace_root",
+    "is_legacy_workspace_root_request", "workspace_root_recovery_block",
+]

@@ -973,6 +973,7 @@ class OuroborosAgent:
         if _exec_note:
             messages.append({"role": "user", "content": _exec_note})
         subagent_bootstrap.append_startup_receipt(ctx, messages, startup_wake)
+        startup_refusal = subagent_bootstrap.startup_refusal_outcome(startup_wake)
         # The nanny postcondition's input fact for the loop's finalization seam:
         # THIS task was dispatched onto the delegated substrate. ALL economics
         # marks reset together per dispatch (F4) — defensive, since the
@@ -1000,6 +1001,13 @@ class OuroborosAgent:
 
         cap_info["budget_remaining"] = budget_remaining
         cap_info["budget_accounting_status"] = budget_accounting_status
+        if startup_refusal is not None:
+            # A definite configured-session refusal is terminal before the loop
+            # gets a chance to spend a native/API round.  Keep ambiguous startup
+            # receipts (pending, uncustodied, recovery) on the normal wake rail.
+            subagent_bootstrap.apply_startup_refusal_projection(
+                task, cap_info, startup_refusal,
+            )
         # An explicit executor pin that no route can honor ends the task UNRUN: the
         # caller reads this instead of the loop (D28 — the pin exists to keep the work
         # off metered API tokens, so re-routing it to paid native execution spends the
@@ -1111,14 +1119,14 @@ class OuroborosAgent:
             task_type_str = str(task.get("type") or "").lower()
             initial_effort = _initial_effort_for(task, task_type_str)
 
-            # The owner's first phase-6 UI directive: the LEDE must show that THIS
-            # bubble / subagent runs on codex (a chip, not a badge). The fact is
-            # recorded onto the live task metadata that `_subagent_progress_meta`
-            # already projects — read from the ONE record the dispatch resolution
-            # stamped onto the task, never re-derived per surface.
             self._record_executor_facts(task)
 
-            if str(cap_info.get("executor_blocked_reason") or ""):
+            startup_refusal = cap_info.get("configured_startup_refusal")
+            if isinstance(startup_refusal, dict):
+                text = str(startup_refusal.get("text") or "")
+                usage = dict(startup_refusal.get("usage") or {})
+                llm_trace = dict(startup_refusal.get("llm_trace") or {})
+            elif str(cap_info.get("executor_blocked_reason") or ""):
                 text, usage, llm_trace = _blocked_executor_terminal(cap_info, task)
             elif task_type_str == "deep_self_review":
                 # Deep self-review bypasses the tool loop.

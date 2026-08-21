@@ -128,12 +128,14 @@ class DelegatedRunShape:
 def delegated_run_shape(acting: bool) -> DelegatedRunShape:
     """The run shape for an acting (mutating) child, or for a read-only one.
 
-    A MUTATING child runs ``live``: Claudexor edits the nanny's OWN worktree in place,
-    so the nanny's existing workspace-patch capture sees the harness's edits with no
-    new plumbing, and the same capture invalidates itself if the harness dared to
-    commit. In place is also the ONE shape where Claudexor would otherwise hand the
-    harness the operator's real ``$HOME`` — which holds the daemon control token — so
-    ``delegated`` travels with it, inseparably, in the same record.
+    A MUTATING child asks for ``live``: on the future workspace-root contract Claudexor
+    edits the private execution snapshot while the stable target remains the project
+    identity; the pinned legacy engine receives that snapshot as ``scope.root``. The
+    nanny's existing workspace-patch capture still sees the snapshot's edits, and the
+    same capture invalidates itself if the harness dared to commit. In place is also the
+    ONE shape where Claudexor would otherwise hand the harness the operator's real
+    ``$HOME`` — which holds the daemon control token — so ``delegated`` travels with it,
+    inseparably, in the same record.
 
     A READ-ONLY child has nothing to write back, so it runs in Claudexor's default
     envelope, which is scoped already and needs no marker: that is one transport with
@@ -387,7 +389,7 @@ def resolve_subagent_executor(
 
 def route_health(
     gateway: Any, route_id: str, shape: DelegatedRunShape, *, route_model: str = "",
-    pinned_profile: str = "",
+    pinned_profile: str = "", workspace_root_required: bool = False,
 ) -> tuple[str, str]:
     """Return ``(unavailable_reason, reset_at)`` for a route about to run ``shape``.
 
@@ -416,7 +418,10 @@ def route_health(
     refuse. Empty (automatic rotation) keeps the harness-wide judgement: WHICH
     profile an unpinned run lands on stays Claudexor's business.
     """
-    from ouroboros.config import CLAUDEXOR_DELEGATED_MARKER_MIN_VERSION
+    from ouroboros.config import (
+        CLAUDEXOR_DELEGATED_MARKER_MIN_VERSION,
+        CLAUDEXOR_DELEGATED_WORKSPACE_ROOT_MIN_VERSION,
+    )
     from ouroboros.gateways.claudexor import engine_at_least
 
     catalog = gateway.agent_capabilities()
@@ -464,6 +469,16 @@ def route_health(
         CLAUDEXOR_DELEGATED_MARKER_MIN_VERSION,
     ):
         return "engine_rejects_delegated_marker", ""
+    # A future Claudexor release accepts the private execution snapshot in the
+    # nested ``workspaceRoot`` field. A retry tells us explicitly whether its
+    # frozen body has that field; historical one-root bodies remain replayable
+    # byte-for-byte. This is a release contract for PR216, not a catalog probe.
+    requires_workspace = bool(workspace_root_required)
+    if requires_workspace:
+        if not engine_at_least(
+                str(getattr(gateway, "engine_version", "") or ""),
+                CLAUDEXOR_DELEGATED_WORKSPACE_ROOT_MIN_VERSION):
+            return "engine_rejects_delegated_workspace_root", ""
     exhausted, reset_at = _exhausted_window(gateway, route_id, route_model, pinned_profile)
     if exhausted and not reset_at:
         # Spent with no named healing instant: still spent. The old shape carried

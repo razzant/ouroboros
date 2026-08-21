@@ -459,14 +459,17 @@ class OwnedClaudexorDaemon:
             _write_ownership_marker()
             deadline = time.monotonic() + _SPAWN_WAIT_SEC
             while time.monotonic() < deadline:
-                if self._proc.poll() is not None:
-                    break
                 # RECONCILE: fresh discovery + AUTHENTICATED handshake against
                 # the descriptor the new daemon just wrote — the same identity
                 # proof attach uses, so a restart never claims a port it does
-                # not hold.
+                # not hold.  A spawned loser may exit before the winner has
+                # published its descriptor; keep polling through the existing
+                # deadline instead of treating that observation as proof that
+                # no authenticated winner can still appear.
                 endpoint = self._alive_endpoint()
                 if endpoint is not None:
+                    if self._proc.poll() is not None:
+                        self._proc = None
                     self._last_error = ""
                     return endpoint
                 time.sleep(_SPAWN_POLL_SEC)

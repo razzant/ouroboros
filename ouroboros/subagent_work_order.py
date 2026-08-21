@@ -28,6 +28,15 @@ def _text(value: Any) -> str:
     return str(value or "").strip()
 
 
+def _delegation_budget_text(value: Any) -> str:
+    """Render the normalized delegation authority without losing its intent note."""
+    if not isinstance(value, Mapping):
+        return ""
+    # Keep this a complete structured block: the child must receive the same
+    # typed authority that schedule_subagent persisted, not a lossy paraphrase.
+    return json.dumps(dict(value), ensure_ascii=False, sort_keys=True)
+
+
 def assignment_instructions(ctx: Any) -> str:
     """Host-authored immutable objective/output block for every delegate start."""
 
@@ -57,6 +66,7 @@ def _render_external_work_order(task: Mapping[str, Any]) -> str:
         ("EXPECTED OUTPUT", task.get("expected_output") or contract.get("expected_output")),
         ("CONSTRAINTS / NON-GOALS", task.get("constraints") or contract.get("constraints")),
         ("ACCEPTANCE CLAIMS", contract.get("acceptance_claims")),
+        ("DELEGATION BUDGET / INTENT", _delegation_budget_text(contract.get("delegation_budget"))),
     ]
     authority = {
         "task_id": str(task.get("id") or ""),

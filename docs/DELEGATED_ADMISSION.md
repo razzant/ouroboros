@@ -1,6 +1,6 @@
 # Delegated-run admission — threat model
 
-Status: **schema floor enforced at admission; the boundary is read back per attempt and
+Status: **schema/capability floors enforced at admission; the OS containment boundary is read back per attempt and
 DISCLOSED, never required.** Owner: `ouroboros/config.py` (the two floors),
 `ouroboros/subagents.route_health` (the admission decision),
 `ouroboros/gateways/claudexor.attempt_containment` (the applied-fact reader) and
@@ -23,6 +23,26 @@ operator's own home, at an absolute path a scoped `HOME` does not redirect. Ouro
 daemon (D30) is the exception: it is spawned under `CLAUDEXOR_CONFIG_DIR`, and that override IS
 the complete relocatable root — its token lives under `data/claudexor/`, not in the operator's
 home. Either way the token is an absolute path the child does not have to guess.
+
+## 2a. Stable project identity and private execution workspace
+
+Fresh mutating delegated starts on an engine satisfying the workspace-root release
+contract register and retain the actual target project in `scope.root`. The host copies
+that target into a private snapshot and sends the snapshot as `execution.workspaceRoot`,
+so the engine's project identity and the child's writable filesystem are separate facts.
+The pinned 3.8.0 engine and older engines keep the legacy shape, with the private
+snapshot itself in `scope.root`; they do not receive the new field. A retry always
+replays its recorded request byte-for-byte. An already accepted idempotency key may
+therefore replay across an engine upgrade; an unknown legacy pending start that the
+future schema rejects remains pending with a typed compatibility reason, while a
+future-shaped pending body is held back from an old engine. Read-only starts keep the legacy
+`mode: ask` envelope and send no `execution.workspaceRoot`.
+
+This shape depends on a Claudexor schema that accepts `workspaceRoot`. Ouroboros uses the
+explicit release contract `CLAUDEXOR_DELEGATED_WORKSPACE_ROOT_MIN_VERSION = 3.8.1`, the
+next compatible semver release carrying Claudexor PR216 after the currently pinned 3.8.0.
+Older engines keep the legacy snapshot-in-`scope.root` shape and retire their one-shot
+registration; a future engine at or above the contract gets the stable-target shape.
 
 ## 2. The actor
 

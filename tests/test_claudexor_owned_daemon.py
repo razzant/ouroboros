@@ -2570,6 +2570,57 @@ def test_first_spawn_loser_attaches_to_the_winners_endpoint(monkeypatch, tmp_pat
     assert manager.stop() is False
 
 
+def test_spawn_loser_keeps_polling_for_delayed_winner_after_child_exit(monkeypatch, tmp_path):
+    """An exited first-spawn loser must not end the winner's publication window."""
+    from ouroboros import claudexor_runtime as runtime
+    from ouroboros.gateways.claudexor import DaemonEndpoint
+
+    data_dir = tmp_path / "data"
+    config_dir = data_dir / "claudexor"
+    _point_owned_home(monkeypatch, config_dir, data_dir)
+    monkeypatch.setattr(owned, "verify_owned_home", lambda: "")
+    monkeypatch.setattr(owned, "_SPAWN_WAIT_SEC", 0.15)
+    monkeypatch.setattr(owned, "_SPAWN_POLL_SEC", 0.01)
+
+    class ReadyRuntime:
+        def ensure(self):
+            return ["/fixture/node", "/fixture/claudexord.bundle.cjs"]
+
+        def status(self, *args, **kwargs):
+            return {"source": "download"}
+
+    monkeypatch.setattr(runtime, "get_runtime_manager", lambda: ReadyRuntime())
+
+    class ExitedLoser:
+        pid = 424244
+
+        def poll(self):
+            return 1
+
+        def terminate(self):
+            raise AssertionError("an exited loser must not be terminated")
+
+    child = ExitedLoser()
+    import ouroboros.process_custody as custody_mod
+
+    monkeypatch.setattr(custody_mod, "spawn_supervised", lambda *_args, **_kwargs: child)
+    endpoint = DaemonEndpoint(host="127.0.0.1", port=45682, token="winner-token")
+    polls = iter([None, None, endpoint])
+    seen = []
+
+    def delayed_alive_endpoint():
+        seen.append(True)
+        return next(polls, endpoint)
+
+    manager = owned.OwnedClaudexorDaemon()
+    monkeypatch.setattr(manager, "_classify_liveness", lambda: (None, "not_provisioned", ""))
+    monkeypatch.setattr(manager, "_alive_endpoint", delayed_alive_endpoint)
+
+    assert manager.ensure_running() is endpoint
+    assert len(seen) >= 3
+    assert manager._proc is None
+
+
 def test_dead_owned_daemon_is_restarted_and_reconciled(monkeypatch, tmp_path):
     """The stale case end-to-end: descriptor exists, daemon dead, ownership
     marker OURS -> ensure_running restarts under the same supervision

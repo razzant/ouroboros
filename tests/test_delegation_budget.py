@@ -52,6 +52,30 @@ def test_compose_subagent_text_surfaces_budget():
     assert "[DELEGATION BUDGET]" not in txt2
 
 
+def test_external_work_order_surfaces_delegation_budget_and_intent_note():
+    from ouroboros.subagent_work_order import compile_external_work_order
+
+    work_order = compile_external_work_order({
+        "id": "child",
+        "task_contract": {
+            "objective": "Build the whole game",
+            "delegation_budget": {
+                "may_delegate": True,
+                "may_mutate": True,
+                "may_fan_out": True,
+                "depth_remaining": 2,
+                "max_children": 4,
+                "intent_note": "delegate per subsystem and synthesize the results",
+            },
+        },
+    })
+
+    assert "DELEGATION BUDGET / INTENT" in work_order
+    assert '"depth_remaining": 2' in work_order
+    assert '"max_children": 4' in work_order
+    assert "delegate per subsystem and synthesize the results" in work_order
+
+
 def test_absorption_full_then_whole_pointer_and_grandchild_rollup():
     from ouroboros.task_status import format_subagent_absorption_message
     children = [

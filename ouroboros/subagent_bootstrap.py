@@ -8,6 +8,92 @@ from typing import Any, Mapping
 from ouroboros.subagent_work_order import WorkOrderBudgetExceeded, compile_external_work_order
 
 
+def startup_refusal_outcome(startup_wake: str) -> dict[str, Any] | None:
+    """Return a terminal outcome for a definite configured-session no-start.
+
+    A configured session is an exact user choice.  A typed refusal from the
+    route preflight or the exact start request therefore cannot fall through to
+    a native/API model round.  Other startup receipts remain deliberately
+    ambiguous: an unparseable response, an uncustodied start, or a recovery
+    wake may still describe a run that needs custody recovery.
+    """
+    if not startup_wake:
+        return None
+    try:
+        receipt = json.loads(startup_wake)
+    except (TypeError, ValueError):
+        return None
+    if not isinstance(receipt, dict):
+        return None
+    if str(receipt.get("status") or "") != "configured_session_start_wake":
+        return None
+    startup = receipt.get("startup")
+    if not isinstance(startup, dict):
+        return None
+    startup_status = str(startup.get("status") or "").strip().lower()
+    if startup_status not in {"temporarily_unavailable", "refused"}:
+        return None
+    # A refusal carrying any daemon/custody handle is not a definite no-start:
+    # the POST may have queued or bound a run while returning a typed negative
+    # envelope. Preserve that wake for recovery rather than terminalizing over
+    # an invocation the host may still need to wait/cancel.
+    custody_keys = (
+        "pending_invocation_id", "pending_invocation_ids", "invocation_id",
+        "run_id", "job_id", "queued_handle", "handle", "run_dir",
+    )
+    if any(startup.get(key) for key in custody_keys):
+        return None
+    reason = str(startup.get("reason") or "configured_session_start_refused").strip()
+    selected = str(startup.get("selected_subagent_id") or "").strip()
+    reset_at = str(startup.get("reset_at") or "").strip()
+    alternatives = startup.get("alternatives") if isinstance(startup.get("alternatives"), list) else []
+    if startup_status == "temporarily_unavailable":
+        reason_code = "subagent_executor_unavailable"
+        headline = "SUBAGENT_UNAVAILABLE"
+    else:
+        reason_code = "configured_subagent_start_refused"
+        headline = "SUBAGENT_START_REFUSED"
+    text = (
+        f"⚠️ {headline}: the selected configured session"
+        + (f" ({selected})" if selected else "")
+        + f" could not start ({reason}). The task was NOT run: no LLM, tool, "
+        "or native/API fallback was executed."
+        + (f" Route reset: {reset_at}." if reset_at else "")
+        + (f" Explicit alternatives: {json.dumps(alternatives, ensure_ascii=False, sort_keys=True)}."
+           if alternatives else "")
+    )
+    usage = {
+        "execution_status": "infra_failed",
+        "reason_code": reason_code,
+        "unavailable_reason": reason,
+        "reset_at": reset_at,
+        "alternatives": alternatives,
+        "startup_status": startup_status,
+        "host_fallback": False,
+    }
+    return {
+        "text": text,
+        "usage": usage,
+        "llm_trace": {"reasoning_notes": ["configured_session_start_refused"], "tool_calls": []},
+    }
+
+
+def apply_startup_refusal_projection(
+    task: dict[str, Any], cap_info: dict[str, Any], refusal: dict[str, Any],
+) -> None:
+    cap_info["configured_startup_refusal"] = refusal
+    usage = dict(refusal.get("usage") or {})
+    availability = dict(task.get("subagent_availability") or {})
+    availability.update({
+        "status": usage.get("startup_status", "refused"),
+        "reason": usage.get("unavailable_reason", ""),
+        "reset_at": usage.get("reset_at", ""),
+        "alternatives": usage.get("alternatives", []),
+        "host_fallback": False,
+    })
+    task["subagent_availability"] = availability
+
+
 def bootstrap_before_context(ctx: Any, task: Mapping[str, Any], dispatch: Any) -> str:
     """Mark exact routing and atomically bootstrap before context/model work."""
 
@@ -166,4 +252,7 @@ def bootstrap_session_leaf(ctx: Any, task: Mapping[str, Any], dispatch: Any) -> 
     }, ensure_ascii=False, indent=2)
 
 
-__all__ = ["append_startup_receipt", "bootstrap_before_context", "bootstrap_session_leaf"]
+__all__ = [
+    "append_startup_receipt", "apply_startup_refusal_projection",
+    "bootstrap_before_context", "bootstrap_session_leaf", "startup_refusal_outcome",
+]

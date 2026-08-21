@@ -169,6 +169,97 @@ def test_uncredentialed_api_actor_stops_before_the_llm_loop(monkeypatch, tmp_pat
     assert any(event.get("type") == "task_done" for event in events)
 
 
+@pytest.mark.parametrize(
+    ("startup_status", "reason"),
+    [("refused", "work_order_budget_exceeded"), ("temporarily_unavailable", "subscription_window_exhausted")],
+)
+def test_definite_configured_session_no_start_terminalizes_before_llm(
+    monkeypatch, tmp_path, startup_status, reason,
+):
+    """A selected session refusal is not permission to do the assignment natively."""
+    from ouroboros import agent as agent_module
+    import ouroboros.claudexor_daemon as daemon
+    import ouroboros.subagent_bootstrap as bootstrap
+    import ouroboros.subagents as subagents
+    from ouroboros.agent import Env, OuroborosAgent
+
+    repo, drive = tmp_path / "repo", tmp_path / "drive"
+    repo.mkdir()
+    drive.mkdir()
+    monkeypatch.setattr(daemon, "ensure_owned_gateway", lambda: SimpleNamespace(close=lambda: None))
+    monkeypatch.setattr(subagents, "route_health", lambda *_a, **_k: ("", ""))
+    monkeypatch.setattr(OuroborosAgent, "_log_worker_boot_once", lambda self: None)
+    monkeypatch.setattr(agent_module, "build_llm_messages", lambda **_kwargs: ([], {}))
+    monkeypatch.setattr(
+        bootstrap,
+        "bootstrap_session_leaf",
+        lambda *_a, **_k: json.dumps({
+            "status": "configured_session_start_wake",
+            "startup": {"status": startup_status, "reason": reason},
+        }),
+    )
+    calls = []
+    monkeypatch.setattr(
+        agent_module,
+        "run_llm_loop",
+        lambda **kwargs: calls.append(kwargs) or ("unexpected", {}, {}),
+    )
+
+    snapshot = _snapshot(_settings(_session_row()), "session-builder")
+    agent = OuroborosAgent(Env(repo_dir=repo, drive_root=drive))
+    agent.tools.available_tools = lambda: ["delegate_start", "delegate_wait", "delegate_cancel"]
+    events = agent._handle_task_scoped({
+        "id": "session-child",
+        "type": "task",
+        "chat_id": 1,
+        "text": "Use the exact session actor",
+        "delegation_role": "subagent",
+        "configured_subagent": snapshot,
+        "parent_cognitive_route": {
+            "model": "openai/parent", "effort": "high", "use_local_model": False,
+        },
+        "task_constraint": {},
+        "task_contract": {"objective": "Build", "expected_output": "Patch"},
+        "drive_root": str(drive),
+        "budget_drive_root": str(drive),
+    })
+
+    assert calls == []
+    result = json.loads(
+        (drive / "task_results" / "session-child.json").read_text(encoding="utf-8")
+    )
+    assert result["outcome_axes"]["execution"]["status"] == "infra_failed"
+    assert result["subagent_availability"]["host_fallback"] is False
+    assert reason in result["result"]
+    assert any(event.get("type") == "task_done" for event in events)
+
+
+def test_startup_refusal_classifier_preserves_ambiguous_wakes():
+    from ouroboros.subagent_bootstrap import startup_refusal_outcome
+
+    def receipt(status, *, outer="configured_session_start_wake"):
+        return json.dumps({"status": outer, "startup": {"status": status, "reason": "x"}})
+
+    assert startup_refusal_outcome(receipt("refused"))["usage"]["reason_code"] == "configured_subagent_start_refused"
+    assert startup_refusal_outcome(receipt("temporarily_unavailable"))["usage"]["reason_code"] == "subagent_executor_unavailable"
+    assert startup_refusal_outcome(receipt("started_uncustodied")) is None
+    assert startup_refusal_outcome(receipt("pending")) is None
+    assert startup_refusal_outcome(receipt("refused", outer="configured_session_recovery_wake")) is None
+    for key, value in (
+        ("pending_invocation_id", "inv-1"),
+        ("run_id", "run-1"),
+        ("queued_handle", {"jobId": "job-1"}),
+    ):
+        payload = json.loads(receipt("refused"))
+        payload["startup"][key] = value
+        assert startup_refusal_outcome(json.dumps(payload)) is None
+
+    # A malformed exact-start response is also ambiguous: the host cannot prove
+    # that the POST did not reach the daemon, so it must not synthesize a clean
+    # terminal no-start.
+    assert startup_refusal_outcome("not-json") is None
+
+
 def test_context_build_exception_propagates_after_exact_leaf_bootstrap(monkeypatch, tmp_path):
     from ouroboros import agent as agent_module
     import ouroboros.claudexor_daemon as daemon
