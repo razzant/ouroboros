@@ -38,7 +38,7 @@ def append_result_index(run_dir: pathlib.Path, row: dict[str, Any]) -> None:
 #   round_limit          loop.py:3128  round cap (_handle_round_limit)
 #   finalization_grace   loop.py:3146  supervisor finalize_now grace
 #   deadline_local       loop.py:3220  loop-local deadline
-#   provider_unavailable loop.py:3185  same-model reroute + fallback exhausted
+#   provider_unavailable loop.py       recovery exhausted or unknown send preserved
 #   children_unabsorbed  loop.py:4071  forced terminal with child results unabsorbed
 _TRUNCATION_CODES_NOT_BEST_EFFORT = frozenset({
     # ADDITIVE DELTA, one code. `llm_api_error` (loop_llm_call.py:630) is not a best-effort

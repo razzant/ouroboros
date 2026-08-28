@@ -317,7 +317,11 @@ def test_chat_remote_no_proxy_retries_openrouter_parameter_rejection():
         def create(self, **kwargs):
             captured_kwargs.append(kwargs)
             if len(captured_kwargs) == 1:
-                raise RuntimeError("404 No endpoints found that can handle the requested parameters")
+                error = RuntimeError(
+                    "404 No endpoints found that can handle the requested parameters"
+                )
+                error.status_code = 404
+                raise error
             return MagicMock(
                 model_dump=lambda: {
                     "choices": [{"message": {"role": "assistant", "content": "ok", "tool_calls": None}}],

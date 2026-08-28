@@ -157,6 +157,87 @@ def test_caption_mode_does_not_treat_bracket_label_as_real_caption(monkeypatch):
     assert out[0]["content"][1]["text"] == "[image caption: actual visual caption]"
 
 
+def _vision_provider_error(*, observed: bool, status: int | None = None):
+    from ouroboros.usage_accounting import PhysicalAttemptCapture
+
+    exc = ConnectionError("caption request connection ended")
+    exc.physical_attempt_capture = PhysicalAttemptCapture(
+        attempt_id="caption-attempt",
+        model="google/gemini-3.5-flash",
+        provider="openrouter",
+        state="unresolved",
+        provider_response_observed=observed,
+        provider_status_code=status,
+    )
+    return exc
+
+
+def test_unknown_caption_outcome_blocks_main_model_send(monkeypatch, tmp_path):
+    from ouroboros.loop_llm_call import call_llm_with_retry
+
+    calls = {"caption": 0, "main": 0}
+
+    class FakeLLM:
+        def default_model(self):
+            return "google/gemini-3.5-flash"
+
+        def vision_query(self, *_args, **_kwargs):
+            calls["caption"] += 1
+            raise _vision_provider_error(observed=False)
+
+        def chat(self, **_kwargs):
+            calls["main"] += 1
+            raise AssertionError("main send must not follow an unknown caption outcome")
+
+    monkeypatch.setenv("OUROBOROS_IMAGE_INPUT_MODE", "caption")
+    monkeypatch.setenv("OUROBOROS_MODEL_VISION", "google/gemini-3.5-flash")
+    messages = _image_message()
+    messages[0]["content"][1].pop("_caption")
+    usage = {}
+    msg, _cost = call_llm_with_retry(
+        FakeLLM(), messages, "not/vision", None, "medium", 3,
+        tmp_path / "logs", "caption-unknown", 1, None, usage,
+        attempt_cap=2,
+    )
+
+    assert msg is None
+    assert calls == {"caption": 1, "main": 0}
+    assert usage["_last_llm_error_kind"] == "provider_outcome_unknown"
+
+
+def test_response_observed_caption_failure_keeps_fail_soft_main_send(monkeypatch, tmp_path):
+    from ouroboros.loop_llm_call import call_llm_with_retry
+
+    calls = {"caption": 0, "main": 0}
+
+    class FakeLLM:
+        def default_model(self):
+            return "google/gemini-3.5-flash"
+
+        def vision_query(self, *_args, **_kwargs):
+            calls["caption"] += 1
+            raise _vision_provider_error(observed=True, status=503)
+
+        def chat(self, **_kwargs):
+            calls["main"] += 1
+            return {"content": "continued safely"}, {
+                "provider": "openrouter", "resolved_model": "not/vision",
+            }
+
+    monkeypatch.setenv("OUROBOROS_IMAGE_INPUT_MODE", "caption")
+    monkeypatch.setenv("OUROBOROS_MODEL_VISION", "google/gemini-3.5-flash")
+    messages = _image_message()
+    messages[0]["content"][1].pop("_caption")
+    msg, _cost = call_llm_with_retry(
+        FakeLLM(), messages, "not/vision", None, "medium", 3,
+        tmp_path / "logs", "caption-known", 1, None, {},
+        attempt_cap=2,
+    )
+
+    assert msg["content"] == "continued safely"
+    assert calls == {"caption": 1, "main": 1}
+
+
 def test_vlm_tools_are_not_web_resource_gated():
     from ouroboros.tools.registry import _WEB_TOOLS
 

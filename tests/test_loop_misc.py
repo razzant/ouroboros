@@ -1078,6 +1078,63 @@ def test_budget_rail_after_dispatch_is_terminal_without_provider_fallback(tmp_pa
     assert root_fence["root_task_id"] == "budget-root"
 
 
+def test_unknown_provider_outcome_skips_retry_fallback_and_forced_model_call(
+    tmp_path, monkeypatch,
+):
+    from ouroboros.tools.registry import ToolRegistry
+
+    class FakeLLM:
+        def default_model(self):
+            return "test-model"
+
+    calls = {"primary": 0, "fallback": 0}
+
+    def unknown_outcome(
+        _llm, _messages, _model, _tools, _effort, _max_retries,
+        _drive_logs, _task_id, _round_idx, _event_queue, accumulated_usage,
+        *_args, **_kwargs,
+    ):
+        calls["primary"] += 1
+        accumulated_usage.update({
+            "_last_llm_error": "APIConnectionError('Connection error.')",
+            "_last_llm_error_kind": "provider_outcome_unknown",
+            "_last_llm_retry_same_request": False,
+            "_llm_attempts_used": 1,
+            "_llm_dispatched_attempts": 1,
+        })
+        return None, 0.0
+
+    def forbidden_fallback(**_kwargs):
+        calls["fallback"] += 1
+        raise AssertionError("unknown provider outcomes must not enter paid fallback")
+
+    monkeypatch.setattr(loop_mod, "call_llm_with_retry", unknown_outcome)
+    monkeypatch.setattr(loop_mod, "_run_cross_model_fallback_chain", forbidden_fallback)
+    monkeypatch.setenv("OUROBOROS_TASK_REVIEW_MODE", "off")
+
+    text, usage, trace = run_llm_loop(
+        messages=[{"role": "user", "content": "go"}],
+        tools=ToolRegistry(repo_dir=tmp_path, drive_root=tmp_path),
+        llm=FakeLLM(),
+        drive_logs=tmp_path,
+        emit_progress=lambda _text: None,
+        incoming_messages=queue.Queue(),
+        task_id="unknown-provider",
+        drive_root=tmp_path,
+    )
+
+    assert calls == {"primary": 1, "fallback": 0}
+    assert "FINALIZATION NOTICE (host)" in text
+    assert "may have reached the provider" in text
+    assert "no terminal provider outcome" in text
+    assert "No further replay, same-request retry, or paid fallback was sent" in text
+    assert "after retries" not in text
+    assert "same-model reroute" not in text
+    assert "hard limit" not in text
+    assert usage["reason_code"] == "provider_unavailable"
+    assert trace["forced_finalization"]["source"] == "provider_outcome_unknown_no_resend"
+
+
 def test_run_llm_loop_narrates_reasoning_to_bubble_not_trace(tmp_path, monkeypatch):
     """Display-only contract: a pure tool-call round with no visible content narrates the
     provider's readable reasoning to the progress BUBBLE, but never records it in the durable
@@ -1163,7 +1220,8 @@ def test_run_llm_loop_finalize_now_control_forces_best_effort_answer(tmp_path, m
         drive_root=tmp_path,
     )
 
-    assert result == "best effort summary"
+    assert result.startswith("best effort summary")
+    assert "supervisor finalization request (reason: deadline)" in result
     assert usage["reason_code"] == "finalization_grace"
     assert usage["execution_status"] == "failed"  # lifted to best_effort by the outcome gate
     assert usage["_best_effort_extracted"] is True  # typed fact: real model answer
@@ -1514,7 +1572,9 @@ def test_run_llm_loop_appends_orphan_note_when_finalizing_with_unhandled_child(t
     assert sum(1 for item in progress if "Subagent handoff status refreshed" in item) == 1
     # The forced best-effort prose is preserved AND the loud orphan note is appended.
     assert result.startswith("Best effort: child1 is still running.")
-    assert "child1" in result and "NOTE: finalized" in result
+    assert "child1" in result
+    assert "FINALIZATION NOTICE (host): Finalized best-effort after the bounded child-absorption reminder" in result
+    assert "NOTE (host): At forced finalization" in result
 
 
 def test_run_llm_loop_forces_best_effort_after_child_absorption_reminder(tmp_path, monkeypatch):

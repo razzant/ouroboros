@@ -1,13 +1,8 @@
 """Durable physical-model-attempt accounting.
 
-The append-only JSONL ledger is the monetary authority.  Existing
-``llm_usage`` events and ``state.json`` remain compatibility projections and
-carry ledger attempt ids, so they can never become a second charge source.
-
-The implementation is deliberately small: no hash chain, fanout reservation,
-epoch/reconcile platform, or per-attempt snapshot database.  A projection is
-replayed from validated records under the same short cross-process lock used
-for budget check + append + fsync; network I/O always happens outside that lock.
+The append-only JSONL ledger is the monetary authority; ``llm_usage`` and
+``state.json`` remain compatibility projections carrying attempt ids. Ledger
+validation and fsync share a short lock, while network I/O remains outside it.
 """
 
 from __future__ import annotations
@@ -36,11 +31,13 @@ IMPORT_REL = pathlib.Path("state/usage_import_watermark.json")
 _TERMINAL = frozenset({"settled", "unresolved", "released"})
 
 __all__ = (
-    "AttemptRequest", "AttemptReservation", "BudgetExceeded", "PhysicalAttemptLimitExceeded",
+    "AttemptRequest", "AttemptReservation", "BudgetExceeded", "PhysicalAttemptCapture",
+    "PhysicalAttemptLimitExceeded",
     "UsageAccountingError", "UsageLedgerCorrupt", "UsageScope", "capture_attempt_ids",
     "current_usage_scope",
     "ensure_legacy_imported", "execute_physical_attempt", "execute_physical_attempt_async",
     "mark_dispatched", "mark_unresolved", "physical_attempt_limit",
+    "physical_attempt_capture_from_exception", "physical_provider_outcome_unknown",
     "record_unmetered_external_dispatch", "release_attempt", "reserve_attempt", "settle_attempt",
     "usage_breakdown", "usage_from_response", "usage_projection", "usage_scope",
     "review_wave_admission",
@@ -122,6 +119,40 @@ class AttemptReservation:
     model: str
     provider: str
     reservation_upper_bound_usd: Optional[float]
+
+
+@dataclass(frozen=True)
+class PhysicalAttemptCapture:
+    """Immutable ledger and provider-response facts for one raised send."""
+    attempt_id: str
+    model: str
+    provider: str
+    state: str
+    provider_response_observed: bool = False
+    provider_status_code: Optional[int] = None
+    provider_code: str = ""
+    logical_call_attempt_ids: Tuple[str, ...] = ()
+
+
+def physical_attempt_capture_from_exception(exc: BaseException) -> Optional[PhysicalAttemptCapture]:
+    """Read direct/causal capture; ignore ambiguous automatic ``__context__``."""
+    current: Optional[BaseException] = exc
+    seen: set[int] = set()
+    while current is not None and id(current) not in seen:
+        seen.add(id(current))
+        capture = getattr(current, "physical_attempt_capture", None)
+        if isinstance(capture, PhysicalAttemptCapture):
+            return capture
+        current = current.__cause__
+    return None
+
+
+def physical_provider_outcome_unknown(exc: BaseException) -> bool:
+    """Whether replaying this exact dispatched request could duplicate work."""
+    capture = physical_attempt_capture_from_exception(exc)
+    return bool(capture is not None
+                and capture.state in {"dispatched", "unresolved"}
+                and not capture.provider_response_observed)
 
 
 def _drive_root(value: pathlib.Path | str | None = None) -> pathlib.Path:
@@ -1200,7 +1231,7 @@ def _is_tos_rejection(exc: BaseException) -> bool:
     return status == 403 or "error code: 403" in text or '"code": 403' in text or "'code': 403" in text
 
 
-def _terminalize_failed_attempt(reservation: AttemptReservation, exc: BaseException) -> None:
+def _terminalize_failed_attempt(reservation: AttemptReservation, exc: BaseException) -> str:
     """Route a raised provider send to its honest terminal ledger state."""
     provider = str(reservation.provider or "").strip().lower()
     if provider == "openrouter" and _is_pre_routing_rejection(exc):
@@ -1211,6 +1242,7 @@ def _terminalize_failed_attempt(reservation: AttemptReservation, exc: BaseExcept
             cost_final=True,
             settle_reason="pre_routing_rejection",
         )
+        return "settled"
     elif provider == "openrouter" and _is_tos_rejection(exc):
         _transition(
             reservation,
@@ -1219,8 +1251,56 @@ def _terminalize_failed_attempt(reservation: AttemptReservation, exc: BaseExcept
             cost_final=True,
             settle_reason="tos_rejection",
         )
+        return "settled"
     else:
         mark_unresolved(reservation, f"{type(exc).__name__}: {exc}")
+        return "unresolved"
+
+
+def _provider_exception_facts(exc: BaseException) -> Tuple[bool, Optional[int], str]:
+    """Extract response facts using the classifier's typed HTTP aliases."""
+    response = getattr(exc, "response", None)
+    status = getattr(exc, "status_code", None)
+    status = getattr(exc, "status", None) if status is None else status
+    status = getattr(exc, "code", None) if status is None else status
+    if status is None and response is not None:
+        status = getattr(response, "status_code", None)
+    try:
+        status = int(status) if status is not None else None
+    except (TypeError, ValueError, OverflowError):
+        status = None
+
+    body = getattr(exc, "body", None)
+    if body is None and response is not None and callable(getattr(response, "json", None)):
+        try:
+            body = response.json()
+        except Exception:
+            body = None
+    error = body.get("error") if isinstance(body, dict) and isinstance(body.get("error"), dict) else body
+    code = ""
+    if isinstance(error, dict):
+        code = str(error.get("code") or error.get("type") or "").strip()
+    provider_response_observed = bool(status is not None or response is not None or body is not None)
+    return provider_response_observed, status, code
+
+
+def _attach_attempt_capture(reservation: AttemptReservation, state: str, exc: BaseException) -> PhysicalAttemptCapture:
+    observed, status, code = _provider_exception_facts(exc)
+    capture = PhysicalAttemptCapture(
+        attempt_id=reservation.attempt_id,
+        model=reservation.model,
+        provider=reservation.provider,
+        state=state,
+        provider_response_observed=observed,
+        provider_status_code=status,
+        provider_code=code,
+        logical_call_attempt_ids=tuple(_ATTEMPT_COLLECTOR.get() or (reservation.attempt_id,)),
+    )
+    try:
+        setattr(exc, "physical_attempt_capture", capture)
+    except Exception:
+        log.debug("Provider exception does not accept attempt capture", exc_info=True)
+    return capture
 
 
 def execute_physical_attempt(
@@ -1235,10 +1315,12 @@ def execute_physical_attempt(
     try:
         response = send()
     except BaseException as exc:
+        terminal_state = "dispatched"
         try:
-            _terminalize_failed_attempt(reservation, exc)
+            terminal_state = _terminalize_failed_attempt(reservation, exc)
         except Exception:
             log.exception("Failed to mark provider attempt unresolved: %s", reservation.attempt_id)
+        _attach_attempt_capture(reservation, terminal_state, exc)
         raise
     try:
         usage, cost, final = extractor(response)
@@ -1266,10 +1348,12 @@ async def execute_physical_attempt_async(
     try:
         response = await send()
     except BaseException as exc:
+        terminal_state = "dispatched"
         try:
-            _terminalize_failed_attempt(reservation, exc)
+            terminal_state = _terminalize_failed_attempt(reservation, exc)
         except Exception:
             log.exception("Failed to mark provider attempt unresolved: %s", reservation.attempt_id)
+        _attach_attempt_capture(reservation, terminal_state, exc)
         raise
     try:
         usage, cost, final = extractor(response)

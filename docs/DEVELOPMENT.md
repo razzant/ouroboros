@@ -1079,7 +1079,13 @@ Before every commit, verify the following:
   Quota/auth/billing, hard bad-request, and request-too-large/context failures
   are non-retryable as-is: record the exact category and surface a recovery hint
   instead of burning rounds on identical calls. Transient rate limits/timeouts may
-  still use the normal retry path.
+  still use the normal retry path when a typed provider response proves their
+  terminal status. A dispatched physical attempt with no terminal provider
+  response is `provider_outcome_unknown`: do not replay it, retry it, dispatch a
+  paid fallback, or make a model-authored forced-summary call, because the original
+  work may still complete remotely. Host notices derive retry/fallback claims from
+  recorded actions and forced-finalization wording from the typed reason; child
+  statuses are labeled as a finalization-time snapshot.
 
 #### Timeout & Wait Control
 - [ ] For cognitive/long-horizon work (subagent waits and review),

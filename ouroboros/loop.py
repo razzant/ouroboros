@@ -119,6 +119,13 @@ def _provider_failure_hint(accumulated_usage: Dict[str, Any]) -> str:
 
 def _provider_recovery_hint(accumulated_usage: Dict[str, Any]) -> str:
     """Explain whether retrying later is likely to help."""
+    kind = str(accumulated_usage.get("_last_llm_error_kind") or "").strip()
+    if kind == "provider_outcome_unknown":
+        return (
+            " The dispatched request has no terminal provider outcome. No further "
+            "replay, same-request retry, or paid fallback was sent after that "
+            "unknown outcome because doing so could duplicate live work."
+        )
     if accumulated_usage.get("context_overflow_suggest_low"):
         return (
             " ⚠️ The context overflowed the model window. Switching to low context "
@@ -126,7 +133,6 @@ def _provider_recovery_hint(accumulated_usage: Dict[str, Any]) -> str:
             "models by serving ARCHITECTURE as a navigation map and compacting "
             "memory sooner — without changing the model or reasoning effort."
         )
-    kind = str(accumulated_usage.get("_last_llm_error_kind") or "").strip()
     if kind in {"quota_exhausted", "auth_error", "request_too_large", "bad_request", "context_overflow"}:
         guidance = {
             "quota_exhausted": "The provider rejected the request for quota/billing reasons; retrying the same request will not help until the key/account limit changes.",
@@ -148,6 +154,88 @@ def _provider_recovery_hint(accumulated_usage: Dict[str, Any]) -> str:
             "be transient, but it can also indicate malformed client input."
         )
     return " If background consciousness is running, it will retry when the provider recovers."
+
+
+def _record_provider_recovery_action(
+    accumulated_usage: Dict[str, Any],
+    *,
+    kind: str,
+    count: int,
+    model: str,
+) -> None:
+    """Project recovery actions backed by this round's physical-attempt events."""
+
+    count = max(0, int(count or 0))
+    if not count:
+        return
+    actions = accumulated_usage.setdefault("_provider_recovery_actions", [])
+    if not isinstance(actions, list):
+        actions = []
+        accumulated_usage["_provider_recovery_actions"] = actions
+    actions.append({"kind": str(kind), "count": count, "model": str(model or "")})
+
+
+def _record_last_call_same_model_retries(
+    accumulated_usage: Dict[str, Any], model: str,
+) -> int:
+    dispatched = int(accumulated_usage.get("_llm_dispatched_attempts") or 0)
+    if dispatched > 1:
+        _record_provider_recovery_action(
+            accumulated_usage,
+            kind="same_model_retry",
+            count=dispatched - 1,
+            model=model,
+        )
+    return dispatched
+
+
+def _provider_recovery_action_hint(accumulated_usage: Dict[str, Any]) -> str:
+    """Describe only recovery actions backed by typed physical-attempt facts."""
+
+    actions = accumulated_usage.get("_provider_recovery_actions")
+    if not isinstance(actions, list):
+        return ""
+    retries = sum(
+        max(0, int(action.get("count") or 0))
+        for action in actions
+        if isinstance(action, dict) and action.get("kind") == "same_model_retry"
+    )
+    fallbacks = sum(
+        max(0, int(action.get("count") or 0))
+        for action in actions
+        if isinstance(action, dict) and action.get("kind") == "cross_model_fallback"
+    )
+    facts: list[str] = []
+    if retries:
+        facts.append(f"{retries} same-model retry attempt(s)")
+    if fallbacks:
+        facts.append(f"{fallbacks} configured fallback route attempt(s)")
+    if not facts:
+        return ""
+    return (
+        " Recorded physical-attempt evidence confirms these recovery actions "
+        "in the same episode: " + "; ".join(facts) + "."
+    )
+
+
+def _provider_unavailable_notice(accumulated_usage: Dict[str, Any]) -> str:
+    """Host-authored provider terminal notice with evidence-bound claims."""
+
+    kind = str(accumulated_usage.get("_last_llm_error_kind") or "").strip()
+    if kind == "provider_outcome_unknown":
+        lead = (
+            "⚠️ SYSTEM NOTICE (host): A model request may have reached the "
+            "provider, but no terminal provider outcome was recorded."
+        )
+    else:
+        lead = "⚠️ SYSTEM NOTICE (host): The model provider returned no usable response."
+    return (
+        lead
+        + _provider_failure_hint(accumulated_usage)
+        + _provider_recovery_action_hint(accumulated_usage)
+        + _provider_recovery_hint(accumulated_usage)
+        + " Any files written so far are preserved in the workspace."
+    )
 
 
 def _handle_text_response(
@@ -2432,6 +2520,15 @@ def _run_cross_model_fallback_chain(
     from ouroboros.config import get_fallback_models
     from ouroboros.loop_llm_call import _COOLDOWN_ERROR_KINDS as _cooldown_kinds
 
+    if str(accumulated_usage.get("_last_llm_error_kind") or "") == "provider_outcome_unknown":
+        return (
+            None,
+            active_model,
+            active_use_local,
+            context_fit_plan,
+            active_context_mode,
+        )
+
     def _cooled(model: str, use_local: bool) -> None:
         if str(accumulated_usage.get("_last_llm_error_kind") or "") in _cooldown_kinds:
             _fcd.mark_cooldown(model, use_local)
@@ -2490,6 +2587,16 @@ def _run_cross_model_fallback_chain(
                 attempt_cap=attempt_cap,
             )
         )
+        dispatched_attempts = _record_last_call_same_model_retries(
+            accumulated_usage, fallback_model,
+        )
+        if dispatched_attempts:
+            _record_provider_recovery_action(
+                accumulated_usage,
+                kind="cross_model_fallback",
+                count=1,
+                model=fallback_model,
+            )
         if msg is not None:
             (
                 active_model,
@@ -2514,6 +2621,8 @@ def _run_cross_model_fallback_chain(
         tools._ctx.context_fit_plan = context_fit_plan
         tools._ctx.messages = messages
         tools._ctx.active_context_mode = active_context_mode
+        if str(accumulated_usage.get("_last_llm_error_kind") or "") == "provider_outcome_unknown":
+            break
         _cooled(fallback_model, fallback_use_local)
     if msg is None and context_fit_plan is not None:
         accumulated_usage["_context_route_fp"] = str(
@@ -3116,6 +3225,7 @@ class _RoundLimitContext:
     incoming_messages: Optional[queue.Queue] = None
     owner_msg_seen: Optional[set] = None
     forced_service_evidence_fingerprint: str = ""
+    finalization_reason: str = ""
 
 
 def _handle_round_limit(ctx: _RoundLimitContext) -> Tuple[str, Dict[str, Any], Dict[str, Any]]:
@@ -3136,9 +3246,10 @@ def _handle_forced_finalization(ctx: _RoundLimitContext, reason: str) -> Tuple[s
     tool-less best final answer inside the grace window so a deadline NEVER
     returns emptiness.
     """
-    fallback = f"⚠️ Task reached {reason or 'deadline'}; finalization grace produced no answer."
+    ctx.finalization_reason = " ".join(str(reason or "deadline").split())[:200]
+    fallback = f"⚠️ Task reached {ctx.finalization_reason}; finalization grace produced no answer."
     prompt = (
-        f"[FINALIZE_NOW] The supervisor opened a finalization grace window (reason: {reason or 'deadline'}). "
+        f"[FINALIZE_NOW] The supervisor opened a finalization grace window (reason: {ctx.finalization_reason}). "
         "The task will be stopped shortly. Produce your best final answer NOW from the verified "
         "work so far; clearly mark anything unverified or incomplete. An honest best-effort "
         "result is the expected outcome here, not a failure."
@@ -3147,13 +3258,7 @@ def _handle_forced_finalization(ctx: _RoundLimitContext, reason: str) -> Tuple[s
 
 
 def _handle_provider_unavailable(ctx: _RoundLimitContext) -> Tuple[str, Dict[str, Any], Dict[str, Any]]:
-    """Provider-death terminalization (P2 unified best-effort shelf): the model
-    returned no usable response after the transport same-model reroute + retries
-    (+ any configured cross-model fallback). Join the SAME honest best-effort
-    shelf as deadline/budget/round-limit instead of discarding workspace state
-    with a bare error string — one tool-less final answer (which itself benefits
-    from the same-model reroute) and, failing that, the last assistant text
-    already produced."""
+    """Provider terminalization with unknown-outcome no-resend custody."""
     # A stale DeliveryCandidate is still the best complete text available when
     # the provider is dead. _forced_fallback_result preserves its original
     # evidence provenance and adds a host-owned resume disclosure rather than
@@ -3169,20 +3274,34 @@ def _handle_provider_unavailable(ctx: _RoundLimitContext) -> Tuple[str, Dict[str
             salvaged = latest_llm_response_text(pathlib.Path(ctx.drive_root), ctx.task_id) or ""
         except Exception:
             log.debug("latest_llm_response_text salvage failed", exc_info=True)
-    if salvaged:
-        fallback = salvaged
-    else:
-        fallback = (
-            "⚠️ The model provider returned no usable response after retries and same-model reroute."
-            f"{_provider_failure_hint(ctx.accumulated_usage)}{_provider_recovery_hint(ctx.accumulated_usage)} "
-            "Any files written so far are preserved in the workspace."
+    fallback = salvaged or ""
+    notice = _provider_unavailable_notice(ctx.accumulated_usage)
+    if str(ctx.accumulated_usage.get("_last_llm_error_kind") or "") == "provider_outcome_unknown":
+        live_trace = getattr(ctx, "llm_trace", None)
+        llm_trace = live_trace if isinstance(live_trace, dict) else {}
+        _finalize_forced_services(ctx, llm_trace)
+        ctx.accumulated_usage["execution_status"] = "failed"
+        ctx.accumulated_usage["reason_code"] = "provider_unavailable"
+        return _forced_fallback_result(
+            ctx,
+            llm_trace,
+            fallback,
+            "provider_unavailable",
+            source="provider_outcome_unknown_no_resend",
+            host_notice=notice,
         )
     prompt = (
         "[PROVIDER_UNAVAILABLE] The model provider failed to return a usable response. "
         "Produce your best final answer NOW from the verified work so far; clearly mark "
         "anything unverified or incomplete. An honest best-effort result is expected here, not a failure."
     )
-    return _forced_final_answer(ctx, prompt=prompt, fallback_text=fallback, reason_code="provider_unavailable")
+    return _forced_final_answer(
+        ctx,
+        prompt=prompt,
+        fallback_text=fallback,
+        reason_code="provider_unavailable",
+        host_notice=notice,
+    )
 
 
 def _maybe_deadline_local_finalize(
@@ -3674,6 +3793,7 @@ def _record_forced_finalization(
     )
     llm_trace["forced_finalization"] = {
         "reason_code": reason_code,
+        "finalization_reason": str(getattr(ctx, "finalization_reason", "") or ""),
         "source": source,
         "degraded": True,
         "candidate_sha256": candidate.content_sha256 if candidate is not None else "",
@@ -3950,7 +4070,60 @@ def _compose_delivery_suffix(full_text: str, suffix: str) -> str:
     return text + note
 
 
-def _forced_orphan_note(ctx: _RoundLimitContext, *, include_terminal: bool = True) -> str:
+def _compose_host_notice(full_text: str, host_notice: str) -> str:
+    """Append one visibly host-authored notice with normal Markdown spacing."""
+
+    text = str(full_text or "")
+    notice = str(host_notice or "").strip()
+    if not notice or text.endswith(notice):
+        return text
+    return text + ("\n\n" if text else "") + notice
+
+
+def _forced_finalization_lead(ctx: _RoundLimitContext, reason_code: str) -> str:
+    """Render a typed finalization cause; only real hard rails say hard limit."""
+
+    if reason_code == "round_limit":
+        return "Finalized under the hard round limit"
+    if reason_code == "budget_exhausted":
+        return "Finalized under a hard budget/resource limit"
+    if reason_code == "deadline_local":
+        return "Finalized because the task deadline was reached"
+    if reason_code == "provider_unavailable":
+        if str(ctx.accumulated_usage.get("_last_llm_error_kind") or "") == "provider_outcome_unknown":
+            return "Finalized because a provider request had an unknown outcome"
+        return "Finalized because the model provider was unavailable"
+    if reason_code == "children_unabsorbed":
+        return "Finalized best-effort after the bounded child-absorption reminder"
+    if reason_code == "finalization_grace":
+        detail = " ".join(
+            str(getattr(ctx, "finalization_reason", "") or "unspecified").split()
+        )[:200]
+        return f"Finalized after a supervisor finalization request (reason: {detail})"
+    return "Finalized through forced finalization"
+
+
+def _forced_finalization_notice(
+    ctx: _RoundLimitContext,
+    reason_code: str,
+    detail: str = "",
+) -> str:
+    """Compose one visibly host-authored cause plus optional custody detail."""
+
+    prefix = "⚠️ FINALIZATION NOTICE (host): "
+    extra = str(detail or "").strip()
+    if extra.startswith("⚠️ SYSTEM NOTICE (host): "):
+        extra = extra[len("⚠️ SYSTEM NOTICE (host): "):].strip()
+    notice = f"{prefix}{_forced_finalization_lead(ctx, reason_code)}."
+    return notice + (f" {extra}" if extra else "")
+
+
+def _forced_orphan_note(
+    ctx: _RoundLimitContext,
+    *,
+    include_terminal: bool = True,
+    reason_code: str = "",
+) -> str:
     """A bounded note listing children the parent did NOT explicitly handle (discard/cancel),
     appended to a finalization so paid child work is never SILENTLY orphaned (P1; P5 — no
     prose parsing). On a FORCED finalization (deadline / provider death / finalize_now,
@@ -3989,23 +4162,27 @@ def _forced_orphan_note(ctx: _RoundLimitContext, *, include_terminal: bool = Tru
         if undecided:
             listed = "; ".join(_label(c) for c in undecided[:10])
             more = f" (+{len(undecided) - 10} more)" if len(undecided) > 10 else ""
-            lead = "finalized under a hard limit with" if include_terminal else "finalized with"
+            lead = "At forced finalization" if include_terminal else "Finalized"
             detail = (
                 "running ones may be incomplete, completed ones may be UNREAD"
                 if include_terminal else
                 "still-running children not absorbed or discarded"
             )
             notes.append(
-                f"\n\n⚠️ NOTE: {lead} {len(undecided)} child task(s) not explicitly absorbed or "
-                f"discarded — {detail}: {listed}{more}. Inspect with get_task_result(<id>) / "
-                f"peek_task(<id>)."
+                f"\n\n⚠️ NOTE (host): {lead} with {len(undecided)} child task(s) not "
+                f"explicitly absorbed or discarded — {detail}. This child list is a snapshot "
+                "at finalization time; listed statuses may change and are not guaranteed to be "
+                f"final outcomes. Snapshot: {listed}{more}. Inspect with "
+                "`get_task_result(<id>)` / `peek_task(<id>)`."
             )
         if deferred:
             listed = "; ".join(_label(c) for c in deferred[:10])
             more = f" (+{len(deferred) - 10} more)" if len(deferred) > 10 else ""
             notes.append(
-                f"\n\n⚠️ DEFERRED CHILD RESULTS: {listed}{more}. These exact results were "
-                "explicitly deferred, so this answer is degraded/best-effort rather than clean solved."
+                "\n\n⚠️ DEFERRED CHILD RESULTS (host): This child list is a snapshot at "
+                "finalization time; listed statuses may change and are not guaranteed to be final "
+                f"outcomes. Snapshot: {listed}{more}. These exact results were explicitly deferred, "
+                "so this answer is degraded/best-effort rather than clean solved."
             )
         return "".join(notes)
     except Exception:
@@ -4578,10 +4755,14 @@ def _forced_fallback_result(
     source: str = "host_fallback",
     retained_source: str = "",
     retained_control: str = "",
+    host_notice: str = "",
 ) -> Tuple[str, Dict[str, Any], Dict[str, Any]]:
     """Return one exact candidate; reuse only current unchanged full text."""
 
-    suffix = _forced_orphan_note(ctx)
+    host_notice = _forced_finalization_notice(ctx, reason_code, host_notice)
+    orphan_suffix = _forced_orphan_note(ctx, reason_code=reason_code)
+    notice_suffix = f"\n\n{host_notice}"
+    suffix = notice_suffix + orphan_suffix
     live_candidate = _live_delivery_candidate(ctx)
     fallback_is_retained_model_text = (
         isinstance(live_candidate, DeliveryCandidate)
@@ -4589,7 +4770,10 @@ def _forced_fallback_result(
     )
     candidate = _current_delivery_candidate(ctx, llm_trace)
     if candidate is not None:
-        composed = _compose_delivery_suffix(candidate.full_text, suffix)
+        composed = _compose_delivery_suffix(
+            _compose_host_notice(candidate.full_text, host_notice),
+            orphan_suffix,
+        )
         if composed != candidate.full_text:
             candidate = _publish_model_forced_candidate(
                 ctx, llm_trace, composed, reason_code,
@@ -4601,7 +4785,11 @@ def _forced_fallback_result(
                 reason_code=reason_code,
                 source=(
                     f"{retained_source}_with_host_suffix"
-                    if retained_source else "retained_candidate_with_host_suffix"
+                    if retained_source else (
+                        f"{source}_with_host_suffix"
+                        if source != "host_fallback"
+                        else "retained_candidate_with_host_suffix"
+                    )
                 ),
                 candidate=candidate,
             )
@@ -4643,7 +4831,10 @@ def _forced_fallback_result(
             )
             return candidate.full_text, ctx.accumulated_usage, llm_trace
 
-    composed = _compose_delivery_suffix(fallback_text, suffix)
+    composed = _compose_delivery_suffix(
+        _compose_host_notice(fallback_text, host_notice),
+        orphan_suffix,
+    )
     candidate = _publish_model_forced_candidate(
         ctx, llm_trace, composed, reason_code,
     )
@@ -4665,6 +4856,7 @@ def _forced_final_answer(
     prompt: str,
     fallback_text: str,
     reason_code: str,
+    host_notice: str = "",
 ) -> Tuple[str, Dict[str, Any], Dict[str, Any]]:
     """Force one tool-less final answer; stamp the typed forced-finalization
     reason code (the best_effort outcome gate reads it downstream)."""
@@ -4672,6 +4864,10 @@ def _forced_final_answer(
     llm_trace = live_trace if isinstance(live_trace, dict) else {}
     _finalize_forced_services(ctx, llm_trace)
     _append_or_merge_user_message(ctx.messages, prompt)
+    # A forced summary is a new provider episode. The caller may already have
+    # materialized a notice for the outage that triggered it; any new failure
+    # must not inherit action claims from that earlier episode.
+    ctx.accumulated_usage["_provider_recovery_actions"] = []
     extracted = ""
     for attempt in range(2):
         try:
@@ -4684,6 +4880,17 @@ def _forced_final_answer(
             extracted = ""
         ctx.accumulated_usage["execution_status"] = "failed"
         ctx.accumulated_usage["reason_code"] = reason_code
+        if str(ctx.accumulated_usage.get("_last_llm_error_kind") or "") == "provider_outcome_unknown":
+            _drain_forced_owner_directives(ctx, llm_trace)
+            _finalize_forced_services(ctx, llm_trace)
+            return _forced_fallback_result(
+                ctx,
+                llm_trace,
+                fallback_text,
+                reason_code,
+                source="provider_outcome_unknown_no_resend",
+                host_notice=_provider_unavailable_notice(ctx.accumulated_usage),
+            )
         if not _drain_forced_owner_directives(ctx, llm_trace):
             break
         if attempt == 1:
@@ -4697,6 +4904,7 @@ def _forced_final_answer(
                 ),
                 reason_code,
                 source="late_owner_directive_requires_resume",
+                host_notice=host_notice,
             )
         _finalize_forced_services(ctx, llm_trace)
         _append_or_merge_user_message(
@@ -4710,7 +4918,11 @@ def _forced_final_answer(
         # Typed fact for the best_effort outcome gate: a REAL model answer
         # was extracted (host fallback strings never set this).
         ctx.accumulated_usage["_best_effort_extracted"] = True
-        full_text = _compose_delivery_suffix(extracted, _forced_orphan_note(ctx))
+        finalization_notice = _forced_finalization_notice(ctx, reason_code, host_notice)
+        full_text = _compose_delivery_suffix(
+            _compose_host_notice(extracted, finalization_notice),
+            _forced_orphan_note(ctx, reason_code=reason_code),
+        )
         candidate = _publish_model_forced_candidate(
             ctx, llm_trace, full_text, reason_code,
         )
@@ -4718,7 +4930,7 @@ def _forced_final_answer(
             ctx,
             llm_trace,
             reason_code=reason_code,
-            source="model",
+            source="model_with_host_notice",
             candidate=candidate,
         )
         return (
@@ -4731,6 +4943,7 @@ def _forced_final_answer(
         llm_trace,
         fallback_text,
         reason_code,
+        host_notice=host_notice,
     )
 
 
@@ -5223,6 +5436,9 @@ def _call_round_model(ctx: _RoundModelCallContext) -> Tuple[Any, float, str]:
         attempt_cap=ctx.attempt_cap,
         allow_server_web_search=_server_web_allowed_by_task(ctx.tools._ctx),
     )
+    first_dispatched_attempts = int(
+        ctx.accumulated_usage.get("_llm_dispatched_attempts") or 0
+    )
     should_retry_low = (
         msg is None
         and plan is not None
@@ -5267,24 +5483,28 @@ def _call_round_model(ctx: _RoundModelCallContext) -> Tuple[Any, float, str]:
         "toast_once": f"{ctx.task_id}:context-fit-low:{ctx.round_idx}",
         "owner_visible": True,
     })
-    msg, cost = call_llm_with_retry(
-        ctx.llm,
-        ctx.messages,
-        ctx.active_model,
-        ctx.tool_schemas,
-        ctx.active_effort,
-        ctx.max_retries,
-        ctx.drive_logs,
-        ctx.task_id,
-        ctx.round_idx,
-        ctx.event_queue,
-        ctx.accumulated_usage,
-        ctx.task_type,
-        use_local=ctx.active_use_local,
-        deadline_ts=_task_deadline_epoch(ctx.tools),
-        attempt_cap=1,
-        allow_server_web_search=_server_web_allowed_by_task(ctx.tools._ctx),
-    )
+    try:
+        msg, cost = call_llm_with_retry(
+            ctx.llm,
+            ctx.messages,
+            ctx.active_model,
+            ctx.tool_schemas,
+            ctx.active_effort,
+            ctx.max_retries,
+            ctx.drive_logs,
+            ctx.task_id,
+            ctx.round_idx,
+            ctx.event_queue,
+            ctx.accumulated_usage,
+            ctx.task_type,
+            use_local=ctx.active_use_local,
+            deadline_ts=_task_deadline_epoch(ctx.tools),
+            attempt_cap=1,
+            allow_server_web_search=_server_web_allowed_by_task(ctx.tools._ctx),
+        )
+    finally:
+        ctx.accumulated_usage["_llm_dispatched_attempts"] = first_dispatched_attempts + int(
+            ctx.accumulated_usage.get("_llm_dispatched_attempts") or 0)
     return msg, cost, "low"
 
 
@@ -5828,6 +6048,10 @@ def run_llm_loop(
 
             seal_task_transcript(messages)
 
+            # Per-round typed recovery projection. Only physical attempts proven
+            # by usage/capture facts are added below; classifier decisions and
+            # configured retry budgets are not action evidence.
+            accumulated_usage["_provider_recovery_actions"] = []
             msg, cost, active_context_mode = _call_round_model(
                 _RoundModelCallContext(
                     llm=llm,
@@ -5852,19 +6076,24 @@ def run_llm_loop(
             tools._ctx._current_llm_call_meta = dict(accumulated_usage.get("_last_llm_call_meta") or {})
 
             if msg is None:
-                (
-                    msg,
-                    active_model,
-                    active_use_local,
-                    context_fit_plan,
-                    active_context_mode,
-                ) = _run_cross_model_fallback_chain(
-                    llm=llm, ctx=ctx, tools=tools, messages=messages, active_model=active_model,
-                    active_use_local=active_use_local, tool_schemas=tool_schemas, active_effort=active_effort,
-                    max_retries=max_retries, drive_logs=drive_logs, task_id=task_id, round_idx=round_idx,
-                    event_queue=event_queue, accumulated_usage=accumulated_usage, task_type=task_type,
-                    emit_progress=emit_progress, context_fit_plan=context_fit_plan,
-                    active_context_mode=active_context_mode)
+                _record_last_call_same_model_retries(accumulated_usage, active_model)
+                if (
+                    str(accumulated_usage.get("_last_llm_error_kind") or "")
+                    != "provider_outcome_unknown"
+                ):
+                    (
+                        msg,
+                        active_model,
+                        active_use_local,
+                        context_fit_plan,
+                        active_context_mode,
+                    ) = _run_cross_model_fallback_chain(
+                        llm=llm, ctx=ctx, tools=tools, messages=messages, active_model=active_model,
+                        active_use_local=active_use_local, tool_schemas=tool_schemas, active_effort=active_effort,
+                        max_retries=max_retries, drive_logs=drive_logs, task_id=task_id, round_idx=round_idx,
+                        event_queue=event_queue, accumulated_usage=accumulated_usage, task_type=task_type,
+                        emit_progress=emit_progress, context_fit_plan=context_fit_plan,
+                        active_context_mode=active_context_mode)
                 if msg is None:
                     # Provider-death: join the unified honest best-effort shelf
                     # (deadline/budget/round-limit) instead of discarding useful

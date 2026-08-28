@@ -142,6 +142,98 @@ def test_call_llm_with_retry_stops_non_retryable_same_request(tmp_path):
     assert usage["_last_llm_retry_same_request"] is False
 
 
+def test_unknown_physical_outcome_is_recorded_and_not_retried(tmp_path, monkeypatch):
+    import json
+
+    from ouroboros.usage_accounting import AttemptRequest, execute_physical_attempt
+
+    monkeypatch.setenv("OUROBOROS_DATA_DIR", str(tmp_path))
+    monkeypatch.setenv("OUROBOROS_SETTINGS_PATH", str(tmp_path / "settings.json"))
+    monkeypatch.setenv("TOTAL_BUDGET", "100")
+    drive_logs = tmp_path / "logs"
+
+    class UnknownOutcomeLLM:
+        calls = 0
+
+        def chat(self, **_kwargs):
+            self.calls += 1
+            return execute_physical_attempt(
+                AttemptRequest(
+                    model="openai/gpt-5.5",
+                    provider="openai",
+                    reservation_usd=0.01,
+                    drive_root=tmp_path,
+                    task_id="unknown-attempt",
+                    root_task_id="unknown-attempt",
+                ),
+                lambda: (_ for _ in ()).throw(ConnectionError("Connection error.")),
+            )
+
+    llm = UnknownOutcomeLLM()
+    usage = {}
+    msg, cost = call_llm_with_retry(
+        llm,
+        [{"role": "user", "content": "hi"}],
+        "openai/gpt-5.5",
+        None,
+        "medium",
+        3,
+        drive_logs,
+        "unknown-attempt",
+        1,
+        None,
+        usage,
+        "task",
+        False,
+    )
+
+    assert msg is None
+    assert cost == 0.0
+    assert llm.calls == 1
+    assert usage["_last_llm_error_kind"] == "provider_outcome_unknown"
+    assert usage["_last_llm_retry_same_request"] is False
+    assert usage["_llm_attempts_used"] == 1
+    assert usage["_llm_dispatched_attempts"] == 1
+    events = [
+        json.loads(line)
+        for line in (drive_logs / "events.jsonl").read_text(encoding="utf-8").splitlines()
+        if line.strip()
+    ]
+    error = next(row for row in events if row.get("type") == "llm_api_error")
+    assert error["attempt"] == 1
+    assert error["error_kind"] == "provider_outcome_unknown"
+    assert error["retry_same_request"] is False
+    assert error["physical_attempt_state"] == "unresolved"
+    assert error["provider_response_observed"] is False
+    assert error["physical_attempt_id"]
+    assert error["physical_attempt_ids"] == [error["physical_attempt_id"]]
+
+
+def test_provider_notice_names_only_recorded_recovery_actions():
+    from ouroboros.loop import _provider_unavailable_notice
+
+    notice = _provider_unavailable_notice({
+        "_last_llm_error_kind": "provider_transient",
+        "_provider_recovery_actions": [
+            {"kind": "same_model_retry", "count": 2, "model": "model-a"},
+            {"kind": "cross_model_fallback", "count": 1, "model": "model-b"},
+        ],
+    })
+
+    assert "2 same-model retry attempt(s)" in notice
+    assert "1 configured fallback route attempt(s)" in notice
+    assert "same-model reroute" not in notice
+    assert "exhausted" not in notice
+
+    unproven = _provider_unavailable_notice({
+        "_last_llm_error_kind": "provider_transient",
+        "_llm_attempts_used": 9,
+        "_last_llm_retry_same_request": True,
+    })
+    assert "retry attempt(s)" not in unproven
+    assert "fallback route attempt(s)" not in unproven
+
+
 class _GlitchThenOkLLM:
     """finish_reason=null provider glitch for N calls, then a real response."""
 

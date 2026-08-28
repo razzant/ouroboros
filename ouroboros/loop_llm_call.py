@@ -22,7 +22,11 @@ from ouroboros import model_concurrency
 from ouroboros.llm import LLMClient, LocalContextTooLargeError, add_usage
 from ouroboros.observability import new_call_id, new_execution_id, persist_call
 from ouroboros.pricing import emit_llm_usage_event, estimate_cost_optional, infer_model_category
-from ouroboros.usage_accounting import UsageAccountingError
+from ouroboros.usage_accounting import (
+    UsageAccountingError,
+    physical_attempt_capture_from_exception,
+    physical_provider_outcome_unknown,
+)
 from ouroboros.utils import append_jsonl, emit_log_event, sanitize_tool_result_for_log, truncate_review_artifact, utc_now_iso
 from ouroboros.config import get_context_mode
 
@@ -424,6 +428,10 @@ def _exception_status_code(exc: Exception) -> Optional[int]:
                 pass
     response = getattr(exc, "response", None)
     value = getattr(response, "status_code", None)
+    if isinstance(value, int):
+        return value
+    capture = physical_attempt_capture_from_exception(exc)
+    value = getattr(capture, "provider_status_code", None)
     return value if isinstance(value, int) else None
 
 
@@ -444,6 +452,10 @@ def _exception_provider_code(exc: Exception, safe_error: str) -> str:
                 value = nested.get(key)
                 if isinstance(value, str) and value.strip():
                     return value.strip()
+    capture = physical_attempt_capture_from_exception(exc)
+    value = getattr(capture, "provider_code", None)
+    if isinstance(value, str) and value.strip():
+        return value.strip()
     return ""
 
 
@@ -483,6 +495,11 @@ def classify_llm_exception(exc: Exception, safe_error: str = "") -> LlmErrorClas
     safe = safe_error or sanitize_tool_result_for_log(repr(exc))
     if isinstance(exc, LocalContextTooLargeError):
         return LlmErrorClassification("context_overflow", False)
+    if physical_provider_outcome_unknown(exc):
+        # Physical custody outranks provider-code and message heuristics. A
+        # response-observed HTTP status is captured as known and reaches the
+        # ordinary class-specific policy below.
+        return LlmErrorClassification("provider_outcome_unknown", False)
     status_code = _exception_status_code(exc)
     provider_code = _exception_provider_code(exc, safe)
     low = str(safe or "").lower()
@@ -588,6 +605,8 @@ def _record_llm_call_error(
     safe_error = sanitize_tool_result_for_log(repr(error))
     classification = classify_llm_exception(error, safe_error)
     provider_message = _exception_provider_message(error, safe_error)
+    physical_capture = physical_attempt_capture_from_exception(error)
+    physical_attempt_ids = _physical_attempt_ids_from_capture(physical_capture)
     _emit_live_log(ctx.event_queue, {
         "type": "llm_round_error",
         "task_id": ctx.task_id,
@@ -615,6 +634,12 @@ def _record_llm_call_error(
         "status_code": classification.status_code,
         "provider_code": classification.provider_code,
         "provider_message": provider_message,
+        "physical_attempt_id": str(getattr(physical_capture, "attempt_id", "") or ""),
+        "physical_attempt_ids": list(physical_attempt_ids),
+        "physical_attempt_state": str(getattr(physical_capture, "state", "") or ""),
+        "provider_response_observed": bool(
+            getattr(physical_capture, "provider_response_observed", False)
+        ),
         "request_ref": ctx.request_ref.get("manifest_ref") if ctx.request_ref else None,
     })
     ctx.accumulated_usage["_last_llm_error"] = _short_error_text(safe_error)
@@ -714,6 +739,35 @@ def _context_fit_event_fields(usage: Dict[str, Any]) -> Dict[str, Any]:
     }
 
 
+def _physical_attempt_ids_from_capture(capture: Any) -> tuple[str, ...]:
+    ids = getattr(capture, "logical_call_attempt_ids", ()) or ()
+    if not ids and str(getattr(capture, "attempt_id", "") or ""):
+        ids = (getattr(capture, "attempt_id"),)
+    return tuple(dict.fromkeys(str(item) for item in ids if str(item)))
+
+
+def _note_dispatched_llm_attempt(
+    accumulated_usage: Dict[str, Any],
+    *,
+    response_usage: Optional[Dict[str, Any]] = None,
+    error: Optional[BaseException] = None,
+) -> None:
+    capture = physical_attempt_capture_from_exception(error) if error is not None else None
+    response_ids = response_usage.get("ledger_attempt_ids") if response_usage else ()
+    if isinstance(response_ids, (list, tuple, set)):
+        attempt_ids = tuple(dict.fromkeys(str(item) for item in response_ids if str(item)))
+    else:
+        attempt_ids = ()
+    if not attempt_ids and str(getattr(capture, "state", "") or "") in {
+        "dispatched", "unresolved", "settled",
+    }:
+        attempt_ids = _physical_attempt_ids_from_capture(capture)
+    if attempt_ids:
+        accumulated_usage["_llm_dispatched_attempts"] = int(
+            accumulated_usage.get("_llm_dispatched_attempts") or 0
+        ) + len(attempt_ids)
+
+
 def call_llm_with_retry(
     llm: LLMClient,
     messages: List[Dict[str, Any]],
@@ -732,16 +786,13 @@ def call_llm_with_retry(
     attempt_cap: Optional[int] = None,
     allow_server_web_search: bool = False,
 ) -> Tuple[Optional[Dict[str, Any]], Optional[float]]:
-    """Call one model with failure-class retry budgets and usage events.
-
-    ``deadline_ts`` bounds backoff, ``attempt_cap`` caps fallback candidates,
-    and cross-model fallback remains the caller's responsibility.
-    """
+    """Call one model with bounded retry budgets; fallback stays with the caller."""
     msg = None
     drive_root = pathlib.Path(drive_logs).parent
     execution_id = str(accumulated_usage.setdefault("execution_id", new_execution_id()))
     round_id = f"{execution_id}:round:{round_idx}"
     transient_budget = _attempt_loop_budget(max_retries, attempt_cap)
+    accumulated_usage["_llm_dispatched_attempts"] = 0
 
     for attempt in range(transient_budget):
         accumulated_usage["_llm_attempts_used"] = attempt + 1
@@ -764,7 +815,9 @@ def call_llm_with_retry(
                         use_local=use_local,
                     ),
                 )
-            except Exception:
+            except Exception as exc:
+                if physical_provider_outcome_unknown(exc):
+                    raise
                 log.debug("vision routing preparation failed; falling back to canonical messages", exc_info=True)
             _emit_live_log(event_queue, {
                 "type": "llm_round_started",
@@ -823,6 +876,7 @@ def call_llm_with_retry(
             # ONLY the provider call — not the retry loop, not the backoff. Fail-soft.
             with model_concurrency.model_call_slot(model, use_local, deadline_ts):
                 resp_msg, usage = llm.chat(**kwargs)
+            _note_dispatched_llm_attempt(accumulated_usage, response_usage=usage)
             msg = resp_msg
             accumulated_usage.pop("_last_llm_error", None)
             accumulated_usage.pop("_last_llm_error_kind", None)
@@ -973,6 +1027,7 @@ def call_llm_with_retry(
         except UsageAccountingError:
             raise  # Monetary/ledger rails are not provider failures.
         except Exception as e:
+            _note_dispatched_llm_attempt(accumulated_usage, error=e)
             if _record_llm_call_error(
                 e,
                 _LlmErrorContext(

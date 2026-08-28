@@ -22,6 +22,7 @@ from ouroboros.usage_accounting import (
     current_usage_scope,
     execute_physical_attempt,
     execute_physical_attempt_async,
+    physical_provider_outcome_unknown,
     usage_scope,
 )
 from ouroboros.utils import in_worker_process
@@ -937,6 +938,8 @@ class LLMClient:
         model_id: str,
         exc: BaseException,
     ) -> Optional[Dict[str, Any]]:
+        if physical_provider_outcome_unknown(exc):
+            return None
         cls = type(self)
         if not cls._parameter_rejection_error(exc):
             return None
@@ -1132,6 +1135,8 @@ class LLMClient:
         exc: BaseException,
     ) -> Optional[Dict[str, Any]]:
         """Remove only an explicitly rejected cache-affinity parameter once."""
+        if physical_provider_outcome_unknown(exc):
+            return None
         provider = str(target.get("provider") or "").strip().lower()
         extra_body = payload.get("extra_body")
         param = ""
@@ -1787,6 +1792,8 @@ class LLMClient:
         allowlist — so every provider phrasing of this failure class is covered.
         ``_reroute_same_model_kwargs`` returns None when no reasoning was present,
         so a genuine (non-reasoning) 400 still propagates unchanged."""
+        if physical_provider_outcome_unknown(exc):
+            return None
         if not target.get("supports_openrouter_extensions"):
             return None
         if not self._is_http_status(exc, 400):
@@ -2437,6 +2444,8 @@ class LLMClient:
             except Exception as exc:
                 last_exc = exc
                 err = str(exc)
+                if physical_provider_outcome_unknown(exc):
+                    raise
                 if "context_length_exceeded" in err:
                     raise LocalContextTooLargeError(err) from exc
                 if attempt == 2:
@@ -3849,7 +3858,9 @@ class LLMClient:
                 resp = _send(reroute_kwargs)
             except UsageAccountingError:
                 raise
-            except Exception:
+            except Exception as exc:
+                if physical_provider_outcome_unknown(exc):
+                    raise
                 return resp
             kwargs = reroute_kwargs
         # An encrypted-reasoning 400 delivered in the body (directly, or on the
@@ -3861,7 +3872,9 @@ class LLMClient:
                 return _send(strip_kwargs)
             except UsageAccountingError:
                 raise
-            except Exception:
+            except Exception as exc:
+                if physical_provider_outcome_unknown(exc):
+                    raise
                 return resp
         # A parameter/VALUE rejection delivered as a body-400 (v6.73.2, triad
         # r3) gets the same one-shot recovery as the exception path — the floor
@@ -3872,8 +3885,10 @@ class LLMClient:
                 return _send(param_kwargs)
             except UsageAccountingError:
                 raise
-            except Exception:
+            except Exception as exc:
                 self._pop_effort_clamp_disclosure()
+                if physical_provider_outcome_unknown(exc):
+                    raise
                 return resp
         return resp
 
@@ -3948,7 +3963,9 @@ class LLMClient:
                 resp = await _send(reroute_kwargs)
             except UsageAccountingError:
                 raise
-            except Exception:
+            except Exception as exc:
+                if physical_provider_outcome_unknown(exc):
+                    raise
                 return resp
             kwargs = reroute_kwargs
         # An encrypted-reasoning 400 delivered in the body (directly, or on the
@@ -3960,7 +3977,9 @@ class LLMClient:
                 return await _send(strip_kwargs)
             except UsageAccountingError:
                 raise
-            except Exception:
+            except Exception as exc:
+                if physical_provider_outcome_unknown(exc):
+                    raise
                 return resp
         # Sync-driver parity (v6.73.2, triad r3): parameter/VALUE rejections
         # delivered as a body-400 recover through the same seam.
@@ -3970,8 +3989,10 @@ class LLMClient:
                 return await _send(param_kwargs)
             except UsageAccountingError:
                 raise
-            except Exception:
+            except Exception as exc:
                 self._pop_effort_clamp_disclosure()
+                if physical_provider_outcome_unknown(exc):
+                    raise
                 return resp
         return resp
 

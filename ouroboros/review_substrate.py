@@ -33,6 +33,7 @@ from ouroboros.usage_accounting import (
     UsageScope,
     current_usage_scope,
     physical_attempt_limit,
+    physical_provider_outcome_unknown,
     usage_scope,
 )
 from ouroboros.utils import sanitize_tool_result_for_log, truncate_review_artifact
@@ -1434,13 +1435,7 @@ class ReviewCoordinator:
             p3_actor = request.surface in {"multi_model_review", "scope_review"}
             acceptance_actor = request.surface == "task_acceptance"
             actor_attempts = 2 if (p3_actor or acceptance_actor) else 1
-            # Acceptance and P3 share the same two-physical-send rail. The
-            # documented contract ("one substantive call and at most two
-            # physical attempts total — same-route transport retry or
-            # extraction/format repair") historically retried only empty/errored
-            # responses; a MALFORMED non-empty acceptance response burned the
-            # actor as DEGRADED without using its second permitted send. The
-            # prompt, slot, and model never change on the repair resend.
+            # P3/acceptance permit one bounded same-route transport or format-repair resend.
             attempt_rail = (
                 physical_attempt_limit(2)
                 if acceptance_actor or p3_actor
@@ -1473,7 +1468,12 @@ class ReviewCoordinator:
                             msg, usage, raw_text = _prior_msg, _prior_usage, _prior_text
                             break
                         raise
-                    except Exception:
+                    except Exception as exc:
+                        if physical_provider_outcome_unknown(exc):
+                            if _prior_text:
+                                msg, usage, raw_text = _prior_msg, _prior_usage, _prior_text
+                                break
+                            raise
                         if actor_attempt + 1 < actor_attempts:
                             continue
                         if _prior_text:

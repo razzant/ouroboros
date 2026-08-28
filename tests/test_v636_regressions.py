@@ -80,6 +80,67 @@ def test_create_with_retries_reroutes_once_on_transient_body_error(tmp_path, mon
     assert "allow_fallbacks" not in calls[1].get("extra_body", {}).get("provider", {})
 
 
+def test_unknown_outcome_during_body_reroute_is_not_hidden_or_replayed(
+    tmp_path, monkeypatch,
+):
+    from ouroboros.llm import LLMClient
+    from ouroboros.usage_accounting import capture_attempt_ids, physical_provider_outcome_unknown
+
+    monkeypatch.setenv("OUROBOROS_DATA_DIR", str(tmp_path / "data"))
+    monkeypatch.setenv("OUROBOROS_SETTINGS_PATH", str(tmp_path / "data" / "settings.json"))
+    monkeypatch.setenv("TOTAL_BUDGET", "100")
+
+    class Response:
+        def model_dump(self):
+            return {"error": {"code": 429, "message": "rate limited"}, "choices": None}
+
+    calls = []
+
+    def create_fn(**kwargs):
+        calls.append(kwargs)
+        if len(calls) == 1:
+            return Response()
+        raise ConnectionError("connection dropped during same-model reroute")
+
+    client = LLMClient.__new__(LLMClient)
+    target = {
+        "supports_openrouter_extensions": True,
+        "provider": "openrouter",
+        "resolved_model": "openai/gpt-5.2",
+        "usage_model": "openai/gpt-5.2",
+    }
+    kwargs = {
+        "messages": [
+            {"role": "assistant", "reasoning_details": [{"x": 1}]},
+            {"role": "user", "content": "hi"},
+        ],
+        "extra_body": {"provider": {"allow_fallbacks": False}},
+    }
+
+    import pytest
+
+    with capture_attempt_ids(), pytest.raises(ConnectionError) as exc_info:
+        client._create_chat_completion_with_retries(create_fn, kwargs, target)
+
+    assert physical_provider_outcome_unknown(exc_info.value) is True
+    assert len(calls) == 2
+    capture = __import__(
+        "ouroboros.usage_accounting", fromlist=["physical_attempt_capture_from_exception"]
+    ).physical_attempt_capture_from_exception(exc_info.value)
+    assert len(capture.logical_call_attempt_ids) == 2
+
+    from ouroboros.loop import _provider_unavailable_notice, _record_last_call_same_model_retries
+    from ouroboros.loop_llm_call import _note_dispatched_llm_attempt
+
+    projected = {"_last_llm_error_kind": "provider_outcome_unknown"}
+    _note_dispatched_llm_attempt(projected, error=exc_info.value)
+    assert projected["_llm_dispatched_attempts"] == 2
+    _record_last_call_same_model_retries(projected, "openai/gpt-5.2")
+    notice = _provider_unavailable_notice(projected)
+    assert "1 same-model retry attempt(s)" in notice
+    assert "exhausted" not in notice
+
+
 # --- WA2: provider-death -> best-effort shelf / salvage -----------------------
 def test_provider_unavailable_salvages_then_best_effort(monkeypatch):
     import ouroboros.loop as loop
@@ -92,14 +153,16 @@ def test_provider_unavailable_salvages_then_best_effort(monkeypatch):
     # provider stays dead -> final call yields nothing -> salvage last assistant text (NOT best_effort)
     monkeypatch.setattr(loop, "call_llm_with_retry", lambda *a, **k: (None, 0.0))
     text, usage, _ = loop._handle_provider_unavailable(ctx)
-    assert text == "partial A"
+    assert text.startswith("partial A")
+    assert "FINALIZATION NOTICE (host)" in text
     assert usage.get("reason_code") == "provider_unavailable"
     assert not usage.get("_best_effort_extracted")
     # provider recovers (reroute) -> fresh final answer -> best_effort
     ctx.accumulated_usage = {}
     monkeypatch.setattr(loop, "call_llm_with_retry", lambda *a, **k: ({"content": "FINAL"}, 0.01))
     text2, usage2, _ = loop._handle_provider_unavailable(ctx)
-    assert text2 == "FINAL"
+    assert text2.startswith("FINAL")
+    assert "FINALIZATION NOTICE (host)" in text2
     assert usage2.get("_best_effort_extracted") is True
 
 

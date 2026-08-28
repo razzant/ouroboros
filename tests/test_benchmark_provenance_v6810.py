@@ -256,7 +256,7 @@ _TRUNCATION_DECISIONS: dict[str, tuple[bool, str]] = {
     "round_limit": (True, "loop.py:3128 _handle_round_limit, the round cap"),
     "finalization_grace": (True, "loop.py:3146 supervisor finalize_now grace"),
     "deadline_local": (True, "loop.py:3220 loop-local deadline"),
-    "provider_unavailable": (True, "loop.py:3185 reroute + fallback exhausted"),
+    "provider_unavailable": (True, "loop.py recovery exhausted or unknown send preserved"),
     "children_unabsorbed": (True, "loop.py:4071 forced terminal, child results unabsorbed"),
     "llm_api_error": (True, "loop_llm_call.py:630 transport death; never a fair shot"),
     # -- not truncating: a real terminal the agent reached, or a rejected tool call --------

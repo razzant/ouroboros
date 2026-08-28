@@ -684,7 +684,7 @@ def write_disclosure_ledger(*, jobs_dir: pathlib.Path, out_path: pathlib.Path, r
     # as a clean reward-0 trial with exception_info=null). Without this a 429-driven failure is
     # indistinguishable from a genuine wrong answer.
     _timeout_types = {"AgentTimeoutError", "VerifierTimeoutError"}
-    # Both codes are real and grepped: loop.py:3185 (reroute + fallback exhausted) and
+    # Both codes are real and grepped: loop.py (recovery exhausted or unknown send preserved) and
     # loop_llm_call.py:630 (transport death). `rate_limited`/`provider_error` used to sit
     # here too and the runtime has never emitted either — inert, but a hand-written claim
     # about a vocabulary that lives elsewhere, which is exactly the defect this release fixed

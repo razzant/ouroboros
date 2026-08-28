@@ -79,6 +79,35 @@ def test_chat_history_replays_delivered_document_row(tmp_path):
     assert rec["caption"] == "quarterly numbers"
 
 
+def test_chat_history_preserves_markdown_helper_references_verbatim(tmp_path):
+    logs = tmp_path / "logs"
+    logs.mkdir()
+    helper_text = (
+        "Inspect with `get_task_result(<id>)` / `peek_task(<id>)`."
+    )
+    (logs / "chat.jsonl").write_text(
+        json.dumps({
+            "ts": "2026-08-28T00:00:00Z",
+            "direction": "out",
+            "chat_id": 1,
+            "text": helper_text,
+            "format": "markdown",
+        }) + "\n",
+        encoding="utf-8",
+    )
+    (logs / "progress.jsonl").write_text("", encoding="utf-8")
+
+    endpoint = make_chat_history_endpoint(tmp_path)
+    response = asyncio.run(endpoint(SimpleNamespace(query_params={"limit": "10"})))
+    record = json.loads(response.body.decode("utf-8"))["messages"][0]
+
+    assert record["text"] == helper_text
+    assert record["markdown"] is True
+    assert "\\" not in record["text"]
+    assert "`get_task_result(<id>)`" in record["text"]
+    assert "`peek_task(<id>)`" in record["text"]
+
+
 def test_chat_history_backfills_from_rotated_archive(tmp_path):
     """The live chat.jsonl is rotated to archive/chat_<ts>.jsonl at ~800KB. History
     replay must backfill from the most recent archive(s) so a rotation does not

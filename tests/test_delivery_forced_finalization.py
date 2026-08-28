@@ -457,6 +457,107 @@ def test_provider_unavailable_preserves_stale_candidate_with_resume_disclosure(
     assert trace["tool_calls"] == []
 
 
+def test_unknown_provider_finalization_is_host_only_and_reason_specific(
+    tmp_path, monkeypatch,
+):
+    _write_child(tmp_path, status="running")
+    usage = {
+        "_last_llm_error": "APIConnectionError('Connection error.')",
+        "_last_llm_error_kind": "provider_outcome_unknown",
+        "_last_llm_retry_same_request": False,
+        "_provider_recovery_actions": [],
+    }
+    loop, _registry, limit_ctx, _trace = _forced_test_context(tmp_path, usage=usage)
+
+    def forbidden_model_call(*_args, **_kwargs):
+        raise AssertionError("unknown provider outcome must not trigger another model call")
+
+    monkeypatch.setattr(loop, "call_llm_with_retry", forbidden_model_call)
+    text, returned_usage, returned_trace = loop._handle_provider_unavailable(limit_ctx)
+
+    assert "FINALIZATION NOTICE (host)" in text
+    assert "may have reached the provider" in text
+    assert "No further replay, same-request retry, or paid fallback was sent" in text
+    assert "after retries" not in text
+    assert "same-model reroute" not in text
+    assert "Finalized because a provider request had an unknown outcome" in text
+    assert "hard limit" not in text
+    assert "snapshot at finalization time" in text
+    assert "not guaranteed to be final outcomes" in text
+    assert "`get_task_result(<id>)` / `peek_task(<id>)`" in text
+    assert "\\_" not in text
+    assert "\\<" not in text
+    assert returned_usage["reason_code"] == "provider_unavailable"
+    assert returned_trace["forced_finalization"]["source"] == "provider_outcome_unknown_no_resend"
+
+
+def test_round_limit_orphan_notice_names_real_hard_limit(tmp_path, monkeypatch):
+    _write_child(tmp_path, status="running")
+    loop, _registry, limit_ctx, _trace = _forced_test_context(tmp_path)
+    monkeypatch.setattr(loop, "call_llm_with_retry", lambda *_args, **_kwargs: (None, 0.0))
+
+    text, usage, returned_trace = loop._handle_round_limit(limit_ctx)
+
+    assert "Finalized under the hard round limit" in text
+    assert "snapshot at finalization time" in text
+    assert "`get_task_result(<id>)` / `peek_task(<id>)`" in text
+    assert usage["reason_code"] == "round_limit"
+    assert returned_trace["forced_finalization"]["reason_code"] == "round_limit"
+
+
+def test_unknown_forced_summary_keeps_original_reason_without_children(
+    tmp_path, monkeypatch,
+):
+    loop, registry, ctx, trace = _forced_test_context(tmp_path)
+    retained = loop._replace_delivery_candidate(
+        registry, ctx, trace, "Retained complete answer.", control="candidate",
+    )
+    calls = 0
+
+    def unknown_forced_call(*_args, **_kwargs):
+        nonlocal calls
+        calls += 1
+        ctx.accumulated_usage.update({
+            "_last_llm_error_kind": "provider_outcome_unknown",
+            "_last_llm_error": "connection ended after dispatch",
+            "_llm_dispatched_attempts": 1,
+        })
+        return None, 0.0
+
+    monkeypatch.setattr(loop, "call_llm_with_retry", unknown_forced_call)
+    text, _usage, returned_trace = loop._forced_final_answer(
+        ctx,
+        prompt="finalize",
+        fallback_text="round fallback",
+        reason_code="round_limit",
+    )
+
+    assert calls == 1
+    assert text.startswith(retained.full_text)
+    assert text.count("Finalized under the hard round limit") == 1
+    assert "may have reached the provider" in text
+    assert "No further replay, same-request retry, or paid fallback was sent" in text
+    assert "child task(s)" not in text
+    assert returned_trace["forced_finalization"]["source"] == (
+        "provider_outcome_unknown_no_resend_with_host_suffix"
+    )
+
+
+def test_supervisor_finalization_notice_preserves_exact_reason(tmp_path, monkeypatch):
+    loop, _registry, limit_ctx, _trace = _forced_test_context(tmp_path)
+    monkeypatch.setattr(loop, "call_llm_with_retry", lambda *_args, **_kwargs: (None, 0.0))
+
+    text, usage, returned_trace = loop._handle_forced_finalization(
+        limit_ctx, "hard_timeout",
+    )
+
+    assert "supervisor finalization request (reason: hard_timeout)" in text
+    assert "under a hard limit" not in text
+    assert "child task(s)" not in text
+    assert usage["reason_code"] == "finalization_grace"
+    assert returned_trace["forced_finalization"]["finalization_reason"] == "hard_timeout"
+
+
 def test_normal_host_suffix_is_inside_candidate_and_panel_subject(tmp_path, monkeypatch):
     import hashlib
 
@@ -525,7 +626,8 @@ def test_forced_retained_candidate_suffix_creates_new_unaccepted_revision(
 
     candidate = registry._ctx._delivery_candidate
     assert text == candidate.full_text
-    assert "NOTE: finalized" in text
+    assert "FINALIZATION NOTICE (host): Finalized under the hard round limit" in text
+    assert "NOTE (host): At forced finalization" in text
     assert candidate.revision == original.revision + 1
     assert candidate.content_sha256 == hashlib.sha256(text.encode("utf-8")).hexdigest()
     assert candidate.acceptance_binding["acceptance_status"] == "unaccepted"
@@ -572,6 +674,7 @@ def test_forced_finalization_stops_services_before_model_and_binds_evidence(
 
     assert order == ["services", "model"]
     assert text == registry._ctx._delivery_candidate.full_text
+    assert "Finalized because the task deadline was reached" in text
     assert returned_trace["verification_events"][0]["kind"] == "services_stopped"
     assert len(returned_trace["verification_events"][0]["services"][0]["artifact_outputs"]) > 8000
     assert returned_trace["delivery_candidate"]["evidence_current"] is True
@@ -733,7 +836,8 @@ def test_forced_owner_arrival_gets_one_complete_refresh(tmp_path, monkeypatch):
     )
 
     assert len(calls) == 2
-    assert text == "Refreshed forced answer."
+    assert text.startswith("Refreshed forced answer.")
+    assert "FINALIZATION NOTICE (host)" in text
     assert "Stale forced draft" not in text
     assert registry._ctx._delivery_candidate.content_sha256 == hashlib.sha256(
         text.encode("utf-8")
@@ -775,7 +879,8 @@ def test_forced_replacement_supersedes_accepted_pass_in_outcome_and_projection(
         reason_code="round_limit",
     )
 
-    assert text == "Forced replacement answer."
+    assert text.startswith("Forced replacement answer.")
+    assert "Finalized under the hard round limit" in text
     assert prior_run["superseded_by_revision"] is True
     assert prior_run["superseded_reason"] == "delivery_candidate_replaced"
     assert prior_run["enforcement_impact"] == "requires_revision"

@@ -11,6 +11,7 @@ from typing import Any, Dict, List
 from ouroboros.config import get_image_input_mode, get_vision_caption_timeout_sec, get_vision_model, resolve_effort
 from ouroboros.observability import new_call_id, persist_call
 from ouroboros.provider_models import supports_vision
+from ouroboros.usage_accounting import physical_provider_outcome_unknown
 
 
 _CAPTION_PROMPT = (
@@ -141,6 +142,8 @@ def _caption_for_block(
                 manifest={"model": model},
             )
     except Exception as exc:
+        if physical_provider_outcome_unknown(exc):
+            raise
         caption = f"[image caption unavailable: {type(exc).__name__}: {exc}]"
     memo[key] = caption
     return caption

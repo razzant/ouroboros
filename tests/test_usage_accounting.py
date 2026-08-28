@@ -125,12 +125,135 @@ def test_provider_failure_remains_unresolved(data_root):
         sends += 1
         raise TimeoutError("transport timeout")
 
-    with pytest.raises(TimeoutError):
+    with pytest.raises(TimeoutError) as exc_info:
         ua.execute_physical_attempt(_request(data_root), fail)
     assert sends == 1
+    capture = ua.physical_attempt_capture_from_exception(exc_info.value)
+    assert capture is not None
+    assert capture.state == "unresolved"
+    assert capture.provider_response_observed is False
+    assert capture.provider_status_code is None
+    assert ua.physical_provider_outcome_unknown(exc_info.value) is True
     projection = ua.usage_projection(data_root)
     assert projection["unresolved_upper_bound_usd"] == 1.0
     assert _ledger(data_root)[-1]["state"] == "unresolved"
+
+
+def test_typed_http_failure_is_not_an_unknown_provider_outcome(data_root):
+    from ouroboros.loop_llm_call import classify_llm_exception
+
+    class Response:
+        status_code = 503
+
+        @staticmethod
+        def json():
+            return {"error": {"code": "overloaded"}}
+
+    class ProviderError(Exception):
+        def __init__(self):
+            super().__init__("provider unavailable")
+            self.response = Response()
+
+    error = ProviderError()
+    with pytest.raises(ProviderError) as exc_info:
+        ua.execute_physical_attempt(
+            _request(data_root),
+            lambda: (_ for _ in ()).throw(error),
+        )
+
+    capture = ua.physical_attempt_capture_from_exception(exc_info.value)
+    assert capture is not None
+    assert capture.state == "unresolved"  # conservative cost custody
+    assert capture.provider_response_observed is True
+    assert capture.provider_status_code == 503
+    assert capture.provider_code == "overloaded"
+    assert ua.physical_provider_outcome_unknown(exc_info.value) is False
+    classification = classify_llm_exception(exc_info.value)
+    assert classification.kind == "provider_transient"
+    assert classification.retry_same_request is True
+
+
+@pytest.mark.parametrize(("attribute", "value", "expected"), [
+    ("status", 408, 408),
+    ("code", 503, 503),
+    ("code", "503", 503),
+])
+def test_typed_http_status_aliases_preserve_safe_retry(
+    data_root, attribute, value, expected,
+):
+    from ouroboros.loop_llm_call import classify_llm_exception
+
+    class ProviderError(Exception):
+        pass
+
+    error = ProviderError("typed provider response")
+    setattr(error, attribute, value)
+    with pytest.raises(ProviderError) as exc_info:
+        ua.execute_physical_attempt(
+            _request(data_root),
+            lambda: (_ for _ in ()).throw(error),
+        )
+
+    capture = ua.physical_attempt_capture_from_exception(exc_info.value)
+    assert capture.provider_response_observed is True
+    assert capture.provider_status_code == expected
+    assert capture.logical_call_attempt_ids == (capture.attempt_id,)
+    classification = classify_llm_exception(exc_info.value)
+    assert classification.kind == "provider_transient"
+    assert classification.retry_same_request is True
+
+
+@pytest.mark.parametrize("provider_code", ["insufficient_quota", "invalid_api_key"])
+def test_unknown_outcome_outranks_unobserved_provider_code(provider_code, data_root):
+    from ouroboros.loop_llm_call import classify_llm_exception
+
+    class ProviderError(ConnectionError):
+        code = provider_code
+
+    with pytest.raises(ProviderError) as exc_info:
+        ua.execute_physical_attempt(
+            _request(data_root),
+            lambda: (_ for _ in ()).throw(ProviderError("connection lost after send")),
+        )
+
+    assert ua.physical_provider_outcome_unknown(exc_info.value) is True
+    classification = classify_llm_exception(exc_info.value)
+    assert classification.kind == "provider_outcome_unknown"
+    assert classification.retry_same_request is False
+
+
+def test_async_provider_failure_carries_unknown_outcome_capture(data_root):
+    async def fail():
+        raise ConnectionError("connection dropped")
+
+    with pytest.raises(ConnectionError) as exc_info:
+        asyncio.run(ua.execute_physical_attempt_async(_request(data_root), fail))
+
+    capture = ua.physical_attempt_capture_from_exception(exc_info.value)
+    assert capture is not None
+    assert capture.state == "unresolved"
+    assert capture.provider_response_observed is False
+    assert ua.physical_provider_outcome_unknown(exc_info.value) is True
+
+
+def test_async_typed_status_alias_preserves_safe_retry(data_root):
+    from ouroboros.loop_llm_call import classify_llm_exception
+
+    class ProviderError(Exception):
+        status = "503"
+
+    async def fail():
+        raise ProviderError("typed async provider response")
+
+    with pytest.raises(ProviderError) as exc_info:
+        asyncio.run(ua.execute_physical_attempt_async(_request(data_root), fail))
+
+    capture = ua.physical_attempt_capture_from_exception(exc_info.value)
+    assert capture.provider_response_observed is True
+    assert capture.provider_status_code == 503
+    classification = classify_llm_exception(exc_info.value)
+    assert classification.kind == "provider_transient"
+    assert classification.retry_same_request is True
 
 
 def test_lock_failure_is_fail_closed_before_send(data_root, monkeypatch):

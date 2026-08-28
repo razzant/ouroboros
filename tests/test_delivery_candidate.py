@@ -755,16 +755,20 @@ def test_budget_dispatch_rail_preserves_current_candidate_and_exact_binding(
         drive_root=tmp_path,
     )
 
-    assert result == original
+    assert result.startswith(original)
+    assert "FINALIZATION NOTICE (host)" in result
+    assert "hard budget/resource limit" in result
     assert calls == 2
     assert usage["reason_code"] == "budget_exhausted"
     assert usage["resource_limit"]["status"] == "resource_limited"
     assert usage["_best_effort_extracted"] is True
     assert trace["resource_limit"] == usage["resource_limit"]
-    assert trace["delivery_candidate"]["finalization_control"] == "budget_preserve"
+    assert trace["delivery_candidate"]["finalization_control"] == (
+        "forced_replace:budget_exhausted"
+    )
     assert trace["delivery_candidate"]["degraded"] is True
-    assert trace["delivery_candidate"]["acceptance_binding"] == historical_binding
-    assert trace["forced_finalization"]["source"] == "budget_preserve"
+    assert trace["delivery_candidate"]["acceptance_binding"]["authoritative"] is False
+    assert trace["forced_finalization"]["source"] == "budget_preserve_with_host_suffix"
     outcome = derive_loop_outcome(result, usage, trace)
     assert outcome["outcome_axes"]["execution"]["status"] == "best_effort"
     assert outcome["outcome_axes"]["execution"]["resource_limit"] == usage["resource_limit"]
@@ -787,10 +791,11 @@ def test_round_limit_model_answer_replaces_candidate_with_unaccepted_binding(
         acceptance_results=[True],
     )
 
-    forced_sha = hashlib.sha256(forced.encode("utf-8")).hexdigest()
     candidate = trace["delivery_candidate"]
     binding = candidate["acceptance_binding"]
-    assert result == forced
+    assert result.startswith(forced)
+    assert "Finalized under the hard round limit" in result
+    forced_sha = hashlib.sha256(result.encode("utf-8")).hexdigest()
     assert len(calls) == 2
     assert usage["reason_code"] == "round_limit"
     assert usage["_best_effort_extracted"] is True
@@ -802,7 +807,7 @@ def test_round_limit_model_answer_replaces_candidate_with_unaccepted_binding(
     assert binding["acceptance_status"] == "unaccepted"
     assert binding["authoritative"] is False
     assert binding["binding_hash"] == ""
-    assert trace["forced_finalization"]["source"] == "model"
+    assert trace["forced_finalization"]["source"] == "model_with_host_notice"
     assert trace["forced_finalization"]["candidate_revision"] == 2
     outcome = derive_loop_outcome(result, usage, trace)
     assert outcome["outcome_axes"]["execution"]["status"] == "best_effort"
@@ -881,7 +886,8 @@ def test_forced_fallback_rejects_stale_delivery_candidate(tmp_path, monkeypatch)
         reason_code="provider_unavailable",
     )
 
-    assert text == "host fallback"
+    assert text.startswith("host fallback")
+    assert "Finalized because the model provider was unavailable" in text
     assert text != candidate.full_text
     assert usage["reason_code"] == "provider_unavailable"
     assert not usage.get("_best_effort_extracted")

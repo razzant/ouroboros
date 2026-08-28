@@ -431,7 +431,9 @@ def test_openrouter_signature_error_retries_once_with_reasoning_stripped(monkeyp
     def fake_create(**call_kwargs):
         calls.append(call_kwargs)
         if len(calls) == 1:
-            raise RuntimeError("400 INVALID_ARGUMENT: Corrupted thought signature")
+            error = RuntimeError("400 INVALID_ARGUMENT: Corrupted thought signature")
+            error.status_code = 400
+            raise error
         return _Resp()
 
     resp = client._create_chat_completion_with_retries(fake_create, kwargs, target)
@@ -473,9 +475,11 @@ def test_openrouter_encrypted_reasoning_item_error_triggers_same_strip_retry():
     def fake_create(**call_kwargs):
         calls.append(call_kwargs)
         if len(calls) == 1:
-            raise RuntimeError(
+            error = RuntimeError(
                 "Error code: 400 - Could not load the encrypted content for item rs_abc."
             )
+            error.status_code = 400
+            raise error
         return _Resp()
 
     resp = client._create_chat_completion_with_retries(fake_create, kwargs, target)

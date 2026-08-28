@@ -140,6 +140,92 @@ def test_acceptance_repair_does_not_third_send(tmp_path):
     assert result.aggregate_signal == "DEGRADED"
 
 
+def _captured_provider_error(*, observed: bool, status: int | None = None):
+    from ouroboros.usage_accounting import PhysicalAttemptCapture
+
+    exc = ConnectionError("provider connection ended")
+    exc.physical_attempt_capture = PhysicalAttemptCapture(
+        attempt_id="attempt-1",
+        model="review/model",
+        provider="openrouter",
+        state="unresolved",
+        provider_response_observed=observed,
+        provider_status_code=status,
+    )
+    return exc
+
+
+def test_acceptance_unknown_outcome_does_not_use_repair_resend(tmp_path):
+    from ouroboros.review_substrate import ReviewRequest, ReviewSlot, run_review_request
+
+    calls = {"n": 0}
+
+    class UnknownThenPass:
+        def chat(self, **_kwargs):
+            calls["n"] += 1
+            if calls["n"] == 1:
+                raise _captured_provider_error(observed=False)
+            return {"content": '{"verdict":"PASS","findings":[],"summary":"ok"}'}, {}
+
+    result = run_review_request(
+        ReviewRequest(surface="task_acceptance", goal="g", task_id="unknown-sync"),
+        slots=[ReviewSlot(slot_id="s1", model="review/model")],
+        drive_root=tmp_path,
+        llm=UnknownThenPass(),
+    )
+
+    assert calls["n"] == 1
+    assert result.aggregate_signal == "DEGRADED"
+    assert result.actors[0]["status"] == "error"
+
+
+def test_p3_async_unknown_outcome_does_not_resend(tmp_path):
+    from ouroboros.review_substrate import ReviewRequest, ReviewSlot, run_review_request
+
+    calls = {"n": 0}
+
+    class AsyncUnknownThenPass:
+        async def chat_async(self, **_kwargs):
+            calls["n"] += 1
+            if calls["n"] == 1:
+                raise _captured_provider_error(observed=False)
+            return {"content": '{"verdict":"PASS","findings":[],"summary":"ok"}'}, {}
+
+    result = run_review_request(
+        ReviewRequest(surface="multi_model_review", goal="g", task_id="unknown-async"),
+        slots=[ReviewSlot(slot_id="s1", model="review/model")],
+        drive_root=tmp_path,
+        llm=AsyncUnknownThenPass(),
+    )
+
+    assert calls["n"] == 1
+    assert result.aggregate_signal == "DEGRADED"
+    assert result.actors[0]["status"] == "error"
+
+
+def test_review_response_observed_503_keeps_bounded_retry(tmp_path):
+    from ouroboros.review_substrate import ReviewRequest, ReviewSlot, run_review_request
+
+    calls = {"n": 0}
+
+    class Known503ThenPass:
+        def chat(self, **_kwargs):
+            calls["n"] += 1
+            if calls["n"] == 1:
+                raise _captured_provider_error(observed=True, status=503)
+            return {"content": '{"verdict":"PASS","findings":[],"summary":"ok"}'}, {}
+
+    result = run_review_request(
+        ReviewRequest(surface="task_acceptance", goal="g", task_id="known-503"),
+        slots=[ReviewSlot(slot_id="s1", model="review/model")],
+        drive_root=tmp_path,
+        llm=Known503ThenPass(),
+    )
+
+    assert calls["n"] == 2
+    assert result.aggregate_signal == "PASS"
+
+
 # ---------------------------------------------------------------------------
 # 2.7 Self-locating tool errors
 # ---------------------------------------------------------------------------

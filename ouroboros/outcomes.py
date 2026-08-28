@@ -61,9 +61,9 @@ BEST_EFFORT_REASON_CODES = frozenset({
     "round_limit",
     "finalization_grace",
     "deadline_local",
-    # provider-death terminalization (WA2): a genuinely-extracted final answer
-    # after the same-model reroute + fallback exhausted must land as best_effort,
-    # not a flat failure — the same honest-shelf semantics as deadline/budget.
+    # Provider terminalization (WA2): a genuinely-extracted final answer after
+    # recorded recovery is exhausted must land as best_effort, while an unknown
+    # dispatched outcome is preserved without another model send.
     "provider_unavailable",
     "children_unabsorbed",
 })

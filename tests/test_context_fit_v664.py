@@ -270,6 +270,61 @@ def test_confirmed_overflow_gets_one_same_model_low_retry(tmp_path, monkeypatch)
     assert __import__("os").environ["OUROBOROS_CONTEXT_MODE"] == "max"
 
 
+def test_low_retry_preserves_max_dispatch_count_when_low_is_budget_blocked(
+    tmp_path, monkeypatch,
+):
+    import ouroboros.loop as loop
+    from ouroboros.usage_accounting import BudgetExceeded
+
+    messages = [{"role": "user", "content": "solve"}]
+    plan = SimpleNamespace(
+        model="primary-model",
+        preferred_mode="max",
+        route_fp="route-primary",
+        core_sha256="core-primary",
+        reproject_transcript=lambda current, _mode: list(current),
+    )
+    tool_ctx = SimpleNamespace(
+        task_metadata={},
+        task_contract={},
+        messages=messages,
+        active_context_mode="max",
+    )
+    tools = SimpleNamespace(_ctx=tool_ctx)
+    calls = 0
+
+    def fake_call(
+        _llm, _messages, _model, _tools, _effort, _max_retries, _logs,
+        _task_id, _round_idx, _events, accumulated_usage, _task_type="", **_kwargs,
+    ):
+        nonlocal calls
+        calls += 1
+        if calls == 1:
+            accumulated_usage["_llm_dispatched_attempts"] = 2
+            accumulated_usage["_last_llm_error_kind"] = "context_overflow"
+            return None, 0.0
+        accumulated_usage["_llm_dispatched_attempts"] = 0
+        raise BudgetExceeded("Low retry blocked before dispatch")
+
+    monkeypatch.setattr(loop, "call_llm_with_retry", fake_call)
+    monkeypatch.setattr(loop, "_persist_compaction_checkpoint", lambda *_a, **_kw: True)
+    monkeypatch.setattr(loop, "_emit_checkpoint_event", lambda *_a, **_kw: None)
+    usage = {}
+
+    with pytest.raises(BudgetExceeded):
+        loop._call_round_model(loop._RoundModelCallContext(
+            llm=SimpleNamespace(), messages=messages, tools=tools,
+            context_fit_plan=plan, active_model="primary-model", tool_schemas=[],
+            active_effort="high", max_retries=3, drive_logs=tmp_path / "logs",
+            task_id="budget-blocked-low", round_idx=1, event_queue=None,
+            accumulated_usage=usage, task_type="task", active_use_local=False,
+            active_context_mode="max", drive_root=tmp_path,
+        ))
+
+    assert calls == 2
+    assert usage["_llm_dispatched_attempts"] == 2
+
+
 def test_low_retry_precedes_fallback_and_accepted_route_rebinds(tmp_path, monkeypatch):
     from ouroboros import config, context, fallback_cooldown, loop
     from ouroboros.tools.registry import ToolRegistry
@@ -312,11 +367,14 @@ def test_low_retry_precedes_fallback_and_accepted_route_rebinds(tmp_path, monkey
             **kwargs,
         })
         if len(calls) == 1:
+            accumulated_usage["_llm_dispatched_attempts"] = 2
             accumulated_usage["_last_llm_error_kind"] = "context_overflow"
             return None, 0.0
         if len(calls) == 2:
+            accumulated_usage["_llm_dispatched_attempts"] = 1
             accumulated_usage["_last_llm_error_kind"] = "provider_transient"
             return None, 0.0
+        accumulated_usage["_llm_dispatched_attempts"] = 1
         return {"role": "assistant", "content": "fallback fits", "tool_calls": []}, 0.0
 
     monkeypatch.setattr(loop, "call_llm_with_retry", fake_call)
@@ -348,6 +406,7 @@ def test_low_retry_precedes_fallback_and_accepted_route_rebinds(tmp_path, monkey
     assert [call["model"] for call in calls] == ["primary-model", "primary-model"]
     assert calls[1]["attempt_cap"] == 1
     assert calls[1]["system"] == plan.low_projection.system_message()
+    assert accumulated_usage["_llm_dispatched_attempts"] == 3
 
     monkeypatch.setattr(
         context,
