@@ -1383,9 +1383,19 @@ def test_workspace_start_error_recovers_name_custody_by_inspect(tmp_path):
         },
     }
 
+    removed = []
+
     def command(argv, *, cwd=None, env=None, timeout=None):
         if "inspect" in argv and "container" in argv:
-            return CommandResult(0, json.dumps([observed]), "")
+            target = argv[-1]
+            if target in removed:
+                return CommandResult(1, "", f"Error: No such container: {target}")
+            if target in {name, container_id}:
+                return CommandResult(0, json.dumps([observed]), "")
+        if "rm" in argv and container_id in argv:
+            removed.append(container_id)
+            removed.append(name)
+            return CommandResult(0, "", "")
         if "run" in argv and name in argv:
             raise ExecutorFailure("docker run transport timeout")
         raise AssertionError(argv)
@@ -1397,9 +1407,9 @@ def test_workspace_start_error_recovers_name_custody_by_inspect(tmp_path):
             config.run_root / "task-c",
             plan,
         )
-    assert executor._task_containers[name] == container_id
-    assert executor._workspace_observations[name]["Id"] == container_id
+    assert name not in executor._task_containers
     assert name not in executor._unresolved_workspace_custody
+    assert container_id in removed
     assert not executor._workspace_starting
 
 

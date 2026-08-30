@@ -221,10 +221,11 @@ first-turn fallback allowance does not authorize cross-family substitution.
 
 No model price is hardcoded in this adapter.  Cost is read from the exact
 provider route and usage record.  A missing or `null` cost is `cost unknown`,
-not zero.  The campaign ledger records that attempt as unresolved and keeps
-the reserved per-task estimate as remaining liability.  A missing upper bound
-does not freeze the rest of the catalog; only a known exhausted projected
-total refuses the next paid dispatch.
+not zero.  A finished or failed attempt settles any known actual and then
+releases the live reservation; leftover unresolved upper bound is not
+dispatch liability.  Historical claim-estimate corpses must not poison
+replay.  Only settled cash plus live in-flight reserved can refuse the next
+paid dispatch.
 
 ## 5. No-swarm and tool policy
 
@@ -485,7 +486,7 @@ The campaign has one initial hard cap of USD 3,500.  One campaign-wide
 reservation ledger under one isolated server/data root enforces:
 
 ```text
-settled_usd + reserved_usd + unresolved_upper_bound <= 3500
+settled_usd + reserved_usd <= 3500
 ```
 
 The launcher must receive an explicit measured per-task reservation through
@@ -497,12 +498,12 @@ owner-authorized pilot the launcher applies the explicit runtime tree cap
 runtime tree cap and the latter is the separate campaign-ledger reservation.
 Both values are visible without conflating their roles, and paid invocations
 must state the runtime cap explicitly.  A new claim still requires a finite
-per-task estimate.  An unresolved dead attempt with a missing upper bound
-keeps that estimate as remaining liability and does not set campaign
-``projected=None``.  Only a known projected total at or above the cap blocks
-the next paid dispatch.  A nullable provider cost is not interpreted as
-zero.  The watchdog stops before crossing the cap; it cannot raise the cap or
-rewrite settled rows.
+per-task estimate.  A finished or dead attempt does not keep that estimate
+as remaining liability: dispatch projection is settled cash plus live
+in-flight reserved only.  Historical unresolved rows, including a written
+``$20`` leftover bound, do not refuse the catalog.  A nullable provider cost
+is not interpreted as zero.  The watchdog stops before crossing the cap; it
+cannot raise the cap or rewrite settled rows.
 
 The operational target is roughly eight hours (8h) for the full 1,507-task cohort.
 The target is subordinate to the cap, provenance, capability, provider-rate,

@@ -496,16 +496,34 @@ def _numeric_unresolved_bound(
     reserved_usd: float = 0.0,
     prior_upper: float | None = None,
 ) -> float:
-    """Return a finite unresolved liability; never campaign-wide unknown.
+    """Remaining liability of a finished attempt is 0.
 
-    A missing upper bound keeps the claim estimate (or a prior bound). That is
-    remaining liability for this attempt only. It does not freeze the catalog.
+    Known actuals are settled, not left as an unresolved reserve. A missing
+    bound must not fall back to the live claim estimate: that leftover UB is
+    what reserved $20 × N corpses against the campaign cap. ``reserved_usd``
+    and ``prior_upper`` stay in the signature so historical callers and replay
+    helpers do not fork; they do not become dispatch liability.
     """
-    if explicit_upper is not None:
-        return float(explicit_upper)
-    if prior_upper is not None:
-        return float(prior_upper)
-    return float(reserved_usd or 0.0)
+    del explicit_upper, reserved_usd, prior_upper
+    return 0.0
+
+
+def _finished_attempt_actual_usd(outcome: Mapping[str, Any] | None) -> float | None:
+    """Return a known actual for a finished attempt, or None.
+
+    This is settled cash (or a measured terminal bound), never the per-task
+    claim estimate. A finished/infra row without a number has remaining 0.
+    """
+    if not isinstance(outcome, Mapping):
+        return None
+    for key in ("cost_usd", "cost_upper_bound_usd"):
+        if key not in outcome or outcome[key] is None:
+            continue
+        try:
+            return _money(outcome[key], field=key)
+        except LedgerError:
+            return None
+    return None
 
 
 def _attempt_reservation_bound(
@@ -670,10 +688,10 @@ def project_budget(
 ) -> BudgetProjection:
     """Replay terminal state per attempt.
 
-    Unresolved attempts stay visible. A missing upper bound falls back to that
-    attempt's reserved estimate and does not set ``projected=None`` or refuse
-    the rest of the catalog. Dispatch fails only when a known projected total
-    exhausts the cap.
+    Live in-flight reservations count. A finished/failed/infra attempt does
+    not keep its claim estimate (or any leftover unresolved UB) as dispatch
+    liability — historical jsonl must not poison replay. Dispatch fails only
+    when settled cash plus live reserved exhausts the cap.
     """
     cap = _money(cap_usd, field="cap_usd", allow_none=True)
     if cap is not None and cap > DEFAULT_BUDGET_CAP_USD:
@@ -727,18 +745,11 @@ def project_budget(
         elif kind in {"unresolved", "unknown"}:
             if previous is None or previous.get("state") not in {"reserved", "unresolved"}:
                 raise LedgerError(f"unresolved event has no active claim: {attempt}")
-            upper = _event_amount(event, "upper_bound_usd", "unresolved_upper_bound_usd", allow_none=True)
-            prior_upper = previous.get("upper_bound_usd")
-            bound = _numeric_unresolved_bound(
-                upper,
-                reserved_usd=float(previous.get("reserved_usd") or 0.0),
-                prior_upper=float(prior_upper) if prior_upper is not None else None,
-            )
             latest[attempt] = {
                 **previous,
                 "state": "unresolved",
                 "reserved_usd": 0.0,
-                "upper_bound_usd": bound,
+                "upper_bound_usd": 0.0,
             }
         elif kind in {"release", "released"}:
             if previous is None or previous.get("state") not in {"reserved", "unresolved"}:
@@ -749,16 +760,15 @@ def project_budget(
 
     settled = sum(float(item.get("cost_usd") or 0.0) for item in latest.values() if item.get("state") == "settled")
     reserved = sum(float(item.get("reserved_usd") or 0.0) for item in latest.values() if item.get("state") == "reserved")
-    unresolved_rows = [item for item in latest.values() if item.get("state") == "unresolved"]
-    unresolved = sum(float(item.get("upper_bound_usd") or 0.0) for item in unresolved_rows)
-    projected = settled + reserved + unresolved
+    unresolved = 0.0
+    projected = settled + reserved
     if cap is None:
         available, can_dispatch, reason = None, True, "uncapped"
     else:
         available = cap - projected
         can_dispatch = available >= 0
         reason = "within_cap" if can_dispatch else "budget_cap_exceeded"
-    active = {attempt: item for attempt, item in latest.items() if item.get("state") in {"reserved", "unresolved"}}
+    active = {attempt: item for attempt, item in latest.items() if item.get("state") == "reserved"}
     return BudgetProjection(
         cap,
         settled,
@@ -1278,15 +1288,11 @@ def run_campaign(
                 else (contract if isinstance(contract, Mapping) else None),
                 attempt_id=str(claim["attempt_id"]),
             )
-            cost_estimated = outcome.get("cost_estimated")
-            if cost_estimated not in (None, False):
-                if cost_estimated is not True:
-                    raise LedgerError("cost_estimated must be a boolean")
-                ledger.mark_unresolved(str(claim["attempt_id"]), outcome.get("cost_upper_bound_usd"))
-            elif outcome.get("cost_usd") is None or outcome.get("cost_final") is not True:
-                ledger.mark_unresolved(str(claim["attempt_id"]), outcome.get("cost_upper_bound_usd"))
+            actual = _finished_attempt_actual_usd(outcome)
+            if actual is not None:
+                ledger.settle(str(claim["attempt_id"]), actual)
             else:
-                ledger.settle(str(claim["attempt_id"]), float(outcome["cost_usd"]))
+                ledger.mark_unresolved(str(claim["attempt_id"]), 0.0)
         except BudgetOverspend as exc:
             budget_refs = dict(outcome.get("artifact_refs") or {})
             budget_refs.setdefault("task_dir", str(task_dir))
@@ -1354,23 +1360,13 @@ def run_campaign(
                 except LedgerError:
                     exact_cost = None
                 try:
-                    if (
-                        exact_cost is not None
-                        and (
-                            outcome.get("cost_estimated") is None
-                            or outcome.get("cost_estimated") is False
-                        )
-                        and outcome.get("cost_final") is True
-                    ):
-                        ledger.settle(str(claim["attempt_id"]), exact_cost)
+                    actual = exact_cost
+                    if actual is None:
+                        actual = _finished_attempt_actual_usd(outcome)
+                    if actual is not None:
+                        ledger.settle(str(claim["attempt_id"]), actual)
                     else:
-                        try:
-                            ledger.mark_unresolved(
-                                str(claim["attempt_id"]),
-                                outcome.get("cost_upper_bound_usd"),
-                            )
-                        except LedgerError:
-                            ledger.mark_unresolved(str(claim["attempt_id"]), None)
+                        ledger.mark_unresolved(str(claim["attempt_id"]), 0.0)
                 except BudgetOverspend as settlement_exc:
                     settlement_overspend = settlement_exc
             failure_refs = dict(outcome.get("artifact_refs") or {})

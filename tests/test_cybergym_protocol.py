@@ -248,7 +248,7 @@ def test_explicit_final_trial_cannot_rebind_a_stale_record():
     assert projection["final_submission_reason"] == "invalid_final_trial"
 
 
-def test_budget_claims_are_atomic_and_unresolved_null_does_not_freeze(tmp_path):
+def test_budget_claims_are_atomic_and_unresolved_dead_releases_reserve(tmp_path):
     ledger = BudgetLedger(tmp_path / "claims.jsonl", cap_usd=5)
     ledger.claim("arvo:1", 4, attempt_id="a1")
     with pytest.raises(ClaimRefused):
@@ -257,12 +257,13 @@ def test_budget_claims_are_atomic_and_unresolved_null_does_not_freeze(tmp_path):
     projection = ledger.projection()
     assert projection.can_dispatch is True
     assert projection.reason == "within_cap"
-    assert projection.unresolved_upper_bound_usd == pytest.approx(4)
-    assert projection.projected_usd == pytest.approx(4)
+    assert projection.unresolved_upper_bound_usd == pytest.approx(0)
+    assert projection.projected_usd == pytest.approx(0)
+    assert projection.reserved_usd == pytest.approx(0)
     second = ledger.claim("arvo:2", 1, attempt_id="a2")
     assert second["attempt_id"] == "a2"
-    with pytest.raises(BudgetRefused):
-        ledger.claim("arvo:3", 1, attempt_id="a3")
+    third = ledger.claim("arvo:3", 1, attempt_id="a3")
+    assert third["attempt_id"] == "a3"
 
 
 def test_budget_historical_null_unresolved_does_not_refuse_catalog():
@@ -274,21 +275,56 @@ def test_budget_historical_null_unresolved_does_not_refuse_catalog():
         cap_usd=10,
     )
     assert projection.can_dispatch is True
-    assert projection.unresolved_upper_bound_usd == pytest.approx(2)
-    assert projection.projected_usd == pytest.approx(2)
-    assert "arvo:1" in projection.active_task_ids
+    assert projection.unresolved_upper_bound_usd == pytest.approx(0)
+    assert projection.projected_usd == pytest.approx(0)
+    assert "arvo:1" not in projection.active_task_ids
 
 
-def test_budget_huge_unresolved_bound_still_blocks(tmp_path):
+def test_budget_historical_claim_estimate_corpses_do_not_refuse_catalog():
+    events = []
+    for i in range(163):
+        events.append(
+            {
+                "event": "claim",
+                "task_id": f"arvo:{i}",
+                "attempt_id": f"a{i}",
+                "reserved_usd": 20,
+            }
+        )
+        events.append(
+            {"event": "unresolved", "attempt_id": f"a{i}", "upper_bound_usd": 20}
+        )
+    projection = project_budget(events, cap_usd=3500)
+    assert projection.can_dispatch is True
+    assert projection.reserved_usd == pytest.approx(0)
+    assert projection.projected_usd == pytest.approx(0)
+    ledger = BudgetLedger("/tmp/unused-historical-replay", cap_usd=3500)
+    # Replay-only: a fresh ledger with the same events would dispatch.
+    replayed = project_budget(events + [], cap_usd=3500)
+    assert replayed.can_dispatch is True
+    del ledger
+
+
+def test_budget_live_in_flight_huge_reserve_still_blocks(tmp_path):
+    ledger = BudgetLedger(tmp_path / "claims.jsonl", cap_usd=5)
+    ledger.claim("arvo:1", 4, attempt_id="live")
+    projection = ledger.projection()
+    assert projection.can_dispatch is True
+    assert projection.reserved_usd == pytest.approx(4)
+    with pytest.raises(BudgetRefused):
+        ledger.claim("arvo:2", 2, attempt_id="next")
+
+
+def test_budget_unresolved_dead_does_not_block_even_with_huge_written_bound(tmp_path):
     ledger = BudgetLedger(tmp_path / "claims.jsonl", cap_usd=5)
     ledger.claim("arvo:1", 1, attempt_id="a1")
     ledger.mark_unresolved("a1", 100)
     projection = ledger.projection()
-    assert projection.can_dispatch is False
-    assert projection.reason == "budget_cap_exceeded"
-    assert projection.unresolved_upper_bound_usd == pytest.approx(100)
-    with pytest.raises(BudgetRefused):
-        ledger.claim("arvo:2", 1, attempt_id="a2")
+    assert projection.can_dispatch is True
+    assert projection.unresolved_upper_bound_usd == pytest.approx(0)
+    assert projection.projected_usd == pytest.approx(0)
+    second = ledger.claim("arvo:2", 1, attempt_id="a2")
+    assert second["attempt_id"] == "a2"
 
 
 def test_budget_projection_replays_terminal_states():
@@ -491,8 +527,8 @@ def test_reused_input_attestation_binds_exact_paths_and_digests(tmp_path):
         _load_reused_input_observations(args)
 
 
-def test_run_campaign_does_not_settle_nonfinal_cost(tmp_path):
-    """A numeric charge is not settled until the provider marks it final."""
+def test_run_campaign_settles_known_actual_on_nonfinal_cost(tmp_path):
+    """Known actual cost settles the reserve; the leftover claim estimate is not leftover UB."""
 
     def callback(_task, task_dir):
         (task_dir / "final.poc").write_bytes(b"poc")
@@ -524,13 +560,13 @@ def test_run_campaign_does_not_settle_nonfinal_cost(tmp_path):
     assert rows[0]["status"] == "infra_failed"
     assert rows[0]["infra_reason"] == "cost_unverifiable"
     projection = BudgetLedger(tmp_path / "nonfinal-cost" / "claims.jsonl", cap_usd=2).projection()
-    assert projection.settled_usd == 0
-    assert projection.unresolved_upper_bound_usd == pytest.approx(1)
+    assert projection.settled_usd == pytest.approx(0.5)
+    assert projection.unresolved_upper_bound_usd == pytest.approx(0)
     assert projection.can_dispatch is True
 
 
 def test_run_campaign_records_terminal_total_accounted_bound_not_residual(tmp_path):
-    """The outer ledger must retain known inner spend plus its open remainder."""
+    """The outer ledger settles the known inner accounted bound, not leftover UB."""
 
     from devtools.benchmarks.cybergym.cybergym_adapter import _terminal_gateway_accounting
 
@@ -624,9 +660,10 @@ def test_run_campaign_records_terminal_total_accounted_bound_not_residual(tmp_pa
     )
     assert rows[0]["status"] == "infra_failed"
     projection = BudgetLedger(root / "claims.jsonl", cap_usd=2).projection()
-    assert projection.unresolved_upper_bound_usd == pytest.approx(0.060914)
+    assert projection.settled_usd == pytest.approx(0.060914)
+    assert projection.unresolved_upper_bound_usd == pytest.approx(0)
     assert projection.projected_usd == pytest.approx(0.060914)
-    assert projection.unresolved_upper_bound_usd != pytest.approx(0.020062)
+    assert projection.settled_usd != pytest.approx(0.020062)
 
     conflict_root = tmp_path / "terminal-conflict"
     conflict_terminal = {
@@ -652,8 +689,8 @@ def test_run_campaign_records_terminal_total_accounted_bound_not_residual(tmp_pa
     conflict_projection = BudgetLedger(
         conflict_root / "claims.jsonl", cap_usd=2
     ).projection()
-    assert conflict_projection.settled_usd == 0
-    assert conflict_projection.unresolved_upper_bound_usd == pytest.approx(0.2)
+    assert conflict_projection.settled_usd == pytest.approx(0.2)
+    assert conflict_projection.unresolved_upper_bound_usd == pytest.approx(0)
 
 
 def test_strict_trial_bool_rejects_truthy_strings_and_contract_is_pinned():

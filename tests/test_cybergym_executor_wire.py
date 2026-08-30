@@ -778,7 +778,7 @@ def test_post_admission_status_error_is_not_reclassified_as_zero_cost(
     assert rows[0]["cost_usd"] is None
     projection = BudgetLedger(config.run_root / "claims.jsonl", cap_usd=2).projection()
     assert projection.settled_usd == 0
-    assert projection.unresolved_upper_bound_usd == pytest.approx(1)
+    assert projection.unresolved_upper_bound_usd == pytest.approx(0)
     assert projection.can_dispatch is True
 
 

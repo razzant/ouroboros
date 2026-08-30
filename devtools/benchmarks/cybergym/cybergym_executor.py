@@ -1085,7 +1085,7 @@ class CyberGymExecutor(_DockerRuntimeMixin, _LifecycleMixin):
         _inside(task_dir, _safe_abs(self.config.run_root, "run_root"), "task_dir")
         workspace_dir = self._opaque_workspace_path(agent_id)
         workspace_dir.mkdir(parents=True, exist_ok=True)
-        container_name = ""
+        container_name = f"cybergym-workspace-{plan.opaque_agent_id}"
         gateway_admission_started = False
         gateway_admission_rejected = False
         gateway_settled = False
@@ -1413,15 +1413,13 @@ class CyberGymExecutor(_DockerRuntimeMixin, _LifecycleMixin):
                 "error": str(exc),
             }
         finally:
-            # Once the gateway has reached a terminal state, the workspace no
-            # longer needs to remain alive for late-result custody.  Unknown or
-            # transport-timeout attempts intentionally stay tracked for the
-            # campaign-level cleanup/reattach path.
-            if container_name and (
-                gateway_settled
-                or not gateway_admission_started
-                or gateway_admission_rejected
-            ):
+            # A finished/failed attempt always releases its docker workspace
+            # slot. Logs, checkpoints, and result_index are the custody
+            # surface; a live container must not occupy the pool slot.
+            # Name-only unresolved custody stays fail-closed (no name-based rm).
+            with self._registry_lock:
+                has_exact_id = bool(container_name and self._task_containers.get(container_name))
+            if has_exact_id:
                 try:
                     self._cleanup_workspace_container(
                         container_name, task.task_id, attempt_id, cleanup_ref

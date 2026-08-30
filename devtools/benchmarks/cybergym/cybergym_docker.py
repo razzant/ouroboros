@@ -943,6 +943,10 @@ class _DockerRuntimeMixin:
 
     def _workspace(self, task: TaskSpec, task_dir: pathlib.Path, plan: NetworkPlan) -> str:
         container_name = f"cybergym-workspace-{plan.opaque_agent_id}"
+        with self._registry_condition:
+            if self._unresolved_workspace_custody:
+                names = ", ".join(sorted(self._unresolved_workspace_custody))
+                raise ExecutorFailure(f"workspace startup custody is unresolved: {names}")
         spec = WorkspaceCommandSpec(
             self.host,
             plan,
@@ -997,7 +1001,26 @@ class _DockerRuntimeMixin:
                 with self._registry_lock:
                     has_exact_id = bool(self._task_containers.get(container_name))
                 if not has_exact_id:
-                    self._recover_workspace_custody(container_name, plan, type(exc).__name__)
+                    has_exact_id = self._recover_workspace_custody(
+                        container_name, plan, type(exc).__name__
+                    )
+                if has_exact_id:
+                    # Failed attempt after create: release the docker slot.
+                    # Logs/checkpoints remain custody, not a live container.
+                    report = (
+                        self.config.run_root
+                        / "workspaces"
+                        / f"{container_name}.startup_cleanup.json"
+                    )
+                    try:
+                        self._cleanup_workspace_container(
+                            container_name,
+                            str(getattr(task, "task_id", "") or "startup"),
+                            "startup",
+                            report,
+                        )
+                    except Exception:
+                        pass
                 raise
         finally:
             with self._registry_condition:
@@ -1214,9 +1237,9 @@ class _DockerRuntimeMixin:
         The campaign network and server remain shared by other lanes, so this
         deliberately does not call the broader ``CleanupPlan``.  It performs
         the same ownership checks locally: inspect the stored id, reject a
-        name replacement, remove the exact id, and inspect again.  An
-        unresolved gateway attempt never reaches this method and is retained
-        for late-result custody.
+        name replacement, remove the exact id, and inspect again.  A finished
+        or failed attempt must release this slot; logs and result_index are
+        the custody surface, not a live container.
         """
         with self._registry_lock:
             container_id = str(self._task_containers.get(container_name) or "").strip()
