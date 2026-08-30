@@ -183,6 +183,11 @@ class ExecutorConfig:
     preverified_binary_observation: Mapping[str, Any] | None = None
     log_dir: pathlib.Path | None = None
     db_path: pathlib.Path | None = None
+    # When the campaign-owned Ouroboros server keeps its mutable state on an
+    # external disk (``--state-dir``), its wire-evidence refs resolve below
+    # that data root rather than below ``run_root``.  Telemetry verification
+    # must accept exactly that extra root, never a broader one.
+    isolate_data_root: pathlib.Path | None = None
     python_executable: str = "python"
     command: tuple[str, ...] = ("tail", "-f", "/dev/null")
     disabled_tools: tuple[str, ...] = DEFAULT_DISABLED_TOOLS
@@ -309,6 +314,13 @@ class ExecutorConfig:
                 resolved = _safe_abs(value, field_name)
                 _inside(resolved, server_root, field_name)
                 object.__setattr__(self, field_name, resolved)
+        if self.isolate_data_root is not None:
+            isolate = _safe_abs(self.isolate_data_root, "isolate_data_root")
+            if isolate == pathlib.Path("/"):
+                raise ExecutorFailure("isolate_data_root cannot be the filesystem root")
+            if any(_paths_overlap(isolate, root) for root in forbidden):
+                raise ExecutorFailure("isolate_data_root overlaps a live Ouroboros root")
+            object.__setattr__(self, "isolate_data_root", isolate)
         object.__setattr__(self, "docker_host", host)
         object.__setattr__(self, "server_image_digest", _image_digest(self.server_image_digest, "server_image_digest"))
         object.__setattr__(self, "workspace_image_digest", _image_digest(self.workspace_image_digest, "workspace_image_digest"))

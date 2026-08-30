@@ -449,3 +449,94 @@ def test_start_exposes_attested_base_url_and_closes(tmp_path):
     server = wrapper._server
     wrapper.close()
     assert server.stopped is True
+
+
+def test_state_dir_places_mutable_state_outside_run_root(tmp_path):
+    seed, commit = _seed_repo(tmp_path)
+    state = tmp_path / "nvme-state"
+    wrapper = CyberGymIsolatedServer(
+        seed,
+        tmp_path / "run",
+        _settings(tmp_path),
+        _host(),
+        expected_commit=commit,
+        state_dir=state,
+    )
+    wrapper.prepare()
+    assert wrapper.state_dir == state.resolve()
+    assert wrapper.data_root == state.resolve() / "ouroboros-data"
+    assert (wrapper.data_root / ".ouroboros_isolated_benchmark").is_file()
+    assert wrapper.settings_path == wrapper.data_root / "settings.json"
+    assert wrapper.settings_path.stat().st_mode & 0o777 == 0o600
+    # The durable run root keeps the clone but not the mutable state tree.
+    assert wrapper.clone_root.is_dir()
+    assert not (wrapper.run_root / "ouroboros-data").exists()
+
+
+def test_state_dir_rejects_unsafe_paths(tmp_path):
+    seed, commit = _seed_repo(tmp_path)
+    settings = _settings(tmp_path)
+    run = tmp_path / "run"
+    bad_values = (
+        pathlib.Path("/"),
+        seed / "nested",
+        seed.parent,
+        run / "nested",
+        tmp_path,
+    )
+    for value in bad_values:
+        with pytest.raises(CyberGymServerError, match="state_dir"):
+            CyberGymIsolatedServer(
+                seed, run, settings, _host(), expected_commit=commit, state_dir=value
+            )
+
+
+def test_close_mirrors_audit_surface_to_run_root(tmp_path):
+    seed, commit = _seed_repo(tmp_path)
+    wrapper = CyberGymIsolatedServer(
+        seed,
+        tmp_path / "run",
+        _settings(tmp_path),
+        _host(),
+        expected_commit=commit,
+        state_dir=tmp_path / "nvme-state",
+    )
+    wrapper.prepare()
+    for name in ("state", "logs", "task_results", "memory", "observability"):
+        target = wrapper.data_root / name
+        target.mkdir(parents=True, exist_ok=True)
+        (target / "marker.txt").write_text(name, encoding="utf-8")
+    wrapper.close()
+
+    mirror = wrapper.run_root / "ouroboros-data"
+    for name in ("state", "logs", "task_results", "memory"):
+        assert (mirror / name / "marker.txt").read_text(encoding="utf-8") == name
+    assert not (mirror / "observability").exists()
+    assert (mirror / "settings.json").stat().st_mode & 0o777 == 0o600
+    assert (mirror / ".ouroboros_isolated_benchmark").is_file()
+    receipt = wrapper.state_export
+    assert receipt["ok"] is True
+    assert receipt["status"] == "exported"
+    assert receipt["skipped"] == ["observability"]
+    # A second export must not overwrite the first mirror.
+    second = wrapper.export_state_snapshot()
+    assert second["status"] == "skipped"
+    assert second["reason"] == "destination_exists"
+
+
+def test_export_state_snapshot_not_needed_without_state_dir(tmp_path):
+    seed, commit = _seed_repo(tmp_path)
+    wrapper = CyberGymIsolatedServer(
+        seed,
+        tmp_path / "run",
+        _settings(tmp_path),
+        _host(),
+        expected_commit=commit,
+    )
+    wrapper.prepare()
+    receipt = wrapper.export_state_snapshot()
+    assert receipt == {
+        "status": "not_needed",
+        "ok": True,
+        "reason": "state_dir_in_run_root",
+    }

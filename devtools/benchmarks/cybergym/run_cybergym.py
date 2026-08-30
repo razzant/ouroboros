@@ -138,6 +138,7 @@ def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
     )
     parser.add_argument("--out-dir", default="", help="append-only benchmark output root")
     parser.add_argument("--run-id", default="")
+    parser.add_argument("--state-dir", default="", help="external local-disk directory for isolated-server mutable state")
     parser.add_argument("--budget-usd", type=float, default=DEFAULT_BUDGET_CAP_USD)
     parser.add_argument("--per-task-estimate-usd", type=float, default=None,
                         help="finite reservation required for a paid injected executor")
@@ -444,13 +445,13 @@ def _build_default_executor(
     out_root: pathlib.Path,
     *,
     ouroboros_url: str | None = None,
+    isolate_data_root: pathlib.Path | None = None,
 ) -> Callable[[TaskSpec, pathlib.Path], Mapping[str, Any]]:
     """Construct the concrete sidecar executor after admission.
 
     An explicit ``--executor`` remains useful for a pre-started server or a
     laboratory harness.  The normal paid path must provide all image/socket
-    pins, so a missing value is a typed refusal rather than a host-shell
-    fallback.
+    pins; a missing value is a typed refusal, never a host-shell fallback.
     """
     effective_ouroboros_url = str(ouroboros_url or getattr(args, "ouroboros_url", "") or "").strip()
     required = {
@@ -508,6 +509,7 @@ def _build_default_executor(
         provider_order=_csv_values(getattr(args, "provider_order", ())),
         disabled_tools=disabled_tools,
         python_executable=resolved_python,
+        isolate_data_root=isolate_data_root,
     )
     executor = build_executor(config)
 
@@ -669,10 +671,8 @@ def _start_isolated_ouroboros_server(
 ) -> Any:
     """Start the campaign-owned Ouroboros gateway on the selected Docker daemon.
 
-    The wrapper is deliberately imported and started only after admission and
-    applied-settings rendering.  Its isolated clone receives the exact
-    committed seed and a copy of the settings file; the live operator server
-    and settings are never reused.
+    The wrapper is imported and started only after admission and settings
+    rendering; the live operator server and settings are never reused.
     """
     from devtools.benchmarks.cybergym.cybergym_server import CyberGymIsolatedServer
     provider_key = str(os.environ.get("OPENROUTER_API_KEY", "") or "").strip()
@@ -695,6 +695,7 @@ def _start_isolated_ouroboros_server(
             expected_commit=str(expected_commit or ""),
             provider_key=provider_key,
             expected_settings_sha256=str(expected_settings_sha256 or ""),
+            state_dir=pathlib.Path(args.state_dir) if str(getattr(args, "state_dir", "") or "").strip() else None,
         )
         return server.start(ready_timeout=180)
     except Exception as exc:
@@ -720,10 +721,9 @@ def _cleanup_execution_resources(
     """Close owned resources while retaining a typed custody report.
 
     A callback may return ``{"ok": False}`` when a late gateway result still
-    owns live workers.  In that case the server is deliberately left running
-    for reattachment, and both decisions are persisted through the enclosing
-    manifest finalizer.  Cleanup errors are recorded without copying an
-    exception message that could contain endpoint or credential data.
+    owns live workers; the server then stays alive for reattachment, and both
+    decisions persist through the manifest finalizer.  Cleanup errors are
+    recorded without copying endpoint or credential data from messages.
     """
     extra = manifest.setdefault("extra", {})
     executor_cleanup: dict[str, Any] = {
@@ -785,6 +785,8 @@ def _cleanup_execution_resources(
                 raise
             else:
                 server_cleanup["status"] = "closed"
+                state_export = getattr(isolated_server, "state_export", None)
+                if isinstance(state_export, Mapping) and state_export: extra["state_export"] = dict(state_export)
         extra["server_cleanup"] = server_cleanup
         extra["close_skipped"] = bool(server_cleanup["close_skipped"])
 
@@ -1121,6 +1123,7 @@ def main(argv: Sequence[str] | None = None) -> int:
             assert_outside_repo(pathlib.Path(args.server_root), repo_dir)
         if args.binary_dir:
             assert_outside_repo(pathlib.Path(args.binary_dir), repo_dir)
+        if str(getattr(args, "state_dir", "") or "").strip(): assert_outside_repo(pathlib.Path(args.state_dir), repo_dir)
     except (CyberGymError, ValueError, OSError) as exc:
         print(f"[cybergym] pre-admission path refusal: {exc}", file=sys.stderr)
         return 2
@@ -1376,11 +1379,14 @@ def main(argv: Sequence[str] | None = None) -> int:
                         manifest.setdefault("extra", {})["ouroboros_server"] = dict(
                             getattr(isolated_server, "attestation", {}) or {}
                         )
+                        from devtools.benchmarks.cybergym.cybergym_server import state_layout_manifest
+                        manifest["extra"]["state_layout"] = state_layout_manifest(isolated_server)
                         manifest.setdefault("harness", {})["ouroboros_url"] = str(
                             isolated_server.base_url
                         )
                         executor = _build_default_executor(
-                            args, out_root, ouroboros_url=isolated_server.base_url
+                            args, out_root, ouroboros_url=isolated_server.base_url,
+                            isolate_data_root=getattr(isolated_server, "data_root", None),
                         )
                     prepare = getattr(executor, "prepare", None)
                     if not callable(prepare):
