@@ -16,7 +16,7 @@ import logging
 
 from ouroboros.llm import LLMClient, normalize_reasoning_effort, add_usage
 from ouroboros import task_pacing
-from ouroboros.config import adaptive_quorum, get_context_mode, get_light_model, get_review_enforcement, get_task_review_mode, resolve_effort
+from ouroboros.config import adaptive_quorum, get_acceptance_fence_wait_max_rounds, get_context_mode, get_light_model, get_review_enforcement, get_task_review_mode, resolve_effort
 from ouroboros.review_cycles import REASON_REVIEW_CYCLES_EXHAUSTED
 from ouroboros.outcomes import ACCEPTANCE_ACCEPTED, ACCEPTANCE_BYPASS_REASON_BY_RAIL, ACCEPTANCE_BYPASS_REASONS, ACCEPTANCE_DECISION_STATUSES, ACCEPTANCE_FINALIZED_UNACCEPTED, ACCEPTANCE_REVISION_REQUESTED, REASON_ACCEPTANCE_REVIEW_SKIPPED_DEADLINE_RESERVE, REASON_DELIVERY_CONTROL_DEGRADED, REASON_OWNER_REQUESTED_FINALIZATION, RESULT_INFRA_FAILED, extract_final_answer, latest_agent_defined_verification, latest_unreconciled_failed_verification, latest_unreconciled_masked_verification, reviewable_effect_projection, should_nudge_verification, turn_has_reviewable_effects
 from ouroboros.observability import new_execution_id
@@ -1160,6 +1160,10 @@ ACCEPTANCE_DECISION_REASONS = (
     "review_degraded",
     "fence_reopen_failed",
     "infra_failure",
+    # Bounded fence wait exhausted (CyberGym full1507): the queue-owned
+    # admission fence stayed unavailable past the configured round cap, so the
+    # task terminalized as infra_failed instead of spinning paid rounds.
+    "acceptance_fence_unavailable",
     # Owner Q2A: the forced children_unabsorbed rail runs the panel but cannot
     # grant a requested improvement pass; the dangling revision terminalizes.
     "revision_unavailable_on_forced_rail",
@@ -2140,6 +2144,31 @@ def _run_task_acceptance_review_once(
         llm_trace["review_decision"] = {
             "eligibility": "acceptance_fence_failed", "trigger": trigger,
         }
+        # Bounded wait (CyberGym full1507 postmortem): each fence-unavailable
+        # round used to burn one paid LLM round until the 4h deadline. Count
+        # consecutive failures and terminalize as infra_failed at the config
+        # cap instead; the leaked supervisor-side fence is cleared by
+        # task_done / the reaper / the dead-owner sweep.
+        fence_failures = int(getattr(tools._ctx, "_task_acceptance_fence_failures", 0) or 0) + 1
+        tools._ctx._task_acceptance_fence_failures = fence_failures
+        if fence_failures >= get_acceptance_fence_wait_max_rounds():
+            tools._ctx._task_acceptance_fence_infra_failed = True
+            _set_acceptance_decision(llm_trace, {
+                "status": ACCEPTANCE_FINALIZED_UNACCEPTED,
+                "reason": "acceptance_fence_unavailable",
+                "source": "acceptance_fence",
+                "rationale": (
+                    f"The queue-owned admission fence stayed unavailable for "
+                    f"{fence_failures} consecutive rounds; terminalizing as an "
+                    "infrastructure failure instead of burning paid rounds "
+                    "until the deadline."
+                ),
+            })
+            emit_progress(
+                "Task acceptance review could not acquire the queue-owned admission "
+                "fence; terminalizing as an infrastructure failure."
+            )
+            return False
         _append_or_merge_user_message(
             messages,
             "[TASK ACCEPTANCE WAIT] The supervisor could not atomically close "
@@ -2148,6 +2177,7 @@ def _run_task_acceptance_review_once(
         )
         emit_progress("Task acceptance review waiting for the queue-owned admission fence.")
         return True
+    tools._ctx._task_acceptance_fence_failures = 0
     quiescent, subtree_statuses = _task_acceptance_subtree_snapshot(
         tools._ctx, drive_root, task_id,
     )
@@ -4756,6 +4786,24 @@ def _no_tool_final_answer(
         # free-form answer re-enters the acceptance panel (blocking not
         # weakened); other lanes still arm where JSON keep/replace is needed.
         return None
+    if bool(getattr(tools._ctx, "_task_acceptance_fence_infra_failed", False)):
+        # The bounded fence wait is exhausted: terminalize as infra_failed
+        # through the host-salvage seam instead of finalizing past a review
+        # that never ran.
+        text, usage, fence_trace = _forced_fallback_result(
+            limit_ctx,
+            llm_trace,
+            "⚠️ The task could not start its acceptance review: the queue-owned "
+            "admission fence stayed unavailable. Any files written so far are "
+            "preserved in the workspace.",
+            "acceptance_fence_unavailable",
+            source="acceptance_fence_unavailable",
+        )
+        usage.update(
+            execution_status=RESULT_INFRA_FAILED,
+            reason_code="acceptance_fence_unavailable",
+        )
+        return text, usage, fence_trace
     candidate = getattr(tools._ctx, "_delivery_candidate", None)
     if isinstance(candidate, DeliveryCandidate):
         candidate.acceptance_binding = _delivery_acceptance_binding(

@@ -1549,6 +1549,8 @@ from supervisor.queue_transitions import (  # noqa: E402, F401 -- intentional pu
     _live_retry_target_locked,
     _settled_status,
     clear_acceptance_fence_for_root,
+    gc_acceptance_fences_for_dead_owners,
+    release_acceptance_fence_for_dead_owner,
     resume_budget_paused_task,
     resume_project_deletions,
     run_project_deletion,

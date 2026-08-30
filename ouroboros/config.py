@@ -279,6 +279,14 @@ SETTINGS_DEFAULTS = {**UPDATE_SETTINGS_DEFAULTS,
     # STRING "N"|"unlimited": plan review, acceptance (passes = cycles - 1), commit gate and skill review (paid cycles per root task / manual snapshot); identical material is never re-reviewed for pay on any gate.
     "OUROBOROS_REVIEW_MAX_CYCLES": "2",
     "OUROBOROS_ACCEPTANCE_RESERVE_PCT": 5,
+    # Acceptance-fence IPC bounds (CyberGym full1507 postmortem, v6.111.x): the
+    # worker's one-shot ack file can sit behind a backlogged supervisor event
+    # loop or a slow network-FS rename, so the fixed 10s poll was below real
+    # latency there. The wait cap bounds CONSECUTIVE fence-unavailable rounds
+    # before the task terminalizes as infra_failed instead of spinning paid
+    # rounds until the deadline.
+    "OUROBOROS_ACCEPTANCE_FENCE_ACK_TIMEOUT_SEC": 120,
+    "OUROBOROS_ACCEPTANCE_FENCE_WAIT_MAX_ROUNDS": 3,
     # Prompt-cache TTL, one honest GLOBAL override (owner decision 2026-08-08, batch #2 Q2=A): applied to
     # EVERY cache_control breakpoint on the Anthropic-normalizing family — main loop, review lanes, safety
     # supervisor alike — at the ONE send-time finalizer (llm._normalize_payload_cache_ttl). 'default' = bare
@@ -1000,6 +1008,19 @@ def get_acceptance_review_est_sec() -> float:
 def get_acceptance_reserve_pct() -> int:
     """Default finalization-reserve percentage of the total budget (v6.54.4)."""
     return _clamped_number_setting("OUROBOROS_ACCEPTANCE_RESERVE_PCT", low=0, high=50, cast=int)
+
+
+def get_acceptance_fence_ack_timeout_sec() -> float:
+    """Worker-side timeout for the supervisor's one-shot acceptance-fence ack.
+
+    Scaled to slow-drive/event-loop-backlog reality (network FS data roots);
+    the ack file stays the transport, this is only its latency bound."""
+    return _clamped_number_setting("OUROBOROS_ACCEPTANCE_FENCE_ACK_TIMEOUT_SEC", low=5.0, high=900.0)
+
+
+def get_acceptance_fence_wait_max_rounds() -> int:
+    """Consecutive fence-unavailable rounds before infra_failed terminalization."""
+    return _clamped_number_setting("OUROBOROS_ACCEPTANCE_FENCE_WAIT_MAX_ROUNDS", low=1, high=50, cast=int)
 
 
 def get_plan_task_deadline_min_sec() -> float:

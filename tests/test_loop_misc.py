@@ -351,7 +351,9 @@ def test_every_host_acceptance_writer_emits_a_canonical_status_and_typed_reason(
     # 17th writer: the forced-rail acceptance-bypass recorder (typed, closed-enum
     # reason). 18th: the forced children_unabsorbed rail terminalizing a requested
     # improvement pass it cannot grant (owner Q2A, revision_unavailable_on_forced_rail).
-    assert len(starts) == 18, f"writer inventory changed: {len(starts)} call sites"
+    # 19th: the bounded acceptance-fence wait terminalizing as infra_failed
+    # (acceptance_fence_unavailable) instead of spinning paid rounds.
+    assert len(starts) == 19, f"writer inventory changed: {len(starts)} call sites"
     allowed_status = {
         "ACCEPTANCE_ACCEPTED", "ACCEPTANCE_REVISION_REQUESTED",
         "ACCEPTANCE_FINALIZED_UNACCEPTED",

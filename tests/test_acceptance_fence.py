@@ -368,3 +368,217 @@ def test_split_drive_worker_reads_acceptance_ack_from_budget_root(tmp_path):
     assert not ack.exists()
     child_ack = child / "state" / "acceptance_fence_acks" / f"{token}.json"
     assert not child_ack.exists()
+
+
+def test_begin_with_lost_token_readopts_existing_live_fence(monkeypatch, tmp_path):
+    """CyberGym full1507: the ack timed out AFTER the supervisor activated the
+    fence, so the worker held no token while the fence stayed active. A re-begin
+    with a fresh token must adopt the existing fence, not spin on rejections."""
+    queue_mod, _pending = _isolated_queue(monkeypatch, tmp_path)
+    queue_mod.RUNNING["root-1"] = {"task": {"id": "root-1", "root_task_id": "root-1"}}
+
+    begun = queue_mod.transition_acceptance_fence(
+        action="begin", token="a" * 32, root_task_id="root-1", task_id="root-1",
+    )
+    assert begun["status"] == "active"
+
+    readopted = queue_mod.transition_acceptance_fence(
+        action="begin", token="b" * 32, root_task_id="root-1", task_id="root-1",
+    )
+    assert readopted["ok"] is True
+    assert readopted["status"] == "active"
+    assert readopted["token"] == "a" * 32
+    assert readopted["re_adopted"] is True
+    # The fence row is unchanged: same token, same owner, still one fence.
+    assert queue_mod.ACCEPTANCE_FENCES["root-1"]["token"] == "a" * 32
+
+    # The adopted token drives inspect/end exactly like the original one.
+    inspected = queue_mod.transition_acceptance_fence(action="inspect", token="a" * 32)
+    assert inspected["status"] == "active"
+    ended = queue_mod.transition_acceptance_fence(
+        action="end", token="a" * 32, outcome="terminal",
+    )
+    assert ended["status"] == "sealed"
+
+
+def test_begin_reconciles_fence_whose_owner_is_dead(monkeypatch, tmp_path):
+    """Dead-owner reconcile: a fence whose owner left RUNNING and PENDING is
+    handed over to the new begin instead of rejecting it forever."""
+    queue_mod, _pending = _isolated_queue(monkeypatch, tmp_path)
+    begun = queue_mod.transition_acceptance_fence(
+        action="begin", token="a" * 32, root_task_id="root-1", task_id="root-1",
+    )
+    assert begun["status"] == "active"
+    # No RUNNING/PENDING entry for root-1: the owner is provably gone.
+
+    reconciled = queue_mod.transition_acceptance_fence(
+        action="begin", token="b" * 32, root_task_id="root-1", task_id="root-1-retry",
+    )
+    assert reconciled["ok"] is True
+    assert reconciled["status"] == "active"
+    assert reconciled["token"] == "b" * 32
+    assert reconciled["reconciled_dead_owner"] is True
+    row = queue_mod.ACCEPTANCE_FENCES["root-1"]
+    assert row["token"] == "b" * 32
+    assert row["task_id"] == "root-1-retry"
+
+    # The dead owner's token no longer drives the fence.
+    orphaned = queue_mod.transition_acceptance_fence(action="inspect", token="a" * 32)
+    assert orphaned["ok"] is False
+    ended = queue_mod.transition_acceptance_fence(
+        action="end", token="b" * 32, outcome="terminal",
+    )
+    assert ended["status"] == "sealed"
+
+
+def test_sealed_fence_is_never_readopted(monkeypatch, tmp_path):
+    queue_mod, _pending = _isolated_queue(monkeypatch, tmp_path)
+    queue_mod.RUNNING["root-2"] = {"task": {"id": "root-2", "root_task_id": "root-2"}}
+    queue_mod.transition_acceptance_fence(
+        action="begin", token="a" * 32, root_task_id="root-2", task_id="root-2",
+    )
+    sealed = queue_mod.transition_acceptance_fence(
+        action="end", token="a" * 32, outcome="terminal",
+    )
+    assert sealed["status"] == "sealed"
+
+    rejected = queue_mod.transition_acceptance_fence(
+        action="begin", token="c" * 32, root_task_id="root-2", task_id="root-2",
+    )
+    assert rejected["ok"] is False
+    assert "already active" in rejected["error"]
+    assert queue_mod.ACCEPTANCE_FENCES["root-2"]["status"] == "sealed"
+
+
+def test_gc_sweep_drops_dead_owner_fence_and_spares_live(monkeypatch, tmp_path):
+    queue_mod, _pending = _isolated_queue(monkeypatch, tmp_path)
+    queue_mod.transition_acceptance_fence(
+        action="begin", token="a" * 32, root_task_id="root-dead", task_id="root-dead",
+    )
+    queue_mod.transition_acceptance_fence(
+        action="begin", token="b" * 32, root_task_id="root-live", task_id="root-live",
+    )
+    queue_mod.transition_acceptance_fence(
+        action="begin", token="c" * 32, root_task_id="root-queued", task_id="root-queued",
+    )
+    queue_mod.RUNNING["root-live"] = {"task": {"id": "root-live", "root_task_id": "root-live"}}
+    queue_mod.PENDING.append({"id": "root-queued", "root_task_id": "root-queued"})
+
+    cleared = queue_mod.gc_acceptance_fences_for_dead_owners()
+    assert cleared == ["root-dead"]
+    assert set(queue_mod.ACCEPTANCE_FENCES) == {"root-live", "root-queued"}
+
+    # The cleared root's subtree is admissible again; the spared fences still block.
+    admitted = queue_mod.enqueue_task({
+        "id": "child-of-dead", "root_task_id": "root-dead", "delegation_role": "subagent",
+    })
+    assert admitted.get("_admission_blocked") is None
+    blocked = queue_mod.enqueue_task({
+        "id": "child-of-live", "root_task_id": "root-live", "delegation_role": "subagent",
+    })
+    assert blocked["_admission_blocked"] == "task_acceptance_fence"
+
+
+def test_enforce_task_timeouts_sweeps_dead_owner_fence_on_idle_queue(monkeypatch, tmp_path):
+    """The watchdog sweep runs even when RUNNING is empty (no early return)."""
+    queue_mod, _pending = _isolated_queue(monkeypatch, tmp_path)
+    queue_mod.transition_acceptance_fence(
+        action="begin", token="a" * 32, root_task_id="root-dead", task_id="root-dead",
+    )
+    queue_mod.enforce_task_timeouts()
+    assert "root-dead" not in queue_mod.ACCEPTANCE_FENCES
+
+
+def test_release_acceptance_fence_for_dead_owner_matches_owner_not_root(monkeypatch, tmp_path):
+    queue_mod, _pending = _isolated_queue(monkeypatch, tmp_path)
+    queue_mod.transition_acceptance_fence(
+        action="begin", token="a" * 32, root_task_id="root-1", task_id="root-1",
+    )
+    # A reaped CHILD of the fenced root must not drop its reviewing root's fence.
+    assert queue_mod.release_acceptance_fence_for_dead_owner("child-1") is False
+    assert "root-1" in queue_mod.ACCEPTANCE_FENCES
+    # The confirmed-dead owner releases its own fence.
+    assert queue_mod.release_acceptance_fence_for_dead_owner("root-1") is True
+    assert "root-1" not in queue_mod.ACCEPTANCE_FENCES
+
+
+def test_worker_adopts_existing_fence_token_from_begin_response():
+    """Loop-side half of the idempotent begin: after a lost ack (begin raised,
+    no token stored), the retry stores the EXISTING fence's token/generation."""
+    from ouroboros.loop import _begin_task_acceptance_fence
+
+    ctx = SimpleNamespace(task_metadata={"root_task_id": "root-1"})
+
+    def failing_callback(**_kwargs):
+        raise TimeoutError("supervisor did not acknowledge acceptance fence 1234")
+
+    ctx.begin_acceptance_fence = failing_callback
+    ok, token = _begin_task_acceptance_fence(ctx, "root-1")
+    assert (ok, token) == (False, None)
+    assert getattr(ctx, "_task_acceptance_fence_token", None) is None
+
+    def readopt_callback(**_kwargs):
+        return {
+            "ok": True,
+            "status": "active",
+            "token": "existing-token",
+            "owner_message_generation": 2,
+            "queue_descendants": [],
+            "re_adopted": True,
+        }
+
+    ctx.begin_acceptance_fence = readopt_callback
+    ok, token = _begin_task_acceptance_fence(ctx, "root-1")
+    assert ok is True
+    assert token == "existing-token"
+    assert ctx._task_acceptance_fence_token == "existing-token"
+    assert ctx._task_acceptance_fence_generation == 2
+
+
+def test_fence_wait_terminalizes_infra_failed_after_bounded_rounds(monkeypatch, tmp_path):
+    """The fence wait must not burn paid rounds until the deadline: after the
+    configured cap of consecutive fence-unavailable rounds the review exits
+    with the typed infra-failure decision and the loop-side flag."""
+    import ouroboros.loop as loop_mod
+    from ouroboros.tools.registry import ToolRegistry
+
+    monkeypatch.setenv("OUROBOROS_TASK_REVIEW_MODE", "auto")
+    monkeypatch.setenv("OUROBOROS_ACCEPTANCE_FENCE_WAIT_MAX_ROUNDS", "3")
+    registry = ToolRegistry(repo_dir=tmp_path, drive_root=tmp_path)
+    registry._ctx.task_id = "root-1"
+    registry._ctx.task_metadata = {
+        "task_id": "root-1",
+        "root_task_id": "root-1",
+        "parent_task_id": "",
+        "delegation_role": "root",
+    }
+    registry._ctx.task_contract = {}
+    monkeypatch.setattr(
+        loop_mod, "_begin_task_acceptance_fence", lambda *_args, **_kwargs: (False, None),
+    )
+
+    def run_once(trace):
+        return loop_mod._run_task_acceptance_review_once(
+            tools=registry,
+            content="answer",
+            task_id="root-1",
+            task_type="task",
+            llm_trace=trace,
+            drive_root=tmp_path,
+            messages=[],
+            emit_progress=lambda _message: None,
+        )
+
+    for expected_failures in (1, 2):
+        trace = {"tool_calls": []}
+        assert run_once(trace) is True
+        assert trace["review_decision"]["eligibility"] == "acceptance_fence_failed"
+        assert registry._ctx._task_acceptance_fence_failures == expected_failures
+        assert not getattr(registry._ctx, "_task_acceptance_fence_infra_failed", False)
+
+    trace = {"tool_calls": []}
+    assert run_once(trace) is False
+    assert registry._ctx._task_acceptance_fence_infra_failed is True
+    decision = trace["acceptance_decision"]
+    assert decision["status"] == "finalized_unaccepted"
+    assert decision["reason"] == "acceptance_fence_unavailable"

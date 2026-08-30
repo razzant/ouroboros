@@ -48,7 +48,8 @@ from supervisor.evolution_lifecycle import (  # noqa: F401 -- public queue API a
 )
 from supervisor.task_lifecycle import (  # noqa: F401 -- public queue API re-exports
     BUDGET_ROOT_FENCES, apply_budget_root_admission_fence, cancel_task_by_id,
-    clear_acceptance_fence_for_root,
+    clear_acceptance_fence_for_root, gc_acceptance_fences_for_dead_owners,
+    release_acceptance_fence_for_dead_owner,
     resume_budget_paused_task, restore_queue_fences, transition_acceptance_fence,
 )
 from supervisor.cognitive_operations import _active_operation_progressing
@@ -1139,6 +1140,11 @@ def enforce_task_timeouts() -> None:
     """
     # Avoid circular dependency during module load.
     from supervisor import workers
+
+    # The acceptance fence has no lease of its own; sweep rows whose owner
+    # task is provably gone BEFORE the RUNNING early-return so a leaked fence
+    # cannot outlive its worker on an idle queue.
+    gc_acceptance_fences_for_dead_owners()
 
     if not RUNNING:
         return

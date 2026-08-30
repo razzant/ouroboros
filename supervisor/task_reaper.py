@@ -1224,6 +1224,17 @@ def reap_timed_out_task(job: Dict[str, Any]) -> None:
         int(getattr(proc, "pid", 0) or 0)
     )
 
+    # The dead worker can never end a queue-owned acceptance fence it opened;
+    # release it NOW (matched on the fence's recorded owner id, so a reaped
+    # child never drops its still-reviewing root's fence) — before the retry
+    # admission below, which the stale fence would otherwise terminalize.
+    try:
+        from supervisor.queue import release_acceptance_fence_for_dead_owner
+
+        release_acceptance_fence_for_dead_owner(task_id)
+    except Exception:
+        log.debug("Reaper: acceptance-fence release failed for %s", task_id, exc_info=True)
+
     try:
         from ouroboros.tools.services import archive_task_service_logs
 
