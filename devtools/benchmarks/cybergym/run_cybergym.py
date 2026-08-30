@@ -523,6 +523,17 @@ def _build_default_executor(
     return callback
 
 
+def _paid_prepare_failure_text(exc: BaseException) -> str:
+    """Keep the typed refuse line, plus a short secret-free cause."""
+    detail = " ".join(str(exc).split())
+    suffix = type(exc).__name__
+    if detail and detail != suffix:
+        if len(detail) > 240:
+            detail = detail[:237] + "..."
+        suffix = f"{suffix}: {detail}"
+    return "paid executor preparation failed: " + suffix
+
+
 def _prepared_observation(
     executor: Any,
     prepared: Any,
@@ -1384,7 +1395,7 @@ def main(argv: Sequence[str] | None = None) -> int:
                         raise
                     except Exception as exc:
                         raise CyberGymIntegrationUnavailable(
-                            "paid executor preparation failed: " + type(exc).__name__
+                            _paid_prepare_failure_text(exc)
                         ) from exc
                     provider_observation, data_observation, binary_observation, probe_cost = (
                         _validate_paid_observations(

@@ -464,7 +464,11 @@ Ouroboros `data/`.
 
 Cleanup occurs only after terminal custody is settled.  It removes or reaps
 containers, sockets, and temporary files bearing this run's exact label, then
-checks for escaped task files or credentials.  If custody is unknown, cleanup
+checks for escaped task files or credentials.  A prior `custody_pending`
+abort can leave the host-wide `cybergym-internal` network empty; that leftover
+is not live custody, and the next campaign reaps an empty singleton before
+create instead of dying after the paid provider probe.  A leftover with
+attached containers stays fail-closed.  If custody is unknown, cleanup
 is deliberately deferred and the owned server/workspace remain available for
 manual rescue; `custody_pending.json` is the truthful terminal artifact for
 that state.  It never removes another operator's container, old append-only

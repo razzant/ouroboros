@@ -691,19 +691,52 @@ class _DockerRuntimeMixin:
                 result["Config"] = config_copy
         return result
 
+    def _reap_empty_stale_campaign_network(self) -> None:
+        """Remove a leftover host-wide ``cybergym-internal`` only when empty.
+
+        The name is a singleton. A prior campaign that exited
+        ``custody_pending`` keeps the network; the next admission then dies
+        after the paid provider probe. An empty leftover is the same corpse
+        class as a leftover reservation: it must not claim the next run.
+        Attached containers stay fail-closed. Parallel campaigns on one
+        daemon remain unsupported because the name is shared.
+        """
+        existing = self._inspect_optional("network", "cybergym-internal")
+        if existing is None:
+            return
+        observed_id = str(existing.get("Id") or "").strip()
+        if not observed_id:
+            raise ExecutorFailure("stale cybergym-internal has no inspectable id")
+        attached = existing.get("Containers")
+        if isinstance(attached, Mapping) and attached:
+            raise ExecutorFailure(
+                "cybergym-internal is leftover and still has attached containers"
+            )
+        result = self.config.command_runner(
+            ("docker", "--host", self.host.value, "network", "rm", observed_id),
+            cwd=self.config.run_root,
+            env=_minimal_child_env(self.host),
+            timeout=60,
+        )
+        if result.returncode not in {0, 1} or self._inspect_optional("network", observed_id) is not None:
+            raise ExecutorFailure("stale empty cybergym-internal could not be removed")
+
     def _network(self) -> None:
         argv = build_network_create_argv(self.host, self._network_plan("campaign"))
         result = self.config.command_runner(
             argv, cwd=self.config.run_root, env=_minimal_child_env(self.host), timeout=60
         )
+        if result.returncode != 0:
+            # Reap an empty leftover, then create once. Never attach to a
+            # pre-existing network: reuse is ambiguous even when labels match.
+            self._reap_empty_stale_campaign_network()
+            result = self.config.command_runner(
+                argv, cwd=self.config.run_root, env=_minimal_child_env(self.host), timeout=60
+            )
         if result.returncode == 0:
             self.network_id = result.stdout.strip()
             self._network_created = True
         else:
-            # A campaign always owns a fresh network.  Reusing a same-named
-            # network is ambiguous (and breaks parallel campaigns), even when
-            # its labels happen to look compatible; leave it for an explicit
-            # operator cleanup instead of attaching to stale containers.
             raise ExecutorFailure(
                 "cybergym-internal already exists or could not be created; a fresh campaign network is required"
             )

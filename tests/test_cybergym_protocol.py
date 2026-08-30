@@ -1166,6 +1166,17 @@ def test_launcher_isolated_server_helper_uses_seed_and_closes(monkeypatch, tmp_p
     assert events[-1] == ("close",)
 
 
+def test_paid_prepare_failure_keeps_executor_message():
+    import devtools.benchmarks.cybergym.run_cybergym as launcher
+
+    exc = launcher.CyberGymIntegrationUnavailable(
+        "cybergym-internal already exists or could not be created; a fresh campaign network is required"
+    )
+    text = launcher._paid_prepare_failure_text(exc)
+    assert text.startswith("paid executor preparation failed: CyberGymIntegrationUnavailable: ")
+    assert "cybergym-internal already exists" in text
+
+
 def test_launcher_wraps_server_start_error_and_closes_partial(monkeypatch, tmp_path):
     """Expected server startup errors become typed refusals after cleanup."""
     from types import SimpleNamespace

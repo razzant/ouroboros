@@ -8,6 +8,8 @@ or provider credential is used.
 
 from __future__ import annotations
 
+import json
+
 import pytest
 
 from devtools.benchmarks.cybergym import cybergym_executor as executor_module
@@ -16,10 +18,11 @@ from devtools.benchmarks.cybergym.cybergym_adapter import (
     run_campaign,
 )
 from devtools.benchmarks.cybergym.cybergym_executor import (
+    CommandResult,
     CyberGymExecutor,
     ExecutorFailure,
 )
-from tests.test_cybergym_executor import _config
+from tests.test_cybergym_executor import _config, dataclasses_replace
 
 
 def test_post_create_timeout_releases_workspace_slot(tmp_path, monkeypatch):
@@ -73,3 +76,86 @@ def test_post_create_timeout_releases_workspace_slot(tmp_path, monkeypatch):
     assert projection.reserved_usd == pytest.approx(0)
     assert projection.unresolved_upper_bound_usd == pytest.approx(0)
     assert projection.can_dispatch is True
+
+
+def test_network_reaps_empty_foreign_leftover_then_creates(tmp_path):
+    config = _config(tmp_path)
+    stale_id = "stale-be200ad3-network"
+    created: list[str] = []
+    inspect_by_id = {stale_id: True}
+
+    def command(argv, *, cwd=None, env=None, timeout=None):
+        if "network" in argv and "create" in argv:
+            if not created:
+                created.append("fail")
+                return CommandResult(1, "", "network with name cybergym-internal already exists")
+            created.append("ok")
+            return CommandResult(0, "fresh-network-id\n", "")
+        if "network" in argv and "inspect" in argv:
+            target = argv[-1]
+            if target == stale_id and not inspect_by_id.get(stale_id):
+                return CommandResult(1, "", "Error: No such network: stale-be200ad3-network")
+            if target in {stale_id, "cybergym-internal"} and inspect_by_id.get(stale_id):
+                return CommandResult(
+                    0,
+                    json.dumps([{
+                        "Name": "cybergym-internal",
+                        "Id": stale_id,
+                        "Internal": False,
+                        "Driver": "bridge",
+                        "Labels": {"com.ouroboros.campaign": "be200ad3-dead"},
+                        "Containers": {},
+                    }]),
+                    "",
+                )
+            if target == "cybergym-internal" and created.count("ok"):
+                return CommandResult(
+                    0,
+                    json.dumps([{
+                        "Name": "cybergym-internal",
+                        "Id": "fresh-network-id",
+                        "Internal": False,
+                        "Driver": "bridge",
+                        "Labels": {"com.ouroboros.campaign": "test-campaign"},
+                        "Containers": {},
+                    }]),
+                    "",
+                )
+            return CommandResult(1, "", f"Error: No such network: {target}")
+        if "network" in argv and "rm" in argv:
+            assert argv[-1] == stale_id
+            inspect_by_id[stale_id] = False
+            return CommandResult(0, "", "")
+        raise AssertionError(argv)
+
+    executor = CyberGymExecutor(dataclasses_replace(config, command_runner=command, provider_probe=False))
+    executor._network()  # noqa: SLF001 - leftover-network class contract
+    assert created == ["fail", "ok"]
+    assert executor.network_id == "fresh-network-id"
+    assert executor._network_created is True
+
+
+def test_network_refuses_leftover_with_attached_containers(tmp_path):
+    config = _config(tmp_path)
+
+    def command(argv, *, cwd=None, env=None, timeout=None):
+        if "create" in argv:
+            return CommandResult(1, "", "already exists")
+        if "inspect" in argv:
+            return CommandResult(
+                0,
+                json.dumps([{
+                    "Name": "cybergym-internal",
+                    "Id": "busy-network-id",
+                    "Internal": False,
+                    "Driver": "bridge",
+                    "Labels": {"com.ouroboros.campaign": "other-campaign"},
+                    "Containers": {"abc": {"Name": "cybergym-server-other-campaign"}},
+                }]),
+                "",
+            )
+        raise AssertionError("must not rm a leftover with containers")
+
+    executor = CyberGymExecutor(dataclasses_replace(config, command_runner=command, provider_probe=False))
+    with pytest.raises(ExecutorFailure, match="still has attached containers"):
+        executor._network()  # noqa: SLF001 - leftover-network class contract
