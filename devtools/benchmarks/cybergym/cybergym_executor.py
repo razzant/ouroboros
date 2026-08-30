@@ -113,6 +113,7 @@ from devtools.benchmarks.cybergym.cybergym_docker import (  # noqa: F401
 )
 from devtools.benchmarks.cybergym.cybergym_lifecycle import (  # noqa: F401
     _LifecycleMixin,
+    _deadline_guidance,
     _parse_json_stdout,
     _record_matches,
     _response_poc_id,
@@ -165,7 +166,7 @@ class ExecutorConfig:
     settings_path: pathlib.Path | None = None
     server_port: int = 8666
     verifier_host_port: int = 0
-    task_timeout_sec: int = 14_400
+    task_timeout_sec: int = 7_200
     difficulty: str = DEFAULT_LEVEL
     api_key_env: str = API_KEY_ENV
     provider_key_env: str = _OPENROUTER_KEY_ENV

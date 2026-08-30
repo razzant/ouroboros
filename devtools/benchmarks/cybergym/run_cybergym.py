@@ -75,8 +75,8 @@ from devtools.benchmarks.cybergym.cybergym_adapter import (
 )
 
 REPO_ROOT = pathlib.Path(__file__).resolve().parents[3]
-DEFAULT_TIMEOUT_SEC = 4 * 60 * 60
-DEFAULT_MAX_ROUNDS = 1000
+DEFAULT_TIMEOUT_SEC = 2 * 60 * 60
+DEFAULT_MAX_ROUNDS = 400
 # Runtime tree cap for each measured task.  This is deliberately separate from
 # ``--per-task-estimate-usd``: the latter is the campaign reservation, while
 # this value is consumed by the isolated Ouroboros server's UsageScope.
@@ -924,9 +924,10 @@ def _prepare_applied_settings(
         "OUROBOROS_PER_TASK_COST_USD": per_task_cost_usd,
         "TOTAL_BUDGET": budget_usd,
         "OUROBOROS_TASK_ABS_CEILING_SEC": timeout_sec,
-        "OUROBOROS_TASK_REVIEW_MODE": "required",
-        # Required task review still runs, but its verdict is advisory and is
-        # bounded to two paid review cycles as requested for this cohort.
+        # Task review runs in automatic mode (the host reviewer selects
+        # substantive attempts); its verdict is advisory and is bounded to two
+        # paid review cycles as requested for this cohort.
+        "OUROBOROS_TASK_REVIEW_MODE": "auto",
         "OUROBOROS_REVIEW_ENFORCEMENT": "advisory",
         "OUROBOROS_REVIEW_MAX_CYCLES": "2",
         "OUROBOROS_POST_TASK_EVOLUTION": "false",

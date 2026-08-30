@@ -96,6 +96,33 @@ and manifest:
 * the three-task protocol smoke has a positive submission and verifier result,
   valid model-token telemetry, and the required negative-connectivity checks.
 
+## External state directory and reconcile
+
+`--state-dir <absolute path>` moves the isolated server's mutable
+`ouroboros-data` state (`state/`, `logs/`, `task_results/`, locks, and the
+observability wire evidence) off the run root onto an operator-chosen local
+disk such as NVMe.  The append-only run root keeps the durable artifacts
+(`workspaces/`, `checkpoints/`, `attestations/`, `result_index.jsonl`,
+`claims.jsonl`, `run_manifest.json`).  The manifest records the layout under
+`extra.state_layout`, and at finalize the server mirrors the small audit
+surface (`state/`, `logs/`, `task_results/`, `memory/`, `settings.json`) back
+to `run_root/ouroboros-data` on a best-effort basis; the receipt lands in
+`extra.state_export`.  Large observability blobs are not mirrored.  The state
+directory must not overlap the seed repository or the run root, and telemetry
+verification accepts exactly the run root plus this one external data root.
+
+`--reconcile <run root>` adopts an interrupted run whose launcher died after
+the gateway accepted tasks but before their rows were delivered.  It re-reads
+the manifest, attaches to the still-running isolated server and workspace
+containers, and runs the shared delivery path for every checkpointed attempt
+that has no `result_index.jsonl` row.  It never re-runs an agent, never starts
+new infrastructure, and never rewrites an existing row.  Attempts whose
+gateway task is still alive are reported as `left_running` and left for a
+later pass; the report lands in `extra.reconcile` of the finalized manifest.
+The exit code is `0` when nothing deliverable failed, `2` on refusals or
+undeliverable terminal attempts.  Reconcile requires the same pinned inputs
+and `--model` value as the original invocation.
+
 ## Template settings versus applied settings
 
 `settings_base.json` is a reviewable template.  It is not evidence that a live
@@ -137,7 +164,7 @@ runtime-injected grant separately by fingerprint.
 The measured task reasoning effort is `high`; review, scope-review, and deep-self-review
 use the stronger supported `max` tier.  The structured reviewer panel has one
 triad row and one scope row, both on that exact model, with the optional
-advisory lane disabled.  Task review remains `required`, while enforcement is
+advisory lane disabled.  Task review runs in `auto` mode, while enforcement is
 `advisory`, and the shared review-cycle cap is `2`.  No local model, Claude
 session, legacy heavy slot, or hidden fallback family is inherited.
 
@@ -154,8 +181,8 @@ The template also records these run-shaping defaults:
 | --- | ---: | --- |
 | `OUROBOROS_MAX_SUBAGENT_DEPTH` | `0` | no delegation inside a measured task |
 | `OUROBOROS_MAX_WORKERS` | `32` | cross-task worker-pool ceiling, not within-task swarm |
-| `OUROBOROS_MAX_ROUNDS` | `1000` | per-task Ouroboros loop ceiling for the current owner-authorized cohort |
-| `OUROBOROS_TASK_ABS_CEILING_SEC` | `14400` | four-hour absolute task backstop |
+| `OUROBOROS_MAX_ROUNDS` | `400` | per-task Ouroboros loop ceiling for the current owner-authorized cohort |
+| `OUROBOROS_TASK_ABS_CEILING_SEC` | `7200` | two-hour absolute task backstop |
 | `TOTAL_BUDGET` | `3500.0` | first campaign-wide USD hard stop |
 | `OUROBOROS_RUNTIME_MODE` | `pro` | container benchmark runtime |
 | `OUROBOROS_SAFETY_MODE` | `off` | owner-authorized isolated cohort setting; deterministic benchmark guards still apply |
@@ -201,7 +228,10 @@ selected unrestricted egress for this cohort, so that broader surface is
 explicitly disclosed.  The task prompt therefore forbids target issue or
 bug reports, changelogs, commit history, release notes, patched/fix commits,
 published patches, ready-made PoCs, prior CyberGym solutions, and prior
-trajectories.  This nudge does not replace the mandatory trajectory-audit gate:
+trajectories.  The prompt also states the task's wall-clock budget, derived
+from the configured absolute ceiling (`OUROBOROS_TASK_ABS_CEILING_SEC`), so
+the agent can pace itself and submit a best-effort `final.poc` before the
+deadline.  This nudge does not replace the mandatory trajectory-audit gate:
 all smoke and pilot traces are audited before phase promotion, and the full
 cohort is audited before publication or submission.
 
@@ -292,7 +322,7 @@ failures, infra failures, timeouts, and unattempted rows.
    one OSS-Fuzz task, and one MSan-labelled task when its pinned image is
    available.  A
    missing image or setup refusal is a typed infrastructure result, not a
-   silent capability zero.  The smoke timeout is shorter than four hours and
+   silent capability zero.  The smoke timeout is shorter than two hours and
    is written to the manifest.  Audit all three trajectories before the pilot.
 2. **Ten-task pilot.**  Use the official parity subset below.  Start with a
    small independent-lane count and double only when reward/token validity,

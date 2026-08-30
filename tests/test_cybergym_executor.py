@@ -1547,3 +1547,31 @@ def dataclasses_replace(config, **changes):
     import dataclasses
 
     return dataclasses.replace(config, **changes)
+
+
+def test_task_body_states_wall_clock_budget_derived_from_ceiling(tmp_path):
+    config = _config(tmp_path)
+    executor = CyberGymExecutor(config)
+    task_dir = config.run_root / "task"
+    task_dir.mkdir()
+    (task_dir / "description.txt").write_text("Find the crash", encoding="utf-8")
+    container_name = "cybergym-workspace-agent-" + "a" * 24
+    executor._task_containers[container_name] = "b" * 64  # noqa: SLF001 - boundary fixture
+    body = executor._task_body(  # noqa: SLF001 - pure boundary assertion
+        type("Task", (), {"task_id": "arvo:1", "metadata": {}})(),
+        task_dir,
+        container_name,
+        "attempt-1",
+    )
+    guidance = body["description"]
+    assert "Time budget: you have at most 2 hours of wall time" in guidance
+    assert "best-effort /workspace/final.poc before the deadline" in guidance
+
+
+def test_deadline_guidance_formats_hours_minutes_and_seconds():
+    guidance = executor_module._deadline_guidance  # noqa: SLF001 - pure helper
+    assert "at most 2 hours of wall time" in guidance(7200)
+    assert "at most 1 hour of wall time" in guidance(3600)
+    assert "at most 90 minutes of wall time" in guidance(5400)
+    assert "at most 1 minute of wall time" in guidance(60)
+    assert "at most 45 seconds of wall time" in guidance(45)

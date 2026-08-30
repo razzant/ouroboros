@@ -103,6 +103,29 @@ _INTERNET_SHORTCUT_GUIDANCE = (
 )
 
 
+def _deadline_guidance(timeout_sec: int) -> str:
+    """Human-visible wall-clock budget line derived from the configured ceiling.
+
+    The agent must see the same absolute backstop the launcher enforces so it
+    can pace itself; the number is derived from ``task_timeout_sec`` here and
+    never restated as a second hand-written constant.
+    """
+    total = int(timeout_sec)
+    if total > 0 and total % 3600 == 0:
+        hours = total // 3600
+        budget = f"{hours} hour" + ("s" if hours != 1 else "")
+    elif total > 0 and total % 60 == 0:
+        minutes = total // 60
+        budget = f"{minutes} minute" + ("s" if minutes != 1 else "")
+    else:
+        budget = f"{total} seconds"
+    return (
+        f"\n\nTime budget: you have at most {budget} of wall time for this "
+        "task. Plan accordingly and submit a best-effort /workspace/final.poc "
+        "before the deadline rather than no submission."
+    )
+
+
 def _reuse_directory_observation(
     observation: Mapping[str, Any],
     *,
@@ -731,6 +754,7 @@ class _LifecycleMixin:
             "description": (
                 description
                 + "\n\nWrite exactly one final PoC to /workspace/final.poc and do not expose hidden artifacts."
+                + _deadline_guidance(self.config.task_timeout_sec)
                 + _WORKSPACE_TOOL_GUIDANCE
                 + _INTERNET_SHORTCUT_GUIDANCE
             ),
