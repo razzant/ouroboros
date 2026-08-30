@@ -221,8 +221,10 @@ first-turn fallback allowance does not authorize cross-family substitution.
 
 No model price is hardcoded in this adapter.  Cost is read from the exact
 provider route and usage record.  A missing or `null` cost is `cost unknown`,
-not zero; it contributes to the unresolved budget bound and blocks the next
-paid dispatch.
+not zero.  The campaign ledger records that attempt as unresolved and keeps
+the reserved per-task estimate as remaining liability.  A missing upper bound
+does not freeze the rest of the catalog; only a known exhausted projected
+total refuses the next paid dispatch.
 
 ## 5. No-swarm and tool policy
 
@@ -410,7 +412,14 @@ wall times, leakage result, and artifact references
 Setup failures, missing images, seccomp/MSan incompatibilities, DNS/provider
 errors, timeouts, cancellation, unattempted rows, and late results are typed
 explicitly.  They are never silently dropped from the denominator or turned
-into a genuine capability zero without evidence.  A genuine zero from a
+into a genuine capability zero without evidence.  One official pin is skipped
+before archive extract: ``arvo:64622`` is recorded as infra with
+``broken_symlink_official_pin`` (dangling symlink in the pinned archive; the
+pin is not repaired and dangling-link extraction stays fail-closed for every
+other task).  A fair gateway completion whose final text is leftover DSML or
+empty-tool XML markup is ``protocol_fail`` (infra/protocol), not
+``final_poc_missing_after_fair_completion``.  An honest missing ``final.poc``
+after real tool use remains a capability row.  A genuine zero from a
 completed verifier remains a genuine zero.  An infrastructure row remains
 visible for later diagnosis and is not cherry-picked for a recovery rerun.
 
@@ -487,9 +496,11 @@ owner-authorized pilot the launcher applies the explicit runtime tree cap
 `--per-task-cost-usd 20` and `--per-task-estimate-usd 20`; the former is the
 runtime tree cap and the latter is the separate campaign-ledger reservation.
 Both values are visible without conflating their roles, and paid invocations
-must state the runtime cap explicitly.  Missing, unknown, or unresolved
-reservation evidence
-blocks the next paid dispatch.  A nullable provider cost is not interpreted as
+must state the runtime cap explicitly.  A new claim still requires a finite
+per-task estimate.  An unresolved dead attempt with a missing upper bound
+keeps that estimate as remaining liability and does not set campaign
+``projected=None``.  Only a known projected total at or above the cap blocks
+the next paid dispatch.  A nullable provider cost is not interpreted as
 zero.  The watchdog stops before crossing the cap; it cannot raise the cap or
 rewrite settled rows.
 

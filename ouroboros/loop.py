@@ -15,6 +15,11 @@ from typing import Any, Callable, Dict, List, Optional, Tuple
 import logging
 
 from ouroboros.llm import LLMClient, normalize_reasoning_effort, add_usage
+from ouroboros.tool_call_markup import (
+    content_has_tool_markup,
+    promote_tool_markup,
+    tool_markup_protocol_fail,
+)
 from ouroboros import task_pacing
 from ouroboros.config import adaptive_quorum, get_context_mode, get_light_model, get_review_enforcement, get_task_review_mode, resolve_effort
 from ouroboros.review_cycles import REASON_REVIEW_CYCLES_EXHAUSTED
@@ -236,10 +241,9 @@ def _check_budget_limits(
     is the root subtree's ledger-accounted number when a root cap exists (the
     fence counts the TREE, not own calls); own cost is the DISCLOSED fallback
     and diagnostic. Unknown spend never becomes $0. The axes are INDEPENDENT
-    (v6.91): ``budget_remaining_usd`` None only means no finite GLOBAL budget
-    (TOTAL_BUDGET unset — the GAIA-shaped run) and must not silence a live
-    per-task ROOT CAP; with neither, the ceiling resolves ``disabled`` and
-    the whole cost axis stays silent, as before."""
+    (v6.91): ``budget_remaining_usd`` None means only no finite GLOBAL budget
+    (TOTAL_BUDGET unset) and must not silence a live per-task ROOT CAP; with
+    neither, the cost axis stays silent."""
     accumulated_usage = ctx.accumulated_usage
     raw_task_cost = accumulated_usage.get("cost")
     task_cost = float(raw_task_cost) if raw_task_cost is not None else None
@@ -1200,8 +1204,8 @@ def _collect_acceptance_obligations(llm_trace: Dict[str, Any], result: Any) -> N
     agent disposition per obligation (v6.54.0); time/pass gates and the
     forced-finalization escape hatches bound the loop, so a deadline never
     hangs here. v6.60.0 widening (S1-lite, owner quiz 18b): when the AGGREGATE
-    verdict itself is failing — signal FAIL, or worst tier
-    blocked_with_evidence — contributing reviewers' HIGH findings with a
+    verdict itself is failing (signal FAIL, or worst tier
+    blocked_with_evidence), contributing reviewers' HIGH findings with a
     concrete recommendation also become obligations (the PB incident). On a
     PASS (incl. with-dissent) the bar stays critical-only, so the blocking
     lane cannot creep into taxing clean runs with hygiene items."""
@@ -1581,8 +1585,8 @@ def _execute_task_acceptance_panel(ctx: _TaskAcceptanceContext) -> Any:
     # Budget admission for the whole acceptance wave (v6.69.0): a wave that
     # cannot fit the remaining root budget is declined up front as a terminal
     # DEGRADED (no-quorum semantics) instead of dying mid-wave. The estimate
-    # renders the REAL per-slot message pair; the rare second physical
-    # attempt is not multiplied in — fail-open coarse filter, no reservation.
+    # renders the REAL per-slot message pair (fail-open coarse filter, no
+    # reservation).
     from ouroboros.tools.review_helpers import review_wave_budget_gate
 
     try:
@@ -3511,8 +3515,7 @@ def _child_disposition_state(child: Dict[str, Any]) -> str:
     # Explicit cancellation is lifecycle authority and wins every completion
     # race; late scratch results are not projected or recovered. Only a SETTLED
     # ``cancelled`` counts as handled (GR2-8c): ``cancel_requested`` is intent,
-    # not outcome — treating it as done suppressed the handoff reminder, so
-    # such a child stays cancel-pending until custody settles.
+    # not outcome, and the child stays cancel-pending until custody settles.
     if (
         str(child.get("parent_decision") or "").strip().lower() == "cancelled"
         and str(child.get("status") or "").strip().lower() == "cancelled"
@@ -3910,10 +3913,9 @@ def _record_forced_acceptance_bypass(
     forced exits used to leave the review axis at {skipped, not_eligible,
     run_count:0} — indistinguishable from "no panel warranted". Stamp the
     terminal truth instead: eligibility is evaluated PURE against the live
-    trace (no fence begin, quiescence wait, panel, model round, or prompt text
-    — forced exits are the v6.29 honesty/salvage shelf, byte-identical); an
-    OWED-but-bypassed panel lands as ``finalized_unaccepted`` with a
-    closed-enum reason (`ACCEPTANCE_BYPASS_REASON_BY_RAIL`, v6.54.4
+    trace (forced exits are the v6.29 honesty/salvage shelf, byte-identical);
+    an OWED-but-bypassed panel lands as ``finalized_unaccepted`` with a
+    closed-enum reason (`ACCEPTANCE_BYPASS_REASON_BY_RAIL`, the v6.54.4
     deadline-reserve precedent generalized; v6.74.4). Reason tokens stay
     ledger-only (v6.61.4 token-parroting class). Never raises."""
     rail_reason = ACCEPTANCE_BYPASS_REASON_BY_RAIL.get(str(reason_code or ""))
@@ -3929,9 +3931,9 @@ def _record_forced_acceptance_bypass(
         return
     # A recorded host decision (panel ran, pacing skip, supersede) wins; the
     # bypass record exists only for the no-host-verdict shape. "Host
-    # decision" = a canonical status — NOT the status-less agent-stance dict
-    # merged when task_acceptance_review defers to the host (that left the
-    # bypass unrecorded when owed); `_set_acceptance_decision` stamps.
+    # decision" = a canonical `_set_acceptance_decision` status — NOT the
+    # status-less agent-stance dict merged on defer (that left the bypass
+    # unrecorded when owed).
     decision = llm_trace.get("acceptance_decision")
     if isinstance(decision, dict) and str(decision.get("status") or "") in ACCEPTANCE_DECISION_STATUSES:
         return
@@ -4264,11 +4266,10 @@ def _forced_orphan_note(ctx: _RoundLimitContext, *, include_terminal: bool = Tru
             lifecycle = "running" if st not in FINAL_STATUSES else st
             # W2: a child whose LATEST blackboard decision row no longer
             # binds the current result was READ and decided — say that, not
-            # "unread"; only what the ledger PROVES: the row EXISTS, the
-            # binding did not. Scoped to children the projection left
-            # UNDECIDED: a carried disposition (deferred / integrated /
-            # irrelevant / discarded / cancelled) is no failed binding —
-            # "re-submit to close it" would be false there.
+            # "unread". Scoped to children the projection left UNDECIDED: a
+            # carried disposition (deferred / integrated / irrelevant /
+            # discarded / cancelled) is no failed binding — "re-submit to
+            # close it" would be false there.
             claim = claimed.get(tid) if not _child_disposition_state(c) else None
             if claim is not None:
                 disposition, row_sha = claim
@@ -5611,10 +5612,9 @@ def _nanny_finalization_message(
     toolset and durable custody evidence (delegate_custody.
     task_execution_evidence) spanning the WHOLE task — per-execution llm_trace
     resets on continuation. `trace_attempted` is the third fact: a
-    delegate_start in THIS execution's trace; it must not suppress the failure
-    message (triad, e84475f2: delegate, run dies, finish by hand, finalize —
-    one execution), only the accusation when custody has no rows yet (a
-    pending/uncustodied start is an attempt, not a choice)."""
+    delegate_start in THIS execution's trace; it suppresses only the
+    accusation when custody has no rows yet (a pending/uncustodied start is an
+    attempt, not a choice), never the failure message (triad, e84475f2)."""
     try:
         if "delegate_start" not in set(tools.available_tools()):
             return ""  # the verbs are invisible here; "you chose not to" would be false
@@ -5787,9 +5787,9 @@ def _maybe_inject_finalization_nudges(
         # Red-verification one-shot nudge: the latest host-attested verify
         # receipt is RED and unreconciled — finalizing over your own failing
         # check is a self-contradiction (P3/P12), distinct from receipt_absent
-        # below ("no grounding" vs "grounding says FAIL"). BEFORE the FR3
-        # verify nudge. Binary latch; advisory; forced-finalization paths
-        # bypass it. Keyed on the typed receipt status, never content (P5).
+        # below. BEFORE the FR3 verify nudge. Binary latch; advisory; forced
+        # paths bypass it. Keyed on the typed receipt status, never content
+        # (P5).
         _failed_receipt = latest_unreconciled_failed_verification(
             drive_root, task_id, receipts=receipt_rows,
         )
@@ -5844,8 +5844,8 @@ def _maybe_inject_finalization_nudges(
         # passing verification used an AGENT-DEFINED criterion with no stated
         # basis — green check, synthesized criterion. One reminder to confirm
         # equivalence with the task's real requirement (or state the basis via
-        # criterion_basis). AFTER the masked nudge, BEFORE FR3. Flag-driven on
-        # the typed receipt field, never content (P5); forced paths bypass.
+        # criterion_basis). AFTER the masked nudge, BEFORE FR3. Keyed on the
+        # typed receipt field, never content (P5); forced paths bypass.
         _agent_defined = latest_agent_defined_verification(
             drive_root, task_id, receipts=receipt_rows,
         )
@@ -5903,8 +5903,8 @@ def _maybe_inject_finalization_nudges(
         return True
     # A3 one-shot no-op nudge: a declared deliverable (non-empty
     # expected_output) but NO tool calls, reviewable effects, or FINAL ANSWER
-    # marker this turn — about-to-finalize-without-attempting (family of the
-    # M2 expected_output_ungrounded flag). Own latch, AFTER the verify nudge;
+    # marker this turn — about-to-finalize-without-attempting (M2
+    # expected_output_ungrounded family). Own latch, AFTER the verify nudge;
     # never forces acceptance review; forced paths return earlier. Structural
     # facts only (no refusal-text matching).
     if (
@@ -5934,14 +5934,13 @@ def _maybe_inject_finalization_nudges(
         emit_progress("No-op attempt nudge injected before final response.")
         llm_trace["reasoning_notes"].append("No-op attempt nudge injected before final response.")
         return True
-    # P2 one-shot final-answer-marker nudge: REAL work + visible prose but
-    # no FINAL ANSWER marker — the typed extractor would drop it, a forced
-    # finalization score empty. Strengthen BEHAVIOR (agent marks its OWN
+    # P2 one-shot final-answer-marker nudge: REAL work + visible prose but no
+    # FINAL ANSWER marker — the typed extractor would drop it, a forced
+    # finalization scores empty. Strengthen BEHAVIOR (agent marks its OWN
     # answer), never mine prose into a claimed answer (P5). Own latch, AFTER
-    # verify/red/A3; forced paths return earlier. The protocol gate alone
-    # suffices — it must not ALSO require expected_output: GAIA-shaped
-    # contracts keep it empty; that extra gate once suppressed the only
-    # salvage surface (v6.56.0: last-round refusal finalized empty).
+    # verify/red/A3; forced paths return earlier. No extra expected_output
+    # gate: GAIA-shaped contracts keep it empty (v6.56.0: that gate once
+    # suppressed the only salvage surface).
     if (
         not getattr(tools._ctx, "_final_marker_nudged", False)
         and _answer_protocol_active(tools._ctx)  # v6.60.0: marker nudge is protocol-gated
@@ -6771,7 +6770,6 @@ def run_llm_loop(
             ctx.active_model = active_model
             ctx.active_effort = active_effort
             ctx.active_use_local = active_use_local
-
             # One forced-wrap-up context per round: consumed by the round-limit
             # path and the supervisor finalize_now control path below.
             limit_ctx = _RoundLimitContext(
@@ -6789,7 +6787,6 @@ def run_llm_loop(
                     text, accumulated_usage, forced_trace = _handle_round_limit(limit_ctx)
                 _merge_finalization_trace(llm_trace, forced_trace)
                 return text, accumulated_usage, llm_trace
-
             # Tuple, not a sum: an APPENDED short owner message must also read as new input (final-pair fable F1).
             _pre_drain_sig = (len(messages), len(str(messages[-1].get("content") or "")))
             _controls = _drain_incoming_messages(
@@ -6812,7 +6809,6 @@ def run_llm_loop(
                 text, accumulated_usage, forced_trace = _early_final
                 _merge_finalization_trace(llm_trace, forced_trace)
                 return text, accumulated_usage, llm_trace
-
             # Typed soft landing (v6.91): the ledger fence stays the untouched
             # backstop; an exhausted ceiling wraps up BEFORE spending a round.
             _soft_land = _soft_land_exhausted_ceiling(limit_ctx, cost_ceiling)
@@ -6920,8 +6916,13 @@ def run_llm_loop(
                 (),
             )
             content = msg.get("content")
+            if not tool_calls and content_has_tool_markup(content):
+                promoted = promote_tool_markup(msg)
+                if promoted is None:
+                    return tool_markup_protocol_fail(accumulated_usage, llm_trace)
+                msg, tool_calls = promoted
+                content = msg["content"]
             _latch_final_answer_marker(llm_trace, content, current_tool_calls=tool_calls)
-            # Every metered response counts as nanny progress.
             _note_nanny_delegate_activity(tools._ctx, round_idx, accumulated_usage, [])
             if not tool_calls:
                 final_result = _no_tool_final_answer(

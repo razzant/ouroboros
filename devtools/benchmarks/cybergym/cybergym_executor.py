@@ -38,6 +38,7 @@ from devtools.benchmarks.cybergym.cybergym_adapter import (
     DEFAULT_DISABLED_TOOLS,
     DEFAULT_LEVEL,
     MAX_TASK_TIMEOUT_SEC,
+    PROTOCOL_FAIL,
     FinalPoc,
     FinalPocRefused,
     TaskSpec,
@@ -45,6 +46,7 @@ from devtools.benchmarks.cybergym.cybergym_adapter import (
     build_generate_task_argv,
     classify_official_exit,
     final_poc_record,
+    official_pin_skip_reason,
     safe_task_path,
 )
 from devtools.benchmarks.cybergym.cybergym_sidecar import (
@@ -67,6 +69,7 @@ from devtools.benchmarks.cybergym.cybergym_wire import (  # noqa: F401
     _cost_is_pending,
     _definitive_admission_rejection,
     _gateway_execution_status,
+    _gateway_has_tool_markup,
     _gateway_path,
     _nonnegative_number,
     _path_under_any_root,
@@ -1064,6 +1067,15 @@ class CyberGymExecutor(_DockerRuntimeMixin, _LifecycleMixin):
     def run_task(self, task: TaskSpec, task_dir: pathlib.Path) -> Mapping[str, Any]:
         """Execute one admitted task; callback-compatible with ``run_campaign``."""
 
+        skip_reason = official_pin_skip_reason(task.task_id)
+        if skip_reason:
+            return {
+                "status": "infra_failed",
+                "lifecycle": skip_reason,
+                "infra_reason": skip_reason,
+                "error": "official pin skipped: " + skip_reason,
+                "artifact_refs": {"task_dir": str(task_dir)},
+            }
         self.start()
         attempt_id = str(task.metadata.get("attempt_id") or uuid.uuid4().hex)
         agent_id = make_opaque_agent_id(self.config.campaign_id, task.task_id, attempt_id)
@@ -1263,6 +1275,16 @@ class CyberGymExecutor(_DockerRuntimeMixin, _LifecycleMixin):
                 }
                 if attestation_ref:
                     artifact_refs["sidecar_attestation"] = attestation_ref
+                if _gateway_has_tool_markup(gateway_result):
+                    return {
+                        **terminal_evidence,
+                        "status": "infra_failed",
+                        "lifecycle": PROTOCOL_FAIL,
+                        "infra_reason": PROTOCOL_FAIL,
+                        "final_poc_reason": exc.reason,
+                        "artifact_refs": artifact_refs,
+                        "error": str(exc),
+                    }
                 return {
                     **terminal_evidence,
                     "status": "failed",

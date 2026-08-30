@@ -19,6 +19,7 @@ import pytest
 from devtools.benchmarks.cybergym import cybergym_executor as executor_module
 from devtools.benchmarks.cybergym.cybergym_adapter import (
     CAPABILITY_FINAL_POC_MISSING,
+    PROTOCOL_FAIL,
     BudgetLedger,
     run_campaign,
 )
@@ -517,6 +518,83 @@ def test_fair_terminal_missing_marker_is_typed_and_settles_cost(tmp_path, monkey
     assert projection.unresolved_upper_bound_usd == 0
 
 
+def test_fair_terminal_leftover_dsml_is_protocol_fail(tmp_path, monkeypatch):
+    from ouroboros.tool_call_markup import _DSML_MARK
+
+    leftover = (
+        f"<{_DSML_MARK}tool_calls>"
+        f"<{_DSML_MARK}invoke name=\"run_shell\">broken"
+    )
+    gateway_result = {
+        "status": "completed",
+        "content": leftover,
+        "observed_model": "deepseek/deepseek-v4-flash-0731",
+        "observed_provider": "relace",
+        "reasoning_effort": "high",
+        "prompt_tokens": 100,
+        "completion_tokens": 10,
+        "cost_usd": 0.02,
+        "cost_final": True,
+        "cost_breakdown": {
+            "accounted_upper_bound_usd": 0.02,
+            "cost_final": True,
+        },
+        "outcome_axes": {"execution": {"status": "ok"}},
+    }
+    config, executor = _stub_terminal_task_executor(
+        tmp_path, monkeypatch, gateway_result
+    )
+    rows = run_campaign(
+        ["arvo:1"],
+        run_root=config.run_root,
+        executor=executor.run_task,
+        estimated_cost_usd=1,
+        budget_cap_usd=2,
+    )
+    assert rows[0]["status"] == "infra_failed"
+    assert rows[0]["lifecycle"] == PROTOCOL_FAIL
+    assert rows[0]["infra_reason"] == PROTOCOL_FAIL
+    assert rows[0]["capability_outcome"] == ""
+
+
+def test_fair_terminal_prose_without_markup_is_capability_missing_poc(
+    tmp_path, monkeypatch
+):
+    gateway_result = {
+        "status": "completed",
+        "content": (
+            "I inspected the Baidu parser with 11 tools and wrote a long "
+            "analysis. No final.poc was produced."
+        ),
+        "observed_model": "deepseek/deepseek-v4-flash-0731",
+        "observed_provider": "backend-a",
+        "reasoning_effort": "high",
+        "prompt_tokens": 200,
+        "completion_tokens": 80,
+        "cost_usd": 0.03,
+        "cost_final": True,
+        "cost_breakdown": {
+            "accounted_upper_bound_usd": 0.03,
+            "cost_final": True,
+        },
+        "outcome_axes": {"execution": {"status": "ok"}},
+    }
+    config, executor = _stub_terminal_task_executor(
+        tmp_path, monkeypatch, gateway_result
+    )
+    rows = run_campaign(
+        ["arvo:1065"],
+        run_root=config.run_root,
+        executor=executor.run_task,
+        estimated_cost_usd=1,
+        budget_cap_usd=2,
+    )
+    assert rows[0]["status"] == "failed"
+    assert rows[0]["capability_outcome"] == CAPABILITY_FINAL_POC_MISSING
+    assert rows[0]["lifecycle"] != PROTOCOL_FAIL
+    assert rows[0]["infra_reason"] == ""
+
+
 def test_terminal_telemetry_failure_preserves_settled_cost(tmp_path, monkeypatch):
     gateway_result = {
         "status": "completed",
@@ -700,8 +778,8 @@ def test_post_admission_status_error_is_not_reclassified_as_zero_cost(
     assert rows[0]["cost_usd"] is None
     projection = BudgetLedger(config.run_root / "claims.jsonl", cap_usd=2).projection()
     assert projection.settled_usd == 0
-    assert projection.unresolved_upper_bound_usd is None
-    assert projection.can_dispatch is False
+    assert projection.unresolved_upper_bound_usd == pytest.approx(1)
+    assert projection.can_dispatch is True
 
 
 def test_cancel_503_recovers_terminal_gateway_payload(tmp_path):

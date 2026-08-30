@@ -28,6 +28,7 @@ from devtools.benchmarks.cybergym.cybergym_adapter import (
     directory_tree_digest,
     final_poc_record,
     final_submission,
+    official_pin_skip_reason,
     parse_strict_bool,
     pre_admission_report,
     project_budget,
@@ -62,6 +63,30 @@ def test_safe_ids_and_argv_are_path_safe(tmp_path):
     assert argv[:4] == [argv[0], "-m", "cybergym.task.gen_task", "--task-id"]
     assert "--with-flag" in argv
     assert all(isinstance(part, str) for part in argv)
+
+
+def test_official_pin_skips_arvo_64622_without_calling_executor(tmp_path):
+    assert official_pin_skip_reason("arvo:64622") == "broken_symlink_official_pin"
+    assert official_pin_skip_reason("arvo:1065") == ""
+
+    called: list[str] = []
+
+    def boom(task, task_dir):
+        called.append(task.task_id)
+        raise AssertionError("executor must not run a skipped official pin")
+
+    rows = run_campaign(
+        ["arvo:64622", "arvo:1"],
+        run_root=tmp_path / "pin-skip",
+        executor=boom,
+        estimated_cost_usd=1,
+        budget_cap_usd=5,
+    )
+    assert called == ["arvo:1"]
+    assert rows[0]["task_id"] == "arvo:64622"
+    assert rows[0]["status"] == "infra_failed"
+    assert rows[0]["lifecycle"] == "broken_symlink_official_pin"
+    assert rows[0]["infra_reason"] == "broken_symlink_official_pin"
 
 
 def test_applied_server_provenance_rewrites_manifest_command(tmp_path):
@@ -223,13 +248,45 @@ def test_explicit_final_trial_cannot_rebind_a_stale_record():
     assert projection["final_submission_reason"] == "invalid_final_trial"
 
 
-def test_budget_claims_are_atomic_and_unknown_cost_blocks(tmp_path):
+def test_budget_claims_are_atomic_and_unresolved_null_does_not_freeze(tmp_path):
     ledger = BudgetLedger(tmp_path / "claims.jsonl", cap_usd=5)
     ledger.claim("arvo:1", 4, attempt_id="a1")
     with pytest.raises(ClaimRefused):
         ledger.claim("arvo:1", 1, attempt_id="a2")
     ledger.mark_unresolved("a1")
-    assert not ledger.projection().can_dispatch
+    projection = ledger.projection()
+    assert projection.can_dispatch is True
+    assert projection.reason == "within_cap"
+    assert projection.unresolved_upper_bound_usd == pytest.approx(4)
+    assert projection.projected_usd == pytest.approx(4)
+    second = ledger.claim("arvo:2", 1, attempt_id="a2")
+    assert second["attempt_id"] == "a2"
+    with pytest.raises(BudgetRefused):
+        ledger.claim("arvo:3", 1, attempt_id="a3")
+
+
+def test_budget_historical_null_unresolved_does_not_refuse_catalog():
+    projection = project_budget(
+        [
+            {"event": "claim", "task_id": "arvo:1", "attempt_id": "a1", "reserved_usd": 2},
+            {"event": "unresolved", "attempt_id": "a1", "upper_bound_usd": None},
+        ],
+        cap_usd=10,
+    )
+    assert projection.can_dispatch is True
+    assert projection.unresolved_upper_bound_usd == pytest.approx(2)
+    assert projection.projected_usd == pytest.approx(2)
+    assert "arvo:1" in projection.active_task_ids
+
+
+def test_budget_huge_unresolved_bound_still_blocks(tmp_path):
+    ledger = BudgetLedger(tmp_path / "claims.jsonl", cap_usd=5)
+    ledger.claim("arvo:1", 1, attempt_id="a1")
+    ledger.mark_unresolved("a1", 100)
+    projection = ledger.projection()
+    assert projection.can_dispatch is False
+    assert projection.reason == "budget_cap_exceeded"
+    assert projection.unresolved_upper_bound_usd == pytest.approx(100)
     with pytest.raises(BudgetRefused):
         ledger.claim("arvo:2", 1, attempt_id="a2")
 
@@ -468,8 +525,8 @@ def test_run_campaign_does_not_settle_nonfinal_cost(tmp_path):
     assert rows[0]["infra_reason"] == "cost_unverifiable"
     projection = BudgetLedger(tmp_path / "nonfinal-cost" / "claims.jsonl", cap_usd=2).projection()
     assert projection.settled_usd == 0
-    assert projection.unresolved_upper_bound_usd is None
-    assert projection.can_dispatch is False
+    assert projection.unresolved_upper_bound_usd == pytest.approx(1)
+    assert projection.can_dispatch is True
 
 
 def test_run_campaign_records_terminal_total_accounted_bound_not_residual(tmp_path):

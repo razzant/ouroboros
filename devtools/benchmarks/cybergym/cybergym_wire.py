@@ -22,6 +22,7 @@ from devtools.benchmarks.cybergym.cybergym_adapter import (
     CyberGymIntegrationUnavailable,
     _terminal_gateway_accounting,
 )
+from ouroboros.tool_call_markup import content_has_tool_markup
 
 _HEX64 = re.compile(r"^[0-9a-f]{64}$")
 _PROVIDER_ID = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.:/ -]{0,127}$")
@@ -122,6 +123,39 @@ def _gateway_execution_status(payload: Mapping[str, Any]) -> str:
             if isinstance(child, Mapping):
                 queue.append(child)
     return ""
+
+
+def _gateway_assistant_text(payload: Mapping[str, Any]) -> str:
+    """Return the assistant-facing terminal text from a gateway envelope."""
+    if not isinstance(payload, Mapping):
+        return ""
+    queue: list[Mapping[str, Any]] = [payload]
+    seen: set[int] = set()
+    first_text = ""
+    for current in queue:
+        marker = id(current)
+        if marker in seen:
+            continue
+        seen.add(marker)
+        for key in ("final_text", "result", "content", "text"):
+            value = current.get(key)
+            if isinstance(value, str) and value.strip():
+                if content_has_tool_markup(value):
+                    return value
+                if not first_text:
+                    first_text = value
+            elif isinstance(value, Mapping):
+                queue.append(value)
+        for key in ("task_result", "runtime_result", "agent_result"):
+            child = current.get(key)
+            if isinstance(child, Mapping):
+                queue.append(child)
+    return first_text
+
+
+def _gateway_has_tool_markup(payload: Mapping[str, Any]) -> bool:
+    """True when the gateway final is leftover DSML/XML tool markup."""
+    return content_has_tool_markup(_gateway_assistant_text(payload))
 
 
 def _runtime_value(payload: Mapping[str, Any], *keys: str) -> Any:

@@ -85,6 +85,10 @@ MAX_CROSS_TASK_WORKERS = 32
 LEDGER_SCHEMA = "ouroboros.benchmark.cybergym.ledger.v1"
 RESULT_SCHEMA = "ouroboros.benchmark.cybergym.task_result.v1"
 CAPABILITY_FINAL_POC_MISSING = "final_poc_missing_after_fair_completion"
+PROTOCOL_FAIL = "protocol_fail"
+OFFICIAL_PIN_SKIPS = {
+    "arvo:64622": "broken_symlink_official_pin",
+}
 
 
 class CyberGymIntegrationUnavailable(CyberGymError):
@@ -262,6 +266,11 @@ def final_poc_hash(value: pathlib.Path | str | bytes | bytearray | memoryview) -
     if isinstance(value, (bytes, bytearray, memoryview)):
         return hashlib.sha256(bytes(value)).hexdigest()
     return final_poc_record(value).sha256
+
+
+def official_pin_skip_reason(task_id: str) -> str:
+    """Return the explicit official-pin skip reason, or empty if the task runs."""
+    return str(OFFICIAL_PIN_SKIPS.get(safe_task_id(task_id), "") or "")
 
 
 def build_task_result_row(
@@ -481,6 +490,54 @@ def _event_amount(event: Mapping[str, Any], *keys: str, allow_none: bool = False
     raise LedgerError(f"ledger event missing {keys[0]}")
 
 
+def _numeric_unresolved_bound(
+    explicit_upper: float | None,
+    *,
+    reserved_usd: float = 0.0,
+    prior_upper: float | None = None,
+) -> float:
+    """Return a finite unresolved liability; never campaign-wide unknown.
+
+    A missing upper bound keeps the claim estimate (or a prior bound). That is
+    remaining liability for this attempt only. It does not freeze the catalog.
+    """
+    if explicit_upper is not None:
+        return float(explicit_upper)
+    if prior_upper is not None:
+        return float(prior_upper)
+    return float(reserved_usd or 0.0)
+
+
+def _attempt_reservation_bound(
+    events: Iterable[Mapping[str, Any]], attempt: str
+) -> tuple[float, float | None]:
+    """Latest reserved estimate and persisted unresolved bound for one attempt."""
+    reserved = 0.0
+    prior_upper: float | None = None
+    for raw in events:
+        if not isinstance(raw, Mapping):
+            continue
+        if str(raw.get("attempt_id", raw.get("id", "")) or "").strip() != attempt:
+            continue
+        kind = str(raw.get("event", raw.get("kind", "")) or "").lower()
+        if kind in {"claim", "reserve", "reserved"}:
+            reserved = float(
+                _event_amount(raw, "reserved_usd", "estimated_cost_usd", "amount_usd") or 0.0
+            )
+            prior_upper = None
+        elif kind in {"unresolved", "unknown"}:
+            prior = _event_amount(
+                raw, "upper_bound_usd", "unresolved_upper_bound_usd", allow_none=True
+            )
+            if prior is not None:
+                prior_upper = prior
+                reserved = 0.0
+        elif kind in {"settle", "settled", "overspend", "release", "released"}:
+            reserved = 0.0
+            prior_upper = None
+    return reserved, prior_upper
+
+
 _TERMINAL_GATEWAY_STATUSES = frozenset(
     {"completed", "failed", "cancelled", "rejected_duplicate"}
 )
@@ -611,7 +668,13 @@ def _terminal_gateway_accounting(payload: Mapping[str, Any] | None) -> dict[str,
 def project_budget(
     events: Iterable[Mapping[str, Any]], cap_usd: float | None = DEFAULT_BUDGET_CAP_USD
 ) -> BudgetProjection:
-    """Replay terminal state per attempt; unknown cost blocks dispatch."""
+    """Replay terminal state per attempt.
+
+    Unresolved attempts stay visible. A missing upper bound falls back to that
+    attempt's reserved estimate and does not set ``projected=None`` or refuse
+    the rest of the catalog. Dispatch fails only when a known projected total
+    exhausts the cap.
+    """
     cap = _money(cap_usd, field="cap_usd", allow_none=True)
     if cap is not None and cap > DEFAULT_BUDGET_CAP_USD:
         raise BudgetRefused(
@@ -665,7 +728,18 @@ def project_budget(
             if previous is None or previous.get("state") not in {"reserved", "unresolved"}:
                 raise LedgerError(f"unresolved event has no active claim: {attempt}")
             upper = _event_amount(event, "upper_bound_usd", "unresolved_upper_bound_usd", allow_none=True)
-            latest[attempt] = {**previous, "state": "unresolved", "reserved_usd": 0.0, "upper_bound_usd": upper}
+            prior_upper = previous.get("upper_bound_usd")
+            bound = _numeric_unresolved_bound(
+                upper,
+                reserved_usd=float(previous.get("reserved_usd") or 0.0),
+                prior_upper=float(prior_upper) if prior_upper is not None else None,
+            )
+            latest[attempt] = {
+                **previous,
+                "state": "unresolved",
+                "reserved_usd": 0.0,
+                "upper_bound_usd": bound,
+            }
         elif kind in {"release", "released"}:
             if previous is None or previous.get("state") not in {"reserved", "unresolved"}:
                 raise LedgerError(f"release has no active claim: {attempt}")
@@ -676,15 +750,9 @@ def project_budget(
     settled = sum(float(item.get("cost_usd") or 0.0) for item in latest.values() if item.get("state") == "settled")
     reserved = sum(float(item.get("reserved_usd") or 0.0) for item in latest.values() if item.get("state") == "reserved")
     unresolved_rows = [item for item in latest.values() if item.get("state") == "unresolved"]
-    unresolved = (
-        None
-        if any(item.get("upper_bound_usd") is None for item in unresolved_rows)
-        else sum(float(item.get("upper_bound_usd") or 0.0) for item in unresolved_rows)
-    )
-    projected = None if unresolved is None else settled + reserved + unresolved
-    if projected is None:
-        available, can_dispatch, reason = None, False, "unresolved_cost_unknown"
-    elif cap is None:
+    unresolved = sum(float(item.get("upper_bound_usd") or 0.0) for item in unresolved_rows)
+    projected = settled + reserved + unresolved
+    if cap is None:
         available, can_dispatch, reason = None, True, "uncapped"
     else:
         available = cap - projected
@@ -814,9 +882,8 @@ class BudgetLedger:
             if attempt not in current.active_attempt_ids:
                 raise LedgerError(f"attempt is not active: {attempt}")
             # Replace this attempt's reservation with its measured spend when
-            # checking the hard cap.  Unknown other attempts deliberately keep
-            # the projection unknown; they already block new claims, while a
-            # known terminal result can still be recorded for custody.
+            # checking the hard cap.  Other unresolved attempts contribute their
+            # numeric bound (claim estimate if the written bound was missing).
             reserved_for_attempt = 0.0
             for event in self.events():
                 if str(event.get("attempt_id") or "") != attempt:
@@ -918,9 +985,22 @@ class BudgetLedger:
         attempt = str(attempt_id or "").strip()
         upper = _money(upper_bound_usd, field="upper_bound_usd", allow_none=True)
         with self._lock():
-            if attempt not in self.projection().active_attempt_ids:
+            events = self.events()
+            if attempt not in project_budget(events, self.cap_usd).active_attempt_ids:
                 raise LedgerError(f"attempt is not active: {attempt}")
-            self._append({"schema": LEDGER_SCHEMA, "event": "unresolved", "attempt_id": attempt, "upper_bound_usd": upper, "ts_unix": time.time()})
+            reserved, prior_upper = _attempt_reservation_bound(events, attempt)
+            bound = _numeric_unresolved_bound(
+                upper, reserved_usd=reserved, prior_upper=prior_upper
+            )
+            self._append(
+                {
+                    "schema": LEDGER_SCHEMA,
+                    "event": "unresolved",
+                    "attempt_id": attempt,
+                    "upper_bound_usd": bound,
+                    "ts_unix": time.time(),
+                }
+            )
 
     def release(self, attempt_id: str) -> None:
         attempt = str(attempt_id or "").strip()
@@ -1053,8 +1133,23 @@ def run_campaign(
 
     def _run_one(task: TaskSpec) -> dict[str, Any]:
         contract = task.metadata.get("task_contract") if isinstance(task.metadata, Mapping) else None
+        task_dir = safe_task_path(root, task.task_id)
+        skip_reason = official_pin_skip_reason(task.task_id)
+        if skip_reason:
+            task_dir.mkdir(parents=True, exist_ok=True)
+            row = build_task_result_row(
+                task.task_id,
+                status="infra_failed",
+                lifecycle=skip_reason,
+                level=task.level,
+                infra_reason=skip_reason,
+                artifact_refs={"task_dir": str(task_dir)},
+                error="official pin skipped: " + skip_reason,
+                task_contract=contract if isinstance(contract, Mapping) else None,
+            )
+            append_cybergym_result(root, row)
+            return row
         if executor is None:
-            task_dir = safe_task_path(root, task.task_id)
             task_dir.mkdir(parents=True, exist_ok=True)
             row = build_task_result_row(
                 task.task_id,
@@ -1072,7 +1167,6 @@ def run_campaign(
         claim: Mapping[str, Any] | None = None
         outcome: dict[str, Any] = {}
         callback_contract: Mapping[str, Any] | None = None
-        task_dir = safe_task_path(root, task.task_id)
         try:
             claim = ledger.claim(task.task_id, estimated_cost_usd)
             # Claim first, then create the workspace.  The persisted attempt id
