@@ -1575,3 +1575,15 @@ def test_deadline_guidance_formats_hours_minutes_and_seconds():
     assert "at most 90 minutes of wall time" in guidance(5400)
     assert "at most 1 minute of wall time" in guidance(60)
     assert "at most 45 seconds of wall time" in guidance(45)
+
+
+def test_isolate_data_root_extends_telemetry_allowed_roots(tmp_path):
+    external = tmp_path / "nvme" / "ouroboros-data"
+    config = _config(tmp_path, isolate_data_root=external)
+    executor = CyberGymExecutor(config)
+    assert executor._telemetry_allowed_roots() == (  # noqa: SLF001 - boundary assertion
+        config.run_root,
+        external.resolve(),
+    )
+    with pytest.raises(ExecutorFailure, match="isolate_data_root"):
+        _config(tmp_path, isolate_data_root=pathlib.Path("/"))

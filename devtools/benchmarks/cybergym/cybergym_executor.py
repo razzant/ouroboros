@@ -22,7 +22,6 @@ import os
 import pathlib
 import posixpath
 import re
-import shutil
 import stat
 import tarfile
 import tempfile
@@ -34,18 +33,11 @@ from collections.abc import Callable, Mapping
 from typing import Any
 
 from devtools.benchmarks.cybergym.cybergym_adapter import (
-    CAPABILITY_FINAL_POC_MISSING,
     DEFAULT_DISABLED_TOOLS,
     DEFAULT_LEVEL,
     MAX_TASK_TIMEOUT_SEC,
-    PROTOCOL_FAIL,
-    FinalPoc,
-    FinalPocRefused,
     TaskSpec,
-    _terminal_gateway_accounting,
     build_generate_task_argv,
-    classify_official_exit,
-    final_poc_record,
     official_pin_skip_reason,
     safe_task_path,
 )
@@ -119,6 +111,9 @@ from devtools.benchmarks.cybergym.cybergym_lifecycle import (  # noqa: F401
     _response_poc_id,
     _reuse_directory_observation,
     _validate_verify_response,
+)
+from devtools.benchmarks.cybergym.cybergym_reconcile import (  # noqa: F401
+    _ReconcileMixin,
 )
 
 
@@ -843,7 +838,7 @@ def _safe_extract(archive: pathlib.Path, destination: pathlib.Path) -> None:
             raise cleanup_error
 
 
-class CyberGymExecutor(_DockerRuntimeMixin, _LifecycleMixin):
+class CyberGymExecutor(_DockerRuntimeMixin, _LifecycleMixin, _ReconcileMixin):
     """Run one task at a time against a campaign-owned sidecar."""
 
     def __init__(self, config: ExecutorConfig) -> None:
@@ -879,6 +874,9 @@ class CyberGymExecutor(_DockerRuntimeMixin, _LifecycleMixin):
         # ``close`` reap the workspace while its paid worker is still alive.
         self._gateway_attempts: dict[str, dict[str, Any]] = {}
         self._custody_blocked = False
+        # Reconcile mode attaches to resources created by an earlier launcher
+        # process; close() must detach rather than remove them.
+        self._adopted = False
         self._staged_mask_map: pathlib.Path | None = None
         self._start_lock = threading.Lock()
         self.settings_observation: dict[str, Any] = {"status": "not_checked"}
@@ -1167,213 +1165,20 @@ class CyberGymExecutor(_DockerRuntimeMixin, _LifecycleMixin):
             gateway_result = self._gateway_wait(body, checkpoint)
             gateway_settled = True
             terminal_runtime_result = dict(gateway_result)
-            if _response_status(gateway_result) != "completed":
-                return {
-                    "status": "infra_failed",
-                    "lifecycle": "gateway_terminal",
-                    "infra_reason": _response_status(gateway_result) or "gateway_failed",
-                    "runtime_result": dict(gateway_result),
-                    "artifact_refs": {
-                        "task_dir": str(task_dir),
-                        "checkpoint": str(checkpoint),
-                        "workspace_backend_alias": str(alias_ref),
-                        "workspace_cleanup": str(cleanup_ref),
-                    },
-                }
-            served = _served_telemetry(
+            return self._deliver_gateway_result(
+                task,
+                task_dir,
+                workspace_dir,
+                container_name,
+                agent_id,
                 gateway_result,
-                allowed_roots=(self.config.run_root,),
+                checkpoint=checkpoint,
+                cleanup_ref=cleanup_ref,
+                alias_ref=alias_ref,
+                attestation_ref=attestation_ref,
+                sidecar_attestation=sidecar_attestation,
+                terminal_evidence=terminal_evidence,
             )
-            if self.config.provider_probe and int(served.get("trace_call_count") or 0) <= 0:
-                raise ExecutorFailure("gateway result omitted authoritative served-call telemetry")
-            if self.config.provider_probe and not served.get("authoritative_identity"):
-                raise ExecutorFailure("gateway result omitted immutable served-call ids")
-            observed_model = str(served.get("observed_model") or "").strip()
-            observed_provider = str(served.get("observed_provider") or "").strip()
-            observed_effort = str(served.get("observed_effort") or "").strip()
-            prompt_tokens = _runtime_value(gateway_result, "prompt_tokens", "input_tokens", "tokens_in")
-            completion_tokens = _runtime_value(gateway_result, "completion_tokens", "output_tokens", "tokens_out")
-            cached_tokens = _runtime_value(
-                gateway_result,
-                "cached_tokens",
-                "cache_read_tokens",
-                "prompt_cache_hit_tokens",
-            )
-            if observed_model != self.config.model:
-                raise ExecutorFailure("gateway result omitted or changed the exact requested model")
-            if not observed_provider:
-                raise ExecutorFailure("gateway result omitted provider telemetry")
-            observed_effort = _require_exact_effort(observed_effort)
-            if self.config.provider_probe and str(served.get("effort_source") or "") not in {
-                "served_trace",
-                "served_response_wire",
-                "runtime_observed",
-            }:
-                raise ExecutorFailure("gateway result has no authoritative served reasoning effort")
-            if (
-                self.config.provider_probe
-                and int(served.get("trace_call_count") or 0) > 0
-                and int(served.get("served_effort_count") or 0)
-                < int(served.get("trace_call_count") or 0)
-            ):
-                raise ExecutorFailure("gateway telemetry omitted effort for a served call")
-            if (
-                self.config.provider_probe
-                and int(served.get("response_wire_provider_count") or 0)
-                < int(served.get("trace_call_count") or 0)
-            ):
-                raise ExecutorFailure("gateway telemetry omitted backend provider for a served call")
-            _positive_int(prompt_tokens, "gateway prompt_tokens")
-            _positive_int(completion_tokens, "gateway completion_tokens")
-            task_accounting = _terminal_gateway_accounting(gateway_result)
-            task_cost_raw = task_accounting.get("cost_usd")
-            task_cost_estimated = _strict_flag(
-                task_accounting.get("cost_estimated"),
-                "gateway cost_estimated",
-            )
-            cost_final = task_accounting.get("cost_final")
-            if task_cost_raw is None or task_cost_estimated or not cost_final:
-                raise ExecutorFailure("gateway result cost is unknown or estimated")
-            task_cost = _nonnegative_number(task_cost_raw, "gateway cost")
-            terminal_evidence = {
-                "runtime_result": dict(gateway_result),
-                "sidecar_attestation": sidecar_attestation,
-                "observed_model": observed_model,
-                "observed_provider": observed_provider,
-                "observed_provider_attempts": list(
-                    served.get("observed_provider_attempts") or ()
-                ),
-                "observed_provider_route": list(
-                    served.get("observed_provider_route") or ()
-                ),
-                "provider_distribution": dict(
-                    served.get("provider_distribution") or {}
-                ),
-                "observed_effort": observed_effort,
-                "observed_effort_source": str(served.get("effort_source") or "missing"),
-                "telemetry_trace_call_count": int(served.get("trace_call_count") or 0),
-                "prompt_tokens": prompt_tokens,
-                "completion_tokens": completion_tokens,
-                "cached_tokens": cached_tokens,
-                "cost_usd": task_cost,
-                "cost_estimated": False,
-                "cost_final": True,
-                "leakage": {
-                    "agent_id": agent_id,
-                    "masked_id_source": "official_generator",
-                    "internet_access": "unrestricted_outbound",
-                    "trajectory_audit": {"required": True, "status": "pending"},
-                },
-            }
-            try:
-                submit_response, digest, masked_id = self._submit_final(
-                    task, workspace_dir, container_name
-                )
-            except FinalPocRefused as exc:
-                fair_completion = _gateway_execution_status(gateway_result) == "ok"
-                agent_marker_failure = exc.reason in {
-                    "missing",
-                    "non_regular",
-                    "empty",
-                    "oversized",
-                }
-                if not fair_completion or not agent_marker_failure:
-                    raise
-                artifact_refs = {
-                    "task_dir": str(task_dir),
-                    "workspace_dir": str(workspace_dir),
-                    "checkpoint": str(checkpoint),
-                    "workspace_backend_alias": str(alias_ref),
-                    "workspace_cleanup": str(cleanup_ref),
-                }
-                if attestation_ref:
-                    artifact_refs["sidecar_attestation"] = attestation_ref
-                if _gateway_has_tool_markup(gateway_result):
-                    return {
-                        **terminal_evidence,
-                        "status": "infra_failed",
-                        "lifecycle": PROTOCOL_FAIL,
-                        "infra_reason": PROTOCOL_FAIL,
-                        "final_poc_reason": exc.reason,
-                        "artifact_refs": artifact_refs,
-                        "error": str(exc),
-                    }
-                return {
-                    **terminal_evidence,
-                    "status": "failed",
-                    "lifecycle": CAPABILITY_FINAL_POC_MISSING,
-                    "capability_outcome": CAPABILITY_FINAL_POC_MISSING,
-                    "final_poc_reason": exc.reason,
-                    "artifact_refs": artifact_refs,
-                    "error": str(exc),
-                }
-            # Keep the designated marker in the task-local result root used by the
-            # common ledger, while the agent-facing workspace remains opaque.
-            workspace_marker = final_poc_record(workspace_dir)
-            task_marker = task_dir / "final.poc"
-            task_marker.parent.mkdir(parents=True, exist_ok=True)
-            temporary_marker = task_marker.with_name(task_marker.name + f".tmp.{os.getpid()}")
-            shutil.copyfile(workspace_marker.path, temporary_marker)
-            os.replace(temporary_marker, task_marker)
-            # verify-agent-pocs is the upstream operation that reruns both images.
-            key = self._ensure_key()
-            submitted_poc_id = _response_poc_id(submit_response)
-            verify_response = _validate_verify_response(
-                self._server_http(
-                    "POST", "/verify-agent-pocs",
-                    body={"agent_id": agent_id},
-                    headers={"X-API-Key": key},
-                    timeout=300,
-                ),
-                expected_poc_id=submitted_poc_id,
-            )
-            records = self._private_query(agent_id, task.task_id)
-            matching = [
-                item for item in records
-                if _record_matches(item, task.task_id, digest)
-                and str(item.get("poc_id") or "").strip() == submitted_poc_id
-            ]
-            if not matching:
-                raise ExecutorFailure("private query returned no record for the designated final PoC")
-            record = matching[-1]
-            classification = classify_official_exit(
-                record.get("vul_exit_code", record.get("vul_exit")),
-                record.get("fix_exit_code", record.get("fix_exit")),
-            )
-            if classification["official_success"] is None:
-                raise ExecutorFailure("private verifier record omitted raw vulnerable/fixed exit codes")
-            trial = {
-                "trial_id": str(record.get("poc_id") or digest[:16]),
-                "poc_id": record.get("poc_id"),
-                "poc_hash": digest,
-                "vul_exit_code": record.get("vul_exit_code"),
-                "fix_exit_code": record.get("fix_exit_code"),
-                "is_final": True,
-            }
-            private_artifact = safe_task_path(self.config.run_root / "private", task.task_id) / "submit_response.json"
-            _write_json(private_artifact, {"submit": submit_response, "verify": verify_response, "record": record})
-            artifact_refs = {
-                "task_dir": str(task_dir),
-                "workspace_dir": str(workspace_dir),
-                "checkpoint": str(checkpoint),
-                "submit": str(private_artifact),
-                "workspace_backend_alias": str(alias_ref),
-                "workspace_cleanup": str(cleanup_ref),
-            }
-            if attestation_ref:
-                artifact_refs["sidecar_attestation"] = attestation_ref
-            return {
-                **terminal_evidence,
-                "status": "completed",
-                "lifecycle": "official_verified",
-                "final_poc": FinalPoc(str(task_marker.resolve(strict=False)), digest, int(task_marker.stat().st_size)),
-                "final_poc_sha256": digest,
-                "masked_id": masked_id,
-                "masked_id_source": "official_submit_response",
-                "trials": [trial],
-                "final_trial": trial,
-                "artifact_refs": artifact_refs,
-            }
         except Exception as exc:
             if not gateway_admission_started or isinstance(
                 exc, GatewayAdmissionRejected

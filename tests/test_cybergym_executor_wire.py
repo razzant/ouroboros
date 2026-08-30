@@ -206,6 +206,74 @@ def test_served_telemetry_reads_verified_response_wire_effort(tmp_path):
     assert observed["response_wire_provider_count"] == 1
 
 
+def test_served_telemetry_uses_isolate_data_root_for_wire_refs(tmp_path):
+    external = (tmp_path / "nvme" / "ouroboros-data").resolve()
+    calls = external / "observability" / "calls" / "opaque"
+    calls.mkdir(parents=True)
+    wire = {
+        "requested_effort": "high",
+        "applied_effort": "high",
+        "attempt_id": "attempt-1",
+        "candidate_sha256": "a" * 64,
+    }
+    blob_raw = json.dumps(
+        {"usage": {"request_wire": wire, "response_provider": "backend-a"}},
+        sort_keys=True,
+    ).encode("utf-8")
+    blob_path = external / "observability" / "blobs" / ("b" * 64 + ".json.gz")
+    blob_path.parent.mkdir(parents=True)
+    blob_path.write_bytes(gzip.compress(blob_raw))
+    blob_ref = {
+        "path": str(blob_path),
+        "sha256": hashlib.sha256(blob_raw).hexdigest(),
+        "size": len(blob_raw),
+        "kind": "json",
+        "encoding": "gzip",
+    }
+    manifest_raw = json.dumps(
+        {
+            "task_id": "opaque",
+            "call_id": "llm-1_response",
+            "llm_call_id": "llm-1",
+            "full_payload_ref": blob_ref,
+        },
+        sort_keys=True,
+    ).encode("utf-8")
+    manifest_path = calls / "llm-1_response.json"
+    manifest_path.write_bytes(manifest_raw)
+    payload = {
+        "reasoning_effort": "low",
+        "trace_refs": {
+            "llm_call_refs": [
+                {
+                    "llm_call_id": "llm-1",
+                    "resolved_model": "deepseek/deepseek-v4-flash-0731",
+                    "provider": "provider-a",
+                    "response_ref": {
+                        "path": str(manifest_path),
+                        "sha256": hashlib.sha256(manifest_raw).hexdigest(),
+                        "call_id": "llm-1_response",
+                    },
+                }
+            ]
+        },
+    }
+
+    config = _config(tmp_path, isolate_data_root=external)
+    executor = CyberGymExecutor(config)
+    observed = _served_telemetry(
+        payload,
+        allowed_roots=executor._telemetry_allowed_roots(),  # noqa: SLF001
+    )
+    assert observed["effort_source"] == "served_response_wire"
+    assert observed["observed_effort"] == "high"
+    # Without the external root the same wire evidence is untrusted and the
+    # telemetry falls back to the requested field rather than failing closed
+    # on a paid-path fact it cannot verify.
+    untrusted = _served_telemetry(payload, allowed_roots=(config.run_root,))
+    assert untrusted["effort_source"] == "runtime_requested_field"
+
+
 def test_submit_stdout_parser_accepts_preceding_prose_and_multiline_json():
     parsed = _parse_json_stdout('notice\n{\n  "task_id": "opaque1234",\n  "poc_id": "poc-1"\n}\n')
     assert parsed == {"task_id": "opaque1234", "poc_id": "poc-1"}

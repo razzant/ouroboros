@@ -1394,3 +1394,107 @@ def test_launcher_cleanup_report_preserves_pending_custody(tmp_path):
         "status": "skipped_custody",
     }
     assert extra["close_skipped"] is True
+
+
+def _reconcile_args(run_dir, **overrides):
+    from types import SimpleNamespace
+
+    base = {
+        "reconcile": str(run_dir),
+        "model": OFFICIAL_MODEL,
+        "tasks_file": "",
+        "expected_tasks_sha256": "",
+        "budget_usd": 100.0,
+        "timeout_sec": 120,
+        "max_rounds": 10,
+        "per_task_cost_usd": 20.0,
+        "workers": 1,
+        "per_task_estimate_usd": 1.0,
+        "dry_run": False,
+        "allow_dirty_seed": False,
+        "expected_data_sha256": "a" * 64,
+        "expected_binary_sha256": "b" * 64,
+        "cybergym_python": "python3",
+        "executor": "",
+        "ouroboros_url": "",
+    }
+    base.update(overrides)
+    return SimpleNamespace(**base)
+
+
+def test_reconcile_missing_manifest_is_a_typed_refusal(tmp_path, capsys):
+    from devtools.benchmarks.cybergym.cybergym_reconcile import reconcile_main
+
+    args = _reconcile_args(tmp_path / "absent")
+    assert reconcile_main(args) == 2
+    assert "reconcile refusal" in capsys.readouterr().err
+
+
+def test_reconcile_refuses_manifest_model_mismatch(tmp_path):
+    from devtools.benchmarks.cybergym.cybergym_reconcile import reconcile_main
+
+    run_dir = tmp_path / "run"
+    run_dir.mkdir()
+    (run_dir / "run_manifest.json").write_text(
+        json.dumps({
+            "harness": {"model": "other/model", "ouroboros_url": "http://127.0.0.1:8765"},
+            "requested_task_ids": ["arvo:1"],
+        }),
+        encoding="utf-8",
+    )
+    assert reconcile_main(_reconcile_args(run_dir)) == 2
+
+
+def test_reconcile_nothing_pending_finalizes_manifest(tmp_path):
+    from devtools.benchmarks.cybergym.cybergym_reconcile import reconcile_main
+
+    run_dir = tmp_path / "run"
+    run_dir.mkdir()
+    (run_dir / "run_manifest.json").write_text(
+        json.dumps({
+            "harness": {"model": OFFICIAL_MODEL, "ouroboros_url": "http://127.0.0.1:8765"},
+            "requested_task_ids": ["arvo:1", "arvo:2"],
+        }),
+        encoding="utf-8",
+    )
+    (run_dir / "result_index.jsonl").write_text(
+        '{"task_id": "arvo:1"}\n{"task_id": "arvo:2"}\n',
+        encoding="utf-8",
+    )
+    assert reconcile_main(_reconcile_args(run_dir)) == 0
+    manifest = json.loads((run_dir / "run_manifest.json").read_text(encoding="utf-8"))
+    report = manifest["extra"]["reconcile"]
+    assert report["status"] == "nothing_pending"
+    assert report["pending_attempts"] == 0
+    assert report["already_recorded"] == ["arvo:1", "arvo:2"]
+    assert manifest["extra"]["outcome"] == "reconciled"
+    assert manifest["extra"]["exit_code"] == 0
+
+
+def test_reconcile_skips_attempts_already_in_result_index(tmp_path):
+    from devtools.benchmarks.cybergym.cybergym_reconcile import reconcile_main
+
+    run_dir = tmp_path / "run"
+    attempt_dir = run_dir / "checkpoints" / "arvo__1" / "attempt-a01"
+    attempt_dir.mkdir(parents=True)
+    (attempt_dir / "gateway_checkpoint.json").write_text(
+        json.dumps({"gateway_task_id": "gateway-task-1", "status": "running"}),
+        encoding="utf-8",
+    )
+    (run_dir / "run_manifest.json").write_text(
+        json.dumps({
+            "harness": {"model": OFFICIAL_MODEL, "ouroboros_url": "http://127.0.0.1:8765"},
+            "requested_task_ids": ["arvo:1"],
+        }),
+        encoding="utf-8",
+    )
+    (run_dir / "result_index.jsonl").write_text(
+        '{"task_id": "arvo:1"}\n',
+        encoding="utf-8",
+    )
+    assert reconcile_main(_reconcile_args(run_dir)) == 0
+    manifest = json.loads((run_dir / "run_manifest.json").read_text(encoding="utf-8"))
+    report = manifest["extra"]["reconcile"]
+    assert report["status"] == "nothing_pending"
+    assert report["pending_attempts"] == 0
+    assert report["already_recorded"] == ["arvo:1"]

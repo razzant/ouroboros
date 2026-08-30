@@ -9,12 +9,14 @@ or provider credential is used.
 from __future__ import annotations
 
 import json
+import pathlib
 
 import pytest
 
 from devtools.benchmarks.cybergym import cybergym_executor as executor_module
 from devtools.benchmarks.cybergym.cybergym_adapter import (
     BudgetLedger,
+    TaskSpec,
     run_campaign,
 )
 from devtools.benchmarks.cybergym.cybergym_executor import (
@@ -159,3 +161,177 @@ def test_network_refuses_leftover_with_attached_containers(tmp_path):
     executor = CyberGymExecutor(dataclasses_replace(config, command_runner=command, provider_probe=False))
     with pytest.raises(ExecutorFailure, match="still has attached containers"):
         executor._network()  # noqa: SLF001 - leftover-network class contract
+
+
+def _reconcile_fixture(tmp_path, gateway_id, checkpoint_payload, **config_overrides):
+    config = _config(tmp_path, **config_overrides)
+    executor = CyberGymExecutor(config)
+    task_dir = config.run_root / "arvo_1"
+    task_dir.mkdir()
+    checkpoint = task_dir / "gateway_checkpoint.json"
+    checkpoint.write_text(json.dumps(checkpoint_payload), encoding="utf-8")
+    return config, executor, task_dir, checkpoint
+
+
+def test_reconcile_task_leaves_nonterminal_gateway_attempt_running(tmp_path):
+    gateway_id = "gateway-task-1"
+
+    def http(method, url, **_kwargs):
+        assert method == "GET"
+        assert gateway_id in url
+        return {"task_id": gateway_id, "status": "running"}
+
+    config, executor, task_dir, checkpoint = _reconcile_fixture(
+        tmp_path,
+        gateway_id,
+        {"gateway_task_id": gateway_id, "status": "running"},
+        http_runner=http,
+    )
+    outcome = executor.reconcile_task(TaskSpec("arvo:1", "arvo"), task_dir, "attempt-1", checkpoint)
+    assert outcome["status"] == "infra_failed"
+    assert outcome["lifecycle"] == "reconcile_pending"
+    assert outcome["reconcile_disposition"] == "left_running"
+    assert outcome["gateway_task_id"] == gateway_id
+    frame = json.loads(checkpoint.read_text(encoding="utf-8"))
+    assert frame["reconciled"] is True
+    assert frame["reconcile_source"] == "gateway_poll"
+    assert config.run_root in pathlib.Path(outcome["artifact_refs"]["task_dir"]).parents
+
+
+def test_reconcile_task_malformed_checkpoint_is_undeliverable(tmp_path):
+    config = _config(tmp_path)
+    executor = CyberGymExecutor(config)
+    task_dir = config.run_root / "arvo_1"
+    task_dir.mkdir()
+    checkpoint = task_dir / "gateway_checkpoint.json"
+    checkpoint.write_text("{not-json", encoding="utf-8")
+    outcome = executor.reconcile_task(TaskSpec("arvo:1", "arvo"), task_dir, "attempt-1", checkpoint)
+    assert outcome["status"] == "infra_failed"
+    assert outcome["lifecycle"] == "reconcile_blocked"
+    assert outcome["reconcile_disposition"] == "undeliverable"
+    assert outcome["infra_reason"] == "ExecutorFailure"
+
+
+def test_reconcile_task_delivers_terminal_failure_from_isolate_disk(tmp_path):
+    gateway_id = "gateway-task-9"
+    external = tmp_path / "nvme" / "ouroboros-data"
+    records = external / "task_results"
+    records.mkdir(parents=True)
+    (records / f"{gateway_id}.json").write_text(
+        json.dumps({"task_id": gateway_id, "status": "failed", "error": "worker crashed"}),
+        encoding="utf-8",
+    )
+
+    def http(*_args, **_kwargs):
+        raise ExecutorFailure("isolate gateway is down")
+
+    config, executor, task_dir, checkpoint = _reconcile_fixture(
+        tmp_path,
+        gateway_id,
+        {"gateway_task_id": gateway_id, "status": "running"},
+        http_runner=http,
+        isolate_data_root=external,
+    )
+    outcome = executor.reconcile_task(TaskSpec("arvo:1", "arvo"), task_dir, "attempt-1", checkpoint)
+    # A terminal non-completed result delivers its typed infra row without
+    # touching Docker; the launcher records that as a delivered row.
+    assert outcome["status"] == "infra_failed"
+    assert outcome["lifecycle"] == "gateway_terminal"
+    assert outcome["infra_reason"] == "failed"
+    assert "reconcile_disposition" not in outcome
+    frame = json.loads(checkpoint.read_text(encoding="utf-8"))
+    assert frame["reconciled"] is True
+    assert frame["reconcile_source"] == "isolate_task_results"
+
+
+def test_reconcile_task_without_isolate_root_has_no_disk_fallback(tmp_path):
+    gateway_id = "gateway-task-10"
+
+    def http(*_args, **_kwargs):
+        raise ExecutorFailure("isolate gateway is down")
+
+    _config_unused, executor, task_dir, checkpoint = _reconcile_fixture(
+        tmp_path,
+        gateway_id,
+        {"gateway_task_id": gateway_id, "status": "running"},
+        http_runner=http,
+    )
+    outcome = executor.reconcile_task(TaskSpec("arvo:1", "arvo"), task_dir, "attempt-1", checkpoint)
+    assert outcome["reconcile_disposition"] == "undeliverable"
+    assert outcome["lifecycle"] == "reconcile_blocked"
+
+
+def _adopt_fixture(tmp_path, monkeypatch, *, server_labels, network_labels=None):
+    server_id = "a" * 64
+    network_id = "b" * 64
+    settings = tmp_path / "settings_applied.json"
+    settings.write_text(
+        json.dumps({
+            "OUROBOROS_MODEL": "deepseek/deepseek-v4-flash-0731",
+            "OUROBOROS_OR_PROVIDER": {"allow_fallbacks": True, "require_parameters": True},
+        }),
+        encoding="utf-8",
+    )
+    monkeypatch.setenv("CYBERGYM_API_KEY", "test-cybergym-key")
+
+    def commands(argv, **_kwargs):
+        parts = list(argv)
+        if "inspect" in parts and "container" in parts:
+            return CommandResult(0, json.dumps([{
+                "Id": server_id,
+                "Config": {"Labels": dict(server_labels)},
+                "State": {"Status": "running"},
+            }]))
+        if "inspect" in parts and "network" in parts:
+            if network_labels is None:
+                return CommandResult(1, "", "no such network")
+            return CommandResult(0, json.dumps([{
+                "Id": network_id,
+                "Labels": dict(network_labels),
+            }]))
+        raise AssertionError(f"unexpected command: {parts}")
+
+    config = _config(tmp_path, settings_path=settings, command_runner=commands)
+    executor = CyberGymExecutor(config)
+    (config.run_root / "sidecar_state.json").write_text(
+        json.dumps({"server_id": server_id, "network_id": network_id}),
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(executor, "_wait_server", lambda *_args, **_kwargs: None)
+    return executor, server_id, network_id
+
+
+def test_adopt_campaign_registers_attested_resources_and_detaches(tmp_path, monkeypatch):
+    executor, server_id, network_id = _adopt_fixture(
+        tmp_path,
+        monkeypatch,
+        server_labels={"com.ouroboros.campaign": "test-campaign"},
+        network_labels={"com.ouroboros.campaign": "test-campaign"},
+    )
+    report = executor.adopt_campaign()
+    assert report["status"] == "adopted"
+    assert report["ok"] is True
+    assert executor.started is True
+    assert executor.server_id == server_id
+    assert executor.network_id == network_id
+
+    cleanup = executor.close()
+    assert cleanup["status"] == "detached"
+    assert cleanup["adopted"] is True
+    assert cleanup["server_id"] == server_id
+    assert executor.started is False
+    # Detach never removes the adopted campaign resources.
+    assert executor.server_id == ""
+    assert executor.network_id == ""
+
+
+def test_adopt_campaign_rejects_foreign_server_container(tmp_path, monkeypatch):
+    executor, _server_id, _network_id = _adopt_fixture(
+        tmp_path,
+        monkeypatch,
+        server_labels={"com.ouroboros.campaign": "another-campaign"},
+        network_labels={"com.ouroboros.campaign": "test-campaign"},
+    )
+    with pytest.raises(ExecutorFailure, match="ownership attestation"):
+        executor.adopt_campaign()
+    assert executor.started is False

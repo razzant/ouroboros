@@ -1076,6 +1076,119 @@ def _task_spec(value: TaskSpec | Mapping[str, Any] | str) -> TaskSpec:
     return TaskSpec(task_id, task_id.split(":", 1)[0])
 
 
+def finalize_outcome_row(
+    root: pathlib.Path,
+    task: TaskSpec,
+    task_dir: pathlib.Path,
+    outcome: dict[str, Any],
+    *,
+    attempt_id: str,
+    contract: Mapping[str, Any] | None,
+) -> dict[str, Any]:
+    """Build the denominator-preserving row for one finished attempt outcome.
+
+    Shared by ``run_campaign`` and the launcher's reconcile mode so a
+    redelivered terminal result is projected, validated, and rendered exactly
+    like a live one.  ``outcome`` is updated in place with the terminal
+    gateway accounting projection.  This function does not append the row or
+    settle the claim; callers own both side effects.
+    """
+    # A terminal gateway result is the only authoritative source for an
+    # outer-ledger bound when the executor stopped during custody.  Project
+    # its TOTAL accounted amount before building the row and settling the
+    # claim; the inner unresolved remainder alone would omit already-settled
+    # gateway usage.
+    terminal_accounting = _terminal_gateway_accounting(outcome.get("runtime_result"))
+    if terminal_accounting:
+        outcome.update(terminal_accounting)
+    requested_status = str(outcome.get("status") or "completed").strip().lower()
+    raw_cost_estimated = outcome.get("cost_estimated")
+    if raw_cost_estimated not in (None, False, True):
+        raise LedgerError("cost_estimated must be a boolean")
+    raw_cost_final = outcome.get("cost_final")
+    if raw_cost_final not in (None, False, True):
+        raise LedgerError("cost_final must be a boolean")
+    cost_unverifiable = (
+        raw_cost_estimated is True
+        or outcome.get("cost_usd") is None
+        or raw_cost_final is not True
+    )
+    if requested_status == "completed" and cost_unverifiable:
+        # A completed row without an exact provider charge would make the hard
+        # campaign cap unverifiable.  Keep the attempt as an infra result and
+        # leave its reservation unresolved for the caller.
+        requested_status = "infra_failed"
+        outcome["lifecycle"] = "cost_unverifiable"
+        outcome["infra_reason"] = "cost_unverifiable"
+    if requested_status == "completed":
+        observed_effort = validate_high_effort(
+            outcome.get("observed_effort"), field="observed_effort"
+        )
+    else:
+        observed_effort = str(outcome.get("observed_effort") or "")
+    final_poc = outcome.get("final_poc")
+    marker_record: FinalPoc | None = None
+    if requested_status == "completed":
+        marker_record = final_poc_record(task_dir)
+        declared_hash = str(outcome.get("final_poc_sha256") or "").strip().lower()
+        if declared_hash and declared_hash != marker_record.sha256:
+            raise FinalPocRefused("executor final_poc_sha256 does not match final.poc")
+        if final_poc is not None:
+            if isinstance(final_poc, FinalPoc):
+                supplied_hash = final_poc.sha256
+            elif isinstance(final_poc, Mapping):
+                supplied_hash = str(final_poc.get("sha256", final_poc.get("poc_hash", "")))
+            else:
+                supplied_hash = final_poc_hash(final_poc)
+            if supplied_hash and supplied_hash.strip().lower() != marker_record.sha256:
+                raise FinalPocRefused("executor final_poc does not match final.poc")
+        final_poc = marker_record
+    elif final_poc is None and (task_dir / FINAL_POC_BASENAME).exists():
+        marker_record = final_poc_record(task_dir)
+        final_poc = marker_record
+    return build_task_result_row(
+        task.task_id,
+        trials=outcome.get("trials") or (),
+        final_trial=outcome.get("final_trial"),
+        final_poc=final_poc,
+        status=requested_status,
+        lifecycle=str(outcome.get("lifecycle") or "completed"),
+        capability_outcome=str(outcome.get("capability_outcome") or ""),
+        level=task.level,
+        masked_id=str(outcome.get("masked_id") or ""),
+        masked_id_source=str(outcome.get("masked_id_source") or ""),
+        observed_provider=str(outcome.get("observed_provider") or ""),
+        observed_provider_attempts=outcome.get("observed_provider_attempts") or (),
+        observed_model=str(outcome.get("observed_model") or ""),
+        observed_effort=observed_effort,
+        observed_effort_source=str(outcome.get("observed_effort_source") or ""),
+        prompt_tokens=outcome.get("prompt_tokens"),
+        completion_tokens=outcome.get("completion_tokens"),
+        cached_tokens=outcome.get("cached_tokens"),
+        cost_usd=outcome.get("cost_usd"),
+        cost_estimated=outcome.get("cost_estimated"),
+        cost_status=str(outcome.get("cost_status") or ""),
+        infra_reason=str(outcome.get("infra_reason") or ""),
+        leakage=outcome.get("leakage"),
+        artifact_refs=outcome.get("artifact_refs") or {"task_dir": str(task_dir)},
+        error=str(outcome.get("error") or ""),
+        runtime_result=outcome.get("runtime_result"),
+        task_contract=contract,
+        attempt_id=str(attempt_id),
+    )
+
+
+def settle_finished_attempt(
+    ledger: "BudgetLedger", attempt_id: str, outcome: Mapping[str, Any]
+) -> None:
+    """Settle a finished attempt's claim from its outcome, or mark it unresolved."""
+    actual = _finished_attempt_actual_usd(outcome)
+    if actual is not None:
+        ledger.settle(str(attempt_id), actual)
+    else:
+        ledger.mark_unresolved(str(attempt_id), 0.0)
+
+
 def run_campaign(
     tasks: Sequence[TaskSpec | Mapping[str, Any] | str],
     *,
@@ -1201,98 +1314,17 @@ def run_campaign(
             if not isinstance(result, Mapping):
                 raise CyberGymIntegrationUnavailable("CyberGym executor must return a mapping")
             outcome = dict(result)
-            # A terminal gateway result is the only authoritative source for
-            # an outer-ledger bound when the executor stopped during custody.
-            # Project its TOTAL accounted amount before building the row and
-            # settling/unresolving the claim; the inner unresolved remainder
-            # alone would omit already-settled gateway usage.
-            terminal_accounting = _terminal_gateway_accounting(
-                outcome.get("runtime_result")
-            )
-            if terminal_accounting:
-                outcome.update(terminal_accounting)
-            requested_status = str(outcome.get("status") or "completed").strip().lower()
-            raw_cost_estimated = outcome.get("cost_estimated")
-            if raw_cost_estimated not in (None, False, True):
-                raise LedgerError("cost_estimated must be a boolean")
-            raw_cost_final = outcome.get("cost_final")
-            if raw_cost_final not in (None, False, True):
-                raise LedgerError("cost_final must be a boolean")
-            cost_unverifiable = (
-                raw_cost_estimated is True
-                or outcome.get("cost_usd") is None
-                or raw_cost_final is not True
-            )
-            if requested_status == "completed" and cost_unverifiable:
-                # A completed row without an exact provider charge would make
-                # the hard campaign cap unverifiable.  Keep the attempt as an
-                # infra result and leave its reservation unresolved below.
-                requested_status = "infra_failed"
-                outcome["lifecycle"] = "cost_unverifiable"
-                outcome["infra_reason"] = "cost_unverifiable"
-            if requested_status == "completed":
-                observed_effort = validate_high_effort(
-                    outcome.get("observed_effort"), field="observed_effort"
-                )
-            else:
-                observed_effort = str(outcome.get("observed_effort") or "")
-            final_poc = outcome.get("final_poc")
-            marker_record: FinalPoc | None = None
-            if requested_status == "completed":
-                marker_record = final_poc_record(task_dir)
-                declared_hash = str(outcome.get("final_poc_sha256") or "").strip().lower()
-                if declared_hash and declared_hash != marker_record.sha256:
-                    raise FinalPocRefused("executor final_poc_sha256 does not match final.poc")
-                if final_poc is not None:
-                    if isinstance(final_poc, FinalPoc):
-                        supplied_hash = final_poc.sha256
-                    elif isinstance(final_poc, Mapping):
-                        supplied_hash = str(final_poc.get("sha256", final_poc.get("poc_hash", "")))
-                    else:
-                        supplied_hash = final_poc_hash(final_poc)
-                    if supplied_hash and supplied_hash.strip().lower() != marker_record.sha256:
-                        raise FinalPocRefused("executor final_poc does not match final.poc")
-                final_poc = marker_record
-            elif final_poc is None and (task_dir / FINAL_POC_BASENAME).exists():
-                marker_record = final_poc_record(task_dir)
-                final_poc = marker_record
-            row = build_task_result_row(
-                task.task_id,
-                trials=outcome.get("trials") or (),
-                final_trial=outcome.get("final_trial"),
-                final_poc=final_poc,
-                status=requested_status,
-                lifecycle=str(outcome.get("lifecycle") or "completed"),
-                capability_outcome=str(outcome.get("capability_outcome") or ""),
-                level=task.level,
-                masked_id=str(outcome.get("masked_id") or ""),
-                masked_id_source=str(outcome.get("masked_id_source") or ""),
-                observed_provider=str(outcome.get("observed_provider") or ""),
-                observed_provider_attempts=outcome.get("observed_provider_attempts") or (),
-                observed_model=str(outcome.get("observed_model") or ""),
-                observed_effort=observed_effort,
-                observed_effort_source=str(outcome.get("observed_effort_source") or ""),
-                prompt_tokens=outcome.get("prompt_tokens"),
-                completion_tokens=outcome.get("completion_tokens"),
-                cached_tokens=outcome.get("cached_tokens"),
-                cost_usd=outcome.get("cost_usd"),
-                cost_estimated=outcome.get("cost_estimated"),
-                cost_status=str(outcome.get("cost_status") or ""),
-                infra_reason=str(outcome.get("infra_reason") or ""),
-                leakage=outcome.get("leakage"),
-                artifact_refs=outcome.get("artifact_refs") or {"task_dir": str(task_dir)},
-                error=str(outcome.get("error") or ""),
-                runtime_result=outcome.get("runtime_result"),
-                task_contract=callback_contract
+            row = finalize_outcome_row(
+                root,
+                task,
+                task_dir,
+                outcome,
+                attempt_id=str(claim["attempt_id"]),
+                contract=callback_contract
                 if callback_contract is not None
                 else (contract if isinstance(contract, Mapping) else None),
-                attempt_id=str(claim["attempt_id"]),
             )
-            actual = _finished_attempt_actual_usd(outcome)
-            if actual is not None:
-                ledger.settle(str(claim["attempt_id"]), actual)
-            else:
-                ledger.mark_unresolved(str(claim["attempt_id"]), 0.0)
+            settle_finished_attempt(ledger, str(claim["attempt_id"]), outcome)
         except BudgetOverspend as exc:
             budget_refs = dict(outcome.get("artifact_refs") or {})
             budget_refs.setdefault("task_dir", str(task_dir))

@@ -139,6 +139,7 @@ def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--out-dir", default="", help="append-only benchmark output root")
     parser.add_argument("--run-id", default="")
     parser.add_argument("--state-dir", default="", help="external local-disk directory for isolated-server mutable state")
+    parser.add_argument("--reconcile", default="", help="adopt an interrupted run root and deliver its terminal gateway results")
     parser.add_argument("--budget-usd", type=float, default=DEFAULT_BUDGET_CAP_USD)
     parser.add_argument("--per-task-estimate-usd", type=float, default=None,
                         help="finite reservation required for a paid injected executor")
@@ -307,9 +308,8 @@ def _validate_launcher_values(args: argparse.Namespace) -> None:
     """Normalize scalar launch values and enforce the campaign safety rails.
 
     This function is deliberately filesystem-free.  Paid input hashes are
-    required here so an invalid or incomplete declaration cannot reach server
-    startup; the bytes themselves are attested by the concrete executor after
-    admission.
+    required here so an invalid declaration cannot reach server startup; the
+    bytes themselves are attested by the concrete executor after admission.
     """
     args.model = validate_model_pin(args.model, expected=OFFICIAL_MODEL)
     args.budget_usd = validate_positive_finite(args.budget_usd, field="budget_usd")
@@ -723,8 +723,7 @@ def _cleanup_execution_resources(
     A callback may return ``{"ok": False}`` when a late gateway result still
     owns live workers; the server then stays alive for reattachment, and both
     decisions persist through the manifest finalizer.  Cleanup errors are
-    recorded without copying endpoint or credential data from messages.
-    """
+    recorded without copying endpoint or credential data from messages."""
     extra = manifest.setdefault("extra", {})
     executor_cleanup: dict[str, Any] = {
         "attempted": False,
@@ -846,9 +845,8 @@ def _prepare_applied_settings(
 
     The template is read only after ``admit_benchmark_run`` has persisted the
     manifest.  ``build_isolated_settings`` filters credentials and legacy keys;
-    explicit benchmark overrides then become the applied, auditable settings
-    for an injected server.  The snapshot is an ordinary run artifact, never
-    the live settings path.
+    explicit benchmark overrides become the applied, auditable settings for an
+    injected server — an ordinary run artifact, never the live settings path.
     """
     try:
         template = json.loads(template_path.read_text(encoding="utf-8"))
@@ -1071,6 +1069,9 @@ def _prepare_applied_settings(
 def main(argv: Sequence[str] | None = None) -> int:
     args = parse_args(argv)
 
+    if str(getattr(args, "reconcile", "") or "").strip():
+        from devtools.benchmarks.cybergym.cybergym_reconcile import reconcile_main
+        return reconcile_main(args)
     # Everything through this point is argument/path arithmetic.  In particular,
     # do not read tasks.json, inspect Docker, import the optional upstream package,
     # or create a directory before the shared admission manifest exists.
