@@ -792,3 +792,134 @@ def test_bounded_fence_wait_terminalizes_via_forced_fallback(monkeypatch, tmp_pa
     assert usage["execution_status"] == RESULT_INFRA_FAILED
     assert usage["reason_code"] == "acceptance_fence_unavailable"
     assert "could not start its acceptance review" in text
+
+
+class _DeadProc:
+    pid = 0
+
+    def is_alive(self):
+        return False
+
+    def join(self, timeout=None):
+        return None
+
+
+def test_enforce_reap_confirmed_death_forgets_and_releases(monkeypatch, tmp_path):
+    """Real wiring: the enforce hand-off registers the owner as not-provably-dead
+    (its fence survives the sweep), and the reaper's confirmed death forgets the
+    registry id and releases the fence itself."""
+    from supervisor import task_reaper
+    from supervisor import workers as workers_mod
+
+    queue_mod, _pending = _isolated_queue(monkeypatch, tmp_path)
+    queue_mod.transition_acceptance_fence(
+        action="begin", token="a" * 32, root_task_id="root-1", task_id="root-1",
+    )
+    monkeypatch.setattr(queue_mod, "FINALIZATION_GRACE_SEC", 0)
+    monkeypatch.setattr(queue_mod, "load_state", lambda: {})
+    monkeypatch.setattr(queue_mod, "_ensure_reaper_started", lambda: None)
+    monkeypatch.setattr(queue_mod, "_reap_queue", queue_mod._stdqueue.Queue())
+    monkeypatch.setattr(workers_mod, "WORKERS", {
+        1: SimpleNamespace(busy_task_id="root-1", proc=_DeadProc(), reaping=False),
+    })
+    monkeypatch.setattr(workers_mod, "respawn_worker", lambda worker_id: None)
+    monkeypatch.setattr(workers_mod, "get_event_q", lambda: SimpleNamespace(put=lambda *a, **k: None))
+    monkeypatch.setattr("supervisor.task_reaper.send_with_budget", lambda *a, **k: None)
+    now = time.time()
+    queue_mod.RUNNING["root-1"] = {
+        "task": {"id": "root-1", "type": "task", "deadline_at": "2000-01-01T00:00:00Z"},
+        "started_at": now - 30, "last_heartbeat_at": now - 30, "worker_id": 1, "attempt": 1,
+    }
+
+    queue_mod.enforce_task_timeouts()
+
+    # Popped from RUNNING into the reaper: the registry protects the fence.
+    assert "root-1" not in queue_mod.RUNNING
+    assert task_reaper.task_reaping_in_progress("root-1")
+    assert queue_mod.gc_acceptance_fences_for_dead_owners() == []
+    assert "root-1" in queue_mod.ACCEPTANCE_FENCES
+
+    while not queue_mod._reap_queue.empty():
+        queue_mod._reap_timed_out_task(queue_mod._reap_queue.get_nowait())
+
+    # Confirmed death: the reaper forgot the id and released the fence.
+    assert not task_reaper.task_reaping_in_progress("root-1")
+    assert "root-1" not in queue_mod.ACCEPTANCE_FENCES
+
+
+def test_wedged_owner_orphan_heal_forgets_and_releases(monkeypatch, tmp_path):
+    """A wedged (kill-unconfirmed) owner keeps its fence while possibly alive;
+    when the orphaned-running sweep later terminalizes the provably-dead task,
+    the registry id is forgotten and the fence is released."""
+    from supervisor import task_reaper
+    from ouroboros.task_results import (
+        STATUS_FAILED,
+        STATUS_RUNNING,
+        load_task_result,
+        write_task_result,
+    )
+    from ouroboros.task_status import reconcile_orphaned_running_tasks
+    from ouroboros.utils import append_jsonl
+
+    queue_mod, _pending = _isolated_queue(monkeypatch, tmp_path)
+    queue_mod.transition_acceptance_fence(
+        action="begin", token="a" * 32, root_task_id="root-w", task_id="root-w",
+    )
+    task_reaper.note_task_reaping("root-w")  # wedged hold: kill never confirmed
+    try:
+        assert queue_mod.gc_acceptance_fences_for_dead_owners() == []
+        assert "root-w" in queue_mod.ACCEPTANCE_FENCES
+
+        monkeypatch.setattr(time, "time", lambda: 1_800_000_000.0)
+        write_task_result(
+            tmp_path, "root-w", STATUS_RUNNING,
+            result="held reaping, task left running", ts="2026-05-28T00:00:00+00:00",
+        )
+        (tmp_path / "state").mkdir(exist_ok=True)
+        (tmp_path / "state" / "queue_snapshot.json").write_text(
+            '{"pending": [], "running": []}', encoding="utf-8",
+        )
+        events = tmp_path / "logs" / "events.jsonl"
+        append_jsonl(events, {"ts": "2026-05-28T00:00:01+00:00", "type": "llm_round", "task_id": "root-w"})
+        append_jsonl(events, {"ts": "2026-05-28T00:00:02+00:00", "type": "worker_boot"})
+
+        healed = reconcile_orphaned_running_tasks(tmp_path)
+
+        assert healed == 1
+        assert load_task_result(tmp_path, "root-w")["status"] == STATUS_FAILED
+        assert not task_reaper.task_reaping_in_progress("root-w")
+        assert "root-w" not in queue_mod.ACCEPTANCE_FENCES
+    finally:
+        task_reaper._forget_task_reaping("root-w")
+
+
+def test_reaper_exception_path_forgets_registry_id(monkeypatch, tmp_path):
+    """A reap job that raises before death confirmation must not leave the task
+    id in the not-provably-dead registry for the rest of the uptime."""
+    from supervisor import task_reaper
+
+    _isolated_queue(monkeypatch, tmp_path)  # clears the reaping registry
+    task_reaper.note_task_reaping("root-x")
+    # worker_id is not an int: reap_timed_out_task raises during variable
+    # extraction, before any kill is attempted.
+    task_reaper.reap_queue.put({"worker_id": "not-an-int", "task_id": "root-x"})
+    task_reaper.ensure_reaper_started()
+    deadline = time.time() + 10
+    while time.time() < deadline and task_reaper.task_reaping_in_progress("root-x"):
+        time.sleep(0.05)
+    assert not task_reaper.task_reaping_in_progress("root-x")
+
+
+def test_chat_turn_liveness_form(monkeypatch):
+    """None agent -> not live; busy agent -> live with its task id; idle -> not live."""
+    from supervisor import workers
+
+    monkeypatch.setattr(workers, "_chat_agent", None)
+    assert workers.chat_turn_liveness() == (False, None, None)
+    monkeypatch.setattr(
+        workers, "_chat_agent",
+        SimpleNamespace(_busy=True, _current_task_id="root-1", _last_activity_ts=42.0),
+    )
+    assert workers.chat_turn_liveness() == (True, "root-1", 42.0)
+    workers._chat_agent._busy = False
+    assert workers.chat_turn_liveness() == (False, None, None)

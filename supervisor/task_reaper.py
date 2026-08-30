@@ -68,6 +68,9 @@ def reaper_loop() -> None:
             # the crash detector skips reaping slots, so it would be unrecoverable until restart.
             # Clear reaping (the same conservative recovery step 5 uses) so a later tick reclaims
             # it; do NOT respawn here (an early escape may have left the original worker alive).
+            # The abandoned job also leaves the not-provably-dead registry: the
+            # orphaned-running sweep terminalizes the task and releases its fence.
+            _forget_task_reaping(str((job or {}).get("task_id") or ""))
             try:
                 from supervisor import workers as _w_mod
                 from supervisor.queue import _queue_lock as _ql
