@@ -4428,14 +4428,12 @@ def _run_forced_children_acceptance(
 ) -> None:
     """Content acceptance still runs on the forced children_unabsorbed rail (owner Q2A).
 
-    The panel uses the ORDINARY entry point
-    (`_run_task_acceptance_review_once`) after the forced answer text exists
-    but BEFORE the loop seals it; the evidence packet carries the
-    undispositioned children via the ctx stash. The forced rail can never
-    take another model round, so a ``True`` return terminalizes here: a
-    requested improvement pass downgrades to ``finalized_unaccepted``; a WAIT
-    shape that never ran the panel keeps the typed acceptance-bypass verdict
-    from `_record_forced_finalization`. Never raises — salvage outranks review."""
+    The panel uses the ORDINARY entry point (``_run_task_acceptance_review_once``)
+    after the forced answer text exists but BEFORE the loop seals it; the evidence
+    packet carries the undispositioned children via the ctx stash. The forced rail
+    can never take another model round, so a ``True`` return terminalizes here: a
+    requested improvement pass downgrades to ``finalized_unaccepted``; a WAIT shape
+    that never ran the panel keeps the typed acceptance-bypass verdict. Never raises."""
     if not str(text or "").strip():
         return
     tools_ctx = tools._ctx
@@ -4456,15 +4454,11 @@ def _run_forced_children_acceptance(
             debt.append({"omitted": len(undecided) - 20, "total": len(undecided)})
         tools_ctx._forced_undispositioned_children = debt
         another_round = _run_task_acceptance_review_once(
-            tools=tools,
-            content=str(text),
-            task_id=limit_ctx.task_id,
-            task_type=limit_ctx.task_type,
-            llm_trace=llm_trace,
-            drive_root=limit_ctx.drive_root,
-            messages=messages,
-            emit_progress=emit_progress,
+            tools=tools, content=str(text), task_id=limit_ctx.task_id, task_type=limit_ctx.task_type,
+            llm_trace=llm_trace, drive_root=limit_ctx.drive_root, messages=messages, emit_progress=emit_progress,
         )
+        # This rail never reaches _no_tool_final_answer (the flag's only reader).
+        tools_ctx._task_acceptance_fence_infra_failed = False
         if not another_round:
             return
         tools_ctx._task_acceptance_reviewed = True
@@ -4485,8 +4479,7 @@ def _run_forced_children_acceptance(
             })
             emit_progress(
                 "Task acceptance ran on the forced rail; the requested improvement "
-                "pass is unavailable, finalizing unaccepted."
-            )
+                "pass is unavailable, finalizing unaccepted.")
     except Exception:
         log.debug("Forced children_unabsorbed acceptance run failed", exc_info=True)
     finally:

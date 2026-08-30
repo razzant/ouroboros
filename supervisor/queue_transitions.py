@@ -1,12 +1,9 @@
 """Queue-owned lifecycle TRANSITIONS that are not cancellation custody.
 
 Extracted from ``supervisor/task_lifecycle.py`` for the module-size gate: the
-acceptance FENCE (open/inspect/seal a root against new subtask admission while
-its acceptance review runs), explicit BUDGET resume, fenced PROJECT deletion,
-and shared live-subtree / timeout-retry lineage views — each a queue-owned
-transition or read-side view of ADMISSION/QUIESCENCE state driven through the
-queue module. One-way dependency: the queue is reached lazily and nothing is
-imported from ``task_lifecycle`` (which re-exports these names).
+acceptance FENCE, explicit BUDGET resume, fenced PROJECT deletion, and shared
+live-subtree / timeout-retry lineage views. One-way dependency: the queue is
+reached lazily; nothing is imported from ``task_lifecycle``.
 """
 
 from __future__ import annotations
@@ -32,9 +29,10 @@ def _queue_module():
 
 def _acceptance_fence_owner_dead_locked(q: Any, fence: Dict[str, Any]) -> bool:
     """True when the fence's recorded owner task is provably not live: not
-    RUNNING, not PENDING (a same-id retry waiting behind the fence), and not in
-    the reaper's not-yet-provably-dead registry (a wedged kill holds the task
-    out of RUNNING while the worker may still live).  Caller holds ``q._queue_lock``."""
+    RUNNING, not PENDING (a same-id retry waiting behind the fence), not in the
+    reaper's not-yet-provably-dead registry (a wedged kill holds the task out of
+    RUNNING while the worker may still live), and not the in-process direct-chat
+    lane currently running it (never in RUNNING/PENDING).  Caller holds ``q._queue_lock``."""
     owner = str(fence.get("task_id") or "").strip()
     if not owner:
         return False  # no owner recorded: not provably dead
@@ -43,9 +41,13 @@ def _acceptance_fence_owner_dead_locked(q: Any, fence: Dict[str, Any]) -> bool:
     for task in q.PENDING:
         if isinstance(task, dict) and str(task.get("id") or "") == owner:
             return False
+    from supervisor import workers
     from supervisor.task_reaper import task_reaping_in_progress
 
-    return not task_reaping_in_progress(owner)
+    if task_reaping_in_progress(owner):
+        return False
+    busy, live_task_id, _activity = workers.chat_turn_liveness()
+    return not (busy and str(live_task_id or "") == owner)
 
 
 def transition_acceptance_fence(
@@ -59,6 +61,7 @@ def transition_acceptance_fence(
     root_task_id = str(root_task_id or task_id or "").strip()
     if not token or action not in {"begin", "inspect", "end"}:
         return {"ok": False, "status": "error", "error": "invalid acceptance fence event"}
+    reconcile_event = None  # emitted AFTER lock release: file IO under the lock stalls every queue reader on a slow FS
     with q._queue_lock:
         if action == "begin":
             if not root_task_id:
@@ -69,32 +72,29 @@ def transition_acceptance_fence(
                 if str(existing.get("status") or "") != "active":
                     # A sealed fence terminalizes with its task on task_done.
                     return {"ok": False, "status": "error",
-                            "error": f"acceptance fence already active for root {root_task_id}"}
+                            "error": f"acceptance fence already sealed for root {root_task_id}"}
                 if _acceptance_fence_owner_dead_locked(q, existing):
-                    # Dead-owner reconcile: the leaked fence is replaced by the
-                    # new owner's fresh row (its review restarts the boundary).
-                    q.append_jsonl(
-                        q.DRIVE_ROOT / "logs" / "supervisor.jsonl",
-                        {"ts": utc_now_iso(), "type": "acceptance_fence_dead_owner_reconciled", "root_task_id": root_task_id,
-                         "dead_task_id": str(existing.get("task_id") or ""), "new_task_id": str(task_id or root_task_id)},
-                    )
+                    # Dead-owner reconcile: the new owner's fresh row replaces the
+                    # leaked fence; the audit event is emitted after lock release.
+                    reconcile_event = {
+                        "ts": utc_now_iso(), "type": "acceptance_fence_dead_owner_reconciled", "root_task_id": root_task_id,
+                        "dead_task_id": str(existing.get("task_id") or ""), "new_task_id": str(task_id or root_task_id),
+                    }
                     existing = None
                     reconciled_dead_owner = True
                 else:
-                    # Idempotent re-adoption: a worker that lost its token (ack
-                    # timeout on a slow drive) adopts the EXISTING fence instead of
-                    # a paid retry spin; the mailbox drain still forces re-review.
+                    # Idempotent re-adoption: a worker that lost its token (ack timeout
+                    # on a slow drive) adopts the EXISTING fence instead of a paid retry spin.
                     re_adopted = True
             if isinstance(existing, dict):
                 row = existing
             else:
                 row = q.ACCEPTANCE_FENCES[root_task_id] = {
-                    "token": token, "root_task_id": root_task_id, "task_id": str(task_id or root_task_id),
-                    "status": "active", "opened_at": utc_now_iso(), "owner_message_generation": 0,
+                    "token": token, "root_task_id": root_task_id, "task_id": str(task_id or root_task_id), "status": "active",
+                    "opened_at": utc_now_iso(), "owner_message_generation": 0,
                 }
             result = {
-                "ok": True, "status": "active", "root_task_id": root_task_id,
-                "token": str(row.get("token") or token),
+                "ok": True, "status": "active", "root_task_id": root_task_id, "token": str(row.get("token") or token),
                 "owner_message_generation": int(row.get("owner_message_generation") or 0),
                 "queue_descendants": _live_descendants_locked(q, root_task_id, exclude_task_id=str(task_id or root_task_id)),
             }
@@ -110,8 +110,8 @@ def transition_acceptance_fence(
             row = q.ACCEPTANCE_FENCES[matched_root]
             if action == "inspect":
                 return {
-                    "ok": True, "status": str(row.get("status") or "active"), "root_task_id": matched_root,
-                    "token": token, "owner_message_generation": int(row.get("owner_message_generation") or 0),
+                    "ok": True, "status": str(row.get("status") or "active"), "root_task_id": matched_root, "token": token,
+                    "owner_message_generation": int(row.get("owner_message_generation") or 0),
                     "queue_descendants": _live_descendants_locked(
                         q, matched_root, exclude_task_id=str(row.get("task_id") or matched_root)),
                 }
@@ -123,15 +123,19 @@ def transition_acceptance_fence(
                     and int(row.get("owner_message_generation") or 0) != int(expected_generation)):
                 q.ACCEPTANCE_FENCES.pop(matched_root, None)
                 result = {
-                    "ok": True, "status": "released", "root_task_id": matched_root, "token": token,
-                    "generation_mismatch": True, "expected_generation": int(expected_generation),
-                    "owner_message_generation": int(row.get("owner_message_generation") or 0),
+                    "ok": True, "status": "released", "root_task_id": matched_root, "token": token, "generation_mismatch": True,
+                    "expected_generation": int(expected_generation), "owner_message_generation": int(row.get("owner_message_generation") or 0),
                 }
             else:
                 row["status"] = "sealed"
                 row["outcome"] = normalized_outcome or "terminal"
                 row["sealed_at"] = utc_now_iso()
                 result = {"ok": True, "status": "sealed", "root_task_id": matched_root, "token": token}
+    if reconcile_event is not None:
+        try:
+            q.append_jsonl(q.DRIVE_ROOT / "logs" / "supervisor.jsonl", reconcile_event)
+        except Exception:
+            log.warning("Failed to persist %s", reconcile_event["type"], exc_info=True)
     q.persist_queue_snapshot(reason=f"acceptance_fence_{result['status']}")
     return result
 
@@ -169,8 +173,7 @@ def clear_acceptance_fence_for_root(root_task_id: str) -> bool:
 
 def _drop_acceptance_fences(event_type: str, matches: Any, **extra: Any) -> List[str]:
     """Drop every fence row where ``matches(q, row)`` holds; audit + persist.
-    The fence has no lease of its own, so every teardown seam (reaper,
-    watchdog sweep) funnels through this one dropper; persist is best-effort."""
+    Every teardown seam (reaper, watchdog sweep) funnels here; persist is best-effort."""
     q = _queue_module()
     with q._queue_lock:
         roots = [root for root, row in q.ACCEPTANCE_FENCES.items() if isinstance(row, dict) and matches(q, row)]
@@ -189,11 +192,9 @@ def _drop_acceptance_fences(event_type: str, matches: Any, **extra: Any) -> List
 
 
 def release_acceptance_fence_for_dead_owner(task_id: str) -> bool:
-    """Release fences OWNED by one confirmed-dead task (reaper seam): matched on
-    the fence's recorded owner id (unlike ``clear_acceptance_fence_for_root``,
-    keyed by root on task_done), so a reaped child never drops its
-    still-reviewing root's fence.  Called after confirmed death and BEFORE
-    retry admission, which the stale fence would otherwise terminalize."""
+    """Release fences OWNED by one confirmed-dead task (reaper seam): matched on the
+    fence's recorded owner id, so a reaped child never drops its still-reviewing
+    root's fence.  Called after confirmed death, BEFORE retry admission."""
     task_id = str(task_id or "").strip()
     if not task_id:
         return False
@@ -205,9 +206,8 @@ def release_acceptance_fence_for_dead_owner(task_id: str) -> bool:
 
 
 def gc_acceptance_fences_for_dead_owners() -> List[str]:
-    """Watchdog sweep dropping fences whose owner is provably dead: task_done
-    clears a fence, but a worker killed mid-review never sends one.  Returns
-    the cleared root ids."""
+    """Watchdog sweep dropping fences whose owner is provably dead (task_done
+    clears a fence; a worker killed mid-review never sends one)."""
     return _drop_acceptance_fences(
         "acceptance_fence_dead_owner_gc", _acceptance_fence_owner_dead_locked,
     )

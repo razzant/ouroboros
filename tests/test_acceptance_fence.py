@@ -448,7 +448,7 @@ def test_sealed_fence_is_never_readopted(monkeypatch, tmp_path):
         action="begin", token="c" * 32, root_task_id="root-2", task_id="root-2",
     )
     assert rejected["ok"] is False
-    assert "already active" in rejected["error"]
+    assert "already sealed" in rejected["error"]
     assert queue_mod.ACCEPTANCE_FENCES["root-2"]["status"] == "sealed"
 
 
@@ -703,3 +703,92 @@ def test_acceptance_fence_config_getters_defaults_and_clamps(monkeypatch):
     assert get_acceptance_fence_ack_timeout_sec() == 120.0
     monkeypatch.setenv("OUROBOROS_ACCEPTANCE_FENCE_WAIT_MAX_ROUNDS", "junk")
     assert get_acceptance_fence_wait_max_rounds() == 3
+
+
+def test_direct_chat_owner_survives_gc_while_turn_busy(monkeypatch, tmp_path):
+    """The direct-chat lane runs in-process and never enters RUNNING/PENDING:
+    a fence whose owner is the currently-busy chat turn is ALIVE and must
+    survive both the sweep and the enforce_task_timeouts tick."""
+    from supervisor import workers
+
+    queue_mod, _pending = _isolated_queue(monkeypatch, tmp_path)
+    queue_mod.transition_acceptance_fence(
+        action="begin", token="a" * 32, root_task_id="root-dc", task_id="root-dc",
+    )
+    monkeypatch.setattr(workers, "chat_turn_liveness", lambda: (True, "root-dc", 123.0))
+    assert queue_mod.gc_acceptance_fences_for_dead_owners() == []
+    assert "root-dc" in queue_mod.ACCEPTANCE_FENCES
+    queue_mod.enforce_task_timeouts()
+    assert "root-dc" in queue_mod.ACCEPTANCE_FENCES
+    # A begin from the same live owner re-adopts; no dead-owner reconcile.
+    readopted = queue_mod.transition_acceptance_fence(
+        action="begin", token="b" * 32, root_task_id="root-dc", task_id="root-dc",
+    )
+    assert readopted["ok"] is True
+    assert readopted.get("re_adopted") is True
+    assert "reconciled_dead_owner" not in readopted
+
+
+def test_direct_chat_owner_collected_after_turn_goes_idle(monkeypatch, tmp_path):
+    """Once the chat turn is no longer busy — or after a restart, when the
+    in-process lane is gone — the same fence is collectable garbage."""
+    from supervisor import workers
+
+    queue_mod, _pending = _isolated_queue(monkeypatch, tmp_path)
+    queue_mod.transition_acceptance_fence(
+        action="begin", token="a" * 32, root_task_id="root-dc", task_id="root-dc",
+    )
+    monkeypatch.setattr(workers, "chat_turn_liveness", lambda: (False, None, None))
+    assert queue_mod.gc_acceptance_fences_for_dead_owners() == ["root-dc"]
+    assert "root-dc" not in queue_mod.ACCEPTANCE_FENCES
+
+
+def test_bounded_fence_wait_terminalizes_via_forced_fallback(monkeypatch, tmp_path):
+    """The bounded-wait flag set at the consecutive-failure cap must terminalize
+    the no-tool finalization path as infra_failed through the host-salvage seam
+    instead of finalizing past a review that never ran."""
+    import queue
+
+    import ouroboros.loop as loop_mod
+    from ouroboros.outcomes import RESULT_INFRA_FAILED
+    from ouroboros.tools.registry import ToolRegistry
+
+    registry = ToolRegistry(repo_dir=tmp_path, drive_root=tmp_path)
+    registry._ctx.task_id = "root-1"
+    registry._ctx.task_metadata = {"root_task_id": "root-1", "budget_drive_root": str(tmp_path)}
+    registry._ctx._task_acceptance_fence_infra_failed = True
+    trace = {"tool_calls": [], "reasoning_notes": []}
+    limit_ctx = loop_mod._RoundLimitContext(
+        [{"role": "user", "content": "task"}],
+        SimpleNamespace(),
+        "test-model",
+        "medium",
+        1,
+        tmp_path / "logs",
+        "root-1",
+        2,
+        None,
+        {},
+        "",
+        False,
+        10,
+        drive_root=tmp_path,
+        incoming_messages=None,
+        owner_msg_seen=set(),
+    )
+    loop_mod._finalize_limit_ctx(limit_ctx, registry, trace)
+    monkeypatch.setattr(loop_mod, "_resolve_delivery_control", lambda content, *_args: ("fresh", content))
+    monkeypatch.setattr(loop_mod, "_enforce_swarm_actions", lambda *_args: False)
+    monkeypatch.setattr(loop_mod, "_compute_subagent_handoff", lambda *_args: None)
+    monkeypatch.setattr(loop_mod, "_maybe_enforce_child_absorption_gate", lambda *_args: None)
+    monkeypatch.setattr(loop_mod, "_maybe_inject_finalization_nudges", lambda *_args: False)
+    monkeypatch.setattr(loop_mod, "_finalize_task_services", lambda *_args: False)
+    monkeypatch.setattr(loop_mod, "_run_task_acceptance_review_once", lambda **_kwargs: False)
+
+    # Empty content: no live delivery candidate, so the seam returns the fallback text.
+    text, usage, _trace = loop_mod._no_tool_final_answer(
+        "", limit_ctx, trace, registry, queue.Queue(), set(), lambda _msg: None,
+    )
+    assert usage["execution_status"] == RESULT_INFRA_FAILED
+    assert usage["reason_code"] == "acceptance_fence_unavailable"
+    assert "could not start its acceptance review" in text
