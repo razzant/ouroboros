@@ -153,6 +153,7 @@ from supervisor.task_admission import (  # noqa: E402,F401 - public queue API
 # the thin names the enforce path and tests use — monkeypatching these queue names still works.
 from supervisor.task_reaper import (  # noqa: E402,F401 — re-exported for enforce path + tests
     ensure_reaper_started as _ensure_reaper_started,
+    note_task_reaping as _note_task_reaping,
     reap_queue as _reap_queue,
     reap_timed_out_task as _reap_timed_out_task,
     request_finalization_grace as _request_finalization_grace,
@@ -1443,6 +1444,8 @@ def _enforce_task_timeouts_locked(
             retry_task_id = task_id if same_id else uuid.uuid4().hex[:8]
 
         _ensure_reaper_started()
+        # Not provably dead until the reaper confirms the kill — the fence sweep keeps its fence.
+        _note_task_reaping(str(task_id))
         _reap_queue.put({
             "worker_id": worker_id,
             "proc": proc_handle,

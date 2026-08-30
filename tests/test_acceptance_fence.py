@@ -10,11 +10,13 @@ import pytest
 
 def _isolated_queue(monkeypatch, tmp_path):
     from supervisor import queue as queue_mod
+    from supervisor import task_reaper
 
     pending = []
     running = {}
     queue_mod.init_queue_refs(pending, running, {"value": 0})
     queue_mod.ACCEPTANCE_FENCES.clear()
+    task_reaper._REAPING_TASK_IDS.clear()
     monkeypatch.setattr(queue_mod, "DRIVE_ROOT", tmp_path)
     monkeypatch.setattr(queue_mod, "QUEUE_SNAPSHOT_PATH", tmp_path / "state" / "queue_snapshot.json")
     return queue_mod, pending
@@ -582,3 +584,122 @@ def test_fence_wait_terminalizes_infra_failed_after_bounded_rounds(monkeypatch, 
     decision = trace["acceptance_decision"]
     assert decision["status"] == "finalized_unaccepted"
     assert decision["reason"] == "acceptance_fence_unavailable"
+
+
+def test_reaping_owner_is_not_dead_until_kill_confirmed(monkeypatch, tmp_path):
+    """Sol race: enforce_task_timeouts pops the owner from RUNNING and hands it
+    to the reaper; while the kill is unconfirmed (wedged hold) the worker may
+    still be alive, so the sweep and the begin-reconcile must KEEP its fence.
+    Only confirmed death releases it."""
+    from supervisor import task_reaper
+
+    queue_mod, _pending = _isolated_queue(monkeypatch, tmp_path)
+    queue_mod.transition_acceptance_fence(
+        action="begin", token="a" * 32, root_task_id="root-reap", task_id="root-reap",
+    )
+    # Owner popped from RUNNING into the reaper, kill not yet confirmed.
+    task_reaper.note_task_reaping("root-reap")
+    try:
+        assert queue_mod.gc_acceptance_fences_for_dead_owners() == []
+        assert "root-reap" in queue_mod.ACCEPTANCE_FENCES
+        # A begin for the same root re-adopts; it must NOT dead-owner-reconcile.
+        readopted = queue_mod.transition_acceptance_fence(
+            action="begin", token="b" * 32, root_task_id="root-reap", task_id="root-reap-retry",
+        )
+        assert readopted["ok"] is True
+        assert readopted.get("re_adopted") is True
+        assert "reconciled_dead_owner" not in readopted
+        assert queue_mod.ACCEPTANCE_FENCES["root-reap"]["token"] == "a" * 32
+    finally:
+        task_reaper._forget_task_reaping("root-reap")
+    # Confirmed death: the reaper forgets the id and releases the fence.
+    assert queue_mod.gc_acceptance_fences_for_dead_owners() == ["root-reap"]
+    assert "root-reap" not in queue_mod.ACCEPTANCE_FENCES
+
+
+def test_fence_wait_counter_resets_on_successful_begin(monkeypatch, tmp_path):
+    """The bounded wait counts CONSECUTIVE failures: a successful begin between
+    failures resets the counter, so fail/succeed/fail/fail must NOT terminalize
+    at the cap of 3 — only the third consecutive failure does."""
+    import ouroboros.loop as loop_mod
+    from ouroboros.tools.registry import ToolRegistry
+
+    monkeypatch.setenv("OUROBOROS_TASK_REVIEW_MODE", "auto")
+    monkeypatch.setenv("OUROBOROS_ACCEPTANCE_FENCE_WAIT_MAX_ROUNDS", "3")
+    registry = ToolRegistry(repo_dir=tmp_path, drive_root=tmp_path)
+    registry._ctx.task_id = "root-1"
+    registry._ctx.task_metadata = {
+        "task_id": "root-1",
+        "root_task_id": "root-1",
+        "parent_task_id": "",
+        "delegation_role": "root",
+    }
+    registry._ctx.task_contract = {}
+    begin_results = iter([(False, None), (True, "tok"), (False, None), (False, None), (False, None)])
+    monkeypatch.setattr(
+        loop_mod, "_begin_task_acceptance_fence", lambda *_args, **_kwargs: next(begin_results),
+    )
+    # The successful begin proceeds to a non-quiescent subtree wait (returns True).
+    monkeypatch.setattr(
+        loop_mod, "_task_acceptance_subtree_snapshot", lambda *_args, **_kwargs: (False, []),
+    )
+
+    def run_once(trace):
+        return loop_mod._run_task_acceptance_review_once(
+            tools=registry,
+            content="answer",
+            task_id="root-1",
+            task_type="task",
+            llm_trace=trace,
+            drive_root=tmp_path,
+            messages=[],
+            emit_progress=lambda _message: None,
+        )
+
+    trace = {"tool_calls": []}
+    assert run_once(trace) is True  # failure 1
+    assert registry._ctx._task_acceptance_fence_failures == 1
+
+    trace = {"tool_calls": []}
+    assert run_once(trace) is True  # successful begin resets the counter
+    assert registry._ctx._task_acceptance_fence_failures == 0
+    assert trace["review_decision"]["eligibility"] == "waiting_for_quiescence"
+
+    for expected_failures in (1, 2):
+        trace = {"tool_calls": []}
+        assert run_once(trace) is True  # failures 1 and 2 after the reset
+        assert registry._ctx._task_acceptance_fence_failures == expected_failures
+        assert not getattr(registry._ctx, "_task_acceptance_fence_infra_failed", False)
+
+    trace = {"tool_calls": []}
+    assert run_once(trace) is False  # third CONSECUTIVE failure terminalizes
+    assert registry._ctx._task_acceptance_fence_infra_failed is True
+    assert trace["acceptance_decision"]["reason"] == "acceptance_fence_unavailable"
+
+
+def test_acceptance_fence_config_getters_defaults_and_clamps(monkeypatch):
+    """The config SSOT getters ship 120s/3-round defaults, clamp to
+    [5, 900] / [1, 50], and fall back to the default on a malformed value."""
+    from ouroboros.config import (
+        get_acceptance_fence_ack_timeout_sec,
+        get_acceptance_fence_wait_max_rounds,
+    )
+
+    monkeypatch.delenv("OUROBOROS_ACCEPTANCE_FENCE_ACK_TIMEOUT_SEC", raising=False)
+    monkeypatch.delenv("OUROBOROS_ACCEPTANCE_FENCE_WAIT_MAX_ROUNDS", raising=False)
+    assert get_acceptance_fence_ack_timeout_sec() == 120.0
+    assert get_acceptance_fence_wait_max_rounds() == 3
+
+    monkeypatch.setenv("OUROBOROS_ACCEPTANCE_FENCE_ACK_TIMEOUT_SEC", "2")
+    assert get_acceptance_fence_ack_timeout_sec() == 5.0
+    monkeypatch.setenv("OUROBOROS_ACCEPTANCE_FENCE_ACK_TIMEOUT_SEC", "5000")
+    assert get_acceptance_fence_ack_timeout_sec() == 900.0
+    monkeypatch.setenv("OUROBOROS_ACCEPTANCE_FENCE_WAIT_MAX_ROUNDS", "0")
+    assert get_acceptance_fence_wait_max_rounds() == 1
+    monkeypatch.setenv("OUROBOROS_ACCEPTANCE_FENCE_WAIT_MAX_ROUNDS", "999")
+    assert get_acceptance_fence_wait_max_rounds() == 50
+
+    monkeypatch.setenv("OUROBOROS_ACCEPTANCE_FENCE_ACK_TIMEOUT_SEC", "not-a-number")
+    assert get_acceptance_fence_ack_timeout_sec() == 120.0
+    monkeypatch.setenv("OUROBOROS_ACCEPTANCE_FENCE_WAIT_MAX_ROUNDS", "junk")
+    assert get_acceptance_fence_wait_max_rounds() == 3

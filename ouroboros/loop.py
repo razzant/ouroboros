@@ -1160,9 +1160,8 @@ ACCEPTANCE_DECISION_REASONS = (
     "review_degraded",
     "fence_reopen_failed",
     "infra_failure",
-    # Bounded fence wait exhausted (CyberGym full1507): the queue-owned
-    # admission fence stayed unavailable past the configured round cap, so the
-    # task terminalized as infra_failed instead of spinning paid rounds.
+    # Bounded fence wait exhausted (CyberGym full1507): terminalized as
+    # infra_failed instead of spinning paid rounds until the deadline.
     "acceptance_fence_unavailable",
     # Owner Q2A: the forced children_unabsorbed rail runs the panel but cannot
     # grant a requested improvement pass; the dangling revision terminalizes.
@@ -2076,8 +2075,7 @@ def _run_task_acceptance_review_once(
     emit_progress: Callable[[str], None],
 ) -> bool:
     """Run the root-owned acceptance gate once for the current deliverable.
-    Loop-side rails facts arrive via the ``_acceptance_loop_rails`` ctx stash
-    (set by ``_no_tool_final_answer``; keeps the signature at 8 params)."""
+    Loop-side rails facts arrive via the ``_acceptance_loop_rails`` ctx stash (set by ``_no_tool_final_answer``)."""
     mode = get_task_review_mode()
     _latch_final_answer_marker(llm_trace, content)
     if getattr(tools._ctx, "_task_acceptance_reviewed", False):
@@ -2087,8 +2085,7 @@ def _run_task_acceptance_review_once(
     meta = getattr(tools._ctx, "task_metadata", {})
     meta = meta if isinstance(meta, dict) else {}
     lineage = resolve_task_lineage(
-        task_id or getattr(tools._ctx, "task_id", ""),
-        metadata=meta,
+        task_id or getattr(tools._ctx, "task_id", ""), metadata=meta,
         root_task_id=getattr(tools._ctx, "root_task_id", None),
         parent_task_id=getattr(tools._ctx, "parent_task_id", None),
         delegation_role=getattr(tools._ctx, "delegation_role", None),
@@ -2096,15 +2093,11 @@ def _run_task_acceptance_review_once(
         timeout_retry_from=getattr(tools._ctx, "timeout_retry_from", None),
     )
     eligible, trigger = _task_acceptance_eligible(
-        mode,
-        llm_trace,
-        bool(getattr(tools._ctx, "is_direct_chat", False)),
+        mode, llm_trace, bool(getattr(tools._ctx, "is_direct_chat", False)),
         is_root_task=bool(lineage["is_root_task"]),
         is_ephemeral_turn=bool(getattr(tools._ctx, "is_ephemeral_turn", False)),
         task_contract=(
-            tools._ctx.task_contract
-            if isinstance(getattr(tools._ctx, "task_contract", None), dict)
-            else {}
+            tools._ctx.task_contract if isinstance(getattr(tools._ctx, "task_contract", None), dict) else {}
         ),
     )
     agent_called = any(
@@ -2112,8 +2105,7 @@ def _run_task_acceptance_review_once(
         for call in (llm_trace.get("tool_calls") or [])
     )
     agent_review_present = any(
-        isinstance(run, dict)
-        and isinstance(run.get("request"), dict)
+        isinstance(run, dict) and isinstance(run.get("request"), dict)
         and str((run.get("request") or {}).get("surface") or "") == "task_acceptance"
         and str(run.get("aggregate_signal") or "").strip()
         for run in (llm_trace.get("review_runs") or [])
@@ -2123,138 +2115,90 @@ def _run_task_acceptance_review_once(
         trigger = f"{trigger}_after_agent_advisory"
     elif agent_called:
         trigger = f"{trigger}_after_agent_tool"
-    llm_trace["review_decision"] = {
-        "eligibility": "eligible" if eligible else "not_eligible", "trigger": trigger,
-    }
+    llm_trace["review_decision"] = {"eligibility": "eligible" if eligible else "not_eligible", "trigger": trigger}
     if not eligible:
         return False
-    # Owner hurry (§19.7.2 item 8): AFTER structural eligibility is known,
-    # BEFORE acceptance-fence/quiescence/reviewer admission, an armed latch
-    # skips the next otherwise-eligible panel with the typed reason — no
-    # reviewer calls (an in-flight panel is never cancelled/relabeled).
+    # Owner hurry (§19.7.2 item 8): AFTER structural eligibility, BEFORE fence/
+    # quiescence/reviewer admission, an armed latch skips the next eligible panel
+    # with the typed reason (an in-flight panel is never cancelled/relabeled).
     from ouroboros.owner_hurry import acceptance_skip_applied, effective_budget_profile
 
     if acceptance_skip_applied(
         tools._ctx, llm_trace, task_id=task_id, drive_root=drive_root,
-        set_decision=_set_acceptance_decision, emit_progress=emit_progress,
-    ):
+        set_decision=_set_acceptance_decision, emit_progress=emit_progress):
         return False
     fence_ok, _fence_token = _begin_task_acceptance_fence(tools._ctx, task_id)
     if not fence_ok:
-        llm_trace["review_decision"] = {
-            "eligibility": "acceptance_fence_failed", "trigger": trigger,
-        }
-        # Bounded wait (CyberGym full1507 postmortem): each fence-unavailable
-        # round used to burn one paid LLM round until the 4h deadline. Count
-        # consecutive failures and terminalize as infra_failed at the config
-        # cap instead; the leaked supervisor-side fence is cleared by
-        # task_done / the reaper / the dead-owner sweep.
+        llm_trace["review_decision"] = {"eligibility": "acceptance_fence_failed", "trigger": trigger}
+        # Bounded wait (CyberGym full1507 postmortem): each fence-unavailable round
+        # used to burn one paid LLM round until the deadline; terminalize as
+        # infra_failed at the config cap of CONSECUTIVE failures instead.
         fence_failures = int(getattr(tools._ctx, "_task_acceptance_fence_failures", 0) or 0) + 1
         tools._ctx._task_acceptance_fence_failures = fence_failures
         if fence_failures >= get_acceptance_fence_wait_max_rounds():
             tools._ctx._task_acceptance_fence_infra_failed = True
             _set_acceptance_decision(llm_trace, {
-                "status": ACCEPTANCE_FINALIZED_UNACCEPTED,
-                "reason": "acceptance_fence_unavailable",
-                "source": "acceptance_fence",
-                "rationale": (
-                    f"The queue-owned admission fence stayed unavailable for "
-                    f"{fence_failures} consecutive rounds; terminalizing as an "
-                    "infrastructure failure instead of burning paid rounds "
-                    "until the deadline."
+                "status": ACCEPTANCE_FINALIZED_UNACCEPTED, "reason": "acceptance_fence_unavailable",
+                "source": "acceptance_fence", "rationale": (
+                    f"The queue-owned admission fence stayed unavailable for {fence_failures} consecutive rounds; "
+                    "terminalizing as an infrastructure failure instead of burning paid rounds until the deadline."
                 ),
             })
-            emit_progress(
-                "Task acceptance review could not acquire the queue-owned admission "
-                "fence; terminalizing as an infrastructure failure."
-            )
+            emit_progress("Task acceptance review could not acquire the queue-owned admission fence; terminalizing as an infrastructure failure.")
             return False
         _append_or_merge_user_message(
-            messages,
-            "[TASK ACCEPTANCE WAIT] The supervisor could not atomically close "
-            "subtask admission. Do not finalize or spawn more work; retry after the "
-            "queue fence is available.",
+            messages, "[TASK ACCEPTANCE WAIT] The supervisor could not atomically close subtask "
+            "admission. Do not finalize or spawn more work; retry after the queue fence is available.",
         )
         emit_progress("Task acceptance review waiting for the queue-owned admission fence.")
         return True
     tools._ctx._task_acceptance_fence_failures = 0
-    quiescent, subtree_statuses = _task_acceptance_subtree_snapshot(
-        tools._ctx, drive_root, task_id,
-    )
+    quiescent, subtree_statuses = _task_acceptance_subtree_snapshot(tools._ctx, drive_root, task_id)
     if not quiescent:
         llm_trace["review_decision"] = {
-            "eligibility": "waiting_for_quiescence",
-            "trigger": trigger,
+            "eligibility": "waiting_for_quiescence", "trigger": trigger,
             "live_descendants": [
                 row for row in subtree_statuses
-                if str(row.get("status") or "")
-                not in {"completed", "failed", "cancelled", "rejected_duplicate"}
+                if str(row.get("status") or "") not in {"completed", "failed", "cancelled", "rejected_duplicate"}
             ],
         }
         _append_or_merge_user_message(
-            messages,
-            "[TASK ACCEPTANCE WAIT] The root acceptance review requires the recursive "
-            "subtree to be terminal. Absorb or explicitly cancel the remaining child "
-            "tasks before finalizing.",
+            messages, "[TASK ACCEPTANCE WAIT] The root acceptance review requires the recursive subtree "
+            "to be terminal. Absorb or explicitly cancel the remaining child tasks before finalizing.",
         )
         emit_progress("Task acceptance review waiting for recursive subtree quiescence.")
         return True
     # §19.7.2 item 7: ONE effective profile (remaining improvement passes ->
-    # 0 under an armed hurry latch) feeds EVERY acceptance-pacing read below
-    # — the improvement_pass_allowed call and the rails display alike.
-    budget_profile = effective_budget_profile(
-        tools._ctx, task_pacing.resolve_budget_profile(tools._ctx),
-    )
+    # 0 under an armed hurry latch) feeds EVERY acceptance-pacing read below.
+    budget_profile = effective_budget_profile(tools._ctx, task_pacing.resolve_budget_profile(tools._ctx))
     budget_snapshot = task_pacing.build_budget_snapshot(tools._ctx, profile=budget_profile)
     passes_done = int(getattr(tools._ctx, "_task_acceptance_improvement_passes", 0))
     launch_ok, launch_reason = task_pacing.review_launch_allowed(
-        budget_snapshot,
-        estimated_sec=task_pacing.acceptance_review_estimate_sec(
-            tools._ctx, passes_done=passes_done,
-        ),
+        budget_snapshot, estimated_sec=task_pacing.acceptance_review_estimate_sec(tools._ctx, passes_done=passes_done),
     )
     if not launch_ok:
         tools._ctx._task_acceptance_reviewed = True
         _end_task_acceptance_fence(tools._ctx, outcome="terminal")
-        _mark_root_acceptance_checkpoint(
-            tools._ctx, llm_trace, status=launch_reason, pass_index=passes_done,
-        )
+        _mark_root_acceptance_checkpoint(tools._ctx, llm_trace, status=launch_reason, pass_index=passes_done)
         llm_trace["review_decision"].update({"skipped": launch_reason})
         # The pacing launch reason is now the typed REASON, not the status;
         # `outcomes.derive_loop_outcome` keys on that PAIR (see its comment).
         _set_acceptance_decision(llm_trace, {
-            "status": ACCEPTANCE_FINALIZED_UNACCEPTED, "reason": launch_reason,
-            "source": "task_pacing",
+            "status": ACCEPTANCE_FINALIZED_UNACCEPTED, "reason": launch_reason, "source": "task_pacing",
             "rationale": (
-                f"Remaining {budget_snapshot.remaining_sec:.0f}s is inside the finalization "
-                f"reserve ({budget_snapshot.reserve_sec:.0f}s); finalizing without review."
-            ),
+                f"Remaining {budget_snapshot.remaining_sec:.0f}s is inside the finalization reserve "
+                f"({budget_snapshot.reserve_sec:.0f}s); finalizing without review."),
         })
         emit_progress("Task acceptance review skipped: inside the finalization reserve.")
         return False
     review_ctx = _TaskAcceptanceContext(
-        tools=tools,
-        content=content,
-        task_id=task_id,
-        task_type=task_type,
-        llm_trace=llm_trace,
-        drive_root=drive_root,
-        messages=messages,
-        emit_progress=emit_progress,
-        mode=mode,
-        subtree_statuses=subtree_statuses,
-        budget_profile=budget_profile,
-        passes_done=passes_done,
-        evidence={},
-        review_binding={},
-        rails_line=task_pacing.acceptance_rails_line(
-            budget_snapshot,
-            budget_profile,
-            passes_done,
-            getattr(tools._ctx, "_acceptance_loop_rails", None),
-            required_blocking=(
-                mode == "required" and get_review_enforcement() == "blocking"
-            ), workspace=task_pacing._workspace_delivery(tools._ctx),
+        tools=tools, content=content, task_id=task_id, task_type=task_type, llm_trace=llm_trace,
+        drive_root=drive_root, messages=messages, emit_progress=emit_progress, mode=mode,
+        subtree_statuses=subtree_statuses, budget_profile=budget_profile, passes_done=passes_done,
+        evidence={}, review_binding={}, rails_line=task_pacing.acceptance_rails_line(
+            budget_snapshot, budget_profile, passes_done, getattr(tools._ctx, "_acceptance_loop_rails", None),
+            required_blocking=(mode == "required" and get_review_enforcement() == "blocking"),
+            workspace=task_pacing._workspace_delivery(tools._ctx),
         ),
     )
     try:
@@ -2279,13 +2223,9 @@ def _run_task_acceptance_review_once(
             if prior_run not in (llm_trace.get("review_runs") or []):
                 llm_trace.setdefault("review_runs", []).append(dict(prior_run))
             llm_trace["review_decision"].update({
-                "panel_reused": True,
-                "panel_id": str(prior_run.get("panel_id") or ""),
-                "binding_hash": binding_hash,
+                "panel_reused": True, "panel_id": str(prior_run.get("panel_id") or ""), "binding_hash": binding_hash,
             })
-            emit_progress(
-                "Task acceptance review: reusing the authoritative result for the unchanged binding."
-            )
+            emit_progress("Task acceptance review: reusing the authoritative result for the unchanged binding.")
             # Re-run the normal semantic application (gates, outcome axis,
             # obligations, fence) without appending or paying for another panel.
             reused_result = SimpleNamespace(**prior_run)
@@ -2296,45 +2236,24 @@ def _run_task_acceptance_review_once(
             raise RuntimeError("acceptance binding was attempted but its host run is unavailable")
         else:
             seen_bindings[binding_hash] = None
-        llm_trace["review_decision"].update({
-            "panel_id": str(review_ctx.review_binding.get("panel_id") or ""),
-            "binding_hash": binding_hash,
-        })
+        llm_trace["review_decision"].update(
+            {"panel_id": str(review_ctx.review_binding.get("panel_id") or ""), "binding_hash": binding_hash})
         messages_before_apply = list(messages)
         obligations_were_present = "acceptance_obligations" in llm_trace
         obligations_before_apply = [
-            dict(row) if isinstance(row, dict) else row
-            for row in (llm_trace.get("acceptance_obligations") or [])
+            dict(row) if isinstance(row, dict) else row for row in (llm_trace.get("acceptance_obligations") or [])
         ]
-        passes_before_apply = int(
-            getattr(tools._ctx, "_task_acceptance_improvement_passes", 0) or 0
-        )
+        passes_before_apply = int(getattr(tools._ctx, "_task_acceptance_improvement_passes", 0) or 0)
         panel_result = reused_result or _execute_task_acceptance_panel(review_ctx)
-        run_record = (
-            prior_run
-            if reused_result is not None
-            else _record_host_acceptance_run(review_ctx, panel_result)
-        )
+        run_record = prior_run if reused_result is not None else _record_host_acceptance_run(review_ctx, panel_result)
         if _task_acceptance_owner_generation_changed(tools._ctx):
             _supersede_task_acceptance_for_owner_followup(tools._ctx, llm_trace)
-            emit_progress(
-                "Task acceptance review superseded: an owner follow-up arrived during the panel."
-            )
+            emit_progress("Task acceptance review superseded: an owner follow-up arrived during the panel.")
             return True
-        fresh_quiescent, fresh_subtree_statuses = _task_acceptance_subtree_snapshot(
-            tools._ctx, drive_root, task_id,
-        )
-        fresh_review_ctx = replace(
-            review_ctx,
-            subtree_statuses=fresh_subtree_statuses,
-            evidence={},
-        )
-        fresh_evidence_revision = task_acceptance_evidence_revision(
-            _build_host_acceptance_evidence(fresh_review_ctx)
-        )
-        frozen_evidence_revision = str(
-            review_ctx.review_binding.get("evidence_revision") or ""
-        )
+        fresh_quiescent, fresh_subtree_statuses = _task_acceptance_subtree_snapshot(tools._ctx, drive_root, task_id)
+        fresh_review_ctx = replace(review_ctx, subtree_statuses=fresh_subtree_statuses, evidence={})
+        fresh_evidence_revision = task_acceptance_evidence_revision(_build_host_acceptance_evidence(fresh_review_ctx))
+        frozen_evidence_revision = str(review_ctx.review_binding.get("evidence_revision") or "")
         stale_reason = ""
         if not fresh_quiescent:
             stale_reason = "host_acceptance_subtree_became_non_quiescent"
@@ -2342,20 +2261,10 @@ def _run_task_acceptance_review_once(
             stale_reason = "host_acceptance_evidence_revision_changed"
         if stale_reason:
             _supersede_task_acceptance_for_evidence_change(
-                tools._ctx,
-                llm_trace,
-                run_record,
-                stale_reason,
-                messages,
-                emit_progress,
-            )
+                tools._ctx, llm_trace, run_record, stale_reason, messages, emit_progress)
             return True
         another_round = _apply_task_acceptance_result(
-            review_ctx,
-            panel_result,
-            record_run=False,
-            reused=reused_result is not None,
-        )
+            review_ctx, panel_result, record_run=False, reused=reused_result is not None)
         if getattr(tools._ctx, "_task_acceptance_fence_generation_mismatch", False):
             messages[:] = messages_before_apply
             if obligations_were_present:
@@ -2364,15 +2273,9 @@ def _run_task_acceptance_review_once(
                 llm_trace.pop("acceptance_obligations", None)
             tools._ctx._task_acceptance_improvement_passes = passes_before_apply
             _supersede_task_acceptance_for_owner_followup(tools._ctx, llm_trace)
-            emit_progress(
-                "Task acceptance review superseded: an owner follow-up arrived during the panel."
-            )
+            emit_progress("Task acceptance review superseded: an owner follow-up arrived during the panel.")
             return True
-        _set_applied_host_acceptance_impact(
-            run_record,
-            panel_result,
-            requires_revision=another_round,
-        )
+        _set_applied_host_acceptance_impact(run_record, panel_result, requires_revision=another_round)
         return another_round
     except Exception as exc:
         log.debug("Mandatory task acceptance review failed", exc_info=True)
@@ -4637,26 +4540,20 @@ def _no_tool_final_answer(
 ) -> Optional[Tuple[str, Dict[str, Any], Dict[str, Any]]]:
     """Run the no-tool finalization gates; ``None`` requests another model round."""
     messages = limit_ctx.messages
-    control_state, controlled_content = _resolve_delivery_control(
-        content, tools, limit_ctx, llm_trace,
-    )
+    control_state, controlled_content = _resolve_delivery_control(content, tools, limit_ctx, llm_trace)
     if control_state == "retry":
         return None
     content = controlled_content
     _project_child_result_dispositions(limit_ctx, llm_trace)
     if control_state == "fresh" and str(content or "").strip():
-        candidate = _replace_delivery_candidate(
-            tools, limit_ctx, llm_trace, str(content), control="candidate",
-        )
+        candidate = _replace_delivery_candidate(tools, limit_ctx, llm_trace, str(content), control="candidate")
         content = candidate.full_text
     else:
         candidate = getattr(tools._ctx, "_delivery_candidate", None)
         if isinstance(candidate, DeliveryCandidate):
             content = candidate.full_text
 
-    if _enforce_swarm_actions(
-        str(content or ""), messages, tools, llm_trace, emit_progress,
-    ):
+    if _enforce_swarm_actions(str(content or ""), messages, tools, llm_trace, emit_progress):
         return None
     handoff_msg = _compute_subagent_handoff(tools, limit_ctx.drive_root, limit_ctx.task_id, content)
     if handoff_msg:
@@ -4667,64 +4564,46 @@ def _no_tool_final_answer(
         llm_trace["reasoning_notes"].append("Subagent handoff status refreshed before final response.")
         _arm_delivery_control(tools, limit_ctx, llm_trace)
         return None
-    absorption_result = _maybe_enforce_child_absorption_gate(
-        tools, limit_ctx, content, messages, emit_progress, llm_trace,
-    )
+    absorption_result = _maybe_enforce_child_absorption_gate(tools, limit_ctx, content, messages, emit_progress, llm_trace)
     if absorption_result == "continue":
         _arm_delivery_control(tools, limit_ctx, llm_trace)
         return None
     if absorption_result is not None:
         return absorption_result
-    skill_finalization_was_injected = bool(
-        getattr(tools._ctx, "_skill_finalization_injected", False)
-    )
+    skill_finalization_was_injected = bool(getattr(tools._ctx, "_skill_finalization_injected", False))
     if _maybe_inject_finalization_nudges(
-        tools, limit_ctx.drive_root, limit_ctx.task_id, llm_trace, content, messages, emit_progress,
-    ):
-        skill_finalization_injected_now = (
-            not skill_finalization_was_injected
-            and bool(getattr(tools._ctx, "_skill_finalization_injected", False))
-        )
-        # Skill finalization is an action gate, not a service notice.
-        # Preserve the candidate without a conflicting JSON-only instruction:
-        # the next round may run the required tool or give the historically
-        # allowed reconsidered answer; a typed keep cannot close it.
+        tools, limit_ctx.drive_root, limit_ctx.task_id, llm_trace, content, messages, emit_progress):
+        skill_finalization_injected_now = (not skill_finalization_was_injected
+                                           and bool(getattr(tools._ctx, "_skill_finalization_injected", False)))
+        # Skill finalization is an action gate, not a service notice: preserve the
+        # candidate without a conflicting JSON-only instruction; a typed keep cannot
+        # close it (the next round may run the required tool or reconsider).
         if skill_finalization_injected_now:
             _hold_delivery_for_skill_action(tools, llm_trace)
         else:
             _arm_delivery_control(tools, limit_ctx, llm_trace)
         return None
 
-    # Declared service outputs and teardown failures are acceptance evidence,
-    # not postscript cleanup: finalize them before the host panel and, when
-    # that changes evidence, require one complete replacement answer bound to
-    # the new revision. The finally-path reuses the same idempotent helper.
+    # Declared service outputs and teardown failures are acceptance evidence, not
+    # postscript cleanup: finalize them before the host panel; on evidence change,
+    # require one complete replacement answer (the finally-path reuses the helper).
     service_exit_ctx = _LoopExitContext(
-        tools=tools,
-        drive_root=limit_ctx.drive_root,
-        task_id=limit_ctx.task_id,
-        event_queue=limit_ctx.event_queue,
-        drive_logs=limit_ctx.drive_logs,
-        accumulated_usage=limit_ctx.accumulated_usage,
-        llm_trace=llm_trace,
+        tools=tools, drive_root=limit_ctx.drive_root, task_id=limit_ctx.task_id,
+        event_queue=limit_ctx.event_queue, drive_logs=limit_ctx.drive_logs,
+        accumulated_usage=limit_ctx.accumulated_usage, llm_trace=llm_trace,
     )
     if _finalize_task_services(service_exit_ctx):
-        evidence_revision, evidence_fingerprint = _delivery_evidence_state(
-            tools, limit_ctx, llm_trace,
-        )
+        evidence_revision, evidence_fingerprint = _delivery_evidence_state(tools, limit_ctx, llm_trace)
         candidate = getattr(tools._ctx, "_delivery_candidate", None)
         if (
             isinstance(candidate, DeliveryCandidate)
-            and (
-                candidate.evidence_revision != evidence_revision
-                or candidate.evidence_fingerprint != evidence_fingerprint
-            )
+            and (candidate.evidence_revision != evidence_revision
+                 or candidate.evidence_fingerprint != evidence_fingerprint)
         ):
             if content and str(content).strip():
                 messages.append({"role": "assistant", "content": str(content)})
             llm_trace["reasoning_notes"].append(
-                "Task services were finalized before acceptance; the complete answer must bind the resulting evidence."
-            )
+                "Task services were finalized before acceptance; the complete answer must bind the resulting evidence.")
             _arm_delivery_control(tools, limit_ctx, llm_trace)
             return None
 
@@ -4735,14 +4614,10 @@ def _no_tool_final_answer(
     composed_content = _compose_delivery_suffix(str(content or ""), normal_suffix)
     candidate = getattr(tools._ctx, "_delivery_candidate", None)
     if composed_content and (
-        not isinstance(candidate, DeliveryCandidate)
-        or candidate.full_text != composed_content
+        not isinstance(candidate, DeliveryCandidate) or candidate.full_text != composed_content
     ):
         candidate = _replace_delivery_candidate(
-            tools,
-            limit_ctx,
-            llm_trace,
-            composed_content,
+            tools, limit_ctx, llm_trace, composed_content,
             control="host_suffix" if normal_suffix else "candidate",
             model_text=str(content or ""),
         )
@@ -4758,57 +4633,36 @@ def _no_tool_final_answer(
         content = candidate.full_text
 
     tools._ctx._acceptance_loop_rails = {
-        "round_idx": limit_ctx.round_idx,
-        "max_rounds": limit_ctx.max_rounds,
+        "round_idx": limit_ctx.round_idx, "max_rounds": limit_ctx.max_rounds,
         "task_cost_usd": limit_ctx.accumulated_usage.get("cost"),
     }
-    # v6.78.0 (owner Q20/Q22): mirror the host-attested native-retrieval
-    # fact into the trace so `build_task_acceptance_evidence` can show the
-    # reviewer whether the answer was grounded in fetched pages. Reviewer-side
-    # only — the agent gets the improvement capsule, not the evidence packet.
+    # v6.78.0 (owner Q20/Q22): mirror the host-attested native-retrieval fact into
+    # the trace for `build_task_acceptance_evidence` (reviewer-side only).
     _retrieval = limit_ctx.accumulated_usage.get("retrieval")
     if isinstance(_retrieval, dict) and _retrieval:
         llm_trace["retrieval"] = dict(_retrieval)
     if _run_task_acceptance_review_once(
-        tools=tools,
-        content=content or "",
-        task_id=limit_ctx.task_id,
-        task_type=limit_ctx.task_type,
-        llm_trace=llm_trace,
-        drive_root=limit_ctx.drive_root,
-        messages=messages,
-        emit_progress=emit_progress,
+        tools=tools, content=content or "", task_id=limit_ctx.task_id, task_type=limit_ctx.task_type,
+        llm_trace=llm_trace, drive_root=limit_ctx.drive_root, messages=messages, emit_progress=emit_progress,
     ):
-        # v6.71.1: an acceptance improvement pass is an ORDINARY substantive
-        # answer round — do NOT arm delivery-control: layering "return
-        # exactly one JSON object" on OPEN OBLIGATIONS plus the self-check
-        # froze the model into resubmitting the same answer. The next
-        # free-form answer re-enters the acceptance panel (blocking not
-        # weakened); other lanes still arm where JSON keep/replace is needed.
+        # v6.71.1: an acceptance improvement pass is an ORDINARY substantive answer
+        # round — do NOT arm delivery-control: layering "return exactly one JSON
+        # object" on OPEN OBLIGATIONS froze the model into resubmitting the same
+        # answer; other lanes still arm where JSON keep/replace is needed.
         return None
     if bool(getattr(tools._ctx, "_task_acceptance_fence_infra_failed", False)):
-        # The bounded fence wait is exhausted: terminalize as infra_failed
-        # through the host-salvage seam instead of finalizing past a review
-        # that never ran.
+        # Bounded fence wait exhausted: terminalize as infra_failed through the host-salvage seam.
         text, usage, fence_trace = _forced_fallback_result(
-            limit_ctx,
-            llm_trace,
-            "⚠️ The task could not start its acceptance review: the queue-owned "
-            "admission fence stayed unavailable. Any files written so far are "
-            "preserved in the workspace.",
-            "acceptance_fence_unavailable",
-            source="acceptance_fence_unavailable",
+            limit_ctx, llm_trace,
+            "⚠️ The task could not start its acceptance review: the queue-owned admission "
+            "fence stayed unavailable. Any files written so far are preserved in the workspace.",
+            "acceptance_fence_unavailable", source="acceptance_fence_unavailable",
         )
-        usage.update(
-            execution_status=RESULT_INFRA_FAILED,
-            reason_code="acceptance_fence_unavailable",
-        )
+        usage.update(execution_status=RESULT_INFRA_FAILED, reason_code="acceptance_fence_unavailable")
         return text, usage, fence_trace
     candidate = getattr(tools._ctx, "_delivery_candidate", None)
     if isinstance(candidate, DeliveryCandidate):
-        candidate.acceptance_binding = _delivery_acceptance_binding(
-            tools, llm_trace, candidate.content_sha256,
-        )
+        candidate.acceptance_binding = _delivery_acceptance_binding(tools, llm_trace, candidate.content_sha256)
         _publish_delivery_candidate(tools, candidate, llm_trace)
 
     # Close delivery under the same lock as routing, then drain once. A follow-up
@@ -4819,8 +4673,7 @@ def _no_tool_final_answer(
         before_directives = len(getattr(tools._ctx, "_owner_directives", []) or [])
         acceptance_was_terminal = bool(
             getattr(tools._ctx, "_task_acceptance_reviewed", False)
-            or getattr(tools._ctx, "_task_acceptance_sealed_fence_token", None)
-        )
+            or getattr(tools._ctx, "_task_acceptance_sealed_fence_token", None))
         provisional_assistant = {"role": "assistant", "content": content} if content else None
         if provisional_assistant is not None:
             messages.append(provisional_assistant)
@@ -4828,23 +4681,18 @@ def _no_tool_final_answer(
             admission_agent._accepting_owner_messages = False
             post_controls = _drain_incoming_messages(
                 messages, incoming_messages, limit_ctx.drive_root, limit_ctx.task_id,
-                limit_ctx.event_queue, owner_msg_seen, owner_ctx=tools._ctx,
-            )
+                limit_ctx.event_queue, owner_msg_seen, owner_ctx=tools._ctx)
         if len(getattr(tools._ctx, "_owner_directives", []) or []) > before_directives:
             with admission_lock:
                 if acceptance_was_terminal:
-                    _supersede_task_acceptance_for_owner_followup(
-                        tools._ctx, llm_trace, admission_locked=True,
-                    )
+                    _supersede_task_acceptance_for_owner_followup(tools._ctx, llm_trace, admission_locked=True)
                 if (
                     getattr(admission_agent, "_busy", False)
                     and str(getattr(admission_agent, "_current_task_id", "") or "") == limit_ctx.task_id
                 ):
                     admission_agent._accepting_owner_messages = True
             if acceptance_was_terminal:
-                emit_progress(
-                    "Task acceptance review superseded: an owner follow-up arrived before finalization."
-                )
+                emit_progress("Task acceptance review superseded: an owner follow-up arrived before finalization.")
             # An owner directive is a substantive revision request, not a service
             # notification. The next complete response creates a fresh candidate.
             tools._ctx._delivery_control_required = False
@@ -4856,73 +4704,49 @@ def _no_tool_final_answer(
         if provisional_assistant is not None and messages[-1] is provisional_assistant:
             messages.pop()
         if post_controls.get("finalize_now"):
-            text, usage, forced_trace = _maybe_early_finalize(
-                limit_ctx, tools, post_controls,
-            )
+            text, usage, forced_trace = _maybe_early_finalize(limit_ctx, tools, post_controls)
             _merge_finalization_trace(llm_trace, forced_trace)
             return text, usage, llm_trace
     _project_child_result_dispositions(limit_ctx, llm_trace)
-    evidence_revision, evidence_fingerprint = _delivery_evidence_state(
-        tools, limit_ctx, llm_trace,
-    )
+    evidence_revision, evidence_fingerprint = _delivery_evidence_state(tools, limit_ctx, llm_trace)
     candidate = getattr(tools._ctx, "_delivery_candidate", None)
     if (
         isinstance(candidate, DeliveryCandidate)
-        and (
-            candidate.evidence_revision != evidence_revision
-            or candidate.evidence_fingerprint != evidence_fingerprint
-        )
+        and (candidate.evidence_revision != evidence_revision
+             or candidate.evidence_fingerprint != evidence_fingerprint)
     ):
         acceptance_was_terminal = bool(
             getattr(tools._ctx, "_task_acceptance_reviewed", False)
-            or getattr(tools._ctx, "_task_acceptance_sealed_fence_token", None)
-        )
+            or getattr(tools._ctx, "_task_acceptance_sealed_fence_token", None))
         if acceptance_was_terminal:
-            decision = (
-                llm_trace.get("review_decision")
-                if isinstance(llm_trace.get("review_decision"), dict)
-                else {}
-            )
+            decision = llm_trace.get("review_decision") if isinstance(llm_trace.get("review_decision"), dict) else {}
             expected_panel = str(decision.get("panel_id") or "")
             expected_binding = str(decision.get("binding_hash") or "")
             active_run = next(
                 (
-                    run
-                    for run in reversed(llm_trace.get("review_runs") or [])
+                    run for run in reversed(llm_trace.get("review_runs") or [])
                     if isinstance(run, dict)
                     and run.get("authority") == "host_root"
                     and not run.get("superseded_by_revision")
                     and str(run.get("panel_id") or "") == expected_panel
                     and str(run.get("binding_hash") or "") == expected_binding
-                ),
-                None,
+                ), None,
             )
             _supersede_task_acceptance_for_evidence_change(
-                tools._ctx,
-                llm_trace,
-                active_run,
-                "delivery_evidence_changed_after_host_acceptance",
-                messages,
-                emit_progress,
+                tools._ctx, llm_trace, active_run,
+                "delivery_evidence_changed_after_host_acceptance", messages, emit_progress,
             )
         if candidate.full_text:
             messages.append({"role": "assistant", "content": candidate.full_text})
         llm_trace["reasoning_notes"].append(
-            "Delivery evidence changed after host acceptance; a complete replacement answer is required."
-        )
+            "Delivery evidence changed after host acceptance; a complete replacement answer is required.")
         _arm_delivery_control(tools, limit_ctx, llm_trace)
         return None
     if isinstance(candidate, DeliveryCandidate):
-        candidate.acceptance_binding = _delivery_acceptance_binding(
-            tools, llm_trace, candidate.content_sha256,
-        )
+        candidate.acceptance_binding = _delivery_acceptance_binding(tools, llm_trace, candidate.content_sha256)
         _publish_delivery_candidate(tools, candidate, llm_trace)
         content = candidate.full_text
-    return _handle_text_response(
-        str(content or ""),
-        llm_trace,
-        limit_ctx.accumulated_usage,
-    )
+    return _handle_text_response(str(content or ""), llm_trace, limit_ctx.accumulated_usage)
 
 
 def _finalize_forced_services(
