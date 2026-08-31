@@ -153,6 +153,9 @@ SETTINGS_DEFAULTS = {**UPDATE_SETTINGS_DEFAULTS,
     "OUROBOROS_TASK_IDLE_TIMEOUT_SEC": 900,
     "OUROBOROS_TASK_ABS_CEILING_SEC": 21600,
     "OUROBOROS_PER_CALL_TIMEOUT_CEILING_SEC": 1800,
+    # Seconds the periodic sweep carries a dead `unresolved` usage-attempt row before
+    # writing it off at its reservation bound (terminal tasks reconcile immediately).
+    "OUROBOROS_USAGE_UNRESOLVED_WRITEOFF_SEC": 900,
     "OUROBOROS_FINALIZATION_GRACE_SEC": FINALIZATION_GRACE_DEFAULT_SEC,
     "OUROBOROS_SUPERVISOR_LIVENESS_DEADLINE_SEC": SUPERVISOR_LIVENESS_DEADLINE_DEFAULT_SEC,
     "OUROBOROS_PACING_INTERVAL_SEC": PACING_INTERVAL_DEFAULT_SEC,
@@ -361,10 +364,7 @@ CLAUDEXOR_DELEGATED_WORKSPACE_ROOT_MIN_VERSION: str = "3.8.1"
 
 
 def _main_model() -> str:
-    return (
-        str(os.environ.get("OUROBOROS_MODEL", "") or "").strip()
-        or str(SETTINGS_DEFAULTS["OUROBOROS_MODEL"])
-    )
+    return str(os.environ.get("OUROBOROS_MODEL", "") or "").strip() or str(SETTINGS_DEFAULTS["OUROBOROS_MODEL"])
 
 
 def get_light_model() -> str:
@@ -713,8 +713,7 @@ def get_per_call_timeout_ceiling_sec() -> int:
 
 
 def get_restart_drain_max_sec() -> int:
-    return _clamped_number_setting(
-        "OUROBOROS_RESTART_DRAIN_MAX_SEC", low=0, cast=lambda v: int(float(v)))
+    return _clamped_number_setting("OUROBOROS_RESTART_DRAIN_MAX_SEC", low=0, cast=lambda v: int(float(v)))
 
 
 def get_post_task_evolution_enabled() -> bool:
@@ -831,10 +830,8 @@ def get_allow_mutative_subagents(write_surface: str = "") -> bool:
 
 def get_subagent_worktree_root() -> str:
     """Filesystem root for acting self_worktree checkouts (outside repo/ and data/)."""
-    raw = str(
-        os.environ.get("OUROBOROS_SUBAGENT_WORKTREE_ROOT", "")
-        or SETTINGS_DEFAULTS.get("OUROBOROS_SUBAGENT_WORKTREE_ROOT", "")
-    ).strip()
+    raw = str(os.environ.get("OUROBOROS_SUBAGENT_WORKTREE_ROOT", "")
+              or SETTINGS_DEFAULTS.get("OUROBOROS_SUBAGENT_WORKTREE_ROOT", "")).strip()
     return raw or os.path.expanduser(os.path.join("~", "Ouroboros", "subagent_worktrees"))
 
 
@@ -863,10 +860,8 @@ def get_subagent_projects_root() -> str:
 
     Outside repo/ and data/. Unlike self_worktree checkouts, genesis projects are
     durable deliverables and are never age-pruned by the GC retention sweep."""
-    raw = str(
-        os.environ.get("OUROBOROS_SUBAGENT_PROJECTS_ROOT", "")
-        or SETTINGS_DEFAULTS.get("OUROBOROS_SUBAGENT_PROJECTS_ROOT", "")
-    ).strip()
+    raw = str(os.environ.get("OUROBOROS_SUBAGENT_PROJECTS_ROOT", "")
+              or SETTINGS_DEFAULTS.get("OUROBOROS_SUBAGENT_PROJECTS_ROOT", "")).strip()
     return raw or os.path.expanduser(os.path.join("~", "Ouroboros", "projects"))
 
 
@@ -882,10 +877,8 @@ def get_deliverables_root() -> str:
     instead of cluttering the home root. Sibling of the genesis projects root under ~/Ouroboros,
     outside data/, and never GC-pruned. An explicit placement (Desktop/..., Downloads/..., or any
     path WITH a directory) is always honored as given. Override with OUROBOROS_DELIVERABLES_ROOT."""
-    raw = str(
-        os.environ.get("OUROBOROS_DELIVERABLES_ROOT", "")
-        or SETTINGS_DEFAULTS.get("OUROBOROS_DELIVERABLES_ROOT", "")
-    ).strip()
+    raw = str(os.environ.get("OUROBOROS_DELIVERABLES_ROOT", "")
+              or SETTINGS_DEFAULTS.get("OUROBOROS_DELIVERABLES_ROOT", "")).strip()
     return raw or os.path.expanduser(os.path.join("~", "Ouroboros", "Deliverables"))
 
 
@@ -1494,6 +1487,9 @@ def get_vision_caption_timeout_sec() -> int:
     return _clamped_number_setting("OUROBOROS_VISION_CAPTION_TIMEOUT_SEC", low=1, cast=int)
 def get_claudexor_harness_install_timeout_sec() -> int:
     return _clamped_number_setting("OUROBOROS_CLAUDEXOR_HARNESS_INSTALL_TIMEOUT_SEC", low=1, cast=int)
+def get_usage_unresolved_writeoff_sec() -> float:
+    """Sweep TTL for carrying a dead unresolved attempt row before its bound write-off."""
+    return _clamped_number_setting("OUROBOROS_USAGE_UNRESOLVED_WRITEOFF_SEC", low=60.0, high=86400.0)
 
 
 def get_finalization_grace_sec(settings: Optional[dict] = None) -> int:

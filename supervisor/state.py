@@ -720,6 +720,14 @@ def reconstruct_task_cost(
 
             authority_root = pathlib.Path(drive_root) if drive_root is not None else DRIVE_ROOT
             ensure_legacy_imported(authority_root)
+            try:
+                # Every caller here is a terminal/pause path: close the task's dead
+                # unresolved rows first so the stored frame can be born cost-final.
+                from ouroboros.usage_reconcile import reconcile_abandoned_unresolved_attempts
+
+                reconcile_abandoned_unresolved_attempts(authority_root, task_id=want)
+            except Exception:
+                log.debug("abandoned-attempt reconcile failed for %s", want, exc_info=True)
             bucket = usage_breakdown(authority_root, task_id=want)
             projection = {
                 "cost_accounting_status": "available",

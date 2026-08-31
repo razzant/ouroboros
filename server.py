@@ -1049,13 +1049,15 @@ def _start_supervisor_liveness_watchdog(liveness: list, stop_event=None) -> None
 
 
 _LAST_CANCEL_INTENT_SWEEP = [0.0]
+_LAST_USAGE_RECONCILE = [0.0]
 
 
 def _periodic_supervisor_maintenance(last_custody_reap: list, last_review_reconcile: list) -> None:
     """Throttled periodic upkeep extracted from the supervisor loop: cancel-intent
     watchdog and pending child-ref promotion replay (every 20s), custody reap of
     orphaned task-scoped processes (every 600s) + review-job zombie reconcile
-    (every 300s). Each cadence gates itself via its own last-run marker."""
+    (every 300s) + abandoned unresolved usage-attempt write-off (every 300s).
+    Each cadence gates itself via its own last-run marker."""
     if time.time() - _LAST_CANCEL_INTENT_SWEEP[0] > 20:
         _LAST_CANCEL_INTENT_SWEEP[0] = time.time()
         try:
@@ -1105,6 +1107,22 @@ def _periodic_supervisor_maintenance(last_custody_reap: list, last_review_reconc
     if time.time() - last_review_reconcile[0] > 300:
         last_review_reconcile[0] = time.time()
         _periodic_zombie_reconcile()
+    if time.time() - _LAST_USAGE_RECONCILE[0] > 300:
+        _LAST_USAGE_RECONCILE[0] = time.time()
+        try:
+            # Backstop for the unresolved-row lifecycle: rows whose task never
+            # reached a terminal cost projection (crashes, pre-feature ledgers,
+            # unattributed rows) are written off at their bound past the TTL.
+            from ouroboros.usage_reconcile import reconcile_abandoned_unresolved_attempts
+
+            outcome = reconcile_abandoned_unresolved_attempts(DATA_DIR)
+            if outcome.get("terminalized"):
+                log.info(
+                    "Usage reconcile wrote off %d abandoned unresolved attempt(s)",
+                    len(outcome["terminalized"]),
+                )
+        except Exception:
+            log.debug("Periodic usage-attempt reconcile failed", exc_info=True)
 
 
 def _reconcile_delegated_runs(running_task_ids: set) -> None:

@@ -32,6 +32,10 @@ log = logging.getLogger(__name__)
 LEDGER_REL = pathlib.Path("state/usage_attempts.jsonl")
 QUARANTINE_REL = pathlib.Path("state/usage_attempts.quarantine.jsonl")
 _TERMINAL = frozenset({"settled", "unresolved", "released"})
+# The typed settle_reason of the ONE legal exit from `unresolved`: the abandoned-attempt
+# reconciler's write-off, settling the row at its carried reservation upper bound
+# (ouroboros/usage_reconcile.py). Any other post-terminal mutation stays corrupt.
+UNRESOLVED_WRITEOFF_REASON = "abandoned_unresolved_writeoff"
 
 __all__ = (
     "LEDGER_REL", "QUARANTINE_REL", "UsageAccountingError", "UsageLedgerCorrupt",
@@ -296,6 +300,9 @@ def _validate_records(
                 raise UsageLedgerCorrupt(
                     f"dispatched->released requires a typed pre-dispatch reason at seq={row.get('seq')}"
                 )
+        elif previous == "unresolved":
+            if state != "settled" or str(row.get("settle_reason") or "") != UNRESOLVED_WRITEOFF_REASON:
+                raise UsageLedgerCorrupt(f"invalid transition {previous}->{state}")
         else:
             raise UsageLedgerCorrupt(f"attempt {attempt_id} changed after terminal state")
         states[attempt_id] = state
