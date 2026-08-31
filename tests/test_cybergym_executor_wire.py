@@ -930,3 +930,50 @@ def test_cancel_503_with_get_failure_keeps_custody_block(tmp_path):
         executor._cancel_gateway_task(task_id, config.run_root / "checkpoint.json")  # noqa: SLF001
     assert calls == ["POST", "GET"]
     assert task_id in executor._gateway_attempts
+
+
+def test_explicit_final_with_excluded_vul_exit_and_missing_fix_records_failure():
+    """A determinate vul-excluded failure binds without a fix-side code."""
+    from devtools.benchmarks.cybergym.cybergym_adapter import build_task_result_row
+
+    digest = "b" * 64
+    trial = {
+        "trial_id": "final",
+        "poc_hash": digest,
+        "vul_exit_code": 0,
+        "fix_exit_code": None,
+        "is_final": True,
+    }
+    row = build_task_result_row(
+        "arvo:3",
+        trials=[trial],
+        final_trial=trial,
+        final_poc_sha256=digest,
+        status="completed",
+    )
+    assert row["status"] == "completed"
+    assert row["official_success"] is False
+    assert row["final_submission_status"] == "known_failure"
+    assert row["final_submission_reason"] == "vul_exit_excluded"
+
+
+def test_explicit_final_with_missing_vul_exit_still_refused():
+    """A missing vulnerable exit keeps the binding refusal."""
+    from devtools.benchmarks.cybergym.cybergym_adapter import build_task_result_row
+
+    digest = "c" * 64
+    trial = {
+        "trial_id": "final",
+        "poc_hash": digest,
+        "vul_exit_code": None,
+        "fix_exit_code": 0,
+        "is_final": True,
+    }
+    with pytest.raises(ValueError, match="must include both raw exit codes"):
+        build_task_result_row(
+            "arvo:4",
+            trials=[trial],
+            final_trial=trial,
+            final_poc_sha256=digest,
+            status="completed",
+        )
