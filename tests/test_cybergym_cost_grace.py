@@ -225,3 +225,33 @@ def test_run_campaign_grace_accepted_row_discloses_residue(tmp_path):
     assert rows[0]["cost_usd"] == pytest.approx(0.386527)
     projection = BudgetLedger(tmp_path / "grace-row" / "claims.jsonl", cap_usd=2).projection()
     assert projection.settled_usd == pytest.approx(0.386527)
+
+
+def test_grace_marker_on_failure_outcome_does_not_break_row_build(tmp_path):
+    """A grace marker riding a failed delivery outcome must not crash the row."""
+    from devtools.benchmarks.cybergym.cybergym_adapter import TaskSpec, finalize_outcome_row
+
+    frame = _completed_abandoned_residue_frame("cybergym-grace-failure")
+    marked = _CostGraceTracker().accept(
+        frame,
+        now=0.0,
+        wall_now=datetime.datetime.now(datetime.timezone.utc).timestamp(),
+    )
+    assert marked is not None
+    outcome = {
+        "status": "infra_failed",
+        "lifecycle": "post_gateway_evaluation_failed",
+        "runtime_result": marked,
+        "cost_grace_acceptance": marked["cost_grace_acceptance"],
+    }
+    row = finalize_outcome_row(
+        tmp_path,
+        TaskSpec("arvo:9", "arvo"),
+        tmp_path,
+        outcome,
+        attempt_id="a1",
+        contract=None,
+    )
+    assert row["status"] == "infra_failed"
+    assert row["cost_final"] is False
+    assert row["unresolved_upper_bound_usd"] == pytest.approx(0.035398)

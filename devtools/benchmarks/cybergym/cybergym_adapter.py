@@ -1185,11 +1185,11 @@ def finalize_outcome_row(
         attempt_id=str(attempt_id),
     )
     grace = outcome.get("cost_grace_acceptance")
-    if grace is not None:
+    if isinstance(grace, Mapping) and grace.get("unresolved_upper_bound_usd") is not None:
         # The accounted upper bound already contains the abandoned residue;
         # the row discloses it instead of claiming a fully final cost.
         row.update({"cost_final": False, "cost_grace_acceptance": grace,
-                    "unresolved_upper_bound_usd": outcome["unresolved_upper_bound_usd"]})
+                    "unresolved_upper_bound_usd": grace["unresolved_upper_bound_usd"]})
     return row
 
 
