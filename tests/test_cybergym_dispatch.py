@@ -18,6 +18,8 @@ import urllib.request
 import pytest
 
 from devtools.benchmarks.cybergym.cybergym_adapter import (
+    DEFAULT_LEVEL,
+    OFFICIAL_MODEL,
     BudgetLedger,
     GatewayCircuitOpen,
     run_campaign,
@@ -277,3 +279,189 @@ def test_gateway_circuit_threshold_is_validated(tmp_path):
                 budget_cap_usd=2,
                 gateway_circuit_threshold=invalid,
             )
+
+
+def test_launcher_finalizes_gateway_unreachable_when_circuit_opens(monkeypatch, tmp_path):
+    """Pin the launcher branch that finalizes a circuit-open campaign.
+
+    ``run_campaign`` raising ``GatewayCircuitOpen`` must still produce a
+    finalized manifest: the rows that landed stay accounted, the undispatched
+    tasks are named under ``extra.gateway_circuit.remaining_task_ids``, and
+    the run records outcome ``gateway_unreachable`` with exit code 2 instead
+    of a generic failure.
+    """
+    from types import SimpleNamespace
+
+    import devtools.benchmarks.cybergym.run_cybergym as launcher
+
+    repo = tmp_path / "seed"
+    source = tmp_path / "cybergym-source"
+    data = tmp_path / "cybergym-data"
+    tasks = tmp_path / "tasks.json"
+    mask_map = tmp_path / "mask-map.json"
+    settings_template = tmp_path / "settings.json"
+    server_root = tmp_path / "server-root"
+    binary_dir = server_root / "bin"
+    for directory in (repo, source, data, server_root, binary_dir):
+        directory.mkdir(parents=True)
+    tasks.write_text("{}", encoding="utf-8")
+    mask_map.write_text("{}", encoding="utf-8")
+    settings_template.write_text("{}", encoding="utf-8")
+    applied = tmp_path / "run" / "settings_applied.json"
+    expected_commit = "a" * 40
+    task_ids = ["arvo:1", "arvo:2", "arvo:3", "arvo:4"]
+    events: list[str] = []
+
+    class FakeServer:
+        base_url = "http://127.0.0.1:18181"
+        attestation = {"repo_head": expected_commit}
+
+        def close(self):
+            events.append("server.close")
+
+    class FakeExecutor:
+        def prepare(self):
+            events.append("executor.prepare")
+            return {"prepared": True}
+
+        def close(self):
+            events.append("executor.close")
+            return {"ok": True, "status": "closed"}
+
+    def fake_prepare(_template, _out_root, _args):
+        applied.parent.mkdir(parents=True, exist_ok=True)
+        applied.write_text("{}", encoding="utf-8")
+        return applied, {
+            "model": OFFICIAL_MODEL,
+            "model_slots": {"OUROBOROS_MODEL": OFFICIAL_MODEL},
+            "provider_credentials": {},
+        }
+
+    args = SimpleNamespace(
+        repo_dir=repo,
+        source_root=source,
+        data_root=data,
+        tasks_file=tasks,
+        task_id=list(task_ids),
+        server="http://cybergym-internal:8666",
+        ouroboros_url="",
+        docker_host="unix:///run/user/1006/docker.sock",
+        server_image="cybergym-server",
+        server_image_digest="sha256:" + "b" * 64,
+        workspace_image="ouroboros-workspace",
+        workspace_image_digest="sha256:" + "c" * 64,
+        server_root=server_root,
+        binary_dir=binary_dir,
+        cybergym_api_key_env="CYBERGYM_API_KEY",
+        mask_map=mask_map,
+        difficulty=DEFAULT_LEVEL,
+        model=OFFICIAL_MODEL,
+        settings_path=settings_template,
+        out_dir=tmp_path / "run",
+        run_id="",
+        budget_usd=2.0,
+        per_task_cost_usd=1.0,
+        per_task_estimate_usd=1.0,
+        timeout_sec=1,
+        workers=1,
+        executor="",
+        dry_run=False,
+        allow_dirty_seed=False,
+        expected_source_sha256="",
+        expected_data_sha256="a" * 64,
+        expected_binary_sha256="b" * 64,
+        expected_tasks_sha256="",
+        expected_mask_sha256="mask-digest",
+        cybergym_python="python3",
+        provider_only=["provider-a"],
+        provider_order=["provider-a"],
+    )
+    monkeypatch.setattr(launcher, "parse_args", lambda _argv=None: args)
+    monkeypatch.setattr(launcher, "pre_admission_report", lambda **_kwargs: {"ok": True, "reasons": []})
+    monkeypatch.setattr(
+        launcher,
+        "admit_benchmark_run",
+        lambda _path, **_kwargs: {
+            "source": {"head": expected_commit},
+            "extra": dict(_kwargs.get("extra") or {}),
+            "harness": {},
+            "output_paths": {},
+        },
+    )
+    monkeypatch.setattr(launcher, "verify_source_checkout", lambda *_args, **_kwargs: {})
+    monkeypatch.setattr(launcher, "source_tree_digest", lambda *_args, **_kwargs: "source-digest")
+    monkeypatch.setattr(
+        launcher,
+        "verify_mask_map",
+        lambda *_args, **_kwargs: {"sha256": "mask-digest"},
+    )
+    monkeypatch.setattr(
+        launcher,
+        "load_task_catalog",
+        lambda *_args, **_kwargs: {"task_ids": list(task_ids)},
+    )
+    monkeypatch.setattr(launcher, "_prepare_applied_settings", fake_prepare)
+    monkeypatch.setattr(
+        launcher,
+        "_start_isolated_ouroboros_server",
+        lambda *_args, **_kwargs: FakeServer(),
+    )
+    monkeypatch.setattr(launcher, "_build_default_executor", lambda *_args, **_kwargs: FakeExecutor())
+    monkeypatch.setattr(
+        launcher,
+        "_validate_paid_observations",
+        lambda *_args, **_kwargs: (
+            {"status": "passed", "model": OFFICIAL_MODEL},
+            {"sha256": "a" * 64},
+            {"sha256": "b" * 64},
+            0.0,
+        ),
+    )
+    monkeypatch.setattr(
+        launcher,
+        "_record_provider_probe_cost",
+        lambda *_args, **_kwargs: {"attempt_id": "campaign-overhead-provider_probe"},
+    )
+
+    landed_rows = [
+        {
+            "task_id": "arvo:1",
+            "status": "infra_failed",
+            "infra_reason": "GatewayTransportError",
+            "final_submission_success": False,
+        },
+        {
+            "task_id": "arvo:2",
+            "status": "completed",
+            "final_submission_success": True,
+        },
+    ]
+    dispatched: list[str] = []
+
+    def circuit_open(specs, **_kwargs):
+        dispatched.extend(spec.task_id for spec in specs)
+        raise GatewayCircuitOpen(rows=landed_rows, threshold=3, remaining=task_ids[2:])
+
+    monkeypatch.setattr(launcher, "run_campaign", circuit_open)
+    rc = launcher.main()
+
+    assert rc == 2
+    assert dispatched == task_ids
+    assert events == ["executor.prepare", "executor.close", "server.close"]
+    manifest = json.loads((tmp_path / "run" / "run_manifest.json").read_text(encoding="utf-8"))
+    assert manifest["requested_task_ids"] == task_ids
+    extra = manifest["extra"]
+    assert extra["outcome"] == "gateway_unreachable"
+    assert extra["exit_code"] == 2
+    assert extra["gateway_circuit"] == {
+        "outcome": "gateway_unreachable",
+        "consecutive_transport_failures": 3,
+        "dispatched_rows": 2,
+        "remaining_task_ids": ["arvo:3", "arvo:4"],
+    }
+    # Rows that landed before the breaker opened stay accounted, not dropped.
+    assert extra["rows_written"] == 2
+    assert extra["completed_count"] == 1
+    assert extra["infra_count"] == 1
+    assert extra["close_skipped"] is False
+    assert extra["server_cleanup"]["status"] == "closed"
