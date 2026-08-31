@@ -153,6 +153,7 @@ SETTINGS_DEFAULTS = {**UPDATE_SETTINGS_DEFAULTS,
     "OUROBOROS_TASK_IDLE_TIMEOUT_SEC": 900,
     "OUROBOROS_TASK_ABS_CEILING_SEC": 21600,
     "OUROBOROS_PER_CALL_TIMEOUT_CEILING_SEC": 1800,
+    "OUROBOROS_USAGE_UNRESOLVED_WRITEOFF_SEC": 900,  # sweep TTL for the dead-unresolved-row bound write-off
     "OUROBOROS_FINALIZATION_GRACE_SEC": FINALIZATION_GRACE_DEFAULT_SEC,
     "OUROBOROS_SUPERVISOR_LIVENESS_DEADLINE_SEC": SUPERVISOR_LIVENESS_DEADLINE_DEFAULT_SEC,
     "OUROBOROS_PACING_INTERVAL_SEC": PACING_INTERVAL_DEFAULT_SEC,
@@ -161,10 +162,9 @@ SETTINGS_DEFAULTS = {**UPDATE_SETTINGS_DEFAULTS,
     "OUROBOROS_BG_MAX_ROUNDS": 10,
     "OUROBOROS_BG_WAKEUP_MIN": 30,
     "OUROBOROS_BG_WAKEUP_MAX": 7200,
-    # Post-task self-evolution envelope (V4). Owner-enabled capability whose
-    # CONTENT stays LLM-first; default OFF. When enabled, after a qualifying task
-    # the worker may promote one high-value code-class backlog item into the
-    # existing (gated) evolution campaign. Cadence: off | llm | every_n:<k>.
+    # Post-task self-evolution envelope (V4), owner-enabled, default OFF; CONTENT
+    # stays LLM-first. When enabled, after a qualifying task the worker may promote
+    # one high-value code-class backlog item into the (gated) evolution campaign. Cadence: off | llm | every_n:<k>.
     "OUROBOROS_POST_TASK_EVOLUTION": "false",
     "OUROBOROS_POST_TASK_EVOLUTION_CADENCE": "llm",
     "OUROBOROS_POST_TASK_EVOLUTION_BUDGET_USD": 0.0,
@@ -172,55 +172,46 @@ SETTINGS_DEFAULTS = {**UPDATE_SETTINGS_DEFAULTS,
     # overrides the LLM-first promotion). Empty = pure LLM choice.
     "OUROBOROS_EVOLUTION_PERSISTENT_OBJECTIVE": "",
     "OUROBOROS_WEBSEARCH_MODEL": "gpt-5.2",
-    # web_search backend pin: auto (default OpenAI-first cascade) | ddgs (pure
-    # retrieval, no second LLM — for fixed-model runs) | openai | openrouter | anthropic.
+    # web_search backend pin: auto (OpenAI-first cascade) | ddgs (pure retrieval, no second LLM) | openai | openrouter | anthropic.
     "OUROBOROS_WEBSEARCH_BACKEND": "auto",
-    # Main-loop OpenRouter server web-search tool. Off by default: provider-
-    # specific capability, not a core provider-independence requirement.
+    # Main-loop OpenRouter server web-search tool; off by default (provider-specific capability).
     "OUROBOROS_MAIN_WEB_SEARCH": "off",
     "OUROBOROS_MAIN_WEB_SEARCH_ENGINE": "auto",
     "OUROBOROS_MAIN_WEB_SEARCH_MAX_TOTAL_RESULTS": 10,
-    # OpenRouter provider routing: "" (off) | resilience (same-model failover, cache-warm)
-    # | repro (pin, no failover — fixed-model runs) | a raw JSON `provider` object.
+    # OpenRouter provider routing: "" (off) | resilience (same-model failover) | repro (pin, no failover) | raw JSON `provider` object.
     "OUROBOROS_OR_PROVIDER": "",
     # search_code total wall-clock budget (seconds) bounding the rg walk + the fallback walk.
     "OUROBOROS_SEARCH_CODE_WALL_SEC": "45",
     # NOTE: OUROBOROS_OBSERVABILITY_KEEP_RAW (writes UNREDACTED secret-bearing payloads to
     # disk) is intentionally NOT a settings/UI carrier — it is an env-only operator debug
     # override so a self-change or non-owner save can never enable secret logging.
-    # Generative context-window probe machinery: when enabled AND a caller passes
+    # Generative context-window probe (dormant since the settings-time Max gate
+    # retirement; kept for tests and future explicit owner probes): with
     # allow_generative=True, confirms a route's >=1M window from a FREE over-window
-    # reject; *_CHARS sizes the padding. Since the settings-time Max gate retirement
-    # no production surface passes allow_generative=True (dormant; kept for tests
-    # and future explicit owner probes).
+    # reject; *_CHARS sizes the padding.
     "OUROBOROS_GENERATIVE_PROBE": "1",
     "OUROBOROS_GENERATIVE_PROBE_CHARS": "5000000",
     # Pre-commit review: comma-separated provider-tagged model list
     "OUROBOROS_REVIEW_MODELS": ",".join(OPENROUTER_REVIEW_DEFAULTS["triad"]),
     "OUROBOROS_REVIEWER_SLOTS": "",  # structured slot SSOT (reviewer_slot_config.py); "" = legacy comma keys
     "OUROBOROS_SUBAGENTS": "",  # configured task-actor SSOT; "" = bounded legacy/undecided read
-    # INSTALL-TIME facts: the agent-preset generation this install received, and WHEN onboarding last completed
-    # (recorded on EVERY completion). Endpoint-authored and disk-only — see ENDPOINT_AUTHORED_SETTINGS.
+    # INSTALL-TIME facts (endpoint-authored, disk-only — see ENDPOINT_AUTHORED_SETTINGS): preset generation + WHEN onboarding last completed (EVERY completion).
     "OUROBOROS_SUBSCRIPTION_PRESET_VERSION": "",
     "OUROBOROS_SUBAGENT_PRESET_RECEIPT": "",
     "OUROBOROS_ONBOARDING_COMPLETED_AT": "",
     # Pre-commit review enforcement: advisory | blocking
     "OUROBOROS_REVIEW_ENFORCEMENT": "advisory",
-    # Native tool-round reviewer episode caps (review_native_episode.py owns
-    # the getters); both fail CLOSED — typed refusal, never compaction/resume.
+    # Native tool-round reviewer episode caps (getters: review_native_episode.py); both fail CLOSED with a typed refusal.
     "OUROBOROS_REVIEW_NATIVE_MAX_ROUNDS": "16",
     "OUROBOROS_REVIEW_NATIVE_MAX_TRANSCRIPT_CHARS": "900000",
-    # Auto-grant reviewed-skill requests by default; grants stay bound to the
-    # reviewed content hash and editing a skill still invalidates them.
+    # Auto-grant reviewed-skill requests by default; grants stay bound to the reviewed content hash (editing invalidates).
     "OUROBOROS_AUTO_GRANT_REVIEWED_SKILLS": "true",
-    # Launcher-seeded native skills carry a hash-pinned native-trust review
-    # verdict (the payload bytes shipped through the repo commit gate); the
-    # zero-grant ones also auto-enable. Editing the payload still goes stale.
-    # Owner opt-out: set to false to keep manual review for native seeds.
+    # Launcher-seeded native skills carry a hash-pinned native-trust review verdict
+    # (payload bytes shipped through the commit gate); zero-grant ones auto-enable,
+    # editing goes stale, and false keeps manual review for native seeds.
     "OUROBOROS_TRUST_NATIVE_SEEDED_SKILLS": "true",
-    # Agent-requested restarts drain running tasks first: while any RUNNING
-    # task still heartbeats, the restart waits up to this many seconds before
-    # proceeding fail-closed (0 = no drain, restart immediately).
+    # Agent-requested restarts drain running tasks first: while any RUNNING task
+    # still heartbeats, wait up to this many seconds, then proceed fail-closed (0 = no drain).
     "OUROBOROS_RESTART_DRAIN_MAX_SEC": 120,
     # Runtime mode: light | advanced | pro; pro still requires review gates.
     "OUROBOROS_RUNTIME_MODE": "advanced",
@@ -262,23 +253,24 @@ SETTINGS_DEFAULTS = {**UPDATE_SETTINGS_DEFAULTS,
     # then fail-closed blocks a benign command. Registered numeric SSOT (no inline literals).
     "OUROBOROS_SAFETY_MAX_TOKENS": 2000,
     "OUROBOROS_SAFETY_CALL_TIMEOUT_SEC": 60,
-    # v6.54.3 transport-timeout SSOT (deadline package D). web_search: 480 is one
-    # provider-attempt bound; the ToolEntry envelope derives the configured paid
-    # cascade. LLM no_proxy: 2700 leaves room for long silent reasoning without
-    # pinning a worker on a dead socket.
+    # v6.54.3 transport-timeout SSOT (deadline package D). web_search: one provider-attempt
+    # bound. LLM no_proxy: room for long silent reasoning without pinning a dead socket.
     "OUROBOROS_WEBSEARCH_TIMEOUT_SEC": 480,
     "OUROBOROS_LLM_TRANSPORT_READ_TIMEOUT_SEC": 2700,
-    # v6.54.3 (1.5): plan_task deadline scaling. With a task deadline the planning swarm's
-    # wait ceiling is min(configured ceiling, remaining/4); below this floor plan_task SKIPS
-    # with a typed reason + telemetry rather than eat the tail of the budget.
+    # v6.54.3 (1.5): plan_task deadline scaling — the planning swarm's wait ceiling is
+    # min(configured ceiling, remaining/4); below this floor plan_task SKIPS with a typed reason.
     "OUROBOROS_PLAN_TASK_DEADLINE_MIN_SEC": 300,
-    # Acceptance-review budget layer (task_pacing SSOT). The first final review
-    # reserves at least 200s; later passes use max(this floor, 1.5×timing EWMA).
+    # Acceptance-review budget layer (task_pacing SSOT): first final review reserves >=200s; later passes use max(this floor, 1.5×timing EWMA).
     "OUROBOROS_ACCEPTANCE_REVIEW_EST_SEC": 200,
     # Shared paid-review-cycle cap (SSOT + per-gate meaning: ouroboros/review_cycles.py):
     # STRING "N"|"unlimited": plan review, acceptance (passes = cycles - 1), commit gate and skill review (paid cycles per root task / manual snapshot); identical material is never re-reviewed for pay on any gate.
     "OUROBOROS_REVIEW_MAX_CYCLES": "2",
     "OUROBOROS_ACCEPTANCE_RESERVE_PCT": 5,
+    # Acceptance-fence IPC bounds (CyberGym full1507 postmortem): the ack-file
+    # latency bound for slow/FS-backlogged supervisors, and the cap on CONSECUTIVE
+    # fence-unavailable rounds before the task terminalizes as infra_failed.
+    "OUROBOROS_ACCEPTANCE_FENCE_ACK_TIMEOUT_SEC": 120,
+    "OUROBOROS_ACCEPTANCE_FENCE_WAIT_MAX_ROUNDS": 3,
     # Prompt-cache TTL, one honest GLOBAL override (owner decision 2026-08-08, batch #2 Q2=A): applied to
     # EVERY cache_control breakpoint on the Anthropic-normalizing family — main loop, review lanes, safety
     # supervisor alike — at the ONE send-time finalizer (llm._normalize_payload_cache_ttl). 'default' = bare
@@ -310,8 +302,7 @@ SETTINGS_DEFAULTS = {**UPDATE_SETTINGS_DEFAULTS,
     "USE_LOCAL_CONSCIOUSNESS": False,
     "USE_LOCAL_FALLBACK": False,
     "OUROBOROS_FILE_BROWSER_DEFAULT": "",
-    # 429-aware cross-model fallback: process-local cooldown for transiently failing
-    # models (429/5xx/overloaded), passive heal-back. Owner-tunable; default-on, fail-soft.
+    # 429-aware cross-model fallback: process-local cooldown for transiently failing models, passive heal-back. Default-on, fail-soft.
     "OUROBOROS_FALLBACK_COOLDOWN_ENABLED": True,
     "OUROBOROS_FALLBACK_COOLDOWN_SEC": 120,
     "OUROBOROS_FALLBACK_ATTEMPTS_PER_MODEL": 1,
@@ -361,10 +352,7 @@ CLAUDEXOR_DELEGATED_WORKSPACE_ROOT_MIN_VERSION: str = "3.8.1"
 
 
 def _main_model() -> str:
-    return (
-        str(os.environ.get("OUROBOROS_MODEL", "") or "").strip()
-        or str(SETTINGS_DEFAULTS["OUROBOROS_MODEL"])
-    )
+    return str(os.environ.get("OUROBOROS_MODEL", "") or "").strip() or str(SETTINGS_DEFAULTS["OUROBOROS_MODEL"])
 
 
 def get_light_model() -> str:
@@ -1004,6 +992,16 @@ def get_acceptance_reserve_pct() -> int:
     return _clamped_number_setting("OUROBOROS_ACCEPTANCE_RESERVE_PCT", low=0, high=50, cast=int)
 
 
+def get_acceptance_fence_ack_timeout_sec() -> float:
+    """Worker-side timeout for the supervisor's one-shot acceptance-fence ack (slow-FS scaled)."""
+    return _clamped_number_setting("OUROBOROS_ACCEPTANCE_FENCE_ACK_TIMEOUT_SEC", low=5.0, high=900.0)
+
+
+def get_acceptance_fence_wait_max_rounds() -> int:
+    """Consecutive fence-unavailable rounds before infra_failed terminalization."""
+    return _clamped_number_setting("OUROBOROS_ACCEPTANCE_FENCE_WAIT_MAX_ROUNDS", low=1, high=50, cast=int)
+
+
 def get_plan_task_deadline_min_sec() -> float:
     """Minimum useful deadline-scaled planning-swarm window (v6.54.3, 1.5)."""
     return _clamped_number_setting("OUROBOROS_PLAN_TASK_DEADLINE_MIN_SEC", low=30.0, high=3600.0)
@@ -1494,6 +1492,8 @@ def get_vision_caption_timeout_sec() -> int:
     return _clamped_number_setting("OUROBOROS_VISION_CAPTION_TIMEOUT_SEC", low=1, cast=int)
 def get_claudexor_harness_install_timeout_sec() -> int:
     return _clamped_number_setting("OUROBOROS_CLAUDEXOR_HARNESS_INSTALL_TIMEOUT_SEC", low=1, cast=int)
+def get_usage_unresolved_writeoff_sec() -> float:
+    return _clamped_number_setting("OUROBOROS_USAGE_UNRESOLVED_WRITEOFF_SEC", low=60.0, high=86400.0)
 
 
 def get_finalization_grace_sec(settings: Optional[dict] = None) -> int:

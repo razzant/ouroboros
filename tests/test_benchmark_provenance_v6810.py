@@ -484,6 +484,10 @@ _TRUNCATION_DECISIONS: dict[str, tuple[bool, str]] = {
         "loop_llm_call.py owner deadline admission rail; no provider call was dispatched",
     ),
     "task_exception": (False, "agent.py:777 the attempt ran and crashed; an honest failure"),
+    # The model's turn completed but its content was tool-call markup that
+    # could not be converted (leftover DSML/XML): a protocol failure terminal,
+    # never a rail that cut the attempt off.
+    "protocol_fail": (False, "tool_call_markup.py tool_markup_protocol_fail; malformed markup terminal, not a truncation"),
     "capability_profile_mismatch": (False, "control_delegation.py:81 rejected delegate call"),
     "delegation_rights_may_delegate": (False, "control_delegation.py explicit parent recursion-right refusal"),
     "delegation_rights_may_fan_out": (False, "control_delegation.py explicit parent fan-out refusal"),

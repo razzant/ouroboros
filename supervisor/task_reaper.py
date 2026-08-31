@@ -16,7 +16,7 @@ import queue as _stdqueue
 import shutil
 import threading
 import uuid
-from typing import Any, Dict, Optional
+from typing import Any, Dict, Optional, Set
 
 from ouroboros.outcomes import EXECUTION_INFRA_FAILED, terminal_outcome_axes
 from ouroboros.utils import append_jsonl, utc_now_iso
@@ -28,6 +28,29 @@ log = logging.getLogger(__name__)
 reap_queue: "_stdqueue.Queue[Dict[str, Any]]" = _stdqueue.Queue()
 _reaper_thread: "Optional[threading.Thread]" = None
 _reaper_start_lock = threading.Lock()
+
+# Task ids handed to the reaper whose worker is not PROVABLY dead (queued,
+# mid-kill, or wedged-held after a failed kill): the acceptance-fence
+# dead-owner predicate treats membership as ALIVE; only confirmed death forgets.
+_REAPING_TASK_IDS: Set[str] = set()
+_REAPING_TASK_IDS_LOCK = threading.Lock()
+
+
+def note_task_reaping(task_id: str) -> None:
+    tid = str(task_id or "").strip()
+    if tid:
+        with _REAPING_TASK_IDS_LOCK:
+            _REAPING_TASK_IDS.add(tid)
+
+
+def task_reaping_in_progress(task_id: str) -> bool:
+    with _REAPING_TASK_IDS_LOCK:
+        return str(task_id or "").strip() in _REAPING_TASK_IDS
+
+
+def _forget_task_reaping(task_id: str) -> None:
+    with _REAPING_TASK_IDS_LOCK:
+        _REAPING_TASK_IDS.discard(str(task_id or "").strip())
 
 
 def reaper_loop() -> None:
@@ -45,6 +68,9 @@ def reaper_loop() -> None:
             # the crash detector skips reaping slots, so it would be unrecoverable until restart.
             # Clear reaping (the same conservative recovery step 5 uses) so a later tick reclaims
             # it; do NOT respawn here (an early escape may have left the original worker alive).
+            # The abandoned job also leaves the not-provably-dead registry: the
+            # orphaned-running sweep terminalizes the task and releases its fence.
+            _forget_task_reaping(str((job or {}).get("task_id") or ""))
             try:
                 from supervisor import workers as _w_mod
                 from supervisor.queue import _queue_lock as _ql
@@ -1201,6 +1227,28 @@ def _respawn_after_reap(q: Any, workers_mod: Any, worker_id: int) -> None:
         log.debug("Reaper: failed to persist queue snapshot after respawn", exc_info=True)
 
 
+def _release_confirmed_dead_acceptance_owner(
+    workers_mod: Any,
+    proc: Any,
+    task_id: str,
+) -> None:
+    """Forget reaping custody and release fences owned by a confirmed-dead task."""
+    _forget_task_reaping(task_id)
+    workers_mod._reconcile_confirmed_dead_review_owner(
+        int(getattr(proc, "pid", 0) or 0)
+    )
+    try:
+        from supervisor.queue import release_acceptance_fence_for_dead_owner
+
+        release_acceptance_fence_for_dead_owner(task_id)
+    except Exception:
+        log.debug(
+            "Reaper: acceptance-fence release failed for %s",
+            task_id,
+            exc_info=True,
+        )
+
+
 def reap_timed_out_task(job: Dict[str, Any]) -> None:
     """Full teardown for a timed-out task, run OFF the supervisor loop (Variant A).
 
@@ -1250,9 +1298,8 @@ def reap_timed_out_task(job: Dict[str, Any]) -> None:
                             _incident_chat_id(task, owner_chat_id))
         return
 
-    workers_mod._reconcile_confirmed_dead_review_owner(
-        int(getattr(proc, "pid", 0) or 0)
-    )
+    # Confirmed death releases reaper/fence custody before retry admission.
+    _release_confirmed_dead_acceptance_owner(workers_mod, proc, task_id)
 
     try:
         from ouroboros.tools.services import archive_task_service_logs
@@ -1262,10 +1309,7 @@ def reap_timed_out_task(job: Dict[str, Any]) -> None:
         log.debug("Reaper: failed to archive service logs for %s", task_id, exc_info=True)
 
     # GR5-2: the killed worker's graceful ``release_task_runs`` never ran, so
-    # its open delegated (Claudexor) runs would keep mutating while the retry
-    # starts — and the orphan sweep never fires, because the retried task keeps
-    # the owner "alive". Reconcile custody NOW (the same seam + post-reconcile
-    # open_runs/pending_invocations re-audit the cancel kill path uses), BEFORE
+    # reconcile delegated-run custody NOW (the cancel kill path's seam), BEFORE
     # the retry/respawn decision; still-open runs are disclosed on the reap
     # outcome (result field + the typed ``delegated_runs_unreconciled`` event
     # the shared helper emits). Custody reconciliation only — the reaper mints
@@ -1281,8 +1325,7 @@ def reap_timed_out_task(job: Dict[str, Any]) -> None:
         write_task_result,
     )
 
-    # 2. POST-KILL already-terminal re-check: the worker may have self-finalized right at
-    #    the boundary. The process is dead now, so this decision is final.
+    # 2. POST-KILL already-terminal re-check (the process is dead; this decision is final).
     self_status, _existing = _load_post_kill_terminal_result(_q, task, task_id)
 
     if self_status:
@@ -1292,8 +1335,7 @@ def reap_timed_out_task(job: Dict[str, Any]) -> None:
         )
     else:
         # 3. Reconstruct real cost/rounds from durable llm_usage (the killed worker never
-        #    finalized; the event would otherwise carry zeros and understate metrics).
-        #    A failure here cannot abort teardown before the slot is respawned.
+        #    finalized). A failure here cannot abort teardown before the slot is respawned.
         try:
             recon_fields = _q.reconstruct_task_cost(task_id, fields=True)
         except Exception:
@@ -1358,8 +1400,7 @@ def reap_timed_out_task(job: Dict[str, Any]) -> None:
                     exc_info=True,
                 )
 
-        # 4. Enqueue the retry ONLY now (original is dead) — no concurrent execution.
-        #    Guarded so an enqueue failure cannot abort the reaper before respawn.
+        # 4. Enqueue the retry ONLY now (original is dead); a guarded enqueue failure cannot abort the reaper before respawn.
         requeued = False
         new_attempt = attempt
         retry_suppression: Dict[str, str] = {}
@@ -1450,9 +1491,8 @@ def reap_timed_out_task(job: Dict[str, Any]) -> None:
         except Exception:
             log.debug("Reaper: failed to log task_terminal_timeout for %s", task_id, exc_info=True)
 
-        # Guarded: a notification failure (e.g. a torn-down bus during shutdown) must NOT
-        # abort the reaper before respawn, or the slot would stay reaping=True forever.
-        # C4: the notice goes to the TASK'S chat; owner chat only as absent-binding fallback.
+        # Guarded: a notification failure must not abort the reaper before respawn
+        # (the slot would stay reaping=True). C4: the notice goes to the TASK'S chat.
         incident_chat_id = _incident_chat_id(task, owner_chat_id)
         if incident_chat_id is not None:
             try:
@@ -1490,8 +1530,7 @@ def reap_timed_out_task(job: Dict[str, Any]) -> None:
                 log.debug("Reaper: failed to send owner notification for %s", task_id, exc_info=True)
 
         if not requeued and not retry_suppression:
-            # AR2-5a ordering: salvage first (it registers the answer as OWED in
-            # the durable outbox), only then task_done — see _emit_reap_task_done.
+            # AR2-5a ordering: salvage first (it registers the answer as OWED), then task_done.
             _deliver_reap_salvage(_q, task, task_id, terminal_reason, unreconciled)
             _emit_reap_task_done(
                 workers_mod, task, task_id, task_type, terminal_reason,

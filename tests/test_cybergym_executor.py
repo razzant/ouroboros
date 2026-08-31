@@ -1383,9 +1383,19 @@ def test_workspace_start_error_recovers_name_custody_by_inspect(tmp_path):
         },
     }
 
+    removed = []
+
     def command(argv, *, cwd=None, env=None, timeout=None):
         if "inspect" in argv and "container" in argv:
-            return CommandResult(0, json.dumps([observed]), "")
+            target = argv[-1]
+            if target in removed:
+                return CommandResult(1, "", f"Error: No such container: {target}")
+            if target in {name, container_id}:
+                return CommandResult(0, json.dumps([observed]), "")
+        if "rm" in argv and container_id in argv:
+            removed.append(container_id)
+            removed.append(name)
+            return CommandResult(0, "", "")
         if "run" in argv and name in argv:
             raise ExecutorFailure("docker run transport timeout")
         raise AssertionError(argv)
@@ -1397,9 +1407,9 @@ def test_workspace_start_error_recovers_name_custody_by_inspect(tmp_path):
             config.run_root / "task-c",
             plan,
         )
-    assert executor._task_containers[name] == container_id
-    assert executor._workspace_observations[name]["Id"] == container_id
+    assert name not in executor._task_containers
     assert name not in executor._unresolved_workspace_custody
+    assert container_id in removed
     assert not executor._workspace_starting
 
 
@@ -1537,3 +1547,43 @@ def dataclasses_replace(config, **changes):
     import dataclasses
 
     return dataclasses.replace(config, **changes)
+
+
+def test_task_body_states_wall_clock_budget_derived_from_ceiling(tmp_path):
+    config = _config(tmp_path)
+    executor = CyberGymExecutor(config)
+    task_dir = config.run_root / "task"
+    task_dir.mkdir()
+    (task_dir / "description.txt").write_text("Find the crash", encoding="utf-8")
+    container_name = "cybergym-workspace-agent-" + "a" * 24
+    executor._task_containers[container_name] = "b" * 64  # noqa: SLF001 - boundary fixture
+    body = executor._task_body(  # noqa: SLF001 - pure boundary assertion
+        type("Task", (), {"task_id": "arvo:1", "metadata": {}})(),
+        task_dir,
+        container_name,
+        "attempt-1",
+    )
+    guidance = body["description"]
+    assert "Time budget: you have at most 2 hours of wall time" in guidance
+    assert "best-effort /workspace/final.poc before the deadline" in guidance
+
+
+def test_deadline_guidance_formats_hours_minutes_and_seconds():
+    guidance = executor_module._deadline_guidance  # noqa: SLF001 - pure helper
+    assert "at most 2 hours of wall time" in guidance(7200)
+    assert "at most 1 hour of wall time" in guidance(3600)
+    assert "at most 90 minutes of wall time" in guidance(5400)
+    assert "at most 1 minute of wall time" in guidance(60)
+    assert "at most 45 seconds of wall time" in guidance(45)
+
+
+def test_isolate_data_root_extends_telemetry_allowed_roots(tmp_path):
+    external = tmp_path / "nvme" / "ouroboros-data"
+    config = _config(tmp_path, isolate_data_root=external)
+    executor = CyberGymExecutor(config)
+    assert executor._telemetry_allowed_roots() == (  # noqa: SLF001 - boundary assertion
+        config.run_root,
+        external.resolve(),
+    )
+    with pytest.raises(ExecutorFailure, match="isolate_data_root"):
+        _config(tmp_path, isolate_data_root=pathlib.Path("/"))

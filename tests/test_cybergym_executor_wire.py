@@ -19,6 +19,7 @@ import pytest
 from devtools.benchmarks.cybergym import cybergym_executor as executor_module
 from devtools.benchmarks.cybergym.cybergym_adapter import (
     CAPABILITY_FINAL_POC_MISSING,
+    PROTOCOL_FAIL,
     BudgetLedger,
     run_campaign,
 )
@@ -203,6 +204,74 @@ def test_served_telemetry_reads_verified_response_wire_effort(tmp_path):
     assert observed["effort_source"] == "served_response_wire"
     assert observed["response_wire_effort_count"] == 1
     assert observed["response_wire_provider_count"] == 1
+
+
+def test_served_telemetry_uses_isolate_data_root_for_wire_refs(tmp_path):
+    external = (tmp_path / "nvme" / "ouroboros-data").resolve()
+    calls = external / "observability" / "calls" / "opaque"
+    calls.mkdir(parents=True)
+    wire = {
+        "requested_effort": "high",
+        "applied_effort": "high",
+        "attempt_id": "attempt-1",
+        "candidate_sha256": "a" * 64,
+    }
+    blob_raw = json.dumps(
+        {"usage": {"request_wire": wire, "response_provider": "backend-a"}},
+        sort_keys=True,
+    ).encode("utf-8")
+    blob_path = external / "observability" / "blobs" / ("b" * 64 + ".json.gz")
+    blob_path.parent.mkdir(parents=True)
+    blob_path.write_bytes(gzip.compress(blob_raw))
+    blob_ref = {
+        "path": str(blob_path),
+        "sha256": hashlib.sha256(blob_raw).hexdigest(),
+        "size": len(blob_raw),
+        "kind": "json",
+        "encoding": "gzip",
+    }
+    manifest_raw = json.dumps(
+        {
+            "task_id": "opaque",
+            "call_id": "llm-1_response",
+            "llm_call_id": "llm-1",
+            "full_payload_ref": blob_ref,
+        },
+        sort_keys=True,
+    ).encode("utf-8")
+    manifest_path = calls / "llm-1_response.json"
+    manifest_path.write_bytes(manifest_raw)
+    payload = {
+        "reasoning_effort": "low",
+        "trace_refs": {
+            "llm_call_refs": [
+                {
+                    "llm_call_id": "llm-1",
+                    "resolved_model": "deepseek/deepseek-v4-flash-0731",
+                    "provider": "provider-a",
+                    "response_ref": {
+                        "path": str(manifest_path),
+                        "sha256": hashlib.sha256(manifest_raw).hexdigest(),
+                        "call_id": "llm-1_response",
+                    },
+                }
+            ]
+        },
+    }
+
+    config = _config(tmp_path, isolate_data_root=external)
+    executor = CyberGymExecutor(config)
+    observed = _served_telemetry(
+        payload,
+        allowed_roots=executor._telemetry_allowed_roots(),  # noqa: SLF001
+    )
+    assert observed["effort_source"] == "served_response_wire"
+    assert observed["observed_effort"] == "high"
+    # Without the external root the same wire evidence is untrusted and the
+    # telemetry falls back to the requested field rather than failing closed
+    # on a paid-path fact it cannot verify.
+    untrusted = _served_telemetry(payload, allowed_roots=(config.run_root,))
+    assert untrusted["effort_source"] == "runtime_requested_field"
 
 
 def test_submit_stdout_parser_accepts_preceding_prose_and_multiline_json():
@@ -517,6 +586,83 @@ def test_fair_terminal_missing_marker_is_typed_and_settles_cost(tmp_path, monkey
     assert projection.unresolved_upper_bound_usd == 0
 
 
+def test_fair_terminal_leftover_dsml_is_protocol_fail(tmp_path, monkeypatch):
+    from ouroboros.tool_call_markup import _DSML_MARK
+
+    leftover = (
+        f"<{_DSML_MARK}tool_calls>"
+        f"<{_DSML_MARK}invoke name=\"run_shell\">broken"
+    )
+    gateway_result = {
+        "status": "completed",
+        "content": leftover,
+        "observed_model": "deepseek/deepseek-v4-flash-0731",
+        "observed_provider": "relace",
+        "reasoning_effort": "high",
+        "prompt_tokens": 100,
+        "completion_tokens": 10,
+        "cost_usd": 0.02,
+        "cost_final": True,
+        "cost_breakdown": {
+            "accounted_upper_bound_usd": 0.02,
+            "cost_final": True,
+        },
+        "outcome_axes": {"execution": {"status": "ok"}},
+    }
+    config, executor = _stub_terminal_task_executor(
+        tmp_path, monkeypatch, gateway_result
+    )
+    rows = run_campaign(
+        ["arvo:1"],
+        run_root=config.run_root,
+        executor=executor.run_task,
+        estimated_cost_usd=1,
+        budget_cap_usd=2,
+    )
+    assert rows[0]["status"] == "infra_failed"
+    assert rows[0]["lifecycle"] == PROTOCOL_FAIL
+    assert rows[0]["infra_reason"] == PROTOCOL_FAIL
+    assert rows[0]["capability_outcome"] == ""
+
+
+def test_fair_terminal_prose_without_markup_is_capability_missing_poc(
+    tmp_path, monkeypatch
+):
+    gateway_result = {
+        "status": "completed",
+        "content": (
+            "I inspected the Baidu parser with 11 tools and wrote a long "
+            "analysis. No final.poc was produced."
+        ),
+        "observed_model": "deepseek/deepseek-v4-flash-0731",
+        "observed_provider": "backend-a",
+        "reasoning_effort": "high",
+        "prompt_tokens": 200,
+        "completion_tokens": 80,
+        "cost_usd": 0.03,
+        "cost_final": True,
+        "cost_breakdown": {
+            "accounted_upper_bound_usd": 0.03,
+            "cost_final": True,
+        },
+        "outcome_axes": {"execution": {"status": "ok"}},
+    }
+    config, executor = _stub_terminal_task_executor(
+        tmp_path, monkeypatch, gateway_result
+    )
+    rows = run_campaign(
+        ["arvo:1065"],
+        run_root=config.run_root,
+        executor=executor.run_task,
+        estimated_cost_usd=1,
+        budget_cap_usd=2,
+    )
+    assert rows[0]["status"] == "failed"
+    assert rows[0]["capability_outcome"] == CAPABILITY_FINAL_POC_MISSING
+    assert rows[0]["lifecycle"] != PROTOCOL_FAIL
+    assert rows[0]["infra_reason"] == ""
+
+
 def test_terminal_telemetry_failure_preserves_settled_cost(tmp_path, monkeypatch):
     gateway_result = {
         "status": "completed",
@@ -700,8 +846,8 @@ def test_post_admission_status_error_is_not_reclassified_as_zero_cost(
     assert rows[0]["cost_usd"] is None
     projection = BudgetLedger(config.run_root / "claims.jsonl", cap_usd=2).projection()
     assert projection.settled_usd == 0
-    assert projection.unresolved_upper_bound_usd is None
-    assert projection.can_dispatch is False
+    assert projection.unresolved_upper_bound_usd == pytest.approx(0)
+    assert projection.can_dispatch is True
 
 
 def test_cancel_503_recovers_terminal_gateway_payload(tmp_path):
@@ -784,3 +930,50 @@ def test_cancel_503_with_get_failure_keeps_custody_block(tmp_path):
         executor._cancel_gateway_task(task_id, config.run_root / "checkpoint.json")  # noqa: SLF001
     assert calls == ["POST", "GET"]
     assert task_id in executor._gateway_attempts
+
+
+def test_explicit_final_with_excluded_vul_exit_and_missing_fix_records_failure():
+    """A determinate vul-excluded failure binds without a fix-side code."""
+    from devtools.benchmarks.cybergym.cybergym_adapter import build_task_result_row
+
+    digest = "b" * 64
+    trial = {
+        "trial_id": "final",
+        "poc_hash": digest,
+        "vul_exit_code": 0,
+        "fix_exit_code": None,
+        "is_final": True,
+    }
+    row = build_task_result_row(
+        "arvo:3",
+        trials=[trial],
+        final_trial=trial,
+        final_poc_sha256=digest,
+        status="completed",
+    )
+    assert row["status"] == "completed"
+    assert row["official_success"] is False
+    assert row["final_submission_status"] == "known_failure"
+    assert row["final_submission_reason"] == "vul_exit_excluded"
+
+
+def test_explicit_final_with_missing_vul_exit_still_refused():
+    """A missing vulnerable exit keeps the binding refusal."""
+    from devtools.benchmarks.cybergym.cybergym_adapter import build_task_result_row
+
+    digest = "c" * 64
+    trial = {
+        "trial_id": "final",
+        "poc_hash": digest,
+        "vul_exit_code": None,
+        "fix_exit_code": 0,
+        "is_final": True,
+    }
+    with pytest.raises(ValueError, match="must include both raw exit codes"):
+        build_task_result_row(
+            "arvo:4",
+            trials=[trial],
+            final_trial=trial,
+            final_poc_sha256=digest,
+            status="completed",
+        )

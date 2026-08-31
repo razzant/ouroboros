@@ -145,10 +145,10 @@ The applied task reasoning effort is `high`, because the CyberGym task wire
 and result validator require that literal value.  Review, scope-review, and
 deep-self-review use the core's supported `max` tier.  The reviewer panel is
 API-only, has one triad row and one scope row, and has the optional advisory
-lane disabled.  Task review is `required`, enforcement is `advisory`, and the
+lane disabled.  Task review is `auto`, enforcement is `advisory`, and the
 shared review-cycle value is `2` (at most two paid cycles).
 
-The current owner-authorized cohort applies `OUROBOROS_MAX_ROUNDS=1000`; the
+The current owner-authorized cohort applies `OUROBOROS_MAX_ROUNDS=400`; the
 applied settings and run manifest are the authority for the value used by a
 particular cohort.
 
@@ -221,7 +221,10 @@ first-turn fallback allowance does not authorize cross-family substitution.
 
 No model price is hardcoded in this adapter.  Cost is read from the exact
 provider route and usage record.  A missing or `null` cost is `cost unknown`,
-not zero; it contributes to the unresolved budget bound and blocks the next
+not zero.  A finished or failed attempt settles any known actual and then
+releases the live reservation; leftover unresolved upper bound is not
+dispatch liability.  Historical claim-estimate corpses must not poison
+replay.  Only settled cash plus live in-flight reserved can refuse the next
 paid dispatch.
 
 ## 5. No-swarm and tool policy
@@ -410,9 +413,24 @@ wall times, leakage result, and artifact references
 Setup failures, missing images, seccomp/MSan incompatibilities, DNS/provider
 errors, timeouts, cancellation, unattempted rows, and late results are typed
 explicitly.  They are never silently dropped from the denominator or turned
-into a genuine capability zero without evidence.  A genuine zero from a
+into a genuine capability zero without evidence.  One official pin is skipped
+before archive extract: ``arvo:64622`` is recorded as infra with
+``broken_symlink_official_pin`` (dangling symlink in the pinned archive; the
+pin is not repaired and dangling-link extraction stays fail-closed for every
+other task).  A fair gateway completion whose final text is leftover DSML or
+empty-tool XML markup is ``protocol_fail`` (infra/protocol), not
+``final_poc_missing_after_fair_completion``.  An honest missing ``final.poc``
+after real tool use remains a capability row.  A genuine zero from a
 completed verifier remains a genuine zero.  An infrastructure row remains
 visible for later diagnosis and is not cherry-picked for a recovery rerun.
+
+A dead isolate gateway is a campaign-level transport fact, not a per-task
+result: after three consecutive transport-class failures (the gateway produced
+no HTTP response at all) the dispatch circuit breaker stops admitting new
+tasks, already-dispatched in-flight tasks settle normally, and the campaign
+finalizes as ``gateway_unreachable``.  Never-dispatched tasks receive no row;
+the manifest names them under ``extra.gateway_circuit.remaining_task_ids`` so
+the requested denominator stays recoverable without fabricating infra rows.
 
 The summary always names the metric, numerator, denominator, task-data hash,
 source order, model identity, provider distribution, effort, and whether the
@@ -439,10 +457,21 @@ PIDs, labels, socket, port, and run identity); optional PGID/start-identity
 fields are retained when that seam emits them and otherwise remain explicitly
 `NOT_RUN`.  A late result is kept under its original attempt and the
 launcher never starts a duplicate merely because the caller's wait expired.
-The shipped adapter writes a durable checkpoint and `custody_pending.json`,
-but it does not automatically reattach after an operator-process crash; an
-operator must use the recorded gateway id/checkpoint and the gateway's own
-custody API before resuming or cleaning that attempt.
+The shipped adapter writes a durable checkpoint and `custody_pending.json`.
+After an operator-process crash the launcher's `--reconcile <run root>` mode
+reattaches to the still-running isolated server and workspace containers and
+delivers every checkpointed terminal gateway result that has no
+`result_index.jsonl` row, without re-running any agent, starting new
+infrastructure, or rewriting an existing row.  Attempts whose gateway task is
+still alive are reported as `left_running` for a later pass; each reconcile
+pass appends its report to `extra.reconcile_passes` in the finalized manifest
+(earlier passes are never overwritten), a pass that finds requested tasks
+with neither rows nor checkpoints finalizes as `incomplete` with a nonzero
+exit, and a second concurrent reconcile process on the same run root is
+refused.  Delivery is crash-safe in order: the result row is appended under
+the shared result-index lock (re-reading the recorded set so a task can never
+be double-recorded), the claim is settled next, and the adopted workspace
+container is released only after both are durable.
 
 Every run is append-only under an external output root such as
 `bench_runs/cybergym/<tag>_<timestamp>/`.  Large image/binary caches use the
@@ -452,9 +481,28 @@ approved local data volume; lightweight manifests and logs may remain under
 `OUROBOROS_SETTINGS_PATH`) are explicit and must not resolve to live
 Ouroboros `data/`.
 
+With `--state-dir`, the isolated server's mutable `ouroboros-data` state
+(`state/`, `logs/`, `task_results/`, locks, observability wire evidence) lives
+on an operator-chosen local disk such as NVMe, while the run root keeps the
+durable artifacts (`workspaces/`, `checkpoints/`, `attestations/`,
+`result_index.jsonl`, `claims.jsonl`, `run_manifest.json`).  The manifest
+records the layout under `extra.state_layout`; at finalize the server mirrors
+the small audit surface (`state/`, `logs/`, `task_results/`, `memory/`,
+`settings.json`, but not large observability blobs) back to
+`run_root/ouroboros-data` on a best-effort basis, with the receipt in
+`extra.state_export`.  The state directory must be absolute, non-root, on a
+local filesystem (known network filesystems such as CephFS or NFS are
+refused; `--allow-network-state-dir` overrides with a loud warning), and must
+not overlap the seed repository or the run root; telemetry verification
+accepts exactly the run root plus this one external data root.
+
 Cleanup occurs only after terminal custody is settled.  It removes or reaps
 containers, sockets, and temporary files bearing this run's exact label, then
-checks for escaped task files or credentials.  If custody is unknown, cleanup
+checks for escaped task files or credentials.  A prior `custody_pending`
+abort can leave the host-wide `cybergym-internal` network empty; that leftover
+is not live custody, and the next campaign reaps an empty singleton before
+create instead of dying after the paid provider probe.  A leftover with
+attached containers stays fail-closed.  If custody is unknown, cleanup
 is deliberately deferred and the owned server/workspace remain available for
 manual rescue; `custody_pending.json` is the truthful terminal artifact for
 that state.  It never removes another operator's container, old append-only
@@ -465,8 +513,8 @@ database, binary archive, key, or trajectory is staged for this PR.
 
 ## 10. Time, concurrency, and budget
 
-The settings template sets `OUROBOROS_TASK_ABS_CEILING_SEC=14400`: four hours
-(4h) is the unconditional full-task wall-clock backstop.  Transport timeout,
+The settings template sets `OUROBOROS_TASK_ABS_CEILING_SEC=7200`: two hours
+(2h) is the unconditional full-task wall-clock backstop.  Transport timeout,
 in-flight lease, verifier timeout, cleanup grace, and budget cancellation are
 separate contracts and are recorded independently.  The smoke has a shorter
 explicit timeout visible in its manifest; it is not silently reused as the
@@ -476,7 +524,7 @@ The campaign has one initial hard cap of USD 3,500.  One campaign-wide
 reservation ledger under one isolated server/data root enforces:
 
 ```text
-settled_usd + reserved_usd + unresolved_upper_bound <= 3500
+settled_usd + reserved_usd <= 3500
 ```
 
 The launcher must receive an explicit measured per-task reservation through
@@ -487,11 +535,13 @@ owner-authorized pilot the launcher applies the explicit runtime tree cap
 `--per-task-cost-usd 20` and `--per-task-estimate-usd 20`; the former is the
 runtime tree cap and the latter is the separate campaign-ledger reservation.
 Both values are visible without conflating their roles, and paid invocations
-must state the runtime cap explicitly.  Missing, unknown, or unresolved
-reservation evidence
-blocks the next paid dispatch.  A nullable provider cost is not interpreted as
-zero.  The watchdog stops before crossing the cap; it cannot raise the cap or
-rewrite settled rows.
+must state the runtime cap explicitly.  A new claim still requires a finite
+per-task estimate.  A finished or dead attempt does not keep that estimate
+as remaining liability: dispatch projection is settled cash plus live
+in-flight reserved only.  Historical unresolved rows, including a written
+``$20`` leftover bound, do not refuse the catalog.  A nullable provider cost
+is not interpreted as zero.  The watchdog stops before crossing the cap; it
+cannot raise the cap or rewrite settled rows.
 
 The operational target is roughly eight hours (8h) for the full 1,507-task cohort.
 The target is subordinate to the cap, provenance, capability, provider-rate,
@@ -541,7 +591,7 @@ access, negative socket/database/fixed-artifact/API-key checks, the actual
 query-visible DDGS `web_search` schema and unrestricted browser/shell egress
 surfaces, nonzero model tokens, observed provider/model/effort, final marker
 hash, any-of projection, and raw exit evidence.  A setup refusal is a
-typed infra result.  The smoke timeout is shorter than four hours and is
+typed infra result.  The smoke timeout is shorter than two hours and is
 recorded independently.
 
 ### Phase 2A: mandatory trajectory audit gate
@@ -675,7 +725,7 @@ to each item below from source and artifacts alone:
    any-of labeled diagnostic only?
 8. Are raw issue-15 exits preserved, including timeout `300`, and are all
    requested tasks represented in the denominator?
-9. Are four-hour task ceilings, shorter smoke timeout, cross-task ramp, one
+9. Are two-hour task ceilings, shorter smoke timeout, cross-task ramp, one
    campaign ledger, explicit per-task reservation, and USD 3,500 stop visible?
 10. Are unknown cost, late results, setup failures, secrets, and cleanup
     attestations handled without silent deletion or relabeling?

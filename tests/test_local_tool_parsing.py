@@ -313,3 +313,75 @@ class TestParseToolCallsWithThink(unittest.TestCase):
         # Argument value is untouched
         args = _json.loads(parsed["tool_calls"][0]["function"]["arguments"])
         self.assertEqual(args["content"], arg_value)
+
+
+class TestDeepSeekDsmlParsing(unittest.TestCase):
+    def _dsml(self, inner: str) -> str:
+        from ouroboros.tool_call_markup import _DSML_MARK
+
+        return f"<{_DSML_MARK}tool_calls>{inner}</{_DSML_MARK}tool_calls>"
+
+    def test_well_formed_dsml_becomes_tool_calls(self):
+        from ouroboros.llm import LLMClient
+        from ouroboros.tool_call_markup import _DSML_MARK
+
+        invoke = (
+            f"<{_DSML_MARK}invoke name=\"read_file\">"
+            f"<{_DSML_MARK}parameter name=\"path\" string=\"true\">README.md"
+            f"</{_DSML_MARK}parameter>"
+            f"</{_DSML_MARK}invoke>"
+        )
+        msg = {
+            "content": "I will read the file now.\n" + self._dsml(invoke),
+            "tool_calls": [],
+        }
+        parsed = LLMClient._parse_tool_calls_from_content(msg, {"read_file"})
+        self.assertEqual(len(parsed["tool_calls"]), 1)
+        self.assertEqual(parsed["tool_calls"][0]["function"]["name"], "read_file")
+        self.assertEqual(
+            json.loads(parsed["tool_calls"][0]["function"]["arguments"]),
+            {"path": "README.md"},
+        )
+
+    def test_malformed_dsml_is_not_upgraded(self):
+        from ouroboros.llm import LLMClient
+        from ouroboros.tool_call_markup import _DSML_MARK, content_has_tool_markup
+
+        broken = f"<{_DSML_MARK}tool_calls><{_DSML_MARK}invoke name=\"read_file\">broken"
+        msg = {"content": broken, "tool_calls": []}
+        self.assertTrue(content_has_tool_markup(broken))
+        parsed = LLMClient._parse_tool_calls_from_content(msg, {"read_file"})
+        self.assertFalse(parsed.get("tool_calls"))
+
+    def test_normalize_remote_response_promotes_well_formed_dsml(self):
+        from ouroboros.llm import LLMClient
+        from ouroboros.tool_call_markup import _DSML_MARK
+
+        invoke = (
+            f"<{_DSML_MARK}invoke name=\"read_file\">"
+            f"<{_DSML_MARK}parameter name=\"path\" string=\"true\">README.md"
+            f"</{_DSML_MARK}parameter>"
+            f"</{_DSML_MARK}invoke>"
+        )
+        client = LLMClient()
+        target = {
+            "provider": "openrouter",
+            "usage_model": "deepseek/deepseek-v4-flash-0731",
+            "resolved_model": "deepseek/deepseek-v4-flash-0731",
+        }
+        message, _usage = client._normalize_remote_response(
+            {
+                "choices": [{
+                    "message": {
+                        "role": "assistant",
+                        "content": "Looking.\n" + self._dsml(invoke),
+                        "tool_calls": [],
+                    }
+                }],
+                "usage": {"prompt_tokens": 1, "completion_tokens": 1},
+            },
+            target,
+            skip_cost_fetch=True,
+        )
+        self.assertEqual(len(message.get("tool_calls") or []), 1)
+        self.assertEqual(message["tool_calls"][0]["function"]["name"], "read_file")

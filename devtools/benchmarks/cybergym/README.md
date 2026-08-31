@@ -96,6 +96,40 @@ and manifest:
 * the three-task protocol smoke has a positive submission and verifier result,
   valid model-token telemetry, and the required negative-connectivity checks.
 
+## External state directory and reconcile
+
+`--state-dir <absolute path>` moves the isolated server's mutable
+`ouroboros-data` state (`state/`, `logs/`, `task_results/`, locks, and the
+observability wire evidence) off the run root onto an operator-chosen local
+disk such as NVMe.  The append-only run root keeps the durable artifacts
+(`workspaces/`, `checkpoints/`, `attestations/`, `result_index.jsonl`,
+`claims.jsonl`, `run_manifest.json`).  The manifest records the layout under
+`extra.state_layout`, and at finalize the server mirrors the small audit
+surface (`state/`, `logs/`, `task_results/`, `memory/`, `settings.json`) back
+to `run_root/ouroboros-data` on a best-effort basis; the receipt lands in
+`extra.state_export`.  Large observability blobs are not mirrored.  The state
+directory must not overlap the seed repository or the run root, must sit on a
+local filesystem (known network filesystems such as CephFS or NFS are refused;
+`--allow-network-state-dir` overrides with a loud warning), and telemetry
+verification accepts exactly the run root plus this one external data root.
+
+`--reconcile <run root>` adopts an interrupted run whose launcher died after
+the gateway accepted tasks but before their rows were delivered.  It re-reads
+the manifest, attaches to the still-running isolated server and workspace
+containers, and runs the shared delivery path for every checkpointed attempt
+that has no `result_index.jsonl` row.  It never re-runs an agent, never starts
+new infrastructure, and never rewrites an existing row.  Attempts whose
+gateway task is still alive are reported as `left_running` and left for a
+later pass; each pass appends its report to `extra.reconcile_passes` of the
+finalized manifest, and earlier passes are never overwritten.  A run whose
+requested tasks have neither rows nor checkpoints is reported `incomplete`
+with a nonzero exit, never as a successful reconcile.  The exit code is `0`
+when nothing deliverable failed, `2` on refusals or undeliverable terminal
+attempts.  Reconcile requires the same pinned inputs and `--model` value as
+the original invocation, refuses to run concurrently against the same run
+root, and cross-checks an explicit `--state-dir` against the manifest's
+recorded state layout.
+
 ## Template settings versus applied settings
 
 `settings_base.json` is a reviewable template.  It is not evidence that a live
@@ -137,7 +171,7 @@ runtime-injected grant separately by fingerprint.
 The measured task reasoning effort is `high`; review, scope-review, and deep-self-review
 use the stronger supported `max` tier.  The structured reviewer panel has one
 triad row and one scope row, both on that exact model, with the optional
-advisory lane disabled.  Task review remains `required`, while enforcement is
+advisory lane disabled.  Task review runs in `auto` mode, while enforcement is
 `advisory`, and the shared review-cycle cap is `2`.  No local model, Claude
 session, legacy heavy slot, or hidden fallback family is inherited.
 
@@ -154,8 +188,8 @@ The template also records these run-shaping defaults:
 | --- | ---: | --- |
 | `OUROBOROS_MAX_SUBAGENT_DEPTH` | `0` | no delegation inside a measured task |
 | `OUROBOROS_MAX_WORKERS` | `32` | cross-task worker-pool ceiling, not within-task swarm |
-| `OUROBOROS_MAX_ROUNDS` | `1000` | per-task Ouroboros loop ceiling for the current owner-authorized cohort |
-| `OUROBOROS_TASK_ABS_CEILING_SEC` | `14400` | four-hour absolute task backstop |
+| `OUROBOROS_MAX_ROUNDS` | `400` | per-task Ouroboros loop ceiling for the current owner-authorized cohort |
+| `OUROBOROS_TASK_ABS_CEILING_SEC` | `7200` | two-hour absolute task backstop |
 | `TOTAL_BUDGET` | `3500.0` | first campaign-wide USD hard stop |
 | `OUROBOROS_RUNTIME_MODE` | `pro` | container benchmark runtime |
 | `OUROBOROS_SAFETY_MODE` | `off` | owner-authorized isolated cohort setting; deterministic benchmark guards still apply |
@@ -201,7 +235,10 @@ selected unrestricted egress for this cohort, so that broader surface is
 explicitly disclosed.  The task prompt therefore forbids target issue or
 bug reports, changelogs, commit history, release notes, patched/fix commits,
 published patches, ready-made PoCs, prior CyberGym solutions, and prior
-trajectories.  This nudge does not replace the mandatory trajectory-audit gate:
+trajectories.  The prompt also states the task's wall-clock budget, derived
+from the configured absolute ceiling (`OUROBOROS_TASK_ABS_CEILING_SEC`), so
+the agent can pace itself and submit a best-effort `final.poc` before the
+deadline.  This nudge does not replace the mandatory trajectory-audit gate:
 all smoke and pilot traces are audited before phase promotion, and the full
 cohort is audited before publication or submission.
 
@@ -292,7 +329,7 @@ failures, infra failures, timeouts, and unattempted rows.
    one OSS-Fuzz task, and one MSan-labelled task when its pinned image is
    available.  A
    missing image or setup refusal is a typed infrastructure result, not a
-   silent capability zero.  The smoke timeout is shorter than four hours and
+   silent capability zero.  The smoke timeout is shorter than two hours and
    is written to the manifest.  Audit all three trajectories before the pilot.
 2. **Ten-task pilot.**  Use the official parity subset below.  Start with a
    small independent-lane count and double only when reward/token validity,
@@ -309,10 +346,14 @@ failures, infra failures, timeouts, and unattempted rows.
    publishing or submitting the headline.
 
 The first cap is campaign-wide and shared by one isolated Ouroboros data root
-and one atomic reservation ledger.  Settled spend plus reserved in-flight
-holds plus an unresolved upper bound must remain below USD 3,500.  A nullable
-or unmetered provider response contributes to the unresolved bound and blocks
-new dispatch.  A further tranche is never automatic; it needs a new
+and one atomic reservation ledger.  Settled spend plus live in-flight
+reservations must remain below USD 3,500, and a new claim is refused when the
+projected total plus its estimate would cross the cap.  A finished or failed
+attempt settles its known actual and releases the reservation.  A nullable
+or unmetered provider response on a completed result demotes the row to an
+infrastructure result, never a capability success, and the attempt's
+reservation is marked unresolved — released from dispatch liability, not
+blocking new dispatch.  A further tranche is never automatic; it needs a new
 explicit owner decision after comparable model-focused evidence.  Resuming a
 partial run creates a new append-only directory with explicit remaining task
 ids; it does not rewrite or relabel the original denominator.
@@ -350,9 +391,13 @@ that no task workspace, API key, socket mount, or temporary file escaped the
 run root.  Cleanup is performed after terminal custody is settled; an
 in-flight late result is retained under its original attempt instead of being
 deleted or retried as a duplicate.  When custody is unknown, the adapter
-writes `custody_pending.json` and intentionally leaves owned resources alive;
-the shipped launcher has no automatic cross-process reattach, so an operator
-must use that checkpoint and the gateway custody API before cleanup.
+writes `custody_pending.json` and intentionally leaves owned resources alive.
+Cross-process reattach ships as the `--reconcile <run root>` mode described
+above: it adopts the interrupted run's still-running isolated server and
+workspace containers and delivers every checkpointed terminal gateway result,
+while a gateway task that is still in flight is reported `left_running` and
+revisited by a later pass once it settles — reconcile never hijacks or
+re-runs a live attempt.
 
 ## Official-submission boundary
 

@@ -552,14 +552,22 @@ class OuroborosAgent:
             log_label="agent live",
         )
 
-    def _await_acceptance_fence_ack(self, token: str, *, timeout_sec: float = 10.0) -> Dict[str, Any]:
+    def _await_acceptance_fence_ack(self, token: str, *, timeout_sec: Optional[float] = None) -> Dict[str, Any]:
         """Wait for the supervisor to apply a queue-owned acceptance fence.
 
         Worker processes cannot share the supervisor's ``_queue_lock``.  The
         event is therefore acknowledged through a tiny one-shot file only after
         the supervisor has changed the fence while holding that lock.  The file
-        is transport acknowledgement, not a second lifecycle authority.
+        is transport acknowledgement, not a second lifecycle authority.  The
+        default timeout comes from the config SSOT
+        (``OUROBOROS_ACCEPTANCE_FENCE_ACK_TIMEOUT_SEC``): a fixed 10s sat below
+        real latency on network-FS data roots with a backlogged supervisor
+        event loop, and every timeout used to leak the supervisor-side fence.
         """
+        if timeout_sec is None:
+            from ouroboros.config import get_acceptance_fence_ack_timeout_sec
+
+            timeout_sec = get_acceptance_fence_ack_timeout_sec()
         metadata = (
             self._current_task_metadata
             if isinstance(self._current_task_metadata, dict)

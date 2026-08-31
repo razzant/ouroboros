@@ -25,10 +25,10 @@ from __future__ import annotations
 import hashlib
 import json
 import logging
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Callable, Dict, List, Optional, Tuple
 
 from ouroboros import task_pacing
-from ouroboros.config import adaptive_quorum
+from ouroboros.config import adaptive_quorum, get_acceptance_fence_wait_max_rounds
 from ouroboros.outcomes import (
     ACCEPTANCE_ACCEPTED,
     ACCEPTANCE_BYPASS_REASONS,
@@ -64,6 +64,9 @@ ACCEPTANCE_DECISION_REASONS = (
     "review_degraded",
     "fence_reopen_failed",
     "infra_failure",
+    # The queue-owned fence remained unavailable past its configured round
+    # bound, so the task terminalized as infrastructure failure.
+    "acceptance_fence_unavailable",
     # The pacing/wallet reason two branches below already STAMP (`pass_reason ==
     # REASON_REVIEW_CYCLES_EXHAUSTED`); it was missing from the closed set, so a
     # spent shared cap shipped a reason no reader could validate.
@@ -104,6 +107,97 @@ def _set_acceptance_decision(llm_trace: Dict[str, Any], decision: Dict[str, Any]
         if previous.get(key) and not merged.get(key):
             merged[key] = previous.get(key)
     llm_trace["acceptance_decision"] = merged
+
+
+def acceptance_fence_failure_exhausted(
+    tools_ctx: Any,
+    llm_trace: Dict[str, Any],
+    emit_progress: Callable[[str], None],
+) -> bool:
+    """Count a failed fence begin and terminalize after the configured bound."""
+    failures = int(
+        getattr(tools_ctx, "_task_acceptance_fence_failures", 0) or 0
+    ) + 1
+    tools_ctx._task_acceptance_fence_failures = failures
+    if failures < get_acceptance_fence_wait_max_rounds():
+        return False
+    tools_ctx._task_acceptance_fence_infra_failed = True
+    _set_acceptance_decision(llm_trace, {
+        "status": ACCEPTANCE_FINALIZED_UNACCEPTED,
+        "reason": "acceptance_fence_unavailable",
+        "source": "acceptance_fence",
+        "rationale": (
+            "The queue-owned admission fence stayed unavailable for "
+            f"{failures} consecutive rounds; terminalizing as infrastructure "
+            "failure instead of burning paid rounds until the deadline."
+        ),
+    })
+    emit_progress(
+        "Task acceptance review could not acquire the queue-owned admission "
+        "fence; terminalizing as an infrastructure failure."
+    )
+    return True
+
+
+def finalize_acceptance_fence_failure(
+    tools_ctx: Any,
+    limit_ctx: Any,
+    llm_trace: Dict[str, Any],
+    forced_fallback: Callable[..., Tuple[str, Dict[str, Any], Dict[str, Any]]],
+) -> Optional[Tuple[str, Dict[str, Any], Dict[str, Any]]]:
+    """Build the host-salvaged infra result after bounded fence exhaustion."""
+    if not bool(getattr(tools_ctx, "_task_acceptance_fence_infra_failed", False)):
+        return None
+    text, usage, trace = forced_fallback(
+        limit_ctx,
+        llm_trace,
+        "⚠️ The task could not start its acceptance review: the queue-owned "
+        "admission fence stayed unavailable. Any files written so far are "
+        "preserved in the workspace.",
+        "acceptance_fence_unavailable",
+        source="acceptance_fence_unavailable",
+    )
+    usage.update(
+        execution_status="infra_failed",
+        reason_code="acceptance_fence_unavailable",
+    )
+    return text, usage, trace
+
+
+def _set_applied_host_acceptance_impact(
+    run_record: Any,
+    result: Any,
+    *,
+    requires_revision: bool,
+) -> None:
+    """Record what the host actually did with a panel result."""
+    if not isinstance(run_record, dict):
+        return
+    if requires_revision:
+        run_record["enforcement_impact"] = "requires_revision"
+        return
+    from ouroboros.review_substrate import task_acceptance_is_clean
+
+    run_record["enforcement_impact"] = (
+        "allows_completion"
+        if task_acceptance_is_clean(result)
+        else "degrades_completion"
+    )
+
+
+def _direct_context_fence_state(tools_ctx: Any, fence_token: Any) -> Any:
+    """Return the queue token or direct-chat generations for review binding."""
+    if fence_token is not None:
+        return fence_token
+    return {
+        "state": "direct_context",
+        "owner_generation": getattr(
+            tools_ctx, "_task_acceptance_owner_generation", None,
+        ),
+        "queue_generation": getattr(
+            tools_ctx, "_task_acceptance_fence_generation", None,
+        ),
+    }
 
 
 def _collect_acceptance_obligations(llm_trace: Dict[str, Any], result: Any) -> None:

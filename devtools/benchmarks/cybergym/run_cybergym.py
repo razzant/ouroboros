@@ -54,6 +54,7 @@ from devtools.benchmarks.cybergym.cybergym_adapter import (
     BudgetLedger,
     CyberGymError,
     CyberGymIntegrationUnavailable,
+    GatewayCircuitOpen,
     TaskSpec,
     append_cybergym_result,
     build_generate_task_argv,
@@ -75,8 +76,8 @@ from devtools.benchmarks.cybergym.cybergym_adapter import (
 )
 
 REPO_ROOT = pathlib.Path(__file__).resolve().parents[3]
-DEFAULT_TIMEOUT_SEC = 4 * 60 * 60
-DEFAULT_MAX_ROUNDS = 1000
+DEFAULT_TIMEOUT_SEC = 2 * 60 * 60
+DEFAULT_MAX_ROUNDS = 400
 # Runtime tree cap for each measured task.  This is deliberately separate from
 # ``--per-task-estimate-usd``: the latter is the campaign reservation, while
 # this value is consumed by the isolated Ouroboros server's UsageScope.
@@ -138,16 +139,14 @@ def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
     )
     parser.add_argument("--out-dir", default="", help="append-only benchmark output root")
     parser.add_argument("--run-id", default="")
+    parser.add_argument("--state-dir", default="", help="external local-disk directory for isolated-server mutable state")
+    parser.add_argument("--allow-network-state-dir", action="store_true", help="accept a network filesystem for --state-dir (logs a loud warning)")
+    parser.add_argument("--reconcile", default="", help="adopt an interrupted run root and deliver its terminal gateway results")
     parser.add_argument("--budget-usd", type=float, default=DEFAULT_BUDGET_CAP_USD)
     parser.add_argument("--per-task-estimate-usd", type=float, default=None,
                         help="finite reservation required for a paid injected executor")
     parser.add_argument("--timeout-sec", type=float, default=DEFAULT_TIMEOUT_SEC)
-    parser.add_argument(
-        "--max-rounds",
-        type=float,
-        default=DEFAULT_MAX_ROUNDS,
-        help="per-task Ouroboros round ceiling (recorded in applied settings)",
-    )
+    parser.add_argument("--max-rounds", type=float, default=DEFAULT_MAX_ROUNDS, help="per-task Ouroboros round ceiling (recorded in applied settings)")
     parser.add_argument(
         "--per-task-cost-usd",
         type=float,
@@ -306,9 +305,8 @@ def _validate_launcher_values(args: argparse.Namespace) -> None:
     """Normalize scalar launch values and enforce the campaign safety rails.
 
     This function is deliberately filesystem-free.  Paid input hashes are
-    required here so an invalid or incomplete declaration cannot reach server
-    startup; the bytes themselves are attested by the concrete executor after
-    admission.
+    required here so an invalid declaration cannot reach server startup; the
+    bytes themselves are attested by the concrete executor after admission.
     """
     args.model = validate_model_pin(args.model, expected=OFFICIAL_MODEL)
     args.budget_usd = validate_positive_finite(args.budget_usd, field="budget_usd")
@@ -444,13 +442,13 @@ def _build_default_executor(
     out_root: pathlib.Path,
     *,
     ouroboros_url: str | None = None,
+    isolate_data_root: pathlib.Path | None = None,
 ) -> Callable[[TaskSpec, pathlib.Path], Mapping[str, Any]]:
     """Construct the concrete sidecar executor after admission.
 
     An explicit ``--executor`` remains useful for a pre-started server or a
     laboratory harness.  The normal paid path must provide all image/socket
-    pins, so a missing value is a typed refusal rather than a host-shell
-    fallback.
+    pins; a missing value is a typed refusal, never a host-shell fallback.
     """
     effective_ouroboros_url = str(ouroboros_url or getattr(args, "ouroboros_url", "") or "").strip()
     required = {
@@ -508,6 +506,7 @@ def _build_default_executor(
         provider_order=_csv_values(getattr(args, "provider_order", ())),
         disabled_tools=disabled_tools,
         python_executable=resolved_python,
+        isolate_data_root=isolate_data_root,
     )
     executor = build_executor(config)
 
@@ -521,6 +520,17 @@ def _build_default_executor(
     setattr(callback, "prepare", executor.start)
     setattr(callback, "executor", executor)
     return callback
+
+
+def _paid_prepare_failure_text(exc: BaseException) -> str:
+    """Keep the typed refuse line, plus a short secret-free cause."""
+    detail = " ".join(str(exc).split())
+    suffix = type(exc).__name__
+    if detail and detail != suffix:
+        if len(detail) > 240:
+            detail = detail[:237] + "..."
+        suffix = f"{suffix}: {detail}"
+    return "paid executor preparation failed: " + suffix
 
 
 def _prepared_observation(
@@ -658,10 +668,8 @@ def _start_isolated_ouroboros_server(
 ) -> Any:
     """Start the campaign-owned Ouroboros gateway on the selected Docker daemon.
 
-    The wrapper is deliberately imported and started only after admission and
-    applied-settings rendering.  Its isolated clone receives the exact
-    committed seed and a copy of the settings file; the live operator server
-    and settings are never reused.
+    The wrapper is imported and started only after admission and settings
+    rendering; the live operator server and settings are never reused.
     """
     from devtools.benchmarks.cybergym.cybergym_server import CyberGymIsolatedServer
     provider_key = str(os.environ.get("OPENROUTER_API_KEY", "") or "").strip()
@@ -684,6 +692,8 @@ def _start_isolated_ouroboros_server(
             expected_commit=str(expected_commit or ""),
             provider_key=provider_key,
             expected_settings_sha256=str(expected_settings_sha256 or ""),
+            state_dir=pathlib.Path(args.state_dir) if str(getattr(args, "state_dir", "") or "").strip() else None,
+            allow_network_state_dir=bool(getattr(args, "allow_network_state_dir", False)),
         )
         return server.start(ready_timeout=180)
     except Exception as exc:
@@ -709,11 +719,9 @@ def _cleanup_execution_resources(
     """Close owned resources while retaining a typed custody report.
 
     A callback may return ``{"ok": False}`` when a late gateway result still
-    owns live workers.  In that case the server is deliberately left running
-    for reattachment, and both decisions are persisted through the enclosing
-    manifest finalizer.  Cleanup errors are recorded without copying an
-    exception message that could contain endpoint or credential data.
-    """
+    owns live workers; the server then stays alive for reattachment, and both
+    decisions persist through the manifest finalizer.  Cleanup errors are
+    recorded without copying endpoint or credential data from messages."""
     extra = manifest.setdefault("extra", {})
     executor_cleanup: dict[str, Any] = {
         "attempted": False,
@@ -774,6 +782,8 @@ def _cleanup_execution_resources(
                 raise
             else:
                 server_cleanup["status"] = "closed"
+                state_export = getattr(isolated_server, "state_export", None)
+                if isinstance(state_export, Mapping) and state_export: extra["state_export"] = dict(state_export)
         extra["server_cleanup"] = server_cleanup
         extra["close_skipped"] = bool(server_cleanup["close_skipped"])
 
@@ -833,9 +843,8 @@ def _prepare_applied_settings(
 
     The template is read only after ``admit_benchmark_run`` has persisted the
     manifest.  ``build_isolated_settings`` filters credentials and legacy keys;
-    explicit benchmark overrides then become the applied, auditable settings
-    for an injected server.  The snapshot is an ordinary run artifact, never
-    the live settings path.
+    explicit benchmark overrides become the applied, auditable settings for an
+    injected server — an ordinary run artifact, never the live settings path.
     """
     try:
         template = json.loads(template_path.read_text(encoding="utf-8"))
@@ -913,9 +922,10 @@ def _prepare_applied_settings(
         "OUROBOROS_PER_TASK_COST_USD": per_task_cost_usd,
         "TOTAL_BUDGET": budget_usd,
         "OUROBOROS_TASK_ABS_CEILING_SEC": timeout_sec,
-        "OUROBOROS_TASK_REVIEW_MODE": "required",
-        # Required task review still runs, but its verdict is advisory and is
-        # bounded to two paid review cycles as requested for this cohort.
+        # Task review runs in automatic mode (the host reviewer selects
+        # substantive attempts); its verdict is advisory and is bounded to two
+        # paid review cycles as requested for this cohort.
+        "OUROBOROS_TASK_REVIEW_MODE": "auto",
         "OUROBOROS_REVIEW_ENFORCEMENT": "advisory",
         "OUROBOROS_REVIEW_MAX_CYCLES": "2",
         "OUROBOROS_POST_TASK_EVOLUTION": "false",
@@ -1057,6 +1067,9 @@ def _prepare_applied_settings(
 def main(argv: Sequence[str] | None = None) -> int:
     args = parse_args(argv)
 
+    if str(getattr(args, "reconcile", "") or "").strip():
+        from devtools.benchmarks.cybergym.cybergym_reconcile import reconcile_main
+        return reconcile_main(args)
     # Everything through this point is argument/path arithmetic.  In particular,
     # do not read tasks.json, inspect Docker, import the optional upstream package,
     # or create a directory before the shared admission manifest exists.
@@ -1109,6 +1122,7 @@ def main(argv: Sequence[str] | None = None) -> int:
             assert_outside_repo(pathlib.Path(args.server_root), repo_dir)
         if args.binary_dir:
             assert_outside_repo(pathlib.Path(args.binary_dir), repo_dir)
+        if str(getattr(args, "state_dir", "") or "").strip(): assert_outside_repo(pathlib.Path(args.state_dir), repo_dir)
     except (CyberGymError, ValueError, OSError) as exc:
         print(f"[cybergym] pre-admission path refusal: {exc}", file=sys.stderr)
         return 2
@@ -1314,6 +1328,7 @@ def main(argv: Sequence[str] | None = None) -> int:
                 applied_metadata.get("model") or ""
             )
 
+            circuit: GatewayCircuitOpen | None = None
             if args.dry_run:
                 rows = _write_planned_rows(
                     out_root, task_ids, level=DEFAULT_LEVEL, contract=contract
@@ -1364,11 +1379,14 @@ def main(argv: Sequence[str] | None = None) -> int:
                         manifest.setdefault("extra", {})["ouroboros_server"] = dict(
                             getattr(isolated_server, "attestation", {}) or {}
                         )
+                        from devtools.benchmarks.cybergym.cybergym_server import state_layout_manifest
+                        manifest["extra"]["state_layout"] = state_layout_manifest(isolated_server)
                         manifest.setdefault("harness", {})["ouroboros_url"] = str(
                             isolated_server.base_url
                         )
                         executor = _build_default_executor(
-                            args, out_root, ouroboros_url=isolated_server.base_url
+                            args, out_root, ouroboros_url=isolated_server.base_url,
+                            isolate_data_root=getattr(isolated_server, "data_root", None),
                         )
                     prepare = getattr(executor, "prepare", None)
                     if not callable(prepare):
@@ -1384,7 +1402,7 @@ def main(argv: Sequence[str] | None = None) -> int:
                         raise
                     except Exception as exc:
                         raise CyberGymIntegrationUnavailable(
-                            "paid executor preparation failed: " + type(exc).__name__
+                            _paid_prepare_failure_text(exc)
                         ) from exc
                     provider_observation, data_observation, binary_observation, probe_cost = (
                         _validate_paid_observations(
@@ -1425,14 +1443,18 @@ def main(argv: Sequence[str] | None = None) -> int:
                             _apply_server_provenance(
                                 manifest, args, applied_server_url
                             )
-                    rows = run_campaign(
-                        _task_specs(task_ids, contract=contract),
-                        run_root=out_root,
-                        executor=executor,
-                        estimated_cost_usd=float(args.per_task_estimate_usd),
-                        budget_cap_usd=float(args.budget_usd),
-                        max_workers=int(args.workers),
-                    )
+                    try:
+                        rows = run_campaign(
+                            _task_specs(task_ids, contract=contract),
+                            run_root=out_root,
+                            executor=executor,
+                            estimated_cost_usd=float(args.per_task_estimate_usd),
+                            budget_cap_usd=float(args.budget_usd),
+                            max_workers=int(args.workers),
+                        )
+                    except GatewayCircuitOpen as exc:
+                        circuit, rows = exc, list(exc.rows)
+                        manifest["extra"]["gateway_circuit"] = exc.as_dict()
                 finally:
                     _cleanup_execution_resources(executor, isolated_server, manifest)
 
@@ -1444,14 +1466,11 @@ def main(argv: Sequence[str] | None = None) -> int:
                 manifest["extra"]["budget_projection"] = {"available": False, "error": str(exc)}
             manifest["extra"].update(_row_counts(rows))
             custody_pending = bool(manifest.get("extra", {}).get("close_skipped"))
-            code = (
-                2
-                if custody_pending
-                else 0
-                if args.dry_run or all(row.get("status") == "completed" for row in rows)
-                else 2
-            )
-            if custody_pending:
+            all_completed = args.dry_run or all(row.get("status") == "completed" for row in rows)
+            code = 2 if custody_pending or circuit is not None or not all_completed else 0
+            if circuit is not None:
+                final.update({"outcome": "gateway_unreachable", "exit_code": 2})
+            elif custody_pending:
                 final.update({"outcome": "custody_pending", "exit_code": code})
             elif code:
                 final.update({"outcome": "integration_or_task_failure", "exit_code": code})
