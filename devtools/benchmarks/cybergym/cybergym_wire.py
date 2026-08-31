@@ -51,6 +51,16 @@ class GatewayAdmissionRejected(ExecutorFailure):
     """The gateway definitively rejected the POST before task admission."""
 
 
+class GatewayTransportError(ExecutorFailure):
+    """The gateway could not be reached at transport level at all.
+
+    Distinct from ``HttpStatusError`` (the gateway answered with a status) and
+    from malformed-body failures (the gateway answered with bytes): only a
+    dead or unreachable isolate raises this, which is the signal the campaign
+    circuit breaker counts.
+    """
+
+
 def urllib_json(
     method: str,
     url: str,
@@ -77,7 +87,7 @@ def urllib_json(
             int(exc.code),
         ) from exc
     except (urllib.error.URLError, OSError) as exc:
-        raise ExecutorFailure(f"HTTP {method.upper()} transport failed") from exc
+        raise GatewayTransportError(f"HTTP {method.upper()} transport failed") from exc
     if not raw.strip():
         return {}
     try:

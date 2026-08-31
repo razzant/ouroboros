@@ -424,6 +424,14 @@ after real tool use remains a capability row.  A genuine zero from a
 completed verifier remains a genuine zero.  An infrastructure row remains
 visible for later diagnosis and is not cherry-picked for a recovery rerun.
 
+A dead isolate gateway is a campaign-level transport fact, not a per-task
+result: after three consecutive transport-class failures (the gateway produced
+no HTTP response at all) the dispatch circuit breaker stops admitting new
+tasks, already-dispatched in-flight tasks settle normally, and the campaign
+finalizes as ``gateway_unreachable``.  Never-dispatched tasks receive no row;
+the manifest names them under ``extra.gateway_circuit.remaining_task_ids`` so
+the requested denominator stays recoverable without fabricating infra rows.
+
 The summary always names the metric, numerator, denominator, task-data hash,
 source order, model identity, provider distribution, effort, and whether the
 population is complete, pilot-only, or interrupted.  It must not infer a

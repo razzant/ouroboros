@@ -19,9 +19,13 @@ import pathlib
 import time
 import uuid
 from collections.abc import Callable, Iterable, Iterator, Mapping, Sequence
-from concurrent.futures import ThreadPoolExecutor
 from typing import Any
 
+from devtools.benchmarks.cybergym.cybergym_dispatch import (  # noqa: F401
+    GATEWAY_CIRCUIT_BREAKER_THRESHOLD,
+    GatewayCircuitOpen,
+    run_dispatched,
+)
 from devtools.benchmarks.cybergym.cybergym_protocol import (
     BENCHMARK_NAME,
     DEFAULT_LEVEL,
@@ -1208,17 +1212,28 @@ def run_campaign(
     budget_cap_usd: float | None = DEFAULT_BUDGET_CAP_USD,
     max_workers: int = 1,
     allow_retries: bool = False,
+    gateway_circuit_threshold: int = GATEWAY_CIRCUIT_BREAKER_THRESHOLD,
 ) -> list[dict[str, Any]]:
     """Run injected task callbacks under one atomic ledger.
 
     The callback owns task generation, sidecar lifecycle, model transport, and
     process custody.  A missing callback is an explicit blocked result; this
-    seam never falls back to Docker, a shell, or a host network.
+    seam never falls back to Docker, a shell, or a host network.  A run of
+    ``gateway_circuit_threshold`` consecutive transport-class gateway failures
+    opens the dispatch circuit breaker: admission stops, in-flight tasks
+    settle, and ``GatewayCircuitOpen`` carries the landed rows plus the
+    undispatched task ids.
     """
     if isinstance(max_workers, bool) or not isinstance(max_workers, int) or not 1 <= max_workers <= MAX_CROSS_TASK_WORKERS:
         raise ValueError(
             f"max_workers must be an integer in the range 1..{MAX_CROSS_TASK_WORKERS}"
         )
+    if (
+        isinstance(gateway_circuit_threshold, bool)
+        or not isinstance(gateway_circuit_threshold, int)
+        or gateway_circuit_threshold < 1
+    ):
+        raise ValueError("gateway_circuit_threshold must be a positive integer")
     root = pathlib.Path(run_root).expanduser().resolve(strict=False)
     normalized_tasks: list[TaskSpec] = []
     seen_task_ids: set[str] = set()
@@ -1472,9 +1487,12 @@ def run_campaign(
     # A campaign may fan out independent tasks, but each task remains a
     # single-agent/no-swarm attempt.  The ledger and result writer are locked;
     # callers should choose the worker count from the measured pilot rather
-    # than treating this as an unbounded scheduler.
-    if max_workers == 1 or len(normalized_tasks) <= 1:
-        return [_run_one(task) for task in normalized_tasks]
-    with ThreadPoolExecutor(max_workers=max_workers, thread_name_prefix="cybergym") as pool:
-        futures = [pool.submit(_run_one, task) for task in normalized_tasks]
-        return [future.result() for future in futures]
+    # than treating this as an unbounded scheduler.  The dispatch engine stops
+    # admitting new work once the isolate gateway is proven unreachable, so a
+    # dead gateway cannot burn the rest of the catalog into transport rows.
+    return run_dispatched(
+        normalized_tasks,
+        _run_one,
+        max_workers=max_workers,
+        threshold=gateway_circuit_threshold,
+    )

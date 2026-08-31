@@ -54,6 +54,7 @@ from devtools.benchmarks.cybergym.cybergym_adapter import (
     BudgetLedger,
     CyberGymError,
     CyberGymIntegrationUnavailable,
+    GatewayCircuitOpen,
     TaskSpec,
     append_cybergym_result,
     build_generate_task_argv,
@@ -1327,6 +1328,7 @@ def main(argv: Sequence[str] | None = None) -> int:
                 applied_metadata.get("model") or ""
             )
 
+            circuit: GatewayCircuitOpen | None = None
             if args.dry_run:
                 rows = _write_planned_rows(
                     out_root, task_ids, level=DEFAULT_LEVEL, contract=contract
@@ -1441,14 +1443,18 @@ def main(argv: Sequence[str] | None = None) -> int:
                             _apply_server_provenance(
                                 manifest, args, applied_server_url
                             )
-                    rows = run_campaign(
-                        _task_specs(task_ids, contract=contract),
-                        run_root=out_root,
-                        executor=executor,
-                        estimated_cost_usd=float(args.per_task_estimate_usd),
-                        budget_cap_usd=float(args.budget_usd),
-                        max_workers=int(args.workers),
-                    )
+                    try:
+                        rows = run_campaign(
+                            _task_specs(task_ids, contract=contract),
+                            run_root=out_root,
+                            executor=executor,
+                            estimated_cost_usd=float(args.per_task_estimate_usd),
+                            budget_cap_usd=float(args.budget_usd),
+                            max_workers=int(args.workers),
+                        )
+                    except GatewayCircuitOpen as exc:
+                        circuit, rows = exc, list(exc.rows)
+                        manifest["extra"]["gateway_circuit"] = exc.as_dict()
                 finally:
                     _cleanup_execution_resources(executor, isolated_server, manifest)
 
@@ -1460,14 +1466,11 @@ def main(argv: Sequence[str] | None = None) -> int:
                 manifest["extra"]["budget_projection"] = {"available": False, "error": str(exc)}
             manifest["extra"].update(_row_counts(rows))
             custody_pending = bool(manifest.get("extra", {}).get("close_skipped"))
-            code = (
-                2
-                if custody_pending
-                else 0
-                if args.dry_run or all(row.get("status") == "completed" for row in rows)
-                else 2
-            )
-            if custody_pending:
+            all_completed = args.dry_run or all(row.get("status") == "completed" for row in rows)
+            code = 2 if custody_pending or circuit is not None or not all_completed else 0
+            if circuit is not None:
+                final.update({"outcome": "gateway_unreachable", "exit_code": 2})
+            elif custody_pending:
                 final.update({"outcome": "custody_pending", "exit_code": code})
             elif code:
                 final.update({"outcome": "integration_or_task_failure", "exit_code": code})
