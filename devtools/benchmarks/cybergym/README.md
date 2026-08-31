@@ -346,10 +346,14 @@ failures, infra failures, timeouts, and unattempted rows.
    publishing or submitting the headline.
 
 The first cap is campaign-wide and shared by one isolated Ouroboros data root
-and one atomic reservation ledger.  Settled spend plus reserved in-flight
-holds plus an unresolved upper bound must remain below USD 3,500.  A nullable
-or unmetered provider response contributes to the unresolved bound and blocks
-new dispatch.  A further tranche is never automatic; it needs a new
+and one atomic reservation ledger.  Settled spend plus live in-flight
+reservations must remain below USD 3,500, and a new claim is refused when the
+projected total plus its estimate would cross the cap.  A finished or failed
+attempt settles its known actual and releases the reservation.  A nullable
+or unmetered provider response on a completed result demotes the row to an
+infrastructure result, never a capability success, and the attempt's
+reservation is marked unresolved — released from dispatch liability, not
+blocking new dispatch.  A further tranche is never automatic; it needs a new
 explicit owner decision after comparable model-focused evidence.  Resuming a
 partial run creates a new append-only directory with explicit remaining task
 ids; it does not rewrite or relabel the original denominator.
@@ -387,9 +391,13 @@ that no task workspace, API key, socket mount, or temporary file escaped the
 run root.  Cleanup is performed after terminal custody is settled; an
 in-flight late result is retained under its original attempt instead of being
 deleted or retried as a duplicate.  When custody is unknown, the adapter
-writes `custody_pending.json` and intentionally leaves owned resources alive;
-the shipped launcher has no automatic cross-process reattach, so an operator
-must use that checkpoint and the gateway custody API before cleanup.
+writes `custody_pending.json` and intentionally leaves owned resources alive.
+Cross-process reattach ships as the `--reconcile <run root>` mode described
+above: it adopts the interrupted run's still-running isolated server and
+workspace containers and delivers every checkpointed terminal gateway result,
+while a gateway task that is still in flight is reported `left_running` and
+revisited by a later pass once it settles — reconcile never hijacks or
+re-runs a live attempt.
 
 ## Official-submission boundary
 

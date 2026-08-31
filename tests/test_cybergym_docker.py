@@ -322,6 +322,68 @@ def test_reconcile_task_polls_when_cached_frame_is_not_settled(tmp_path):
     assert frame["reconcile_source"] == "gateway_poll"
 
 
+def test_reconcile_task_rejects_polled_terminal_result_with_empty_task_id(tmp_path):
+    """A terminal poll frame without its task id is an infra error, not a delivery."""
+    gateway_id = "gateway-task-15"
+
+    def http(method, url, **_kwargs):
+        assert method == "GET"
+        return {"status": "failed"}
+
+    _config_unused, executor, task_dir, checkpoint = _reconcile_fixture(
+        tmp_path,
+        gateway_id,
+        {"gateway_task_id": gateway_id, "status": "running"},
+        http_runner=http,
+    )
+    outcome = executor.reconcile_task(TaskSpec("arvo:1", "arvo"), task_dir, "attempt-1", checkpoint)
+    assert outcome["status"] == "infra_failed"
+    assert outcome["lifecycle"] == "reconcile_blocked"
+    assert outcome["reconcile_disposition"] == "undeliverable"
+    assert "no usable task id" in outcome["error"]
+    # The id-less frame must not be cached into the checkpoint for a later pass.
+    frame = json.loads(checkpoint.read_text(encoding="utf-8"))
+    assert "reconciled" not in frame
+
+
+def test_reconcile_task_rejects_cached_terminal_result_with_empty_task_id(tmp_path):
+    """A cached terminal frame without its task id is an infra error."""
+    gateway_id = "gateway-task-16"
+    _config_unused, executor, task_dir, checkpoint = _reconcile_fixture(
+        tmp_path,
+        gateway_id,
+        {
+            "gateway_task_id": gateway_id,
+            "status": "failed",
+            "result": {"status": "failed", "error": "worker crashed"},
+        },
+    )
+    outcome = executor.reconcile_task(TaskSpec("arvo:1", "arvo"), task_dir, "attempt-1", checkpoint)
+    assert outcome["status"] == "infra_failed"
+    assert outcome["lifecycle"] == "reconcile_blocked"
+    assert outcome["reconcile_disposition"] == "undeliverable"
+    assert "different task" in outcome["error"]
+
+
+def test_reconcile_task_left_running_tolerates_nonterminal_empty_task_id(tmp_path):
+    """The exact-id gate is terminal-scoped: a running frame stays retryable."""
+    gateway_id = "gateway-task-17"
+
+    def http(method, url, **_kwargs):
+        assert method == "GET"
+        return {"status": "running"}
+
+    _config_unused, executor, task_dir, checkpoint = _reconcile_fixture(
+        tmp_path,
+        gateway_id,
+        {"gateway_task_id": gateway_id, "status": "running"},
+        http_runner=http,
+    )
+    outcome = executor.reconcile_task(TaskSpec("arvo:1", "arvo"), task_dir, "attempt-1", checkpoint)
+    assert outcome["reconcile_disposition"] == "left_running"
+    assert outcome["lifecycle"] == "reconcile_pending"
+
+
 def test_reconcile_task_defers_workspace_release_until_durable(tmp_path, monkeypatch):
     """reconcile_task keeps the adopted container; the launcher releases it."""
     gateway_id = "gateway-task-13"

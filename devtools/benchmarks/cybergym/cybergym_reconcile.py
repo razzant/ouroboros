@@ -246,11 +246,11 @@ class _ReconcileMixin:
                 and not (_response_status(cached) == "completed" and _cost_is_pending(cached))
             ):
                 # The cached frame is delivered without any gateway poll, so it
-                # must be bound to this checkpoint's task exactly like a polled
-                # response is; a foreign cached result is an infra error, never
-                # deliverable.
+                # must be bound to this checkpoint's task exactly like the
+                # isolate-disk fallback is; a foreign or id-less cached result
+                # is an infra error, never deliverable.
                 cached_task_id = str(cached.get("task_id") or "").strip()
-                if cached_task_id and cached_task_id != gateway_task_id:
+                if cached_task_id != gateway_task_id:
                     raise ExecutorFailure("cached checkpoint result belongs to a different task")
                 gateway_result = cached
             else:
@@ -284,20 +284,27 @@ class _ReconcileMixin:
                 returned_id = str(latest.get("task_id") or "").strip()
                 if returned_id and returned_id != gateway_task_id:
                     raise ExecutorFailure("Ouroboros status response belongs to a different task")
+                status = _response_status(latest)
+                terminal = status in _SETTLED and not (
+                    status == "completed" and _cost_is_pending(latest)
+                )
+                if terminal and returned_id != gateway_task_id:
+                    # A terminal frame we may deliver must be bound to this
+                    # checkpoint's task exactly, like the isolate-disk
+                    # fallback; an empty id is an infra error, not a delivery,
+                    # and the foreign frame is never cached into the checkpoint.
+                    raise ExecutorFailure("Ouroboros status response has no usable task id")
                 _write_json(
                     checkpoint,
                     {
                         "gateway_task_id": gateway_task_id,
-                        "status": _response_status(latest),
+                        "status": status,
                         "result": dict(latest),
                         "reconciled": True,
                         "reconcile_source": source,
                     },
                 )
-                status = _response_status(latest)
-                if status not in _SETTLED or (
-                    status == "completed" and _cost_is_pending(latest)
-                ):
+                if not terminal:
                     return {
                         "status": "infra_failed",
                         "lifecycle": "reconcile_pending",
