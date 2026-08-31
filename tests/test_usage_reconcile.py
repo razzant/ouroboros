@@ -12,6 +12,7 @@ drives it from the terminal cost authority (any age) and the periodic sweep
 from __future__ import annotations
 
 import json
+import time
 
 import pytest
 
@@ -227,10 +228,109 @@ def test_unresolved_exit_without_the_typed_reason_is_corrupt():
     with pytest.raises(UsageLedgerCorrupt):
         ua._validate_records(rows)
     rows[3]["settle_reason"] = UNRESOLVED_WRITEOFF_REASON
-    ua._validate_records(rows)  # typed write-off: legal
+    rows[3]["reservation_upper_bound_usd"] = 1.0
+    rows[3]["cost_final"] = True
+    ua._validate_records(rows)  # typed write-off at the carried bound, final: legal
     rows[3]["state"] = "released"
     with pytest.raises(UsageLedgerCorrupt):
         ua._validate_records(rows)
+
+
+def test_writeoff_transition_rejects_a_discounted_or_nonfinal_cost():
+    """Sol review pin: the authority rejects bound $1.00 settling as final $0.00."""
+    base = [
+        {"seq": 1, "attempt_id": "a", "state": "reserved", "kind": "attempt",
+         "reservation_upper_bound_usd": 1.0},
+        {"seq": 2, "attempt_id": "a", "state": "dispatched", "kind": "attempt",
+         "reservation_upper_bound_usd": 1.0},
+        {"seq": 3, "attempt_id": "a", "state": "unresolved", "kind": "attempt",
+         "reservation_upper_bound_usd": 1.0},
+    ]
+    writeoff = {
+        "seq": 4, "attempt_id": "a", "state": "settled", "kind": "attempt",
+        "settle_reason": UNRESOLVED_WRITEOFF_REASON,
+        "reservation_upper_bound_usd": 1.0, "cost_usd": 1.0, "cost_final": True,
+    }
+    ua._validate_records([*base, dict(writeoff)])  # exact bound, final: accepted
+
+    discounted = dict(writeoff, cost_usd=0.0)
+    with pytest.raises(UsageLedgerCorrupt):
+        ua._validate_records([*base, discounted])
+
+    under_bound = dict(writeoff, cost_usd=0.5)
+    with pytest.raises(UsageLedgerCorrupt):
+        ua._validate_records([*base, under_bound])
+
+    non_final = dict(writeoff, cost_final=False)
+    with pytest.raises(UsageLedgerCorrupt):
+        ua._validate_records([*base, non_final])
+
+    missing_cost = dict(writeoff)
+    del missing_cost["cost_usd"]
+    with pytest.raises(UsageLedgerCorrupt):
+        ua._validate_records([*base, missing_cost])
+
+
+def test_writeoff_event_lands_in_events_log(data_root):
+    """The audit disclosure: every sweep write-off is visible in events.jsonl."""
+    reservation = _unresolved_reservation(data_root)
+
+    outcome = reconcile_abandoned_unresolved_attempts(data_root, task_id="child")
+
+    assert outcome["terminalized"] == [reservation.attempt_id]
+    events = [
+        json.loads(line)
+        for line in (data_root / "logs" / "events.jsonl").read_text().splitlines()
+        if line.strip()
+    ]
+    writeoffs = [row for row in events if row.get("type") == "usage_unresolved_writeoff"]
+    assert len(writeoffs) == 1
+    assert writeoffs[0]["attempt_ids"] == [reservation.attempt_id]
+    assert writeoffs[0]["task_id"] == "child"
+    assert writeoffs[0]["ts"]
+
+
+def test_writeoff_ttl_getter_clamps(monkeypatch):
+    from ouroboros.config import get_usage_unresolved_writeoff_sec
+
+    monkeypatch.delenv("OUROBOROS_USAGE_UNRESOLVED_WRITEOFF_SEC", raising=False)
+    assert get_usage_unresolved_writeoff_sec() == 900.0
+    monkeypatch.setenv("OUROBOROS_USAGE_UNRESOLVED_WRITEOFF_SEC", "30")
+    assert get_usage_unresolved_writeoff_sec() == 60.0
+    monkeypatch.setenv("OUROBOROS_USAGE_UNRESOLVED_WRITEOFF_SEC", "999999")
+    assert get_usage_unresolved_writeoff_sec() == 86400.0
+    monkeypatch.setenv("OUROBOROS_USAGE_UNRESOLVED_WRITEOFF_SEC", "garbage")
+    assert get_usage_unresolved_writeoff_sec() == 900.0
+
+
+def test_periodic_supervisor_maintenance_runs_the_reconciler(monkeypatch):
+    """The production seam: the supervisor maintenance tick drives the sweep."""
+    import sys
+
+    # server.py inserts OUROBOROS_REPO_DIR (the live repo on this host, which may
+    # diverge from this checkout) into sys.path at import time and sets
+    # OUROBOROS_AGENT_PYTHON; keep both from leaking into later tests.
+    monkeypatch.delenv("OUROBOROS_REPO_DIR", raising=False)
+    monkeypatch.delenv("OUROBOROS_AGENT_PYTHON", raising=False)
+    saved_path = list(sys.path)
+    import server
+
+    sys.path[:] = saved_path
+
+    calls = []
+    monkeypatch.setattr(
+        "ouroboros.usage_reconcile.reconcile_abandoned_unresolved_attempts",
+        lambda drive_root: calls.append(drive_root) or {"terminalized": []},
+    )
+    # Only the usage cadence is due; every sibling cadence just ran.
+    monkeypatch.setattr(server, "_LAST_CANCEL_INTENT_SWEEP", [time.time()])
+    monkeypatch.setattr(server, "_LAST_USAGE_RECONCILE", [0.0])
+    now = time.time()
+    server._periodic_supervisor_maintenance([now], [now])
+    assert calls == [server.DATA_DIR]
+    # Cadence: a second pass inside the 300s window does not re-fire.
+    server._periodic_supervisor_maintenance([now], [now])
+    assert len(calls) == 1
 
 
 def test_reconstruct_task_cost_terminalizes_the_tasks_dead_rows(data_root):

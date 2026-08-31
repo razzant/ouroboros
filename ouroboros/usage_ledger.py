@@ -301,7 +301,16 @@ def _validate_records(
                     f"dispatched->released requires a typed pre-dispatch reason at seq={row.get('seq')}"
                 )
         elif previous == "unresolved":
-            if state != "settled" or str(row.get("settle_reason") or "") != UNRESOLVED_WRITEOFF_REASON:
+            # The write-off must settle AT the carried bound, finally: a cheaper
+            # or non-final "write-off" is a fabricated discount on real spend.
+            if (
+                state != "settled"
+                or str(row.get("settle_reason") or "") != UNRESOLVED_WRITEOFF_REASON
+                or row.get("cost_final") is not True
+                or _number(row.get("cost_usd")) is None
+                or _number(row.get("reservation_upper_bound_usd")) is None
+                or _number(row.get("cost_usd")) != _number(row.get("reservation_upper_bound_usd"))
+            ):
                 raise UsageLedgerCorrupt(f"invalid transition {previous}->{state}")
         else:
             raise UsageLedgerCorrupt(f"attempt {attempt_id} changed after terminal state")
