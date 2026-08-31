@@ -455,8 +455,15 @@ reattaches to the still-running isolated server and workspace containers and
 delivers every checkpointed terminal gateway result that has no
 `result_index.jsonl` row, without re-running any agent, starting new
 infrastructure, or rewriting an existing row.  Attempts whose gateway task is
-still alive are reported as `left_running` for a later pass; the reconcile
-report is recorded in the finalized manifest under `extra.reconcile`.
+still alive are reported as `left_running` for a later pass; each reconcile
+pass appends its report to `extra.reconcile_passes` in the finalized manifest
+(earlier passes are never overwritten), a pass that finds requested tasks
+with neither rows nor checkpoints finalizes as `incomplete` with a nonzero
+exit, and a second concurrent reconcile process on the same run root is
+refused.  Delivery is crash-safe in order: the result row is appended under
+the shared result-index lock (re-reading the recorded set so a task can never
+be double-recorded), the claim is settled next, and the adopted workspace
+container is released only after both are durable.
 
 Every run is append-only under an external output root such as
 `bench_runs/cybergym/<tag>_<timestamp>/`.  Large image/binary caches use the
@@ -475,8 +482,10 @@ records the layout under `extra.state_layout`; at finalize the server mirrors
 the small audit surface (`state/`, `logs/`, `task_results/`, `memory/`,
 `settings.json`, but not large observability blobs) back to
 `run_root/ouroboros-data` on a best-effort basis, with the receipt in
-`extra.state_export`.  The state directory must be absolute, non-root, and
-must not overlap the seed repository or the run root; telemetry verification
+`extra.state_export`.  The state directory must be absolute, non-root, on a
+local filesystem (known network filesystems such as CephFS or NFS are
+refused; `--allow-network-state-dir` overrides with a loud warning), and must
+not overlap the seed repository or the run root; telemetry verification
 accepts exactly the run root plus this one external data root.
 
 Cleanup occurs only after terminal custody is settled.  It removes or reaps

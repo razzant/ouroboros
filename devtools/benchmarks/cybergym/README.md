@@ -108,7 +108,9 @@ disk such as NVMe.  The append-only run root keeps the durable artifacts
 surface (`state/`, `logs/`, `task_results/`, `memory/`, `settings.json`) back
 to `run_root/ouroboros-data` on a best-effort basis; the receipt lands in
 `extra.state_export`.  Large observability blobs are not mirrored.  The state
-directory must not overlap the seed repository or the run root, and telemetry
+directory must not overlap the seed repository or the run root, must sit on a
+local filesystem (known network filesystems such as CephFS or NFS are refused;
+`--allow-network-state-dir` overrides with a loud warning), and telemetry
 verification accepts exactly the run root plus this one external data root.
 
 `--reconcile <run root>` adopts an interrupted run whose launcher died after
@@ -118,10 +120,15 @@ containers, and runs the shared delivery path for every checkpointed attempt
 that has no `result_index.jsonl` row.  It never re-runs an agent, never starts
 new infrastructure, and never rewrites an existing row.  Attempts whose
 gateway task is still alive are reported as `left_running` and left for a
-later pass; the report lands in `extra.reconcile` of the finalized manifest.
-The exit code is `0` when nothing deliverable failed, `2` on refusals or
-undeliverable terminal attempts.  Reconcile requires the same pinned inputs
-and `--model` value as the original invocation.
+later pass; each pass appends its report to `extra.reconcile_passes` of the
+finalized manifest, and earlier passes are never overwritten.  A run whose
+requested tasks have neither rows nor checkpoints is reported `incomplete`
+with a nonzero exit, never as a successful reconcile.  The exit code is `0`
+when nothing deliverable failed, `2` on refusals or undeliverable terminal
+attempts.  Reconcile requires the same pinned inputs and `--model` value as
+the original invocation, refuses to run concurrently against the same run
+root, and cross-checks an explicit `--state-dir` against the manifest's
+recorded state layout.
 
 ## Template settings versus applied settings
 

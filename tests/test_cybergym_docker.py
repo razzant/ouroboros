@@ -261,6 +261,116 @@ def test_reconcile_task_without_isolate_root_has_no_disk_fallback(tmp_path):
     assert outcome["lifecycle"] == "reconcile_blocked"
 
 
+def test_reconcile_task_rejects_cached_result_of_a_different_task(tmp_path):
+    """A cached terminal frame bound to another gateway task is an infra error."""
+    gateway_id = "gateway-task-11"
+    _config_unused, executor, task_dir, checkpoint = _reconcile_fixture(
+        tmp_path,
+        gateway_id,
+        {
+            "gateway_task_id": gateway_id,
+            "status": "failed",
+            "result": {"task_id": "gateway-task-foreign", "status": "failed"},
+        },
+    )
+    outcome = executor.reconcile_task(TaskSpec("arvo:1", "arvo"), task_dir, "attempt-1", checkpoint)
+    assert outcome["status"] == "infra_failed"
+    assert outcome["lifecycle"] == "reconcile_blocked"
+    assert outcome["reconcile_disposition"] == "undeliverable"
+    assert "different task" in outcome["error"]
+    # The checkpoint is left untouched so the mismatch stays auditable.
+    frame = json.loads(checkpoint.read_text(encoding="utf-8"))
+    assert "reconciled" not in frame
+
+
+def test_reconcile_task_delivers_cached_terminal_result(tmp_path):
+    """A cached terminal frame bound to the checkpoint's task needs no poll."""
+    gateway_id = "gateway-task-12"
+    cached = {"task_id": gateway_id, "status": "failed", "error": "worker crashed"}
+    _config_unused, executor, task_dir, checkpoint = _reconcile_fixture(
+        tmp_path,
+        gateway_id,
+        {"gateway_task_id": gateway_id, "status": "failed", "result": cached},
+    )
+    outcome = executor.reconcile_task(TaskSpec("arvo:1", "arvo"), task_dir, "attempt-1", checkpoint)
+    assert outcome["status"] == "infra_failed"
+    assert outcome["lifecycle"] == "gateway_terminal"
+    assert outcome["infra_reason"] == "failed"
+
+
+def test_reconcile_task_polls_when_cached_frame_is_not_settled(tmp_path):
+    """A non-settled cached frame is not authoritative; the gateway is polled."""
+    gateway_id = "gateway-task-14"
+
+    def http(method, url, **_kwargs):
+        assert method == "GET"
+        return {"task_id": gateway_id, "status": "running"}
+
+    _config_unused, executor, task_dir, checkpoint = _reconcile_fixture(
+        tmp_path,
+        gateway_id,
+        {
+            "gateway_task_id": gateway_id,
+            "status": "running",
+            "result": {"task_id": gateway_id, "status": "running"},
+        },
+        http_runner=http,
+    )
+    outcome = executor.reconcile_task(TaskSpec("arvo:1", "arvo"), task_dir, "attempt-1", checkpoint)
+    assert outcome["reconcile_disposition"] == "left_running"
+    frame = json.loads(checkpoint.read_text(encoding="utf-8"))
+    assert frame["reconcile_source"] == "gateway_poll"
+
+
+def test_reconcile_task_defers_workspace_release_until_durable(tmp_path, monkeypatch):
+    """reconcile_task keeps the adopted container; the launcher releases it."""
+    gateway_id = "gateway-task-13"
+    cached = {
+        "task_id": gateway_id,
+        "status": "completed",
+        "cost_usd": 0.5,
+        "cost_estimated": False,
+        "cost_final": True,
+    }
+    _config_unused, executor, task_dir, checkpoint = _reconcile_fixture(
+        tmp_path,
+        gateway_id,
+        {"gateway_task_id": gateway_id, "status": "completed", "result": cached},
+    )
+    adopted: list[str] = []
+    cleaned: list[str] = []
+
+    def fake_adopt(container_name):
+        adopted.append(container_name)
+        executor._task_containers[container_name] = "d" * 64
+        return "d" * 64
+
+    def fake_cleanup(name, task_id, attempt_id, report_path):
+        cleaned.append(name)
+        executor._task_containers.pop(name, None)
+        return {"status": "verified", "ok": True}
+
+    monkeypatch.setattr(executor, "_adopt_workspace_container", fake_adopt)
+    monkeypatch.setattr(executor, "_cleanup_workspace_container", fake_cleanup)
+    monkeypatch.setattr(
+        executor,
+        "_deliver_gateway_result",
+        lambda *args, **kwargs: {"status": "completed", "lifecycle": "completed"},
+    )
+    task = TaskSpec("arvo:1", "arvo")
+    outcome = executor.reconcile_task(task, task_dir, "attempt-1", checkpoint)
+    assert outcome["status"] == "completed"
+    assert adopted and not cleaned
+    assert executor._task_containers  # adopted slot survives reconcile_task
+
+    report = executor.release_reconciled_workspace(task, "attempt-1")
+    assert report["ok"] is True
+    assert cleaned == adopted
+    assert executor._task_containers == {}
+    # A left-running or never-adopted attempt has nothing to release.
+    assert executor.release_reconciled_workspace(task, "attempt-1") is None
+
+
 def _adopt_fixture(tmp_path, monkeypatch, *, server_labels, network_labels=None):
     server_id = "a" * 64
     network_id = "b" * 64

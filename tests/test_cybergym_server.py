@@ -491,6 +491,59 @@ def test_state_dir_rejects_unsafe_paths(tmp_path):
             )
 
 
+def test_state_dir_rejects_network_filesystem(tmp_path, monkeypatch):
+    from devtools.benchmarks.cybergym import cybergym_server
+
+    seed, commit = _seed_repo(tmp_path)
+    monkeypatch.setattr(cybergym_server, "_mount_fs_type", lambda path: "ceph")
+    with pytest.raises(CyberGymServerError, match="local filesystem"):
+        CyberGymIsolatedServer(
+            seed,
+            tmp_path / "run",
+            _settings(tmp_path),
+            _host(),
+            expected_commit=commit,
+            state_dir=tmp_path / "ceph-state",
+        )
+
+
+def test_state_dir_network_escape_hatch_warns(tmp_path, monkeypatch, capsys):
+    from devtools.benchmarks.cybergym import cybergym_server
+
+    seed, commit = _seed_repo(tmp_path)
+    monkeypatch.setattr(cybergym_server, "_mount_fs_type", lambda path: "nfs4")
+    wrapper = CyberGymIsolatedServer(
+        seed,
+        tmp_path / "run",
+        _settings(tmp_path),
+        _host(),
+        expected_commit=commit,
+        state_dir=tmp_path / "net-state",
+        allow_network_state_dir=True,
+    )
+    assert wrapper.state_dir == (tmp_path / "net-state").resolve()
+    assert "network filesystem" in capsys.readouterr().err
+
+
+def test_mount_fs_type_longest_prefix_wins():
+    from devtools.benchmarks.cybergym.cybergym_server import _mount_fs_type
+
+    mounts = "\n".join([
+        "proc /proc proc rw 0 0",
+        "/dev/sda1 / ext4 rw 0 0",
+        "10.0.0.1:/volume /mnt/cephfs ceph rw 0 0",
+        "tmpfs /tmp tmpfs rw 0 0",
+    ])
+    assert _mount_fs_type(pathlib.Path("/mnt/cephfs/razzh/state"), mounts) == "ceph"
+    assert _mount_fs_type(pathlib.Path("/mnt/cephfs"), mounts) == "ceph"
+    assert _mount_fs_type(pathlib.Path("/tmp/state"), mounts) == "tmpfs"
+    assert _mount_fs_type(pathlib.Path("/var/lib/x"), mounts) == "ext4"
+    assert _mount_fs_type(pathlib.Path("/"), mounts) == "ext4"
+    escaped = "server:/a /mnt/with\\040space nfs4 rw 0 0\n/dev/sda1 / ext4 rw 0 0\n"
+    assert _mount_fs_type(pathlib.Path("/mnt/with space/sub"), escaped) == "nfs4"
+    assert _mount_fs_type(pathlib.Path("/elsewhere"), "garbage line\n") == ""
+
+
 def test_close_mirrors_audit_surface_to_run_root(tmp_path):
     seed, commit = _seed_repo(tmp_path)
     wrapper = CyberGymIsolatedServer(

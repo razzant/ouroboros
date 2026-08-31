@@ -17,6 +17,7 @@ import pathlib
 import re
 import shutil
 import subprocess
+import sys
 from collections.abc import Callable, Mapping, Sequence
 from typing import Any
 
@@ -29,6 +30,58 @@ from devtools.benchmarks.cybergym.cybergym_sidecar import (
 
 class CyberGymServerError(RuntimeError):
     """Typed refusal for isolated-server preparation or attestation."""
+
+
+# Filesystem types whose network latency and lock semantics defeated the
+# isolated server's state-dir guarantees before (flock timeouts on CephFS).
+# ``--state-dir`` exists to keep hot mutable state on a local disk; accepting
+# one of these silently would recreate that incident class.
+_NETWORK_STATE_FS_TYPES = frozenset({
+    "9p",
+    "ceph",
+    "cifs",
+    "fuse.ceph",
+    "fuse.cifs",
+    "fuse.glusterfs",
+    "fuse.sshfs",
+    "glusterfs",
+    "nfs",
+    "nfs4",
+    "smb3",
+    "smbfs",
+    "sshfs",
+})
+
+
+def _mount_fs_type(path: pathlib.Path, mounts_text: str | None = None) -> str:
+    """Return the filesystem type serving ``path`` per the kernel mount table.
+
+    The longest mount-point prefix of the (already resolved) path wins, so a
+    not-yet-created state dir is classified by its future location.  An empty
+    string means the type could not be determined (no readable /proc/mounts,
+    e.g. macOS); callers must treat that as unknown, not as proof of local.
+    """
+    if mounts_text is None:
+        try:
+            mounts_text = pathlib.Path("/proc/mounts").read_text(
+                encoding="utf-8", errors="replace"
+            )
+        except OSError:
+            return ""
+    probe = str(path)
+    best_length = 0
+    best_type = ""
+    for line in mounts_text.splitlines():
+        fields = line.split()
+        if len(fields) < 3:
+            continue
+        mount_point = fields[1].replace("\\040", " ").rstrip("/") or "/"
+        if mount_point != "/" and probe != mount_point and not probe.startswith(mount_point + "/"):
+            continue
+        if len(mount_point) > best_length:
+            best_length = len(mount_point)
+            best_type = fields[2]
+    return best_type
 
 
 GitRunner = Callable[[Sequence[str], pathlib.Path], int]
@@ -133,6 +186,7 @@ class CyberGymIsolatedServer:
         git_runner: GitRunner | None = None,
         expected_settings_sha256: str = "",
         state_dir: pathlib.Path | str | None = None,
+        allow_network_state_dir: bool = False,
     ) -> None:
         self.seed_repo = pathlib.Path(seed_repo).expanduser().resolve(strict=False)
         self.run_root = pathlib.Path(run_root).expanduser().resolve(strict=False)
@@ -232,6 +286,22 @@ class CyberGymIsolatedServer:
                     raise CyberGymServerError("state_dir must not contain a live Ouroboros root")
                 except ValueError:
                     pass
+            if not isinstance(allow_network_state_dir, bool):
+                raise CyberGymServerError("allow_network_state_dir must be a boolean")
+            state_fs_type = _mount_fs_type(resolved_state)
+            if state_fs_type in _NETWORK_STATE_FS_TYPES:
+                if not allow_network_state_dir:
+                    raise CyberGymServerError(
+                        "state_dir must be on a local filesystem; observed network "
+                        f"type {state_fs_type!r} (pass --allow-network-state-dir to "
+                        "accept the lock-latency risk)"
+                    )
+                print(
+                    f"[cybergym] WARNING: state_dir is on network filesystem "
+                    f"{state_fs_type!r}; isolated-server lock latency there "
+                    "previously stalled runs",
+                    file=sys.stderr,
+                )
             self.state_dir: pathlib.Path | None = resolved_state
             self.data_root = resolved_state / "ouroboros-data"
         else:

@@ -1463,7 +1463,7 @@ def test_reconcile_nothing_pending_finalizes_manifest(tmp_path):
     )
     assert reconcile_main(_reconcile_args(run_dir)) == 0
     manifest = json.loads((run_dir / "run_manifest.json").read_text(encoding="utf-8"))
-    report = manifest["extra"]["reconcile"]
+    report = manifest["extra"]["reconcile_passes"][-1]
     assert report["status"] == "nothing_pending"
     assert report["pending_attempts"] == 0
     assert report["already_recorded"] == ["arvo:1", "arvo:2"]
@@ -1494,7 +1494,7 @@ def test_reconcile_skips_attempts_already_in_result_index(tmp_path):
     )
     assert reconcile_main(_reconcile_args(run_dir)) == 0
     manifest = json.loads((run_dir / "run_manifest.json").read_text(encoding="utf-8"))
-    report = manifest["extra"]["reconcile"]
+    report = manifest["extra"]["reconcile_passes"][-1]
     assert report["status"] == "nothing_pending"
     assert report["pending_attempts"] == 0
     assert report["already_recorded"] == ["arvo:1"]

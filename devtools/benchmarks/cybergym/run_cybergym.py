@@ -139,17 +139,13 @@ def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--out-dir", default="", help="append-only benchmark output root")
     parser.add_argument("--run-id", default="")
     parser.add_argument("--state-dir", default="", help="external local-disk directory for isolated-server mutable state")
+    parser.add_argument("--allow-network-state-dir", action="store_true", help="accept a network filesystem for --state-dir (logs a loud warning)")
     parser.add_argument("--reconcile", default="", help="adopt an interrupted run root and deliver its terminal gateway results")
     parser.add_argument("--budget-usd", type=float, default=DEFAULT_BUDGET_CAP_USD)
     parser.add_argument("--per-task-estimate-usd", type=float, default=None,
                         help="finite reservation required for a paid injected executor")
     parser.add_argument("--timeout-sec", type=float, default=DEFAULT_TIMEOUT_SEC)
-    parser.add_argument(
-        "--max-rounds",
-        type=float,
-        default=DEFAULT_MAX_ROUNDS,
-        help="per-task Ouroboros round ceiling (recorded in applied settings)",
-    )
+    parser.add_argument("--max-rounds", type=float, default=DEFAULT_MAX_ROUNDS, help="per-task Ouroboros round ceiling (recorded in applied settings)")
     parser.add_argument(
         "--per-task-cost-usd",
         type=float,
@@ -696,6 +692,7 @@ def _start_isolated_ouroboros_server(
             provider_key=provider_key,
             expected_settings_sha256=str(expected_settings_sha256 or ""),
             state_dir=pathlib.Path(args.state_dir) if str(getattr(args, "state_dir", "") or "").strip() else None,
+            allow_network_state_dir=bool(getattr(args, "allow_network_state_dir", False)),
         )
         return server.start(ready_timeout=180)
     except Exception as exc:

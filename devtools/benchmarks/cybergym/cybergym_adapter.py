@@ -1020,13 +1020,24 @@ class BudgetLedger:
             self._append({"schema": LEDGER_SCHEMA, "event": "release", "attempt_id": attempt, "ts_unix": time.time()})
 
 
-def append_cybergym_result(run_root: pathlib.Path | str, row: Mapping[str, Any]) -> None:
-    """Append one row to the common run index and its task-local index."""
+def _append_result_pair(root: pathlib.Path, row: Mapping[str, Any]) -> None:
+    """Append one row to the common run index and its task-local index.
+
+    No locking here: callers either hold ``.result_index.lock`` across a wider
+    check+append sequence (the reconcile arm) or go through
+    ``append_cybergym_result``, which takes the lock for the pair.
+    """
     from devtools.benchmarks.common.result_index import append_result_index
 
-    root = pathlib.Path(run_root).expanduser().resolve(strict=False)
     task = safe_task_id(str(row.get("task_id", row.get("instance_id", ""))))
     value = dict(row)
+    append_result_index(root, value)
+    append_result_index(safe_task_path(root, task), value)
+
+
+def append_cybergym_result(run_root: pathlib.Path | str, row: Mapping[str, Any]) -> None:
+    """Append one row to the common run index and its task-local index."""
+    root = pathlib.Path(run_root).expanduser().resolve(strict=False)
     # The shared helper deliberately stays a tiny append primitive and does not
     # own a cross-process lock.  A campaign can have several lanes, so serialize
     # the paired parent/task writes here and fsync the lock holder before release.
@@ -1042,8 +1053,7 @@ def append_cybergym_result(run_root: pathlib.Path | str, row: Mapping[str, Any])
                 locked = True
             except ImportError:
                 pass
-            append_result_index(root, value)
-            append_result_index(safe_task_path(root, task), value)
+            _append_result_pair(root, row)
             lock.flush()
             os.fsync(lock.fileno())
         finally:
