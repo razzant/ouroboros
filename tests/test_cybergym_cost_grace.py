@@ -160,6 +160,20 @@ def test_cancel_404_without_terminal_record_keeps_typed_failure(tmp_path):
     assert task_id in executor._gateway_attempts
 
 
+def test_grace_residue_bound_admits_multi_row_residue_and_refuses_pathological():
+    from devtools.benchmarks.cybergym.cybergym_wire import _abandoned_cost_residue_usd
+
+    frame = _completed_abandoned_residue_frame("cybergym-grace-bound")
+    # A provider error loop leaves many abandoned rows; their summed known
+    # residue stays deliverable while it is small against the task envelope.
+    frame["unresolved_upper_bound_usd"] = 1.60
+    frame["non_final_rows"] = 46
+    assert _abandoned_cost_residue_usd(frame) == pytest.approx(1.60)
+    # A pathological residue (a large fraction of the task's own cost) is not.
+    frame["unresolved_upper_bound_usd"] = 6.00
+    assert _abandoned_cost_residue_usd(frame) is None
+
+
 def test_isolate_disk_terminal_record_grace_accepts_abandoned_residue(tmp_path):
     isolate_root = tmp_path / "isolate-data"
     config = _config(tmp_path, provider_probe=False, isolate_data_root=isolate_root)

@@ -125,8 +125,11 @@ def _cost_is_pending(payload: Mapping[str, Any]) -> bool:
 # is the ONLY open cause, its reservation upper bound is already inside the
 # frame's accounted upper bound, so after a bounded grace window the frame is
 # deliverable: the solved task is scored and the residue is disclosed on the
-# frame, never silently called fully final.
-_COST_GRACE_UNRESOLVED_UB_USD = 1.00
+# frame, never silently called fully final.  The residue bound is a quarter
+# of the per-task claim envelope: every row in it is one abandoned call's
+# reservation (~$0.03), so the bound still excludes only pathological frames
+# whose unresolved liability is a large fraction of the task's own cost.
+_COST_GRACE_UNRESOLVED_UB_USD = 5.00
 _COST_GRACE_PERIOD_SEC = 120.0
 _COST_GRACE_MARKER = "cost_grace_acceptance"
 
