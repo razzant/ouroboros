@@ -55,12 +55,11 @@ from devtools.benchmarks.cybergym.cybergym_docker import (
     _safe_abs,
     _write_json,
 )
-from devtools.benchmarks.cybergym.cybergym_lifecycle import _SETTLED
 from devtools.benchmarks.cybergym.cybergym_sidecar import make_opaque_agent_id
 from devtools.benchmarks.cybergym.cybergym_wire import (
     ExecutorFailure,
-    _cost_is_pending,
     _gateway_path,
+    _redeliverable_terminal_frame,
     _response_status,
     _unwrap_http_json,
 )
@@ -174,8 +173,10 @@ class _ReconcileMixin:
 
         The gateway process may be dead while its ``task_results/`` tree
         persists on disk.  A record is accepted only when it names the exact
-        gateway task and is settled with final cost accounting; anything else
-        is treated as absent so the caller keeps its typed refusal path.
+        gateway task and is deliverable — settled with final cost accounting,
+        or released by the abandoned-residue grace with its disclosure;
+        anything else is treated as absent so the caller keeps its typed
+        refusal path.
         """
         root = self.config.isolate_data_root
         if root is None:
@@ -189,10 +190,7 @@ class _ReconcileMixin:
             return None
         if str(value.get("task_id") or "").strip() != gateway_task_id:
             return None
-        status = _response_status(value)
-        if status not in _SETTLED or (status == "completed" and _cost_is_pending(value)):
-            return None
-        return value
+        return _redeliverable_terminal_frame(value)
 
     def reconcile_task(
         self,
@@ -239,12 +237,8 @@ class _ReconcileMixin:
             gateway_task_id = str(raw_checkpoint.get("gateway_task_id") or "").strip()
             if not gateway_task_id or not _GATEWAY_TASK_ID.fullmatch(gateway_task_id):
                 raise ExecutorFailure("gateway checkpoint has no usable task id")
-            cached = raw_checkpoint.get("result")
-            if (
-                isinstance(cached, Mapping)
-                and _response_status(cached) in _SETTLED
-                and not (_response_status(cached) == "completed" and _cost_is_pending(cached))
-            ):
+            cached = _redeliverable_terminal_frame(raw_checkpoint.get("result"))
+            if cached is not None:
                 # The cached frame is delivered without any gateway poll, so it
                 # must be bound to this checkpoint's task exactly like the
                 # isolate-disk fallback is; a foreign or id-less cached result
@@ -285,9 +279,10 @@ class _ReconcileMixin:
                 if returned_id and returned_id != gateway_task_id:
                     raise ExecutorFailure("Ouroboros status response belongs to a different task")
                 status = _response_status(latest)
-                terminal = status in _SETTLED and not (
-                    status == "completed" and _cost_is_pending(latest)
-                )
+                deliverable = _redeliverable_terminal_frame(latest)
+                terminal = deliverable is not None
+                if deliverable is not None:
+                    latest = deliverable
                 if terminal and returned_id != gateway_task_id:
                     # A terminal frame we may deliver must be bound to this
                     # checkpoint's task exactly, like the isolate-disk

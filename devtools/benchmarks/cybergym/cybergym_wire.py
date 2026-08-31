@@ -7,12 +7,14 @@ payloads and never touches containers, workspaces, or child processes.
 """
 from __future__ import annotations
 
+import datetime
 import gzip
 import hashlib
 import json
 import math
 import pathlib
 import re
+import time
 import urllib.error
 import urllib.parse
 import urllib.request
@@ -20,6 +22,7 @@ from typing import Any, Mapping, Sequence
 
 from devtools.benchmarks.cybergym.cybergym_adapter import (
     CyberGymIntegrationUnavailable,
+    _TERMINAL_GATEWAY_STATUSES,
     _terminal_gateway_accounting,
 )
 from ouroboros.tool_call_markup import content_has_tool_markup
@@ -112,6 +115,231 @@ def _cost_final_marker(payload: Mapping[str, Any]) -> bool | None:
 def _cost_is_pending(payload: Mapping[str, Any]) -> bool:
     """Recognize a completed result whose accounting is explicitly unfinished."""
     return _cost_final_marker(payload) is not True
+
+
+# A transient provider failure (e.g. a 429 during the admission burst) can
+# leave a usage-ledger row ``unresolved`` forever — no production path
+# terminalizes it — so a completed gateway frame's ``cost_final`` never turns
+# true and the delivery poll would burn the whole task timeout before the
+# cancel request 404s on the long-inactive task.  When the abandoned residue
+# is the ONLY open cause, its reservation upper bound is already inside the
+# frame's accounted upper bound, so after a bounded grace window the frame is
+# deliverable: the solved task is scored and the residue is disclosed on the
+# frame, never silently called fully final.
+_COST_GRACE_UNRESOLVED_UB_USD = 1.00
+_COST_GRACE_PERIOD_SEC = 120.0
+_COST_GRACE_MARKER = "cost_grace_acceptance"
+
+
+def _frame_accounting_sources(payload: Mapping[str, Any]) -> list[Mapping[str, Any]]:
+    """Walk the frame plus its nested accounting views (terminal-projection shape)."""
+    sources: list[Mapping[str, Any]] = []
+    queue: list[Mapping[str, Any]] = [payload]
+    seen: set[int] = set()
+    for source in queue:
+        marker = id(source)
+        if marker in seen:
+            continue
+        seen.add(marker)
+        sources.append(source)
+        for child_key in ("result", "task_result", "runtime_result", "cost_breakdown"):
+            child = source.get(child_key)
+            if isinstance(child, Mapping):
+                queue.append(child)
+    return sources
+
+
+def _abandoned_cost_residue_usd(payload: Mapping[str, Any]) -> float | None:
+    """Return the abandoned-row residue when it is the frame's ONLY open cost cause.
+
+    Eligible frame: ``completed``, still cost-pending, ledger integrity
+    intact, accounting available, nothing unmetered, nothing reserved in
+    flight, no estimated cost, and a known unresolved upper bound within
+    ``_COST_GRACE_UNRESOLVED_UB_USD``.  Any other openness axis returns None
+    and keeps the frame on the normal wait-for-final path.
+    """
+    if not isinstance(payload, Mapping):
+        return None
+    if _response_status(payload) != "completed" or not _cost_is_pending(payload):
+        return None
+    sources = _frame_accounting_sources(payload)
+
+    def present(name: str) -> list[Any]:
+        return [source[name] for source in sources if name in source and source[name] is not None]
+
+    def numbers(name: str) -> list[float] | None:
+        values: list[float] = []
+        for raw in present(name):
+            if isinstance(raw, bool):
+                return None
+            try:
+                value = float(raw)
+            except (TypeError, ValueError):
+                return None
+            if not math.isfinite(value):
+                return None
+            values.append(value)
+        return values
+
+    if any(bool(value) for value in present("ledger_integrity_degraded")):
+        return None
+    if any(str(value).strip().lower() != "available" for value in present("cost_accounting_status")):
+        return None
+    if any(bool(value) for value in present("cost_estimated")):
+        return None
+    for name in ("unknown_unmetered", "reserved_usd"):
+        values = numbers(name)
+        if values is None or any(value != 0 for value in values):
+            return None
+    unresolved = numbers("unresolved_upper_bound_usd")
+    if not unresolved:
+        return None
+    residue = max(unresolved)
+    if not 0.0 < residue <= _COST_GRACE_UNRESOLVED_UB_USD:
+        return None
+    return residue
+
+
+def _terminal_frame_epoch(payload: Mapping[str, Any]) -> float | None:
+    """Newest parseable terminal timestamp on the frame, as epoch seconds."""
+    newest: float | None = None
+    for name in ("artifact_finalized_at", "updated_at", "ts"):
+        raw = payload.get(name)
+        if not isinstance(raw, str) or not raw.strip():
+            continue
+        try:
+            parsed = datetime.datetime.fromisoformat(raw.strip())
+        except ValueError:
+            continue
+        if parsed.tzinfo is None:
+            parsed = parsed.replace(tzinfo=datetime.timezone.utc)
+        epoch = parsed.timestamp()
+        if newest is None or epoch > newest:
+            newest = epoch
+    return newest
+
+
+class _CostGraceTracker:
+    """One bounded grace window for an abandoned-residue-blocked frame.
+
+    The window opens at the first eligible sighting; a frame whose own
+    terminal timestamps are already older than the window (a long-finished
+    task met by a custody poll or a reconcile pass) has objectively outlived
+    the grace and is accepted immediately.  A sighting whose open cause is
+    not only the abandoned residue resets the window.
+    """
+
+    def __init__(self) -> None:
+        self._since: float | None = None
+
+    def accept(
+        self,
+        payload: Mapping[str, Any],
+        *,
+        now: float,
+        wall_now: float | None = None,
+    ) -> dict[str, Any] | None:
+        """Return the frame with its grace disclosure once the window elapsed."""
+        residue = _abandoned_cost_residue_usd(payload)
+        if residue is None:
+            self._since = None
+            return None
+        if self._since is None:
+            self._since = now
+        elapsed = max(0.0, now - self._since)
+        terminal_epoch = _terminal_frame_epoch(payload)
+        if terminal_epoch is not None and wall_now is not None:
+            elapsed = max(elapsed, wall_now - terminal_epoch)
+        if elapsed < _COST_GRACE_PERIOD_SEC:
+            return None
+        frame = dict(payload)
+        frame[_COST_GRACE_MARKER] = {
+            "schema": "ouroboros.benchmark.cybergym.cost_grace.v1",
+            "reason": "abandoned_unresolved_residue",
+            "unresolved_upper_bound_usd": residue,
+            "grace_period_sec": _COST_GRACE_PERIOD_SEC,
+            "waited_sec": round(elapsed, 3),
+        }
+        return frame
+
+
+def _valid_cost_grace(payload: Mapping[str, Any]) -> dict[str, Any] | None:
+    """Return the frame's grace disclosure when it is genuine.
+
+    The marker alone never authorizes delivery: the frame must still qualify
+    on its own current accounting fields, and the disclosed residue must
+    match the recomputed one.
+    """
+    if not isinstance(payload, Mapping):
+        return None
+    marker = payload.get(_COST_GRACE_MARKER)
+    if not isinstance(marker, Mapping):
+        return None
+    residue = _abandoned_cost_residue_usd(payload)
+    if residue is None:
+        return None
+    claimed = marker.get("unresolved_upper_bound_usd")
+    if isinstance(claimed, bool):
+        return None
+    try:
+        claimed_value = float(claimed)
+    except (TypeError, ValueError):
+        return None
+    if not math.isclose(claimed_value, residue, rel_tol=1e-9, abs_tol=1e-9):
+        return None
+    return dict(marker)
+
+
+def _apply_cost_grace_to_outcome(outcome: dict[str, Any]) -> bool:
+    """Carry a genuine grace disclosure onto the outer outcome cost fields.
+
+    The accounted upper bound already contains the residue, so the outcome
+    keeps its amount; the disclosure downgrades only the finality story.
+    """
+    if not isinstance(outcome, dict):
+        return False
+    grace = _valid_cost_grace(outcome.get("runtime_result") or {})
+    if grace is None:
+        return False
+    outcome["cost_final"] = False
+    outcome["unresolved_upper_bound_usd"] = grace["unresolved_upper_bound_usd"]
+    outcome["cost_grace_acceptance"] = grace
+    return True
+
+
+def _status_after_cost_check(outcome: dict[str, Any], requested_status: str) -> str:
+    """Resolve the row status for a completed outcome whose cost is unverifiable.
+
+    A completed row without an exact provider charge would make the hard
+    campaign cap unverifiable, so it demotes to an infra result with its
+    reservation left unresolved for the caller — unless the terminal frame
+    carries a genuine abandoned-residue grace disclosure, which is applied
+    to the outcome instead and keeps the completed status.
+    """
+    if requested_status != "completed":
+        return requested_status
+    if _apply_cost_grace_to_outcome(outcome):
+        return "completed"
+    outcome["lifecycle"] = "cost_unverifiable"
+    outcome["infra_reason"] = "cost_unverifiable"
+    return "infra_failed"
+
+
+def _redeliverable_terminal_frame(payload: Mapping[str, Any]) -> Mapping[str, Any] | None:
+    """Return the deliverable terminal frame for a custody/reconcile re-read.
+
+    A settled frame is deliverable; a completed cost-pending frame only via
+    the abandoned-residue grace, whose window a long-terminal frame has
+    already outlived on its own timestamps, so recovery never waits.
+    """
+    if not isinstance(payload, Mapping):
+        return None
+    status = _response_status(payload)
+    if status not in _TERMINAL_GATEWAY_STATUSES:
+        return None
+    if status == "completed" and _cost_is_pending(payload) and _valid_cost_grace(payload) is None:
+        return _CostGraceTracker().accept(payload, now=time.monotonic(), wall_now=time.time())
+    return payload
 
 
 def _gateway_execution_status(payload: Mapping[str, Any]) -> str:

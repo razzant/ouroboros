@@ -104,6 +104,9 @@ from devtools.benchmarks.cybergym.cybergym_docker import (  # noqa: F401
     _write_json,
     run_command,
 )
+from devtools.benchmarks.cybergym.cybergym_custody import (  # noqa: F401
+    _CustodyMixin,
+)
 from devtools.benchmarks.cybergym.cybergym_lifecycle import (  # noqa: F401
     _LifecycleMixin,
     _deadline_guidance,
@@ -839,7 +842,7 @@ def _safe_extract(archive: pathlib.Path, destination: pathlib.Path) -> None:
             raise cleanup_error
 
 
-class CyberGymExecutor(_DockerRuntimeMixin, _LifecycleMixin, _ReconcileMixin):
+class CyberGymExecutor(_DockerRuntimeMixin, _LifecycleMixin, _ReconcileMixin, _CustodyMixin):
     """Run one task at a time against a campaign-owned sidecar."""
 
     def __init__(self, config: ExecutorConfig) -> None:

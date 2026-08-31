@@ -502,11 +502,10 @@ def _numeric_unresolved_bound(
 ) -> float:
     """Remaining liability of a finished attempt is 0.
 
-    Known actuals are settled, not left as an unresolved reserve. A missing
-    bound must not fall back to the live claim estimate: that leftover UB is
-    what reserved $20 × N corpses against the campaign cap. ``reserved_usd``
-    and ``prior_upper`` stay in the signature so historical callers and replay
-    helpers do not fork; they do not become dispatch liability.
+    A missing bound must not fall back to the live claim estimate: that
+    leftover UB reserved $20 × N corpses against the campaign cap. The legacy
+    parameters stay in the signature so historical callers and replay helpers
+    do not fork; they never become dispatch liability.
     """
     del explicit_upper, reserved_usd, prior_upper
     return 0.0
@@ -568,12 +567,11 @@ _TERMINAL_GATEWAY_STATUSES = frozenset(
 def _terminal_gateway_accounting(payload: Mapping[str, Any] | None) -> dict[str, Any]:
     """Project a terminal gateway's total accounted bound for the outer ledger.
 
-    The outer CyberGym ledger cannot see the gateway's physical attempt rows,
-    so a terminal task response must contribute its total
-    ``accounted_upper_bound_usd`` (with ``cost_usd`` as the frozen alias).
-    ``unresolved_upper_bound_usd`` is only the inner ledger's residual and is
-    never sufficient by itself.  Restricting this helper to terminal payloads
-    prevents an intermediate/running snapshot from authorizing dispatch.
+    The outer ledger cannot see the gateway's physical attempt rows, so a
+    terminal task response contributes its total ``accounted_upper_bound_usd``
+    (``cost_usd`` as the frozen alias); the inner ``unresolved_upper_bound_usd``
+    residual alone is never sufficient.  Terminal payloads only: an
+    intermediate/running snapshot must not authorize dispatch.
     """
 
     if not isinstance(payload, Mapping):
@@ -1003,9 +1001,7 @@ class BudgetLedger:
             if attempt not in project_budget(events, self.cap_usd).active_attempt_ids:
                 raise LedgerError(f"attempt is not active: {attempt}")
             reserved, prior_upper = _attempt_reservation_bound(events, attempt)
-            bound = _numeric_unresolved_bound(
-                upper, reserved_usd=reserved, prior_upper=prior_upper
-            )
+            bound = _numeric_unresolved_bound(upper, reserved_usd=reserved, prior_upper=prior_upper)
             self._append(
                 {
                     "schema": LEDGER_SCHEMA,
@@ -1128,12 +1124,10 @@ def finalize_outcome_row(
         or raw_cost_final is not True
     )
     if requested_status == "completed" and cost_unverifiable:
-        # A completed row without an exact provider charge would make the hard
-        # campaign cap unverifiable.  Keep the attempt as an infra result and
-        # leave its reservation unresolved for the caller.
-        requested_status = "infra_failed"
-        outcome["lifecycle"] = "cost_unverifiable"
-        outcome["infra_reason"] = "cost_unverifiable"
+        # Lazy import: the wire layer imports this module at its top level.
+        from devtools.benchmarks.cybergym.cybergym_wire import _status_after_cost_check
+
+        requested_status = _status_after_cost_check(outcome, requested_status)
     if requested_status == "completed":
         observed_effort = validate_high_effort(
             outcome.get("observed_effort"), field="observed_effort"
@@ -1160,7 +1154,7 @@ def finalize_outcome_row(
     elif final_poc is None and (task_dir / FINAL_POC_BASENAME).exists():
         marker_record = final_poc_record(task_dir)
         final_poc = marker_record
-    return build_task_result_row(
+    row = build_task_result_row(
         task.task_id,
         trials=outcome.get("trials") or (),
         final_trial=outcome.get("final_trial"),
@@ -1190,6 +1184,13 @@ def finalize_outcome_row(
         task_contract=contract,
         attempt_id=str(attempt_id),
     )
+    grace = outcome.get("cost_grace_acceptance")
+    if grace is not None:
+        # The accounted upper bound already contains the abandoned residue;
+        # the row discloses it instead of claiming a fully final cost.
+        row.update({"cost_final": False, "cost_grace_acceptance": grace,
+                    "unresolved_upper_bound_usd": outcome["unresolved_upper_bound_usd"]})
+    return row
 
 
 def settle_finished_attempt(
@@ -1219,10 +1220,9 @@ def run_campaign(
     The callback owns task generation, sidecar lifecycle, model transport, and
     process custody.  A missing callback is an explicit blocked result; this
     seam never falls back to Docker, a shell, or a host network.  A run of
-    ``gateway_circuit_threshold`` consecutive transport-class gateway failures
-    opens the dispatch circuit breaker: admission stops, in-flight tasks
-    settle, and ``GatewayCircuitOpen`` carries the landed rows plus the
-    undispatched task ids.
+    ``gateway_circuit_threshold`` consecutive transport-class failures opens
+    the dispatch circuit breaker: admission stops, in-flight tasks settle,
+    and ``GatewayCircuitOpen`` carries the landed rows and undispatched ids.
     """
     if isinstance(max_workers, bool) or not isinstance(max_workers, int) or not 1 <= max_workers <= MAX_CROSS_TASK_WORKERS:
         raise ValueError(
