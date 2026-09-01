@@ -191,11 +191,9 @@ class _ReconcileMixin:
         """Read a terminal task record persisted on the isolate's data root.
 
         The gateway process may be dead while its ``task_results/`` tree
-        persists on disk.  A record is accepted only when it names the exact
-        gateway task and is deliverable — settled with final cost accounting,
-        or released by the abandoned-residue grace with its disclosure;
-        anything else is treated as absent so the caller keeps its typed
-        refusal path.
+        persists on disk.  An exact-id terminal record is returned raw: the
+        caller distinguishes deliverable accounting from a completed sparse
+        frame that must become an explicit infra row.
         """
         root = self.config.isolate_data_root
         if root is None:
@@ -209,7 +207,9 @@ class _ReconcileMixin:
             return None
         if str(value.get("task_id") or "").strip() != gateway_task_id:
             return None
-        return _redeliverable_terminal_frame(value)
+        if _response_status(value) not in _TERMINAL_GATEWAY_STATUSES:
+            return None
+        return value
 
     def reconcile_task(
         self,
@@ -246,6 +246,7 @@ class _ReconcileMixin:
         ) / "workspace_backend_alias.json"
         terminal_evidence: dict[str, Any] = {}
         gateway_result: Mapping[str, Any] | None = None
+        terminal_cost_unverifiable = False
         try:
             try:
                 raw_checkpoint = json.loads(checkpoint.read_text(encoding="utf-8"))
@@ -256,16 +257,24 @@ class _ReconcileMixin:
             gateway_task_id = str(raw_checkpoint.get("gateway_task_id") or "").strip()
             if not gateway_task_id or not _GATEWAY_TASK_ID.fullmatch(gateway_task_id):
                 raise ExecutorFailure("gateway checkpoint has no usable task id")
-            cached = _redeliverable_terminal_frame(raw_checkpoint.get("result"))
-            if cached is not None:
+            raw_cached = raw_checkpoint.get("result")
+            cached = _redeliverable_terminal_frame(raw_cached)
+            cached_sparse = (
+                isinstance(raw_cached, Mapping)
+                and _response_status(raw_cached) == "completed"
+                and cached is None
+            )
+            if cached is not None or cached_sparse:
                 # The cached frame is delivered without any gateway poll, so it
                 # must be bound to this checkpoint's task exactly like the
                 # isolate-disk fallback is; a foreign or id-less cached result
                 # is an infra error, never deliverable.
-                cached_task_id = str(cached.get("task_id") or "").strip()
+                cached_frame = cached if cached is not None else raw_cached
+                cached_task_id = str(cached_frame.get("task_id") or "").strip()
                 if cached_task_id != gateway_task_id:
                     raise ExecutorFailure("cached checkpoint result belongs to a different task")
-                gateway_result = cached
+                gateway_result = cached_frame
+                terminal_cost_unverifiable = cached_sparse
             else:
                 latest: Mapping[str, Any] | None = None
                 poll_error: BaseException | None = None
@@ -341,24 +350,24 @@ class _ReconcileMixin:
                         },
                         "error": "gateway task is not terminal; left for a later reconcile pass",
                     }
-                if terminal_cost_unverifiable:
-                    return {
-                        "runtime_result": dict(latest),
-                        "status": "infra_failed",
-                        "lifecycle": "terminal_cost_unverifiable",
-                        "infra_reason": "terminal_cost_unverifiable",
-                        "reconcile_disposition": "delivery_failed",
-                        "artifact_refs": {
-                            "task_dir": str(task_dir),
-                            "checkpoint": str(checkpoint),
-                            "workspace_cleanup": str(cleanup_ref),
-                        },
-                        "error": (
-                            "gateway task is terminal but its sparse accounting "
-                            "cannot prove final or grace-eligible cost"
-                        ),
-                    }
                 gateway_result = latest
+            if terminal_cost_unverifiable:
+                return {
+                    "runtime_result": dict(gateway_result),
+                    "status": "infra_failed",
+                    "lifecycle": "terminal_cost_unverifiable",
+                    "infra_reason": "terminal_cost_unverifiable",
+                    "reconcile_disposition": "delivery_failed",
+                    "artifact_refs": {
+                        "task_dir": str(task_dir),
+                        "checkpoint": str(checkpoint),
+                        "workspace_cleanup": str(cleanup_ref),
+                    },
+                    "error": (
+                        "gateway task is terminal but its sparse accounting "
+                        "cannot prove final or grace-eligible cost"
+                    ),
+                }
             # Delivery re-runs the official submit inside the workspace
             # container, so a completed result needs the live container to
             # adopt.  A terminal non-completed result delivers its typed infra

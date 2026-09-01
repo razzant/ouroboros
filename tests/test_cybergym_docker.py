@@ -338,7 +338,9 @@ def test_reconcile_task_records_terminal_sparse_cost_as_infra(tmp_path):
         tmp_path,
         gateway_id,
         {"gateway_task_id": gateway_id, "status": "completed", "result": terminal},
-        http_runner=lambda *_args, **_kwargs: terminal,
+        http_runner=lambda *_args, **_kwargs: (_ for _ in ()).throw(
+            AssertionError("cached terminal frame must avoid a gateway poll")
+        ),
     )
     outcome = executor.reconcile_task(
         TaskSpec("arvo:1", "arvo"), task_dir, "attempt-1", checkpoint,
@@ -349,6 +351,42 @@ def test_reconcile_task_records_terminal_sparse_cost_as_infra(tmp_path):
     assert outcome["reconcile_disposition"] == "delivery_failed"
     assert outcome["runtime_result"]["cost_usd"] == pytest.approx(1.25)
     assert config.run_root in pathlib.Path(outcome["artifact_refs"]["task_dir"]).parents
+
+
+def test_reconcile_task_records_sparse_cost_from_isolate_disk(tmp_path):
+    gateway_id = "gateway-task-sparse-disk"
+    external = tmp_path / "nvme" / "ouroboros-data"
+    records = external / "task_results"
+    records.mkdir(parents=True)
+    (records / f"{gateway_id}.json").write_text(
+        json.dumps({
+            "task_id": gateway_id,
+            "status": "completed",
+            "cost_usd": 2.5,
+            "cost_final": False,
+            "unresolved_upper_bound_usd": 0.4,
+        }),
+        encoding="utf-8",
+    )
+
+    config, executor, task_dir, checkpoint = _reconcile_fixture(
+        tmp_path,
+        gateway_id,
+        {"gateway_task_id": gateway_id, "status": "running"},
+        http_runner=lambda *_args, **_kwargs: (_ for _ in ()).throw(
+            ExecutorFailure("isolate gateway is down")
+        ),
+        isolate_data_root=external,
+    )
+    outcome = executor.reconcile_task(
+        TaskSpec("arvo:1", "arvo"), task_dir, "attempt-1", checkpoint,
+    )
+
+    assert outcome["status"] == "infra_failed"
+    assert outcome["lifecycle"] == "terminal_cost_unverifiable"
+    assert outcome["runtime_result"]["cost_usd"] == pytest.approx(2.5)
+    frame = json.loads(checkpoint.read_text(encoding="utf-8"))
+    assert frame["reconcile_source"] == "isolate_task_results"
 
 
 def test_reconcile_task_malformed_checkpoint_is_undeliverable(tmp_path):

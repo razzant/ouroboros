@@ -99,7 +99,8 @@ are the in-run stop gate and receive continuous model, reward, infrastructure,
 cost, Docker, and custody monitoring.  A failed gate pauses new admission
 without deleting already-paid in-flight custody.  There is no silent
 downsampling, task relabeling, or selection of only tasks that start
-successfully.
+successfully.  This is a rolling observation gate, not a barrier before task
+65: replacement tasks may enter freed lanes until the watcher latches a stop.
 
 If an image cannot be resolved or a setup precondition fails, the row is typed
 as infrastructure; the runner does not turn it into a fabricated capability
@@ -565,7 +566,8 @@ manifest names only a template value or pre-override CLI argument.
 
 Start all 1,507 source-ordered rows with 64 fixed lanes after the non-paid
 preflight and provider probe pass.  The first 64 terminal rows are not a
-separate cohort: they are the live stop gate.  Monitor sidecar placement, DNS
+separate cohort or an admission barrier: they are the live stop gate, while
+replacement tasks may enter freed lanes until a stop is latched.  Monitor sidecar placement, DNS
 and `NO_PROXY`, public HTTPS egress and submit feedback, private query/fix
 access, negative socket/database/fixed-artifact/API-key checks, model tokens,
 observed provider/model/effort, final marker hashes, raw exits, cost,

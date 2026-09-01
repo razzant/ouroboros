@@ -247,7 +247,8 @@ audited before publication or submission.
 enable a swarm inside one task.  The owner-directed full cohort fixes `64`
 lanes before launch; the isolated server records
 `OUROBOROS_MAX_WORKERS=64`.  The first 64 terminal rows are the in-run stop
-gate, and the live cohort is never resized.  Both knobs are
+gate rather than a task-65 barrier: replacement tasks may enter freed lanes
+until the watcher latches a stop.  The live cohort is never resized.  Both knobs are
 required because they govern different pools.  The per-process model governor
 remains `3`, so the aggregate provider burst is bounded by the selected
 independent workers; raising either limit requires a new append-only capacity
@@ -330,7 +331,8 @@ failures, infra failures, timeouts, and unattempted rows.
    key balance, Docker topology, local state directory, disk headroom, and
    negative-connectivity contract without a separate paid cohort.
 2. **Full cohort and first-batch gate.** Start all 1,507 Level-1 rows with 64
-   fixed lanes.  The first 64 terminal rows are the live stop gate; poor
+   fixed lanes.  The first 64 terminal rows are a rolling live stop gate, not
+   a barrier before task 65; poor
    capability signal or critical model, cost, Docker, disk, or custody health
    pauses new admission while preserving in-flight attempts.
 3. **Continued monitoring.** If the first batch is healthy, the same
