@@ -4160,14 +4160,30 @@ def _handle_acceptance_fence(evt: Dict[str, Any], ctx: Any) -> None:
     ack_path = ack_dir / f"{token}.json"
     try:
         now = time.time()
-        prior = sorted(ack_dir.glob("*.json"), key=lambda path: path.stat().st_mtime, reverse=True)
-        for index, path in enumerate(prior):
-            if index >= 255 or now - path.stat().st_mtime > 3600.0:
+        # Workers consume their ack files concurrently with this sweep: stat
+        # between glob and unlink can race the unlink. Skip vanished files
+        # instead of failing the whole compaction.
+        prior_entries = []
+        for path in ack_dir.glob("*.json"):
+            try:
+                prior_entries.append((path.stat().st_mtime, path))
+            except OSError:
+                continue
+        for index, (_mtime, path) in enumerate(sorted(prior_entries, reverse=True)):
+            if index < 255 and now - _mtime <= 3600.0:
+                continue
+            try:
                 path.unlink(missing_ok=True)
+            except OSError:
+                continue
     except Exception:
         log.warning("Could not compact stale acceptance-fence acknowledgements", exc_info=True)
     try:
-        atomic_write_json(ack_path, {**result, "ts": utc_now_iso()}, trailing_newline=True)
+        atomic_write_json(
+            ack_path,
+            {**result, "op": str(evt.get("op") or ""), "ts": utc_now_iso()},
+            trailing_newline=True,
+        )
     except Exception:
         # Loud: without the acknowledgement the worker fails closed rather than
         # reviewing against a possibly-racing subtree.

@@ -992,3 +992,122 @@ def test_chat_turn_liveness_form(monkeypatch):
     assert workers.chat_turn_liveness() == (True, "root-1", 42.0)
     workers._chat_agent._busy = False
     assert workers.chat_turn_liveness() == (False, None, None)
+
+
+def test_acceptance_ack_waiter_ignores_stale_operation_ack(tmp_path):
+    """CyberGym full1507 class: begin/inspect/end share one fence token, so the
+    ack file must be matched to the OPERATION, not just the fence. A late ack
+    for a previous op is left untouched (its own waiter or the compaction owns
+    it) and never consumed as this op's receipt."""
+    from ouroboros.agent import Env, OuroborosAgent
+
+    canonical = tmp_path / "canonical-data"
+    child = canonical / "state" / "headless_tasks" / "root-1" / "data"
+    repo = tmp_path / "repo"
+    child.mkdir(parents=True)
+    repo.mkdir()
+    token = "a" * 32
+    ack = canonical / "state" / "acceptance_fence_acks" / f"{token}.json"
+    ack.parent.mkdir(parents=True)
+    ack.write_text(
+        json.dumps({"ok": True, "status": "active", "token": token, "op": "old-op"}),
+        encoding="utf-8",
+    )
+
+    agent = object.__new__(OuroborosAgent)
+    agent.env = Env(repo_dir=repo, drive_root=child)
+    agent._current_task_metadata = {"budget_drive_root": str(canonical)}
+
+    with pytest.raises(TimeoutError):
+        agent._await_acceptance_fence_ack(token, op="new-op", timeout_sec=0.2)
+    assert ack.exists()  # the stale op's ack was not consumed
+
+    ack.write_text(
+        json.dumps({"ok": True, "status": "released", "token": token, "op": "new-op"}),
+        encoding="utf-8",
+    )
+    payload = agent._await_acceptance_fence_ack(token, op="new-op", timeout_sec=2.0)
+    assert payload["status"] == "released"
+    assert not ack.exists()
+
+
+def test_begin_with_stale_token_rebinds_through_fresh_begin():
+    """A lost end/inspect ack leaves a stale local token while the supervisor
+    already released the fence: begin must drop the poisoned binding and go
+    through a fresh (idempotent supervisor-side) begin instead of inspecting
+    the dead token forever."""
+    from ouroboros.loop import _begin_task_acceptance_fence
+
+    ctx = SimpleNamespace(
+        task_metadata={"root_task_id": "root-1"},
+        _task_acceptance_fence_token="stale-token",
+        _task_acceptance_fence_generation=0,
+        _task_acceptance_queue_descendants=[],
+    )
+    ctx.inspect_acceptance_fence = lambda **_kwargs: (_ for _ in ()).throw(
+        RuntimeError("acceptance fence inspection failed")
+    )
+    ctx.begin_acceptance_fence = lambda **_kwargs: {
+        "ok": True,
+        "status": "active",
+        "token": "fresh-token",
+        "owner_message_generation": 1,
+        "queue_descendants": [],
+        "re_adopted": True,
+    }
+
+    ok, token = _begin_task_acceptance_fence(ctx, "root-1")
+    assert (ok, token) == (True, "fresh-token")
+    assert ctx._task_acceptance_fence_token == "fresh-token"
+    assert ctx._task_acceptance_fence_generation == 1
+
+
+def test_end_failure_drops_binding_so_next_begin_is_fresh():
+    """A failed end transition (lost ack, unknown outcome) must not retain the
+    local token: the next begin re-adopts or recreates the fence instead of
+    inspecting a token whose state the worker cannot prove."""
+    from ouroboros.loop import _begin_task_acceptance_fence, _end_task_acceptance_fence
+
+    ctx = SimpleNamespace(
+        task_metadata={"root_task_id": "root-1"},
+        _task_acceptance_fence_token="token-1",
+        _task_acceptance_fence_generation=0,
+        _task_acceptance_queue_descendants=[],
+        _task_acceptance_sealed_fence_token=None,
+    )
+
+    def failing_end(**_kwargs):
+        raise TimeoutError("supervisor did not acknowledge acceptance fence token-1")
+
+    ctx.end_acceptance_fence = failing_end
+    assert _end_task_acceptance_fence(ctx, outcome="revision") is False
+    assert ctx._task_acceptance_fence_token is None
+    assert ctx._task_acceptance_fence_generation is None
+
+    ctx.begin_acceptance_fence = lambda **_kwargs: {
+        "ok": True,
+        "status": "active",
+        "token": "token-2",
+        "owner_message_generation": 0,
+        "queue_descendants": [],
+    }
+    ok, token = _begin_task_acceptance_fence(ctx, "root-1")
+    assert (ok, token) == (True, "token-2")
+
+
+def test_owner_generation_check_exception_is_not_a_followup():
+    """An inspect transport failure is UNKNOWN, not an owner follow-up: the
+    generation-matched end transition remains the authoritative guard, and a
+    paid panel must never be superseded by a transport error."""
+    from ouroboros.loop import _task_acceptance_owner_generation_changed
+
+    ctx = SimpleNamespace(
+        _task_acceptance_owner_generation=None,
+        owner_message_admission_agent=None,
+        _task_acceptance_fence_generation=0,
+        _task_acceptance_fence_token="token-1",
+    )
+    ctx.inspect_acceptance_fence = lambda **_kwargs: (_ for _ in ()).throw(
+        TimeoutError("supervisor did not acknowledge acceptance fence token-1")
+    )
+    assert _task_acceptance_owner_generation_changed(ctx) is False
