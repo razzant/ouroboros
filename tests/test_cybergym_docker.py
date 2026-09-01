@@ -80,6 +80,45 @@ def test_post_create_timeout_preserves_workspace_custody(tmp_path, monkeypatch):
     assert projection.can_dispatch is True
 
 
+def test_preplan_failure_returns_typed_row_without_durability_ack_error(tmp_path, monkeypatch):
+    config = _config(tmp_path, provider_probe=False)
+    executor = CyberGymExecutor(config)
+    monkeypatch.setattr(
+        executor,
+        "start",
+        lambda: (_ for _ in ()).throw(ExecutorFailure("pre-plan failure")),
+    )
+
+    rows = run_campaign(
+        ["arvo:1"],
+        run_root=config.run_root,
+        executor=executor.run_task,
+        estimated_cost_usd=1,
+        budget_cap_usd=2,
+    )
+
+    assert rows[0]["status"] == "infra_failed"
+    assert rows[0]["infra_reason"] == "ExecutorFailure"
+    assert executor._plans == {}
+    assert executor._terminal_uncommitted_workspaces == {}
+
+
+def test_settled_gateway_transfer_to_terminal_custody_is_atomic(tmp_path):
+    executor = CyberGymExecutor(_config(tmp_path, provider_probe=False))
+    executor._gateway_attempts["gateway-1"] = {
+        "workspace_name": "workspace-1",
+        "task_id": "arvo:1",
+        "attempt_id": "attempt-a01",
+    }
+
+    executor._terminalize_gateway_attempt("gateway-1")
+
+    assert executor._gateway_attempts == {}
+    assert executor._terminal_uncommitted_workspaces == {
+        "workspace-1": {"task_id": "arvo:1", "attempt_id": "attempt-a01"},
+    }
+
+
 def test_terminal_workspace_survives_until_result_and_settlement_return(tmp_path, monkeypatch):
     config = _config(tmp_path, provider_probe=False)
     executor = CyberGymExecutor(config)
@@ -104,10 +143,17 @@ def test_terminal_workspace_survives_until_result_and_settlement_return(tmp_path
         executor, "_task_body",
         lambda task, *_args, **_kwargs: {"task_id": "cybergym-" + task.task_id.replace(":", "-")},
     )
-    monkeypatch.setattr(
-        executor, "_gateway_wait",
-        lambda *_args, **_kwargs: {"status": "failed", "cost_final": True},
-    )
+
+    def fake_gateway_wait(_body, _checkpoint, **custody):
+        executor._gateway_attempts["gateway-test"] = {
+            "workspace_name": custody["workspace_name"],
+            "task_id": custody["task_id"],
+            "attempt_id": custody["attempt_id"],
+        }
+        executor._terminalize_gateway_attempt("gateway-test")
+        return {"status": "failed", "cost_final": True}
+
+    monkeypatch.setattr(executor, "_gateway_wait", fake_gateway_wait)
     monkeypatch.setattr(
         executor, "_deliver_gateway_result",
         lambda *_args, **_kwargs: {

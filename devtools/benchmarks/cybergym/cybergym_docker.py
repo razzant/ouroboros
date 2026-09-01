@@ -1344,6 +1344,8 @@ class _DockerRuntimeMixin:
             if self._unresolved_workspace_custody:
                 names = ", ".join(sorted(self._unresolved_workspace_custody))
                 raise ExecutorFailure(f"cleanup custody is unresolved for workspace names: {names}")
+            if self._terminal_uncommitted_workspaces:
+                raise ExecutorFailure("cleanup custody has terminal workspaces awaiting durability")
             workspace_items = tuple(self._task_containers.items())
         workspace_ids = tuple(container_id for _name, container_id in workspace_items)
         if not self.network_id and not self.server_id and not workspace_ids:

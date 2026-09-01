@@ -126,7 +126,6 @@ BAND_BASELINE_PATHS = (
 BAND_PATHS = {
     "devtools/benchmarks/cybergym/cybergym_docker.py": "Docker runtime layer of the executor split: one container-machinery seam.",
     "devtools/benchmarks/cybergym/cybergym_executor.py": "Executor assembly after docker/lifecycle/wire splits (ratchet heal); shrink next touch.",
-    "devtools/benchmarks/cybergym/cybergym_lifecycle.py": "Run/settle lifecycle layer of the executor split: one accounting seam.",
     "devtools/benchmarks/cybergym/cybergym_protocol.py": "Stateless protocol layer of the adapter split: constants, validators, provenance.",
     "devtools/benchmarks/cybergym/cybergym_reconcile.py": "Crash recovery joins checkpoint, result-row, claim, and cleanup state so settlement-only and cleanup-only phases resume without repeating paid delivery.",
     "devtools/benchmarks/cybergym/cybergym_sidecar.py": "Sidecar attestation core after the observations split (ratchet heal); shrink next touch.",

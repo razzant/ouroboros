@@ -1084,7 +1084,7 @@ class CyberGymExecutor(_DockerRuntimeMixin, _LifecycleMixin, _ReconcileMixin, _C
         """Release terminal workspace custody after row and ledger durability."""
         plan = self._plans.get(str(attempt_id))
         if plan is None:
-            raise ExecutorFailure("durability acknowledgement has no attempt plan")
+            return
         container_name = f"cybergym-workspace-{plan.opaque_agent_id}"
         with self._registry_condition:
             pending = self._terminal_uncommitted_workspaces.get(container_name)
@@ -1186,14 +1186,15 @@ class CyberGymExecutor(_DockerRuntimeMixin, _LifecycleMixin, _ReconcileMixin, _C
             # beside the mounted task files would let a still-running agent read
             # server ids, raw exits, or another task's diagnostics.
             gateway_admission_started = True
-            gateway_result = self._gateway_wait(body, checkpoint)
+            gateway_result = self._gateway_wait(
+                body,
+                checkpoint,
+                workspace_name=container_name,
+                task_id=task.task_id,
+                attempt_id=attempt_id,
+            )
             gateway_settled = True
             terminal_runtime_result = dict(gateway_result)
-            with self._registry_condition:
-                self._terminal_uncommitted_workspaces[container_name] = {
-                    "task_id": task.task_id,
-                    "attempt_id": attempt_id,
-                }
             return self._deliver_gateway_result(
                 task,
                 task_dir,

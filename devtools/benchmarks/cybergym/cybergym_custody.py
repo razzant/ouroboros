@@ -93,7 +93,7 @@ class _CustodyMixin:
                     and _cost_is_pending(latest)
                     and _valid_cost_grace(latest) is None
                 ):
-                    self._gateway_attempts.pop(task_id, None)
+                    self._terminalize_gateway_attempt(task_id)
                     return latest
             except ExecutorFailure:
                 # HTTP/auth/transport failures remain typed failures and keep

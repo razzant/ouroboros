@@ -838,8 +838,31 @@ class _LifecycleMixin:
             },
         }
 
-    def _gateway_wait(self, body: Mapping[str, Any], checkpoint: pathlib.Path) -> Mapping[str, Any]:
+    def _terminalize_gateway_attempt(self, gateway_task_id: str) -> None:
+        """Atomically transfer a settled gateway attempt to outer-write custody."""
+        with self._registry_condition:
+            entry = self._gateway_attempts.get(gateway_task_id)
+            if isinstance(entry, Mapping):
+                workspace_name = str(entry.get("workspace_name") or "")
+                if workspace_name:
+                    self._terminal_uncommitted_workspaces[workspace_name] = {
+                        "task_id": str(entry.get("task_id") or ""),
+                        "attempt_id": str(entry.get("attempt_id") or ""),
+                    }
+            self._gateway_attempts.pop(gateway_task_id, None)
+
+    def _gateway_wait(
+        self,
+        body: Mapping[str, Any],
+        checkpoint: pathlib.Path,
+        *,
+        workspace_name: str = "",
+        task_id: str = "",
+        attempt_id: str = "",
+    ) -> Mapping[str, Any]:
         requested_task_id = str(body.get("task_id") or "").strip()
+        owner_task_id = str(task_id)
+        owner_attempt_id = str(attempt_id)
         # The gateway currently echoes the opaque caller task id.  Register it
         # before POST so a dropped response can still be treated as an
         # admitted-or-unknown attempt and retained for manual reattachment.
@@ -852,6 +875,9 @@ class _LifecycleMixin:
             "status": "admission_pending",
             "checkpoint": str(checkpoint),
             "idempotency_key": idempotency_key,
+            "workspace_name": str(workspace_name),
+            "task_id": owner_task_id,
+            "attempt_id": owner_attempt_id,
         }
         try:
             created = _unwrap_http_json(
@@ -923,6 +949,9 @@ class _LifecycleMixin:
             "status": "submitted",
             "checkpoint": str(checkpoint),
             "idempotency_key": idempotency_key,
+            "workspace_name": str(workspace_name),
+            "task_id": owner_task_id,
+            "attempt_id": owner_attempt_id,
         }
         _write_json(
             checkpoint,
@@ -966,7 +995,7 @@ class _LifecycleMixin:
                         continue
                     latest = accepted
                     _write_json(checkpoint, {"gateway_task_id": task_id, "status": status, "result": dict(latest)})
-                self._gateway_attempts.pop(task_id, None)
+                self._terminalize_gateway_attempt(task_id)
                 return latest
             self.config.sleep(max(0.5, float(self.config.poll_interval_sec)))
         # The task may still be running after the local wait expires.  Ask the
