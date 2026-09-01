@@ -4094,6 +4094,11 @@ def _arm_delivery_control(
     evidence_revision, evidence_fingerprint = _delivery_evidence_state(tools, ctx, llm_trace)
     candidate.finalization_control = control
     candidate.repair_attempted = False
+    # Keep the causal fact after the transient latch is cleared. Acceptance
+    # improvement rounds are intentionally free-form, but an exact protocol
+    # object emitted while an earlier host control episode is still in the
+    # transcript must not become owner-facing prose.
+    tools._ctx._delivery_control_episode_seen = True
     tools._ctx._delivery_control_required = True
     _append_or_merge_user_message(
         ctx.messages,
@@ -4173,6 +4178,16 @@ def _resolve_delivery_control(
     is_control_intent = duplicate_protocol_key or (
         isinstance(parsed, dict) and "delivery_control" in parsed
     )
+    if (
+        not required
+        and is_control_intent
+        and bool(getattr(tools._ctx, "_delivery_control_episode_seen", False))
+    ):
+        # A prior host-issued control prompt makes this an outstanding
+        # protocol response even when an ordinary acceptance revision
+        # deliberately disabled the one-round latch.
+        required = True
+        tools._ctx._delivery_control_required = True
     if not required:
         if _delivery_replace_required(candidate):
             # A writer/skill action cannot silently turn a short acknowledgement
@@ -6713,6 +6728,7 @@ def run_llm_loop(
     ctx._delivery_candidate = None
     ctx._delivery_candidate_revision = 0
     ctx._delivery_control_required = False
+    ctx._delivery_control_episode_seen = False
     ctx._delivery_evidence_revision = 0
     ctx._delivery_evidence_fingerprint = ""
     _initialize_owner_directives(ctx, messages)

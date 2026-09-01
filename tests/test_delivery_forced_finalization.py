@@ -1532,6 +1532,32 @@ def test_forced_finalization_passes_json_through_when_latch_not_armed(tmp_path, 
     assert text.startswith(legitimate)
 
 
+def test_stale_control_envelope_is_decoded_after_acceptance_revision(tmp_path):
+    """A cleared latch must not leak a prior host control envelope."""
+    loop, registry, limit_ctx, trace = _forced_test_context(tmp_path)
+    _arm_latch_with_candidate(loop, registry, limit_ctx, trace)
+    registry._ctx._delivery_control_episode_seen = True
+    registry._ctx._delivery_control_required = False
+    content = '{"delivery_control":"replace","full_answer":"answer\\nwith **markdown**"}'
+
+    status, text = loop._resolve_delivery_control(content, registry, limit_ctx, trace)
+
+    assert status == "resolved"
+    assert text == "answer\nwith **markdown**"
+    assert registry._ctx._delivery_control_required is False
+
+
+def test_unrelated_json_remains_fresh_without_a_control_episode(tmp_path):
+    """JSON stays user-facing when no host control episode occurred."""
+    loop, registry, limit_ctx, trace = _forced_test_context(tmp_path)
+    content = '{"delivery_control":"replace","full_answer":"user data"}'
+
+    status, text = loop._resolve_delivery_control(content, registry, limit_ctx, trace)
+
+    assert status == "fresh"
+    assert text == content
+
+
 def test_forced_finalization_degrades_unknown_verb_control_to_retained_candidate(
     tmp_path, monkeypatch,
 ):
