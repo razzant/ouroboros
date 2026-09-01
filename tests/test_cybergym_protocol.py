@@ -5,6 +5,7 @@ from __future__ import annotations
 import hashlib
 import json
 import pathlib
+import threading
 
 import pytest
 
@@ -24,6 +25,7 @@ from devtools.benchmarks.cybergym.cybergym_adapter import (
     assert_fresh_output_root,
     build_generate_task_argv,
     build_task_result_row,
+    campaign_execution_lock,
     classify_official_exit,
     directory_tree_digest,
     final_poc_record,
@@ -982,6 +984,45 @@ def test_run_campaign_persists_row_before_settlement_event(tmp_path, monkeypatch
     assert rows[0]["status"] == "completed"
     projection = BudgetLedger(root / "claims.jsonl", cap_usd=2).projection()
     assert projection.active_attempt_ids == (rows[0]["attempt_id"],)
+
+
+def test_run_campaign_holds_campaign_lock_through_dispatch(tmp_path):
+    pytest.importorskip("fcntl")
+    root = tmp_path / "live-lock"
+    started = threading.Event()
+    release = threading.Event()
+    result: list[list[dict]] = []
+
+    def callback(_task, _task_dir):
+        started.set()
+        assert release.wait(timeout=5)
+        return {
+            "status": "infra_failed",
+            "infra_reason": "test_terminal",
+            "cost_usd": 0.1,
+            "cost_final": True,
+        }
+
+    worker = threading.Thread(
+        target=lambda: result.append(run_campaign(
+            ["arvo:1"],
+            run_root=root,
+            executor=callback,
+            estimated_cost_usd=1,
+            budget_cap_usd=2,
+        )),
+        daemon=True,
+    )
+    worker.start()
+    assert started.wait(timeout=5)
+    try:
+        with campaign_execution_lock(root, blocking=False) as lock_held:
+            assert lock_held is False
+    finally:
+        release.set()
+        worker.join(timeout=5)
+    assert not worker.is_alive()
+    assert result[0][0]["status"] == "infra_failed"
 
 
 def test_run_campaign_rejects_missing_or_non_high_effort(tmp_path):
