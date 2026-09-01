@@ -181,6 +181,23 @@ def test_run_script_body_audit_is_post_exec_stat_verified(tmp_path, monkeypatch)
     assert "ARTIFACT_OUTPUT_UNDECLARED" in bad, bad
 
 
+def test_run_script_success_keeps_payload_alongside_undeclared_nudge(tmp_path, monkeypatch):
+    """capinv-447 D5: on a SUCCESSFUL script the undeclared-outputs nudge used to
+    REPLACE the whole _run_shell payload — the exit description and the answer the
+    script printed were discarded, leaving only the note plus the script path. The
+    nudge must APPEND (as the error path and run_command already do)."""
+    registry, _repo, _data, desktop = _reg(tmp_path, monkeypatch)
+    target = desktop / "undeclared_deliverable.txt"
+    result = registry.execute(
+        "run_script",
+        {"script": f"open({str(target)!r}, 'w').write('deliverable')\nprint('THE ANSWER IS 42')",
+         "interpreter": "python3", "cwd": str(desktop)},
+    )
+    assert "ARTIFACT_OUTPUT_UNDECLARED" in result, result  # the nudge still fires
+    assert "THE ANSWER IS 42" in result, result            # ...without eating stdout
+    assert "exit_code=0" in result, result                 # ...or the exit description
+
+
 def test_run_script_body_audit_runs_on_failure_path(tmp_path, monkeypatch):
     """v6.56.0 review regression: a script that WRITES an undeclared user_files
     deliverable and then FAILS (raise/SystemExit) still leaves the file on disk —

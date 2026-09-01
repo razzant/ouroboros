@@ -41,8 +41,13 @@ INTERPRETER_WRITE_RE = re.compile(
     # write flag, or perl '>' / '>>' / '+>' / '+<'), not any quoted arg containing
     # w/a/x/+ — a read `open(my $fh, '<', '/tmp/f.txt')` must not match on the 'x'
     # in the filename.
+    # `remove(`/`rename(` are anchored to the os/fs namespaces so the two write
+    # vocabularies AGREE with the AST walker on the same line (#447 A4:
+    # `xs.remove(1)` is list.remove — AST False, unanchored regex True; pandas
+    # `df.rename(` writes nothing). Residual: bare `Path(p).rename(q)` no longer
+    # matches here — the AST lane still models it for the light/runtime_data gates.
     r"""(?is)(?:\.write\(|write_text\(|write_bytes\(|fs\.write|fs\.append|"""
-    r"""createwritestream|unlink\(|rename\(|mkdir\(|rmtree\(|remove\(|"""
+    r"""createwritestream|unlink\(|(?:os|fs)\s*\.\s*rename\(|mkdir\(|rmtree\(|(?:os|fs)\s*\.\s*remove\(|"""
     r"""open\s*\([^)]*,\s*(?:mode\s*=\s*)?['"](?=[a-z+]{1,3}['"])[a-z+]*[wax+][a-z+]*['"]|"""
     r"""open\s*\([^)]*,\s*(?:mode\s*=\s*)?['"]\s*(?:\+\s*[<>]|>{1,2}))"""
 )
@@ -73,7 +78,11 @@ _INTERPRETER_ANY_WRITE_RE = re.compile(
     # instead of being mis-classified as a pure read. Pure reads (open()/read_text
     # with no write token) still match nothing and stay allowed.
     + r"""subprocess\.|os\.system\(|os\.popen\(|Popen\(|check_call\(|check_output\(|"""
-    + r"""\.extractall\(|unpack_archive\(|make_archive\(|sqlite3\.connect\(|"""
+    # sqlite3.connect: `:memory:` and an explicit `file:...?mode=ro` URI open
+    # nothing writable — the AST lane carves both, so the regex must agree
+    # (#447 A4: a read-only DB open is not a write shape).
+    + r"""\.extractall\(|unpack_archive\(|make_archive\(|"""
+    + r"""sqlite3\.connect\((?!\s*['"](?:file:)?:memory:|\s*['"]file:[^'"]*?[?&]mode=ro\b)|"""
     # LIBRARY save-APIs (fable-5 cumulative review F1): to_csv/savefig/.save &co
     # write files while carrying no base write-token, so an interpreter command
     # using them was classified as a PURE READ and skipped the runtime_data

@@ -542,6 +542,48 @@ def test_replay_returns_the_recorded_zero_index(tmp_path, monkeypatch):
     assert body["duplicate"] is True and body["answered_index"] == 0
 
 
+def test_free_answer_replay_never_becomes_an_option(tmp_path, monkeypatch):
+    """A same-request_id retry may legally carry a different payload (a 503
+    retry pressed as an option after a free answer). The recorded block is the
+    only truth: the replay confirmation and the task frame keep the free
+    answer, and no answered_index is fabricated from the retry's payload."""
+    record_asked(tmp_path, "task-1", quiz_id="q1", question="?", options=["A", "B"])
+    app = _decision_app(tmp_path, monkeypatch, live_task={"id": "task-1"})
+    first = _post(app, {"request_id": "r1", "decision_id": "quiz:task-1:q1",
+                        "comment": "my own plan"})
+    assert first.status_code == 200 and "answered_index" not in first.json()
+    replay = _post(app, {"request_id": "r1", "decision_id": "quiz:task-1:q1",
+                         "option_index": 1})
+    assert replay.status_code == 200
+    body = replay.json()
+    assert body["duplicate"] is True
+    assert "answered_index" not in body
+    assert body["comment"] == "my own plan"
+
+
+def test_replay_keeps_the_recorded_comment(tmp_path, monkeypatch):
+    """A retry with a rewritten comment cannot overwrite what was recorded."""
+    record_asked(tmp_path, "task-1", quiz_id="q1", question="?", options=["A", "B"])
+    app = _decision_app(tmp_path, monkeypatch, live_task={"id": "task-1"})
+    _post(app, {"request_id": "r1", "decision_id": "quiz:task-1:q1",
+                "option_index": 0, "comment": "recorded note"})
+    replay = _post(app, {"request_id": "r1", "decision_id": "quiz:task-1:q1",
+                         "option_index": 0, "comment": "rewritten note"})
+    assert replay.status_code == 200
+    assert replay.json()["comment"] == "recorded note"
+
+
+def test_comment_edges_survive_verbatim(tmp_path, monkeypatch):
+    """The frame signs the comment as the owner's exact words: leading and
+    trailing whitespace is part of the answer, not transport noise."""
+    record_asked(tmp_path, "task-1", quiz_id="q1", question="?", options=["A", "B"])
+    app = _decision_app(tmp_path, monkeypatch, live_task={"id": "task-1"})
+    resp = _post(app, {"request_id": "r1", "decision_id": "quiz:task-1:q1",
+                       "option_index": 0, "comment": "  edges kept  "})
+    assert resp.status_code == 200
+    assert resp.json()["comment"] == "  edges kept  "
+
+
 def test_comment_is_verbatim_or_refused(tmp_path, monkeypatch):
     record_asked(tmp_path, "task-1", quiz_id="q1", question="?", options=["A", "B"])
     app = _decision_app(tmp_path, monkeypatch, live_task={"id": "task-1"})
@@ -552,6 +594,100 @@ def test_comment_is_verbatim_or_refused(tmp_path, monkeypatch):
     bad_type = _post(app, {"request_id": "r1", "decision_id": "quiz:task-1:q1",
                            "option_index": 0, "comment": 7})
     assert bad_type.status_code == 400
+
+
+def test_own_answer_needs_no_option_index(tmp_path, monkeypatch):
+    """The owner may reject every offered option and answer in their own
+    words: no index is recorded (a stored 0 would replay as "chose the first
+    option") and the frame says exactly what happened."""
+    from ouroboros.owner_mailbox import KIND_QUIZ_ANSWER, drain_owner_entries
+
+    record_asked(tmp_path, "task-1", quiz_id="q1", question="Which db?",
+                 options=["sqlite", "postgres"], assumption="sqlite meanwhile")
+    frames = []
+
+    class _Bridge:
+        def send_quiz_state(self, quiz_id, task_id, state, answered_index=None, chat_id=0):
+            frames.append((quiz_id, state, answered_index))
+
+    import supervisor.message_bus as mb
+
+    monkeypatch.setattr(mb, "get_bridge", lambda: _Bridge())
+    app = _decision_app(tmp_path, monkeypatch, live_task={"id": "task-1"})
+    resp = _post(app, {"request_id": "r1", "decision_id": "quiz:task-1:q1",
+                       "comment": "neither — use duckdb"})
+    assert resp.status_code == 200, resp.text
+    body = resp.json()
+    assert body["state"] == "answered"
+    assert "answered_index" not in body  # absent, never fabricated
+    assert frames == [("q1", "answered", None)]
+
+    block = quiz_states(tmp_path, "task-1")["q1"]
+    assert block["state"] == STATE_ANSWERED
+    assert "answered_index" not in block
+    assert block["comment"] == "neither — use duckdb"
+
+    entries = drain_owner_entries(tmp_path, "task-1", set())
+    frame_text = [e for e in entries if e.get("kind") == KIND_QUIZ_ANSWER][0]["text"]
+    assert ("The owner rejected all offered options and answered verbatim: "
+            "neither — use duckdb") in frame_text
+    assert "chose option" not in frame_text
+
+
+def test_own_answer_without_a_comment_is_refused(tmp_path, monkeypatch):
+    """An answer that names no option AND says nothing is not an answer."""
+    record_asked(tmp_path, "task-1", quiz_id="q1", question="?", options=["A", "B"])
+    app = _decision_app(tmp_path, monkeypatch, live_task={"id": "task-1"})
+    for payload in (
+        {"request_id": "r1", "decision_id": "quiz:task-1:q1"},
+        {"request_id": "r2", "decision_id": "quiz:task-1:q1", "comment": "   "},
+        {"request_id": "r3", "decision_id": "quiz:task-1:q1", "option_index": None},
+    ):
+        resp = _post(app, payload)
+        assert resp.status_code == 400, resp.text
+        assert resp.json()["reason_code"] == "option_index_required"
+    assert quiz_states(tmp_path, "task-1")["q1"]["state"] == STATE_OPEN
+    # Defence in depth at the projection itself, below the ingress guard.
+    out = record_answered(tmp_path, "task-1", quiz_id="q1", option_index=None,
+                          request_id="r4", comment="")
+    assert out["ok"] is False and out["error"] == "answer_empty"
+
+
+def test_routing_family_still_requires_an_option_index(tmp_path, monkeypatch):
+    """The optional index is a QUIZ verb: a routing choice IS its option, so
+    the picker family keeps the integer requirement."""
+    app = _decision_app(tmp_path, monkeypatch, live_task=None)
+    resp = _post(app, {"request_id": "r", "decision_id": "routing:msg-1:tok",
+                       "comment": "somewhere else"})
+    assert resp.status_code == 400
+    assert resp.json()["reason_code"] == "option_index_required"
+
+
+def test_history_replay_carries_the_owner_comment(tmp_path, monkeypatch):
+    """Replay must not drop the owner's words: with no answered_index they
+    ARE the answer, so a card rebuilt from history would otherwise show a
+    settled question with no visible answer at all."""
+    record_asked(tmp_path, "task-1", quiz_id="q1", question="Which?",
+                 options=["A", "B"])
+    record_answered(tmp_path, "task-1", quiz_id="q1", option_index=None,
+                    request_id="r1", comment="neither, do C")
+    logs = tmp_path / "logs"
+    logs.mkdir(parents=True, exist_ok=True)
+    chat_path = logs / "chat.jsonl"
+    chat_path.write_text(json.dumps({
+        "ts": "2026-09-01T00:00:00Z", "direction": "out", "chat_id": 1,
+        "user_id": 7, "text": "Which?", "type": "quiz", "task_id": "task-1",
+        "quiz": {"quiz_id": "q1", "options": [{"label": "A"}, {"label": "B"}],
+                 "stake": "", "assumption": "x", "state": "open"},
+    }) + "\n")
+    from ouroboros.gateway.history import _collect_chat_rows
+
+    rows, _ = _collect_chat_rows(chat_path, tmp_path / "archive", 50,
+                                 lambda entry_chat, entry=None: True, {})
+    quiz = [r for r in rows if r.get("msg_type") == "quiz"][0]["quiz"]
+    assert quiz["state"] == "answered"
+    assert quiz["comment"] == "neither, do C"
+    assert "answered_index" not in quiz
 
 
 def test_escalate_refuses_direct_chat_and_broken_lineage(tmp_path):

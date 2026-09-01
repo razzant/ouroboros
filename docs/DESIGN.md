@@ -74,10 +74,22 @@ caps with `text-transform`.
 | --- | --- |
 | `--text-primary` | The one thing this row/card is about; interactive control labels |
 | `--text-meta` | Real secondary content: labels, notes, hints, meta lines |
+| `--text-secondary` | A quieter step below meta, for a dense repeated field |
 | `--text-disabled` | Genuinely inert or incidental content only |
 
 `--text-muted` is a legacy alias of `--text-disabled`; new work names
 `--text-meta` or `--text-disabled` so the intent is readable in the diff.
+
+`--text-secondary` is a real fourth step, not an alias: it sits between meta
+and disabled and is written at ~50 call sites. Reach for it only when
+`--text-meta` is genuinely too loud — a value repeated on every row of a dense
+list, a chip's supporting word — and `--text-disabled` would be unreadable.
+The criterion is the same one that governs the whole table: **if the owner has
+to read it to act, it is `--text-meta` or brighter.** A load-bearing caveat, a
+one-off note, a hint that explains a control: those stay at meta. A tone or an
+unclassifiable ink is what produced the original "too much small
+high-contrast white text" report from the opposite direction, so a rule that
+declares a size and no colour is still the worst of the options.
 
 Two failure modes this table exists to prevent, both observed in this codebase:
 
@@ -87,6 +99,51 @@ Two failure modes this table exists to prevent, both observed in this codebase:
 - **Secondary content with no foreground at all**, inheriting `--text-primary`.
   This is the loudest of all failures because it is invisible in the CSS — the
   rule simply declares a size and says nothing about colour.
+
+### Brand accent
+
+The brand red is **one value**, `--accent`. Every appearance of it is either
+that token, the named roles built on it (`--accent-light` for text on dark,
+`--accent-dim` for a fill, `--focus-accent-border` / `--focus-accent-ring` for
+focus), or a rung of the accent alpha ladder (`--accent-04` … `--accent-65`).
+A new alpha is a rung added to the ladder, never an `rgba()` literal in a rule:
+the ladder is what makes "make the accent calmer" a one-line change instead of
+a grep.
+
+The first-run wizard carried a *second* brand red for a while, so the first
+screen a new owner saw was the one screen that did not match the app.
+`web/onboarding.css` is inlined standalone and cannot import `web/style.css`,
+so it mirrors the shared tokens **by value**, and
+`tests/test_web_typography_static.py` fails if a name declared in both `:root`
+blocks resolves differently. A wizard-only token is fine; a wizard-only *value*
+for a shared name is not.
+
+### Focus
+
+Keyboard focus has **one** appearance:
+
+```css
+outline: 2px solid var(--focus-accent-border);
+outline-offset: 2px;
+```
+
+`outline-offset: -2px` is the only sanctioned variant, for a control that sits
+flush inside a strip that clips an outer ring (sidebar rows, header buttons).
+Nothing else: not a blue ring, not a green one, not a `box-shadow` standing in
+for an outline, and not a colour picked to match the control it is on. A focus
+ring is the reader's cursor; if it changes colour per surface, it stops
+reading as one thing.
+
+**Hover paint is not a focus ring.** A rule written as
+`.x:hover, .x:focus-visible { background: … }` gives a keyboard user exactly
+what a mouse user gets by accident and nothing that says "you are here". Where
+a control wants both, the shared paint stays in the hybrid rule and the ring
+goes in a `:focus-visible`-only rule of its own.
+
+Text fields are the exception, and they keep their own established idiom:
+`border-color: var(--focus-accent-border)` plus
+`box-shadow: 0 0 0 3px var(--focus-accent-ring)`. A field already has a border
+to recolour, so an outline outside it would be a second frame.
 
 ### `.muted`
 
@@ -139,12 +196,12 @@ relabel the whole still-working task. A failed child keeps a compact factual
 authoritative status. Internal reason codes belong in details and diagnostics,
 not compact headlines.
 
-| Role | Foreground | Background |
-| --- | --- | --- |
-| Success / connected | `--status-ok-fg` | `--status-ok-bg` |
-| Warning / degraded | `--status-warn-fg` | `--status-warn-bg` |
-| Error / failed | `--status-error-fg` | `--status-error-bg` |
-| Neutral / classification | `--status-neutral-fg` | `--status-neutral-bg` |
+| Role | Foreground | Background | Border |
+| --- | --- | --- | --- |
+| Success / connected | `--status-ok-fg` | `--status-ok-bg` | `--status-ok-border` |
+| Warning / degraded | `--status-warn-fg` | `--status-warn-bg` | `--status-warn-border` |
+| Error / failed | `--status-error-fg` | `--status-error-bg` | `--status-error-border` |
+| Neutral / classification | `--status-neutral-fg` | `--status-neutral-bg` | `--status-neutral-border` |
 
 - **Status renders as dot + text.** The dot carries the state at a glance, so
   the sentence does not have to shout it in saturated colour and can sit at
@@ -154,9 +211,37 @@ not compact headlines.
   A tone value the code actually emits (`muted`) must have a rule; falling
   through to a default is how chips end up white.
 - Chips are `--type-meta`, not smaller, and are not uppercased.
-- `--tone-ok` / `--tone-warn` / `--tone-danger` remain the saturated role hues
-  for large fills, borders and indicators. The `--status-*-fg` tints are for
-  12px text on near-black; do not swap them.
+- `--green` / `--amber` / `--red` are the saturated hues, and they are for
+  things that are not text: dots, switch tracks, progress. The `--status-*-fg`
+  tints are for text on near-black; do not swap them. (There was also a
+  `--tone-ok` / `--tone-warn` / `--tone-danger` alias family, plus
+  `--accent-task` / `--accent-system` / `--accent-user` / `--accent-project`
+  and `--ui-tone-*`. They were named here and referenced by nothing at all, so
+  every surface kept inventing its own literal instead. They are gone; the
+  vocabulary above is the whole vocabulary.)
+
+### The tone primitive
+
+Two shapes carry a tone, and they are not interchangeable:
+
+- **A status sentence** — `.ui-status[data-tone]`. Foreground only, rendered as
+  dot + text. Filling it would turn every inline status into a badge and make
+  "connected" the loudest thing on the panel.
+- **A status chip** — `.ui-chip[data-tone]`. The full triple, because the chip
+  *is* the status and has nothing else to carry it.
+
+Surfaces whose tone is a class suffix rather than `data-tone`
+(`.skills-status-*`, `.skills-badge-*`, `.toast-*`, `.marketplace-state-*`,
+`.chat-live-phase`, `.log-phase`, `.evo-runtime-pill`, `.widget-table-status`,
+`.widget-metric` / `.widget-callout`) name the same tokens. A surface that
+paints only its edge (a card tinted by its state, a callout's left rule) takes
+the border and leaves its own background alone; a toast keeps its glass
+background, because a translucent status fill over live page content costs the
+text its contrast.
+
+Adopting these tokens is applying the semantic status contract, which already
+governs every surface — it is not a token migration of those surfaces and does
+not move them into the migrated set in section 8.
 
 ## 5. Card and section composition
 
@@ -172,6 +257,9 @@ not compact headlines.
   that floats equidistant between two groups belongs to neither.
 - Spacing comes from the 8pt tokens (`--space-*`); a new visual dimension
   becomes a CSS variable before it becomes a page-local literal.
+- An item in a popup menu or a picker list highlights with
+  `--menu-item-hover`. One gesture, one fill: a menu that highlights at a
+  different strength than the menu beside it reads as a different control.
 
 ### Reviews inside task cards
 
@@ -226,16 +314,29 @@ settles, as a record of the path taken. Anatomy, top to bottom:
    After settlement buttons drop to `--text-disabled`; the chosen option keeps
    the ok pair. Options are capped by the shared Python↔JS constant
    (`MAX_QUIZ_OPTIONS`).
-5. **Assumption** — the signature line (`Continuing meanwhile: …`),
+5. **Free answer** — while the card is open, a compact always-visible field
+   (`Your answer or comment…`) with a `Send my answer` button, enabled only
+   once something is typed. No option ever has to be the least wrong one: the
+   text rides with an option click as the owner's remark, or goes alone as the
+   owner's own answer. It uses the card's own ink and surface tokens (never
+   the legacy chat input), is capped by the shared Python↔JS constant
+   (`MAX_DECISION_COMMENT`), and disappears the moment the card settles.
+   A settled card instead carries what the owner said as a second primary
+   line (`Owner's answer: …`, `--type-body`, `--text-primary`) under the
+   options — beside the highlighted option when one was chosen, and as the
+   whole answer when none was.
+6. **Assumption** — the signature line (`Continuing meanwhile: …`),
    `--type-meta`, `--text-meta`, separated by a hairline. While the card is
    open it names the default path; once the card settles it is the durable
    record of what the agent did without an answer. It is never dropped on
    state change.
 
-The card is born on tokens even though the surrounding chat surface is not yet
-migrated: type sizes and every colour come from tokens (no new literals);
-component geometry (card min/max width, chip radius) keeps local literals like
-the rest of the chat surface until its migration pass.
+The card was born on tokens ahead of the rest of the chat surface (which has
+since migrated too): type sizes and every colour come from tokens (no new
+literals), the chip's pill radius and the option gap included; every focusable
+element in the card shares one keyboard ring (2px `--focus-accent-border`,
+2px offset). Component geometry (card min/max width) keeps local literals like
+the rest of the chat surface.
 
 ## 6. Account group / row anatomy
 
@@ -291,12 +392,17 @@ The scale is applied surface by surface. Migrated today:
 - `web/settings.css` (settings shell, model/effort cards, MCP cards)
 - `web/onboarding.css` (the whole first-run wizard)
 - `web/style.css` between the `design-system:migrated-begin` and
-  `design-system:migrated-end` markers — harness accounts, reviewer slots,
-  and the Dashboard → Updates tab (status card, one action row, collapsed
-  Recovery with a single restore list)
+  `design-system:migrated-end` marker pairs (several — migrated surfaces are
+  not contiguous in the file): harness accounts, reviewer slots, the
+  Dashboard → Updates tab (status card, one action row, collapsed Recovery
+  with a single restore list), and chat (typography, foreground and status
+  colour; component geometry keeps its local literals per the viewport
+  reserve contract, and the glass surface tints — frosted header/composer
+  backgrounds, bubble gradients and their border tints — remain local
+  literals with no token equivalents yet)
 - the global `.muted`, `.form-section h3` and shared `.ui-status` tone rules
 
-Not yet migrated: chat, skills, marketplace, widgets, logs, evolution. They are
+Not yet migrated: skills, marketplace, widgets, logs, evolution. They are
 historical and keep their literals until their own pass. Do not part-migrate a
 surface: a half-tokenised stylesheet is harder to reason about than an untouched
 one. The semantic status/action/notification contract above already applies to

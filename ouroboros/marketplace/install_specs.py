@@ -20,7 +20,11 @@ _PIP_PACKAGE_RE = re.compile(
     r"(\[[A-Za-z0-9_.-]+(,[A-Za-z0-9_.-]+)*\])?"
     r"([=<>!~]=?[A-Za-z0-9_.!*+-]+(,[=<>!~]=?[A-Za-z0-9_.!*+-]+)*)?$"
 )
-_NPM_PACKAGE_RE = re.compile(r"^(@[a-z0-9_.-]+/)?[a-z0-9][a-z0-9_.-]{0,120}$")
+# Version pins are valid automatic-install syntax (G3, capinv-447): npm accepts
+# "name@1.2.3" / "name@latest" exactly as pip accepts "name==1.2.3" — parity.
+_NPM_PACKAGE_RE = re.compile(
+    r"^(@[a-z0-9_.-]+/)?[a-z0-9][a-z0-9_.-]{0,120}(@[A-Za-z0-9_.-]{1,64})?$"
+)
 _CARGO_PACKAGE_RE = re.compile(r"^[A-Za-z0-9_][A-Za-z0-9_-]{0,120}$")
 
 

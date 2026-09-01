@@ -29,6 +29,9 @@ FROZEN_CONTRACT_PATH_PREFIXES = (
 FROZEN_CONTRACT_PATHS = frozenset({
     "tests/test_contracts.py",
     "docs/CHECKLISTS.md",
+    # The standing-disclosure archive is the same binding reviewer contract as
+    # its parent — extracted for pack size, not demoted (#447 stage 3).
+    "docs/CHECKLISTS_ARCHIVE.md",
     "ouroboros/gateway/contracts.py",
     "ouroboros/size_ratchet_manifest.py",
 })

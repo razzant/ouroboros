@@ -297,7 +297,7 @@ def test_presence_turn_attachment_refusal_returns_complete_typed_manifest(
     class Agent:
         def handle_task(self, task):
             agent_calls.append(task)
-            raise AssertionError("Presence refusal must happen before the agent")
+            return [{"type": "presence_result", "outcome": "message", "text": "ok"}]
 
     def run_real_presence(**kwargs):
         return run_presence_turn(
@@ -330,17 +330,15 @@ def test_presence_turn_attachment_refusal_returns_complete_typed_manifest(
         },
     )
 
-    assert response.status_code == 409
-    payload = response.json()
-    assert payload["ok"] is False
-    assert payload["code"] == "presence_attachment_admission_rejected"
-    assert payload["field"] == "staged_files"
-    manifest = payload["attachment_manifest"]
+    # В25c (capinv-447): partial staging is the default — the turn proceeds and
+    # the secret-shaped source stays a typed rejected row on the task manifest.
+    assert response.status_code == 200
+    assert agent_calls, "partial staging must let the turn reach the agent"
+    manifest = agent_calls[0]["attachments"]
     assert [row["status"] for row in manifest] == ["staged", "rejected"]
     assert manifest[1]["reason"] == "secret_source"
-    assert not pathlib.Path(manifest[0]["abs_path"]).exists()
-    assert agent_calls == []
-    assert not (tmp_path / "logs" / "chat.jsonl").exists()
+    assert manifest[1]["rule"], "the exact rule that fired must be named"
+    assert pathlib.Path(manifest[0]["abs_path"]).is_file()
 
 
 def test_presence_turn_host_passes_attachment_limit_to_canonical_staging_owner(
@@ -370,7 +368,7 @@ def test_presence_turn_host_passes_attachment_limit_to_canonical_staging_owner(
     class Agent:
         def handle_task(self, task):
             agent_calls.append(task)
-            raise AssertionError("Presence refusal must happen before the agent")
+            return [{"type": "presence_result", "outcome": "message", "text": "ok"}]
 
     def run_real_presence(**kwargs):
         return run_presence_turn(
@@ -404,15 +402,16 @@ def test_presence_turn_host_passes_attachment_limit_to_canonical_staging_owner(
         },
     )
 
-    assert response.status_code == 409
-    payload = response.json()
-    assert payload["code"] == "presence_attachment_admission_rejected"
-    manifest = payload["attachment_manifest"]
+    # В25c (capinv-447): the over-limit row is a disclosed rejection; the 25
+    # in-limit rows stage and the turn proceeds. Ordinal rows stay complete.
+    assert response.status_code == 200
+    assert agent_calls
+    manifest = agent_calls[0]["attachments"]
     assert len(manifest) == 26
     assert [row["ordinal"] for row in manifest] == list(range(26))
-    assert manifest[-1]["reason"] == "attachment_limit_exceeded"
-    assert all(row["status"] == "rejected" for row in manifest[25:])
-    assert agent_calls == []
+    assert manifest[25]["status"] == "rejected"
+    assert manifest[25]["reason"] == "attachment_limit_exceeded"
+    assert all(row["status"] == "staged" for row in manifest[:25])
 
 
 def test_presence_turn_host_passes_internal_missing_and_directory_to_staging_owner(
@@ -432,6 +431,8 @@ def test_presence_turn_host_passes_internal_missing_and_directory_to_staging_own
     missing = skill_state / "missing.txt"
     directory = skill_state / "directory"
     directory.mkdir()
+    good = skill_state / "good.txt"
+    good.write_text("payload", encoding="utf-8")
     repo = tmp_path / "repo"
     repo.mkdir()
     agent_calls = []
@@ -439,7 +440,7 @@ def test_presence_turn_host_passes_internal_missing_and_directory_to_staging_own
     class Agent:
         def handle_task(self, task):
             agent_calls.append(task)
-            raise AssertionError("Presence refusal must happen before the agent")
+            return [{"type": "presence_result", "outcome": "message", "text": "ok"}]
 
     def run_real_presence(**kwargs):
         return run_presence_turn(
@@ -469,17 +470,19 @@ def test_presence_turn_host_passes_internal_missing_and_directory_to_staging_own
                 "message": {"message_id": "42"},
                 "text": "Hello",
             },
-            "staged_files": [str(missing), str(directory)],
+            "staged_files": [str(good), str(missing), str(directory)],
         },
     )
 
-    assert response.status_code == 409
-    payload = response.json()
-    assert payload["code"] == "presence_attachment_admission_rejected"
-    manifest = payload["attachment_manifest"]
-    assert [row["ordinal"] for row in manifest] == [0, 1]
-    assert [row["reason"] for row in manifest] == ["source_missing", "source_not_file"]
-    assert agent_calls == []
+    # В25c (capinv-447): the typed rejections reach the staging owner and the
+    # turn proceeds with them disclosed (partial staging; a FULLY-rejected set
+    # would stay atomic — pinned elsewhere).
+    assert response.status_code == 200
+    assert agent_calls
+    manifest = agent_calls[0]["attachments"]
+    assert [row["ordinal"] for row in manifest] == [0, 1, 2]
+    assert [row["reason"] for row in manifest][1:] == ["source_missing", "source_not_file"]
+    assert manifest[0]["status"] == "staged"
 
 
 def test_presence_turn_host_rejects_symlink_escape_before_staging(

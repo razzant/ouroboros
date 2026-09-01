@@ -89,21 +89,32 @@ def _live_root_task(task_id: str) -> Tuple[Optional[Dict[str, Any]], str]:
         return task, ""
 
 
-def _quiz_answer_frame(block: Dict[str, Any], option_index: int, comment: str) -> str:
+def _quiz_answer_frame(
+    block: Dict[str, Any], option_index: Optional[int], comment: str,
+) -> str:
     """Host-authored structural frame around the owner's VERBATIM choice.
 
     The asked/answered timestamps ride inside so the MODEL judges freshness
-    itself (owner decision 30=A — no host staleness verdict)."""
+    itself (owner decision 30=A — no host staleness verdict). With no
+    ``option_index`` the owner took none of the offered options and wrote
+    their own answer — say exactly that, so the model never reads the free
+    answer as a gloss on a chosen option."""
     options = block.get("options") if isinstance(block.get("options"), list) else []
-    label = str(options[option_index]) if 0 <= option_index < len(options) else ""
     lines = [
         f"[Owner quiz answer] quiz {block.get('quiz_id')} — asked {block.get('asked_at')}, "
         f"answered {block.get('answered_at')}.",
         f"Question was: {block.get('question')}",
-        f"The owner chose option {option_index + 1}: {label}",
     ]
-    if comment:
-        lines.append(f"Owner comment (verbatim): {comment}")
+    if option_index is None:
+        lines.append(
+            "The owner rejected all offered options and answered verbatim: "
+            f"{comment}"
+        )
+    else:
+        label = str(options[option_index]) if 0 <= option_index < len(options) else ""
+        lines.append(f"The owner chose option {option_index + 1}: {label}")
+        if comment:
+            lines.append(f"Owner comment (verbatim): {comment}")
     if str(block.get("assumption") or ""):
         lines.append(
             f"You continued under the assumption: {block.get('assumption')} — "
@@ -127,7 +138,9 @@ async def api_decision_answer(request: Request) -> JSONResponse:
     raw_comment = body.get("comment")
     if raw_comment is not None and not isinstance(raw_comment, str):
         return json_error("comment must be a string", 400, reason_code="comment_invalid")
-    comment = (raw_comment or "").strip()
+    # VERBATIM: the owner's exact characters, edges included, reach the
+    # projection and the frame — the only transformations are validation.
+    comment = raw_comment or ""
     if len(comment) > _COMMENT_MAX:
         # VERBATIM contract: the frame signs the comment as the owner's exact
         # words — refuse instead of silently truncating them.
@@ -156,11 +169,24 @@ async def api_decision_answer(request: Request) -> JSONResponse:
             501, reason_code="decision_family_not_served",
         )
     raw_index = body.get("option_index")
-    if not isinstance(raw_index, int) or isinstance(raw_index, bool) or raw_index < 0:
+    if raw_index is not None and (
+        not isinstance(raw_index, int) or isinstance(raw_index, bool) or raw_index < 0
+    ):
         return json_error(
             "option_index must be a non-negative integer",
             400, reason_code="option_index_invalid",
         )
+    if raw_index is None:
+        # An answer with NO option belongs to the quiz family only: the owner
+        # rejected every offered option and wrote their own answer, which the
+        # comment carries verbatim. The routing family has no such verb — its
+        # option IS the destination — so it keeps the integer requirement.
+        if family != "quiz" or not comment.strip():
+            return json_error(
+                "option_index is required (a quiz answer may instead carry a "
+                "non-empty comment as the owner's own answer)",
+                400, reason_code="option_index_required",
+            )
     drive_root = request_drive_root(request)
     if family == "routing":
         from ouroboros.gateway.routing_decision import handle_routing_decision
@@ -219,7 +245,9 @@ async def api_decision_answer(request: Request) -> JSONResponse:
                 # The loser of a first-wins race settles honestly: the card
                 # learns the WINNING option, never a false expiry.
                 payload["answered_index"] = refused_block["answered_index"]
-            if error == "option_out_of_range":
+            if str(refused_block.get("comment") or ""):
+                payload["comment"] = str(refused_block["comment"])
+            if error in {"option_out_of_range", "answer_empty"}:
                 status = 400
             return JSONResponse(payload, status_code=status)
         block = outcome.get("block") if isinstance(outcome.get("block"), dict) else {}
@@ -239,10 +267,14 @@ async def api_decision_answer(request: Request) -> JSONResponse:
             # same-id retry attempt (reset_attempt_controls_for_retry revokes
             # only hurry/finalize kinds), and the model judges freshness from
             # the frame's stamps (30=A). No lock spans both writes on purpose.
+            # The recorded block is the ONLY answer truth: a same-request_id
+            # retry may legally carry a different payload (a 503 retry pressed
+            # as an option after a free answer), and echoing that payload would
+            # hand the task a choice the projection never recorded.
             answered_index = (int(block["answered_index"])
                               if isinstance(block.get("answered_index"), int)
-                              else raw_index)
-            frame = _quiz_answer_frame(block, answered_index, str(block.get("comment") or comment))
+                              else None)  # None: the owner's own free answer
+            frame = _quiz_answer_frame(block, answered_index, str(block.get("comment") or ""))
             drive = _task_drive_for_task(task, task_id)
             if not write_owner_message(
                 drive, frame, task_id,
@@ -267,15 +299,22 @@ async def api_decision_answer(request: Request) -> JSONResponse:
             log.debug("quiz_state broadcast failed for %s", quiz_id, exc_info=True)
     except Exception as exc:
         return json_exception(exc, 503)
-    return JSONResponse({
+    payload_ok: Dict[str, Any] = {
         "ok": True,
         "decision_id": decision_id,
         "state": str(outcome.get("state") or "answered"),
-        "answered_index": (int(block["answered_index"])
-                           if isinstance(block.get("answered_index"), int)
-                           else raw_index),
         "duplicate": bool(outcome.get("duplicate")),
-    })
+    }
+    recorded_index = (int(block["answered_index"])
+                      if isinstance(block.get("answered_index"), int)
+                      else None)
+    if recorded_index is not None:
+        # ABSENT, never fabricated: an answer with no option has no index,
+        # and a 0 would settle the card on an option the owner refused.
+        payload_ok["answered_index"] = recorded_index
+    if str(block.get("comment") or ""):
+        payload_ok["comment"] = str(block["comment"])
+    return JSONResponse(payload_ok)
 
 
 __all__ = ["api_decision_answer"]

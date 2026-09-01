@@ -19,6 +19,9 @@ class SkillReadiness:
     review_gate: Dict[str, Any] = field(default_factory=dict)
     grant_status: Dict[str, Any] = field(default_factory=dict)
     conflict: Dict[str, Any] = field(default_factory=dict)
+    # G3 (capinv-447): declared dependencies that need manual installation —
+    # disclosed ("kind:package"), never silently dropped; not a hard blocker.
+    manual_dependencies: List[str] = field(default_factory=list)
 
 
 def skill_readiness_for_execution(
@@ -79,7 +82,10 @@ def skill_readiness_for_execution(
     try:
         from ouroboros.marketplace.install_specs import install_specs_hash
         from ouroboros.marketplace.isolated_deps import read_deps_state
-        from ouroboros.skill_dependencies import auto_install_specs_for_skill
+        from ouroboros.skill_dependencies import (
+            auto_install_specs_for_skill,
+            manual_install_specs_for_skill,
+        )
 
         auto_specs = auto_install_specs_for_skill(pathlib.Path(drive_root), skill)
         if auto_specs:
@@ -92,7 +98,16 @@ def skill_readiness_for_execution(
             elif deps_state.get("specs_hash") != install_specs_hash(auto_specs):
                 blockers.append("deps_stale")
                 agent_fixable.append("deps_stale")
+        # G3 (capinv-447) third readiness state: manually-installed dependencies
+        # are DISCLOSED, not silently dropped from the dependency list. They do
+        # not hard-block (the owner may have installed them system-wide, and no
+        # ledger records that), so this is honesty, not a new gate.
+        manual_specs, _manual_warnings = manual_install_specs_for_skill(skill)
+        manual_dependencies = [
+            f"{spec.get('kind') or '?'}:{spec.get('package') or '?'}" for spec in manual_specs
+        ]
     except Exception:
+        manual_dependencies = []
         log.debug("skill readiness deps probe failed", exc_info=True)
 
     return SkillReadiness(
@@ -103,4 +118,5 @@ def skill_readiness_for_execution(
         review_gate=gate,
         grant_status=grants,
         conflict=conflict,
+        manual_dependencies=manual_dependencies,
     )

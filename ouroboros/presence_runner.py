@@ -328,17 +328,17 @@ def _build_task(
         task_id,
         [{"path": str(path), "label": path.name} for path in staged_files],
     )
+    # Partial staging is the default for initial-task ingress (В25c, capinv-447):
+    # good attachments stage, rejected ones ride along as disclosed manifest
+    # rows — mirrors the gateway task API default. A FULLY-rejected set stays
+    # atomic: the turn would run with none of its declared material.
     if manifest:
         from ouroboros.artifacts import (
-            attachment_manifest_has_rejections,
+            attachment_manifest_all_rejected,
             remove_staged_attachments,
         )
 
-        if attachment_manifest_has_rejections(manifest):
-            # Presence is an initial-task ingress, so its default is the same
-            # atomic admission as gateway-created roots.  Keep the complete
-            # ordinal-preserving report, but remove every sibling copied by
-            # this failed admission before dialogue or model execution begins.
+        if attachment_manifest_all_rejected(manifest):
             remove_staged_attachments(manifest)
             raise PresenceTurnError(
                 "presence_attachment_admission_rejected",

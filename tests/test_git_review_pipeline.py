@@ -234,11 +234,21 @@ class TestRepoWriteMultiFile:
 # pass; otherwise an iterable of substrings every one of which must appear in
 # the returned blocker text.
 _PREFLIGHT_CASES = [
+    # Regression (#447): the commit-message version-reference heuristic was
+    # removed — a version-shaped message no longer demands VERSION staged.
     (
-        "missing_version",
+        "version_ref_message_without_version_passes",
         "v3.24.0: big change",
         "ouroboros/tools/git.py\nREADME.md",
-        ("PREFLIGHT_BLOCKED", "VERSION"),
+        None,
+    ),
+    # Regression (#447): the old "version" substring test matched "conversion"
+    # and told an unrelated commit to bump VERSION.
+    (
+        "conversion_message_does_not_demand_version",
+        "add unit conversion helper",
+        "M  ouroboros/units.py",
+        None,
     ),
     (
         "missing_readme",
@@ -258,23 +268,20 @@ _PREFLIGHT_CASES = [
         "M  docs/ARCHITECTURE.md",
         None,
     ),
+    # Regression (#447): the tests-required predicate was removed — a .py
+    # change under ouroboros/ (e.g. comment-only) without staged tests is no
+    # longer refused; CHECKLISTS.md item 6 (tests_affected) owns coverage.
     (
-        "logic_changed_without_tests_blocked",
+        "logic_without_tests_passes",
         "fix something",
         "M  ouroboros/tools/shell.py\nM  VERSION\nM  README.md",
-        ("PREFLIGHT_BLOCKED", "tests/"),
-    ),
-    (
-        "logic_changed_with_tests_passes",
-        "fix something",
-        "M  ouroboros/tools/shell.py\nM  tests/test_shell_run_shell.py\nM  VERSION\nM  README.md",
         None,
     ),
     (
-        "supervisor_logic_without_tests_blocked",
+        "supervisor_logic_without_tests_passes",
         "update supervisor",
         "M  supervisor/workers.py",
-        ("PREFLIGHT_BLOCKED",),
+        None,
     ),
     (
         "docs_only_change_no_tests_required",
@@ -746,25 +753,15 @@ class TestReviewEnforcementModes:
         assert "PREFLIGHT_BLOCKED" in result
         assert "ARCHITECTURE.md" in result
 
-    def test_rename_out_of_ouroboros_triggers_check3(self):
-        """Renaming a .py file OUT of ouroboros/ is treated as a deletion and triggers check 3."""
+    def test_rename_out_of_ouroboros_without_tests_passes(self):
+        """Regression (#447): a rename/deletion of a .py file out of
+        ouroboros/ without staged tests is no longer refused — the lexical
+        tests-required predicate was removed (CHECKLISTS.md item 6 owns
+        coverage semantically)."""
         review = _get_review_module()
-        # Source side should appear as D ouroboros/old.py in preflight
         result = review._preflight_check(
             "move module out of ouroboros",
             "D  ouroboros/old.py\nR  docs/old.py",  # src deleted, dest not in ouroboros/
-            "/tmp",
-        )
-        assert result is not None
-        assert "PREFLIGHT_BLOCKED" in result
-        assert "tests/" in result
-
-    def test_rename_out_of_ouroboros_with_tests_passes(self):
-        """Renaming a .py file out of ouroboros/ + staging tests passes check 3."""
-        review = _get_review_module()
-        result = review._preflight_check(
-            "move module out of ouroboros",
-            "D  ouroboros/old.py\nR  docs/old.py\nM  tests/test_old.py",
             "/tmp",
         )
         assert result is None
@@ -802,7 +799,7 @@ class TestReviewEnforcementModes:
             "R  VERSIONX",
             "/tmp",
         )
-        # No version-ref in commit message, so no preflight block expected
+        # VERSIONX is not the VERSION carrier, so no preflight block expected
         assert result is None
 
     def test_rename_of_readme_counts_as_present(self, tmp_path, monkeypatch):
@@ -815,7 +812,6 @@ class TestReviewEnforcementModes:
             "/tmp",
         )
         # Both VERSION and README.md present → no check 1 block
-        # No ouroboros .py → no check 3 block
         assert result is None
 
     def test_copied_module_without_architecture_blocked(self):
@@ -841,38 +837,25 @@ class TestReviewEnforcementModes:
         )
         assert result is None
 
-    def test_deleted_tests_file_does_not_satisfy_check3(self):
-        """Deleting a test file (D status) does not count as 'tests staged'."""
+    def test_logic_change_with_deleted_test_passes(self):
+        """Regression (#447): a modified logic file plus a deleted test file
+        is no longer refused for missing tests — the lexical tests-required
+        predicate was removed."""
         review = _get_review_module()
-        # Logic file modified, old test deleted — check 3 should still block
         result = review._preflight_check(
             "refactor module",
             "M  ouroboros/some_module.py\nD  tests/test_old.py",
             "/tmp",
         )
-        assert result is not None
-        assert "PREFLIGHT_BLOCKED" in result
-        assert "tests/" in result
+        assert result is None
 
-    def test_deleted_logic_file_without_tests_blocked(self):
-        """Deleting a .py file in ouroboros/ without staged tests is blocked (check 3)."""
+    def test_deleted_logic_file_without_tests_passes(self):
+        """Regression (#447): a deletion-only diff in ouroboros/ without
+        staged tests is no longer refused (removed tests-required predicate)."""
         review = _get_review_module()
-        # Only a deletion — no tests staged
         result = review._preflight_check(
             "remove old module",
             "D  ouroboros/old_module.py",
-            "/tmp",
-        )
-        assert result is not None
-        assert "PREFLIGHT_BLOCKED" in result
-        assert "tests/" in result
-
-    def test_deleted_logic_file_with_tests_passes(self):
-        """Deleting a .py file + staging a test file passes check 3."""
-        review = _get_review_module()
-        result = review._preflight_check(
-            "remove old module",
-            "D  ouroboros/old_module.py\nM  tests/test_old_module.py",
             "/tmp",
         )
         assert result is None
@@ -919,20 +902,9 @@ class TestReviewEnforcementModes:
         assert "PREFLIGHT_BLOCKED" in result
         assert "ARCHITECTURE.md" in result
 
-    def test_copy_source_not_treated_as_deletion(self):
-        """Copy source in ouroboros/ does NOT falsely trigger check 3 (source is not deleted)."""
-        review = _get_review_module()
-        # C100 ouroboros/base.py → docs/base_copy.py
-        # The copy source (ouroboros/base.py) was NOT modified or deleted — no logic change.
-        # The destination (docs/base_copy.py) is not in ouroboros/ → no new module.
-        # Result: preflight should NOT block for missing tests.
-        result = review._preflight_check(
-            "copy base to docs",
-            "A  docs/base_copy.py",  # only the destination; no D entry for C source
-            "/tmp",
-        )
-        # No .py logic change in ouroboros/ → check 3 should not fire
-        assert result is None
+    # ``test_copy_source_not_treated_as_deletion`` was removed with the
+    # tests-required preflight heuristic (#447): a false D entry for a copy
+    # source no longer has any observable preflight effect to pin.
 
 
 # --- Unified review wired into commit functions ---
@@ -1262,7 +1234,6 @@ class TestPreflightCheck7P9Limits:
             return ""  # README absent from staged index
 
         monkeypatch.setattr(review, "_git_show_staged", _fake_git_show)
-        # Tests staged to pass check 3; ARCHITECTURE.md for check 4.
         result = review._preflight_check(
             "v4.99.0 bump", "M  VERSION\nM  tests/test_foo.py", "/repo"
         )
@@ -1553,6 +1524,9 @@ class TestAdvisorySkipTests:
             status="preflight_blocked",
             ts="2026-04-20T00:00:00Z",
             raw_result="SyntaxError: invalid syntax at foo.py:3",
+            # H4 (capinv-447): the specific problem-class claim now requires the
+            # typed cause; an untyped legacy record gets the generic wording.
+            reason_kind="syntax",
         )
         state = AdvisoryReviewState()
 

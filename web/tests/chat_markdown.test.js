@@ -3,6 +3,7 @@ import test from 'node:test';
 
 import {
     chatMarkdownUrl,
+    enhanceChatMarkdown,
     parseChartConfig,
     prepareMarkdownSource,
     renderChatMarkdown,
@@ -190,4 +191,43 @@ test('parseChartConfig exposes only allowlisted chart and dataset keys', () => {
         },
         options: { animation: false, responsive: true, maintainAspectRatio: false },
     });
+});
+
+test('chart success and error writes use the supplied viewport boundary', () => {
+    const prior = { document: globalThis.document, Chart: globalThis.Chart };
+    const node = (text) => ({
+        textContent: text,
+        dataset: {},
+        classList: { values: new Set(), add(value) { this.values.add(value); } },
+        replaceChildren(...children) { this.children = children; },
+    });
+    const valid = node('{"type":"bar","data":{"datasets":[{"data":[1]}]}}');
+    const invalid = node('not json');
+    const root = {
+        isConnected: true,
+        matches: () => false,
+        querySelectorAll: (selector) => selector === '.md-chart' ? [valid, invalid] : [],
+        setAttribute() {}, removeAttribute() {}, addEventListener() {}, removeEventListener() {},
+    };
+    let destroyed = false;
+    globalThis.document = { createElement: () => ({}) };
+    globalThis.Chart = class {
+        destroy() { destroyed = true; }
+    };
+    let writes = 0;
+    try {
+        const dispose = enhanceChatMarkdown(root, {
+            onDomWrite: (mutate) => { writes += 1; return mutate(); },
+        });
+        assert.equal(writes, 3); // shared sync enhancement + success + error
+        assert.equal(valid.dataset.processed, 'true');
+        assert.equal(valid.children.length, 1);
+        assert.equal(invalid.dataset.processed, 'true');
+        assert.ok(invalid.classList.values.has('md-chart-error'));
+        dispose();
+        assert.equal(destroyed, true);
+    } finally {
+        globalThis.document = prior.document;
+        globalThis.Chart = prior.Chart;
+    }
 });

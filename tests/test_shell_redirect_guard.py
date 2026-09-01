@@ -1,8 +1,9 @@
-"""v6.37.0 guard (C6.6): a shell redirect GLUED into one argv element
-(["find", ..., "2>/dev/null"]) must be caught with the actionable [sh,-c,...] hint
-before subprocess runs — the old standalone-operator set only caught a bare ">"
-element, so "2>/dev/null" reached `find` as a literal arg and died cryptically.
-A '>' inside a sed/awk/grep expression must NOT be misflagged."""
+"""Glued-redirect detection (["find", ..., "2>/dev/null"] as one argv element).
+
+Since #447 A5 the detection DISCLOSES instead of refusing: the element is literal
+data to subprocess (no shell interprets it), so the command runs and the result
+carries the actionable [sh,-c,...] hint explaining a cryptic program error.
+A '>' inside a sed/awk/grep expression must NOT be flagged at all."""
 
 import pathlib
 from types import SimpleNamespace
@@ -38,8 +39,24 @@ def test_legit_args_not_flagged(arg):
     assert not _GLUED_REDIRECT_RE.match(arg)
 
 
-def test_run_shell_blocks_glued_redirect(tmp_path):
-    out = _run_shell(_ctx(tmp_path), cmd=["find", ".", "-name", "*.py", "2>/dev/null"])
-    assert "SHELL_CMD_ERROR" in out
+def test_run_shell_discloses_glued_redirect(tmp_path, monkeypatch):
+    # #447 A5: the redirect-looking element is literal data to subprocess — the
+    # command runs and the literal pass-through is disclosed with the
+    # ["sh","-c",...] escape hatch, so the program's own error stays explainable.
+    from subprocess import CompletedProcess
+
+    monkeypatch.setattr("ouroboros.tools.shell.load_settings", lambda: {})
+    seen = {}
+
+    def fake_run(cmd, **kwargs):
+        seen["cmd"] = cmd
+        return CompletedProcess(cmd, 0, "ok", "")
+
+    monkeypatch.setattr("ouroboros.tools.shell._tracked_subprocess_run", fake_run)
+    ctx = _ctx(tmp_path)
+    ctx.drive_root = tmp_path  # the command now really runs, so binding resolves
+    out = _run_shell(ctx, cmd=["find", ".", "-name", "*.py", "2>/dev/null"])
+    assert "SHELL_LITERAL_ARGV_NOTE" in out
     assert "2>/dev/null" in out
     assert "sh" in out  # points to the ["sh","-c",...] escape hatch
+    assert seen["cmd"][-1] == "2>/dev/null"  # reached the program literally

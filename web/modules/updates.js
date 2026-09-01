@@ -30,6 +30,11 @@ function extraWarnings(data) {
         .filter((w) => !STATE_WARNINGS.has(String(w).split(':', 1)[0]) && !STATE_WARNINGS.has(w));
 }
 
+function statusReadFailed(data) {
+    return Array.isArray(data?.warnings)
+        && data.warnings.some((warning) => String(warning).startsWith('status_error:'));
+}
+
 // Verdict function: durable server state × transient client phase → one
 // presentation descriptor (deterministic given status, phase, and the clock —
 // humanizeCheckedAt reads Date.now for the "checked N ago" age). The button is always a real next action; facts
@@ -55,7 +60,7 @@ export function updateVerdict(data = {}, phase = '') {
     if (phase === 'checking') return { ...base, state: 'checking', tone: 'neutral', headline: 'Checking the official channel…', hint: '', action: { id: 'check', label: 'Checking…', disabled: true } };
     if (phase === 'preflighting') return { ...base, state: 'preflighting', tone: 'neutral', headline: 'Preparing the update…', hint: '', action: { id: 'update', label: 'Preparing…', disabled: true } };
     if (phase === 'updating') return { ...base, state: 'updating', tone: 'neutral', headline: 'Applying the update…', hint: '', action: { id: 'update', label: 'Updating…', disabled: true } };
-    if (phase === 'restarting') return { ...base, state: 'restarting', tone: 'ok', headline: 'Restarting the server…', hint: 'The page reloads by itself when the server is back.', action: { id: 'restart', label: 'Restarting…', disabled: true } };
+    if (phase === 'restarting') return { ...base, state: 'restarting', tone: 'ok', headline: 'Restarting the server…', hint: 'This page updates itself when the server is back.', action: { id: 'restart', label: 'Restarting…', disabled: true } };
     if (phase === 'restart_required') return { ...base, state: 'restart_required', tone: 'warn', headline: 'The update landed, but the automatic restart failed.', hint: 'Restart Ouroboros to finish.', action: { id: 'restart', label: 'Restart now' } };
     // Distinct from restart_required ("the update landed"): the operation did
     // NOT land — the runtime just cannot continue without a restart (failed
@@ -77,16 +82,17 @@ export function updateVerdict(data = {}, phase = '') {
         const txPhase = String(data.update_tx.phase || '');
         const task = data.update_tx.task_id ? ` (task ${data.update_tx.task_id})` : '';
         if (txPhase === 'corrupt') {
-            // Truthful dead-end disclosure: boot recovery deliberately leaves a
-            // corrupt marker for the owner, and apply (Replace included) 409s
-            // while any marker is active — so neither restart nor the Recovery
-            // panel clears this state (final-review finding, 2026-08-31).
+            // Boot recovery quarantines readable corruption when no live merge
+            // is present. It deliberately leaves unreadable/rename-failed or
+            // merge-owned markers fail-closed. The in-app restart is itself
+            // deferred while the marker is corrupt, so do not offer a control
+            // that cannot reach that boot recovery path.
             return {
                 ...base,
                 state: 'resolving', tone: 'error',
                 headline: 'The update transaction marker is corrupt.',
-                hint: 'Updates are blocked and a restart will not clear this. Inspect and remove the marker file (ouroboros-update-tx.json in the repository .git directory) manually, then check again.',
-                action: null,
+                hint: 'Quit and reopen Ouroboros so boot recovery can quarantine readable corruption when no merge is active. The in-app restart is deferred while this marker is corrupt. If this state remains after reopening, inspect the marker file (ouroboros-update-tx.json in the repository .git directory) manually, then check again.',
+                action: { id: 'check', label: 'Check again' },
             };
         }
         if (txPhase === 'pending_boot_smoke') {
@@ -181,6 +187,57 @@ export function updateVerdict(data = {}, phase = '') {
     };
 }
 
+// Mirrors the two boot-recovery phases admitted by server.py's serialized
+// restart path. A later backend phase remains safe: the UI falls through to
+// its durable verdict instead of inventing another transient hold.
+const RESTART_BOOT_PHASES = new Set(['pending_boot_smoke', 'applying_replace']);
+
+// A reconnect proves that the browser reached a server generation after the
+// restart request, but the managed-update boot finalizer can still own the
+// durable transaction. Keep the synthetic phase until that boot-only state is
+// gone; every other durable status is more truthful than "Restarting…".
+export function restartStatusCanSettle(data, { afterBootNotice = false } = {}) {
+    if (!data || typeof data !== 'object') return false;
+    if (statusReadFailed(data)) return false;
+    if (!data.update_tx?.active) return true;
+    const txPhase = String(data.update_tx.phase || '');
+    // update_status_ready is emitted after the boot finalizer returns. If it
+    // deliberately leaves a boot phase durable (for example, a retry is still
+    // required), that verdict now owns the UI instead of synthetic restarting.
+    return afterBootNotice || !RESTART_BOOT_PHASES.has(txPhase);
+}
+
+// Updates is mounted for the SPA lifetime. Keep its reconnect episode local:
+// update_status_ready is transient and can arrive from the old generation, so
+// it may reconcile a restart only after the socket has actually reopened.
+export function bindUpdateRefreshEvents({ ws, getPhase, reconcileRestart, loadStatus }) {
+    let restartReconnected = false;
+    const disposers = [];
+    const listen = (event, handler) => {
+        const dispose = ws?.on?.(event, handler);
+        if (typeof dispose === 'function') disposers.push(dispose);
+    };
+
+    listen('open', (event = {}) => {
+        if (getPhase() !== 'restarting' || event.previouslyConnected !== true) return;
+        restartReconnected = true;
+        reconcileRestart({ afterBootNotice: false });
+    });
+    listen('update_status_ready', () => {
+        const phase = getPhase();
+        if (phase === 'restarting') {
+            if (restartReconnected) reconcileRestart({ afterBootNotice: true });
+            return;
+        }
+        if (phase === '' || phase === 'loading') loadStatus({ fetchRemote: false });
+    });
+
+    return {
+        beginRestarting() { restartReconnected = false; },
+        dispose() { disposers.splice(0).forEach((dispose) => dispose()); },
+    };
+}
+
 export function initUpdates({ mount, state, ws, openSettingsTab }) {
     const page = document.createElement('div');
     page.id = 'page-updates';
@@ -231,6 +288,9 @@ export function initUpdates({ mount, state, ws, openSettingsTab }) {
     const officialTagsDiv = page.querySelector('#updates-official-tags');
     let latestStatus = null;
     let phase = 'loading';
+    let restartReconcileInFlight = false;
+    let restartReconcileQueued = false;
+    let restartReconcileAfterBootNotice = false;
 
     function chipHtml(chip) {
         const body = `<strong>${escapeHtml(chip.label)}:</strong> ${escapeHtml(chip.value)}`;
@@ -264,9 +324,7 @@ export function initUpdates({ mount, state, ws, openSettingsTab }) {
         // Replace gating fails CLOSED: a status read that failed (synthesized
         // status_error) proves nothing about the durable transaction, so the
         // recovery action stays disabled until a successful re-read.
-        const statusReadFailed = Array.isArray(latestStatus?.warnings)
-            && latestStatus.warnings.some((w) => String(w).startsWith('status_error:'));
-        replaceBtn.disabled = replaceInFlight || statusReadFailed || [
+        replaceBtn.disabled = replaceInFlight || statusReadFailed(latestStatus) || [
             'loading', 'checking', 'updating', 'preflighting', 'restarting',
             'restart_required', 'restart_needed', 'resolving', 'unmanaged',
         ].includes(verdict.state);
@@ -275,6 +333,49 @@ export function initUpdates({ mount, state, ws, openSettingsTab }) {
     function setPhase(next) {
         phase = next;
         render();
+    }
+
+    function enterRestarting() {
+        restartRefresh.beginRestarting();
+        setPhase('restarting');
+    }
+
+    async function reconcileRestartStatus({ afterBootNotice = false } = {}) {
+        if (phase !== 'restarting') return;
+        if (restartReconcileInFlight) {
+            restartReconcileQueued = true;
+            restartReconcileAfterBootNotice ||= afterBootNotice;
+            return;
+        }
+        restartReconcileInFlight = true;
+        let currentAfterBootNotice = afterBootNotice;
+        try {
+            do {
+                restartReconcileQueued = false;
+                restartReconcileAfterBootNotice = false;
+                let data;
+                try {
+                    data = await apiClient.updateStatus();
+                } catch {
+                    // A failed read proves nothing. Stay in the honest
+                    // restarting state and let the next reconnect/ready event
+                    // provide another bounded chance to reconcile.
+                    currentAfterBootNotice = restartReconcileAfterBootNotice;
+                    continue;
+                }
+                if (phase !== 'restarting') return;
+                latestStatus = data;
+                if (restartStatusCanSettle(data, { afterBootNotice: currentAfterBootNotice })) {
+                    restartNeeded = false;
+                    setPhase('');
+                    return;
+                }
+                render();
+                currentAfterBootNotice = restartReconcileAfterBootNotice;
+            } while (restartReconcileQueued && phase === 'restarting');
+        } finally {
+            restartReconcileInFlight = false;
+        }
     }
 
     async function loadStatus({ fetchRemote = false } = {}) {
@@ -381,7 +482,7 @@ export function initUpdates({ mount, state, ws, openSettingsTab }) {
             const data = await resp.json();
             if (data.status === 'ok') {
                 showToast(`Rollback successful: ${data.message}. Server is restarting...`, 'success');
-                setPhase('restarting');
+                enterRestarting();
             } else if (data.status === 'restart_required') {
                 // A ROLLBACK landed, not an update: the update-specific
                 // restart_required headline would lie here.
@@ -455,7 +556,7 @@ export function initUpdates({ mount, state, ws, openSettingsTab }) {
                 setPhase('restart_required');
             } else {
                 showToast('Update applied. Server is restarting.', 'success');
-                setPhase('restarting');
+                enterRestarting();
             }
         } catch (err) {
             showToast('Update failed: ' + applyFailureText(err), 'error');
@@ -495,7 +596,7 @@ export function initUpdates({ mount, state, ws, openSettingsTab }) {
                 setPhase('restart_required');
             } else {
                 showToast('Official version restored. Server is restarting.', 'success');
-                setPhase('restarting');
+                enterRestarting();
             }
         } catch (err) {
             const restartRequired = Boolean(err?.body?.restart_required);
@@ -522,8 +623,7 @@ export function initUpdates({ mount, state, ws, openSettingsTab }) {
             });
             if (!resp.ok) throw new Error(`restart command refused (HTTP ${resp.status})`);
             showToast('Restart requested.', 'success');
-            restartNeeded = false;
-            setPhase('restarting');
+            enterRestarting();
         } catch (err) {
             showToast('Restart failed: ' + (err.message || err), 'error');
             primaryBtn.disabled = false;
@@ -567,10 +667,13 @@ export function initUpdates({ mount, state, ws, openSettingsTab }) {
         }
     });
 
-    // The panel is mounted once for the whole app lifetime (app.js), so the
-    // WS subscription is deliberately installation-lifetime — no disposer.
-    ws?.on?.('update_status_ready', () => {
-        if (phase === '' || phase === 'loading') loadStatus({ fetchRemote: false });
+    // The panel is mounted once for the whole app lifetime (app.js), so this
+    // binding deliberately lives for that same installation lifetime.
+    const restartRefresh = bindUpdateRefreshEvents({
+        ws,
+        getPhase: () => phase,
+        reconcileRestart: reconcileRestartStatus,
+        loadStatus,
     });
     window.addEventListener('ouro:dashboard-subtab-shown', (event) => {
         if (event.detail?.tab !== 'updates' || state.activePage !== 'dashboard') return;

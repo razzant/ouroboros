@@ -45,13 +45,15 @@ def _search_wall_clock_sec() -> float:
     return get_search_code_wall_sec()
 
 
-def is_search_skippable(path: pathlib.Path) -> bool:
-    """Return True for paths search_code must not read.
+def search_skip_reason(path: pathlib.Path) -> str:
+    """Typed reason a path is not searchable, or ``""`` (D3, capinv-447).
 
-    Skips name-pattern excludes, oversized files, AND non-regular files —
-    device nodes, FIFOs, sockets. ``/dev/zero`` and ``/proc`` pseudo-files
-    report st_size 0 (so a size guard alone lets them through) and read_text()
-    on them never terminates / grows memory without bound (the search_code OOM
+    Closed vocabulary (file-transport facts, not semantics): ``excluded_name``,
+    ``symlink``, ``stat_error``, ``not_regular_file``, ``oversized``. Skips
+    name-pattern excludes, oversized files, AND non-regular files — device
+    nodes, FIFOs, sockets. ``/dev/zero`` and ``/proc`` pseudo-files report
+    st_size 0 (so a size guard alone lets them through) and read_text() on
+    them never terminates / grows memory without bound (the search_code OOM
     root cause when a root resolves to ``/``).
     """
     try:
@@ -61,23 +63,28 @@ def is_search_skippable(path: pathlib.Path) -> bool:
     name = path.name
     for glob_pat in SEARCH_SKIP_GLOBS:
         if fnmatch.fnmatch(name, glob_pat):
-            return True
+            return "excluded_name"
     try:
         if path.is_symlink():
             # Never follow symlinks: one inside an allowed root can point outside it,
             # letting search_code read bytes beyond the resource confinement boundary.
-            return True
+            return "symlink"
     except OSError:
-        return True
+        return "stat_error"
     try:
         st = path.stat()
     except OSError:
-        return True
+        return "stat_error"
     if not stat.S_ISREG(st.st_mode):
-        return True
+        return "not_regular_file"
     if st.st_size > MAX_FILE_SIZE_BYTES:
-        return True
-    return False
+        return "oversized"
+    return ""
+
+
+def is_search_skippable(path: pathlib.Path) -> bool:
+    """Boolean projection of :func:`search_skip_reason` for gate call sites."""
+    return bool(search_skip_reason(path))
 
 
 @dataclass(frozen=True)
@@ -239,6 +246,20 @@ def search_with_rg(
     return RgSearchResult(matches, result_truncated, capped, deadline_hit)
 
 
+def format_dropped_files_note(dropped: dict[str, int] | None) -> str:
+    """Render the filter receipt for files present but excluded from a search.
+
+    D3 (capinv-447): count-and-time caps were already disclosed; this discloses
+    the ORDINARY exclusions (oversized, symlink, policy-filtered, unreadable)
+    so a clean "No matches" is only ever claimed when nothing was dropped.
+    """
+    total = sum(int(v) for v in (dropped or {}).values() if v)
+    if not total:
+        return ""
+    details = ", ".join(f"{key}={int(count)}" for key, count in sorted((dropped or {}).items()) if count)
+    return f" {total} file(s) were present but not searched ({details})."
+
+
 def format_search_result(
     *,
     display_path: str,
@@ -248,6 +269,7 @@ def format_search_result(
     regex: bool,
     max_results: int,
     result: RgSearchResult,
+    dropped: dict[str, int] | None = None,
 ) -> str:
     matches, truncated, file_capped = result.matches, result.truncated, result.file_capped
     deadline_hit = result.deadline_hit
@@ -263,11 +285,13 @@ def format_search_result(
         "may be incomplete; narrow the path or glob, or raise OUROBOROS_SEARCH_CODE_WALL_SEC."
         if deadline_hit else ""
     )
+    dropped_note = format_dropped_files_note(dropped)
     rendered = [f"{root_name}:{m.path.relative_to(root_path).as_posix()}:{m.line}: {m.text}" for m in matches]
     if not rendered:
-        # Surface the file-scan cap AND the deadline here too: otherwise a capped/timed-out
-        # huge-root search with zero matches looks like a clean "no matches" (the misleading case).
-        return f"No matches found for {'regex' if regex else 'literal'} `{query}` in {display_path} (ripgrep).{cap_note}{deadline_note}"
+        # Surface the file-scan cap, the deadline, AND the filter receipt here: a
+        # capped/timed-out/filtered huge-root search with zero matches must never
+        # look like a clean "no matches" (the misleading case).
+        return f"No matches found for {'regex' if regex else 'literal'} `{query}` in {display_path} (ripgrep).{cap_note}{deadline_note}{dropped_note}"
     header = f"Found {len(rendered)} match{'es' if len(rendered) != 1 else ''} in {display_path} (ripgrep)"
     if truncated:
         header += f" — truncated at {max_results} results"
@@ -275,4 +299,6 @@ def format_search_result(
         header += f" — scan stopped at {MAX_SEARCH_FILES_SCANNED} files (narrow the path/glob)"
     if deadline_hit:
         header += " — stopped at the time budget (results may be incomplete)"
+    if dropped_note:
+        header += " —" + dropped_note.rstrip(".")
     return header + "\n\n" + "\n".join(rendered)

@@ -811,7 +811,7 @@
 [data-enforcement-group] .settings-effort-btn[data-effort-value="blocking"]:hover {
     color: var(--text-primary);
     border-color: rgba(232, 93, 111, 0.5);
-    background: rgba(201, 53, 69, 0.18);
+    background: var(--accent-18);
 }
 
 .local-toggle {

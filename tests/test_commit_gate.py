@@ -1260,7 +1260,9 @@ def test_blocking_history_section_with_scope_blocked(tmp_path):
 
 
 def test_review_blocked_message_prefers_fix_over_rebuttal():
-    """v4.9.2: REVIEW_BLOCKED message directs agent to fix first, rebuttal only for factual errors."""
+    """REVIEW_BLOCKED coaching (issue #447, В8=A): fix first; rebuttal is legitimate
+    for factual errors, unsupported severity, or disproportionate remedies — but it
+    never overrides owner-chosen enforcement, and a repeated finding means fix."""
     from ouroboros.tools.review import _build_critical_block_message
 
     class FakeCtx:
@@ -1270,8 +1272,15 @@ def test_review_blocked_message_prefers_fix_over_rebuttal():
     msg = _build_critical_block_message(
         FakeCtx(), "test commit", ["bible_compliance: violation"], [], ""
     )
-    assert "factually incorrect" in msg.lower()
-    assert "not to argue" in msg.lower() or "not to argue against" in msg.lower()
+    # Whitespace-normalized: the message wraps lines mid-phrase.
+    lowered = " ".join(msg.lower().split())
+    assert "factually incorrect" in lowered
+    # Proportionality channel is open: disproportionate remedies are arguable.
+    assert "disproportionate" in lowered
+    # Non-override clause: rebuttal is argument, not authority.
+    assert "never overrides owner-chosen enforcement" in lowered
+    # Fix-on-repeat coaching survives the replacement.
+    assert "implement the fix" in lowered
 
 
 def test_review_blocked_5plus_hint_suggests_split():

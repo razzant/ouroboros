@@ -162,6 +162,7 @@ function installDom(fetchImpl = async () => ({ ok: true, json: async () => ({ ac
     const prior = {
         document: globalThis.document, window: globalThis.window,
         sessionStorage: globalThis.sessionStorage, fetch: globalThis.fetch,
+        WebSocket: globalThis.WebSocket,
         ResizeObserver: globalThis.ResizeObserver,
         requestAnimationFrame: globalThis.requestAnimationFrame,
     };
@@ -191,6 +192,7 @@ function installDom(fetchImpl = async () => ({ ok: true, json: async () => ({ ac
         removeItem: (key) => storage.delete(key),
     };
     globalThis.fetch = fetchImpl;
+    globalThis.WebSocket = { OPEN: 1 };
     globalThis.ResizeObserver = class { observe() {} disconnect() {} };
     globalThis.requestAnimationFrame = (fn) => { fn(); return 1; };
     return { prior, mount };
@@ -392,7 +394,7 @@ test('render arm order and enhancement guard are pinned in source', () => {
     // The enhancement pass skips exactly the plain-system case.
     assert.match(
         chatSource,
-        /if \(role !== 'user' && systemType !== 'skill_review' && \(role !== 'system' \|\| markdown === true\)\) enhanceChatMarkdown\(bubble\);/,
+        /if \(role !== 'user' && systemType !== 'skill_review' && \(role !== 'system' \|\| markdown === true\)\) enhanceMountedMarkdown\(bubble\);/,
     );
 });
 

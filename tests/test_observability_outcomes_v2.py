@@ -127,7 +127,7 @@ def test_redactor_masks_compound_secret_names_without_generic_key_false_positive
 
     redacted = redact_projection(payload)
 
-    assert redacted.value["authtoken"] == "***REDACTED***"
+    assert redacted.value["authtoken"].startswith("***REDACTED[")  # G11 fingerprint
     assert structured_secret not in json.dumps(redacted.value)
     assert text_secret not in redacted.value["log"]
     for key, value in benign_fields.items():
@@ -160,8 +160,8 @@ def test_redactor_masks_segmented_secret_markers_with_trailing_qualifiers():
 
     redacted = redact_projection(payload)
 
-    assert redacted.value["client_secret_v2"] == "***REDACTED***"
-    assert redacted.value["api_key_prod"] == "***REDACTED***"
+    assert redacted.value["client_secret_v2"].startswith("***REDACTED[")
+    assert redacted.value["api_key_prod"].startswith("***REDACTED[")
     rendered = json.dumps(redacted.value)
     assert "ClientSecretValue1234" not in rendered
     assert "ApiKeyValue12345678" not in rendered
@@ -205,7 +205,7 @@ def test_persist_call_writes_private_full_and_redacted_refs(tmp_path, monkeypatc
         assert os.stat(redacted_path).st_mode & 0o777 == 0o600
     assert "full_payload_ref" not in refs
     assert "redacted_projection" not in refs
-    assert _read_gzip_json(redacted_path)["args"]["token"] == "***REDACTED***"
+    assert _read_gzip_json(redacted_path)["args"]["token"].startswith("***REDACTED[")
 
     manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
     # Default: the authoritative blob is REDACTED so no raw secret lands on disk;
@@ -215,7 +215,7 @@ def test_persist_call_writes_private_full_and_redacted_refs(tmp_path, monkeypatc
     full_path = manifest["full_payload_ref"]["path"]
     if posix_private_modes_supported():
         assert os.stat(full_path).st_mode & 0o777 == 0o600
-    assert _read_gzip_json(full_path)["args"]["token"] == "***REDACTED***"
+    assert _read_gzip_json(full_path)["args"]["token"].startswith("***REDACTED[")
     assert manifest["call_type"] == "tool_call"
     assert manifest["redaction"]["redacted"] is True
     assert manifest["full_payload_ref"]["sha256"]
@@ -252,7 +252,7 @@ def test_persist_call_keep_raw_override_preserves_exact_authoritative_payload(
     assert refs["full_payload_redacted"] is False
     assert read_blob_ref(tmp_path, manifest["full_payload_ref"]) == payload
     projection = read_blob_ref(tmp_path, refs["redacted_projection_ref"])
-    assert projection["messages"][0]["content"]["token"] == "***REDACTED***"
+    assert projection["messages"][0]["content"]["token"].startswith("***REDACTED[")
     assert manifest["full_payload_ref"]["sha256"] != refs["redacted_projection_ref"]["sha256"]
 
 
@@ -269,7 +269,7 @@ def test_persist_call_keep_raw_env_persists_unredacted(tmp_path, monkeypatch):
     assert manifest["full_payload_redacted"] is False
     assert refs["full_payload_redacted"] is False
     assert _read_gzip_json(manifest["full_payload_ref"]["path"])["args"]["token"].startswith("ghp_")
-    assert _read_gzip_json(refs["redacted_projection_ref"]["path"])["args"]["token"] == "***REDACTED***"
+    assert _read_gzip_json(refs["redacted_projection_ref"]["path"])["args"]["token"].startswith("***REDACTED[")
     assert manifest["full_payload_ref"]["path"] != refs["redacted_projection_ref"]["path"]
 
 

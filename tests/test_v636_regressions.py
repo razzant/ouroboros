@@ -34,7 +34,8 @@ def test_reroute_same_model_strips_reasoning_and_unpins():
         "extra_body": {"provider": {"allow_fallbacks": False}, "reasoning": {"effort": "medium"}},
     }
     out = inst._reroute_same_model_kwargs(target, kwargs)
-    assert not LLMClient._has_openrouter_reasoning_details(out["messages"])
+    assert not any(m.get("reasoning_details") for m in out["messages"])
+    assert LLMClient._has_replayed_reasoning_metadata(out["messages"]) is False
     assert "allow_fallbacks" not in out.get("extra_body", {}).get("provider", {})
     # nothing pins a provider (no reasoning continuity) -> no reroute needed
     assert inst._reroute_same_model_kwargs(target, {"messages": [{"role": "user", "content": "x"}]}) is None
@@ -457,10 +458,11 @@ def test_vlm_allowed_roots_derive_from_policy_matrix(tmp_path, monkeypatch):
     assert any(str(projects) == str(r) for r in roots)
 
 
-def test_vlm_user_files_admission_keeps_secret_guard(tmp_path, monkeypatch):
-    """A path admitted ONLY through the user_files home root still clears the
-    user_files secret/credential guards — deriving roots from the matrix widens
-    reach, never the secret boundary."""
+def test_vlm_user_files_admission_read_parity(tmp_path, monkeypatch):
+    """SC-6 read_file parity both ways (capinv-447 / В23=A): a credential-SHAPED
+    name under home is READABLE for the root principal (read_file no longer
+    shape-denies it), while the user_files LOCATION guards still apply — a
+    control-plane path stays refused."""
     from ouroboros.tools import vision
 
     home = tmp_path / "home"
@@ -469,9 +471,8 @@ def test_vlm_user_files_admission_keeps_secret_guard(tmp_path, monkeypatch):
     img = home / "token.png"  # credential-like NAME under home
     img.write_bytes(b"\x89PNG\r\n\x1a\n" + b"\x00" * 32)
     ctx = SimpleNamespace(repo_dir=tmp_path / "repo", drive_root=str(tmp_path / "data"))
-    payload, err = vision._load_local_image_payload(ctx, str(img))
-    assert payload is None
-    assert "USER_FILES_PATH_BLOCKED" in err and "credential-like" in err
+    _payload, err = vision._load_local_image_payload(ctx, str(img))
+    assert "USER_FILES_PATH_BLOCKED" not in (err or "")
 
 
 def test_vlm_restricted_subagent_secret_data_path_blocked(tmp_path, monkeypatch):

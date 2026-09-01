@@ -11,6 +11,30 @@ from ouroboros.tools.registry import ToolRegistry
 from ouroboros.tools.services import archive_task_service_logs, prune_service_logs
 
 
+def _wait_for_service_log(drive, task_id, name, predicate, timeout_sec=15.0):
+    """Wait until the service's live log satisfies ``predicate``.
+
+    The start_service readiness contract without a stdout marker is "process
+    alive == ready" — it never waits for output. These suites assert on log
+    CONTENT, so they must wait for the observable condition themselves: on a
+    slow CI runner the child's first write can land well after start_service
+    returns (a latent race exposed when the guard path got faster), and the
+    assertions below are about redaction/finalization, never about timing.
+    """
+    log_path = drive / "services" / task_id / name
+    deadline = time.time() + timeout_sec
+    while time.time() < deadline:
+        try:
+            if predicate(log_path.read_bytes() if log_path.exists() else b""):
+                return
+        except OSError:
+            pass
+        time.sleep(0.1)
+    raise AssertionError(
+        f"service log {log_path} did not satisfy the wait predicate within {timeout_sec}s"
+    )
+
+
 def _force_advanced_runtime(monkeypatch):
     from ouroboros import config as cfg
 
@@ -80,6 +104,7 @@ def test_service_logs_redact_secret_assignments(tmp_path, monkeypatch):
         "readiness": {"timeout_sec": 1},
     })
     assert json.loads(start)["state"] in {"running", "exited"}
+    _wait_for_service_log(drive, "task-1", "secretlog.log", lambda b: b"OPENAI_API_KEY=" in b)
     logs = json.loads(registry.execute("service_logs", {"name": "secretlog", "tail": 500}))
     registry.execute("stop_service", {"name": "secretlog"})
 
@@ -537,6 +562,7 @@ def test_stop_service_retains_live_log_when_full_blob_omitted(tmp_path, monkeypa
         "cmd": [sys.executable, "-c", "print('x' * 100, flush=True)"],
         "readiness": {"timeout_sec": 1},
     })
+    _wait_for_service_log(drive, "task-oversize", "oversize.log", lambda b: len(b) > 100)
     stopped = json.loads(registry.execute("stop_service", {"name": "oversize"}))
 
     finalization = stopped["log_finalization"]
@@ -846,6 +872,7 @@ def test_service_outputs_register_artifacts_on_stop(tmp_path, monkeypatch):
         "readiness": {"timeout_sec": 1},
     })
     assert "LIGHT_MODE_BLOCKED" not in start
+    _wait_for_service_log(drive, "task-service-output", "artifact_service.log", lambda b: b"READY" in b)
 
     stopped = json.loads(registry.execute("stop_service", {"name": "artifact_service"}))
 

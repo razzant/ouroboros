@@ -48,15 +48,33 @@ def normalize_declared_dependency_specs(raw: Any) -> tuple[List[Dict[str, Any]],
     return normalize_install_specs(_coerce_dependency_specs(raw))
 
 
-def _manifest_install_specs(manifest: Any) -> List[Dict[str, Any]]:
+def _manifest_declared_raw(manifest: Any) -> Any:
     extras = dict(getattr(manifest, "raw_extra", {}) or {})
     raw = extras.get("install_specs")
     if raw in (None, "", [], {}):
         raw = extras.get("install")
     if raw in (None, "", [], {}):
         raw = extras.get("dependencies")
-    auto, _manual, _warnings = normalize_declared_dependency_specs(raw)
+    return raw
+
+
+def _manifest_install_specs(manifest: Any) -> List[Dict[str, Any]]:
+    auto, _manual, _warnings = normalize_declared_dependency_specs(_manifest_declared_raw(manifest))
     return auto
+
+
+def manual_install_specs_for_skill(loaded: Any) -> tuple[List[Dict[str, Any]], List[str]]:
+    """Return ``(manual_specs, warnings)`` declared in the skill's manifest.
+
+    G3 (capinv-447): the auto-spec resolver used to DROP the manual portion, so
+    a skill whose only dependencies were manual reported an empty dependency
+    list and READY. Manual specs only ever come from the reviewed manifest
+    declaration (provenance/sidecar records carry the auto list alone).
+    """
+    _auto, manual, warnings = normalize_declared_dependency_specs(
+        _manifest_declared_raw(getattr(loaded, "manifest", None))
+    )
+    return manual, warnings
 
 
 def _payload_sidecar_specs(skill_dir: pathlib.Path) -> List[Dict[str, Any]]:

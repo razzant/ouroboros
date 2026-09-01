@@ -8,6 +8,26 @@ export async function apiFetch(url, init = {}) {
     return fetch(url, init);
 }
 
+/**
+ * Read an owner-visible sentence out of a gateway error body. Several routes
+ * answer with a STRUCTURED error (`{error: {code, message, ...}}`), and
+ * interpolating that object straight into an Error message produced the
+ * literal `[object Object]` in a toast — the owner saw an alarm carrying no
+ * fact at all. Prefer the object's own sentence, then its code, and serialize
+ * only as a last resort so nothing is silently swallowed.
+ */
+function errorText(data) {
+    for (const value of [data?.error, data?.message]) {
+        if (typeof value === 'string' && value.trim()) return value;
+        if (value && typeof value === 'object') {
+            const inner = value.message || value.detail || value.code;
+            if (typeof inner === 'string' && inner.trim()) return inner;
+            try { return JSON.stringify(value); } catch { /* fall through */ }
+        }
+    }
+    return '';
+}
+
 export async function fetchJson(url, init = {}, options = {}) {
     const response = await apiFetch(url, init);
     let data = null;
@@ -17,7 +37,7 @@ export async function fetchJson(url, init = {}, options = {}) {
         data = { error: `non-json response (HTTP ${response.status})` };
     }
     if (!response.ok || (options.rejectOkFalse && data && data.ok === false)) {
-        const message = (data && (data.error || data.message)) || `HTTP ${response.status}`;
+        const message = errorText(data) || `HTTP ${response.status}`;
         const error = new Error(message);
         error.status = response.status;
         error.body = data;

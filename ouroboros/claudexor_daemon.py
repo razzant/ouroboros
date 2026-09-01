@@ -263,7 +263,7 @@ class OwnedClaudexorDaemon:
 
     # -- state ------------------------------------------------------------
 
-    def _classify_liveness(self) -> tuple:
+    def _classify_liveness(self, *, timeout_sec: Optional[float] = None) -> tuple:
         """(endpoint_or_None, state, detail) — the ONE liveness probe.
 
         The bearer token in OUR descriptor is the identity proof: each home's
@@ -290,7 +290,11 @@ class OwnedClaudexorDaemon:
             return None, "stale", f"{exc.code}: {exc}"
         try:
             with ClaudexorGateway(endpoint) as gateway:
-                handshake = gateway.handshake()
+                handshake = (
+                    gateway.handshake()
+                    if timeout_sec is None
+                    else gateway.handshake(timeout_sec=timeout_sec)
+                )
                 self._engine_version = gateway.engine_version
                 engine = handshake.get("engine") if isinstance(handshake.get("engine"), dict) else {}
                 self._engine_build_sha = str(engine.get("sha") or "")
@@ -311,9 +315,9 @@ class OwnedClaudexorDaemon:
                 )
             return None, "stale", f"{exc.code}: {exc}"
 
-    def _alive_endpoint(self) -> Optional[Any]:
+    def _alive_endpoint(self, *, timeout_sec: Optional[float] = None) -> Optional[Any]:
         """Endpoint of a LIVE daemon on our home, or None. Never spawns."""
-        endpoint, state, detail = self._classify_liveness()
+        endpoint, state, detail = self._classify_liveness(timeout_sec=timeout_sec)
         if detail:
             self._last_error = detail
         return endpoint
@@ -365,7 +369,10 @@ class OwnedClaudexorDaemon:
         home is not ours, or the spawned daemon never published a live
         descriptor.
         """
-        from ouroboros.gateways.claudexor import ClaudexorUnavailable
+        from ouroboros.gateways.claudexor import (
+            SHORT_POLL_TIMEOUT_SEC,
+            ClaudexorUnavailable,
+        )
 
         with self._lock:
             endpoint, state, detail = self._classify_liveness()
@@ -458,29 +465,29 @@ class OwnedClaudexorDaemon:
                 )
             _write_ownership_marker()
             deadline = time.monotonic() + _SPAWN_WAIT_SEC
-            while time.monotonic() < deadline:
-                if self._proc.poll() is not None:
+            while True:
+                remaining = deadline - time.monotonic()
+                if remaining <= 0:
                     break
+                # An exited child may only have lost the writer lease to another
+                # worker. Child state is not completion authority: the shared,
+                # authenticated endpoint or this deadline is.
                 # RECONCILE: fresh discovery + AUTHENTICATED handshake against
                 # the descriptor the new daemon just wrote — the same identity
                 # proof attach uses, so a restart never claims a port it does
                 # not hold.
-                endpoint = self._alive_endpoint()
+                endpoint = self._alive_endpoint(
+                    timeout_sec=min(remaining, SHORT_POLL_TIMEOUT_SEC),
+                )
                 if endpoint is not None:
+                    if self._proc is not None and self._proc.poll() is not None:
+                        self._proc = None
                     self._last_error = ""
                     return endpoint
-                time.sleep(_SPAWN_POLL_SEC)
-            # Two Ouroboros processes can race only on first provisioning: the
-            # winner publishes the owned endpoint and the losing Claudexor
-            # child exits after observing the same writer lease. Reconcile one
-            # final time after child exit before reporting a false spawn
-            # failure. An exited loser is not a process this manager owns.
-            endpoint = self._alive_endpoint()
-            if endpoint is not None:
-                if self._proc.poll() is not None:
-                    self._proc = None
-                self._last_error = ""
-                return endpoint
+                remaining = deadline - time.monotonic()
+                if remaining <= 0:
+                    break
+                time.sleep(min(_SPAWN_POLL_SEC, remaining))
             tail = ""
             try:
                 tail = log_path.read_bytes()[-500:].decode("utf-8", errors="replace")
@@ -673,9 +680,9 @@ def ensure_owned_gateway(*, admission_wait_sec: Optional[float] = None) -> Any:
     the zero-wait variant for callers that must not stall on ADMISSION: a
     recovering daemon is an immediate typed refusal there, and the initial
     handshake below is read-bounded by the same small window. The wait bounds
-    admission only — ``ensure_running``'s own liveness/spawn probes keep their
-    pre-existing finite transport ceilings (connect 5s; they are one identity
-    handshake, not a poll loop), unchanged for every caller of this seam.
+    admission only. ``ensure_running`` keeps ordinary attach probes on their
+    default transport ceiling, while a spawned daemon is reconciled through
+    bounded authenticated handshakes inside its existing startup window.
     An expired/failed admission also skips the reconcile: the recovering
     daemon 503s settings reads anyway, and the next ensure retries it.
     """

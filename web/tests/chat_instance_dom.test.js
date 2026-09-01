@@ -1,8 +1,6 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
-
 import { createChatInstance } from '../modules/chat.js';
-
 class ClassList {
     constructor(node) { this.node = node; this.names = new Set(); }
     add(...names) { names.forEach((name) => this.names.add(name)); this.sync(); }
@@ -17,13 +15,14 @@ class ClassList {
     sync() { this.node._className = [...this.names].join(' '); }
     from(value) { this.names = new Set(String(value || '').split(/\s+/).filter(Boolean)); this.sync(); }
 }
-
 class ElementStub {
     constructor(tag = 'div', doc = null) {
         this.tagName = tag.toUpperCase();
         this.ownerDocument = doc;
         this.dataset = {};
-        this.style = { setProperty() {} };
+        const styleValues = new Map();
+        this.style = { setProperty: (name, value) => styleValues.set(name, String(value)),
+            getPropertyValue: (name) => styleValues.get(name) || '' };
         this.attributes = new Map();
         this.children = [];
         this.listeners = new Map();
@@ -82,6 +81,7 @@ class ElementStub {
     appendChild(node) { return this.insertBefore(node, null); }
     append(...nodes) { nodes.forEach((node) => this.appendChild(node)); }
     prepend(node) { return this.insertBefore(node, this.children[0] || null); }
+    insertAdjacentElement(_position, node) { const list = this.parentNode?.children || []; return this.parentNode?.insertBefore(node, list[list.indexOf(this) + 1] || null); }
     insertBefore(node, before) {
         if (node?.isDocumentFragment) {
             for (const child of [...node.children]) this.insertBefore(child, before);
@@ -142,10 +142,8 @@ class ElementStub {
     }
     getBoundingClientRect() { return { top: 0, bottom: 20, left: 0, right: 100, width: 100, height: 20 }; }
     getClientRects() { return [this.getBoundingClientRect()]; }
-    focus() { if (this.ownerDocument) this.ownerDocument.activeElement = this; }
-    click() {}
+    focus() { if (this.ownerDocument) this.ownerDocument.activeElement = this; } click() {}
 }
-
 function installDom(fetchImpl = async () => ({ ok: true, json: async () => ({ active_direct_turns: [] }) })) {
     const prior = {
         document: globalThis.document, window: globalThis.window,
@@ -183,11 +181,9 @@ function installDom(fetchImpl = async () => ({ ok: true, json: async () => ({ ac
     globalThis.requestAnimationFrame = (fn) => { fn(); return 1; };
     return { prior, mount };
 }
-
 function restoreDom(prior) {
     Object.assign(globalThis, prior);
 }
-
 test('createChatInstance renders a real assistant bubble without senderLabel shadowing', () => {
     const { prior, mount } = installDom();
     const handlers = new Map();
@@ -231,15 +227,15 @@ test('createChatInstance renders a real assistant bubble without senderLabel sha
         restoreDom(prior);
     }
 });
-
 test('first task-bound review hydrates a progress-created owner once and reconciles task truth', async () => {
     const calls = [];
-    let resolveDeferredDetail = null;
+    let resolveDeferredDetail = null, resolveNoopDetail = null;
     let reconnectRows = [];
     const { prior, mount } = installDom(async (url) => {
         calls.push(String(url));
         if (String(url).startsWith('/api/chat/history')) {
-            return { ok: true, json: async () => ({ messages: reconnectRows }) };
+            return { ok: true, json: async () => ({ messages: reconnectRows, window: {
+                complete: false, truncated_by: ['quota'] } }) };
         }
         if (String(url).startsWith('/api/tasks/root-review')) {
             return { ok: true, json: async () => ({
@@ -268,6 +264,13 @@ test('first task-bound review hydrates a progress-created owner once and reconci
                     task_id: 'root-deferred', status: 'running', cancel_state: 'pending',
                     stop_policy: 'finalize_then_cancel',
                 }) });
+            });
+        }
+        if (String(url).startsWith('/api/tasks/root-noop')) {
+            return new Promise((resolve) => {
+                resolveNoopDetail = () => resolve({
+                    ok: true, json: async () => ({ task_id: 'root-noop' }),
+                });
             });
         }
         if (String(url).startsWith('/api/tasks/root-terminal-active')) {
@@ -308,6 +311,7 @@ test('first task-bound review hydrates a progress-created owner once and reconci
             ts: '2026-08-24T00:00:00Z',
         });
         const messages = globalThis.document.byId.get('chat-messages');
+        const jump = globalThis.document.byId.get('chat-scroll-bottom');
         const progressCard = messages.children.find((node) => node.dataset.taskId === 'root-review');
         assert.ok(progressCard, 'progress created the owner card before its first review');
         handlers.get('chat')({
@@ -334,7 +338,6 @@ test('first task-bound review hydrates a progress-created owner once and reconci
         assert.equal(pendingCard.querySelector('.chat-live-phase')?.textContent, 'Finalizing…');
         assert.equal(messages.children.some((node) => node.classList.contains('system')), false,
             'the task-bound review did not fall through to a standalone system bubble');
-
         handlers.get('chat')({
             chat_id: 2,
             role: 'system',
@@ -353,7 +356,8 @@ test('first task-bound review hydrates a progress-created owner once and reconci
         await new Promise((resolve) => setTimeout(resolve, 0));
         assert.equal(calls.filter((url) => url.startsWith('/api/tasks/root-review')).length, 1,
             'later attempts in the same card generation add no task-detail GET');
-
+        messages.scrollTop = 600;
+        messages.listeners.get('scroll')[0]();
         handlers.get('chat')({
             chat_id: 2,
             role: 'system',
@@ -373,7 +377,6 @@ test('first task-bound review hydrates a progress-created owner once and reconci
         assert.ok(synthesisCard);
         assert.equal(synthesisCard.dataset.finished, '0',
             'completed task detail stays live while post-task synthesis is open');
-
         handlers.get('chat')({
             chat_id: 2,
             role: 'system',
@@ -416,6 +419,8 @@ test('first task-bound review hydrates a progress-created owner once and reconci
             chat_id: 2, activity_id: 'root-deferred', task_id: 'root-deferred',
             kind: 'managed_task', phase: 'working',
         });
+        messages.scrollHeight = 1000; messages.clientHeight = 400; messages.scrollTop = 500;
+        messages.listeners.get('scroll')[0]();
         resolveDeferredDetail();
         await new Promise((resolve) => setTimeout(resolve, 0));
         assert.equal(calls.filter((url) => url.startsWith('/api/tasks/root-deferred')).length, 1,
@@ -424,7 +429,10 @@ test('first task-bound review hydrates a progress-created owner once and reconci
         assert.equal(deferredCard?.dataset.finished, '0');
         assert.equal(deferredCard?.querySelector('.chat-live-phase')?.textContent, 'Finalizing…',
             'the delayed read reconciled the current card and pending cancel outranked fresh activity');
-
+        assert.equal(messages.scrollTop, 500, 'the delayed remote detail preserves the reader');
+        assert.equal(jump.getAttribute('aria-label'), 'New activity — scroll to latest message');
+        messages.scrollTop = 600;
+        messages.listeners.get('scroll')[0]();
         handlers.get('typing')({
             chat_id: 2, activity_id: 'root-terminal-active', task_id: 'root-terminal-active',
             kind: 'managed_task', phase: 'working',
@@ -448,12 +456,42 @@ test('first task-bound review hydrates a progress-created owner once and reconci
         );
         assert.equal(terminalCard?.dataset.finished, '0',
             'fresh managed activity prevents stale terminal detail from closing the card');
+        handlers.get('chat')({
+            chat_id: 2, role: 'system', is_progress: true,
+            task_id: 'root-noop', content: 'No-op detail target',
+        });
+        messages.scrollHeight = 1000;
+        messages.clientHeight = 400;
+        messages.scrollTop = 600;
+        messages.listeners.get('scroll')[0]();
+        handlers.get('chat')({
+            chat_id: 2, role: 'system', system_type: 'skill_review',
+            task_id: 'initiator-child',
+            review_group: {
+                surface: 'skill', id: 'task:root-noop:alpha',
+                presentation_owner_task_id: 'root-noop', skill: 'alpha', status: 'clean',
+                attempts: [{ skill: 'alpha', status: 'clean' }],
+            },
+        });
+        assert.equal(typeof resolveNoopDetail, 'function');
+        messages.scrollTop = 560; messages.listeners.get('scroll')[0]();
+        resolveNoopDetail(); await new Promise((resolve) => setTimeout(resolve, 0));
+        assert.equal(messages.scrollTop, 560, 'a late task-detail no-op cannot follow a reader from the 40px zone');
+        const routineRows = [
+            { chat_id: 2, role: 'system', is_progress: true, task_id: 'routine-root', content: 'First visible progress', ts: '2026-08-24T00:01:00Z' },
+            { chat_id: 2, role: 'system', is_progress: true, task_id: 'routine-root', content: 'Second visible progress', ts: '2026-08-24T00:01:01Z' },
+            { chat_id: 2, role: 'system', is_progress: true, task_id: 'routine-child', delegation_role: 'subagent', subagent_event: 'running', subagent_task_id: 'routine-child', parent_task_id: 'routine-root', subagent_role: 'reader', content: 'Child progress', ts: '2026-08-24T00:01:02Z' },
+        ];
+        for (const row of routineRows) handlers.get('chat')(row); reconnectRows = [...routineRows, { chat_id: 2, role: 'system', is_progress: true, task_id: 'routine-hidden', ephemeral_decision: true, content: 'Hidden decision' }];
+        messages.scrollHeight = 1000; messages.clientHeight = 400; messages.scrollTop = 600; messages.listeners.get('scroll')[0](); messages.scrollTop = 560; messages.listeners.get('scroll')[0]();
+        await instance.refreshHistory({ revision: 1 });
+        assert.equal(messages.scrollTop, 560, 'ordinary and subagent replay no-ops cannot consume the 40px follow zone');
+        assert.equal(jump.getAttribute('aria-label'), 'Scroll to latest message');
     } finally {
         instance?.destroy();
         restoreDom(prior);
     }
 });
-
 test('review-only reconnect anchors stay inert until task truth arrives', async () => {
     let historyRows = [];
     const { prior, mount } = installDom(async (url) => {
@@ -527,7 +565,6 @@ test('review-only reconnect anchors stay inert until task truth arrives', async 
         assert.equal(card('review-running')?.querySelector('[data-live-phase]')?.hidden, false);
         assert.equal(card('review-running')?.querySelector('[data-live-phase]')?.textContent, 'Working');
         assert.equal(card('review-terminal')?.dataset.finished, '1');
-
         const snapshotCard = card('review-snapshot');
         instance.hydrateStateSnapshot({
             active_direct_turns: [{
@@ -538,16 +575,21 @@ test('review-only reconnect anchors stay inert until task truth arrives', async 
         assert.equal(card('review-snapshot'), snapshotCard, 'late task truth promotes the same card');
         assert.equal(snapshotCard.querySelector('[data-live-phase]')?.hidden, false);
         assert.equal(snapshotCard.querySelector('[data-live-phase]')?.textContent, 'Working');
-
         const finalizingCard = card('review-finalizing-ws');
-        handlers.get('chat')({
-            chat_id: 2, role: 'assistant', task_id: 'review-finalizing-ws',
+        const finalizingFrame = { chat_id: 2, role: 'assistant', task_id: 'review-finalizing-ws',
             content: 'Answer delivered while synthesis runs', task_phase: 'finalizing',
-        });
+            ts: '2026-08-24T00:01:00Z' };
+        handlers.get('chat')(finalizingFrame);
         assert.equal(card('review-finalizing-ws'), finalizingCard);
         assert.equal(finalizingCard.querySelector('[data-live-phase]')?.hidden, false);
         assert.equal(finalizingCard.querySelector('[data-live-phase]')?.textContent, 'Finalizing…');
-
+        messages.scrollHeight = 1000; messages.clientHeight = 400; messages.scrollTop = 600;
+        messages.listeners.get('scroll')[0]();
+        messages.scrollTop = 500;
+        messages.listeners.get('scroll')[0]();
+        handlers.get('chat')(finalizingFrame);
+        assert.equal(messages.scrollTop, 500, 'an identical finalizing frame is not a scroll author');
+        assert.equal(globalThis.document.byId.get('chat-scroll-bottom').getAttribute('aria-label'), 'Scroll to latest message');
         const terminalWsCard = card('review-terminal-ws');
         handlers.get('chat')({
             chat_id: 2, role: 'assistant', task_id: 'review-terminal-ws',
@@ -567,7 +609,6 @@ test('review-only reconnect anchors stay inert until task truth arrives', async 
         });
         assert.equal(terminalWsCard.dataset.finished, '1');
         assert.equal(terminalWsCard.querySelector('[data-live-phase]')?.textContent, 'Done');
-
         const anchoredCard = card('review-root');
         handlers.get('typing')({
             chat_id: 2, activity_id: 'review-root', task_id: 'review-root',
@@ -581,7 +622,6 @@ test('review-only reconnect anchors stay inert until task truth arrives', async 
         restoreDom(prior);
     }
 });
-
 test('Plan invalidation applies terminal task detail to its review-created owner card', async () => {
     const revision = 'a'.repeat(64);
     const detailCalls = [];
@@ -632,7 +672,6 @@ test('Plan invalidation applies terminal task detail to its review-created owner
         assert.equal(card.dataset.finished, '1', 'canonical terminal detail settled the owner card');
         assert.equal(card.querySelector('.chat-live-phase')?.textContent, 'Done');
         assert.equal(detailCalls.length, 1);
-
         historyRows = [{
             chat_id: 2, role: 'system', is_progress: true, task_id: 'plan-review-rail',
             progress_meta: { review_reference: {
@@ -654,7 +693,6 @@ test('Plan invalidation applies terminal task detail to its review-created owner
         restoreDom(prior);
     }
 });
-
 test('source-incomplete typed review lifecycle is consumed in history, live chat, and logs', async () => {
     const lifecycle = { kind: 'review', status: 'running', target: 'manual-skill', job_id: 'manual-job' };
     const historyRow = {
@@ -703,7 +741,6 @@ test('source-incomplete typed review lifecycle is consumed in history, live chat
         restoreDom(prior);
     }
 });
-
 test('terminal task-bound review lifecycle resyncs canonical verdict without reconnect', async () => {
     const calls = [];
     let historyRows = [];
@@ -752,7 +789,6 @@ test('terminal task-bound review lifecycle resyncs canonical verdict without rec
         const reviewHost = owner.querySelector('[data-live-reviews-host]');
         assert.match(reviewHost?.innerHTML || '', /running/);
         const initialHistoryCalls = calls.filter((url) => url.startsWith('/api/chat/history')).length;
-
         historyRows = [{
             chat_id: 2, role: 'system', system_type: 'skill_review',
             task_id: 'review-child', ts: '2026-08-28T00:00:02Z',
@@ -781,7 +817,6 @@ test('terminal task-bound review lifecycle resyncs canonical verdict without rec
         restoreDom(prior);
     }
 });
-
 test('duplicate lifecycle pointer never mints a task and enriches only an existing exact owner', async () => {
     const { prior, mount } = installDom();
     const handlers = new Map();
@@ -826,13 +861,17 @@ test('duplicate lifecycle pointer never mints a task and enriches only an existi
         assert.equal(acknowledgements[0].classList.contains('system'), false);
         assert.equal(acknowledgements[0].dataset.taskId, undefined);
         assert.match(acknowledgements[0].innerHTML, /already running in its original chat/);
-
         handlers.get('chat')({
             chat_id: 2, role: 'system', is_progress: true,
             task_id: 'root-pointer', content: 'Owner task is already visible',
         });
         const owner = messages.children.find((node) => node.dataset.taskId === 'root-pointer');
         assert.ok(owner);
+        const jump = globalThis.document.byId.get('chat-scroll-bottom');
+        messages.scrollHeight = 1000;
+        messages.clientHeight = 400;
+        messages.scrollTop = 600;
+        messages.listeners.get('scroll')[0]();
         handlers.get('chat')({
             chat_id: 2, role: 'system', is_progress: true,
             task_id: 'skill_lifecycle_review_alpha_job-pointer',
@@ -849,12 +888,21 @@ test('duplicate lifecycle pointer never mints a task and enriches only an existi
                 && node.classList.contains('assistant')
                 && node.classList.contains('progress'),
         ).length, 1, 'an existing exact owner consumes the pointer without another acknowledgement');
+        messages.scrollTop = 0;
+        messages.listeners.get('scroll')[0]();
+        handlers.get('chat')({
+            chat_id: 2, role: 'system', is_progress: true,
+            task_id: 'skill_lifecycle_review_alpha_job-pointer',
+            content: 'Skill review alpha is already running in its original chat.',
+            progress_meta: { lifecycle_pointer: pointer },
+        });
+        assert.equal(jump.getAttribute('aria-label'), 'Scroll to latest message',
+            'a consumed duplicate pointer is not visible remote activity');
     } finally {
         instance?.destroy();
         restoreDom(prior);
     }
 });
-
 test('history replay keeps one duplicate lifecycle acknowledgement without a task card', async () => {
     const pointerRow = {
         chat_id: 2, role: 'assistant', is_progress: true, task_id: '',
@@ -903,7 +951,6 @@ test('history replay keeps one duplicate lifecycle acknowledgement without a tas
         restoreDom(prior);
     }
 });
-
 test('history replay keeps an ownerless duplicate acknowledgement without a task card', async () => {
     const pointerRow = {
         chat_id: 2, role: 'assistant', is_progress: true, task_id: '',

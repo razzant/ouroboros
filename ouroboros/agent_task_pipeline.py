@@ -1415,6 +1415,7 @@ def build_review_context(env: Any) -> str:
     try:
         from ouroboros.review_state import (
             _LEGACY_CURRENT_REPO_KEY,
+            advisory_commit_ready,
             compute_snapshot_hash,
             format_status_section,
             load_state,
@@ -1454,13 +1455,13 @@ def build_review_context(env: Any) -> str:
             current_run = run
             break
 
-        lines: List[str] = ["## Review Continuity", "### Live repo gate"]
+        # H5 (capinv-447): honestly named — this is the ADVISORY readiness
+        # projection, not the full commit gate (triad/scope/custody independent).
+        lines: List[str] = ["## Review Continuity", "### Advisory readiness (not the full commit gate)"]
         live_status = str(getattr(current_run, "status", "") or "missing")
-        repo_commit_ready = bool(
-            current_run is not None
-            and current_run.status in ("fresh", "bypassed", "skipped")
-            and not open_obs
-            and not open_debts
+        repo_commit_ready = advisory_commit_ready(
+            current_run is not None and current_run.status in ("fresh", "bypassed", "skipped"),
+            open_obs, open_debts,
         )
         lines.append(f"- repo_key={repo_key}")
         lines.append(f"- snapshot_hash={snapshot_hash[:12] or '(empty)'}")

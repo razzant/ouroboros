@@ -964,11 +964,17 @@ def _check_advisory_freshness(ctx: ToolContext, commit_message: str,
 
     if matching_run and matching_run.status == "preflight_blocked":
         preflight_detail = (matching_run.raw_result or "").strip()
+        # H4 (capinv-447): the status is shared by several deterministic checks;
+        # name the problem class only when the typed cause is recorded.
+        reason_kind = str(getattr(matching_run, "reason_kind", "") or "")
+        cause = {
+            "syntax": "The advisory delivery was skipped because a staged `.py` file has a SyntaxError.",
+            "release_metadata": "The advisory delivery was skipped because the deterministic release metadata preflight failed.",
+        }.get(reason_kind, "The advisory delivery was skipped by a deterministic preflight check (exact cause below).")
         return (
             f"⚠️ ADVISORY_PRE_REVIEW_REQUIRED: Last advisory run for this snapshot "
-            f"was blocked by the syntax preflight (hash={snapshot_hash[:12]}, "
-            f"ts={matching_run.ts}). The Claude SDK advisory was skipped because a "
-            f"staged `.py` file has a SyntaxError.\n\n"
+            f"was blocked by a preflight check (hash={snapshot_hash[:12]}, "
+            f"ts={matching_run.ts}). {cause}\n\n"
             f"{preflight_detail}\n\n"
             "Re-run after fixing: preflight_review(commit_message='...')"
         )

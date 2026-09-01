@@ -1438,6 +1438,7 @@ def summarize_skills(drive_root: pathlib.Path) -> Dict[str, Any]:
             grants_usable = True
             runnable = False
             conflict = None
+            readiness = None
         else:
             readiness = skill_readiness_for_execution(drive_root, s, skills=skills)
             grant_status = readiness.grant_status or grant_status_for_skill(drive_root, s)
@@ -1473,6 +1474,11 @@ def summarize_skills(drive_root: pathlib.Path) -> Dict[str, Any]:
             "source": s.source,
             "conflicts": list(s.manifest.conflicts or []),
             "conflict": conflict,
+            # #447 G3: an unresolvable manual dependency must reach the CALLER,
+            # not just the internal readiness object — a skill that needs
+            # `brew:ffmpeg` installed by a human is otherwise reported ready
+            # and fails only at execution time.
+            "manual_dependencies": list(getattr(readiness, "manual_dependencies", []) or []),
         })
     return {
         "count": len(skills),

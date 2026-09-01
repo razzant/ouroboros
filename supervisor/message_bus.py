@@ -32,17 +32,37 @@ BUDGET_REPORT_EVERY_MESSAGES: int = 10
 _BRIDGE: Optional["LocalChatBridge"] = None
 
 
-def _chat_media_download_url(task_id: str, data: bytes, mime: str) -> str:
+def _chat_media_download_url(task_id: str, data: bytes, mime: str) -> Tuple[str, str]:
+    """Return ``(canonical_url, compat_url)`` for stored outbound chat media.
+
+    The canonical form is the durable task-artifact route. The compat form is
+    the long-shipped ``/api/files/download`` route, emitted only when the stored
+    file actually resolves inside the current file-browser root. Packaged
+    desktop launchers gate their file bridge to a fixed URL allowlist that
+    predates the artifact route, so on an older launcher the canonical URL is
+    refused while the compat URL still opens; it is a second address for the
+    same bytes, never a replacement.
+    """
     if not DATA_DIR:
-        return ""
+        return "", ""
     try:
         stored = store_chat_media_bytes(DATA_DIR, task_id, data, mime)
     except Exception:
         log.warning("Could not persist outbound chat media", exc_info=True)
-        return ""
+        return "", ""
     if not stored:
-        return ""
-    return f"/api/tasks/{quote(task_id, safe='')}/artifacts/{quote(str(stored['name']), safe='')}"
+        return "", ""
+    canonical = f"/api/tasks/{quote(task_id, safe='')}/artifacts/{quote(str(stored['name']), safe='')}"
+    compat = ""
+    stored_path = str(stored.get("path") or "") if isinstance(stored, dict) else ""
+    if stored_path:
+        try:
+            from ouroboros.gateway.files import download_url_for_local_file
+
+            compat = download_url_for_local_file(stored_path)
+        except Exception:  # non-fatal: the canonical URL still works everywhere
+            compat = ""
+    return canonical, compat
 
 
 def coerce_chat_identity(value: Any, default: int = 1) -> int:
@@ -546,7 +566,7 @@ class LocalChatBridge:
         """Send photo to UI and host event subscribers."""
         if is_a2a_chat_id(chat_id):
             return True, "ok"
-        download_url = _chat_media_download_url(task_id, photo_bytes, mime)
+        download_url, download_url_compat = _chat_media_download_url(task_id, photo_bytes, mime)
         b64_str = base64.b64encode(photo_bytes).decode("ascii")
         msg = {
             "type": "photo",
@@ -558,6 +578,13 @@ class LocalChatBridge:
             "chat_id": int(chat_id or 0),
             "task_id": str(task_id or ""),
         }
+        # The durable addresses ride the LIVE frame too: without them a
+        # packaged desktop shell can only save this media after a history
+        # reload (the bridge cannot be handed a data: URI).
+        if download_url:
+            msg["download_url"] = download_url
+        if download_url_compat:
+            msg["download_url_compat"] = download_url_compat
         stamp_project_thread(DATA_DIR, msg)
         if self._broadcast_fn:
             self._broadcast_fn(msg)
@@ -584,6 +611,7 @@ class LocalChatBridge:
             record_type="photo",
             mime=str(mime or ""),
             download_url=download_url,
+            download_url_compat=download_url_compat,
             caption=str(caption or ""),
         )
         _advance_project_visible_revision(chat_id)
@@ -600,7 +628,7 @@ class LocalChatBridge:
         """Send video to UI and host event subscribers."""
         if is_a2a_chat_id(chat_id):
             return True, "ok"
-        download_url = _chat_media_download_url(task_id, video_bytes, mime)
+        download_url, download_url_compat = _chat_media_download_url(task_id, video_bytes, mime)
         b64_str = base64.b64encode(video_bytes).decode("ascii")
         msg = {
             "type": "video",
@@ -612,6 +640,13 @@ class LocalChatBridge:
             "chat_id": int(chat_id or 0),
             "task_id": str(task_id or ""),
         }
+        # The durable addresses ride the LIVE frame too: without them a
+        # packaged desktop shell can only save this media after a history
+        # reload (the bridge cannot be handed a data: URI).
+        if download_url:
+            msg["download_url"] = download_url
+        if download_url_compat:
+            msg["download_url_compat"] = download_url_compat
         stamp_project_thread(DATA_DIR, msg)
         if self._broadcast_fn:
             self._broadcast_fn(msg)
@@ -638,6 +673,7 @@ class LocalChatBridge:
             record_type="video",
             mime=str(mime or ""),
             download_url=download_url,
+            download_url_compat=download_url_compat,
             caption=str(caption or ""),
         )
         _advance_project_visible_revision(chat_id)
@@ -1059,6 +1095,7 @@ def log_chat(
     filename: str = "",
     mime: str = "",
     download_url: str = "",
+    download_url_compat: str = "",
     caption: str = "",
     actions: Optional[List[Dict[str, str]]] = None,
     title: str = "",
@@ -1112,6 +1149,10 @@ def log_chat(
             record["mime"] = mime
         if download_url:
             record["download_url"] = download_url
+        if download_url_compat:
+            # Second address for the same bytes, for desktop launchers whose
+            # file bridge predates the task-artifact route.
+            record["download_url_compat"] = download_url_compat
         if caption:
             record["caption"] = caption
         if actions:

@@ -5,41 +5,40 @@
   --panel-2: rgba(255, 255, 255, 0.04);
   --panel-3: rgba(255, 255, 255, 0.03);
   --border: rgba(255, 255, 255, 0.10);
-  --ui-card-bg: var(--panel);
-  --ui-card-border: var(--border);
-  --ui-tone-ok: var(--green);
-  --ui-tone-danger: var(--red);
-  --border-strong: rgba(232, 93, 111, 0.35);
+  --border-strong: rgba(201, 53, 69, 0.35);
   --text: #edf2f7;
   /* Foregrounds mirrored by value (docs/DESIGN.md); --muted is now an alias so
      the wizard has one secondary grey. --ghost stays placeholder-only. */
-  --text-meta: rgba(237, 242, 247, 0.68);
-  --text-disabled: rgba(237, 242, 247, 0.38);
+  --text-secondary: rgba(255, 255, 255, 0.54);
+  --text-meta: rgba(255, 255, 255, 0.68);
+  --text-disabled: rgba(255, 255, 255, 0.38);
   --muted: var(--text-meta);
-  --ghost: rgba(237, 242, 247, 0.28);
-  --accent: #e85d6f;
-  --accent-2: #fb7185;
-  --green: #34d399;
-  --green-dim: rgba(52, 211, 153, 0.14);
+  --ghost: rgba(255, 255, 255, 0.28);
+  /* Brand red: ONE value across the product (docs/DESIGN.md "Brand accent").
+     The wizard used to carry its own lighter rose, so the first thing a new
+     owner saw was a different product than the one they landed in. */
+  --accent: #c93545;
+  --accent-light: #f07a86;
+  --accent-dim: rgba(201, 53, 69, 0.15);
+  --accent-08: rgba(201, 53, 69, 0.08);
+  --accent-10: rgba(201, 53, 69, 0.10);
+  --accent-12: rgba(201, 53, 69, 0.12);
+  --accent-18: rgba(201, 53, 69, 0.18);
+  --accent-25: rgba(201, 53, 69, 0.25);
+  --accent-35: rgba(201, 53, 69, 0.35);
+  --green: #22c55e;
+  --green-dim: rgba(34, 197, 94, 0.15);
   --amber: #f59e0b;
-  --amber-dim: rgba(245, 158, 11, 0.12);
+  --amber-dim: rgba(245, 158, 11, 0.15);
   --red: #ef4444;
-  --red-dim: rgba(239, 68, 68, 0.12);
+  --red-dim: rgba(239, 68, 68, 0.15);
   --shadow: 0 28px 64px rgba(0, 0, 0, 0.45);
   /* Shared design-system vocabulary (C7.2): the onboarding page is inlined
      standalone (it cannot import style.css), so it mirrors the same role tokens
-     by VALUE — project fuchsia and the owner-voice blue match style.css exactly,
-     and the role names (task/system/user/project, ok/warn/danger) read the same
-     on both surfaces. The base brand red/green stay as defined above. */
+     by VALUE — the project fuchsia matches style.css exactly.
+     tests/test_web_typography_static.py pins that every name declared in BOTH
+     :root blocks resolves to the same value here as it does there. */
   --project: #e879f9;
-  --user: #6e96d2;
-  --accent-task: var(--accent);
-  --accent-system: var(--amber);
-  --accent-user: var(--user);
-  --accent-project: var(--project);
-  --tone-ok: var(--green);
-  --tone-warn: var(--amber);
-  --tone-danger: var(--red);
   /* Type scale — the same four sizes as style.css, no fifth. */
   --type-meta: 12px;
   --type-body: 14px;
@@ -56,14 +55,15 @@
   --status-error-fg: #fca5a5;
   --status-error-bg: var(--red-dim);
   --status-neutral-fg: var(--text-meta);
-  --status-neutral-bg: rgba(255, 255, 255, 0.08);
+  --status-neutral-bg: rgba(255, 255, 255, 0.06);
   --radius-sm: 8px;
   --space-1: 4px;
   --button-padding-y: 8px;
   --button-padding-x: 16px;
   --button-font-size: 13px;
   --button-min-height: 34px;
-  --focus-accent-border: rgba(232, 93, 111, 0.4);
+  --focus-accent-border: rgba(201, 53, 69, 0.4);
+  --focus-accent-ring: var(--accent-10);
 }
 
 * {
@@ -80,7 +80,7 @@ body {
   min-height: 100vh;
   padding: 16px;
   background:
-    radial-gradient(circle at top left, rgba(232, 93, 111, 0.12), transparent 35%),
+    radial-gradient(circle at top left, rgba(201, 53, 69, 0.12), transparent 35%),
     radial-gradient(circle at top right, rgba(232, 121, 249, 0.12), transparent 30%),
     var(--bg);
   color: var(--text);
@@ -173,12 +173,12 @@ textarea::placeholder {
 
 .wizard-step.active {
   border-color: var(--border-strong);
-  background: rgba(232, 93, 111, 0.09);
-  box-shadow: inset 0 0 0 1px rgba(232, 93, 111, 0.12);
+  background: var(--accent-08);
+  box-shadow: inset 0 0 0 1px var(--accent-12);
 }
 
 .wizard-step.done {
-  border-color: rgba(52, 211, 153, 0.22);
+  border-color: rgba(34, 197, 94, 0.22);
 }
 
 .wizard-step-index {
@@ -197,7 +197,7 @@ textarea::placeholder {
 }
 
 .wizard-step.active .wizard-step-index {
-  background: rgba(232, 93, 111, 0.18);
+  background: var(--accent-18);
   color: var(--text);
 }
 
@@ -445,8 +445,8 @@ textarea {
 input:focus,
 select:focus,
 textarea:focus {
-  border-color: var(--border-strong);
-  box-shadow: 0 0 0 3px rgba(232, 93, 111, 0.12);
+  border-color: var(--focus-accent-border);
+  box-shadow: 0 0 0 3px var(--focus-accent-ring);
 }
 
 .selection-row,
@@ -472,7 +472,7 @@ textarea:focus {
 }
 
 .selection-pill.active {
-  background: rgba(232, 93, 111, 0.16);
+  background: var(--accent-dim);
   border-color: var(--border-strong);
 }
 
@@ -527,7 +527,7 @@ textarea:focus {
 
 .wizard-choice.active {
   border-color: var(--border-strong);
-  background: rgba(232, 93, 111, 0.09);
+  background: var(--accent-08);
 }
 
 /* Choice-card chip. Only advisory/blocking declared a pair, so the three
@@ -607,7 +607,7 @@ textarea:focus {
 }
 
 .wizard-test-result[data-tone="ok"] {
-  border-color: rgba(52, 211, 153, 0.22);
+  border-color: rgba(34, 197, 94, 0.22);
   color: var(--status-ok-fg);
 }
 
@@ -676,29 +676,45 @@ textarea:focus {
   transform: translateY(-1px);
 }
 
+/* The wizard's buttons are the same buttons as the app's: same names, same
+   values (style.css `.btn-*`). The primary used to be a saturated brand
+   gradient with pure-white text — a louder button than any the owner meets
+   again after setup, and the only surface where the brand red was a fill
+   rather than a tint. */
 .btn-primary {
   min-width: 170px;
-  background: linear-gradient(135deg, var(--accent), var(--accent-2));
-  border-color: rgba(251, 113, 133, 0.55);
-  color: #fff;
+  background: var(--accent-dim);
+  border-color: var(--accent-18);
+  color: var(--accent-light);
   font-weight: 700;
 }
 
-.btn-secondary,
-.btn-ghost {
-  background: rgba(255, 255, 255, 0.03);
-  color: var(--text);
+.btn-primary:hover:not(:disabled) {
+  background: var(--accent-25);
+  border-color: var(--accent-35);
 }
 
-.btn-default {
+.btn-secondary {
   background: rgba(255, 255, 255, 0.04);
   color: var(--text);
   border-color: rgba(255, 255, 255, 0.10);
 }
 
+.btn-ghost {
+  background: transparent;
+  color: var(--text);
+  border-color: rgba(255, 255, 255, 0.08);
+}
+
+.btn-default {
+  background: rgba(255, 255, 255, 0.06);
+  color: var(--text);
+  border-color: rgba(255, 255, 255, 0.08);
+}
+
 .btn-default:hover:not(:disabled) {
-  background: rgba(255, 255, 255, 0.07);
-  border-color: var(--border-strong);
+  background: rgba(255, 255, 255, 0.08);
+  border-color: rgba(255, 255, 255, 0.14);
 }
 
 .btn:focus-visible {
@@ -764,7 +780,7 @@ textarea:focus {
 /* The last rung is the destination the owner is being shown, so it is the one
    place on this step that carries the connected colour. */
 .agent-rung:last-child .agent-rung-tone {
-  border-color: rgba(52, 211, 153, 0.32);
+  border-color: rgba(34, 197, 94, 0.32);
   background: var(--status-ok-bg);
   color: var(--status-ok-fg);
 }

@@ -42,19 +42,21 @@ from ouroboros.acceptance_dialogue import (  # noqa: F401 — re-export
 )
 from ouroboros.config import adaptive_quorum, get_context_mode, get_light_model, get_review_enforcement, get_task_review_mode, resolve_effort
 from ouroboros.outcomes import ACCEPTANCE_BYPASS_REASON_BY_RAIL, ACCEPTANCE_DECISION_STATUSES, ACCEPTANCE_FINALIZED_UNACCEPTED, ACCEPTANCE_REVISION_REQUESTED, REASON_DELIVERY_CONTROL_DEGRADED, REASON_OWNER_REQUESTED_FINALIZATION, RESULT_INFRA_FAILED, extract_final_answer, latest_agent_defined_verification, latest_unreconciled_failed_verification, latest_unreconciled_masked_verification, reviewable_effect_projection, should_nudge_verification, turn_has_reviewable_effects
-from ouroboros.observability import new_execution_id, strip_protocol_fence
-# Extracted at this module's size ceiling; historical names stay importable.
+from ouroboros.observability import new_execution_id
+# Protocol leaf keeps historical names importable at this module's size ceiling.
 from ouroboros.delivery_protocol import (
     CHILD_ABSORPTION_HOLD_CONTROL as _CHILD_ABSORPTION_HOLD_CONTROL,
     DELIVERY_HOLD_CONTROLS as _DELIVERY_HOLD_CONTROLS,
     SKILL_ACTION_HOLD_CONTROL as _SKILL_ACTION_HOLD_CONTROL,
     DeliveryCandidate,
+    classify_parsed_delivery_control as _classify_parsed_delivery_control,
     delivery_control_prompt as _delivery_control_prompt,
     delivery_keep_allowed as _delivery_keep_allowed,
     delivery_replace_required as _delivery_replace_required,
     extract_plain_text_from_content as _extract_plain_text_from_content,
     parse_delivery_control_body as _parse_delivery_control_body,
     parse_delivery_control_object as _parse_delivery_control_object,  # noqa: F401
+    resolve_forced_delivery_control_body as _resolve_forced_delivery_control_body,
 )
 from ouroboros.tool_policy import CAPABILITY_OMISSION_HEADER, format_capability_omissions, initial_tool_schemas, list_non_core_tools, swarm_router_turn
 from ouroboros.tools.registry import ToolRegistry
@@ -3164,6 +3166,7 @@ def _publish_delivery_candidate(
         "evidence_current": candidate.evidence_fingerprint == current_fp,
         "acceptance_binding": dict(candidate.acceptance_binding),
         "finalization_control": candidate.finalization_control,
+        "control_episode_seen": candidate.control_episode_seen,
         "degraded": candidate.degraded,
         "degraded_reason": candidate.degraded_reason,
     }
@@ -3203,6 +3206,9 @@ def _replace_delivery_candidate(
         acceptance_binding=_unaccepted_delivery_binding(tools, content_hash),
         finalization_control=control,
         model_text=model_text,
+        control_episode_seen=bool(
+            getattr(previous_candidate, "control_episode_seen", False)
+        ),
     )
     tools._ctx._delivery_candidate = candidate
     tools._ctx._delivery_control_required = False
@@ -3468,6 +3474,7 @@ def _arm_delivery_control(
             ),
         ),
     )
+    candidate.control_episode_seen = True
     _publish_delivery_candidate(tools, candidate, llm_trace)
 
 
@@ -3506,12 +3513,11 @@ def _resolve_delivery_control(
         return "fresh", _extract_plain_text_from_content(content)
     raw = _extract_plain_text_from_content(content).strip()
     parsed, duplicate_protocol_key, embedded_protocol = _parse_delivery_control_body(raw)
-    # ANY parsed object carrying the protocol key is control intent, whatever
-    # the verb or placement — a mangled protocol attempt is never prose (raw
-    # JSON leaked to chat); validity judged below.
-    is_control_intent = duplicate_protocol_key or (
-        isinstance(parsed, dict) and "delivery_control" in parsed
+    control_kind, replacement, error = _classify_parsed_delivery_control(
+        parsed, duplicate_protocol_key, embedded_protocol,
     )
+    is_control_intent = control_kind != "none"
+    historical_control = False
     if not required:
         if _delivery_replace_required(candidate):
             # A writer/skill action cannot silently turn a short acknowledgement
@@ -3530,40 +3536,28 @@ def _resolve_delivery_control(
             candidate.finalization_control = "skill_revision_required"
             required = True
             tools._ctx._delivery_control_required = True
-        else:
-            # An owner revision starts an ordinary substantive answer round.
-            # If the model still follows the prior typed instruction, honor
-            # that control structurally; service/effect/skill rounds are
-            # handled by the replace-required branch above.
-            if not (
-                candidate.finalization_control == "owner_revision_required"
-                and is_control_intent
-            ):
-                return "fresh", _extract_plain_text_from_content(content)
+        elif (
+            candidate.finalization_control == "owner_revision_required"
+            and is_control_intent
+        ):
+            # Honor a prior typed instruction during this substantive revision.
             tools._ctx._delivery_control_required = True
+        elif (
+            candidate.control_episode_seen
+            and control_kind in {"keep", "replace", "invalid"}
+        ):
+            historical_control = True
+        else:
+            return "fresh", _extract_plain_text_from_content(content)
     evidence_revision, evidence_fingerprint = _delivery_evidence_state(tools, ctx, llm_trace)
-    error = "control must be one exact JSON object"
-    selected = str(parsed.get("delivery_control") or "") if isinstance(parsed, dict) else ""
-    valid = False
-    replacement = ""
-    if embedded_protocol:
-        # A trailing prose-embedded object is a protocol ATTEMPT, never a
-        # valid control: honoring it would leak the raw object or drop the
-        # prose half (the default error states the exact-object rule).
-        pass
-    elif selected == "keep" and set(parsed) == {"delivery_control"}:
+    valid = control_kind == "replace"
+    if control_kind == "keep":
         valid = _delivery_keep_allowed(
             candidate, evidence_revision, evidence_fingerprint,
         )
         error = "keep cannot bind changed evidence; send replace with the complete answer"
-    elif selected == "replace" and set(parsed) == {"delivery_control", "full_answer"}:
-        replacement_value = parsed.get("full_answer")
-        if isinstance(replacement_value, str):
-            replacement = replacement_value
-        valid = isinstance(replacement_value, str) and bool(replacement.strip())
-        error = "replace requires a non-empty complete full_answer"
 
-    if valid and selected == "keep":
+    if valid and control_kind == "keep":
         tools._ctx._delivery_control_required = False
         candidate.finalization_control = "keep"
         candidate.acceptance_binding = _delivery_acceptance_binding(
@@ -3571,11 +3565,13 @@ def _resolve_delivery_control(
         )
         _publish_delivery_candidate(tools, candidate, llm_trace)
         return "resolved", candidate.full_text
-    if valid and selected == "replace":
+    if valid and control_kind == "replace":
         updated = _replace_delivery_candidate(
             tools, ctx, llm_trace, replacement, control="replace",
         )
         return "resolved", updated.full_text
+    if historical_control:
+        return "resolved", candidate.full_text
 
     if not candidate.repair_attempted:
         candidate.repair_attempted = True
@@ -3596,6 +3592,7 @@ def _resolve_delivery_control(
                 ),
             ),
         )
+        candidate.control_episode_seen = True
         _publish_delivery_candidate(tools, candidate, llm_trace)
         return "retry", ""
 
@@ -4352,6 +4349,8 @@ def _publish_model_forced_candidate(
     llm_trace: Dict[str, Any],
     full_text: str,
     reason_code: str,
+    *,
+    degraded_reason: str = "",
 ) -> Optional[DeliveryCandidate]:
     """Replace the retained answer and old verdict."""
 
@@ -4369,7 +4368,7 @@ def _publish_model_forced_candidate(
         tools, candidate, reason_code,
     )
     candidate.degraded = True
-    candidate.degraded_reason = reason_code
+    candidate.degraded_reason = degraded_reason or reason_code
     _publish_delivery_candidate(tools, candidate, llm_trace)
     ctx.delivery_candidate = candidate
     return candidate
@@ -4435,6 +4434,7 @@ def _forced_fallback_result(
     source: str = "host_fallback",
     retained_source: str = "",
     retained_control: str = "",
+    candidate_reason: str = "",
     provider_terminal: bool = False,
 ) -> Tuple[str, Dict[str, Any], Dict[str, Any]]:
     """Return a current or fallback candidate."""
@@ -4467,6 +4467,7 @@ def _forced_fallback_result(
         if composed != candidate.full_text:
             candidate = _publish_model_forced_candidate(
                 ctx, llm_trace, composed, reason_code,
+                degraded_reason=candidate_reason,
             )
             ctx.accumulated_usage["_best_effort_extracted"] = True
             _record_forced_finalization(
@@ -4485,7 +4486,7 @@ def _forced_fallback_result(
             llm_trace,
             candidate,
             control=retained_control or f"forced_preserve:{reason_code}",
-            reason_code=reason_code,
+            reason_code=candidate_reason or reason_code,
         )
         ctx.accumulated_usage["_best_effort_extracted"] = True
         _record_forced_finalization(
@@ -4506,6 +4507,9 @@ def _forced_fallback_result(
             suffix,
         )
         if candidate is not None:
+            if candidate_reason:
+                candidate.degraded_reason = candidate_reason
+                _publish_delivery_candidate(ctx.tools, candidate, llm_trace)
             if provider_terminal:
                 ctx.accumulated_usage["terminal_origin"] = TERMINAL_ORIGIN_HOST_SALVAGE
             ctx.accumulated_usage["_best_effort_extracted"] = True
@@ -4592,45 +4596,19 @@ def _forced_swarm_router_result(
 def _resolve_forced_delivery_control(
     tools_ctx: Any,
     extracted: str,
-) -> Tuple[str, str]:
-    """Resolve an armed delivery-control object without another model round."""
+) -> Tuple[str, str, bool, bool]:
+    """Resolve forced control."""
     if tools_ctx is None or not extracted:
-        return extracted, ""
+        return extracted, "", False, False
     candidate = getattr(tools_ctx, "_delivery_candidate", None)
-    candidate = candidate if isinstance(candidate, DeliveryCandidate) else None
     armed = bool(getattr(tools_ctx, "_delivery_control_required", False)) or (
-        candidate is not None and _delivery_replace_required(candidate)
+        isinstance(candidate, DeliveryCandidate) and _delivery_replace_required(candidate)
     )
-    if not armed:
-        return extracted, ""
-    tools_ctx._delivery_control_required = False
-    parsed, duplicate_protocol_key, embedded_protocol = _parse_delivery_control_body(extracted)
-    # Protocol intent: any parsed object with the protocol key (unknown verb =
-    # broken control; a trailing prose-embedded object counts), or JSON-looking
-    # text after the shared fence-strip that fails to parse under the latch.
-    protocol_intent = duplicate_protocol_key or (
-        ("delivery_control" in parsed)
-        if isinstance(parsed, dict)
-        else strip_protocol_fence(extracted).startswith("{")
-    )
-    if not protocol_intent:
-        # Ordinary prose under an armed latch stands (a control object quoted
-        # MID-prose is the disclosed residual).
-        return extracted, ""
-    if not embedded_protocol:
-        selected = str(parsed.get("delivery_control") or "") if isinstance(parsed, dict) else ""
-        if selected == "replace" and set(parsed) == {"delivery_control", "full_answer"}:
-            replacement = parsed.get("full_answer")
-            if isinstance(replacement, str) and replacement.strip():
-                return replacement, ""
-        elif selected == "keep" and set(parsed) == {"delivery_control"} and candidate is not None:
-            return candidate.full_text, ""
-    # Malformed/duplicate/prose-embedded/invalid control: preserve the retained
-    # candidate (with none retained, the caller's fallback stands) and say so.
-    return (
-        candidate.full_text if candidate is not None else "",
-        REASON_DELIVERY_CONTROL_DEGRADED,
-    )
+    resolved, retained, degraded, consumed, replaced = _resolve_forced_delivery_control_body(
+        extracted, candidate, armed=armed)
+    if consumed:
+        tools_ctx._delivery_control_required = False
+    return resolved, REASON_DELIVERY_CONTROL_DEGRADED if degraded else "", retained, replaced
 
 
 def _forced_delegation_note(tools_ctx: Any, llm_trace: Dict[str, Any]) -> str:
@@ -4766,13 +4744,21 @@ def _forced_final_answer(
             "[FORCED_OWNER_REFRESH] Answer all current directives; ignore the stale draft.",
         )
 
-    if provider_terminal and extracted and forced_response_is_incomplete(response_meta):
+    incomplete = provider_terminal and extracted and forced_response_is_incomplete(response_meta)
+    extracted, degraded, retained, replaced = _resolve_forced_delivery_control(
+        tools_ctx, extracted)
+    current = _current_delivery_candidate(ctx, llm_trace)
+    if retained and current is None:
         return _forced_fallback_result(
             ctx, llm_trace, extracted, reason_code,
-            source="forced_model_incomplete", provider_terminal=True,
+            source="model_control_retained", candidate_reason=degraded,
+            provider_terminal=provider_terminal,
         )
-
-    extracted, control_degraded = _resolve_forced_delivery_control(tools_ctx, extracted)
+    if incomplete and (current is not None or not replaced):
+        return _forced_fallback_result(
+            ctx, llm_trace, extracted or fallback_text, reason_code,
+            source="forced_model_incomplete", candidate_reason=degraded, provider_terminal=True,
+        )
     if extracted:
         ctx.accumulated_usage["_best_effort_extracted"] = True
         plan_suffix = (
@@ -4788,15 +4774,13 @@ def _forced_final_answer(
             ctx.accumulated_usage["terminal_origin"] = TERMINAL_ORIGIN_MODEL_FINAL
         candidate = _publish_model_forced_candidate(
             ctx, llm_trace, full_text, reason_code,
+            degraded_reason=degraded,
         )
-        if control_degraded and candidate is not None:
-            candidate.degraded_reason = control_degraded
+        if degraded and candidate is not None:
             llm_trace.setdefault("reasoning_notes", []).append(
                 "Forced finalization received an invalid delivery-control object; "
                 "preserved the retained complete answer."
             )
-            if getattr(ctx, "tools", None) is not None:
-                _publish_delivery_candidate(ctx.tools, candidate, llm_trace)
         _record_forced_finalization(
             ctx,
             llm_trace,

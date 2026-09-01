@@ -18,6 +18,7 @@ from ouroboros.skill_loader import (
     find_skill,
     save_skill_grants,
 )
+from ouroboros.tools.result_envelope import result_payload_text as _payload
 from tests._shared import clean_extension_runtime_state
 from tests.test_extension_loader import (
     _add_fake_native_dep,
@@ -79,7 +80,7 @@ def test_native_risk_extension_registers_and_dispatches_out_of_process(tmp_path)
         task_metadata={"budget_drive_root": str(drive_root)},
         task_contract={"objective": "native-objective"},
     ))
-    assert registry.execute(tool_name, {"message": "ok"}).endswith(f":ok:{child_drive}:{drive_root}:native-objective")
+    assert _payload(registry.execute(tool_name, {"message": "ok"})).endswith(f":ok:{child_drive}:{drive_root}:native-objective")
 
 
 def test_extension_child_runner_uses_host_python_for_host_dependencies():
@@ -241,7 +242,7 @@ def test_out_of_process_extension_child_does_not_receive_settings_as_env(tmp_pat
     tool_name = extension_loader.extension_surface_name("native_env_contract", "check")
     registry = ToolRegistry(repo_dir=pathlib.Path(__file__).resolve().parents[1], drive_root=drive_root)
 
-    assert registry.execute(tool_name, {}).endswith("no-env-leak")
+    assert _payload(registry.execute(tool_name, {})).endswith("no-env-leak")
 
 
 def test_native_risk_extension_abort_during_import_does_not_abort_host(tmp_path):
@@ -494,7 +495,7 @@ def test_isolated_dependency_extension_dispatches_out_of_process_without_native_
     assert tool is not None
     assert tool["out_of_process"] is True
     registry = ToolRegistry(repo_dir=pathlib.Path(__file__).resolve().parents[1], drive_root=drive_root)
-    assert registry.execute(tool_name, {}).endswith("pure-isolated")
+    assert _payload(registry.execute(tool_name, {})).endswith("pure-isolated")
 
 
 def test_isolated_dependency_extension_stdout_does_not_break_child_protocol(tmp_path):
@@ -533,7 +534,7 @@ def test_isolated_dependency_extension_stdout_does_not_break_child_protocol(tmp_
         assert stat.S_IMODE(calls_dir.stat().st_mode) == 0o700
     tool_name = extension_loader.extension_surface_name("isolated_noisy_stdout", "value")
     registry = ToolRegistry(repo_dir=pathlib.Path(__file__).resolve().parents[1], drive_root=drive_root)
-    assert registry.execute(tool_name, {}).endswith("pure-isolated-noisy")
+    assert _payload(registry.execute(tool_name, {})).endswith("pure-isolated-noisy")
 
 
 def test_isolated_dependency_extension_oversized_child_result_is_capped(tmp_path):
@@ -597,8 +598,8 @@ def test_parallel_isolated_extension_children_do_not_sweep_each_other_import_tre
         time.sleep(0.1)
         second = pool.submit(registry.execute, tool_name, {"delay": 0.1})
 
-    assert first.result().endswith("True")
-    assert second.result().endswith("True")
+    assert _payload(first.result()).endswith("True")
+    assert _payload(second.result()).endswith("True")
 
 
 def test_isolated_dependency_extension_child_inherits_runtime_mode(tmp_path, monkeypatch):

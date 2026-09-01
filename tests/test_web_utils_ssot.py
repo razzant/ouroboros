@@ -91,6 +91,12 @@ def test_render_markdown_safe_strips_dangerous_tags_and_attrs():
         assert f"'{forbidden_tag}'" in block, f"renderMarkdownSafe must FORBID_TAGS {forbidden_tag}"
     for forbidden_attr in ("style", "src", "srcset", "srcdoc"):
         assert f"'{forbidden_attr}'" in block, f"renderMarkdownSafe must FORBID_ATTR {forbidden_attr}"
+    # A same-window navigation out of a widget replaces the whole desktop shell
+    # with no way back, so publisher markdown carries the same link contract the
+    # chat markdown renderer applies.
+    assert "a[href]" in block
+    assert "'target', '_blank'" in block
+    assert "'rel', 'noopener noreferrer'" in block
 
 
 def test_marketplace_does_not_redeclare_shared_helpers():
@@ -177,23 +183,14 @@ def test_accent_tokens_have_concrete_rgba_values():
     assert root_match, ":root block not found in web/style.css"
     root_body = root_match.group(1)
 
-    expected = (
-        "--accent-dim",
-        "--accent-glow",
-        "--accent-04",
-        "--accent-05",
-        "--accent-08",
-        "--accent-10",
-        "--accent-12",
-        "--accent-18",
-        "--accent-22",
-        "--accent-25",
-        "--accent-55",
-    )
-    for name in expected:
-        decl_match = re.search(rf"{re.escape(name)}\s*:\s*([^;]+);", root_body)
-        assert decl_match, f"{name} not declared in :root"
-        value = decl_match.group(1).strip()
+    # The ladder is read from the file rather than snapshotted here: rungs are
+    # added and removed as the accent's call sites move onto tokens, and a
+    # hardcoded list turns that into an unrelated test failure while silently
+    # exempting any rung added after it was written.
+    ladder = re.findall(r"(--accent-(?:dim|\d{2}))\s*:\s*([^;]+);", root_body)
+    assert len(ladder) >= 8, f"the accent alpha ladder looks truncated: {ladder}"
+    for name, raw_value in ladder:
+        value = raw_value.strip()
         # The value must be a literal rgba(...) anchored on the crimson
         # accent triple; never a ``var(<itself>)`` cycle, never a ``var()``
         # to a different accent token (that pattern works in CSS but

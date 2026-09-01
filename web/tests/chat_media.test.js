@@ -274,6 +274,48 @@ test('a trailing typing indicator does not break photo grouping', () => {
     }
 });
 
+test('live media and quiz-state writes use the injected content boundary', () => {
+    const fx = fixture();
+    const handlers = new Map();
+    const seen = new Set();
+    let mutations = 0;
+    let unread = 0;
+    try {
+        fx.controller.wireDeliveries({
+            onWs(type, handler) { handlers.set(type, handler); },
+            isMyThread: () => true,
+            hideTypingIndicatorOnly() {},
+            syncChatStatus() {},
+            incrementUnreadIfNeeded() { unread += 1; },
+            seenMessageKeys: seen,
+            rememberMessageKey(key) { seen.add(key); },
+            chatMediaMessageKey: (msg) => `media:${msg.task_id}:${msg.ts}`,
+            documentMessageKey: (msg) => `doc:${msg.task_id}:${msg.ts}`,
+            buildQuizCard: () => null,
+            applyQuizStateFrame: (_root, msg) => msg.changed === true,
+            messagesRoot: () => ({}),
+            deliverContentMutation(mutate) { mutations += 1; return mutate(); },
+        });
+        handlers.get('photo')({
+            type: 'photo', role: 'assistant', task_id: 'task-a', ts: 'one',
+            image_base64: 'aGVsbG8=', mime: 'image/png',
+        });
+        handlers.get('photo')({
+            type: 'photo', role: 'assistant', task_id: 'task-a', ts: 'two',
+            image_base64: 'aGVsbG8=', mime: 'image/png',
+        });
+        handlers.get('quiz_state')({ quiz_id: 'q1', changed: false });
+        handlers.get('quiz_state')({ quiz_id: 'q1', changed: true });
+        assert.equal(mutations, 4);
+        assert.equal(unread, 2);
+        assert.equal(fx.inserted.length, 1);
+        assert.equal(fx.inserted[0].querySelectorAll('.chat-gallery-item').length, 2);
+    } finally {
+        fx.controller.destroy();
+        fx.restore();
+    }
+});
+
 test('an intervening message breaks file-card adjacency the same way', () => {
     const fx = fixture();
     try {
@@ -550,4 +592,99 @@ test('reset disposes listeners, stops players, clears groups, and destroy is fin
     } finally {
         fx.restore();
     }
+});
+
+test('media host-bridge calls prefer the compat URL while the browser keeps the canonical one', async () => {
+    const fx = fixture();
+    const bridged = [];
+    globalThis.window.pywebview = {
+        api: {
+            download_file_to_downloads: async (url, name, external) => {
+                bridged.push([url, name, external]);
+                return { ok: true };
+            },
+        },
+    };
+    try {
+        const canonical = '/api/tasks/t-1/artifacts/chat-media-aa.png';
+        const compat = '/api/files/download?path=tasks/t-1/chat-media-aa.png';
+        const photo = fx.controller.buildMediaBubble({
+            type: 'photo',
+            role: 'assistant',
+            mime: 'image/png',
+            download_url: canonical,
+            download_url_compat: compat,
+        });
+        // The rendered element addresses the canonical route: the browser has
+        // no gate, and the compat form is only an alternative address.
+        assert.ok(photo.innerHTML.includes(`src="${canonical}"`), photo.innerHTML);
+        await photo.querySelector('[data-photo-action="download"]').click();
+        assert.deepEqual(bridged, [[compat, 'image.png', false]]);
+    } finally {
+        fx.controller.destroy();
+        fx.restore();
+    }
+});
+
+test('a media frame without a compat URL still reaches the bridge on the canonical route', async () => {
+    const fx = fixture();
+    const bridged = [];
+    globalThis.window.pywebview = {
+        api: {
+            download_file_to_downloads: async (url) => { bridged.push(url); return { ok: true }; },
+        },
+    };
+    try {
+        const canonical = '/api/tasks/t-1/artifacts/chat-media-bb.png';
+        const photo = fx.controller.buildMediaBubble({
+            type: 'photo', role: 'assistant', mime: 'image/png', download_url: canonical,
+        });
+        await photo.querySelector('[data-photo-action="download"]').click();
+        assert.deepEqual(bridged, [canonical]);
+    } finally {
+        fx.controller.destroy();
+        fx.restore();
+    }
+});
+
+test('a compat URL that is not the files-download form is rejected, not trusted', async () => {
+    const fx = fixture();
+    const bridged = [];
+    globalThis.window.pywebview = {
+        api: {
+            download_file_to_downloads: async (url) => { bridged.push(url); return { ok: true }; },
+        },
+    };
+    try {
+        const canonical = '/api/tasks/t-1/artifacts/chat-media-cc.png';
+        const photo = fx.controller.buildMediaBubble({
+            type: 'photo',
+            role: 'assistant',
+            mime: 'image/png',
+            download_url: canonical,
+            download_url_compat: 'https://evil.example/steal',
+        });
+        await photo.querySelector('[data-photo-action="download"]').click();
+        assert.deepEqual(bridged, [canonical]);
+    } finally {
+        fx.controller.destroy();
+        fx.restore();
+    }
+});
+
+test('a live data: photo still hands the bridge the frame addresses', () => {
+    const { controller, restore } = fixture();
+    try {
+        const msg = {
+            msg_type: 'photo', task_id: 't9', ts: '2026-09-01T10:00:00+00:00',
+            mime: 'image/png', image_base64: 'aGk=',
+            download_url: '/api/tasks/t9/artifacts/chat-media-' + 'a'.repeat(64) + '.png',
+            download_url_compat: '/api/files/download?path=x/chat-media.png',
+        };
+        const bubble = controller.buildMediaBubble(msg);
+        assert.ok(bubble, 'bubble built from base64');
+        const html = String(bubble.innerHTML || '');
+        assert.ok(html.includes('data:image/png'), 'display stays base64');
+        assert.ok(!html.includes('/api/files/download'), 'compat address is bridge-only, not the display');
+    } finally { restore(); }
 });

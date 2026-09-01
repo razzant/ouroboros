@@ -245,11 +245,23 @@ export function renderMarkdownSafe(rawMd, { emptyHtml = '', preClass = '' } = {}
             gfm: true,
             breaks: false,
         });
-        return DOMPurify.sanitize(rendered, {
+        const clean = DOMPurify.sanitize(rendered, {
             USE_PROFILES: { html: true },
             FORBID_TAGS: ['script', 'iframe', 'object', 'embed', 'form', 'input', 'img', 'video', 'audio', 'source'],
             FORBID_ATTR: ['style', 'src', 'srcset', 'srcdoc'],
+            RETURN_DOM_FRAGMENT: true,
         });
+        // Same link contract the chat markdown renderer applies: the desktop
+        // WKWebView has no new-window delegate, so a same-window navigation
+        // out of a widget replaces the whole app with no way back. `_blank`
+        // also lets the shell interceptor route the click to the OS browser.
+        for (const link of clean.querySelectorAll('a[href]')) {
+            link.setAttribute('target', '_blank');
+            link.setAttribute('rel', 'noopener noreferrer');
+        }
+        const host = document.createElement('div');
+        host.appendChild(clean);
+        return host.innerHTML;
     } catch (err) {
         console.warn('renderMarkdownSafe: markdown render failed', err);
         return fallback;

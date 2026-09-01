@@ -517,13 +517,13 @@ def test_real_presence_promotion_rejection_cleans_promoted_attachment_copy(
     )
     outcome = workers.promote_chat_to_task(event, worker_ctx)
 
-    assert outcome["status"] == "needs_manual_target"
-    assert outcome["reason"] == "attachment_admission_rejected"
-    assert enqueued == []
-    promoted_dir = (
-        tmp_path / "task_results" / "artifacts" / event["task_id"] / "attachments"
-    )
-    assert not promoted_dir.exists()
+    # В25c (capinv-447): partial staging is the default — the inherited input
+    # rides into the promoted task and the missing upload stays a disclosed row.
+    assert outcome["status"] != "needs_manual_target"
+    assert enqueued, "promotion must proceed with the staged attachment"
+    manifest = enqueued[0]["attachments"]
+    assert [row["status"] for row in manifest] == ["staged", "rejected"]
+    assert manifest[1]["reason"] == "source_missing"
     assert original_path.is_file()
 
 
@@ -1082,7 +1082,9 @@ def test_promote_event_enqueues_first_class_task(tmp_path, monkeypatch):
     assert all_task_bindings(tmp_path).get("abc12345") == project["chat_id"]
 
 
-def test_promote_initial_task_is_atomic_on_attachment_rejection(tmp_path, monkeypatch):
+def test_promote_initial_task_defaults_to_partial_on_attachment_rejection(tmp_path, monkeypatch):
+    """В25c (capinv-447): a rejected upload becomes a disclosed manifest row;
+    the promotion itself proceeds instead of discarding the whole task."""
     import supervisor.workers as workers
 
     monkeypatch.setattr(workers, "DRIVE_ROOT", tmp_path)
@@ -1093,6 +1095,8 @@ def test_promote_initial_task_is_atomic_on_attachment_rejection(tmp_path, monkey
         load_state=lambda: {"owner_chat_id": 1},
     )
 
+    good = tmp_path / "good.txt"
+    good.write_text("payload", encoding="utf-8")
     outcome = workers.promote_chat_to_task({
         "type": "promote_chat_to_task",
         "task_id": "attach-reject",
@@ -1101,21 +1105,16 @@ def test_promote_initial_task_is_atomic_on_attachment_rejection(tmp_path, monkey
         "project_id": "attachment-project",
         "project_name": "Attachment Project",
         "attachment_uploads": [
+            {"path": str(good), "label": "good"},
             {"path": str(tmp_path / "missing.txt"), "label": "missing"},
         ],
     }, ctx)
 
-    assert outcome["status"] == "needs_manual_target"
-    assert outcome["reason"] == "attachment_admission_rejected"
-    assert outcome["attachment_manifest"][0]["reason"] == "source_missing"
-    assert enqueued == []
-    from ouroboros.projects_registry import all_task_bindings, get_reserved_project
-    from ouroboros.task_results import load_task_result
-
-    assert get_reserved_project(tmp_path, "attachment-project") is None
-    assert "attach-reject" not in all_task_bindings(tmp_path)
-    assert load_task_result(tmp_path, "attach-reject") is None
-    assert not (tmp_path / "task_results" / "artifacts" / "attach-reject").exists()
+    assert outcome["status"] != "needs_manual_target"
+    assert enqueued, "promotion must proceed with the rejection disclosed"
+    manifest = enqueued[0]["attachments"]
+    assert [row["status"] for row in manifest] == ["staged", "rejected"]
+    assert manifest[1]["reason"] == "source_missing"
 
 
 def test_promote_success_relocates_pre_admitted_attachment_to_child_drive(

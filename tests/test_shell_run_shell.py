@@ -193,9 +193,13 @@ class TestShellArgContract:
         result = _run_shell(_ctx(tmp_path), "")
         assert "SHELL_ARG_ERROR" in result
 
-    def test_string_cmd_still_validates_env_refs(self, tmp_path):
+    def test_string_cmd_still_discloses_env_refs(self, tmp_path, fake_subprocess):
+        # #447 A5: literal shell syntax in direct argv is DATA — the command runs
+        # and the literal pass-through is disclosed, not refused.
+        fake_subprocess(stdout="ok")
         result = _run_shell(_ctx(tmp_path), 'curl -H "x-api-key: $SECRET"')
-        assert "SHELL_ENV_ERROR" in result
+        assert "SHELL_LITERAL_ARGV_NOTE" in result
+        assert "exit_code=0" in result
 
     # JSON-shape refusal — 2026-05-03 production bug. See module docstring
     # for the failure mode this guard prevents.
@@ -251,16 +255,21 @@ class TestShellArgContract:
 # ---------------------------------------------------------------------------
 
 
-def test_run_shell_rejects_literal_env_refs_in_argv(tmp_path):
+def test_run_shell_discloses_literal_env_refs_in_argv(tmp_path, fake_subprocess):
+    # #447 A5: the argv is executed as-is (no shell interprets "$..."), and the
+    # unexpanded pass-through is disclosed in the result.
+    calls = fake_subprocess(stdout="ok")
     result = _run_shell(_ctx(tmp_path), ["curl", "-H", "x-api-key: $ANTHROPIC_API_KEY"])
-    assert "SHELL_ENV_ERROR" in result
+    assert "SHELL_LITERAL_ARGV_NOTE" in result
     assert "$ANTHROPIC_API_KEY" in result
+    assert "exit_code=0" in result
+    assert calls, "the command must actually run"
 
 
 def test_run_shell_allows_shell_expansion_via_sh_c(tmp_path, fake_subprocess):
     fake_subprocess(stdout="ok")
     result = _run_shell(_ctx(tmp_path), ["sh", "-c", "printf '%s' \"$ANTHROPIC_API_KEY\""])
-    assert "SHELL_ENV_ERROR" not in result
+    assert "SHELL_LITERAL_ARGV_NOTE" not in result
     assert "exit_code=0" in result
 
 

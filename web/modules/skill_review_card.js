@@ -12,6 +12,8 @@
 import { apiFetch } from './api_client.js';
 import { escapeHtmlAttr, renderMarkdown } from './utils.js';
 
+const writeDirectly = (mutate) => mutate();
+
 // escapeHtmlAttr (pure string, node-safe) is used for text content too:
 // over-escaping quotes renders identically in the browser.
 
@@ -48,7 +50,7 @@ export function renderSkillReviewDisclosure(text, ref = null, deps = {}) {
                     <span class="skill-review-toggle-label">Show review</span>
                 </span>
             </button>
-            <div class="skill-review-full" data-skill-review-full hidden>${jobRef ? '' : render(text)}</div>
+            <div class="skill-review-full" data-skill-review-full data-chat-markdown-enhanced="1" hidden>${jobRef ? '' : render(text)}</div>
         </div>
     `;
 }
@@ -73,31 +75,40 @@ async function responseJson(resp) {
     }
 }
 
-function renderDetailState(full, entry, render) {
-    if (!full || !entry) return;
-    full.dataset.state = entry.state;
-    full.setAttribute?.('aria-busy', entry.state === 'loading' ? 'true' : 'false');
-    if (entry.state === 'loading') {
-        full.innerHTML = '<div class="skill-review-loading" role="status" aria-live="polite">Loading review details…</div>';
-    } else if (entry.state === 'loaded') {
-        full.innerHTML = render(entry.markdown);
-    } else if (entry.state === 'error') {
-        full.innerHTML = `<div class="skill-review-error" role="status" aria-live="polite">Review details unavailable (${escapeHtmlAttr(entry.error)}). `
-            + (entry.retryable
-                ? '<button type="button" class="skill-review-retry" data-skill-review-retry>Retry</button>'
-                : '')
-            + '</div><div class="skill-review-cost-unavailable">Cost unavailable</div>';
-    }
+function renderDetailState(full, entry, render, onDomWrite = writeDirectly) {
+    if (!full || !entry) return false;
+    return onDomWrite(() => {
+        full.dataset.state = entry.state;
+        // Every state this renderer writes is HTML (a status div or rendered
+        // markdown), never authored plain text: opt the node out of the chat
+        // bubble's pre-wrap so block markup does not gain a blank line per
+        // source newline. Host-owned marker, same attribute the chat bubble uses.
+        full.dataset.chatMarkdownEnhanced = '1';
+        full.setAttribute?.('aria-busy', entry.state === 'loading' ? 'true' : 'false');
+        if (entry.state === 'loading') {
+            full.innerHTML = '<div class="skill-review-loading" role="status" aria-live="polite">Loading review details…</div>';
+        } else if (entry.state === 'loaded') {
+            full.innerHTML = render(entry.markdown);
+        } else if (entry.state === 'error') {
+            full.innerHTML = `<div class="skill-review-error" role="status" aria-live="polite">Review details unavailable (${escapeHtmlAttr(entry.error)}). `
+                + (entry.retryable
+                    ? '<button type="button" class="skill-review-retry" data-skill-review-retry>Retry</button>'
+                    : '')
+                + '</div><div class="skill-review-cost-unavailable">Cost unavailable</div>';
+        }
+        return true;
+    });
 }
 
-function renderDetailStateIfChanged(full, entry, render) {
-    if (!full || !entry || full.dataset.state === entry.state) return;
-    renderDetailState(full, entry, render);
+function renderDetailStateIfChanged(full, entry, render, onDomWrite = writeDirectly) {
+    if (!full || !entry || full.dataset.state === entry.state) return false;
+    return renderDetailState(full, entry, render, onDomWrite);
 }
 
 export async function loadSkillReviewDetail(full, ref, deps = {}) {
     const fetchImpl = deps.fetchImpl || apiFetch;
     const render = deps.render || renderMarkdown;
+    const onDomWrite = deps.onDomWrite || writeDirectly;
     const store = deps.store instanceof Map ? deps.store : null;
     if (!full || !ref || !ref.skill || !ref.jobId) return '';
     const cacheKey = detailStoreKey(ref);
@@ -113,10 +124,10 @@ export async function loadSkillReviewDetail(full, ref, deps = {}) {
         // unrelated review update. Paint only when this node has not reached
         // the cached state yet; an explicit retry remains the only forced
         // rewrite path.
-        renderDetailStateIfChanged(full, entry, render);
+        renderDetailStateIfChanged(full, entry, render, onDomWrite);
         if (entry.state === 'loading' && entry.promise) {
             await entry.promise;
-            renderDetailStateIfChanged(full, entry, render);
+            renderDetailStateIfChanged(full, entry, render, onDomWrite);
         }
         return entry.state;
     }
@@ -128,7 +139,7 @@ export async function loadSkillReviewDetail(full, ref, deps = {}) {
         retryable: true,
     };
     store?.set(cacheKey, entry);
-    renderDetailState(full, entry, render);
+    renderDetailState(full, entry, render, onDomWrite);
     entry.promise = (async () => {
         try {
             const url = `/api/skills/${encodeURIComponent(ref.skill)}/review-history/${encodeURIComponent(ref.jobId)}`;
@@ -151,7 +162,7 @@ export async function loadSkillReviewDetail(full, ref, deps = {}) {
         }
     })();
     await entry.promise;
-    renderDetailStateIfChanged(full, entry, render);
+    renderDetailStateIfChanged(full, entry, render, onDomWrite);
     return entry.state;
 }
 
@@ -165,10 +176,10 @@ export function nestedSkillReviewRef(detail) {
 /**
  * Wire one rendered skill-review bubble: expand/collapse toggle, first-expand
  * lazy fetch for reference rows, and the error-state Retry. `bubble` is the
- * chat bubble element containing a `renderSkillReviewDisclosure` result;
- * `onLayoutChange` runs after any content/height change.
+ * chat bubble element containing a `renderSkillReviewDisclosure` result.
  */
-export function wireSkillReviewDisclosure(bubble, onLayoutChange, deps = {}) {
+export function wireSkillReviewDisclosure(bubble, deps = {}) {
+    const onDomWrite = deps.onDomWrite || writeDirectly;
     const toggle = bubble.querySelector('[data-skill-review-toggle]');
     if (!toggle) return false;
     const disclosure = bubble.querySelector('[data-skill-review-disclosure]');
@@ -180,22 +191,24 @@ export function wireSkillReviewDisclosure(bubble, onLayoutChange, deps = {}) {
         const label = bubble.querySelector('.skill-review-toggle-label');
         const expanded = disclosure?.dataset.expanded === '1';
         if (!disclosure || !full) return;
-        disclosure.dataset.expanded = expanded ? '0' : '1';
-        full.hidden = expanded;
-        toggle.setAttribute('aria-expanded', expanded ? 'false' : 'true');
-        if (label) label.textContent = expanded ? 'Show review' : 'Hide review';
+        onDomWrite(() => {
+            disclosure.dataset.expanded = expanded ? '0' : '1';
+            full.hidden = expanded;
+            toggle.setAttribute('aria-expanded', expanded ? 'false' : 'true');
+            if (label) label.textContent = expanded ? 'Show review' : 'Hide review';
+            return true;
+        });
         // Reference rows fetch the rendered review once on first expand;
         // collapse/re-expand keeps whatever state the container reached.
         if (!expanded && reviewRef && !full.dataset.state) {
-            loadSkillReviewDetail(full, reviewRef, deps).then(onLayoutChange);
+            void loadSkillReviewDetail(full, reviewRef, deps);
         }
-        onLayoutChange();
     });
     if (reviewRef && full) {
         full.addEventListener('click', (ev) => {
             if (!ev.target?.closest?.('[data-skill-review-retry]')) return;
             full.dataset.state = '';
-            loadSkillReviewDetail(full, reviewRef, { ...deps, retry: true }).then(onLayoutChange);
+            void loadSkillReviewDetail(full, reviewRef, { ...deps, retry: true });
         });
     }
     return true;

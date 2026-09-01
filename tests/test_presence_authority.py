@@ -289,7 +289,8 @@ def test_presence_argument_bindings_override_model_supplied_values(tmp_path):
         "bound_tool",
         {"person_id": "spoof", "destination": "wrong", "mode": "overwrite"},
     )
-    result = json.loads(raw_result.rsplit("\n---\n", 1)[-1])
+    # #447 H1: host notes (safety reminder) trail the payload now.
+    result = json.loads(raw_result.rsplit("\n---\n", 1)[-1].splitlines()[0])
     assert result == {"destination": "room-1", "mode": "append", "person_id": "u-7"}
 
 

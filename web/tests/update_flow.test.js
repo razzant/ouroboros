@@ -4,6 +4,20 @@ import { readFileSync } from 'node:fs';
 
 import { apiClient, updateStrategyForPlan } from '../modules/api_client.js';
 import { updatePillText, verifiedUpdatePlan } from '../modules/update_status.js';
+import {
+    bindUpdateRefreshEvents,
+    restartStatusCanSettle,
+} from '../modules/updates.js';
+
+
+class FakeWS {
+    constructor() { this.listeners = new Map(); }
+    on(type, handler) {
+        this.listeners.set(type, handler);
+        return () => this.listeners.delete(type);
+    }
+    emit(type, payload) { this.listeners.get(type)?.(payload); }
+}
 
 
 test('ordinary update selects clean or assisted merge without recovery replacement or client-side stash', () => {
@@ -153,7 +167,7 @@ test('restart continuation and Replace gating are fail-closed in source', () => 
     assert.match(src, /setPhase\(restartNeeded \? 'restart_needed' : ''\)/);
     // render() alone owns the Replace gate, failing closed on unreadable status
     // and on every busy/blocked state including restart_needed.
-    assert.match(src, /statusReadFailed \|\| \[\s*'loading', 'checking', 'updating', 'preflighting', 'restarting',\s*'restart_required', 'restart_needed', 'resolving', 'unmanaged',\s*\]/);
+    assert.match(src, /statusReadFailed\(latestStatus\) \|\| \[\s*'loading', 'checking', 'updating', 'preflighting', 'restarting',\s*'restart_required', 'restart_needed', 'resolving', 'unmanaged',\s*\]/);
     // The catches never assign replaceBtn.disabled themselves.
     const catches = src.split('catch').slice(1);
     for (const c of catches) {
@@ -169,4 +183,80 @@ test('Replace carries an in-flight latch that render respects across re-renders'
     const body = fn.slice(0, fn.indexOf('async function', 10));
     assert.match(body, /replaceInFlight = true;[\s\S]*updatePreflight/);
     assert.match(body, /finally \{\s*replaceInFlight = false;\s*render\(\);/);
+});
+
+test('restart refresh waits for a real reconnect before honoring boot status', () => {
+    const ws = new FakeWS();
+    let phase = 'restarting';
+    const restartReads = [];
+    let ordinaryReads = 0;
+    const binding = bindUpdateRefreshEvents({
+        ws,
+        getPhase: () => phase,
+        reconcileRestart: (options) => { restartReads.push(options); },
+        loadStatus: () => { ordinaryReads += 1; },
+    });
+
+    binding.beginRestarting();
+    ws.emit('update_status_ready');
+    ws.emit('open', { previouslyConnected: false });
+    assert.equal(restartReads.length, 0, 'an old boot signal or first open cannot settle a restart');
+
+    ws.emit('open', { previouslyConnected: true });
+    assert.deepEqual(restartReads, [{ afterBootNotice: false }], 'same-SHA reconnect rereads durable update status');
+    ws.emit('update_status_ready');
+    assert.deepEqual(restartReads, [
+        { afterBootNotice: false },
+        { afterBootNotice: true },
+    ], 'boot finalization gets one typed post-reconnect reconciliation');
+
+    binding.beginRestarting();
+    ws.emit('update_status_ready');
+    assert.equal(restartReads.length, 2, 'a new restart episode resets the reconnect proof');
+
+    phase = '';
+    ws.emit('open', { previouslyConnected: true });
+    phase = 'restarting';
+    ws.emit('update_status_ready');
+    assert.equal(restartReads.length, 2, 'an idle reconnect cannot leak proof into a later restart');
+
+    phase = '';
+    ws.emit('update_status_ready');
+    assert.equal(ordinaryReads, 1, 'ordinary ready refresh remains intact');
+    binding.dispose();
+    ws.emit('open', { previouslyConnected: true });
+    ws.emit('update_status_ready');
+    assert.equal(restartReads.length, 2, 'disposed restart listeners are inert');
+    assert.equal(ordinaryReads, 1, 'disposed ordinary listener is inert');
+});
+
+test('restart reconciliation waits only for boot-owned transaction phases', () => {
+    assert.equal(restartStatusCanSettle(null), false);
+    assert.equal(restartStatusCanSettle('invalid'), false);
+    assert.equal(restartStatusCanSettle({ warnings: ['status_error:down'] }), false);
+    assert.equal(restartStatusCanSettle({}), true);
+    assert.equal(restartStatusCanSettle({ update_tx: { active: false } }), true);
+    assert.equal(restartStatusCanSettle({
+        update_tx: { active: true, phase: 'pending_boot_smoke' },
+    }), false);
+    assert.equal(restartStatusCanSettle({
+        update_tx: { active: true, phase: 'applying_replace' },
+    }), false);
+    assert.equal(restartStatusCanSettle({
+        update_tx: { active: true, phase: 'pending_boot_smoke' },
+    }, { afterBootNotice: true }), true);
+    assert.equal(restartStatusCanSettle({
+        update_tx: { active: true, phase: 'gate_blocked' },
+    }), true);
+    assert.equal(restartStatusCanSettle({
+        update_tx: { active: true, phase: 'rolling_back' },
+    }), true);
+});
+
+test('all successful restart paths share one lifecycle entry', () => {
+    const source = readFileSync(new URL('../modules/updates.js', import.meta.url), 'utf8');
+    assert.equal((source.match(/setPhase\('restarting'\)/g) || []).length, 1);
+    // Definition plus rollback, ordinary apply, recovery replace, and Restart now.
+    assert.equal((source.match(/enterRestarting\(\)/g) || []).length, 5);
+    assert.doesNotMatch(source, /restartNeeded = false;\s*enterRestarting\(\)/);
 });

@@ -668,3 +668,32 @@ def test_enabled_servers_without_tools_empty_when_disabled():
     mgr.reconfigure(_settings(_good_server(id="s"), enabled=False))
     # global MCP disabled -> nothing surfaced
     assert mgr.enabled_servers_without_tools() == []
+
+
+def test_duplicate_tool_names_disclose_instead_of_crashing(monkeypatch, tmp_path):
+    """s2r2: the collision-disclosure branch referenced a nonexistent
+    MCPTool.name — a catalog with a DUPLICATE tool name crashed refresh with
+    AttributeError before any disclosure was recorded."""
+    from ouroboros.mcp_client import MCPManager
+
+    mgr = MCPManager()
+    mgr._enabled = True
+    from ouroboros.mcp_client import MCPServerRuntime, normalize_server_config
+
+    import dataclasses
+
+    cfg = normalize_server_config({"id": "dup", "url": "https://dup.example/mcp"})
+    assert cfg is not None
+    cfg = dataclasses.replace(cfg, enabled=True)
+    mgr._servers["dup"] = MCPServerRuntime(config=cfg)
+    monkeypatch.setattr(
+        "ouroboros.mcp_client._run_async",
+        lambda fn, join_timeout=0: [
+            {"name": "get_user", "description": "", "input_schema": {}},
+            {"name": "get_user", "description": "dup", "input_schema": {}},
+        ],
+    )
+    out = mgr.refresh_server("dup")
+    assert out.get("ok") is True, out
+    assert out.get("tool_count") == 1
+    assert "collision" in (mgr._servers["dup"].last_error or ""), mgr._servers["dup"].last_error

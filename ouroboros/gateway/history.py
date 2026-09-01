@@ -898,10 +898,10 @@ def _collect_chat_rows(
                 if "size_bytes" in entry:
                     rec["size_bytes"] = coerce_int(entry.get("size_bytes"), 0)
             elif entry.get("type") in {"photo", "video"} and entry.get("download_url"):
-                rec["msg_type"] = str(entry["type"])
-                rec["mime"] = str(entry.get("mime") or "")
-                rec["download_url"] = str(entry["download_url"])
-                rec["caption"] = str(entry.get("caption") or "")
+                rec.update(msg_type=str(entry["type"]), mime=str(entry.get("mime") or ""),
+                           download_url=str(entry["download_url"]),
+                           download_url_compat=str(entry.get("download_url_compat") or ""),
+                           caption=str(entry.get("caption") or ""))
             elif entry.get("type") == "links":
                 rec.update(msg_type="links", actions=list(entry.get("actions") or []), title=str(entry.get("title") or ""))
             elif entry.get("type") == "quiz" and isinstance(entry.get("quiz"), dict):
@@ -915,8 +915,9 @@ def _collect_chat_rows(
                     _live = quiz_projection_cache[_qtid].get(str(quiz.get("quiz_id") or ""))
                     if isinstance(_live, dict):
                         quiz["state"] = str(_live.get("state") or quiz.get("state") or "open")
-                        if "answered_index" in _live:
-                            quiz["answered_index"] = _live["answered_index"]
+                        for key in ("answered_index", "comment"):  # the recorded answer itself
+                            if key in _live:
+                                quiz[key] = _live[key]
                 rec.update(msg_type="quiz", quiz=quiz)
             if "task_terminal_status" in entry:
                 rec["task_terminal_status"] = str(entry.get("task_terminal_status") or "")

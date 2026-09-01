@@ -5,6 +5,7 @@ from __future__ import annotations
 import copy
 from dataclasses import dataclass
 from hashlib import sha256
+import logging
 import pathlib
 from typing import Any, Dict, List
 
@@ -13,6 +14,8 @@ from ouroboros.deadline_utils import owner_deadline_exhausted, transport_timeout
 from ouroboros.observability import new_call_id, persist_call
 from ouroboros.provider_models import supports_vision
 from ouroboros.utils import emit_cognitive_operation_event
+
+log = logging.getLogger(__name__)
 
 
 _CAPTION_PROMPT = (
@@ -109,8 +112,11 @@ def _caption_for_block(
         kind="vlm",
         task_attempt=getattr(ctx, "task_attempt", None),
     )
-    try:
-        if drive_root is not None:
+    # Receipts are BOOKKEEPING and live OUTSIDE the caption-producing try: a
+    # persist_call failure used to jump into the failure arm below, REPLACE the
+    # paid caption with a failure label and memoize it for the task.
+    if drive_root is not None:
+        try:
             prompt_ref = persist_call(
                 drive_root,
                 task_id=task_id,
@@ -119,6 +125,9 @@ def _caption_for_block(
                 payload={"prompt": _CAPTION_PROMPT, "image_url": url, "model": model},
                 manifest={"model": model},
             )
+        except Exception:
+            log.warning("vision caption request receipt failed", exc_info=True)
+    try:
         reserve = _vision_finalization_reserve()
         if owner_deadline_exhausted(
             deadline_ts=getattr(ctx, "deadline_ts", None), reserve_sec=reserve,
@@ -135,48 +144,6 @@ def _caption_for_block(
                 reserve_sec=reserve,
             ),
         )
-        try:
-            from ouroboros.llm import add_usage
-
-            add_usage(accumulated_usage, usage)
-        except Exception:
-            pass
-        try:
-            from ouroboros.pricing import emit_llm_usage_event
-
-            emit_llm_usage_event(
-                event_queue,
-                task_id,
-                model,
-                usage,
-                (
-                    float(usage["cost"])
-                    if isinstance(usage, dict) and usage.get("cost") is not None
-                    else None
-                ),
-                category="task",
-                source="vision_caption",
-            )
-        except Exception:
-            pass
-        caption = str(text or "").strip()
-        if drive_root is not None:
-            persist_call(
-                drive_root,
-                task_id=task_id,
-                call_id=f"{call_id}_response",
-                call_type="vision_caption_response",
-                payload={"caption": caption, "usage": usage, "prompt_ref": prompt_ref},
-                manifest={"model": model},
-            )
-        emit_cognitive_operation_event(
-            event_queue,
-            task_id=task_id,
-            operation_id=call_id,
-            phase="finished",
-            kind="vlm",
-            task_attempt=getattr(ctx, "task_attempt", None),
-        )
     except Exception as exc:
         emit_cognitive_operation_event(
             event_queue,
@@ -186,7 +153,54 @@ def _caption_for_block(
             kind="vlm",
             task_attempt=getattr(ctx, "task_attempt", None),
         )
-        caption = f"[image caption unavailable: {type(exc).__name__}: {exc}]"
+        # NOT memoized: a memoized failure label used to block every retry for
+        # this image for the rest of the task.
+        return f"[image caption unavailable: {type(exc).__name__}: {exc}]"
+    try:
+        from ouroboros.llm import add_usage
+
+        add_usage(accumulated_usage, usage)
+    except Exception:
+        pass
+    try:
+        from ouroboros.pricing import emit_llm_usage_event
+
+        emit_llm_usage_event(
+            event_queue,
+            task_id,
+            model,
+            usage,
+            (
+                float(usage["cost"])
+                if isinstance(usage, dict) and usage.get("cost") is not None
+                else None
+            ),
+            category="task",
+            source="vision_caption",
+        )
+    except Exception:
+        pass
+    caption = str(text or "").strip()
+    if drive_root is not None:
+        try:
+            persist_call(
+                drive_root,
+                task_id=task_id,
+                call_id=f"{call_id}_response",
+                call_type="vision_caption_response",
+                payload={"caption": caption, "usage": usage, "prompt_ref": prompt_ref},
+                manifest={"model": model},
+            )
+        except Exception:
+            log.warning("vision caption response receipt failed", exc_info=True)
+    emit_cognitive_operation_event(
+        event_queue,
+        task_id=task_id,
+        operation_id=call_id,
+        phase="finished",
+        kind="vlm",
+        task_attempt=getattr(ctx, "task_attempt", None),
+    )
     memo[key] = caption
     return caption
 

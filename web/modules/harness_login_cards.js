@@ -44,6 +44,7 @@ import {
     claudexorStatus,
     familyLabel,
 } from './claudexor_status_store.js';
+import { copyTextWithToast } from './ui_helpers.js';
 import { escapeHtmlAttr as escapeHtml, safeExternalHrefAttr } from './utils.js';
 
 const JOB_POLL_MS = 3000;
@@ -847,16 +848,19 @@ export function createLoginCardController({
             // different transport and never auto-fallback.
             start(active.harness, active.profile, 'client_pty');
         });
+        // Copy is a STEP of signing in here, so a non-secure origin or a
+        // desktop shell without the async clipboard must not leave a dead
+        // button: the shared helper falls back and always reports.
         hostEl.querySelector('[data-copy-signin-link]')?.addEventListener('click', () => {
             const disclosure = deviceCodeDisclosure(active.envelope || {});
-            if (disclosure?.url) navigator.clipboard?.writeText(disclosure.url);
+            void copyTextWithToast(disclosure?.url || '', { okMessage: 'Sign-in link copied.' });
         });
         hostEl.querySelector('[data-copy-device-code]')?.addEventListener('click', () => {
             const disclosure = deviceCodeDisclosure(active.envelope || {});
-            if (disclosure?.code) navigator.clipboard?.writeText(disclosure.code);
+            void copyTextWithToast(disclosure?.code || '', { okMessage: 'Code copied.' });
         });
         hostEl.querySelector('[data-copy-attach]')?.addEventListener('click', () => {
-            navigator.clipboard?.writeText(active.attachCommand || '');
+            void copyTextWithToast(active.attachCommand || '', { okMessage: 'Command copied.' });
         });
         const advanced = hostEl.querySelector('[data-login-advanced]');
         // Re-renders (every poll tick) must not slam the user's Advanced section

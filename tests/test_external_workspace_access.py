@@ -111,25 +111,29 @@ def test_subagent_inherits_active_external_workspace_when_metadata_missing(tmp_p
     assert workspace_mode == "external"
 
 
-def test_hidden_dotdir_default_deny_with_benign_allowlist(tmp_path):
-    """v6.52.0 (P1): hidden (dot) components are DEFAULT-DENY — only a small benign project
-    allowlist (.github/.vscode/.cache/...) is readable; every other in-home dotfile/dotdir
-    (including credential stores a blocklist enumeration would miss) stays blocked."""
+def test_hidden_dotdir_default_deny_is_mutation_only(tmp_path):
+    """capinv-447 / В23=A: the hidden/credential DEFAULT-DENY is now a MUTATION
+    gate (and the fail-closed default for unknown-operation callers). Root
+    READS of the owner's home are location-authorized only — the same paths
+    are readable (secret bytes are masked at egress, not refused)."""
     home = tmp_path / "_home"
     ctx = _ctx(tmp_path, mode="workspace")  # non-external, the now-readable user_files profile
-    # benign project dotdirs / dotfiles -> allowed (empty block reason)
+    # benign project dotdirs / dotfiles -> allowed even for mutation
     for rel in (".github/workflows/ci.yml", ".vscode/launch.json", ".gitignore", "proj/.github/x.yml"):
         assert user_files_path_block_reason(ctx, home / rel) == "", f"benign blocked: {rel}"
-    # credential stores / unknown dotfiles -> BLOCKED (the exact leaks an enumeration missed).
-    # `.cache` is intentionally NOT allowlisted (security-reviewer call: highest exposure, e.g.
-    # credential caches, for the least benefit vs project-config dotdirs).
+    # credential stores / unknown dotfiles: mutation (default op) stays BLOCKED,
+    # root reads are allowed.
     for rel in (
         ".terraform.d/credentials.tfrc.json", ".cargo/credentials.toml", ".oci/config",
         ".pip/pip.conf", ".m2/settings.xml", ".bash_history", ".mysql_history", ".kaggle/kaggle.json",
         ".cache/huggingface/token.json", ".aws/credentials", ".ssh/id_rsa", ".gnupg/secring.gpg",
         ".git/config", ".gitconfig",
     ):
-        assert user_files_path_block_reason(ctx, home / rel) != "", f"secret LEAKED: {rel}"
+        assert user_files_path_block_reason(ctx, home / rel) != "", f"mutation gate lost: {rel}"
+        for op in ("read", "list", "search"):
+            assert user_files_path_block_reason(ctx, home / rel, operation=op) == "", (
+                f"root read still denied: {rel}"
+            )
 
 
 def test_block_reason_allows_scratch_only_in_external_mode(tmp_path):
@@ -145,10 +149,14 @@ def test_block_reason_protects_runtime_and_credentials_even_in_external(tmp_path
     # System repo and parent data drive stay protected.
     assert user_files_path_block_reason(ext, tmp_path / "system" / "BIBLE.md")
     assert user_files_path_block_reason(ext, tmp_path / "data" / "settings.json")
-    # The CHILD data drive control plane stays protected (enumerated explicitly).
+    # The CHILD data drive control plane stays protected (enumerated explicitly),
+    # for READS too (location boundary, not a name shape).
     assert user_files_path_block_reason(ext, child / "memory" / "identity.md")
-    # Credential-like names stay protected wherever they live.
+    assert user_files_path_block_reason(ext, child / "memory" / "identity.md", operation="read")
+    # Credential-like names: mutation stays shape-denied; root reads are
+    # location-only (capinv-447 / В23=A — bytes are masked at egress instead).
     assert user_files_path_block_reason(ext, tmp_path / "scratch" / "id_rsa.pem")
+    assert user_files_path_block_reason(ext, tmp_path / "scratch" / "id_rsa.pem", operation="read") == ""
 
 
 def test_shell_cwd_scratch_scoped_not_filesystem_root(tmp_path):

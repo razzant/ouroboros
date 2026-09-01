@@ -51,6 +51,50 @@ def test_analyze_screenshot_no_vision_returns_typed_gap(monkeypatch):
     assert "Do NOT retry the image" in out
 
 
+def test_build_remote_kwargs_vision_gate_uses_qualified_identity(monkeypatch):
+    """E1: the blind-model gate must consult supports_vision() with the QUALIFIED
+    identity (usage_model) — the stripped resolved_model has lost its provider
+    namespace, matched no vision prefix, and replaced the image with the omission
+    placeholder on every direct-provider install (incl. the shipped default
+    openai::gpt-5.6-terra). Same identity contract as the browser-screenshot
+    call site (tools/browser.py)."""
+    from ouroboros import provider_models
+    from ouroboros.llm import LLMClient
+
+    monkeypatch.setenv("OPENAI_API_KEY", "test-key")
+    # Static map authority only: a parallel test's overlay write must not flip verdicts.
+    monkeypatch.setattr(provider_models, "_VISION_OVERLAY", {})
+    client = LLMClient()
+    msgs = [{
+        "role": "user",
+        "content": [
+            {"type": "text", "text": "look at this"},
+            {"type": "image_url", "image_url": {"url": "data:image/png;base64,AAAA"}},
+        ],
+    }]
+
+    # Qualified direct-provider identity keeps its image block (was blinded).
+    direct = client._resolve_remote_target("openai::gpt-5.6-terra")
+    kwargs = client._build_remote_kwargs(direct, msgs, "high", 128, "auto", None, None)
+    assert [b.get("type") for b in kwargs["messages"][0]["content"]] == ["text", "image_url"]
+
+    # OpenRouter identities behave exactly as before: vision-capable keeps the
+    # image, a blind model still gets the honest omission placeholder.
+    sol = client._resolve_remote_target("openai/gpt-5.6-sol")
+    kwargs = client._build_remote_kwargs(
+        sol, msgs, "high", 128, "auto", None, None, skip_capability_fetch=True
+    )
+    assert [b.get("type") for b in kwargs["messages"][0]["content"]] == ["text", "image_url"]
+
+    blind = client._resolve_remote_target("deepseek/deepseek-chat")
+    kwargs = client._build_remote_kwargs(
+        blind, msgs, "high", 128, "auto", None, None, skip_capability_fetch=True
+    )
+    blocks = kwargs["messages"][0]["content"]
+    assert [b.get("type") for b in blocks] == ["text", "text"]
+    assert "image omitted" in blocks[1]["text"]
+
+
 def test_replace_image_blocks_with_placeholder_keeps_text_and_caption():
     from ouroboros.llm import LLMClient
     msgs = [{

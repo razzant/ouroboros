@@ -102,7 +102,9 @@ def stage_task_attachments(
     through here so they land in ONE agent-readable root (``artifact_store``) and
     become reachable via ``read_file(root='artifact_store', path='attachments/...')``
     instead of a bare absolute host path. Secret SOURCES are skipped (SSOT: the
-    ``ouroboros.tool_access`` secret blocklist). Never raises. Every declared
+    ``ouroboros.credential_shapes`` vocabulary for host paths; the workspace
+    patch rules for /api/chat/upload byte uploads, judged on the ORIGINAL
+    basename). Never raises. Every declared
     input produces exactly one ordinal-preserving ``staged`` or ``rejected``
     row, so callers never confuse a partial staging result with the complete
     attachment set.
@@ -154,33 +156,62 @@ def stage_task_attachments(
                 digest.update(chunk)
         return digest.hexdigest()[:12]
 
-    # SSOT secret detection: reuse the user_files secret blocklist so a credential
-    # SOURCE (e.g. ~/.ssh/id_rsa, credentials.json, *.pem) is never copied in.
-    from ouroboros.tool_access import (
-        _USER_FILES_ALLOWED_DOTNAMES,
-        _USER_FILES_SECRET_COMPONENTS,
-        _USER_FILES_SECRET_NAMES,
-        _USER_FILES_SECRET_RE,
+    # SSOT secret detection: reuse the shared credential-shape vocabulary so a
+    # credential SOURCE (e.g. ~/.ssh/id_rsa, credentials.json, *.pem) is never copied in.
+    from ouroboros.credential_shapes import (
+        BENIGN_DOT_NAMES,
+        CREDENTIAL_COMPONENT_NAMES,
+        CREDENTIAL_FILE_NAMES,
+        CREDENTIAL_FILE_SUFFIXES,
+        CREDENTIAL_NAME_RE,
     )
 
-    def _is_secret_source(src: pathlib.Path) -> bool:
+    # G10 (capinv-447): BOTH attachment routes get ONE policy. A path-selected
+    # attachment is judged on its host path; a /api/chat/upload byte upload sits
+    # under data/uploads with a server-generated "<32hex>_<original>" basename
+    # whose transport path is meaningless (its uuid prefix used to defeat the
+    # name rules entirely, and a dotted DATA_DIR parent — ~/.local, ~/Library —
+    # used to reject EVERY upload), so it is judged on the ORIGINAL basename.
+    try:
+        from ouroboros.config import DATA_DIR as _DATA_DIR
+
+        _uploads_root = (pathlib.Path(_DATA_DIR) / "uploads").resolve(strict=False)
+    except Exception:
+        _uploads_root = None
+    _upload_name_re = re.compile(r"^[0-9a-f]{32}_")
+
+    def _secret_source_reason(src: pathlib.Path) -> str:
+        """Rule-named reason the source must not be staged, or ``""``."""
+        if _uploads_root is not None:
+            try:
+                src.relative_to(_uploads_root)
+            except ValueError:
+                pass
+            else:
+                from ouroboros.workspace_patch_rules import _sensitive_untracked_reason
+
+                original = _upload_name_re.sub("", src.name)
+                reason = _sensitive_untracked_reason(original)
+                return f"uploaded file name {original!r}: {reason}" if reason else ""
         for part in src.parts:
             part_lower = part.lower()
-            if part_lower in _USER_FILES_SECRET_COMPONENTS:
-                return True
-            # Parity with user_files_path_block_reason (DEFAULT-DENY dotted): a non-allowlisted
-            # dotted SOURCE component is potentially credential-bearing, so an enumerated-blocklist
-            # gap (e.g. ~/.terraform.d/credentials.tfrc.json) can't auto-stage a secret. Owner-
-            # supplied attachments only — defense-in-depth parity, not a live agent-exfil path.
-            if part.startswith(".") and part_lower not in _USER_FILES_ALLOWED_DOTNAMES:
-                return True
+            if part_lower in CREDENTIAL_COMPONENT_NAMES:
+                return f"credential/control directory component {part!r}"
+            # DEFAULT-DENY dotted components: a non-allowlisted dotted SOURCE component is
+            # potentially credential-bearing, so an enumerated-blocklist gap (e.g.
+            # ~/.terraform.d/credentials.tfrc.json) can't auto-stage a secret. Owner-
+            # supplied attachments only — defense-in-depth, not a live agent-exfil path.
+            if part.startswith(".") and part_lower not in BENIGN_DOT_NAMES:
+                return f"non-allowlisted hidden path component {part!r}"
         name = src.name
         name_lower = name.lower()
-        return bool(
-            name_lower in _USER_FILES_SECRET_NAMES
-            or _USER_FILES_SECRET_RE.search(name)
-            or name_lower.endswith((".key", ".pem", ".p12", ".pfx"))
-        )
+        if name_lower in CREDENTIAL_FILE_NAMES:
+            return f"credential-shaped file name {name!r}"
+        if CREDENTIAL_NAME_RE.search(name):
+            return f"credential-shaped token in file name {name!r}"
+        if name_lower.endswith(CREDENTIAL_FILE_SUFFIXES):
+            return f"private key / certificate suffix on {name!r}"
+        return ""
 
     try:
         attach_dir = task_artifact_dir_path(drive_root, task_id, create=False) / _ATTACHMENTS_SUBDIR
@@ -220,9 +251,13 @@ def stage_task_attachments(
             if not source.is_file():
                 manifest.append(_rejected(ordinal, label, "source_not_file"))
                 continue
-            if _is_secret_source(source):
-                log.info("stage_task_attachments: skipped secret source %s", source.name)
-                manifest.append(_rejected(ordinal, label, "secret_source"))
+            if secret_rule := _secret_source_reason(source):
+                log.info("stage_task_attachments: skipped secret source %s (%s)", source.name, secret_rule)
+                # Reason stays a closed vocabulary; the RULE that fired is named
+                # separately so the owner sees exactly why (G10, capinv-447).
+                row = _rejected(ordinal, label, "secret_source")
+                row["rule"] = secret_rule
+                manifest.append(row)
                 continue
             try:
                 if source.stat().st_size > _MAX_STAGED_ATTACHMENT_BYTES:
@@ -284,6 +319,23 @@ def stage_task_attachments(
             log.debug("stage_task_attachments: rejected a file on error", exc_info=True)
             manifest.append(_rejected(ordinal, label, "copy_failed"))
     return manifest
+
+
+def attachment_manifest_all_rejected(manifest: Any) -> bool:
+    """Whether staging rejected EVERY declared attachment (none staged).
+
+    Partial staging is the default (В25c, capinv-447): good rows ride, rejected
+    rows are disclosed. A fully-rejected set is different — the task would start
+    with NONE of the material it declared it needs — so the flagless ingresses
+    (UI chat, presence, promote) stay atomic for exactly that case."""
+
+    return bool(
+        isinstance(manifest, list) and manifest
+        and all(
+            isinstance(item, dict) and str(item.get("status") or "staged") == "rejected"
+            for item in manifest
+        )
+    )
 
 
 def attachment_manifest_has_rejections(manifest: Any) -> bool:
@@ -719,7 +771,15 @@ def store_chat_media_bytes(
     path = media_dir / name
     if path.is_symlink() or not path.is_file():
         write_bytes_atomic(path, data)
-    return {"name": name, "mime": normalized_mime, "sha256": digest, "size": len(data)}
+    # ``path`` is reported so a caller can derive a second, launcher-compatible
+    # URL for the same bytes (see supervisor.message_bus).
+    return {
+        "name": name,
+        "mime": normalized_mime,
+        "sha256": digest,
+        "size": len(data),
+        "path": str(path),
+    }
 
 
 def resolve_chat_media_path(

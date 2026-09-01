@@ -220,13 +220,15 @@ def test_server_navigation_and_chat_static_contracts():
     assert "attachBtn.classList.toggle('uploading', uploading)" in chat_source
     assert "input.disabled = uploading;" in chat_source
     assert "cleanupUploadedAttachments" in chat_source
-    assert "method: 'DELETE'" in chat_source
     assert "await cleanupUploadedAttachments(uploaded);" in chat_source
     assert "await cleanupUploadedAttachments(uploadedAttachments);" in chat_source
     assert "ws.send({" in chat_source and "{ queue: false }" in chat_source
     assert "result?.status !== 'sent'" in chat_source
     assert "data-attachment-remove" in chat_source
-    assert "Promise.allSettled" in chat_source
+    media_source = _read("web/modules/chat_media.js")
+    assert "export async function cleanupUploadedAttachments" in media_source
+    assert "method: 'DELETE'" in media_source
+    assert "Promise.allSettled" in media_source
     assert '>Loading…</span>' in chat_source
     assert "syncHeaderControlState({ accounting: { available: false } });" in chat_source
     assert "budget_text: 'Connecting...'" not in chat_source

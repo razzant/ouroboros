@@ -192,7 +192,12 @@ def test_caption_does_not_start_inside_finalization_reserve(monkeypatch):
     assert "caption unavailable" in out[0]["content"][1]["text"]
 
 
-def test_caption_persistence_failure_emits_one_failed_terminal(monkeypatch, tmp_path):
+def test_caption_persistence_failure_keeps_paid_caption_one_terminal(monkeypatch, tmp_path):
+    """capinv-447 D9. This test previously PINNED the defect: it asserted the
+    persistence failure replaced the paid caption with "caption unavailable".
+    The real contract is the terminal-event sequence (started + exactly one
+    terminal); the model call SUCCEEDED, so the caller must receive the fresh
+    caption and the operation must terminate "finished", not "failed"."""
     import queue
     from ouroboros import vision_routing
     from ouroboros.vision_routing import VisionRoutingContext, prepare_messages_for_send
@@ -222,13 +227,59 @@ def test_caption_persistence_failure_emits_one_failed_terminal(monkeypatch, tmp_
             task_id="task-1", event_queue=events,
         ),
     )
-    assert "caption unavailable" in out[0]["content"][1]["text"]
+    assert out[0]["content"][1]["text"] == "[image caption: fresh caption]"
     phases = []
     while not events.empty():
         event = events.get_nowait()
         if event.get("type") == "cognitive_operation":
             phases.append(event.get("phase"))
-    assert phases == ["started", "failed"]
+    assert phases == ["started", "finished"]
+
+
+def test_failed_caption_is_not_memoized_second_attempt_retries(monkeypatch):
+    """capinv-447 D9: a failure label must never be memoized — memoizing it used
+    to block any second caption attempt for that image for the rest of the task."""
+    from ouroboros.vision_routing import VisionRoutingContext, prepare_messages_for_send
+
+    class FlakyLLM:
+        calls = 0
+
+        def default_model(self):
+            return "google/gemini-3.5-flash"
+
+        def vision_query(self, *args, **kwargs):
+            FlakyLLM.calls += 1
+            if FlakyLLM.calls == 1:
+                raise RuntimeError("transient provider failure")
+            return "second try caption", {"cost": 0.01}
+
+    monkeypatch.setenv("OUROBOROS_IMAGE_INPUT_MODE", "caption")
+    monkeypatch.setenv("OUROBOROS_MODEL_VISION", "google/gemini-3.5-flash")
+    llm = FlakyLLM()
+    shared_usage: dict = {}  # one accumulated_usage dict = one per-task memo
+    first = _image_message()
+    first[0]["content"][1].pop("_caption")
+    out1 = prepare_messages_for_send(
+        first, routing=VisionRoutingContext("not/vision", llm, shared_usage),
+    )
+    assert "caption unavailable" in out1[0]["content"][1]["text"]
+
+    second = _image_message()
+    second[0]["content"][1].pop("_caption")
+    out2 = prepare_messages_for_send(
+        second, routing=VisionRoutingContext("not/vision", llm, shared_usage),
+    )
+    assert out2[0]["content"][1]["text"] == "[image caption: second try caption]"
+    assert FlakyLLM.calls == 2
+
+    # The SUCCESSFUL caption is still memoized: a third send pays nothing.
+    third = _image_message()
+    third[0]["content"][1].pop("_caption")
+    out3 = prepare_messages_for_send(
+        third, routing=VisionRoutingContext("not/vision", llm, shared_usage),
+    )
+    assert out3[0]["content"][1]["text"] == "[image caption: second try caption]"
+    assert FlakyLLM.calls == 2
 
 
 def test_caption_mode_does_not_treat_bracket_label_as_real_caption(monkeypatch):

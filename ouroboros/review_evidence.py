@@ -1068,6 +1068,7 @@ def collect_review_evidence(
 ) -> Dict[str, Any]:
     from ouroboros.review_state import (
         _LEGACY_CURRENT_REPO_KEY,
+        advisory_commit_ready,
         compute_snapshot_hash,
         load_state,
         make_repo_key,
@@ -1120,11 +1121,9 @@ def collect_review_evidence(
         "current_repo": {
             "snapshot_hash": snapshot_hash[:12] if snapshot_hash else "",
             "advisory_status": str(getattr(current_run, "status", "") or "missing"),
-            "repo_commit_ready": bool(
-                current_run is not None
-                and current_run.status in ("fresh", "bypassed", "skipped")
-                and not open_obligations
-                and not open_debts
+            "repo_commit_ready": advisory_commit_ready(
+                current_run is not None and current_run.status in ("fresh", "bypassed", "skipped"),
+                open_obligations, open_debts,
             ),
             "bypass_reason": str(getattr(current_run, "bypass_reason", "") or ""),
             "stale_reason": str(getattr(state, "last_stale_reason", "") or "") if stale_matches_repo else "",
@@ -1193,6 +1192,7 @@ def build_review_projection(
 ) -> Dict[str, Any]:
     """Build the semantic read-model shared by review_status-style renderers."""
     from ouroboros.review_state import (
+        advisory_commit_ready,
         compute_snapshot_hash,
         load_state,
         make_repo_key,
@@ -1274,7 +1274,7 @@ def build_review_projection(
         ) or ("Current snapshot hash no longer matches the latest advisory run." if hash_mismatch else None),
         "open_obligations": open_obligations,
         "open_debts": open_debts,
-        "repo_commit_ready": bool(effective_is_fresh and not open_obligations and not open_debts),
+        "repo_commit_ready": advisory_commit_ready(bool(effective_is_fresh), open_obligations, open_debts),
         "retry_anchor": "commit_readiness_debt" if open_debts else None,
         "advisory_overrides": advisory_overrides,
     }

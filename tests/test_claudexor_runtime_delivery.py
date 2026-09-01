@@ -154,7 +154,7 @@ def test_tracked_pin_names_a_cli_capable_release():
     of this proposal converged on while the pin was still pre-CLI 3.6.0)."""
     pin = runtime.load_runtime_pin()
     assert pin is not None
-    assert pin.version == "3.9.4"
+    assert pin.version == "3.9.5"
     assert pin.cli_entrypoint == "claudexor.bundle.cjs"
 
 
@@ -170,7 +170,7 @@ def test_managed_runtime_layout_stays_inside_legacy_windows_path_budget(
         runtime.managed_runtime_root()
     ) == pathlib.Path(pin.install_name)
 
-    # The current public closure's measured longest relative member is 170
+    # The current public closure's measured longest relative member is 172
     # characters.  A conservative default Windows profile still stays below
     # legacy MAX_PATH with the shared compact layout; no platform fork needed.
     windows_data_root = pathlib.PureWindowsPath(
@@ -178,10 +178,11 @@ def test_managed_runtime_layout_stays_inside_legacy_windows_path_budget(
     )
     longest_member = (
         "browser-mcp-runtime/node_modules/.pnpm/"
-        "playwright-core@1.62.0-alpha-1783623505000/node_modules/"
-        "playwright-core/lib/vite/traceViewer/assets/defaultSettingsView-CT5oRh4X.js"
+        "@claudexor+schema@file+packages+schema/node_modules/"
+        "@claudexor/schema/generated/"
+        "ControlCredentialProfilesSnapshotResponse.schema.json"
     )
-    assert len(longest_member) == 170
+    assert len(longest_member) == 172
     candidate = windows_data_root / "state" / "cx" / pin.install_name / longest_member
     assert len(str(candidate)) < 260
 

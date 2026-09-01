@@ -305,6 +305,71 @@ def test_empty_body_output_or_body_size_is_not_context_recovery(tmp_path):
         assert usage["_last_llm_error_kind"] == "request_too_large"
 
 
+_EMPTY_RESPONSE_EVENT_TYPES = {
+    "provider_body_error", "provider_incomplete_response", "llm_empty_response",
+}
+
+
+def _empty_response_event(drive_logs):
+    import json
+
+    return next(
+        event
+        for event in (
+            json.loads(line)
+            for line in (drive_logs / "events.jsonl").read_text().splitlines()
+        )
+        if event.get("type") in _EMPTY_RESPONSE_EVENT_TYPES
+    )
+
+
+def test_empty_response_event_attributes_the_upstream_provider(tmp_path):
+    """Issue #468: the live case is an HTTP-200 body error, so the upstream label never
+    reached ``llm_api_error`` — it belongs on the durable EMPTY-RESPONSE events, where
+    the usage carrying it is already in hand. Without it a same-model provider incident
+    names only the model and is unattributable after the fact."""
+
+    class _AttributedBodyErrorLLM:
+        calls = 0
+
+        def chat(self, **kwargs):
+            self.calls += 1
+            return (
+                {"content": "", "tool_calls": [], "finish_reason": "stop"},
+                {"response_provider": "DeepInfra",
+                 "provider_error": {"kind": "rate_limit", "code": "429", "message": "rate"}},
+            )
+
+    usage = {}
+    msg, _cost = call_llm_with_retry(
+        _AttributedBodyErrorLLM(), [{"role": "user", "content": "hi"}],
+        "deepseek/deepseek-v4-flash-0731", None, "medium", 1, tmp_path,
+        "task-attribution", 1, None, usage, "task", False, attempt_cap=1,
+    )
+
+    assert msg is None
+    event = _empty_response_event(tmp_path)
+    assert event["response_provider"] == "DeepInfra"
+    assert event["provider_error_kind"] == "rate_limit"
+    assert event["model"] == "deepseek/deepseek-v4-flash-0731"
+
+
+def test_empty_response_event_reports_absent_provider_attribution_as_null(tmp_path):
+    """A missing upstream label is reported as an explicit null — never guessed from a
+    neighbouring round's accumulated usage, and never silently dropped from the record."""
+    usage = {}
+    call_llm_with_retry(
+        _EmptyBodyErrorLLM({"kind": "provider_error", "code": 400, "message": "nope"}),
+        [{"role": "user", "content": "hi"}], "openai/gpt-5.5",
+        None, "medium", 1, tmp_path, "task-no-attribution", 1, None, usage,
+        "task", False, attempt_cap=1,
+    )
+
+    event = _empty_response_event(tmp_path)
+    assert event["response_provider"] is None
+    assert event["provider_error_kind"] == "provider_error"
+
+
 def test_empty_structured_context_overflow_event_carries_fit_projection(tmp_path):
     usage = {
         "_context_profile": "owner_low",
@@ -1224,3 +1289,156 @@ def test_successful_round_pops_the_retry_wall_marker(tmp_path):
     assert msg == {"content": "ok"}
     assert RETRY_WALL_EXHAUSTED_KEY not in accumulated
     assert "execution_status" not in accumulated
+
+
+def test_llm_usage_durable_row_carries_reasoning_pin(monkeypatch, tmp_path):
+    """The typed pin fact must reach the DURABLE llm_usage row in events.jsonl —
+    disclosure that survives only in observability blobs is not grep-able
+    (issue #468 triad finding). Mirrors the web_search_sources projection."""
+    import pathlib
+    from supervisor import events as sup_events
+
+    captured = {}
+    monkeypatch.setattr(sup_events, "append_jsonl", lambda path, row: captured.update(row))
+
+    class _Ctx:
+        RUNNING = {}
+        DRIVE_ROOT = pathlib.Path(str(tmp_path))
+
+        @staticmethod
+        def update_budget_from_usage(usage):
+            return None
+
+    pin = {"sealed": True, "artifact": "encrypted"}
+    evt = {"type": "llm_usage", "task_id": "t1",
+           "usage": {"prompt_tokens": 1, "reasoning_pin": pin}}
+    sup_events._handle_llm_usage(evt, _Ctx())
+    assert captured.get("reasoning_pin") == pin
+
+    # And absent stays absent — no null-noise on every unpinned row.
+    captured.clear()
+    sup_events._handle_llm_usage(
+        {"type": "llm_usage", "task_id": "t1", "usage": {"prompt_tokens": 1}}, _Ctx())
+    assert "reasoning_pin" not in captured
+
+
+def test_provider_error_usage_key_is_host_owned(monkeypatch):
+    """``usage.provider_error`` feeds retry classification and the durable
+    empty-response events, so a provider usage EXTENSION must not be able to
+    supply it: the host assigns it from the designated outer body-error shape
+    only (adversarial R1 finding — spoof-pop parity with response_provider)."""
+    from ouroboros.llm import LLMClient
+
+    client = LLMClient()
+    target = client._resolve_remote_target("deepseek/deepseek-v4-flash-0731")
+    resp = {
+        "id": "gen-1", "provider": "Real",
+        "choices": [{"message": {"content": "ok"}, "finish_reason": "stop"}],
+        "usage": {"prompt_tokens": 1,
+                  "provider_error": {"kind": "x" * 200, "code": "999"}},
+    }
+    _msg, usage = client._normalize_remote_response(resp, target, skip_cost_fetch=True)
+    assert "provider_error" not in usage
+
+
+def test_aborted_ladder_discards_staged_reasoning_pin(monkeypatch):
+    """A ladder that stages the pin fact and then ABORTS (no normalize ran) must
+    not leak that fact into a later unrelated call on the same thread
+    (adversarial R1/R2 finding: false honesty disclosure)."""
+    from ouroboros.llm import LLMClient
+
+    client = LLMClient()
+    monkeypatch.setattr(client, "_get_supported_parameters", lambda _m: None)
+    # Simulate the abort residue: a staged pin note nobody popped.
+    client._stage_reasoning_pin_disclosure({
+        "model": "z-ai/glm-4.6",
+        "extra_body": {"provider": {"allow_fallbacks": False}},
+        "messages": [{"role": "assistant",
+                      "reasoning_details": [{"type": "reasoning.encrypted", "data": "b"}]}],
+    })
+
+    target = client._resolve_remote_target("deepseek/deepseek-v4-flash-0731")
+    kwargs = client._build_remote_kwargs(
+        target, [{"role": "user", "content": "hi"}], "medium", 128, "auto", None, None)
+
+    class _Resp:
+        def model_dump(self):
+            return {"id": "gen-2", "provider": "Clean",
+                    "choices": [{"message": {"content": "ok"}, "finish_reason": "stop"}],
+                    "usage": {"prompt_tokens": 1}}
+
+    resp = client._create_chat_completion_with_retries(lambda **_kw: _Resp(), kwargs, target)
+    _msg, usage = client._normalize_remote_response(
+        resp.model_dump(), target, skip_cost_fetch=True)
+    assert "reasoning_pin" not in usage
+
+
+def test_concurrent_async_ladders_keep_pin_notes_isolated(monkeypatch):
+    """Two overlapping async calls on ONE event loop must not clear or consume
+    each other's staged reasoning_pin note (final-gate finding: the ContextVar
+    isolation needs a contract test — a threading.local slot fails this)."""
+    import asyncio
+    from ouroboros.llm import LLMClient
+
+    client = LLMClient()
+    monkeypatch.setattr(client, "_get_supported_parameters", lambda _m: None)
+
+    sealed_msgs = [
+        {"role": "user", "content": "q"},
+        {"role": "assistant",
+         "reasoning_details": [{"type": "reasoning.encrypted", "data": "b"}]},
+    ]
+    plain_msgs = [{"role": "user", "content": "q"}]
+
+    def _resp(rid):
+        class _R:
+            def model_dump(self):
+                return {"id": rid, "provider": "P",
+                        "choices": [{"message": {"content": "ok"},
+                                     "finish_reason": "stop"}],
+                        "usage": {"prompt_tokens": 1}}
+        return _R()
+
+    sealed_staged = asyncio.Event()
+    sibling_done = asyncio.Event()
+
+    async def sealed_call():
+        target = client._resolve_remote_target("z-ai/glm-4.6")
+        kwargs = client._build_remote_kwargs(
+            target, sealed_msgs, "medium", 128, "auto", None, None)
+
+        async def create_fn(**_kw):
+            return _resp("gen-sealed")
+
+        resp = await client._create_chat_completion_with_retries_async(
+            create_fn, kwargs, target)
+        # The note is staged now; let the sibling run its WHOLE cycle
+        # (ladder-entry discard + stage-None + normalize) before we normalize.
+        sealed_staged.set()
+        await sibling_done.wait()
+        _msg, usage = client._normalize_remote_response(
+            resp.model_dump(), target, skip_cost_fetch=True)
+        return usage
+
+    async def plain_call():
+        await sealed_staged.wait()
+        target = client._resolve_remote_target("deepseek/deepseek-v4-flash-0731")
+        kwargs = client._build_remote_kwargs(
+            target, plain_msgs, "medium", 128, "auto", None, None)
+
+        async def create_fn(**_kw):
+            return _resp("gen-plain")
+
+        resp = await client._create_chat_completion_with_retries_async(
+            create_fn, kwargs, target)
+        _msg, usage = client._normalize_remote_response(
+            resp.model_dump(), target, skip_cost_fetch=True)
+        sibling_done.set()
+        return usage
+
+    async def main():
+        return await asyncio.gather(sealed_call(), plain_call())
+
+    sealed_usage, plain_usage = asyncio.run(main())
+    assert sealed_usage["reasoning_pin"] == {"sealed": True, "artifact": "encrypted"}
+    assert "reasoning_pin" not in plain_usage

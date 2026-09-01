@@ -278,12 +278,11 @@ def test_build_remote_kwargs_never_sends_non_leading_system_to_strict_providers(
 
 
 def test_openrouter_reasoning_details_disable_provider_fallbacks(monkeypatch):
-    """An UNVERIFIED reasoning family (here ``z-ai/glm`` — the original GLM->Claude
-    cross-family signature bug) keeps the conservative ``allow_fallbacks=false`` pin when
-    the transcript carries replayed reasoning, so an unportable signature cannot silently
-    fail over to a sibling provider. Verified-portable families (anthropic/gemini/openai)
-    stay failover-eligible — see
-    ``test_portable_family_reasoning_replay_stays_failover_eligible``."""
+    """A SEALED artifact (here an encrypted block on ``z-ai/glm`` — the original
+    GLM->Claude cross-family signature bug) keeps the conservative
+    ``allow_fallbacks=false`` pin, so an endpoint-bound artifact cannot silently fail
+    over to a sibling provider. Readable artifacts stay failover-eligible — see
+    ``test_portable_reasoning_replay_stays_failover_eligible``."""
     client = LLMClient()
     monkeypatch.setattr(client, "_get_supported_parameters", lambda _model_id: None)
     messages = [
@@ -310,11 +309,10 @@ def test_openrouter_reasoning_details_disable_provider_fallbacks(monkeypatch):
 
 
 def test_unverified_family_signed_reasoning_block_keeps_pin(monkeypatch):
-    """The pin trigger uses the BROAD replay-artifact contract
-    (``_has_replayed_reasoning_metadata``), not just top-level ``reasoning_details``: an
-    unverified family carrying a SIGNED reasoning/thinking CONTENT block with NO top-level
-    ``reasoning_details`` must STILL be pinned, else an unportable signature could fail
-    over to a sibling provider through a non-``reasoning_details`` artifact."""
+    """The pin sees CONTENT blocks, not just top-level ``reasoning_details``: a
+    non-roster family carrying a SIGNED thinking block with NO ``reasoning_details``
+    must STILL be pinned, else an endpoint-bound signature could fail over to a sibling
+    provider through a non-``reasoning_details`` artifact."""
     client = LLMClient()
     monkeypatch.setattr(client, "_get_supported_parameters", lambda _model_id: None)
     messages = [
@@ -341,30 +339,20 @@ def test_unverified_family_signed_reasoning_block_keeps_pin(monkeypatch):
     assert kwargs["extra_body"]["provider"]["allow_fallbacks"] is False
 
 
-@pytest.mark.parametrize("model", [
-    "anthropic/claude-sonnet-4.6",
-    "google/gemini-3.5-flash",
-    "openai/gpt-5.5",
-])
-def test_portable_family_reasoning_replay_stays_failover_eligible(monkeypatch, model):
-    """Anthropic / Gemini / OpenAI reasoning signatures are cross-provider portable on
-    OpenRouter (verified live via a same-model replay probe), so a replayed-reasoning
-    request must NOT pin ``allow_fallbacks=false`` — same-model provider failover keeps
-    continuity and stays eligible under an upstream rate-limit. The anthropic cache route
-    still pins ``require_parameters``; gemini/openai add no provider block at all. The
-    replayed reasoning is preserved. Unverified families keep the pin
-    (``test_openrouter_reasoning_details_disable_provider_fallbacks``)."""
-    client = LLMClient()
-    monkeypatch.setattr(client, "_get_supported_parameters", lambda _model_id: None)
-    messages = [
+_SIGNED_TEXT = [{"type": "reasoning.text", "text": "t", "signature": "sig"}]
+_PLAIN_TEXT = [{"type": "reasoning.text", "text": "t"}]
+
+
+def _replay_assistant_turn(**extra):
+    return [
         {"role": "user", "content": "inspect"},
-        {
-            "role": "assistant",
-            "content": "thinking",
-            "reasoning_details": [{"type": "reasoning.text", "text": "t", "signature": "sig"}],
-        },
+        {"role": "assistant", "content": "thinking", **extra},
     ]
 
+
+def _dispatch_provider_block(monkeypatch, model, messages):
+    client = LLMClient()
+    monkeypatch.setattr(client, "_get_supported_parameters", lambda _model_id: None)
     kwargs = client._build_remote_kwargs(
         client._resolve_remote_target(model),
         messages,
@@ -374,12 +362,79 @@ def test_portable_family_reasoning_replay_stays_failover_eligible(monkeypatch, m
         None,
         None,
     )
+    return kwargs, kwargs["extra_body"].get("provider", {})
 
-    provider = kwargs["extra_body"].get("provider", {})
+
+@pytest.mark.parametrize("model,details", [
+    # Roster-vouched families: their SIGNED artifacts replay across sibling endpoints.
+    ("anthropic/claude-sonnet-4.6", _SIGNED_TEXT),
+    ("google/gemini-3.5-flash", _SIGNED_TEXT),
+    # Shape-first: an UNSIGNED readable artifact is portable for EVERY family — the
+    # issue #468 case (a deepseek run pinned to one 429ing endpoint with 30 healthy ones).
+    ("deepseek/deepseek-v4-flash-0731", _PLAIN_TEXT),
+    ("z-ai/glm-4.6", _PLAIN_TEXT),
+    ("openai/gpt-5.5", _PLAIN_TEXT),
+])
+def test_portable_reasoning_replay_stays_failover_eligible(monkeypatch, model, details):
+    """A replayed artifact that is NOT sealed must never pin ``allow_fallbacks=false``:
+    same-model provider failover keeps continuity and stays eligible under an upstream
+    rate-limit. The anthropic cache route still pins ``require_parameters``; the others
+    add no provider block at all. The replayed reasoning is preserved either way."""
+    kwargs, provider = _dispatch_provider_block(
+        monkeypatch, model, _replay_assistant_turn(reasoning_details=details),
+    )
+
     assert "allow_fallbacks" not in provider  # same-model provider failover stays eligible
     if model.startswith("anthropic/"):
         assert provider.get("require_parameters") is True
-    assert kwargs["messages"][1]["reasoning_details"][0]["signature"] == "sig"
+    assert kwargs["messages"][1]["reasoning_details"] == details
+
+
+def test_bare_response_id_no_longer_pins_the_provider(monkeypatch):
+    """``response_id`` is stamped on EVERY OpenRouter response, so treating it as a
+    replay artifact pinned every round after the first — for a transcript carrying no
+    reasoning at all. It is an identifier, not an artifact: no pin (issue #468)."""
+    _kwargs, provider = _dispatch_provider_block(
+        monkeypatch, "deepseek/deepseek-v4-flash-0731",
+        _replay_assistant_turn(response_id="gen-1"),
+    )
+
+    assert "allow_fallbacks" not in provider
+
+
+def test_openai_encrypted_reasoning_pins_the_provider(monkeypatch):
+    """Field 2026-07 (gpt-5.6-sol over 3x OpenAI + 2x Azure): replayed ENCRYPTED items
+    answered "The encrypted content for item rs_... could not be ..." with a 400 after
+    429-driven reroutes and killed benchmark waves. The reactive reroute path already
+    stripped for openai/*; the proactive dispatch pin used to let it through. Both now
+    read the same artifact-shape truth, so openai/* encrypted reasoning pins."""
+    _kwargs, provider = _dispatch_provider_block(
+        monkeypatch, "openai/gpt-5.5",
+        _replay_assistant_turn(
+            reasoning_details=[{"type": "reasoning.encrypted", "data": "rs_blob"}],
+        ),
+    )
+
+    assert provider["allow_fallbacks"] is False
+
+
+@pytest.mark.parametrize("model,pinned", [
+    ("openai/gpt-5.5", True),
+    ("google/gemini-3.5-flash", False),
+])
+def test_mixed_artifacts_seal_on_the_worst_form(monkeypatch, model, pinned):
+    """A transcript is sealed if ANY carried artifact is — a readable summary sitting
+    next to an encrypted blob does not make the turn replayable. The roster still
+    vouches every form for its own families."""
+    _kwargs, provider = _dispatch_provider_block(
+        monkeypatch, model,
+        _replay_assistant_turn(reasoning_details=[
+            {"type": "reasoning.summary", "summary": "s"},
+            {"type": "reasoning.encrypted", "data": "blob"},
+        ]),
+    )
+
+    assert (provider.get("allow_fallbacks") is False) is pinned
 
 
 def test_body_error_reroute_preserves_reasoning_for_portable_family():
@@ -416,6 +471,31 @@ def test_body_error_reroute_preserves_reasoning_for_portable_family():
     # 400 signature-rejection path (default allow_portable_reasoning=False): strips even portable
     sig400 = inst._reroute_same_model_kwargs(target, _mk("google/gemini-3.5-flash"))
     assert LLMClient._has_replayed_reasoning_metadata(sig400["messages"]) is False
+
+
+def test_body_error_reroute_preserves_plain_reasoning_for_any_family():
+    """The rate-limit reroute keeps an UNSIGNED readable artifact for a non-roster
+    family too — its portability is a property of the artifact, not of the vendor
+    (issue #468). The sticky session key is still rotated: replaying the old
+    ``session_id`` would land the retry back on the endpoint that just 429'd."""
+    inst = LLMClient.__new__(LLMClient)
+    kwargs = {
+        "model": "deepseek/deepseek-v4-flash-0731",
+        "messages": [
+            {"role": "assistant", "reasoning_details": [{"type": "reasoning.text", "text": "t"}]},
+            {"role": "user", "content": "hi"},
+        ],
+        "extra_body": {"provider": {}, "session_id": "ouroboros-session-old"},
+    }
+
+    out = inst._reroute_same_model_kwargs(
+        {"supports_openrouter_extensions": True}, kwargs, allow_portable_reasoning=True,
+    )
+
+    assert out is not None
+    assert out["messages"][0]["reasoning_details"] == [{"type": "reasoning.text", "text": "t"}]
+    assert out["extra_body"]["session_id"] != "ouroboros-session-old"
+    assert out["extra_body"]["session_id"].startswith("ouroboros-session-")
 
 
 def test_openrouter_signature_error_retries_once_with_reasoning_stripped(monkeypatch):
@@ -998,3 +1078,239 @@ def test_genuine_400_body_error_is_not_strip_retried():
     )
     assert resp.model_dump().get("error", {}).get("code") == 400
     assert len(calls) == 1
+
+
+# --- issue #468: shape-first sealed-reasoning classification -------------------
+
+def _sealed(details=None, content=None, model="z-ai/glm-4.6", **extra):
+    from ouroboros.reasoning_artifacts import transcript_has_sealed_reasoning
+
+    msg = {"role": "assistant", **extra}
+    if details is not None:
+        msg["reasoning_details"] = details
+    if content is not None:
+        msg["content"] = content
+    return transcript_has_sealed_reasoning([{"role": "user", "content": "q"}, msg], model)
+
+
+@pytest.mark.parametrize("kwargs,expected", [
+    # --- portable for EVERY family: readable text carries no endpoint binding ---
+    ({"details": [{"type": "reasoning.text", "text": "t"}]}, False),
+    ({"details": [{"type": "reasoning.summary", "summary": "s"}]}, False),
+    # A sidecar ``data`` on a READABLE type must not seal: opaqueness is a property
+    # of the TYPE. Reading it as "has data => opaque" is how #468 comes back dressed up.
+    ({"details": [{"type": "reasoning.text", "text": "t", "data": "x"}]}, False),
+    # ``None``/``""`` is how providers spell "unsigned" on a readable artifact.
+    ({"details": [{"type": "reasoning.text", "text": "t", "signature": None}]}, False),
+    ({"details": [{"type": "reasoning.text", "text": "t", "signature": ""}]}, False),
+    ({"details": [{"type": "reasoning.text", "text": "t", "signature": "  "}]}, False),
+    ({"content": [{"type": "thinking", "thinking": "p"}]}, False),
+    ({"content": [{"type": "reasoning", "text": "p"}]}, False),
+    ({"reasoning": "plain chain of thought"}, False),
+    ({"reasoning_content": "plain chain of thought"}, False),
+    ({"response_id": "gen-1"}, False),  # an identifier is not an artifact (Q3)
+    ({}, False),
+    # --- sealed for a non-roster family ---
+    ({"details": [{"type": "reasoning.text", "text": "t", "signature": "sig"}]}, True),
+    # A signed SUMMARY seals too: a signature is an endpoint binding wherever it
+    # rides on a readable entry (fail-closed; roast finding F6).
+    ({"details": [{"type": "reasoning.summary", "summary": "s", "signature": "sig"}]}, True),
+    # Non-string truthy flat reasoning fields are unrecognized shapes => fail-closed.
+    ({"reasoning": {"weird": "dict"}}, True),
+    ({"reasoning_content": ["weird", "list"]}, True),
+    # A truthy NON-STRING signature is an unrecognized shape => fail-closed too.
+    ({"details": [{"type": "reasoning.text", "text": "t", "signature": 123}]}, True),
+    ({"content": [{"type": "thinking", "thinking": "p", "signature": b"sig"}]}, True),
+    # FALSY-present reasoning_details is the common JSON idiom for "no reasoning at
+    # all" — NOT an artifact. Sealing it would pin transcripts with zero reasoning
+    # (the response_id bug class); parity with the presence predicate's truthiness.
+    ({"details": {}}, False),
+    ({"details": ""}, False),
+    ({"details": 0}, False),
+    ({"details": False}, False),
+    ({"reasoning_details": None}, False),  # explicit present-null via **extra
+    ({"details": [{"type": "reasoning.encrypted", "data": "blob"}]}, True),
+    ({"details": [{"type": "reasoning.brand_new_shape"}]}, True),  # unknown => fail-closed
+    ({"details": [{"no_type": 1}]}, True),
+    ({"details": "not-a-list"}, True),                             # malformed => fail-closed
+    ({"details": {"type": "reasoning.text"}}, True),
+    ({"content": [{"type": "redacted_thinking", "data": "blob"}]}, True),
+    ({"content": [{"type": "thinking", "thinking": "p", "signature": "sig"}]}, True),
+    ({"content": [{"type": "text", "text": "hi", "signature": "stray"}]}, True),
+])
+def test_sealed_classifier_single_forms(kwargs, expected):
+    """One artifact form at a time, on a NON-ROSTER family, so the verdict is the
+    shape's alone."""
+    assert _sealed(**kwargs) is expected
+
+
+@pytest.mark.parametrize("model", ["anthropic/claude-sonnet-4.6", "google/gemini-3.5-flash",
+                                   "~google/gemini-3.5-flash", " anthropic/claude-opus-5 ",
+                                   "Anthropic/Claude-Opus-5"])
+@pytest.mark.parametrize("form", [
+    {"details": [{"type": "reasoning.encrypted", "data": "blob"}]},
+    {"details": [{"type": "reasoning.text", "text": "t", "signature": "sig"}]},
+    {"details": [{"type": "reasoning.unknown_future"}]},
+    {"content": [{"type": "redacted_thinking", "data": "blob"}]},
+])
+def test_signed_portable_roster_vouches_every_opaque_form(model, form):
+    """The roster is the SECOND axis and it vouches ALL non-plain forms for its
+    families — exactly the exemption they held before the classifier, so their
+    same-model failover behavior is byte-for-byte unchanged. Model ids are
+    normalized (leading ``~``, surrounding whitespace) before the prefix test."""
+    assert _sealed(model=model, **form) is False
+
+
+def test_sealed_classifier_ignores_malformed_transcript_entries():
+    from ouroboros.reasoning_artifacts import transcript_has_sealed_reasoning
+
+    assert transcript_has_sealed_reasoning([], "z-ai/glm-4.6") is False
+    assert transcript_has_sealed_reasoning(["not-a-dict", None], "z-ai/glm-4.6") is False
+    assert transcript_has_sealed_reasoning(
+        ["not-a-dict", {"reasoning_details": [{"type": "reasoning.encrypted"}]}],
+        "z-ai/glm-4.6",
+    ) is True
+
+
+def test_sealed_artifact_label_is_a_bounded_vocabulary():
+    """The label rides into usage telemetry, so it must come from a closed host-owned
+    set — never provider-controlled text."""
+    from ouroboros.reasoning_artifacts import sealed_reasoning_artifact
+
+    cases = {
+        "encrypted": [{"type": "reasoning.encrypted", "data": "b"}],
+        "signed_text": [{"type": "reasoning.text", "signature": "s"}],
+        "unknown_type": [{"type": "reasoning.mystery"}],
+        "reasoning_details_malformed": "not-a-list",
+    }
+    for label, details in cases.items():
+        assert sealed_reasoning_artifact(
+            [{"role": "assistant", "reasoning_details": details}], "z-ai/glm-4.6",
+        ) == label
+    assert sealed_reasoning_artifact(
+        [{"role": "assistant", "content": [{"type": "redacted_thinking"}]}], "z-ai/glm-4.6",
+    ) == "redacted_thinking"
+
+
+# --- issue #468: gap-merge against the owner provider policy -------------------
+
+@pytest.mark.parametrize("details,expect_pin", [
+    ([{"type": "reasoning.encrypted", "data": "blob"}], True),
+    ([{"type": "reasoning.text", "text": "t"}], False),
+])
+def test_owner_allow_fallbacks_policy_loses_only_to_a_sealed_pin(monkeypatch, details, expect_pin):
+    """The owner's ``OUROBOROS_OR_PROVIDER`` resilience policy is honored unless the
+    continuity pin would be silently overwritten into a GUARANTEED 400. A portable
+    transcript has no such pin, so ``allow_fallbacks:true`` must reach the wire — that
+    is the exact configuration issue #468 was filed against."""
+    monkeypatch.setenv(
+        "OUROBOROS_OR_PROVIDER", '{"allow_fallbacks": true, "require_parameters": true}',
+    )
+    _kwargs, provider = _dispatch_provider_block(
+        monkeypatch, "deepseek/deepseek-v4-flash-0731",
+        _replay_assistant_turn(reasoning_details=details),
+    )
+
+    assert provider["require_parameters"] is True
+    assert provider["allow_fallbacks"] is (False if expect_pin else True)
+
+
+# --- issue #468: pin telemetry ------------------------------------------------
+
+def _pin_usage(model, messages, monkeypatch):
+    """Drive a real send through the retry ladder and return the normalized usage."""
+    client = LLMClient()
+    monkeypatch.setattr(client, "_get_supported_parameters", lambda _model_id: None)
+    target = client._resolve_remote_target(model)
+    kwargs = client._build_remote_kwargs(
+        target, messages, "medium", 512, "auto", None, None,
+    )
+
+    class _Resp:
+        def model_dump(self):
+            return {
+                "id": "gen-1", "provider": "Fireworks",
+                "choices": [{"message": {"content": "ok"}, "finish_reason": "stop"}],
+                "usage": {"prompt_tokens": 1, "completion_tokens": 1,
+                          # A provider usage extension must not be able to spoof the
+                          # host-owned pin fact.
+                          "reasoning_pin": {"sealed": False, "artifact": "spoofed"}},
+            }
+
+    resp = client._create_chat_completion_with_retries(lambda **_kw: _Resp(), kwargs, target)
+    _msg, usage = client._normalize_remote_response(
+        resp.model_dump(), target, skip_cost_fetch=True,
+    )
+    return usage
+
+
+def test_sealed_pin_is_disclosed_in_usage(monkeypatch):
+    """Why same-model failover was withheld must be recoverable from the call's own
+    usage record, not by excavating observability blobs (issue #468)."""
+    usage = _pin_usage(
+        "z-ai/glm-4.6",
+        _replay_assistant_turn(
+            reasoning_details=[{"type": "reasoning.encrypted", "data": "blob"}],
+        ),
+        monkeypatch,
+    )
+
+    assert usage["reasoning_pin"] == {"sealed": True, "artifact": "encrypted"}
+    assert usage["response_provider"] == "Fireworks"
+
+
+def test_portable_transcript_discloses_no_pin(monkeypatch):
+    usage = _pin_usage(
+        "z-ai/glm-4.6",
+        _replay_assistant_turn(reasoning_details=[{"type": "reasoning.text", "text": "t"}]),
+        monkeypatch,
+    )
+
+    # The spoofed provider-supplied key is popped and NOT replaced: no pin, no fact.
+    assert "reasoning_pin" not in usage
+
+
+def test_pin_fact_follows_the_terminal_candidate_not_the_built_one(monkeypatch):
+    """The recovery ladder can strip reasoning and drop the pin. The disclosure is
+    staged on send SUCCESS, so it describes what actually reached the wire — a
+    build-time guess would report a pin the terminal request never carried."""
+    client = LLMClient()
+    monkeypatch.setattr(client, "_get_supported_parameters", lambda _model_id: None)
+    target = client._resolve_remote_target("z-ai/glm-4.6")
+    kwargs = client._build_remote_kwargs(
+        target,
+        _replay_assistant_turn(
+            reasoning_details=[{"type": "reasoning.encrypted", "data": "blob"}],
+        ),
+        "medium", 512, "auto", None, None,
+    )
+    assert kwargs["extra_body"]["provider"]["allow_fallbacks"] is False
+
+    sent = []
+
+    class _Resp:
+        def __init__(self, dump):
+            self._dump = dump
+
+        def model_dump(self):
+            return self._dump
+
+    rate_limited = {"error": {"code": 429, "message": "rate"}, "choices": None}
+    healthy = {"id": "gen-2", "provider": "Nebius",
+               "choices": [{"message": {"content": "ok"}}],
+               "usage": {"prompt_tokens": 1, "completion_tokens": 1}}
+
+    def fake_create(**call_kwargs):
+        sent.append(call_kwargs)
+        return _Resp(rate_limited if len(sent) == 1 else healthy)
+
+    resp = client._create_chat_completion_with_retries(fake_create, kwargs, target)
+    _msg, usage = client._normalize_remote_response(
+        resp.model_dump(), target, skip_cost_fetch=True,
+    )
+
+    # The reroute stripped the sealed artifact and unpinned; the terminal candidate
+    # carried no pin, so no pin is disclosed.
+    assert len(sent) == 2
+    assert "allow_fallbacks" not in sent[-1].get("extra_body", {}).get("provider", {})
+    assert "reasoning_pin" not in usage

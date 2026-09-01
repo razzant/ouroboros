@@ -10,7 +10,6 @@ from __future__ import annotations
 
 import os
 import pathlib
-import re
 from dataclasses import dataclass
 from typing import Any, Iterable, Literal, Optional
 
@@ -155,69 +154,17 @@ _TOP_LEVEL_PRINCIPAL_PROFILES: frozenset[str] = frozenset({
 })
 
 _READ_OPS = frozenset({"read", "list", "search"})
-_USER_FILES_SECRET_COMPONENTS = frozenset({
-    ".aws",
-    ".azure",
-    ".config",
-    ".docker",
-    ".git",   # v6.52.0: VCS internals hold config + stored credentials
-    ".gnupg",
-    ".hg",
-    ".kube",
-    ".local",
-    ".netrc",
-    ".ssh",
-    ".svn",
-    "library",
-})
-_USER_FILES_SECRET_NAMES = frozenset({
-    ".env",
-    # v6.52.0: credential / shell-init / history dotFILES kept blocked AFTER the bare
-    # `startswith('.')` block was dropped (so benign project dotdirs are readable while
-    # secret-bearing dotfiles are not).
-    ".bash_history",
-    ".bash_profile",
-    ".bashrc",
-    ".dockercfg",
-    ".git-credentials",
-    ".gitconfig",
-    ".htpasswd",
-    ".npmrc",
-    ".pgpass",
-    ".profile",
-    ".pypirc",
-    ".python_history",
-    ".zsh_history",
-    ".zprofile",
-    ".zshrc",
-    "auth.json",
-    "credentials",
-    "credentials.json",
-    "secrets.json",
-    "settings.json",
-    "token.json",
-    "tokens.json",
-})
-_USER_FILES_SECRET_RE = re.compile(r"(?:^|[._-])(api[_-]?key|credential|password|secret|token)(?:[._-]|$)", re.I)
-# v6.52.0 (P1): a SMALL allowlist of benign hidden (dot) project components. The dotfile guard
-# is DEFAULT-DENY: a credential blocklist can never be exhaustive (e.g. ~/.terraform.d,
-# ~/.cargo/credentials.toml, ~/.oci/config, ~/.pip/pip.conf, ~/.m2/settings.xml, ~/.*_history all
-# leak under enumeration), so a dotted component is blocked UNLESS it is one of these known-safe
-# project-config dirs/files. This serves the goal (read .github/.vscode/.idea project config)
-# without opening the whole in-home dotfile space.
-_USER_FILES_ALLOWED_DOTNAMES = frozenset({
-    ".github",
-    ".gitlab",
-    ".circleci",
-    ".devcontainer",
-    ".vscode",
-    ".idea",
-    ".gitignore",
-    ".gitattributes",
-    ".gitmodules",
-    ".dockerignore",
-    ".editorconfig",
-})
+# Operations that can MUTATE a root. "vcs" is deliberately not write-like on its
+# own: read-only children carry {read,list,search,vcs} only so their status/diff
+# bindings resolve (the registry tool allowlist exposes no mutating vcs names to
+# them), and every profile that can actually mutate through vcs also holds
+# write/edit/shell on the same root — property-pinned by the projection test.
+_WRITE_LIKE_OPS: frozenset[str] = frozenset({"write", "edit", "shell", "service"})
+# The credential-shape dictionaries/regex live in ouroboros.credential_shapes
+# (capinv-447): user_files READ authorization for the root principal is
+# location-only, so this module must not import the name shapes at module
+# level — only the MUTATION branch of user_files_path_block_reason reaches
+# them, via a function-local import (pinned by the import-boundary test).
 
 _TOP_LEVEL_PRINCIPAL_POLICY: dict[str, set[str]] = {
     "active_workspace": {"read", "list", "search", "write", "edit", "shell", "vcs", "review", "service"},
@@ -310,8 +257,8 @@ def is_external_workspace(ctx: Any) -> bool:
     External-workspace tasks operate on a pre-existing working tree somewhere on
     the host (container scratch, a repo cloned under ``/tmp`` or ``/build``,
     etc.). They legitimately read, run commands, and use git OUTSIDE the user
-    home, while the Ouroboros runtime (system repo + data drive) and
-    credential-like files stay protected by the per-path guards. ``self_worktree``
+    home, while the Ouroboros runtime (system repo + data drive) stays
+    protected by the per-path location guards. ``self_worktree``
     and ``genesis`` are acting-subagent SURFACES (``acting_subagent`` profile),
     never this profile, so they keep full home/runtime confinement.
     """
@@ -547,11 +494,13 @@ def filesystem_affordance_map(ctx: Any, *, runtime_mode: str = "") -> dict[str, 
 
     profile = active_tool_profile(ctx)
     policy = _POLICY.get(profile, {})
-    write_like = {"write", "edit", "shell", "vcs", "service"}
-    writable_roots = sorted(root for root, ops in policy.items() if ops & write_like)
+    # H2 (capinv-447): a root is writable iff a MUTATING operation is granted on
+    # it. Grouping "vcs" as write-like claimed writable roots for the read-only
+    # child profile (status/diff-only vcs), contradicting summarize_subagent_profile.
+    writable_roots = sorted(root for root, ops in policy.items() if ops & _WRITE_LIKE_OPS)
     readonly_roots = sorted(
         root for root, ops in policy.items()
-        if ops and not (ops & write_like) and ops <= (_READ_OPS | {"review", "delegate"})
+        if ops and not (ops & _WRITE_LIKE_OPS)
     )
     shell_roots = _side_effect_free_process_roots(ctx, "shell")
     service_roots = _side_effect_free_process_roots(ctx, "service")
@@ -887,16 +836,28 @@ def user_files_path_block_reason(
     candidate: pathlib.Path,
     *,
     allow_protected_descendants: bool = False,
+    operation: str = "",
 ) -> str:
-    """Return a block reason when candidate is not an external user file."""
+    """Return a block reason when candidate is not an external user file.
+
+    Location checks (outside-home, control-plane overlap) apply to every
+    operation. The credential-shape name gate applies ONLY to non-read
+    operations (capinv-447 / В23=A): the ROOT principal reads the owner's home
+    in full — secret bytes are masked at egress, not refused at read time —
+    while writes/edits/shell targets keep the shape deny (overwriting
+    ~/.bashrc or ~/.ssh material is a persistence hazard, not a read).
+    ``operation=""`` (unknown caller) keeps the shape deny, fail-closed for
+    mutation surfaces. Children never hold a user_files grant (profile
+    policy), so the read-side lift is root-only by construction.
+    """
 
     resolved = pathlib.Path(candidate).expanduser().resolve(strict=False)
     home = _user_files_root()
     outside_home = not path_is_relative_to(resolved, home) and not _path_is_relative_to_casefold(resolved, home)
     # External-workspace tasks may reach host scratch outside home (/tmp, /build,
-    # sibling checkouts). The runtime-overlap and credential guards BELOW still
-    # run on the full path, so the Ouroboros repo/data drive and secret-like
-    # files stay protected even when home confinement is lifted.
+    # sibling checkouts). The runtime-overlap guard BELOW still runs on the full
+    # path, so the Ouroboros repo/data drive stays protected even when home
+    # confinement is lifted.
     if outside_home and not is_external_workspace(ctx):
         return f"path is outside user home {home}"
 
@@ -931,7 +892,7 @@ def user_files_path_block_reason(
     # The configured Deliverables container is an INTENDED user-output root, allowed past the
     # workspace-overlap guard — but ONLY when it is a genuine sibling: a misconfigured
     # OUROBOROS_DELIVERABLES_ROOT that overlaps or contains a HARD data/repo/budget drive must NOT
-    # open a bypass. The outside-home, credential, and hidden-name checks still apply regardless.
+    # open a bypass. The outside-home check (and, for mutations, the shape gate) still applies.
     in_deliverables = False
     try:
         _deliverables = _deliverables_root()
@@ -970,33 +931,14 @@ def user_files_path_block_reason(
                     "or root=skill_payload instead"
                 )
 
-    try:
-        parts = resolved.relative_to(home).parts
-    except ValueError:
-        parts = resolved.parts
-    for part in parts:
-        if not part:
-            continue
-        part_lower = part.lower()
-        # v6.52.0 (P1): DEFAULT-DENY hidden (dot) components. Known secret/credential/VCS dirs
-        # are always blocked; ANY OTHER dotted component is blocked too UNLESS it is in the small
-        # benign allowlist (.github/.vscode/.idea/...). Benign project dotdirs become readable
-        # (the owner's goal) while the in-home dotfile space stays safe-by-default — an enumerated
-        # blocklist would leak credential stores like ~/.terraform.d, ~/.cargo, ~/.pip, etc.
-        if part_lower in _USER_FILES_SECRET_COMPONENTS:
-            return "path is hidden or credential-like (secret/credential directory)"
-        if part.startswith(".") and part_lower not in _USER_FILES_ALLOWED_DOTNAMES:
-            return "path is hidden or credential-like (non-allowlisted hidden component)"
-    name = resolved.name
-    name_lower = name.lower()
-    if (
-        name_lower in _USER_FILES_SECRET_NAMES
-        or _USER_FILES_SECRET_RE.search(name)
-        or name_lower.endswith((".key", ".pem", ".p12", ".pfx"))
-    ):
-        return "path name is credential-like"
+    if operation in _READ_OPS:
+        # Root READ authorization is location-only (capinv-447 / В23=A) — the
+        # name shapes are never consulted here, so this branch must stay free
+        # of any credential_shapes import (import-boundary test).
+        return ""
+    from ouroboros.credential_shapes import user_files_mutation_shape_reason
 
-    return ""
+    return user_files_mutation_shape_reason(resolved, home)
 
 
 class UserFilesPathBlockedError(ValueError):
@@ -1016,6 +958,7 @@ def resolve_user_file_path(
     *,
     allow_protected_descendants: bool = False,
     allow_outside_home: bool = False,
+    operation: str = "",
 ) -> pathlib.Path:
     """Resolve a user_files path under the user's home and outside Ouroboros control-plane roots.
 
@@ -1105,6 +1048,7 @@ def resolve_user_file_path(
         ctx,
         candidate,
         allow_protected_descendants=allow_protected_descendants,
+        operation=operation,
     )
     if reason:
         raise UserFilesPathBlockedError(f"user_files path blocked: {reason}")
@@ -1377,6 +1321,7 @@ def _resolve_target_in_selected_base(
             ctx,
             path,
             allow_protected_descendants=operation in {"list", "search"},
+            operation=operation,
         )
     resolved_base = pathlib.Path(base_path).resolve(strict=False)
     path_text = str(path or ".")

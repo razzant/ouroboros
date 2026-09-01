@@ -113,8 +113,15 @@ class MCPServerRuntime:
     last_attempted: str = ""
 
 
-def _slugify(value: str, *, max_len: int) -> str:
-    """Return a provider-safe slug, hashing truncated tails to avoid collisions."""
+def _slugify(value: str, *, max_len: int, injective: bool = False) -> str:
+    """Return a provider-safe slug, hashing truncated tails to avoid collisions.
+
+    ``injective=True`` (E5, capinv-447) also appends the hash tail whenever the
+    character-class normalization was LOSSY (case folding, ``-``/``.`` → ``_``),
+    so distinct legal MCP tool names like ``get-user`` / ``get_user`` /
+    ``get.User`` can no longer collide into one slug and silently drop tools.
+    Server ids stay non-injective: their slugs are persisted settings/UI keys.
+    """
     text = str(value or "").strip()
     if not text:
         return ""
@@ -122,9 +129,10 @@ def _slugify(value: str, *, max_len: int) -> str:
     safe = re.sub(r"_+", "_", safe).strip("_").lower()
     if not safe:
         return ""
-    if len(safe) <= max_len:
+    lossy = injective and safe != text
+    if len(safe) <= max_len and not lossy:
         return safe
-    digest = hashlib.sha1(text.encode("utf-8", errors="replace")).hexdigest()[:6]
+    digest = hashlib.sha1(text.encode("utf-8", errors="replace")).hexdigest()[:12]
     keep = max_len - len(digest) - 1
     if keep <= 0:
         return digest
@@ -139,7 +147,7 @@ def canonical_server_id(value: str) -> str:
 def make_tool_name(server_id: str, tool_name: str) -> str:
     """Return provider-safe ``mcp_<server>__<tool>``."""
     server_slug = canonical_server_id(server_id)
-    tool_slug = _slugify(tool_name, max_len=_MAX_TOOL_SLUG)
+    tool_slug = _slugify(tool_name, max_len=_MAX_TOOL_SLUG, injective=True)
     if not server_slug or not tool_slug:
         return ""
     candidate = f"{TOOL_NAME_PREFIX}{server_slug}__{tool_slug}"
@@ -433,16 +441,38 @@ async def _list_tools_async(cfg: MCPServerConfig, *, timeout_sec: int) -> List[D
                 read, write = streams.read, streams.write  # pragma: no cover
             async with ClientSession(read, write) as session:
                 await session.initialize()
-                result = await session.list_tools()
+                # Follow nextCursor (E5, capinv-447): the MCP listing is paginated
+                # and a single call silently loses every tool after page one. The
+                # page bound only guards against a cursor loop from a broken server.
                 tools_raw: List[Dict[str, Any]] = []
-                for tool in result.tools or []:
-                    tools_raw.append(
-                        {
-                            "name": getattr(tool, "name", ""),
-                            "description": getattr(tool, "description", "") or "",
-                            "input_schema": getattr(tool, "inputSchema", {}) or {},
-                        }
+                cursor: Any = None
+                for _page in range(50):
+                    result = await (
+                        session.list_tools(cursor=cursor) if cursor else session.list_tools()
                     )
+                    for tool in result.tools or []:
+                        tools_raw.append(
+                            {
+                                "name": getattr(tool, "name", ""),
+                                "description": getattr(tool, "description", "") or "",
+                                "input_schema": getattr(tool, "inputSchema", {}) or {},
+                            }
+                        )
+                    cursor = getattr(result, "nextCursor", None)
+                    if not cursor:
+                        break
+                else:
+                    if cursor:
+                        # Cap exhausted with pages remaining: a partial catalog
+                        # must not read as the complete one (#447 P1).
+                        tools_raw.append({
+                            "name": "",
+                            "_pagination_truncated": True,
+                        })
+                        log.warning(
+                            "MCP tool listing stopped at the 50-page bound with "
+                            "nextCursor still present; catalog is PARTIAL",
+                        )
                 return tools_raw
 
     return await asyncio.wait_for(
@@ -487,11 +517,16 @@ def _stringify_call_result(result: Any) -> str:
             parts.append(json.dumps(_serialize_content_part(item), ensure_ascii=False))
         except Exception:
             parts.append(repr(item))
-    if not parts and getattr(result, "structuredContent", None):
+    # structuredContent is protocol data in its own right (E5, capinv-447):
+    # carry it even when text/content parts exist, unless it duplicates one.
+    structured = getattr(result, "structuredContent", None)
+    if structured is not None:
         try:
-            parts.append(json.dumps(result.structuredContent, ensure_ascii=False))
+            dumped = json.dumps(structured, ensure_ascii=False)
         except Exception:
-            parts.append(repr(result.structuredContent))
+            dumped = repr(structured)
+        if dumped not in parts:
+            parts.append(f"structuredContent: {dumped}" if parts else dumped)
     body = "\n\n".join(parts).strip() or "(empty result)"
     if is_error:
         return f"⚠️ MCP_TOOL_ERROR: {body}"
@@ -505,6 +540,19 @@ def _serialize_content_part(item: Any) -> Dict[str, Any]:
         value = getattr(item, attr, None)
         if value is not None and not callable(value):
             out[attr] = value
+    # EmbeddedResource carries its payload in a NESTED resource object (E5,
+    # capinv-447): omitting it dropped the text/blob of every embedded resource.
+    resource = getattr(item, "resource", None)
+    if resource is not None and not callable(resource):
+        nested: Dict[str, Any] = {}
+        for attr in ("uri", "mimeType", "text", "blob"):
+            value = getattr(resource, attr, None)
+            if value is not None and not callable(value):
+                nested[attr] = str(value) if attr == "uri" else value
+        if nested:
+            out["resource"] = nested
+    if "uri" in out:
+        out["uri"] = str(out["uri"])  # AnyUrl is not JSON-serializable
     return out
 
 
@@ -745,6 +793,14 @@ class MCPManager:
                     target.tools = []
             return {"ok": False, "error": err_text}
 
+        pagination_truncated = any(
+            isinstance(item, dict) and item.get("_pagination_truncated")
+            for item in tools_raw
+        )
+        tools_raw = [
+            item for item in tools_raw
+            if not (isinstance(item, dict) and item.get("_pagination_truncated"))
+        ]
         normalized = [
             MCPTool(
                 server_id=cfg.id,
@@ -757,14 +813,33 @@ class MCPManager:
             if str(item.get("name") or "").strip()
         ]
         normalized = [tool for tool in normalized if tool.prefixed_name]
-        # Drop duplicates caused by slug collisions.
+        # A residual slug collision (12-hex tail makes it astronomically rare)
+        # drops a tool — that is a capability omission and must be DISCLOSED,
+        # not silently swallowed (#447 P1).
         seen: set = set()
         deduped: List[MCPTool] = []
+        collided: List[str] = []
         for tool in normalized:
             if tool.prefixed_name in seen:
+                collided.append(tool.raw_name)
                 continue
             seen.add(tool.prefixed_name)
             deduped.append(tool)
+        omission_notes: List[str] = []
+        if collided:
+            log.warning(
+                "MCP server %s: %d tool(s) dropped by slug collision: %s",
+                server_id, len(collided), ", ".join(collided[:5]),
+            )
+            omission_notes.append(
+                f"{len(collided)} tool(s) unavailable due to slug collision: "
+                + ", ".join(collided[:5])
+            )
+        if pagination_truncated:
+            omission_notes.append(
+                "tool catalog is PARTIAL: listing stopped at the 50-page bound "
+                "with more pages remaining"
+            )
 
         finished_at = datetime.now(timezone.utc).isoformat()
         with self._lock:
@@ -776,7 +851,10 @@ class MCPManager:
                 }
             if target is not None:
                 target.tools = deduped
-                target.last_error = ""
+                # A successful refresh with omissions keeps the omission note
+                # visible (#447 P1): partial catalog / collided tools must not
+                # read as a clean complete listing.
+                target.last_error = "; ".join(omission_notes)
                 target.last_attempted = attempted_at
                 target.last_refreshed = finished_at
         return {
@@ -839,10 +917,18 @@ class MCPManager:
             tools_raw = _run_async(lambda: self._async_list_tools(cfg, timeout), join_timeout=timeout + 3)
         except BaseException as exc:  # noqa: BLE001
             return {"ok": False, "error": f"{type(exc).__name__}: {_redact_error_text(exc, cfg)}"}
+        truncated = any(
+            isinstance(t, dict) and t.get("_pagination_truncated") for t in tools_raw
+        )
+        tools_raw = [
+            t for t in tools_raw
+            if not (isinstance(t, dict) and t.get("_pagination_truncated"))
+        ]
         return {
             "ok": True,
             "server_id": cfg.id,
             "tool_count": len(tools_raw),
+            **({"pagination_truncated": True} if truncated else {}),
             "tools": [
                 {
                     "name": str(t.get("name") or ""),

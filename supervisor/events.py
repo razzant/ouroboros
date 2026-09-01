@@ -661,6 +661,9 @@ def _handle_llm_usage(evt: Dict[str, Any], ctx: Any) -> None:
     # what the native web-search tool actually fetched — the search happens on the
     # provider side and never appears in tools.jsonl.
     web_search_sources = usage.get("web_search_sources")
+    # Host-owned sealed-reasoning pin fact (issue #468): why same-model provider
+    # failover was withheld on this call. Bounded {"sealed", "artifact"} dict.
+    reasoning_pin = usage.get("reasoning_pin")
 
     usage_event = {
         "ts": evt.get("ts", utc_now_iso()),
@@ -691,6 +694,7 @@ def _handle_llm_usage(evt: Dict[str, Any], ctx: Any) -> None:
         "ledger_attempt_ids": ledger_attempt_ids,
         **({"chat_id": evt["chat_id"]} if evt.get("chat_id") is not None else {}),
         **({"web_search_sources": web_search_sources} if isinstance(web_search_sources, list) and web_search_sources else {}),
+        **({"reasoning_pin": reasoning_pin} if isinstance(reasoning_pin, dict) and reasoning_pin else {}),
     }
     _address_ctx(ctx, usage_event)
     try:

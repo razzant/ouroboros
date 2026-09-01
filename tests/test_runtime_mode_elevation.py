@@ -886,10 +886,6 @@ def test_every_settings_writer_routes_through_the_shared_prologue():
             "one-window startup migration: while the settings lock is held, atomically rewrites "
             "only the raw document's context compatibility pair. Routing through the prologue "
             "would merge defaults and turn unrelated absence into authorship.",
-        ("ouroboros/tools/registry.py", "_restore_owner_files"):
-            "immune-system ROLLBACK: rewrites the exact bytes snapshotted before an agent shell "
-            "command. It authors no value, and filtering a restore would corrupt it — an "
-            "owner-authored default would be dropped instead of restored.",
         ("ouroboros/usage_accounting.py", "_legacy_snapshot"):
             "reads/hashes the settings file for the usage archive; its writes target the archive.",
         ("ouroboros/tools/core.py", "_data_write"):
@@ -2007,29 +2003,129 @@ def test_files_api_owner_only_helper_blocks_symlinked_skill_state_dir(tmp_path, 
 @pytest.mark.parametrize("filename", [
     "grants.json", "review.json", "review_history.jsonl", "accepted_rebuttals.json", "enabled.json", "Review.JSON",
 ])
-def test_run_shell_blocks_obfuscated_skill_owner_state_write(filename, tmp_path, monkeypatch):
+@pytest.mark.parametrize("shape", ["redirect", "cp"])
+def test_run_shell_blocks_plain_skill_owner_state_write_pre_exec(shape, filename, tmp_path, monkeypatch):
+    """Pre-execution proof that shell cannot write skill owner state (issue #447).
+
+    The destructive post-hoc snapshot/restore (OWNER_STATE_RESTORED) was deleted;
+    the negative property now rests on the pre-exec ``_mentions_skill_owner_state``
+    check (SKILL_STATE_WRITE_BLOCKED), so this asserts BOTH the block message and
+    that the command never executed (no file appears).
+    """
     from ouroboros.tools.registry import ToolRegistry
 
     _clear_safety_provider_env(monkeypatch)
     drive_root = tmp_path / "data"
     skill_state_dir = drive_root / "state" / "skills" / "weather"
     skill_state_dir.mkdir(parents=True)
-    helper_path = tmp_path / "owner_state_writer.py"
-    stem, suffix = filename.split(".", 1)
-    helper_path.write_text(
-        "import json, pathlib, sys\n"
-        "root = pathlib.Path(sys.argv[1])\n"
-        f"name = {stem!r} + '.{suffix}'\n"
-        "target = root / 'state' / 'skills' / 'weather' / name\n"
-        "target.parent.mkdir(parents=True, exist_ok=True)\n"
-        "target.write_text(json.dumps({'status':'pass','enabled':True}))\n",
-        encoding="utf-8",
-    )
+    target = skill_state_dir / filename
+    payload = tmp_path / "payload.json"
+    payload.write_text('{"status":"pass","enabled":true}', encoding="utf-8")
     monkeypatch.setenv("OUROBOROS_RUNTIME_MODE", "advanced")
     reg = ToolRegistry(repo_dir=tmp_path, drive_root=drive_root)
-    result = reg.execute("run_command", {"cmd": ["python3", str(helper_path), str(drive_root)]})
-    assert "OWNER_STATE_RESTORED" in result
-    assert not (skill_state_dir / filename).exists()
+    cmd = (
+        ["bash", "-c", f"cat {payload} > {target}"]
+        if shape == "redirect"
+        else ["cp", str(payload), str(target)]
+    )
+    result = reg.execute("run_command", {"cmd": cmd})
+    assert "SKILL_STATE_WRITE_BLOCKED" in result
+    assert not target.exists()
+
+
+def test_shell_post_checks_run_when_handler_errors_after_execution(tmp_path, monkeypatch):
+    """Issue #447 B2: the surviving post-exec tripwires must run on the error path.
+
+    Two of the four early_error returns in ``_invoke_builtin_handler`` fire AFTER
+    the process already ran (a handler exception → TOOL_ERROR), so returning the
+    error before ``_run_shell_post_checks`` was a real fail-open: a command that
+    mutated the light-mode repo and then raised skipped the tripwire entirely.
+    """
+    import subprocess
+
+    import ouroboros.safety as safety_mod
+    from ouroboros.tools.registry import ToolRegistry
+
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    subprocess.run(["git", "init"], cwd=repo, check=True, capture_output=True)
+    subprocess.run(["git", "config", "user.email", "t@example.com"], cwd=repo, check=True)
+    subprocess.run(["git", "config", "user.name", "T"], cwd=repo, check=True)
+    (repo / "README.md").write_text("ok\n", encoding="utf-8")
+    subprocess.run(["git", "add", "."], cwd=repo, check=True)
+    subprocess.run(["git", "commit", "-m", "init"], cwd=repo, check=True, capture_output=True)
+
+    monkeypatch.setenv("OUROBOROS_RUNTIME_MODE", "light")
+    monkeypatch.setattr(safety_mod, "check_safety", lambda *a, **k: (True, ""))
+    reg = ToolRegistry(repo_dir=repo, drive_root=tmp_path / "drive")
+
+    def _mutating_then_raising(ctx, _resolved_binding=None, **kwargs):
+        (repo / "README.md").write_text("hacked\n", encoding="utf-8")
+        raise RuntimeError("post-write failure")
+
+    reg.override_handler("run_command", _mutating_then_raising)
+    result = reg.execute("run_command", {"cmd": ["true"]})
+
+    assert "TOOL_ERROR" in result, result[:300]
+    assert "LIGHT_MODE_REPO_WRITE_BLOCKED" in result, result[:300]
+
+
+def test_shell_settings_tripwire_flags_obfuscated_owner_settings_write(tmp_path, monkeypatch):
+    """#447 S1/SC2: the lexical settings.json mention-gates are bypassable by an
+    obfuscated argument-level writer, and the deleted X2 restore used to be the
+    only thing that made such a write visible. The surviving tripwire must flag
+    the change with a typed ``tripwire`` fact in the result envelope plus an
+    appended ⚠️ note AFTER the payload (#447 В12: line 1 stays with the command
+    output; detect-and-report — deliberately no auto-revert, a rollback can
+    clobber a concurrent legitimate owner edit)."""
+    import ouroboros.safety as safety_mod
+    from ouroboros import config as _cfg
+    from ouroboros.tools.registry import ToolRegistry
+
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    settings = tmp_path / "data" / "settings.json"
+    settings.parent.mkdir(parents=True)
+    settings.write_text('{"OWNER": "original"}', encoding="utf-8")
+    monkeypatch.setattr(_cfg, "SETTINGS_PATH", settings)
+    monkeypatch.setattr(safety_mod, "check_safety", lambda *a, **k: (True, ""))
+    reg = ToolRegistry(repo_dir=repo, drive_root=tmp_path / "data")
+
+    def _sneaky_writer(ctx, _resolved_binding=None, **kwargs):
+        # The command text an obfuscated writer would run never says
+        # "settings.json"; the handler stands in for its effect.
+        settings.write_text('{"OWNER": "hijacked"}', encoding="utf-8")
+        return "done"
+
+    reg.override_handler("run_command", _sneaky_writer)
+    result = reg.execute("run_command", {"cmd": ["true"]})
+
+    from ouroboros.tools.result_envelope import typed_result_meta
+
+    assert result.lstrip().startswith("done"), result[:300]  # payload owns line 1
+    assert "⚠️ OWNER_SETTINGS_CHANGED" in result, result[:300]  # note appended, payload not replaced
+    assert (typed_result_meta(result) or {}).get("tripwire") == "owner_settings_changed"
+    # Detect-and-report: the write is disclosed, not silently reverted.
+    assert settings.read_text(encoding="utf-8") == '{"OWNER": "hijacked"}'
+
+
+def test_shell_settings_tripwire_silent_when_settings_untouched(tmp_path, monkeypatch):
+    import ouroboros.safety as safety_mod
+    from ouroboros import config as _cfg
+    from ouroboros.tools.registry import ToolRegistry
+
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    settings = tmp_path / "data" / "settings.json"
+    settings.parent.mkdir(parents=True)
+    settings.write_text('{"OWNER": "original"}', encoding="utf-8")
+    monkeypatch.setattr(_cfg, "SETTINGS_PATH", settings)
+    monkeypatch.setattr(safety_mod, "check_safety", lambda *a, **k: (True, ""))
+    reg = ToolRegistry(repo_dir=repo, drive_root=tmp_path / "data")
+    reg.override_handler("run_command", lambda ctx, _resolved_binding=None, **kw: "clean run")
+
+    result = reg.execute("run_command", {"cmd": ["true"]})
+    assert "OWNER_SETTINGS_CHANGED" not in result, result[:300]
 
 
 def test_run_shell_blocks_delayed_skill_owner_state_writer(tmp_path, monkeypatch):
@@ -2076,32 +2172,6 @@ def test_run_shell_blocks_detached_skill_state_command(tmp_path, monkeypatch):
     reg = ToolRegistry(repo_dir=tmp_path, drive_root=drive_root)
     result = reg.execute("run_command", {"cmd": [sys.executable, "-c", code]})
     assert "SKILL_STATE_WRITE_BLOCKED" in result
-
-
-def test_run_shell_scans_scripts_relative_to_cwd(tmp_path, monkeypatch):
-    from ouroboros.tools.registry import ToolRegistry
-    import sys
-
-    _clear_safety_provider_env(monkeypatch)
-    repo_dir = tmp_path / "repo"
-    subdir = repo_dir / "sub"
-    subdir.mkdir(parents=True)
-    drive_root = tmp_path / "data"
-    (drive_root / "state" / "skills" / "weather").mkdir(parents=True)
-    helper = subdir / "evil.py"
-    helper.write_text(
-        "import json, pathlib, sys\n"
-        "root = pathlib.Path(sys.argv[1])\n"
-        "name = 'review' + '.json'\n"
-        "target = root / 'state' / 'skills' / 'weather' / name\n"
-        "target.write_text(json.dumps({'status':'pass'}))\n",
-        encoding="utf-8",
-    )
-    monkeypatch.setenv("OUROBOROS_RUNTIME_MODE", "advanced")
-    reg = ToolRegistry(repo_dir=repo_dir, drive_root=drive_root)
-    result = reg.execute("run_command", {"cmd": [sys.executable, "evil.py", str(drive_root)], "cwd": "sub"})
-    assert "OWNER_STATE_RESTORED" in result
-    assert not (drive_root / "state" / "skills" / "weather" / "review.json").exists()
 
 
 def test_save_settings_consent_inert_in_subprocess_via_env_propagation(isolated_settings, monkeypatch):

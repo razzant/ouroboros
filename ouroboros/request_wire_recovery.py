@@ -14,6 +14,7 @@ import inspect
 from dataclasses import dataclass, replace
 from typing import Any, Dict, Iterator, Mapping, Optional, Sequence, Tuple
 
+from ouroboros.openai_chat_custom import CustomToolProjectionError
 from ouroboros.request_wire_contract import (
     NESTED_REASONING_FIELD,
     OPTIONAL_REQUEST_FIELDS,
@@ -500,6 +501,24 @@ def prepare_wire_payload_for_send(
             if _direct_openai_tool_source(target, detached)
             else _prepare_durable_candidate(target, detached, api_surface)
         )
+    except CustomToolProjectionError:
+        # An unrepresentable catalog is a representation failure of the CUSTOM
+        # rung, not a malformed payload: fall to the function dialect (the
+        # canonical source form) so a registered candidate keeps state.current
+        # set and every retry rung stays reachable (E4). The generic clause
+        # below used to swallow this and send the raw payload with the ladder
+        # severed. The fallback bind gets its own catch: a catalog broken enough
+        # to also fail the FUNCTION bind (duplicate/unnamed tools) must degrade
+        # to the raw-send path below, not escape as a local ValueError that
+        # kills the call before anything reaches the provider.
+        try:
+            candidate = _prepare_direct_rung_candidate(
+                target, detached, api_surface,
+                dialect="function",
+                reason_code="requested_wire_form", ordinal=1,
+            )
+        except (TypeError, ValueError):
+            candidate = None
     except (TypeError, ValueError):
         candidate = None
     if candidate is None:
@@ -772,6 +791,12 @@ def _plan_retry(status_code: Optional[int], message: str) -> Optional[Dict[str, 
         )
         return candidate.physical_payload()
     except (TypeError, ValueError):
+        # CustomToolProjectionError (a ValueError) is included by DESIGN here,
+        # unlike prepare_wire_payload_for_send: the closed action vocabulary
+        # cannot mutate tools/messages/tool_choice, so a catalog that projected
+        # at bind time projects deterministically on retry, and an
+        # unrepresentable one can never succeed by retrying -- "no plan" is the
+        # correct plan, and the original provider error stays visible upstream.
         return None
 
 
@@ -812,6 +837,7 @@ def _plan_direct_dialect_retry(
         )
         return candidate.physical_payload()
     except (TypeError, ValueError):
+        # Includes CustomToolProjectionError on purpose -- see _plan_retry.
         return None
 
 

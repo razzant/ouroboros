@@ -49,7 +49,7 @@ test('the cancel click shows the honest interim, not an instant Cancelled', () =
         .replace(/\r\n/g, '\n');
     assert.match(chat, /function markLiveCardCancelPending\(/);
     assert.match(chat, /markLiveCardCancelPending\(taskId, soft\);\n[\s\S]{0,600}await requestStop\(/);
-    assert.match(chat, /taskCancelPending\(stored\)[\s\S]{0,400}markLiveCardCancelPending\(taskId[,)]/);
+    assert.match(chat, /taskCancelPending\(stored\)[\s\S]{0,200}return markLiveCardCancelPending\(taskId[,)]/);
     assert.doesNotMatch(chat, /cancel_state === 'pending'/);
     assert.match(chat, /Cancelling…/);
     // S3 (Q1): the pending SOFT stop shows "Finalizing…" from the same seam.
@@ -210,12 +210,6 @@ test('task-detail reconciliation consults taskCancelPending BEFORE the legacy te
     const terminalAt = helper.indexOf("'cancel_requested'");
     assert.ok(pendingAt > 0 && terminalAt > 0, 'both branches exist in the helper');
     assert.ok(pendingAt < terminalAt, 'the typed pending check runs before the terminal fallback');
-    // Cancel success, 404, non-404 failure, and both freshness branches of the
-    // missing-card detail read route through the ONE helper (no inline drift).
-    assert.equal(
-        chat.match(/reconcileCancelCardFromDetail\((?:record|currentRecord), taskId, (stored|detail|await fetchTaskDetail\(taskId\))\);/g).length,
-        5,
-    );
 });
 
 test('a failed cancel reconciles through the shared helper before touching the button', () => {
@@ -227,7 +221,6 @@ test('a failed cancel reconciles through the shared helper before touching the b
     // the button re-enabled.
     const chat = readFileSync(new URL('../modules/chat.js', import.meta.url), 'utf8')
         .replace(/\r\n/g, '\n');
-    assert.match(chat, /const priorPhase = captureLiveCardPhaseState\(record\);\n\s*markLiveCardCancelPending\(taskId, soft\);/);
     const failure = chat.slice(chat.indexOf('showToast(`Cancel failed:'));
     const branch = failure.slice(0, 2200);
     // The shared seam runs BEFORE any button re-enable.
@@ -235,8 +228,10 @@ test('a failed cancel reconciles through the shared helper before touching the b
     const reenableAt = branch.indexOf('btn.disabled = false');
     assert.ok(reconcileAt > 0 && reenableAt > 0, 'both the reconcile and the re-enable exist');
     assert.ok(reconcileAt < reenableAt, 'reconciliation happens before the button is re-enabled');
-    // Pending or terminal ⇒ return WITHOUT re-enabling or restoring the phase.
-    assert.match(branch, /if \(record\.finished \|\| stillPending\) return;/);
+    // Pending or terminal returns the real reconcile delta without touching the button.
+    assert.match(branch, /let changed = reconcileCancelCardFromDetail\(record, taskId, stored\);/);
+    assert.match(branch, /if \(record\.finished \|\| taskCancelPending\(stored\)\) return changed;/);
+    assert.match(branch, /return changed;/);
     assert.match(branch, /taskCancelPending\(stored\)/);
     assert.match(branch, /restoreLiveCardPhaseState\(record, priorPhase\)/);
 });

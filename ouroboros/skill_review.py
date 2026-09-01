@@ -15,6 +15,11 @@ from typing import Any, Dict, List, Optional
 
 from ouroboros.config import adaptive_quorum, get_auto_grant_enabled
 from ouroboros.reviewer_slot_config import commit_triad_delivery, reviewer_slot_config_error
+from ouroboros.skill_review_passes import (
+    SkillBinaryPayload as _SkillBinaryPayload,
+    binary_file_descriptor,
+    executable_magic_kind,
+)
 from ouroboros.skill_loader import (
     SkillReviewState,
     auto_grant_if_enabled,
@@ -65,8 +70,8 @@ log = logging.getLogger(__name__)
 # The reviewable skill payload is bound by ONE pack-level token budget (reusing the
 # review stack's SSOT REVIEW_PROMPT_TOKEN_BUDGET) instead of arbitrary per-file /
 # file-count BYTE caps: a 76 KB data file or a 41-file skill is fully reviewable when
-# the whole pack fits a 1M-context reviewer. Binary / unreadable files are still
-# refused (those are safety, not size). Headroom reserves the rest of the reviewer
+# the whole pack fits a 1M-context reviewer. Loadable executables / unreadable files
+# are still refused (safety, not size). Headroom reserves the rest of the reviewer
 # prompt (governance docs + checklist + framing) so the SKILL pack alone is bounded.
 _SKILL_PACK_TOKEN_HEADROOM = 120_000
 
@@ -77,16 +82,13 @@ def _skill_pack_token_budget() -> int:
 
 _SKILL_CHECKLIST_SECTION = "Skill Review Checklist"
 
-# Loadable native code is unreviewable by LLMs. All non-UTF-8 runtime-reachable
-# files are blocked; this set names common categories early in the error path.
+# Lexical download filter retained ONLY for the marketplace fetcher's coarse
+# pre-gate (ouroboros/marketplace/fetcher.py). Skill REVIEW itself judges file
+# CONTENT — loader magic bytes, see ``skill_review_passes.executable_magic_kind``
+# — never filenames (X4/В21): a renamed ELF is still blocked, while a text file
+# with a scary extension stays reviewable.
 _LOADABLE_BINARY_EXTENSIONS = frozenset(
-    {
-        ".so", ".dylib", ".dll",          # native shared libs
-        ".pyc", ".pyo",                    # precompiled Python
-        ".node",                           # Node.js native addons
-        ".wasm",                           # WebAssembly (loadable by node/python)
-        ".exe", ".bin",                    # generic executables
-    }
+    {".so", ".dylib", ".dll", ".pyc", ".pyo", ".node", ".wasm", ".exe", ".bin"}
 )
 
 class _SkillFileOverBudget(RuntimeError):
@@ -117,16 +119,6 @@ class _SkillFileUnreadable(RuntimeError):
         self.err = err
 
 
-class _SkillBinaryPayload(RuntimeError):
-    """Raised for non-UTF-8 runtime payloads that reviewers cannot inspect."""
-
-    def __init__(self, relpath: str, size_bytes: int) -> None:
-        super().__init__(
-            f"Skill file {relpath!r} is binary ({size_bytes} bytes); "
-            "review refuses opaque payloads in the executable surface."
-        )
-        self.relpath = relpath
-        self.size_bytes = size_bytes
 
 
 def _truncate_raw_result(text: str) -> str:
@@ -207,24 +199,29 @@ def _apply_auto_grant_outcome(outcome: SkillReviewOutcome, skill: Any, auto_gran
 
 # Prompt assembly
 
-def _read_skill_text(path: pathlib.Path, *, relpath: str = "") -> tuple[str, bytes]:
-    """Read a text skill file; refuse unreadable or binary payloads. The reviewable
-    SIZE is bound ONCE at the pack level (see ``_build_skill_file_packs``), not by an
-    arbitrary per-file byte cap, so a large legitimate text/data file is reviewable."""
+def _read_skill_file(
+    path: pathlib.Path, *, relpath: str = ""
+) -> tuple[Optional[str], bytes, Optional[Dict[str, Any]]]:
+    """Read one skill file: ``(text, sha256_digest, descriptor)`` — exactly one set.
+    Loadable executables (CONTENT magic bytes, never filename) hard-block review;
+    other non-UTF-8 files yield a typed descriptor instead of raw bytes."""
     try:
         data = path.read_bytes()
     except OSError as exc:
         # Fail closed; placeholders would let review pass over missing payload.
         raise _SkillFileUnreadable(relpath or path.name, exc) from exc
-    lowered = path.name.lower()
-    if any(lowered.endswith(ext) for ext in _LOADABLE_BINARY_EXTENSIONS):
-        raise _SkillBinaryPayload(relpath or path.name, len(data))
+    rel = relpath or path.name
     try:
-        text = data.decode("utf-8")
-    except UnicodeDecodeError as exc:
-        # Any non-UTF-8 runtime-reachable file blocks review.
-        raise _SkillBinaryPayload(relpath or path.name, len(data)) from exc
-    return text, hashlib.sha256(data).digest()
+        text: Optional[str] = data.decode("utf-8")
+    except UnicodeDecodeError:
+        text = None
+    kind = executable_magic_kind(data, is_utf8_text=text is not None)
+    if kind:
+        raise _SkillBinaryPayload(rel, len(data), kind)
+    digest = hashlib.sha256(data).digest()
+    if text is not None:
+        return text, digest, None
+    return None, digest, binary_file_descriptor(rel, data, filename=path.name)
 
 
 def _build_skill_file_packs(
@@ -242,9 +239,9 @@ def _build_skill_file_packs(
     truncated. A single file that alone exceeds the budget cannot be split without
     truncating it, so it raises ``_SkillFileOverBudget`` (honest-pending).
 
-    The bound is ONE pack-level token budget, not arbitrary per-file/file-count BYTE
-    caps. Binary / unreadable files are still refused by ``_read_skill_text`` (those
-    are safety, not size)."""
+    The bound is ONE pack-level token budget, not per-file BYTE caps. Loadable
+    executables (content magic bytes) / unreadable files are still refused by
+    ``_read_skill_file``; other non-UTF-8 files enter the pack as descriptors."""
     from ouroboros.skill_loader import _iter_payload_files, reduce_skill_content_hash  # pylint: disable=W0212
 
     skill_dir = skill_dir.resolve()
@@ -265,9 +262,14 @@ def _build_skill_file_packs(
     file_digests: List[tuple[str, bytes]] = []
     for file_path in files:
         rel = file_path.relative_to(skill_dir).as_posix()
-        body, file_digest = _read_skill_text(file_path, relpath=rel)
+        body, file_digest, descriptor = _read_skill_file(file_path, relpath=rel)
         file_digests.append((rel, file_digest))
-        block = f"### {rel}\n\n```\n{body}\n```"
+        if descriptor is not None:  # typed descriptor, never raw non-UTF-8 bytes
+            body = json.dumps(descriptor, indent=2, sort_keys=True)
+            rel_head = f"{rel} (non-UTF-8 file — descriptor only, content not inlined)"
+            block = f"### {rel_head}\n\n```json\n{body}\n```"
+        else:
+            block = f"### {rel}\n\n```\n{body}\n```"
         block_tokens = estimate_tokens(block)
         if block_tokens > budget:
             # One file too large to review in a single pass without truncating it.
@@ -1312,12 +1314,10 @@ def review_skill(
             status=STATUS_PENDING,
             content_hash=content_hash,
             error=(
-                f"Skill file {exc.relpath!r} ({exc.size_bytes} bytes) is "
-                "binary / non-UTF-8. Review refuses opaque payloads in the "
-                "executable skill surface — the subprocess could load them "
-                "via ctypes/native addons without reviewer inspection. "
-                "Remove the file from the skill or refactor the skill to "
-                "store such payloads outside the hashed surface."
+                f"Skill file {exc.relpath!r} ({exc.size_bytes} bytes) is a loadable "
+                f"executable ({exc.kind or 'native magic bytes'}); review hard-blocks "
+                "native code the subprocess could load via ctypes/import without "
+                "reviewer inspection. Remove it or store it outside the hashed surface."
             ),
         )
     except (_SkillFileUnreadable, SkillPayloadUnreadable) as exc:

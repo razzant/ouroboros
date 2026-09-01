@@ -478,25 +478,66 @@ def _plugin_permission_findings(skill_dir: pathlib.Path, manifest: Optional[Skil
         tree = ast.parse(plugin.read_text(encoding="utf-8"), filename=str(plugin))
     except Exception:
         return []
-    seen: dict[str, int] = {}
+    # Receiver proof (#447 A6): a method NAME alone does not prove a PluginAPI
+    # call — `OtherLibrary().get_settings()` made a skill permanently
+    # non-executable (STATUS_PENDING, no advisory override). Only a call whose
+    # receiver is provably the `register(api)` parameter (or an alias assigned
+    # from it) keeps blocking power; an unproven receiver DEGRADES to an ok=True
+    # note — the disposition every other unprovable preflight check already gets
+    # — and the tri-model review / runtime permission gate stay authoritative.
+    api_names: set[str] = set()
+    for node in ast.walk(tree):
+        if (
+            isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef))
+            and node.name == "register"
+            and node.args.args
+        ):
+            api_names.add(node.args.args[0].arg)
+    for node in ast.walk(tree):
+        if (
+            isinstance(node, ast.Assign)
+            and isinstance(node.value, ast.Name)
+            and node.value.id in api_names
+        ):
+            for target in node.targets:
+                if isinstance(target, ast.Name):
+                    api_names.add(target.id)
+    seen: dict[str, tuple[int, bool]] = {}
     for node in ast.walk(tree):
         if not isinstance(node, ast.Call):
             continue
         func = node.func
         if isinstance(func, ast.Attribute):
             perm = required_by_call.get(func.attr)
-            if perm and perm not in seen:
-                seen[perm] = getattr(node, "lineno", 0)
+            if not perm:
+                continue
+            proven = isinstance(func.value, ast.Name) and func.value.id in api_names
+            line, seen_proven = seen.get(perm, (0, False))
+            if perm not in seen or (proven and not seen_proven):
+                seen[perm] = (getattr(node, "lineno", 0), proven)
     declared = set(manifest.permissions or [])
     findings: List[Dict[str, Any]] = []
-    for perm, line in sorted(seen.items()):
-        findings.append({
+    for perm, (line, proven) in sorted(seen.items()):
+        if perm in declared:
+            detail = "ok"
+        elif proven:
+            detail = f"plugin calls PluginAPI surface requiring permission {perm!r}"
+        else:
+            detail = (
+                f"call names a PluginAPI-like surface requiring permission {perm!r}, but the "
+                "receiver is not provably the plugin's `api` object — not statically required "
+                "(reviewers and the runtime permission gate stay authoritative)"
+            )
+        finding: Dict[str, Any] = {
             "item": "permission_static",
             "source": f"{plugin.name}:{line}" if line else plugin.name,
             "permission": perm,
-            "ok": perm in declared,
-            "detail": "ok" if perm in declared else f"plugin calls PluginAPI surface requiring permission {perm!r}",
-        })
+            "ok": perm in declared or not proven,
+            "detail": detail,
+        }
+        if perm not in declared and not proven:
+            finding["degraded"] = True
+        findings.append(finding)
     return findings
 
 

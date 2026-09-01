@@ -610,6 +610,27 @@ def _non_executable_review_message(prefix: str, skill_name: str, status: str, *,
     )
 
 
+def _non_text_script_refusal(script_path: pathlib.Path, script_rel: str) -> str:
+    """Execution-seam guard (#447 X4): review admission carries non-UTF-8
+    payload files as DESCRIPTORS instead of hard-blocking them, so the exec
+    layer independently refuses to hand a non-text blob (a zipapp/PK archive
+    renamed to a declared script name) to an interpreter. A declared script is
+    a reviewed TEXT artifact by contract. Returns the typed refusal or ""."""
+    try:
+        # Decode the WHOLE file: a 64 KiB prefix check would pass a script with
+        # a binary tail (and falsely refuse a multibyte char straddling the
+        # boundary). The file is about to be executed anyway — one full read
+        # here is not the expensive part.
+        script_path.read_bytes().decode("utf-8")
+    except (OSError, UnicodeDecodeError):
+        return (
+            f"⚠️ SKILL_EXEC_ERROR: script {script_rel!r} is not valid UTF-8 "
+            "text; declared skill scripts are reviewed text artifacts and a "
+            "binary blob cannot be executed through skill_exec."
+        )
+    return ""
+
+
 def _handle_skill_exec(
     ctx: ToolContext,
     skill: str = "",
@@ -750,6 +771,8 @@ def _handle_skill_exec(
             "Add the script to the manifest and re-run skill_review."
         )
 
+    if (non_text := _non_text_script_refusal(script_path, script_rel)):
+        return non_text
     cmd = [runtime_binary, str(script_path)]
     if args is None:
         extra_args: List[Any] = []
@@ -806,11 +829,10 @@ def _handle_skill_exec(
         log.debug("Could not augment skill env with isolated dependencies", exc_info=True)
 
     # E2BIG hygiene (C5): byte-accurate argv+env budget against the REAL exec
-    # environment, checked before spawn. Type validation above proves the args
-    # are scalars; only this proves the kernel will accept them. There is no
-    # automatic file/stdin fallback here — a skill accepts bulk input via files
-    # only when its own manifest/interface says so — so an over-budget call is
-    # a typed refusal telling the caller to use the skill's file inputs.
+    # environment, checked before spawn (type validation above only proves the
+    # args are scalars). No automatic file/stdin fallback — a skill accepts
+    # bulk input via files only when its own manifest says so — so an
+    # over-budget call is a typed refusal pointing at the skill's file inputs.
     from ouroboros.argv_budget import argv_budget_excess
 
     _argv_excess = argv_budget_excess(cmd, env=env)

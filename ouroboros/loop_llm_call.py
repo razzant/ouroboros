@@ -200,15 +200,14 @@ def transient_retry_max(default_retries: int) -> int:
     return max(int(default_retries), value)
 
 
-def _empty_response_log_msg(usage: Dict[str, Any], is_provider_glitch: bool, accumulated_usage: Dict[str, Any]) -> str:
-    """Honest message for an empty/incomplete LLM response. A transient provider
+def _empty_response_log_msg(usage: Dict[str, Any], is_provider_glitch: bool) -> str:
+    """Honest message for an empty/incomplete LLM response: a transient provider
     body-error (OpenRouter 429/5xx inside an HTTP 200, surfaced as usage
-    ``provider_error``) that a same-model reroute could not escape is classified
-    as the real rate_limit/provider_transient kind instead of a blank
-    finish_reason=null glitch."""
+    ``provider_error``) that a same-model reroute could not escape is named as
+    itself, not as a blank finish_reason=null glitch. Pure: the error KIND is owned
+    by the caller's typed assignment (``_cooldown_kind_for_empty_response``)."""
     provider_error = usage.get("provider_error") if isinstance(usage, dict) else None
     if isinstance(provider_error, dict):
-        accumulated_usage["_last_llm_error_kind"] = str(provider_error.get("kind") or "provider_transient")
         return f"Provider returned a body error (code={provider_error.get('code')}): {provider_error.get('message')}"
     if is_provider_glitch:
         return "Provider returned incomplete response (finish_reason=null)"
@@ -265,51 +264,52 @@ def _record_and_emit_empty_response(
     Returns ``(event_type, is_provider_glitch, permanent_body_error)`` for the caller's
     retry decision. Extracted from call_llm_with_retry to keep that loop readable."""
     finish_reason = msg.get("finish_reason") or msg.get("stop_reason")
+    body_error = usage.get("provider_error") if isinstance(usage, dict) and isinstance(usage.get("provider_error"), dict) else {}
     event_type, is_provider_glitch, permanent_body_error = _classify_empty_response(usage, msg)
-    log_msg = _empty_response_log_msg(usage, is_provider_glitch, accumulated_usage)
+    log_msg = _empty_response_log_msg(usage, is_provider_glitch)
     log.warning("%s, attempt %d/%d", log_msg, attempt + 1, transient_budget)
     _emit_empty_response_events(
         event_type, event_queue=event_queue, drive_logs=drive_logs,
         base={"task_id": task_id, "execution_id": execution_id, "round_id": round_id,
               "llm_call_id": llm_call_id, "round": round_idx, "attempt": attempt + 1,
-              "model": model, "finish_reason": finish_reason,
-              "task_attempt": task_attempt,
+              "model": model, "finish_reason": finish_reason, "task_attempt": task_attempt,
+              # WHICH upstream endpoint served (or refused) this round, plus the typed class
+              # of an HTTP-200 body error (the shape issue #468 died on); a durable record
+              # naming only the MODEL cannot attribute a same-model provider incident.
+              "response_provider": usage.get("response_provider"),
+              "provider_error_kind": body_error.get("kind"),
               **context_fit_event_fields},
         task_type=task_type,
         details={"content": content, "tool_calls": tool_calls,
                  "request_ref": request_ref, "response_ref": response_ref},
     )
-    accumulated_usage["_last_llm_error"] = _short_error_text(log_msg)
     if event_type == "remote_context_overflow":
-        accumulated_usage["execution_status"] = "infra_failed"
-        accumulated_usage["reason_code"] = "llm_api_error"
-        accumulated_usage["_last_llm_error_kind"] = "context_overflow"
+        status, reason, kind = "infra_failed", "llm_api_error", "context_overflow"
     else:
-        accumulated_usage["execution_status"] = (
-            "infra_failed" if (is_provider_glitch and not permanent_body_error) else "failed"
-        )
-        accumulated_usage["reason_code"] = event_type
+        status = "infra_failed" if (is_provider_glitch and not permanent_body_error) else "failed"
+        reason = event_type
         # Cooldown signal for the F1 fallback gate (see helper; not a retry change).
-        accumulated_usage["_last_llm_error_kind"] = _cooldown_kind_for_empty_response(
-            usage, event_type,
-        )
+        kind = _cooldown_kind_for_empty_response(body_error, event_type)
+    accumulated_usage.update({
+        "_last_llm_error": _short_error_text(log_msg), "execution_status": status,
+        "reason_code": reason, "_last_llm_error_kind": kind,
+    })
     return event_type, is_provider_glitch, permanent_body_error
 
 
-def _cooldown_kind_for_empty_response(usage: Dict[str, Any], event_type: str) -> str:
+def _cooldown_kind_for_empty_response(body_error: Dict[str, Any], event_type: str) -> str:
     """Pick the kind exposed as ``_last_llm_error_kind`` for the F1 fallback-chain cooldown
-    gate on an empty/body-error response. PREFER the provider body-error kind (a 429
-    surfaces as ``rate_limit``) so a rate-limited model cools down regardless of
-    finish_reason; otherwise fall back to ``event_type`` (``provider_incomplete_response``
-    cools; ``provider_body_error`` / ``llm_empty_response`` are not in the cooldown set, so
-    they correctly do not). This is purely the cooldown SIGNAL — it does not change the
-    same-model transient-retry layering (the primary keeps its full plan-preserved budget;
-    cooldown is the second layer once that budget is exhausted)."""
-    body_err = usage.get("provider_error") if isinstance(usage, dict) else None
-    body_kind = str((body_err or {}).get("kind") or "") if isinstance(body_err, dict) else ""
-    if isinstance(body_err, dict):
-        body_code = str(body_err.get("code") or "").strip()
-        body_message = str(body_err.get("message") or "")
+    gate on an empty/body-error response, from the caller's validated body error ({} when
+    there is none). PREFER the provider body-error kind (a 429 surfaces as ``rate_limit``)
+    so a rate-limited model cools down regardless of finish_reason; otherwise fall back to
+    ``event_type`` (``provider_incomplete_response`` cools; ``provider_body_error`` /
+    ``llm_empty_response`` are not in the cooldown set, so they correctly do not). Purely
+    the cooldown SIGNAL — it does not change the same-model transient-retry layering (the
+    primary keeps its full plan-preserved budget; cooldown is the second layer)."""
+    body_kind = str(body_error.get("kind") or "")
+    if body_error:
+        body_code = str(body_error.get("code") or "").strip()
+        body_message = str(body_error.get("message") or "")
         if body_code == "413" or _is_output_or_body_size_error(body_message):
             return "request_too_large"
     return body_kind if body_kind in _COOLDOWN_ERROR_KINDS else event_type

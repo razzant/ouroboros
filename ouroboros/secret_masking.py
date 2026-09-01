@@ -1,15 +1,17 @@
-"""Wire placeholders for Settings and MCP secrets.
+"""Wire placeholders for Settings/MCP secrets and secret-byte egress masking.
 
-Each reader recognizes only a shape emitted by its matching producer. Keeping
-the small mechanical contract here prevents a display placeholder from being
-persisted without treating arbitrary values ending in ``...`` as secrets to
-erase.
+Each placeholder reader recognizes only a shape emitted by its matching
+producer. Keeping the small mechanical contract here prevents a display
+placeholder from being persisted without treating arbitrary values ending in
+``...`` as secrets to erase. This module is also the SSOT for well-known
+secret BYTE shapes (entropy token formats, PEM private keys) masked on the
+tool-output egress before model context/history.
 """
 
 from __future__ import annotations
 
 import re
-from typing import Any, Collection, Dict
+from typing import Any, Collection, Dict, Tuple
 
 # Credentials the Settings API answers a GET with a PLACEHOLDER instead of the
 # stored value. The same set gates the read-side repair in
@@ -93,6 +95,84 @@ def looks_masked_secret(value: Any) -> bool:
     """Compatibility union of the exact placeholder shapes this module emits."""
     text = str(value or "").strip()
     return text == CONFIGURED_SECRET_PLACEHOLDER or looks_masked_mcp_secret(text)
+
+
+# Well-known entropy token formats (SSOT; ``observability`` reuses this list
+# for forensic redaction). Each pattern names a provider/protocol shape whose
+# match is a credential with high precision — never a generic "looks random"
+# heuristic, so ordinary file content survives masking.
+SECRET_TOKEN_PATTERNS: Tuple[Tuple[str, re.Pattern[str]], ...] = (
+    ("bearer_token", re.compile(r"(?i)\bBearer\s+[A-Za-z0-9_\-./+=]{16,}")),
+    ("basic_auth", re.compile(r"(?i)\bBasic\s+[A-Za-z0-9+/=]{16,}")),
+    ("openai_key", re.compile(r"\bsk-[A-Za-z0-9_\-]{20,}\b")),
+    ("github_token", re.compile(r"\b(?:gh[pousr]_[A-Za-z0-9_]{20,}|github_pat_[A-Za-z0-9_]{30,})\b")),
+    ("aws_access_key", re.compile(r"\bAKIA[0-9A-Z]{16}\b")),
+    ("openrouter_key", re.compile(r"\bsk-or-[A-Za-z0-9\-]{20,}\b")),
+    ("openai_project_key", re.compile(r"\bsk-(?:proj|svcacct|admin)-[A-Za-z0-9_\-]{20,}\b")),
+    ("anthropic_key", re.compile(r"\bsk-ant-[A-Za-z0-9_\-]{20,}\b")),
+    ("groq_key", re.compile(r"\bgsk_[A-Za-z0-9]{20,}\b")),
+    ("huggingface_token", re.compile(r"\bhf_[A-Za-z0-9]{20,}\b")),
+    ("stripe_key", re.compile(r"\bsk_(?:live|test)_[A-Za-z0-9]{20,}\b")),
+    # The leading \b never matched the real Telegram URL form ``/bot<id>:<secret>/``
+    # ("bot" and the digits are both word chars — no boundary), so the pattern
+    # silently missed the exact secret it was written for (v6.70.0 fix).
+    ("telegram_bot_token", re.compile(r"(?:(?<=bot)|\b)[0-9]{8,}:[A-Za-z0-9_\-]{20,}\b")),
+    ("jwt", re.compile(r"\beyJ[A-Za-z0-9_\-]{10,}\.[A-Za-z0-9_\-]{10,}\.[A-Za-z0-9_\-]{10,}\b")),
+    (
+        "url_credentials",
+        re.compile(r"(?i)\b([a-z][a-z0-9+.-]*://)([^/@\s:]+):([^/@\s]+)@"),
+    ),
+)
+
+# A PEM private-key block, masked whole. When a read slice cuts the file before
+# the END marker the tail is still key material, so an unterminated block masks
+# through end-of-text (raw key bytes must never survive on a truncation edge).
+_PEM_PRIVATE_KEY_RE = re.compile(
+    r"-----BEGIN [A-Z0-9 ]*PRIVATE KEY[A-Z0-9 ]*-----"
+    r"(?:.*?-----END [A-Z0-9 ]*PRIVATE KEY[A-Z0-9 ]*-----|.*\Z)",
+    re.DOTALL,
+)
+
+# EGRESS-ONLY long-opaque-run rule (never used by observability redaction — a
+# different false-positive budget). Line-oriented egresses (search match lines,
+# a read slice that starts past the PEM header) surface key MATERIAL without
+# the block markers or provider prefixes the patterns above key on: a PEM body
+# line is 64 unbroken base64 chars, an AWS secret key is 40. Any unbroken run
+# of 40+ base64/hex-ish chars in owner-home output is treated as opaque
+# credential material. Known accepted FP: long hashes/data-URI fragments in
+# owner files get masked too — the disclosure note tells the agent to
+# reference them by location.
+_LONG_OPAQUE_RUN_RE = re.compile(r"[A-Za-z0-9+/=_\-]{40,}")
+
+
+def mask_secret_bytes(text: str) -> Tuple[str, int]:
+    """Mask secret-shaped byte spans in final tool output; return (text, count).
+
+    Egress seam for owner-home (``user_files``) content: the root agent may
+    read the file, but raw credential bytes never enter model context/history —
+    the masked form (``***``) may (#447 X1/В23). Coverage: the known entropy
+    formats above, PEM private-key blocks, and any unbroken 40+ char opaque run
+    (closes line-oriented egresses — search match lines, mid-file read slices).
+    Disclosed residual: a dictionary-word password has no shape to match.
+    """
+    out = str(text or "")
+    count = 0
+
+    def _mask(_match: re.Match[str]) -> str:
+        nonlocal count
+        count += 1
+        return "***"
+
+    def _mask_url(match: re.Match[str]) -> str:
+        nonlocal count
+        count += 1
+        return f"{match.group(1)}***:***@"
+
+    out = _PEM_PRIVATE_KEY_RE.sub(_mask, out)
+    for rule, pattern in SECRET_TOKEN_PATTERNS:
+        out = pattern.sub(_mask_url if rule == "url_credentials" else _mask, out)
+    out = _LONG_OPAQUE_RUN_RE.sub(_mask, out)
+    return out, count
 
 
 def strip_masked_secrets(settings: Dict[str, Any], *, known_setting_keys: Collection[str]) -> Dict[str, Any]:

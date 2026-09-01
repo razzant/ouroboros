@@ -363,6 +363,8 @@
  * @property {string} mime
  * @property {string} ts
  * @property {string=} caption
+ * @property {string=} download_url  // durable task-artifact URL, replayed by chat history
+ * @property {string=} download_url_compat  // same bytes on /api/files/download; host-bridge form for launchers whose gate predates the artifact route
  * @property {string=} content
  * @property {string=} source
  * @property {string=} sender_label
@@ -383,6 +385,8 @@
  * @property {string} mime
  * @property {string} ts
  * @property {string=} caption
+ * @property {string=} download_url  // durable task-artifact URL, replayed by chat history
+ * @property {string=} download_url_compat  // same bytes on /api/files/download; host-bridge form for launchers whose gate predates the artifact route
  * @property {string=} content
  * @property {string=} source
  * @property {string=} sender_label
@@ -431,6 +435,8 @@
  * @property {string} assumption
  * @property {string} state
  * @property {string} ts
+ * @property {number=} answered_index
+ * @property {string=} comment
  * @property {number=} chat_id
  * @property {string=} task_id
  * @property {boolean=} project_thread
@@ -454,11 +460,13 @@
 /**
  * POST /api/decisions body — the ONE answer ingress for owner decision cards
  * (decision families quiz:/routing:/interaction:). request_id is the
- * idempotency key; a replay returns the recorded confirmation.
+ * idempotency key; a replay returns the recorded confirmation. option_index is
+ * optional for the quiz family only: an owner who takes none of the offered
+ * options sends a non-empty comment and no index.
  * @typedef {Object} DecisionRequest
  * @property {string} request_id
  * @property {string} decision_id
- * @property {number} option_index
+ * @property {number=} option_index
  * @property {string=} comment
  */
 
@@ -470,6 +478,7 @@
  * @property {string=} decision_id
  * @property {string=} state
  * @property {number=} answered_index
+ * @property {string=} comment
  * @property {boolean=} duplicate
  * @property {string=} error
  * @property {string=} dispatched
@@ -1192,4 +1201,8 @@
 
 export const MAX_LINK_ACTIONS = 12;
 export const MAX_QUIZ_OPTIONS = 6;
+// Mirror of ouroboros/gateway/task_decision.py::_COMMENT_MAX — the ingress
+// REFUSES a longer comment (it is delivered verbatim, never truncated), so
+// the card must not offer to send one.
+export const MAX_DECISION_COMMENT = 2000;
 export const GATEWAY_CONTRACT_VERSION = '6.113.5';

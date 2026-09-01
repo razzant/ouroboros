@@ -187,6 +187,9 @@ def test_status_projects_snapshots_and_absences_from_its_single_read(monkeypatch
         def quota_snapshots(self):  # pragma: no cover - forbidden status reader
             raise AssertionError("status must not perform a second quota read")
 
+        def refresh_quota(self):  # pragma: no cover - passive GET must not mutate
+            raise AssertionError("status must not perform a foreground quota refresh")
+
     monkeypatch.setattr(owned, "get_owned_daemon", lambda: Daemon())
     monkeypatch.setattr(owned, "owned_config_dir", lambda: tmp_path / "cfg")
     monkeypatch.setattr(gateway_module, "discover_daemon_at", lambda _path: object())

@@ -1068,7 +1068,7 @@ def _write_payload_patch_artifacts(
             return _manifest(
                 ARTIFACT_STATUS_FAILED, non_utf8_paths=non_utf8,
                 note="the candidate adds/modifies non-UTF-8 payload content, which the "
-                     "permanent text-only skill contract refuses "
+                     "current text-only skill posture refuses "
                      f"({', '.join(non_utf8[:5])}); the snapshot is preserved")
         diff = _git("diff", *diff_isolation, "--cached", "--binary", baseline)
         if diff.returncode != 0:

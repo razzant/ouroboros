@@ -158,7 +158,9 @@ def test_task_api_enqueue_workspace_creates_child_drive(tmp_path, monkeypatch):
     assert "target workspace, not the Ouroboros system repo" in captured[0]["text"]
 
 
-def test_task_api_attachment_admission_is_atomic_by_default(tmp_path, monkeypatch):
+def test_task_api_attachment_admission_atomic_on_explicit_optout(tmp_path, monkeypatch):
+    """В25c (capinv-447): partial staging is the default; explicit
+    ``allow_partial_attachments=false`` keeps the old atomic admission."""
     import supervisor.queue as queue
     from ouroboros.task_results import load_task_result
 
@@ -180,6 +182,7 @@ def test_task_api_attachment_admission_is_atomic_by_default(tmp_path, monkeypatc
         json={
             "task_id": "atomic-attachments",
             "description": "needs both",
+            "allow_partial_attachments": False,
             "attachments": [
                 {"path": str(good), "label": "good"},
                 {"path": str(tmp_path / "missing.txt"), "label": "missing"},
@@ -196,6 +199,42 @@ def test_task_api_attachment_admission_is_atomic_by_default(tmp_path, monkeypatc
     assert load_task_result(data, "atomic-attachments") is None
     assert "atomic-attachments" not in queue.ADMISSION_RESERVATIONS
     assert not task_artifacts_dir(data, "atomic-attachments", create=False).exists()
+
+
+def test_task_api_attachment_admission_partial_by_default(tmp_path, monkeypatch):
+    """В25c (capinv-447): omitting allow_partial_attachments stages the good
+    rows and schedules the task with the rejected ones disclosed."""
+    import supervisor.queue as queue
+
+    data = tmp_path / "data"
+    repo = tmp_path / "repo"
+    data.mkdir()
+    repo.mkdir()
+    good = tmp_path / "good.txt"
+    good.write_text("ok", encoding="utf-8")
+    captured = []
+    monkeypatch.setattr(queue, "enqueue_task", lambda task: captured.append(task) or task)
+    monkeypatch.setattr(queue, "persist_queue_snapshot", lambda reason="": True)
+    app = Starlette(routes=[Route("/api/tasks", endpoint=api_tasks_create, methods=["POST"])])
+    app.state.drive_root = data
+    app.state.repo_dir = repo
+
+    response = TestClient(app).post(
+        "/api/tasks",
+        json={
+            "task_id": "default-partial-attachments",
+            "description": "work with what arrived",
+            "attachments": [
+                {"path": str(good), "label": "good"},
+                {"path": str(tmp_path / "missing.txt"), "label": "missing"},
+            ],
+        },
+    )
+
+    assert response.status_code == 200
+    manifest = response.json()["attachment_manifest"]
+    assert [row["status"] for row in manifest] == ["staged", "rejected"]
+    assert captured and captured[0]["attachments"] == manifest
 
 
 def test_task_api_explicit_partial_attachments_reaches_caller_contract_and_actor(
@@ -1290,7 +1329,9 @@ def test_workspace_run_shell_allows_absolute_cwd_under_workspace_and_child_drive
             {"cmd": [sys.executable, "-c", "import os; print(os.getcwd())"], "cwd": str(path)},
         )
         assert "exit_code=0" in output
-        cwd_output = output.rsplit("STDOUT:\n", 1)[-1].strip()
+        # #447 H1: host notes (SAFETY_WARNING and siblings) trail the payload
+        # now — take the first line after STDOUT, not the whole tail.
+        cwd_output = output.rsplit("STDOUT:\n", 1)[-1].strip().splitlines()[0].strip()
         assert pathlib.Path(cwd_output).resolve() == path.resolve()
 
     assert_python_cwd(workspace)
@@ -1362,8 +1403,14 @@ def test_workspace_shell_sudo_and_pro_passthrough_policy(tmp_path):
     assert "SUDO_INTERACTIVE_BLOCKED" in registry._run_shell_safety_check({"cmd": ["sudo", "-nS", "true"]}, "pro")
     assert "SUDO_INTERACTIVE_BLOCKED" in registry._run_shell_safety_check({"cmd": ["sudoedit", "/etc/hosts"]}, "pro")
     assert registry._run_shell_safety_check({"cmd": ["sudo", "-n", "python", "-S", "-c", "print(1)"]}, "pro") is None
-    assert "SAFETY_VIOLATION" in registry._run_shell_safety_check({"cmd": ["sh", "-c", "gh\nrepo\ncreate x"]}, "pro")
-    assert "SAFETY_VIOLATION" in registry._run_shell_safety_check({"cmd": ["sh", "-c", "gh\nauth\nlogin"]}, "pro")
+    assert "SAFETY_VIOLATION" in registry._run_shell_safety_check({"cmd": ["sh", "-c", "gh repo create x"]}, "pro")
+    assert "SAFETY_VIOLATION" in registry._run_shell_safety_check({"cmd": ["sh", "-c", "gh auth login"]}, "pro")
+    # Line-continuation still spells ONE gh invocation and stays blocked...
+    assert "SAFETY_VIOLATION" in registry._run_shell_safety_check({"cmd": ["sh", "-c", "gh \\\nrepo create x"]}, "pro")
+    # ...while bare newlines run `gh`, `repo`, `create x` as three separate
+    # commands that create nothing — that spelling was only ever a text
+    # mention, not an invocation (#447 A7 argv-positional gh policy).
+    assert registry._run_shell_safety_check({"cmd": ["sh", "-c", "gh\nrepo\ncreate x"]}, "pro") is None
     outside_write = {"cmd": ["python", "-c", "open('/tmp/ouroboros-pro.txt','w').write('x')"]}
     assert "WORKSPACE_SHELL_BLOCKED" in registry._run_shell_safety_check(outside_write, "advanced")
     assert registry._run_shell_safety_check(outside_write, "pro") is None
@@ -1577,53 +1624,108 @@ def test_workspace_patch_manifest_excludes_env_cache_dirs(tmp_path):
     assert any(item["kind"] == "workspace_patch_manifest" for item in artifacts)
 
 
-def test_workspace_patch_fails_on_sensitive_untracked_file(tmp_path):
+def test_workspace_patch_excludes_sensitive_untracked_file_but_keeps_tracked_diff(tmp_path):
+    """One credential-shaped untracked NAME must not annihilate the whole patch:
+    the file is a disclosed per-file exclusion, the tracked diff survives (#447)."""
     repo = tmp_path / "repo"
     _init_repo_with_file(repo)
+    (repo / "tracked.txt").write_text("new\n", encoding="utf-8")
     (repo / ".npmrc").write_text("//registry.npmjs.org/:_authToken=secret\n", encoding="utf-8")
+    artifact_dir = tmp_path / "artifacts"
 
-    artifacts, manifest = write_workspace_patch_artifacts(repo, tmp_path / "artifacts", task={})
+    artifacts, manifest = write_workspace_patch_artifacts(repo, artifact_dir, task={})
 
-    assert manifest["status"] == ARTIFACT_STATUS_FAILED
-    assert manifest["errors"][0]["type"] == "sensitive_untracked_files"
+    assert manifest["status"] == ARTIFACT_STATUS_READY_WITH_CHANGES
+    assert manifest["errors"] == []
     assert manifest["sensitive_blocked"][0]["path"] == ".npmrc"
-    assert not any(item["kind"] == "workspace_patch" for item in artifacts)
+    assert any(item["kind"] == "workspace_patch" for item in artifacts)
+    patch_text = (artifact_dir / "workspace.patch").read_text(encoding="utf-8")
+    assert "tracked.txt" in patch_text
+    assert "_authToken" not in patch_text
 
 
-def test_workspace_patch_fails_on_sensitive_untracked_file_inside_excluded_dir(tmp_path):
+def test_workspace_patch_excludes_public_pem_and_disclosed_keeps_tracked_work(tmp_path):
     repo = tmp_path / "repo"
     _init_repo_with_file(repo)
+    (repo / "tracked.txt").write_text("new\n", encoding="utf-8")
+    (repo / "public.pem").write_text("-----BEGIN PUBLIC KEY-----\nAAAA\n-----END PUBLIC KEY-----\n", encoding="utf-8")
+    artifact_dir = tmp_path / "artifacts"
+
+    artifacts, manifest = write_workspace_patch_artifacts(repo, artifact_dir, task={})
+
+    assert manifest["status"] == ARTIFACT_STATUS_READY_WITH_CHANGES
+    assert manifest["sensitive_blocked"] == [
+        {"path": "public.pem", "reason": "private key or certificate"}
+    ]
+    assert any(item["kind"] == "workspace_patch" for item in artifacts)
+    patch_text = (artifact_dir / "workspace.patch").read_text(encoding="utf-8")
+    assert "tracked.txt" in patch_text
+    assert "public.pem" not in patch_text
+
+
+def test_workspace_patch_excludes_private_key_material_by_content(tmp_path):
+    """An innocently NAMED file whose bytes carry a PEM private-key header is
+    excluded on content evidence; the tracked diff still survives (#447)."""
+    repo = tmp_path / "repo"
+    _init_repo_with_file(repo)
+    (repo / "tracked.txt").write_text("new\n", encoding="utf-8")
+    (repo / "notes.txt").write_text(
+        "-----BEGIN RSA PRIVATE KEY-----\nMIIEowIBAAKCAQEA\n-----END RSA PRIVATE KEY-----\n",
+        encoding="utf-8",
+    )
+    artifact_dir = tmp_path / "artifacts"
+
+    artifacts, manifest = write_workspace_patch_artifacts(repo, artifact_dir, task={})
+
+    assert manifest["status"] == ARTIFACT_STATUS_READY_WITH_CHANGES
+    assert {item["path"]: item["reason"] for item in manifest["untracked_excluded"]} == {
+        "notes.txt": "private key material (PEM private-key header)"
+    }
+    assert any(item["kind"] == "workspace_patch" for item in artifacts)
+    patch_text = (artifact_dir / "workspace.patch").read_text(encoding="utf-8")
+    assert "tracked.txt" in patch_text
+    assert "PRIVATE KEY" not in patch_text
+
+
+def test_workspace_patch_excludes_sensitive_untracked_file_inside_excluded_dir(tmp_path):
+    repo = tmp_path / "repo"
+    _init_repo_with_file(repo)
+    (repo / "tracked.txt").write_text("new\n", encoding="utf-8")
     secret = repo / "node_modules" / "pkg" / "service-account.json"
     secret.parent.mkdir(parents=True)
     secret.write_text("TOKEN=secret\n", encoding="utf-8")
 
     artifacts, manifest = write_workspace_patch_artifacts(repo, tmp_path / "artifacts", task={})
 
-    assert manifest["status"] == ARTIFACT_STATUS_FAILED
+    assert manifest["status"] == ARTIFACT_STATUS_READY_WITH_CHANGES
     assert manifest["counts"]["sensitive_blocked"] == 1
     assert manifest["sensitive_blocked"][0]["path"] == "node_modules/pkg/service-account.json"
-    assert not any(item["kind"] == "workspace_patch" for item in artifacts)
+    assert any(item["kind"] == "workspace_patch" for item in artifacts)
 
 
-def test_workspace_patch_fails_on_common_credential_paths(tmp_path):
+def test_workspace_patch_excludes_common_credential_paths_but_still_produces_patch(tmp_path):
     repo = tmp_path / "repo"
     _init_repo_with_file(repo)
+    (repo / "tracked.txt").write_text("new\n", encoding="utf-8")
     (repo / "credentials").write_text("secret\n", encoding="utf-8")
     (repo / "prod.env").write_text("SECRET=1\n", encoding="utf-8")
     (repo / "settings.env.local").write_text("SECRET=1\n", encoding="utf-8")
     (repo / ".aws").mkdir()
     (repo / ".aws" / "credentials").write_text("secret\n", encoding="utf-8")
+    artifact_dir = tmp_path / "artifacts"
 
-    artifacts, manifest = write_workspace_patch_artifacts(repo, tmp_path / "artifacts", task={})
+    artifacts, manifest = write_workspace_patch_artifacts(repo, artifact_dir, task={})
 
-    assert manifest["status"] == ARTIFACT_STATUS_FAILED
+    assert manifest["status"] == ARTIFACT_STATUS_READY_WITH_CHANGES
     assert {item["path"] for item in manifest["sensitive_blocked"]} == {
         "credentials",
         "prod.env",
         "settings.env.local",
         ".aws/credentials",
     }
-    assert not any(item["kind"] == "workspace_patch" for item in artifacts)
+    assert any(item["kind"] == "workspace_patch" for item in artifacts)
+    patch_text = (artifact_dir / "workspace.patch").read_text(encoding="utf-8")
+    assert "SECRET" not in patch_text
 
 
 def test_workspace_patch_allows_benign_tokenizer_json(tmp_path):
@@ -1650,7 +1752,10 @@ def test_failed_refinalization_drops_stale_workspace_patch_metadata(tmp_path):
     result = json.loads((parent / "task_results" / "task-stale.json").read_text(encoding="utf-8"))
     assert any(item.get("kind") == "workspace_patch" for item in result["artifacts"])
 
-    (repo / ".env").write_text("TOKEN=secret\n", encoding="utf-8")
+    # A sensitive-shaped file no longer fails the patch (#447); break the HEAD
+    # ref instead to force a genuinely FAILED refinalization.
+    head_ref = subprocess.run(["git", "symbolic-ref", "--quiet", "HEAD"], cwd=repo, capture_output=True, text=True, check=True).stdout.strip()
+    (repo / ".git" / head_ref).unlink()
     finalize_task_artifacts(parent, task)
 
     result = json.loads((parent / "task_results" / "task-stale.json").read_text(encoding="utf-8"))

@@ -360,27 +360,57 @@ def collect_leading_env(argv: List[str]) -> tuple[dict, List[str]]:
     return assignments, rest[idx:]
 
 
-def sudo_noninteractive_violation(argv: List[str]) -> bool:
-    if argv and pathlib.PurePath(argv[0]).name.lower() in _SHELLS:
-        inline = shell_command_string(argv)
-        if inline:
-            return sudo_noninteractive_violation(shell_argv(inline))
-    for idx, token in enumerate(argv):
-        command_name = pathlib.PurePath(token).name.lower()
-        if command_name == "sudoedit":
-            return True
-        if command_name != "sudo":
-            continue
-        has_noninteractive = False
-        for option in _sudo_option_tokens(argv[idx + 1 :]):
-            if option == "-S" or (option.startswith("-") and not option.startswith("--") and "S" in option[1:]):
+# Heads that only forward to the command that follows them: sudo behind one of
+# these is still an invocation. A wrapper flag that consumes a VALUE token
+# (``nice -n 10 sudo ...``) hides the wrapped head — a disclosed residual that
+# can only miss a hang, never refuse work (this is a hang guard, not a
+# privilege boundary).
+_SUDO_FORWARDING_WRAPPERS = frozenset({
+    "command", "builtin", "exec", "nohup", "time", "nice", "ionice", "stdbuf",
+    "setsid", "timeout",
+})
+
+
+def sudo_noninteractive_violation(raw_cmd: Any) -> bool:
+    """True when the command actually INVOKES interactive sudo/sudoedit.
+
+    Judged by COMMAND POSITION per segment (the head after env/wrapper peeling),
+    never by token mention: ``rg sudo README.md`` or ``ls /usr/bin/sudo`` name
+    sudo as DATA and invoke nothing (issue #447 A3). Interactive sudo hangs
+    forever on a password prompt in the headless runtime; ``sudo -n`` is fine,
+    ``-S`` (password on stdin) is refused outright as before.
+    """
+    for segment in shell_segments(raw_cmd):
+        _env, command = collect_leading_env(segment)
+        while command:
+            head = pathlib.PurePath(str(command[0])).name.lower()
+            if head in _SHELLS:
+                inline = shell_command_string(command)
+                if inline and sudo_noninteractive_violation(inline):
+                    return True
+                break
+            if head == "sudoedit":
                 return True
-            if option == "-n" or (option.startswith("-") and not option.startswith("--") and "n" in option[1:]):
-                has_noninteractive = True
-            if option.startswith("--non-interactive"):
-                has_noninteractive = True
-        if not has_noninteractive:
-            return True
+            if head == "sudo":
+                has_noninteractive = False
+                for option in _sudo_option_tokens(command[1:]):
+                    if option == "-S" or (option.startswith("-") and not option.startswith("--") and "S" in option[1:]):
+                        return True
+                    if option == "-n" or (option.startswith("-") and not option.startswith("--") and "n" in option[1:]):
+                        has_noninteractive = True
+                    if option.startswith("--non-interactive"):
+                        has_noninteractive = True
+                if not has_noninteractive:
+                    return True
+                # `sudo -n sh -c "sudo ..."` — keep walking the wrapped command.
+                command = _sudo_wrapped_command(command[1:])
+                continue
+            if head in _SUDO_FORWARDING_WRAPPERS:
+                command = command[1:]
+                while command and str(command[0]).startswith("-"):
+                    command = command[1:]
+                continue
+            break
     return False
 
 
@@ -457,14 +487,18 @@ def embedded_absolute_path_tokens(text: Any) -> List[str]:
     return tokens
 
 
+# -A/--askpass and -b/--background are FLAGS (no argument): listing them here
+# made the walker eat the wrapped command's head as an "option value".
+_SUDO_OPTIONS_WITH_ARG = frozenset({
+    "-a", "-C", "-c", "-D", "-g", "-h", "-p", "-R", "-r", "-T", "-t", "-U", "-u",
+    "--auth-type", "--chdir", "--close-from", "--command-timeout",
+    "--context", "--group", "--host", "--login-class", "--prompt", "--role", "--type", "--user",
+    "--other-user",
+})
+
+
 def _sudo_option_tokens(rest: List[str]) -> List[str]:
     options: List[str] = []
-    options_with_arg = {
-        "-A", "-a", "-b", "-C", "-c", "-D", "-g", "-h", "-p", "-R", "-r", "-T", "-t", "-U", "-u",
-        "--askpass", "--auth-type", "--background", "--chdir", "--close-from", "--command-timeout",
-        "--context", "--group", "--host", "--login-class", "--prompt", "--role", "--type", "--user",
-        "--other-user",
-    }
     idx = 0
     while idx < len(rest):
         token = rest[idx]
@@ -473,5 +507,19 @@ def _sudo_option_tokens(rest: List[str]) -> List[str]:
         if not token.startswith("-") or token == "-":
             break
         options.append(token)
-        idx += 2 if token in options_with_arg else 1
+        idx += 2 if token in _SUDO_OPTIONS_WITH_ARG else 1
     return options
+
+
+def _sudo_wrapped_command(rest: List[str]) -> List[str]:
+    """The command sudo runs: its own options and leading VAR=val tokens peeled."""
+    idx = 0
+    while idx < len(rest):
+        token = rest[idx]
+        if token == "--":
+            idx += 1
+            break
+        if not token.startswith("-") or token == "-":
+            break
+        idx += 2 if token in _SUDO_OPTIONS_WITH_ARG else 1
+    return strip_leading_env_assignments(rest[idx:])

@@ -13,6 +13,7 @@ import urllib.request
 import pytest
 
 from tests.fixtures_mock_llm import MockLLMServer
+from tests.ui_chat_viewport_smoke import _CAPTURE_TEST_SOCKET, _emit_ws_frame
 
 REPO_ROOT = os.path.dirname(os.path.dirname(__file__))
 
@@ -743,8 +744,8 @@ def test_ui_smoke_phase3_declarative_widgets_and_settings(direct_server_with_dat
                 callout = card.locator('.widget-callout')
                 assert metric.get_attribute("data-tone") == "ok"
                 assert callout.get_attribute("data-tone") == "warn"
-                assert metric.evaluate("element => getComputedStyle(element).borderLeftColor") == "rgb(52, 211, 153)"
-                assert callout.evaluate("element => getComputedStyle(element).borderLeftColor") == "rgb(251, 191, 36)"
+                assert metric.evaluate("element => getComputedStyle(element).borderLeftColor") == "rgb(110, 231, 183)"
+                assert callout.evaluate("element => getComputedStyle(element).borderLeftColor") == "rgb(252, 211, 77)"
 
                 emitted = page.evaluate(
                     """async (skill) => {
@@ -1004,7 +1005,6 @@ def test_ui_smoke_collapsed_activity_line_named_vs_unnamed(
         "cost_accounting_status": "available",
         "cost_final": True,
     }) + "\n", encoding="utf-8")
-
     try:
         with sync_playwright() as pw:
             browser_type = getattr(pw, browser_engine)
@@ -1012,7 +1012,7 @@ def test_ui_smoke_collapsed_activity_line_named_vs_unnamed(
                 browser = browser_type.launch(headless=True)
             except PlaywrightError as exc:
                 if "Executable doesn't exist" in str(exc) or "playwright install" in str(exc).lower():
-                    pytest.skip(f"Playwright {browser_engine} browser is not installed: {exc}")
+                    pytest.fail(f"required Playwright {browser_engine} browser is not installed: {exc}")
                 raise
             try:
                 for width, height, mobile in [(1440, 1000, False), (390, 844, True)]:
@@ -1022,7 +1022,12 @@ def test_ui_smoke_collapsed_activity_line_named_vs_unnamed(
                         has_touch=mobile,
                     )
                     page = context.new_page()
+                    page.add_init_script(f"({_CAPTURE_TEST_SOCKET})()")
                     page.goto(url, wait_until="domcontentloaded", timeout=30_000)
+                    page.wait_for_function(
+                        "() => window.__testSockets?.some(socket => socket.readyState === WebSocket.OPEN)",
+                        timeout=30_000,
+                    )
                     named = page.locator('.chat-live-card[data-task-id="named-act"]')
                     named.wait_for(state="attached", timeout=30_000)
                     unnamed = page.locator('.chat-live-card[data-task-id="unnamed-act"]')
@@ -1032,6 +1037,14 @@ def test_ui_smoke_collapsed_activity_line_named_vs_unnamed(
                         " [data-live-title]')?.textContent === 'Data Analysis'",
                         timeout=30_000,
                     )
+                    _emit_ws_frame(page, {
+                        "type": "chat", "role": "assistant", "is_progress": True,
+                        "chat_id": 1, "task_id": "running-act", "suggested_name": "Short task",
+                        "content": "Short update", "ts": "2026-07-29T10:00:02+00:00",
+                    })
+                    running = page.locator('.chat-live-card[data-task-id="running-act"]')
+                    running.wait_for(state="attached", timeout=30_000)
+                    assert running.locator('[data-live-title]').text_content().strip() == "Short task"
                     assert named.get_attribute("data-expanded") == "0"
                     named_activity = named.locator('[data-live-activity]')
                     activity_text = named_activity.text_content().strip()
@@ -1066,6 +1079,39 @@ def test_ui_smoke_collapsed_activity_line_named_vs_unnamed(
                     assert "Doing things without a name" in unnamed.locator('[data-live-title]').text_content()
                     assert unnamed_activity.text_content().strip() == ""
                     assert not unnamed_activity.is_visible()
+                    bands = page.evaluate(
+                        """() => Object.fromEntries(['named-act', 'unnamed-act', 'running-act'].map(id => {
+                            const card = document.querySelector(`.chat-live-card[data-task-id="${id}"]`);
+                            const facts = selector => {
+                                const node = card.querySelector(selector);
+                                const style = getComputedStyle(node);
+                                const height = node.getBoundingClientRect().height;
+                                const lineHeight = parseFloat(style.lineHeight);
+                                return {height, lines: height / lineHeight,
+                                    display: style.display, visibility: style.visibility};
+                            };
+                            return [id, {
+                                title: facts('[data-live-title]'),
+                                activity: facts('[data-live-activity]'),
+                                meta: facts('[data-live-meta]'),
+                                finished: card.dataset.finished === '1',
+                                clipped: card.scrollHeight > card.clientHeight + 1,
+                                reviews: card.querySelector('[data-live-review-summary]')?.textContent || '',
+                            }];
+                        }))"""
+                    )
+                    assert bands["named-act"]["finished"] is True, bands
+                    assert bands["unnamed-act"]["finished"] is False, bands
+                    assert bands["running-act"]["finished"] is False, bands
+                    for slot in ("title", "activity"):
+                        heights = [bands[task_id][slot]["height"] for task_id in bands]
+                        assert max(heights) - min(heights) <= 1, bands
+                        assert all(1.9 <= bands[task_id][slot]["lines"] <= 2.2 for task_id in bands), bands
+                    assert bands["unnamed-act"]["activity"]["display"] != "none", bands
+                    assert bands["unnamed-act"]["activity"]["visibility"] == "hidden", bands
+                    assert all(bands[task_id]["meta"]["lines"] >= 0.9 for task_id in bands), bands
+                    assert all(not bands[task_id]["clipped"] for task_id in bands), bands
+                    assert all("Reviews" not in bands[task_id]["reviews"] for task_id in bands), bands
 
                     named.locator(':scope > [data-live-summary-button]').click()
                     line_toggle = named.locator(':scope > [data-live-timeline] .chat-live-line-toggle').first
@@ -1085,7 +1131,7 @@ def test_ui_smoke_collapsed_activity_line_named_vs_unnamed(
                 browser.close()
     except PlaywrightError as exc:
         if "Executable doesn't exist" in str(exc) or "playwright install" in str(exc).lower():
-            pytest.skip(str(exc))
+            pytest.fail(f"required Playwright {browser_engine} browser is not installed: {exc}")
         raise
 
 
@@ -1095,242 +1141,9 @@ def test_ui_smoke_live_card_mutations_preserve_viewport(
     direct_server_with_data,
     browser_engine,
 ):
-    """Live card growth follows bottom or preserves the visible descendant."""
-    pytest.importorskip("playwright.sync_api", reason="Playwright is not installed")
-    from playwright.sync_api import Error as PlaywrightError
-    from playwright.sync_api import sync_playwright
+    from tests.ui_chat_viewport_smoke import run_chat_viewport_smoke
 
-    url = direct_server_with_data["url"]
-    data_dir = direct_server_with_data["data_dir"]
-    logs_dir = data_dir / "logs"
-    logs_dir.mkdir(parents=True, exist_ok=True)
-    (logs_dir / "chat.jsonl").write_text("", encoding="utf-8")
-    (logs_dir / "progress.jsonl").write_text("", encoding="utf-8")
-
-    capture_socket = """() => {
-        const NativeWebSocket = window.WebSocket;
-        window.__testSockets = [];
-        window.WebSocket = class TestWebSocket extends NativeWebSocket {
-            constructor(...args) {
-                super(...args);
-                window.__testSockets.push(this);
-            }
-        };
-    }"""
-    settle = "() => new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve)))"
-
-    def emit(page, frame):
-        page.evaluate(
-            """frame => {
-                const socket = window.__testSockets?.[0];
-                if (!socket) throw new Error('test socket not captured');
-                socket.dispatchEvent(new MessageEvent('message', {
-                    data: JSON.stringify(frame),
-                }));
-            }""",
-            frame,
-        )
-        page.evaluate(settle)
-
-    def card_top(page, task_id):
-        return page.locator(f'.chat-live-card[data-task-id="{task_id}"]').evaluate(
-            "card => card.getBoundingClientRect().top"
-        )
-
-    def put_at_viewport_top(page, selector):
-        return page.evaluate(
-            """selector => {
-                const messages = document.querySelector('#chat-messages');
-                const anchor = document.querySelector(selector);
-                const before = messages.scrollTop;
-                messages.scrollTop += anchor.getBoundingClientRect().top
-                    - messages.getBoundingClientRect().top;
-                messages.dispatchEvent(new Event('scroll'));
-                return {
-                    moved: Math.abs(messages.scrollTop - before),
-                    remaining: messages.scrollHeight - messages.scrollTop - messages.clientHeight,
-                };
-            }""",
-            selector,
-        )
-
-    try:
-        with sync_playwright() as pw:
-            browser_type = getattr(pw, browser_engine)
-            try:
-                browser = browser_type.launch(headless=True)
-            except PlaywrightError as exc:
-                if "Executable doesn't exist" in str(exc) or "playwright install" in str(exc).lower():
-                    pytest.skip(f"Playwright {browser_engine} browser is not installed: {exc}")
-                raise
-            page = browser.new_page(viewport={"width": 1280, "height": 760})
-            try:
-                page.add_init_script(f"({capture_socket})()")
-                page.goto(url, wait_until="domcontentloaded", timeout=30_000)
-                page.wait_for_function(
-                    "() => window.__testSockets?.some(socket => socket.readyState === WebSocket.OPEN)",
-                    timeout=30_000,
-                )
-                page.wait_for_function(
-                    "() => document.querySelector('#chat-messages')?.innerText.includes('Ouroboros has awakened')",
-                    timeout=30_000,
-                )
-
-                emit(page, {
-                    "type": "chat", "role": "assistant", "is_progress": True,
-                    "chat_id": 1, "task_id": "vp-parent",
-                    "content": "Parent begins", "ts": "2026-08-03T10:00:00+00:00",
-                })
-                for idx in range(1, 5):
-                    emit(page, {
-                        "type": "chat", "role": "assistant", "is_progress": True,
-                        "chat_id": 1, "task_id": f"vp-child-{idx}",
-                        "delegation_role": "subagent", "subagent_event": "scheduled",
-                        "subagent_task_id": f"vp-child-{idx}", "parent_task_id": "vp-parent",
-                        "root_task_id": "vp-parent", "subagent_role": f"reader-{idx}",
-                        "content": f"Child {idx} scheduled",
-                        "ts": f"2026-08-03T10:00:0{idx}+00:00",
-                    })
-                for idx in range(1, 11):
-                    emit(page, {
-                        "type": "chat", "role": "assistant", "is_progress": True,
-                        "chat_id": 1, "task_id": f"vp-follow-{idx}",
-                        "content": (f"Following task {idx} " * 14),
-                        "ts": f"2026-08-03T10:01:{idx:02d}+00:00",
-                    })
-                page.wait_for_selector('.chat-live-card[data-task-id="vp-follow-10"]', timeout=30_000)
-
-                # Pinned readers continue following the newest content.
-                before_bottom = page.evaluate(
-                    """() => {
-                        const m = document.querySelector('#chat-messages');
-                        m.scrollTop = m.scrollHeight;
-                        m.dispatchEvent(new Event('scroll'));
-                        return m.scrollHeight;
-                    }"""
-                )
-                page.evaluate(settle)
-                emit(page, {
-                    "type": "chat", "role": "assistant", "is_progress": True,
-                    "chat_id": 1, "task_id": "vp-bottom-child",
-                    "delegation_role": "subagent", "subagent_event": "scheduled",
-                    "subagent_task_id": "vp-bottom-child", "parent_task_id": "vp-follow-10",
-                    "root_task_id": "vp-follow-10", "subagent_role": "bottom-reader",
-                    "content": "A newly mounted child at the bottom",
-                    "ts": "2026-08-03T10:02:00+00:00",
-                })
-                bottom = page.evaluate(
-                    """() => {
-                        const m = document.querySelector('#chat-messages');
-                        return { height: m.scrollHeight, remaining: m.scrollHeight - m.scrollTop - m.clientHeight };
-                    }"""
-                )
-                assert bottom["height"] > before_bottom + 30, bottom
-                assert bottom["remaining"] <= 6, bottom
-
-                # The reader is inside a child. Naming the parent and growing its
-                # visible timeline above that child must keep the child stationary.
-                parent = page.locator('.chat-live-card[data-task-id="vp-parent"]')
-                parent.locator(':scope > [data-live-summary-button]').click()
-                child_selector = '.chat-live-card[data-task-id="vp-child-2"] > [data-live-summary-button]'
-                mid = put_at_viewport_top(page, child_selector)
-                page.evaluate(settle)
-                assert mid["remaining"] > 160, mid
-                child_before = page.locator(child_selector).evaluate("el => el.getBoundingClientRect().top")
-                parent_height_before = parent.evaluate("card => card.getBoundingClientRect().height")
-                emit(page, {
-                    "type": "task_named", "task_id": "vp-parent",
-                    "suggested_name": "A deliberately long generated project name " * 12,
-                })
-                child_after_name = page.locator(child_selector).evaluate("el => el.getBoundingClientRect().top")
-                parent_height_named = parent.evaluate("card => card.getBoundingClientRect().height")
-                assert parent_height_named > parent_height_before + 20
-                assert abs(child_after_name - child_before) <= 6
-
-                for idx in range(8):
-                    emit(page, {
-                        "type": "chat", "role": "assistant", "is_progress": True,
-                        "chat_id": 1, "task_id": "vp-parent",
-                        "content": (f"Visible parent timeline update {idx} " * 10),
-                        "ts": f"2026-08-03T10:03:{idx:02d}+00:00",
-                    })
-                child_after_growth = page.locator(child_selector).evaluate("el => el.getBoundingClientRect().top")
-                parent_height_grown = parent.evaluate("card => card.getBoundingClientRect().height")
-                assert parent_height_grown > parent_height_named + 100
-                assert abs(child_after_growth - child_before) <= 6
-
-                # A child mounted in an earlier card must not move the next
-                # top-level card the reader is looking at.
-                anchor_id = "vp-follow-1"
-                anchor_selector = f'.chat-live-card[data-task-id="{anchor_id}"]'
-                mid = put_at_viewport_top(page, anchor_selector)
-                page.evaluate(settle)
-                assert mid["remaining"] > 160, mid
-                anchor_before = card_top(page, anchor_id)
-                parent_before_mount = parent.evaluate("card => card.getBoundingClientRect().height")
-                emit(page, {
-                    "type": "chat", "role": "assistant", "is_progress": True,
-                    "chat_id": 1, "task_id": "vp-late-child",
-                    "delegation_role": "subagent", "subagent_event": "scheduled",
-                    "subagent_task_id": "vp-late-child", "parent_task_id": "vp-parent",
-                    "root_task_id": "vp-parent", "subagent_role": "late-reader",
-                    "content": "Late child mounted above the reader",
-                    "ts": "2026-08-03T10:04:00+00:00",
-                })
-                assert parent.evaluate("card => card.getBoundingClientRect().height") > parent_before_mount + 30
-                assert abs(card_top(page, anchor_id) - anchor_before) <= 6
-
-                parent_before_finish = parent.evaluate("card => card.getBoundingClientRect().height")
-                emit(page, {
-                    "type": "chat", "role": "system", "system_type": "task_summary",
-                    "chat_id": 1, "task_id": "vp-parent", "content": "Parent completed",
-                    "ts": "2026-08-03T10:05:00+00:00",
-                    "outcome_axes": {
-                        "lifecycle": {"status": "completed"}, "execution": {"status": "ok"},
-                        "objective": {"status": "pass"}, "review": {"status": "pass"},
-                        "artifacts": {"status": "ready"},
-                    },
-                })
-                assert parent.get_attribute("data-expanded") == "1"
-                assert parent.evaluate("card => card.getBoundingClientRect().height") >= parent_before_finish - 32
-                assert abs(card_top(page, anchor_id) - anchor_before) <= 6
-
-                review_child = page.locator('.chat-live-card[data-task-id="vp-late-child"]')
-                review_before = review_child.evaluate("card => card.getBoundingClientRect().height")
-                emit(page, {
-                    "type": "chat", "role": "assistant", "is_progress": True,
-                    "chat_id": 1, "task_id": "vp-late-child",
-                    "delegation_role": "subagent", "subagent_event": "completed",
-                    "subagent_task_id": "vp-late-child", "parent_task_id": "vp-parent",
-                    "root_task_id": "vp-parent", "subagent_role": "late-reader",
-                    "result": "Review-bearing result " * 16,
-                    "status": "completed", "ts": "2026-08-03T10:06:00+00:00",
-                    "review_projection": {"panels": [{
-                        "panel_id": "viewport-review", "surface": "task_acceptance",
-                        "authority": "host_root", "aggregate_signal": "PASS",
-                        "transport_status": "success", "parse_status": "valid",
-                        "quorum": {"required": 1, "contributed": 1, "configured": 1},
-                        "enforcement_impact": "supports_pass", "reason": "viewport evidence",
-                        "actors": [],
-                    }]},
-                })
-                assert review_child.get_attribute("data-expanded") == "0"
-                review_child.locator(":scope > [data-live-summary-button]").evaluate("el => el.click()")
-                page.evaluate(settle)
-                assert review_child.get_attribute("data-expanded") == "1"
-                assert review_child.evaluate("card => card.getBoundingClientRect().height") > review_before + 20
-                assert abs(card_top(page, anchor_id) - anchor_before) <= 6
-                page.screenshot(
-                    path=str(data_dir.parent / f"live-card-viewport-{browser_engine}.png"),
-                    full_page=True,
-                )
-            finally:
-                browser.close()
-    except PlaywrightError as exc:
-        if "Executable doesn't exist" in str(exc) or "playwright install" in str(exc).lower():
-            pytest.skip(str(exc))
-        raise
-
+    run_chat_viewport_smoke(direct_server_with_data, browser_engine)
 
 @pytest.mark.ui_browser
 def test_ui_smoke_chat_chronology_reconnect_and_plain_answer_marker(direct_server_with_data):
@@ -2602,6 +2415,59 @@ def test_ui_smoke_live_cards_keep_usable_geometry_at_depth_and_in_project_panel(
         assert expanded["titleWidth"] >= 150, expanded
         assert long_url in expanded["text"], expanded
 
+    def assert_jump_geometry(page, scope_selector, *, require_overflow=True):
+        page.evaluate(
+            """({scopeSelector, requireOverflow}) => {
+                const scope = document.querySelector(scopeSelector);
+                const messages = scope
+                    .querySelector('.chat-messages, #chat-messages');
+                messages.scrollTop = 0;
+                messages.dispatchEvent(new Event('scroll'));
+            }""",
+            {"scopeSelector": scope_selector, "requireOverflow": require_overflow},
+        )
+        page.wait_for_timeout(250)
+        facts = page.evaluate(
+            """({scopeSelector, forceVisible}) => {
+                const scope = document.querySelector(scopeSelector);
+                const messages = scope.querySelector('.chat-messages, #chat-messages');
+                const button = scope.querySelector('.chat-scroll-bottom-btn');
+                const priorTransition = button.style.transition;
+                button.style.transition = 'none';
+                if (forceVisible) button.classList.add('visible');
+                const wrap = scope.querySelector('.chat-input-wrap');
+                const toolbar = scope.querySelector('.chat-toolbar-row');
+                const preview = scope.querySelector('.chat-attachment-preview.visible');
+                const b = button.getBoundingClientRect();
+                const w = wrap.getBoundingClientRect();
+                const t = toolbar.getBoundingClientRect();
+                const overlap = (a, c) => Math.max(0, Math.min(a.right, c.right) - Math.max(a.left, c.left))
+                    * Math.max(0, Math.min(a.bottom, c.bottom) - Math.max(a.top, c.top));
+                const facts = {
+                    remaining: messages.scrollHeight - messages.scrollTop - messages.clientHeight,
+                    visible: button.classList.contains('visible'),
+                    width: b.width, height: b.height,
+                    centerDelta: Math.abs((b.left + b.width / 2) - (w.left + w.width / 2)),
+                    gap: w.top - b.bottom,
+                    toolbarOverlap: overlap(b, t),
+                    previewOverlap: preview ? overlap(b, preview.getBoundingClientRect()) : 0,
+                    boxShadow: getComputedStyle(button).boxShadow,
+                };
+                if (priorTransition) button.style.transition = priorTransition;
+                else button.style.removeProperty('transition');
+                return facts;
+            }""",
+            {"scopeSelector": scope_selector, "forceVisible": not require_overflow},
+        )
+        assert facts["visible"], facts
+        if require_overflow:
+            assert facts["remaining"] > 48, facts
+        assert abs(facts["width"] - 32) <= 1 and abs(facts["height"] - 32) <= 1, facts
+        assert facts["centerDelta"] <= 1 and abs(facts["gap"] - 8) <= 1, facts
+        assert facts["toolbarOverlap"] == 0 and facts["previewOverlap"] == 0, facts
+        assert facts["boxShadow"] == "none", facts
+        return facts
+
     try:
         with sync_playwright() as pw:
             browser_type = getattr(pw, browser_engine)
@@ -2609,7 +2475,7 @@ def test_ui_smoke_live_cards_keep_usable_geometry_at_depth_and_in_project_panel(
                 browser = browser_type.launch(headless=True)
             except PlaywrightError as exc:
                 if "Executable doesn't exist" in str(exc) or "playwright install" in str(exc).lower():
-                    pytest.skip(f"Playwright {browser_engine} browser is not installed: {exc}")
+                    pytest.fail(f"required Playwright {browser_engine} browser is not installed: {exc}")
                 raise
             try:
                 mobile_context = browser.new_context(
@@ -2620,6 +2486,7 @@ def test_ui_smoke_live_cards_keep_usable_geometry_at_depth_and_in_project_panel(
                 mobile = mobile_context.new_page()
                 mobile.goto(url, wait_until="domcontentloaded", timeout=30_000)
                 assert_mobile_geometry(mobile)
+                assert_jump_geometry(mobile, "#page-chat")
                 mobile.screenshot(
                     path=str(data_dir.parent / f"live-card-depth-10-{browser_engine}.png"),
                     full_page=True,
@@ -2672,6 +2539,44 @@ def test_ui_smoke_live_cards_keep_usable_geometry_at_depth_and_in_project_panel(
                     assert min(card["mainBottom"], card["sideBottom"]) \
                         > max(card["mainTop"], card["sideTop"]), wide_facts
 
+                assert_jump_geometry(wide, "#page-chat")
+                jump = wide.locator("#page-chat .chat-scroll-bottom-btn")
+                before_hover = jump.bounding_box()
+                jump.hover()
+                after_hover = jump.bounding_box()
+                assert before_hover is not None and after_hover is not None
+                for key in ("x", "y", "width", "height"):
+                    assert abs(before_hover[key] - after_hover[key]) <= 1, (before_hover, after_hover)
+                jump.focus()
+                focus = jump.evaluate(
+                    "node => ({style: getComputedStyle(node).outlineStyle, "
+                    "width: parseFloat(getComputedStyle(node).outlineWidth)})"
+                )
+                assert focus["style"] != "none" and focus["width"] >= 2, focus
+                wide.emulate_media(reduced_motion="reduce")
+                assert jump.evaluate(
+                    "node => getComputedStyle(node).transitionDuration.split(',')"
+                    ".every(value => parseFloat(value) === 0)"
+                )
+                wide.emulate_media(reduced_motion="no-preference")
+
+                wide.evaluate(
+                    """() => {
+                        const transfer = new DataTransfer();
+                        transfer.items.add(new File(['preview'], 'preview.txt', {type: 'text/plain'}));
+                        const target = document.querySelector('#page-chat');
+                        for (const type of ['dragenter', 'dragover', 'drop']) {
+                            target.dispatchEvent(new DragEvent(type, {
+                                bubbles: true, cancelable: true, dataTransfer: transfer,
+                            }));
+                        }
+                    }"""
+                )
+                wide.locator("#chat-attachment-preview.visible").wait_for(
+                    state="visible", timeout=5_000
+                )
+                assert_jump_geometry(wide, "#page-chat")
+
                 with (logs_dir / "progress.jsonl").open("a", encoding="utf-8") as handle:
                     handle.write(json.dumps(panel_row) + "\n")
                 wide.evaluate(
@@ -2707,6 +2612,9 @@ def test_ui_smoke_live_cards_keep_usable_geometry_at_depth_and_in_project_panel(
                 assert panel_facts["cardScroll"] <= panel_facts["cardClient"] + 1, panel_facts
                 assert panel_facts["titleWidth"] >= 180, panel_facts
                 assert panel_facts["sideTop"] >= panel_facts["mainBottom"] - 1, panel_facts
+                assert_jump_geometry(
+                    wide, "#panel-pchat-layout-project", require_overflow=False
+                )
                 wide.screenshot(
                     path=str(data_dir.parent / f"live-card-project-panel-{browser_engine}.png"),
                     full_page=True,
@@ -2715,7 +2623,7 @@ def test_ui_smoke_live_cards_keep_usable_geometry_at_depth_and_in_project_panel(
                 browser.close()
     except PlaywrightError as exc:
         if "Executable doesn't exist" in str(exc) or "playwright install" in str(exc).lower():
-            pytest.skip(str(exc))
+            pytest.fail(f"required Playwright {browser_engine} browser is not installed: {exc}")
         raise
 
 

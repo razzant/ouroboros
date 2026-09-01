@@ -37,6 +37,7 @@ from ouroboros.tool_capabilities import (
     tool_result_limit as _tool_result_limit,
 )
 from ouroboros.tools.registry import ToolRegistry
+from ouroboros.tools.result_envelope import result_payload_text, typed_result_meta
 from ouroboros.tools.review_synthesis import PLAN_REVIEW_CONTROL_PREFIX
 from ouroboros.usage_accounting import UsageAccountingError
 from ouroboros.utils import (
@@ -485,9 +486,11 @@ def _structured_tool_failure(result: Any) -> bool:
 
     Deliberately narrow: the payload must be a JSON OBJECT whose top-level `ok` is
     exactly False. A tool returning prose, a list, or `ok` as data-not-status is
-    untouched.
+    untouched. Host notes (safety warning, tripwires) are appended AFTER the
+    payload (#447 В12), so detection reads the pre-note payload from the
+    result envelope when one is present.
     """
-    text = str(result or "").lstrip()
+    text = result_payload_text(result).lstrip()
     if not text.startswith("{") or '"ok"' not in text:
         return False
     try:
@@ -503,6 +506,11 @@ def _is_tool_execution_failure(tool_ok: bool, result: Any) -> bool:
         return True
     if _structured_tool_failure(result):
         return True
+    typed = typed_result_meta(result)
+    if typed and isinstance(typed.get("is_failure"), bool):
+        # A migrated producer's typed verdict (#447 В12) wins over first-line
+        # parsing; unmigrated producers keep the text fallback below.
+        return typed["is_failure"]
     text = str(result or "")
     if text.startswith("⚠️ SHELL_REGEX_AUTO_CORRECTED"):
         remainder = text.split("\n", 1)[1] if "\n" in text else ""
@@ -520,12 +528,17 @@ def _is_tool_execution_failure(tool_ok: bool, result: Any) -> bool:
 def _extract_result_metadata(fn_name: str, result: Any, is_error: bool) -> Dict[str, Any]:
     """Extract structured outcome facts for summaries and reflections."""
     text = str(result or "")
+    typed = typed_result_meta(result)
     status = "error" if is_error else "ok"
     if _structured_tool_failure(result):
         # A typed status, not the generic "error": an extension tool that answered
         # honestly is a different fact from an executor crash, and the trace should
         # say which happened.
         status = "tool_reported_failure"
+    elif typed and typed.get("status"):
+        # A migrated producer's typed status (#447 В12 minimal) replaces the
+        # first-line startswith ladder below; unmigrated producers keep it.
+        status = str(typed["status"])
     elif text.startswith("⚠️ TOOL_TIMEOUT"):
         status = "timeout"
     elif text.startswith("⚠️ SHELL_REGEX_AUTO_CORRECTED") and "⚠️ ARTIFACT_OUTPUT_UNDECLARED" in text:
@@ -606,6 +619,13 @@ def _extract_result_metadata(fn_name: str, result: Any, is_error: bool) -> Dict[
         status = "error"
 
     meta: Dict[str, Any] = {"status": status}
+    if typed:
+        # Typed facts stamped by producers/gates travel into result_meta as-is:
+        # the refusal's contract name and surviving route (#447 В12), the
+        # host-appended notes, and post-exec tripwire facts.
+        for passthrough in ("policy_contract", "remaining_route", "notes", "tripwire"):
+            if passthrough in typed:
+                meta[passthrough] = typed[passthrough]
     # Structured deliverable signal captured from the FULL result (before the trace
     # preview is truncated to 700 chars) so effect detection never misses a
     # late ARTIFACT_OUTPUTS marker (e.g. a stopped service after a long log tail).

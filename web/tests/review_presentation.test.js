@@ -1090,7 +1090,11 @@ test('review updates never change owner disclosure state', () => {
     const host = { innerHTML: '', addEventListener() {} };
     const summary = { hidden: true, textContent: '' };
     const disclosure = { sectionExpanded: false, expandedGroups: new Set(), expandedAttempts: new Set() };
-    const controller = createReviewPresentationController({ host, summary, disclosure });
+    let domWrites = 0;
+    const controller = createReviewPresentationController({
+        host, summary, disclosure,
+        onDomWrite(mutate) { domWrites += 1; return mutate(); },
+    });
     controller.update(reviewGroupFromLifecycle({ lifecycle: {
         kind: 'review', status: 'running', target: 'alpha', job_id: 'job-1',
         group_id: 'task:root:alpha', presentation_owner_task_id: 'root',
@@ -1099,6 +1103,7 @@ test('review updates never change owner disclosure state', () => {
     assert.equal(disclosure.sectionExpanded, false);
     assert.deepEqual([...disclosure.expandedGroups], []);
     assert.deepEqual([...disclosure.expandedAttempts], []);
+    assert.equal(domWrites, 2, 'each actual review reconcile enters the pre-write boundary');
 });
 
 test('an open exact Skill detail survives a review re-render while its read is in flight', async () => {
@@ -1211,6 +1216,51 @@ test('typed invalidations dedupe revisions and guarantee one trailing refresh', 
     assert.deepEqual(applied, [firstRevision, secondRevision]);
     assert.equal(await hydrator.hydrate('root', secondRevision), false);
     assert.equal(reads.length, 2);
+});
+
+test('review hydration keeps the originating viewport writer for a trailing revision', async () => {
+    let activeWriter = '';
+    const reads = [];
+    const applied = [];
+    const deferred = () => {
+        let resolve;
+        const promise = new Promise((done) => { resolve = done; });
+        return { promise, resolve };
+    };
+    const writer = (label) => (mutate) => {
+        const previous = activeWriter;
+        activeWriter = label;
+        try { return mutate(); } finally { activeWriter = previous; }
+    };
+    const hydrator = createReviewHydrator({
+        fetchDetail() {
+            const gate = deferred();
+            reads.push(gate);
+            return gate.promise;
+        },
+        applyDetail(_taskId, detail) {
+            applied.push([detail.revision, activeWriter]);
+            return true;
+        },
+        onState: () => false,
+    });
+    const firstRevision = 'd'.repeat(64);
+    const secondRevision = 'e'.repeat(64);
+    const first = hydrator.hydrate('root', firstRevision, { onDomWrite: writer('local') });
+    await Promise.resolve();
+    const trailing = hydrator.hydrate('root', secondRevision, { onDomWrite: writer('remote') });
+    reads[0].resolve({ revision: firstRevision });
+    await first;
+    await Promise.resolve();
+    reads[1].resolve({ revision: secondRevision });
+    await trailing;
+    assert.deepEqual(applied, [
+        [firstRevision, 'local'],
+        [secondRevision, 'remote'],
+    ]);
+    assert.equal(await hydrator.hydrate('root', secondRevision, {
+        onDomWrite: writer('duplicate'),
+    }), false);
 });
 
 test('applied-revision invalidation preserves and joins an in-flight physical read', async () => {

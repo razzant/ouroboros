@@ -12,10 +12,12 @@ import ouroboros.request_wire_contract as wire
 from ouroboros.llm import LLMClient, add_usage
 from ouroboros.request_wire_contract import (
     canonical_sha256,
+    infer_tool_dialect,
     payload_effort,
     physical_candidate_sha256,
 )
 from ouroboros.request_wire_recovery import (
+    current_wire_candidate,
     finalize_wire_response,
     merge_request_wire_usage,
     note_wire_send_failed,
@@ -208,6 +210,38 @@ def test_exact_route_tool_shape_isolation(evidence_root):
             anthropic, native, api_surface="messages"
         )
     assert native_payload["temperature"] == 0.4
+
+
+def test_unrepresentable_custom_catalog_falls_to_function_rung(evidence_root):
+    """E4: a catalog the custom dialect cannot represent (CustomToolProjectionError)
+    must fall to the function rung WITH a registered candidate. It used to be
+    swallowed as a malformed payload: the raw payload went on the wire with
+    state.current cleared, so every retry rung returned None and the turn died
+    on the raw provider error."""
+    huge = {f"field_{index:03d}": {"type": "string"} for index in range(300)}
+    source = _payload()
+    source["model"] = "gpt-future"
+    source["tools"] = [{
+        "type": "function",
+        "function": {
+            "name": "probe",
+            "parameters": {"type": "object", "properties": huge},
+        },
+    }]
+    target = _target(provider="openai", model="gpt-future")
+    with request_wire_call_scope():
+        sent = prepare_wire_payload_for_send(target, source, api_surface="chat.completions")
+        registered = current_wire_candidate()
+        # Never on the wire with a severed ladder: the function-dialect rung is
+        # bound and registered, and the physical payload IS that candidate.
+        assert registered is not None
+        assert infer_tool_dialect(sent) == "function"
+        assert registered.candidate_sha256 == physical_candidate_sha256(sent)
+        note_wire_send_failed()
+        # The retry ladder stays reachable after the projection failure.
+        retry = plan_wire_retry_from_exception(_Rejected("temperature is unsupported"))
+        assert retry is not None
+        assert "temperature" not in retry
 
 
 def _value_payload(carrier, target, effort):

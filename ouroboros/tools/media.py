@@ -81,6 +81,29 @@ def _resolve_local_file(ctx: ToolContext, path: str, *, max_bytes: int) -> tuple
     return fp, ""
 
 
+def _mask_user_files_text(ctx: ToolContext, fp: pathlib.Path, text: str) -> str:
+    """Same egress seam as read_file/search (#447 В23): TEXT extracted from an
+    owner-home file must not carry raw credential bytes into model context."""
+    try:
+        from ouroboros.tool_access import path_is_relative_to, resource_root_path
+
+        root = resource_root_path(ctx, "user_files")
+        if not (root and path_is_relative_to(pathlib.Path(fp), root)):
+            return text
+    except Exception:
+        return text
+    from ouroboros.secret_masking import mask_secret_bytes
+
+    masked, count = mask_secret_bytes(text)
+    if count:
+        masked += (
+            f"\n⚠️ SECRET_BYTES_MASKED: {count} secret-shaped span(s) in this "
+            "extraction were replaced with ***; raw credentials never enter "
+            "model context."
+        )
+    return masked
+
+
 def _ocr_pdf(ctx: ToolContext, path: str = "", max_pages: int = 0) -> str:
     """Extract the embedded TEXT layer of a PDF (digital PDFs). Scanned/image-only PDFs
     have no text layer → typed `⚠️ OCR_PDF_SCANNED_UNAVAILABLE` (true OCR of scanned pages
@@ -117,7 +140,7 @@ def _ocr_pdf(ctx: ToolContext, path: str = "", max_pages: int = 0) -> str:
     if len(text) > _OCR_PDF_MAX_CHARS:
         text = text[:_OCR_PDF_MAX_CHARS]
         note += "\n[disclosed: text truncated]"
-    return f"PDF text ({min(total, cap)} page(s)):\n\n{text}{note}"
+    return _mask_user_files_text(ctx, fp, f"PDF text ({min(total, cap)} page(s)):\n\n{text}{note}")
 
 
 def _youtube_video_id(url: str) -> str:

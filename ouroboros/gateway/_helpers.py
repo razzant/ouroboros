@@ -216,8 +216,9 @@ def stage_initial_task_attachments(
         "reason_code": "attachment_admission_rejected",
         "error": (
             "Task was not scheduled because one or more declared attachments "
-            "could not be staged. Retry with corrected attachments, or set "
-            "allow_partial_attachments=true on the task API request."
+            "could not be staged and this request asked for atomic admission "
+            "(allow_partial_attachments=false). Retry with corrected "
+            "attachments, or omit the flag to stage the good ones partially."
         ),
         "attachment_manifest": manifest,
     }, status_code=422)

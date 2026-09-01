@@ -768,8 +768,13 @@ def list_changed_paths_from_git_status(
 ) -> list[str]:
     """Return changed paths using NUL-delimited porcelain output."""
     path_args = (["--"] + list(paths)) if paths else []
+    # --untracked-files=all: a repo-local status.showUntrackedFiles=no would
+    # silently EMPTY the untracked half of every consumer (the restore
+    # protected-path gate among them), and the default dir-collapsing renders
+    # an untracked directory as "dir/" — hiding the individual files a
+    # protected-path judgment needs to see.
     result = subprocess.run(
-        ["git", "status", "--porcelain=v1", "-z"] + path_args,
+        ["git", "status", "--porcelain=v1", "-z", "--untracked-files=all"] + path_args,
         cwd=repo_dir,
         capture_output=True,
         timeout=10,

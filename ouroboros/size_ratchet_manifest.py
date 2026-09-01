@@ -142,11 +142,13 @@ BAND_PATHS = {
     "ouroboros/gateway/history.py": None,
     "ouroboros/gateway/settings.py": "Retiring persistent auto-Low removed the former giant debt; the remaining owner and reviewer settings endpoints stay centralized while tracked in the shrinking band.",
     "ouroboros/marketplace/ouroboroshub.py": "Entered the band from 373 lines: the hubflow sprint added the adopt transaction (eligibility prelude, CAS re-verification, move-aside + state-quintet snapshot, verified rollback with per-step error collection, retention finalize) beside the existing install/update flows (hubflow sprint, adopt-in-ouroboroshub owner decision D4).",
+    "ouroboros/mcp_client.py": "E5+s2r2 (#447): nextCursor pagination, injective 12-hex slugs, and disclosed collision/pagination omissions grew the MCP client past 1000 lines",
     "ouroboros/observability.py": "Entered the band from 820 lines: child task copy-back now promotes only promised observability CAS manifests/blobs and task-owned source handles into canonical storage before headless GC, with typed unavailable gaps and retry metadata.",
     "ouroboros/platform_layer.py": "Shrank INTO the band: the retired Claude-SDK runtime probes (resolve_claude_runtime, ClaudeRuntimeState) were deleted with the transport (owner-approved Q4 retirement); no new content was added.",
     "ouroboros/preflight_runner.py": None,
     "ouroboros/projects_registry.py": "Entered the band from 999 lines: the stuck-Working liveness sprint homed the project-thread membership lens (mtime-cached) and its broadcast-choke marker here \u2014 registry semantics belong to the registry, not to message_bus.",
     "ouroboros/protected_artifacts.py": None,
+    "ouroboros/request_wire_recovery.py": "E4 (#447): typed CustomToolProjectionError fallback keeps the wire-recovery ladder alive; includes the one-site-sufficient decision record at both retry catch sites",
     "ouroboros/review.py": "Entered the band from 952 lines: re-anchoring the size ratchet on the official line added the candidate and pairwise base-vs-tip transition validators (validate_size_ratchet_candidate/validate_size_ratchet_transition_against_base) with merge-aware previous-manifest resolution, replacing the retired first-parent history audit (update-flow-redesign sprint, Q7-C/Q18-A/Q19-A owner decisions).",
     "ouroboros/review_custody.py": "Review custody now owns the shared typed retry-rail history and frozen actor reconstruction so physical outcomes cannot be lost between the substrate and reconciliation.",
     "ouroboros/review_execution.py": "Verdict extraction and the native tool-round executor moved to their own modules (generic reviewer-actor sprint); the transport seam re-enters the band smaller and more cohesive.",
@@ -171,7 +173,6 @@ BAND_PATHS = {
     "supervisor/message_bus.py": "push_log gained the A2A frame suppression and explicit-addressing contract comments in the live log routing fix (fix/main-chat-leak sprint); the module sat at exactly 1000 lines before it",
     "supervisor/queue_transitions.py": "Queue-owned admission/quiescence transitions: the budget-pause predicate, the settled-tree fence release, and the restore-time orphan sweep join their resume/fence siblings (one queue authority).",
     "supervisor/terminal_delivery.py": None,
-    "tests/test_acting_subagents.py": None,
     "tests/test_advisory_observability.py": None,
     "tests/test_build_scripts.py": None,
     "tests/test_commit_gate.py": None,
@@ -180,6 +181,7 @@ BAND_PATHS = {
     "tests/test_delegated_skill_payload.py": "Sol scope-review fix batch: P1 trust probes (forged index, symlinked git metadata), P2 golden-E2E review close and schema/docs pins joined the existing R1+gate-fix payload suite.",
     "tests/test_evolution_redesign.py": None,
     "tests/test_external_workspace_access.py": "Deliverables custody matrix covers nested roots, executor aliases, Presence ceilings, and direct shell target semantics.",
+    "tests/test_llm_provider_routing.py": "Entered the band from 1000 lines: the issue #468 shape-first reasoning classifier added its single-form/roster/mixed-artifact unit table, the gap-merge cases against the owner provider policy, and the pin-telemetry guards beside the dispatch and reroute tests they constrain.",
     "tests/test_loop_transport_wait.py": "Contract suite for the transport-wait episode: classification, custody, round-level wait, terminals, and the final-review regression pins live together as one coherent surface.",
     "tests/test_managed_review_subject.py": "Lane L-review contract suite: the managed resolution-delta subject (gate/advisory surfaces, M0 fallback), Q25-A admission, Q28-A yield outcomes and enforcement-honest advisory texts grew past 1000 across the adversarial fix round; one subject, one suite.",
     "tests/test_nested_rights_depth.py": "Nested delegation depth authority regression coverage",
@@ -203,6 +205,7 @@ BAND_PATHS = {
     "tests/test_usage_accounting.py": None,
     "tests/test_v6730_origin_invariant.py": None,
     "tests/test_v678_receipt_reconciliation.py": None,
+    "tests/ui_chat_viewport_smoke.py": "Entered the band from 992 lines: the terminal-summary shrink bound gained its calibration rationale for the owner-approved 16px chat scale (frontend sprint 2026-09-01).",
     "web/modules/api_types.js": "The shared browser contract module now includes issue 265 publication-preflight types alongside the target settings and subagent contracts.",
     "web/modules/harness_accounts.js": None,
     "web/modules/log_events.js": None,
@@ -225,8 +228,8 @@ BYTE_BASELINE_DEBT = {
 }
 
 BYTE_DEBT = {
-    "ouroboros/loop.py": 285121,
+    "ouroboros/loop.py": 283854,
     "tests/test_delegated_subagent_transport.py": 320337,
     "tests/test_devtools_benchmarks.py": 328116,
-    "web/modules/chat.js": 210935,
+    "web/modules/chat.js": 208394,
 }

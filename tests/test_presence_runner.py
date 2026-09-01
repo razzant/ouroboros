@@ -6,7 +6,6 @@ import threading
 import time
 from concurrent.futures import ThreadPoolExecutor
 
-import pytest
 
 from ouroboros.presence_admission import PresenceAdmission
 from ouroboros.presence_authority import (
@@ -17,7 +16,6 @@ from ouroboros.presence_authority import (
 from ouroboros.presence_bindings import PresenceEndpoint
 from ouroboros.presence_context import build_presence_context_section
 from ouroboros.presence_runner import (
-    PresenceTurnError,
     PresenceTurnEvent,
     PresenceTurnGate,
     run_presence_turn,
@@ -121,39 +119,38 @@ def test_runner_builds_bounded_fresh_task_and_logs_shared_dialogue(tmp_path):
     assert rows[1]["presence_provenance"] == rows[0]["presence_provenance"]
 
 
-def test_presence_initial_attachment_rejection_is_atomic_before_dialogue_or_agent(tmp_path):
+def test_presence_initial_attachment_rejection_defaults_to_partial_staging(tmp_path):
+    """В25c (capinv-447): one bad attachment no longer discards the whole set —
+    the staged sibling rides into the task and the rejected row stays disclosed."""
     repo = tmp_path / "repo"
     data = tmp_path / "data"
     repo.mkdir()
     data.mkdir()
     staged_source = tmp_path / "available.txt"
     staged_source.write_text("available", encoding="utf-8")
-    agent_calls = []
+    seen_tasks = []
 
     class Agent:
         def handle_task(self, task):
-            agent_calls.append(task)
-            raise AssertionError("Presence rejection must happen before the agent")
+            seen_tasks.append(task)
+            return [{"type": "presence_result", "outcome": "message", "text": "ok"}]
 
-    with pytest.raises(PresenceTurnError) as raised:
-        run_presence_turn(
-            admission=_admission(),
-            event=_event(),
-            repo_dir=repo,
-            drive_root=data,
-            staged_files=(staged_source, tmp_path / "missing.txt"),
-            agent_factory=lambda **_kwargs: Agent(),
-            gate=PresenceTurnGate(2),
-        )
+    result = run_presence_turn(
+        admission=_admission(),
+        event=_event(),
+        repo_dir=repo,
+        drive_root=data,
+        staged_files=(staged_source, tmp_path / "missing.txt"),
+        agent_factory=lambda **_kwargs: Agent(),
+        gate=PresenceTurnGate(2),
+    )
 
-    error = raised.value
-    assert error.code == "presence_attachment_admission_rejected"
-    assert error.field == "staged_files"
-    assert [row["status"] for row in error.attachment_manifest] == ["staged", "rejected"]
-    assert error.attachment_manifest[1]["reason"] == "source_missing"
-    assert not pathlib.Path(error.attachment_manifest[0]["abs_path"]).exists()
-    assert agent_calls == []
-    assert not (data / "logs" / "chat.jsonl").exists()
+    assert result is not None
+    assert seen_tasks, "partial staging must let the turn proceed"
+    manifest = seen_tasks[0]["attachments"]
+    assert [row["status"] for row in manifest] == ["staged", "rejected"]
+    assert manifest[1]["reason"] == "source_missing"
+    assert pathlib.Path(manifest[0]["abs_path"]).is_file()
 
 
 def test_presence_context_loads_declared_topic_and_completion_contract(tmp_path):

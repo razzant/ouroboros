@@ -140,17 +140,24 @@ def record_asked(
 
 def record_answered(
     drive_root: Any, task_id: str, *,
-    quiz_id: str, option_index: int, request_id: str, comment: str = "",
+    quiz_id: str, option_index: Optional[int], request_id: str, comment: str = "",
 ) -> Dict[str, Any]:
     """Ingress-side answer write — request-id idempotent, first answer wins.
 
+    ``option_index=None`` is the owner's OWN answer: none of the offered
+    options was taken, so no ``answered_index`` is written at all (a stored 0
+    would read as "chose the first option" on every later replay) and the
+    verbatim ``comment`` carries the answer.
+
     Returns ``{"ok", "state", "duplicate", "error", "block"}``:
     - unknown quiz_id → ``error="quiz_not_found"``;
-    - open + valid index → answered (``ok=True``);
+    - open + valid index (or no index + comment) → answered (``ok=True``);
     - same ``request_id`` replay → the recorded confirmation, ``duplicate``;
     - already answered/expired with a different ``request_id`` → refusal with
       the truthful current ``state`` (the card settles, never re-invites);
-    - out-of-range index → ``error="option_out_of_range"``.
+    - out-of-range index → ``error="option_out_of_range"``;
+    - no index and no comment → ``error="answer_empty"`` (an answer that says
+      nothing is not an answer).
     """
     stamp = utc_now_iso()
     outcome: Dict[str, Any] = {}
@@ -168,13 +175,18 @@ def record_answered(
             outcome.update({"ok": False, "error": "quiz_closed", "state": state, "block": dict(block)})
             return _KEEP
         options = block.get("options") if isinstance(block.get("options"), list) else []
-        if not isinstance(option_index, int) or not (0 <= option_index < len(options)):
+        if option_index is None:
+            if not str(comment or "").strip():
+                outcome.update({"ok": False, "error": "answer_empty", "state": state})
+                return _KEEP
+        elif not isinstance(option_index, int) or not (0 <= option_index < len(options)):
             outcome.update({"ok": False, "error": "option_out_of_range", "state": state})
             return _KEEP
         block.update({
             "state": STATE_ANSWERED, "answered_at": stamp,
-            "answered_index": int(option_index),
             "request_id": str(request_id or ""),
+            # No index key at all for an own answer — see the docstring.
+            **({"answered_index": int(option_index)} if option_index is not None else {}),
             **({"comment": str(comment)} if str(comment or "").strip() else {}),
         })
         quizzes[str(quiz_id)] = block

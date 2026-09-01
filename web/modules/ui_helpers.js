@@ -136,7 +136,26 @@ export function setInlineStatus(el, text, tone = 'muted') {
     el.dataset.tone = normalizeTone(tone);
 }
 
-export async function openViaHostBridge(url, filename = 'file') {
+/**
+ * A packaged launcher answers `{ok:false, error}` when its file bridge refuses
+ * the URL — most often because its allowlist predates the route it was handed,
+ * which no amount of retrying fixes. Throwing there leaves the owner with a
+ * dead control and an error toast, so degrade to the same copy-link handoff the
+ * no-bridge-at-all path already uses. The refusal is rethrown only when even
+ * copying fails, so the caller's own error toast still gets its turn.
+ */
+async function bridgeRefusalFallback(url, error, browserUrl = '') {
+    try {
+        // Copy the canonical address when the caller carries both: the compat
+        // form tracks the CURRENT file-browser root and may already dangle.
+        await copyShellLinkWithToast(absoluteShellUrl(browserUrl || url, window), window, document, showToast);
+    } catch {
+        throw error;
+    }
+    return { ok: false, native: false, degraded: 'copy-link' };
+}
+
+export async function openViaHostBridge(url, filename = 'file', { browserUrl = '' } = {}) {
     // Resolved through the shared shell resolver: in the framed onboarding
     // wizard the bridge lives on the PARENT window, and reading only our own
     // window here would silently fall through to the dead window.open path.
@@ -144,7 +163,7 @@ export async function openViaHostBridge(url, filename = 'file') {
     const openBridge = api?.open_file_with_default_app;
     if (openBridge) {
         const result = await openBridge(url, filename);
-        if (!result?.ok) throw new Error(result?.error || 'open failed');
+        if (!result?.ok) return bridgeRefusalFallback(url, new Error(result?.error || 'open failed'), browserUrl);
         return { ...result, native: true };
     }
     // Version-skew fallback: the served frontend auto-updates via the managed
@@ -157,23 +176,30 @@ export async function openViaHostBridge(url, filename = 'file') {
     const downloadBridge = api?.download_file_to_downloads;
     if (downloadBridge) {
         const result = await downloadBridge(url, filename, true);
-        if (!result?.ok) throw new Error(result?.error || 'open failed');
+        if (!result?.ok) return bridgeRefusalFallback(url, new Error(result?.error || 'open failed'), browserUrl);
         return { ...result, native: true };
     }
     // True web / non-desktop: open in a new tab. This never navigates the app
     // itself; the browser previews (e.g. PDF) or downloads per its own handling.
-    window.open(url, '_blank', 'noopener');
+    // A launcher-gate compat address is bridge-only — the browser gets the
+    // canonical URL when the caller carries both.
+    window.open(browserUrl || url, '_blank', 'noopener');
     return { ok: true, native: false };
 }
 
-export async function downloadViaHostBridge(url, filename = 'download', { openExternal = false, fetchOptions = {} } = {}) {
+export async function downloadViaHostBridge(url, filename = 'download', { openExternal = false, fetchOptions = {}, browserUrl = '' } = {}) {
     const bridge = shellBridgeApi(window)?.download_file_to_downloads;
     if (bridge) {
         const result = await bridge(url, filename, Boolean(openExternal));
-        if (!result?.ok) throw new Error(result?.error || 'desktop download failed');
+        if (!result?.ok) {
+            return bridgeRefusalFallback(url, new Error(result?.error || 'desktop download failed'), browserUrl);
+        }
         return { ...result, native: true };
     }
-    const resp = await apiFetch(url, fetchOptions);
+    // Browser fallback fetches the canonical address when the caller carries
+    // both: the compat form depends on the CURRENT file-browser root and may
+    // dangle after the owner re-roots it, while the artifact URL stays valid.
+    const resp = await apiFetch(browserUrl || url, fetchOptions);
     if (!resp.ok) throw new Error(`download failed: HTTP ${resp.status}`);
     const blobUrl = URL.createObjectURL(await resp.blob());
     const link = document.createElement('a');
@@ -290,7 +316,13 @@ async function shellBytesPayload(url, filename, win) {
     };
 }
 
-async function copyShellLink(url, win, doc) {
+/**
+ * Clipboard write with the execCommand-textarea fallback. Non-secure origins
+ * and the desktop shell have no async clipboard, so a bare
+ * `navigator.clipboard?.writeText(...)` is a silently dead control there.
+ * Throws when nothing could be copied, so every caller can report honestly.
+ */
+async function copyTextToClipboard(url, win, doc) {
     try {
         if (!win.navigator?.clipboard?.writeText) throw new Error('no async clipboard');
         await win.navigator.clipboard.writeText(url);
@@ -309,6 +341,29 @@ async function copyShellLink(url, win, doc) {
     }
 }
 
+/**
+ * Copy owner-visible text and report the outcome through the shared toast host.
+ * ONE clipboard contract for controls whose whole job is "put this on the
+ * clipboard" (a sign-in link, a device code, a setup command).
+ */
+export async function copyTextWithToast(text, {
+    okMessage = 'Copied.', win = window, doc = document, toast = showToast,
+} = {}) {
+    const value = String(text ?? '');
+    if (!value) {
+        toast('Nothing to copy.', 'warn');
+        return false;
+    }
+    try {
+        await copyTextToClipboard(value, win, doc);
+    } catch (error) {
+        toast(`Could not copy: ${error?.message || error}`, 'error');
+        return false;
+    }
+    toast(okMessage, 'ok');
+    return true;
+}
+
 // With NO file-bridge method at all, openViaHostBridge/downloadViaHostBridge
 // fall back to window.open / anchor clicks — dead in the shell, and a re-entry
 // into the interceptor's own shim. routeShellUrl degrades that case to the
@@ -320,7 +375,7 @@ function absoluteShellUrl(url, win) {
 }
 
 async function copyShellLinkWithToast(url, win, doc, toast) {
-    await copyShellLink(url, win, doc);
+    await copyTextToClipboard(url, win, doc);
     toast('Link copied — open it in your browser.', 'info');
 }
 
@@ -335,6 +390,8 @@ async function routeShellUrl(kind, url, deps) {
                 return;
             }
             const name = filename || bridgeFilenameFromUrl(url);
+            // A refusal from inside these helpers already handed the owner a
+            // copy-link toast; only a genuine throw reaches the catch below.
             if (wantsDownload) await downloadFile(url, name);
             else await openFile(url, name);
         } else if (kind === 'external') {

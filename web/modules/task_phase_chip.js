@@ -56,12 +56,15 @@ export function restoreLiveCardPhaseState(record, snapshot) {
 // One writer for the stable factual task/subagent phase chip. Technical
 // nonterminal diagnostics stay in the card timeline/details.
 export function setLiveCardPhase(record, phase = 'working', text = '', className = '') {
-    if (!record?.phaseEl) return;
+    if (!record?.phaseEl) return false;
     const activePhase = String(phase || 'working');
     const activeText = String(text || taskPresentation(activePhase).headline);
     const activeClassName = className || `chat-live-phase ${activePhase}`;
     const activeLabel = `${record.isSubagent ? 'Subagent' : 'Task'} status: ${activeText}`;
     const phaseEl = record.phaseEl;
+    const changed = phaseEl.dataset.phase !== activePhase
+        || phaseEl.className !== activeClassName
+        || phaseEl.textContent !== activeText;
     if (phaseEl.dataset.phase !== activePhase) phaseEl.dataset.phase = activePhase;
     if (phaseEl.className !== activeClassName) phaseEl.className = activeClassName;
     // Do not make a polite live region re-announce identical routine progress.
@@ -70,4 +73,5 @@ export function setLiveCardPhase(record, phase = 'working', text = '', className
     if (phaseEl.getAttribute('aria-live') !== 'polite') phaseEl.setAttribute('aria-live', 'polite');
     if (phaseEl.getAttribute('aria-atomic') !== 'true') phaseEl.setAttribute('aria-atomic', 'true');
     if (phaseEl.getAttribute('aria-label') !== activeLabel) phaseEl.setAttribute('aria-label', activeLabel);
+    return changed;
 }

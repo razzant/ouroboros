@@ -10,6 +10,7 @@ const MAX_CHART_POINTS = 500;
 const MAX_RICH_BLOCK_SOURCE_LENGTH = 32768;
 const MERMAID_SCRIPT_ID = 'chat-mermaid-library';
 const ROOT_STATE = new WeakMap();
+const writeDirectly = (mutate) => mutate();
 
 let markdownParser = null;
 let mermaidLoadPromise = null;
@@ -385,26 +386,42 @@ function degradeMermaid(node, source, message) {
     node.replaceWith(block);
 }
 
-async function renderMermaidNodes(root, state) {
+async function renderMermaidNodes(root, state, onDomWrite) {
     const foundNodes = Array.from(root.querySelectorAll?.('.md-mermaid') || []);
     if (root.matches?.('.md-mermaid')) foundNodes.unshift(root);
     const nodes = [];
+    const oversized = [];
     for (const node of foundNodes) {
         const source = node.textContent || '';
         if (source.length > MAX_RICH_BLOCK_SOURCE_LENGTH) {
-            if (node.isConnected !== false) degradeMermaid(node, source, 'Diagram could not be rendered.');
+            oversized.push({ node, source });
         } else {
             nodes.push(node);
         }
     }
+    if (oversized.length) onDomWrite(() => {
+        let changed = false;
+        for (const { node, source } of oversized) {
+            if (node.isConnected === false) continue;
+            degradeMermaid(node, source, 'Diagram could not be rendered.');
+            changed = true;
+        }
+        return changed;
+    });
     if (!nodes.length) return;
     let api;
     try {
         api = await loadMermaid();
     } catch {
         if (state.destroyed || root.isConnected === false) return;
-        nodes.forEach((node) => {
-            if (node.isConnected !== false) degradeMermaid(node, node.textContent || '', 'Diagram library failed to load.');
+        onDomWrite(() => {
+            let changed = false;
+            nodes.forEach((node) => {
+                if (node.isConnected === false) return;
+                degradeMermaid(node, node.textContent || '', 'Diagram library failed to load.');
+                changed = true;
+            });
+            return changed;
         });
         return;
     }
@@ -414,18 +431,47 @@ async function renderMermaidNodes(root, state) {
         if (state.destroyed || root.isConnected === false) return;
         if (node.isConnected === false) continue;
         const source = node.textContent || '';
+        const rendered = node.cloneNode(true);
+        const stage = document.createElement('div');
+        stage.className = 'md-mermaid-stage';
+        stage.setAttribute('aria-hidden', 'true');
+        // A collapsed/hidden fence measures 0 wide; fall back to the nearest
+        // visible ancestor before the 320px floor so the diagram is laid out
+        // for the container it will actually mount into.
+        const stageWidth = node.getBoundingClientRect?.().width
+            || node.closest?.('.message')?.getBoundingClientRect?.().width
+            || root.getBoundingClientRect?.().width
+            || 0;
+        stage.style.setProperty(
+            '--md-mermaid-stage-width',
+            `${Math.max(stageWidth, 320)}px`,
+        );
+        stage.append(rendered);
+        document.body.append(stage);
         try {
-            await api.run({ nodes: [node], suppressErrors: true });
-            hardenMermaidLinks(node);
+            await api.run({ nodes: [rendered], suppressErrors: true });
+            hardenMermaidLinks(rendered);
+            stage.remove();
+            if (state.destroyed || root.isConnected === false || node.isConnected === false) return;
+            onDomWrite(() => {
+                if (node.isConnected === false) return false;
+                node.replaceWith(rendered);
+                return true;
+            });
         } catch {
+            stage.remove();
             if (!state.destroyed && root.isConnected !== false && node.isConnected !== false) {
-                degradeMermaid(node, source, 'Diagram could not be rendered.');
+                onDomWrite(() => {
+                    if (node.isConnected === false) return false;
+                    degradeMermaid(node, source, 'Diagram could not be rendered.');
+                    return true;
+                });
             }
         }
     }
 }
 
-function renderChartNodes(root, state) {
+function renderChartNodes(root, state, onDomWrite) {
     const nodes = Array.from(root.querySelectorAll?.('.md-chart') || []);
     if (root.matches?.('.md-chart')) nodes.unshift(root);
     for (const node of nodes) {
@@ -435,14 +481,20 @@ function renderChartNodes(root, state) {
             if (typeof globalThis.Chart !== 'function') throw new Error('chart library is unavailable');
             const config = parseChartConfig(source);
             const canvas = document.createElement('canvas');
-            node.replaceChildren(canvas);
-            const chart = new globalThis.Chart(canvas, config);
-            state.charts.add(chart);
-            node.dataset.processed = 'true';
+            onDomWrite(() => {
+                node.replaceChildren(canvas);
+                const chart = new globalThis.Chart(canvas, config);
+                state.charts.add(chart);
+                node.dataset.processed = 'true';
+                return true;
+            });
         } catch {
-            node.classList.add('md-chart-error');
-            node.textContent = source;
-            node.dataset.processed = 'true';
+            onDomWrite(() => {
+                node.classList.add('md-chart-error');
+                node.textContent = source;
+                node.dataset.processed = 'true';
+                return true;
+            });
         }
     }
 }
@@ -484,7 +536,7 @@ function cleanupState(root, state) {
 }
 
 /** Enhance mounted markdown and return a disposer for resources acquired here. */
-export function enhanceChatMarkdown(rootEl) {
+export function enhanceChatMarkdown(rootEl, { onDomWrite = writeDirectly } = {}) {
     if (!rootEl) return () => {};
     destroyChatMarkdown(rootEl);
     const state = {
@@ -516,12 +568,17 @@ export function enhanceChatMarkdown(rootEl) {
     rootEl.addEventListener('click', state.clickHandler);
     const start = () => {
         if (state.destroyed || rootEl.isConnected === false) return;
-        highlightCodeIn(rootEl);
-        renderLatexIn(rootEl);
-        void renderMermaidNodes(rootEl, state);
+        onDomWrite(() => {
+            highlightCodeIn(rootEl);
+            renderLatexIn(rootEl);
+            return true;
+        });
+        void renderMermaidNodes(rootEl, state, onDomWrite);
         const mountCharts = () => {
             state.frame = null;
-            if (!state.destroyed && rootEl.isConnected !== false) renderChartNodes(rootEl, state);
+            if (!state.destroyed && rootEl.isConnected !== false) {
+                renderChartNodes(rootEl, state, onDomWrite);
+            }
         };
         if (typeof requestAnimationFrame === 'function') {
             state.frame = requestAnimationFrame(mountCharts);

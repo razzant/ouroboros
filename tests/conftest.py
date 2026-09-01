@@ -127,12 +127,15 @@ def _bind_pytest_runtime_roots() -> None:
         return
     root = _PYTEST_DATA_DIR.resolve(strict=False)
     import ouroboros.config as config
-    from supervisor import queue, state, workers
+    from supervisor import git_ops, queue, state, workers
 
     config.DATA_DIR = root
     config.SETTINGS_PATH = root / "settings.json"
     state.init(root, state.TOTAL_BUDGET_LIMIT)
     queue.init(root, queue.SOFT_TIMEOUT_SEC, queue.HARD_TIMEOUT_SEC)
+    # git_ops has no env fallback: keep every rescue/log writer on the disposable
+    # data root without init(), which would also overwrite branch/remote authority.
+    git_ops.DRIVE_ROOT = root
     workers.DRIVE_ROOT = root
     # spawn_workers hands str(workers.REPO_DIR) to every child, and the child binds git_ops to
     # it — so leaving this at the live default would send workers started BY A TEST back at the

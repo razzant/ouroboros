@@ -19,6 +19,7 @@ import uuid
 from dataclasses import dataclass, field
 from typing import Any, Callable, Dict, List, Optional, Tuple
 
+from ouroboros.secret_masking import SECRET_TOKEN_PATTERNS
 from ouroboros.utils import (
     atomic_write_json,
     extract_trailing_json_object,
@@ -32,20 +33,17 @@ SCHEMA_VERSION = 1
 _PRIVATE_FILE_MODE = 0o600
 _PRIVATE_DIR_MODE = 0o700
 
-_NON_SECRET_KEY_NAMES = frozenset({
-    "prompt_tokens",
-    "completion_tokens",
-    "cached_tokens",
-    "token_estimate",
-    "token_count",
-    "total_tokens",
-    "reasoning_tokens",
-    "accepted_prediction_tokens",
-    "rejected_prediction_tokens",
-    "prompt_token_details",
-    "completion_token_details",
-    "input_tokens",
-    "output_tokens",
+# A trailing quantity/identity qualifier names METADATA about a credential —
+# a count, budget, or label — never the secret value itself (``token_estimate``,
+# ``token_budget``, ``credential_profile_id``). Structural rule replacing the
+# per-name ``_NON_SECRET_KEY_NAMES`` allowlist (#447 G11: each new metadata
+# field used to need one more allowlist patch or be destroyed irreversibly).
+# Trailing-only on purpose: ``id_token`` (OIDC) stays a secret.
+_METADATA_QUALIFIER_SEGMENTS = frozenset({
+    "count", "counts", "estimate", "estimates", "total", "totals",
+    "budget", "budgets", "limit", "limits", "usage", "details",
+    "id", "ids", "index", "type", "kind", "len", "length", "size",
+    "num", "number",
 })
 _SECRET_KEY_EXACT = frozenset({
     "authorization",
@@ -112,28 +110,9 @@ _SECRET_KEY_SEGMENT_MARKERS: Tuple[Tuple[str, ...], ...] = (
     ("api", "key"),
     ("client", "secret"),
 )
-_TOKEN_PATTERNS: Tuple[Tuple[str, re.Pattern[str]], ...] = (
-    ("bearer_token", re.compile(r"(?i)\bBearer\s+[A-Za-z0-9_\-./+=]{16,}")),
-    ("basic_auth", re.compile(r"(?i)\bBasic\s+[A-Za-z0-9+/=]{16,}")),
-    ("openai_key", re.compile(r"\bsk-[A-Za-z0-9_\-]{20,}\b")),
-    ("github_token", re.compile(r"\b(?:gh[pousr]_[A-Za-z0-9_]{20,}|github_pat_[A-Za-z0-9_]{30,})\b")),
-    ("aws_access_key", re.compile(r"\bAKIA[0-9A-Z]{16}\b")),
-    ("openrouter_key", re.compile(r"\bsk-or-[A-Za-z0-9\-]{20,}\b")),
-    ("openai_project_key", re.compile(r"\bsk-(?:proj|svcacct|admin)-[A-Za-z0-9_\-]{20,}\b")),
-    ("anthropic_key", re.compile(r"\bsk-ant-[A-Za-z0-9_\-]{20,}\b")),
-    ("groq_key", re.compile(r"\bgsk_[A-Za-z0-9]{20,}\b")),
-    ("huggingface_token", re.compile(r"\bhf_[A-Za-z0-9]{20,}\b")),
-    ("stripe_key", re.compile(r"\bsk_(?:live|test)_[A-Za-z0-9]{20,}\b")),
-    # The leading \b never matched the real Telegram URL form ``/bot<id>:<secret>/``
-    # ("bot" and the digits are both word chars — no boundary), so the pattern
-    # silently missed the exact secret it was written for (v6.70.0 fix).
-    ("telegram_bot_token", re.compile(r"(?:(?<=bot)|\b)[0-9]{8,}:[A-Za-z0-9_\-]{20,}\b")),
-    ("jwt", re.compile(r"\beyJ[A-Za-z0-9_\-]{10,}\.[A-Za-z0-9_\-]{10,}\.[A-Za-z0-9_\-]{10,}\b")),
-    (
-        "url_credentials",
-        re.compile(r"(?i)\b([a-z][a-z0-9+.-]*://)([^/@\s:]+):([^/@\s]+)@"),
-    ),
-)
+# Entropy token formats live in ``secret_masking`` (shared with the
+# tool-output egress masker); this module keeps its historical private name.
+_TOKEN_PATTERNS = SECRET_TOKEN_PATTERNS
 _SECRET_QUERY_PARAM_RE = re.compile(
     r"(?i)(?P<prefix>[?&])(?P<key>[A-Za-z_][A-Za-z0-9_.-]*)"
     r"(?P<separator>=)(?P<value>[^&#\s]+)"
@@ -181,13 +160,17 @@ def _normalize_key_name(name: str) -> str:
 
 def _is_secret_key_name(name: str) -> bool:
     normalized = _normalize_key_name(name)
-    if not normalized or normalized in _NON_SECRET_KEY_NAMES:
+    if not normalized:
+        return False
+    ordered_parts = tuple(normalized.split("_"))
+    if ordered_parts[-1] in _METADATA_QUALIFIER_SEGMENTS:
+        # Metadata ABOUT a credential, not the credential (the value-shape rules
+        # in _redact_text still catch a real secret parked under such a key).
         return False
     if normalized in _SECRET_KEY_EXACT or normalized.endswith(_SECRET_KEY_SUFFIXES):
         return True
     if normalized.endswith(_SECRET_KEY_COMPOUND_SUFFIXES):
         return True
-    ordered_parts = tuple(normalized.split("_"))
     if any(
         ordered_parts[start : start + len(marker)] == marker
         for marker in _SECRET_KEY_SEGMENT_MARKERS
@@ -1059,6 +1042,20 @@ def _redact_text(text: str, records: List[RedactionRecord], path: str) -> str:
     return out
 
 
+def _secret_value_fingerprint(value: Any) -> str:
+    """Non-secret meta of a redacted value: type, length, sha256 first 8 hex.
+
+    The default authoritative blob is the redacted one, so bare destruction is
+    irreversible (#447 G11): the fingerprint keeps equality/rotation auditable
+    (same secret → same digest) without persisting a single raw byte.
+    """
+    raw = value if isinstance(value, str) else json.dumps(
+        value, ensure_ascii=False, sort_keys=True, default=str
+    )
+    digest = hashlib.sha256(raw.encode("utf-8", errors="replace")).hexdigest()[:8]
+    return f"***REDACTED[{type(value).__name__}:len={len(raw)}:sha256_8={digest}]***"
+
+
 def _redact_any(value: Any, records: List[RedactionRecord], path: str) -> Any:
     if isinstance(value, dict):
         out: Dict[str, Any] = {}
@@ -1068,7 +1065,9 @@ def _redact_any(value: Any, records: List[RedactionRecord], path: str) -> Any:
             if _is_secret_key_name(key_text):
                 if item not in (None, "", False):
                     records.append(RedactionRecord(path=item_path, rule="secret_key_name"))
-                out[key_text] = "***REDACTED***" if item not in (None, "", False) else item
+                out[key_text] = (
+                    _secret_value_fingerprint(item) if item not in (None, "", False) else item
+                )
             else:
                 out[key_text] = _redact_any(item, records, item_path)
         return out

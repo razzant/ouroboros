@@ -29,20 +29,25 @@ from typing import Any, Dict, List, Optional
 
 import httpx
 
-from ouroboros.config import CLAUDEXOR_MIN_VERSION, CLAUDEXOR_PROTOCOL_MAJOR
+from ouroboros.config import (
+    CLAUDEXOR_MIN_VERSION,
+    CLAUDEXOR_PROTOCOL_MAJOR,
+    get_claudexor_quota_refresh_timeout_sec,
+)
 
 log = logging.getLogger(__name__)
 
 CONTROL_API_REL = ".claudexor/v3/daemon/control-api.json"
 PROTOCOL_HEADER = "X-Claudexor-Protocol-Major"
 _CONNECT_TIMEOUT_SEC = 5.0
-# The client-wide read default, and the CEILING on any self-bounding caller's ask
+# The client-wide read default, and the CEILING on any polling/self-bounding caller's ask
 # (`delegate_progress.poll_bound` reads it): a per-request value above it is not a bound
 # at all, it is a hung read granted more rope than it would have had. Generous on
 # purpose: most calls here would rather wait than fail, and a run start can take a while
 # to answer.
 _READ_TIMEOUT_SEC = 60.0
-# The FLOOR under such a caller's ask, not a bound anything asks for by name. Every
+# The FLOOR under non-strict bounded wait/admission asks. Owned-daemon startup also
+# imports it as the CEILING for each fast loopback liveness probe. Every ordinary
 # `delegate_wait` poll asks for what its window has left; this is where that narrowing
 # stops, because a nearly spent window asking for its own 0.2s turns a healthy daemon
 # into a timeout, while the 60s default would outrun the very deadline the wait clamps
@@ -427,6 +432,15 @@ class ClaudexorGateway:
         """GET /v2/quota once, retaining its one-epoch evidence envelope."""
         body = self._request("GET", "/v2/quota")
         return body if isinstance(body, dict) else {}
+
+    def refresh_quota(self) -> Dict[str, Any]:
+        """POST /v2/quota once, returning the foreground evidence envelope."""
+        return self._request(
+            "POST",
+            "/v2/quota",
+            json_body={},
+            timeout_sec=get_claudexor_quota_refresh_timeout_sec(),
+        )
 
     def quota_snapshots(self) -> List[Dict[str, Any]]:
         body = self.quota_state()

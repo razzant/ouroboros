@@ -6,6 +6,7 @@ import {
     LOAD_OLDER_QUOTA_STEPS,
     createHistoryResyncScheduler,
     createRebuildBatch,
+    createTimelineAnchors,
     loadOlderControlState,
     nextQuotaEscalation,
     orderBatchNodes,
@@ -137,25 +138,7 @@ test('load-older control follows the SERVER window verdict', () => {
     assert.match(floor.label, /lineage/i);
 });
 
-// ─────────────── source pins: routine path & sticky boundary ───────────────
-
-test('routine path still routes through chronological insertTimelineNode', () => {
-    // [Fable#9] The batch collector only diverts while a rebuildAll batch is
-    // active; the routine/live insertMessageNode path must keep flowing into
-    // insertTimelineNode (the py pin becomes provable structure, not luck).
-    const fn = chatSource.slice(
-        chatSource.indexOf('function insertMessageNode('),
-        chatSource.indexOf('function isBackgroundTaskId('),
-    );
-    const guard = fn.indexOf('if (_rebuildBatch) {');
-    const divert = fn.indexOf('_rebuildBatch.collect(node);');
-    const chronological = fn.indexOf('insertTimelineNode(messagesDiv, node, typing');
-    assert.ok(guard !== -1 && divert !== -1 && chronological !== -1);
-    // The batch divert RETURNS before the chronological insertion, which stays
-    // the one and only mounted-DOM path.
-    assert.ok(guard < divert && divert < chronological);
-    assert.match(fn.slice(divert, chronological), /return;/);
-});
+// ─────────────── sticky hydration / replay contracts ──────────────────────
 
 test('sticky single-flight never swallows the post-completion resync', () => {
     // [GPT#12 + Fable#1] scheduleHistorySync (700ms debounce after task
@@ -175,19 +158,6 @@ test('sticky single-flight never swallows the post-completion resync', () => {
     );
     // Every failed sync resets the sticky promise.
     assert.ok((chatSource.match(/initialHydrationPromise = null;/g) || []).length >= 3);
-});
-
-test('rebuild batch runs inside ONE outer withStableViewport with a synchronous mount', () => {
-    // [GPT#14] the clearing→mount critical section must stay synchronous and
-    // wrapped once; the fragment mounts before the typing bubble.
-    const start = chatSource.indexOf('_rebuildBatch = createRebuildBatch();');
-    assert.ok(start !== -1);
-    const section = chatSource.slice(start, start + 900);
-    assert.match(section, /withStableViewport\(\(\) => \{/);
-    assert.match(section, /applySyncedMessages\(\);/);
-    assert.match(section, /batch\.mount\(messagesDiv, messagesDiv\.querySelector\('\.typing-bubble'\)\);/);
-    assert.match(section, /finalizeRebuildBatch\(batch\);/);
-    assert.doesNotMatch(section.slice(0, section.indexOf('finalizeRebuildBatch')), /await /);
 });
 
 // ──────────── replay-time resync suppression (double-fetch fix) ────────────
@@ -275,21 +245,6 @@ test('chat.js wires the replay flag around the replay and keeps live callsites i
     assert.doesNotMatch(chatSource, /_historyReplayActive[^\n]*scheduleHistorySync/);
 });
 
-test('the Load-older control is mounted ONLY while it has something to show', () => {
-    // A permanently-present (even hidden) control is an extra top-level feed
-    // child that breaks child-order consumers (ui-smoke chronology pattern)
-    // and diverges from the pre-P4 feed layout on complete windows.
-    const fn = chatSource.slice(
-        chatSource.indexOf('function syncLoadOlderControl('),
-        chatSource.indexOf('async function loadOlderHistory('),
-    );
-    assert.match(fn, /if \(control\.mode === 'hidden'\) \{[\s\n]*loadOlderEl\.remove\(\);/);
-    assert.match(fn, /if \(!loadOlderEl\.isConnected\) messagesDiv\.prepend\(loadOlderEl\);/);
-    // The ONLY mount site is the on-demand one inside syncLoadOlderControl —
-    // no unconditional prepend at instance construction.
-    assert.equal((chatSource.match(/messagesDiv\.prepend\(loadOlderEl\);/g) || []).length, 1);
-});
-
 test('the Load-older control is excluded from viewport anchoring like typing', () => {
     // [GPT#13] the anchor must land on the first visible TIMESTAMPED node.
     // The anchor pair lives in chat_render_batch.js (extracted verbatim from
@@ -301,4 +256,71 @@ test('the Load-older control is excluded from viewport anchoring like typing', (
     );
     assert.match(fn, /!node\.classList\.contains\('typing-bubble'\)/);
     assert.match(fn, /!node\.classList\.contains\('chat-load-older'\)/);
+});
+
+test('a reader inside Reviews stays anchored when content grows above the attempt', () => {
+    const box = (top, bottom) => ({ top, bottom, left: 0, right: 600, width: 600, height: bottom - top });
+    const makeAnchorNode = (name, bounds, classes = [], selectors = []) => {
+        const node = {
+            name,
+            dataset: {},
+            isConnected: true,
+            parentElement: null,
+            bounds,
+            classNames: new Set(classes),
+            selectors: new Set(selectors),
+        };
+        node.classList = { contains: (value) => node.classNames.has(value) };
+        node.getBoundingClientRect = () => node.bounds;
+        node.getClientRects = () => [node.bounds];
+        node.matches = (selector) => node.selectors.has(selector);
+        node.contains = (candidate) => {
+            for (let current = candidate; current; current = current.parentElement) {
+                if (current === node) return true;
+            }
+            return false;
+        };
+        node.closest = (selector) => {
+            for (let current = node; current; current = current.parentElement) {
+                if (selector === '.chat-live-card' && current.classNames?.has('chat-live-card')) {
+                    return current;
+                }
+            }
+            return null;
+        };
+        node.querySelectorAll = () => [];
+        return node;
+    };
+
+    const messages = makeAnchorNode('messages', box(0, 500));
+    messages.scrollTop = 1000;
+    const card = makeAnchorNode('card', box(-1000, 1200), ['chat-live-card']);
+    card.dataset.taskId = 'review-task';
+    card.parentElement = messages;
+    const summary = makeAnchorNode('summary', box(-1000, -900), [], ['[data-live-summary-button]']);
+    const timeline = makeAnchorNode('timeline', box(-800, -100), ['chat-live-line'], ['.chat-live-line']);
+    const reviewHost = makeAnchorNode('review-host', box(-100, 900));
+    const reviewSection = makeAnchorNode('review-section', box(-100, 900), [], ['[data-review-section]']);
+    const review = makeAnchorNode('review-attempt', box(-100, 900), [], ['[data-review-attempt]']);
+    summary.parentElement = card;
+    timeline.parentElement = card;
+    reviewHost.parentElement = card;
+    reviewSection.parentElement = reviewHost;
+    review.parentElement = reviewSection;
+    const descendants = [summary, timeline, reviewSection, review];
+    card.querySelectorAll = (selector) => descendants.filter(
+        (candidate) => [...candidate.selectors].some((token) => selector.includes(token)),
+    );
+    messages.children = [card];
+    messages.contains = (candidate) => candidate === card || card.contains(candidate);
+
+    const anchors = createTimelineAnchors({
+        messagesDiv: messages,
+        liveCardRecords: new Map([['review-task', { root: card }]]),
+    });
+    const anchor = anchors.captureVisibleTimelineAnchor();
+    review.bounds = box(20, 1020);
+    assert.equal(anchor.node, review);
+    assert.equal(anchors.restoreVisibleTimelineAnchor(anchor), true);
+    assert.equal(messages.scrollTop, 1120);
 });

@@ -577,7 +577,10 @@ async def api_tasks_create(request: Request) -> JSONResponse:
     effective_drive = child_drive or drive_root
     attachment_manifest, attachment_error = stage_initial_task_attachments(
         effective_drive, task_id, _normalize_attachments(body.get("attachments")),
-        allow_partial=body.get("allow_partial_attachments") is True,
+        # Partial staging is the DEFAULT (В25c, capinv-447): good attachments
+        # stage, rejected ones stay disclosed rows. Pass explicit false for the
+        # old atomic all-or-nothing admission.
+        allow_partial=body.get("allow_partial_attachments") is not False,
     )
     if attachment_error is not None:
         _cleanup_api_admission_attempt(drive_root, task_id, admission_token, child_drive)

@@ -439,7 +439,9 @@ def _user_files_only_admission_block(ctx: Any, fp: "pathlib.Path") -> str:
         for label, root in profile_readable_root_paths(ctx):
             if label != "user_files" and _path_is_under(fp, root):
                 return ""  # admitted by a narrower root in its own right
-        reason = user_files_path_block_reason(ctx, fp)
+        # operation="read" keeps SC-6 read_file parity: root reads of the owner
+        # home are location-authorized only (capinv-447 / В23=A).
+        reason = user_files_path_block_reason(ctx, fp, operation="read")
         if reason:
             return f"⚠️ USER_FILES_PATH_BLOCKED: user_files path blocked: {reason}"
     except Exception:

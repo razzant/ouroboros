@@ -213,7 +213,12 @@ def test_progress_bubbles_have_subdued_styling():
     """Progress/reasoning bubbles should be visually muted compared to regular ones."""
     css = _read("web/style.css")
     assert ".chat-bubble.progress .message" in css, "Missing progress-specific message style"
-    assert "font-size: 13px" in css, "Progress font should be smaller than default 15.5px"
+    progress_block = css.split(".chat-bubble.progress .message", 1)[1]
+    progress_block = progress_block[: progress_block.index("}")]
+    assert "font-size: var(--type-body)" in progress_block, (
+        "Progress font should be the 14px body token, smaller than the "
+        "16px --type-section chat default"
+    )
 
 
 def test_working_live_cards_are_subdued_and_expandable():
@@ -303,11 +308,8 @@ def test_chat_scrolls_to_bottom_after_first_history_load():
     assert "const parent = liveCardRecords.get(record.parentGroupId);" in source
     assert "seen.has(record.groupId)" in source, \
         "Nested subagent timestamps must propagate to the top-level ancestor safely"
-    assert "messagesDiv.scrollTop = messagesDiv.scrollHeight" in source
-    # Pin the chronological insertion call-site: a revert to plain append would
-    # keep JS unit tests green (they exercise the exported helper directly).
-    assert "insertTimelineNode(messagesDiv, node, typing" in source, \
-        "insertMessageNode must route through chronological insertTimelineNode"
+    assert "if (wasFirstLoad) scrollToBottomAfterLayout();" in source, \
+        "First load must pin the fresh feed to the newest message explicitly"
     # The shared photo/video builder and the separate document builder must
     # each stamp sortable data-ts from the raw source timestamp.
     bubble_frame = media_source.split("function bubbleFrame", 1)[1].split(

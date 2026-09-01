@@ -472,6 +472,52 @@ def test_integrate_apply_happy(tmp_path):
     assert len(str(child.get("child_result_disposition_sha256") or "")) == 64
 
 
+def test_integrate_discloses_capture_excluded_files(tmp_path):
+    """#447 C2: per-file capture exclusions (F5) live in the manifest, which no
+    parent-facing surface rendered — a dropped deliverable hid behind the
+    affirmative "Integrated N file(s)" line. The success message must disclose."""
+    from ouroboros.tools.subagent_integration import _integrate_subagent_patch
+
+    repo = tmp_path / "repo"
+    _init_repo(repo, {"a.txt": "hi\n"})
+    drive = tmp_path / "data"; drive.mkdir()
+    art = _make_child_patch(repo, drive, "child1", "a.txt", "hi\nworld\n")
+    manifest = json.loads((art / "workspace_patch.json").read_text(encoding="utf-8"))
+    manifest["sensitive_blocked"] = [
+        {"path": "token_report.json", "reason": "credential-like filename"},
+    ]
+    manifest["untracked_excluded"] = [
+        {"path": "fixtures/dummy_key.pem", "reason": "private key material"},
+    ]
+    (art / "workspace_patch.json").write_text(json.dumps(manifest), encoding="utf-8")
+
+    out = _integrate_subagent_patch(_integrate_ctx(repo, drive), task_id="child1", reason="best of N")
+
+    assert "Integrated subagent patch" in out
+    assert "EXCLUDED from this patch by capture policy" in out, out[:400]
+    assert "token_report.json (credential-like filename)" in out
+    assert "fixtures/dummy_key.pem (private key material)" in out
+
+
+def test_reject_branch_also_discloses_exclusions(tmp_path):
+    """#447 R2-B: a run whose ONLY output was excluded files reads as no-changes/rejected - those branches must disclose the exclusions too, or the sole copy vanishes behind an affirmative nothing-happened line."""
+    from ouroboros.tools.subagent_integration import _integrate_subagent_patch
+
+    repo = tmp_path / "repo"
+    _init_repo(repo, {"a.txt": "hi\n"})
+    drive = tmp_path / "data"; drive.mkdir()
+    art = _make_child_patch(repo, drive, "child1", "a.txt", "hi\nworld\n")
+    manifest = json.loads((art / "workspace_patch.json").read_text(encoding="utf-8"))
+    manifest["sensitive_blocked"] = [{"path": "token_report.json", "reason": "credential-like filename"}]
+    (art / "workspace_patch.json").write_text(json.dumps(manifest), encoding="utf-8")
+
+    out = _integrate_subagent_patch(
+        _integrate_ctx(repo, drive), task_id="child1", decision="reject", reason="not needed",
+    )
+    assert "Rejected subagent patch" in out, out[:300]
+    assert "EXCLUDED from this patch by capture policy" in out, out[:400]
+
+
 def test_integrate_reject_records_verdict(tmp_path):
     from ouroboros.tools.subagent_integration import _integrate_subagent_patch
     from ouroboros.task_results import load_task_result

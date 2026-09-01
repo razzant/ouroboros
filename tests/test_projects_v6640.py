@@ -596,16 +596,11 @@ def test_ephemeral_decision_web_frames_never_create_task_card_or_second_receipt(
     ]
     assert "!ephemeralDecisionTaskIds.has(normalizedGroupId)" in card_factory
 
-    progress = chat[
-        chat.index("function updateLiveCardFromProgressMessage"):
-        chat.index("function updateSubagentCardFromEvent")
-    ]
     logs = chat[
         chat.index("function updateLiveCardFromLogEvent"):
         chat.index("function addMessage")
     ]
-    assert "if (registerEphemeralDecisionFrame(msg)) return;" in progress
-    assert "if (registerEphemeralDecisionFrame(evt)) return;" in logs
+    assert chat.count("if (ephemeral !== undefined) return ephemeral;") == 3
     assert logs.index("registerEphemeralDecisionFrame(evt)") < logs.index(
         "const taskId = getLogTaskGroupId(evt)"
     )
@@ -616,6 +611,7 @@ def test_ephemeral_decision_web_frames_never_create_task_card_or_second_receipt(
     ]
     # Inline ephemeral answers are not blanket-suppressed. Typed routing turns
     # retain any non-empty final answer while their progress/card stays hidden.
-    assert fanout.count("if (ephemeralDecision) return;") == 1  # progress/card path only
-    assert fanout.index("showTaskIncidentToast(msg);") < fanout.index("if (ephemeralDecision) return;")
+    assert "const isEphemeral = ephemeral !== undefined;" in fanout
+    assert fanout.count("if (isEphemeral) return ephemeral;") == 1
+    assert fanout.index("showTaskIncidentToast(msg);") < fanout.index("if (isEphemeral) return ephemeral;")
     assert "addMessage(msg.content" in fanout

@@ -157,21 +157,30 @@ def test_query_code_workspace_and_subagent_schema_roots(tmp_path):
     assert "TOOL_ACCESS_BLOCKED" in blocked
 
 
-def test_query_code_hides_local_readonly_subagent_secret_paths(tmp_path):
+def test_query_code_subagent_name_shape_is_not_authorization(tmp_path):
+    """#447 A1 conversion: this test used to pin the REFUSAL (an ordinary source
+    file named secret.py was invisible to children). The positive contract is
+    pinned instead: a credential-shaped NAME on an ordinary source file at an
+    allowed location is readable/queryable by children (the suffix carve);
+    only the conventional credential LOCATION (an auth/ directory) stays
+    denied, and no code-intel cache is written for a restricted child."""
     from ouroboros.contracts.task_constraint import TaskConstraint
     from ouroboros.tool_capabilities import LOCAL_READONLY_SUBAGENT_MODE
 
     repo = _repo(tmp_path)
+    (repo / "pkg" / "secret.py").write_text(
+        "def issue_token():\n    return 'ordinary auth logic'\n", encoding="utf-8")
     (repo / "auth").mkdir()
-    (repo / "auth" / "secret.py").write_text("def leak():\n    return 'TOKEN_LEAK'\n", encoding="utf-8")
+    (repo / "auth" / "service.py").write_text("def hidden():\n    return 2\n", encoding="utf-8")
     ctx = ToolContext(
         repo_dir=repo,
         drive_root=tmp_path / "data",
         task_constraint=TaskConstraint(mode=LOCAL_READONLY_SUBAGENT_MODE),
     )
 
-    result = _query_code(ctx, op="structural", query="leak", path="auth")
-    assert "TOKEN_LEAK" not in result
-    assert "auth/secret.py" not in result
+    result = _query_code(ctx, op="structural", query="FunctionDef", path="pkg")
+    assert "pkg/secret.py" in result  # the NAME alone does not hide the file
+    located = _query_code(ctx, op="structural", query="FunctionDef", path="auth")
+    assert "auth/service.py" not in located  # the conventional LOCATION still does
     cache_files = list((tmp_path / "data" / "state" / "code_intel").glob("*/inventory.json"))
     assert cache_files == []

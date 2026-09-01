@@ -5,7 +5,7 @@
 // assumption, so it must read correctly both as "you can redirect me" (open)
 // and as a record of what happened (answered / expired). The routing picker
 // settles into the plain routing ack line once its dispatch is confirmed.
-import { MAX_QUIZ_OPTIONS } from './api_types.js';
+import { MAX_DECISION_COMMENT, MAX_QUIZ_OPTIONS } from './api_types.js';
 import { renderRoutingAnnotation, routingOptionLabel } from './chat_activity.js';
 
 const QUIZ_STATUS_TEXT = {
@@ -31,6 +31,7 @@ export function createChatDecision({
     renderMarkdown,
     enhanceMarkdown,
     showToast,
+    onDomWrite = (mutate) => mutate(),
 }) {
     function normalizeQuiz(msg) {
         const nested = msg && typeof msg.quiz === 'object' && msg.quiz ? msg.quiz : null;
@@ -54,6 +55,10 @@ export function createChatDecision({
             taskId: String(msg.task_id || ''),
             ts: msg.ts || null,
             answeredIndex: Number.isInteger(src.answered_index) ? src.answered_index : null,
+            // The owner's verbatim words on a settled card (history replay
+            // merges them from the projection). With no answeredIndex they
+            // ARE the answer, not a remark beside one.
+            comment: String(src.comment || ''),
         };
     }
 
@@ -62,9 +67,10 @@ export function createChatDecision({
         return QUIZ_STATUS_TEXT[state] || 'Closed';
     }
 
-    async function submitAnswer(card, quiz, index) {
+    async function submitAnswer(card, quiz, index, comment) {
         if (card.dataset.pending === '1') return;
         card.dataset.pending = '1';
+        const text = String(comment || '');
         // STABLE per-card idempotency key: a retry after a transient failure
         // must replay the SAME request, or the server-side first-wins latch
         // reads the retry as a competing second answer.
@@ -78,13 +84,26 @@ export function createChatDecision({
                 body: JSON.stringify({
                     request_id: card.dataset.requestId,
                     decision_id: `quiz:${quiz.taskId}:${quiz.quizId}`,
-                    option_index: index,
+                    // Omitted, never null: no option means the owner took none
+                    // of them and the comment carries the whole answer.
+                    ...(Number.isInteger(index) ? { option_index: index } : {}),
+                    ...(text ? { comment: text } : {}),
                 }),
             });
             let body = null;
             try { body = res && res.json ? await res.json() : null; } catch (parseErr) { body = null; }
             if (res && res.ok) {
-                const answered = body && Number.isInteger(body.answered_index) ? body.answered_index : index;
+                // The confirmation is the display truth: a same-request_id
+                // retry may have carried a different payload, and the server
+                // answers with what was actually RECORDED — index absent for a
+                // free answer, comment as stored. Never render this attempt's
+                // own click over it.
+                const answered = body && Number.isInteger(body.answered_index)
+                    ? body.answered_index
+                    : (body && body.duplicate ? null : (Number.isInteger(index) ? index : null));
+                const recorded = body && typeof body.comment === 'string' ? body.comment : text;
+                if (recorded) card.dataset.ownerComment = recorded;
+                else delete card.dataset.ownerComment;
                 setCardState(card, 'answered', answered);
                 return;
             }
@@ -94,6 +113,10 @@ export function createChatDecision({
                 // an already-answered quiz settles as answered (with the
                 // winning option when known), never as a false expiry.
                 const answered = Number.isInteger(body.answered_index) ? body.answered_index : null;
+                // The 409 loser learns the WINNING answer, comment included —
+                // the local draft must not survive as the displayed record.
+                if (typeof body.comment === 'string' && body.comment) card.dataset.ownerComment = body.comment;
+                else delete card.dataset.ownerComment;
                 setCardState(card, body.state, answered);
                 showToast(body.state === 'answered'
                     ? 'Already answered.' : 'This question is no longer open.', 'error');
@@ -112,15 +135,63 @@ export function createChatDecision({
         }
     }
 
+    function renderOwnerAnswer(card, comment) {
+        // The owner's own words are a SECOND primary line under the question:
+        // with no chosen option they are the entire answer, and beside a
+        // chosen one they qualify it.
+        let line = card.querySelector('.chat-quiz-answer');
+        if (!comment) {
+            if (!line) return false;
+            line.remove();
+            return true;
+        }
+        const text = `Owner's answer: ${comment}`;
+        if (line) {
+            if (line.textContent === text) return false;
+            line.textContent = text;
+            return true;
+        }
+        line = document.createElement('div');
+        line.className = 'chat-quiz-answer';
+        line.textContent = text;
+        const assumption = card.querySelector('.chat-quiz-assumption');
+        if (assumption) assumption.before(line);
+        else card.append(line);
+        return true;
+    }
+
     function setCardState(card, state, answeredIndex) {
-        if (!card) return;
-        card.dataset.state = state;
-        const status = card.querySelector('.chat-quiz-status-text');
-        if (status) status.textContent = statusText(state);
-        const buttons = card.querySelectorAll('.chat-quiz-option');
-        buttons.forEach((btn, i) => {
-            btn.disabled = state !== 'open';
-            btn.classList.toggle('chosen', answeredIndex !== null && i === answeredIndex);
+        if (!card) return false;
+        return onDomWrite(() => {
+            let changed = card.dataset.state !== state;
+            if (changed) card.dataset.state = state;
+            if (state !== 'open') {
+                // A settled card takes no more input: the draft field goes,
+                // and what the owner actually said takes its place.
+                const box = card.querySelector('.chat-quiz-comment-box');
+                if (box) { box.remove(); changed = true; }
+                if (renderOwnerAnswer(card, String(card.dataset.ownerComment || ''))) changed = true;
+            }
+            const status = card.querySelector('.chat-quiz-status-text');
+            const nextStatus = statusText(state);
+            if (status && status.textContent !== nextStatus) {
+                status.textContent = nextStatus;
+                changed = true;
+            }
+            const buttons = card.querySelectorAll('.chat-quiz-option');
+            buttons.forEach((btn, i) => {
+                const disabled = state !== 'open';
+                const chosen = answeredIndex !== null && i === answeredIndex;
+                if (btn.disabled !== disabled) {
+                    btn.disabled = disabled;
+                    changed = true;
+                }
+                if (btn.classList.contains('chosen') !== chosen) {
+                    btn.classList.toggle('chosen', chosen);
+                    changed = true;
+                }
+            });
+            return changed;
         });
     }
 
@@ -164,6 +235,12 @@ export function createChatDecision({
             card.append(stake);
         }
 
+        let commentField = null;
+        // The raw field value is the answer (VERBATIM to the model); the
+        // trimmed view only decides whether there IS one.
+        const commentText = () => String((commentField && commentField.value) || '');
+        const commentPresent = () => commentText().trim().length > 0;
+
         const optionsBox = document.createElement('div');
         optionsBox.className = 'chat-quiz-options';
         quiz.options.forEach((option, index) => {
@@ -183,11 +260,53 @@ export function createChatDecision({
             }
             btn.addEventListener('click', () => {
                 if (card.dataset.state !== 'open') return;
-                submitAnswer(card, quiz, index);
+                // A typed remark rides WITH the click: the owner picked this
+                // option and said why, one answer, one request.
+                submitAnswer(card, quiz, index, commentText());
             });
             optionsBox.append(btn);
         });
         card.append(optionsBox);
+
+        // Free answer: none of the options may fit, and the owner must not be
+        // forced to pick the least wrong one. Always visible while the card is
+        // open (no disclosure to discover), removed once it settles.
+        if (quiz.state === 'open') {
+            const box = document.createElement('div');
+            box.className = 'chat-quiz-comment-box';
+            commentField = document.createElement('textarea');
+            commentField.className = 'chat-quiz-comment';
+            commentField.rows = 2;
+            commentField.maxLength = MAX_DECISION_COMMENT;
+            commentField.placeholder = 'Your answer or comment…';
+            const send = document.createElement('button');
+            send.type = 'button';
+            send.className = 'chat-quiz-send';
+            send.textContent = 'Send my answer';
+            send.disabled = true;
+            const syncSend = () => {
+                const text = commentText();
+                const enabled = commentPresent() && text.length <= MAX_DECISION_COMMENT;
+                if (send.disabled === !enabled) return;
+                send.disabled = !enabled;
+            };
+            commentField.addEventListener('input', () => onDomWrite(() => { syncSend(); return true; }));
+            send.addEventListener('click', () => {
+                if (card.dataset.state !== 'open') return;
+                const text = commentText();
+                if (!commentPresent()) return;
+                if (text.length > MAX_DECISION_COMMENT) {
+                    // The ingress refuses it rather than truncating the
+                    // owner's words — say so here instead of sending.
+                    showToast(`Keep the answer under ${MAX_DECISION_COMMENT} characters — `
+                        + 'it is delivered word for word.', 'error');
+                    return;
+                }
+                submitAnswer(card, quiz, null, text);
+            });
+            box.append(commentField, send);
+            card.append(box);
+        }
 
         // The signature line: what the agent keeps doing while the owner has
         // not answered — and, once the card settles, the record of the path
@@ -199,6 +318,7 @@ export function createChatDecision({
             card.append(assumption);
         }
 
+        if (quiz.comment) card.dataset.ownerComment = quiz.comment;
         setCardState(card, quiz.state, quiz.answeredIndex);
         const framed = frameNode(msg, card);
         if (enhanceMarkdown && renderMarkdown) enhanceMarkdown(card);
@@ -206,13 +326,29 @@ export function createChatDecision({
     }
 
     function setRoutingCardState(card, state, chosenIndex) {
-        if (!card) return;
-        card.dataset.state = state;
-        const status = card.querySelector('.chat-quiz-status-text');
-        if (status) status.textContent = ROUTING_STATUS_TEXT[state] || 'Closed';
-        card.querySelectorAll('.chat-quiz-option').forEach((btn, i) => {
-            btn.disabled = state !== 'open';
-            btn.classList.toggle('chosen', chosenIndex !== null && i === chosenIndex);
+        if (!card) return false;
+        return onDomWrite(() => {
+            let changed = card.dataset.state !== state;
+            if (changed) card.dataset.state = state;
+            const status = card.querySelector('.chat-quiz-status-text');
+            const nextStatus = ROUTING_STATUS_TEXT[state] || 'Closed';
+            if (status && status.textContent !== nextStatus) {
+                status.textContent = nextStatus;
+                changed = true;
+            }
+            card.querySelectorAll('.chat-quiz-option').forEach((btn, i) => {
+                const disabled = state !== 'open';
+                const chosen = chosenIndex !== null && i === chosenIndex;
+                if (btn.disabled !== disabled) {
+                    btn.disabled = disabled;
+                    changed = true;
+                }
+                if (btn.classList.contains('chosen') !== chosen) {
+                    btn.classList.toggle('chosen', chosen);
+                    changed = true;
+                }
+            });
+            return changed;
         });
     }
 
@@ -308,11 +444,12 @@ export function createChatDecision({
             more.type = 'button';
             more.className = 'chat-quiz-more';
             more.textContent = `Show all ${options.length}`;
-            more.addEventListener('click', () => {
+            more.addEventListener('click', () => onDomWrite(() => {
                 optionsBox.querySelectorAll('.chat-quiz-option')
                     .forEach((btn) => { btn.hidden = false; });
                 more.remove();
-            });
+                return true;
+            }));
             card.append(more);
         }
         setRoutingCardState(card, 'open', null);
@@ -324,26 +461,30 @@ export function createChatDecision({
         // refusal renders the picker card; every other annotation state
         // settles back into the plain text ack line.
         if (!bubble) return false;
-        const cmid = String(bubble.dataset.clientMessageId || '');
-        const status = String((annotation && annotation.status) || '');
-        const token = String((annotation && annotation.routing_token) || '');
-        const options = Array.isArray(annotation && annotation.options) ? annotation.options : [];
-        const actionable = status === 'needs_manual_target' && cmid && token
-            && options.length > 0 && options.every((o) => o && typeof o === 'object');
-        if (!actionable) {
-            bubble.querySelector('.chat-routing-card')?.remove();
-            return renderRoutingAnnotation(bubble, annotation);
-        }
-        renderRoutingAnnotation(bubble, null); // the card replaces the text line
-        let card = bubble.querySelector('.chat-routing-card');
-        if (card && card.dataset.routingToken === token) return true; // same attempt
-        card?.remove();
-        card = buildRoutingCard(cmid, token, options);
-        const time = bubble.querySelector('.msg-time');
-        if (time) time.before(card);
-        else bubble.append(card);
-        bubble.dataset.chatAnnotationStatus = status;
-        return true;
+        return onDomWrite(() => {
+            const cmid = String(bubble.dataset.clientMessageId || '');
+            const status = String((annotation && annotation.status) || '');
+            const token = String((annotation && annotation.routing_token) || '');
+            const options = Array.isArray(annotation && annotation.options) ? annotation.options : [];
+            const actionable = status === 'needs_manual_target' && cmid && token
+                && options.length > 0 && options.every((o) => o && typeof o === 'object');
+            if (!actionable) {
+                const card = bubble.querySelector('.chat-routing-card');
+                card?.remove();
+                return renderRoutingAnnotation(bubble, annotation) || Boolean(card);
+            }
+            const annotationChanged = bubble.querySelector('.msg-routing-annotation')
+                ? renderRoutingAnnotation(bubble, null) : false;
+            let card = bubble.querySelector('.chat-routing-card');
+            if (card && card.dataset.routingToken === token) return annotationChanged;
+            card?.remove();
+            card = buildRoutingCard(cmid, token, options);
+            const time = bubble.querySelector('.msg-time');
+            if (time) time.before(card);
+            else bubble.append(card);
+            bubble.dataset.chatAnnotationStatus = status;
+            return true;
+        });
     }
 
     function applyQuizStateFrame(rootNode, frame) {
@@ -355,8 +496,7 @@ export function createChatDecision({
         const card = rootNode.querySelector(`.chat-quiz-card[data-quiz-id="${CSS.escape(quizId)}"]`);
         if (!card) return false;
         const index = Number.isInteger(frame.answered_index) ? frame.answered_index : null;
-        setCardState(card, String(frame.state || ''), index);
-        return true;
+        return setCardState(card, String(frame.state || ''), index);
     }
 
     return { buildQuizCard, setCardState, applyQuizStateFrame, renderRoutingDecision };

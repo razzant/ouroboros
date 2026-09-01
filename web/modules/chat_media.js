@@ -2,6 +2,7 @@ import { escapeHtmlAttr, escapeHtmlText as escapeHtml } from './utils.js';
 import { showToast } from './toast.js';
 import { downloadViaHostBridge, openViaHostBridge } from './ui_helpers.js';
 import { MAX_LINK_ACTIONS } from './api_types.js';
+import { apiFetch } from './api_client.js';
 
 const MIME_RE = /^[A-Za-z0-9!#$&^_.+-]+\/[A-Za-z0-9!#$&^_.+-]+$/;
 const BASE64_RE = /^[A-Za-z0-9+/=\s]+$/;
@@ -70,6 +71,27 @@ export function showTaskIncidentToast(msg) {
         shownIncidentToastKeys.delete(oldest);
     }
     showToast(String(msg?.content || msg?.text || incident), 'error');
+}
+
+// Best-effort teardown of temporary uploads after a failed send; lives with
+// the attachment/media domain so chat.js stays within its byte ratchet.
+export async function cleanupUploadedAttachments(uploaded) {
+    const filenames = uploaded
+        .map((item) => item.filename)
+        .filter(Boolean);
+    if (!filenames.length) return;
+    const results = await Promise.allSettled(filenames.map(async (filename) => {
+        const resp = await apiFetch('/api/chat/upload', {
+            method: 'DELETE',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ filename }),
+        });
+        if (!resp.ok) throw new Error(`DELETE ${filename} failed with HTTP ${resp.status}`);
+    }));
+    const failed = results.filter((result) => result.status === 'rejected');
+    if (failed.length) {
+        console.warn('Failed to clean up uploaded chat attachments after send failure', failed);
+    }
 }
 
 export function safeHttpUrl(value) {
@@ -164,6 +186,32 @@ export function createChatMedia({
         return base64 ? `data:${mime};base64,${base64}` : durable;
     }
 
+    // Compat address for the same media bytes: packaged desktop launchers gate
+    // their file bridge to a URL allowlist that predates the task-artifact
+    // route, so the bridge is handed this form when the server offered one.
+    // The browser keeps the canonical URL — this is an extra address, not a
+    // replacement, and it is validated exactly like the document form.
+    function compatMediaUrl(value) {
+        const raw = String(value || '');
+        return FILE_URL_RE.test(raw) ? raw : '';
+    }
+
+    // Bridge-facing view of one delivered media item. `durable` is the
+    // canonical same-origin URL used for fetches; `bridge` is what a host-bridge
+    // call should be given.
+    function mediaSourceRef(msg, source) {
+        // The displayed source may be a data: URI (live delivery) while the
+        // frame still carries durable addresses; the bridge can only be handed
+        // a URL, so those addresses are read from the frame, not the display.
+        const isData = source.startsWith('data:');
+        const canonical = isData ? durableChatMediaUrl(msg?.download_url) : source;
+        return {
+            base64: isData ? source.split(',')[1] || '' : '',
+            durable: canonical,
+            bridge: canonical ? (compatMediaUrl(msg?.download_url_compat) || canonical) : '',
+        };
+    }
+
     function fileSource(msg, mime) {
         const base64 = cleanBase64(msg.file_base64);
         const durable = FILE_URL_RE.test(String(msg.download_url || ''))
@@ -172,6 +220,8 @@ export function createChatMedia({
         return {
             base64,
             durable,
+            // Documents already ship on the files route the gate admits.
+            bridge: durable,
             src: base64 ? `data:${mime};base64,${base64}` : durable,
         };
     }
@@ -182,7 +232,7 @@ export function createChatMedia({
             return new Blob([bytes], { type: mime });
         }
         if (!source.durable) throw new Error('File data is unavailable');
-        const response = await fetch(source.durable);
+        const response = await apiFetch(source.durable);
         if (!response.ok) throw new Error(`Download failed (${response.status})`);
         return response.blob();
     }
@@ -203,7 +253,7 @@ export function createChatMedia({
 
     async function downloadSource(source, filename, mime) {
         if (source.durable) {
-            await downloadViaHostBridge(source.durable, filename);
+            await downloadViaHostBridge(source.bridge || source.durable, filename, { browserUrl: source.durable });
             return;
         }
         downloadBlob(await sourceBlob(source, mime), filename);
@@ -233,7 +283,11 @@ export function createChatMedia({
         listen(fileDialog.querySelector('[data-file-action="open"]'), 'click', async () => {
             if (!dialogFile?.source.durable) return;
             try {
-                await openViaHostBridge(dialogFile.source.durable, dialogFile.filename);
+                await openViaHostBridge(
+                    dialogFile.source.bridge || dialogFile.source.durable,
+                    dialogFile.filename,
+                    { browserUrl: dialogFile.source.durable },
+                );
                 close();
             } catch (error) {
                 showToast(`Could not open file: ${error?.message || error}`, 'error');
@@ -385,14 +439,21 @@ export function createChatMedia({
         </details>`;
     }
 
-    function wirePhotoActions(item, source, filename, mime) {
-        const sourceRef = {
-            base64: source.startsWith('data:') ? source.split(',')[1] || '' : '',
-            durable: source.startsWith('data:') ? '' : source,
-        };
+    function wirePhotoActions(item, source, sourceRef, filename, mime) {
         const action = (name) => item.querySelector(`[data-photo-action="${name}"]`);
-        listen(item.querySelector('.chat-photo'), 'click', () => window.open(source, '_blank', 'noopener'));
-        listen(action('open'), 'click', () => window.open(source, '_blank', 'noopener'));
+        // A durable photo rides the host-bridge helper with BOTH addresses
+        // (bridge form for the launcher gate, canonical for browsers); a data:
+        // display keeps window.open, whose shell interceptor saves the bytes.
+        const openPhoto = () => {
+            if (sourceRef.durable) {
+                openViaHostBridge(sourceRef.bridge || sourceRef.durable, filename, { browserUrl: sourceRef.durable })
+                    .catch((error) => showToast(`Could not open image: ${error?.message || error}`, 'error'));
+                return;
+            }
+            window.open(source, '_blank', 'noopener');
+        };
+        listen(item.querySelector('.chat-photo'), 'click', openPhoto);
+        listen(action('open'), 'click', openPhoto);
         listen(action('download'), 'click', async () => {
             try { await downloadSource(sourceRef, filename, mime); }
             catch (error) { showToast(`Could not download image: ${error?.message || error}`, 'error'); }
@@ -426,10 +487,7 @@ export function createChatMedia({
         const caption = String(msg.caption || '');
         if (type === 'video') {
             const extension = (mime.split('/')[1]?.split('+')[0] || '').slice(0, 10) || 'mp4';
-            const sourceRef = {
-                base64: source.startsWith('data:') ? source.split(',')[1] || '' : '',
-                durable: source.startsWith('data:') ? '' : source,
-            };
+            const sourceRef = mediaSourceRef(msg, source);
             const body = `${caption ? `<div class="message">${escapeHtml(caption)}</div>` : ''}
                 <div class="message">${playerHtml({ src: source })}</div>`;
             const bubble = bubbleFrame(msg, body);
@@ -448,7 +506,7 @@ export function createChatMedia({
             </figure>
         </div></div>`;
         const bubble = bubbleFrame(msg, body);
-        wirePhotoActions(bubble, source, filename, mime);
+        wirePhotoActions(bubble, source, mediaSourceRef(msg, source), filename, mime);
         return bubble;
     }
 
@@ -677,6 +735,7 @@ export function createChatMedia({
         buildQuizCard,
         applyQuizStateFrame,
         messagesRoot,
+        deliverContentMutation = (mutate) => mutate(),
     }) {
         function appendMediaBubble(msg) {
             const key = chatMediaMessageKey(msg);
@@ -684,9 +743,8 @@ export function createChatMedia({
             const bubble = buildMediaBubble(msg);
             if (!bubble) return false;
             rememberMessageKey(key);
-            if ((msg.msg_type || msg.type) === 'photo') buildGallery('photos', msg, bubble);
-            else insertMessageNode(bubble);
-            return true;
+            if ((msg.msg_type || msg.type) === 'photo') return buildGallery('photos', msg, bubble);
+            return insertMessageNode(bubble) !== false;
         }
         function appendDocumentBubble(msg) {
             const key = documentMessageKey(msg);
@@ -694,8 +752,7 @@ export function createChatMedia({
             const bubble = buildDocumentBubble(msg);
             if (!bubble) return false;
             rememberMessageKey(key);
-            buildGallery('files', msg, bubble);
-            return true;
+            return buildGallery('files', msg, bubble);
         }
         function appendLinksMessage(msg) {
             const actions = Array.isArray(msg.actions) ? msg.actions.slice(0, MAX_LINK_ACTIONS) : [];
@@ -704,8 +761,7 @@ export function createChatMedia({
             const bubble = buildLinksMessage(msg);
             if (!bubble) return false;
             rememberMessageKey(key);
-            insertMessageNode(bubble);
-            return true;
+            return insertMessageNode(bubble) !== false;
         }
         function appendQuizMessage(msg) {
             const quizId = String((msg.quiz && msg.quiz.quiz_id) || msg.quiz_id || '');
@@ -714,8 +770,7 @@ export function createChatMedia({
             const bubble = buildQuizCard ? buildQuizCard(msg) : null;
             if (!bubble) return false;
             rememberMessageKey(key);
-            insertMessageNode(bubble);
-            return true;
+            return insertMessageNode(bubble) !== false;
         }
         // Media frames carry no activity identity: hide the dots row but keep
         // the authoritative active set intact; sync derives the header from it.
@@ -723,7 +778,7 @@ export function createChatMedia({
             if (!isMyThread(msg)) return;
             hideTypingIndicatorOnly();
             syncChatStatus();
-            if (append(msg)) incrementUnreadIfNeeded(msg);
+            if (deliverContentMutation(() => append(msg))) incrementUnreadIfNeeded(msg);
         };
         for (const type of ['photo', 'video']) onWs(type, deliver(appendMediaBubble));
         onWs('document', deliver(appendDocumentBubble));
@@ -732,7 +787,9 @@ export function createChatMedia({
         if (applyQuizStateFrame && messagesRoot) {
             // Lifecycle updates address an EXISTING card by quiz_id — no
             // thread routing, no unread bump, never a new bubble.
-            onWs('quiz_state', (msg) => applyQuizStateFrame(messagesRoot(), msg));
+            onWs('quiz_state', (msg) => deliverContentMutation(
+                () => applyQuizStateFrame(messagesRoot(), msg),
+            ));
         }
         return { appendMediaBubble, appendDocumentBubble, appendLinksMessage, appendQuizMessage };
     }

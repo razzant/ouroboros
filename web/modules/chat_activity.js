@@ -66,7 +66,7 @@ export function buildTimelineItemHtml(item, record) {
     const isProgressLine = item.phase === 'working' || item.phase === 'thinking';
     const bodyId = `chat-live-line-body-${String(record.groupId || 'task').replace(/[^A-Za-z0-9_-]/g, '-')}-${String(item.lineKey || '').replace(/[^A-Za-z0-9_-]/g, '-')}`;
     const headContent = `
-        <span class="chat-live-line-title">${isProgressLine ? renderMarkdown(displayHeadline) : escapeHtml(displayHeadline)}</span>
+        <span class="chat-live-line-title"${isProgressLine ? ' data-chat-markdown-enhanced' : ''}>${isProgressLine ? renderMarkdown(displayHeadline) : escapeHtml(displayHeadline)}</span>
         <span class="chat-live-line-repeat" ${item.count > 1 ? '' : 'hidden'}>${item.count > 1 ? `${item.count}x` : ''}</span>
         ${item.ts ? `<span class="chat-live-line-time">${escapeHtml(item.ts)}</span>` : ''}
     `;
@@ -94,6 +94,22 @@ export function buildTimelineItemHtml(item, record) {
             ${displayBody ? `<div class="chat-live-line-body${showingFetched ? ' chat-live-line-body-full' : ''}" id="${escapeHtmlAttr(bodyId)}">${renderMarkdown(displayBody)}${loadingFull ? '<div class="chat-live-line-loading">Loading full output…</div>' : ''}</div>` : ''}
         </div>
     `;
+}
+
+// Sortable data-ts stamping for timeline nodes; anchor mode only ever moves a
+// node's effective timestamp earlier so replay cannot teleport it downward.
+export function stampNodeTimestamp(node, raw, { anchor = false } = {}) {
+    if (!node) return false;
+    const epoch = rawTimestampEpoch(raw);
+    if (!Number.isFinite(epoch)) return false;
+    if (anchor && node.dataset.ts) {
+        const current = Number(node.dataset.ts);
+        const next = Number.isFinite(current) ? Math.min(current, epoch) : epoch;
+        if (node.dataset.ts !== String(next)) node.dataset.ts = String(next);
+        return Number.isFinite(current) && next < current;
+    }
+    if (node.dataset.ts !== String(epoch)) node.dataset.ts = String(epoch);
+    return false;
 }
 
 export function durableChatMediaUrl(value) {
@@ -870,10 +886,16 @@ export function renderRoutingAnnotation(bubble, annotation) {
     const text = routingAnnotationText(annotation);
     let note = bubble.querySelector('.msg-routing-annotation');
     if (!text) {
+        const hasStatus = bubble.dataset.chatAnnotationStatus !== undefined;
+        if (!note && !hasStatus) return false;
         note?.remove();
-        delete bubble.dataset.chatAnnotationStatus;
-        return false;
+        if (hasStatus) delete bubble.dataset.chatAnnotationStatus;
+        return true;
     }
+    const status = String(annotation.status || '');
+    const changed = !note || note.textContent !== text
+        || note.dataset.annotationStatus !== status
+        || bubble.dataset.chatAnnotationStatus !== status;
     if (!note) {
         note = document.createElement('div');
         note.className = 'msg-routing-annotation';
@@ -881,9 +903,8 @@ export function renderRoutingAnnotation(bubble, annotation) {
         if (time) time.before(note);
         else bubble.append(note);
     }
-    const status = String(annotation.status || '');
-    note.textContent = text;
-    note.dataset.annotationStatus = status;
-    bubble.dataset.chatAnnotationStatus = status;
-    return true;
+    if (note.textContent !== text) note.textContent = text;
+    if (note.dataset.annotationStatus !== status) note.dataset.annotationStatus = status;
+    if (bubble.dataset.chatAnnotationStatus !== status) bubble.dataset.chatAnnotationStatus = status;
+    return changed;
 }

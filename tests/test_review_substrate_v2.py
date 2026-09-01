@@ -1181,11 +1181,12 @@ def test_actor_projection_carries_bounded_disclosed_finding_rows():
     odd_rows = actors["odd-shape"]["findings"]
     assert odd_rows and "the only copy of this evidence" in odd_rows[0]["item"]
     assert "hunter2-odd-shape" not in rendered
-    assert "***REDACTED***" in odd_rows[0]["item"]
+    # #447 G11: key-name redaction leaves a typed fingerprint, not bare deletion.
+    assert "***REDACTED[" in odd_rows[0]["item"]
 
     nested_rows = actors["nested-evidence"]["findings"]
     assert "hunter2-nested-shape" not in rendered
-    assert "***REDACTED***" in nested_rows[0]["evidence"]
+    assert "***REDACTED[" in nested_rows[0]["evidence"]
     assert nested_rows[0]["item"] == "nested shape"
 
     # A list-shaped parsed response (array reviewer contract) projects its

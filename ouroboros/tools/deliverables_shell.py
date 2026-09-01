@@ -7,11 +7,14 @@ import pathlib
 from collections.abc import Callable, Sequence
 
 from ouroboros.tools.shell_guards import directory_destination_child_name, directory_destination_pairs
+from ouroboros.credential_shapes import (
+    BENIGN_DOT_NAMES,
+    CREDENTIAL_COMPONENT_NAMES,
+    CREDENTIAL_FILE_NAMES,
+    CREDENTIAL_FILE_SUFFIXES,
+    CREDENTIAL_NAME_RE,
+)
 from ouroboros.tool_access import (
-    _USER_FILES_ALLOWED_DOTNAMES,
-    _USER_FILES_SECRET_COMPONENTS,
-    _USER_FILES_SECRET_NAMES,
-    _USER_FILES_SECRET_RE,
     _path_is_relative_to_casefold,
     user_files_path_block_reason,
 )
@@ -52,15 +55,15 @@ def lexical_user_files_block_reason(candidate: pathlib.Path) -> str:
         lower = part.lower()
         if not part or part in {"/", "\\"}:
             continue
-        if lower in _USER_FILES_SECRET_COMPONENTS:
+        if lower in CREDENTIAL_COMPONENT_NAMES:
             return "path is hidden or credential-like (secret/credential directory)"
-        if part.startswith(".") and lower not in _USER_FILES_ALLOWED_DOTNAMES:
+        if part.startswith(".") and lower not in BENIGN_DOT_NAMES:
             return "path is hidden or credential-like (non-allowlisted hidden component)"
     name = pathlib.PurePath(str(candidate)).name.lower()
     if (
-        name in _USER_FILES_SECRET_NAMES
-        or _USER_FILES_SECRET_RE.search(name)
-        or name.endswith((".key", ".pem", ".p12", ".pfx"))
+        name in CREDENTIAL_FILE_NAMES
+        or CREDENTIAL_NAME_RE.search(name)
+        or name.endswith(CREDENTIAL_FILE_SUFFIXES)
     ):
         return "path name is credential-like"
     return ""

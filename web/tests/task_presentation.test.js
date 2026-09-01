@@ -77,7 +77,7 @@ test('typed terminal status drives an error phase on live and replay cards', () 
         chatSource,
         /finishLiveCard\(taskId, msg\.task_terminal_status \? taskTerminalPhase\(msg\) : replayTerminalPhase\(taskState, record\)\);/,
     );
-    assert.match(chatSource, /finishLiveCard\(explicitTaskId, taskTerminalPhase\(msg\)\);/);
+    assert.match(chatSource, /finishLiveCard\(explicitTaskId, taskTerminalPhase\(msg\)\) \|\| changed;/);
 });
 
 test('interrupted task_done remains retryable and cannot finish a root card', () => {
@@ -254,7 +254,7 @@ test('history replay keeps open summaries live and terminal fallbacks factual', 
     assert.match(summary, /const finalizing = msg\?\.task_phase === 'finalizing';/);
     assert.match(summary, /terminal: !finalizing/);
     assert.match(summary, /record\.finalizingHold = true/);
-    assert.match(summary, /if \(finalizing\) return;\s*finishLiveCard/);
+    assert.match(summary, /if \(finalizing\) return changed;\s*changed = finishLiveCard/);
 
     assert.equal(replayTerminalPhase({}, { finished: false, phaseEl: {
         dataset: { phase: 'working' },
@@ -296,7 +296,7 @@ test('phase chips are contextual polite status regions without repeat announceme
         },
     };
     const record = { phaseEl, isSubagent: true };
-    setLiveCardPhase(record, 'working');
+    assert.equal(setLiveCardPhase(record, 'working'), true);
     assert.deepEqual({ ...phaseEl.dataset }, { phase: 'working' });
     assert.equal(phaseEl.className, 'chat-live-phase working');
     assert.equal(textContent, 'Working');
@@ -306,19 +306,19 @@ test('phase chips are contextual polite status regions without repeat announceme
     assert.equal(attrs.get('aria-label'), 'Subagent status: Working');
     const stableTextWrites = textWrites;
     const stableLabelWrites = attrWrites.get('aria-label');
-    setLiveCardPhase(record, 'working');
+    assert.equal(setLiveCardPhase(record, 'working'), false);
     assert.equal(textWrites, stableTextWrites);
     assert.equal(attrWrites.get('aria-label'), stableLabelWrites);
-    setLiveCardPhase(record, 'error', 'Failed');
+    assert.equal(setLiveCardPhase(record, 'error', 'Failed'), true);
     assert.equal(textContent, 'Failed');
     assert.equal(attrs.get('aria-label'), 'Subagent status: Failed');
     assert.equal(textWrites, stableTextWrites + 1);
     assert.equal(attrWrites.get('aria-label'), stableLabelWrites + 1);
     const sticky = desiredLiveCardPhase({ cancelPendingPolicy: 'finalize' }, 'warn');
-    setLiveCardPhase(record, sticky.phase, sticky.text, sticky.className);
+    assert.equal(setLiveCardPhase(record, sticky.phase, sticky.text, sticky.className), true);
     const stickyTextWrites = textWrites;
     const stickyLabelWrites = attrWrites.get('aria-label');
-    setLiveCardPhase(record, sticky.phase, sticky.text, sticky.className);
+    assert.equal(setLiveCardPhase(record, sticky.phase, sticky.text, sticky.className), false);
     assert.equal(textContent, 'Finalizing…');
     assert.equal(phaseEl.className, 'chat-live-phase working cancelling');
     assert.equal(textWrites, stickyTextWrites);

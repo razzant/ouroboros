@@ -345,11 +345,19 @@ def _python_call_is_vocabulary_write(node: ast.Call, callee: str) -> bool:
     ):
         return False
     # `sqlite3.connect(":memory:")` opens no file — the sentinel is not a path, and
-    # resolving it relative to the cwd refused an in-memory scratch DB as a repo write.
+    # resolving it relative to the cwd refused an in-memory scratch DB as a repo
+    # write. An explicit `file:...?mode=ro` URI is a demonstrated READ-ONLY open
+    # (#447 A4) — same carve.
     first = node.args[0] if node.args else None
+    if not isinstance(first, ast.Constant):
+        return True
+    value = str(first.value or "")
+    if value.removeprefix("file:").startswith(":memory:"):
+        return False
     return not (
-        isinstance(first, ast.Constant)
-        and str(first.value or "").removeprefix("file:").startswith(":memory:")
+        callee == "connect"
+        and value.startswith("file:")
+        and "mode=ro" in value.partition("?")[2].split("&")
     )
 
 
@@ -377,6 +385,27 @@ def _python_write_targets_and_unknown(inline_code: str) -> tuple[list[str], bool
     write_handles: dict[str, str] = {}
     targets: list[str] = []
     unknown = False
+    # Receiver proof (#447 A4): a receiver that is provably NOT a path object —
+    # a literal, a Name bound to a str/collection literal, or an instance of a
+    # class DEFINED IN THIS PAYLOAD (whose method bodies this same walk already
+    # inspects) — cannot perform a filesystem write through a colliding method
+    # name (`s.replace`, `xs.remove`, `A().save`). Everything unproven stays on
+    # the fail-closed path exactly as before.
+    str_names: set[str] = set()
+    non_path_names: set[str] = set()
+    local_classes = {n.name for n in ast.walk(tree) if isinstance(n, ast.ClassDef)}
+
+    def _receiver_not_path(receiver: ast.AST) -> bool:
+        if isinstance(receiver, ast.Constant):
+            return True
+        if isinstance(receiver, ast.Name):
+            return receiver.id in str_names or receiver.id in non_path_names
+        return (
+            isinstance(receiver, ast.Call)
+            and isinstance(receiver.func, ast.Name)
+            and receiver.func.id in local_classes
+        )
+
     for node in ast.walk(tree):
         if isinstance(node, ast.With):
             for item in node.items:
@@ -394,6 +423,21 @@ def _python_write_targets_and_unknown(inline_code: str) -> tuple[list[str], bool
                     if target is not None:
                         write_handles[item.optional_vars.id] = target
         if isinstance(node, ast.Assign) and len(node.targets) == 1 and isinstance(node.targets[0], ast.Name):
+            bound = node.targets[0].id
+            # Track the binding KIND, not just the resolved text: `s = 'a,b'` is a
+            # str object (its methods are str methods, never Path ops), while
+            # `p = Path('a,b')` resolves to the same text but IS a path receiver.
+            if isinstance(node.value, ast.Constant) and isinstance(node.value.value, str):
+                str_names.add(bound)
+                non_path_names.discard(bound)
+            elif isinstance(node.value, (ast.List, ast.Tuple, ast.Set, ast.Dict)) or (
+                isinstance(node.value, ast.Constant) and not isinstance(node.value.value, str)
+            ):
+                non_path_names.add(bound)
+                str_names.discard(bound)
+            else:
+                str_names.discard(bound)
+                non_path_names.discard(bound)
             literal = _python_literal_path(node.value, names)
             if literal is not None:
                 names[node.targets[0].id] = literal
@@ -441,16 +485,16 @@ def _python_write_targets_and_unknown(inline_code: str) -> tuple[list[str], bool
             "write_text", "write_bytes", "unlink", "rename", "replace", "mkdir", "rmdir",
             "touch",
         }:
-            if isinstance(func.value, ast.Constant):
-                # `'a,b'.replace(',', ';')` is str.replace, not Path.replace. A bare
-                # literal receiver has no filesystem method at all, so there is no
-                # such thing as a repo write via `'a,b'.replace` — crediting one
-                # refused ordinary text one-liners (`.replace` is the most common
-                # string method in Python) with a security message whose advice
-                # ("move your cwd") the agent could not connect to the cause. The
-                # module already draws exactly this receiver line for the other
-                # ambiguous spellings (`shutil.copy` is a write, `some_dict.copy()`
-                # is not); `replace`/`rename` had simply never been held to it.
+            if _receiver_not_path(func.value):
+                # `'a,b'.replace(',', ';')` — and `s = 'a,b'; s.replace(...)` — is
+                # str.replace, not Path.replace: a receiver provably bound to a
+                # non-path literal has no filesystem method at all, so there is no
+                # such thing as a repo write through it. Crediting one refused
+                # ordinary text one-liners (`.replace` is the most common string
+                # method in Python) with a security message whose advice ("move
+                # your cwd") the agent could not connect to the cause. The module
+                # already draws exactly this receiver line for the other ambiguous
+                # spellings (`shutil.copy` writes, `some_dict.copy()` does not).
                 continue
             target = _python_literal_path(func.value, names)
             if target is None:
@@ -489,6 +533,10 @@ def _python_write_targets_and_unknown(inline_code: str) -> tuple[list[str], bool
         elif isinstance(func, ast.Attribute) and func.attr in {
             "remove", "unlink", "makedirs", "mkdir", "rmdir", "removedirs", "rmtree",
         }:
+            if _receiver_not_path(func.value):
+                # `xs = [1, 2]; xs.remove(item)` is list.remove — a collection-
+                # literal receiver never touches the filesystem (#447 A4).
+                continue
             first = node.args[0] if node.args else None
             if isinstance(first, ast.Constant) and not isinstance(first.value, (str, bytes)):
                 # `d.remove(1)` is list.remove. A non-string literal is not an
@@ -507,6 +555,11 @@ def _python_write_targets_and_unknown(inline_code: str) -> tuple[list[str], bool
                 func.attr if isinstance(func, ast.Attribute)
                 else func.id if isinstance(func, ast.Name) else ""
             )
+            if isinstance(func, ast.Attribute) and _receiver_not_path(func.value):
+                # `A().save()` on a class DEFINED in this payload: its method body
+                # is walked by this same pass, so any real write inside it gets its
+                # own verdict — the call site itself proves nothing (#447 A4).
+                continue
             if callee and _python_call_is_vocabulary_write(node, callee):
                 target = _python_vocabulary_write_target(node, callee, names, write_handles)
                 if target is None:

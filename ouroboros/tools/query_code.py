@@ -372,8 +372,12 @@ def _query_code(
 
     try:
         if op == "structural":
+            # Collect through the requested page (offset+limit, like relevant_files
+            # above): collecting only `limit` rows made rows[offset:] empty on every
+            # page after the first and blamed the query for it (#447 D6).
             rows = _structural(
-                ctx, repo_root, query, scoped_path, str(lang or "any"), limit, binding
+                ctx, repo_root, query, scoped_path, str(lang or "any"),
+                min(_MAX_LIMIT, offset + limit), binding
             )
         else:
             from ouroboros.code_intelligence import build_code_inventory
@@ -405,7 +409,14 @@ def _query_code(
                 # Whole-repo map (folded from the former codebase_digest tool):
                 # a compact file/symbol inventory to orient in an unfamiliar repo.
                 from ouroboros.code_intelligence import render_codebase_digest
-                return render_codebase_digest(inventory)
+                digest_text = render_codebase_digest(inventory)
+                if normalized_root == "user_files":
+                    # Same В23 egress seam: a secret-shaped file/symbol NAME in
+                    # the owner's home must not surface raw (#447 s2r2).
+                    from ouroboros.secret_masking import mask_secret_bytes
+
+                    digest_text, _masked = mask_secret_bytes(digest_text)
+                return digest_text
             rows = _inventory_rows(ctx, inventory, repo_root, {
                 "op": op, "query": query, "path": scoped_path, "kind": kind,
                 "depth": depth, "limit": limit, "offset": offset,
@@ -417,12 +428,50 @@ def _query_code(
     shown = rows[offset:offset + limit]
     next_offset = offset + limit
     label = query or scoped_path or "."
+    # Collection stops at min(_MAX_LIMIT, offset+limit) for the ops that page a
+    # capped collector (structural, relevant_files): a full collection there
+    # means more matches MAY exist, so "No results" / "N of N" would be a
+    # success-shaped lie about completeness (#447 S3). Ops whose collectors
+    # return the complete set must NOT claim a cap they never applied.
+    collection_capped = (
+        op in ("structural", "relevant_files")
+        and total >= min(_MAX_LIMIT, offset + limit)
+    )
     if not shown:
+        if collection_capped:
+            return (
+                f"⚠️ QUERY_CODE_TRUNCATED: collection for op `{op}` `{label}` stops at "
+                f"{_MAX_LIMIT} rows and offset={offset} lies beyond what was collected. "
+                "Narrow the query or path= instead of paging past the cap."
+            )
         return f"No results for op `{op}` `{label}`. {_empty_hint(op, label)}"
+    def _mask_user_files_rows(text: str) -> str:
+        # Same egress seam as read_file/search (#447 В23): query_code snippets
+        # over the owner's home must not carry raw credential bytes.
+        if normalized_root != "user_files":
+            return text
+        from ouroboros.secret_masking import mask_secret_bytes
+
+        masked, count = mask_secret_bytes(text)
+        if count:
+            masked += (
+                f"\n⚠️ SECRET_BYTES_MASKED: {count} secret-shaped span(s) were "
+                "replaced with ***; raw credentials never enter model context."
+            )
+        return masked
+
     header = f"{op} `{label}` — {len(shown)} of {total}"
     if next_offset < total:
         header += f" — next offset={next_offset}"
-    return header + "\n\n" + "\n".join(shown) + _next_step_hint(op)
+    elif collection_capped:
+        # The collector filled exactly the requested page: "N of N" would claim
+        # completeness it never verified, below the 200 cap included.
+        header += (
+            f" — collection capped at {_MAX_LIMIT}; more may exist (narrow query/path=)"
+            if total >= _MAX_LIMIT
+            else f" — more may exist; continue with offset={next_offset}"
+        )
+    return _mask_user_files_rows(header + "\n\n" + "\n".join(shown)) + _next_step_hint(op)
 
 
 def _empty_hint(op: str, label: str) -> str:

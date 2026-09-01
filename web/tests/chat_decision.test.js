@@ -56,7 +56,18 @@ class NodeStub {
     querySelectorAll(selector) { return this.collect(selector.replace(/^\./, '')); }
 }
 
-function fixture({ fetchImpl, renderMarkdown } = {}) {
+function countPropertyWrites(target, key) {
+    let value = target[key];
+    let writes = 0;
+    Object.defineProperty(target, key, {
+        configurable: true,
+        get: () => value,
+        set: (next) => { writes += 1; value = next; },
+    });
+    return () => writes;
+}
+
+function fixture({ fetchImpl, renderMarkdown, onDomWrite } = {}) {
     const prior = { document: globalThis.document, crypto: globalThis.crypto };
     globalThis.document = { createElement: (tag) => new NodeStub(tag) };
     if (!globalThis.crypto || !globalThis.crypto.randomUUID) {
@@ -76,6 +87,7 @@ function fixture({ fetchImpl, renderMarkdown } = {}) {
         renderMarkdown,
         enhanceMarkdown: renderMarkdown ? () => {} : null,
         showToast: (text, tone) => toasts.push({ text, tone }),
+        onDomWrite,
     });
     return { decision, toasts, calls, restore: () => {
         globalThis.document = prior.document;
@@ -279,12 +291,143 @@ test('applyQuizStateFrame settles an existing card and ignores unknown ids', asy
         assert.ok(buttons.length >= 2);
         assert.ok(buttons.every((btn) => btn.disabled));
         assert.ok(buttons[0].classList.contains('chosen'));
+        const stateWrites = countPropertyWrites(quizCard.dataset, 'state');
+        const disabledWrites = buttons.map((btn) => countPropertyWrites(btn, 'disabled'));
+        let chosenWrites = 0;
+        for (const btn of buttons) {
+            const toggle = btn.classList.toggle.bind(btn.classList);
+            btn.classList.toggle = (...args) => { chosenWrites += 1; return toggle(...args); };
+        }
+        assert.equal(fx.decision.applyQuizStateFrame(root, {
+            quiz_id: 'qz-1', task_id: 't-1', state: 'answered', answered_index: 0,
+        }), false, 'an identical acknowledgement performs no DOM mutation');
+        assert.equal(stateWrites(), 0);
+        assert.ok(disabledWrites.every((writes) => writes() === 0));
+        assert.equal(chosenWrites, 0);
 
         // Unknown id: no card found, nothing thrown, honest false.
         assert.equal(fx.decision.applyQuizStateFrame(root, { quiz_id: 'other', state: 'answered' }), false);
     } finally {
         fx.restore();
     }
+});
+
+// ---- free answer (the owner's own option) ----
+
+function commentParts(card) {
+    return {
+        field: card.querySelector('.chat-quiz-comment'),
+        send: card.querySelector('.chat-quiz-send'),
+    };
+}
+
+test('a typed remark rides WITH an option click as one answer', async () => {
+    const fx = fixture();
+    try {
+        const card = fx.decision.buildQuizCard(WS_MSG);
+        const { field, send } = commentParts(card);
+        assert.ok(field && send);
+        field.value = 'yes, but only after CI';
+        field.listeners.get('input')();
+        assert.equal(send.disabled, false);
+        card.querySelectorAll('.chat-quiz-option')[0].click();
+        await new Promise((resolve) => setTimeout(resolve, 0));
+        const body = JSON.parse(fx.calls[0].init.body);
+        assert.equal(body.option_index, 0);
+        assert.equal(body.comment, 'yes, but only after CI');
+        // Settled: the draft field is gone and the words are the record.
+        assert.equal(card.querySelector('.chat-quiz-comment-box'), null);
+        assert.equal(card.querySelector('.chat-quiz-answer').textContent,
+            "Owner's answer: yes, but only after CI");
+    } finally { fx.restore(); }
+});
+
+test('the send button answers WITHOUT an option_index', async () => {
+    const fx = fixture();
+    try {
+        const card = fx.decision.buildQuizCard(WS_MSG);
+        const { field, send } = commentParts(card);
+        field.value = '  neither — do C  ';
+        field.listeners.get('input')();
+        send.click();
+        await new Promise((resolve) => setTimeout(resolve, 0));
+        assert.equal(fx.calls.length, 1);
+        const body = JSON.parse(fx.calls[0].init.body);
+        assert.equal('option_index' in body, false, 'no option was taken — the key must be absent');
+        // VERBATIM: the owner's exact characters, edges included.
+        assert.equal(body.comment, '  neither — do C  ');
+        assert.equal(card.dataset.state, 'answered');
+        // No option is highlighted: the owner chose none of them.
+        assert.ok(card.querySelectorAll('.chat-quiz-option').every((btn) => !btn.classList.contains('chosen')));
+    } finally { fx.restore(); }
+});
+
+test('an empty field leaves the send button disabled and sends nothing', async () => {
+    const fx = fixture();
+    try {
+        const card = fx.decision.buildQuizCard(WS_MSG);
+        const { field, send } = commentParts(card);
+        assert.equal(send.disabled, true);
+        field.value = '   ';
+        field.listeners.get('input')();
+        assert.equal(send.disabled, true);
+        send.click();
+        await new Promise((resolve) => setTimeout(resolve, 0));
+        assert.equal(fx.calls.length, 0);
+        assert.equal(card.dataset.state, 'open');
+    } finally { fx.restore(); }
+});
+
+test('an over-long answer is refused client-side, not truncated', async () => {
+    const fx = fixture();
+    try {
+        const card = fx.decision.buildQuizCard(WS_MSG);
+        const { field, send } = commentParts(card);
+        field.value = 'x'.repeat(2001);
+        field.listeners.get('input')();
+        assert.equal(send.disabled, true, 'the cap is the ingress limit, mirrored');
+        send.click();
+        await new Promise((resolve) => setTimeout(resolve, 0));
+        assert.equal(fx.calls.length, 0);
+        assert.match(fx.toasts[0].text, /under 2000 characters/);
+        assert.equal(card.dataset.state, 'open');
+    } finally { fx.restore(); }
+});
+
+test('a settled replayed card shows the owner answer and offers no field', () => {
+    const fx = fixture();
+    try {
+        const card = fx.decision.buildQuizCard({
+            msg_type: 'quiz', role: 'assistant', task_id: 't-1', text: 'Merge now?', ts: 'x',
+            quiz: {
+                quiz_id: 'qz-3', state: 'answered', stake: '', assumption: 'merging meanwhile',
+                options: [{ label: 'Yes' }, { label: 'No' }],
+                comment: 'neither — revert first',
+            },
+        });
+        assert.equal(card.querySelector('.chat-quiz-comment-box'), null);
+        assert.equal(card.querySelector('.chat-quiz-answer').textContent,
+            "Owner's answer: neither — revert first");
+        assert.ok(card.querySelectorAll('.chat-quiz-option').every((btn) => btn.disabled));
+        assert.ok(card.querySelectorAll('.chat-quiz-option').every((btn) => !btn.classList.contains('chosen')));
+    } finally { fx.restore(); }
+});
+
+test('a live state frame for an open card never wipes the typed draft', () => {
+    const fx = fixture();
+    if (!globalThis.CSS) globalThis.CSS = { escape: (v) => String(v) };
+    try {
+        const card = fx.decision.buildQuizCard(WS_MSG);
+        const { field } = commentParts(card);
+        field.value = 'half-written thought';
+        field.listeners.get('input')();
+        const root = { querySelector: () => card };
+        assert.equal(fx.decision.applyQuizStateFrame(root, {
+            quiz_id: 'qz-1', task_id: 't-1', state: 'open',
+        }), false, 'an open→open frame is a no-op');
+        assert.equal(card.querySelector('.chat-quiz-comment').value, 'half-written thought');
+        assert.ok(card.querySelector('.chat-quiz-comment-box'));
+    } finally { fx.restore(); }
 });
 
 // ---- routing picker (#198) ----
@@ -308,6 +451,7 @@ test('an actionable refusal renders the picker card; other statuses fall back to
     try {
         const bubble = routingBubble();
         assert.equal(fx.decision.renderRoutingDecision(bubble, ROUTING_ANNOTATION), true);
+        assert.equal(fx.decision.renderRoutingDecision(bubble, ROUTING_ANNOTATION), false);
         const card = bubble.querySelector('.chat-routing-card');
         assert.ok(card);
         assert.equal(card.dataset.state, 'open');
@@ -317,11 +461,24 @@ test('an actionable refusal renders the picker card; other statuses fall back to
         assert.equal(buttons[1].querySelector('.chat-quiz-option-label').textContent, 'New task in Web');
         // A later settled annotation (the dispatch ack) REPLACES the card
         // with the plain text line — the card never lingers past its attempt.
-        fx.decision.renderRoutingDecision(bubble, {
+        const settled = {
             status: 'delivered', action: 'steer_task', target: 't1', target_label: 'Fix CI',
-        });
+        };
+        assert.equal(fx.decision.renderRoutingDecision(bubble, settled), true);
+        const note = bubble.querySelector('.msg-routing-annotation');
+        const textWrites = countPropertyWrites(note, 'textContent');
+        const noteStatusWrites = countPropertyWrites(note.dataset, 'annotationStatus');
+        const bubbleStatusWrites = countPropertyWrites(bubble.dataset, 'chatAnnotationStatus');
+        assert.equal(fx.decision.renderRoutingDecision(bubble, settled), false);
+        assert.deepEqual(
+            [textWrites(), noteStatusWrites(), bubbleStatusWrites()], [0, 0, 0],
+        );
         assert.equal(bubble.querySelector('.chat-routing-card'), null);
         assert.match(bubble.querySelector('.msg-routing-annotation').textContent, /Steered task/);
+        assert.equal(fx.decision.renderRoutingDecision(bubble, null), true);
+        assert.equal(bubble.querySelector('.msg-routing-annotation'), null);
+        assert.equal(bubble.dataset.chatAnnotationStatus, undefined);
+        assert.equal(fx.decision.renderRoutingDecision(bubble, null), false);
     } finally { fx.restore(); }
 });
 
@@ -363,7 +520,8 @@ test('a routing 409 settles the card from the body state, never a false expiry',
 });
 
 test('more than eight options hide behind a show-all control', () => {
-    const fx = fixture();
+    let writes = 0;
+    const fx = fixture({ onDomWrite: (mutate) => { writes += 1; return mutate(); } });
     try {
         const bubble = routingBubble('cm-4');
         const wide = {
@@ -378,8 +536,44 @@ test('more than eight options hide behind a show-all control', () => {
         assert.equal(buttons.filter((btn) => btn.hidden).length, 3);
         const more = card.querySelector('.chat-quiz-more');
         assert.match(more.textContent, /11/);
+        const beforeClick = writes;
         more.click();
+        assert.equal(writes, beforeClick + 1);
         assert.equal(buttons.filter((btn) => btn.hidden).length, 0);
         assert.equal(card.querySelector('.chat-quiz-more'), null);
+    } finally { fx.restore(); }
+});
+
+test('a duplicate confirmation renders the recorded free answer, not the retried click', async () => {
+    const fx = fixture({ fetchImpl: async () => ({
+        ok: true, status: 200,
+        json: async () => ({ ok: true, state: 'answered', duplicate: true, comment: 'my own plan' }),
+    }) });
+    try {
+        const card = fx.decision.buildQuizCard(WS_MSG);
+        const area = card.querySelector('.chat-quiz-comment');
+        area.value = 'rewritten retry';
+        card.querySelectorAll('.chat-quiz-option')[1].click();
+        await new Promise((resolve) => setTimeout(resolve, 0));
+        assert.equal(card.dataset.state, 'answered');
+        assert.equal(card.dataset.ownerComment, 'my own plan');
+        // No option is fabricated for a recorded free answer.
+        assert.ok(!card.querySelectorAll('.chat-quiz-option')[1].classList.contains('chosen'));
+    } finally { fx.restore(); }
+});
+
+test('a 409 loser adopts the winning comment over its local draft', async () => {
+    const fx = fixture({ fetchImpl: async () => ({
+        ok: false, status: 409,
+        json: async () => ({ ok: false, error: 'quiz_closed', state: 'answered', answered_index: 0, comment: 'winning note' }),
+    }) });
+    try {
+        const card = fx.decision.buildQuizCard(WS_MSG);
+        const area = card.querySelector('.chat-quiz-comment');
+        area.value = 'losing draft';
+        card.querySelectorAll('.chat-quiz-option')[1].click();
+        await new Promise((resolve) => setTimeout(resolve, 0));
+        assert.equal(card.dataset.state, 'answered');
+        assert.equal(card.dataset.ownerComment, 'winning note');
     } finally { fx.restore(); }
 });

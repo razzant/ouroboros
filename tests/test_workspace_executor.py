@@ -349,16 +349,31 @@ def test_run_script_directory_output_blocks_sensitive_members(tmp_path, monkeypa
         "run_script",
         {
             "interpreter": "python3",
-            "script": "from pathlib import Path; Path('site/.ssh').mkdir(parents=True); Path('site/.ssh/config').write_text('x')",
+            "script": (
+                "from pathlib import Path; Path('site').mkdir(); "
+                "Path('site/index.html').write_text('<h1>ok</h1>'); "
+                "Path('site/id_rsa').write_text('SECRETKEY')"
+            ),
             "cwd": str(workspace),
             "outputs": ["site"],
         },
     )
 
-    assert "ARTIFACT_OUTPUT_ERROR" in result
-    assert "hidden/control output path component .ssh" in result
+    # D4 (capinv-447): a credential-shaped MEMBER is skipped with a receipt;
+    # the rest of the declared directory still exports (per-member, not atomic).
+    assert "ARTIFACT_OUTPUTS" in result
+    assert "registered directory output" in result
+    assert "skipped 1 member(s)" in result
+    assert "id_rsa" in result
+    assert "credential filename" in result
     artifact_dir = data / "task_results" / "artifacts" / "workspace-sensitive-dir-output"
-    assert not list(artifact_dir.glob("site.*.zip"))
+    zips = list(artifact_dir.glob("site.*.zip"))
+    assert zips
+    import zipfile as _zipfile
+
+    names = _zipfile.ZipFile(zips[0]).namelist()
+    assert any(name.endswith("index.html") for name in names)
+    assert not any("id_rsa" in name for name in names)
 
 
 def test_run_command_external_workspace_unchanged_directory_output_is_cosmetic(tmp_path, monkeypatch):

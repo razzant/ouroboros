@@ -10,6 +10,7 @@ import json
 import logging
 import os
 import pathlib
+import re
 import shutil
 import subprocess
 import tempfile
@@ -949,12 +950,12 @@ def write_workspace_patch_artifacts(
             else:
                 kept_untracked.append(rel)
         included_untracked = kept_untracked
-    if sensitive:
-        errors.append({
-            "type": "sensitive_untracked_files",
-            "message": "untracked sensitive-looking files are not included in workspace patch",
-            "paths": [item["path"] for item in sensitive],
-        })
+    # A sensitive-shaped untracked file is a PER-FILE exclusion (disclosed in
+    # ``sensitive_blocked``), never a manifest error: the error path suppressed
+    # the ENTIRE patch write, so one credential-shaped NAME (public.pem,
+    # token_count.json) annihilated the whole tracked diff. The snapshot path
+    # (untracked_capture_veto_reason → provision_execution_snapshot) always
+    # treated the same hit as a per-file skip; the patch now matches it (#447).
 
     hasher = sha256()
     total_size = 0
@@ -1422,10 +1423,19 @@ def _write_patch_separator(fh: BinaryIO, hasher: Any) -> int:
     return len(data)
 
 
+# PEM private-key header (any label: RSA/EC/DSA/OPENSSH/ENCRYPTED/none). This is
+# CONTENT evidence — the filename-shape rules in workspace_patch_rules miss real
+# key material under an innocent name (notes.txt) while flagging public.pem; a
+# bounded head read catches the former on evidence, not on spelling (#447).
+_PEM_PRIVATE_KEY_RE = re.compile(rb"-----BEGIN [A-Z0-9 ]*PRIVATE KEY-----")
+_PEM_HEAD_READ_BYTES = 4096
+
+
 def _untracked_blob_exclude_reason(root: pathlib.Path, rel: str) -> str:
     """Reason to drop an untracked file from the workspace patch when it is a
-    build/runtime BINARY or exceeds the per-file size cap. Keeps real-usage
-    patches source-shaped without losing data (the file stays in the workspace
+    build/runtime BINARY, exceeds the per-file size cap, or carries a PEM
+    private-key header in its head bytes. Keeps real-usage patches
+    source-shaped without losing data (the file stays in the workspace
     and is recorded under ``untracked_excluded``). On any git/stat failure the
     file is INCLUDED (conservative — the main binary diff still applies)."""
 
@@ -1435,6 +1445,13 @@ def _untracked_blob_exclude_reason(root: pathlib.Path, rel: str) -> str:
         return ""  # unreadable/symlink races: include and let git decide
     if size > _PATCH_MAX_UNTRACKED_FILE_BYTES:
         return f"untracked file exceeds size cap ({size}B > {_PATCH_MAX_UNTRACKED_FILE_BYTES}B)"
+    try:
+        with (root / rel).open("rb") as fh:
+            head = fh.read(_PEM_HEAD_READ_BYTES)
+    except OSError:
+        head = b""
+    if _PEM_PRIVATE_KEY_RE.search(head):
+        return "private key material (PEM private-key header)"
     numstat = _git_stdout(
         ["git", "diff", "--no-index", "--numstat", "--no-ext-diff", "--no-color", "--", os.devnull, rel],
         root,

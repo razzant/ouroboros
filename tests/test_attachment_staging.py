@@ -122,11 +122,13 @@ class TestStageTaskAttachments:
         key.write_text("PRIVATE", encoding="utf-8")
 
         manifest = stage_task_attachments(drive, "task04", [{"path": str(key)}])
+        # #447 G10: the rejection row names the exact rule that fired.
         assert manifest == [{
             "ordinal": 0,
             "status": "rejected",
             "reason": "secret_source",
             "label": "id_rsa",
+            "rule": "credential/control directory component '.ssh'",
         }]
 
     def test_image_source_marked_is_image(self, tmp_path):

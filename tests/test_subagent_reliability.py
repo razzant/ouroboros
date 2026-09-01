@@ -57,7 +57,8 @@ def test_replay_clears_and_rebuilds_subagent_lineage():
     # One helper learns lineage from both replay rows and live final frames.
     assert "function learnSubagentLineage(msg)" in src
     assert "for (const msg of messages) learnSubagentLineage(msg);" in src
-    assert "learnSubagentLineage(msg);\n            const ephemeralDecision" in src
+    fanout = src[src.index("onWs('chat'"):src.index("onWs('message_annotation'")]
+    assert fanout.index("learnSubagentLineage(msg);") < fanout.index("registerEphemeralDecisionFrame(msg);")
     assert "forceTaskCard(childId, rawTs);" in src
     # A child is locked terminal from EITHER a terminal subagent event OR a
     # genuinely-settled server task_terminal_status; interrupted stays retryable.

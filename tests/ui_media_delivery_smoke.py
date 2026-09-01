@@ -58,6 +58,11 @@ def run_media_delivery_smoke(direct_server_with_data):
         {"ts": "2026-08-30T00:00:06Z", "direction": "out", "chat_id": 1,
          "user_id": 7, "text": "raw **message** text"},
     ]
+    rows.extend({
+        "ts": f"2026-08-30T00:00:{10 + index:02d}Z",
+        "direction": "out", "chat_id": 1,
+        "text": f"Viewport filler {index} " * 18,
+    } for index in range(8))
     (logs / "chat.jsonl").write_text(
         "".join(json.dumps(row) + "\n" for row in rows), encoding="utf-8",
     )
@@ -86,6 +91,9 @@ def run_media_delivery_smoke(direct_server_with_data):
                     };
                 })()""")
                 page.goto(direct_server_with_data["url"], wait_until="domcontentloaded", timeout=30_000)
+                page.add_style_tag(
+                    content="#chat-messages, #chat-messages * { overflow-anchor: none !important; }"
+                )
                 page.wait_for_selector('.chat-media-player.is-audio', timeout=30_000)
                 page.wait_for_function(
                     "() => window.__mediaTestSockets?.some(socket => socket.readyState === 1)",
@@ -99,6 +107,11 @@ def run_media_delivery_smoke(direct_server_with_data):
                 assert page.locator('.chat-link-button').first.get_attribute("rel") == "noopener noreferrer"
                 assert page.locator('.chat-message-copy').count() >= 1
 
+                page.evaluate("""() => {
+                    const messages = document.querySelector('#chat-messages');
+                    messages.scrollTop = messages.scrollHeight;
+                    messages.dispatchEvent(new Event('scroll'));
+                }""")
                 page.evaluate("""frame => {
                     const socket = window.__mediaTestSockets
                         ?.find(candidate => candidate.readyState === 1);
@@ -118,6 +131,48 @@ def run_media_delivery_smoke(direct_server_with_data):
                 assert page.locator(
                     '[data-media-group="assistant:photos:live-ws-photo"] .chat-photo'
                 ).count() == 1
+                followed = page.evaluate("""() => {
+                    const messages = document.querySelector('#chat-messages');
+                    return messages.scrollHeight - messages.scrollTop - messages.clientHeight;
+                }""")
+                assert followed <= 6, followed
+
+                away = page.evaluate("""() => {
+                    const messages = document.querySelector('#chat-messages');
+                    messages.scrollTop = Math.max(0, messages.scrollHeight - messages.clientHeight - 300);
+                    messages.dispatchEvent(new Event('scroll'));
+                    const box = messages.getBoundingClientRect();
+                    const anchor = [...messages.children].find(node => {
+                        const rect = node.getBoundingClientRect();
+                        return rect.bottom > box.top && rect.top < box.bottom;
+                    });
+                    return {node: anchor.dataset.ts, top: anchor.getBoundingClientRect().top,
+                        remaining: messages.scrollHeight - messages.scrollTop - messages.clientHeight};
+                }""")
+                assert away["remaining"] >= 298, away
+                page.evaluate("""frame => {
+                    const socket = window.__mediaTestSockets.find(candidate => candidate.readyState === 1);
+                    socket.dispatchEvent(new MessageEvent('message', {data: JSON.stringify(frame)}));
+                }""", {
+                    "type": "photo", "role": "assistant", "chat_id": 1,
+                    "task_id": "live-ws-photo", "mime": "image/png",
+                    "image_base64": pixel_png, "ts": "2026-08-30T00:01:01Z",
+                })
+                page.wait_for_function(
+                    "() => document.querySelectorAll('[data-media-group=\"assistant:photos:live-ws-photo\"] .chat-photo').length === 2"
+                )
+                grouped = page.evaluate("""anchor => {
+                    const messages = document.querySelector('#chat-messages');
+                    const node = [...messages.children].find(candidate => candidate.dataset.ts === anchor.node);
+                    const button = document.querySelector('#chat-scroll-bottom');
+                    return {top: node.getBoundingClientRect().top,
+                        remaining: messages.scrollHeight - messages.scrollTop - messages.clientHeight,
+                        dotHidden: button.querySelector('.chat-scroll-activity-dot').hidden,
+                        dotCount: button.querySelectorAll('.chat-scroll-activity-dot').length};
+                }""", away)
+                assert abs(grouped["top"] - away["top"]) <= 6, (away, grouped)
+                assert grouped["remaining"] > 48, grouped
+                assert grouped["dotHidden"] is False and grouped["dotCount"] == 1, grouped
 
                 result = page.evaluate("""async () => {
                     const mod = await import('/static/modules/chat_media.js');
@@ -191,6 +246,90 @@ def run_media_delivery_smoke(direct_server_with_data):
                     "liveGroups": 2, "liveGalleryItems": 2, "liveLinks": 1,
                     "bridge": True, "blob": True, "copied": "raw **message** text",
                 }
+                # V-4 regression pins. The chat bubble's `white-space: pre-wrap`
+                # used to be inherited by structural card markup, so every
+                # newline of a template became a rendered blank line: a file
+                # card measured ~203px instead of ~68px and a gallery item ~531px
+                # instead of ~369px. Measure real geometry rather than CSS text.
+                # The dialog pin covers the universal margin reset killing the UA
+                # `dialog { margin: auto }` that centres a modal.
+                geometry = page.evaluate("""() => {
+                    const card = document.querySelector('.chat-file-card');
+                    const item = card.closest('.chat-file-item');
+                    const caption = item.querySelector('.chat-file-caption');
+                    const gallery = document.querySelector('.chat-bubble.is-multiple .chat-gallery-item');
+                    const photo = gallery.querySelector('.chat-photo');
+                    const figcaption = gallery.querySelector('figcaption');
+                    card.click();
+                    const dialog = [...document.querySelectorAll('.chat-file-dialog')].find((node) => node.open);
+                    const box = dialog.getBoundingClientRect();
+                    const measured = {
+                        cardHeight: card.getBoundingClientRect().height,
+                        itemHeight: item.getBoundingClientRect().height,
+                        captionHeight: caption ? caption.getBoundingClientRect().height : 0,
+                        galleryHeight: gallery.getBoundingClientRect().height,
+                        photoHeight: photo.getBoundingClientRect().height,
+                        figcaptionHeight: figcaption ? figcaption.getBoundingClientRect().height : 0,
+                        dialogWidth: box.width,
+                        dx: (box.left + box.width / 2) - window.innerWidth / 2,
+                        dy: (box.top + box.height / 2) - window.innerHeight / 2,
+                    };
+                    dialog.querySelector('[data-file-action="close"]').click();
+                    return measured;
+                }""")
+                assert 0 < geometry["cardHeight"] < 90, geometry
+                assert geometry["captionHeight"] > 0, geometry
+                assert abs(
+                    geometry["itemHeight"] - geometry["cardHeight"] - geometry["captionHeight"]
+                ) <= 1, geometry
+                assert geometry["photoHeight"] > 0 and geometry["figcaptionHeight"] > 0, geometry
+                # The figure adds its own 1px border top and bottom; anything
+                # beyond that is a phantom line between photo and caption.
+                assert abs(
+                    geometry["galleryHeight"] - geometry["photoHeight"] - geometry["figcaptionHeight"] - 2
+                ) <= 1, geometry
+                assert geometry["dialogWidth"] > 0, geometry
+                assert abs(geometry["dx"]) <= 2 and abs(geometry["dy"]) <= 2, geometry
+
+                # The opt-out marker is selective, not a blanket disable: a
+                # markdown-rendered body resolves to `normal` while a body that
+                # still carries authored plain text keeps its line breaks. Read
+                # computed style so a later rule ordering or specificity change
+                # cannot silently re-inherit the bubble default.
+                computed = page.evaluate("""() => {
+                    const host = document.querySelector('#chat-messages');
+                    const probe = document.createElement('div');
+                    probe.className = 'chat-bubble assistant';
+                    probe.innerHTML = `<div class="message">
+                        <div class="chat-live-line">
+                          <span class="chat-live-line-title" data-chat-markdown-enhanced>t</span>
+                          <div class="chat-live-line-body">b</div>
+                        </div>
+                        <div class="skill-review-full" data-chat-markdown-enhanced>s</div>
+                        <div class="chat-review-attempt-detail" data-chat-markdown-enhanced>d</div>
+                        <div class="chat-review-attempt-detail">plain</div>
+                        <div class="chat-live-line-title">plain-title</div>
+                    </div>`;
+                    host.appendChild(probe);
+                    const ws = (node) => getComputedStyle(node).whiteSpace;
+                    const details = [...probe.querySelectorAll('.chat-review-attempt-detail')];
+                    const titles = [...probe.querySelectorAll('.chat-live-line-title')];
+                    const measured = {
+                        title: ws(titles[0]),
+                        body: ws(probe.querySelector('.chat-live-line-body')),
+                        full: ws(probe.querySelector('.skill-review-full')),
+                        detail: ws(details[0]),
+                        plainDetail: ws(details[1]),
+                        plainTitle: ws(titles[1]),
+                    };
+                    probe.remove();
+                    return measured;
+                }""")
+                assert computed == {
+                    "title": "normal", "body": "normal", "full": "normal", "detail": "normal",
+                    "plainDetail": "pre-wrap", "plainTitle": "pre-wrap",
+                }, computed
+
                 page.wait_for_timeout(100)
                 assert console_errors == []
             finally:

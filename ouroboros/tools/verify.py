@@ -297,7 +297,14 @@ def _compare_files_bytes_equal(
         from ouroboros.workspace_executor import execute as _executor_execute
 
         res = _executor_execute(ctx, ["cmp", "--", a_raw, b_raw], pathlib.Path(work_dir), 60)
-        rc = int(getattr(res, "returncode", 2) or 0)
+        # No `or` coercion on an exit code: `None or 0` would read an unknown
+        # outcome as cmp's success and report the two files byte-equal. Absent or
+        # non-numeric is unknown, which is not equality.
+        rc_raw = getattr(res, "returncode", None)
+        try:
+            rc = int(rc_raw)
+        except (TypeError, ValueError):
+            return False, f"bytes_equal: executor cmp returned no exit status for {a_raw} vs {b_raw}"
         out = ((res.stdout or "") + ("\n" + res.stderr if res.stderr else "")).strip()
         if rc == 0:
             return True, f"bytes_equal: {a_raw} == {b_raw} (executor cmp)"
@@ -388,7 +395,10 @@ def _probe_artifact_lifecycle(
                 else:
                     from ouroboros.workspace_executor import execute as _executor_execute
                     res = _executor_execute(ctx, ["sh", "-c", 'test -e "$1"', "_", text], pathlib.Path(work_dir), 30)
-                    exists = int(getattr(res, "returncode", 1) or 1) == 0
+                    # No `or 1` coercion: returncode 0 is falsy, so it inverted every
+                    # healthy probe into exists_after=false (a None returncode now
+                    # raises into the advisory "unavailable" arm instead of lying).
+                    exists = int(getattr(res, "returncode", 1)) == 0
             else:
                 # HOST branch: resolve a RELATIVE path against the CHECK's cwd (work_dir) — the
                 # check ran there, so its relative deliverable lives there. A relative path MUST

@@ -32,6 +32,7 @@ from supervisor.update_candidate import (  # noqa: F401
     find_update_stash_sha, restore_stash_with_marker, restore_update_stash,
     stash_local_changes_for_update, lookup_update_stash,
     destructive_apply_guard, project_version_carriers,
+    quarantine_corrupt_update_tx_marker,
 )
 
 UPDATE_TX_MARKER_NAME = "ouroboros-update-tx.json"
@@ -1517,7 +1518,8 @@ def finalize_managed_update_on_boot(supervisor_ready: bool = True) -> Dict[str, 
     strict-reads the tx, and dispatches by phase: ``pending_boot_smoke`` (committed +
     restarted) → health-check + boot-loop guard; an assisted phase → non-destructive
     merge-state recovery (resume / abandon-on-divergence / rollback-on-expiry). A CORRUPT
-    marker fails closed (left for the owner). Best-effort; never raises."""
+    marker is quarantined aside byte-intact (admission reopens) unless the tree shows an
+    in-flight merge, which stays fail-closed. Best-effort; never raises."""
     lock_fh = None
     try:
         try:
@@ -1528,8 +1530,10 @@ def finalize_managed_update_on_boot(supervisor_ready: bool = True) -> Dict[str, 
         if status == "absent":
             return {"finalized": False, "reason": "no pending update"}
         if status == "corrupt":
-            _log_supervisor({"type": "managed_update_tx_corrupt_on_boot"})
-            return {"finalized": False, "reason": "corrupt tx marker — left for owner"}
+            # Quarantined aside byte-intact (evidence survives, the admission
+            # latch does not) unless MERGE_HEAD shows a live merge (#447);
+            # mechanics in update_candidate.quarantine_corrupt_update_tx_marker.
+            return quarantine_corrupt_update_tx_marker()
         phase = str(tx.get("phase") or "")
         if phase == "stashing_local_work":
             # Crash between the durable pre-stash marker and the merge apply:

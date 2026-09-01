@@ -40,7 +40,7 @@ const finiteCount = (value) => {
 };
 
 export function setReviewAnchor(record, enabled, writePhase) {
-    if (!record || Boolean(record.reviewAnchor) === enabled) return;
+    if (!record || Boolean(record.reviewAnchor) === enabled) return false;
     record.reviewAnchor = enabled;
     record.phaseEl.hidden = enabled;
     if (enabled) {
@@ -53,6 +53,7 @@ export function setReviewAnchor(record, enabled, writePhase) {
         }
         record.inlineTypingEl.style.display = '';
     }
+    return true;
 }
 
 function normalizedState(value, fallback = 'unavailable') {
@@ -954,7 +955,7 @@ export function mergeReviewGroup(store, incoming) {
         const active = activeAttempts.at(-1);
         merged.state = activeAttempts.some((attempt) => attempt.state === 'running') ? 'running' : 'queued';
         merged.tone = 'working';
-        merged.verdict = active.verdict || merged.state;
+        merged.verdict = active.verdict || (merged.lifecycleOnly ? '' : merged.state);
         merged.summary = active.summary || merged.summary;
         merged.activeCount = activeAttempts.length;
     }
@@ -1042,6 +1043,7 @@ export function mergeReviewGroup(store, incoming) {
         merged.attempts,
         incoming.initiatorTaskId || prior.initiatorTaskId,
     );
+    if (JSON.stringify(prior) === JSON.stringify(merged)) return prior;
     store.set(merged.id, merged);
     return merged;
 }
@@ -1064,32 +1066,28 @@ function reviewRevision(value) {
     return /^[0-9a-f]{64}$/.test(revision) ? revision : null;
 }
 
-/**
- * Per-task invalidation hydrator. Revisions are opaque content SHA-256 tokens,
- * not counters. A distinct token arriving during a GET schedules one trailing
- * read; an identical applied/in-flight/pending token is a no-op/same flight.
- */
+// Revisions are opaque SHA-256 tokens; one distinct token may trail a live GET.
 export function createReviewHydrator({ fetchDetail, applyDetail, onState = () => {} } = {}) {
     const states = new Map();
 
-    const start = (taskId, state, revision) => {
+    const start = (taskId, state, revision, onDomWrite) => {
         const generation = ++state.generation;
         state.inFlightRevision = revision;
-        // Status is typed presentation state, not a per-attempt DOM FSM: a
-        // first load (or a retry after a failure) announces itself; routine
-        // background refreshes over already-applied content stay silent.
+        const write = typeof onDomWrite === 'function' ? onDomWrite : (mutate) => mutate();
+        // First load/retry announces; routine refresh over applied content stays quiet.
         const notify = (status) => {
             state.lastStatus = status;
-            onState(taskId, status);
+            return write(() => onState(taskId, status));
         };
-        if (!state.everApplied || state.lastStatus === 'error') notify('loading');
         const request = Promise.resolve()
-            .then(() => fetchDetail(taskId))
+            .then(() => {
+                if (!state.everApplied || state.lastStatus === 'error') notify('loading');
+                return fetchDetail(taskId);
+            })
             .then((detail) => {
-                // A strict fetch seam REJECTS on a failed read; a null detail
-                // means the record is genuinely absent (404) — not an error.
+                // The strict seam rejects failures; null means genuinely absent (404).
                 if (detail === null || detail === undefined) return false;
-                return applyDetail(taskId, detail);
+                return write(() => applyDetail(taskId, detail));
             })
             .then((applied) => {
                 if (applied !== false && revision !== null) state.appliedRevision = revision;
@@ -1105,16 +1103,18 @@ export function createReviewHydrator({ fetchDetail, applyDetail, onState = () =>
                 if (state.inFlight !== request || state.generation !== generation) return;
                 state.inFlight = null;
                 state.inFlightRevision = null;
-                const trailing = state.pendingRevision;
-                state.pendingRevision = null;
-                if (trailing !== null && trailing !== state.appliedRevision) start(taskId, state, trailing);
+                const pending = state.pending;
+                state.pending = null;
+                if (pending && pending.revision !== state.appliedRevision) {
+                    start(taskId, state, pending.revision, pending.onDomWrite);
+                }
             });
         state.inFlight = request;
         return request;
     };
 
     return {
-        hydrate(taskIdValue, revisionValue = null) {
+        hydrate(taskIdValue, revisionValue = null, { onDomWrite = null } = {}) {
             const taskId = text(taskIdValue);
             if (!taskId) return Promise.resolve(false);
             const revision = reviewRevision(revisionValue);
@@ -1123,7 +1123,7 @@ export function createReviewHydrator({ fetchDetail, applyDetail, onState = () =>
                 state = {
                     appliedRevision: null,
                     inFlightRevision: null,
-                    pendingRevision: null,
+                    pending: null,
                     inFlight: null,
                     generation: 0,
                     everApplied: false,
@@ -1135,19 +1135,19 @@ export function createReviewHydrator({ fetchDetail, applyDetail, onState = () =>
                 return Promise.resolve(false);
             }
             if (state.inFlight) {
-                if (revision !== null && revision === state.pendingRevision) {
+                if (revision !== null && revision === state.pending?.revision) {
                     return state.inFlight.then(() => state.inFlight || false);
                 }
                 if (
                     revision !== null
                     && revision !== state.inFlightRevision
                 ) {
-                    state.pendingRevision = revision;
+                    state.pending = { revision, onDomWrite };
                     return state.inFlight.then(() => state.inFlight || false);
                 }
                 return state.inFlight;
             }
-            return start(taskId, state, revision);
+            return start(taskId, state, revision, onDomWrite);
         },
         invalidateApplied(taskIdValue = '') {
             const taskId = text(taskIdValue);
@@ -1346,9 +1346,8 @@ export function renderReviewsSection(groupsInput, disclosure = {}) {
 }
 
 /**
- * One interactive renderer for the Reviews subsection. The owning Chat card
- * supplies durable-per-instance disclosure state and exact detail/hydration
- * callbacks; review events only call update(), never change disclosure.
+ * Interactive Reviews renderer. Chat owns disclosure and hydration callbacks;
+ * review events update content without taking disclosure ownership.
  */
 export function createReviewPresentationController({
     host,
@@ -1356,7 +1355,7 @@ export function createReviewPresentationController({
     disclosure,
     onHydrate = () => {},
     onLoadSkillDetail = () => {},
-    onLayout = () => {},
+    onDomWrite = (mutate) => mutate(),
 } = {}) {
     const groups = new Map();
     const state = disclosure || {};
@@ -1391,7 +1390,7 @@ export function createReviewPresentationController({
         target?.focus?.();
     };
 
-    const render = () => {
+    const render = () => onDomWrite(() => {
         if (!host || !summary) return;
         const focused = focusedControl();
         const { groupCount, activeCount } = reviewGroupCounts(groups);
@@ -1408,12 +1407,12 @@ export function createReviewPresentationController({
         if (!reconciled || !active || !host.contains?.(active)) restoreFocus(focused);
         for (const detail of host.querySelectorAll?.('[data-review-attempt-detail]') || []) {
             if (
-                !detail.hidden
+                !detail?.hidden
                 && detail.dataset?.skillReviewSkill
                 && detail.dataset?.skillReviewJob
             ) onLoadSkillDetail(detail);
         }
-    };
+    });
 
     host?.addEventListener('click', (event) => {
         const hydrateRetry = event.target?.closest?.('[data-review-hydrate-retry]');
@@ -1426,7 +1425,6 @@ export function createReviewPresentationController({
                 status.setAttribute?.('tabindex', '-1');
                 status.focus?.();
             }
-            onLayout();
             return;
         }
         const retry = event.target?.closest?.('[data-skill-review-retry]');
@@ -1436,7 +1434,6 @@ export function createReviewPresentationController({
                 onLoadSkillDetail(detail, { retry: true });
                 detail.setAttribute?.('tabindex', '-1');
                 detail.focus?.();
-                onLayout();
             }
             return;
         }
@@ -1445,7 +1442,6 @@ export function createReviewPresentationController({
             state.sectionExpanded = !state.sectionExpanded;
             render();
             if (state.sectionExpanded) onHydrate();
-            onLayout();
             return;
         }
         const groupToggle = event.target?.closest?.('[data-review-group-toggle]');
@@ -1456,7 +1452,6 @@ export function createReviewPresentationController({
             else state.expandedGroups.add(groupId);
             render();
             if (state.expandedGroups.has(groupId)) onHydrate();
-            onLayout();
             return;
         }
         const attemptToggle = event.target?.closest?.('[data-review-attempt-toggle]');
@@ -1467,34 +1462,39 @@ export function createReviewPresentationController({
         if (opening) state.expandedAttempts.add(attemptKey);
         else state.expandedAttempts.delete(attemptKey);
         render();
-        onLayout();
     });
 
     return {
         groups,
         render,
         update(group) {
-            const merged = mergeReviewGroup(groups, group);
-            if (merged) render();
-            return merged;
+            const prior = groups.get(group?.id), merged = mergeReviewGroup(groups, group);
+            if (merged && merged !== prior) render();
+            return merged === prior ? false : merged;
         },
         updateMany(nextGroups) {
             let changed = false;
             for (const group of Array.isArray(nextGroups) ? nextGroups : []) {
-                if (mergeReviewGroup(groups, group)) changed = true;
+                const prior = groups.get(group?.id), merged = mergeReviewGroup(groups, group);
+                if (merged && merged !== prior) changed = true;
             }
             if (changed) render();
             return changed;
         },
         setHydrateStatus(statusValue) {
+            const statusVisible = (value) => groups.size > 0 || value === 'error'
+                || (value === 'loading' && state.hadHydrateError === true);
             const status = text(statusValue);
-            if (state.hydrateStatus === status) return;
+            if (state.hydrateStatus === status) return false;
+            const wasVisible = statusVisible(state.hydrateStatus);
             // Remember a failure across the retry's loading pass so the
             // zero-group shell stays mounted until the retry settles.
             if (status === 'error') state.hadHydrateError = true;
             else if (status === 'idle') state.hadHydrateError = false;
             state.hydrateStatus = status;
-            render();
+            const isVisible = statusVisible(status);
+            if (wasVisible || isVisible) render();
+            return wasVisible || isVisible;
         },
     };
 }

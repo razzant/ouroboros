@@ -36,6 +36,9 @@ def dispatch_extension_tool(ctx: Any, name: str, ext_tool: Dict[str, Any], args:
         return f"⚠️ TOOL_ERROR ({name}): extension {skill_name!r} is not allowed to dispatch right now."
 
     from ouroboros.safety import check_safety as _ext_check_safety
+    # Warning trails the payload (#447 H1): a leading SAFETY_WARNING masked a
+    # structured {"ok": false} extension answer from failure classification.
+    from ouroboros.tools.result_envelope import append_note as _append_result_note
 
     _ext_safe, _ext_safety_msg = _ext_check_safety(
         name,
@@ -53,7 +56,7 @@ def dispatch_extension_tool(ctx: Any, name: str, ext_tool: Dict[str, Any], args:
             result_str = dispatch_extension_tool_subprocess(ext_tool, ctx, call_args)
         except Exception as exc:
             return f"⚠️ TOOL_ERROR ({name}): extension child process failed: {type(exc).__name__}: {exc}"
-        return f"{_ext_safety_msg}\n\n---\n{result_str}" if _ext_safety_msg else result_str
+        return _append_result_note(result_str, _ext_safety_msg) if _ext_safety_msg else result_str
 
     handler = ext_tool["handler"]
     try:
@@ -113,4 +116,4 @@ def dispatch_extension_tool(ctx: Any, name: str, ext_tool: Dict[str, Any], args:
         result = box.get("value", "")
 
     result_str = result if isinstance(result, str) else str(result)
-    return f"{_ext_safety_msg}\n\n---\n{result_str}" if _ext_safety_msg else result_str
+    return _append_result_note(result_str, _ext_safety_msg) if _ext_safety_msg else result_str

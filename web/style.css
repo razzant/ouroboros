@@ -1,7 +1,6 @@
 :root {
     --bg-primary: #0d0b0f;
     --bg-secondary: #1a1520;
-    --bg-tertiary: #201828;
     --bg-card: rgba(255, 255, 255, 0.06);
     --bg-hover: rgba(255, 255, 255, 0.08);
     /* Type scale + foreground semantics: docs/DESIGN.md. Four sizes, no fifth. */
@@ -20,7 +19,6 @@
     --accent: #c93545;
     --accent-light: #f07a86;
     --accent-dim: rgba(201, 53, 69, 0.15);
-    --accent-glow: rgba(201, 53, 69, 0.08);
     /* Accent alpha tokens; keep future tweaks off hardcoded rgba literals. */
     --accent-04: rgba(201, 53, 69, 0.04);
     --accent-05: rgba(201, 53, 69, 0.05);
@@ -30,7 +28,10 @@
     --accent-18: rgba(201, 53, 69, 0.18);
     --accent-22: rgba(201, 53, 69, 0.22);
     --accent-25: rgba(201, 53, 69, 0.25);
+    --accent-35: rgba(201, 53, 69, 0.35);
+    --accent-45: rgba(201, 53, 69, 0.45);
     --accent-55: rgba(201, 53, 69, 0.55);
+    --accent-65: rgba(201, 53, 69, 0.65);
     /* Project identity (vivid fuchsia): a converted task card, its sidebar marker,
        and the project panel header share this so "this is a project" reads as a
        deliberate state — never the red task accent (looked like an error, P3) and
@@ -38,16 +39,11 @@
        blue and the two blurred together; fuchsia is unmistakably its own role.
        Base is legible-on-dark fuchsia-400; every tint shares the SAME hue (C7.3). */
     --project: #e879f9;
-    --project-light: #f0abfc;
-    --project-dim: rgba(232, 121, 249, 0.15);
     --project-08: rgba(232, 121, 249, 0.08);
     --project-12: rgba(232, 121, 249, 0.12);
     --project-18: rgba(232, 121, 249, 0.18);
-    --project-25: rgba(232, 121, 249, 0.25);
     /* User / owner voice: the owner's chat bubble + sender accents. Tokenized so
        the hue lives in one place and stays clear of the project fuchsia (C7.2). */
-    --user: #6e96d2;
-    --user-light: #9bb9f0;
     --user-bubble-from: rgba(80, 120, 190, 0.14);
     --user-bubble-to: rgba(55, 85, 155, 0.12);
     --user-border: rgba(110, 150, 210, 0.18);
@@ -60,8 +56,11 @@
     --system-border: rgba(245, 158, 11, 0.45);
     --system-sender: rgba(245, 158, 11, 0.9);
     --system-text: rgba(255, 240, 210, 0.78);
+    /* Assistant / agent voice: the assistant bubble's sender + body tints,
+       tokenized like the user/system voices above (C7.2). */
+    --assistant-sender: rgba(250, 125, 125, 0.95);
+    --assistant-text: rgba(255, 235, 238, 0.96);
     --blue: #3b82f6;
-    --blue-dim: rgba(30, 64, 175, 0.3);
     --amber: #f59e0b;
     --amber-dim: rgba(245, 158, 11, 0.15);
     --green: #22c55e;
@@ -86,33 +85,24 @@
     --ui-card-bg-soft: var(--surface-card-soft);
     --ui-card-border: var(--surface-border);
     --ui-modal-bg: rgba(18, 20, 26, 0.98);
-    --ui-tone-ok: #22c55e;
-    --ui-tone-warn: #f59e0b;
-    --ui-tone-danger: #ef4444;
-    /* Semantic role palette (SSOT, C7.2): name a color by the ROLE it signals, so
-       a component references the role rather than a raw hue. task = red accent (a
-       running task), system = amber (system / owner-control notices), user = blue
-       (the owner's voice), project = fuchsia (a project identity). Tones map ok /
-       warn / danger. Re-point a role here and every surface follows. */
-    --accent-task: var(--accent);
-    --accent-system: var(--amber);
-    --accent-user: var(--user);
-    --accent-project: var(--project);
-    --tone-ok: var(--green);
-    --tone-warn: var(--amber);
-    --tone-danger: var(--red);
-    /* Status pairs: fg/bg named together, never derived (docs/DESIGN.md).
-       --tone-* stays the saturated hue for fills; these are for 12px text. */
+    /* Status triples: fg/bg/border named together, never derived
+       (docs/DESIGN.md "Status and chips"). The fg tints are readable at 12px on
+       near-black; the saturated --green/--amber/--red stay for dots, tracks and
+       other large indicators. */
     --status-ok-fg: #6ee7b7;
     --status-ok-bg: var(--green-dim);
+    --status-ok-border: rgba(34, 197, 94, 0.28);
     --status-warn-fg: #fcd34d;
     --status-warn-bg: var(--amber-dim);
+    --status-warn-border: rgba(245, 158, 11, 0.30);
     --status-error-fg: #fca5a5;
     --status-error-bg: var(--red-dim);
+    --status-error-border: rgba(239, 68, 68, 0.30);
     --status-neutral-fg: var(--text-meta);
     --status-neutral-bg: rgba(255, 255, 255, 0.06);
-    --focus-accent-border: rgba(232, 93, 111, 0.4);
-    --focus-accent-ring: rgba(232, 93, 111, 0.10);
+    --status-neutral-border: rgba(255, 255, 255, 0.12);
+    --focus-accent-border: rgba(201, 53, 69, 0.4);
+    --focus-accent-ring: var(--accent-10);
     --radius-xs: 3px;
     --radius-sm: 8px;
     /* In-between radius used by chips, counters, and fade rules. */
@@ -136,6 +126,11 @@
     --sidebar-width: 280px;
     --project-panel-width: clamp(340px, 36vw, 440px);
     --nav-item-radius: 10px;
+    /* One hover fill for an item in a popup menu or a picker list. Six menus
+       used five different fills (0.04 / 0.06 / 0.08 / an accent tint / an
+       undeclared --surface-2), so the same gesture looked like a different
+       control depending on which menu you opened. */
+    --menu-item-hover: rgba(255, 255, 255, 0.07);
     /* 8pt spacing scale (Apple HIG / common 8pt grid) — use these instead of
        ad-hoc pixel values so spacing stays consistent across components. */
     --space-1: 4px;
@@ -143,7 +138,6 @@
     --space-3: 12px;
     --space-4: 16px;
     --space-5: 24px;
-    --space-6: 32px;
     /* Bounded scroll region for the Updates restore list (DESIGN section 5:
        a new visual dimension becomes a variable before a page-local literal). */
     --updates-list-max-height: 320px;
@@ -151,6 +145,12 @@
 }
 
 * { margin: 0; padding: 0; box-sizing: border-box; }
+
+/* The universal reset above also clears the UA's `dialog { margin: auto }`,
+   which is what centres a native modal dialog in its viewport — without it
+   every `showModal()` surface lands in the top-left corner. Restore it for
+   dialogs as a class, not per dialog. */
+dialog { margin: auto; }
 
 /* Color-only utility — never a font-size (docs/DESIGN.md ".muted"). */
 .muted { color: var(--text-meta); }
@@ -202,7 +202,7 @@ body {
     padding: var(--space-4) var(--space-3) var(--space-3);
     background:
         linear-gradient(180deg, rgba(13, 11, 15, 0.62), rgba(13, 11, 15, 0.32)),
-        radial-gradient(circle at 8% 0%, rgba(201, 53, 69, 0.08), transparent 260px);
+        radial-gradient(circle at 8% 0%, var(--accent-08), transparent 260px);
     border-right: 1px solid var(--divider);
     z-index: 10;
     position: relative;  /* positioning context for the resize handle */
@@ -327,7 +327,7 @@ body.resizing-panels { user-select: none; }
     border-radius: var(--radius-sm);
     background: var(--red);
     color: #fff;
-    font-size: 10px;
+    font-size: var(--type-meta);
     font-weight: 700;
     display: flex;
     align-items: center;
@@ -344,7 +344,7 @@ body.resizing-panels { user-select: none; }
     height: 8px;
     border-radius: 50%;
     background: var(--red);
-    box-shadow: 0 0 0 2px rgba(201, 53, 69, 0.18);
+    box-shadow: 0 0 0 2px var(--accent-18);
 }
 
 .nav-row:hover,
@@ -368,12 +368,15 @@ body.resizing-panels { user-select: none; }
     outline: none;
 }
 
+/* Inset: these sit flush inside the sidebar / header strip, which clips an
+   outer ring (docs/DESIGN.md "Focus"). */
 .nav-row:focus-visible,
 .nav-section-toggle:focus-visible,
 .app-tab:focus-visible,
 .chat-header-btn:focus-visible,
 .chat-header-more > summary:focus-visible {
-    box-shadow: inset 0 0 0 2px rgba(96, 165, 250, 0.65);
+    outline: 2px solid var(--focus-accent-border);
+    outline-offset: -2px;
 }
 
 .chat-live-actions {
@@ -418,7 +421,7 @@ body.resizing-panels { user-select: none; }
 
 .task-control-item:hover:not(:disabled) {
     color: var(--text-primary);
-    background: var(--surface-control);
+    background: var(--menu-item-hover);
 }
 
 .task-control-item.danger {
@@ -469,7 +472,7 @@ body.resizing-panels { user-select: none; }
     background: transparent;
     color: var(--text-secondary);
     font: inherit;
-    font-size: 13px;
+    font-size: var(--type-body);
     text-align: left;
     cursor: pointer;
     border-radius: inherit;
@@ -480,7 +483,7 @@ body.resizing-panels { user-select: none; }
 }
 
 .chat-live-project-icon {
-    font-size: 15px;
+    font-size: var(--type-section);
     line-height: 1;
 }
 
@@ -496,7 +499,7 @@ body.resizing-panels { user-select: none; }
     margin-left: auto;
     flex: 0 0 auto;
     color: var(--project);
-    font-size: 12px;
+    font-size: var(--type-meta);
 }
 
 /* F4 — a bound (project-chat) card keeps its live timeline above and gets the
@@ -560,7 +563,7 @@ body.resizing-panels { user-select: none; }
 .app-page-glass {
     background:
         linear-gradient(180deg, rgba(13, 11, 15, 0.76) 0%, rgba(13, 11, 15, 0.34) 170px, rgba(13, 11, 15, 0.08) 100%),
-        radial-gradient(circle at 18% 0%, rgba(232, 93, 111, 0.10), transparent 300px);
+        radial-gradient(circle at 18% 0%, var(--accent-10), transparent 300px);
 }
 
 /* Containment for narrow screens and unbroken runtime text. */
@@ -902,11 +905,11 @@ body.resizing-panels { user-select: none; }
 }
 
 .files-context-item:hover {
-    background: rgba(255, 255, 255, 0.06);
+    background: var(--menu-item-hover);
 }
 
 .files-context-item-danger {
-    color: #fca5a5;
+    color: var(--status-error-fg);
 }
 
 .files-context-item-danger:hover {
@@ -1047,7 +1050,7 @@ body.resizing-panels { user-select: none; }
 .app-tab.is-active {
     color: var(--text-primary);
     border-color: var(--focus-accent-border);
-    background: rgba(232, 93, 111, 0.12);
+    background: var(--accent-12);
 }
 
 .app-tab-pill {
@@ -1060,7 +1063,7 @@ body.resizing-panels { user-select: none; }
     height: 18px;
     border-radius: 9px;
     background: rgba(245, 158, 11, 0.15);
-    color: #f59e0b;
+    color: var(--amber);
     font-size: 11px;
     font-family: 'JetBrains Mono', monospace;
 }
@@ -1088,6 +1091,8 @@ body.resizing-panels { user-select: none; }
 .app-page-header-overlay {
     align-items: center;
 }
+
+/* === design-system:migrated-begin (chat: page header, budget pill, load-older) === */
 
 .chat-page-header {
     position: absolute;
@@ -1135,7 +1140,7 @@ body.resizing-panels { user-select: none; }
     color: var(--text-secondary);
     border-radius: 999px;
     padding: 7px 14px;
-    font-size: 12px;
+    font-size: var(--type-meta);
     line-height: 1.2;
     font-weight: 600;
     cursor: pointer;
@@ -1149,14 +1154,14 @@ body.resizing-panels { user-select: none; }
 }
 
 .chat-header-btn.on {
-    border-color: rgba(201, 53, 69, 0.38);
-    background: rgba(201, 53, 69, 0.14);
+    border-color: var(--accent-35);
+    background: var(--accent-dim);
     color: var(--accent-light);
 }
 
 .chat-header-btn.danger {
     border-color: rgba(239, 68, 68, 0.22);
-    color: rgba(248, 113, 113, 0.95);
+    color: var(--status-error-fg);
 }
 
 .chat-header-btn.danger:hover {
@@ -1201,7 +1206,7 @@ body.resizing-panels { user-select: none; }
     background: transparent;
     color: var(--text-secondary);
     font: inherit;
-    font-size: 13px;
+    font-size: var(--type-body);
     text-align: left;
     padding: var(--space-2) var(--space-3);
     cursor: pointer;
@@ -1209,7 +1214,7 @@ body.resizing-panels { user-select: none; }
 
 .chat-header-menu-item:hover {
     color: var(--text-primary);
-    background: var(--surface-control);
+    background: var(--menu-item-hover);
 }
 
 /* Evolve/Consciousness live in this menu now; show their on-state in place. */
@@ -1219,14 +1224,14 @@ body.resizing-panels { user-select: none; }
 }
 
 .chat-header-menu-item.danger {
-    color: rgba(248, 113, 113, 0.95);
+    color: var(--status-error-fg);
 }
 
 /* When a mode inside More is active, mark the collapsed More pill with a dot. */
 .chat-header-more > summary.has-active {
     position: relative;
-    border-color: rgba(201, 53, 69, 0.38);
-    background: rgba(201, 53, 69, 0.14);
+    border-color: var(--accent-35);
+    background: var(--accent-dim);
     color: var(--accent-light);
 }
 
@@ -1269,7 +1274,7 @@ body.resizing-panels { user-select: none; }
 }
 
 .chat-budget-text {
-    font-size: 11px;
+    font-size: var(--type-meta);
     font-weight: 600;
     color: var(--amber);
     white-space: nowrap;
@@ -1294,7 +1299,7 @@ body.resizing-panels { user-select: none; }
 
 .status-badge {
     padding: 4px 10px;
-    font-size: 11px;
+    font-size: var(--type-meta);
     font-weight: 500;
     background: rgba(26, 21, 32, 0.78);
     backdrop-filter: blur(8px);
@@ -1327,7 +1332,7 @@ body.resizing-panels { user-select: none; }
     border-radius: 999px;
     background: var(--bg-secondary);
     color: var(--text-secondary);
-    font-size: 12.5px;
+    font-size: var(--type-meta);
     padding: 5px 14px;
     cursor: pointer;
     transition: color 0.15s ease, border-color 0.15s ease;
@@ -1338,7 +1343,7 @@ body.resizing-panels { user-select: none; }
 }
 .chat-load-older-btn:disabled { opacity: 0.6; cursor: default; }
 .chat-load-older-note {
-    font-size: 12px;
+    font-size: var(--type-meta);
     color: var(--text-muted);
     text-align: center;
     max-width: 460px;
@@ -1364,6 +1369,8 @@ body.resizing-panels { user-select: none; }
     0%, 60%, 100% { transform: translateY(0); opacity: 0.4; }
     30% { transform: translateY(-6px); opacity: 1; }
 }
+
+/* === design-system:migrated-end === */
 
 .onboarding-overlay {
     position: fixed;
@@ -1431,6 +1438,8 @@ body.resizing-panels { user-select: none; }
 
 }
 
+/* === design-system:migrated-begin (chat: transcript, bubbles, live cards, composer) === */
+
 #chat-messages,
 .chat-messages {
     flex: 1;
@@ -1458,50 +1467,57 @@ body.resizing-panels { user-select: none; }
     flex-shrink: 0;
 }
 
-/* Round glass "jump to newest" button — floats directly above the Send button
-   (right edges aligned), shown only when the user has scrolled up away from the
-   bottom. Anchored inside .chat-send-group (its positioning context) so it glues
-   to Send on desktop and mobile alike, regardless of textarea growth. */
+/* Quiet transcript navigation, centered above the complete two-row composer. */
 .chat-scroll-bottom-btn {
     position: absolute;
-    right: 0;
-    bottom: calc(100% + 12px);
+    left: 50%;
+    bottom: calc(100% + var(--space-2));
     z-index: 6;
-    width: 42px;
-    height: 42px;
+    width: var(--composer-control-height);
+    height: var(--composer-control-height);
     display: flex;
     align-items: center;
     justify-content: center;
     border-radius: 50%;
-    color: var(--accent-light);
-    background: rgba(26, 21, 32, 0.72);
-    border: 1px solid rgba(201, 53, 69, 0.42);
+    color: var(--text-secondary);
+    background: rgba(26, 21, 32, 0.84);
+    border: 1px solid var(--surface-border);
     backdrop-filter: blur(12px);
     -webkit-backdrop-filter: blur(12px);
-    box-shadow: 0 8px 22px rgba(0, 0, 0, 0.32), inset 0 1px 0 rgba(255, 255, 255, 0.05);
+    box-shadow: none;
     cursor: pointer;
     opacity: 0;
-    transform: translateY(8px) scale(0.9);
+    transform: translate(-50%, 8px);
     pointer-events: none;
     transition: opacity 0.18s ease, transform 0.18s ease, border-color 0.18s ease, background 0.18s ease, color 0.18s ease;
 }
 .chat-scroll-bottom-btn.visible {
     opacity: 1;
-    transform: translateY(0) scale(1);
+    transform: translate(-50%, 0);
     pointer-events: auto;
 }
 .chat-scroll-bottom-btn:hover {
-    color: #fff;
-    background: rgba(201, 53, 69, 0.16);
-    border-color: rgba(232, 93, 111, 0.6);
-    transform: translateY(0) scale(1.05);
+    color: var(--text-primary);
+    background: var(--bg-hover);
+    border-color: rgba(255, 255, 255, 0.16);
+    transform: translate(-50%, 0);
 }
 .chat-scroll-bottom-btn:focus-visible {
-    outline: none;
-    border-color: rgba(232, 93, 111, 0.6);
-    box-shadow: 0 0 0 3px rgba(201, 53, 69, 0.18);
+    outline: 2px solid var(--focus-accent-border);
+    outline-offset: 2px;
 }
 .chat-scroll-bottom-btn svg { display: block; }
+.chat-scroll-activity-dot {
+    position: absolute;
+    top: -2px;
+    right: -2px;
+    width: 8px;
+    height: 8px;
+    border-radius: 50%;
+    background: var(--accent);
+    box-shadow: 0 0 0 2px var(--bg-primary);
+}
+.chat-scroll-activity-dot[hidden] { display: none; }
 
 .chat-bubble {
     padding: 10px 14px;
@@ -1536,22 +1552,35 @@ body.resizing-panels { user-select: none; }
 }
 
 .chat-bubble .sender {
-    font-size: 11px;
+    font-size: var(--type-meta);
     font-weight: 600;
     margin-bottom: 4px;
 }
 .chat-bubble.user .sender { color: var(--user-sender); }
-.chat-bubble.assistant .sender { color: rgba(250, 125, 125, 0.95); }
+.chat-bubble.assistant .sender { color: var(--assistant-sender); }
 .chat-bubble.system .sender { color: var(--system-sender); }
 
 .chat-bubble .message {
-    font-size: 15.5px;
-    line-height: 1.5;
+    font-size: var(--type-section);
+    line-height: var(--line-body);
     color: var(--text-primary);
     white-space: pre-wrap;
 }
 
 .chat-bubble[data-chat-markdown-enhanced] .message {
+    white-space: normal;
+}
+
+/* Same opt-out idiom, applied to the rest of the class: a surface whose body is
+   RENDERED markdown (block elements) must not also honour the bubble's
+   `pre-wrap`, or every source newline becomes an extra blank line. The marker
+   attribute is authored by the renderer that writes the markdown, so a surface
+   that still shows plain multi-line text (an un-hydrated attempt detail) keeps
+   pre-wrap and its authored line breaks. */
+.chat-live-line-body,
+[data-chat-markdown-enhanced].chat-live-line-title,
+[data-chat-markdown-enhanced].skill-review-full,
+[data-chat-markdown-enhanced].chat-review-attempt-detail {
     white-space: normal;
 }
 
@@ -1567,7 +1596,7 @@ body.resizing-panels { user-select: none; }
 }
 
 .chat-bubble.user .message { color: var(--user-text); }
-.chat-bubble.assistant .message { color: rgba(255, 235, 238, 0.96); }
+.chat-bubble.assistant .message { color: var(--assistant-text); }
 .chat-bubble.system .message { color: var(--system-text); }
 
 /* Shared rich-content contract (v6.71.0): rendered markdown/lists inside
@@ -1584,6 +1613,14 @@ body.resizing-panels { user-select: none; }
 .ui-rich-content li {
     margin-block: 3px;
 }
+/* Rendered markdown outside a chat bubble had no paragraph rhythm at all: the
+   global reset zeroes <p> margins and nothing put them back, so a multi-
+   paragraph card body read as one wall of text. */
+.ui-rich-content p {
+    margin-block: var(--space-2);
+}
+.ui-rich-content p:first-child { margin-block-start: 0; }
+.ui-rich-content p:last-child { margin-block-end: 0; }
 
 .chat-bubble.system[data-system-type="skill_review"] {
     padding: 0;
@@ -1640,7 +1677,7 @@ body.resizing-panels { user-select: none; }
     justify-content: space-between;
     gap: 10px;
     color: rgba(255, 240, 210, 0.66);
-    font-size: 12px;
+    font-size: var(--type-meta);
 }
 
 .skill-review-meta {
@@ -1652,13 +1689,13 @@ body.resizing-panels { user-select: none; }
 
 .skill-review-toggle-label {
     flex-shrink: 0;
-    color: rgba(245, 158, 11, 0.95);
+    color: var(--system-sender);
     font-weight: 650;
 }
 
 .skill-review-full {
     padding: 0 14px 14px;
-    color: rgba(255, 240, 210, 0.82);
+    color: var(--system-text);
     white-space: pre-wrap;
     /* Full review bodies can run to hundreds of lines: scroll inside the
        card instead of re-bloating the chat column (owner-picked 60vh). */
@@ -1667,7 +1704,7 @@ body.resizing-panels { user-select: none; }
 }
 
 .skill-review-error {
-    color: rgba(255, 180, 160, 0.92);
+    color: var(--status-error-fg);
 }
 
 .skill-review-retry {
@@ -1676,9 +1713,9 @@ body.resizing-panels { user-select: none; }
     border: 1px solid rgba(245, 158, 11, 0.55);
     border-radius: 6px;
     background: transparent;
-    color: rgba(245, 158, 11, 0.95);
+    color: var(--system-sender);
     font: inherit;
-    font-size: 12px;
+    font-size: var(--type-meta);
     cursor: pointer;
 }
 
@@ -1693,14 +1730,14 @@ body.resizing-panels { user-select: none; }
 
 .msg-pending {
     margin-top: 6px;
-    font-size: 11px;
+    font-size: var(--type-meta);
     color: var(--text-muted);
 }
 
 .msg-routing-annotation {
     margin-top: 6px;
-    color: rgba(255, 255, 255, 0.58);
-    font-size: 11px;
+    color: var(--text-secondary);
+    font-size: var(--type-meta);
     line-height: 1.3;
     overflow: hidden;
     text-overflow: ellipsis;
@@ -1708,17 +1745,17 @@ body.resizing-panels { user-select: none; }
 }
 
 .msg-routing-annotation[data-annotation-status="pending"] {
-    color: rgba(255, 255, 255, 0.42);
+    color: var(--text-disabled);
 }
 
 .msg-routing-annotation[data-annotation-status="needs_manual_target"],
 .msg-routing-annotation[data-annotation-status="project_unavailable"] {
-    color: rgba(248, 180, 188, 0.9);
+    color: var(--status-error-fg);
 }
 
 .msg-time {
-    font-size: 0.65rem;
-    color: var(--text-secondary, #666);
+    font-size: var(--type-meta);
+    color: var(--text-secondary);
     opacity: 0.4;
     margin-top: 6px;
     text-align: right;
@@ -1754,14 +1791,14 @@ body.resizing-panels { user-select: none; }
 }
 
 .chat-bubble.progress .sender {
-    font-size: 10px;
-    color: rgba(248, 113, 113, 0.6);
+    font-size: var(--type-meta);
+    color: var(--assistant-sender);
 }
 
 .chat-bubble.progress .message {
-    font-size: 13px;
+    font-size: var(--type-body);
     line-height: 1.45;
-    color: rgba(255, 228, 232, 0.55);
+    color: var(--text-secondary);
 }
 
 .chat-live-card {
@@ -1784,7 +1821,7 @@ body.resizing-panels { user-select: none; }
 
 .chat-live-card[data-finished="1"] {
     border-color: var(--accent-08);
-    background: rgba(201, 53, 69, 0.02);
+    background: var(--accent-04);
 }
 
 .chat-live-card[hidden] {
@@ -1806,7 +1843,7 @@ body.resizing-panels { user-select: none; }
 }
 
 .chat-live-summary-button:hover {
-    background: rgba(201, 53, 69, 0.06);
+    background: var(--accent-05);
 }
 
 .chat-live-summary {
@@ -1837,18 +1874,18 @@ body.resizing-panels { user-select: none; }
     align-items: center;
     padding: 2px 8px;
     border-radius: 999px;
-    border: 1px solid rgba(255,255,255,0.08);
-    background: rgba(255,255,255,0.04);
+    border: 1px solid var(--surface-border);
+    background: var(--surface-control);
     color: var(--text-secondary);
-    font-size: 11px;
+    font-size: var(--type-meta);
     font-weight: 600;
     text-transform: none;
 }
 
 .chat-live-phase:is(.start, .calling, .context, .progress, .working, .thought, .thinking, .boot),
 .chat-live-line-phase:is(.start, .calling, .context, .progress, .working, .thought, .thinking, .boot) {
-    color: rgba(248, 130, 140, 0.95);
-    border-color: rgba(201, 53, 69, 0.24);
+    color: var(--accent-light);
+    border-color: var(--accent-25);
     background: var(--accent-10);
 }
 
@@ -1856,31 +1893,35 @@ body.resizing-panels { user-select: none; }
     animation: thinking-pulse 1.5s ease-in-out infinite;
 }
 
+/* Phase pills are status chips with class-named tones; the triple is the
+   canonical one. The saturated --green/--amber/--red they used to carry are
+   dot-and-indicator hues, not small-text hues (docs/DESIGN.md "Status and
+   chips"). */
 .chat-live-phase:is(.done, .ready, .ok, .result, .usage, .metrics),
 .chat-live-line-phase:is(.done, .ready, .ok, .result, .usage, .metrics),
 .log-entry .log-phase:is(.done, .ready, .ok, .result, .usage, .metrics),
 .evo-runtime-pill.online {
-    color: var(--green);
-    border-color: rgba(34, 197, 94, 0.22);
-    background: rgba(34, 197, 94, 0.10);
+    color: var(--status-ok-fg);
+    border-color: var(--status-ok-border);
+    background: var(--status-ok-bg);
 }
 
 .chat-live-phase:is(.warn, .alive, .empty, .cancelled),
 .chat-live-line-phase:is(.warn, .alive, .empty, .cancelled),
 .log-entry .log-phase:is(.warn, .alive, .empty, .cancelled),
 .evo-runtime-pill.starting {
-    color: var(--amber);
-    border-color: rgba(245, 158, 11, 0.25);
-    background: rgba(245, 158, 11, 0.10);
+    color: var(--status-warn-fg);
+    border-color: var(--status-warn-border);
+    background: var(--status-warn-bg);
 }
 
 .chat-live-phase:is(.error, .timeout, .lifecycle_error),
 .chat-live-line-phase:is(.error, .timeout, .lifecycle_error),
 .log-entry .log-phase:is(.error, .timeout, .lifecycle_error),
 .evo-runtime-pill.error {
-    color: var(--red);
-    border-color: rgba(239, 68, 68, 0.25);
-    background: rgba(239, 68, 68, 0.10);
+    color: var(--status-error-fg);
+    border-color: var(--status-error-border);
+    background: var(--status-error-bg);
 }
 
 /* Live-card typing dots. */
@@ -1907,9 +1948,9 @@ body.resizing-panels { user-select: none; }
 }
 
 .chat-live-title {
-    font-size: 13px;
+    font-size: var(--type-body);
     font-weight: 400;
-    color: rgba(226, 232, 240, 0.68);
+    color: var(--text-meta);
     flex: 1;
     min-width: 0;
     line-height: 1.45;
@@ -1928,14 +1969,19 @@ body.resizing-panels { user-select: none; }
     overflow: hidden;
 }
 
-/* P1 (v6.82): collapsed activity line under the title row. Root cards render
-   it only when a coined name holds the title (JS leaves it empty otherwise);
-   subagent cards always feed it from their routed progress. Empty ⇒ hidden, so
-   it reserves no space. Anywhere-wrap at ALL widths keeps the narrow-container
-   layout (card-local query below) safe for long URLs/paths. */
+.chat-live-card:not([data-expanded="1"]) > .chat-live-summary-button .chat-live-title {
+    min-height: 2.9em;
+}
+
+.chat-live-card:not([data-expanded="1"]) > .chat-live-summary-button .chat-live-activity {
+    min-height: 2.8em;
+}
+
+/* Root activity remains visually quiet until naming; collapsed cards still
+   reserve its two-line band. Anywhere-wrap protects narrow cards and URLs. */
 .chat-live-activity {
     color: var(--text-muted);
-    font-size: 12px;
+    font-size: var(--type-meta);
     line-height: 1.4;
     min-width: 0;
     overflow-wrap: anywhere;
@@ -1946,18 +1992,19 @@ body.resizing-panels { user-select: none; }
 }
 
 .chat-live-card:not([data-expanded="1"]) > .chat-live-summary-button .chat-live-activity:empty {
-    display: none;
+    display: -webkit-box;
+    visibility: hidden;
 }
 
 .chat-live-count {
     color: var(--text-muted);
-    font-size: 11px;
+    font-size: var(--type-meta);
     white-space: nowrap;
 }
 
 .chat-live-toggle {
     color: var(--text-secondary);
-    font-size: 12px;
+    font-size: var(--type-meta);
     white-space: nowrap;
 }
 
@@ -1976,11 +2023,17 @@ body.resizing-panels { user-select: none; }
     gap: 6px;
 }
 
+.chat-live-card:not([data-expanded="1"]) > .chat-live-summary-button .chat-live-meta {
+    min-height: 1.35em;
+    font-size: var(--type-meta);
+    line-height: 1.35;
+}
+
 .chat-live-meta-text {
     display: inline-flex;
     align-items: center;
     color: var(--text-secondary);
-    font-size: 12px;
+    font-size: var(--type-meta);
 }
 
 .chat-live-review-summary {
@@ -2141,7 +2194,7 @@ body.resizing-panels { user-select: none; }
 .chat-review-section-toggle:focus-visible,
 .chat-review-group-toggle:focus-visible,
 .chat-review-detail-toggle:focus-visible {
-    outline: 2px solid var(--accent);
+    outline: 2px solid var(--focus-accent-border);
     outline-offset: 2px;
 }
 
@@ -2166,7 +2219,7 @@ body.resizing-panels { user-select: none; }
     margin-block: 2px 12px;
     margin-inline: 24px 14px;
     padding-inline-start: 14px;
-    border-inline-start: 1px solid rgba(201, 53, 69, 0.28);
+    border-inline-start: 1px solid var(--accent-25);
 }
 
 .chat-subagents:empty {
@@ -2266,7 +2319,7 @@ body.resizing-panels { user-select: none; }
     width: 100%;
     max-width: 100%;
     margin-inline-end: 0;
-    border-color: rgba(201, 53, 69, 0.20);
+    border-color: var(--accent-18);
     background: rgba(255, 255, 255, 0.025);
     box-shadow: inset 0 1px 0 rgba(255, 200, 210, 0.03);
 }
@@ -2327,8 +2380,8 @@ body.resizing-panels { user-select: none; }
 }
 
 .chat-live-line-title {
-    color: rgba(226, 232, 240, 0.72);
-    font-size: 13px;
+    color: var(--text-meta);
+    font-size: var(--type-body);
     font-weight: 400;
     line-height: 1.45;
     white-space: pre-wrap;
@@ -2336,18 +2389,18 @@ body.resizing-panels { user-select: none; }
 
 .chat-live-line-repeat {
     color: var(--text-muted);
-    font-size: 11px;
+    font-size: var(--type-meta);
 }
 
 .chat-live-line-time {
     margin-left: auto;
     color: var(--text-muted);
-    font-size: 11px;
+    font-size: var(--type-meta);
 }
 
 .chat-live-line-expand-label {
     color: var(--text-secondary);
-    font-size: 12px;
+    font-size: var(--type-meta);
     white-space: nowrap;
     flex-shrink: 0;
     padding-top: 1px;
@@ -2355,11 +2408,12 @@ body.resizing-panels { user-select: none; }
 
 
 .chat-live-line-body {
-    color: rgba(226, 232, 240, 0.64);
-    white-space: pre-wrap;
+    color: var(--text-meta);
+    /* white-space is set with the other rendered-markdown surfaces, next to the
+       chat bubble's pre-wrap default this body has to opt out of. */
     word-break: break-word;
-    font-size: 13px;
-    line-height: 1.5;
+    font-size: var(--type-body);
+    line-height: var(--line-body);
 }
 
 /* P3: the genuinely-full fetched output is shown in a bounded, scrollable box so a
@@ -2371,22 +2425,22 @@ body.resizing-panels { user-select: none; }
 
 .chat-live-line-loading {
     margin-top: 6px;
-    font-size: 12px;
+    font-size: var(--type-meta);
     font-style: italic;
-    color: rgba(148, 163, 184, 0.8);
+    color: var(--text-meta);
 }
 
 .chat-live-line[data-expanded="1"] .chat-live-line-title {
-    color: rgba(239, 246, 255, 0.9);
+    color: var(--text-primary);
 }
 
 .chat-live-line[data-expanded="1"] .chat-live-line-body {
-    color: rgba(239, 246, 255, 0.82);
+    color: var(--text-primary);
 }
 
 .chat-live-line.error .chat-live-line-title,
 .chat-live-line.timeout .chat-live-line-title {
-    color: #fda4af;
+    color: var(--status-error-fg);
 }
 
 .chat-bubble .message pre {
@@ -2395,12 +2449,12 @@ body.resizing-panels { user-select: none; }
     padding: 8px 10px;
     margin: 6px 0;
     overflow-x: auto;
-    font-size: 13px;
-    line-height: 1.5;
+    font-size: var(--type-body);
+    line-height: var(--line-body);
 }
 .chat-bubble .message code {
     font-family: 'SF Mono', 'Fira Code', 'Consolas', monospace;
-    font-size: 13px;
+    font-size: var(--type-body);
 }
 .chat-bubble .message .inline-code {
     background: rgba(255, 255, 255, 0.08);
@@ -2461,22 +2515,27 @@ body.resizing-panels { user-select: none; }
     background: var(--surface-card-soft);
     color: var(--text-meta);
 }
-.chat-bubble .message .md-table {
+/* The markdown renderer emits .md-table everywhere it runs — live activity
+   lines, quiz cards, skill review bodies, review attempt details — but the
+   table styling was scoped to the chat bubble, so every other surface showed
+   an unseparated run of cells. The class travels with the renderer, like
+   .md-h1 / .md-quote / .md-link above. */
+.md-table {
     width: max-content;
     min-width: 100%;
     border-collapse: collapse;
     color: var(--text-primary);
     font-size: var(--type-body);
 }
-.chat-bubble .message .md-table th,
-.chat-bubble .message .md-table td {
+.md-table th,
+.md-table td {
     min-width: 140px;
     padding: var(--space-2) var(--space-3);
     border-bottom: 1px solid var(--surface-border);
     text-align: left;
     white-space: nowrap;
 }
-.chat-bubble .message .md-table th {
+.md-table th {
     font-weight: 600;
     color: var(--text-primary);
 }
@@ -2586,6 +2645,10 @@ body.resizing-panels { user-select: none; }
     background: var(--bg-hover);
     color: var(--text-primary);
 }
+.md-code-copy:focus-visible {
+    outline: 2px solid var(--focus-accent-border);
+    outline-offset: 2px;
+}
 .md-code-copy.is-copied { color: var(--status-ok-fg); }
 
 .md-code-block .hljs-comment,
@@ -2628,6 +2691,14 @@ body.resizing-panels { user-select: none; }
     color: var(--text-primary);
 }
 .md-mermaid { text-align: center; }
+.md-mermaid-stage {
+    position: fixed;
+    top: 0;
+    left: -10000px;
+    width: var(--md-mermaid-stage-width, 320px);
+    opacity: 0;
+    pointer-events: none;
+}
 .md-mermaid svg {
     display: block;
     width: auto;
@@ -2737,7 +2808,7 @@ body.resizing-panels { user-select: none; }
         padding-top: calc(64px + env(safe-area-inset-top, 0px));
         background:
             linear-gradient(180deg, rgba(13, 11, 15, 0.94), rgba(13, 11, 15, 0.86)),
-            radial-gradient(circle at 8% 0%, rgba(201, 53, 69, 0.10), transparent 260px);
+            radial-gradient(circle at 8% 0%, var(--accent-10), transparent 260px);
     }
 
     #primary-sidebar.open {
@@ -2749,7 +2820,6 @@ body.resizing-panels { user-select: none; }
         right: 4px;
         min-width: 14px;
         height: 14px;
-        font-size: 9px;
     }
 
     #nav-version,
@@ -2805,10 +2875,6 @@ body.resizing-panels { user-select: none; }
     .chat-budget-pill {
         min-width: 0;
         padding: 3px 10px;
-    }
-
-    .chat-budget-text {
-        font-size: 10px;
     }
 
     .page-header,
@@ -2910,7 +2976,7 @@ body.resizing-panels { user-select: none; }
 #chat-input-area.drag-active .chat-input-wrap,
 .chat-input-area.drag-active .chat-input-wrap {
     border-radius: 24px;
-    box-shadow: 0 0 0 1px rgba(232, 93, 111, 0.45), 0 0 0 4px var(--accent-10);
+    box-shadow: 0 0 0 1px var(--accent-45), 0 0 0 4px var(--accent-10);
 }
 
 /* Attach button: a flow item at the left of the text row (no absolute float). */
@@ -2922,7 +2988,7 @@ body.resizing-panels { user-select: none; }
     border-radius: var(--radius-sm);
     border: none;
     background: transparent;
-    color: rgba(226, 232, 240, 0.45);
+    color: var(--text-secondary);
     display: flex;
     align-items: center;
     justify-content: center;
@@ -2932,7 +2998,7 @@ body.resizing-panels { user-select: none; }
 }
 
 .chat-attach-btn:hover {
-    color: rgba(226, 232, 240, 0.85);
+    color: var(--text-primary);
     background: rgba(255, 255, 255, 0.06);
 }
 
@@ -2965,12 +3031,12 @@ body.resizing-panels { user-select: none; }
     gap: 6px;
     padding: 4px 8px 4px 6px;
     background: rgba(26, 21, 32, 0.78);
-    border: 1px solid rgba(201, 53, 69, 0.35);
+    border: 1px solid var(--accent-35);
     backdrop-filter: blur(8px);
     -webkit-backdrop-filter: blur(8px);
     border-radius: var(--radius-sm);
-    font-size: 12px;
-    color: rgba(226, 232, 240, 0.85);
+    font-size: var(--type-meta);
+    color: var(--text-primary);
     max-width: 100%;
 }
 
@@ -2985,15 +3051,15 @@ body.resizing-panels { user-select: none; }
     flex-shrink: 0;
     border: none;
     background: none;
-    color: rgba(226, 232, 240, 0.5);
+    color: var(--text-secondary);
     cursor: pointer;
-    font-size: 16px;
+    font-size: var(--type-section);
     line-height: 1;
     padding: 0 2px;
 }
 
 .attach-remove:hover {
-    color: rgba(226, 232, 240, 0.9);
+    color: var(--text-primary);
 }
 
 #chat-input,
@@ -3009,7 +3075,7 @@ textarea.chat-input {
     background: transparent;
     box-shadow: none;
     color: var(--text-primary);
-    font-size: 15px;
+    font-size: var(--type-section);
     font-family: inherit;
     outline: none;
     resize: none;
@@ -3035,7 +3101,7 @@ textarea.chat-input::placeholder { color: var(--text-muted); }
     border: 1px solid rgba(226, 232, 240, 0.12);
     border-radius: 999px;
     background: rgba(26, 21, 32, 0.38);
-    color: rgba(226, 232, 240, 0.68);
+    color: var(--text-meta);
     backdrop-filter: blur(18px);
     -webkit-backdrop-filter: blur(18px);
     box-shadow: var(--composer-control-shadow);
@@ -3049,13 +3115,13 @@ textarea.chat-input::placeholder { color: var(--text-muted); }
 }
 .chat-swarm:hover {
     color: var(--accent);
-    border-color: rgba(232, 93, 111, 0.40);
+    border-color: var(--accent-35);
     background: rgba(38, 25, 34, 0.58);
 }
 .chat-swarm[data-armed="true"] {
     color: var(--accent);
-    border-color: rgba(232, 93, 111, 0.44);
-    background: rgba(232, 93, 111, 0.14);
+    border-color: var(--accent-45);
+    background: var(--accent-dim);
     box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.06), 0 0 0 3px var(--accent-10);
 }
 
@@ -3084,7 +3150,7 @@ textarea.chat-input::placeholder { color: var(--text-muted); }
     padding: 0 12px;
     border: none;
     background: transparent;
-    color: rgba(226, 232, 240, 0.45);
+    color: var(--text-secondary);
     font: inherit;
     cursor: pointer;
     transition: color 0.15s, background 0.15s;
@@ -3094,7 +3160,7 @@ textarea.chat-input::placeholder { color: var(--text-muted); }
 }
 /* Active segment: Max glows accent (full context); Low glows amber (reduced). */
 .chat-context-mode[data-context-mode="max"] .chat-seg[data-mode="max"] {
-    background: rgba(232, 93, 111, 0.16);
+    background: var(--accent-dim);
     color: var(--accent);
 }
 .chat-context-mode[data-context-mode="low"] .chat-seg[data-mode="low"] {
@@ -3109,9 +3175,6 @@ textarea.chat-input::placeholder { color: var(--text-muted); }
     align-items: center;
     gap: 0;
     height: var(--composer-control-height);
-    /* Positioning context for the round "jump to newest" button, which floats
-       directly above the Send button (right edges aligned). */
-    position: relative;
 }
 
 .chat-send-group[data-busy="1"] {
@@ -3119,8 +3182,8 @@ textarea.chat-input::placeholder { color: var(--text-muted); }
 }
 
 .chat-send-inline {
-    border: 1px solid rgba(232, 93, 111, 0.28);
-    background: rgba(232, 93, 111, 0.08);
+    border: 1px solid var(--accent-25);
+    background: var(--accent-08);
     color: var(--accent);
     font-size: var(--composer-control-font-size);
     font-weight: 700;
@@ -3141,12 +3204,14 @@ textarea.chat-input::placeholder { color: var(--text-muted); }
 .chat-send-inline:hover {
     opacity: 1;
     background: var(--accent-18);
-    border-color: rgba(232, 93, 111, 0.48);
+    border-color: var(--accent-45);
 }
 .chat-send-inline:active {
     background: var(--accent-18);
     opacity: 1;
 }
+
+/* === design-system:migrated-end === */
 
 /* Shared UI components. */
 .ui-card,
@@ -3170,15 +3235,53 @@ textarea.chat-input::placeholder { color: var(--text-muted); }
     white-space: nowrap;
 }
 
+/* The chip primitive reserves its border so a tone can paint it without
+   changing the chip's size. The aliases above keep their own geometry. */
+.ui-chip {
+    border: 1px solid transparent;
+}
+
 .ui-status,
 :where(.settings-inline-status, .marketplace-status, .wizard-runtime-status) {
     color: var(--text-secondary);
-    font-size: 13px;
-    line-height: 1.45;
+    font-size: var(--type-meta);
+    line-height: var(--line-meta);
 }
 
-/* Tone is a STATE and must outrank the `.muted` utility: `#mp-status` carries
+/* Tone primitive (docs/DESIGN.md "Status and chips"). A status states a fact
+   with an EXPLICIT pair; it never derives its foreground from whatever generic
+   opacity happens to sit on the element.
+   Two shapes, because a status appears as two things:
+     - `.ui-status[data-tone]` — a status SENTENCE: foreground only, rendered as
+       dot + text. Giving it a fill would turn every inline status into a badge
+       and make the loudest thing on the panel the one that says "connected".
+     - `.ui-chip[data-tone]` — a status CHIP: the full triple, because the chip
+       itself is the status and has nothing else to carry it.
+   Tone is a STATE and must outrank the `.muted` utility: `#mp-status` carries
    both classes, so a :where()-wrapped tone (specificity 0) would lose to it. */
+.ui-chip[data-tone="ok"] {
+    color: var(--status-ok-fg);
+    background: var(--status-ok-bg);
+    border-color: var(--status-ok-border);
+}
+.ui-chip[data-tone="warn"] {
+    color: var(--status-warn-fg);
+    background: var(--status-warn-bg);
+    border-color: var(--status-warn-border);
+}
+.ui-chip[data-tone="danger"],
+.ui-chip[data-tone="error"] {
+    color: var(--status-error-fg);
+    background: var(--status-error-bg);
+    border-color: var(--status-error-border);
+}
+.ui-chip[data-tone="neutral"],
+.ui-chip[data-tone="muted"] {
+    color: var(--status-neutral-fg);
+    background: var(--status-neutral-bg);
+    border-color: var(--status-neutral-border);
+}
+
 .ui-status[data-tone="ok"],
 .settings-inline-status[data-tone="ok"],
 .settings-test-result[data-tone="ok"],
@@ -3246,7 +3349,7 @@ textarea.chat-input::placeholder { color: var(--text-muted); }
     transition: border-color 0.3s;
 }
 .stat-card:hover {
-    border-color: rgba(201, 53, 69, 0.2);
+    border-color: var(--accent-18);
 }
 
 .stat-card .label {
@@ -3314,34 +3417,35 @@ textarea.chat-input::placeholder { color: var(--text-muted); }
 .btn-primary {
     background: var(--accent-dim);
     color: var(--accent-light);
-    border-color: rgba(201, 53, 69, 0.20);
+    border-color: var(--accent-18);
 }
 .btn-primary:hover {
     background: var(--accent-25);
-    border-color: rgba(232, 93, 111, 0.35);
+    border-color: var(--accent-35);
 }
+/* An action the owner can take is legible at rest (docs/DESIGN.md section 6):
+   a button label parked at secondary ink reads as disabled next to the one
+   beside it. */
 .btn-secondary {
     background: rgba(255, 255, 255, 0.04);
-    color: var(--text-secondary);
+    color: var(--text-primary);
     border-color: rgba(255, 255, 255, 0.10);
 }
 .btn-secondary:hover {
     background: rgba(255, 255, 255, 0.07);
-    color: var(--text-primary);
-    border-color: rgba(232, 93, 111, 0.28);
+    border-color: var(--accent-25);
 }
 .btn-ghost {
     background: transparent;
-    color: var(--text-secondary);
+    color: var(--text-primary);
     border-color: rgba(255, 255, 255, 0.08);
 }
 .btn-ghost:hover {
     background: rgba(255, 255, 255, 0.04);
-    color: var(--text-primary);
 }
 .btn-danger {
     background: rgba(220, 38, 38, 0.2);
-    color: #fca5a5;
+    color: var(--status-error-fg);
     border: 1px solid rgba(220, 38, 38, 0.3);
 }
 .btn-danger:hover { background: rgba(220, 38, 38, 0.35); }
@@ -3405,8 +3509,8 @@ textarea.chat-input::placeholder { color: var(--text-muted); }
 }
 
 .form-field input:focus {
-    border-color: var(--accent);
-    box-shadow: 0 0 0 2px var(--accent-dim);
+    border-color: var(--focus-accent-border);
+    box-shadow: 0 0 0 3px var(--focus-accent-ring);
 }
 
 .local-toggle {
@@ -3608,7 +3712,7 @@ textarea.chat-input::placeholder { color: var(--text-muted); }
 .log-task-card {
     border-color: var(--accent-12);
     background:
-        linear-gradient(135deg, rgba(201, 53, 69, 0.07), rgba(255,255,255,0.01)),
+        linear-gradient(135deg, var(--accent-08), rgba(255,255,255,0.01)),
         rgba(255,255,255,0.015);
 }
 
@@ -3657,8 +3761,8 @@ textarea.chat-input::placeholder { color: var(--text-muted); }
 
 ::-webkit-scrollbar { width: 6px; }
 ::-webkit-scrollbar-track { background: transparent; }
-::-webkit-scrollbar-thumb { background: rgba(201, 53, 69, 0.2); border-radius: var(--radius-xs); }
-::-webkit-scrollbar-thumb:hover { background: rgba(201, 53, 69, 0.35); }
+::-webkit-scrollbar-thumb { background: var(--accent-18); border-radius: var(--radius-xs); }
+::-webkit-scrollbar-thumb:hover { background: var(--accent-35); }
 
 #reconnect-overlay {
     display: none;
@@ -3717,9 +3821,9 @@ textarea.chat-input::placeholder { color: var(--text-muted); }
     border: 1px solid rgba(255,255,255,0.08);
     color: var(--text-secondary, rgba(255,255,255,0.65));
 }
-.settings-lan-hint[data-tone="ok"] { border-color: rgba(100,200,100,0.25); }
-.settings-lan-hint[data-tone="warn"] { border-color: rgba(220,180,50,0.35); }
-.settings-lan-hint[data-tone="info"] { border-color: rgba(100,150,220,0.25); }
+.settings-lan-hint[data-tone="ok"] { border-color: var(--status-ok-border); }
+.settings-lan-hint[data-tone="warn"] { border-color: var(--status-warn-border); }
+.settings-lan-hint[data-tone="info"] { border-color: var(--status-neutral-border); }
 .settings-lan-hint a { color: inherit; text-decoration: underline; opacity: 0.9; }
 .btn-sm {
     padding: calc(var(--button-padding-y) - 4px) calc(var(--button-padding-x) - 4px);
@@ -4014,6 +4118,12 @@ textarea.chat-input::placeholder { color: var(--text-muted); }
 }
 
 /* P2: main-screen Update pill — a pointer to Dashboard -> Updates. */
+/* "An update is available" is a classification, not an alarm and not a
+   success: it is a pointer to Dashboard -> Updates and it reads NEUTRAL
+   (docs/DESIGN.md "Status and chips"). The sky blue it used to carry belonged
+   to no role in the system and was the only place that hue appeared.
+   Uncommitted local changes ARE a caveat about what an update would do, so
+   that variant keeps the warn triple. */
 .update-pill {
     display: inline-flex;
     align-items: center;
@@ -4021,22 +4131,23 @@ textarea.chat-input::placeholder { color: var(--text-muted); }
     margin: 6px 8px;
     padding: 5px 11px;
     border-radius: 999px;
-    border: 1px solid rgba(56, 189, 248, 0.5);
-    background: rgba(56, 189, 248, 0.14);
-    color: #bae6fd;
+    border: 1px solid var(--status-neutral-border);
+    background: var(--status-neutral-bg);
+    color: var(--status-neutral-fg);
     font-size: 12px;
     font-weight: 600;
     cursor: pointer;
 }
 
 .update-pill:hover {
-    background: rgba(56, 189, 248, 0.22);
+    background: var(--bg-hover);
+    color: var(--text-primary);
 }
 
 .update-pill.has-local {
-    border-color: rgba(251, 191, 36, 0.55);
-    background: rgba(251, 191, 36, 0.14);
-    color: #fde68a;
+    border-color: var(--status-warn-border);
+    background: var(--status-warn-bg);
+    color: var(--status-warn-fg);
 }
 
 .settings-embedded-content {
@@ -4155,28 +4266,29 @@ textarea.chat-input::placeholder { color: var(--text-muted); }
     filter: brightness(1.12);
 }
 
+/* Canonical status triples (docs/DESIGN.md "Status and chips"). */
 .skills-status-ok {
-    background: rgba(34, 197, 94, 0.12);
-    color: #4ade80;
-    border-color: rgba(34, 197, 94, 0.3);
+    background: var(--status-ok-bg);
+    color: var(--status-ok-fg);
+    border-color: var(--status-ok-border);
 }
 
 .skills-status-warn {
-    background: rgba(245, 158, 11, 0.12);
-    color: #fbbf24;
-    border-color: rgba(245, 158, 11, 0.3);
+    background: var(--status-warn-bg);
+    color: var(--status-warn-fg);
+    border-color: var(--status-warn-border);
 }
 
 .skills-status-danger {
-    background: rgba(239, 68, 68, 0.12);
-    color: #f87171;
-    border-color: rgba(239, 68, 68, 0.3);
+    background: var(--status-error-bg);
+    color: var(--status-error-fg);
+    border-color: var(--status-error-border);
 }
 
 .skills-status-muted {
-    background: rgba(250, 250, 250, 0.06);
-    color: rgba(250, 250, 250, 0.65);
-    border-color: rgba(250, 250, 250, 0.12);
+    background: var(--status-neutral-bg);
+    color: var(--status-neutral-fg);
+    border-color: var(--status-neutral-border);
 }
 
 .skills-switch {
@@ -4220,7 +4332,7 @@ textarea.chat-input::placeholder { color: var(--text-muted); }
 }
 
 .skills-switch input:checked + .skills-switch-track {
-    background: #22c55e;
+    background: var(--green);
 }
 
 .skills-switch input:checked + .skills-switch-track .skills-switch-thumb {
@@ -4228,7 +4340,7 @@ textarea.chat-input::placeholder { color: var(--text-muted); }
 }
 
 .skills-switch input:focus-visible + .skills-switch-track {
-    outline: 2px solid rgba(34, 197, 94, 0.6);
+    outline: 2px solid var(--focus-accent-border);
     outline-offset: 2px;
 }
 
@@ -4251,7 +4363,7 @@ textarea.chat-input::placeholder { color: var(--text-muted); }
 /* Inline hint for switches locked by review/grants. */
 .skills-lock-hint {
     font-size: 12px;
-    color: #fbbf24;
+    color: var(--status-warn-fg);
     margin-left: 2px;
     display: flex;
     align-items: center;
@@ -4264,7 +4376,8 @@ textarea.chat-input::placeholder { color: var(--text-muted); }
 
 .skills-lock-hint[role="button"]:focus-visible,
 .skills-status-chip[role="button"]:focus-visible {
-    box-shadow: 0 0 0 2px var(--accent-55);
+    outline: 2px solid var(--focus-accent-border);
+    outline-offset: 2px;
 }
 
 .skills-lock-hint::before {
@@ -4280,7 +4393,7 @@ textarea.chat-input::placeholder { color: var(--text-muted); }
     align-self: flex-start;
     padding: 6px 10px;
     border-radius: 999px;
-    border: 1px solid rgba(201, 53, 69, 0.24);
+    border: 1px solid var(--accent-25);
     background: var(--accent-08);
     color: rgba(255, 220, 226, 0.86);
     font-size: 12px;
@@ -4518,7 +4631,7 @@ textarea.chat-input::placeholder { color: var(--text-muted); }
 }
 
 .skills-card-menu-trigger:hover {
-    border-color: rgba(232, 93, 111, 0.30);
+    border-color: var(--accent-25);
     color: var(--text-primary);
 }
 
@@ -4565,7 +4678,7 @@ textarea.chat-input::placeholder { color: var(--text-muted); }
 }
 
 .skills-menu-item:hover {
-    background: var(--accent-10);
+    background: var(--menu-item-hover);
     color: var(--text-primary);
 }
 
@@ -4584,9 +4697,9 @@ textarea.chat-input::placeholder { color: var(--text-muted); }
 }
 
 .skills-source-warn {
-    background: rgba(245, 158, 11, 0.1);
-    color: #fbbf24;
-    border-color: rgba(245, 158, 11, 0.25);
+    background: var(--status-warn-bg);
+    color: var(--status-warn-fg);
+    border-color: var(--status-warn-border);
 }
 
 .skills-source-muted {
@@ -4610,10 +4723,10 @@ textarea.chat-input::placeholder { color: var(--text-muted); }
     letter-spacing: 0.5px;
 }
 
-.skills-badge-ok { background: rgba(34, 197, 94, 0.15); color: #22c55e; }
-.skills-badge-danger { background: rgba(239, 68, 68, 0.15); color: #ef4444; }
-.skills-badge-warn { background: rgba(245, 158, 11, 0.15); color: #f59e0b; }
-.skills-badge-muted { background: rgba(250, 250, 250, 0.06); color: rgba(250, 250, 250, 0.55); }
+.skills-badge-ok { background: var(--status-ok-bg); color: var(--status-ok-fg); }
+.skills-badge-danger { background: var(--status-error-bg); color: var(--status-error-fg); }
+.skills-badge-warn { background: var(--status-warn-bg); color: var(--status-warn-fg); }
+.skills-badge-muted { background: var(--status-neutral-bg); color: var(--status-neutral-fg); }
 
 .toast-stack {
     position: fixed;
@@ -4639,6 +4752,9 @@ textarea.chat-input::placeholder { color: var(--text-muted); }
     -webkit-backdrop-filter: blur(14px);
     font-size: 13px;
     line-height: 1.45;
+    /* Error text can be a long unbroken token (a path, a URL, a serialized
+       body); without this it overflows the toast instead of wrapping. */
+    overflow-wrap: anywhere;
     pointer-events: auto;
     cursor: pointer;
     animation: toast-in 160ms ease-out;
@@ -4648,11 +4764,13 @@ textarea.chat-input::placeholder { color: var(--text-muted); }
     animation: toast-out 160ms ease-in forwards;
 }
 
-.toast-ok { border-color: rgba(34, 197, 94, 0.28); color: #bbf7d0; }
-.toast-danger { border-color: rgba(239, 68, 68, 0.35); color: #fecaca; }
-.toast-warn { border-color: rgba(245, 158, 11, 0.35); color: #fde68a; }
+/* A toast keeps its own glass background (a translucent status fill over the
+   page would cost the text its contrast); the tone paints edge + foreground. */
+.toast-ok { border-color: var(--status-ok-border); color: var(--status-ok-fg); }
+.toast-danger { border-color: var(--status-error-border); color: var(--status-error-fg); }
+.toast-warn { border-color: var(--status-warn-border); color: var(--status-warn-fg); }
 .toast-muted,
-.toast-info { color: rgba(250, 250, 250, 0.78); }
+.toast-info { color: var(--status-neutral-fg); }
 
 @keyframes toast-in {
     from { opacity: 0; transform: translateY(8px); }
@@ -4701,7 +4819,8 @@ textarea.chat-input::placeholder { color: var(--text-muted); }
 
 .marketplace-search:focus {
     outline: none;
-    border-color: rgba(250, 250, 250, 0.3);
+    border-color: var(--focus-accent-border);
+    box-shadow: 0 0 0 3px var(--focus-accent-ring);
     background: rgba(255, 255, 255, 0.05);
 }
 
@@ -4798,8 +4917,8 @@ textarea.chat-input::placeholder { color: var(--text-muted); }
 }
 
 .marketplace-filter-toggle input[type="checkbox"]:checked + .marketplace-filter-track {
-    background: rgba(232, 93, 111, 0.55);
-    border-color: rgba(232, 93, 111, 0.65);
+    background: var(--accent-55);
+    border-color: var(--accent-65);
 }
 
 .marketplace-filter-toggle input[type="checkbox"]:checked + .marketplace-filter-track::after {
@@ -4808,7 +4927,7 @@ textarea.chat-input::placeholder { color: var(--text-muted); }
 }
 
 .marketplace-filter-toggle input[type="checkbox"]:focus-visible + .marketplace-filter-track {
-    outline: 2px solid rgba(232, 93, 111, 0.45);
+    outline: 2px solid var(--focus-accent-border);
     outline-offset: 2px;
 }
 
@@ -4878,15 +4997,15 @@ textarea.chat-input::placeholder { color: var(--text-muted); }
 }
 
 .marketplace-state-ok {
-    border-color: rgba(34, 197, 94, 0.25);
+    border-color: var(--status-ok-border);
 }
 
 .marketplace-state-warn {
-    border-color: rgba(245, 158, 11, 0.30);
+    border-color: var(--status-warn-border);
 }
 
 .marketplace-state-danger {
-    border-color: rgba(239, 68, 68, 0.30);
+    border-color: var(--status-error-border);
 }
 
 .marketplace-card-meta {
@@ -5016,10 +5135,10 @@ textarea.chat-input::placeholder { color: var(--text-muted); }
     gap: 8px;
 }
 
-.marketplace-block-list h4 { color: #ef4444; }
-.marketplace-block-list ul { margin: 4px 0 0 0; padding-left: 18px; color: #ef4444; font-size: 12px; }
-.marketplace-warn-list h4 { color: #f59e0b; }
-.marketplace-warn-list ul { margin: 4px 0 0 0; padding-left: 18px; color: #f59e0b; font-size: 12px; }
+.marketplace-block-list h4 { color: var(--red); }
+.marketplace-block-list ul { margin: 4px 0 0 0; padding-left: 18px; color: var(--red); font-size: 12px; }
+.marketplace-warn-list h4 { color: var(--amber); }
+.marketplace-warn-list ul { margin: 4px 0 0 0; padding-left: 18px; color: var(--amber); font-size: 12px; }
 
 /* Installed-card provenance and adapter warnings. */
 .skills-card-provenance {
@@ -5063,7 +5182,7 @@ textarea.chat-input::placeholder { color: var(--text-muted); }
 }
 
 .widgets-card.drag-over {
-    border-color: rgba(232, 93, 111, 0.48);
+    border-color: var(--accent-45);
     box-shadow: 0 0 0 3px var(--accent-10);
 }
 
@@ -5110,7 +5229,7 @@ textarea.chat-input::placeholder { color: var(--text-muted); }
 }
 
 .widgets-card-drag:hover {
-    border-color: rgba(232, 93, 111, 0.44);
+    border-color: var(--accent-45);
     color: var(--text-primary);
 }
 
@@ -5157,6 +5276,44 @@ textarea.chat-input::placeholder { color: var(--text-muted); }
 .widget-subscription-render {
     margin-top: 10px;
 }
+
+/* Publisher markdown in a widget is DOMPurify-sanitized HTML, not the chat
+   renderer's classed output, and the renderer stays unchanged (ARCHITECTURE,
+   "Declarative widgets"). Its block elements therefore need element-level
+   rhythm inside this one scope; paragraphs come from .ui-rich-content, which
+   the widget host already applies alongside .widget-markdown. */
+.widget-markdown h1,
+.widget-markdown h2,
+.widget-markdown h3 {
+    margin: var(--space-4) 0 var(--space-2);
+    color: var(--text-primary);
+    line-height: var(--line-title);
+}
+.widget-markdown h1 { font-size: var(--type-section); }
+.widget-markdown h2,
+.widget-markdown h3 { font-size: var(--type-body); }
+.widget-markdown blockquote {
+    margin: var(--space-3) 0;
+    padding: var(--space-2) var(--space-3);
+    border-left: 3px solid var(--accent);
+    background: var(--surface-card-soft);
+    color: var(--text-meta);
+}
+.widget-markdown table {
+    width: 100%;
+    margin: var(--space-4) 0;
+    border-collapse: collapse;
+    color: var(--text-primary);
+    font-size: var(--type-body);
+}
+.widget-markdown th,
+.widget-markdown td {
+    padding: var(--space-2) var(--space-3);
+    border-bottom: 1px solid var(--surface-border);
+    color: var(--text-primary);
+    text-align: left;
+}
+.widget-markdown th { font-weight: 600; }
 
 .widget-json {
     min-width: 0;
@@ -5270,10 +5427,11 @@ textarea.chat-input::placeholder { color: var(--text-muted); }
 .widget-metric > strong { font-size: 18px; }
 .widget-metric small { color: var(--text-secondary); font-size: 11px; font-weight: 500; }
 .widget-callout { font-size: 13px; line-height: 1.45; background: rgba(96, 165, 250, 0.06); }
-.widget-metric[data-tone="ok"], .widget-callout[data-tone="ok"] { border-left-color: #34d399; }
-.widget-metric[data-tone="warn"], .widget-callout[data-tone="warn"] { border-left-color: #fbbf24; }
-.widget-metric[data-tone="danger"], .widget-callout[data-tone="danger"] { border-left-color: #e85d6f; }
-.widget-metric[data-tone="info"], .widget-callout[data-tone="info"] { border-left-color: #60a5fa; }
+.widget-metric[data-tone="ok"], .widget-callout[data-tone="ok"] { border-left-color: var(--status-ok-fg); }
+.widget-metric[data-tone="warn"], .widget-callout[data-tone="warn"] { border-left-color: var(--status-warn-fg); }
+.widget-metric[data-tone="danger"], .widget-callout[data-tone="danger"] { border-left-color: var(--status-error-fg); }
+/* `info` is a widget-only tone with no status role; it stays the plain blue. */
+.widget-metric[data-tone="info"], .widget-callout[data-tone="info"] { border-left-color: var(--blue); }
 
 .widget-kv-row {
     display: flex;
@@ -5307,9 +5465,11 @@ textarea.chat-input::placeholder { color: var(--text-muted); }
 
 .widget-table a { color: #93c5fd; overflow-wrap: anywhere; }
 .widget-table-status { font-weight: 600; }
-.widget-table-status[data-tone="ok"] { color: #6ee7b7; }
-.widget-table-status[data-tone="warn"] { color: #fcd34d; }
-.widget-table-status[data-tone="danger"] { color: #fb7185; }
+.widget-table-status[data-tone="ok"] { color: var(--status-ok-fg); }
+.widget-table-status[data-tone="warn"] { color: var(--status-warn-fg); }
+.widget-table-status[data-tone="danger"] { color: var(--status-error-fg); }
+.widget-table-status[data-tone="neutral"],
+.widget-table-status[data-tone="muted"] { color: var(--status-neutral-fg); }
 
 .widget-media img,
 .widget-media video {
@@ -5367,8 +5527,8 @@ textarea.chat-input::placeholder { color: var(--text-muted); }
     display: flex;
     flex-direction: column;
     gap: 7px;
-    background: rgba(232, 93, 111, 0.12);
-    border: 1px solid rgba(232, 93, 111, 0.25);
+    background: var(--accent-12);
+    border: 1px solid var(--accent-25);
     border-radius: 6px;
     padding: 6px 8px;
     margin: 4px 0;
@@ -5469,8 +5629,8 @@ textarea.chat-input::placeholder { color: var(--text-muted); }
 }
 
 .widget-tab-btn.active {
-    border-color: rgba(232, 93, 111, 0.4);
-    background: rgba(232, 93, 111, 0.12);
+    border-color: var(--accent-35);
+    background: var(--accent-12);
     color: var(--text-primary);
 }
 
@@ -5822,7 +5982,7 @@ textarea.chat-input {
     border-radius: 9px;
     background: var(--red);
     color: #fff;
-    font-size: 10px;
+    font-size: var(--type-meta);
     font-weight: 700;
     line-height: 18px;
     text-align: center;
@@ -5844,7 +6004,7 @@ textarea.chat-input {
 .nav-projects-add:hover,
 .nav-projects-add:focus-visible {
     color: var(--text-primary);
-    background: var(--surface-2, rgba(255, 255, 255, 0.06));
+    background: var(--bg-hover);
 }
 
 .nav-projects-add:focus-visible {
@@ -5875,7 +6035,14 @@ textarea.chat-input {
 .nav-project-kebab:hover,
 .nav-project-kebab:focus-visible {
     color: var(--text-primary);
-    background: var(--surface-2, rgba(255, 255, 255, 0.06));
+    background: var(--bg-hover);
+}
+
+/* Hover paint is not a focus ring: the kebab had only the paint, so a keyboard
+   user could not tell it was focused (docs/DESIGN.md "Focus"). */
+.nav-project-kebab:focus-visible {
+    outline: 2px solid var(--focus-accent-border);
+    outline-offset: -2px;
 }
 
 .project-row-menu {
@@ -5889,7 +6056,7 @@ textarea.chat-input {
     padding: 4px;
     border: 1px solid var(--divider);
     border-radius: var(--radius-md, 8px);
-    background: var(--surface-1, #16181d);
+    background: var(--ui-modal-bg);
     box-shadow: 0 8px 24px rgba(0, 0, 0, 0.4);
     max-width: min(260px, calc(100vw - 16px));
 }
@@ -5906,11 +6073,11 @@ textarea.chat-input {
 }
 
 .project-row-menu button:hover {
-    background: var(--surface-2, rgba(255, 255, 255, 0.06));
+    background: var(--menu-item-hover);
 }
 
 .project-row-menu button.danger {
-    color: var(--danger, #e5534b);
+    color: var(--status-error-fg);
 }
 
 /* New Project dialog */
@@ -5991,7 +6158,7 @@ textarea.chat-input {
 }
 
 .new-project-dir-row:hover {
-    background: var(--surface-2, rgba(255, 255, 255, 0.06));
+    background: var(--menu-item-hover);
 }
 
 .new-project-dir-up {
@@ -6006,7 +6173,7 @@ textarea.chat-input {
 
 .new-project-trust-note {
     padding: 8px 10px;
-    border: 1px solid var(--warning, #b58900);
+    border: 1px solid var(--status-warn-border);
     border-radius: var(--radius-md, 8px);
     color: var(--text-primary);
     font-size: 12.5px;
@@ -6014,7 +6181,7 @@ textarea.chat-input {
 }
 
 .new-project-error {
-    color: var(--danger, #e5534b);
+    color: var(--status-error-fg);
     font-size: 12.5px;
     margin: 0 0 var(--space-2);
     white-space: pre-wrap;
@@ -6198,7 +6365,8 @@ textarea.chat-input {
 
 @media (prefers-reduced-motion: reduce) {
     .project-panel,
-    .project-panel-backdrop {
+    .project-panel-backdrop,
+    .chat-scroll-bottom-btn {
         transition: none;
     }
 }
@@ -6451,7 +6619,7 @@ textarea.chat-input {
 .harness-device-code p { margin: 4px 0; }
 /* Device code: display size is the point; nearest token, not a one-off 22px. */
 .harness-code {
-    font-family: var(--mono, ui-monospace, monospace);
+    font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", monospace;
     font-size: var(--type-page);
     letter-spacing: 0.18em;
     padding: 8px 12px;
@@ -6461,7 +6629,7 @@ textarea.chat-input {
     user-select: all;
 }
 .harness-attach-command {
-    font-family: var(--mono, ui-monospace, monospace);
+    font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", monospace;
     font-size: var(--type-meta);
     padding: 8px 10px;
     border-radius: 8px;
@@ -6479,7 +6647,7 @@ textarea.chat-input {
 .harness-code-entry label { font-size: var(--type-meta); line-height: var(--line-meta); color: var(--text-meta); }
 .harness-code-entry-row { display: flex; gap: 6px; align-items: center; flex-wrap: wrap; }
 .harness-code-entry-row input {
-    font-family: var(--mono, ui-monospace, monospace);
+    font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", monospace;
     font-size: var(--type-body);
     padding: 6px 10px;
     border: 1px solid var(--ui-card-border);
@@ -6683,11 +6851,13 @@ textarea.chat-input {
 
 /* === design-system:migrated-end === */
 
+/* === design-system:migrated-begin (chat: executor chip, structured delivery, quiz card) === */
+
 /* Phase 6: per-bubble/subagent executor chip (owner directive: a small chip
-   like Claudexor's, never a promotional badge). Reuses .harness-chip; keeps its
-   own 10px chat sizing, so it sits outside the marked region above. */
+   like Claudexor's, never a promotional badge). Reuses .harness-chip, sized on
+   the shared meta token like the rest of the migrated chat surface. */
 .chat-live-executor-chip {
-    font-size: 10px;
+    font-size: var(--type-meta);
     padding: 0 6px;
     margin-right: 6px;
     vertical-align: middle;
@@ -6704,10 +6874,21 @@ textarea.chat-input {
     display: grid;
     gap: 8px;
     min-width: 0;
+    /* Structural markup, not owner prose: the bubble's `pre-wrap` would turn
+       every newline of the card template into a rendered blank line. Captions
+       below opt back in, because those line breaks are the owner's. */
+    white-space: normal;
 }
 
 .chat-bubble.is-multiple .chat-gallery-grid {
     grid-template-columns: repeat(2, minmax(0, 1fr));
+}
+
+/* The links bubble's own .message is a container (title + list), so the same
+   structural rule applies to it directly — at the specificity of the
+   `.chat-bubble .message` pre-wrap default it has to beat. */
+.chat-bubble .message.chat-links-message {
+    white-space: normal;
 }
 
 .chat-group-title,
@@ -6743,6 +6924,8 @@ textarea.chat-input {
     font-size: var(--type-meta);
     line-height: var(--line-meta);
     overflow-wrap: anywhere;
+    /* Owner-authored text inside a structural container: keep its line breaks. */
+    white-space: pre-wrap;
 }
 
 .chat-photo-actions {
@@ -6793,7 +6976,7 @@ textarea.chat-input {
 }
 
 .chat-photo-menu button:last-child { border-bottom: 0; }
-.chat-photo-menu button:hover { background: var(--bg-hover); }
+.chat-photo-menu button:hover { background: var(--menu-item-hover); }
 
 .chat-file-card {
     display: grid;
@@ -6899,6 +7082,9 @@ textarea.chat-input {
 .chat-media-player {
     overflow: hidden;
     min-width: 250px;
+    /* Structural markup (see .chat-gallery-grid): no phantom lines between the
+       stage and the control row. */
+    white-space: normal;
     border: 1px solid var(--ui-card-border);
     border-radius: var(--radius);
     background: var(--ui-modal-bg);
@@ -6959,7 +7145,7 @@ textarea.chat-input {
 .chat-media-time {
     flex: 0 0 auto;
     color: var(--text-meta);
-    font-family: var(--mono, ui-monospace, monospace);
+    font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", monospace;
     font-size: var(--type-meta);
     white-space: nowrap;
 }
@@ -7003,7 +7189,7 @@ textarea.chat-input {
 }
 .chat-quiz-chip {
     padding: 1px 8px;
-    border-radius: 999px;
+    border-radius: var(--pill-radius);
     font-size: var(--type-meta);
     color: var(--status-neutral-fg);
     background: var(--status-neutral-bg);
@@ -7044,7 +7230,7 @@ textarea.chat-input {
     display: flex;
     flex-direction: column;
     align-items: flex-start;
-    gap: 2px;
+    gap: var(--space-1, 4px);
     padding: var(--space-2, 8px) var(--space-3, 12px);
     border: 1px solid var(--ui-card-border);
     border-radius: var(--radius-sm);
@@ -7070,12 +7256,60 @@ textarea.chat-input {
     color: var(--text-meta);
 }
 .chat-quiz-option:disabled .chat-quiz-option-detail { color: var(--text-disabled); }
+/* Free answer: the owner's own words when no offered option fits. */
+.chat-quiz-comment-box {
+    display: flex;
+    flex-direction: column;
+    gap: var(--space-1, 4px);
+}
+.chat-quiz-comment {
+    width: 100%;
+    box-sizing: border-box;
+    padding: var(--space-2, 8px);
+    border: 1px solid var(--ui-card-border);
+    border-radius: var(--radius-sm);
+    background: var(--ui-card-bg-soft);
+    color: var(--text-primary);
+    font-family: inherit;
+    font-size: var(--type-body);
+    line-height: var(--line-body, 1.5);
+    resize: vertical;
+}
+.chat-quiz-comment::placeholder { color: var(--text-meta); }
+.chat-quiz-send {
+    align-self: flex-start;
+    padding: var(--space-1, 4px) var(--space-3, 12px);
+    border: 1px solid var(--ui-card-border);
+    border-radius: var(--radius-sm);
+    background: var(--ui-card-bg-soft);
+    color: var(--text-primary);
+    font-size: var(--type-meta);
+    cursor: pointer;
+}
+.chat-quiz-send:hover:not(:disabled) {
+    border-color: var(--focus-accent-border);
+    background: var(--accent-08);
+}
+.chat-quiz-send:disabled { color: var(--text-disabled); cursor: default; }
+.chat-quiz-option:focus-visible,
+.chat-quiz-comment:focus-visible,
+.chat-quiz-send:focus-visible,
+.chat-quiz-more:focus-visible {
+    outline: 2px solid var(--focus-accent-border);
+    outline-offset: 2px;
+}
+/* The settled record of what the owner answered: a second primary line. */
+.chat-quiz-answer {
+    font-size: var(--type-body);
+    line-height: var(--line-body, 1.5);
+    color: var(--text-primary);
+}
 .chat-quiz-more {
     align-self: flex-start;
     padding: var(--space-1, 4px) 0;
     border: none;
     background: none;
-    color: var(--text-link, var(--text-meta));
+    color: var(--accent-light);
     font-size: var(--type-meta);
     cursor: pointer;
 }
@@ -7112,6 +7346,10 @@ textarea.chat-input {
 .chat-message-copy:hover,
 .chat-message-copy:focus-visible { opacity: 1; }
 .chat-message-copy:hover { background: var(--surface-control); }
+.chat-message-copy:focus-visible {
+    outline: 2px solid var(--focus-accent-border);
+    outline-offset: 2px;
+}
 
 /* Reserve a gutter so the timestamp never sits under the always-visible icon
    (the button spans ~30px from the bubble's right edge). */
@@ -7132,3 +7370,5 @@ textarea.chat-input {
     .chat-media-progress { order: 2; flex-basis: 100%; }
     .chat-media-rate-menu { display: none; }
 }
+
+/* === design-system:migrated-end === */

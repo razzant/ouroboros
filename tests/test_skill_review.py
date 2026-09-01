@@ -1146,48 +1146,116 @@ def test_review_skill_malformed_reviewer_slots_block_before_any_reviewer(tmp_pat
     assert "not valid JSON" in outcome.error
 
 
-def test_skill_review_hard_blocks_extensionless_binary(tmp_path, monkeypatch):
-    """Phase 3 round 15 regression: ANY non-UTF8 file in the runtime-
-    reachable surface is a hard-block, not just extension-matched
-    loadable formats. An extensionless disguised binary must still
-    raise ``_SkillBinaryPayload`` so raw bytes never reach reviewer
-    models and no PASS verdict ships over an opaque hash."""
-    from ouroboros.skill_review import _read_skill_text, _SkillBinaryPayload
+def test_skill_review_non_utf8_yields_typed_descriptor(tmp_path):
+    """X4/В21: a non-UTF-8, non-executable payload is neither hard-blocked nor
+    inlined — the review pack carries a typed {path,size,mime,sha256}
+    descriptor instead of raw bytes. (Replaces the retired 'any non-UTF-8
+    blocks review' contract, which lexically over-blocked legitimate data.)"""
+    import hashlib as _hashlib
 
-    skills_root = tmp_path / "skills"
-    skill_dir = skills_root / "bin1"
+    from ouroboros.skill_review import _read_skill_file
+
+    skill_dir = tmp_path / "skills" / "bin1"
     skill_dir.mkdir(parents=True)
-    # Invalid UTF-8 bytes, no telltale extension (could be a Mach-O or
-    # ELF blob disguised with a misleading ``.dat`` suffix).
     payload = b"\xff\xfeBEGIN CERT leak-me-please\xff\xc0\xc1\xfe\xff"
-    (skill_dir / "cert.dat").write_bytes(payload)
+    (skill_dir / "cert.png").write_bytes(payload)
 
-    with pytest.raises(_SkillBinaryPayload):
-        _read_skill_text(skill_dir / "cert.dat", relpath="cert.dat")
+    text, digest, descriptor = _read_skill_file(
+        skill_dir / "cert.png", relpath="cert.png"
+    )
+    assert text is None
+    assert digest == _hashlib.sha256(payload).digest()
+    assert descriptor == {
+        "path": "cert.png",
+        "size": len(payload),
+        # guessed from the NAME (bytes are not a PNG) — the field name says so
+        "mime_from_name": "image/png",
+        "sha256": _hashlib.sha256(payload).hexdigest(),
+    }
 
 
-def test_skill_review_blocks_loadable_native_binaries(tmp_path):
-    """Phase 3 round 13 regression: loadable native code
-    (``.so``/``.dylib``/``.pyc``/``.node``/``.wasm``) must hard-block
-    review. The subprocess could otherwise ``ctypes.CDLL`` / import /
-    require the blob and execute never-reviewed code even under a
-    PASS verdict."""
-    from ouroboros.skill_review import _read_skill_text, _SkillBinaryPayload
+def test_skill_review_pack_carries_descriptor_not_raw_bytes(tmp_path):
+    """The assembled review pack must contain the JSON descriptor block for a
+    non-UTF-8 file — never its raw bytes — while text files stay inlined."""
+    import hashlib as _hashlib
 
-    skills_root = tmp_path / "skills"
-    skill_dir = skills_root / "nativelink"
+    from ouroboros.skill_review import _build_skill_file_packs
+
+    skill_dir = tmp_path / "skills" / "mixed"
     skill_dir.mkdir(parents=True)
-    target = skill_dir / "evil.so"
-    target.write_bytes(b"\x7fELF" + b"\x00" * 128)
-    with pytest.raises(_SkillBinaryPayload):
-        _read_skill_text(target, relpath="evil.so")
+    (skill_dir / "skill.json").write_text('{"name": "mixed"}', encoding="utf-8")
+    payload = b"\x80\x81\x82opaque-data\xff"
+    (skill_dir / "blob.dat").write_bytes(payload)
+
+    packs = _build_skill_file_packs(skill_dir)
+    joined = "\n".join(packs)
+    assert '{"name": "mixed"}' in joined
+    assert "descriptor only" in joined
+    assert _hashlib.sha256(payload).hexdigest() in joined
+    assert "opaque-data" not in joined  # raw bytes never inlined
+
+
+def test_skill_review_blocks_executables_by_magic_not_filename(tmp_path):
+    """X4/В21: loadable executables are hard-blocked by CONTENT magic bytes
+    (ELF/PE/Mach-O/WASM/.pyc) regardless of filename; a disguised extension
+    does not evade the block."""
+    import importlib.util
+
+    from ouroboros.skill_review import _read_skill_file, _SkillBinaryPayload
+
+    skill_dir = tmp_path / "skills" / "nativelink"
+    skill_dir.mkdir(parents=True)
+    samples = {
+        "innocent.txt": b"\x7fELF" + b"\x00" * 128,          # ELF, disguised name
+        "tool.dat": b"MZ\x90\x00" + b"\xff" * 64,            # PE (non-UTF-8 body)
+        "module.blob": b"\x00asm\x01\x00\x00\x00",           # WASM
+        "lib.data": b"\xcf\xfa\xed\xfe" + b"\x00" * 32,      # Mach-O 64-bit LE
+        "cache.dat": importlib.util.MAGIC_NUMBER + b"\x00" * 32,  # .pyc
+    }
+    for name, payload in samples.items():
+        target = skill_dir / name
+        target.write_bytes(payload)
+        with pytest.raises(_SkillBinaryPayload):
+            _read_skill_file(target, relpath=name)
+
+
+def test_skill_review_does_not_block_text_by_scary_filename(tmp_path):
+    """Capability preservation: the block is content-judged, so a valid UTF-8
+    text file survives review even with a formerly-blocking extension or an
+    ambiguous 'MZ' text prefix."""
+    from ouroboros.skill_review import _read_skill_file
+
+    skill_dir = tmp_path / "skills" / "textish"
+    skill_dir.mkdir(parents=True)
+    (skill_dir / "notes.so").write_text("just text, not an ELF", encoding="utf-8")
+    text, _digest, descriptor = _read_skill_file(
+        skill_dir / "notes.so", relpath="notes.so"
+    )
+    assert text == "just text, not an ELF"
+    assert descriptor is None
+
+    # 'MZ' is ambiguous (2 bytes): only non-UTF-8 content is judged as PE.
+    (skill_dir / "mz.md").write_text("MZ stands for initials", encoding="utf-8")
+    text, _digest, descriptor = _read_skill_file(skill_dir / "mz.md", relpath="mz.md")
+    assert text == "MZ stands for initials"
+    assert descriptor is None
+
+
+def test_skill_review_session_prompt_allows_binary_inspection():
+    """X4/В21 leg 3: the agent_session reviewer's retrieval assignment tells it
+    that descriptor-only binary files may be inspected with its own tools."""
+    from ouroboros.skill_review_passes import _SESSION_RETRIEVAL
+
+    assert "{path,size,mime_from_name,sha256}" in _SESSION_RETRIEVAL
+    assert "your own read/search tools" in _SESSION_RETRIEVAL
+    assert "judge by the descriptor" in _SESSION_RETRIEVAL
 
 
 def test_review_skill_fails_closed_on_unreadable_payload(tmp_path, monkeypatch):
     """Phase 3 round 18 regression: an unreadable payload file must
     fail review CLOSED (pending + error) instead of letting the
     placeholder slip past the gate. Regression for the old behaviour
-    where ``_read_skill_text`` returned a string on OSError and
+    where the payload reader returned a string on OSError and
     ``compute_content_hash`` silently skipped the file."""
     import os, platform
     if platform.system() == "Windows":
@@ -1233,8 +1301,8 @@ def test_review_skill_refuses_when_payload_contains_native_binary(tmp_path, monk
     ):
         outcome = review_skill(ctx, "nativepack")
     assert outcome.status == "pending"
-    assert "binary" in outcome.error.lower()
-    assert "opaque" in outcome.error.lower()
+    assert "loadable executable" in outcome.error.lower()
+    assert "hard-blocks" in outcome.error.lower()
 
 
 def test_skill_pack_includes_large_individual_file(tmp_path):

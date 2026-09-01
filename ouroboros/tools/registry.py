@@ -37,6 +37,7 @@ from ouroboros.shell_parse import (
     sudo_noninteractive_violation,
     unwrap_env_argv,
 )
+from ouroboros.tools.read_inspection import _is_pure_read_inspection
 from ouroboros.tools.shell_guards import (
     PROTECTED_RUNTIME_PATHS_LOWER,
     interpreter_family,
@@ -56,6 +57,7 @@ from ouroboros.tools.deliverables_shell import (
     direct_deliverable_target_block,
     lexical_user_files_block_reason,
 )
+from ouroboros.tools.result_envelope import annotate as _annotate_result, append_note as _append_result_note
 from ouroboros.artifacts import task_artifact_dir_path, task_id_for_artifacts
 from ouroboros.protected_artifacts import shell_block_reason as protected_artifact_shell_block_reason
 from ouroboros.git_shell_policy import run_shell_git_block_reason, workspace_git_safety_violation
@@ -89,7 +91,6 @@ from ouroboros.process_interpreters import (
 from ouroboros.utils import safe_relpath
 from ouroboros.contracts.task_constraint import TaskConstraint, VALID_WRITE_SURFACES, normalize_task_constraint
 from ouroboros.contracts.skill_payload_policy import (
-    SKILL_OWNER_STATE_FILENAMES,
     SKILL_OWNER_STATE_STEMS,
     SKILL_PAYLOAD_CONTROL_DIRNAMES,
     SKILL_PAYLOAD_CONTROL_FILENAMES,
@@ -418,157 +419,6 @@ def _detect_context_mode_self_lowering(text_lower: str, *, writeish: bool = True
     return _owner_control_mention_blocks(text_lower, detected, writeish)
 
 
-# Commands that can only READ. This is an ALLOWLIST on purpose: an unrecognised
-# command head is treated as executable access, so the enumeration fails CLOSED.
-# (A denylist of "write markers" fails OPEN — every new spelling of a POST walks
-# around it, which is exactly the keyword-gate antipattern BIBLE P5 forbids.)
-_READ_ONLY_INSPECTION_COMMANDS = frozenset({
-    "grep", "egrep", "fgrep", "zgrep", "rg", "ag", "ack", "ripgrep",
-    "cat", "bat", "head", "tail", "less", "more", "nl", "strings",
-    "ls", "find", "fd", "stat", "file", "wc", "sort", "uniq", "cut", "tr", "column",
-    "basename", "dirname", "realpath", "readlink", "diff", "cmp", "jq", "yq",
-    "echo", "printf", "true", "pwd", "date", "tree",
-})
-# Wrappers that do not themselves act: the real command head follows them.
-_COMMAND_HEAD_WRAPPERS = frozenset({
-    "sudo", "env", "command", "builtin", "exec", "nohup", "time", "nice", "ionice",
-    "stdbuf", "\\",
-})
-# ``git`` reads only through these subcommands.
-_READ_ONLY_GIT_SUBCOMMANDS = frozenset({
-    "grep", "log", "show", "diff", "blame", "cat-file", "ls-files", "ls-tree",
-    "rev-parse", "status", "describe",
-})
-# Allowlist MEMBERSHIP IS NOT ENOUGH: several read heads execute or write through their
-# own options. Per command, because short flags are not portable — ``grep -o`` prints
-# matches, ``sort -o`` writes a file. Text reaching here is lowercased, so an upper-case
-# spelling (``git grep -O``, ``fd -X``) collapses onto the same entry.
-_SEARCH_TOOL_EXEC_OPTIONS = frozenset({"--pre", "--pre-glob", "--hostname-bin", "--pager"})
-_DENIED_READ_OPTIONS: dict = {
-    # find/fd run and delete: -exec/-execdir/-ok/-okdir/-x, -delete, and the -f* writers.
-    "find": frozenset({
-        "-exec", "-execdir", "-ok", "-okdir", "-delete",
-        "-fls", "-fprint", "-fprint0", "-fprintf",
-    }),
-    "fd": frozenset({"-x", "--exec", "--exec-batch"}),
-    "rg": _SEARCH_TOOL_EXEC_OPTIONS,
-    "ripgrep": _SEARCH_TOOL_EXEC_OPTIONS,
-    "ag": _SEARCH_TOOL_EXEC_OPTIONS,
-    "ack": _SEARCH_TOOL_EXEC_OPTIONS,
-    # yq edits the named file in place with -i/--inplace; without this the family
-    # read-carve exempted `yq -i '.OUROBOROS_SAFETY_MODE="off"' settings.json` as
-    # "pure inspection" (jq has no in-place edit and stays a stdout-only read).
-    "yq": frozenset({"-i", "--inplace"}),
-    "sort": frozenset({"-o", "--output", "--compress-program"}),
-    "less": frozenset({"-o", "--log-file", "-k", "--lesskey-file"}),
-    "more": frozenset({"-o"}),
-    "file": frozenset({"-c", "--compile"}),
-    # git: external diff/textconv helpers execute a configured program, -o/--output and
-    # git grep -O write or spawn a pager, --exec-path relocates the git binaries.
-    "git": frozenset({
-        "-c", "--config-env", "--exec-path", "--ext-diff", "--textconv",
-        "-o", "--output", "--open-files-in-pager",
-    }),
-}
-# The executable itself must be a bare name or live in a system bin: ``/tmp/evil/grep``
-# and ``./grep`` are shadowing, not inspection.
-_TRUSTED_EXECUTABLE_DIRS = frozenset({
-    "/bin", "/usr/bin", "/usr/local/bin", "/sbin", "/usr/sbin", "/opt/homebrew/bin",
-})
-
-
-def _trusted_read_head(token: str) -> str:
-    """The allowlist-comparable command name, or "" when the executable is untrusted."""
-    if "\\" in token:
-        return ""  # a windows/escaped path is not a form we can resolve — fail closed
-    directory, sep, name = token.rpartition("/")
-    if sep and directory not in _TRUSTED_EXECUTABLE_DIRS:
-        return ""
-    return name.removesuffix(".exe")
-
-
-def _denied_read_option(token: str, denied: frozenset) -> bool:
-    """True when an argument spells an execution/mutation option of its command."""
-    if not token.startswith("-") or token in {"-", "--"}:
-        return False
-    name = token.split("=", 1)[0]
-    if name in denied:
-        return True
-    if name.startswith("--"):
-        return False
-    return any(f"-{letter}" in denied for letter in name[1:])  # bundled short cluster
-
-
-# Spellings that make a shell run a command NESTED inside another one. The read exemption
-# fails closed on all of them: the head-allowlist can only vouch for heads it actually sees,
-# and a nested command's head is not one of them ("echo" vouching for the "curl -X POST" it
-# interpolates). Refusing the CONSTRUCT rather than enumerating the payloads inside it is the
-# point — no list of "what a write looks like" is ever complete (BIBLE P5).
-_NESTED_EXECUTION_MARKERS = ("$(", "`", "<(", ">(")
-# Bare tokens the lexer emits for the same constructs (and for a plain subshell). These used to
-# be STRIPPED from the token list before the head was taken, which is precisely how the nested
-# command escaped validation; they are refused instead.
-_NESTED_EXECUTION_TOKENS = frozenset({"$", "(", ")", "<(", ">(", "$("})
-
-
-def _is_pure_read_inspection(text_lower: str) -> bool:
-    """True when EVERY command in a shell line is a read-only source inspection.
-
-    Structural, not keyword-based: the line is split into per-command segments with
-    the shared lexer (``shell_parse.shell_segments``) and each segment's HEAD is
-    matched against an allowlist. An unknown head — any interpreter, HTTP client,
-    or shell — is not an inspection, whatever flags or payload spelling it carries.
-
-    Head membership is NECESSARY, NOT SUFFICIENT (review round 2): an allowed head can
-    still execute through its own options (``find -exec``, ``rg --pre``, git's external
-    diff/textconv) or through what precedes it. So the options are validated per command
-    (``_DENIED_READ_OPTIONS``), a leading environment assignment is REFUSED rather than
-    dropped (``PATH=``/``LD_PRELOAD=``/``GIT_EXTERNAL_DIFF=`` change what actually runs),
-    wrappers may not carry their own flags (``env -i``, ``sudo -e``), and the executable
-    must resolve to a bare name or a system bin. Anything unrecognised stays fail-closed.
-
-    NESTED EXECUTION IS REFUSED BEFORE ANY OF THAT (review round 3). Only the heads the lexer
-    actually surfaces get validated, so a command substitution hid its command from every check
-    above: ``echo "$(curl -X POST .../api/owner/scope-review-floor)"`` presented the allowlisted
-    ``echo``, and the write-shape detector does not recognise an HTTP POST, so the exemption was
-    granted to a line that existed to reach the owner-only endpoint. A quoted substitution is
-    one opaque argument token to the lexer, which is why this is a check on the TEXT and on the
-    tokens, not something the per-segment head walk could have caught.
-    """
-    from ouroboros.shell_parse import shell_segments
-
-    if any(marker in text_lower for marker in _NESTED_EXECUTION_MARKERS):
-        return False
-    segments = shell_segments(text_lower)
-    if not segments:
-        return False
-    for segment in segments:
-        if any(token in _NESTED_EXECUTION_TOKENS for token in segment):
-            return False
-        tokens = [token for token in segment if token]
-        while tokens and tokens[0] in _COMMAND_HEAD_WRAPPERS:
-            tokens = tokens[1:]
-            if tokens and tokens[0].startswith("-"):
-                return False  # a wrapper's own options can rebuild the environment
-        if not tokens:
-            continue  # a bare wrapper executes nothing
-        if "=" in tokens[0] and not tokens[0].startswith(("-", "=")):
-            return False  # leading env assignment: never silently discarded
-        head = _trusted_read_head(tokens[0])
-        if head == "git":
-            if len(tokens) < 2 or tokens[1] not in _READ_ONLY_GIT_SUBCOMMANDS:
-                return False
-        elif not head or head not in _READ_ONLY_INSPECTION_COMMANDS:
-            return False
-        denied = _DENIED_READ_OPTIONS.get(head)
-        if denied and any(_denied_read_option(token, denied) for token in tokens[1:]):
-            return False
-        if head == "uniq" and sum(1 for t in tokens[1:] if t == "-" or not t.startswith("-")) >= 2:
-            # uniq's SECOND positional operand is its output file ('-' is the
-            # stdin operand, not a flag): `... | uniq - settings.json` writes.
-            return False
-    return True
-
 
 def _detect_scope_review_floor_self_lowering(text_lower: str, *, writeish: bool = True) -> bool:
     """Detect shell/script attempts to REACH the owner-controlled scope-review floor
@@ -618,15 +468,15 @@ def _detect_scope_review_floor_self_lowering(text_lower: str, *, writeish: bool 
 def _compose_execute_result(result: str, route_note: str, safety_msg: str) -> str:
     """Assemble the final tool result.
 
-    The auto-route note TRAILS the result: failure classification
-    (loop_tool_execution) inspects the FIRST line, so a leading note would mask
-    an underlying tool error on the auto-routed read path (review round 3). The
-    safety warning keeps its historical leading position — its ``---`` separator
-    is an established transcript convention the metadata scan already handles."""
+    ALL host notes TRAIL the result (#447 В12/H1): failure classification
+    (loop_tool_execution) reads the producer's typed result_meta first and the
+    payload's FIRST line as fallback, so neither the auto-route note nor the
+    safety warning may own line 1 — a leading SAFETY_WARNING used to reclassify
+    a failed command (or an extension's ``{"ok": false}`` answer) as ok."""
     if route_note:
-        result = f"{result}\n\n{route_note}"
+        result = _append_result_note(result, route_note)
     if safety_msg:
-        return f"{safety_msg}\n\n---\n{result}"
+        result = _append_result_note(result, safety_msg)
     return result
 
 
@@ -744,15 +594,19 @@ _SKILL_OWNER_STATE_STEMS = SKILL_OWNER_STATE_STEMS
 _DETACHED_PROCESS_MARKERS = ("start_new_session", "new_session", "setsid", "preexec_fn", "nohup")
 
 
-def _mentions_skill_owner_state(text_lower: str) -> bool:
+def _mentions_skill_owner_state(text_lower: str, *, writeish: bool = True) -> bool:
+    """Skill owner-state mention, with the family read-carve (#447 A2): the file
+    plane explicitly allows reading review.json (core.py review-carve), so a pure
+    read inspection naming it must not be refused here with a WRITE-named marker.
+    Any write shape or non-inspection head still blocks, fail-closed."""
     if "state" not in text_lower or "skills" not in text_lower:
         return False
+    detected = False
     for stem in _SKILL_OWNER_STATE_STEMS:
-        if f"{stem}.json" in text_lower:
-            return True
-        if stem in text_lower and ".json" in text_lower:
-            return True
-    return False
+        if f"{stem}.json" in text_lower or (stem in text_lower and ".json" in text_lower):
+            detected = True
+            break
+    return _owner_control_mention_blocks(text_lower, detected, writeish)
 
 
 def _mentions_detached_process(text_lower: str) -> bool:
@@ -769,8 +623,8 @@ _PROCESS_COMMAND_TOOLS = frozenset({"run_command", "run_script", "start_service"
 # protected-root / workspace-state / light-mode writes) — that pre-exec filter is the
 # security boundary and blocks a forbidden mutation BEFORE the handler runs, so a guarded
 # check cannot mutate protected state and then leave a host-attested PASS receipt. It is
-# deliberately NOT in _PROCESS_COMMAND_TOOLS: those POST-execution checks (owner-file
-# restore, light-repo diff, git-ref tripwire) run AFTER the handler has already written the
+# deliberately NOT in _PROCESS_COMMAND_TOOLS: those POST-execution checks (light-repo
+# diff, git-ref tripwire) run AFTER the handler has already written the
 # receipt, so they would only annotate the returned text, not gate the durable receipt —
 # adding them would give false assurance while the pre-exec guards already do the gating.
 _SHELL_GUARDED_TOOLS = _PROCESS_COMMAND_TOOLS | {"verify_and_record"}
@@ -1339,13 +1193,6 @@ def _binding_set_is_light_restricted(ctx: Any, binding: Any) -> bool:
     )
 
 
-def _binding_state_drive_root(ctx: Any, binding: Any) -> pathlib.Path:
-    items = _binding_items(binding)
-    if items:
-        return pathlib.Path(items[0].state_drive_root)
-    return pathlib.Path(ctx.drive_root)
-
-
 def _light_binding_failure_redirect(name: str, args: dict[str, Any]) -> str:
     """Project an existing light-mode UX redirect after a failed target bind."""
 
@@ -1501,7 +1348,8 @@ def _light_repo_snapshot(repo_dir: pathlib.Path) -> Optional[Dict[str, Any]]:
         return None
 
 
-def _format_light_repo_write_block(before: Dict[str, Any], after: Dict[str, Any], result: str, tool_name: str = "run_command") -> str:
+def _format_light_repo_write_note(before: Dict[str, Any], after: Dict[str, Any], tool_name: str = "run_command") -> str:
+    """The light-lane tripwire NOTE, appended after the command payload (#447 В12)."""
     before_paths = set(before.get("paths") or [])
     after_paths = set(after.get("paths") or [])
     touched = sorted(after_paths | before_paths)
@@ -1513,9 +1361,7 @@ def _format_light_repo_write_block(before: Dict[str, Any], after: Dict[str, Any]
         f"a mutation of the Ouroboros repository after {tool_name}. "
         "The command result is blocked and no automatic rollback was attempted "
         "to avoid overwriting concurrent human edits. "
-        f"Affected/dirty paths: {listed}. Switch to advanced/pro for repo writes.\n\n"
-        "Original command output:\n"
-        f"{result}"
+        f"Affected/dirty paths: {listed}. Switch to advanced/pro for repo writes."
     )
 
 
@@ -1717,8 +1563,13 @@ class ToolRegistry:
     def __init__(self, repo_dir: pathlib.Path, drive_root: pathlib.Path):
         self._entries: Dict[str, ToolEntry] = {}
         self._ctx = ToolContext(repo_dir=repo_dir, drive_root=drive_root)
+        # Load-time omissions are FACTS OF THIS PROCESS (a tool module that failed
+        # to import stays missing until restart); schemas() rebuilds start from
+        # them instead of an empty list so the ledger never forgets them (H3).
+        self._module_load_omissions: List[Dict[str, Any]] = []
         self._capability_omissions: List[Dict[str, Any]] = []
         self._load_modules()
+        self._capability_omissions = [dict(item) for item in self._module_load_omissions]
 
     _FROZEN_TOOL_MODULES = [
         "browser", "ci", "claude_advisory_review", "compact_context", "control",
@@ -1751,9 +1602,17 @@ class ToolRegistry:
                 if hasattr(mod, "get_tools"):
                     for entry in mod.get_tools():
                         self._entries[entry.name] = entry
-            except Exception:
+            except Exception as exc:
                 logging.getLogger(__name__).warning(
                     "Failed to load tool module %s", modname, exc_info=True)
+                # A failed module silently omits EVERY tool it exports; record it
+                # in the durable capability ledger, not only the process log (H3).
+                self._module_load_omissions.append({
+                    "surface": "tools",
+                    "reason": "module_load_failed",
+                    "module": modname,
+                    "error": f"{type(exc).__name__}: {exc}",
+                })
 
     def set_context(self, ctx: ToolContext) -> None:
         self._ctx = ctx
@@ -2006,7 +1865,9 @@ class ToolRegistry:
         local_readonly_subagent = self._is_local_readonly_subagent()
         ephemeral_turn = bool(getattr(self._ctx, "is_ephemeral_turn", False))
         disabled_tools = _disabled_tools(self._ctx)
-        self._capability_omissions = []
+        # Rebuild from the load-time facts, never from empty: a rebuilt schema
+        # list must not erase module_load_failed omissions (H3, capinv-447).
+        self._capability_omissions = [dict(item) for item in self._module_load_omissions]
         unavailable_tools = {
             entry.name: detail
             for entry in self._entries.values()
@@ -2332,7 +2193,9 @@ class ToolRegistry:
             result = _mcp_call(name, args or {})
         except Exception as exc:
             return f"⚠️ TOOL_ERROR ({name}): {exc}"
-        return f"{safety_msg}\n\n---\n{result}" if safety_msg else result
+        # Warning trails the payload (#447 H1): a leading SAFETY_WARNING masked
+        # a structured {"ok": false} MCP answer from failure classification.
+        return _append_result_note(result, safety_msg) if safety_msg else result
 
     def _protected_shell_block(
         self, raw_cmd, cmd_path_lower, binding, acting_self_worktree, writeish,
@@ -2925,7 +2788,7 @@ class ToolRegistry:
         acting_self_worktree = self._acting_self_worktree()
         acting_subagent = self._is_acting_subagent()
         argv = strip_leading_env_assignments(unwrap_env_argv(shell_argv(raw_cmd)))
-        if sudo_noninteractive_violation(argv):
+        if sudo_noninteractive_violation(raw_cmd):
             return (
                 "⚠️ SUDO_INTERACTIVE_BLOCKED: sudo must be noninteractive. Use sudo -n for commands that can run without a password; if sudo -n fails, report validation/install blocked by environment."
             )
@@ -3058,12 +2921,13 @@ class ToolRegistry:
             return "⚠️ ELEVATION_BLOCKED: OUROBOROS_ALLOW_MUTATIVE_SUBAGENTS is owner-controlled (it grants subagents write power against the live body). Change it by stopping the agent and editing settings.json directly, then restart — the agent must not self-enable mutative subagents."
         if _detect_evolution_owner_control_self_change(cmd_lower, writeish=writeish):
             return "⚠️ ELEVATION_BLOCKED: the self-evolution controls (OUROBOROS_POST_TASK_EVOLUTION and OUROBOROS_EVOLUTION_PERSISTENT_OBJECTIVE) are owner-controlled — they enable or steer self-modification cycles. Change them via the owner Settings UI, or stop the agent and edit settings.json directly — the agent must not self-set evolution controls."
-        if _mentions_skill_owner_state(cmd_lower):
+        if _mentions_skill_owner_state(cmd_lower, writeish=writeish):
             return (
                 "⚠️ SKILL_STATE_WRITE_BLOCKED: skill review, enablement, "
                 "grants, and marketplace provenance are owner/review "
                 "controlled state. Use skill_review, toggle_skill/the Skills "
-                "UI, or the desktop launcher confirmation flow."
+                "UI, or the desktop launcher confirmation flow. Pure read-only "
+                "inspection (grep/rg/cat/jq) of these names is allowed."
             )
         if "state" in cmd_lower and "skills" in cmd_lower and _mentions_detached_process(cmd_lower):
             return (
@@ -3141,12 +3005,11 @@ class ToolRegistry:
         ):
             return protected_shell
 
-        # GitHub repo create/delete/auth.
-        cmd_words = re.sub(r"\s+", " ", cmd_lower)
-        if "gh repo create" in cmd_words or "gh repo delete" in cmd_words:
-            return "⚠️ SAFETY_VIOLATION: Creating/deleting GitHub repositories requires admin approval."
-        if "gh auth" in cmd_words:
-            return "⚠️ SAFETY_VIOLATION: Modifying GitHub authentication is not permitted."
+        # GitHub repo create/delete/auth — argv-positional, never substring (#447 A7).
+        from ouroboros.git_shell_policy import gh_shell_block_reason
+
+        if gh_block := gh_shell_block_reason(raw_cmd):
+            return gh_block
 
         return self._shell_git_and_runtime_block(
             raw_cmd, args, cmd_path_lower, workspace_mode,
@@ -3277,109 +3140,80 @@ class ToolRegistry:
             "project folder)."
         )
 
-    def _snapshot_owner_files(
-        self, state_drive_root: pathlib.Path | None = None,
-    ) -> Dict[pathlib.Path, Optional[str]]:
-        from ouroboros import config as _cfg
-        out: Dict[pathlib.Path, Optional[str]] = {}
-        settings_path = pathlib.Path(_cfg.SETTINGS_PATH)
-        try:
-            out[settings_path] = settings_path.read_text(encoding="utf-8") if settings_path.is_file() else None
-        except OSError:
-            out[settings_path] = None
-        root = pathlib.Path(state_drive_root or self._ctx.drive_root) / "state" / "skills"
-        if not root.is_dir():
-            return out
-        for path in root.glob("*/*"):
-            if path.name.lower() not in SKILL_OWNER_STATE_FILENAMES:
-                continue
-            try:
-                out[path] = path.read_text(encoding="utf-8")
-            except OSError:
-                out[path] = None
-        return out
+    @staticmethod
+    def _owner_settings_snapshot() -> Optional[str]:
+        """Text of the live settings.json, "" if absent, None if UNREADABLE.
 
-    def _restore_owner_files(
-        self,
-        before: Dict[pathlib.Path, Optional[str]],
-        state_drive_root: pathlib.Path | None = None,
-    ) -> bool:
+        None disarms the tripwire below: the deleted restore recorded an OSError
+        as "file absent" and could unlink the live settings.json — a baseline is
+        either read successfully or not used at all."""
         from ouroboros import config as _cfg
-        root = pathlib.Path(state_drive_root or self._ctx.drive_root) / "state" / "skills"
-        current = set()
-        if root.is_dir():
-            current.update(
-                path for path in root.glob("*/*")
-                if path.name.lower() in SKILL_OWNER_STATE_FILENAMES
-            )
-        settings_path = pathlib.Path(_cfg.SETTINGS_PATH)
-        current.add(settings_path)
-        changed = False
-        for path in current - set(before):
-            try:
-                path.unlink()
-                changed = True
-            except OSError:
-                pass
-        for path, content in before.items():
-            try:
-                if content is None:
-                    if path.exists():
-                        path.unlink()
-                        changed = True
-                    continue
-                if not path.exists() or path.read_text(encoding="utf-8") != content:
-                    path.parent.mkdir(parents=True, exist_ok=True)
-                    path.write_text(content, encoding="utf-8")
-                    changed = True
-            except OSError:
-                pass
-        return changed
+
+        path = pathlib.Path(_cfg.SETTINGS_PATH)
+        try:
+            return path.read_text(encoding="utf-8") if path.is_file() else ""
+        except OSError:
+            return None
 
     def _run_shell_post_checks(
         self,
         result: str,
         *,
-        owner_snapshot: Dict[pathlib.Path, Optional[str]],
-        state_drive_root: pathlib.Path,
         light_repo_before: Optional[Dict[str, Any]],
         workspace_refs_before: Optional[Dict[str, str]],
+        settings_before: Optional[str] = None,
         tool_name: str = "run_command",
     ) -> str:
-        import time
-
-        restored_owner_state = False
-        for _ in range(4):
-            time.sleep(0.3)
-            restored_owner_state = (
-                self._restore_owner_files(owner_snapshot, state_drive_root)
-                or restored_owner_state
-            )
-        if restored_owner_state:
-            result = (
-                f"{result}\n\n⚠️ OWNER_STATE_RESTORED: run_command attempted to "
-                "change owner-only settings or skill trust state; protected files were restored."
-            )
+        # The owner-state snapshot/restore (OWNER_STATE_RESTORED) that used to
+        # run here was DELETED (issue #447, owner decision): it reverted ANY
+        # post-command difference without proving the command caused it, so a
+        # concurrent owner edit (Settings UI, grant click) was silently rolled
+        # back and blamed on the command; and its snapshot recorded an OSError
+        # while reading as "file absent", so the restore could UNLINK the live
+        # settings.json after a transient read error. The light-lane guard
+        # below refuses auto-rollback for exactly this reason. Pre-exec guards
+        # keep skill owner state (SKILL_STATE_WRITE_BLOCKED on any writeish /
+        # non-inspection mention — pure read inspection is carved, #447 A2);
+        # the settings.json mention-gates are lexical, so an obfuscated
+        # argument-level writer (`S=settings; cat > data/$S.json`) can pass
+        # them — the tripwire below makes that LOUD (a typed ``tripwire`` fact
+        # in result_meta plus an appended ⚠️ note) without re-introducing the
+        # unsound rollback. Disclosed residual: the write itself is not
+        # reverted; owner-surface restore is the remedy. Tripwire notes TRAIL
+        # the payload (#447 В12): line 1 stays with the command output so its
+        # own outcome is never masked; each fired tripwire appends its own
+        # note, and the typed facts carry the classification.
+        if settings_before is not None:
+            settings_after = self._owner_settings_snapshot()
+            if settings_after is not None and settings_after != settings_before:
+                result = _annotate_result(_append_result_note(result, (
+                    "⚠️ OWNER_SETTINGS_CHANGED: data/settings.json changed while this "
+                    "command ran. Owner settings change only through save_settings / the "
+                    "Settings UI; this write was NOT auto-reverted (a post-hoc rollback "
+                    "can clobber a concurrent legitimate owner edit) — the owner surface "
+                    "is the place to verify and restore."
+                )), tripwire="owner_settings_changed")
         if light_repo_before is not None:
             light_repo_after = _light_repo_snapshot(system_repo_dir_for(self._ctx))
             if (
                 light_repo_after is not None
                 and light_repo_after.get("digest") != light_repo_before.get("digest")
             ):
-                result = _format_light_repo_write_block(light_repo_before, light_repo_after, result, tool_name=tool_name)
+                result = _annotate_result(
+                    _append_result_note(result, _format_light_repo_write_note(light_repo_before, light_repo_after, tool_name=tool_name)),
+                    status="light_mode_blocked", is_failure=True,
+                )
         if workspace_refs_before is not None:
             workspace_refs_after = _git_ref_snapshot(active_repo_dir_for(self._ctx))
             if (
                 workspace_refs_after is not None
                 and workspace_refs_after.get("digest") != workspace_refs_before.get("digest")
             ):
-                result = (
+                result = _annotate_result(_append_result_note(result, (
                     "⚠️ WORKSPACE_GIT_REF_CHANGED: run_command changed git HEAD or refs "
                     "inside the external workspace. External workspace runs must leave "
-                    "changes as files/patch artifacts, not commits/tags/resets.\n\n"
-                    "Original command output:\n"
-                    f"{result}"
-                )
+                    "changes as files/patch artifacts, not commits/tags/resets."
+                )), status="workspace_blocked", is_failure=True)
         return result
 
     def _heal_mode_block(self, name, args, task_constraint, ext_tool, is_mcp) -> Optional[str]:
@@ -3870,11 +3704,6 @@ class ToolRegistry:
         )
         if not is_safe:
             return safety_msg
-        state_drive_root = _binding_state_drive_root(self._ctx, resolved_binding)
-        owner_snapshot = (
-            self._snapshot_owner_files(state_drive_root)
-            if name in _PROCESS_COMMAND_TOOLS else {}
-        )
         light_repo_before = (
             _light_repo_snapshot(system_repo_dir_for(self._ctx))
             if (
@@ -3893,22 +3722,27 @@ class ToolRegistry:
             else None
         )
         worktree_before = self._worktree_status_snapshot() if entry.mutates_worktree else None
+        settings_before = self._owner_settings_snapshot() if name in _PROCESS_COMMAND_TOOLS else None
         if interpreter_resolution is None:  # node: post-gates (A-F4)
             args, interpreter_resolution = resolve_node_postgates(self._ctx, name, args, runtime_mode=_runtime_mode, effective_constraint=effective_constraint, resolved_binding=resolved_binding)
         early_error, result = self._invoke_builtin_handler(
             name, entry, args, resolved_binding, interpreter_resolution, worktree_before,
         )
-        if early_error is not None:
-            return early_error
         if name in _PROCESS_COMMAND_TOOLS:
-            result = self._run_shell_post_checks(
-                result,
-                owner_snapshot=owner_snapshot,
-                state_drive_root=state_drive_root,
+            # Tripwires run on the TOOL_ERROR path too: two early_error returns
+            # fire AFTER the process already ran (#447 B2).
+            checked = self._run_shell_post_checks(
+                early_error if early_error is not None else result,
                 light_repo_before=light_repo_before,
                 workspace_refs_before=workspace_refs_before,
+                settings_before=settings_before,
                 tool_name=name,
             )
+            if early_error is not None:
+                return checked
+            result = checked
+        if early_error is not None:
+            return early_error
         return _compose_execute_result(result, _route_note, safety_msg)
 
     def _worktree_status_snapshot(self) -> str:

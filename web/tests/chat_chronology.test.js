@@ -84,26 +84,17 @@ test('typing remains last and timestamp-free nodes keep append behavior', () => 
     assert.deepEqual(ids(timeline), ['dated', 'undated', 'typing']);
 });
 
-test('insertion above a scrolled-up viewport compensates scrollTop', () => {
+test('chronological insertion leaves viewport ownership to the chat boundary', () => {
     const typing = makeNode('typing', null, { height: 0 });
     const timeline = makeTimeline([makeNode('t3', 3, { height: 30, top: -10 }), typing]);
     timeline.scrollTop = 100;
-    const beforeHeight = timeline.scrollHeight;
     const result = insertTimelineNode(
         timeline,
         makeNode('t2', 2, { height: 24 }),
         typing,
     );
-    assert.equal(result.insertedAboveViewport, true);
-    assert.equal(timeline.scrollHeight - beforeHeight, 24);
-    assert.equal(timeline.scrollTop, 124);
-});
-
-test('near-bottom insertion keeps normal bottom stickiness', () => {
-    const typing = makeNode('typing', null, { height: 0 });
-    const timeline = makeTimeline([makeNode('t3', 3, { height: 30 }), typing]);
-    insertTimelineNode(timeline, makeNode('t1', 1, { height: 20 }), typing, { stickToBottom: true });
-    assert.equal(timeline.scrollTop, timeline.scrollHeight);
+    assert.equal(result.before.id, 't3');
+    assert.equal(timeline.scrollTop, 100);
 });
 
 test('raw source timestamps become numeric epoch values', () => {

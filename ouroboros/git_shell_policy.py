@@ -19,7 +19,8 @@ from ouroboros.utils import safe_relpath
 GIT_READONLY_SUBCOMMANDS = frozenset([
     "status", "diff", "log", "show", "ls-files", "describe", "rev-parse",
     "cat-file", "shortlog", "version", "help", "blame", "grep",
-    "for-each-ref", "rev-list", "show-ref",
+    "for-each-ref", "rev-list", "show-ref", "ls-tree", "merge-base",
+    "check-ignore", "count-objects", "var", "name-rev", "verify-commit",
 ])
 # NOT here: multi-mode subcommands (`branch`, `tag`, `reflog`, `remote`) are
 # mode-parsed in _git_subcommand_is_readonly — an unconditional entry would
@@ -64,6 +65,90 @@ _TAG_READONLY_FLAGS = frozenset({
 # `expire`/`delete`/`drop` rewrite or remove reflog entries.
 _REMOTE_READONLY_MODES = frozenset({"show", "get-url"})
 _REFLOG_MUTATING_MODES = frozenset({"expire", "delete", "drop", "write"})
+# Verb-dispatched read modes for the remaining multi-mode subcommands (#447 A7,
+# same shape as branch/tag/remote/reflog). Bare `git stash` pushes and bare
+# `git worktree`/`git bisect` print usage — neither is classified read-only
+# (conservative); bare `git notes` defaults to `list` and only reads.
+_STASH_READONLY_MODES = frozenset({"list", "show"})
+_WORKTREE_READONLY_MODES = frozenset({"list"})
+_NOTES_READONLY_MODES = frozenset({"", "list", "show", "get-ref"})
+_BISECT_READONLY_MODES = frozenset({"log", "visualize", "view", "terms"})
+# git config: legacy flag-dispatched modes. `-f`/`--file`/`--blob` make config a
+# general file reader OUTSIDE the repo, so they disqualify the read-only
+# classification outright (the `--no-index` precedent: reads must not ride the
+# repo-inspection exemption at arbitrary targets).
+_CONFIG_READONLY_ACTION_FLAGS = frozenset({
+    "--get", "--get-all", "--get-regexp", "--get-urlmatch", "-l", "--list",
+    "--get-color", "--get-colorbool",
+})
+_CONFIG_MUTATING_FLAGS = frozenset({
+    "--add", "--replace-all", "--unset", "--unset-all", "--rename-section",
+    "--remove-section", "-e", "--edit", "--fixed-value",
+})
+_CONFIG_FILE_FLAGS = frozenset({"-f", "--file", "--blob"})
+_CONFIG_VALUE_FLAGS = frozenset({"--default", "--type", "-t"})
+_CONFIG_READONLY_VERBS = frozenset({"get", "list"})
+_CONFIG_MUTATING_VERBS = frozenset({"set", "unset", "edit", "rename-section", "remove-section"})
+
+
+def _git_config_readonly(args: list[str]) -> bool:
+    """`git config` reads through --get*/--list (or the new `get`/`list` verbs)
+    and through the one-positional legacy `git config <key>` form; a value
+    positional, a mutating flag/verb, or an external-file selector is not
+    read-only inspection."""
+    read_hint = False
+    positionals: list[str] = []
+    skip_value = False
+    for arg in args:
+        text = str(arg)
+        if skip_value:
+            skip_value = False
+            continue
+        flag = text.split("=", 1)[0] if text.startswith("-") else text
+        if flag in _CONFIG_FILE_FLAGS or flag in _CONFIG_MUTATING_FLAGS:
+            return False
+        if text.startswith("-"):
+            if flag in _CONFIG_READONLY_ACTION_FLAGS:
+                read_hint = True
+            skip_value = flag in _CONFIG_VALUE_FLAGS and "=" not in text
+            continue
+        positionals.append(text)
+    if positionals and positionals[0].lower() in _CONFIG_MUTATING_VERBS:
+        return False
+    if positionals and positionals[0].lower() in _CONFIG_READONLY_VERBS:
+        return True
+    if read_hint:
+        return len(positionals) <= 1
+    return len(positionals) == 1
+
+
+# `gh auth` verbs that MUTATE the host GitHub identity. `status`/`token` (and an
+# unknown future verb) only read — fail-open on unknown verbs is deliberate: the
+# hazard is a closed, named set of identity mutations, and the LLM safety layer
+# still reviews intent (#447 A7: the old substring scan refused `rg "gh auth"`).
+_GH_AUTH_MUTATING_VERBS = frozenset({"login", "logout", "refresh", "switch", "setup-git"})
+
+
+def gh_shell_block_reason(raw_cmd: Any) -> str:
+    """Positional gh policy: judged only where `gh` is a segment's command head."""
+    for segment in shell_segments(raw_cmd):
+        _env, command = collect_leading_env(segment)
+        if not command:
+            continue
+        head = pathlib.PurePath(str(command[0])).name.lower()
+        if head in {"bash", "sh", "zsh"}:
+            inline = shell_command_string(command)
+            if inline and (nested := gh_shell_block_reason(inline)):
+                return nested
+            continue
+        if head != "gh":
+            continue
+        words = [str(t).lower() for t in command[1:] if not str(t).startswith("-")]
+        if len(words) >= 2 and words[0] == "repo" and words[1] in {"create", "delete"}:
+            return "⚠️ SAFETY_VIOLATION: Creating/deleting GitHub repositories requires admin approval."
+        if len(words) >= 2 and words[0] == "auth" and words[1] in _GH_AUTH_MUTATING_VERBS:
+            return "⚠️ SAFETY_VIOLATION: Modifying GitHub authentication is not permitted. Read-only `gh auth status` / `gh auth token` are allowed."
+    return ""
 
 
 def _git_subcommand_and_args(cmd_parts: list[str]) -> tuple[str, list[str]]:
@@ -195,6 +280,16 @@ def _git_subcommand_is_readonly(subcmd: str, args: list[str]) -> bool:
         return _git_reflog_readonly(args)
     if subcmd == "remote":
         return _git_remote_readonly(args)
+    if subcmd == "config":
+        return _git_config_readonly(args)
+    if subcmd == "stash":
+        return _git_verb_mode(args) in _STASH_READONLY_MODES
+    if subcmd == "worktree":
+        return _git_verb_mode(args) in _WORKTREE_READONLY_MODES
+    if subcmd == "notes":
+        return _git_verb_mode(args) in _NOTES_READONLY_MODES
+    if subcmd == "bisect":
+        return _git_verb_mode(args) in _BISECT_READONLY_MODES
     return False
 
 
@@ -509,6 +604,12 @@ def _git_effective_base(invocation: list[str], base: pathlib.Path) -> pathlib.Pa
             effective_base = _resolve_shell_arg(str(invocation[idx + 1]), effective_base)
             idx += 2
             continue
+        if part.startswith("-C") and len(part) > 2:
+            # git accepts the GLUED spelling `-C<path>` too; parsing only the
+            # split form judged the wrong base for it (#447 A7).
+            effective_base = _resolve_shell_arg(part[2:], effective_base)
+            idx += 1
+            continue
         if part.startswith("-"):
             idx += 2 if part in ("-c", "--git-dir", "--work-tree") else 1
             continue
@@ -805,9 +906,13 @@ def workspace_git_safety_violation(
                     return f"git {part} escapes the active workspace"
                 j += 2
                 continue
-            if part.startswith("--git-dir=") or part.startswith("--work-tree="):
+            if (
+                part.startswith("--git-dir=")
+                or part.startswith("--work-tree=")
+                or (part.startswith("-C") and len(part) > 2 and not part.startswith("--"))
+            ):
                 saw_root_selector = True
-                value = part.split("=", 1)[1]
+                value = part[2:] if part.startswith("-C") else part.split("=", 1)[1]
                 try:
                     target = pathlib.Path(value)
                     if not _rooted(target):

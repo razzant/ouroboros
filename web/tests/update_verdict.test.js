@@ -45,6 +45,8 @@ test('restarting and restart_required stay distinct states with distinct actions
     const restarting = updateVerdict({}, 'restarting');
     assert.equal(restarting.state, 'restarting');
     assert.equal(restarting.action.disabled, true);
+    assert.match(restarting.hint, /page updates itself/);
+    assert.doesNotMatch(restarting.hint, /reload/i);
     const required = updateVerdict({}, 'restart_required');
     assert.equal(required.state, 'restart_required');
     assert.equal(required.action.id, 'restart');
@@ -109,11 +111,15 @@ test('non-assisted and corrupt update transactions are named honestly, never "un
     assert.match(assisted.headline, /resolved under review/);
 });
 
-test('a corrupt marker discloses the true dead end: no restart promise, no Replace advertisement', () => {
+test('a corrupt marker names out-of-process boot recovery without offering the refused restart', () => {
     const corrupt = updateVerdict({ managed: true, update_tx: { active: true, phase: 'corrupt' } }, '');
-    assert.equal(corrupt.action, null);
-    assert.match(corrupt.hint, /restart will not clear/);
+    assert.equal(corrupt.action?.id, 'check');
+    assert.equal(corrupt.action?.label, 'Check again');
+    assert.match(corrupt.hint, /Quit and reopen Ouroboros/);
+    assert.match(corrupt.hint, /in-app restart is deferred/i);
+    assert.match(corrupt.hint, /If this state remains after reopening/);
     assert.match(corrupt.hint, /ouroboros-update-tx\.json/);
+    assert.doesNotMatch(corrupt.hint, /restart will not clear/i);
     assert.doesNotMatch(corrupt.hint, /Replace with Official/);
 });
 

@@ -69,11 +69,12 @@ def _assignment_case(tmp_path, monkeypatch, task_id="assign-evo"):
 
 
 def test_pytest_process_globals_use_the_disposable_root():
-    from supervisor import queue, state, workers
+    from supervisor import git_ops, queue, state, workers
 
     expected = pathlib.Path(os.environ["OUROBOROS_DATA_DIR"]).resolve(strict=False)
     assert state.DRIVE_ROOT.resolve(strict=False) == expected
     assert queue.DRIVE_ROOT.resolve(strict=False) == expected
+    assert git_ops.DRIVE_ROOT.resolve(strict=False) == expected
     assert workers.DRIVE_ROOT.resolve(strict=False) == expected
     assert expected != (pathlib.Path.home() / "Ouroboros" / "data").resolve(strict=False)
 
@@ -109,16 +110,21 @@ def test_pytest_bootstrap_rebinds_preimported_modules_away_from_fake_home(tmp_pa
     ):
         env.pop(key, None)
     env["HOME"] = str(fake_home)
+    env["USERPROFILE"] = str(fake_home)
     env["PYTHONPATH"] = os.pathsep.join((str(repo), str(repo / "tests")))
     code = """
 import importlib.util, json, pathlib
-from supervisor import queue, state, workers
+from supervisor import git_ops, queue, state, workers
 spec = importlib.util.spec_from_file_location('isolated_conftest', pathlib.Path('tests/conftest.py'))
 module = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(module)
 module._bind_pytest_runtime_roots()
 state.update_state(lambda live: live.update({'probe': 'isolated'}))
-print(json.dumps({'root': str(state.DRIVE_ROOT), 'state': state.load_state()}))
+print(json.dumps({
+    'root': str(state.DRIVE_ROOT),
+    'git_ops_root': str(git_ops.DRIVE_ROOT),
+    'state': state.load_state(),
+}))
 """
 
     proc = subprocess.run(
@@ -133,6 +139,7 @@ print(json.dumps({'root': str(state.DRIVE_ROOT), 'state': state.load_state()}))
     payload = json.loads(proc.stdout.strip().splitlines()[-1])
     assert sentinel_path.read_bytes() == sentinel
     assert pathlib.Path(payload["root"]) != sentinel_path.parents[1]
+    assert payload["git_ops_root"] == payload["root"]
     assert payload["state"]["probe"] == "isolated"
 
 

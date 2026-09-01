@@ -421,6 +421,16 @@ def test_send_photo_and_video_persist_compact_rows_before_unread_revision(monkey
 
     media_frames = [frame for frame in frames if frame.get("type") in {"photo", "video"}]
     assert [frame["task_id"] for frame in media_frames] == ["media-task", "media-task"]
+    # The LIVE frame carries both durable addresses: a packaged desktop shell
+    # cannot hand its file bridge a data: URI, so without these the media is
+    # only saveable after a history reload.
+    for frame in media_frames:
+        assert frame["download_url"].startswith("/api/tasks/media-task/artifacts/chat-media-")
+        # compat resolves only under the configured file-browser root; this
+        # fixture's DATA_DIR lives in /tmp (outside it), so absence is honest —
+        # presence must still carry the launcher-gate-compatible form.
+        compat = frame.get("download_url_compat")
+        assert compat is None or compat.startswith("/api/files/download?path=")
 
     rows = [
         json.loads(line)

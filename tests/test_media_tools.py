@@ -264,12 +264,12 @@ def test_harbor_agent_prefix_installs_imageio_ffmpeg():
     assert "pip install imageio-ffmpeg" in src
 
 
-def test_media_user_files_admission_keeps_secret_guard(tmp_path, monkeypatch):
-    """SC-6 read_file parity: media inherits vision._allowed_file_roots, which
-    (matrix-derived) admits the user_files home — so a path admitted ONLY through
-    that root must still clear the user_files secret/credential guards, exactly
-    as read_file and view_image do. Before the shared _read_file_parity_block,
-    ocr_pdf admitted credential-like home paths read_file refuses."""
+def test_media_user_files_admission_read_parity(tmp_path, monkeypatch):
+    """SC-6 read_file parity: media inherits vision._allowed_file_roots and the
+    shared _read_file_parity_block, so it must track read_file exactly — and
+    since capinv-447 / В23=A read_file no longer shape-denies credential-LIKE
+    names under home for the root principal, ocr_pdf admits them too (the
+    LOCATION guards still apply)."""
     from types import SimpleNamespace
     from ouroboros.tools.media import _resolve_local_file
 
@@ -280,8 +280,8 @@ def test_media_user_files_admission_keeps_secret_guard(tmp_path, monkeypatch):
     doc.write_bytes(b"%PDF-1.4 fake")
     ctx = SimpleNamespace(repo_dir=tmp_path / "repo", drive_root=str(tmp_path / "data"))
     fp, err = _resolve_local_file(ctx, str(doc), max_bytes=10**7)
-    assert fp is None
-    assert "USER_FILES_PATH_BLOCKED" in err and "credential-like" in err
+    assert "USER_FILES_PATH_BLOCKED" not in (err or "")
+    assert fp is not None
 
 
 def test_media_restricted_subagent_secret_data_path_blocked(tmp_path):

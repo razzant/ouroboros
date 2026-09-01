@@ -561,6 +561,41 @@ def test_max_quiz_options_pinned_across_python_and_js():
     assert int(match.group(1)) == _MAX_QUIZ_OPTIONS
 
 
+def test_decision_comment_limit_and_optional_index_pinned_across_python_and_js():
+    """The verbatim-comment cap is ONE number in both languages (the ingress
+    refuses a longer comment instead of truncating it, so the card must not
+    offer to send one), and the browser mirror must declare option_index as
+    OPTIONAL — the field-set parity loop cannot see requiredness, and an
+    owner's own answer (no option taken) carries no index at all."""
+    from ouroboros.gateway.contracts import DecisionRequest
+    from ouroboros.gateway.task_decision import _COMMENT_MAX
+
+    text = (pathlib.Path(__file__).resolve().parent.parent / "web" / "modules" / "api_types.js").read_text(
+        encoding="utf-8"
+    )
+    match = re.search(r"^export const MAX_DECISION_COMMENT = (\d+);", text, flags=re.MULTILINE)
+    assert match, "api_types.js missing MAX_DECISION_COMMENT"
+    assert int(match.group(1)) == _COMMENT_MAX
+
+    optional = {
+        name for name, annotation in DecisionRequest.__annotations__.items()
+        if (getattr(annotation, "__forward_arg__", None) or str(annotation)).startswith("NotRequired[")
+    }
+    assert optional == {"option_index", "comment"}
+    request_decl = re.search(r"@typedef \{Object\} DecisionRequest\b([\s\S]*?)\*/", text)
+    assert request_decl
+    assert "@property {number=} option_index" in request_decl.group(1)
+    assert "@property {string=} comment" in request_decl.group(1)
+
+    # The settled quiz card replayed from history carries the recorded answer:
+    # the chosen index when there was one, and the owner's verbatim words —
+    # which, with no index, ARE the answer.
+    quiz_decl = re.search(r"@typedef \{Object\} QuizOutbound\b([\s\S]*?)\*/", text)
+    assert quiz_decl
+    assert "@property {number=} answered_index" in quiz_decl.group(1)
+    assert "@property {string=} comment" in quiz_decl.group(1)
+
+
 def test_max_link_actions_pinned_across_python_and_js():
     """The links-action cap is one number in both languages: the tool gate
     (ouroboros.tools.core._MAX_LINK_ACTIONS) and the UI contract mirror

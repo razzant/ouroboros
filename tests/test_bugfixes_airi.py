@@ -87,11 +87,15 @@ def test_live_card_disclosure_is_explicit_user_owned_state():
 
 
 def test_live_card_timeline_only_follows_when_pinned():
-    src = _read("web/modules/chat.js")
-    assert "function isTimelinePinnedToBottom(record)" in src
-    assert "const prevTop = el.scrollTop;" in src
-    assert "el.scrollTop = pinned ? el.scrollHeight : prevTop;" in src
-    assert "record.root.dataset.expanded === '1' && pinned" in src
+    src = _read("web/modules/chat_render_batch.js")
+    renderer = src[
+        src.index("export function createLiveCardTimelineRenderer"):
+        src.index('// "Load older" quota escalation ladder')
+    ]
+    assert renderer.count("const pinned =") == 2
+    assert "const prevTop = el.scrollTop;" in renderer
+    assert "el.scrollTop = pinned ? el.scrollHeight : prevTop;" in renderer
+    assert "record.root.dataset.expanded === '1' && pinned" in renderer
 
 
 # ───────────────────── Bug 3: reconnect feed rebuild ─────────────────────────

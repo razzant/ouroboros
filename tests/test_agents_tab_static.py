@@ -316,9 +316,18 @@ def test_a_spent_window_is_emphasised_rather_than_dimmed() -> None:
     and made its still-clickable Remove/Sign-in buttons read as disabled
     (docs/DESIGN.md: "a control rendered at secondary ink reads as disabled")."""
     css = (REPO_ROOT / "web" / "style.css").read_text(encoding="utf-8")
-    start = css.index("design-system:migrated-begin")
-    end = css.index("design-system:migrated-end", start)
-    region = css[start:end]
+    # The stylesheet now carries several migrated marker pairs (the chat pass);
+    # the harness rules live in ONE of them, so scan every span's concatenation.
+    spans = []
+    cursor = 0
+    while True:
+        start = css.find("design-system:migrated-begin", cursor)
+        if start == -1:
+            break
+        end = css.index("design-system:migrated-end", start)
+        spans.append(css[start:end])
+        cursor = end + 1
+    region = "\n".join(spans)
     rule = re.search(r"\.harness-exhausted\s*\{([^}]*)\}", region)
     assert rule, ".harness-exhausted missing from the migrated region"
     assert "opacity" not in rule.group(1), (

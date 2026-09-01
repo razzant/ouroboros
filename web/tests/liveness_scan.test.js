@@ -7,7 +7,10 @@ import assert from 'node:assert/strict';
 import test from 'node:test';
 import { readFileSync } from 'node:fs';
 
-import { unconfirmedForegroundCardIds } from '../modules/chat_activity.js';
+import {
+    reconcileHydratedDirectActivities,
+    unconfirmedForegroundCardIds,
+} from '../modules/chat_activity.js';
 import { createRebuildBatch } from '../modules/chat_render_batch.js';
 import { REUSABLE_TASK_IDS } from '../modules/task_control_menu.js';
 
@@ -24,13 +27,31 @@ test('unconfirmedForegroundCardIds: a mounted unfinished foreground card the sna
     );
 });
 
-test('unconfirmedForegroundCardIds: an id the snapshot confirms live is never handed to the detail reconcile', () => {
+test('unconfirmedForegroundCardIds: snapshot and request-barrier live evidence block detail reconcile', () => {
     assert.deepEqual(
         unconfirmedForegroundCardIds([live('running-root'), live('orphan')], new Set(['running-root'])),
         ['orphan'],
     );
     // Map keys work as the confirmed set too (anything with .has).
     assert.deepEqual(unconfirmedForegroundCardIds([live('r')], new Map([['r', {}]])), []);
+
+    const existing = new Map([[
+        'fresh-root',
+        { activityId: 'fresh-root', kind: 'managed_task', phase: 'working', startedAt: 9_000 },
+    ]]);
+    const stale = reconcileHydratedDirectActivities(existing, [], 1, 5_000);
+    const staleConfirmed = new Set([
+        ...stale.globallyActiveActivityIds, ...stale.activities.keys(),
+    ]);
+    assert.deepEqual(stale.departedManagedTaskIds, []);
+    assert.deepEqual(unconfirmedForegroundCardIds([live('fresh-root')], staleConfirmed), []);
+
+    const fresh = reconcileHydratedDirectActivities(existing, [], 1, 10_000);
+    const freshConfirmed = new Set([
+        ...fresh.globallyActiveActivityIds, ...fresh.activities.keys(),
+    ]);
+    assert.deepEqual(fresh.departedManagedTaskIds, ['fresh-root']);
+    assert.deepEqual(unconfirmedForegroundCardIds([live('fresh-root')], freshConfirmed), ['fresh-root']);
 });
 
 test('unconfirmedForegroundCardIds: finished cards are skipped', () => {
@@ -69,7 +90,10 @@ test('chat.js hands the card projection to the selector inside hydrateDirectActi
         chatSource.indexOf('const isKnownProjectFrame ='),
     );
     assert.match(fn, /unconfirmedForegroundCardIds\(/);
-    assert.match(fn, /globallyActiveActivityIds,\s*\)\) observeMissingManagedTask\(taskId\);/);
+    assert.match(
+        fn,
+        /new Set\(\[\.\.\.globallyActiveActivityIds, \.\.\.activeDirectActivities\.keys\(\)\]\)/,
+    );
     // The projection is built from the live card map, not from a DOM query.
     assert.match(fn, /Array\.from\(liveCardRecords, \(\[id, r\]\) =>/);
     assert.match(fn, /connected: r\.root\?\.isConnected/);

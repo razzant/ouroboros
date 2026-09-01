@@ -730,9 +730,8 @@ def test_writer_fence_order(monkeypatch):
         lambda *_args, **_kwargs: calls.append("kill_services") or [],
     )
     # The custody sweep is the fence's fifth step and reads
-    # supervisor.git_ops.DRIVE_ROOT, which is bound at IMPORT time — an
-    # isolated OUROBOROS_DATA_DIR does not rebind it (docs/DEVELOPMENT.md
-    # hermetic-preflight rule). Unpatched, this unit test of ORDER reached the
+    # supervisor.git_ops.DRIVE_ROOT. The shared pytest bootstrap now rebinds it
+    # to a disposable root; before that binding, this order-only test reached the
     # operator's live process ledger: it reported live entries as blockers
     # (any machine running Ouroboros failed this test) and, worse, would have
     # killed a ledgered task/session service that happened to be running.
