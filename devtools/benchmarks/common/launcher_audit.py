@@ -22,6 +22,13 @@ INVARIANT A — ADMISSION IS THE OUTER BOUNDARY.
     needing a durable record. A bare EXISTENCE probe is the one permitted middle, and becomes a
     violation the moment the helper holding it can RAISE.
 
+    One ownership primitive may precede admission: the canonical host-local
+    campaign lock. It exists specifically so a losing launcher cannot race and
+    overwrite the winning launcher's manifest. The exemption is resolved to one
+    exact first-party module and is shape-checked: hashing the absolute run-root,
+    opening the host temp lock, and flocking it are allowed; any additional
+    denied read, mutation, network call, or deferred dependency revokes it.
+
 INVARIANT B — CONFINEMENT IS COMPUTED FROM THE ACTIVE CHECKOUT.
     A launcher whose provenance is attested against a checkout it was HANDED (``--repo-dir``,
     ``--ouroboros-clone``) must confine its output paths against that same checkout, never a
@@ -148,6 +155,13 @@ RESOLVABLE_PACKAGES = ("devtools.", "ouroboros.")
 # first-party imports are exempt: those are a style choice, not a dependency on the world.
 _STDLIB_MODULES = frozenset(getattr(sys, "stdlib_module_names", ()))
 _FIRST_PARTY_ROOTS = frozenset(package.rstrip(".") for package in RESOLVABLE_PACKAGES)
+_PRE_ADMISSION_LOCK_MODULE = (
+    "devtools.benchmarks.cybergym.cybergym_result_index"
+)
+_PRE_ADMISSION_LOCK_NAME = "acquire_campaign_execution_lock"
+_PRE_ADMISSION_LOCK_REQUIRED_CALLS = frozenset({
+    "encode", "flock", "gettempdir", "open", "sha256",
+})
 
 
 def _dotted_callee(node: ast.expr) -> str:
@@ -369,6 +383,35 @@ def resolve_denied(dotted: str, unit: _Unit, *, depth: int = 2) -> str:
     return ""
 
 
+def _approved_pre_admission_lock(dotted: str, unit: _Unit) -> bool:
+    """Whether ``dotted`` is the canonical minimal host-local ownership lock."""
+    leaf = dotted.split(".")[-1]
+    if (
+        leaf != _PRE_ADMISSION_LOCK_NAME
+        or unit.imports.get(leaf) != _PRE_ADMISSION_LOCK_MODULE
+    ):
+        return False
+    imported = _unit_for_module(_PRE_ADMISSION_LOCK_MODULE)
+    target = imported.functions.get(leaf) if imported is not None else None
+    if imported is None or target is None or _helper_effects(target):
+        return False
+    calls = {
+        _dotted_callee(node.func).split(".")[-1]
+        for node in ast.walk(target)
+        if isinstance(node, ast.Call)
+    }
+    if not _PRE_ADMISSION_LOCK_REQUIRED_CALLS.issubset(calls):
+        return False
+    for node in ast.walk(target):
+        if not isinstance(node, ast.Call):
+            continue
+        inner = _dotted_callee(node.func)
+        denied = resolve_denied(inner, imported, depth=1)
+        if denied and inner.split(".")[-1] != "open":
+            return False
+    return True
+
+
 def _pre_admission_violations(unit: _Unit) -> list[str]:
     owners = [node.name for node in ast.walk(unit.tree)
               if isinstance(node, ast.FunctionDef)
@@ -383,6 +426,8 @@ def _pre_admission_violations(unit: _Unit) -> list[str]:
         prefix += calls_before(unit.functions["main"], owner)
     violations: list[str] = []
     for dotted in prefix:
+        if _approved_pre_admission_lock(dotted, unit):
+            continue
         denied = resolve_denied(dotted, unit)
         if denied:
             violations.append(

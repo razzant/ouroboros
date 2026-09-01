@@ -3,9 +3,11 @@
 from __future__ import annotations
 
 import contextlib
+import hashlib
 import json
 import os
 import pathlib
+import tempfile
 from collections.abc import Iterator, Mapping
 from typing import Any, TextIO
 
@@ -22,10 +24,10 @@ def acquire_campaign_execution_lock(
     *,
     blocking: bool = True,
 ) -> TextIO | None:
-    """Acquire the sibling campaign lock without creating the candidate root."""
+    """Acquire a host-local lock without creating the candidate root."""
     root = pathlib.Path(run_root).expanduser().resolve(strict=False)
-    root.parent.mkdir(parents=True, exist_ok=True)
-    handle = (root.parent / f".{root.name}.campaign_execution.lock").open(
+    root_digest = hashlib.sha256(str(root).encode("utf-8")).hexdigest()
+    handle = (pathlib.Path(tempfile.gettempdir()) / f"ouroboros-cybergym-{root_digest}.lock").open(
         "a+", encoding="utf-8",
     )
     try:
