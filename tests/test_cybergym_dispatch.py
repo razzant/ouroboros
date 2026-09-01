@@ -140,7 +140,8 @@ def test_consecutive_transport_failures_open_circuit_and_skip_remaining(tmp_path
         assert not safe_task_path(root, task_id).exists()
     projection = BudgetLedger(root / "claims.jsonl", cap_usd=10).projection()
     assert projection.reserved_usd == 0
-    assert projection.unresolved_upper_bound_usd == 0
+    assert projection.unresolved_upper_bound_usd == 3
+    assert projection.projected_usd == 3
     assert projection.can_dispatch is True
 
 

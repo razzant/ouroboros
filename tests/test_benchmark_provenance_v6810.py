@@ -444,6 +444,10 @@ _TRUNCATION_DECISIONS: dict[str, tuple[bool, str]] = {
     "finalization_grace": (True, "loop.py:3146 supervisor finalize_now grace"),
     "deadline_local": (True, "loop.py:3220 loop-local deadline"),
     "provider_unavailable": (True, "loop.py:3185 reroute + fallback exhausted"),
+    "acceptance_fence_unavailable": (
+        True,
+        "acceptance_dialogue.py bounded queue-fence failure; review never ran",
+    ),
     "children_unabsorbed": (True, "loop.py:4071 forced terminal, child results unabsorbed"),
     "llm_api_error": (True, "loop_llm_call.py:630 transport death; never a fair shot"),
     # S3 owner graceful stop ("Wrap up"): the owner ended the attempt, so

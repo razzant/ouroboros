@@ -3772,8 +3772,6 @@ class LLMClient:
         msg, usage = normalize_direct_openai_completion(msg, usage, wire_completion)
         _custom_receipts = usage.get("_request_wire_custom_receipts", ())
         finalize_wire_response(msg, usage, custom_receipts=_custom_receipts)
-        if not msg.get("tool_calls"):
-            msg = self._parse_tool_calls_from_content(msg)
         return msg, usage
 
     @staticmethod

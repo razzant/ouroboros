@@ -45,7 +45,6 @@ from devtools.benchmarks.cybergym.cybergym_sidecar import (
 )
 from devtools.benchmarks.cybergym.cybergym_wire import (
     ExecutorFailure,
-    GatewayTransportError,
     _unwrap_http_json,
     urllib_json,
 )
@@ -904,7 +903,7 @@ class _DockerRuntimeMixin:
             timeout=max(1.0, float(timeout) + 5.0),
         )
         if result.returncode != 0:
-            raise GatewayTransportError("private server HTTP transport failed")
+            raise ExecutorFailure("private server HTTP transport failed")
         try:
             value = json.loads(result.stdout)
         except json.JSONDecodeError as exc:
@@ -912,7 +911,7 @@ class _DockerRuntimeMixin:
         if not isinstance(value, Mapping):
             raise ExecutorFailure("private server HTTP transport returned a non-object")
         if value.get("transport_error"):
-            raise GatewayTransportError("private server HTTP transport failed")
+            raise ExecutorFailure("private server HTTP transport failed")
         return value
 
     def _write_campaign_state(self, state: Mapping[str, Any]) -> None:

@@ -440,7 +440,7 @@ packaging/cli/                ← Packaged CLI shell/cmd wrappers and user-local
 Dockerfile                    ← Docker image (web UI runtime)
 site/                         ← Public GitHub Pages source (Vite). `site/scripts/sync-assets.mjs` copies canonical `assets/` images into gitignored `site/public/assets/`, and `pnpm build` renders committed `docs/`. Text-first product, paper, and install routes, the reciprocal Claudexor relationship on the homepage and `/llms.txt`, `/install.json`, and the sitemap share the same build; `tests/test_public_site_metadata.py` guards canonical URLs, structured metadata, paper citations, related-software links, install data, asset hashes, and source-to-Pages sync.
 devtools/                     ← Tracked operator tooling outside runtime and package discovery; domain-specific architecture and methodology stay with the relevant devtool.
-devtools/benchmarks/cybergym/ ← Pinned Level-1 CyberGym launcher, adapter, settings, and methodology; detailed topology stays in the benchmark docs.
+devtools/benchmarks/cybergym/ ← Pinned Level-1 CyberGym launcher, adapter, settings, and methodology; its campaign execution lock excludes live dispatch from reconcile, whose checkpoint+row+claim+cleanup join resumes settlement/cleanup crash windows without repeating an agent; detailed topology stays in the benchmark docs.
 ```
 
 ### Devtools boundary

@@ -21,6 +21,7 @@ from devtools.benchmarks.cybergym.cybergym_adapter import (
     CAPABILITY_FINAL_POC_MISSING,
     PROTOCOL_FAIL,
     BudgetLedger,
+    TaskSpec,
     run_campaign,
 )
 from devtools.benchmarks.cybergym.cybergym_executor import (
@@ -32,6 +33,7 @@ from devtools.benchmarks.cybergym.cybergym_executor import (
     _served_telemetry,
     _validate_verify_response,
 )
+from devtools.benchmarks.cybergym.cybergym_wire import GatewayTransportError
 from tests.test_cybergym_executor import _config, dataclasses_replace
 
 
@@ -314,6 +316,22 @@ def test_private_query_accepts_nested_items_wrapper(tmp_path, monkeypatch):
     assert executor._private_query("agent-" + "a" * 24, "arvo:1") == [record]
 
 
+def test_private_sidecar_transport_failure_is_not_gateway_circuit_class(tmp_path):
+    config = _config(tmp_path)
+    executor = CyberGymExecutor(
+        dataclasses_replace(
+            config,
+            command_runner=lambda *_args, **_kwargs: CommandResult(
+                1, "", "failed"
+            ),
+        )
+    )
+    executor.server_id = "a" * 64
+    with pytest.raises(ExecutorFailure) as excinfo:
+        executor._server_http("POST", "/verify-agent-pocs")
+    assert not isinstance(excinfo.value, GatewayTransportError)
+
+
 def test_submit_response_binds_poc_id_not_nonexistent_hash_and_keeps_exit_code(tmp_path):
     config = _config(tmp_path)
     task_dir = config.run_root / "task"
@@ -354,6 +372,90 @@ def test_submit_response_binds_poc_id_not_nonexistent_hash_and_keeps_exit_code(t
     assert masked == "opaque1234"
     assert executor_id in submit_calls[0]
     assert executor_name not in submit_calls[0]
+
+
+def test_delivery_checkpoint_prevents_duplicate_submit_and_verify(
+    tmp_path, monkeypatch
+):
+    monkeypatch.setenv("CYBERGYM_API_KEY", "test-secret-value")
+    config = _config(tmp_path, provider_probe=False)
+    executor = CyberGymExecutor(config)
+    task = TaskSpec("arvo:1", "arvo")
+    task_dir = config.run_root / "arvo__1"
+    workspace = config.run_root / "workspace"
+    task_dir.mkdir(parents=True)
+    workspace.mkdir()
+    payload = b"poc"
+    (workspace / "final.poc").write_bytes(payload)
+    digest = hashlib.sha256(payload).hexdigest()
+    checkpoint = config.run_root / "checkpoint.json"
+    checkpoint.write_text(
+        json.dumps({"gateway_task_id": "gateway-1", "status": "completed"}),
+        encoding="utf-8",
+    )
+    record = {
+        "task_id": task.task_id,
+        "agent_id": "opaque1234",
+        "poc_id": "poc-1",
+        "poc_hash": digest,
+        "vul_exit_code": 1,
+        "fix_exit_code": 0,
+    }
+    counts = {"submit": 0, "verify": 0, "query": 0}
+
+    def submit(*_args):
+        counts["submit"] += 1
+        return {"task_id": "opaque1234", "poc_id": "poc-1"}, digest, "opaque1234"
+
+    def query(*_args, **_kwargs):
+        counts["query"] += 1
+        return [] if counts["query"] <= 2 else [record]
+
+    def server_http(*_args, **_kwargs):
+        counts["verify"] += 1
+        return {"message": "verified", "poc_ids": ["poc-1"]}
+
+    monkeypatch.setattr(executor, "_submit_final", submit)
+    monkeypatch.setattr(executor, "_private_query", query)
+    monkeypatch.setattr(executor, "_server_http", server_http)
+    gateway_result = {
+        "status": "completed",
+        "observed_model": config.model,
+        "observed_provider": "backend-a",
+        "reasoning_effort": "high",
+        "prompt_tokens": 10,
+        "completion_tokens": 5,
+        "cost_usd": 0.1,
+        "cost_final": True,
+        "cost_breakdown": {
+            "accounted_upper_bound_usd": 0.1,
+            "cost_final": True,
+        },
+        "outcome_axes": {"execution": {"status": "ok"}},
+    }
+    kwargs = {
+        "checkpoint": checkpoint,
+        "cleanup_ref": config.run_root / "cleanup.json",
+        "alias_ref": config.run_root / "alias.json",
+        "attestation_ref": "",
+        "sidecar_attestation": {"status": "passed"},
+    }
+    for _ in range(2):
+        outcome = executor._deliver_gateway_result(  # noqa: SLF001
+            task,
+            task_dir,
+            workspace,
+            "workspace",
+            "agent-" + "a" * 24,
+            gateway_result,
+            terminal_evidence={},
+            **kwargs,
+        )
+        assert outcome["status"] == "completed"
+    assert counts == {"submit": 1, "verify": 1, "query": 4}
+    delivery = json.loads(checkpoint.read_text(encoding="utf-8"))["delivery"]
+    assert delivery["phase"] == "classified"
+    assert delivery["final_poc_sha256"] == digest
 
 
 def test_unknown_gateway_attempt_blocks_campaign_cleanup(tmp_path):
@@ -846,7 +948,8 @@ def test_post_admission_status_error_is_not_reclassified_as_zero_cost(
     assert rows[0]["cost_usd"] is None
     projection = BudgetLedger(config.run_root / "claims.jsonl", cap_usd=2).projection()
     assert projection.settled_usd == 0
-    assert projection.unresolved_upper_bound_usd == pytest.approx(0)
+    assert projection.unresolved_upper_bound_usd == pytest.approx(1)
+    assert projection.projected_usd == pytest.approx(1)
     assert projection.can_dispatch is True
 
 

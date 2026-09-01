@@ -507,6 +507,22 @@ def test_state_dir_rejects_network_filesystem(tmp_path, monkeypatch):
         )
 
 
+def test_state_dir_rejects_unknown_filesystem(tmp_path, monkeypatch):
+    from devtools.benchmarks.cybergym import cybergym_server
+
+    seed, commit = _seed_repo(tmp_path)
+    monkeypatch.setattr(cybergym_server, "_mount_fs_type", lambda path: "")
+    with pytest.raises(CyberGymServerError, match="known local filesystem"):
+        CyberGymIsolatedServer(
+            seed,
+            tmp_path / "run",
+            _settings(tmp_path),
+            _host(),
+            expected_commit=commit,
+            state_dir=tmp_path / "unknown-state",
+        )
+
+
 def test_state_dir_network_escape_hatch_warns(tmp_path, monkeypatch, capsys):
     from devtools.benchmarks.cybergym import cybergym_server
 
@@ -522,7 +538,7 @@ def test_state_dir_network_escape_hatch_warns(tmp_path, monkeypatch, capsys):
         allow_network_state_dir=True,
     )
     assert wrapper.state_dir == (tmp_path / "net-state").resolve()
-    assert "network filesystem" in capsys.readouterr().err
+    assert "state_dir filesystem" in capsys.readouterr().err
 
 
 def test_mount_fs_type_longest_prefix_wins():

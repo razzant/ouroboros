@@ -289,17 +289,17 @@ class CyberGymIsolatedServer:
             if not isinstance(allow_network_state_dir, bool):
                 raise CyberGymServerError("allow_network_state_dir must be a boolean")
             state_fs_type = _mount_fs_type(resolved_state)
-            if state_fs_type in _NETWORK_STATE_FS_TYPES:
+            if not state_fs_type or state_fs_type in _NETWORK_STATE_FS_TYPES:
                 if not allow_network_state_dir:
                     raise CyberGymServerError(
-                        "state_dir must be on a local filesystem; observed network "
-                        f"type {state_fs_type!r} (pass --allow-network-state-dir to "
+                        "state_dir must be on a known local filesystem; observed "
+                        f"type {state_fs_type or 'unknown'!r} (pass --allow-network-state-dir to "
                         "accept the lock-latency risk)"
                     )
                 print(
-                    f"[cybergym] WARNING: state_dir is on network filesystem "
-                    f"{state_fs_type!r}; isolated-server lock latency there "
-                    "previously stalled runs",
+                    "[cybergym] WARNING: state_dir filesystem is "
+                    f"{state_fs_type or 'unknown'!r}; isolated-server lock "
+                    "latency there may stall runs",
                     file=sys.stderr,
                 )
             self.state_dir: pathlib.Path | None = resolved_state

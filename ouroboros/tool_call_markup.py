@@ -27,6 +27,8 @@ TOOL_MARKUP_PROTOCOL_FAIL_NOTE = "Unparsed tool-call markup is a protocol failur
 _DSML_MARK = "\uff5cDSML\uff5c"
 _DSML_TOOL_CALLS_OPEN = f"<{_DSML_MARK}tool_calls>"
 _DSML_INVOKE_OPEN = f"<{_DSML_MARK}invoke"
+_PLAIN_DSML_TOOL_CALLS_OPEN = "<tool_calls>"
+_PLAIN_DSML_INVOKE_OPEN = "<invoke"
 _TOOL_CALL_TAG_RE = re.compile(r"<tool_call\b", re.IGNORECASE)
 _DSML_INVOKE_RE = re.compile(
     rf"<(?:{_DSML_MARK})?invoke\s+name=\"([^\"]+)\"\s*>(.*?)</(?:{_DSML_MARK})?invoke>",
@@ -65,21 +67,26 @@ def message_content_text(content: Any) -> str:
 
 
 def content_has_tool_markup(content: Any) -> bool:
-    """True when content carries a concrete tool-call wire format.
+    """True when content begins with a concrete tool-call wire envelope.
 
-    Detects DeepSeek DSML tags or leftover ``<tool_call>`` / ``<tool_calls>``
-    XML. This is a wire-format check, not a task-outcome classifier.
+    Leading ``think``/``reasoning`` wrappers may precede the envelope.
+    Ordinary prose or code examples that merely quote a tag remain content.
     """
     text = message_content_text(content)
     if not text:
         return False
-    if _DSML_TOOL_CALLS_OPEN in text or _DSML_INVOKE_OPEN in text:
-        return True
-    if _TOOL_CALL_TAG_RE.search(text):
-        return True
-    if "<tool_calls>" in text and "<invoke" in text:
-        return True
-    return False
+    cut = tool_markup_start(text)
+    if cut < 0:
+        return False
+    prefix = text[:cut].strip()
+    for tag in ("think", "reasoning"):
+        prefix = re.sub(
+            rf"<{tag}>.*?</{tag}>",
+            "",
+            prefix,
+            flags=re.DOTALL | re.IGNORECASE,
+        ).strip()
+    return not prefix
 
 
 def tool_markup_start(text: str) -> int:
@@ -91,6 +98,10 @@ def tool_markup_start(text: str) -> int:
     dsml_idx = text.find(_DSML_TOOL_CALLS_OPEN)
     if dsml_idx < 0:
         dsml_idx = text.find(_DSML_INVOKE_OPEN)
+    if dsml_idx < 0:
+        dsml_idx = text.find(_PLAIN_DSML_TOOL_CALLS_OPEN)
+    if dsml_idx < 0:
+        dsml_idx = text.find(_PLAIN_DSML_INVOKE_OPEN)
     if dsml_idx >= 0:
         cuts.append(dsml_idx)
     return min(cuts) if cuts else -1
@@ -262,14 +273,20 @@ def parse_tool_calls_from_content(
     return msg
 
 
-def promote_tool_markup(msg: Dict[str, Any]) -> Optional[Tuple[Dict[str, Any], List[Dict[str, Any]]]]:
+def promote_tool_markup(
+    msg: Dict[str, Any],
+    allowed_tool_names: Optional[Set[str]] = None,
+) -> Optional[Tuple[Dict[str, Any], List[Dict[str, Any]]]]:
     """Second-chance promotion of leftover markup to native ``tool_calls``.
 
     Returns ``(msg, tool_calls)`` with the parsed calls and the remainder
     content when the content is well-formed markup, or ``None`` when the
     markup is malformed — a protocol failure, never a final answer.
     """
-    parsed = parse_tool_calls_from_content({"content": msg.get("content"), "tool_calls": []})
+    parsed = parse_tool_calls_from_content(
+        {"content": msg.get("content"), "tool_calls": []},
+        allowed_tool_names,
+    )
     tool_calls = parsed.get("tool_calls") or []
     if not tool_calls:
         return None
@@ -293,6 +310,7 @@ def resolve_tool_markup(
     content: Any,
     accumulated_usage: Dict[str, Any],
     llm_trace: Dict[str, Any],
+    tool_schemas: List[Dict[str, Any]],
 ) -> Tuple[
     Dict[str, Any],
     List[Dict[str, Any]],
@@ -302,7 +320,17 @@ def resolve_tool_markup(
     """Promote leftover markup or return its typed protocol failure."""
     if tool_calls or not content_has_tool_markup(content):
         return msg, tool_calls, content, None
-    promoted = promote_tool_markup(msg)
+    allowed: Set[str] = set()
+    for schema in tool_schemas:
+        function = schema.get("function") if isinstance(schema, dict) else None
+        name = (
+            function.get("name")
+            if isinstance(function, dict)
+            else schema.get("name") if isinstance(schema, dict) else None
+        )
+        if isinstance(name, str) and name:
+            allowed.add(name)
+    promoted = promote_tool_markup(msg, allowed)
     if promoted is None:
         return msg, tool_calls, content, tool_markup_protocol_fail(
             accumulated_usage, llm_trace,

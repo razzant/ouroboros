@@ -248,7 +248,7 @@ def test_explicit_final_trial_cannot_rebind_a_stale_record():
     assert projection["final_submission_reason"] == "invalid_final_trial"
 
 
-def test_budget_claims_are_atomic_and_unresolved_dead_releases_reserve(tmp_path):
+def test_budget_claims_are_atomic_and_unresolved_retains_reserve(tmp_path):
     ledger = BudgetLedger(tmp_path / "claims.jsonl", cap_usd=5)
     ledger.claim("arvo:1", 4, attempt_id="a1")
     with pytest.raises(ClaimRefused):
@@ -257,16 +257,16 @@ def test_budget_claims_are_atomic_and_unresolved_dead_releases_reserve(tmp_path)
     projection = ledger.projection()
     assert projection.can_dispatch is True
     assert projection.reason == "within_cap"
-    assert projection.unresolved_upper_bound_usd == pytest.approx(0)
-    assert projection.projected_usd == pytest.approx(0)
+    assert projection.unresolved_upper_bound_usd == pytest.approx(4)
+    assert projection.projected_usd == pytest.approx(4)
     assert projection.reserved_usd == pytest.approx(0)
     second = ledger.claim("arvo:2", 1, attempt_id="a2")
     assert second["attempt_id"] == "a2"
-    third = ledger.claim("arvo:3", 1, attempt_id="a3")
-    assert third["attempt_id"] == "a3"
+    with pytest.raises(BudgetRefused):
+        ledger.claim("arvo:3", 1, attempt_id="a3")
 
 
-def test_budget_historical_null_unresolved_does_not_refuse_catalog():
+def test_budget_null_unresolved_falls_back_to_original_reservation():
     projection = project_budget(
         [
             {"event": "claim", "task_id": "arvo:1", "attempt_id": "a1", "reserved_usd": 2},
@@ -275,12 +275,12 @@ def test_budget_historical_null_unresolved_does_not_refuse_catalog():
         cap_usd=10,
     )
     assert projection.can_dispatch is True
-    assert projection.unresolved_upper_bound_usd == pytest.approx(0)
-    assert projection.projected_usd == pytest.approx(0)
-    assert "arvo:1" not in projection.active_task_ids
+    assert projection.unresolved_upper_bound_usd == pytest.approx(2)
+    assert projection.projected_usd == pytest.approx(2)
+    assert "arvo:1" in projection.active_task_ids
 
 
-def test_budget_historical_claim_estimate_corpses_do_not_refuse_catalog():
+def test_budget_unresolved_bounds_remain_campaign_liability():
     events = []
     for i in range(163):
         events.append(
@@ -297,7 +297,8 @@ def test_budget_historical_claim_estimate_corpses_do_not_refuse_catalog():
     projection = project_budget(events, cap_usd=3500)
     assert projection.can_dispatch is True
     assert projection.reserved_usd == pytest.approx(0)
-    assert projection.projected_usd == pytest.approx(0)
+    assert projection.unresolved_upper_bound_usd == pytest.approx(3260)
+    assert projection.projected_usd == pytest.approx(3260)
     ledger = BudgetLedger("/tmp/unused-historical-replay", cap_usd=3500)
     # Replay-only: a fresh ledger with the same events would dispatch.
     replayed = project_budget(events + [], cap_usd=3500)
@@ -315,16 +316,16 @@ def test_budget_live_in_flight_huge_reserve_still_blocks(tmp_path):
         ledger.claim("arvo:2", 2, attempt_id="next")
 
 
-def test_budget_unresolved_dead_does_not_block_even_with_huge_written_bound(tmp_path):
+def test_budget_unresolved_written_bound_blocks_when_cap_is_exceeded(tmp_path):
     ledger = BudgetLedger(tmp_path / "claims.jsonl", cap_usd=5)
     ledger.claim("arvo:1", 1, attempt_id="a1")
     ledger.mark_unresolved("a1", 100)
     projection = ledger.projection()
-    assert projection.can_dispatch is True
-    assert projection.unresolved_upper_bound_usd == pytest.approx(0)
-    assert projection.projected_usd == pytest.approx(0)
-    second = ledger.claim("arvo:2", 1, attempt_id="a2")
-    assert second["attempt_id"] == "a2"
+    assert projection.can_dispatch is False
+    assert projection.unresolved_upper_bound_usd == pytest.approx(100)
+    assert projection.projected_usd == pytest.approx(100)
+    with pytest.raises(BudgetRefused):
+        ledger.claim("arvo:2", 1, attempt_id="a2")
 
 
 def test_budget_projection_replays_terminal_states():
@@ -1490,6 +1491,18 @@ def test_reconcile_skips_attempts_already_in_result_index(tmp_path):
     )
     (run_dir / "result_index.jsonl").write_text(
         '{"task_id": "arvo:1"}\n',
+        encoding="utf-8",
+    )
+    cleanup = (
+        run_dir
+        / "attestations"
+        / "arvo__1"
+        / "attempt-a01"
+        / "workspace_cleanup.json"
+    )
+    cleanup.parent.mkdir(parents=True)
+    cleanup.write_text(
+        json.dumps({"status": "verified", "ok": True}),
         encoding="utf-8",
     )
     assert reconcile_main(_reconcile_args(run_dir)) == 0

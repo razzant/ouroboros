@@ -77,6 +77,7 @@ def run_dispatched(
     *,
     max_workers: int,
     threshold: int = GATEWAY_CIRCUIT_BREAKER_THRESHOLD,
+    on_row: Callable[[Mapping[str, Any]], None] | None = None,
 ) -> list[dict[str, Any]]:
     """Run ``run_one`` over ``tasks``, stopping admission on a dead gateway.
 
@@ -115,18 +116,22 @@ def run_dispatched(
                 break
             row = run_one(task)
             record(row)
+            if on_row is not None:
+                on_row(row)
             rows.append(row)
             submitted += 1
         return settle(rows, submitted)
 
     dispatched: dict[int, dict[str, Any]] = {}
+    completed: dict[int, dict[str, Any]] = {}
     submitted = 0
+    next_record = 0
     with ThreadPoolExecutor(max_workers=max_workers, thread_name_prefix="cybergym") as pool:
         in_flight: dict[Future[dict[str, Any]], int] = {}
         while True:
             while (
                 not circuit_open.is_set()
-                and len(in_flight) < max_workers
+                and len(in_flight) + len(completed) < max_workers
                 and submitted < len(tasks)
             ):
                 in_flight[pool.submit(run_one, tasks[submitted])] = submitted
@@ -134,11 +139,17 @@ def run_dispatched(
             if not in_flight:
                 break
             done, _pending = wait(tuple(in_flight), return_when=FIRST_COMPLETED)
-            # Record a simultaneous batch in task order so the streak is
-            # deterministic and matches the sequential lane's semantics.
-            finished = sorted((in_flight.pop(future), future) for future in done)
-            for position, future in finished:
-                row = future.result()
+            for future in done:
+                position = in_flight.pop(future)
+                completed[position] = future.result()
+            # Source order is the campaign treatment. Buffer out-of-order
+            # completions so a later healthy row cannot open an admission slot
+            # before an earlier transport failure latches the breaker.
+            while next_record in completed:
+                row = completed.pop(next_record)
                 record(row)
-                dispatched[position] = row
+                if on_row is not None:
+                    on_row(row)
+                dispatched[next_record] = row
+                next_record += 1
     return settle([dispatched[position] for position in sorted(dispatched)], submitted)

@@ -27,8 +27,8 @@ from devtools.benchmarks.cybergym.cybergym_executor import (
 from tests.test_cybergym_executor import _config, dataclasses_replace
 
 
-def test_post_create_timeout_releases_workspace_slot(tmp_path, monkeypatch):
-    """A post-create timeout must rm the workspace so the next row can claim."""
+def test_post_create_timeout_preserves_workspace_custody(tmp_path, monkeypatch):
+    """An admitted-but-unresolved attempt keeps its exact workspace for reconcile."""
     config = _config(tmp_path, provider_probe=False)
     executor = CyberGymExecutor(config)
     cleaned = []
@@ -72,11 +72,11 @@ def test_post_create_timeout_releases_workspace_slot(tmp_path, monkeypatch):
         budget_cap_usd=5,
     )
     assert [row["status"] for row in rows] == ["infra_failed", "infra_failed"]
-    assert len(cleaned) == 2
-    assert executor._task_containers == {}
+    assert cleaned == []
+    assert len(executor._task_containers) == 2
     projection = BudgetLedger(config.run_root / "claims.jsonl", cap_usd=5).projection()
     assert projection.reserved_usd == pytest.approx(0)
-    assert projection.unresolved_upper_bound_usd == pytest.approx(0)
+    assert projection.unresolved_upper_bound_usd == pytest.approx(2)
     assert projection.can_dispatch is True
 
 

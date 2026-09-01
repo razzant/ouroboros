@@ -20,6 +20,7 @@ from devtools.benchmarks.cybergym.cybergym_adapter import _TERMINAL_GATEWAY_STAT
 from devtools.benchmarks.cybergym.cybergym_docker import _write_json
 from devtools.benchmarks.cybergym.cybergym_wire import (
     ExecutorFailure,
+    GatewayTransportError,
     HttpStatusError,
     _CostGraceTracker,
     _cost_is_pending,
@@ -164,6 +165,16 @@ class _CustodyMixin:
                     custody_seconds=custody_seconds,
                 )
             raise ExecutorFailure("Ouroboros task cancellation request failed") from exc
+        except GatewayTransportError as exc:
+            _write_json(
+                checkpoint,
+                {
+                    "gateway_task_id": task_id,
+                    "status": "cancel_request_failed",
+                    "cancel_error": type(exc).__name__,
+                },
+            )
+            raise
         except Exception as exc:
             _write_json(
                 checkpoint,

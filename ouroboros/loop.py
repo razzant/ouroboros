@@ -3826,10 +3826,10 @@ def _maybe_enforce_child_absorption_gate(
         reason_code="children_unabsorbed",
     )
     _merge_finalization_trace(llm_trace, forced_trace)
-    _run_forced_children_acceptance(
+    acceptance_result = _run_forced_children_acceptance(
         tools, limit_ctx, text, messages, emit_progress, llm_trace,
     )
-    return text, usage, llm_trace
+    return acceptance_result or (text, usage, llm_trace)
 
 
 def _run_forced_children_acceptance(
@@ -3839,15 +3839,8 @@ def _run_forced_children_acceptance(
     messages: List[Dict[str, Any]],
     emit_progress: Callable[[str], None],
     llm_trace: Dict[str, Any],
-) -> None:
-    """Content acceptance still runs on the forced children_unabsorbed rail (owner Q2A).
-
-    The panel uses the ORDINARY entry point (``_run_task_acceptance_review_once``)
-    after the forced answer text exists but BEFORE the loop seals it; the evidence
-    packet carries the undispositioned children via the ctx stash. The forced rail
-    can never take another model round, so a ``True`` return terminalizes here: a
-    requested improvement pass downgrades to ``finalized_unaccepted``; a WAIT shape
-    that never ran the panel keeps the typed acceptance-bypass verdict. Never raises."""
+) -> Optional[Tuple[str, Dict[str, Any], Dict[str, Any]]]:
+    """Run acceptance on the forced child rail, preserving typed infra failure."""
     if not str(text or "").strip():
         return
     tools_ctx = tools._ctx
@@ -3874,9 +3867,15 @@ def _run_forced_children_acceptance(
             tools=tools, content=str(text), task_id=limit_ctx.task_id, task_type=limit_ctx.task_type,
             llm_trace=llm_trace, drive_root=limit_ctx.drive_root, messages=messages, emit_progress=emit_progress,
         )
-        # This rail never reaches _no_tool_final_answer (the flag's only reader).
-        tools_ctx._task_acceptance_fence_infra_failed = False
         if not another_round:
+            fence_failure = finalize_acceptance_fence_failure(
+                tools_ctx,
+                limit_ctx,
+                llm_trace,
+                _forced_fallback_result,
+            )
+            if fence_failure is not None:
+                return fence_failure
             return
         tools_ctx._task_acceptance_reviewed = True
         _end_task_acceptance_fence(tools_ctx, outcome="terminal")
@@ -6318,7 +6317,7 @@ def run_llm_loop(
             )
             content = msg.get("content")
             msg, tool_calls, content, markup_failure = resolve_tool_markup(
-                msg, tool_calls, content, accumulated_usage, llm_trace)
+                msg, tool_calls, content, accumulated_usage, llm_trace, tool_schemas)
             if markup_failure is not None:
                 return markup_failure
             _latch_final_answer_marker(llm_trace, content, current_tool_calls=tool_calls)

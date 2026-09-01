@@ -332,7 +332,7 @@ class TestDeepSeekDsmlParsing(unittest.TestCase):
             f"</{_DSML_MARK}invoke>"
         )
         msg = {
-            "content": "I will read the file now.\n" + self._dsml(invoke),
+            "content": self._dsml(invoke),
             "tool_calls": [],
         }
         parsed = LLMClient._parse_tool_calls_from_content(msg, {"read_file"})
@@ -353,9 +353,9 @@ class TestDeepSeekDsmlParsing(unittest.TestCase):
         parsed = LLMClient._parse_tool_calls_from_content(msg, {"read_file"})
         self.assertFalse(parsed.get("tool_calls"))
 
-    def test_normalize_remote_response_promotes_well_formed_dsml(self):
+    def test_loop_wire_seam_promotes_well_formed_remote_dsml(self):
         from ouroboros.llm import LLMClient
-        from ouroboros.tool_call_markup import _DSML_MARK
+        from ouroboros.tool_call_markup import _DSML_MARK, resolve_tool_markup
 
         invoke = (
             f"<{_DSML_MARK}invoke name=\"read_file\">"
@@ -374,7 +374,7 @@ class TestDeepSeekDsmlParsing(unittest.TestCase):
                 "choices": [{
                     "message": {
                         "role": "assistant",
-                        "content": "Looking.\n" + self._dsml(invoke),
+                        "content": self._dsml(invoke),
                         "tool_calls": [],
                     }
                 }],
@@ -383,5 +383,46 @@ class TestDeepSeekDsmlParsing(unittest.TestCase):
             target,
             skip_cost_fetch=True,
         )
-        self.assertEqual(len(message.get("tool_calls") or []), 1)
+        self.assertFalse(message.get("tool_calls"))
+        message, calls, _content, failure = resolve_tool_markup(
+            message,
+            [],
+            message["content"],
+            {},
+            {"reasoning_notes": []},
+            [{"type": "function", "function": {"name": "read_file"}}],
+        )
+        self.assertIsNone(failure)
+        self.assertEqual(len(calls), 1)
         self.assertEqual(message["tool_calls"][0]["function"]["name"], "read_file")
+
+    def test_plain_dsml_preserves_literal_reasoning_tags_in_parameter(self):
+        from ouroboros.llm import LLMClient
+
+        literal = "<think>literal</think><reasoning>bytes</reasoning>"
+        msg = {
+            "content": (
+                '<tool_calls><invoke name="write_file">'
+                f'<parameter name="content" string="true">{literal}</parameter>'
+                "</invoke></tool_calls>"
+            ),
+            "tool_calls": [],
+        }
+        parsed = LLMClient._parse_tool_calls_from_content(msg, {"write_file"})
+        args = json.loads(parsed["tool_calls"][0]["function"]["arguments"])
+        self.assertEqual(args["content"], literal)
+        self.assertIsNone(parsed["content"])
+
+    def test_prose_quoting_tool_markup_is_not_a_wire_envelope(self):
+        from ouroboros.tool_call_markup import content_has_tool_markup
+
+        self.assertFalse(
+            content_has_tool_markup(
+                "Document the literal <tool_call> tag without invoking anything."
+            )
+        )
+        self.assertFalse(
+            content_has_tool_markup(
+                "Example: <tool_calls><invoke name=\"read_file\"></invoke></tool_calls>"
+            )
+        )

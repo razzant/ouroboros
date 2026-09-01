@@ -40,8 +40,10 @@ from devtools.benchmarks.cybergym.cybergym_adapter import (
     BudgetLedger,
     CyberGymError,
     CyberGymIntegrationUnavailable,
+    LedgerError,
     TaskSpec,
     _append_result_pair,
+    campaign_execution_lock,
     finalize_outcome_row,
     load_task_catalog,
     safe_task_id,
@@ -165,6 +167,20 @@ class _ReconcileMixin:
         with self._registry_lock:
             self._task_containers[container_name] = actual_id
         return actual_id
+
+    def adopt_reconciled_workspace(self, task: TaskSpec, attempt_id: str) -> str:
+        """Adopt the deterministic exact-ID workspace for cleanup-only recovery."""
+        plan = self._plans.get(str(attempt_id))
+        if plan is None:
+            agent_id = make_opaque_agent_id(
+                self.config.campaign_id,
+                task.task_id,
+                str(attempt_id),
+            )
+            plan = self._task_network_plan(task.task_id, agent_id)
+        return self._adopt_workspace_container(
+            f"cybergym-workspace-{plan.opaque_agent_id}"
+        )
 
     def _terminal_result_from_isolate_disk(
         self, gateway_task_id: str
@@ -426,14 +442,25 @@ class _ReconcileMixin:
                 "container_name": container_name,
             }
 
+    def finalize_adopted_campaign(self) -> Mapping[str, Any]:
+        """Transfer verified adoption into cleanup ownership after full recovery."""
+        if not self._adopted:
+            raise ExecutorFailure("campaign was not adopted")
+        with self._registry_lock:
+            if self._task_containers:
+                raise ExecutorFailure("adopted workspaces remain in custody")
+        self._adopted = False
+        self._network_created = True
+        return self.close() or {"status": "not_needed", "ok": True}
 
-def _recorded_task_ids(run_dir: pathlib.Path) -> set[str]:
-    """Read the task ids that already have a row in the run's result index.
+
+def _recorded_task_rows(run_dir: pathlib.Path) -> dict[str, dict[str, Any]]:
+    """Read the latest row per task from the run's result index.
 
     Lenient like the reconcile preamble has always been: blank or non-object
     lines are skipped, but an unreadable index is a typed refusal.
     """
-    recorded: set[str] = set()
+    recorded: dict[str, dict[str, Any]] = {}
     index_path = run_dir / "result_index.jsonl"
     if not index_path.exists():
         return recorded
@@ -446,10 +473,34 @@ def _recorded_task_ids(run_dir: pathlib.Path) -> set[str]:
                 continue
             raw_task = value.get("task_id", value.get("instance_id", ""))
             if raw_task:
-                recorded.add(safe_task_id(str(raw_task)))
+                recorded[safe_task_id(str(raw_task))] = dict(value)
     except (OSError, UnicodeDecodeError, json.JSONDecodeError) as exc:
         raise CyberGymError(f"result index is unreadable: {exc}") from exc
     return recorded
+
+
+def _recorded_task_ids(run_dir: pathlib.Path) -> set[str]:
+    return set(_recorded_task_rows(run_dir))
+
+
+def _workspace_cleanup_complete(
+    run_dir: pathlib.Path,
+    task_id: str,
+    attempt_id: str,
+) -> bool:
+    path = (
+        safe_task_path(run_dir / "attestations", task_id, attempt_id)
+        / "workspace_cleanup.json"
+    )
+    try:
+        value = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, UnicodeDecodeError, json.JSONDecodeError):
+        return False
+    return bool(
+        isinstance(value, Mapping)
+        and value.get("ok") is True
+        and value.get("status") == "verified"
+    )
 
 
 @contextlib.contextmanager
@@ -495,33 +546,6 @@ def _append_row_if_unrecorded(run_dir: pathlib.Path, row: Mapping[str, Any]) -> 
             return False
         _append_result_pair(run_dir, row)
         return True
-
-
-@contextlib.contextmanager
-def _reconcile_process_lock(run_dir: pathlib.Path) -> Iterator[bool]:
-    """Exclusive advisory lock so only one ``--reconcile`` pass works a run root.
-
-    A second concurrent process is refused (fail-closed) instead of racing
-    the delivery loop, which would double-submit officially and append
-    duplicate rows.  The OS releases the lock if the holder dies, so a
-    crashed pass never blocks a later one.  Platforms without ``fcntl``
-    proceed without the lock, exactly like the result-index lock seam.
-    """
-    try:
-        import fcntl
-    except ImportError:
-        yield True
-        return
-    handle = (run_dir / ".reconcile.lock").open("a+", encoding="utf-8")
-    try:
-        try:
-            fcntl.flock(handle.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
-        except BlockingIOError:
-            yield False
-            return
-        yield True
-    finally:
-        handle.close()
 
 
 def _record_reconcile_pass(manifest: dict[str, Any], report: Mapping[str, Any]) -> None:
@@ -682,7 +706,7 @@ def reconcile_main(args: argparse.Namespace) -> int:
     # A second concurrent reconcile process on the same run root would race
     # this pass through adoption, delivery, and the manifest write; refuse it
     # instead of relying on the per-row lock to catch every interleaving.
-    with _reconcile_process_lock(run_dir) as lock_held:
+    with campaign_execution_lock(run_dir, blocking=False) as lock_held:
         if not lock_held:
             print(
                 "[cybergym] reconcile refusal: another --reconcile process "
@@ -691,11 +715,16 @@ def reconcile_main(args: argparse.Namespace) -> int:
             )
             return 2
 
+        ledger = BudgetLedger(
+            run_dir / "claims.jsonl",
+            cap_usd=float(args.budget_usd),
+        )
         try:
-            recorded = _recorded_task_ids(run_dir)
+            recorded_rows = _recorded_task_rows(run_dir)
         except CyberGymError as exc:
             print(f"[cybergym] reconcile refusal: {exc}", file=sys.stderr)
             return 2
+        recorded = set(recorded_rows)
 
         slug_to_id = {task_slug(task_id): task_id for task_id in requested_ids}
         pending: list[tuple[str, str, pathlib.Path]] = []
@@ -713,7 +742,21 @@ def reconcile_main(args: argparse.Namespace) -> int:
                     if not (attempt_dir.is_dir() and checkpoint.is_file()):
                         continue
                     checkpointed.add(task_id)
-                    if task_id not in recorded:
+                    try:
+                        claim_state = ledger.attempt_state(attempt_dir.name)
+                    except LedgerError as exc:
+                        print(
+                            f"[cybergym] reconcile refusal: {exc}",
+                            file=sys.stderr,
+                        )
+                        return 2
+                    if (
+                        task_id not in recorded
+                        or claim_state == "reserved"
+                        or not _workspace_cleanup_complete(
+                            run_dir, task_id, attempt_dir.name,
+                        )
+                    ):
                         pending.append((task_id, attempt_dir.name, checkpoint))
 
         # A requested task with neither a result row nor a checkpoint was never
@@ -788,22 +831,61 @@ def reconcile_main(args: argparse.Namespace) -> int:
             return 2
         reconcile_report["adoption"] = dict(adopt_report)
 
-        ledger = BudgetLedger(run_dir / "claims.jsonl", cap_usd=float(args.budget_usd))
         specs = {spec.task_id: spec for spec in _task_specs(requested_ids, contract=contract)}
         exit_code = 0
         try:
             for task_id, attempt_id, checkpoint in pending:
                 spec = specs[task_id]
                 if task_id in recorded:
-                    # An earlier attempt of this task was already delivered in
-                    # this pass; a second checkpoint must not double-submit.
-                    reconcile_report["skipped_recorded"].append(
-                        {
-                            "task_id": task_id,
-                            "attempt_id": attempt_id,
-                            "disposition": "skipped_recorded",
-                        }
-                    )
+                    entry = {
+                        "task_id": task_id,
+                        "attempt_id": attempt_id,
+                        "disposition": "recorded_recovery",
+                    }
+                    row = recorded_rows[task_id]
+                    row_attempt = str(row.get("attempt_id") or "")
+                    try:
+                        claim_state = ledger.attempt_state(attempt_id)
+                        if claim_state in {"reserved", "unresolved"}:
+                            if row_attempt != attempt_id:
+                                raise LedgerError(
+                                    "recorded row belongs to a different active attempt"
+                                )
+                            settle_finished_attempt(ledger, attempt_id, row)
+                            claim_state = ledger.attempt_state(attempt_id)
+                    except CyberGymError as exc:
+                        entry.update(
+                            disposition="settlement_pending",
+                            error_type=type(exc).__name__,
+                        )
+                        reconcile_report["undeliverable"].append(entry)
+                        exit_code = 2
+                        continue
+                    if _workspace_cleanup_complete(run_dir, task_id, attempt_id):
+                        entry["disposition"] = "already_complete"
+                        reconcile_report["skipped_recorded"].append(entry)
+                        continue
+                    try:
+                        executor_obj.adopt_reconciled_workspace(spec, attempt_id)
+                        release = executor_obj.release_reconciled_workspace(
+                            spec, attempt_id,
+                        )
+                    except CyberGymError as exc:
+                        entry.update(
+                            disposition="cleanup_pending",
+                            error_type=type(exc).__name__,
+                        )
+                        reconcile_report["undeliverable"].append(entry)
+                        exit_code = 2
+                        continue
+                    if isinstance(release, Mapping) and release.get("ok") is False:
+                        entry["disposition"] = "cleanup_pending"
+                        reconcile_report["undeliverable"].append(entry)
+                        exit_code = 2
+                        continue
+                    entry["claim_state"] = claim_state
+                    entry["disposition"] = "recorded_recovered"
+                    reconcile_report["skipped_recorded"].append(entry)
                     continue
                 task_contract = spec.metadata.get("task_contract")
                 task_dir = safe_task_path(run_dir, task_id)
@@ -853,23 +935,35 @@ def reconcile_main(args: argparse.Namespace) -> int:
                     exit_code = 2
                     continue
                 if not appended:
-                    # Another writer recorded this task while delivery ran; the
-                    # official row stands and the duplicate is dropped.
                     entry["disposition"] = "recorded_elsewhere"
+                    try:
+                        claim_state = ledger.attempt_state(attempt_id)
+                    except LedgerError as exc:
+                        entry["error_type"] = type(exc).__name__
+                        reconcile_report["undeliverable"].append(entry)
+                        exit_code = 2
+                        continue
+                    if claim_state in {"reserved", "unresolved"}:
+                        entry["claim_state"] = claim_state
+                        reconcile_report["undeliverable"].append(entry)
+                        exit_code = 2
+                        continue
                     reconcile_report["skipped_recorded"].append(entry)
                     executor_obj.release_reconciled_workspace(spec, attempt_id)
                     continue
                 recorded.add(task_id)
+                recorded_rows[task_id] = dict(row)
                 entry["row_status"] = str(row.get("status") or "")
                 try:
                     settle_finished_attempt(ledger, attempt_id, outcome)
                 except CyberGymError as exc:
-                    # The row is the denominator surface and is already written; a
-                    # settle refusal means the claim was no longer active (e.g. the
-                    # original launcher settled it before dying).  Record the fact
-                    # rather than losing the row.
-                    entry["settle"] = "not_active"
+                    # The row is durable, but cleanup must wait until a later
+                    # pass proves the claim terminal.
+                    entry["settle"] = "pending"
                     entry["settle_type"] = type(exc).__name__
+                    reconcile_report["undeliverable"].append(entry)
+                    exit_code = 2
+                    continue
                 # The row and the claim settle are both durable; only now may
                 # the adopted workspace container be released.  Every earlier
                 # exit from this iteration keeps the container so a later pass
@@ -884,7 +978,20 @@ def reconcile_main(args: argparse.Namespace) -> int:
                     reconcile_report["delivered"].append(entry)
         finally:
             try:
-                reconcile_report["detach"] = dict(executor_obj.close() or {})
+                fully_recovered = (
+                    exit_code == 0
+                    and not unaccounted
+                    and not reconcile_report["left_running"]
+                    and not reconcile_report["undeliverable"]
+                )
+                cleanup = (
+                    executor_obj.finalize_adopted_campaign()
+                    if fully_recovered
+                    else executor_obj.close()
+                )
+                reconcile_report[
+                    "cleanup" if fully_recovered else "detach"
+                ] = dict(cleanup or {})
             except Exception as exc:
                 reconcile_report["detach"] = {"status": "error", "error_type": type(exc).__name__}
                 exit_code = 2
@@ -892,8 +999,14 @@ def reconcile_main(args: argparse.Namespace) -> int:
         if unaccounted:
             exit_code = 2
         reconcile_report["status"] = "completed" if exit_code == 0 else "partial"
-        with finalize_run_manifest(manifest_path, manifest, outcome="reconciled") as final:
+        manifest_outcome = "reconciled" if exit_code == 0 else "reconcile_partial"
+        with finalize_run_manifest(
+            manifest_path,
+            manifest,
+            outcome=manifest_outcome,
+            exit_code=exit_code,
+        ) as final:
             _record_reconcile_pass(manifest, reconcile_report)
-            final.update({"outcome": "reconciled", "exit_code": exit_code})
+            final.update({"outcome": manifest_outcome, "exit_code": exit_code})
         print(json.dumps(reconcile_report, indent=2, sort_keys=True))
         return exit_code

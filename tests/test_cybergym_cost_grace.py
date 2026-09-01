@@ -42,6 +42,7 @@ def _completed_abandoned_residue_frame(task_id, *, residue=0.035398, age_sec=360
         "unknown_unmetered": 0,
         "non_final_rows": 1,
         "cost_final": False,
+        "cost_estimated": False,
         "cost_accounting_status": "available",
         "ledger_integrity_degraded": False,
     }
@@ -105,6 +106,40 @@ def test_gateway_live_reservation_is_never_grace_accepted(tmp_path):
     assert calls == ["POST", "GET", "GET", "GET"]
     assert result["cost_final"] is True
     assert "cost_grace_acceptance" not in result
+
+
+@pytest.mark.parametrize(
+    "missing",
+    [
+        "ledger_integrity_degraded",
+        "cost_accounting_status",
+        "cost_estimated",
+        "unknown_unmetered",
+        "reserved_usd",
+    ],
+)
+def test_cost_grace_requires_every_accounting_axis(missing):
+    from devtools.benchmarks.cybergym.cybergym_wire import (
+        _abandoned_cost_residue_usd,
+    )
+
+    frame = _completed_abandoned_residue_frame("cybergym-grace-sparse")
+    frame.pop(missing)
+    assert _abandoned_cost_residue_usd(frame) is None
+
+
+def test_cost_grace_marker_must_prove_full_wait():
+    from devtools.benchmarks.cybergym.cybergym_wire import _valid_cost_grace
+
+    frame = _completed_abandoned_residue_frame("cybergym-grace-marker")
+    marked = _CostGraceTracker().accept(
+        frame,
+        now=0.0,
+        wall_now=datetime.datetime.now(datetime.timezone.utc).timestamp(),
+    )
+    assert marked is not None
+    marked["cost_grace_acceptance"]["waited_sec"] = 1
+    assert _valid_cost_grace(marked) is None
 
 
 def test_cancel_404_recovers_terminal_gateway_payload(tmp_path):
@@ -239,6 +274,8 @@ def test_run_campaign_grace_accepted_row_discloses_residue(tmp_path):
     assert rows[0]["cost_usd"] == pytest.approx(0.386527)
     projection = BudgetLedger(tmp_path / "grace-row" / "claims.jsonl", cap_usd=2).projection()
     assert projection.settled_usd == pytest.approx(0.386527)
+    assert projection.unresolved_upper_bound_usd == 0
+    assert projection.projected_usd == pytest.approx(0.386527)
 
 
 def test_grace_marker_on_failure_outcome_does_not_break_row_build(tmp_path):

@@ -108,24 +108,25 @@ disk such as NVMe.  The append-only run root keeps the durable artifacts
 surface (`state/`, `logs/`, `task_results/`, `memory/`, `settings.json`) back
 to `run_root/ouroboros-data` on a best-effort basis; the receipt lands in
 `extra.state_export`.  Large observability blobs are not mirrored.  The state
-directory must not overlap the seed repository or the run root, must sit on a
-local filesystem (known network filesystems such as CephFS or NFS are refused;
-`--allow-network-state-dir` overrides with a loud warning), and telemetry
+directory must not overlap the seed repository or the run root, and its
+filesystem must be positively identified as local.  Network and unknown types
+are refused unless `--allow-network-state-dir` supplies a loud override; telemetry
 verification accepts exactly the run root plus this one external data root.
 
 `--reconcile <run root>` adopts an interrupted run whose launcher died after
 the gateway accepted tasks but before their rows were delivered.  It re-reads
-the manifest, attaches to the still-running isolated server and workspace
-containers, and runs the shared delivery path for every checkpointed attempt
-that has no `result_index.jsonl` row.  It never re-runs an agent, never starts
-new infrastructure, and never rewrites an existing row.  Attempts whose
+the manifest and attaches to the still-running isolated server and workspace
+containers.  A campaign execution lock excludes the live launcher; recovery
+joins checkpoint, result row, claim state, and cleanup receipt so a later pass
+can finish settlement-only or cleanup-only crash windows.  Persisted delivery
+phases reuse an existing exact-hash submit/verify rather than repeating
+upstream side effects.  It never re-runs an agent or rewrites an existing row.  Attempts whose
 gateway task is still alive are reported as `left_running` and left for a
 later pass; each pass appends its report to `extra.reconcile_passes` of the
 finalized manifest, and earlier passes are never overwritten.  A run whose
-requested tasks have neither rows nor checkpoints is reported `incomplete`
-with a nonzero exit, never as a successful reconcile.  The exit code is `0`
-when nothing deliverable failed, `2` on refusals or undeliverable terminal
-attempts.  Reconcile requires the same pinned inputs and `--model` value as
+requested tasks have neither rows nor checkpoints is reported
+`reconcile_incomplete`; another partial pass is `reconcile_partial`.  The exit
+code is `0` only when recovery is complete and `2` otherwise.  Reconcile requires the same pinned inputs and `--model` value as
 the original invocation, refuses to run concurrently against the same run
 root, and cross-checks an explicit `--state-dir` against the manifest's
 recorded state layout.
@@ -346,14 +347,11 @@ failures, infra failures, timeouts, and unattempted rows.
    publishing or submitting the headline.
 
 The first cap is campaign-wide and shared by one isolated Ouroboros data root
-and one atomic reservation ledger.  Settled spend plus live in-flight
-reservations must remain below USD 3,500, and a new claim is refused when the
-projected total plus its estimate would cross the cap.  A finished or failed
-attempt settles its known actual and releases the reservation.  A nullable
-or unmetered provider response on a completed result demotes the row to an
-infrastructure result, never a capability success, and the attempt's
-reservation is marked unresolved — released from dispatch liability, not
-blocking new dispatch.  A further tranche is never automatic; it needs a new
+and one atomic reservation ledger.  Settled spend, live reservations, and
+unresolved upper bounds must remain below USD 3,500.  A finished attempt
+settles its known terminal amount; otherwise its strongest known upper bound
+remains liability, falling back to the original reservation.  A wholly
+unknown bound blocks dispatch rather than becoming zero.  A further tranche is never automatic; it needs a new
 explicit owner decision after comparable model-focused evidence.  Resuming a
 partial run creates a new append-only directory with explicit remaining task
 ids; it does not rewrite or relabel the original denominator.

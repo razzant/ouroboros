@@ -794,6 +794,64 @@ def test_bounded_fence_wait_terminalizes_via_forced_fallback(monkeypatch, tmp_pa
     assert "could not start its acceptance review" in text
 
 
+def test_forced_children_rail_preserves_fence_infra_failure(monkeypatch, tmp_path):
+    import ouroboros.loop as loop_mod
+    from ouroboros.outcomes import RESULT_INFRA_FAILED
+    from ouroboros.tools.registry import ToolRegistry
+
+    registry = ToolRegistry(repo_dir=tmp_path, drive_root=tmp_path)
+    registry._ctx.task_id = "root-forced"
+    registry._ctx.task_metadata = {
+        "root_task_id": "root-forced",
+        "budget_drive_root": str(tmp_path),
+    }
+    trace = {"tool_calls": [], "reasoning_notes": []}
+    messages = [{"role": "user", "content": "task"}]
+    limit_ctx = loop_mod._RoundLimitContext(
+        messages,
+        SimpleNamespace(),
+        "test-model",
+        "medium",
+        1,
+        tmp_path / "logs",
+        "root-forced",
+        2,
+        None,
+        {},
+        "",
+        False,
+        10,
+        drive_root=tmp_path,
+        incoming_messages=None,
+        owner_msg_seen=set(),
+    )
+    loop_mod._finalize_limit_ctx(limit_ctx, registry, trace)
+    monkeypatch.setattr(loop_mod, "_undispositioned_children", lambda *_args: [])
+
+    def exhausted(**_kwargs):
+        registry._ctx._task_acceptance_fence_infra_failed = True
+        return False
+
+    monkeypatch.setattr(
+        loop_mod,
+        "_run_task_acceptance_review_once",
+        exhausted,
+    )
+    result = loop_mod._run_forced_children_acceptance(
+        registry,
+        limit_ctx,
+        "forced answer",
+        messages,
+        lambda _message: None,
+        trace,
+    )
+    assert result is not None
+    text, usage, _trace = result
+    assert usage["execution_status"] == RESULT_INFRA_FAILED
+    assert usage["reason_code"] == "acceptance_fence_unavailable"
+    assert "could not start its acceptance review" in text
+
+
 class _DeadProc:
     pid = 0
 
@@ -893,21 +951,32 @@ def test_wedged_owner_orphan_heal_forgets_and_releases(monkeypatch, tmp_path):
         task_reaper._forget_task_reaping("root-w")
 
 
-def test_reaper_exception_path_forgets_registry_id(monkeypatch, tmp_path):
-    """A reap job that raises before death confirmation must not leave the task
-    id in the not-provably-dead registry for the rest of the uptime."""
+def test_reaper_exception_path_preserves_fence_custody(monkeypatch, tmp_path):
+    """An early reaper escape cannot make a potentially-live owner look dead."""
     from supervisor import task_reaper
 
-    _isolated_queue(monkeypatch, tmp_path)  # clears the reaping registry
+    queue_mod, _pending = _isolated_queue(monkeypatch, tmp_path)
     task_reaper.note_task_reaping("root-x")
-    # worker_id is not an int: reap_timed_out_task raises during variable
-    # extraction, before any kill is attempted.
-    task_reaper.reap_queue.put({"worker_id": "not-an-int", "task_id": "root-x"})
-    task_reaper.ensure_reaper_started()
-    deadline = time.time() + 10
-    while time.time() < deadline and task_reaper.task_reaping_in_progress("root-x"):
-        time.sleep(0.05)
-    assert not task_reaper.task_reaping_in_progress("root-x")
+    queue_mod.ACCEPTANCE_FENCES["root-x"] = {
+        "task_id": "root-x",
+        "root_task_id": "root-x",
+        "token": "fence-x",
+        "status": "active",
+    }
+    try:
+        # Invalid worker_id raises before any kill can prove the worker dead.
+        task_reaper.reap_queue.put(
+            {"worker_id": "not-an-int", "task_id": "root-x"}
+        )
+        task_reaper.ensure_reaper_started()
+        deadline = time.time() + 10
+        while time.time() < deadline and task_reaper.reap_queue.unfinished_tasks:
+            time.sleep(0.05)
+        assert task_reaper.task_reaping_in_progress("root-x")
+        assert queue_mod.gc_acceptance_fences_for_dead_owners() == []
+        assert "root-x" in queue_mod.ACCEPTANCE_FENCES
+    finally:
+        task_reaper._forget_task_reaping("root-x")
 
 
 def test_chat_turn_liveness_form(monkeypatch):

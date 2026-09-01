@@ -499,16 +499,12 @@ def _numeric_unresolved_bound(
     *,
     reserved_usd: float = 0.0,
     prior_upper: float | None = None,
-) -> float:
-    """Remaining liability of a finished attempt is 0.
-
-    A missing bound must not fall back to the live claim estimate: that
-    leftover UB reserved $20 × N corpses against the campaign cap. The legacy
-    parameters stay in the signature so historical callers and replay helpers
-    do not fork; they never become dispatch liability.
-    """
-    del explicit_upper, reserved_usd, prior_upper
-    return 0.0
+) -> float | None:
+    """Choose the strongest known liability bound for an unresolved attempt."""
+    for value in (explicit_upper, prior_upper, reserved_usd):
+        if value is not None:
+            return float(value)
+    return None
 
 
 def _finished_attempt_actual_usd(outcome: Mapping[str, Any] | None) -> float | None:
@@ -518,6 +514,8 @@ def _finished_attempt_actual_usd(outcome: Mapping[str, Any] | None) -> float | N
     claim estimate. A finished/infra row without a number has remaining 0.
     """
     if not isinstance(outcome, Mapping):
+        return None
+    if outcome.get("cost_estimated") is True:
         return None
     for key in ("cost_usd", "cost_upper_bound_usd"):
         if key not in outcome or outcome[key] is None:
@@ -747,11 +745,21 @@ def project_budget(
         elif kind in {"unresolved", "unknown"}:
             if previous is None or previous.get("state") not in {"reserved", "unresolved"}:
                 raise LedgerError(f"unresolved event has no active claim: {attempt}")
+            explicit_upper = _event_amount(
+                event,
+                "upper_bound_usd",
+                "unresolved_upper_bound_usd",
+                allow_none=True,
+            )
             latest[attempt] = {
                 **previous,
                 "state": "unresolved",
                 "reserved_usd": 0.0,
-                "upper_bound_usd": 0.0,
+                "upper_bound_usd": _numeric_unresolved_bound(
+                    explicit_upper,
+                    reserved_usd=float(previous.get("reserved_usd") or 0.0),
+                    prior_upper=previous.get("upper_bound_usd"),
+                ),
             }
         elif kind in {"release", "released"}:
             if previous is None or previous.get("state") not in {"reserved", "unresolved"}:
@@ -762,15 +770,30 @@ def project_budget(
 
     settled = sum(float(item.get("cost_usd") or 0.0) for item in latest.values() if item.get("state") == "settled")
     reserved = sum(float(item.get("reserved_usd") or 0.0) for item in latest.values() if item.get("state") == "reserved")
-    unresolved = 0.0
-    projected = settled + reserved
+    unresolved_items = [
+        item.get("upper_bound_usd")
+        for item in latest.values()
+        if item.get("state") == "unresolved"
+    ]
+    unresolved = (
+        None
+        if any(value is None for value in unresolved_items)
+        else sum(float(value or 0.0) for value in unresolved_items)
+    )
+    projected = None if unresolved is None else settled + reserved + unresolved
     if cap is None:
         available, can_dispatch, reason = None, True, "uncapped"
+    elif projected is None:
+        available, can_dispatch, reason = None, False, "unresolved_cost_unknown"
     else:
         available = cap - projected
         can_dispatch = available >= 0
         reason = "within_cap" if can_dispatch else "budget_cap_exceeded"
-    active = {attempt: item for attempt, item in latest.items() if item.get("state") == "reserved"}
+    active = {
+        attempt: item
+        for attempt, item in latest.items()
+        if item.get("state") in {"reserved", "unresolved"}
+    }
     return BudgetProjection(
         cap,
         settled,
@@ -818,6 +841,26 @@ class BudgetLedger:
 
     def projection(self) -> BudgetProjection:
         return project_budget(self.events(), self.cap_usd)
+
+    def attempt_state(self, attempt_id: str) -> str:
+        """Return the validated latest state for one attempt, or ``missing``."""
+        attempt = str(attempt_id or "").strip()
+        events = self.events()
+        project_budget(events, self.cap_usd)
+        state = "missing"
+        for event in events:
+            if str(event.get("attempt_id") or "").strip() != attempt:
+                continue
+            kind = str(event.get("event", event.get("kind", "")) or "").lower()
+            if kind in {"claim", "reserve", "reserved"}:
+                state = "reserved"
+            elif kind in {"unresolved", "unknown"}:
+                state = "unresolved"
+            elif kind in {"settle", "settled", "overspend", "campaign_cost", "overhead"}:
+                state = "settled"
+            elif kind in {"release", "released"}:
+                state = "released"
+        return state
 
     @contextlib.contextmanager
     def _lock(self) -> Iterator[None]:
@@ -1020,6 +1063,35 @@ class BudgetLedger:
             self._append({"schema": LEDGER_SCHEMA, "event": "release", "attempt_id": attempt, "ts_unix": time.time()})
 
 
+@contextlib.contextmanager
+def campaign_execution_lock(
+    run_root: pathlib.Path | str,
+    *,
+    blocking: bool = True,
+) -> Iterator[bool]:
+    """Exclude live dispatch and reconcile delivery for one campaign root."""
+    root = pathlib.Path(run_root).expanduser().resolve(strict=False)
+    root.mkdir(parents=True, exist_ok=True)
+    handle = (root / ".campaign_execution.lock").open("a+", encoding="utf-8")
+    try:
+        try:
+            import fcntl
+
+            operation = fcntl.LOCK_EX
+            if not blocking:
+                operation |= fcntl.LOCK_NB
+            try:
+                fcntl.flock(handle.fileno(), operation)
+            except BlockingIOError:
+                yield False
+                return
+        except ImportError:
+            pass
+        yield True
+    finally:
+        handle.close()
+
+
 def _append_result_pair(root: pathlib.Path, row: Mapping[str, Any]) -> None:
     """Append one row to the common run index and its task-local index.
 
@@ -1197,11 +1269,23 @@ def settle_finished_attempt(
     ledger: "BudgetLedger", attempt_id: str, outcome: Mapping[str, Any]
 ) -> None:
     """Settle a finished attempt's claim from its outcome, or mark it unresolved."""
-    actual = _finished_attempt_actual_usd(outcome)
+    projected = dict(outcome)
+    accounting = _terminal_gateway_accounting(outcome.get("runtime_result"))
+    if accounting:
+        projected.update(accounting)
+    actual = _finished_attempt_actual_usd(projected)
     if actual is not None:
         ledger.settle(str(attempt_id), actual)
     else:
-        ledger.mark_unresolved(str(attempt_id), 0.0)
+        upper_bound = projected.get("cost_upper_bound_usd")
+        if upper_bound is None:
+            upper_bound = projected.get("cost_usd")
+        if upper_bound is None:
+            upper_bound = projected.get("unresolved_upper_bound_usd")
+        ledger.mark_unresolved(
+            str(attempt_id),
+            upper_bound,
+        )
 
 
 def run_campaign(
@@ -1295,7 +1379,6 @@ def run_campaign(
                 error="official pin skipped: " + skip_reason,
                 task_contract=contract if isinstance(contract, Mapping) else None,
             )
-            append_cybergym_result(root, row)
             return row
         if executor is None:
             task_dir.mkdir(parents=True, exist_ok=True)
@@ -1309,7 +1392,6 @@ def run_campaign(
                 error="CyberGym executor is not configured",
                 task_contract=contract if isinstance(contract, Mapping) else None,
             )
-            append_cybergym_result(root, row)
             return row
 
         claim: Mapping[str, Any] | None = None
@@ -1409,23 +1491,17 @@ def run_campaign(
                 if terminal_accounting:
                     outcome.update(terminal_accounting)
                 try:
-                    exact_cost = (
-                        _money(outcome.get("cost_usd"), field="cost_usd")
-                        if outcome.get("cost_usd") is not None
-                        else None
+                    settle_finished_attempt(
+                        ledger,
+                        str(claim["attempt_id"]),
+                        outcome,
                     )
-                except LedgerError:
-                    exact_cost = None
-                try:
-                    actual = exact_cost
-                    if actual is None:
-                        actual = _finished_attempt_actual_usd(outcome)
-                    if actual is not None:
-                        ledger.settle(str(claim["attempt_id"]), actual)
-                    else:
-                        ledger.mark_unresolved(str(claim["attempt_id"]), 0.0)
                 except BudgetOverspend as settlement_exc:
                     settlement_overspend = settlement_exc
+                except LedgerError as settlement_exc:
+                    # The still-active reservation remains conservative. A
+                    # failure-row builder must not crash the dispatch loop.
+                    outcome["settlement_error"] = type(settlement_exc).__name__
             failure_refs = dict(outcome.get("artifact_refs") or {})
             failure_refs.setdefault("task_dir", str(task_dir))
             failure_refs.setdefault("claims", str(ledger.path))
@@ -1481,7 +1557,6 @@ def run_campaign(
                 else (contract if isinstance(contract, Mapping) else None),
                 attempt_id=str(claim["attempt_id"]) if claim else "",
             )
-        append_cybergym_result(root, row)
         return row
 
     # A campaign may fan out independent tasks, but each task remains a
@@ -1490,9 +1565,13 @@ def run_campaign(
     # than treating this as an unbounded scheduler.  The dispatch engine stops
     # admitting new work once the isolate gateway is proven unreachable, so a
     # dead gateway cannot burn the rest of the catalog into transport rows.
-    return run_dispatched(
-        normalized_tasks,
-        _run_one,
-        max_workers=max_workers,
-        threshold=gateway_circuit_threshold,
-    )
+    with campaign_execution_lock(root) as lock_held:
+        if not lock_held:
+            raise ClaimRefused("campaign execution lock is unavailable")
+        return run_dispatched(
+            normalized_tasks,
+            _run_one,
+            max_workers=max_workers,
+            threshold=gateway_circuit_threshold,
+            on_row=lambda row: append_cybergym_result(root, row),
+        )

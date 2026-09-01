@@ -1235,13 +1235,17 @@ class CyberGymExecutor(_DockerRuntimeMixin, _LifecycleMixin, _ReconcileMixin, _C
                 "error": str(exc),
             }
         finally:
-            # A finished/failed attempt always releases its docker workspace
-            # slot. Logs, checkpoints, and result_index are the custody
-            # surface; a live container must not occupy the pool slot.
-            # Name-only unresolved custody stays fail-closed (no name-based rm).
+            # Keep the exact workspace while gateway admission or terminal
+            # custody is unresolved: a late completed result needs that
+            # container for official submit/verify during reconcile.
             with self._registry_lock:
                 has_exact_id = bool(container_name and self._task_containers.get(container_name))
-            if has_exact_id:
+            cleanup_safe = (
+                not gateway_admission_started
+                or gateway_admission_rejected
+                or gateway_settled
+            )
+            if has_exact_id and cleanup_safe:
                 try:
                     self._cleanup_workspace_container(
                         container_name, task.task_id, attempt_id, cleanup_ref

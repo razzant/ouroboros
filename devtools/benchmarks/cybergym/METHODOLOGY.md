@@ -221,11 +221,10 @@ first-turn fallback allowance does not authorize cross-family substitution.
 
 No model price is hardcoded in this adapter.  Cost is read from the exact
 provider route and usage record.  A missing or `null` cost is `cost unknown`,
-not zero.  A finished or failed attempt settles any known actual and then
-releases the live reservation; leftover unresolved upper bound is not
-dispatch liability.  Historical claim-estimate corpses must not poison
-replay.  Only settled cash plus live in-flight reserved can refuse the next
-paid dispatch.
+not zero.  A finished or failed attempt settles any known actual; otherwise
+its strongest known upper bound remains campaign liability, falling back to
+the original reservation.  An unknown bound blocks further paid dispatch.
+Only an explicit settled/released transition removes that liability.
 
 ## 5. No-swarm and tool policy
 
@@ -459,19 +458,18 @@ fields are retained when that seam emits them and otherwise remain explicitly
 launcher never starts a duplicate merely because the caller's wait expired.
 The shipped adapter writes a durable checkpoint and `custody_pending.json`.
 After an operator-process crash the launcher's `--reconcile <run root>` mode
-reattaches to the still-running isolated server and workspace containers and
-delivers every checkpointed terminal gateway result that has no
-`result_index.jsonl` row, without re-running any agent, starting new
-infrastructure, or rewriting an existing row.  Attempts whose gateway task is
-still alive are reported as `left_running` for a later pass; each reconcile
-pass appends its report to `extra.reconcile_passes` in the finalized manifest
-(earlier passes are never overwritten), a pass that finds requested tasks
-with neither rows nor checkpoints finalizes as `incomplete` with a nonzero
-exit, and a second concurrent reconcile process on the same run root is
-refused.  Delivery is crash-safe in order: the result row is appended under
-the shared result-index lock (re-reading the recorded set so a task can never
-be double-recorded), the claim is settled next, and the adopted workspace
-container is released only after both are durable.
+reattaches to the still-running isolated server and workspace containers.  A
+campaign execution lock excludes live delivery from reconcile.  Per-attempt
+delivery phases let a recovered pass reuse an already-submitted/verified final
+PoC instead of repeating upstream side effects.  Discovery joins checkpoint,
+result row, claim state, and cleanup receipt: a row already present may still
+need settlement-only or cleanup-only recovery.  Attempts whose gateway task is
+still alive are reported as `left_running`; each pass appends its report to
+`extra.reconcile_passes`, partial recovery is `reconcile_partial`, and a pass
+with requested tasks having neither rows nor checkpoints is
+`reconcile_incomplete`.  The row is fsynced first, claim settlement follows,
+and the exact workspace is released only after the ledger proves a terminal
+state; a later pass resumes any crash window without re-running the agent.
 
 Every run is append-only under an external output root such as
 `bench_runs/cybergym/<tag>_<timestamp>/`.  Large image/binary caches use the
@@ -524,7 +522,7 @@ The campaign has one initial hard cap of USD 3,500.  One campaign-wide
 reservation ledger under one isolated server/data root enforces:
 
 ```text
-settled_usd + reserved_usd <= 3500
+settled_usd + reserved_usd + unresolved_upper_bound_usd <= 3500
 ```
 
 The launcher must receive an explicit measured per-task reservation through
@@ -536,12 +534,12 @@ owner-authorized pilot the launcher applies the explicit runtime tree cap
 runtime tree cap and the latter is the separate campaign-ledger reservation.
 Both values are visible without conflating their roles, and paid invocations
 must state the runtime cap explicitly.  A new claim still requires a finite
-per-task estimate.  A finished or dead attempt does not keep that estimate
-as remaining liability: dispatch projection is settled cash plus live
-in-flight reserved only.  Historical unresolved rows, including a written
-``$20`` leftover bound, do not refuse the catalog.  A nullable provider cost
-is not interpreted as zero.  The watchdog stops before crossing the cap; it
-cannot raise the cap or rewrite settled rows.
+per-task estimate.  A finished attempt with numeric terminal accounting
+settles that amount.  Otherwise its explicit unresolved upper bound remains
+liability, falling back to the original reservation; a wholly unknown bound
+blocks new dispatch.  A nullable provider cost is never interpreted as zero.
+The watchdog stops before crossing the cap and cannot raise the cap or rewrite
+settled rows.
 
 The operational target is roughly eight hours (8h) for the full 1,507-task cohort.
 The target is subordinate to the cap, provenance, capability, provider-rate,

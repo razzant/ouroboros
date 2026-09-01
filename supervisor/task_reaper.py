@@ -63,26 +63,9 @@ def reaper_loop() -> None:
             reap_timed_out_task(job)
         except Exception:
             log.error("Reaper failed for task %s", (job or {}).get("task_id"), exc_info=True)
-            # Self-heal: an escape BEFORE the guarded teardown (e.g. the top-of-function
-            # imports / variable extraction) must not strand the slot at reaping=True forever —
-            # the crash detector skips reaping slots, so it would be unrecoverable until restart.
-            # Clear reaping (the same conservative recovery step 5 uses) so a later tick reclaims
-            # it; do NOT respawn here (an early escape may have left the original worker alive).
-            # The abandoned job also leaves the not-provably-dead registry: the
-            # orphaned-running sweep terminalizes the task and releases its fence.
-            _forget_task_reaping(str((job or {}).get("task_id") or ""))
-            try:
-                from supervisor import workers as _w_mod
-                from supervisor.queue import _queue_lock as _ql
-
-                _wid_raw = (job or {}).get("worker_id")
-                if _wid_raw is not None:
-                    with _ql:
-                        _w = _w_mod.WORKERS.get(int(_wid_raw))
-                        if _w is not None:
-                            _w.reaping = False
-            except Exception:
-                log.debug("Reaper: self-heal reaping-clear failed", exc_info=True)
+            # Fail closed: an early escape may leave the original worker alive.
+            # Keep both the registry id and worker.reaping until confirmed-dead
+            # or startup orphan reconciliation proves terminal custody.
         finally:
             try:
                 reap_queue.task_done()

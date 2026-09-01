@@ -309,6 +309,30 @@ def _validate_verify_response(
     return response
 
 
+def _checkpoint_delivery(path: pathlib.Path) -> dict[str, Any]:
+    try:
+        value = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, UnicodeDecodeError, json.JSONDecodeError):
+        return {}
+    if not isinstance(value, Mapping):
+        return {}
+    delivery = value.get("delivery")
+    return dict(delivery) if isinstance(delivery, Mapping) else {}
+
+
+def _write_checkpoint_delivery(
+    path: pathlib.Path,
+    delivery: Mapping[str, Any],
+) -> None:
+    try:
+        value = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, UnicodeDecodeError, json.JSONDecodeError):
+        value = {}
+    payload = dict(value) if isinstance(value, Mapping) else {}
+    payload["delivery"] = dict(delivery)
+    _write_json(path, payload)
+
+
 class _LifecycleMixin:
     """Provider/settings/startup/gateway/cleanup lifecycle methods."""
 
@@ -932,13 +956,15 @@ class _LifecycleMixin:
                 # abandoned-residue grace (cybergym_wire) releases such a
                 # frame early, with the residue disclosed on it.
                 if status == "completed" and _cost_is_pending(latest):
-                    latest = (
-                        cost_grace.accept(latest, now=time.monotonic(), wall_now=time.time())
-                        or latest
+                    accepted = cost_grace.accept(
+                        latest,
+                        now=time.monotonic(),
+                        wall_now=time.time(),
                     )
-                    if _valid_cost_grace(latest) is None:
+                    if accepted is None:
                         self.config.sleep(max(0.5, float(self.config.poll_interval_sec)))
                         continue
+                    latest = accepted
                     _write_json(checkpoint, {"gateway_task_id": task_id, "status": status, "result": dict(latest)})
                 self._gateway_attempts.pop(task_id, None)
                 return latest
@@ -984,7 +1010,13 @@ class _LifecycleMixin:
         response["submit_returncode"] = result.returncode
         return response, marker.sha256, masked_id
 
-    def _private_query(self, agent_id: str, real_task_id: str) -> list[dict[str, Any]]:
+    def _private_query(
+        self,
+        agent_id: str,
+        real_task_id: str,
+        *,
+        allow_empty: bool = False,
+    ) -> list[dict[str, Any]]:
         key = self._ensure_key()
         headers = {"X-API-Key": key}
         # The server remains on the internal bridge.  The default transport
@@ -1018,7 +1050,7 @@ class _LifecycleMixin:
             if not isinstance(item, Mapping):
                 raise ExecutorFailure("CyberGym private query returned a malformed record")
             normalized.append(dict(item))
-        if not normalized:
+        if not normalized and not allow_empty:
             raise ExecutorFailure("CyberGym private query returned no records")
         return normalized
 
@@ -1159,9 +1191,52 @@ class _LifecycleMixin:
             },
         })
         try:
-            submit_response, digest, masked_id = self._submit_final(
-                task, workspace_dir, container_name
-            )
+            workspace_marker = final_poc_record(workspace_dir)
+            digest = workspace_marker.sha256
+            delivery = _checkpoint_delivery(checkpoint)
+            submit_response = delivery.get("submit")
+            masked_id = str(delivery.get("masked_id") or "")
+            if (
+                delivery.get("final_poc_sha256") != digest
+                or not isinstance(submit_response, Mapping)
+                or not _MASKED_TASK_ID.fullmatch(masked_id)
+            ):
+                existing = [
+                    item
+                    for item in self._private_query(
+                        agent_id,
+                        task.task_id,
+                        allow_empty=True,
+                    )
+                    if _record_matches(item, task.task_id, digest)
+                ]
+                reusable = existing[-1] if existing else None
+                reusable_masked = str(
+                    (reusable or {}).get("agent_id")
+                    or (reusable or {}).get("masked_task_id")
+                    or ""
+                )
+                if (
+                    reusable is not None
+                    and _response_poc_id(reusable)
+                    and _MASKED_TASK_ID.fullmatch(reusable_masked)
+                ):
+                    submit_response = dict(reusable)
+                    submit_response["final_poc_sha256"] = digest
+                    masked_id = reusable_masked
+                else:
+                    submit_response, digest, masked_id = self._submit_final(
+                        task, workspace_dir, container_name
+                    )
+                _write_checkpoint_delivery(
+                    checkpoint,
+                    {
+                        "phase": "submitted",
+                        "final_poc_sha256": digest,
+                        "masked_id": masked_id,
+                        "submit": dict(submit_response),
+                    },
+                )
         except FinalPocRefused as exc:
             fair_completion = _gateway_execution_status(gateway_result) == "ok"
             agent_marker_failure = exc.reason in {
@@ -1202,7 +1277,6 @@ class _LifecycleMixin:
             }
         # Keep the designated marker in the task-local result root used by the
         # common ledger, while the agent-facing workspace remains opaque.
-        workspace_marker = final_poc_record(workspace_dir)
         task_marker = task_dir / "final.poc"
         task_marker.parent.mkdir(parents=True, exist_ok=True)
         temporary_marker = task_marker.with_name(task_marker.name + f".tmp.{os.getpid()}")
@@ -1211,15 +1285,53 @@ class _LifecycleMixin:
         # verify-agent-pocs is the upstream operation that reruns both images.
         key = self._ensure_key()
         submitted_poc_id = _response_poc_id(submit_response)
-        verify_response = _validate_verify_response(
-            self._server_http(
-                "POST", "/verify-agent-pocs",
-                body={"agent_id": agent_id},
-                headers={"X-API-Key": key},
-                timeout=300,
-            ),
-            expected_poc_id=submitted_poc_id,
-        )
+        delivery = _checkpoint_delivery(checkpoint)
+        verify_response = delivery.get("verify")
+        if not isinstance(verify_response, Mapping):
+            prior_records = self._private_query(
+                agent_id,
+                task.task_id,
+                allow_empty=True,
+            )
+            prior_match = next(
+                (
+                    item
+                    for item in reversed(prior_records)
+                    if _record_matches(item, task.task_id, digest)
+                    and str(item.get("poc_id") or "").strip() == submitted_poc_id
+                    and classify_official_exit(
+                        item.get("vul_exit_code", item.get("vul_exit")),
+                        item.get("fix_exit_code", item.get("fix_exit")),
+                    )["official_success"]
+                    is not None
+                ),
+                None,
+            )
+            verify_response = (
+                {"status": "reused_verified_record", "poc_id": submitted_poc_id}
+                if prior_match is not None
+                else _validate_verify_response(
+                    self._server_http(
+                        "POST",
+                        "/verify-agent-pocs",
+                        body={"agent_id": agent_id},
+                        headers={"X-API-Key": key},
+                        timeout=300,
+                    ),
+                    expected_poc_id=submitted_poc_id,
+                )
+            )
+            _write_checkpoint_delivery(
+                checkpoint,
+                {
+                    **delivery,
+                    "phase": "verified",
+                    "final_poc_sha256": digest,
+                    "masked_id": masked_id,
+                    "submit": dict(submit_response),
+                    "verify": dict(verify_response),
+                },
+            )
         records = self._private_query(agent_id, task.task_id)
         matching = [
             item for item in records
@@ -1243,6 +1355,14 @@ class _LifecycleMixin:
             "fix_exit_code": record.get("fix_exit_code"),
             "is_final": True,
         }
+        _write_checkpoint_delivery(
+            checkpoint,
+            {
+                **_checkpoint_delivery(checkpoint),
+                "phase": "classified",
+                "record": dict(record),
+            },
+        )
         private_artifact = safe_task_path(self.config.run_root / "private", task.task_id) / "submit_response.json"
         _write_json(private_artifact, {"submit": submit_response, "verify": verify_response, "record": record})
         artifact_refs = {

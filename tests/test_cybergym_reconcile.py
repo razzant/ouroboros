@@ -48,11 +48,27 @@ def _write_run(run_dir, task_ids, *, rows=(), checkpoints=(), state_layout=None)
         with (run_dir / "result_index.jsonl").open("w", encoding="utf-8") as handle:
             for task_id in rows:
                 handle.write(json.dumps({"task_id": task_id}) + "\n")
+    claims = []
     for task_id, attempt_id in checkpoints:
+        claims.append(
+            {
+                "schema": "ouroboros.benchmark.cybergym.claims.v1",
+                "event": "claim",
+                "task_id": task_id,
+                "attempt_id": attempt_id,
+                "reserved_usd": 1.0,
+                "ts_unix": 1.0,
+            }
+        )
         attempt_dir = run_dir / "checkpoints" / task_slug(task_id) / attempt_id
         attempt_dir.mkdir(parents=True, exist_ok=True)
         (attempt_dir / "gateway_checkpoint.json").write_text(
             json.dumps({"gateway_task_id": f"gateway-{attempt_id}", "status": "failed"}),
+            encoding="utf-8",
+        )
+    if claims:
+        (run_dir / "claims.jsonl").write_text(
+            "".join(json.dumps(row) + "\n" for row in claims),
             encoding="utf-8",
         )
     return run_dir
@@ -75,6 +91,7 @@ class _FakeExecutor:
         self.events = events
         self.reconciled = []
         self.released = []
+        self.adopted_workspaces = []
 
     def adopt_campaign(self):
         return {"status": "adopted", "ok": True}
@@ -88,6 +105,13 @@ class _FakeExecutor:
         if self.events is not None:
             self.events.append("cleanup")
         return None
+
+    def adopt_reconciled_workspace(self, spec, attempt_id):
+        self.adopted_workspaces.append((spec.task_id, attempt_id))
+        return "container-id"
+
+    def finalize_adopted_campaign(self):
+        return {"status": "verified", "ok": True}
 
     def close(self):
         return {"status": "detached"}
@@ -151,6 +175,7 @@ def test_reconcile_crash_between_append_and_settle_keeps_workspace(tmp_path, mon
     run_dir = _write_run(tmp_path / "run", ["arvo:1"], checkpoints=[("arvo:1", "attempt-a01")])
     fake = _FakeExecutor(_TERMINAL_OUTCOME)
     _install_fake_executor(monkeypatch, fake)
+    real_settle = cybergym_reconcile.settle_finished_attempt
 
     def crashing_settle(ledger, attempt_id, outcome):
         raise RuntimeError("simulated crash")
@@ -160,6 +185,16 @@ def test_reconcile_crash_between_append_and_settle_keeps_workspace(tmp_path, mon
         reconcile_main(_reconcile_args(run_dir))
     assert fake.released == []
     assert [row["task_id"] for row in _read_rows(run_dir)] == ["arvo:1"]
+
+    monkeypatch.setattr(
+        cybergym_reconcile,
+        "settle_finished_attempt",
+        real_settle,
+    )
+    assert reconcile_main(_reconcile_args(run_dir)) == 0
+    assert fake.reconciled == [("arvo:1", "attempt-a01")]
+    assert fake.adopted_workspaces == [("arvo:1", "attempt-a01")]
+    assert fake.released == [("arvo:1", "attempt-a01")]
 
 
 def test_reconcile_second_checkpoint_of_same_task_is_skipped(tmp_path, monkeypatch):
@@ -172,14 +207,15 @@ def test_reconcile_second_checkpoint_of_same_task_is_skipped(tmp_path, monkeypat
     fake = _FakeExecutor(_TERMINAL_OUTCOME)
     _install_fake_executor(monkeypatch, fake)
 
-    assert reconcile_main(_reconcile_args(run_dir)) == 0
+    assert reconcile_main(_reconcile_args(run_dir)) == 2
     assert fake.reconciled == [("arvo:1", "attempt-a01")]
     assert len(_read_rows(run_dir)) == 1
     report = _read_manifest(run_dir)["extra"]["reconcile_passes"][-1]
     assert [entry["attempt_id"] for entry in report["delivered"]] == ["attempt-a01"]
-    skipped = report["skipped_recorded"]
-    assert [entry["attempt_id"] for entry in skipped] == ["attempt-a02"]
-    assert skipped[0]["disposition"] == "skipped_recorded"
+    assert report["skipped_recorded"] == []
+    assert [entry["attempt_id"] for entry in report["undeliverable"]] == [
+        "attempt-a02"
+    ]
 
 
 def test_reconcile_drops_row_when_task_was_recorded_mid_delivery(tmp_path, monkeypatch):
@@ -195,20 +231,21 @@ def test_reconcile_drops_row_when_task_was_recorded_mid_delivery(tmp_path, monke
     fake = RacingExecutor(_TERMINAL_OUTCOME)
     _install_fake_executor(monkeypatch, fake)
 
-    assert reconcile_main(_reconcile_args(run_dir)) == 0
+    assert reconcile_main(_reconcile_args(run_dir)) == 2
     assert len(_read_rows(run_dir)) == 1
     report = _read_manifest(run_dir)["extra"]["reconcile_passes"][-1]
     assert report["delivered"] == []
-    skipped = report["skipped_recorded"]
-    assert [entry["disposition"] for entry in skipped] == ["recorded_elsewhere"]
-    # The row is durable via the other writer, so the adopted slot is released.
-    assert fake.released == [("arvo:1", "attempt-a01")]
+    assert report["skipped_recorded"] == []
+    assert [entry["disposition"] for entry in report["undeliverable"]] == [
+        "recorded_elsewhere"
+    ]
+    assert fake.released == []
 
 
 def test_second_concurrent_reconcile_process_is_refused(tmp_path, capsys):
     fcntl = pytest.importorskip("fcntl")
     run_dir = _write_run(tmp_path / "run", ["arvo:1"], rows=["arvo:1"])
-    handle = (run_dir / ".reconcile.lock").open("a+", encoding="utf-8")
+    handle = (run_dir / ".campaign_execution.lock").open("a+", encoding="utf-8")
     fcntl.flock(handle.fileno(), fcntl.LOCK_EX)
     try:
         assert reconcile_main(_reconcile_args(run_dir)) == 2

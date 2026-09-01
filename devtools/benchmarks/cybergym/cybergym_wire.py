@@ -184,15 +184,21 @@ def _abandoned_cost_residue_usd(payload: Mapping[str, Any]) -> float | None:
             values.append(value)
         return values
 
-    if any(bool(value) for value in present("ledger_integrity_degraded")):
+    integrity = present("ledger_integrity_degraded")
+    if not integrity or any(value is not False for value in integrity):
         return None
-    if any(str(value).strip().lower() != "available" for value in present("cost_accounting_status")):
+    accounting = present("cost_accounting_status")
+    if not accounting or any(
+        not isinstance(value, str) or value.strip().lower() != "available"
+        for value in accounting
+    ):
         return None
-    if any(bool(value) for value in present("cost_estimated")):
+    estimated = present("cost_estimated")
+    if not estimated or any(value is not False for value in estimated):
         return None
     for name in ("unknown_unmetered", "reserved_usd"):
         values = numbers(name)
-        if values is None or any(value != 0 for value in values):
+        if not values or any(value != 0 for value in values):
             return None
     unresolved = numbers("unresolved_upper_bound_usd")
     if not unresolved:
@@ -277,6 +283,20 @@ def _valid_cost_grace(payload: Mapping[str, Any]) -> dict[str, Any] | None:
         return None
     marker = payload.get(_COST_GRACE_MARKER)
     if not isinstance(marker, Mapping):
+        return None
+    if (
+        marker.get("schema") != "ouroboros.benchmark.cybergym.cost_grace.v1"
+        or marker.get("reason") != "abandoned_unresolved_residue"
+        or marker.get("grace_period_sec") != _COST_GRACE_PERIOD_SEC
+    ):
+        return None
+    waited = marker.get("waited_sec")
+    if isinstance(waited, bool):
+        return None
+    try:
+        if float(waited) < _COST_GRACE_PERIOD_SEC:
+            return None
+    except (TypeError, ValueError):
         return None
     residue = _abandoned_cost_residue_usd(payload)
     if residue is None:
