@@ -1101,10 +1101,12 @@ def _append_result_pair(root: pathlib.Path, row: Mapping[str, Any]) -> None:
     task_root = safe_task_path(root, task)
 
     def _matching_rows(path: pathlib.Path) -> list[dict[str, Any]]:
-        return [
-            existing for existing in read_result_index(path)
-            if str(existing.get("task_id", existing.get("instance_id", ""))) == task
-        ]
+        try:
+            rows = read_result_index(path)
+        except (OSError, UnicodeDecodeError, json.JSONDecodeError) as exc:
+            raise CyberGymError(f"result index is unreadable: {exc}") from exc
+        return [existing for existing in rows
+                if str(existing.get("task_id", existing.get("instance_id", ""))) == task]
 
     run_rows = _matching_rows(root)
     if run_rows:

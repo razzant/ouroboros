@@ -835,6 +835,7 @@ def reconcile_main(args: argparse.Namespace) -> int:
 
         specs = {spec.task_id: spec for spec in _task_specs(requested_ids, contract=contract)}
         exit_code = 0
+        delivery_loop_completed = False
         try:
             for task_id, attempt_id, checkpoint in pending:
                 spec = specs[task_id]
@@ -980,10 +981,12 @@ def reconcile_main(args: argparse.Namespace) -> int:
                     exit_code = 2
                 else:
                     reconcile_report["delivered"].append(entry)
+            delivery_loop_completed = True
         finally:
             try:
                 fully_recovered = (
-                    exit_code == 0
+                    delivery_loop_completed
+                    and exit_code == 0
                     and not unaccounted
                     and not reconcile_report["left_running"]
                     and not reconcile_report["undeliverable"]

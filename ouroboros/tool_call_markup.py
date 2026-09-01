@@ -41,11 +41,10 @@ _DSML_PARAM_RE = re.compile(
     re.DOTALL,
 )
 _DSML_STRING_ATTR_RE = re.compile(r'\bstring\s*=\s*"(true|false)"', re.IGNORECASE)
-_DSML_WRAPPER_RE = re.compile(rf"</?(?:{_DSML_MARK})?tool_calls>", re.IGNORECASE)
-_DSML_WRAPPER_OPEN_RE = re.compile(rf"^\s*<(?P<wrapper_mark>{_DSML_MARK})?tool_calls>", re.IGNORECASE)
-_DSML_TAG_RE = re.compile(
-    rf"</?(?:{_DSML_MARK})?(?:tool_calls|invoke|parameter)\b",
-    re.IGNORECASE,
+_DSML_WRAPPED_RE = re.compile(
+    rf"^\s*<(?P<wrapper_mark>{_DSML_MARK})?tool_calls>(?P<wrapper_body>.*)"
+    rf"</(?(wrapper_mark){_DSML_MARK})tool_calls>\s*$",
+    re.DOTALL | re.IGNORECASE,
 )
 _LOCAL_TOOL_CALL_FULL_RE = re.compile(
     r"^(?:\s*<tool_call>\s*\{.*?\}\s*</tool_call>\s*)+$",
@@ -165,17 +164,24 @@ def parse_dsml_tool_calls(
     """Return OpenAI-shaped tool_calls for well-formed DSML, else None."""
     if not text or not content_has_tool_markup(text):
         return None
-    wrapper = _DSML_WRAPPER_OPEN_RE.match(text)
-    if wrapper:
-        expected_close = f"</{wrapper.group('wrapper_mark') or ''}tool_calls>"
-        if not text.rstrip().lower().endswith(expected_close.lower()):
+    stripped = text.strip()
+    if stripped.startswith((_DSML_TOOL_CALLS_OPEN, _PLAIN_DSML_TOOL_CALLS_OPEN)):
+        wrapper = _DSML_WRAPPED_RE.fullmatch(stripped)
+        if wrapper is None:
             return None
-    invokes = list(_DSML_INVOKE_RE.finditer(text))
+        payload = wrapper.group("wrapper_body") or ""
+    else:
+        payload = stripped
+    invokes = list(_DSML_INVOKE_RE.finditer(payload))
     if not invokes:
         return None
     allowed = {name for name in (allowed_tool_names or set()) if name}
     tool_calls: List[Dict[str, Any]] = []
+    consumed = 0
     for index, match in enumerate(invokes):
+        if payload[consumed:match.start()].strip():
+            return None
+        consumed = match.end()
         name = str(match.group(2) or "").strip()
         body = match.group(3) or ""
         if not name:
@@ -205,8 +211,7 @@ def parse_dsml_tool_calls(
                 "arguments": json.dumps(arguments),
             },
         })
-    remainder = _DSML_WRAPPER_RE.sub("", _DSML_INVOKE_RE.sub("", text)).strip()
-    if _DSML_TAG_RE.search(remainder):
+    if payload[consumed:].strip():
         return None
     return tool_calls or None
 
@@ -234,8 +239,7 @@ def parse_tool_calls_from_content(
             return msg
         msg = dict(msg)
         msg["tool_calls"] = dsml_calls
-        remainder = _DSML_WRAPPER_RE.sub("", _DSML_INVOKE_RE.sub("", stripped)).strip()
-        msg["content"] = remainder or reasoning or None
+        msg["content"] = reasoning or None
         log.info("Parsed %d DSML tool call(s) from content", len(dsml_calls))
         return msg
 

@@ -254,6 +254,41 @@ def test_result_pair_append_repairs_torn_task_local_row(tmp_path):
     assert _read_rows(run_dir / task_slug("arvo:1")) == [row]
 
 
+def test_corrupt_torn_task_local_row_refuses_campaign_finalization(tmp_path, monkeypatch):
+    run_dir = _write_run(
+        tmp_path / "run",
+        ["arvo:1"],
+        rows=["arvo:1"],
+        checkpoints=[("arvo:1", "attempt-a01")],
+    )
+    task_dir = run_dir / task_slug("arvo:1")
+    task_dir.mkdir()
+    (task_dir / "result_index.jsonl").write_text('{"task_id":', encoding="utf-8")
+
+    class TrackingExecutor(_FakeExecutor):
+        finalized = 0
+        detached = 0
+
+        def finalize_adopted_campaign(self):
+            self.finalized += 1
+            return super().finalize_adopted_campaign()
+
+        def close(self):
+            self.detached += 1
+            return super().close()
+
+    fake = TrackingExecutor(_TERMINAL_OUTCOME)
+    _install_fake_executor(monkeypatch, fake)
+
+    assert reconcile_main(_reconcile_args(run_dir)) == 2
+    assert fake.finalized == 0
+    assert fake.detached == 1
+    assert fake.released == []
+    report = _read_manifest(run_dir)["extra"]["reconcile_passes"][-1]
+    assert report["status"] == "partial"
+    assert report["undeliverable"][0]["disposition"] == "settlement_pending"
+
+
 def test_second_concurrent_reconcile_process_is_refused(tmp_path, capsys):
     fcntl = pytest.importorskip("fcntl")
     run_dir = _write_run(tmp_path / "run", ["arvo:1"], rows=["arvo:1"])

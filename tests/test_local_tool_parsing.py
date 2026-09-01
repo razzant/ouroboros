@@ -372,6 +372,20 @@ class TestDeepSeekDsmlParsing(unittest.TestCase):
         self.assertFalse(parsed.get("tool_calls"))
         self.assertEqual(parsed["content"], content)
 
+    def test_valid_invoke_plus_truncated_tag_is_not_partially_upgraded(self):
+        from ouroboros.llm import LLMClient
+
+        valid = '<invoke name="read_file"></invoke>'
+        for fragment in ("<invok", "</invok"):
+            with self.subTest(fragment=fragment):
+                content = f"<tool_calls>{valid}{fragment}</tool_calls>"
+                msg = {"content": content, "tool_calls": []}
+
+                parsed = LLMClient._parse_tool_calls_from_content(msg, {"read_file"})
+
+                self.assertFalse(parsed.get("tool_calls"))
+                self.assertEqual(parsed["content"], content)
+
     def test_mixed_tagged_and_plain_invoke_pair_is_not_upgraded(self):
         from ouroboros.llm import LLMClient
         from ouroboros.tool_call_markup import _DSML_MARK
