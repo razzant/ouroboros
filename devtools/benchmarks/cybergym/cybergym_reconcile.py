@@ -209,7 +209,7 @@ class _ReconcileMixin:
             return None
         if _response_status(value) not in _TERMINAL_GATEWAY_STATUSES:
             return None
-        return value
+        return _redeliverable_terminal_frame(value) or value
 
     def reconcile_task(
         self,

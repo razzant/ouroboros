@@ -226,7 +226,10 @@ def test_isolate_disk_terminal_record_grace_accepts_abandoned_residue(tmp_path):
     pending = dict(frame)
     pending["reserved_usd"] = 0.5
     target.write_text(json.dumps(pending), encoding="utf-8")
-    assert executor._terminal_result_from_isolate_disk(task_id) is None  # noqa: SLF001
+    sparse = executor._terminal_result_from_isolate_disk(task_id)  # noqa: SLF001
+    assert sparse is not None
+    assert "cost_grace_acceptance" not in sparse
+    assert sparse["reserved_usd"] == pytest.approx(0.5)
 
 
 def test_run_campaign_grace_accepted_row_discloses_residue(tmp_path):
