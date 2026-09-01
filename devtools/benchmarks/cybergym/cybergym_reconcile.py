@@ -1032,6 +1032,19 @@ def reconcile_main(args: argparse.Namespace) -> int:
                 # the adopted workspace container be released.  Every earlier
                 # exit from this iteration keeps the container so a later pass
                 # can redeliver from the checkpoint.
+                runtime_result = outcome.get("runtime_result")
+                if (
+                    isinstance(runtime_result, Mapping)
+                    and _response_status(runtime_result) == "completed"
+                ):
+                    try:
+                        executor_obj.adopt_reconciled_workspace(spec, attempt_id)
+                    except CyberGymError as exc:
+                        entry["workspace_cleanup"] = "adoption_failed"
+                        entry["cleanup_type"] = type(exc).__name__
+                        reconcile_report["undeliverable"].append(entry)
+                        exit_code = 2
+                        continue
                 release = executor_obj.release_reconciled_workspace(spec, attempt_id)
                 if isinstance(release, Mapping) and release.get("ok") is False:
                     entry["workspace_cleanup"] = "failed"

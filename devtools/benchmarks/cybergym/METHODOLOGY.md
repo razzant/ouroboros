@@ -530,7 +530,8 @@ The target is subordinate to the cap, provenance, capability, provider-rate,
 Docker, network, and disk gates.  The full run starts with the owner-fixed 64
 lanes and never resizes live.  `OUROBOROS_MAX_WORKERS=64` is a cross-task
 ceiling, not permission to spawn within-task children.  The first 64 terminal
-rows gate continued admission.
+rows provide the first formal monitoring decision; admission rolls meanwhile
+until the watcher latches a stop.
 
 A further tranche is never automatic.  It requires a new explicit
 owner confirmation after comparable model-focused evidence.  If the first-batch
@@ -606,8 +607,8 @@ and remains outside the tracked repository.
 
 ### Phase 3: continued full-cohort monitoring
 
-After the first-batch gate, the same append-only run continues at the frozen
-64-lane count.  A persistent watcher emits a snapshot every 10--30 minutes,
+From launch onward, the same append-only run rolls at the frozen 64-lane
+count unless the watcher latches a stop.  A persistent watcher emits a snapshot every 10--30 minutes,
 including completed/requested rows, headline and any-of numerators,
 genuine/infra split, provider/backend distribution, model-token validity,
 error/stagnation rate, process/container liveness, lane throughput, storage

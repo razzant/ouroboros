@@ -335,8 +335,9 @@ failures, infra failures, timeouts, and unattempted rows.
    a barrier before task 65; poor
    capability signal or critical model, cost, Docker, disk, or custody health
    pauses new admission while preserving in-flight attempts.
-3. **Continued monitoring.** If the first batch is healthy, the same
-   append-only run continues without resizing.  The watcher reports every
+3. **Continued monitoring.** Monitoring runs continuously from launch; reaching
+   64 terminal rows adds a formal evidence checkpoint rather than unlocking
+   admission.  The same append-only run never resizes. The watcher reports every
    10--30 minutes and stops dispatch before the USD 3,500 cap when spend,
    unknown reservations, provider/rate errors, Docker/network health, disk,
    or throughput become unsafe.  Inventory every trajectory and complete the

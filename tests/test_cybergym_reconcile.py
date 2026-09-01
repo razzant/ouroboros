@@ -157,6 +157,36 @@ def test_reconcile_releases_workspace_only_after_row_and_settle(tmp_path, monkey
     assert [entry["attempt_id"] for entry in report["delivered"]] == ["attempt-a01"]
 
 
+def test_terminal_sparse_cost_row_adopts_workspace_for_post_durable_cleanup(
+    tmp_path, monkeypatch
+):
+    run_dir = _write_run(
+        tmp_path / "run",
+        ["arvo:1"],
+        checkpoints=[("arvo:1", "attempt-a01")],
+    )
+    outcome = {
+        "status": "infra_failed",
+        "lifecycle": "terminal_cost_unverifiable",
+        "infra_reason": "terminal_cost_unverifiable",
+        "reconcile_disposition": "delivery_failed",
+        "runtime_result": {
+            "task_id": "gateway-task-1",
+            "status": "completed",
+            "cost_usd": 1.25,
+            "cost_final": False,
+            "unresolved_upper_bound_usd": 0.2,
+        },
+    }
+    fake = _FakeExecutor(outcome)
+    _install_fake_executor(monkeypatch, fake)
+
+    assert reconcile_main(_reconcile_args(run_dir)) == 2
+    assert fake.adopted_workspaces == [("arvo:1", "attempt-a01")]
+    assert fake.released == [("arvo:1", "attempt-a01")]
+    assert len(_read_rows(run_dir)) == 1
+
+
 def test_reconcile_crash_before_append_keeps_workspace_and_writes_no_row(tmp_path, monkeypatch):
     """A crash before the append must strand neither the container nor the row."""
     run_dir = _write_run(tmp_path / "run", ["arvo:1"], checkpoints=[("arvo:1", "attempt-a01")])
