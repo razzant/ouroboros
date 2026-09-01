@@ -7,9 +7,10 @@ every later round into ``acceptance_fence_unavailable``. This test runs the REAL
 worker methods (``OuroborosAgent._begin/_inspect/_end_acceptance_fence``), the
 REAL waiter (``_await_acceptance_fence_ack``), the REAL supervisor transition
 (``transition_acceptance_fence``) and the REAL ack writer
-(``_handle_acceptance_fence``) across 32 concurrent workers with a delayed
-consumer — and proves the poisoned loop is gone: lost acks are recovered by a
-fresh idempotent begin, and no operation ever consumes another operation's ack.
+(``_handle_acceptance_fence``) across 64 concurrent workers — the production
+lane count — with a delayed consumer, and proves the poisoned loop is gone:
+lost acks are recovered by a fresh idempotent begin, and no operation ever
+consumes another operation's ack.
 """
 
 from __future__ import annotations
@@ -23,7 +24,7 @@ from types import SimpleNamespace
 from tests.test_acceptance_fence import _isolated_queue
 
 
-_WORKERS = 32
+_WORKERS = 64
 _OP_TIMEOUT_SEC = 1.0
 
 
