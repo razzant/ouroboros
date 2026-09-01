@@ -475,3 +475,44 @@ class TestDeepSeekDsmlParsing(unittest.TestCase):
                 "Example: <tool_calls><invoke name=\"read_file\"></invoke></tool_calls>"
             )
         )
+
+    def test_prefixed_executable_dsml_fails_closed_without_promotion(self):
+        from ouroboros.tool_call_markup import (
+            TOOL_MARKUP_PROTOCOL_FAIL_TEXT,
+            resolve_tool_markup,
+        )
+
+        for markup in (
+            '<tool_calls><invoke name="read_file"></invoke></tool_calls>',
+            "<tool_calls><invok</tool_calls>",
+        ):
+            with self.subTest(markup=markup):
+                content = f"I will use the tool now.\n{markup}"
+                message = {"content": content, "tool_calls": []}
+                resolved, calls, unchanged, failure = resolve_tool_markup(
+                    message,
+                    [],
+                    content,
+                    {},
+                    {"reasoning_notes": []},
+                    [{"type": "function", "function": {"name": "read_file"}}],
+                )
+                self.assertEqual(resolved, message)
+                self.assertEqual(calls, [])
+                self.assertEqual(unchanged, content)
+                self.assertIsNotNone(failure)
+                self.assertEqual(failure[0], TOOL_MARKUP_PROTOCOL_FAIL_TEXT)
+
+    def test_prefixed_non_executable_tag_mention_remains_content(self):
+        from ouroboros.tool_call_markup import resolve_tool_markup
+
+        content = "Document the literal <tool_call> tag without invoking anything."
+        message = {"content": content, "tool_calls": []}
+        resolved, calls, unchanged, failure = resolve_tool_markup(
+            message, [], content, {}, {"reasoning_notes": []}, [],
+        )
+
+        self.assertEqual(resolved, message)
+        self.assertEqual(calls, [])
+        self.assertEqual(unchanged, content)
+        self.assertIsNone(failure)

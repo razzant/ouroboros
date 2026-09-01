@@ -95,6 +95,19 @@ def content_has_tool_markup(content: Any) -> bool:
     return not prefix
 
 
+def _prefixed_executable_markup(text: str) -> bool:
+    """True for a wire-shaped tool envelope preceded by ordinary prose."""
+    cut = tool_markup_start(text)
+    if cut <= 0 or not text[:cut].strip():
+        return False
+    suffix = text[cut:].lstrip()
+    if suffix.startswith((_DSML_TOOL_CALLS_OPEN, _PLAIN_DSML_TOOL_CALLS_OPEN)):
+        return True
+    if re.match(rf"<(?:{_DSML_MARK})?invoke\s+name=\"", suffix):
+        return True
+    return bool(re.match(r"<tool_call\b[^>]*>\s*\{\{?", suffix, re.IGNORECASE))
+
+
 def tool_markup_start(text: str) -> int:
     """Return the earliest tool-markup offset in ``text``, or -1."""
     cuts: List[int] = []
@@ -337,7 +350,14 @@ def resolve_tool_markup(
     Optional[Tuple[str, Dict[str, Any], Dict[str, Any]]],
 ]:
     """Promote leftover markup or return its typed protocol failure."""
-    if tool_calls or not content_has_tool_markup(content):
+    if tool_calls:
+        return msg, tool_calls, content, None
+    content_text = message_content_text(content)
+    if not content_has_tool_markup(content):
+        if _prefixed_executable_markup(content_text):
+            return msg, tool_calls, content, tool_markup_protocol_fail(
+                accumulated_usage, llm_trace,
+            )
         return msg, tool_calls, content, None
     allowed: Set[str] = set()
     for schema in tool_schemas:
