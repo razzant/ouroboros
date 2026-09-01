@@ -383,6 +383,28 @@ def resolve_denied(dotted: str, unit: _Unit, *, depth: int = 2) -> str:
     return ""
 
 
+def _is_host_temp_lock_receiver(node: ast.expr) -> bool:
+    """Match exactly ``Path(gettempdir()) / f"...{root_digest}..."``."""
+    if not isinstance(node, ast.BinOp) or not isinstance(node.op, ast.Div):
+        return False
+    if not isinstance(node.left, ast.Call) or _dotted_callee(node.left.func) != "pathlib.Path":
+        return False
+    if len(node.left.args) != 1 or node.left.keywords:
+        return False
+    temp_call = node.left.args[0]
+    if (
+        not isinstance(temp_call, ast.Call)
+        or _dotted_callee(temp_call.func) != "tempfile.gettempdir"
+        or temp_call.args
+        or temp_call.keywords
+    ):
+        return False
+    return isinstance(node.right, ast.JoinedStr) and any(
+        isinstance(inner, ast.Name) and inner.id == "root_digest"
+        for inner in ast.walk(node.right)
+    )
+
+
 def _safe_pre_admission_lock_helper(target: ast.FunctionDef, unit: _Unit) -> bool:
     """Validate the one exact temp-lock implementation, including its sole open."""
     if _helper_effects(target):
@@ -397,16 +419,7 @@ def _safe_pre_admission_lock_helper(target: ast.FunctionDef, unit: _Unit) -> boo
     ]
     if len(open_calls) != 1 or not isinstance(open_calls[0].func, ast.Attribute):
         return False
-    receiver = open_calls[0].func.value
-    receiver_calls = {
-        _dotted_callee(node.func).split(".")[-1]
-        for node in ast.walk(receiver)
-        if isinstance(node, ast.Call)
-    }
-    receiver_names = {
-        node.id for node in ast.walk(receiver) if isinstance(node, ast.Name)
-    }
-    if "gettempdir" not in receiver_calls or "root_digest" not in receiver_names:
+    if not _is_host_temp_lock_receiver(open_calls[0].func.value):
         return False
     for node in call_nodes:
         denied = resolve_denied(_dotted_callee(node.func), unit, depth=1)
@@ -415,16 +428,45 @@ def _safe_pre_admission_lock_helper(target: ast.FunctionDef, unit: _Unit) -> boo
     return True
 
 
+def _pre_admission_lock_binding_shadowed(unit: _Unit, leaf: str) -> bool:
+    canonical_imports = [
+        (node, alias)
+        for node in unit.tree.body
+        if isinstance(node, ast.ImportFrom)
+        and node.module == _PRE_ADMISSION_LOCK_MODULE
+        for alias in node.names
+        if (alias.asname or alias.name) == leaf and alias.name == leaf
+    ]
+    if len(canonical_imports) != 1:
+        return True
+    canonical_node, canonical_alias = canonical_imports[0]
+    for node in ast.walk(unit.tree):
+        if isinstance(node, (ast.Import, ast.ImportFrom)):
+            for alias in node.names:
+                bound = alias.asname or alias.name.split(".")[0]
+                if bound == leaf and not (
+                    node is canonical_node and alias is canonical_alias
+                ):
+                    return True
+        if isinstance(node, ast.ExceptHandler) and node.name == leaf:
+            return True
+        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)) and node.name == leaf:
+            return True
+        if isinstance(node, ast.Name) and isinstance(node.ctx, ast.Store) and node.id == leaf:
+            return True
+        if isinstance(node, ast.arg) and node.arg == leaf:
+            return True
+        if isinstance(node, (ast.MatchAs, ast.MatchStar)) and node.name == leaf:
+            return True
+    return False
+
+
 def _approved_pre_admission_lock(dotted: str, unit: _Unit) -> bool:
     """Whether ``dotted`` resolves unshadowed to the canonical lock helper."""
     leaf = dotted.split(".")[-1]
     if leaf != _PRE_ADMISSION_LOCK_NAME or unit.imports.get(leaf) != _PRE_ADMISSION_LOCK_MODULE:
         return False
-    if leaf in unit.functions or any(
-        (isinstance(node, ast.Name) and isinstance(node.ctx, ast.Store) and node.id == leaf)
-        or (isinstance(node, ast.arg) and node.arg == leaf)
-        for node in ast.walk(unit.tree)
-    ):
+    if _pre_admission_lock_binding_shadowed(unit, leaf):
         return False
     imported = _unit_for_module(_PRE_ADMISSION_LOCK_MODULE)
     target = imported.functions.get(leaf) if imported is not None else None

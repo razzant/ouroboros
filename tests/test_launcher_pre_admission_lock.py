@@ -44,6 +44,27 @@ def main(out):
     violations = launcher_audit.audit_source(shadowed, name="shadowed_lock.py")
     assert any("acquire_campaign_execution_lock -> open" in item for item in violations)
 
+    import_shadowed = approved.replace(
+        "def main(out):",
+        "def main(out):\n"
+        "    import pathlib as acquire_campaign_execution_lock",
+    )
+    assert launcher_audit.audit_source(
+        import_shadowed, name="import_shadowed_lock.py",
+    )
+
+    except_shadowed = approved.replace(
+        "def main(out):",
+        "def main(out):\n"
+        "    try:\n"
+        "        pass\n"
+        "    except Exception as acquire_campaign_execution_lock:\n"
+        "        pass",
+    )
+    assert launcher_audit.audit_source(
+        except_shadowed, name="except_shadowed_lock.py",
+    )
+
 
 def test_pre_admission_lock_shape_rejects_a_second_open():
     source = '''
@@ -52,6 +73,21 @@ def acquire_campaign_execution_lock(run_root, blocking=True):
     root_digest = hashlib.sha256(str(root).encode("utf-8")).hexdigest()
     handle = (pathlib.Path(tempfile.gettempdir()) / f"lock-{root_digest}").open("a+")
     forbidden = (root / "inside.lock").open("a+")
+    fcntl.flock(handle.fileno(), fcntl.LOCK_EX)
+    return handle
+'''
+    unit = launcher_audit._Unit(ast.parse(source), "synthetic_lock")
+    target = unit.functions["acquire_campaign_execution_lock"]
+    assert launcher_audit._safe_pre_admission_lock_helper(target, unit) is False
+
+
+def test_pre_admission_lock_shape_rejects_temp_path_decoy():
+    source = '''
+def acquire_campaign_execution_lock(run_root, blocking=True):
+    root = pathlib.Path(run_root).resolve()
+    root_digest = hashlib.sha256(str(root).encode("utf-8")).hexdigest()
+    receiver = pathlib.Path(tempfile.gettempdir()) and (root / f"{root_digest}.lock")
+    handle = receiver.open("a+")
     fcntl.flock(handle.fileno(), fcntl.LOCK_EX)
     return handle
 '''
