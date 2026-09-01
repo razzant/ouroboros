@@ -273,8 +273,8 @@ def test_run_campaign_grace_accepted_row_discloses_residue(tmp_path):
     assert rows[0]["cost_grace_acceptance"]["reason"] == "abandoned_unresolved_residue"
     assert rows[0]["cost_usd"] == pytest.approx(0.386527)
     projection = BudgetLedger(tmp_path / "grace-row" / "claims.jsonl", cap_usd=2).projection()
-    assert projection.settled_usd == pytest.approx(0.386527)
-    assert projection.unresolved_upper_bound_usd == 0
+    assert projection.settled_usd == 0
+    assert projection.unresolved_upper_bound_usd == pytest.approx(0.386527)
     assert projection.projected_usd == pytest.approx(0.386527)
 
 

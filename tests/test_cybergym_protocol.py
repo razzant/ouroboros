@@ -5,7 +5,6 @@ from __future__ import annotations
 import hashlib
 import json
 import pathlib
-import threading
 
 import pytest
 
@@ -25,7 +24,6 @@ from devtools.benchmarks.cybergym.cybergym_adapter import (
     assert_fresh_output_root,
     build_generate_task_argv,
     build_task_result_row,
-    campaign_execution_lock,
     classify_official_exit,
     directory_tree_digest,
     final_poc_record,
@@ -545,8 +543,8 @@ def test_reused_input_attestation_binds_exact_paths_and_digests(tmp_path):
         _load_reused_input_observations(args)
 
 
-def test_run_campaign_settles_known_actual_on_nonfinal_cost(tmp_path):
-    """Known actual cost settles the reserve; the leftover claim estimate is not leftover UB."""
+def test_run_campaign_keeps_reservation_for_nonfinal_partial_cost(tmp_path):
+    """A partial observation cannot reduce liability below the reservation."""
 
     def callback(_task, task_dir):
         (task_dir / "final.poc").write_bytes(b"poc")
@@ -578,13 +576,13 @@ def test_run_campaign_settles_known_actual_on_nonfinal_cost(tmp_path):
     assert rows[0]["status"] == "infra_failed"
     assert rows[0]["infra_reason"] == "cost_unverifiable"
     projection = BudgetLedger(tmp_path / "nonfinal-cost" / "claims.jsonl", cap_usd=2).projection()
-    assert projection.settled_usd == pytest.approx(0.5)
-    assert projection.unresolved_upper_bound_usd == pytest.approx(0)
+    assert projection.settled_usd == pytest.approx(0)
+    assert projection.unresolved_upper_bound_usd == pytest.approx(1)
     assert projection.can_dispatch is True
 
 
 def test_run_campaign_records_terminal_total_accounted_bound_not_residual(tmp_path):
-    """The outer ledger settles the known inner accounted bound, not leftover UB."""
+    """The outer ledger retains the known total bound, not the smaller residue."""
 
     from devtools.benchmarks.cybergym.cybergym_adapter import _terminal_gateway_accounting
 
@@ -678,10 +676,10 @@ def test_run_campaign_records_terminal_total_accounted_bound_not_residual(tmp_pa
     )
     assert rows[0]["status"] == "infra_failed"
     projection = BudgetLedger(root / "claims.jsonl", cap_usd=2).projection()
-    assert projection.settled_usd == pytest.approx(0.060914)
-    assert projection.unresolved_upper_bound_usd == pytest.approx(0)
+    assert projection.settled_usd == pytest.approx(0)
+    assert projection.unresolved_upper_bound_usd == pytest.approx(0.060914)
     assert projection.projected_usd == pytest.approx(0.060914)
-    assert projection.settled_usd != pytest.approx(0.020062)
+    assert projection.unresolved_upper_bound_usd != pytest.approx(0.020062)
 
     conflict_root = tmp_path / "terminal-conflict"
     conflict_terminal = {
@@ -707,8 +705,8 @@ def test_run_campaign_records_terminal_total_accounted_bound_not_residual(tmp_pa
     conflict_projection = BudgetLedger(
         conflict_root / "claims.jsonl", cap_usd=2
     ).projection()
-    assert conflict_projection.settled_usd == pytest.approx(0.2)
-    assert conflict_projection.unresolved_upper_bound_usd == pytest.approx(0)
+    assert conflict_projection.settled_usd == pytest.approx(0)
+    assert conflict_projection.unresolved_upper_bound_usd == pytest.approx(0.2)
 
 
 def test_strict_trial_bool_rejects_truthy_strings_and_contract_is_pinned():
@@ -768,6 +766,7 @@ def test_run_campaign_requires_regular_marker_and_binds_hash(tmp_path):
             "observed_effort": "high",
             "trials": [{"trial_id": "final", "poc_hash": "a" * 64, "vul_exit_code": 1, "fix_exit_code": 0}],
             "cost_usd": 0.5,
+            "cost_estimated": False,
             "cost_final": True,
         }
 
@@ -793,6 +792,7 @@ def test_run_campaign_requires_regular_marker_and_binds_hash(tmp_path):
             "status": "completed",
             "observed_effort": "high",
             "cost_usd": 2.0,
+            "cost_estimated": False,
             "cost_final": True,
         }
 
@@ -817,6 +817,7 @@ def test_run_campaign_requires_regular_marker_and_binds_hash(tmp_path):
             "capability_outcome": CAPABILITY_FINAL_POC_MISSING,
             "observed_effort": "high",
             "cost_usd": 0.5,
+            "cost_estimated": False,
             "cost_final": True,
         }
 
@@ -845,6 +846,7 @@ def test_run_campaign_requires_regular_marker_and_binds_hash(tmp_path):
             "observed_effort": "high",
             "trials": [{"trial_id": "final", "is_final": True, "poc_hash": digest, "vul_exit_code": 1, "fix_exit_code": 0}],
             "cost_usd": 0.5,
+            "cost_estimated": False,
             "cost_final": True,
         }
 
@@ -870,6 +872,7 @@ def test_run_campaign_typed_overspend_row_and_retry_attempt_isolated(tmp_path):
             "observed_effort": "high",
             "trials": [{"trial_id": "final", "is_final": True, "poc_hash": digest, "vul_exit_code": 1, "fix_exit_code": 0}],
             "cost_usd": 3,
+            "cost_estimated": False,
             "cost_final": True,
         }
 
@@ -904,6 +907,7 @@ def test_run_campaign_typed_overspend_row_and_retry_attempt_isolated(tmp_path):
             "observed_effort": "high",
             "trials": [{"trial_id": "final", "is_final": True, "poc_hash": digest, "vul_exit_code": 1, "fix_exit_code": 0}],
             "cost_usd": 0.25,
+            "cost_estimated": False,
             "cost_final": True,
         }
 
@@ -956,6 +960,7 @@ def test_run_campaign_persists_row_before_settlement_event(tmp_path, monkeypatch
                 "vul_exit_code": 1, "fix_exit_code": 0,
             }],
             "cost_usd": 0.5,
+            "cost_estimated": False,
             "cost_final": True,
         }
 
@@ -984,45 +989,6 @@ def test_run_campaign_persists_row_before_settlement_event(tmp_path, monkeypatch
     assert rows[0]["status"] == "completed"
     projection = BudgetLedger(root / "claims.jsonl", cap_usd=2).projection()
     assert projection.active_attempt_ids == (rows[0]["attempt_id"],)
-
-
-def test_run_campaign_holds_campaign_lock_through_dispatch(tmp_path):
-    pytest.importorskip("fcntl")
-    root = tmp_path / "live-lock"
-    started = threading.Event()
-    release = threading.Event()
-    result: list[list[dict]] = []
-
-    def callback(_task, _task_dir):
-        started.set()
-        assert release.wait(timeout=5)
-        return {
-            "status": "infra_failed",
-            "infra_reason": "test_terminal",
-            "cost_usd": 0.1,
-            "cost_final": True,
-        }
-
-    worker = threading.Thread(
-        target=lambda: result.append(run_campaign(
-            ["arvo:1"],
-            run_root=root,
-            executor=callback,
-            estimated_cost_usd=1,
-            budget_cap_usd=2,
-        )),
-        daemon=True,
-    )
-    worker.start()
-    assert started.wait(timeout=5)
-    try:
-        with campaign_execution_lock(root, blocking=False) as lock_held:
-            assert lock_held is False
-    finally:
-        release.set()
-        worker.join(timeout=5)
-    assert not worker.is_alive()
-    assert result[0][0]["status"] == "infra_failed"
 
 
 def test_run_campaign_rejects_missing_or_non_high_effort(tmp_path):
@@ -1603,7 +1569,7 @@ def test_reconcile_skips_attempts_already_in_result_index(tmp_path):
         encoding="utf-8",
     )
     (run_dir / "result_index.jsonl").write_text(
-        '{"task_id": "arvo:1"}\n',
+        '{"task_id": "arvo:1", "attempt_id": "attempt-a01"}\n',
         encoding="utf-8",
     )
     cleanup = (

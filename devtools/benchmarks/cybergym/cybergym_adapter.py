@@ -26,6 +26,10 @@ from devtools.benchmarks.cybergym.cybergym_dispatch import (  # noqa: F401
     GatewayCircuitOpen,
     run_dispatched,
 )
+from devtools.benchmarks.cybergym.cybergym_result_index import (
+    append_cybergym_result,
+    campaign_execution_lock,
+)
 from devtools.benchmarks.cybergym.cybergym_protocol import (
     BENCHMARK_NAME,
     DEFAULT_LEVEL,
@@ -517,7 +521,7 @@ def _finished_attempt_actual_usd(outcome: Mapping[str, Any] | None) -> float | N
     """
     if not isinstance(outcome, Mapping):
         return None
-    if outcome.get("cost_estimated") is True:
+    if outcome.get("cost_final") is not True or outcome.get("cost_estimated") is not False:
         return None
     for key in ("cost_usd", "cost_upper_bound_usd"):
         if key not in outcome or outcome[key] is None:
@@ -1102,97 +1106,6 @@ class BudgetLedger:
             self._append({"schema": LEDGER_SCHEMA, "event": "release", "attempt_id": attempt, "ts_unix": time.time()})
 
 
-@contextlib.contextmanager
-def campaign_execution_lock(
-    run_root: pathlib.Path | str,
-    *,
-    blocking: bool = True,
-) -> Iterator[bool]:
-    """Exclude live dispatch and reconcile delivery for one campaign root."""
-    root = pathlib.Path(run_root).expanduser().resolve(strict=False)
-    root.mkdir(parents=True, exist_ok=True)
-    handle = (root / ".campaign_execution.lock").open("a+", encoding="utf-8")
-    try:
-        try:
-            import fcntl
-
-            operation = fcntl.LOCK_EX
-            if not blocking:
-                operation |= fcntl.LOCK_NB
-            try:
-                fcntl.flock(handle.fileno(), operation)
-            except BlockingIOError:
-                yield False
-                return
-        except ImportError:
-            pass
-        yield True
-    finally:
-        handle.close()
-
-
-def _append_result_pair(root: pathlib.Path, row: Mapping[str, Any]) -> None:
-    """Idempotently append/repair the common and task-local result pair."""
-    from devtools.benchmarks.common.result_index import append_result_index, read_result_index
-
-    task = safe_task_id(str(row.get("task_id", row.get("instance_id", ""))))
-    value = dict(row)
-    attempt = str(value.get("attempt_id") or "")
-    task_root = safe_task_path(root, task)
-
-    def _matching_rows(path: pathlib.Path) -> list[dict[str, Any]]:
-        try:
-            rows = read_result_index(path)
-        except (OSError, UnicodeDecodeError, json.JSONDecodeError) as exc:
-            raise CyberGymError(f"result index is unreadable: {exc}") from exc
-        return [
-            existing for existing in rows
-            if str(existing.get("task_id", existing.get("instance_id", ""))) == task
-            and str(existing.get("attempt_id") or "") == attempt
-        ]
-
-    run_rows = _matching_rows(root)
-    if run_rows:
-        if run_rows[-1] != value:
-            raise CyberGymError(f"conflicting result row already recorded for {task}")
-        value = run_rows[-1]
-    else:
-        append_result_index(root, value)
-    task_rows = _matching_rows(task_root)
-    if task_rows and task_rows[-1] != value:
-        raise CyberGymError(f"conflicting task-local result row already recorded for {task}")
-    if not task_rows:
-        append_result_index(task_root, value)
-
-
-def append_cybergym_result(run_root: pathlib.Path | str, row: Mapping[str, Any]) -> None:
-    """Append one row to the common run index and its task-local index."""
-    root = pathlib.Path(run_root).expanduser().resolve(strict=False)
-    # The shared helper deliberately stays a tiny append primitive and does not
-    # own a cross-process lock.  A campaign can have several lanes, so serialize
-    # the paired parent/task writes here and fsync the lock holder before release.
-    lock_path = root / ".result_index.lock"
-    root.mkdir(parents=True, exist_ok=True)
-    with lock_path.open("a+", encoding="utf-8") as lock:
-        locked = False
-        try:
-            try:
-                import fcntl
-
-                fcntl.flock(lock.fileno(), fcntl.LOCK_EX)
-                locked = True
-            except ImportError:
-                pass
-            _append_result_pair(root, row)
-            lock.flush()
-            os.fsync(lock.fileno())
-        finally:
-            if locked:
-                import fcntl
-
-                fcntl.flock(lock.fileno(), fcntl.LOCK_UN)
-
-
 def _task_spec(value: TaskSpec | Mapping[str, Any] | str) -> TaskSpec:
     """Normalize one injected task value without touching the filesystem."""
     if isinstance(value, TaskSpec):
@@ -1344,13 +1257,45 @@ def settle_finished_attempt(
     else:
         upper_bound = projected.get("cost_upper_bound_usd")
         if upper_bound is None:
-            upper_bound = projected.get("cost_usd")
-        if upper_bound is None:
             upper_bound = projected.get("unresolved_upper_bound_usd")
         ledger.mark_unresolved(
             str(attempt_id),
             upper_bound,
             before_write=before_write,
+        )
+
+
+def _refuse_existing_campaign_history(
+    root: pathlib.Path,
+    ledger: BudgetLedger,
+    requested_task_ids: set[str],
+) -> None:
+    claimed_tasks = {
+        safe_task_id(str(event.get("task_id") or ""))
+        for event in ledger.events()
+        if str(event.get("event", event.get("kind", "")) or "").lower()
+        in {"claim", "reserve", "reserved"}
+    }
+    recorded_tasks: set[str] = set()
+    index_path = root / "result_index.jsonl"
+    if index_path.exists():
+        try:
+            for line_number, line in enumerate(index_path.read_text(encoding="utf-8").splitlines(), 1):
+                if not line.strip():
+                    continue
+                value = json.loads(line)
+                if not isinstance(value, Mapping):
+                    raise LedgerError(f"result index line {line_number} is not an object")
+                raw_task = value.get("task_id", value.get("instance_id", ""))
+                if raw_task:
+                    recorded_tasks.add(safe_task_id(str(raw_task)))
+        except (OSError, UnicodeDecodeError, json.JSONDecodeError) as exc:
+            raise LedgerError(f"cannot inspect existing result index: {index_path}") from exc
+    repeated = sorted((claimed_tasks | recorded_tasks).intersection(requested_task_ids))
+    if repeated:
+        raise ClaimRefused(
+            "task already has campaign history; pass allow_retries=True: "
+            + ", ".join(repeated)
         )
 
 
@@ -1364,6 +1309,7 @@ def run_campaign(
     max_workers: int = 1,
     allow_retries: bool = False,
     gateway_circuit_threshold: int = GATEWAY_CIRCUIT_BREAKER_THRESHOLD,
+    campaign_lock_held: bool = False,
 ) -> list[dict[str, Any]]:
     """Run injected task callbacks under one atomic ledger.
 
@@ -1396,38 +1342,6 @@ def run_campaign(
     ledger = BudgetLedger(root / "claims.jsonl", cap_usd=budget_cap_usd)
     if not isinstance(allow_retries, bool):
         raise ValueError("allow_retries must be a boolean")
-    if not allow_retries:
-        # A second invocation against the same campaign root is ambiguous: it
-        # could overwrite a completed row or attach a late result to the wrong
-        # attempt.  Callers that intentionally resume must opt in explicitly;
-        # each resumed claim receives a fresh attempt id below.
-        claimed_tasks = {
-            safe_task_id(str(event.get("task_id") or ""))
-            for event in ledger.events()
-            if str(event.get("event", event.get("kind", "")) or "").lower()
-            in {"claim", "reserve", "reserved"}
-        }
-        recorded_tasks: set[str] = set()
-        index_path = root / "result_index.jsonl"
-        if index_path.exists():
-            try:
-                for line_number, line in enumerate(index_path.read_text(encoding="utf-8").splitlines(), 1):
-                    if not line.strip():
-                        continue
-                    value = json.loads(line)
-                    if not isinstance(value, Mapping):
-                        raise LedgerError(f"result index line {line_number} is not an object")
-                    raw_task = value.get("task_id", value.get("instance_id", ""))
-                    if raw_task:
-                        recorded_tasks.add(safe_task_id(str(raw_task)))
-            except (OSError, UnicodeDecodeError, json.JSONDecodeError) as exc:
-                raise LedgerError(f"cannot inspect existing result index: {index_path}") from exc
-        repeated = sorted((claimed_tasks | recorded_tasks).intersection(seen_task_ids))
-        if repeated:
-            raise ClaimRefused(
-                "task already has campaign history; pass allow_retries=True: "
-                + ", ".join(repeated)
-            )
 
     def _run_one(task: TaskSpec) -> dict[str, Any]:
         contract = task.metadata.get("task_contract") if isinstance(task.metadata, Mapping) else None
@@ -1638,9 +1552,18 @@ def run_campaign(
     # than treating this as an unbounded scheduler.  The dispatch engine stops
     # admitting new work once the isolate gateway is proven unreachable, so a
     # dead gateway cannot burn the rest of the catalog into transport rows.
-    with campaign_execution_lock(root) as lock_held:
+    if not isinstance(campaign_lock_held, bool):
+        raise ValueError("campaign_lock_held must be a boolean")
+    lock_context = (
+        contextlib.nullcontext(True)
+        if campaign_lock_held
+        else campaign_execution_lock(root, blocking=False)
+    )
+    with lock_context as lock_held:
         if not lock_held:
             raise ClaimRefused("campaign execution lock is unavailable")
+        if not allow_retries:
+            _refuse_existing_campaign_history(root, ledger, seen_task_ids)
         return run_dispatched(
             normalized_tasks,
             _run_one,

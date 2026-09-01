@@ -101,7 +101,7 @@
 +        # is emitted by the runtime; the guard test above fails if this list and the SSOT
 +        # ever diverge again.
 +        "truncated": reason_code in (
-+            "budget_exhausted", "children_unabsorbed", "deadline_local",
++            "acceptance_fence_unavailable", "budget_exhausted", "children_unabsorbed", "deadline_local",
 +            "finalization_grace", "llm_api_error", "owner_requested_finalization",
 +            "provider_unavailable", "round_limit"),
 +        "degraded": bool(task_result.get("degraded") or loop_outcome.get("degraded")),

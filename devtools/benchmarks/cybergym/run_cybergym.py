@@ -59,6 +59,7 @@ from devtools.benchmarks.cybergym.cybergym_adapter import (
     append_cybergym_result,
     build_generate_task_argv,
     build_task_result_row,
+    campaign_execution_lock,
     derive_disabled_tools,
     load_task_catalog,
     mask_task_id,
@@ -1235,7 +1236,12 @@ def main(argv: Sequence[str] | None = None) -> int:
         print(f"[cybergym] admission refused: {exc}", file=sys.stderr)
         return 2
 
-    with finalize_run_manifest(manifest_path, manifest, outcome="completed") as final:
+    with campaign_execution_lock(out_root, blocking=False) as campaign_lock_held, \
+            finalize_run_manifest(manifest_path, manifest, outcome="completed") as final:
+        if not campaign_lock_held:
+            final.update({"outcome": "refused", "exit_code": 2})
+            print("[cybergym] refused: campaign root is already active", file=sys.stderr)
+            return 2
         try:
             task_ids = list(declared_ids)
             catalog: dict[str, Any] | None = None
@@ -1451,6 +1457,7 @@ def main(argv: Sequence[str] | None = None) -> int:
                             estimated_cost_usd=float(args.per_task_estimate_usd),
                             budget_cap_usd=float(args.budget_usd),
                             max_workers=int(args.workers),
+                            campaign_lock_held=True,
                         )
                     except GatewayCircuitOpen as exc:
                         circuit, rows = exc, list(exc.rows)

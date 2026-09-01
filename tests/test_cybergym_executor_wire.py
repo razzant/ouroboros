@@ -796,8 +796,8 @@ def test_terminal_telemetry_failure_preserves_settled_cost(tmp_path, monkeypatch
     assert rows[0]["lifecycle"] == "post_gateway_evaluation_failed"
     assert rows[0]["cost_usd"] == pytest.approx(0.25)
     projection = BudgetLedger(config.run_root / "claims.jsonl", cap_usd=2).projection()
-    assert projection.settled_usd == pytest.approx(0.25)
-    assert projection.unresolved_upper_bound_usd == 0
+    assert projection.settled_usd == 0
+    assert projection.unresolved_upper_bound_usd == pytest.approx(0.25)
 
 
 def test_missing_marker_with_failed_execution_stays_infra(tmp_path, monkeypatch):

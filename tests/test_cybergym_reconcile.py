@@ -14,6 +14,7 @@ import pytest
 
 from devtools.benchmarks.cybergym import cybergym_reconcile
 from devtools.benchmarks.cybergym.cybergym_adapter import (
+    BudgetLedger,
     append_cybergym_result,
     task_slug,
 )
@@ -197,8 +198,7 @@ def test_reconcile_crash_between_append_and_settle_keeps_workspace(tmp_path, mon
     assert fake.released == [("arvo:1", "attempt-a01")]
 
 
-def test_reconcile_second_checkpoint_of_same_task_is_skipped(tmp_path, monkeypatch):
-    """Two checkpoints of one task yield exactly one official row."""
+def test_reconcile_processes_each_retry_attempt_independently(tmp_path, monkeypatch):
     run_dir = _write_run(
         tmp_path / "run",
         ["arvo:1"],
@@ -207,15 +207,18 @@ def test_reconcile_second_checkpoint_of_same_task_is_skipped(tmp_path, monkeypat
     fake = _FakeExecutor(_TERMINAL_OUTCOME)
     _install_fake_executor(monkeypatch, fake)
 
-    assert reconcile_main(_reconcile_args(run_dir)) == 2
-    assert fake.reconciled == [("arvo:1", "attempt-a01")]
-    assert len(_read_rows(run_dir)) == 1
-    report = _read_manifest(run_dir)["extra"]["reconcile_passes"][-1]
-    assert [entry["attempt_id"] for entry in report["delivered"]] == ["attempt-a01"]
-    assert report["skipped_recorded"] == []
-    assert [entry["attempt_id"] for entry in report["undeliverable"]] == [
-        "attempt-a02"
+    assert reconcile_main(_reconcile_args(run_dir)) == 0
+    assert fake.reconciled == [
+        ("arvo:1", "attempt-a01"),
+        ("arvo:1", "attempt-a02"),
     ]
+    assert len(_read_rows(run_dir)) == 2
+    report = _read_manifest(run_dir)["extra"]["reconcile_passes"][-1]
+    assert [entry["attempt_id"] for entry in report["delivered"]] == [
+        "attempt-a01", "attempt-a02",
+    ]
+    assert report["skipped_recorded"] == []
+    assert report["undeliverable"] == []
 
 
 def test_reconcile_drops_row_when_task_was_recorded_mid_delivery(tmp_path, monkeypatch):
@@ -225,7 +228,10 @@ def test_reconcile_drops_row_when_task_was_recorded_mid_delivery(tmp_path, monke
     class RacingExecutor(_FakeExecutor):
         def reconcile_task(self, spec, task_dir, attempt_id, checkpoint):
             outcome = super().reconcile_task(spec, task_dir, attempt_id, checkpoint)
-            append_cybergym_result(run_dir, {"task_id": spec.task_id, "status": "infra_failed"})
+            append_cybergym_result(
+                run_dir,
+                {"task_id": spec.task_id, "attempt_id": attempt_id, "status": "infra_failed"},
+            )
             return outcome
 
     fake = RacingExecutor(_TERMINAL_OUTCOME)
@@ -252,6 +258,37 @@ def test_result_pair_append_repairs_torn_task_local_row(tmp_path):
 
     assert _read_rows(run_dir) == [row]
     assert _read_rows(run_dir / task_slug("arvo:1")) == [row]
+
+
+def test_reconcile_uses_exact_recorded_row_for_each_retry_attempt(tmp_path, monkeypatch):
+    attempts = ("attempt-a01", "attempt-a02")
+    run_dir = _write_run(
+        tmp_path / "run",
+        ["arvo:1"],
+        checkpoints=[("arvo:1", attempt) for attempt in attempts],
+    )
+    rows = [
+        {
+            "task_id": "arvo:1",
+            "attempt_id": attempt,
+            "status": "infra_failed",
+            "cost_usd": 0.1,
+            "cost_estimated": False,
+            "cost_final": True,
+        }
+        for attempt in attempts
+    ]
+    (run_dir / "result_index.jsonl").write_text(
+        "".join(json.dumps(row) + "\n" for row in rows),
+        encoding="utf-8",
+    )
+    fake = _FakeExecutor(_TERMINAL_OUTCOME)
+    _install_fake_executor(monkeypatch, fake)
+
+    assert reconcile_main(_reconcile_args(run_dir)) == 0
+    assert fake.released == [("arvo:1", attempt) for attempt in attempts]
+    assert BudgetLedger(run_dir / "claims.jsonl", cap_usd=3500).projection().active_attempt_ids == ()
+    assert _read_rows(run_dir / task_slug("arvo:1")) == rows
 
 
 def test_corrupt_torn_task_local_row_refuses_campaign_finalization(tmp_path, monkeypatch):
@@ -286,7 +323,7 @@ def test_corrupt_torn_task_local_row_refuses_campaign_finalization(tmp_path, mon
     assert fake.released == []
     report = _read_manifest(run_dir)["extra"]["reconcile_passes"][-1]
     assert report["status"] == "partial"
-    assert report["undeliverable"][0]["disposition"] == "settlement_pending"
+    assert report["undeliverable"][0]["disposition"] == "row_refused"
 
 
 def test_second_concurrent_reconcile_process_is_refused(tmp_path, capsys):

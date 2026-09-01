@@ -32,24 +32,21 @@ class CyberGymServerError(RuntimeError):
     """Typed refusal for isolated-server preparation or attestation."""
 
 
-# Filesystem types whose network latency and lock semantics defeated the
-# isolated server's state-dir guarantees before (flock timeouts on CephFS).
-# ``--state-dir`` exists to keep hot mutable state on a local disk; accepting
-# one of these silently would recreate that incident class.
-_NETWORK_STATE_FS_TYPES = frozenset({
-    "9p",
-    "ceph",
-    "cifs",
-    "fuse.ceph",
-    "fuse.cifs",
-    "fuse.glusterfs",
-    "fuse.sshfs",
-    "glusterfs",
-    "nfs",
-    "nfs4",
-    "smb3",
-    "smbfs",
-    "sshfs",
+# Positive evidence only: ``--state-dir`` exists specifically to keep hot
+# mutable lock/state traffic on a local disk. Unknown/FUSE/network types need
+# the explicit risk override rather than silently recreating the CephFS stall.
+_LOCAL_STATE_FS_TYPES = frozenset({
+    "btrfs",
+    "ext2",
+    "ext3",
+    "ext4",
+    "hfs",
+    "hfsplus",
+    "ntfs",
+    "ntfs3",
+    "overlay",
+    "xfs",
+    "zfs",
 })
 
 
@@ -289,7 +286,7 @@ class CyberGymIsolatedServer:
             if not isinstance(allow_network_state_dir, bool):
                 raise CyberGymServerError("allow_network_state_dir must be a boolean")
             state_fs_type = _mount_fs_type(resolved_state)
-            if not state_fs_type or state_fs_type in _NETWORK_STATE_FS_TYPES:
+            if state_fs_type not in _LOCAL_STATE_FS_TYPES:
                 if not allow_network_state_dir:
                     raise CyberGymServerError(
                         "state_dir must be on a known local filesystem; observed "

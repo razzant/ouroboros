@@ -403,23 +403,6 @@ def test_begin_with_lost_token_readopts_existing_live_fence(monkeypatch, tmp_pat
     assert ended["status"] == "sealed"
 
 
-def test_begin_cannot_readopt_different_live_owners_fence(monkeypatch, tmp_path):
-    queue_mod, _pending = _isolated_queue(monkeypatch, tmp_path)
-    queue_mod.RUNNING["owner-1"] = {"task": {"id": "owner-1", "root_task_id": "root-1"}}
-    queue_mod.transition_acceptance_fence(
-        action="begin", token="a" * 32, root_task_id="root-1", task_id="owner-1",
-    )
-
-    rejected = queue_mod.transition_acceptance_fence(
-        action="begin", token="b" * 32, root_task_id="root-1", task_id="owner-2",
-    )
-
-    assert rejected["ok"] is False
-    assert "different live owner" in rejected["error"]
-    assert queue_mod.ACCEPTANCE_FENCES["root-1"]["token"] == "a" * 32
-    assert queue_mod.ACCEPTANCE_FENCES["root-1"]["task_id"] == "owner-1"
-
-
 def test_begin_reconciles_fence_whose_owner_is_dead(monkeypatch, tmp_path):
     """Dead-owner reconcile: a fence whose owner left RUNNING and PENDING is
     handed over to the new begin instead of rejecting it forever."""

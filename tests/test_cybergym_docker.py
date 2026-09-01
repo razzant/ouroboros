@@ -80,6 +80,60 @@ def test_post_create_timeout_preserves_workspace_custody(tmp_path, monkeypatch):
     assert projection.can_dispatch is True
 
 
+def test_terminal_workspace_survives_until_result_and_settlement_return(tmp_path, monkeypatch):
+    config = _config(tmp_path, provider_probe=False)
+    executor = CyberGymExecutor(config)
+    cleaned = []
+
+    def fake_workspace(task, task_dir, plan):
+        name = f"cybergym-workspace-{plan.opaque_agent_id}"
+        executor._task_containers[name] = "d" * 64
+        return name
+
+    monkeypatch.setattr(executor, "start", lambda: None)
+    monkeypatch.setattr(executor, "_generate", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(
+        executor_module, "_install_workspace_backend_alias", lambda *_args, **_kwargs: None,
+    )
+    monkeypatch.setattr(executor, "_workspace", fake_workspace)
+    monkeypatch.setattr(
+        executor, "_cleanup_workspace_container",
+        lambda name, *_args, **_kwargs: cleaned.append(name),
+    )
+    monkeypatch.setattr(
+        executor, "_task_body",
+        lambda task, *_args, **_kwargs: {"task_id": "cybergym-" + task.task_id.replace(":", "-")},
+    )
+    monkeypatch.setattr(
+        executor, "_gateway_wait",
+        lambda *_args, **_kwargs: {"status": "failed", "cost_final": True},
+    )
+    monkeypatch.setattr(
+        executor, "_deliver_gateway_result",
+        lambda *_args, **_kwargs: {
+            "status": "infra_failed",
+            "infra_reason": "test_terminal",
+            "cost_usd": 0.1,
+            "cost_estimated": False,
+            "cost_final": True,
+        },
+    )
+
+    rows = run_campaign(
+        ["arvo:1"],
+        run_root=config.run_root,
+        executor=executor.run_task,
+        estimated_cost_usd=1,
+        budget_cap_usd=2,
+    )
+
+    assert rows[0]["status"] == "infra_failed"
+    assert cleaned == []
+    assert len(executor._task_containers) == 1
+    projection = BudgetLedger(config.run_root / "claims.jsonl", cap_usd=2).projection()
+    assert projection.settled_usd == pytest.approx(0.1)
+
+
 def test_network_reaps_empty_foreign_leftover_then_creates(tmp_path):
     config = _config(tmp_path)
     stale_id = "stale-be200ad3-network"

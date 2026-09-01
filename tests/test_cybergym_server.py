@@ -511,16 +511,17 @@ def test_state_dir_rejects_unknown_filesystem(tmp_path, monkeypatch):
     from devtools.benchmarks.cybergym import cybergym_server
 
     seed, commit = _seed_repo(tmp_path)
-    monkeypatch.setattr(cybergym_server, "_mount_fs_type", lambda path: "")
-    with pytest.raises(CyberGymServerError, match="known local filesystem"):
-        CyberGymIsolatedServer(
-            seed,
-            tmp_path / "run",
-            _settings(tmp_path),
-            _host(),
-            expected_commit=commit,
-            state_dir=tmp_path / "unknown-state",
-        )
+    for fs_type in ("", "mysteryfs"):
+        monkeypatch.setattr(cybergym_server, "_mount_fs_type", lambda path, value=fs_type: value)
+        with pytest.raises(CyberGymServerError, match="known local filesystem"):
+            CyberGymIsolatedServer(
+                seed,
+                tmp_path / "run",
+                _settings(tmp_path),
+                _host(),
+                expected_commit=commit,
+                state_dir=tmp_path / "unknown-state",
+            )
 
 
 def test_state_dir_network_escape_hatch_warns(tmp_path, monkeypatch, capsys):

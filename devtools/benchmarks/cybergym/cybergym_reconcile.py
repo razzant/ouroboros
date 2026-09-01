@@ -42,7 +42,6 @@ from devtools.benchmarks.cybergym.cybergym_adapter import (
     CyberGymIntegrationUnavailable,
     LedgerError,
     TaskSpec,
-    _append_result_pair,
     campaign_execution_lock,
     finalize_outcome_row,
     load_task_catalog,
@@ -51,6 +50,7 @@ from devtools.benchmarks.cybergym.cybergym_adapter import (
     settle_finished_attempt,
     task_slug,
 )
+from devtools.benchmarks.cybergym.cybergym_result_index import _append_result_pair
 from devtools.benchmarks.cybergym.cybergym_docker import (
     _GATEWAY_TASK_ID,
     _inside,
@@ -454,13 +454,15 @@ class _ReconcileMixin:
         return self.close() or {"status": "not_needed", "ok": True}
 
 
-def _recorded_task_rows(run_dir: pathlib.Path) -> dict[str, dict[str, Any]]:
-    """Read the latest row per task from the run's result index.
+def _recorded_attempt_rows(
+    run_dir: pathlib.Path,
+) -> dict[tuple[str, str], dict[str, Any]]:
+    """Read the latest row per task attempt from the run's result index.
 
     Lenient like the reconcile preamble has always been: blank or non-object
     lines are skipped, but an unreadable index is a typed refusal.
     """
-    recorded: dict[str, dict[str, Any]] = {}
+    recorded: dict[tuple[str, str], dict[str, Any]] = {}
     index_path = run_dir / "result_index.jsonl"
     if not index_path.exists():
         return recorded
@@ -473,14 +475,15 @@ def _recorded_task_rows(run_dir: pathlib.Path) -> dict[str, dict[str, Any]]:
                 continue
             raw_task = value.get("task_id", value.get("instance_id", ""))
             if raw_task:
-                recorded[safe_task_id(str(raw_task))] = dict(value)
+                key = (safe_task_id(str(raw_task)), str(value.get("attempt_id") or ""))
+                recorded[key] = dict(value)
     except (OSError, UnicodeDecodeError, json.JSONDecodeError) as exc:
         raise CyberGymError(f"result index is unreadable: {exc}") from exc
     return recorded
 
 
 def _recorded_task_ids(run_dir: pathlib.Path) -> set[str]:
-    return set(_recorded_task_rows(run_dir))
+    return {task_id for task_id, _attempt_id in _recorded_attempt_rows(run_dir)}
 
 
 def _workspace_cleanup_complete(
@@ -541,10 +544,11 @@ def _append_row_if_unrecorded(run_dir: pathlib.Path, row: Mapping[str, Any]) -> 
     the duplicate row is dropped instead of double-submitting it.
     """
     task = safe_task_id(str(row.get("task_id", row.get("instance_id", ""))))
+    attempt = str(row.get("attempt_id") or "")
     with _result_index_lock(run_dir):
-        recorded = _recorded_task_rows(run_dir)
-        if task in recorded:
-            _append_result_pair(run_dir, recorded[task])
+        recorded = _recorded_attempt_rows(run_dir)
+        if (task, attempt) in recorded:
+            _append_result_pair(run_dir, recorded[(task, attempt)])
             return False
         _append_result_pair(run_dir, row)
         return True
@@ -722,11 +726,12 @@ def reconcile_main(args: argparse.Namespace) -> int:
             cap_usd=float(args.budget_usd),
         )
         try:
-            recorded_rows = _recorded_task_rows(run_dir)
+            recorded_rows = _recorded_attempt_rows(run_dir)
         except CyberGymError as exc:
             print(f"[cybergym] reconcile refusal: {exc}", file=sys.stderr)
             return 2
-        recorded = set(recorded_rows)
+        recorded_attempts = set(recorded_rows)
+        recorded_tasks = {task_id for task_id, _attempt_id in recorded_attempts}
 
         slug_to_id = {task_slug(task_id): task_id for task_id in requested_ids}
         pending: list[tuple[str, str, pathlib.Path]] = []
@@ -753,7 +758,7 @@ def reconcile_main(args: argparse.Namespace) -> int:
                         )
                         return 2
                     if (
-                        task_id not in recorded
+                        (task_id, attempt_dir.name) not in recorded_attempts
                         or claim_state == "reserved"
                         or not _workspace_cleanup_complete(
                             run_dir, task_id, attempt_dir.name,
@@ -767,14 +772,14 @@ def reconcile_main(args: argparse.Namespace) -> int:
         unaccounted = sorted(
             task_id
             for task_id in requested_ids
-            if task_id not in recorded and task_id not in checkpointed
+            if task_id not in recorded_tasks and task_id not in checkpointed
         )
 
         reconcile_report: dict[str, Any] = {
             "schema": "ouroboros.benchmark.cybergym.reconcile.v1",
             "run_root": str(run_dir),
             "requested_count": len(requested_ids),
-            "already_recorded": sorted(recorded),
+            "already_recorded": sorted(recorded_tasks),
             "pending_attempts": len(pending),
             "delivered": [],
             "left_running": [],
@@ -839,13 +844,14 @@ def reconcile_main(args: argparse.Namespace) -> int:
         try:
             for task_id, attempt_id, checkpoint in pending:
                 spec = specs[task_id]
-                if task_id in recorded:
+                attempt_key = (task_id, attempt_id)
+                if attempt_key in recorded_attempts:
                     entry = {
                         "task_id": task_id,
                         "attempt_id": attempt_id,
                         "disposition": "recorded_recovery",
                     }
-                    row = recorded_rows[task_id]
+                    row = recorded_rows[attempt_key]
                     try:
                         with _result_index_lock(run_dir):
                             _append_result_pair(run_dir, row)
@@ -956,8 +962,9 @@ def reconcile_main(args: argparse.Namespace) -> int:
                     reconcile_report["skipped_recorded"].append(entry)
                     executor_obj.release_reconciled_workspace(spec, attempt_id)
                     continue
-                recorded.add(task_id)
-                recorded_rows[task_id] = dict(row)
+                recorded_attempts.add(attempt_key)
+                recorded_tasks.add(task_id)
+                recorded_rows[attempt_key] = dict(row)
                 entry["row_status"] = str(row.get("status") or "")
                 try:
                     settle_finished_attempt(ledger, attempt_id, outcome)

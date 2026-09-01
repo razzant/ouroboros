@@ -1235,15 +1235,15 @@ class CyberGymExecutor(_DockerRuntimeMixin, _LifecycleMixin, _ReconcileMixin, _C
                 "error": str(exc),
             }
         finally:
-            # Keep the exact workspace while gateway admission or terminal
-            # custody is unresolved: a late completed result needs that
-            # container for official submit/verify during reconcile.
+            # Once gateway admission starts, keep the exact workspace through
+            # the outer result-row and claim-settlement transaction. Campaign
+            # close reaps terminal workspaces only after run_campaign returns;
+            # unresolved custody remains available to reconcile.
             with self._registry_lock:
                 has_exact_id = bool(container_name and self._task_containers.get(container_name))
             cleanup_safe = (
                 not gateway_admission_started
                 or gateway_admission_rejected
-                or gateway_settled
             )
             if has_exact_id and cleanup_safe:
                 try:
