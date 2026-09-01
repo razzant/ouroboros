@@ -16,6 +16,7 @@ from devtools.benchmarks.cybergym import cybergym_reconcile
 from devtools.benchmarks.cybergym.cybergym_adapter import (
     BudgetLedger,
     append_cybergym_result,
+    campaign_execution_lock,
     task_slug,
 )
 from devtools.benchmarks.cybergym.cybergym_reconcile import reconcile_main
@@ -199,12 +200,28 @@ def test_reconcile_crash_between_append_and_settle_keeps_workspace(tmp_path, mon
 
 
 def test_reconcile_processes_each_retry_attempt_independently(tmp_path, monkeypatch):
+    attempts = ("attempt-a01", "attempt-a02")
     run_dir = _write_run(
         tmp_path / "run",
         ["arvo:1"],
-        checkpoints=[("arvo:1", "attempt-a01"), ("arvo:1", "attempt-a02")],
+        checkpoints=[("arvo:1", attempt) for attempt in attempts],
     )
-    fake = _FakeExecutor(_TERMINAL_OUTCOME)
+    expected_dirs = []
+    for attempt in attempts:
+        retry_dir = run_dir / task_slug("arvo:1") / attempt
+        retry_dir.mkdir(parents=True)
+        expected_dirs.append(retry_dir)
+
+    class RetryDirExecutor(_FakeExecutor):
+        def __init__(self, outcome):
+            super().__init__(outcome)
+            self.task_dirs = []
+
+        def reconcile_task(self, spec, task_dir, attempt_id, checkpoint):
+            self.task_dirs.append(task_dir)
+            return super().reconcile_task(spec, task_dir, attempt_id, checkpoint)
+
+    fake = RetryDirExecutor(_TERMINAL_OUTCOME)
     _install_fake_executor(monkeypatch, fake)
 
     assert reconcile_main(_reconcile_args(run_dir)) == 0
@@ -212,6 +229,7 @@ def test_reconcile_processes_each_retry_attempt_independently(tmp_path, monkeypa
         ("arvo:1", "attempt-a01"),
         ("arvo:1", "attempt-a02"),
     ]
+    assert fake.task_dirs == expected_dirs
     assert len(_read_rows(run_dir)) == 2
     report = _read_manifest(run_dir)["extra"]["reconcile_passes"][-1]
     assert [entry["attempt_id"] for entry in report["delivered"]] == [
@@ -327,14 +345,11 @@ def test_corrupt_torn_task_local_row_refuses_campaign_finalization(tmp_path, mon
 
 
 def test_second_concurrent_reconcile_process_is_refused(tmp_path, capsys):
-    fcntl = pytest.importorskip("fcntl")
+    pytest.importorskip("fcntl")
     run_dir = _write_run(tmp_path / "run", ["arvo:1"], rows=["arvo:1"])
-    handle = (run_dir / ".campaign_execution.lock").open("a+", encoding="utf-8")
-    fcntl.flock(handle.fileno(), fcntl.LOCK_EX)
-    try:
+    with campaign_execution_lock(run_dir, blocking=False) as lock_held:
+        assert lock_held is True
         assert reconcile_main(_reconcile_args(run_dir)) == 2
-    finally:
-        handle.close()
     assert "another --reconcile process" in capsys.readouterr().err
 
 

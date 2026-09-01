@@ -580,7 +580,6 @@ def test_run_campaign_keeps_reservation_for_nonfinal_partial_cost(tmp_path):
     assert projection.unresolved_upper_bound_usd == pytest.approx(1)
     assert projection.can_dispatch is True
 
-
 def test_run_campaign_records_terminal_total_accounted_bound_not_residual(tmp_path):
     """The outer ledger retains the known total bound, not the smaller residue."""
 

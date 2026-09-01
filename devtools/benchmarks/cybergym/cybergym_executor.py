@@ -858,6 +858,7 @@ class CyberGymExecutor(_DockerRuntimeMixin, _LifecycleMixin, _ReconcileMixin, _C
         # handles and are not sufficient custody evidence after a daemon
         # restart or a concurrent name collision.
         self._task_containers: dict[str, str] = {}
+        self._terminal_uncommitted_workspaces: dict[str, dict[str, str]] = {}
         self._server_observation: Mapping[str, Any] | None = None
         self._server_image_observation: Mapping[str, Any] | None = None
         self._workspace_image_observation: Mapping[str, Any] | None = None
@@ -1079,6 +1080,25 @@ class CyberGymExecutor(_DockerRuntimeMixin, _LifecycleMixin, _ReconcileMixin, _C
             raise ExecutorFailure(security_failure)
         return dict(report)
 
+    def acknowledge_result_durable(self, task_id: str, attempt_id: str) -> None:
+        """Release terminal workspace custody after row and ledger durability."""
+        plan = self._plans.get(str(attempt_id))
+        if plan is None:
+            raise ExecutorFailure("durability acknowledgement has no attempt plan")
+        container_name = f"cybergym-workspace-{plan.opaque_agent_id}"
+        with self._registry_condition:
+            pending = self._terminal_uncommitted_workspaces.get(container_name)
+            if pending is None:
+                return
+            if not isinstance(pending, Mapping):
+                raise ExecutorFailure("durability acknowledgement custody is malformed")
+            if (
+                pending.get("task_id") != str(task_id)
+                or pending.get("attempt_id") != str(attempt_id)
+            ):
+                raise ExecutorFailure("durability acknowledgement identity mismatch")
+            self._terminal_uncommitted_workspaces.pop(container_name, None)
+
     def run_task(self, task: TaskSpec, task_dir: pathlib.Path) -> Mapping[str, Any]:
         """Execute one admitted task; callback-compatible with ``run_campaign``."""
 
@@ -1169,6 +1189,11 @@ class CyberGymExecutor(_DockerRuntimeMixin, _LifecycleMixin, _ReconcileMixin, _C
             gateway_result = self._gateway_wait(body, checkpoint)
             gateway_settled = True
             terminal_runtime_result = dict(gateway_result)
+            with self._registry_condition:
+                self._terminal_uncommitted_workspaces[container_name] = {
+                    "task_id": task.task_id,
+                    "attempt_id": attempt_id,
+                }
             return self._deliver_gateway_result(
                 task,
                 task_dir,

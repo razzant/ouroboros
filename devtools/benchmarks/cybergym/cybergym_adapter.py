@@ -28,6 +28,7 @@ from devtools.benchmarks.cybergym.cybergym_dispatch import (  # noqa: F401
 )
 from devtools.benchmarks.cybergym.cybergym_result_index import (
     append_cybergym_result,
+    campaign_history_task_ids,
     campaign_execution_lock,
 )
 from devtools.benchmarks.cybergym.cybergym_protocol import (
@@ -1077,6 +1078,7 @@ class BudgetLedger:
         upper_bound_usd: float | None = None,
         *,
         before_write: Callable[[BudgetOverspend | None], None] | None = None,
+        preserve_existing_floor: bool = False,
     ) -> None:
         attempt = str(attempt_id or "").strip()
         upper = _money(upper_bound_usd, field="upper_bound_usd", allow_none=True)
@@ -1085,7 +1087,16 @@ class BudgetLedger:
             if attempt not in project_budget(events, self.cap_usd).active_attempt_ids:
                 raise LedgerError(f"attempt is not active: {attempt}")
             reserved, prior_upper = _attempt_reservation_bound(events, attempt)
-            bound = _numeric_unresolved_bound(upper, reserved_usd=reserved, prior_upper=prior_upper)
+            if preserve_existing_floor:
+                known = [
+                    float(value) for value in (upper, prior_upper, reserved)
+                    if value is not None
+                ]
+                bound = max(known) if known else None
+            else:
+                bound = _numeric_unresolved_bound(
+                    upper, reserved_usd=reserved, prior_upper=prior_upper,
+                )
             if before_write is not None:
                 before_write(None)
             self._append(
@@ -1258,10 +1269,29 @@ def settle_finished_attempt(
         upper_bound = projected.get("cost_upper_bound_usd")
         if upper_bound is None:
             upper_bound = projected.get("unresolved_upper_bound_usd")
+        if upper_bound is not None:
+            upper_bound = _money(upper_bound, field="cost_upper_bound_usd")
+        preserve_existing_floor = upper_bound is None
+        partial_value = (
+            projected.get("cost_usd")
+            if projected.get("cost_final") is not True
+            and projected.get("cost_estimated") is False
+            else None
+        )
+        partial_cost = (
+            _money(partial_value, field="cost_usd")
+            if partial_value is not None
+            else None
+        )
+        if partial_cost is not None and (
+            upper_bound is None or partial_cost > float(upper_bound)
+        ):
+            upper_bound = partial_cost
         ledger.mark_unresolved(
             str(attempt_id),
             upper_bound,
             before_write=before_write,
+            preserve_existing_floor=preserve_existing_floor,
         )
 
 
@@ -1270,28 +1300,8 @@ def _refuse_existing_campaign_history(
     ledger: BudgetLedger,
     requested_task_ids: set[str],
 ) -> None:
-    claimed_tasks = {
-        safe_task_id(str(event.get("task_id") or ""))
-        for event in ledger.events()
-        if str(event.get("event", event.get("kind", "")) or "").lower()
-        in {"claim", "reserve", "reserved"}
-    }
-    recorded_tasks: set[str] = set()
-    index_path = root / "result_index.jsonl"
-    if index_path.exists():
-        try:
-            for line_number, line in enumerate(index_path.read_text(encoding="utf-8").splitlines(), 1):
-                if not line.strip():
-                    continue
-                value = json.loads(line)
-                if not isinstance(value, Mapping):
-                    raise LedgerError(f"result index line {line_number} is not an object")
-                raw_task = value.get("task_id", value.get("instance_id", ""))
-                if raw_task:
-                    recorded_tasks.add(safe_task_id(str(raw_task)))
-        except (OSError, UnicodeDecodeError, json.JSONDecodeError) as exc:
-            raise LedgerError(f"cannot inspect existing result index: {index_path}") from exc
-    repeated = sorted((claimed_tasks | recorded_tasks).intersection(requested_task_ids))
+    history = campaign_history_task_ids(root, ledger.events())
+    repeated = sorted(history.intersection(requested_task_ids))
     if repeated:
         raise ClaimRefused(
             "task already has campaign history; pass allow_retries=True: "
@@ -1545,6 +1555,12 @@ def run_campaign(
         except BudgetOverspend:
             # The typed row was persisted before the terminal overspend event.
             pass
+        executor_owner = getattr(executor, "executor", None) or getattr(
+            executor, "__self__", None,
+        )
+        acknowledge = getattr(executor_owner, "acknowledge_result_durable", None)
+        if callable(acknowledge):
+            acknowledge(str(row.get("task_id") or ""), attempt_id)
 
     # A campaign may fan out independent tasks, but each task remains a
     # single-agent/no-swarm attempt.  The ledger and result writer are locked;

@@ -7,7 +7,7 @@ import json
 import os
 import pathlib
 from collections.abc import Iterator, Mapping
-from typing import Any
+from typing import Any, TextIO
 
 from devtools.benchmarks.common.result_index import append_result_index, read_result_index
 from devtools.benchmarks.cybergym.cybergym_protocol import (
@@ -17,6 +17,33 @@ from devtools.benchmarks.cybergym.cybergym_protocol import (
 )
 
 
+def acquire_campaign_execution_lock(
+    run_root: pathlib.Path | str,
+    *,
+    blocking: bool = True,
+) -> TextIO | None:
+    """Acquire the sibling campaign lock without creating the candidate root."""
+    root = pathlib.Path(run_root).expanduser().resolve(strict=False)
+    root.parent.mkdir(parents=True, exist_ok=True)
+    handle = (root.parent / f".{root.name}.campaign_execution.lock").open(
+        "a+", encoding="utf-8",
+    )
+    try:
+        import fcntl
+
+        operation = fcntl.LOCK_EX
+        if not blocking:
+            operation |= fcntl.LOCK_NB
+        try:
+            fcntl.flock(handle.fileno(), operation)
+        except BlockingIOError:
+            handle.close()
+            return None
+    except ImportError:
+        pass
+    return handle
+
+
 @contextlib.contextmanager
 def campaign_execution_lock(
     run_root: pathlib.Path | str,
@@ -24,26 +51,41 @@ def campaign_execution_lock(
     blocking: bool = True,
 ) -> Iterator[bool]:
     """Exclude live dispatch and reconcile delivery for one campaign root."""
-    root = pathlib.Path(run_root).expanduser().resolve(strict=False)
-    root.mkdir(parents=True, exist_ok=True)
-    handle = (root / ".campaign_execution.lock").open("a+", encoding="utf-8")
+    handle = acquire_campaign_execution_lock(run_root, blocking=blocking)
     try:
-        try:
-            import fcntl
-
-            operation = fcntl.LOCK_EX
-            if not blocking:
-                operation |= fcntl.LOCK_NB
-            try:
-                fcntl.flock(handle.fileno(), operation)
-            except BlockingIOError:
-                yield False
-                return
-        except ImportError:
-            pass
-        yield True
+        yield handle is not None
     finally:
-        handle.close()
+        if handle is not None:
+            handle.close()
+
+
+def campaign_history_task_ids(
+    run_root: pathlib.Path,
+    ledger_events: list[dict[str, Any]],
+) -> set[str]:
+    """Return task ids with a claim or official result in this campaign."""
+    tasks = {
+        safe_task_id(str(event.get("task_id") or ""))
+        for event in ledger_events
+        if str(event.get("event", event.get("kind", "")) or "").lower()
+        in {"claim", "reserve", "reserved"}
+    }
+    index_path = run_root / "result_index.jsonl"
+    if not index_path.exists():
+        return tasks
+    try:
+        for line_number, line in enumerate(index_path.read_text(encoding="utf-8").splitlines(), 1):
+            if not line.strip():
+                continue
+            value = json.loads(line)
+            if not isinstance(value, Mapping):
+                raise CyberGymError(f"result index line {line_number} is not an object")
+            raw_task = value.get("task_id", value.get("instance_id", ""))
+            if raw_task:
+                tasks.add(safe_task_id(str(raw_task)))
+    except (OSError, UnicodeDecodeError, json.JSONDecodeError) as exc:
+        raise CyberGymError(f"cannot inspect existing result index: {index_path}") from exc
+    return tasks
 
 
 def _append_result_pair(root: pathlib.Path, row: Mapping[str, Any]) -> None:

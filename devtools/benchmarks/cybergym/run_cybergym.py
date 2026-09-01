@@ -11,6 +11,7 @@ back to a host shell, Docker default network, or a different model.
 from __future__ import annotations
 
 import argparse
+import contextlib
 import hashlib
 import importlib
 import json
@@ -59,7 +60,6 @@ from devtools.benchmarks.cybergym.cybergym_adapter import (
     append_cybergym_result,
     build_generate_task_argv,
     build_task_result_row,
-    campaign_execution_lock,
     derive_disabled_tools,
     load_task_catalog,
     mask_task_id,
@@ -74,6 +74,9 @@ from devtools.benchmarks.cybergym.cybergym_adapter import (
     validate_positive_integral,
     verify_mask_map,
     verify_source_checkout,
+)
+from devtools.benchmarks.cybergym.cybergym_result_index import (
+    acquire_campaign_execution_lock,
 )
 
 REPO_ROOT = pathlib.Path(__file__).resolve().parents[3]
@@ -1087,6 +1090,10 @@ def main(argv: Sequence[str] | None = None) -> int:
 
     repo_dir = pathlib.Path(args.repo_dir).expanduser().resolve(strict=False)
     out_root = pathlib.Path(args.out_dir).expanduser().resolve(strict=False) if args.out_dir else run_root(BENCHMARK_NAME, args.run_id)
+    campaign_lock_handle = acquire_campaign_execution_lock(out_root, blocking=False)
+    if campaign_lock_handle is None:
+        print("[cybergym] pre-admission refusal: campaign root is already active", file=sys.stderr)
+        return 2
     manifest_path = out_root / "run_manifest.json"
     ledger_path = out_root / "result_index.jsonl"
     settings_path = pathlib.Path(args.settings_path).expanduser().resolve(strict=False) if args.settings_path else None
@@ -1104,6 +1111,7 @@ def main(argv: Sequence[str] | None = None) -> int:
                 + str(freshness.get("reason") or "output root is not fresh"),
                 file=sys.stderr,
             )
+            campaign_lock_handle.close()
             return 2
         out_root = pathlib.Path(str(freshness["path"]))
         manifest_path = out_root / "run_manifest.json"
@@ -1125,6 +1133,7 @@ def main(argv: Sequence[str] | None = None) -> int:
             assert_outside_repo(pathlib.Path(args.binary_dir), repo_dir)
         if str(getattr(args, "state_dir", "") or "").strip(): assert_outside_repo(pathlib.Path(args.state_dir), repo_dir)
     except (CyberGymError, ValueError, OSError) as exc:
+        campaign_lock_handle.close()
         print(f"[cybergym] pre-admission path refusal: {exc}", file=sys.stderr)
         return 2
 
@@ -1148,6 +1157,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         binary_dir=args.binary_dir,
     )
     if not report["ok"]:
+        campaign_lock_handle.close()
         print("[cybergym] pre-admission refusal: " + "; ".join(report["reasons"]), file=sys.stderr)
         return 2
 
@@ -1233,15 +1243,12 @@ def main(argv: Sequence[str] | None = None) -> int:
             },
         )
     except BenchmarkAdmissionRefused as exc:
+        campaign_lock_handle.close()
         print(f"[cybergym] admission refused: {exc}", file=sys.stderr)
         return 2
 
-    with campaign_execution_lock(out_root, blocking=False) as campaign_lock_held, \
+    with contextlib.closing(campaign_lock_handle), \
             finalize_run_manifest(manifest_path, manifest, outcome="completed") as final:
-        if not campaign_lock_held:
-            final.update({"outcome": "refused", "exit_code": 2})
-            print("[cybergym] refused: campaign root is already active", file=sys.stderr)
-            return 2
         try:
             task_ids = list(declared_ids)
             catalog: dict[str, Any] | None = None

@@ -130,8 +130,30 @@ def test_terminal_workspace_survives_until_result_and_settlement_return(tmp_path
     assert rows[0]["status"] == "infra_failed"
     assert cleaned == []
     assert len(executor._task_containers) == 1
+    assert executor._terminal_uncommitted_workspaces == {}
     projection = BudgetLedger(config.run_root / "claims.jsonl", cap_usd=2).projection()
     assert projection.settled_usd == pytest.approx(0.1)
+
+    from devtools.benchmarks.cybergym import cybergym_adapter
+
+    monkeypatch.setattr(
+        cybergym_adapter,
+        "append_cybergym_result",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(OSError("result fsync failed")),
+    )
+    with pytest.raises(OSError, match="result fsync failed"):
+        run_campaign(
+            ["arvo:2"],
+            run_root=config.run_root,
+            executor=executor.run_task,
+            estimated_cost_usd=1,
+            budget_cap_usd=2,
+        )
+    assert len(executor._terminal_uncommitted_workspaces) == 1
+    close_report = executor.close()
+    assert close_report["status"] == "custody_pending"
+    assert len(executor._task_containers) == 2
+    assert cleaned == []
 
 
 def test_network_reaps_empty_foreign_leftover_then_creates(tmp_path):

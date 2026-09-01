@@ -506,6 +506,18 @@ def _workspace_cleanup_complete(
     )
 
 
+def _reconcile_task_dir(
+    run_dir: pathlib.Path,
+    task_id: str,
+    attempt_id: str,
+) -> pathlib.Path:
+    """Select the isolated retry directory, falling back to the legacy layout."""
+    retry_dir = safe_task_path(run_dir, task_id, attempt_id)
+    if retry_dir.is_dir():
+        return retry_dir
+    return safe_task_path(run_dir, task_id)
+
+
 @contextlib.contextmanager
 def _result_index_lock(run_dir: pathlib.Path) -> Iterator[None]:
     """Hold the run's ``.result_index.lock`` across a check+append sequence.
@@ -899,7 +911,7 @@ def reconcile_main(args: argparse.Namespace) -> int:
                     reconcile_report["skipped_recorded"].append(entry)
                     continue
                 task_contract = spec.metadata.get("task_contract")
-                task_dir = safe_task_path(run_dir, task_id)
+                task_dir = _reconcile_task_dir(run_dir, task_id, attempt_id)
                 task_dir.mkdir(parents=True, exist_ok=True)
                 outcome = dict(executor_obj.reconcile_task(spec, task_dir, attempt_id, checkpoint))
                 disposition = str(outcome.get("reconcile_disposition") or "")

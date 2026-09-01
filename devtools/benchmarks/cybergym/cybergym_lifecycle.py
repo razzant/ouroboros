@@ -1392,7 +1392,11 @@ class _LifecycleMixin:
     def custody_blocked(self) -> bool:
         """Whether an unresolved gateway attempt requires the server to stay alive."""
         with self._registry_condition:
-            workspace_pending = bool(self._workspace_starting or self._unresolved_workspace_custody)
+            workspace_pending = bool(
+                self._workspace_starting
+                or self._unresolved_workspace_custody
+                or self._terminal_uncommitted_workspaces
+            )
             return bool(self._custody_blocked or self._gateway_attempts or workspace_pending)
 
     def close(self) -> Mapping[str, Any] | None:
@@ -1411,6 +1415,7 @@ class _LifecycleMixin:
                 and not self.network_id
                 and not self._workspace_starting
                 and not self._unresolved_workspace_custody
+                and not self._terminal_uncommitted_workspaces
             )
         if no_resources:
             return {"status": "not_needed", "ok": True}
@@ -1433,6 +1438,7 @@ class _LifecycleMixin:
             with self._registry_condition:
                 self._task_containers.clear()
                 self._workspace_observations.clear()
+                self._terminal_uncommitted_workspaces.clear()
                 self._server_observation = None
             self.network_id = ""
             self.server_id = ""
@@ -1445,9 +1451,10 @@ class _LifecycleMixin:
             gateway_pending = bool(self._gateway_attempts)
             workspace_starting = tuple(sorted(self._workspace_starting))
             unresolved_workspace = dict(self._unresolved_workspace_custody)
+            terminal_uncommitted = dict(self._terminal_uncommitted_workspaces)
             workspace_ids = dict(self._task_containers)
             attempts = [dict(value) for value in self._gateway_attempts.values()]
-        if gateway_pending or workspace_starting or unresolved_workspace:
+        if gateway_pending or workspace_starting or unresolved_workspace or terminal_uncommitted:
             self._custody_blocked = True
             pending = {
                 "schema": "ouroboros.benchmark.cybergym.custody_pending.v1",
@@ -1459,6 +1466,7 @@ class _LifecycleMixin:
                 "workspace_ids": workspace_ids,
                 "workspace_starting": list(workspace_starting),
                 "workspace_custody_unresolved": unresolved_workspace,
+                "terminal_uncommitted_workspaces": terminal_uncommitted,
             }
             _write_json(self.config.run_root / "custody_pending.json", pending)
             self._sidecar_attestation = {"cleanup": pending}
@@ -1470,6 +1478,7 @@ class _LifecycleMixin:
             self._server_observation = None
             self._workspace_starting.clear()
             self._unresolved_workspace_custody.clear()
+            self._terminal_uncommitted_workspaces.clear()
         self.network_id = ""
         self.server_id = ""
         self.server_url = ""

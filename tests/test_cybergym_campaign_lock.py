@@ -89,3 +89,22 @@ def test_second_live_campaign_is_refused_before_stale_history_admission(tmp_path
         release.set()
         worker.join(timeout=5)
     assert not worker.is_alive()
+
+
+def test_launcher_lock_loser_writes_no_admission_manifest(tmp_path):
+    from devtools.benchmarks.cybergym.run_cybergym import main
+
+    root = tmp_path / "locked-run"
+    settings = tmp_path / "settings.json"
+    settings.write_text("{}", encoding="utf-8")
+
+    with campaign_execution_lock(root, blocking=False) as lock_held:
+        assert lock_held is True
+        assert main([
+            "--dry-run",
+            "--out-dir", str(root),
+            "--settings-path", str(settings),
+            "--task-id", "arvo:1",
+        ]) == 2
+
+    assert not root.exists()
