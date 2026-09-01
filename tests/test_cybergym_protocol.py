@@ -1353,7 +1353,11 @@ def test_launcher_closes_server_when_executor_construction_fails(monkeypatch, tm
         }
         assert _manifest["extra"]["docker_network_internal"] is False
         assert _manifest["extra"]["server_host_publish"] is False
-        yield {}
+        class Final(dict):
+            def checkpoint(self, phase):
+                events.append(f"manifest.{phase}")
+
+        yield Final()
 
     args = SimpleNamespace(
         repo_dir=repo,
@@ -1434,7 +1438,7 @@ def test_launcher_closes_server_when_executor_construction_fails(monkeypatch, tm
     rc = launcher.main()
 
     assert rc == 2
-    assert events == ["executor.build", "server.close"]
+    assert events == ["manifest.settings_applied", "executor.build", "server.close"]
 
 
 def test_launcher_cleanup_report_preserves_pending_custody(tmp_path):

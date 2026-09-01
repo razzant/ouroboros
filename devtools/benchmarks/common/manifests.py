@@ -9,6 +9,7 @@ provenance auditable.
 from __future__ import annotations
 
 import contextlib
+import copy
 import hashlib
 import json
 import os
@@ -488,6 +489,38 @@ def admit_benchmark_run(manifest_path: pathlib.Path, **manifest_kwargs: Any) -> 
     return manifest
 
 
+class _RunManifestFinalizer(dict[str, Any]):
+    """Terminal outcome mapping with an explicit non-terminal recovery checkpoint."""
+
+    def __init__(
+        self,
+        manifest_path: pathlib.Path,
+        manifest: dict[str, Any],
+        *,
+        outcome: str,
+        exit_code: int,
+    ) -> None:
+        super().__init__(outcome=outcome, exit_code=exit_code)
+        self._manifest_path = pathlib.Path(manifest_path)
+        self._manifest = manifest
+
+    def checkpoint(self, phase: str) -> None:
+        """Persist current recovery authority without publishing a terminal outcome."""
+        phase = str(phase or "").strip()
+        if not phase:
+            raise ValueError("run manifest checkpoint phase must be non-empty")
+        snapshot = copy.deepcopy(self._manifest)
+        snapshot.setdefault("extra", {}).update({
+            "outcome": "running",
+            "exit_code": None,
+            "recovery_checkpoint": {
+                "phase": phase,
+                "created_at_unix": time.time(),
+            },
+        })
+        write_json(self._manifest_path, snapshot)
+
+
 @contextlib.contextmanager
 def finalize_run_manifest(
     manifest_path: pathlib.Path,
@@ -509,7 +542,12 @@ def finalize_run_manifest(
     the process really exits with.
     """
     default_outcome = str(outcome)
-    final: dict[str, Any] = {"outcome": default_outcome, "exit_code": int(exit_code)}
+    final = _RunManifestFinalizer(
+        manifest_path,
+        manifest,
+        outcome=default_outcome,
+        exit_code=int(exit_code),
+    )
     try:
         yield final
     except BaseException as exc:

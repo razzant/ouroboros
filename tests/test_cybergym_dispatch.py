@@ -443,6 +443,16 @@ def test_launcher_finalizes_gateway_unreachable_when_circuit_opens(monkeypatch, 
     dispatched: list[str] = []
 
     def circuit_open(specs, **_kwargs):
+        durable = json.loads(
+            (tmp_path / "run" / "run_manifest.json").read_text(encoding="utf-8")
+        )
+        assert durable["requested_task_ids"] == task_ids
+        assert durable["requested_count"] == len(task_ids)
+        assert durable["extra"]["provider_probe"]["model"] == OFFICIAL_MODEL
+        assert "data_root" in durable["extra"]["state_layout"]
+        assert durable["extra"]["outcome"] == "running"
+        assert durable["extra"]["exit_code"] is None
+        assert durable["extra"]["recovery_checkpoint"]["phase"] == "ready_to_dispatch"
         dispatched.extend(spec.task_id for spec in specs)
         raise GatewayCircuitOpen(rows=landed_rows, threshold=3, remaining=task_ids[2:])
 

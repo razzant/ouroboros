@@ -1340,6 +1340,10 @@ def main(argv: Sequence[str] | None = None) -> int:
             manifest.setdefault("harness", {})["applied_model"] = str(
                 applied_metadata.get("model") or ""
             )
+            # The denominator and applied settings are crash-recovery authority,
+            # not terminal-report decoration. Persist them before starting any
+            # campaign-owned process or paid provider work.
+            final.checkpoint("settings_applied")
 
             circuit: GatewayCircuitOpen | None = None
             if args.dry_run:
@@ -1456,6 +1460,10 @@ def main(argv: Sequence[str] | None = None) -> int:
                             _apply_server_provenance(
                                 manifest, args, applied_server_url
                             )
+                    # Reconcile must be able to reconstruct every admitted task,
+                    # the exact isolate, and the paid provider probe even if the
+                    # launcher dies inside run_campaign.
+                    final.checkpoint("ready_to_dispatch")
                     try:
                         rows = run_campaign(
                             _task_specs(task_ids, contract=contract),
