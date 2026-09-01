@@ -123,6 +123,7 @@ class _RootlessIsolatedServer:
         docker_host: DockerHostRef,
         provider_key: str = "",
         provider_key_env: str = "OPENROUTER_API_KEY",
+        worker_start_method: str = "spawn",
         expected_settings_sha256: str | None = None,
         **kwargs: Any,
     ) -> None:
@@ -131,6 +132,11 @@ class _RootlessIsolatedServer:
         self._docker_host = docker_host
         self._provider_key = str(provider_key or "").strip()
         self._provider_key_env = str(provider_key_env or "").strip()
+        self._worker_start_method = str(worker_start_method or "").strip().lower()
+        if self._worker_start_method not in {"spawn", "forkserver"}:
+            raise CyberGymServerError(
+                "worker_start_method must avoid fork-from-thread in the isolated server"
+            )
         self._delegate = IsolatedServer(
             *args,
             expected_settings_sha256=expected_settings_sha256,
@@ -146,6 +152,7 @@ class _RootlessIsolatedServer:
         env["DOCKER_HOST"] = self._docker_host.value
         if self._provider_key:
             env[self._provider_key_env] = self._provider_key
+        env["OUROBOROS_WORKER_START_METHOD"] = self._worker_start_method
         return env
 
     def start(self, *args: Any, **kwargs: Any) -> Any:
@@ -192,6 +199,7 @@ class CyberGymIsolatedServer:
         self.expected_commit = str(expected_commit or "").strip().lower()
         self.provider_key = str(provider_key or "").strip()
         self.provider_key_env = str(provider_key_env or "").strip()
+        self.worker_start_method = "spawn"
         self.expected_settings_sha256 = str(expected_settings_sha256 or "").strip().lower()
         if self.expected_settings_sha256 and (
             len(self.expected_settings_sha256) != 64
@@ -398,6 +406,7 @@ class CyberGymIsolatedServer:
             # historical call contract and do not need this implementation detail.
             factory_kwargs["settings_authoritative_env"] = True
             factory_kwargs["expected_settings_sha256"] = self._copied_settings_sha256
+            factory_kwargs["worker_start_method"] = self.worker_start_method
         self._server = factory(
             self.clone_root,
             self.data_root,
@@ -418,6 +427,7 @@ class CyberGymIsolatedServer:
                 "state_dir": str(self.state_dir) if self.state_dir is not None else "",
                 "settings_path": str(self.settings_path),
                 "settings_sha256": self._copied_settings_sha256,
+                "worker_start_method": self.worker_start_method,
                 "repo_head": observed_head,
                 "runtime": observed,
             }

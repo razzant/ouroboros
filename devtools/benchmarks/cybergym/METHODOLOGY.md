@@ -275,6 +275,11 @@ governor's cap of 3 is process-local, not global.  Any higher worker/governor
 setting is a new append-only capacity cohort requiring fresh provider, Docker,
 network, and disk validation.
 
+The isolated server explicitly uses multiprocessing `spawn`.  Its supervisor
+starts from a background server thread, so Linux `fork` is not a valid
+64-worker launch contract; the adapter reapplies and attests `spawn` after the
+authoritative environment scrub.
+
 ## 6. Sidecar topology and security boundary
 
 The executor schema currently accepts only `host` or `none` for its network

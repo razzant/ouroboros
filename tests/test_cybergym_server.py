@@ -107,6 +107,7 @@ def test_rootless_wrapper_injects_selected_socket(monkeypatch, tmp_path):
     delegate = _RootlessIsolatedServer(seed, tmp_path / "data", _settings(tmp_path), docker_host=host)
     monkeypatch.setattr(delegate._delegate, "_env", lambda: {"DOCKER_HOST": "unix:///var/run/docker.sock"})
     assert delegate._env()["DOCKER_HOST"] == host.value
+    assert delegate._env()["OUROBOROS_WORKER_START_METHOD"] == "spawn"
     assert isinstance(delegate._delegate, IsolatedServer)
 
 
@@ -144,6 +145,7 @@ def test_rootless_wrapper_makes_applied_settings_authoritative(monkeypatch, tmp_
     assert "OUROBOROS_RUNTIME_MODE" not in env
     assert len(env["OUROBOROS_SETTINGS_SHA256"]) == 64
     assert env["DOCKER_HOST"] == _host().value
+    assert env["OUROBOROS_WORKER_START_METHOD"] == "spawn"
     assert pathlib.Path(env["OUROBOROS_USER_FILES_ROOT"]) == (tmp_path / "data" / "user_files").resolve()
     assert pathlib.Path(env["OUROBOROS_DELIVERABLES_ROOT"]) == (
         tmp_path / "data" / "user_files" / "Deliverables"
@@ -195,6 +197,18 @@ def test_authoritative_env_scrubs_legacy_and_future_runtime_overrides(monkeypatc
     assert env["OPENROUTER_API_KEY"] == "selected-router"
     assert env["OUROBOROS_APP_ROOT"] == str(seed.parent)
     assert "PATH" in env
+
+
+def test_rootless_wrapper_rejects_fork_from_server_thread(tmp_path):
+    seed, _commit = _seed_repo(tmp_path)
+    with pytest.raises(CyberGymServerError, match="fork-from-thread"):
+        _RootlessIsolatedServer(
+            seed,
+            tmp_path / "data",
+            _settings(tmp_path),
+            docker_host=_host(),
+            worker_start_method="fork",
+        )
 
 
 def test_authoritative_server_refuses_unreadable_settings_before_spawn(monkeypatch, tmp_path):

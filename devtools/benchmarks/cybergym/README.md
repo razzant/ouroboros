@@ -255,6 +255,11 @@ independent workers; raising either limit requires a new append-only capacity
 cohort and fresh rate/storage evidence.  A live cohort is never resized in
 place.
 
+The adapter reapplies `OUROBOROS_WORKER_START_METHOD=spawn` after the
+authoritative environment scrub.  The isolated server initializes its worker
+manager from a background thread, where Linux `fork` is not a supported
+64-worker startup path.
+
 ## Sidecar and network boundary
 
 The approved topology uses one campaign-owned CyberGym server sidecar and one
