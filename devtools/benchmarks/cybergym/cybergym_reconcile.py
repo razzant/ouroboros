@@ -542,7 +542,9 @@ def _append_row_if_unrecorded(run_dir: pathlib.Path, row: Mapping[str, Any]) -> 
     """
     task = safe_task_id(str(row.get("task_id", row.get("instance_id", ""))))
     with _result_index_lock(run_dir):
-        if task in _recorded_task_ids(run_dir):
+        recorded = _recorded_task_rows(run_dir)
+        if task in recorded:
+            _append_result_pair(run_dir, recorded[task])
             return False
         _append_result_pair(run_dir, row)
         return True
@@ -843,8 +845,10 @@ def reconcile_main(args: argparse.Namespace) -> int:
                         "disposition": "recorded_recovery",
                     }
                     row = recorded_rows[task_id]
-                    row_attempt = str(row.get("attempt_id") or "")
                     try:
+                        with _result_index_lock(run_dir):
+                            _append_result_pair(run_dir, row)
+                        row_attempt = str(row.get("attempt_id") or "")
                         claim_state = ledger.attempt_state(attempt_id)
                         if claim_state in {"reserved", "unresolved"}:
                             if row_attempt != attempt_id:

@@ -1093,18 +1093,31 @@ def campaign_execution_lock(
 
 
 def _append_result_pair(root: pathlib.Path, row: Mapping[str, Any]) -> None:
-    """Append one row to the common run index and its task-local index.
-
-    No locking here: callers either hold ``.result_index.lock`` across a wider
-    check+append sequence (the reconcile arm) or go through
-    ``append_cybergym_result``, which takes the lock for the pair.
-    """
-    from devtools.benchmarks.common.result_index import append_result_index
+    """Idempotently append/repair the common and task-local result pair."""
+    from devtools.benchmarks.common.result_index import append_result_index, read_result_index
 
     task = safe_task_id(str(row.get("task_id", row.get("instance_id", ""))))
     value = dict(row)
-    append_result_index(root, value)
-    append_result_index(safe_task_path(root, task), value)
+    task_root = safe_task_path(root, task)
+
+    def _matching_rows(path: pathlib.Path) -> list[dict[str, Any]]:
+        return [
+            existing for existing in read_result_index(path)
+            if str(existing.get("task_id", existing.get("instance_id", ""))) == task
+        ]
+
+    run_rows = _matching_rows(root)
+    if run_rows:
+        if run_rows[-1] != value:
+            raise CyberGymError(f"conflicting result row already recorded for {task}")
+        value = run_rows[-1]
+    else:
+        append_result_index(root, value)
+    task_rows = _matching_rows(task_root)
+    if task_rows and task_rows[-1] != value:
+        raise CyberGymError(f"conflicting task-local result row already recorded for {task}")
+    if not task_rows:
+        append_result_index(task_root, value)
 
 
 def append_cybergym_result(run_root: pathlib.Path | str, row: Mapping[str, Any]) -> None:

@@ -242,6 +242,18 @@ def test_reconcile_drops_row_when_task_was_recorded_mid_delivery(tmp_path, monke
     assert fake.released == []
 
 
+def test_result_pair_append_repairs_torn_task_local_row(tmp_path):
+    run_dir = tmp_path / "run"
+    run_dir.mkdir()
+    row = {"task_id": "arvo:1", "attempt_id": "attempt-a01", "status": "completed"}
+    (run_dir / "result_index.jsonl").write_text(json.dumps(row) + "\n", encoding="utf-8")
+
+    append_cybergym_result(run_dir, row)
+
+    assert _read_rows(run_dir) == [row]
+    assert _read_rows(run_dir / task_slug("arvo:1")) == [row]
+
+
 def test_second_concurrent_reconcile_process_is_refused(tmp_path, capsys):
     fcntl = pytest.importorskip("fcntl")
     run_dir = _write_run(tmp_path / "run", ["arvo:1"], rows=["arvo:1"])

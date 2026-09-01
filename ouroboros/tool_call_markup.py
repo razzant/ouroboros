@@ -31,15 +31,22 @@ _PLAIN_DSML_TOOL_CALLS_OPEN = "<tool_calls>"
 _PLAIN_DSML_INVOKE_OPEN = "<invoke"
 _TOOL_CALL_TAG_RE = re.compile(r"<tool_call\b", re.IGNORECASE)
 _DSML_INVOKE_RE = re.compile(
-    rf"<(?:{_DSML_MARK})?invoke\s+name=\"([^\"]+)\"\s*>(.*?)</(?:{_DSML_MARK})?invoke>",
+    rf"<(?P<invoke_mark>{_DSML_MARK})?invoke\s+name=\"([^\"]+)\"\s*>"
+    rf"(.*?)</(?(invoke_mark){_DSML_MARK})invoke>",
     re.DOTALL,
 )
 _DSML_PARAM_RE = re.compile(
-    rf"<(?:{_DSML_MARK})?parameter\s+name=\"([^\"]+)\"([^>]*)>(.*?)</(?:{_DSML_MARK})?parameter>",
+    rf"<(?P<parameter_mark>{_DSML_MARK})?parameter\s+name=\"([^\"]+)\"([^>]*)>"
+    rf"(.*?)</(?(parameter_mark){_DSML_MARK})parameter>",
     re.DOTALL,
 )
 _DSML_STRING_ATTR_RE = re.compile(r'\bstring\s*=\s*"(true|false)"', re.IGNORECASE)
 _DSML_WRAPPER_RE = re.compile(rf"</?(?:{_DSML_MARK})?tool_calls>", re.IGNORECASE)
+_DSML_WRAPPER_OPEN_RE = re.compile(rf"^\s*<(?P<wrapper_mark>{_DSML_MARK})?tool_calls>", re.IGNORECASE)
+_DSML_TAG_RE = re.compile(
+    rf"</?(?:{_DSML_MARK})?(?:tool_calls|invoke|parameter)\b",
+    re.IGNORECASE,
+)
 _LOCAL_TOOL_CALL_FULL_RE = re.compile(
     r"^(?:\s*<tool_call>\s*\{.*?\}\s*</tool_call>\s*)+$",
     re.DOTALL,
@@ -158,27 +165,32 @@ def parse_dsml_tool_calls(
     """Return OpenAI-shaped tool_calls for well-formed DSML, else None."""
     if not text or not content_has_tool_markup(text):
         return None
+    wrapper = _DSML_WRAPPER_OPEN_RE.match(text)
+    if wrapper:
+        expected_close = f"</{wrapper.group('wrapper_mark') or ''}tool_calls>"
+        if not text.rstrip().lower().endswith(expected_close.lower()):
+            return None
     invokes = list(_DSML_INVOKE_RE.finditer(text))
     if not invokes:
         return None
     allowed = {name for name in (allowed_tool_names or set()) if name}
     tool_calls: List[Dict[str, Any]] = []
     for index, match in enumerate(invokes):
-        name = str(match.group(1) or "").strip()
-        body = match.group(2) or ""
+        name = str(match.group(2) or "").strip()
+        body = match.group(3) or ""
         if not name:
             return None
         if allowed and name not in allowed:
             return None
         arguments: Dict[str, Any] = {}
         for param in _DSML_PARAM_RE.finditer(body):
-            key = str(param.group(1) or "").strip()
+            key = str(param.group(2) or "").strip()
             if not key:
                 return None
             try:
                 arguments[key] = _parse_dsml_parameter_value(
+                    param.group(4) or "",
                     param.group(3) or "",
-                    param.group(2) or "",
                 )
             except (json.JSONDecodeError, ValueError):
                 return None
@@ -193,6 +205,9 @@ def parse_dsml_tool_calls(
                 "arguments": json.dumps(arguments),
             },
         })
+    remainder = _DSML_WRAPPER_RE.sub("", _DSML_INVOKE_RE.sub("", text)).strip()
+    if _DSML_TAG_RE.search(remainder):
+        return None
     return tool_calls or None
 
 

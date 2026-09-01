@@ -82,6 +82,11 @@ def transition_acceptance_fence(
                     }
                     existing = None
                     reconciled_dead_owner = True
+                elif str(existing.get("task_id") or "") != str(task_id or root_task_id):
+                    return {
+                        "ok": False, "status": "error",
+                        "error": f"acceptance fence has a different live owner for root {root_task_id}",
+                    }
                 else:
                     # Idempotent re-adoption: a worker that lost its token (ack timeout
                     # on a slow drive) adopts the EXISTING fence instead of a paid retry spin.

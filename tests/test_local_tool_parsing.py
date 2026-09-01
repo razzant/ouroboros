@@ -353,6 +353,41 @@ class TestDeepSeekDsmlParsing(unittest.TestCase):
         parsed = LLMClient._parse_tool_calls_from_content(msg, {"read_file"})
         self.assertFalse(parsed.get("tool_calls"))
 
+    def test_valid_invoke_plus_unclosed_invoke_is_not_partially_upgraded(self):
+        from ouroboros.llm import LLMClient
+
+        content = (
+            '<tool_calls><invoke name="read_file">'
+            '<parameter name="path" string="true">README.md</parameter>'
+            "</invoke>"
+            '<invoke name="write_file"><parameter name="path" string="true">out.txt'
+            "</tool_calls>"
+        )
+        msg = {"content": content, "tool_calls": []}
+
+        parsed = LLMClient._parse_tool_calls_from_content(
+            msg, {"read_file", "write_file"},
+        )
+
+        self.assertFalse(parsed.get("tool_calls"))
+        self.assertEqual(parsed["content"], content)
+
+    def test_mixed_tagged_and_plain_invoke_pair_is_not_upgraded(self):
+        from ouroboros.llm import LLMClient
+        from ouroboros.tool_call_markup import _DSML_MARK
+
+        content = (
+            f"<{_DSML_MARK}tool_calls>"
+            f'<{_DSML_MARK}invoke name="read_file"></invoke>'
+            f"</{_DSML_MARK}tool_calls>"
+        )
+        msg = {"content": content, "tool_calls": []}
+
+        parsed = LLMClient._parse_tool_calls_from_content(msg, {"read_file"})
+
+        self.assertFalse(parsed.get("tool_calls"))
+        self.assertEqual(parsed["content"], content)
+
     def test_loop_wire_seam_promotes_well_formed_remote_dsml(self):
         from ouroboros.llm import LLMClient
         from ouroboros.tool_call_markup import _DSML_MARK, resolve_tool_markup

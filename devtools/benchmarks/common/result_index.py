@@ -19,6 +19,20 @@ def append_result_index(run_dir: pathlib.Path, row: dict[str, Any]) -> None:
         os.fsync(fh.fileno())
 
 
+def read_result_index(run_dir: pathlib.Path) -> list[dict[str, Any]]:
+    """Read object rows from an append-only result index."""
+    path = run_dir / "result_index.jsonl"
+    if not path.exists():
+        return []
+    rows: list[dict[str, Any]] = []
+    for line in path.read_text(encoding="utf-8").splitlines():
+        if line.strip():
+            value = json.loads(line)
+            if isinstance(value, dict):
+                rows.append(value)
+    return rows
+
+
 # Reason codes on which the RUNTIME stopped a task for a reason that is not "the task is
 # finished". A truncated run and an honest failure are otherwise indistinguishable in a
 # benchmark artefact, which is how an aggregator records `2/3` with no indication that a
