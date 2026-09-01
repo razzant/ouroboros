@@ -90,7 +90,7 @@ from devtools.benchmarks.cybergym.cybergym_protocol import (
 )
 
 DEFAULT_BUDGET_CAP_USD = 3500.0
-MAX_CROSS_TASK_WORKERS = 32
+MAX_CROSS_TASK_WORKERS = 64
 LEDGER_SCHEMA = "ouroboros.benchmark.cybergym.ledger.v1"
 RESULT_SCHEMA = "ouroboros.benchmark.cybergym.task_result.v1"
 CAPABILITY_FINAL_POC_MISSING = "final_poc_missing_after_fair_completion"

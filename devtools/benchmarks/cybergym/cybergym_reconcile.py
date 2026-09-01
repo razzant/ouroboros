@@ -42,6 +42,7 @@ from devtools.benchmarks.cybergym.cybergym_adapter import (
     CyberGymIntegrationUnavailable,
     LedgerError,
     TaskSpec,
+    _TERMINAL_GATEWAY_STATUSES,
     finalize_outcome_row,
     load_task_catalog,
     safe_task_id,
@@ -298,7 +299,12 @@ class _ReconcileMixin:
                     raise ExecutorFailure("Ouroboros status response belongs to a different task")
                 status = _response_status(latest)
                 deliverable = _redeliverable_terminal_frame(latest)
-                terminal = deliverable is not None
+                terminal_cost_unverifiable = (
+                    status == "completed"
+                    and status in _TERMINAL_GATEWAY_STATUSES
+                    and deliverable is None
+                )
+                terminal = deliverable is not None or terminal_cost_unverifiable
                 if deliverable is not None:
                     latest = deliverable
                 if terminal and returned_id != gateway_task_id:
@@ -334,6 +340,23 @@ class _ReconcileMixin:
                             "workspace_cleanup": str(cleanup_ref),
                         },
                         "error": "gateway task is not terminal; left for a later reconcile pass",
+                    }
+                if terminal_cost_unverifiable:
+                    return {
+                        "runtime_result": dict(latest),
+                        "status": "infra_failed",
+                        "lifecycle": "terminal_cost_unverifiable",
+                        "infra_reason": "terminal_cost_unverifiable",
+                        "reconcile_disposition": "delivery_failed",
+                        "artifact_refs": {
+                            "task_dir": str(task_dir),
+                            "checkpoint": str(checkpoint),
+                            "workspace_cleanup": str(cleanup_ref),
+                        },
+                        "error": (
+                            "gateway task is terminal but its sparse accounting "
+                            "cannot prove final or grace-eligible cost"
+                        ),
                     }
                 gateway_result = latest
             # Delivery re-runs the official submit inside the workspace

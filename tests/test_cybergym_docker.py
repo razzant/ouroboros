@@ -320,6 +320,37 @@ def test_reconcile_task_leaves_nonterminal_gateway_attempt_running(tmp_path):
     assert config.run_root in pathlib.Path(outcome["artifact_refs"]["task_dir"]).parents
 
 
+def test_reconcile_task_records_terminal_sparse_cost_as_infra(tmp_path):
+    gateway_id = "gateway-task-sparse-cost"
+    terminal = {
+        "task_id": gateway_id,
+        "status": "completed",
+        "cost_usd": 1.25,
+        "cost_final": False,
+        "ledger_integrity_degraded": False,
+        "cost_accounting_status": "available",
+        "unknown_unmetered": 0,
+        "reserved_usd": 0.0,
+        "unresolved_upper_bound_usd": 0.2,
+    }
+
+    config, executor, task_dir, checkpoint = _reconcile_fixture(
+        tmp_path,
+        gateway_id,
+        {"gateway_task_id": gateway_id, "status": "completed", "result": terminal},
+        http_runner=lambda *_args, **_kwargs: terminal,
+    )
+    outcome = executor.reconcile_task(
+        TaskSpec("arvo:1", "arvo"), task_dir, "attempt-1", checkpoint,
+    )
+
+    assert outcome["status"] == "infra_failed"
+    assert outcome["lifecycle"] == "terminal_cost_unverifiable"
+    assert outcome["reconcile_disposition"] == "delivery_failed"
+    assert outcome["runtime_result"]["cost_usd"] == pytest.approx(1.25)
+    assert config.run_root in pathlib.Path(outcome["artifact_refs"]["task_dir"]).parents
+
+
 def test_reconcile_task_malformed_checkpoint_is_undeliverable(tmp_path):
     config = _config(tmp_path)
     executor = CyberGymExecutor(config)
