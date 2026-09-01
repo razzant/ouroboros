@@ -383,33 +383,53 @@ def resolve_denied(dotted: str, unit: _Unit, *, depth: int = 2) -> str:
     return ""
 
 
+def _safe_pre_admission_lock_helper(target: ast.FunctionDef, unit: _Unit) -> bool:
+    """Validate the one exact temp-lock implementation, including its sole open."""
+    if _helper_effects(target):
+        return False
+    call_nodes = [node for node in ast.walk(target) if isinstance(node, ast.Call)]
+    calls = {_dotted_callee(node.func).split(".")[-1] for node in call_nodes}
+    if not _PRE_ADMISSION_LOCK_REQUIRED_CALLS.issubset(calls):
+        return False
+    open_calls = [
+        node for node in call_nodes
+        if _dotted_callee(node.func).split(".")[-1] == "open"
+    ]
+    if len(open_calls) != 1 or not isinstance(open_calls[0].func, ast.Attribute):
+        return False
+    receiver = open_calls[0].func.value
+    receiver_calls = {
+        _dotted_callee(node.func).split(".")[-1]
+        for node in ast.walk(receiver)
+        if isinstance(node, ast.Call)
+    }
+    receiver_names = {
+        node.id for node in ast.walk(receiver) if isinstance(node, ast.Name)
+    }
+    if "gettempdir" not in receiver_calls or "root_digest" not in receiver_names:
+        return False
+    for node in call_nodes:
+        denied = resolve_denied(_dotted_callee(node.func), unit, depth=1)
+        if denied and node is not open_calls[0]:
+            return False
+    return True
+
+
 def _approved_pre_admission_lock(dotted: str, unit: _Unit) -> bool:
-    """Whether ``dotted`` is the canonical minimal host-local ownership lock."""
+    """Whether ``dotted`` resolves unshadowed to the canonical lock helper."""
     leaf = dotted.split(".")[-1]
-    if (
-        leaf != _PRE_ADMISSION_LOCK_NAME
-        or unit.imports.get(leaf) != _PRE_ADMISSION_LOCK_MODULE
+    if leaf != _PRE_ADMISSION_LOCK_NAME or unit.imports.get(leaf) != _PRE_ADMISSION_LOCK_MODULE:
+        return False
+    if leaf in unit.functions or any(
+        (isinstance(node, ast.Name) and isinstance(node.ctx, ast.Store) and node.id == leaf)
+        or (isinstance(node, ast.arg) and node.arg == leaf)
+        for node in ast.walk(unit.tree)
     ):
         return False
     imported = _unit_for_module(_PRE_ADMISSION_LOCK_MODULE)
     target = imported.functions.get(leaf) if imported is not None else None
-    if imported is None or target is None or _helper_effects(target):
-        return False
-    calls = {
-        _dotted_callee(node.func).split(".")[-1]
-        for node in ast.walk(target)
-        if isinstance(node, ast.Call)
-    }
-    if not _PRE_ADMISSION_LOCK_REQUIRED_CALLS.issubset(calls):
-        return False
-    for node in ast.walk(target):
-        if not isinstance(node, ast.Call):
-            continue
-        inner = _dotted_callee(node.func)
-        denied = resolve_denied(inner, imported, depth=1)
-        if denied and inner.split(".")[-1] != "open":
-            return False
-    return True
+    return bool(imported is not None and target is not None
+                and _safe_pre_admission_lock_helper(target, imported))
 
 
 def _pre_admission_violations(unit: _Unit) -> list[str]:

@@ -1,5 +1,7 @@
 """Structural coverage for the one pre-admission ownership primitive."""
 
+import ast
+
 from devtools.benchmarks.common import launcher_audit
 
 
@@ -32,3 +34,27 @@ def main(out):
         same_name_wrong_body, name="unapproved_lock.py",
     )
     assert any("acquire_campaign_execution_lock -> open" in item for item in violations)
+
+    shadowed = approved.replace(
+        "\ndef main(out):",
+        '\ndef acquire_campaign_execution_lock(path, blocking=False):\n'
+        '    return open(path / "shadow.lock", "a")\n'
+        "\ndef main(out):",
+    )
+    violations = launcher_audit.audit_source(shadowed, name="shadowed_lock.py")
+    assert any("acquire_campaign_execution_lock -> open" in item for item in violations)
+
+
+def test_pre_admission_lock_shape_rejects_a_second_open():
+    source = '''
+def acquire_campaign_execution_lock(run_root, blocking=True):
+    root = pathlib.Path(run_root).resolve()
+    root_digest = hashlib.sha256(str(root).encode("utf-8")).hexdigest()
+    handle = (pathlib.Path(tempfile.gettempdir()) / f"lock-{root_digest}").open("a+")
+    forbidden = (root / "inside.lock").open("a+")
+    fcntl.flock(handle.fileno(), fcntl.LOCK_EX)
+    return handle
+'''
+    unit = launcher_audit._Unit(ast.parse(source), "synthetic_lock")
+    target = unit.functions["acquire_campaign_execution_lock"]
+    assert launcher_audit._safe_pre_admission_lock_helper(target, unit) is False

@@ -42,7 +42,6 @@ from devtools.benchmarks.cybergym.cybergym_adapter import (
     CyberGymIntegrationUnavailable,
     LedgerError,
     TaskSpec,
-    campaign_execution_lock,
     finalize_outcome_row,
     load_task_catalog,
     safe_task_id,
@@ -50,7 +49,10 @@ from devtools.benchmarks.cybergym.cybergym_adapter import (
     settle_finished_attempt,
     task_slug,
 )
-from devtools.benchmarks.cybergym.cybergym_result_index import _append_result_pair
+from devtools.benchmarks.cybergym.cybergym_result_index import (
+    _append_result_pair,
+    acquire_campaign_execution_lock,
+)
 from devtools.benchmarks.cybergym.cybergym_docker import (
     _GATEWAY_TASK_ID,
     _inside,
@@ -607,19 +609,30 @@ def reconcile_main(args: argparse.Namespace) -> int:
         print(f"[cybergym] pre-admission refusal: {exc}", file=sys.stderr)
         return 2
     run_dir = pathlib.Path(args.reconcile).expanduser().resolve(strict=False)
+    campaign_lock_handle = acquire_campaign_execution_lock(run_dir, blocking=False)
+    if campaign_lock_handle is None:
+        print(
+            "[cybergym] reconcile refusal: another launcher or --reconcile process "
+            "already holds this run root",
+            file=sys.stderr,
+        )
+        return 2
     manifest_path = run_dir / "run_manifest.json"
     try:
         manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
     except (OSError, UnicodeDecodeError, json.JSONDecodeError):
+        campaign_lock_handle.close()
         print("[cybergym] reconcile refusal: run manifest is unavailable", file=sys.stderr)
         return 2
     if not isinstance(manifest, dict):
+        campaign_lock_handle.close()
         print("[cybergym] reconcile refusal: run manifest is malformed", file=sys.stderr)
         return 2
     harness = manifest.get("harness")
     harness = harness if isinstance(harness, Mapping) else {}
     manifest_model = str(harness.get("model") or "").strip()
     if manifest_model and manifest_model != str(args.model):
+        campaign_lock_handle.close()
         print(
             "[cybergym] reconcile refusal: manifest model does not match --model",
             file=sys.stderr,
@@ -644,9 +657,11 @@ def reconcile_main(args: argparse.Namespace) -> int:
             )
             requested_ids = list(catalog["task_ids"])
         except CyberGymError as exc:
+            campaign_lock_handle.close()
             print(f"[cybergym] reconcile refusal: {exc}", file=sys.stderr)
             return 2
     if not requested_ids:
+        campaign_lock_handle.close()
         print(
             "[cybergym] reconcile refusal: the manifest names no tasks and no "
             "tasks file was supplied",
@@ -674,6 +689,7 @@ def reconcile_main(args: argparse.Namespace) -> int:
         if recorded_root:
             manifest_root = pathlib.Path(recorded_root).expanduser().resolve(strict=False)
             if manifest_root != override_root:
+                campaign_lock_handle.close()
                 print(
                     "[cybergym] reconcile refusal: --state-dir disagrees with the "
                     "manifest's recorded state root "
@@ -714,6 +730,7 @@ def reconcile_main(args: argparse.Namespace) -> int:
         if 1 <= port <= 65535:
             ouroboros_url = f"http://127.0.0.1:{port}"
     if not ouroboros_url:
+        campaign_lock_handle.close()
         print(
             "[cybergym] reconcile refusal: no gateway URL in --ouroboros-url, "
             "the manifest, or the isolate's persisted server_port",
@@ -721,18 +738,9 @@ def reconcile_main(args: argparse.Namespace) -> int:
         )
         return 2
 
-    # A second concurrent reconcile process on the same run root would race
-    # this pass through adoption, delivery, and the manifest write; refuse it
-    # instead of relying on the per-row lock to catch every interleaving.
-    with campaign_execution_lock(run_dir, blocking=False) as lock_held:
-        if not lock_held:
-            print(
-                "[cybergym] reconcile refusal: another --reconcile process "
-                "already holds this run root",
-                file=sys.stderr,
-            )
-            return 2
-
+    # The lock was acquired before the manifest snapshot and remains held
+    # through every recovery decision and final manifest publication.
+    with contextlib.closing(campaign_lock_handle):
         ledger = BudgetLedger(
             run_dir / "claims.jsonl",
             cap_usd=float(args.budget_usd),

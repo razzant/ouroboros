@@ -8,6 +8,7 @@ Docker daemon, upstream package, or provider credential is used.
 from __future__ import annotations
 
 import json
+import pathlib
 from types import SimpleNamespace
 
 import pytest
@@ -344,13 +345,24 @@ def test_corrupt_torn_task_local_row_refuses_campaign_finalization(tmp_path, mon
     assert report["undeliverable"][0]["disposition"] == "row_refused"
 
 
-def test_second_concurrent_reconcile_process_is_refused(tmp_path, capsys):
+def test_second_concurrent_reconcile_process_is_refused(tmp_path, capsys, monkeypatch):
     pytest.importorskip("fcntl")
     run_dir = _write_run(tmp_path / "run", ["arvo:1"], rows=["arvo:1"])
+    manifest_path = run_dir / "run_manifest.json"
+    manifest_reads = []
+    real_read_text = pathlib.Path.read_text
+
+    def track_manifest_read(path, *args, **kwargs):
+        if path == manifest_path:
+            manifest_reads.append(path)
+        return real_read_text(path, *args, **kwargs)
+
+    monkeypatch.setattr(pathlib.Path, "read_text", track_manifest_read)
     with campaign_execution_lock(run_dir, blocking=False) as lock_held:
         assert lock_held is True
         assert reconcile_main(_reconcile_args(run_dir)) == 2
-    assert "another --reconcile process" in capsys.readouterr().err
+    assert manifest_reads == []
+    assert "another launcher or --reconcile process" in capsys.readouterr().err
 
 
 def test_reconcile_state_dir_override_must_match_manifest(tmp_path, capsys):
