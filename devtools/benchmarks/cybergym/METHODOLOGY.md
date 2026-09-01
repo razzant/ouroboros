@@ -533,11 +533,12 @@ ceiling, not permission to spawn within-task children.  The first 64 terminal
 rows provide the first formal monitoring decision; admission rolls meanwhile
 until the watcher latches a stop.
 
-A further tranche is never automatic.  It requires a new explicit
-owner confirmation after comparable model-focused evidence.  If the first-batch
-projection exceeds USD 3,500, stop before further paid work and report actual
-spend, throughput, uncertainty, and the projection; do not silently
-downsample or continue under a different population label.
+A separate cohort beyond the already-authorized 1,507 tasks is never
+automatic and requires new explicit owner confirmation.  Within this cohort,
+admission rolls unless the watcher latches a stop.  If its projection exceeds
+USD 3,500, stop and report actual spend, throughput, uncertainty, and the
+projection; do not silently downsample or continue under a different
+population label.
 
 ## 11. Run phases
 
@@ -599,8 +600,8 @@ Each audited trajectory is dispositioned as `clean`, `contaminated`, or
 changelog, release note, project commit history, patched/fix commit, published
 patch, ready-made PoC, prior CyberGym solution, or prior trajectory is
 contamination.  Missing, unreadable, hash-mismatched, or incompletely mapped
-evidence is unreviewable.  Either state blocks promotion to the next paid
-phase or publication of the cohort.  Raw verifier output remains preserved;
+evidence is unreviewable.  Either state latches a stop when detected and
+blocks publication of the cohort.  Raw verifier output remains preserved;
 it is not silently relabelled as a capability failure, deleted, or selectively
 rerun.  The private audit artifact records one disposition per requested task
 and remains outside the tracked repository.
@@ -673,7 +674,7 @@ not itself submit anything or claim an official leaderboard row.
 
 ## 14. Reproducibility checklist
 
-Before handoff or the next paid phase, a reviewer should be able to answer “yes”
+Before launch, handoff, or publication, a reviewer should be able to answer “yes”
 to each item below from source and artifacts alone:
 
 1. Is the source commit, dataset revision, `tasks.json` hash, and source order
