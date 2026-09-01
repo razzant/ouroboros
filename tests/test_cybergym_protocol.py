@@ -352,6 +352,21 @@ def test_budget_settlement_overspend_is_typed_and_stops_dispatch(tmp_path):
     assert projection.can_dispatch is False
 
 
+def test_budget_settlement_replaces_unresolved_liability_not_original_claim(tmp_path):
+    ledger = BudgetLedger(tmp_path / "claims.jsonl", cap_usd=10)
+    ledger.claim("arvo:0", 7, attempt_id="settled")
+    ledger.settle("settled", 7)
+    ledger.claim("arvo:1", 3, attempt_id="pending")
+    ledger.mark_unresolved("pending", 1)
+
+    with pytest.raises(BudgetOverspend):
+        ledger.settle("pending", 4)
+
+    projection = ledger.projection()
+    assert projection.settled_usd == pytest.approx(11)
+    assert projection.can_dispatch is False
+
+
 def test_exact_model_and_positive_launcher_values_are_strict():
     assert validate_model_pin(OFFICIAL_MODEL) == OFFICIAL_MODEL
     with pytest.raises(ValueError):
@@ -910,6 +925,63 @@ def test_run_campaign_typed_overspend_row_and_retry_attempt_isolated(tmp_path):
     assert calls[0][0] != calls[1][0]
     assert calls[0][1] != calls[1][1]
     assert first[0]["attempt_id"] != second[0]["attempt_id"]
+    parent_rows = [
+        json.loads(line)
+        for line in (retry_root / "result_index.jsonl").read_text(encoding="utf-8").splitlines()
+    ]
+    local_rows = [
+        json.loads(line)
+        for line in (retry_root / "arvo__2" / "result_index.jsonl").read_text(encoding="utf-8").splitlines()
+    ]
+    assert [row["attempt_id"] for row in parent_rows] == [
+        first[0]["attempt_id"], second[0]["attempt_id"],
+    ]
+    assert local_rows == parent_rows
+
+
+def test_run_campaign_persists_row_before_settlement_event(tmp_path, monkeypatch):
+    root = tmp_path / "settle-crash"
+
+    def callback(_task, task_dir):
+        marker = task_dir / "final.poc"
+        marker.write_bytes(b"poc")
+        digest = hashlib.sha256(b"poc").hexdigest()
+        return {
+            "status": "completed",
+            "observed_effort": "high",
+            "trials": [{
+                "trial_id": "final", "is_final": True, "poc_hash": digest,
+                "vul_exit_code": 1, "fix_exit_code": 0,
+            }],
+            "cost_usd": 0.5,
+            "cost_final": True,
+        }
+
+    real_append = BudgetLedger._append
+
+    def crash_on_settle(self, event):
+        if event.get("event") == "settle":
+            raise RuntimeError("settlement write crash")
+        return real_append(self, event)
+
+    monkeypatch.setattr(BudgetLedger, "_append", crash_on_settle)
+    with pytest.raises(RuntimeError, match="settlement write crash"):
+        run_campaign(
+            ["arvo:1"],
+            run_root=root,
+            executor=callback,
+            estimated_cost_usd=1,
+            budget_cap_usd=2,
+        )
+
+    rows = [
+        json.loads(line)
+        for line in (root / "result_index.jsonl").read_text(encoding="utf-8").splitlines()
+    ]
+    assert len(rows) == 1
+    assert rows[0]["status"] == "completed"
+    projection = BudgetLedger(root / "claims.jsonl", cap_usd=2).projection()
+    assert projection.active_attempt_ids == (rows[0]["attempt_id"],)
 
 
 def test_run_campaign_rejects_missing_or_non_high_effort(tmp_path):

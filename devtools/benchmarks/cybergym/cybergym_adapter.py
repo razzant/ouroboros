@@ -301,6 +301,7 @@ def build_task_result_row(
     cached_tokens: int | None = None,
     cost_usd: float | None = None,
     cost_estimated: bool | None = None,
+    cost_final: bool | None = None,
     cost_status: str = "",
     infra_reason: str = "",
     leakage: Any = None,
@@ -455,6 +456,7 @@ def build_task_result_row(
             "cached_tokens": cached_tokens,
             "cost_usd": cost_usd,
             "cost_estimated": cost_estimated,
+            "cost_final": cost_final,
             "cost_status": str(cost_status or ("known" if cost_usd is not None else "unknown")),
             "infra_reason": effective_infra_reason,
             "leakage": leakage,
@@ -808,6 +810,40 @@ def project_budget(
     )
 
 
+def _active_attempt_liability(
+    events: Iterable[Mapping[str, Any]], attempt_id: str
+) -> float:
+    """Replay one active attempt's current contribution to projection."""
+    reserved = 0.0
+    upper: float | None = None
+    state = "missing"
+    for event in events:
+        if str(event.get("attempt_id", event.get("id", "")) or "") != attempt_id:
+            continue
+        kind = str(event.get("event", event.get("kind", "")) or "").lower()
+        if kind in {"claim", "reserve", "reserved"}:
+            reserved = float(
+                _event_amount(event, "reserved_usd", "estimated_cost_usd", "amount_usd")
+                or 0.0
+            )
+            upper, state = None, "reserved"
+        elif kind in {"unresolved", "unknown"}:
+            explicit = _event_amount(
+                event, "upper_bound_usd", "unresolved_upper_bound_usd", allow_none=True,
+            )
+            upper = _numeric_unresolved_bound(
+                explicit, reserved_usd=reserved, prior_upper=upper,
+            )
+            reserved, state = 0.0, "unresolved"
+        elif kind in {"settle", "settled", "overspend", "release", "released"}:
+            reserved, upper, state = 0.0, None, "terminal"
+    if state == "reserved":
+        return reserved
+    if state == "unresolved" and upper is not None:
+        return float(upper)
+    raise LedgerError(f"attempt is not active: {attempt_id}")
+
+
 class BudgetLedger:
     """Append-only atomic claim/settlement writer for one campaign."""
 
@@ -929,37 +965,35 @@ class BudgetLedger:
             )
         return {"task_id": task, "attempt_id": attempt, "reserved_usd": estimate, "ts_unix": now}
 
-    def settle(self, attempt_id: str, cost_usd: float) -> None:
+    def settle(
+        self,
+        attempt_id: str,
+        cost_usd: float,
+        *,
+        before_write: Callable[[BudgetOverspend | None], None] | None = None,
+    ) -> None:
         attempt = str(attempt_id or "").strip()
         cost = _money(cost_usd, field="cost_usd")
         with self._lock():
-            current = self.projection()
+            events = self.events()
+            current = project_budget(events, self.cap_usd)
             if attempt not in current.active_attempt_ids:
                 raise LedgerError(f"attempt is not active: {attempt}")
-            # Replace this attempt's reservation with its measured spend when
-            # checking the hard cap.  Other unresolved attempts contribute their
-            # numeric bound (claim estimate if the written bound was missing).
-            reserved_for_attempt = 0.0
-            for event in self.events():
-                if str(event.get("attempt_id") or "") != attempt:
-                    continue
-                kind = str(event.get("event", event.get("kind", "")) or "").lower()
-                if kind in {"claim", "reserve", "reserved"}:
-                    reserved_for_attempt = float(
-                        _event_amount(
-                            event,
-                            "reserved_usd",
-                            "estimated_cost_usd",
-                            "amount_usd",
-                        )
-                        or 0.0
-                    )
-                elif kind in {"settle", "settled", "overspend", "release", "released"}:
-                    reserved_for_attempt = 0.0
+            current_liability = _active_attempt_liability(events, attempt)
             projected_after = None
             if current.projected_usd is not None:
-                projected_after = current.projected_usd - reserved_for_attempt + float(cost or 0.0)
-            if self.cap_usd is not None and projected_after is not None and projected_after > self.cap_usd:
+                projected_after = current.projected_usd - current_liability + float(cost or 0.0)
+            overspend = self.cap_usd is not None and projected_after is not None and projected_after > self.cap_usd
+            overspend_error = (
+                BudgetOverspend(
+                    "measured settlement exceeds campaign budget cap: "
+                    f"projected={projected_after:.6f}, cap={self.cap_usd:.6f}"
+                )
+                if overspend else None
+            )
+            if before_write is not None:
+                before_write(overspend_error)
+            if overspend:
                 self._append(
                     {
                         "schema": LEDGER_SCHEMA,
@@ -969,10 +1003,7 @@ class BudgetLedger:
                         "ts_unix": time.time(),
                     }
                 )
-                raise BudgetOverspend(
-                    "measured settlement exceeds campaign budget cap: "
-                    f"projected={projected_after:.6f}, cap={self.cap_usd:.6f}"
-                )
+                raise overspend_error
             self._append(
                 {
                     "schema": LEDGER_SCHEMA,
@@ -1036,7 +1067,13 @@ class BudgetLedger:
                 )
             return event
 
-    def mark_unresolved(self, attempt_id: str, upper_bound_usd: float | None = None) -> None:
+    def mark_unresolved(
+        self,
+        attempt_id: str,
+        upper_bound_usd: float | None = None,
+        *,
+        before_write: Callable[[BudgetOverspend | None], None] | None = None,
+    ) -> None:
         attempt = str(attempt_id or "").strip()
         upper = _money(upper_bound_usd, field="upper_bound_usd", allow_none=True)
         with self._lock():
@@ -1045,6 +1082,8 @@ class BudgetLedger:
                 raise LedgerError(f"attempt is not active: {attempt}")
             reserved, prior_upper = _attempt_reservation_bound(events, attempt)
             bound = _numeric_unresolved_bound(upper, reserved_usd=reserved, prior_upper=prior_upper)
+            if before_write is not None:
+                before_write(None)
             self._append(
                 {
                     "schema": LEDGER_SCHEMA,
@@ -1098,6 +1137,7 @@ def _append_result_pair(root: pathlib.Path, row: Mapping[str, Any]) -> None:
 
     task = safe_task_id(str(row.get("task_id", row.get("instance_id", ""))))
     value = dict(row)
+    attempt = str(value.get("attempt_id") or "")
     task_root = safe_task_path(root, task)
 
     def _matching_rows(path: pathlib.Path) -> list[dict[str, Any]]:
@@ -1105,8 +1145,11 @@ def _append_result_pair(root: pathlib.Path, row: Mapping[str, Any]) -> None:
             rows = read_result_index(path)
         except (OSError, UnicodeDecodeError, json.JSONDecodeError) as exc:
             raise CyberGymError(f"result index is unreadable: {exc}") from exc
-        return [existing for existing in rows
-                if str(existing.get("task_id", existing.get("instance_id", ""))) == task]
+        return [
+            existing for existing in rows
+            if str(existing.get("task_id", existing.get("instance_id", ""))) == task
+            and str(existing.get("attempt_id") or "") == attempt
+        ]
 
     run_rows = _matching_rows(root)
     if run_rows:
@@ -1262,6 +1305,7 @@ def finalize_outcome_row(
         cached_tokens=outcome.get("cached_tokens"),
         cost_usd=outcome.get("cost_usd"),
         cost_estimated=outcome.get("cost_estimated"),
+        cost_final=outcome.get("cost_final"),
         cost_status=str(outcome.get("cost_status") or ""),
         infra_reason=str(outcome.get("infra_reason") or ""),
         leakage=outcome.get("leakage"),
@@ -1271,6 +1315,8 @@ def finalize_outcome_row(
         task_contract=contract,
         attempt_id=str(attempt_id),
     )
+    if outcome.get("cost_upper_bound_usd") is not None:
+        row["cost_upper_bound_usd"] = outcome["cost_upper_bound_usd"]
     grace = outcome.get("cost_grace_acceptance")
     if isinstance(grace, Mapping) and grace.get("unresolved_upper_bound_usd") is not None:
         # The accounted upper bound already contains the abandoned residue;
@@ -1281,7 +1327,11 @@ def finalize_outcome_row(
 
 
 def settle_finished_attempt(
-    ledger: "BudgetLedger", attempt_id: str, outcome: Mapping[str, Any]
+    ledger: "BudgetLedger",
+    attempt_id: str,
+    outcome: Mapping[str, Any],
+    *,
+    before_write: Callable[[BudgetOverspend | None], None] | None = None,
 ) -> None:
     """Settle a finished attempt's claim from its outcome, or mark it unresolved."""
     projected = dict(outcome)
@@ -1290,7 +1340,7 @@ def settle_finished_attempt(
         projected.update(accounting)
     actual = _finished_attempt_actual_usd(projected)
     if actual is not None:
-        ledger.settle(str(attempt_id), actual)
+        ledger.settle(str(attempt_id), actual, before_write=before_write)
     else:
         upper_bound = projected.get("cost_upper_bound_usd")
         if upper_bound is None:
@@ -1300,6 +1350,7 @@ def settle_finished_attempt(
         ledger.mark_unresolved(
             str(attempt_id),
             upper_bound,
+            before_write=before_write,
         )
 
 
@@ -1446,7 +1497,6 @@ def run_campaign(
                 if callback_contract is not None
                 else (contract if isinstance(contract, Mapping) else None),
             )
-            settle_finished_attempt(ledger, str(claim["attempt_id"]), outcome)
         except BudgetOverspend as exc:
             budget_refs = dict(outcome.get("artifact_refs") or {})
             budget_refs.setdefault("task_dir", str(task_dir))
@@ -1487,6 +1537,7 @@ def run_campaign(
                 cached_tokens=outcome.get("cached_tokens"),
                 cost_usd=outcome.get("cost_usd"),
                 cost_estimated=outcome.get("cost_estimated"),
+                cost_final=outcome.get("cost_final"),
                 cost_status=str(outcome.get("cost_status") or ""),
                 infra_reason="budget_overspend",
                 artifact_refs=budget_refs,
@@ -1498,25 +1549,12 @@ def run_campaign(
                 attempt_id=str(claim["attempt_id"]) if claim else "",
             )
         except Exception as exc:
-            settlement_overspend: BudgetOverspend | None = None
             if claim is not None:
                 terminal_accounting = _terminal_gateway_accounting(
                     outcome.get("runtime_result")
                 )
                 if terminal_accounting:
                     outcome.update(terminal_accounting)
-                try:
-                    settle_finished_attempt(
-                        ledger,
-                        str(claim["attempt_id"]),
-                        outcome,
-                    )
-                except BudgetOverspend as settlement_exc:
-                    settlement_overspend = settlement_exc
-                except LedgerError as settlement_exc:
-                    # The still-active reservation remains conservative. A
-                    # failure-row builder must not crash the dispatch loop.
-                    outcome["settlement_error"] = type(settlement_exc).__name__
             failure_refs = dict(outcome.get("artifact_refs") or {})
             failure_refs.setdefault("task_dir", str(task_dir))
             failure_refs.setdefault("claims", str(ledger.path))
@@ -1539,9 +1577,7 @@ def run_campaign(
                 final_trial=outcome.get("final_trial"),
                 final_poc_sha256=str(outcome.get("final_poc_sha256") or ""),
                 status="infra_failed",
-                lifecycle=(
-                    "budget_refused" if settlement_overspend else "executor_failed"
-                ),
+                lifecycle="executor_failed",
                 level=task.level,
                 masked_id=str(outcome.get("masked_id") or ""),
                 masked_id_source=str(outcome.get("masked_id_source") or ""),
@@ -1558,14 +1594,11 @@ def run_campaign(
                 cached_tokens=outcome.get("cached_tokens"),
                 cost_usd=outcome.get("cost_usd"),
                 cost_estimated=outcome.get("cost_estimated"),
+                cost_final=outcome.get("cost_final"),
                 cost_status=str(outcome.get("cost_status") or ""),
-                infra_reason=(
-                    "budget_overspend"
-                    if settlement_overspend
-                    else type(exc).__name__
-                ),
+                infra_reason=type(exc).__name__,
                 artifact_refs=failure_refs,
-                error=str(settlement_overspend or exc),
+                error=str(exc),
                 runtime_result=outcome.get("runtime_result"),
                 task_contract=callback_contract
                 if callback_contract is not None
@@ -1573,6 +1606,31 @@ def run_campaign(
                 attempt_id=str(claim["attempt_id"]) if claim else "",
             )
         return row
+
+    def _land_and_settle(row: dict[str, Any]) -> None:
+        attempt_id = str(row.get("attempt_id") or "")
+        if not attempt_id:
+            append_cybergym_result(root, row)
+            return
+
+        def _write_before_settle(overspend: BudgetOverspend | None) -> None:
+            if overspend is not None:
+                row.update(
+                    status="infra_failed",
+                    lifecycle="budget_refused",
+                    infra_reason="budget_overspend",
+                    reason_code="budget_overspend",
+                    error=str(overspend),
+                )
+            append_cybergym_result(root, row)
+
+        try:
+            settle_finished_attempt(
+                ledger, attempt_id, row, before_write=_write_before_settle,
+            )
+        except BudgetOverspend:
+            # The typed row was persisted before the terminal overspend event.
+            pass
 
     # A campaign may fan out independent tasks, but each task remains a
     # single-agent/no-swarm attempt.  The ledger and result writer are locked;
@@ -1588,5 +1646,5 @@ def run_campaign(
             _run_one,
             max_workers=max_workers,
             threshold=gateway_circuit_threshold,
-            on_row=lambda row: append_cybergym_result(root, row),
+            on_row=_land_and_settle,
         )
