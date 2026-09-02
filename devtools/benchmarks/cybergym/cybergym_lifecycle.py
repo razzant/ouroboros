@@ -53,6 +53,7 @@ from devtools.benchmarks.cybergym.cybergym_sidecar import (
 from devtools.benchmarks.cybergym.cybergym_wire import (
     ExecutorFailure,
     GatewayAdmissionRejected,
+    HttpStatusError,
     _CostGraceTracker,
     _HEX64,
     _PROVIDER_ID,
@@ -1051,16 +1052,27 @@ class _LifecycleMixin:
         # The server remains on the internal bridge.  The default transport
         # executes the request inside its immutable container; injected HTTP
         # runners may still use their explicitly supplied URL seam.
-        payload = _unwrap_http_payload(
-            self._server_http(
-                "POST", "/query-poc",
-                body={"agent_id": agent_id, "task_id": real_task_id},
-                headers=headers,
-                timeout=60,
-            ),
-            operation="CyberGym private query",
-            allow_list=True,
-        )
+        try:
+            payload = _unwrap_http_payload(
+                self._server_http(
+                    "POST", "/query-poc",
+                    body={"agent_id": agent_id, "task_id": real_task_id},
+                    headers=headers,
+                    timeout=60,
+                ),
+                operation="CyberGym private query",
+                allow_list=True,
+            )
+        except HttpStatusError as exc:
+            # The pinned upstream answers 404 "Record not found" when the agent
+            # has no submissions for this task yet.  On the reuse-check path
+            # (allow_empty) that is exactly the empty list; refusing it killed
+            # the delivery before the ``_submit_final`` fallback.  The
+            # post-submit query (allow_empty=False) must keep failing: a
+            # record has to exist by then.
+            if exc.status_code == 404 and allow_empty:
+                return []
+            raise
         # The pinned upstream route returns a bare JSON list.  A few private
         # proxies wrap it in ``records``/``items``; accept both shapes without
         # weakening the task/hash binding below.

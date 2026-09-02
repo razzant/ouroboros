@@ -303,6 +303,25 @@ def test_private_query_rejects_http_and_body_errors(tmp_path, monkeypatch):
         executor._private_query("agent-" + "a" * 24, "arvo:1")
 
 
+def test_private_query_404_with_allow_empty_returns_empty_list(tmp_path, monkeypatch):
+    # The pinned upstream /query-poc answers 404 "Record not found" for an
+    # agent that has never submitted to this task.  The reuse-check path
+    # (allow_empty=True) must read that as the empty list and fall through to
+    # ``_submit_final``; only the post-submit query may treat 404 as fatal.
+    config = _config(tmp_path)
+    monkeypatch.setenv("CYBERGYM_API_KEY", "test-secret-value")
+    executor = CyberGymExecutor(
+        dataclasses_replace(
+            config,
+            http_runner=lambda *args, **kwargs: {"status_code": 404, "body": {"detail": "Record not found"}},
+        )
+    )
+    assert executor._private_query("agent-" + "a" * 24, "arvo:1", allow_empty=True) == []
+
+    with pytest.raises(ExecutorFailure, match="HTTP 404"):
+        executor._private_query("agent-" + "a" * 24, "arvo:1", allow_empty=False)
+
+
 def test_private_query_accepts_nested_items_wrapper(tmp_path, monkeypatch):
     config = _config(tmp_path)
     monkeypatch.setenv("CYBERGYM_API_KEY", "test-secret-value")
