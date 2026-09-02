@@ -10,6 +10,7 @@ import threading
 import time
 import uuid
 from collections import deque
+from concurrent.futures import ThreadPoolExecutor
 from typing import Any, Dict, Optional
 
 from ouroboros.utils import append_jsonl, atomic_write_json, truncate_for_log, utc_now_iso
@@ -4304,6 +4305,22 @@ def _handle_main_llm_call_state(evt: Dict[str, Any], ctx: Any) -> None:
     meta.pop("active_llm_call", None)
 
 
+# The task_done finalization (child copy-back with its recursive observability
+# ref-tree promotion — gzip decompress + sha256 verify per blob — plus the
+# workspace patch write) is O(task size) CPU/IO work.  Run synchronously on the
+# intake loop it stalled the supervisor for ~95 s per large task under a
+# 64-lane benchmark load, starving every other lane's intake.  Defer the whole
+# handler to a bounded background pool: the loop only enqueues, and per-task
+# ordering is preserved because a task emits exactly one task_done.
+_TASK_DONE_EXECUTOR = ThreadPoolExecutor(
+    max_workers=4, thread_name_prefix="task-done-finalize"
+)
+
+
+def _handle_task_done_deferred(evt: Dict[str, Any], ctx: Any) -> None:
+    _TASK_DONE_EXECUTOR.submit(_handle_task_done, evt, ctx)
+
+
 EVENT_HANDLERS = {
     "llm_usage": _handle_llm_usage,
     "external_wait_lease": _handle_external_wait_lease,
@@ -4316,7 +4333,7 @@ EVENT_HANDLERS = {
     "task_dispatch_resolved": _handle_task_dispatch_resolved,
     "typing_start": _handle_typing_start,
     "send_message": _handle_send_message,
-    "task_done": _handle_task_done,
+    "task_done": _handle_task_done_deferred,
     "task_metrics": _handle_task_metrics,
     "deep_self_review_request": _handle_deep_self_review_request,
     "promote_to_stable": _handle_promote_to_stable,

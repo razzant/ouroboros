@@ -8,6 +8,46 @@ import pathlib
 import json
 
 
+def test_task_done_dispatch_is_deferred_off_the_intake_loop(monkeypatch, tmp_path):
+    """The task_done finalization (child ref-tree promotion + workspace patch)
+    must not run on the supervisor intake loop: dispatch_event returns
+    immediately while the handler is still blocked on the finalize pool."""
+    import threading
+    import time
+
+    from supervisor import events as events_mod
+
+    entered = threading.Event()
+    release = threading.Event()
+
+    def blocking_handler(evt, ctx):
+        entered.set()
+        release.wait(5.0)
+
+    monkeypatch.setattr(events_mod, "_handle_task_done", blocking_handler)
+
+    class Ctx:
+        DRIVE_ROOT = tmp_path
+
+        def append_jsonl(self, path, data):
+            from ouroboros.utils import append_jsonl
+
+            append_jsonl(path, data)
+
+    t0 = time.monotonic()
+    events_mod.dispatch_event(
+        {"type": "task_done", "task_id": "t-defer", "status": "completed"},
+        Ctx(),
+    )
+    elapsed = time.monotonic() - t0
+    try:
+        assert elapsed < 1.0, f"dispatch blocked the intake loop for {elapsed:.2f}s"
+        assert entered.wait(2.0), "the deferred handler never started on the pool"
+        # The handler is still blocked on `release`, yet dispatch returned.
+    finally:
+        release.set()
+
+
 
 def _make_fake_env(drive_root: pathlib.Path):
     """Create a minimal mock env for emit_task_results."""
