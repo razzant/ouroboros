@@ -986,6 +986,11 @@ class _LifecycleMixin:
                 # Exhaustion re-raises so a dead gateway still produces the
                 # circuit-breaker row.
                 now = time.monotonic()
+                if now >= deadline:
+                    # The task's own deadline passed while the gateway was
+                    # unreachable: stop polling and cancel it like a normal
+                    # deadline exit instead of writing a transport row.
+                    break
                 if transport_deadline is None:
                     transport_deadline = min(
                         deadline, now + GATEWAY_TRANSPORT_RETRY_BUDGET_SEC

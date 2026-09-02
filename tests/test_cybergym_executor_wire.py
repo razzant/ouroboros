@@ -1177,6 +1177,65 @@ def test_cancel_transport_budget_exhaustion_keeps_custody(tmp_path, monkeypatch)
     assert saved["cancel_error"] == "GatewayTransportError"
 
 
+def test_gateway_poll_transport_error_at_deadline_goes_to_cancel(tmp_path, monkeypatch):
+    # A transport failure riding into the task's own deadline must exit to the
+    # cancel path, not raise a transport row: the deadline, not the network,
+    # decides the task's fate.
+    config = _config(tmp_path, provider_probe=False, task_timeout_sec=1)
+    task_id = "cybergym-deadline-stall"
+    calls = []
+
+    def http(method, _url, **_kwargs):
+        calls.append(method)
+        if method == "POST":
+            return {"task_id": task_id, "status": "scheduled"}
+        raise GatewayTransportError("HTTP GET transport failed")
+
+    executor = CyberGymExecutor(
+        dataclasses_replace(config, http_runner=http, sleep=lambda _seconds: None)
+    )
+    sentinel = {"status": "cancelled", "via": "cancel_path"}
+    monkeypatch.setattr(
+        executor, "_cancel_gateway_task", lambda *_a, **_k: dict(sentinel)
+    )
+    result = executor._gateway_wait(  # noqa: SLF001 - transport recovery contract
+        {"task_id": task_id, "description": "test"},
+        config.run_root / "checkpoint.json",
+    )
+
+    assert result == sentinel
+    assert "GET" in calls
+
+
+def test_cancel_custody_window_covers_deadline_wave_settle(tmp_path, monkeypatch):
+    # The post-cancel custody poll must outlast a deadline-wave settle: the
+    # old ~34 s bound wrote off paid tasks whose cancel had already landed.
+    config = _config(tmp_path, poll_interval_sec=3.0)
+    task_id = "cybergym-cancel-window"
+    captured = {}
+
+    def http(method, _url, **_kwargs):
+        return {
+            "status_code": 200,
+            "body": {"task_id": task_id, "status": "cancel_requested"},
+        }
+
+    executor = CyberGymExecutor(dataclasses_replace(config, http_runner=http))
+    executor._gateway_attempts[task_id] = {  # noqa: SLF001 - custody assertion
+        "gateway_task_id": task_id,
+        "status": "submitted",
+    }
+
+    def fake_custody(*_args, **kwargs):
+        captured["custody_seconds"] = kwargs.get("custody_seconds")
+        return {}
+
+    monkeypatch.setattr(executor, "_poll_gateway_custody", fake_custody)
+    executor._cancel_gateway_task(task_id, config.run_root / "checkpoint.json")  # noqa: SLF001
+
+    assert captured["custody_seconds"] >= 300.0
+
+
 def test_explicit_final_with_excluded_vul_exit_and_missing_fix_records_failure():
     """A determinate vul-excluded failure binds without a fix-side code."""
     from devtools.benchmarks.cybergym.cybergym_adapter import build_task_result_row

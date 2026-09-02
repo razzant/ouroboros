@@ -133,8 +133,13 @@ class _CustodyMixin:
             self.config.ouroboros_url,
             "/api/tasks/" + urllib.parse.quote(task_id, safe="") + "/cancel",
         )
+        # The post-cancel custody poll must outlast a deadline-wave settle:
+        # when a full 64-lane wave hits its 2 h deadline together, the isolate
+        # takes minutes to settle each cancellation, and the previous ~34 s
+        # bound wrote off 18 paid tasks in one wave as "custody did not
+        # settle" even though every cancel had already landed.
         custody_seconds = min(
-            180.0, max(30.0, float(self.config.poll_interval_sec) * 8.0 + 10.0)
+            600.0, max(300.0, float(self.config.poll_interval_sec) * 8.0 + 10.0)
         )
         cancel_response: Mapping[str, Any] | None = None
         transport_deadline: float | None = None
