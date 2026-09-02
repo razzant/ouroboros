@@ -566,6 +566,20 @@ def _format_task_for_dedup(
     return "\n\n".join(sections)
 
 
+# The per-event budget-projection refresh renders the full grouped usage
+# breakdown (~1.5s CPU at ~9k ledger rows, growing with the ledger) on the
+# supervisor loop thread. Under a 64-way event burst the render cannot keep up
+# with the event rate, the queue grows unboundedly, and the loop stalls for
+# minutes (the CyberGym full1507 stall class that starved acceptance-fence
+# acks). The physical-attempt ledger is the hard budget gate; this projection
+# is a compatibility/display view, so coalescing bursts to one refresh per
+# window is the correct trade. Other ``update_budget_from_usage`` callers
+# (safety, reflection, pipeline) are not high-frequency and keep per-call
+# semantics.
+_LLM_USAGE_BUDGET_REFRESH_SEC = 10.0
+_llm_usage_budget_last = [0.0]  # monotonic; mutated only on the loop thread
+
+
 def _handle_llm_usage(evt: Dict[str, Any], ctx: Any) -> None:
     usage_raw = evt.get("usage")
     usage: Dict[str, Any] = usage_raw if isinstance(usage_raw, dict) else {}
@@ -650,11 +664,14 @@ def _handle_llm_usage(evt: Dict[str, Any], ctx: Any) -> None:
         "prompt_cache_ttl": prompt_cache_ttl,
     }
     projection_update_status = "available"
-    try:
-        ctx.update_budget_from_usage(usage_for_budget)
-    except Exception:
-        projection_update_status = "unavailable"
-        log.error("Paid llm_usage retained but compatibility projection update failed", exc_info=True)
+    now_mono = time.monotonic()
+    if now_mono - _llm_usage_budget_last[0] >= _LLM_USAGE_BUDGET_REFRESH_SEC:
+        try:
+            ctx.update_budget_from_usage(usage_for_budget)
+            _llm_usage_budget_last[0] = now_mono
+        except Exception:
+            projection_update_status = "unavailable"
+            log.error("Paid llm_usage retained but compatibility projection update failed", exc_info=True)
 
     # Server-side web-search citations ({url,title,content}, capped at 20 in
     # llm.py). Persisted so post-hoc audits (e.g. the GAIA leakage audit) can see

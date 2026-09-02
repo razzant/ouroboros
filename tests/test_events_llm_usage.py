@@ -37,6 +37,7 @@ def test_llm_usage_writes_cached_tokens_and_cache_write_tokens(tmp_path):
         "delegation_role": "subagent",
     }
     ctx = FakeCtx()
+    ev_module._llm_usage_budget_last[0] = 0.0  # defeat the refresh throttle: this test asserts the call
     ev_module._handle_llm_usage(evt, ctx)
 
     events_file = tmp_path / "logs" / "events.jsonl"
@@ -70,6 +71,7 @@ def test_llm_usage_preserves_unknown_cost_as_null(tmp_path):
             self.last_usage = usage
 
     ctx = FakeCtx()
+    ev_module._llm_usage_budget_last[0] = 0.0  # defeat the refresh throttle: this test asserts the call
     ev_module._handle_llm_usage(
         {"type": "llm_usage", "task_id": "unknown", "usage": {"prompt_tokens": 3}},
         ctx,
@@ -78,6 +80,34 @@ def test_llm_usage_preserves_unknown_cost_as_null(tmp_path):
     assert written["cost"] is None
     assert written["cost_known"] is False
     assert ctx.last_usage["cost"] is None
+
+
+def test_llm_usage_budget_refresh_is_coalesced(monkeypatch, tmp_path):
+    """The hot path coalesces the expensive budget-projection render to one per
+    window: a 64-way event burst must not re-render the full grouped breakdown
+    per event on the supervisor loop (the full1507 stall class)."""
+    from supervisor import events as ev_module
+
+    (tmp_path / "logs").mkdir()
+    calls = []
+
+    class FakeCtx:
+        DRIVE_ROOT = tmp_path
+
+        def update_budget_from_usage(self, usage):
+            calls.append(dict(usage))
+
+    ctx = FakeCtx()
+    evt = {"type": "llm_usage", "task_id": "t", "usage": {"prompt_tokens": 5, "cost": 0.01}}
+    ev_module._llm_usage_budget_last[0] = 0.0  # first call always refreshes
+    ev_module._handle_llm_usage(dict(evt), ctx)
+    ev_module._handle_llm_usage(dict(evt), ctx)  # inside the window: coalesced
+    assert len(calls) == 1
+
+    monkeypatch.setattr(ev_module, "_LLM_USAGE_BUDGET_REFRESH_SEC", 0.0)
+    ev_module._handle_llm_usage(dict(evt), ctx)  # window elapsed: refresh again
+    assert len(calls) == 2
+    ev_module._llm_usage_budget_last[0] = 0.0  # leave no cross-test residue
 
 
 def test_cost_breakdown_aggregates_cache_tokens_and_ttl(tmp_path):
