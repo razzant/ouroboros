@@ -4317,8 +4317,78 @@ _TASK_DONE_EXECUTOR = ThreadPoolExecutor(
 )
 
 
+def _log_task_done_finalize_failure(fut: Any, ctx: Any) -> None:
+    """Surface a deferred task_done crash exactly like dispatch_event's net.
+
+    concurrent.futures never logs an unretrieved exception; without this
+    callback a crashing finalization left the task in RUNNING with zero
+    diagnostics, bypassing the worker_event_handler_error record.
+    """
+    try:
+        exc = fut.exception()
+    except Exception:
+        return
+    if exc is None:
+        return
+    log.warning(
+        "Deferred task_done finalization failed: %s",
+        exc,
+        exc_info=(type(exc), exc, exc.__traceback__),
+    )
+    try:
+        ctx.append_jsonl(
+            ctx.DRIVE_ROOT / "logs" / "supervisor.jsonl",
+            {
+                "ts": utc_now_iso(),
+                "type": "worker_event_handler_error",
+                "event_type": "task_done",
+                "error": repr(exc),
+                "deferred": True,
+            },
+        )
+    except Exception:
+        log.debug("failed to record deferred task_done failure", exc_info=True)
+
+
+def _run_task_done_finalization(evt: Dict[str, Any], ctx: Any, task_id: str) -> None:
+    try:
+        _handle_task_done(evt, ctx)
+    finally:
+        # The handler pops RUNNING on the normal path; on a crash the row may
+        # survive, and the custody marker must not spare the wedged task from
+        # the timeout enforcer forever.
+        if task_id:
+            try:
+                from supervisor.queue import RUNNING as _RUNNING
+                from supervisor.queue import _queue_lock
+
+                with _queue_lock:
+                    meta = _RUNNING.get(task_id)
+                    if isinstance(meta, dict):
+                        meta.pop("finalization_pending", None)
+            except Exception:
+                log.debug("failed to clear finalization_pending", exc_info=True)
+
+
 def _handle_task_done_deferred(evt: Dict[str, Any], ctx: Any) -> None:
-    _TASK_DONE_EXECUTOR.submit(_handle_task_done, evt, ctx)
+    task_id = str(evt.get("task_id") or "")
+    # Stamp custody before queueing: a completed task whose finalization sits
+    # in the pool backlog otherwise looks idle/stale to enforce_task_timeouts
+    # and the reaper while its RUNNING row keeps aging.
+    if task_id:
+        try:
+            from supervisor.queue import RUNNING as _RUNNING
+            from supervisor.queue import _queue_lock
+
+            with _queue_lock:
+                meta = _RUNNING.get(task_id)
+                if isinstance(meta, dict):
+                    meta["finalization_pending"] = True
+                    meta["last_progress_at"] = time.time()
+        except Exception:
+            log.debug("failed to stamp finalization_pending", exc_info=True)
+    future = _TASK_DONE_EXECUTOR.submit(_run_task_done_finalization, evt, ctx, task_id)
+    future.add_done_callback(lambda fut: _log_task_done_finalize_failure(fut, ctx))
 
 
 EVENT_HANDLERS = {

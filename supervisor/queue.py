@@ -1262,6 +1262,11 @@ def _enforce_task_timeouts_locked(
     for task_id, meta in list(RUNNING.items()):
         if not isinstance(meta, dict):
             continue
+        if meta.get("finalization_pending"):
+            # The task already emitted task_done and its finalization is queued
+            # or running on the finalize pool; its RUNNING row keeps aging
+            # during the backlog, which must not read as idle/ceiling/deadline.
+            continue
         task = meta.get("task") if isinstance(meta.get("task"), dict) else {}
         started_at = float(meta.get("started_at") or 0.0)
         if started_at <= 0:
