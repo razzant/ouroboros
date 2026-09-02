@@ -1054,6 +1054,129 @@ def test_cancel_503_with_get_failure_keeps_custody_block(tmp_path):
     assert task_id in executor._gateway_attempts
 
 
+def test_gateway_poll_rides_out_transient_transport_errors(tmp_path):
+    # A ~95 s isolate event-loop stall used to kill a healthy paid task via a
+    # single 60 s poll timeout.  The poll now retries transport failures
+    # within a bounded budget; the terminal answer after the stall wins.
+    config = _config(tmp_path, provider_probe=False, task_timeout_sec=60)
+    task_id = "cybergym-transient-stall"
+    calls = []
+
+    def http(method, _url, **_kwargs):
+        calls.append(method)
+        if method == "POST":
+            return {"task_id": task_id, "status": "scheduled"}
+        if calls.count("GET") <= 3:
+            raise GatewayTransportError("HTTP GET transport failed")
+        return {"task_id": task_id, "status": "completed", "result": {"cost_final": True}}
+
+    executor = CyberGymExecutor(
+        dataclasses_replace(config, http_runner=http, sleep=lambda _seconds: None)
+    )
+    result = executor._gateway_wait(  # noqa: SLF001 - transport recovery contract
+        {"task_id": task_id, "description": "test"},
+        config.run_root / "checkpoint.json",
+    )
+
+    assert result["status"] == "completed"
+    assert calls == ["POST", "GET", "GET", "GET", "GET"]
+
+
+def test_gateway_poll_transport_budget_exhaustion_still_fails(tmp_path, monkeypatch):
+    # The retry budget is bounded: a gateway that never answers within it
+    # still produces the circuit-breaker transport row.
+    config = _config(tmp_path, provider_probe=False, task_timeout_sec=3600)
+    task_id = "cybergym-dead-gateway"
+    monkeypatch.setattr(
+        "devtools.benchmarks.cybergym.cybergym_lifecycle.GATEWAY_TRANSPORT_RETRY_BUDGET_SEC",
+        0.0,
+    )
+
+    def http(method, _url, **_kwargs):
+        if method == "POST":
+            return {"task_id": task_id, "status": "scheduled"}
+        raise GatewayTransportError("HTTP GET transport failed")
+
+    executor = CyberGymExecutor(
+        dataclasses_replace(config, http_runner=http, sleep=lambda _seconds: None)
+    )
+    with pytest.raises(GatewayTransportError):
+        executor._gateway_wait(  # noqa: SLF001 - transport recovery contract
+            {"task_id": task_id, "description": "test"},
+            config.run_root / "checkpoint.json",
+        )
+
+
+def test_cancel_rides_out_transient_transport_errors(tmp_path):
+    # The cancel intent usually lands server-side and only the response is
+    # starved by an isolate stall; a duplicate POST is idempotent.  The
+    # bounded retry turns a stall into a delayed cancel instead of a
+    # written-off paid attempt.
+    config = _config(tmp_path, poll_interval_sec=0)
+    task_id = "cybergym-cancel-stall"
+    terminal = {
+        "task_id": task_id,
+        "status": "failed",
+        "cost_usd": 0.060914,
+        "accounted_upper_bound_usd": 0.060914,
+        "unresolved_upper_bound_usd": 0.020062,
+        "cost_final": False,
+    }
+    calls = []
+
+    def http(method, _url, **_kwargs):
+        calls.append(method)
+        if method == "POST" and calls.count("POST") <= 2:
+            raise GatewayTransportError("HTTP POST transport failed")
+        if method == "POST":
+            return {"status_code": 200, "body": {"task_id": task_id, "status": "cancel_requested"}}
+        return {"status_code": 200, "body": terminal}
+
+    executor = CyberGymExecutor(
+        dataclasses_replace(config, http_runner=http, sleep=lambda _seconds: None)
+    )
+    executor._gateway_attempts[task_id] = {  # noqa: SLF001 - custody assertion
+        "gateway_task_id": task_id,
+        "status": "submitted",
+    }
+    checkpoint = config.run_root / "checkpoint.json"
+    result = executor._cancel_gateway_task(task_id, checkpoint)  # noqa: SLF001
+
+    assert result == terminal
+    assert calls == ["POST", "POST", "POST", "GET"]
+    assert task_id not in executor._gateway_attempts
+
+
+def test_cancel_transport_budget_exhaustion_keeps_custody(tmp_path, monkeypatch):
+    # A cancel that never gets through within the budget keeps the original
+    # fail-closed behaviour: typed checkpoint evidence and retained custody.
+    config = _config(tmp_path, poll_interval_sec=0)
+    task_id = "cybergym-cancel-dead"
+    monkeypatch.setattr(
+        "devtools.benchmarks.cybergym.cybergym_custody.GATEWAY_TRANSPORT_RETRY_BUDGET_SEC",
+        0.0,
+    )
+
+    def http(method, _url, **_kwargs):
+        raise GatewayTransportError("HTTP POST transport failed")
+
+    executor = CyberGymExecutor(
+        dataclasses_replace(config, http_runner=http, sleep=lambda _seconds: None)
+    )
+    executor._gateway_attempts[task_id] = {  # noqa: SLF001 - custody assertion
+        "gateway_task_id": task_id,
+        "status": "submitted",
+    }
+    checkpoint = config.run_root / "checkpoint.json"
+    with pytest.raises(GatewayTransportError):
+        executor._cancel_gateway_task(task_id, checkpoint)  # noqa: SLF001
+
+    assert task_id in executor._gateway_attempts
+    saved = json.loads(checkpoint.read_text(encoding="utf-8"))
+    assert saved["status"] == "cancel_request_failed"
+    assert saved["cancel_error"] == "GatewayTransportError"
+
+
 def test_explicit_final_with_excluded_vul_exit_and_missing_fix_records_failure():
     """A determinate vul-excluded failure binds without a fix-side code."""
     from devtools.benchmarks.cybergym.cybergym_adapter import build_task_result_row

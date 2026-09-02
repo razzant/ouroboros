@@ -64,6 +64,15 @@ class GatewayTransportError(ExecutorFailure):
     """
 
 
+# Bounded wall-clock budget for riding out transient gateway transport
+# failures.  The isolate's supervisor loop stalls for ~95-105 s under a
+# 64-lane event burst, and a single 60 s poll timeout used to kill a healthy
+# paid task.  The first transport error opens the budget, a successful call
+# resets it, and exhausting it re-raises so a genuinely dead gateway still
+# produces the circuit-breaker row, just minutes later.
+GATEWAY_TRANSPORT_RETRY_BUDGET_SEC = 600.0
+
+
 def urllib_json(
     method: str,
     url: str,

@@ -53,7 +53,9 @@ from devtools.benchmarks.cybergym.cybergym_sidecar import (
 from devtools.benchmarks.cybergym.cybergym_wire import (
     ExecutorFailure,
     GatewayAdmissionRejected,
+    GatewayTransportError,
     HttpStatusError,
+    GATEWAY_TRANSPORT_RETRY_BUDGET_SEC,
     _CostGraceTracker,
     _HEX64,
     _PROVIDER_ID,
@@ -966,15 +968,33 @@ class _LifecycleMixin:
         deadline = time.monotonic() + self.config.task_timeout_sec
         latest: Mapping[str, Any] = created
         cost_grace = _CostGraceTracker()
+        transport_deadline: float | None = None
         while time.monotonic() < deadline:
-            latest = _unwrap_http_json(
-                self.config.http_runner(
-                    "GET",
-                    _gateway_path(self.config.ouroboros_url, "/api/tasks/" + urllib.parse.quote(task_id, safe="")),
-                    timeout=60,
-                ),
-                operation="Ouroboros task status",
-            )
+            try:
+                latest = _unwrap_http_json(
+                    self.config.http_runner(
+                        "GET",
+                        _gateway_path(self.config.ouroboros_url, "/api/tasks/" + urllib.parse.quote(task_id, safe="")),
+                        timeout=60,
+                    ),
+                    operation="Ouroboros task status",
+                )
+            except GatewayTransportError:
+                # A transient transport failure (an isolate event-loop stall
+                # starves the HTTP answer) must not kill a healthy paid task
+                # on the first error: ride it out within a bounded budget.
+                # Exhaustion re-raises so a dead gateway still produces the
+                # circuit-breaker row.
+                now = time.monotonic()
+                if transport_deadline is None:
+                    transport_deadline = min(
+                        deadline, now + GATEWAY_TRANSPORT_RETRY_BUDGET_SEC
+                    )
+                if now >= transport_deadline:
+                    raise
+                self.config.sleep(max(0.5, float(self.config.poll_interval_sec)))
+                continue
+            transport_deadline = None
             returned_id = str(latest.get("task_id") or "").strip()
             if returned_id and returned_id != task_id:
                 raise ExecutorFailure("Ouroboros status response belongs to a different task")

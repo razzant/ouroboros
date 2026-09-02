@@ -22,6 +22,7 @@ from devtools.benchmarks.cybergym.cybergym_wire import (
     ExecutorFailure,
     GatewayTransportError,
     HttpStatusError,
+    GATEWAY_TRANSPORT_RETRY_BUDGET_SEC,
     _CostGraceTracker,
     _cost_is_pending,
     _gateway_path,
@@ -135,56 +136,69 @@ class _CustodyMixin:
         custody_seconds = min(
             180.0, max(30.0, float(self.config.poll_interval_sec) * 8.0 + 10.0)
         )
-        try:
-            cancel_response = _unwrap_http_json(
-                self.config.http_runner(
-                    "POST", cancel_url, body={}, timeout=30
-                ),
-                operation="Ouroboros task cancellation",
-                accepted_statuses=(200, 202, 204),
-            )
-        except HttpStatusError as exc:
-            _write_json(
-                checkpoint,
-                {
-                    "gateway_task_id": task_id,
-                    "status": "cancel_request_failed",
-                    "cancel_error": type(exc).__name__,
-                    "cancel_status_code": exc.status_code,
-                },
-            )
-            if exc.status_code in (503, 404):
-                # Only a later terminal GET can turn a cancellation race into
-                # an adapter outcome; absent that frame we retain the
-                # original custody block.
-                return self._poll_gateway_custody(
-                    task_id,
-                    checkpoint,
-                    cancel_response=None,
-                    cancel_status_code=exc.status_code,
-                    custody_seconds=custody_seconds,
+        cancel_response: Mapping[str, Any] | None = None
+        transport_deadline: float | None = None
+        while cancel_response is None:
+            try:
+                cancel_response = _unwrap_http_json(
+                    self.config.http_runner(
+                        "POST", cancel_url, body={}, timeout=30
+                    ),
+                    operation="Ouroboros task cancellation",
+                    accepted_statuses=(200, 202, 204),
                 )
-            raise ExecutorFailure("Ouroboros task cancellation request failed") from exc
-        except GatewayTransportError as exc:
-            _write_json(
-                checkpoint,
-                {
-                    "gateway_task_id": task_id,
-                    "status": "cancel_request_failed",
-                    "cancel_error": type(exc).__name__,
-                },
-            )
-            raise
-        except Exception as exc:
-            _write_json(
-                checkpoint,
-                {
-                    "gateway_task_id": task_id,
-                    "status": "cancel_request_failed",
-                    "cancel_error": type(exc).__name__,
-                },
-            )
-            raise ExecutorFailure("Ouroboros task cancellation request failed") from exc
+            except HttpStatusError as exc:
+                _write_json(
+                    checkpoint,
+                    {
+                        "gateway_task_id": task_id,
+                        "status": "cancel_request_failed",
+                        "cancel_error": type(exc).__name__,
+                        "cancel_status_code": exc.status_code,
+                    },
+                )
+                if exc.status_code in (503, 404):
+                    # Only a later terminal GET can turn a cancellation race into
+                    # an adapter outcome; absent that frame we retain the
+                    # original custody block.
+                    return self._poll_gateway_custody(
+                        task_id,
+                        checkpoint,
+                        cancel_response=None,
+                        cancel_status_code=exc.status_code,
+                        custody_seconds=custody_seconds,
+                    )
+                raise ExecutorFailure("Ouroboros task cancellation request failed") from exc
+            except GatewayTransportError as exc:
+                # Transient: the cancel intent usually lands server-side and
+                # only the response is starved (an isolate event-loop stall),
+                # and a duplicate cancel POST is idempotent.  Ride out the
+                # stall within a bounded budget before writing the attempt
+                # off; exhaustion keeps the original fail-closed behaviour.
+                now = time.monotonic()
+                if transport_deadline is None:
+                    transport_deadline = now + GATEWAY_TRANSPORT_RETRY_BUDGET_SEC
+                if now >= transport_deadline:
+                    _write_json(
+                        checkpoint,
+                        {
+                            "gateway_task_id": task_id,
+                            "status": "cancel_request_failed",
+                            "cancel_error": type(exc).__name__,
+                        },
+                    )
+                    raise
+                self.config.sleep(max(0.5, float(self.config.poll_interval_sec)))
+            except Exception as exc:
+                _write_json(
+                    checkpoint,
+                    {
+                        "gateway_task_id": task_id,
+                        "status": "cancel_request_failed",
+                        "cancel_error": type(exc).__name__,
+                    },
+                )
+                raise ExecutorFailure("Ouroboros task cancellation request failed") from exc
         _write_json(
             checkpoint,
             {
