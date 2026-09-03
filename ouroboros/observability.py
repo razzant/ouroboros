@@ -260,14 +260,25 @@ def _json_bytes(payload: Any) -> bytes:
 
 
 # Byte markers whose presence means a payload may embed drive-local refs that
-# copy-back must rewrite (blob/manifest refs carry the drive's absolute path;
-# Phase3B actor refs carry the marker or ``"kind": "task_source"``). A payload
-# with none of them is portable: promotion can relocate the compressed file as
-# is, without decompressing and re-hashing gigabytes on the control plane.
+# copy-back must rewrite (blob/manifest refs carry the drive's absolute path
+# under ``observability/blobs/`` or ``observability/calls/``; Phase3B actor refs
+# carry the marker or ``"kind": "task_source"``). A payload with none of them is
+# portable: promotion can relocate the compressed file as is, without
+# decompressing and re-hashing gigabytes on the control plane.
+#
+# The markers must be the REF PATH SHAPES, not the bare directory name: the
+# agent's system prompt documents the drive layout (``observability/`` followed
+# by a tree of ``blobs/`` and ``calls/``), so a bare ``observability/`` marker
+# classified every LLM request payload — the multi-megabyte blobs that carry
+# nearly all of a cohort's bytes — as non-portable and sent exactly the heavy
+# half of the closure through the inflate/re-encode/re-compress path (Tier-2
+# load repro on 34feecaf: 2352 request blobs, 3.3 GB compressed, 0 real refs;
+# finalization held each lane 150-400 s under 64 lanes).
 _NON_PORTABLE_MARKERS: tuple[bytes, ...] = (
     b"FULL_RESULT_SOURCE_JSON=",
     b"task_source",
-    (OBSERVABILITY_DIR + "/").encode("utf-8"),
+    (OBSERVABILITY_DIR + "/blobs/").encode("utf-8"),
+    (OBSERVABILITY_DIR + "/calls/").encode("utf-8"),
 )
 
 

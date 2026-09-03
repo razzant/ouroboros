@@ -75,6 +75,27 @@ def test_write_blob_stamps_portability_from_payload_bytes(tmp_path):
     foreign = write_blob(other, {"x": 1})
     carrying = write_blob(drive, {"tool": "read_file", "result": foreign})
     assert carrying["portable"] is False
+    manifest_like = write_blob(
+        drive,
+        {"note": f"see {other}/observability/calls/t1/llm_1_response.json"},
+    )
+    assert manifest_like["portable"] is False
+
+    # The system prompt DOCUMENTS the drive layout; a request payload that
+    # merely mentions the directory carries no ref and must stay portable —
+    # these are the multi-megabyte blobs that dominate a cohort's bytes.
+    prompt_text = (
+        "data/\n"
+        "│   ├── observability/\n"
+        "│   │   ├── blobs/<sha256>.json.gz ← private forensic payloads\n"
+        "│   │   └── calls/<task_id>/ ← per-call manifests\n"
+    )
+    request = write_blob(
+        drive,
+        {"messages": [{"role": "system", "content": prompt_text}], "tools": []},
+    )
+    assert request["portable"] is True
+    assert len(request["compressed_sha256"]) == 64
 
 
 def test_portable_ref_is_relocated_without_decompression(tmp_path, monkeypatch):

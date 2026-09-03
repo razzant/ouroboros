@@ -30,22 +30,38 @@ _CALLS_PER_TASK = 16
 _POOL_WIDTH = 4  # supervisor.events._TASK_DONE_EXECUTOR
 
 
+# The production system prompt documents the drive layout.  Every LLM request
+# payload therefore mentions the observability directory by name without
+# carrying a single ref; the portability heuristic must not trip on it.
+_SYSTEM_PROMPT = (
+    "You are the agent.\n"
+    "data/\n"
+    "│   ├── observability/\n"
+    "│   │   ├── blobs/<sha256>.json.gz ← private forensic payloads\n"
+    "│   │   └── calls/<task_id>/ ← per-call manifests\n"
+    "│   └── task_results/<task_id>.json\n"
+)
+
+
 def _seed_child(parent: pathlib.Path, index: int) -> tuple[str, pathlib.Path]:
     task_id = f"load-lane-{index:02d}"
     child = prepare_task_drive(parent, task_id, "empty")
     assert child is not None
     refs = []
+    history: list[dict[str, str]] = [{"role": "system", "content": _SYSTEM_PROMPT}]
     for call in range(_CALLS_PER_TASK):
+        # Realistic transcript bulk: the request carries the whole history, so
+        # later rounds are tens of KB of low-entropy tool output.
+        history.append({"role": "user", "content": f"lane {index} round {call}"})
+        history.append(
+            {"role": "tool", "content": ("fuzz target harness output line\n" * 60) + str(call)}
+        )
         persisted = persist_call(
             child,
             task_id=task_id,
             call_id=f"llm_{call}",
             call_type="llm_request",
-            payload={
-                "prompt": f"lane {index} round {call}",
-                # Realistic transcript bulk: tens of KB of low-entropy context.
-                "context": ("fuzz target harness output line\n" * 900) + str(call),
-            },
+            payload={"model": "load-stub", "messages": list(history)},
         )
         refs.append({"request_ref": persisted["manifest_ref"]})
     write_task_result(
@@ -113,7 +129,9 @@ def test_64_lane_copyback_finalizes_without_inflating_blobs(tmp_path, monkeypatc
         ]["path"]
     )
     manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
-    assert read_blob_ref(parent, manifest["full_payload_ref"])["prompt"] == "lane 7 round 3"
+    payload = read_blob_ref(parent, manifest["full_payload_ref"])
+    assert payload["messages"][0]["content"] == _SYSTEM_PROMPT
+    assert {"role": "user", "content": "lane 7 round 3"} in payload["messages"]
 
 
 def test_relocation_is_an_order_of_magnitude_cheaper_than_inflating(tmp_path, monkeypatch):
