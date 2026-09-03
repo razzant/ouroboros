@@ -4,6 +4,8 @@ import json
 import sys
 from types import SimpleNamespace
 
+import pytest
+
 
 def test_server_subcommand_sanitizes_argv(monkeypatch):
     from ouroboros import cli
@@ -102,6 +104,12 @@ def test_chat_history_non_positive_limit_sends_no_quota(monkeypatch, capsys):
 
     assert seen == [("GET", "/api/chat/history"), ("GET", "/api/chat/history")]
     capsys.readouterr()
+
+    # The parser is the command surface, so the help a user reads says it too.
+    with pytest.raises(SystemExit):
+        cli.build_parser().parse_args(["chat", "history", "--help"])
+    rendered = " ".join(capsys.readouterr().out.split())  # argparse wraps the help
+    assert "omitted, zero or negative = the server's default window" in rendered
 
 
 def test_chat_history_without_limit_sends_no_quota(monkeypatch, capsys):

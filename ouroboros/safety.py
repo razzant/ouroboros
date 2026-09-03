@@ -430,7 +430,7 @@ _SAFETY_OMISSION_MARKER = "[… {n} older messages omitted]"
 # run_script/run_command payload otherwise inflates this prompt past provider
 # limits, and the conversation budget above cannot help because the subject rides
 # outside it. The refusal is a typed policy denial with a working alternative
-# (stage the payload with write_file), never a truncated half-reviewed call.
+# (split the payload into reviewable calls), never a truncated half-reviewed call.
 _SAFETY_SUBJECT_CHAR_BUDGET = 250_000
 
 
