@@ -1814,10 +1814,9 @@ export function createChatInstance({
 
     const historyResyncScheduler = createHistoryResyncScheduler({
         isReplayActive: () => _historyReplayActive,
-        // A joined run cannot answer an arm raised after the in-flight fetch left,
-        // and its timer is spent: re-arm rather than wait for the next completion.
+        // A joined run's timer was spent on a window fetched before the arm: re-arm.
         run: () => syncHistory({ includeUser: false }).catch(() => {}).then(() => {
-            if (lastHistorySyncSucceeded && liveCardBound.isArmed()) scheduleHistorySync();
+            if (!destroyed && lastHistorySyncSucceeded && liveCardBound.isArmed()) scheduleHistorySync();
         }),
     });
 

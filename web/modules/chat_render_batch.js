@@ -20,6 +20,13 @@
  * An arm raised between the first two came from live cards this window never saw
  * and survives the rebuild; one raised during the replay came from the window's own
  * rows and is answered by the floor that same rebuild sets.
+ *
+ * Accepted residual, shared with every rebuild the chat has always run (reconnect,
+ * first load, Load older): cards minted after a rebuild's fetch left are replaced by
+ * that rebuild and come back with their task's next frame or the next sync. A sync
+ * that already started armed does not re-arm on them: carrying a dirty bit across an
+ * armed rebuild would rebuild again after every busy rebuild, a storm by time where
+ * the relative floor removed the storm by size.
  */
 export function createLiveCardBound(cap) {
     let armed = false;

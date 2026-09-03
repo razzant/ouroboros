@@ -345,10 +345,12 @@ test('chat.js wires the replay flag around the replay and keeps live callsites i
     // occurrence is the scheduler re-arming itself when a run settles with the bound
     // still armed, which is how a run that only JOINED an older in-flight fetch (and
     // spent its timer on a window fetched before the arm) keeps the deadline alive.
+    // It is gated on !destroyed: a joined sync that settles after teardown must not
+    // install a fresh timer on a dead instance (the disposer invariant).
     assert.equal((chatSource.match(/scheduleHistorySync\(\);/g) || []).length, 4);
     assert.match(
         chatSource,
-        /if \(lastHistorySyncSucceeded && liveCardBound\.isArmed\(\)\) scheduleHistorySync\(\);/,
+        /if \(!destroyed && lastHistorySyncSucceeded && liveCardBound\.isArmed\(\)\) scheduleHistorySync\(\);/,
     );
     assert.doesNotMatch(chatSource, /_historyReplayActive[^\n]*scheduleHistorySync/);
 });
