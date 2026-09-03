@@ -1043,11 +1043,20 @@ class OuroborosAgent:
         budget_accounting_status = "available"
         try:
             from ouroboros.usage_accounting import usage_projection
+            from ouroboros.usage_ledger import DISPLAY_LOCK_TIMEOUT_SEC
 
             budget_root_text = str(task.get("budget_drive_root") or "").strip()
             budget_root = pathlib.Path(budget_root_text) if budget_root_text else self.env.drive_root
             total_budget = float(os.environ.get("TOTAL_BUDGET", "1"))
-            projection = usage_projection(budget_root, global_limit_usd=total_budget)
+            # Advisory context field (the hard gate is reserve_attempt): ride
+            # the last validated snapshot under ledger-write contention instead
+            # of parking this worker's task start for the monetary timeout.
+            projection = usage_projection(
+                budget_root,
+                global_limit_usd=total_budget,
+                lock_timeout_sec=DISPLAY_LOCK_TIMEOUT_SEC,
+                allow_stale=True,
+            )
             if total_budget > 0:
                 budget_remaining = max(0.0, total_budget - float(projection.get("accounted_usd") or 0.0))
         except Exception:

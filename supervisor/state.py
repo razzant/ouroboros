@@ -290,6 +290,8 @@ def budget_remaining(
     *,
     strict: bool = False,
     projection: Optional[Dict[str, Any]] = None,
+    lock_timeout_sec: float = 45.0,
+    allow_stale: bool = False,
 ) -> float:
     """Return ledger-derived remaining budget in USD.
 
@@ -318,7 +320,17 @@ def budget_remaining(
             from ouroboros.usage_accounting import ensure_legacy_imported, usage_projection
 
             ensure_legacy_imported(DRIVE_ROOT)
-            projection = usage_projection(DRIVE_ROOT, global_limit_usd=total)
+            # Hot admission paths (assign_tasks on the supervisor loop, chat
+            # dispatch) pass a short timeout + allow_stale: the exact monetary
+            # gate stays reserve_attempt, while this pre-check must never park
+            # the loop behind a contended ledger lock. A cold memo still fails
+            # closed exactly as before.
+            projection = usage_projection(
+                DRIVE_ROOT,
+                global_limit_usd=total,
+                lock_timeout_sec=lock_timeout_sec,
+                allow_stale=allow_stale,
+            )
         return float(projection.get("remaining_known_usd") or 0.0)
     except Exception:
         log.exception("Budget ledger unavailable; refusing new model dispatch")
@@ -475,9 +487,15 @@ def budget_pct(st: Dict[str, Any]) -> float:
         return 0.0
     try:
         from ouroboros.usage_accounting import ensure_legacy_imported, usage_projection
+        from ouroboros.usage_ledger import DISPLAY_LOCK_TIMEOUT_SEC
 
         ensure_legacy_imported(DRIVE_ROOT)
-        projection = usage_projection(DRIVE_ROOT, global_limit_usd=total)
+        projection = usage_projection(
+            DRIVE_ROOT,
+            global_limit_usd=total,
+            lock_timeout_sec=DISPLAY_LOCK_TIMEOUT_SEC,
+            allow_stale=True,
+        )
         return (float(projection.get("accounted_usd") or 0.0) / total) * 100.0
     except Exception:
         log.exception("Budget ledger unavailable while calculating percent")
@@ -507,6 +525,7 @@ def update_budget_from_usage(usage: Dict[str, Any]) -> None:
             return default
 
     from ouroboros.usage_accounting import ensure_legacy_imported, usage_breakdown, usage_projection
+    from ouroboros.usage_ledger import DISPLAY_LOCK_TIMEOUT_SEC
 
     # Serialize the ledger snapshot with its compatibility write. Otherwise an
     # older concurrent reader can acquire STATE_LOCK later and regress state.json.
@@ -514,10 +533,22 @@ def update_budget_from_usage(usage: Dict[str, Any]) -> None:
     _warn_state_unlocked("budget-update", lock_fd)
     try:
         ensure_legacy_imported(DRIVE_ROOT)
-        breakdown = usage_breakdown(DRIVE_ROOT)
+        # Called from the supervisor loop's llm_usage handler: the ledger reads
+        # must ride the last validated snapshot under write contention, never
+        # park the loop for the monetary-lock timeout (remaining1150 stall).
+        breakdown = usage_breakdown(
+            DRIVE_ROOT,
+            lock_timeout_sec=DISPLAY_LOCK_TIMEOUT_SEC,
+            allow_stale=True,
+        )
         total_limit = float(TOTAL_BUDGET_LIMIT or 0.0)
         projection = (
-            usage_projection(DRIVE_ROOT, global_limit_usd=total_limit)
+            usage_projection(
+                DRIVE_ROOT,
+                global_limit_usd=total_limit,
+                lock_timeout_sec=DISPLAY_LOCK_TIMEOUT_SEC,
+                allow_stale=True,
+            )
             if total_limit > 0
             else {key: breakdown.get(key) for key in (
                 "settled_usd", "confirmed_usd", "estimated_usd", "reserved_usd",
@@ -636,9 +667,14 @@ def budget_breakdown(st: Dict[str, Any]) -> Dict[str, float]:
     breakdown: Dict[str, float] = {}
     try:
         from ouroboros.usage_accounting import ensure_legacy_imported, usage_breakdown
+        from ouroboros.usage_ledger import DISPLAY_LOCK_TIMEOUT_SEC
 
         ensure_legacy_imported(DRIVE_ROOT)
-        ledger = usage_breakdown(DRIVE_ROOT)
+        ledger = usage_breakdown(
+            DRIVE_ROOT,
+            lock_timeout_sec=DISPLAY_LOCK_TIMEOUT_SEC,
+            allow_stale=True,
+        )
         for category, bucket in dict(ledger.get("by_category") or {}).items():
             breakdown[str(category)] = float(bucket.get("accounted_usd") or 0.0)
         unattributed = dict(ledger.get("unattributed") or {}).get("category") or {}
@@ -655,9 +691,14 @@ def model_breakdown(st: Dict[str, Any]) -> Dict[str, Dict[str, float]]:
     breakdown: Dict[str, Dict[str, float]] = {}
     try:
         from ouroboros.usage_accounting import ensure_legacy_imported, usage_breakdown
+        from ouroboros.usage_ledger import DISPLAY_LOCK_TIMEOUT_SEC
 
         ensure_legacy_imported(DRIVE_ROOT)
-        ledger = usage_breakdown(DRIVE_ROOT)
+        ledger = usage_breakdown(
+            DRIVE_ROOT,
+            lock_timeout_sec=DISPLAY_LOCK_TIMEOUT_SEC,
+            allow_stale=True,
+        )
         buckets = dict(ledger.get("by_model") or {})
         unattributed = dict(ledger.get("unattributed") or {}).get("model") or {}
         if int(unattributed.get("physical_calls") or 0) or float(unattributed.get("accounted_usd") or 0.0):
@@ -682,9 +723,14 @@ def per_task_cost_summary(max_tasks: int = 10, tail_bytes: int = 512_000) -> Lis
     tasks: Dict[str, Dict[str, Any]] = {}
     try:
         from ouroboros.usage_accounting import ensure_legacy_imported, usage_breakdown
+        from ouroboros.usage_ledger import DISPLAY_LOCK_TIMEOUT_SEC
 
         ensure_legacy_imported(DRIVE_ROOT)
-        ledger = usage_breakdown(DRIVE_ROOT)
+        ledger = usage_breakdown(
+            DRIVE_ROOT,
+            lock_timeout_sec=DISPLAY_LOCK_TIMEOUT_SEC,
+            allow_stale=True,
+        )
         for task_id, bucket in dict(ledger.get("by_task") or {}).items():
             tasks[str(task_id)] = {
                 "task_id": str(task_id),
@@ -821,11 +867,21 @@ def status_text(workers_dict: Dict[int, Any], pending_list: list, running_dict: 
     accounting_available = True
     try:
         from ouroboros.usage_accounting import ensure_legacy_imported, usage_breakdown, usage_projection
+        from ouroboros.usage_ledger import DISPLAY_LOCK_TIMEOUT_SEC
 
         ensure_legacy_imported(DRIVE_ROOT)
-        ledger_breakdown = usage_breakdown(DRIVE_ROOT)
+        ledger_breakdown = usage_breakdown(
+            DRIVE_ROOT,
+            lock_timeout_sec=DISPLAY_LOCK_TIMEOUT_SEC,
+            allow_stale=True,
+        )
         ledger_projection = (
-            usage_projection(DRIVE_ROOT, global_limit_usd=TOTAL_BUDGET_LIMIT)
+            usage_projection(
+                DRIVE_ROOT,
+                global_limit_usd=TOTAL_BUDGET_LIMIT,
+                lock_timeout_sec=DISPLAY_LOCK_TIMEOUT_SEC,
+                allow_stale=True,
+            )
             if TOTAL_BUDGET_LIMIT > 0
             else ledger_breakdown
         )

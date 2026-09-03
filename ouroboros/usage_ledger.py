@@ -39,6 +39,7 @@ UNRESOLVED_WRITEOFF_REASON = "abandoned_unresolved_writeoff"
 
 __all__ = (
     "LEDGER_REL", "QUARANTINE_REL", "UsageAccountingError", "UsageLedgerCorrupt",
+    "UsageLockUnavailable",
 )
 
 
@@ -48,6 +49,15 @@ class UsageAccountingError(RuntimeError):
 
 class UsageLedgerCorrupt(UsageAccountingError):
     """Raised when durable history is structurally invalid."""
+
+
+class UsageLockUnavailable(UsageAccountingError):
+    """The ledger lock could not be acquired within the caller's timeout.
+
+    Distinct from corruption and validation failures: display-only readers
+    catch exactly this to serve their last validated snapshot, while every
+    other accounting error keeps failing closed.
+    """
 
 
 _SHA256_RE = re.compile(r"^[0-9a-f]{64}$")
@@ -139,20 +149,32 @@ def _named_lock(
     path = root / "state" / filename
     fd = acquire_exclusive_file_lock(path, timeout_sec=timeout_sec, stale_sec=stale_sec)
     if fd is None:
-        raise UsageAccountingError(f"usage accounting lock unavailable: {path}")
+        raise UsageLockUnavailable(f"usage accounting lock unavailable: {path}")
     try:
         yield
     finally:
         release_exclusive_file_lock(path, fd)
 
 
+# Display/compatibility projections (heartbeat cost fields, /api/state, cost
+# breakdown views, the legacy state.json refresh) never wait on the monetary
+# ledger lock beyond this bound. Under a 64-lane write burst the lock is held
+# almost continuously, and a 45s wait on the supervisor loop or the gateway
+# event loop starves every IPC path behind it — the full1507/remaining1150
+# stall class (supervisor_loop_stall ~90-105s, then GatewayTransportError
+# write-offs). These readers serve their last validated snapshot instead.
+DISPLAY_LOCK_TIMEOUT_SEC = 0.25
+
+
 @contextlib.contextmanager
-def _locked(root: pathlib.Path) -> Iterator[None]:
+def _locked(root: pathlib.Path, *, timeout_sec: float = 45.0) -> Iterator[None]:
     # Operator fix 2026-07-23: 4.0s starves under a grown ledger (reserve_attempt
     # re-reads the whole usage_attempts.jsonl under this lock — ~0.5s hold at 20MB),
     # failing healthy tasks with UsageAccountingError at >=10 concurrent workers.
     # Waiting longer is always correct here; the transaction itself stays atomic.
-    with _named_lock(root, "usage_attempts.lock", timeout_sec=45.0, stale_sec=90.0):
+    # Display-only readers (e.g. the heartbeat cost projection) pass a short
+    # timeout: a contended lock must degrade the render, never stall the caller.
+    with _named_lock(root, "usage_attempts.lock", timeout_sec=timeout_sec, stale_sec=90.0):
         yield
 
 

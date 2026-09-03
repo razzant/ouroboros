@@ -178,7 +178,13 @@ def enqueue_evolution_task_if_needed() -> None:
         return
 
     try:
-        remaining = q.budget_remaining(st, strict=True)
+        from ouroboros.usage_ledger import DISPLAY_LOCK_TIMEOUT_SEC
+
+        remaining = q.budget_remaining(
+            st, strict=True,
+            lock_timeout_sec=DISPLAY_LOCK_TIMEOUT_SEC,
+            allow_stale=True,
+        )
     except Exception:
         log.error("Evolution scheduling deferred: cost accounting unavailable", exc_info=True)
         q.append_jsonl(q.DRIVE_ROOT / "logs" / "events.jsonl", {

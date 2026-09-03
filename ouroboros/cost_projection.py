@@ -178,10 +178,17 @@ def live_root_cost_projection(
         return {}
     try:
         from ouroboros.usage_accounting import usage_projection
+        from ouroboros.usage_ledger import DISPLAY_LOCK_TIMEOUT_SEC
 
+        # This runs on the supervisor event loop per root heartbeat: a
+        # contended ledger lock must degrade to the last validated snapshot,
+        # never park the loop behind monetary writes (the remaining1150 stall
+        # class — py-spy showed the loop blocked here for the full 45s).
         usage = usage_projection(
             pathlib.Path(task.get("budget_drive_root") or drive_root),
             root_task_id=str(lineage["root_task_id"] or task_id),
+            lock_timeout_sec=DISPLAY_LOCK_TIMEOUT_SEC,
+            allow_stale=True,
         )
         # A root-filtered summary with no attributable rows is an empty view,
         # not measured zero.  The task-detail reader applies the same rule:

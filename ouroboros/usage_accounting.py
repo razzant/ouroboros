@@ -384,13 +384,20 @@ def usage_projection(
     root_task_id: str = "",
     global_limit_usd: Optional[float] = None,
     include_roots: bool = True,
+    lock_timeout_sec: float = 45.0,
+    allow_stale: bool = False,
 ) -> Dict[str, Any]:
     """Return a replayed global projection, or one root/subtree projection.
 
     ``include_roots=False`` skips building the per-root ``by_root`` map for
     hot-path readers that never consume it (``/api/state``); the slim result
     still carries ``limit_usd``/``remaining_known_usd`` — the two fields
-    ``budget_remaining`` consumes. The default keeps the full contract."""
+    ``budget_remaining`` consumes. The default keeps the full contract.
+
+    Display-only readers on concurrency-critical threads (supervisor loop,
+    gateway event loop) pass ``lock_timeout_sec=DISPLAY_LOCK_TIMEOUT_SEC`` and
+    ``allow_stale=True``: a contended ledger lock then serves the last
+    validated snapshot instead of stalling the caller behind monetary writes."""
     root = _drive_root(drive_root)
     if root_task_id:
         cache_key = ("usage_projection", root_task_id, "", None, True)
@@ -402,7 +409,10 @@ def usage_projection(
             result = _with_limit(_summary(rows), min(known_limits) if known_limits else None)
             return _with_integrity(result, integrity_degraded)
 
-        return _render_cached(root, cache_key, render_root)
+        return _render_cached(
+            root, cache_key, render_root,
+            lock_timeout_sec=lock_timeout_sec, allow_stale=allow_stale,
+        )
     if global_limit_usd is not None:
         configured_limit = max(0.0, float(global_limit_usd))
     else:
@@ -441,7 +451,10 @@ def usage_projection(
                 )
         return _with_integrity(result, integrity_degraded)
 
-    return _render_cached(root, cache_key, render_global)
+    return _render_cached(
+        root, cache_key, render_global,
+        lock_timeout_sec=lock_timeout_sec, allow_stale=allow_stale,
+    )
 
 
 def usage_breakdown(
@@ -449,8 +462,14 @@ def usage_breakdown(
     *,
     root_task_id: str = "",
     task_id: str = "",
+    lock_timeout_sec: float = 45.0,
+    allow_stale: bool = False,
 ) -> Dict[str, Any]:
-    """Read-only physical-call/token/cost buckets from validated ledger finals."""
+    """Read-only physical-call/token/cost buckets from validated ledger finals.
+
+    ``lock_timeout_sec``/``allow_stale`` are the display-reader contract from
+    ``usage_projection``: contended-lock callers serve the last validated
+    snapshot rather than stall."""
     root = _drive_root(drive_root)
     cache_key = ("usage_breakdown", root_task_id, task_id, None, True)
 
@@ -514,7 +533,10 @@ def usage_breakdown(
                     _with_integrity(bucket, True)
         return result
 
-    return _render_cached(root, cache_key, render)
+    return _render_cached(
+        root, cache_key, render,
+        lock_timeout_sec=lock_timeout_sec, allow_stale=allow_stale,
+    )
 
 
 def _reservation_cost(request: AttemptRequest) -> Optional[float]:

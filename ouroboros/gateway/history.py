@@ -265,14 +265,20 @@ def _user_annotation(
 
 
 def make_cost_breakdown_endpoint(data_dir: pathlib.Path):
-    async def api_cost_breakdown(_request: Request) -> JSONResponse:
-        """Return ledger-derived cost and physical-attempt breakdowns."""
+    def _cost_breakdown_payload() -> JSONResponse:
         try:
             from ouroboros.pricing import infer_model_category
             from ouroboros.usage_accounting import ensure_legacy_imported, usage_breakdown
+            from ouroboros.usage_ledger import DISPLAY_LOCK_TIMEOUT_SEC
 
             ensure_legacy_imported(data_dir)
-            breakdown = usage_breakdown(data_dir)
+            # Display read: serve the last validated snapshot under write
+            # contention instead of holding the monetary lock timeout.
+            breakdown = usage_breakdown(
+                data_dir,
+                lock_timeout_sec=DISPLAY_LOCK_TIMEOUT_SEC,
+                allow_stale=True,
+            )
             unattributed = dict(breakdown.get("unattributed") or {})
             by_model_raw = dict(breakdown.get("by_model") or {})
             try:
@@ -335,6 +341,12 @@ def make_cost_breakdown_endpoint(data_dir: pathlib.Path):
                     "error_code": "ledger_unavailable",
                 },
             }, status_code=503)
+
+    async def api_cost_breakdown(_request: Request) -> JSONResponse:
+        """Return ledger-derived cost and physical-attempt breakdowns."""
+        # Off the event loop (same pattern as gateway/state.py): the ledger
+        # read must never park the asyncio loop behind monetary writes.
+        return await asyncio.to_thread(_cost_breakdown_payload)
 
     return api_cost_breakdown
 

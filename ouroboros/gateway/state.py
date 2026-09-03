@@ -65,14 +65,29 @@ def _state_snapshot(request: Request) -> Dict[str, Any]:
     drive_root = request_drive_root(request)
     accounting_available = True
     try:
+        from ouroboros.usage_ledger import DISPLAY_LOCK_TIMEOUT_SEC
+
         ensure_legacy_imported(drive_root)
-        breakdown = usage_breakdown(drive_root)
+        # /api/state is polled by benchmark watchers during 64-lane runs: the
+        # ledger reads degrade to the last validated snapshot under write
+        # contention instead of parking this to_thread for the monetary timeout.
+        breakdown = usage_breakdown(
+            drive_root,
+            lock_timeout_sec=DISPLAY_LOCK_TIMEOUT_SEC,
+            allow_stale=True,
+        )
         # include_roots=False: /api/state serializes named scalars only, so the
         # per-root map would be built per poll and thrown away (O(N×roots) work
         # with zero readers on this path). The slim projection still carries
         # limit_usd/remaining_known_usd for the evolution budget snapshot below.
         accounting = (
-            usage_projection(drive_root, global_limit_usd=limit, include_roots=False)
+            usage_projection(
+                drive_root,
+                global_limit_usd=limit,
+                include_roots=False,
+                lock_timeout_sec=DISPLAY_LOCK_TIMEOUT_SEC,
+                allow_stale=True,
+            )
             if limit > 0
             else dict(breakdown)
         )

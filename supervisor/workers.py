@@ -1254,7 +1254,13 @@ def _handle_chat_direct_locked(
 ) -> None:
     from supervisor.state import budget_remaining, load_state
     try:
-        remaining = budget_remaining(load_state(), strict=True)
+        from ouroboros.usage_ledger import DISPLAY_LOCK_TIMEOUT_SEC
+
+        remaining = budget_remaining(
+            load_state(), strict=True,
+            lock_timeout_sec=DISPLAY_LOCK_TIMEOUT_SEC,
+            allow_stale=True,
+        )
     except Exception:
         send_with_budget(chat_id, "⚠️ Cost accounting is unavailable. Task was not dispatched; retry after ledger recovery.")
         return
@@ -1264,7 +1270,7 @@ def _handle_chat_direct_locked(
         except Exception:
             pass
         return
-        
+
     _run_chat_task(
         _get_chat_agent(), chat_id, text, image_data,
         task_constraint=task_constraint, task_metadata=task_metadata, ephemeral=False,
@@ -1531,7 +1537,13 @@ def handle_chat_ephemeral(
     themselves and are barred from long-term memory/reflection/evolution writes."""
     from supervisor.state import budget_remaining, load_state
     try:
-        remaining = budget_remaining(load_state(), strict=True)
+        from ouroboros.usage_ledger import DISPLAY_LOCK_TIMEOUT_SEC
+
+        remaining = budget_remaining(
+            load_state(), strict=True,
+            lock_timeout_sec=DISPLAY_LOCK_TIMEOUT_SEC,
+            allow_stale=True,
+        )
     except Exception:
         send_with_budget(chat_id, "⚠️ Cost accounting is unavailable. Task was not dispatched; retry after ledger recovery.")
         return
@@ -3813,7 +3825,17 @@ def assign_tasks() -> None:
                 ", ".join(unresolved_invalid_ids),
             )
         try:
-            remaining = budget_remaining(st, strict=True)
+            from ouroboros.usage_ledger import DISPLAY_LOCK_TIMEOUT_SEC
+
+            # The loop ticks this gate constantly; reserve_attempt stays the
+            # exact monetary authority, so this pre-check rides the last
+            # validated snapshot under ledger-write contention rather than
+            # stalling assignment behind the 45s monetary lock.
+            remaining = budget_remaining(
+                st, strict=True,
+                lock_timeout_sec=DISPLAY_LOCK_TIMEOUT_SEC,
+                allow_stale=True,
+            )
         except Exception:
             log.error("Task assignment blocked: monetary authority unavailable")
             return

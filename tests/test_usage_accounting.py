@@ -941,7 +941,7 @@ def test_legacy_state_projection_cannot_regress_under_reordered_writers(
     release_first = threading.Event()
     calls = []
 
-    def breakdown(_root):
+    def breakdown(_root, **_kwargs):
         calls.append(len(calls) + 1)
         if len(calls) == 1:
             first_started.set()

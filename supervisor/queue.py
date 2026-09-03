@@ -1516,7 +1516,15 @@ def get_evolution_status_snapshot(*, budget_projection: Optional[Dict[str, Any]]
     owner_chat_id = int(st.get("owner_chat_id") or 0)
     consecutive_failures = int(st.get("evolution_consecutive_failures") or 0)
     try:
-        remaining: Optional[float] = round(float(budget_remaining(st, strict=True, projection=budget_projection)), 2)
+        from ouroboros.usage_ledger import DISPLAY_LOCK_TIMEOUT_SEC
+
+        # A status snapshot is a display read: when no pre-computed projection
+        # is supplied, ride the last validated snapshot under ledger contention.
+        remaining: Optional[float] = round(float(budget_remaining(
+            st, strict=True, projection=budget_projection,
+            lock_timeout_sec=DISPLAY_LOCK_TIMEOUT_SEC,
+            allow_stale=True,
+        )), 2)
         accounting_available = True
     except Exception:
         remaining = None

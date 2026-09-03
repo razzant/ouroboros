@@ -867,8 +867,16 @@ def _task_cost_breakdown_view(drive_root: pathlib.Path, result: Dict[str, Any]) 
     try:
         from ouroboros.cost_projection import honest_accounted_amount
         from ouroboros.usage_accounting import usage_breakdown
+        from ouroboros.usage_ledger import DISPLAY_LOCK_TIMEOUT_SEC
 
-        breakdown = usage_breakdown(drive_root, root_task_id=root_id)
+        # Read-at-display-time only: a contended ledger lock serves the last
+        # validated snapshot rather than stalling this request thread.
+        breakdown = usage_breakdown(
+            drive_root,
+            root_task_id=root_id,
+            lock_timeout_sec=DISPLAY_LOCK_TIMEOUT_SEC,
+            allow_stale=True,
+        )
     except Exception:
         log.debug("cost breakdown view unavailable for %s", task_id, exc_info=True)
         return None
@@ -913,17 +921,30 @@ def _task_cost_breakdown_view(drive_root: pathlib.Path, result: Dict[str, Any]) 
     }
 
 
+def _task_get_payload(
+    drive_root: pathlib.Path, task_id: str
+) -> "tuple[Optional[Dict[str, Any]], Optional[Dict[str, Any]]]":
+    data = load_effective_task_result(drive_root, task_id)
+    if not data:
+        return None, None
+    payload = public_task_result(data)
+    return payload, _task_cost_breakdown_view(drive_root, data)
+
+
 async def api_task_get(request: Request) -> JSONResponse:
     try:
         task_id = validate_task_id(request.path_params.get("task_id"))
     except ValueError as exc:
         return json_error(str(exc), 400)
     drive_root = request_drive_root(request)
-    data = load_effective_task_result(drive_root, task_id)
-    if not data:
+    # Off the event loop: the result read hits the workspace filesystem and the
+    # cost view takes the ledger lock — a slow read must never park every HTTP
+    # client behind it (the remaining1150 gateway-starvation class: the
+    # executor's 60s status polls died at transport level while a contended
+    # cost breakdown held the asyncio loop).
+    payload, breakdown_view = await asyncio.to_thread(_task_get_payload, drive_root, task_id)
+    if payload is None:
         return json_error("task not found", 404)
-    payload = public_task_result(data)
-    breakdown_view = _task_cost_breakdown_view(drive_root, data)
     if breakdown_view is not None:
         payload["cost_breakdown"] = breakdown_view
     return JSONResponse(payload)
