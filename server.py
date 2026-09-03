@@ -2707,6 +2707,18 @@ def _shutdown_supervisor_event_bus() -> None:
         pass
 
 
+def _drain_task_done_finalizations(timeout_sec: float = 120.0) -> bool:
+    """Preserve queued copy-back/promotions before shutdown removes workers."""
+
+    try:
+        from supervisor.events import drain_task_done_finalizations
+
+        return drain_task_done_finalizations(timeout_sec=timeout_sec)
+    except Exception:
+        log.warning("Deferred task finalization drain failed", exc_info=True)
+        return False
+
+
 def _execute_panic_stop(consciousness, kill_workers_fn) -> None:
     _execute_panic_stop_impl(
         consciousness,
@@ -3021,6 +3033,7 @@ async def lifespan(app):
                 supervisor.stop_all()
         except Exception:
             pass
+        _drain_task_done_finalizations()
         try:
             restart_requested = _restart_requested.is_set()
             # Record an explicit shutdown cause so a task interrupted by the
@@ -3082,6 +3095,7 @@ def _actual_bound_port() -> int:
 
 def _emergency_process_cleanup(*, port_sweep: bool = True) -> None:
     """Kill child processes, workers, companions, and runtime port holders."""
+    _drain_task_done_finalizations()
     try:
         from ouroboros.tools.shell import kill_all_tracked_subprocesses
         kill_all_tracked_subprocesses()

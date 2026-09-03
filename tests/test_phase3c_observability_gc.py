@@ -409,6 +409,45 @@ def test_interrupted_live_ref_promotion_blocks_gc_until_idempotent_retry(
     assert prune_headless_task_drives(parent, retention_days=0, now=_future_now())["pruned"]
 
 
+def test_immediate_cleanup_retries_live_pending_child_refs(tmp_path, monkeypatch):
+    import ouroboros.observability as observability
+
+    task_id = "phase3c-cleanup-retry"
+    parent, child = _child(tmp_path, task_id)
+    trace = persist_call(
+        child,
+        task_id=task_id,
+        call_id="tool_call",
+        call_type="tool_call",
+        payload={"result": "must survive cleanup"},
+    )
+    write_task_result(
+        child,
+        task_id,
+        STATUS_COMPLETED,
+        result="done",
+        artifact_status="ready",
+        trace_refs={"tool_call_refs": [{"manifest_ref": trace["manifest_ref"]}]},
+    )
+    real = observability.promote_call_manifest_ref
+    monkeypatch.setattr(
+        observability,
+        "promote_call_manifest_ref",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(OSError("interrupted copy")),
+    )
+    copied = copy_child_task_result(parent, {"id": task_id, "drive_root": str(child)})
+    assert copied is not None
+    assert copied["child_ref_promotion"]["status"] == "incomplete"
+
+    monkeypatch.setattr(observability, "promote_call_manifest_ref", real)
+    assert remove_subagent_task_drive(parent, task_id) is True
+
+    settled = load_task_result(parent, task_id) or {}
+    assert settled["child_ref_promotion"]["status"] == "complete"
+    assert settled["child_ref_promotion"]["pending_refs"] == []
+    assert not child.exists()
+
+
 def test_digest_mismatch_becomes_typed_unavailable_and_does_not_pin_drive(tmp_path):
     task_id = "phase3c-digest"
     parent, child = _child(tmp_path, task_id)

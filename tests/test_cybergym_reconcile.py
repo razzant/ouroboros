@@ -16,11 +16,16 @@ import pytest
 from devtools.benchmarks.cybergym import cybergym_reconcile
 from devtools.benchmarks.cybergym.cybergym_adapter import (
     BudgetLedger,
+    CyberGymError,
     append_cybergym_result,
     campaign_execution_lock,
     task_slug,
 )
 from devtools.benchmarks.cybergym.cybergym_reconcile import reconcile_main
+from devtools.benchmarks.cybergym.cybergym_result_index import (
+    append_cybergym_late_result,
+    effective_task_rows,
+)
 from tests.test_cybergym_protocol import OFFICIAL_MODEL, _reconcile_args
 
 _TERMINAL_OUTCOME = {
@@ -307,6 +312,208 @@ def test_result_pair_append_repairs_torn_task_local_row(tmp_path):
 
     assert _read_rows(run_dir) == [row]
     assert _read_rows(run_dir / task_slug("arvo:1")) == [row]
+
+
+def test_late_result_appends_auditable_superseding_pair(tmp_path):
+    run_dir = tmp_path / "run"
+    old = {
+        "task_id": "arvo:1",
+        "attempt_id": "attempt-a01",
+        "status": "infra_failed",
+        "lifecycle": "executor_failed",
+        "infra_reason": "GatewayTransportError",
+        "ts_unix": 1.0,
+    }
+    append_cybergym_result(run_dir, old)
+    old_line = (run_dir / "result_index.jsonl").read_text(encoding="utf-8").splitlines()[0]
+    terminal = {
+        "task_id": "arvo:1",
+        "attempt_id": "attempt-a01",
+        "status": "completed",
+        "lifecycle": "official_verified",
+        "cost_usd": 0.25,
+    }
+
+    assert append_cybergym_late_result(
+        run_dir,
+        terminal,
+        source="isolate_task_results",
+        gateway_task_id="gateway-1",
+        reconcile_pass=3,
+    )
+
+    rows = _read_rows(run_dir)
+    assert len(rows) == 2
+    assert rows[-1]["row_role"] == "late_delivery"
+    assert rows[-1]["supersedes"]["row_sha256"] == __import__("hashlib").sha256(
+        old_line.encode("utf-8")
+    ).hexdigest()
+    assert _read_rows(run_dir / task_slug("arvo:1")) == rows
+    assert effective_task_rows(rows)["arvo:1"]["status"] == "completed"
+
+
+def test_late_result_refuses_a_second_competing_truth(tmp_path):
+    run_dir = tmp_path / "run"
+    append_cybergym_result(
+        run_dir,
+        {
+            "task_id": "arvo:1",
+            "attempt_id": "attempt-a01",
+            "status": "infra_failed",
+            "lifecycle": "executor_failed",
+        },
+    )
+    terminal = {
+        "task_id": "arvo:1",
+        "attempt_id": "attempt-a01",
+        "status": "completed",
+        "lifecycle": "official_verified",
+        "cost_usd": 0.25,
+    }
+    append_cybergym_late_result(
+        run_dir,
+        terminal,
+        source="isolate_task_results",
+        gateway_task_id="gateway-1",
+        reconcile_pass=1,
+    )
+
+    with pytest.raises(CyberGymError, match="not supersedeable"):
+        append_cybergym_late_result(
+            run_dir,
+            {**terminal, "cost_usd": 0.30},
+            source="isolate_task_results",
+            gateway_task_id="gateway-1",
+            reconcile_pass=2,
+        )
+
+
+def test_reconcile_supersedes_settled_transport_failure_without_resettling(
+    tmp_path, monkeypatch,
+):
+    task_id = "arvo:1"
+    attempt_id = "attempt-a01"
+    run_dir = _write_run(
+        tmp_path / "run",
+        [task_id],
+        checkpoints=[(task_id, attempt_id)],
+    )
+    append_cybergym_result(
+        run_dir,
+        {
+            "task_id": task_id,
+            "attempt_id": attempt_id,
+            "status": "infra_failed",
+            "lifecycle": "executor_failed",
+            "infra_reason": "GatewayTransportError",
+            "cost_usd": None,
+        },
+    )
+    ledger = BudgetLedger(run_dir / "claims.jsonl", cap_usd=3500)
+    ledger.settle(attempt_id, 0.2500004)
+    terminal_row = {
+        "task_id": task_id,
+        "attempt_id": attempt_id,
+        "status": "completed",
+        "lifecycle": "official_verified",
+        "cost_usd": 0.25,
+    }
+    fake = _FakeExecutor({"status": "completed", "lifecycle": "official_verified"})
+    _install_fake_executor(monkeypatch, fake)
+    monkeypatch.setattr(
+        cybergym_reconcile,
+        "finalize_outcome_row",
+        lambda *_args, **_kwargs: dict(terminal_row),
+    )
+
+    assert reconcile_main(_reconcile_args(run_dir)) == 0
+
+    rows = _read_rows(run_dir)
+    assert [row["status"] for row in rows] == ["infra_failed", "completed"]
+    assert rows[-1]["row_role"] == "late_delivery"
+    assert ledger.attempt_state(attempt_id) == "settled"
+    report = _read_manifest(run_dir)["extra"]["reconcile_passes"][-1]
+    assert report["late_delivered"][0]["disposition"] == "late_delivered"
+    assert fake.released == [(task_id, attempt_id)]
+
+
+def test_reconcile_repairs_torn_late_delivery_pair(tmp_path, monkeypatch):
+    task_id = "arvo:1"
+    attempt_id = "attempt-a01"
+    run_dir = _write_run(
+        tmp_path / "run",
+        [task_id],
+        checkpoints=[(task_id, attempt_id)],
+    )
+    old = {
+        "task_id": task_id,
+        "attempt_id": attempt_id,
+        "status": "infra_failed",
+        "lifecycle": "executor_failed",
+    }
+    append_cybergym_result(run_dir, old)
+    BudgetLedger(run_dir / "claims.jsonl", cap_usd=3500).settle(attempt_id, 0.25)
+    terminal = {
+        "task_id": task_id,
+        "attempt_id": attempt_id,
+        "status": "completed",
+        "lifecycle": "official_verified",
+        "cost_usd": 0.25,
+    }
+    append_cybergym_late_result(
+        run_dir,
+        terminal,
+        source="isolate_task_results",
+        gateway_task_id="gateway-1",
+        reconcile_pass=1,
+    )
+    task_index = run_dir / task_slug(task_id) / "result_index.jsonl"
+    task_index.write_text(json.dumps(old) + "\n", encoding="utf-8")
+    fake = _FakeExecutor(_TERMINAL_OUTCOME)
+    _install_fake_executor(monkeypatch, fake)
+
+    assert reconcile_main(_reconcile_args(run_dir)) == 0
+    assert _read_rows(run_dir / task_slug(task_id)) == _read_rows(run_dir)
+
+
+def test_late_nonterminal_row_is_reported_without_crashing_pass(
+    tmp_path, monkeypatch,
+):
+    task_id = "arvo:1"
+    attempt_id = "attempt-a01"
+    run_dir = _write_run(
+        tmp_path / "run",
+        [task_id],
+        checkpoints=[(task_id, attempt_id)],
+    )
+    append_cybergym_result(
+        run_dir,
+        {
+            "task_id": task_id,
+            "attempt_id": attempt_id,
+            "status": "infra_failed",
+            "lifecycle": "executor_failed",
+        },
+    )
+    BudgetLedger(run_dir / "claims.jsonl", cap_usd=3500).settle(attempt_id, 0.25)
+    fake = _FakeExecutor(_TERMINAL_OUTCOME)
+    _install_fake_executor(monkeypatch, fake)
+    monkeypatch.setattr(
+        cybergym_reconcile,
+        "finalize_outcome_row",
+        lambda *_args, **_kwargs: {
+            "task_id": task_id,
+            "attempt_id": attempt_id,
+            "status": "infra_failed",
+            "lifecycle": "gateway_terminal",
+            "cost_usd": None,
+        },
+    )
+
+    assert reconcile_main(_reconcile_args(run_dir)) == 2
+    report = _read_manifest(run_dir)["extra"]["reconcile_passes"][-1]
+    assert report["undeliverable"][0]["disposition"] == "row_refused"
+    assert len(_read_rows(run_dir)) == 1
 
 
 def test_reconcile_uses_exact_recorded_row_for_each_retry_attempt(tmp_path, monkeypatch):

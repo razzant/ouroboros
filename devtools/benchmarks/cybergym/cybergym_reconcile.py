@@ -4,10 +4,12 @@ When the launcher dies after the gateway accepted tasks but before their rows
 were delivered, ``--reconcile <run root>`` re-reads the manifest, attaches to
 the still-running isolated server and workspace containers, and runs the
 shared delivery path for every checkpointed attempt that has no
-``result_index.jsonl`` row.  It never re-runs an agent, never starts new
-infrastructure, and never rewrites an existing row; attempts whose gateway
-task is still alive are reported ``left_running`` for a later pass, and the
-report lands in ``extra.reconcile`` of the finalized manifest.
+``result_index.jsonl`` row, plus settled transport failures whose durable
+terminal evidence arrived late.  It never re-runs an agent, never starts new
+infrastructure, and never rewrites an existing row; late evidence is appended
+as a hash-linked superseding row. Attempts whose gateway task is still alive
+are reported ``left_running`` for a later pass, and each report is appended to
+``extra.reconcile_passes`` in the finalized manifest.
 
 ``_ReconcileMixin`` carries the executor-side adoption/delivery methods and is
 assembled into ``CyberGymExecutor``; ``reconcile_main`` is the launcher entry.
@@ -27,6 +29,7 @@ from __future__ import annotations
 import argparse
 import contextlib
 import json
+import math
 import os
 import pathlib
 import sys
@@ -53,6 +56,9 @@ from devtools.benchmarks.cybergym.cybergym_adapter import (
 from devtools.benchmarks.cybergym.cybergym_result_index import (
     _append_result_pair,
     acquire_campaign_execution_lock,
+    append_cybergym_late_result,
+    is_late_terminal_result,
+    is_supersedeable_result,
 )
 from devtools.benchmarks.cybergym.cybergym_docker import (
     _GATEWAY_TASK_ID,
@@ -368,12 +374,23 @@ class _ReconcileMixin:
                         "cannot prove final or grace-eligible cost"
                     ),
                 }
-            # Delivery re-runs the official submit inside the workspace
-            # container, so a completed result needs the live container to
-            # adopt.  A terminal non-completed result delivers its typed infra
-            # row without touching Docker.
+            # Existing verifier evidence can be reused without a live workspace
+            # container.  `_submit_final` remains the fail-closed seam: only a
+            # genuinely new submission requires an adopted container.
             if _response_status(gateway_result) == "completed":
-                self._adopt_workspace_container(container_name)
+                observed_workspace = self._inspect_optional(
+                    "container", container_name
+                )
+                observed_state = (
+                    observed_workspace.get("State")
+                    if isinstance(observed_workspace, Mapping)
+                    else {}
+                )
+                if (
+                    isinstance(observed_state, Mapping)
+                    and str(observed_state.get("Status") or "").lower() == "running"
+                ):
+                    self._adopt_workspace_container(container_name)
             return self._deliver_gateway_result(
                 task,
                 task_dir,
@@ -600,6 +617,29 @@ def _append_row_if_unrecorded(run_dir: pathlib.Path, row: Mapping[str, Any]) -> 
         return True
 
 
+def _settled_attempt_cost_usd(ledger: BudgetLedger, attempt_id: str) -> float:
+    """Return the durable settled amount for an attempt, or refuse ambiguity."""
+
+    latest: Mapping[str, Any] | None = None
+    for event in ledger.events():
+        if str(event.get("attempt_id") or "") == str(attempt_id):
+            latest = event
+    kind = (
+        str(latest.get("event", latest.get("kind", "")) or "").lower()
+        if latest is not None
+        else ""
+    )
+    if kind not in {"settle", "settled", "overspend"}:
+        raise LedgerError("late delivery requires an already-settled attempt")
+    try:
+        cost = float(latest.get("cost_usd"))
+    except (TypeError, ValueError) as exc:
+        raise LedgerError("settled attempt has no finite cost") from exc
+    if not math.isfinite(cost):
+        raise LedgerError("settled attempt has no finite cost")
+    return cost
+
+
 def _record_reconcile_pass(manifest: dict[str, Any], report: Mapping[str, Any]) -> None:
     """Append one reconcile pass to the manifest; passes are never overwritten.
 
@@ -811,6 +851,12 @@ def reconcile_main(args: argparse.Namespace) -> int:
                         return 2
                     if (
                         (task_id, attempt_dir.name) not in recorded_attempts
+                        or (
+                            claim_state == "settled"
+                            and is_supersedeable_result(
+                                recorded_rows.get((task_id, attempt_dir.name), {})
+                            )
+                        )
                         or claim_state == "reserved"
                         or not _workspace_cleanup_complete(
                             run_dir, task_id, attempt_dir.name,
@@ -826,6 +872,10 @@ def reconcile_main(args: argparse.Namespace) -> int:
             for task_id in requested_ids
             if task_id not in recorded_tasks and task_id not in checkpointed
         )
+        prior_passes = extra.get("reconcile_passes")
+        reconcile_pass_number = (
+            len(prior_passes) + 1 if isinstance(prior_passes, list) else 1
+        )
 
         reconcile_report: dict[str, Any] = {
             "schema": "ouroboros.benchmark.cybergym.reconcile.v1",
@@ -837,6 +887,7 @@ def reconcile_main(args: argparse.Namespace) -> int:
             "left_running": [],
             "undeliverable": [],
             "skipped_recorded": [],
+            "late_delivered": [],
         }
         if unaccounted:
             reconcile_report["unaccounted"] = unaccounted
@@ -897,7 +948,12 @@ def reconcile_main(args: argparse.Namespace) -> int:
             for task_id, attempt_id, checkpoint in pending:
                 spec = specs[task_id]
                 attempt_key = (task_id, attempt_id)
-                if attempt_key in recorded_attempts:
+                late_delivery = (
+                    attempt_key in recorded_attempts
+                    and is_supersedeable_result(recorded_rows[attempt_key])
+                    and ledger.attempt_state(attempt_id) == "settled"
+                )
+                if attempt_key in recorded_attempts and not late_delivery:
                     entry = {
                         "task_id": task_id,
                         "attempt_id": attempt_id,
@@ -988,8 +1044,44 @@ def reconcile_main(args: argparse.Namespace) -> int:
                     exit_code = 2
                     continue
                 try:
-                    appended = _append_row_if_unrecorded(run_dir, row)
-                except CyberGymError as exc:
+                    if late_delivery:
+                        if not is_late_terminal_result(row):
+                            raise CyberGymError(
+                                "late result is not terminal benchmark evidence"
+                            )
+                        settled_cost = _settled_attempt_cost_usd(ledger, attempt_id)
+                        delivered_cost = float(row.get("cost_usd"))
+                        if (
+                            not math.isfinite(delivered_cost)
+                            or round(settled_cost, 6) != round(delivered_cost, 6)
+                        ):
+                            raise LedgerError(
+                                "late terminal cost disagrees with settled claim"
+                            )
+                        checkpoint_value = json.loads(
+                            checkpoint.read_text(encoding="utf-8")
+                        )
+                        appended = append_cybergym_late_result(
+                            run_dir,
+                            row,
+                            source=str(
+                                checkpoint_value.get("reconcile_source")
+                                or "checkpoint_cache"
+                            ),
+                            gateway_task_id=str(
+                                checkpoint_value.get("gateway_task_id") or ""
+                            ),
+                            reconcile_pass=reconcile_pass_number,
+                        )
+                    else:
+                        appended = _append_row_if_unrecorded(run_dir, row)
+                except (
+                    CyberGymError,
+                    LedgerError,
+                    OSError,
+                    TypeError,
+                    ValueError,
+                ) as exc:
                     # The index became unreadable mid-pass: fail closed and
                     # keep the adopted container for a later pass.
                     entry["disposition"] = "row_refused"
@@ -1018,6 +1110,19 @@ def reconcile_main(args: argparse.Namespace) -> int:
                 recorded_tasks.add(task_id)
                 recorded_rows[attempt_key] = dict(row)
                 entry["row_status"] = str(row.get("status") or "")
+                if late_delivery:
+                    release = executor_obj.release_reconciled_workspace(
+                        spec, attempt_id
+                    )
+                    if isinstance(release, Mapping) and release.get("ok") is False:
+                        entry["workspace_cleanup"] = "failed"
+                        reconcile_report["undeliverable"].append(entry)
+                        exit_code = 2
+                        continue
+                    entry["disposition"] = "late_delivered"
+                    entry["claim_state"] = ledger.attempt_state(attempt_id)
+                    reconcile_report["late_delivered"].append(entry)
+                    continue
                 try:
                     settle_finished_attempt(ledger, attempt_id, outcome)
                 except CyberGymError as exc:

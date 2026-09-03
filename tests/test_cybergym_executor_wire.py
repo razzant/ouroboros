@@ -1147,6 +1147,79 @@ def test_cancel_rides_out_transient_transport_errors(tmp_path):
     assert task_id not in executor._gateway_attempts
 
 
+def test_cancel_custody_get_rides_out_transient_transport_errors(tmp_path):
+    config = _config(tmp_path, poll_interval_sec=0)
+    task_id = "cybergym-cancel-poll-stall"
+    terminal = {
+        "task_id": task_id,
+        "status": "failed",
+        "cost_usd": 0.2,
+        "cost_final": True,
+    }
+    calls = []
+
+    def http(method, _url, **_kwargs):
+        calls.append(method)
+        if method == "POST":
+            return {
+                "status_code": 202,
+                "body": {"task_id": task_id, "status": "cancel_requested"},
+            }
+        if calls.count("GET") <= 3:
+            raise GatewayTransportError("HTTP GET transport failed")
+        return {"status_code": 200, "body": terminal}
+
+    executor = CyberGymExecutor(
+        dataclasses_replace(config, http_runner=http, sleep=lambda _seconds: None)
+    )
+    executor._gateway_attempts[task_id] = {  # noqa: SLF001 - custody assertion
+        "gateway_task_id": task_id,
+        "status": "submitted",
+    }
+    result = executor._cancel_gateway_task(  # noqa: SLF001
+        task_id, config.run_root / "checkpoint.json"
+    )
+
+    assert result == terminal
+    assert calls == ["POST", "GET", "GET", "GET", "GET"]
+    assert task_id not in executor._gateway_attempts
+
+
+def test_cancel_custody_get_transport_budget_exhaustion_keeps_custody(
+    tmp_path, monkeypatch
+):
+    config = _config(tmp_path, poll_interval_sec=0)
+    task_id = "cybergym-cancel-poll-dead"
+    monkeypatch.setattr(
+        "devtools.benchmarks.cybergym.cybergym_custody.GATEWAY_TRANSPORT_RETRY_BUDGET_SEC",
+        0.0,
+    )
+
+    def http(method, _url, **_kwargs):
+        if method == "POST":
+            return {
+                "status_code": 202,
+                "body": {"task_id": task_id, "status": "cancel_requested"},
+            }
+        raise GatewayTransportError("HTTP GET transport failed")
+
+    executor = CyberGymExecutor(
+        dataclasses_replace(config, http_runner=http, sleep=lambda _seconds: None)
+    )
+    executor._gateway_attempts[task_id] = {  # noqa: SLF001 - custody assertion
+        "gateway_task_id": task_id,
+        "status": "submitted",
+    }
+    checkpoint = config.run_root / "checkpoint.json"
+    with pytest.raises(GatewayTransportError):
+        executor._cancel_gateway_task(task_id, checkpoint)  # noqa: SLF001
+
+    assert task_id in executor._gateway_attempts
+    saved = json.loads(checkpoint.read_text(encoding="utf-8"))
+    assert saved["status"] == "cancel_poll_error"
+    assert saved["cancel_error"] == "GatewayTransportError"
+
+
 def test_cancel_transport_budget_exhaustion_keeps_custody(tmp_path, monkeypatch):
     # A cancel that never gets through within the budget keeps the original
     # fail-closed behaviour: typed checkpoint evidence and retained custody.

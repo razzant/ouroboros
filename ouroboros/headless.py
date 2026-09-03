@@ -409,6 +409,24 @@ def remove_subagent_task_drive(parent_drive_root: pathlib.Path, task_id: str) ->
     try:
         result = load_task_result(parent, task_id) or {}
         promotion = result.get("child_ref_promotion")
+        child_bases = (headless_base / "data", task_drive_base)
+        for child_base in child_bases:
+            if not _live_unpromoted_child_refs(promotion, child_base):
+                continue
+            try:
+                from ouroboros.observability import retry_task_child_ref_promotion
+
+                result = retry_task_child_ref_promotion(
+                    parent, child_base, task_id, result
+                )
+                promotion = result.get("child_ref_promotion")
+            except Exception:
+                log.debug(
+                    "Failed to retry child refs before removing task drive %s",
+                    child_base,
+                    exc_info=True,
+                )
+                return False
         if (
             _live_unpromoted_child_refs(promotion, headless_base / "data")
             or _live_unpromoted_child_refs(promotion, task_drive_base)

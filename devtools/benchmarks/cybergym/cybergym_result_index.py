@@ -18,6 +18,45 @@ from devtools.benchmarks.cybergym.cybergym_protocol import (
     safe_task_path,
 )
 
+_SUPERSEDEABLE_LIFECYCLES = frozenset({"executor_failed"})
+
+
+def is_supersedeable_result(row: Mapping[str, Any]) -> bool:
+    """Whether late terminal evidence may supersede this transport-only row."""
+
+    return (
+        str(row.get("status") or "") in {"infra_failed", "blocked"}
+        and str(row.get("lifecycle") or "") in _SUPERSEDEABLE_LIFECYCLES
+        and str(row.get("row_role") or "") != "late_delivery"
+    )
+
+
+def is_late_terminal_result(row: Mapping[str, Any]) -> bool:
+    """Whether a row is terminal benchmark evidence, not another infra opinion."""
+
+    status = str(row.get("status") or "")
+    lifecycle = str(row.get("lifecycle") or "")
+    return (
+        (status == "completed" and lifecycle == "official_verified")
+        or (
+            status == "failed"
+            and lifecycle == "final_poc_missing_after_fair_completion"
+        )
+    )
+
+
+def effective_task_rows(
+    rows: Iterator[Mapping[str, Any]] | list[Mapping[str, Any]],
+) -> dict[str, dict[str, Any]]:
+    """Project append-only history to the latest effective row per task."""
+
+    effective: dict[str, dict[str, Any]] = {}
+    for row in rows:
+        raw_task = row.get("task_id", row.get("instance_id", ""))
+        if raw_task:
+            effective[safe_task_id(str(raw_task))] = dict(row)
+    return effective
+
 
 def acquire_campaign_execution_lock(
     run_root: pathlib.Path | str,
@@ -117,8 +156,27 @@ def _append_result_pair(root: pathlib.Path, row: Mapping[str, Any]) -> None:
         append_result_index(root, value)
     task_rows = _matching_rows(task_root)
     if task_rows and task_rows[-1] != value:
+        supersedes = value.get("supersedes")
+        expected_hash = (
+            str(supersedes.get("row_sha256") or "")
+            if isinstance(supersedes, Mapping)
+            else ""
+        )
+        observed_line = json.dumps(task_rows[-1], ensure_ascii=False)
+        observed_hash = hashlib.sha256(observed_line.encode("utf-8")).hexdigest()
+        if (
+            str(value.get("row_role") or "") == "late_delivery"
+            and expected_hash
+            and observed_hash == expected_hash
+        ):
+            append_result_index(task_root, value)
+            return
         raise CyberGymError(f"conflicting task-local result row already recorded for {task}")
     if not task_rows:
+        if str(value.get("row_role") or "") == "late_delivery":
+            raise CyberGymError(
+                f"task-local superseded history is unavailable for {task}"
+            )
         append_result_index(task_root, value)
 
 
@@ -140,6 +198,137 @@ def append_cybergym_result(run_root: pathlib.Path | str, row: Mapping[str, Any])
             _append_result_pair(root, row)
             lock.flush()
             os.fsync(lock.fileno())
+        finally:
+            if locked:
+                import fcntl
+
+                fcntl.flock(lock.fileno(), fcntl.LOCK_UN)
+
+
+def append_cybergym_late_result(
+    run_root: pathlib.Path | str,
+    row: Mapping[str, Any],
+    *,
+    source: str,
+    gateway_task_id: str,
+    reconcile_pass: int,
+) -> bool:
+    """Append one auditable infra-to-terminal superseding row pair."""
+
+    root = pathlib.Path(run_root).expanduser().resolve(strict=False)
+    root.mkdir(parents=True, exist_ok=True)
+    task = safe_task_id(str(row.get("task_id", row.get("instance_id", ""))))
+    attempt = str(row.get("attempt_id") or "")
+    if not is_late_terminal_result(row):
+        raise CyberGymError("late result is not terminal benchmark evidence")
+
+    def _latest(path: pathlib.Path) -> tuple[dict[str, Any], str] | None:
+        index = path / "result_index.jsonl"
+        try:
+            lines = index.read_text(encoding="utf-8").splitlines()
+        except FileNotFoundError:
+            return None
+        except (OSError, UnicodeDecodeError) as exc:
+            raise CyberGymError(f"result index is unreadable: {exc}") from exc
+        latest: tuple[dict[str, Any], str] | None = None
+        for line in lines:
+            if not line.strip():
+                continue
+            try:
+                value = json.loads(line)
+            except json.JSONDecodeError as exc:
+                raise CyberGymError(f"result index is unreadable: {exc}") from exc
+            if (
+                isinstance(value, Mapping)
+                and str(value.get("task_id", value.get("instance_id", ""))) == task
+                and str(value.get("attempt_id") or "") == attempt
+            ):
+                latest = (dict(value), line)
+        return latest
+
+    lock_path = root / ".result_index.lock"
+    with lock_path.open("a+", encoding="utf-8") as lock:
+        locked = False
+        try:
+            try:
+                import fcntl
+
+                fcntl.flock(lock.fileno(), fcntl.LOCK_EX)
+                locked = True
+            except ImportError:
+                pass
+            previous = _latest(root)
+            if previous is None:
+                raise CyberGymError(f"no result row exists to supersede for {task}")
+            previous_row, previous_line = previous
+            if previous_row == dict(row):
+                _append_result_pair(root, previous_row)
+                return False
+            if str(previous_row.get("row_role") or "") == "late_delivery":
+                task_root = safe_task_path(root, task)
+                task_latest = _latest(task_root)
+                if task_latest is not None and task_latest[0] == previous_row:
+                    prior_terminal = {
+                        key: item
+                        for key, item in previous_row.items()
+                        if key not in {"row_role", "supersedes", "late_delivery"}
+                    }
+                    if prior_terminal == dict(row):
+                        return False
+                    raise CyberGymError(
+                        f"result row is not supersedeable for {task}"
+                    )
+                expected_hash = str(
+                    (previous_row.get("supersedes") or {}).get("row_sha256") or ""
+                )
+                observed_hash = (
+                    hashlib.sha256(task_latest[1].encode("utf-8")).hexdigest()
+                    if task_latest is not None
+                    else ""
+                )
+                if task_latest is not None and observed_hash == expected_hash:
+                    append_result_index(task_root, previous_row)
+                    return False
+                if task_latest is None:
+                    raise CyberGymError(
+                        f"task-local superseded history is unavailable for {task}"
+                    )
+                raise CyberGymError(
+                    f"task-local result history diverged during late-delivery repair for {task}"
+                )
+            if not is_supersedeable_result(previous_row):
+                raise CyberGymError(f"result row is not supersedeable for {task}")
+            value = {
+                **dict(row),
+                "row_role": "late_delivery",
+                "supersedes": {
+                    "row_sha256": hashlib.sha256(
+                        previous_line.encode("utf-8")
+                    ).hexdigest(),
+                    "status": str(previous_row.get("status") or ""),
+                    "lifecycle": str(previous_row.get("lifecycle") or ""),
+                    "infra_reason": str(previous_row.get("infra_reason") or ""),
+                    "ts_unix": previous_row.get("ts_unix"),
+                },
+                "late_delivery": {
+                    "source": str(source),
+                    "gateway_task_id": str(gateway_task_id),
+                    "reconcile_pass": int(reconcile_pass),
+                },
+            }
+            task_root = safe_task_path(root, task)
+            task_latest = _latest(task_root)
+            if task_latest is not None and task_latest[0] != previous_row:
+                raise CyberGymError(
+                    f"task-local result history diverged before late delivery for {task}"
+                )
+            if task_latest is None:
+                append_result_index(task_root, previous_row)
+            append_result_index(root, value)
+            append_result_index(task_root, value)
+            lock.flush()
+            os.fsync(lock.fileno())
+            return True
         finally:
             if locked:
                 import fcntl

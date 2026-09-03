@@ -904,6 +904,25 @@ def _retry_pending_child_ref_promotion(
     )
 
 
+def retry_task_child_ref_promotion(
+    parent_drive_root: pathlib.Path,
+    child_drive_root: pathlib.Path,
+    task_id: str,
+    loaded_result: Dict[str, Any],
+) -> Dict[str, Any]:
+    """Synchronously retry one task's pending refs from canonical authority."""
+
+    result = dict(loaded_result or {})
+    if not _has_pending_ref_promotion(result.get("child_ref_promotion")):
+        return result
+    return _retry_pending_child_ref_promotion(
+        pathlib.Path(parent_drive_root),
+        pathlib.Path(child_drive_root),
+        str(task_id),
+        result,
+    )
+
+
 def retry_pending_child_ref_promotions(
     parent_drive_root: pathlib.Path,
 ) -> Dict[str, Any]:

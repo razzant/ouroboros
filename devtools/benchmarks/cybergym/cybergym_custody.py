@@ -55,6 +55,7 @@ class _CustodyMixin:
         """
 
         deadline = time.monotonic() + custody_seconds
+        transport_deadline: float | None = None
         cost_grace = _CostGraceTracker()
         cancel_frame = dict(cancel_response) if isinstance(cancel_response, Mapping) else None
         latest: Mapping[str, Any] = cancel_response or {}
@@ -96,6 +97,33 @@ class _CustodyMixin:
                 ):
                     self._terminalize_gateway_attempt(task_id)
                     return latest
+                transport_deadline = None
+            except (GatewayTransportError, HttpStatusError) as exc:
+                if isinstance(exc, HttpStatusError) and exc.status_code != 503:
+                    raise
+                # Cancellation waves can starve both the cancel POST and the
+                # follow-up GET on the same event loop.  Keep custody through
+                # that transient outage, bounded by both the custody window
+                # and the shared transport retry budget.
+                now = time.monotonic()
+                if transport_deadline is None:
+                    transport_deadline = min(
+                        deadline, now + GATEWAY_TRANSPORT_RETRY_BUDGET_SEC
+                    )
+                frame = {
+                    "gateway_task_id": task_id,
+                    "status": "cancel_poll_error",
+                    "cancel_error": type(exc).__name__,
+                }
+                if isinstance(exc, HttpStatusError):
+                    frame["cancel_poll_status_code"] = exc.status_code
+                if cancel_status_code is not None:
+                    frame["cancel_status_code"] = cancel_status_code
+                if cancel_frame is not None:
+                    frame["cancel_response"] = cancel_frame
+                _write_json(checkpoint, frame)
+                if now >= transport_deadline:
+                    raise
             except ExecutorFailure:
                 # HTTP/auth/transport failures remain typed failures and keep
                 # the attempt registered for manual custody recovery.

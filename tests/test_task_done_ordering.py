@@ -144,6 +144,35 @@ def test_task_done_submit_stamps_and_clears_finalization_pending(monkeypatch, tm
         queue_mod.RUNNING.pop("t-custody", None)
 
 
+def test_shutdown_drain_waits_for_deferred_task_finalization(monkeypatch):
+    import threading
+    import time
+    from concurrent.futures import ThreadPoolExecutor
+
+    from supervisor import events as events_mod
+
+    entered = threading.Event()
+    release = threading.Event()
+    executor = ThreadPoolExecutor(max_workers=1)
+    monkeypatch.setattr(events_mod, "_TASK_DONE_EXECUTOR", executor)
+
+    def blocking_finalization(_evt, _ctx):
+        entered.set()
+        release.wait(5)
+
+    monkeypatch.setattr(events_mod, "_handle_task_done", blocking_finalization)
+    events_mod._handle_task_done_deferred(  # noqa: SLF001
+        {"task_id": "drain-test"},
+        object(),
+    )
+    assert entered.wait(1)
+    threading.Timer(0.1, release.set).start()
+    started = time.monotonic()
+
+    assert events_mod.drain_task_done_finalizations(timeout_sec=2) is True
+    assert time.monotonic() - started >= 0.05
+
+
 
 def _make_fake_env(drive_root: pathlib.Path):
     """Create a minimal mock env for emit_task_results."""

@@ -2148,6 +2148,7 @@ def _handle_task_done(evt: Dict[str, Any], ctx: Any) -> None:
     if task_id:
         try:
             from ouroboros.headless import (
+                _child_drive_from_task,
                 copy_child_task_result,
                 finalize_task_artifacts,
                 task_is_readonly_subagent,
@@ -2155,6 +2156,28 @@ def _handle_task_done(evt: Dict[str, Any], ctx: Any) -> None:
 
             if task:
                 copy_child_task_result(ctx.DRIVE_ROOT, task)
+                child_drive = _child_drive_from_task(task)
+                if child_drive is not None:
+                    try:
+                        from ouroboros.observability import (
+                            retry_task_child_ref_promotion,
+                        )
+
+                        canonical = load_task_result(
+                            ctx.DRIVE_ROOT, str(task_id)
+                        ) or {}
+                        retry_task_child_ref_promotion(
+                            ctx.DRIVE_ROOT,
+                            child_drive,
+                            str(task_id),
+                            canonical,
+                        )
+                    except Exception:
+                        log.debug(
+                            "Failed to retry child refs before finalizing %s",
+                            task_id,
+                            exc_info=True,
+                        )
             # AR2-3 (§8-A1): task_done is validated through the DURABLE result,
             # not the event's own status claim. The read sits AFTER the child
             # copy-back (split-drive tasks settle on the child drive first) and
@@ -4315,6 +4338,28 @@ def _handle_main_llm_call_state(evt: Dict[str, Any], ctx: Any) -> None:
 _TASK_DONE_EXECUTOR = ThreadPoolExecutor(
     max_workers=4, thread_name_prefix="task-done-finalize"
 )
+_TASK_DONE_PENDING: set[Any] = set()
+_TASK_DONE_PENDING_CONDITION = threading.Condition()
+
+
+def drain_task_done_finalizations(timeout_sec: float = 120.0) -> bool:
+    """Drain queued task finalizations before workers and scratch are removed."""
+
+    deadline = time.monotonic() + max(0.0, float(timeout_sec))
+    with _TASK_DONE_PENDING_CONDITION:
+        while _TASK_DONE_PENDING:
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                break
+            _TASK_DONE_PENDING_CONDITION.wait(remaining)
+        ok = not _TASK_DONE_PENDING
+    if not ok:
+        log.warning(
+            "task_done finalization drain timed out after %.1fs (%d pending)",
+            float(timeout_sec),
+            len(_TASK_DONE_PENDING),
+        )
+    return ok
 
 
 def _log_task_done_finalize_failure(fut: Any, ctx: Any) -> None:
@@ -4388,7 +4433,18 @@ def _handle_task_done_deferred(evt: Dict[str, Any], ctx: Any) -> None:
         except Exception:
             log.debug("failed to stamp finalization_pending", exc_info=True)
     future = _TASK_DONE_EXECUTOR.submit(_run_task_done_finalization, evt, ctx, task_id)
-    future.add_done_callback(lambda fut: _log_task_done_finalize_failure(fut, ctx))
+    with _TASK_DONE_PENDING_CONDITION:
+        _TASK_DONE_PENDING.add(future)
+
+    def _finished(fut: Any) -> None:
+        try:
+            _log_task_done_finalize_failure(fut, ctx)
+        finally:
+            with _TASK_DONE_PENDING_CONDITION:
+                _TASK_DONE_PENDING.discard(fut)
+                _TASK_DONE_PENDING_CONDITION.notify_all()
+
+    future.add_done_callback(_finished)
 
 
 EVENT_HANDLERS = {
