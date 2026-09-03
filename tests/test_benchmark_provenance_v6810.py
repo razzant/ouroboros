@@ -444,6 +444,10 @@ _TRUNCATION_DECISIONS: dict[str, tuple[bool, str]] = {
     "finalization_grace": (True, "loop.py:3146 supervisor finalize_now grace"),
     "deadline_local": (True, "loop.py:3220 loop-local deadline"),
     "provider_unavailable": (True, "loop.py:3185 reroute + fallback exhausted"),
+    "acceptance_fence_unavailable": (
+        True,
+        "acceptance_dialogue.py bounded queue-fence failure; review never ran",
+    ),
     "children_unabsorbed": (True, "loop.py:4071 forced terminal, child results unabsorbed"),
     "llm_api_error": (True, "loop_llm_call.py:630 transport death; never a fair shot"),
     # S3 owner graceful stop ("Wrap up"): the owner ended the attempt, so
@@ -484,6 +488,10 @@ _TRUNCATION_DECISIONS: dict[str, tuple[bool, str]] = {
         "loop_llm_call.py owner deadline admission rail; no provider call was dispatched",
     ),
     "task_exception": (False, "agent.py:777 the attempt ran and crashed; an honest failure"),
+    # The model's turn completed but its content was tool-call markup that
+    # could not be converted (leftover DSML/XML): a protocol failure terminal,
+    # never a rail that cut the attempt off.
+    "protocol_fail": (False, "tool_call_markup.py tool_markup_protocol_fail; malformed markup terminal, not a truncation"),
     "capability_profile_mismatch": (False, "control_delegation.py:81 rejected delegate call"),
     "option_index_required": (False, "gateway/task_decision.py quiz-answer HTTP 400 validation; an owner-UI refusal, never a trial rail"),
     "delegation_rights_may_delegate": (False, "control_delegation.py explicit parent recursion-right refusal"),

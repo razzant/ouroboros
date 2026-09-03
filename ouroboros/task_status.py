@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import logging
 import pathlib
 import time
 from datetime import datetime, timezone
@@ -40,6 +41,8 @@ from ouroboros.task_results import (
     validate_task_id,
 )
 from ouroboros.utils import iter_jsonl_objects, read_json_dict
+
+log = logging.getLogger(__name__)
 
 
 # Terminal task statuses. Since the cancel redesign (Poltergeist sprint phase A)
@@ -520,6 +523,17 @@ def reconcile_orphaned_running_tasks(drive_root: Any) -> int:
             healed += 1
         except Exception:
             continue
+        # The healed orphan is provably dead (the projection's liveness gates):
+        # forget its reaping-registry id and release any acceptance fence it
+        # owned (a wedged kill holds both past the orphan's terminalization).
+        try:
+            from supervisor.queue import release_acceptance_fence_for_dead_owner
+            from supervisor.task_reaper import _forget_task_reaping
+
+            _forget_task_reaping(task_id)
+            release_acceptance_fence_for_dead_owner(task_id)
+        except Exception:
+            log.debug("Post-heal acceptance-fence release failed for %s", task_id, exc_info=True)
     return healed
 
 

@@ -29,6 +29,7 @@ from ouroboros.transport_custody import release_pre_dispatch_attempt
 from ouroboros.usage_ledger import (  # noqa: F401 — re-exported substrate
     LEDGER_REL,
     QUARANTINE_REL,
+    UNRESOLVED_WRITEOFF_REASON,
     LedgerResumeState,
     UsageAccountingError,
     UsageLedgerCorrupt,
@@ -991,7 +992,13 @@ def terminalize_abandoned_attempt(
     reason: str,
     usage: Optional[Dict[str, Any]] = None,
 ) -> str:
-    """Close a dead owner attempt from measured usage, else unresolved/released."""
+    """Close a dead owner attempt from measured usage, else unresolved/released.
+
+    An already-unresolved attempt has exactly one exit: settlement at its carried
+    reservation bound (the typed abandoned write-off) — the bound already stands in
+    ``accounted_usd``, so finality flips without moving money. An unresolved row
+    with an unknown bound stays unresolved: no honest terminal number exists.
+    """
     with _locked(reservation.drive_root):
         current = _final_rows(_read_records_locked_cached(reservation.drive_root)).get(
             reservation.attempt_id
@@ -999,8 +1006,18 @@ def terminalize_abandoned_attempt(
     if current is None:
         return "unknown"
     state = str(current.get("state") or "")
-    if state in _TERMINAL:
+    if state in {"settled", "released"}:
         return state
+    if state == "unresolved":
+        bound = _number(current.get("reservation_upper_bound_usd"))
+        if bound is None:
+            return "unresolved"
+        _transition(
+            reservation, "settled", cost_usd=bound, cost_final=True,
+            settle_reason=UNRESOLVED_WRITEOFF_REASON,
+            origin_reason=str(current.get("reason") or "")[:500],
+        )
+        return "settled"
     if state == "reserved":
         release_attempt(reservation, reason)
         return "released"

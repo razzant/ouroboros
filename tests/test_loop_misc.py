@@ -355,11 +355,11 @@ def test_every_host_acceptance_writer_emits_a_canonical_status_and_typed_reason(
         i for i, line in enumerate(src)
         if "_set_acceptance_decision(" in line and not line.lstrip().startswith("def ")
     ]
-    # 7 rail-side writers in loop.py (owner follow-up, evidence refresh, delivery
-    # binding, launch reserve, forced bypass, forced-rail revision) + 12 in
-    # acceptance_dialogue.py (the terminal branches, the clean pass, the capsule,
-    # the fence-reopen failure and the A-material identical refusal).
-    assert len(starts) == 19, f"writer inventory changed: {len(starts)} call sites"
+    # 8 rail-side writers in loop.py (owner follow-up, evidence refresh, delivery
+    # binding, launch reserve, forced bypass, forced-rail revision, panel
+    # infrastructure failure, and bounded fence exhaustion) + 12 in
+    # acceptance_dialogue.py.
+    assert len(starts) == 20, f"writer inventory changed: {len(starts)} call sites"
     allowed_status = {
         "ACCEPTANCE_ACCEPTED", "ACCEPTANCE_REVISION_REQUESTED",
         "ACCEPTANCE_FINALIZED_UNACCEPTED",

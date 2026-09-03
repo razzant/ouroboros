@@ -69,6 +69,10 @@ from ouroboros.context_budget import (
     CONTEXT_OVERFLOW_CODES,
     context_overflow_message,
 )
+from ouroboros.tool_call_markup import (
+    parse_tool_calls_from_content,
+    strip_reasoning_wrappers,
+)
 
 # Response-only labels are diagnostic facts, not canonical assistant fields. Keep
 # provider-supplied values bounded and printable before they enter usage custody.
@@ -2523,104 +2527,16 @@ class LLMClient:
 
     @staticmethod
     def _strip_reasoning_wrappers(text: str):
-        """Strip leading think/reasoning wrappers before the first <tool_call> only."""
-        # Split at first <tool_call> so we never touch JSON inside tool payloads.
-        tool_call_start = re.search(r"<tool_call\b", text, re.IGNORECASE)
-        if tool_call_start:
-            prefix = text[: tool_call_start.start()]
-            suffix = text[tool_call_start.start():]
-        else:
-            prefix = text
-            suffix = ""
-
-        reasoning_parts: list = []
-
-        def _extract(tag: str, s: str) -> str:
-            pattern = re.compile(
-                r"<" + re.escape(tag) + r">(.*?)</" + re.escape(tag) + r">",
-                re.DOTALL | re.IGNORECASE,
-            )
-            inner_texts = pattern.findall(s)
-            reasoning_parts.extend(p.strip() for p in inner_texts if p.strip())
-            return pattern.sub("", s)
-
-        cleaned_prefix = _extract("think", prefix)
-        cleaned_prefix = _extract("reasoning", cleaned_prefix)
-
-        combined = (cleaned_prefix.strip() + ("\n" if cleaned_prefix.strip() and suffix else "") + suffix).strip()
-        return combined, "\n\n".join(reasoning_parts)
+        """Strip leading think/reasoning wrappers before the first tool markup."""
+        return strip_reasoning_wrappers(text)
 
     @staticmethod
     def _parse_tool_calls_from_content(
         msg: Dict[str, Any],
         allowed_tool_names: Optional[Set[str]] = None,
     ) -> Dict[str, Any]:
-        """Parse local <tool_call> XML output after a strict full-match guard."""
-        content = str(msg.get("content", "") or "")
-        stripped_raw = content.strip()
-        if not stripped_raw:
-            return msg
-
-        # Only explicit reasoning wrappers are removed; arbitrary prose is left.
-        stripped, reasoning = LLMClient._strip_reasoning_wrappers(stripped_raw)
-        if not stripped:
-            return msg
-
-        # Upgrade only pure tool-call output; mixed prose stays plain text.
-        full_pattern = re.compile(
-            r"^(?:\s*<tool_call>\s*\{.*?\}\s*</tool_call>\s*)+$",
-            re.DOTALL,
-        )
-        if not full_pattern.fullmatch(stripped):
-            return msg
-
-        matches = re.findall(r"<tool_call>\s*(\{.*?\})\s*</tool_call>", stripped, re.DOTALL)
-        if not matches:
-            return msg
-
-        allowed = {name for name in (allowed_tool_names or set()) if name}
-        tool_calls = []
-        for i, raw in enumerate(matches):
-            try:
-                raw_stripped = raw.strip()
-                try:
-                    obj = json.loads(raw_stripped)
-                except json.JSONDecodeError:
-                    if raw_stripped.startswith("{{") and raw_stripped.endswith("}}"):
-                        obj = json.loads(raw_stripped[1:-1])
-                    else:
-                        raise
-                if not isinstance(obj, dict):
-                    raise ValueError("tool_call payload must be an object")
-                name = str(obj.get("name", "")).strip()
-                args = obj.get("arguments", {})
-                if not name:
-                    raise ValueError("tool_call missing function name")
-                if allowed and name not in allowed:
-                    raise ValueError(f"unknown tool '{name}'")
-                if not isinstance(args, dict):
-                    raise ValueError("tool_call arguments must be an object")
-                tool_calls.append({
-                    "id": f"call_local_{i}",
-                    "type": "function",
-                    "function": {
-                        "name": name,
-                        "arguments": json.dumps(args),
-                    },
-                })
-            except (json.JSONDecodeError, ValueError) as exc:
-                log.warning("Rejected local <tool_call> block: %s (%s)", raw[:200], exc)
-                return msg
-
-        if not tool_calls:
-            return msg
-
-        msg = dict(msg)
-        msg["tool_calls"] = tool_calls
-        # Preserve reasoning text for loop progress; None/empty remains falsy.
-        msg["content"] = reasoning or None
-        log.info("Parsed %d local tool call(s) from text output", len(tool_calls))
-        return msg
+        """Parse local <tool_call> XML or well-formed DeepSeek DSML content."""
+        return parse_tool_calls_from_content(msg, allowed_tool_names)
 
     @staticmethod
     def _stringify_anthropic_content(value: Any) -> str:

@@ -8,6 +8,142 @@ import pathlib
 import json
 
 
+def test_task_done_dispatch_is_deferred_off_the_intake_loop(monkeypatch, tmp_path):
+    """The task_done finalization (child ref-tree promotion + workspace patch)
+    must not run on the supervisor intake loop: dispatch_event returns
+    immediately while the handler is still blocked on the finalize pool."""
+    import threading
+    import time
+
+    from supervisor import events as events_mod
+
+    entered = threading.Event()
+    release = threading.Event()
+
+    def blocking_handler(evt, ctx):
+        entered.set()
+        release.wait(5.0)
+
+    monkeypatch.setattr(events_mod, "_handle_task_done", blocking_handler)
+
+    class Ctx:
+        DRIVE_ROOT = tmp_path
+
+        def append_jsonl(self, path, data):
+            from ouroboros.utils import append_jsonl
+
+            append_jsonl(path, data)
+
+    t0 = time.monotonic()
+    events_mod.dispatch_event(
+        {"type": "task_done", "task_id": "t-defer", "status": "completed"},
+        Ctx(),
+    )
+    elapsed = time.monotonic() - t0
+    try:
+        assert elapsed < 1.0, f"dispatch blocked the intake loop for {elapsed:.2f}s"
+        assert entered.wait(2.0), "the deferred handler never started on the pool"
+        # The handler is still blocked on `release`, yet dispatch returned.
+    finally:
+        release.set()
+
+
+def test_deferred_task_done_failure_is_surfaced(monkeypatch, tmp_path):
+    """A crashing deferred task_done handler must still produce the
+    worker_event_handler_error record dispatch_event wrote for the sync path."""
+    import threading
+    import time
+
+    from supervisor import events as events_mod
+
+    def raising_handler(evt, ctx):
+        raise RuntimeError("boom")
+
+    monkeypatch.setattr(events_mod, "_handle_task_done", raising_handler)
+
+    class Ctx:
+        DRIVE_ROOT = tmp_path
+
+        def append_jsonl(self, path, data):
+            from ouroboros.utils import append_jsonl
+
+            append_jsonl(path, data)
+
+    events_mod.dispatch_event(
+        {"type": "task_done", "task_id": "t-raise", "status": "completed"},
+        Ctx(),
+    )
+    sup = tmp_path / "logs" / "supervisor.jsonl"
+    deadline = time.time() + 5
+    found = False
+    while time.time() < deadline and not found:
+        if sup.exists():
+            for line in sup.read_text().splitlines():
+                row = json.loads(line)
+                if (
+                    row.get("type") == "worker_event_handler_error"
+                    and row.get("event_type") == "task_done"
+                ):
+                    found = True
+                    break
+        if not found:
+            time.sleep(0.05)
+    assert found, "the deferred handler's exception was not surfaced"
+
+
+def test_task_done_submit_stamps_and_clears_finalization_pending(monkeypatch, tmp_path):
+    """A completed task queued for finalization must be marked so the timeout
+    enforcer does not reap it as stale while its RUNNING row keeps aging."""
+    import threading
+    import time
+
+    from supervisor import events as events_mod
+    from supervisor import queue as queue_mod
+
+    queue_mod.RUNNING["t-custody"] = {
+        "task": {"type": "task"},
+        "started_at": time.time(),
+        "last_progress_at": 0.0,
+    }
+
+    entered = threading.Event()
+    release = threading.Event()
+
+    def blocking_handler(evt, ctx):
+        entered.set()
+        release.wait(5.0)
+
+    monkeypatch.setattr(events_mod, "_handle_task_done", blocking_handler)
+
+    class Ctx:
+        DRIVE_ROOT = tmp_path
+
+        def append_jsonl(self, path, data):
+            from ouroboros.utils import append_jsonl
+
+            append_jsonl(path, data)
+
+    try:
+        events_mod.dispatch_event(
+            {"type": "task_done", "task_id": "t-custody", "status": "completed"},
+            Ctx(),
+        )
+        meta = queue_mod.RUNNING["t-custody"]
+        assert meta.get("finalization_pending") is True
+        assert meta["last_progress_at"] > 0.0
+        assert entered.wait(2.0)
+        release.set()
+        deadline = time.time() + 5
+        while time.time() < deadline:
+            if not queue_mod.RUNNING["t-custody"].get("finalization_pending"):
+                break
+            time.sleep(0.05)
+        assert not queue_mod.RUNNING["t-custody"].get("finalization_pending")
+    finally:
+        release.set()
+        queue_mod.RUNNING.pop("t-custody", None)
+
+
 
 def _make_fake_env(drive_root: pathlib.Path):
     """Create a minimal mock env for emit_task_results."""

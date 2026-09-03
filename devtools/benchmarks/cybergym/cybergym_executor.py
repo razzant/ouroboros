@@ -22,7 +22,6 @@ import os
 import pathlib
 import posixpath
 import re
-import shutil
 import stat
 import tarfile
 import tempfile
@@ -34,17 +33,12 @@ from collections.abc import Callable, Mapping
 from typing import Any
 
 from devtools.benchmarks.cybergym.cybergym_adapter import (
-    CAPABILITY_FINAL_POC_MISSING,
     DEFAULT_DISABLED_TOOLS,
     DEFAULT_LEVEL,
     MAX_TASK_TIMEOUT_SEC,
-    FinalPoc,
-    FinalPocRefused,
     TaskSpec,
-    _terminal_gateway_accounting,
     build_generate_task_argv,
-    classify_official_exit,
-    final_poc_record,
+    official_pin_skip_reason,
     safe_task_path,
 )
 from devtools.benchmarks.cybergym.cybergym_sidecar import (
@@ -62,11 +56,13 @@ from devtools.benchmarks.cybergym.cybergym_wire import (  # noqa: F401
     _PROVIDER_ID,
     ExecutorFailure,
     GatewayAdmissionRejected,
+    GatewayTransportError,
     HttpStatusError,
     _cost_final_marker,
     _cost_is_pending,
     _definitive_admission_rejection,
     _gateway_execution_status,
+    _gateway_has_tool_markup,
     _gateway_path,
     _nonnegative_number,
     _path_under_any_root,
@@ -108,13 +104,20 @@ from devtools.benchmarks.cybergym.cybergym_docker import (  # noqa: F401
     _write_json,
     run_command,
 )
+from devtools.benchmarks.cybergym.cybergym_custody import (  # noqa: F401
+    _CustodyMixin,
+)
 from devtools.benchmarks.cybergym.cybergym_lifecycle import (  # noqa: F401
     _LifecycleMixin,
+    _deadline_guidance,
     _parse_json_stdout,
     _record_matches,
     _response_poc_id,
     _reuse_directory_observation,
     _validate_verify_response,
+)
+from devtools.benchmarks.cybergym.cybergym_reconcile import (  # noqa: F401
+    _ReconcileMixin,
 )
 
 
@@ -162,7 +165,7 @@ class ExecutorConfig:
     settings_path: pathlib.Path | None = None
     server_port: int = 8666
     verifier_host_port: int = 0
-    task_timeout_sec: int = 14_400
+    task_timeout_sec: int = 7_200
     difficulty: str = DEFAULT_LEVEL
     api_key_env: str = API_KEY_ENV
     provider_key_env: str = _OPENROUTER_KEY_ENV
@@ -179,6 +182,11 @@ class ExecutorConfig:
     preverified_binary_observation: Mapping[str, Any] | None = None
     log_dir: pathlib.Path | None = None
     db_path: pathlib.Path | None = None
+    # When the campaign-owned Ouroboros server keeps its mutable state on an
+    # external disk (``--state-dir``), its wire-evidence refs resolve below
+    # that data root rather than below ``run_root``.  Telemetry verification
+    # must accept exactly that extra root, never a broader one.
+    isolate_data_root: pathlib.Path | None = None
     python_executable: str = "python"
     command: tuple[str, ...] = ("tail", "-f", "/dev/null")
     disabled_tools: tuple[str, ...] = DEFAULT_DISABLED_TOOLS
@@ -305,6 +313,13 @@ class ExecutorConfig:
                 resolved = _safe_abs(value, field_name)
                 _inside(resolved, server_root, field_name)
                 object.__setattr__(self, field_name, resolved)
+        if self.isolate_data_root is not None:
+            isolate = _safe_abs(self.isolate_data_root, "isolate_data_root")
+            if isolate == pathlib.Path("/"):
+                raise ExecutorFailure("isolate_data_root cannot be the filesystem root")
+            if any(_paths_overlap(isolate, root) for root in forbidden):
+                raise ExecutorFailure("isolate_data_root overlaps a live Ouroboros root")
+            object.__setattr__(self, "isolate_data_root", isolate)
         object.__setattr__(self, "docker_host", host)
         object.__setattr__(self, "server_image_digest", _image_digest(self.server_image_digest, "server_image_digest"))
         object.__setattr__(self, "workspace_image_digest", _image_digest(self.workspace_image_digest, "workspace_image_digest"))
@@ -827,7 +842,7 @@ def _safe_extract(archive: pathlib.Path, destination: pathlib.Path) -> None:
             raise cleanup_error
 
 
-class CyberGymExecutor(_DockerRuntimeMixin, _LifecycleMixin):
+class CyberGymExecutor(_DockerRuntimeMixin, _LifecycleMixin, _ReconcileMixin, _CustodyMixin):
     """Run one task at a time against a campaign-owned sidecar."""
 
     def __init__(self, config: ExecutorConfig) -> None:
@@ -843,6 +858,7 @@ class CyberGymExecutor(_DockerRuntimeMixin, _LifecycleMixin):
         # handles and are not sufficient custody evidence after a daemon
         # restart or a concurrent name collision.
         self._task_containers: dict[str, str] = {}
+        self._terminal_uncommitted_workspaces: dict[str, dict[str, str]] = {}
         self._server_observation: Mapping[str, Any] | None = None
         self._server_image_observation: Mapping[str, Any] | None = None
         self._workspace_image_observation: Mapping[str, Any] | None = None
@@ -863,6 +879,9 @@ class CyberGymExecutor(_DockerRuntimeMixin, _LifecycleMixin):
         # ``close`` reap the workspace while its paid worker is still alive.
         self._gateway_attempts: dict[str, dict[str, Any]] = {}
         self._custody_blocked = False
+        # Reconcile mode attaches to resources created by an earlier launcher
+        # process; close() must detach rather than remove them.
+        self._adopted = False
         self._staged_mask_map: pathlib.Path | None = None
         self._start_lock = threading.Lock()
         self.settings_observation: dict[str, Any] = {"status": "not_checked"}
@@ -1061,9 +1080,37 @@ class CyberGymExecutor(_DockerRuntimeMixin, _LifecycleMixin):
             raise ExecutorFailure(security_failure)
         return dict(report)
 
+    def acknowledge_result_durable(self, task_id: str, attempt_id: str) -> None:
+        """Release terminal workspace custody after row and ledger durability."""
+        plan = self._plans.get(str(attempt_id))
+        if plan is None:
+            return
+        container_name = f"cybergym-workspace-{plan.opaque_agent_id}"
+        with self._registry_condition:
+            pending = self._terminal_uncommitted_workspaces.get(container_name)
+            if pending is None:
+                return
+            if not isinstance(pending, Mapping):
+                raise ExecutorFailure("durability acknowledgement custody is malformed")
+            if (
+                pending.get("task_id") != str(task_id)
+                or pending.get("attempt_id") != str(attempt_id)
+            ):
+                raise ExecutorFailure("durability acknowledgement identity mismatch")
+            self._terminal_uncommitted_workspaces.pop(container_name, None)
+
     def run_task(self, task: TaskSpec, task_dir: pathlib.Path) -> Mapping[str, Any]:
         """Execute one admitted task; callback-compatible with ``run_campaign``."""
 
+        skip_reason = official_pin_skip_reason(task.task_id)
+        if skip_reason:
+            return {
+                "status": "infra_failed",
+                "lifecycle": skip_reason,
+                "infra_reason": skip_reason,
+                "error": "official pin skipped: " + skip_reason,
+                "artifact_refs": {"task_dir": str(task_dir)},
+            }
         self.start()
         attempt_id = str(task.metadata.get("attempt_id") or uuid.uuid4().hex)
         agent_id = make_opaque_agent_id(self.config.campaign_id, task.task_id, attempt_id)
@@ -1073,7 +1120,7 @@ class CyberGymExecutor(_DockerRuntimeMixin, _LifecycleMixin):
         _inside(task_dir, _safe_abs(self.config.run_root, "run_root"), "task_dir")
         workspace_dir = self._opaque_workspace_path(agent_id)
         workspace_dir.mkdir(parents=True, exist_ok=True)
-        container_name = ""
+        container_name = f"cybergym-workspace-{plan.opaque_agent_id}"
         gateway_admission_started = False
         gateway_admission_rejected = False
         gateway_settled = False
@@ -1139,206 +1186,29 @@ class CyberGymExecutor(_DockerRuntimeMixin, _LifecycleMixin):
             # beside the mounted task files would let a still-running agent read
             # server ids, raw exits, or another task's diagnostics.
             gateway_admission_started = True
-            gateway_result = self._gateway_wait(body, checkpoint)
+            gateway_result = self._gateway_wait(
+                body,
+                checkpoint,
+                workspace_name=container_name,
+                task_id=task.task_id,
+                attempt_id=attempt_id,
+            )
             gateway_settled = True
             terminal_runtime_result = dict(gateway_result)
-            if _response_status(gateway_result) != "completed":
-                return {
-                    "status": "infra_failed",
-                    "lifecycle": "gateway_terminal",
-                    "infra_reason": _response_status(gateway_result) or "gateway_failed",
-                    "runtime_result": dict(gateway_result),
-                    "artifact_refs": {
-                        "task_dir": str(task_dir),
-                        "checkpoint": str(checkpoint),
-                        "workspace_backend_alias": str(alias_ref),
-                        "workspace_cleanup": str(cleanup_ref),
-                    },
-                }
-            served = _served_telemetry(
+            return self._deliver_gateway_result(
+                task,
+                task_dir,
+                workspace_dir,
+                container_name,
+                agent_id,
                 gateway_result,
-                allowed_roots=(self.config.run_root,),
+                checkpoint=checkpoint,
+                cleanup_ref=cleanup_ref,
+                alias_ref=alias_ref,
+                attestation_ref=attestation_ref,
+                sidecar_attestation=sidecar_attestation,
+                terminal_evidence=terminal_evidence,
             )
-            if self.config.provider_probe and int(served.get("trace_call_count") or 0) <= 0:
-                raise ExecutorFailure("gateway result omitted authoritative served-call telemetry")
-            if self.config.provider_probe and not served.get("authoritative_identity"):
-                raise ExecutorFailure("gateway result omitted immutable served-call ids")
-            observed_model = str(served.get("observed_model") or "").strip()
-            observed_provider = str(served.get("observed_provider") or "").strip()
-            observed_effort = str(served.get("observed_effort") or "").strip()
-            prompt_tokens = _runtime_value(gateway_result, "prompt_tokens", "input_tokens", "tokens_in")
-            completion_tokens = _runtime_value(gateway_result, "completion_tokens", "output_tokens", "tokens_out")
-            cached_tokens = _runtime_value(
-                gateway_result,
-                "cached_tokens",
-                "cache_read_tokens",
-                "prompt_cache_hit_tokens",
-            )
-            if observed_model != self.config.model:
-                raise ExecutorFailure("gateway result omitted or changed the exact requested model")
-            if not observed_provider:
-                raise ExecutorFailure("gateway result omitted provider telemetry")
-            observed_effort = _require_exact_effort(observed_effort)
-            if self.config.provider_probe and str(served.get("effort_source") or "") not in {
-                "served_trace",
-                "served_response_wire",
-                "runtime_observed",
-            }:
-                raise ExecutorFailure("gateway result has no authoritative served reasoning effort")
-            if (
-                self.config.provider_probe
-                and int(served.get("trace_call_count") or 0) > 0
-                and int(served.get("served_effort_count") or 0)
-                < int(served.get("trace_call_count") or 0)
-            ):
-                raise ExecutorFailure("gateway telemetry omitted effort for a served call")
-            if (
-                self.config.provider_probe
-                and int(served.get("response_wire_provider_count") or 0)
-                < int(served.get("trace_call_count") or 0)
-            ):
-                raise ExecutorFailure("gateway telemetry omitted backend provider for a served call")
-            _positive_int(prompt_tokens, "gateway prompt_tokens")
-            _positive_int(completion_tokens, "gateway completion_tokens")
-            task_accounting = _terminal_gateway_accounting(gateway_result)
-            task_cost_raw = task_accounting.get("cost_usd")
-            task_cost_estimated = _strict_flag(
-                task_accounting.get("cost_estimated"),
-                "gateway cost_estimated",
-            )
-            cost_final = task_accounting.get("cost_final")
-            if task_cost_raw is None or task_cost_estimated or not cost_final:
-                raise ExecutorFailure("gateway result cost is unknown or estimated")
-            task_cost = _nonnegative_number(task_cost_raw, "gateway cost")
-            terminal_evidence = {
-                "runtime_result": dict(gateway_result),
-                "sidecar_attestation": sidecar_attestation,
-                "observed_model": observed_model,
-                "observed_provider": observed_provider,
-                "observed_provider_attempts": list(
-                    served.get("observed_provider_attempts") or ()
-                ),
-                "observed_provider_route": list(
-                    served.get("observed_provider_route") or ()
-                ),
-                "provider_distribution": dict(
-                    served.get("provider_distribution") or {}
-                ),
-                "observed_effort": observed_effort,
-                "observed_effort_source": str(served.get("effort_source") or "missing"),
-                "telemetry_trace_call_count": int(served.get("trace_call_count") or 0),
-                "prompt_tokens": prompt_tokens,
-                "completion_tokens": completion_tokens,
-                "cached_tokens": cached_tokens,
-                "cost_usd": task_cost,
-                "cost_estimated": False,
-                "cost_final": True,
-                "leakage": {
-                    "agent_id": agent_id,
-                    "masked_id_source": "official_generator",
-                    "internet_access": "unrestricted_outbound",
-                    "trajectory_audit": {"required": True, "status": "pending"},
-                },
-            }
-            try:
-                submit_response, digest, masked_id = self._submit_final(
-                    task, workspace_dir, container_name
-                )
-            except FinalPocRefused as exc:
-                fair_completion = _gateway_execution_status(gateway_result) == "ok"
-                agent_marker_failure = exc.reason in {
-                    "missing",
-                    "non_regular",
-                    "empty",
-                    "oversized",
-                }
-                if not fair_completion or not agent_marker_failure:
-                    raise
-                artifact_refs = {
-                    "task_dir": str(task_dir),
-                    "workspace_dir": str(workspace_dir),
-                    "checkpoint": str(checkpoint),
-                    "workspace_backend_alias": str(alias_ref),
-                    "workspace_cleanup": str(cleanup_ref),
-                }
-                if attestation_ref:
-                    artifact_refs["sidecar_attestation"] = attestation_ref
-                return {
-                    **terminal_evidence,
-                    "status": "failed",
-                    "lifecycle": CAPABILITY_FINAL_POC_MISSING,
-                    "capability_outcome": CAPABILITY_FINAL_POC_MISSING,
-                    "final_poc_reason": exc.reason,
-                    "artifact_refs": artifact_refs,
-                    "error": str(exc),
-                }
-            # Keep the designated marker in the task-local result root used by the
-            # common ledger, while the agent-facing workspace remains opaque.
-            workspace_marker = final_poc_record(workspace_dir)
-            task_marker = task_dir / "final.poc"
-            task_marker.parent.mkdir(parents=True, exist_ok=True)
-            temporary_marker = task_marker.with_name(task_marker.name + f".tmp.{os.getpid()}")
-            shutil.copyfile(workspace_marker.path, temporary_marker)
-            os.replace(temporary_marker, task_marker)
-            # verify-agent-pocs is the upstream operation that reruns both images.
-            key = self._ensure_key()
-            submitted_poc_id = _response_poc_id(submit_response)
-            verify_response = _validate_verify_response(
-                self._server_http(
-                    "POST", "/verify-agent-pocs",
-                    body={"agent_id": agent_id},
-                    headers={"X-API-Key": key},
-                    timeout=300,
-                ),
-                expected_poc_id=submitted_poc_id,
-            )
-            records = self._private_query(agent_id, task.task_id)
-            matching = [
-                item for item in records
-                if _record_matches(item, task.task_id, digest)
-                and str(item.get("poc_id") or "").strip() == submitted_poc_id
-            ]
-            if not matching:
-                raise ExecutorFailure("private query returned no record for the designated final PoC")
-            record = matching[-1]
-            classification = classify_official_exit(
-                record.get("vul_exit_code", record.get("vul_exit")),
-                record.get("fix_exit_code", record.get("fix_exit")),
-            )
-            if classification["official_success"] is None:
-                raise ExecutorFailure("private verifier record omitted raw vulnerable/fixed exit codes")
-            trial = {
-                "trial_id": str(record.get("poc_id") or digest[:16]),
-                "poc_id": record.get("poc_id"),
-                "poc_hash": digest,
-                "vul_exit_code": record.get("vul_exit_code"),
-                "fix_exit_code": record.get("fix_exit_code"),
-                "is_final": True,
-            }
-            private_artifact = safe_task_path(self.config.run_root / "private", task.task_id) / "submit_response.json"
-            _write_json(private_artifact, {"submit": submit_response, "verify": verify_response, "record": record})
-            artifact_refs = {
-                "task_dir": str(task_dir),
-                "workspace_dir": str(workspace_dir),
-                "checkpoint": str(checkpoint),
-                "submit": str(private_artifact),
-                "workspace_backend_alias": str(alias_ref),
-                "workspace_cleanup": str(cleanup_ref),
-            }
-            if attestation_ref:
-                artifact_refs["sidecar_attestation"] = attestation_ref
-            return {
-                **terminal_evidence,
-                "status": "completed",
-                "lifecycle": "official_verified",
-                "final_poc": FinalPoc(str(task_marker.resolve(strict=False)), digest, int(task_marker.stat().st_size)),
-                "final_poc_sha256": digest,
-                "masked_id": masked_id,
-                "masked_id_source": "official_submit_response",
-                "trials": [trial],
-                "final_trial": trial,
-                "artifact_refs": artifact_refs,
-            }
         except Exception as exc:
             if not gateway_admission_started or isinstance(
                 exc, GatewayAdmissionRejected
@@ -1391,15 +1261,17 @@ class CyberGymExecutor(_DockerRuntimeMixin, _LifecycleMixin):
                 "error": str(exc),
             }
         finally:
-            # Once the gateway has reached a terminal state, the workspace no
-            # longer needs to remain alive for late-result custody.  Unknown or
-            # transport-timeout attempts intentionally stay tracked for the
-            # campaign-level cleanup/reattach path.
-            if container_name and (
-                gateway_settled
-                or not gateway_admission_started
+            # Once gateway admission starts, keep the exact workspace through
+            # the outer result-row and claim-settlement transaction. Campaign
+            # close reaps terminal workspaces only after run_campaign returns;
+            # unresolved custody remains available to reconcile.
+            with self._registry_lock:
+                has_exact_id = bool(container_name and self._task_containers.get(container_name))
+            cleanup_safe = (
+                not gateway_admission_started
                 or gateway_admission_rejected
-            ):
+            )
+            if has_exact_id and cleanup_safe:
                 try:
                     self._cleanup_workspace_container(
                         container_name, task.task_id, attempt_id, cleanup_ref
@@ -1440,6 +1312,7 @@ __all__ = [
     "CommandResult",
     "ExecutorConfig",
     "ExecutorFailure",
+    "GatewayTransportError",
     "CyberGymExecutor",
     "build_executor",
     "run_command",

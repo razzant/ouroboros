@@ -1,23 +1,9 @@
 """Queue-owned lifecycle TRANSITIONS that are not cancellation custody.
 
-Extracted from ``supervisor/task_lifecycle.py`` for the module-size gate (the
-same boundary that produced ``terminal_delivery.py`` and
-``delegate_containment.py``): custody grew when the Poltergeist cancel redesign
-landed, and the clusters here never touch it. They share one property — each
-is a queue-owned transition or read-side view of a task's ADMISSION or
-QUIESCENCE state, driven entirely through the queue module:
-
-- the acceptance FENCE (open/inspect/seal a root so no new subtask is admitted
-  while its acceptance review runs),
-- explicit BUDGET resume of a zero-dispatch task and its root latch,
-- fenced PROJECT deletion: cancel the project's tree, then tombstone only after
-  the tree is provably quiescent,
-- shared live-subtree and timeout-retry lineage views used by cancellation and
-  admission without creating a second queue authority.
-
-The dependency runs one way: this module reaches the queue lazily and imports
-nothing from ``task_lifecycle``, which re-exports these names so
-``supervisor.queue`` stays the single public import surface for callers.
+Extracted from ``supervisor/task_lifecycle.py`` for the module-size gate: the
+acceptance FENCE, explicit BUDGET resume, fenced PROJECT deletion, and shared
+live-subtree / timeout-retry lineage views. One-way dependency: the queue is
+reached lazily; nothing is imported from ``task_lifecycle``.
 """
 
 from __future__ import annotations
@@ -41,6 +27,29 @@ def _queue_module():
     return queue
 
 
+def _acceptance_fence_owner_dead_locked(q: Any, fence: Dict[str, Any]) -> bool:
+    """True when the fence's recorded owner task is provably not live: not
+    RUNNING, not PENDING (a same-id retry waiting behind the fence), not in the
+    reaper's not-yet-provably-dead registry (a wedged kill holds the task out of
+    RUNNING while the worker may still live), and not the in-process direct-chat
+    lane currently running it (never in RUNNING/PENDING).  Caller holds ``q._queue_lock``."""
+    owner = str(fence.get("task_id") or "").strip()
+    if not owner:
+        return False  # no owner recorded: not provably dead
+    if owner in q.RUNNING:
+        return False
+    for task in q.PENDING:
+        if isinstance(task, dict) and str(task.get("id") or "") == owner:
+            return False
+    from supervisor import workers
+    from supervisor.task_reaper import task_reaping_in_progress
+
+    if task_reaping_in_progress(owner):
+        return False
+    busy, live_task_id, _activity = workers.chat_turn_liveness()
+    return not (busy and str(live_task_id or "") == owner)
+
+
 def transition_acceptance_fence(
     *, action: str, token: str, root_task_id: str = "", task_id: str = "", outcome: str = "",
     expected_generation: Optional[int] = None,
@@ -52,91 +61,86 @@ def transition_acceptance_fence(
     root_task_id = str(root_task_id or task_id or "").strip()
     if not token or action not in {"begin", "inspect", "end"}:
         return {"ok": False, "status": "error", "error": "invalid acceptance fence event"}
+    reconcile_event = None  # emitted AFTER lock release: file IO under the lock stalls every queue reader on a slow FS
     with q._queue_lock:
         if action == "begin":
             if not root_task_id:
                 return {"ok": False, "status": "error", "error": "missing root_task_id"}
             existing = q.ACCEPTANCE_FENCES.get(root_task_id)
+            re_adopted = reconciled_dead_owner = False
             if isinstance(existing, dict) and str(existing.get("token") or "") != token:
-                return {
-                    "ok": False,
-                    "status": "error",
-                    "error": f"acceptance fence already active for root {root_task_id}",
-                }
+                if str(existing.get("status") or "") != "active":
+                    # A sealed fence terminalizes with its task on task_done.
+                    return {"ok": False, "status": "error",
+                            "error": f"acceptance fence already sealed for root {root_task_id}"}
+                if _acceptance_fence_owner_dead_locked(q, existing):
+                    # Dead-owner reconcile: the new owner's fresh row replaces the
+                    # leaked fence; the audit event is emitted after lock release.
+                    reconcile_event = {
+                        "ts": utc_now_iso(), "type": "acceptance_fence_dead_owner_reconciled", "root_task_id": root_task_id,
+                        "dead_task_id": str(existing.get("task_id") or ""), "new_task_id": str(task_id or root_task_id),
+                    }
+                    existing = None
+                    reconciled_dead_owner = True
+                elif str(existing.get("task_id") or "") != str(task_id or root_task_id):
+                    return {
+                        "ok": False, "status": "error",
+                        "error": f"acceptance fence has a different live owner for root {root_task_id}",
+                    }
+                else:
+                    # Idempotent re-adoption: a worker that lost its token (ack timeout
+                    # on a slow drive) adopts the EXISTING fence instead of a paid retry spin.
+                    re_adopted = True
             if isinstance(existing, dict):
                 row = existing
             else:
                 row = q.ACCEPTANCE_FENCES[root_task_id] = {
-                    "token": token,
-                    "root_task_id": root_task_id,
-                    "task_id": str(task_id or root_task_id),
-                    "status": "active",
-                    "opened_at": utc_now_iso(),
-                    "owner_message_generation": 0,
+                    "token": token, "root_task_id": root_task_id, "task_id": str(task_id or root_task_id), "status": "active",
+                    "opened_at": utc_now_iso(), "owner_message_generation": 0,
                 }
             result = {
-                "ok": True,
-                "status": "active",
-                "root_task_id": root_task_id,
-                "token": token,
+                "ok": True, "status": "active", "root_task_id": root_task_id, "token": str(row.get("token") or token),
                 "owner_message_generation": int(row.get("owner_message_generation") or 0),
-                "queue_descendants": _live_descendants_locked(
-                    q, root_task_id, exclude_task_id=str(task_id or root_task_id),
-                ),
+                "queue_descendants": _live_descendants_locked(q, root_task_id, exclude_task_id=str(task_id or root_task_id)),
             }
+            if re_adopted:
+                result["re_adopted"] = True
+            if reconciled_dead_owner:
+                result["reconciled_dead_owner"] = True
         else:
             matched_root = next(
-                (rid for rid, row in q.ACCEPTANCE_FENCES.items() if str(row.get("token") or "") == token),
-                "",
-            )
+                (rid for rid, row in q.ACCEPTANCE_FENCES.items() if str(row.get("token") or "") == token), "")
             if not matched_root:
                 return {"ok": False, "status": "error", "error": "unknown acceptance fence token"}
             row = q.ACCEPTANCE_FENCES[matched_root]
             if action == "inspect":
                 return {
-                    "ok": True,
-                    "status": str(row.get("status") or "active"),
-                    "root_task_id": matched_root,
-                    "token": token,
+                    "ok": True, "status": str(row.get("status") or "active"), "root_task_id": matched_root, "token": token,
                     "owner_message_generation": int(row.get("owner_message_generation") or 0),
                     "queue_descendants": _live_descendants_locked(
-                        q, matched_root, exclude_task_id=str(row.get("task_id") or matched_root),
-                    ),
+                        q, matched_root, exclude_task_id=str(row.get("task_id") or matched_root)),
                 }
             normalized_outcome = str(outcome or "").strip().lower()
             if normalized_outcome == "revision":
                 q.ACCEPTANCE_FENCES.pop(matched_root, None)
-                result = {
-                    "ok": True,
-                    "status": "released",
-                    "root_task_id": matched_root,
-                    "token": token,
-                }
-            elif (
-                expected_generation is not None
-                and int(row.get("owner_message_generation") or 0) != int(expected_generation)
-            ):
-                current_generation = int(row.get("owner_message_generation") or 0)
+                result = {"ok": True, "status": "released", "root_task_id": matched_root, "token": token}
+            elif (expected_generation is not None
+                    and int(row.get("owner_message_generation") or 0) != int(expected_generation)):
                 q.ACCEPTANCE_FENCES.pop(matched_root, None)
                 result = {
-                    "ok": True,
-                    "status": "released",
-                    "root_task_id": matched_root,
-                    "token": token,
-                    "generation_mismatch": True,
-                    "expected_generation": int(expected_generation),
-                    "owner_message_generation": current_generation,
+                    "ok": True, "status": "released", "root_task_id": matched_root, "token": token, "generation_mismatch": True,
+                    "expected_generation": int(expected_generation), "owner_message_generation": int(row.get("owner_message_generation") or 0),
                 }
             else:
                 row["status"] = "sealed"
                 row["outcome"] = normalized_outcome or "terminal"
                 row["sealed_at"] = utc_now_iso()
-                result = {
-                    "ok": True,
-                    "status": "sealed",
-                    "root_task_id": matched_root,
-                    "token": token,
-                }
+                result = {"ok": True, "status": "sealed", "root_task_id": matched_root, "token": token}
+    if reconcile_event is not None:
+        try:
+            q.append_jsonl(q.DRIVE_ROOT / "logs" / "supervisor.jsonl", reconcile_event)
+        except Exception:
+            log.warning("Failed to persist %s", reconcile_event["type"], exc_info=True)
     q.persist_queue_snapshot(reason=f"acceptance_fence_{result['status']}")
     return result
 
@@ -255,6 +259,48 @@ def budget_pause_fact(task, fences=None):
     if isinstance(fence, dict) and str(fence.get("status") or "") in {"active", "paused"}:
         return fence
     return None
+
+
+def _drop_acceptance_fences(event_type: str, matches: Any, **extra: Any) -> List[str]:
+    """Drop every fence row where ``matches(q, row)`` holds; audit + persist.
+    Every teardown seam (reaper, watchdog sweep) funnels here; persist is best-effort."""
+    q = _queue_module()
+    with q._queue_lock:
+        roots = [root for root, row in q.ACCEPTANCE_FENCES.items() if isinstance(row, dict) and matches(q, row)]
+        for root in roots:
+            q.ACCEPTANCE_FENCES.pop(root, None)
+    if roots:
+        try:
+            q.append_jsonl(
+                q.DRIVE_ROOT / "logs" / "supervisor.jsonl",
+                {"ts": utc_now_iso(), "type": event_type, "root_task_ids": roots, **extra},
+            )
+            q.persist_queue_snapshot(reason=event_type)
+        except Exception:
+            log.warning("Failed to persist %s", event_type, exc_info=True)
+    return roots
+
+
+def release_acceptance_fence_for_dead_owner(task_id: str) -> bool:
+    """Release fences OWNED by one confirmed-dead task (reaper seam): matched on the
+    fence's recorded owner id, so a reaped child never drops its still-reviewing
+    root's fence.  Called after confirmed death, BEFORE retry admission."""
+    task_id = str(task_id or "").strip()
+    if not task_id:
+        return False
+    return bool(_drop_acceptance_fences(
+        "acceptance_fence_owner_reaped",
+        lambda _q, row: str(row.get("task_id") or "") == task_id,
+        task_id=task_id,
+    ))
+
+
+def gc_acceptance_fences_for_dead_owners() -> List[str]:
+    """Watchdog sweep dropping fences whose owner is provably dead (task_done
+    clears a fence; a worker killed mid-review never sends one)."""
+    return _drop_acceptance_fences(
+        "acceptance_fence_dead_owner_gc", _acceptance_fence_owner_dead_locked,
+    )
 
 
 def resume_budget_paused_task(task_id: str) -> Dict[str, Any]:

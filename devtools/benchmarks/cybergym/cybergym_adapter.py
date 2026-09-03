@@ -19,9 +19,18 @@ import pathlib
 import time
 import uuid
 from collections.abc import Callable, Iterable, Iterator, Mapping, Sequence
-from concurrent.futures import ThreadPoolExecutor
 from typing import Any
 
+from devtools.benchmarks.cybergym.cybergym_dispatch import (  # noqa: F401
+    GATEWAY_CIRCUIT_BREAKER_THRESHOLD,
+    GatewayCircuitOpen,
+    run_dispatched,
+)
+from devtools.benchmarks.cybergym.cybergym_result_index import (
+    append_cybergym_result,
+    campaign_history_task_ids,
+    campaign_execution_lock,
+)
 from devtools.benchmarks.cybergym.cybergym_protocol import (
     BENCHMARK_NAME,
     DEFAULT_LEVEL,
@@ -81,10 +90,14 @@ from devtools.benchmarks.cybergym.cybergym_protocol import (
 )
 
 DEFAULT_BUDGET_CAP_USD = 3500.0
-MAX_CROSS_TASK_WORKERS = 32
+MAX_CROSS_TASK_WORKERS = 64
 LEDGER_SCHEMA = "ouroboros.benchmark.cybergym.ledger.v1"
 RESULT_SCHEMA = "ouroboros.benchmark.cybergym.task_result.v1"
 CAPABILITY_FINAL_POC_MISSING = "final_poc_missing_after_fair_completion"
+PROTOCOL_FAIL = "protocol_fail"
+OFFICIAL_PIN_SKIPS = {
+    "arvo:64622": "broken_symlink_official_pin",
+}
 
 
 class CyberGymIntegrationUnavailable(CyberGymError):
@@ -264,6 +277,11 @@ def final_poc_hash(value: pathlib.Path | str | bytes | bytearray | memoryview) -
     return final_poc_record(value).sha256
 
 
+def official_pin_skip_reason(task_id: str) -> str:
+    """Return the explicit official-pin skip reason, or empty if the task runs."""
+    return str(OFFICIAL_PIN_SKIPS.get(safe_task_id(task_id), "") or "")
+
+
 def build_task_result_row(
     task_id: str,
     *,
@@ -288,6 +306,7 @@ def build_task_result_row(
     cached_tokens: int | None = None,
     cost_usd: float | None = None,
     cost_estimated: bool | None = None,
+    cost_final: bool | None = None,
     cost_status: str = "",
     infra_reason: str = "",
     leakage: Any = None,
@@ -442,6 +461,7 @@ def build_task_result_row(
             "cached_tokens": cached_tokens,
             "cost_usd": cost_usd,
             "cost_estimated": cost_estimated,
+            "cost_final": cost_final,
             "cost_status": str(cost_status or ("known" if cost_usd is not None else "unknown")),
             "infra_reason": effective_infra_reason,
             "leakage": leakage,
@@ -481,6 +501,69 @@ def _event_amount(event: Mapping[str, Any], *keys: str, allow_none: bool = False
     raise LedgerError(f"ledger event missing {keys[0]}")
 
 
+def _numeric_unresolved_bound(
+    explicit_upper: float | None,
+    *,
+    reserved_usd: float = 0.0,
+    prior_upper: float | None = None,
+) -> float | None:
+    """Choose the strongest known liability bound for an unresolved attempt."""
+    for value in (explicit_upper, prior_upper, reserved_usd):
+        if value is not None:
+            return float(value)
+    return None
+
+
+def _finished_attempt_actual_usd(outcome: Mapping[str, Any] | None) -> float | None:
+    """Return a known actual for a finished attempt, or None.
+
+    This is settled cash (or a measured terminal bound), never the per-task
+    claim estimate. A finished/infra row without a number has remaining 0.
+    """
+    if not isinstance(outcome, Mapping):
+        return None
+    if outcome.get("cost_final") is not True or outcome.get("cost_estimated") is not False:
+        return None
+    for key in ("cost_usd", "cost_upper_bound_usd"):
+        if key not in outcome or outcome[key] is None:
+            continue
+        try:
+            return _money(outcome[key], field=key)
+        except LedgerError:
+            return None
+    return None
+
+
+def _attempt_reservation_bound(
+    events: Iterable[Mapping[str, Any]], attempt: str
+) -> tuple[float, float | None]:
+    """Latest reserved estimate and persisted unresolved bound for one attempt."""
+    reserved = 0.0
+    prior_upper: float | None = None
+    for raw in events:
+        if not isinstance(raw, Mapping):
+            continue
+        if str(raw.get("attempt_id", raw.get("id", "")) or "").strip() != attempt:
+            continue
+        kind = str(raw.get("event", raw.get("kind", "")) or "").lower()
+        if kind in {"claim", "reserve", "reserved"}:
+            reserved = float(
+                _event_amount(raw, "reserved_usd", "estimated_cost_usd", "amount_usd") or 0.0
+            )
+            prior_upper = None
+        elif kind in {"unresolved", "unknown"}:
+            prior = _event_amount(
+                raw, "upper_bound_usd", "unresolved_upper_bound_usd", allow_none=True
+            )
+            if prior is not None:
+                prior_upper = prior
+                reserved = 0.0
+        elif kind in {"settle", "settled", "overspend", "release", "released"}:
+            reserved = 0.0
+            prior_upper = None
+    return reserved, prior_upper
+
+
 _TERMINAL_GATEWAY_STATUSES = frozenset(
     {"completed", "failed", "cancelled", "rejected_duplicate"}
 )
@@ -489,12 +572,11 @@ _TERMINAL_GATEWAY_STATUSES = frozenset(
 def _terminal_gateway_accounting(payload: Mapping[str, Any] | None) -> dict[str, Any]:
     """Project a terminal gateway's total accounted bound for the outer ledger.
 
-    The outer CyberGym ledger cannot see the gateway's physical attempt rows,
-    so a terminal task response must contribute its total
-    ``accounted_upper_bound_usd`` (with ``cost_usd`` as the frozen alias).
-    ``unresolved_upper_bound_usd`` is only the inner ledger's residual and is
-    never sufficient by itself.  Restricting this helper to terminal payloads
-    prevents an intermediate/running snapshot from authorizing dispatch.
+    The outer ledger cannot see the gateway's physical attempt rows, so a
+    terminal task response contributes its total ``accounted_upper_bound_usd``
+    (``cost_usd`` as the frozen alias); the inner ``unresolved_upper_bound_usd``
+    residual alone is never sufficient.  Terminal payloads only: an
+    intermediate/running snapshot must not authorize dispatch.
     """
 
     if not isinstance(payload, Mapping):
@@ -611,7 +693,13 @@ def _terminal_gateway_accounting(payload: Mapping[str, Any] | None) -> dict[str,
 def project_budget(
     events: Iterable[Mapping[str, Any]], cap_usd: float | None = DEFAULT_BUDGET_CAP_USD
 ) -> BudgetProjection:
-    """Replay terminal state per attempt; unknown cost blocks dispatch."""
+    """Replay terminal state per attempt.
+
+    Live in-flight reservations count. A finished/failed/infra attempt does
+    not keep its claim estimate (or any leftover unresolved UB) as dispatch
+    liability — historical jsonl must not poison replay. Dispatch fails only
+    when settled cash plus live reserved exhausts the cap.
+    """
     cap = _money(cap_usd, field="cap_usd", allow_none=True)
     if cap is not None and cap > DEFAULT_BUDGET_CAP_USD:
         raise BudgetRefused(
@@ -664,8 +752,22 @@ def project_budget(
         elif kind in {"unresolved", "unknown"}:
             if previous is None or previous.get("state") not in {"reserved", "unresolved"}:
                 raise LedgerError(f"unresolved event has no active claim: {attempt}")
-            upper = _event_amount(event, "upper_bound_usd", "unresolved_upper_bound_usd", allow_none=True)
-            latest[attempt] = {**previous, "state": "unresolved", "reserved_usd": 0.0, "upper_bound_usd": upper}
+            explicit_upper = _event_amount(
+                event,
+                "upper_bound_usd",
+                "unresolved_upper_bound_usd",
+                allow_none=True,
+            )
+            latest[attempt] = {
+                **previous,
+                "state": "unresolved",
+                "reserved_usd": 0.0,
+                "upper_bound_usd": _numeric_unresolved_bound(
+                    explicit_upper,
+                    reserved_usd=float(previous.get("reserved_usd") or 0.0),
+                    prior_upper=previous.get("upper_bound_usd"),
+                ),
+            }
         elif kind in {"release", "released"}:
             if previous is None or previous.get("state") not in {"reserved", "unresolved"}:
                 raise LedgerError(f"release has no active claim: {attempt}")
@@ -675,22 +777,30 @@ def project_budget(
 
     settled = sum(float(item.get("cost_usd") or 0.0) for item in latest.values() if item.get("state") == "settled")
     reserved = sum(float(item.get("reserved_usd") or 0.0) for item in latest.values() if item.get("state") == "reserved")
-    unresolved_rows = [item for item in latest.values() if item.get("state") == "unresolved"]
+    unresolved_items = [
+        item.get("upper_bound_usd")
+        for item in latest.values()
+        if item.get("state") == "unresolved"
+    ]
     unresolved = (
         None
-        if any(item.get("upper_bound_usd") is None for item in unresolved_rows)
-        else sum(float(item.get("upper_bound_usd") or 0.0) for item in unresolved_rows)
+        if any(value is None for value in unresolved_items)
+        else sum(float(value or 0.0) for value in unresolved_items)
     )
     projected = None if unresolved is None else settled + reserved + unresolved
-    if projected is None:
-        available, can_dispatch, reason = None, False, "unresolved_cost_unknown"
-    elif cap is None:
+    if cap is None:
         available, can_dispatch, reason = None, True, "uncapped"
+    elif projected is None:
+        available, can_dispatch, reason = None, False, "unresolved_cost_unknown"
     else:
         available = cap - projected
         can_dispatch = available >= 0
         reason = "within_cap" if can_dispatch else "budget_cap_exceeded"
-    active = {attempt: item for attempt, item in latest.items() if item.get("state") in {"reserved", "unresolved"}}
+    active = {
+        attempt: item
+        for attempt, item in latest.items()
+        if item.get("state") in {"reserved", "unresolved"}
+    }
     return BudgetProjection(
         cap,
         settled,
@@ -703,6 +813,40 @@ def project_budget(
         tuple(sorted(str(item["task_id"]) for item in active.values())),
         tuple(sorted(active)),
     )
+
+
+def _active_attempt_liability(
+    events: Iterable[Mapping[str, Any]], attempt_id: str
+) -> float:
+    """Replay one active attempt's current contribution to projection."""
+    reserved = 0.0
+    upper: float | None = None
+    state = "missing"
+    for event in events:
+        if str(event.get("attempt_id", event.get("id", "")) or "") != attempt_id:
+            continue
+        kind = str(event.get("event", event.get("kind", "")) or "").lower()
+        if kind in {"claim", "reserve", "reserved"}:
+            reserved = float(
+                _event_amount(event, "reserved_usd", "estimated_cost_usd", "amount_usd")
+                or 0.0
+            )
+            upper, state = None, "reserved"
+        elif kind in {"unresolved", "unknown"}:
+            explicit = _event_amount(
+                event, "upper_bound_usd", "unresolved_upper_bound_usd", allow_none=True,
+            )
+            upper = _numeric_unresolved_bound(
+                explicit, reserved_usd=reserved, prior_upper=upper,
+            )
+            reserved, state = 0.0, "unresolved"
+        elif kind in {"settle", "settled", "overspend", "release", "released"}:
+            reserved, upper, state = 0.0, None, "terminal"
+    if state == "reserved":
+        return reserved
+    if state == "unresolved" and upper is not None:
+        return float(upper)
+    raise LedgerError(f"attempt is not active: {attempt_id}")
 
 
 class BudgetLedger:
@@ -738,6 +882,26 @@ class BudgetLedger:
 
     def projection(self) -> BudgetProjection:
         return project_budget(self.events(), self.cap_usd)
+
+    def attempt_state(self, attempt_id: str) -> str:
+        """Return the validated latest state for one attempt, or ``missing``."""
+        attempt = str(attempt_id or "").strip()
+        events = self.events()
+        project_budget(events, self.cap_usd)
+        state = "missing"
+        for event in events:
+            if str(event.get("attempt_id") or "").strip() != attempt:
+                continue
+            kind = str(event.get("event", event.get("kind", "")) or "").lower()
+            if kind in {"claim", "reserve", "reserved"}:
+                state = "reserved"
+            elif kind in {"unresolved", "unknown"}:
+                state = "unresolved"
+            elif kind in {"settle", "settled", "overspend", "campaign_cost", "overhead"}:
+                state = "settled"
+            elif kind in {"release", "released"}:
+                state = "released"
+        return state
 
     @contextlib.contextmanager
     def _lock(self) -> Iterator[None]:
@@ -806,38 +970,35 @@ class BudgetLedger:
             )
         return {"task_id": task, "attempt_id": attempt, "reserved_usd": estimate, "ts_unix": now}
 
-    def settle(self, attempt_id: str, cost_usd: float) -> None:
+    def settle(
+        self,
+        attempt_id: str,
+        cost_usd: float,
+        *,
+        before_write: Callable[[BudgetOverspend | None], None] | None = None,
+    ) -> None:
         attempt = str(attempt_id or "").strip()
         cost = _money(cost_usd, field="cost_usd")
         with self._lock():
-            current = self.projection()
+            events = self.events()
+            current = project_budget(events, self.cap_usd)
             if attempt not in current.active_attempt_ids:
                 raise LedgerError(f"attempt is not active: {attempt}")
-            # Replace this attempt's reservation with its measured spend when
-            # checking the hard cap.  Unknown other attempts deliberately keep
-            # the projection unknown; they already block new claims, while a
-            # known terminal result can still be recorded for custody.
-            reserved_for_attempt = 0.0
-            for event in self.events():
-                if str(event.get("attempt_id") or "") != attempt:
-                    continue
-                kind = str(event.get("event", event.get("kind", "")) or "").lower()
-                if kind in {"claim", "reserve", "reserved"}:
-                    reserved_for_attempt = float(
-                        _event_amount(
-                            event,
-                            "reserved_usd",
-                            "estimated_cost_usd",
-                            "amount_usd",
-                        )
-                        or 0.0
-                    )
-                elif kind in {"settle", "settled", "overspend", "release", "released"}:
-                    reserved_for_attempt = 0.0
+            current_liability = _active_attempt_liability(events, attempt)
             projected_after = None
             if current.projected_usd is not None:
-                projected_after = current.projected_usd - reserved_for_attempt + float(cost or 0.0)
-            if self.cap_usd is not None and projected_after is not None and projected_after > self.cap_usd:
+                projected_after = current.projected_usd - current_liability + float(cost or 0.0)
+            overspend = self.cap_usd is not None and projected_after is not None and projected_after > self.cap_usd
+            overspend_error = (
+                BudgetOverspend(
+                    "measured settlement exceeds campaign budget cap: "
+                    f"projected={projected_after:.6f}, cap={self.cap_usd:.6f}"
+                )
+                if overspend else None
+            )
+            if before_write is not None:
+                before_write(overspend_error)
+            if overspend:
                 self._append(
                     {
                         "schema": LEDGER_SCHEMA,
@@ -847,10 +1008,7 @@ class BudgetLedger:
                         "ts_unix": time.time(),
                     }
                 )
-                raise BudgetOverspend(
-                    "measured settlement exceeds campaign budget cap: "
-                    f"projected={projected_after:.6f}, cap={self.cap_usd:.6f}"
-                )
+                raise overspend_error
             self._append(
                 {
                     "schema": LEDGER_SCHEMA,
@@ -914,13 +1072,42 @@ class BudgetLedger:
                 )
             return event
 
-    def mark_unresolved(self, attempt_id: str, upper_bound_usd: float | None = None) -> None:
+    def mark_unresolved(
+        self,
+        attempt_id: str,
+        upper_bound_usd: float | None = None,
+        *,
+        before_write: Callable[[BudgetOverspend | None], None] | None = None,
+        preserve_existing_floor: bool = False,
+    ) -> None:
         attempt = str(attempt_id or "").strip()
         upper = _money(upper_bound_usd, field="upper_bound_usd", allow_none=True)
         with self._lock():
-            if attempt not in self.projection().active_attempt_ids:
+            events = self.events()
+            if attempt not in project_budget(events, self.cap_usd).active_attempt_ids:
                 raise LedgerError(f"attempt is not active: {attempt}")
-            self._append({"schema": LEDGER_SCHEMA, "event": "unresolved", "attempt_id": attempt, "upper_bound_usd": upper, "ts_unix": time.time()})
+            reserved, prior_upper = _attempt_reservation_bound(events, attempt)
+            if preserve_existing_floor:
+                known = [
+                    float(value) for value in (upper, prior_upper, reserved)
+                    if value is not None
+                ]
+                bound = max(known) if known else None
+            else:
+                bound = _numeric_unresolved_bound(
+                    upper, reserved_usd=reserved, prior_upper=prior_upper,
+                )
+            if before_write is not None:
+                before_write(None)
+            self._append(
+                {
+                    "schema": LEDGER_SCHEMA,
+                    "event": "unresolved",
+                    "attempt_id": attempt,
+                    "upper_bound_usd": bound,
+                    "ts_unix": time.time(),
+                }
+            )
 
     def release(self, attempt_id: str) -> None:
         attempt = str(attempt_id or "").strip()
@@ -928,39 +1115,6 @@ class BudgetLedger:
             if attempt not in self.projection().active_attempt_ids:
                 raise LedgerError(f"attempt is not active: {attempt}")
             self._append({"schema": LEDGER_SCHEMA, "event": "release", "attempt_id": attempt, "ts_unix": time.time()})
-
-
-def append_cybergym_result(run_root: pathlib.Path | str, row: Mapping[str, Any]) -> None:
-    """Append one row to the common run index and its task-local index."""
-    from devtools.benchmarks.common.result_index import append_result_index
-
-    root = pathlib.Path(run_root).expanduser().resolve(strict=False)
-    task = safe_task_id(str(row.get("task_id", row.get("instance_id", ""))))
-    value = dict(row)
-    # The shared helper deliberately stays a tiny append primitive and does not
-    # own a cross-process lock.  A campaign can have several lanes, so serialize
-    # the paired parent/task writes here and fsync the lock holder before release.
-    lock_path = root / ".result_index.lock"
-    root.mkdir(parents=True, exist_ok=True)
-    with lock_path.open("a+", encoding="utf-8") as lock:
-        locked = False
-        try:
-            try:
-                import fcntl
-
-                fcntl.flock(lock.fileno(), fcntl.LOCK_EX)
-                locked = True
-            except ImportError:
-                pass
-            append_result_index(root, value)
-            append_result_index(safe_task_path(root, task), value)
-            lock.flush()
-            os.fsync(lock.fileno())
-        finally:
-            if locked:
-                import fcntl
-
-                fcntl.flock(lock.fileno(), fcntl.LOCK_UN)
 
 
 def _task_spec(value: TaskSpec | Mapping[str, Any] | str) -> TaskSpec:
@@ -986,6 +1140,175 @@ def _task_spec(value: TaskSpec | Mapping[str, Any] | str) -> TaskSpec:
     return TaskSpec(task_id, task_id.split(":", 1)[0])
 
 
+def finalize_outcome_row(
+    root: pathlib.Path,
+    task: TaskSpec,
+    task_dir: pathlib.Path,
+    outcome: dict[str, Any],
+    *,
+    attempt_id: str,
+    contract: Mapping[str, Any] | None,
+) -> dict[str, Any]:
+    """Build the denominator-preserving row for one finished attempt outcome.
+
+    Shared by ``run_campaign`` and the launcher's reconcile mode so a
+    redelivered terminal result is projected, validated, and rendered exactly
+    like a live one.  ``outcome`` is updated in place with the terminal
+    gateway accounting projection.  This function does not append the row or
+    settle the claim; callers own both side effects.
+    """
+    # A terminal gateway result is the only authoritative source for an
+    # outer-ledger bound when the executor stopped during custody.  Project
+    # its TOTAL accounted amount before building the row and settling the
+    # claim; the inner unresolved remainder alone would omit already-settled
+    # gateway usage.
+    terminal_accounting = _terminal_gateway_accounting(outcome.get("runtime_result"))
+    if terminal_accounting:
+        outcome.update(terminal_accounting)
+    requested_status = str(outcome.get("status") or "completed").strip().lower()
+    raw_cost_estimated = outcome.get("cost_estimated")
+    if raw_cost_estimated not in (None, False, True):
+        raise LedgerError("cost_estimated must be a boolean")
+    raw_cost_final = outcome.get("cost_final")
+    if raw_cost_final not in (None, False, True):
+        raise LedgerError("cost_final must be a boolean")
+    cost_unverifiable = (
+        raw_cost_estimated is True
+        or outcome.get("cost_usd") is None
+        or raw_cost_final is not True
+    )
+    if requested_status == "completed" and cost_unverifiable:
+        # Lazy import: the wire layer imports this module at its top level.
+        from devtools.benchmarks.cybergym.cybergym_wire import _status_after_cost_check
+
+        requested_status = _status_after_cost_check(outcome, requested_status)
+    if requested_status == "completed":
+        observed_effort = validate_high_effort(
+            outcome.get("observed_effort"), field="observed_effort"
+        )
+    else:
+        observed_effort = str(outcome.get("observed_effort") or "")
+    final_poc = outcome.get("final_poc")
+    marker_record: FinalPoc | None = None
+    if requested_status == "completed":
+        marker_record = final_poc_record(task_dir)
+        declared_hash = str(outcome.get("final_poc_sha256") or "").strip().lower()
+        if declared_hash and declared_hash != marker_record.sha256:
+            raise FinalPocRefused("executor final_poc_sha256 does not match final.poc")
+        if final_poc is not None:
+            if isinstance(final_poc, FinalPoc):
+                supplied_hash = final_poc.sha256
+            elif isinstance(final_poc, Mapping):
+                supplied_hash = str(final_poc.get("sha256", final_poc.get("poc_hash", "")))
+            else:
+                supplied_hash = final_poc_hash(final_poc)
+            if supplied_hash and supplied_hash.strip().lower() != marker_record.sha256:
+                raise FinalPocRefused("executor final_poc does not match final.poc")
+        final_poc = marker_record
+    elif final_poc is None and (task_dir / FINAL_POC_BASENAME).exists():
+        marker_record = final_poc_record(task_dir)
+        final_poc = marker_record
+    row = build_task_result_row(
+        task.task_id,
+        trials=outcome.get("trials") or (),
+        final_trial=outcome.get("final_trial"),
+        final_poc=final_poc,
+        status=requested_status,
+        lifecycle=str(outcome.get("lifecycle") or "completed"),
+        capability_outcome=str(outcome.get("capability_outcome") or ""),
+        level=task.level,
+        masked_id=str(outcome.get("masked_id") or ""),
+        masked_id_source=str(outcome.get("masked_id_source") or ""),
+        observed_provider=str(outcome.get("observed_provider") or ""),
+        observed_provider_attempts=outcome.get("observed_provider_attempts") or (),
+        observed_model=str(outcome.get("observed_model") or ""),
+        observed_effort=observed_effort,
+        observed_effort_source=str(outcome.get("observed_effort_source") or ""),
+        prompt_tokens=outcome.get("prompt_tokens"),
+        completion_tokens=outcome.get("completion_tokens"),
+        cached_tokens=outcome.get("cached_tokens"),
+        cost_usd=outcome.get("cost_usd"),
+        cost_estimated=outcome.get("cost_estimated"),
+        cost_final=outcome.get("cost_final"),
+        cost_status=str(outcome.get("cost_status") or ""),
+        infra_reason=str(outcome.get("infra_reason") or ""),
+        leakage=outcome.get("leakage"),
+        artifact_refs=outcome.get("artifact_refs") or {"task_dir": str(task_dir)},
+        error=str(outcome.get("error") or ""),
+        runtime_result=outcome.get("runtime_result"),
+        task_contract=contract,
+        attempt_id=str(attempt_id),
+    )
+    if outcome.get("cost_upper_bound_usd") is not None:
+        row["cost_upper_bound_usd"] = outcome["cost_upper_bound_usd"]
+    grace = outcome.get("cost_grace_acceptance")
+    if isinstance(grace, Mapping) and grace.get("unresolved_upper_bound_usd") is not None:
+        # The accounted upper bound already contains the abandoned residue;
+        # the row discloses it instead of claiming a fully final cost.
+        row.update({"cost_final": False, "cost_grace_acceptance": grace,
+                    "unresolved_upper_bound_usd": grace["unresolved_upper_bound_usd"]})
+    return row
+
+
+def settle_finished_attempt(
+    ledger: "BudgetLedger",
+    attempt_id: str,
+    outcome: Mapping[str, Any],
+    *,
+    before_write: Callable[[BudgetOverspend | None], None] | None = None,
+) -> None:
+    """Settle a finished attempt's claim from its outcome, or mark it unresolved."""
+    projected = dict(outcome)
+    accounting = _terminal_gateway_accounting(outcome.get("runtime_result"))
+    if accounting:
+        projected.update(accounting)
+    actual = _finished_attempt_actual_usd(projected)
+    if actual is not None:
+        ledger.settle(str(attempt_id), actual, before_write=before_write)
+    else:
+        upper_bound = projected.get("cost_upper_bound_usd")
+        if upper_bound is None:
+            upper_bound = projected.get("unresolved_upper_bound_usd")
+        if upper_bound is not None:
+            upper_bound = _money(upper_bound, field="cost_upper_bound_usd")
+        preserve_existing_floor = upper_bound is None
+        partial_value = (
+            projected.get("cost_usd")
+            if projected.get("cost_final") is not True
+            and projected.get("cost_estimated") is False
+            else None
+        )
+        partial_cost = (
+            _money(partial_value, field="cost_usd")
+            if partial_value is not None
+            else None
+        )
+        if partial_cost is not None and (
+            upper_bound is None or partial_cost > float(upper_bound)
+        ):
+            upper_bound = partial_cost
+        ledger.mark_unresolved(
+            str(attempt_id),
+            upper_bound,
+            before_write=before_write,
+            preserve_existing_floor=preserve_existing_floor,
+        )
+
+
+def _refuse_existing_campaign_history(
+    root: pathlib.Path,
+    ledger: BudgetLedger,
+    requested_task_ids: set[str],
+) -> None:
+    history = campaign_history_task_ids(root, ledger.events())
+    repeated = sorted(history.intersection(requested_task_ids))
+    if repeated:
+        raise ClaimRefused(
+            "task already has campaign history; pass allow_retries=True: "
+            + ", ".join(repeated)
+        )
+
+
 def run_campaign(
     tasks: Sequence[TaskSpec | Mapping[str, Any] | str],
     *,
@@ -995,17 +1318,28 @@ def run_campaign(
     budget_cap_usd: float | None = DEFAULT_BUDGET_CAP_USD,
     max_workers: int = 1,
     allow_retries: bool = False,
+    gateway_circuit_threshold: int = GATEWAY_CIRCUIT_BREAKER_THRESHOLD,
+    campaign_lock_held: bool = False,
 ) -> list[dict[str, Any]]:
     """Run injected task callbacks under one atomic ledger.
 
     The callback owns task generation, sidecar lifecycle, model transport, and
     process custody.  A missing callback is an explicit blocked result; this
-    seam never falls back to Docker, a shell, or a host network.
+    seam never falls back to Docker, a shell, or a host network.  A run of
+    ``gateway_circuit_threshold`` consecutive transport-class failures opens
+    the dispatch circuit breaker: admission stops, in-flight tasks settle,
+    and ``GatewayCircuitOpen`` carries the landed rows and undispatched ids.
     """
     if isinstance(max_workers, bool) or not isinstance(max_workers, int) or not 1 <= max_workers <= MAX_CROSS_TASK_WORKERS:
         raise ValueError(
             f"max_workers must be an integer in the range 1..{MAX_CROSS_TASK_WORKERS}"
         )
+    if (
+        isinstance(gateway_circuit_threshold, bool)
+        or not isinstance(gateway_circuit_threshold, int)
+        or gateway_circuit_threshold < 1
+    ):
+        raise ValueError("gateway_circuit_threshold must be a positive integer")
     root = pathlib.Path(run_root).expanduser().resolve(strict=False)
     normalized_tasks: list[TaskSpec] = []
     seen_task_ids: set[str] = set()
@@ -1018,43 +1352,25 @@ def run_campaign(
     ledger = BudgetLedger(root / "claims.jsonl", cap_usd=budget_cap_usd)
     if not isinstance(allow_retries, bool):
         raise ValueError("allow_retries must be a boolean")
-    if not allow_retries:
-        # A second invocation against the same campaign root is ambiguous: it
-        # could overwrite a completed row or attach a late result to the wrong
-        # attempt.  Callers that intentionally resume must opt in explicitly;
-        # each resumed claim receives a fresh attempt id below.
-        claimed_tasks = {
-            safe_task_id(str(event.get("task_id") or ""))
-            for event in ledger.events()
-            if str(event.get("event", event.get("kind", "")) or "").lower()
-            in {"claim", "reserve", "reserved"}
-        }
-        recorded_tasks: set[str] = set()
-        index_path = root / "result_index.jsonl"
-        if index_path.exists():
-            try:
-                for line_number, line in enumerate(index_path.read_text(encoding="utf-8").splitlines(), 1):
-                    if not line.strip():
-                        continue
-                    value = json.loads(line)
-                    if not isinstance(value, Mapping):
-                        raise LedgerError(f"result index line {line_number} is not an object")
-                    raw_task = value.get("task_id", value.get("instance_id", ""))
-                    if raw_task:
-                        recorded_tasks.add(safe_task_id(str(raw_task)))
-            except (OSError, UnicodeDecodeError, json.JSONDecodeError) as exc:
-                raise LedgerError(f"cannot inspect existing result index: {index_path}") from exc
-        repeated = sorted((claimed_tasks | recorded_tasks).intersection(seen_task_ids))
-        if repeated:
-            raise ClaimRefused(
-                "task already has campaign history; pass allow_retries=True: "
-                + ", ".join(repeated)
-            )
 
     def _run_one(task: TaskSpec) -> dict[str, Any]:
         contract = task.metadata.get("task_contract") if isinstance(task.metadata, Mapping) else None
+        task_dir = safe_task_path(root, task.task_id)
+        skip_reason = official_pin_skip_reason(task.task_id)
+        if skip_reason:
+            task_dir.mkdir(parents=True, exist_ok=True)
+            row = build_task_result_row(
+                task.task_id,
+                status="infra_failed",
+                lifecycle=skip_reason,
+                level=task.level,
+                infra_reason=skip_reason,
+                artifact_refs={"task_dir": str(task_dir)},
+                error="official pin skipped: " + skip_reason,
+                task_contract=contract if isinstance(contract, Mapping) else None,
+            )
+            return row
         if executor is None:
-            task_dir = safe_task_path(root, task.task_id)
             task_dir.mkdir(parents=True, exist_ok=True)
             row = build_task_result_row(
                 task.task_id,
@@ -1066,13 +1382,11 @@ def run_campaign(
                 error="CyberGym executor is not configured",
                 task_contract=contract if isinstance(contract, Mapping) else None,
             )
-            append_cybergym_result(root, row)
             return row
 
         claim: Mapping[str, Any] | None = None
         outcome: dict[str, Any] = {}
         callback_contract: Mapping[str, Any] | None = None
-        task_dir = safe_task_path(root, task.task_id)
         try:
             claim = ledger.claim(task.task_id, estimated_cost_usd)
             # Claim first, then create the workspace.  The persisted attempt id
@@ -1097,102 +1411,16 @@ def run_campaign(
             if not isinstance(result, Mapping):
                 raise CyberGymIntegrationUnavailable("CyberGym executor must return a mapping")
             outcome = dict(result)
-            # A terminal gateway result is the only authoritative source for
-            # an outer-ledger bound when the executor stopped during custody.
-            # Project its TOTAL accounted amount before building the row and
-            # settling/unresolving the claim; the inner unresolved remainder
-            # alone would omit already-settled gateway usage.
-            terminal_accounting = _terminal_gateway_accounting(
-                outcome.get("runtime_result")
-            )
-            if terminal_accounting:
-                outcome.update(terminal_accounting)
-            requested_status = str(outcome.get("status") or "completed").strip().lower()
-            raw_cost_estimated = outcome.get("cost_estimated")
-            if raw_cost_estimated not in (None, False, True):
-                raise LedgerError("cost_estimated must be a boolean")
-            raw_cost_final = outcome.get("cost_final")
-            if raw_cost_final not in (None, False, True):
-                raise LedgerError("cost_final must be a boolean")
-            cost_unverifiable = (
-                raw_cost_estimated is True
-                or outcome.get("cost_usd") is None
-                or raw_cost_final is not True
-            )
-            if requested_status == "completed" and cost_unverifiable:
-                # A completed row without an exact provider charge would make
-                # the hard campaign cap unverifiable.  Keep the attempt as an
-                # infra result and leave its reservation unresolved below.
-                requested_status = "infra_failed"
-                outcome["lifecycle"] = "cost_unverifiable"
-                outcome["infra_reason"] = "cost_unverifiable"
-            if requested_status == "completed":
-                observed_effort = validate_high_effort(
-                    outcome.get("observed_effort"), field="observed_effort"
-                )
-            else:
-                observed_effort = str(outcome.get("observed_effort") or "")
-            final_poc = outcome.get("final_poc")
-            marker_record: FinalPoc | None = None
-            if requested_status == "completed":
-                marker_record = final_poc_record(task_dir)
-                declared_hash = str(outcome.get("final_poc_sha256") or "").strip().lower()
-                if declared_hash and declared_hash != marker_record.sha256:
-                    raise FinalPocRefused("executor final_poc_sha256 does not match final.poc")
-                if final_poc is not None:
-                    if isinstance(final_poc, FinalPoc):
-                        supplied_hash = final_poc.sha256
-                    elif isinstance(final_poc, Mapping):
-                        supplied_hash = str(final_poc.get("sha256", final_poc.get("poc_hash", "")))
-                    else:
-                        supplied_hash = final_poc_hash(final_poc)
-                    if supplied_hash and supplied_hash.strip().lower() != marker_record.sha256:
-                        raise FinalPocRefused("executor final_poc does not match final.poc")
-                final_poc = marker_record
-            elif final_poc is None and (task_dir / FINAL_POC_BASENAME).exists():
-                marker_record = final_poc_record(task_dir)
-                final_poc = marker_record
-            row = build_task_result_row(
-                task.task_id,
-                trials=outcome.get("trials") or (),
-                final_trial=outcome.get("final_trial"),
-                final_poc=final_poc,
-                status=requested_status,
-                lifecycle=str(outcome.get("lifecycle") or "completed"),
-                capability_outcome=str(outcome.get("capability_outcome") or ""),
-                level=task.level,
-                masked_id=str(outcome.get("masked_id") or ""),
-                masked_id_source=str(outcome.get("masked_id_source") or ""),
-                observed_provider=str(outcome.get("observed_provider") or ""),
-                observed_provider_attempts=outcome.get("observed_provider_attempts") or (),
-                observed_model=str(outcome.get("observed_model") or ""),
-                observed_effort=observed_effort,
-                observed_effort_source=str(outcome.get("observed_effort_source") or ""),
-                prompt_tokens=outcome.get("prompt_tokens"),
-                completion_tokens=outcome.get("completion_tokens"),
-                cached_tokens=outcome.get("cached_tokens"),
-                cost_usd=outcome.get("cost_usd"),
-                cost_estimated=outcome.get("cost_estimated"),
-                cost_status=str(outcome.get("cost_status") or ""),
-                infra_reason=str(outcome.get("infra_reason") or ""),
-                leakage=outcome.get("leakage"),
-                artifact_refs=outcome.get("artifact_refs") or {"task_dir": str(task_dir)},
-                error=str(outcome.get("error") or ""),
-                runtime_result=outcome.get("runtime_result"),
-                task_contract=callback_contract
+            row = finalize_outcome_row(
+                root,
+                task,
+                task_dir,
+                outcome,
+                attempt_id=str(claim["attempt_id"]),
+                contract=callback_contract
                 if callback_contract is not None
                 else (contract if isinstance(contract, Mapping) else None),
-                attempt_id=str(claim["attempt_id"]),
             )
-            cost_estimated = outcome.get("cost_estimated")
-            if cost_estimated not in (None, False):
-                if cost_estimated is not True:
-                    raise LedgerError("cost_estimated must be a boolean")
-                ledger.mark_unresolved(str(claim["attempt_id"]), outcome.get("cost_upper_bound_usd"))
-            elif outcome.get("cost_usd") is None or outcome.get("cost_final") is not True:
-                ledger.mark_unresolved(str(claim["attempt_id"]), outcome.get("cost_upper_bound_usd"))
-            else:
-                ledger.settle(str(claim["attempt_id"]), float(outcome["cost_usd"]))
         except BudgetOverspend as exc:
             budget_refs = dict(outcome.get("artifact_refs") or {})
             budget_refs.setdefault("task_dir", str(task_dir))
@@ -1233,6 +1461,7 @@ def run_campaign(
                 cached_tokens=outcome.get("cached_tokens"),
                 cost_usd=outcome.get("cost_usd"),
                 cost_estimated=outcome.get("cost_estimated"),
+                cost_final=outcome.get("cost_final"),
                 cost_status=str(outcome.get("cost_status") or ""),
                 infra_reason="budget_overspend",
                 artifact_refs=budget_refs,
@@ -1244,41 +1473,12 @@ def run_campaign(
                 attempt_id=str(claim["attempt_id"]) if claim else "",
             )
         except Exception as exc:
-            settlement_overspend: BudgetOverspend | None = None
             if claim is not None:
                 terminal_accounting = _terminal_gateway_accounting(
                     outcome.get("runtime_result")
                 )
                 if terminal_accounting:
                     outcome.update(terminal_accounting)
-                try:
-                    exact_cost = (
-                        _money(outcome.get("cost_usd"), field="cost_usd")
-                        if outcome.get("cost_usd") is not None
-                        else None
-                    )
-                except LedgerError:
-                    exact_cost = None
-                try:
-                    if (
-                        exact_cost is not None
-                        and (
-                            outcome.get("cost_estimated") is None
-                            or outcome.get("cost_estimated") is False
-                        )
-                        and outcome.get("cost_final") is True
-                    ):
-                        ledger.settle(str(claim["attempt_id"]), exact_cost)
-                    else:
-                        try:
-                            ledger.mark_unresolved(
-                                str(claim["attempt_id"]),
-                                outcome.get("cost_upper_bound_usd"),
-                            )
-                        except LedgerError:
-                            ledger.mark_unresolved(str(claim["attempt_id"]), None)
-                except BudgetOverspend as settlement_exc:
-                    settlement_overspend = settlement_exc
             failure_refs = dict(outcome.get("artifact_refs") or {})
             failure_refs.setdefault("task_dir", str(task_dir))
             failure_refs.setdefault("claims", str(ledger.path))
@@ -1301,9 +1501,7 @@ def run_campaign(
                 final_trial=outcome.get("final_trial"),
                 final_poc_sha256=str(outcome.get("final_poc_sha256") or ""),
                 status="infra_failed",
-                lifecycle=(
-                    "budget_refused" if settlement_overspend else "executor_failed"
-                ),
+                lifecycle="executor_failed",
                 level=task.level,
                 masked_id=str(outcome.get("masked_id") or ""),
                 masked_id_source=str(outcome.get("masked_id_source") or ""),
@@ -1320,29 +1518,72 @@ def run_campaign(
                 cached_tokens=outcome.get("cached_tokens"),
                 cost_usd=outcome.get("cost_usd"),
                 cost_estimated=outcome.get("cost_estimated"),
+                cost_final=outcome.get("cost_final"),
                 cost_status=str(outcome.get("cost_status") or ""),
-                infra_reason=(
-                    "budget_overspend"
-                    if settlement_overspend
-                    else type(exc).__name__
-                ),
+                infra_reason=type(exc).__name__,
                 artifact_refs=failure_refs,
-                error=str(settlement_overspend or exc),
+                error=str(exc),
                 runtime_result=outcome.get("runtime_result"),
                 task_contract=callback_contract
                 if callback_contract is not None
                 else (contract if isinstance(contract, Mapping) else None),
                 attempt_id=str(claim["attempt_id"]) if claim else "",
             )
-        append_cybergym_result(root, row)
         return row
+
+    def _land_and_settle(row: dict[str, Any]) -> None:
+        attempt_id = str(row.get("attempt_id") or "")
+        if not attempt_id:
+            append_cybergym_result(root, row)
+            return
+
+        def _write_before_settle(overspend: BudgetOverspend | None) -> None:
+            if overspend is not None:
+                row.update(
+                    status="infra_failed",
+                    lifecycle="budget_refused",
+                    infra_reason="budget_overspend",
+                    reason_code="budget_overspend",
+                    error=str(overspend),
+                )
+            append_cybergym_result(root, row)
+
+        try:
+            settle_finished_attempt(
+                ledger, attempt_id, row, before_write=_write_before_settle,
+            )
+        except BudgetOverspend:
+            # The typed row was persisted before the terminal overspend event.
+            pass
+        executor_owner = getattr(executor, "executor", None) or getattr(
+            executor, "__self__", None,
+        )
+        acknowledge = getattr(executor_owner, "acknowledge_result_durable", None)
+        if callable(acknowledge):
+            acknowledge(str(row.get("task_id") or ""), attempt_id)
 
     # A campaign may fan out independent tasks, but each task remains a
     # single-agent/no-swarm attempt.  The ledger and result writer are locked;
     # callers should choose the worker count from the measured pilot rather
-    # than treating this as an unbounded scheduler.
-    if max_workers == 1 or len(normalized_tasks) <= 1:
-        return [_run_one(task) for task in normalized_tasks]
-    with ThreadPoolExecutor(max_workers=max_workers, thread_name_prefix="cybergym") as pool:
-        futures = [pool.submit(_run_one, task) for task in normalized_tasks]
-        return [future.result() for future in futures]
+    # than treating this as an unbounded scheduler.  The dispatch engine stops
+    # admitting new work once the isolate gateway is proven unreachable, so a
+    # dead gateway cannot burn the rest of the catalog into transport rows.
+    if not isinstance(campaign_lock_held, bool):
+        raise ValueError("campaign_lock_held must be a boolean")
+    lock_context = (
+        contextlib.nullcontext(True)
+        if campaign_lock_held
+        else campaign_execution_lock(root, blocking=False)
+    )
+    with lock_context as lock_held:
+        if not lock_held:
+            raise ClaimRefused("campaign execution lock is unavailable")
+        if not allow_retries:
+            _refuse_existing_campaign_history(root, ledger, seen_task_ids)
+        return run_dispatched(
+            normalized_tasks,
+            _run_one,
+            max_workers=max_workers,
+            threshold=gateway_circuit_threshold,
+            on_row=_land_and_settle,
+        )

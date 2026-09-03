@@ -10,6 +10,7 @@ import threading
 import time
 import uuid
 from collections import deque
+from concurrent.futures import ThreadPoolExecutor
 from typing import Any, Dict, Optional
 
 from ouroboros.utils import append_jsonl, atomic_write_json, truncate_for_log, utc_now_iso
@@ -571,6 +572,20 @@ def _format_task_for_dedup(
     return "\n\n".join(sections)
 
 
+# The per-event budget-projection refresh renders the full grouped usage
+# breakdown (~1.5s CPU at ~9k ledger rows, growing with the ledger) on the
+# supervisor loop thread. Under a 64-way event burst the render cannot keep up
+# with the event rate, the queue grows unboundedly, and the loop stalls for
+# minutes (the CyberGym full1507 stall class that starved acceptance-fence
+# acks). The physical-attempt ledger is the hard budget gate; this projection
+# is a compatibility/display view, so coalescing bursts to one refresh per
+# window is the correct trade. Other ``update_budget_from_usage`` callers
+# (safety, reflection, pipeline) are not high-frequency and keep per-call
+# semantics.
+_LLM_USAGE_BUDGET_REFRESH_SEC = 10.0
+_llm_usage_budget_last = [0.0]  # monotonic; mutated only on the loop thread
+
+
 def _handle_llm_usage(evt: Dict[str, Any], ctx: Any) -> None:
     usage_raw = evt.get("usage")
     usage: Dict[str, Any] = usage_raw if isinstance(usage_raw, dict) else {}
@@ -655,11 +670,14 @@ def _handle_llm_usage(evt: Dict[str, Any], ctx: Any) -> None:
         "prompt_cache_ttl": prompt_cache_ttl,
     }
     projection_update_status = "available"
-    try:
-        ctx.update_budget_from_usage(usage_for_budget)
-    except Exception:
-        projection_update_status = "unavailable"
-        log.error("Paid llm_usage retained but compatibility projection update failed", exc_info=True)
+    now_mono = time.monotonic()
+    if now_mono - _llm_usage_budget_last[0] >= _LLM_USAGE_BUDGET_REFRESH_SEC:
+        try:
+            ctx.update_budget_from_usage(usage_for_budget)
+            _llm_usage_budget_last[0] = now_mono
+        except Exception:
+            projection_update_status = "unavailable"
+            log.error("Paid llm_usage retained but compatibility projection update failed", exc_info=True)
 
     # Server-side web-search citations ({url,title,content}, capped at 20 in
     # llm.py). Persisted so post-hoc audits (e.g. the GAIA leakage audit) can see
@@ -4168,14 +4186,30 @@ def _handle_acceptance_fence(evt: Dict[str, Any], ctx: Any) -> None:
     ack_path = ack_dir / f"{token}.json"
     try:
         now = time.time()
-        prior = sorted(ack_dir.glob("*.json"), key=lambda path: path.stat().st_mtime, reverse=True)
-        for index, path in enumerate(prior):
-            if index >= 255 or now - path.stat().st_mtime > 3600.0:
+        # Workers consume their ack files concurrently with this sweep: stat
+        # between glob and unlink can race the unlink. Skip vanished files
+        # instead of failing the whole compaction.
+        prior_entries = []
+        for path in ack_dir.glob("*.json"):
+            try:
+                prior_entries.append((path.stat().st_mtime, path))
+            except OSError:
+                continue
+        for index, (_mtime, path) in enumerate(sorted(prior_entries, reverse=True)):
+            if index < 255 and now - _mtime <= 3600.0:
+                continue
+            try:
                 path.unlink(missing_ok=True)
+            except OSError:
+                continue
     except Exception:
         log.warning("Could not compact stale acceptance-fence acknowledgements", exc_info=True)
     try:
-        atomic_write_json(ack_path, {**result, "ts": utc_now_iso()}, trailing_newline=True)
+        atomic_write_json(
+            ack_path,
+            {**result, "op": str(evt.get("op") or ""), "ts": utc_now_iso()},
+            trailing_newline=True,
+        )
     except Exception:
         # Loud: without the acknowledgement the worker fails closed rather than
         # reviewing against a possibly-racing subtree.
@@ -4279,6 +4313,92 @@ def _handle_main_llm_call_state(evt: Dict[str, Any], ctx: Any) -> None:
     meta.pop("active_llm_call", None)
 
 
+# The task_done finalization (child copy-back with its recursive observability
+# ref-tree promotion — gzip decompress + sha256 verify per blob — plus the
+# workspace patch write) is O(task size) CPU/IO work.  Run synchronously on the
+# intake loop it stalled the supervisor for ~95 s per large task under a
+# 64-lane benchmark load, starving every other lane's intake.  Defer the whole
+# handler to a bounded background pool: the loop only enqueues, and per-task
+# ordering is preserved because a task emits exactly one task_done.
+_TASK_DONE_EXECUTOR = ThreadPoolExecutor(
+    max_workers=4, thread_name_prefix="task-done-finalize"
+)
+
+
+def _log_task_done_finalize_failure(fut: Any, ctx: Any) -> None:
+    """Surface a deferred task_done crash exactly like dispatch_event's net.
+
+    concurrent.futures never logs an unretrieved exception; without this
+    callback a crashing finalization left the task in RUNNING with zero
+    diagnostics, bypassing the worker_event_handler_error record.
+    """
+    try:
+        exc = fut.exception()
+    except Exception:
+        return
+    if exc is None:
+        return
+    log.warning(
+        "Deferred task_done finalization failed: %s",
+        exc,
+        exc_info=(type(exc), exc, exc.__traceback__),
+    )
+    try:
+        ctx.append_jsonl(
+            ctx.DRIVE_ROOT / "logs" / "supervisor.jsonl",
+            {
+                "ts": utc_now_iso(),
+                "type": "worker_event_handler_error",
+                "event_type": "task_done",
+                "error": repr(exc),
+                "deferred": True,
+            },
+        )
+    except Exception:
+        log.debug("failed to record deferred task_done failure", exc_info=True)
+
+
+def _run_task_done_finalization(evt: Dict[str, Any], ctx: Any, task_id: str) -> None:
+    try:
+        _handle_task_done(evt, ctx)
+    finally:
+        # The handler pops RUNNING on the normal path; on a crash the row may
+        # survive, and the custody marker must not spare the wedged task from
+        # the timeout enforcer forever.
+        if task_id:
+            try:
+                from supervisor.queue import RUNNING as _RUNNING
+                from supervisor.queue import _queue_lock
+
+                with _queue_lock:
+                    meta = _RUNNING.get(task_id)
+                    if isinstance(meta, dict):
+                        meta.pop("finalization_pending", None)
+            except Exception:
+                log.debug("failed to clear finalization_pending", exc_info=True)
+
+
+def _handle_task_done_deferred(evt: Dict[str, Any], ctx: Any) -> None:
+    task_id = str(evt.get("task_id") or "")
+    # Stamp custody before queueing: a completed task whose finalization sits
+    # in the pool backlog otherwise looks idle/stale to enforce_task_timeouts
+    # and the reaper while its RUNNING row keeps aging.
+    if task_id:
+        try:
+            from supervisor.queue import RUNNING as _RUNNING
+            from supervisor.queue import _queue_lock
+
+            with _queue_lock:
+                meta = _RUNNING.get(task_id)
+                if isinstance(meta, dict):
+                    meta["finalization_pending"] = True
+                    meta["last_progress_at"] = time.time()
+        except Exception:
+            log.debug("failed to stamp finalization_pending", exc_info=True)
+    future = _TASK_DONE_EXECUTOR.submit(_run_task_done_finalization, evt, ctx, task_id)
+    future.add_done_callback(lambda fut: _log_task_done_finalize_failure(fut, ctx))
+
+
 EVENT_HANDLERS = {
     "llm_usage": _handle_llm_usage,
     "external_wait_lease": _handle_external_wait_lease,
@@ -4291,7 +4411,7 @@ EVENT_HANDLERS = {
     "task_dispatch_resolved": _handle_task_dispatch_resolved,
     "typing_start": _handle_typing_start,
     "send_message": _handle_send_message,
-    "task_done": _handle_task_done,
+    "task_done": _handle_task_done_deferred,
     "task_metrics": _handle_task_metrics,
     "deep_self_review_request": _handle_deep_self_review_request,
     "promote_to_stable": _handle_promote_to_stable,

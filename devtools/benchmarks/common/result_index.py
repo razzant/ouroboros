@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import os
 import pathlib
 import time
 from typing import Any
@@ -14,6 +15,22 @@ def append_result_index(run_dir: pathlib.Path, row: dict[str, Any]) -> None:
     run_dir.mkdir(parents=True, exist_ok=True)
     with (run_dir / "result_index.jsonl").open("a", encoding="utf-8") as fh:
         fh.write(json.dumps(row, ensure_ascii=False) + "\n")
+        fh.flush()
+        os.fsync(fh.fileno())
+
+
+def read_result_index(run_dir: pathlib.Path) -> list[dict[str, Any]]:
+    """Read object rows from an append-only result index."""
+    path = run_dir / "result_index.jsonl"
+    if not path.exists():
+        return []
+    rows: list[dict[str, Any]] = []
+    for line in path.read_text(encoding="utf-8").splitlines():
+        if line.strip():
+            value = json.loads(line)
+            if isinstance(value, dict):
+                rows.append(value)
+    return rows
 
 
 # Reason codes on which the RUNTIME stopped a task for a reason that is not "the task is
@@ -55,6 +72,7 @@ _TRUNCATION_CODES_NOT_BEST_EFFORT = frozenset({
     # now terminalizes as infra_failed instead of "completed (best effort)".
     "llm_api_error",
     "provider_unavailable",
+    "acceptance_fence_unavailable",
 })
 
 RUNTIME_TRUNCATION_REASON_CODES = BEST_EFFORT_REASON_CODES | _TRUNCATION_CODES_NOT_BEST_EFFORT

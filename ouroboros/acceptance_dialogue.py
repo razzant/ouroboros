@@ -25,10 +25,10 @@ from __future__ import annotations
 import hashlib
 import json
 import logging
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Callable, Dict, List, Optional, Tuple
 
 from ouroboros import task_pacing
-from ouroboros.config import adaptive_quorum
+from ouroboros.config import adaptive_quorum, get_acceptance_fence_wait_max_rounds
 from ouroboros.outcomes import (
     ACCEPTANCE_ACCEPTED,
     ACCEPTANCE_BYPASS_REASONS,
@@ -64,6 +64,9 @@ ACCEPTANCE_DECISION_REASONS = (
     "review_degraded",
     "fence_reopen_failed",
     "infra_failure",
+    # The queue-owned fence remained unavailable past its configured round
+    # bound, so the task terminalized as infrastructure failure.
+    "acceptance_fence_unavailable",
     # The pacing/wallet reason two branches below already STAMP (`pass_reason ==
     # REASON_REVIEW_CYCLES_EXHAUSTED`); it was missing from the closed set, so a
     # spent shared cap shipped a reason no reader could validate.
@@ -104,6 +107,234 @@ def _set_acceptance_decision(llm_trace: Dict[str, Any], decision: Dict[str, Any]
         if previous.get(key) and not merged.get(key):
             merged[key] = previous.get(key)
     llm_trace["acceptance_decision"] = merged
+
+
+def acceptance_fence_failure_exhausted(
+    tools_ctx: Any,
+    llm_trace: Dict[str, Any],
+    emit_progress: Callable[[str], None],
+) -> bool:
+    """Count a failed fence begin and terminalize after the configured bound."""
+    failures = int(
+        getattr(tools_ctx, "_task_acceptance_fence_failures", 0) or 0
+    ) + 1
+    tools_ctx._task_acceptance_fence_failures = failures
+    if failures < get_acceptance_fence_wait_max_rounds():
+        return False
+    tools_ctx._task_acceptance_fence_infra_failed = True
+    _set_acceptance_decision(llm_trace, {
+        "status": ACCEPTANCE_FINALIZED_UNACCEPTED,
+        "reason": "acceptance_fence_unavailable",
+        "source": "acceptance_fence",
+        "rationale": (
+            "The queue-owned admission fence stayed unavailable for "
+            f"{failures} consecutive rounds; terminalizing as infrastructure "
+            "failure instead of burning paid rounds until the deadline."
+        ),
+    })
+    emit_progress(
+        "Task acceptance review could not acquire the queue-owned admission "
+        "fence; terminalizing as an infrastructure failure."
+    )
+    return True
+
+
+def finalize_acceptance_fence_failure(
+    tools_ctx: Any,
+    limit_ctx: Any,
+    llm_trace: Dict[str, Any],
+    forced_fallback: Callable[..., Tuple[str, Dict[str, Any], Dict[str, Any]]],
+) -> Optional[Tuple[str, Dict[str, Any], Dict[str, Any]]]:
+    """Build the host-salvaged infra result after bounded fence exhaustion."""
+    if not bool(getattr(tools_ctx, "_task_acceptance_fence_infra_failed", False)):
+        return None
+    text, usage, trace = forced_fallback(
+        limit_ctx,
+        llm_trace,
+        "⚠️ The task could not start its acceptance review: the queue-owned "
+        "admission fence stayed unavailable. Any files written so far are "
+        "preserved in the workspace.",
+        "acceptance_fence_unavailable",
+        source="acceptance_fence_unavailable",
+    )
+    usage.update(
+        execution_status="infra_failed",
+        reason_code="acceptance_fence_unavailable",
+    )
+    return text, usage, trace
+
+
+def _drop_task_acceptance_fence_binding(ctx: Any) -> None:
+    """Forget the local fence binding after a failed/unknown transition.
+
+    The queue-owned fence is the authority; a retained local token whose
+    transition outcome is unknown poisons every later round (the next begin
+    only inspects the stale token). Dropping it lets the next begin re-adopt
+    or recreate the fence through the idempotent supervisor path.
+    """
+    ctx._task_acceptance_fence_token = None
+    ctx._task_acceptance_fence_generation = None
+    ctx._task_acceptance_queue_descendants = []
+
+
+def _begin_task_acceptance_fence(ctx: Any, task_id: str) -> Tuple[bool, Any]:
+    """Optional seam implemented by the supervisor under its queue lock."""
+    admission_lock = getattr(ctx, "owner_message_admission_lock", None)
+    admission_agent = getattr(ctx, "owner_message_admission_agent", None)
+    if admission_lock is not None and admission_agent is not None:
+        with admission_lock:
+            ctx._task_acceptance_owner_generation = int(getattr(admission_agent, "_owner_message_generation", 0) or 0)
+    existing = getattr(ctx, "_task_acceptance_fence_token", None)
+    if existing is not None:
+        inspect = getattr(ctx, "inspect_acceptance_fence", None)
+        if not callable(inspect):
+            return True, existing
+        try:
+            refreshed = inspect(token=str(existing))
+        except Exception:
+            # A lost end/inspect ack leaves a stale local token while the
+            # supervisor already released the fence; every later inspect then
+            # fails closed on "unknown token". Rebind through a fresh begin
+            # (idempotent supervisor-side) instead of spinning on it.
+            log.debug("Acceptance fence inspection failed; rebinding via fresh begin", exc_info=True)
+            _drop_task_acceptance_fence_binding(ctx)
+        else:
+            ctx._task_acceptance_queue_descendants = (
+                list(refreshed.get("queue_descendants") or [])
+                if isinstance(refreshed, dict) else []
+            )
+            if isinstance(refreshed, dict):
+                ctx._task_acceptance_fence_generation = int(
+                    refreshed.get("owner_message_generation") or 0
+                )
+            return True, existing
+    callback = getattr(ctx, "begin_acceptance_fence", None)
+    if not callable(callback):
+        return True, None  # one-minor/direct-context compatibility
+    try:
+        meta = getattr(ctx, "task_metadata", {})
+        meta = meta if isinstance(meta, dict) else {}
+        response = callback(
+            root_task_id=str(
+                meta.get("root_task_id") or getattr(ctx, "root_task_id", "") or task_id
+            ),
+            task_id=str(task_id),
+        )
+    except Exception:
+        log.debug("Queue-owned acceptance fence begin failed", exc_info=True)
+        return False, None
+    if isinstance(response, dict):
+        token = response.get("token")
+        ctx._task_acceptance_queue_descendants = list(response.get("queue_descendants") or [])
+        ctx._task_acceptance_fence_generation = int(
+            response.get("owner_message_generation") or 0
+        )
+    else:
+        token = response
+        ctx._task_acceptance_queue_descendants = []
+        ctx._task_acceptance_fence_generation = None
+    if token in (None, False, ""):
+        return False, None
+    ctx._task_acceptance_fence_token = token
+    return True, token
+
+
+def _end_task_acceptance_fence(
+    ctx: Any, *, outcome: str, admission_locked: bool = False,
+) -> bool:
+    token = getattr(ctx, "_task_acceptance_fence_token", None)
+    if token is None and str(outcome) == "revision":
+        token = getattr(ctx, "_task_acceptance_sealed_fence_token", None)
+    callback = getattr(ctx, "end_acceptance_fence", None)
+    admission_lock = getattr(ctx, "owner_message_admission_lock", None)
+    admission_agent = getattr(ctx, "owner_message_admission_agent", None)
+    acquired = False
+    try:
+        if admission_lock is not None and admission_agent is not None and not admission_locked:
+            admission_lock.acquire()
+            acquired = True
+        expected_owner_generation = getattr(ctx, "_task_acceptance_owner_generation", None)
+        direct_generation_mismatch = bool(
+            expected_owner_generation is not None
+            and admission_agent is not None
+            and int(getattr(admission_agent, "_owner_message_generation", 0) or 0)
+            != int(expected_owner_generation)
+        )
+        effective_outcome = "revision" if direct_generation_mismatch else str(outcome)
+        if token is None or not callable(callback):
+            ctx._task_acceptance_fence_generation_mismatch = direct_generation_mismatch
+            return True
+        expected_queue_generation = getattr(ctx, "_task_acceptance_fence_generation", None)
+        if expected_queue_generation is None:
+            response = callback(token=token, outcome=effective_outcome)
+        else:
+            response = callback(
+                token=token,
+                outcome=effective_outcome,
+                expected_generation=int(expected_queue_generation),
+            )
+    except Exception:
+        # The ack may have been lost while the supervisor applied the
+        # transition; keeping the local token would poison every later round.
+        log.debug("Queue-owned acceptance fence transition failed", exc_info=True)
+        _drop_task_acceptance_fence_binding(ctx)
+        return False
+    finally:
+        if acquired:
+            admission_lock.release()
+    if isinstance(response, dict) and not bool(response.get("ok", True)):
+        _drop_task_acceptance_fence_binding(ctx)
+        return False
+    status = str((response or {}).get("status") or "") if isinstance(response, dict) else ""
+    generation_mismatch = bool(
+        direct_generation_mismatch
+        or (isinstance(response, dict) and response.get("generation_mismatch"))
+    )
+    ctx._task_acceptance_fence_generation_mismatch = generation_mismatch
+    ctx._task_acceptance_fence_token = None
+    ctx._task_acceptance_fence_generation = None
+    ctx._task_acceptance_queue_descendants = []
+    if status == "sealed" or (not status and effective_outcome != "revision"):
+        ctx._task_acceptance_sealed_fence_token = token
+    else:
+        ctx._task_acceptance_sealed_fence_token = None
+    return True
+
+
+def _set_applied_host_acceptance_impact(
+    run_record: Any,
+    result: Any,
+    *,
+    requires_revision: bool,
+) -> None:
+    """Record what the host actually did with a panel result."""
+    if not isinstance(run_record, dict):
+        return
+    if requires_revision:
+        run_record["enforcement_impact"] = "requires_revision"
+        return
+    from ouroboros.review_substrate import task_acceptance_is_clean
+
+    run_record["enforcement_impact"] = (
+        "allows_completion"
+        if task_acceptance_is_clean(result)
+        else "degrades_completion"
+    )
+
+
+def _direct_context_fence_state(tools_ctx: Any, fence_token: Any) -> Any:
+    """Return the queue token or direct-chat generations for review binding."""
+    if fence_token is not None:
+        return fence_token
+    return {
+        "state": "direct_context",
+        "owner_generation": getattr(
+            tools_ctx, "_task_acceptance_owner_generation", None,
+        ),
+        "queue_generation": getattr(
+            tools_ctx, "_task_acceptance_fence_generation", None,
+        ),
+    }
 
 
 def _collect_acceptance_obligations(llm_trace: Dict[str, Any], result: Any) -> None:
@@ -365,7 +596,7 @@ def _refuse_identical_acceptance(
     from ouroboros import loop
 
     ctx.tools._ctx._task_acceptance_reviewed = True
-    loop._end_task_acceptance_fence(ctx.tools._ctx, outcome="terminal")
+    _end_task_acceptance_fence(ctx.tools._ctx, outcome="terminal")
     loop._mark_root_acceptance_checkpoint(
         ctx.tools._ctx,
         ctx.llm_trace,
@@ -459,7 +690,7 @@ def _apply_task_acceptance_result(
         )
     if task_acceptance_is_clean(result):
         ctx.tools._ctx._task_acceptance_reviewed = True
-        loop._end_task_acceptance_fence(ctx.tools._ctx, outcome="terminal")
+        _end_task_acceptance_fence(ctx.tools._ctx, outcome="terminal")
         loop._mark_root_acceptance_checkpoint(
             ctx.tools._ctx, ctx.llm_trace, status="pass", pass_index=ctx.passes_done,
         )
@@ -506,7 +737,7 @@ def _apply_task_acceptance_result(
         # the EXISTING honest path recording BOTH positions in one
         # owner-visible line — reviewer authorship, not a host timer.
         ctx.tools._ctx._task_acceptance_reviewed = True
-        loop._end_task_acceptance_fence(ctx.tools._ctx, outcome="terminal")
+        _end_task_acceptance_fence(ctx.tools._ctx, outcome="terminal")
         loop._mark_root_acceptance_checkpoint(
             ctx.tools._ctx,
             ctx.llm_trace,
@@ -544,7 +775,7 @@ def _apply_task_acceptance_result(
             "dissent_noted": bool(dissent),
         })
         ctx.tools._ctx._task_acceptance_improvement_passes = ctx.passes_done + 1
-        if not loop._end_task_acceptance_fence(ctx.tools._ctx, outcome="revision"):
+        if not _end_task_acceptance_fence(ctx.tools._ctx, outcome="revision"):
             ctx.tools._ctx._task_acceptance_reviewed = True
             _set_acceptance_decision(ctx.llm_trace, {
                 "status": ACCEPTANCE_FINALIZED_UNACCEPTED,
@@ -564,7 +795,7 @@ def _apply_task_acceptance_result(
         return True
 
     ctx.tools._ctx._task_acceptance_reviewed = True
-    loop._end_task_acceptance_fence(ctx.tools._ctx, outcome="terminal")
+    _end_task_acceptance_fence(ctx.tools._ctx, outcome="terminal")
     loop._mark_root_acceptance_checkpoint(
         ctx.tools._ctx,
         ctx.llm_trace,

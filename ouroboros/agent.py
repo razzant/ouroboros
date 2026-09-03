@@ -552,14 +552,30 @@ class OuroborosAgent:
             log_label="agent live",
         )
 
-    def _await_acceptance_fence_ack(self, token: str, *, timeout_sec: float = 10.0) -> Dict[str, Any]:
+    def _await_acceptance_fence_ack(
+        self, token: str, *, op: str = "", timeout_sec: Optional[float] = None,
+    ) -> Dict[str, Any]:
         """Wait for the supervisor to apply a queue-owned acceptance fence.
 
         Worker processes cannot share the supervisor's ``_queue_lock``.  The
         event is therefore acknowledged through a tiny one-shot file only after
         the supervisor has changed the fence while holding that lock.  The file
-        is transport acknowledgement, not a second lifecycle authority.
+        is transport acknowledgement, not a second lifecycle authority.  The
+        default timeout comes from the config SSOT
+        (``OUROBOROS_ACCEPTANCE_FENCE_ACK_TIMEOUT_SEC``): a fixed 10s sat below
+        real latency on network-FS data roots with a backlogged supervisor
+        event loop, and every timeout used to leak the supervisor-side fence.
+
+        ``op`` binds the wait to ONE operation: begin/inspect/end share the
+        fence token, so without it a late ack for a previous operation is read
+        as this operation's receipt (the CyberGym full1507 off-by-one that
+        poisoned live tasks).  A mismatched file is left for its own waiter or
+        the hourly compaction; it is never consumed here.
         """
+        if timeout_sec is None:
+            from ouroboros.config import get_acceptance_fence_ack_timeout_sec
+
+            timeout_sec = get_acceptance_fence_ack_timeout_sec()
         metadata = (
             self._current_task_metadata
             if isinstance(self._current_task_metadata, dict)
@@ -573,6 +589,9 @@ class OuroborosAgent:
         while time.monotonic() < deadline:
             payload = read_json_dict(ack_path)
             if payload:
+                if op and str(payload.get("op") or "") != op:
+                    time.sleep(0.02)
+                    continue
                 try:
                     ack_path.unlink(missing_ok=True)
                 except OSError:
@@ -585,15 +604,17 @@ class OuroborosAgent:
         if self._event_queue is None:
             raise RuntimeError("acceptance fence requires a supervisor event queue")
         token = uuid.uuid4().hex
+        op = uuid.uuid4().hex[:16]
         self._event_queue.put({
             "type": "acceptance_fence",
             "action": "begin",
             "token": token,
+            "op": op,
             "root_task_id": str(root_task_id or task_id),
             "task_id": str(task_id),
             "ts": utc_now_iso(),
         })
-        ack = self._await_acceptance_fence_ack(token)
+        ack = self._await_acceptance_fence_ack(token, op=op)
         if str(ack.get("status") or "") != "active":
             raise RuntimeError(str(ack.get("error") or "acceptance fence was not activated"))
         return ack
@@ -602,14 +623,16 @@ class OuroborosAgent:
         """Refresh queue-level quiescence while keeping the same admission fence."""
         if self._event_queue is None:
             raise RuntimeError("acceptance fence requires a supervisor event queue")
+        op = uuid.uuid4().hex[:16]
         self._event_queue.put({
             "type": "acceptance_fence",
             "action": "inspect",
             "token": str(token),
+            "op": op,
             "task_id": str(self._current_task_id or ""),
             "ts": utc_now_iso(),
         })
-        ack = self._await_acceptance_fence_ack(str(token))
+        ack = self._await_acceptance_fence_ack(str(token), op=op)
         if str(ack.get("status") or "") not in {"active", "sealed"}:
             raise RuntimeError(str(ack.get("error") or "acceptance fence inspection failed"))
         return ack
@@ -619,10 +642,12 @@ class OuroborosAgent:
     ) -> Dict[str, Any]:
         if self._event_queue is None:
             raise RuntimeError("acceptance fence requires a supervisor event queue")
+        op = uuid.uuid4().hex[:16]
         event = {
             "type": "acceptance_fence",
             "action": "end",
             "token": str(token),
+            "op": op,
             "outcome": str(outcome),
             "task_id": str(self._current_task_id or ""),
             "ts": utc_now_iso(),
@@ -630,7 +655,7 @@ class OuroborosAgent:
         if expected_generation is not None:
             event["expected_generation"] = int(expected_generation)
         self._event_queue.put(event)
-        ack = self._await_acceptance_fence_ack(str(token))
+        ack = self._await_acceptance_fence_ack(str(token), op=op)
         if str(ack.get("status") or "") not in {"released", "sealed"}:
             raise RuntimeError(str(ack.get("error") or "acceptance fence transition failed"))
         return ack

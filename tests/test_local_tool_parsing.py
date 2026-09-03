@@ -313,3 +313,206 @@ class TestParseToolCallsWithThink(unittest.TestCase):
         # Argument value is untouched
         args = _json.loads(parsed["tool_calls"][0]["function"]["arguments"])
         self.assertEqual(args["content"], arg_value)
+
+
+class TestDeepSeekDsmlParsing(unittest.TestCase):
+    def _dsml(self, inner: str) -> str:
+        from ouroboros.tool_call_markup import _DSML_MARK
+
+        return f"<{_DSML_MARK}tool_calls>{inner}</{_DSML_MARK}tool_calls>"
+
+    def test_well_formed_dsml_becomes_tool_calls(self):
+        from ouroboros.llm import LLMClient
+        from ouroboros.tool_call_markup import _DSML_MARK
+
+        invoke = (
+            f"<{_DSML_MARK}invoke name=\"read_file\">"
+            f"<{_DSML_MARK}parameter name=\"path\" string=\"true\">README.md"
+            f"</{_DSML_MARK}parameter>"
+            f"</{_DSML_MARK}invoke>"
+        )
+        msg = {
+            "content": self._dsml(invoke),
+            "tool_calls": [],
+        }
+        parsed = LLMClient._parse_tool_calls_from_content(msg, {"read_file"})
+        self.assertEqual(len(parsed["tool_calls"]), 1)
+        self.assertEqual(parsed["tool_calls"][0]["function"]["name"], "read_file")
+        self.assertEqual(
+            json.loads(parsed["tool_calls"][0]["function"]["arguments"]),
+            {"path": "README.md"},
+        )
+
+    def test_malformed_dsml_is_not_upgraded(self):
+        from ouroboros.llm import LLMClient
+        from ouroboros.tool_call_markup import _DSML_MARK, content_has_tool_markup
+
+        broken = f"<{_DSML_MARK}tool_calls><{_DSML_MARK}invoke name=\"read_file\">broken"
+        msg = {"content": broken, "tool_calls": []}
+        self.assertTrue(content_has_tool_markup(broken))
+        parsed = LLMClient._parse_tool_calls_from_content(msg, {"read_file"})
+        self.assertFalse(parsed.get("tool_calls"))
+
+    def test_valid_invoke_plus_unclosed_invoke_is_not_partially_upgraded(self):
+        from ouroboros.llm import LLMClient
+
+        content = (
+            '<tool_calls><invoke name="read_file">'
+            '<parameter name="path" string="true">README.md</parameter>'
+            "</invoke>"
+            '<invoke name="write_file"><parameter name="path" string="true">out.txt'
+            "</tool_calls>"
+        )
+        msg = {"content": content, "tool_calls": []}
+
+        parsed = LLMClient._parse_tool_calls_from_content(
+            msg, {"read_file", "write_file"},
+        )
+
+        self.assertFalse(parsed.get("tool_calls"))
+        self.assertEqual(parsed["content"], content)
+
+    def test_valid_invoke_plus_truncated_tag_is_not_partially_upgraded(self):
+        from ouroboros.llm import LLMClient
+
+        valid = '<invoke name="read_file"></invoke>'
+        for fragment in ("<invok", "</invok"):
+            with self.subTest(fragment=fragment):
+                content = f"<tool_calls>{valid}{fragment}</tool_calls>"
+                msg = {"content": content, "tool_calls": []}
+
+                parsed = LLMClient._parse_tool_calls_from_content(msg, {"read_file"})
+
+                self.assertFalse(parsed.get("tool_calls"))
+                self.assertEqual(parsed["content"], content)
+
+    def test_mixed_tagged_and_plain_invoke_pair_is_not_upgraded(self):
+        from ouroboros.llm import LLMClient
+        from ouroboros.tool_call_markup import _DSML_MARK
+
+        content = (
+            f"<{_DSML_MARK}tool_calls>"
+            f'<{_DSML_MARK}invoke name="read_file"></invoke>'
+            f"</{_DSML_MARK}tool_calls>"
+        )
+        msg = {"content": content, "tool_calls": []}
+
+        parsed = LLMClient._parse_tool_calls_from_content(msg, {"read_file"})
+
+        self.assertFalse(parsed.get("tool_calls"))
+        self.assertEqual(parsed["content"], content)
+
+    def test_loop_wire_seam_promotes_well_formed_remote_dsml(self):
+        from ouroboros.llm import LLMClient
+        from ouroboros.tool_call_markup import _DSML_MARK, resolve_tool_markup
+
+        invoke = (
+            f"<{_DSML_MARK}invoke name=\"read_file\">"
+            f"<{_DSML_MARK}parameter name=\"path\" string=\"true\">README.md"
+            f"</{_DSML_MARK}parameter>"
+            f"</{_DSML_MARK}invoke>"
+        )
+        client = LLMClient()
+        target = {
+            "provider": "openrouter",
+            "usage_model": "deepseek/deepseek-v4-flash-0731",
+            "resolved_model": "deepseek/deepseek-v4-flash-0731",
+        }
+        message, _usage = client._normalize_remote_response(
+            {
+                "choices": [{
+                    "message": {
+                        "role": "assistant",
+                        "content": self._dsml(invoke),
+                        "tool_calls": [],
+                    }
+                }],
+                "usage": {"prompt_tokens": 1, "completion_tokens": 1},
+            },
+            target,
+            skip_cost_fetch=True,
+        )
+        self.assertFalse(message.get("tool_calls"))
+        message, calls, _content, failure = resolve_tool_markup(
+            message,
+            [],
+            message["content"],
+            {},
+            {"reasoning_notes": []},
+            [{"type": "function", "function": {"name": "read_file"}}],
+        )
+        self.assertIsNone(failure)
+        self.assertEqual(len(calls), 1)
+        self.assertEqual(message["tool_calls"][0]["function"]["name"], "read_file")
+
+    def test_plain_dsml_preserves_literal_reasoning_tags_in_parameter(self):
+        from ouroboros.llm import LLMClient
+
+        literal = "<think>literal</think><reasoning>bytes</reasoning>"
+        msg = {
+            "content": (
+                '<tool_calls><invoke name="write_file">'
+                f'<parameter name="content" string="true">{literal}</parameter>'
+                "</invoke></tool_calls>"
+            ),
+            "tool_calls": [],
+        }
+        parsed = LLMClient._parse_tool_calls_from_content(msg, {"write_file"})
+        args = json.loads(parsed["tool_calls"][0]["function"]["arguments"])
+        self.assertEqual(args["content"], literal)
+        self.assertIsNone(parsed["content"])
+
+    def test_prose_quoting_tool_markup_is_not_a_wire_envelope(self):
+        from ouroboros.tool_call_markup import content_has_tool_markup
+
+        self.assertFalse(
+            content_has_tool_markup(
+                "Document the literal <tool_call> tag without invoking anything."
+            )
+        )
+        self.assertFalse(
+            content_has_tool_markup(
+                "Example: <tool_calls><invoke name=\"read_file\"></invoke></tool_calls>"
+            )
+        )
+
+    def test_prefixed_executable_dsml_fails_closed_without_promotion(self):
+        from ouroboros.tool_call_markup import (
+            TOOL_MARKUP_PROTOCOL_FAIL_TEXT,
+            resolve_tool_markup,
+        )
+
+        for markup in (
+            '<tool_calls><invoke name="read_file"></invoke></tool_calls>',
+            "<tool_calls><invok</tool_calls>",
+        ):
+            with self.subTest(markup=markup):
+                content = f"I will use the tool now.\n{markup}"
+                message = {"content": content, "tool_calls": []}
+                resolved, calls, unchanged, failure = resolve_tool_markup(
+                    message,
+                    [],
+                    content,
+                    {},
+                    {"reasoning_notes": []},
+                    [{"type": "function", "function": {"name": "read_file"}}],
+                )
+                self.assertEqual(resolved, message)
+                self.assertEqual(calls, [])
+                self.assertEqual(unchanged, content)
+                self.assertIsNotNone(failure)
+                self.assertEqual(failure[0], TOOL_MARKUP_PROTOCOL_FAIL_TEXT)
+
+    def test_prefixed_non_executable_tag_mention_remains_content(self):
+        from ouroboros.tool_call_markup import resolve_tool_markup
+
+        content = "Document the literal <tool_call> tag without invoking anything."
+        message = {"content": content, "tool_calls": []}
+        resolved, calls, unchanged, failure = resolve_tool_markup(
+            message, [], content, {}, {"reasoning_notes": []}, [],
+        )
+
+        self.assertEqual(resolved, message)
+        self.assertEqual(calls, [])
+        self.assertEqual(unchanged, content)
+        self.assertIsNone(failure)

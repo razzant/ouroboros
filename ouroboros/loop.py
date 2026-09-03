@@ -15,6 +15,7 @@ from typing import Any, Callable, Dict, List, Optional, Tuple
 import logging
 
 from ouroboros.llm import LLMClient, normalize_reasoning_effort, add_usage
+from ouroboros.tool_call_markup import resolve_tool_markup
 from ouroboros import task_pacing
 # The acceptance obligations/dialogue/decision machinery moved WHOLE into
 # `acceptance_dialogue.py`; loop.py keeps the fence, checkpoint, panel-execution
@@ -25,15 +26,21 @@ from ouroboros.acceptance_dialogue import (  # noqa: F401 — re-export
     ACCEPTANCE_REASON_UNSPECIFIED,
     _acceptance_dialogue_quorum,
     _apply_task_acceptance_result,
+    _begin_task_acceptance_fence,
     _collect_acceptance_obligations,
     _dispose_obligations_on_clean_pass,
+    _direct_context_fence_state,
+    _end_task_acceptance_fence,
     _format_obligations_clause,
     _mark_agent_acceptance_runs_advisory,
     _open_acceptance_obligations,
     _prior_acceptance_run,
+    _set_applied_host_acceptance_impact,
     _set_acceptance_decision,
+    acceptance_fence_failure_exhausted,
     acceptance_dialogue_history,
     bind_acceptance_paid_identity,
+    finalize_acceptance_fence_failure,
 )
 from ouroboros.config import adaptive_quorum, get_context_mode, get_light_model, get_review_enforcement, get_task_review_mode, resolve_effort
 from ouroboros.outcomes import ACCEPTANCE_BYPASS_REASON_BY_RAIL, ACCEPTANCE_DECISION_STATUSES, ACCEPTANCE_FINALIZED_UNACCEPTED, ACCEPTANCE_REVISION_REQUESTED, REASON_DELIVERY_CONTROL_DEGRADED, REASON_OWNER_REQUESTED_FINALIZATION, RESULT_INFRA_FAILED, extract_final_answer, latest_agent_defined_verification, latest_unreconciled_failed_verification, latest_unreconciled_masked_verification, reviewable_effect_projection, should_nudge_verification, turn_has_reviewable_effects
@@ -685,120 +692,6 @@ def _task_acceptance_eligible(
     return False, "skipped_unknown_mode"
 
 
-def _begin_task_acceptance_fence(ctx: Any, task_id: str) -> tuple[bool, Any]:
-    """Optional seam implemented by the supervisor under its queue lock."""
-    admission_lock = getattr(ctx, "owner_message_admission_lock", None)
-    admission_agent = getattr(ctx, "owner_message_admission_agent", None)
-    if admission_lock is not None and admission_agent is not None:
-        with admission_lock:
-            ctx._task_acceptance_owner_generation = int(getattr(admission_agent, "_owner_message_generation", 0) or 0)
-    existing = getattr(ctx, "_task_acceptance_fence_token", None)
-    if existing is not None:
-        inspect = getattr(ctx, "inspect_acceptance_fence", None)
-        if callable(inspect):
-            try:
-                refreshed = inspect(token=str(existing))
-                ctx._task_acceptance_queue_descendants = (
-                    list(refreshed.get("queue_descendants") or [])
-                    if isinstance(refreshed, dict) else []
-                )
-                if isinstance(refreshed, dict):
-                    ctx._task_acceptance_fence_generation = int(
-                        refreshed.get("owner_message_generation") or 0
-                    )
-            except Exception:
-                log.debug("Queue-owned acceptance fence inspection failed", exc_info=True)
-                return False, existing
-        return True, existing
-    callback = getattr(ctx, "begin_acceptance_fence", None)
-    if not callable(callback):
-        return True, None  # one-minor/direct-context compatibility
-    try:
-        meta = getattr(ctx, "task_metadata", {})
-        meta = meta if isinstance(meta, dict) else {}
-        response = callback(
-            root_task_id=str(
-                meta.get("root_task_id") or getattr(ctx, "root_task_id", "") or task_id
-            ),
-            task_id=str(task_id),
-        )
-    except Exception:
-        log.debug("Queue-owned acceptance fence begin failed", exc_info=True)
-        return False, None
-    if isinstance(response, dict):
-        token = response.get("token")
-        ctx._task_acceptance_queue_descendants = list(response.get("queue_descendants") or [])
-        ctx._task_acceptance_fence_generation = int(
-            response.get("owner_message_generation") or 0
-        )
-    else:
-        token = response
-        ctx._task_acceptance_queue_descendants = []
-        ctx._task_acceptance_fence_generation = None
-    if token in (None, False, ""):
-        return False, None
-    ctx._task_acceptance_fence_token = token
-    return True, token
-
-
-def _end_task_acceptance_fence(
-    ctx: Any, *, outcome: str, admission_locked: bool = False,
-) -> bool:
-    token = getattr(ctx, "_task_acceptance_fence_token", None)
-    if token is None and str(outcome) == "revision":
-        token = getattr(ctx, "_task_acceptance_sealed_fence_token", None)
-    callback = getattr(ctx, "end_acceptance_fence", None)
-    admission_lock = getattr(ctx, "owner_message_admission_lock", None)
-    admission_agent = getattr(ctx, "owner_message_admission_agent", None)
-    acquired = False
-    try:
-        if admission_lock is not None and admission_agent is not None and not admission_locked:
-            admission_lock.acquire()
-            acquired = True
-        expected_owner_generation = getattr(ctx, "_task_acceptance_owner_generation", None)
-        direct_generation_mismatch = bool(
-            expected_owner_generation is not None
-            and admission_agent is not None
-            and int(getattr(admission_agent, "_owner_message_generation", 0) or 0)
-            != int(expected_owner_generation)
-        )
-        effective_outcome = "revision" if direct_generation_mismatch else str(outcome)
-        if token is None or not callable(callback):
-            ctx._task_acceptance_fence_generation_mismatch = direct_generation_mismatch
-            return True
-        expected_queue_generation = getattr(ctx, "_task_acceptance_fence_generation", None)
-        if expected_queue_generation is None:
-            response = callback(token=token, outcome=effective_outcome)
-        else:
-            response = callback(
-                token=token,
-                outcome=effective_outcome,
-                expected_generation=int(expected_queue_generation),
-            )
-    except Exception:
-        log.debug("Queue-owned acceptance fence transition failed", exc_info=True)
-        return False
-    finally:
-        if acquired:
-            admission_lock.release()
-    if isinstance(response, dict) and not bool(response.get("ok", True)):
-        return False
-    status = str((response or {}).get("status") or "") if isinstance(response, dict) else ""
-    generation_mismatch = bool(
-        direct_generation_mismatch
-        or (isinstance(response, dict) and response.get("generation_mismatch"))
-    )
-    ctx._task_acceptance_fence_generation_mismatch = generation_mismatch
-    ctx._task_acceptance_fence_token = None
-    ctx._task_acceptance_fence_generation = None
-    ctx._task_acceptance_queue_descendants = []
-    if status == "sealed" or (not status and effective_outcome != "revision"):
-        ctx._task_acceptance_sealed_fence_token = token
-    else:
-        ctx._task_acceptance_sealed_fence_token = None
-    return True
-
-
 def _supersede_delivery_acceptance_binding(
     tools: ToolRegistry,
     llm_trace: Dict[str, Any],
@@ -949,7 +842,11 @@ def _task_acceptance_owner_generation_changed(ctx: Any) -> bool:
             and int(state.get("owner_message_generation") or 0) != int(expected_queue)
         )
     except Exception:
-        return True
+        # A transport failure is not an owner follow-up: the generation-matched
+        # end transition remains the authoritative guard, so an unknown check
+        # must never supersede a paid panel.
+        log.debug("Acceptance fence generation check failed; treating as unchanged", exc_info=True)
+        return False
 
 
 def _supersede_task_acceptance_for_evidence_change(
@@ -1425,25 +1322,6 @@ def _record_host_acceptance_run(ctx: _TaskAcceptanceContext, result: Any) -> Dic
     return run_record
 
 
-def _set_applied_host_acceptance_impact(
-    run_record: Any,
-    result: Any,
-    *,
-    requires_revision: bool,
-) -> None:
-    """Record what the host actually did with a panel result."""
-    if not isinstance(run_record, dict):
-        return
-    if requires_revision:
-        run_record["enforcement_impact"] = "requires_revision"
-        return
-    from ouroboros.review_substrate import task_acceptance_is_clean
-
-    run_record["enforcement_impact"] = (
-        "allows_completion" if task_acceptance_is_clean(result) else "degrades_completion"
-    )
-
-
 def _record_acceptance_infra_failure(ctx: _TaskAcceptanceContext, exc: Exception) -> bool:
     """Finish an eligible mandatory panel as DEGRADED, never as a silent skip."""
     ctx.tools._ctx._task_acceptance_reviewed = True
@@ -1486,18 +1364,6 @@ def _record_acceptance_infra_failure(ctx: _TaskAcceptanceContext, exc: Exception
     })
     ctx.emit_progress("Task acceptance review: DEGRADED after host review infrastructure failure.")
     return False
-
-
-def _direct_context_fence_state(tools_ctx: Any, fence_token: Any) -> Any:
-    """Review-binding fence state: the queue-owned token when present, else the
-    direct-chat generations (no queue fence exists for a direct context)."""
-    if fence_token is not None:
-        return fence_token
-    return {
-        "state": "direct_context",
-        "owner_generation": getattr(tools_ctx, "_task_acceptance_owner_generation", None),
-        "queue_generation": getattr(tools_ctx, "_task_acceptance_fence_generation", None),
-    }
 
 
 def _run_task_acceptance_review_once(
@@ -1580,6 +1446,10 @@ def _run_task_acceptance_review_once(
         llm_trace["review_decision"] = {
             "eligibility": "acceptance_fence_failed", "trigger": trigger,
         }
+        if acceptance_fence_failure_exhausted(
+            tools._ctx, llm_trace, emit_progress,
+        ):
+            return False
         _append_or_merge_user_message(
             messages,
             "[TASK ACCEPTANCE WAIT] The supervisor could not atomically close "
@@ -1588,6 +1458,7 @@ def _run_task_acceptance_review_once(
         )
         emit_progress("Task acceptance review waiting for the queue-owned admission fence.")
         return True
+    tools._ctx._task_acceptance_fence_failures = 0
     quiescent, subtree_statuses = _task_acceptance_subtree_snapshot(
         tools._ctx, drive_root, task_id,
     )
@@ -3844,10 +3715,10 @@ def _maybe_enforce_child_absorption_gate(
         reason_code="children_unabsorbed",
     )
     _merge_finalization_trace(llm_trace, forced_trace)
-    _run_forced_children_acceptance(
+    acceptance_result = _run_forced_children_acceptance(
         tools, limit_ctx, text, messages, emit_progress, llm_trace,
     )
-    return text, usage, llm_trace
+    return acceptance_result or (text, usage, llm_trace)
 
 
 def _run_forced_children_acceptance(
@@ -3857,17 +3728,8 @@ def _run_forced_children_acceptance(
     messages: List[Dict[str, Any]],
     emit_progress: Callable[[str], None],
     llm_trace: Dict[str, Any],
-) -> None:
-    """Content acceptance still runs on the forced children_unabsorbed rail (owner Q2A).
-
-    The panel uses the ORDINARY entry point
-    (`_run_task_acceptance_review_once`) after the forced answer text exists
-    but BEFORE the loop seals it; the evidence packet carries the
-    undispositioned children via the ctx stash. The forced rail can never
-    take another model round, so a ``True`` return terminalizes here: a
-    requested improvement pass downgrades to ``finalized_unaccepted``; a WAIT
-    shape that never ran the panel keeps the typed acceptance-bypass verdict
-    from `_record_forced_finalization`. Never raises — salvage outranks review."""
+) -> Optional[Tuple[str, Dict[str, Any], Dict[str, Any]]]:
+    """Run acceptance on the forced child rail, preserving typed infra failure."""
     if not str(text or "").strip():
         return
     tools_ctx = tools._ctx
@@ -3891,16 +3753,18 @@ def _run_forced_children_acceptance(
             debt.append({"omitted": len(undecided) - 20, "total": len(undecided)})
         tools_ctx._forced_undispositioned_children = debt
         another_round = _run_task_acceptance_review_once(
-            tools=tools,
-            content=str(text),
-            task_id=limit_ctx.task_id,
-            task_type=limit_ctx.task_type,
-            llm_trace=llm_trace,
-            drive_root=limit_ctx.drive_root,
-            messages=messages,
-            emit_progress=emit_progress,
+            tools=tools, content=str(text), task_id=limit_ctx.task_id, task_type=limit_ctx.task_type,
+            llm_trace=llm_trace, drive_root=limit_ctx.drive_root, messages=messages, emit_progress=emit_progress,
         )
         if not another_round:
+            fence_failure = finalize_acceptance_fence_failure(
+                tools_ctx,
+                limit_ctx,
+                llm_trace,
+                _forced_fallback_result,
+            )
+            if fence_failure is not None:
+                return fence_failure
             return
         tools_ctx._task_acceptance_reviewed = True
         _end_task_acceptance_fence(tools_ctx, outcome="terminal")
@@ -3920,8 +3784,7 @@ def _run_forced_children_acceptance(
             })
             emit_progress(
                 "Task acceptance ran on the forced rail; the requested improvement "
-                "pass is unavailable, finalizing unaccepted."
-            )
+                "pass is unavailable, finalizing unaccepted.")
     except Exception:
         log.debug("Forced children_unabsorbed acceptance run failed", exc_info=True)
     finally:
@@ -4128,6 +3991,11 @@ def _no_tool_final_answer(
         # free-form answer re-enters the acceptance panel (blocking not
         # weakened); other lanes still arm where JSON keep/replace is needed.
         return None
+    fence_failure = finalize_acceptance_fence_failure(
+        tools._ctx, limit_ctx, llm_trace, _forced_fallback_result,
+    )
+    if fence_failure is not None:
+        return fence_failure
     candidate = getattr(tools._ctx, "_delivery_candidate", None)
     if isinstance(candidate, DeliveryCandidate):
         candidate.acceptance_binding = _delivery_acceptance_binding(
@@ -6324,6 +6192,10 @@ def run_llm_loop(
                 (),
             )
             content = msg.get("content")
+            msg, tool_calls, content, markup_failure = resolve_tool_markup(
+                msg, tool_calls, content, accumulated_usage, llm_trace, tool_schemas)
+            if markup_failure is not None:
+                return markup_failure
             _latch_final_answer_marker(llm_trace, content, current_tool_calls=tool_calls)
             # Every metered response counts as nanny progress.
             _note_nanny_delegate_activity(tools._ctx, round_idx, accumulated_usage, [])
@@ -6345,9 +6217,8 @@ def run_llm_loop(
             _emit_round_progress(content, msg, emit_progress, llm_trace)
 
             handle_tool_calls(
-                tool_calls, tools, drive_logs, task_id, stateful_executor,
-                messages, llm_trace, emit_progress
-            )
+                tool_calls, tools, drive_logs, task_id, stateful_executor, messages,
+                llm_trace, emit_progress)
 
             # Nanny-economics baseline (poltergeist phase B): mark the
             # round's metered progress; re-baseline when it touched a
@@ -6357,8 +6228,7 @@ def run_llm_loop(
             )
 
             _prepare_post_tool_budget_context(
-                tools, limit_ctx, llm_trace, active_model, active_use_local, active_effort,
-            )
+                tools, limit_ctx, llm_trace, active_model, active_use_local, active_effort)
             budget_result = _check_budget_limits(
                 limit_ctx,
                 budget_remaining_usd,
