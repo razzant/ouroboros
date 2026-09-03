@@ -1062,7 +1062,7 @@ def derive_loop_outcome(final_text: str, usage: Dict[str, Any], llm_trace: Dict[
         failure = {"kind": _infra[1], "reason_code": reason_code}
     elif delivery_candidate.get("degraded") and not deferred_child_suffix:
         execution_status = EXECUTION_DEGRADED
-        reason_code = usage_reason or REASON_DELIVERY_CONTROL_DEGRADED
+        reason_code = usage_reason or str(delivery_candidate.get("degraded_reason") or "") or REASON_DELIVERY_CONTROL_DEGRADED
         failure = {"kind": "finalization_control", "reason_code": reason_code}
     elif deferred_child_count:
         execution_status = EXECUTION_DEGRADED
@@ -1235,7 +1235,7 @@ def derive_loop_outcome(final_text: str, usage: Dict[str, Any], llm_trace: Dict[
         # is not "missing" one; marker-free tasks (no answer_protocol) simply read True,
         # which downstream consumers must interpret via the contract, not as a failure.
         "final_answer_missing_sentinel": not final_answer_payload,
-        "failure": headline_failure,
+        "failure": headline_failure, "degraded": bool(delivery_candidate.get("degraded")), "degraded_reason": str(delivery_candidate.get("degraded_reason") or ""),
         "recoveries": recovered_tool_errors[:20],
         "usage": {
             "cost_usd": (

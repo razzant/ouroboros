@@ -124,7 +124,13 @@ class PluginAPI(Protocol):
         *,
         methods: Sequence[str] = ("GET",),
     ) -> None:
-        """Register ``/api/extensions/<skill>/<path>`` for allowed methods."""
+        """Register ``/api/extensions/<skill>/<path>`` for allowed methods.
+
+        The host owns GET/HEAD for the exact paths ``manifest`` and
+        ``settings_section`` and for everything under ``module/`` in that
+        namespace, so a skill route registered there is shadowed for GET/HEAD
+        (POST and the other methods still reach the skill); use another path.
+        """
         ...
 
     def register_ws_handler(
@@ -148,6 +154,21 @@ class PluginAPI(Protocol):
         ``render`` is host-owned declarative UI, iframe, or a reviewed sandboxed
         module served only for a live tab and bridged to this skill's route prefix.
         Same-origin SPA modules are outside this contract.
+
+        ``render.start`` declares the card's launch policy: ``"auto"`` starts when
+        the Widgets page is shown and stops when the owner leaves; ``"manual"``
+        shows a Start button and leaving the page is an ordered Stop; ``"retain"``
+        starts on the first Widgets visit and keeps running while the owner is on
+        other pages until Stop, skill disable/unload/delete, app reload, or closing
+        Ouroboros — it never outlives the window; a same-SHA server reconnect keeps
+        a retained frame whose skill is live again with the same revision, while a
+        changed revision is re-mounted at once when Widgets is visible and at the
+        next Widgets entry while it is hidden. Defaults:
+        ``module``/``iframe`` → ``"manual"``; ``declarative`` → ``"auto"`` and
+        accepts nothing else. The validator
+        (``ouroboros/extension_ui_validation.py::WIDGET_START_MODES``) is the SSOT
+        and fills the default into the stored declaration; the owner's per-card
+        override (``ui_preferences.widget_start_mode``) always wins.
         """
         ...
 

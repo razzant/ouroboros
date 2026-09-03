@@ -498,3 +498,45 @@ def test_notifier_local_failure_reaches_supervisor(tmp_path, monkeypatch):
     monkeypatch.setattr(nt, "_load_settings", broken_settings)
     with pytest.raises(RuntimeError, match="local notifier defect"):
         asyncio.run(nt._make_notifier(api)())
+
+
+def test_tasks_notify_reads_lifecycle_status_and_severity_icon(tmp_path, monkeypatch):
+    """The lifecycle AXIS is a dict — read `.status`, never str() the container.
+
+    Pushes once read `⚠️ Task 8023b715 done · 25r · $7.98 · {'status':
+    'completed'}`: every task looked degraded and leaked a Python dict repr.
+    The word now comes from `outcome_axes.lifecycle.status` (legacy bare-string
+    rows still resolve), and the icon additionally warns on a degraded/
+    best_effort execution axis. This adapter is deliberately NARROWER than the
+    web card's `taskOutcomeSeverity`: failed and cancelled are shown by their
+    lifecycle word with the same ⚠️, not with a distinct icon.
+    """
+    nt = _load(); api, data = _api(tmp_path); _Rec.sent = []
+    monkeypatch.setattr(nt, "TelegramClient", _Rec)
+    rows = [
+        {"task_id": "ok1", "rounds": 25,
+         "outcome_axes": {"lifecycle": {"status": "completed"},
+                          "execution": {"status": "ok", "reason_code": ""}}},
+        {"task_id": "deg1",
+         "outcome_axes": {"lifecycle": {"status": "completed"},
+                          "execution": {"status": "degraded",
+                                        "reason_code": "plan_review_advisory"}}},
+        {"task_id": "fail1",
+         "outcome_axes": {"lifecycle": {"status": "failed"},
+                          "execution": {"status": "failed", "reason_code": "boom"}}},
+        {"task_id": "legacy1", "outcome_axes": {"lifecycle": "completed"}},
+    ]
+    with open(data / "logs" / "chat.jsonl", "w", encoding="utf-8") as f:
+        for row in rows:
+            f.write(json.dumps({"type": "task_summary", **row}) + "\n")
+    state = {"notified_task_ids": []}
+    asyncio.run(nt._check_tasks_notify(api, {"TELEGRAM_NOTIFY_TASKS": "on"}, 42, state, "en"))
+
+    assert [text for _chat, text in _Rec.sent] == [
+        "✅ Task ok1 done · 25r",
+        "⚠️ Task deg1 done",
+        "⚠️ Task fail1 done · failed",
+        "✅ Task legacy1 done",
+    ]
+    # The container is never stringified into an owner-visible push.
+    assert all("{'status'" not in text for _chat, text in _Rec.sent)

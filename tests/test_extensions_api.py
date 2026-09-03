@@ -663,7 +663,7 @@ def test_api_extension_manifest_prefers_runtime_load_error(tmp_path, monkeypatch
         _stop_patches(patches)
 
 
-def test_api_extensions_index_marks_widget_only_extensions_as_ui_pending(
+def test_api_extensions_index_lists_widget_only_extension_tabs(
     tmp_path, monkeypatch
 ):
     from ouroboros import extension_loader
@@ -706,10 +706,8 @@ def test_api_extensions_index_marks_widget_only_extensions_as_ui_pending(
         entry = next(s for s in data["skills"] if s["name"] == "ext_widget")
         assert entry["live_loaded"] is True
         assert entry["dispatch_live"] is False
-        assert entry["ui_tabs_pending"] == []
         assert data["live"]["ui_tabs"][0]["key"] == "ext_widget:weather"
         assert data["live"]["ui_tabs"][0]["render"]["kind"] == "declarative"
-        assert data["live"]["ui_tabs_pending"] == []
     finally:
         _stop_patches(patches)
 
@@ -1121,7 +1119,7 @@ def test_api_extension_dispatcher_routes_to_registered_handler(tmp_path, monkeyp
         _stop_patches(patches)
 
 
-def test_api_extension_module_serves_only_live_declared_entry(tmp_path, monkeypatch):
+def test_api_extension_module_serves_live_reviewed_js(tmp_path, monkeypatch):
     from ouroboros import extension_loader
     from ouroboros.skill_loader import (
         SkillReviewState,
@@ -1138,6 +1136,7 @@ def test_api_extension_module_serves_only_live_declared_entry(tmp_path, monkeypa
     )
     skill_dir = _write_ext(skills_root, "ext_module", permissions=["widget"], plugin=plugin)
     (skill_dir / "widget.js").write_text("window.__ok = true;\n", encoding="utf-8")
+    (skill_dir / "other.js").write_text("window.__other = true;\n", encoding="utf-8")
     monkeypatch.setenv("OUROBOROS_SKILLS_REPO_PATH", str(skills_root))
     client, drive_root, patches = _make_client(tmp_path, monkeypatch)
     try:
@@ -1157,8 +1156,11 @@ def test_api_extension_module_serves_only_live_declared_entry(tmp_path, monkeypa
         assert ok.status_code == 200, ok.text
         assert "window.__ok" in ok.text
         assert ok.headers["cache-control"] == "no-store"
+        assert ok.headers["access-control-allow-origin"] == "*"
 
-        assert client.get("/api/extensions/ext_module/module/other.js").status_code == 404
+        # Q21=A: every reviewed .js of the payload is served, not only the declared entry.
+        other = client.get("/api/extensions/ext_module/module/other.js")
+        assert other.status_code == 200 and other.text == "window.__other = true;\n"
         assert client.get("/api/extensions/ext_module/module/../widget.js").status_code in {400, 404}
     finally:
         _stop_patches(patches)

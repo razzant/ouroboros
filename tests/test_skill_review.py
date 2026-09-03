@@ -1197,7 +1197,7 @@ def test_skill_review_pack_carries_descriptor_not_raw_bytes(tmp_path):
 
 def test_skill_review_blocks_executables_by_magic_not_filename(tmp_path):
     """X4/В21: loadable executables are hard-blocked by CONTENT magic bytes
-    (ELF/PE/Mach-O/WASM/.pyc) regardless of filename; a disguised extension
+    (ELF/PE/Mach-O/.pyc) regardless of filename; a disguised extension
     does not evade the block."""
     import importlib.util
 
@@ -1208,7 +1208,6 @@ def test_skill_review_blocks_executables_by_magic_not_filename(tmp_path):
     samples = {
         "innocent.txt": b"\x7fELF" + b"\x00" * 128,          # ELF, disguised name
         "tool.dat": b"MZ\x90\x00" + b"\xff" * 64,            # PE (non-UTF-8 body)
-        "module.blob": b"\x00asm\x01\x00\x00\x00",           # WASM
         "lib.data": b"\xcf\xfa\xed\xfe" + b"\x00" * 32,      # Mach-O 64-bit LE
         "cache.dat": importlib.util.MAGIC_NUMBER + b"\x00" * 32,  # .pyc
     }
@@ -1217,6 +1216,80 @@ def test_skill_review_blocks_executables_by_magic_not_filename(tmp_path):
         target.write_bytes(payload)
         with pytest.raises(_SkillBinaryPayload):
             _read_skill_file(target, relpath=name)
+
+
+def test_skill_review_admits_wasm_as_content_hash_bound_descriptor(tmp_path):
+    """Q15=A: WebAssembly left the loader-magic hard-block list. The host never
+    loads it natively (it runs only inside the browser's sandboxed widget frame),
+    so a ``.wasm`` file takes the ordinary non-UTF-8 path: the review pack carries
+    a typed {path,size,mime_from_name,sha256} descriptor — the reviewer does not
+    read the WebAssembly code — while the payload content hash binds every byte.
+    Native loader magics (the renamed ELF above) still hard-block."""
+    import hashlib as _hashlib
+
+    from ouroboros.skill_loader import compute_content_hash
+    from ouroboros.skill_review import _build_skill_file_packs, _read_skill_file
+    from ouroboros.skill_review_passes import executable_magic_kind
+
+    skill_dir = tmp_path / "skills" / "wasmpack"
+    skill_dir.mkdir(parents=True)
+    (skill_dir / "skill.json").write_text('{"name": "wasmpack"}', encoding="utf-8")
+    wasm = b"\x00asm\x01\x00\x00\x00" + b"\x01\x85\x80\x80\x80\x00\xff\xfe" * 4
+    (skill_dir / "core.wasm").write_bytes(wasm)
+
+    assert executable_magic_kind(wasm, is_utf8_text=False) == ""
+    text, digest, descriptor = _read_skill_file(skill_dir / "core.wasm", relpath="core.wasm")
+    assert text is None and digest == _hashlib.sha256(wasm).digest()
+    assert descriptor is not None and descriptor.pop("mime_from_name")
+    assert descriptor == {"path": "core.wasm", "size": len(wasm), "sha256": _hashlib.sha256(wasm).hexdigest()}
+    joined = "\n".join(_build_skill_file_packs(skill_dir))
+    assert "core.wasm (binary file — descriptor only" in joined
+    assert _hashlib.sha256(wasm).hexdigest() in joined
+    # Content-hash-bound: one changed byte is a different payload (the stored
+    # review goes stale), exactly like every other payload file.
+    before = compute_content_hash(skill_dir)
+    (skill_dir / "core.wasm").write_bytes(wasm[:-1] + b"\x00")
+    assert compute_content_hash(skill_dir) != before
+
+
+def test_skill_review_routes_utf8_decodable_wasm_to_descriptor(tmp_path):
+    """W5-7/W5-11: the descriptor route is chosen by the WebAssembly magic, not by a
+    failed UTF-8 decode. The canonical 8-byte module and a functional module made
+    only of ASCII bytes both decode as UTF-8, yet neither may be inlined as text —
+    "the reviewer does not read the WebAssembly code" must hold for every module.
+    A native loader magic renamed ``.wasm`` still hard-blocks by content."""
+    import hashlib as _hashlib
+
+    from ouroboros.skill_review import _build_skill_file_packs, _read_skill_file, _SkillBinaryPayload
+    from ouroboros.skill_review_passes import WASM_MAGIC
+
+    skill_dir = tmp_path / "skills" / "wasmtext"
+    skill_dir.mkdir(parents=True)
+    (skill_dir / "skill.json").write_text('{"name": "wasmtext"}', encoding="utf-8")
+    canonical = WASM_MAGIC + b"\x01\x00\x00\x00"
+    # (func (export "f") (result i32) i32.const 42) — type, function, export and code
+    # sections; every byte < 0x80 (validated with WebAssembly.validate, f() == 42).
+    functional = (
+        canonical
+        + b"\x01\x05\x01\x60\x00\x01\x7f"
+        + b"\x03\x02\x01\x00"
+        + b"\x07\x05\x01\x01f\x00\x00"
+        + b"\x0a\x06\x01\x04\x00\x41\x2a\x0b"
+    )
+    for name, module in (("empty.wasm", canonical), ("answer.wasm", functional)):
+        module.decode("utf-8")  # the precondition the decode-first branch mistook for text
+        (skill_dir / name).write_bytes(module)
+        text, digest, descriptor = _read_skill_file(skill_dir / name, relpath=name)
+        assert text is None and digest == _hashlib.sha256(module).digest(), name
+        assert descriptor is not None and descriptor["sha256"] == _hashlib.sha256(module).hexdigest()
+        assert descriptor["path"] == name and descriptor["size"] == len(module)
+    joined = "\n".join(_build_skill_file_packs(skill_dir))
+    assert "empty.wasm (binary file — descriptor only" in joined
+    assert "answer.wasm (binary file — descriptor only" in joined
+    assert "\x00asm" not in joined  # module bytes never inlined, not even as "text"
+    (skill_dir / "core.wasm").write_bytes(b"\x7fELF" + b"\x00" * 32)  # ELF disguised as wasm
+    with pytest.raises(_SkillBinaryPayload):
+        _read_skill_file(skill_dir / "core.wasm", relpath="core.wasm")
 
 
 def test_skill_review_does_not_block_text_by_scary_filename(tmp_path):

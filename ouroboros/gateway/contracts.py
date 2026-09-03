@@ -8,6 +8,8 @@ from __future__ import annotations
 
 from typing import Any, Dict, List, Optional
 
+from ouroboros.gateway.widgets import ExtensionLiveSnapshot, WidgetTab, WidgetsResponse
+
 try:  # Python 3.11+
     from typing import Literal, NotRequired, Required, TypedDict  # type: ignore[attr-defined]
 except ImportError:  # pragma: no cover - CI supports Python 3.10.
@@ -861,6 +863,7 @@ class SkillDeleteResponse(TypedDict, total=False):
 class UiPreferencesResponse(TypedDict):
     ok: NotRequired[bool]
     widget_order: list[str]
+    widget_start_mode: dict[str, Literal["auto", "manual", "retain"]]  # owner per-card launch-policy override
     nested_subagents_expanded: bool
     sidebar_width: int  # px; 0 = CSS default (resizable side sections, v6.33.0)
     project_panel_width: int  # px; 0 = CSS default
@@ -912,6 +915,7 @@ class UploadResponse(TypedDict):
 class ExtensionsIndexResponse(TypedDict, total=False):
     extensions: list[Dict[str, Any]]
     skills: list[Dict[str, Any]]
+    live: ExtensionLiveSnapshot
     lifecycle: Dict[str, Any]
     error: str
 
@@ -1020,6 +1024,10 @@ class _TaskCreateRequestRequired(TypedDict):
 class TaskCreateRequest(_TaskCreateRequestRequired, total=False):
     task_id: str
     type: str
+    # v6.115.0: the run's owner-facing name. Supplied, it fills both name slots
+    # like a promoted chat turn; omitted, admission derives a display-only name
+    # from the request's first line. `metadata.title` is refused (400).
+    title: str
     chat_id: int
     depth: int
     session_id: str
@@ -1548,6 +1556,9 @@ __all__ = [
     "ScheduleDeleteResponse",
     "UploadResponse",
     "ExtensionsIndexResponse",
+    "ExtensionLiveSnapshot",
+    "WidgetTab",
+    "WidgetsResponse",
     "SkillPublishPreflightResponse",
     "SkillLifecycleQueueResponse",
     "MarketplaceSearchResponse",

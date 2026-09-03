@@ -388,10 +388,16 @@ def _projects_summary_safe(request: Request) -> list:
 
 
 def _task_bindings_safe(request: Request) -> dict:
-    """{task_id: {project_id, chat_id}} for tasks bound to a project. The frontend
-    uses this to recognise a project-scoped task card: it suppresses the stray
-    "turn into project" button (P2) AND turns the card into a pointer that opens
-    the bound project's panel (F4). Never raises."""
+    """{task_id: {project_id, chat_id}} for tasks BOUND to a project. The frontend
+    uses this to recognise a bound task card: it suppresses the stray "turn into
+    project" button (P2) AND turns the card into a pointer that opens the bound
+    project's panel (F4).
+
+    Bound is not the same as project-SCOPED: a headless/CLI run carries a
+    project_id for lease and memory without ever being bound (that stays the
+    owner-facing convert/promote act), so it is absent here BY DESIGN. It needs
+    no button gate either — such a run is addressed to its project thread at
+    admission, so it never mints a card in Main. Never raises."""
     try:
         from ouroboros.projects_registry import all_task_project_bindings
 

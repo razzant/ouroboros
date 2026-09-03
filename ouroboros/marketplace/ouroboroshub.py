@@ -267,7 +267,7 @@ def _safe_rel(path: str) -> pathlib.PurePosixPath:
         raise FetchError(f"unsafe catalog file path: {path!r}")
     if any(part in {"node_modules", ".ouroboros_env"} for part in rel.parts):
         raise FetchError(f"catalog file path uses review-opaque dependency directory: {path!r}")
-    if "__pycache__" in rel.parts or rel.suffix.lower() in {".pyc", ".pyo", ".so", ".dylib", ".dll", ".wasm"}:
+    if "__pycache__" in rel.parts or rel.suffix.lower() in {".pyc", ".pyo", ".so", ".dylib", ".dll"}:
         raise FetchError(f"catalog file path uses generated or binary artifact: {path!r}")
     return rel
 

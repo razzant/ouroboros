@@ -9,9 +9,10 @@ from __future__ import annotations
 
 import pathlib
 from collections.abc import Callable, Mapping
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
-from starlette.routing import BaseRoute
+if TYPE_CHECKING:  # type-only: importing the package (and so the contracts) stays transport-free
+    from starlette.routing import BaseRoute
 
 
 def collect_routes(

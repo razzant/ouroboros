@@ -4,6 +4,7 @@ import json
 import os
 import pathlib
 import textwrap
+import urllib.parse
 
 import pytest
 
@@ -43,11 +44,13 @@ def _write_module_widget_smoke_extension(data_dir: pathlib.Path) -> str:
 
 
             def register(api):
+                # Geometry probes are cheap instruments: `start: "auto"` so they mount on show
+                # (framed cards default to `manual` and would wait behind Start otherwise).
                 api.register_route("ping", ping, methods=("GET",))
-                api.register_ui_tab("auto", "Auto module", render={"kind": "module", "entry": "widget.js"})
-                api.register_ui_tab("fixed", "Fixed module", render={"kind": "module", "entry": "widget.js", "height": 480})
-                api.register_ui_tab("capped", "Capped module", render={"kind": "module", "entry": "widget.js", "max_height": 640})
-                api.register_ui_tab("small", "Small module", render={"kind": "module", "entry": "small.js"})
+                api.register_ui_tab("auto", "Auto module", render={"kind": "module", "entry": "widget.js", "start": "auto"})
+                api.register_ui_tab("fixed", "Fixed module", render={"kind": "module", "entry": "widget.js", "height": 480, "start": "auto"})
+                api.register_ui_tab("capped", "Capped module", render={"kind": "module", "entry": "widget.js", "max_height": 640, "start": "auto"})
+                api.register_ui_tab("small", "Small module", render={"kind": "module", "entry": "small.js", "start": "auto"})
             """
         ),
         encoding="utf-8",
@@ -120,13 +123,13 @@ def _write_temporal_module_widget_extension(data_dir: pathlib.Path) -> str:
         textwrap.dedent(
             """\
             def register(api):
-                module = {"kind": "module", "entry": "widget.js"}
+                module = {"kind": "module", "entry": "widget.js", "start": "auto"}
                 api.register_ui_tab("auto", "Temporal auto", render={**module, "span": 2})
                 api.register_ui_tab("capped", "Temporal capped", render={**module, "span": 2, "max_height": 1000})
                 api.register_ui_tab("fixed", "Temporal fixed", render={**module, "height": 480})
-                api.register_ui_tab("floor", "Temporal floor", render={"kind": "module", "entry": "small.js", "max_height": 320})
-                api.register_ui_tab("wide", "Temporal wide", render={"kind": "module", "entry": "wide.js", "span": 2, "max_height": 700})
-                api.register_ui_tab("sibling", "Temporal sibling", render={"kind": "module", "entry": "small.js", "height": 360})
+                api.register_ui_tab("floor", "Temporal floor", render={"kind": "module", "entry": "small.js", "max_height": 320, "start": "auto"})
+                api.register_ui_tab("wide", "Temporal wide", render={"kind": "module", "entry": "wide.js", "span": 2, "max_height": 700, "start": "auto"})
+                api.register_ui_tab("sibling", "Temporal sibling", render={"kind": "module", "entry": "small.js", "height": 360, "start": "auto"})
             """
         ),
         encoding="utf-8",
@@ -303,14 +306,17 @@ _WIDGET_TEMPORAL_TRACE_SCRIPT = r"""
     const start = () => {
         const observer = new MutationObserver((records) => {
             records.forEach((row) => {
-                const target = row.target.nodeType === 1 ? row.target : row.target.parentElement;
-                if (target?.matches?.('style[id^="masonry-style-"]')) {
-                    record('masonry', target, {css: target.textContent});
+                // Masonry writes its plan as custom properties (widgets lifecycle
+                // phase 3): `--masonry-h` on the list is the one write per layout.
+                if (row.type === 'attributes' && row.target.matches?.('.widgets-list')) {
+                    record('masonry', row.target, {height: row.target.style.getPropertyValue('--masonry-h')});
                 }
             });
             scan();
         });
-        observer.observe(document.documentElement, {subtree: true, childList: true});
+        observer.observe(document.documentElement, {
+            subtree: true, childList: true, attributes: true, attributeFilter: ['style'],
+        });
         scan();
     };
     if (document.readyState === 'loading') addEventListener('DOMContentLoaded', start, {once: true});
@@ -594,6 +600,21 @@ def test_ui_smoke_module_widgets_geometry_lifecycle(direct_server_with_data):
                 assert narrow_height > 320
                 page.screenshot(path=str(evidence_dir / "module-widgets-narrow.png"), full_page=True)
 
+                # Leave/return: leaving disposes the framed mount, but the card
+                # keeps its DOM identity (an expando survives only on the same
+                # node), a hidden page issues no list request, and the return
+                # issues exactly one `GET /api/widgets` before mounting again.
+                widgets_list_requests = []
+
+                def record_widgets_request(request):
+                    if urllib.parse.urlparse(request.url).path == "/api/widgets":
+                        widgets_list_requests.append(request.url)
+
+                page.on("request", record_widgets_request)
+                page.evaluate(
+                    "(selector) => { document.querySelector(selector).__ouroCardIdentity = true; }",
+                    card_selector("auto"),
+                )
                 page.evaluate(
                     """() => {
                         const button = [...document.querySelectorAll('[data-nav-page="dashboard"]')]
@@ -606,6 +627,8 @@ def test_ui_smoke_module_widgets_geometry_lifecycle(direct_server_with_data):
                     arg=card_selector("auto"),
                     timeout=10_000,
                 )
+                page.wait_for_timeout(300)
+                assert widgets_list_requests == [], widgets_list_requests
                 page.evaluate(
                     """() => {
                         const button = [...document.querySelectorAll('[data-nav-page="widgets"]')]
@@ -614,6 +637,11 @@ def test_ui_smoke_module_widgets_geometry_lifecycle(direct_server_with_data):
                     }"""
                 )
                 page.locator(card_selector("auto")).locator("iframe").wait_for(state="attached", timeout=10_000)
+                assert page.evaluate(
+                    "(selector) => document.querySelector(selector).__ouroCardIdentity === true",
+                    card_selector("auto"),
+                ), "returning to Widgets must reuse the existing card node, not rebuild the list"
+                assert len(widgets_list_requests) == 1, widgets_list_requests
             finally:
                 browser.close()
     except PlaywrightError as exc:

@@ -63,6 +63,49 @@ def test_architecture_documents_skill_schedule_lifecycle_and_evolution_light_blo
     assert "never auto-written to `identity.md`" in arch
 
 
+def test_chat_id_addressing_docs_match_the_code_that_routes_it():
+    """The chat-0 doctrine is documented where implementers read it (P6).
+
+    ARCHITECTURE previously claimed history replay renders chat-0 frames in the
+    Main stream; the Main filter drops them, so a reader following the doc would
+    look for a CLI run's dialogue in a surface that never shows it. That claim
+    must never come back.
+    """
+    arch = _read("docs/ARCHITECTURE.md")
+    development = _read("docs/DEVELOPMENT.md")
+
+    assert "renders them in the Main stream" not in arch
+    assert "a `chat_id=0` history query coerces to Main" in arch
+    assert "HIDDEN_CHAT_ID" in arch
+    # The headless address is decided at admission, and both outcomes are stated.
+    assert "log_addressing.ingress_chat_id" in arch
+    assert "is refused with a typed 400 rather than honoured" in arch
+    assert "has exactly ONE destination" in arch
+    assert "the only address is `HIDDEN_CHAT_ID` (0)" in arch
+    assert "Registration alone does not qualify" in arch
+    assert "admitted into that project's thread" in arch
+    assert "stays in the hidden partition, silent in every chat" in arch
+    # Scoped is not bound, so the absent conversion button is documented intent.
+    assert "Project-SCOPED is not project-BOUND" in arch
+    # Naming is part of the same admission contract, and its two slots differ.
+    assert "The run is also NAMED at admission, without a model call" in arch
+    assert "`metadata.title` is refused with a" in arch
+    assert "never outranks a real name coined later" in arch
+    # A degraded delivery names its own cause. The doc must keep saying which
+    # code each rail actually produces — the forced rail keeps its own — rather
+    # than renaming one after the other.
+    assert "which is this" in arch and "forced rail's own code" in arch
+    assert "the ordinary repair path records `invalid_delivery_control_after_repair`" in arch
+    assert "falls back to `delivery_control_degraded` only for a" in arch
+    design = _read("docs/DESIGN.md")
+    assert "Where a card does show a cause, it says it in the owner's" in design
+    assert "the record keeps the machine code" in design
+    # The rule itself lives with the other anti-patterns, not only in a changelog.
+    assert "Anti-pattern: a chat id tested for truth" in development
+    assert "notification_chat_route" in development and "coerce_chat_identity" in development
+    assert "tests/test_chat_id_truthiness_guard.py" in development
+
+
 def test_consciousness_prompt_matches_scope_limited_contracts():
     consciousness = _read("prompts/CONSCIOUSNESS.md")
 

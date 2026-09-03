@@ -155,10 +155,15 @@ def _derive_project_name(drive_root: object, task_id: str) -> str:
 
 
 def _preset_suggested_name(drive_root: object, task_id: str) -> str:
-    """The LLM title the proactive card namer already coined for this task (Cluster B),
-    read from the persisted result then the live queue. Reused by turn-into-project so
-    the conversion needs no extra LLM call. Empty when the namer has not run yet (a
-    convert click within the first ~second). Never raises."""
+    """The name already sitting in this task's ``suggested_name`` slot, read from
+    the persisted result then the live queue. Reused by turn-into-project so the
+    conversion needs no extra LLM call.
+
+    Two producers fill that slot and this function cannot tell them apart, which
+    is why its naming reason says only where the name was READ: the proactive
+    card namer coins one with a model for a Main-chat turn, and headless
+    admission derives one lexically from the request's first line. Empty when
+    neither has run (a convert click within the first ~second). Never raises."""
     try:
         from ouroboros.task_results import load_task_result
 
@@ -646,7 +651,7 @@ async def api_project_from_task(request: Request) -> JSONResponse:
             if explicit_title:
                 project_name, reason = explicit_title, "explicit_task_title"
             elif preset:
-                project_name, reason = preset, "proactive_namer"
+                project_name, reason = preset, "preset_suggested_name"
             else:
                 # A skill/system task carries no owner request text; give the namer an
                 # explicit skill-derived candidate so the conversion never dead-ends at

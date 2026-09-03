@@ -40,6 +40,7 @@ def collect_routes(
         api_skill_review_history_detail,
         api_skill_toggle,
     )
+    from ouroboros.gateway.widgets import api_widgets
     from ouroboros.gateway.files import (
         api_chat_upload,
         api_chat_upload_delete,
@@ -151,9 +152,10 @@ def collect_routes(
     routes: list[BaseRoute] = [
         Route("/api/health", endpoint=api_health),
         Route("/api/state", endpoint=api_state),
+        Route("/api/widgets", endpoint=api_widgets, methods=["GET"]),
         Route("/api/extensions", endpoint=api_extensions_index, methods=["GET"]),
         Route("/api/extensions/{skill}/manifest", endpoint=api_extension_manifest, methods=["GET"]),
-        Route("/api/extensions/{skill}/module/{entry}", endpoint=api_extension_module, methods=["GET"]),
+        Route("/api/extensions/{skill}/module/{entry:path}", endpoint=api_extension_module, methods=["GET"]),
         Route(
             "/api/extensions/{skill}/settings_section",
             endpoint=api_extension_settings_section,

@@ -25,7 +25,7 @@ from typing import Any, Dict, Iterator, List, Optional
 from ouroboros.contracts.chat_id_policy import project_chat_id
 from ouroboros.contracts.schema_versions import with_schema_version
 from ouroboros.project_facts import sanitize_project_id
-from ouroboros.utils import atomic_write_json, iter_jsonl_objects, read_json_dict, utc_now_iso
+from ouroboros.utils import atomic_write_json, iter_jsonl_objects, read_json_dict, utc_now_iso, strip_markdown
 
 log = logging.getLogger(__name__)
 
@@ -552,7 +552,7 @@ def _bounded_presentation_name(value: Any, *, fallback: str = "") -> str:
 
 
 def task_presentation_snapshot(drive_root: Any, task_id: str, *, task: Any = None,
-                               result: Any = None, project_id: str = "") -> Dict[str, str]:
+                               result: Any = None, project_id: str = "") -> Dict[str, Any]:
     tid = str(task_id or "").strip()
     sources = [row for row in (task, result) if isinstance(row, dict)]
     if tid:
@@ -580,8 +580,17 @@ def task_presentation_snapshot(drive_root: Any, task_id: str, *, task: Any = Non
         binding = project_binding_for_task(drive_root, tid) or {}
         pid = str(binding.get("project_id") or "").strip()
     pname = ""
+    registered = False
     if pid:
+        # ONE registry read serves both the display name and the additive
+        # ``project_routable`` fact: a workspace-derived proj_<hash> is
+        # project-SCOPED without having a room, and a producer that announces it
+        # would point the owner at a project that does not exist.
         project = get_reserved_project(drive_root, pid) or {}
+        # ROUTABLE, not merely reserved: list_reserved_projects deliberately
+        # includes deleting/tombstoned history reservations, and those have no
+        # room left to open.
+        registered = str(project.get("lifecycle") or "") == PROJECT_ACTIVE
         pname = _bounded_presentation_name(project.get("name"))
     if pname == pid:
         pname = ""
@@ -590,14 +599,16 @@ def task_presentation_snapshot(drive_root: Any, task_id: str, *, task: Any = Non
     task_name = ""
     for field in ("title", "suggested_name", "objective", "description"):
         for source in sources:
-            task_name = _bounded_presentation_name(source.get(field))
+            # Strip markdown BEFORE the name is flattened: the task half is a raw
+            # request line, and ARCHITECTURE promises this label is plain text.
+            task_name = _bounded_presentation_name(strip_markdown(str(source.get(field) or "")))
             if task_name:
                 break
         if task_name:
             break
     task_name = task_name or "Task"
     return {"project_id": pid, "project_name": pname, "task_id": tid,
-            "task_name": task_name,
+            "project_routable": registered, "task_name": task_name,
             "target_label": f"{pname} › {task_name}" if pname else task_name}
 
 

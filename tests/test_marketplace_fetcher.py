@@ -188,7 +188,7 @@ def test_stage_rejects_sensitive_filenames(name):
     [
         "evil.so", "evil.dll", "evil.dylib",
         "evil.pyc", "evil.pyo", "evil.node",
-        "evil.wasm", "evil.exe", "evil.bin",
+        "evil.exe", "evil.bin",
     ],
 )
 def test_stage_rejects_loadable_binaries(name):
@@ -198,6 +198,42 @@ def test_stage_rejects_loadable_binaries(name):
     ])
     with pytest.raises(FetchError, match="loadable-binary"):
         stage(archive, slug="x", version="1.0.0")
+
+
+def test_stage_admits_widget_assets_and_wasm():
+    """Q13/Q15=A: fonts, audio/video, and WebAssembly are ordinary hub payload
+    (the widget frame consumes them; review sees each as a content-hash-bound
+    descriptor). The lexical gate stays coarse: a native loadable binary is
+    still refused by name (``test_stage_rejects_loadable_binaries``) and, if
+    disguised, by content magic at review."""
+    assets = [
+        ("fonts/ui.woff2", b"wOF2\x00\x01\xff\xfe"),
+        ("fonts/ui.ttf", b"\x00\x01\x00\x00\xff"),
+        ("audio/click.mp3", b"ID3\x03\x00\xff\xfb"),
+        ("audio/loop.ogg", b"OggS\x00\xff"),
+        ("video/intro.webm", b"\x1a\x45\xdf\xa3"),
+        ("video/intro.mp4", b"\x00\x00\x00\x18ftyp"),
+        ("wasm/core.wasm", b"\x00asm\x01\x00\x00\x00\xff"),
+    ]
+    archive = _zip_with([("SKILL.md", SKILL_MD_BYTES), *assets])
+    staged = stage(archive, slug="x", version="1.0.0")
+    try:
+        assert staged.file_list == sorted(["SKILL.md", *(name for name, _ in assets)])
+        assert (staged.staging_dir / "wasm" / "core.wasm").read_bytes() == assets[-1][1]
+    finally:
+        staged.cleanup()
+
+
+def test_stage_per_file_cap_is_inclusive():
+    """Exactly 8 MiB is admitted; the byte above it is refused (see the
+    oversize test below). Sparse zero bytes keep the fixture fast."""
+    exact = b"\x00" * (8 * 1024 * 1024)
+    archive = _zip_with([("SKILL.md", SKILL_MD_BYTES), ("video/intro.mp4", exact)])
+    staged = stage(archive, slug="x", version="1.0.0")
+    try:
+        assert staged.total_bytes == len(exact) + len(SKILL_MD_BYTES)
+    finally:
+        staged.cleanup()
 
 
 def test_stage_rejects_disallowed_extension():

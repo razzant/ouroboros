@@ -194,7 +194,9 @@ Local diagnostic failures remain inspectable in details and Logs, but do not
 relabel the whole still-working task. A failed child keeps a compact factual
 `Failed` marker inside its parent while the root continues under its own
 authoritative status. Internal reason codes belong in details and diagnostics,
-not compact headlines.
+not compact headlines. Where a card does show a cause, it says it in the owner's
+words while the record keeps the machine code; a cause with no sentence yet stays
+raw rather than borrowing a wrong one.
 
 | Role | Foreground | Background | Border |
 | --- | --- | --- | --- |

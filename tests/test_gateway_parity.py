@@ -50,6 +50,7 @@ from ouroboros.gateway.contracts import (
     TaskHurryRequest,
     TaskHurryResponse,
     TypingOutbound,
+    UiPreferencesResponse,
     UpdateApplyErrorResponse,
     UpdateApplyRequest,
     UpdateApplySuccessResponse,
@@ -60,6 +61,7 @@ from ouroboros.gateway.contracts import (
     VideoOutbound,
 )
 from ouroboros.gateway.router import collect_routes
+from ouroboros.gateway.widgets import WidgetTab, WidgetsResponse
 
 
 def _js_typedef_fields(text: str, name: str) -> set[str]:
@@ -227,6 +229,8 @@ def test_gateway_contract_endpoint_index_matches_router_and_types(tmp_path):
         "ClaudexorLoginJobProblem",
         "ClaudexorCredentialProfileDeleteResponse",
         "ClaudexorVendorCredentialDisposition",
+        "WidgetTab",
+        "WidgetsResponse",
     ):
         assert re.search(rf"@typedef \{{Object\}} {name}\b", text), f"api_types.js missing {name}"
     api_client = (pathlib.Path(__file__).resolve().parent.parent / "web" / "modules" / "api_client.js").read_text(
@@ -257,7 +261,10 @@ def test_gateway_contract_endpoint_index_matches_router_and_types(tmp_path):
                 ClaudexorLoginJobResponse, ClaudexorLoginJobProblem,
                 ClaudexorCredentialProfileDeleteResponse,
                 ClaudexorVendorCredentialDisposition,
-                ClaudexorStatusReads, ClaudexorStatusResponse):
+                ClaudexorStatusReads, ClaudexorStatusResponse,
+                WidgetTab, WidgetsResponse,
+                # widgets-lifecycle W1b: the owner's per-card start-mode override is checked field by field.
+                UiPreferencesResponse):
         expected = set(get_type_hints(cls, include_extras=True))
         actual = _js_typedef_fields(text, cls.__name__)
         assert actual == expected, f"{cls.__name__} JSDoc fields drifted: missing={sorted(expected - actual)}, extra={sorted(actual - expected)}"

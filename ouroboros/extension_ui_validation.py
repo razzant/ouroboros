@@ -29,6 +29,10 @@ _DECLARATIVE_MAX_NODES = 256
 _GRID_COLUMNS_MAX = 4
 WIDGET_FRAME_MIN_HEIGHT = 320
 WIDGET_FRAME_MAX_HEIGHT = 8192
+# Launch policy of a widget card (``render.start``). This tuple is the SSOT for the
+# enum; ``gateway/ui_preferences.py`` imports it for the owner's per-card override.
+WIDGET_START_MODES = ("auto", "manual", "retain")
+_START_MODE_DEFAULTS = {"module": "manual", "iframe": "manual", "declarative": "auto"}
 
 
 def _text(value: Any) -> str:
@@ -89,6 +93,32 @@ def _validate_grid_columns(value: Any, *, path: str) -> None:
         raise ExtensionRegistrationError(
             f"{path} must be an integer from 1 to {_GRID_COLUMNS_MAX}"
         )
+
+
+def _validate_start_mode(render: Dict[str, Any], *, kind: str) -> None:
+    """Normalize ``render.start``: fill the per-kind default, reject unknown values.
+
+    Only an absent, ``None``, or blank ``start`` takes the default. Any other present
+    value must be one of ``WIDGET_START_MODES`` after trimming: the enum is closed, so
+    ``0``, ``False``, ``[]``, ``{}`` and ``"Retain"`` are rejected rather than defaulted.
+    """
+    raw = render.get("start")
+    mode = raw.strip() if isinstance(raw, str) else raw
+    if mode is None or mode == "":
+        default = _START_MODE_DEFAULTS.get(kind)
+        if default is not None:
+            render["start"] = default
+        return
+    if mode not in WIDGET_START_MODES:
+        raise ExtensionRegistrationError(
+            f"ui render start {mode!r} is unsupported; expected one of {list(WIDGET_START_MODES)}"
+        )
+    if kind == "declarative" and mode != "auto":
+        raise ExtensionRegistrationError(
+            f"ui render start {mode!r} applies to module and iframe widgets only; "
+            "a declarative widget is drawn by the host and has nothing to start"
+        )
+    render["start"] = mode
 
 
 def _validate_frame_geometry(render: Dict[str, Any], *, kind: str) -> None:
@@ -361,6 +391,7 @@ def validate_ui_render(render: Dict[str, Any]) -> Dict[str, Any]:
     kind = _text(clean.get("kind"))
     if kind not in _UI_RENDER_KINDS:
         raise ExtensionRegistrationError(f"ui render kind {kind!r} is unsupported; expected one of {sorted(_UI_RENDER_KINDS - {''})}")
+    _validate_start_mode(clean, kind=kind)
     if kind in {"iframe", "module"}:
         _validate_frame_geometry(clean, kind=kind)
     if kind == "module":
@@ -371,6 +402,7 @@ def validate_ui_render(render: Dict[str, Any]) -> Dict[str, Any]:
             raise ExtensionRegistrationError(f"module widget entry {entry!r} must be a bare filename inside the skill directory")
         if not entry.endswith((".js", ".mjs")):
             raise ExtensionRegistrationError("module widget entry must be a .js / .mjs file")
+        clean["entry"] = entry  # normalized once: the loader capture and the module URL agree
         return clean
     if kind == "declarative":
         if "height" in clean or "max_height" in clean:
@@ -414,16 +446,20 @@ def validate_settings_schema(schema: Dict[str, Any]) -> Dict[str, Any]:
                 f"settings section {path}.type {component_type!r} is unsupported; "
                 f"expected one of {sorted(_SETTINGS_COMPONENTS)}"
             )
-    return validate_ui_render({
+    clean = validate_ui_render({
         "kind": "declarative",
         "schema_version": 1,
         "components": components,
     })
+    # Settings sections are drawn in place; the widget launch policy does not apply.
+    clean.pop("start", None)
+    return clean
 
 
 __all__ = [
     "WIDGET_FRAME_MAX_HEIGHT",
     "WIDGET_FRAME_MIN_HEIGHT",
+    "WIDGET_START_MODES",
     "validate_settings_schema",
     "validate_ui_render",
 ]

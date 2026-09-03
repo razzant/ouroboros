@@ -8,11 +8,17 @@ from typing import Any
 from starlette.requests import Request
 from starlette.responses import JSONResponse
 
+from ouroboros.extension_ui_validation import WIDGET_START_MODES
 from ouroboros.gateway._helpers import json_error, request_drive_root, request_json_or
 from ouroboros.utils import append_jsonl, atomic_write_json, read_json_dict, utc_now_iso
 
 DEFAULT_UI_PREFERENCES: dict[str, Any] = {
     "widget_order": [],
+    # Owner override of a widget card's launch policy, keyed "<skill>:<tab_id>" with a
+    # value from the validator's WIDGET_START_MODES. Bounds only: keys are never
+    # checked against live widgets, so a temporarily disabled or removed skill keeps
+    # the owner's choice instead of losing it with the next discovery.
+    "widget_start_mode": {},
     "nested_subagents_expanded": False,
     # Resizable side sections (0 = use the CSS default). Clamped to sane ranges so
     # a stored value can never collapse or run away with the layout.
@@ -27,6 +33,7 @@ DEFAULT_UI_PREFERENCES: dict[str, Any] = {
 }
 _KNOWN_KEYS = frozenset(DEFAULT_UI_PREFERENCES)
 _MAX_WIDGET_ORDER_ITEMS = 200
+_MAX_WIDGET_START_MODE_ITEMS = 200
 _MAX_WIDGET_KEY_LENGTH = 200
 _SIDEBAR_WIDTH_MIN, _SIDEBAR_WIDTH_MAX = 180, 560
 _PROJECT_PANEL_WIDTH_MIN, _PROJECT_PANEL_WIDTH_MAX = 320, 1100
@@ -87,6 +94,26 @@ def _normalize_preferences(
                 seen.add(key)
                 result.append(key)
             prefs["widget_order"] = result
+    if "widget_start_mode" in raw:
+        value = raw.get("widget_start_mode")
+        if value is None:
+            prefs["widget_start_mode"] = {}
+        elif not isinstance(value, dict):
+            raise ValueError("widget_start_mode must be an object of {widget_key: mode}")
+        else:
+            modes: dict[str, str] = {}
+            for widget_key, mode in list(value.items())[:_MAX_WIDGET_START_MODE_ITEMS]:
+                key = str(widget_key or "").strip()
+                if not key or len(key) > _MAX_WIDGET_KEY_LENGTH:
+                    continue
+                # Trim like the validator trims ``render.start``; non-strings still fail below.
+                mode = str(mode).strip()
+                if mode not in WIDGET_START_MODES:
+                    raise ValueError(
+                        f"widget_start_mode values must be one of {list(WIDGET_START_MODES)}"
+                    )
+                modes[key] = mode
+            prefs["widget_start_mode"] = modes
     if "nested_subagents_expanded" in raw:
         value = raw.get("nested_subagents_expanded")
         if not isinstance(value, bool):

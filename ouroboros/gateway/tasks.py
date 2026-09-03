@@ -19,6 +19,7 @@ from starlette.responses import FileResponse, JSONResponse
 
 from ouroboros.gateway._helpers import coerce_int, json_error, json_exception, request_drive_root, request_json_or, request_repo_dir, stage_initial_task_attachments
 from ouroboros.depth_evidence import parse_task_depth
+from supervisor.log_addressing import ProjectThreadConflict, ingress_chat_id
 # Re-exported SSE surface (split out by the 1600-line module gate): route
 # wiring, the CLI, and long-standing monkeypatch pins address these names on
 # gateway.tasks; task_events resolves its patched collaborators back through
@@ -311,6 +312,9 @@ def _complete_api_task_admission(
         "session_id": task.get("session_id"),
         "actor_id": task.get("actor_id"),
         "delegation_role": task.get("delegation_role"),
+        "chat_id": task.get("chat_id"),
+        "title": task.get("title"),
+        "suggested_name": task.get("suggested_name"),
         "project_id": project_id,
         "description": description,
         "context": task.get("context"),
@@ -395,12 +399,58 @@ def _complete_api_task_admission(
             drive_root, task_id, admission_token, child_drive
         )
         return json_exception(exc, 503)
+    _broadcast_task_named(task_id, str(task.get("suggested_name") or ""))
     return JSONResponse({
         "ok": True,
         "task_id": task_id,
         "status": STATUS_SCHEDULED,
         "attachment_manifest": list(task.get("attachments") or []),
     })
+
+
+def _broadcast_task_named(task_id: str, suggested_name: str) -> None:
+    """Publish an admitted run's name so its card is never born nameless.
+
+    The live card takes its title from ``suggested_name``; without this frame a
+    project-homed run would paint as its status phrase until the first history
+    replay. WS only — never a chat.jsonl row — and the client buffers a name that
+    arrives before the card exists, so ordering does not matter. Fail-soft: a
+    missing bridge (CLI/test process) simply means no live viewer.
+    """
+    if not suggested_name:
+        return
+    try:
+        from supervisor.message_bus import try_get_bridge
+
+        bridge = try_get_bridge()
+        if bridge is not None:
+            bridge.broadcast(
+                {"type": "task_named", "task_id": task_id, "suggested_name": suggested_name}
+            )
+    except Exception:
+        log.debug("task_named broadcast failed for %s", task_id, exc_info=True)
+
+
+def _admission_names(body: Dict[str, Any], description: str) -> tuple:
+    """The run's owner-facing name at admission: ``(title, suggested_name)``.
+
+    A caller-supplied title is AUTHORSHIP — it fills both slots, exactly as a
+    chat turn promoted into a task does. Without one, the request's first line is
+    DERIVED for display only: it fills ``suggested_name`` (what the live card,
+    history replay and the Project lifecycle row read) and leaves ``title``
+    empty, so a truncated prompt never outranks a real name coined later. Lexical
+    only — markdown is stripped before the first line is taken, then the shared
+    title cleaner caps it at the project-name length (P5: no model call, and
+    therefore no benchmark-visible cost for a scripted run).
+    """
+    from ouroboros.project_naming import clean_model_title
+    from ouroboros.projects_registry import PROJECT_NAME_MAX
+    from ouroboros.utils import strip_markdown
+
+    explicit = clean_model_title(strip_markdown(str(body.get("title") or "")), max_len=PROJECT_NAME_MAX)
+    if explicit:
+        return explicit, explicit
+    return "", clean_model_title(strip_markdown(description), max_len=PROJECT_NAME_MAX)
 
 
 async def api_tasks_create(request: Request) -> JSONResponse:
@@ -441,20 +491,17 @@ async def api_tasks_create(request: Request) -> JSONResponse:
         return json_error("memory_mode must be one of forked, empty, shared", 400)
     if workspace_root and memory_mode == "shared":
         return json_error("memory_mode=shared is not allowed for external workspaces; use forked or empty", 400)
+    from ouroboros.project_facts import explicit_project_id_ok, resolve_project_id as _resolve_pid
+
     raw_project_id = str(body.get("project_id") or "")
-    if raw_project_id:
-        from ouroboros.project_facts import explicit_project_id_ok
-
-        # Validate the UNSTRIPPED value so leading/trailing whitespace (which would
-        # collapse two inputs into one store) is rejected, not silently normalized.
-        if not explicit_project_id_ok(raw_project_id):
-            # Fail closed: an explicit project_id must already be filesystem-clean.
-            # Reject (rather than silently normalize/empty -> canonical), so two
-            # inputs never collapse to one store and isolation is never defeated.
-            return json_error(
-                "project_id must be filesystem-safe (alphanumeric/_/-/., no spaces or slashes)", 400)
-    from ouroboros.project_facts import resolve_project_id as _resolve_pid
-
+    # Validate the UNSTRIPPED value so leading/trailing whitespace (which would
+    # collapse two inputs into one store) is rejected, not silently normalized.
+    if raw_project_id and not explicit_project_id_ok(raw_project_id):
+        # Fail closed: an explicit project_id must already be filesystem-clean.
+        # Reject (rather than silently normalize/empty -> canonical), so two
+        # inputs never collapse to one store and isolation is never defeated.
+        return json_error(
+            "project_id must be filesystem-safe (alphanumeric/_/-/., no spaces or slashes)", 400)
     _task_project_id = _resolve_pid({"project_id": raw_project_id, "workspace_root": str(workspace_root or "")})
     # D5 (Option A): keep the RECORDED memory_mode exactly as requested — shared/forked/
     # empty semantics are unchanged. Isolation for a project-scoped `shared` task comes
@@ -473,8 +520,10 @@ async def api_tasks_create(request: Request) -> JSONResponse:
     if workspace_root and task_type != "task":
         return json_error("external workspace tasks must use type='task'", 400)
     try:
-        chat_id = int(body.get("chat_id") if body.get("chat_id") is not None else 0)
+        chat_id = ingress_chat_id(body.get("chat_id"), drive_root, _task_project_id)
         depth = parse_task_depth(body.get("depth"), default=0)
+    except ProjectThreadConflict as exc:
+        return json_error(str(exc), 400)
     except (TypeError, ValueError) as exc:
         return json_error(
             "depth must be a non-negative integer"
@@ -488,10 +537,11 @@ async def api_tasks_create(request: Request) -> JSONResponse:
         return json_error("delegation_role=subagent is only allowed through the internal schedule_subagent tool", 400)
     if str(body.get("parent_task_id") or "").strip() or str(body.get("root_task_id") or "").strip():
         return json_error("parent_task_id and root_task_id are internal lineage fields; external tasks must start as roots", 400)
-    if "project_id" in raw_metadata:
-        # project_id is a top-level field; silently dropping it from metadata would
-        # let a caller believe isolation is active while the task runs unscoped.
-        return json_error("project_id must be a top-level field, not metadata", 400)
+    for _top_level_only in ("project_id", "title"):
+        # Top-level fields; silently dropping either from metadata would let a
+        # caller believe isolation is active, or a name was accepted, when it was not.
+        if _top_level_only in raw_metadata:
+            return json_error(f"{_top_level_only} must be a top-level field, not metadata", 400)
     metadata = {str(k): v for k, v in raw_metadata.items() if str(k) not in _RESERVED_METADATA_KEYS}
     allowed_resources, resource_policy, disabled_tools, acceptance_claims, policy_error = (
         _fold_contract_policies(body, raw_metadata, metadata)
@@ -533,7 +583,6 @@ async def api_tasks_create(request: Request) -> JSONResponse:
         deadline_at = _normalize_deadline_at(body.get("deadline_at") or raw_metadata.get("deadline_at") or "")
     except ValueError as exc:
         return json_error(str(exc), 400)
-    timeout_sec = 0.0
     try:
         timeout_sec = float(body.get("timeout_sec") or body.get("timeout") or 0)
     except (TypeError, ValueError):
@@ -635,10 +684,12 @@ async def api_tasks_create(request: Request) -> JSONResponse:
             drive_root, task_id, admission_token, child_drive
         )
         return json_exception(exc, 503)
+    _title, _suggested_name = _admission_names(body, description)
     task = {
         "id": task_id,
         "type": task_type,
         "chat_id": chat_id,
+        "title": _title, "suggested_name": _suggested_name,
         "text": task_text,
         "description": description,
         "context": str(body.get("context") or ""),

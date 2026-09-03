@@ -23,6 +23,7 @@ import {
     taskStoppedWithSummary,
     taskDoneIsTerminal,
     keepStickyExecutorChip,
+    taskReasonDetail,
     taskTerminalPhase,
 } from './log_events.js';
 import {
@@ -2137,8 +2138,7 @@ export function createChatInstance({
         // never warn-styled, with the owner-request marker in the details.
         const softStopped = taskStoppedWithSummary(msg || {});
         const softStopDetail = softStopped ? OWNER_STOP_DETAIL_MARKER : '';
-        const reasonDetail = !softStopped && msg?.reason_code
-            ? `Reason: ${String(msg.reason_code)}` : '';
+        const reasonDetail = taskReasonDetail(msg || {});
         const record = liveCardRecords.get(taskId);
         changed = Boolean(record?.reviewController?.updateMany(projectedReviews)) || changed;
         if (finalizing && record && !record.finished) record.finalizingHold = true;

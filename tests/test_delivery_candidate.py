@@ -417,7 +417,14 @@ def test_deferred_child_suffix_is_not_misclassified_as_delivery_control_failure(
     assert invalid_control["outcome_axes"]["objective"]["source"] == (
         "delivery_finalization_control"
     )
-    assert invalid_control["reason_code"] == "delivery_control_degraded"
+    # The candidate's OWN typed cause survives: the generic code is reserved for a
+    # degradation that reports no reason, so a record can no longer name a
+    # malformed control object when the real cause was something else.
+    assert invalid_control["reason_code"] == "invalid_delivery_control_after_repair"
+    # The degradation FACT now reaches the record itself, which is what the
+    # benchmark run-summary and result-index readers already look for.
+    assert invalid_control["degraded"] is True
+    assert invalid_control["degraded_reason"] == "invalid_delivery_control_after_repair"
 
 
 def test_delivery_acceptance_binding_uses_exact_active_host_verdict(tmp_path):

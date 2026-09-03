@@ -117,6 +117,20 @@ async def _check_budget_notify(
     return None, delivered
 
 
+def _axis_status(axes: Any, axis: str) -> str:
+    """One `outcome_axes` axis status, tolerating the legacy bare-string shape.
+
+    Canonical rows carry ``{"lifecycle": {"status": "completed"}}``; pre-axes
+    rows carry ``{"lifecycle": "completed"}``. Stringifying the axis itself is
+    what once pushed ``· {'status': 'completed'}`` with a permanent warning
+    icon, so read the status and never the container.
+    """
+    value = axes.get(axis) if isinstance(axes, dict) else None
+    if isinstance(value, dict):
+        value = value.get("status")
+    return str(value or "")
+
+
 def _summary_ids_in_tail(api, limit: int = 200) -> list:
     rows, _omitted = _jsonl_tail(
         _data_dir(api) / "logs" / "chat.jsonl",
@@ -161,11 +175,13 @@ async def _check_tasks_notify(
         except (TypeError, ValueError):
             pass
         oa = e.get("outcome_axes")
-        outcome = str(oa.get("lifecycle") or "") if isinstance(oa, dict) else ""
+        outcome = _axis_status(oa, "lifecycle")
+        degraded = _axis_status(oa, "execution").lower() in ("degraded", "best_effort")
         if outcome and outcome not in ("completed", "done"):
             parts.append(outcome)
         tail = (" · " + " · ".join(parts)) if parts else ""
-        icon = "✅" if outcome in ("", "completed", "done") else "⚠️"
+        healthy = outcome in ("", "completed", "done") and not degraded
+        icon = "✅" if healthy else "⚠️"
         msg = (f"{icon} Задача {tid[:8]} готова{tail}" if lang == "ru" else f"{icon} Task {tid[:8]} done{tail}")
         send_outcome, exc = await _push_notification(api, chat_id, msg, trust_env=trust_env)
         if send_outcome == "transient":

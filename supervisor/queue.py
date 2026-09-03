@@ -18,7 +18,7 @@ from supervisor.state import (
     QUEUE_SNAPSHOT_PATH, budget_remaining, EVOLUTION_BUDGET_RESERVE,
     reconstruct_task_cost as reconstruct_task_cost,
 )
-from supervisor.message_bus import send_with_budget
+from supervisor.message_bus import coerce_chat_identity, notification_chat_route, send_with_budget
 from ouroboros.config import (
     DATA_DIR,
     FINALIZATION_GRACE_DEFAULT_SEC,
@@ -1324,7 +1324,7 @@ def _enforce_task_timeouts_locked(
             # the drive resolution (which may read the result record) stays off the no-episode path.
             if meta.get("finalization_requested_at") and _resolve_grace_episode_for_spared_task(
                 _task_drive_for_task(task, str(task_id)), str(task_id), meta,
-                chat_id=int(task.get("chat_id") or owner_chat_id or 0),
+                chat_id=coerce_chat_identity(task.get("chat_id"), int(owner_chat_id or 0)),
                 own_progress=own_progress, now=now,
             ):
                 RUNNING[task_id] = meta
@@ -1345,7 +1345,7 @@ def _enforce_task_timeouts_locked(
             # can never name different episodes.
             meta["finalization_control_msg_id"] = _request_finalization_grace(
                 _task_drive_for_task(task, str(task_id)), str(task_id), terminal_reason,
-                chat_id=int(task.get("chat_id") or owner_chat_id or 0),
+                chat_id=coerce_chat_identity(task.get("chat_id"), int(owner_chat_id or 0)),
                 stamp=int(now),
             )
             RUNNING[task_id] = meta
@@ -1472,8 +1472,10 @@ def queue_deep_self_review_task(reason: str, model: str = "", force: bool = Fals
     ``/review``) so the queued ack and the task results return to the requester
     instead of always defaulting to the web owner's ``owner_chat_id``.
     """
-    target_chat_id = chat_id if chat_id else load_state().get("owner_chat_id")
-    if not target_chat_id:
+    # Membership, not truthiness: a review asked for from the hidden partition
+    # is answered there, not silently re-routed to the owner's main chat.
+    target_chat_id = notification_chat_route(chat_id, load_state().get("owner_chat_id"))
+    if target_chat_id is None:
         return None
     if (not force) and queue_has_task_type("deep_self_review"):
         return None
@@ -1486,7 +1488,9 @@ def queue_deep_self_review_task(reason: str, model: str = "", force: bool = Fals
         "model": model,
     })
     persist_queue_snapshot(reason="deep_self_review_enqueued")
-    send_with_budget(int(target_chat_id), f"🔎 Deep self-review queued: {tid} ({reason})")
+    # Typed SYSTEM row: an acknowledgement is never a task's answer, and the bench
+    # trajectory reader takes the last UNTYPED outbound row as one.
+    send_with_budget(int(target_chat_id), f"🔎 Deep self-review queued: {tid} ({reason})", role="system", system_type="deep_self_review_queued")
     return tid
 
 

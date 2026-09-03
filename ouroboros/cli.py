@@ -203,6 +203,7 @@ def _run_command(args: argparse.Namespace) -> int:
         disabled_tools.extend(part.strip() for part in str(raw or "").split(",") if part.strip())
     body = {
         "description": prompt,
+        "title": getattr(args, "title", "") or "",
         "workspace_root": args.workspace or "",
         "workspace_mode": "external" if args.workspace else "",
         "project_id": getattr(args, "project_id", "") or "",
@@ -505,6 +506,7 @@ def build_parser() -> argparse.ArgumentParser:
     run.add_argument("--start", action="store_true", help="start a local server if attach fails")
     run.add_argument("--workspace", default="", help="external workspace root")
     run.add_argument("--project-id", default="", help="per-project facts scope id (else derived from the workspace path)")
+    run.add_argument("--title", default="", help="owner-facing task name (else derived from the prompt's first line)")
     run.add_argument("--memory-mode", choices=["shared", "forked", "empty"], default="")
     run.add_argument("--attach", action="append", default=[])
     run.add_argument("--jsonl", action="store_true")
@@ -517,19 +519,15 @@ def build_parser() -> argparse.ArgumentParser:
     run.add_argument("--result-json-out", default="", help="write final task result JSON to this path")
     run.add_argument("--disable-tools", action="append", default=[], help="comma-separated tool names to withhold from this task")
     run.add_argument(
-        "--task-metadata-json",
-        default="",
+        "--task-metadata-json", default="",
         help="JSON object merged into the task metadata (e.g. budget_profile); "
-        "host-owned keys delegation_role/source cannot be overridden",
-    )
+        "host-owned keys delegation_role/source cannot be overridden")
     run.add_argument("--actor-id", default="cli")
     run.add_argument("--delegation-role", default="root")
     run.add_argument(
-        "--prompt-file",
-        default="",
+        "--prompt-file", default="",
         help="read the task prompt from this file ('-' = stdin); mutually "
-        "exclusive with the positional prompt (E2BIG hygiene for bulk prompts)",
-    )
+        "exclusive with the positional prompt (E2BIG hygiene for bulk prompts)")
     run.add_argument("prompt", nargs=argparse.REMAINDER)
     run.set_defaults(func=_run_command)
 

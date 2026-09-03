@@ -786,6 +786,38 @@ def _completion_excerpt(result: Dict[str, Any]) -> str:
     return ""
 
 
+def _run_lives_in_its_project(
+    drive_root: Any, task_id: str, project_id: str, task: Dict[str, Any], result: Dict[str, Any],
+) -> bool:
+    """Did this run's work actually go into that project's room?
+
+    Two facts answer yes, and only these two. The run was ADDRESSED there —
+    admission resolves a registered project's thread, and a scoped run cannot be
+    addressed anywhere else. Or the run is BOUND to it, which is how a task that
+    started unscoped joins a project mid-flight; a binding re-homes every row it
+    already wrote, including the ones written before the project existed.
+
+    Registration alone is not that fact. A run scoped to an id nobody had
+    registered yet is admitted to the hidden partition; if that id is registered
+    while the run is still going, a room appears its rows never entered, and
+    answering "a room exists" is how the reported defect comes back.
+    """
+    try:
+        from ouroboros.projects_registry import get_reserved_project, project_binding_for_task
+
+        chat_id = result.get("chat_id")
+        if chat_id is None:
+            chat_id = task.get("chat_id")
+        project_chat = (get_reserved_project(drive_root, project_id) or {}).get("chat_id")
+        if chat_id is not None and project_chat is not None and int(chat_id) == int(project_chat):
+            return True
+        binding = project_binding_for_task(drive_root, task_id) or {}
+        return str(binding.get("project_id") or "") == str(project_id)
+    except Exception:
+        log.debug("project-room membership check failed for %s", task_id, exc_info=True)
+        return False
+
+
 def enqueue_project_completion_summary(
     drive_root: Any, evt: Dict[str, Any], task_id: str, task: Dict[str, Any],
     result: Dict[str, Any], task_done_event: Dict[str, Any],
@@ -821,7 +853,17 @@ def enqueue_project_completion_summary(
             drive_root, tid, task=task, result=result,
             project_id=str(result.get("project_id") or task.get("project_id") or ""),
         )
-        if not snapshot["project_id"]:
+        if not snapshot["project_id"] or not snapshot["project_routable"]:
+            # Owner decision 3A: a run whose project id was DERIVED from a
+            # workspace has no room, so Main stays silent instead of offering an
+            # "Open Project" that lands in an empty duplicate of itself. The same
+            # holds once a project is deleting or tombstoned.
+            return False
+        if not _run_lives_in_its_project(drive_root, tid, snapshot["project_id"], task, result):
+            # The room exists but holds none of this run's work: its id was only
+            # registered AFTER admission, or a mid-flight bind failed fail-soft.
+            # Offering "Open the Project" would reproduce the reported defect —
+            # a Main row leading into an empty room.
             return False
         excerpt = _completion_excerpt(result)
         event = {

@@ -1,7 +1,7 @@
 ---
 name: telegram
 description: Owner-only Telegram text bridge and Mini App gateway for the existing Ouroboros interface.
-version: 1.1.0
+version: 1.1.1
 type: extension
 entry: plugin.py
 runtime: python3
@@ -29,7 +29,8 @@ videos, documents, typing state, subagent cards, and opt-in notifications are
 mirrored back to that owner.
 
 Version 1.1 adds richer Telegram formatting, native MP3/M4A playback, and
-inline link keyboards.
+inline link keyboards. Version 1.1.1 fixes the task-done push, which read the
+lifecycle axis as a whole object and warned on every finished task.
 
 The Mini App exposes the unchanged Ouroboros SPA through the established
 owner-authenticated sidecar and a pinned Cloudflare Quick Tunnel. It is enabled

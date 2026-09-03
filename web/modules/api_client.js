@@ -224,6 +224,13 @@ export const apiClient = {
      */
     providerTest: (payload) => jsonPost('/api/providers/test', payload),
     extensions: () => fetchJson('/api/extensions', { cache: 'no-store' }),
+    /**
+     * Widgets page cards: live extension UI tabs projected from the loader
+     * snapshot (no skill discovery), each stamped with the owning skill's
+     * payload `revision`.
+     * @returns {Promise<import('./api_types.js').WidgetsResponse>}
+     */
+    widgets: () => fetchJson('/api/widgets', { cache: 'no-store' }),
     skillPublishPreflight,
     createTask,
     skillLifecycleQueue: () => fetchJson('/api/skills/lifecycle-queue', { cache: 'no-store' }),

@@ -147,6 +147,27 @@ prefer provider-settled usage, and otherwise preserve `cost=None` and
 `cost_final=false`. Unknown price is neither free nor a model-admission veto;
 known exhausted budget remains enforceable.
 
+### Anti-pattern: a chat id tested for truth (v6.115.0)
+
+A chat id is a VALUE, not a boolean. `HIDDEN_CHAT_ID` (0) is the hidden
+partition — the Skill Review panel plus every headless task admitted without a
+registered project — and it is a REAL destination that no browser surface reads.
+Absence is `None`, and a negative id is synthetic A2A traffic. `if chat_id:`
+therefore does two wrong things at once: it drops a partition-bound notice AND
+re-routes hidden work to the owner's main chat. That single habit is what made a
+whole `ouroboros run` invisible while its children surfaced in Main as a nameless
+card, and it recurred across two dozen sites because each one re-invented the
+test.
+
+Use the two normalizers instead of a third: `message_bus.notification_chat_route`
+answers "where does this notice go" (first DELIVERABLE candidate, `None` when
+none is), and `message_bus.coerce_chat_identity` answers "what is this row's
+address" (explicit value kept, absence defaulted). Address a headless task once,
+at admission (`log_addressing.ingress_chat_id`), and pass it downstream by value
+— the ingress-capture rule below, applied to routing. `tests/test_chat_id_truthiness_guard.py`
+is the source lint that keeps the class closed; its allowlist is where a
+deliberate exception states its reason.
+
 ### Anti-pattern: content-derived identity for host-minted records (v6.73.0)
 
 If the host itself created a record — a chat message, a task, a binding — its
@@ -725,9 +746,35 @@ The resource kinds this covers:
 
 An instance that can be closed, hidden, or replaced (project chat panels are
 the canonical case) must be destroyable without leaving any acquisition
-behind; "hide the DOM node, keep the handlers" is the leak shape this
-invariant forbids. Late async continuations check a `destroyed` flag before
-touching state or re-arming loops.
+behind. A UI instance may survive being hidden only under an explicit,
+owner-visible retention reason — a project chat with pending work (staged
+attachments, an upload in flight), a widget card the owner set to Keep running
+— and even then it still owns its disposer, and Stop / unload / reload /
+shutdown remain force-destroy boundaries. The reason is re-evaluated at the
+instance's next lifecycle point, not continuously — a project chat's at the next
+navigation, a kept widget card's at the next Widgets entry or lifecycle event —
+so a hidden instance whose reason lapsed is released then, and this rule
+promises no earlier release. For a kept widget card the force-destroy
+boundaries are the owner's Stop, its skill leaving the live list (also while
+hidden), a window reload and closing Ouroboros; a server reconnect
+with the same served SHA keeps the frame when its skill is live again with the
+same `revision` (a changed revision stops it in order and re-mounts it — at
+once while Widgets is visible, at the next Widgets entry while the page is
+hidden, where the pass compares presence only). The untyped shape "hide the
+DOM node, keep the handlers" remains the leak this invariant forbids. Late
+async continuations check a `destroyed` flag before touching state or
+re-arming loops.
+
+A module widget's disposer (`kind: module`) is the ordered dispose with
+acknowledgement (ARCHITECTURE "Skills and Widgets"): it posts the dispose
+message, keeps the bridge answering the child's hooks, and finishes — abort,
+unlisten, remove the iframe — on the child's acknowledgement or after
+`WIDGET_DISPOSE_ACK_TIMEOUT_MS`; a route iframe (`kind: iframe`) has no bridge
+and its disposer removes the frame synchronously. The Widgets masonry (`applyMasonry`) returns an idempotent disposer for its two
+`ResizeObserver`s, its `MutationObserver` and its pending animation frame.
+That bounded wait is not the forbidden shape: the handlers live only until a
+settle promise the page tracks per card key resolves, and a remount of the same
+key waits on that promise instead of racing it.
 
 Enforcement (honest disclosure): the deterministic leak test runs in the
 release-tier `ui_browser` lane, not at commit tier; commit-tier coverage is
@@ -1828,8 +1875,8 @@ Before every commit, verify the following:
 - A new top-level page that scrolls its header together with content violates the architecture mirror: fix the layout, not the symptom.
 - Top-level tab/pill buttons are a single design-system control: `renderTabStrip` + `.app-tab-strip` + `.app-tab` + the `--pill-*` CSS variables in `web/style.css`. Do not redeclare per-page tab padding, font size, border radius, or active styling in page CSS files.
 - Scrollable page bodies use the shared `.scroll-fade-y` mask when content can pass under fixed page chrome. Do not copy/paste custom gradient masks into page modules; extend the shared class if the fade rhythm changes.
-- Masonry-style widget packing uses `web/modules/masonry.js::applyMasonry`. Do not reintroduce CSS Grid row packing (`align-items: start`) for unequal-height widget cards; it leaves row gaps under shorter cards.
-- Widget card ordering is a host UI preference. Persist it through `/api/ui/preferences` and `data/state/ui_preferences.json`; never rewrite extension manifests or widget declarations to store owner layout.
+- Masonry-style widget packing uses `web/modules/masonry.js::applyMasonry`. Do not reintroduce CSS Grid row packing (`align-items: start`) for unequal-height widget cards; it leaves row gaps under shorter cards. It packs in the page's explicit key order and writes only `--masonry-*` custom properties (the static rules in `web/style.css` apply them); never move `<article>` nodes to reorder — a moved `<iframe>` reloads.
+- Widget card ordering and the owner's per-card launch-policy override (`widget_start_mode`, values from `extension_ui_validation.WIDGET_START_MODES`) are host UI preferences. Persist them through `/api/ui/preferences` and `data/state/ui_preferences.json`; never rewrite extension manifests or widget declarations to store owner layout or owner overrides.
 - New visual dimensions should become CSS variables first (`--pill-*`, `--button-*`, `--page-header-*`, etc.) and then be consumed by shared classes. Hardcoded page-local dimensions are review debt unless the component is genuinely unique.
 
 #### Setup / Onboarding Layout
@@ -2541,6 +2588,10 @@ stealing usable text space. Use the shared responsive component before adding a
 page-specific layout. A visible change is inspected with vision in at least one
 relevant real consumer flow. A stored screenshot alone is not verification;
 mobile or WebKit is not a universal requirement and is selected from risk.
+Disclosed residual: a Widgets reorder changes the visible order without moving
+DOM nodes (a moved frame would reload), so after a reorder the Tab/focus order
+may differ from the visible order until a window reload rebuilds the cards;
+keyboard reorder through the card handle follows the key order.
 
 ### Browser dialogs
 
@@ -2557,14 +2608,39 @@ their actual HTML contexts, constrain media to extension routes or safe data
 URLs, and keep charts accessible through a semantic table.
 
 Rare `kind: "module"` UI runs only in a sandboxed opaque-origin iframe, with no
-`allow-same-origin`; its parent bridge proxies only the owning extension route.
+`allow-same-origin`; its parent bridge proxies only the owning extension route,
+and its document policy admits scripts, images, media and fonts only from that
+skill's own prefix (plus `data:`/`blob:`; `connect-src` closed). The route
+iframe (`kind: iframe`) shares the sandbox and permissions set and has no bridge.
+Both framed mounts (the extension-route iframe and the module `srcdoc` iframe
+with its CSP/sandbox constants and parent bridge) live in
+`web/modules/widget_module.js` (the child-side bootstrap that runs inside the
+module frame — bridge grammar, `Response` rebuilt over a stream, resize reports,
+dispose acknowledgement — is `web/modules/widget_frame.js`) and return their
+disposer to the `mountTab` dispatcher in `widgets.js`, which keeps the card registry and the declarative
+renderer. The framed card's chrome — the effective launch policy (owner override
+> author `render.start` > kind default), whether it keeps the card running while
+Widgets is hidden (`retain`, framed cards only), the one primary Start / Stop
+control, the launch-policy menu and the stopped card's facade — lives in
+`web/modules/widget_card.js`; the card reorder handles live in
+`web/modules/widget_reorder.js` (a reorder is a pure move in the key order handed
+back to the page; no node moves); the declarative `chart` helpers, the table
+cell renderer and the shared dotted-path reader live in
+`web/modules/widget_chart.js`; the masonry
+(`web/modules/masonry.js`) packs the cards in that key order through
+`--masonry-*` custom properties and returns a disposer. The pure list helpers —
+per-card and order-independent list change signatures plus the keyed patch plan
+— live in `web/modules/widget_list.js`; the page compares the signature after
+every `GET /api/widgets`; an unchanged signature adds, removes, replaces or
+moves no card node, and only card controls and the masonry properties are
+reconciled.
 Never load skill JavaScript into the SPA origin. Long-running actions use a
 durable job id and resumable status polling rather than a foreground request
 lost on remount.
 
 Every timer, listener, observer, stream, abort controller, chart, and mounted
-widget has a paired disposer. UI preferences such as widget order belong in
-host state, never in extension manifests.
+widget has a paired disposer. UI preferences such as widget order and the
+per-card start-mode override belong in host state, never in extension manifests.
 
 ## MCP Client Integration
 
@@ -2645,7 +2721,16 @@ explicitly:
   in ordinary pull-request tests; do not move provider secrets into PR jobs or
   edit the workflow merely to duplicate this existing trusted lane.
 - `browser` launches real Playwright Chromium/WebKit for agent browser tools.
-- `ui_browser` launches the host-side web UI under Playwright.
+- `ui_browser` launches the host-side web UI under Playwright. The marker is
+  the source of truth for what the lane collects; the Widgets lifecycle suites
+  in it are `tests/test_widgets_ui_browser.py` (geometry, job retry),
+  `tests/test_widgets_ui_browser_lifecycle.py` (launch policy, ordered stop,
+  `retain`, the streaming bridge), `tests/test_widgets_ui_browser_patch.py`
+  (keyed patch of a running card, reconnect reconcile, serialized policy
+  writes) and `tests/test_widgets_ui_browser_capabilities.py` (the frame CSP,
+  sandbox and permissions boundary: Wasm, blob workers, media and fonts,
+  negative origins, on Chromium and WebKit) — run all of them before a release that touched Widgets, e.g.
+  `OUROBOROS_RUN_UI_SMOKE=1 OUROBOROS_DATA_DIR=$(mktemp -d) python -m pytest -o addopts="" -m ui_browser tests/test_widgets_ui_browser*.py`.
 - `ui_browser_docker` talks to an `ouroboros-web:test` container and must
   skip cleanly when Docker is unavailable locally.
 - `portable_detail` covers build/portable artifact invariants and also runs

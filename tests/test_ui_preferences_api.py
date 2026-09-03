@@ -23,6 +23,7 @@ def test_ui_preferences_round_trip_and_normalization(tmp_path):
         assert initial.status_code == 200
         assert initial.json() == {
             "widget_order": [],
+            "widget_start_mode": {},
             "nested_subagents_expanded": False,
             "sidebar_width": 0,
             "project_panel_width": 0,
@@ -140,3 +141,60 @@ def test_ui_preferences_concurrent_paint_acks_are_monotonic(tmp_path):
     assert statuses == [200, 200]
     stored = json.loads((tmp_path / "state" / "ui_preferences.json").read_text(encoding="utf-8"))
     assert stored["project_seen_revision"]["race"] == 5
+
+
+def test_ui_preferences_widget_start_mode_override(tmp_path):
+    """Owner per-card launch-policy override: bounds only, whole-map replace, stale keys kept."""
+    from starlette.testclient import TestClient
+
+    from ouroboros.extension_ui_validation import WIDGET_START_MODES
+
+    app = Starlette(routes=collect_routes(data_dir=tmp_path))
+    app.state.drive_root = tmp_path
+    with TestClient(app) as client:
+        assert client.get("/api/ui/preferences").json()["widget_start_mode"] == {}
+
+        # Round trip. Keys are NOT checked against live widgets: a key of a disabled or
+        # removed skill is kept on purpose so a temporary disable never loses the choice.
+        stored = {"game:main": "retain", "gone_skill:old": "manual", "gauge:live": "auto"}
+        saved = client.post("/api/ui/preferences", json={"widget_start_mode": stored})
+        assert saved.status_code == 200
+        assert saved.json()["widget_start_mode"] == stored
+        assert client.get("/api/ui/preferences").json()["widget_start_mode"] == stored
+
+        # POST replaces the whole map (widget_order semantics); other keys are untouched.
+        replaced = client.post("/api/ui/preferences", json={"widget_start_mode": {"game:main": "manual"}})
+        assert replaced.status_code == 200
+        assert replaced.json()["widget_start_mode"] == {"game:main": "manual"}
+        other = client.post("/api/ui/preferences", json={"widget_order": ["game:main"]})
+        assert other.json()["widget_start_mode"] == {"game:main": "manual"}
+        assert other.json()["widget_order"] == ["game:main"]
+
+        # Values come from the validator's enum; any other shape is a 400 and stores nothing.
+        for bad in (
+            {"widget_start_mode": {"game:main": "always"}},
+            {"widget_start_mode": {"game:main": 1}},
+            {"widget_start_mode": {"game:main": None}},
+            {"widget_start_mode": ["game:main"]},
+            {"widget_start_mode": "retain"},
+            {"widget_start_modes": {}},  # unknown key stays 400
+        ):
+            assert client.post("/api/ui/preferences", json=bad).status_code == 400, bad
+        assert client.get("/api/ui/preferences").json()["widget_start_mode"] == {"game:main": "manual"}
+
+        # Blank or oversized keys are dropped; whitespace around keys and values is trimmed
+        # (the validator trims render.start the same way); null clears the map.
+        trimmed = client.post(
+            "/api/ui/preferences",
+            json={"widget_start_mode": {"": "auto", "x" * 201: "auto", " game:main ": "retain", "gauge:live": " auto "}},
+        )
+        assert trimmed.json()["widget_start_mode"] == {"game:main": "retain", "gauge:live": "auto"}
+        assert client.post("/api/ui/preferences", json={"widget_start_mode": None}).json()["widget_start_mode"] == {}
+
+        # Bounded like widget_order: at most 200 entries are kept.
+        many = {f"skill:{i}": WIDGET_START_MODES[i % len(WIDGET_START_MODES)] for i in range(250)}
+        bounded = client.post("/api/ui/preferences", json={"widget_start_mode": many})
+        assert bounded.status_code == 200
+        kept = bounded.json()["widget_start_mode"]
+        assert len(kept) == 200
+        assert all(many[key] == mode for key, mode in kept.items())

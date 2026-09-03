@@ -7,7 +7,8 @@ attribution belongs in message payloads (``source``), not in the numeric id.
 Positive ids above ``PROJECT_CHAT_ID_MIN`` are per-project chats (v6.32.0,
 multi-project): the SAME web owner (user_id stays 1 — owner binding is
 security-load-bearing and never re-binds) talking to the same single agent in
-a project-scoped thread. The main chat stays ``WEB_UI_CHAT_ID``.
+a project-scoped thread. The main chat stays ``WEB_UI_CHAT_ID``, and
+``HIDDEN_CHAT_ID`` is the hidden partition below it.
 """
 
 from __future__ import annotations
@@ -15,6 +16,13 @@ from __future__ import annotations
 import hashlib
 
 WEB_UI_CHAT_ID = 1
+
+# The hidden partition: the Skill Review panel plus every headless task admitted
+# without a registered project. 0 is a REAL, addressable destination that no
+# browser surface reads (a chat_id=0 history query coerces to Main, and the Main
+# filter drops chat-0 rows), never "no chat" — the ``if chat_id:`` truthiness
+# that read it as missing is the class this constant exists to end.
+HIDDEN_CHAT_ID = 0
 
 # Reserved for A2A-like synthetic conversations. Legacy A2A generated
 # unbounded negative ids (-1001, -1002, ...), so every negative id remains
@@ -68,6 +76,7 @@ def project_chat_id(project_id: str) -> int:
 __all__ = [
     "A2A_CHAT_ID_MAX",
     "A2A_CHAT_ID_MIN",
+    "HIDDEN_CHAT_ID",
     "PROJECT_CHAT_ID_MIN",
     "WEB_UI_CHAT_ID",
     "is_a2a_chat_id",

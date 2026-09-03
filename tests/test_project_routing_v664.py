@@ -733,7 +733,7 @@ def test_task_presentation_snapshot_prefers_human_names_and_keeps_machine_ids(tm
     assert snapshot == {
         "project_id": "opaque-project-id",
         "project_name": "Космос 🌌",
-        "task_id": "opaque-task-id",
+        "task_id": "opaque-task-id", "project_routable": True,
         "task_name": "Явный заголовок",
         "target_label": "Космос 🌌 › Явный заголовок",
     }
