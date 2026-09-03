@@ -1541,7 +1541,7 @@ export function createChatInstance({
             }
         });
         liveCardRecords.set(normalizedGroupId, record);
-        // Issue #135: >200 live cards past the last rebuild arm a full rebuild (like a reconnect); only a rebuild clears the arm.
+        // Issue #135: >200 live cards past the last rebuild arm a full rebuild; only a rebuild clears the arm.
         if (liveCardRecords.size > liveCardFloor + LIVE_CARD_CAP) fullRebuildPending = true;
         // apply a name that arrived (task_named) before this card existed.
         const _pendingName = pendingSuggestedNames.get(normalizedGroupId);
@@ -1812,7 +1812,7 @@ export function createChatInstance({
     }
 
     function scheduleHistorySync() {
-        historyResyncScheduler.schedule();
+        historyResyncScheduler.schedule(fullRebuildPending);
     }
 
     const historyResyncScheduler = createHistoryResyncScheduler({

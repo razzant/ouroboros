@@ -22,9 +22,20 @@ export function createHistoryResyncScheduler({
 }) {
     let timer = null;
     return {
-        schedule() {
+        /**
+         * @param {boolean} keepPending an armed full rebuild is a DEADLINE, not a
+         * best-effort refetch: it is the transaction a reconnect runs, and the live-card
+         * bound (issue #135) is only a bound if it actually happens. While one is armed,
+         * a later completion must not push the pending run out again — completions
+         * arriving faster than the debounce would otherwise starve it for as long as the
+         * traffic lasts, which is exactly the busy session the bound exists for.
+         */
+        schedule(keepPending = false) {
             if (isReplayActive()) return false;
-            if (timer != null) clearTimer(timer);
+            if (timer != null) {
+                if (keepPending) return true;
+                clearTimer(timer);
+            }
             timer = setTimer(() => {
                 timer = null;
                 run();

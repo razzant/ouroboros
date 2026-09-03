@@ -78,6 +78,32 @@ def test_chat_history_limit_maps_to_n_human(monkeypatch, capsys):
     capsys.readouterr()
 
 
+def test_chat_history_non_positive_limit_sends_no_quota(monkeypatch, capsys):
+    """`--limit 0` (or a negative) asks for the server's window, not an empty chat.
+
+    Before the flag was wired to `n_human` it was a placebo: every value returned the
+    default window. An explicit `n_human=0` would now return zero conversation rows,
+    so a script that passed 0 to mean "whatever the server gives" would silently lose
+    its history. The server is already lenient the same way for the legacy `limit`.
+    """
+    from ouroboros import cli
+
+    seen = []
+
+    class FakeClient:
+        def request(self, method, path, body=None):
+            seen.append((method, path))
+            return {"messages": []}
+
+    monkeypatch.setattr(cli, "_client", lambda _args, **_kwargs: FakeClient())
+
+    for limit in (0, -5):
+        assert cli._chat_history_command(SimpleNamespace(limit=limit)) == 0
+
+    assert seen == [("GET", "/api/chat/history"), ("GET", "/api/chat/history")]
+    capsys.readouterr()
+
+
 def test_chat_history_without_limit_sends_no_quota(monkeypatch, capsys):
     """Through the real parser: an omitted `--limit` requests the bare endpoint.
 

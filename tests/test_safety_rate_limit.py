@@ -715,7 +715,14 @@ def test_oversized_subject_blocks_without_a_model_call(monkeypatch, tmp_path):
     assert ok is False, "an unreviewable guarded call must not execute"
     assert msg.splitlines()[0].startswith("⚠️ SAFETY_SUBJECT_TOO_LARGE_BLOCKED:")
     assert "SAFETY_VIOLATION" not in msg
-    assert "write_file" in msg, "the refusal carries the working alternative"
+    assert "split" in msg, "the refusal carries the working alternative"
+    # The first version of this refusal told the agent to stage the body with
+    # write_file (a POLICY_SKIP tool) and run the staged file. That is a route
+    # around the supervisor: it reviews the call it is handed, and a script run
+    # from a path hands it a path, not the bytes. The remediation must not name
+    # it, and the earlier test asserting "write_file" in msg pinned the defect.
+    assert "write_file" not in msg
+    assert "staged" not in msg
 
     rows = _read_events(ctx, "safety_subject_too_large")
     assert len(rows) == 1

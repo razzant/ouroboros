@@ -909,8 +909,8 @@ def _subject_too_large_blocked(
         f"{subject_chars:,} characters, above the {_SAFETY_SUBJECT_CHAR_BUDGET:,}-character "
         "budget the Safety Supervisor can review in one prompt. The call was NOT executed "
         "and the subject was NOT truncated (a partially reviewed call must never run). "
-        "Reshape it: stage large content with write_file and run the staged file, or split "
-        "the payload into smaller calls."
+        "Reshape it: split the payload into smaller calls that each fit the budget, so "
+        "every byte that runs is a byte the supervisor saw."
     )
 
 

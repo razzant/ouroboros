@@ -224,6 +224,39 @@ test('a LIVE finished transition (outside a replay) schedules a real 700ms resyn
     assert.equal(timers.pending.length, 0);
 });
 
+test('while a full rebuild is armed, later completions cannot push the resync out', () => {
+    // The live-card bound arms the rebuild and waits for the next history sync. That
+    // sync is this debounced resync, and every completion used to restart its timer:
+    // completions arriving faster than 700ms starved it for as long as the burst
+    // lasted, which is precisely the busy session the bound exists for.
+    const timers = makeFakeTimers();
+    let runs = 0;
+    const scheduler = createHistoryResyncScheduler({
+        isReplayActive: () => false,
+        run: () => { runs += 1; },
+        setTimer: timers.setTimer,
+        clearTimer: timers.clearTimer,
+    });
+    const armed = true;
+    assert.equal(scheduler.schedule(armed), true);
+    const first = timers.pending[0];
+    for (let i = 0; i < 50; i += 1) scheduler.schedule(armed);
+    assert.equal(timers.pending.length, 1);
+    assert.equal(timers.pending[0], first, 'the original deadline survived the burst');
+    timers.fire();
+    assert.equal(runs, 1);
+    // Unarmed scheduling keeps debouncing: a quiet session still coalesces.
+    scheduler.schedule();
+    const second = timers.pending[0];
+    scheduler.schedule();
+    assert.equal(timers.pending.length, 1);
+    assert.notEqual(timers.pending[0], second);
+});
+
+test('chat.js hands the armed flag to the scheduler', () => {
+    assert.match(chatSource, /historyResyncScheduler\.schedule\(fullRebuildPending\);/);
+});
+
 test('chat.js wires the replay flag around the replay and keeps live callsites intact', () => {
     // scheduleHistorySync delegates to the scheduler, whose replay gate reads
     // _historyReplayActive; the flag wraps the whole replay dispatch (both the

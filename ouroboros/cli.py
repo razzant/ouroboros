@@ -291,9 +291,9 @@ def _chat_send_command(args: argparse.Namespace) -> int:
 
 def _chat_history_command(args: argparse.Namespace) -> int:
     # `n_human` is the server's quota for conversation (non-progress) rows. An
-    # omitted --limit sends no quota so the server's own window governs (one
-    # owner for the default); legacy `limit` still works for shipped CLIs.
-    query = "" if args.limit is None else f"?n_human={int(args.limit)}"
+    # omitted (or non-positive) --limit sends no quota so the server's own window
+    # governs, the way the server already treats a non-positive legacy `limit`.
+    query = f"?n_human={int(args.limit)}" if (args.limit or 0) > 0 else ""
     _print_json(_client(args).request("GET", f"/api/chat/history{query}"))
     return 0
 
