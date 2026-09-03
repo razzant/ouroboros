@@ -66,6 +66,7 @@ import { harnessIdentityMarkup } from './harness_presentation.js';
 import {
     captureLiveCardProjection,
     createHistoryResyncScheduler,
+    createLiveCardBound,
     createLiveCardTimelineRenderer,
     createRebuildBatch,
     createTimelineAnchors,
@@ -467,11 +468,6 @@ export function createChatInstance({
     // a new revision) short-circuit instead of refetching. Any FAILED sync
     // resets it; scheduleHistorySync and the reconnect path never consult it.
     let initialHydrationPromise = null;
-    // The next successful sync fully rebuilds the feed: the offline bootstrap
-    // painted the sessionStorage fallback, or live cards passed LIVE_CARD_CAP
-    // beyond the population the last rebuild left behind.
-    let fullRebuildPending = false;
-    let liveCardFloor = 0;
     // highest project revision whose history has been fetched;
     // refreshHistory only bypasses the sticky promise for a NEWER revision.
     let lastLoadedHistoryRevision = 0;
@@ -494,6 +490,7 @@ export function createChatInstance({
     const isInstanceVisible = () =>
         Boolean(messagesDiv) && messagesDiv.offsetParent !== null && !document.hidden;
     const LIVE_CARD_CAP = 200;
+    const liveCardBound = createLiveCardBound(LIVE_CARD_CAP);
     const liveCardRecords = new Map();
     const markReviewAnchor = (r, on = false) => setReviewAnchor(r, on, setLiveCardPhase);
     const explicitCardExpansion = new Map();
@@ -1541,8 +1538,7 @@ export function createChatInstance({
             }
         });
         liveCardRecords.set(normalizedGroupId, record);
-        // Issue #135: >200 live cards past the last rebuild arm a full rebuild; only a rebuild clears the arm.
-        if (liveCardRecords.size > liveCardFloor + LIVE_CARD_CAP) fullRebuildPending = true;
+        liveCardBound.observe(liveCardRecords.size);
         // apply a name that arrived (task_named) before this card existed.
         const _pendingName = pendingSuggestedNames.get(normalizedGroupId);
         if (_pendingName && !record.isSubagent) {
@@ -1812,12 +1808,16 @@ export function createChatInstance({
     }
 
     function scheduleHistorySync() {
-        historyResyncScheduler.schedule(fullRebuildPending);
+        historyResyncScheduler.schedule(liveCardBound.isArmed());
     }
 
     const historyResyncScheduler = createHistoryResyncScheduler({
         isReplayActive: () => _historyReplayActive,
-        run: () => syncHistory({ includeUser: false }).catch(() => {}),
+        // A joined run cannot answer an arm raised after the in-flight fetch left,
+        // and its timer is spent: re-arm rather than wait for the next completion.
+        run: () => syncHistory({ includeUser: false }).catch(() => {}).then(() => {
+            if (lastHistorySyncSucceeded && liveCardBound.isArmed()) scheduleHistorySync();
+        }),
     });
 
     // The 12 cost-meta keys shared by both subagent whitelists (the delegation
@@ -2732,6 +2732,7 @@ export function createChatInstance({
             return historySyncPromise;
         }
         historySyncPromise = (async () => {
+            const armedAtStart = liveCardBound.begin();
             try {
                 // Server defaults own first-load quotas; Load older overrides them.
                 let historyUrl = `/api/chat/history${isMain ? '' : `?chat_id=${chatId}`}`;
@@ -2768,15 +2769,14 @@ export function createChatInstance({
 
                 // First load/reconnect trusts server history and fully rebuilds the
                 // feed; routine post-completion syncs only fold in new task cards.
-                // Load-older (forceRebuild) and a pending arm (offline bootstrap / card cap) rebuild fully too.
-                const rebuildAll = !historyLoaded || fromReconnect || forceRebuild
-                    || fullRebuildPending;
+                // Load-older (forceRebuild) and an arm this sync inherited rebuild fully too.
+                const rebuildAll = !historyLoaded || fromReconnect || forceRebuild || armedAtStart;
                 // On a soft reconnect the module (and its dedupe set)
                 // survives: a plain re-sync would dedupe-drop every bubble.
                 // Restore user text and rebuild from durable history on every
                 // rebuild — incl. includeUser=false triggers (clean open /
                 // 700ms resync), since the rebuild clears those too.
-                const renderUser = includeUser || fromReconnect || fullRebuildPending;
+                const renderUser = includeUser || fromReconnect || armedAtStart;
                 // Every rebuild replays everything, so retirement resets with it.
                 if (rebuildAll) retiredTaskIds.clear();
 
@@ -3033,6 +3033,7 @@ export function createChatInstance({
                 // dropped synchronously, so a real live completion frame can
                 // never land while it is up.
                 _historyReplayActive = true;
+                liveCardBound.beginReplay();
                 try {
                     if (rebuildAll) {
                         // one outer withStableViewport for
@@ -3102,7 +3103,7 @@ export function createChatInstance({
                 const wasFirstLoad = !historyLoaded;
                 historyLoaded = true;
                 lastHistorySyncSucceeded = true;
-                if (rebuildAll) { fullRebuildPending = false; liveCardFloor = liveCardRecords.size; }
+                liveCardBound.settle({ rebuilt: rebuildAll, size: liveCardRecords.size });
                 // ANY successful sync leaves the instance hydrated
                 // — later hydration triggers ride this sticky promise.
                 initialHydrationPromise = historySyncPromise;
@@ -3218,7 +3219,7 @@ export function createChatInstance({
         // make the first successful post-outage sync a NON-rebuilding routine
         // fold over stale sessionStorage bubbles. Flag it so that sync
         // rebuilds from durable history instead.
-        if (!lastHistorySyncSucceeded) fullRebuildPending = true;
+        if (!lastHistorySyncSucceeded) liveCardBound.arm();
         ensureWelcomeMessage();
     })();
 

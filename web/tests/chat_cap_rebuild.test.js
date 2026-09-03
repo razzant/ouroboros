@@ -410,3 +410,43 @@ test('an arm raised while a routine replay is running survives to the next sync'
         restoreDom(prior);
     }
 });
+
+test('a sync already in flight when the cap arms does not rebuild from its older window', () => {
+    // The reviewer scenario for the arm: the response was fetched before the cap
+    // crossed, so rebuilding from it would clear cards that window never saw and
+    // consume the arm with nothing left to replay them. The in-flight sync must
+    // fold routinely; the arm belongs to the NEXT sync, which fetches again.
+    const historyCalls = [];
+    let release;
+    const gate = new Promise((resolve) => { release = resolve; });
+    const { prior, mount } = installDom(async (url) => {
+        const value = String(url);
+        if (value.startsWith('/api/chat/history')) {
+            historyCalls.push(value);
+            if (historyCalls.length === 2) await gate;   // the deferred (stale) window
+            return { ok: true, json: async () => ({
+                messages: [], window: { complete: false, truncated_by: ['quota'] },
+            }) };
+        }
+        return { ok: true, json: async () => ({ active_direct_turns: [] }) };
+    });
+    const { instance, handlers, messages } = makeInstance(mount);
+    return (async () => {
+        try {
+            await sync(instance, 1);
+            const inFlight = instance.refreshHistory({ revision: 2 });
+            for (let i = 0; i < 201; i += 1) sealCard(handlers, `race-t${i}`, i);
+            release();
+            await inFlight;
+            assert.equal(historyCalls.length, 2);
+            assert.equal(taskCards(messages).length, 201,
+                'the older window folded in routinely and kept the newer cards');
+            await sync(instance, 3);
+            assert.equal(historyCalls.length, 3, 'the arm survived and fetched a fresh window');
+            assert.equal(taskCards(messages).length, 0, 'that fresh sync rebuilt');
+        } finally {
+            instance.destroy();
+            restoreDom(prior);
+        }
+    })();
+});

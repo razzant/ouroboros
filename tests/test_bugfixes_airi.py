@@ -102,7 +102,7 @@ def test_live_card_timeline_only_follows_when_pinned():
 
 def test_reconnect_rebuilds_feed_and_clears_dedupe():
     src = _read("web/modules/chat.js")
-    assert "const renderUser = includeUser || fromReconnect || fullRebuildPending;" in src
+    assert "const renderUser = includeUser || fromReconnect || armedAtStart;" in src
     assert "seenMessageKeys.clear();" in src
     assert "messageKeyOrder.length = 0;" in src
     assert "querySelectorAll('.chat-bubble')" in src
