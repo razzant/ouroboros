@@ -13,6 +13,7 @@ import gzip
 import hashlib
 import json
 import pathlib
+import time as _time
 
 import pytest
 
@@ -1354,3 +1355,135 @@ def test_explicit_final_with_missing_vul_exit_still_refused():
             final_poc_sha256=digest,
             status="completed",
         )
+
+
+class _FakeClock:
+    """Deterministic ``time`` stand-in for the gateway wait loop."""
+
+    def __init__(self) -> None:
+        self.now = 10_000.0
+
+    def monotonic(self) -> float:
+        return self.now
+
+    def time(self) -> float:
+        return 1_700_000_000.0 + self.now
+
+    def sleep(self, seconds: float) -> None:
+        self.now += float(seconds)
+
+    strftime = staticmethod(_time.strftime)
+    gmtime = staticmethod(_time.gmtime)
+
+
+def _deadline_executor(tmp_path, monkeypatch, http, *, task_timeout_sec):
+    from devtools.benchmarks.cybergym import cybergym_lifecycle
+
+    clock = _FakeClock()
+    monkeypatch.setattr(cybergym_lifecycle, "time", clock)
+    config = _config(
+        tmp_path,
+        provider_probe=False,
+        task_timeout_sec=task_timeout_sec,
+        poll_interval_sec=1.0,
+    )
+    executor = CyberGymExecutor(
+        dataclasses_replace(config, http_runner=http, sleep=clock.sleep)
+    )
+    sentinel = {"status": "cancelled", "via": "cancel_path"}
+    monkeypatch.setattr(
+        executor, "_cancel_gateway_task", lambda *_a, **_k: dict(sentinel)
+    )
+    return executor, clock, config.run_root / "checkpoint.json", sentinel
+
+
+def test_gateway_deadline_is_anchored_at_observed_run_start(tmp_path, monkeypatch):
+    # full1507: tasks queued ~1 h behind a finalization backlog were cancelled
+    # after ~1 h of runtime because the deadline was anchored at submit. The
+    # clock must start when the gateway first reports a non-queued status.
+    task_id = "cybergym-observed-start"
+    # Each poll costs 6 s + 1 s poll interval: ~14 s queued (inside the 20 s
+    # queue cap), then the run starts at ~21 s, past a submit-anchored 20 s
+    # deadline, and completes at ~35 s -- inside the observed-start deadline.
+    frames = iter(
+        (
+            {"task_id": task_id, "status": "scheduled"},
+            {"task_id": task_id, "status": "scheduled"},
+            {"task_id": task_id, "status": "running"},
+            {"task_id": task_id, "status": "running"},
+            {
+                "task_id": task_id,
+                "status": "completed",
+                "result": {"cost_final": True},
+            },
+        )
+    )
+    clock_ref = {}
+
+    def http(method, _url, **_kwargs):
+        if method == "POST":
+            return {"task_id": task_id, "status": "scheduled"}
+        clock_ref["clock"].now += 6.0
+        return next(frames)
+
+    executor, clock, checkpoint, sentinel = _deadline_executor(
+        tmp_path, monkeypatch, http, task_timeout_sec=20
+    )
+    submitted_at = clock.now
+    clock_ref["clock"] = clock
+    result = executor._gateway_wait(  # noqa: SLF001 - deadline contract
+        {"task_id": task_id, "description": "test"}, checkpoint
+    )
+
+    assert result["status"] == "completed", "queued time was charged against the deadline"
+    assert clock.now - submitted_at > 20, "scenario must outlive a submit-anchored deadline"
+    saved = json.loads(checkpoint.read_text(encoding="utf-8"))
+    assert saved["deadline_basis"] == "observed_start"
+    assert saved["observed_start_at"].endswith("Z")
+
+
+def test_gateway_queue_wait_cap_still_bounds_a_never_started_task(tmp_path, monkeypatch):
+    task_id = "cybergym-queue-cap"
+    polls = []
+
+    def http(method, _url, **_kwargs):
+        if method == "POST":
+            return {"task_id": task_id, "status": "scheduled"}
+        polls.append(_kwargs.get("timeout"))
+        return {"task_id": task_id, "status": "scheduled"}
+
+    executor, clock, checkpoint, sentinel = _deadline_executor(
+        tmp_path, monkeypatch, http, task_timeout_sec=10
+    )
+    result = executor._gateway_wait(  # noqa: SLF001 - deadline contract
+        {"task_id": task_id, "description": "test"}, checkpoint
+    )
+
+    assert result == sentinel
+    assert 9 <= len(polls) <= 12
+    saved = json.loads(checkpoint.read_text(encoding="utf-8"))
+    assert saved["deadline_basis"] == "queue_wait_cap"
+    assert "observed_start_at" not in saved
+
+
+def test_gateway_run_deadline_carries_grace_behind_server_ceiling(tmp_path, monkeypatch):
+    from devtools.benchmarks.cybergym.cybergym_lifecycle import TASK_DEADLINE_GRACE_SEC
+
+    task_id = "cybergym-run-deadline"
+
+    def http(method, _url, **_kwargs):
+        if method == "POST":
+            return {"task_id": task_id, "status": "scheduled"}
+        return {"task_id": task_id, "status": "running"}
+
+    executor, clock, checkpoint, sentinel = _deadline_executor(
+        tmp_path, monkeypatch, http, task_timeout_sec=10
+    )
+    started = clock.now
+    result = executor._gateway_wait(  # noqa: SLF001 - deadline contract
+        {"task_id": task_id, "description": "test"}, checkpoint
+    )
+
+    assert result == sentinel
+    elapsed = clock.now - started
+    assert 10 + TASK_DEADLINE_GRACE_SEC <= elapsed < 10 + TASK_DEADLINE_GRACE_SEC + 2.0

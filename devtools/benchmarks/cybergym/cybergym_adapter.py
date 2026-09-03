@@ -1575,6 +1575,26 @@ def run_campaign(
         if campaign_lock_held
         else campaign_execution_lock(root, blocking=False)
     )
+    # The breaker pauses and probes instead of abandoning the catalog when
+    # the executor can tell a stalled gateway from a dead one; the pause
+    # history is durable next to the claims so a reviewer can see why
+    # admission stopped and when it resumed.
+    dispatch_owner = getattr(executor, "executor", None) or getattr(
+        executor, "__self__", None,
+    )
+    gateway_probe = getattr(dispatch_owner, "probe_gateway_alive", None)
+    if not callable(gateway_probe):
+        gateway_probe = None
+    dispatch_events_path = root / "dispatch_events.jsonl"
+
+    def _record_dispatch_event(event: Mapping[str, Any]) -> None:
+        payload = {
+            "ts": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+            **dict(event),
+        }
+        with dispatch_events_path.open("a", encoding="utf-8") as handle:
+            handle.write(json.dumps(payload, ensure_ascii=False, sort_keys=True) + "\n")
+
     with lock_context as lock_held:
         if not lock_held:
             raise ClaimRefused("campaign execution lock is unavailable")
@@ -1586,4 +1606,6 @@ def run_campaign(
             max_workers=max_workers,
             threshold=gateway_circuit_threshold,
             on_row=_land_and_settle,
+            gateway_probe=gateway_probe,
+            on_event=_record_dispatch_event,
         )

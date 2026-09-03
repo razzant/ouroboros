@@ -605,6 +605,13 @@ def test_reconcile_task_defers_workspace_release_until_durable(tmp_path, monkeyp
 
     monkeypatch.setattr(executor, "_adopt_workspace_container", fake_adopt)
     monkeypatch.setattr(executor, "_cleanup_workspace_container", fake_cleanup)
+    # A completed frame adopts its workspace only while the container is
+    # still running; present it as running so the adoption path is exercised.
+    monkeypatch.setattr(
+        executor,
+        "_inspect_optional",
+        lambda kind, _name: {"State": {"Status": "running"}} if kind == "container" else None,
+    )
     monkeypatch.setattr(
         executor,
         "_deliver_gateway_result",

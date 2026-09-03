@@ -88,6 +88,18 @@ from devtools.benchmarks.cybergym.cybergym_docker import (
 
 _SETTLED = frozenset({"completed", "failed", "cancelled", "rejected_duplicate"})
 
+# Gateway statuses under which the task has been admitted but has not started
+# executing: no worker lane, no provider spend, no wall clock the agent can
+# pace against.  The launcher's task deadline starts when the task leaves this
+# set (full1507 postmortem: a submit-anchored deadline cancelled healthy tasks
+# after ~1 h of runtime because they had queued ~1 h behind a finalization
+# backlog).  The isolate's own ``OUROBOROS_TASK_ABS_CEILING_SEC`` bounds the
+# RUNNING phase from the same moment; ``TASK_DEADLINE_GRACE_SEC`` keeps the
+# launcher's cancel a backstop behind that server-side settle, not a race
+# against it.
+_QUEUED_GATEWAY_STATUSES = frozenset({"", "scheduled", "queued", "pending"})
+TASK_DEADLINE_GRACE_SEC = 300.0
+
 
 _MASKED_TASK_ID = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_-]{7,255}$")
 
@@ -854,6 +866,27 @@ class _LifecycleMixin:
                     }
             self._gateway_attempts.pop(gateway_task_id, None)
 
+    def probe_gateway_alive(self) -> bool:
+        """Liveness probe for the dispatch breaker: did the gateway answer?
+
+        Any answer (even a non-2xx status) proves the transport is back; only
+        a transport-level failure keeps the campaign paused.
+        """
+
+        try:
+            self.config.http_runner(
+                "GET",
+                _gateway_path(self.config.ouroboros_url, "/api/health"),
+                timeout=15,
+            )
+        except GatewayTransportError:
+            return False
+        except HttpStatusError:
+            return True
+        except Exception:  # noqa: BLE001 - malformed body still means "answered"
+            return True
+        return True
+
     def _gateway_wait(
         self,
         body: Mapping[str, Any],
@@ -965,11 +998,20 @@ class _LifecycleMixin:
                 "body": {k: v for k, v in body.items() if k != "description"},
             },
         )
-        deadline = time.monotonic() + self.config.task_timeout_sec
+        # Two bounds, one active at a time: the queue-wait cap while the
+        # gateway still reports the task as not started, then the task
+        # deadline anchored at the first observed non-queued status.
+        queue_started = time.monotonic()
+        queue_wait_cap = queue_started + float(self.config.task_timeout_sec)
+        run_deadline: float | None = None
+        observed_start_at: str | None = None
         latest: Mapping[str, Any] = created
         cost_grace = _CostGraceTracker()
         transport_deadline: float | None = None
-        while time.monotonic() < deadline:
+        while True:
+            bound = run_deadline if run_deadline is not None else queue_wait_cap
+            if time.monotonic() >= bound:
+                break
             try:
                 latest = _unwrap_http_json(
                     self.config.http_runner(
@@ -986,14 +1028,14 @@ class _LifecycleMixin:
                 # Exhaustion re-raises so a dead gateway still produces the
                 # circuit-breaker row.
                 now = time.monotonic()
-                if now >= deadline:
+                if now >= bound:
                     # The task's own deadline passed while the gateway was
                     # unreachable: stop polling and cancel it like a normal
                     # deadline exit instead of writing a transport row.
                     break
                 if transport_deadline is None:
                     transport_deadline = min(
-                        deadline, now + GATEWAY_TRANSPORT_RETRY_BUDGET_SEC
+                        bound, now + GATEWAY_TRANSPORT_RETRY_BUDGET_SEC
                     )
                 if now >= transport_deadline:
                     raise
@@ -1003,8 +1045,25 @@ class _LifecycleMixin:
             returned_id = str(latest.get("task_id") or "").strip()
             if returned_id and returned_id != task_id:
                 raise ExecutorFailure("Ouroboros status response belongs to a different task")
-            _write_json(checkpoint, {"gateway_task_id": task_id, "status": _response_status(latest), "result": dict(latest)})
             status = _response_status(latest)
+            if run_deadline is None and status not in _QUEUED_GATEWAY_STATUSES:
+                run_deadline = (
+                    time.monotonic()
+                    + float(self.config.task_timeout_sec)
+                    + TASK_DEADLINE_GRACE_SEC
+                )
+                observed_start_at = time.strftime(
+                    "%Y-%m-%dT%H:%M:%SZ", time.gmtime()
+                )
+            frame = {
+                "gateway_task_id": task_id,
+                "status": status,
+                "result": dict(latest),
+                "deadline_basis": "observed_start" if run_deadline is not None else "queue_wait_cap",
+            }
+            if observed_start_at is not None:
+                frame["observed_start_at"] = observed_start_at
+            _write_json(checkpoint, frame)
             if status in _SETTLED:
                 # Root post-task accounting can publish ``completed`` before
                 # its durable cost roll-up is final; only the bounded

@@ -272,6 +272,183 @@ def test_healthy_gateway_parallel_campaign_is_unchanged(tmp_path):
     assert all(row["status"] == "completed" for row in rows)
 
 
+class _Task:
+    def __init__(self, task_id: str) -> None:
+        self.task_id = task_id
+
+
+class _PausingClock:
+    def __init__(self) -> None:
+        self.now = 0.0
+        self.slept: list[float] = []
+
+    def monotonic(self) -> float:
+        return self.now
+
+    def sleep(self, seconds: float) -> None:
+        self.slept.append(float(seconds))
+        self.now += float(seconds)
+
+
+def _transport_row(task_id: str) -> dict:
+    return {
+        "task_id": task_id,
+        "status": "infra_failed",
+        "infra_reason": GATEWAY_TRANSPORT_INFRA_REASON,
+    }
+
+
+def test_breaker_pauses_probes_and_resumes_instead_of_abandoning(tmp_path):
+    """full1507: three transport rows from a ~100 s stall, not a dead isolate."""
+
+    from devtools.benchmarks.cybergym.cybergym_dispatch import run_dispatched
+
+    clock = _PausingClock()
+    probes: list[float] = []
+    # Gateway is "stalled" for the first two probes and answers on the third.
+    probe_answers = iter([False, False, True])
+
+    def probe() -> bool:
+        probes.append(clock.now)
+        return next(probe_answers)
+
+    outcomes = iter(["transport", "transport", "transport", "ok", "ok", "ok"])
+
+    def run_one(task):
+        if next(outcomes) == "ok":
+            return {"task_id": task.task_id, "status": "completed"}
+        return _transport_row(task.task_id)
+
+    events: list[dict] = []
+    tasks = [_Task(f"arvo:{index}") for index in range(1, 7)]
+    for workers in (1, 3):
+        outcomes = iter(["transport", "transport", "transport", "ok", "ok", "ok"])
+        probe_answers = iter([False, False, True])
+        probes.clear()
+        events.clear()
+        clock.now = 0.0
+        clock.slept.clear()
+        rows = run_dispatched(
+            tasks,
+            run_one,
+            max_workers=workers,
+            threshold=3,
+            gateway_probe=probe,
+            probe_backoff_sec=(30.0, 60.0, 120.0),
+            pause_budget_sec=3600.0,
+            on_event=events.append,
+            sleep=clock.sleep,
+            clock=clock.monotonic,
+        )
+
+        assert [row["status"] for row in rows] == ["infra_failed"] * 3 + ["completed"] * 3
+        # Backoff schedule: first probe after 30 s, then +60 s, then +120 s.
+        assert probes == [30.0, 90.0, 210.0]
+        names = [event["event"] for event in events]
+        assert names == [
+            "gateway_pause",
+            "gateway_probe_failed",
+            "gateway_probe_failed",
+            "gateway_resume",
+        ]
+        assert events[-1]["paused_sec"] == 210.0
+        assert events[-1]["failed_probes"] == 2
+
+
+def test_breaker_opens_only_after_pause_budget_is_exhausted(tmp_path):
+    from devtools.benchmarks.cybergym.cybergym_dispatch import run_dispatched
+
+    clock = _PausingClock()
+    probes: list[float] = []
+
+    def dead_probe() -> bool:
+        probes.append(clock.now)
+        return False
+
+    def run_one(task):
+        return _transport_row(task.task_id)
+
+    tasks = [_Task(f"arvo:{index}") for index in range(1, 9)]
+    with pytest.raises(GatewayCircuitOpen) as excinfo:
+        run_dispatched(
+            tasks,
+            run_one,
+            max_workers=1,
+            threshold=3,
+            gateway_probe=dead_probe,
+            probe_backoff_sec=(30.0, 60.0),
+            pause_budget_sec=200.0,
+            sleep=clock.sleep,
+            clock=clock.monotonic,
+        )
+
+    exc = excinfo.value
+    assert [row["task_id"] for row in exc.rows] == ["arvo:1", "arvo:2", "arvo:3"]
+    assert exc.remaining_task_ids == [f"arvo:{index}" for index in range(4, 9)]
+    # 30, 90, 150, 210 >= 200 budget -> open on the fourth failed probe.
+    assert probes == [30.0, 90.0, 150.0, 210.0]
+    assert exc.as_dict()["pause"]["pauses"][0]["failed_probes"] == 4
+    assert exc.as_dict()["pause"]["pauses"][0]["paused_sec"] == 210.0
+
+
+def test_breaker_without_probe_keeps_the_fail_fast_contract(tmp_path):
+    from devtools.benchmarks.cybergym.cybergym_dispatch import run_dispatched
+
+    def run_one(task):
+        return _transport_row(task.task_id)
+
+    tasks = [_Task(f"arvo:{index}") for index in range(1, 6)]
+    with pytest.raises(GatewayCircuitOpen) as excinfo:
+        run_dispatched(
+            tasks,
+            run_one,
+            max_workers=1,
+            threshold=3,
+            sleep=lambda _s: pytest.fail("no probe: must not sleep"),
+        )
+    assert "pause" not in excinfo.value.as_dict()
+    assert excinfo.value.remaining_task_ids == ["arvo:4", "arvo:5"]
+
+
+def test_run_campaign_wires_executor_probe_and_records_dispatch_events(tmp_path, monkeypatch):
+    from devtools.benchmarks.cybergym import cybergym_dispatch
+
+    captured = {}
+    real = cybergym_dispatch.run_dispatched
+
+    def spy(tasks, run_one, **kwargs):
+        captured.update(kwargs)
+        return real(tasks, run_one, **kwargs)
+
+    monkeypatch.setattr(
+        "devtools.benchmarks.cybergym.cybergym_adapter.run_dispatched", spy
+    )
+
+    class Owner:
+        def probe_gateway_alive(self) -> bool:
+            return True
+
+        def run(self, task, task_dir):
+            return _completed(task, task_dir)
+
+    owner = Owner()
+    rows = run_campaign(
+        ["arvo:1", "arvo:2"],
+        run_root=tmp_path / "wired",
+        executor=owner.run,
+        estimated_cost_usd=1,
+        budget_cap_usd=10,
+    )
+
+    assert [row["status"] for row in rows] == ["completed", "completed"]
+    assert captured["gateway_probe"] == owner.probe_gateway_alive
+    captured["on_event"]({"event": "gateway_pause", "x": 1})
+    logged = (tmp_path / "wired" / "dispatch_events.jsonl").read_text(encoding="utf-8")
+    entry = json.loads(logged.strip())
+    assert entry["event"] == "gateway_pause"
+    assert entry["ts"].endswith("Z")
+
+
 def test_gateway_circuit_threshold_is_validated(tmp_path):
     for invalid in (0, -1, True, 2.5, "3"):
         with pytest.raises(ValueError, match="gateway_circuit_threshold"):

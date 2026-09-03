@@ -259,11 +259,50 @@ def _json_bytes(payload: Any) -> bytes:
     return json.dumps(payload, ensure_ascii=False, sort_keys=True, default=str).encode("utf-8")
 
 
+# Byte markers whose presence means a payload may embed drive-local refs that
+# copy-back must rewrite (blob/manifest refs carry the drive's absolute path;
+# Phase3B actor refs carry the marker or ``"kind": "task_source"``). A payload
+# with none of them is portable: promotion can relocate the compressed file as
+# is, without decompressing and re-hashing gigabytes on the control plane.
+_NON_PORTABLE_MARKERS: tuple[bytes, ...] = (
+    b"FULL_RESULT_SOURCE_JSON=",
+    b"task_source",
+    (OBSERVABILITY_DIR + "/").encode("utf-8"),
+)
+
+
+def _payload_is_portable(drive_root: pathlib.Path, raw: bytes) -> bool:
+    for marker in _NON_PORTABLE_MARKERS:
+        if marker in raw:
+            return False
+    seen: set[str] = set()
+    for candidate in (pathlib.Path(drive_root), pathlib.Path(drive_root).resolve(strict=False)):
+        text = str(candidate)
+        if text in seen or not text or text == os.sep:
+            continue
+        seen.add(text)
+        if text.encode("utf-8", errors="replace") in raw:
+            return False
+    return True
+
+
+def _compressed_sha256(path: pathlib.Path) -> str:
+    digest = hashlib.sha256()
+    with open(path, "rb") as handle:
+        while True:
+            chunk = handle.read(1 << 20)
+            if not chunk:
+                break
+            digest.update(chunk)
+    return digest.hexdigest()
+
+
 def write_blob(drive_root: pathlib.Path, payload: Any, *, kind: str = "json") -> Dict[str, Any]:
     """Persist a full private payload as a content-addressed gzip blob."""
 
     raw = _json_bytes(payload) if kind == "json" else str(payload).encode("utf-8", errors="replace")
     digest = hashlib.sha256(raw).hexdigest()
+    portable = _payload_is_portable(pathlib.Path(drive_root), raw)
     path = _observability_root(pathlib.Path(drive_root)) / "blobs" / f"{digest}.{kind}.gz"
     path.parent.mkdir(parents=True, exist_ok=True)
     _chmod_private_dir(path.parent)
@@ -293,14 +332,21 @@ def write_blob(drive_root: pathlib.Path, payload: Any, *, kind: str = "json") ->
                 raise
     else:
         _chmod_private(path)
-    return {
+    ref = {
         "sha256": digest,
         "path": str(path),
         "kind": kind,
         "encoding": "gzip",
         "size": len(raw),
         "compressed_size": path.stat().st_size if path.exists() else 0,
+        "portable": portable,
     }
+    if portable:
+        # The compressed digest lets copy-back verify the file it relocates
+        # without inflating it; it describes the durable file (which may be a
+        # pre-existing CAS twin with different gzip framing), not our buffer.
+        ref["compressed_sha256"] = _compressed_sha256(path)
+    return ref
 
 
 def read_blob_ref(
@@ -365,6 +411,116 @@ def _promotion_source_error(exc: Exception) -> ObservabilityPromotionSourceError
     return ObservabilityPromotionSourceError(reason, message or type(exc).__name__)
 
 
+def _blob_source_path(
+    source_drive_root: pathlib.Path, ref: Dict[str, Any], *, expected_kind: str
+) -> pathlib.Path:
+    """Validate a blob ref's scope and shape without opening its payload."""
+
+    if not isinstance(ref, dict):
+        raise ValueError("observability blob ref must be an object")
+    kind = str(ref.get("kind") or "")
+    if kind != expected_kind or ref.get("encoding") != "gzip":
+        raise ValueError("observability blob ref has an unexpected kind or encoding")
+    if not str(ref.get("sha256") or ""):
+        raise ValueError("observability blob ref has no sha256")
+    try:
+        int(ref["size"])
+    except (KeyError, TypeError, ValueError) as exc:
+        raise ValueError("observability blob ref has no valid size") from exc
+    root = _observability_root(pathlib.Path(source_drive_root)).resolve(strict=False)
+    path = pathlib.Path(str(ref.get("path") or "")).resolve(strict=True)
+    try:
+        path.relative_to(root)
+    except ValueError as exc:
+        raise ValueError("observability blob ref points outside its drive") from exc
+    return path
+
+
+def _relocate_portable_blob(
+    source: pathlib.Path,
+    canonical_drive_root: pathlib.Path,
+    ref: Dict[str, Any],
+    *,
+    kind: str,
+) -> Optional[Dict[str, Any]]:
+    """Publish a portable child blob into canonical CAS without decompressing.
+
+    ``source`` is the already scope-validated child path. The blob was
+    content-addressed and verified when the child wrote it, and a portable
+    payload embeds no drive-local refs, so its bytes are already the canonical
+    bytes: a hard link (same inode) or a size-and-digest-checked byte copy is
+    the promotion. Returns ``None`` when the ref is not eligible so the caller
+    falls back to the verifying decompress-and-rewrite path. Destination
+    failures raise plainly so the caller keeps them retryable.
+    """
+
+    digest = str(ref.get("sha256") or "")
+    expected_name = f"{digest}.{kind}.gz"
+    expected_compressed = str(ref.get("compressed_sha256") or "")
+    if source.name != expected_name or not expected_compressed:
+        return None
+    # Integrity is asserted on the compressed bytes the child recorded: a
+    # tampered or torn source is still refused as ``digest_mismatch``.
+    if _compressed_sha256(source) != expected_compressed:
+        raise ValueError("observability blob ref failed size or sha256 verification")
+    source_size = source.stat().st_size
+    dest_dir = _observability_root(pathlib.Path(canonical_drive_root)) / "blobs"
+    dest_dir.mkdir(parents=True, exist_ok=True)
+    _chmod_private_dir(dest_dir)
+    dest = dest_dir / expected_name
+    if source.resolve(strict=False) == dest.resolve(strict=False):
+        return dict(ref)
+    dest_compressed = expected_compressed
+    if dest.exists():
+        dest_compressed = _compressed_sha256(dest)
+    else:
+        tmp = dest.with_name(f".{dest.name}.tmp.{os.getpid()}.{uuid.uuid4().hex[:8]}")
+        try:
+            try:
+                os.link(source, tmp)
+            except OSError:
+                # Cross-device or link-less filesystem: byte copy instead.
+                with open(source, "rb") as src, open(tmp, "wb") as out:
+                    while True:
+                        chunk = src.read(1 << 20)
+                        if not chunk:
+                            break
+                        out.write(chunk)
+            if (
+                tmp.stat().st_size != source_size
+                or _compressed_sha256(tmp) != expected_compressed
+            ):
+                raise OSError("portable blob relocation did not land intact")
+            _chmod_private(tmp)
+            replace_atomic(tmp, dest)
+        except Exception:
+            try:
+                tmp.unlink()
+            except OSError:
+                pass
+            if not dest.exists():
+                raise
+            # A concurrent copy-back published the twin first.
+            dest_compressed = _compressed_sha256(dest)
+    _chmod_private(dest)
+    # An already-present canonical blob is the same raw content by address;
+    # its gzip framing may differ (header mtime, level), so only the framing
+    # magic is asserted here, never byte equality with the child copy.
+    with open(dest, "rb") as handle:
+        if handle.read(2) != b"\x1f\x8b":
+            raise OSError("canonical observability blob is not gzip framed")
+    return {
+        "sha256": digest,
+        "path": str(dest),
+        "kind": kind,
+        "encoding": "gzip",
+        "size": int(ref["size"]),
+        "compressed_size": dest.stat().st_size,
+        "portable": True,
+        "compressed_sha256": dest_compressed,
+    }
+
+
 def promote_blob_ref(
     source_drive_root: pathlib.Path,
     canonical_drive_root: pathlib.Path,
@@ -379,9 +535,29 @@ def promote_blob_ref(
     is minted. Source verification happens first; destination write failures
     remain ordinary I/O errors so the caller can retry without calling a
     corrupt/missing source live.
+
+    A ref stamped ``portable`` at write time embeds nothing to rebase, so it is
+    relocated by hard link / checked byte copy instead of the decompress,
+    re-hash, re-compress, re-verify cycle — the cycle that, run for tens of
+    thousands of blobs per cohort, saturated the finalization pool and the
+    supervisor loop under 64 lanes (full1507 postmortem).
     """
 
     kind = str((ref or {}).get("kind") or "")
+    if isinstance(ref, dict) and ref.get("portable") is True:
+        try:
+            source = _blob_source_path(
+                pathlib.Path(source_drive_root), ref, expected_kind=kind
+            )
+            relocated = _relocate_portable_blob(
+                source, pathlib.Path(canonical_drive_root), ref, kind=kind
+            )
+        except (ValueError, FileNotFoundError) as exc:
+            # Source-side verdicts (scope, shape, digest, missing file) are
+            # typed unavailable; destination I/O errors stay retryable.
+            raise _promotion_source_error(exc) from exc
+        if relocated is not None:
+            return relocated
     try:
         payload = read_blob_ref(
             pathlib.Path(source_drive_root),

@@ -417,10 +417,24 @@ visible for later diagnosis and is not cherry-picked for a recovery rerun.
 A dead isolate gateway is a campaign-level transport fact, not a per-task
 result: after three consecutive transport-class failures (the gateway produced
 no HTTP response at all) the dispatch circuit breaker stops admitting new
-tasks, already-dispatched in-flight tasks settle normally, and the campaign
-finalizes as ``gateway_unreachable``.  Never-dispatched tasks receive no row;
-the manifest names them under ``extra.gateway_circuit.remaining_task_ids`` so
-the requested denominator stays recoverable without fabricating infra rows.
+tasks.  A stalled gateway is not yet a dead one: while admission is paused the
+launcher probes ``/api/health`` on a fixed backoff (30 s, 60 s, 120 s, then
+every 300 s) and resumes admission on the first answer; every pause, failed
+probe, and resume is appended to ``dispatch_events.jsonl`` in the run root.
+Only a pause that exhausts its one-hour budget without a single answer opens
+the circuit: already-dispatched in-flight tasks settle normally and the
+campaign finalizes as ``gateway_unreachable``.  Never-dispatched tasks receive
+no row; the manifest names them under
+``extra.gateway_circuit.remaining_task_ids`` (with the pause history under
+``extra.gateway_circuit.pause``) so the requested denominator stays
+recoverable without fabricating infra rows.
+
+The per-task wall-clock deadline is anchored at the first gateway status that
+is not ``scheduled``: time a task spends admitted but queued behind busy lanes
+is bounded separately by a queue-wait cap equal to the task timeout, and is
+never charged against the agent's working budget.  The checkpoint frame
+discloses ``deadline_basis`` (``queue_wait_cap`` or ``observed_start``) and
+``observed_start_at``.
 
 The summary always names the metric, numerator, denominator, task-data hash,
 source order, model identity, provider distribution, effort, and whether the
