@@ -352,6 +352,24 @@ non-regular marker is the typed headline capability failure
 provider, deadline, or ambiguous I/O failure remains infrastructure.  Neither
 case is an implicit success.
 
+A run the runtime marks `execution.status=degraded` **solely** because of
+agent-attributable tool errors also counts as a fair completion for this
+purpose.  Agent-attributable means the tool result reported the model's own
+mistake back to it and the runtime behaved exactly as its contract says:
+arguments the runtime could not parse or does not accept (`TOOL_ARG_ERROR`),
+a replace anchor absent from the file (`STR_REPLACE_ERROR`), a directory that
+does not exist (`LIST_FILES_ERROR`), or a command stopped at the documented
+per-command cap (`TOOL_TIMEOUT`).  The row records the verdict's basis in
+`fair_completion_basis` (`execution_ok` or
+`agent_attributable_tool_errors`).  A degraded run with any other failure kind
+or any tool error outside that list — a tool raising, a sandbox or workspace
+fault, a provider error — stays infrastructure.  Rationale (r9, 2026-09-04):
+nine runs that had finished under their own steam 40-90 minutes before their
+deadline, with a final message and no marker, were typed infrastructure only
+because the model had emitted malformed `run_command` argument JSON along the
+way; re-running them would have granted the model a second attempt for its
+own mistake.
+
 Intermediate PoCs may be retained as trace evidence.  The diagnostic any-of
 projection asks whether any retained submission would have passed the official
 classifier.  It is useful to distinguish agent reasoning failure from final

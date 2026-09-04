@@ -1487,3 +1487,68 @@ def test_gateway_run_deadline_carries_grace_behind_server_ceiling(tmp_path, monk
     assert result == sentinel
     elapsed = clock.now - started
     assert 10 + TASK_DEADLINE_GRACE_SEC <= elapsed < 10 + TASK_DEADLINE_GRACE_SEC + 2.0
+
+
+# r9 (2026-09-04): nine runs that finished on their own, 40-90 min before the
+# deadline, with a final message and no marker, were typed infrastructure
+# (FinalPocRefused) because the runtime marked execution `degraded` over the
+# model's own malformed run_command argument JSON. The fair-completion verdict
+# now sees through agent-attributable tool errors and discloses its basis.
+
+
+def _envelope(execution: dict) -> dict:
+    return {"status": "completed", "result": {"outcome_axes": {
+        "lifecycle": {"status": "completed"}, "execution": execution,
+    }}}
+
+
+def _tool_error(tool: str, text: str, status: str = "error") -> dict:
+    return {"tool": tool, "status": status, "exit_code": None, "signal": None, "result": text}
+
+
+def test_fair_completion_execution_ok_and_agent_attributable_tool_errors():
+    from devtools.benchmarks.cybergym.cybergym_wire import _gateway_fair_completion
+
+    assert _gateway_fair_completion(_envelope({"status": "ok"})) == (True, "execution_ok")
+    degraded = _envelope({
+        "status": "degraded", "reason_code": "tool_failure",
+        "failure": {"kind": "tool", "reason_code": "tool_failure", "tool_errors": [
+            _tool_error("run_command", "⚠️ TOOL_ARG_ERROR: Could not parse arguments for 'run_command': Expecting ',' delimiter: line 1 column 257 (char 256)"),
+            _tool_error("search_code", "⚠️ TOOL_ARG_ERROR (search_code): invalid arguments for search_code. Accepted parameters: query, path"),
+            _tool_error("edit_text", "⚠️ STR_REPLACE_ERROR: old_str not found in sweep.py."),
+            _tool_error("list_files", "⚠️ LIST_FILES_ERROR: Directory not found: tmp"),
+            _tool_error("run_command", "⚠️ TOOL_TIMEOUT (run_command): command exceeded the per-command timeout of 900s", status="timeout"),
+        ]},
+    })
+    assert _gateway_fair_completion(degraded) == (True, "agent_attributable_tool_errors")
+
+
+@pytest.mark.parametrize("execution, basis", [
+    ({"status": "failed"}, "execution_failed"),
+    ({"status": "infra_failed"}, "execution_infra_failed"),
+    ({"status": "best_effort"}, "execution_best_effort"),
+    ({}, "execution_missing"),
+    ({"status": "degraded", "failure": {"kind": "finalization_control", "reason_code": "delivery_control_degraded"}},
+     "degraded_non_tool_failure"),
+    ({"status": "degraded", "failure": {"kind": "tool", "reason_code": "tool_failure", "tool_errors": []}},
+     "degraded_tool_failure_without_errors"),
+    ({"status": "degraded", "failure": {"kind": "tool", "reason_code": "tool_failure", "tool_errors": [
+        _tool_error("run_command", "⚠️ TOOL_ARG_ERROR: Could not parse arguments"),
+        _tool_error("run_command", "⚠️ TOOL_ERROR (run_command): RuntimeError: Could not determine home directory."),
+    ]}}, "degraded_runtime_tool_error"),
+    ({"status": "degraded", "failure": {"kind": "tool", "reason_code": "tool_failure", "tool_errors": ["oops"]}},
+     "degraded_untyped_tool_error"),
+])
+def test_fair_completion_refuses_everything_else(execution, basis):
+    from devtools.benchmarks.cybergym.cybergym_wire import _gateway_fair_completion
+
+    assert _gateway_fair_completion(_envelope(execution)) == (False, basis)
+
+
+def test_fair_completion_reads_outermost_execution_axis():
+    from devtools.benchmarks.cybergym.cybergym_wire import _gateway_fair_completion
+
+    payload = {"outcome_axes": {"execution": {"status": "ok"}},
+               "result": {"outcome_axes": {"execution": {"status": "failed"}}}}
+    assert _gateway_fair_completion(payload) == (True, "execution_ok")
+    assert _gateway_fair_completion({"result": {"task_result": _envelope({"status": "failed"})}}) == (False, "execution_failed")

@@ -61,7 +61,7 @@ from devtools.benchmarks.cybergym.cybergym_wire import (
     _PROVIDER_ID,
     _cost_is_pending,
     _definitive_admission_rejection,
-    _gateway_execution_status,
+    _gateway_fair_completion,
     _gateway_has_tool_markup,
     _gateway_path,
     _nonnegative_number,
@@ -1363,7 +1363,7 @@ class _LifecycleMixin:
                     },
                 )
         except FinalPocRefused as exc:
-            fair_completion = _gateway_execution_status(gateway_result) == "ok"
+            fair_completion, fair_basis = _gateway_fair_completion(gateway_result)
             agent_marker_failure = exc.reason in {
                 "missing",
                 "non_regular",
@@ -1397,6 +1397,7 @@ class _LifecycleMixin:
                 "lifecycle": CAPABILITY_FINAL_POC_MISSING,
                 "capability_outcome": CAPABILITY_FINAL_POC_MISSING,
                 "final_poc_reason": exc.reason,
+                "fair_completion_basis": fair_basis,
                 "artifact_refs": artifact_refs,
                 "error": str(exc),
             }
