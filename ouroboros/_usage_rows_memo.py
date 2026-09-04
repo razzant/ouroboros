@@ -362,6 +362,117 @@ def _cached_attempt_states(root: pathlib.Path, row_count: int) -> Optional[Dict[
     return dict(resume.states)
 
 
+class _FinalsView:
+    """Final rows, their ``_summary`` and a per-root index, maintained incrementally.
+
+    ``reserve_attempt`` folded ``_final_rows`` + ``_summary`` over the WHOLE
+    cached record list under the monetary lock on every reserve, and filtered
+    the finals per root task on top: O(ledger) per call. Measured on the r8
+    ledger replicated to 512K rows: ~100 ms for the dict alone, and the summary
+    grows with the number of attempts (~170K at the tail of a 1369-task
+    campaign) — enough, at 1-2 reserves/s, to hand the lock convoy back in the
+    last third of the run. This view applies only the rows appended since its
+    last call: superseded final rows are retracted from the accumulator and the
+    new ones added, so the summary is the same arithmetic as a replay.
+
+    The view is keyed on the cached record list's shape — ``(first seq, last
+    seq, row count)`` — and any mismatch (cache refold, quarantine, shrink,
+    another root) rebuilds from scratch. It never touches the file; it is
+    always called under the held ledger lock with the list the in-lock read
+    just returned. Every ``_REFOLD_EVERY`` applied rows it refolds anyway, so
+    float add/retract drift stays bounded, and once a subscription row is seen
+    (whose window maximum is not retractable) the summary is re-folded from
+    the final rows on every call.
+    """
+
+    _REFOLD_EVERY = 4096
+
+    def __init__(self) -> None:
+        self.row_count = 0
+        self.first_seq: Any = None
+        self.last_seq: Any = None
+        self.finals: Dict[str, Dict[str, Any]] = {}
+        self.by_root: Dict[str, Dict[str, Dict[str, Any]]] = {}
+        self.accumulator = _ua().SummaryAccumulator()
+        self.applied_since_refold = 0
+
+    def _extends(self, records: list) -> bool:
+        if not self.row_count or len(records) < self.row_count:
+            return False
+        try:
+            return (
+                records[0].get("seq") == self.first_seq
+                and records[self.row_count - 1].get("seq") == self.last_seq
+            )
+        except (AttributeError, IndexError):
+            return False
+
+    def _apply(self, row: Dict[str, Any]) -> None:
+        attempt_id = str(row.get("attempt_id") or "")
+        previous = self.finals.get(attempt_id)
+        if previous is not None:
+            self.accumulator.add(previous, -1)
+            old_root = str(previous.get("root_task_id") or "")
+            if old_root:
+                bucket = self.by_root.get(old_root)
+                if bucket is not None:
+                    bucket.pop(attempt_id, None)
+        self.finals[attempt_id] = row
+        self.accumulator.add(row)
+        root_task_id = str(row.get("root_task_id") or "")
+        if root_task_id:
+            self.by_root.setdefault(root_task_id, {})[attempt_id] = row
+        self.applied_since_refold += 1
+
+    def _rebuild(self, records: list) -> None:
+        self.finals = {}
+        self.by_root = {}
+        self.accumulator = _ua().SummaryAccumulator()
+        for row in records:
+            self._apply(row)
+        self.applied_since_refold = 0
+        self._stamp(records)
+
+    def _stamp(self, records: list) -> None:
+        self.row_count = len(records)
+        self.first_seq = records[0].get("seq") if records else None
+        self.last_seq = records[-1].get("seq") if records else None
+
+    def advance(self, records: list) -> None:
+        if not self._extends(records) or self.applied_since_refold >= self._REFOLD_EVERY:
+            self._rebuild(records)
+            return
+        for row in records[self.row_count:]:
+            self._apply(row)
+        self._stamp(records)
+
+    def summary(self) -> Dict[str, Any]:
+        if not self.accumulator.exact_retraction:
+            return _ua()._summary(list(self.finals.values()))
+        return self.accumulator.render()
+
+    def rows_for_root(self, root_task_id: str) -> list:
+        """Final rows of one root task's subtree (order: first occurrence, like
+        a filtered ``_final_rows``)."""
+        return list((self.by_root.get(str(root_task_id or "")) or {}).values())
+
+
+_FINALS_VIEWS: Dict[str, _FinalsView] = {}
+_FINALS_VIEWS_LOCK = threading.Lock()
+
+
+def _finals_view(root: pathlib.Path, records: list) -> _FinalsView:
+    """The incrementally maintained finals view for ``records`` — the list the
+    in-lock read just returned for ``root``. Call under the held ledger lock."""
+    key = str(pathlib.Path(root).resolve(strict=False))
+    with _FINALS_VIEWS_LOCK:
+        view = _FINALS_VIEWS.get(key)
+        if view is None:
+            view = _FINALS_VIEWS[key] = _FinalsView()
+        view.advance(records)
+        return view
+
+
 def _read_records_locked_cached(root: pathlib.Path) -> list:
     """``_read_records_locked`` with an incremental warm path. Call under the
     held ledger lock (same contract as ``_read_records_locked``)."""

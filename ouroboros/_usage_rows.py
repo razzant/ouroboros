@@ -15,94 +15,128 @@ from ouroboros.usage_ledger import _number
 
 REVIEW_ATTRIBUTION_KEYS = ("review_skill", "review_wave_id", "review_slot_id")
 
-def _summary(rows: Sequence[Dict[str, Any]]) -> Dict[str, Any]:
-    settled = confirmed = estimated = reserved = unresolved = 0.0
-    unknown = 0
-    # Finality is a COUNT of OPEN ROWS, not a truthiness test on dollar sums. Three of the
-    # four old terms asked a STATE question of a float, so any row that is genuinely open
-    # while holding $0.00 disappeared from the predicate entirely:
-    #   * an ESTIMATED $0.00 — what the engine reports for a delegated subscription run
-    #     whose cash it has not settled (all 8 estimated rows on a live 60-run page); and
-    #   * a DISPATCHED row whose reservation is exactly 0.0, which `_reservation_cost`
-    #     returns for `provider="local"`, so the projection claimed `cost_final: True`
-    #     with a physical send still in flight.
-    # A row is final when it is SETTLED at a known price its writer called final; anything
-    # else is open, however little it costs. `_final_rows` keys by attempt_id, so a settled
-    # row REPLACES its own reserved/dispatched predecessor — a row still open here is
-    # really still open, and a released reservation is in neither branch.
-    #
-    # The count is also the DISCLOSED CAUSE, returned as `non_final_rows`: a projection
-    # reporting `cost_final: false` with every dollar bucket at zero and `unknown` at zero
-    # is a flag no reader can reconstruct.
-    non_final_rows = 0
-    counts: Dict[str, int] = {}
-    # Separate "sessions and quota" axis: subscription work is already paid for, so
-    # it contributes exactly $0 to money, and its real scarce resource (sessions and
-    # the window that grants them) is counted here instead of being faked as cash.
-    sessions = 0
-    session_windows: Dict[str, str] = {}
-    for row in rows:
+class SummaryAccumulator:
+    """The ``_summary`` fold as a reusable, SIGNED accumulator.
+
+    ``add(row)`` applies one final row; ``add(row, -1)`` retracts a row that a
+    later row of the same attempt has superseded. ``_summary`` itself is
+    ``add`` over its rows in order, so a full replay and an incrementally
+    maintained accumulator are the same arithmetic (see
+    ``_usage_rows_memo._FinalsView``: the reserve path at 500K ledger rows
+    otherwise re-folds every final row under the monetary lock per call).
+
+    Only the per-route ``subscription_windows`` maximum is not retractable; a
+    view that has ever seen a subscription row reports ``exact_retraction``
+    False and its owner re-folds from the final rows instead.
+    """
+
+    __slots__ = (
+        "settled", "confirmed", "estimated", "reserved", "unresolved", "unknown",
+        "non_final_rows", "counts", "sessions", "session_windows", "exact_retraction",
+    )
+
+    def __init__(self) -> None:
+        self.settled = self.confirmed = self.estimated = self.reserved = self.unresolved = 0.0
+        self.unknown = 0
+        # Finality is a COUNT of OPEN ROWS, not a truthiness test on dollar sums. Three of the
+        # four old terms asked a STATE question of a float, so any row that is genuinely open
+        # while holding $0.00 disappeared from the predicate entirely:
+        #   * an ESTIMATED $0.00 — what the engine reports for a delegated subscription run
+        #     whose cash it has not settled (all 8 estimated rows on a live 60-run page); and
+        #   * a DISPATCHED row whose reservation is exactly 0.0, which `_reservation_cost`
+        #     returns for `provider="local"`, so the projection claimed `cost_final: True`
+        #     with a physical send still in flight.
+        # A row is final when it is SETTLED at a known price its writer called final; anything
+        # else is open, however little it costs. `_final_rows` keys by attempt_id, so a settled
+        # row REPLACES its own reserved/dispatched predecessor — a row still open here is
+        # really still open, and a released reservation is in neither branch.
+        #
+        # The count is also the DISCLOSED CAUSE, returned as `non_final_rows`: a projection
+        # reporting `cost_final: false` with every dollar bucket at zero and `unknown` at zero
+        # is a flag no reader can reconstruct.
+        self.non_final_rows = 0
+        self.counts: Dict[str, int] = {}
+        # Separate "sessions and quota" axis: subscription work is already paid for, so
+        # it contributes exactly $0 to money, and its real scarce resource (sessions and
+        # the window that grants them) is counted here instead of being faked as cash.
+        self.sessions = 0
+        self.session_windows: Dict[str, str] = {}
+        self.exact_retraction = True
+
+    def add(self, row: Dict[str, Any], sign: int = 1) -> None:
         state = str(row.get("state") or "")
         if str(row.get("kind") or "") == "subscription_session":
-            sessions += 1
+            self.sessions += sign
             route = str(row.get("subscription_route") or "")
             reset_at = str(row.get("subscription_reset_at") or "")
             if route and reset_at:
-                session_windows[route] = max(session_windows.get(route, ""), reset_at)
+                self.session_windows[route] = max(self.session_windows.get(route, ""), reset_at)
+                self.exact_retraction = False
         if str(row.get("kind") or "") == "legacy_metadata":
             ambiguous = max(1, int(row.get("ambiguous_call_count") or 1))
-            counts["metadata_only"] = counts.get("metadata_only", 0) + ambiguous
-            continue
-        counts[state] = counts.get(state, 0) + 1
+            self.counts["metadata_only"] = self.counts.get("metadata_only", 0) + sign * ambiguous
+            return
+        self.counts[state] = self.counts.get(state, 0) + sign
         pricing_unknown = row.get("pricing_known") is False
         if state == "settled":
             cost = _number(row.get("cost_usd"))
             if cost is None:
-                unknown += 1
-                non_final_rows += 1
+                self.unknown += sign
+                self.non_final_rows += sign
                 bound = _number(row.get("reservation_upper_bound_usd"))
                 if bound is not None:
-                    unresolved += bound
+                    self.unresolved += sign * bound
             else:
-                settled += cost
+                self.settled += sign * cost
                 if bool(row.get("cost_final")):
-                    confirmed += cost
+                    self.confirmed += sign * cost
                 else:
-                    estimated += cost
-                    non_final_rows += 1
+                    self.estimated += sign * cost
+                    self.non_final_rows += sign
         elif state == "reserved":
-            non_final_rows += 1
+            self.non_final_rows += sign
             bound = _number(row.get("reservation_upper_bound_usd"))
             if bound is None or pricing_unknown:
-                unknown += 1
+                self.unknown += sign
             if bound is not None:
-                reserved += bound
+                self.reserved += sign * bound
         elif state in {"dispatched", "unresolved"}:
-            non_final_rows += 1
+            self.non_final_rows += sign
             bound = _number(row.get("reservation_upper_bound_usd"))
             if bound is None or pricing_unknown:
-                unknown += 1
+                self.unknown += sign
             if bound is not None:
-                unresolved += bound
-    settled, confirmed, estimated, reserved, unresolved = (
-        round(value, 6) for value in (settled, confirmed, estimated, reserved, unresolved)
-    )
-    return {
-        "settled_usd": settled,
-        "confirmed_usd": confirmed,
-        "estimated_usd": estimated,
-        "reserved_usd": reserved,
-        "unresolved_upper_bound_usd": unresolved,
-        "accounted_usd": round(settled + reserved + unresolved, 6),
-        "unknown_unmetered": unknown,
-        # Every row that increments `unknown` is open, so the old `not unknown` term is
-        # subsumed here rather than dropped.
-        "non_final_rows": non_final_rows,
-        "cost_final": not non_final_rows,
-        "attempt_counts": counts,
-        "subscription_sessions": sessions,
-        "subscription_windows": session_windows,
-    }
+                self.unresolved += sign * bound
+
+    def render(self) -> Dict[str, Any]:
+        settled, confirmed, estimated, reserved, unresolved = (
+            round(value, 6) for value in (
+                self.settled, self.confirmed, self.estimated, self.reserved, self.unresolved,
+            )
+        )
+        return {
+            "settled_usd": settled,
+            "confirmed_usd": confirmed,
+            "estimated_usd": estimated,
+            "reserved_usd": reserved,
+            "unresolved_upper_bound_usd": unresolved,
+            "accounted_usd": round(settled + reserved + unresolved, 6),
+            "unknown_unmetered": self.unknown,
+            # Every row that increments `unknown` is open, so the old `not unknown` term is
+            # subsumed here rather than dropped.
+            "non_final_rows": self.non_final_rows,
+            "cost_final": not self.non_final_rows,
+            "attempt_counts": {state: count for state, count in self.counts.items() if count},
+            "subscription_sessions": self.sessions,
+            "subscription_windows": dict(self.session_windows),
+        }
+
+
+def _summary(rows: Sequence[Dict[str, Any]]) -> Dict[str, Any]:
+    accumulator = SummaryAccumulator()
+    for row in rows:
+        accumulator.add(row)
+    return accumulator.render()
 
 
 def _with_limit(summary: Dict[str, Any], limit: Optional[float]) -> Dict[str, Any]:

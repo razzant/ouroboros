@@ -647,3 +647,174 @@ def test_warm_up_refuses_a_corrupt_prefix_and_backs_off(data_root, monkeypatch):
     assert memo._warm_ledger_read_cache(data_root) is False
     assert opened == []  # cooling down: no second cold parse on the next lock entry
     memo._WARM_FAILED_AT.clear()
+
+
+# CyberGym r9 (2026-09-04): every reserve folded `_final_rows` + `_summary` over
+# the WHOLE cached ledger under the monetary lock — ~100 ms for the dict alone at
+# 512K rows, and the summary grows with the number of attempts. The reserve path
+# now advances an incremental finals view instead; these tests pin that the view
+# is the same arithmetic as a from-scratch replay after every kind of append.
+
+
+def _money_equal(a: dict, b: dict) -> None:
+    assert set(a) == set(b)
+    for key, value in a.items():
+        if isinstance(value, float):
+            assert abs(value - b[key]) < 1e-6, (key, value, b[key])
+        else:
+            assert value == b[key], key
+
+
+def _replay(records: list) -> dict:
+    return ua._summary(list(ua._final_rows(records).values()))
+
+
+def _random_ledger(rng: random.Random, n_attempts: int, roots: int) -> list:
+    rows: list = []
+    attempts = [f"a{i}" for i in range(n_attempts)]
+    states = {}
+    seq = 0
+    while len(rows) < n_attempts * 3:
+        aid = rng.choice(attempts)
+        state = states.get(aid)
+        if state in ("settled", "released", None) and state is not None:
+            continue
+        seq += 1
+        root = f"root{rng.randrange(roots)}" if rng.random() < 0.9 else ""
+        bound = rng.choice([None, 0.0, round(rng.random(), 6), 20.0])
+        base = {"seq": seq, "attempt_id": aid, "root_task_id": root, "kind": "attempt",
+                "reservation_upper_bound_usd": bound, "pricing_known": bound is not None}
+        if state is None:
+            rows.append({**base, "state": "reserved"})
+            states[aid] = "reserved"
+        elif state == "reserved":
+            nxt = rng.choice(["dispatched", "released"])
+            rows.append({**base, "state": nxt})
+            states[aid] = nxt
+        elif state == "dispatched":
+            nxt = rng.choice(["settled", "unresolved", "settled"])
+            row = {**base, "state": nxt}
+            if nxt == "settled":
+                row["cost_usd"] = rng.choice([None, round(rng.random() * 3, 6)])
+                row["cost_final"] = rng.random() < 0.7
+            rows.append(row)
+            states[aid] = nxt
+        elif state == "unresolved":
+            rows.append({**base, "state": "settled", "cost_usd": bound, "cost_final": True})
+            states[aid] = "settled"
+        if all(states.get(a) in ("settled", "released") for a in attempts):
+            break
+    return rows
+
+
+def test_finals_view_matches_replay_after_every_append(tmp_path):
+    from ouroboros._usage_rows_memo import _FinalsView
+
+    rng = random.Random(9)
+    rows = _random_ledger(rng, 300, 7)
+    view = _FinalsView()
+    cut = 0
+    while cut < len(rows):
+        cut = min(len(rows), cut + rng.randrange(1, 40))
+        prefix = rows[:cut]
+        view.advance(list(prefix))  # a fresh list object every time, like the read cache
+        _money_equal(view.summary(), _replay(prefix))
+        finals = ua._final_rows(prefix)
+        assert set(view.finals) == set(finals)
+        for root in {str(r.get("root_task_id") or "") for r in prefix} - {""}:
+            expected = [r for r in finals.values() if str(r.get("root_task_id") or "") == root]
+            got = view.rows_for_root(root)
+            assert sorted(r["attempt_id"] for r in got) == sorted(r["attempt_id"] for r in expected)
+            _money_equal(ua._summary(got), ua._summary(expected))
+    assert view.rows_for_root("nope") == []
+
+
+def test_finals_view_refolds_on_shape_change_and_periodically():
+    from ouroboros._usage_rows_memo import _FinalsView
+
+    rng = random.Random(3)
+    rows = _random_ledger(rng, 50, 2)
+    view = _FinalsView()
+    view.advance(rows[:40])
+    # Shrink (quarantine dropped a tail) → refold.
+    view.advance(rows[:30])
+    _money_equal(view.summary(), _replay(rows[:30]))
+    # Same length, different first seq (another ledger under the same key) → refold.
+    other = [{**r, "seq": r["seq"] + 1000} for r in rows[:30]]
+    view.advance(other)
+    _money_equal(view.summary(), _replay(other))
+    assert view.first_seq == 1001
+    # Periodic refold bounds float drift: force the counter past the threshold.
+    view.applied_since_refold = view._REFOLD_EVERY
+    view.advance(other + [{**rows[30], "seq": rows[30]["seq"] + 1000}])
+    assert view.applied_since_refold == 0
+    _money_equal(view.summary(), _replay(other + [{**rows[30], "seq": rows[30]["seq"] + 1000}]))
+
+
+def test_finals_view_refolds_summary_once_a_subscription_row_is_seen():
+    from ouroboros._usage_rows_memo import _FinalsView
+
+    rows = [
+        {"seq": 1, "attempt_id": "a", "state": "reserved", "reservation_upper_bound_usd": 1.0, "kind": "attempt"},
+        {"seq": 2, "attempt_id": "s", "state": "settled", "kind": "subscription_session",
+         "subscription_route": "r", "subscription_reset_at": "2026-09-04T10:00:00+00:00", "cost_usd": 0.0, "cost_final": True},
+        {"seq": 3, "attempt_id": "a", "state": "settled", "cost_usd": 0.5, "cost_final": True, "kind": "attempt"},
+    ]
+    view = _FinalsView()
+    view.advance(rows)
+    assert view.accumulator.exact_retraction is False
+    _money_equal(view.summary(), _replay(rows))
+    assert view.summary()["subscription_windows"] == {"r": "2026-09-04T10:00:00+00:00"}
+
+
+def test_reserve_uses_the_view_and_keeps_budget_semantics(data_root, monkeypatch):
+    """Global and root limits are enforced from the incremental view exactly as
+    from the replay, across many transitions and a cache refold."""
+    from ouroboros import _usage_rows_memo as memo
+
+    folds: list = []
+    real_final_rows = ua._final_rows
+
+    def spy(records):
+        folds.append(len(records))
+        return real_final_rows(records)
+
+    monkeypatch.setattr(ua, "_final_rows", spy)
+    monkeypatch.setenv("TOTAL_BUDGET", "1.0")
+    kept = []
+    for _ in range(12):
+        r = ua.reserve_attempt(_request(data_root, reservation_usd=0.05))
+        ua.mark_dispatched(r)
+        ua.settle_attempt(r, {"prompt_tokens": 1, "completion_tokens": 1}, cost_usd=0.07, cost_final=True)
+        kept.append(r)
+    assert not folds, "reserve must not fold the whole ledger per call"
+    projection = ua.usage_projection(data_root)
+    assert abs(projection["accounted_usd"] - 0.84) < 1e-9
+    # 0.84 accounted + 0.05 bound fits; 0.84 + 0.2 does not.
+    ok = ua.reserve_attempt(_request(data_root, reservation_usd=0.05))
+    with pytest.raises(ua.BudgetExceeded):
+        ua.reserve_attempt(_request(data_root, reservation_usd=0.2))
+    ua.release_attempt(ok)
+    # Another process refolds the read cache: the view follows the new list shape.
+    _clear_ledger_read_cache()
+    with memo._FINALS_VIEWS_LOCK:
+        memo._FINALS_VIEWS.clear()
+    with pytest.raises(ua.BudgetExceeded):
+        ua.reserve_attempt(_request(data_root, reservation_usd=0.2))
+    fine = ua.reserve_attempt(_request(data_root, reservation_usd=0.1))
+    # The view is advanced on the reserve path, over the records as they stood
+    # BEFORE that reserve's own append: it is the replay of exactly that prefix.
+    with memo._FINALS_VIEWS_LOCK:
+        view = memo._FINALS_VIEWS[str(data_root.resolve())]
+    records = ua._read_records_locked(data_root)
+    assert view.row_count == len(records) - 1
+    _money_equal(view.summary(), _replay(records[: view.row_count]))
+    ua.release_attempt(fine)
+    # Rows appended by other paths (the reserve above, its release) are folded
+    # in by the next reserve, never left behind.
+    late = ua.reserve_attempt(_request(data_root, reservation_usd=0.01))
+    records = ua._read_records_locked(data_root)
+    assert view.row_count == len(records) - 1
+    _money_equal(view.summary(), _replay(records[:-1]))
+    assert view.summary()["reserved_usd"] == 0.0  # `fine` was released
+    ua.release_attempt(late)

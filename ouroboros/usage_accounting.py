@@ -50,6 +50,7 @@ from ouroboros.usage_ledger import (  # noqa: F401 — re-exported substrate
 from ouroboros.utils import append_jsonl, atomic_write_json, utc_now_iso
 from ouroboros._usage_rows import (  # noqa: F401  (re-exported substrate vocabulary)
     REVIEW_ATTRIBUTION_KEYS,
+    SummaryAccumulator,
     _breakdown_bucket,
     _physical_call_count,
     _summary,
@@ -374,7 +375,7 @@ def _merge_scope(request: AttemptRequest) -> Tuple[AttemptRequest, UsageScope]:
     return request, scope
 from ouroboros._usage_rows_memo import (  # noqa: F401,E402  (re-exported seam)
     _LedgerRowsMemo, _ROWS_MEMO, _ROWS_MEMO_LOCK,
-    _memoized_final_rows, _read_records_locked_cached, _render_cached,
+    _finals_view, _memoized_final_rows, _read_records_locked_cached, _render_cached,
 )
 
 
@@ -722,8 +723,17 @@ def reserve_attempt(request: AttemptRequest) -> AttemptReservation:
     attempt_id = uuid.uuid4().hex
     with _locked(root):
         records = _read_records_locked_cached(root)
-        finals = list(_final_rows(records).values())
-        global_summary = _summary(finals)
+        # Incremental: only the rows appended since the last reserve are folded
+        # (CyberGym r8/r9 scale: a whole-ledger fold per reserve under the lock
+        # is what brings the convoy back once the ledger is a few 100K rows).
+        # Any doubt about the view falls back to the from-scratch fold.
+        try:
+            finals_view = _finals_view(root, records)
+            global_summary = finals_view.summary()
+        except Exception:  # noqa: BLE001 — the replay below is the correctness path
+            log.debug("incremental finals view unavailable for %s", root, exc_info=True)
+            finals_view = None
+            global_summary = _summary(list(_final_rows(records).values()))
         global_limit = _global_limit(request)
         accounted = float(global_summary["accounted_usd"])
         if global_limit <= 0 or accounted >= global_limit - 1e-9 or (
@@ -738,7 +748,14 @@ def reserve_attempt(request: AttemptRequest) -> AttemptReservation:
         root_rows: Optional[list[Dict[str, Any]]] = None
         root_limit: Optional[float] = None
         if scope.root_task_id and scope.root_limit_usd is not None:
-            root_rows = [row for row in finals if str(row.get("root_task_id") or "") == scope.root_task_id]
+            root_rows = (
+                finals_view.rows_for_root(scope.root_task_id)
+                if finals_view is not None
+                else [
+                    row for row in _final_rows(records).values()
+                    if str(row.get("root_task_id") or "") == scope.root_task_id
+                ]
+            )
             root_accounted = float(_summary(root_rows)["accounted_usd"])
             root_limit = max(0.0, float(scope.root_limit_usd))
             # Piggyback the measured pre-append subtree sum on this locked read.
