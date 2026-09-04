@@ -440,6 +440,19 @@ never charged against the agent's working budget.  The checkpoint frame
 discloses ``deadline_basis`` (``queue_wait_cap`` or ``observed_start``) and
 ``observed_start_at``.
 
+Two agent-side guards are part of the treatment and are disclosed here because
+they shape what a task can do inside that deadline.  A single assistant turn
+executes at most ``OUROBOROS_MAX_TOOL_CALLS_PER_TURN`` tool calls (32); the
+surplus is pruned from the turn, the model is told what was discarded, and the
+task's event log carries a ``tool_call_burst_truncated`` checkpoint (a degenerate
+1113-call turn otherwise overflowed the context window and ended the task).
+The blocking post-task cognition chain (consolidation, summary, reflection) is
+skipped when the task's ``deadline_at`` is nearer than
+``OUROBOROS_POST_TASK_COGNITION_MIN_REMAINING_SEC`` (900 s); the PoC is already
+final at that point, and the skip is recorded as ``post_task_cognition_skipped``.
+Without the guard the supervisor's deadline kill landed mid-reflection, and a task
+whose work had finished in time was lost or published cost-non-final.
+
 The summary always names the metric, numerator, denominator, task-data hash,
 source order, model identity, provider distribution, effort, and whether the
 population is complete, first-batch-gated, or interrupted.  It must not infer a
