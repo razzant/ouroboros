@@ -1726,6 +1726,38 @@ def _prepare_worker_task_runtime() -> None:
     import supervisor.update_merge  # noqa: F401
 
 
+def _demote_inherited_rotating_log_handlers() -> None:
+    """Only the supervisor rotates ``server.log``; workers follow the live file.
+
+    Under fork every worker inherits the server's ``RotatingFileHandler`` and
+    rotates the SAME file on its own byte count. With 64 workers the renames
+    race each other and the log degenerates into a handful of tiny files (r8,
+    2026-09-04: ``server.log`` 2 KB, ``.1`` 198 B, ``.2`` 739 B — hours of
+    forensics gone). A ``WatchedFileHandler`` on the same path writes to
+    whatever the supervisor's rotation currently calls ``server.log``.
+    """
+    import logging as _logging
+    from logging.handlers import RotatingFileHandler, WatchedFileHandler
+
+    root = _logging.getLogger()
+    for handler in list(root.handlers):
+        if not isinstance(handler, RotatingFileHandler):
+            continue
+        try:
+            replacement = WatchedFileHandler(
+                handler.baseFilename, encoding=getattr(handler, "encoding", None) or "utf-8",
+            )
+            replacement.setFormatter(handler.formatter)
+            replacement.setLevel(handler.level)
+            for log_filter in list(handler.filters):
+                replacement.addFilter(log_filter)
+            root.removeHandler(handler)
+            root.addHandler(replacement)
+            handler.close()  # this process's fd copy only; the parent's is untouched
+        except Exception:
+            pass
+
+
 def worker_main(wid: int, in_q: Any, out_q: Any, repo_dir: str, drive_root: str,
                 custody_session_id: str = "") -> None:
     import os as _os
@@ -1735,6 +1767,7 @@ def worker_main(wid: int, in_q: Any, out_q: Any, repo_dir: str, drive_root: str,
     # fork-safety guard (no _scproxy/SCDynamicStoreCopyProxies on the child side
     # of fork) and a clean default for spawned workers too.
     _os.environ["OUROBOROS_IN_WORKER"] = "1"
+    _demote_inherited_rotating_log_handlers()
     # Before ANY import that resolves the update-tx marker through git_ops (see
     # _bind_worker_repo_root): a spawned child would otherwise gate on the hardcoded default repo.
     _bind_worker_repo_root(repo_dir, drive_root)

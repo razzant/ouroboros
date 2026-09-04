@@ -68,8 +68,11 @@ else:
     _log_dir = DATA_DIR / "logs"
     _log_dir.mkdir(parents=True, exist_ok=True)
     from logging.handlers import RotatingFileHandler
+    # Only this process rotates (workers swap the inherited handler for a
+    # WatchedFileHandler, see supervisor.workers). 2 MB x 3 held minutes of a
+    # 64-lane campaign's log; 64 MB x 5 keeps a day's forensics.
     _file_handler = RotatingFileHandler(
-        _log_dir / "server.log", maxBytes=2 * 1024 * 1024, backupCount=3, encoding="utf-8",
+        _log_dir / "server.log", maxBytes=64 * 1024 * 1024, backupCount=5, encoding="utf-8",
     )
     _file_handler.setFormatter(logging.Formatter(_LOG_FORMAT))
     logging.basicConfig(level=logging.INFO, format=_LOG_FORMAT, handlers=[_file_handler, logging.StreamHandler()])
