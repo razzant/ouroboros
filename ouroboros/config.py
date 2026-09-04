@@ -159,6 +159,13 @@ SETTINGS_DEFAULTS = {**UPDATE_SETTINGS_DEFAULTS,
     "OUROBOROS_TASK_ABS_CEILING_SEC": 21600,
     "OUROBOROS_PER_CALL_TIMEOUT_CEILING_SEC": 1800,
     "OUROBOROS_USAGE_UNRESOLVED_WRITEOFF_SEC": 900,  # sweep TTL for the dead-unresolved-row bound write-off
+    # LLM-heavy post-task cognition (consolidation, summary, reflection) is skipped
+    # when the task's wall deadline is closer than this. The supervisor kills the
+    # worker at deadline_at + finalization grace (<=300 s); under a 64-lane load
+    # this chain took 5-16 min (CyberGym r8, 2026-09-04), so a task that finished
+    # its work inside the deadline was killed mid-reflection and its completed
+    # result was lost or born cost-non-final. <=0 disables the guard.
+    "OUROBOROS_POST_TASK_COGNITION_MIN_REMAINING_SEC": 900,
     "OUROBOROS_FINALIZATION_GRACE_SEC": FINALIZATION_GRACE_DEFAULT_SEC,
     "OUROBOROS_SUPERVISOR_LIVENESS_DEADLINE_SEC": SUPERVISOR_LIVENESS_DEADLINE_DEFAULT_SEC,
     "OUROBOROS_PACING_INTERVAL_SEC": PACING_INTERVAL_DEFAULT_SEC,
@@ -1501,6 +1508,11 @@ def get_claudexor_harness_install_timeout_sec() -> int:
     return _clamped_number_setting("OUROBOROS_CLAUDEXOR_HARNESS_INSTALL_TIMEOUT_SEC", low=1, cast=int)
 def get_usage_unresolved_writeoff_sec() -> float:
     return _clamped_number_setting("OUROBOROS_USAGE_UNRESOLVED_WRITEOFF_SEC", low=60.0, high=86400.0)
+
+
+def get_post_task_cognition_min_remaining_sec() -> float:
+    """Wall-clock floor before ``deadline_at`` under which post-task cognition is skipped."""
+    return _clamped_number_setting("OUROBOROS_POST_TASK_COGNITION_MIN_REMAINING_SEC", low=0.0, high=86400.0)
 
 
 def get_finalization_grace_sec(settings: Optional[dict] = None) -> int:

@@ -303,6 +303,35 @@ def _compact_review_projection(llm_trace: Dict[str, Any]) -> Dict[str, Any]:
         return {"panels": []}
 
 
+def post_task_cognition_deadline_skip(task: Dict[str, Any]) -> Dict[str, Any] | None:
+    """Return the skip disclosure when ``deadline_at`` leaves no room for cognition.
+
+    The supervisor stops the worker at ``deadline_at`` plus a finalization grace
+    of at most 300 s; the consolidation/summary/reflection chain is several
+    provider calls and took 5-16 min under a 64-lane load (CyberGym r8,
+    2026-09-04).  Running it into the deadline killed the worker mid-reflection
+    and lost, or left cost-non-final, results whose actual work had finished in
+    time.  None means "run it"; a dict is the audit row explaining the skip.
+    """
+    from ouroboros.config import get_post_task_cognition_min_remaining_sec
+    from ouroboros.deadline_utils import seconds_until
+
+    floor = float(get_post_task_cognition_min_remaining_sec())
+    if floor <= 0:
+        return None
+    metadata = task.get("metadata") if isinstance(task.get("metadata"), dict) else {}
+    deadline_at = task.get("deadline_at") or metadata.get("deadline_at")
+    remaining = seconds_until(deadline_at)
+    if remaining is None or remaining >= floor:
+        return None
+    return {
+        "reason": "deadline_near",
+        "deadline_at": str(deadline_at),
+        "remaining_sec": round(remaining, 1),
+        "min_remaining_sec": floor,
+    }
+
+
 def _run_post_task_processing_async(
     env: Any,
     task: Dict[str, Any],
@@ -316,6 +345,26 @@ def _run_post_task_processing_async(
     sealed_final: Dict[str, Any] | None = None,
 ) -> Dict[str, Any] | None:
     """Run best-effort LLM-heavy post-task memory work off the reply path."""
+    skip = post_task_cognition_deadline_skip(task)
+    if skip is not None:
+        skipped_task_id = str(task.get("id") or task.get("task_id") or "")
+        log.warning("Post-task cognition skipped for %s: %s", skipped_task_id, skip)
+        try:
+            append_jsonl(
+                pathlib.Path(drive_logs) / "events.jsonl",
+                {
+                    "ts": utc_now_iso(),
+                    "type": "post_task_cognition_skipped",
+                    "task_id": skipped_task_id,
+                    **skip,
+                },
+            )
+        except Exception:
+            log.debug("Failed to record post_task_cognition_skipped", exc_info=True)
+        if _is_root_post_task(task) and not _root_post_task_already_completed(env, task):
+            # Terminal at once: nothing will be paid, so the frame can be born final.
+            _set_root_post_task_checkpoint(env, task, "degraded")
+        return None
     task_snapshot = json.loads(json.dumps(task, ensure_ascii=False, default=str))
     trace_snapshot = json.loads(json.dumps(llm_trace, ensure_ascii=False, default=str))
     review_evidence_snapshot = json.loads(json.dumps(review_evidence, ensure_ascii=False, default=str))

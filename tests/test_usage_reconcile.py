@@ -185,6 +185,72 @@ def test_legacy_metadata_unresolved_rows_are_not_touched(data_root):
     assert _ledger(data_root)[-1]["state"] == "unresolved"
 
 
+def test_terminal_task_writes_off_its_own_dispatched_row_at_bound(data_root):
+    """r8 (2026-09-04): the reaper's deadline kill landed mid post-task synthesis;
+    the ``dispatched`` row of the dead worker kept the completed frame
+    ``cost_final: false`` and the launcher's cancellation custody timed out on a
+    solved task.  At the terminal seam the task's own open row is dead: settle
+    it at its carried bound so the frame is born final; money does not move."""
+    reservation = ua.reserve_attempt(_request(data_root, task_id="child", root_task_id="child", source="post_task_synthesis"))
+    ua.mark_dispatched(reservation)
+    before = ua.usage_projection(data_root)
+    assert before["cost_final"] is False
+    assert before["unresolved_upper_bound_usd"] == 1.0
+
+    outcome = reconcile_abandoned_unresolved_attempts(data_root, task_id="child")
+
+    assert outcome["terminalized"] == [reservation.attempt_id]
+    assert outcome["released"] == []
+    after = ua.usage_projection(data_root)
+    assert after["cost_final"] is True
+    assert after["non_final_rows"] == 0
+    assert after["accounted_usd"] == before["accounted_usd"] == 1.0
+    assert [row["state"] for row in _ledger(data_root)] == ["reserved", "dispatched", "unresolved", "settled"]
+    final_row = _ledger(data_root)[-1]
+    assert final_row["cost_usd"] == 1.0 and final_row["cost_final"] is True
+    assert "reconcile_terminal_task_open_attempt" in final_row["origin_reason"]
+
+
+def test_terminal_task_releases_its_own_reserved_row(data_root):
+    """A reservation that never reached a provider is released, not billed."""
+    reservation = ua.reserve_attempt(_request(data_root, task_id="child", root_task_id="child"))
+    assert ua.usage_projection(data_root)["reserved_usd"] == 1.0
+
+    outcome = reconcile_abandoned_unresolved_attempts(data_root, task_id="child")
+
+    assert outcome["released"] == [reservation.attempt_id]
+    assert outcome["terminalized"] == []
+    after = ua.usage_projection(data_root)
+    assert after["cost_final"] is True
+    assert after["accounted_usd"] == 0.0
+    assert _ledger(data_root)[-1]["state"] == "released"
+
+
+def test_terminal_root_leaves_a_childs_open_dispatched_row_alone(data_root):
+    """Subtree scoping stays ``unresolved``-only: a child may be mid-call while
+    its root terminalizes, and the root's authority must not fabricate its end."""
+    child = ua.reserve_attempt(_request(data_root, task_id="child", root_task_id="root"))
+    ua.mark_dispatched(child)
+    own = ua.reserve_attempt(_request(data_root, task_id="root", root_task_id="root"))
+    ua.mark_dispatched(own)
+
+    outcome = reconcile_abandoned_unresolved_attempts(data_root, task_id="root")
+
+    assert outcome["terminalized"] == [own.attempt_id]
+    states = {row["attempt_id"]: row["state"] for row in _ledger(data_root)}
+    assert states[child.attempt_id] == "dispatched"
+    assert states[own.attempt_id] == "settled"
+
+
+def test_sweep_never_touches_open_dispatched_rows(data_root):
+    """Without a terminal task the sweep cannot know a dispatched row is dead."""
+    reservation = ua.reserve_attempt(_request(data_root))
+    ua.mark_dispatched(reservation)
+    outcome = reconcile_abandoned_unresolved_attempts(data_root, max_age_sec=0)
+    assert outcome == {"terminalized": [], "released": [], "kept_unknown_bound": []}
+    assert _ledger(data_root)[-1]["state"] == "dispatched"
+
+
 def test_reconcile_is_idempotent(data_root):
     reservation = _unresolved_reservation(data_root)
     first = reconcile_abandoned_unresolved_attempts(data_root, task_id="child")
