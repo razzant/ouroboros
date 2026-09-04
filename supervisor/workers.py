@@ -4200,15 +4200,80 @@ def _worker_crash_storm_detected(
     return True
 
 
+def _worker_rss_mb(pid: int) -> Optional[int]:
+    """Resident set size of a worker process in MiB from /proc, or None."""
+    try:
+        with open(f"/proc/{int(pid)}/status", "r") as fh:
+            for line in fh:
+                if line.startswith("VmRSS:"):
+                    return int(line.split()[1]) // 1024
+    except (OSError, ValueError, TypeError):
+        return None
+    return None
+
+
+def _worker_rss_limit_mb() -> int:
+    """Per-worker RSS ceiling. A single task's context + tool outputs stays in
+    single-digit GiB; a runaway (a model that keeps appending huge tool output,
+    or a pathological workspace load) can balloon a worker to hundreds of GiB
+    and trigger a GLOBAL OOM that kills the isolate and every other lane at
+    once (CyberGym r11, 2026-09-04: one python3 worker reached 373 GiB RSS ->
+    host OOM -> launcher torn down -> 1152 in-flight tasks written off). The
+    watchdog kills the single offender (its task ends as an infra crash, no
+    retry) long before the host is threatened. 0/invalid disables it."""
+    raw = str(os.environ.get("OUROBOROS_WORKER_RSS_LIMIT_MB") or "").strip()
+    if not raw:
+        return 24000  # unset -> default ceiling
+    try:
+        return max(0, int(raw))  # explicit 0 disables the watchdog
+    except ValueError:
+        return 24000
+
+
 def _ensure_workers_healthy_locked(queue: Any) -> tuple[List[int], bool]:
     busy_crashes = 0
     dead_detections = 0
     crashed_tasks = []
     respawn_ids: List[int] = []
+    _rss_limit_mb = _worker_rss_limit_mb()
     for wid, w in list(WORKERS.items()):
         # The reaper owns marked slots through replacement; never double-respawn them.
         if getattr(w, "reaping", False):
             continue
+        # Memory watchdog: SIGKILL a single runaway worker before its balloon
+        # OOMs the whole host. The kill surfaces next tick as a signal death,
+        # which the crash path below finalizes as a terminal infra failure (no
+        # retry — a retry would balloon again). Only busy workers are checked;
+        # an idle worker at rest is never a runaway.
+        if (
+            _rss_limit_mb > 0
+            and w.busy_task_id is not None
+            and w.proc.is_alive()
+            and (w.proc.pid or 0)
+        ):
+            _rss = _worker_rss_mb(int(w.proc.pid))
+            if _rss is not None and _rss > _rss_limit_mb:
+                append_jsonl(
+                    DRIVE_ROOT / "logs" / "supervisor.jsonl",
+                    {
+                        "ts": utc_now_iso(),
+                        "type": "worker_memory_exceeded",
+                        "worker_id": wid,
+                        "pid": int(w.proc.pid),
+                        "rss_mb": _rss,
+                        "limit_mb": _rss_limit_mb,
+                        "busy_task_id": w.busy_task_id,
+                    },
+                )
+                log.error(
+                    "Worker %d (task %s) RSS %d MiB exceeds %d MiB — killing to protect the host",
+                    wid, w.busy_task_id, _rss, _rss_limit_mb,
+                )
+                try:
+                    w.proc.kill()
+                except Exception:
+                    log.debug("Failed to kill over-memory worker %d", wid, exc_info=True)
+                continue
         if not w.proc.is_alive():
             # Reserve the dead slot before the queue lock is released.
             w.reaping = True

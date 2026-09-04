@@ -651,3 +651,76 @@ def test_deep_self_review_crash_emits_task_done_event(tmp_path):
     )
     assert task_done_events[0]["task_id"] == "dsr01"
     assert task_done_events[0]["status"] == "failed"
+
+
+# ---------------------------------------------------------------------------
+# Test: per-worker memory watchdog (r11 2026-09-04 host OOM class)
+# ---------------------------------------------------------------------------
+
+def test_memory_watchdog_kills_only_the_runaway_busy_worker(tmp_path, monkeypatch):
+    """A busy worker whose RSS exceeds the limit is SIGKILLed to protect the
+    host; an under-limit busy worker and an idle over-limit worker are spared.
+    The kill surfaces next tick as a signal death (terminal infra, no retry)."""
+    import supervisor.workers as W
+
+    W.DRIVE_ROOT = tmp_path
+    (tmp_path / "logs").mkdir(parents=True, exist_ok=True)
+    W._LAST_SPAWN_TIME = 0
+    monkeypatch.setenv("OUROBOROS_WORKER_RSS_LIMIT_MB", "24000")
+
+    runaway = _make_worker(wid=0, alive=True, busy_task_id="hog", exitcode=None)
+    runaway.proc.pid = 111
+    ok = _make_worker(wid=1, alive=True, busy_task_id="fine", exitcode=None)
+    ok.proc.pid = 222
+    idle = _make_worker(wid=2, alive=True, busy_task_id=None, exitcode=None)
+    idle.proc.pid = 333
+
+    rss = {111: 373_000, 222: 4_096, 333: 500_000}
+    monkeypatch.setattr(W, "_worker_rss_mb", lambda pid: rss.get(int(pid)))
+
+    W.WORKERS = {0: runaway, 1: ok, 2: idle}
+    W.RUNNING = {
+        "hog": {"task": _make_task(task_id="hog"), "started_at": time.time() - 5, "attempt": 1},
+        "fine": {"task": _make_task(task_id="fine"), "started_at": time.time() - 5, "attempt": 1},
+    }
+
+    import supervisor.queue as sq
+    with patch.object(sq, "enqueue_task", MagicMock()), \
+         patch.object(sq, "persist_queue_snapshot", MagicMock()), \
+         patch("supervisor.workers.respawn_worker"):
+        W.ensure_workers_healthy()
+
+    runaway.proc.kill.assert_called_once()
+    ok.proc.kill.assert_not_called()
+    idle.proc.kill.assert_not_called()
+
+    lines = (tmp_path / "logs" / "supervisor.jsonl").read_text(encoding="utf-8").splitlines()
+    import json as _json
+    mem = [_json.loads(x) for x in lines if x.strip() and _json.loads(x).get("type") == "worker_memory_exceeded"]
+    assert len(mem) == 1
+    assert mem[0]["busy_task_id"] == "hog"
+    assert mem[0]["rss_mb"] == 373_000
+    assert mem[0]["limit_mb"] == 24000
+
+
+def test_memory_watchdog_disabled_when_limit_is_zero(tmp_path, monkeypatch):
+    import supervisor.workers as W
+
+    W.DRIVE_ROOT = tmp_path
+    (tmp_path / "logs").mkdir(parents=True, exist_ok=True)
+    W._LAST_SPAWN_TIME = 0
+    monkeypatch.setenv("OUROBOROS_WORKER_RSS_LIMIT_MB", "0")
+
+    runaway = _make_worker(wid=0, alive=True, busy_task_id="hog", exitcode=None)
+    runaway.proc.pid = 111
+    monkeypatch.setattr(W, "_worker_rss_mb", lambda pid: 999_999)
+    W.WORKERS = {0: runaway}
+    W.RUNNING = {"hog": {"task": _make_task(task_id="hog"), "started_at": time.time() - 5, "attempt": 1}}
+
+    import supervisor.queue as sq
+    with patch.object(sq, "enqueue_task", MagicMock()), \
+         patch.object(sq, "persist_queue_snapshot", MagicMock()), \
+         patch("supervisor.workers.respawn_worker"):
+        W.ensure_workers_healthy()
+
+    runaway.proc.kill.assert_not_called()
