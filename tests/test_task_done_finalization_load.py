@@ -48,7 +48,11 @@ def _seed_child(parent: pathlib.Path, index: int) -> tuple[str, pathlib.Path]:
     child = prepare_task_drive(parent, task_id, "empty")
     assert child is not None
     refs = []
-    history: list[dict[str, str]] = [{"role": "system", "content": _SYSTEM_PROMPT}]
+    # Production payloads also name the task's own drive root in plain text
+    # (environment description, tool cwd); that mention is not a ref either.
+    history: list[dict[str, str]] = [
+        {"role": "system", "content": _SYSTEM_PROMPT + f"\nYour data root: {child}\n"}
+    ]
     for call in range(_CALLS_PER_TASK):
         # Realistic transcript bulk: the request carries the whole history, so
         # later rounds are tens of KB of low-entropy tool output.
@@ -130,7 +134,7 @@ def test_64_lane_copyback_finalizes_without_inflating_blobs(tmp_path, monkeypatc
     )
     manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
     payload = read_blob_ref(parent, manifest["full_payload_ref"])
-    assert payload["messages"][0]["content"] == _SYSTEM_PROMPT
+    assert payload["messages"][0]["content"].startswith(_SYSTEM_PROMPT)
     assert {"role": "user", "content": "lane 7 round 3"} in payload["messages"]
 
 

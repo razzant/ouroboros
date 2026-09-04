@@ -259,21 +259,26 @@ def _json_bytes(payload: Any) -> bytes:
     return json.dumps(payload, ensure_ascii=False, sort_keys=True, default=str).encode("utf-8")
 
 
-# Byte markers whose presence means a payload may embed drive-local refs that
-# copy-back must rewrite (blob/manifest refs carry the drive's absolute path
-# under ``observability/blobs/`` or ``observability/calls/``; Phase3B actor refs
-# carry the marker or ``"kind": "task_source"``). A payload with none of them is
-# portable: promotion can relocate the compressed file as is, without
-# decompressing and re-hashing gigabytes on the control plane.
+# Byte markers whose presence means a payload may embed refs that copy-back
+# must rewrite. ``_rewrite_child_ref_tree`` rewrites exactly three shapes, and
+# each leaves a fixed byte sequence in the serialized payload: blob/manifest
+# ref dicts address ``observability/blobs/`` or ``observability/calls/`` (the
+# only paths ``write_blob``/``persist_call`` ever mint, and ``/`` is never
+# JSON-escaped, so the marker survives embedding in a service result string);
+# Phase3B actor refs carry ``"kind": "task_source"`` or the
+# ``FULL_RESULT_SOURCE_JSON=`` marker. A payload with none of them is portable:
+# the rebase would re-encode it byte-for-byte, so promotion relocates the
+# compressed file as is instead of inflating, re-encoding and re-compressing
+# gigabytes on the control plane.
 #
-# The markers must be the REF PATH SHAPES, not the bare directory name: the
-# agent's system prompt documents the drive layout (``observability/`` followed
-# by a tree of ``blobs/`` and ``calls/``), so a bare ``observability/`` marker
-# classified every LLM request payload — the multi-megabyte blobs that carry
-# nearly all of a cohort's bytes — as non-portable and sent exactly the heavy
-# half of the closure through the inflate/re-encode/re-compress path (Tier-2
-# load repro on 34feecaf: 2352 request blobs, 3.3 GB compressed, 0 real refs;
-# finalization held each lane 150-400 s under 64 lanes).
+# The markers must be exactly these shapes. Two broader guards were tried and
+# both classified every LLM request payload — the multi-megabyte blobs that
+# carry nearly all of a cohort's bytes — as non-portable while embedding no
+# ref at all: a bare ``observability/`` marker (the system prompt documents the
+# drive layout) and the drive root's absolute path (the prompt and tool output
+# name the agent's own data directory). Tier-2 load repro on 34feecaf and
+# 8c8e75f7, 64 native lanes: 100 % of request blobs took the slow path with
+# zero real refs and finalization held each lane 140-400 s.
 _NON_PORTABLE_MARKERS: tuple[bytes, ...] = (
     b"FULL_RESULT_SOURCE_JSON=",
     b"task_source",
@@ -283,18 +288,8 @@ _NON_PORTABLE_MARKERS: tuple[bytes, ...] = (
 
 
 def _payload_is_portable(drive_root: pathlib.Path, raw: bytes) -> bool:
-    for marker in _NON_PORTABLE_MARKERS:
-        if marker in raw:
-            return False
-    seen: set[str] = set()
-    for candidate in (pathlib.Path(drive_root), pathlib.Path(drive_root).resolve(strict=False)):
-        text = str(candidate)
-        if text in seen or not text or text == os.sep:
-            continue
-        seen.add(text)
-        if text.encode("utf-8", errors="replace") in raw:
-            return False
-    return True
+    del drive_root  # a bare mention of the drive path is not a ref (see above)
+    return not any(marker in raw for marker in _NON_PORTABLE_MARKERS)
 
 
 def _compressed_sha256(path: pathlib.Path) -> str:

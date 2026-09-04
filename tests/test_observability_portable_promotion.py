@@ -58,10 +58,21 @@ def test_write_blob_stamps_portability_from_payload_bytes(tmp_path):
     assert plain["portable"] is True
     assert len(plain["compressed_sha256"]) == 64
 
-    # A payload naming this drive embeds a ref copy-back must rebase.
+    # A payload embedding one of this drive's refs is what copy-back rebases.
     nested = write_blob(drive, {"tool": "read_file", "result": plain})
     assert nested["portable"] is False
     assert "compressed_sha256" not in nested
+    # ...even when the ref rides inside a service tool's JSON result string,
+    # where the quotes are escaped but the path separators are not.
+    embedded = write_blob(
+        drive, {"tool": "run_command", "result": "ok " + json.dumps({"ref": plain})}
+    )
+    assert embedded["portable"] is False
+
+    # A bare mention of the drive path is not a ref: the prompt and tool output
+    # name the agent's own data directory in nearly every request payload.
+    mention = write_blob(drive, {"messages": [{"role": "user", "content": f"cwd is {drive}"}]})
+    assert mention["portable"] is True
 
     marker = write_blob(
         drive, "visible\nFULL_RESULT_SOURCE_JSON={\"kind\":\"task_source\"}", kind="txt"
