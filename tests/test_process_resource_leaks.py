@@ -183,6 +183,43 @@ def test_record_worker_pids_roundtrip(tmp_path, monkeypatch):
     assert {"pid": 4242} in (data.get("workers") or [])
 
 
+def test_record_worker_pids_ledgers_each_slot_pid_once(tmp_path, monkeypatch):
+    """A respawn re-records the pool; only the NEW pid may cost a custody row
+    (two ``ps`` subprocesses each) — re-fingerprinting all 64 live slots held
+    the cancel/reap path for tens of seconds on a busy host."""
+    from ouroboros import process_custody
+    from supervisor import workers
+
+    monkeypatch.setattr(workers, "DRIVE_ROOT", tmp_path, raising=False)
+    (tmp_path / "state").mkdir(parents=True, exist_ok=True)
+    monkeypatch.setattr(workers, "_LEDGERED_WORKER_PIDS", set())
+    recorded: list[int] = []
+
+    def _fake_record(drive_root, *, pid, **_kwargs):
+        recorded.append(int(pid))
+        return {"pid": pid}
+
+    monkeypatch.setattr(process_custody, "record_process", _fake_record)
+
+    class _FakeProc:
+        def __init__(self, pid):
+            self.pid = pid
+
+    pool = {wid: workers.Worker(wid=wid, proc=_FakeProc(1000 + wid), in_q=None) for wid in range(4)}
+    monkeypatch.setattr(workers, "WORKERS", pool, raising=False)
+    workers._record_worker_pids()
+    assert sorted(recorded) == [1000, 1001, 1002, 1003]
+
+    # Slot 2 respawns with a new pid: exactly one new custody row.
+    pool[2] = workers.Worker(wid=2, proc=_FakeProc(2002), in_q=None)
+    workers._record_worker_pids()
+    assert sorted(recorded) == [1000, 1001, 1002, 1003, 2002]
+
+    # A no-op refresh records nothing.
+    workers._record_worker_pids()
+    assert len(recorded) == 5
+
+
 # ───────────────────── #4/#6 + #7: source contracts ─────────────────────────
 
 def test_respawn_closes_old_queue_under_lock():

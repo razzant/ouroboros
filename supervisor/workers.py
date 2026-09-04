@@ -2547,6 +2547,9 @@ def _worker_pids_path() -> pathlib.Path:
     return DRIVE_ROOT / "state" / _WORKER_PIDS_FILENAME
 
 
+_LEDGERED_WORKER_PIDS: set[tuple[int, int]] = set()
+
+
 def _record_worker_pids() -> None:
     """Persist current worker PIDs so a later server instance can reap any that
     survive an abrupt restart. Workers run in their own ``os.setsid`` session, so
@@ -2562,19 +2565,28 @@ def _record_worker_pids() -> None:
     except Exception:
         log.debug("Failed to record worker pids", exc_info=True)
     # Write-through into the custody ledger (SSOT for the generation reaper);
-    # worker_pids.json stays as the legacy session-leader reap path.
+    # worker_pids.json stays as the legacy session-leader reap path.  Each
+    # (slot, pid) is ledgered ONCE per server generation: the row survives
+    # every ledger rewrite while the pid is alive and same-session, and
+    # ``record_process`` costs two ``ps`` subprocesses per pid — re-recording
+    # all 64 slots on every respawn held the cancel/reap path ~40 s on a busy
+    # host (Tier-2 load repro, 14k host processes) and appended 64 duplicate
+    # rows per respawn.
     try:
         from ouroboros.process_custody import record_process
 
         for w in WORKERS.values():
-            if w.proc.pid:
-                record_process(
-                    DRIVE_ROOT,
-                    pid=int(w.proc.pid),
-                    cmd=f"ouroboros-worker-{w.wid}",
-                    purpose=f"worker:{w.wid}",
-                    scope="session",
-                )
+            key = (int(w.wid), int(w.proc.pid or 0))
+            if not key[1] or key in _LEDGERED_WORKER_PIDS:
+                continue
+            record_process(
+                DRIVE_ROOT,
+                pid=key[1],
+                cmd=f"ouroboros-worker-{w.wid}",
+                purpose=f"worker:{w.wid}",
+                scope="session",
+            )
+            _LEDGERED_WORKER_PIDS.add(key)
     except Exception:
         log.debug("Failed to ledger worker pids", exc_info=True)
 
