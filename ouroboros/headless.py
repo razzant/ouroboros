@@ -937,8 +937,29 @@ def write_workspace_patch_artifacts(
     except Exception:
         scratch_sha_by_rel = {}
         scratch_sha_by_abs = {}
-    for rel in untracked:
-        _want_sha = scratch_sha_by_rel.get(rel) or scratch_sha_by_abs.get(os.path.normcase(str((root / rel).resolve(strict=False))))
+    max_untracked_files, untracked_budget_sec, max_untracked_probes = _patch_untracked_budget()
+    budget_excluded = 0
+    untracked_started = time.monotonic()
+    probed = 0
+    for index, rel in enumerate(untracked):
+        # Every file past the path-shape rules costs a stat + head read (and a
+        # realpath when a scratch manifest exists) on the workspace filesystem;
+        # a fuzzing corpus of 50K untracked files on a network mount turned
+        # that into 15-25 min per task (CyberGym r9-r11, 2026-09-04). Once the
+        # probe budget is spent the rest is disclosed unprobed.
+        if probed >= max_untracked_probes or time.monotonic() - untracked_started > untracked_budget_sec:
+            over = untracked[index:]
+            for late in over:
+                excluded.append({"path": late, "reason": f"untracked probe budget exceeded ({max_untracked_probes} files / {untracked_budget_sec:.0f}s per patch)"})
+            budget_excluded += len(over)
+            diagnostics.append({
+                "type": "untracked_budget",
+                "message": f"{len(over)} untracked files left out of the patch unprobed (budget {max_untracked_probes} files / {untracked_budget_sec:.0f}s); they remain in the workspace",
+            })
+            break
+        _want_sha = scratch_sha_by_rel.get(rel)
+        if not _want_sha and scratch_sha_by_abs:
+            _want_sha = scratch_sha_by_abs.get(os.path.normcase(str((root / rel).resolve(strict=False))))
         if _want_sha:
             try:
                 _cur_sha = sha256((root / rel).read_bytes()).hexdigest()
@@ -955,6 +976,7 @@ def write_workspace_patch_artifacts(
         if reason:
             excluded.append({"path": rel, "reason": reason})
             continue
+        probed += 1
         blob_reason = _untracked_blob_exclude_reason(root, rel)
         if blob_reason:
             excluded.append({"path": rel, "reason": blob_reason})
@@ -969,8 +991,6 @@ def write_workspace_patch_artifacts(
             else:
                 kept_untracked.append(rel)
         included_untracked = kept_untracked
-    max_untracked_files, untracked_budget_sec = _patch_untracked_budget()
-    budget_excluded = 0
     if len(included_untracked) > max_untracked_files:
         over = included_untracked[max_untracked_files:]
         included_untracked = included_untracked[:max_untracked_files]
@@ -1013,19 +1033,7 @@ def write_workspace_patch_artifacts(
                 errors=errors,
                 diagnostics=diagnostics,
             )
-            untracked_started = time.monotonic()
-            patched_untracked: List[str] = []
-            for index, rel in enumerate(included_untracked):
-                if time.monotonic() - untracked_started > untracked_budget_sec:
-                    over = included_untracked[index:]
-                    for late in over:
-                        excluded.append({"path": late, "reason": f"untracked patch time budget exceeded ({untracked_budget_sec:.0f}s per patch)"})
-                    budget_excluded += len(over)
-                    diagnostics.append({
-                        "type": "untracked_budget",
-                        "message": f"{len(over)} untracked files left out of the patch after {untracked_budget_sec:.0f}s; they remain in the workspace",
-                    })
-                    break
+            for rel in included_untracked:
                 if total_size:
                     total_size += _write_patch_separator(fh, hasher)
                 total_size += _append_git_output(
@@ -1037,8 +1045,6 @@ def write_workspace_patch_artifacts(
                     errors=errors,
                     diagnostics=diagnostics,
                 )
-                patched_untracked.append(rel)
-            included_untracked = patched_untracked
     if errors:
         try:
             patch_path.unlink()
@@ -1478,26 +1484,30 @@ _PEM_HEAD_READ_BYTES = 4096
 _GIT_BINARY_PROBE_BYTES = 8000  # git xdiff FIRST_FEW_BYTES
 
 
-def _patch_untracked_budget() -> Tuple[int, float]:
-    """(max included untracked files, wall-time budget in seconds) for one
-    workspace patch. Each included untracked file costs one `git diff
-    --no-index --binary` subprocess; without a bound a task that leaves
-    thousands of generated files in its workspace holds finalization — and
-    with it the task's `running/finalizing` projection — for tens of minutes.
-    Files past the budget stay in the workspace and are disclosed in the
-    manifest under ``untracked_excluded`` with a budget reason."""
-    def _env(name: str, default: str) -> str:
-        return str(os.environ.get(name) or default).strip()
+def _patch_untracked_budget() -> Tuple[int, float, int]:
+    """(max included untracked files, wall-time budget in seconds, max probed
+    untracked files) for one workspace patch. Each probed untracked file costs
+    a stat + head read on the workspace filesystem and each included one a
+    `git diff --no-index --binary` subprocess; without a bound a task that
+    leaves thousands of generated files in its workspace holds finalization —
+    and with it the task's `running/finalizing` projection — for tens of
+    minutes. Files past the budget stay in the workspace and are disclosed in
+    the manifest under ``untracked_excluded`` with a budget reason."""
+    def _env_int(name: str, default: int) -> int:
+        try:
+            return max(1, int(str(os.environ.get(name) or default).strip()))
+        except ValueError:
+            return default
 
     try:
-        max_files = max(1, int(_env("OUROBOROS_PATCH_MAX_UNTRACKED_FILES", "400")))
-    except ValueError:
-        max_files = 400
-    try:
-        budget_sec = max(1.0, float(_env("OUROBOROS_PATCH_UNTRACKED_TIME_BUDGET_SEC", "120")))
+        budget_sec = max(1.0, float(str(os.environ.get("OUROBOROS_PATCH_UNTRACKED_TIME_BUDGET_SEC") or "120").strip()))
     except ValueError:
         budget_sec = 120.0
-    return max_files, budget_sec
+    return (
+        _env_int("OUROBOROS_PATCH_MAX_UNTRACKED_FILES", 400),
+        budget_sec,
+        _env_int("OUROBOROS_PATCH_MAX_UNTRACKED_PROBES", 4000),
+    )
 
 
 def _untracked_blob_exclude_reason(root: pathlib.Path, rel: str) -> str:

@@ -2981,6 +2981,66 @@ def test_workspace_patch_budgets_untracked_files_and_discloses_the_rest(tmp_path
     assert any(item["kind"] == "workspace_patch" for item in artifacts)
 
 
+def test_workspace_patch_probe_budget_leaves_a_corpus_unprobed(tmp_path, monkeypatch):
+    """A 50K-file binary corpus was probed file by file (stat + head read on
+    CephFS, r11 py-spy: 3 of 4 finalize threads in that loop). Past the probe
+    budget the remainder is disclosed unprobed, without touching the files."""
+    import ouroboros.headless as headless
+
+    import collections as _collections
+
+    repo = tmp_path / "repo"
+    _init_repo_with_file(repo)
+    # "aaa.py" sorts before the corpus so it is probed (and kept) inside the
+    # budget; the 20 binary corpus files sort after and exhaust it.
+    (repo / "aaa.py").write_text("print('fixed')\n", encoding="utf-8")
+    (repo / "corpus").mkdir()
+    for index in range(20):
+        (repo / "corpus" / f"seed{index:03d}").write_bytes(b"\x00\x01" * 8)
+    monkeypatch.setenv("OUROBOROS_PATCH_MAX_UNTRACKED_PROBES", "6")
+    probes = []
+    real = headless._untracked_blob_exclude_reason
+
+    def _counting(root, rel):
+        probes.append(rel)
+        return real(root, rel)
+
+    monkeypatch.setattr(headless, "_untracked_blob_exclude_reason", _counting)
+    artifact_dir = tmp_path / "artifacts"
+
+    _artifacts, manifest = headless.write_workspace_patch_artifacts(repo, artifact_dir, task={})
+
+    assert len(probes) == 6
+    assert manifest["status"] == "ready_with_changes"
+    assert manifest["errors"] == []
+    reasons = _collections.Counter(item["reason"] for item in manifest["untracked_excluded"])
+    assert reasons["binary file"] == 5
+    assert sum(count for reason, count in reasons.items() if reason.startswith("untracked probe budget exceeded")) == 15
+    assert manifest["counts"]["untracked_budget_excluded"] == 15
+    assert manifest["counts"]["untracked_included"] == 1
+    assert manifest["untracked_included"] == ["aaa.py"]
+
+
+def test_workspace_patch_skips_realpath_without_a_scratch_manifest(tmp_path, monkeypatch):
+    import ouroboros.headless as headless
+
+    repo = tmp_path / "repo"
+    _init_repo_with_file(repo)
+    (repo / "new.txt").write_text("new\n", encoding="utf-8")
+    resolved = []
+    real_resolve = pathlib.Path.resolve
+
+    def _spy(self, strict=False):
+        if str(self).startswith(str(repo)) and self.name == "new.txt":
+            resolved.append(str(self))
+        return real_resolve(self, strict=strict)
+
+    monkeypatch.setattr(pathlib.Path, "resolve", _spy)
+    _artifacts, manifest = headless.write_workspace_patch_artifacts(repo, tmp_path / "artifacts", task={})
+    assert manifest["untracked_included"] == ["new.txt"]
+    assert resolved == []
+
+
 def test_workspace_patch_time_budget_stops_the_untracked_loop(tmp_path, monkeypatch):
     import ouroboros.headless as headless
 
@@ -2992,8 +3052,11 @@ def test_workspace_patch_time_budget_stops_the_untracked_loop(tmp_path, monkeypa
     ticks = {"now": 0.0}
 
     def _monotonic():
-        ticks["now"] += 0.4  # every check advances 0.4 s: the budget runs out after ~3 files
-        return ticks["now"]
+        # First call anchors the probe start at 0; each subsequent per-file
+        # check advances 0.4 s, so the 1 s budget runs out after ~2 files.
+        now = ticks["now"]
+        ticks["now"] += 0.4
+        return now
 
     monkeypatch.setattr(headless.time, "monotonic", _monotonic)
     artifact_dir = tmp_path / "artifacts"
@@ -3005,6 +3068,7 @@ def test_workspace_patch_time_budget_stops_the_untracked_loop(tmp_path, monkeypa
     included = manifest["counts"]["untracked_included"]
     assert 1 <= included < 6
     assert manifest["counts"]["untracked_budget_excluded"] == 6 - included
-    assert any("time budget" in item["reason"] for item in manifest["untracked_excluded"])
+    assert all("budget exceeded" in item["reason"] for item in manifest["untracked_excluded"])
+    assert len(manifest["untracked_excluded"]) == 6 - included
     patch_text = (artifact_dir / "workspace.patch").read_text(encoding="utf-8")
     assert patch_text.count("diff --git") == included

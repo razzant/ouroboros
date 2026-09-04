@@ -4354,8 +4354,26 @@ def _handle_main_llm_call_state(evt: Dict[str, Any], ctx: Any) -> None:
 # 64-lane benchmark load, starving every other lane's intake.  Defer the whole
 # handler to a bounded background pool: the loop only enqueues, and per-task
 # ordering is preserved because a task emits exactly one task_done.
+def _task_done_finalize_threads() -> int:
+    """Finalization is I/O-bound (workspace git + blob promotion on the task
+    filesystem); four threads fell hours behind 64 lanes finishing together
+    (CyberGym r10, 2026-09-04: 100 task_done in 40 min, finalization hold p50
+    8 min). Default scales with the worker pool, bounded."""
+    try:
+        explicit = int(str(os.environ.get("OUROBOROS_TASK_DONE_FINALIZE_THREADS") or "").strip() or 0)
+    except ValueError:
+        explicit = 0
+    if explicit > 0:
+        return min(64, explicit)
+    try:
+        workers = int(str(os.environ.get("OUROBOROS_MAX_WORKERS") or "").strip() or 0)
+    except ValueError:
+        workers = 0
+    return max(4, min(16, workers // 4)) if workers > 0 else 4
+
+
 _TASK_DONE_EXECUTOR = ThreadPoolExecutor(
-    max_workers=4, thread_name_prefix="task-done-finalize"
+    max_workers=_task_done_finalize_threads(), thread_name_prefix="task-done-finalize"
 )
 _TASK_DONE_PENDING: set[Any] = set()
 _TASK_DONE_PENDING_CONDITION = threading.Condition()
