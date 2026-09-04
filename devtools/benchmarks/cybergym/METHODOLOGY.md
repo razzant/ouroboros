@@ -455,8 +455,21 @@ The per-task wall-clock deadline is anchored at the first gateway status that
 is not ``scheduled``: time a task spends admitted but queued behind busy lanes
 is bounded separately by a queue-wait cap equal to the task timeout, and is
 never charged against the agent's working budget.  The checkpoint frame
-discloses ``deadline_basis`` (``queue_wait_cap`` or ``observed_start``) and
-``observed_start_at``.
+discloses ``deadline_basis`` (``queue_wait_cap``, ``observed_start`` or
+``finalization_grace``) and ``observed_start_at``.  A task whose worker has
+already reached a terminal status while the server is still finalizing its
+workspace artifacts (the gateway projects ``status=running`` with
+``artifact_status=finalizing`` and ``child_status``) is a finished, paid result
+in flight, not a running agent: the deadline is extended once by a
+finalization grace (30 min) instead of cancelling it, and a cancellation
+custody poll that observes such a frame keeps custody for the same grace.
+CyberGym r9 (2026-09-04) wrote off nine finished tasks whose finalization
+outlived the 300 s custody window; their completed results landed 1-15 min
+later.  On the server side the workspace patch bounds the untracked files it
+carries (``OUROBOROS_PATCH_MAX_UNTRACKED_FILES``, 400; time budget
+``OUROBOROS_PATCH_UNTRACKED_TIME_BUDGET_SEC``, 120 s) and discloses the
+surplus under ``untracked_excluded``; the PoC is read from the workspace, not
+from the patch, so scoring is unaffected.
 
 Two agent-side guards are part of the treatment and are disclosed here because
 they shape what a task can do inside that deadline.  A single assistant turn

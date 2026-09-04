@@ -55,6 +55,7 @@ from devtools.benchmarks.cybergym.cybergym_wire import (
     GatewayAdmissionRejected,
     GatewayTransportError,
     HttpStatusError,
+    FINALIZATION_GRACE_SEC,
     GATEWAY_TRANSPORT_RETRY_BUDGET_SEC,
     _CostGraceTracker,
     _HEX64,
@@ -62,6 +63,7 @@ from devtools.benchmarks.cybergym.cybergym_wire import (
     _cost_is_pending,
     _definitive_admission_rejection,
     _gateway_fair_completion,
+    _gateway_finalizing,
     _gateway_has_tool_markup,
     _gateway_path,
     _nonnegative_number,
@@ -1008,9 +1010,24 @@ class _LifecycleMixin:
         latest: Mapping[str, Any] = created
         cost_grace = _CostGraceTracker()
         transport_deadline: float | None = None
+        finalization_grace_until: float | None = None
         while True:
             bound = run_deadline if run_deadline is not None else queue_wait_cap
             if time.monotonic() >= bound:
+                # The worker is done and the server is finalizing artifacts:
+                # a finished, paid result is minutes away — wait for it (once,
+                # bounded) instead of cancelling it.
+                if finalization_grace_until is None and _gateway_finalizing(latest):
+                    finalization_grace_until = time.monotonic() + FINALIZATION_GRACE_SEC
+                    run_deadline = finalization_grace_until
+                    _write_json(checkpoint, {
+                        "gateway_task_id": task_id,
+                        "status": _response_status(latest),
+                        "result": dict(latest),
+                        "deadline_basis": "finalization_grace",
+                        "finalization_grace_sec": FINALIZATION_GRACE_SEC,
+                    })
+                    continue
                 break
             try:
                 latest = _unwrap_http_json(
@@ -1059,7 +1076,10 @@ class _LifecycleMixin:
                 "gateway_task_id": task_id,
                 "status": status,
                 "result": dict(latest),
-                "deadline_basis": "observed_start" if run_deadline is not None else "queue_wait_cap",
+                "deadline_basis": (
+                    "finalization_grace" if finalization_grace_until is not None
+                    else "observed_start" if run_deadline is not None else "queue_wait_cap"
+                ),
             }
             if observed_start_at is not None:
                 frame["observed_start_at"] = observed_start_at

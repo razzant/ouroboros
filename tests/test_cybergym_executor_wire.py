@@ -1552,3 +1552,97 @@ def test_fair_completion_reads_outermost_execution_axis():
                "result": {"outcome_axes": {"execution": {"status": "failed"}}}}
     assert _gateway_fair_completion(payload) == (True, "execution_ok")
     assert _gateway_fair_completion({"result": {"task_result": _envelope({"status": "failed"})}}) == (False, "execution_failed")
+
+# r9 (2026-09-04): nine finished, paid tasks were cancelled by the launcher at
+# deadline+grace while the server was still finalizing their workspace
+# artifacts (projected `running` / `artifact_status=finalizing`); the cancel path
+# re-ran the same finalization and the 300 s custody window expired 1-15 min
+# before the completed results landed. A finalizing frame now buys the task a
+# bounded finalization grace on both the wait and the custody paths.
+
+
+def test_gateway_wait_grants_finalization_grace_instead_of_cancelling(tmp_path, monkeypatch):
+    from devtools.benchmarks.cybergym.cybergym_wire import FINALIZATION_GRACE_SEC
+
+    task_id = "cybergym-finalizing"
+    finalizing = {
+        "task_id": task_id, "status": "running", "artifact_status": "finalizing",
+        "child_status": "completed", "cost_final": True,
+    }
+    state = {"polls": 0}
+
+    def http(method, _url, **_kwargs):
+        if method == "POST":
+            return {"task_id": task_id, "status": "scheduled"}
+        state["polls"] += 1
+        # Runs to its deadline, then finalizes for a while, then delivers.
+        if state["polls"] < 12:
+            return {"task_id": task_id, "status": "running"}
+        if state["polls"] < 20:
+            return dict(finalizing)
+        return {"task_id": task_id, "status": "completed", "result": {"cost_final": True}}
+
+    executor, clock, checkpoint, sentinel = _deadline_executor(
+        tmp_path, monkeypatch, http, task_timeout_sec=5
+    )
+    result = executor._gateway_wait(  # noqa: SLF001 - deadline contract
+        {"task_id": task_id, "description": "test"}, checkpoint
+    )
+    assert result["status"] == "completed", "a finalizing task must not be cancelled"
+    assert result != sentinel
+    saved = json.loads(checkpoint.read_text(encoding="utf-8"))
+    assert saved["status"] == "completed"
+    assert FINALIZATION_GRACE_SEC > 60
+
+
+def test_gateway_wait_finalization_grace_is_granted_once(tmp_path, monkeypatch):
+    from devtools.benchmarks.cybergym import cybergym_lifecycle
+
+    task_id = "cybergym-finalizing-forever"
+
+    def http(method, _url, **_kwargs):
+        if method == "POST":
+            return {"task_id": task_id, "status": "scheduled"}
+        return {"task_id": task_id, "status": "running", "artifact_status": "finalizing", "child_status": "completed"}
+
+    monkeypatch.setattr(cybergym_lifecycle, "FINALIZATION_GRACE_SEC", 20.0)
+    executor, clock, checkpoint, sentinel = _deadline_executor(
+        tmp_path, monkeypatch, http, task_timeout_sec=5
+    )
+    started = clock.now
+    result = executor._gateway_wait(  # noqa: SLF001 - deadline contract
+        {"task_id": task_id, "description": "test"}, checkpoint
+    )
+    assert result == sentinel, "finalization that outlives the grace is still cancelled"
+    elapsed = clock.now - started
+    assert 5 + 300 + 20 <= elapsed < 5 + 300 + 20 + 3
+    saved = json.loads(checkpoint.read_text(encoding="utf-8"))
+    assert saved["deadline_basis"] == "finalization_grace"
+
+
+def test_custody_poll_outlasts_its_window_while_the_task_is_finalizing(tmp_path, monkeypatch):
+    from devtools.benchmarks.cybergym import cybergym_custody
+
+    task_id = "cybergym-custody-finalizing"
+    clock = _FakeClock()
+    monkeypatch.setattr(cybergym_custody, "time", clock)
+    monkeypatch.setattr(cybergym_custody, "FINALIZATION_GRACE_SEC", 120.0)
+    state = {"polls": 0}
+
+    def http(method, _url, **_kwargs):
+        state["polls"] += 1
+        clock.now += 10.0
+        if state["polls"] < 8:  # 80 s of finalizing: past a 30 s custody window
+            return {"task_id": task_id, "status": "running", "artifact_status": "finalizing", "child_status": "completed"}
+        return {"task_id": task_id, "status": "completed", "result": {"cost_final": True}}
+
+    config = _config(tmp_path, provider_probe=False, poll_interval_sec=1.0)
+    executor = CyberGymExecutor(dataclasses_replace(config, http_runner=http, sleep=clock.sleep))
+    monkeypatch.setattr(executor, "_terminalize_gateway_attempt", lambda *_a, **_k: None)
+    checkpoint = config.run_root / "custody.json"
+    result = executor._poll_gateway_custody(  # noqa: SLF001 - custody contract
+        task_id, checkpoint, cancel_response=None, cancel_status_code=503, custody_seconds=30.0
+    )
+    assert result["status"] == "completed"
+    saved = json.loads(checkpoint.read_text(encoding="utf-8"))
+    assert saved["status"] == "completed"

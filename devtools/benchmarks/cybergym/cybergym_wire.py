@@ -115,6 +115,28 @@ def _response_status(payload: Mapping[str, Any]) -> str:
     return str(payload.get("status") or "").strip().lower()
 
 
+# How long the launcher keeps waiting for a task whose WORKER has already
+# finished while the server is still finalizing its workspace artifacts. The
+# gateway projects such a task as `status=running, artifact_status=finalizing`
+# (child_status carries the worker's terminal status) — a paid, finished
+# result that must not be cancelled: cancelling it re-runs the same
+# finalization in the cancel path and the 300 s custody window expires on a
+# finished task (CyberGym r9, 2026-09-04: nine tasks written off 1-15 min
+# before the server delivered their completed results).
+FINALIZATION_GRACE_SEC = 1800.0
+_WORKER_TERMINAL_CHILD_STATUSES = frozenset({"completed", "failed", "cancelled"})
+
+
+def _gateway_finalizing(payload: Mapping[str, Any]) -> bool:
+    """True when the task is `running` only because artifact finalization is
+    still in progress after the worker itself reached a terminal status."""
+    if not isinstance(payload, Mapping) or _response_status(payload) != "running":
+        return False
+    artifact_status = str(payload.get("artifact_status") or "").strip().lower()
+    child_status = str(payload.get("child_status") or "").strip().lower()
+    return artifact_status == "finalizing" or child_status in _WORKER_TERMINAL_CHILD_STATUSES
+
+
 def _cost_final_marker(payload: Mapping[str, Any]) -> bool | None:
     """Return an explicit cost-finality marker, without guessing absence."""
     marker = _terminal_gateway_accounting(payload).get("cost_final")

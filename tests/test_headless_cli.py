@@ -2927,3 +2927,84 @@ def test_queue_restore_accepts_headless_chat_zero(tmp_path, monkeypatch):
 
     assert queue.restore_pending_from_snapshot(max_age_sec=900) == 1
     assert queue.PENDING[0]["id"] == "headless1"
+
+# CyberGym r9 (2026-09-04): finalization of a fuzzing task's workspace spent
+# 15-25 minutes in write_workspace_patch_artifacts — one `git diff --numstat`
+# subprocess per untracked corpus file (52K of them on a network filesystem) —
+# while the task projected `running/finalizing` and the launcher's cancel
+# custody expired on a finished result. The binary verdict is now computed
+# in-process from the head bytes, and the number of untracked files that
+# enter the patch (each one a `git diff --no-index` subprocess) is budgeted.
+
+
+def test_untracked_blob_exclude_reason_needs_no_git_subprocess(tmp_path, monkeypatch):
+    import ouroboros.headless as headless
+
+    repo = tmp_path / "repo"
+    _init_repo_with_file(repo)
+    (repo / "text.py").write_text("print('x')\n" * 50, encoding="utf-8")
+    (repo / "blob.bin").write_bytes(b"\x7fELF" + b"\x00" * 16 + b"data")
+    (repo / "late_nul.dat").write_bytes(b"a" * 9000 + b"\x00")  # NUL past git's 8000-byte probe: text, like git says
+
+    def _no_git(*_a, **_k):
+        raise AssertionError("binary detection must not spawn git")
+
+    monkeypatch.setattr(headless, "_git_stdout", _no_git)
+    assert headless._untracked_blob_exclude_reason(repo, "text.py") == ""
+    assert headless._untracked_blob_exclude_reason(repo, "blob.bin") == "binary file"
+    assert headless._untracked_blob_exclude_reason(repo, "late_nul.dat") == ""
+
+
+def test_workspace_patch_budgets_untracked_files_and_discloses_the_rest(tmp_path, monkeypatch):
+    import ouroboros.headless as headless
+
+    repo = tmp_path / "repo"
+    _init_repo_with_file(repo)
+    (repo / "corpus").mkdir()
+    for index in range(12):
+        (repo / "corpus" / f"seed{index:03d}.txt").write_text(f"seed {index}\n", encoding="utf-8")
+    monkeypatch.setenv("OUROBOROS_PATCH_MAX_UNTRACKED_FILES", "5")
+    artifact_dir = tmp_path / "artifacts"
+
+    artifacts, manifest = headless.write_workspace_patch_artifacts(repo, artifact_dir, task={})
+
+    assert manifest["status"] == "ready_with_changes"
+    assert manifest["errors"] == []
+    assert manifest["counts"]["untracked_included"] == 5
+    assert manifest["counts"]["untracked_budget_excluded"] == 7
+    assert manifest["counts"]["untracked_excluded"] == 7
+    reasons = {item["reason"] for item in manifest["untracked_excluded"]}
+    assert reasons == {"untracked file budget exceeded (max 5 files per patch)"}
+    assert any(item["type"] == "untracked_budget" for item in manifest["diagnostics"])
+    patch_text = (artifact_dir / "workspace.patch").read_text(encoding="utf-8")
+    assert patch_text.count("diff --git") == 5
+    assert any(item["kind"] == "workspace_patch" for item in artifacts)
+
+
+def test_workspace_patch_time_budget_stops_the_untracked_loop(tmp_path, monkeypatch):
+    import ouroboros.headless as headless
+
+    repo = tmp_path / "repo"
+    _init_repo_with_file(repo)
+    for index in range(6):
+        (repo / f"new{index}.txt").write_text(f"new {index}\n", encoding="utf-8")
+    monkeypatch.setenv("OUROBOROS_PATCH_UNTRACKED_TIME_BUDGET_SEC", "1")
+    ticks = {"now": 0.0}
+
+    def _monotonic():
+        ticks["now"] += 0.4  # every check advances 0.4 s: the budget runs out after ~3 files
+        return ticks["now"]
+
+    monkeypatch.setattr(headless.time, "monotonic", _monotonic)
+    artifact_dir = tmp_path / "artifacts"
+
+    _artifacts, manifest = headless.write_workspace_patch_artifacts(repo, artifact_dir, task={})
+
+    assert manifest["status"] == "ready_with_changes"
+    assert manifest["errors"] == []
+    included = manifest["counts"]["untracked_included"]
+    assert 1 <= included < 6
+    assert manifest["counts"]["untracked_budget_excluded"] == 6 - included
+    assert any("time budget" in item["reason"] for item in manifest["untracked_excluded"])
+    patch_text = (artifact_dir / "workspace.patch").read_text(encoding="utf-8")
+    assert patch_text.count("diff --git") == included

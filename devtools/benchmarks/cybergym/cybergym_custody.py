@@ -23,8 +23,10 @@ from devtools.benchmarks.cybergym.cybergym_wire import (
     GatewayTransportError,
     HttpStatusError,
     GATEWAY_TRANSPORT_RETRY_BUDGET_SEC,
+    FINALIZATION_GRACE_SEC,
     _CostGraceTracker,
     _cost_is_pending,
+    _gateway_finalizing,
     _gateway_path,
     _response_status,
     _unwrap_http_json,
@@ -55,6 +57,11 @@ class _CustodyMixin:
         """
 
         deadline = time.monotonic() + custody_seconds
+        # A frame that shows the worker finished and artifacts finalizing is a
+        # paid result in flight, not a stuck cancellation: custody stays open
+        # for it up to the finalization grace (once).
+        finalization_deadline = time.monotonic() + max(custody_seconds, FINALIZATION_GRACE_SEC)
+        finalization_extended = False
         transport_deadline: float | None = None
         cost_grace = _CostGraceTracker()
         cancel_frame = dict(cancel_response) if isinstance(cancel_response, Mapping) else None
@@ -97,6 +104,10 @@ class _CustodyMixin:
                 ):
                     self._terminalize_gateway_attempt(task_id)
                     return latest
+                if not finalization_extended and _gateway_finalizing(latest):
+                    finalization_extended = True
+                    deadline = max(deadline, finalization_deadline)
+                    _write_json(checkpoint, {**frame, "custody_basis": "finalization_grace"})
                 transport_deadline = None
             except (GatewayTransportError, HttpStatusError) as exc:
                 if isinstance(exc, HttpStatusError) and exc.status_code != 503:

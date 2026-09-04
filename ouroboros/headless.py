@@ -15,6 +15,7 @@ import shutil
 import subprocess
 import tempfile
 import threading
+import time
 from datetime import datetime, timezone
 from hashlib import sha256
 from typing import Any, BinaryIO, Dict, Iterable, List, Optional, Sequence, Tuple
@@ -968,6 +969,18 @@ def write_workspace_patch_artifacts(
             else:
                 kept_untracked.append(rel)
         included_untracked = kept_untracked
+    max_untracked_files, untracked_budget_sec = _patch_untracked_budget()
+    budget_excluded = 0
+    if len(included_untracked) > max_untracked_files:
+        over = included_untracked[max_untracked_files:]
+        included_untracked = included_untracked[:max_untracked_files]
+        for rel in over:
+            excluded.append({"path": rel, "reason": f"untracked file budget exceeded (max {max_untracked_files} files per patch)"})
+        budget_excluded += len(over)
+        diagnostics.append({
+            "type": "untracked_budget",
+            "message": f"{len(over)} untracked files left out of the patch (max {max_untracked_files}); they remain in the workspace",
+        })
     # A sensitive-shaped untracked file is a PER-FILE exclusion (disclosed in
     # ``sensitive_blocked``), never a manifest error: the error path suppressed
     # the ENTIRE patch write, so one credential-shaped NAME (public.pem,
@@ -1000,7 +1013,19 @@ def write_workspace_patch_artifacts(
                 errors=errors,
                 diagnostics=diagnostics,
             )
-            for rel in included_untracked:
+            untracked_started = time.monotonic()
+            patched_untracked: List[str] = []
+            for index, rel in enumerate(included_untracked):
+                if time.monotonic() - untracked_started > untracked_budget_sec:
+                    over = included_untracked[index:]
+                    for late in over:
+                        excluded.append({"path": late, "reason": f"untracked patch time budget exceeded ({untracked_budget_sec:.0f}s per patch)"})
+                    budget_excluded += len(over)
+                    diagnostics.append({
+                        "type": "untracked_budget",
+                        "message": f"{len(over)} untracked files left out of the patch after {untracked_budget_sec:.0f}s; they remain in the workspace",
+                    })
+                    break
                 if total_size:
                     total_size += _write_patch_separator(fh, hasher)
                 total_size += _append_git_output(
@@ -1012,6 +1037,8 @@ def write_workspace_patch_artifacts(
                     errors=errors,
                     diagnostics=diagnostics,
                 )
+                patched_untracked.append(rel)
+            included_untracked = patched_untracked
     if errors:
         try:
             patch_path.unlink()
@@ -1089,6 +1116,7 @@ def write_workspace_patch_artifacts(
             "tracked_excluded": len(tracked_excluded),
             "untracked_included": len(included_untracked),
             "untracked_excluded": len(excluded),
+            "untracked_budget_excluded": budget_excluded,
             "sensitive_blocked": len(sensitive),
         },
         "tracked_changed": changed_tracked,
@@ -1447,6 +1475,29 @@ def _write_patch_separator(fh: BinaryIO, hasher: Any) -> int:
 # bounded head read catches the former on evidence, not on spelling (#447).
 _PEM_PRIVATE_KEY_RE = re.compile(rb"-----BEGIN [A-Z0-9 ]*PRIVATE KEY-----")
 _PEM_HEAD_READ_BYTES = 4096
+_GIT_BINARY_PROBE_BYTES = 8000  # git xdiff FIRST_FEW_BYTES
+
+
+def _patch_untracked_budget() -> Tuple[int, float]:
+    """(max included untracked files, wall-time budget in seconds) for one
+    workspace patch. Each included untracked file costs one `git diff
+    --no-index --binary` subprocess; without a bound a task that leaves
+    thousands of generated files in its workspace holds finalization — and
+    with it the task's `running/finalizing` projection — for tens of minutes.
+    Files past the budget stay in the workspace and are disclosed in the
+    manifest under ``untracked_excluded`` with a budget reason."""
+    def _env(name: str, default: str) -> str:
+        return str(os.environ.get(name) or default).strip()
+
+    try:
+        max_files = max(1, int(_env("OUROBOROS_PATCH_MAX_UNTRACKED_FILES", "400")))
+    except ValueError:
+        max_files = 400
+    try:
+        budget_sec = max(1.0, float(_env("OUROBOROS_PATCH_UNTRACKED_TIME_BUDGET_SEC", "120")))
+    except ValueError:
+        budget_sec = 120.0
+    return max_files, budget_sec
 
 
 def _untracked_blob_exclude_reason(root: pathlib.Path, rel: str) -> str:
@@ -1465,19 +1516,19 @@ def _untracked_blob_exclude_reason(root: pathlib.Path, rel: str) -> str:
         return f"untracked file exceeds size cap ({size}B > {_PATCH_MAX_UNTRACKED_FILE_BYTES}B)"
     try:
         with (root / rel).open("rb") as fh:
-            head = fh.read(_PEM_HEAD_READ_BYTES)
+            head = fh.read(_GIT_BINARY_PROBE_BYTES)
     except OSError:
         head = b""
-    if _PEM_PRIVATE_KEY_RE.search(head):
+    if _PEM_PRIVATE_KEY_RE.search(head[:_PEM_HEAD_READ_BYTES]):
         return "private key material (PEM private-key header)"
-    numstat = _git_stdout(
-        ["git", "diff", "--no-index", "--numstat", "--no-ext-diff", "--no-color", "--", os.devnull, rel],
-        root,
-        allow_rc={0, 1},
-        errors=None,
-    )
-    first = numstat.strip().splitlines()[0] if numstat.strip() else ""
-    if first.startswith("-\t-"):
+    # git's own binary verdict (xdiff buffer_is_binary: a NUL byte within the
+    # first 8000 bytes), computed on the head bytes already in hand. This used
+    # to be one `git diff --no-index --numstat` SUBPROCESS per untracked file:
+    # a fuzzing task that leaves a 50K-file corpus in its workspace on a
+    # network filesystem then spent 15-25 minutes here at finalization
+    # (CyberGym r9, 2026-09-04), the task projected `running/finalizing` the
+    # whole time, and the launcher's cancel custody expired on a finished task.
+    if b"\0" in head:
         return "binary file"
     return ""
 
@@ -1553,6 +1604,7 @@ def _empty_patch_manifest(
             "tracked_changed": 0,
             "untracked_included": 0,
             "untracked_excluded": 0,
+            "untracked_budget_excluded": 0,
             "sensitive_blocked": 0,
         },
         "tracked_changed": [],
