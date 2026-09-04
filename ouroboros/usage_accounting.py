@@ -851,7 +851,7 @@ def _append_single_settled_row(
     attempt_id = str(row["attempt_id"])
     with _locked(root):
         records = _read_records_locked_cached(root)
-        existing = _final_rows(records).get(attempt_id)
+        existing = _last_row_for(records, attempt_id)
         if existing is not None:
             def identity_value(source: Dict[str, Any], key: str) -> Any:
                 # Rows written before physical_attempt_v1 omitted these optional keys:
@@ -926,10 +926,26 @@ def record_subscription_session(
         "kind", "model", "provider", "task_id", "root_task_id", "parent_task_id",
         "category", "source", *REVIEW_ATTRIBUTION_KEYS, "subscription_route", "session_id_sha256",
     ))
+def _last_row_for(records: Sequence[Dict[str, Any]], attempt_id: str) -> Optional[Dict[str, Any]]:
+    """The attempt's final row (its LAST row), by reverse scan.
+
+    Equivalent to ``_final_rows(records).get(attempt_id)`` but O(distance from
+    the tail) instead of materializing a dict over the whole history under the
+    monetary lock on every transition (CyberGym r8, 2026-09-04: with the
+    whole-ledger append re-validation this made the lock hold O(ledger) and
+    starved callers past the 45 s timeout).
+    """
+    wanted = str(attempt_id)
+    for row in reversed(records):
+        if str(row.get("attempt_id") or "") == wanted:
+            return row
+    return None
+
+
 def _transition(reservation: AttemptReservation, state: str, **fields: Any) -> Dict[str, Any]:
     with _locked(reservation.drive_root):
         records = _read_records_locked_cached(reservation.drive_root)
-        current = _final_rows(records).get(reservation.attempt_id)
+        current = _last_row_for(records, reservation.attempt_id)
         if current is None:
             raise UsageAccountingError(f"unknown usage attempt {reservation.attempt_id}")
         allow_release = bool(fields.pop("_allow_dispatched_release", False))
@@ -960,10 +976,10 @@ def _transition(reservation: AttemptReservation, state: str, **fields: Any) -> D
         root_limit = _number(current.get("root_limit_usd"))
         if root_task_id and root_limit is not None:
             # Refresh from post-transition finals without another ledger read.
-            subtree = [
-                r for r in _final_rows([*records, *appended]).values()
+            subtree = list(_final_rows([
+                r for r in (*records, *appended)
                 if str(r.get("root_task_id") or "") == root_task_id
-            ]
+            ]).values())
             _stash_root_accounting(
                 root_task_id, float(_summary(subtree)["accounted_usd"]), root_limit,
             )
@@ -1022,8 +1038,8 @@ def terminalize_abandoned_attempt(
     with an unknown bound stays unresolved: no honest terminal number exists.
     """
     with _locked(reservation.drive_root):
-        current = _final_rows(_read_records_locked_cached(reservation.drive_root)).get(
-            reservation.attempt_id
+        current = _last_row_for(
+            _read_records_locked_cached(reservation.drive_root), reservation.attempt_id,
         )
     if current is None:
         return "unknown"

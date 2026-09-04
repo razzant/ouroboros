@@ -27,7 +27,7 @@ import pathlib
 import threading
 import time
 from dataclasses import dataclass, field
-from typing import Any, Callable, Dict, Tuple
+from typing import Any, Callable, Dict, Optional, Tuple
 
 from ouroboros.usage_ledger import (
     QUARANTINE_REL,
@@ -262,6 +262,21 @@ def _ledger_cache_put(key: str, value: "Tuple[LedgerResumeState, list]") -> None
         _LEDGER_READ_CACHE.move_to_end(key)
         while len(_LEDGER_READ_CACHE) > _LEDGER_READ_CACHE_MAX_ROOTS:
             _LEDGER_READ_CACHE.popitem(last=False)
+
+
+def _cached_attempt_states(root: pathlib.Path, row_count: int) -> Optional[Dict[str, str]]:
+    """Per-attempt last-state map of the cached validated read, if it covers
+    exactly ``row_count`` rows; a copy the caller may mutate. None = not cached
+    for that extent (caller derives the map from its records)."""
+    key = str(pathlib.Path(root).resolve(strict=False))
+    with _LEDGER_READ_CACHE_LOCK:
+        cached = _LEDGER_READ_CACHE.get(key)
+    if cached is None:
+        return None
+    resume, rows = cached
+    if int(resume.row_count) != int(row_count) or len(rows) != int(row_count):
+        return None
+    return dict(resume.states)
 
 
 def _read_records_locked_cached(root: pathlib.Path) -> list:

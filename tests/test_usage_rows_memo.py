@@ -450,3 +450,91 @@ def test_ledger_read_cache_falls_back_when_the_file_is_rewritten(data_root):
         raw = ua._read_records_locked(data_root)
     assert after == raw
     assert len(after) == 2  # the cached four-row state was not served
+
+
+# CyberGym r8 (2026-09-04): every append re-validated the WHOLE ledger under the
+# monetary lock (0.6 s at 43K rows), saturating the lock at ~3 transitions/s and
+# starving callers past the 45 s timeout — tasks died as task_exception:
+# UsageLockUnavailable. Appends validate only their tail against the prefix's
+# per-attempt last state, preferring the cached validated read's state map.
+
+
+def test_append_validates_only_the_appended_tail(data_root, monkeypatch):
+    for _ in range(3):
+        reservation = ua.reserve_attempt(_request(data_root))
+        ua.mark_dispatched(reservation)
+        ua.settle_attempt(reservation, {"prompt_tokens": 1, "completion_tokens": 1}, cost_usd=0.001, cost_final=True)
+    from ouroboros import usage_ledger
+
+    seen: list[tuple[int, int]] = []
+    real = usage_ledger._validate_records
+
+    def spy(records, *, start_seq=1, states=None):
+        seen.append((len(records), start_seq))
+        return real(records, start_seq=start_seq, states=states)
+
+    monkeypatch.setattr(usage_ledger, "_validate_records", spy)
+    with ua._locked(data_root):
+        records = ua._read_records_locked_cached(data_root)
+        assert len(records) == 9
+        ua._append_rows_locked(data_root, records, [{
+            "kind": "external_unmetered", "attempt_id": "ext-1", "state": "settled",
+            "model": "", "provider": "external", "cost_usd": None, "cost_final": False,
+            "reservation_upper_bound_usd": None, "prompt_tokens": 1, "completion_tokens": 1,
+            "task_id": "t", "root_task_id": "t", "parent_task_id": "", "category": "external",
+            "source": "test",
+        }])
+    # The in-lock read validates only its resumed tail, and the append validates
+    # only the one new row at seq 10 — the 9-row prefix is never replayed.
+    assert seen[-1] == (1, 10)
+    assert all(count < 9 for count, _ in seen)
+
+
+def test_append_still_rejects_an_invalid_transition_against_the_prefix(data_root):
+    reservation = ua.reserve_attempt(_request(data_root))
+    ua.mark_dispatched(reservation)
+    ua.settle_attempt(reservation, {"prompt_tokens": 1, "completion_tokens": 1}, cost_usd=0.001, cost_final=True)
+    with ua._locked(data_root):
+        records = ua._read_records_locked_cached(data_root)
+        final = dict(records[-1])
+        final.pop("seq")
+        with pytest.raises(ua.UsageLedgerCorrupt, match="changed after terminal state"):
+            ua._append_rows_locked(data_root, records, [final])
+        fresh = {**records[0], "attempt_id": "brand-new", "state": "dispatched"}
+        fresh.pop("seq")
+        with pytest.raises(ua.UsageLedgerCorrupt, match="did not begin reserved"):
+            ua._append_rows_locked(data_root, records, [fresh])
+    # Nothing was written by the rejected appends.
+    assert len(ua._read_records_locked(data_root)) == 3
+
+
+def test_append_state_map_matches_between_cached_and_derived_paths(data_root):
+    from ouroboros import _usage_rows_memo as memo
+
+    reservations = [ua.reserve_attempt(_request(data_root)) for _ in range(4)]
+    ua.mark_dispatched(reservations[0])
+    ua.release_attempt(reservations[1])
+    with ua._locked(data_root):
+        records = ua._read_records_locked_cached(data_root)
+        cached = memo._cached_attempt_states(data_root, len(records))
+    assert cached is not None
+    derived = {str(row["attempt_id"]): str(row["state"]) for row in records}
+    assert cached == derived
+    # Extent mismatch => not usable; the derived map is the fallback.
+    assert memo._cached_attempt_states(data_root, len(records) - 1) is None
+    _clear_ledger_read_cache()
+    assert memo._cached_attempt_states(data_root, len(records)) is None
+    # And the derived path appends just as well after the cache was dropped.
+    ua.mark_dispatched(reservations[2])
+    assert ua.usage_projection(data_root)["attempt_counts"] == {"dispatched": 2, "released": 1, "reserved": 1}
+
+
+def test_last_row_for_is_the_final_row_of_the_attempt(data_root):
+    reservation = ua.reserve_attempt(_request(data_root))
+    ua.mark_dispatched(reservation)
+    other = ua.reserve_attempt(_request(data_root))
+    records = ua._read_records_locked(data_root)
+    assert ua._last_row_for(records, reservation.attempt_id) is ua._final_rows(records)[reservation.attempt_id]
+    assert ua._last_row_for(records, reservation.attempt_id)["state"] == "dispatched"
+    assert ua._last_row_for(records, other.attempt_id)["state"] == "reserved"
+    assert ua._last_row_for(records, "nobody") is None

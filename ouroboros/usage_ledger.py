@@ -530,7 +530,27 @@ def _append_rows_locked(
     for raw in rows:
         sequence += 1
         materialized.append({**raw, "seq": sequence, "ts": str(raw.get("ts") or utc_now_iso())})
-    _validate_records([*records, *materialized])
+    # ``records`` is the validated in-lock read (full or resumed tail); re-running
+    # the structural validation over the whole history on every append made the
+    # monetary lock hold O(ledger) — 0.6 s at 43K rows, saturating the lock at
+    # ~3 transitions/s and starving callers past the 45 s timeout (CyberGym r8,
+    # 2026-09-04: UsageLockUnavailable killed tasks as task_exception). Only the
+    # appended rows need validating, against the prefix's per-attempt last state
+    # — the same additive resume seam the incremental tail reader uses.
+    states: Optional[Dict[str, str]] = None
+    try:
+        from ouroboros._usage_rows_memo import _cached_attempt_states
+
+        states = _cached_attempt_states(root, len(records))
+    except Exception:  # noqa: BLE001 — the derived map below is the correctness path
+        states = None
+    if states is None:
+        states = {}
+        for row in records:
+            if isinstance(row, dict):
+                states[str(row.get("attempt_id") or "")] = str(row.get("state") or "")
+        states.pop("", None)
+    _validate_records(materialized, start_seq=len(records) + 1, states=states)
     payload = b"".join(
         (json.dumps(row, ensure_ascii=False, sort_keys=True, separators=(",", ":")) + "\n").encode("utf-8")
         for row in materialized
