@@ -538,3 +538,112 @@ def test_last_row_for_is_the_final_row_of_the_attempt(data_root):
     assert ua._last_row_for(records, reservation.attempt_id)["state"] == "dispatched"
     assert ua._last_row_for(records, other.attempt_id)["state"] == "reserved"
     assert ua._last_row_for(records, "nobody") is None
+
+
+# CyberGym r8 (2026-09-04 08:27-08:31): a deadline wave freed ~48 lanes at once
+# and every fresh worker's first in-lock read cold-parsed the 47K-row ledger
+# UNDER the monetary lock (~1 s each, serialized) — reserves behind them timed
+# out at 45 s and 15 just-admitted tasks died. The cold parse now happens before
+# the lock is taken; the in-lock read only resumes from that snapshot.
+
+
+def _warm_module():
+    from ouroboros import _usage_rows_memo as memo
+
+    return memo
+
+
+def test_unlocked_warm_up_makes_the_first_locked_read_incremental(data_root, monkeypatch):
+    for _ in range(3):
+        reservation = ua.reserve_attempt(_request(data_root))
+        ua.mark_dispatched(reservation)
+        ua.settle_attempt(reservation, {"prompt_tokens": 1, "completion_tokens": 1}, cost_usd=0.001, cost_final=True)
+    memo = _warm_module()
+    _clear_ledger_read_cache()  # a fresh process: nothing cached
+    memo._WARM_FAILED_AT.clear()
+
+    assert memo._warm_ledger_read_cache(data_root) is True
+    assert memo._warm_ledger_read_cache(data_root) is False  # already warm: no re-read
+
+    full_reads: list = []
+    real_full = ua._read_records_locked
+
+    def spy_full(root):
+        full_reads.append(root)
+        return real_full(root)
+
+    monkeypatch.setattr(memo._ua(), "_read_records_locked", spy_full)
+    with ua._locked(data_root):
+        records = ua._read_records_locked_cached(data_root)
+    assert full_reads == [], "the in-lock read must resume from the unlocked snapshot"
+    assert [row["seq"] for row in records] == list(range(1, 10))
+    assert records == real_full(data_root)
+
+
+def test_locked_entry_warms_the_cache_itself_and_sees_rows_appended_meanwhile(data_root):
+    reservation = ua.reserve_attempt(_request(data_root))
+    memo = _warm_module()
+    _clear_ledger_read_cache()
+    memo._WARM_FAILED_AT.clear()
+    # Another process appends between the (unlocked) warm-up and our lock.
+    assert memo._warm_ledger_read_cache(data_root) is True
+    records = ua._read_records_locked(data_root)
+    ua._append_rows_locked(data_root, records, [{**{k: v for k, v in records[0].items() if k not in ("seq", "ts")}, "state": "dispatched"}])
+
+    # The transition's in-lock read resumes from the snapshot AND sees the
+    # foreign dispatched row: a plain release is now illegal, exactly as it
+    # would be after a full read.
+    with pytest.raises(ua.UsageAccountingError, match="typed pre-dispatch release"):
+        ua.release_attempt(reservation)
+    ua.settle_attempt(reservation, {"prompt_tokens": 1, "completion_tokens": 1}, cost_usd=0.001, cost_final=True)
+    rows = ua._read_records_locked(data_root)
+    assert [row["state"] for row in rows] == ["reserved", "dispatched", "settled"]
+    assert [row["seq"] for row in rows] == [1, 2, 3]
+
+
+def test_warm_up_stops_at_the_last_row_boundary_and_never_quarantines(data_root):
+    reservation = ua.reserve_attempt(_request(data_root))
+    ua.mark_dispatched(reservation)
+    memo = _warm_module()
+    _clear_ledger_read_cache()
+    memo._WARM_FAILED_AT.clear()
+    path = data_root / ua.LEDGER_REL
+    original = path.read_bytes()
+    path.write_bytes(original + b'{"seq": 3, "attempt_id": "torn"')  # crash-torn, newline-less tail
+
+    assert memo._warm_ledger_read_cache(data_root) is True
+    with memo._LEDGER_READ_CACHE_LOCK:
+        resume, rows = memo._LEDGER_READ_CACHE[str(data_root.resolve())]
+    assert resume.row_count == 2 and resume.size == len(original)
+    assert path.read_bytes() == original + b'{"seq": 3, "attempt_id": "torn"'  # untouched
+    assert not (data_root / ua.QUARANTINE_REL).exists()
+
+    # The locked path owns the torn tail: the resume is refused (file grew past
+    # the boundary but the tail does not parse), the full read quarantines it.
+    with ua._locked(data_root):
+        records = ua._read_records_locked_cached(data_root)
+    assert [row["state"] for row in records] == ["reserved", "dispatched"]
+    assert (data_root / ua.QUARANTINE_REL).exists()
+
+
+def test_warm_up_refuses_a_corrupt_prefix_and_backs_off(data_root, monkeypatch):
+    reservation = ua.reserve_attempt(_request(data_root))
+    ua.mark_dispatched(reservation)
+    memo = _warm_module()
+    _clear_ledger_read_cache()
+    memo._WARM_FAILED_AT.clear()
+    path = data_root / ua.LEDGER_REL
+    lines = path.read_bytes().splitlines(keepends=True)
+    lines[0] = b"not json\n"
+    path.write_bytes(b"".join(lines))
+
+    assert memo._warm_ledger_read_cache(data_root) is False
+    with memo._LEDGER_READ_CACHE_LOCK:
+        assert str(data_root.resolve()) not in memo._LEDGER_READ_CACHE
+    assert str(data_root.resolve()) in memo._WARM_FAILED_AT
+    opened: list = []
+    real_open = memo.open if hasattr(memo, "open") else open
+    monkeypatch.setattr("builtins.open", lambda *a, **k: opened.append(a) or real_open(*a, **k))
+    assert memo._warm_ledger_read_cache(data_root) is False
+    assert opened == []  # cooling down: no second cold parse on the next lock entry
+    memo._WARM_FAILED_AT.clear()

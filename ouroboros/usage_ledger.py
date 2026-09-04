@@ -179,6 +179,18 @@ def _locked(root: pathlib.Path, *, timeout_sec: float = 45.0) -> Iterator[None]:
     # Waiting longer is always correct here; the transaction itself stays atomic.
     # Display-only readers (e.g. the heartbeat cost projection) pass a short
     # timeout: a contended lock must degrade the render, never stall the caller.
+    #
+    # A process's first read of a grown ledger is parsed and validated BEFORE
+    # taking the lock (unlocked snapshot of the row-aligned prefix); the in-lock
+    # read then only resumes from that snapshot. Otherwise every fresh worker
+    # of an admission wave holds the lock for a full cold parse (CyberGym r8,
+    # 2026-09-04: 48 workers x ~1 s serialized => reserves timed out at 45 s).
+    try:
+        from ouroboros._usage_rows_memo import _warm_ledger_read_cache
+
+        _warm_ledger_read_cache(root)
+    except Exception:  # noqa: BLE001 — warming is best-effort; the locked read is authoritative
+        log.debug("unlocked ledger warm-up failed for %s", root, exc_info=True)
     with _named_lock(root, "usage_attempts.lock", timeout_sec=timeout_sec, stale_sec=90.0):
         yield
 

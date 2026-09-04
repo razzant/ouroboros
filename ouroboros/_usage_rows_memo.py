@@ -22,7 +22,9 @@ from __future__ import annotations
 
 import collections
 import copy
+import json
 import logging
+import os
 import pathlib
 import threading
 import time
@@ -254,6 +256,10 @@ _LEDGER_READ_CACHE: "collections.OrderedDict[str, Tuple[LedgerResumeState, list]
 )
 _LEDGER_READ_CACHE_LOCK = threading.Lock()
 _LEDGER_READ_CACHE_MAX_ROOTS = 8
+# Unlocked warm-up attempts that found an unusable file (torn/corrupt) are not
+# repeated on every lock entry; the locked full read owns quarantine.
+_WARM_FAILED_AT: Dict[str, float] = {}
+_WARM_RETRY_SEC = 30.0
 
 
 def _ledger_cache_put(key: str, value: "Tuple[LedgerResumeState, list]") -> None:
@@ -262,6 +268,83 @@ def _ledger_cache_put(key: str, value: "Tuple[LedgerResumeState, list]") -> None
         _LEDGER_READ_CACHE.move_to_end(key)
         while len(_LEDGER_READ_CACHE) > _LEDGER_READ_CACHE_MAX_ROOTS:
             _LEDGER_READ_CACHE.popitem(last=False)
+
+
+def _warm_ledger_read_cache(root: pathlib.Path) -> bool:
+    """Seed this process's ledger read cache WITHOUT the monetary lock.
+
+    A process's first in-lock read parses and validates the whole ledger under
+    the lock (0.7-1 s at 45K rows, linear in size). When a deadline wave frees
+    ~48 lanes at once, 48 fresh workers do that cold read back to back under
+    the same lock — ~50 s of serialized hold — and every reserve behind them
+    times out (CyberGym r8, 2026-09-04 08:27-08:31: 15 tasks died as
+    task_exception: UsageLockUnavailable within minutes of admission).
+
+    The ledger is append-only under the lock, so a validated snapshot of a
+    row-aligned prefix taken without the lock is exactly what the incremental
+    resume seam expects: the in-lock read then parses only the bytes appended
+    since. Anything doubtful (torn tail, parse or validation failure, a
+    concurrent rewrite) leaves the cache untouched and the locked full read —
+    which OWNS quarantine — runs as before. Returns True when a snapshot was
+    seeded. Never mutates the ledger.
+    """
+    ua = _ua()
+    key = str(pathlib.Path(root).resolve(strict=False))
+    now = time.monotonic()
+    with _LEDGER_READ_CACHE_LOCK:
+        if key in _LEDGER_READ_CACHE:
+            return False
+        failed_at = _WARM_FAILED_AT.get(key)
+        if failed_at is not None and now - failed_at < _WARM_RETRY_SEC:
+            return False
+    path = pathlib.Path(root) / ua.LEDGER_REL
+    try:
+        with open(path, "rb") as handle:
+            data = handle.read()
+            stat = os.fstat(handle.fileno())
+    except OSError:
+        return False
+    boundary = data.rfind(b"\n") + 1
+    if boundary <= 0:
+        return False
+
+    def _give_up() -> bool:
+        with _LEDGER_READ_CACHE_LOCK:
+            _WARM_FAILED_AT[key] = time.monotonic()
+        return False
+
+    records: list = []
+    for chunk in data[:boundary].splitlines():
+        raw = chunk.rstrip(b"\r")
+        if not raw:
+            continue
+        try:
+            row = json.loads(raw.decode("utf-8"))
+        except (UnicodeDecodeError, json.JSONDecodeError):
+            return _give_up()
+        if not isinstance(row, dict):
+            return _give_up()
+        records.append(row)
+    states: Dict[str, str] = {}
+    try:
+        ua._validate_records(records, states=states)
+    except ua.UsageLedgerCorrupt:
+        return _give_up()
+    # The mtime fingerprint only matters when the size is unchanged; if a writer
+    # appended between our read and the stat, the sizes differ and the in-lock
+    # tail read takes over from ``boundary`` regardless.
+    mtime_ns = stat.st_mtime_ns if boundary == stat.st_size else -1
+    resume = ua.LedgerResumeState(
+        stat.st_ino, stat.st_dev, boundary, mtime_ns, len(records), states,
+    )
+    with _LEDGER_READ_CACHE_LOCK:
+        if key in _LEDGER_READ_CACHE:
+            return False
+        _LEDGER_READ_CACHE[key] = (resume, records)
+        _LEDGER_READ_CACHE.move_to_end(key)
+        while len(_LEDGER_READ_CACHE) > _LEDGER_READ_CACHE_MAX_ROOTS:
+            _LEDGER_READ_CACHE.popitem(last=False)
+    return True
 
 
 def _cached_attempt_states(root: pathlib.Path, row_count: int) -> Optional[Dict[str, str]]:
