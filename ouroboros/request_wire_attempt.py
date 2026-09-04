@@ -32,13 +32,23 @@ def validate_normalized_wire_success(
 def validate_physical_wire_attempt(
     candidate: "WireCandidateManifest",
     capture: "PhysicalAttemptCapture",
+    *,
+    allow_unresolved_accounting: bool = False,
 ) -> None:
-    """Require the settled accounting attempt for this exact physical candidate."""
+    """Require the settled accounting attempt for this exact physical candidate.
+
+    ``allow_unresolved_accounting`` also accepts a capture whose response was
+    received but whose post-response settle failed (state ``unresolved``, money
+    bound at the reservation): the candidate WAS sent and answered, so what was
+    applied on the wire is a fact regardless of the ledger's availability.
+    Disclosure uses this; compatibility-profile learning keeps requiring settled.
+    """
     from ouroboros.usage_accounting import PhysicalAttemptCapture
 
     if not isinstance(capture, PhysicalAttemptCapture):
         raise ValueError("wire evidence requires a physical-attempt capture")
-    if capture.state != "settled" or not capture.attempt_id:
+    accepted_states = {"settled", "unresolved"} if allow_unresolved_accounting else {"settled"}
+    if capture.state not in accepted_states or not capture.attempt_id:
         raise ValueError("wire evidence requires a settled physical attempt")
     if capture.candidate_measurement_kind != "canonical_json_v1":
         raise ValueError("wire evidence requires an inspectable canonical candidate")
@@ -79,7 +89,12 @@ class WireUsageDisclosure:
         candidate: "WireCandidateManifest",
         physical_attempt: "PhysicalAttemptCapture",
     ) -> "WireUsageDisclosure":
-        validate_physical_wire_attempt(candidate, physical_attempt)
+        # A response whose settle failed (UsageLockUnavailable under a 64-lane
+        # convoy, CyberGym r8 2026-09-04) is still a served call: without the
+        # disclosure it carried no applied_effort and the benchmark executor
+        # refused the WHOLE task ("gateway telemetry omitted effort for a served
+        # call") — 6 tasks, 40-100 rounds of finished work each.
+        validate_physical_wire_attempt(candidate, physical_attempt, allow_unresolved_accounting=True)
         return cls(
             requested_effort=candidate.requested_effort,
             applied_effort=candidate.candidate_spec.effort,

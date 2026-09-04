@@ -922,3 +922,43 @@ def test_store_cross_process_writers_do_not_lose_updates(tmp_path):
     for index in range(4):
         profile = _profile(target=_target(model=f"model-{index}"))
         assert wire._read_wire_actions_at(tmp_path, profile)[0]["kind"] == "drop_field"
+
+
+def test_disclosure_survives_a_failed_post_response_settle_but_learning_does_not():
+    """CyberGym r8 (2026-09-04): a response whose ledger settle failed under a
+    lock convoy was captured ``unresolved``; the disclosure then raised, the
+    served call carried no ``applied_effort``, and the benchmark executor
+    refused the whole task. The wire facts do not depend on the ledger."""
+    candidate = _candidate()
+    unresolved = _capture(candidate, state="unresolved")
+
+    disclosure = WireUsageDisclosure.from_candidate(candidate, unresolved)
+    assert disclosure.applied_effort == "high"
+    assert disclosure.attempt_id == unresolved.attempt_id
+    assert disclosure.candidate_sha256 == candidate.candidate_sha256
+
+    # A send that never produced a response still cannot be disclosed.
+    for state in ("reserved", "dispatched", "released"):
+        with pytest.raises(ValueError, match="settled physical attempt"):
+            WireUsageDisclosure.from_candidate(candidate, _capture(candidate, state=state))
+
+    # Compatibility-profile learning keeps requiring settled accounting.
+    observation = observe_wire_semantics(
+        candidate=candidate,
+        normalized_response={
+            "role": "assistant",
+            "content": "",
+            "tool_calls": [{
+                "id": "call-1",
+                "type": "function",
+                "function": {"name": "probe", "arguments": "{}"},
+            }],
+        },
+        normalized_usage={},
+    )
+    with pytest.raises(ValueError, match="settled physical attempt"):
+        bind_wire_compatibility_receipt(
+            candidate=candidate,
+            physical_attempt=unresolved,
+            semantic_observation=observation,
+        )
