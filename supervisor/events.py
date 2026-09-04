@@ -1892,6 +1892,25 @@ def _resolve_lifecycle_fault(
             return
     except Exception:
         log.debug("lifecycle-fault cancel-pending check failed for %s", task_id, exc_info=True)
+    try:
+        from supervisor.task_reaper import reaper_owns_task_row
+
+        # The reaper popped RUNNING before its kill confirmed; the worker's own
+        # task_done landed in that window over a root row still `scheduled`
+        # (its completed result sits on the child drive, copied back only from
+        # a RUNNING row). The reaper's post-kill re-check mirrors and honors
+        # that self-finalized result — terminalizing here as failed clobbered
+        # it (CyberGym r8, 2026-09-04: 4 completed tasks published as
+        # task_done_lifecycle_fault at the 2 h wall). The window runs until the
+        # reaper has published the terminal row, not just until the kill lands.
+        if reaper_owns_task_row(task_id):
+            log.info(
+                "task_done lifecycle fault for %s left to the in-flight reaper (post-kill re-check owns the row)",
+                task_id,
+            )
+            return
+    except Exception:
+        log.debug("lifecycle-fault reaping check failed for %s", task_id, exc_info=True)
     detail = detail or (
         f"Worker published a non-settled task_done ({evt_status!r}) and no cancellation "
         "owns this task; the supervisor terminalized it so the slot is not wedged."

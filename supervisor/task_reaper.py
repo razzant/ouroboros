@@ -53,6 +53,38 @@ def _forget_task_reaping(task_id: str) -> None:
         _REAPING_TASK_IDS.discard(str(task_id or "").strip())
 
 
+# Task ids whose worker is CONFIRMED dead but whose terminal publication (the
+# post-kill already-terminal re-check, cost reconstruction, retry/task_done) the
+# reaper has not finished yet. Distinct from ``_REAPING_TASK_IDS`` (which the
+# acceptance-fence dead-owner predicate reads and which must clear at confirmed
+# death): this set only says "the reaper owns this task's terminal row".
+_PUBLISHING_TASK_IDS: Set[str] = set()
+
+
+def _note_reaper_publishing(task_id: str) -> None:
+    tid = str(task_id or "").strip()
+    if tid:
+        with _REAPING_TASK_IDS_LOCK:
+            _PUBLISHING_TASK_IDS.add(tid)
+
+
+def _forget_reaper_publishing(task_id: str) -> None:
+    with _REAPING_TASK_IDS_LOCK:
+        _PUBLISHING_TASK_IDS.discard(str(task_id or "").strip())
+
+
+def reaper_owns_task_row(task_id: str) -> bool:
+    """True from the moment the reaper pops a task out of RUNNING until it has
+    published the task's terminal row (or held the slot wedged). In that window
+    the worker's own late ``task_done`` must not be terminalized by anyone else:
+    the reaper's post-kill re-check mirrors and honors a self-finalized result
+    (CyberGym r8, 2026-09-04: 4 completed tasks were published as
+    ``task_done_lifecycle_fault`` when the fault resolver won that race)."""
+    tid = str(task_id or "").strip()
+    with _REAPING_TASK_IDS_LOCK:
+        return tid in _REAPING_TASK_IDS or tid in _PUBLISHING_TASK_IDS
+
+
 def reaper_loop() -> None:
     while True:
         try:
@@ -67,6 +99,8 @@ def reaper_loop() -> None:
             # Keep both the registry id and worker.reaping until confirmed-dead
             # or startup orphan reconciliation proves terminal custody.
         finally:
+            # Terminal-row ownership ends with the job, published or not.
+            _forget_reaper_publishing(str((job or {}).get("task_id") or ""))
             try:
                 reap_queue.task_done()
             except Exception:
@@ -1215,7 +1249,11 @@ def _release_confirmed_dead_acceptance_owner(
     proc: Any,
     task_id: str,
 ) -> None:
-    """Forget reaping custody and release fences owned by a confirmed-dead task."""
+    """Forget reaping custody and release fences owned by a confirmed-dead task.
+
+    The reaper still owns the task's TERMINAL ROW until the job finishes (see
+    ``reaper_owns_task_row``); only the not-provably-dead custody ends here."""
+    _note_reaper_publishing(task_id)
     _forget_task_reaping(task_id)
     workers_mod._reconcile_confirmed_dead_review_owner(
         int(getattr(proc, "pid", 0) or 0)
