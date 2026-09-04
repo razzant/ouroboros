@@ -85,8 +85,10 @@ from supervisor.owner_stop import (
 
 from ouroboros.loop_tool_execution import (
     StatefulToolExecutor,
+    cap_tool_call_burst,
     handle_tool_calls,
     prune_reclaim_trace_refs,
+    tool_call_burst_notice,
     reclaim_negative_memo,
     reclaim_trace_refs,
 )
@@ -6212,6 +6214,14 @@ def run_llm_loop(
                 tools._ctx._skill_finalization_injected = False
             assistant_msg = dict(msg)
             assistant_msg.setdefault("role", "assistant")
+            tool_calls, burst_dropped = cap_tool_call_burst(assistant_msg, tool_calls)
+            if burst_dropped:
+                _emit_checkpoint_event(event_queue, task_id, drive_logs, {
+                    "checkpoint_kind": "tool_call_burst_truncated",
+                    "round": round_idx,
+                    "kept": len(tool_calls),
+                    "dropped": burst_dropped,
+                })
             messages.append(assistant_msg)
 
             _emit_round_progress(content, msg, emit_progress, llm_trace)
@@ -6219,6 +6229,10 @@ def run_llm_loop(
             handle_tool_calls(
                 tool_calls, tools, drive_logs, task_id, stateful_executor, messages,
                 llm_trace, emit_progress)
+            if burst_dropped:
+                _append_or_merge_user_message(
+                    messages, tool_call_burst_notice(len(tool_calls), burst_dropped),
+                )
 
             # Nanny-economics baseline (poltergeist phase B): mark the
             # round's metered progress; re-baseline when it touched a

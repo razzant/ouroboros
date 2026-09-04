@@ -122,6 +122,13 @@ SETTINGS_DEFAULTS = {**UPDATE_SETTINGS_DEFAULTS,
     "OUROBOROS_PRICING_TTL_SEC": 21600,
     # Main-loop round ceiling (was an inline literal in loop.py — hot-reloadable now).
     "OUROBOROS_MAX_ROUNDS": 200,
+    # Degenerate-response guard: a single assistant turn may execute at most this
+    # many tool calls. DeepSeek V4 Flash emitted 872- and 1113-call turns (CyberGym
+    # r8, 2026-09-04): executing them all inflated the transcript past the 1M
+    # window and killed both tasks as context_overflow. Surplus calls are dropped
+    # from the turn (no phantom tool results) and the model is told to re-issue in
+    # smaller batches. <=0 disables.
+    "OUROBOROS_MAX_TOOL_CALLS_PER_TURN": 32,
     # Same-model attempt budget for TRANSIENT provider failure classes
     # (finish_reason=null, 429/5xx/overloaded); floored at the caller's base
     # retry budget. Permanent classes fail fast regardless.

@@ -1186,6 +1186,62 @@ def tool_calls_can_run_parallel(tool_calls: List[Dict[str, Any]]) -> bool:
     )
 
 
+def max_tool_calls_per_turn() -> int:
+    """Effective per-turn tool-call ceiling (settings, then env; <=0 disables)."""
+    from ouroboros.config import SETTINGS_DEFAULTS
+
+    default = int(SETTINGS_DEFAULTS["OUROBOROS_MAX_TOOL_CALLS_PER_TURN"])
+    raw = os.environ.get("OUROBOROS_MAX_TOOL_CALLS_PER_TURN")
+    if raw is None:
+        try:
+            raw = load_settings().get("OUROBOROS_MAX_TOOL_CALLS_PER_TURN")
+        except Exception:
+            raw = None
+    try:
+        return int(raw) if raw not in (None, "") else default
+    except (TypeError, ValueError):
+        return default
+
+
+def cap_tool_call_burst(
+    assistant_msg: Dict[str, Any],
+    tool_calls: List[Dict[str, Any]],
+    *,
+    limit: Optional[int] = None,
+) -> tuple[List[Dict[str, Any]], int]:
+    """Keep only the first ``limit`` tool calls of a degenerate assistant turn.
+
+    Returns ``(kept_calls, dropped_count)``. The surplus is removed from the
+    assistant message itself (the transcript keeps the protocol invariant that
+    every ``tool_call_id`` has exactly one tool result) rather than answered
+    with hundreds of stub tool results, which would still inflate the context
+    by tens of thousands of tokens. Calls are kept in emission order.
+    """
+    cap = max_tool_calls_per_turn() if limit is None else int(limit)
+    if cap <= 0 or len(tool_calls) <= cap:
+        return tool_calls, 0
+    kept = list(tool_calls[:cap])
+    dropped = len(tool_calls) - cap
+    kept_ids = {str(tc.get("id") or "") for tc in kept}
+    raw = assistant_msg.get("tool_calls")
+    if isinstance(raw, list):
+        assistant_msg["tool_calls"] = [
+            tc for tc in raw
+            if isinstance(tc, dict) and str(tc.get("id") or "") in kept_ids
+        ]
+    return kept, dropped
+
+
+def tool_call_burst_notice(kept: int, dropped: int) -> str:
+    return (
+        f"[system] Your previous turn contained {kept + dropped} tool calls; only the "
+        f"first {kept} were executed and the remaining {dropped} were DISCARDED "
+        f"(not run). Issue at most {kept} tool calls per turn. If you were "
+        "repeating the same command, stop: check the results above before "
+        "continuing."
+    )
+
+
 def handle_tool_calls(
     tool_calls: List[Dict[str, Any]],
     tools: ToolRegistry,
