@@ -147,7 +147,12 @@ def _named_lock(
     )
 
     path = root / "state" / filename
-    fd = acquire_exclusive_file_lock(path, timeout_sec=timeout_sec, stale_sec=stale_sec)
+    # A worker killed mid-transaction (cancel/timeout custody) cannot release
+    # the lock; reclaim it as soon as its pid is provably gone instead of
+    # failing every ledger transaction behind it for the stale window.
+    fd = acquire_exclusive_file_lock(
+        path, timeout_sec=timeout_sec, stale_sec=stale_sec, reclaim_dead_owner=True,
+    )
     if fd is None:
         raise UsageLockUnavailable(f"usage accounting lock unavailable: {path}")
     try:

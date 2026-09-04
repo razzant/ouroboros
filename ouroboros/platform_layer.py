@@ -166,6 +166,42 @@ def scrub_repo_from_pythonpath(env: dict[str, str], repo_dir: "str | pathlib.Pat
     return out
 
 
+def _lock_owner_pid(lock_path: pathlib.Path) -> int:
+    """The ``pid=`` recorded in a lockfile's metadata, or 0 when absent/unreadable."""
+    try:
+        for field in lock_path.read_text(encoding="utf-8", errors="replace").split():
+            if field.startswith("pid="):
+                return int(field[4:])
+    except (OSError, ValueError):
+        pass
+    return 0
+
+
+def _reclaim_lock_of_dead_owner(lock_path: pathlib.Path) -> bool:
+    """Unlink ``lock_path`` if its recorded owner pid is provably gone.
+
+    The inode is re-checked right before the unlink so a lock that a new owner
+    re-created between our read and our unlink is left alone.
+    """
+    try:
+        before = lock_path.stat()
+    except OSError:
+        return False
+    owner_pid = _lock_owner_pid(lock_path)
+    if owner_pid <= 0 or owner_pid == os.getpid() or not pid_provably_gone(owner_pid):
+        return False
+    try:
+        if lock_path.stat().st_ino != before.st_ino:
+            return False
+        lock_path.unlink()
+    except OSError:
+        return False
+    log.warning(
+        "Reclaimed lock %s held by dead process pid=%d", lock_path, owner_pid,
+    )
+    return True
+
+
 def acquire_exclusive_file_lock(
     lock_path: pathlib.Path,
     *,
@@ -174,12 +210,23 @@ def acquire_exclusive_file_lock(
     metadata: str = "",
     poll_sec: float = 0.05,
     owner_aware_stale: bool = False,
+    reclaim_dead_owner: bool = False,
 ) -> Optional[int]:
     """Acquire a portable lockfile using O_EXCL and return its file descriptor.
 
     Authority streams opt into ``owner_aware_stale`` so elapsed time alone can
     never steal a lock from a live writer.  A dead/malformed legacy owner still
     recovers through the existing stale-age path.
+
+    ``reclaim_dead_owner`` reclaims a lock whose recorded ``pid=`` owner the OS
+    positively reports as gone, without waiting out ``stale_sec``.  A worker
+    killed by cancel/timeout custody while it held the usage ledger lock
+    (``proc.terminate()`` — no unwinding, no ``finally``) otherwise orphans the
+    lock for the full stale window: every 45 s ledger transaction behind it
+    fails and the task fails as ``infra_failed`` (Tier-2 load repro on
+    02b99c71: one cancel -> 90 s outage -> 17 accounting failures, 10 healthy
+    tasks written off).  Only a provably dead pid is reclaimed; a live or
+    unknown owner still goes through the stale-age path.
     """
     lock_path = pathlib.Path(lock_path)
     lock_path.parent.mkdir(parents=True, exist_ok=True)
@@ -195,19 +242,12 @@ def acquire_exclusive_file_lock(
             return fd
         except (FileExistsError, PermissionError):
             try:
+                if reclaim_dead_owner and _reclaim_lock_of_dead_owner(lock_path):
+                    continue
                 age = time.time() - lock_path.stat().st_mtime
                 if age > stale_sec:
                     if owner_aware_stale:
-                        owner_pid = 0
-                        try:
-                            for field in lock_path.read_text(
-                                encoding="utf-8", errors="replace",
-                            ).split():
-                                if field.startswith("pid="):
-                                    owner_pid = int(field[4:])
-                                    break
-                        except (OSError, ValueError):
-                            owner_pid = 0
+                        owner_pid = _lock_owner_pid(lock_path)
                         if owner_pid > 0 and pid_is_alive(owner_pid):
                             time.sleep(poll_sec)
                             continue
