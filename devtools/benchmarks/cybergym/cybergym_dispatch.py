@@ -302,9 +302,15 @@ def run_dispatched(
     with ThreadPoolExecutor(max_workers=max_workers, thread_name_prefix="cybergym") as pool:
         in_flight: dict[Future[dict[str, Any]], int] = {}
         while True:
+            # Admission is bounded by lanes actually running.  Rows waiting in
+            # ``completed`` for an earlier position to settle must not hold a
+            # lane: counting them made every window of ``max_workers`` tasks
+            # wait for its slowest member (a 2 h deadline task idled 63 lanes
+            # for up to 2 h — r7/r8 ran near single-digit effective
+            # concurrency for long stretches).
             while (
                 breaker.admission_allowed()
-                and len(in_flight) + len(completed) < max_workers
+                and len(in_flight) < max_workers
                 and submitted < len(tasks)
             ):
                 in_flight[pool.submit(run_one, tasks[submitted])] = submitted
@@ -320,13 +326,17 @@ def run_dispatched(
             )
             for future in done:
                 position = in_flight.pop(future)
-                completed[position] = future.result()
-            # Source order is the campaign treatment. Buffer out-of-order
-            # completions so a later healthy row cannot open an admission slot
-            # before an earlier transport failure latches the breaker.
+                row = future.result()
+                # The breaker sees rows as they settle, so a transport failure
+                # pauses admission immediately instead of waiting behind an
+                # earlier long-running position.
+                breaker.record(row)
+                completed[position] = row
+            # Source order is the campaign treatment: rows are recorded (and
+            # result_index appended) strictly in task order, buffering
+            # out-of-order completions until their predecessors settle.
             while next_record in completed:
                 row = completed.pop(next_record)
-                breaker.record(row)
                 if on_row is not None:
                     on_row(row)
                 dispatched[next_record] = row

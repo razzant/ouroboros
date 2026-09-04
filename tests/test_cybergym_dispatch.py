@@ -272,6 +272,96 @@ def test_healthy_gateway_parallel_campaign_is_unchanged(tmp_path):
     assert all(row["status"] == "completed" for row in rows)
 
 
+def test_buffered_completions_do_not_hold_admission_lanes(tmp_path):
+    """r8 (2026-09-04): 9 finished lanes sat idle behind one long position 0.
+
+    A slow early task must not idle the lanes whose rows are merely waiting
+    to be recorded behind it; recording (and result_index) still lands in
+    source order.
+    """
+
+    from devtools.benchmarks.cybergym.cybergym_dispatch import run_dispatched
+
+    first_may_finish = threading.Event()
+    first_finished = threading.Event()
+    head_still_running_at: list[str] = []
+    lock = threading.Lock()
+
+    def run_one(task):
+        if task.task_id == "arvo:1":
+            assert first_may_finish.wait(timeout=30)
+            first_finished.set()
+        else:
+            with lock:
+                if not first_finished.is_set():
+                    head_still_running_at.append(task.task_id)
+            if task.task_id == "arvo:4":
+                # Two refills of the second lane happened behind a running
+                # position 0; now let the head of the line finish.
+                first_may_finish.set()
+        return {"task_id": task.task_id, "status": "completed"}
+
+    recorded: list[str] = []
+    rows = run_dispatched(
+        [_Task(f"arvo:{index}") for index in range(1, 6)],
+        run_one,
+        max_workers=2,
+        on_row=lambda row: recorded.append(row["task_id"]),
+    )
+
+    # arvo:3 and arvo:4 were admitted into the lane arvo:2 freed while arvo:1
+    # (position 0) was still running.
+    assert head_still_running_at[:3] == ["arvo:2", "arvo:3", "arvo:4"]
+    assert recorded == [f"arvo:{index}" for index in range(1, 6)]
+    assert [row["task_id"] for row in rows] == recorded
+
+
+def test_breaker_sees_transport_failures_in_completion_order(tmp_path):
+    """A transport failure at a later position pauses admission at once, even
+    while an earlier position is still running."""
+
+    from devtools.benchmarks.cybergym.cybergym_dispatch import run_dispatched
+
+    first_may_finish = threading.Event()
+    started: list[str] = []
+    lock = threading.Lock()
+
+    def run_one(task):
+        with lock:
+            started.append(task.task_id)
+        if task.task_id == "arvo:1":
+            assert first_may_finish.wait(timeout=30)
+            return {"task_id": task.task_id, "status": "completed"}
+        if task.task_id == "arvo:2":
+            return _transport_row(task.task_id)
+        raise AssertionError(f"{task.task_id} must never be dispatched")
+
+    events: list[dict] = []
+
+    def probe() -> bool:
+        first_may_finish.set()
+        return False
+
+    # Real clock: the in-flight wait is bounded by the probe schedule.
+    with pytest.raises(GatewayCircuitOpen) as excinfo:
+        run_dispatched(
+            [_Task(f"arvo:{index}") for index in range(1, 5)],
+            run_one,
+            max_workers=2,
+            threshold=1,
+            gateway_probe=probe,
+            probe_backoff_sec=(0.2,),
+            pause_budget_sec=1.0,
+            on_event=events.append,
+        )
+
+    assert sorted(started) == ["arvo:1", "arvo:2"]
+    assert [row["task_id"] for row in excinfo.value.rows] == ["arvo:1", "arvo:2"]
+    assert excinfo.value.rows[0]["status"] == "completed"
+    assert excinfo.value.remaining_task_ids == ["arvo:3", "arvo:4"]
+    assert events[0]["event"] == "gateway_pause"
+
+
 class _Task:
     def __init__(self, task_id: str) -> None:
         self.task_id = task_id

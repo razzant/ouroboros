@@ -427,7 +427,11 @@ campaign finalizes as ``gateway_unreachable``.  Never-dispatched tasks receive
 no row; the manifest names them under
 ``extra.gateway_circuit.remaining_task_ids`` (with the pause history under
 ``extra.gateway_circuit.pause``) so the requested denominator stays
-recoverable without fabricating infra rows.
+recoverable without fabricating infra rows.  The breaker observes rows as
+they settle; admission is bounded by the lanes actually running.  Rows that
+finish out of source order are buffered until their predecessors settle so
+``result_index.jsonl`` stays in task order, but a buffered row does not hold a
+lane: one slow task never idles the rest of the pool.
 
 The per-task wall-clock deadline is anchored at the first gateway status that
 is not ``scheduled``: time a task spends admitted but queued behind busy lanes
