@@ -724,3 +724,64 @@ def test_memory_watchdog_disabled_when_limit_is_zero(tmp_path, monkeypatch):
         W.ensure_workers_healthy()
 
     runaway.proc.kill.assert_not_called()
+
+# ---------------------------------------------------------------------------
+# Test: supervisor event-bus resilience to a dead SyncManager (r11/r12/r13)
+# ---------------------------------------------------------------------------
+
+def test_revive_event_q_if_dead_rebuilds_a_dead_manager(monkeypatch, tmp_path):
+    """When the SyncManager process dies, revive_event_q_if_dead swaps in a
+    fresh bus instead of leaving the loop to crash on BrokenPipeError."""
+    import supervisor.workers as W
+
+    W.DRIVE_ROOT = tmp_path
+    (tmp_path / "logs").mkdir(parents=True, exist_ok=True)
+    monkeypatch.setattr(W, "_EVENT_Q_SHUTDOWN", False)
+
+    # A live bus: revive is a no-op.
+    live_q = object()
+    monkeypatch.setattr(W, "_EVENT_Q", live_q)
+    monkeypatch.setattr(W, "_EVENT_Q_MANAGER", object())
+    monkeypatch.setattr(W, "_event_q_manager_alive", lambda: True)
+    assert W.revive_event_q_if_dead() is None
+
+    # A dead manager: revive rebuilds the bus and records the event.
+    created = []
+
+    def _fake_new():
+        q = object()
+        created.append(q)
+        return q
+
+    monkeypatch.setattr(W, "_event_q_manager_alive", lambda: False)
+    monkeypatch.setattr(W, "_new_event_q_locked", _fake_new)
+    monkeypatch.setattr(W, "append_jsonl", lambda *a, **k: None)
+    revived = W.revive_event_q_if_dead()
+    assert revived is not None and created, "a dead manager must be rebuilt"
+    assert revived is created[0]
+
+
+def test_revive_event_q_if_dead_returns_none_when_shutting_down(monkeypatch, tmp_path):
+    import supervisor.workers as W
+
+    W.DRIVE_ROOT = tmp_path
+    (tmp_path / "logs").mkdir(parents=True, exist_ok=True)
+    monkeypatch.setattr(W, "_EVENT_Q_SHUTDOWN", True)
+    monkeypatch.setattr(W, "_event_q_manager_alive", lambda: False)
+    assert W.revive_event_q_if_dead() is None
+
+
+def test_event_q_manager_alive_false_when_process_dead(monkeypatch):
+    import supervisor.workers as W
+
+    class _DeadProc:
+        def is_alive(self):
+            return False
+
+    class _Mgr:
+        _process = _DeadProc()
+
+    monkeypatch.setattr(W, "_EVENT_Q_MANAGER", _Mgr())
+    assert W._event_q_manager_alive() is False
+    monkeypatch.setattr(W, "_EVENT_Q_MANAGER", None)
+    assert W._event_q_manager_alive() is False

@@ -113,6 +113,68 @@ def _serialized_worker_lifecycle(fn):
     return wrapped
 
 
+def _event_q_manager_alive() -> bool:
+    """True when the SyncManager backing the event bus is still reachable.
+
+    The manager is a separate process; when it dies (OOM, a stray kill, a
+    corrupted connection) every proxy call raises BrokenPipeError/EOFError and
+    the supervisor loop's `get_nowait()` crashes the whole campaign (CyberGym
+    r11/r12/r13, 2026-09-04/05: one dead manager = one dead 64-lane run)."""
+    manager = _EVENT_Q_MANAGER
+    if manager is None:
+        return False
+    proc = getattr(manager, "_process", None)
+    try:
+        if proc is not None and not proc.is_alive():
+            return False
+    except Exception:
+        return False
+    return True
+
+
+def _new_event_q_locked():
+    """Create a fresh manager-backed event bus. Caller holds ``_EVENT_Q_LOCK``."""
+    global _EVENT_Q, _EVENT_Q_MANAGER, _EVENT_Q_GENERATION
+    # A raw multiprocessing.Queue has an asynchronous feeder and its pipe can
+    # be corrupted when a worker is force-killed mid-frame. A manager-backed
+    # queue serializes synchronously in the producer and isolates each producer
+    # connection, so replacing/killing a worker generation cannot wedge the
+    # process-lifetime bus.
+    _EVENT_Q_MANAGER = _get_ctx().Manager()
+    _EVENT_Q = _EVENT_Q_MANAGER.Queue()
+    _EVENT_Q_GENERATION = f"{os.getpid()}:{uuid.uuid4().hex[:12]}"
+    try:
+        from ouroboros.process_custody import record_process
+
+        manager_proc = getattr(_EVENT_Q_MANAGER, "_process", None)
+        manager_pid = int(getattr(manager_proc, "pid", 0) or 0)
+        if manager_pid:
+            record_process(
+                DRIVE_ROOT,
+                pid=manager_pid,
+                cmd="multiprocessing SyncManager",
+                purpose="supervisor_event_queue_manager",
+                scope="session",
+                reap_process_group=False,
+            )
+    except Exception:
+        log.warning("Failed to custody-track event queue manager", exc_info=True)
+    try:
+        append_jsonl(
+            DRIVE_ROOT / "logs" / "supervisor.jsonl",
+            {
+                "ts": utc_now_iso(),
+                "type": "event_queue_generation_started",
+                "generation": _EVENT_Q_GENERATION,
+                "server_pid": os.getpid(),
+                "start_method": _WORKER_START_METHOD,
+            },
+        )
+    except Exception:
+        log.debug("Failed to record event queue generation", exc_info=True)
+    return _EVENT_Q
+
+
 def get_event_q():
     """Return the process-lifetime supervisor event bus, creating it lazily.
 
@@ -121,49 +183,45 @@ def get_event_q():
     Rotating the queue during a pool respawn strands those producers on an
     undrained queue, so only a new server process creates a new bus.
     """
-    global _EVENT_Q, _EVENT_Q_MANAGER, _EVENT_Q_GENERATION
     with _EVENT_Q_LOCK:
         if _EVENT_Q_SHUTDOWN:
             raise RuntimeError("supervisor event bus is shutting down")
         if _EVENT_Q is None:
-            # A raw multiprocessing.Queue has an asynchronous feeder and its
-            # pipe can be corrupted when a worker is force-killed mid-frame.
-            # A manager-backed queue serializes synchronously in the producer
-            # and isolates each producer connection, so replacing/killing a
-            # worker generation cannot wedge the process-lifetime bus.
-            _EVENT_Q_MANAGER = _get_ctx().Manager()
-            _EVENT_Q = _EVENT_Q_MANAGER.Queue()
-            _EVENT_Q_GENERATION = f"{os.getpid()}:{uuid.uuid4().hex[:12]}"
-            try:
-                from ouroboros.process_custody import record_process
-
-                manager_proc = getattr(_EVENT_Q_MANAGER, "_process", None)
-                manager_pid = int(getattr(manager_proc, "pid", 0) or 0)
-                if manager_pid:
-                    record_process(
-                        DRIVE_ROOT,
-                        pid=manager_pid,
-                        cmd="multiprocessing SyncManager",
-                        purpose="supervisor_event_queue_manager",
-                        scope="session",
-                        reap_process_group=False,
-                    )
-            except Exception:
-                log.warning("Failed to custody-track event queue manager", exc_info=True)
-            try:
-                append_jsonl(
-                    DRIVE_ROOT / "logs" / "supervisor.jsonl",
-                    {
-                        "ts": utc_now_iso(),
-                        "type": "event_queue_generation_started",
-                        "generation": _EVENT_Q_GENERATION,
-                        "server_pid": os.getpid(),
-                        "start_method": _WORKER_START_METHOD,
-                    },
-                )
-            except Exception:
-                log.debug("Failed to record event queue generation", exc_info=True)
+            _new_event_q_locked()
     return _EVENT_Q
+
+
+def revive_event_q_if_dead():
+    """Rebuild the event bus in place when its SyncManager died, else None.
+
+    The supervisor loop calls this when a proxy op raises BrokenPipeError /
+    EOFError / FileNotFoundError: instead of crashing the loop (and the whole
+    campaign with it), it swaps in a fresh manager-backed queue. Events that
+    were sitting on the dead bus are lost — they are re-derivable (task_done
+    is re-emitted by the worker's own terminal path; heartbeats/checkpoints are
+    periodic). Returns the new queue, or None when the bus is still healthy.
+    """
+    with _EVENT_Q_LOCK:
+        if _EVENT_Q_SHUTDOWN:
+            return None
+        if _event_q_manager_alive():
+            return None
+        log.error(
+            "Event-queue SyncManager died (generation %s) — rebuilding the bus in place",
+            _EVENT_Q_GENERATION,
+        )
+        try:
+            append_jsonl(
+                DRIVE_ROOT / "logs" / "supervisor.jsonl",
+                {
+                    "ts": utc_now_iso(),
+                    "type": "event_queue_manager_died_rebuilt",
+                    "dead_generation": _EVENT_Q_GENERATION,
+                },
+            )
+        except Exception:
+            log.debug("Failed to record event-queue rebuild", exc_info=True)
+        return _new_event_q_locked()
 
 
 def shutdown_event_q() -> None:

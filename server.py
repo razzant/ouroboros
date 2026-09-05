@@ -1035,6 +1035,21 @@ def _start_supervisor_liveness_watchdog(liveness: list, stop_event=None) -> None
                     loop_alerted = True
             else:
                 loop_alerted = False
+            # (1b) Event-bus SyncManager liveness — a dead manager crashes the
+            # loop's get_nowait() with BrokenPipeError and takes the whole
+            # campaign down (CyberGym r11/r12/r13). Log it loudly the moment it
+            # dies so the cause is captured before the loop hits the pipe.
+            try:
+                from supervisor.workers import _event_q_manager_alive, _EVENT_Q_MANAGER
+                if _EVENT_Q_MANAGER is not None and not _event_q_manager_alive():
+                    log.error(
+                        "Event-queue SyncManager is DEAD (generation %s) — the next "
+                        "event-queue read will fail; the supervisor loop rebuilds the "
+                        "bus in place on that read.",
+                        getattr(__import__("supervisor.workers", fromlist=["_EVENT_Q_GENERATION"]), "_EVENT_Q_GENERATION", "?"),
+                    )
+            except Exception:
+                log.debug("event-queue manager liveness probe failed", exc_info=True)
             # (2) In-process direct-chat turn wedge — a heartbeat-silent busy turn.
             try:
                 from supervisor.workers import chat_turn_liveness
@@ -2287,6 +2302,27 @@ def _run_supervisor(settings: dict) -> None:
                 try:
                     evt = event_q.get_nowait()
                 except _queue_mod.Empty:
+                    break
+                except (BrokenPipeError, EOFError, FileNotFoundError) as _bus_exc:
+                    # The SyncManager backing the event bus died (OOM / stray
+                    # kill / corrupted connection). Crashing the loop here took
+                    # down the whole 64-lane campaign (CyberGym r11/r12/r13,
+                    # 2026-09-04/05). Rebuild the bus in place and keep going:
+                    # queued events are re-derivable (task_done is re-emitted
+                    # by the worker's own terminal path; heartbeats/checkpoints
+                    # are periodic), so the loss is bounded to the dead bus's
+                    # in-flight backlog.
+                    from supervisor.workers import revive_event_q_if_dead
+
+                    revived = revive_event_q_if_dead()
+                    if revived is None:
+                        raise  # not a dead-manager shape — surface it
+                    log.error(
+                        "Supervisor event bus rebuilt after manager death (%s); "
+                        "dropped the dead bus's in-flight backlog",
+                        _bus_exc,
+                    )
+                    event_q = revived
                     break
                 if evt.get("type") == "restart_request":
                     _handle_restart_in_supervisor(evt, _event_ctx)
