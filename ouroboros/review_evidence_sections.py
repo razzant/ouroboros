@@ -661,7 +661,7 @@ def _accept_trajectory(tool_calls: list, drive_root: Any = None, task_id: str = 
 def _accept_artifact_manifest(drive_root: Any, task_id: str, protected: set) -> list:
     """Return a leak-safe manifest; protected, large and binary artifacts stay manifest-only."""
     from ouroboros.task_results import validate_task_id
-    from ouroboros.artifacts import _ARTIFACT_MANIFEST, is_task_bookkeeping_artifact
+    from ouroboros.artifacts import _ARTIFACT_MANIFEST, _SOURCE_HANDLES_SUBDIR, is_task_bookkeeping_artifact
     from ouroboros.utils import read_json_dict
 
     out: list = []
@@ -686,7 +686,7 @@ def _accept_artifact_manifest(drive_root: Any, task_id: str, protected: set) -> 
             except OSError:
                 continue
             rel = str(p.relative_to(base))
-            if rel in {_ARTIFACT_MANIFEST, _ARTIFACT_MANIFEST + ".lock"} or rel in review_sources:
+            if p.relative_to(base).parts[0] == _SOURCE_HANDLES_SUBDIR or rel in {_ARTIFACT_MANIFEST, _ARTIFACT_MANIFEST + ".lock"} or rel in review_sources:
                 continue  # host bookkeeping is available through its own review refs
             entry: Dict[str, Any] = {"name": rel, "size": size, "provenance": "artifact"}
             # Match protected paths by artifact path, prefix, or basename.

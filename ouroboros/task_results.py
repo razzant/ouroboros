@@ -749,7 +749,9 @@ def load_task_result(
     ``task_result_schema_refusal`` — is QUARANTINED by the fail-soft path
     (moved under ``task_results/quarantine/``, one batched durable event) and
     the read reports no result; the strict path raises WITHOUT moving, so an
-    authority probe never mutates storage.
+    authority probe never mutates storage. Historical review-source artifacts
+    are projected out of deliverables here without rewriting their saved bytes;
+    lifecycle, cost, review references and independent artifact states remain.
     """
     try:
         tid = validate_task_id(task_id)
@@ -773,17 +775,21 @@ def load_task_result(
         outcome = _quarantine_task_result(path, refusal)
         if outcome == "kept_admissible":
             data = read_json_dict(path)
-            return data if not task_result_schema_refusal(data) else None
-        if outcome == "moved":
-            _emit_quarantine_event(drive_root, [{"task_id": tid, "reason": refusal}])
-        return None
+            if task_result_schema_refusal(data):
+                return None
+        else:
+            if outcome == "moved":
+                _emit_quarantine_event(drive_root, [{"task_id": tid, "reason": refusal}])
+            return None
     if strict and (
         str(data.get("task_id") or "") != tid
         or not isinstance(data.get("status"), str)
         or not str(data.get("status") or "").strip()
     ):
         raise ValueError(f"task result authority is unreadable or invalid: {path}")
-    return data
+    from ouroboros.artifacts import project_deliverable_artifacts
+
+    return project_deliverable_artifacts(data)
 
 
 def list_task_results(

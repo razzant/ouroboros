@@ -1,4 +1,5 @@
 import { escapeHtmlAttr } from './utils.js';
+import { taskSourceDownloadUrl } from './api_client.js';
 import { harnessIdentityMarkup } from './harness_presentation.js';
 import { reconcileReviewMarkup } from './review_dom_patch.js';
 
@@ -767,15 +768,6 @@ export function formatReviewProjection(projection) {
     return lines.join('\n');
 }
 
-function appliedReviewUrl(panel, owner) {
-    const ref = panel.applied_source_ref;
-    if (panel.applied_source_status !== 'available' || ref?.root !== 'artifact_store'
-        || ref.kind !== 'task_acceptance_review' || !/^[0-9a-f]{64}$/.test(ref.sha256 || '')
-        || !Number.isSafeInteger(ref.bytes) || ref.bytes < 0
-        || !/^[A-Za-z0-9][A-Za-z0-9._-]*$/.test(ref.path || '')) return '';
-    return `/api/tasks/${encodeURIComponent(owner)}/artifacts/${encodeURIComponent(ref.path)}`;
-}
-
 export function taskAcceptanceGroupFromTaskDetail(detail, ownerTaskId = '') {
     const owner = text(ownerTaskId || detail?.task_id);
     const projection = detail?.review_projection;
@@ -802,7 +794,8 @@ export function taskAcceptanceGroupFromTaskDetail(detail, ownerTaskId = '') {
             initiatorTaskId: owner,
             executions: executionsFromReviewRecord(panel),
             execution: null,
-            detailRef: { surface: 'task_acceptance', url: appliedReviewUrl(panel, owner) },
+            detailRef: { surface: 'task_acceptance', url: panel.applied_source_status === 'available'
+                ? taskSourceDownloadUrl(owner, panel.applied_source_ref, 'task_acceptance_review') : '' },
             detailText: `${formatReviewProjection({ panels: [panel] })}\nCost unavailable`.trim(),
         };
     });

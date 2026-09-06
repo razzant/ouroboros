@@ -2185,16 +2185,17 @@ by "Provider Independence" above. Call-site imperatives:
   budgeting; recording a review must not change the facts it reviewed. Complete
   applied host records (including resolved criteria, decisions and supersession)
   are saved by `review_projection.publish_acceptance_checkpoint` through the
-  existing artifact store before compact publication. Artifact registration uses
-  a short locked manifest merge shared by all three writers; copying/hashing
-  finishes before the lock, which never acquires a task-result lock. The live
+  existing write-once source handles before compact publication. Ordinary artifact
+  registration keeps its short locked manifest merge; copying/hashing finishes
+  before that lock, which never acquires a task-result lock. The live
   publication changes only `review_projection`, preserving lifecycle and other
   writers' fields. Test delayed snapshots and child replicas through the same
   central merge, and verify that the full source downloads while the task is
-  still running. Registered review bookkeeping remains downloadable without entering
-  user deliverables or making an otherwise artifact-free task ready. Completion
-  observations use the same classifier only after canonical-first full-source
-  persistence (`task.budget_drive_root or drive_root`). Give native readers an
+  still running. Review/completion sources use `source_handles/context_checkpoints`,
+  outside deliverables and the acceptance artifact manifest. Canonical-first
+  persistence (`task.budget_drive_root or drive_root`) and the existing published-ref
+  closure preserve them before child cleanup. Legacy flat refs and their read-only
+  bookkeeping projection remain compatible; do not migrate live task data. Give native readers an
   executable get_task_result selector for that source task; reuse explicit character
   ranges and complete-source hashes so a split or later task never resolves the
   basename against its own artifact directory. Preserve that

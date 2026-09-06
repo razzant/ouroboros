@@ -5,6 +5,7 @@ import gzip
 import json
 import shutil
 from types import SimpleNamespace
+from pathlib import Path
 
 import pytest
 from starlette.applications import Starlette
@@ -74,7 +75,8 @@ def test_sealed_observations_survive_copyback_and_recovery_without_global_attrib
         app = Starlette(routes=[Route("/api/tasks/{task_id}/artifacts/{name}", api_task_artifact)])
         app.state.drive_root = canonical
         with TestClient(app) as client:
-            response = client.get(f"/api/tasks/observation/artifacts/{ref['path']}")
+            response = client.get(f"/api/tasks/observation/artifacts/{Path(ref['path']).name}",
+                                  params={"source": ref["path"]})
             assert response.status_code == 200 and response.content == raw
     download()  # canonical custody exists before any child artifact copy-back
     if source_root != canonical:
@@ -108,7 +110,7 @@ def test_full_source_failure_is_disclosed_without_inventing_a_ref(tmp_path, monk
     monkeypatch.setattr("ouroboros.skill_readiness.acceptance_skill_lifecycle", lambda *_a, **_k: [])
     def fail(*args, **kwargs):
         raise failure("source unavailable")
-    monkeypatch.setattr("ouroboros.artifacts.store_task_artifact_bytes", fail)
+    monkeypatch.setattr("ouroboros.artifacts.store_actor_source_bytes", fail)
     trace = {"tool_calls": [{"tool": "send_photo", "status": "error", "is_error": True,
                              "result_partial": True, "result": "submission incomplete"}]}
     result = build_completion_observations(tmp_path, {"id": "partial"}, trace)

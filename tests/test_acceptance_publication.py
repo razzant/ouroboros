@@ -7,6 +7,7 @@ import queue
 import threading
 from concurrent.futures import ThreadPoolExecutor
 from types import SimpleNamespace
+from pathlib import Path
 
 import pytest
 
@@ -42,7 +43,7 @@ def _source(root, panel):
     path = artifacts.task_artifact_dir_path(root, "applied") / ref["path"]
     raw = path.read_bytes()
     assert hashlib.sha256(raw).hexdigest() == ref["sha256"]
-    assert len(raw) == ref["bytes"]
+    assert len(raw) == ref["size"]
     return json.loads(raw)
 
 
@@ -68,7 +69,9 @@ def test_full_applied_source_downloads_while_task_is_running(tmp_path):
     app = Starlette(routes=[Route("/api/tasks/{task_id}/artifacts/{name}", api_task_artifact)])
     app.state.drive_root = tmp_path
     with TestClient(app) as client:
-        response = client.get(f"/api/tasks/applied/artifacts/{panel['applied_source_ref']['path']}")
+        ref = panel["applied_source_ref"]
+        response = client.get(f"/api/tasks/applied/artifacts/{Path(ref['path']).name}",
+                              params={"source": ref["path"]})
         assert response.status_code == 200
         assert response.json() == full
         assert client.get("/api/tasks/applied/artifacts/missing.json").status_code == 404
@@ -84,7 +87,7 @@ def test_delayed_publication_cannot_replace_supersession_or_terminal_fields(tmp_
     ctx = _context(tmp_path)
     trace = {"review_runs": [_run()]}
     reached, release = threading.Event(), threading.Event()
-    actual_store = artifacts.store_task_artifact_bytes
+    actual_store = artifacts.store_actor_source_bytes
     first_thread = []
 
     def delayed_store(*args, **kwargs):
@@ -94,7 +97,7 @@ def test_delayed_publication_cannot_replace_supersession_or_terminal_fields(tmp_
             assert release.wait(10)
         return actual_store(*args, **kwargs)
 
-    monkeypatch.setattr(artifacts, "store_task_artifact_bytes", delayed_store)
+    monkeypatch.setattr(artifacts, "store_actor_source_bytes", delayed_store)
     with ThreadPoolExecutor(max_workers=1) as executor:
         older = executor.submit(review_projection.publish_acceptance_checkpoint, ctx, trace)
         try:
@@ -162,7 +165,7 @@ def test_publishing_legacy_run_does_not_invent_its_task_attempt(tmp_path):
 
 def test_source_failure_discloses_unavailable_without_changing_verdict(tmp_path, monkeypatch):
     ctx, trace = _context(tmp_path), {"review_runs": [_run()]}
-    monkeypatch.setattr(artifacts, "store_task_artifact_bytes", lambda *a, **k: (_ for _ in ()).throw(OSError("disk unavailable")))
+    monkeypatch.setattr(artifacts, "store_actor_source_bytes", lambda *a, **k: (_ for _ in ()).throw(OSError("disk unavailable")))
     review_projection.publish_acceptance_checkpoint(ctx, trace)
     panel = load_task_result(tmp_path, "applied")["review_projection"]["panels"][0]
     assert panel["aggregate_signal"] == "PASS"

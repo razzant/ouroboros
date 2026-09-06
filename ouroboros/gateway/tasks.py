@@ -13,7 +13,7 @@ from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional
 
 from starlette.requests import Request
-from starlette.responses import FileResponse, JSONResponse
+from starlette.responses import FileResponse, JSONResponse, Response
 
 from ouroboros.gateway._helpers import coerce_int, json_error, json_exception, request_drive_root, request_json_or, request_repo_dir, stage_initial_task_attachments
 from ouroboros.gateway.contracts import TaskCreateRequest
@@ -54,7 +54,7 @@ from ouroboros.contracts.task_contract import (
     normalize_resource_policy,
 )
 from ouroboros.outcomes import public_task_result
-from ouroboros.artifacts import resolve_chat_media_path
+from ouroboros import artifacts as artifact_store
 from ouroboros.task_result_schema import (
     emit_quarantine_event,
     quarantine_task_result,
@@ -990,30 +990,32 @@ async def api_task_artifact(request: Request):
     if not name or "/" in name or "\\" in name or name in {".", ".."} or ".." in pathlib.PurePosixPath(name).parts:
         return json_error("artifact name must be a simple filename", 400)
     drive_root = request_drive_root(request)
-    chat_media = resolve_chat_media_path(drive_root, task_id, name)
-    if chat_media is not None:
-        return FileResponse(chat_media)
-    result = load_effective_task_result(drive_root, task_id)
-    if not result:
-        return json_error("task not found", 404)
-    artifact = _artifact_by_name(result, name)
-    if artifact is None:
-        from ouroboros.artifacts import collect_task_artifact_records, is_task_bookkeeping_artifact
-
-        records = collect_task_artifact_records(drive_root, task_id, include_bookkeeping=True)
-        artifact = _artifact_by_name({"artifacts": [row for row in records if is_task_bookkeeping_artifact(row)]}, name)
-    if artifact is None:
-        return json_error("artifact not found", 404, task_id=task_id, artifact=name)
-    base = task_artifacts_dir(drive_root, task_id).resolve(strict=False)
-    path = pathlib.Path(str(artifact.get("path") or "")).resolve(strict=False)
-    if path.name != name:
-        return json_error("artifact metadata path does not match requested name", 500)
-    try:
-        path.relative_to(base)
-    except ValueError:
-        return json_error("artifact path is outside task artifact directory", 500)
-    if not path.is_file():
-        return json_error("artifact file is missing", 404, task_id=task_id, artifact=name)
+    path = artifact_store.resolve_chat_media_path(drive_root, task_id, name)
+    if path is None:
+        result = load_effective_task_result(drive_root, task_id)
+        if not result:
+            return json_error("task not found", 404)
+        if source := request.query_params.get("source"):
+            try:
+                return Response(artifact_store.read_task_result_source_bytes(drive_root, result, name, source), media_type="application/json")
+            except (OSError, ValueError, RuntimeError):
+                return json_error("task source is unavailable or does not match its recorded identity", 404)
+        artifact = _artifact_by_name(result, name)
+        if artifact is None:
+            records = artifact_store.collect_task_artifact_records(drive_root, task_id, include_bookkeeping=True)
+            artifact = _artifact_by_name({"artifacts": [row for row in records if artifact_store.is_task_bookkeeping_artifact(row)]}, name)
+        if artifact is None:
+            return json_error("artifact not found", 404, task_id=task_id, artifact=name)
+        base = task_artifacts_dir(drive_root, task_id).resolve(strict=False)
+        path = pathlib.Path(str(artifact.get("path") or "")).resolve(strict=False)
+        if path.name != name:
+            return json_error("artifact metadata path does not match requested name", 500)
+        try:
+            path.relative_to(base)
+        except ValueError:
+            return json_error("artifact path is outside task artifact directory", 500)
+        if not path.is_file():
+            return json_error("artifact file is missing", 404, task_id=task_id, artifact=name)
     return FileResponse(path)
 
 

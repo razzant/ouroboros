@@ -100,3 +100,20 @@ test('acceptance invalidation joins a current read and refreshes to the newly ap
     assert.equal(release.length, 2);
     assert.equal(reviewReferenceFromRow({ type: 'review_reference', surface: 'commit', task_id: 'root' }), null);
 });
+
+test('source handles use the bound-source selector on the existing download route', () => {
+    const path = `source_handles/context_checkpoints/acceptance-${hash}.json`;
+    const ref = { kind: 'task_source', root: 'artifact_store', path, size: 75000, sha256: hash };
+    const projected = group(panel({ applied_source_ref: ref }));
+    assert.equal(projected.attempts[0].detailRef.url,
+        `/api/tasks/root/artifacts/acceptance-${hash}.json?source=${encodeURIComponent(path)}`);
+    assert.match(renderReviewsSection([projected]), /Download full applied review/);
+    for (const bad of [
+        { ...ref, path: 'source_handles/context_checkpoints/../private.json' },
+        { ...ref, path: 'source_handles/other/private.json' },
+        { ...ref, size: '75000' }, { ...ref, sha256: '' },
+        { ...ref, root: 'runtime_data' },
+    ]) {
+        assert.equal(group(panel({ applied_source_ref: bad })).attempts[0].detailRef.url, '');
+    }
+});

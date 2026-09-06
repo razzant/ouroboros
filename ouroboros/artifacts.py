@@ -627,12 +627,17 @@ def read_actor_source_bytes(
 ) -> bytes:
     """Resolve and verify one task-local actor source ref or raise explicitly."""
 
-    if not isinstance(ref, dict) or ref.get("kind") != "task_source":
+    legacy = isinstance(ref, dict) and ref.get("kind") in {"task_acceptance_review", "task_completion_observations"}
+    if not isinstance(ref, dict) or (ref.get("kind") != "task_source" and not legacy):
         raise ValueError("actor source ref has an unexpected kind")
     if ref.get("root") != "artifact_store":
         raise ValueError("actor source ref has an unexpected root")
     rel = pathlib.PurePosixPath(str(ref.get("path") or ""))
-    if not rel.parts or rel.parts[0] != _SOURCE_HANDLES_SUBDIR or rel.is_absolute():
+    valid_path = (
+        len(rel.parts) == 1 and rel.name not in {".", ".."} and "\\" not in str(ref.get("path") or "")
+        if legacy else bool(rel.parts and rel.parts[0] == _SOURCE_HANDLES_SUBDIR)
+    )
+    if not valid_path or rel.is_absolute():
         raise ValueError("actor source ref has an invalid path")
     base = task_artifact_dir_path(drive_root, task_id, create=False).resolve(strict=False)
     target = base.joinpath(*rel.parts)
@@ -647,7 +652,7 @@ def read_actor_source_bytes(
         raise ValueError("actor source ref escapes its task artifact root") from exc
     raw = target.read_bytes()
     try:
-        expected_size = int(ref["size"])
+        expected_size = int(ref["bytes" if legacy else "size"])
     except (KeyError, TypeError, ValueError) as exc:
         raise ValueError("actor source ref has no valid size") from exc
     if len(raw) != expected_size:
@@ -655,6 +660,22 @@ def read_actor_source_bytes(
     if sha256(raw).hexdigest() != str(ref.get("sha256") or ""):
         raise ValueError("actor source ref failed sha256 verification")
     return raw
+
+
+def read_task_result_source_bytes(
+    drive_root: Any, result: Dict[str, Any], name: str, source_path: str,
+) -> bytes:
+    """Read an exact published source ref, never a caller-selected filesystem path."""
+    review = result.get("review_projection")
+    panels = review.get("panels") if isinstance(review, dict) else []
+    refs = [row.get("applied_source_ref") for row in (panels if isinstance(panels, list) else []) if isinstance(row, dict)]
+    observations = result.get("completion_observations")
+    if isinstance(observations, dict):
+        refs.append(observations.get("source_ref"))
+    for ref in refs:
+        if isinstance(ref, dict) and ref.get("path") == source_path and pathlib.PurePosixPath(source_path).name == name:
+            return read_actor_source_bytes(drive_root, validate_task_id(result.get("task_id")), ref)
+    raise ValueError("the requested source is not published by this task result")
 
 
 def persist_exact_text_source(

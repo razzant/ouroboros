@@ -89,3 +89,13 @@ def test_unavoidable_overflow_reports_the_complete_final_packet_size():
     assert overflow["budget_chars"] == 1000
     assert overflow["packet_chars"] == len(json.dumps(packet, ensure_ascii=False))
     assert overflow["packet_chars"] > 1000
+
+
+def test_source_handles_do_not_change_task_work_identity(review_context):
+    from ouroboros.artifacts import store_actor_source_bytes
+    before = review_evidence.task_acceptance_evidence_revision(loop._build_host_acceptance_evidence(review_context))
+    for category in ["context_checkpoints", "tool_results"]:
+        store_actor_source_bytes(review_context.drive_root, "identity", category=category,
+                                 source_id="recorded-review", data=b"complete review source", extension="txt")
+    after = review_evidence.task_acceptance_evidence_revision(loop._build_host_acceptance_evidence(review_context))
+    assert after == before

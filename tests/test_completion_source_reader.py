@@ -85,7 +85,7 @@ def test_completion_reader_does_not_claim_a_different_or_missing_source(tmp_path
     if fault == 'digest':
         ref['sha256'] = '0' * 64
     elif fault == 'bytes':
-        ref['bytes'] += 1
+        ref['size'] += 1
     elif fault == 'traversal':
         ref['path'] = '../outside.json'
     else:
@@ -97,3 +97,15 @@ def test_completion_reader_does_not_claim_a_different_or_missing_source(tmp_path
     }))['completion_source']
     assert result['status'] == 'unavailable' and 'text' not in result
     assert result['reason'] in {'source_unavailable', 'source_identity_mismatch', 'source_ref_invalid'}
+
+
+def test_completion_source_follows_the_effective_retry_identity(tmp_path, monkeypatch):
+    reg, ref, path, canonical, _execution, _row = source_reader(tmp_path, monkeypatch, 'split_readonly')
+    write_task_result(canonical, 'original-task', 'interrupted', superseded_by='source-task')
+    text = path.read_text(encoding='utf-8')
+    result = json.loads(reg.execute('get_task_result', {
+        'task_id': 'original-task', 'include_completion_source': True,
+        'source_start_char': 0, 'source_end_char': len(text),
+    }))['completion_source']
+    assert result['complete_sha256'] == ref['sha256']
+    assert result['text'] == text

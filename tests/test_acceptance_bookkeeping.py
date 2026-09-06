@@ -4,6 +4,7 @@ import copy
 import hashlib
 import shutil
 from types import SimpleNamespace
+from pathlib import Path
 
 import pytest
 from starlette.applications import Starlette
@@ -53,10 +54,11 @@ def _download(root, stored):
     app = Starlette(routes=[Route("/api/tasks/{task_id}/artifacts/{name}", api_task_artifact)])
     app.state.drive_root = root
     with TestClient(app) as client:
-        response = client.get(f"/api/tasks/applied/artifacts/{ref['path']}")
+        response = client.get(f"/api/tasks/applied/artifacts/{Path(ref['path']).name}",
+                              params={"source": ref["path"]} if ref["kind"] == "task_source" else {})
         assert response.status_code == 200
         assert hashlib.sha256(response.content).hexdigest() == ref["sha256"]
-        assert len(response.content) == ref["bytes"]
+        assert len(response.content) == ref.get("size", ref.get("bytes"))
         assert len(response.json()["actors"][0]["parsed"]["findings"]) == 80
         for name in (artifacts._ARTIFACT_MANIFEST, artifacts._ARTIFACT_MANIFEST + ".lock", "verification_receipts.jsonl"):
             assert client.get(f"/api/tasks/applied/artifacts/{name}").status_code == 404

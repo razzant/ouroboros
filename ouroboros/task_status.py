@@ -736,7 +736,7 @@ def effective_task_result(
         if merged_is_workspace and child_status in FINAL_STATUSES and (parent_status not in {STATUS_FAILED, STATUS_CANCELLED, STATUS_REJECTED_DUPLICATE} or copied_child_terminal):
             merged = _normalize_workspace_artifact_status(merged)
 
-    merged = _normalize_workspace_artifact_status(project_deliverable_artifacts(merged))
+    merged = _normalize_workspace_artifact_status(merged)
 
     parent_status = str(merged.get("status") or "").lower()
     if parent_status not in FINAL_STATUSES:

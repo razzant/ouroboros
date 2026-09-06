@@ -331,7 +331,7 @@ def publish_acceptance_checkpoint(
     """
     from pathlib import Path
 
-    from ouroboros.artifacts import store_task_artifact_bytes
+    from ouroboros.artifacts import store_actor_source_bytes
     from ouroboros.task_results import write_task_result
     from ouroboros.tools.plan_review_references import _emit_review_reference
 
@@ -359,9 +359,9 @@ def publish_acceptance_checkpoint(
         run.pop("applied_source_ref", None)
         run["applied_source_status"] = "unavailable"
         try:
-            run["applied_source_ref"] = store_task_artifact_bytes(
-                Path(root), task_id, f"acceptance-{hashlib.sha256(raw).hexdigest()}.json",
-                raw, kind="task_acceptance_review",
+            run["applied_source_ref"] = store_actor_source_bytes(
+                Path(root), task_id, category="context_checkpoints",
+                source_id="acceptance", data=raw, extension="json",
             )
             run["applied_source_status"] = "available"
         except (OSError, ValueError, TimeoutError):
