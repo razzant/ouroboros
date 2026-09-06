@@ -81,15 +81,23 @@ rules have no automated surface — review-only.
 - A process cwd determines relative paths, not the root task's entire write
   authority. Reuse the resource binding for other authorized destinations;
   preserve child write confinement and actual runtime/credential boundaries.
-  Local guard inspection excludes SSH remote payloads while retaining local
-  options and redirections; the executed argv remains literal and unchanged.
+  Only the filesystem writer lane excludes SSH remote payloads, retaining local
+  options and redirections. Other guards inspect the original command, as does
+  execution. Child, external-task and Light read checks share the physical paths
+  from `shell_guards.shell_inspection_paths`, including each row's effective cwd.
   Remote commands can reach local files through configured SSH trust (including
   loopback); this local inspection is not a remote-effect sandbox.
+  Positional GitHub policy inspects direct `gh` and shell-wrapper segments;
+  remote `ssh ... gh auth` is an inherited residual, not classified as local auth.
 - Do not infer credential authority from ordinary source/config directory
   names. Restricted repository reads/searches use the existing byte masker with
   `mask_opaque=False`: preserve ordinary long source while masking known token
   formats and PEM keys. Keep owner-home opaque masking enabled. A runtime data
-  directory inside a project retains its actual secret/control path rules. The
+  directory inside a project retains its actual secret/control path rules,
+  including a forked child's canonical parent (`core_secret_paths.restricted_data_roots`).
+  Task/artifact source names and public PEM certificates carry no credential
+  authority. Restricted file readers mask complete private-key blocks before
+  selecting a window, preserving character positions and line breaks. The
   owner credential fence covers the enumerated locations in
   `credential_shapes.owner_credential_locations`, credential leaves and VCS
   control directories. The exact SSH config exception does not permit key writes

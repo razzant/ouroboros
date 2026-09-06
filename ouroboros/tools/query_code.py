@@ -96,7 +96,7 @@ def _visible_file(
     try:
         from ouroboros.tools.core import is_restricted_subagent_profile as _is_local_readonly_subagent, _is_subagent_secret_repo_target
 
-        if _is_local_readonly_subagent(ctx) and _is_subagent_secret_repo_target(target, repo_root, data_root=ctx.drive_root):
+        if _is_local_readonly_subagent(ctx) and _is_subagent_secret_repo_target(target, repo_root, ctx=ctx):
             return False
     except Exception:
         pass
@@ -408,7 +408,7 @@ def _query_code(
                     persist = False
                     exclude_paths = [
                         p for p in repo_root.rglob("*")
-                        if _is_subagent_secret_repo_target(p, repo_root, data_root=ctx.drive_root)
+                        if _is_subagent_secret_repo_target(p, repo_root, ctx=ctx)
                     ]
             except Exception:
                 pass

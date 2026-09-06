@@ -473,45 +473,12 @@ def _read_file_parity_block(ctx: Any, fp: "pathlib.Path") -> str:
         restricted = bool(is_restricted_subagent_profile(ctx))
     except Exception:
         restricted = False
-    # G5-3: anchor the per-path data guards on EVERY runtime-data root the
-    # admission (``_allowed_file_roots``) could have used, not on ctx.drive_root
-    # alone. ``_allowed_file_roots`` admits ``<canonical>/uploads`` and
-    # ``<canonical>/state/skills`` off ``OUROBOROS_DATA_DIR``, and canonical
-    # resources (installed skill payload state) resolve off ``budget_drive_root``
-    # via ``canonical_data_root``. A forked/empty subagent runs on an ISOLATED
-    # child drive, so its ctx.drive_root ≠ the canonical root; anchoring the
-    # guards on the child drive alone let a canonical-root path (owner skill
-    # state, per-project store) pass ROOT admission while ``relative_to`` failed
-    # and skipped the guards read_file enforces. Mirror the admission's anchor
-    # set so the guard cannot under-reach it. (De-duped; guard blocks under ANY
-    # anchor win — a legitimate uploads/job artifact still resolves clean.)
+    # Read admission and every restricted file/shell consumer share the same
+    # child/canonical/configured roots; a fork cannot hide parent owner state.
+    from ouroboros.tools.core_secret_paths import restricted_data_roots
+
     fp_resolved = _pl.Path(fp).resolve(strict=False)
-    data_roots: list["_pl.Path"] = []
-    _seen_roots: set[str] = set()
-
-    def _add_data_root(raw: Any) -> None:
-        text = str(raw or "").strip()
-        if not text:
-            return
-        try:
-            resolved_root = _pl.Path(text).expanduser().resolve(strict=False)
-        except Exception:
-            return
-        key = str(resolved_root)
-        if key not in _seen_roots:
-            _seen_roots.add(key)
-            data_roots.append(resolved_root)
-
-    _add_data_root(getattr(ctx, "drive_root", ""))
-    try:
-        from ouroboros.tool_access import canonical_data_root
-        _add_data_root(canonical_data_root(ctx))
-    except Exception:
-        pass
-    # Same OUROBOROS_DATA_DIR base ``_allowed_file_roots`` derives uploads /
-    # state-skills from, so a canonical admission root always has a matching guard
-    # anchor even when ctx carries no budget_drive_root.
-    _add_data_root(os.environ.get("OUROBOROS_DATA_DIR", "") or _pl.Path("~/Ouroboros/data").expanduser())
+    data_roots = restricted_data_roots(ctx)
 
     for data_root in data_roots:
         try:
@@ -557,7 +524,7 @@ def _read_file_parity_block(ctx: Any, fp: "pathlib.Path") -> str:
             except Exception:
                 pass
             for repo_root in repo_roots:
-                if _path_is_under(fp, repo_root) and _is_subagent_secret_repo_target(fp, repo_root):
+                if _path_is_under(fp, repo_root) and _is_subagent_secret_repo_target(fp, repo_root, ctx=ctx):
                     return "⚠️ PATH_BLOCKED: this subagent cannot access repo secret or control paths."
         except Exception:
             pass

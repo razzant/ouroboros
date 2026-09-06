@@ -994,79 +994,39 @@ def _external_shell_runtime_or_secret_block(
     work_dir: Optional[pathlib.Path] = None,
     binding: Any = None,
 ) -> ToolResult | None:
-    """External-workspace shell guard for READ and write commands alike: block any
-    command that targets the Ouroboros runtime (system repo / any data drive) or an
-    owner credential path. read_file/user_files already enforce this; raw shell
-    (cat, python -c open(...), etc.) would otherwise bypass it. Two layers, because
-    string matching alone is bypassable by relative paths and symlinks:
-      (1) embedded-string boundary match of ABSOLUTE protected roots (catches a path
-          literal inside e.g. python -c "open('/abs/data/settings.json')");
-      (2) path-token RESOLUTION — every path-like arg is expanduser'd, joined to the
-          command cwd when relative, and resolve()'d (canonicalizing symlinks + ..),
-          then containment-checked. This closes a relative path passed as its own
-          argv token (`cat ../../data/settings.json`) and a workspace-internal symlink
-          to the data drive (round-2 review).
-    Both layers are best-effort DEFENSE-IN-DEPTH, not the primary control: a relative
-    path hidden INSIDE an interpreter one-liner string (e.g. node -e
-    "readFileSync('../../data/settings.json')") is not a standalone token, so it is
-    not extracted here — and that residual is deliberately NOT chased with a regex
-    over code strings (an unwinnable arms race; BIBLE P5 / no-string-gate doctrine).
-    The PRIMARY control is the gated read_file/user_files path, which fully resolves
-    and containment-checks every read against the protected drives, plus the LLM
-    safety supervisor judging intent on each shell call."""
-    _BLOCK = ToolResult(
-        status="blocked",
-        code="WORKSPACE_BLOCKED",
-        text=(
-        "⚠️ WORKSPACE_SHELL_BLOCKED: shell command targets the Ouroboros runtime "
-        "(system repo / data drive) or an owner credential path. External-workspace "
-        "tasks may not read or write those; use the gated read_file tool for any "
-        "inspection you need. Run your command against the task's own surfaces "
-        "instead: the active workspace root (e.g. /app) or scratch such as /tmp."
-        ),
-    )
-    protected_texts, allowed_texts, protected_paths, allowed_paths = (
-        _external_runtime_protected_paths(self, binding)
-    )
-    # (1) embedded-string boundary match (absolute roots only — no substring secret
-    # markers, which would false-block the task's own project files / "os.environ").
-    for pt in protected_texts:
-        if _command_mentions_protected_root(cmd_path_lower, pt) and not any(
-            _command_mentions_protected_root(cmd_path_lower, t) for t in allowed_texts
-        ):
-            return _BLOCK
-    # (2) path-token resolution (relative -> cwd, ~ -> home, symlinks canonicalized).
-    # The cwd is resolved ONCE per safety check by the caller (D1); resolve here
-    # only when this guard is used standalone.
+    """Apply the external-task boundary to shared physical inspection targets.
+
+    File tools remain the primary resolved access path. Shell inspection is
+    best-effort over explicit operands/literals; it cannot prove arbitrary
+    computed paths. All shell lanes agree about cwd, wrappers and symlinks,
+    while external tasks retain their own allowed/protected resource roots.
+    """
+    from ouroboros.tools.shell_guards import shell_inspection_paths
+
+    _, allowed_texts, protected_paths, allowed_paths = _external_runtime_protected_paths(self, binding)
     if work_dir is None:
-        resolved_cwd = _resolved_shell_cwd(self, args, binding)
-        if isinstance(resolved_cwd, ToolResult):
-            return resolved_cwd
-        work_dir = pathlib.Path(resolved_cwd)
-    work_dir = pathlib.Path(work_dir)
-
-    def _within(child: pathlib.Path, parent: pathlib.Path) -> bool:
-        try:
-            child.relative_to(parent)
-            return True
-        except ValueError:
-            return False
-
-    for tok in _registry().shell_argv_with_path_tokens(raw_cmd):
-        tok_text = str(tok or "").strip()
-        if not tok_text or tok_text.startswith("-") or tok_text in {"|", "&&", "||", ";", ">", ">>", "<", "<<", "&"}:
+        work_dir = _resolved_shell_cwd(self, args, binding)
+        if isinstance(work_dir, ToolResult):
+            return work_dir
+    for target in shell_inspection_paths(
+        raw_cmd, work_dir=pathlib.Path(work_dir), drive_root=self._ctx.drive_root,
+    ):
+        if str(target).replace("\\", "/").lower() in allowed_texts:
             continue
-        try:
-            p = pathlib.Path(tok_text).expanduser()
-            resolved = p.resolve(strict=False) if p.is_absolute() else (work_dir / p).resolve(strict=False)
-        except Exception:
+        if any(target.is_relative_to(root) for root in allowed_paths):
             continue
-        if str(resolved).replace("\\", "/").lower() in allowed_texts:
-            continue
-        if any(_within(resolved, ap) for ap in allowed_paths):
-            continue
-        if any(_within(resolved, pp) for pp in protected_paths):
-            return _BLOCK
+        if any(target.is_relative_to(root) for root in protected_paths):
+            return ToolResult(
+                status="blocked",
+                code="WORKSPACE_BLOCKED",
+                text=(
+                    "⚠️ WORKSPACE_SHELL_BLOCKED: shell command targets the Ouroboros runtime "
+                    "(system repo / data drive) or an owner credential path. External-workspace "
+                    "tasks may not read or write those; use the gated read_file tool for any "
+                    "inspection you need. Run your command against the task's own surfaces "
+                    "instead: the active workspace root (e.g. /app) or scratch such as /tmp."
+                ),
+            )
     return None
 
 

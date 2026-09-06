@@ -18,7 +18,6 @@ from ouroboros.shell_parse import (
     normalize_check_argv,
     replacement_target_uncertain,
     shell_argv,
-    shell_argv_with_inline,
     shell_command_string,
     shell_segment_rows,
     shell_segments,
@@ -588,6 +587,72 @@ def _expand_known_runtime_roots(text: str, drive: pathlib.Path, home: pathlib.Pa
             .replace("%USERPROFILE%", str(home)).replace("~/", f"{home}/"))
 
 
+def shell_inspection_paths(
+    raw_cmd: Any, *, work_dir: pathlib.Path, drive_root: pathlib.Path | None = None,
+) -> List[pathlib.Path]:
+    """Resolve explicit shell operands/literals for every read-policy caller.
+
+    Sequential and wrapper cwd belong to each row; expansion only affects this
+    inspection view, never execution argv. Embedded Windows paths are harvested
+    before POSIX tokenization can eat their backslashes. Computed paths remain
+    a disclosed limit of argv inspection, not a reason to prohibit interpreters.
+    """
+    from ouroboros.shell_parse import sequential_effective_cwds
+
+    home = pathlib.Path.home()
+    drive = pathlib.Path(drive_root) if drive_root is not None else home
+    found: list[pathlib.Path] = []
+
+    def inspect(command: Any, cwd: pathlib.Path, depth: int = 0) -> None:
+        segments = shell_segment_rows(command)
+        rows = [(collect_leading_env(segment)[1], [], (), False) for segment, _, _ in segments]
+        cwd_rows = [([_expand_known_runtime_roots(str(token), drive, home) for token in argv], [], (), False)
+                    for argv, _, _, _ in rows]
+        cwds = sequential_effective_cwds(cwd_rows, cwd)
+        for (segment, _, heredocs), (argv, _, _, _), row_cwd in zip(segments, rows, cwds):
+            if not argv:
+                continue
+            wrapper_cwd = env_chdir_operand(segment)
+            if wrapper_cwd:
+                wrapper_cwd = _expand_known_runtime_roots(wrapper_cwd, drive, home)
+                row_cwd = (row_cwd / pathlib.Path(wrapper_cwd).expanduser()).resolve(strict=False)
+            head = pathlib.PurePath(argv[0]).name.lower().removesuffix(".exe")
+            nested = []
+            if head in _SHELL_WRAPPER_HEADS and depth < _MAX_INLINE_RECURSION:
+                body = shell_command_string(argv)
+                nested = [body] if body else list(heredocs) if interpreter_reads_program_from_stdin(argv) else []
+                for body in nested:
+                    inspect(body, row_cwd, depth + 1)
+            bodies = nested or interpreter_inline_code(argv)
+            if not bodies and interpreter_reads_program_from_stdin(argv):
+                bodies = list(heredocs)
+            paths = [str(token) for token in argv[1:] if token not in bodies and not str(token).startswith("-")]
+            # Wrapper bodies have already been resolved in their own cwd.
+            for body in (() if nested else bodies):
+                tree = python_body_ast(body)
+                if tree is not None:
+                    paths.extend(node.value for node in ast.walk(tree) if isinstance(node, ast.Constant) and isinstance(node.value, str))
+                else:
+                    paths.extend(value for _quote, value in re.findall(r"(['\"])(.*?)\1", body))
+            expanded = _expand_known_runtime_roots(" ".join(str(token) for token in argv if token not in nested), drive, home)
+            paths.extend(embedded_absolute_path_tokens(expanded))
+            paths.extend(EMBEDDED_WINDOWS_ABSOLUTE_PATH_RE.findall(expanded))
+            if isinstance(command, str):
+                paths.extend(EMBEDDED_WINDOWS_ABSOLUTE_PATH_RE.findall(command))
+            for text in paths:
+                try:
+                    path = pathlib.Path(_expand_known_runtime_roots(text, drive, home)).expanduser()
+                    target = (row_cwd / path).resolve(strict=False)
+                    plausible = "/" in text or "\\" in text or bool(path.suffix) or text.startswith(".") or target.exists()
+                except (OSError, ValueError, RuntimeError):
+                    continue
+                if plausible and target not in found:
+                    found.append(target)
+
+    inspect(raw_cmd, pathlib.Path(work_dir).resolve(strict=False))
+    return found
+
+
 def runtime_data_write_targets(
     raw_cmd: Any,
     *,
@@ -595,53 +660,12 @@ def runtime_data_write_targets(
     work_dir: pathlib.Path,
     allowed_roots: List[pathlib.Path],
 ) -> List[str]:
-    """Find write-like path mentions under runtime data but outside task artifact roots."""
-
-    try:
-        drive = pathlib.Path(drive_root).resolve(strict=False)
-        cwd = pathlib.Path(work_dir).resolve(strict=False)
-    except Exception:
-        return []
+    """Find explicit runtime-data mentions through the shared inspection resolver."""
+    drive = pathlib.Path(drive_root).resolve(strict=False)
     allowed = [pathlib.Path(root).resolve(strict=False) for root in allowed_roots]
-    try:
-        home = pathlib.Path.home().resolve(strict=False)
-    except Exception:
-        home = pathlib.Path("~").expanduser()
-    blocked: List[str] = []
-    scan_texts = [str(token or "") for token in shell_argv_with_inline(raw_cmd)]
-    if isinstance(raw_cmd, str):
-        # POSIX-mode shlex EATS backslashes in UNQUOTED tokens, so a bare Windows
-        # path argv (cp C:\Users\...\data\x D:\y) reaches the token loop mangled
-        # (C:Users...) and matches nothing — the windows CI full-test caught the
-        # resulting false-allow (v6.55.0). The raw command string preserves the
-        # separators; harvesting candidates from it too is a superset on POSIX
-        # shapes (no backslashes to eat) and dedups via the blocked list.
-        scan_texts.append(raw_cmd)
-    for text in scan_texts:
-        expanded_texts = {text, _expand_known_runtime_roots(text, drive, home)}
-        candidates: List[str] = []
-        for expanded in expanded_texts:
-            if expanded.startswith(("/", "~")) or re.match(r"^[A-Za-z]:[\\/]", expanded):
-                candidates.append(expanded)
-            candidates.extend(embedded_absolute_path_tokens(expanded))
-            candidates.extend(EMBEDDED_WINDOWS_ABSOLUTE_PATH_RE.findall(expanded))
-            candidates.extend(EMBEDDED_RELATIVE_PATH_RE.findall(expanded))
-        for candidate in candidates:
-            candidate_variants = {candidate}
-            if "\\\\" in candidate:
-                candidate_variants.add(candidate.replace("\\\\", "\\"))
-            for candidate_text in candidate_variants:
-                try:
-                    raw_path = pathlib.Path(candidate_text).expanduser()
-                    path = raw_path.resolve(strict=False) if raw_path.is_absolute() else (cwd / raw_path).resolve(strict=False)
-                except Exception:
-                    continue
-                if not _path_inside(path, drive) or any(_path_inside(path, root) for root in allowed):
-                    continue
-                rendered = str(path)
-                if rendered not in blocked:
-                    blocked.append(rendered)
-    return blocked
+    return [str(path) for path in shell_inspection_paths(
+        raw_cmd, drive_root=drive, work_dir=work_dir,
+    ) if _path_inside(path, drive) and not any(_path_inside(path, root) for root in allowed)]
 
 
 def _secret_runtime_data_mentions(
@@ -651,37 +675,18 @@ def _secret_runtime_data_mentions(
     work_dir: pathlib.Path,
     allowed_roots: List[pathlib.Path] | None = None,
 ) -> List[str]:
-    """Mentioned drive paths whose NAME marks secret/control state (v6.54.3).
+    """Inspect the physical owner/control bindings used by file reads.
 
-    Reuses the subagent secret-name SSOT from tools.core (lazy import — core does
-    not import this module) over every path the mention scanner can extract. The
-    owner's real secret/control state (settings.json, tokens, memory/, .env) lives
-    at the DRIVE ROOT, outside any task's own roots, and stays blocked. The task's
-    OWN task_drive/artifact_store are exempt (adversarial review r2 #2): a staged
-    attachment or own scratch file that merely NAME-matches the secret regex —
-    e.g. ``secret_santa.docx``, ``token_usage.json`` — is the task's own content,
-    not an owner credential, and reading it must not be blocked."""
-    try:
-        from ouroboros.tools.core import _is_subagent_secret_data_path
-    except Exception:
-        return []
-    mentions = runtime_data_write_targets(
-        raw_cmd, drive_root=drive_root, work_dir=work_dir,
+    Task roots are ordinary content, not a credential store inferred from a
+    filename. An alias to actual owner state still resolves to that state.
+    """
+    from ouroboros.tools.core_secret_paths import _is_subagent_secret_repo_target
+
+    drive = pathlib.Path(drive_root).resolve(strict=False)
+    return [text for text in runtime_data_write_targets(
+        raw_cmd, drive_root=drive, work_dir=work_dir,
         allowed_roots=list(allowed_roots or []),
-    )
-    try:
-        drive = pathlib.Path(drive_root).resolve(strict=False)
-    except Exception:
-        return []
-    hits: List[str] = []
-    for text in mentions:
-        try:
-            rel = str(pathlib.Path(text).resolve(strict=False).relative_to(drive)).replace("\\", "/")
-        except (OSError, ValueError):
-            continue
-        if _is_subagent_secret_data_path(rel):
-            hits.append(text)
-    return hits
+    ) if _is_subagent_secret_repo_target(pathlib.Path(text), drive, data_root=drive)]
 
 
 def _project_store_runtime_data_mentions(

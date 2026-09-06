@@ -8,10 +8,8 @@ monkeypatch targets keep working unchanged.
 
 from __future__ import annotations
 
-import ast
 import hashlib
 import pathlib
-import re
 import subprocess
 
 from ouroboros.contracts.skill_payload_policy import SKILL_OWNER_STATE_STEMS
@@ -55,95 +53,19 @@ def _detect_runtime_mode_elevation(text_lower: str, *, writeish: bool = True) ->
 
 
 def _subagent_shell_targets_secret(cmd_path_lower: str, *, ctx: Any = None, cwd: Any = None) -> bool:
-    """Inspect path operands/literals, never substrings of code such as os.environ.
+    """Use the same physical read targets as file tools and the other shell lanes."""
+    from ouroboros.tools.core_secret_paths import _is_subagent_secret_repo_target, restricted_data_roots
+    from ouroboros.tools.shell_guards import shell_inspection_paths
 
-    Runtime/control locations are physical; the same repo-file predicate as
-    read_file protects credential leaves without hiding auth/tokens source dirs.
-    This is a best-effort argv inspection, not a sandbox for computed paths.
-    """
-    from ouroboros.credential_shapes import owner_credential_locations
-    from ouroboros.shell_parse import (
-        EMBEDDED_WINDOWS_ABSOLUTE_PATH_RE,
-        collect_leading_env, embedded_absolute_path_tokens, env_chdir_operand,
-        interpreter_reads_program_from_stdin, sequential_effective_cwds,
-        shell_command_string, shell_segment_rows,
+    data_roots = restricted_data_roots(ctx) if ctx is not None else []
+    repo_root = (_registry().active_repo_dir_for(ctx)
+                 if getattr(ctx, "repo_dir", None) is not None else pathlib.Path(cwd or "."))
+    work_dir = pathlib.Path(cwd or repo_root).resolve(strict=False)
+    paths = shell_inspection_paths(
+        cmd_path_lower, work_dir=work_dir,
+        drive_root=data_roots[0] if data_roots else None,
     )
-    from ouroboros.tools.core_secret_paths import _is_subagent_secret_repo_path, _is_subagent_secret_data_path
-    from ouroboros.tools.shell_guards import (
-        _MAX_INLINE_RECURSION, _SHELL_WRAPPER_HEADS, _expand_known_runtime_roots,
-    )
-    from ouroboros.tools.write_shape import python_body_ast
-
-    home = pathlib.Path.home()
-    protected, allowed = owner_credential_locations(home)
-    data_roots = []
-    if ctx is not None:
-        metadata = getattr(ctx, "task_metadata", {}) or {}
-        for root in (getattr(ctx, "drive_root", None), metadata.get("budget_drive_root")):
-            if root:
-                data_roots.append(pathlib.Path(root).resolve(strict=False))
-    drive = data_roots[0] if data_roots else home
-
-    def inspect(command: Any, work_dir: pathlib.Path, depth: int = 0) -> bool:
-        segments = shell_segment_rows(command)
-        rows = [(collect_leading_env(segment)[1], [], (), False) for segment, _, _ in segments]
-        # Expand only the inspection view; the executor retains the original argv.
-        cwd_rows = [([_expand_known_runtime_roots(str(token), drive, home) for token in argv], [], (), False)
-                    for argv, _, _, _ in rows]
-        cwds = sequential_effective_cwds(cwd_rows, work_dir)
-        for (segment, _, heredocs), (argv, _, _, _), row_cwd in zip(segments, rows, cwds):
-            if not argv:
-                continue
-            wrapper_cwd = env_chdir_operand(segment)
-            if wrapper_cwd:
-                wrapper_cwd = _expand_known_runtime_roots(wrapper_cwd, drive, home)
-                row_cwd = (row_cwd / pathlib.Path(wrapper_cwd).expanduser()).resolve(strict=False)
-            head = pathlib.PurePath(argv[0]).name.lower().removesuffix(".exe")
-            bodies = []
-            nested = []
-            if head in _SHELL_WRAPPER_HEADS and depth < _MAX_INLINE_RECURSION:
-                body = shell_command_string(argv)
-                nested = [body] if body else list(heredocs) if interpreter_reads_program_from_stdin(argv) else []
-                if nested:
-                    if any(inspect(body, row_cwd, depth + 1) for body in nested):
-                        return True
-                    bodies = nested  # the wrapper body is code; outer redirects still count
-            bodies = bodies or _registry().interpreter_inline_code(argv)
-            if not bodies and interpreter_reads_program_from_stdin(argv):
-                bodies = list(heredocs)
-            paths = [str(token) for token in argv[1:] if token not in bodies and not str(token).startswith("-")]
-            # A wrapper body was already inspected under its own sequential
-            # cwd. Re-reading its literals here would assign the outer cwd.
-            for body in (() if nested else bodies):
-                tree = python_body_ast(body)
-                if tree is not None:
-                    paths.extend(node.value for node in ast.walk(tree) if isinstance(node, ast.Constant) and isinstance(node.value, str))
-                else:
-                    paths.extend(value for _quote, value in re.findall(r"(['\"])(.*?)\1", body))
-            expanded = _expand_known_runtime_roots(" ".join(argv), drive, home)
-            paths.extend(embedded_absolute_path_tokens(expanded))
-            paths.extend(EMBEDDED_WINDOWS_ABSOLUTE_PATH_RE.findall(expanded))
-            for text in paths:
-                try:
-                    path = pathlib.Path(_expand_known_runtime_roots(text, drive, home)).expanduser()
-                    target = (row_cwd / path).resolve(strict=False)
-                    # Bare search terms and string data are not file operands.
-                    # A separator, suffix or existing entry supplies path shape.
-                    plausible = "/" in text or "\\" in text or bool(path.suffix) or text.startswith(".") or target.exists()
-                except (OSError, ValueError, RuntimeError):
-                    continue
-                if not plausible:
-                    continue
-                if _is_subagent_secret_repo_path(text):
-                    return True
-                if target not in allowed and any(target.is_relative_to(path.resolve(strict=False)) for path in protected):
-                    return True
-                for root in data_roots:
-                    if target.is_relative_to(root) and _is_subagent_secret_data_path(target.relative_to(root).as_posix()):
-                        return True
-        return False
-
-    return inspect(cmd_path_lower, pathlib.Path(cwd or ".").resolve(strict=False))
+    return any(_is_subagent_secret_repo_target(target, repo_root, ctx=ctx) for target in paths)
 
 
 def _detect_mutative_toggle_self_change(text_lower: str, *, writeish: bool = True) -> bool:
@@ -552,7 +474,7 @@ def _run_shell_safety_check(
     """Pre-execution run_command filter; returns a native denial or ``None``."""
     from ouroboros.shell_parse import local_shell_subject
 
-    raw_cmd = local_shell_subject(args.get("cmd", args.get("command", "")))
+    raw_cmd = args.get("cmd", args.get("command", ""))
     if binding is None:
         operation = (
             "service"
@@ -615,7 +537,10 @@ def _run_shell_safety_check(
         if not inline_cmd:
             inline_cmd = _registry().shell_command_string(argv_for_write)
         inline_argv = _registry().strip_leading_env_assignments(_registry().unwrap_env_argv(_registry().shell_argv(inline_cmd)))
-    target_rows, write_target_argvs, explicit_write_targets, executable_path_tokens = _lane_writer_targets(raw_cmd)
+    # Only filesystem writer targets use SSH's local-effect projection.
+    # Owner controls, credentials, safety and execution inspect the full argv.
+    writer_cmd = local_shell_subject(raw_cmd)
+    target_rows, write_target_argvs, explicit_write_targets, executable_path_tokens = _lane_writer_targets(writer_cmd)
     # Writer-command membership canonicalizes versioned interpreter spellings to
     # their family (`ruby3.2` is `ruby`), so a versioned basename is exactly as
     # write-suspect as the unversioned one (XG-2R.2).
@@ -680,8 +605,8 @@ def _run_shell_safety_check(
         workspace_write_block = registry_guards._workspace_shell_write_block(
             self,
             args,
-            raw_cmd,
-            cmd_path_lower,
+            writer_cmd,
+            (" ".join(str(x) for x in writer_cmd) if isinstance(writer_cmd, list) else str(writer_cmd)).lower().replace("\\", "/"),
             explicit_write_targets,
             target_rows,
             executable_path_tokens,

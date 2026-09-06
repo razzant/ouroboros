@@ -253,6 +253,116 @@ def test_ssh_subject_separates_remote_payload_and_local_channels():
     assert raw[-1] == 'sudo -n tee /etc/remote.conf'
 
 
+@pytest.mark.parametrize('remote', [False, True])
+@pytest.mark.parametrize('control', ['elevation', 'owner_key'])
+def test_ssh_keeps_full_command_visible_to_non_writer_guards(environment, remote, control):
+    from ouroboros.tools.registry_guard_process import _run_shell_safety_check
+
+    reg, ctx, home, work, _data = environment
+    commands = {
+        'elevation': ([sys.executable, '-c',
+                       "from ouroboros.config import save_settings; save_settings({'OUROBOROS_RUNTIME_MODE':'pro'})"],
+                      'ELEVATION_BLOCKED'),
+        'owner_key': (['cat', str(home / '.ssh' / 'id_fixture')], 'SUBAGENT_SECRET_READ_BLOCKED'),
+    }
+    if control == 'owner_key':
+        ctx.task_constraint = TaskConstraint(mode='acting_subagent', surface='external_workspace', write_root=str(work))
+    command, expected = commands[control]
+    command = ['ssh', 'localhost', *command] if remote else command
+    original = list(command)
+    # Deliberately stop at admission: no SSH/auth/owner mutation is executed.
+    result = _run_shell_safety_check(reg, {'cmd': command, 'cwd': str(work)}, 'advanced')
+    assert result is not None and (result.status, result.code) == ('blocked', expected)
+    assert command == original
+
+
+def test_ssh_passes_complete_argv_to_existing_github_policy(environment, monkeypatch):
+    from ouroboros import git_shell_policy
+    from ouroboros.tools.registry_guard_process import _run_shell_safety_check
+
+    reg, _ctx, _home, work, _data = environment
+    command = ['ssh', 'localhost', 'gh', 'auth', 'login']
+    seen = []
+    policy = git_shell_policy.gh_shell_block_reason
+
+    def observe(raw):
+        seen.append(list(raw))
+        return policy(raw)
+
+    monkeypatch.setattr(git_shell_policy, 'gh_shell_block_reason', observe)
+    _run_shell_safety_check(reg, {'cmd': command, 'cwd': str(work)}, 'advanced')
+    assert seen == [command]
+    # This test pins delivery to the existing policy, not permission to run
+    # remote auth: positional gh only handles direct gh/shell segments today.
+
+
+@pytest.mark.parametrize('root', ['active_workspace', 'task_drive', 'artifact_store'])
+@pytest.mark.parametrize('directory', ['ordinary', 'auth', 'tokens'])
+def test_child_source_names_and_certificates_do_not_confer_credential_authority(environment, root, directory):
+    reg, ctx, _home, _work, _data = environment
+    ctx.task_constraint = TaskConstraint(mode='local_readonly_subagent')
+    base = resource_root_path(ctx, root)
+    source = base / 'src' / directory / 'login.py'
+    source.parent.mkdir(parents=True)
+    token = 'sk-' + 'a' * 48
+    source.write_text('def login():\n    return "' + token + '"  # SOURCE_AVAILABLE\n', encoding='utf-8')
+    result = reg.execute('read_file', {'root': root, 'path': source.relative_to(base).as_posix()})
+    assert 'SOURCE_AVAILABLE' in result and token not in result and '***' in result
+    # A public PEM must survive unchanged; a private block uses existing byte
+    # egress masking, including when the caller asks for a window past its header.
+    certificate = '-----BEGIN CERTIFICATE-----\n' + 'ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789' * 2 + '\n-----END CERTIFICATE-----\n'
+    public = source.parent / 'public.pem'
+    public.write_text(certificate, encoding='utf-8')
+    assert certificate in reg.execute('read_file', {'root': root, 'path': public.relative_to(base).as_posix()})
+    private = source.parent / 'fixture.pem'
+    material = 'fixture-private-material-0123456789'
+    private.write_text('-----BEGIN PRIVATE KEY-----\n' + material + '\n-----END PRIVATE KEY-----\n', encoding='utf-8')
+    for start_line in (1, 2):
+        read = reg.execute('read_file', {'root': root, 'path': private.relative_to(base).as_posix(), 'start_line': start_line})
+        assert material not in read
+        assert ctx.last_read_view['total_lines'] == 3
+
+
+@pytest.mark.parametrize('root', ['task_drive', 'artifact_store'])
+@pytest.mark.parametrize('path', ['auth/login.py', 'tokens/login.py', 'tokens.json'])
+def test_child_own_task_content_is_not_a_repository_credential_store(environment, root, path):
+    reg, ctx, _home, _work, _data = environment
+    ctx.task_constraint = TaskConstraint(mode='local_readonly_subagent')
+    target = resource_root_path(ctx, root) / path
+    target.parent.mkdir(parents=True, exist_ok=True)
+    target.write_text('TASK_CONTENT_AVAILABLE', encoding='utf-8')
+    assert 'TASK_CONTENT_AVAILABLE' in reg.execute('read_file', {'root': root, 'path': path})
+    assert path.split('/')[0] in reg.execute('list_files', {'root': root, 'path': '.'})
+    # The profile grants read/list here, not search. Shared path policy must
+    # preserve that independent resource matrix instead of granting a new verb.
+    assert 'TOOL_ACCESS_BLOCKED' in reg.execute('search_code', {'root': root, 'path': '.', 'query': 'TASK_CONTENT_AVAILABLE'})
+
+
+@pytest.mark.parametrize('lane', ['child', 'external', 'light'])
+@pytest.mark.parametrize('wrapper', ['direct', 'shell_cwd', 'env_cwd'])
+def test_shell_read_lanes_share_physical_control_binding(environment, monkeypatch, lane, wrapper):
+    from ouroboros.tools.registry_guard_process import _run_shell_safety_check
+
+    reg, ctx, _home, work, data = environment
+    if lane == 'child':
+        ctx.task_constraint = TaskConstraint(mode='acting_subagent', surface='external_workspace', write_root=str(work))
+    elif lane == 'light':
+        ctx.workspace_mode = ''
+        ctx.workspace_root = None
+    command = [sys.executable, '-c', "print(open('settings.json').read())"]
+    if wrapper == 'shell_cwd':
+        command = ['sh', '-c', 'cd ' + shlex.quote(str(data)) + '; ' + shlex.join(command)]
+    elif wrapper == 'env_cwd':
+        command = ['env', '-C', str(data), *command]
+    else:
+        command = [sys.executable, '-c', 'print(open(' + repr(str(data / 'settings.json')) + ').read())']
+    (data / 'settings.json').write_text('RUNTIME_PRIVATE_FIXTURE', encoding='utf-8')
+    expected = {'child': 'SUBAGENT_SECRET_READ_BLOCKED', 'external': 'WORKSPACE_BLOCKED', 'light': 'LIGHT_MODE_BLOCKED'}[lane]
+    cwd = 'task_drive' if lane == 'light' else str(work)
+    result = _run_shell_safety_check(reg, {'cmd': command, 'cwd': cwd}, 'light' if lane == 'light' else 'advanced')
+    assert result is not None and result.code == expected, result
+
+
 def test_remote_paths_are_not_child_local_writes_but_outer_redirects_are(environment):
     from tests._typed_guard_shared import _shell_guard_text
     reg, ctx, _home, work, _data = environment

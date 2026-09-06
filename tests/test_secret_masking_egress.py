@@ -64,6 +64,20 @@ def test_mask_secret_bytes_masks_unterminated_pem_to_end(mask_opaque):
     assert masked == "prefix\n***"
 
 
+@pytest.mark.parametrize("separator", ["\n", "\r\n", "\u2028"])
+def test_mask_before_file_window_preserves_source_positions(separator):
+    prefix = 'public line' + separator
+    tail = separator + 'next source line' + separator
+    text = prefix + PEM_BLOCK.replace('\n', separator) + tail
+    masked, count = mask_secret_bytes(text, mask_opaque=False, preserve_layout=True)
+    assert count == 1 and len(masked) == len(text)
+    assert [i for i, char in enumerate(masked) if char == '\n'] == [i for i, char in enumerate(text) if char == '\n']
+    assert len(masked.splitlines()) == len(text.splitlines())
+    assert masked[:len(prefix)] == prefix and masked[-len(tail):] == tail
+    key_start = text.index('b3BlbnNzaC1rZXktdjE')
+    assert set(masked[key_start:key_start + 20]) == {'*'}
+
+
 def test_mask_secret_bytes_leaves_plain_text_untouched():
     text = "ordinary notes\nmodel: anthropic/claude-fable-5\npath: ~/.config/app/settings.toml\n"
     masked, count = mask_secret_bytes(text)
@@ -160,7 +174,8 @@ def test_project_settings_source_is_readable_by_verify_guard(tmp_path):
 
 
 @pytest.mark.parametrize("profile", ["local_readonly_subagent", "acting_subagent"])
-def test_runtime_data_inside_repo_keeps_its_read_protection(tmp_path, monkeypatch, profile):
+@pytest.mark.parametrize("forked", [False, True])
+def test_runtime_data_inside_repo_keeps_its_read_protection(tmp_path, monkeypatch, profile, forked):
     from ouroboros.contracts.task_constraint import TaskConstraint
     from ouroboros.tools.registry import ToolRegistry
 
@@ -171,7 +186,10 @@ def test_runtime_data_inside_repo_keeps_its_read_protection(tmp_path, monkeypatc
     (repo / "auth" / "secret.py").write_text("def public_source():\n    pass\n", encoding="utf-8")
     (data / "auth" / "secret.py").write_text("def runtime_private():\n    pass\n", encoding="utf-8")
     (data / "settings.json").write_text('{"fixture": "runtime_private"}', encoding="utf-8")
-    registry = ToolRegistry(repo, data)
+    child = data / 'state' / 'headless_tasks' / 'child-1' / 'data' if forked else data
+    child.mkdir(parents=True, exist_ok=True)
+    registry = ToolRegistry(repo, child)
+    registry._ctx.task_metadata['budget_drive_root'] = str(data)
     registry._ctx.task_constraint = TaskConstraint(mode=profile, write_root=str(repo), surface="external_workspace")
     for path in ("data/auth/secret.py", str(data / "auth" / "secret.py"), "data/settings.json"):
         result = registry.execute("read_file", {"path": path})
@@ -185,6 +203,10 @@ def test_runtime_data_inside_repo_keeps_its_read_protection(tmp_path, monkeypatc
     search = registry.execute("search_code", {"query": "def "})
     assert "public_source" in search and "runtime_private" not in search
     assert "files searched" in search
+    # The image/media admission path uses this same set of physical data roots.
+    from ouroboros.tools.vision import _read_file_parity_block
+
+    assert 'BLOCKED' in _read_file_parity_block(registry._ctx, data / 'settings.json')
 
 
 @pytest.fixture()
