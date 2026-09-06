@@ -86,6 +86,7 @@ SUBAGENT_CREDENTIAL_FILE_NAMES = frozenset({
     ".env",
     ".netrc",
     "auth.json",
+    "auth_token.json",
     "credentials",
     "credentials.json",
     "keys.json",

@@ -112,7 +112,7 @@ else:
     assert "OK" in proc.stdout
 
 
-# ── consolidation keeps the child (subagent) contract byte-for-byte ──────────
+# ── restricted-child reads use exact credential leaves and real stores ──────
 
 def test_child_secret_shape_contract_preserved():
     from ouroboros.tools.core import (
@@ -120,14 +120,19 @@ def test_child_secret_shape_contract_preserved():
         _is_subagent_secret_repo_path,
     )
 
-    for norm in ("state/settings.json", "foo.pem", "secrets/x.txt",
-                 ".env.production", "my_api_key.json", "keys.json"):
+    for norm in ("state/settings.json", "secrets/x.txt", ".env.production", "keys.json",
+                 "claudexor/profile/auth.json", "state/skills/alpha/auth_token.json"):
         assert _is_subagent_secret_data_path(norm), norm
-    for norm in ("memory/identity.md", "logs/progress.jsonl", "notes.txt"):
+    for norm in ("memory/identity.md", "logs/progress.jsonl", "notes.txt",
+                 "foo.pem", "my_api_key.json", "source/auth/service.py"):
         assert not _is_subagent_secret_data_path(norm), norm
-    for norm in (".git/config", "deploy.key", "token.json"):
+    for norm in (".git/config", "token.json", "config/.env", "deploy/credentials.json",
+                 "auth_token.json", "config/auth_token.json"):
         assert _is_subagent_secret_repo_path(norm), norm
-    for norm in ("README.md", "src/main.py", "docs/token_economics.md", "settings.json", "auth/service.py", "ordinary.config"):
+    # Owner-selected capability: suffixes and source-directory names alone
+    # cannot identify private credentials. Exact names above stay blocked.
+    for norm in ("README.md", "src/main.py", "docs/token_economics.md", "settings.json",
+                 "auth/service.py", "ordinary.config", "deploy.key", "foo.pem", "my_api_key.json"):
         assert not _is_subagent_secret_repo_path(norm), norm
 
 

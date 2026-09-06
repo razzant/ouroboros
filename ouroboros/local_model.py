@@ -527,8 +527,12 @@ class LocalModelManager:
                         # generation; a concurrent stop/restart cannot publish it.
                         if proc is None or self._proc is not proc or proc.poll() is not None:
                             return
-                        self._service_binding = record_service_binding(
-                            DATA_DIR, "local_model", "127.0.0.1", self._port, pid=proc.pid)
+                        try:
+                            self._service_binding = record_service_binding(
+                                DATA_DIR, "local_model", "127.0.0.1", self._port, pid=proc.pid)
+                        except Exception:
+                            self._service_binding = None
+                            log.warning("Local model service binding unavailable; health remains ready", exc_info=True)
                         self._status = "ready"
                         self._context_length = health.get("context_length", 0)
                         self._model_name = health.get("model_name", "")
