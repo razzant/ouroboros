@@ -6,7 +6,7 @@ from types import SimpleNamespace
 import pytest
 
 from ouroboros import loop, review_evidence
-from ouroboros.artifacts import store_task_artifact_bytes
+from ouroboros.artifacts import store_actor_source_bytes, store_task_artifact_bytes
 
 
 @pytest.fixture
@@ -61,12 +61,13 @@ def test_real_source_changes_still_invalidate_acceptance(review_context, monkeyp
     assert after != before
 
 
-def test_registered_review_sources_are_bookkeeping_not_new_work(review_context):
+def test_review_source_handles_are_not_work_but_user_artifacts_are(review_context):
     before = review_evidence.task_acceptance_evidence_revision(loop._build_host_acceptance_evidence(review_context))
-    store_task_artifact_bytes(review_context.drive_root, "identity", "panel.json", b'{"verdict":"PASS"}', kind="task_acceptance_review")
+    store_actor_source_bytes(review_context.drive_root, "identity", category="context_checkpoints",
+                             source_id="acceptance", data=b'{"verdict":"PASS"}', extension="json")
     after_review = review_evidence.task_acceptance_evidence_revision(loop._build_host_acceptance_evidence(review_context))
     assert after_review == before
-    # The rule is the host registration kind, never the filename or extension.
+    # Source custody has its own location; a similarly named user file is work.
     store_task_artifact_bytes(review_context.drive_root, "identity", "task-acceptance-review-user.json", b'{"answer":42}')
     after_work = review_evidence.task_acceptance_evidence_revision(loop._build_host_acceptance_evidence(review_context))
     assert after_work != before

@@ -1002,9 +1002,6 @@ async def api_task_artifact(request: Request):
                 return json_error("task source is unavailable or does not match its recorded identity", 404)
         artifact = _artifact_by_name(result, name)
         if artifact is None:
-            records = artifact_store.collect_task_artifact_records(drive_root, task_id, include_bookkeeping=True)
-            artifact = _artifact_by_name({"artifacts": [row for row in records if artifact_store.is_task_bookkeeping_artifact(row)]}, name)
-        if artifact is None:
             return json_error("artifact not found", 404, task_id=task_id, artifact=name)
         base = task_artifacts_dir(drive_root, task_id).resolve(strict=False)
         path = pathlib.Path(str(artifact.get("path") or "")).resolve(strict=False)

@@ -2287,8 +2287,7 @@ by "Provider Independence" above. Call-site imperatives:
   still running. Review/completion sources use `source_handles/context_checkpoints`,
   outside deliverables and the acceptance artifact manifest. Canonical-first
   persistence (`task.budget_drive_root or drive_root`) and the existing published-ref
-  closure preserve them before child cleanup. Legacy flat refs and their read-only
-  bookkeeping projection remain compatible; do not migrate live task data. Give native readers an
+  closure preserve them before child cleanup. Give native readers an
   executable get_task_result selector for that source task; reuse explicit character
   ranges and complete-source hashes so a split or later task never resolves the
   basename against its own artifact directory. Preserve that

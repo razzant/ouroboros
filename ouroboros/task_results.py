@@ -787,9 +787,7 @@ def load_task_result(
         or not str(data.get("status") or "").strip()
     ):
         raise ValueError(f"task result authority is unreadable or invalid: {path}")
-    from ouroboros.artifacts import project_deliverable_artifacts
-
-    return project_deliverable_artifacts(data)
+    return data
 
 
 def list_task_results(

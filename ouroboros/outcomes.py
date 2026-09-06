@@ -1299,9 +1299,6 @@ def collect_trace_refs(usage: Dict[str, Any], llm_trace: Dict[str, Any]) -> Dict
 
 def artifact_bundle_from_result(result: Dict[str, Any]) -> Dict[str, Any]:
     """Return v2 ArtifactBundle while preserving old artifact fields."""
-    from ouroboros.artifacts import project_deliverable_artifacts
-
-    result = project_deliverable_artifacts(result)
     existing_bundle = result.get("artifact_bundle") if isinstance(result.get("artifact_bundle"), dict) else {}
     artifacts = list(result.get("artifacts") or []) if isinstance(result.get("artifacts"), list) else []
     bundle_status = str(existing_bundle.get("status") or "").strip()
@@ -1353,8 +1350,6 @@ def artifact_bundle_from_result(result: Dict[str, Any]) -> Dict[str, Any]:
             "errors": list(item.get("errors") or []) if isinstance(item.get("errors"), list) else [],
         }
         records.append(record)
-    if status == "not_applicable" and records and all(row["status"] == ARTIFACT_STATUS_READY for row in records):
-        status = ARTIFACT_STATUS_READY  # Materialized deliverables supersede an empty older view.
     if status != ARTIFACT_STATUS_FAILED and any(str(item.get("status") or "") == "missing" for item in records):
         status = "missing"
     errors = []
