@@ -262,3 +262,58 @@ def test_cancel_event_keeps_requested_retry_id_for_owner_presentation(monkeypatc
         "toast_once": "stable-root:cancellation_fault",
         "cancel_physical_task_id": "physical-retry-7f3a",
     }
+
+
+def test_routine_cancel_outcomes_publish_nothing_to_the_owner_chat(monkeypatch) -> None:
+    """#624: custody publishes the settled truth itself (task_summary/salvage in
+    the task's own thread; the tool result to the calling agent). A second host
+    acknowledgement for cancelled / already-settled / not-found reached the
+    GLOBAL owner chat as an untyped assistant row with no task identity — and
+    for a pending-drop race the "had already finished" wording misstated the
+    causal history. Those three outcomes now publish nothing; only FAILED keeps
+    its typed progress incident (the test above)."""
+    import supervisor.queue as q
+    from supervisor.events import _handle_cancel_task
+
+    for outcome in (q.CANCEL_CANCELLED, q.CANCEL_ALREADY_SETTLED, q.CANCEL_NOT_FOUND):
+        sent = []
+        seen = []
+        monkeypatch.setattr(
+            q, "cancel_task_custody",
+            lambda task_id, **_kw: seen.append(task_id) or outcome,
+        )
+
+        class _Ctx:
+            DRIVE_ROOT = pathlib.Path("/unused")
+
+            @staticmethod
+            def load_state():
+                return {"owner_chat_id": 9}
+
+            @staticmethod
+            def send_with_budget(*args, **kwargs):
+                sent.append((args, kwargs))
+
+        _handle_cancel_task({"task_id": "child-A", "requested_task_id": "child-A"}, _Ctx())
+        assert seen == ["child-A"], outcome  # custody still runs
+        assert sent == [], (outcome, sent)   # no Main-chat speech, no untyped row
+
+    # A missing task id never reaches custody and still says nothing.
+    sent = []
+    monkeypatch.setattr(q, "cancel_task_custody", lambda task_id, **_kw: q.CANCEL_CANCELLED)
+
+    class _Ctx2:
+        @staticmethod
+        def load_state():
+            return {"owner_chat_id": 9}
+
+        @staticmethod
+        def send_with_budget(*args, **kwargs):
+            sent.append((args, kwargs))
+
+    _handle_cancel_task({"task_id": ""}, _Ctx2())
+    assert sent == []
+    # The handler no longer carries the prose that leaked: source pin.
+    src = inspect.getsource(_handle_cancel_task)
+    for leaked in ("teardown confirmed", "had already finished", "no such live task"):
+        assert leaked not in src

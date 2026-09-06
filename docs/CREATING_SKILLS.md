@@ -501,7 +501,7 @@ calls and runtime behaviours:
 | `supervised_task` | The skill may register an in-process host-supervised async task. |
 | `companion_process` | The skill may register a manifest-declared companion subprocess supervised by the host. |
 | `subscribe_event` | The skill may subscribe to manifest-declared host event topics such as `chat.outbound` or `skill.lifecycle`. Chat topics require owner permission grants; `skill.lifecycle` does not. |
-| `inject_chat` | The skill may request Host Service chat injection after an explicit owner permission grant. |
+| `inject_chat` | The skill may request Host Service chat injection after an explicit owner permission grant: `POST /chat/inject` carries text, an inline image, or `attachments` (`[{path, name?, mime?}]` — regular files under the skill's own state root, at most 25 per message and 50 MB each, which the host copies into the shared `data/uploads` chat-upload store and stages for the task; a file-only message needs no text). The same grant lets the skill relay the owner's decision-card answer through `POST /chat/decision` (`{request_id, decision_id, option_index?, comment?}`, the `POST /api/decisions` contract). |
 | `presence` | A reviewed transport skill may submit authenticated non-owner conversation events to the Host Service Presence boundary and poll only their correlated late work. Requires an explicit content-hash-bound owner grant. |
 
 A missing permission causes the matching `register_*` call to raise

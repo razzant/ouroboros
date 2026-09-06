@@ -550,6 +550,23 @@ export function createChatInstance({
         missingManagedTaskIds.delete(id);
         if (REUSABLE_TASK_IDS.has(id)) concludedDirectActivities.delete(id);
         else recordConcludedActivity(id);
+        settleTerminalRootChildren(id);
+    }
+    // A root proven terminal settles descendant cards a lost child terminal left
+    // open (#300): one single-flight durable read each, through the ordinary
+    // child-terminal path; no proven terminal fact = the child keeps its state.
+    function settleTerminalRootChildren(rootId) {
+        for (const [childId, info] of subagentChildParents) {
+            if (info.parentId !== rootId) continue;
+            settleTerminalRootChildren(childId);
+            const record = liveCardRecords.get(childId);
+            if (!record || record.finished || managedTaskDetailReads.has(childId)) continue;
+            managedTaskDetailReads.add(childId);
+            fetchTaskDetail(childId).then((detail) => {
+                if (destroyed || !isTerminalTaskDetail(detail)) return;
+                withStableViewport(() => routeSubagentTerminalToCard(childId, { ...detail, task_id: childId }));
+            }).catch(() => {}).finally(() => managedTaskDetailReads.delete(childId));
+        }
     }
     // Finished task ids hidden from routine syncs until reload/reconnect rebuilds history.
     const retiredTaskIds = new Set();
@@ -558,40 +575,17 @@ export function createChatInstance({
     let _pendingCardObjective = '';
     let activeLiveGroupId = '';
     let pendingReconnectSync = false;  // Set when a fromReconnect sync arrives while one is already in-flight.
-    let pendingReconnectBannerText = readPendingReconnectBanner();
+    let pendingReconnectBannerText = '';
+    try {
+        pendingReconnectBannerText = reconnectBannerText(new URL(window.location.href).searchParams.get('_ouro_reason') || '');
+    } catch {}
 
+    // An ephemeral (decision) turn's id is remembered ONLY so the card factory
+    // never offers "Turn into project" (#691): its work renders on the ordinary
+    // live card with host-attested authority alone (no `cancelable`, no Cancel).
     function registerEphemeralDecisionFrame(frame) {
         const taskId = taskKey(frame?.task_id);
-        if (!taskId) return undefined;
-        if (frame?.ephemeral_decision) return withStableViewport(
-            () => registerEphemeralDecisionFrameMutation(taskId),
-        );
-        return ephemeralDecisionTaskIds.has(taskId) ? false : undefined;
-    }
-
-    function registerEphemeralDecisionFrameMutation(taskId) {
-        ephemeralDecisionTaskIds.add(taskId);
-        const taskState = taskUiStates.get(taskId);
-        if (taskState?.cleanupTimer) clearTimeout(taskState.cleanupTimer);
-        taskUiStates.delete(taskId);
-        const record = liveCardRecords.get(taskId);
-        const changed = Boolean(record?.root?.isConnected);
-        if (record) {
-            record.root?.remove();
-            liveCardRecords.delete(taskId);
-        }
-        pendingSuggestedNames.delete(taskId);
-        if (activeLiveGroupId === taskId) activeLiveGroupId = '';
-        return changed;
-    }
-
-    function readPendingReconnectBanner() {
-        try {
-            const url = new URL(window.location.href);
-            return reconnectBannerText(url.searchParams.get('_ouro_reason') || '');
-        } catch {
-            return '';
-        }
+        if (taskId && frame?.ephemeral_decision) ephemeralDecisionTaskIds.add(taskId);
     }
 
     function clearPendingReconnectBanner() {
@@ -838,7 +832,6 @@ export function createChatInstance({
             rawTs,
             dedupeKey: dedupeKey || summary.dedupeKey || '',
         });
-
     }
 
     function reanchorTaskCard(
@@ -1602,9 +1595,14 @@ export function createChatInstance({
         return Boolean(changed && record.activityEl.isConnected);
     }
 
-    function ensureSubagentContainer(parentId = '') {
+    function ensureSubagentContainer(parentId = '', depth = 0) {
         if (!parentId) return null;
-        const parentRecord = getLiveCardRecord(parentId);
+        // A lineage-known parent is minted as the nested card ITS parent owns,
+        // never as a root-shaped shell (#636); depth bounds a lineage cycle.
+        const lineage = depth < 32 ? subagentChildParents.get(parentId) : null;
+        const parentRecord = lineage
+            ? getSubagentCardRecordMutation(parentId, lineage.parentId, lineage.role, depth + 1)
+            : getLiveCardRecord(parentId);
         let container = parentRecord.subagentsEl;
         if (!container) {
             container = document.createElement('div');
@@ -1632,7 +1630,7 @@ export function createChatInstance({
         return record;
     }
 
-    function getSubagentCardRecordMutation(childId = '', parentId = '', role = '') {
+    function getSubagentCardRecordMutation(childId = '', parentId = '', role = '', depth = 0) {
         if (!childId || !parentId) return null;
         const existing = liveCardRecords.get(childId);
         const record = existing || createLiveCardRecord(childId, {
@@ -1655,7 +1653,7 @@ export function createChatInstance({
         if (existing && !explicitCardExpansion.has(childId)) {
             setLiveCardExpanded(record, nestedSubagentsExpanded);
         }
-        const container = ensureSubagentContainer(parentId);
+        const container = ensureSubagentContainer(parentId, depth);
         if (container && record.root.parentNode !== container) {
             container.appendChild(record.root);
         }
@@ -1700,25 +1698,20 @@ export function createChatInstance({
         record,
         { suppressDomInsert = false, reorderExisting = false } = {},
     ) {
-        if (record?.isSubagent && record.parentGroupId) {
-            if (!suppressDomInsert && !_syncPass1Active) {
-                const parentRecord = getLiveCardRecord(record.parentGroupId);
-                if (parentRecord.isSubagent && parentRecord.parentGroupId) {
-                    ensureLiveCardVisible(parentRecord);
-                } else {
-                    insertMessageNode(parentRecord.root);
-                }
-                const container = ensureSubagentContainer(record.parentGroupId);
-                if (container && record.root.parentNode !== container) {
-                    container.appendChild(record.root);
-                }
-                updateLiveCardCount(parentRecord);
+        if (!record || suppressDomInsert || _syncPass1Active) return;
+        if (record.isSubagent && record.parentGroupId) {
+            // The container mints a lineage-known parent nested (#636); the
+            // recursion carries the chain up to the inserted root.
+            const container = ensureSubagentContainer(record.parentGroupId);
+            if (container && record.root.parentNode !== container) {
+                container.appendChild(record.root);
             }
+            const parentRecord = liveCardRecords.get(record.parentGroupId);
+            ensureLiveCardVisible(parentRecord);
+            updateLiveCardCount(parentRecord);
             return;
         }
-        if (!record.isSubagent && !suppressDomInsert && !_syncPass1Active) {
-            insertMessageNode(record.root, { reorderExisting });
-        }
+        if (!record.isSubagent) insertMessageNode(record.root, { reorderExisting });
     }
 
     function setLiveCardExpanded(record, expanded) {
@@ -1822,21 +1815,14 @@ export function createChatInstance({
 
     // The 12 cost-meta keys shared by both subagent whitelists (the delegation
     // trio stays inline in each literal — the wire test scans those literals).
+    const COST_META_KEYS = [
+        'cost_usd', 'accounted_upper_bound_usd', 'accounted_upper_bound_usd_with_children',
+        'cost_accounting_status', 'cost_accounting_error', 'cost_final', 'cost_usd_with_children',
+        'cost_with_children_partial', 'reserved_usd', 'unresolved_upper_bound_usd',
+        'unknown_unmetered', 'non_final_rows',
+    ];
     function costMetaKeys(src) {
-        return {
-            cost_usd: src?.cost_usd,
-            accounted_upper_bound_usd: src?.accounted_upper_bound_usd,
-            accounted_upper_bound_usd_with_children: src?.accounted_upper_bound_usd_with_children,
-            cost_accounting_status: src?.cost_accounting_status,
-            cost_accounting_error: src?.cost_accounting_error,
-            cost_final: src?.cost_final,
-            cost_usd_with_children: src?.cost_usd_with_children,
-            cost_with_children_partial: src?.cost_with_children_partial,
-            reserved_usd: src?.reserved_usd,
-            unresolved_upper_bound_usd: src?.unresolved_upper_bound_usd,
-            unknown_unmetered: src?.unknown_unmetered,
-            non_final_rows: src?.non_final_rows,
-        };
+        return Object.fromEntries(COST_META_KEYS.map((key) => [key, src?.[key]]));
     }
 
     // the ONE meta-line renderer, fed entirely from record state,
@@ -2108,8 +2094,7 @@ export function createChatInstance({
     function appendTaskSummaryToLiveCard(msg, { suppressDomInsert = false } = {}) {
         const taskId = msg?.task_id || activeLiveGroupId || '';
         const rawTs = msg?.ts || new Date().toISOString();
-        const ephemeral = registerEphemeralDecisionFrame(msg);
-        if (ephemeral !== undefined) return ephemeral;
+        registerEphemeralDecisionFrame(msg);
         if (!taskId) {
             return finishLiveCard(taskId, 'done');
         }
@@ -2235,8 +2220,7 @@ export function createChatInstance({
     function updateLiveCardFromProgressMessage(msg, { grantCancelAuthority = true } = {}) {
         const taskId = msg?.task_id || activeLiveGroupId || '';
         const rawTs = msg?.ts || new Date().toISOString();
-        const ephemeral = registerEphemeralDecisionFrame(msg);
-        if (ephemeral !== undefined) return ephemeral;
+        registerEphemeralDecisionFrame(msg);
         const review = attachReviewFromRow(msg, rawTs);
         if (review !== undefined) return review;
         if (!taskId) return false;
@@ -2440,11 +2424,13 @@ export function createChatInstance({
     function updateLiveCardFromLogEvent(evt) {
         if (!evt) return false;
         const eventType = evt.type || evt.event || '';
+        // An ephemeral turn's task_done has no durable status; its conclusion is
+        // the typed `completed` its final frame is stamped with (#691).
+        if (eventType === 'task_done' && evt.ephemeral_decision && !evt.status) evt = { ...evt, status: 'completed' };
         const reference = handleReviewReference(evt);
         if (reference !== undefined) return reference;
         if (!isGroupedTaskEvent(evt)) return false;
-        const ephemeral = registerEphemeralDecisionFrame(evt);
-        if (ephemeral !== undefined) return ephemeral;
+        registerEphemeralDecisionFrame(evt);
         const taskId = getLogTaskGroupId(evt) || activeLiveGroupId || '';
         if (!taskId) return false;
         const rawTs = evt.ts || evt.timestamp || new Date().toISOString();
@@ -3869,24 +3855,13 @@ export function createChatInstance({
                 if (cancelPending || taskKey(detail?.status)) {
                     changed = markReviewAnchor(currentRecord) || changed;
                 }
-                if (cancelPending) {
-                    return Boolean(
-                        reconcileCancelCardFromDetail(currentRecord, taskId, detail) || changed
-                    );
+                const vouched = !missingManagedTaskIds.has(taskId) || activeDirectActivities.has(taskId);
+                if (cancelPending || (!vouched && !isTerminalTaskDetail(detail))) {
+                    return Boolean(reconcileCancelCardFromDetail(currentRecord, taskId, detail) || changed);
                 }
-                if (
-                    !missingManagedTaskIds.has(taskId)
-                    || activeDirectActivities.has(taskId)
-                ) return changed;
-                if (!isTerminalTaskDetail(detail)) {
-                    return Boolean(
-                        reconcileCancelCardFromDetail(currentRecord, taskId, detail) || changed
-                    );
-                }
+                if (vouched) return changed;
                 recordTerminalActivity(taskId);
-                return Boolean(
-                    appendTaskSummaryToLiveCard({ ...detail, task_id: taskId }) || changed
-                );
+                return Boolean(appendTaskSummaryToLiveCard({ ...detail, task_id: taskId }) || changed);
             });
         } catch {
             // No terminal fact was proved. A later existing snapshot retries.
@@ -4033,10 +4008,10 @@ export function createChatInstance({
                 return Boolean(added);
             }
             learnSubagentLineage(msg);
-            const ephemeral = registerEphemeralDecisionFrame(msg);
-            const isEphemeral = ephemeral !== undefined;
+            registerEphemeralDecisionFrame(msg);
+            const isEphemeral = Boolean(explicitTaskId) && ephemeralDecisionTaskIds.has(explicitTaskId);
             // Late duplicate progress cannot resurrect a concluded activity.
-            if (isEphemeral && explicitTaskId && !concludedDirectActivities.has(explicitTaskId)) {
+            if (isEphemeral && !concludedDirectActivities.has(explicitTaskId)) {
                 const existing = activeDirectActivities.get(explicitTaskId) || {};
                 activeDirectActivities.set(explicitTaskId, {
                     activityId: explicitTaskId,
@@ -4048,7 +4023,6 @@ export function createChatInstance({
             }
             if (msg.is_progress) {
                 showTaskIncidentToast(msg);
-                if (isEphemeral) return ephemeral;
                 if (
                     msg.cancelable === true
                     && explicitTaskId
@@ -4092,16 +4066,16 @@ export function createChatInstance({
                 if (!finalizing) markAssistantReply(explicitTaskId);
                 if (changed) incrementUnreadIfNeeded(msg);
                 syncChatStatus();
-                return Boolean(ephemeral || changed);
+                return Boolean(changed);
             }
             if (explicitTaskId && subagentChildParents.has(explicitTaskId)) {
                 const changed = routeSubagentFinalMessageToCard(explicitTaskId, msg);
                 if (typedTerminal) markAssistantReply(explicitTaskId);
                 if (changed) incrementUnreadIfNeeded(msg);
                 syncChatStatus();
-                return Boolean(ephemeral || changed);
+                return Boolean(changed);
             }
-            let changed = Boolean(ephemeral);
+            let changed = false;
             if (finalizing) changed = markLiveCardFinalizing(explicitTaskId) || changed;
             else if (explicitTaskId && typedTerminal) {
                 changed = finishLiveCard(explicitTaskId, taskTerminalPhase(msg)) || changed;

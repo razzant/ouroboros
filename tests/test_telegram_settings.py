@@ -222,6 +222,31 @@ def test_settings_route_returns_bounded_conflict_for_busy_store(tmp_path: Path, 
     }
 
 
+def test_bridge_status_reports_deferred_validation_as_degraded(tmp_path: Path) -> None:
+    """#376: a dead network at startup defers getMe; the status must say so
+    instead of `ready`/absent, in the SAME two-section body the UI renders."""
+    plugin = _load_plugin()
+    merge_settings(tmp_path, {"TELEGRAM_CHAT_ID": "42", "TELEGRAM_COMMAND_MODE": "full_access"})
+    (tmp_path / "bridge_status.json").write_text(
+        json.dumps({"state": "degraded", "reason_code": "telegram_startup_deferred"}), encoding="utf-8",
+    )
+    response = asyncio.run(plugin._make_status(_RouteApi(tmp_path))(None))
+    body = json.loads(response.body)
+    assert set(body) == {"bridge", "mini_app"}
+    assert body["bridge"] == {
+        "state": "degraded",
+        "owner_bound": True,
+        "poller": "degraded",
+        "command_mode": "full_access",
+        "mirror_mode": "all",
+        "reason_code": "telegram_startup_deferred",
+    }
+    # Validation later succeeds → the poller writes `ready` and the overlay lifts.
+    plugin._save_bridge_status(_RouteApi(tmp_path), "ready")
+    body = json.loads(asyncio.run(plugin._make_status(_RouteApi(tmp_path))(None)).body)
+    assert body["bridge"]["state"] == "ready" and "reason_code" not in body["bridge"]
+
+
 def test_combined_status_has_only_bounded_bridge_and_mini_app_sections(tmp_path: Path) -> None:
     plugin = _load_plugin()
     merge_settings(tmp_path, {

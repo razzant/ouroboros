@@ -249,6 +249,9 @@
  *   A cancellation fault names the physical task it could not settle when that
  *   differs from the displayed task id.
  * @property {string=} toast_once
+ * @property {string=} toast_tone
+ *   The incident's valence for the one-shot toast (warn/ok/error); absent =
+ *   the alarm tone.
  * @property {boolean=} task_id_pending
  *   X3: a repair receipt whose managed task id does not exist yet (minted at
  *   promotion) — typed truth instead of an invented id.
@@ -467,6 +470,8 @@
  * @property {string} state
  * @property {string} ts
  * @property {number=} answered_index
+ * @property {string=} comment
+ *   The owner's recorded free-text answer, when one was recorded.
  * @property {number=} chat_id
  */
 

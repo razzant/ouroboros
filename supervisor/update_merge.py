@@ -895,6 +895,11 @@ def _recover_assisted_on_boot(tx: Dict[str, Any], supervisor_ready: bool) -> Dic
                 tx["conflict_paths"] = refreshed_conflicts
         rescue_info: Dict[str, Any] = {}
         if not has_progress:
+            # The server's owner-control path must be resident before the
+            # re-materialized conflict markers land in the live tree (#283).
+            from supervisor.worker_chat_lane import preload_owner_control_path
+
+            preload_owner_control_path()
             # Re-materialization hard-resets the tree: rescue surviving dirty work; the
             # pointer persists BEFORE materialize and reaches the objective via enqueue.
             rescue_info = _g.rescue_into_tx(

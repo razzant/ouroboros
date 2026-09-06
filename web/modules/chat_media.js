@@ -1,6 +1,6 @@
 import { escapeHtmlAttr, escapeHtmlText as escapeHtml } from './utils.js';
 import { showToast } from './toast.js';
-import { downloadViaHostBridge, openViaHostBridge } from './ui_helpers.js';
+import { downloadViaHostBridge, normalizeTone, openViaHostBridge } from './ui_helpers.js';
 import { MAX_LINK_ACTIONS } from './api_types.js';
 import { apiFetch } from './api_client.js';
 
@@ -62,15 +62,19 @@ const shownIncidentToastKeys = new Set();
 
 export function showTaskIncidentToast(msg) {
     const incident = String(msg?.task_incident || '').trim();
-    if (!incident) return;
+    if (!incident) return null;
     const key = String(msg?.toast_once || `${msg?.task_id || ''}:${incident}`).trim();
-    if (!key || shownIncidentToastKeys.has(key)) return;
+    if (!key || shownIncidentToastKeys.has(key)) return null;
     shownIncidentToastKeys.add(key);
     if (shownIncidentToastKeys.size > 500) {
         const oldest = shownIncidentToastKeys.values().next().value;
         shownIncidentToastKeys.delete(oldest);
     }
-    showToast(String(msg?.content || msg?.text || incident), 'error');
+    // The incident's valence rides the frame (#628): a recovery is good news,
+    // a wait is a warning, an exhaustion or a cancellation fault is the alarm.
+    // No tone on the frame (older producers, cancellation_fault) keeps the
+    // alarm tone; the text is never parsed for it.
+    return showToast(String(msg?.content || msg?.text || incident), normalizeTone(msg?.toast_tone || 'error', 'error'));
 }
 
 // Best-effort teardown of temporary uploads after a failed send; lives with

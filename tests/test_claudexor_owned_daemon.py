@@ -2376,7 +2376,7 @@ def test_login_input_409_conflicts_ride_through_typed(monkeypatch, tmp_path):
 # ---------------------------------------------------------------------------
 
 
-def _agent_with_metadata(task, task_id="child-1"):
+def _agent_with_metadata(task, task_id="child-1", cap_info=None):
     import types
 
     from ouroboros.agent import OuroborosAgent
@@ -2392,7 +2392,7 @@ def _agent_with_metadata(task, task_id="child-1"):
     # record_fields) — the same principle this file always asserted ("a
     # projection of the decision, never a second derivation"), one level
     # stronger: the projection reads the durable record, not a live object.
-    agent._record_executor_facts(task if isinstance(task, dict) else {})
+    agent._record_executor_facts(task if isinstance(task, dict) else {}, cap_info)
     return agent, types
 
 
@@ -2409,18 +2409,62 @@ def test_resolved_harness_route_reaches_the_frame_assembler():
     assert frame["delegation_role"] == "subagent"
 
 
-def test_no_executor_fact_when_the_run_is_native_blocked_or_undecided():
+def test_no_executor_fact_when_the_run_is_native_or_undecided():
     """Absent fact -> empty/absent, so the renderer draws NO chip: the native
     API path is the ordinary case and must not print 'api' on every bubble."""
     native, _ = _agent_with_metadata(
         {"effective_executor": "native", "executor_route": ""}, "child-2")
     assert native._subagent_progress_meta("running")["executor_route"] == ""
-    # A blocked or unresolved dispatch records nothing at all.
-    blocked, _ = _agent_with_metadata(
-        {"effective_executor": "blocked", "executor_route": "codex"}, "child-3")
-    assert "executor_route" not in blocked._current_task_metadata
     undecided, _ = _agent_with_metadata({}, "child-4")
     assert "executor_route" not in undecided._current_task_metadata
+
+
+def test_blocked_harness_pin_projects_the_refused_route_from_cap_info_only():
+    """#363: a harness pin the resolution refused ends as a typed $0 terminal
+    whose child card must say `{harness} · blocked`. The route the pin named
+    reaches the frame from the cap_info projection `_fill_executor_blocked_caps`
+    writes — the durable record keeps its EMPTY route (the completion-seam
+    evidence gate stays closed for a child that never ran), and a blocked
+    API-model actor, which names no route, stays chip-less."""
+    blocked, _ = _agent_with_metadata(
+        {"effective_executor": "blocked", "executor_route": ""}, "child-3",
+        cap_info={"executor_blocked_reason": "subscription_window_exhausted",
+                  "executor_blocked_requested": "harness",
+                  "executor_blocked_route": "codex"},
+    )
+    frame = blocked._subagent_progress_meta("failed")
+    assert frame["executor_route"] == "codex"
+    assert blocked._current_task_metadata["effective_executor"] == "blocked"
+    # No refused route in cap_info (API-model actor, or a pin with no route
+    # configured at all): nothing is recorded, no chip.
+    api_model, _ = _agent_with_metadata(
+        {"effective_executor": "blocked", "executor_route": ""}, "child-5",
+        cap_info={"executor_blocked_reason": "credentials_unavailable",
+                  "executor_blocked_requested": "native", "executor_blocked_route": ""},
+    )
+    assert "executor_route" not in api_model._current_task_metadata
+    legacy_call, _ = _agent_with_metadata({"effective_executor": "blocked", "executor_route": "codex"}, "child-6")
+    assert "executor_route" not in legacy_call._current_task_metadata
+    # The cap_info projection itself names the refused route from the resolution.
+    from types import SimpleNamespace
+
+    from ouroboros.subagent_dispatch_notes import _fill_executor_blocked_caps
+
+    cap_info = {}
+    dispatch = SimpleNamespace(
+        blocked=True,
+        executor_resolution=SimpleNamespace(
+            requested="harness", reason="subscription_window_exhausted", reset_at="2026-09-07T00:00:00Z",
+            route=SimpleNamespace(route_id="codex=gpt-5.6-sol"),
+        ),
+        delta=SimpleNamespace(reason=""),
+    )
+    _fill_executor_blocked_caps(SimpleNamespace(), cap_info, dispatch)
+    assert cap_info["executor_blocked_route"] == "codex=gpt-5.6-sol"
+    cap_info = {}
+    dispatch.executor_resolution.route = None
+    _fill_executor_blocked_caps(SimpleNamespace(), cap_info, dispatch)
+    assert cap_info["executor_blocked_route"] == ""
 
 
 def test_the_executor_fact_survives_history_replay_and_the_frozen_contract():

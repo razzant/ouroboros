@@ -337,8 +337,8 @@ class LocalChatBridge:
         image_b64 = str(image_base64 or "").strip()
         if not clean_text and caption_text:
             clean_text = caption_text
-        if not clean_text and not image_b64:
-            return
+        if not clean_text and not image_b64 and not (task_metadata or {}).get("chat_attachment_uploads"):
+            return  # nothing to say and nothing attached (a file-only message carries uploads)
         # Invariant: the default chat/user id is the web owner (1). External
         # transports (source != "web") MUST pass explicit ids — the Host Service
         # injects 0 for unidentified senders so they can never bind/own the web
@@ -889,6 +889,7 @@ class LocalChatBridge:
         state: str,
         answered_index: Optional[int] = None,
         chat_id: int = 0,
+        comment: Optional[str] = None,
     ) -> None:
         """Broadcast a quiz lifecycle update to already-rendered cards.
 
@@ -897,6 +898,8 @@ class LocalChatBridge:
         must never masquerade as a new card. Durability lives in the
         owner_quiz task-result projection (history replay merges it) — this
         frame is the live half only, so a lost broadcast heals on reload.
+        ``comment`` is the owner's recorded free-text answer (#471): the live
+        card renders it exactly as the replayed one does; absent when empty.
         """
         if not self._broadcast_fn:
             return
@@ -909,6 +912,8 @@ class LocalChatBridge:
         }
         if answered_index is not None:
             msg["answered_index"] = int(answered_index)
+        if str(comment or ""):
+            msg["comment"] = str(comment)
         if int(chat_id or 0):
             msg["chat_id"] = int(chat_id or 0)
         try:

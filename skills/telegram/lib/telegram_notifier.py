@@ -146,6 +146,16 @@ def _summary_ids_in_tail(api, limit: int = 200) -> list:
     return list(summaries.items())
 
 
+# The host's task-summary phase vocabulary (project_dialogue.OUTCOME_PHASE_HEADLINE)
+# rendered as this transport's completion word and icon. Unknown/legacy phases
+# fall back to the axes rule below.
+_PHASE_WORDS = {
+    "en": {"done": "done", "warn": "done with warnings", "error": "failed", "cancelled": "cancelled"},
+    "ru": {"done": "готова", "warn": "готова с предупреждениями", "error": "ошибка", "cancelled": "отменена"},
+}
+_PHASE_ICONS = {"done": "✅", "warn": "⚠️", "error": "❌", "cancelled": "🚫"}
+
+
 async def _check_tasks_notify(
     api, settings: Dict[str, Any], chat_id: int, state: Dict[str, Any], lang: str,
     *, trust_env: bool = False,
@@ -179,19 +189,22 @@ async def _check_tasks_notify(
         oa = e.get("outcome_axes")
         outcome = _axis_status(oa, "lifecycle")
         degraded = _axis_status(oa, "execution").lower() in ("degraded", "best_effort")
-        if outcome and outcome not in ("completed", "done"):
-            parts.append(outcome)
-        tail = (" · " + " · ".join(parts)) if parts else ""
         # The host stamps one status phase on its own task rows; consume it
-        # instead of re-deriving a third status ladder from the axes. Legacy
-        # rows and pre-finalization "working" rows keep the axes rule.
+        # instead of re-deriving a third status ladder from the axes: the phase
+        # picks the icon AND the completion word (#538), so a failed or
+        # cancelled task is never announced as "done". Legacy rows and
+        # pre-finalization "working" rows keep the axes rule.
         phase = str(e.get("outcome_phase") or "")
-        if phase and phase != "working":
-            healthy = phase == "done"
+        words = _PHASE_WORDS["ru" if lang == "ru" else "en"]
+        if phase in words:
+            icon, word = _PHASE_ICONS[phase], words[phase]
         else:
             healthy = outcome in ("", "completed", "done") and not degraded
-        icon = "✅" if healthy else "⚠️"
-        msg = (f"{icon} Задача {tid[:8]} готова{tail}" if lang == "ru" else f"{icon} Task {tid[:8]} done{tail}")
+            icon, word = ("✅" if healthy else "⚠️"), words["done"]
+            if outcome and outcome not in ("completed", "done"):
+                parts.append(outcome)
+        tail = (" · " + " · ".join(parts)) if parts else ""
+        msg = (f"{icon} Задача {tid[:8]} {word}{tail}" if lang == "ru" else f"{icon} Task {tid[:8]} {word}{tail}")
         send_outcome, exc = await _push_notification(api, chat_id, msg, trust_env=trust_env)
         if send_outcome == "transient":
             # Stop the batch on the first transient failure: every further

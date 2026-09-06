@@ -803,6 +803,44 @@ def _data_dir() -> pathlib.Path:
     ))
 
 
+def _safe_upload_basename(raw_name: str) -> str:
+    """The stored basename of a chat upload: basename only, spaces → ``_``, 200 chars."""
+    return os.path.basename(str(raw_name or "")).replace(" ", "_")[:200] or "upload"
+
+
+def _unique_upload_name(raw_name: str) -> str:
+    """``<uuid32>_<safe basename>`` — the ONE stored-name shape of chat uploads.
+
+    The 32-hex prefix is what ``artifacts.stage_task_attachments`` strips to
+    judge the secret-name rule on the ORIGINAL basename."""
+    return f"{uuid.uuid4().hex}_{_safe_upload_basename(raw_name)}"
+
+
+def store_chat_upload(
+    source: pathlib.Path, display_name: str = "", *, data_dir: pathlib.Path | None = None,
+) -> pathlib.Path:
+    """Copy an already-local file into ``data/uploads`` as a chat upload.
+
+    Same store, naming and 50 MB cap as ``api_chat_upload`` (the browser
+    paperclip); the Host Service uses it when a transport skill relays an
+    inbound file (#668), so the worker sees ONE upload family. Raises
+    ``ChatUploadPayloadTooLarge`` or ``OSError``; never publishes a partial copy."""
+    source = pathlib.Path(source)
+    if source.stat().st_size > _CHAT_UPLOAD_MAX_BYTES:
+        raise ChatUploadPayloadTooLarge("File exceeds 50 MB limit")
+    upload_dir = (pathlib.Path(data_dir) if data_dir is not None else _data_dir()) / "uploads"
+    upload_dir.mkdir(parents=True, exist_ok=True)
+    dest = upload_dir / _unique_upload_name(display_name or source.name)
+    tmp_dest = upload_dir / f".{uuid.uuid4().hex}.uploading"
+    try:
+        shutil.copyfile(source, tmp_dest)
+        tmp_dest.replace(dest)
+    finally:
+        with suppress(OSError):
+            tmp_dest.unlink()
+    return dest
+
+
 async def api_chat_upload(request: Request) -> JSONResponse:
     """Upload a chat attachment to data/uploads/ with a unique name."""
     # Quick Content-Length reject before multipart parsing.
@@ -840,9 +878,7 @@ async def api_chat_upload(request: Request) -> JSONResponse:
     if not isinstance(upload, UploadFile):
         return JSONResponse({"ok": False, "error": "No valid file field"}, status_code=400)
 
-    raw_name = getattr(upload, "filename", "") or "upload"
-    safe_base = os.path.basename(raw_name).replace(" ", "_")[:200] or "upload"
-
+    safe_base = _safe_upload_basename(getattr(upload, "filename", "") or "upload")
     # Unique stored names avoid repeated-upload conflicts.
     unique_name = f"{uuid.uuid4().hex}_{safe_base}"
 

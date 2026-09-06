@@ -551,3 +551,46 @@ def test_logs_js_backfills_all_streams_and_dedupes_without_dropping_preconnect()
     assert "ws.on('open'" in src
     # …without a load-time timestamp skip that could drop the pre-connect window.
     assert "loadStart" not in src
+
+
+def test_llm_call_failure_reaches_the_live_log_exactly_once(tmp_path, production_sink):
+    """#355: one LLM failure was two Logs rows — the durable `llm_api_error`
+    append (forwarded live by the events tail) plus a live-only
+    `llm_round_error` sibling from the same producer. The producer now writes
+    the durable row only; through the production sink that is ONE frame."""
+    import inspect
+    import json
+    import queue as queue_mod
+
+    from ouroboros.loop_llm_call import _LlmErrorContext, _record_llm_call_error
+
+    src = inspect.getsource(_record_llm_call_error)
+    assert '"llm_round_error"' not in src
+    assert '"type": "llm_api_error"' in src
+
+    live = queue_mod.Queue()
+    ctx = _LlmErrorContext(
+        task_id="m1", task_type="task", execution_id="exec-1", round_id="round-1",
+        llm_call_id="call-1", round_idx=1, attempt=0, model="provider/model",
+        request_ref=None, drive_logs=tmp_path / "logs", event_queue=live,
+        accumulated_usage={}, context_fit_event_fields={},
+    )
+    (tmp_path / "logs").mkdir()
+
+    class _ProviderError(RuntimeError):
+        status_code = 503
+
+    _record_llm_call_error(_ProviderError("upstream unavailable"), ctx)
+
+    rows = [json.loads(line) for line in (tmp_path / "logs" / "events.jsonl").read_text().splitlines()]
+    assert [row["type"] for row in rows if row["type"].startswith("llm_")] == ["llm_api_error"]
+    # The producer's live queue carries no second copy of the same failure.
+    live_items = []
+    while not live.empty():
+        live_items.append(live.get_nowait())
+    assert not any(
+        str((item.get("data") or item).get("type") or "") == "llm_round_error"
+        for item in live_items if isinstance(item, dict)
+    ), live_items
+    # Through the production sink the durable append is the one live frame.
+    assert [f["type"] for f in production_sink.frames if str(f.get("type", "")).startswith("llm_")] == ["llm_api_error"]

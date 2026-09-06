@@ -1059,3 +1059,81 @@ def test_main_history_admits_project_started_row_and_project_thread_excludes_it(
 
     # Replay-safe: a second read of the same durable stream is identical.
     assert _messages(1) == main
+
+
+def test_chat_history_replays_the_live_subtree_ceiling_for_a_running_root(tmp_path, monkeypatch):
+    """#469: a root still running replays the SAME non-final subtree ceiling its
+    heartbeat pushes live (one cost owner, `live_root_cost_projection`), stamped
+    on its latest in-window progress row; a child never carries it and a root
+    whose ledger has no attributable rows stays absent — unknown is never zero
+    and never final."""
+    from ouroboros import usage_accounting
+
+    seen_roots = []
+
+    def _projection(_drive, *, root_task_id=""):
+        seen_roots.append(root_task_id)
+        if root_task_id == "root-empty":
+            return {"attempt_counts": {"metadata_only": 1}, "subscription_sessions": 0}
+        return {
+            "accounted_usd": 3.5, "reserved_usd": 0.25, "unresolved_upper_bound_usd": 0.5,
+            "unknown_unmetered": 1, "non_final_rows": 2, "integrity_degraded": False,
+            "attempt_counts": {"resolved": 4}, "subscription_sessions": 0,
+        }
+
+    monkeypatch.setattr(usage_accounting, "usage_projection", _projection)
+    logs = tmp_path / "logs"
+    logs.mkdir()
+    (logs / "chat.jsonl").write_text("", encoding="utf-8")
+    rows = [
+        {"ts": "2026-09-06T00:00:01Z", "content": "root working", "task_id": "root-live"},
+        {"ts": "2026-09-06T00:00:02Z", "content": "root still working", "task_id": "root-live"},
+        {"ts": "2026-09-06T00:00:03Z", "content": "child working", "task_id": "child-live",
+         "delegation_role": "subagent", "parent_task_id": "root-live", "root_task_id": "root-live",
+         "subagent_task_id": "child-live", "subagent_event": "running"},
+        {"ts": "2026-09-06T00:00:04Z", "content": "quiet root", "task_id": "root-empty"},
+        {"ts": "2026-09-06T00:00:05Z", "content": "done root", "task_id": "root-done"},
+    ]
+    (logs / "progress.jsonl").write_text(
+        "".join(json.dumps(row) + "\n" for row in rows), encoding="utf-8",
+    )
+    results = tmp_path / "task_results"
+    results.mkdir()
+    for task_id, status, extra in (
+        ("root-live", "running", {}),
+        ("child-live", "running", {"delegation_role": "subagent", "parent_task_id": "root-live",
+                                   "root_task_id": "root-live"}),
+        ("root-empty", "running", {}),
+        ("root-done", "completed", {"accounted_upper_bound_usd": 0.42, "cost_final": True}),
+    ):
+        (results / f"{task_id}.json").write_text(json.dumps({
+            "_schema_version": 1, "task_id": task_id, "status": status, "metadata": {}, **extra,
+        }), encoding="utf-8")
+
+    endpoint = make_chat_history_endpoint(tmp_path)
+    response = asyncio.run(endpoint(SimpleNamespace(query_params={"limit": "50"})))
+    payload = json.loads(response.body.decode("utf-8"))["messages"]
+
+    live_rows = [m for m in payload if m.get("task_id") == "root-live"]
+    assert len(live_rows) == 2
+    first, latest = sorted(live_rows, key=lambda m: m["ts"])
+    assert "accounted_upper_bound_usd_with_children" not in first
+    # honest_accounted_amount: the projection's accounted upper bound (which
+    # already folds settled + reserved + unresolved), never re-summed here.
+    assert latest["accounted_upper_bound_usd_with_children"] == 3.5
+    assert latest["cost_final"] is False
+    assert latest["cost_with_children_partial"] is True
+    assert latest["cost_accounting_status"] == "available"
+    assert (latest["reserved_usd"], latest["unresolved_upper_bound_usd"]) == (0.25, 0.5)
+    assert "task_terminal_status" not in latest  # still running, never finalized by replay
+    child = next(m for m in payload if m.get("task_id") == "child-live")
+    assert "accounted_upper_bound_usd_with_children" not in child
+    empty = next(m for m in payload if m.get("task_id") == "root-empty")
+    assert "accounted_upper_bound_usd_with_children" not in empty
+    assert "cost_final" not in empty
+    done = next(m for m in payload if m.get("task_id") == "root-done")
+    assert done["task_terminal_status"] == "completed"
+    assert done["accounted_upper_bound_usd"] == 0.42 and done["cost_final"] is True
+    # Only ROOT lineage reaches the ledger; the finished root is served by its
+    # durable terminal truth, not by a live read.
+    assert sorted(seen_roots) == ["root-empty", "root-live"]

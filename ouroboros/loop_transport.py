@@ -101,23 +101,28 @@ class TransportWaitEpisode:
         iteration, so a zero-wait terminal never claims it waited."""
         return time.monotonic() - self.started_monotonic if self.wait_iterations else 0.0
 
-    def incident(self, task_id: str, phase: str) -> Optional[Dict[str, str]]:
+    def incident(self, task_id: str, phase: str, tone: str = "") -> Optional[Dict[str, str]]:
         """Typed toast pair for an ephemeral episode's owner note.
 
-        The browser renders progress rows for managed tasks and direct turns
-        but not for ephemeral decision turns, whose only owner-visible wait
-        surface is the one-shot ``task_incident`` toast (``toast_once`` dedupes
-        replay; the millisecond entry stamp keeps two episodes of one turn
-        distinct). Managed and direct episodes carry none.
+        An ephemeral decision turn's episode-boundary notes carry the one-shot
+        ``task_incident`` toast (``toast_once`` dedupes replay; the millisecond
+        entry stamp keeps two episodes of one turn distinct). Managed and
+        direct episodes carry none. ``tone`` is the note's valence for the
+        toast (#628): the call site that knows whether the boundary is a wait,
+        a recovery or an exhaustion stamps it as the optional ``toast_tone``;
+        the browser falls back to its alarm tone when absent.
         """
         if not self.ephemeral:
             return None
-        return {
+        pair = {
             "task_incident": "network_wait",
             "toast_once": (
                 f"{task_id}:network_wait:{phase}:{int(self.started_monotonic * 1000)}"
             ),
         }
+        if tone:
+            pair["toast_tone"] = str(tone)
+        return pair
 
 
 def emit_network_wait_event(
@@ -250,7 +255,7 @@ def reconcile_transport_wait(
             "🌐 Could not establish a provider connection — waiting and "
             "redialing automatically (failed attempts are $0)."
             + ("" if interactive else " Stop cancels."),
-            incident=episode.incident(task_id, "entered"),
+            incident=episode.incident(task_id, "entered", "warn"),
         )
         return episode
     elapsed = time.monotonic() - episode.started_monotonic
@@ -264,7 +269,7 @@ def reconcile_transport_wait(
                 emit_progress(
                     f"🌐 Provider connection still unavailable after {elapsed / 60.0:.1f} min "
                     "— continuing on the local fallback model.",
-                    incident=episode.incident(task_id, "ended"),
+                    incident=episode.incident(task_id, "ended", "warn"),
                 )
         else:
             emit_network_wait_event(
@@ -273,7 +278,7 @@ def reconcile_transport_wait(
             )
             emit_progress(
                 f"🌐 Provider connection restored after {elapsed / 60.0:.1f} min — resuming.",
-                incident=episode.incident(task_id, "recovered"),
+                incident=episode.incident(task_id, "recovered", "ok"),
             )
         return None
     if (
@@ -291,7 +296,7 @@ def reconcile_transport_wait(
             emit_progress(
                 f"🌐 Provider connection restored after {elapsed / 60.0:.1f} min — the redial "
                 f"got past the connect phase and failed as {error_kind}; ordinary failure policy resumes.",
-                incident=episode.incident(task_id, "recovered"),
+                incident=episode.incident(task_id, "recovered", "warn"),
             )
         return None
     return episode
@@ -469,7 +474,7 @@ def transport_wait_step(
             emit_progress(
                 "🌐 Stopped waiting for a provider connection after "
                 f"{elapsed / 60.0:.1f} min — this turn ends as a provider outage.",
-                incident=episode.incident(task_id, "ended"),
+                incident=episode.incident(task_id, "ended", "error"),
             )
         return False
 

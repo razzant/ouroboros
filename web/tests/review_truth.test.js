@@ -4,6 +4,7 @@ import test from 'node:test';
 import {
     executorChip,
     formatReviewProjection,
+    keepStickyExecutorChip,
     summarizeChatLiveEvent,
     taskOutcomeSeverity,
 } from '../modules/log_events.js';
@@ -217,6 +218,32 @@ test('a delegated frame yields a small harness chip; an ordinary frame yields no
     assert.equal(executorChip({}), null);
     assert.equal(executorChip({ executor_route: '' }), null);
     assert.equal(executorChip(null), null);
+});
+
+test('a harness pin the resolution refused reads `{harness} · blocked`, never dispatched/no run yet (#363)', () => {
+    // The typed $0 terminal (reason_code subagent_executor_unavailable) plus
+    // the route the pin named: the chip says WHO refused and that the child
+    // never ran. Checked before the evidence branches, so an empty custody
+    // read cannot print "no run yet" over a child that was never dispatched.
+    const blocked = executorChip({ executor_route: 'codex', reason_code: 'subagent_executor_unavailable' });
+    assert.equal(blocked.label, 'Codex · blocked');
+    assert.equal(blocked.harness, 'codex');
+    assert.equal(blocked.hasEvidence, true, 'evidence-grade: a later dispatch-shaped frame cannot downgrade it');
+    assert.match(blocked.title, /NOT run/);
+    assert.doesNotMatch(blocked.title, /subscription/i);
+    // A configured-session refusal after dispatch reaches the seam WITH an
+    // (empty) evidence block: still blocked, not "no run yet".
+    const sessionRefused = executorChip({
+        executor_route: 'claude', reason_code: 'subagent_executor_unavailable',
+        execution_evidence: { delegated_runs_started: 0, delegated_runs_settled: 0 },
+        actual_substrate: 'native_only',
+    });
+    assert.equal(sessionRefused.label, 'Claude Code · blocked');
+    assert.equal(keepStickyExecutorChip(blocked, executorChip({ executor_route: 'codex' })), true);
+    // A blocked API-model actor names no route: no harness chip is invented.
+    assert.equal(executorChip({ reason_code: 'subagent_executor_unavailable' }), null);
+    // Any other reason code keeps the ordinary layered truth.
+    assert.equal(executorChip({ executor_route: 'codex', reason_code: 'tool_failure' }).label, 'Codex · dispatched');
 });
 
 test('the chip is layered truth: decision before evidence, receipt only from evidence', () => {

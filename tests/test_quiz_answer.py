@@ -105,7 +105,7 @@ def test_task_done_seam_reconciles_and_broadcasts(tmp_path, monkeypatch):
     frames = []
 
     class _Bridge:
-        def send_quiz_state(self, quiz_id, task_id, state, answered_index=None, chat_id=0):
+        def send_quiz_state(self, quiz_id, task_id, state, answered_index=None, chat_id=0, comment=None):
             frames.append((quiz_id, task_id, state))
 
     import supervisor.message_bus as mb
@@ -152,7 +152,7 @@ def test_ingress_answers_a_live_quiz_end_to_end(tmp_path, monkeypatch):
     frames = []
 
     class _Bridge:
-        def send_quiz_state(self, quiz_id, task_id, state, answered_index=None, chat_id=0):
+        def send_quiz_state(self, quiz_id, task_id, state, answered_index=None, chat_id=0, comment=None):
             frames.append((quiz_id, task_id, state, answered_index))
 
     import supervisor.message_bus as mb
@@ -607,8 +607,8 @@ def test_own_answer_needs_no_option_index(tmp_path, monkeypatch):
     frames = []
 
     class _Bridge:
-        def send_quiz_state(self, quiz_id, task_id, state, answered_index=None, chat_id=0):
-            frames.append((quiz_id, state, answered_index))
+        def send_quiz_state(self, quiz_id, task_id, state, answered_index=None, chat_id=0, comment=None):
+            frames.append((quiz_id, state, answered_index, comment))
 
     import supervisor.message_bus as mb
 
@@ -620,7 +620,9 @@ def test_own_answer_needs_no_option_index(tmp_path, monkeypatch):
     body = resp.json()
     assert body["state"] == "answered"
     assert "answered_index" not in body  # absent, never fabricated
-    assert frames == [("q1", "answered", None)]
+    # #471: the live frame carries the recorded comment so the open card can
+    # render `Owner's answer:` exactly as the replayed one does.
+    assert frames == [("q1", "answered", None, "neither — use duckdb")]
 
     block = quiz_states(tmp_path, "task-1")["q1"]
     assert block["state"] == STATE_ANSWERED
@@ -778,3 +780,21 @@ def test_projection_refuses_foreign_schema_and_stamps_its_own_write(tmp_path):
     with pytest.raises(ValueError, match="TASK_RESULT_SCHEMA_REFUSED"):
         record_asked(tmp_path, "t-schema", quiz_id="q2", question="?", options=["A"])
     assert json.loads(path.read_text(encoding="utf-8")) == foreign
+
+
+def test_quiz_state_frame_carries_the_comment_only_when_recorded():
+    """#471: `send_quiz_state` puts the owner's free-text answer on the live
+    `quiz_state` frame when one was recorded and leaves the key absent
+    otherwise (an option-only answer, an expiry, a supersede)."""
+    from supervisor.message_bus import LocalChatBridge
+
+    frames = []
+    bridge = LocalChatBridge.__new__(LocalChatBridge)
+    bridge._broadcast_fn = frames.append
+    bridge.send_quiz_state("q1", "t1", "answered", answered_index=1)
+    bridge.send_quiz_state("q1", "t1", "answered", comment="neither — use duckdb")
+    bridge.send_quiz_state("q1", "t1", "expired_terminal", comment="")
+    assert [("comment" in f, f.get("comment")) for f in frames] == [
+        (False, None), (True, "neither — use duckdb"), (False, None),
+    ]
+    assert frames[0]["answered_index"] == 1 and "answered_index" not in frames[1]

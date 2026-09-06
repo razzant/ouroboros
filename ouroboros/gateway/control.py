@@ -815,6 +815,12 @@ def _start_assisted_merge_fenced(plan: dict, tx: dict) -> JSONResponse:
              **({"stash_note": note} if note else {})},
             status_code=409,
         )
+    # The server's own owner-control path must be resident BEFORE conflict
+    # markers reach the live tree: a first function-local import after that
+    # point raises SyntaxError on a conflicted module (#283). Best effort.
+    from supervisor.worker_chat_lane import preload_owner_control_path
+
+    preload_owner_control_path()
     # Final late-mutation guard: the resolver boot above can wait ~90s and the
     # writer fence stops Ouroboros, not humans — re-verify the exact planned
     # state IMMEDIATELY before the first destructive command.

@@ -582,7 +582,12 @@ def test_ephemeral_routing_keeps_annotation_and_final_in_history_projection(tmp_
     assert progress["ephemeral_decision"] is True
 
 
-def test_ephemeral_decision_web_frames_never_create_task_card_or_second_receipt():
+def test_ephemeral_decision_web_frames_render_activity_without_task_claim_or_second_receipt():
+    """#691: a decision (ephemeral) turn's work is VISIBLE on the ordinary live
+    card — its progress, tool events and typed conclusion go through the same
+    paths a direct turn uses — while the marker still keeps every task claim
+    off it: no "Turn into project" (the factory gate), no blanket suppression,
+    and exactly one inline answer receipt."""
     from pathlib import Path
 
     root = Path(__file__).resolve().parents[1]
@@ -591,12 +596,15 @@ def test_ephemeral_decision_web_frames_never_create_task_card_or_second_receipt(
     assert "const ephemeralDecisionTaskIds = new Set();" in chat
     register = chat[
         chat.index("function registerEphemeralDecisionFrame"):
-        # buildMessageKey moved to chat_activity.js; the next stable symbol
-        # after the register pair bounds the slice now.
-        chat.index("function readPendingReconnectBanner")
+        chat.index("function clearPendingReconnectBanner")
     ]
+    # The marker is remembered, and that is ALL the register does: no card
+    # removal, no task-state wipe, no suppression verdict for the callers.
     assert "ephemeralDecisionTaskIds.add(taskId);" in register
-    assert "record.root?.remove();" in register
+    assert "record.root?.remove();" not in register
+    assert "liveCardRecords.delete" not in register
+    assert "return ephemeral" not in chat
+    assert "registerEphemeralDecisionFrameMutation" not in chat
 
     card_factory = chat[
         chat.index("function createLiveCardRecord"):
@@ -604,22 +612,36 @@ def test_ephemeral_decision_web_frames_never_create_task_card_or_second_receipt(
     ]
     assert "!ephemeralDecisionTaskIds.has(normalizedGroupId)" in card_factory
 
+    # Every consumer still registers the marker BEFORE it resolves the card,
+    # and none of them returns early on it: tool telemetry reaches the ordinary
+    # reveal gate, progress rows reach the ordinary progress path.
     logs = chat[
         chat.index("function updateLiveCardFromLogEvent"):
         chat.index("function addMessage")
     ]
-    assert chat.count("if (ephemeral !== undefined) return ephemeral;") == 3
     assert logs.index("registerEphemeralDecisionFrame(evt)") < logs.index(
         "const taskId = getLogTaskGroupId(evt)"
     )
+    assert logs.index("registerEphemeralDecisionFrame(evt)") < logs.index("applyEventTelemetry")
+    for fn in ("function updateLiveCardFromProgressMessage", "function appendTaskSummaryToLiveCard"):
+        body = chat[chat.index(fn):chat.index("\n    }\n", chat.index(fn))]
+        assert "registerEphemeralDecisionFrame(msg);" in body, fn
 
     fanout = chat[
         chat.index("onWs('chat'"):
         chat.index("onWs('message_annotation'")
     ]
-    # Inline ephemeral answers are not blanket-suppressed. Typed routing turns
-    # retain any non-empty final answer while their progress/card stays hidden.
-    assert "const isEphemeral = ephemeral !== undefined;" in fanout
-    assert fanout.count("if (isEphemeral) return ephemeral;") == 1
-    assert fanout.index("showTaskIncidentToast(msg);") < fanout.index("if (isEphemeral) return ephemeral;")
-    assert "addMessage(msg.content" in fanout
+    assert "ephemeralDecisionTaskIds.has(explicitTaskId)" in fanout
+    assert "kind: 'ephemeral_decision'" in fanout
+    assert "if (isEphemeral) return" not in fanout
+    # One receipt: the toast dedupe still runs on the progress path and the
+    # final answer is still added exactly by the ordinary bubble path.
+    assert "showTaskIncidentToast(msg);" in fanout
+    assistant_fanout = fanout[fanout.index("const explicitTaskId"):]
+    # The final-answer bubble path (the one that renders an ephemeral turn's
+    # answer) exists exactly once; the other addMessage there is the typed
+    # system/pointer row of a duplicate lifecycle acknowledgement.
+    assert assistant_fanout.count("addMessage(msg.content, msg.role") == 1
+    # Authority is never granted by display: Cancel needs the host-attested
+    # marker, which an ephemeral frame never carries.
+    assert "msg.cancelable === true" in fanout

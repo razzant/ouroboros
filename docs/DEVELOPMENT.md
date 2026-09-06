@@ -2099,10 +2099,13 @@ by "Provider Independence" above. Call-site imperatives:
   actual control reason through wait termination: owner Wrap up is distinct
   from deadline/budget finalization and still sends no new summary request.
 - The transport-wait episode's owner notes always pass `incident=` — the
-  typed `task_incident`/`toast_once` pair on an ephemeral turn's
+  typed `task_incident`/`toast_once` pair (plus the optional `toast_tone`
+  valence the call site stamps: warn/ok/error) on an ephemeral turn's
   episode-boundary notes (entry, recovery/closure, exhaustion), `None` on
   every other note — so any `emit_progress` callable handed to `run_llm_loop`
-  must accept the `incident=` keyword; `OuroborosAgent._emit_progress` is the
+  must accept the `incident=` keyword; the browser's `showTaskIncidentToast`
+  reads the tone through `normalizeTone` and keeps the alarm tone for a
+  frame without one — never parse `toast_once` or the text for it; `OuroborosAgent._emit_progress` is the
   production implementation and a test fake mirrors it
   (`lambda text, *, incident=None: ...`).
 - Timeout contract classes differ; keep the axes separate. A transport
@@ -2421,6 +2424,16 @@ commit review.
   the update transaction before mutation; reopen writers only after a
   verified abort/rollback or a healthy restart. Delayed evolution cleanup
   acquires the same update lock and honors the same admission owner.
+- Conversation admission is separate from repo-writing permission. The chat
+  lanes refuse turns only during destructive windows (apply/replace/rollback
+  prologue, materialization). While the ONE authorized assisted resolver holds
+  the repository (`assisted_resolution` / `committing_assisted`) Main keeps
+  answering, the registry guard still refuses repo tools to every other task,
+  and steering reaches the resolver through the ordinary `steer_task` mailbox
+  (`supervisor/worker_chat_lane.py::conversation_admitted_during_update`).
+  The server's owner-control path is imported BEFORE conflict markers land in
+  the live tree (`preload_owner_control_path`, called after the resolver
+  readiness proof and before a boot re-materialization).
 - Dirty local work never enters merge history: the apply stashes it and
   restores it as uncommitted content; a conflicting restore keeps the stash
   and discloses the recovery command. The reviewed assisted resolver runs
