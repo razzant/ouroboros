@@ -142,6 +142,26 @@ export function facetKnown(readState) {
     return readState === READ_OK;
 }
 
+/** Current blocking evidence, independent of subject and model selection. */
+export function quotaConstraintFact(constraint, nowMs = Date.now()) {
+    const cooldown = String(constraint?.cooldown_until || '').trim();
+    const cooldownAt = Date.parse(cooldown);
+    // Preserve the explicit cooldown's conservative unknown-clock contract.
+    const cooling = Boolean(cooldown)
+        && (!Number.isFinite(cooldownAt) || cooldownAt > nowMs);
+    const used = constraint?.used_ratio;
+    const full = typeof used === 'number' && Number.isFinite(used) && used >= 1;
+    const reset = String(constraint?.resets_at || '').trim();
+    const resetAt = Date.parse(reset);
+    const exhausted = full && Number.isFinite(resetAt) && resetAt > nowMs;
+    return {
+        exhausted: cooling || exhausted,
+        resetsAt: cooling ? cooldown : (exhausted ? reset : ''),
+        // A non-blocking incomplete reading never certifies available quota.
+        unknown: full && !cooling && !exhausted,
+    };
+}
+
 export function shouldPollStatus({
     hasSubscribers = false, hidden = false, surfaceVisible = false, held = false,
 } = {}) {

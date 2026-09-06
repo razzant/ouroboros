@@ -40,3 +40,17 @@ def test_any_other_untracked_or_modified_path_still_fails_the_clean_check(tmp_pa
     (root / "a.txt").write_text("changed\n", encoding="utf-8")
     clean, porcelain, transient = scenarios.worktree_after_commit(root)
     assert clean is False and "M a.txt" in porcelain and transient == ["?? .ouroboros/"]   # ``_git`` strips the leading column
+
+
+def test_the_landing_commit_call_records_its_skip_flags():
+    """rc.15 run2/run3: two SM1 lanes landed through review_rebuttal + skip_advisory_review=True; the documented
+    path has no skip flags, so the landing call's truthy ``skip_*`` arguments are a recorded fact and a check."""
+    rows = [{"tool": "commit_reviewed", "result_preview": "⚠️ REVIEW_BLOCKED (attempt 1)", "args": {"skip_advisory_review": True}},
+            {"tool": "commit_reviewed", "result_preview": "OK: committed to ouroboros: x",
+             "args": {"skip_advisory_review": True, "skip_tests": False, "paths": ["a"]}},
+            {"tool": "read_file", "result_preview": "OK", "args": {"skip_advisory_review": True}}]
+    facts = scenarios.commit_refusal_facts({}, rows, {})
+    assert facts["landing_skip_flags"] == ["skip_advisory_review"]
+    clean = [{"tool": "commit_reviewed", "result_preview": "OK: committed", "args": {"paths": ["a"]}}]
+    assert scenarios.commit_refusal_facts({}, clean, {})["landing_skip_flags"] == []
+    assert scenarios.commit_refusal_facts({}, [], {})["landing_skip_flags"] == []

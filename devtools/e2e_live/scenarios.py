@@ -73,6 +73,7 @@ name: {SK1_SKILL}
 description: Loopback probe extension authored by the live E2E stand SK1 scenario.
 version: 0.1.0
 type: extension
+runtime: python3
 entry: plugin.py
 plugin_api: "2.0"
 permissions: ["tool", "inject_chat", "net"]
@@ -196,7 +197,13 @@ def commit_refusal_facts(ledger: dict, tools_rows: list, stored: dict) -> dict:
         match = _REFUSAL_CODE_RE.search(str(row.get("result_preview") or ""))
         calls.append({"tool": str(row.get("tool") or ""), "status": str(row.get("status") or ""),
                       "code": match.group(1) if match else ""})
+    landing = next((row for row in reversed(tools_rows) if str(row.get("tool") or "") == "commit_reviewed"
+                    and str(row.get("result_preview") or "").startswith("OK:")), None)
+    landing_args = (landing or {}).get("args") if isinstance((landing or {}).get("args"), dict) else {}
     return {
+        # The documented SM1 path has NO skip flags on the landing call (DEVELOPMENT.md): rc.15 run2 and run3
+        # landed twice through review_rebuttal + skip_advisory_review=True and the stand did not tell.
+        "landing_skip_flags": sorted(k for k, v in landing_args.items() if str(k).startswith("skip_") and v),
         "commit_attempts": [{"attempt": a.get("attempt"), "phase": str(a.get("phase") or ""),
                              "status": str(a.get("status") or ""), "block_reason": str(a.get("block_reason") or "")}
                             for a in attempts],
@@ -533,6 +540,8 @@ def run_sm1(ctx: LaneContext) -> None:
     ctx.check("advisory_ledger_row_present", any(advisory_run_is_real(r) for r in runs))
     tools_rows = task_oracle.tools_rows()
     ctx.facts["commit_reviewed_refusals"] = commit_refusal_facts(ledger, tools_rows, stored)
+    ctx.check("landed_without_skip_flags", ctx.checks["commit_landed"]
+              and not ctx.facts["commit_reviewed_refusals"]["landing_skip_flags"])
     # A FACT, not a check: the reviewers judge the UI evidence (development_compliance 2(i)).
     vision = vision_evidence_rows(tools_rows)
     ctx.facts["vision_evidence_present"] = bool(vision)

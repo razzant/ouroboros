@@ -263,13 +263,13 @@ def test_config_sha256_is_secret_free_and_key_independent():
 # The run-wide budget ledger
 # --------------------------------------------------------------------------- #
 
-def test_lane_spend_sums_durable_llm_usage_rows_and_counts_unknown_costs(tmp_path):
-    logs = tmp_path / "data" / "logs"
-    logs.mkdir(parents=True)
-    rows = [{"type": "llm_usage", "cost": 1.5}, {"type": "llm_usage", "cost": 0.25},
-            {"type": "llm_usage", "cost": None, "cost_known": False}, {"type": "task_done", "cost": 99.0},
-            {"type": "llm_usage", "cost": True}]
-    (logs / "events.jsonl").write_text("\n".join(json.dumps(r) for r in rows) + "\n", encoding="utf-8")
+def test_lane_spend_sums_the_settled_product_ledger_and_counts_unknown_costs(tmp_path):
+    """rc.15 run3: telemetry summed 114.81, the product ledger 141.63 (skill review, advisory, synthesis write no row)."""
+    (state := tmp_path / "data" / "state").mkdir(parents=True)
+    rows = [{"state": "settled", "cost_final": True, "cost_usd": 1.5}, {"state": "settled", "cost_final": True, "cost_usd": 0.25},
+            {"state": "settled", "cost_final": True, "cost_usd": None}, {"state": "settled", "cost_final": False, "cost_usd": 99.0},
+            {"state": "pending", "cost_usd": 99.0}, {"state": "settled", "cost_final": True, "cost_usd": True}, "not json"]
+    (state / "usage_attempts.jsonl").write_text("\n".join(r if isinstance(r, str) else json.dumps(r) for r in rows) + "\n", encoding="utf-8")
     assert run_live_lanes.lane_spend(tmp_path / "data") == (1.75, 2)
     assert run_live_lanes.lane_spend(tmp_path / "absent") == (0.0, 0)
 

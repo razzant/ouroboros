@@ -625,7 +625,7 @@ def test_agent_slot_without_session_task_refuses_the_api_pack(tmp_path, fake_rou
     assert not any(inst.start_requests for inst in fake_route.instances)
 
 
-def test_pre_dispatch_admission_raises_the_typed_window_class(tmp_path, fake_route, monkeypatch):
+def test_pre_dispatch_admission_requires_current_window_evidence(tmp_path, fake_route, monkeypatch):
     """Admission health (route_health, before any POST) knew the window was spent but
     said so in PROSE — the reset instant and the code did not survive to the actor
     record. B1: the EXISTING exhausted class is raised there, carrying reset_at, and
@@ -646,10 +646,10 @@ def test_pre_dispatch_admission_raises_the_typed_window_class(tmp_path, fake_rou
     with pytest.raises(ClaudexorSubscriptionWindowExhausted) as excinfo:
         executor.execute()
     assert excinfo.value.reset_at == "2030-02-02T00:00:00Z"
+    assert sum(len(inst.start_requests) for inst in fake_route.instances) == 0
 
-    # An undated exhaustion (route_health's reason-with-empty-reset shape) is
-    # STILL the typed class — spent with an unknown healing instant. A fresh
-    # executor: a settled typed failure is memoized per executor by design.
+    # An incomplete ratio is not an admission verdict. A fresh executor asks
+    # the selected subscription engine, without another model or API fallback.
     spent["constraints"] = [{"used_ratio": 1.0}]
     custody._CUSTODY.clear()
     executor = AgentSessionReviewExecutor(
@@ -658,10 +658,11 @@ def test_pre_dispatch_admission_raises_the_typed_window_class(tmp_path, fake_rou
                          custody_root=tmp_path / "b"),
         llm=FakeLLM(),
     )
-    with pytest.raises(ClaudexorSubscriptionWindowExhausted) as undated:
-        executor.execute()
-    assert undated.value.reset_at == ""
-    assert sum(len(inst.start_requests) for inst in fake_route.instances) == 0
+    assert executor.execute().raw_text == "[]"
+    starts = [request for instance in fake_route.instances for request in instance.start_requests]
+    assert len(starts) == 1
+    assert starts[0]["authPreference"] == "subscription"
+    assert starts[0]["model"] == "fake-small"
 
 
 def test_pre_dispatch_admission_preserves_the_pool_code(tmp_path, fake_route, monkeypatch):

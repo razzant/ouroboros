@@ -46,7 +46,7 @@ def test_a_pinned_route_is_judged_by_its_own_subject_exactly():
     an unreadable pinned quota is UNKNOWN, not spent."""
     from ouroboros.subagents import _exhausted_window
 
-    def _snap(profile, *, spent, reset="2026-08-03T12:00:00Z"):
+    def _snap(profile, *, spent, reset="2099-08-03T12:00:00Z"):
         constraint = ({"used_ratio": 1.0, "resets_at": reset} if spent
                       else {"used_ratio": 0.4, "resets_at": reset})
         return {"subject": {"harness": "some-route", "subject_id": profile},
@@ -64,7 +64,7 @@ def test_a_pinned_route_is_judged_by_its_own_subject_exactly():
     assert _exhausted_window(spent_pin_live_sibling, "some-route") == (False, "")
     # Pinned to the spent account: the sibling cannot vouch for it.
     assert _exhausted_window(spent_pin_live_sibling, "some-route",
-                             "", "koshak") == (True, "2026-08-03T12:00:00Z")
+                             "", "koshak") == (True, "2099-08-03T12:00:00Z")
     # Pinned to the live account while the sibling is spent: healthy.
     assert _exhausted_window(_Quota([_snap("koshak", spent=False),
                                      _snap("acct-b", spent=True)]),
@@ -81,7 +81,7 @@ def test_a_pinned_route_is_judged_by_its_own_subject_exactly():
     # …and a sibling's absence says nothing about the pinned subject.
     sibling_absence = {"subject": {"harness": "some-route", "subject_id": "acct-b"}}
     assert _exhausted_window(_Quota([_snap("koshak", spent=True)], [sibling_absence]),
-                             "some-route", "", "koshak") == (True, "2026-08-03T12:00:00Z")
+                             "some-route", "", "koshak") == (True, "2099-08-03T12:00:00Z")
 
 
 def _waited_run(tmp_path, monkeypatch, summary, requested_model="m",
@@ -267,19 +267,19 @@ def test_a_retry_health_check_judges_the_stored_pin_not_the_current_setting(
     # 3. STORED pin spent, drifted pin live: judging today's setting would
     #    dispatch onto a window the engine is certain to refuse; judging the
     #    stored subject refuses typed, with ITS reset instant.
-    quota["snapshots"] = [_snap("stored-pin", spent=True, reset="2026-08-20T00:00:00Z"),
-                          _snap("drifted-pin", spent=False, reset="2026-08-21T00:00:00Z")]
+    quota["snapshots"] = [_snap("stored-pin", spent=True, reset="2099-08-20T00:00:00Z"),
+                          _snap("drifted-pin", spent=False, reset="2099-08-21T00:00:00Z")]
     blocked = json.loads(delegate._delegate_start(_plain_ctx(tmp_path), "the intended work",
                                                   retry_of=token))
     assert blocked["reason"] == "subscription_window_exhausted", blocked
-    assert blocked["reset_at"] == "2026-08-20T00:00:00Z"
+    assert blocked["reset_at"] == "2099-08-20T00:00:00Z"
     assert len(bodies) == 1, "a health-refused retry must never reach the wire"
 
     # 4. Readings flipped: the stored subject is live while today's setting
     #    names a spent account — the retry dispatches, and the wire carries the
     #    STORED body byte-identically, drifted setting notwithstanding.
-    quota["snapshots"] = [_snap("stored-pin", spent=False, reset="2026-08-20T00:00:00Z"),
-                          _snap("drifted-pin", spent=True, reset="2026-08-21T00:00:00Z")]
+    quota["snapshots"] = [_snap("stored-pin", spent=False, reset="2099-08-20T00:00:00Z"),
+                          _snap("drifted-pin", spent=True, reset="2099-08-21T00:00:00Z")]
     retried = json.loads(delegate._delegate_start(_plain_ctx(tmp_path), "the intended work",
                                                   retry_of=token))
     assert retried["status"] == "started", retried

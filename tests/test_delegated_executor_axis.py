@@ -185,7 +185,7 @@ def test_one_exhausted_credential_profile_does_not_take_the_harness_offline():
     stays Claudexor's business, so no rotation moves into Ouroboros."""
     from ouroboros.subagents import _exhausted_window
 
-    def _snap(profile, *, spent, reset="2026-08-03T12:00:00Z", harness="some-route",
+    def _snap(profile, *, spent, reset="2099-08-03T12:00:00Z", harness="some-route",
               freshness="fresh", applies=None):
         # `subject_id` is the REAL QuotaSubject key for a credential profile
         # (packages/schema/src/quota.ts; the object is `.strict()`, so the `profile`
@@ -204,19 +204,19 @@ def test_one_exhausted_credential_profile_does_not_take_the_harness_offline():
         def quota_absences(self): return self._absences or []
 
     # ONE of two profiles spent: the harness is still usable, so no blocker at all.
-    mixed = _Quota([_snap("acct-a", spent=True, reset="2026-08-03T10:00:00Z"),
+    mixed = _Quota([_snap("acct-a", spent=True, reset="2099-08-03T10:00:00Z"),
                     _snap("acct-b", spent=False)])
     assert _exhausted_window(mixed, "some-route") == (False, "")
 
     # ALL profiles spent: a blocker, at the EARLIEST reset (the first one to heal).
-    both = _Quota([_snap("acct-a", spent=True, reset="2026-08-03T12:00:00Z"),
-                   _snap("acct-b", spent=True, reset="2026-08-03T10:00:00Z")])
-    assert _exhausted_window(both, "some-route") == (True, "2026-08-03T10:00:00Z")
+    both = _Quota([_snap("acct-a", spent=True, reset="2099-08-03T12:00:00Z"),
+                   _snap("acct-b", spent=True, reset="2099-08-03T10:00:00Z")])
+    assert _exhausted_window(both, "some-route") == (True, "2099-08-03T10:00:00Z")
 
     # A single-profile harness (no profile field at all) behaves exactly as before.
     single = _Quota([{"subject": {"harness": "some-route"}, "freshness": "fresh",
-                      "constraints": [{"used_ratio": 1.0, "resets_at": "2026-08-03T09:00:00Z"}]}])
-    assert _exhausted_window(single, "some-route") == (True, "2026-08-03T09:00:00Z")
+                      "constraints": [{"used_ratio": 1.0, "resets_at": "2099-08-03T09:00:00Z"}]}])
+    assert _exhausted_window(single, "some-route") == (True, "2099-08-03T09:00:00Z")
 
     # Another harness's exhaustion is not ours, and a STALE snapshot never blocks.
     other = _Quota([_snap("acct-a", spent=True, harness="other-route")])
@@ -240,8 +240,8 @@ def test_a_model_scoped_window_does_not_block_a_route_pinned_to_another_model():
     fable_scoped = {"subject": {"harness": "some-route", "subject_id": "acct"},
                     "freshness": "fresh",
                     "constraints": [
-                        {"used_ratio": 0.0, "resets_at": "2026-08-07T00:00:00Z"},
-                        {"used_ratio": 1.0, "resets_at": "2026-08-11T00:00:00Z",
+                        {"used_ratio": 0.0, "resets_at": "2099-08-07T00:00:00Z"},
+                        {"used_ratio": 1.0, "resets_at": "2099-08-11T00:00:00Z",
                          "applies_to_models": ["fable", "claude-fable-5", "best"]},
                     ]}
 
@@ -257,18 +257,18 @@ def test_a_model_scoped_window_does_not_block_a_route_pinned_to_another_model():
     # Pinned to fable (either alias direction): the scoped window DOES apply, and the
     # profile's healthy sibling constraint does not rescue it (a spent window blocks
     # its own profile whatever the other windows say).
-    assert _exhausted_window(quota, "some-route", "fable") == (True, "2026-08-11T00:00:00Z")
-    assert _exhausted_window(quota, "some-route", "claude-fable-5") == (True, "2026-08-11T00:00:00Z")
+    assert _exhausted_window(quota, "some-route", "fable") == (True, "2099-08-11T00:00:00Z")
+    assert _exhausted_window(quota, "some-route", "claude-fable-5") == (True, "2099-08-11T00:00:00Z")
     # No model pin: any scoped window may apply to whatever model the run lands on.
-    assert _exhausted_window(quota, "some-route", "") == (True, "2026-08-11T00:00:00Z")
+    assert _exhausted_window(quota, "some-route", "") == (True, "2099-08-11T00:00:00Z")
 
 
-def test_a_spent_window_with_no_reset_instant_is_still_spent():
-    """The inverse defect (three reviewers independently): a fully-used window whose
-    constraint named neither `resets_at` nor `cooldown_until` produced no collectable
-    reset, and the old single-string contract could only express exhaustion AS a
-    reset — so a positively spent route read back as healthy and D28's loud fallback
-    never fired. Exhaustion and its healing instant are separate facts now."""
+def test_a_full_ratio_without_reset_does_not_refuse_the_engine_attempt():
+    """A partial usage reading cannot prove the selected account is unavailable.
+
+    The engine still admits or refuses the actual start; this read performs no
+    quota refresh and does not substitute metered API work for the selected route.
+    """
     from ouroboros.subagents import _exhausted_window, route_health, delegated_run_shape
 
     undated = {"subject": {"harness": "some-route", "subject_id": "acct"},
@@ -279,10 +279,9 @@ def test_a_spent_window_with_no_reset_instant_is_still_spent():
         def quota_snapshots(self): return self._snaps
         def quota_absences(self): return []
 
-    assert _exhausted_window(_Quota([undated]), "some-route") == (True, "")
+    assert _exhausted_window(_Quota([undated]), "some-route") == (False, "")
 
-    # And through the ONE health reader: an undated exhaustion still reaches the rule
-    # table as `subscription_window_exhausted`, as the REASON with an empty reset.
+    # The same incomplete reading stays non-blocking through the public reader.
     class _Gateway(_Quota):
         engine_version = "9.9.9"
         def agent_capabilities(self):
@@ -291,7 +290,21 @@ def test_a_spent_window_with_no_reset_instant_is_still_spent():
 
     unavailable, reset_at = route_health(
         _Gateway([undated]), "some-route", delegated_run_shape(False))
-    assert (unavailable, reset_at) == ("subscription_window_exhausted", "")
+    assert (unavailable, reset_at) == ("", "")
+
+
+@pytest.mark.parametrize("executor", ["harness", "auto"])
+def test_partial_quota_keeps_the_selected_subscription_dispatch(monkeypatch, executor):
+    class Partial(_HealthStub):
+        def quota_snapshots(self):
+            return [{"subject": {"harness": "some-route"}, "freshness": "fresh",
+                     "constraints": [{"used_ratio": 1.0}]}]
+
+    resolution = _dispatch(executor, stub=Partial(), monkeypatch=monkeypatch)
+    assert resolution.executor == "harness"
+    assert not resolution.blocked
+    assert resolution.route.model == "weak"
+    assert resolution.route.effort == "low"
 
 
 def test_an_unreadable_profile_keeps_the_route_usable():
@@ -305,7 +318,7 @@ def test_an_unreadable_profile_keeps_the_route_usable():
 
     spent = {"subject": {"harness": "some-route", "subject_id": "acct-a"},
              "freshness": "fresh",
-             "constraints": [{"used_ratio": 1.0, "resets_at": "2026-08-11T00:00:00Z"}]}
+             "constraints": [{"used_ratio": 1.0, "resets_at": "2099-08-11T00:00:00Z"}]}
     absence = {"subject": {"harness": "some-route", "subject_id": "acct-b"},
                "reason": "refresh_failed", "detail": "oauth/usage responded 429"}
     foreign_absence = {"subject": {"harness": "other-route", "subject_id": "acct-x"},
@@ -321,7 +334,7 @@ def test_an_unreadable_profile_keeps_the_route_usable():
     assert _exhausted_window(_Quota([spent], [absence]), "some-route") == (False, "")
     assert _exhausted_window(
         _Quota([spent], [foreign_absence]), "some-route"
-    ) == (True, "2026-08-11T00:00:00Z")
+    ) == (True, "2099-08-11T00:00:00Z")
 
     # A gateway with no absence reader at all (test stubs, older fakes) keeps the
     # plain positive-evidence answer.
@@ -330,7 +343,7 @@ def test_an_unreadable_profile_keeps_the_route_usable():
         def quota_snapshots(self): return self._snaps
 
     assert _exhausted_window(
-        _NoAbsences([spent]), "some-route") == (True, "2026-08-11T00:00:00Z")
+        _NoAbsences([spent]), "some-route") == (True, "2099-08-11T00:00:00Z")
 
 
 def test_dispatch_row_auto_without_a_route_runs_native(monkeypatch):
