@@ -349,7 +349,12 @@ class OwnedClaudexorDaemon:
                     "daemon recycled the port. It is not ours: disclosed, not "
                     "killed; a restart of OUR daemon rewrites the descriptor."
                 )
-            if exc.code == "daemon_unreachable" and isinstance(exc.__cause__, httpx.HTTPError):
+            # Local request/configuration errors and decoded response failures
+            # do not prove an unavailable network; received refusals still win.
+            if status < 400 and exc.code == "daemon_unreachable" and isinstance(
+                exc.__cause__, (httpx.NetworkError, httpx.ConnectTimeout,
+                                httpx.ReadTimeout, httpx.WriteTimeout),
+            ):
                 return None, _TRANSPORT_UNREACHABLE, f"{exc.code}: {exc}"
             return None, "stale", f"{exc.code}: {exc}"
 

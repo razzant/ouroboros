@@ -2579,8 +2579,11 @@ Panic calls before the worker tree-kill) requires the owned marker for attached
 roots, then matches the ledger against one set of live start-time and command
 observations. An authenticated endpoint or the gateway's typed HTTP transport
 failure permits that stop; a received refusal, protocol/malformed response, or
-invalid descriptor/token discovery never does. Keep transport provenance distinct
-from the public stale status; a matching error-code string is not transport proof.
+invalid descriptor/token discovery never does. Preserve a received HTTP status
+before reading the body, so a later read timeout cannot erase an authentication
+refusal. Local protocol/configuration and response-decoding failures are not
+network-unavailability evidence. Keep transport provenance distinct from the
+public stale status; a matching error-code string is not transport proof.
 Only confirmed exit permits `process_stopped`
 and pruning; concurrent and unreadable ledger bytes remain intact under the append
 lock. Each root gets its own exit window; partial success never means the whole
