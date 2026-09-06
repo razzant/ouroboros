@@ -247,8 +247,9 @@ def test_chat_async_no_proxy_non_anthropic_uses_httpx_async_client():
     ))
     fake_oa_client.chat.completions.create = fake_create
 
-    with patch("httpx.AsyncClient", FakeAsyncClient), \
-         patch("openai.AsyncOpenAI", return_value=fake_oa_client), \
+    # Resolve SDK inheritance before substituting its HTTP base class.
+    with patch("openai.AsyncOpenAI", return_value=fake_oa_client), \
+         patch("httpx.AsyncClient", FakeAsyncClient), \
          patch("requests.get", side_effect=AssertionError("no_proxy must not use requests.get")):
         asyncio.run(
             client.chat_async(messages=messages, model=model, no_proxy=True)
