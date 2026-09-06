@@ -431,7 +431,6 @@ def test_a_stranger_that_took_a_recycled_pid_or_pgid_is_never_signalled(monkeypa
         start_new_session=True,  # its own leader, so pgid == pid, as a root's is
     )
     answer = [process_containment.MARKER_ABSENT]
-    monkeypatch.setattr(process_containment, "_REAP_DEADLINE_SEC", 0.5)
     monkeypatch.setattr(
         process_containment, "pid_marker_state",
         lambda pid, marker: (answer[0] if pid == stranger.pid
@@ -453,6 +452,7 @@ def test_a_stranger_that_took_a_recycled_pid_or_pgid_is_never_signalled(monkeypa
         # The same recycled root pid, now UNREADABLE. Nothing was disproved, so the
         # seeded root is a leak — and still nothing is signalled, which is what keeps
         # fail-closed from becoming a licence to kill whatever it cannot identify.
+        monkeypatch.setattr(process_containment, "_REAP_DEADLINE_SEC", 0.5)
         answer[0] = process_containment.MARKER_UNREADABLE
         unreadable = ProcessContainer()
         unreadable._root = stranger.pid

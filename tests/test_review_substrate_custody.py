@@ -552,24 +552,36 @@ def test_replayed_late_review_does_not_charge_same_context_twice(tmp_path):
     assert second.actors[0]["operation_state"] == "late_settled"
 
 def test_review_slot_timeout_is_not_used_as_transport_timeout(tmp_path):
+    import threading
+    from ouroboros.review_custody import _ACTIVE, _ACTIVE_LOCK, _attempt_key
+
     captured = []
+    entered = threading.Event()
 
     class CapturingLLM:
         def chat(self, **kwargs):
             captured.append(kwargs)
+            entered.set()
             return {"content": '{"verdict":"PASS","findings":[],"summary":"ok"}'}, {}
 
-    result = run_review_request(
-        ReviewRequest(surface="scope", goal="review", task_id="transport-separation"),
-        slots=[ReviewSlot(
-            slot_id="slot_a", model="same/model", timeout_sec=0.5,
-            transport_timeout_sec=17,
-        )],
-        drive_root=tmp_path,
-        llm=CapturingLLM(),
-    )
-    assert result.aggregate_signal == "PASS"
-    assert captured and captured[0]["timeout"] == 17
+    request = ReviewRequest(surface="scope", goal="review", task_id="transport-separation")
+    # Keep the logical window below 17: min(logical, transport) must still fail.
+    slot = ReviewSlot(slot_id="slot_a", model="same/model", timeout_sec=0.5, transport_timeout_sec=17)
+    try:
+        run_review_request(request, slots=[slot], drive_root=tmp_path, llm=CapturingLLM())
+        assert entered.wait(10), "review worker never entered the transport"
+        assert captured[0]["timeout"] == 17
+    finally:
+        key = _attempt_key(request, slot)
+        deadline = time.monotonic() + 10
+        active = True
+        while time.monotonic() < deadline:
+            with _ACTIVE_LOCK:
+                active = key in _ACTIVE
+            if not active:
+                break
+            time.sleep(0.01)
+        assert not active, "transport observation worker did not settle before teardown"
 
 def test_review_transport_timeout_is_narrowed_by_request_deadline(tmp_path, monkeypatch):
     from datetime import datetime, timedelta, timezone

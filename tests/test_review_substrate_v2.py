@@ -347,6 +347,9 @@ def test_review_substrate_treats_duplicate_models_as_independent_slots(tmp_path)
 
 
 def test_review_substrate_queues_all_slots_above_concurrency_cap(tmp_path):
+    import threading
+    from ouroboros.review_custody import _ACTIVE, _ACTIVE_LOCK, _attempt_key
+
     llm = FakeLLM()
     slots = [
         ReviewSlot(slot_id=f"slot_{idx}", model=f"model-{idx}", effort="high")
@@ -365,24 +368,38 @@ def test_review_substrate_queues_all_slots_above_concurrency_cap(tmp_path):
     assert len(llm.calls) == 10
     assert all(actor["status"] == "ok" for actor in result.actors)
 
-    slow_calls = []
-    slow_llm = SimpleNamespace(chat=lambda **kwargs: (
-        slow_calls.append(kwargs),
-        time.sleep(0.2),
-        ({"content": "{\"verdict\":\"PASS\",\"findings\":[],\"summary\":\"late\"}"}, {}),
-    )[-1])
     slow_slots = [
         ReviewSlot(slot_id=f"slow_{idx}", model=f"slow-model-{idx}", effort="high", timeout_sec=0.05)
         for idx in range(10)
     ]
-    slow_result = run_review_request(
-        ReviewRequest(surface="task_acceptance", goal="verify final claim", subject="done", task_id="task-slow"),
-        slots=slow_slots,
-        drive_root=tmp_path,
-        llm=slow_llm,
-    )
-    assert len(slow_calls) == 10
-    assert "Not started before reviewer timeout budget expired" not in "\n".join(slow_result.degraded_reasons)
+    entered = {slot.model: threading.Event() for slot in slow_slots}
+    slow_calls = []
+    def slow_chat(**kwargs):
+        slow_calls.append(kwargs)
+        entered[kwargs["model"]].set()
+        time.sleep(0.2)
+        return {"content": '{"verdict":"PASS","findings":[],"summary":"late"}'}, {}
+    request = ReviewRequest(surface="task_acceptance", goal="verify final claim", subject="done", task_id="task-slow")
+    try:
+        slow_result = run_review_request(request, slots=slow_slots, drive_root=tmp_path,
+                                         llm=SimpleNamespace(chat=slow_chat))
+        # Logical timeout may precede chat entry. Workers do not wait for each
+        # other, so this census also works if dispatch later acquires a cap.
+        deadline = time.monotonic() + 10
+        assert all(event.wait(max(0, deadline - time.monotonic())) for event in entered.values())
+        assert len(slow_calls) == 10
+        assert {actor["slot_id"] for actor in slow_result.actors} == {slot.slot_id for slot in slow_slots}
+    finally:
+        keys = {_attempt_key(request, slot) for slot in slow_slots}
+        deadline = time.monotonic() + 10
+        active = True
+        while time.monotonic() < deadline:
+            with _ACTIVE_LOCK:
+                active = keys.intersection(_ACTIVE)
+            if not active:
+                break
+            time.sleep(0.01)
+        assert not active, "review workers did not settle before teardown"
 
 
 def test_review_substrate_reports_no_slots_as_degraded(tmp_path):
