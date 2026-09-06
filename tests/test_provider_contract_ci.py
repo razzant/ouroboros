@@ -173,6 +173,7 @@ def test_exact_provider_canary_matrix_logical_turns_and_attempt_bound():
     assert [(row.canary_id, row.model) for row in matrix] == [
         ("openrouter_gemini", "google/gemini-3.8-flash"),
         ("openrouter_opus", "anthropic/claude-opus-5"),
+        ("openrouter_fable", "anthropic/claude-fable-5.1"),
         ("openrouter_gpt", "openai/gpt-5.6-luna"),
         ("openrouter_grok", "x-ai/grok-4.6"),
         ("openrouter_deepseek", "deepseek/deepseek-v4-pro-0813"),
@@ -189,6 +190,7 @@ def test_exact_provider_canary_matrix_logical_turns_and_attempt_bound():
     assert medium_ids == {
         "openrouter_gemini",
         "openrouter_opus",
+        "openrouter_fable",
         "openrouter_gpt",
         "openrouter_grok",
         "openrouter_deepseek",
@@ -202,16 +204,16 @@ def test_exact_provider_canary_matrix_logical_turns_and_attempt_bound():
         "openai_direct_main", "deepseek_direct"
     ]
     assert [row.canary_id for row in matrix if not row.named_tool_choice] == [
-        "gigachat_direct"
+        "openrouter_fable", "gigachat_direct"
     ]
     logical_turns = sum(1 + int(row.continue_to_final) for row in matrix)
-    assert logical_turns == 15
-    assert logical_turns * CANARY_EMPTY_RESPONSE_MAX_ATTEMPTS == 30
+    assert logical_turns == 16
+    assert logical_turns * CANARY_EMPTY_RESPONSE_MAX_ATTEMPTS == 32
     assert sum(
         1 + int(row.continue_to_final)
         for row in matrix
         if row.credential_required
-    ) == 10
+    ) == 11
 
 
 def test_direct_anthropic_named_tool_choice_projects_without_type_error():
@@ -973,11 +975,12 @@ def test_canary_repeated_semantic_empty_stays_red(monkeypatch):
     assert [call["bypass_response_cache"] for call in client.calls] == [False, True]
 
 
-def test_canary_permanent_empty_and_nonempty_malformed_do_not_retry(monkeypatch):
+@pytest.mark.parametrize("canary_id", ["openrouter_grok", "openrouter_fable"])
+def test_canary_permanent_empty_and_nonempty_malformed_do_not_retry(monkeypatch, canary_id):
     import tests.provider_contract_ci as contract
 
     monkeypatch.setattr(contract.time, "sleep", lambda _seconds: None)
-    canary = next(row for row in provider_canary_matrix() if row.canary_id == "openrouter_grok")
+    canary = next(row for row in provider_canary_matrix() if row.canary_id == canary_id)
 
     class PermanentClient:
         def __init__(self):

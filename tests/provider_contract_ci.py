@@ -52,6 +52,10 @@ _OPENROUTER_CANARIES = (
         "OPENROUTER_API_KEY", True, "medium",
     ),
     ProviderCanary(
+        "openrouter_fable", "anthropic/claude-fable-5.1", "openrouter",
+        "OPENROUTER_API_KEY", True, "medium", named_tool_choice=False,
+    ),
+    ProviderCanary(
         "openrouter_gpt", "openai/gpt-5.6-luna", "openrouter",
         "OPENROUTER_API_KEY", True, "medium",
     ),

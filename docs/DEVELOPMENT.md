@@ -354,6 +354,9 @@ disclosed on usage as `reasoning_effort_clamped`. The carriage is keyed on the
 provider id, never a model-name prefix or a target capability field, so a
 hand-built target cannot silently drop it.
 
+Apply static, semantics-preserving wire normalization before request-wire
+binding; keep learned recovery and its evidence store separate.
+
 All learned request-shape adaptation goes through the one provider-neutral
 request-wire driver (`ouroboros/request_wire_contract.py`: exact-route
 identity, closed action vocabulary, shared TTL, never executes provider prose
