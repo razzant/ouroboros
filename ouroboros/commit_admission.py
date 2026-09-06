@@ -16,6 +16,7 @@ drift apart.
 from __future__ import annotations
 
 import logging
+import os
 import pathlib
 import re
 import subprocess
@@ -239,13 +240,23 @@ def run_tests_preflight_with_proof(ctx: ToolContext, *, runner) -> Optional[str]
     ctx record (F2); the durable tx copy written alongside is forensic
     telemetry only. Returns the runner's error text, or None when green.
     """
-    test_err = runner(ctx)
+    from ouroboros.tools.registry import _authorized_managed_update_resolver
+
+    force = _authorized_managed_update_resolver(ctx)
+    ctx._preflight_tests_passed = False  # diagnostic only; not the managed proof
+    test_err = runner(ctx, force=True) if force else runner(ctx)
     if test_err:
         return str(test_err)
+    if not force and os.environ.get("OUROBOROS_PRE_PUSH_TESTS", "1") != "1":
+        return None  # the runner's policy skip is not a green proof
+    ctx._preflight_tests_passed = True
     try:
         from supervisor.update_merge import record_managed_tests_proof
 
-        record_managed_tests_proof(ctx)
+        if force:
+            record_managed_tests_proof(ctx, force=True)
+        else:
+            record_managed_tests_proof(ctx)
     except Exception:
         log.debug("managed tests evidence recording failed", exc_info=True)
     return None

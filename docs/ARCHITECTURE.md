@@ -1103,6 +1103,61 @@ Review delivery has two closed route kinds in `review_execution.py`: `api_chat` 
 
 Advisory availability is evaluated from the current configured slot and route, never inferred from a stale stored verdict. A disabled advisory slot is an audited bypass; an `api_chat` row requires provider credentials for its RESOLVED model, an `agent_session` row a resolvable session route. If the commit advisory is unavailable, the commit gate runs its compensating hermetic preflight only when tests remain independently applicable (not explicitly skipped, diff not documentation-only). Malformed structured slot configuration is refused at save and becomes a typed loud review-time failure for commit triad, scope, advisory, plan, skill review — and deep self-review (`deep_review_slot()` raises on the malformed value and `run_deep_self_review` returns the typed `deep_self_review_unavailable` result instead of a report). Task acceptance refuses the same way (a typed DEGRADED panel, `reviewer_slot_config_invalid`; owner R3). No surface silently chooses the opposite route or a default panel.
 
+The reviewed-commit cycle checks authorization and unresolved prior work before
+mechanical preparation and staging, then binds the exact candidate before its
+existing free-cycle/budget admission. Needed preflight runs inline with the full
+rebuttal and applicable tests; the index and worktree snapshot are revalidated
+before triad/scope. `git_review_cycle` owns entry-point resets and pending/blocked
+finalization. Its custody check joins current reviewer facts with the strict durable
+advisory record before index cleanup, including interruption before local metadata
+was updated. `AdvisoryRunRecord.execution_pending` preserves physical custody for
+history retention and the external wrapper; `blocks_preflight` separately tracks
+logical admission. An explicit audited bypass releases that admission while
+retaining the original task, invocation, source and unknown physical outcome.
+Late results update their original history row without superseding the newer
+bypass. Free advisory replay still checks freshness and buys no automatic
+preflight; stale coverage requires an explicit audited skip, with applicable
+compensating tests preserved.
+
+`AdvisoryRunRecord.execution` binds delegated preflight intent and candidate to
+the existing invocation token before POST. The same row retains terminal
+usage/receipt evidence on failure.
+`delegate_custody.invocation_record` owns
+the immutable request, including the full prompt; no second prompt store is
+created. An exact pending rejoin restores that request through the shared
+executor. A delivery-kind change cannot replace an unresolved session; same-session
+model/profile changes still rejoin the canonical request. Changed/foreign/lost identity
+is refused before preparation, naming the mismatched fields; `review_status` projects
+the recorded rejoin intent and execution identifiers through the existing public
+secret redactor, without exposing the private reviewer prompt. Failed
+checkpoint writes cannot dispatch. Unresolved rows survive history trimming.
+Only a corroborated `failed_definite` invocation discharges a stranded logical
+checkpoint automatically; age, missing identifiers and unreadable state cannot
+prove never-started work. An audited skip never posts a replacement preflight.
+Released history remains eligible for an exact delegated rejoin, but does not
+lock a later explicit standalone request for different intent or evidence.
+An unchanged audited bypass can satisfy the existing freshness shortcut without
+a new model call; that response names the actual bypassed status.
+Native preflight uses its existing executor's end-event and monetary custody,
+without a separate advisory operation checkpoint or native resume protocol.
+Returned unknown physical outcomes remain failed evidence and preserve the
+existing refusal and audited-skip paths; a hard process death has no native
+exact-rejoin handle. The external wrapper runs the same cycle, exports the real advisory
+record to `advisory.txt`, and preserves a pending checkout without restaging.
+
+Technical failure and commit permission are separate facts. Producers retain
+failure origin (context, delivery, format or window authority) alongside the
+original status, source and findings; the shared physical exception projection
+keeps budget/admission and authority refusals distinct. Under advisory
+enforcement the commit aggregate can continue on a known bound candidate;
+under blocking it still refuses. Neither path turns missing review into PASS or
+changes quorum. Custody, Stop/deadline, ownership and candidate binding remain
+independent. Readiness projections receive only an exact repo/hash-matched
+advisory record and keep its failed status/freshness. Contributor slot evidence
+retains configured-subagent identity while its stored wire uses the existing
+mutually exclusive reference-or-route form, preserving native retrieval and
+its API budget admission.
+
 Session reviewer identity comes from `gateways.claudexor.final_attempt_facts`: the
 unique `final_attempt_id` row in the engine-owned `final/telemetry.yaml`, bound to
 the requested run id. Model, harness and credential profile come from that SAME
@@ -1273,7 +1328,7 @@ The cap is DENSITY-CALIBRATED from measured evidence, not model names: `usage_ac
 
 The cap is WINDOW-AWARE. `reviewer_window.resolve_reviewer_window` resolves each slot's REAL window from Capability Evidence (no static table); the triad, plan review, and task acceptance size their packs against it — a 200K reviewer treated as 1M-capable loses its whole review to a deterministic prompt-too-long 400 — with a sub-1M window scaling its reserves rather than zeroing the slot; deep self-review's PACKED delivery reads the same resolver but REFUSES a confirmed sub-1M route typed instead of sizing down (its pack is the ≥1M guarantee; the native/session rows serve such routes). An UNKNOWN route keeps the full-window assumption on those four surfaces (triad, plan review, task acceptance, and deep self-review) — for deep self-review, its packed delivery; only scope review fails CLOSED on absent evidence, because its BLOCKING authority is what a wrong assumption would forge — guess-small is not the safe direction, since governance packs run ~169K tokens and a sub-floor guess would decline the whole review on every cold-evidence install. `blocking_authority_allowed` is a COMPUTED property of fresh evidence (`capability_evidence.confirms_at_least(..., require_fresh=True)`), never of the configured model name: that closes the two routes to a forged blocking verdict — an expired record read as live, and the designated-default sentinel read as sourced (the sentinel survives as a sizing number only). Concurrent resolutions of one route serialise on a per-route lock; the probe is rate-limited by the evidence TTL and nothing else — a memo that never expires while the record does converts a healthy long-lived process into a permanently blocked one.
 
-Scope authority is coupled to the owner's context mode, stated once: in `max`, provider oversize rejections and `budget_exceeded` are recorded as evidence but never satisfy the P3 gate — unconditionally fail-closed, no softening setting (`OUROBOROS_SCOPE_REVIEW_FLOOR` persists but is enforcement-inert); the remedy for a structurally oversized repo is shrinking the reviewed tree, never lowering the reviewer below the 1M floor (BIBLE P3). In owner-selected `low`, `run_scope_review` returns before assembling anything — the predicate reads `config.get_owner_context_mode()`, never the effective mode — and records a typed non-blocking `status="skipped_low_context_mode"` row through the same evidence surface as the fail-closed results, so a low-mode commit is never forensically confusable with "scope review silently failed to launch" (BIBLE P1). A known sub-1M reviewer remains advisory-only in `max` (its result preserved as evidence, the commit failing closed); the no-≥1M-reviewer case is answered by the owner choosing `low` or an owner-declared RETRIEVING scope slot at ≥200K sourced evidence — never by a weaker blocking gate. Non-responded scope actors carry the provider failure text in the verdict, so a deterministic 400 is visible without observability digging.
+Scope applicability follows the owner's context mode. In `max`, provider oversize and window-authority failures remain failed evidence: they never satisfy the sourced blocking-review floor or become PASS. Under owner-selected `advisory` enforcement, the commit aggregate may continue with that failure disclosed on an independently bound candidate; `blocking` enforcement still refuses. Budget/admission, unresolved custody, Stop/deadline, ownership and candidate-binding failures remain independent refusals under both modes. `OUROBOROS_SCOPE_REVIEW_FLOOR` is retired and cannot change this policy. A structurally oversized repository calls for a smaller reviewed tree, never a weaker blocking reviewer (BIBLE P3). In owner-selected `low`, `run_scope_review` reads `config.get_owner_context_mode()` and returns before assembly with the typed non-blocking `status="skipped_low_context_mode"` row, distinct from an attempted review that failed. In `max`, a known sub-1M packet reviewer supplies advisory evidence only; an owner-declared retrieving scope slot can instead establish blocking authority at ≥200K sourced evidence. Non-responded actors retain their provider failure text so the cause stays visible beside the permission decision.
 
 Scope prompt assembly is GUARANTEED-FIT: the assembler walks a deterministic degradation ladder instead of skipping. The five rungs:
 

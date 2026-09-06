@@ -959,4 +959,30 @@ def aggregate_review_verdict(review_err, scope_result, triad_block_reason, triad
         )
         combined_msg += f"\n\n---\nTriad advisory findings:\n{adv_text}"
 
+    from ouroboros.config import get_review_enforcement
+    from ouroboros.tools.commit_gate import review_failure_is_technical
+
+    scope_rows = list(getattr(ctx, "_last_scope_raw_results", []) or [])
+    if scope_result is not None and not scope_rows:
+        scope_rows = [build_scope_actor_record(scope_result)]
+    failed_scope = [row for row in scope_rows if row.get("status") not in {
+        "responded", "skipped_low_context_mode", "not_dispatched",
+    }]
+    technical_scope = bool(failed_scope) and all(review_failure_is_technical(row) for row in failed_scope)
+    if (get_review_enforcement() == "advisory"
+            and (not review_err or triad_block_reason == "fixed_overflow")
+            and (scope_result is None or not scope_result.blocked or technical_scope)):
+        from ouroboros.tools.review import _record_advisory_override
+
+        disclosure = (
+            "Review enforcement=advisory: technical review failure permits continuing "
+            "on the independently bound candidate; failed or missing review is not a PASS.\n"
+            + combined_msg
+        )
+        ctx._last_review_block_reason = block_reason
+        _record_advisory_override(ctx, disclosure)
+        ctx._review_advisory.append(disclosure)
+        ctx._review_degraded_reasons = list(getattr(ctx, "_review_degraded_reasons", []) or []) + ["review_technical_failure_advisory"]
+        return False, combined_msg, block_reason, _combined_findings, _scope_advisory_items
+
     return True, combined_msg, block_reason, _combined_findings, _scope_advisory_items

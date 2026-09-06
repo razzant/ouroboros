@@ -2,10 +2,10 @@
 
 Runs beside triad review and sees touched context plus a generated repo atlas. Critical findings follow
 ``OUROBOROS_REVIEW_ENFORCEMENT``: blocking enforcement blocks, advisory
-enforcement reports them without blocking. Infrastructure failures such as
-model errors, empty output, parse failures, and touched-context errors still
-fail closed, and so does an oversized prompt. In owner-selected ``low`` context
-mode the reviewer is not called at all and a typed skip row is recorded instead.
+enforcement reports them without blocking. Failed rows retain their original
+status and typed origin. The commit aggregate applies advisory permission to
+technical failures independently of candidate, custody and owner admission.
+In owner-selected ``low`` context mode no reviewer runs and a typed skip is recorded.
 """
 
 from __future__ import annotations
@@ -198,6 +198,8 @@ class ScopeReviewResult:
     # responded|error|parse_failure|empty_response|budget_exceeded|fixed_overflow|
     # sub_floor|session_advisory|omitted|empty — only `responded` is AUTHORITATIVE
     status: str = "responded"
+    failure_phase: str = ""
+    failure_code: str = ""
     prompt_chars: int = 0
     # measured (len(prompt)) | estimated_from_tokens (no prompt was assembled)
     prompt_chars_source: str = "measured"
@@ -375,6 +377,9 @@ def _call_scope_llm(
             "operation_id": str(actor.get("operation_id") or ""),
             "operation_state": str(actor.get("operation_state") or "settled"),
             "late_result_pending": bool(actor.get("late_result_pending")),
+            "pending_invocation_id": str(actor.get("pending_invocation_id") or usage.get("pending_invocation_id") or ""),
+            "delegated_run_id": str(actor.get("delegated_run_id") or usage.get("delegated_run_id") or ""),
+            "failure_code": str(actor.get("failure_code") or ""),
         })
         if actor.get("status") not in {"ok", "empty"}:
             error_msg = (
@@ -382,7 +387,7 @@ def _call_scope_llm(
                 f"Error: {actor.get('error') or actor.get('status') or 'scope reviewer failed'}\n"
                 "Retry the commit, or check API key and network connectivity."
             )
-            return "", usage, error_msg
+            return str(actor.get("raw_text") or ""), usage, error_msg
         return str(actor.get("raw_text") or ""), usage, ""
     except Exception as e:
         error_msg = (
@@ -479,7 +484,7 @@ def _handle_prompt_signals(
                 f"⚠️ SCOPE_REVIEW_BLOCKED: {_cause}, so the required >=1M blocking "
                 "scope gate has no authoritative verdict."
             ),
-            status="sub_floor",
+            status="sub_floor", failure_phase="context", failure_code="sub_floor",
             # No prompt string exists on this path (ladder sentinel): the char count
             # is DERIVED from the token estimate and labelled as such.
             prompt_chars=token_count * 4,
@@ -505,7 +510,7 @@ def _handle_prompt_signals(
         cause, remedy = _ladder_terminal_cause(context_status, input_limit, managed=managed)
         return ScopeReviewResult(
             blocked=True,
-            status="fixed_overflow",
+            status="fixed_overflow", failure_phase="context", failure_code="fixed_overflow",
             prompt_chars=token_count * 4,
             prompt_chars_source="estimated_from_tokens",
             block_message=(
@@ -517,7 +522,7 @@ def _handle_prompt_signals(
     if context_status.status == "empty":
         return ScopeReviewResult(
             blocked=True,
-            status="empty",
+            status="empty", failure_phase="context", failure_code="empty",
             block_message=(
                 "⚠️ SCOPE_REVIEW_BLOCKED: Could not read any touched files — "
                 "scope review requires direct file context. Commit blocked."
@@ -528,7 +533,7 @@ def _handle_prompt_signals(
         omitted_names = ", ".join(context_status.omitted_paths) or "(unknown)"
         return ScopeReviewResult(
             blocked=True,
-            status="omitted",
+            status="omitted", failure_phase="context", failure_code="omitted",
             block_message=(
                 f"⚠️ SCOPE_REVIEW_BLOCKED: Some touched file(s) could not be included "
                 f"in direct context (binary/oversize/unreadable): {omitted_names}.\n"
@@ -688,6 +693,8 @@ def run_scope_review(
         "pending_invocation_id": str(_usage.get("pending_invocation_id") or ""),
         "delegated_run_id": str(_usage.get("delegated_run_id") or ""),
     }
+    failure = {"failure_phase": str(_usage.get("review_failure_phase") or ""),
+               "failure_code": str(_usage.get("failure_code") or "")}
     if llm_error:
         if _is_provider_oversize_error(llm_error):
             # The real tokenizer rejected the prompt; the >=1M gate fails closed.
@@ -706,13 +713,13 @@ def run_scope_review(
                 tokens_in=_tokens_in,
                 tokens_out=_tokens_out,
                 cost_usd=_cost_usd,
-                operation=_operation,
+                operation={**_operation, **failure},
             )
         return ScopeReviewResult(
             blocked=True,
             block_message=llm_error,
             model_id=scope_model_id,
-            status="error",
+            status="error", raw_text=raw_text, **failure,
             prompt_chars=_prompt_chars,
             context_manifest=_current_scope_context_manifest(),
             prompt_ref=_prompt_ref,
@@ -739,7 +746,7 @@ def run_scope_review(
             tokens_in=_tokens_in,
             tokens_out=_tokens_out,
             cost_usd=_cost_usd,
-            operation=_operation,
+            operation={**_operation, "failure_phase": "delivery", "failure_code": "provider_error"},
         )
     if not raw_text.strip():
         # Empty model response is distinct from transport/API error.
@@ -750,7 +757,7 @@ def run_scope_review(
                 "Retry the commit."
             ),
             model_id=scope_model_id,
-            status="empty_response",
+            status="empty_response", failure_phase="format", failure_code="empty_response",
             prompt_chars=_prompt_chars,
             tokens_in=_tokens_in,
             tokens_out=_tokens_out,
@@ -769,7 +776,7 @@ def run_scope_review(
                 "Full raw response preserved in scope_raw_result (status='parse_failure')."
             ),
             model_id=scope_model_id,
-            status="parse_failure",
+            status="parse_failure", failure_phase="format", failure_code="parse_failure",
             raw_text=raw_text,
             prompt_chars=_prompt_chars,
             tokens_in=_tokens_in,
@@ -791,9 +798,11 @@ def run_scope_review(
                 "Retry the commit so scope review covers all required checklist items."
             ),
             model_id=scope_model_id,
-            status="parse_failure",
+            status="parse_failure", failure_phase="format", failure_code="checklist_contract",
             raw_text=raw_text,
             parsed_items=parsed_items,
+            critical_findings=_classify_scope_findings(parsed_items)[0],
+            advisory_findings=_classify_scope_findings(parsed_items)[1],
             prompt_chars=_prompt_chars,
             tokens_in=_tokens_in,
             tokens_out=_tokens_out,
@@ -823,6 +832,8 @@ def run_scope_review(
         result_kwargs=result_kwargs, delegated=delegated,
         native_retrieval=bool(subagent_id) and not delegated)
     if authority_block is not None:
+        authority_block.failure_phase = "window_authority"
+        authority_block.failure_code = authority_block.status
         return authority_block
     _log_scope_result(
         ctx,

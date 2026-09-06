@@ -185,7 +185,8 @@ class TestBypassPathTestsRun:
 
         captured = {}
 
-        def _fake_freshness(ctx, commit_message, skip_advisory_pre_review=False, *, paths=None):
+        def _fake_freshness(ctx, commit_message, skip_advisory_pre_review=False, *, paths=None,
+                            review_rebuttal="", decision=None):
             captured["paths"] = list(paths or [])
             return "blocked for test"
 
