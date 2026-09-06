@@ -21,6 +21,7 @@ from starlette.websockets import WebSocket, WebSocketDisconnect
 
 from ouroboros.contracts.chat_id_policy import A2A_CHAT_ID_MAX, A2A_CHAT_ID_MIN, is_a2a_chat_id
 from ouroboros.event_bus import get_global_event_bus
+from ouroboros.gateway.files import ChatUploadPayloadTooLarge, store_chat_upload
 from ouroboros.skill_loader import (
     find_skill,
     grant_status_for_skill,
@@ -306,6 +307,32 @@ async def _api_chat_inject(request: Request) -> JSONResponse:
         payload = await request.json()
         text = str(payload.get("text") or "")
         image_caption = str(payload.get("image_caption") or "")
+        client_message_id = str(payload.get("client_message_id") or "").strip()[:128]
+        try:
+            copying = asyncio.create_task(asyncio.to_thread(
+                _inject_attachment_uploads, ctx, skill_name, payload.get("attachments"),
+            ))
+            try:
+                uploads = await asyncio.shield(copying)
+            except asyncio.CancelledError:
+                # Keep the admitted copy and its in-flight slot until the
+                # worker settles; the skill still owns its source files.
+                while not copying.done():
+                    try:
+                        await asyncio.shield(copying)
+                    except asyncio.CancelledError:
+                        pass
+                    except Exception:
+                        break
+                try:
+                    copying.result()
+                except Exception:
+                    log.debug("Host upload failed while cancellation settled", exc_info=True)
+                raise
+        except ChatUploadPayloadTooLarge as exc:
+            return _json_error(str(exc), 413)
+        except ValueError as exc:
+            return _json_error(str(exc), 400)
         bridge = ctx.bridge_getter()
         chat_id = int(payload.get("chat_id") or 0)
         wait_for_response = bool(payload.get("wait_for_response", False))
@@ -339,6 +366,8 @@ async def _api_chat_inject(request: Request) -> JSONResponse:
             image_mime=str(payload.get("image_mime") or ""),
             image_caption=image_caption,
             transport=payload.get("transport") if isinstance(payload.get("transport"), dict) else {},
+            **({"task_metadata": {"chat_attachment_uploads": uploads}} if uploads else {}),
+            **({"client_message_id": client_message_id} if client_message_id else {}),
         )
         if not wait_for_response:
             return JSONResponse({"ok": True, "status": "queued"}, status_code=202)
@@ -367,6 +396,46 @@ async def _api_chat_inject(request: Request) -> JSONResponse:
             except Exception:
                 log.debug("Failed to unsubscribe host-service response callback", exc_info=True)
         ctx._leave_inflight(skill_name)
+
+
+_INJECT_ATTACHMENT_MAX = 25
+
+
+def _inject_attachment_uploads(
+    ctx: HostServiceContext, skill_name: str, value: Any,
+) -> list[dict[str, str]]:
+    """Copy a skill's inbound files into the shared chat-upload store (#668).
+
+    Each ``{path, name?, mime?}`` must be a regular file under the calling
+    skill's OWN state root (the ``staged_files`` confinement; a symlink that
+    resolves outside is refused). The host copies it through the SAME store the
+    browser paperclip uses — ``data/uploads``, unique name, 50 MB cap — so the
+    worker's ``stage_task_attachments`` and the secret-name rule see one upload
+    family. Returns ``chat_attachment_uploads`` specs (``{path, label, mime}``);
+    the skill removes its parked copy afterwards.
+    """
+    if value in (None, []):
+        return []
+    if not isinstance(value, list):
+        raise ValueError("attachments must be a list of {path, name?, mime?}")
+    if len(value) > _INJECT_ATTACHMENT_MAX:
+        raise ValueError(f"attachments: at most {_INJECT_ATTACHMENT_MAX} files per message")
+    state_root = (ctx.skills_state_dir / skill_name).resolve(strict=False)
+    specs: list[dict[str, str]] = []
+    for index, item in enumerate(value):
+        if not isinstance(item, dict):
+            raise ValueError(f"attachments[{index}] must be an object")
+        source = pathlib.Path(str(item.get("path") or "")).expanduser().resolve(strict=False)
+        try:
+            source.relative_to(state_root)
+        except ValueError as exc:
+            raise ValueError(f"attachments[{index}] is outside this skill's state") from exc
+        if not source.is_file():
+            raise ValueError(f"attachments[{index}] is not a regular file")
+        name = os.path.basename(str(item.get("name") or "").strip()) or source.name
+        stored = store_chat_upload(source, name, data_dir=ctx.data_dir)
+        specs.append({"path": str(stored), "label": name, "mime": str(item.get("mime") or "")})
+    return specs
 
 
 def _presence_staged_files(
@@ -552,6 +621,37 @@ async def _api_presence_work(request: Request) -> JSONResponse:
         return _json_error("presence work lookup failed", 500)
 
 
+async def _api_chat_decision(request: Request) -> JSONResponse:
+    """Relay the owner's answer to a decision card (a quiz option or free answer).
+
+    The SAME ingress as ``POST /api/decisions`` (``task_decision.answer_decision``):
+    idempotent per ``request_id``, first answer wins, typed 404/409 refusals.
+    ``inject_chat`` is the owner grant that already lets this skill speak as the
+    owner's chat input; answering the owner's own quiz needs nothing more (#472).
+    """
+    ctx: HostServiceContext = request.app.state.host_service_context
+    try:
+        skill_name, token_payload = ctx.authenticate_token_payload(request.headers.get("x-skill-token", ""))
+        ctx.require_permission(skill_name, token_payload, "inject_chat")
+    except HostServiceAuthError as exc:
+        return _json_error(str(exc), 403)
+    if not ctx.rate_limiter.allow(f"{skill_name}:decision"):
+        return _json_error("rate limit exceeded", 429)
+    try:
+        body = await request.json()
+    except Exception:
+        return _json_error("invalid json", 400)
+    from ouroboros.gateway.task_decision import answer_decision
+
+    try:
+        status, payload = await answer_decision(ctx.data_dir, body)
+    except Exception as exc:
+        log.debug("Host service decision relay failed", exc_info=True)
+        return _json_error(str(exc), 500)
+    payload.setdefault("ok", status < 400)
+    return JSONResponse(payload, status_code=status)
+
+
 async def _api_ws_message(request: Request) -> JSONResponse:
     """WS-out bridge: relay a namespaced extension WS event to browser clients.
 
@@ -653,6 +753,7 @@ def create_host_service_app(
             Route("/tools/schemas", _api_tool_schemas, methods=["GET"]),
             Route("/chat/allocate-internal", _api_allocate_internal, methods=["POST"]),
             Route("/chat/inject", _api_chat_inject, methods=["POST"]),
+            Route("/chat/decision", _api_chat_decision, methods=["POST"]),
             Route("/presence/turn", _api_presence_turn, methods=["POST"]),
             Route("/presence/work/{work_ref}", _api_presence_work, methods=["GET"]),
             Route("/ui/ws-message", _api_ws_message, methods=["POST"]),

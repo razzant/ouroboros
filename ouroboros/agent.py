@@ -812,7 +812,7 @@ class OuroborosAgent:
             # recorded onto the live task metadata that `_subagent_progress_meta`
             # already projects — read from the ONE record the dispatch resolution
             # stamped onto the task, never re-derived per surface.
-            self._record_executor_facts(task)
+            self._record_executor_facts(task, cap_info)
 
             authority_refusal = cap_info.get("authority_source_unavailable")
             if isinstance(authority_refusal, dict) and authority_refusal:
@@ -1099,25 +1099,38 @@ class OuroborosAgent:
         except Exception:
             log.warning("Failed to emit task heartbeat event", exc_info=True)
 
-    def _record_executor_facts(self, task: Dict[str, Any]) -> None:
+    def _record_executor_facts(
+        self, task: Dict[str, Any], cap_info: Optional[Dict[str, Any]] = None,
+    ) -> None:
         """Stamp the RESOLVED executor/route onto the live task metadata.
 
         The resolution has exactly one owner (`resolve_subagent_dispatch`, which
         stamped `effective_executor`/`executor_route` onto the task record at
         dispatch); this projects that record where the frame assembler below
         already reads its execution facts, so the UI chip is a projection of the
-        decision rather than a second derivation of it. A blocked or unresolved
-        dispatch records nothing — no fact, no chip.
+        decision rather than a second derivation of it. An unresolved dispatch
+        records nothing — no fact, no chip. A BLOCKED harness pin (#363) records
+        the route the pin named and the resolution refused, from the cap_info
+        projection `_fill_executor_blocked_caps` wrote, so the child's card can
+        say `{harness} · blocked` beside its typed `subagent_executor_unavailable`
+        terminal; the durable record keeps its empty route (the completion-seam
+        evidence gate must stay closed for a child that never ran). A blocked
+        API-model actor names no route and stays chip-less.
         """
         if not isinstance(self._current_task_metadata, dict):
             return
         effective = str(task.get("effective_executor") or "")
-        if not effective or effective == "blocked":
+        if not effective:
             return
+        route = str(task.get("executor_route") or "")
+        if effective == "blocked":
+            route = str((cap_info or {}).get("executor_blocked_route") or "")
+            if not route:
+                return
         self._current_task_metadata["effective_executor"] = effective
         # The OPAQUE harness id, verbatim from the route Claudexor was asked for
         # — Ouroboros never interprets it, and the UI only prints it.
-        self._current_task_metadata["executor_route"] = str(task.get("executor_route") or "")
+        self._current_task_metadata["executor_route"] = route
 
     def _subagent_progress_meta(self, event: str) -> Dict[str, Any]:
         metadata = self._current_task_metadata if isinstance(self._current_task_metadata, dict) else {}

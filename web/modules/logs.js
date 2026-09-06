@@ -136,7 +136,7 @@ export function initLogs({ ws, state, mount }) {
     function createStandaloneEntry(evt) {
         const view = summarizeLogEvent(evt);
         const execution = executorChip(evt);
-        const cat = categorizeLogEvent(evt);
+        const cat = categorizeLogEvent(evt, view);
         const dedupeKey = duplicateLogEventKey(evt);
         const now = (() => {
             const parsed = evt.ts ? Date.parse(evt.ts) : NaN;
@@ -277,10 +277,15 @@ export function initLogs({ ws, state, mount }) {
         }
 
         const view = summarizeLogEvent(evt);
-        const eventCategory = categorizeLogEvent(evt);
+        const eventCategory = categorizeLogEvent(evt, view);
+        // A task group stays under Errors once one of its events earned it
+        // (#323): the next heartbeat must not flip the card back to amber and
+        // drop it out of the Errors filter while the failure is still in its
+        // timeline. The phase pill still follows the latest event.
+        const earlier = taskGroups.get(groupId);
         const category = groupId === 'bg-consciousness'
             ? 'consciousness'
-            : (eventCategory === 'errors' ? 'errors' : 'tasks');
+            : (eventCategory === 'errors' || earlier?.category === 'errors' ? 'errors' : 'tasks');
         // Captured before ANY record mutation: an already-mounted card grows
         // in place (summary rewrite, review unhide, timeline render) before
         // the append below, and that growth alone can push a pinned reader

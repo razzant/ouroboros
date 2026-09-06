@@ -972,11 +972,10 @@ def _record_llm_call_error(
         "llm_call_id": ctx.llm_call_id, "round": ctx.round_idx, "attempt": ctx.attempt + 1,
         "model": ctx.model,
     }
-    _emit_live_log(ctx.event_queue, {
-        "type": "llm_round_error", "task_type": ctx.task_type, **identity,
-        "task_attempt": ctx.task_attempt, "error": safe_error,
-        "error_kind": classification.kind, "retry_same_request": will_retry,
-    })
+    # ONE durable row per failure (#355): the events.jsonl append below is
+    # forwarded live by the worker's events tail, so a second live-only
+    # `llm_round_error` sibling was the same failure delivered twice to the
+    # Logs tab. Background Consciousness keeps its own live `llm_round_error`.
     append_jsonl(ctx.drive_logs / "events.jsonl", {
         "ts": utc_now_iso(), "type": "llm_api_error", **identity, "error": safe_error,
         "error_kind": classification.kind, "retry_same_request": will_retry,

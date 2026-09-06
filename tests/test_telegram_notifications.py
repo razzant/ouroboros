@@ -157,7 +157,7 @@ def test_tasks_notify_waits_for_latest_final_summary_for_each_task(tmp_path, mon
     asyncio.run(nt._check_tasks_notify(
         api, {"TELEGRAM_NOTIFY_TASKS": "on"}, 42, state, "en",
     ))
-    assert _Rec.sent == [(42, "⚠️ Task same1 done")]
+    assert _Rec.sent == [(42, "⚠️ Task same1 done with warnings")]
     assert state["notified_task_ids"] == ["same1"]
 
 
@@ -610,7 +610,47 @@ def test_tasks_notify_consumes_the_host_status_phase_when_the_row_carries_one(
     asyncio.run(nt._check_tasks_notify(api, {"TELEGRAM_NOTIFY_TASKS": "on"}, 42, state, "en"))
 
     assert [text for _chat, text in _Rec.sent] == [
-        "⚠️ Task review1 done",
+        "⚠️ Task review1 done with warnings",
         "✅ Task stop1 done",
     ]
     assert state["notified_task_ids"] == ["review1", "stop1"]
+
+
+def test_tasks_notify_word_and_icon_follow_the_host_phase(tmp_path, monkeypatch):
+    """#538: a failed or cancelled task is never announced as "done". The word
+    and icon come from the stamped phase (the web card's own vocabulary); the
+    lifecycle tail is not repeated as a second status word. Russian follows."""
+    nt = _load(); api, data = _api(tmp_path); _Rec.sent = []
+    monkeypatch.setattr(nt, "TelegramClient", _Rec)
+    rows = [
+        {"task_id": "fail1", "outcome_phase": "error", "rounds": 3,
+         "outcome_axes": {"lifecycle": {"status": "failed"}, "execution": {"status": "failed"}}},
+        {"task_id": "stop1", "outcome_phase": "cancelled",
+         "outcome_axes": {"lifecycle": {"status": "cancelled"}, "execution": {"status": "best_effort"}}},
+        {"task_id": "warn1", "outcome_phase": "warn",
+         "outcome_axes": {"lifecycle": {"status": "completed"}, "review": {"status": "degraded"}}},
+        {"task_id": "ok1", "outcome_phase": "done",
+         "outcome_axes": {"lifecycle": {"status": "completed"}}},
+        {"task_id": "odd1", "outcome_phase": "someday",
+         "outcome_axes": {"lifecycle": {"status": "failed"}}},
+    ]
+    with open(data / "logs" / "chat.jsonl", "w", encoding="utf-8") as f:
+        for row in rows:
+            f.write(json.dumps({"type": "task_summary", **row}) + "\n")
+    asyncio.run(nt._check_tasks_notify(api, {"TELEGRAM_NOTIFY_TASKS": "on"}, 42, {"notified_task_ids": []}, "en"))
+    assert [text for _chat, text in _Rec.sent] == [
+        "❌ Task fail1 failed · 3r",
+        "🚫 Task stop1 cancelled",
+        "⚠️ Task warn1 done with warnings",
+        "✅ Task ok1 done",
+        "⚠️ Task odd1 done · failed",  # unknown phase: the legacy axes rule
+    ]
+    _Rec.sent = []
+    asyncio.run(nt._check_tasks_notify(api, {"TELEGRAM_NOTIFY_TASKS": "on"}, 42, {"notified_task_ids": []}, "ru"))
+    assert [text for _chat, text in _Rec.sent] == [
+        "❌ Задача fail1 ошибка · 3r",
+        "🚫 Задача stop1 отменена",
+        "⚠️ Задача warn1 готова с предупреждениями",
+        "✅ Задача ok1 готова",
+        "⚠️ Задача odd1 готова · failed",
+    ]

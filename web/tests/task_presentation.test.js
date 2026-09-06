@@ -77,7 +77,7 @@ test('typed terminal status drives an error phase on live and replay cards', () 
         chatSource,
         /finishLiveCard\(taskId, msg\.task_terminal_status \? taskTerminalPhase\(msg\) : replayTerminalPhase\(taskState, record\)\);/,
     );
-    assert.match(chatSource, /finishLiveCard\(explicitTaskId, taskTerminalPhase\(msg\)\) \|\| changed;/);
+    assert.match(chatSource, /appendTaskSummaryToLiveCard\(msg\) \|\| changed;/);
 });
 
 test('interrupted task_done remains retryable and cannot finish a root card', () => {

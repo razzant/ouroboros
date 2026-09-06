@@ -45,8 +45,8 @@ class TestEphemeralTerminalStamp:
             tmp_path, {"id": "e1", "_ephemeral_turn": True}, "answer", {},
             evt, ephemeral=True, presence=False,
         )
-        # An ephemeral task_done frame is dropped at the client's log-event
-        # entry by design: the final is the turn's only conclusion vehicle.
+        # The final concludes the activity even when its task_done is missed;
+        # the pipeline adds the outcome facts before delivery.
         assert out["progress_meta"]["task_terminal_status"] == "completed"
 
     def test_presence_frames_stay_unstamped(self, tmp_path):
