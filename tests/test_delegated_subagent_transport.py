@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+from contextlib import contextmanager
 import pathlib
 import httpx
 import pytest
@@ -262,9 +263,10 @@ def test_a_per_request_bound_reaches_httpx_and_absence_is_not_an_unbounded_call(
     calls = []
 
     class _Recorder:
-        def request(self, method, path, **kwargs):
+        @contextmanager
+        def stream(self, method, path, **kwargs):
             calls.append(kwargs)
-            return httpx.Response(200, json={"id": path.rsplit("/", 1)[-1], "summary": {}})
+            yield httpx.Response(200, json={"id": path.rsplit("/", 1)[-1], "summary": {}})
 
     gateway = cx.ClaudexorGateway(cx.DaemonEndpoint("127.0.0.1", 1, "secret-token"))
     gateway.close()

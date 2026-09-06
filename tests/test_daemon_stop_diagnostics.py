@@ -336,8 +336,8 @@ class Handler(http.server.BaseHTTPRequestHandler):
             threading.Event().wait()
         status, body = 200, {'compatible': True, 'protocolMajor': 3,
             'engine': {'version': '3.9.8', 'sha': 'a' * 40}}
-        if mode in ('401', '403'):
-            status = int(mode)
+        if mode in ('401', '403', 'gzip401', 'slow401', 'slow403'):
+            status = 403 if mode.endswith('403') else 401
         elif mode == 'protocol':
             body['protocolMajor'] = 99
         elif mode == 'body_code':
@@ -345,7 +345,12 @@ class Handler(http.server.BaseHTTPRequestHandler):
         raw = b'{broken' if mode == 'malformed' else json.dumps(body).encode()
         self.send_response(status)
         self.send_header('Content-Length', str(len(raw)))
+        if mode.startswith('gzip'):
+            self.send_header('Content-Encoding', 'gzip')
         self.end_headers()
+        if mode.startswith('slow'):
+            print('response-headers-sent', flush=True)
+            threading.Event().wait()
         self.wfile.write(raw)
 if mode == 'refused':
     sock = socket.socket()
@@ -389,7 +394,7 @@ def stop_endpoint(tmp_path, monkeypatch, request):
 
 @pytest.mark.serial
 @pytest.mark.skipif(os.name == "nt", reason="POSIX measured ledger identity")
-@pytest.mark.parametrize("stop_endpoint", ["hang", "refused"], indirect=True)
+@pytest.mark.parametrize("stop_endpoint", ["hang", "refused", "slow200"], indirect=True)
 def test_panic_stops_unreachable_owned_legacy_daemon(stop_endpoint, tmp_path, monkeypatch):
     from tests.test_server_control_panic_daemon import _run_panic
 
@@ -404,7 +409,7 @@ def test_panic_stops_unreachable_owned_legacy_daemon(stop_endpoint, tmp_path, mo
 
 @pytest.mark.serial
 @pytest.mark.skipif(os.name == "nt", reason="POSIX measured ledger identity")
-@pytest.mark.parametrize("stop_endpoint", ["401", "403", "protocol", "malformed", "body_code"], indirect=True)
+@pytest.mark.parametrize("stop_endpoint", ["401", "403", "protocol", "malformed", "body_code", "gzip200", "gzip401", "slow401", "slow403"], indirect=True)
 def test_reachable_refusal_is_not_unreachable_stop_authority(stop_endpoint, tmp_path, caplog):
     proc, manager = stop_endpoint
     before = custody.ledger_path(tmp_path).read_bytes()
@@ -452,3 +457,19 @@ def test_unreachable_status_keeps_public_stale_contract(stop_endpoint):
     assert manager.status_dict()["state"] == "stale"
     assert manager._alive_endpoint(timeout_sec=0.1) is None
     assert proc.poll() is None
+
+
+@pytest.mark.serial
+@pytest.mark.skipif(os.name == "nt", reason="POSIX measured ledger identity")
+@pytest.mark.parametrize("stop_endpoint", ["normal"], indirect=True)
+def test_local_header_error_is_not_unreachable_stop_authority(stop_endpoint, tmp_path):
+    proc, manager = stop_endpoint
+    (daemon.owned_descriptor_path().parent / "token").write_text("synthetic\ninvalid")
+    # A listening peer lets HTTPX reach header validation. A refused socket
+    # instead fails earlier with a genuine ConnectError, a different contract.
+    _, state, detail = manager._classify_liveness(timeout_sec=.1)
+    assert state == "stale" and "LocalProtocolError" in detail
+    before = custody.ledger_path(tmp_path).read_bytes()
+    assert manager.stop() is False
+    assert proc.poll() is None
+    assert custody.ledger_path(tmp_path).read_bytes() == before
