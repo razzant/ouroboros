@@ -620,10 +620,7 @@ def _schedule_task(ctx: ToolContext, internal: Dict[str, Any] | None = None, /, 
 
     current_depth, depth_error = _context_task_depth(ctx)
     if depth_error:
-        return (
-            "⚠️ TOOL_ERROR (schedule_subagent): invalid_task_depth: "
-            f"{depth_error}"
-        )
+        return f"⚠️ TOOL_ERROR (schedule_subagent): invalid_task_depth: {depth_error}"
     new_depth = current_depth + 1
     metadata = getattr(ctx, "task_metadata", {}) if isinstance(getattr(ctx, "task_metadata", {}), dict) else {}
     parent_contract = metadata.get("task_contract") if isinstance(metadata.get("task_contract"), dict) else {}
