@@ -3,11 +3,62 @@
 from __future__ import annotations
 
 from concurrent.futures import Future
+from datetime import datetime
+import json
+from pathlib import Path
 
 import httpx
+import pytest
 
 from ouroboros.gateways.claudexor import ClaudexorGateway, DaemonEndpoint
 from ouroboros.subagents import _exhausted_window
+
+
+WINDOW_FACTS = json.loads((
+    Path(__file__).resolve().parents[1] / "web/tests/fixtures/quota_window_facts.json"
+).read_text(encoding="utf-8"))
+
+
+@pytest.mark.parametrize("case", WINDOW_FACTS["cases"], ids=lambda case: case["name"])
+def test_partial_window_evidence_matches_ui_and_uses_only_one_get(monkeypatch, case):
+    from ouroboros import subagent_route_health as health
+
+    class Clock(datetime):
+        @classmethod
+        def now(cls, tz=None):
+            return datetime.fromisoformat(WINDOW_FACTS["now"].replace("Z", "+00:00"))
+
+    monkeypatch.setattr(health, "datetime", Clock)
+    requests = []
+
+    def handler(request):
+        requests.append((request.method, request.url.path))
+        return httpx.Response(200, json={"snapshots": [{
+            "subject": {"harness": "claude", "subject_id": "chosen"},
+            "freshness": "fresh", "constraints": [case["constraint"]],
+        }], "absences": []})
+
+    with ClaudexorGateway(DaemonEndpoint("127.0.0.1", 1, "test-token")) as gateway:
+        gateway._client.close()
+        gateway._client = httpx.Client(base_url="http://127.0.0.1:1", transport=httpx.MockTransport(handler))
+        assert _exhausted_window(gateway, "claude", pinned_profile="chosen") == (
+            case["exhausted"], case["resetsAt"])
+    assert requests == [("GET", "/v2/quota")]
+
+
+def test_partial_sibling_preserves_rotation_but_never_rescues_a_spent_pin():
+    class Gateway:
+        def quota_state(self):
+            return {"snapshots": [
+                _spent("chosen"),
+                {**_spent("unknown"), "constraints": [{"used_ratio": 1}]},
+            ], "absences": []}
+
+    gateway = Gateway()
+    assert _exhausted_window(gateway, "claude") == (False, "")
+    assert _exhausted_window(gateway, "claude", pinned_profile="unknown") == (False, "")
+    assert _exhausted_window(gateway, "claude", pinned_profile="chosen") == (
+        True, "2099-01-01T00:00:00Z")
 
 
 def _spent(subject_id: str) -> dict:

@@ -34,6 +34,43 @@ def test_enum_case_and_whitespace_are_normalized_once_without_changing_prose():
                       {**rows[1], "verdict": "PASS"}]
 
 
+@pytest.mark.parametrize("invalid", [
+    {"item": "second", "verdict": "FAIL", "severity": "high"},
+    {"item": "second", "severity": "critical"},
+    {"unexpected": "row"},
+    42,
+])
+def test_invalid_final_array_cannot_fall_back_to_an_earlier_pass_example(monkeypatch, invalid):
+    import ouroboros.llm as llm
+
+    example = [{"item": "example", "verdict": "PASS", "severity": "advisory"}]
+    final = [{"item": "real_bug", "verdict": "FAIL", "severity": "critical",
+              "reason": "The requested behavior is broken."}, invalid]
+    raw = f"Example: {json.dumps(example)}\nFinal findings:\n```json\n{json.dumps(final)}\n```"
+    calls = []
+
+    def extract(_self, **kwargs):
+        calls.append(kwargs)
+        return {"content": "UNEXTRACTABLE"}, {}
+
+    monkeypatch.setattr(llm.LLMClient, "chat", extract)
+    items = run._parse_advisory_output(raw)
+    assert items == [], "an invalid final array must not select an earlier example"
+    assert run._needs_fallback_extraction(items, raw)
+    assert run._llm_extract_advisory_items(raw, SimpleNamespace()) == []
+    assert len(calls) == 1 and raw in calls[0]["messages"][0]["content"]
+
+
+@pytest.mark.parametrize("fenced", [False, True])
+def test_valid_final_findings_survive_prose_and_unrelated_numeric_arrays(fenced):
+    findings = [{"item": "real_bug", "verdict": "FAIL", "severity": "critical"}]
+    body = json.dumps(findings)
+    if fenced:
+        body = f"```json\n{body}\n```"
+    raw = f"Counts: [1, 2]\nFindings: {body}\nMore counts: [3, 4]"
+    assert run._parse_advisory_output(raw) == findings
+
+
 def test_malformed_json_array_reaches_existing_extraction_with_the_whole_source(monkeypatch):
     import ouroboros.llm as llm
 

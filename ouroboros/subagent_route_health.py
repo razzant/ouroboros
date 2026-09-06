@@ -34,9 +34,9 @@ def route_health(
 
     ``route_model`` is the route's pinned model (``DelegationRoute.model``): quota
     windows scoped to OTHER models must not take this route offline, so exhaustion is
-    judged against the model the run would actually use. A full-window exhaustion that
-    names no reset instant still reports ``subscription_window_exhausted`` — as the
-    REASON with an empty ``reset_at``, since an unknown healing time is not health.
+    judged against the model the run would actually use. A fully-used ratio without
+    a valid future reset is incomplete evidence, not a current refusal: the engine
+    decides admission. An explicit active cooldown remains a refusal.
 
     The harness row's aggregate doctor ``status`` is deliberately NOT a refusal
     here (cx-delegation sprint, owner decisions 2026-08-28 «статус обманывает,
@@ -111,13 +111,7 @@ def route_health(
         CLAUDEXOR_DELEGATED_MARKER_MIN_VERSION,
     ):
         return "engine_rejects_delegated_marker", ""
-    exhausted, reset_at = _exhausted_window(gateway, route_id, route_model, pinned_profile)
-    if exhausted and not reset_at:
-        # Spent with no named healing instant: still spent. The old shape carried
-        # exhaustion ONLY in a non-empty reset, so a window the harness reports as
-        # fully used but undated read back as a healthy route and the child was
-        # dispatched onto a substrate that was going to refuse it.
-        return "subscription_window_exhausted", ""
+    _exhausted, reset_at = _exhausted_window(gateway, route_id, route_model, pinned_profile)
     return "", reset_at
 
 
@@ -125,8 +119,8 @@ def _exhausted_window(gateway: Any, route_id: str, route_model: str = "",
                       pinned_profile: str = "") -> tuple[bool, str]:
     """``(exhausted, reset_at)`` for a route judged against its OWN model.
 
-    A window counts as spent when the harness reports it fully used or still cooling
-    down (a FUTURE ``cooldown_until``) AND its model scope covers the route's model —
+    A window counts as spent when it is fully used with a valid future reset, or
+    still cooling down, AND its model scope covers the route's model —
     a window scoped to a model this route never uses (the live incident: a Fable-only
     weekly window taking an opus-pinned route offline for days) is someone else's
     exhaustion, not this route's. Stale snapshots are ignored — an old reading must
@@ -138,8 +132,9 @@ def _exhausted_window(gateway: Any, route_id: str, route_model: str = "",
     so it fail-opens the route: the daemon owns rotation and answers a genuinely
     empty route with its own typed refusal at start time, which costs nothing here.
     Only when every readable profile is spent and none is unreadable is there
-    something to wait for; the honest instant is the EARLIEST named reset (possibly
-    none — spent windows are not obliged to carry one).
+    something to wait for; the honest instant is the EARLIEST named reset.
+    A fully-used ratio without a valid future reset does not prove a live block.
+    Letting the engine try that account is not a claim that its quota is healthy.
 
     A snapshot with an applicable spent constraint counts as spent even if another of
     ITS OWN constraints has room: a 5-hour window at 100% blocks that profile now,
@@ -188,15 +183,18 @@ def _exhausted_window(gateway: Any, route_id: str, route_model: str = "",
             continue
         if str(snapshot.get("freshness") or "") != "fresh":
             continue
-        spent_here = [
-            (str(c.get("cooldown_until") or "") or str(c.get("resets_at") or ""))
-            for c in (snapshot.get("constraints") or [])
-            if isinstance(c, dict)
-            and (_cooldown_active(c.get("cooldown_until"))
-                 or (isinstance(c.get("used_ratio"), (int, float))
-                     and float(c.get("used_ratio")) >= 1.0))
-            and _model_scope_matches(route_model, c.get("applies_to_models"))
-        ]
+        spent_here = []
+        for c in snapshot.get("constraints") or []:
+            if not isinstance(c, dict) or not _model_scope_matches(
+                route_model, c.get("applies_to_models")
+            ):
+                continue
+            if _cooldown_active(c.get("cooldown_until")):
+                spent_here.append(str(c["cooldown_until"]))
+            elif (isinstance(c.get("used_ratio"), (int, float))
+                  and float(c["used_ratio"]) >= 1.0
+                  and _cooldown_active(c.get("resets_at"), unknown_is_active=False)):
+                spent_here.append(str(c["resets_at"]))
         if spent_here:
             any_spent = True
             resets.extend(reset for reset in spent_here if reset)
@@ -235,19 +233,20 @@ def _model_scope_matches(route_model: str, applies_to_models: Any) -> bool:
     return any(a == model or a in model or model in a for a in aliases)
 
 
-def _cooldown_active(cooldown_until: Any) -> bool:
+def _cooldown_active(cooldown_until: Any, *, unknown_is_active: bool = True) -> bool:
     """A cooldown blocks only while its instant is still AHEAD: an expired
     ``cooldown_until`` is history the harness has not refreshed yet, not positive
     evidence of a spent window. An illegible instant keeps the conservative old
     reading (spent) — the harness positively said "cooling down" and an unreadable
-    clock is no proof it healed."""
+    clock is no proof it healed. A ratio's reset uses ``unknown_is_active=False``:
+    an unreadable reset, unlike an explicit cooldown, proves no current block."""
     text = str(cooldown_until or "").strip()
     if not text:
         return False
     try:
         instant = datetime.fromisoformat(text.replace("Z", "+00:00"))
     except ValueError:
-        return True
+        return unknown_is_active
     if instant.tzinfo is None:
         instant = instant.replace(tzinfo=timezone.utc)
     return instant > datetime.now(timezone.utc)

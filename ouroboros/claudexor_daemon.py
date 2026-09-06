@@ -336,14 +336,12 @@ class OwnedClaudexorDaemon:
             engine_version=self._engine_version,
             engine_build_sha=self._engine_build_sha,
         )
-        command = runtime_manager.resolve_command()
         return {
             "state": state,
             "config_dir": str(owned_config_dir()),
             "engine_version": self._engine_version,
             "engine_build_sha": self._engine_build_sha,
             "self_started": bool(self._proc is not None and self._proc.poll() is None),
-            "binary": command[0] if command else None,
             "runtime": runtime,
             "last_error": self._last_error or None,
             # Typed foreign-home disclosure ('' = ours): a marker naming another

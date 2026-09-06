@@ -790,12 +790,18 @@ def _needs_fallback_extraction(items: list, raw_text: str) -> bool:
 
 
 def _parse_advisory_output(stdout: str) -> list:
-    """Extract the JSON findings array from Claude CLI output."""
+    """Select the result array before validating its rows as a whole.
+
+    Enum validation must not make the scanner skip an invalid final checklist
+    and accept an earlier example. Unrelated numeric arrays remain ignorable.
+    """
     items = _car().extract_json_array(
         stdout,
         unwrap_result=True,
-        validate_fn=_is_checklist_array,
+        validate_fn=lambda rows: any(isinstance(row, dict) for row in rows),
     ) or []
+    if not _is_checklist_array(items):
+        return []  # the complete raw answer reaches the existing extraction rail
     return [dict(item, verdict=item["verdict"].strip().upper(), **(
         {"severity": item["severity"].strip().lower()} if "severity" in item else {}
     )) for item in items]
