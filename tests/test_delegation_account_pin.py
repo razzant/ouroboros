@@ -85,16 +85,25 @@ def test_a_pinned_route_is_judged_by_its_own_subject_exactly():
 
 
 def _waited_run(tmp_path, monkeypatch, summary, requested_model="m",
-                requested_profile="", selected_subagent_id=""):
+                requested_profile="", selected_subagent_id="", observed_attempt=None):
     """Drive one terminal `delegate_wait` for `summary`; return the agent payload.
 
     Profile-aware sibling of the transport module's `_waited_run`: the custody
     row's REQUESTED model and account pin are under test-control — the
-    requested-vs-applied disclosures compare them against the engine summary's
-    own `model` / `authRoute` receipt."""
+    requested-vs-applied disclosures compare them against the engine's separate
+    final-attempt telemetry, never the summary's request/previous-attempt echoes."""
     import ouroboros.tools.delegate as delegate
     from ouroboros.gateways import claudexor as gw
     from ouroboros.tools.registry import ToolContext
+
+    if observed_attempt is not None:
+        final = tmp_path / "run" / "final"
+        final.mkdir(parents=True)
+        (final / "telemetry.yaml").write_text(json.dumps({
+            "run_id": "run-1", "final_attempt_id": observed_attempt["attempt_id"],
+            "attempts": [observed_attempt],
+        }), encoding="utf-8")
+        summary = {**summary, "runDir": str(final.parent)}
 
     class _Stub:
         def handshake(self, **_kw): return {}
@@ -118,7 +127,7 @@ def _waited_run(tmp_path, monkeypatch, summary, requested_model="m",
 
 def test_the_receipt_carries_the_requested_and_applied_account(tmp_path, monkeypatch):
     """Unified-accounts sprint (D-U5/§K.7): the APPLIED account is the engine's
-    own authRoute settlement receipt — the same fact the ledger row and the
+    own final-attempt telemetry — the same fact the ledger row and the
     SETTLED event carry — and the REQUESTED pin replays off the durable STARTED
     row, so a requested-vs-ran mismatch is disclosable in the «Last delegated
     run» line. Absence stays absence: telemetry that predates the receipt
@@ -128,11 +137,14 @@ def test_the_receipt_carries_the_requested_and_applied_account(tmp_path, monkeyp
     monkeypatch.setattr("ouroboros.config.DATA_DIR", tmp_path / "acct-data")
     _waited_run(tmp_path / "acct", monkeypatch,
                 {"state": "succeeded", "spendUsd": 0.0, "model": "m",
-                 "authRoute": {"profileId": "codex-default"}},
-                requested_profile="koshak", selected_subagent_id="session-builder")
+                 "authRoute": {"profileId": "previous-profile"}},
+                requested_profile="koshak", selected_subagent_id="session-builder",
+                observed_attempt={"attempt_id": "a02", "harness_id": "r",
+                                  "observed_model": "actual-model", "profile_id": "codex-default"})
     record = subagent_last_delegation()
     assert record["requested_profile"] == "koshak"
     assert record["applied_profile"] == "codex-default"
+    assert record["applied_model"] == "actual-model"
     assert record["selected_subagent_id"] == "session-builder"
 
     from ouroboros.subagents import record_last_delegation
@@ -142,11 +154,11 @@ def test_the_receipt_carries_the_requested_and_applied_account(tmp_path, monkeyp
     )
     assert subagent_last_delegation() == record
 
-    # No receipt, no invention: an engine whose telemetry predates authRoute
-    # leaves the applied account empty beside the recorded request.
+    # A summary echo cannot replace the missing final-attempt receipt.
     monkeypatch.setattr("ouroboros.config.DATA_DIR", tmp_path / "acct-data-2")
     _waited_run(tmp_path / "acct2", monkeypatch,
-                {"state": "succeeded", "spendUsd": 0.0, "model": "m"},
+                {"state": "succeeded", "spendUsd": 0.0, "model": "m",
+                 "authRoute": {"profileId": "previous-profile"}},
                 requested_profile="koshak")
     bare = subagent_last_delegation()
     assert bare["requested_profile"] == "koshak"

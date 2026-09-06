@@ -744,7 +744,7 @@ def run_delegated_review_session(
     from ouroboros import delegate_custody as custody
     from ouroboros.claudexor_daemon import ensure_owned_gateway
     from ouroboros.gateways.claudexor import (
-        WINDOW_EXHAUSTED_CODES, ClaudexorSubscriptionWindowExhausted, ClaudexorUnavailable,
+        WINDOW_EXHAUSTED_CODES, ClaudexorSubscriptionWindowExhausted, ClaudexorUnavailable, final_attempt_facts,
     )
     from ouroboros.subagents import delegated_run_shape, route_health
     from ouroboros.usage_accounting import current_usage_scope
@@ -968,6 +968,7 @@ def run_delegated_review_session(
             raise
         settlement = custody.settle_run(custody_drive, gateway, entry, detail)
         summary = custody.summary_of(detail)
+        observed = final_attempt_facts(detail, run_id)
         run_state = str(summary.get("state") or "")
         if run_state != "succeeded":
             failure = summary.get("failure") if isinstance(summary.get("failure"), dict) else {}
@@ -987,7 +988,7 @@ def run_delegated_review_session(
             from ouroboros.review_thread_continuity import review_thread_receipt as receipt_for
             thread_receipt = receipt_for(gateway, thread_id, run_id, turn_id,
                 expected_profile=str(getattr(route, "profile_id", "") or ""),
-                applied_profile=str((summary.get("authRoute") or {}).get("profileId") or ""))
+                applied_profile=observed.get("profile_id", ""))
             turn_id = str(thread_receipt.get("turn_id") or turn_id)
         state.pop("pending_invocation_id", None)
         state.pop("delegated_run_id", None)
@@ -1004,15 +1005,14 @@ def run_delegated_review_session(
             "idempotent_recovery": recovering,
             "settlement": settlement,
             "route_id": str(entry.route_id),
-            # Engine receipt of the used pool; pinned-route drift is disclosed (D4).
-            "effective_route_ids": [
-                str(h) for h in (summary.get("harnesses") or []) if str(h)
-            ],
-            "model": str(summary.get("model") or ""),
+            # One final attempt, never the requested pool or a mixed summary route.
+            "effective_route_ids": [observed["harness_id"]] if observed.get("harness_id") else [],
+            "observed_attempt": observed,
+            "model": observed.get("model", ""),
             "spend": spend,
             "spend_estimated": estimated,
             # D22/D29 applied facts are verbatim telemetry, never inferred.
-            "applied_profile": str((summary.get("authRoute") or {}).get("profileId") or ""),
+            "applied_profile": observed.get("profile_id", ""),
             "auth_route_receipt": summary.get("authRoute") or {},
             # Only effectiveAccess witnesses applied access; request echo is insufficient.
             "applied_access": str(summary.get("effectiveAccess") or ""),
@@ -1212,7 +1212,7 @@ class AgentSessionReviewExecutor(ReviewSlotExecutor):
             started = bool(self._run_id or getattr(exc, "delegated_run_started", False))
             if started and not self._session_usage_observed and session_usage_once(self._run_id):
                 self._observe_usage({
-                    "provider": "claudexor", "resolved_model": str(self.assignment.slot.model or ""),
+                    "provider": "claudexor", "resolved_model": "",
                     "delegated_run_started": True, "delegated_run_id": self._run_id, "cost": None,
                 })
                 self._session_usage_observed = True
@@ -1345,7 +1345,14 @@ class AgentSessionReviewExecutor(ReviewSlotExecutor):
                 "reason": "schema_not_conformed_on_effective_route",
             })
         effective_routes = facts.get("effective_route_ids") or []
-        if effective_routes and set(effective_routes) != {facts["route_id"]}:
+        if not effective_routes:
+            self._deltas.append({
+                "kind": "capability_delta",
+                "requested": f"route {facts['route_id']} (pinned pool)",
+                "effective": "final-attempt route observation unavailable; pinned pool could not be verified",
+                "reason": "session_route_observation_unavailable",
+            })
+        elif set(effective_routes) != {facts["route_id"]}:
             # Belt over the pin: the request names exactly one eligible
             # harness, so the engine's receipt disagreeing is drift that must
             # surface loudly, never a quietly accepted substitute route.
@@ -1360,7 +1367,9 @@ class AgentSessionReviewExecutor(ReviewSlotExecutor):
             "provider": "claudexor",
             "resolved_model": facts["model"],
             "delegated_run_id": facts["run_id"],
-            "delegated_route": facts["route_id"],
+            "delegated_route": effective_routes[0] if len(effective_routes) == 1 else "",
+            "requested_route": facts["route_id"],
+            "observed_attempt": facts.get("observed_attempt") or {},
             "review_thread_id": str(facts.get("thread_id") or ""),
             "review_turn_id": str(facts.get("turn_id") or ""),
             "review_thread_receipt": facts.get("thread_receipt") or {},

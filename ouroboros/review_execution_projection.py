@@ -115,9 +115,9 @@ def review_executions_from_actor_usage(actors: Any) -> List[Dict[str, str]]:
         usage = actor.get("usage") if isinstance(actor.get("usage"), dict) else {}
         delegated_route = str(usage.get("delegated_route") or "").strip()
         model = str(usage.get("resolved_model") or "").strip()
-        if delegated_route:
+        if delegated_route or (usage.get("provider") == "claudexor" and usage.get("delegated_run_id")):
             executions.append({
-                "kind": "harness", "harness_id": delegated_route,
+                "kind": "harness", **({"harness_id": delegated_route} if delegated_route else {}),
                 **({"model": model} if model else {}),
             })
         elif _has_api_execution_receipt(usage):

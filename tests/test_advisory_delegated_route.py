@@ -20,7 +20,7 @@ from types import SimpleNamespace
 import pytest
 
 import ouroboros.tools.claude_advisory_review as advisory
-from tests.test_review_agent_session_route import FakeGateway, _terminal_detail
+from tests._review_session_route_shared import _terminal_detail, fake_route as fake_route
 
 
 @pytest.fixture(autouse=True)
@@ -33,17 +33,6 @@ def _owned_gateway_uses_each_test_transport(monkeypatch):
         "ensure_owned_gateway",
         lambda: gateway_module.ClaudexorGateway(),
     )
-
-
-@pytest.fixture()
-def fake_route(monkeypatch):
-    from ouroboros import delegate_custody as custody
-
-    FakeGateway.reset()
-    monkeypatch.setattr("ouroboros.gateways.claudexor.ClaudexorGateway", FakeGateway)
-    monkeypatch.setenv("OUROBOROS_REVIEW_SESSION_ROUTE", "fake-review=fake-small:low")
-    custody._CUSTODY.clear()
-    return FakeGateway
 
 
 def _ctx(tmp_path):
@@ -121,7 +110,7 @@ def test_delegated_route_runs_without_the_key(tmp_path, monkeypatch, fake_route)
     )
     assert not raw.startswith("⚠️ ADVISORY_ERROR")
     assert [i["item"] for i in items] == ["correctness"]
-    assert model  # the effective session model/route is reported
+    assert model == "fake-small"  # from the shared fixture's final-attempt telemetry
     start = fake_route.instances[0].start_requests[0]
     assert start["authPreference"] == "subscription"
     assert start["access"] == "readonly"

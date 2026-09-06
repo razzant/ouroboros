@@ -11,7 +11,7 @@ from __future__ import annotations
 
 import json
 import logging
-from typing import Any, Dict, List, Optional
+from typing import Any, Callable, Dict, List, Optional
 
 from ouroboros.config import get_finalization_grace_sec
 from ouroboros.deadline_utils import owner_deadline_exhausted, review_transport_timeout
@@ -89,7 +89,9 @@ def _findings_array(payload: Any) -> Optional[List[Dict[str, Any]]]:
     return None
 
 
-def _strictly_parseable(text: str, shape: str = "array") -> bool:
+def _strictly_parseable(
+    text: str, shape: str = "array", array_validator: Optional[Callable[[list], bool]] = None,
+) -> bool:
     """Would the surfaces' own strict parsers accept this text as a verdict?
 
     The strict path comes FIRST (D19): a session that already obeyed the output
@@ -125,17 +127,20 @@ def _strictly_parseable(text: str, shape: str = "array") -> bool:
         parsed = json.loads(body.strip())
     except (TypeError, ValueError):
         return False
-    return bool(parsed) and isinstance(parsed, list) and all(isinstance(item, dict) for item in parsed)
+    return bool(parsed) and isinstance(parsed, list) and all(isinstance(item, dict) for item in parsed) \
+        and (array_validator is None or array_validator(parsed))
 
 
-def _canonical_payload_text(payload: Any, shape: str) -> Optional[str]:
+def _canonical_payload_text(
+    payload: Any, shape: str, array_validator: Optional[Callable[[list], bool]] = None,
+) -> Optional[str]:
     """Canonical text of a structured payload for ``shape``, or None when it
     does not carry the contract's shape."""
     if shape == "object":
         verdict = object_verdict_payload(payload)
         return None if verdict is None else json.dumps(verdict, ensure_ascii=False)
     findings = _findings_array(payload)
-    if findings is None:
+    if findings is None or (findings and array_validator is not None and not array_validator(findings)):
         return None
     return "[]" if not findings else json.dumps(findings, ensure_ascii=False)
 
@@ -143,6 +148,7 @@ def _canonical_payload_text(payload: Any, shape: str) -> Optional[str]:
 def canonicalize_session_verdict(
     raw_text: str, *, conformance_passed: bool, contract: str = "", llm: Any = None,
     deadline_at: Any = None, transport_timeout_sec: Any = None, shape: str = "array",
+    array_validator: Optional[Callable[[list], bool]] = None,
 ) -> tuple[str, str, Dict[str, Any]]:
     """Return ``(canonical_text, method, extraction_usage)`` for a session answer.
 
@@ -162,6 +168,10 @@ def canonicalize_session_verdict(
     kept whole on every branch — never reduced to its findings) or ``report``
     (a free-form product that is passed through verbatim; nothing here may
     turn a diagnosis into a findings array).
+
+    An array surface may supply its existing row validator. Shape-valid but
+    contract-invalid rows then reach the same extraction rail; the host never
+    guesses a verdict or severity. Other surfaces keep their own parsing rules.
     """
     text = str(raw_text or "")
     if shape == "report":
@@ -171,19 +181,19 @@ def canonicalize_session_verdict(
             payload = json.loads(text.strip())
         except (TypeError, ValueError):
             payload = None
-        canonical = _canonical_payload_text(payload, shape)
+        canonical = _canonical_payload_text(payload, shape, array_validator)
         if canonical is not None:
             return canonical, "schema", {}
         # The engine claimed conformance over a payload that does not carry the
         # contract's shape: fall through to the honest branches, and the caller
         # discloses the delta.
-    if _strictly_parseable(text, shape):
+    if _strictly_parseable(text, shape, array_validator):
         return text, "strict", {}
     if len(text) > _EXTRACT_MAX_CHARS:
         return text, "extraction_incomplete", {}
     canonical, usage = _extract_verdict_via_light_model(
         text, contract=contract, llm=llm, deadline_at=deadline_at,
-        transport_timeout_sec=transport_timeout_sec, shape=shape)
+        transport_timeout_sec=transport_timeout_sec, shape=shape, array_validator=array_validator)
     if canonical is not None:
         return canonical, "light_model_extraction", usage
     # `unparsed` is the honest end of THIS layer's knowledge. The coordinator's
@@ -197,6 +207,7 @@ def canonicalize_session_verdict(
 def _extract_verdict_via_light_model(
     raw_text: str, *, contract: str = "", llm: Any = None, deadline_at: Any = None,
     transport_timeout_sec: Any = None, shape: str = "array",
+    array_validator: Optional[Callable[[list], bool]] = None,
 ) -> tuple[Optional[str], Dict[str, Any]]:
     """One bounded light-model call canonicalizing narrative to the contract."""
     from ouroboros.config import get_light_model
@@ -269,4 +280,4 @@ def _extract_verdict_via_light_model(
             findings = None
     if findings is None:
         return None, usage
-    return ("[]" if not findings else json.dumps(findings, ensure_ascii=False)), usage
+    return _canonical_payload_text(findings, shape, array_validator), usage

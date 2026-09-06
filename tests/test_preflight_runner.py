@@ -597,7 +597,7 @@ def test_serial_file_manifest_entries_exist_and_partition():
 
     for name in _SERIAL_TEST_FILES:
         assert (REPO_ROOT / "tests" / name).exists(), f"_SERIAL_TEST_FILES names a missing file: {name}"
-    assert "test_preflight_runner.py" in _SERIAL_TEST_FILES
+    assert {"test_preflight_runner.py", "test_preflight_process_containment.py"} <= _SERIAL_TEST_FILES
 
 
 # ── Result classification (unit, no spawn) ────────────────────────────
@@ -3672,12 +3672,11 @@ def test_hermetic_pytest_timeout_reaps_detached_session_child(tmp_path, two_pass
         },
     )
 
-    # 10s (was 5s serial): the parallel pass pays xdist controller+worker startup
-    # before the probe body runs at all.
-    result = run_hermetic_pytest(repo, timeout=10)
+    # Allow xdist startup before timing out the detached-child probe.
+    result = run_hermetic_pytest(repo, timeout=30)
     assert result is not None and "timed out" in result
 
-    assert marker.exists(), "detached child never recorded its pid"
+    assert marker.exists(), "probe never started; reaper result is inconclusive"
     child_pid = int(marker.read_text().strip())
     deadline = time.time() + 10
     alive = True

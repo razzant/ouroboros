@@ -827,20 +827,22 @@ def test_registry_bridges_resolved_runtime_slot_for_observability(tmp_path):
     ONE string slot ``ctx._process_resolved_runtime`` for the duration of the
     handler call — the slot the typed process facts and the verify receipt
     disclose — and restores it afterwards; a no-op trace publishes nothing."""
+    from dataclasses import replace
     from types import SimpleNamespace
 
     from ouroboros.process_interpreters import InterpreterResolutionTrace
     from ouroboros.tools.registry import ToolRegistry
+    from ouroboros.tools.shell import get_tools
 
     registry = ToolRegistry.__new__(ToolRegistry)
-    registry._ctx = SimpleNamespace()
+    registry._ctx = SimpleNamespace(repo_dir=tmp_path, drive_root=tmp_path / "data")
     seen = {}
 
     def handler(ctx, **kwargs):
         seen["slot"] = getattr(ctx, "_process_resolved_runtime", None)
         return "ok"
 
-    entry = SimpleNamespace(handler=handler)
+    entry = replace(next(tool for tool in get_tools() if tool.name == "run_command"), handler=handler)
     changed = InterpreterResolutionTrace(
         tool="run_command", requested_interpreter="node",
         resolved_interpreter="/bundle/bin/node", surface="external_workspace",

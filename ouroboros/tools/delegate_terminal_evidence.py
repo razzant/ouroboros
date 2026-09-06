@@ -173,15 +173,18 @@ def _containment_evidence(detail: Dict[str, Any]) -> Dict[str, Any]:
 
 def _terminal_payload(run_id: str, detail: Dict[str, Any],
                       authority: "DelegatedRunShape") -> Dict[str, Any]:
+    from ouroboros.gateways.claudexor import final_attempt_facts
+
     summary = _delegate().custody.summary_of(detail)
+    observed = final_attempt_facts(detail, run_id)
     payload = {
         "status": "terminal",
         "run_id": run_id,
         "state": str(summary.get("state") or ""),
-        # The APPLIED model, from the engine's own summary — '' when the run
-        # never disclosed one (live unpinned runs really do), shown as absence
-        # rather than the requested model dressed up as the applied one.
-        "model": str(summary.get("model") or ""),
+        # Model, harness and profile come from the SAME final attempt. The
+        # summary's requested model and cross-attempt route are not evidence.
+        "model": observed.get("model", ""),
+        "observed_attempt": observed,
         "outcome_banner": detail.get("outcomeBanner"),
         "outcome_facts": summary.get("outcomeFacts"),
         "output_conformance": summary.get("outputConformance"),

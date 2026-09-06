@@ -917,6 +917,45 @@ def attempt_containment(run_dir: str) -> List[AttemptContainment]:
     return applied
 
 
+def final_attempt_facts(detail: Dict[str, Any], run_id: str) -> Dict[str, str]:
+    """Read the final attempt's route facts from engine-owned telemetry.
+
+    The summary's model and harnesses echo the request; its route/authRoute
+    projections may borrow facts from earlier attempts. Only the unique row
+    named by final_attempt_id belongs to the delivered result. Missing facts
+    stay unknown, never filled from another attempt or the request.
+    """
+    summary = detail.get("summary") if isinstance(detail, dict) else None
+    if not isinstance(summary, dict) or not isinstance(run_id, str) or not run_id.strip():
+        return {}
+    run_dir = summary.get("runDir")
+    if not isinstance(run_dir, str) or not run_dir.strip():
+        return {}
+    import yaml  # type: ignore
+
+    try:
+        record = yaml.safe_load(
+            (pathlib.Path(run_dir) / "final" / "telemetry.yaml").read_text(encoding="utf-8"))
+    except (OSError, ValueError, RuntimeError, yaml.YAMLError):
+        return {}
+    if not isinstance(record, dict) or record.get("run_id") != run_id:
+        return {}
+    final_id, attempts = record.get("final_attempt_id"), record.get("attempts")
+    if not isinstance(final_id, str) or not final_id.strip() or not isinstance(attempts, list):
+        return {}
+    matching = [row for row in attempts if isinstance(row, dict) and row.get("attempt_id") == final_id]
+    if len(matching) != 1:
+        return {}
+    row = matching[0]
+    return {
+        target: row.get(source) if isinstance(row.get(source), str) else ""
+        for target, source in (
+            ("attempt_id", "attempt_id"), ("harness_id", "harness_id"),
+            ("model", "observed_model"), ("profile_id", "profile_id"),
+        )
+    }
+
+
 __all__ = [
     "AttemptContainment",
     "ClaudexorGateway",
@@ -928,6 +967,7 @@ __all__ = [
     "discover_daemon",
     "discover_daemon_at",
     "engine_at_least",
+    "final_attempt_facts",
     "operator_home",
     "pending_interactions",
 ]

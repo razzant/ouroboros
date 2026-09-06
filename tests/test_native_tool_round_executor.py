@@ -868,7 +868,14 @@ def test_slot_logical_window_bounds_the_episode(subject_repo, tmp_path, monkeypa
     """The coordinator's logical window for the slot is a bound like the owner
     deadline: past it, a verdict episode refuses typed and a report keeps its
     draft; one send's transport timeout never outlives the window."""
-    import time as _time
+    from types import SimpleNamespace
+    import ouroboros.review_native_episode as native_episode
+
+    # Advance only the episode clock at the transitions this test exercises.
+    # Real registry preparation may outlive a sub-second window on a busy host;
+    # that is a valid pre-dispatch refusal, not the retained-draft case below.
+    clock = SimpleNamespace(now=1000.0)
+    monkeypatch.setattr(native_episode, "time", SimpleNamespace(monotonic=lambda: clock.now))
 
     llm = _ScriptedLLM([
         {"tool_calls": [_tool_call("read_file", {"path": "greeting.txt"}, "c1")]},
@@ -876,8 +883,8 @@ def test_slot_logical_window_bounds_the_episode(subject_repo, tmp_path, monkeypa
     ])
     assignment = dataclasses.replace(_assignment(subject_repo, llm), custody_root=tmp_path / "window")
     executor = NativeToolRoundReviewExecutor(assignment, llm=llm)
-    executor._logical_deadline_monotonic = _time.monotonic() + 0.05
-    _time.sleep(0.08)
+    executor._logical_deadline_monotonic = clock.now + 0.05
+    clock.now += 0.08
     with pytest.raises(ReviewRouteUnavailable) as exc:
         executor.execute()
     assert exc.value.code == "deadline_exhausted" and not llm.calls
@@ -887,11 +894,11 @@ def test_slot_logical_window_bounds_the_episode(subject_repo, tmp_path, monkeypa
     assignment = _assignment(subject_repo, llm)
     assignment.request.surface = "deep_self_review"
     executor = NativeToolRoundReviewExecutor(assignment, llm=llm)
-    executor._logical_deadline_monotonic = _time.monotonic() + 0.2  # the window is read once, at the start
+    executor._logical_deadline_monotonic = clock.now + 0.2  # the window is read once, at the start
     original_chat = llm.chat
 
     def slow_chat(**kwargs):
-        _time.sleep(0.3)  # the round outlives the window
+        clock.now += 0.3  # the round outlives the window
         return original_chat(**kwargs)
 
     llm.chat = slow_chat
@@ -903,10 +910,8 @@ def test_slot_logical_window_bounds_the_episode(subject_repo, tmp_path, monkeypa
 
     # The window expiring between the round's admission check and dispatch
     # takes the deadline path — no send with a floored timeout.
-    import ouroboros.review_native_episode as native_episode
-
     ticks = iter([1000.0])  # the admission check sees 1000; every later reading (the clamp) sees 1002
-    monkeypatch.setattr(native_episode.time, "monotonic", lambda: next(ticks, 1002.0))
+    monkeypatch.setattr(native_episode, "time", SimpleNamespace(monotonic=lambda: next(ticks, 1002.0)))
     llm = _ScriptedLLM([{"content": _VERDICT}])
     executor = NativeToolRoundReviewExecutor(_assignment(subject_repo, llm), llm=llm)
     executor._logical_deadline_monotonic = 1001.0

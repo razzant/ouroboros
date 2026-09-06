@@ -40,6 +40,14 @@ validated aggregate plus every row that is still live.
 
 ## 4. Baseline block shape
 
+Subscription-session replay binds the stable external session id, route and all
+ownership/review-attribution fields. Its observed model is disclosure, not a new
+physical session or a pricing input: a later observation can differ or become
+unknown while replay returns the original ledger row byte-identically. Existing
+legacy model labels are historical evidence, not newly confirmed observations;
+new custody/result observations remain separate. External-unmetered replay keeps
+its own existing model identity check.
+
 The compacted file is `[header row] [group rows …] [retained rows …]`.
 
 **Header** (`kind="usage_baseline"`, exactly one, always seq 1 when present):
