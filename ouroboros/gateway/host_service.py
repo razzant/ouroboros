@@ -309,7 +309,26 @@ async def _api_chat_inject(request: Request) -> JSONResponse:
         image_caption = str(payload.get("image_caption") or "")
         client_message_id = str(payload.get("client_message_id") or "").strip()[:128]
         try:
-            uploads = _inject_attachment_uploads(ctx, skill_name, payload.get("attachments"))
+            copying = asyncio.create_task(asyncio.to_thread(
+                _inject_attachment_uploads, ctx, skill_name, payload.get("attachments"),
+            ))
+            try:
+                uploads = await asyncio.shield(copying)
+            except asyncio.CancelledError:
+                # Keep the admitted copy and its in-flight slot until the
+                # worker settles; the skill still owns its source files.
+                while not copying.done():
+                    try:
+                        await asyncio.shield(copying)
+                    except asyncio.CancelledError:
+                        pass
+                    except Exception:
+                        break
+                try:
+                    copying.result()
+                except Exception:
+                    log.debug("Host upload failed while cancellation settled", exc_info=True)
+                raise
         except ChatUploadPayloadTooLarge as exc:
             return _json_error(str(exc), 413)
         except ValueError as exc:

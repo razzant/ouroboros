@@ -11,6 +11,7 @@ import os
 import pathlib
 import re
 
+import pytest
 from starlette.testclient import TestClient
 
 from ouroboros.gateway.host_service import create_host_service_app
@@ -66,6 +67,63 @@ def test_inject_without_attachments_keeps_the_historical_kwargs(tmp_path):
     assert response.status_code == 202
     assert "task_metadata" not in bridge.messages[0]
     assert "client_message_id" not in bridge.messages[0]
+
+
+@pytest.mark.parametrize("copy_fails", [False, True])
+def test_cancelled_inject_retains_copy_and_inflight_until_worker_settles(tmp_path, monkeypatch, copy_fails):
+    import asyncio
+    import threading
+    from types import SimpleNamespace
+    from ouroboros.gateway import host_service
+
+    source = _skill_file(tmp_path)
+    bridge = FakeBridge()
+    client = _client(tmp_path, bridge)
+    ctx = client.app.state.host_service_context
+    entered, release, finished = threading.Event(), threading.Event(), threading.Event()
+    original_copy, original_leave = host_service.store_chat_upload, ctx._leave_inflight
+    left = []
+
+    def copy(*args, **kwargs):
+        entered.set()
+        assert release.wait(5)
+        try:
+            if copy_fails:
+                raise OSError("controlled disk copy failure")
+            return original_copy(*args, **kwargs)
+        finally:
+            finished.set()
+
+    def leave(skill):
+        left.append(skill)
+        original_leave(skill)
+
+    async def payload():
+        return {"chat_id": 42, "text": "file", "attachments": [{"path": str(source)}]}
+
+    monkeypatch.setattr(host_service, "store_chat_upload", copy)
+    monkeypatch.setattr(ctx, "_leave_inflight", leave)
+    request = SimpleNamespace(app=client.app, headers={"x-skill-token": "token"}, json=payload)
+
+    async def run():
+        task = asyncio.create_task(host_service._api_chat_inject(request))
+        try:
+            assert await asyncio.to_thread(entered.wait, 5)
+            task.cancel()
+            await asyncio.sleep(0)
+            task.cancel()
+            await asyncio.sleep(0)
+            assert not task.done() and ctx._inflight["telegram"] == 1
+            assert left == [] and not finished.is_set()
+        finally:
+            release.set()
+            with pytest.raises(asyncio.CancelledError):
+                await task
+        assert finished.is_set() and ctx._inflight["telegram"] == 0
+        assert left == ["telegram"] and bridge.messages == []
+        assert source.is_file()
+
+    asyncio.run(run())
 
 
 def test_inject_refuses_files_outside_the_skill_state_and_bad_shapes(tmp_path):
