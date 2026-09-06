@@ -117,6 +117,32 @@ def test_generic_hub_transport_keeps_explicit_api_contract(tmp_path, gh_calls, m
     assert gh_calls[0][1]["env"]["GH_REPO"] == "configured/hub"
 
 
+@pytest.mark.parametrize("kind", ["system", "queued", "room", "fileless", "broken"])
+@pytest.mark.parametrize("name,args,_count", _CALLS)
+def test_public_null_target_never_selects_internal_hub_transport(tmp_path, gh_calls, monkeypatch, kind, name, args, _count):
+    from ouroboros.tools.registry import ToolRegistry
+
+    ctx, _ = _context(tmp_path, "room" if kind in {"fileless", "broken"} else kind)
+    if kind == "fileless":
+        ctx.task_metadata = {}
+    elif kind == "broken":
+        ctx.task_metadata = {"_project_room_note": "registry unavailable"}
+    monkeypatch.setenv("GH_REPO", "unrelated/wrong-repo")
+    monkeypatch.setenv("OUROBOROS_SAFETY_MODE", "off")
+    registry = ToolRegistry(repo_dir=ctx.repo_dir, drive_root=ctx.drive_root)
+    registry.set_context(ctx)
+    result = registry.execute(name, {**args, "repo": None})
+    assert "GH_TARGET_INVALID" in result
+    assert not gh_calls
+
+
+@pytest.mark.parametrize("repo", [False, 0, [], {}, 1])
+def test_invalid_public_target_values_cannot_be_generic_transport(tmp_path, gh_calls, repo):
+    ctx, _ = _context(tmp_path, "queued")
+    assert "GH_TARGET_INVALID" in github._get_issue(ctx, 7, repo=repo)
+    assert not gh_calls
+
+
 def test_room_registry_failure_is_visible(tmp_path, monkeypatch):
     from ouroboros import projects_registry
     from ouroboros.workspace_admission import room_chat_lens_dir

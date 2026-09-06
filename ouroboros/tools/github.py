@@ -13,6 +13,7 @@ from ouroboros.tools.registry import ToolContext, ToolEntry
 from ouroboros.utils import truncate_review_artifact as _truncate_with_notice
 
 log = logging.getLogger(__name__)
+_GENERIC_TRANSPORT = object()
 
 def github_token_from_env_or_settings() -> str:
     from ouroboros.config import load_settings
@@ -60,13 +61,15 @@ def github_cli_configured() -> bool:
 
 
 def _gh_cmd(args: List[str], ctx: ToolContext, timeout: int = 30, input_data: Optional[str] = None,
-            *, repo: Optional[str] = None) -> str:
-    # None keeps explicit API/Hub callers on their existing transport contract.
-    # The eight repository tools pass a string, including '' for Project focus.
+            *, repo: object = _GENERIC_TRANSPORT) -> str:
+    # Only omitted internal API/Hub calls keep the generic transport contract.
+    # Public repository tools always pass repo, including '' for Project focus.
+    if repo is not _GENERIC_TRANSPORT and not isinstance(repo, str):
+        return "⚠️ GH_TARGET_INVALID: repo must be a string; omit it to use the selected Project."
     try:
         cwd, env = pathlib.Path(ctx.repo_dir), _gh_env(ctx)
         cmd = ["gh", *args]
-        if repo is not None:
+        if repo is not _GENERIC_TRANSPORT:
             from ouroboros.tool_access import build_resolved_resource_binding
 
             metadata = getattr(ctx, "task_metadata", {})
