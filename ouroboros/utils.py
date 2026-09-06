@@ -758,15 +758,46 @@ def jsonl_archive_segments(
 
 
 @contextlib.contextmanager
-def jsonl_chain_handles(path, *, strict=False, start_offset=None, snapshot=None) -> Iterator[List[Tuple[pathlib.Path, Any]]]:
-    """Whole ordered chain by default; snapshot selects one segment at start_offset.
+def jsonl_chain_handles(
+    path: pathlib.Path, *, strict: bool = False,
+    start_offset: Optional[int] = None,
+    snapshot: Optional[Dict[str, Any]] = None,
+) -> Iterator[List[Tuple[pathlib.Path, Any]]]:
+    """Open binary handles for a rotated JSONL chain; the context owns closing.
 
-    Open live first and dedup its inode; snapshot caches metadata for one fixed
-    source/EOF pass, never client paths. Consumed prefixes are stat'd once, not
-    opened. Rebind the original live inode after rotation; keep at most two
-    handles in snapshot mode. Every handle closes on exit, including errors.
-    Missing discovery entries are benign; strict enumeration/stat/read or
-    shortened required segments fail explicitly. Lenient reads skip failures.
+    By default yield every ``(path, handle)`` in archive filename order, with
+    the initially opened live generation last. Open live BEFORE enumeration;
+    device/inode identity excludes its renamed archive alias after rotation.
+    On Windows that open handle can prevent the rotator's rename. This is not
+    an atomic content snapshot, a JSON-row deduplicator, or an event-time sort.
+
+    ``start_offset`` counts bytes across the captured chain lengths, skipping
+    consumed segments without opening them and seeking within selected ones.
+    The captured EOF yields no handles; an offset beyond it always raises
+    ``JsonlChainUnreadable``, even when ``strict`` is false.
+
+    ``snapshot`` is a caller-owned dict for ONE source and ONE logical pass.
+    An empty dict captures paths, stat identities, cumulative ends and total
+    once; reuse selects at most one segment at the requested offset. Reusing
+    it for another path raises ``ValueError``. Never populate it from client
+    paths. Without it, every call discovers a fresh remaining whole chain.
+    No descriptors survive context exit. At most two are open in snapshot
+    mode: the initially pinned live handle and the selected archive handle.
+    If the captured live generation rotated between calls, locate its inode
+    in the archive and retain that path in the same snapshot.
+
+    Snapshot metadata does NOT cap the returned handle's reads: an appending
+    file can expose bytes beyond the captured total. The caller must limit
+    reads to that total and start a fresh snapshot for the next pass; the
+    cursor follower owns this EOF limit and unfinished-line handling.
+
+    Missing live files and entries lost before discovery stat are benign.
+    Strict enumeration/stat/open/seek failures raise ``JsonlChainUnreadable``;
+    lenient mode skips them. With an offset, a selected segment shorter than
+    its captured size is such a failure; a required segment lost after the
+    snapshot is not empty history. Errors while the caller reads a yielded
+    handle propagate as its original I/O errors. All opened handles close on
+    context exit, including failed setup, caller errors and early returns.
     """
     from bisect import bisect_right
 
