@@ -1389,7 +1389,11 @@ server and resolves `-n auto` to the host CPU count, so the stand sets
 (`IsolatedServer` keeps that one key through the settings-authoritative sweep;
 `preflight_runner._preflight_env` still scrubs it from the candidate suite) and
 records the applied value as `extra.preflight_test_workers` in the manifest and
-`preflight_test_workers` in every lane row. `--self-mod` enables post-task evolution with the real
+`preflight_test_workers` in every lane row. Paid lanes run the stand's review panel
+(`scenarios.STAND_PANEL_SETTINGS`): triad gemini-3.8-flash / gpt-5.6-luna / deepseek-v4-pro, scope
+deepseek-v4-pro, advisory claude-sonnet-5, every reviewer at effort low, task and evolution at medium —
+three model families at a fraction of the default panel's cost; `--production-panel` runs the tree's
+own defaults instead, and the product's defaults for installs are untouched. `--self-mod` enables post-task evolution with the real
 re-exec restart — a settings fact (`OUROBOROS_POST_TASK_EVOLUTION` + cadence `every_n:1`) while the
 lane seeds `owner_chat_id` ONLY, never a campaign: the scenario task's post-task promotion
 (`apply_pending_request`) enables the one-shot campaign whose cycle lands, restarts and absorbs.

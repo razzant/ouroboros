@@ -146,6 +146,22 @@ SK1_ECHO_MESSAGE = "ping-e2e-live"
 SK1_ECHO_EXPECTED = f"echo: {SK1_ECHO_MESSAGE}"   # exactly what ``_echo`` in SK1_PLUGIN returns AND relays
 
 
+# The STAND's review panel (the owner's choice of 2026-09-06, questions 1-4 = A): cheap, three model families, every
+# reviewer at effort low, task and evolution at medium. The product's own defaults (gemini/terra/opus triad, terra
+# scope, sonnet advisory, high efforts) stay untouched for installs; ``--production-panel`` runs them on the stand.
+# run3 on the defaults cost 141.63 USD, 75% of it review and opus alone 39%; this panel is estimated at ~40%.
+_ROW = lambda slot_id, model: {"slot_id": slot_id, "route": {"kind": "api_chat", "target_id": model}, "effort": "low"}  # noqa: E731
+STAND_REVIEW_PANEL = {
+    "triad": [_ROW("t_gemini", "google/gemini-3.8-flash"), _ROW("t_luna", "openai/gpt-5.6-luna"),
+              _ROW("t_deepseek", "deepseek/deepseek-v4-pro")],
+    "scope": [_ROW("s_deepseek", "deepseek/deepseek-v4-pro")],
+    "advisory": {"route": {"kind": "api_chat", "target_id": "anthropic/claude-sonnet-5"}, "effort": "low"},
+}
+STAND_PANEL_SETTINGS = {"OUROBOROS_REVIEWER_SLOTS": json.dumps(STAND_REVIEW_PANEL), "OUROBOROS_EFFORT_TASK": "medium",
+                        "OUROBOROS_EFFORT_EVOLUTION": "medium", "OUROBOROS_EFFORT_REVIEW": "low",
+                        "OUROBOROS_EFFORT_SCOPE_REVIEW": "low"}
+
+
 def _git(args: list[str], cwd: pathlib.Path) -> str:
     proc = subprocess.run(["git", *args], cwd=str(cwd), check=False, capture_output=True, text=True)
     return (proc.stdout or "").strip()
