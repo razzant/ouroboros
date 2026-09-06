@@ -292,6 +292,54 @@ def _queue_task_status(snapshot: Dict[str, Any], task_id: str) -> tuple[str, Dic
     return "", {}
 
 
+def observe_cancellation_target(
+    drive_root: Any, task_id: str, *, include_execution: bool = False,
+    request_origin: Optional[Dict[str, Any]] = None,
+) -> Dict[str, Any]:
+    """Read separate source facts about the resolved target, never cancel authority.
+
+    The result file, queue snapshot and custody rows are separate observations;
+    their own timestamps/freshness survive. A failed liveness probe is UNKNOWN,
+    never the fail-open ownership hint used to admit an actual cancellation.
+    """
+    from ouroboros.cancel_intents import _validated_single_cancel_target
+    from ouroboros.cost_projection import cost_projection
+    from ouroboros.utils import utc_now_iso
+
+    observation: Dict[str, Any] = {"observed_at": utc_now_iso(), "requested_task_id": task_id,
+                                   "request_origin": dict(request_origin or {})}
+    try:
+        target = _validated_single_cancel_target(drive_root, task_id)
+    except Exception:
+        return {**observation, "observed_task_id": None, "status": "retry_target_unavailable"}
+    observation["observed_task_id"] = target
+    try:
+        record = load_task_result(drive_root, target, strict=True) or {}
+        observation["task_result"] = {"status": record.get("status"), "updated_at": record.get("updated_at"),
+                                      "started_at": record.get("started_at"), "cost": cost_projection(record)}
+    except Exception:
+        observation["task_result"] = {"status": None, "coverage": "unavailable"}
+    try:
+        snapshot = _load_queue_snapshot(pathlib.Path(drive_root))
+        fresh = not (snapshot.get("_snapshot_missing") or snapshot.get("_snapshot_invalid") or _snapshot_is_stale(snapshot))
+        state, _task = _queue_task_status(snapshot, target) if fresh else ("unknown", {})
+        observation["queue_snapshot"] = {"status": state or "not_listed", "ts": snapshot.get("ts"), "fresh": fresh}
+    except Exception:
+        observation["queue_snapshot"] = {"status": "unknown", "fresh": False}
+    if include_execution:
+        try:
+            from ouroboros.delegate_evidence import task_execution_evidence
+
+            evidence = task_execution_evidence(drive_root, target)
+            keys = ("delegated_runs_started", "delegated_runs_settled", "delegated_runs_succeeded",
+                    "delegated_runs_failed", "subscription_cost_usd", "subscription_cost_estimated")
+            observation["delegated_execution"] = ({"evidence_read_failed": True} if evidence.get("evidence_read_failed")
+                                                   else {key: evidence[key] for key in keys if key in evidence})
+        except Exception:
+            observation["delegated_execution"] = {"evidence_read_failed": True}
+    return observation
+
+
 class _EventsTailIndex:
     """One lazily-parsed events.jsonl tail shared across a batch of orphan checks.
 
@@ -585,6 +633,9 @@ def effective_task_result(
 
     if not result:
         return {}
+    from ouroboros.artifacts import project_deliverable_artifacts
+
+    result = project_deliverable_artifacts(result)
     task_id = str(result.get("task_id") or result.get("id") or "").strip()
     if not task_id:
         return dict(result)
@@ -685,7 +736,7 @@ def effective_task_result(
         if merged_is_workspace and child_status in FINAL_STATUSES and (parent_status not in {STATUS_FAILED, STATUS_CANCELLED, STATUS_REJECTED_DUPLICATE} or copied_child_terminal):
             merged = _normalize_workspace_artifact_status(merged)
 
-    merged = _normalize_workspace_artifact_status(merged)
+    merged = _normalize_workspace_artifact_status(project_deliverable_artifacts(merged))
 
     parent_status = str(merged.get("status") or "").lower()
     if parent_status not in FINAL_STATUSES:
@@ -826,8 +877,12 @@ def effective_task_result(
                 collected_artifacts = collect_task_artifact_records(drive_root, task_id)
             merged["artifacts"] = merge_artifact_records(existing_artifacts, rebased_child_artifacts, collected_artifacts)
             merged["artifact_bundle"] = artifact_bundle_from_result(merged)
-            if not merged.get("artifact_status"):
+            if str(merged.get("artifact_status") or "") in {"", "not_applicable"}:
                 merged["artifact_status"] = merged["artifact_bundle"].get("status")
+            axes = merged.get("outcome_axes")
+            artifact_axis = axes.get("artifacts") if isinstance(axes, dict) else None
+            if isinstance(artifact_axis, dict) and artifact_axis.get("status") == "not_applicable" and merged["artifact_bundle"].get("status") == "ready":
+                merged["outcome_axes"] = {**axes, "artifacts": {**artifact_axis, "status": "ready"}}
     except Exception:
         pass
     return _project_child_result_disposition(pathlib.Path(drive_root), merged)

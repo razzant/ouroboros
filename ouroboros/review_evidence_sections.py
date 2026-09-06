@@ -238,16 +238,20 @@ def _accept_obligation_row(o: Dict[str, Any]) -> Dict[str, Any]:
 # key belongs here only when it is derived from panels already paid for.
 UNHASHED_ACCEPTANCE_DIALOGUE_HISTORY_KEY = "acceptance_dialogue_history"
 UNHASHED_EVIDENCE_KEYS = (UNHASHED_ACCEPTANCE_DIALOGUE_HISTORY_KEY,)
+ACCEPTANCE_SOURCE_REVISION_KEY = "__source_revision__"
 
 
 def task_acceptance_evidence_revision(evidence: Dict[str, Any]) -> str:
     """Return the stable content revision used to bind acceptance evidence.
 
-    The evidence packet is already bounded and redacted by the shared builder.
-    Hashing that exact packet — minus ``UNHASHED_EVIDENCE_KEYS`` — lets the
-    agent's cheap evidence call and the host-owned panel refer to the same
-    revision without a second ledger.
+    The shared host builder stamps the facts BEFORE presentation budgeting.
+    History still counts toward the wire budget, but its size cannot turn an
+    unchanged subject into a new one. Plain legacy packets retain their direct
+    hash; agent-supplied evidence is nested and cannot author the host stamp.
     """
+    revision = (evidence or {}).get(ACCEPTANCE_SOURCE_REVISION_KEY)
+    if isinstance(revision, str) and len(revision) == 64 and all(c in "0123456789abcdef" for c in revision):
+        return revision
     packet = {
         key: value
         for key, value in (evidence or {}).items()
@@ -657,6 +661,8 @@ def _accept_trajectory(tool_calls: list, drive_root: Any = None, task_id: str = 
 def _accept_artifact_manifest(drive_root: Any, task_id: str, protected: set) -> list:
     """Return a leak-safe manifest; protected, large and binary artifacts stay manifest-only."""
     from ouroboros.task_results import validate_task_id
+    from ouroboros.artifacts import _ARTIFACT_MANIFEST, is_task_bookkeeping_artifact
+    from ouroboros.utils import read_json_dict
 
     out: list = []
     try:
@@ -665,6 +671,10 @@ def _accept_artifact_manifest(drive_root: Any, task_id: str, protected: set) -> 
         if not base.exists():
             return out
         base_resolved = base.resolve()
+        metadata = read_json_dict(base / _ARTIFACT_MANIFEST) or {}
+        registered = metadata.get("artifacts") if isinstance(metadata.get("artifacts"), dict) else {}
+        review_sources = {name for name, row in registered.items()
+                          if is_task_bookkeeping_artifact(row)}
         for p in sorted(base.rglob("*")):
             # rglob follows symlinked dirs, so reject symlinks and escaped paths.
             try:
@@ -676,6 +686,8 @@ def _accept_artifact_manifest(drive_root: Any, task_id: str, protected: set) -> 
             except OSError:
                 continue
             rel = str(p.relative_to(base))
+            if rel in {_ARTIFACT_MANIFEST, _ARTIFACT_MANIFEST + ".lock"} or rel in review_sources:
+                continue  # host bookkeeping is available through its own review refs
             entry: Dict[str, Any] = {"name": rel, "size": size, "provenance": "artifact"}
             # Match protected paths by artifact path, prefix, or basename.
             rel_base = rel.rsplit("/", 1)[-1]
@@ -714,6 +726,16 @@ def _accept_enforce_budget(ev: Dict[str, Any], *, budget: int = 0) -> Dict[str, 
         for row in ev.get("tool_trajectory") or []:
             if isinstance(row, dict):
                 row.pop("_legacy_projection_envelope", None)
+        _sync_annotations()
+        overflow = ev.get("__immutable_core_overflow__")
+        if isinstance(overflow, dict):
+            # Count the overflow disclosure itself, including this numeric
+            # field. Its digit width settles after remeasurement.
+            while True:
+                final_size = len(json.dumps(ev, ensure_ascii=False, default=str))
+                if overflow.get("packet_chars") == final_size:
+                    break
+                overflow["packet_chars"] = final_size
         return ev
 
     def _cap_result(row: Dict[str, Any], limit: int) -> None:
@@ -722,6 +744,7 @@ def _accept_enforce_budget(ev: Dict[str, Any], *, budget: int = 0) -> Dict[str, 
         ))
 
     def _size() -> int:
+        _sync_annotations()
         try:
             return len(json.dumps(ev, ensure_ascii=False, default=str))
         except (TypeError, ValueError):
@@ -735,6 +758,36 @@ def _accept_enforce_budget(ev: Dict[str, Any], *, budget: int = 0) -> Dict[str, 
     # section the reviewer does not need verbatim: the previous task's own
     # authority is a durable record, and the reviewer judges THIS task.
     notes: List[str] = []
+    original_partials = list(ev.get("__unresolved_partial_artifacts__") or [])
+
+    def _sync_annotations() -> None:
+        # These rows are part of the actual wire packet. Measuring before adding
+        # them let a fitting intermediate view overflow without an overflow flag.
+        trajectory_source_ref = ev.get("tool_trajectory_source_ref") or {}
+        unresolved_partials = [{
+            "tool": str(row.get("tool") or ""),
+            "status": ("not_materialized_for_reviewer"
+                       if row.get("result_source_ref") or trajectory_source_ref else "source_unavailable"),
+            "source_ref": row.get("result_source_ref") or trajectory_source_ref,
+        } for row in (ev.get("tool_trajectory") or [])
+            if isinstance(row, dict) and row.get("result_complete") is False]
+        if int(ev.get("tool_trajectory_omitted_leading", 0) or 0) > 0:
+            unresolved_partials.append({
+                "tool": "tool_trajectory", "status": ("not_materialized_for_reviewer"
+                    if trajectory_source_ref else "source_unavailable"), "source_ref": trajectory_source_ref,
+            })
+        if unresolved_partials:
+            ev["__unresolved_partial_artifacts__"] = [*original_partials, *unresolved_partials]
+        elif original_partials:
+            ev["__unresolved_partial_artifacts__"] = list(original_partials)
+        else:
+            ev.pop("__unresolved_partial_artifacts__", None)
+        if notes:
+            ev["__budget_note__"] = (
+                f"⚠️ OMISSION NOTE: evidence exceeded {budget} chars; "
+                + "; ".join(notes) + ". Full content is durable off-axis."
+            )
+
     contract = ev.get("task_contract")
     if _size() > budget and isinstance(contract, dict) and contract.get("predecessor_authority"):
         envelope = contract.get("predecessor_authority")
@@ -769,33 +822,25 @@ def _accept_enforce_budget(ev: Dict[str, Any], *, budget: int = 0) -> Dict[str, 
         ev["tool_trajectory_complete"] = False
         notes.append(f"kept the most-recent 20 tool calls (dropped {dropped} earlier)")
         omissions.append({"section": "tool_trajectory", "omitted": dropped, "reason": "evidence_budget"})
-    # Re-cap trajectory results before lower-priority evidence sections.
+    # Re-cap against the FINAL annotated size. A cut can introduce source refs,
+    # so remeasure after it; stop once it fits or no result can shrink further.
     traj = ev.get("tool_trajectory")
-    if _size() > budget and isinstance(traj, list) and traj:
+    while _size() > budget and isinstance(traj, list) and traj:
         non_traj = _size() - sum(len(str(c.get("result") or "")) for c in traj if isinstance(c, dict))
-        # Keep conservative headroom for markers and JSON escaping.
-        share = max(700, (budget - non_traj) // max(1, len(traj)) - 400)
+        share = max(700, (budget - non_traj) // len(traj) - 400)
         recapped = 0
         for c in traj:
             if isinstance(c, dict) and len(str(c.get("result") or "")) > share:
+                before = len(str(c.get("result") or ""))
                 _cap_result(c, share)
-                c["result_complete"] = False
-                recapped += 1
-        if recapped:
-            ev["tool_trajectory_complete"] = False
-            notes.append(f"re-capped {recapped} trajectory results to ~{share} chars each for budget")
-            omissions.append({"section": "tool_trajectory_results", "omitted": recapped, "reason": "evidence_budget"})
-        # Escape-proof backstop: shed to the 700-char floor if needed.
-        if _size() > budget and share > 700:
-            floored = 0
-            for c in traj:
-                if isinstance(c, dict) and len(str(c.get("result") or "")) > 700:
-                    _cap_result(c, 700)
+                if len(str(c.get("result") or "")) < before:
                     c["result_complete"] = False
-                    floored += 1
-            if floored:
-                notes.append(f"floored {floored} trajectory results to 700 chars for budget")
-                omissions.append({"section": "tool_trajectory_results", "omitted": floored, "reason": "evidence_budget_floor"})
+                    recapped += 1
+        if not recapped:
+            break
+        ev["tool_trajectory_complete"] = False
+        notes.append(f"re-capped {recapped} trajectory results to ~{share} chars each for budget")
+        omissions.append({"section": "tool_trajectory_results", "omitted": recapped, "reason": "evidence_budget"})
     if _size() > budget and isinstance(ev.get("artifacts"), list):
         stripped = 0
         for a in ev["artifacts"]:
@@ -849,30 +894,6 @@ def _accept_enforce_budget(ev: Dict[str, Any], *, budget: int = 0) -> Dict[str, 
             ),
         }
         notes.append(f"immutable core remains ~{_size() // 1000}k; reviewer must abstain as DEGRADED")
-    trajectory_source_ref = ev.get("tool_trajectory_source_ref") or {}
-    unresolved_partials = [{
-        "tool": str(row.get("tool") or ""),
-        "status": ("not_materialized_for_reviewer"
-                   if row.get("result_source_ref") or trajectory_source_ref else "source_unavailable"),
-        "source_ref": row.get("result_source_ref") or trajectory_source_ref,
-    } for row in (ev.get("tool_trajectory") or [])
-        if isinstance(row, dict) and row.get("result_complete") is False]
-    if int(ev.get("tool_trajectory_omitted_leading", 0) or 0) > 0:
-        unresolved_partials.append({
-            "tool": "tool_trajectory", "status": ("not_materialized_for_reviewer"
-                if trajectory_source_ref else "source_unavailable"), "source_ref": trajectory_source_ref,
-        })
-    if unresolved_partials:
-        existing = ev.get("__unresolved_partial_artifacts__")
-        ev["__unresolved_partial_artifacts__"] = [
-            *(existing if isinstance(existing, list) else []),
-            *unresolved_partials,
-        ]
-    if notes:
-        ev["__budget_note__"] = (
-            f"⚠️ OMISSION NOTE: evidence exceeded {budget} chars; "
-            + "; ".join(notes) + ". Full content is durable off-axis."
-        )
     return _finish()
 
 

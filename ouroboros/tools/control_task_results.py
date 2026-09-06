@@ -162,9 +162,9 @@ def _subtask_outcome_summary(data: Dict[str, Any], receipts: list | None = None)
 def _get_task_result(
     ctx: ToolContext, task_id: str, include_authority: bool = False,
     include_work_order_source: bool = False, source_start_char: Any = None,
-    source_end_char: Any = None,
+    source_end_char: Any = None, include_completion_source: bool = False,
 ) -> str:
-    """Read a task result, or one bounded canonical work-order source range."""
+    """Read a task result, or a bounded canonical work-order/completion source range."""
     metadata = getattr(ctx, "task_metadata", {}) if isinstance(getattr(ctx, "task_metadata", {}), dict) else {}
     status_drive_root = Path(str(metadata.get("budget_drive_root") or getattr(ctx, "budget_drive_root", "") or ctx.drive_root))
     data = load_effective_task_result(status_drive_root, task_id)
@@ -173,7 +173,7 @@ def _get_task_result(
             status="unavailable", code="LEGACY_UNAVAILABLE",
             text=f"Task {task_id}: unknown or not yet registered",
         ))
-    if bool(include_authority) or bool(include_work_order_source):
+    if bool(include_authority) or bool(include_work_order_source) or bool(include_completion_source):
         from ouroboros.agent_startup_checks import task_result_authority_projection
 
         authority = task_result_authority_projection(data, drive_root=status_drive_root)
@@ -209,6 +209,12 @@ def _get_task_result(
             }
             if reason:
                 payload["work_order_source"]["reason"] = reason
+        if bool(include_completion_source):
+            from ouroboros.task_finalization import completion_source_projection
+
+            payload["completion_source"] = completion_source_projection(
+                status_drive_root, str(task_id), data, source_start_char, source_end_char,
+            )
         return json.dumps(payload, ensure_ascii=False, sort_keys=True)
     status = data.get("status", "unknown")
     result = data.get("result", "")
@@ -264,7 +270,7 @@ def _get_task_result(
 def _wait_attention_poll(
     ctx: ToolContext, after_ts: str, task_ids: List[str],
 ) -> Callable[..., Any]:
-    """on_poll hook: break a sliced wait early when a child appends an attention beacon
+    """on_poll hook: break a sliced wait for the actor's mailbox or a child attention beacon
     (blocker/question/interface_contract/review_requested/delegation_constraint).
 
     The cursor is context-local and per child: a beacon written before this
@@ -274,8 +280,10 @@ def _wait_attention_poll(
     """
     # tree_note/tree_read live in ouroboros/tools/task_tree.py (extracted for module size).
     from ouroboros.tools.task_tree import tree_root_id
+    from ouroboros.owner_mailbox import OwnerMailboxPeek
 
     rid = tree_root_id(ctx)
+    mailbox_peek = OwnerMailboxPeek()
 
     cursor_store = getattr(ctx, "_wait_attention_cursors", None)
     if not isinstance(cursor_store, dict):
@@ -302,6 +310,16 @@ def _wait_attention_poll(
         child_cursors[str(task_id)] = cursor
 
     def _hook(_results: Dict[str, Any], _terminal: Dict[str, bool]) -> Any:
+        from ouroboros.loop_transport import _owner_signal_pending
+
+        # Reuse transport-wait's non-destructive peek. The ordinary round-top
+        # drain still owns delivery and acknowledgement; child work stays live.
+        if _owner_signal_pending(
+            None, getattr(ctx, "drive_root", None), str(getattr(ctx, "task_id", "") or ""),
+            getattr(ctx, "_loop_mailbox_seen_ids", None), getattr(ctx, "task_attempt", None) or 1,
+            mailbox_peek,
+        ):
+            return {"reason": "owner_mailbox_pending", "delivery": "pending_loop_drain"}
         if not rid:
             return None
         try:
@@ -418,7 +436,10 @@ def _wait_for_task(ctx: ToolContext, task_id: str, timeout_sec: int = 180) -> st
         on_poll=_wait_attention_poll(ctx, "", [tid]), poll_interval_sec=2.0,
     )
     early = waited.get("early_return")
-    if early:
+    if early and early.get("reason") == "owner_mailbox_pending":
+        header = "Task wait interrupted by an unread message for this task"
+        extra = "\n\nThe ordinary loop will deliver and acknowledge the message. This does not stop the child."
+    elif early:
         header = "Task wait interrupted by a child attention beacon"
         extra = f"\n\n[CHILD_BEACONS]\n{json.dumps(early, ensure_ascii=False, indent=2)}\n[/CHILD_BEACONS]"
     else:

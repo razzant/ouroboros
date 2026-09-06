@@ -1684,6 +1684,22 @@ owner, owed terminal delivery, cascade postconditions — lives in ARCHITECTURE
   child-drive merge or terminality logic in gateways/tools. Task waits use
   `SETTLED_STATUSES` and structured facts plus queue-heartbeat freshness —
   never keyword matching.
+- `wait_task` and `wait_tasks` also peek the waiting actor's own mailbox through
+  the existing transport-wait reader. A pending message returns control without
+  acknowledging it or stopping children; the ordinary round-top drain delivers
+  and acknowledges it. Read the actor's execution drive, not its budget root.
+  One wait/transport episode may retain only a successfully proved empty mailbox:
+  compare both mailbox/ACK fingerprints before and after the existing full reader,
+  plus execution root, task, attempt and seen ids. Read/parse/stat failure or torn
+  data is not proof; never cache it. Check the in-memory incoming queue every tick.
+  A changed source re-enters the full revocation-aware reader; no TTL or ACK in peek.
+- Cancellation observations use `task_status.observe_cancellation_target` before
+  the existing intent write. They name the resolved physical target, separate
+  task-result update/start facts from queue freshness, and optionally include
+  recorded delegated execution. These are separate source observations, not an
+  atomic snapshot. Caller reason and request origin are distinct; an HTTP client
+  is not proof of personal owner intent. A later target mismatch is disclosed.
+  Keep cancellation authority and completion-wins independent of these observations.
 - Cancel INTENT is never a status value. Every cancel ingress writes a durable
   intent through `ouroboros/cancel_intents.request_cancel` and FAILS CLOSED
   when that write fails: a cancel without a durable, watchdog-replayable
@@ -2160,6 +2176,50 @@ by "Provider Independence" above. Call-site imperatives:
   acceptance, atomically fence new descendants under the queue lock and
   prove recursive subtree quiescence from the task-status SSOT; a revision
   must explicitly reopen the fence, and terminal/degraded outcomes seal it.
+- Delivery-control JSON applies only to a final response with no tool calls.
+  Retaining an answer leaves tools available for further work; changed evidence
+  still requires the existing complete replacement. A requested file or diff
+  does not imply a universal commit-or-revert rule. Self-modification keeps its
+  reviewed-commit contract.
+- Post-task synthesis receives `completion_observations` from the existing
+  terminal result writer: per-send-tool counts and latest recorded returns,
+  task-related skill readiness plus coverage, and a full redacted artifact for
+  later readers. Counts come from `OWNER_DELIVERY_TOOL_NAMES`, not prose parsing.
+  Packet-only summary/reflection use the inline observations; a source reference
+  is not evidence they read. Tool success is not a chat/owner-receipt guarantee,
+  and empty or omitted material never proves that no delivery happened. Recovery
+  uses the stored snapshot; global skill state never attributes an owner click
+  to the task. Task-summary calls use the existing `chat_observed` custody seam.
+- Promoted tasks carry their host-minted root id and role on the queue payload.
+  RUNNING writes preserve the actual `_task_started_ts` as `started_at` and an
+  existing `queued_at`; terminal `ts` remains its own field. Missing historical
+  start facts stay missing. LLM usage carries the existing call/execution/round
+  ids so it can join the worker's round without duplicating that round event.
+  Delegated settlement/disposition/unread rows carry their existing root/parent
+  ids. Intrinsic pacing exposes the same `cost_ceiling_disclosure` its text uses;
+  tool error manifests carry their typed code and redacted reason preview.
+  These are observation links, not new accounting or zero-price rules.
+- Acceptance evidence identity hashes source facts before history-dependent
+  budgeting; recording a review must not change the facts it reviewed. Complete
+  applied host records (including resolved criteria, decisions and supersession)
+  are saved by `review_projection.publish_acceptance_checkpoint` through the
+  existing artifact store before compact publication. Artifact registration uses
+  a short locked manifest merge shared by all three writers; copying/hashing
+  finishes before the lock, which never acquires a task-result lock. The live
+  publication changes only `review_projection`, preserving lifecycle and other
+  writers' fields. Test delayed snapshots and child replicas through the same
+  central merge, and verify that the full source downloads while the task is
+  still running. Registered review bookkeeping remains downloadable without entering
+  user deliverables or making an otherwise artifact-free task ready. Completion
+  observations use the same classifier only after canonical-first full-source
+  persistence (`task.budget_drive_root or drive_root`). Give native readers an
+  executable get_task_result selector for that source task; reuse explicit character
+  ranges and complete-source hashes so a split or later task never resolves the
+  basename against its own artifact directory. Preserve that
+  distinction through effective reads and child copy-back; terminal references must
+  carry the task's chat id, including zero. A missing source is disclosed, never reconstructed from a
+  bounded preview. Source/capacity, publication order and paid identity are
+  separate contracts; changing history or presentation must not mint work.
 - The host buys one authoritative acceptance panel per PAID IDENTITY —
   `sha256(candidate_hash + the sorted set of nonempty (obligation_id,
   disposition, sha256(reason)) tuples)`; an empty disposition reason hashes

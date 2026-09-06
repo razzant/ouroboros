@@ -183,7 +183,6 @@ def promote_chat_to_task(evt: dict, ctx: Any) -> dict:
     evt = dict(evt)
     source_note = str(evt.get("_source_note") or "")
     effective_pid = str(evt.get("project_id") or "")
-    attachment_manifest: list[dict] = []
     repair_constraint, constraint_error = _canonical_promoted_repair_constraint(
         evt.get("task_constraint")
     )
@@ -207,16 +206,17 @@ def promote_chat_to_task(evt: dict, ctx: Any) -> dict:
     text = objective if not expected_output else f"{objective}\n\nExpected output: {expected_output}"
     # Short human title the model coined at card creation (owner P1) — reused as the
     # project name on a later "turn into project" conversion; never the bare task id.
-    title = str(evt.get("title") or "").strip()[:80]
     task = {
         "id": tid,
+        "root_task_id": tid,
+        "delegation_role": "root",
         "type": "task",
         "chat_id": chat_id,
         "text": text,
         "description": objective,
         "objective": objective,
         "expected_output": expected_output,
-        "title": title,
+        "title": str(evt.get("title") or "").strip()[:80],
         "source": "promote_chat_to_task",
         "_require_unique_task_id": True,
         "_require_worker_pool": True,

@@ -46,7 +46,7 @@ import os
 import pathlib
 import queue
 import time
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Any, Callable, Dict, List, Optional
 
 from ouroboros.config import (
@@ -57,6 +57,7 @@ from ouroboros.config import (
 )
 from ouroboros.deadline_utils import parse_deadline_ts
 from ouroboros.loop_llm_call import TRANSPORT_DEATHS_KEY, _TRANSIENT_BACKOFF_CAP_SEC
+from ouroboros.owner_mailbox import OwnerMailboxPeek
 from ouroboros.utils import append_jsonl, utc_now_iso
 
 log = logging.getLogger(__name__)
@@ -92,6 +93,7 @@ class TransportWaitEpisode:
     last_note_monotonic: float = 0.0
     local_pass_used: bool = False
     final_redial_done: bool = False
+    mailbox_peek: OwnerMailboxPeek = field(default_factory=OwnerMailboxPeek, repr=False)
 
     @property
     def waited_sec(self) -> float:
@@ -386,6 +388,7 @@ def _owner_signal_pending(
     task_id: str,
     owner_msg_seen: Optional[set],
     attempt: Any,
+    mailbox_peek: Optional[OwnerMailboxPeek] = None,
 ) -> bool:
     """Non-destructive peek: is an owner message or typed control waiting?"""
     if incoming_messages is not None and not incoming_messages.empty():
@@ -395,6 +398,8 @@ def _owner_signal_pending(
     try:
         from ouroboros.owner_mailbox import drain_owner_entries
 
+        if mailbox_peek is not None:
+            return mailbox_peek.pending(pathlib.Path(drive_root), task_id, set(owner_msg_seen or ()), attempt)
         # A COPY of the seen-set: this is a peek — the round top performs the
         # real drain, delivery, and acknowledgement.
         return bool(drain_owner_entries(
@@ -513,6 +518,7 @@ def transport_wait_step(
             # Same attempt key as the round-top drain (task_attempt or 1), so
             # the peek never sees acks under a different namespace.
             getattr(getattr(tools, "_ctx", None), "task_attempt", None) or 1,
+            episode.mailbox_peek,
         ),
     )
     episode.redials += 1

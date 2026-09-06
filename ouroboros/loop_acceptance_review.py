@@ -18,6 +18,7 @@ from ouroboros import task_pacing
 from ouroboros.config import adaptive_quorum
 from ouroboros.outcomes import ACCEPTANCE_ACCEPTED, ACCEPTANCE_FINALIZED_UNACCEPTED, ACCEPTANCE_REVISION_REQUESTED
 from ouroboros.review_cycles import REASON_REVIEW_CYCLES_EXHAUSTED
+from ouroboros.review_projection import publish_acceptance_checkpoint
 from ouroboros.tools.registry import ToolRegistry
 from ouroboros.utils import truncate_review_artifact
 
@@ -480,6 +481,8 @@ def _record_host_acceptance_run(ctx: _TaskAcceptanceContext, result: Any) -> Dic
         if key not in run_record and hasattr(result, key):
             run_record[key] = getattr(result, key)
     run_record["authority"] = "host_root"
+    if type(getattr(ctx.tools._ctx, "task_attempt", None)) is int:
+        run_record["task_attempt"] = ctx.tools._ctx.task_attempt
     run_record.update(ctx.review_binding or {})
     aggregate = str(run_record.get("aggregate_signal") or "DEGRADED").upper()
     run_record["enforcement_impact"] = (
@@ -829,6 +832,8 @@ def _record_acceptance_infra_failure(ctx: _TaskAcceptanceContext, exc: Exception
         **(ctx.review_binding or {}),
         "enforcement_impact": "degrades_completion",
     }
+    if type(getattr(ctx.tools._ctx, "task_attempt", None)) is int:
+        run_record["task_attempt"] = ctx.tools._ctx.task_attempt
     ctx.llm_trace.setdefault("review_runs", []).append(run_record)
     seen = getattr(ctx.tools._ctx, "_task_acceptance_seen_bindings", None)
     binding_hash = str(run_record.get("binding_hash") or "")
@@ -1393,3 +1398,5 @@ def _run_task_acceptance_review_once(
     except Exception as exc:
         log.debug("Mandatory task acceptance review failed", exc_info=True)
         return _record_acceptance_infra_failure(review_ctx, exc)
+    finally:
+        publish_acceptance_checkpoint(tools._ctx, llm_trace, task_id=task_id, drive_root=drive_root)

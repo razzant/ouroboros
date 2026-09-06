@@ -427,11 +427,12 @@ def remove_subagent_task_drive(parent_drive_root: pathlib.Path, task_id: str) ->
 
 def copy_child_task_result(parent_drive_root: pathlib.Path, task: Dict[str, Any]) -> Optional[Dict[str, Any]]:
     """Copy a child-drive task result back to the parent data root."""
+    from ouroboros.artifacts import project_deliverable_artifacts
 
     task_id = str(task.get("id") or "")
     if not task_id:
         return None
-    canonical_existing = load_task_result(parent_drive_root, task_id) or {}
+    canonical_existing = project_deliverable_artifacts(load_task_result(parent_drive_root, task_id) or {})
     # Cancellation is authoritative before any child-root read or artifact copy.
     if cancellation_blocks_child_result(canonical_existing):
         return canonical_existing
@@ -441,6 +442,7 @@ def copy_child_task_result(parent_drive_root: pathlib.Path, task: Dict[str, Any]
     child_result = load_task_result(child_drive, task_id)
     if not isinstance(child_result, dict):
         return None
+    child_result = project_deliverable_artifacts(child_result)
     # Canonical terminal results must not retain child-local forensic/source
     # pointers that the startup GC is about to delete. Promotion happens before
     # the one atomic canonical result write; a live ref whose destination write
@@ -533,11 +535,14 @@ def _copy_child_artifacts_to_parent(
 ) -> List[Dict[str, Any]]:
     """Rebase child-drive artifact files into the parent task artifact store."""
 
+    from ouroboros.artifacts import is_task_bookkeeping_artifact
     from ouroboros.outcome_receipt_store import is_verification_receipts_path
 
     parent_dir = task_artifacts_dir(parent_drive_root, task_id)
     rebased: List[Dict[str, Any]] = []
     for artifact in artifacts:
+        if is_task_bookkeeping_artifact(artifact):
+            continue
         item = dict(artifact)
         raw_path = str(item.get("path") or "").strip()
         if not raw_path:
@@ -916,6 +921,9 @@ def _merge_artifacts(
     *,
     drop_kinds: Optional[set[str]] = None,
 ) -> List[Dict[str, Any]]:
+    from ouroboros.artifacts import is_task_bookkeeping_artifact
+
+    new_items = [item for item in new_items if not is_task_bookkeeping_artifact(item)]
     merged: List[Dict[str, Any]] = []
     drop = drop_kinds or set()
     key_for = lambda item: (
@@ -924,7 +932,7 @@ def _merge_artifacts(
     )
     keys = {key_for(item) for item in new_items if isinstance(item, dict)}
     for item in existing:
-        if not isinstance(item, dict):
+        if not isinstance(item, dict) or is_task_bookkeeping_artifact(item):
             continue
         key = key_for(item)
         if key[0] not in drop and key not in keys:

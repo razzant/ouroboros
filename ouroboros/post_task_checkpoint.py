@@ -18,6 +18,7 @@ from ouroboros.task_results import (
     TASK_COST_META_FIELDS,
     STATUS_COMPLETED,
     load_task_result,
+    merge_review_projection,
     resolve_task_lineage,
     write_task_result,
 )
@@ -107,10 +108,15 @@ def project_replica_task_result_fields(
     A terminal canonical post-task checkpoint owns its synthesis fields and
     accounting snapshot. Canonical custody also retains non-regressing delegation
     receipts and canonical-if-present reconciliation disclosures under the narrow
-    rules below. The replica continues to own acceptance, result, review, and trace fields.
+    rules below. The replica continues to own acceptance, result, and trace fields;
+    review snapshots retain the newest host publication of each panel.
     ``updated_at`` is monotonic metadata only; it never selects field authority.
     """
     overlay = dict(replica_fields)
+    if "review_projection" in overlay:
+        overlay["review_projection"] = merge_review_projection(
+            canonical_fields.get("review_projection"), overlay["review_projection"],
+        )
     canonical_checkpoint = canonical_fields.get("root_phase_checkpoint")
     canonical_post_task = (
         str(canonical_checkpoint.get("post_task_synthesis") or "")
