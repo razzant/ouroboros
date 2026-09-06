@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import asyncio
 import functools
-import json
 import logging
 import pathlib
 import shutil
@@ -1540,9 +1539,7 @@ def _render_attachment_lines(attachments: Any) -> str:
 
 def _artifact_by_name(result: Dict[str, Any], name: str) -> Optional[Dict[str, Any]]:
     for artifact in result.get("artifacts") or []:
-        if not isinstance(artifact, dict):
-            continue
-        if str(artifact.get("name") or pathlib.Path(str(artifact.get("path") or "")).name) == name:
+        if isinstance(artifact, dict) and str(artifact.get("name") or pathlib.Path(str(artifact.get("path") or "")).name) == name:
             return artifact
     return None
 
@@ -1550,10 +1547,9 @@ def _artifact_by_name(result: Dict[str, Any], name: str) -> Optional[Dict[str, A
 def _queue_snapshot(drive_root: pathlib.Path) -> Dict[str, Any]:
     path = pathlib.Path(drive_root) / "state" / "queue_snapshot.json"
     try:
-        data = json.loads(path.read_text(encoding="utf-8"))
+        return read_json_dict(path) or {}
     except Exception:
         return {}
-    return data if isinstance(data, dict) else {}
 
 
 def _supervisor_ready_error(request: Request) -> Optional[JSONResponse]:
