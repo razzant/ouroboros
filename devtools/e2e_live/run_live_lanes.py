@@ -234,19 +234,19 @@ def credit_preflight(key: str, *, timeout: float = 10.0) -> dict:
 # --------------------------------------------------------------------------- #
 
 def lane_spend(data_root: pathlib.Path) -> tuple[float, int]:
-    """``(USD summed over the lane's durable llm_usage rows, rows whose cost is unknown)``. The system-E2E
-    harness oracle is the reader (the same ``logs/events.jsonl`` the runtime writes); the server-level file
-    carries every row of the lane — task loops, review organs, safety — verified on the first paid run
-    against the ``task_results`` accounting. A row without a numeric cost is counted, never priced."""
-    from tests.system_e2e import harness  # durable readers (runtime-only import, outside the audit walk)
-
+    """``(USD over the lane's SETTLED physical-attempt ledger rows, unknown-cost rows)``: ``state/usage_attempts.jsonl`` is
+    the product's money authority; ``llm_usage`` telemetry misses skill review/advisory/synthesis (run3: 114.81 vs 141.63)."""
+    path = pathlib.Path(data_root) / "state" / "usage_attempts.jsonl"
     spent, unknown = 0.0, 0
-    for row in harness.ArtifactOracle(data_root).events("llm_usage"):
-        cost = row.get("cost")
-        if isinstance(cost, (int, float)) and not isinstance(cost, bool):
-            spent += float(cost)
-        else:
-            unknown += 1
+    for line in (path.read_text(encoding="utf-8").splitlines() if path.is_file() else []):
+        try:
+            row = json.loads(line)
+        except ValueError:
+            continue
+        if isinstance(row, dict) and row.get("state") == "settled" and row.get("cost_final") is True:
+            cost = row.get("cost_usd")
+            priced = isinstance(cost, (int, float)) and not isinstance(cost, bool)
+            spent, unknown = spent + (float(cost) if priced else 0.0), unknown + (0 if priced else 1)
     return spent, unknown
 
 

@@ -75,7 +75,7 @@ from ouroboros.task_status import (
     effective_task_result,
     load_effective_task_result,
 )
-from ouroboros.utils import read_json_dict
+from ouroboros.utils import read_json_dict, utc_now_iso
 from ouroboros.tool_access import path_is_relative_to, paths_overlap_casefold
 from ouroboros.workspace_preflight import (
     collect_workspace_preflight,
@@ -314,6 +314,7 @@ def _complete_api_task_admission(
 ) -> JSONResponse:
     """Publish one API admission or roll back only its token-owned queue row."""
     result_fields = {
+        **({"created_at": task["created_at"]} if task.get("created_at") else {}),
         "parent_task_id": task.get("parent_task_id"),
         "root_task_id": task.get("root_task_id"),
         "session_id": task.get("session_id"),
@@ -474,6 +475,7 @@ async def api_tasks_create(request: Request) -> JSONResponse:
     repo_dir = request_repo_dir(request)
     try:
         task_id = validate_task_id(body.get("task_id") or uuid.uuid4().hex[:16])
+        created_at = utc_now_iso() if not body.get("task_id") else ""
     except ValueError as exc:
         return json_error(str(exc), 400)
     if _task_identity_occupied(drive_root, task_id):
@@ -649,11 +651,9 @@ async def api_tasks_create(request: Request) -> JSONResponse:
     # impersonate a host stamp) — the caller-declared channel IS the fact.
     metadata["client_surface"] = {"channel": str(metadata.get("source") or "api_task")}
     metadata.setdefault("delegation_role", "root")
-    parent_task_id = None
-    root_task_id = task_id
     metadata.setdefault("task_id", task_id)
-    metadata.setdefault("parent_task_id", parent_task_id or "")
-    metadata.setdefault("root_task_id", root_task_id)
+    metadata.setdefault("parent_task_id", "")
+    metadata.setdefault("root_task_id", task_id)
     artifacts: List[Dict[str, Any]] = []
     workspace_preflight_summary: Dict[str, Any] = {}
     if workspace_root:
@@ -688,6 +688,7 @@ async def api_tasks_create(request: Request) -> JSONResponse:
     _title, _suggested_name = admission_names(body, description)
     task = {
         "id": task_id,
+        **({"created_at": created_at} if created_at else {}),
         "type": task_type,
         "chat_id": chat_id,
         "title": _title, "suggested_name": _suggested_name,
@@ -703,8 +704,8 @@ async def api_tasks_create(request: Request) -> JSONResponse:
         "acceptance_claims": acceptance_claims,
         "deadline_at": deadline_at,
         "depth": depth,
-        "parent_task_id": parent_task_id,
-        "root_task_id": root_task_id,
+        "parent_task_id": None,
+        "root_task_id": task_id,
         "session_id": metadata["session_id"],
         "actor_id": metadata["actor_id"],
         "delegation_role": metadata["delegation_role"],

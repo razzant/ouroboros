@@ -1237,6 +1237,19 @@ class ClaudexorLoginJobProblem(TypedDict, total=False):
     required_actions: List[str]
 
 
+class TaskEventCursor(TypedDict):
+    v: Literal[2]
+    seq: int
+    view: str
+    positions: Dict[str, Dict[str, int]]
+
+
+class TaskEventsRequest(TypedDict):
+    v: Literal[2]
+    wait: NotRequired[int]
+    cursor: NotRequired[Optional[TaskEventCursor]]
+
+
 class TaskEvent(TypedDict, total=False):
     seq: int
     source: str
@@ -1246,6 +1259,10 @@ class TaskEvent(TypedDict, total=False):
     task_id: str
     root: str
     data: Dict[str, Any]
+    event_id: str
+    cursor: TaskEventCursor
+    reason: str
+    error: str
 
 
 class TaskCancelResponse(TypedDict, total=False):
@@ -1571,6 +1588,8 @@ __all__ = [
     "ClaudexorVendorCredentialDisposition",
     "ClaudexorCredentialProfileDeleteResponse",
     "TaskEvent",
+    "TaskEventCursor",
+    "TaskEventsRequest",
     "TaskCancelResponse",
     "TaskHurryRequest",
     "TaskHurryResponse",

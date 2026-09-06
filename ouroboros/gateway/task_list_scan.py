@@ -1,15 +1,14 @@
-"""Raw result-name scan for the unfiltered GET /api/tasks slice path.
+"""Compact, stat-invalidated result facts for interactive read projections.
 
-Split out of ``ouroboros/gateway/tasks.py`` at its module-size ceiling: one
-coherent concern — the creation-ts sort scan behind slice-before-projection
-(v6.9x P2) plus the ABI-2 admission routing for candidates whose bytes fail
-to parse. ``tasks.py`` re-imports these names (same objects), so the endpoint
-wiring and tests keep their historical surface.
+The files and their schema readers remain authoritative. This process-local
+memo serves name ordering, SSE lineage discovery and Main's newest-result
+selection; selected full results still pass the existing admission reader.
 """
 
 from __future__ import annotations
 
 import os
+import logging
 import pathlib
 from typing import Dict, List
 
@@ -19,21 +18,71 @@ from ouroboros.task_result_schema import (
 )
 from ouroboros.utils import read_json_dict
 
-# Process-wide {(results_dir, filename) -> raw ts} memo for the unfiltered list
-# path. The raw `ts` is CREATION-STABLE (write_task_result sets it on the first
-# write; later updates touch only updated_at), so entries never need
-# invalidation — only deletions are dropped and new names decoded. Keyed by the
-# directory too, so multiple drive roots (tests, child drives) never collide.
-# Concurrency note: worst case a race re-reads a file and stores the identical
-# creation-stable value; no lock needed.
-_RAW_TS_MEMO: Dict[tuple, str] = {}
+# Never retain bodies: a cached row only chooses which authoritative files to
+# read. Immutable tuple values publish atomically; concurrent scans may repeat
+# a read, while the next stat invalidates a superseded observation.
+_RAW_TS_MEMO: Dict[tuple, tuple] = {}
+_RESULT_FACT_KEYS = (
+    "task_id", "id", "ts", "updated_at", "delegation_role", "parent_task_id",
+    "root_task_id", "child_drive_root", "headless_child_drive_root",
+)
+
+
+def _result_stat(path: pathlib.Path) -> tuple:
+    stat = path.stat()
+    return (stat.st_dev, stat.st_ino, stat.st_size, stat.st_mtime_ns, stat.st_ctime_ns)
+
+
+def raw_result_facts(results_dir: pathlib.Path, *, reader=None) -> tuple[Dict[str, dict], List[str]]:
+    """Read changed/new files only, never caching failed or concurrent reads.
+
+    Parseable inadmissible rows retain their refusal for callers to apply their
+    own schema-reader contract; the memo never admits or quarantines a row.
+    ``reader`` keeps the legacy gateway.tasks read seam injectable.
+    """
+    reader = reader or read_json_dict
+    try:
+        with os.scandir(results_dir) as entries:
+            names = sorted(entry.name for entry in entries if entry.name.endswith(".json"))
+    except FileNotFoundError:
+        names = []
+    dir_key = str(results_dir)
+    present = set(names)
+    for key in [k for k in list(_RAW_TS_MEMO) if k[0] == dir_key and k[1] not in present]:
+        _RAW_TS_MEMO.pop(key, None)
+    rows: Dict[str, dict] = {}
+    malformed: List[str] = []
+    for name in names:
+        key = (dir_key, name)
+        path = results_dir / name
+        try:
+            signature = _result_stat(path)
+            cached = _RAW_TS_MEMO.get(key)
+            if cached is not None and cached[0] == signature:
+                rows[name] = dict(cached[1])
+                continue
+            _RAW_TS_MEMO.pop(key, None)
+            data = reader(path)
+            if data is None or _result_stat(path) != signature:
+                malformed.append(name)
+                continue
+        except OSError:
+            _RAW_TS_MEMO.pop(key, None)
+            malformed.append(name)
+            continue
+        facts = {field: str(data.get(field) or "") for field in _RESULT_FACT_KEYS}
+        facts["schema_refusal"] = task_result_schema_refusal(data)
+        rows[name] = facts
+        if not facts["schema_refusal"]:
+            _RAW_TS_MEMO[key] = (signature, tuple(facts.items()))
+    return rows, malformed
 
 
 def _raw_sorted_result_names(results_dir: pathlib.Path) -> tuple[List[str], List[str]]:
     """``(sorted_names, malformed_names)`` for the unfiltered list scan.
 
     ``sorted_names`` is every parseable result filename, newest-first by RAW
-    creation ts (memoized); a row whose file lacks `ts` sorts as
+    raw ts (stat-invalidated); a row whose file lacks `ts` sorts as
     minus-infinity (oldest), tie-broken by filename for determinism.
     ``malformed_names`` is every candidate whose bytes failed to parse: ABI-2
     forbids silently dropping it — the caller MUST route it through the same
@@ -44,27 +93,11 @@ def _raw_sorted_result_names(results_dir: pathlib.Path) -> tuple[List[str], List
     re-checks under the row's write lock — a row a concurrent writer just
     made admissible is KEPT, never moved)."""
     try:
-        with os.scandir(results_dir) as entries:
-            names = [entry.name for entry in entries if entry.name.endswith(".json")]
+        rows, malformed = raw_result_facts(results_dir)
     except OSError:
-        return [], []
-    dir_key = str(results_dir)
-    present = set(names)
-    for key in [k for k in list(_RAW_TS_MEMO) if k[0] == dir_key and k[1] not in present]:
-        _RAW_TS_MEMO.pop(key, None)
-    decorated: List[tuple] = []
-    malformed: List[str] = []
-    for name in names:
-        key = (dir_key, name)
-        raw_ts = _RAW_TS_MEMO.get(key)
-        if raw_ts is None:
-            data = read_json_dict(results_dir / name)
-            if data is None:
-                malformed.append(name)
-                continue
-            raw_ts = str(data.get("ts") or "")
-            _RAW_TS_MEMO[key] = raw_ts
-        decorated.append((raw_ts, name))
+        logging.getLogger(__name__).warning("Task-result directory is unreadable: %s", results_dir, exc_info=True)
+        return [], []  # preserve the legacy list caller's fail-soft return
+    decorated = [(row["ts"], name) for name, row in rows.items()]
     decorated.sort(reverse=True)  # "" (no ts) sorts after every real timestamp
     return [name for _ts, name in decorated], malformed
 

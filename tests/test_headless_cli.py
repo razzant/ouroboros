@@ -327,8 +327,8 @@ def test_cli_watch_caps_sse_wait_by_timeout(monkeypatch):
     times = iter([100.0, 100.1, 100.2, 101.0])
 
     class FakeClient:
-        def stream_sse(self, path, timeout=120.0):
-            calls.append((path, timeout))
+        def stream_sse(self, path, timeout=120.0, *, body=None):
+            calls.append((path, timeout, body))
             return iter(())
 
     monkeypatch.setattr(cli.time, "time", lambda: next(times))
@@ -336,7 +336,7 @@ def test_cli_watch_caps_sse_wait_by_timeout(monkeypatch):
 
     with pytest.raises(cli.TaskTimeoutCLIError):
         cli._watch_task(FakeClient(), "abc123", jsonl=False, quiet=True, timeout_sec=0.5)
-    assert "wait=0" in calls[0][0]
+    assert calls[0][2]["wait"] == 0
     assert calls[0][1] <= 1.5
 
 

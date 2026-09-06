@@ -10,11 +10,23 @@ from __future__ import annotations
 
 import json
 
+import pytest
+
 from supervisor.state import (
     ISOLATED_BENCHMARK_SENTINEL,
     rotate_chat_log_if_needed,
     rotate_jsonl_log_if_needed,
 )
+
+
+# (live filename, archive prefix) — v6.109.29 added events + tools to the
+# supervisor-tick rotation alongside chat/progress. Each pair must produce
+# the same byte-preserving rename + empty-live side effect.
+ROTATED_LOG_NAMES = [
+    ("progress.jsonl", "progress"),
+    ("events.jsonl", "events"),
+    ("tools.jsonl", "tools"),
+]
 
 
 def _seed_log(root, name, rows=50):
@@ -28,13 +40,17 @@ def _seed_log(root, name, rows=50):
     return path
 
 
-def test_progress_rotation_moves_live_to_archive(tmp_path):
-    live = _seed_log(tmp_path, "progress.jsonl")
+@pytest.mark.parametrize(("name", "prefix"), ROTATED_LOG_NAMES)
+def test_rotation_moves_live_to_archive(tmp_path, name, prefix):
+    """A >max_bytes file for chat/progress/events/tools rotates to
+    archive/<prefix>_<ts>.jsonl, the live file is recreated empty, and no
+    line is lost (v6.109.29)."""
+    live = _seed_log(tmp_path, name)
     original = live.read_text(encoding="utf-8")
 
-    rotate_jsonl_log_if_needed(tmp_path, "progress.jsonl", "progress", max_bytes=100)
+    rotate_jsonl_log_if_needed(tmp_path, name, prefix, max_bytes=100)
 
-    archives = sorted((tmp_path / "archive").glob("progress_*.jsonl"))
+    archives = sorted((tmp_path / "archive").glob(f"{prefix}_*.jsonl"))
     assert len(archives) == 1
     assert archives[0].read_text(encoding="utf-8") == original
     assert live.exists()

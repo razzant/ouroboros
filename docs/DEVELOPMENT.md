@@ -475,6 +475,26 @@ filtered down to the answer.
   unbounded event log (`ouroboros/delegate_custody.py`); the fingerprint-keyed
   render cache in `ouroboros/_usage_rows_memo.py` — a projection cached while
   its input is unchanged, invalidated only by advance/refold, never by TTL.
+  Interactive result discovery reuses `gateway/task_list_scan.py`'s compact
+  stat-invalidated facts; decode changed/new files, never cache failed or torn
+  reads, and fetch selected full rows through the existing schema owner. Live
+  event followers retain per-file proven lineage across failed reads only; valid
+  moves, role/schema changes and deletion remove it. Disclose incomplete discovery
+  with nonfatal history_gap coverage, never client-root trust or a global error
+  for one unrelated bad file. Diagnostics do not advance legacy ranks or bytes.
+  Task-event v2 cursors advance after each consumed row; preserve physical byte
+  positions through rotation and disclose replay/gaps rather than resetting an
+  unavailable cursor. Keep the legacy GET rank contract separate.
+  Bound native handle lifetime independently of network backpressure: close
+  each JSONL read buffer before yielding its per-row cursors. Stamp creation
+  only where the host allocates a fresh id, before preparation; neither a
+  supplied id nor a legacy/final result timestamp proves task creation.
+  Pin each source's logical EOF and helper-built chain metadata until the pass
+  ends; select subsequent buffers without rescanning the archive prefix. Rebind
+  the original live inode after rotation; later appends belong to the next pass,
+  without truncating history or imposing an event-count cap. Whole-chain callers
+  retain their ordered handle list and share JSONL parsing through borrowed
+  handles without changing descriptor ownership.
 
 Enforcement: Repo Commit Checklist item 24 (advisory) triggers on diffs that
 add or change an endpoint/poller/subscription/timer or read a growing store;
@@ -1297,7 +1317,8 @@ the run-root `effective_settings.json` is REDACTED and the value reaches disk
 only in each lane's 0600 settings file, disclosed by fingerprint as the runtime
 grant); the preflight takes `min(key limit remaining, account credits)` and
 refuses below `--min-credit-usd`. `--total-budget` (default 100) is the RUN-WIDE
-cap: a ledger sums the lanes' durable `llm_usage` costs, reserves
+cap: a ledger sums the lanes' settled physical-attempt ledger rows (`state/usage_attempts.jsonl`, the
+product's money authority; the `llm_usage` telemetry misses skill review, advisory and synthesis), reserves
 `max(0.01, --per-task-usd × (root tasks + 1 with --self-mod for the scenario that absorbs))` per attempt (SM1 and SW1 one root — scouts spend
 under their root's `OUROBOROS_PER_TASK_COST_USD` fence — SK1 two; with `--self-mod` SM1's
 one post-task evolution cycle is one more root (SW1/SK1 pin promotion off) (the rc.14 paid run showed a second, generic

@@ -13,6 +13,7 @@ import time
 import urllib.error
 import urllib.parse
 import urllib.request
+from collections import OrderedDict
 from typing import Any, Dict, Iterable, Iterator, List, Optional
 
 
@@ -98,8 +99,13 @@ class OuroborosHTTPClient:
         except urllib.error.URLError as exc:
             raise ConnectionCLIError(f"cannot download from Ouroboros server at {self.base_url}: {exc}") from exc
 
-    def stream_sse(self, path: str, timeout: float = 120.0) -> Iterator[Dict[str, Any]]:
-        req = urllib.request.Request(self.base_url + path, headers={"Accept": "text/event-stream"})
+    def stream_sse(self, path: str, timeout: float = 120.0, *, body: Optional[dict] = None) -> Iterator[Dict[str, Any]]:
+        headers = {"Accept": "text/event-stream"}
+        if body is not None:
+            headers["Content-Type"] = "application/json"
+        req = urllib.request.Request(self.base_url + path, headers=headers,
+            data=json.dumps(body).encode("utf-8") if body is not None else None,
+            method="POST" if body is not None else "GET")
         try:
             with urllib.request.urlopen(req, timeout=timeout) as resp:
                 yield from _parse_sse_lines(resp)
@@ -765,7 +771,13 @@ def _watch_task(
     quiet: bool,
     timeout_sec: float,
 ) -> None:
-    cursor = 0
+    cursor: Optional[dict] = None
+    legacy_seq = 0
+    legacy = False
+    first_connection = True
+    # Bounded overlap suppression across explicit view replays. Older repeats
+    # outside this recent window may reappear; no infinite exactly-once claim.
+    seen: OrderedDict[str, None] = OrderedDict()
     final = False
     deadline = time.time() + timeout_sec if timeout_sec and timeout_sec > 0 else None
     while not final:
@@ -777,21 +789,49 @@ def _watch_task(
             remaining = max(0.0, deadline - time.time())
             wait_param = max(0, min(30, int(remaining)))
             request_timeout = max(1.0, min(40.0, remaining + 1.0))
-        path = f"/api/tasks/{urllib.parse.quote(task_id)}/events?cursor={cursor}&wait={wait_param}"
+        path = f"/api/tasks/{urllib.parse.quote(task_id)}/events"
         saw_event = False
-        for event in client.stream_sse(path, timeout=request_timeout):
-            if deadline is not None and time.time() >= deadline:
-                raise TaskTimeoutCLIError(f"task {task_id} did not finish within {timeout_sec:g}s")
-            saw_event = True
-            cursor = max(cursor, int(event.get("seq") or cursor))
-            if jsonl:
-                print(json.dumps(event, ensure_ascii=False), flush=True)
-            elif not quiet:
-                rendered = _render_event_for_stderr(event)
-                if rendered:
-                    print(rendered, file=sys.stderr, flush=True)
-            if event.get("type") == "task_result":
-                final = _is_terminal_result((event.get("data") or {}))
+        try:
+            events = (client.stream_sse(f"{path}?cursor={legacy_seq}&wait={wait_param}", timeout=request_timeout)
+                      if legacy else client.stream_sse(path, timeout=request_timeout,
+                          body={"v": 2, "wait": wait_param, "cursor": cursor}))
+            for event in events:
+                if deadline is not None and time.time() >= deadline:
+                    raise TaskTimeoutCLIError(f"task {task_id} did not finish within {timeout_sec:g}s")
+                saw_event = True
+                if event.get("type") == "error":
+                    raise CLIError(str(event.get("error") or "task stream failed"))
+                identity = str(event.get("event_id") or "")
+                duplicate = bool(identity) and identity in seen
+                if not duplicate:
+                    if jsonl:
+                        print(json.dumps(event, ensure_ascii=False), flush=True)
+                    elif not quiet:
+                        rendered = _render_event_for_stderr(event)
+                        if rendered:
+                            print(rendered, file=sys.stderr, flush=True)
+                if event.get("type") == "task_result":
+                    final = _is_terminal_result((event.get("data") or {}))
+                if identity:
+                    seen[identity] = None
+                    seen.move_to_end(identity)
+                    if len(seen) > 4096:
+                        seen.popitem(last=False)
+                # Advance only after the complete envelope was consumed. A
+                # result snapshot has no log identity and is never deduplicated.
+                if not legacy:
+                    next_cursor = event.get("cursor")
+                    if not isinstance(next_cursor, dict):
+                        raise CLIError("v2 task event is missing its cursor")
+                    cursor = next_cursor
+                legacy_seq = max(legacy_seq, int(event.get("seq") or legacy_seq))
+        except CLIError as exc:
+            if (first_connection and not saw_event and not legacy
+                    and isinstance(exc.__cause__, urllib.error.HTTPError) and exc.__cause__.code == 405):
+                legacy, first_connection = True, False
+                continue
+            raise
+        first_connection = False
         if not saw_event:
             time.sleep(0.5)
 
@@ -848,6 +888,8 @@ def _render_event_for_stderr(event: Dict[str, Any]) -> str:
         return f"tool: {data.get('tool', '?')}"
     if etype in {"task_done", "task_metrics"}:
         return f"{etype}: {data.get('task_id', '')}"
+    if etype in {"cursor_replay", "history_gap"}:
+        return f"{etype}: {event.get('reason', '')}"
     return ""
 
 

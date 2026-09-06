@@ -715,7 +715,7 @@ def _schedule_task(ctx: ToolContext, internal: Dict[str, Any] | None = None, /, 
     # recorded here is what the parent ASKED for, plus the parent's own lane, which
     # is the fact an omitted lane inherits and which only the parent knows.
     tid = uuid.uuid4().hex[:8]
-    task_ids: List[str] = [tid]
+    created_at = utc_now_iso()
     root_task_id = root_task_id_seed or tid
     parent_model_lane = str(metadata.get("effective_model_lane") or "")
     parent_cognitive_route = {
@@ -811,6 +811,7 @@ def _schedule_task(ctx: ToolContext, internal: Dict[str, Any] | None = None, /, 
             status_drive_root,
             tid,
             STATUS_REQUESTED,
+            created_at=created_at,
             parent_task_id=parent_task_id or None,
             root_task_id=root_task_id,
             session_id=session_id,
@@ -850,16 +851,15 @@ def _schedule_task(ctx: ToolContext, internal: Dict[str, Any] | None = None, /, 
             shutil.rmtree(child_drive, ignore_errors=True)
         return _publish_scheduling_refusal(ctx, "error", "TOOL_ERROR", f"⚠️ SUBTASK_STATUS_ERROR: failed to persist requested status for {tid}; subagent was not scheduled.")
 
-    emitted_modes: List[str] = [_emit_control_event(ctx, evt)]
     return _finalize_schedule_emission(ctx, {
-        "task_ids": task_ids,
+        "task_ids": [tid],
         "requested_model_lane": requested_model_lane,
         "objective": objective,
         "role": role,
         "depth": new_depth,
         "parent_task_id": parent_task_id,
         "root_task_id": root_task_id_seed or current_task_id,
-        "emitted_modes": emitted_modes,
+        "emitted_modes": [_emit_control_event(ctx, evt)],
         "write_surface": requested_surface,
         "configured_subagent": configured_subagent,
         "legacy_selection": legacy_selection,

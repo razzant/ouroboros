@@ -73,6 +73,41 @@ def _append_progress(data, task_id, content, ts):
         handle.write(json.dumps({"ts": ts, "content": content, "task_id": task_id}) + "\n")
 
 
+def _seed_events_running_task(tmp_path, task_id="t1", event_rows=2):
+    """Mirror of _seed_running_task that seeds events.jsonl instead of progress.
+
+    v6.109.29: events.jsonl rotates on the supervisor tick (see
+    _ROTATED_LOG_PREFIXES); the SSE follow path must heal mid-stream rotations
+    the same way it heals progress."""
+    data = tmp_path / "data"
+    logs = data / "logs"
+    logs.mkdir(parents=True)
+    lines = [
+        json.dumps({
+            "ts": f"2026-01-01T00:01:{i:02d}Z",
+            "type": "llm_call",
+            "task_id": task_id,
+            "content": f"event-{i}",
+        })
+        for i in range(event_rows)
+    ]
+    (logs / "events.jsonl").write_text("\n".join(lines) + "\n", encoding="utf-8")
+    write_task_result(data, task_id, "running", result="working", ts=OLD_TS)
+    (data / "state").mkdir(parents=True, exist_ok=True)
+    (data / "state" / "queue_snapshot.json").write_text('{"pending": [], "running": []}', encoding="utf-8")
+    return data
+
+
+def _append_events(data, task_id, content, ts):
+    with (data / "logs" / "events.jsonl").open("a", encoding="utf-8") as handle:
+        handle.write(json.dumps({
+            "ts": ts,
+            "type": "llm_call",
+            "task_id": task_id,
+            "content": content,
+        }) + "\n")
+
+
 def _finalize(data, task_id):
     # ts sorts after every progress row used in these tests, so the terminal
     # task_result row is the LAST merged event (a terminal row sorting earlier
@@ -246,8 +281,8 @@ def test_iter_task_events_reads_progress_archive_chain(tmp_path):
 
 
 def test_sse_archive_floor_skips_archives_predating_task_creation(tmp_path):
-    """Fix 4: an archive whose rotation stamp predates the watched task's raw
-    creation ts is never read (bounds the glob to the task lifetime); archives
+    """An archive whose rotation stamp predates proven task creation is never
+    read (bounds the scan to the task lifetime); archives
     stamped after creation are still consulted."""
     data = tmp_path / "data"
     (data / "logs").mkdir(parents=True)
@@ -266,7 +301,8 @@ def test_sse_archive_floor_skips_archives_predating_task_creation(tmp_path):
         json.dumps({"ts": "2026-01-01T00:02:30Z", "content": "live-row", "task_id": "t1"}) + "\n",
         encoding="utf-8",
     )
-    write_task_result(data, "t1", "running", result="working", ts="2026-01-01T00:01:00Z")
+    write_task_result(data, "t1", "running", result="working", ts="2026-01-01T00:01:00Z",
+                      created_at="2026-01-01T00:01:00Z")
 
     events = iter_task_events(data, "t1")
 
@@ -405,6 +441,47 @@ def test_sse_terminal_merge_row_uses_one_materializing_read(tmp_path, monkeypatc
     assert flags[-1] is True  # ...and it happens at emission, after the projections
 
 
+def test_sse_survives_mid_stream_rotation_of_events_without_loss_or_duplicates(tmp_path):
+    """v6.109.29: events.jsonl rotates on the supervisor tick. The SSE
+    _TaskEventFollower heals a mid-stream rotation by reading the newest
+    archive's unconsumed suffix before continuing on the new live file —
+    mirror of test_sse_survives_mid_stream_rotation_without_loss_or_duplicates
+    but for the events source."""
+    data = _seed_events_running_task(tmp_path)
+    live = data / "logs" / "events.jsonl"
+    fired = {"rotated": False, "finalized": False}
+
+    def on_event(event, events):
+        if not fired["rotated"] and len(events) >= 3:
+            # An unconsumed event lands just before the rotation…
+            _append_events(data, "t1", "pre-rotation", "2026-01-01T00:02:00Z")
+            archive_dir = data / "archive"
+            archive_dir.mkdir(exist_ok=True)
+            os.replace(live, archive_dir / "events_20260101T000200.jsonl")
+            live.touch()
+            # …and a fresh event starts the new live file.
+            _append_events(data, "t1", "post-rotation", "2026-01-01T00:02:01Z")
+            fired["rotated"] = True
+        if fired["rotated"] and not fired["finalized"] and any(
+            (e.get("data") or {}).get("content") == "post-rotation" for e in events
+        ):
+            _finalize(data, "t1")
+            fired["finalized"] = True
+
+    response = asyncio.run(api_task_events(_request(data, "t1")))
+    events = asyncio.run(_consume(response, on_event))
+
+    # Only events with the watched task_id surface as row entries.
+    event_rows = [
+        (e.get("data") or {}).get("content") for e in events
+        if e["type"] in {"llm_call", "events"}
+    ]
+    assert event_rows == ["event-0", "event-1", "pre-rotation", "post-rotation"]
+    seqs = [e["seq"] for e in events]
+    assert seqs == sorted(seqs) and len(set(seqs)) == len(seqs)
+    assert events[-1]["data"]["status"] == "completed"
+
+
 def test_sse_torn_child_result_is_retried_and_discovered_next_tick(tmp_path):
     """Scandir name-diff seen-set rule (P2 wave-1, GPT#6): a name is committed
     only after a successful read — a torn/mid-write child file is re-read on the
@@ -424,6 +501,7 @@ def test_sse_torn_child_result_is_retried_and_discovered_next_tick(tmp_path):
     child_drive.mkdir()
     (data / "task_results" / "c1.json").write_text(
         json.dumps({
+            "_schema_version": 1,
             "task_id": "c1",
             "status": "running",
             "delegation_role": "subagent",
@@ -452,7 +530,7 @@ def test_sse_nonlineage_result_names_read_once_then_committed(tmp_path, monkeypa
     follower.full_merge()
 
     (data / "task_results" / "other.json").write_text(
-        json.dumps({"task_id": "other", "status": "running", "delegation_role": "root", "ts": OLD_TS}),
+        json.dumps({"_schema_version": 1, "task_id": "other", "status": "running", "delegation_role": "root", "ts": OLD_TS}),
         encoding="utf-8",
     )
     reads = []

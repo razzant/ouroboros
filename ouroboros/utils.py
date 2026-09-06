@@ -650,13 +650,14 @@ def iter_jsonl_objects(
     tail_bytes: Optional[int] = None,
     dict_only: bool = True,
     gap_reasons: Optional[set[str]] = None,
+    _handle: Any = None,  # Internal borrowed stream; its caller owns closing.
 ) -> Iterator[Any]:
     """Yield parseable JSONL entries; max_entries applies to raw tail lines."""
     path = pathlib.Path(path)
     if (max_entries is not None and max_entries <= 0) or (tail_bytes is not None and tail_bytes <= 0):
         return
     try:
-        with path.open("rb") as handle:
+        with (contextlib.nullcontext(_handle) if _handle is not None else path.open("rb")) as handle:
             if tail_bytes is not None:
                 file_size = path.stat().st_size
                 if file_size > tail_bytes:
@@ -697,6 +698,8 @@ def iter_jsonl_objects(
                 elif gap_reasons is not None:
                     gap_reasons.add("invalid_jsonl_row")
     except FileNotFoundError:
+        if _handle is not None:
+            raise
         return
 
 
@@ -755,75 +758,86 @@ def jsonl_archive_segments(
 
 
 @contextlib.contextmanager
-def jsonl_chain_handles(
-    path: pathlib.Path, *, strict: bool = False,
-) -> Iterator[List[Tuple[pathlib.Path, Any]]]:
-    """Open a rotated JSONL store's whole chain for ONE consistent read.
+def jsonl_chain_handles(path, *, strict=False, start_offset=None, snapshot=None) -> Iterator[List[Tuple[pathlib.Path, Any]]]:
+    """Whole ordered chain by default; snapshot selects one segment at start_offset.
 
-    Yields ``[(path, binary_handle), ...]`` oldest→newest with the live file
-    last. The live file is opened FIRST, then the archive is enumerated: a
-    rotation racing this read renames the just-opened file into the archive,
-    where inode identity dedups it — so every durable row as of the open
-    instant is seen exactly once, in chronological order, whichever side of
-    the rename the reader lands on. (On Windows the rotator's ``os.replace``
-    fails while the handle is open, so the race cannot occur at all.)
-    By default unopenable segments are skipped (fail-soft readers own their
-    own probes). ``strict=True`` raises :class:`JsonlChainUnreadable` instead —
-    an absent live file, or a segment that vanished between enumeration and
-    stat, stays benign (rotation never deletes, so absence is positively
-    empty), but anything UNREADABLE is an incomplete view. Handles are closed
-    on exit.
+    Open live first and dedup its inode; snapshot caches metadata for one fixed
+    source/EOF pass, never client paths. Consumed prefixes are stat'd once, not
+    opened. Rebind the original live inode after rotation; keep at most two
+    handles in snapshot mode. Every handle closes on exit, including errors.
+    Missing discovery entries are benign; strict enumeration/stat/read or
+    shortened required segments fail explicitly. Lenient reads skip failures.
     """
-    path = pathlib.Path(path)
-    handles: List[Tuple[pathlib.Path, Any]] = []
-    live_handle = None
-    try:
-        try:
-            live_handle = path.open("rb")
-        except FileNotFoundError:
-            live_handle = None
-        except OSError as exc:
-            if strict:
-                raise JsonlChainUnreadable(f"cannot open {path}: {exc}") from exc
-            live_handle = None
-        live_id = None
-        if live_handle is not None:
-            try:
-                stat = os.fstat(live_handle.fileno())
-                live_id = (stat.st_dev, stat.st_ino)
-            except OSError as exc:
-                if strict:
-                    raise JsonlChainUnreadable(f"cannot stat {path}: {exc}") from exc
-                live_id = None
-        for segment in jsonl_archive_segments(path, strict=strict):
-            try:
-                seg_stat = segment.stat()
-            except FileNotFoundError:
-                continue
-            except OSError as exc:
-                if strict:
-                    raise JsonlChainUnreadable(f"cannot stat {segment}: {exc}") from exc
-                continue
-            if live_id is not None and (seg_stat.st_dev, seg_stat.st_ino) == live_id:
-                continue  # the open live handle IS this rotated segment
-            try:
-                handles.append((segment, segment.open("rb")))
-            except OSError as exc:
-                if strict:
-                    raise JsonlChainUnreadable(f"cannot open {segment}: {exc}") from exc
-                continue
-        if live_handle is not None:
-            handles.append((path, live_handle))
-            live_handle = None  # ownership moved into the list
-        yield handles
-    finally:
-        if live_handle is not None:
-            with contextlib.suppress(Exception):
-                live_handle.close()
-        for _, handle in handles:
-            with contextlib.suppress(Exception):
-                handle.close()
+    from bisect import bisect_right
 
+    path = pathlib.Path(path)
+    state = snapshot if snapshot is not None else {}
+    with contextlib.ExitStack() as stack:
+        live_handle = None
+        if not state:
+            try:
+                live_handle = stack.enter_context(path.open("rb"))
+                live_stat = os.fstat(live_handle.fileno())
+            except OSError as exc:
+                if strict and not isinstance(exc, FileNotFoundError):
+                    raise JsonlChainUnreadable(f"cannot open or stat {path}: {exc}") from exc
+                live_stat = None
+            entries, ends, total = [], [], 0
+            for segment in [*jsonl_archive_segments(path, strict=strict), path]:
+                try:
+                    stat = live_stat if segment == path else segment.stat()
+                except OSError as exc:
+                    if strict and not isinstance(exc, FileNotFoundError):
+                        raise JsonlChainUnreadable(f"cannot stat {segment}: {exc}") from exc
+                    continue
+                if stat is None or (segment != path and live_stat is not None
+                        and (stat.st_dev, stat.st_ino) == (live_stat.st_dev, live_stat.st_ino)):
+                    continue
+                total += stat.st_size
+                entries.append([segment, stat, segment == path])
+                ends.append(total)
+            state.update(path=path, entries=entries, ends=ends, total=total)
+        if state["path"] != path:
+            raise ValueError("chain pass belongs to a different source")
+        entries, ends = state["entries"], state["ends"]
+        if start_offset is not None and start_offset > state["total"]:
+            raise JsonlChainUnreadable(f"shortened or missing chain at {path}")
+        first = bisect_right(ends, start_offset) if start_offset is not None else 0
+        stop = min(len(entries), first + 1) if snapshot is not None else len(entries)
+        handles = []
+        for index in range(first, stop):
+            segment, expected, was_live = entries[index]
+            try:
+                if was_live:
+                    handle = live_handle
+                    if handle is None:
+                        with contextlib.suppress(FileNotFoundError):
+                            handle = stack.enter_context(segment.open("rb"))
+                    identity = (expected.st_dev, expected.st_ino)
+                    actual = os.fstat(handle.fileno()) if handle is not None else None
+                    if actual is None or (actual.st_dev, actual.st_ino) != identity:
+                        if handle is not None:
+                            handle.close()
+                        for candidate in jsonl_archive_segments(path, strict=strict):
+                            with contextlib.suppress(FileNotFoundError):
+                                stat = candidate.stat()
+                                if (stat.st_dev, stat.st_ino) == identity:
+                                    segment = entries[index][0] = candidate
+                                    break
+                        else:
+                            raise JsonlChainUnreadable(f"original live generation missing at {path}")
+                        handle = stack.enter_context(segment.open("rb"))
+                else:
+                    handle = stack.enter_context(segment.open("rb"))
+                if start_offset is not None:
+                    if os.fstat(handle.fileno()).st_size < expected.st_size:
+                        raise JsonlChainUnreadable(f"shortened chain segment {segment}")
+                    handle.seek(max(0, start_offset - (ends[index - 1] if index else 0)))
+                handles.append((segment, handle))
+            except OSError as exc:
+                if strict:
+                    raise JsonlChainUnreadable(f"cannot read {segment}: {exc}") from exc
+        yield handles
 
 def iter_jsonl_chain_objects(
     path: pathlib.Path,
@@ -836,17 +850,8 @@ def iter_jsonl_chain_objects(
     windows.
     """
     with jsonl_chain_handles(pathlib.Path(path)) as handles:
-        for _, handle in handles:
-            for raw in handle:
-                line = raw.decode("utf-8", errors="replace").strip()
-                if not line:
-                    continue
-                try:
-                    entry = json.loads(line)
-                except (json.JSONDecodeError, ValueError):
-                    continue
-                if not dict_only or isinstance(entry, dict):
-                    yield entry
+        for segment, handle in handles:
+            yield from iter_jsonl_objects(segment, dict_only=dict_only, _handle=handle)
 
 
 def iter_llm_usage_events(
@@ -855,9 +860,8 @@ def iter_llm_usage_events(
     max_entries: Optional[int] = None,
     tail_bytes: Optional[int] = None,
 ) -> Iterator[Dict[str, Any]]:
-    for event in iter_jsonl_objects(path, max_entries=max_entries, tail_bytes=tail_bytes):
-        if event.get("type") == "llm_usage":
-            yield event
+    yield from (event for event in iter_jsonl_objects(path, max_entries=max_entries, tail_bytes=tail_bytes)
+                if event.get("type") == "llm_usage")
 
 
 def llm_usage_cost(event: Dict[str, Any]) -> float:

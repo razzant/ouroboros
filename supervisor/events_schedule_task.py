@@ -15,6 +15,7 @@ from ouroboros.task_results import (
     STATUS_FAILED,
     write_task_result,
 )
+from ouroboros.utils import utc_now_iso
 from supervisor.events_subagent_admission import (
     _send_subagent_rejection,
 )
@@ -397,6 +398,7 @@ def _handle_schedule_task(evt: Dict[str, Any], ctx: Any) -> None:
     # producer stamped; only a MISSING id is absence and falls to the owner chat.
     chat_id = coerce_chat_identity(evt.get("chat_id"), owner_chat_int)
     tid = str(evt.get("task_id") or uuid.uuid4().hex[:8])
+    created_at = utc_now_iso() if not evt.get("task_id") else ""
     desc = str(evt.get("objective") or evt.get("description") or "").strip()
     expected_output = str(evt.get("expected_output") or "").strip()
     constraints = str(evt.get("constraints") or "").strip()
@@ -486,6 +488,7 @@ def _handle_schedule_task(evt: Dict[str, Any], ctx: Any) -> None:
         max_depth=max_depth,
     )
     result_fields = {
+        **({"created_at": created_at} if created_at else {}),
         "parent_task_id": parent_id,
         "root_task_id": root_task_id,
         "session_id": session_id,

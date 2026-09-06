@@ -1,15 +1,15 @@
-"""Task-event SSE endpoint and follow state (split out of gateway/tasks.py).
+"""Task-event SSE: legacy sorted replay and additive physical-cursor streaming.
 
-Extracted verbatim from ``ouroboros/gateway/tasks.py`` when the v6.9x P2
-slice/discovery work pushed that module past the 1600-line size gate
-(tests/test_smoke.py::test_no_oversized_modules). ``gateway/tasks.py``
-re-exports this module's surface, so route wiring, CLI imports, and
-monkeypatch pins keep addressing ``ouroboros.gateway.tasks`` unchanged.
+The existing ``gateway.tasks`` exports remain the route and injection surface.
+Both transports share current result/lineage projections and all five sources;
+v2 owns only read positions, never event persistence or task state.
 """
 
 from __future__ import annotations
 
 import asyncio
+import hashlib
+import io
 import json
 import os
 import pathlib
@@ -17,13 +17,17 @@ import time
 from typing import Any, Dict, List, Optional
 
 from starlette.requests import Request
-from starlette.responses import StreamingResponse
+from starlette.responses import JSONResponse, StreamingResponse
 
 from ouroboros.gateway._helpers import coerce_int, request_drive_root
 from ouroboros.headless import ARTIFACT_STATUS_FINALIZING, ARTIFACT_STATUS_PENDING
 from ouroboros.outcomes import public_task_result
 from ouroboros.task_results import load_task_result, task_results_dir, validate_task_id
 from ouroboros.task_status import FINAL_STATUSES
+from ouroboros.gateway.task_list_scan import raw_result_facts
+from ouroboros.gateway.contracts import TaskEventsRequest
+from ouroboros.gateway.schema import validate_ingress
+from ouroboros.utils import jsonl_archive_segments, jsonl_chain_handles
 
 
 def _tasks_namespace():
@@ -61,6 +65,8 @@ async def api_task_events(request: Request) -> StreamingResponse:
         async def _bad_id():
             yield _sse({"type": "error", "error": message, "seq": 1}, event_id=1)
         return StreamingResponse(_bad_id(), media_type="text/event-stream", status_code=400)
+    if getattr(request, "method", "GET") == "POST":
+        return await _api_task_events_v2(request, task_id)
     cursor = max(0, coerce_int(request.query_params.get("cursor"), 0))
     wait_sec = max(0, min(coerce_int(request.query_params.get("wait"), 30), 120))
     drive_root = request_drive_root(request)
@@ -69,7 +75,7 @@ async def api_task_events(request: Request) -> StreamingResponse:
             yield _sse({"type": "error", "error": "task not found", "task_id": task_id, "seq": 1}, event_id=1)
         return StreamingResponse(_missing(), media_type="text/event-stream", status_code=404)
 
-    async def _stream():
+    async def _legacy_events():
         # Initial replay = one full archive-aware merge (identical to a fresh
         # iter_task_events call, so the client's cross-reconnect `cursor` keeps
         # addressing the same positions — the CLI contract, ouroboros/cli.py
@@ -115,6 +121,10 @@ async def api_task_events(request: Request) -> StreamingResponse:
                         pending.append(row)
                     if pending:
                         tail_key = _event_sort_key(pending[-1])
+            if follower._lineage_notice is not None:
+                notice, follower._lineage_notice = follower._lineage_notice, None
+                # A read diagnostic is not a legacy history row/rank.
+                yield _sse({**notice, "seq": cursor}, event_id=cursor)
             for event in pending:
                 cursor = int(event.get("seq") or cursor)
                 if str(event.get("type") or "") == "task_result":
@@ -167,12 +177,20 @@ async def api_task_events(request: Request) -> StreamingResponse:
                 break
             await asyncio.sleep(0.5)
 
+    async def _stream():
+        try:
+            async for frame in _legacy_events():
+                yield frame
+        except (OSError, ValueError) as exc:
+            yield _sse({"type": "error", "task_id": task_id, "seq": cursor + 1,
+                        "error": str(exc), "reason": "history_unavailable"}, event_id=cursor + 1)
+
     return StreamingResponse(_stream(), media_type="text/event-stream")
 
 
 # Live logs that the supervisor rotates into archive/<prefix>_<ts>.jsonl
-# (supervisor/state.rotate_jsonl_log_if_needed); the other sources never rotate.
-_ROTATED_LOG_PREFIXES = {"progress": "progress", "chat": "chat"}
+# (supervisor/state.rotate_jsonl_log_if_needed). Every source served here rotates.
+_ROTATED_LOG_PREFIXES = {source: source for source, _parts in _LOG_SOURCES}
 
 
 def _event_sort_key(item: Dict[str, Any]) -> tuple:
@@ -251,16 +269,16 @@ class _TaskEventFollower:
         self.suppress_task_done = False
         self.filter_grew = False
         self._queue_snapshot_mtime: Any = None
-        # Child discovery state (v6.9x P2): result filenames already read (and
-        # lineage-classified) by the scandir name-diff in _discover_roots.
         self._results_dir = task_results_dir(self.drive_root, create=False)
-        self._seen_result_names: set = set()
-        # Archive floor (P2 review, fix 4): the RAW result's ts is the first
-        # write's timestamp (creation/admission — no production writer passes an
-        # explicit ts), so an archive whose rotation stamp predates it cannot
-        # contain this task's rows. Empty floor = no bound (fail open).
+        # Per-file proof belongs to this live follower, never a client cursor
+        # or the shared current-facts memo. Failed reads may retain this proof.
+        self._seen_result_names: Dict[str, tuple[str, str]] = {}
+        self._lineage_failed_names: set[str] = set()
+        self._lineage_notice: Optional[dict] = None
+        # Only an explicit creation fact may bound the scan. Legacy ``ts`` can
+        # describe finalization and must never hide earlier task history.
         raw = load_task_result(self.drive_root, task_id) or {}
-        self._created_floor = _compact_ts_stamp(str(raw.get("created_at") or raw.get("ts") or ""))
+        self._created_floor = _compact_ts_stamp(str(raw.get("created_at") or ""))
 
     def refresh_result(self) -> None:
         self.result = _tasks_namespace().load_effective_task_result(
@@ -283,78 +301,46 @@ class _TaskEventFollower:
         return changed
 
     def _discover_roots(self) -> bool:
-        """Refresh roots + lineage filter ids; True when something new appeared.
+        """Rebuild the filter from current compact facts, reusing unchanged rows.
 
-        Child discovery is a scandir NAME-DIFF over the main root's
-        task_results/ (v6.9x P2). Invariant this relies on: schedule_subagent
-        durably writes the child's ``task_results/<tid>.json`` — already
-        carrying lineage and child_drive_root — into the MAIN data root BEFORE
-        emitting any event and BEFORE the child is enqueued
-        (ouroboros/tools/control.py, the STATUS_REQUESTED write; a failed write
-        means the child was never scheduled). A new child is therefore always
-        visible as a new filename no later than its first log row. Each tick
-        reads ONLY names outside the seen-set; a name is committed to the
-        seen-set ONLY after read_json_dict succeeds (a torn/mid-write file is
-        retried next tick), and successfully-read NON-lineage names are
-        committed too so a busy shared store is not re-read every tick. The
-        lineage match reproduces find_child_tasks' subtree semantics exactly:
-        direct parent OR root equals the watched id, delegation_role ==
-        "subagent", child_drive_root collection, NO recursion (mid-stream
-        grandchildren of a non-root watched task did not match before either).
-        A child missed through a transient failure is recovered by the next
-        tick or, at worst, a client reconnect's full re-merge (at-least-once —
-        pre-existing property)."""
-        changed = False
+        Results are written with lineage before enqueue. Stat invalidation also
+        sees later changes to an existing row; reconnects share that same memo.
+        Discovery is a read-only projection, never result/schema authority.
+        """
         candidates = [self.drive_root]
-        child = str(
-            self.result.get("child_drive_root")
-            or self.result.get("headless_child_drive_root")
-            or ""
-        ).strip()
+        child = str(self.result.get("child_drive_root") or self.result.get("headless_child_drive_root") or "").strip()
         if child:
             candidates.append(pathlib.Path(child))
-        try:
-            with os.scandir(self._results_dir) as entries:
-                names = [entry.name for entry in entries if entry.name.endswith(".json")]
-        except OSError:
-            names = []
-        for name in names:
-            if name in self._seen_result_names:
+        facts, malformed = raw_result_facts(
+            self._results_dir, reader=_tasks_namespace().read_json_dict,
+        )
+        failed = set(malformed)
+        bindings = {name: binding for name, binding in self._seen_result_names.items() if name in failed}
+        retained_count = len(bindings)
+        for name, row in facts.items():
+            if row["schema_refusal"] or row["delegation_role"] != "subagent":
                 continue
-            row = _tasks_namespace().read_json_dict(self._results_dir / name)
-            if row is None:
-                continue  # torn write: not committed, re-read next tick
-            self._seen_result_names.add(name)
-            if str(row.get("delegation_role") or "") != "subagent":
+            child_id = row["task_id"] or row["id"]
+            if not child_id or not (row["parent_task_id"] == self.task_id or row["root_task_id"] == self.task_id):
                 continue
-            child_id = str(row.get("task_id") or row.get("id") or "").strip()
-            if not child_id:
-                continue
-            if not (
-                str(row.get("parent_task_id") or "") == self.task_id
-                or str(row.get("root_task_id") or "") == self.task_id
-            ):
-                continue
-            if child_id not in self.task_filter_ids:
-                self.task_filter_ids.add(child_id)
-                changed = True
-                # A new FILTER ID over already-consumed bytes is lossy: rows
-                # matching only via subagent_task_id were filtered out when
-                # those bytes were read, so only a full re-merge recovers them
-                # (new ROOTS are fine — their logs join at offset 0). The
-                # stream checks this flag after every poll; full_merge resets it.
-                self.filter_grew = True
-            child_root = str(
-                row.get("child_drive_root")
-                or row.get("headless_child_drive_root")
-                or ""
-            ).strip()
+            child_root = row["child_drive_root"] or row["headless_child_drive_root"]
+            bindings[name] = (child_id, child_root)
+        ids = {self.task_id, *(child_id for child_id, _root in bindings.values())}
+        for _child_id, child_root in bindings.values():
             if child_root:
                 candidates.append(pathlib.Path(child_root))
-        for path in candidates:
-            if path not in self.roots:
-                self.roots.append(path)
-                changed = True
+        self._seen_result_names = bindings
+        if failed != self._lineage_failed_names:
+            self._lineage_notice = ({"type": "history_gap", "source": "task_result",
+                "task_id": self.task_id, "reason": "lineage_incomplete",
+                "data": {"failed_result_reads": len(failed), "retained_result_bindings": retained_count,
+                         "unknown_result_membership": len(failed) - retained_count}}
+                if failed else None)
+        self._lineage_failed_names = failed
+        roots = sorted(set(candidates), key=str)
+        changed = ids != self.task_filter_ids or roots != self.roots
+        self.filter_grew = self.filter_grew or changed
+        self.task_filter_ids, self.roots = ids, roots
         return changed
 
     def _log_state(self, root: pathlib.Path, source: str) -> Dict[str, Any]:
@@ -462,9 +448,8 @@ class _TaskEventFollower:
         self.logs = {}
         self.roots = []
         self.task_filter_ids = {self.task_id}
-        # Reset the discovery baseline too: the merge below re-reads every
-        # consumed byte, so every result name must be re-read and re-classified.
-        self._seen_result_names = set()
+        # The process-local stat memo survives a connection/replay rebuild.
+        # A replay rebuilds log positions, not the live follower's prior proof.
         self.refresh_result()
         self.queue_snapshot_changed()
         self._discover_roots()
@@ -500,6 +485,217 @@ class _TaskEventFollower:
                     rows.extend(self._entries_to_rows(root, source, entries))
         rows.sort(key=_event_sort_key)
         return rows, advanced
+
+
+def _cursor_input(value: Any) -> Dict[str, Any]:
+    """Validate only the versioned transport; paths never select read authority."""
+    if value is None:
+        return {"v": 2, "seq": 0, "view": "", "positions": {}}
+    if value["v"] != 2 or value["seq"] < 0:
+        raise ValueError("cursor version or sequence is invalid")
+    if not value["view"]:
+        raise ValueError("cursor view or positions is invalid")
+    for root, sources in value["positions"].items():
+        if not isinstance(root, str) or not isinstance(sources, dict):
+            raise ValueError("cursor root positions must be objects")
+        if any(source not in _ROTATED_LOG_PREFIXES or type(offset) is not int or offset < 0
+               for source, offset in sources.items()):
+            raise ValueError("cursor source position is invalid")
+    return value
+
+
+class _TaskEventCursorFollower(_TaskEventFollower):
+    """Physical append positions over immutable archives plus the live file.
+
+    Positions count the complete chain, independently of creation-floor skips.
+    No timestamp sorting or history-sized event batches occur on this path.
+    Archives must remain immutable and retained: a shorter/unreadable chain
+    refuses continuation. Manual prefix removal masked by new appended bytes
+    cannot be detected by this offset protocol and is outside its guarantee.
+    """
+
+    def __init__(self, drive_root: pathlib.Path, task_id: str, cursor: dict) -> None:
+        super().__init__(drive_root, task_id)
+        self.seq = cursor["seq"]
+        self.view = cursor["view"]
+        self.positions = {root: dict(sources) for root, sources in cursor["positions"].items()}
+
+    def checkpoint(self) -> dict:
+        return {"v": 2, "seq": self.seq, "view": self.view,
+                "positions": {root: dict(sources) for root, sources in self.positions.items()}}
+
+    def envelope(self, event: dict, *, identity: str = "", delivery: bool = True) -> dict:
+        if delivery:
+            self.seq += 1
+        return {**event, "seq": self.seq, "event_id": identity, "cursor": self.checkpoint()}
+
+    def refresh_view(self) -> Optional[dict]:
+        self.refresh_result()
+        self._discover_roots()
+        facts = {"task_id": self.task_id, "task_ids": sorted(self.task_filter_ids),
+                 "roots": [str(root) for root in self.roots],
+                 "suppress_task_done": self.suppress_task_done, "creation_floor": self._created_floor}
+        view = hashlib.sha256(json.dumps(facts, sort_keys=True).encode()).hexdigest()
+        expected = {str(root): {source: 0 for source, _parts in _LOG_SOURCES} for root in self.roots}
+        changed = bool(self.view) and view != self.view
+        if not self.view or changed:
+            self.positions = expected
+        elif (set(self.positions) != set(expected)
+              or any(set(self.positions[root]) != set(sources) for root, sources in expected.items())):
+            raise ValueError("cursor positions do not cover this view")
+        self.view = view
+        if changed:
+            return self.envelope({"type": "cursor_replay", "task_id": self.task_id,
+                                  "reason": "view_changed"}, delivery=False)
+        return None
+
+    def read_events(self):
+        """Close each bounded read before yielding its rows and per-row cursors.
+
+        The buffer is at most 64 KiB plus one complete line. A single large
+        JSONL record keeps its existing support; history is never one batch.
+        Each source's logical EOF is pinned for this pass; later appends wait
+        for the next pass so a busy source cannot starve the rest of the view.
+        """
+        if self._lineage_notice is not None:
+            notice, self._lineage_notice = self._lineage_notice, None
+            yield self.envelope(notice, delivery=False)
+        for root in self.roots:
+            for source, parts in _LOG_SOURCES:
+                live = root.joinpath(*parts)
+                position = self.positions[str(root)][source]
+                if position == 0 and self._created_floor:
+                    # Skip the known pre-birth prefix in one metadata pass,
+                    # without opening each old archive as a separate batch.
+                    for path in jsonl_archive_segments(live, strict=True):
+                        if not _archive_stamp_predates(path.name, source, self._created_floor):
+                            break
+                        position += path.stat().st_size
+                    self.positions[str(root)][source] = position
+                snapshot: dict = {}
+                while not snapshot or position < snapshot["total"]:
+                    before = position
+                    with jsonl_chain_handles(live, strict=True, start_offset=position,
+                                             snapshot=snapshot) as handles:
+                        end_position = snapshot["total"]
+                        if not handles:
+                            break
+                        path, handle = handles[0]
+                        remaining = os.fstat(handle.fileno()).st_size - handle.tell()
+                        snapshot_cut = remaining > end_position - position
+                        remaining = min(remaining, end_position - position)
+                        if (path != live and self._created_floor
+                                and _archive_stamp_predates(path.name, source, self._created_floor)):
+                            position += remaining
+                            self.positions[str(root)][source] = position
+                            continue
+                        data = handle.read(min(64 * 1024, remaining))
+                        if data and not data.endswith(b"\n") and len(data) < remaining:
+                            data += handle.readline(remaining - len(data))
+                    for raw in io.BytesIO(data):
+                        if not raw.endswith(b"\n") and (path == live or snapshot_cut):
+                            break  # an append still owns this unfinished row
+                        row_start = position
+                        position += len(raw)
+                        self.positions[str(root)][source] = position
+                        identity = json.dumps([str(root), source, row_start], separators=(",", ":"))
+                        try:
+                            if not raw.endswith(b"\n"):
+                                raise ValueError("incomplete_archive_line")
+                            if not raw.strip():
+                                continue
+                            entry = json.loads(raw.decode("utf-8"))
+                            if not isinstance(entry, dict):
+                                raise ValueError("non_object_line")
+                        except (ValueError, UnicodeDecodeError):
+                            yield self.envelope({"type": "history_gap", "source": source,
+                                "root": str(root), "task_id": self.task_id,
+                                "reason": "invalid_archive_line" if path != live else "invalid_jsonl_line"},
+                                identity=identity, delivery=False)
+                            continue
+                        if (str(entry.get("task_id") or "") not in self.task_filter_ids
+                                and str(entry.get("subagent_task_id") or "") not in self.task_filter_ids
+                                and str(entry.get("parent_task_id") or "") != self.task_id
+                                and str(entry.get("root_task_id") or "") != self.task_id):
+                            continue
+                        event = _event_from_log_entry(source, 0, entry, root)
+                        # Legacy ``line`` counts parsed rows. A resumed byte
+                        # reader cannot reconstruct that count without replay.
+                        event.pop("line")
+                        if self.suppress_task_done and event["type"] == "task_done":
+                            continue
+                        yield self.envelope(event, identity=identity)
+                    if position == before:
+                        break
+
+
+async def _api_task_events_v2(request: Request, task_id: str):
+    try:
+        body = await request.json()
+        if errors := validate_ingress(body, TaskEventsRequest):
+            return JSONResponse({"error": f"invalid request body: {errors[0]}",
+                                 "schema_errors": errors[:8]}, status_code=400)
+        cursor = _cursor_input(body.get("cursor"))
+        wait = body.get("wait", 30)
+        if type(wait) is not int or not 0 <= wait <= 120:
+            raise ValueError("wait must be an integer from 0 to 120 seconds")
+    except (ValueError, TypeError) as exc:
+        return JSONResponse({"error": str(exc)}, status_code=400)
+    drive_root = request_drive_root(request)
+    if not load_task_result(drive_root, task_id):
+        return JSONResponse({"error": "task not found", "task_id": task_id}, status_code=404)
+    follower = _TaskEventCursorFollower(drive_root, task_id, cursor)
+
+    async def stream():
+        deadline = time.monotonic() + wait
+        first = True
+        try:
+            while True:
+                replay = await asyncio.to_thread(follower.refresh_view)
+                if replay:
+                    yield _sse(replay, event_id=follower.seq)
+                rows = follower.read_events()
+                try:
+                    while True:
+                        read = asyncio.create_task(asyncio.to_thread(next, rows, None))
+                        try:
+                            event = await asyncio.shield(read)
+                        except asyncio.CancelledError:
+                            # A cancelled HTTP waiter does not stop its file
+                            # read thread. Settle it before closing the handles.
+                            await read
+                            raise
+                        if event is None:
+                            break
+                        yield _sse(event, event_id=event["seq"])
+                finally:
+                    rows.close()
+                terminal = follower.result_is_final()
+                if first or terminal:
+                    result = follower.result
+                    if terminal:
+                        result = await asyncio.to_thread(
+                            _tasks_namespace().load_effective_task_result, drive_root, task_id,
+                        )
+                    event = follower.envelope({"source": "task_result", "type": "task_result",
+                        "task_id": task_id, "data": public_task_result(result)})
+                    # Synthetic result snapshots have no log identity. They are
+                    # always consumed, including the fresh terminal materialization.
+                    yield _sse(event, event_id=follower.seq)
+                    first = False
+                if terminal:
+                    break
+                if time.monotonic() >= deadline:
+                    event = follower.envelope({"type": "cursor_checkpoint", "task_id": task_id}, delivery=False)
+                    yield _sse(event, event_id=follower.seq)
+                    break
+                await asyncio.sleep(0.5)
+        except (OSError, ValueError) as exc:
+            event = follower.envelope({"type": "error", "task_id": task_id,
+                "error": str(exc), "reason": "cursor_unavailable"}, delivery=False)
+            yield _sse(event, event_id=follower.seq)
+
+    return StreamingResponse(stream(), media_type="text/event-stream")
 
 
 def iter_task_events(drive_root: pathlib.Path, task_id: str) -> List[Dict[str, Any]]:

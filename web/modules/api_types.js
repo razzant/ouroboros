@@ -936,6 +936,25 @@
  * @property {string=} ts
  * @property {string=} root
  * @property {Object=} data
+ * @property {string=} event_id
+ * @property {TaskEventCursor=} cursor
+ * @property {string=} reason
+ * @property {string=} error
+ */
+
+/**
+ * @typedef {Object} TaskEventCursor
+ * @property {number} v
+ * @property {number} seq
+ * @property {string} view
+ * @property {Object<string, Object<string, number>>} positions
+ */
+
+/**
+ * @typedef {Object} TaskEventsRequest
+ * @property {number} v
+ * @property {number=} wait
+ * @property {?TaskEventCursor=} cursor
  */
 
 /**
