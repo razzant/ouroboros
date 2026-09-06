@@ -144,6 +144,10 @@ def test_restricted_repo_search_preserves_source_identifiers(tmp_path, monkeypat
     registry._ctx.task_constraint = TaskConstraint(mode="local_readonly_subagent")
     if fallback:
         monkeypatch.setattr("ouroboros.code_search_rg._rg_binary", lambda: "")
+    else:
+        from tests.test_code_search_rg import _install_fake_rg
+
+        _install_fake_rg(tmp_path, monkeypatch)
     out = registry.execute("search_code", {"query": "ordinary_source_identifier"})
     assert identifier in out and "SECRET_BYTES_MASKED" in out
     assert GITHUB_TOKEN not in out
