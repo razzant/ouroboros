@@ -251,7 +251,7 @@ def test_update_quiesce_kills_service_group_that_outlives_leader(tmp_path, monke
     monkeypatch.setattr(
         process_custody,
         "_rewrite_ledger",
-        lambda _root, entries: rewritten.extend(entries),
+        lambda _root, entries, **_kw: rewritten.extend(entries),
     )
 
     ok, blockers = process_custody.quiesce_custodied_services(tmp_path)
@@ -928,8 +928,8 @@ def test_start_time_match_matrix(tmp_path, monkeypatch, live, recorded, expected
 def test_reaper_skips_the_fingerprint_for_live_same_session_rows(tmp_path, monkeypatch, purpose):
     """A live same-session session row is kept either way, so the `ps` is pure cost.
 
-    The counter is the assertion: worker-pool members, the SyncManager, the claudexor
-    daemon, the local-model server and keep-services are ALL scope="session", so this is
+    The counter is the assertion: worker-pool members, the SyncManager, the
+    local-model server and keep-services are ALL scope="session", so this is
     the hot majority of the ledger on every 600s tick and startup sweep.
     """
     calls = []
@@ -974,7 +974,7 @@ def test_reaper_keeps_dead_leader_session_service_with_a_live_group(tmp_path, mo
         process_custody, "kill_process_group_id",
         lambda pgid: pytest.fail(f"a surviving service group must not be killed (pgid={pgid})"),
     )
-    monkeypatch.setattr(process_custody, "_rewrite_ledger", lambda _root, entries: rewritten.extend(entries))
+    monkeypatch.setattr(process_custody, "_rewrite_ledger", lambda _root, entries, **_kw: rewritten.extend(entries))
 
     assert reap_orphaned_processes(tmp_path) == []
     assert rewritten == [entry], "the dead-leader row must survive on its group evidence"

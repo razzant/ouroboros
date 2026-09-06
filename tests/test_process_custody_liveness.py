@@ -78,6 +78,6 @@ def test_same_generation_zombie_record_is_pruned(monkeypatch, tmp_path):
     monkeypatch.setattr(process_custody, "pid_is_zombie", lambda _: True)
     monkeypatch.setattr(process_custody, "process_group_has_live_members", lambda _: False)
     survivors = []
-    monkeypatch.setattr(process_custody, "_rewrite_ledger", lambda _, rows: survivors.extend(rows))
+    monkeypatch.setattr(process_custody, "_rewrite_ledger", lambda _, rows, **_kw: survivors.extend(rows))
     assert process_custody.reap_orphaned_processes(tmp_path) == []
     assert survivors == []

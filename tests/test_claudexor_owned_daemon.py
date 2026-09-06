@@ -189,7 +189,7 @@ def test_discover_daemon_at_reads_override_layout(tmp_path):
 
 def test_stop_never_kills_a_daemon_it_did_not_start():
     manager = owned.OwnedClaudexorDaemon()
-    assert manager.stop() is False  # nothing self-started -> nothing to kill
+    assert manager.stop() is False  # nothing self-started, no ledger root -> nothing to kill
 
 
 def test_ensure_running_without_binary_is_a_typed_refusal(monkeypatch, tmp_path):
@@ -2475,14 +2475,29 @@ def _point_owned_home(monkeypatch, config_dir: pathlib.Path, data_dir: pathlib.P
     monkeypatch.setattr(config_mod, "DATA_DIR", data_dir)
 
 
+class _UnpublishedChild:
+    """Popen fixture that never becomes ready and confirms only an observed stop."""
+    def __init__(self, pid):
+        self.pid = pid
+        self.terminated = 0
+
+    def poll(self):
+        return 0 if self.terminated else None
+
+    def wait(self, timeout=None):
+        assert self.terminated, "wait cannot certify a child that was never stopped"
+        return 0
+
+    def terminate(self):
+        self.terminated += 1
+
+
 def test_a_spawn_that_never_publishes_a_descriptor_does_not_leave_the_child_running(
         monkeypatch, tmp_path):
-    """The timeout branch raised its typed refusal and walked away from the process it
-    had just started. That child is OURS and it is alive — holding the config dir, its
-    log, and whatever port it eventually binds — and `self._proc` still pointed at it,
-    so the NEXT `ensure_running` spawned a SECOND daemon beside the first. Every retry
-    added one. `stop()` could not clean up either: by contract it only ever terminates
-    a daemon we successfully started, and this one never became reachable."""
+    """A failed startup cleans up its own child before a retry can spawn another.
+    The Popen fixture reports termination and wait like a real completed child;
+    signal failure and retained custody are covered in test_process_custody_stop.
+    """
     import sys
 
     from ouroboros.gateways.claudexor import ClaudexorUnavailable
@@ -2495,24 +2510,10 @@ def test_a_spawn_that_never_publishes_a_descriptor_does_not_leave_the_child_runn
     monkeypatch.setattr(owned, "_SPAWN_WAIT_SEC", 0.3)
     monkeypatch.setattr(owned, "_SPAWN_POLL_SEC", 0.05)
 
-    class _NeverReadyChild:
-        """Alive, but it never writes a descriptor — so discovery never succeeds."""
-
-        pid = 424242
-
-        def __init__(self):
-            self.terminated = 0
-
-        def poll(self):
-            return None                      # still running
-
-        def terminate(self):
-            self.terminated += 1
-
-    child = _NeverReadyChild()
+    child = _UnpublishedChild(424242)
     import ouroboros.platform_layer as platform_layer
     monkeypatch.setattr(platform_layer, "process_group_id", lambda _pid: 0)
-    monkeypatch.setattr(owned, "spawn_supervised", lambda *a, **k: child, raising=False)
+    monkeypatch.setattr(platform_layer, "kill_process_tree", lambda proc: proc.terminate())
     import ouroboros.process_custody as custody_mod
     monkeypatch.setattr(custody_mod, "spawn_supervised", lambda *a, **k: child)
 
@@ -2539,7 +2540,7 @@ def test_first_spawn_loser_attaches_to_the_winners_endpoint(monkeypatch, tmp_pat
     data_dir = tmp_path / "data"
     config_dir = data_dir / "claudexor"
     _point_owned_home(monkeypatch, config_dir, data_dir)
-    monkeypatch.setattr(owned, "verify_owned_home", lambda: "")
+    monkeypatch.setattr(owned, "verify_owned_home", lambda **_kw: "")
 
     class ReadyRuntime:
         def ensure(self):
@@ -2596,7 +2597,7 @@ def test_exited_spawn_times_out_cleanly_with_bounded_liveness_probes(
     data_dir = tmp_path / "data"
     config_dir = data_dir / "claudexor"
     _point_owned_home(monkeypatch, config_dir, data_dir)
-    monkeypatch.setattr(owned, "verify_owned_home", lambda: "")
+    monkeypatch.setattr(owned, "verify_owned_home", lambda **_kw: "")
     monkeypatch.setattr(owned, "_SPAWN_WAIT_SEC", 0.03)
     monkeypatch.setattr(owned, "_SPAWN_POLL_SEC", 0.01)
 
@@ -2819,7 +2820,7 @@ def test_foreign_responder_on_stale_port_is_disclosed_not_killed(monkeypatch, tm
         status = manager.status_dict()
         assert status["state"] == "foreign_daemon"
         assert "REFUSED our home's token" in (status["last_error"] or "")
-        # No kill: stop() only ever touches a self-started process.
+        # No kill: a foreign responder is never a ledger root of ours, so stop() has nothing.
         assert manager.stop() is False
     finally:
         foreign.shutdown()
@@ -2914,7 +2915,7 @@ def test_staged_update_activates_only_at_the_next_natural_start(monkeypatch, tmp
     data_dir = tmp_path / "data"
     config_dir = data_dir / "claudexor"
     _point_owned_home(monkeypatch, config_dir, data_dir)
-    monkeypatch.setattr(owned, "verify_owned_home", lambda: "")
+    monkeypatch.setattr(owned, "verify_owned_home", lambda **_kw: "")
 
     new_command = ["/fixture/node", "/fixture/state/cx/3.4.0-111111111111/dist/claudexord.js"]
     ensures: list = []
@@ -3030,22 +3031,13 @@ def test_spawn_env_prepends_onto_the_hosts_own_path_key(monkeypatch, tmp_path):
 
     captured = {}
 
-    class _NeverReadyChild:
-        pid = 424244
-
-        def poll(self):
-            return None
-
-        def terminate(self):
-            pass
-
     def _capture_spawn(command, **kwargs):
         captured["env"] = kwargs["env"]
-        return _NeverReadyChild()
+        return _UnpublishedChild(424244)
 
     import ouroboros.platform_layer as platform_layer
 
-    monkeypatch.setattr(platform_layer, "process_group_id", lambda _pid: 0)
+    monkeypatch.setattr(platform_layer, "kill_process_tree", lambda proc: proc.terminate())
     import ouroboros.process_custody as custody_mod
 
     monkeypatch.setattr(custody_mod, "spawn_supervised", _capture_spawn)
@@ -3091,22 +3083,13 @@ def test_spawn_env_never_leaves_an_empty_path_component(monkeypatch, tmp_path):
 
     captured = {}
 
-    class _NeverReadyChild:
-        pid = 424245
-
-        def poll(self):
-            return None
-
-        def terminate(self):
-            pass
-
     def _capture_spawn(command, **kwargs):
         captured["env"] = kwargs["env"]
-        return _NeverReadyChild()
+        return _UnpublishedChild(424245)
 
     import ouroboros.platform_layer as platform_layer
 
-    monkeypatch.setattr(platform_layer, "process_group_id", lambda _pid: 0)
+    monkeypatch.setattr(platform_layer, "kill_process_tree", lambda proc: proc.terminate())
     import ouroboros.process_custody as custody_mod
 
     monkeypatch.setattr(custody_mod, "spawn_supervised", _capture_spawn)

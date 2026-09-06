@@ -11,15 +11,22 @@ jobs).
 
 Lifecycle belongs to the installation, not the process that first needed it:
 
-* spawn through ``process_custody`` (daemon scope); server sweeps preserve
-  fingerprint-matching legacy session records through the same named purpose;
+* spawn through ``process_custody`` (daemon scope) from whichever process first
+  needs the daemon — a task worker included; every worker tree-kill spares the
+  ledger's live daemon roots (``supervisor.worker_pool_lifecycle.kill_worker_tree``)
+  and both server sweeps retain the purpose's legacy session rows, so neither a
+  worker's death nor a server generation change ends the daemon's paid runs;
 * ATTACH-IF-ALIVE: a live daemon already serving our config dir (a previous
   generation's, custody-pending) is attached to, not duplicated — the engine
   refuses a second daemon on the same socket anyway;
-* OWN-ONLY-IF-SELF-STARTED: ``stop`` terminates only a process THIS manager
-  spawned. An attached daemon — ours-by-home or anyone else's — is never
-  killed here; a generation change alone never authorizes stopping live runs.
-  A newer runtime pin is staged for the next natural start, never hot-swapped.
+* STOP-ONLY-WHAT-IS-PROVABLY-OURS: ``stop`` (Panic) terminates the child THIS
+  manager spawned and ledger roots confirmed by our marker, authenticated
+  endpoint and live custody fingerprint — a prior generation's or a
+  worker's spawn included — never a live responder known only by name or by
+  the descriptor port (a foreign daemon on a recycled port stays disclosed, not
+  killed). A newer runtime pin is staged for the next natural start, never
+  hot-swapped. Planned replacement remains deferred pending the engine's
+  atomic treatment of setup jobs with unconfirmed termination.
 
 Zero auth logic lives here or anywhere in Ouroboros: login jobs, device-code
 custody, verification and rotation are the daemon's own product surface,
@@ -125,15 +132,15 @@ def read_ownership_marker() -> Dict[str, Any]:
         return {}
 
 
-def verify_owned_home() -> str:
+def verify_owned_home(*, require_marker: bool = False) -> str:
     """'' when the home is OURS to manage; a typed reason otherwise.
 
     Two independent facts, both required before any restart may CLAIM the
     home: the config dir sits under OUR data plane, and the ownership marker
     (when present) names the same data plane. A marker naming a different
     data plane is a FOREIGN home — disclosed, never adopted, never killed.
-    A missing marker on our own data-plane path is fine: it is written at
-    provision time, and pre-marker homes are ours by construction of the path.
+    A missing marker remains valid for provisioning. ``require_marker`` instead
+    demands a positive Ouroboros marker before an attached process can be stopped.
     """
     from ouroboros.config import DATA_DIR
 
@@ -145,6 +152,11 @@ def verify_owned_home() -> str:
         return f"config dir {config_dir} is outside the data plane {data_dir}"
     marker = read_ownership_marker()
     marked = str(marker.get("data_dir") or "")
+    path = ownership_marker_path()
+    if (require_marker or path.exists() or path.is_symlink()) and (
+        marker.get("owner") != "ouroboros" or not marked
+    ):
+        return "owned daemon marker is missing or invalid; stop ownership is unconfirmed"
     if marked and pathlib.Path(marked).resolve() != data_dir:
         return (f"ownership marker names a different data plane ({marked}); "
                 "this home is not ours to manage")
@@ -152,20 +164,30 @@ def verify_owned_home() -> str:
 
 
 def _write_ownership_marker() -> None:
-    import json
-
+    """Create missing ownership evidence; never replace another writer's marker."""
     from ouroboros.config import DATA_DIR
-    from ouroboros.utils import utc_now_iso, write_text_atomic
+    from ouroboros.gateways.claudexor import ClaudexorUnavailable
+    from ouroboros.utils import utc_now_iso
 
+    problem = verify_owned_home()
+    if problem:
+        raise ClaudexorUnavailable("foreign_daemon_home", problem)
+    path = ownership_marker_path()
     try:
-        ownership_marker_path().parent.mkdir(parents=True, exist_ok=True)
-        write_text_atomic(ownership_marker_path(), json.dumps({
-            "owner": "ouroboros",
-            "data_dir": str(pathlib.Path(DATA_DIR).resolve()),
+        path.parent.mkdir(parents=True, exist_ok=True)
+        payload = json.dumps({
+            "owner": "ouroboros", "data_dir": str(pathlib.Path(DATA_DIR).resolve()),
             "provisioned_at": utc_now_iso(),
-        }, ensure_ascii=False, indent=1))
+        }, ensure_ascii=False, indent=1)
+        # Exclusive creation also protects a marker appearing after validation.
+        with path.open("x", encoding="utf-8") as stream:
+            stream.write(payload)
+    except FileExistsError:
+        problem = verify_owned_home(require_marker=True)
+        if problem:
+            raise ClaudexorUnavailable("foreign_daemon_home", problem)
     except OSError:
-        log.warning("ownership marker write failed", exc_info=True)
+        log.warning("ownership marker write failed; attached stop remains unconfirmed", exc_info=True)
 
 
 def resolve_claudexord() -> str:
@@ -376,14 +398,13 @@ class OwnedClaudexorDaemon:
         )
 
         with self._lock:
+            # Validate before probing or claiming even an already-live endpoint.
+            ownership_problem = verify_owned_home()
+            if ownership_problem:
+                raise ClaudexorUnavailable("foreign_daemon_home", ownership_problem)
             endpoint, state, detail = self._classify_liveness()
-            # NEVER ADOPT: before claiming the home (restart OR first spawn),
-            # prove it is ours — under our data plane, marker (if any) naming
-            # our data plane. A foreign marker is a typed refusal, not a kill.
-            if endpoint is None:
-                ownership_problem = verify_owned_home()
-                if ownership_problem:
-                    raise ClaudexorUnavailable("foreign_daemon_home", ownership_problem)
+            if endpoint is not None:
+                _write_ownership_marker()
             if state == "foreign_daemon" and detail:
                 # A live foreign daemon sits on our STALE descriptor port. Our
                 # own daemon is dead (it would hold that port otherwise), so
@@ -410,6 +431,8 @@ class OwnedClaudexorDaemon:
                     # through the ordinary ensure path (owner decision 2A:
                     # side-by-side, current work is never touched).
                     return endpoint
+            if endpoint is None and self._proc is not None and self._proc.poll() is None:
+                raise ClaudexorUnavailable("daemon_stop_unconfirmed", "the previous startup child is still alive; no replacement was spawned")
             try:
                 command = runtime_manager.ensure()
             except ClaudexorRuntimeError as exc:
@@ -464,7 +487,6 @@ class OwnedClaudexorDaemon:
                     stdout=sink,
                     stderr=sink,
                 )
-            _write_ownership_marker()
             deadline = time.monotonic() + _SPAWN_WAIT_SEC
             while True:
                 remaining = deadline - time.monotonic()
@@ -481,6 +503,7 @@ class OwnedClaudexorDaemon:
                     timeout_sec=min(remaining, SHORT_POLL_TIMEOUT_SEC),
                 )
                 if endpoint is not None:
+                    _write_ownership_marker()
                     if self._proc is not None and self._proc.poll() is not None:
                         self._proc = None
                     self._last_error = ""
@@ -515,21 +538,22 @@ class OwnedClaudexorDaemon:
     # closed without spawn-time state. REACHABLE stays the whole spawn exit
     # predicate; the bounded admission wait stays in `ensure_owned_gateway`.
 
-    def _terminate_child(self) -> None:
-        """Stop and forget the child this manager spawned. Caller holds the lock."""
-        proc, self._proc = self._proc, None
+    def _terminate_child(self) -> bool:
+        """Stop our child; forget its handle only after confirmed exit. Caller holds the lock."""
+        proc = self._proc
         if proc is None or proc.poll() is not None:
-            return
-        from ouroboros.platform_layer import kill_process_group_id, process_group_id
+            self._proc = None
+            return False
+        from ouroboros.platform_layer import kill_process_tree
 
+        kill_process_tree(proc)
         try:
-            pgid = process_group_id(proc.pid)
-            if pgid:
-                kill_process_group_id(pgid)
-            else:
-                proc.terminate()
-        except Exception:
-            proc.terminate()
+            proc.wait(timeout=5)
+        except subprocess.TimeoutExpired:
+            log.warning("owned daemon child %s stop is unconfirmed; handle retained", proc.pid)
+            return False
+        self._proc = None
+        return True
 
     def reconcile_rotation(self, gateway: Any) -> None:
         """D28 as reconciliation (B3): default the MISSING limit-action
@@ -637,11 +661,62 @@ class OwnedClaudexorDaemon:
                         path, exc, exc_info=True)
 
     def stop(self) -> bool:
-        """Terminate ONLY a self-started daemon; attached daemons are left alone."""
-        with self._lock:
-            live = self._proc is not None and self._proc.poll() is None
-            self._terminate_child()
-            return live
+        """Stop verified own roots; report every unconfirmed remainder.
+
+        False also means nothing needed stopping. True requires a confirmed
+        stop with no remaining custody. Lock acquisition is bounded separately
+        from HTTP connect/read phases and each root's exit wait; there is no
+        promised absolute wall-clock deadline for the whole teardown. A
+        self-started Popen handle proves direct ownership; attached roots need
+        the owned marker, authenticated endpoint and measured ledger identity.
+        """
+        from ouroboros.config import DATA_DIR
+        from ouroboros.gateways.claudexor import SHORT_POLL_TIMEOUT_SEC
+        from ouroboros.process_custody import pending_process_stops, stop_ledgered_processes
+
+        if not self._lock.acquire(timeout=SHORT_POLL_TIMEOUT_SEC):
+            self._report_stop_unconfirmed("daemon manager lock unavailable; custody unchanged")
+            return False
+        try:
+            root = pathlib.Path(DATA_DIR)
+            purposes = {CUSTODY_PURPOSE}
+            stopped, unconfirmed = [], []
+            self._last_error = ""
+            ownership_problem = verify_owned_home(require_marker=True)
+            endpoint = None if ownership_problem else self._alive_endpoint(
+                timeout_sec=SHORT_POLL_TIMEOUT_SEC)
+            if endpoint is not None:
+                stopped = stop_ledgered_processes(root, purposes, unconfirmed=unconfirmed)
+            child_stopped = self._terminate_child()
+            if ownership_problem and owned_daemon_provisioned() and not child_stopped:
+                unconfirmed.append("descriptor ownership is unconfirmed")
+            unconfirmed.extend(pending_process_stops(root, purposes))
+            if self._proc is not None:
+                unconfirmed.append("self-started child exit unconfirmed")
+            if endpoint is not None and not stopped and not child_stopped:
+                unconfirmed.append("authenticated endpoint has no confirmed stopped root")
+            if unconfirmed:
+                reason = ownership_problem or self._last_error
+                if reason:
+                    unconfirmed.insert(0, reason)
+                self._report_stop_unconfirmed("; ".join(dict.fromkeys(unconfirmed)))
+                return False
+            self._last_error = ""
+            return child_stopped or bool(stopped)
+        finally:
+            self._lock.release()
+
+    def _report_stop_unconfirmed(self, detail: str) -> None:
+        """The lifecycle owner discloses a failed stop in the existing supervisor log."""
+        from ouroboros.config import DATA_DIR
+        from ouroboros.utils import append_jsonl, utc_now_iso
+
+        self._last_error = detail
+        log.critical("Owned Claudexor stop unconfirmed: %s; custody retained", detail)
+        append_jsonl(pathlib.Path(DATA_DIR) / "logs" / "supervisor.jsonl", {
+            "ts": utc_now_iso(), "type": "process_stop_unconfirmed",
+            "purpose": CUSTODY_PURPOSE, "reason": detail,
+        })
 
 
 _MANAGER: Optional[OwnedClaudexorDaemon] = None
@@ -664,9 +739,8 @@ def ensure_owned_gateway(*, admission_wait_sec: Optional[float] = None) -> Any:
     which is why the rotation reconcile rides it: spawn AND attach paths are
     both covered, on every ensure, best-effort (see ``reconcile_rotation``).
     The gateway transport itself stays pure I/O; callers own ``close()`` (or
-    use it as a context manager). Daemon stop semantics are unchanged: only
-    ``get_owned_daemon().stop()`` may stop a process this manager spawned,
-    and it never kills an attached process.
+    use it as a context manager). ``stop()`` owns the separate marker, endpoint
+    and process-identity checks for stopping an attached daemon.
 
     ADMISSION is waited for here — outside the daemon manager's lock, the same
     way for a fresh spawn and an attach. A daemon whose handshake explicitly
