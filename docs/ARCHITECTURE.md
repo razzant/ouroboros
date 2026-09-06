@@ -1103,11 +1103,45 @@ Review delivery has two closed route kinds in `review_execution.py`: `api_chat` 
 
 Advisory availability is evaluated from the current configured slot and route, never inferred from a stale stored verdict. A disabled advisory slot is an audited bypass; an `api_chat` row requires provider credentials for its RESOLVED model, an `agent_session` row a resolvable session route. If the commit advisory is unavailable, the commit gate runs its compensating hermetic preflight only when tests remain independently applicable (not explicitly skipped, diff not documentation-only). Malformed structured slot configuration is refused at save and becomes a typed loud review-time failure for commit triad, scope, advisory, plan, skill review — and deep self-review (`deep_review_slot()` raises on the malformed value and `run_deep_self_review` returns the typed `deep_self_review_unavailable` result instead of a report). Task acceptance refuses the same way (a typed DEGRADED panel, `reviewer_slot_config_invalid`; owner R3). No surface silently chooses the opposite route or a default panel.
 
+Session reviewer identity comes from `gateways.claudexor.final_attempt_facts`: the
+unique `final_attempt_id` row in the engine-owned `final/telemetry.yaml`, bound to
+the requested run id. Model, harness and credential profile come from that SAME
+attempt. `summary.model`/`harnesses` echo requests, and summary route/auth projections
+may borrow earlier-attempt facts; none supplies a missing observation. Reviewer
+usage, last-execution views, delegated terminal payloads and settlement preserve
+known facts or explicit absence. The original custody/billing route remains its
+chosen authority, separate from the observed actor. No new quorum rule or model-name
+mapping is implied by this disclosure.
+
+Advisory row parsing owns its `PASS|FAIL` and `critical|advisory` values at
+`preflight_review_run._is_checklist_array`. Case and surrounding whitespace are
+canonicalized once for every consumer. An unknown verdict or unknown/missing FAIL
+severity rejects the whole array into the existing bounded extraction rail;
+unresolved output stays `parse_failure` with its full source retained. PASS without
+a severity remains compatible, and the separate genuine-empty-clean predicate is
+unchanged. An optional array validator lets the shared canonicalizer honor this
+surface contract without changing triad, object-verdict or report semantics.
+Canonicalization never changes the reviewer's judgment by searching the repository
+for words or identifiers.
+
 ### Usage ledger substrate vs. accounting policy
 
 `usage_ledger.py` owns the durable append-only physical-attempt ledger (cross-process locking, sequence and transition validation, append+fsync, replay, loud tail quarantine); `usage_accounting.py` is the one-way policy layer above it (pricing, reservations, settlement, scopes, budget fences, imports, projections, admission), and the substrate never imports policy. The boundary means a pricing or budget-policy change cannot redefine valid ledger storage, and a locking or repair change cannot silently change what an attempt costs; compatibility events, state mirrors, task fields, and UI projections may carry attempt ids and derived totals but never become a second charge source.
 
 ### Delegated subagents (Claudexor transport + the nanny)
+
+Ordinary delegation requests no extra engine review panel; new ordinary runs on
+Claudexor 3.9.8+ default to no panel. This is the behavior's version boundary,
+not a second release pin. The start receipt's `engine_version`
+is the handshaken serving version, distinct from the release pin. Older serving
+engines and already-recorded runs can retain historical review behavior. Engine
+review outcome, execution success, the parent's integration decision and Ouroboros
+review gates remain separate. Timeline projection retains each known participant's
+`harnessId`/`attemptId`, including non-text reviewer events, and names them on live
+progress without guessing absent identities. Delegated snapshot capture remains
+relative to its recorded baseline: committed bytes can be captured with a disclosed
+`head_moved`; the instruction still forbids committing, and the distinct
+`self_worktree` unchanged-HEAD check is preserved.
 
 Children coordinate through `tree_note` and `tree_read`; only the parent may use `override_delegation_constraint`, and a `review_requested` note carries an exact evidence reference/hash and wakes the parent without starting a paid cycle. Both read-only and acting children hold the descendant-scoped `forward_to_worker`, `peek_task`, `cancel_task`, and `discard_child_result` controls; recursive delegation never widens filesystem, budget, depth, deadline, commit, or owner authority. `delegation_budget` governs descendants (`may_delegate`, `may_fan_out`, additive depth provenance; a free-form intent note is never authority); persisted admission facts outrank later Settings changes, and a lower permitted depth is reported `capability_reduced`, never a silent flat tree.
 

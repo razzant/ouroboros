@@ -147,3 +147,37 @@ def test_verbose_text_remains_disclosed_and_the_payload_fits():
 
 def test_no_new_rows_keeps_the_existing_progress_fallback():
     assert render() == "🛰 delegated run run-1 @seq 18: (new session events)"
+
+
+@pytest.mark.parametrize("event_type", ["reviewer.started", "reviewer.failed", "reviewer.timed_out"])
+def test_reviewer_events_preserve_the_known_actor_in_payload_and_live_progress(event_type):
+    event = {"type": event_type, "title": "Reviewer setup failed", "severity": "error",
+             "harnessId": "review-harness", "attemptId": "a02"}
+    assert timeline_tail({"timeline": [event]}) == [event]
+    seen = WindowObservations()
+    advance = seen.record({"timeline": [event]}, 9, 3)
+    output = []
+    emit(SimpleNamespace(emit_progress_fn=output.append), "run-1", advance)
+    assert output == ["🛰 delegated run run-1 @seq 9: [review-harness/a02] Reviewer setup failed"]
+    assert seen.rows(10000)[0]["events"] == [event]
+
+
+def test_start_receipt_names_the_serving_engine_without_claiming_review_success():
+    from ouroboros.subagents import delegated_run_shape
+    from ouroboros.tools.delegate import _started_payload, get_tools
+    from ouroboros.delegate_start_instructions import HOST_INSTRUCTIONS
+
+    payload = json.loads(_started_payload(
+        {"runDir": "/fixture/run"}, "run-1", SimpleNamespace(route_id="selected", model="m", effort="high"),
+        "readonly", delegated_run_shape(False), "/fixture/repo", durable=True, recovering=False,
+        invocation_id="invocation-1", snapshot_id="", target_root="", baseline_sha="",
+        engine_version="3.9.7",
+    ))
+    assert payload["engine_version"] == "3.9.7"
+    assert payload["status"] == "started"
+    assert "review_passed" not in payload
+    description = next(tool.schema["description"] for tool in get_tools() if tool.name == "delegate_start")
+    assert "requests no extra Claudexor review panel" in description
+    assert "recovered historical run" in description
+    assert "self_worktree capture separately requires an unchanged HEAD" in HOST_INSTRUCTIONS
+    assert "preserve committed changes" in HOST_INSTRUCTIONS

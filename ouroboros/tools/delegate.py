@@ -324,8 +324,6 @@ def _delegate_start(ctx: ToolContext, prompt: str, max_seconds: Optional[int] = 
     target_root = ""
     authority_source = ""
     resource_ref: Dict[str, Any] = {}
-    selected_subagent_id = ""
-    config_fingerprint = ""
     retry_token = str(retry_of or "").strip()
     source_binding = prepare_work_order_start_binding(
         ctx, drive, retry_token, _canonical_work_order_fingerprint, text,
@@ -587,13 +585,14 @@ def _delegate_start(ctx: ToolContext, prompt: str, max_seconds: Optional[int] = 
                             durable=durable, recovering=recovering,
                             invocation_id=invocation_id,
                             snapshot_id=snapshot_id, target_root=target_root,
-                            baseline_sha=baseline_sha)
+                            baseline_sha=baseline_sha,
+                            engine_version=str(getattr(gateway, "engine_version", "") or ""))
 
 
 def _started_payload(handle: Dict[str, Any], run_id: str, route: Any, access: str,
                      authority: "DelegatedRunShape", root: str, *, durable: bool,
                      recovering: bool, invocation_id: str, snapshot_id: str, target_root: str,
-                     baseline_sha: str) -> str:
+                     baseline_sha: str, engine_version: str = "") -> str:
     """The one author of delegate_start's started result (note + payload).
 
     The AUTHORITY guidance and the CUSTODY warning are independent facts about the same
@@ -626,6 +625,7 @@ def _started_payload(handle: Dict[str, Any], run_id: str, route: Any, access: st
         "status": "started" if durable else "started_uncustodied",
         "run_id": run_id,
         "run_dir": handle.get("runDir"),
+        "engine_version": engine_version,
         "route": route.route_id,
         "model": route.model,
         "effort": route.effort,
@@ -918,9 +918,9 @@ def _delegate_wait(ctx: ToolContext, run_id: str, wait_sec: Optional[int] = None
                         route=entry.route_id, requested_model=entry.model,
                         applied_model=str(payload.get("model") or ""), run_id=rid,
                         selected_subagent_id=entry.selected_subagent_id,
-                        # Applied = the settlement receipt's authRoute fact (never invented); requested replays off STARTED.
+                        # Applied = the same final attempt as the model; requested replays off STARTED.
                         requested_profile=entry.profile_id,
-                        applied_profile=str((summary.get("authRoute") or {}).get("profileId") or ""))
+                        applied_profile=str((payload.get("observed_attempt") or {}).get("profile_id") or ""))
                 # D7 made load-bearing: settlement is where "paid for and never read"
                 # becomes permanent, so the parent is told in WORDS here — not left to
                 # infer it from `output_delivery.consumed`. Re-settling an already
@@ -1100,6 +1100,11 @@ def get_tools() -> List[ToolEntry]:
                 "leaf before your first round (the startup receipt carries its run id): never start a duplicate — "
                 "supervise it; a replacement delegate_start(prompt='') is legal only after verified cancellation/"
                 "terminal settlement or a typed refusal proving no run exists. Recovery retries use retry_of without a new selector."
+                " This ordinary call requests no extra Claudexor review panel; new ordinary "
+                "runs on engine 3.9.8+ default to no panel. The started receipt names the serving "
+                "engine_version; an older engine or a recovered historical run may retain its "
+                "earlier review behavior. Engine review, execution success, your integration "
+                "decision, and applicable Ouroboros review gates remain separate."
             ),
             "parameters": {
                 "type": "object",

@@ -975,7 +975,11 @@ def record_subscription_session(
     access_profile: str = "",
     review_skill: str = "", review_wave_id: str = "", review_slot_id: str = "",
 ) -> str:
-    """Record one idempotent subscription session; None remains undisclosed."""
+    """Record one idempotent session; model observation is not session identity.
+
+    A later model disclosure replays the existing row byte-for-byte, without
+    repricing or rewriting it. Custody carries the newly observed actor facts.
+    """
     stable_id, route_id = str(session_id or "").strip(), str(route or "").strip()
     if not stable_id or not route_id:
         raise UsageAccountingError("subscription session requires a stable session_id and route")
@@ -1018,7 +1022,7 @@ def record_subscription_session(
         "model_send_seal": "unobserved",
     }
     return _append_single_settled_row(root, row, comparable=(
-        "kind", "model", "provider", "task_id", "root_task_id", "parent_task_id",
+        "kind", "provider", "task_id", "root_task_id", "parent_task_id",
         "category", "source", *REVIEW_ATTRIBUTION_KEYS, "subscription_route", "session_id_sha256",
     ))
 def _transition(reservation: AttemptReservation, state: str, **fields: Any) -> Dict[str, Any]:

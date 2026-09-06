@@ -187,6 +187,31 @@ def test_d29_absent_authroute_records_empty_never_invented(tmp_path, monkeypatch
     assert event["credential_profile_id"] == ""
 
 
+@pytest.mark.parametrize("observed", [
+    {"harness_id": "actual-route", "observed_model": "actual-model", "profile_id": "actual-profile"},
+    {},
+])
+def test_final_attempt_identity_survives_settlement_and_parent_delivery(tmp_path, monkeypatch, observed):
+    from ouroboros.subagents import subagent_last_delegation
+
+    monkeypatch.setattr("ouroboros.config.DATA_DIR", tmp_path / "canonical-data")
+    payload, ledger, event = _settled_run(tmp_path, monkeypatch, {
+        "state": "succeeded", "spendUsd": 0.0, "model": "request-echo",
+        "authRoute": {"profileId": "old-profile"}, "effectiveAccess": "readonly",
+    }, observed=observed)
+    for row in [payload, ledger, event]:
+        assert row["model"] == observed.get("observed_model", "")
+    assert ledger["credential_profile_id"] == observed.get("profile_id", "")
+    assert event["credential_profile_id"] == observed.get("profile_id", "")
+    assert event["observed_attempt"] == payload["observed_attempt"]
+    assert payload["observed_attempt"]["attempt_id"] == "a02"
+    assert ledger["cost_usd"] == 0.0 and ledger["cost_final"] is True
+    record = subagent_last_delegation()
+    assert record["requested_model"] == "m"
+    assert record["applied_model"] == observed.get("observed_model", "")
+    assert record["applied_profile"] == observed.get("profile_id", "")
+
+
 def test_the_durable_access_profile_is_the_receipt_never_our_own_request(tmp_path, monkeypatch):
     """The daemon computes `access` as `effectiveAccess ?? the client's own parsed
     request`, so it is our ask reflected back, not a witness. Reading it as a fallback
@@ -197,7 +222,27 @@ def test_the_durable_access_profile_is_the_receipt_never_our_own_request(tmp_pat
     assert event["access_profile"] == ""
 
 
-def _settled_run(tmp_path, monkeypatch, summary):
+def _observed_summary(tmp_path, summary, observed=None):
+    """Give existing positive fixtures a separate engine telemetry artifact.
+
+    The summary values used by the old tests describe the intended observation;
+    new mismatch/unknown scenarios pass an independent observation explicitly.
+    """
+    final = tmp_path / "engine-run" / "final"
+    final.mkdir(parents=True, exist_ok=True)
+    if observed is None:
+        observed = {"harness_id": "r", "observed_model": summary.get("model"),
+                    "profile_id": (summary.get("authRoute") or {}).get("profileId")}
+    (final / "telemetry.yaml").write_text(json.dumps({
+        "run_id": "run-1", "final_attempt_id": "a02",
+        "attempts": [{"attempt_id": "a01", "harness_id": "old-route",
+                      "observed_model": "old-model", "profile_id": "old-profile"},
+                     {"attempt_id": "a02", **observed}],
+    }), encoding="utf-8")
+    return {**summary, "runDir": str(final.parent)}
+
+
+def _settled_run(tmp_path, monkeypatch, summary, observed=None):
     """Drive a real `_settle` for `summary`; return (agent payload, ledger row, envelope).
 
     The `delegate_run_settled` envelope is returned too because it RE-DERIVES the row's
@@ -208,6 +253,7 @@ def _settled_run(tmp_path, monkeypatch, summary):
     from ouroboros.gateways import claudexor as gw
     from ouroboros.tools.registry import ToolContext
 
+    summary = _observed_summary(tmp_path, summary, observed)
     class _Stub:
         def handshake(self, **_kw): return {}
         def get_run(self, rid, **_kw): return {"lastSeq": 9, "summary": dict(summary)}
@@ -232,7 +278,7 @@ def _settled_run(tmp_path, monkeypatch, summary):
             next(e for e in events if e.get("type") == "delegate_run_settled"))
 
 
-def _waited_run(tmp_path, monkeypatch, summary, requested_model="m"):
+def _waited_run(tmp_path, monkeypatch, summary, requested_model="m", observed=None):
     """Drive one terminal `delegate_wait` for `summary`; return the agent payload.
 
     Same transport walk as `_settled_run`, with the custody row's REQUESTED
@@ -242,6 +288,7 @@ def _waited_run(tmp_path, monkeypatch, summary, requested_model="m"):
     from ouroboros.gateways import claudexor as gw
     from ouroboros.tools.registry import ToolContext
 
+    summary = _observed_summary(tmp_path, summary, observed)
     class _Stub:
         def handshake(self, **_kw): return {}
         def get_run(self, rid, **_kw): return {"lastSeq": 9, "summary": dict(summary)}

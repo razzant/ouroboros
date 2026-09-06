@@ -61,9 +61,9 @@ _ADVISORY_EXTRACT_CONTRACT = (
     '"item" (checklist item name), "verdict" ("PASS" or "FAIL"), "severity" '
     '("critical" or "advisory" — REQUIRED even for PASS entries), "reason" (brief '
     'explanation). Optional: "obligation_id" (stable id of a previously surfaced '
-    "obligation). If a FAIL entry in the source omits severity, infer it from "
-    'context: "critical" for bugs, security or constitutional violations, else '
-    '"advisory". If the text carries no valid checklist array, return [].'
+    "obligation). Preserve the reviewer's stated verdict and severity; do not "
+    "infer severity from the alleged bug or change a verdict from withdrawal prose. "
+    "If either cannot be faithfully recovered, return UNEXTRACTABLE."
 )
 
 
@@ -96,6 +96,7 @@ def _llm_extract_advisory_items(raw_text: str, ctx: object) -> list:
             # the trusted-schema branch is never taken on this path.
             conformance_passed=False,
             contract=_ADVISORY_EXTRACT_CONTRACT,
+            array_validator=_is_checklist_array,
             deadline_at=(getattr(ctx, "task_metadata", {}) or {}).get("deadline_at"),
         )
         if method == "extraction_incomplete":
@@ -120,23 +121,9 @@ def _llm_extract_advisory_items(raw_text: str, ctx: object) -> list:
                 provider=_infer_prov(light_model),
             )
 
-        # The SSOT already flattened provider content blocks to text; the advisory's
-        # OWN contract post-processing (below) is unchanged and stays here.
-        items = _parse_advisory_output(str(content or ""))
-        if not _is_checklist_array(items):
-            return []
-
-        # Missing FAIL severity defaults to critical; never silently downgrade.
-        normalised = []
-        for it in items:
-            if not isinstance(it, dict):
-                continue
-            verdict = str(it.get("verdict", "")).upper().strip()
-            if verdict == "FAIL" and not str(it.get("severity", "")).strip():
-                it = dict(it)
-                it["severity"] = "critical"
-            normalised.append(it)
-        return normalised
+        # Canonical enum spelling is shared with direct parsing. Missing or
+        # unknown severity stays unparsed, never a host-authored critical.
+        return _parse_advisory_output(str(content or ""))
 
     except Exception as exc:
         log.warning("Advisory LLM fallback extraction failed: %s", exc)
@@ -345,7 +332,7 @@ def _run_advisory_delegated(prompt: str, repo_dir: pathlib.Path, ctx: ToolContex
             usage={}, error=f"{type(exc).__name__}: {exc}", stderr_tail="",
         ), ""
     usage = dict(attempt.usage or {})
-    resolved_model = str(usage.get("resolved_model") or usage.get("delegated_route") or "")
+    resolved_model = str(usage.get("resolved_model") or "")
     return SimpleNamespace(
         success=True,
         result_text=str(attempt.raw_text or ""),
@@ -656,24 +643,41 @@ def _needs_fallback_extraction(items: list, raw_text: str) -> bool:
 
 
 def _parse_advisory_output(stdout: str) -> list:
-    """Extract the JSON findings array from Claude CLI output."""
-    return _car().extract_json_array(
+    """Select the result array before validating its rows as a whole.
+
+    Enum validation must not make the scanner skip an invalid final checklist
+    and accept an earlier example. Unrelated numeric arrays remain ignorable.
+    """
+    items = _car().extract_json_array(
         stdout,
         unwrap_result=True,
-        validate_fn=_is_checklist_array,
+        validate_fn=lambda rows: any(isinstance(row, dict) for row in rows),
     ) or []
+    if not _is_checklist_array(items):
+        return []  # the complete raw answer reaches the existing extraction rail
+    return [dict(item, verdict=item["verdict"].strip().upper(), **(
+        {"severity": item["severity"].strip().lower()} if "severity" in item else {}
+    )) for item in items]
 
 
 def _is_checklist_array(items: list) -> bool:
     """Return True iff items looks like a real advisory checklist array.
 
-    Each element must be a dict containing at least 'item' and 'verdict' keys.
-    An empty list is rejected (no findings = parse_failure, not a clean advisory).
-    Stray arrays like [1,2,3], code snippets, or unrelated JSON lists are rejected.
+    Unknown enum values invalidate the whole array, never silently dropping a
+    finding or choosing its seriousness. PASS without severity stays compatible;
+    FAIL requires the reviewer's critical/advisory classification. Empty clean
+    responses are recognized separately by _is_clean_verdict.
     """
-    if not items:
+    if not isinstance(items, list) or not items:
         return False
     return all(
-        isinstance(el, dict) and "item" in el and "verdict" in el
+        isinstance(el, dict)
+        and isinstance(el.get("item"), str) and bool(el["item"].strip())
+        and isinstance(el.get("verdict"), str) and el["verdict"].strip().upper() in {"PASS", "FAIL"}
+        and (
+            (el["verdict"].strip().upper() == "PASS" and "severity" not in el)
+            or isinstance(el.get("severity"), str)
+            and el["severity"].strip().lower() in {"critical", "advisory"}
+        )
         for el in items
     )

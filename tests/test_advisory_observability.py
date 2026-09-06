@@ -686,7 +686,7 @@ class TestIsChecklistArray:
     def test_valid_multi_item_accepted(self):
         items = [
             {"item": "bible_compliance", "verdict": "PASS"},
-            {"item": "code_quality", "verdict": "FAIL", "reason": "bug"},
+            {"item": "code_quality", "verdict": "FAIL", "severity": "critical", "reason": "bug"},
         ]
         assert self.fn(items) is True
 
@@ -1029,9 +1029,8 @@ class TestLLMFallbackExtraction:
         model = self.mod._resolve_fallback_model()
         assert model == "openai::gpt-4o-mini"
 
-    def test_fallback_normalises_fail_without_severity_to_critical(self, monkeypatch):
-        """FAIL items missing 'severity' from the LLM fallback must be normalised to 'critical'
-        so _handle_advisory_pre_review() never silently downgrades blocking findings."""
+    def test_fallback_does_not_invent_severity_for_an_incomplete_finding(self, monkeypatch):
+        """An extractor's incomplete FAIL remains unparsed, not host-classified."""
         # Simulate LLM returning a FAIL item with no severity (schema-incomplete output)
         raw_items = [
             {"item": "code_quality", "verdict": "FAIL", "reason": "bug found"},
@@ -1044,11 +1043,7 @@ class TestLLMFallbackExtraction:
         monkeypatch.setattr(llm_mod.LLMClient, "chat", fake_chat)
 
         result = self.mod._llm_extract_advisory_items("narrative with no json", self._make_ctx())
-        assert len(result) == 1
-        assert result[0]["verdict"] == "FAIL"
-        assert result[0]["severity"] == "critical", (
-            "FAIL without severity must be normalised to 'critical' — not left empty"
-        )
+        assert result == []
 
     def test_fallback_returns_empty_on_llm_failure(self, monkeypatch):
         """When the LLM call raises an exception, fallback must return [] gracefully."""
@@ -1123,7 +1118,7 @@ class TestAdvisoryCleanSentinel:
         monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-ant-fake-for-test")
         monkeypatch.setattr(
             adv, "_run_claude_advisory",
-            lambda repo_dir, commit_message, ctx, **kwargs: ([], raw_text, "opus", 10),
+            lambda repo_dir, commit_message, ctx, **kwargs: (adv._parse_advisory_output(raw_text), raw_text, "opus", 10),
         )
         # Release-metadata preflight (BIBLE P9) runs before the SDK branch under
         # test, so the fake change set must carry the release artifacts.
@@ -1176,6 +1171,21 @@ class TestAdvisoryCleanSentinel:
     def test_unparseable_array_with_sentinel_is_not_clean(self, tmp_path, monkeypatch):
         result = self._run_handler(tmp_path, monkeypatch, '[{"item": broken\nNO_FINDINGS')
         assert result.get("status") == "parse_failure"
+
+    @pytest.mark.parametrize("severity,expected", [("high", "parse_failure"), (" CRITICAL ", "fresh")])
+    def test_row_contract_is_preserved_in_the_durable_advisory_result(self, tmp_path, monkeypatch, severity, expected):
+        from ouroboros.tools import claude_advisory_review as advisory
+
+        raw = json.dumps([{"item": "check", "verdict": " fail ", "severity": severity, "reason": "bug"}])
+        result = self._run_handler(tmp_path, monkeypatch, raw)
+        assert result["status"] == expected
+        record = advisory.load_state(tmp_path).latest()
+        assert record.status == expected and record.raw_result == raw
+        if expected == "fresh":
+            assert result["critical_count"] == 1
+            assert record.items[0]["severity"] == "critical"
+        else:
+            assert record.items == []
 
 
 class TestEmptyArrayIsVerifiedClean:

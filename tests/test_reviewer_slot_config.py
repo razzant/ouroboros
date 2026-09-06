@@ -868,14 +868,14 @@ def test_runs_as_records_applied_facts_never_requested_as_applied():
 
 
 def test_runner_facts_carry_the_applied_receipt_fields():
-    """The session runner surfaces authRoute.profileId/effectiveAccess from the
-    summary — the one source settle_run (D29) reads too."""
+    """The session runner shares final-attempt identity with settlement;
+    effectiveAccess remains an independent engine fact."""
     import inspect
 
     from ouroboros import review_execution
 
     source = inspect.getsource(review_execution.run_delegated_review_session)
-    assert '"applied_profile"' in source and "authRoute" in source
+    assert '"applied_profile"' in source and "final_attempt_facts" in source
     assert '"applied_access"' in source and "effectiveAccess" in source
 
 

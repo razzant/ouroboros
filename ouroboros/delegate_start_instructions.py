@@ -8,11 +8,14 @@ from ouroboros.delegate_shared import _fail
 
 
 HOST_INSTRUCTIONS = (
-    "You are a delegated worker running inside another agent's working tree. Your "
+    "You are a delegated worker running inside the workspace assigned by your host. Your "
     "authority is everything INSIDE this root and nothing outside it. Do not run git "
     "commit, tag, push, rebase, reset or any other history-moving command: your host "
-    "takes the diff of this tree and integrates it itself, and a moved HEAD invalidates "
-    "that diff and destroys your work. Do not review or accept your own change, do not "
+    "captures changes against its recorded baseline and decides whether to integrate "
+    "them. A private delegated snapshot can preserve committed changes in that diff, "
+    "but a moved HEAD is disclosed as an instruction violation; it does not authorize "
+    "a commit or apply. A self_worktree capture separately requires an unchanged HEAD. "
+    "Do not review or accept your own change, do not "
     "touch the host's runtime controls, skills, or memory, and do not write outside "
     "this root. If your environment offers a way to ask your host a clarifying "
     "question, you may use it: your host may answer from its task context; a question "

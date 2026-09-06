@@ -969,6 +969,18 @@ canonicalizer: the shape table is form only, and a new object- or
 report-shaped surface registers there instead of teaching the extraction rail
 another `if`.
 
+Advisory validates its own row enums through the shared canonicalizer's optional
+array validator. Unknown verdicts or unknown/missing FAIL severity remain unparsed
+unless the existing extraction can faithfully recover them; neither path invents
+critical severity or downgrades a finding from identifier presence. Preserve the
+full raw result, ordinary PASS rows and genuine empty-clean responses in tests.
+Hosted-review model/harness/profile evidence comes from the same final attempt in
+`final/telemetry.yaml`, not requested values or cross-attempt summary projections.
+Missing observations remain unknown; the exact contributor checker still refuses
+unconfirmed model identity, including a display label that cannot prove the pin.
+Ordinary delegation requests no extra engine panel; the start receipt names the
+serving engine version, and historical runs can retain older review behavior.
+
 Paid review cycles across the gates are bounded by one shared owner knob,
 `OUROBOROS_REVIEW_MAX_CYCLES` — a STRING, positive integer or `unlimited`,
 default `"2"` (Settings → Behavior → "Max Review Cycles"). Its SSOT is

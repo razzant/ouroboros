@@ -291,10 +291,9 @@ def record_last_delegation(*, route: str, requested_model: str,
     Best-effort and atomic, in the CANONICAL data plane beside the saved
     settings (the reviewer-slot projection's own rule): this is UI state, not
     per-task forensics — those live in the custody event log and the ledger.
-    ``applied_model`` is the engine summary's own value, '' when the run never
-    disclosed one — the requested model is never dressed up as the applied one.
-    The same rule for the account (D-U5): ``applied_profile`` is the engine's
-    ``authRoute.profileId`` settlement receipt, '' when telemetry predates it;
+    ``applied_model`` and ``applied_profile`` come from the same final attempt
+    in the engine's telemetry, '' when that attempt disclosed no such fact.
+    Neither the requested model nor a prior attempt supplies missing evidence;
     ``requested_profile`` is the pin the request carried ('' = rotation) — the
     two stay separate so a requested-vs-ran mismatch is disclosable, never
     rewritten.
