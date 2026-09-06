@@ -5,7 +5,7 @@
 // this module only decides which positive/negative facts a card may honestly
 // claim.
 
-import { accountRows, nextUpAccount } from './claudexor_status_store.js';
+import { accountRows, nextUpAccount, quotaConstraintFact } from './claudexor_status_store.js';
 import {
     ROUTE_KIND_AGENT_SESSION,
     describeExecutionEvidence,
@@ -29,35 +29,28 @@ function modelScopeMatches(model, aliases) {
         || routeModel.includes(scope) || scope.includes(routeModel));
 }
 
-function cooldownActive(value, nowMs = Date.now()) {
-    const text = String(value || '').trim();
-    if (!text) return false;
-    const instant = Date.parse(text);
-    return !Number.isFinite(instant) || instant > nowMs;
-}
-
 /** UI projection of the same positive quota facts dispatch checks again. */
 function routeQuotaFact(snapshot, harness, model, profileId = '', nowMs = Date.now()) {
     const pin = String(profileId || '');
     let observed = false;
     let usable = false;
     let spent = false;
+    let unknown = false;
     for (const row of snapshot?.quota || []) {
         const subject = row?.subject || {};
         if (String(subject.harness || '') !== String(harness || '')) continue;
         if (pin && String(subject.subject_id || '') !== pin) continue;
         if (String(row?.freshness || '') !== 'fresh') continue;
         observed = true;
-        const spentHere = (row?.constraints || []).some((constraint) => {
-            const used = Number(constraint?.used_ratio);
-            return modelScopeMatches(model, constraint?.applies_to_models)
-                && (cooldownActive(constraint?.cooldown_until, nowMs)
-                    || (Number.isFinite(used) && used >= 1));
-        });
+        const facts = (row?.constraints || [])
+            .filter((constraint) => modelScopeMatches(model, constraint?.applies_to_models))
+            .map((constraint) => quotaConstraintFact(constraint, nowMs));
+        const spentHere = facts.some((fact) => fact.exhausted);
         if (spentHere) spent = true;
+        else if (facts.some((fact) => fact.unknown)) unknown = true;
         else usable = true;
     }
-    return { known: observed, exhausted: spent && !usable };
+    return { known: usable || (observed && !unknown), exhausted: spent && !usable && !unknown };
 }
 
 function modelIsPresent(harness, model) {

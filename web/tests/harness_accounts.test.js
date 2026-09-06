@@ -170,13 +170,13 @@ test('both verification statuses are honest: vendor is trusted, local is neutral
     // "not verified" there is an alarm nothing can ever clear — the local
     // state stays labeled unverified in WORDS, in a neutral tone.
     const vendor = verificationBadge({ status: {
-        verification: 'passed', verification_source: 'vendor', last_verified_at: '2026-08-03T10:00:00Z',
+        verification: 'passed', verification_source: 'vendor', last_verified_at: '2099-08-03T10:00:00Z',
     } });
     assert.equal(vendor.tone, 'ok');
     assert.equal(vendor.label, 'Verified live');
     // The raw ISO instant left the badge entirely (owner: a row must never lead
     // with a timestamp); accountMetaLine humanizes it on line 2 instead.
-    assert.doesNotMatch(vendor.label, /2026-/);
+    assert.doesNotMatch(vendor.label, /\d{4}-\d{2}-\d{2}/);
 
     const local = verificationBadge({ status: { verification: 'passed', verification_source: 'local_store' } });
     assert.equal(local.tone, 'muted');
@@ -198,16 +198,16 @@ test('both verification statuses are honest: vendor is trusted, local is neutral
 test('an exhausted window is shown with its reset time, never hidden', () => {
     const snapshots = [{
         subject: { harness: 'codex', subject_id: 'koshak' }, freshness: 'fresh',
-        constraints: [{ used_ratio: 1.0, resets_at: '2026-08-04T00:00:00Z' }],
+        constraints: [{ used_ratio: 1.0, resets_at: '2099-08-04T00:00:00Z' }],
     }];
     // Owner ask: the limit text compact and understandable. The RESET is
     // humanized against a fixed now, and the raw instant stays on `resetsAt`.
-    const now = Date.parse('2026-08-03T22:00:00Z');
+    const now = Date.parse('2099-08-03T22:00:00Z');
     const summary = quotaSummary(snapshots, 'codex', 'koshak', { nowMs: now });
     assert.equal(summary.exhausted, true);
-    assert.equal(summary.resetsAt, '2026-08-04T00:00:00Z');
+    assert.equal(summary.resetsAt, '2099-08-04T00:00:00Z');
     assert.equal(summary.label, 'Limit reached · resets in 2h');
-    assert.doesNotMatch(summary.label, /2026-/);
+    assert.doesNotMatch(summary.label, /\d{4}-\d{2}-\d{2}/);
 
     const healthy = quotaSummary([{
         subject: { harness: 'codex' }, freshness: 'fresh', constraints: [{ used_ratio: 0.42 }],
@@ -233,7 +233,7 @@ test('the card reads a window on the same bar the runtime dispatches on', () => 
     //    telling the owner a lane was down that was in fact serving.
     const stale = [{
         subject: { harness: 'codex', subject_id: 'koshak' }, freshness: 'stale',
-        constraints: [{ used_ratio: 1.0, resets_at: '2026-08-04T00:00:00Z' }],
+        constraints: [{ used_ratio: 1.0, resets_at: '2099-08-04T00:00:00Z' }],
     }];
     assert.deepEqual(quotaSummary(stale, 'codex', 'koshak'),
         { label: 'Usage unavailable', exhausted: false, resetsAt: '', tone: 'muted' });
@@ -246,19 +246,19 @@ test('the card reads a window on the same bar the runtime dispatches on', () => 
     const cooling = [{
         subject: { harness: 'codex', subject_id: 'koshak' }, freshness: 'fresh',
         constraints: [
-            { used_ratio: 0.20, cooldown_until: '2026-08-04T00:00:00Z' },
+            { used_ratio: 0.20, cooldown_until: '2099-08-04T00:00:00Z' },
             { used_ratio: 0.80 },
         ],
     }];
     const summary = quotaSummary(cooling, 'codex', 'koshak');
     assert.equal(summary.exhausted, true);
-    assert.equal(summary.resetsAt, '2026-08-04T00:00:00Z');
+    assert.equal(summary.resetsAt, '2099-08-04T00:00:00Z');
 
     // ...and vanished entirely when the cooling constraint reported no ratio at all,
     // because a non-finite used_ratio was skipped before it could be read.
     const ratioless = [{
         subject: { harness: 'codex', subject_id: 'koshak' }, freshness: 'fresh',
-        constraints: [{ cooldown_until: '2026-08-04T00:00:00Z' }],
+        constraints: [{ cooldown_until: '2099-08-04T00:00:00Z' }],
     }];
     assert.equal(quotaSummary(ratioless, 'codex', 'koshak').exhausted, true);
 });
@@ -273,14 +273,14 @@ test('a named profile\'s exhausted window is never reported as the default accou
         { subject: { harness: 'codex', subject_id: null }, freshness: 'fresh',
           constraints: [{ used_ratio: 0.05 }] },
         { subject: { harness: 'codex', subject_id: 'koshak' }, freshness: 'fresh',
-          constraints: [{ used_ratio: 1.0, resets_at: '2026-08-04T00:00:00Z' }] },
+          constraints: [{ used_ratio: 1.0, resets_at: '2099-08-04T00:00:00Z' }] },
     ];
     const defaultRow = quotaSummary(snapshots, 'codex', '');
     assert.equal(defaultRow.exhausted, false);
     assert.equal(defaultRow.label, '5% used');
     const namedRow = quotaSummary(snapshots, 'codex', 'koshak');
     assert.equal(namedRow.exhausted, true);
-    assert.equal(namedRow.resetsAt, '2026-08-04T00:00:00Z');
+    assert.equal(namedRow.resetsAt, '2099-08-04T00:00:00Z');
 });
 
 test('typed quota gaps are exact-subject, neutral, and distinct in words', () => {
@@ -369,7 +369,7 @@ test('a contradictory same-subject absence stays visible and fail-open', () => {
 test('stale quota does not become a current percentage beside its typed gap', () => {
     const summary = quotaSummary([{
         subject: { harness: 'claude', subject_id: 'proton4' }, freshness: 'stale',
-        constraints: [{ used_ratio: 0.65, resets_at: '2026-08-31T00:00:00Z' }],
+        constraints: [{ used_ratio: 0.65, resets_at: '2099-08-31T00:00:00Z' }],
     }], 'claude', 'proton4', { absences: [{
         subject: { harness: 'claude', subject_id: 'proton4' }, reason: 'poll_paced',
         detail: 'next poll is paced',
@@ -393,7 +393,7 @@ test('a model-scoped window never paints the whole account exhausted — it is a
         subject, freshness: 'fresh',
         constraints: [
             { id: 'fable-window', label: 'Fable window', applies_to_models: ['claude-fable-5'],
-              used_ratio: 1.0, resets_at: '2026-08-08T00:00:00Z' },
+              used_ratio: 1.0, resets_at: '2099-08-08T00:00:00Z' },
             { applies_to_models: null, used_ratio: 0.4 },
         ],
     }], 'claude', 'abstractdl');
@@ -405,7 +405,7 @@ test('a model-scoped window never paints the whole account exhausted — it is a
     const scopedOnly = quotaSummary([{
         subject, freshness: 'fresh',
         constraints: [{ id: 'fable-window', label: 'Fable window',
-            applies_to_models: ['claude-fable-5'], cooldown_until: '2026-08-08T00:00:00Z', used_ratio: null }],
+            applies_to_models: ['claude-fable-5'], cooldown_until: '2099-08-08T00:00:00Z', used_ratio: null }],
     }], 'claude', 'abstractdl');
     assert.equal(scopedOnly.exhausted, false);
     assert.equal(scopedOnly.label, 'Fable window spent');
@@ -421,7 +421,7 @@ test('a model-scoped window never paints the whole account exhausted — it is a
     // account-level exhausted behavior exactly as before.
     const global = quotaSummary([{
         subject, freshness: 'fresh',
-        constraints: [{ applies_to_models: null, used_ratio: 1.0, resets_at: '2026-08-08T00:00:00Z' }],
+        constraints: [{ applies_to_models: null, used_ratio: 1.0, resets_at: '2099-08-08T00:00:00Z' }],
     }], 'claude', 'abstractdl');
     assert.equal(global.exhausted, true);
     assert.ok(global.label.startsWith('Limit reached'));
@@ -430,7 +430,7 @@ test('a model-scoped window never paints the whole account exhausted — it is a
     assert.equal(quotaSummary([{
         subject, freshness: 'fresh',
         constraints: [{ id: 'fable_5h', applies_to_models: ['claude-fable-5'], used_ratio: 1.0 }],
-    }], 'claude', 'abstractdl').label, 'fable_5h spent');
+    }], 'claude', 'abstractdl').label, 'fable_5h availability not proven');
 });
 
 // ---------------------------------------------------------------------------
@@ -1446,12 +1446,12 @@ test("the LEGACY wire's global refusal blames no facet and quotes no facet's err
 test('each row projection is gated by ITS OWN facet, and a stale value says it is last known', () => {
     const row = {
         harness: 'codex', profile_id: '', kind: 'native', identity: {},
-        status: { verification: 'passed', verification_source: 'vendor', last_verified_at: '2026-08-09' },
+        status: { verification: 'passed', verification_source: 'vendor', last_verified_at: '2099-08-09' },
     };
     const payload = { quota: [{
         subject: { harness: 'codex', subject_id: '' },
         freshness: 'fresh',
-        constraints: [{ used_ratio: 1.0, resets_at: '2026-08-09T12:00:00Z' }],
+        constraints: [{ used_ratio: 1.0, resets_at: '2099-08-09T12:00:00Z' }],
     }] };
 
     // Both facets read: exactly today's row, in the two-line anatomy — line 1

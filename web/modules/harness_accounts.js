@@ -57,6 +57,7 @@ import {
     facetReadState,
     familyLabel,
     nextUpAccount,
+    quotaConstraintFact,
     readsFor,
     unifiedAccounts,
 } from './claudexor_status_store.js';
@@ -179,18 +180,19 @@ export function quotaSummary(snapshots, harnessId, subjectId = '',
     }
     let worst = null;
     // The runtime's own bar, per snapshot: spent when a constraint is cooling down OR
-    // its window is fully used — ANY constraint, not just the one with the highest
+    // its window is fully used with a future reset — ANY constraint, not just the highest
     // ratio. Reading exhaustion off `worst` alone hid a cooling constraint whenever
     // some other window happened to report a larger used_ratio, and dropped it
     // entirely when the cooling one reported no ratio at all.
     let exhausted = false;
+    let unknown = false;
     let exhaustedResetsAt = '';
     const scopedSpent = [];
     for (const snap of rows) {
         for (const constraint of snap.constraints || []) {
             const used = Number(constraint.used_ratio);
-            const spent = Boolean(constraint.cooldown_until)
-                || (Number.isFinite(used) && used >= 1.0);
+            const fact = quotaConstraintFact(constraint, nowMs);
+            const spent = fact.exhausted;
             const models = Array.isArray(constraint.applies_to_models)
                 ? constraint.applies_to_models.filter(Boolean) : [];
             if (models.length) {
@@ -200,26 +202,32 @@ export function quotaSummary(snapshots, harnessId, subjectId = '',
                 // quota.ts). So it must never paint the whole account
                 // exhausted, and its ratio is not the account's bar: a spent
                 // scope becomes a compact note beside the account label.
-                if (spent) scopedSpent.push(String(constraint.label || constraint.id || models.join(', ')));
+                if (spent || fact.unknown) {
+                    const label = String(constraint.label || constraint.id || models.join(', '));
+                    scopedSpent.push(`${label} ${spent ? 'spent' : 'availability not proven'}`);
+                }
                 continue;
             }
             if (spent && !exhausted) {
                 exhausted = true;
-                exhaustedResetsAt = String(constraint.cooldown_until || constraint.resets_at || '');
+                exhaustedResetsAt = fact.resetsAt;
             }
+            unknown ||= fact.unknown;
             if (!Number.isFinite(used)) continue;
             if (!worst || used > worst.used) {
-                worst = { used, resetsAt: String(constraint.resets_at || constraint.cooldown_until || '') };
+                worst = { used, resetsAt: fact.unknown ? ''
+                    : String(constraint.resets_at || constraint.cooldown_until || '') };
             }
         }
     }
-    const note = scopedSpent.length ? `${[...new Set(scopedSpent)].join(', ')} spent` : '';
+    const note = [...new Set(scopedSpent)].join(', ');
     const resetsAt = exhausted ? (exhaustedResetsAt || worst?.resetsAt || '') : (worst?.resetsAt || '');
     const resets = humanizeResetAt(resetsAt, nowMs);
     let base = '';
     if (exhausted) base = `Limit reached${resets ? ` · resets ${resets}` : ''}`;
     else if (worst) {
         base = `${Math.min(100, Math.round(worst.used * 100))}% used${resets ? ` · resets ${resets}` : ''}`;
+        if (unknown) base += ' · availability not proven';
     }
     // Match typed gaps by the exact current subject only: the legacy default
     // alias belongs to retained snapshots, never to another subject's

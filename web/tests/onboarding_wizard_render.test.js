@@ -144,6 +144,91 @@ test(`importing the onboarding wizard renders the '${step}' step without throwin
 });
 }
 
+test('wizard renders and submits the edited owner draft on Finish', { timeout: 3000 }, async () => {
+    // Keep the real contract and input handlers: only start at the model step,
+    // after provider access, so this regression needs no subscription service.
+    const modelIndex = BOOTSTRAP.stepOrder.indexOf('models');
+    const bootstrap = {
+        ...BOOTSTRAP,
+        stepOrder: [...BOOTSTRAP.stepOrder.slice(modelIndex), ...BOOTSTRAP.stepOrder.slice(0, modelIndex)],
+        initialState: {
+            ...BOOTSTRAP.initialState,
+            openrouterKey: 'test-key-not-a-secret',
+            reviewEnforcement: 'blocking',
+        },
+    };
+    const modelInputs = {
+        'main-model': 'test/owner-main',
+        'light-model': 'test/owner-light',
+        'vision-model': 'test/owner-vision',
+        'consciousness-model': 'test/owner-consciousness',
+        'fallback-model': 'test/owner-fallback',
+    };
+    const requests = [];
+    const replaced = [];
+    let recordSubmission;
+    const submitted = new Promise((resolve) => { recordSubmission = resolve; });
+    let returnReceipt;
+    const response = new Promise((resolve) => { returnReceipt = resolve; });
+    let recordCompletion;
+    const completed = new Promise((resolve) => { recordCompletion = resolve; });
+    const fetch = (url, init) => {
+        requests.push({ url, method: init.method, body: JSON.parse(init.body) });
+        recordSubmission();
+        return response;
+    };
+    const location = {
+        origin: 'http://127.0.0.1:8765',
+        replace(href) { replaced.push(href); recordCompletion(); },
+    };
+
+    await withWizard(bootstrap, 'save=owner-draft', async ({ doc }) => {
+        for (const [id, value] of Object.entries(modelInputs)) {
+            const input = doc.getElementById(id);
+            input.value = value;
+            input.fire('input');
+        }
+        doc.getElementById('next-btn').fire('click');   // Models → review mode.
+        doc.getElementById('next-btn').fire('click');   // Review mode → budget.
+        for (const [id, value] of [['total-budget', '15.5'], ['per-task-budget', '5.25']]) {
+            const input = doc.getElementById(id);
+            input.value = value;
+            input.fire('input');
+        }
+        doc.getElementById('next-btn').fire('click');   // Budget → summary.
+        assert.match(doc.getElementById('root').innerHTML, /Start Ouroboros/);
+        doc.getElementById('next-btn').fire('click');
+        await submitted;
+        assert.equal(requests.length, 1);
+        assert.equal(requests[0].url, '/api/onboarding/complete');
+        assert.equal(requests[0].method, 'POST');
+        const expected = {
+            OPENROUTER_API_KEY: 'test-key-not-a-secret',
+            OUROBOROS_MODEL: 'test/owner-main',
+            OUROBOROS_MODEL_LIGHT: 'test/owner-light',
+            OUROBOROS_MODEL_VISION: 'test/owner-vision',
+            OUROBOROS_MODEL_CONSCIOUSNESS: 'test/owner-consciousness',
+            OUROBOROS_MODEL_FALLBACKS: 'test/owner-fallback',
+            TOTAL_BUDGET: 15.5,
+            OUROBOROS_PER_TASK_COST_USD: 5.25,
+            OUROBOROS_REVIEW_ENFORCEMENT: 'blocking',
+            OUROBOROS_RUNTIME_MODE: 'advanced',
+            subscriptionsConnected: false,
+            skipSubscriptionPresets: false,
+        };
+        for (const [key, value] of Object.entries(expected)) assert.equal(requests[0].body[key], value, key);
+        assert.deepEqual(replaced, [], 'a pending save is not a completion');
+        assert.equal(doc.getElementById('next-btn').disabled, true);
+        returnReceipt({
+            ok: true, status: 200,
+            json: async () => ({ ok: true, runtime_mode: 'advanced', restart_required: false }),
+        });
+        await completed;
+        assert.deepEqual(replaced, ['/']);
+        assert.equal(requests.length, 1, 'completion must not start a second settings write');
+    }, { fetch, location });
+});
+
 test('a 503 settings_save_timeout keeps the wizard open with "Check status", which proceeds once the probe says the save landed', async () => {
     // The completion POST runs through the shared bounded settings writer:
     // past twice the document-lock bound it answers 503 `settings_save_timeout`

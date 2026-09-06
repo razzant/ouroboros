@@ -73,6 +73,7 @@ name: {SK1_SKILL}
 description: Loopback probe extension authored by the live E2E stand SK1 scenario.
 version: 0.1.0
 type: extension
+runtime: python3
 entry: plugin.py
 plugin_api: "2.0"
 permissions: ["tool", "inject_chat", "net"]
@@ -196,7 +197,13 @@ def commit_refusal_facts(ledger: dict, tools_rows: list, stored: dict) -> dict:
         match = _REFUSAL_CODE_RE.search(str(row.get("result_preview") or ""))
         calls.append({"tool": str(row.get("tool") or ""), "status": str(row.get("status") or ""),
                       "code": match.group(1) if match else ""})
+    landing = next((row for row in reversed(tools_rows) if str(row.get("tool") or "") == "commit_reviewed"
+                    and str(row.get("result_preview") or "").startswith("OK:")), None)
+    landing_args = (landing or {}).get("args") if isinstance((landing or {}).get("args"), dict) else {}
     return {
+        # The documented SM1 path has NO skip flags on the landing call (DEVELOPMENT.md): rc.15 run2 and run3
+        # landed twice through review_rebuttal + skip_advisory_review=True and the stand did not tell.
+        "landing_skip_flags": sorted(k for k, v in landing_args.items() if str(k).startswith("skip_") and v),
         "commit_attempts": [{"attempt": a.get("attempt"), "phase": str(a.get("phase") or ""),
                              "status": str(a.get("status") or ""), "block_reason": str(a.get("block_reason") or "")}
                             for a in attempts],
@@ -439,6 +446,20 @@ def vision_evidence_rows(tools_rows: list) -> list:
     return out
 
 
+RUNTIME_SCRATCH_PREFIX = ".ouroboros/"   # run_script's active-workspace scratch (tools/shell.py), unlinked in a finally
+
+
+def worktree_after_commit(clone: pathlib.Path) -> tuple[bool, str, list[str]]:
+    """``(clean, porcelain, transient)`` for the clean-worktree check: the runtime's OWN transient scratch under
+    ``.ouroboros/`` does not count — a post-task evolution cycle starts seconds after the commit in the same clone
+    and its ``run_script`` files live there until unlinked (rc.15 run3, SM1_a1: ``?? .ouroboros/`` at check time,
+    issue #701) — but it is recorded, and every other untracked or modified path fails the check."""
+    porcelain = _git(["status", "--porcelain"], clone)
+    entries = [line for line in porcelain.splitlines() if line.strip()]
+    transient = [line for line in entries if line.split(None, 1)[-1].startswith(RUNTIME_SCRATCH_PREFIX)]   # ``_git`` strips
+    return len(entries) == len(transient), porcelain, transient
+
+
 def _git_show(clone: pathlib.Path, rev: str, path: str) -> str:
     """The exact text of ``path`` at ``rev`` ('' when absent there)."""
     proc = subprocess.run(["git", "show", f"{rev}:{path}"], cwd=str(clone), check=False, capture_output=True, text=True)
@@ -510,7 +531,8 @@ def run_sm1(ctx: LaneContext) -> None:
     # colour on the unlock page, the site stylesheet), and the reviewers own that judgment.
     ctx.check("committed_diff_includes_sheets", all(path in files for path in SM1_CSS_PATHS),
               committed_files=files, committed_companions=sm1_out_of_scope(ctx.clone, rev, files))
-    ctx.check("worktree_clean_after_commit", _git(["status", "--porcelain"], ctx.clone) == "")
+    clean, porcelain, transient = worktree_after_commit(ctx.clone)
+    ctx.check("worktree_clean_after_commit", clean, worktree_porcelain=porcelain, worktree_transient=transient)
     task_oracle = ctx.oracle.task_drive(task_id)
     ledger = task_oracle.advisory_review()
     runs = [r for r in (ledger.get("advisory_runs") or []) if isinstance(r, dict)]
@@ -518,6 +540,8 @@ def run_sm1(ctx: LaneContext) -> None:
     ctx.check("advisory_ledger_row_present", any(advisory_run_is_real(r) for r in runs))
     tools_rows = task_oracle.tools_rows()
     ctx.facts["commit_reviewed_refusals"] = commit_refusal_facts(ledger, tools_rows, stored)
+    ctx.check("landed_without_skip_flags", ctx.checks["commit_landed"]
+              and not ctx.facts["commit_reviewed_refusals"]["landing_skip_flags"])
     # A FACT, not a check: the reviewers judge the UI evidence (development_compliance 2(i)).
     vision = vision_evidence_rows(tools_rows)
     ctx.facts["vision_evidence_present"] = bool(vision)

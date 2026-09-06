@@ -472,7 +472,7 @@ test('session status uses model-scoped quota and keeps missing quota as not prov
         subject: { harness: 'codex', subject_id: 'koshak' },
         freshness: 'fresh',
         constraints: [{
-            applies_to_models: ['gpt-5.6-sol'], used_ratio: 1,
+            applies_to_models: ['gpt-5.6-sol'], used_ratio: 1, resets_at: '2099-01-01T00:00:00Z',
         }],
     }];
     const exhausted = availableSubagentRowMarkup(sessionRow(), state);

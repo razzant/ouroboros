@@ -1074,13 +1074,18 @@ def extract_trailing_json_object(
     return prefix, parsed, duplicate_flagged
 
 
-def run_cmd(cmd: List[str], cwd: Optional[pathlib.Path] = None) -> str:
+def run_cmd(
+    cmd: List[str],
+    cwd: Optional[pathlib.Path] = None,
+    timeout: Optional[float] = None,
+) -> str:
     # Tool output is PARSED (git error signatures, porcelain text), so it must not
     # depend on the operator's locale: a Russian-locale git answers «метка … уже
     # существует» where the code and its tests match "already exists".
     env = {**os.environ, "LC_ALL": "C", "LANG": "C"}
     res = subprocess.run(
         cmd, cwd=str(cwd) if cwd else None, capture_output=True, text=True, env=env,
+        timeout=timeout,
     )
     if res.returncode != 0:
         raise RuntimeError(
@@ -1093,25 +1098,16 @@ def get_git_info(repo_dir: pathlib.Path) -> tuple[str, str]:
     branch = ""
     sha = ""
     try:
-        r = subprocess.run(
+        branch = run_cmd(
             ["git", "rev-parse", "--abbrev-ref", "HEAD"],
-            cwd=str(repo_dir), capture_output=True, text=True, timeout=2,
+            cwd=repo_dir, timeout=2,
         )
-        if r.returncode == 0:
-            branch = r.stdout.strip()
     except Exception:
         log.debug("Failed to get git branch", exc_info=True)
-        pass
     try:
-        r = subprocess.run(
-            ["git", "rev-parse", "HEAD"],
-            cwd=str(repo_dir), capture_output=True, text=True, timeout=2,
-        )
-        if r.returncode == 0:
-            sha = r.stdout.strip()
+        sha = run_cmd(["git", "rev-parse", "HEAD"], cwd=repo_dir, timeout=2)
     except Exception:
         log.debug("Failed to get git SHA", exc_info=True)
-        pass
     return branch, sha
 
 def sanitize_task_for_event(

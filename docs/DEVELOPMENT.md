@@ -1297,7 +1297,8 @@ the run-root `effective_settings.json` is REDACTED and the value reaches disk
 only in each lane's 0600 settings file, disclosed by fingerprint as the runtime
 grant); the preflight takes `min(key limit remaining, account credits)` and
 refuses below `--min-credit-usd`. `--total-budget` (default 100) is the RUN-WIDE
-cap: a ledger sums the lanes' durable `llm_usage` costs, reserves
+cap: a ledger sums the lanes' settled physical-attempt ledger rows (`state/usage_attempts.jsonl`, the
+product's money authority; the `llm_usage` telemetry misses skill review, advisory and synthesis), reserves
 `max(0.01, --per-task-usd × (root tasks + 1 with --self-mod for the scenario that absorbs))` per attempt (SM1 and SW1 one root — scouts spend
 under their root's `OUROBOROS_PER_TASK_COST_USD` fence — SK1 two; with `--self-mod` SM1's
 one post-task evolution cycle is one more root (SW1/SK1 pin promotion off) (the rc.14 paid run showed a second, generic
@@ -1375,7 +1376,9 @@ lane seeds `owner_chat_id` ONLY, never a campaign: the scenario task's post-task
 A pre-seeded active campaign (the benchmark helper's form, rc.15 paid run2) runs generic cycles from
 t=0, gets the promotion refused (evolution already enabled) and its kept request file blocks the
 `no_promotion` exit of the absorb wait. `--self-mod` REQUIRES a confirmed absorb per lane whose scenario
-`expects_absorb` (SM1, the one that lands a commit): a pre-task snapshot
+`expects_absorb` (SM1, the one that lands a commit; its clean-worktree check records the
+porcelain and tolerates only the runtime's transient `.ouroboros/` scratch, which a post-task
+cycle in the same clone writes seconds after the commit): a pre-task snapshot
 (clone HEAD, served sha, uptime, absorbed-cycle counter) and, afterwards, the
 counter advanced, the served sha moved, the uptime reset and the server ready;
 anything less is a typed `self_mod_absorb_confirmed=false` and the run fails. The
@@ -1600,7 +1603,10 @@ both critical. The imperatives:
   manifest observation is a preflight, not a lease. `subagents.route_health`
   is the ONE route reader for every consumer; quota readers project one
   `ClaudexorGateway.quota_state()` envelope
-  (`tests/test_available_subagents_runtime.py`). Substrate facts and the
+  (`tests/test_available_subagents_runtime.py`). A fully-used ratio without a
+  valid future reset must neither refuse dispatch nor certify available quota
+  in the UI; retain explicit active cooldowns and leave final admission with
+  the engine. Substrate facts and the
   packet's per-skill lifecycle facts are VISIBILITY ONLY — acceptance judges
   quality, never the execution route — and an unreadable custody log reads
   `evidence_read_failed`, never a proven-empty substrate.
