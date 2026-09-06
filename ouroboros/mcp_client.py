@@ -6,7 +6,8 @@ call opens a fresh session. Secrets, server descriptions/results, and obvious
 metadata SSRF targets are handled defensively because MCP servers are external.
 
 For ``stdio``, ``command`` is an executable and ``args`` is passed as an exact
-list. No shell, custom environment, or working directory is involved.
+list without a shell. Optional cwd and settings-backed environment selections
+apply to both discovery and calls; omitted fields retain SDK defaults.
 """
 
 from __future__ import annotations
@@ -17,8 +18,11 @@ import ipaddress
 import json
 import logging
 import re
+import tempfile
 import threading
 import urllib.parse
+from contextlib import asynccontextmanager
+from contextvars import ContextVar
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from typing import Any, Awaitable, Callable, Dict, List, Optional
@@ -28,8 +32,11 @@ from ouroboros.secret_masking import (
 )
 from ouroboros.secret_masking import (
     mask_prefixed_secret,
+    redact_known_values,
 )
 from ouroboros.tools.tool_result import ToolResult
+from ouroboros.platform_layer import IS_WINDOWS
+from ouroboros.workspace_executor import validate_process_env
 
 log = logging.getLogger(__name__)
 
@@ -60,6 +67,7 @@ _MAX_SERVER_SLUG = 24
 _MAX_TOOL_SLUG = 32
 _HEADER_NAME_RE = re.compile(r"^[!#$%&'*+\-.^_`|~0-9A-Za-z]+$")
 _CONTROL_CHARS_RE = re.compile(r"[\x00-\x1f\x7f]")
+_STDIO_DIAGNOSTIC_CONFIG = ContextVar("mcp_stdio_diagnostic_config", default=None)
 
 # Block obvious metadata SSRF targets, but allow localhost/private LAN MCP servers.
 _DENIED_HOSTS = frozenset(
@@ -86,6 +94,9 @@ class MCPServerConfig:
     auth_header: str
     auth_token: str
     allowed_tools: List[str]
+    cwd: str = ""
+    env_from_settings: Dict[str, str] = field(default_factory=dict)
+    env: Dict[str, str] = field(default_factory=dict, repr=False)
 
     def has_auth(self) -> bool:
         return bool(self.auth_token.strip())
@@ -262,22 +273,52 @@ def _coerce_str_list(value: Any) -> List[str]:
     return []
 
 
-def normalize_server_config(raw: Dict[str, Any]) -> Optional[MCPServerConfig]:
+def normalize_server_config(
+    raw: Dict[str, Any], *, settings: Optional[Dict[str, Any]] = None,
+    errors: Optional[List[str]] = None,
+) -> Optional[MCPServerConfig]:
     """Validate one ``MCP_SERVERS`` entry; return ``None`` if unsalvageable."""
+    def invalid(message: str) -> None:
+        if errors is not None:
+            errors.append(f"MCP_CONFIG_ERROR: {message}")
+        log.warning("Invalid MCP server config: %s", message)
+
     if not isinstance(raw, dict):
-        return None
+        return invalid("server must be an object")
 
     raw_id = raw.get("id") or raw.get("slug") or raw.get("name")
     server_slug = canonical_server_id(raw_id)
     if not server_slug:
-        return None
+        return invalid("server id or name is required")
 
     transport = str(raw.get("transport") or "streamable_http").strip().lower()
     if transport not in SUPPORTED_TRANSPORTS:
-        log.warning("Unsupported transport %r for server %r", transport, raw_id)
-        return None
+        return invalid("unsupported transport; use streamable_http, sse, or stdio")
 
     try:
+        known = {"id", "slug", "name", "label", "enabled", "transport", "url", "command",
+                 "args", "auth_header", "auth_token", "allowed_tools", "cwd", "env_from_settings"}
+        unknown = set(raw) - known
+        if unknown:
+            raise ValueError("unsupported fields: " + ", ".join(sorted(map(str, unknown)))
+                             + "; use env_from_settings for stdio environment selections")
+        cwd = raw.get("cwd", "")
+        if not isinstance(cwd, str) or "\x00" in cwd:
+            raise ValueError("cwd must be a string without NUL")
+        refs = validate_process_env(raw.get("env_from_settings"))
+        env: Dict[str, str] = {}
+        unused = ("url", "auth_token") if transport == "stdio" else ("command", "args", "cwd", "env_from_settings")
+        if any(raw.get(key) for key in unused):
+            raise ValueError("fields unsupported by this transport: " + ", ".join(key for key in unused if raw.get(key)))
+        if transport == "stdio" and raw.get("auth_header", "Authorization") not in (None, "", "Authorization"):
+            raise ValueError("auth_header is unsupported for stdio")
+        for key, reference in refs.items():
+            if not reference or settings is None or reference not in settings:
+                raise ValueError(f"env_from_settings: setting for {key!r} is missing")
+            value = settings[reference]
+            if not isinstance(value, str) or "\x00" in value:
+                raise ValueError(f"env_from_settings: setting for {key!r} must be a string without NUL")
+            env[key] = value
         if transport == "stdio":
             url = ""
             command = _validate_stdio_command(raw.get("command"))
@@ -291,8 +332,7 @@ def normalize_server_config(raw: Dict[str, Any]) -> Optional[MCPServerConfig]:
             auth_header = _validate_auth_header(raw.get("auth_header") or "Authorization")
             auth_token = _validate_auth_token(raw.get("auth_token") or "")
     except ValueError as exc:
-        log.warning("Dropping invalid MCP server config %r: %s", raw_id, exc)
-        return None
+        return invalid(str(exc))
 
     name = str(raw.get("name") or raw.get("label") or server_slug).strip() or server_slug
     enabled_raw = raw.get("enabled", False)
@@ -314,19 +354,30 @@ def normalize_server_config(raw: Dict[str, Any]) -> Optional[MCPServerConfig]:
         auth_header=auth_header,
         auth_token=auth_token,
         allowed_tools=allowed_tools,
+        cwd=cwd,
+        env_from_settings=refs,
+        env=env,
     )
 
 
-def parse_servers(raw_list: Any) -> List[MCPServerConfig]:
+def parse_servers(
+    raw_list: Any, *, settings: Optional[Dict[str, Any]] = None,
+    errors: Optional[List[Dict[str, Any]]] = None,
+) -> List[MCPServerConfig]:
     """Normalize a raw ``MCP_SERVERS`` list. Invalid entries are warned and skipped."""
     if not isinstance(raw_list, list):
         return []
     out: List[MCPServerConfig] = []
     seen: set = set()
     for entry in raw_list:
-        cfg = normalize_server_config(entry)
+        entry_errors: List[str] = []
+        cfg = normalize_server_config(entry, settings=settings, errors=entry_errors)
         if cfg is None:
-            log.warning("Skipping invalid MCP server entry")
+            if errors is not None:
+                source = entry if isinstance(entry, dict) else {}
+                errors.append({"id": canonical_server_id(source.get("id") or source.get("name")),
+                               "enabled": source.get("enabled", False), "tool_count": 0,
+                               "last_error": "; ".join(entry_errors), "code": "MCP_CONFIG_ERROR"})
             continue
         if cfg.id in seen:
             # Duplicate ids would share tool prefixes; keep the first config.
@@ -351,6 +402,8 @@ def redact_servers_for_status(configs: List[MCPServerConfig]) -> List[Dict[str, 
                 "auth_token": mask_prefixed_secret(cfg.auth_token, visible_chars=4),
                 "auth_configured": cfg.has_auth(),
                 "allowed_tools": list(cfg.allowed_tools),
+                "cwd": cfg.cwd,
+                "env_from_settings": dict(cfg.env_from_settings),
             }
         )
     return out
@@ -362,6 +415,7 @@ def _redact_error_text(text: Any, cfg: Optional[MCPServerConfig] = None) -> str:
         token = str(cfg.auth_token or "")
         if token:
             out = out.replace(token, "<redacted:mcp-auth-token>")
+        out = redact_known_values(out, cfg.env.values())
         parsed = urllib.parse.urlparse(cfg.url)
         if parsed.username or parsed.password:
             safe_netloc = parsed.hostname or ""
@@ -397,21 +451,52 @@ def _untrusted_schema_text(value: str) -> str:
     return f"{prefix} {text[:512]}" if text else prefix
 
 
-def _wrap_schema_text_fields(value: Any) -> Any:
+def _wrap_schema_text_fields(value: Any, cfg: Optional[MCPServerConfig] = None) -> Any:
     if isinstance(value, dict):
         out: Dict[str, Any] = {}
         for key, item in value.items():
             if key in {"description", "title"} and isinstance(item, str):
-                out[key] = _untrusted_schema_text(item)
+                out[key] = _untrusted_schema_text(_redact_error_text(item, cfg))
             else:
-                out[key] = _wrap_schema_text_fields(item)
+                out[key] = _wrap_schema_text_fields(item, cfg)
         return out
     if isinstance(value, list):
-        return [_wrap_schema_text_fields(item) for item in value]
+        return [_wrap_schema_text_fields(item, cfg) for item in value]
     return value
 
 
 # Async transport.
+
+
+@asynccontextmanager
+async def _stdio_with_diagnostics(params: Any, cfg: MCPServerConfig):
+    # SDK stderr otherwise goes straight to the host console, outside masking.
+    # Invalid JSON also makes the SDK log a validation traceback with raw input.
+    # Its tasks inherit this context; concurrent servers never share selections.
+    sdk_log = logging.getLogger("mcp.client.stdio")
+    def project_log(record: logging.LogRecord) -> bool:
+        if _STDIO_DIAGNOSTIC_CONFIG.get() is cfg:
+            message = record.getMessage()
+            if record.exc_info:
+                message += "\n" + logging.Formatter().formatException(record.exc_info)
+                record.exc_info = record.exc_text = None
+            record.msg, record.args = _redact_error_text(message, cfg), ()
+        return True
+    token = _STDIO_DIAGNOSTIC_CONFIG.set(cfg)
+    sdk_log.addFilter(project_log)
+    try:
+        with tempfile.TemporaryFile(mode="w+", encoding="utf-8", errors="replace") as stderr:
+            try:
+                async with stdio_client(params, errlog=stderr) as streams:
+                    yield streams
+            finally:
+                stderr.seek(0)
+                diagnostic = _redact_error_text(stderr.read(), cfg)
+                if diagnostic:
+                    log.warning("MCP stdio stderr (%s): %s", cfg.id, diagnostic)
+    finally:
+        sdk_log.removeFilter(project_log)
+        _STDIO_DIAGNOSTIC_CONFIG.reset(token)
 
 
 def _transport_factory(cfg: MCPServerConfig):
@@ -424,8 +509,14 @@ def _transport_factory(cfg: MCPServerConfig):
     if cfg.transport == "stdio":
         # Leaving env/cwd unset uses the SDK's small cross-platform default
         # environment and its context-managed process shutdown sequence.
-        params = StdioServerParameters(command=cfg.command, args=list(cfg.args))
-        return stdio_client(params)
+        # The SDK merges a plain dict onto its defaults. Windows env names are
+        # case-insensitive: canonical names prevent a second Path/PATH entry.
+        env = {key.upper() if IS_WINDOWS else key: value for key, value in cfg.env.items()}
+        selected = {"env": env} if cfg.env_from_settings else {}
+        if cfg.cwd:
+            selected["cwd"] = cfg.cwd
+        params = StdioServerParameters(command=cfg.command, args=list(cfg.args), **selected)
+        return _stdio_with_diagnostics(params, cfg) if cfg.env else stdio_client(params)
     raise RuntimeError(f"Unsupported transport: {cfg.transport!r}")
 
 
@@ -614,6 +705,7 @@ class MCPManager:
         self._enabled = False
         self._tool_timeout_sec = 60
         self._servers: Dict[str, MCPServerRuntime] = {}
+        self._configuration_errors: List[Dict[str, Any]] = []
         self._configured = False
         self._settings_fingerprint = ""
         self._settings_mtime_ns: Optional[int] = None
@@ -639,7 +731,14 @@ class MCPManager:
             "MCP_TOOL_TIMEOUT_SEC": settings.get("MCP_TOOL_TIMEOUT_SEC"),
             "MCP_SERVERS": settings.get("MCP_SERVERS"),
         }
-        return json.dumps(payload, sort_keys=True, ensure_ascii=False, default=str)
+        references = set()
+        servers = settings.get("MCP_SERVERS")
+        for server in servers if isinstance(servers, list) else []:
+            refs = server.get("env_from_settings") if isinstance(server, dict) else None
+            if isinstance(refs, dict):
+                references.update(ref for ref in refs.values() if isinstance(ref, str))
+        payload["selected_settings"] = {ref: settings.get(ref) for ref in references}
+        return hashlib.sha256(json.dumps(payload, sort_keys=True, ensure_ascii=False, default=str).encode()).hexdigest()
 
     def reconfigure(self, settings: Dict[str, Any], *, settings_mtime_ns: Optional[int] = None) -> bool:
         """Rebuild servers, preserving tools for unchanged configs."""
@@ -657,7 +756,8 @@ class MCPManager:
                 self._tool_timeout_sec = max(1, int(settings.get("MCP_TOOL_TIMEOUT_SEC") or 60))
             except (TypeError, ValueError):
                 self._tool_timeout_sec = 60
-            new_configs = parse_servers(settings.get("MCP_SERVERS"))
+            self._configuration_errors = []
+            new_configs = parse_servers(settings.get("MCP_SERVERS"), settings=settings, errors=self._configuration_errors)
             new_servers: Dict[str, MCPServerRuntime] = {}
             for cfg in new_configs:
                 old = self._servers.get(cfg.id)
@@ -704,7 +804,8 @@ class MCPManager:
         with self._lock:
             if not self._enabled:
                 return []
-            out: List[Dict[str, str]] = []
+            out = [{"id": item["id"], "last_error": item["last_error"]}
+                   for item in self._configuration_errors if item["enabled"]]
             for runtime in self._servers.values():
                 cfg = runtime.config
                 if not cfg.enabled:
@@ -765,7 +866,7 @@ class MCPManager:
     def status_payload(self) -> Dict[str, Any]:
         """Return a redacted status snapshot for ``/api/mcp/status``."""
         with self._lock:
-            servers: List[Dict[str, Any]] = []
+            servers: List[Dict[str, Any]] = [dict(item) for item in self._configuration_errors]
             for runtime in self._servers.values():
                 cfg = runtime.config
                 servers.append(
@@ -778,6 +879,8 @@ class MCPManager:
                         "auth_header": cfg.auth_header,
                         "auth_configured": cfg.has_auth(),
                         "allowed_tools": list(cfg.allowed_tools),
+                        "cwd": cfg.cwd,
+                        "env_from_settings": dict(cfg.env_from_settings),
                         "tool_count": len(runtime.tools),
                         "tools": [
                             {
@@ -810,6 +913,9 @@ class MCPManager:
                 return {"ok": False, "error": "MCP client is disabled."}
             runtime = self._servers.get(server_id)
             if runtime is None:
+                for error in self._configuration_errors:
+                    if error["id"] == server_id:
+                        return {"ok": False, "code": "MCP_CONFIG_ERROR", "error": error["last_error"]}
                 return {
                     "ok": False,
                     "error": f"unknown server id: {server_id!r}",
@@ -846,8 +952,8 @@ class MCPManager:
                 server_id=cfg.id,
                 raw_name=str(item.get("name") or "").strip(),
                 prefixed_name=make_tool_name(cfg.id, item.get("name") or ""),
-                description=_redact_error_text(str(item.get("description") or "")[:1024], cfg),
-                schema=_normalize_input_schema(item.get("input_schema")),
+                description=_redact_error_text(str(item.get("description") or ""), cfg)[:1024],
+                schema=_normalize_input_schema(item.get("input_schema"), cfg),
             )
             for item in tools_raw
             if str(item.get("name") or "").strip()
@@ -949,16 +1055,15 @@ class MCPManager:
 
         threading.Thread(target=_runner, name=f"mcp-refresh-{reason}", daemon=True).start()
 
-    def test_server(self, raw_config: Dict[str, Any]) -> Dict[str, Any]:
+    def test_server(self, raw_config: Dict[str, Any], *, settings: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
         """Probe a candidate config without persisting it."""
-        cfg = normalize_server_config(raw_config)
+        errors: List[str] = []
+        cfg = normalize_server_config(raw_config, settings=settings, errors=errors)
         if cfg is None:
             return {
                 "ok": False,
-                "error": (
-                    "Invalid MCP server config (missing id/url/command, unsupported "
-                    "transport, or invalid transport fields)."
-                ),
+                "code": "MCP_CONFIG_ERROR",
+                "error": "Invalid MCP server config: " + "; ".join(errors),
             }
         timeout = self._tool_timeout_sec
         try:
@@ -980,7 +1085,7 @@ class MCPManager:
             "tools": [
                 {
                     "name": str(t.get("name") or ""),
-                    "description": _redact_error_text(str(t.get("description") or "")[:512], cfg),
+                    "description": _redact_error_text(str(t.get("description") or ""), cfg)[:512],
                 }
                 for t in tools_raw
             ],
@@ -1056,11 +1161,11 @@ class MCPManager:
         return self._call_tool_result(prefixed_name, arguments).text
 
 
-def _normalize_input_schema(value: Any) -> Dict[str, Any]:
+def _normalize_input_schema(value: Any, cfg: Optional[MCPServerConfig] = None) -> Dict[str, Any]:
     """Coerce external input_schema into the provider tool-schema minimum."""
     if not isinstance(value, dict):
         return {"type": "object", "properties": {}}
-    out = _wrap_schema_text_fields(dict(value))
+    out = _wrap_schema_text_fields(dict(value), cfg)
     if out.get("type") != "object":
         out["type"] = "object"
     if "properties" not in out or not isinstance(out["properties"], dict):

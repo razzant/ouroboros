@@ -12,6 +12,8 @@ Covers:
 from __future__ import annotations
 
 import asyncio
+import json
+import sys
 import threading
 from contextlib import asynccontextmanager
 from types import SimpleNamespace
@@ -174,8 +176,8 @@ def test_normalize_server_config_accepts_exact_stdio_argv():
             "transport": "stdio",
             "command": "npx",
             "args": ["-y", "@modelcontextprotocol/server-filesystem", "/path with spaces"],
-            "url": "https://ignored.example/mcp",
-            "auth_token": "ignored-secret",
+            "url": "",
+            "auth_token": "",
         }
     )
     assert cfg is not None
@@ -184,6 +186,174 @@ def test_normalize_server_config_accepts_exact_stdio_argv():
     assert cfg.args == ["-y", "@modelcontextprotocol/server-filesystem", "/path with spaces"]
     assert cfg.url == ""
     assert cfg.has_auth() is False
+
+
+@pytest.mark.parametrize("extra", [
+    {"env": {"TOKEN": "synthetic-unsupported"}}, {"future_option": True},
+    {"url": "https://unused.example/mcp"}, {"auth_token": "unused"},
+    {"cwd": 42}, {"cwd": "bad\x00cwd"}, {"env_from_settings": []},
+    {"env_from_settings": {"BAD=NAME": "KEY"}}, {"env_from_settings": {"TOKEN": "MISSING"}},
+])
+def test_invalid_stdio_fields_are_visible_without_transport(extra):
+    raw = {"id": "local", "enabled": True, "transport": "stdio", "command": "python", **extra}
+    manager = mcp_client.MCPManager()
+    manager.reconfigure(_settings(raw))
+    status = manager.status_payload()["servers"][0]
+    assert status["id"] == "local"
+    assert status["code"] == "MCP_CONFIG_ERROR"
+    assert status["last_error"]
+    assert manager.enabled_servers_without_tools()[0]["last_error"] == status["last_error"]
+    assert manager.test_server(raw)["code"] == "MCP_CONFIG_ERROR"
+    assert manager.refresh_server("local")["code"] == "MCP_CONFIG_ERROR"
+    assert manager.list_tools_for_registry() == []
+
+
+def test_http_does_not_silently_ignore_process_configuration():
+    for extra in ({"cwd": "/project"}, {"env_from_settings": {"TOKEN": "KEY"}}):
+        assert mcp_client.normalize_server_config(_good_server(**extra), settings={"KEY": "synthetic"}) is None
+
+
+def test_stdio_selected_windows_path_overrides_sdk_default_key(monkeypatch):
+    monkeypatch.setattr(mcp_client, "IS_WINDOWS", True)
+    captured = []
+    monkeypatch.setattr(mcp_client, "StdioServerParameters", lambda **kwargs: captured.append(kwargs))
+    cfg = mcp_client.normalize_server_config({"id": "win", "transport": "stdio", "command": "server",
+        "env_from_settings": {"Path": "SELECTED_PATH"}}, settings={"SELECTED_PATH": "C:\\chosen path"})
+    mcp_client._transport_factory(cfg)
+    assert captured[0]["env"] == {"PATH": "C:\\chosen path"}
+
+
+def test_stdio_saved_configuration_is_shared_by_listing_and_calls():
+    manager = mcp_client.MCPManager()
+    seen = []
+
+    async def list_tools(cfg, timeout):
+        seen.append(cfg)
+        return [{"name": "probe", "description": cfg.env["TOKEN"],
+                 "input_schema": {"type": "object", "description": cfg.env["TOKEN"]}}]
+
+    async def call(cfg, name, args, timeout):
+        seen.append(cfg)
+        return ToolResult(status="ok", code="OK", text=cfg.env["TOKEN"])
+
+    manager._async_list_tools, manager._async_call_tool = list_tools, call
+    raw = {"id": "local", "enabled": True, "transport": "stdio", "command": "python",
+           "cwd": "/chosen/project", "env_from_settings": {"TOKEN": "MCP_TEST_KEY"}}
+    settings = {**_settings(raw), "MCP_TEST_KEY": "synthetic-660-selected"}
+    for secret in ("synthetic-660-selected", "synthetic-660-rotated"):
+        settings["MCP_TEST_KEY"] = secret
+        assert manager.reconfigure(settings)
+        assert manager.list_tools_for_registry() == []
+        assert manager.refresh_server("local")["ok"]
+        output = manager.call_tool("mcp_local__probe", {})
+        assert "MCP_TOOL_ERROR" not in output
+        assert seen[-1] is seen[-2]
+        assert seen[-1].env == {"TOKEN": secret}
+        assert seen[-1].cwd == "/chosen/project"
+        assert secret not in output + json.dumps(manager.status_payload()) + json.dumps(manager.list_tools_for_registry())
+        assert secret not in repr(seen[-1]) + manager._settings_fingerprint
+    assert not manager.reconfigure(settings)
+
+
+def test_selected_env_masking_preserves_executable_tool_schema():
+    manager = mcp_client.MCPManager()
+    received = []
+
+    async def list_tools(cfg, timeout):
+        return [{"name": "probe", "description": "path", "input_schema": {
+            "type": "object", "description": "path", "properties": {
+                "path": {"type": "string", "enum": ["path"], "default": "path", "description": "path"},
+            }, "required": ["path"],
+        }}]
+
+    async def call(cfg, name, args, timeout):
+        received.append(args)
+        assert args == {"path": "path"}
+        return ToolResult(status="ok", code="OK", text="done")
+
+    manager._async_list_tools, manager._async_call_tool = list_tools, call
+    raw = {"id": "local", "enabled": True, "transport": "stdio", "command": "python",
+           "env_from_settings": {"SELECTED": "MCP_TEST_KEY"}}
+    manager.reconfigure({**_settings(raw), "MCP_TEST_KEY": "path"})
+    assert manager.refresh_server("local")["ok"]
+    schema = manager.list_tools_for_registry()[0]["schema"]
+    assert schema["properties"]["path"]["enum"] == ["path"]
+    assert schema["properties"]["path"]["default"] == "path"
+    assert schema["required"] == ["path"]
+    assert "path" not in schema["description"]
+    assert "path" not in schema["properties"]["path"]["description"]
+    assert "done" in manager.call_tool("mcp_local__probe", {"path": "path"})
+    assert received == [{"path": "path"}]
+
+
+def test_real_stdio_process_observes_selected_environment_and_cwd(tmp_path, monkeypatch, caplog):
+    pytest.importorskip("mcp")
+    monkeypatch.setenv("UNSELECTED_660_SECRET", "synthetic-host-only")
+    workdir = tmp_path / "project with spaces"
+    workdir.mkdir()
+    witness = tmp_path / "observed.jsonl"
+    script = tmp_path / "mcp_probe.py"
+    script.write_text('''import json, os, sys
+print(os.environ["TOKEN"], file=sys.stderr, flush=True)
+for line in sys.stdin:
+    request = json.loads(line)
+    method = request.get("method")
+    if "id" not in request:
+        continue
+    with open(sys.argv[1], "a", encoding="utf-8") as witness:
+        witness.write(json.dumps({"method": method, "cwd": os.getcwd(),
+            "token": os.environ.get("TOKEN"), "empty": os.environ.get("EMPTY"),
+            "unselected": os.environ.get("UNSELECTED_660_SECRET")}) + "\\n")
+    if method == "initialize":
+        result = {"protocolVersion": request["params"]["protocolVersion"],
+            "capabilities": {"tools": {}}, "serverInfo": {"name": "controlled", "version": "1"}}
+    elif method == "tools/list":
+        result = {"tools": [{"name": "probe", "description": os.environ["TOKEN"],
+            "inputSchema": {"type": "object"}}]}
+    elif method == "tools/call":
+        result = {"content": [{"type": "text", "text": os.environ["TOKEN"]}], "isError": False}
+    else:
+        result = {}
+    print(json.dumps({"jsonrpc": "2.0", "id": request["id"], "result": result}), flush=True)
+''', encoding="utf-8")
+    secret = 'synthetic-660-quote"\\tail\nexact'
+    raw = {"id": "controlled", "enabled": True, "transport": "stdio", "command": sys.executable,
+           "args": [str(script), str(witness)], "cwd": str(workdir),
+           "env_from_settings": {"TOKEN": "TEST_MCP_KEY", "EMPTY": "TEST_EMPTY"}}
+    manager = mcp_client.MCPManager()
+    manager.reconfigure({**_settings(raw, timeout=5), "TEST_MCP_KEY": secret, "TEST_EMPTY": ""})
+    refreshed = manager.refresh_server("controlled")
+    assert refreshed["ok"], refreshed
+    result = manager._call_tool_result("mcp_controlled__probe", {})
+    assert result.status == "ok"
+    rows = [json.loads(line) for line in witness.read_text().splitlines()]
+    methods = [row["method"] for row in rows]
+    assert methods.count("initialize") == 2 and methods.count("tools/call") == 1
+    assert "tools/list" in methods  # SDK may also list while validating a call result.
+    assert all(row["cwd"] == str(workdir) and row["token"] == secret and row["empty"] == ""
+               and row["unselected"] is None for row in rows)
+    diagnostic = json.dumps(refreshed) + result.text + json.dumps(manager.status_payload()) + caplog.text
+    assert secret not in diagnostic and json.dumps(secret)[1:-1] not in diagnostic
+    assert "***" in result.text and "MCP stdio stderr" in caplog.text
+
+
+def test_real_stdio_invalid_stdout_does_not_leak_environment_in_sdk_traceback(tmp_path, caplog):
+    pytest.importorskip("mcp")
+    import logging
+    sdk_log = logging.getLogger("mcp.client.stdio")
+    filters_before = list(sdk_log.filters)
+    secret = "synthetic-660-sdk-diagnostic"
+    script = tmp_path / "bad_stdio.py"
+    script.write_text('import os; print("not-json:" + os.environ["TOKEN"], flush=True)\n')
+    manager = mcp_client.MCPManager()
+    manager.reconfigure({**_settings({"id": "bad", "enabled": True, "transport": "stdio",
+        "command": sys.executable, "args": [str(script)], "cwd": str(tmp_path),
+        "env_from_settings": {"TOKEN": "TEST_MCP_KEY"}}, timeout=3), "TEST_MCP_KEY": secret})
+    result = manager.refresh_server("bad")
+    assert not result["ok"]
+    assert secret not in caplog.text + json.dumps(result) + json.dumps(manager.status_payload())
+    assert "Failed to parse JSONRPC" in caplog.text
+    assert sdk_log.filters == filters_before
 
 
 @pytest.mark.parametrize(

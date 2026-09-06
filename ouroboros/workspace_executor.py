@@ -84,6 +84,7 @@ class _ExecutorService:
     readiness_log_carry: bytes = b""
     readiness_log_identity: tuple[int, int] | None = None
     durable_record_path: pathlib.Path | None = None
+    env: dict[str, str] = field(default_factory=dict, repr=False)
 
 
 _SERVICES: dict[str, _ExecutorService] = {}
@@ -559,7 +560,7 @@ def _register_service_process(drive_root: pathlib.Path | None, record: _Executor
             "cwd_base": record.cwd_base,
             "cwd_source": record.cwd_source,
             "skill_name": record.skill_name,
-            "cmd": _redacted_cmd(record.cmd),
+            "cmd": _redacted_cmd(record.cmd, record.env),
             "keep_alive": bool(record.keep_alive),
         },
     )
@@ -815,9 +816,19 @@ def _trace(executor: ExecutorRef, cwd: str, cmd: list[str], returncode: int | No
     }
 
 
-def _redacted_cmd(cmd: list[str]) -> list[str]:
-    redacted = redact_projection([str(part) for part in cmd]).value
+def _redacted_cmd(cmd: list[str], env: dict[str, str] | None = None) -> list[str]:
+    redacted = redact_projection(_service_diagnostic([str(part) for part in cmd], env)).value
     return [str(part) for part in redacted] if isinstance(redacted, list) else []
+
+
+def _service_diagnostic(value: Any, env: dict[str, str] | None) -> Any:
+    if not env:
+        return value
+    # Explicit selections need exact-value masking in addition to the normal
+    # executor projection. Keep this dependency with that optional capability.
+    from ouroboros.secret_masking import redact_known_values
+
+    return redact_known_values(value, env.values())
 
 
 def service_key(ctx: Any, name: str) -> str:
@@ -840,7 +851,9 @@ def start_service(
     skill_name: str = "",
     keep_alive: bool = False,
     env_overlay: "dict[str, str] | None" = None,
+    env: dict[str, str] | None = None,
 ) -> dict[str, Any]:
+    env = validate_process_env(env)
     executor = executor_ref_from_ctx(ctx)
     if executor is None:
         raise ValueError("no executor_ref configured")
@@ -871,6 +884,7 @@ def start_service(
         before_outputs=before_outputs,
         keep_alive=bool(keep_alive),
         readiness=dict(readiness or {}),
+        env=env,
     )
     if executor.kind == "local":
         log_path = pathlib.Path(getattr(ctx, "drive_root")) / "services" / record.task_id / f"{name}.executor.log"
@@ -892,7 +906,7 @@ def start_service(
             # bundled-node PATH prepend applies here exactly as on the plain
             # host lane (adversarial finding A-F2); the docker branch takes no
             # overlay by design (host paths must not leak into the backend).
-            env=overlay_env(_executor_service_env(), env_overlay),
+            env=overlay_env(overlay_env(_executor_service_env(), env_overlay), env),
         )
         log_fh.close()
         record.local_proc = proc
@@ -902,16 +916,24 @@ def start_service(
         if executor.network == "none":
             _assert_docker_network_none(executor.container_name)
         log_path = f"/tmp/ouroboros-service-{record.task_id}-{name}.log"
-        shell = _docker_service_start_shell(record, log_path)
+        prefix = f"OUROBOROS_SERVICE_ENV_{uuid.uuid4().hex}_"
+        aliases = {key: f"{prefix}{index}" for index, key in enumerate(env)}
+        shell = _docker_service_start_shell(record, log_path, aliases)
         proc = subprocess.run(
-            ["docker", "exec", executor.container_name, "sh", "-lc", shell],
+            ["docker", "exec", *[part for alias in aliases.values() for part in ("--env", alias)],
+             executor.container_name, "sh", "-lc", shell],
+            # Target PATH/DOCKER_HOST/LD_PRELOAD must not reconfigure the host
+            # CLI. Only inert aliases cross this hop; values stay out of argv.
+            **({"env": {**os.environ, **{aliases[key]: value for key, value in env.items()}}} if env else {}),
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
             text=True,
             timeout=20,
         )
         if proc.returncode != 0:
-            raise RuntimeError(proc.stderr.strip() or proc.stdout.strip() or "docker service start failed")
+            raise RuntimeError(_service_diagnostic(
+                proc.stderr.strip() or proc.stdout.strip() or "docker service start failed", env,
+            ))
         record.backend_pid = (proc.stdout or "").strip().splitlines()[-1].strip()
         record.backend_log_path = log_path
     record.durable_record_path = _register_service_process(_drive_root_from_ctx(ctx), record)
@@ -936,7 +958,9 @@ def service_logs(ctx: Any, name: str, tail: int) -> dict[str, Any] | None:
         return None
     return {
         **_service_payload(record),
-        "tail": str(redact_projection(_read_service_tail(record, tail)).value),
+        "tail": redact_projection(_service_diagnostic(
+            _read_service_tail(record, tail), getattr(record, "env", {}),
+        )).value,
     }
 
 
@@ -1113,7 +1137,22 @@ def _kill_durable_service_records(drive_root: pathlib.Path | None, *, wait: bool
     return stopped
 
 
-def _executor_service_env() -> dict[str, str]:
+def validate_process_env(value: Any) -> dict[str, str]:
+    """Validate an explicit env map without coercing or exposing its values."""
+    if value is None:
+        return {}
+    if not isinstance(value, dict):
+        raise ValueError("env must be an object of string names and string values")
+    for key, item in value.items():
+        if not isinstance(key, str) or not key or "=" in key or "\x00" in key:
+            raise ValueError("env names must be nonempty strings without '=' or NUL")
+        if not isinstance(item, str) or "\x00" in item:
+            raise ValueError("env values must be strings without NUL")
+    return dict(value)
+
+
+def service_env() -> dict[str, str]:
+    """Compatible minimal host environment; redaction belongs to diagnostics."""
     allowed_exact = {
         "PATH",
         "HOME",
@@ -1149,19 +1188,24 @@ def _executor_service_env() -> dict[str, str]:
     for key, value in os.environ.items():
         if key.casefold() not in allowed_casefold and not key.startswith("LC_"):
             continue
-        try:
-            if redact_projection(str(value)).records:
-                continue
-        except Exception:
-            continue
         env[key] = str(value)
+    return env
+
+
+def _executor_service_env() -> dict[str, str]:
     # External-workspace service: strip the Ouroboros repo from PYTHONPATH so the
     # target project cannot shadow-import Ouroboros's own modules (R2).
-    return scrub_repo_from_pythonpath(env, _system_repo_dir())
+    return scrub_repo_from_pythonpath(service_env(), _system_repo_dir())
 
 
-def _docker_service_start_shell(record: _ExecutorService, log_path: str) -> str:
+def _docker_service_start_shell(record: _ExecutorService, log_path: str, aliases: dict[str, str] | None = None) -> str:
     command = shlex.join(record.cmd)
+    if aliases:
+        # Expand values only inside the container; env removes transport aliases
+        # and supports names that are not shell identifiers. No value is quoted into code.
+        unset = shlex.join([part for alias in aliases.values() for part in ("-u", alias)])
+        assignments = " ".join(f'{shlex.quote(key)}="${{{alias}}}"' for key, alias in aliases.items())
+        command = f"env {unset} -- {assignments} {command}"
     exec_payload = shlex.quote(f"exec {command}")
     quoted_cwd = shlex.quote(record.backend_cwd)
     quoted_log = shlex.quote(log_path)
@@ -1223,7 +1267,7 @@ def _service_payload(record: _ExecutorService, *, state: str | None = None, note
         "cwd_base": record.cwd_base,
         "cwd_source": record.cwd_source,
         "skill_name": record.skill_name,
-        "cmd": _redacted_cmd(record.cmd),
+        "cmd": _redacted_cmd(record.cmd, getattr(record, "env", {})),
         "outputs": list(record.outputs),
         "keep_alive": bool(record.keep_alive),
         "backend_log_path": record.backend_log_path,
@@ -1231,7 +1275,7 @@ def _service_payload(record: _ExecutorService, *, state: str | None = None, note
         "ts": utc_now_iso(),
     }
     if note:
-        payload["note"] = note
+        payload["note"] = _service_diagnostic(note, getattr(record, "env", {}))
     return payload
 
 

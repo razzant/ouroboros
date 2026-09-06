@@ -2553,11 +2553,32 @@ not policy: configuration trust must not turn remote prose into policy.
 Enabled tools join the initial capability envelope, still pass runtime
 safety, and remain unavailable in repair/heal contexts; discovery failure
 becomes a visible capability omission. Stdio accepts one executable command
-and an exact string argument list — no shell, custom environment, or custom
-working directory. Tokens never appear in status responses
+and an exact string argument list without a shell. Optional `cwd` and
+`env_from_settings` (a map from environment names to existing string-valued
+setting keys) apply to both listing and calling through the saved manager
+configuration. The owner selects these references in Settings; skill-specific
+grants do not grant an unrelated MCP identity access. Missing references,
+unknown fields, and fields unsupported by the selected transport produce
+`MCP_CONFIG_ERROR`; the UI retains unsupported fields until explicitly removed.
+Omitted selections keep the SDK's minimal default environment and cwd.
+Descriptions, tool-result text and stderr diagnostics mask selected process values
 (`ouroboros/secret_masking.py` owns the shared placeholders). Resources,
 prompts, and MCP server behavior remain separate architecture changes.
 Enforcement: `tests/test_mcp_client.py`.
+
+`start_service` accepts an explicit string-valued `env` map, overlaid on the
+existing minimal service environment. It does not read settings or inherit all
+host variables. Cwd still uses the host-owned resolved resource binding; local
+executor import scrubbing and interpreter defaults remain in place. Explicit
+values override defaults unchanged. Docker transports selected values through
+inert CLI environment aliases and restores their names inside the container;
+host Docker configuration and interpreter defaults retain their own environment.
+Secret values never appear in the host argv or generated shell code.
+Service command/note diagnostics, log tails and finalized log blobs mask
+selected values; protocol keys, service identity/state and executable MCP schema
+properties, required fields, enum and default values remain unchanged. The live
+child-output file retains the existing private raw-log
+contract until finalization. Enforcement: `tests/test_workspace_executor_services.py`.
 
 ## Gateway Boundary Pattern
 
