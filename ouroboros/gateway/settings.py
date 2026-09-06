@@ -40,6 +40,7 @@ from ouroboros.onboarding_wizard import build_onboarding_html
 from ouroboros.platform_layer import is_container_env
 from ouroboros.provider_models import MINIMAX_REGION_ENDPOINTS, resolve_minimax_base_url
 from ouroboros.secret_masking import (
+    MCP_RESPONSE_ONLY_FIELDS,
     is_custom_secret_setting_key,
     looks_masked_mcp_secret,
     looks_masked_settings_secret,
@@ -170,8 +171,7 @@ def _rehydrate_mcp_servers_payload(incoming: Any, current: Any) -> list:
     for entry in incoming:
         if not isinstance(entry, dict):
             continue
-        clone = dict(entry)
-        clone.pop("auth_configured", None)
+        clone = {key: value for key, value in entry.items() if key not in MCP_RESPONSE_ONLY_FIELDS}
         if clone.get("id"):
             clone["id"] = _mcp_canonical_id(clone.get("id"))
         token = str(clone.get("auth_token") or "")

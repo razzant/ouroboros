@@ -462,8 +462,8 @@ class TestVlmQueryTool(unittest.TestCase):
             import shutil
             shutil.rmtree(tmpdir)
 
-    def test_vlm_query_data_dir_env_isolation(self):
-        """When OUROBOROS_DATA_DIR is set, only that dir's uploads/ is allowed (not ~/Ouroboros/data/uploads)."""
+    def test_vlm_query_configured_data_dir_isolation(self):
+        """Without a task context, image roots use config's resolved installation root."""
         import shutil
         import os as os_mod
         from ouroboros.tools.vision import _vlm_query
@@ -483,12 +483,14 @@ class TestVlmQueryTool(unittest.TestCase):
         img_path.write_bytes(png_bytes)
 
         try:
-            # With OUROBOROS_DATA_DIR pointing to custom tmpdir, home path is NOT allowed
-            with patch.dict(os_mod.environ, {"OUROBOROS_DATA_DIR": str(pathlib.Path(tmpdir))}):
+            # config resolves the installation environment once; the image reader
+            # must use that owner rather than reconstructing another home root.
+            with patch.dict(os_mod.environ, {"OUROBOROS_DATA_DIR": str(pathlib.Path(tmpdir))}), \
+                    patch("ouroboros.config.DATA_DIR", pathlib.Path(tmpdir)):
                 # We call the real _allowed_file_roots (not patched) here
                 from ouroboros.tools.vision import _allowed_file_roots
                 roots = _allowed_file_roots()
-                # Two env-derived roots: the custom uploads AND the skill-state
+                # Two configured roots: the custom uploads AND the skill-state
                 # tree (state/skills), where reviewed skills write screenshots.
                 self.assertEqual(len(roots), 2)
                 self.assertEqual(roots[0], pathlib.Path(tmpdir).resolve() / "uploads")

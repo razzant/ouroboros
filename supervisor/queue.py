@@ -521,6 +521,7 @@ from supervisor.queue_schedules import (  # noqa: E402, F401 -- intentional publ
 )
 from supervisor.queue_snapshot import (  # noqa: E402, F401 -- intentional public re-exports
     _kept_service_pids,
+    _retained_daemon_pids,
     parse_iso_to_ts,
     persist_queue_snapshot,
     restore_pending_from_snapshot,

@@ -1,9 +1,8 @@
 """Physical path primitives for the access matrix.
 
-Every span is extracted VERBATIM from the parent's tip bytes by
-scripts/v7next_transplant.py (D18/D33 module-handle split, proof-checked);
-the parent re-exports every moved name, so historical imports and
-monkeypatch targets keep working unchanged.
+The access facade re-exports these physical resolvers. Absolute addresses
+retain their identity; callers never sanitize an outside absolute into a
+similarly named relative file.
 """
 
 from __future__ import annotations
@@ -38,7 +37,7 @@ def _user_files_root() -> pathlib.Path:
 
     Defaults to the owner's real home. A jailed/benchmark runtime can redirect it
     to a scratch directory via ``OUROBOROS_USER_FILES_ROOT`` so a task physically
-    cannot resolve the owner's real home (e.g. ``~/file1.txt`` secret files). Any
+    cannot resolve the owner's real home (e.g. ``~/.ssh/id_rsa``). Any
     unusable value falls back to the real home — fail-safe, never broadens reach.
     """
     raw = (os.environ.get("OUROBOROS_USER_FILES_ROOT") or "").strip()
@@ -91,9 +90,8 @@ def normalize_root_relative(root: pathlib.Path, path: str) -> str:
     encodes the root, so structural/read tools accept the paths an agent
     naturally writes: an absolute path inside the active root (e.g. ``/app/foo``
     under a workspace rooted at ``/app``) and a single redundant root-basename
-    prefix (``app/foo``). Returns a RELATIVE string only — it never widens
-    access: callers still apply ``safe_relpath`` + a ``relative_to`` confinement
-    check, so a genuine escape is still rejected downstream.
+    prefix (``app/foo``). An outside absolute path stays absolute so the
+    physical resolver can reject it before any relative-path sanitization.
 
     - absolute & inside root  -> stripped to relative
     - absolute & outside root -> returned unchanged (caller's check rejects it)
@@ -111,7 +109,10 @@ def normalize_root_relative(root: pathlib.Path, path: str) -> str:
     # (A) absolute path that already points inside the root.
     if _tool_access().is_absolute_path_text(text):
         try:
-            return pathlib.Path(text).resolve(strict=False).relative_to(root_resolved).as_posix()
+            candidate = pathlib.Path(text)
+            if not candidate.anchor:
+                return text  # foreign absolute syntax must not acquire the process cwd
+            return candidate.resolve(strict=False).relative_to(root_resolved).as_posix()
         except (OSError, ValueError):
             return text  # outside root -> let the caller's confinement reject it
     # (B) redundant root-basename prefix ('app' or 'app/x' when root basename is
@@ -204,9 +205,9 @@ def normalize_runtime_data_path(data_root: pathlib.Path, path: str) -> str:
     norm = norm[2:] if norm.startswith("./") else norm
     stripped = norm.lstrip("/")
     root_text = str(pathlib.Path(data_root)).rstrip("/").lstrip("/")
-    if root_text and stripped.startswith(root_text):
+    if root_text and (stripped == root_text or stripped.startswith(root_text + "/")):
         return stripped[len(root_text):].lstrip("/") or "."
-    if stripped.startswith(".tmp-data-"):
+    if not _tool_access().is_absolute_path_text(norm) and stripped.startswith(".tmp-data-"):
         _prefix, separator, after = stripped.partition("/")
         if separator:
             return after[len("data/"):] if after.startswith("data/") else after

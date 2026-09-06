@@ -758,15 +758,46 @@ def jsonl_archive_segments(
 
 
 @contextlib.contextmanager
-def jsonl_chain_handles(path, *, strict=False, start_offset=None, snapshot=None) -> Iterator[List[Tuple[pathlib.Path, Any]]]:
-    """Whole ordered chain by default; snapshot selects one segment at start_offset.
+def jsonl_chain_handles(
+    path: pathlib.Path, *, strict: bool = False,
+    start_offset: Optional[int] = None,
+    snapshot: Optional[Dict[str, Any]] = None,
+) -> Iterator[List[Tuple[pathlib.Path, Any]]]:
+    """Open binary handles for a rotated JSONL chain; the context owns closing.
 
-    Open live first and dedup its inode; snapshot caches metadata for one fixed
-    source/EOF pass, never client paths. Consumed prefixes are stat'd once, not
-    opened. Rebind the original live inode after rotation; keep at most two
-    handles in snapshot mode. Every handle closes on exit, including errors.
-    Missing discovery entries are benign; strict enumeration/stat/read or
-    shortened required segments fail explicitly. Lenient reads skip failures.
+    By default yield every ``(path, handle)`` in archive filename order, with
+    the initially opened live generation last. Open live BEFORE enumeration;
+    device/inode identity excludes its renamed archive alias after rotation.
+    On Windows that open handle can prevent the rotator's rename. This is not
+    an atomic content snapshot, a JSON-row deduplicator, or an event-time sort.
+
+    ``start_offset`` counts bytes across the captured chain lengths, skipping
+    consumed segments without opening them and seeking within selected ones.
+    The captured EOF yields no handles; an offset beyond it always raises
+    ``JsonlChainUnreadable``, even when ``strict`` is false.
+
+    ``snapshot`` is a caller-owned dict for ONE source and ONE logical pass.
+    An empty dict captures paths, stat identities, cumulative ends and total
+    once; reuse selects at most one segment at the requested offset. Reusing
+    it for another path raises ``ValueError``. Never populate it from client
+    paths. Without it, every call discovers a fresh remaining whole chain.
+    No descriptors survive context exit. At most two are open in snapshot
+    mode: the initially pinned live handle and the selected archive handle.
+    If the captured live generation rotated between calls, locate its inode
+    in the archive and retain that path in the same snapshot.
+
+    Snapshot metadata does NOT cap the returned handle's reads: an appending
+    file can expose bytes beyond the captured total. The caller must limit
+    reads to that total and start a fresh snapshot for the next pass; the
+    cursor follower owns this EOF limit and unfinished-line handling.
+
+    Missing live files and entries lost before discovery stat are benign.
+    Strict enumeration/stat/open/seek failures raise ``JsonlChainUnreadable``;
+    lenient mode skips them. With an offset, a selected segment shorter than
+    its captured size is such a failure; a required segment lost after the
+    snapshot is not empty history. Errors while the caller reads a yielded
+    handle propagate as its original I/O errors. All opened handles close on
+    context exit, including failed setup, caller errors and early returns.
     """
     from bisect import bisect_right
 
@@ -1194,20 +1225,6 @@ _SECRET_PATTERNS = _re.compile(
 _SECRET_URL_CREDENTIAL_RE = _re.compile(
     r'(?i)\b(?:postgres|postgresql|mysql|mariadb|mongodb(?:\+srv)?|redis)://[^/\s:@]+:[^/\s@]+@'
 )
-_SECRET_LITERAL_FIELDS_RE = _re.compile(
-    r'(?im)(?:^|[\s,{])["\']?([A-Za-z_][A-Za-z0-9_-]*)["\']?\s*[:=]\s*["\']([^"\']+)["\']'
-)
-_SECRET_BRACKET_LITERAL_RE = _re.compile(
-    r'(?im)\[\s*["\']([A-Za-z_][A-Za-z0-9_-]*)["\']\s*\]\s*[:=]\s*["\']([^"\']+)["\']'
-)
-_SECRET_UNQUOTED_ASSIGNMENT_RE = _re.compile(
-    r'(?im)^([A-Za-z_][A-Za-z0-9_-]*)\s*[:=]\s*([A-Za-z0-9_\-./+=]{16,})\s*$'
-)
-_SECRET_FALLBACK_LITERAL_RE = _re.compile(
-    r'(?i)(?:os\.getenv|os\.environ\.get|settings\.get)\(\s*[\'"]([^\'"]+)[\'"][^)]*,\s*[\'"]([^\'"]+)[\'"]'
-    r'|api\.get_settings\([^)]*\)\.get\(\s*[\'"]([^\'"]+)[\'"][^)]*,\s*[\'"]([^\'"]+)[\'"]'
-    r'|process\.env\.([A-Z0-9_]+)\s*(?:\|\||\?\?)\s*[\'"]([^\'"]+)[\'"]'
-)
 _SECRET_KEY_NAME_RE = _re.compile(
     r'(?i)^(?:'
     r'token|access_token|refresh_token|auth_token|secret|secret_key|password|passwd|passphrase|authorization|'
@@ -1247,55 +1264,6 @@ def is_credential_header_name(key: Any) -> bool:
     return normalized in CREDENTIAL_HEADER_NAMES or is_secret_key_name(normalized)
 
 
-def _secret_placeholder_value(value: str) -> bool:
-    cleaned = str(value or "").strip().rstrip(",}]").strip().strip("'\"").strip()
-    if not cleaned:
-        return True
-    lowered = cleaned.lower()
-    if lowered in {"redacted", "***redacted***", "set_via_env", "set-in-settings", "changeme", "example"}:
-        return True
-    if lowered == "bearer":
-        return True
-    if lowered.startswith("bearer "):
-        bearer_value = cleaned[7:].strip()
-        if _secret_placeholder_value(bearer_value):
-            return True
-    if lowered in {"str", "string", "int", "float", "bool", "none", "null", "undefined"}:
-        return True
-    if lowered.startswith(("str ", "str|", "str |", "str)", "str):", "string ", "string|", "string |", "string)", "string):")):
-        return True
-    if lowered.startswith(("os.environ", "os.getenv", "process.env", "settings.", "api.get_settings")):
-        for literal in _re.findall(r"['\"]([^'\"]*)['\"]", cleaned):
-            if literal and not _secret_placeholder_value(literal) and not _secret_key_name(literal):
-                return False
-        return True
-    if lowered.startswith(("f\"", "f'")) and "{" in cleaned:
-        return True
-    if "settings" in lowered and any(word in lowered for word in ("configure", "configured", "set", "enter", "provide")):
-        return True
-    if "+" in cleaned and any(part in lowered for part in ("token", "key", "secret", "settings", "env")):
-        return True
-    if cleaned.startswith(("<", "${", "{")) and (cleaned.endswith((">", "}")) or cleaned.count("{") == 1):
-        return True
-    if _re.match(r"^[A-Za-z_][A-Za-z0-9_]*(?:\.[A-Za-z_][A-Za-z0-9_]*)+\(?[^)]*\)?$", cleaned):
-        return True
-    if _re.match(r"^[A-Za-z_][A-Za-z0-9_]*\([^)]*\)$", cleaned):
-        return True
-    if _re.match(r"^[a-z_][a-z0-9_]*$", cleaned) and cleaned in {
-        "password",
-        "token",
-        "secret",
-        "api_key",
-        "auth_header",
-        "access_token",
-        "refresh_token",
-    }:
-        return True
-    if cleaned.isupper() and "_" in cleaned and not any(ch.isdigit() for ch in cleaned) and _secret_key_name(cleaned):
-        return True
-    return False
-
-
 def sanitize_tool_result_for_log(result: str) -> str:
     """Redact potential secrets before a public or durable projection."""
     if not isinstance(result, str) or len(result) < 20:
@@ -1321,27 +1289,12 @@ def sanitize_tool_args_for_log(
 ) -> Dict[str, Any]:
     """Sanitize tool arguments for logging: redact secrets, truncate large fields."""
 
-    def _redact_public_string(value: str) -> tuple[str, bool]:
-        try:
-            from ouroboros.observability import redact_projection
-
-            redacted = redact_projection(value)
-            return str(redacted.value), bool(redacted.records)
-        except Exception:
-            log.debug("Failed to run observability redactor for tool args", exc_info=True)
-            return sanitize_tool_result_for_log(value), sanitize_tool_result_for_log(value) != value
-
     def _sanitize_value(key: str, value: Any, depth: int) -> Any:
         if depth > 3:
             return {"_depth_limit": True}
         if key.lower() in _SECRET_KEYS:
             return "*** REDACTED ***"
         if isinstance(value, str):
-            redacted, did_redact = _redact_public_string(value)
-            if did_redact:
-                if len(redacted) > threshold:
-                    return f"<REDACTED_TRUNCATED:{key}:{len(redacted)}ch>"
-                return redacted
             if len(value) > threshold:
                 return f"<TRUNCATED:{key}:{len(value)}ch:sha={sha256_text(value)[:12]}>"
             return value
@@ -1357,17 +1310,19 @@ def sanitize_tool_args_for_log(
             return value
         except (TypeError, ValueError):
             log.debug("Failed to JSON serialize value in sanitize_tool_args", exc_info=True)
-            return {"_repr": repr(value)}
+            return {"_repr": sanitize_tool_result_for_log(repr(value))}
 
     try:
-        return {k: _sanitize_value(k, v, 0) for k, v in args.items()}
+        from ouroboros.observability import redact_projection
+
+        # Redact with the complete nested key context before limiting depth,
+        # list length or field size; a value alone loses DB_PASSWORD's meaning.
+        projected = redact_projection(args).value
+        return {k: _sanitize_value(k, v, 0) for k, v in projected.items()}
     except Exception:
         log.debug("Failed to sanitize tool arguments for logging", exc_info=True)
-        try:
-            return json.loads(json.dumps(args, ensure_ascii=False, default=str))
-        except Exception:
-            log.debug("Tool argument sanitization failed completely", exc_info=True)
-            return {"_error": "sanitization_failed"}
+        return {"_error": "sanitization_failed"}
+
 
 
 async def collect_evolution_metrics(repo_dir: str, data_dir: str | None = None) -> list[dict]:

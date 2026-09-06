@@ -1188,7 +1188,7 @@ class BackgroundConsciousness:
         "send_user_message", "update_scratchpad",
         "update_identity", "set_next_wakeup",
         "knowledge_read", "knowledge_write", "knowledge_list",
-        "web_search", "read_file", "list_files", "query_code",
+        "web_search", "read_file", "list_files", "search_code", "query_code",
         "chat_history", "recent_tasks",
         "initiate_presence",
         "list_github_issues", "get_github_issue",

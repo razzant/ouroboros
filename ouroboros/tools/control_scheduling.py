@@ -527,6 +527,7 @@ def _build_child_subagent_contract(spec: Dict[str, Any]) -> Dict[str, Any]:
                 # requested child deadline whenever the parent carried one of its own.
                 "deadline_at": narrowed_deadline_at,
                 "delegation_budget": delegation_budget,
+                "resource_policy": spec.get("resource_policy", parent_contract.get("resource_policy", {})),
                 "attachment_manifest": spec.get("attachment_manifest") or [],
                 # Same lesson for the criteria carriers, re-stated even when EMPTY:
                 # without these, the parent's claims/criteria leak into every child and
@@ -535,6 +536,7 @@ def _build_child_subagent_contract(spec: Dict[str, Any]) -> Dict[str, Any]:
                 "success_criteria": [],
             } if isinstance(parent_contract, dict) else {
                 "delegation_budget": delegation_budget,
+                "resource_policy": spec.get("resource_policy", {}),
                 "acceptance_claims": child_claims,
                 "attachment_manifest": spec.get("attachment_manifest") or [],
             },
@@ -592,7 +594,7 @@ def _schedule_task(ctx: ToolContext, internal: Dict[str, Any] | None = None, /, 
     if set(internal) - _INTERNAL_SCHEDULE_OPTIONS:
         raise TypeError(f"_schedule_task: unknown internal scheduling option(s): "
                         f"{sorted(set(internal) - _INTERNAL_SCHEDULE_OPTIONS)}")
-    fields, arg_error = _validated_schedule_fields(params)
+    fields, arg_error = _validated_schedule_fields(params, ctx=ctx)
     if arg_error:
         return _publish_scheduling_refusal(ctx, "error", "TOOL_ARG_ERROR", arg_error)
     deadline_at = fields["deadline_at"]
@@ -623,9 +625,7 @@ def _schedule_task(ctx: ToolContext, internal: Dict[str, Any] | None = None, /, 
         return f"⚠️ TOOL_ERROR (schedule_subagent): invalid_task_depth: {depth_error}"
     new_depth = current_depth + 1
     metadata = getattr(ctx, "task_metadata", {}) if isinstance(getattr(ctx, "task_metadata", {}), dict) else {}
-    parent_contract = metadata.get("task_contract") if isinstance(metadata.get("task_contract"), dict) else {}
-    if not parent_contract and isinstance(getattr(ctx, "task_contract", None), dict):
-        parent_contract = getattr(ctx, "task_contract")
+    parent_contract = fields["parent_contract"]
     max_depth = admitted_depth_cap(parent_contract, get_max_subagent_depth())
     if new_depth > max_depth:
         return record_depth_limit_refusal(
@@ -644,10 +644,6 @@ def _schedule_task(ctx: ToolContext, internal: Dict[str, Any] | None = None, /, 
             })
         except Exception:
             pass
-    # EMPTINESS decides, not type. `ToolContext.task_contract` defaults to `{}`, so testing
-    # only `isinstance(..., dict)` let that empty default win over a contract that really is
-    # in `task_metadata` — and the parent's `deadline_at` lives in the contract, so the miss
-    # silently un-narrowed every child deadline. Same precedence the registry already uses.
     current_task_id = str(getattr(ctx, "task_id", "") or "")
     parent_task_id = str(current_task_id or metadata.get("parent_task_id") or "").strip()
     root_task_id_seed = str(metadata.get("root_task_id") or current_task_id or "").strip()
@@ -750,7 +746,7 @@ def _schedule_task(ctx: ToolContext, internal: Dict[str, Any] | None = None, /, 
         "allowed_resources": allowed_resources, "parent_contract": parent_contract,
         "parent_task_id": parent_task_id, "root_task_id": root_task_id, "session_id": session_id,
         "child_delegation_budget": child_delegation_budget, "deadline_at": str(deadline_at or ""),
-        "acceptance_claims": fields["acceptance_claims"],
+        "acceptance_claims": fields["acceptance_claims"], "resource_policy": fields["resource_policy"],
         "attachment_manifest": child_attachment_manifest,
     })
     # The requested-status envelope carries the REQUEST. Its derived half stays

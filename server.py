@@ -4,7 +4,6 @@ import asyncio
 import base64  # noqa: F401
 import json
 import logging
-import socket
 import subprocess
 
 import os
@@ -30,7 +29,7 @@ from ouroboros.server_auth import (
     get_network_auth_startup_warning,
     validate_network_auth_configuration,
 )
-from ouroboros.server_entrypoint import find_free_port, parse_server_args, write_port_file
+from ouroboros.server_entrypoint import bound_service_socket, find_free_port, parse_server_args, write_port_file
 from ouroboros.server_web import NoCacheStaticFiles, make_index_page, resolve_web_dir
 from ouroboros.usage_accounting import ensure_legacy_imported
 from ouroboros.gateway import collect_routes
@@ -1193,7 +1192,7 @@ routes = [
     Mount("/static", app=NoCacheStaticFiles(directory=str(web_dir)), name="static"),
 ]
 
-from contextlib import asynccontextmanager, suppress
+from contextlib import ExitStack, asynccontextmanager, suppress
 
 
 @asynccontextmanager
@@ -1282,6 +1281,7 @@ async def lifespan(app):
 
     host_service_task = None
     host_service_server = None
+    host_service_listener = ExitStack()
     extension_reconcile_task = None
     try:
         from ouroboros.event_bus import init_global_event_bus
@@ -1296,18 +1296,11 @@ async def lifespan(app):
         init_global_supervisor(lifespan_drive_root)
         host_service_app = create_host_service_app(lifespan_drive_root)
         host_port = host_service_port()
-        # Probe the port first: uvicorn's Server.startup() calls sys.exit(1) on a
-        # bind error, and SystemExit raised inside an asyncio task escapes
-        # run_forever and takes down the WHOLE main server (a stale prior
-        # instance still holding the port is exactly the realistic trigger).
-        with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as _probe:
-            _probe.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
-            try:
-                _probe.bind((DEFAULT_HOST_SERVICE_HOST, host_port))
-            except OSError as bind_exc:
-                raise RuntimeError(
-                    f"Host Service port {host_port} is busy: {bind_exc}"
-                ) from bind_exc
+        # Bind before starting the asyncio task: uvicorn's bind-error SystemExit
+        # otherwise escapes run_forever and kills the main server. Keep that
+        # socket, removing the former probe-close/rebind race as well.
+        host_socket = host_service_listener.enter_context(bound_service_socket(
+            lifespan_drive_root, "host_service", DEFAULT_HOST_SERVICE_HOST, host_port))
         host_service_config = uvicorn.Config(
             host_service_app,
             host=DEFAULT_HOST_SERVICE_HOST,
@@ -1316,11 +1309,13 @@ async def lifespan(app):
         )
         host_service_server = uvicorn.Server(host_service_config)
         host_service_task = asyncio.create_task(
-            host_service_server.serve(),
+            host_service_server.serve(sockets=[host_socket]),
             name="host-service-api",
         )
+        host_service_task.add_done_callback(lambda _task: host_service_listener.close())
         log.info("Host Service API listening on %s:%d", DEFAULT_HOST_SERVICE_HOST, host_port)
     except Exception:
+        host_service_listener.close()
         log.warning("Failed to start Host Service API", exc_info=True)
 
     try:
@@ -1408,6 +1403,7 @@ async def lifespan(app):
                 host_service_task.cancel()
                 with suppress(asyncio.CancelledError, asyncio.TimeoutError):
                     await asyncio.wait_for(host_service_task, timeout=2)
+        host_service_listener.close()
         ws_heartbeat_task.cancel()
         with suppress(asyncio.CancelledError):
             await ws_heartbeat_task
@@ -1602,9 +1598,6 @@ def main() -> int:
     if actual_port != args.port:
         log.info("Port %d busy on %s, using %d instead", args.port, args.host, actual_port)
     global _ACTUAL_BOUND_PORT
-    _ACTUAL_BOUND_PORT = actual_port
-    write_port_file(PORT_FILE, actual_port)
-    log.info("Starting Ouroboros server on %s:%d", args.host, actual_port)
     config = uvicorn.Config(
         app,
         host=args.host,
@@ -1647,7 +1640,11 @@ def main() -> int:
     threading.Thread(target=_check_restart, daemon=True).start()
 
     try:
-        server.run()
+        with bound_service_socket(DATA_DIR, "main", args.host, actual_port) as listener:
+            actual_port = _ACTUAL_BOUND_PORT = listener.getsockname()[1]
+            write_port_file(PORT_FILE, actual_port)
+            log.info("Starting Ouroboros server on %s:%d", args.host, actual_port)
+            server.run(sockets=[listener])
     finally:
         _uvicorn_exited.set()
 

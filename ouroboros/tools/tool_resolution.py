@@ -416,6 +416,10 @@ def _build_builtin_target_binding(ctx: Any, name: str, args: dict[str, Any]) -> 
             skill_name=str(args.get("skill_name") or ""),
         )
     root = str(args.get("root") or "active_workspace")
+    if name in {"edit_batch", "apply_patch"} and root not in {"active_workspace", "system_repo"}:
+        # The repo-only handler owns this typed argument refusal. Resolving an
+        # unsupported payload first would ask for selectors it cannot accept.
+        return None
     bucket = str(args.get("bucket") or "")
     skill_name = str(args.get("skill_name") or "")
 

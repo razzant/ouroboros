@@ -685,9 +685,9 @@ def test_verify_and_record_check_is_shell_guarded_against_subagent_secret_read()
 
     reg = ToolRegistry(repo_dir=".", drive_root=tempfile.mkdtemp())
     reg._ctx.task_constraint = TaskConstraint(mode="acting_subagent", surface="external_workspace", write_root=tempfile.mkdtemp())
-    mapped = process_shell_guard_args("verify_and_record", {"check": "cat data/settings.json", "cwd": ""})
-    # v6.51.0: normalized via the SSOT (non-login `sh -c`); the guard still inspects the inner command.
-    assert mapped["cmd"] == ["sh", "-c", "cat data/settings.json"]
+    mapped = process_shell_guard_args("verify_and_record", {"check": ["cat", str(Path(reg._ctx.drive_root) / "settings.json")], "cwd": ""})
+    # The shared process guard sees the exact physical path on every platform.
+    assert mapped["cmd"] == ["cat", str(Path(reg._ctx.drive_root) / "settings.json")]
     block = _shell_guard_text(reg, mapped, "advanced")
     assert block and "SECRET" in block.upper()
 

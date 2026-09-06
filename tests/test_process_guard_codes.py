@@ -205,7 +205,7 @@ def test_subagent_secret_denial_precedes_safety_and_handler(tmp_path, monkeypatc
 
     result = registry.execute_result(
         "run_command",
-        {"cmd": ["cat", "data/settings.json"]},
+        {"cmd": ["cat", str(data / "settings.json")]},
     )
 
     assert (result.status, result.code) == (

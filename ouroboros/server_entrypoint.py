@@ -3,8 +3,13 @@
 from __future__ import annotations
 
 import argparse
+from contextlib import contextmanager
+import logging
+import os
 import pathlib
 import socket
+
+log = logging.getLogger(__name__)
 
 
 def _can_bind_port(host: str, port: int) -> bool:
@@ -59,3 +64,35 @@ def parse_server_args(default_host: str, default_port: int) -> argparse.Namespac
 def write_port_file(port_file: pathlib.Path, port: int) -> None:
     port_file.parent.mkdir(parents=True, exist_ok=True)
     port_file.write_text(str(port), encoding="utf-8")
+
+
+@contextmanager
+def bound_service_socket(drive_root: pathlib.Path, service: str, host: str, port: int):
+    """Keep the actual bound socket and its informational identity in one lifetime.
+
+    The existing port selector chooses the port. Uvicorn accepts this socket on
+    Linux, macOS and Windows; no second probe/rebind race or process authority.
+    """
+    from ouroboros.server_process import clear_service_binding, record_service_binding
+
+    family = socket.AF_INET6 if ":" in host else socket.AF_INET
+    sock = socket.socket(family, socket.SOCK_STREAM)
+    binding = None
+    try:
+        sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+        sock.bind((host, port))
+        address = sock.getsockname()
+        try:
+            binding = record_service_binding(drive_root, service, address[0], address[1], pid=os.getpid())
+        except Exception:
+            # Endpoint discovery is informational. Main still writes its actual
+            # port, which keeps restricted browsers conservative on this address.
+            log.warning("Could not record %s service binding; continuing with the bound socket", service, exc_info=True)
+        yield sock
+    finally:
+        sock.close()
+        if binding is not None:
+            try:
+                clear_service_binding(drive_root, service, binding)
+            except Exception:
+                log.warning("Could not retire %s service binding", service, exc_info=True)

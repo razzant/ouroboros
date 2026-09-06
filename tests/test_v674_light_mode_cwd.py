@@ -183,12 +183,11 @@ def test_light_mode_versioned_interpreter_triggers_runtime_data_scan(tmp_path, m
     secret = pathlib.Path(reg._ctx.drive_root) / "settings.json"
     read_cmd = f"import pathlib; print(pathlib.Path({str(secret)!r}).read_text())"
 
-    result = reg.execute("run_command", {"cmd": ["python3.11", "-c", read_cmd]})
-    assert "LIGHT_MODE_BLOCKED" in result, result[:300]
-    assert "runtime_data paths outside this task's own roots" in result, result[:300]
-    assert "settings.json" in result, result[:300]
+    result = reg.execute_result("run_command", {"cmd": ["python3.11", "-c", read_cmd]})
+    assert (result.status, result.code) == ("blocked", "LIGHT_MODE_BLOCKED")
+    assert str(secret) in result.text
 
     # Parity pin: the unversioned spelling of the same command is blocked the
     # same way — the versioned basename must not be the weaker path.
-    unversioned = reg.execute("run_command", {"cmd": ["python", "-c", read_cmd]})
-    assert "LIGHT_MODE_BLOCKED" in unversioned, unversioned[:300]
+    unversioned = reg.execute_result("run_command", {"cmd": ["python", "-c", read_cmd]})
+    assert (unversioned.status, unversioned.code) == (result.status, result.code)
