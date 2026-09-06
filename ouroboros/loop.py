@@ -587,7 +587,6 @@ def run_llm_loop(
                     error_kind=str(accumulated_usage.get("_last_llm_error_kind") or "provider_unavailable"),
                     wait_cause=transport_wait.wait_cause if transport_wait is not None else "",
                     waited_sec=transport_wait.waited_sec if transport_wait is not None else 0.0,
-                    control_reason=str(getattr(tools._ctx, "_transport_repeat_control_reason", "") or ""),
                     interactive=transport_wait.interactive if transport_wait is not None else False)
                 _merge_finalization_trace(llm_trace, forced_trace)
                 return text, accumulated_usage, llm_trace

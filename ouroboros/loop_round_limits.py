@@ -379,11 +379,15 @@ def _handle_owner_stop_finalization(
 def _handle_provider_unavailable(
     ctx: _RoundLimitContext, *, error_kind: str = "provider_unavailable",
     wait_cause: str = "", waited_sec: float = 0.0, interactive: bool = False,
-    control_reason: str = "",
+    control_reason: Optional[str] = None,
 ) -> Tuple[str, Dict[str, Any], Dict[str, Any]]:
     """Provider-death rail wrapper: every arm carries terminal provenance.
     The forced-finalization sink stamps ``host_notice``; retained/generated
-    model candidates stamp ``model_final``."""
+    model candidates stamp ``model_final``. Read the recognized control here
+    so ordinary and delegated-hold terminal paths share the same cause."""
+    if control_reason is None:
+        owner_ctx = getattr(ctx.tools, "_ctx", None)
+        control_reason = str(getattr(owner_ctx, "_transport_repeat_control_reason", "") or "")
     text, usage, llm_trace = _loop()._provider_unavailable_result(
         ctx, error_kind=error_kind, wait_cause=wait_cause, waited_sec=waited_sec,
         interactive=interactive, control_reason=control_reason,

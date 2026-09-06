@@ -164,3 +164,36 @@ def test_paid_repeat_empty_peek_reuses_existing_wait_proof(tmp_path, monkeypatch
     assert loop_transport.transport_repeat_stop_requested(ctx, mailbox_peek=peek)
     assert ctx._transport_repeat_control_reason == REASON_OWNER_STOPPED_DIRECT_TURN
     assert ctx._loop_mailbox_seen_ids == {"old"}
+
+
+@pytest.mark.parametrize("with_leaf", [False, True])
+def test_wrapup_reason_survives_the_live_delegate_hold(tmp_path, monkeypatch, with_leaf):
+    from ouroboros import claudexor_daemon, delegate_custody, delegate_progress
+    from tests.test_delegate_hold import _configured_registry, _start_leaf, _loop_kwargs as hold_kwargs
+
+    monkeypatch.setenv("OUROBOROS_TASK_REVIEW_MODE", "off")
+    monkeypatch.delenv("USE_LOCAL_FALLBACK", raising=False)
+    registry = _configured_registry(tmp_path, task_id="t-death")
+    registry._ctx.budget_drive_root = tmp_path
+    registry._ctx.task_attempt = 1
+    if with_leaf:
+        _start_leaf(tmp_path, task_id="t-death", run_id="fixture-leaf")
+
+    def death():
+        intent = cancel_intents.request_cancel(tmp_path, "t-death", requested_stop_policy=cancel_intents.STOP_POLICY_FINALIZE)
+        owner_mailbox.write_owner_message(tmp_path, REASON_OWNER_REQUESTED_FINALIZATION, "t-death",
+            msg_id=owner_stop_control_id(intent), kind=owner_mailbox.KIND_FINALIZE_NOW)
+        return httpx.ReadError("controlled post-dispatch failure")
+
+    llm = _LedgerLLM(tmp_path, death)
+    kwargs = hold_kwargs(tmp_path, registry, [])
+    kwargs["llm"] = llm
+    monkeypatch.setattr(claudexor_daemon, "ensure_owned_gateway", lambda **kw: SimpleNamespace(close=lambda: None))
+    monkeypatch.setattr(delegate_progress, "bounded_poll", lambda *a, **kw: {"summary": {"state": "running"}})
+    monkeypatch.setattr(delegate_custody, "release_task_runs", lambda *a, **kw: None)
+    with accounting.usage_scope(accounting.UsageScope(
+            drive_root=tmp_path, task_id="t-death", root_task_id="t-death", global_limit_usd=100.0)):
+        _text, usage, _trace = loop.run_llm_loop(**kwargs)
+    assert llm.calls == 1
+    assert accounting.usage_projection(tmp_path)["unresolved_upper_bound_usd"] == 1.0
+    assert "owner requested Wrap up" in usage["terminal_provider_notice"]
