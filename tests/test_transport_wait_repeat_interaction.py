@@ -51,7 +51,7 @@ def no_sleep(monkeypatch):
     """The repeat rail's backoff sleeps, recorded instead of slept (as in the
     transport-death suite; a fixture is defined where it is used)."""
     sleeps = []
-    monkeypatch.setattr(call_mod, "_sleep_within_deadline", lambda sec, _dl: (sleeps.append(sec), True)[1])
+    monkeypatch.setattr(call_mod, "_sleep_within_deadline", lambda sec, _dl, **_kw: (sleeps.append(sec), True)[1])
     return sleeps
 
 

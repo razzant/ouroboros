@@ -406,6 +406,8 @@ def _dispatch_round_model(
     attempt_cap: Optional[int],
     candidate_predicate: Optional[Callable[[Any], Any]] = None,
 ) -> Tuple[Any, float]:
+    from ouroboros.loop_transport import transport_repeat_stop_requested
+
     return _loop().call_llm_with_retry(
         ctx.llm,
         ctx.messages,
@@ -424,6 +426,7 @@ def _dispatch_round_model(
         transport_reserve_sec=task_pacing.get_finalization_grace_sec(),
         attempt_cap=attempt_cap,
         transport_death_retries=_TRANSPORT_DEATH_RETRIES if attempt_cap is None else 0,
+        stop_retry_check=(lambda: transport_repeat_stop_requested(ctx.tools._ctx)) if attempt_cap is None else None,
         allow_server_web_search=_loop()._server_web_allowed_by_task(ctx.tools._ctx),
         physical_context=(
             _physical_context_for_fit(disposition) if disposition is not None else None

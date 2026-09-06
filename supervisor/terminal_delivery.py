@@ -704,7 +704,7 @@ def build_completed_result_event(
         pathlib.Path(drive_root), task_row, tid,
         result_text=core_text,
         terminal_origin=(stored or {}).get("terminal_origin"),
-        base_event=event,
+        base_event=event, provider_notice=str((stored or {}).get("terminal_provider_notice") or ""),
     )
 
 
@@ -716,6 +716,7 @@ def project_terminal_result_event(
     result_text: str,
     terminal_origin: Any,
     base_event: Optional[Dict[str, Any]] = None,
+    provider_notice: str = "",
 ) -> Dict[str, Any]:
     """Project one terminal event from producer-stamped origin.
 
@@ -738,8 +739,10 @@ def project_terminal_result_event(
     origin = str(terminal_origin or "")
     if origin in HOST_AUTHORED_TERMINAL_ORIGINS:
         salvage = origin == TERMINAL_ORIGIN_HOST_SALVAGE
+        receipt = (provider_notice + "\n\nThe full intermediate output and technical details are preserved "
+                   "in the task details.") if provider_notice else _HOST_SALVAGE_RECEIPT
         event.update({
-            "text": _HOST_SALVAGE_RECEIPT if salvage else (event.get("text") or core_text),
+            "text": receipt if salvage else (event.get("text") or core_text),
             "role": "system",
             "terminal_origin": origin,
             **({"system_type": "terminal_incident"} if salvage else {}),

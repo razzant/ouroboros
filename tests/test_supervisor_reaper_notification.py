@@ -99,8 +99,8 @@ def test_reaper_delivered_terminal_with_popped_running_row_still_notifies(
     """Path (b), the proven bug: the reaper loop pops RUNNING before the reap
     job's task_done dispatches, so the FIRST and only delivery arrives with
     task={} — the old `and task` gate swallowed the notification entirely.
-    Also pins the wording: the resume endpoint only serves budget-paused
-    PENDING tasks, so the message promises re-run and never resume."""
+    Also pins the wording: neither resume nor a blind re-run is promised;
+    the preserved facts must be inspected before another run."""
     sent, make_ctx = sent_and_ctx
 
     events_mod._finish_task_done_dispatch(
@@ -112,7 +112,8 @@ def test_reaper_delivered_terminal_with_popped_running_row_still_notifies(
     lines = _outage_lines(sent)
     assert lines, "reaper-delivered provider-death terminal must notify the owner"
     assert "NOT completed" in lines[0]
-    assert "re-run" in lines[0]
+    assert "inspect the task details before starting another run" in lines[0]
+    assert "re-run" not in lines[0]
     assert "resume" not in lines[0]
 
 
@@ -230,9 +231,9 @@ def test_provider_incident_is_system_unkeyed_and_host_salvage_suppresses_duplica
     assert len(sent) == 1
     _chat, text, kwargs = sent[0]
     assert text == (
-        "🔌 Task root-origin was stopped by a model-provider outage and was "
-        "NOT completed. Partial work and workspace files are preserved; "
-        "re-run the task once the provider recovers.\n\n"
+        "🔌 Task root-origin was NOT completed.\n\n"
+        "A model-provider outage stopped this task. Partial work and workspace files "
+        "are preserved; inspect the task details before starting another run.\n\n"
         "Plan review was still open when the outage forced finalization; "
         "its details remain in the task."
     )

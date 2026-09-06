@@ -1097,7 +1097,7 @@ class TestWrapupAffordabilityRail:
 
 
 class TestOneCeilingPerTree:
-    """Every member stays at or below its root's deciding money number."""
+    """Enabled members keep the proved original root's early stop number."""
 
     def _profile(self):
         return normalize_budget_profile(None)
@@ -1110,9 +1110,10 @@ class TestOneCeilingPerTree:
         )
 
         assert "global_pct" in root.basis
-        assert "global_pct" in member.basis
+        assert "root_resolved_ceiling" in member.basis
+        assert "global_pct" not in member.basis
         assert "non_root_member" in member.basis
-        assert member.ceiling_usd <= root.ceiling_usd == 5.0
+        assert member.ceiling_usd == root.ceiling_usd == 5.0
 
     def test_a_child_scope_carries_the_root_resolved_ceiling(self):
         from ouroboros.usage_accounting import UsageScope, usage_scope
@@ -1137,7 +1138,7 @@ class TestOneCeilingPerTree:
         assert task["root_cost_ceiling_usd"] == 5.0
         assert task["metadata"]["root_cost_ceiling_usd"] == 5.0
 
-    def test_a_descendant_tightens_when_global_remaining_falls(self):
+    def test_legacy_missing_carrier_keeps_a_disclosed_local_resolution(self):
         early = task_pacing.resolve_cost_ceiling(
             40.0, self._profile(), root_cap_usd=50.0, non_root_member=True,
         )
@@ -1146,6 +1147,7 @@ class TestOneCeilingPerTree:
         )
 
         assert late.ceiling_usd < early.ceiling_usd
+        assert "original_root_ceiling_unavailable" in late.basis
 
     def test_without_a_root_cap_the_global_component_still_binds(self):
         member = task_pacing.resolve_cost_ceiling(

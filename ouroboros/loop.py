@@ -220,6 +220,7 @@ def _setup_dynamic_tools(tools_registry, tool_schemas, messages):
 def _provider_unavailable_result(
     ctx: _RoundLimitContext, *, error_kind: str = "provider_unavailable",
     wait_cause: str = "", waited_sec: float = 0.0, interactive: bool = False,
+    control_reason: str = "",
 ) -> Tuple[str, Dict[str, Any], Dict[str, Any]]:
     """Salvage provider failure without an unsafe retry. ``wait_cause`` is the
     transport-wait episode's latched cause (survives later overwrites of the
@@ -235,6 +236,18 @@ def _provider_unavailable_result(
     is_deadline_exhausted = kind == "deadline_exhausted" or str(ctx.accumulated_usage.get("_last_llm_error_kind") or "") == "deadline_exhausted"
     llm_trace = getattr(ctx, "llm_trace", None)
     llm_trace = llm_trace if isinstance(llm_trace, dict) else {}
+
+    def with_terminal_notice(text, usage, trace):
+        # Host presentation is separate from the byte-exact model/salvage result.
+        # Use the final usage facts: a forced call can itself end unresolved.
+        if str(usage.get("reason_code") or "") not in {"", "deadline_local"}:
+            usage["terminal_provider_notice"] = _provider_terminal_fallback_text(
+                usage, is_context_overflow=is_context_overflow, is_transport_wait=is_transport_wait,
+                waited_sec=waited_sec, interactive=interactive,
+                is_deadline_exhausted=is_deadline_exhausted, control_reason=control_reason,
+            )
+        return text, usage, trace
+
     candidate = _live_delivery_candidate(ctx)
     salvaged = candidate.full_text if candidate is not None else _last_assistant_text(ctx.messages)
     if candidate is None and not salvaged and ctx.drive_root is not None:
@@ -251,6 +264,7 @@ def _provider_unavailable_result(
             is_transport_wait=is_transport_wait, waited_sec=waited_sec,
             interactive=interactive,
             is_deadline_exhausted=is_deadline_exhausted,
+            control_reason=control_reason,
         )
     if is_context_overflow:
         text, usage, llm_trace = _forced_fallback_result(
@@ -262,7 +276,7 @@ def _provider_unavailable_result(
             reason_code="llm_api_error",
             _last_llm_error_kind="context_overflow",
         )
-        return text, usage, llm_trace
+        return with_terminal_notice(text, usage, llm_trace)
     if is_transport_wait:
         # No-resend terminal over dead egress.
         ctx.accumulated_usage.update(execution_status=RESULT_INFRA_FAILED, reason_code="provider_unavailable")
@@ -272,7 +286,7 @@ def _provider_unavailable_result(
         )
         if usage.get("reason_code") == "provider_unavailable":
             usage["execution_status"] = RESULT_INFRA_FAILED
-        return text, usage, llm_trace
+        return with_terminal_notice(text, usage, llm_trace)
     no_call, wall = provider_no_call_source(ctx.accumulated_usage, is_deadline_exhausted)
     if no_call:
         if wall:
@@ -284,7 +298,7 @@ def _provider_unavailable_result(
         )
         if usage.get("execution_status") is not None:
             usage.update(execution_status=RESULT_INFRA_FAILED, reason_code="provider_unavailable")
-        return text, usage, llm_trace
+        return with_terminal_notice(text, usage, llm_trace)
     prompt = (
         "[DEADLINE] Primary model work reached the owner deadline. Produce the best final answer now from verified work and state what remains undone."
         if is_deadline_exhausted else
@@ -299,7 +313,7 @@ def _provider_unavailable_result(
     )
     if not is_deadline_exhausted and usage.get("reason_code") == "provider_unavailable":
         usage["execution_status"] = RESULT_INFRA_FAILED
-    return text, usage, llm_trace
+    return with_terminal_notice(text, usage, llm_trace)
 
 
 def _apply_runtime_overrides(

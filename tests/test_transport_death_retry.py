@@ -107,7 +107,7 @@ def _events(drive_logs, kind: str):
 @pytest.fixture
 def no_sleep(monkeypatch):
     sleeps = []
-    monkeypatch.setattr(call_mod, "_sleep_within_deadline", lambda sec, _dl: (sleeps.append(sec), True)[1])
+    monkeypatch.setattr(call_mod, "_sleep_within_deadline", lambda sec, _dl, **_kw: (sleeps.append(sec), True)[1])
     return sleeps
 
 
