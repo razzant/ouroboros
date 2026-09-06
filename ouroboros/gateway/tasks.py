@@ -131,11 +131,10 @@ def _cleanup_api_admission_attempt(
 
 
 def _external_subagent_label(body: Dict[str, Any], metadata: Dict[str, Any]) -> bool:
-    role_values = [
-        body.get("delegation_role"),
-        metadata.get("delegation_role"),
-    ]
-    return any(str(value or "").strip().lower() == "subagent" for value in role_values)
+    return any(
+        str(source.get("delegation_role") or "").strip().lower() == "subagent"
+        for source in (body, metadata)
+    )
 
 
 def _normalize_deadline_at(value: Any) -> str:
