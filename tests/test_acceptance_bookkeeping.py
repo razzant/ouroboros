@@ -138,9 +138,10 @@ def test_canonical_source_survives_actual_child_copyback_and_cleanup(tmp_path, m
         assert artifacts.task_artifact_dir_path(canonical, "applied").joinpath("notes.lock").read_bytes() == b"user deliverable"
 
 
-@pytest.mark.parametrize("status", ["ready", "pending", "finalizing", "failed", "ready_no_changes"])
-def test_existing_bookkeeping_projection_preserves_independent_states(status):
-    review = {"name": "acceptance.json", "kind": "task_acceptance_review", "status": "ready"}
+@pytest.mark.parametrize("status", ["ready", "pending", "finalizing", "failed", "partial", "missing", "ready_no_changes"])
+@pytest.mark.parametrize("kind", ["task_acceptance_review", "task_completion_observations"])
+def test_existing_bookkeeping_projection_preserves_independent_states(status, kind):
+    review = {"name": "source.json", "kind": kind, "status": "ready"}
     row = {"artifacts": [review], "artifact_status": status,
            "artifact_bundle": {"artifacts": [review], "status": status},
            "outcome_axes": {"artifacts": {"status": status}}}
@@ -173,7 +174,7 @@ def test_stale_review_only_replica_does_not_restore_ready_status(tmp_path):
     assert (artifacts.task_artifact_dir_path(canonical, "applied") / source["path"]).read_bytes() == b"canonical source"
 
 
-def test_unregistered_review_names_and_completion_custody_are_not_filtered(tmp_path):
+def test_unregistered_review_names_remain_deliverables_but_registered_sources_do_not(tmp_path):
     store = artifacts.task_artifact_dir_path(tmp_path, "applied", create=True)
     (store / "acceptance-user.json").write_text("user file", encoding="utf-8")
     (store / "notes.lock").write_text("user lock", encoding="utf-8")
@@ -184,7 +185,10 @@ def test_unregistered_review_names_and_completion_custody_are_not_filtered(tmp_p
     (nested / "acceptance-host.json").write_text("unregistered same basename", encoding="utf-8")
     records = artifacts.collect_task_artifact_records(tmp_path, "applied")
     assert {row["path"] for row in records} == {str(store / "acceptance-user.json"), str(store / "notes.lock"),
-                                               str(store / "completion.json"), str(nested / "acceptance-host.json")}
+                                               str(nested / "acceptance-host.json")}
+    assert (store / "completion.json").read_bytes() == b"retained555"
+    assert {row["kind"] for row in artifacts.collect_task_artifact_records(tmp_path, "applied", include_bookkeeping=True)} >= {
+        "task_completion_observations", "task_acceptance_review"}
 
 
 def test_materialized_user_artifact_outweighs_stale_review_only_readiness(tmp_path):

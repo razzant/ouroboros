@@ -274,8 +274,10 @@ def _wait_attention_poll(
     """
     # tree_note/tree_read live in ouroboros/tools/task_tree.py (extracted for module size).
     from ouroboros.tools.task_tree import tree_root_id
+    from ouroboros.owner_mailbox import OwnerMailboxPeek
 
     rid = tree_root_id(ctx)
+    mailbox_peek = OwnerMailboxPeek()
 
     cursor_store = getattr(ctx, "_wait_attention_cursors", None)
     if not isinstance(cursor_store, dict):
@@ -309,6 +311,7 @@ def _wait_attention_poll(
         if _owner_signal_pending(
             None, getattr(ctx, "drive_root", None), str(getattr(ctx, "task_id", "") or ""),
             getattr(ctx, "_loop_mailbox_seen_ids", None), getattr(ctx, "task_attempt", None) or 1,
+            mailbox_peek,
         ):
             return {"reason": "owner_mailbox_pending", "delivery": "pending_loop_drain"}
         if not rid:

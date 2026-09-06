@@ -1184,12 +1184,12 @@ def copy_directory_to_task_artifacts(
 
 
 def is_task_bookkeeping_artifact(record: Any) -> bool:
-    """Registered review custody is readable source material, not a deliverable."""
-    return isinstance(record, dict) and record.get("kind") == "task_acceptance_review"
+    """Registered review/completion custody is readable source, not a deliverable."""
+    return isinstance(record, dict) and record.get("kind") in {"task_acceptance_review", "task_completion_observations"}
 
 
 def project_deliverable_artifacts(result: Dict[str, Any]) -> Dict[str, Any]:
-    """Remove review-only records from result views without deleting their sources.
+    """Remove bookkeeping records from result views without deleting their sources.
 
     Older in-flight replicas may already carry these records and inferred ready
     statuses. Only that derived ready status is neutralized; real artifacts and

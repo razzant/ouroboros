@@ -313,7 +313,7 @@ def build_completion_observations(drive_root: Any, task: Dict[str, Any], trace: 
     raw = json.dumps(snapshot, ensure_ascii=False, sort_keys=True, default=str).encode("utf-8")
     try:
         projection["source_ref"] = store_task_artifact_bytes(
-            drive_root, str(task.get("id") or ""), f"completion-{hashlib.sha256(raw).hexdigest()}.json",
+            task.get("budget_drive_root") or drive_root, str(task.get("id") or ""), f"completion-{hashlib.sha256(raw).hexdigest()}.json",
             raw, kind="task_completion_observations",
         )
         projection["source_status"] = "available"
@@ -340,7 +340,6 @@ def build_sealed_final_package(result_row: Any, final_text: str) -> Dict[str, An
          "status": str(record.get("status") or "")}
         for record in (artifact_bundle_from_result(row).get("artifacts") or [])
         if isinstance(record, dict) and record.get("name")
-        and record.get("kind") not in {"task_completion_observations", "task_acceptance_review"}
     ]
     omitted = max(0, len(manifest) - _SEALED_MANIFEST_MAX_FILES)
     return {

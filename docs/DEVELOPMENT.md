@@ -1682,13 +1682,18 @@ owner, owed terminal delivery, cascade postconditions — lives in ARCHITECTURE
   the existing transport-wait reader. A pending message returns control without
   acknowledging it or stopping children; the ordinary round-top drain delivers
   and acknowledges it. Read the actor's execution drive, not its budget root.
+  One wait/transport episode may retain only a successfully proved empty mailbox:
+  compare both mailbox/ACK fingerprints before and after the existing full reader,
+  plus execution root, task, attempt and seen ids. Read/parse/stat failure or torn
+  data is not proof; never cache it. Check the in-memory incoming queue every tick.
+  A changed source re-enters the full revocation-aware reader; no TTL or ACK in peek.
 - Cancellation observations use `task_status.observe_cancellation_target` before
   the existing intent write. They name the resolved physical target, separate
   task-result update/start facts from queue freshness, and optionally include
   recorded delegated execution. These are separate source observations, not an
   atomic snapshot. Caller reason and request origin are distinct; an HTTP client
-  is not proof of personal owner intent. A later target mismatch is disclosed,
-  never used to change cancellation authority or completion-wins behavior.
+  is not proof of personal owner intent. A later target mismatch is disclosed.
+  Keep cancellation authority and completion-wins independent of these observations.
 - Cancel INTENT is never a status value. Every cancel ingress writes a durable
   intent through `ouroboros/cancel_intents.request_cancel` and FAILS CLOSED
   when that write fails: a cancel without a durable, watchdog-replayable
@@ -2181,7 +2186,9 @@ by "Provider Independence" above. Call-site imperatives:
   writers' fields. Test delayed snapshots and child replicas through the same
   central merge, and verify that the full source downloads while the task is
   still running. Registered review bookkeeping remains downloadable without entering
-  user deliverables or making an otherwise artifact-free task ready. Preserve that
+  user deliverables or making an otherwise artifact-free task ready. Completion
+  observations use the same classifier only after canonical-first full-source
+  persistence (`task.budget_drive_root or drive_root`). Preserve that
   distinction through effective reads and child copy-back; terminal references must
   carry the task's chat id, including zero. A missing source is disclosed, never reconstructed from a
   bounded preview. Source/capacity, publication order and paid identity are

@@ -1063,7 +1063,7 @@ def test_promote_event_enqueues_first_class_task(tmp_path, monkeypatch):
     assert task["id"] == "abc12345"
     assert task["type"] == "task"
     assert task["project_id"] == "research-1"
-    assert "delegation_role" not in task
+    assert (task["delegation_role"], task["root_task_id"]) == ("root", task["id"])
     assert "_is_direct_chat" not in task
     assert "Expected output: A summary" in task["text"]
     # The project got registered as a side effect, and the promoted task runs in
