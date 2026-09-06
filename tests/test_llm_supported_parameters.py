@@ -58,6 +58,110 @@ def _install_fake_response(monkeypatch, data: dict[str, Any]) -> dict[str, int]:
 
 
 class TestSupportedParametersFilter:
+    @pytest.mark.parametrize("model", ["anthropic/claude-fable-5.1", "vendor/future-model"])
+    @pytest.mark.parametrize("no_proxy", [False, True])
+    @pytest.mark.parametrize("known_metadata", [False, True])
+    def test_chat_omits_neutral_choice_before_physical_binding(
+        self, monkeypatch, tmp_path, model, no_proxy, known_metadata,
+    ):
+        """An ordinary tool request must survive a catalog without tool_choice."""
+        import copy
+        from types import SimpleNamespace
+
+        from ouroboros import request_wire_contract, usage_accounting
+        from ouroboros.llm import LLMClient
+        from ouroboros.request_wire_recovery import current_wire_candidate
+        from ouroboros.usage_accounting import UsageScope, usage_scope
+
+        monkeypatch.setattr(request_wire_contract, "canonical_wire_evidence_root", lambda: tmp_path)
+        monkeypatch.setattr(usage_accounting, "estimate_cost_optional", lambda *a, **kw: 0.0)
+        monkeypatch.setenv("OUROBOROS_OR_PROVIDER", '{"require_parameters":true,"allow_fallbacks":true}')
+        client = LLMClient(api_key="test")
+        supported = {"tools", "reasoning", "max_tokens"} if known_metadata else None
+        monkeypatch.setattr(client, "_get_supported_parameters", lambda _model: supported)
+        # no_proxy deliberately skips a network fetch, but still uses a warm cache.
+        monkeypatch.setattr(LLMClient, "_SUPPORTED_PARAMS_FETCHED", known_metadata)
+        if known_metadata:
+            LLMClient._SUPPORTED_PARAMS_CACHE[model] = supported
+        tool = {"type": "function", "function": {
+            "name": "probe", "description": "Record a probe.",
+            "parameters": {"type": "object", "properties": {}},
+        }}
+        sent = []
+
+        class ParameterRejection(RuntimeError):
+            status_code = 404
+            body = {"error": {
+                "code": 404,
+                "message": "No endpoints found that can handle the requested parameters",
+                "metadata": {"failed_routing_step": "Filter by Parameters"},
+            }}
+
+        class Response:
+            def model_dump(self):
+                return {"model": model, "provider": "Test provider", "choices": [{
+                    "finish_reason": "tool_calls", "message": {
+                        "role": "assistant", "content": None,
+                        "tool_calls": [{"id": "call-probe", "type": "function",
+                                        "function": {"name": "probe", "arguments": "{}"}}],
+                    },
+                }], "usage": {"prompt_tokens": 11, "completion_tokens": 2, "cost": 0.0}}
+
+        def create(**payload):
+            sent.append(copy.deepcopy(payload))
+            if "tool_choice" in payload:
+                raise ParameterRejection(ParameterRejection.body["error"]["message"])
+            candidate = current_wire_candidate()
+            assert candidate.source_profile.tool_choice == "omitted"
+            assert candidate.accepted_profile.tool_choice == "omitted"
+            return Response()
+
+        remote = SimpleNamespace(chat=SimpleNamespace(completions=SimpleNamespace(create=create)))
+        monkeypatch.setattr(client, "_get_remote_client", lambda _target: remote)
+        monkeypatch.setattr(client, "_make_no_proxy_client", lambda _target, timeout=None: (
+            remote, SimpleNamespace(close=lambda: None),
+        ))
+        with usage_scope(UsageScope(drive_root=tmp_path, task_id="neutral-choice")):
+            message, usage = client.chat(
+                messages=[{"role": "user", "content": "Call probe."}], model=model,
+                tools=[tool], reasoning_effort="medium", no_proxy=no_proxy,
+            )
+        assert len(sent) == 1
+        assert sent[0]["model"] == model
+        assert sent[0]["tools"][0]["function"] == tool["function"]
+        assert sent[0]["extra_body"]["provider"] == {
+            "require_parameters": True, "allow_fallbacks": True,
+        }
+        assert sent[0]["extra_body"]["reasoning"]["effort"] == "medium"
+        assert sent[0]["max_tokens"] == 65536
+        assert message["tool_calls"][0]["function"]["name"] == "probe"
+        assert usage["request_wire"]["applied_actions"] == []
+        assert len(usage["ledger_attempt_ids"]) == 1
+
+    @pytest.mark.parametrize("choice", [
+        "none", "required", {"type": "function", "function": {"name": "probe"}},
+    ])
+    def test_explicit_tool_choice_survives_missing_catalog_support(self, monkeypatch, choice):
+        from ouroboros.llm import LLMClient
+        from ouroboros.request_wire_recovery import prepare_wire_payload_for_send, request_wire_call_scope
+
+        client = LLMClient(api_key="test")
+        monkeypatch.setattr(client, "_get_supported_parameters", lambda _model: {
+            "tools", "reasoning", "max_tokens",
+        })
+        target = client._resolve_remote_target("anthropic/claude-fable-5.1")
+        with request_wire_call_scope():
+            kwargs = client._build_remote_kwargs(
+                target=target, messages=[{"role": "user", "content": "probe"}],
+                reasoning_effort="medium", max_tokens=65536, tool_choice=choice,
+                temperature=None, tools=[{"type": "function", "function": {
+                    "name": "probe", "parameters": {"type": "object", "properties": {}},
+                }}],
+            )
+            physical = prepare_wire_payload_for_send(target, kwargs, api_surface="chat.completions")
+        assert physical["tool_choice"] == choice
+        assert physical["extra_body"]["reasoning"]["effort"] == "medium"
+
     def test_temperature_stripped_for_unsupported_model(self, monkeypatch):
         from ouroboros.llm import LLMClient
         from ouroboros.request_wire_recovery import (

@@ -318,7 +318,9 @@ class _OpenAICompatibleLaneMixin:
             # (`_normalize_payload_cache_ttl`) — it is the only point that sees tools,
             # system and messages together and can order their TTLs.
             kwargs["tools"] = prepared_tools
-            kwargs["tool_choice"] = tool_choice
+            # OpenRouter's implicit default keeps neutral intent out of its parameter filter.
+            if tool_choice != "auto":
+                kwargs["tool_choice"] = tool_choice
 
         # With require_parameters, unsupported params cause OpenRouter 404s.
         # Unknown capabilities mean no stripping.
