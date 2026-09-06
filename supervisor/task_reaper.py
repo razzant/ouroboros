@@ -256,22 +256,19 @@ def _kill_and_confirm_worker_dead(proc: Any, worker_id: int, task_id: str) -> bo
     dead. The Variant-A invariant gates the terminal write + retry on the original being dead, so a
     final hard kill is attempted if the first did not confirm death, and an is_alive() that raises is
     treated as still-alive (fail-closed) — the caller then refuses to enqueue a colliding retry."""
-    from supervisor import queue as _q
-
     try:
-        from ouroboros.platform_layer import kill_pid_tree
+        from supervisor.worker_pool_lifecycle import kill_worker_tree
 
         # Spare deliberately-kept services so a timeout kill leaves verifier-facing services alive;
-        # they reparent to init and the custody reaper governs them.
-        _keep = _q._kept_service_pids()
+        # they reparent to init and the custody reaper governs them (daemon roots are always spared).
         if proc is not None:
             if getattr(proc, "pid", None):
-                kill_pid_tree(proc.pid, exclude_pids=_keep)
+                kill_worker_tree(proc.pid, keep_services=True)
             elif proc.is_alive():
                 proc.terminate()
             proc.join(timeout=5)
             if proc.is_alive() and getattr(proc, "pid", None):
-                kill_pid_tree(proc.pid, exclude_pids=_keep)
+                kill_worker_tree(proc.pid, keep_services=True)
                 proc.join(timeout=2)
     except Exception:
         log.warning("Reaper: failed to terminate worker %d for task %s", worker_id, task_id, exc_info=True)
@@ -284,10 +281,8 @@ def _kill_and_confirm_worker_dead(proc: Any, worker_id: int, task_id: str) -> bo
     except Exception:
         return False  # cannot confirm -> fail closed (treat as still alive)
     try:
-        from ouroboros.platform_layer import kill_pid_tree
-
         if getattr(proc, "pid", None):
-            kill_pid_tree(proc.pid, exclude_pids=_q._kept_service_pids())
+            kill_worker_tree(proc.pid, keep_services=True)
         proc.join(timeout=2)
         return not proc.is_alive()
     except Exception:

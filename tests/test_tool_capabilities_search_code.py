@@ -187,19 +187,22 @@ def test_search_code_registered():
     assert "search_code" in available
 
 
-def test_search_code_ripgrep_path_filters_protected_files(tmp_path, monkeypatch):
+@pytest.mark.parametrize("profile", ["local_readonly_subagent", "acting_subagent"])
+def test_search_code_ripgrep_path_filters_protected_files(tmp_path, monkeypatch, profile):
     """The rg fast path must receive only files that passed Ouroboros gates."""
     import json
     from ouroboros.contracts.task_constraint import TaskConstraint
     from ouroboros.tools.registry import ToolRegistry
-    from ouroboros.tool_capabilities import LOCAL_READONLY_SUBAGENT_MODE
 
     repo = tmp_path / "repo"
-    data = tmp_path / "data"
+    data = repo / "data"
     repo.mkdir()
     (repo / "safe.py").write_text("needle public\n", encoding="utf-8")
     (repo / "auth").mkdir()
-    (repo / "auth" / "secret.py").write_text("needle secret\n", encoding="utf-8")
+    (repo / "auth" / "secret.py").write_text("needle ordinary auth source\n", encoding="utf-8")
+    (data / "auth").mkdir(parents=True)
+    protected = data / "auth" / "secret.py"
+    protected.write_text("needle runtime private bytes\n", encoding="utf-8")
     seen = tmp_path / "seen.json"
     fake_rg_py = tmp_path / "fake_rg.py"
     fake_rg_py.write_text(
@@ -224,11 +227,14 @@ def test_search_code_ripgrep_path_filters_protected_files(tmp_path, monkeypatch)
     monkeypatch.setattr("ouroboros.code_search_rg._rg_binary", lambda: str(fake_rg))
 
     registry = ToolRegistry(repo_dir=repo, drive_root=data)
-    registry._ctx.task_constraint = TaskConstraint(mode=LOCAL_READONLY_SUBAGENT_MODE)
+    registry._ctx.task_constraint = TaskConstraint(mode=profile, write_root=str(repo), surface="external_workspace")
     result = registry.execute("search_code", {"query": "needle"})
     assert "safe.py" in result
-    assert "auth/secret.py" not in result
-    assert all("auth/secret.py" not in path for path in json.loads(seen.read_text(encoding="utf-8")))
+    assert "active_workspace:auth/secret.py" in result
+    assert "runtime private bytes" not in result
+    candidates = json.loads(seen.read_text(encoding="utf-8"))
+    assert str(repo / "auth" / "secret.py") in candidates
+    assert str(protected) not in candidates
 
 
 def test_search_code_ripgrep_fallback_when_unavailable(tmp_path, monkeypatch):

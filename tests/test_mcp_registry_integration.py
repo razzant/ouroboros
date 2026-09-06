@@ -94,6 +94,27 @@ def test_schemas_include_mcp_tools(registry):
     assert "mcp_svc__echo" in names
 
 
+def test_stdio_environment_does_not_expand_native_review_resources(registry, monkeypatch):
+    fake = _FakeTransport([{"name": "probe", "description": "Probe", "input_schema": {}}])
+    _wire_singleton(fake)
+    raw = {"id": "selected", "enabled": True, "transport": "stdio", "command": "python",
+           "cwd": "/selected/project", "env_from_settings": {"TOKEN": "MCP_TEST_KEY"}}
+    mcp_client.reconfigure_from_settings({**_settings(raw), "MCP_TEST_KEY": "synthetic-660"})
+    assert mcp_client.get_manager().refresh_server("selected")["ok"]
+    monkeypatch.setattr("ouroboros.safety.check_safety", lambda *a, **kw: (True, ""))
+    assert "echo(selected/probe)" in registry.execute("mcp_selected__probe", {})
+    call_count = len(fake.call_calls)
+    contract = build_task_contract({"allowed_resources": {"network": False}})
+    registry.set_context(ToolContext(repo_dir=registry._ctx.repo_dir, drive_root=registry._ctx.drive_root,
+        task_constraint=TaskConstraint(mode="local_readonly_subagent", allow_enable=False),
+        task_contract=contract, task_metadata={"task_contract": contract}))
+    assert registry.get_schema_by_name("mcp_selected__probe") is None
+    assert "echo(selected/probe)" not in registry.execute("mcp_selected__probe", {})
+    assert len(fake.call_calls) == call_count
+    assert any(item.get("surface") == "mcp" and item.get("reason") == "resource_blocked"
+               for item in registry.capability_omissions())
+
+
 def test_schemas_cold_worker_loads_settings_and_refreshes_once(registry, monkeypatch):
     fake = _FakeTransport(
         [{"name": "ping", "description": "Ping", "input_schema": {"type": "object", "properties": {}}}]

@@ -1,5 +1,7 @@
 """Tests for browser state isolation and infrastructure error detection."""
 import pathlib
+import os
+from functools import partial
 import socket
 import sys
 import types
@@ -7,6 +9,17 @@ import types
 import pytest
 
 import ouroboros.tools.browser as browser_mod
+from ouroboros import browser_policy
+
+_blocked = partial(browser_policy.browser_url_block_reason, restricted=True)
+
+
+@pytest.fixture(autouse=True)
+def current_control_binding(tmp_path, monkeypatch):
+    from ouroboros import config
+    from ouroboros.server_process import record_service_binding
+    monkeypatch.setattr(config, "DATA_DIR", tmp_path)
+    record_service_binding(tmp_path, "main", "127.0.0.1", 8765, pid=os.getpid())
 from ouroboros.contracts.task_constraint import TaskConstraint
 from ouroboros.tools.browser import (
     _is_infrastructure_error,
@@ -48,6 +61,7 @@ class TestBrowserModuleState:
         contexts = []
         fake_page = types.SimpleNamespace(
             set_default_timeout=lambda timeout: None,
+            on=lambda event, handler: None,
         )
 
         def _new_context(**kwargs):
@@ -84,7 +98,7 @@ class TestBrowserModuleState:
         monkeypatch.setattr(browser_mod, "_HAS_STEALTH", False)
         monkeypatch.setattr(browser_mod, "_ensure_playwright_installed", lambda *args, **kwargs: None)
         monkeypatch.setattr(
-            browser_mod.socket,
+            browser_policy.socket,
             "getaddrinfo",
             lambda host, *args, **kwargs: [
                 (socket.AF_INET, socket.SOCK_STREAM, 6, "", ("93.184.216.34", 443))
@@ -110,18 +124,9 @@ class TestBrowserModuleState:
         assert "Chrome/131.0.0.0" in contexts[-1].kwargs["user_agent"]
         assert getattr(ctx.browser_state, "_thread_id", None) is not None
         assert getattr(ctx.browser_state, "_browser_engine", None) == "chromium"
-        assert routes[:4] == [
-            ("**/api/owner/context-mode", browser_mod._block_context_mode_owner_post),
-            # v6.54.3: the owner-only LLM-safety coverage endpoint is route-blocked too
-            # (broad glob + decoding handler so percent-encoding cannot slip it).
-            ("**/api/owner/**", browser_mod._block_safety_mode_owner_post),
-            # C1, v6.39: the owner-only skill attestation endpoint is route-blocked too
-            # (broad glob so a percent-encoded path still reaches the decoding handler).
-            ("**/api/owner/skills/**", browser_mod._block_owner_skill_attest_post),
-            ("**/api/settings", browser_mod._block_owner_settings_post),
-        ]
-        # v6.26.0: the main agent gets a metadata-only SSRF route guard too.
-        assert len(routes) == 5 and routes[4][0] == "**/*"
+        # One composed guard checks URL and owner-operation identity for every
+        # request; the old four path globs are no longer a second policy chain.
+        assert len(routes) == 1 and routes[0][0] == "**/*"
 
         browser_mod._ensure_browser(ctx, engine="webkit", device="iphone 13")[0]
         assert contexts[-1].kwargs["viewport"] == {"width": 390, "height": 844}
@@ -158,7 +163,7 @@ class TestBrowserModuleState:
         routes[-1][1](route)
         route.request.url = "https://example.com/"
         routes[-1][1](route)
-        assert events == ["abort", "abort", "abort", "abort", "fallback"]
+        assert events == ["abort", "abort", "abort", "abort", "continue"]
 
     def test_local_readonly_browser_url_guard_resolves_dns_fail_closed(self, monkeypatch):
         def fake_getaddrinfo(host, *args, **kwargs):
@@ -168,17 +173,36 @@ class TestBrowserModuleState:
                 return [(socket.AF_INET, socket.SOCK_STREAM, 6, "", ("127.0.0.1", 80))]
             raise socket.gaierror("no such host")
 
-        monkeypatch.setattr(browser_mod.socket, "getaddrinfo", fake_getaddrinfo)
+        monkeypatch.setattr(browser_policy.socket, "getaddrinfo", fake_getaddrinfo)
 
-        assert browser_mod._is_subagent_blocked_browser_url("ftp://public.example/file") is True
-        assert browser_mod._is_subagent_blocked_browser_url("http://127.0.0.1:8765") is True
-        assert browser_mod._is_subagent_blocked_browser_url("http://0177.0.0.1/") is True
-        assert browser_mod._is_subagent_blocked_browser_url("http://0x7f.0.0.1/") is True
-        assert browser_mod._is_subagent_blocked_browser_url("http://2130706433/") is True
-        assert browser_mod._is_subagent_blocked_browser_url("http://012.0.0.1/") is True
-        assert browser_mod._is_subagent_blocked_browser_url("http://internal.example") is True
-        assert browser_mod._is_subagent_blocked_browser_url("http://missing.example") is True
-        assert browser_mod._is_subagent_blocked_browser_url("https://public.example/path") is False
+        assert _blocked("ftp://public.example/file")
+        assert _blocked("http://127.0.0.1:8765")
+        assert _blocked("http://0177.0.0.1/")
+        assert _blocked("http://0x7f.0.0.1/")
+        assert _blocked("http://2130706433/")
+        assert _blocked("http://012.0.0.1/")
+        assert _blocked("http://internal.example")
+        unavailable = _blocked("http://missing.example")
+        assert unavailable.startswith("BROWSER_POLICY_UNAVAILABLE") and "no such host" in unavailable
+        assert not _blocked("https://public.example/path")
+
+    def test_dns_failure_is_a_typed_refusal_through_the_dispatcher(self, tmp_path, monkeypatch):
+        """The tool returns the policy-unavailable refusal and never opens a browser."""
+        from ouroboros.tools.registry import ToolContext, ToolRegistry
+
+        def fake_getaddrinfo(host, *args, **kwargs):
+            raise socket.gaierror("no such host")
+
+        monkeypatch.setattr(browser_policy.socket, "getaddrinfo", fake_getaddrinfo)
+        monkeypatch.setattr(browser_mod, "_ensure_browser",
+                            lambda *_a, **_k: pytest.fail("navigation attempted on an unclassifiable target"))
+        ctx = ToolContext(repo_dir=tmp_path, drive_root=tmp_path / "data",
+                          task_constraint=TaskConstraint(mode="local_readonly_subagent", allow_enable=False))
+        tools = ToolRegistry(tmp_path, ctx.drive_root)
+        tools.set_context(ctx)
+        result = tools.execute("browse_page", {"url": "http://missing.example/report"})
+        assert "BROWSER_POLICY_UNAVAILABLE" in result and "missing.example" in result
+        assert ctx.browser_state.browser is None and ctx.browser_state.pw_instance is None
 
     def test_subagent_screenshot_text_does_not_reference_blocked_send_photo(self):
         fake_page = types.SimpleNamespace(screenshot=lambda **_kwargs: b"png")

@@ -8,6 +8,8 @@ const TRANSPORTS = [
     { value: 'sse', label: 'SSE (Server-Sent Events)' },
     { value: 'stdio', label: 'Local process (stdio)' },
 ];
+const SERVER_FIELDS = new Set(['id', 'slug', 'name', 'label', 'enabled', 'transport', 'url',
+    'command', 'args', 'auth_header', 'auth_token', 'allowed_tools', 'cwd', 'env', 'env_from_settings']);
 
 let mcpServers = [];
 let mcpStatusByServer = {};
@@ -46,6 +48,18 @@ function toolCountLabel(count) {
     return `${count} tool${count === 1 ? '' : 's'}`;
 }
 
+function unsupportedFields(server) {
+    const unused = server.transport === 'stdio' ? ['url', 'auth_token']
+        : ['command', 'args', 'cwd', 'env', 'env_from_settings'];
+    const fields = Object.keys(server).filter((key) => !SERVER_FIELDS.has(key)
+        || (unused.includes(key) && !['', '[]', '{}', 'null'].includes(JSON.stringify(server[key]))
+            && server[key] !== ''));
+    if (server.transport === 'stdio' && server.auth_header && server.auth_header !== 'Authorization') {
+        fields.push('auth_header');
+    }
+    return fields;
+}
+
 function renderServerCard(server, index) {
     const id = String(server.id ?? '');
     const name = String(server.name ?? '');
@@ -54,6 +68,10 @@ function renderServerCard(server, index) {
     const command = String(server.command ?? '');
     const args = Array.isArray(server.args) ? server.args.map(String) : [];
     const isStdio = transport === 'stdio';
+    const unsupported = unsupportedFields(server);
+    const envRefs = typeof server.env_from_settings === 'string'
+        ? server.env_from_settings : JSON.stringify(server.env_from_settings ?? {}, null, 2);
+    const literalEnv = typeof server.env === 'string' ? server.env : JSON.stringify(server.env ?? {}, null, 2);
     const authHeader = String(server.auth_header ?? 'Authorization');
     const authToken = String(server.auth_token ?? '');
     const enabled = server.enabled === true || server.enabled === 'True' || server.enabled === 'true';
@@ -140,6 +158,25 @@ function renderServerCard(server, index) {
                     <textarea data-mcp-field="args" rows="3" placeholder="-y&#10;@modelcontextprotocol/server-filesystem&#10;/path/to/folder" autocomplete="off" spellcheck="false">${escapeHtml(args.join('\n'))}</textarea>
                     <span class="muted">Each line is passed as one argument. Ouroboros does not use a shell.</span>
                 </div>
+            </div>
+            <div class="form-grid two">
+                <div class="form-field">
+                    <label>Working directory (optional)</label>
+                    <input type="text" data-mcp-field="cwd" value="${escapeHtml(String(server.cwd ?? ''))}" placeholder="/path/to/project" autocomplete="off" spellcheck="false">
+                    <span class="muted">Used for both discovering and calling tools. Empty uses the default directory.</span>
+                </div>
+                <div class="form-field">
+                    <label>Environment from settings (JSON)</label>
+                    <textarea data-mcp-field="env_from_settings" rows="4" placeholder='{"API_TOKEN": "MY_MCP_KEY"}' autocomplete="off" spellcheck="false">${escapeHtml(envRefs)}</textarea>
+                    <span class="muted">Map environment names to saved setting keys. Put secret values in Settings → Custom keys.</span>
+                </div>
+            </div>
+            <div class="form-row">
+                <div class="form-field">
+                    <label>Environment (JSON, optional)</label>
+                    <textarea data-mcp-field="env" rows="3" placeholder='{"PORT": "8080", "DEBUG": "1"}' autocomplete="off" spellcheck="false">${escapeHtml(literalEnv)}</textarea>
+                    <span class="muted">Ordinary values passed directly to the process. Settings references override matching names; use Custom keys for secrets.</span>
+                </div>
             </div>` : `
             <div class="form-grid two">
                 <div class="form-field">
@@ -162,6 +199,8 @@ function renderServerCard(server, index) {
                 </div>
             </div>
             <div class="settings-inline-status mcp-server-message" data-mcp-message hidden></div>
+            ${unsupported.length ? `<div class="form-row"><span class="muted">Fields retained but not applied: ${escapeHtml(unsupported.join(', '))}</span>
+                <button type="button" class="btn btn-default" data-mcp-clear-unsupported>Remove unsupported fields</button></div>` : ''}
             ${toolsHtml ? `<details class="mcp-tools-disclosure"><summary>Discovered tools</summary>${toolsHtml}</details>` : ''}
         </article>
     `;
@@ -205,6 +244,14 @@ function bindCardEvents(card) {
                     mcpDirtyTokens.add(`${idx}`);
                 }
                 server.auth_token = input.value;
+            } else if (field === 'env_from_settings' || field === 'env') {
+                try {
+                    server[field] = JSON.parse(input.value || '{}');
+                    setMessage('');
+                } catch {
+                    server[field] = input.value;
+                    setMessage('Environment values and references must be JSON objects. Your input is retained.', 'danger');
+                }
             } else {
                 server[field] = input.value;
             }
@@ -220,6 +267,12 @@ function bindCardEvents(card) {
                 notifyChanged();
             }
         });
+    });
+
+    card.querySelector('[data-mcp-clear-unsupported]')?.addEventListener('click', () => {
+        for (const key of unsupportedFields(mcpServers[idx])) delete mcpServers[idx][key];
+        renderAll();
+        notifyChanged();
     });
 
     const tokenInput = card.querySelector('[data-mcp-field="auth_token"]');
@@ -272,7 +325,8 @@ function bindCardEvents(card) {
                     ? { server_id: sid, server: { ...server } }
                     : { server: serverForTest(server) };
                 const data = await jsonPost('/api/mcp/test', body, { rejectOkFalse: true });
-                setMessage(`Test OK — ${toolCountLabel(Number(data.tool_count || 0))} reported.`, 'ok');
+                const warnings = (data.configuration_warnings || []).join(' ');
+                setMessage(`Test OK — ${toolCountLabel(Number(data.tool_count || 0))} reported.${warnings ? ' ' + warnings : ''}`, warnings ? 'warn' : 'ok');
             } catch (err) {
                 setMessage(`Test failed: ${err && err.message ? err.message : err}`, 'danger');
             } finally {
@@ -421,14 +475,16 @@ export function applyMcpSettings(settings) {
         timeoutInput.value = String(Number.isFinite(value) && value > 0 ? value : 60);
     }
     const incoming = Array.isArray(settings.MCP_SERVERS) ? settings.MCP_SERVERS : [];
-    mcpServers = incoming.map((s) => ({
+    // auth_configured belongs to Settings response metadata, not user config.
+    mcpServers = incoming.map(({ auth_configured: _authConfigured, ...s }) => ({
+        ...s,
         id: String(s.id ?? ''),
         name: String(s.name ?? ''),
         enabled: Boolean(s.enabled),
         transport: String(s.transport ?? 'streamable_http'),
         url: String(s.url ?? ''),
         command: String(s.command ?? ''),
-        args: Array.isArray(s.args) ? s.args.map(String) : [],
+        args: s.args ?? [],
         auth_header: String(s.auth_header ?? 'Authorization'),
         auth_token: String(s.auth_token ?? ''),
         allowed_tools: Array.isArray(s.allowed_tools) ? s.allowed_tools.map(String) : [],
@@ -449,19 +505,17 @@ export function collectMcpSettings() {
         MCP_TOOL_TIMEOUT_SEC: timeout,
         MCP_SERVERS: mcpServers.map((s) => {
             const transport = String(s.transport || 'streamable_http');
-            const isStdio = transport === 'stdio';
             return {
+                ...s,
                 id: String(s.id || '').trim(),
                 name: String(s.name || '').trim(),
                 enabled: Boolean(s.enabled),
                 transport,
-                url: isStdio ? '' : String(s.url || '').trim(),
-                command: isStdio ? String(s.command || '').trim() : '',
-                args: isStdio && Array.isArray(s.args) ? s.args.map(String) : [],
-                auth_header: isStdio
-                    ? 'Authorization'
-                    : (String(s.auth_header || 'Authorization').trim() || 'Authorization'),
-                auth_token: isStdio ? '' : String(s.auth_token || ''),
+                url: String(s.url || '').trim(),
+                command: String(s.command || '').trim(),
+                args: s.args ?? [],
+                auth_header: String(s.auth_header || 'Authorization').trim() || 'Authorization',
+                auth_token: String(s.auth_token || ''),
                 allowed_tools: Array.isArray(s.allowed_tools) ? s.allowed_tools.map(String) : [],
             };
         }),

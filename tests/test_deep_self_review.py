@@ -457,8 +457,9 @@ class TestNoProxyLlmChat:
             "usage": {"prompt_tokens": 1, "completion_tokens": 1},
         }
 
-        with mock.patch("httpx.Client", side_effect=capturing_httpx_client):
-            with mock.patch("openai.OpenAI") as mock_openai_cls:
+        # Resolve the SDK before mocking the HTTP class it inherits on import.
+        with mock.patch("openai.OpenAI") as mock_openai_cls:
+            with mock.patch("httpx.Client", side_effect=capturing_httpx_client):
                 mock_oa = mock.Mock()
                 mock_oa.chat.completions.create.return_value = mock_resp
                 mock_openai_cls.return_value = mock_oa
@@ -497,8 +498,8 @@ class TestNoProxyLlmChat:
             "usage": {"prompt_tokens": 1, "completion_tokens": 1},
         }
 
-        with mock.patch("httpx.Client", TrackingClient):
-            with mock.patch("openai.OpenAI") as mock_openai_cls:
+        with mock.patch("openai.OpenAI") as mock_openai_cls:
+            with mock.patch("httpx.Client", TrackingClient):
                 mock_oa = mock.Mock()
                 mock_oa.chat.completions.create.return_value = mock_resp
                 mock_openai_cls.return_value = mock_oa
@@ -528,8 +529,8 @@ class TestNoProxyLlmChat:
 
         llm = LLMClient()
 
-        with mock.patch("httpx.Client", TrackingClient):
-            with mock.patch("openai.OpenAI") as mock_openai_cls:
+        with mock.patch("openai.OpenAI") as mock_openai_cls:
+            with mock.patch("httpx.Client", TrackingClient):
                 mock_oa = mock.Mock()
                 mock_oa.chat.completions.create.side_effect = RuntimeError("boom")
                 mock_openai_cls.return_value = mock_oa
@@ -557,10 +558,10 @@ class TestNoProxyLlmChat:
             "usage": {"prompt_tokens": 10, "completion_tokens": 5},
         }
 
-        with mock.patch("httpx.Client") as mock_httpx_cls:
-            mock_http = mock.Mock()
-            mock_httpx_cls.return_value = mock_http
-            with mock.patch("openai.OpenAI") as mock_openai_cls:
+        with mock.patch("openai.OpenAI") as mock_openai_cls:
+            with mock.patch("httpx.Client") as mock_httpx_cls:
+                mock_http = mock.Mock()
+                mock_httpx_cls.return_value = mock_http
                 mock_oa = mock.Mock()
                 mock_oa.chat.completions.create.return_value = mock_resp
                 mock_openai_cls.return_value = mock_oa

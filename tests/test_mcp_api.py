@@ -89,6 +89,32 @@ def _make_client(tmp_path, monkeypatch):
     return TestClient(app), patches
 
 
+def test_test_endpoint_uses_selected_settings_and_edited_cwd(tmp_path, monkeypatch):
+    seen = []
+
+    async def list_tools(cfg, timeout):
+        seen.append(cfg)
+        return [{"name": "probe", "description": cfg.env["TOKEN"], "input_schema": {}}]
+
+    mcp_client.get_manager()._async_list_tools = list_tools
+    raw = {"id": "selected", "enabled": True, "transport": "stdio", "command": "python",
+           "cwd": "/saved/project", "env_from_settings": {"TOKEN": "CUSTOM_MCP_KEY"}}
+    settings = {"MCP_ENABLED": True, "MCP_SERVERS": [raw], "CUSTOM_MCP_KEY": "synthetic-660-api"}
+    client, patches = _make_client(tmp_path, monkeypatch)
+    try:
+        with patch("ouroboros.gateway.mcp.load_settings", return_value=settings):
+            response = client.post("/api/mcp/test", json={"server_id": "selected", "server": {**raw, "cwd": "/edited/project"}})
+        assert response.json()["ok"]
+        assert seen[-1].cwd == "/edited/project"
+        assert seen[-1].env == {"TOKEN": settings["CUSTOM_MCP_KEY"]}
+        assert settings["CUSTOM_MCP_KEY"] not in response.text
+        assert raw["cwd"] == "/saved/project"
+    finally:
+        client.close()
+        for item in patches:
+            item.stop()
+
+
 def _stop(patches):
     for p in patches:
         try:

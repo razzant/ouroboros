@@ -1188,10 +1188,9 @@ def kill_workers(
                 log.error("Worker shutdown blocked: disable fence was not durable")
                 return False
         cleared_running = len(RUNNING)
-        from ouroboros.platform_layer import kill_pid_tree
         for w in WORKERS.values():
             if w.proc.pid:
-                kill_pid_tree(w.proc.pid)
+                kill_worker_tree(w.proc.pid)
             elif w.proc.is_alive():
                 w.proc.terminate()
         for w in WORKERS.values():
@@ -2155,6 +2154,7 @@ from supervisor.worker_pool_lifecycle import (  # noqa: E402, F401 -- intentiona
     _worker_pids_path,
     _write_failure_result,
     events_log_cursor,
+    kill_worker_tree,
     kill_workers_for_update,
     reap_orphaned_workers,
     respawn_worker,

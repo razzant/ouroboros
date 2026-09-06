@@ -361,6 +361,28 @@ def _release_booting_slot(
     })
 
 
+def kill_worker_tree(pid: int, *, keep_services: bool = False) -> None:
+    """The ONE worker process-tree kill, for every teardown and backstop.
+
+    A worker's tree is not the worker's property: the installation's daemon
+    roots (``daemon``-scope custody rows — the shared Claudexor daemon when a
+    task worker was the first to need it) outlive every worker and server
+    generation, so they and their descendants are spared. ``keep_services``
+    additionally spares the deliberately kept session services a verifier
+    still needs when ONE task is cancelled or timed out; a generation change
+    ends those services with the generation, so the pool paths leave it off.
+    Windows ``taskkill /T`` cannot spare anything (``platform_layer`` says so):
+    there the worker's whole tree, a daemon it spawned included, still dies.
+    """
+    from ouroboros.platform_layer import kill_pid_tree
+    from supervisor import queue as _q
+
+    spared = _q._retained_daemon_pids()
+    if keep_services:
+        spared |= _q._kept_service_pids()
+    kill_pid_tree(pid, exclude_pids=spared)
+
+
 @_serialized_worker_lifecycle
 def _replace_unready_slot(wid: int, slot: Any, owner_chat_id: int, started: float, attempt: int) -> None:
     """No worker_ready inside the window: tear the child down and replace the slot, bounded.
@@ -372,8 +394,6 @@ def _replace_unready_slot(wid: int, slot: Any, owner_chat_id: int, started: floa
     fresh live slot at ``wid`` in the gap for this stale watcher's respawn to
     evict — its process never terminated, gone from WORKERS.
     """
-    from ouroboros.platform_layer import kill_pid_tree
-
     with _queue_lock:
         if _pool().WORKERS.get(wid) is not slot:
             return  # a pool restart already replaced or cleared this slot
@@ -391,7 +411,7 @@ def _replace_unready_slot(wid: int, slot: Any, owner_chat_id: int, started: floa
         "action": action,
     })
     if pid:
-        kill_pid_tree(pid)
+        kill_worker_tree(pid)
     try:
         slot.proc.join(timeout=2)
     except Exception:
@@ -507,8 +527,6 @@ def reap_orphaned_workers() -> int:
 @_serialized_worker_lifecycle
 def kill_workers_for_update(*, result_reason: str, terminal_status: str = "interrupted") -> List[str]:
     """Stop the current pool and return anything whose death could not be proven."""
-    from ouroboros.platform_layer import kill_pid_tree
-
     with _queue_lock:
         fenced = list(_pool().WORKERS.values())
     teardown_error = ""
@@ -527,7 +545,7 @@ def kill_workers_for_update(*, result_reason: str, terminal_status: str = "inter
     for worker in fenced:
         try:
             if worker.proc.is_alive() and worker.proc.pid:
-                kill_pid_tree(worker.proc.pid)
+                kill_worker_tree(worker.proc.pid)
                 worker.proc.join(timeout=3)
             if worker.proc.is_alive():
                 survivors.append(f"worker:{worker.proc.pid or worker.wid}")
@@ -543,14 +561,13 @@ def kill_workers_for_update(*, result_reason: str, terminal_status: str = "inter
 
 
 def _kill_survivors() -> None:
-    """Force-kill any workers and their entire descendant trees."""
-    from ouroboros.platform_layer import kill_pid_tree
+    """Force-kill any workers and their descendant trees (daemon roots spared)."""
     for w in _pool().WORKERS.values():
         pid = w.proc.pid
         if pid is None:
             continue
         if w.proc.is_alive():
-            kill_pid_tree(pid)
+            kill_worker_tree(pid)
             w.proc.join(timeout=2)
 
 
@@ -593,10 +610,8 @@ def respawn_worker(wid: int, *, ready_attempt: int = 1) -> bool:
             installed = True
     if not installed:
         try:
-            from ouroboros.platform_layer import kill_pid_tree
-
             if proc.pid:
-                kill_pid_tree(proc.pid)
+                kill_worker_tree(proc.pid)
             elif proc.is_alive():
                 proc.terminate()
             proc.join(timeout=2)

@@ -10,6 +10,7 @@ import pytest
 
 from ouroboros.tools.browser import _browse_page, _browser_action, cleanup_browser
 from ouroboros.contracts.task_constraint import TaskConstraint
+from ouroboros.server_entrypoint import bound_service_socket
 from ouroboros.tools.registry import ToolContext
 
 
@@ -44,6 +45,8 @@ def static_page_url():
     finally:
         server.shutdown()
         server.server_close()
+        thread.join(timeout=5)
+        assert not thread.is_alive()
 
 
 def test_browser_tools_launch_real_chromium(tmp_path, static_page_url, monkeypatch):
@@ -54,9 +57,11 @@ def test_browser_tools_launch_real_chromium(tmp_path, static_page_url, monkeypat
         drive_root=tmp_path,
         task_constraint=TaskConstraint(mode="local_readonly_subagent", allow_enable=False),
     )
-    assert "BROWSER_LOCAL_READONLY_BLOCKED" in _browse_page(subagent_ctx, url="http://127.0.0.1:8765")
-    assert "BROWSER_LOCAL_READONLY_BLOCKED" in _browse_page(subagent_ctx, url="http://192.168.1.1")
-    assert "BROWSER_LOCAL_READONLY_BLOCKED" in _browse_page(subagent_ctx, url="http://10.0.0.1")
+    with bound_service_socket(tmp_path, "main", "127.0.0.1", 0) as listener:
+        own_control = f"http://127.0.0.1:{listener.getsockname()[1]}"
+        assert "BROWSER_LOCAL_READONLY_BLOCKED" in _browse_page(subagent_ctx, url=own_control)
+    assert "origin_not_granted" in _browse_page(subagent_ctx, url="http://192.168.1.1")
+    assert "origin_not_granted" in _browse_page(subagent_ctx, url="http://10.0.0.1")
     assert "BROWSER_LOCAL_READONLY_BLOCKED" in _browse_page(subagent_ctx, url="http://169.254.1.1")
     assert "BROWSER_LOCAL_READONLY_BLOCKED" in _browse_page(subagent_ctx, url="http://[::]/")
     assert "BROWSER_LOCAL_READONLY_BLOCKED" in _browse_page(subagent_ctx, url=f"file://{tmp_path / 'settings.json'}")

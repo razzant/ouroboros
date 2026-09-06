@@ -1,4 +1,4 @@
-"""Filename shapes that commonly indicate credential material (leaf module).
+"""Credential leaf shapes and physical owner locations (leaf module).
 
 Single source for the credential-name dictionaries and the name regex that
 previously lived as three inline copies (tool_access + two in tools/core).
@@ -17,7 +17,7 @@ from __future__ import annotations
 import pathlib
 import re
 
-# Directory components whose contents are treated as credential/control stores.
+# Conservative directory shapes for capture/ingest, not root authorization.
 CREDENTIAL_COMPONENT_NAMES = frozenset({
     ".aws",
     ".azure",
@@ -86,6 +86,7 @@ SUBAGENT_CREDENTIAL_FILE_NAMES = frozenset({
     ".env",
     ".netrc",
     "auth.json",
+    "auth_token.json",
     "credentials",
     "credentials.json",
     "keys.json",
@@ -104,32 +105,40 @@ CREDENTIAL_NAME_RE = re.compile(
 CREDENTIAL_FILE_SUFFIXES = (".key", ".pem", ".p12", ".pfx")
 
 
-def user_files_mutation_shape_reason(resolved: pathlib.Path, home: pathlib.Path) -> str:
-    """Shape gate for MUTATING user_files operations (write/edit/shell targets).
+def owner_credential_locations(home: pathlib.Path) -> tuple[list[pathlib.Path], list[pathlib.Path]]:
+    """The existing host credential locations, independent of project names.
 
-    Keeps the pre-capinv-447 hidden/credential semantics: DEFAULT-DENY dotted
-    components (minus the benign project allowlist) plus credential-like names.
-    Never applied to root read/list/search — those are location-authorized only.
-    Empty string = no objection.
+    SSH's ordinary config is a file-level exception; a symlink must still be
+    judged by its destination and cannot turn a key into an ordinary config.
     """
+    protected = [home / rel for rel in (
+        ".ssh", ".aws", ".gnupg", ".netrc", ".pgpass", ".config/gcloud",
+        ".docker/config.json", ".kube/config", ".npmrc", "file1.txt",
+    )]
+    config = home / ".ssh" / "config"
+    allowed = [config] if not config.is_symlink() and not config.is_dir() else []
+    return protected, allowed
+
+
+def user_files_mutation_shape_reason(resolved: pathlib.Path, home: pathlib.Path) -> str:
+    """Keep credential/control writes fenced without banning ordinary configs.
+
+    A project directory named auth, .config or Library is not host authority.
+    Known credential leaves and VCS internals retain their own protection;
+    root read authorization never calls this mutation-only predicate.
+    """
+    resolved = pathlib.Path(resolved).resolve(strict=False)
+    home = pathlib.Path(home).resolve(strict=False)
+    protected, allowed = owner_credential_locations(home)
+    if resolved not in allowed and any(resolved.is_relative_to(path.resolve(strict=False)) for path in protected):
+        return "path is hidden or credential-like (owner credential location)"
     try:
         parts = resolved.relative_to(home).parts
     except ValueError:
         parts = resolved.parts
-    for part in parts:
-        if not part:
-            continue
-        part_lower = part.lower()
-        if part_lower in CREDENTIAL_COMPONENT_NAMES:
-            return "path is hidden or credential-like (secret/credential directory)"
-        if part.startswith(".") and part_lower not in BENIGN_DOT_NAMES:
-            return "path is hidden or credential-like (non-allowlisted hidden component)"
-    name = resolved.name
-    name_lower = name.lower()
-    if (
-        name_lower in CREDENTIAL_FILE_NAMES
-        or CREDENTIAL_NAME_RE.search(name)
-        or name_lower.endswith(CREDENTIAL_FILE_SUFFIXES)
-    ):
+    if any(part.lower() in {".git", ".hg", ".svn"} for part in parts):
+        return "path is hidden or credential-like (VCS control directory)"
+    name_lower = resolved.name.lower()
+    if name_lower in (CREDENTIAL_FILE_NAMES - {"settings.json"}) or name_lower.endswith(CREDENTIAL_FILE_SUFFIXES):
         return "path name is credential-like"
     return ""

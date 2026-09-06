@@ -52,28 +52,20 @@ def _detect_runtime_mode_elevation(text_lower: str, *, writeish: bool = True) ->
     return _registry()._owner_control_mention_blocks(text_lower, detected, writeish)
 
 
-_SUBAGENT_SHELL_SECRET_MARKERS = (
-    # Ouroboros owner secrets/control state. The relative form (no leading slash)
-    # closes the interpreter-string bypass (CW4, v6.34.0): the whole-command
-    # substring scan already catches "/data/settings.json" and "../../data/..",
-    # but a bare "data/settings.json" (e.g. python -c "open('data/settings.json')"
-    # from a workspace cwd) needs the slash-less marker too.
-    "/data/settings.json", "data/settings.json", "ouroboros/data/settings", "file1.txt",
-    # Universal credential/secret/control files (relative or absolute).
-    # ouroboros-update-tx.json is the managed-update tx marker (.git/…): owner
-    # control state, mirrored on .git/config. Subagent shell only — the
-    # authorized resolver is the MAIN agent and the supervisor/host writers go
-    # through supervisor.update_merge, so neither is affected (synthesis F3).
-    ".env", ".git/config", ".git/credentials", "ouroboros-update-tx.json",
-    "credentials.json", "tokens.json",
-    "/.ssh/", ".ssh/", "id_rsa", "id_ed25519", ".netrc", ".npmrc", ".pgpass", ".aws/",
-)
+def _subagent_shell_targets_secret(cmd_path_lower: str, *, ctx: Any = None, cwd: Any = None) -> bool:
+    """Use the same physical read targets as file tools and the other shell lanes."""
+    from ouroboros.tools.core_secret_paths import _is_subagent_secret_repo_target, restricted_data_roots
+    from ouroboros.tools.shell_guards import shell_inspection_paths
 
-
-def _subagent_shell_targets_secret(cmd_path_lower: str) -> bool:
-    """Deterministic guard: a shell command referencing Ouroboros secrets/credentials
-    or owner-control state (settings.json, ssh keys, token/credential files)."""
-    return any(marker in cmd_path_lower for marker in _SUBAGENT_SHELL_SECRET_MARKERS)
+    data_roots = restricted_data_roots(ctx) if ctx is not None else []
+    repo_root = (_registry().active_repo_dir_for(ctx)
+                 if getattr(ctx, "repo_dir", None) is not None else pathlib.Path(cwd or "."))
+    work_dir = pathlib.Path(cwd or repo_root).resolve(strict=False)
+    paths = shell_inspection_paths(
+        cmd_path_lower, work_dir=work_dir,
+        drive_root=data_roots[0] if data_roots else None,
+    )
+    return any(_is_subagent_secret_repo_target(target, repo_root, ctx=ctx) for target in paths)
 
 
 def _detect_mutative_toggle_self_change(text_lower: str, *, writeish: bool = True) -> bool:
@@ -480,6 +472,8 @@ def _run_shell_safety_check(
     self, args: Dict[str, Any], runtime_mode: str, binding: Any = None,
 ) -> ToolResult | None:
     """Pre-execution run_command filter; returns a native denial or ``None``."""
+    from ouroboros.shell_parse import local_shell_subject
+
     raw_cmd = args.get("cmd", args.get("command", ""))
     if binding is None:
         operation = (
@@ -524,7 +518,8 @@ def _run_shell_safety_check(
     while "//" in cmd_path_lower: cmd_path_lower = cmd_path_lower.replace("//", "/")
     # Subagents must not read owner secrets/credentials/control state via shell
     # (read_file already denies these). read_file is the gated inspection path.
-    if (acting_subagent or self._is_local_readonly_subagent()) and _subagent_shell_targets_secret(cmd_path_lower):
+    if (acting_subagent or self._is_local_readonly_subagent()) and _subagent_shell_targets_secret(
+            raw_cmd, ctx=self._ctx, cwd=getattr(binding, "target_path", None)):
         return ToolResult(
             status="blocked",
             code="SUBAGENT_SECRET_READ_BLOCKED",
@@ -542,7 +537,10 @@ def _run_shell_safety_check(
         if not inline_cmd:
             inline_cmd = _registry().shell_command_string(argv_for_write)
         inline_argv = _registry().strip_leading_env_assignments(_registry().unwrap_env_argv(_registry().shell_argv(inline_cmd)))
-    target_rows, write_target_argvs, explicit_write_targets, executable_path_tokens = _lane_writer_targets(raw_cmd)
+    # Only filesystem writer targets use SSH's local-effect projection.
+    # Owner controls, credentials, safety and execution inspect the full argv.
+    writer_cmd = local_shell_subject(raw_cmd)
+    target_rows, write_target_argvs, explicit_write_targets, executable_path_tokens = _lane_writer_targets(writer_cmd)
     # Writer-command membership canonicalizes versioned interpreter spellings to
     # their family (`ruby3.2` is `ruby`), so a versioned basename is exactly as
     # write-suspect as the unversioned one (XG-2R.2).
@@ -607,8 +605,8 @@ def _run_shell_safety_check(
         workspace_write_block = registry_guards._workspace_shell_write_block(
             self,
             args,
-            raw_cmd,
-            cmd_path_lower,
+            writer_cmd,
+            (" ".join(str(x) for x in writer_cmd) if isinstance(writer_cmd, list) else str(writer_cmd)).lower().replace("\\", "/"),
             explicit_write_targets,
             target_rows,
             executable_path_tokens,
@@ -711,17 +709,17 @@ def _run_shell_safety_check(
                 drive_root=pathlib.Path(self._ctx.drive_root),
                 work_dir=pathlib.Path(work_dir),
                 allowed_roots=allowed_runtime_roots,
+                target_rows=target_rows,
             )
             if runtime_data_targets:
-                action = "write under" if writeish else "write-indicating commands that mention"
                 # Name the REAL task roots: a mis-guessed absolute path used to
                 # produce this block with no way to self-correct (v6.54.3).
                 return ToolResult(
                     status="blocked",
                     code="LIGHT_MODE_BLOCKED",
                     text=(
-                        "⚠️ LIGHT_MODE_BLOCKED: runtime_mode=light blocks process commands "
-                        f"that {action} runtime_data paths outside this task's own roots. "
+                        "⚠️ LIGHT_MODE_BLOCKED: runtime_mode=light blocks this command's "
+                        "access to runtime_data outside the permitted task roots. "
                         f"This task's real roots are: artifact_store={own_artifact_dir}, "
                         f"task_drive={own_task_drive} — staged attachments live under "
                         f"{own_artifact_dir / 'attachments'}. Use those absolute paths in scripts, "

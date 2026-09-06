@@ -1,16 +1,15 @@
 """Read-denial policy for RESTRICTED subagents (leaf of ``tools/core``).
 
 Which locations a read-only / acting / constraint-less delegated child may NOT
-read: owner secrets and control state under the data root, credential-shaped
-files in the repository, and the listing-side redaction that hides such
-entries. Extracted from ``core_file_tools`` so the child contract (pinned
-byte-for-byte by ``tests/test_credential_shapes.py``) has one owner; the
-``tools/core`` facade keeps every historical import path.
+read: owner secrets and control state under the data root, repository credential
+locations, and the listing-side redaction that hides such
+entries. The child contract has one owner across read/list/search/query;
+ordinary source directory names do not identify credential stores. The
+``tools/core`` facade keeps the shared import surface.
 """
 
 from __future__ import annotations
 
-import os
 import pathlib
 from typing import TYPE_CHECKING, List
 
@@ -19,11 +18,7 @@ from ouroboros.contracts.skill_payload_policy import (
     is_skill_owner_state_alias,
     is_skill_owner_state_target as _is_skill_owner_state_target,
 )
-from ouroboros.credential_shapes import (
-    CREDENTIAL_FILE_SUFFIXES,
-    CREDENTIAL_NAME_RE,
-    SUBAGENT_CREDENTIAL_FILE_NAMES as _SUBAGENT_SECRET_FILE_NAMES,
-)
+from ouroboros.credential_shapes import SUBAGENT_CREDENTIAL_FILE_NAMES as _SUBAGENT_SECRET_FILE_NAMES
 
 if TYPE_CHECKING:  # pragma: no cover
     from ouroboros.tools.registry import ToolContext
@@ -48,7 +43,9 @@ def _is_subagent_secret_data_path(norm: str) -> bool:
     parts = [part.lower() for part in text.split("/") if part and part != "."]
     if not parts:
         return False
-    if any(part in {"auth", "credentials", "secrets", "tokens"} for part in parts):
+    # These are stores at the runtime root, not directory-name patterns in
+    # task payloads, source trees or artifact stores beneath it.
+    if parts[0] in {"auth", "credentials", "secrets", "tokens"}:
         return True
     name = parts[-1]
     normalized_names = {name, name.lstrip(".")}
@@ -62,71 +59,129 @@ def _is_subagent_secret_data_path(norm: str) -> bool:
         return True
     if name.startswith(".env") or name.endswith(".env") or ".env." in name:
         return True
-    if name.endswith(CREDENTIAL_FILE_SUFFIXES):
-        return True
-    return bool(CREDENTIAL_NAME_RE.search(name))
-
-
-def _is_subagent_secret_repo_path(norm: str) -> bool:
-    text = str(norm or "").replace("\\", "/").strip()
-    while text.startswith("./"):
-        text = text[2:]
-    parts = [part.lower() for part in text.split("/") if part and part != "."]
-    if ".git" in parts or any(part in {"auth", "credentials", "secrets", "tokens"} for part in parts):
-        return True
-    if not parts:
-        return False
-    name = parts[-1]
-    if name in _SUBAGENT_SECRET_FILE_NAMES or name == "settings.tmp":
-        return True
-    if name.startswith(".env") or name.endswith(".env") or ".env." in name:
-        return True
-    if name.endswith(CREDENTIAL_FILE_SUFFIXES):
-        return True
-    if CREDENTIAL_NAME_RE.search(name):
-        suffix = pathlib.PurePosixPath(name).suffix.lower()
-        return suffix in {"", ".json", ".env", ".key", ".pem", ".p12", ".pfx", ".toml", ".yaml", ".yml", ".ini", ".cfg", ".conf"}
     return False
 
 
-def _is_subagent_secret_repo_target(target: pathlib.Path, repo_root: pathlib.Path) -> bool:
-    root = pathlib.Path(repo_root).resolve(strict=False)
-    try:
-        rel = str(pathlib.Path(target).resolve(strict=False).relative_to(root)).replace(os.sep, "/")
-    except (OSError, ValueError):
-        rel = str(target).replace(os.sep, "/")
-    if _is_subagent_secret_repo_path(rel):
+def _is_subagent_secret_repo_path(norm: str, *, credential_names: bool = True) -> bool:
+    """Repo source names do not confer owner authority or identify a secret store."""
+    text = str(norm or "").replace("\\", "/").strip()
+    parts = pathlib.PurePosixPath(text).parts
+    if ".git" in {part.lower() for part in parts}:
         return True
-    secret_candidates = [
-        root / ".git" / "credentials",
-        root / ".git" / "config",
-    ]
+    if not credential_names:
+        return False
+    # Exact credential names remain protected at every depth. Ordinary source
+    # directories such as src/auth and public certificate suffixes do not
+    # identify a credential store.
+    name = pathlib.PurePosixPath(text).name.lower()
+    if name in (_SUBAGENT_SECRET_FILE_NAMES - {"settings.json", "settings.json.lock"}):
+        return True
+    # Match the live dotenv forms, not an ordinary example/template payload.
+    if name.startswith(".env") or name.endswith(".env") or ".env." in name:
+        return not name.endswith((".example", ".sample", ".template", ".dist"))
+    return False
+
+
+def restricted_data_roots(ctx: ToolContext) -> list[pathlib.Path]:
+    """All runtime roots used by file admission, including a forked child's parent.
+
+    The root set comes from the existing vision/file parity owner: child drive,
+    canonical budget drive, and configured runtime admission root. A child's
+    isolated drive must not hide canonical owner state nested in its repository.
+    """
+    from ouroboros.tool_access import canonical_data_root
+    from ouroboros.config import DATA_DIR
+
+    values = [getattr(ctx, "drive_root", "")]
     try:
-        secret_candidates.extend(
-            candidate
-            for candidate in root.iterdir()
-            if candidate.is_file() and _is_subagent_secret_repo_path(candidate.name)
-        )
+        values.append(canonical_data_root(ctx))
+    except Exception:
+        pass
+    values.append(DATA_DIR)
+    roots = []
+    for value in values:
+        if not str(value or "").strip():
+            continue
+        try:
+            root = pathlib.Path(value).expanduser().resolve(strict=False)
+        except (OSError, ValueError, RuntimeError):
+            continue
+        if root not in roots:
+            roots.append(root)
+    return roots
+
+
+def _is_subagent_secret_repo_target(
+    target: pathlib.Path, repo_root: pathlib.Path, *, data_root: pathlib.Path | None = None,
+    ctx: ToolContext | None = None,
+) -> bool:
+    from ouroboros.credential_shapes import owner_credential_locations
+    from ouroboros.tool_access import resource_root_path
+
+    root = pathlib.Path(repo_root).resolve(strict=False)
+    target = pathlib.Path(target).resolve(strict=False)
+    protected, allowed = owner_credential_locations(pathlib.Path.home())
+    if target not in allowed and any(target.is_relative_to(path.resolve(strict=False)) for path in protected):
+        return True
+    # Host-selected task/output roots hold ordinary content. Their filenames
+    # do not turn them into repository credentials, while resolved owner-state
+    # aliases and VCS internals below retain their separate protection.
+    task_content = False
+    if ctx is not None:
+        try:
+            task_content = any(target.is_relative_to(resource_root_path(ctx, kind))
+                               for kind in ("task_drive", "artifact_store"))
+        except (AttributeError, OSError, TypeError, ValueError):
+            pass
+    data_roots = restricted_data_roots(ctx) if ctx is not None else []
+    if data_root is not None:
+        data_roots.append(pathlib.Path(data_root).resolve(strict=False))
+    secret_candidates = [root / ".git" / "credentials", root / ".git" / "config"]
+    for data in dict.fromkeys(data_roots):
+        try:
+            data_rel = target.relative_to(data).as_posix()
+        except ValueError:
+            data_rel = ""
+        if data_rel and (
+            (not task_content and _is_subagent_secret_data_path(data_rel))
+            or _is_skill_owner_state_target(target, data)
+            or is_skill_owner_state_alias(target, data)
+        ):
+            return True
+        try:
+            secret_candidates.extend(candidate for candidate in data.iterdir()
+                                     if candidate.is_file() and _is_subagent_secret_data_path(candidate.name))
+        except OSError:
+            pass
+    try:
+        rel = target.relative_to(root).as_posix()
+    except ValueError:
+        rel = target.as_posix()
+    if _is_subagent_secret_repo_path(rel, credential_names=not task_content):
+        return True
+    try:
+        secret_candidates.extend(candidate for candidate in root.iterdir()
+                                 if candidate.is_file() and _is_subagent_secret_repo_path(candidate.name))
     except OSError:
         pass
-    return any(
-        candidate.is_file()
-        and target.exists()
-        and target.samefile(candidate)
-        for candidate in secret_candidates
-    )
+    return any(candidate.is_file() and target.exists() and target.samefile(candidate)
+               for candidate in secret_candidates)
 
 
-def _filter_subagent_secret_repo_listing(items: List[str], repo_root: pathlib.Path) -> List[str]:
+def _filter_subagent_secret_repo_listing(
+    items: List[str], repo_root: pathlib.Path, *, data_root: pathlib.Path | None = None,
+    ctx: ToolContext | None = None, base_path: pathlib.Path | None = None,
+) -> List[str]:
     filtered: List[str] = []
     redacted = 0
     root = pathlib.Path(repo_root).resolve(strict=False)
+    base = pathlib.Path(base_path).resolve(strict=False) if base_path is not None else root
     for item in items:
         marker = item.rstrip("/")
         if marker.startswith("⚠️") or marker.startswith("...("):
             filtered.append(item)
             continue
-        if _is_subagent_secret_repo_path(marker) or _is_subagent_secret_repo_target(root / marker, root):
+        if _is_subagent_secret_repo_target(base / marker, root, data_root=data_root, ctx=ctx):
             redacted += 1
             continue
         filtered.append(item)
@@ -135,36 +190,13 @@ def _filter_subagent_secret_repo_listing(items: List[str], repo_root: pathlib.Pa
     return filtered
 
 
-def _filter_subagent_secret_listing(items: List[str], data_root: pathlib.Path) -> List[str]:
-    filtered: List[str] = []
-    redacted = 0
-    root = pathlib.Path(data_root).resolve(strict=False)
-    for item in items:
-        marker = item.rstrip("/")
-        if marker.startswith("⚠️") or marker.startswith("...("):
-            filtered.append(item)
-            continue
-        target = root / marker
-        try:
-            resolved_rel = str(pathlib.Path(target).resolve(strict=False).relative_to(root)).replace(os.sep, "/")
-        except (OSError, ValueError):
-            resolved_rel = marker
-        if (
-            _is_subagent_secret_data_path(marker)
-            or _is_subagent_secret_data_path(resolved_rel)
-            or _is_skill_owner_state_target(target, root)
-            or is_skill_owner_state_alias(target, root)
-            or any(
-                candidate.is_file()
-                and _is_subagent_secret_data_path(candidate.name)
-                and target.exists()
-                and target.samefile(candidate)
-                for candidate in root.iterdir()
-            )
-        ):
-            redacted += 1
-            continue
-        filtered.append(item)
-    if redacted:
-        filtered.append(f"⚠️ {redacted} secret/control entr{'y' if redacted == 1 else 'ies'} hidden from this subagent.")
-    return filtered
+def _filter_subagent_secret_listing(
+    items: List[str], data_root: pathlib.Path, *, ctx: ToolContext | None = None,
+) -> List[str]:
+    """List data/task payloads against their real runtime and repository owners."""
+    from ouroboros.tools.registry import active_repo_dir_for
+
+    return _filter_subagent_secret_repo_listing(
+        items, active_repo_dir_for(ctx) if ctx is not None else data_root,
+        data_root=data_root if ctx is None else None, ctx=ctx, base_path=data_root,
+    )
