@@ -2187,6 +2187,14 @@
    "is_error": false,
    "status": "ok"
   },
+  "ident:SERVICE_ENV_REFERENCE_BLOCKED:named": {
+   "is_error": true,
+   "status": "blocked"
+  },
+  "ident:SERVICE_ENV_REFERENCE_BLOCKED:plain": {
+   "is_error": true,
+   "status": "blocked"
+  },
   "ident:SERVICE_NOT_FOUND:named": {
    "is_error": false,
    "status": "ok"
@@ -2850,6 +2858,10 @@
   "native:ACCESS_BLOCKED:MUTATIVE_SUBAGENTS_DISABLED": {
    "is_error": false,
    "status": "ok"
+  },
+  "native:ACCESS_BLOCKED:SERVICE_ENV_REFERENCE_BLOCKED": {
+   "is_error": true,
+   "status": "blocked"
   },
   "native:ACCESS_BLOCKED:TOOL_ACCESS_BLOCKED": {
    "is_error": true,
