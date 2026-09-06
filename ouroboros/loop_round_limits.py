@@ -379,13 +379,18 @@ def _handle_owner_stop_finalization(
 def _handle_provider_unavailable(
     ctx: _RoundLimitContext, *, error_kind: str = "provider_unavailable",
     wait_cause: str = "", waited_sec: float = 0.0, interactive: bool = False,
+    control_reason: Optional[str] = None,
 ) -> Tuple[str, Dict[str, Any], Dict[str, Any]]:
     """Provider-death rail wrapper: every arm carries terminal provenance.
     The forced-finalization sink stamps ``host_notice``; retained/generated
-    model candidates stamp ``model_final``."""
+    model candidates stamp ``model_final``. Read the recognized control here
+    so ordinary and delegated-hold terminal paths share the same cause."""
+    if control_reason is None:
+        owner_ctx = getattr(ctx.tools, "_ctx", None)
+        control_reason = str(getattr(owner_ctx, "_transport_repeat_control_reason", "") or "")
     text, usage, llm_trace = _loop()._provider_unavailable_result(
         ctx, error_kind=error_kind, wait_cause=wait_cause, waited_sec=waited_sec,
-        interactive=interactive,
+        interactive=interactive, control_reason=control_reason,
     )
     if str(usage.get("reason_code") or "") not in ("", "deadline_local") and usage.get(
             "terminal_origin") in (None, TERMINAL_ORIGIN_HOST_NOTICE):
@@ -444,6 +449,7 @@ def _maybe_early_finalize(
             return _finalize_now_transport_terminal(
                 transport_episode, drive_logs=limit_ctx.drive_logs,
                 task_id=limit_ctx.task_id, model=limit_ctx.active_model,
+                control_reason=control_text.splitlines()[0].strip(),
                 handle_provider_unavailable=functools.partial(
                     _handle_provider_unavailable, limit_ctx),
             )

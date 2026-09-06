@@ -140,6 +140,7 @@ def _handle_llm_usage(evt: Dict[str, Any], ctx: Any) -> None:
         "model_category": evt.get("model_category", "other"),
         "provider": evt.get("provider", ""),
         "source": evt.get("source", ""),
+        **{key: evt[key] for key in ("llm_call_id", "execution_id", "round_id", "round") if key in evt},
         "cost_estimated": bool(evt.get("cost_estimated", False)),
         "cost": resolved_cost,
         "cost_known": cost_known,

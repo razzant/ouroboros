@@ -916,19 +916,23 @@ That required presence test is the enforcing surface; CHECKLISTS item 11
 
 ## Review & Commit Protocol
 
-Reviewed commits separate cheap improvement evidence from authoritative
-candidate-bound authority. The operator sequence: finish all edits, run focused
-tests, run the advisory when useful, then freeze and review the exact
-candidate — do not interleave edits with repeated review calls.
-`docs/CHECKLISTS.md` is the only reviewer-question, severity, and output SSOT;
-ARCHITECTURE "Review stack" owns the dataflow.
+Reviewed commits separate improvement evidence from candidate-bound authority.
+Finish the edits and focused tests, then call `commit_reviewed`; standalone
+`preflight_review` remains available when an earlier critique is useful.
+`docs/CHECKLISTS.md` owns reviewer questions, severity and output contracts;
+ARCHITECTURE "Review delivery" owns the dataflow.
 
-1. **Cheap advisory preflight.** After edits, `preflight_review` may find
-   omissions before the expensive gate. Without an explicit skip,
-   `commit_reviewed` requires fresh advisory coverage and no open advisory
-   obligations or commit-readiness debt; any edit makes coverage stale.
-   `skip_advisory_review=True` bypasses only these advisory admission checks;
-   the skip is chosen by LLM judgment and durably audited with its reason.
+1. **Prepared preflight.** Authorization and unresolved-work checks precede
+   mechanical file preparation, staging/classification/protection and the
+   fingerprint. Existing free-cycle/budget admission precedes any automatic
+   preflight. When needed, the same `preflight_review` runs inline with the full
+   `review_rebuttal` and the independently applicable test preflight. The
+   candidate must remain unchanged before triad/scope dispatch. Explicit
+   `skip_advisory_review=True`, disabled and unconfigured paths retain their
+   audited behavior. A free advisory replay reads freshness but buys neither
+   another preflight nor another triad/scope wave. Stale coverage still needs
+   the explicit audited skip; applicable compensating tests run even when the
+   reviewer backend is available. Explicit test skips are not green proof.
 2. **Authoritative gate.** Independently configured deterministic test policy,
    staged fingerprinting, triad review, applicable scope review, aggregation,
    and pre/post revalidation. The fingerprint binds `git write-tree`, ordered
@@ -939,6 +943,35 @@ ARCHITECTURE "Review stack" owns the dataflow.
    mutation, rebase, conflict resolution, or changed landing parent
    invalidates exact-candidate authority and requires the applicable final
    gate again.
+
+A technical review failure may permit continuing under owner-selected advisory
+enforcement on a known, independently bound candidate. The failure's phase,
+reason, received findings and full result stay recorded as failure, never PASS.
+Blocking enforcement still blocks. Candidate/ownership, unfinished custody,
+Stop/deadline and budget/admission errors remain independent. Diagnostic
+`repo_commit_ready` projects this permission only from an exact repo/hash match;
+it does not change the failed review's status or freshness.
+
+Pending triad/scope reconciliation retains the prepared index and never restages
+or reconstructs a lost index. Pending delegated preflight binds the existing
+`delegate_custody` invocation in `AdvisoryRunRecord.execution` before POST and
+replays its canonical request, without another prompt store or physical run.
+An explicit audited preflight skip releases only logical admission: retain the
+old invocation, source and unknown physical work. It neither cancels that work
+nor posts a replacement. A late result updates its original record without
+invalidating the newer bypass. Only the existing definite start-failure producer
+can automatically discharge a stranded checkpoint; elapsed time cannot.
+Both commit and review-only entry points forward the explicit skip. A subsequent
+standalone request can rejoin exact historical custody or check new evidence;
+released unrelated history is not a logical lock. Pending refusals explain the
+audited skip without claiming that it cancels physical work or its cost.
+Native preflight uses the existing executor's end/failure events and monetary
+ledger, without a new advisory operation checkpoint or exact-rejoin protocol.
+An ambiguous returned native outcome remains failed evidence; explicit skip
+does not erase its cost or custody. The external review wrapper uses
+the same cycle and retains its candidate
+checkout/index while custody remains unresolved; its existing outcome records
+the checkout, drive root, reason and invocation for reconciliation.
 
 Triad slots review the staged diff against `docs/CHECKLISTS.md`; duplicate
 model ids remain independent slots and `config.adaptive_quorum` owns quorum. A
@@ -1726,6 +1759,22 @@ owner, owed terminal delivery, cascade postconditions — lives in ARCHITECTURE
   child-drive merge or terminality logic in gateways/tools. Task waits use
   `SETTLED_STATUSES` and structured facts plus queue-heartbeat freshness —
   never keyword matching.
+- `wait_task` and `wait_tasks` also peek the waiting actor's own mailbox through
+  the existing transport-wait reader. A pending message returns control without
+  acknowledging it or stopping children; the ordinary round-top drain delivers
+  and acknowledges it. Read the actor's execution drive, not its budget root.
+  One wait/transport episode may retain only a successfully proved empty mailbox:
+  compare both mailbox/ACK fingerprints before and after the existing full reader,
+  plus execution root, task, attempt and seen ids. Read/parse/stat failure or torn
+  data is not proof; never cache it. Check the in-memory incoming queue every tick.
+  A changed source re-enters the full revocation-aware reader; no TTL or ACK in peek.
+- Cancellation observations use `task_status.observe_cancellation_target` before
+  the existing intent write. They name the resolved physical target, separate
+  task-result update/start facts from queue freshness, and optionally include
+  recorded delegated execution. These are separate source observations, not an
+  atomic snapshot. Caller reason and request origin are distinct; an HTTP client
+  is not proof of personal owner intent. A later target mismatch is disclosed.
+  Keep cancellation authority and completion-wins independent of these observations.
 - Cancel INTENT is never a status value. Every cancel ingress writes a durable
   intent through `ouroboros/cancel_intents.request_cancel` and FAILS CLOSED
   when that write fails: a cancel without a durable, watchdog-replayable
@@ -1910,16 +1959,18 @@ by "Provider Independence" above. Call-site imperatives:
   admission and the transport bound cannot disagree.
 - Tree-spend pacing decides on root-subtree ledger spend including in-flight
   holds; own cost is a disclosed lower-bound fallback, and unavailable is
-  unknown, never `$0`. The root's deciding ceiling bounds every tree member;
-  each descendant intersects that root-cap component with its own current
-  global resolution, resolves once, and discloses the same object the loop later decides on, printed with its
-  binding bound named on every host cost surface. Refresh `usage_accounting.last_root_accounting` only
-  at rare cache-breaking decision surfaces, never per round or inside a
-  stable cached prefix (`tests/test_budget_limits.py`). Graceful
-  finalization precedes the ledger fence because the affordability rail
-  borrows the fence's own per-attempt reservation (cache-aware only from the
-  task's last settled same-provider normalized-route split), never a constant margin alone and never a
-  per-round ledger scan (`tests/test_tree_cost_ceiling.py`). Read the
+  unknown, never `$0`. Resolve the original early threshold at the root and
+  retain it across enabled descendants, forwarding the existing root carrier.
+  A legacy child's local fallback is not proof of the original root threshold.
+  Keep explicit disabled profiles and real monetary fences independent. Publish
+  the same CostCeiling object the loop decides on. Reuse the existing bounded-stale
+  tree snapshot; refresh at its bound or when final preparation requires it.
+  Price the final call with the fence's own cache-aware reservation and compare
+  every known root/global remainder, including tasks with only a global bound.
+  Read the current wallet once per priced phase through the existing cached
+  usage projection, reuse it across candidate probes, and leave final admission
+  to the atomic fence. A check reserves no share; other tasks can spend before
+  dispatch (`tests/test_network_budget_wallet.py`). Read the
   configured global budget through the one resolver rather than an
   inline default, so the loop axis, the bound scope and the ledger fence
   cannot disagree about the same install. Post-task
@@ -1983,7 +2034,10 @@ by "Provider Independence" above. Call-site imperatives:
   never folded into `quota_exhausted`, which is correctly permanent for a
   billing refusal and wrong for a window whose only cure is waiting
   (`tests/test_reviewer_slot_config.py`).
-- Classify provider failures before retrying the same request:
+- Classify provider failures before retrying the same request. The combined
+  Anthropic input-plus-max_tokens rejection is a context-window overflow;
+  preserve true output/body-size precedence in the shared context_budget
+  classifiers, without requiring the input alone to exceed the window.
   quota/auth/billing, hard bad-request, and request-too-large failures are
   non-retryable as-is (record the exact category and surface a recovery
   hint); a typed 408/429/5xx or a failure proven pre-dispatch may retry; a
@@ -1995,10 +2049,14 @@ by "Provider Independence" above. Call-site imperatives:
   and never a resend of the unresolved one, deciding the `retry_same_request`
   flag before the durable row is written
   (`tests/test_transport_death_retry.py`): the flag records that a repeat
-  was granted when the row was written, and exactly two refusal paths take a
-  never-sent repeat back off the round record, each recorded by its own
-  durable row — the admission gate (`llm_not_dispatched`) and the sleep gate
-  (`llm_retry_deadline_exhausted`). A budget refusal does NOT un-count: the
+  was granted when the row was written. Only a proven refusal takes a never-sent
+  grant back off the round record: deadline admission (`llm_not_dispatched`),
+  deadline backoff (`llm_retry_deadline_exhausted`), or a current typed finalization
+  control during the paid-repeat wait (`llm_not_dispatched`, `finalize_control_pending`).
+  Reuse the interruptible sleep and execution mailbox/current-intent readers;
+  peek without delivery or ACK, and leave ordinary input/hurry/revoked controls
+  alone. Generic transient/empty-response backoffs retain their own contract.
+  A budget refusal does NOT un-count: the
   budget rail cannot prove the repeat never left the host (`llm.chat` retries
   on the wire before a later reservation can be refused), so the record keeps
   the attempt booked and the budget terminal, not the provider terminal, ends
@@ -2031,6 +2089,15 @@ by "Provider Independence" above. Call-site imperatives:
   a keyword or regex over content (BIBLE P5). Fixed kill-timeouts (hard
   task/tool ceilings, watchdog) remain the outer safety bound; progress-aware
   waiting tunes the passive wait only.
+- Preserve raw terminal model/salvage bytes separately from the host-authored
+  `terminal_provider_notice`. Existing receipts and secondary notices consume
+  those same facts; a retained answer must not hide wait or unknown-attempt
+  evidence or invite a blind rerun. Ephemeral and message/deferred Presence
+  responses render one host-labelled status section; cached Presence output
+  is already rendered. Preserve silent/tool-delivered authority and never
+  promise task details for an ephemeral turn with no task result. Carry the
+  actual control reason through wait termination: owner Wrap up is distinct
+  from deadline/budget finalization and still sends no new summary request.
 - The transport-wait episode's owner notes always pass `incident=` — the
   typed `task_incident`/`toast_once` pair on an ephemeral turn's
   episode-boundary notes (entry, recovery/closure, exhaustion), `None` on
@@ -2184,6 +2251,50 @@ by "Provider Independence" above. Call-site imperatives:
   acceptance, atomically fence new descendants under the queue lock and
   prove recursive subtree quiescence from the task-status SSOT; a revision
   must explicitly reopen the fence, and terminal/degraded outcomes seal it.
+- Delivery-control JSON applies only to a final response with no tool calls.
+  Retaining an answer leaves tools available for further work; changed evidence
+  still requires the existing complete replacement. A requested file or diff
+  does not imply a universal commit-or-revert rule. Self-modification keeps its
+  reviewed-commit contract.
+- Post-task synthesis receives `completion_observations` from the existing
+  terminal result writer: per-send-tool counts and latest recorded returns,
+  task-related skill readiness plus coverage, and a full redacted artifact for
+  later readers. Counts come from `OWNER_DELIVERY_TOOL_NAMES`, not prose parsing.
+  Packet-only summary/reflection use the inline observations; a source reference
+  is not evidence they read. Tool success is not a chat/owner-receipt guarantee,
+  and empty or omitted material never proves that no delivery happened. Recovery
+  uses the stored snapshot; global skill state never attributes an owner click
+  to the task. Task-summary calls use the existing `chat_observed` custody seam.
+- Promoted tasks carry their host-minted root id and role on the queue payload.
+  RUNNING writes preserve the actual `_task_started_ts` as `started_at` and an
+  existing `queued_at`; terminal `ts` remains its own field. Missing historical
+  start facts stay missing. LLM usage carries the existing call/execution/round
+  ids so it can join the worker's round without duplicating that round event.
+  Delegated settlement/disposition/unread rows carry their existing root/parent
+  ids. Intrinsic pacing exposes the same `cost_ceiling_disclosure` its text uses;
+  tool error manifests carry their typed code and redacted reason preview.
+  These are observation links, not new accounting or zero-price rules.
+- Acceptance evidence identity hashes source facts before history-dependent
+  budgeting; recording a review must not change the facts it reviewed. Complete
+  applied host records (including resolved criteria, decisions and supersession)
+  are saved by `review_projection.publish_acceptance_checkpoint` through the
+  existing write-once source handles before compact publication. Ordinary artifact
+  registration keeps its short locked manifest merge; copying/hashing finishes
+  before that lock, which never acquires a task-result lock. The live
+  publication changes only `review_projection`, preserving lifecycle and other
+  writers' fields. Test delayed snapshots and child replicas through the same
+  central merge, and verify that the full source downloads while the task is
+  still running. Review/completion sources use `source_handles/context_checkpoints`,
+  outside deliverables and the acceptance artifact manifest. Canonical-first
+  persistence (`task.budget_drive_root or drive_root`) and the existing published-ref
+  closure preserve them before child cleanup. Give native readers an
+  executable get_task_result selector for that source task; reuse explicit character
+  ranges and complete-source hashes so a split or later task never resolves the
+  basename against its own artifact directory. Preserve that
+  distinction through effective reads and child copy-back; terminal references must
+  carry the task's chat id, including zero. A missing source is disclosed, never reconstructed from a
+  bounded preview. Source/capacity, publication order and paid identity are
+  separate contracts; changing history or presentation must not mint work.
 - The host buys one authoritative acceptance panel per PAID IDENTITY —
   `sha256(candidate_hash + the sorted set of nonempty (obligation_id,
   disposition, sha256(reason)) tuples)`; an empty disposition reason hashes

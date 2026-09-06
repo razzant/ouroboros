@@ -25,6 +25,7 @@ into custody. The canonical ``status`` never carries intent again.
 
 from __future__ import annotations
 
+import copy
 import hashlib
 import logging
 import os
@@ -349,6 +350,7 @@ def request_cancel(
     scope: str = "",
     allow_settled_target: bool = False,
     requested_stop_policy: str = "",
+    observation: Optional[Dict[str, Any]] = None,
 ) -> Dict[str, Any]:
     """Record durable cancel intent for ``task_id`` — idempotent per task.
 
@@ -391,6 +393,7 @@ def request_cancel(
     # Whether THIS mutation recorded a new hardening — a duplicate immediate
     # request over an already-hardened intent must not re-emit the forensic row.
     newly_hardened = {"value": False}
+    observed = copy.deepcopy(observation) if isinstance(observation, dict) else None
 
     def _mutate(current: Dict[str, Any]) -> Optional[Dict[str, Any]]:
         newly_hardened["value"] = False
@@ -469,6 +472,8 @@ def request_cancel(
         ):
             target_id = _validated_single_cancel_target(drive_root, tid)
         resolved["task_id"] = target_id
+        if observed is not None:
+            observed["matches_cancel_target"] = observed.get("observed_task_id") == target_id
         existing = intents.get(target_id)
         if existing is not None and not isinstance(existing, dict):
             # GR6-3 row strictness: a present-but-malformed ROW is corruption,
@@ -506,6 +511,7 @@ def request_cancel(
                 "already_requested": False,
                 "already_settled": True,
                 "status": resolved["status"],
+                **({"observation": observed} if observed is not None else {}),
             })
             return None
         if isinstance(existing, dict) and existing.get("request_id"):
@@ -513,6 +519,9 @@ def request_cancel(
             minted["already_requested"] = True
             updated_row = dict(existing)
             changed = rekeyed
+            if rekeyed and isinstance(updated_row.get("observation"), dict):
+                updated_row["observation"] = {**updated_row["observation"],
+                    "matches_cancel_target": updated_row["observation"].get("observed_task_id") == target_id}
             if scope_text == SCOPE_CASCADE and str(existing.get("scope") or "") != SCOPE_CASCADE:
                 # A single-cancel intent later re-entered through the cascade
                 # ingress must be replayed as a cascade. WIDEN-ONLY (GR2-1d):
@@ -548,6 +557,7 @@ def request_cancel(
             "requested_at": utc_now_iso(),
             "generation": 0,
             "scope": scope_text or SCOPE_SINGLE,
+            **({"observation": observed} if observed is not None else {}),
         }
         if policy_text == STOP_POLICY_FINALIZE:
             row["stop_policy"] = STOP_POLICY_FINALIZE
@@ -589,6 +599,7 @@ def request_cancel(
             "status": str(minted.get("status") or ""),
             "source": str(source or ""),
             "reason": reason_text,
+            **({"observation": observed} if observed is not None else {}),
         })
     elif not minted.get("already_requested"):
         _forensic(drive_root, {
@@ -600,6 +611,7 @@ def request_cancel(
             "request_id": minted.get("request_id"),
             "source": minted.get("source"), "requested_by": minted.get("requested_by"),
             "scope": minted.get("scope"), "reason": reason_text,
+            **({"observation": minted["observation"]} if "observation" in minted else {}),
             **({"stop_policy": minted.get("stop_policy")} if minted.get("stop_policy") else {}),
             **(
                 {"settled_target_status": resolved.get("status")}

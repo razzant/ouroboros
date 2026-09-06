@@ -49,6 +49,8 @@ def _record_from_dict(d: Dict[str, Any]) -> AdvisoryRunRecord:
         **{key: str(d.get(key, default)) for key, default in _RUN_STR_DEFAULTS.items()},
         ts=ts,
         items=list(d.get("items") or []),
+        execution=(dict(d["execution"]) if isinstance(d.get("execution"), dict)
+                   else {} if d.get("execution") is None else {"operation_state": "custody_lost"}),
         snapshot_paths=list(raw_paths) if isinstance(raw_paths, list) else None,
         task_id=str(d.get("task_id", d.get("bypassed_by_task", ""))),
         attempt=_coerce_int(d.get("attempt", 0)),
@@ -131,6 +133,23 @@ def _validate_attempt_authority_shape(data: Dict[str, Any]) -> List[Any]:
     stay out of this validator: their existing fail-soft ``custody_lost``
     hardening is the recovery contract.
     """
+    raw_runs = data.get("advisory_runs", [])
+    if not isinstance(raw_runs, list):
+        raise ValueError("advisory review runs must be a list")
+    for item in raw_runs:
+        if not isinstance(item, dict):
+            raise ValueError("advisory review run must be an object")
+        if "execution" not in item:
+            continue
+        execution = item["execution"]
+        if not isinstance(execution, dict):
+            raise ValueError("advisory execution custody must be an object")
+        for key in ("invocation_id", "pending_invocation_id", "operation_id", "operation_state",
+                    "fingerprint", "failure_phase", "failure_code"):
+            if key in execution and not isinstance(execution[key], str):
+                raise ValueError(f"advisory execution has invalid {key}")
+        if "intent" in execution and not isinstance(execution["intent"], dict):
+            raise ValueError("advisory execution intent must be an object")
     raw_attempts = data.get("attempts", [])
     if not isinstance(raw_attempts, list):
         raise ValueError("advisory review attempts must be a list")
@@ -408,18 +427,27 @@ def advisory_commit_ready(
     open_obligations: Any,
     open_debts: Any,
     enforcement: str | None = None,
+    *, matching_run: AdvisoryRunRecord | None = None,
 ) -> bool:
     """SSOT for every ``repo_commit_ready`` projection (H5, capinv-447).
 
-    Mirrors the real gate (``commit_gate._check_advisory_freshness``): a fresh /
-    bypassed / skipped advisory run is required under every enforcement mode,
-    while open obligations/debt block ``commit_reviewed`` only under
-    ``blocking`` enforcement — under ``advisory`` the debt is disclosed and
-    acknowledged, not gating. Advisory-readiness projection only: triad, scope,
-    custody, and the other commit requirements stay independent.
+    Mirrors the real advisory gate: fresh/bypassed/skipped coverage, or a
+    typed technical failure permitted under owner-selected advisory enforcement.
+    ``matching_run`` is supplied only after the caller matches current repo/hash;
+    permission never changes its failure status or makes it fresh. Obligations
+    and debt block only under blocking enforcement. Triad, scope, custody and
+    every other commit requirement remain independent.
     """
     if not effectively_fresh:
-        return False
+        from ouroboros.config import get_review_enforcement
+        from ouroboros.tools.commit_gate import review_failure_is_technical
+
+        # The caller has already matched the record to the current repo/hash.
+        # This is permission under advisory enforcement, never freshness/PASS.
+        if ((enforcement or get_review_enforcement()) != "advisory"
+                or getattr(matching_run, "status", "") not in {"error", "parse_failure"}
+                or not review_failure_is_technical(getattr(matching_run, "execution", {}) or {})):
+            return False
     if open_obligations or open_debts:
         if enforcement is None:
             from ouroboros.config import get_review_enforcement

@@ -308,6 +308,7 @@ def emit_llm_usage_event(
             "model_category": infer_model_category(model),
             "provider": resolved_provider,
             "source": source,
+            **{key: usage[key] for key in ("llm_call_id", "execution_id", "round_id", "round") if key in usage},
             "prompt_tokens": int(usage.get("prompt_tokens") or 0),
             "completion_tokens": int(usage.get("completion_tokens") or 0),
             "cached_tokens": int(usage.get("cached_tokens") or 0),

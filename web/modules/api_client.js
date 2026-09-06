@@ -97,6 +97,17 @@ export function cancelTask(taskId, { cascade = false, stopPolicy = '' } = {}) {
     return Object.keys(body).length ? jsonPost(url, body) : fetchJson(url, { method: 'POST' });
 }
 
+/** URL for one published immutable source handle. */
+export function taskSourceDownloadUrl(taskId, ref) {
+    const path = typeof ref?.path === 'string' ? ref.path : '';
+    if (!taskId || ref?.root !== 'artifact_store' || ref?.kind !== 'task_source'
+        || !/^[0-9a-f]{64}$/.test(ref?.sha256 || '')
+        || !/^source_handles\/(tool_results|context_checkpoints)\/[A-Za-z0-9][A-Za-z0-9._-]*$/.test(path)
+        || !Number.isSafeInteger(ref?.size) || ref.size < 0) return '';
+    const name = path.split('/').at(-1);
+    return `/api/tasks/${encodeURIComponent(taskId)}/artifacts/${encodeURIComponent(name)}?source=${encodeURIComponent(path)}`;
+}
+
 export async function resumeTask(taskId) {
     return fetchJson(`/api/tasks/${encodeURIComponent(taskId)}/resume`, { method: 'POST' });
 }

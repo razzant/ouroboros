@@ -277,13 +277,14 @@ def test_non_committing_review_cycle_exists_and_reuses_shared_stage_cycle():
     assert '["git", "commit"' not in source
 
 
-def test_non_committing_review_cycle_runtime_unstages_on_success(monkeypatch):
+def test_non_committing_review_cycle_runtime_unstages_on_success(monkeypatch, tmp_path):
     git_mod = _get_git_module()
     reset_calls = []
     recorded = []
     released = []
 
     monkeypatch.setattr(git_mod, "_check_overlapping_review_attempt", lambda ctx: None)
+    monkeypatch.setattr(git_mod, "_reconcile_advisory_before_preparation", lambda *a, **kw: "")
     monkeypatch.setattr(git_mod, "_acquire_git_lock", lambda ctx: "lock-token")
     monkeypatch.setattr(git_mod, "_release_git_lock", lambda lock: released.append(lock))
     monkeypatch.setattr(
@@ -309,7 +310,7 @@ def test_non_committing_review_cycle_runtime_unstages_on_success(monkeypatch):
         lambda cmd, cwd=None: reset_calls.append((tuple(cmd), cwd)) or "",
     )
 
-    ctx = types.SimpleNamespace(repo_dir="/tmp/repo")
+    ctx = types.SimpleNamespace(repo_dir="/tmp/repo", drive_root=tmp_path)
     outcome = git_mod._run_non_committing_review_cycle(ctx, "test commit")
 
     assert outcome["status"] == "passed"
@@ -320,12 +321,13 @@ def test_non_committing_review_cycle_runtime_unstages_on_success(monkeypatch):
     assert reset_calls == [(("git", "reset", "HEAD"), "/tmp/repo")]
 
 
-def test_non_committing_review_cycle_runtime_unstages_on_block(monkeypatch):
+def test_non_committing_review_cycle_runtime_unstages_on_block(monkeypatch, tmp_path):
     git_mod = _get_git_module()
     reset_calls = []
     released = []
 
     monkeypatch.setattr(git_mod, "_check_overlapping_review_attempt", lambda ctx: None)
+    monkeypatch.setattr(git_mod, "_reconcile_advisory_before_preparation", lambda *a, **kw: "")
     monkeypatch.setattr(git_mod, "_acquire_git_lock", lambda ctx: "lock-token")
     monkeypatch.setattr(git_mod, "_release_git_lock", lambda lock: released.append(lock))
     monkeypatch.setattr(
@@ -343,7 +345,7 @@ def test_non_committing_review_cycle_runtime_unstages_on_block(monkeypatch):
         lambda cmd, cwd=None: reset_calls.append((tuple(cmd), cwd)) or "",
     )
 
-    ctx = types.SimpleNamespace(repo_dir="/tmp/repo")
+    ctx = types.SimpleNamespace(repo_dir="/tmp/repo", drive_root=tmp_path)
     outcome = git_mod._run_non_committing_review_cycle(ctx, "test commit")
 
     assert outcome["status"] == "blocked"

@@ -48,6 +48,7 @@ def acknowledged_task_message_ids(
     task_id: str,
     *,
     attempt_key: Any = None,
+    _read_status: Optional[Dict[str, bool]] = None,
 ) -> set[str]:
     """Read acknowledgements effective for one physical attempt.
 
@@ -55,20 +56,28 @@ def acknowledged_task_message_ids(
     A legacy ack for durable owner text cannot prove which physical attempt
     incorporated it, so fresh attempts replay that exact directive until
     terminal cleanup. New owner-text acks are scoped by ``attempt_key``.
+    Internal peek callers may also request complete-read evidence; a fail-soft
+    empty set alone is not proof that every required source was readable.
     """
 
+    if _read_status is not None:
+        _read_status["complete"] = False
+    complete = True
     path = _ack_path(drive_root, task_id)
     if not path.exists():
+        if _read_status is not None:
+            _read_status["complete"] = True
         return set()
     legacy_owner_ids: set[str] = set()
     if attempt_key is not None:
         try:
-            for line in _mailbox_path(drive_root, task_id).read_text(
-                encoding="utf-8",
-            ).splitlines():
+            content = _mailbox_path(drive_root, task_id).read_text(encoding="utf-8")
+            complete = not content or content.endswith("\n")
+            for line in content.splitlines():
                 try:
                     entry = json.loads(line)
                 except (TypeError, ValueError):
+                    complete = False
                     continue
                 if (
                     isinstance(entry, dict)
@@ -77,18 +86,22 @@ def acknowledged_task_message_ids(
                 ):
                     legacy_owner_ids.add(str(entry["msg_id"]))
         except FileNotFoundError:
-            pass
+            complete = False
         except OSError:
+            complete = False
             log.warning(
                 "Failed to classify legacy owner acknowledgements for %s",
                 task_id, exc_info=True,
             )
     found: set[str] = set()
     try:
-        for line in path.read_text(encoding="utf-8").splitlines():
+        content = path.read_text(encoding="utf-8")
+        complete = complete and (not content or content.endswith("\n"))
+        for line in content.splitlines():
             try:
                 row = json.loads(line)
             except (TypeError, ValueError):
+                complete = False
                 continue
             if not isinstance(row, dict) or not str(row.get("msg_id") or ""):
                 continue
@@ -100,7 +113,10 @@ def acknowledged_task_message_ids(
             ):
                 found.add(str(row["msg_id"]))
     except OSError:
+        complete = False
         log.warning("Failed to read task-message acknowledgements for %s", task_id, exc_info=True)
+    if _read_status is not None:
+        _read_status["complete"] = complete
     return found
 
 
@@ -447,6 +463,8 @@ def drain_owner_entries(
     task_id: str,
     seen_ids: Optional[set] = None,
     attempt_key: Any = None,
+    *,
+    _read_status: Optional[Dict[str, bool]] = None,
 ) -> List[dict]:
     """Read unseen mailbox entries without mutating the append-only mailbox.
 
@@ -454,20 +472,32 @@ def drain_owner_entries(
     so a control retracted by a later line is never delivered even if the reader
     had not drained it yet; the revocation lines themselves are protocol and are
     never returned as content.
+    ``_read_status`` distinguishes successful emptiness from failed/torn reads
+    for wait-local peeks without changing the normal delivery projection.
     """
+    if _read_status is not None:
+        _read_status["complete"] = False
     path = _mailbox_path(drive_root, task_id)
     if not path.exists():
+        if _read_status is not None:
+            _read_status["complete"] = True
         return []
     if seen_ids is None:
         seen_ids = set()
+    ack_status: Dict[str, bool] = {}
     seen_ids.update(
         acknowledged_task_message_ids(
             drive_root, task_id, attempt_key=attempt_key,
+            **({"_read_status": ack_status} if _read_status is not None else {}),
         )
     )
     try:
-        content = path.read_text(encoding="utf-8").strip()
+        content = path.read_text(encoding="utf-8")
+        complete = ack_status.get("complete", False) and (not content or content.endswith("\n"))
+        content = content.strip()
         if not content:
+            if _read_status is not None:
+                _read_status["complete"] = complete
             return []
         parsed: List[dict] = []
         revoked: set = set()
@@ -478,9 +508,11 @@ def drain_owner_entries(
             try:
                 entry = json.loads(line)
             except Exception:
+                complete = False
                 log.debug("Malformed mailbox line for task %s", task_id, exc_info=True)
                 continue
             if not isinstance(entry, dict):
+                complete = False
                 continue
             if str(entry.get("kind") or KIND_OWNER_TEXT) == KIND_CONTROL_REVOKED:
                 revoked.add(str(entry.get("text") or ""))
@@ -521,10 +553,49 @@ def drain_owner_entries(
                     drained["source_task_id"] = str(entry.get("source_task_id") or "")
                     drained["relayed_from_task_id"] = str(entry.get("relayed_from_task_id") or "")
                 entries.append(drained)
+        if _read_status is not None:
+            _read_status["complete"] = complete
         return entries
     except Exception:
         log.debug("Failed to read mailbox for task %s", task_id, exc_info=True)
         return []
+
+
+class OwnerMailboxPeek:
+    """One wait's proven-empty mailbox snapshot; never delivery or ACK authority."""
+
+    def __init__(self) -> None:
+        self._empty_key: Any = None
+
+    @staticmethod
+    def _fingerprint(root: pathlib.Path, task_id: str, attempt: Any, seen: set) -> tuple:
+        files = []
+        for path in (_mailbox_path(root, task_id), _ack_path(root, task_id)):
+            try:
+                stat = path.stat()
+                files.append((stat.st_dev, stat.st_ino, stat.st_size, stat.st_mtime_ns, stat.st_ctime_ns))
+            except FileNotFoundError:
+                files.append(None)
+        return (str(root.resolve()), task_id, None if attempt is None else str(attempt), frozenset(seen), tuple(files))
+
+    def pending(self, root: pathlib.Path, task_id: str, seen: set, attempt: Any) -> bool:
+        try:
+            before = self._fingerprint(root, task_id, attempt, seen)
+        except OSError:
+            before = None
+        if before is not None and before == self._empty_key:
+            return False
+        self._empty_key = None
+        status: Dict[str, bool] = {}
+        # Drain changes only this private set; normal loop delivery owns the real one.
+        entries = drain_owner_entries(root, task_id, set(seen), attempt, _read_status=status)
+        if not entries and before is not None and status.get("complete"):
+            try:
+                if before == self._fingerprint(root, task_id, attempt, seen):
+                    self._empty_key = before
+            except OSError:
+                pass  # uncertainty never becomes a remembered empty mailbox
+        return bool(entries)
 
 
 def drain_owner_messages(

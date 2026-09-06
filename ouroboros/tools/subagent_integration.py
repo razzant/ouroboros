@@ -3,8 +3,9 @@
 A mutative (acting) subagent returns its changes as a ``workspace.patch`` artifact
 (produced by headless finalization, a git diff against the child's base commit).
 The parent decides what to do with it — accept one (best-of-N), synthesize several,
-or reject — and this tool APPLIES the chosen patch into the parent's active repo or
-worktree. The parent stays the sole committer: this stages changes but never
+or reject. This tool applies isolated self_worktree patches to the parent's repo,
+or verifies native external_workspace changes already present in the shared tree.
+The parent stays the sole committer: applying stages changes but never
 commits; the parent reviews and runs ``commit_reviewed`` itself.
 
 Routing is top-only: ``target_root`` defaults to ``ctx.active_repo_dir()`` — the
@@ -853,7 +854,7 @@ def _compare_subagent_patches(ctx: ToolContext, task_ids: Any = None) -> str:
             if len(raw) > _COMPARE_PATCH_PREVIEW_CHARS:
                 body = raw[:_COMPARE_PATCH_PREVIEW_CHARS] + (
                     f"\n... [patch preview truncated; {len(raw)} bytes total — "
-                    "integrate to apply, or read the workspace.patch artifact for the full diff] ..."
+                    "integrate to apply/verify, or read the workspace.patch artifact for the full diff] ..."
                 )
             else:
                 body = raw
@@ -866,7 +867,7 @@ def _compare_subagent_patches(ctx: ToolContext, task_ids: Any = None) -> str:
             + (f"\n```diff\n{body}\n```\n" if body else "- (no patch body; nothing to apply)\n")
         )
     parts.append(
-        "\nPick the best candidate and apply it with integrate_subagent_patch(task_id=...), "
+        "\nUse integrate_subagent_patch(task_id=...) to apply an isolated patch or verify shared files, "
         "or synthesize across candidates yourself (you are the sole committer). Comparison is read-only."
     )
     return "\n".join(parts)
@@ -888,7 +889,7 @@ def get_tools() -> List[ToolEntry]:
                     "workspace.patch candidates side by side (status, diffstat, changed-file counts, "
                     "child summary, and a bounded diff preview) so you can pick the best one or "
                     "synthesize across them. Applies and commits NOTHING — use integrate_subagent_patch "
-                    "to actually stage a chosen patch. Only sees patches reachable from your task drive roots."
+                    "to apply an isolated patch or verify shared files. Only sees patches reachable from your task drive roots."
                 ),
                 "parameters": {
                     "type": "object",
@@ -909,10 +910,11 @@ def get_tools() -> List[ToolEntry]:
             {
                 "name": "integrate_subagent_patch",
                 "description": (
-                    "Integrate (apply) a mutative subagent's returned workspace.patch into your active "
-                    "repo/worktree, or record a rejection. You remain the SOLE COMMITTER: this stages the "
-                    "child's changes (manifest-first, sha256-verified, 3-way apply) but does NOT commit — "
-                    "you review and run commit_reviewed yourself. Use for best-of-N: pick the best child "
+                    "Integrate a mutative child's result or record a rejection: self_worktree uses "
+                    "manifest-first, sha256-verified 3-way apply into your active repo; native external_workspace "
+                    "verifies files already in the shared tree WITHOUT reapplying. Genesis is a standalone "
+                    "directory, not a repo patch. This never commits; self-modification still requires your "
+                    "commit_reviewed. For best-of-N pick a child "
                     "and integrate it, or integrate several to synthesize. Protected-path changes require "
                     "pro runtime mode (and, for a nested acting parent, protected_paths_grant). Conflicts "
                     "are reported for you to resolve (vcs_diff) or abort (vcs_restore). Writes a "
@@ -922,7 +924,7 @@ def get_tools() -> List[ToolEntry]:
                     "type": "object",
                     "properties": {
                         "task_id": {"type": "string", "description": "The child subagent task_id whose workspace.patch to integrate."},
-                        "decision": {"type": "string", "enum": ["apply", "reject"], "default": "apply", "description": "apply = stage the child's patch; reject = record a rejection verdict without applying."},
+                        "decision": {"type": "string", "enum": ["apply", "reject"], "default": "apply", "description": "apply = apply/stage an isolated self_worktree patch, or verify shared external_workspace files already written; reject = record a rejection without applying."},
                         "reason": {"type": "string", "description": "Optional rationale recorded in the verdict (why accept / reject / synthesize)."},
                         "target_root": {"type": "string", "description": "Optional explicit target repo/worktree root. Defaults to your active repo (live repo for the root agent; your worktree for a nested acting parent — top-only routing)."},
                     },

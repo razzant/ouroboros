@@ -202,7 +202,7 @@ _NATIVE_REVIEW_INSTRUCTIONS = (
     "given inside the repository root — read_file, list_files, search_code, "
     "query_code, vcs_status, vcs_diff; no other tools exist here. You cannot "
     "modify anything and have no shell. Read LARGE files in bounded chunks "
-    "(read_file supports offset/limit) instead of requesting a whole large "
+    "(read_file supports start_line/max_lines and start_char for long lines) instead of requesting a whole large "
     "document at once: the episode has a hard transcript budget sized to your "
     "own context window, and an oversized read spends it. There is no round "
     "limit. Your host will tell you once when the budget is nearly spent; "
@@ -224,7 +224,7 @@ _LANDING_NOTICE = (
 
 # Per-tool-result bound inside the episode: one greedy full read of a giant
 # artifact must not consume the whole transcript budget in a single round.
-# Disclosed truncation with an offset/limit continuation handle is honest —
+# Disclosed truncation with a line/character continuation cursor is honest —
 # unlike compaction, nothing unseen is summarized into the record. The cap is
 # ALSO clamped to the room left below the transcript bound minus the landing
 # reserve, so no single read can jump over the landing notice and the bound.
@@ -836,7 +836,7 @@ class NativeToolRoundReviewExecutor(ReviewSlotExecutor):
                     result = f"⚠️ {type(exc).__name__}: {exc}"
                 result_cap = max(0, min(_EPISODE_TOOL_RESULT_CHAR_CAP, room))
                 # Disclosed bound with a continuation handle — the reader keeps
-                # reading in chunks (read_file supports offset/limit), so
+                # reading in chunks (read_file supports start_line/max_lines and start_char for long lines), so
                 # nothing is silently cut. The marker is budgeted INSIDE the
                 # cap, and the cut is measured on the SERIALIZED message (JSON
                 # escaping inflates real text) until it fits the room — a raw
@@ -846,7 +846,7 @@ class NativeToolRoundReviewExecutor(ReviewSlotExecutor):
                     " answer now from what you have read."
                     if room < _EPISODE_TOOL_RESULT_CHAR_CAP else
                     ". Continue reading the remainder in bounded"
-                    " chunks (read_file supports offset/limit)."
+                    " chunks (read_file supports start_line/max_lines and start_char for long lines)."
                 )
                 full = result
                 shown = sent = len(full) if len(full) <= result_cap else max(0, result_cap - len(marker) - 64)
