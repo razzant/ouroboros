@@ -2566,7 +2566,7 @@ def test_first_spawn_loser_attaches_to_the_winners_endpoint(monkeypatch, tmp_pat
     monkeypatch.setattr(custody_mod, "spawn_supervised", lambda *_args, **_kwargs: child)
     endpoint = DaemonEndpoint(host="127.0.0.1", port=45681, token="winner-token")
     manager = owned.OwnedClaudexorDaemon()
-    monkeypatch.setattr(manager, "_classify_liveness", lambda: (None, "not_provisioned", ""))
+    monkeypatch.setattr(manager, "_classify_liveness", lambda **_kwargs: (None, "not_provisioned", ""))
     monkeypatch.setattr(owned, "_SPAWN_POLL_SEC", 0.0)
     probe_bounds = []
 

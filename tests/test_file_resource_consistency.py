@@ -517,7 +517,6 @@ def test_known_root_expansion_applies_to_write_targets_only(tmp_path, monkeypatc
 
 @pytest.mark.parametrize('command', [
     ['sh', '-c', 'cat $HOME/.ssh/id_fixture'],
-    ['sh', '-c', 'cat ${HOME}/file1.txt'],
     ['sh', '-c', 'cd $HOME && cat .ssh/id_fixture'],
     ['sh', '-c', 'env -C $HOME cat .ssh/id_fixture'],
     ['sh', '-c', 'cat $OUROBOROS_DATA_DIR/settings.json'],
@@ -529,7 +528,7 @@ def test_child_known_root_credential_reads_are_blocked(environment, monkeypatch,
     monkeypatch.setenv('USERPROFILE', str(home))
     monkeypatch.setenv('OUROBOROS_DATA_DIR', str(data))
     ctx.task_constraint = TaskConstraint(mode='acting_subagent', surface='external_workspace', write_root=str(work))
-    for target in (home / '.ssh/id_fixture', home / 'file1.txt', data / 'settings.json'):
+    for target in (home / '.ssh/id_fixture', data / 'settings.json'):
         target.parent.mkdir(parents=True, exist_ok=True)
         target.write_text('FIXTURE_SECRET_MUST_NOT_REACH_OUTPUT', encoding='utf-8')
     original = list(command)
@@ -537,6 +536,17 @@ def test_child_known_root_credential_reads_are_blocked(environment, monkeypatch,
     assert (result.status, result.code) == ('blocked', 'SUBAGENT_SECRET_READ_BLOCKED')
     assert 'FIXTURE_SECRET_MUST_NOT_REACH_OUTPUT' not in result.text
     assert command == original
+
+
+@pytest.mark.parametrize('name', ['file1.txt', 'notes.txt'])
+def test_ordinary_home_text_file_keeps_native_read_and_write(environment, name):
+    reg, _ctx, home, _work, _data = environment
+    target = home / name
+    result = reg.execute_result('write_file', {'root': 'user_files', 'path': str(target), 'content': 'ORDINARY_TEXT_OK'})
+    assert result.status == 'ok'
+    assert target.read_text() == 'ORDINARY_TEXT_OK'
+    read = reg.execute_result('read_file', {'root': 'user_files', 'path': str(target)})
+    assert read.status == 'ok' and 'ORDINARY_TEXT_OK' in read.text
 
 
 @pytest.mark.skipif(sys.platform == 'win32', reason='actual POSIX shell expansion')

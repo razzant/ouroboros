@@ -230,8 +230,14 @@ def test_stale_snapshot_is_evidence_of_a_gone_process_not_a_free_port(tmp_path, 
     assert runtime_service_kind("http://127.0.0.1:9105", _ctx()) == SERVICE_IDENTITY_UNKNOWN
     old_host = server_process.read_service_bindings(root)["host_service"]
     server_process.clear_service_binding(root, "host_service", old_host)
-    for url in ("http://127.0.0.1:9300", "http://127.0.0.1:9105", "http://127.0.0.1:9100"):
+    for url in ("http://127.0.0.1:9300", "http://127.0.0.1:9100"):
         assert runtime_service_kind(url, _ctx()) == "", url
+    # Missing Host metadata does not prove the configured endpoint unused:
+    # publication failure has the same absence. A live Host binding elsewhere
+    # supersedes that expectation without borrowing authority from main.
+    assert runtime_service_kind("http://127.0.0.1:9105", _ctx()) == SERVICE_IDENTITY_UNKNOWN
+    record_service_binding(root, "host_service", "127.0.0.1", 9505, pid=os.getpid())
+    assert runtime_service_kind("http://127.0.0.1:9105", _ctx()) == ""
     # An identity probe that cannot answer is unknown, never foreign.
     monkeypatch.setattr(server_process, "service_binding_is_live",
                         lambda _binding: (_ for _ in ()).throw(OSError(5, "access denied")))
@@ -280,3 +286,20 @@ def test_matching_binding_uncertainty_does_not_permit_a_control_endpoint(tmp_pat
     assert runtime_service_kind("http://127.0.0.1:9410", _ctx()) == server_process.SERVICE_IDENTITY_UNKNOWN
     assert "identity could not be verified" in _blocked("http://127.0.0.1:9410", _ctx())
     assert not _blocked("http://127.0.0.1:9411/api/owner/context-mode", _ctx())
+
+
+@pytest.mark.parametrize('matching_record', [False, True])
+def test_unresolved_host_keeps_candidate_specific_legacy_identity(tmp_path, monkeypatch, matching_record):
+    from ouroboros import config, browser_policy, server_process, process_custody, platform_layer
+
+    # This installation predates bindings; the module's modern live-binding
+    # fixture must not supersede the legacy custody path under test.
+    legacy_root = tmp_path / 'legacy'
+    monkeypatch.setattr(config, 'DATA_DIR', legacy_root)
+    monkeypatch.setattr(browser_policy, '_resolved_addresses', lambda _host: (_ for _ in ()).throw(OSError('unresolved test host')))
+    monkeypatch.setattr(process_custody, '_read_ledger', lambda _root: ([{'pid': 123, 'purpose': 'local_model_server'}] if matching_record else []))
+    monkeypatch.setattr(platform_layer, 'pid_is_alive', lambda _pid: True)
+    monkeypatch.setattr(platform_layer, 'process_command', lambda _pid: 'fixture --port 12345')
+    ctx = SimpleNamespace(drive_root=legacy_root)
+    value = browser_policy.runtime_service_kind('http://unresolved.invalid:12345', ctx)
+    assert value == (server_process.SERVICE_IDENTITY_UNKNOWN if matching_record else '')

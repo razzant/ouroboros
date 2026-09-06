@@ -190,13 +190,18 @@ def _custodied_local_model(drive_root: pathlib.Path, port: int,
                            host_matches: Callable[[str], bool]) -> str:
     """``"local_model"`` when this installation's own custody row owns a live server on ``port``.
 
-    The row carries no argv, so the live command line is read only for a row whose
-    process is alive, and the caller's host predicate is asked only once such a row
-    names ``port``; the strict custody fingerprint then decides ownership.
+    Local models bind loopback, so a nonmatching host needs no legacy ledger read.
+    A matching host still replays the ledger; live argv selects the port and the
+    strict custody fingerprint decides ownership.
     """
     from ouroboros.platform_layer import pid_is_alive, process_command
     from ouroboros.process_custody import _fingerprint_matches, _read_ledger
 
+    try:
+        if not host_matches("127.0.0.1"):
+            return ""
+    except OSError:
+        pass  # An unresolved host still needs the original port-specific check.
     for entry in _read_ledger(pathlib.Path(drive_root)):
         if str(entry.get("purpose") or "") != "local_model_server":
             continue
@@ -219,15 +224,16 @@ def runtime_service_identity(drive_root: pathlib.Path, port: int,
     endpoint matches — an unrelated application that reuses a port or pathname.
     ``host_matches(bind_host)`` is the caller's view of whether the target reaches
     that bound interface (``_ANY_LOCAL_HOST`` means any local interface); it is
-    asked only after a port matched, so ordinary page requests pay no DNS or
-    process probe here.
+    asked after a published/expected port matched, or before the legacy local-model
+    lookup to avoid reading that ledger for a non-loopback target.
 
     A live binding is authoritative for its service. An unverified binding still
     names an expected endpoint until its owner retires or replaces the record.
-    An installation may predate the snapshot, so without a live main binding the existing facts decide
-    what is expected: the integer port file (the optional launcher process record
-    can prove that process), the Host Service configuration beside an expected
-    main, and the local model's own custody row with its live argv. Unknown
+    An installation may predate or fail to publish one service's snapshot. Its
+    existing facts still decide what is expected: the integer main port file,
+    Host Service configuration beside an expected main, and local-model custody
+    with live argv. Only that same service's live binding supersedes its legacy
+    endpoint expectation; the optional launcher record can prove main. Unknown
     identity never becomes permission.
     """
     port = int(port)
@@ -246,30 +252,22 @@ def runtime_service_identity(drive_root: pathlib.Path, port: int,
         except OSError:
             return SERVICE_IDENTITY_UNKNOWN
         return kind if live else SERVICE_IDENTITY_UNKNOWN
-    main_snapshot: dict = {}
-
-    def main_snapshot_live() -> bool:
-        if "live" not in main_snapshot:
-            main = bindings.get("main")
-            try:
-                main_snapshot["live"] = isinstance(main, dict) and service_binding_is_live(main)
-            except OSError:
-                main_snapshot["live"] = False
-        return main_snapshot["live"]
+    def snapshot_live(kind: str) -> bool:
+        binding = bindings.get(kind)
+        try:
+            return isinstance(binding, dict) and service_binding_is_live(binding)
+        except OSError:
+            return False
 
     main_port = _port_file_value(drive_root)
     if main_port == port and host_matches(_ANY_LOCAL_HOST):
-        if main_snapshot_live():
+        if snapshot_live("main"):
             return ""
         return _launcher_recorded_main(drive_root, port) or SERVICE_IDENTITY_UNKNOWN
     from ouroboros.gateway.host_service import DEFAULT_HOST_SERVICE_HOST, host_service_port
 
     if main_port is not None and port == host_service_port() and host_matches(DEFAULT_HOST_SERVICE_HOST):
-        return "" if main_snapshot_live() else SERVICE_IDENTITY_UNKNOWN
-    published = bindings.get("local_model")
-    try:
-        if isinstance(published, dict) and service_binding_is_live(published):
-            return ""  # a verified manager owns another endpoint; its custody row is the same process
-    except OSError:
-        pass  # An unrelated port does not inherit this binding's uncertainty.
+        return "" if snapshot_live("host_service") else SERVICE_IDENTITY_UNKNOWN
+    if snapshot_live("local_model"):
+        return ""  # a verified manager owns another endpoint; its custody row is the same process
     return _custodied_local_model(drive_root, port, host_matches)

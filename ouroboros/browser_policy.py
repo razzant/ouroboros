@@ -66,7 +66,7 @@ def runtime_service_kind(url: str, ctx: Any = None) -> str:
     resolved: dict = {}
 
     def host_matches(bind_host: str) -> bool:
-        # Asked only after a port matched, so ordinary requests resolve nothing here.
+        # Resolve once for matched endpoints and the legacy loopback check.
         try:
             bound = ipaddress.ip_address(bind_host)
         except ValueError:
@@ -144,12 +144,12 @@ def browser_request_block_reason(request: Any, ctx: Any, *, restricted: bool) ->
     one whose identity is unknown; an unrelated application reusing the pathname
     on any other port keeps working."""
     reason = browser_url_block_reason(request.url, ctx, restricted=restricted)
-    if reason:
-        return reason
-    if runtime_service_kind(request.url, ctx) and any(predicate(request) for predicate in (
+    if reason or restricted:
+        return reason  # Restricted target checks already refused every runtime identity.
+    if any(predicate(request) for predicate in (
         _is_context_mode_owner_post, _is_safety_mode_owner_post,
         _is_owner_skill_attest_post, _is_owner_settings_self_elevation_post,
-    )):
+    )) and runtime_service_kind(request.url, ctx):
         return "BROWSER_OWNER_CONTROL_BLOCKED: this operation belongs to the owner"
     return ""
 

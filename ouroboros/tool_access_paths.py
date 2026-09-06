@@ -37,7 +37,7 @@ def _user_files_root() -> pathlib.Path:
 
     Defaults to the owner's real home. A jailed/benchmark runtime can redirect it
     to a scratch directory via ``OUROBOROS_USER_FILES_ROOT`` so a task physically
-    cannot resolve the owner's real home (e.g. ``~/file1.txt`` secret files). Any
+    cannot resolve the owner's real home (e.g. ``~/.ssh/id_rsa``). Any
     unusable value falls back to the real home — fail-safe, never broadens reach.
     """
     raw = (os.environ.get("OUROBOROS_USER_FILES_ROOT") or "").strip()

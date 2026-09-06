@@ -196,3 +196,56 @@ def test_local_model_custody_row_identifies_a_legacy_server(tmp_path, monkeypatc
         model.terminate()
         model.wait(timeout=5)
     assert runtime_service_kind("http://127.0.0.1:9333/v1/models", ctx) == ""
+
+
+@pytest.mark.serial
+@pytest.mark.parametrize("failed_publication", [False, True])
+def test_host_binding_is_independent_of_healthy_main(tmp_path, monkeypatch, failed_publication):
+    from ouroboros.browser_policy import browser_request_block_reason
+    from ouroboros.server_entrypoint import write_port_file
+    from types import SimpleNamespace
+
+    root = tmp_path / "host"
+    monkeypatch.setattr(config, "DATA_DIR", root)
+    ctx = SimpleNamespace(drive_root=tmp_path / "child")
+    with bound_service_socket(root, "main", "127.0.0.1", 0) as main:
+        write_port_file(root / "state/server_port", main.getsockname()[1])
+        assert server_process.service_binding_is_live(server_process.read_service_bindings(root)["main"])
+        publish = server_process.record_service_binding
+        def publish_host(*args, **kwargs):
+            if failed_publication and args[1] == "host_service":
+                raise OSError("injected Host Service metadata publication failure")
+            return publish(*args, **kwargs)
+        monkeypatch.setattr(server_process, "record_service_binding", publish_host)
+        with bound_service_socket(root, "host_service", "127.0.0.1", 0) as host:
+            port = host.getsockname()[1]
+            monkeypatch.setenv("OUROBOROS_HOST_SERVICE_PORT", str(port))
+            host.listen(1)
+            with socket.create_connection(("127.0.0.1", port), timeout=2) as client:
+                connection, _ = host.accept()
+                with connection:
+                    connection.sendall(b"Host listener survived")
+                assert client.recv(64) == b"Host listener survived"
+            identity = runtime_service_kind(f"http://127.0.0.1:{port}/identity", ctx)
+            reason = browser_request_block_reason(SimpleNamespace(
+                url=f"http://127.0.0.1:{port}/identity", method="GET", post_data=""), ctx, restricted=True)
+            print({"failed_publication": failed_publication, "listener_alive": True,
+                   "identity": identity, "reason": reason})
+            assert identity == (server_process.SERVICE_IDENTITY_UNKNOWN if failed_publication else "host_service")
+            assert "Ouroboros control-service" in reason
+            # A real other application on an unrelated loopback endpoint keeps
+            # both ordinary child access and owner-shaped URL paths available.
+            with socket.socket() as other:
+                other.bind(("127.0.0.1", 0)); other.listen(1)
+                other_port = other.getsockname()[1]
+                request = SimpleNamespace(url=f"http://127.0.0.1:{other_port}/api/owner/context-mode",
+                                          method="POST", post_data='{"mode":"low"}')
+                assert browser_request_block_reason(request, ctx, restricted=True) == ""
+                assert browser_request_block_reason(request, ctx, restricted=False) == ""
+                with socket.create_connection(("127.0.0.1", other_port), timeout=2) as client:
+                    client.sendall(b"GET / HTTP/1.0\r\n\r\n")
+                    connection, _ = other.accept()
+                    with connection:
+                        assert connection.recv(64).startswith(b"GET /")
+                        connection.sendall(b"HTTP/1.0 200 OK\r\nContent-Length: 9\r\n\r\nother app")
+                    assert client.recv(256).endswith(b"other app")

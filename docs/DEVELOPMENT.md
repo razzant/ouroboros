@@ -2451,16 +2451,22 @@ and timeout custody alike — which spares the ledger's live `daemon`-scope root
 (`process_custody.live_daemon_root_pids`, including the owner's retained legacy
 purposes) and, for one task's cancel or timeout only, the kept services; a direct `kill_pid_tree` on a worker anywhere else in
 `supervisor/` is a defect. The explicit stop (`OwnedClaudexorDaemon.stop`, which
-Panic calls before the worker tree-kill) requires the owned marker and authenticated
-endpoint for attached roots, then matches the ledger against one set of live
-start-time and command observations. Only confirmed exit permits `process_stopped`
+Panic calls before the worker tree-kill) requires the owned marker for attached
+roots, then matches the ledger against one set of live start-time and command
+observations. An authenticated endpoint or the gateway's typed HTTP transport
+failure permits that stop; a received refusal, protocol/malformed response, or
+invalid descriptor/token discovery never does. Keep transport provenance distinct
+from the public stale status; a matching error-code string is not transport proof.
+Only confirmed exit permits `process_stopped`
 and pruning; concurrent and unreadable ledger bytes remain intact under the append
 lock. Each root gets its own exit window; partial success never means the whole
 daemon stop succeeded. Unconfirmed stop emits a critical diagnostic and existing
 supervisor-log row, including lock contention and unknown custody. The manager
 lock uses the short-poll bound separately from HTTP phase timeouts. Authenticated
-attach creates a missing owned marker only after validating the home; malformed
-or foreign markers are never replaced. The reaper's permissive keep is never stop authority, and a daemon known
+attach creates a missing owned marker only after validating the home again under
+the shared JSON publication lock. Atomic publication leaves absence or a complete
+marker after a write fault; existing malformed or foreign markers are never
+replaced. The reaper's permissive keep is never stop authority, and a daemon known
 only by name or port is never signalled.
 Explicit stop and next-start runtime selection remain separate contracts: a
 staged engine pin applies at the daemon's next start, and a planned restart

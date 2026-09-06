@@ -20,9 +20,11 @@ Lifecycle belongs to the installation, not the process that first needed it:
   generation's, custody-pending) is attached to, not duplicated — the engine
   refuses a second daemon on the same socket anyway;
 * STOP-ONLY-WHAT-IS-PROVABLY-OURS: ``stop`` (Panic) terminates the child THIS
-  manager spawned and ledger roots confirmed by our marker, authenticated
-  endpoint and live custody fingerprint — a prior generation's or a
-  worker's spawn included — never a live responder known only by name or by
+  manager spawned and ledger roots confirmed by our marker and measured
+  custody fingerprint, with an authenticated endpoint or a typed transport
+  failure — a prior generation's or a worker's spawn included. Token refusal,
+  invalid discovery and incompatible/malformed replies never permit that
+  fallback. Never stop a live responder known only by name or by
   the descriptor port (a foreign daemon on a recycled port stays disclosed, not
   killed). A newer runtime pin is staged for the next natural start, never
   hot-swapped. Planned replacement remains deferred pending the engine's
@@ -75,6 +77,7 @@ _ROTATION_RECEIPT_NAME = "claudexor_rotation_provisioning.json"
 _SETUP_ATTACH_ROLE = "setup_attach"
 _SHELL_POSIX = "posix"
 _SHELL_POWERSHELL = "powershell"
+_TRANSPORT_UNREACHABLE = "transport_unreachable"
 
 
 def _handshake_serving_mode(body: Any) -> str:
@@ -164,29 +167,36 @@ def verify_owned_home(*, require_marker: bool = False) -> str:
 
 
 def _write_ownership_marker() -> None:
-    """Create missing ownership evidence; never replace another writer's marker."""
+    """Atomically create missing evidence under the shared JSON publication lock."""
     from ouroboros.config import DATA_DIR
     from ouroboros.gateways.claudexor import ClaudexorUnavailable
-    from ouroboros.utils import utc_now_iso
+    from ouroboros.utils import update_json_locked, utc_now_iso
 
     problem = verify_owned_home()
     if problem:
         raise ClaudexorUnavailable("foreign_daemon_home", problem)
     path = ownership_marker_path()
-    try:
-        path.parent.mkdir(parents=True, exist_ok=True)
-        payload = json.dumps({
-            "owner": "ouroboros", "data_dir": str(pathlib.Path(DATA_DIR).resolve()),
-            "provisioned_at": utc_now_iso(),
-        }, ensure_ascii=False, indent=1)
-        # Exclusive creation also protects a marker appearing after validation.
-        with path.open("x", encoding="utf-8") as stream:
-            stream.write(payload)
-    except FileExistsError:
-        problem = verify_owned_home(require_marker=True)
+
+    def create_missing(current: Dict[str, Any]) -> Any:
+        # Revalidate inside the lock: another publisher may have claimed the
+        # home after the first check. Existing ownership is never rewritten.
+        problem = verify_owned_home()
         if problem:
             raise ClaudexorUnavailable("foreign_daemon_home", problem)
-    except OSError:
+        if current:
+            return None
+        return {
+            "owner": "ouroboros", "data_dir": str(pathlib.Path(DATA_DIR).resolve()),
+            "provisioned_at": utc_now_iso(),
+        }
+
+    try:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        update_json_locked(path, create_missing, strict_existing_dict=True,
+                           reject_existing_empty_dict=True)
+    except ValueError as exc:
+        raise ClaudexorUnavailable("foreign_daemon_home", verify_owned_home(require_marker=True) or str(exc)) from exc
+    except (OSError, TimeoutError):
         log.warning("ownership marker write failed; attached stop remains unconfirmed", exc_info=True)
 
 
@@ -294,14 +304,17 @@ class OwnedClaudexorDaemon:
         only succeed against the daemon serving our home. An auth refusal
         (401/403) therefore means something ELSE answered on the descriptor's
         stale port — a foreign daemon, alive, not ours: disclosed, never
-        killed, never adopted. Every other failure is a dead/unreachable
-        daemon: the ordinary stale case a restart heals.
+        killed, never adopted. A transport failure is distinguished privately
+        from other stale evidence so explicit stop can use measured custody;
+        protocol, discovery and malformed-response failures confer no such
+        authority. Public status still projects all those failures as stale.
         """
         from ouroboros.gateways.claudexor import (
             ClaudexorGateway,
             ClaudexorUnavailable,
             discover_daemon_at,
         )
+        import httpx
 
         if not owned_daemon_provisioned():
             self._engine_version = ""
@@ -336,6 +349,8 @@ class OwnedClaudexorDaemon:
                     "daemon recycled the port. It is not ours: disclosed, not "
                     "killed; a restart of OUR daemon rewrites the descriptor."
                 )
+            if exc.code == "daemon_unreachable" and isinstance(exc.__cause__, httpx.HTTPError):
+                return None, _TRANSPORT_UNREACHABLE, f"{exc.code}: {exc}"
             return None, "stale", f"{exc.code}: {exc}"
 
     def _alive_endpoint(self, *, timeout_sec: Optional[float] = None) -> Optional[Any]:
@@ -360,7 +375,7 @@ class OwnedClaudexorDaemon:
             engine_build_sha=self._engine_build_sha,
         )
         return {
-            "state": state,
+            "state": "stale" if state == _TRANSPORT_UNREACHABLE else state,
             "config_dir": str(owned_config_dir()),
             "engine_version": self._engine_version,
             "engine_build_sha": self._engine_build_sha,
@@ -666,7 +681,9 @@ class OwnedClaudexorDaemon:
         from HTTP connect/read phases and each root's exit wait; there is no
         promised absolute wall-clock deadline for the whole teardown. A
         self-started Popen handle proves direct ownership; attached roots need
-        the owned marker, authenticated endpoint and measured ledger identity.
+        the owned marker and measured ledger identity, plus either an
+        authenticated endpoint or a typed transport failure. An explicit token
+        refusal and other unknown identity evidence never permit this fallback.
         """
         from ouroboros.config import DATA_DIR
         from ouroboros.gateways.claudexor import SHORT_POLL_TIMEOUT_SEC
@@ -681,9 +698,12 @@ class OwnedClaudexorDaemon:
             stopped, unconfirmed = [], []
             self._last_error = ""
             ownership_problem = verify_owned_home(require_marker=True)
-            endpoint = None if ownership_problem else self._alive_endpoint(
-                timeout_sec=SHORT_POLL_TIMEOUT_SEC)
-            if endpoint is not None:
+            endpoint, state = None, ""
+            if not ownership_problem:
+                endpoint, state, detail = self._classify_liveness(timeout_sec=SHORT_POLL_TIMEOUT_SEC)
+                if detail:
+                    self._last_error = detail
+            if endpoint is not None or state == _TRANSPORT_UNREACHABLE:
                 stopped = stop_ledgered_processes(root, purposes, unconfirmed=unconfirmed)
             child_stopped = self._terminate_child()
             if ownership_problem and owned_daemon_provisioned() and not child_stopped:
@@ -737,7 +757,7 @@ def ensure_owned_gateway(*, admission_wait_sec: Optional[float] = None) -> Any:
     which is why the rotation reconcile rides it: spawn AND attach paths are
     both covered, on every ensure, best-effort (see ``reconcile_rotation``).
     The gateway transport itself stays pure I/O; callers own ``close()`` (or
-    use it as a context manager). ``stop()`` owns the separate marker, endpoint
+    use it as a context manager). ``stop()`` owns the separate marker, transport
     and process-identity checks for stopping an attached daemon.
 
     ADMISSION is waited for here — outside the daemon manager's lock, the same

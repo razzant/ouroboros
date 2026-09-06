@@ -105,19 +105,66 @@ def test_failed_authentication_does_not_create_marker(authenticated_home, monkey
 
 
 def test_marker_creation_preserves_concurrent_foreign_writer(tmp_path, monkeypatch):
+    from ouroboros import utils
+
     monkeypatch.setattr(config, "DATA_DIR", tmp_path)
-    original = pathlib.Path.open
+    original = utils.update_json_locked
     path = daemon.ownership_marker_path()
     foreign = '{"owner":"foreign","data_dir":"/foreign"}'
-    def racing_open(self, mode="r", *args, **kwargs):
-        if self == path and mode == "x":
-            with original(self, "w") as out:
-                out.write(foreign)
-        return original(self, mode, *args, **kwargs)
-    monkeypatch.setattr(pathlib.Path, "open", racing_open)
+    def claim_first(target, mutator, **kwargs):
+        original(target, lambda _current: json.loads(foreign))
+        return original(target, mutator, **kwargs)
+    monkeypatch.setattr(utils, "update_json_locked", claim_first)
     with pytest.raises(ClaudexorUnavailable):
         daemon._write_ownership_marker()
-    assert path.read_text() == foreign
+    assert json.loads(path.read_text()) == json.loads(foreign)
+
+
+@pytest.mark.serial
+def test_partial_marker_write_leaves_authenticated_attach_retryable(authenticated_home, monkeypatch, caplog):
+    server, _requests = authenticated_home
+    manager = daemon.OwnedClaudexorDaemon()
+    path = daemon.ownership_marker_path()
+    original = pathlib.Path.write_bytes
+    attempted = []
+
+    def partial_write(target, data):
+        if target.parent == path.parent and target.name.startswith(f".{path.name}.tmp."):
+            attempted.append(target)
+            original(target, data[:12])
+            raise OSError("injected partial marker write")
+        return original(target, data)
+
+    with monkeypatch.context() as patch:
+        patch.setattr(pathlib.Path, "write_bytes", partial_write)
+        with caplog.at_level(logging.WARNING):
+            assert manager.ensure_running().port == server.server_port
+    assert attempted and not path.exists()
+    assert all(not temporary.exists() for temporary in attempted)
+    assert not path.with_name(path.name + ".lock").exists()
+    assert "ownership marker write failed" in caplog.text
+    assert manager.ensure_running().port == server.server_port
+    assert daemon.verify_owned_home(require_marker=True) == ""
+    complete = path.read_bytes()
+    with monkeypatch.context() as patch:
+        patch.setattr(pathlib.Path, "write_bytes", partial_write)
+        assert manager.ensure_running().port == server.server_port
+    assert path.read_bytes() == complete
+    assert len(attempted) == 1  # Existing complete evidence is never republished.
+
+
+def test_concurrent_marker_publication_preserves_one_complete_record(tmp_path, monkeypatch):
+    from concurrent.futures import ThreadPoolExecutor
+
+    monkeypatch.setattr(config, "DATA_DIR", tmp_path)
+    with ThreadPoolExecutor(max_workers=4) as pool:
+        list(pool.map(lambda _index: daemon._write_ownership_marker(), range(4)))
+    path = daemon.ownership_marker_path()
+    assert daemon.verify_owned_home(require_marker=True) == ""
+    complete = path.read_bytes()
+    daemon._write_ownership_marker()
+    assert path.read_bytes() == complete
+    assert not path.with_name(path.name + ".lock").exists()
 
 
 @pytest.mark.serial
@@ -151,7 +198,7 @@ def test_partial_stop_is_false_and_preserves_unconfirmed_root(tmp_path, monkeypa
         drive_root=tmp_path, purpose=daemon.CUSTODY_PURPOSE, scope="daemon") for _ in range(2)]
     daemon._write_ownership_marker()
     manager = daemon.OwnedClaudexorDaemon()
-    monkeypatch.setattr(manager, "_alive_endpoint", lambda **_kw: object())
+    monkeypatch.setattr(manager, "_classify_liveness", lambda **_kw: (object(), "running", ""))
     from ouroboros import platform_layer
     original = platform_layer.kill_pid_tree
     monkeypatch.setattr(platform_layer, "kill_pid_tree", lambda pid: original(pid) if pid == procs[0].pid else None)
@@ -276,3 +323,132 @@ def test_real_legacy_daemon_attach_then_stop_uses_token_and_ledger(tmp_path, mon
             proc.kill()
         proc.wait(timeout=5)
         proc.stdout.close()
+
+
+_STOP_ENDPOINT = """
+import http.server, json, socket, sys, threading
+mode = sys.argv[1]
+class Handler(http.server.BaseHTTPRequestHandler):
+    def log_message(self, *_args): pass
+    def do_POST(self):
+        self.rfile.read(int(self.headers.get('Content-Length', '0')))
+        if mode == 'hang':
+            threading.Event().wait()
+        status, body = 200, {'compatible': True, 'protocolMajor': 3,
+            'engine': {'version': '3.9.8', 'sha': 'a' * 40}}
+        if mode in ('401', '403'):
+            status = int(mode)
+        elif mode == 'protocol':
+            body['protocolMajor'] = 99
+        elif mode == 'body_code':
+            status, body = 503, {'code': 'daemon_unreachable', 'message': 'not transport proof'}
+        raw = b'{broken' if mode == 'malformed' else json.dumps(body).encode()
+        self.send_response(status)
+        self.send_header('Content-Length', str(len(raw)))
+        self.end_headers()
+        self.wfile.write(raw)
+if mode == 'refused':
+    sock = socket.socket()
+    sock.bind(('127.0.0.1', 0))
+    print(sock.getsockname()[1], flush=True)
+    threading.Event().wait()
+else:
+    server = http.server.ThreadingHTTPServer(('127.0.0.1', 0), Handler)
+    print(server.server_port, flush=True)
+    server.serve_forever()
+"""
+
+
+@pytest.fixture
+def stop_endpoint(tmp_path, monkeypatch, request):
+    """A real, isolated ledger root; no live Claudexor process is addressed."""
+    from ouroboros.gateways import claudexor
+    from ouroboros import claudexor_runtime
+    from tests.test_claudexor_owned_daemon import _write_descriptor
+
+    monkeypatch.setattr(config, "DATA_DIR", tmp_path)
+    monkeypatch.setattr(claudexor, "SHORT_POLL_TIMEOUT_SEC", 0.1)
+    monkeypatch.setattr(claudexor_runtime, "get_runtime_manager", lambda: SimpleNamespace(
+        status=lambda **_kwargs: {"state": "fixture"}))
+    proc = custody.spawn_supervised(
+        [sys.executable, "-u", "-c", _STOP_ENDPOINT, request.param],
+        drive_root=tmp_path, purpose=daemon.CUSTODY_PURPOSE, scope="session",
+        stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, text=True,
+    )
+    try:
+        _write_descriptor(daemon.owned_config_dir(), port=int(proc.stdout.readline()))
+        daemon._write_ownership_marker()
+        monkeypatch.setattr(custody, "_SESSION_ID", "next-generation")
+        yield proc, daemon.OwnedClaudexorDaemon()
+    finally:
+        if proc.poll() is None:
+            proc.kill()
+        proc.wait(timeout=5)
+        proc.stdout.close()
+
+
+@pytest.mark.serial
+@pytest.mark.skipif(os.name == "nt", reason="POSIX measured ledger identity")
+@pytest.mark.parametrize("stop_endpoint", ["hang", "refused"], indirect=True)
+def test_panic_stops_unreachable_owned_legacy_daemon(stop_endpoint, tmp_path, monkeypatch):
+    from tests.test_server_control_panic_daemon import _run_panic
+
+    proc, manager = stop_endpoint
+    assert manager._proc is None
+    assert custody.live_daemon_root_pids(tmp_path, retained_purposes={daemon.CUSTODY_PURPOSE}) == {proc.pid}
+    assert _run_panic(monkeypatch, tmp_path, daemon_stop=manager.stop)
+    proc.wait(timeout=5)
+    assert custody._read_ledger(tmp_path) == []
+    assert [row["type"] for row in _rows(tmp_path)] == ["process_stopped"]
+
+
+@pytest.mark.serial
+@pytest.mark.skipif(os.name == "nt", reason="POSIX measured ledger identity")
+@pytest.mark.parametrize("stop_endpoint", ["401", "403", "protocol", "malformed", "body_code"], indirect=True)
+def test_reachable_refusal_is_not_unreachable_stop_authority(stop_endpoint, tmp_path, caplog):
+    proc, manager = stop_endpoint
+    before = custody.ledger_path(tmp_path).read_bytes()
+    with caplog.at_level(logging.CRITICAL):
+        assert manager.stop() is False
+    assert proc.poll() is None
+    assert custody.ledger_path(tmp_path).read_bytes() == before
+    assert [row["type"] for row in _rows(tmp_path)] == ["process_stop_unconfirmed"]
+    assert "stop unconfirmed" in caplog.text
+
+
+@pytest.mark.serial
+@pytest.mark.skipif(os.name == "nt", reason="POSIX measured ledger identity")
+@pytest.mark.parametrize("stop_endpoint", ["refused"], indirect=True)
+@pytest.mark.parametrize("proof", ["missing_marker", "mismatching_start", "mismatching_command", "unmeasurable", "invalid_descriptor", "missing_token"])
+def test_transport_failure_never_substitutes_missing_ownership(stop_endpoint, tmp_path, monkeypatch, proof):
+    proc, manager = stop_endpoint
+    if proof == "missing_marker":
+        daemon.ownership_marker_path().unlink()
+    elif proof == "invalid_descriptor":
+        daemon.owned_descriptor_path().write_text("{broken")
+    elif proof == "missing_token":
+        (daemon.owned_descriptor_path().parent / "token").unlink()
+    elif proof == "unmeasurable":
+        monkeypatch.setattr(custody, "process_start_time", lambda _pid: "")
+    else:
+        rows = custody._read_ledger(tmp_path)
+        fingerprint = rows[0]["fingerprint"]
+        if proof == "mismatching_start":
+            fingerprint.update(start_time="not-this-process", start_time_boot="not-this-boot")
+        else:
+            fingerprint["cmd_sha256"] = "0" * 64
+        custody._rewrite_ledger(tmp_path, rows)
+    before = custody.ledger_path(tmp_path).read_bytes()
+    assert manager.stop() is False
+    assert proc.poll() is None
+    assert custody.ledger_path(tmp_path).read_bytes() == before
+    assert not any(row["type"] == "process_stopped" for row in _rows(tmp_path))
+
+
+@pytest.mark.serial
+@pytest.mark.parametrize("stop_endpoint", ["refused"], indirect=True)
+def test_unreachable_status_keeps_public_stale_contract(stop_endpoint):
+    proc, manager = stop_endpoint
+    assert manager.status_dict()["state"] == "stale"
+    assert manager._alive_endpoint(timeout_sec=0.1) is None
+    assert proc.poll() is None

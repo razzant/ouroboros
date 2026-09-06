@@ -221,7 +221,7 @@ def test_stop_needs_measured_identity_and_an_owned_home(tmp_path, monkeypatch):
         assert claudexor_daemon.verify_owned_home() == ""
         assert claudexor_daemon.OwnedClaudexorDaemon().stop() is False
         claudexor_daemon._write_ownership_marker()
-        monkeypatch.setattr(claudexor_daemon.OwnedClaudexorDaemon, "_alive_endpoint", lambda *_a, **_kw: object())
+        monkeypatch.setattr(claudexor_daemon.OwnedClaudexorDaemon, "_classify_liveness", lambda *_a, **_kw: (object(), "running", ""))
         # This unit case supplies authenticated endpoint evidence; the HTTP fixture above
         # exercises the actual descriptor/token/handshake path before a real process stop.
         assert claudexor_daemon.OwnedClaudexorDaemon().stop() is True

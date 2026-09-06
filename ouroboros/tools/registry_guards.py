@@ -923,7 +923,7 @@ def _external_runtime_protected_paths(
             protected_values.append(meta.get(_dk))
     # Owner/runtime credential locations, as ABSOLUTE paths. Blocking by
     # absolute containment (not a substring marker) means the OWNER's personal
-    # secrets (~/.ssh/id_rsa, ~/.aws, ~/file1.txt) are off-limits while a
+    # secrets (~/.ssh/id_rsa, ~/.aws) are off-limits while a
     # project-relative file merely NAMED like a credential (site/.ssh/config, a
     # project .env) stays the task's own — and a non-path token like
     # "os.environ" can never spuriously match.

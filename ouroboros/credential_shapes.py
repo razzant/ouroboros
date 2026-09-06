@@ -113,7 +113,7 @@ def owner_credential_locations(home: pathlib.Path) -> tuple[list[pathlib.Path], 
     """
     protected = [home / rel for rel in (
         ".ssh", ".aws", ".gnupg", ".netrc", ".pgpass", ".config/gcloud",
-        ".docker/config.json", ".kube/config", ".npmrc", "file1.txt",
+        ".docker/config.json", ".kube/config", ".npmrc",
     )]
     config = home / ".ssh" / "config"
     allowed = [config] if not config.is_symlink() and not config.is_dir() else []
