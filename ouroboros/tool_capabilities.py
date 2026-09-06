@@ -68,6 +68,7 @@ LOCAL_READONLY_SUBAGENT_TOOL_NAMES: frozenset[str] = frozenset({
     "switch_model",
     "read_file", "list_files", "search_code", "query_code",
     "vcs_status", "vcs_diff",
+    "knowledge_read", "knowledge_list",
     "chat_history", "recent_tasks", "get_task_result", "wait_task", "wait_tasks",
     "escalate",
     "forward_to_worker", "peek_task", "cancel_task", "discard_child_result",

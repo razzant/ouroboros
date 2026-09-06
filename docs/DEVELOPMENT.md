@@ -65,6 +65,10 @@ rules have no automated surface — review-only.
 - External workspace tasks keep governance bound to the system repository while
   contextual tools default through `ToolContext.active_repo_dir()`. Admission
   rejects overlap with the system repo/data and records a read-only preflight.
+- Physical file resolution must preserve the requested address. Normalize
+  in-root absolute paths for every resource; refuse an outside address before
+  relative-path sanitization. Keep repo-prefix and canonical artifact redirects
+  on the same resolver used by guards and handlers.
 - Project focus changes the default target, not the top-level tool surface.
   Generic VCS selects active/system explicitly; advisory, reviewed commit,
   rollback, promotion, restart, and runtime control keep their intrinsic
@@ -80,6 +84,34 @@ rules have no automated surface — review-only.
   not active authentication; discovery never logs in or probes the network.
 - Do not add a second scheduler for operator tooling or a generic CLI file
   manager. Use the task queue, attachments, logs, and artifact endpoints.
+- A process cwd determines relative paths, not the root task's entire write
+  authority. Reuse the resource binding for other authorized destinations;
+  preserve child write confinement and actual runtime/credential boundaries.
+  Only the filesystem writer lane excludes SSH remote payloads, retaining local
+  options and redirections. Other guards inspect the original command, as does
+  execution. Child, external-task and Light read checks share the physical paths
+  from `shell_guards.shell_inspection_paths`, including each row's effective cwd.
+  Remote commands can reach local files through configured SSH trust (including
+  loopback); this local inspection is not a remote-effect sandbox.
+  Positional GitHub policy inspects direct `gh` and shell-wrapper segments;
+  remote `ssh ... gh auth` is an inherited residual, not classified as local auth.
+- Do not infer credential authority from ordinary source/config directory
+  names. Restricted repository reads/searches use the existing byte masker with
+  `mask_opaque=False`: preserve ordinary long source while masking known token
+  formats and PEM keys. Keep owner-home opaque masking enabled. A runtime data
+  directory inside a project retains its actual secret/control path rules,
+  including a forked child's canonical parent (`core_secret_paths.restricted_data_roots`).
+  Task/artifact source names and public PEM certificates carry no credential
+  authority. Restricted file readers mask complete private-key blocks before
+  selecting a window, preserving character positions and line breaks. The
+  owner credential fence covers the enumerated locations in
+  `credential_shapes.owner_credential_locations`, credential leaves and VCS
+  control directories. The exact SSH config exception does not permit key writes
+  under `.ssh`; unlisted stores such as `.cargo`, `.terraform.d` and `.kaggle`
+  are not protected by an arbitrary dotted-directory default-deny.
+- An unlaunchable sole cmd element gets an actionable argv/shell hint, never
+  automatic splitting or an implicit shell. Repo-only edit tools reject their
+  unsupported roots through their existing argument categories.
 
 Enforcement: `tests/test_headless_cli.py` (task-API admission, typed refusal
 terminality, attachment admission), `tests/test_cli_entrypoint.py` (the CLI

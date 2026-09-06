@@ -125,9 +125,9 @@ def test_child_secret_shape_contract_preserved():
         assert _is_subagent_secret_data_path(norm), norm
     for norm in ("memory/identity.md", "logs/progress.jsonl", "notes.txt"):
         assert not _is_subagent_secret_data_path(norm), norm
-    for norm in ("settings.json", ".git/config", "deploy.key", "token.yaml"):
+    for norm in (".git/config", "deploy.key", "token.json"):
         assert _is_subagent_secret_repo_path(norm), norm
-    for norm in ("README.md", "src/main.py", "docs/token_economics.md"):
+    for norm in ("README.md", "src/main.py", "docs/token_economics.md", "settings.json", "auth/service.py", "ordinary.config"):
         assert not _is_subagent_secret_repo_path(norm), norm
 
 

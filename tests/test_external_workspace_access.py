@@ -114,21 +114,26 @@ def test_subagent_inherits_active_external_workspace_when_metadata_missing(tmp_p
     assert workspace_mode == "external"
 
 
-def test_hidden_dotdir_default_deny_is_mutation_only(tmp_path):
-    """capinv-447 / В23=A: the hidden/credential DEFAULT-DENY is now a MUTATION
-    gate (and the fail-closed default for unknown-operation callers). Root
-    READS of the owner's home are location-authorized only — the same paths
-    are readable (secret bytes are masked at egress, not refused)."""
+def test_root_config_mutations_preserve_enumerated_credentials_without_dotdir_default_deny(tmp_path):
+    """Root configuration access is broad; named stores/leaves keep their fences.
+
+    Root reads remain location-authorized with secret-byte masking at egress.
+    Unlisted dotted directories are explicitly not a blanket credential fence.
+    """
     home = tmp_path / "_home"
     ctx = _ctx(tmp_path, mode="workspace")  # non-external, the now-readable user_files profile
     # benign project dotdirs / dotfiles -> allowed even for mutation
     for rel in (".github/workflows/ci.yml", ".vscode/launch.json", ".gitignore", "proj/.github/x.yml"):
         assert user_files_path_block_reason(ctx, home / rel) == "", f"benign blocked: {rel}"
-    # credential stores / unknown dotfiles: mutation (default op) stays BLOCKED,
-    # root reads are allowed.
+    # These unlisted stores retain the approved ordinary-config capability.
     for rel in (
         ".terraform.d/credentials.tfrc.json", ".cargo/credentials.toml", ".oci/config",
-        ".pip/pip.conf", ".m2/settings.xml", ".bash_history", ".mysql_history", ".kaggle/kaggle.json",
+        ".pip/pip.conf", ".m2/settings.xml", ".mysql_history", ".kaggle/kaggle.json",
+    ):
+        assert user_files_path_block_reason(ctx, home / rel) == "", rel
+        assert user_files_path_block_reason(ctx, home / rel, operation="read") == "", rel
+    for rel in (
+        ".bash_history",
         ".cache/huggingface/token.json", ".aws/credentials", ".ssh/id_rsa", ".gnupg/secring.gpg",
         ".git/config", ".gitconfig",
     ):
@@ -240,7 +245,7 @@ def test_external_workspace_shell_can_write_configured_deliverable_only_at_top_l
 
     The registry guard, rather than only the ``cwd=user_files`` resolver, must
     admit the destination.  The same target remains unavailable to an acting
-    child, and an arbitrary home target stays outside the carve-out.
+    child; the root may also use its ordinary authorized home targets.
     """
     system = tmp_path / "system"
     workspace = tmp_path / "workspace"
@@ -331,11 +336,11 @@ def test_external_workspace_shell_can_write_configured_deliverable_only_at_top_l
     assert "ARTIFACT_OUTPUT_UNDECLARED" in relative_result
 
     arbitrary_home_target = home / "other.txt"
-    blocked = _shell_guard_text(reg,
+    allowed = _shell_guard_text(reg,
         {"cmd": ["cp", str(source), str(arbitrary_home_target)], "cwd": str(workspace)},
         "advanced",
     )
-    assert blocked and "WORKSPACE_SHELL_BLOCKED" in blocked
+    assert allowed is None
 
     child_ctx = ToolContext(
         repo_dir=system,
@@ -769,11 +774,11 @@ def test_external_workspace_deliverables_guard_maps_executor_paths(tmp_path, mon
     )
     assert backend_hidden and "WORKSPACE_SHELL_BLOCKED" in backend_hidden
 
-    blocked = _shell_guard_text(reg,
-        {"cmd": ["cp", "/workspace/dist/app.html", "/tmp/not-deliverables.html"], "cwd": str(workspace)},
+    allowed = _shell_guard_text(reg,
+        {"cmd": ["cp", "/workspace/dist/app.html", str(home / "not-deliverables.html")], "cwd": str(workspace)},
         "advanced",
     )
-    assert blocked and "WORKSPACE_SHELL_BLOCKED" in blocked
+    assert allowed is None
 
 
 def test_executor_deliverables_root_symlink_keeps_target_policy(tmp_path, monkeypatch):
@@ -854,7 +859,7 @@ def test_deliverables_carveout_rejects_a_root_containing_protected_drives(tmp_pa
     assert blocked and "WORKSPACE_SHELL_BLOCKED" in blocked
 
 
-def test_malformed_deliverables_config_fails_closed_without_shell_crash(tmp_path, monkeypatch):
+def test_malformed_deliverables_config_preserves_ordinary_home_authority_without_shell_crash(tmp_path, monkeypatch):
     system = tmp_path / "system"
     workspace = tmp_path / "workspace"
     data = tmp_path / "data"
@@ -871,11 +876,11 @@ def test_malformed_deliverables_config_fails_closed_without_shell_crash(tmp_path
     )
     reg = ToolRegistry(repo_dir=system, drive_root=data)
     reg.set_context(ctx)
-    blocked = _shell_guard_text(reg,
+    allowed = _shell_guard_text(reg,
         {"cmd": ["touch", str(tmp_path / "home" / "out.html")], "cwd": str(workspace)},
         "advanced",
     )
-    assert blocked and "WORKSPACE_SHELL_BLOCKED" in blocked
+    assert allowed is None
 
     # The optional Deliverables setting must not disable the ordinary
     # user_files-home custody nudge when it cannot be resolved.

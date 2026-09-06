@@ -146,7 +146,9 @@ _PEM_PRIVATE_KEY_RE = re.compile(
 _LONG_OPAQUE_RUN_RE = re.compile(r"[A-Za-z0-9+/=_\-]{40,}")
 
 
-def mask_secret_bytes(text: str) -> Tuple[str, int]:
+def mask_secret_bytes(
+    text: str, *, mask_opaque: bool = True, preserve_layout: bool = False,
+) -> Tuple[str, int]:
     """Mask secret-shaped byte spans in final tool output; return (text, count).
 
     Egress seam for owner-home (``user_files``) content: the root agent may
@@ -154,25 +156,35 @@ def mask_secret_bytes(text: str) -> Tuple[str, int]:
     the masked form (``***``) may (#447 X1/В23). Coverage: the known entropy
     formats above, PEM private-key blocks, and any unbroken 40+ char opaque run
     (closes line-oriented egresses — search match lines, mid-file read slices).
+    Repository source callers disable only the opaque fallback: ordinary long
+    identifiers, hashes and source bodies must remain readable. Known token
+    formats and PEM private-key blocks are masked in either scope.
+    Readers that mask before selecting a line/character window set
+    ``preserve_layout``: replacement keeps character positions and line breaks,
+    so a window inside a key cannot lose its header or shift later source.
     Disclosed residual: a dictionary-word password has no shape to match.
     """
     out = str(text or "")
     count = 0
 
+    def _replacement(value: str) -> str:
+        return "".join(char if char.isspace() else "*" for char in value) if preserve_layout else "***"
+
     def _mask(_match: re.Match[str]) -> str:
         nonlocal count
         count += 1
-        return "***"
+        return _replacement(_match.group())
 
     def _mask_url(match: re.Match[str]) -> str:
         nonlocal count
         count += 1
-        return f"{match.group(1)}***:***@"
+        return f"{match.group(1)}{_replacement(match.group(2))}:{_replacement(match.group(3))}@"
 
     out = _PEM_PRIVATE_KEY_RE.sub(_mask, out)
     for rule, pattern in SECRET_TOKEN_PATTERNS:
         out = pattern.sub(_mask_url if rule == "url_credentials" else _mask, out)
-    out = _LONG_OPAQUE_RUN_RE.sub(_mask, out)
+    if mask_opaque:
+        out = _LONG_OPAQUE_RUN_RE.sub(_mask, out)
     return out, count
 
 
