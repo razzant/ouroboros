@@ -144,7 +144,9 @@ def test_wait_episode_exhausted_on_a_round_holding_a_repeat_record_takes_the_unk
         assert usage[TRANSPORT_DEATHS_KEY]["count"] == 1
         assert "1 earlier physical attempt(s) of the last dispatched round" in result
         assert "unresolved at their upper bound" in result
-        assert result == base + loop_transport.provider_recovery_hint(usage)
+        assert "Retry when connectivity returns" not in result
+        assert "Inspect the preserved facts before starting another run." in result
+        assert result.endswith(loop_transport.provider_recovery_hint(usage))
     else:
         assert trace["forced_finalization"]["source"] == "transport_unavailable_no_resend"
         assert TRANSPORT_DEATHS_KEY not in usage

@@ -1434,7 +1434,7 @@ A registry of `config.SETTINGS_DEFAULTS` (exact defaults stay canonical in `conf
 | OUROBOROS_GC_RETENTION_DAYS | 7 | Unified GC retention (`retention.py`) |
 | OUROBOROS_RESTART_DRAIN_MAX_SEC | 120 | Restart drain bound |
 | TOTAL_BUDGET | 200.0 | Global budget (USD) |
-| OUROBOROS_PER_TASK_COST_USD | 50.0 | Per-task cost cap; also the tree ceiling basis (`task_pacing.py`): the root resolves min(global share, cap minus margin), other tree members keep both components and cannot exceed the root, and the wrap-up affordability rail soft-lands under it |
+| OUROBOROS_PER_TASK_COST_USD | 50.0 | Per-task cost cap; also the tree ceiling basis (`task_pacing.py`): the root resolves min(global share, cap minus margin), enabled descendants retain that original threshold while actual monetary admission remains independent, and the wrap-up affordability rail soft-lands under it |
 | OUROBOROS_RUB_USD_RATE | (empty) | Manual RUB→USD rate for RUB-priced providers |
 | OUROBOROS_PRICING_TTL_SEC | 21600 | Provider-catalog pricing cache TTL |
 | OUROBOROS_TOOL_TIMEOUT_SEC | 600 | Default tool timeout |

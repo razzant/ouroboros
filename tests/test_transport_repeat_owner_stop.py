@@ -74,6 +74,8 @@ def test_stop_arriving_in_real_backoff_keeps_only_actual_physical_attempts(
     assert usage["_last_llm_retry_same_request"] is False
     assert usage["_last_llm_error_kind"] == "provider_outcome_unknown"
     assert trace["forced_finalization"]["source"] == "provider_outcome_unknown_no_resend"
+    assert ("owner requested Wrap up" if owner_grace else "owner requested Stop") in usage["terminal_provider_notice"]
+    assert "no terminal provider outcome" in usage["terminal_provider_notice"]
     assert [row["reason_code"] for row in _events(execution / "logs", "llm_not_dispatched")] == ["finalize_control_pending"]
     assert not _events(execution / "logs", "llm_retry_deadline_exhausted")
     assert mid not in ctx._loop_mailbox_seen_ids
@@ -143,3 +145,22 @@ def test_control_callback_does_not_change_other_transient_or_empty_retry_contrac
     llm = _ScriptedLLM(EMPTY_RESPONSE if empty else lambda: _status_failure(503))
     message, _cost = _primary_call(llm, tmp_path, {}, stop_retry_check=forbidden)
     assert message["content"] == "done" and llm.calls == 2
+
+
+def test_paid_repeat_empty_peek_reuses_existing_wait_proof(tmp_path, monkeypatch):
+    ctx = SimpleNamespace(drive_root=tmp_path, task_id="t-death", task_attempt=1, _loop_mailbox_seen_ids={"old"})
+    owner_mailbox.write_owner_message(tmp_path, "seen text", "t-death", msg_id="old")
+    calls = []
+    original = owner_mailbox.drain_owner_entries
+    def read(*args, **kwargs):
+        calls.append(True)
+        return original(*args, **kwargs)
+    monkeypatch.setattr(owner_mailbox, "drain_owner_entries", read)
+    peek = owner_mailbox.OwnerMailboxPeek()
+    for _ in range(4):
+        assert not loop_transport.transport_repeat_stop_requested(ctx, mailbox_peek=peek)
+    assert len(calls) == 1
+    owner_mailbox.write_owner_message(tmp_path, REASON_OWNER_STOPPED_DIRECT_TURN, "t-death", msg_id="stop", kind=owner_mailbox.KIND_FINALIZE_NOW)
+    assert loop_transport.transport_repeat_stop_requested(ctx, mailbox_peek=peek)
+    assert ctx._transport_repeat_control_reason == REASON_OWNER_STOPPED_DIRECT_TURN
+    assert ctx._loop_mailbox_seen_ids == {"old"}

@@ -479,7 +479,7 @@ def _emit_live_log(event_queue: Optional[queue.Queue], payload: Dict[str, Any]) 
 
 
 def _short_error_text(value: Any, limit: int = 220) -> str:
-    text = " ".join(str(value or "").split()).strip()
+    text = " ".join(sanitize_tool_result_for_log(str(value or "")).split()).strip()
     if len(text) <= limit:
         return text
     return text[: limit - 3] + "..."

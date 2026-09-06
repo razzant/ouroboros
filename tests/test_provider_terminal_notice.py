@@ -82,6 +82,7 @@ def test_pipeline_delivery_and_rebuild_keep_raw_bytes_and_known_wait_custody(tmp
     if current:
         assert notice in incidents[0][0][1]
         assert "re-run the task" not in incidents[0][0][1]
+        assert "Retry when connectivity returns" not in incidents[0][0][1]
 
 
 @pytest.mark.parametrize("outcome", ["message", "deferred", "silent", "tool_delivered"])
@@ -146,7 +147,7 @@ def test_real_mailbox_wait_exit_carries_the_control_cause_without_another_call(t
     assert _read_network_wait_events(tmp_path)[-1]["detail"] == "finalize_now"
     if reason == REASON_OWNER_REQUESTED_FINALIZATION:
         assert "owner requested Wrap up" in text and "own limits ran out" not in text
-        assert "no new summary request was sent" in usage["terminal_provider_notice"]
+        assert "no new summary request was sent" in usage["terminal_provider_notice"].lower()
     else:
         assert "owner requested Wrap up" not in text and "provider outage" in text
 
@@ -157,3 +158,27 @@ def test_deadline_text_does_not_hide_an_existing_unknown_attempt():
         is_transport_wait=False, waited_sec=0.0, interactive=False, is_deadline_exhausted=True)
     assert "owner deadline" in text and "no terminal provider outcome" in text
     assert "no retry or paid fallback was sent" in text
+
+
+def test_body_error_diagnostic_is_masked_before_terminal_publication(tmp_path, monkeypatch):
+    from ouroboros.utils import sanitize_tool_result_for_log
+    from tests.test_transport_death_retry import _ScriptedLLM, _death, _primary_call
+
+    secret = "synthetic_notice_canary_" + "x" * 32
+    body = "Request failed for api_key=" + secret
+    assert secret not in sanitize_tool_result_for_log(body)
+    usage = {}
+    llm = _ScriptedLLM(_death, ({"content": "", "tool_calls": []}, {
+        "cost": 0.0, "provider_error": {"kind": "provider_error", "code": "401", "message": body},
+    }))
+    monkeypatch.setattr(loop_llm_call, "_sleep_within_deadline", lambda *_a, **_k: True)
+    message, _ = _primary_call(llm, tmp_path / "logs", usage)
+    assert message is None and llm.calls == 2
+    _, registry, ctx, trace = _forced_test_context(tmp_path, usage=usage)
+    loop._replace_delivery_candidate(registry, ctx, trace, RAW, control="replace")
+    text, usage, trace = loop._handle_provider_unavailable(ctx, error_kind=usage["_last_llm_error_kind"])
+    notices = []
+    assert send_provider_death_notice(SimpleNamespace(send_with_budget=lambda *a, **k: notices.append(a[1])), 7, "parent1", usage)
+    assert text == RAW
+    assert secret not in usage["_last_llm_error"] + usage["terminal_provider_notice"] + notices[0]
+    assert "***" in notices[0]

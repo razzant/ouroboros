@@ -91,7 +91,8 @@ def _handle_text_response(
 # Bounded staleness for the two DECIDING cost surfaces (ceiling check,
 # milestone note): a round can block 900s in wait_tasks while children spend,
 # and the pacing refresh covers only deadline-less tasks — such a round pays
-# ONE real projection read, never per-round (e4a87344).
+# ONE tree projection read. Final-call affordability separately observes the
+# live shared wallet once per priced phase; other roots may spend between rounds.
 
 
 # Closed set of typed acceptance reasons (v6.78.0): every value is a fact
@@ -586,6 +587,7 @@ def run_llm_loop(
                     error_kind=str(accumulated_usage.get("_last_llm_error_kind") or "provider_unavailable"),
                     wait_cause=transport_wait.wait_cause if transport_wait is not None else "",
                     waited_sec=transport_wait.waited_sec if transport_wait is not None else 0.0,
+                    control_reason=str(getattr(tools._ctx, "_transport_repeat_control_reason", "") or ""),
                     interactive=transport_wait.interactive if transport_wait is not None else False)
                 _merge_finalization_trace(llm_trace, forced_trace)
                 return text, accumulated_usage, llm_trace
