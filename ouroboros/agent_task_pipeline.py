@@ -18,7 +18,7 @@ from ouroboros.task_results import (
     load_task_result,
     write_task_result,
 )
-from ouroboros.artifacts import collect_task_artifact_records, merge_artifact_records
+from ouroboros.artifacts import collect_task_artifact_records, merge_artifact_records, project_deliverable_artifacts
 from ouroboros.outcomes import (
     EXECUTION_BEST_EFFORT,
     EXECUTION_FAILED,
@@ -825,7 +825,7 @@ def _store_task_result(env: Any, task: Dict[str, Any], text: str,
         from ouroboros.review_projection import publish_acceptance_checkpoint
 
         publish_acceptance_checkpoint(env, llm_trace, task_id=str(task.get("id") or ""),
-                                      drive_root=env.drive_root)
+                                      drive_root=env.drive_root, chat_id=task.get("chat_id"))
         trace_summary = build_trace_summary(llm_trace)
         from ouroboros.cost_projection import with_cost_aliases
 
@@ -837,7 +837,7 @@ def _store_task_result(env: Any, task: Dict[str, Any], text: str,
             "reserved_usd": None, "unresolved_upper_bound_usd": None,
             "unknown_unmetered": None,
         })
-        existing = load_task_result(env.drive_root, str(task.get("id") or "")) or {}
+        existing = project_deliverable_artifacts(load_task_result(env.drive_root, str(task.get("id") or "")) or {})
         if loop_outcome is None:
             loop_outcome = _derive_host_bound_loop_outcome(env, task, text, usage, llm_trace)
             # Apply FR3 before normalization so the persisted axes and ledger agree.

@@ -321,7 +321,7 @@ def compact_review_projection(review_runs: Any) -> Dict[str, Any]:
 
 def publish_acceptance_checkpoint(
     ctx: Any, llm_trace: Dict[str, Any], *, task_id: str = "",
-    drive_root: Any = None,
+    drive_root: Any = None, chat_id: Any = None,
 ) -> None:
     """Save the complete applied host record before publishing its read model.
 
@@ -384,6 +384,6 @@ def publish_acceptance_checkpoint(
             _field_projector=lambda current, fields: {**fields, "status": current.get("status") or "running"},
         )
         state = result.get("review_projection") or {}
-        _emit_review_reference(ctx, task_id, state, surface="task_acceptance", state_root=Path(root))
+        _emit_review_reference(ctx, task_id, state, surface="task_acceptance", state_root=Path(root), chat_id=chat_id)
     except (OSError, ValueError, TimeoutError):
         logging.getLogger(__name__).warning("Applied acceptance projection unavailable", exc_info=True)

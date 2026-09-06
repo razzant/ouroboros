@@ -1639,11 +1639,17 @@ otherwise the view is partial and the consumer remains non-final or abstains.
 
 Acceptance source identity is computed before history-dependent packet budgeting.
 The complete receipt/tool sources and work artifacts still invalidate the binding
-when their facts change; registered host acceptance-review artifacts are bookkeeping.
+when their facts change; `artifacts.is_task_bookkeeping_artifact` identifies registered
+host acceptance-review sources. Collection and `project_deliverable_artifacts` exclude
+them from user artifacts and inferred readiness, including effective reads and copy-back.
+Their canonical bytes remain available through the existing flat artifact download;
+that endpoint explicitly includes registered bookkeeping for its exact-name fallback.
 The final packet size includes source references and omission notes.
 `review_projection.publish_acceptance_checkpoint` saves full applied host records
 before updating the compact task-result field through `write_task_result` and
-emitting the existing `review_reference` invalidation. Actual task attempts and
+emitting the existing `review_reference` invalidation with the terminal task's explicit
+chat id (including hidden chat 0); loop/plan callers retain their context default and
+Project binding retains addressing precedence. Actual task attempts and
 host-only publication revisions order snapshots of each panel; the common merge
 also covers effective child reads and copy-back. Neither the projection nor its
 ordering stamp grants review authority. Old records without a retained full source

@@ -1183,8 +1183,44 @@ def copy_directory_to_task_artifacts(
     return records
 
 
-def collect_task_artifact_records(drive_root: Union[pathlib.Path, str], task_id: str) -> List[Dict[str, Any]]:
-    """Return records for files already present in the task artifact store."""
+def is_task_bookkeeping_artifact(record: Any) -> bool:
+    """Registered review custody is readable source material, not a deliverable."""
+    return isinstance(record, dict) and record.get("kind") == "task_acceptance_review"
+
+
+def project_deliverable_artifacts(result: Dict[str, Any]) -> Dict[str, Any]:
+    """Remove review-only records from result views without deleting their sources.
+
+    Older in-flight replicas may already carry these records and inferred ready
+    statuses. Only that derived ready status is neutralized; real artifacts and
+    independently meaningful pending/finalizing/failure outcomes stay intact.
+    This is pure projection, including on the status-only read path.
+    """
+    projected = dict(result)
+    bundle = dict(result.get("artifact_bundle") or {}) if isinstance(result.get("artifact_bundle"), dict) else {}
+    removed = False
+    for owner in (projected, bundle):
+        records = owner.get("artifacts")
+        if isinstance(records, list):
+            filtered = [row for row in records if not is_task_bookkeeping_artifact(row)]
+            removed = removed or len(filtered) != len(records)
+            owner["artifacts"] = filtered
+    if removed and not projected.get("artifacts") and not bundle.get("artifacts"):
+        if projected.get("artifact_status") == ARTIFACT_STATUS_READY:
+            projected["artifact_status"] = "not_applicable"
+        if bundle.get("status") == ARTIFACT_STATUS_READY:
+            bundle["status"] = "not_applicable"
+        axes = projected.get("outcome_axes")
+        artifact_axis = axes.get("artifacts") if isinstance(axes, dict) else None
+        if isinstance(artifact_axis, dict) and artifact_axis.get("status") == ARTIFACT_STATUS_READY:
+            projected["outcome_axes"] = {**axes, "artifacts": {**axes["artifacts"], "status": "not_applicable"}}
+    if isinstance(result.get("artifact_bundle"), dict):
+        projected["artifact_bundle"] = bundle
+    return projected
+
+
+def collect_task_artifact_records(drive_root: Union[pathlib.Path, str], task_id: str, *, include_bookkeeping: bool = False) -> List[Dict[str, Any]]:
+    """Collect deliverables; explicit source downloads may include registered bookkeeping."""
 
     try:
         artifact_dir = task_artifact_dir_path(pathlib.Path(drive_root), validate_task_id(task_id), create=False)
@@ -1220,9 +1256,11 @@ def collect_task_artifact_records(drive_root: Union[pathlib.Path, str], task_id:
             _ATTACHMENTS_SUBDIR, _CHAT_MEDIA_SUBDIR, _SOURCE_HANDLES_SUBDIR,
         }:
             continue
+        manifest_record = manifest.get(path.name) if path.parent == artifact_dir else None
+        if not include_bookkeeping and is_task_bookkeeping_artifact(manifest_record):
+            continue
         try:
             record = artifact_record(path)
-            manifest_record = manifest.get(path.name)
             if manifest_record:
                 record.update({
                     key: value
@@ -1240,7 +1278,7 @@ def merge_artifact_records(*groups: Iterable[Dict[str, Any]]) -> List[Dict[str, 
     order: List[str] = []
     for group in groups:
         for item in group:
-            if not isinstance(item, dict):
+            if not isinstance(item, dict) or is_task_bookkeeping_artifact(item):
                 continue
             key = str(item.get("path") or item.get("name") or "")
             if not key:

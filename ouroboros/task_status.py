@@ -633,6 +633,9 @@ def effective_task_result(
 
     if not result:
         return {}
+    from ouroboros.artifacts import project_deliverable_artifacts
+
+    result = project_deliverable_artifacts(result)
     task_id = str(result.get("task_id") or result.get("id") or "").strip()
     if not task_id:
         return dict(result)
@@ -733,7 +736,7 @@ def effective_task_result(
         if merged_is_workspace and child_status in FINAL_STATUSES and (parent_status not in {STATUS_FAILED, STATUS_CANCELLED, STATUS_REJECTED_DUPLICATE} or copied_child_terminal):
             merged = _normalize_workspace_artifact_status(merged)
 
-    merged = _normalize_workspace_artifact_status(merged)
+    merged = _normalize_workspace_artifact_status(project_deliverable_artifacts(merged))
 
     parent_status = str(merged.get("status") or "").lower()
     if parent_status not in FINAL_STATUSES:
@@ -874,8 +877,12 @@ def effective_task_result(
                 collected_artifacts = collect_task_artifact_records(drive_root, task_id)
             merged["artifacts"] = merge_artifact_records(existing_artifacts, rebased_child_artifacts, collected_artifacts)
             merged["artifact_bundle"] = artifact_bundle_from_result(merged)
-            if not merged.get("artifact_status"):
+            if str(merged.get("artifact_status") or "") in {"", "not_applicable"}:
                 merged["artifact_status"] = merged["artifact_bundle"].get("status")
+            axes = merged.get("outcome_axes")
+            artifact_axis = axes.get("artifacts") if isinstance(axes, dict) else None
+            if isinstance(artifact_axis, dict) and artifact_axis.get("status") == "not_applicable" and merged["artifact_bundle"].get("status") == "ready":
+                merged["outcome_axes"] = {**axes, "artifacts": {**artifact_axis, "status": "ready"}}
     except Exception:
         pass
     return _project_child_result_disposition(pathlib.Path(drive_root), merged)

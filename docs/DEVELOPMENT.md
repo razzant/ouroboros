@@ -2180,7 +2180,10 @@ by "Provider Independence" above. Call-site imperatives:
   publication changes only `review_projection`, preserving lifecycle and other
   writers' fields. Test delayed snapshots and child replicas through the same
   central merge, and verify that the full source downloads while the task is
-  still running. A missing source is disclosed, never reconstructed from a
+  still running. Registered review bookkeeping remains downloadable without entering
+  user deliverables or making an otherwise artifact-free task ready. Preserve that
+  distinction through effective reads and child copy-back; terminal references must
+  carry the task's chat id, including zero. A missing source is disclosed, never reconstructed from a
   bounded preview. Source/capacity, publication order and paid identity are
   separate contracts; changing history or presentation must not mint work.
 - The host buys one authoritative acceptance panel per PAID IDENTITY —

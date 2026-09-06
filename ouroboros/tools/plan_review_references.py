@@ -45,7 +45,7 @@ def _emit_plan_review_reference(
 
 def _emit_review_reference(
     ctx: Any, task_id: str, state: Any, *, surface: str,
-    state_root: Optional[pathlib.Path] = None, fingerprint: str = "",
+    state_root: Optional[pathlib.Path] = None, fingerprint: str = "", chat_id: Any = None,
 ) -> None:
     """Invalidate the existing task-detail read model after its durable write."""
     event_queue = getattr(ctx, "event_queue", None)
@@ -54,7 +54,9 @@ def _emit_review_reference(
     try:
         from supervisor.message_bus import notification_chat_route
 
-        chat_id = notification_chat_route(getattr(ctx, "current_chat_id", None), 1)
+        chat_id = notification_chat_route(
+            chat_id if chat_id is not None else getattr(ctx, "current_chat_id", None), 1,
+        )
         if chat_id is None:
             chat_id = 1
     except (TypeError, ValueError):
