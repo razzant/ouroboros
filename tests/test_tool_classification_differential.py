@@ -145,6 +145,11 @@ APPROVED_DELTAS: Mapping[str, Delta] = MappingProxyType({
     # assigned to its text. The golden is the RETIRED LOOP, so reaching the same
     # answer through the producer's own code shows up as a second row.
     "native:TOOL_ARG_ERROR:TOOL_ARG_ERROR": Delta(True, "error", True, "argument_error", "A.17", "same bucket as the TOOL_ARG_ERROR identifier row, through the native code the read/list/write/edit/search root guard publishes"),
+    # GitHub target refusals use the existing argument-error contract (A.6).
+    # The retired text classifier considered both warnings successful; the
+    # publisher now supplies the typed refusal while preserving the message.
+    "native:TOOL_ARG_ERROR:GH_TARGET_INVALID": Delta(False, "ok", True, "argument_error", "A.6", "an invalid repo argument prevents the GitHub operation; the typed result must report that refusal"),
+    "native:TOOL_ARG_ERROR:GH_TARGET_REQUIRED": Delta(False, "ok", True, "argument_error", "A.6", "a missing repo argument in a fileless Project prevents the GitHub operation; the typed result must report that refusal"),
     # Same shape, same reason: `TASK_FORBIDDEN` is already approved above under A.4,
     # and `forward_to_worker` now publishes the code the adapter gave that text.
     # Owner batch #10 item 2 (A.20): refusing a write because the room's files belong

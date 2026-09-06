@@ -10,6 +10,7 @@ import subprocess
 from typing import List, Optional
 
 from ouroboros.tools.registry import ToolContext, ToolEntry
+from ouroboros.tools.tool_result import ToolResult, _publish_tool_result
 from ouroboros.utils import truncate_review_artifact as _truncate_with_notice
 
 log = logging.getLogger(__name__)
@@ -65,7 +66,10 @@ def _gh_cmd(args: List[str], ctx: ToolContext, timeout: int = 30, input_data: Op
     # Only omitted internal API/Hub calls keep the generic transport contract.
     # Public repository tools always pass repo, including '' for Project focus.
     if repo is not _GENERIC_TRANSPORT and not isinstance(repo, str):
-        return "⚠️ GH_TARGET_INVALID: repo must be a string; omit it to use the selected Project."
+        return _publish_tool_result(ctx, ToolResult(
+            status="error", code="TOOL_ARG_ERROR",
+            text="⚠️ GH_TARGET_INVALID: repo must be a string; omit it to use the selected Project.",
+        ))
     try:
         cwd, env = pathlib.Path(ctx.repo_dir), _gh_env(ctx)
         cmd = ["gh", *args]
@@ -83,7 +87,10 @@ def _gh_cmd(args: List[str], ctx: ToolContext, timeout: int = 30, input_data: Op
                 if note or (selected and not pathlib.Path(selected).is_dir()):
                     return f"⚠️ GH_TARGET_UNAVAILABLE: {note or 'The selected Project directory is unavailable.'}"
                 if project and not selected:
-                    return "⚠️ GH_TARGET_REQUIRED: this Project has no repository directory; pass repo='[HOST/]OWNER/REPO'."
+                    return _publish_tool_result(ctx, ToolResult(
+                        status="error", code="TOOL_ARG_ERROR",
+                        text="⚠️ GH_TARGET_REQUIRED: this Project has no repository directory; pass repo='[HOST/]OWNER/REPO'.",
+                    ))
             binding = build_resolved_resource_binding(ctx, operation="shell", process_cwd="")
             cwd = binding.target_path
             if workspace and cwd != pathlib.Path(workspace).resolve(strict=False):

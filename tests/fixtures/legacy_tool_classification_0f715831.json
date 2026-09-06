@@ -2947,6 +2947,14 @@
    "is_error": true,
    "status": "blocked"
   },
+  "native:TOOL_ARG_ERROR:GH_TARGET_INVALID": {
+   "is_error": false,
+   "status": "ok"
+  },
+  "native:TOOL_ARG_ERROR:GH_TARGET_REQUIRED": {
+   "is_error": false,
+   "status": "ok"
+  },
   "native:TOOL_ARG_ERROR:TOOL_ARG_ERROR": {
    "is_error": true,
    "status": "error"

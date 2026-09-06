@@ -131,9 +131,30 @@ def test_public_null_target_never_selects_internal_hub_transport(tmp_path, gh_ca
     monkeypatch.setenv("OUROBOROS_SAFETY_MODE", "off")
     registry = ToolRegistry(repo_dir=ctx.repo_dir, drive_root=ctx.drive_root)
     registry.set_context(ctx)
-    result = registry.execute(name, {**args, "repo": None})
-    assert "GH_TARGET_INVALID" in result
+    result = registry.execute_result(name, {**args, "repo": None})
+    assert "GH_TARGET_INVALID" in result.text
+    assert (result.status, result.code) == ("error", "TOOL_ARG_ERROR")
     assert not gh_calls
+
+
+@pytest.mark.parametrize("name,args,_count", _CALLS)
+def test_required_target_is_an_error_then_a_valid_call_has_no_stale_failure(tmp_path, gh_calls, monkeypatch, name, args, _count):
+    from ouroboros.loop_tool_execution import _typed_execution_failure
+    from ouroboros.tools.registry import ToolRegistry
+
+    ctx, _ = _context(tmp_path, "room")
+    ctx.task_metadata = {}
+    monkeypatch.setenv("OUROBOROS_SAFETY_MODE", "off")
+    registry = ToolRegistry(repo_dir=ctx.repo_dir, drive_root=ctx.drive_root)
+    registry.set_context(ctx)
+    refused = registry.execute_result(name, args)
+    assert "GH_TARGET_REQUIRED" in refused.text
+    assert (refused.status, refused.code) == ("error", "TOOL_ARG_ERROR")
+    assert _typed_execution_failure(True, refused)
+    assert not gh_calls
+    valid = registry.execute_result(name, {**args, "repo": "owner/selected"})
+    assert valid.status == "ok" and not _typed_execution_failure(True, valid)
+    assert len(gh_calls) == _count
 
 
 @pytest.mark.parametrize("repo", [False, 0, [], {}, 1])
