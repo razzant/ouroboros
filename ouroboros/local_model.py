@@ -70,6 +70,7 @@ class LocalModelManager:
 
     def __init__(self) -> None:
         self._proc: Optional[subprocess.Popen] = None
+        self._service_binding: Optional[dict] = None
         self._install_proc: Optional[subprocess.Popen] = None
         self._lock = threading.Lock()
         self._status = "offline"
@@ -498,6 +499,7 @@ class LocalModelManager:
 
     def _wait_for_healthy(self, timeout: float = 300.0) -> None:
         """Poll the local server until healthy or timed out."""
+        proc = self._proc
         start = time.time()
         while time.time() - start < timeout:
             if self._proc is None or self._proc.poll() is not None:
@@ -517,9 +519,19 @@ class LocalModelManager:
             try:
                 health = self.health_check()
                 if health.get("ok"):
-                    self._status = "ready"
-                    self._context_length = health.get("context_length", 0)
-                    self._model_name = health.get("model_name", "")
+                    from ouroboros.config import DATA_DIR
+                    from ouroboros.server_process import record_service_binding
+
+                    with self._lock:
+                        # The health response belongs only to this live manager
+                        # generation; a concurrent stop/restart cannot publish it.
+                        if proc is None or self._proc is not proc or proc.poll() is not None:
+                            return
+                        self._service_binding = record_service_binding(
+                            DATA_DIR, "local_model", "127.0.0.1", self._port, pid=proc.pid)
+                        self._status = "ready"
+                        self._context_length = health.get("context_length", 0)
+                        self._model_name = health.get("model_name", "")
                     log.info(
                         "Local model server ready (ctx=%d, model=%s)",
                         self._context_length, self._model_name,
@@ -540,6 +552,7 @@ class LocalModelManager:
 
         with self._lock:
             proc = self._proc
+            binding, self._service_binding = self._service_binding, None
             install_proc = self._install_proc
             self._proc = None
             self._install_proc = None
@@ -575,6 +588,11 @@ class LocalModelManager:
                 proc.wait(timeout=5)
             except subprocess.TimeoutExpired:
                 pass
+        if binding is not None and proc.poll() is not None:
+            from ouroboros.config import DATA_DIR
+            from ouroboros.server_process import clear_service_binding
+
+            clear_service_binding(DATA_DIR, "local_model", binding)
 
     def health_check(self) -> Dict[str, Any]:
         """Query local server health and loaded-model info."""

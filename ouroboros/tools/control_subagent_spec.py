@@ -60,6 +60,10 @@ def schedule_subagent_properties() -> Dict[str, Any]:
         "write_root": {"type": "string", "description": "For write_surface=external_workspace: the external project directory — a REAL external Git working tree, never runtime data. An installed non-Git skill payload is NOT an external workspace: delegate it directly with delegate_start(subagent_id=..., prompt=..., root='skill_payload', bucket=..., skill_name=...). OMIT write_root to build COOPERATIVELY from scratch — the host mints ONE shared git tree the whole subagent tree writes into together (deeper descendants inherit it), and you integrate the result as the sole committer. Ignored for self_worktree and genesis (both auto-provisioned)."},
         "protected_paths_grant": {"type": "boolean", "default": False, "description": "Allow the child to modify protected paths in its self_worktree. Honored only in pro runtime mode; you still re-check at integration."},
         "external_tool_grants": {"type": "array", "items": {"type": "string"}, "description": "Optional extension/MCP tool names to grant this mutative child. Denied by default."},
+        "allowed_origins": {
+            "type": "array", "items": {"type": "string"},
+            "description": "Exact HTTP(S) origins for the child's assigned private-service browser work, e.g. http://192.168.1.20:5173 (no path, credentials or wildcard). The ordinary root/Main may name task-authorized services; delegated and external Presence callers may only select from inherited origins. Omit to inherit; [] removes them. Other resource and control-plane boundaries still apply.",
+        },
         "delegation_intent": {"type": "string", "description": "Optional: tell THIS child whether/how to delegate further (e.g. 'build the whole game; spawn your own children per subsystem and let them spawn too'). Propagated structurally into the child's delegation budget and surfaced in its prompt, so a 'use maximum subagents / grandchildren' intent is not lost. Defaults to inheriting the parent's intent."},
         "may_mutate": {"type": "boolean", "default": False, "description": "Optional: grant this child the intent to spawn MUTATIVE (acting) descendants of its own. Still bounded by the usual mutative-subagent gating and depth/active caps."},
         "may_fan_out": {"type": "boolean", "default": True, "description": "Optional: whether this child may spawn MULTIPLE children (a wave). Bounded by the per-root active cap."},
@@ -109,7 +113,7 @@ def schedule_subagent_param_names() -> frozenset:
 _INTERNAL_SCHEDULE_OPTIONS: frozenset = frozenset()
 
 
-def _validated_schedule_fields(params: Dict[str, Any]) -> tuple[Dict[str, Any], str]:
+def _validated_schedule_fields(params: Dict[str, Any], *, ctx: Any = None) -> tuple[Dict[str, Any], str]:
     """Normalize and validate the public schedule_subagent fields.
 
     Returns ``(fields, "")`` or ``({}, refusal)``. Extracted from ``_schedule_task`` so
@@ -164,6 +168,32 @@ def _validated_schedule_fields(params: Dict[str, Any]) -> tuple[Dict[str, Any], 
             f"⚠️ TOOL_ARG_ERROR (schedule_subagent): memory_mode must be one of: {allowed}. "
             "memory_mode=shared is disabled for live local subagents until a sanitized shared-context mode exists."
         )
+    from ouroboros.contracts.task_contract import normalize_allowed_origins, normalize_browser_origin, normalize_resource_policy
+    from ouroboros.presence_authority import presence_ceiling_from_context
+    from ouroboros.tools.core import is_restricted_subagent_profile
+
+    metadata = getattr(ctx, "task_metadata", {})
+    metadata = metadata if isinstance(metadata, dict) else {}
+    # EMPTINESS decides, not type. `ToolContext.task_contract` defaults to `{}`, so testing
+    # only `isinstance(..., dict)` let that empty default win over a contract that really is
+    # in `task_metadata` — and the parent's `deadline_at` lives in the contract, so the miss
+    # silently un-narrowed every child deadline. Same precedence the registry already uses.
+    parent = metadata.get("task_contract") if isinstance(metadata.get("task_contract"), dict) else {}
+    if not parent and isinstance(getattr(ctx, "task_contract", None), dict):
+        parent = ctx.task_contract
+    resource_policy = normalize_resource_policy(parent.get("resource_policy") or metadata.get("resource_policy"))
+    if "allowed_origins" in params:
+        requested = params["allowed_origins"]
+        if not isinstance(requested, list) or any(not normalize_browser_origin(item, origin_only=True) for item in requested):
+            return {}, "⚠️ TOOL_ARG_ERROR (schedule_subagent): allowed_origins must contain exact HTTP(S) origins without paths, credentials or wildcards."
+        origins = normalize_allowed_origins(requested)
+        # The host caller class supplies authority; neither a URL in page prose
+        # nor an external Presence event may manufacture a new owner grant.
+        subset_only = (ctx is None or is_restricted_subagent_profile(ctx)
+                       or presence_ceiling_from_context(ctx) is not None)
+        if subset_only and not set(origins).issubset(resource_policy.get("allowed_origins", [])):
+            return {}, "⚠️ BROWSER_ORIGIN_NOT_GRANTED: this caller may only narrow its inherited allowed_origins."
+        resource_policy["allowed_origins"] = origins
     return {
         "deadline_at": deadline_at, "objective": objective, "expected_output": expected_output,
         "role": str(params.get("role") or "researcher").strip() or "researcher",
@@ -171,6 +201,8 @@ def _validated_schedule_fields(params: Dict[str, Any]) -> tuple[Dict[str, Any], 
         "constraints": str(params.get("constraints") or "").strip(),
         "memory_mode": memory_mode, "may_mutate": params.get("may_mutate", False),
         "acceptance_claims": acceptance_claims,
+        "resource_policy": resource_policy,
+        "parent_contract": parent,
     }, ""
 
 

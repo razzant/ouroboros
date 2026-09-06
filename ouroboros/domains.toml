@@ -69,6 +69,7 @@ D20 = "Presence"
 "ouroboros/argv_budget.py" = "D13"
 "ouroboros/artifacts.py" = "D05"
 "ouroboros/betterleaks_runtime.py" = "D14"
+"ouroboros/browser_policy.py" = "D05"
 "ouroboros/cancel_intents.py" = "D09"
 "ouroboros/capability_evidence.py" = "D03"
 "ouroboros/claudexor_daemon.py" = "D07"
@@ -774,6 +775,7 @@ lazy_only = [
   "D01->D10",
   "D01->D11",
   "D02->D09",
+  "D02->D11",
   "D03->D05",
   "D03->D06",
   "D03->D07",

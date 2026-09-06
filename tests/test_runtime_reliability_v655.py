@@ -189,7 +189,7 @@ def test_registry_detects_safety_mode_self_lowering():
 
 
 def test_browser_js_guard_blocks_safety_mode_change():
-    from ouroboros.tools.browser import _blocks_safety_mode_self_lowering_js as js
+    from ouroboros.browser_policy import _blocks_safety_mode_self_lowering_js as js
 
     assert js("fetch('/api/owner/safety-mode', {method: 'POST'})")
     assert js("body: JSON.stringify({OUROBOROS_SAFETY_MODE: 'off'}) /api/settings")
@@ -198,7 +198,7 @@ def test_browser_js_guard_blocks_safety_mode_change():
 
 
 def test_safety_mode_owner_post_route_decodes_percent_encoding():
-    from ouroboros.tools.browser import _is_safety_mode_owner_post
+    from ouroboros.browser_policy import _is_safety_mode_owner_post
 
     req = SimpleNamespace(url="http://127.0.0.1:8765/api/owner/safety%2Dmode", method="POST")
     assert _is_safety_mode_owner_post(req) is True

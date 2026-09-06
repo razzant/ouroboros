@@ -1128,7 +1128,7 @@ def test_evolution_owner_control_self_change_detected():
 
 
 def test_post_task_evolution_js_guard():
-    from ouroboros.tools.browser import _blocks_post_task_evolution_js
+    from ouroboros.browser_policy import _blocks_post_task_evolution_js
     assert _blocks_post_task_evolution_js(
         "fetch('/api/settings', {method:'POST', body: JSON.stringify({OUROBOROS_POST_TASK_EVOLUTION: true})})"
     )
@@ -1277,14 +1277,24 @@ def test_acting_browser_evaluate_runs_and_keeps_owner_guards(tmp_path, monkeypat
     evaluated = [c for c in calls if isinstance(c, str)]
     assert len(evaluated) == 1 and "1 + 1" in evaluated[0]
 
-    blocked = registry.execute(
+    # A dev page can legitimately reuse an owner-shaped relative pathname.
+    ordinary = registry.execute(
         "browser_action",
         {
             "action": "evaluate",
             "value": "fetch('/api/owner/context-mode', {method:'POST', body: JSON.stringify({mode:'low'})})",
         },
     )
-    assert "CONTEXT_MODE_SELF_LOWERING_BLOCKED" in blocked
+    assert ordinary == "2"
+    from ouroboros.server_entrypoint import bound_service_socket
+    with bound_service_socket(drive, "main", "127.0.0.1", 0) as listener:
+        page.url = f"http://127.0.0.1:{listener.getsockname()[1]}"
+        blocked = registry.execute("browser_action", {"action": "evaluate", "value": "1 + 1"})
+        assert "BROWSER_LOCAL_READONLY_BLOCKED" in blocked
+        ctx.task_constraint = None
+        blocked = registry.execute("browser_action", {"action": "evaluate",
+            "value": "fetch('/api/owner/context-mode', {method:'POST', body: JSON.stringify({mode:'low'})})"})
+        assert "CONTEXT_MODE_SELF_LOWERING_BLOCKED" in blocked
 
 
 def test_no_workspace_acting_integrate_blocked(tmp_path):

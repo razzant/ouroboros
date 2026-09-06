@@ -374,27 +374,29 @@ def _resolve_vlm_model(client: Any, requested_model: str = "", *, ctx: Any = Non
     return ""
 
 
-def _allowed_file_roots(ctx: Any = None) -> List["pathlib.Path"]:
+def _allowed_file_roots(ctx: Any = None, *, include_user_files: bool = True) -> List["pathlib.Path"]:
     """Roots a VLM file_path may be read from: the uploads dir + skill state PLUS
-    every resource root the ACTIVE PROFILE can already read via read_file — the
-    SAME trust boundary (derived from the ONE ``_POLICY`` matrix,
+    every resource root the ACTIVE PROFILE can already read via read_file. The
+    profile roots are derived from the ONE ``_POLICY`` matrix,
     ``profile_readable_root_paths``, instead of a hand-maintained private list
     that drifted: view_image could not see subagent_projects/deliverables while
-    verify could — the wave3 r8/r9 copy-shuffle). Widens nothing beyond what
-    read_file already reads; view_image stays image-only with a fail-closed MIME
+    verify could — the wave3 r8/r9 copy-shuffle. The existing image-specific
+    roots also participate in independent admission, before home confinement.
+    ``view_image`` stays image-only with a fail-closed MIME
     sniff + size cap, and a path admitted only through the user_files home root
     still clears the user_files secret/runtime guards
     (``_user_files_only_admission_block``). Never arbitrary filesystem paths."""
-    import pathlib
-    data_dir = os.environ.get("OUROBOROS_DATA_DIR", "")
-    if data_dir:
-        _base = pathlib.Path(data_dir).expanduser().resolve()
-    else:
-        _base = pathlib.Path("~/Ouroboros/data").expanduser().resolve()
+    from ouroboros.config import DATA_DIR
+    from ouroboros.tool_access import canonical_data_root
+
+    try:
+        _base = canonical_data_root(ctx)
+    except (AttributeError, TypeError, ValueError):
+        _base = pathlib.Path(DATA_DIR).resolve()
     # uploads PLUS skill job/state outputs (state/skills/<name>/jobs/...): trusted
     # local files the agent's OWN reviewed skills produce (e.g. computer-use
-    # screenshots). Same trust boundary as read_file; view_image is image-only with
-    # a fail-closed MIME sniff + size cap, so this adds no new exfiltration surface.
+    # screenshots). Per-path secret/owner-state and protected-artifact guards
+    # still apply after admission; these roots do not bypass those checks.
     roots = [_base / "uploads", _base / "state" / "skills"]
     if ctx is not None:
         try:
@@ -404,7 +406,8 @@ def _allowed_file_roots(ctx: Any = None) -> List["pathlib.Path"]:
             pass
         try:
             from ouroboros.tool_access import profile_readable_root_paths
-            roots.extend(path for _label, path in profile_readable_root_paths(ctx))
+            roots.extend(path for label, path in profile_readable_root_paths(ctx)
+                         if include_user_files or label != "user_files")
         except Exception:
             # Fail-soft to the historical fixed set (artifact roots) so a
             # matrix-resolution hiccup never blinds the tool entirely.
@@ -424,7 +427,6 @@ def _user_files_only_admission_block(ctx: Any, fp: "pathlib.Path") -> str:
     runtime-overlap rules read_file enforces on that root. Empty = no objection."""
     try:
         from ouroboros.tool_access import (
-            profile_readable_root_paths,
             resource_root_path,
             user_files_path_block_reason,
         )
@@ -436,8 +438,8 @@ def _user_files_only_admission_block(ctx: Any, fp: "pathlib.Path") -> str:
             return ""  # profile has no user_files root — nothing to guard here
         if not _path_is_under(fp, home):
             return ""
-        for label, root in profile_readable_root_paths(ctx):
-            if label != "user_files" and _path_is_under(fp, root):
+        for root in _allowed_file_roots(ctx, include_user_files=False):
+            if _path_is_under(fp, root):
                 return ""  # admitted by a narrower root in its own right
         # operation="read" keeps SC-6 read_file parity: root reads of the owner
         # home are location-authorized only (capinv-447 / В23=A).
