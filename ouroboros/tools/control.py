@@ -243,10 +243,11 @@ def get_tools() -> List[ToolEntry]:
                 "DEFAULT is READ-ONLY: the child inspects local repo/data/history plus web/browser and "
                 "returns findings (it cannot write local state, commit, enable tools, or run "
                 "shell/review/runtime/skills). Set write_surface to spawn a MUTATIVE (acting) child that "
-                "writes inside an ISOLATED root and returns a workspace.patch you integrate with "
-                "integrate_subagent_patch — you remain the sole committer of the live body. write_surface: "
-                "self_worktree (isolated git worktree of THIS repo, for parallel self-modification / best-of-N), "
-                "external_workspace (an external project dir via write_root or the parent workspace), or "
+                "writes on the selected surface. You remain the sole committer of the live Ouroboros body. "
+                "self_worktree is an isolated git worktree of THIS repo: apply its workspace.patch with "
+                "integrate_subagent_patch for parallel self-modification / best-of-N. Native children on "
+                "external_workspace write directly to the SHARED external project directory (write_root or "
+                "the parent workspace); integrate_subagent_patch verifies the files already there without reapplying. "
                 "genesis (a from-scratch new project — game/site/app/new Ouroboros — auto-provisioned as a fresh "
                 "empty git repo under the durable projects root; the project directory IS the deliverable, not "
                 "integrated into this repo). "
@@ -257,8 +258,9 @@ def get_tools() -> List[ToolEntry]:
                 "COOPERATIVE MULTI-BUILDER vs GENESIS: when SEVERAL builder children must contribute to ONE new "
                 "deliverable together, give each write_surface=external_workspace and OMIT write_root — the host "
                 "mints ONE shared git tree the whole subagent tree writes into cooperatively (deeper descendants "
-                "inherit it), and you integrate it as the sole committer. Use genesis instead only when EACH child "
+                "inherit it), and you verify their combined files with integrate_subagent_patch. Use genesis only when EACH child "
                 "should own its OWN standalone durable repo (e.g. best-of-N separate builds). "
+                "Harness-delegated work uses a private snapshot; integrate_delegated_patch handles that separate patch. "
                 "Mutative children still cannot commit, run "
                 "review/runtime/skills lifecycle, enable tools, or write cognitive memory. Nested delegation "
                 "is allowed within configured depth/cap limits — use delegation_intent / may_mutate / "
@@ -386,7 +388,7 @@ def get_tools() -> List[ToolEntry]:
         }, _get_task_result),
         ToolEntry("wait_task", {
             "name": "wait_task",
-            "description": "Wait for ONE subtask to reach a terminal status and return its effective result. May return EARLY (before terminal) if the child raises a tree_note blocker/question/interface_contract/review_requested/delegation_constraint beacon — the result then carries a [CHILD_BEACONS] block so you can steer, review, or override it. With SEVERAL children in flight, prefer wait_tasks(any_terminal) to absorb whichever finishes first rather than blocking serially on one id at a time.",
+            "description": "Wait for ONE subtask to reach a terminal status and return its effective result. May return EARLY (before terminal) if the child raises a tree_note blocker/question/interface_contract/review_requested/delegation_constraint beacon — the result then carries a [CHILD_BEACONS] block so you can steer, review, or override it. An unread message in your own mailbox also returns early so the ordinary loop can deliver and acknowledge it; the child keeps running. With SEVERAL children in flight, prefer wait_tasks(any_terminal) to absorb whichever finishes first rather than blocking serially on one id at a time.",
             "parameters": {"type": "object", "required": ["task_id"], "properties": {
                 "task_id": {"type": "string", "description": "Task ID to check"},
                 "timeout_sec": {"type": "integer", "default": 180, "description": "Maximum seconds to wait (default 180)."},
@@ -394,7 +396,7 @@ def get_tools() -> List[ToolEntry]:
         }, _wait_for_task, timeout_sec=7200),
         ToolEntry("wait_tasks", {
             "name": "wait_tasks",
-            "description": "Wait for MULTIPLE subtasks at once and return a compact structural projection per child (task_id, status, accounted_upper_bound_usd, cost_final, child_result_sha256, outcome_axes, result, trace_summary, capability_delta when the child has something to disclose, duplicate_of) — the right tool to ABSORB a batch of independent children you scheduled in one burst. The full per-child envelope stays on disk in task_results/<task_id>.json (child_result_sha256 pins the exact result you saw; get_task_result returns the full result text plus trace/outcome summaries). With mode=any_terminal it returns as soon as the FIRST child finishes (handle it, then call again for the rest) instead of blocking serially. The JSON also includes live_child_status (running/scheduled/terminal per child) and may early_return (before all terminal) on a child tree_note blocker/question/interface_contract/review_requested/delegation_constraint beacon so you can steer, review, or override mid-flight. An id no surface of this tree ever minted (no task result, no queue row, no tree-ledger row) is flagged unknown_task_id — 'not yet registered or never scheduled' — and unknown_task_ids + a compact children_roster of your ACTUAL direct children are attached so you can repair the wait set instead of re-polling phantoms.",
+            "description": "Wait for MULTIPLE subtasks at once and return a compact structural projection per child (task_id, status, accounted_upper_bound_usd, cost_final, child_result_sha256, outcome_axes, result, trace_summary, capability_delta when the child has something to disclose, duplicate_of) — the right tool to ABSORB a batch of independent children you scheduled in one burst. The full per-child envelope stays on disk in task_results/<task_id>.json (child_result_sha256 pins the exact result you saw; get_task_result returns the full result text plus trace/outcome summaries). With mode=any_terminal it returns as soon as the FIRST child finishes (handle it, then call again for the rest) instead of blocking serially. The JSON also includes live_child_status (running/scheduled/terminal per child) and may early_return (before all terminal) on a child tree_note blocker/question/interface_contract/review_requested/delegation_constraint beacon so you can steer, review, or override mid-flight, or on an unread message in your own mailbox (reason=owner_mailbox_pending); the ordinary loop then handles delivery and acknowledgement. An id no surface of this tree ever minted (no task result, no queue row, no tree-ledger row) is flagged unknown_task_id — 'not yet registered or never scheduled' — and unknown_task_ids + a compact children_roster of your ACTUAL direct children are attached so you can repair the wait set instead of re-polling phantoms.",
             "parameters": {"type": "object", "required": ["task_ids"], "properties": {
                 "task_ids": {"type": "array", "items": {"type": "string"}, "description": "Task IDs returned by schedule_subagent."},
                 "timeout_sec": {"type": "integer", "default": 600, "description": "Maximum seconds to wait (default 600)."},

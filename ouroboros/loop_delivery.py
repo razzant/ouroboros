@@ -477,7 +477,9 @@ def _delivery_control_prompt(candidate: DeliveryCandidate, *, keep_allowed: bool
         f"A complete answer candidate (revision {candidate.revision}, sha256 "
         f"{candidate.content_sha256[:12]}) is retained by the loop; do not replace it with a "
         f"service notice. {keep_line}\n"
-        "Return exactly one JSON object and no other text:\n"
+        "You may continue using tools whenever more work is needed. This instruction applies "
+        "only to your final response with no tool calls. When ready to finalize, return "
+        "exactly one JSON object and no other text:\n"
         '{"delivery_control":"keep"}\n'
         "or\n"
         '{"delivery_control":"replace","full_answer":"<the complete user-facing answer>"}'
@@ -869,10 +871,6 @@ def _no_tool_final_answer(
     content = controlled_content
     _loop()._project_child_result_dispositions(limit_ctx, llm_trace)
     if control_state == "fresh" and str(content or "").strip():
-        if _loop().withhold_prose_for_uncommitted_work(
-            tools, messages, llm_trace, str(content), emit_progress,
-        ):
-            return None
         candidate = _loop()._replace_delivery_candidate(
             tools, limit_ctx, llm_trace, str(content), control="candidate",
         )

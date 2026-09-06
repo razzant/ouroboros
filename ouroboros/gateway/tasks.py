@@ -74,6 +74,7 @@ from ouroboros.task_status import (
     _EventsTailIndex,
     effective_task_result,
     load_effective_task_result,
+    observe_cancellation_target,
 )
 from ouroboros.utils import read_json_dict
 from ouroboros.tool_access import path_is_relative_to, paths_overlap_casefold
@@ -1118,11 +1119,13 @@ async def _graceful_stop_acknowledgement(task_id: str, *, cascade: bool) -> JSON
     live_own = await asyncio.to_thread(_live_ownership, task_id)
     if not live_own and not await asyncio.to_thread(_live_check, task_id):
         return json_error("task not found or not active", 404, task_id=task_id)
+    observation = await asyncio.to_thread(observe_cancellation_target, _drive_root, task_id, request_origin={"kind": "http_client", "source": "http_graceful"})
     try:
         intent = await asyncio.to_thread(functools.partial(
             request_cancel, _drive_root, task_id,
             reason="owner requested finalize-then-stop",
             source="http_graceful", requested_by="owner",
+            observation=observation,
             requested_stop_policy=STOP_POLICY_FINALIZE,
             allow_settled_target=bool(cascade or live_own),
             **({"scope": SCOPE_CASCADE} if cascade else {}),
@@ -1252,6 +1255,7 @@ async def api_task_cancel(request: Request) -> JSONResponse:
         try:
             intent = request_cancel(
                 _drive_root, task_id, source=source,
+                observation=observe_cancellation_target(_drive_root, task_id, request_origin={"kind": "http_client", "source": source}),
                 **({"scope": SCOPE_CASCADE} if cascade_scope else {}),
                 allow_settled_target=bool(cascade_scope or allow_settled),
                 # §13.1: an omitted/empty-body or explicit-immediate request IS

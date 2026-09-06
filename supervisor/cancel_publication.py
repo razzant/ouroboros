@@ -134,9 +134,12 @@ def _intent_outcome_fields(intent: Dict[str, Any]) -> Dict[str, Any]:
     """``parent_decision`` written only at OUTCOME (phase A): a parent-requested
     cancel stamps its decision on the SETTLED cancelled result, never at intent
     time — so a child that finished first keeps a decision-free completed record."""
-    if not isinstance(intent, dict) or not intent.get("requested_by"):
+    if not isinstance(intent, dict):
         return {}
-    fields: Dict[str, Any] = {"parent_decision": "cancelled"}
+    fields = {"cancel_observation": dict(intent["observation"])} if isinstance(intent.get("observation"), dict) else {}
+    if not intent.get("requested_by"):
+        return fields
+    fields["parent_decision"] = "cancelled"
     if intent.get("reason"):
         fields["parent_decision_reason"] = str(intent.get("reason") or "")
     return fields

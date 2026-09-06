@@ -1678,6 +1678,17 @@ owner, owed terminal delivery, cascade postconditions — lives in ARCHITECTURE
   child-drive merge or terminality logic in gateways/tools. Task waits use
   `SETTLED_STATUSES` and structured facts plus queue-heartbeat freshness —
   never keyword matching.
+- `wait_task` and `wait_tasks` also peek the waiting actor's own mailbox through
+  the existing transport-wait reader. A pending message returns control without
+  acknowledging it or stopping children; the ordinary round-top drain delivers
+  and acknowledges it. Read the actor's execution drive, not its budget root.
+- Cancellation observations use `task_status.observe_cancellation_target` before
+  the existing intent write. They name the resolved physical target, separate
+  task-result update/start facts from queue freshness, and optionally include
+  recorded delegated execution. These are separate source observations, not an
+  atomic snapshot. Caller reason and request origin are distinct; an HTTP client
+  is not proof of personal owner intent. A later target mismatch is disclosed,
+  never used to change cancellation authority or completion-wins behavior.
 - Cancel INTENT is never a status value. Every cancel ingress writes a durable
   intent through `ouroboros/cancel_intents.request_cancel` and FAILS CLOSED
   when that write fails: a cancel without a durable, watchdog-replayable
@@ -2128,14 +2139,6 @@ by "Provider Independence" above. Call-site imperatives:
   `tree_note` payload schema itself, which is the SSOT for when to choose each
   value, and its enum reads the validator's own set. A child wedged in the legacy `cancel_requested` latch is intent,
   not outcome — it stays visible as cancel-pending until custody settles it.
-- A host-bound (non-subagent) task must not turn a fresh prose turn into the
-  terminal delivery candidate while the tracked files its own coding-tool
-  effects touched are still uncommitted. Up to `_MAX_UNCOMMITTED_DELIVERY_NUDGES`
-  (4) bounded `[UNCOMMITTED_WORK]` reminders are allowed (call `commit_reviewed`,
-  or discard with `vcs_restore`); after that, finalization proceeds unchanged
-  and the run finalizes `work_uncommitted` → `STATUS_FAILED`. Read-only probe
-  (`git status --porcelain`), fail-open, and the attributed-path intersection
-  keeps a concurrent task's dirt on the shared tree from counting.
 - Host task acceptance is root-only; eligibility uses structured facts
   (`outcomes.turn_has_reviewable_effects` plus a typed
   deliverable/criterion), never keywords (BIBLE P3/P5). The agent-callable
@@ -2144,6 +2147,29 @@ by "Provider Independence" above. Call-site imperatives:
   acceptance, atomically fence new descendants under the queue lock and
   prove recursive subtree quiescence from the task-status SSOT; a revision
   must explicitly reopen the fence, and terminal/degraded outcomes seal it.
+- Delivery-control JSON applies only to a final response with no tool calls.
+  Retaining an answer leaves tools available for further work; changed evidence
+  still requires the existing complete replacement. A requested file or diff
+  does not imply a universal commit-or-revert rule. Self-modification keeps its
+  reviewed-commit contract.
+- Post-task synthesis receives `completion_observations` from the existing
+  terminal result writer: per-send-tool counts and latest recorded returns,
+  task-related skill readiness plus coverage, and a full redacted artifact for
+  later readers. Counts come from `OWNER_DELIVERY_TOOL_NAMES`, not prose parsing.
+  Packet-only summary/reflection use the inline observations; a source reference
+  is not evidence they read. Tool success is not a chat/owner-receipt guarantee,
+  and empty or omitted material never proves that no delivery happened. Recovery
+  uses the stored snapshot; global skill state never attributes an owner click
+  to the task. Task-summary calls use the existing `chat_observed` custody seam.
+- Promoted tasks carry their host-minted root id and role on the queue payload.
+  RUNNING writes preserve the actual `_task_started_ts` as `started_at` and an
+  existing `queued_at`; terminal `ts` remains its own field. Missing historical
+  start facts stay missing. LLM usage carries the existing call/execution/round
+  ids so it can join the worker's round without duplicating that round event.
+  Delegated settlement/disposition/unread rows carry their existing root/parent
+  ids. Intrinsic pacing exposes the same `cost_ceiling_disclosure` its text uses;
+  tool error manifests carry their typed code and redacted reason preview.
+  These are observation links, not new accounting or zero-price rules.
 - Acceptance evidence identity hashes source facts before history-dependent
   budgeting; recording a review must not change the facts it reviewed. Complete
   applied host records (including resolved criteria, decisions and supersession)

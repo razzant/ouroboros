@@ -264,7 +264,7 @@ def _get_task_result(
 def _wait_attention_poll(
     ctx: ToolContext, after_ts: str, task_ids: List[str],
 ) -> Callable[..., Any]:
-    """on_poll hook: break a sliced wait early when a child appends an attention beacon
+    """on_poll hook: break a sliced wait for the actor's mailbox or a child attention beacon
     (blocker/question/interface_contract/review_requested/delegation_constraint).
 
     The cursor is context-local and per child: a beacon written before this
@@ -302,6 +302,15 @@ def _wait_attention_poll(
         child_cursors[str(task_id)] = cursor
 
     def _hook(_results: Dict[str, Any], _terminal: Dict[str, bool]) -> Any:
+        from ouroboros.loop_transport import _owner_signal_pending
+
+        # Reuse transport-wait's non-destructive peek. The ordinary round-top
+        # drain still owns delivery and acknowledgement; child work stays live.
+        if _owner_signal_pending(
+            None, getattr(ctx, "drive_root", None), str(getattr(ctx, "task_id", "") or ""),
+            getattr(ctx, "_loop_mailbox_seen_ids", None), getattr(ctx, "task_attempt", None) or 1,
+        ):
+            return {"reason": "owner_mailbox_pending", "delivery": "pending_loop_drain"}
         if not rid:
             return None
         try:
@@ -418,7 +427,10 @@ def _wait_for_task(ctx: ToolContext, task_id: str, timeout_sec: int = 180) -> st
         on_poll=_wait_attention_poll(ctx, "", [tid]), poll_interval_sec=2.0,
     )
     early = waited.get("early_return")
-    if early:
+    if early and early.get("reason") == "owner_mailbox_pending":
+        header = "Task wait interrupted by an unread message for this task"
+        extra = "\n\nThe ordinary loop will deliver and acknowledge the message. This does not stop the child."
+    elif early:
         header = "Task wait interrupted by a child attention beacon"
         extra = f"\n\n[CHILD_BEACONS]\n{json.dumps(early, ensure_ascii=False, indent=2)}\n[/CHILD_BEACONS]"
     else:

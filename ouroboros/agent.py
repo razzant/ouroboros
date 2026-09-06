@@ -11,6 +11,7 @@ import time
 import traceback
 import uuid
 from dataclasses import dataclass, replace
+from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional, Tuple, Union
 
 log = logging.getLogger(__name__)
@@ -334,10 +335,14 @@ class OuroborosAgent:
         if bool(task.get("_ephemeral_turn")):
             return
         try:
+            started = getattr(self, "_task_started_ts", None)
             write_task_result(
                 self.env.drive_root,
                 str(task.get("id") or ""),
                 STATUS_RUNNING,
+                **({"started_at": datetime.fromtimestamp(started, timezone.utc).isoformat()}
+                   if isinstance(started, (int, float)) and started > 0 else {}),
+                **({"queued_at": task["queued_at"]} if task.get("queued_at") is not None else {}),
                 chat_id=task.get("chat_id"),
                 parent_task_id=task.get("parent_task_id"),
                 root_task_id=task.get("root_task_id"),
