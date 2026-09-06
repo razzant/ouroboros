@@ -652,3 +652,41 @@ def test_entry_marker_still_skips_every_paid_stage_and_seeds_no_checkpoint(tmp_p
     stored = pipeline.load_task_result(root, task_id) or {}
     assert "root_phase_checkpoint" not in stored, stored
     assert not (root / "logs" / "events.jsonl").exists() or _finalized_events(root, task_id) == []
+
+
+@pytest.mark.parametrize("role", ["root", "subagent"])
+def test_requested_file_result_completes_without_committing_the_worktree(tmp_path, role):
+    """An edited file is a valid requested result; dirty Git state adds no failure.
+
+    Retains the contributor's isolated tracked-diff fixture, while asserting the
+    owner-approved contract instead of universal commit-or-fail finalization.
+    """
+    import subprocess
+
+    repo = tmp_path / "workspace"
+    repo.mkdir()
+    def git(*args):
+        return subprocess.run(["git", *args], cwd=repo, check=True, capture_output=True, text=True).stdout
+
+    git("init", "-q")
+    (repo / "answer.txt").write_text("old\n", encoding="utf-8")
+    git("add", "answer.txt")
+    git("-c", "user.email=t@example.com", "-c", "user.name=T", "commit", "-qm", "base")
+    base = git("rev-parse", "HEAD")
+    (repo / "answer.txt").write_text("42\n", encoding="utf-8")
+    task = {"id": "file-result", "type": "task", "repo_dir": str(repo), "delegation_role": role,
+            "text": "Write 42 to answer.txt and leave the edited file for me.",
+            "expected_output": "The edited answer.txt file; no Git commit requested."}
+    pipeline._store_task_result(
+        env=SimpleNamespace(drive_root=tmp_path, repo_dir=tmp_path / "host_tree"), task=task,
+        text="answer.txt contains 42.", usage={"rounds": 1, "cost": 0},
+        llm_trace={"tool_calls": [{"tool": "write_file", "status": "ok",
+                                   "args": {"path": "answer.txt", "content": "42\n"}}]},
+    )
+    stored = pipeline.load_task_result(tmp_path, "file-result")
+    assert stored["status"] == "completed"
+    assert stored["reason_code"] != "work_uncommitted"
+    assert stored["result"] == "answer.txt contains 42."
+    assert (repo / "answer.txt").read_text(encoding="utf-8") == "42\n"
+    assert git("rev-parse", "HEAD") == base
+    assert "+42" in git("diff", "--", "answer.txt")

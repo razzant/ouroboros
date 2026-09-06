@@ -479,6 +479,10 @@ _TRUNCATION_DECISIONS: dict[str, tuple[bool, str]] = {
         False,
         "tools/search.py recoverable ambiguous paid-call result returned to the LLM; the root task remains live",
     ),
+    "finalize_control_pending": (
+        False,
+        "loop_transport.wait_transport_repeat llm_not_dispatched event; the never-sent repeat was withdrawn, while the later task terminal carries owner_requested_finalization or its actual rail reason",
+    ),
     "deadline_exhausted": (
         False,
         "loop_llm_call.py owner deadline admission rail; no provider call was dispatched",

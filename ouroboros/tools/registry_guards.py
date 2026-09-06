@@ -173,11 +173,11 @@ def _subagent_and_update_guard_result(
     if acting_subagent and entry is not None and name not in _registry().ACTING_SUBAGENT_TOOL_NAMES:
         return ToolResult(status="blocked", code="ACCESS_BLOCKED", text=(
             "⚠️ ACTING_SUBAGENT_BLOCKED: this mutative subagent may read and "
-            "write inside its isolated write root and run shell/services "
+            "write inside its assigned write root and run shell/services "
             f"there, but may not call first-party tool {name!r}. It cannot "
             "commit the live body, run review/runtime/skills lifecycle, enable "
-            "tools, or write cognitive memory; the parent integrates the "
-            "returned patch and is the sole committer."
+            "tools, or write cognitive memory; the parent applies isolated patches "
+            "or verifies shared external files and is the sole live-body committer."
         ))
     if acting_subagent and entry is None and (ext_tool or is_mcp) and name not in acting_tool_grants:
         return ToolResult(status="blocked", code="ACCESS_BLOCKED", text=(

@@ -1971,6 +1971,14 @@
    "is_error": true,
    "status": "error"
   },
+  "ident:REVIEW_STOPPED:named": {
+   "is_error": false,
+   "status": "ok"
+  },
+  "ident:REVIEW_STOPPED:plain": {
+   "is_error": false,
+   "status": "ok"
+  },
   "ident:ROLLBACK_ERROR:named": {
    "is_error": true,
    "status": "error"

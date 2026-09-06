@@ -251,30 +251,9 @@ def work_order_source_projection(
     if not task.get("id") and task.get("task_id"):
         task = {**task, "id": task.get("task_id")}
     rendered = _render_external_work_order(task)
-    total = len(rendered)
-    digest = sha256(rendered.encode("utf-8")).hexdigest()
-    projection: dict[str, Any] = {
-        "schema": 1,
-        "kind": "canonical_work_order",
-        "complete_chars": total,
-        "complete_sha256": digest,
-    }
-    if start_char is None and end_char is None:
-        projection["range_required"] = True
-        return projection, "source_range_required"
-    if type(start_char) is not int or type(end_char) is not int:
-        return None, "source_range_invalid"
-    if start_char < 0 or end_char <= start_char or end_char > total:
-        return None, "source_range_invalid"
-    text = rendered[start_char:end_char]
-    projection.update({
-        "start_char": start_char,
-        "end_char": end_char,
-        "text": text,
-        "text_chars": len(text),
-        "text_sha256": sha256(text.encode("utf-8")).hexdigest(),
-    })
-    return projection, ""
+    from ouroboros.artifacts import text_source_range_projection
+
+    return text_source_range_projection(rendered, "canonical_work_order", start_char, end_char)
 
 
 def _source_task_from_context(ctx: Any, task_id: str) -> dict[str, Any]:

@@ -83,14 +83,14 @@ def test_create_with_retries_reroutes_once_on_transient_body_error(tmp_path, mon
 
 # --- WA2 (amended by the slime-saga honesty fix): provider-death -> salvage the
 # text, but terminalize as an INFRA FAILURE, never a completion ------------------
-def test_provider_unavailable_salvages_then_terminalizes_as_infra_failure(monkeypatch):
+def test_provider_unavailable_salvages_then_terminalizes_as_infra_failure(tmp_path, monkeypatch):
     import ouroboros.loop as loop
     from ouroboros.outcomes import derive_loop_outcome
 
     ctx = SimpleNamespace(
         messages=[{"role": "user", "content": "do"}, {"role": "assistant", "content": "partial A"}],
-        llm=None, active_model="m", active_effort="medium", max_retries=1,
-        drive_logs=pathlib.Path("/tmp"), task_id="t", round_idx=1, event_queue=None,
+        tools=None, llm=None, active_model="m", active_effort="medium", max_retries=1,
+        drive_logs=tmp_path / "logs", task_id="t", round_idx=1, event_queue=None,
         accumulated_usage={}, task_type="", active_use_local=False, max_rounds=10, deadline_ts=None,
     )
     # provider stays dead -> final call yields nothing -> salvage last assistant text

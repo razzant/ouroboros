@@ -622,10 +622,7 @@ def _schedule_task(ctx: ToolContext, internal: Dict[str, Any] | None = None, /, 
 
     current_depth, depth_error = _context_task_depth(ctx)
     if depth_error:
-        return (
-            "⚠️ TOOL_ERROR (schedule_subagent): invalid_task_depth: "
-            f"{depth_error}"
-        )
+        return f"⚠️ TOOL_ERROR (schedule_subagent): invalid_task_depth: {depth_error}"
     new_depth = current_depth + 1
     metadata = getattr(ctx, "task_metadata", {}) if isinstance(getattr(ctx, "task_metadata", {}), dict) else {}
     parent_contract = fields["parent_contract"]
@@ -655,7 +652,10 @@ def _schedule_task(ctx: ToolContext, internal: Dict[str, Any] | None = None, /, 
     # destination now rather than a synonym for "unset".
     current_chat_id = _schedule_parent_chat(ctx)
     budget_drive_root = str(metadata.get("budget_drive_root") or getattr(ctx, "budget_drive_root", "") or ctx.drive_root)
-    status_drive_root, root_cost_ceiling_usd = Path(budget_drive_root), getattr(getattr(ctx, "_cost_ceiling", None), "ceiling_usd", None)
+    status_drive_root = Path(budget_drive_root)
+    # Only the root authors this fact; a legacy child's local fallback is not it.
+    root_cost_ceiling_usd = (getattr(getattr(ctx, "_cost_ceiling", None), "ceiling_usd", None)
+                            if root_task_id_seed == current_task_id else metadata.get("root_cost_ceiling_usd"))
     if refusal := schedule_delegation_refusal(parent_contract, status_drive_root, parent_task_id):
         return refusal
     workspace_root = str(getattr(ctx, "workspace_root", "") or metadata.get("workspace_root") or "").strip()
@@ -713,7 +713,6 @@ def _schedule_task(ctx: ToolContext, internal: Dict[str, Any] | None = None, /, 
     tid = uuid.uuid4().hex[:8]
     created_at = utc_now_iso()
     root_task_id = root_task_id_seed or tid
-    parent_model_lane = str(metadata.get("effective_model_lane") or "")
     parent_cognitive_route = {
         "model": str(getattr(ctx, "active_model", "") or metadata.get("model") or ""),
         "effort": str(getattr(ctx, "active_effort", "") or metadata.get("reasoning_effort") or ""),
@@ -766,7 +765,7 @@ def _schedule_task(ctx: ToolContext, internal: Dict[str, Any] | None = None, /, 
     intent_fields = {
         "model_lane": requested_model_lane,
         "requested_model_lane": requested_model_lane,
-        "parent_model_lane": parent_model_lane,
+        "parent_model_lane": str(metadata.get("effective_model_lane") or ""),
         "requested_executor": requested_executor,
         "configured_subagent": configured_subagent,
         "parent_cognitive_route": parent_cognitive_route,

@@ -400,8 +400,9 @@ class CostCeiling:
     - ``disabled``: no in-task stop — explicit ``cost_hard_stop_pct=0`` (bench
       contract, e.g. SWE-Pro) or no finite budget on either axis (e.g. GAIA);
       the whole cost axis stays silent.
-    - ``active``: ``ceiling_usd`` is a strictly-positive graceful-stop point =
-      min(pct-of-global-remaining, root_cap − planning margin).
+    - ``active``: ``ceiling_usd`` is the root's strictly-positive original
+      graceful-stop point, or a disclosed legacy local resolution when the
+      original carrier is unavailable.
     - ``exhausted_soft_land``: the root cap leaves no room above the planning
       margin — the loop must enter its graceful best-effort wrap-up
       immediately; it must NEVER run uncapped.
@@ -435,8 +436,10 @@ def resolve_cost_ceiling(
     min(available components); NEVER a computed $0 — a root cap at or below the
     margin resolves to ``exhausted_soft_land`` instead.
 
-    A non-root member intersects its own global and root-cap resolutions with
-    the propagated root deciding ceiling, so it can never exceed the root.
+    An enabled non-root member keeps the propagated original root ceiling;
+    a later global balance never re-mints that early threshold. Actual global
+    and root dispatch fences still bind independently. Legacy missing carriers
+    retain a disclosed local resolution, never a guessed original root fact.
 
     Stated plainly rather than implied: the ``room <= 0`` bail is the owner's
     "$0 ceiling" rule EXACTLY, no wider. A cap just ABOVE the margin therefore
@@ -465,7 +468,9 @@ def resolve_cost_ceiling(
             )
         components: list[float] = []
         basis_parts: list[str] = []
-        if budget_remaining_start_usd is not None and float(budget_remaining_start_usd) > 0:
+        inherited = (float(root_ceiling_usd) if non_root_member and root_ceiling_usd is not None
+                     and float(root_ceiling_usd) > 0 else None)
+        if inherited is None and budget_remaining_start_usd is not None and float(budget_remaining_start_usd) > 0:
             components.append(float(budget_remaining_start_usd) * (pct / 100.0))
             basis_parts.append("global_pct")
         margin: Optional[float] = None
@@ -481,13 +486,16 @@ def resolve_cost_ceiling(
                     planning_margin_usd=margin,
                     basis="root_cap_at_or_below_planning_margin",
                 )
-            components.append(room)
-            basis_parts.append("root_cap_minus_margin")
+            if inherited is None:
+                components.append(room)
+                basis_parts.append("root_cap_minus_margin")
             if non_root_member:
                 basis_parts.append("non_root_member")
-        if non_root_member and root_ceiling_usd is not None and float(root_ceiling_usd) > 0:
-            components.append(float(root_ceiling_usd))
+        if inherited is not None:
+            components.append(inherited)
             basis_parts.append("root_resolved_ceiling")
+        elif non_root_member:
+            basis_parts.append("original_root_ceiling_unavailable")
         if not components:
             return CostCeiling(state=COST_CEILING_DISABLED, basis="no_finite_budget")
         return CostCeiling(
@@ -549,8 +557,8 @@ def cost_ceiling_disclosure(ceiling: CostCeiling) -> Dict[str, Any]:
         "rule": (
             "The graceful in-task cost stop of THIS task's whole tree, resolved once at task "
             "start: the root resolves min(configured share of global remaining, hard tree cap "
-            "minus a planning margin); every other member intersects that resolved root number "
-            "with its own global and root-cap resolutions. Crossing it asks for a "
+            "minus a planning margin); enabled descendants retain that original number. "
+            "Legacy members without it disclose their local resolution. Crossing it asks for a "
             "best-effort final answer; the ledger fence at the full cap still binds "
             "independently. Budget checkpoints during the task report the live tree spend."
         ),
@@ -598,22 +606,26 @@ def tree_spend_line(tree_info: Any, ceiling: Optional[CostCeiling] = None) -> st
     )
 
 
-def wrapup_unaffordable_text(deciding_usd: float, ceiling: CostCeiling) -> str:
+def wrapup_unaffordable_text(deciding_usd: Optional[float], ceiling: CostCeiling, global_remaining_usd: Optional[float] = None) -> str:
     """The owner-facing reason a task ends without even one affordable wrap-up send."""
     cap = ceiling.root_cap_usd
     cap_text = f" of the ${cap:.2f} hard tree cap" if cap is not None else ""
+    spent = f"Task tree spent ${deciding_usd:.3f}{cap_text}" if deciding_usd is not None else "Task-tree spend is unavailable"
+    wallet = f"; global model budget remaining is ${global_remaining_usd:.3f}" if global_remaining_usd is not None else ""
     return (
-        f"Task tree spent ${deciding_usd:.3f}{cap_text}; not even one wrap-up call can "
+        f"{spent}{wallet}; not even one wrap-up call can "
         "be reserved, so the host delivers the retained evidence without a model synthesis."
     )
 
 
-def wrapup_last_fit_text(deciding_usd: float, ceiling: CostCeiling) -> str:
+def wrapup_last_fit_text(deciding_usd: Optional[float], ceiling: CostCeiling, global_remaining_usd: Optional[float] = None) -> str:
     """The owner-facing reason a task claims the last affordable wrap-up send."""
     cap = ceiling.root_cap_usd
     cap_text = f" of the ${cap:.2f} hard tree cap" if cap is not None else ""
+    spent = f"Task tree spent ${deciding_usd:.3f}{cap_text}" if deciding_usd is not None else "Task-tree spend is unavailable"
+    wallet = f"; global model budget remaining is ${global_remaining_usd:.3f}" if global_remaining_usd is not None else ""
     return (
-        f"Task tree spent ${deciding_usd:.3f}{cap_text}; one wrap-up call is still "
+        f"{spent}{wallet}; one wrap-up call is still "
         "admissible, but another similarly reserved work call would consume that room."
     )
 
@@ -681,7 +693,8 @@ def wrapup_reservation_fits(
     model: str = "",
     prompt_tokens: int = 0,
     root_cap_usd: Optional[float],
-    deciding_usd: float,
+    deciding_usd: Optional[float],
+    global_remaining_usd: Optional[float] = None,
     reservation_count: int = 1,
     request: Any = None,
     llm: Any = None,
@@ -691,18 +704,19 @@ def wrapup_reservation_fits(
     use_local: bool = False,
     allow_server_web_search: bool = False,
 ) -> Optional[bool]:
-    """Whether one more wrap-up call would still be admitted under the root cap.
+    """Whether a wrap-up reservation fits every known root/global remainder.
 
     Borrows the ledger fence's OWN per-attempt reservation so the graceful stop
     and the fence can never disagree about what a wrap-up call costs: the same
     function, the same cache split, the same arithmetic. Returns None -- fail
-    open, the axis stays silent -- when there is no bound task scope, no root
-    cap, or no known price for the route. ``reservation_count=2`` detects the
+    open, the axis stays silent -- when there is no bound task scope, no known
+    remainder, or no known price for the route. ``reservation_count=2`` detects the
     last-fit window while one final call is still admissible.
 
     Deliberately does NOT read ``usage_projection``: the deciding spend is
-    passed in by the caller that already measured it, never re-scanned per
-    round."""
+    passed in by the caller alongside its fresh global remainder. Several
+    candidate probes reuse those observations; the final atomic fence still
+    arbitrates competing tasks. No money is reserved by this read."""
     try:
         from ouroboros.loop_llm_call import MAIN_LOOP_MAX_TOKENS
         from ouroboros.pricing import infer_provider_from_model
@@ -710,7 +724,14 @@ def wrapup_reservation_fits(
 
         scope = current_usage_scope()
         task_id = str(getattr(scope, "task_id", "") or "") if scope is not None else ""
-        if not task_id or root_cap_usd is None or float(root_cap_usd) <= 0 or use_local:
+        if not task_id or use_local:
+            return None
+        remaining = []
+        if root_cap_usd is not None and deciding_usd is not None:
+            remaining.append(float(root_cap_usd) - float(deciding_usd))
+        if global_remaining_usd is not None:
+            remaining.append(float(global_remaining_usd))
+        if not remaining:
             return None
         if request is None and messages is not None and callable(getattr(llm, "_resolve_remote_target", None)):
             request = prospective_wrapup_attempt_request(
@@ -729,8 +750,8 @@ def wrapup_reservation_fits(
         bound = _reservation_cost(request)
         if bound is None:
             return None
-        return bool(float(deciding_usd) + float(bound) * max(1, int(reservation_count))
-                    <= float(root_cap_usd) + 1e-9)
+        return all(room > 1e-9 and float(bound) * max(1, int(reservation_count)) <= room + 1e-9
+                   for room in remaining)
     except Exception:
         log.warning("Wrap-up affordability check failed; axis stays silent", exc_info=True)
         return None
@@ -1209,4 +1230,7 @@ def build_intrinsic_pacing_note(
     if tree_accounted is not None:
         checkpoint["tree_accounted_usd"] = round(tree_accounted, 4)
         checkpoint["tree_cap_usd"] = round(tree_cap, 4) if tree_cap is not None else None
+    ceiling = getattr(ctx, "_cost_ceiling", None)
+    if isinstance(ceiling, CostCeiling):
+        checkpoint["cost_ceiling"] = cost_ceiling_disclosure(ceiling)
     return PacingNote(text=text, checkpoint=checkpoint)

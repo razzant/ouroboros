@@ -7,6 +7,10 @@ from __future__ import annotations
 # sides import this one name instead of repeating the literal.
 BACKGROUND_DELEGATION_ROLE: str = "background"
 
+OWNER_DELIVERY_TOOL_NAMES: frozenset[str] = frozenset({
+    "send_user_message", "send_photo", "send_video", "send_file", "send_links",
+})
+
 CORE_TOOL_NAMES: frozenset[str] = frozenset({
     "read_file", "list_files", "write_file", "edit_text",
     "apply_patch", "edit_batch",
@@ -41,7 +45,7 @@ CORE_TOOL_NAMES: frozenset[str] = frozenset({
     "web_search",
     "browse_page", "browser_action", "analyze_screenshot", "view_image",
     "ocr_pdf", "youtube_transcript", "extract_video_frames",
-    "send_user_message", "send_photo", "send_video", "send_file", "send_links",
+    *OWNER_DELIVERY_TOOL_NAMES,
     "escalate",
     "switch_model",
     "request_restart", "promote_to_stable",
@@ -90,8 +94,8 @@ LOCAL_READONLY_SUBAGENT_TOOL_NAMES: frozenset[str] = frozenset({
 
 ACTING_SUBAGENT_MODE: str = "acting_subagent"
 
-# Mutative ("acting") subagents may write inside an isolated write root
-# (self_worktree / external_workspace) and run shell/services there.
+# Mutative ("acting") subagents may write inside their assigned write root
+# (isolated self_worktree / shared external_workspace) and run shell/services there.
 # They explicitly CANNOT commit the live body (commit_reviewed /
 # vcs_commit_reviewed), run runtime control, touch the skills lifecycle, enable
 # tools, or write cognitive memory (update_identity/update_scratchpad/

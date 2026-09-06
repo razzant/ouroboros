@@ -29,6 +29,7 @@ from ouroboros.triad_review import (
     REVIEW_JSON_MATRIX_CONTRACT,
 )
 from ouroboros.tools.review_helpers import (
+    build_rebuttal_section,
     REVIEW_SEVERITY_THRESHOLDS,
     REVIEW_THOROUGHNESS_BLOCK,
     _ANTI_THRASHING_RULE_ITEM_NAME,
@@ -296,7 +297,7 @@ def _build_advisory_prompt(
         role_title = "You are performing an advisory SKILL review for Ouroboros."
         role_requirements = (
             "- Review the supplied skill payload using the Skill Review Checklist.\n"
-            "- Use ONLY the read-only inspection tools you are given (read_file, list_files, search_code, query_code, vcs_status, vcs_diff). Do NOT edit or execute any files. Read LARGE files in bounded chunks (read_file supports offset/limit).\n"
+            "- Use ONLY the read-only inspection tools you are given (read_file, list_files, search_code, query_code, vcs_status, vcs_diff). Do NOT edit or execute any files. Read LARGE files in bounded chunks (read_file supports start_line/max_lines and start_char for within-line continuation).\n"
             "- The payload pack is already included below; use tools only for host-code cross-checks.\n"
             "- Return ONLY a JSON array. No prose, no markdown fences — only the JSON array."
         )
@@ -310,7 +311,7 @@ def _build_advisory_prompt(
         role_title = "You are performing a pre-commit review of an Ouroboros self-modifying AI agent codebase."
         role_requirements = (
             "- Review the current working tree changes with the SAME RIGOR as the downstream blocking reviewers.\n  A false PASS here wastes an entire blocking review cycle ($10+).\n"
-            "- Use ONLY the read-only inspection tools you are given (read_file, list_files, search_code, query_code, vcs_status, vcs_diff). Do NOT edit or execute any files. Read LARGE files in bounded chunks (read_file supports offset/limit).\n"
+            "- Use ONLY the read-only inspection tools you are given (read_file, list_files, search_code, query_code, vcs_status, vcs_diff). Do NOT edit or execute any files. Read LARGE files in bounded chunks (read_file supports start_line/max_lines and start_char for within-line continuation).\n"
             "- Read the FULL CONTENT of every changed file listed below with read_file.\n  Do NOT evaluate security, bible compliance, or code quality from path listings or diff hunks alone.\n"
             "- Return ONLY a JSON array. No prose, no markdown fences — only the JSON array."
         )
@@ -359,6 +360,7 @@ def _build_advisory_prompt(
         f"## BIBLE.md (Constitutional context — top priority)\n\n{bible}\n\n"
         "## ARCHITECTURE.md (System structure — critical for version sync and module checks)\n\n"
         f"{arch_doc}\n\n{skill_host_context}\n\n{blocking_history}\n\n"
+        f"{build_rebuttal_section(str(prompt_context.get('review_rebuttal') or ''))}\n"
         f"## Commit message\n\n{commit_message}\n\n"
         f"## Changed files (git status --porcelain)\n\n{changed_files}\n\n"
         "## Current touched files (full content — read these with read_file for deeper inspection)\n\n"

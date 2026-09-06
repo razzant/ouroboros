@@ -48,6 +48,7 @@ CONTEXT_OVERFLOW_MESSAGE_MARKERS = (
     "maximum context",
     "prompt is too long",
     "exceeds the context",
+    "exceed context limit",
     "context window",
     "input is too long",
 )
@@ -65,8 +66,10 @@ OUTPUT_OR_BODY_SIZE_MARKERS = (
 
 
 def output_or_body_size_message(text: Any) -> bool:
-    """True when a provider error message names an output/body-size limit."""
-    low = str(text or "").lower()
+    """True for output/body limits, excluding the combined input+output window."""
+    low = str(text or "").lower().replace("`", "")
+    if "input length and max_tokens exceed context limit" in low:
+        return False  # shrinking input can make the unchanged output reserve fit
     return any(marker in low for marker in OUTPUT_OR_BODY_SIZE_MARKERS)
 
 
@@ -80,7 +83,7 @@ def context_overflow_message(text: Any) -> bool:
     message-level verdict.
     """
     low = str(text or "").lower()
-    if any(marker in low for marker in OUTPUT_OR_BODY_SIZE_MARKERS):
+    if output_or_body_size_message(low):
         return False
     return any(marker in low for marker in CONTEXT_OVERFLOW_MESSAGE_MARKERS)
 

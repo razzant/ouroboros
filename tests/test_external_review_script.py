@@ -96,7 +96,8 @@ def test_external_review_script_delegates_verdict_to_production_gate():
     # The default operator lane still runs the REAL advisory. Contributor mode
     # explicitly skips it while reusing the production triad+scope cycle.
     assert "operator_binding" not in source
-    assert "_handle_advisory_pre_review" in source
+    assert "_handle_advisory_pre_review" not in source
+    assert '"advisory.txt"' in source
     assert "skip_advisory_review=args.contributor" in source
     assert "_CONTRIBUTOR_PROFILE = \"external_pr_readiness\"" in source
 

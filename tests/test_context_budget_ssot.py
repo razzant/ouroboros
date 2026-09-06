@@ -134,3 +134,24 @@ def test_output_size_precedence_lives_inside_the_shared_helper():
     assert not cb.context_overflow_message(probe)
     assert cb.context_overflow_message("prompt is too long: 250000 tokens > 200000 maximum")
     assert not cb.context_overflow_message("request body too large")
+
+
+@pytest.mark.parametrize("reserve", ["max_tokens", "`max_tokens`"])
+def test_combined_anthropic_window_rejection_reaches_main_and_advisory(reserve):
+    from ouroboros.loop_llm_call import classify_llm_exception
+    from ouroboros.tools.claude_advisory_review import _overflow_failure_text
+
+    # The input alone fits; input plus the requested response exceeds the window.
+    text = f"input length and {reserve} exceed context limit: 197202 + 21333 > 200000"
+    error = RuntimeError(text)
+    error.status_code = 400
+    error.body = {"error": {"type": "invalid_request_error", "message": text}}
+    assert cb.context_overflow_message(text)
+    assert not cb.output_or_body_size_message(text)
+    assert classify_llm_exception(error).kind == "context_overflow"
+    assert _overflow_failure_text(text)
+    for output_only in ("max_tokens 65536 exceeds maximum context length 32768",
+                        "output tokens exceed context limit", "request body too large"):
+        assert cb.output_or_body_size_message(output_only)
+        assert not cb.context_overflow_message(output_only)
+        assert not _overflow_failure_text(output_only)

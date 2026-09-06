@@ -269,8 +269,9 @@ def _compose_subagent_text(
             # (the dispatch-time executor note owns execution framing).
             "All changes land inside the write root only. Do NOT commit, run review / "
             "runtime / skills lifecycle, enable tools, or write cognitive memory. Your "
-            "changes are captured as a workspace.patch and returned to the parent, who "
-            "integrates and is the sole committer of the live body. Nested delegation is "
+            "changes are recorded as a workspace.patch for the parent: isolated self_worktree "
+            "patches are applied; shared external_workspace files are verified without reapplying. "
+            "The parent is the sole committer of the live body. Nested delegation is "
             "allowed within configured depth/cap limits; depth bounds how DEEP delegation "
             "nests and never how strong a descendant is — ask for the lane you need.",
         ])

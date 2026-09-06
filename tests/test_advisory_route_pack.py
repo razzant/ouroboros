@@ -442,7 +442,9 @@ def test_native_episode_failure_keeps_custody_and_the_typed_code(tmp_path, monke
     result, model = advisory._run_advisory_native("prompt", ctx.repo_dir, ctx, slot, "openai/adv")
     assert result.success is False and model == "openai/adv"
     assert result.failure_code == "native_transcript_cap_exceeded"
-    assert result.usage == _NATIVE_BOUND_FACTS
+    assert {key: result.usage[key] for key in _NATIVE_BOUND_FACTS} == _NATIVE_BOUND_FACTS
+    assert result.usage["operation_state"] == "settled"
+    assert result.usage["physical_attempt_state"] == "settled"
     assert result.cost_usd == 0.0
     assert result.error.startswith("ReviewRouteUnavailable: exceeded its bound")
 

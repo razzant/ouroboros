@@ -749,7 +749,8 @@ def load_task_result(
     ``task_result_schema_refusal`` — is QUARANTINED by the fail-soft path
     (moved under ``task_results/quarantine/``, one batched durable event) and
     the read reports no result; the strict path raises WITHOUT moving, so an
-    authority probe never mutates storage.
+    authority probe never mutates storage. Admissible rows are returned as
+    stored, without projecting their deliverables or independent state axes.
     """
     try:
         tid = validate_task_id(task_id)
@@ -773,10 +774,12 @@ def load_task_result(
         outcome = _quarantine_task_result(path, refusal)
         if outcome == "kept_admissible":
             data = read_json_dict(path)
-            return data if not task_result_schema_refusal(data) else None
-        if outcome == "moved":
-            _emit_quarantine_event(drive_root, [{"task_id": tid, "reason": refusal}])
-        return None
+            if task_result_schema_refusal(data):
+                return None
+        else:
+            if outcome == "moved":
+                _emit_quarantine_event(drive_root, [{"task_id": tid, "reason": refusal}])
+            return None
     if strict and (
         str(data.get("task_id") or "") != tid
         or not isinstance(data.get("status"), str)
@@ -841,6 +844,41 @@ def list_task_results(
     return results
 
 
+def merge_review_projection(previous: Any, incoming: Any) -> Any:
+    """Keep newer host publication facts when a delayed task snapshot arrives.
+
+    This is read-side custody, never review authority. Attempt identity comes
+    from the task; publication_revision only orders snapshots of the SAME
+    panel. Supersession cannot be reversed by a stale or replayed projection.
+    """
+    if not isinstance(previous, dict) or not isinstance(incoming, dict):
+        return incoming
+    old_rows, new_rows = previous.get("panels"), incoming.get("panels")
+    if not isinstance(old_rows, list) or not isinstance(new_rows, list):
+        return incoming
+    if not any(isinstance(row, dict) and row.get("publication_revision") for row in old_rows + new_rows):
+        return incoming  # unchanged legacy merge semantics
+    def rank(value: Dict[str, Any]) -> tuple:
+        return (bool(value.get("superseded")),
+                value.get("publication_revision") if type(value.get("publication_revision")) is int else 0)
+
+    merged: Dict[tuple, Dict[str, Any]] = {}
+    for index, row in enumerate(old_rows + new_rows):
+        if not isinstance(row, dict):
+            continue
+        key = (str(row.get("surface") or ""), str(row.get("task_attempt") or ""),
+               str(row.get("panel_id") or f"legacy:{index}"), row.get("panel_index"))
+        prior = merged.get(key)
+        if prior is None or rank(row) > rank(prior):
+            merged[key] = copy.deepcopy(row)
+    rows = list(merged.values())
+    rows.sort(key=lambda row: (
+        row.get("task_attempt") if type(row.get("task_attempt")) is int else 0,
+        row.get("panel_index") if type(row.get("panel_index")) is int else 0,
+    ))
+    return {**previous, **incoming, "panels": rows}
+
+
 def write_task_result(
     results_drive_root: Any,
     task_id: str,
@@ -892,6 +930,10 @@ def write_task_result(
             log.debug("Blocked status regression %s -> %s for task %s",
                       existing.get("status"), projected_status, task_id)
             return None
+        if "review_projection" in projected_fields:
+            projected_fields["review_projection"] = merge_review_projection(
+                existing.get("review_projection"), projected_fields["review_projection"],
+            )
         now = utc_now_iso()
         # ABI-3 write seam: the merge BASE is the existing row normalized onto
         # the honest cost names (its own legacy spelling wins its own pair,
