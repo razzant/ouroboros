@@ -1049,7 +1049,7 @@ class ToolRegistry:
             # success, tool error, and exception paths alike (the per-tool
             # manual calls missed early-return/error paths), and skips
             # invalidation when a flagged tool ran read-only.
-            if worktree_before is not None:
+            if entry.mutates_worktree:
                 self._invalidate_advisory_if_worktree_changed(name, worktree_before)
 
     def _execute_legacy_text(self, name: str, args: Dict[str, Any]) -> str | ToolResult:
@@ -1327,17 +1327,17 @@ class ToolRegistry:
         """Compatibility ABI: return the exact model-facing text projection."""
         return self.execute_result(name, args).text
 
-    def _worktree_status_snapshot(self) -> str:
+    def _worktree_status_snapshot(self) -> Optional[str]:
         try:
             from ouroboros.utils import run_cmd
 
             return run_cmd(["git", "status", "--porcelain"], cwd=self._ctx.repo_dir, timeout=20)
         except Exception:
-            return "<status-unavailable>"
+            return None
 
-    def _invalidate_advisory_if_worktree_changed(self, tool_name: str, before: str) -> None:
+    def _invalidate_advisory_if_worktree_changed(self, tool_name: str, before: Optional[str]) -> None:
         after = self._worktree_status_snapshot()
-        if after == before:
+        if before is not None and after is not None and after == before:
             return
         try:
             from ouroboros.review_state import invalidate_advisory_after_mutation

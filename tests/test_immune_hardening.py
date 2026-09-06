@@ -192,6 +192,37 @@ class TestCentralWorktreeInvalidation:
         assert "written_by_tool.py" in after
         assert after != before, "a mutated worktree must not look unchanged"
 
+    @pytest.mark.parametrize("failure", ["before", "after", "both"])
+    @pytest.mark.parametrize("handler_fails", [False, True])
+    def test_unreadable_status_invalidates_after_mutating_dispatch(self, tmp_path, monkeypatch, failure, handler_fails):
+        from types import SimpleNamespace
+        from ouroboros.tools.registry import ToolRegistry
+        from ouroboros import review_state, utils
+
+        registry = ToolRegistry.__new__(ToolRegistry)
+        registry._ctx = SimpleNamespace(repo_dir=tmp_path, drive_root=tmp_path / "data")
+        statuses = iter([failure in {"before", "both"}, failure in {"after", "both"}])
+
+        def status(*args, **kwargs):
+            if next(statuses):
+                raise RuntimeError("git status unavailable")
+            return ""
+
+        invalidations = []
+        monkeypatch.setattr(utils, "run_cmd", status)
+        monkeypatch.setattr(review_state, "invalidate_advisory_after_mutation", lambda *a, **k: invalidations.append(k))
+
+        def handler(ctx):
+            (ctx.repo_dir / "changed.txt").write_text("changed", encoding="utf-8")
+            if handler_fails:
+                raise RuntimeError("failed after writing")
+            return "done"
+
+        before = registry._worktree_status_snapshot()
+        registry._invoke_builtin_handler("fixture", SimpleNamespace(handler=handler, mutates_worktree=True), {}, None, None, before)
+        assert (tmp_path / "changed.txt").read_text() == "changed"
+        assert len(invalidations) == 1
+
     @pytest.mark.serial
     def test_run_cmd_accepts_and_honors_timeout(self, tmp_path):
         import subprocess
