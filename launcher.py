@@ -62,6 +62,10 @@ from ouroboros.launcher_onboarding import (
 from ouroboros.launcher_server_reaper import (
     reap_same_install_strays as _reap_same_install_strays_impl,
 )
+from ouroboros.launcher_windows_runtime import (  # noqa: F401  (re-exported: same objects, prior launcher surface)
+    _prepare_windows_webview_runtime,
+    _show_windows_message,
+)
 from ouroboros.platform_layer import (
     BUNDLE_DIR_ENV,
     IS_LINUX,
@@ -174,108 +178,6 @@ def _find_embedded_python() -> str:
 
 EMBEDDED_PYTHON = _find_embedded_python()
 
-_windows_dll_dir_handles: list = []
-
-
-def _show_windows_message(title: str, message: str) -> None:
-    if not IS_WINDOWS:
-        return
-    try:
-        import ctypes
-
-        ctypes.windll.user32.MessageBoxW(None, message, title, 0x10)
-    except Exception:
-        pass
-
-
-def _prepare_windows_webview_runtime() -> tuple[bool, str]:
-    """Prepare pythonnet/pywebview runtime before importing webview on Windows."""
-    if not IS_WINDOWS:
-        return True, ""
-
-    base_dir = pathlib.Path(getattr(sys, "_MEIPASS", pathlib.Path(sys.executable).parent))
-    exe_dir = pathlib.Path(sys.executable).parent
-    runtime_dir = base_dir / "pythonnet" / "runtime"
-    webview_lib_dir = base_dir / "webview" / "lib"
-    py_dll_name = f"python{sys.version_info[0]}{sys.version_info[1]}.dll"
-
-    def _unblock_file(path: pathlib.Path) -> None:
-        try:
-            os.remove(f"{path}:Zone.Identifier")
-        except OSError:
-            pass
-
-    def _unblock_tree(root: pathlib.Path) -> None:
-        if not root.is_dir():
-            return
-        for child in root.rglob("*"):
-            if child.is_file() and child.suffix.lower() in {".dll", ".exe", ".pyd"}:
-                _unblock_file(child)
-
-    py_dll_candidates = [
-        base_dir / py_dll_name,
-        exe_dir / py_dll_name,
-    ]
-    for root, _dirs, files in os.walk(base_dir):
-        if py_dll_name in files:
-            py_dll_candidates.append(pathlib.Path(root) / py_dll_name)
-            if len(py_dll_candidates) >= 6:
-                break
-
-    py_dll_path = next((path for path in py_dll_candidates if path.is_file()), None)
-    runtime_dll_path = runtime_dir / "Python.Runtime.dll"
-    if not runtime_dll_path.is_file():
-        for root, _dirs, files in os.walk(base_dir):
-            if "Python.Runtime.dll" in files:
-                runtime_dll_path = pathlib.Path(root) / "Python.Runtime.dll"
-                break
-
-    if py_dll_path is None:
-        return False, f"Bundled {py_dll_name} was not found."
-    if not runtime_dll_path.is_file():
-        return False, "Bundled Python.Runtime.dll was not found."
-
-    _unblock_file(py_dll_path)
-    _unblock_file(runtime_dll_path)
-    _unblock_tree(runtime_dll_path.parent)
-    _unblock_tree(webview_lib_dir)
-
-    os.environ["PYTHONNET_RUNTIME"] = "netfx"
-    os.environ["PYTHONNET_PYDLL"] = str(py_dll_path)
-
-    search_dirs = []
-    for candidate in (
-        base_dir,
-        exe_dir,
-        runtime_dir,
-        runtime_dll_path.parent,
-        py_dll_path.parent,
-        webview_lib_dir,
-    ):
-        candidate_str = str(candidate)
-        if candidate.is_dir() and candidate_str not in search_dirs:
-            search_dirs.append(candidate_str)
-
-    current_path_parts = os.environ.get("PATH", "").split(os.pathsep) if os.environ.get("PATH") else []
-    os.environ["PATH"] = os.pathsep.join(search_dirs + [part for part in current_path_parts if part and part not in search_dirs])
-
-    if hasattr(os, "add_dll_directory"):
-        global _windows_dll_dir_handles
-        for candidate in search_dirs:
-            try:
-                _windows_dll_dir_handles.append(os.add_dll_directory(candidate))
-            except (FileNotFoundError, OSError):
-                pass
-
-    try:
-        from clr_loader import get_netfx
-        from pythonnet import set_runtime
-
-        set_runtime(get_netfx())
-    except Exception as exc:
-        return False, f"Windows .NET runtime init failed: {exc}"
-
-    return True, ""
 
 def _bundle_dir() -> pathlib.Path:
     if getattr(sys, "frozen", False):
@@ -537,15 +439,51 @@ def start_agent(port: int = AGENT_SERVER_PORT) -> subprocess.Popen:
     _write_server_process_record(proc, port=port, server_py=server_py)
 
     def _stream_output() -> None:
+        # Size-capped copy (CPL4-C5): same bound as the server.log stdlib
+        # handler (2 MB live + numbered backups). Rotation failure must never
+        # kill the copy thread — worst case the live file keeps growing, which
+        # is exactly the pre-cap behavior.
+        max_bytes = 2 * 1024 * 1024
+        backups = 3
+
+        def _rotate(log_path: pathlib.Path) -> None:
+            try:
+                for index in range(backups - 1, 0, -1):
+                    older = log_path.with_name(f"{log_path.name}.{index}")
+                    if older.exists():
+                        os.replace(older, log_path.with_name(f"{log_path.name}.{index + 1}"))
+                if log_path.exists():
+                    os.replace(log_path, log_path.with_name(f"{log_path.name}.1"))
+            except OSError:
+                pass
+
         log_path = DATA_DIR / "logs" / "agent_stdout.log"
         try:
-            with open(log_path, "a", encoding="utf-8") as handle:
-                for line in iter(proc.stdout.readline, b""):
-                    decoded = line.decode("utf-8", errors="replace")
-                    handle.write(decoded)
-                    handle.flush()
+            written = log_path.stat().st_size if log_path.exists() else 0
+        except OSError:
+            written = 0
+        handle = None
+        try:
+            handle = open(log_path, "a", encoding="utf-8")
+            for line in iter(proc.stdout.readline, b""):
+                decoded = line.decode("utf-8", errors="replace")
+                if written + len(decoded) > max_bytes:
+                    handle.close()
+                    handle = None
+                    _rotate(log_path)
+                    handle = open(log_path, "a", encoding="utf-8")
+                    written = 0
+                handle.write(decoded)
+                handle.flush()
+                written += len(decoded)
         except Exception:
             pass
+        finally:
+            if handle is not None:
+                try:
+                    handle.close()
+                except Exception:
+                    pass
 
     threading.Thread(target=_stream_output, daemon=True).start()
     return proc
@@ -709,14 +647,16 @@ def _poll_port_file(timeout: float = 30.0) -> int:
     return _read_port_file()
 
 
-def _kill_orphaned_children(port: int) -> None:
+def _kill_orphaned_children(port: int, reason: str = "window_close") -> None:
     """Final safety net: kill processes still on runtime ports.
 
     Module-level so both the window-close handler (_on_closing, main thread) and
     the panic-stop branch (agent_lifecycle_loop, supervisor thread) tear down the
-    exact same way.
+    exact same way. ``reason`` names the actual trigger, journalled HERE because
+    stop_agent() usually consumed the recorded-process row already.
     """
-    _cleanup_recorded_server_process("window_close")
+    log.info("Tearing down runtime orphans (%s)", reason)
+    _cleanup_recorded_server_process(reason)
     _kill_stale_runtime_ports(port)
     _kill_stale_on_port(8766)
     try:
@@ -806,7 +746,7 @@ def agent_lifecycle_loop(port: int = AGENT_SERVER_PORT) -> None:
             # supervisor thread cannot end the main-thread Cocoa webview loop on
             # macOS (it leaves a black frozen window), so exit with parity to the
             # window-close path: kill orphans, release the pid lock, os._exit(0).
-            _kill_orphaned_children(port)
+            _kill_orphaned_children(port, reason="panic_stop")
             release_pid_lock()
             os._exit(0)
 
@@ -1176,13 +1116,13 @@ def _run_headless_main(url: str, port: int, lifecycle_thread: threading.Thread) 
                 "(crash fuse); shutting down."
             )
             break
+    requested_shutdown = _shutdown_event.is_set()
     stop_agent()
-    _kill_orphaned_children(port)
+    _kill_orphaned_children(port, reason="headless_shutdown" if requested_shutdown else "crash_fuse")
     # NO explicit release_pid_lock(): sys.exit runs the atexit-registered
     # release, and a second release would unconditionally unlink a lock a
     # NEWER launcher may own (explicit calls stay only on os._exit paths).
-    # Event set == requested shutdown; otherwise crash fuse → exit nonzero.
-    sys.exit(0 if _shutdown_event.is_set() else 1)
+    sys.exit(0 if requested_shutdown else 1)
 
 
 def main():
@@ -1388,7 +1328,7 @@ def main():
         # (an aborted wait is a requested shutdown, not a startup failure).
         log.info("Shutdown requested during headless startup; tearing down.")
         stop_agent()
-        _kill_orphaned_children(actual_port)
+        _kill_orphaned_children(actual_port, reason="startup_abort")
         # atexit owns release_pid_lock on sys.exit (a second release would
         # unlink a newer launcher's lock).
         sys.exit(0)
@@ -1399,7 +1339,7 @@ def main():
         stop_agent()
         lifecycle_thread.join(timeout=5)
         if _headless:
-            _kill_orphaned_children(actual_port)
+            _kill_orphaned_children(actual_port, reason="startup_failure")
             print(
                 "Ouroboros failed to start: the local agent server did not "
                 "become ready.\n"

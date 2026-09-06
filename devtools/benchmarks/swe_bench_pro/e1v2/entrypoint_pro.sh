@@ -433,7 +433,7 @@ SOLVE_ARGS=(
   --jsonl --result-json-out /out/solve_result.json --timeout "${OBO_SOLVE_TIMEOUT:-3000}"
   --disable-tools "$OBO_DISABLE_TOOLS"
   --memory-mode "$OBO_MEMORY_MODE"
-  --task-metadata-json '{"budget_profile": {"improvement_policy": "until_deadline", "max_improvement_passes": 6, "cost_hard_stop_pct": 0}}'
+  --task-metadata-json '{"budget_profile": {"improvement_policy": "fixed", "max_improvement_passes": 6, "cost_hard_stop_pct": 0}}'
 )
 [ -n "$OBO_SOLVE_WORKSPACE_ROOT" ] && SOLVE_ARGS+=(--workspace "$OBO_SOLVE_WORKSPACE_ROOT")
 echo "[pro] solve tools-disabled=[$OBO_DISABLE_TOOLS] memory=[$OBO_MEMORY_MODE] workspace=[${OBO_SOLVE_WORKSPACE_ROOT:-none}]" >&2

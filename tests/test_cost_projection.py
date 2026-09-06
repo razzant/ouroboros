@@ -1,8 +1,10 @@
-"""C2 (owner 10=B): the SSOT cost projection — honest names, honest nulls.
+"""C2 (owner 10=B) + ABI 7.0 (ABI-3): the SSOT cost projection.
 
-`accounted_upper_bound_usd` is the additive honest name for `cost_usd` (same
-value, deprecated alias retained — frozen ABI). Null is null: unknown cost never
-renders as $0.00 and finality is never fabricated.
+`accounted_upper_bound_usd` is the honest name for what `cost_usd` always was.
+Since ABI-3 the deprecated alias spellings are READ-ONLY tolerance for stored
+legacy records (deprecated wins on a diverged pair) and are never EMITTED:
+every write/read seam strips them. Null is null: unknown cost never renders as
+$0.00 and finality is never fabricated.
 """
 
 from __future__ import annotations
@@ -16,33 +18,39 @@ from ouroboros.cost_projection import (
 
 
 class TestAliases:
-    def test_alias_pairs_mirror_both_directions(self):
-        assert with_cost_aliases({"cost_usd": 1.5})["accounted_upper_bound_usd"] == 1.5
-        assert with_cost_aliases({"accounted_upper_bound_usd": 2.5})["cost_usd"] == 2.5
+    def test_legacy_spelling_resolves_but_is_never_emitted(self):
+        out = with_cost_aliases({"cost_usd": 1.5})
+        assert out == {"accounted_upper_bound_usd": 1.5}
+        out = with_cost_aliases({"accounted_upper_bound_usd": 2.5})
+        assert out == {"accounted_upper_bound_usd": 2.5}
         out = with_cost_aliases({"cost_usd_with_children": 3.0})
-        assert out["accounted_upper_bound_usd_with_children"] == 3.0
+        assert out == {"accounted_upper_bound_usd_with_children": 3.0}
 
     def test_deprecated_name_wins_a_diverged_pair(self):
-        # Legacy mutators between two seam crossings edit cost_usd; re-aliasing
-        # at the outer seam re-converges instead of shipping a stale honest name.
+        # Legacy mutators between two seam crossings edit cost_usd; the seam
+        # honors that edit (deprecated wins) while emitting the honest name only.
         out = with_cost_aliases({"cost_usd": None, "accounted_upper_bound_usd": 9.0})
-        assert out["accounted_upper_bound_usd"] is None and out["cost_usd"] is None
+        assert out == {"accounted_upper_bound_usd": None}
 
     def test_unknown_zero_is_not_reintroduced_by_aliasing(self):
         out = with_cost_aliases({
             "cost_usd": 0.0, "unknown_unmetered": 1,
             "cost_final": False,
         })
-        assert out["cost_usd"] is None
+        assert "cost_usd" not in out
         assert out["accounted_upper_bound_usd"] is None
 
     def test_aliasing_never_invents_a_field(self):
-        assert "cost_usd" not in with_cost_aliases({"total_rounds": 3})
+        assert "accounted_upper_bound_usd" not in with_cost_aliases({"total_rounds": 3})
         assert with_cost_aliases(None) == {}
 
-    def test_explicit_none_mirrors_as_none(self):
+    def test_explicit_none_stays_none(self):
         out = with_cost_aliases({"cost_usd": None})
-        assert out["accounted_upper_bound_usd"] is None
+        assert out == {"accounted_upper_bound_usd": None}
+
+    def test_idempotent(self):
+        once = with_cost_aliases({"cost_usd": 4.0, "cost_final": True})
+        assert with_cost_aliases(once) == once
 
 
 class TestProjection:
@@ -58,10 +66,10 @@ class TestProjection:
             "accounted_usd": 1.25, "unknown_unmetered": 1,
         }) == 1.25
 
-    def test_unknown_cost_is_null_on_both_names_and_never_final(self):
+    def test_unknown_cost_is_null_and_never_final(self):
         out = cost_projection({"status": "completed"})
-        assert out["cost_usd"] is None
         assert out["accounted_upper_bound_usd"] is None
+        assert "cost_usd" not in out
         assert out["cost_known"] is False
         assert out["cost_final"] is False
 
@@ -70,27 +78,28 @@ class TestProjection:
             "cost_usd": 0.0, "unknown_unmetered": 1,
             "cost_final": False,
         })
-        assert out["cost_usd"] is None
+        assert out["accounted_upper_bound_usd"] is None
         assert out["cost_known"] is False
 
     def test_missing_key_default_never_fabricates_zero(self):
         # The exact $0-fabrication class: data.get("cost_usd", 0) at five sites.
-        assert cost_projection({})["cost_usd"] is None
-        assert cost_projection(None)["cost_usd"] is None
+        assert cost_projection({})["accounted_upper_bound_usd"] is None
+        assert cost_projection(None)["accounted_upper_bound_usd"] is None
 
     def test_finality_requires_a_known_amount(self):
         assert cost_projection({"cost_final": True})["cost_final"] is False
         assert cost_projection({"cost_final": True, "cost_usd": 0.0})["cost_final"] is True
 
-    def test_known_amount_rides_both_names(self):
+    def test_legacy_stored_spelling_projects_onto_the_honest_name(self):
         out = cost_projection({"cost_usd": 0.42, "cost_final": True})
         assert out["accounted_upper_bound_usd"] == 0.42
-        assert out["cost_usd"] == 0.42 and out["cost_known"] is True
+        assert "cost_usd" not in out and out["cost_known"] is True
 
-    def test_with_children_pair_projects_only_when_present(self):
-        assert "cost_usd_with_children" not in cost_projection({"cost_usd": 1.0})
+    def test_with_children_name_projects_only_when_present(self):
+        assert "accounted_upper_bound_usd_with_children" not in cost_projection({"cost_usd": 1.0})
         out = cost_projection({"cost_usd_with_children": 2.0})
         assert out["accounted_upper_bound_usd_with_children"] == 2.0
+        assert "cost_usd_with_children" not in out
 
     def test_openness_flags_are_carried_not_dropped(self):
         out = cost_projection({"cost_usd": 1.0, "unknown_unmetered": 2, "non_final_rows": 1,
@@ -99,7 +108,7 @@ class TestProjection:
         assert out["cost_accounting_status"] == "available"
 
     def test_boolean_is_not_an_amount(self):
-        assert cost_projection({"cost_usd": True})["cost_usd"] is None
+        assert cost_projection({"cost_usd": True})["accounted_upper_bound_usd"] is None
 
 
 class TestDisplay:
@@ -114,23 +123,12 @@ class TestDisplay:
 
 
 class TestProducers:
-    def test_reconstruct_task_cost_fields_carry_both_names(self, tmp_path):
+    def test_reconstruct_task_cost_fields_carry_the_honest_name_only(self, tmp_path):
         from supervisor.state import reconstruct_task_cost
 
         fields = reconstruct_task_cost("some-task", fields=True, drive_root=tmp_path)
-        assert fields["accounted_upper_bound_usd"] == fields["cost_usd"]
-
-    def test_handoff_block_has_no_fabricated_zero(self):
-        import json
-
-        from ouroboros.task_status import format_handoff_message
-
-        message = format_handoff_message([{"task_id": "c1", "status": "completed"}])
-        payload = json.loads(message.split("[SUBAGENT_HANDOFF_STATUS]\n", 1)[1]
-                             .rsplit("\n[/SUBAGENT_HANDOFF_STATUS]", 1)[0])
-        assert payload[0]["cost_usd"] is None
-        assert payload[0]["accounted_upper_bound_usd"] is None
-        assert payload[0]["cost_final"] is False
+        assert "accounted_upper_bound_usd" in fields
+        assert "cost_usd" not in fields
 
     def test_subagent_absorption_renders_unknown_not_zero(self):
         from ouroboros.task_status import format_subagent_absorption_message
@@ -149,11 +147,22 @@ class TestProducers:
 
         assert "accounted_upper_bound_usd" in get_type_hints(TaskCostBreakdown)
 
-    def test_meta_fields_include_the_additive_names(self):
+    def test_meta_fields_are_honest_only_and_legacy_resolves_via_carry(self):
+        # Ф3.1 fix-round-2 (converted OLD-ABI clause: the list used to keep
+        # both spellings as a raw carry): TASK_COST_META_FIELDS names the
+        # HONEST set only — a retired alias may never travel forward by key
+        # copy. Stored-legacy tolerance lives in carry_cost_meta instead:
+        # the pair resolves deprecated-wins and leaves under the honest name.
+        from ouroboros.cost_projection import carry_cost_meta
         from ouroboros.task_results import TASK_COST_META_FIELDS
 
         assert "accounted_upper_bound_usd" in TASK_COST_META_FIELDS
         assert "accounted_upper_bound_usd_with_children" in TASK_COST_META_FIELDS
+        assert "cost_usd" not in TASK_COST_META_FIELDS
+        assert "cost_usd_with_children" not in TASK_COST_META_FIELDS
+        carried = carry_cost_meta({"cost_usd": 1.25, "cost_final": True})
+        assert carried["accounted_upper_bound_usd"] == 1.25
+        assert "cost_usd" not in carried
 
 
 class TestOnePrecedence:
@@ -163,8 +172,8 @@ class TestOnePrecedence:
         diverged = {"cost_usd": 1.0, "accounted_upper_bound_usd": 9.0}
         written = with_cost_aliases(diverged)
         read = cost_projection(diverged)
-        assert written["cost_usd"] == written["accounted_upper_bound_usd"] == 1.0
-        assert read["cost_usd"] == read["accounted_upper_bound_usd"] == 1.0
+        assert written["accounted_upper_bound_usd"] == 1.0
+        assert read["accounted_upper_bound_usd"] == 1.0
 
     def test_resolver_is_the_one_answer_for_both(self):
         from ouroboros.cost_projection import COST_ALIAS_PAIRS, resolve_cost_pair
@@ -175,16 +184,19 @@ class TestOnePrecedence:
                                  *COST_ALIAS_PAIRS[0]) == (True, 9.0)
         assert resolve_cost_pair({}, *COST_ALIAS_PAIRS[0]) == (False, None)
 
-    def test_persisted_result_leaves_the_pair_converged(self, tmp_path):
-        # A producer that mutates the DEPRECATED name after aliasing used to
-        # persist a diverged pair; aliasing is now the last step there.
+    def test_persisted_result_is_honest_only_and_legacy_records_still_read(self, tmp_path):
         from ouroboros.task_results import load_task_result, write_task_result
 
         write_task_result(tmp_path, "t1", "completed",
                           **with_cost_aliases({"cost_usd": 2.0, "cost_final": True}))
         stored = load_task_result(tmp_path, "t1")
-        assert stored["cost_usd"] == stored["accounted_upper_bound_usd"] == 2.0
-        assert cost_projection(stored)["accounted_upper_bound_usd"] == 2.0
+        assert stored["accounted_upper_bound_usd"] == 2.0
+        assert "cost_usd" not in stored
+        # A legacy record written by an older release keeps reading through the
+        # pair resolver — ABI-3 removed emission, never stored-history reads.
+        write_task_result(tmp_path, "t0", "completed", cost_usd=3.5, cost_final=True)
+        legacy = load_task_result(tmp_path, "t0")
+        assert cost_projection(legacy)["accounted_upper_bound_usd"] == 3.5
 
 
 class TestOpennessCarry:
@@ -199,6 +211,7 @@ class TestOpennessCarry:
             "cost_final": False, "irrelevant": "x",
         })
         assert carried["accounted_upper_bound_usd"] == 3.0
+        assert "cost_usd" not in carried
         assert carried["reserved_usd"] == 0.5
         assert carried["unresolved_upper_bound_usd"] == 1.25
         assert carried["ledger_integrity_degraded"] is True
@@ -208,7 +221,10 @@ class TestOpennessCarry:
         from ouroboros.cost_projection import COST_ALIAS_PAIRS, COST_OPENNESS_FIELDS
         from ouroboros.task_results import TASK_COST_META_FIELDS
 
-        expected = {name for pair in COST_ALIAS_PAIRS for name in pair}
+        # Ф3.1 fix-round-2: derived from the SSOT's HONEST names only (the
+        # retired alias spellings are read tolerance, never part of the
+        # carry-forward set).
+        expected = {new for new, _old in COST_ALIAS_PAIRS}
         expected |= set(COST_OPENNESS_FIELDS)
         assert set(TASK_COST_META_FIELDS) == expected
         assert "ledger_integrity_degraded" in TASK_COST_META_FIELDS
@@ -220,12 +236,14 @@ class TestOpennessCarry:
         # on the frame instead of being silently dropped like the three before it.
         import inspect
 
-        from ouroboros.cost_projection import COST_ALIAS_PAIRS, COST_OPENNESS_FIELDS
+        from ouroboros.cost_projection import COST_OPENNESS_FIELDS
         from supervisor.events import _finish_task_done_dispatch
 
         source = inspect.getsource(_finish_task_done_dispatch)
-        for field in (*COST_OPENNESS_FIELDS, *COST_ALIAS_PAIRS[0]):
+        for field in (*COST_OPENNESS_FIELDS, "accounted_upper_bound_usd"):
             assert f'"{field}"' in source, f"the terminal subagent frame drops {field}"
+        # ABI-3: the retired alias key never appears as an emitted frame key.
+        assert '"cost_usd":' not in source
 
     def test_integrity_marker_is_declared_on_both_contract_mirrors(self):
         from typing import get_type_hints
@@ -247,3 +265,42 @@ class TestRestartRecoverySynthesis:
         assert "unknown" in _synthesis_cost_text(unknown)
         # A REAL zero still reads as a zero.
         assert _synthesis_cost_text({"cost": 0.0}) == "$0.00"
+
+
+class TestModelVisibleToolSurfaces:
+    """External-audit correction lane (base 8827fd2c), item 1: the wait_tasks
+    tool DESCRIPTION promised the model a ``cost_usd`` projection key while the
+    producer (control_task_results) emits the ABI-3 honest pair
+    ``accounted_upper_bound_usd`` + ``cost_final``. Model-visible tool text must
+    name the keys the projection actually carries — a description teaching the
+    model a removed alias is a lie the model then acts on."""
+
+    def test_wait_tasks_description_names_the_actual_projection_keys(self, tmp_path):
+        import pathlib
+
+        from ouroboros.tools.registry import ToolRegistry
+
+        repo_dir = pathlib.Path(__file__).resolve().parents[1]
+        registry = ToolRegistry(repo_dir=repo_dir, drive_root=tmp_path)
+        by_name = {t["function"]["name"]: t["function"] for t in registry.schemas()}
+        desc = by_name["wait_tasks"]["description"]
+        assert "cost_usd" not in desc
+        assert "accounted_upper_bound_usd" in desc
+        assert "cost_final" in desc
+
+    def test_no_builtin_tool_schema_teaches_the_removed_alias(self, tmp_path):
+        """Class-wide pin: NO builtin tool description or parameter doc may
+        mention the removed ``cost_usd`` spelling (``accounted_upper_bound_usd``
+        does not contain it, so honest names pass untouched)."""
+        import json as _json
+        import pathlib
+
+        from ouroboros.tools.registry import ToolRegistry
+
+        repo_dir = pathlib.Path(__file__).resolve().parents[1]
+        registry = ToolRegistry(repo_dir=repo_dir, drive_root=tmp_path)
+        offenders = [
+            t["function"]["name"] for t in registry.schemas()
+            if "cost_usd" in _json.dumps(t)
+        ]
+        assert offenders == []

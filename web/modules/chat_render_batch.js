@@ -3,6 +3,56 @@
 // so node tests can exercise them directly.
 
 /**
+ * The Main chat's live-card bound (issue #135). Main never runs destroy(), so its
+ * live task cards would accumulate for the whole session. Past `cap` cards BEYOND
+ * the population the last full rebuild produced, the next history sync replays
+ * durable history instead of folding into the existing cards - the transaction a
+ * reconnect already runs. The bound is RELATIVE because a history window mints
+ * cards itself (summary rows, progress rows, lineage rows) and can exceed the cap
+ * on its own; an absolute cap would rebuild on every later sync.
+ *
+ * Only the sync that STARTED with the arm up may consume it. A window fetched
+ * before the arm went up cannot answer for the cards that raised it: rebuilding
+ * from it would drop the newest cards and clear the arm without ever replaying a
+ * window that contains them. The three moments a sync passes through are therefore
+ * distinct: begin() before its fetch, beginReplay() when its SYNCHRONOUS replay
+ * starts (no live frame can interleave after that), and settle() when it lands.
+ * An arm raised between the first two came from live cards this window never saw
+ * and survives the rebuild; one raised during the replay came from the window's own
+ * rows and is answered by the floor that same rebuild sets.
+ *
+ * Accepted residual, shared with every rebuild the chat has always run (reconnect,
+ * first load, Load older): cards minted after a rebuild's fetch left are replaced by
+ * that rebuild and come back with their task's next frame or the next sync. A sync
+ * that already started armed does not re-arm on them: carrying a dirty bit across an
+ * armed rebuild would rebuild again after every busy rebuild, a storm by time where
+ * the relative floor removed the storm by size.
+ */
+export function createLiveCardBound(cap) {
+    let armed = false;
+    let floor = 0;
+    let inherited = false;
+    let raisedInFlight = false;
+    return {
+        isArmed: () => armed,
+        /** The offline bootstrap painted sessionStorage: the next sync must rebuild. */
+        arm() { armed = true; },
+        observe(size) { if (size > floor + cap) armed = true; },
+        begin() {
+            inherited = armed;
+            raisedInFlight = false;
+            return inherited;
+        },
+        beginReplay() { raisedInFlight = armed && !inherited; },
+        settle({ rebuilt, size }) {
+            if (!rebuilt) return;
+            armed = raisedInFlight;
+            floor = size;
+        },
+    };
+}
+
+/**
  * perf2 P4 follow-up (double-fetch fix): the debounced post-completion resync
  * behind chat.js's scheduleHistorySync. Finished transitions REPLAYED by
  * syncHistory itself (pass 1 suppressed task summaries, pass 2 / terminal-
@@ -22,9 +72,24 @@ export function createHistoryResyncScheduler({
 }) {
     let timer = null;
     return {
-        schedule() {
+        /**
+         * @param {boolean} keepPending an armed full rebuild is a DEADLINE, not a
+         * best-effort refetch: it is the transaction a reconnect runs, and the live-card
+         * bound (issue #135) is only a bound if it actually happens. While one is armed,
+         * a later completion must not push the pending run out again — completions
+         * arriving faster than the debounce would otherwise starve it for as long as the
+         * traffic lasts, which is exactly the busy session the bound exists for. The
+         * deadline has a second hole the caller closes: a run that lands while an older
+         * history request is still in flight only JOINS it, spending the timer on a
+         * window fetched before the arm, so the caller re-arms when such a run settles
+         * with the bound still armed.
+         */
+        schedule(keepPending = false) {
             if (isReplayActive()) return false;
-            if (timer != null) clearTimer(timer);
+            if (timer != null) {
+                if (keepPending) return true;
+                clearTimer(timer);
+            }
             timer = setTimer(() => {
                 timer = null;
                 run();

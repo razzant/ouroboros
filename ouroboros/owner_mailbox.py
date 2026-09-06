@@ -548,3 +548,47 @@ def cleanup_task_mailbox(drive_root: pathlib.Path, task_id: str) -> None:
                 path.unlink()
         except Exception:
             log.debug("Failed to cleanup mailbox for task %s", task_id, exc_info=True)
+
+
+def sweep_settled_owner_mailboxes(drive_root: pathlib.Path) -> Dict[str, Any]:
+    """Startup sweep of mailboxes whose task died off the terminal paths (CPL4-C18).
+
+    The only regular unlink is the task_done dispatch; a task that never
+    reached it (crash, lost event, hard kill) leaked its mailbox forever.
+    A mailbox goes ONLY when the task's durable result is SETTLED — no result
+    or a non-terminal result keeps it (fail-closed: an undelivered owner
+    directive must survive any ambiguity). Lock sidecars are untouched
+    (self-healing by staleness).
+    """
+    report: Dict[str, Any] = {"removed": [], "kept": 0}
+    mailbox_dir = pathlib.Path(drive_root) / _MAILBOX_DIR
+    try:
+        entries = sorted(p for p in mailbox_dir.glob("*.jsonl") if p.is_file())
+    except OSError:
+        return report
+    for path in entries:
+        stem = path.name[: -len(".jsonl")]
+        if stem.endswith(".acks"):
+            continue  # swept with its mailbox
+        try:
+            task_id = validate_task_id(stem)
+        except Exception:
+            report["kept"] += 1
+            continue  # not a task mailbox we can reason about: keep
+        try:
+            from ouroboros.task_results import load_task_result
+            from ouroboros.task_status import SETTLED_STATUSES
+
+            result = load_task_result(pathlib.Path(drive_root), task_id) or {}
+            settled = str(result.get("status") or "") in SETTLED_STATUSES
+        except Exception:
+            settled = False
+        if not settled:
+            report["kept"] += 1
+            continue
+        cleanup_task_mailbox(pathlib.Path(drive_root), task_id)
+        if path.exists():
+            report["kept"] += 1  # unlink refused: still owned by the mailbox
+        else:
+            report["removed"].append(task_id)
+    return report

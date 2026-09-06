@@ -166,9 +166,10 @@ def spawn_supervised(
 ) -> subprocess.Popen:
     """Popen + durable custody record (the single supervised chokepoint).
 
-    The record is written immediately after spawn, so even a SIGKILL of the
-    spawning worker cannot orphan the child invisibly — the reaper finds it
-    in the ledger on the next generation.
+    The record is written right after ``Popen`` returns, so a spawner that dies
+    any time later cannot orphan the child invisibly (the reaper finds it in the
+    ledger); a hard kill INSIDE that spawn-to-record window is the disclosed
+    residual — such a child is unledgered and the reaper cannot see it.
     """
     if new_process_group:
         merged = dict(subprocess_new_group_kwargs())
@@ -358,20 +359,46 @@ def _rewrite_ledger(drive_root: pathlib.Path, entries: List[Dict[str, Any]]) -> 
         log.debug("process ledger rewrite failed", exc_info=True)
 
 
+def _multiprocessing_parent_sentinel() -> Optional[int]:
+    """The spawner's sentinel fd inside a ``multiprocessing`` child, else None.
+
+    Every start method hands the child the read end of a pipe whose only write
+    end lives in the process that called ``Process.start()`` and stays open for
+    the child's lifetime (``popen_fork``/``popen_spawn_posix`` keep it in the
+    Popen finalizer; ``popen_forkserver`` dups one exactly "as a sentinel of the
+    parent process used by the child"). EOF therefore means the SPAWNER died,
+    under forkserver included -- there the ppid is the forkserver, which
+    outlives a dead supervisor for as long as any worker holds its alive pipe.
+    """
+    try:
+        import multiprocessing
+
+        parent = multiprocessing.parent_process()
+        return None if parent is None else int(parent.sentinel)
+    except Exception:
+        return None
+
+
 def start_parent_lifeline(*, poll_sec: float = 5.0, label: str = "") -> None:
-    """Daemon watchdog: group-suicide when the parent process dies (POSIX).
+    """Daemon watchdog: group-suicide when the spawning parent dies (POSIX).
 
     For OUR python entrypoints only (workers, extension runner, claude child):
-    when the parent dies, the child is reparented to init (ppid==1) and would
-    otherwise keep burning CPU/budget invisibly. Arbitrary-argv services and
-    skills cannot get a watchdog injected — they are covered by the ledger +
-    reaper instead.
+    when the parent dies the child would otherwise keep burning CPU/budget
+    invisibly. Inside a ``multiprocessing`` child the watched parent is the
+    spawner's sentinel (EOF on its death under fork, spawn and forkserver
+    alike); a plain subprocess falls back to its ppid, which changes when the
+    parent dies (orphans go to init/launchd or the nearest subreaper). A ppid
+    change still fires inside a multiprocessing child too: under forkserver it
+    means the forkserver died, which the supervisor already reads as this
+    worker's exit 255. Arbitrary-argv services and skills cannot get a watchdog
+    injected -- they are covered by the ledger + reaper instead.
     """
     if os.name == "nt":
         return  # Windows children are covered by Job Objects
 
     import threading
     import time as _time
+    from multiprocessing.connection import wait as _mp_wait
 
     def _suicide() -> None:
         log.warning("parent process died — lifeline group-suicide (%s)", label or "child")
@@ -388,8 +415,16 @@ def start_parent_lifeline(*, poll_sec: float = 5.0, label: str = "") -> None:
             pass
         os._exit(1)
 
+    def _sentinel_hung_up(sentinel: int, timeout: float) -> bool:
+        return bool(_mp_wait([sentinel], timeout=timeout))
+
     initial_ppid = os.getppid()
-    if initial_ppid <= 1:
+    sentinel = _multiprocessing_parent_sentinel()
+    try:
+        died_early = initial_ppid <= 1 or (sentinel is not None and _sentinel_hung_up(sentinel, 0))
+    except Exception:
+        sentinel, died_early = None, initial_ppid <= 1
+    if died_early:
         # The parent died before we even got here (import-delay race after an
         # abrupt supervisor kill). These entrypoints are always spawned by a
         # live Ouroboros parent, so an orphan at startup is already a leak.
@@ -397,10 +432,19 @@ def start_parent_lifeline(*, poll_sec: float = 5.0, label: str = "") -> None:
         return
 
     def _watch() -> None:
+        nonlocal sentinel
         while True:
-            _time.sleep(poll_sec)
-            # Any reparenting means the original parent died (orphans go to
-            # init/launchd or the nearest subreaper).
+            if sentinel is None:
+                _time.sleep(poll_sec)
+            else:
+                try:
+                    hung_up = _sentinel_hung_up(sentinel, poll_sec)
+                except Exception:
+                    # An unusable sentinel (closed fd) must not kill a live
+                    # task: degrade to the ppid watch rather than guess.
+                    sentinel, hung_up = None, False
+                if hung_up:
+                    _suicide()
             if os.getppid() != initial_ppid:
                 _suicide()
 

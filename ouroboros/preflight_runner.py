@@ -19,6 +19,7 @@ from typing import NamedTuple, Optional, Sequence
 # candidate's web/tests/*.test.js — see ouroboros/preflight_node.py. Imported
 # by name so tests/operators can stub `preflight_runner.run_node_tests`.
 from ouroboros.preflight_node import run_node_tests
+from ouroboros.settings_defaults import settings_env_keys
 
 
 DEFAULT_PYTEST_ARGS = ["tests/", "-q", "--tb=line", "--no-header"]
@@ -582,10 +583,16 @@ def _preflight_env(temp_root: pathlib.Path, repo_worktree: pathlib.Path) -> dict
     # safety/review/mode settings and could also expose prefixed secrets to a
     # self-written test.
     secret_suffixes = ("_API_KEY", "_TOKEN", "_PASSWORD", "_CREDENTIALS", "_SECRET")
+    # Every key config.apply_settings_to_env projects from settings.json is the
+    # same owner state under a name the prefix/suffix rules miss (provider base
+    # URLs, USE_LOCAL_*, LOCAL_MODEL_*, MCP_*, GITHUB_REPO, TOTAL_BUDGET): the
+    # suite routes on OPENAI_COMPATIBLE_BASE_URL alone. Derived, not hand-listed.
+    projected = frozenset(settings_env_keys())
     for key in list(env):
         if (
             key.startswith("OUROBOROS_")
             or key.endswith(secret_suffixes)
+            or key in projected
             or key.startswith("GH_")
             # Externally supplied pytest/xdist controls are dropped WHOLESALE
             # rather than by name, because every one of them can weaken the pass

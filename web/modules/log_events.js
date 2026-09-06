@@ -341,6 +341,42 @@ export function taskStoppedWithSummary(evt) {
     return String(evt?.reason_code || '') === 'owner_requested_finalization';
 }
 
+// The typed degradation causes a card can state in the owner's words. The record
+// keeps the machine code (Logs, task detail, benchmark ledgers); only the card
+// speaks. An UNKNOWN code stays raw on purpose: a reason we have no sentence for
+// must read as itself rather than as a wrong sentence.
+const TASK_REASON_PHRASES = {
+    plan_review_advisory: 'plan review never closed; the work continued under advisory enforcement',
+    host_child_status_suffix: 'a child task had not settled when the answer was delivered',
+    invalid_delivery_control_after_repair: 'the delivery control object was still malformed after repair',
+    budget_exhausted: 'the task ran out of budget before it could finish cleanly',
+    delivery_control_degraded: 'delivery finished in a degraded control state',
+};
+
+export function taskReasonPhrase(code) {
+    const raw = String(code || '');
+    return TASK_REASON_PHRASES[raw] || raw;
+}
+
+export function taskReasonDetail(evt) {
+    // An owner-requested stop is a success and carries its own marker instead.
+    if (taskStoppedWithSummary(evt)) return '';
+    // A warning caused by REVIEW must not be explained by the execution reason
+    // that happens to sit beside it: the host's acceptance decision is the
+    // cause, and it speaks in its own stored words. A hard failure or a
+    // cancellation keeps explaining itself by its execution reason.
+    const record = normalizeTaskTerminalRecord(evt);
+    const decision = record.outcome_axes?.review?.acceptance_decision
+        ?? record.review_status?.acceptance_decision;
+    const severity = taskOutcomeSeverity(evt);
+    if (severity !== 'error' && severity !== 'cancelled' && decision?.status && decision.status !== 'accepted') {
+        const rationale = String(decision.rationale || '').split(/\s+/).filter(Boolean).join(' ');
+        return `Acceptance: ${decision.status}${rationale ? ` — ${rationale}` : ''}`;
+    }
+    if (!evt?.reason_code) return '';
+    return `Reason: ${taskReasonPhrase(evt.reason_code)}`;
+}
+
 // S3 (HQ1): the ONE shared projection of a typed owner_hurry event for the
 // task-detail/card surfaces. Never a chat message: chat.js renders only a
 // compact task-card status from this, and the timeline summarizer hides the
@@ -464,6 +500,8 @@ function taskOutcomeMeta(evt) {
         axes.lifecycle?.status ? `lifecycle ${axes.lifecycle.status}` : '',
         axes.execution?.status ? `execution ${axes.execution.status}` : '',
         axes.objective?.status ? `objective ${axes.objective.status}` : '',
+        axes.review?.status ? `review ${axes.review.status}` : '',
+        axes.review?.acceptance_decision?.status ? `acceptance ${axes.review.acceptance_decision.status}` : '',
     ].filter(Boolean);
 }
 
@@ -552,7 +590,10 @@ export function summarizeLogEvent(evt) {
             meta: taskMeta(
                 evt.model || '',
                 formatLogTokens(evt),
-                formatLogMoney(evt.cost_usd ?? evt.cost),
+                // ABI-3: /api/logs backfill rows carry the honest name; live
+                // frames still say cost_usd/cost — resolve the pair via the
+                // SSOT helper, then the live-frame `cost` spelling.
+                formatLogMoney(accountedUpperBound(evt) ?? evt.cost),
                 evt.response_kind === 'tool_calls' ? `${evt.tool_call_count || 0} tool calls` : evt.response_kind || '',
             ),
         });
@@ -576,7 +617,7 @@ export function summarizeLogEvent(evt) {
             meta: taskMeta(
                 evt.model || '',
                 formatLogTokens(evt),
-                formatLogMoney(evt.cost_usd ?? evt.cost),
+                formatLogMoney(accountedUpperBound(evt) ?? evt.cost),
                 evt.category || '',
             ),
         });
@@ -774,7 +815,7 @@ export function summarizeLogEvent(evt) {
 
     return view('info', shortText(t, 120), {
         body: shortText(evt.text || evt.error || evt.result_preview || compactJson(evt.args || evt.task || evt.checks, 260), 260),
-        meta: taskMeta(evt.model || '', formatLogMoney(evt.cost_usd ?? evt.cost)),
+        meta: taskMeta(evt.model || '', formatLogMoney(accountedUpperBound(evt) ?? evt.cost)),
     });
 }
 
@@ -875,7 +916,7 @@ export function summarizeChatLiveEvent(evt) {
         const resultText = describeText(evt.result || '', 320, { markdown: true });
         const traceText = describeText(evt.trace_summary || '', 320);
         const errorText = describeText(evt.error || '', 220);
-        const reasonDetail = evt.reason_code ? `Reason: ${String(evt.reason_code)}` : '';
+        const reasonDetail = evt.reason_code ? `Reason: ${taskReasonPhrase(evt.reason_code)}` : '';
         const detailParts = [
             progressText.full,
             resultText.full ? `[RESULT]\n${resultText.full}` : '',
@@ -1100,8 +1141,7 @@ export function summarizeChatLiveEvent(evt) {
         // №8/Q3: an owner-requested soft stop keeps 'done' severity but carries
         // its own headline and the owner-request marker in the details meta.
         const softStopped = taskStoppedWithSummary(evt);
-        const reasonDetail = !softStopped && evt.reason_code
-            ? `Reason: ${String(evt.reason_code)}` : '';
+        const reasonDetail = taskReasonDetail(evt);
         return chatView({
             phase: presentation.phase,
             headline: presentation.headline,

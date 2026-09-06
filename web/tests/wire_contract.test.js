@@ -45,11 +45,13 @@ function pythonTupleNames(source, name) {
 }
 
 test('every accounting field the costs page reads is a field the history endpoint emits', () => {
-    const history = repoFile('ouroboros/gateway/history.py');
+    // v7 moved the cost-breakdown endpoint (and its field tuple) out of
+    // gateway/history.py into gateway/cost_breakdown.py; history.py re-exports it.
+    const costBreakdown = repoFile('ouroboros/gateway/cost_breakdown.py');
     const taskResults = repoFile('ouroboros/task_results.py');
     // What the server puts on the wire: the projected ledger fields plus the four
     // keys the endpoint attaches itself right after the projection.
-    const emitted = pythonTupleNames(history, '_ACCOUNTING_SUMMARY_FIELDS');
+    const emitted = pythonTupleNames(costBreakdown, '_ACCOUNTING_SUMMARY_FIELDS');
     for (const literal of ['available', 'authority', 'limit_usd', 'remaining_known_usd']) {
         emitted.add(literal);
     }
@@ -70,6 +72,32 @@ test('every accounting field the costs page reads is a field the history endpoin
     assert.ok(openness.has('non_final_rows') && openness.has('ledger_integrity_degraded'));
     assert.match(taskResults, /TASK_COST_META_FIELDS = tuple\(/);
     assert.match(taskResults, /COST_OPENNESS_FIELDS/);
+});
+
+test('the update letter typedef promises exactly the fields the projection emits', () => {
+    const typedef = moduleFile('api_types.js');
+    const start = typedef.indexOf('@typedef {Object} UpdateLetter');
+    assert.notEqual(start, -1, 'UpdateLetter typedef not found — update this test');
+    const end = typedef.indexOf('*/', start);
+    assert.notEqual(end, -1, 'UpdateLetter typedef closer not found — update this test');
+    const promised = new Set(
+        [...typedef.slice(start, end).matchAll(/@property \{[^\n]*?\} ([a-z_]+)/g)].map((m) => m[1]),
+    );
+    // What the server emits: the keys of project_letter's return dict.
+    const py = repoFile('ouroboros/update_letter.py');
+    const fn = py.indexOf('def project_letter(');
+    assert.notEqual(fn, -1, 'project_letter not found — update this test');
+    const ret = py.indexOf('return {', fn);
+    const retEnd = py.indexOf('\n    }\n', ret);
+    assert.ok(ret > -1 && retEnd > -1, 'project_letter return dict not found — update this test');
+    const emitted = new Set([...py.slice(ret, retEnd).matchAll(/^\s+"([a-z_]+)":/gm)].map((m) => m[1]));
+    assert.ok(promised.size >= 8 && emitted.size >= 8, 'too few fields found — the regex or the source moved');
+    assert.deepEqual([...promised].sort(), [...emitted].sort());
+    // …and the panel reads nothing the typedef does not promise.
+    const read = new Set([...moduleFile('updates.js').matchAll(/\bletter\.([a-z_]+)/g)].map((m) => m[1]));
+    assert.ok(read.size >= 6, 'no letter reads found — the regex or the module moved');
+    const unknown = [...read].filter((field) => !promised.has(field));
+    assert.deepEqual(unknown, [], `updates.js reads letter fields the typedef does not promise: ${unknown}`);
 });
 
 test('the live progress path forwards every progress field the endpoint emits and the chat UI consumes', () => {
@@ -233,4 +261,10 @@ test('live structured delivery frames keep additive grouping and size fields', (
     assert.match(chat, /renderMarkdown: renderChatMarkdown/);
     assert.match(chat, /enhanceMarkdown: enhanceMountedMarkdown/);
     assert.match(contracts, /WS_MESSAGE_TYPES[\s\S]*?"links"/);
+});
+
+test('history typedef declares task outcome terminality fields', () => {
+    const types = moduleFile('api_types.js');
+    assert.match(types, /@property \{"working"\|"done"\|"warn"\|"error"\|"cancelled"=\} outcome_phase/);
+    assert.match(types, /@property \{boolean=\} outcome_final/);
 });

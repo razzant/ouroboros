@@ -1,9 +1,10 @@
 ---
 name: telegram
 description: Owner-only Telegram text bridge and Mini App gateway for the existing Ouroboros interface.
-version: 1.1.0
+version: 1.1.1
 type: extension
 entry: plugin.py
+plugin_api: "2.0"
 runtime: python3
 os: any
 permissions: [net, read_settings, widget, route, supervised_task, subscribe_event, inject_chat, subprocess, companion_process]
@@ -11,6 +12,9 @@ env_from_settings: [TELEGRAM_BOT_TOKEN]
 subscribe_events: [chat.outbound, chat.typing, chat.photo, chat.video, chat.document, chat.links, chat.quiz]
 conflicts: [telegram-bridge, telegram-miniapp-poc]
 when_to_use: The owner wants to communicate with and control Ouroboros through Telegram.
+model_experience:
+  what_model_sees: No new tools; the skill relays owner messages and photos from Telegram into the normal chat and mirrors replies back, so conversation turns may originate from Telegram without any visible difference.
+  token_effect: Near-zero while idle — no per-round schema cost; incoming Telegram media arrive as ordinary attachments and cost what any chat attachment costs.
 timeout_sec: 60
 companion_processes:
   - name: miniapp_gateway
@@ -29,7 +33,8 @@ videos, documents, typing state, subagent cards, and opt-in notifications are
 mirrored back to that owner.
 
 Version 1.1 adds richer Telegram formatting, native MP3/M4A playback, and
-inline link keyboards.
+inline link keyboards. Version 1.1.1 fixes the task-done push, which read the
+lifecycle axis as a whole object and warned on every finished task.
 
 The Mini App exposes the unchanged Ouroboros SPA through the established
 owner-authenticated sidecar and a pinned Cloudflare Quick Tunnel. It is enabled

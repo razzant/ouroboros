@@ -93,6 +93,10 @@ test('direct API is a neutral channel presentation, never a harness identity', (
     const html = harnessIdentityMarkup('api_model');
     assert.match(html, /data-presentation-kind="channel"/);
     assert.match(html, />API<\/span>/);
+    const native = harnessPresentation('native', { label: 'API · native tool rounds' });
+    assert.deepEqual({ kind: native.kind, harnessId: native.harnessId, label: native.label }, {
+        kind: 'channel', harnessId: null, label: 'API · native tool rounds',
+    });
 });
 
 test('Chat renders the executor evidence chip through the shared identity SSOT', () => {

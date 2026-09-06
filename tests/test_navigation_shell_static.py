@@ -18,6 +18,10 @@ def test_navigation_shell_dom_has_sidebar_drawer_and_project_slots():
     html = _read("web/index.html")
     chat_js = _read("web/modules/chat.js")
     assert 'id="primary-sidebar"' in html
+    # The sidebar is the document's one navigation landmark.
+    assert '<nav id="primary-sidebar"' in html
+    assert '<aside id="primary-sidebar"' not in html
+    assert '<aside id="project-panel"' in html
     assert 'data-mobile-nav-toggle' not in html
     assert 'id="nav-drawer-backdrop"' in html
     assert 'data-nav-page="chat"' in html
@@ -58,6 +62,13 @@ def test_navigation_state_and_mobile_drawer_are_first_class():
     assert ".nav-drawer-backdrop" in css
     assert ".mobile-nav-toggle" in css
     assert "grid-template-columns: var(--sidebar-width) minmax(0, 1fr) auto;" in css
+    # One client-side route, read once on load and validated against the DOM
+    # rather than a duplicated page list; never written back on navigation
+    # (the desktop shell and the Telegram mini app have no address bar).
+    assert "function pageFromHash()" in app_js
+    assert "document.getElementById(`page-${name}`)" in app_js
+    assert "hashchange" not in app_js
+    assert "replaceState" not in app_js
     assert ".mobile-nav-toggle {\n        position: fixed" not in css
     assert "flex: 0 0 44px;" in css
 

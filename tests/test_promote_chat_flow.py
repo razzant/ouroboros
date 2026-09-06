@@ -22,7 +22,7 @@ def _isolated_projects_root(tmp_path_factory, monkeypatch):
 
 def _confirm_promote(monkeypatch):
     monkeypatch.setattr(
-        "ouroboros.tools.control._wait_for_promotion_admission",
+        "ouroboros.tools.control_events._wait_for_promotion_admission",
         lambda *_args, **_kwargs: {"status": "scheduled"},
     )
 
@@ -146,7 +146,7 @@ def test_cat_router_preview_promote_first_request_and_direct_harness_keep_full_a
     result_dir = tmp_path / "task_results"
     result_dir.mkdir()
     (result_dir / f"{predecessor_id}.json").write_text(
-        json.dumps(predecessor), encoding="utf-8",
+        json.dumps({"_schema_version": 1, **predecessor}), encoding="utf-8",
     )
     assert len(json.dumps(predecessor["plan_review_state"])) < 1_000
     assert len(json.dumps({
@@ -261,8 +261,8 @@ def test_main_promotion_selects_only_manifested_canonical_predecessor(tmp_path, 
     result_dir = tmp_path / "task_results"
     result_dir.mkdir()
     rows = [
-        {"task_id": "old-a", "status": "completed", "title": "First project"},
-        {"task_id": "old-b", "status": "completed", "title": "Chosen project"},
+        {"_schema_version": 1, "task_id": "old-a", "status": "completed", "title": "First project"},
+        {"_schema_version": 1, "task_id": "old-b", "status": "completed", "title": "Chosen project"},
     ]
     for row in rows:
         (result_dir / f"{row['task_id']}.json").write_text(
@@ -852,7 +852,7 @@ def test_ephemeral_swarm_unconfirmed_promotion_reuses_one_task_id(tmp_path, monk
     from ouroboros.tools.control import _promote_chat_to_task
 
     monkeypatch.setattr(
-        "ouroboros.tools.control._wait_for_promotion_admission",
+        "ouroboros.tools.control_events._wait_for_promotion_admission",
         lambda *_args, **_kwargs: {"status": "unconfirmed", "reason": "confirmation_timeout"},
     )
     ctx = _swarm_ctx(tmp_path)
@@ -870,7 +870,7 @@ def test_ephemeral_swarm_receipt_error_after_emit_keeps_one_attempt(tmp_path, mo
     from ouroboros.tools.control import _promote_chat_to_task
 
     monkeypatch.setattr(
-        "ouroboros.tools.control._wait_for_promotion_admission",
+        "ouroboros.tools.control_events._wait_for_promotion_admission",
         lambda *_args, **_kwargs: (_ for _ in ()).throw(OSError("receipt unavailable")),
     )
     event_queue = queue.Queue()
@@ -891,7 +891,7 @@ def test_ephemeral_swarm_rejected_promotion_is_latched_without_event(tmp_path, m
     from ouroboros.tools.control import _promote_chat_to_task
 
     monkeypatch.setattr(
-        "ouroboros.tools.control._promotion_pool_disabled_from_snapshot",
+        "ouroboros.tools.control_routing._promotion_pool_disabled_from_snapshot",
         lambda _ctx: "crash_storm",
     )
     ctx = _swarm_ctx(tmp_path)
@@ -2167,7 +2167,7 @@ def test_bound_task_media_routes_to_project_panel(tmp_path):
     import base64
 
     from ouroboros.projects_registry import bind_task_to_project, create_project
-    from supervisor.chat_delivery_events import _handle_send_photo, _handle_send_video
+    from supervisor.events_chat_delivery import _handle_send_photo, _handle_send_video
 
     project = create_project(tmp_path, "media-proj")
     project_chat = int(project["chat_id"])

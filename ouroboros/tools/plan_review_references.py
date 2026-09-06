@@ -1,4 +1,4 @@
-"""Small owner-visible invalidations for canonical Plan Review state writes."""
+"""Small owner-visible invalidations for canonical task review state writes."""
 
 from __future__ import annotations
 
@@ -32,7 +32,6 @@ def _emit_plan_review_reference(
     that presentation rail must never interrupt the canonical Plan Review write
     that just completed or the live invalidation event below.
     """
-    event_queue = getattr(ctx, "event_queue", None)
     if state is None:
         try:
             state = load_plan_review_state(state_root, task_id)
@@ -40,6 +39,16 @@ def _emit_plan_review_reference(
             log.debug("Failed to reload plan-review state reference", exc_info=True)
             return
     attempt = state.get("current_attempt") if isinstance(state, dict) else {}
+    _emit_review_reference(ctx, task_id, state, surface="plan_review", state_root=state_root,
+                           fingerprint=str((attempt or {}).get("fingerprint") or ""))
+
+
+def _emit_review_reference(
+    ctx: Any, task_id: str, state: Any, *, surface: str,
+    state_root: Optional[pathlib.Path] = None, fingerprint: str = "",
+) -> None:
+    """Invalidate the existing task-detail read model after its durable write."""
+    event_queue = getattr(ctx, "event_queue", None)
     serialized = json.dumps(state, ensure_ascii=False, sort_keys=True, default=str)
     revision = sha256(serialized.encode("utf-8")).hexdigest()
     try:
@@ -52,10 +61,10 @@ def _emit_plan_review_reference(
         chat_id = 1
     ts = utc_now_iso()
     payload = {
-        "type": "review_reference", "surface": "plan_review",
+        "type": "review_reference", "surface": surface,
         "task_id": str(task_id or ""), "chat_id": chat_id,
         "presentation_owner_task_id": str(task_id or ""),
-        "review_fingerprint": str((attempt or {}).get("fingerprint") or ""),
+        "review_fingerprint": fingerprint,
         "state_revision": revision, "ts": ts,
     }
     raw_root = (
@@ -65,7 +74,7 @@ def _emit_plan_review_reference(
     )
     if raw_root:
         # Existing progress JSONL is the reconnect/history rail. The row is an
-        # opaque invalidation only; the task result remains the sole Plan state.
+        # opaque invalidation only; the task result remains the read-side owner.
         try:
             written = append_jsonl(pathlib.Path(raw_root) / "logs" / "progress.jsonl", {
                 **payload,
@@ -73,12 +82,12 @@ def _emit_plan_review_reference(
                 "user_id": 0, "text": "", "content": "", "format": "",
             })
         except Exception:
-            log.warning("Failed to append plan-review progress reference", exc_info=True)
+            log.warning("Failed to append review progress reference", exc_info=True)
         else:
             if not written:
-                log.warning("Failed to append plan-review progress reference")
+                log.warning("Failed to append review progress reference")
     emit_log_event(
-        event_queue, payload, log_label="plan-review state reference",
+        event_queue, payload, log_label=f"{surface.replace('_', '-')} state reference",
     )
 
 

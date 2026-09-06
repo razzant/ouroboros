@@ -105,10 +105,20 @@ def _parent_intent_fact(ctx: Any) -> dict[str, Any]:
 
 
 def _time_fact(ctx: Any) -> dict[str, Any]:
-    try:
-        from ouroboros.task_pacing import build_budget_snapshot, resolve_budget_profile
+    """The task's deadline window, OBSERVED: this fact writes nothing, so it
+    reads through the observation variants of both readers — never the emitting
+    ``resolve_budget_profile`` (deprecation row) or the latching
+    ``build_budget_snapshot`` (fallback anchor).
 
-        snapshot = build_budget_snapshot(ctx, profile=resolve_budget_profile(ctx))
+    Disclosed consequence: a metadata-poor task (no ``created_at``/
+    ``started_at`` and no anchor latched yet) reports ``state: "not_set"``
+    until a path that OWNS a mutation — the acceptance launch — latches the
+    anchor. A poll answering the same question twice never changes its own
+    next answer."""
+    try:
+        from ouroboros.task_pacing import observe_budget_profile, observe_budget_snapshot
+
+        snapshot = observe_budget_snapshot(ctx, profile=observe_budget_profile(ctx))
         if not snapshot.has_deadline:
             return {
                 "state": "not_set", "remaining_sec": None,
@@ -130,12 +140,19 @@ def _time_fact(ctx: Any) -> dict[str, Any]:
 
 
 def _settled_spend_fact(ctx: Any, root_task_id: str) -> dict[str, Any]:
+    """The tree's ledger-accounted spend, read through the canonical locked reader
+    (``usage_accounting.usage_breakdown``) in every state — an absent ledger is the reader's own
+    known-zero. The fact writes nothing of its own; it inherits the reader's bounded maintenance —
+    today: the torn-tail quarantine after a SINGLE crash mid-append (a crash inside that repair, a
+    torn quarantine sink, is a known residual, issue #586), the empty
+    ``state/`` lock directory on a never-initialized root, and removal of a stale
+    ``usage_attempts.lock`` past the 90 s window (``usage_ledger._locked`` →
+    ``platform_layer.acquire_exclusive_file_lock``, stale-age unlink) — each pinned by a regression."""
     try:
         from ouroboros.usage_accounting import usage_breakdown
 
-        projection = usage_breakdown(
-            custody.custody_root(ctx), root_task_id=root_task_id,
-        )
+        root = custody.custody_root(ctx)
+        projection = usage_breakdown(root, root_task_id=root_task_id)
         integrity = bool(projection.get("integrity_degraded"))
         unknown = int(projection.get("unknown_unmetered") or 0)
         return {
@@ -242,7 +259,16 @@ def _active_descendants_fact(ctx: Any) -> dict[str, Any]:
 
 
 def coordination_live_context(ctx: Any) -> dict[str, Any]:
-    """One LLM-first planning snapshot for startup and meaningful nanny wakes."""
+    """One LLM-first planning snapshot for startup and meaningful nanny wakes.
+
+    Polling writes nothing of its own; it inherits the canonical usage-ledger reader's bounded
+    maintenance — today: the torn-tail quarantine after a SINGLE crash mid-append
+    (``usage_ledger._read_records_locked``, identical for every reader; a crash inside that repair
+    is a known residual, issue #586), the empty ``state/`` lock directory
+    on a never-initialized root, and removal of a stale ``usage_attempts.lock`` past the 90 s window
+    (``usage_ledger._locked`` → ``platform_layer.acquire_exclusive_file_lock``, stale-age unlink) —
+    each pinned by a regression; the settled-spend fact reads the ledger through that reader.
+    """
 
     root_task_id = _coordination_root_id(ctx)
     try:

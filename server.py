@@ -1,7 +1,7 @@
 """Self-editable Starlette/uvicorn entry point for UI and supervisor runtime."""
 
 import asyncio
-import base64
+import base64  # noqa: F401
 import json
 import logging
 import socket
@@ -43,9 +43,65 @@ from ouroboros.gateway.ws import (
     set_event_loop as _set_ws_event_loop,
 )
 
+from ouroboros.server_process import (  # noqa: F401
+    DATA_DIR,
+    _owner_restart_requested,
+    _request_restart_exit,
+    _restart_requested,
+    _supervisor_stop,
+    log,
+)
+from ouroboros.server_routing_context import (  # noqa: F401
+    _active_direct_root,
+    _addressable_root_tasks,
+    _chat_running_tasks,
+    _clip_marked,
+    _decision_turn_metadata,
+    _latest_project_task_result,
+    _main_routing_manifest,
+    _owner_binding_chat_id,
+    _project_id_for_registered_chat,
+    _reserved_project_for_chat,
+    _scoped_task_metadata,
+    _task_belongs_to_chat,
+    _task_result_ground_truth,
+)
+from ouroboros.server_owner_routing import (  # noqa: F401
+    _owner_evolution_stop,
+    _record_routing_receipt,
+    _route_owner_message,
+    _route_project_chat_to_running_task,
+    _stage_mailbox_attachments,
+)
+from ouroboros.server_liveness import (  # noqa: F401
+    _alert_chat_turn_wedge,
+    _chat_turn_wedged,
+    _start_supervisor_liveness_watchdog,
+    _supervisor_loop_stalled,
+)
+from ouroboros.server_maintenance import (  # noqa: F401
+    _LAST_CANCEL_INTENT_SWEEP,
+    _installed_skill_names,
+    _periodic_supervisor_maintenance,
+    _periodic_zombie_reconcile,
+    _prune_delegated_snapshots,
+    _reconcile_delegated_runs,
+    _resume_interrupted_project_deletions,
+    _run_startup_task_recovery,
+    _startup_retired_settings_notice,
+    _startup_custody_sweep,
+    _startup_prune_sweeps,
+    _startup_worktree_prune,
+)
+from ouroboros.server_restart import (  # noqa: F401
+    _live_running_task_ids,
+    _managed_update_pending_kwargs,
+    _safe_restart_serialized,
+    _shutdown_supervisor_event_bus,
+    _shutdown_task_cleanup_args,
+)
+
 REPO_DIR = pathlib.Path(os.environ.get("OUROBOROS_REPO_DIR", pathlib.Path(__file__).parent))
-DATA_DIR = pathlib.Path(os.environ.get("OUROBOROS_DATA_DIR",
-    pathlib.Path.home() / "Ouroboros" / "data"))
 DEFAULT_HOST = os.environ.get("OUROBOROS_SERVER_HOST", "127.0.0.1")
 DEFAULT_PORT = int(os.environ.get("OUROBOROS_SERVER_PORT", "8765"))
 PORT_FILE = DATA_DIR / "state" / "server_port"
@@ -83,15 +139,9 @@ for _handler in logging.getLogger().handlers:
 # the URL path, so even redacted lines are noise at this level.
 logging.getLogger("httpx").setLevel(logging.WARNING)
 logging.getLogger("httpcore").setLevel(logging.WARNING)
-log = logging.getLogger("server")
 
 RESTART_EXIT_CODE = 42
 PANIC_EXIT_CODE = 99
-_restart_requested = threading.Event()
-# Set only when the OWNER asked for the restart (the chat Restart button, and the
-# control endpoints that restart on the owner's behalf). The single fact the
-# re-exec needs to decide whether the runtime-mode ratchet pin rides along.
-_owner_restart_requested = threading.Event()
 _planned_delegate_restart_transaction_id = ""
 _LAUNCHER_MANAGED = str(os.environ.get("OUROBOROS_MANAGED_BY_LAUNCHER", "") or "").strip() == "1"
 
@@ -113,29 +163,6 @@ def _has_active_evolution_transaction() -> bool:
         return isinstance(tx, dict) and not str(tx.get("commit_sha") or "").strip()
     except Exception:
         return False
-
-
-def _installed_skill_names():
-    """Names of skills currently installed ON DISK (disk-derived, not in-memory).
-
-    Passed to the process-custody reaper so it can tell which skill-companion
-    orphans are safe to reap (owner uninstalled). Disk-derived so it is correct
-    independent of in-memory extension-reload timing; returns None on any failure
-    so the reaper fails toward KEEP (never mass-kills live skills' companions).
-    """
-    try:
-        from ouroboros.config import get_skills_repo_path
-        from ouroboros.skill_loader import discover_skills
-
-        names = {s.name for s in discover_skills(DATA_DIR, repo_path=get_skills_repo_path())}
-        # Coalesce an EMPTY result to None ("unknown"), NOT "everything
-        # uninstalled": discover_skills returns [] without raising when the skills
-        # dir is momentarily unavailable; treating that as an empty install set
-        # would let an enforced reap mass-kill live companions. None ⇒ keep-all.
-        return names or None
-    except Exception:
-        log.debug("Could not compute installed skill names for custody reaper", exc_info=True)
-        return None
 
 
 def _restart_current_process(host: str, port: int) -> None:
@@ -213,6 +240,7 @@ def _start_supervisor_if_needed(settings: dict) -> bool:
     if _supervisor_thread and _supervisor_thread.is_alive():
         return False
     _supervisor_error = None
+    _supervisor_stop.clear()  # in-process revival after a teardown-stopped generation
     _supervisor_thread = threading.Thread(
         target=_run_supervisor,
         args=(settings,),
@@ -221,1387 +249,6 @@ def _start_supervisor_if_needed(settings: dict) -> bool:
     )
     _supervisor_thread.start()
     return True
-
-
-def _task_belongs_to_chat(ctx: Any, task_id: str, task_obj: Dict[str, Any], chat_id: int) -> bool:
-    try:
-        if int(task_obj.get("chat_id") or 0) == int(chat_id or 0):
-            return True
-    except (TypeError, ValueError):
-        pass
-    try:
-        from ouroboros.projects_registry import project_chat_for_task
-
-        return int(project_chat_for_task(ctx.DRIVE_ROOT, task_id) or 0) == int(chat_id or 0)
-    except Exception:
-        return False
-
-
-def _active_direct_root(ctx: Any) -> Dict[str, Any]:
-    """Snapshot the one in-process direct root without creating queue state."""
-    try:
-        agent = ctx.get_chat_agent()
-        lock = getattr(agent, "_owner_message_admission_lock", None)
-        if lock is None:
-            return {}
-        with lock:
-            task_id = str(getattr(agent, "_current_task_id", "") or "").strip()
-            if (
-                not getattr(agent, "_busy", False)
-                or not getattr(agent, "_accepting_owner_messages", False)
-                or not task_id
-            ):
-                return {}
-            metadata = getattr(agent, "_current_task_metadata", {})
-            metadata = metadata if isinstance(metadata, dict) else {}
-            return {
-                "task_id": task_id,
-                "status": "running",
-                "title": _clip_marked(metadata.get("title"), 120),
-                "objective": _clip_marked(getattr(agent, "_current_task_text", ""), 600),
-                "project_id": str(metadata.get("project_id") or ""),
-                "chat_id": int(getattr(agent, "_current_chat_id", 0) or 0),
-                "started_at": float(getattr(agent, "_task_started_ts", 0.0) or 0.0),
-                "steerable": True,
-                "direct_chat": True,
-            }
-    except Exception:
-        return {}
-
-
-def _addressable_root_tasks(ctx: Any, chat_id: Optional[int] = None) -> list:
-    """Compact RUNNING+PENDING owner-root manifest, without choosing a target."""
-    out: list = []
-    seen: set[str] = set()
-
-    def _add(task_id: Any, task_obj: Any, status: str, started_at: Any = None) -> None:
-        tid = str(task_id or "").strip()
-        if not tid or tid in seen or not isinstance(task_obj, dict):
-            return
-        if task_obj.get("_is_direct_chat") or str(task_obj.get("delegation_role") or "") == "subagent":
-            return
-        if chat_id is not None and not _task_belongs_to_chat(ctx, tid, task_obj, int(chat_id or 0)):
-            return
-        objective = str(
-            task_obj.get("objective") or task_obj.get("description") or task_obj.get("text") or ""
-        ).strip()
-        out.append({
-            "task_id": tid,
-            "status": status,
-            "title": _clip_marked(task_obj.get("title"), 120),
-            "objective": _clip_marked(objective, 600),
-            "project_id": str(task_obj.get("project_id") or ""),
-            "started_at": started_at,
-            "steerable": True,
-        })
-        seen.add(tid)
-
-    for tid, running in list(getattr(ctx, "RUNNING", {}).items()):
-        if not isinstance(running, dict):
-            continue
-        task_obj = running.get("task") if isinstance(running.get("task"), dict) else running
-        _add(tid, task_obj, "running", running.get("started_at"))
-    for pending in list(getattr(ctx, "PENDING", []) or []):
-        if isinstance(pending, dict):
-            _add(pending.get("id"), pending, "pending", pending.get("queued_at"))
-    direct = _active_direct_root(ctx)
-    if direct and str(direct.get("task_id") or "") not in seen:
-        if chat_id is None or int(direct.get("chat_id") or 0) == int(chat_id or 0):
-            out.append(direct)
-    return out
-
-
-def _stage_mailbox_attachments(
-    ctx: Any,
-    task_drive: pathlib.Path,
-    task_id: str,
-    task_metadata: Any,
-    image_data: Any = None,
-) -> tuple[str, list, str]:
-    """Stage one routed turn's files into the existing task artifact store.
-
-    Returns ``(attachment_note, staged_manifest, rendered_report)`` — the manifest is kept so a
-    refused admission (the cancel-pending re-check inside the mailbox
-    transaction) can remove exactly the files this call staged (GR2-9).
-    """
-    metadata = task_metadata if isinstance(task_metadata, dict) else {}
-    uploads = list(metadata.get("chat_attachment_uploads") or [])
-    temp_source: Optional[pathlib.Path] = None
-    if image_data and not uploads:
-        # Non-Web transports may carry an inline image rather than an uploaded
-        # path. Materialise it only long enough for the canonical staging helper
-        # to copy it into the addressed task's artifact store.
-        try:
-            raw = base64.b64decode(str(image_data[0] or ""), validate=True)
-            if raw and len(raw) <= 50 * 1024 * 1024:
-                mime = str(image_data[1] or "image/jpeg").lower()
-                suffix = ".png" if "png" in mime else ".webp" if "webp" in mime else ".jpg"
-                temp_source = pathlib.Path(ctx.DRIVE_ROOT) / "uploads" / f"routed-{uuid.uuid4().hex}{suffix}"
-                temp_source.parent.mkdir(parents=True, exist_ok=True)
-                with temp_source.open("xb") as handle:
-                    handle.write(raw)
-                    handle.flush()
-                    os.fsync(handle.fileno())
-                uploads.append({"path": str(temp_source), "label": "owner image"})
-        except Exception:
-            log.warning("Unable to stage routed inline image for task %s", task_id, exc_info=True)
-    try:
-        if not uploads:
-            return "", [], ""
-        from ouroboros.artifacts import stage_task_attachments
-        from ouroboros.gateway.tasks import _render_attachment_lines
-
-        manifest = stage_task_attachments(task_drive, task_id, uploads)
-        rendered = _render_attachment_lines(manifest)
-        note = f"\n\n[ATTACHMENTS]\n{rendered}\n[END_ATTACHMENTS]" if rendered else ""
-        return note, manifest, rendered
-    finally:
-        if temp_source is not None:
-            try:
-                temp_source.unlink(missing_ok=True)
-            except OSError:
-                log.debug("Unable to remove routed attachment staging source", exc_info=True)
-
-
-def _route_project_chat_to_running_task(
-    ctx: Any,
-    chat_id: int,
-    message: str,
-    client_message_id: str = "",
-    *,
-    task_metadata: Any = None,
-    image_data: Any = None,
-) -> str:
-    """Deliver a Project follow-up to the sole RUNNING/PENDING root mailbox.
-
-    Multi-project (v6.32.0): a focused project room with exactly ONE active pooled
-    task IS that task's context, so a follow-up is delivered to it as a TRANSPORT
-    invariant (the loop drains the mailbox every round) — there is no routing CHOICE
-    to make. But when the room has ZERO or MORE THAN ONE steerable task, picking a
-    target is a JUDGMENT, and code must never make it mechanically (BIBLE P5 LLM-first,
-    v6.34.0 WS1): this returns "" so the message flows to the decision turn, where the
-    agent sees `current_chat.running_tasks` and chooses `steer_task` / `promote_chat_to_task`.
-    Returns the delivered task id, or "" (no delivery — fall through to the decision lane).
-
-    A chat is a project thread by REGISTRY membership, not a bare numeric range —
-    large external-transport (Telegram-style) chat ids must not be misclassified and
-    have their owner messages swallowed.
-    """
-    try:
-        if not _project_id_for_registered_chat(ctx, chat_id):
-            return ""
-    except Exception:
-        return ""
-    try:
-        steerable = _addressable_root_tasks(ctx, chat_id)
-        # Exactly one candidate => unambiguous transport. Zero or many => a routing
-        # decision the AGENT must make (P5/WS1), so do not deliver here.
-        if len(steerable) != 1:
-            return ""
-        candidate = steerable[0]
-        tid = str(candidate["task_id"])
-        direct_agent = None
-        direct_lock = None
-        if candidate.get("direct_chat"):
-            direct_agent = ctx.get_chat_agent()
-            direct_lock = getattr(direct_agent, "_owner_message_admission_lock", None)
-            if direct_lock is None:
-                return ""
-        task_obj: Dict[str, Any] = {}
-        running = getattr(ctx, "RUNNING", {}).get(tid)
-        if isinstance(running, dict):
-            task_obj = running.get("task") if isinstance(running.get("task"), dict) else running
-        if not task_obj:
-            task_obj = next(
-                (row for row in list(getattr(ctx, "PENDING", []) or []) if str(row.get("id") or "") == tid),
-                {},
-            )
-        from ouroboros.project_dialogue import routing_target_label
-
-        target_label = routing_target_label(
-            ctx.DRIVE_ROOT,
-            "mailbox_delivery",
-            tid,
-            task=task_obj or candidate,
-            project_id=str((task_obj or candidate).get("project_id") or ""),
-        )
-        from ouroboros.owner_mailbox import write_owner_message
-        from supervisor.queue import (
-            ACCEPTANCE_FENCES,
-            _queue_lock,
-            _task_drive_for_task,
-            persist_queue_snapshot,
-        )
-
-        # Active drive (child drive for forked/workspace tasks) — mirror
-        # forward_to_worker / steer_task so the mailbox lands where the task
-        # actually drains it, not the canonical root. A stable msg_id derived from
-        # client_message_id makes this 1:1 delivery idempotent — a WebSocket retry of
-        # the same message can't double-deliver (drain_owner_entries dedups by msg_id),
-        # matching steer_task's contract.
-        direct_lock_held = False
-        queue_lock_held = False
-        fence_generation_changed = False
-        active_fence = None
-        if direct_lock is not None:
-            direct_lock.acquire()
-            direct_lock_held = True
-            if not (
-                getattr(direct_agent, "_busy", False)
-                and getattr(direct_agent, "_accepting_owner_messages", False)
-                and str(getattr(direct_agent, "_current_task_id", "") or "") == tid
-            ):
-                direct_lock.release()
-                direct_lock_held = False
-                return ""
-        task_drive = pathlib.Path(ctx.DRIVE_ROOT) if direct_lock_held else _task_drive_for_task(task_obj, tid)
-        msg_id = f"{client_message_id}:{tid}" if client_message_id else None
-        staged_manifest: list = []
-        attachment_report = ""
-        message_written = False
-        cancel_refused_in_txn = False
-
-        def _drop_staged_inputs() -> None:
-            # GR2-9: the admission was refused, so the files staged for this
-            # message must not linger in the dying task's artifact store.
-            if not staged_manifest:
-                return
-            try:
-                from ouroboros.artifacts import remove_staged_attachments
-
-                remove_staged_attachments(staged_manifest)
-            except Exception:
-                log.debug("staged-attachment cleanup failed for %s", tid, exc_info=True)
-
-        try:
-            # GR2-9 ordering: check cancellation BEFORE staging — the old order
-            # copied the owner's files into the artifact store of a task whose
-            # cancellation was already pending, then refused the message. The
-            # cheap up-front check runs off the lock; the transactional
-            # re-checks below still run and remove the staged inputs on refusal.
-            from ouroboros.cancel_intents import cancel_pending
-
-            if cancel_pending(ctx.DRIVE_ROOT, tid):
-                log.info("Mailbox follow-up refused for %s: cancel pending (pre-staging)", tid)
-                return ""
-            attachment_note, staged_manifest, attachment_report = _stage_mailbox_attachments(
-                ctx, task_drive, tid, task_metadata, image_data,
-            )
-            if direct_lock_held:
-                # AR2-6 (fable): the direct-agent lane used to skip the
-                # cancel-pending admission check the queue lane makes below — a
-                # direct turn whose cancellation is pending must not accept a
-                # new owner message either. Same predicate, same honest
-                # fall-through to the direct chat lane.
-                if cancel_pending(ctx.DRIVE_ROOT, tid):
-                    log.info("Mailbox follow-up refused for %s: cancel pending (direct lane)", tid)
-                    _drop_staged_inputs()
-                    return ""
-            if not direct_lock_held:
-                _queue_lock.acquire()
-                queue_lock_held = True
-                live_meta = getattr(ctx, "RUNNING", {}).get(tid)
-                still_pending = any(
-                    isinstance(row, dict) and str(row.get("id") or "") == tid
-                    for row in list(getattr(ctx, "PENDING", []) or [])
-                )
-                if live_meta is None and not still_pending:
-                    return ""
-                # Phase A: a task whose cancellation is PENDING must not accept a
-                # new owner message — same refusal the steer_task route makes,
-                # checked inside this admission transaction. Falling through to
-                # the direct lane is the honest outcome: the follow-up is
-                # answered in chat instead of handed to a dying task.
-                if cancel_pending(ctx.DRIVE_ROOT, tid):
-                    log.info("Mailbox follow-up refused for %s: cancel pending", tid)
-                    cancel_refused_in_txn = True
-                    return ""
-                fence_root = str(task_obj.get("root_task_id") or tid)
-                active_fence = ACCEPTANCE_FENCES.get(fence_root)
-                if isinstance(active_fence, dict) and str(active_fence.get("status") or "") == "sealed":
-                    return ""
-            if not write_owner_message(
-                task_drive, f"{message}{attachment_note}", tid, msg_id=msg_id,
-                client_surface=(
-                    dict(task_metadata["client_surface"])
-                    if isinstance(task_metadata, dict) and isinstance(task_metadata.get("client_surface"), dict)
-                    else None
-                ),
-                attachment_manifest=staged_manifest if staged_manifest else None,
-            ):
-                return ""
-            message_written = True
-            if direct_lock_held:
-                direct_agent._owner_message_generation = int(
-                    getattr(direct_agent, "_owner_message_generation", 0) or 0
-                ) + 1
-            else:
-                if isinstance(active_fence, dict) and str(active_fence.get("status") or "") == "active":
-                    active_fence["owner_message_generation"] = int(
-                        active_fence.get("owner_message_generation") or 0
-                    ) + 1
-                    fence_generation_changed = True
-        finally:
-            if queue_lock_held:
-                _queue_lock.release()
-            if direct_lock_held:
-                direct_lock.release()
-            if cancel_refused_in_txn:
-                # After the lock release: unlinking staged files is file I/O the
-                # global queue lock should not wait on.
-                _drop_staged_inputs()
-            elif staged_manifest and not message_written:
-                _drop_staged_inputs()
-        if fence_generation_changed:
-            persist_queue_snapshot(reason="acceptance_fence_owner_message")
-        if isinstance(task_metadata, dict) and staged_manifest:
-            task_metadata["_attachment_manifest"] = [
-                dict(item) for item in staged_manifest if isinstance(item, dict)
-            ]
-            task_metadata["_attachment_report"] = attachment_report
-        if isinstance(task_metadata, dict):
-            task_metadata["_routing_target_label"] = target_label
-        if attachment_report:
-            try:
-                ctx.send_with_budget(
-                    chat_id,
-                    f"📎 Attachment staging report for {target_label or 'Task'}:\n"
-                    f"{attachment_report}",
-                )
-            except Exception:
-                log.debug("Mailbox attachment report notice failed for %s", tid, exc_info=True)
-        return tid
-    except Exception:
-        log.debug("Mailbox follow-up routing failed; falling back to direct lane", exc_info=True)
-    return ""
-
-
-def _owner_evolution_stop(ctx: Any, chat_id: int) -> str:
-    """The ``/evolve off`` stop transaction; returns the final status wording.
-
-    Cancels live evolution work BEFORE the terminal campaign close:
-    ``complete_evolution_campaign`` runs the per-cycle worktree cleanup, which
-    skips while a task still holds the shared worktree — so the running cycle
-    must be gone first. PENDING evolution tasks go through the SAME durable
-    intent + typed custody (GR2-13); the old in-place prune left them with no
-    intent, no terminal result and no ``task_done``, and a stop with still-live
-    leftovers was declared clean.
-    """
-    stop_incomplete = False
-    try:
-        from supervisor.queue import evolution_stop_report, stop_evolution_tasks
-        from ouroboros.post_task_evolution import drop_pending_request
-
-        # Fast path: drop any queued post-task promotion so it cannot re-arm on
-        # the next boot tick (the evolution_owner_stopped flag is the durable backstop).
-        drop_pending_request(ctx.DRIVE_ROOT)
-        stopped = stop_evolution_tasks("disabled via owner chat")
-        ctx.sort_pending()
-        ctx.persist_queue_snapshot(reason="evolve_off")
-        stop_lines, stop_incomplete = evolution_stop_report(stopped)
-        for line in stop_lines:
-            ctx.send_with_budget(chat_id, line)
-    except Exception:
-        log.warning("Evolution stop transaction failed", exc_info=True)
-        stop_incomplete = True
-    try:
-        from supervisor.evolution_lifecycle import complete_evolution_campaign
-
-        if stop_incomplete:
-            # GR3-3: an INCOMPLETE stop must not close the campaign — a terminal
-            # "stopped" over still-live evolution work declares a clean ending
-            # that did not happen. The campaign stays open; the durable
-            # evolution_owner_stopped flag already blocks new cycles, and the
-            # owner-stop backstop (supervisor/events.py, on the live task's own
-            # settle) closes the campaign once nothing is live.
-            log.warning(
-                "Evolution stop is incomplete; campaign left open for the "
-                "settle-time owner-stop backstop",
-            )
-        else:
-            # Terminal close (not a resumable pause): /evolve start mints a FRESH
-            # campaign rather than resurrecting this one.
-            complete_evolution_campaign("disabled via owner chat", status="stopped")
-    except Exception:
-        log.warning("Failed to update evolution campaign state", exc_info=True)
-    if stop_incomplete:
-        return ("OFF (mode disabled) — but the stop is INCOMPLETE: see the "
-                "still-live task(s) above. The campaign stays open until they "
-                "settle. Post-task auto-evolution stays paused until /evolve start")
-    return "OFF — post-task auto-evolution also paused until /evolve start"
-
-
-def _clip_marked(value: str, limit: int) -> str:
-    """Clip a routing/recognition string but NEVER silently: an explicit omission
-    marker keeps a decision-context field honest (no silent ``[:N]`` truncation of a
-    cognitive/routing artifact — DEVELOPMENT.md). The marker + the full task_id keep
-    enough signal for the agent to disambiguate the steer target."""
-    s = str(value or "").strip()
-    if len(s) <= limit:
-        return s
-    return s[:limit] + f" …[+{len(s) - limit} chars omitted]"
-
-
-def _chat_running_tasks(ctx: Any, chat_id: int) -> list:
-    """Structural snapshot of the owner's RUNNING root tasks in THIS chat (id +
-    objective + recency). The decision turn reads this from runtime context to
-    pick a steer_task target by its own judgment — code only exposes the state,
-    it never auto-chooses (BIBLE P5). Direct in-process turns and subagents are
-    not pooled RUNNING tasks and are excluded."""
-    return [row for row in _addressable_root_tasks(ctx, chat_id) if row.get("status") == "running"]
-
-
-def _task_result_ground_truth(row: Dict[str, Any]) -> Dict[str, Any]:
-    """Bounded typed projection of one task result for a routing/promote turn:
-    identity, outcome, and WHERE THE WORK LIVES (workspace facts + artifact refs).
-    Never raw result text — a router turn that reconstructs prior work from chat
-    memory instead of these facts invents false premises (the saga's "continue"
-    promotion rebuilt a finished game from scratch)."""
-    bundle = row.get("artifact_bundle") if isinstance(row.get("artifact_bundle"), dict) else {}
-    artifacts = bundle.get("artifacts") if isinstance(bundle.get("artifacts"), list) else []
-    meta = row.get("metadata") if isinstance(row.get("metadata"), dict) else {}
-    preflight = meta.get("workspace_preflight") if isinstance(meta.get("workspace_preflight"), dict) else {}
-    git = preflight.get("git") if isinstance(preflight.get("git"), dict) else {}
-    task_id = str(row.get("task_id") or row.get("id") or "")
-    human_label = _clip_marked(
-        row.get("title") or row.get("objective") or row.get("description") or task_id, 120,
-    )
-    out = {
-        "task_id": task_id,
-        "status": str(row.get("status") or ""),
-        "title": _clip_marked(row.get("title"), 120),
-        "objective": _clip_marked(row.get("objective") or row.get("description"), 300),
-        "project_id": str(row.get("project_id") or ""),
-        "reason_code": str(row.get("reason_code") or ""),
-        "workspace_root": str(row.get("workspace_root") or ""),
-        "workspace_mode": str(row.get("workspace_mode") or ""),
-        "artifact_status": str(row.get("artifact_status") or ""),
-        "artifact_refs": [
-            str(item.get("path") or item.get("name") or "")
-            for item in artifacts[:8] if isinstance(item, dict)
-        ],
-        "authority_source": {
-            "kind": "task_result",
-            "task_id": task_id,
-            "human_label": human_label,
-            "tool": "get_task_result",
-            "arguments": {"task_id": task_id, "include_authority": True},
-        },
-    }
-    if git:
-        out["workspace_git_at_start"] = {
-            "head": str(git.get("head") or ""),
-            "branch": str(git.get("branch") or ""),
-            "dirty": bool(git.get("dirty")),
-        }
-    return out
-
-
-def _latest_project_task_result(ctx: Any, project_id: str) -> Optional[Dict[str, Any]]:
-    """Newest task result bound to ``project_id`` WITHOUT replaying the whole
-    store (DEVELOPMENT "Projection over replay"). The registry row's durable
-    ``last_task_result_id`` pointer (stamped at project-task finalization) is
-    read FIRST — one direct file fetch, immune to how many newer foreign
-    results exist. Only when the pointer is absent or stale (missing/
-    unparseable/foreign file) does the fallback run: the bounded newest-64
-    mtime scan, then — for pre-pointer projects only — a disclosed full scan
-    of the store (the lazy self-heal for rows finalized before the pointer
-    existed; with zero matching results nothing is written back, so it repeats
-    per lookup until a matching result exists). Only the ABSENT-pointer case
-    writes the pointer back: a non-empty pointer that failed to resolve is
-    usually a split-drive result in flight (finalization stamps the pointer
-    before the canonical copy-back lands), so overwriting it from the scan
-    would permanently regress it to an older result — serve the scan hit and
-    let the pointer resolve itself. The steady state needs no
-    ouroboros/context_budget.py threshold enrollment (that table guards
-    recurring full-store replays)."""
-    from ouroboros.projects_registry import get_project, update_project
-    from ouroboros.task_results import load_task_result, task_results_dir
-    from ouroboros.utils import read_json_dict
-
-    try:
-        pointer = str((get_project(ctx.DRIVE_ROOT, project_id) or {}).get(
-            "last_task_result_id") or "").strip()
-    except Exception:
-        pointer = ""
-    if pointer:
-        pointed = load_task_result(ctx.DRIVE_ROOT, pointer)
-        if isinstance(pointed, dict) and str(pointed.get("project_id") or "") == project_id:
-            return pointed
-        log.debug(
-            "project last-task-result pointer for %r is stale (%s); "
-            "falling back to the bounded scan", project_id, pointer,
-        )
-
-    paths = list(task_results_dir(ctx.DRIVE_ROOT, create=False).glob("*.json"))
-    try:
-        paths.sort(key=lambda path: path.stat().st_mtime, reverse=True)
-    except OSError:
-        paths.sort(key=lambda path: path.name, reverse=True)
-    row = None
-    for path in paths[:64]:
-        candidate = read_json_dict(path)
-        if candidate is not None and str(candidate.get("project_id") or "") == project_id:
-            row = candidate
-            break
-    if row is None and len(paths) > 64:
-        log.info(
-            "project last-task-result: %r missed the bounded scan; running the "
-            "full-store self-heal scan (%d files)", project_id, len(paths),
-        )
-        for path in paths[64:]:
-            candidate = read_json_dict(path)
-            if candidate is not None and str(candidate.get("project_id") or "") == project_id:
-                row = candidate
-                break
-    if row is not None and not pointer:
-        try:
-            update_project(ctx.DRIVE_ROOT, project_id, last_task_result_id=str(
-                row.get("task_id") or row.get("id") or ""))
-        except Exception:
-            log.debug("project last-task-result pointer write-back failed", exc_info=True)
-    return row
-
-
-def _main_routing_manifest(ctx: Any) -> Dict[str, Any]:
-    """Bounded canonical facts for one Main-chat LLM routing decision."""
-    from ouroboros.projects_registry import list_projects
-    from ouroboros.task_results import list_task_results
-    from ouroboros.utils import iter_jsonl_objects
-
-    projects = [{
-        "project_id": str(row.get("id") or ""),
-        "name": _clip_marked(row.get("name"), 120),
-        "chat_id": int(row.get("chat_id") or 0),
-        "lifecycle": str(row.get("lifecycle") or "active"),
-        # Registry-canonical working folder: the router turn's ground truth for
-        # where a project's work lives (Q8-A).
-        "working_dir": str(row.get("working_dir") or ""),
-    } for row in list_projects(ctx.DRIVE_ROOT)]
-    roots = _addressable_root_tasks(ctx, None)
-
-    all_results = list_task_results(ctx.DRIVE_ROOT)
-    all_results.sort(key=lambda row: str(row.get("ts") or row.get("updated_at") or ""), reverse=True)
-    finals = [_task_result_ground_truth(row) for row in all_results[:16]]
-
-    dialogue_rows: list = []
-    chat_paths = sorted(
-        (pathlib.Path(ctx.DRIVE_ROOT) / "archive").glob("chat_*.jsonl"),
-        key=lambda path: path.name,
-    )[-2:] + [pathlib.Path(ctx.DRIVE_ROOT) / "logs" / "chat.jsonl"]
-    for path in chat_paths:
-        for row in iter_jsonl_objects(path):
-            text = str(row.get("text") or "").strip()
-            if text:
-                dialogue_rows.append({
-                    "ts": str(row.get("ts") or ""),
-                    "direction": str(row.get("direction") or ""),
-                    "chat_id": int(row.get("chat_id") or 1),
-                    "text": _clip_marked(text, 500),
-                    "task_id": str(row.get("task_id") or ""),
-                    "client_message_id": str(row.get("client_message_id") or ""),
-                })
-    dialogue = dialogue_rows[-20:]
-    return {
-        "projects": projects[:40],
-        "root_tasks": roots[:40],
-        "final_results": finals,
-        "recent_canonical_dialogue": dialogue,
-        "omissions": {
-            "projects": max(0, len(projects) - 40),
-            "root_tasks": max(0, len(roots) - 40),
-            "final_results": max(0, len(all_results) - 16),
-            "dialogue_rows": max(0, len(dialogue_rows) - 20),
-        },
-    }
-
-
-def _decision_turn_metadata(ctx: Any, chat_id: int, client_message_id: str, task_metadata: Any) -> Any:
-    """Enrich a chat turn's metadata with the structural facts the decision turn
-    needs: the RUNNING tasks in THIS chat (so it can steer_task the right one
-    instead of spawning a duplicate) and the originating message id (for idempotent
-    steer delivery). P5-clean: surfaces state only; the agent picks the target by
-    judgment among answer / steer_task / promote_chat_to_task / route_to_project."""
-    md = dict(task_metadata) if isinstance(task_metadata, dict) else {}
-    swarm_intent = bool(md.get("force_plan"))
-    addressable_here = _addressable_root_tasks(ctx, chat_id)
-    running_here = [row for row in addressable_here if row.get("status") == "running"]
-    project_id = str(md.get("project_id") or "").strip() or _project_id_for_registered_chat(
-        ctx, chat_id,
-    )
-    is_main_lane = not bool(project_id)
-    try:
-        # Every non-Project owner transport is the Main lane.  External transports
-        # commonly use a real provider chat id rather than Web's numeric ``1``;
-        # keying this decision to ``chat_id == 1`` made their canonical router see
-        # neither Projects nor globally addressable roots.
-        main_manifest = _main_routing_manifest(ctx) if is_main_lane else {}
-        if main_manifest and not (
-            main_manifest.get("projects") or main_manifest.get("root_tasks")
-        ):
-            main_manifest = {}
-    except Exception:
-        log.warning("Unable to build Main routing manifest", exc_info=True)
-        main_manifest = {"error": "routing_manifest_unavailable"} if is_main_lane else {}
-    if not swarm_intent and not addressable_here and not client_message_id and not main_manifest:
-        return task_metadata
-    if addressable_here:
-        md["current_chat"] = {
-            "chat_id": int(chat_id or 0),
-            "running_tasks": running_here,
-            "addressable_root_tasks": addressable_here,
-        }
-    if main_manifest:
-        md["main_routing_manifest"] = main_manifest
-    if project_id:
-        # Ground truth for a project-room "continue" decision (Q8-A): the thread's
-        # most recent task result as a bounded typed projection. Without it the
-        # router turn has only chat memory about where prior work lives.
-        try:
-            row = _latest_project_task_result(ctx, project_id)
-            if row is not None:
-                md["project_last_task_result"] = _task_result_ground_truth(row)
-        except Exception:
-            log.debug("project last-task-result projection failed", exc_info=True)
-    if client_message_id:
-        md["client_message_id"] = client_message_id
-    option_roots = (
-        list(main_manifest.get("root_tasks") or [])
-        if is_main_lane and isinstance(main_manifest, dict)
-        else addressable_here
-    )
-    manual_options = [] if swarm_intent else [
-        {
-            "action": "steer_task",
-            "task_id": row["task_id"],
-            "status": row["status"],
-            "title": row.get("title") or row.get("objective"),
-            "project_id": str(row.get("project_id") or ""),
-        }
-        for row in option_roots
-        if isinstance(row, dict) and row.get("task_id")
-    ]
-    if not swarm_intent and is_main_lane and isinstance(main_manifest, dict):
-        manual_options.extend({
-            "action": "new_task_in_project",
-            "project_id": str(row.get("project_id") or ""),
-            "project_name": str(row.get("name") or row.get("project_id") or "Project"),
-            "label": f"New task in {str(row.get('name') or 'Project')}",
-        } for row in list(main_manifest.get("projects") or []) if isinstance(row, dict))
-    elif project_id and not swarm_intent:
-        manual_options.append({
-            "action": "new_task_in_project",
-            "project_id": project_id,
-            "label": "New task in Project",
-        })
-    routing_contract = {
-        "llm_first": True,
-        "source_lane": "main" if is_main_lane else "project",
-        "valid_actions": (
-            (["promote_chat_to_task", "route_to_project"] if is_main_lane else ["promote_chat_to_task"])
-            if swarm_intent else
-            [
-                "answer_inline", "steer_task", "promote_chat_to_task", "route_to_project",
-                "needs_manual_target",
-            ]
-        ),
-        "on_uncertain_or_invalid_target": (
-            "promote_chat_to_task" if swarm_intent else "needs_manual_target"
-        ),
-        "manual_options": manual_options,
-    }
-    if not swarm_intent:
-        routing_contract["manual_target_tool"] = {"name": "route_to_project", "project_id": ""}
-    md["routing_contract"] = routing_contract
-    return md
-
-
-def _supervisor_loop_stalled(last_tick: float, now: float, deadline_sec: int) -> bool:
-    """True when the supervisor loop has not published a liveness tick within the
-    deadline (WS3). deadline_sec<=0 disables the watchdog."""
-    return deadline_sec > 0 and (now - last_tick) > deadline_sec
-
-
-def _chat_turn_wedged(busy: bool, last_activity_ts, now: float, deadline_sec: int) -> bool:
-    """True when an IN-PROCESS direct-chat turn is busy but its liveness tick has been
-    silent past the deadline (WS3). ``last_activity_ts is None`` => the turn has not
-    started its liveness loop yet (not wedged). deadline_sec<=0 disables the check."""
-    if not busy or last_activity_ts is None or deadline_sec <= 0:
-        return False
-    return (now - last_activity_ts) > deadline_sec
-
-
-def _alert_chat_turn_wedge(task_id, gap: float) -> None:
-    """WS3: a direct-chat turn is heartbeat-silent. New messages still get answered
-    (WS10 ephemeral decision turns), but a hung IN-PROCESS turn cannot be killed and
-    still holds the chat-agent lock, so admission cannot be freed in-process (full
-    kill-ability via out-of-process direct chat was deferred per owner). Surface it +
-    recommend /restart, which is the safe full recovery."""
-    from supervisor.state import append_jsonl, load_state
-    try:
-        append_jsonl(DATA_DIR / "logs" / "supervisor.jsonl", {
-            "ts": utc_now_iso(), "type": "chat_turn_wedge",
-            "task_id": str(task_id or ""), "silent_sec": round(gap, 1),
-        })
-    except Exception:
-        log.debug("chat-turn wedge log failed", exc_info=True)
-    try:
-        owner_chat = int((load_state() or {}).get("owner_chat_id") or 0)
-        if owner_chat:
-            from supervisor.message_bus import send_with_budget
-            send_with_budget(
-                owner_chat,
-                f"⚠️ A chat turn looks wedged (~{int(gap)}s with no heartbeat). New messages "
-                "still get answered, but the stuck turn can't be cleared in-process — /restart "
-                "to fully recover it.",
-                is_progress=True,
-                task_id=str(task_id or ""),
-                progress_meta={
-                    "task_incident": "chat_turn_wedge",
-                    "toast_once": f"{task_id or 'direct-chat'}:chat_turn_wedge",
-                },
-            )
-    except Exception:
-        log.debug("chat-turn wedge owner alert failed", exc_info=True)
-
-
-def _start_supervisor_liveness_watchdog(liveness: list, stop_event=None) -> None:
-    """Dedicated daemon thread (NOT inside the supervisor loop, so it fires even when
-    that loop stalls). It ALERTS the owner on two silent-wedge classes — a supervisor
-    loop stall (new-message intake starvation) and a heartbeat-silent in-process
-    direct-chat turn — converting a multi-hour silent wedge into an immediate signal.
-    It deliberately does NOT kill a hung thread or free the chat-agent lock: the wedged
-    turn holds that lock for its whole duration, so in-process admission-freeing is
-    unsafe (out-of-process direct chat for full kill-ability was deferred per owner);
-    WS10 ephemeral decision turns keep the chat responsive meanwhile. ``stop_event`` is
-    a PER-GENERATION token: when the supervisor loop that owns ``liveness`` exits (incl.
-    the crash-storm death path, which never sets the global restart flag), it is set so
-    this watchdog stops watching a now-stale liveness list (no false post-revival alert)."""
-    from ouroboros.config import get_supervisor_liveness_deadline_sec
-
-    deadline = get_supervisor_liveness_deadline_sec()
-    if deadline <= 0:
-        return
-
-    def _watch() -> None:
-        from supervisor.state import append_jsonl, load_state
-        interval = min(15, max(1, deadline // 3))
-        loop_alerted = False
-        wedged_task = None
-        while not _restart_requested.is_set() and not (stop_event is not None and stop_event.is_set()):
-            time.sleep(interval)
-            # ONE clock: both halves measure an ELAPSED GAP against stamps taken on
-            # the monotonic clock (the loop-liveness tick here, and the chat-turn
-            # heartbeat in agent.py), so a wall-clock jump — NTP step, DST/timezone
-            # change, manual set, VM resume — can neither fabricate a stall/wedge
-            # nor mask a real one on either half.
-            now = time.monotonic()
-            # (1) Supervisor loop stall — new-message intake starvation.
-            if _supervisor_loop_stalled(liveness[0], now, deadline):
-                if not loop_alerted:
-                    gap = now - liveness[0]
-                    log.error(
-                        "Supervisor loop STALLED ~%.0fs — new-message intake starved (WS10 "
-                        "ephemeral chat still answers); investigate a blocking step.", gap,
-                    )
-                    try:
-                        append_jsonl(DATA_DIR / "logs" / "supervisor.jsonl", {
-                            "ts": utc_now_iso(), "type": "supervisor_loop_stall", "stalled_sec": round(gap, 1),
-                        })
-                    except Exception:
-                        log.debug("loop-stall log failed", exc_info=True)
-                    try:
-                        owner_chat = int((load_state() or {}).get("owner_chat_id") or 0)
-                        if owner_chat:
-                            from supervisor.message_bus import send_with_budget
-                            send_with_budget(
-                                owner_chat,
-                                f"⚠️ My supervisor loop stalled for ~{int(gap)}s — new messages may be "
-                                "delayed. I recover on the next tick or a restart; investigating.",
-                                is_progress=True,
-                                progress_meta={
-                                    "task_incident": "supervisor_loop_stall",
-                                    # pid disambiguates server GENERATIONS: the monotonic stamp alone can
-                                    # repeat at a similar uptime offset across restarts, and the browser's
-                                    # toast-dedupe set outlives this process while the page stays open.
-                                    "toast_once": f"supervisor-loop-stall:{os.getpid()}:{int(liveness[0])}",
-                                },
-                            )
-                    except Exception:
-                        log.debug("loop-stall owner alert failed", exc_info=True)
-                    loop_alerted = True
-            else:
-                loop_alerted = False
-            # (2) In-process direct-chat turn wedge — a heartbeat-silent busy turn.
-            try:
-                from supervisor.workers import chat_turn_liveness
-                busy, turn_task, turn_ts = chat_turn_liveness()
-            except Exception:
-                busy, turn_task, turn_ts = (False, None, None)
-            if _chat_turn_wedged(busy, turn_ts, now, deadline):
-                if wedged_task != turn_task:  # alert once per wedged turn
-                    _alert_chat_turn_wedge(turn_task, now - (turn_ts or now))
-                    wedged_task = turn_task
-            elif not busy:
-                wedged_task = None
-
-    threading.Thread(target=_watch, name="supervisor-liveness-watchdog", daemon=True).start()
-
-
-_LAST_CANCEL_INTENT_SWEEP = [0.0]
-
-
-def _periodic_supervisor_maintenance(last_custody_reap: list, last_review_reconcile: list) -> None:
-    """Throttled periodic upkeep extracted from the supervisor loop: cancel-intent
-    watchdog and pending child-ref promotion replay (every 20s), custody reap of
-    orphaned task-scoped processes (every 600s) + review-job zombie reconcile
-    (every 300s). Each cadence gates itself via its own last-run marker."""
-    if time.time() - _LAST_CANCEL_INTENT_SWEEP[0] > 20:
-        _LAST_CANCEL_INTENT_SWEEP[0] = time.time()
-        try:
-            # Phase A watchdog: re-feed open durable cancel intents into custody
-            # (the ONE settle owner) so a lost control event can no longer wedge
-            # a cancellation forever — the Poltergeist incident class.
-            from supervisor.task_lifecycle import sweep_cancel_intents
-
-            outcomes = sweep_cancel_intents()
-            if outcomes:
-                log.info("Cancel-intent watchdog settled: %s", outcomes)
-        except Exception:
-            log.debug("Cancel-intent watchdog sweep failed", exc_info=True)
-        try:
-            # Phase A2/F7: re-enqueue terminal answers registered as OWED whose
-            # send never got confirmed (a crash between settle and send used to
-            # lose the owner's answer forever — the incident class itself).
-            from supervisor.terminal_delivery import replay_pending_deliveries
-
-            replay_pending_deliveries(DATA_DIR)
-        except Exception:
-            log.debug("Pending terminal-delivery replay failed", exc_info=True)
-        try:
-            from ouroboros.observability import retry_pending_child_ref_promotions
-
-            retry_pending_child_ref_promotions(DATA_DIR)
-        except Exception:
-            log.debug("Pending child-ref promotion retry failed", exc_info=True)
-    if time.time() - last_custody_reap[0] > 600:
-        last_custody_reap[0] = time.time()
-        try:
-            from ouroboros.process_custody import reap_orphaned_processes
-            from supervisor.queue import RUNNING as _running_tasks
-
-            live_tasks = set(_running_tasks.keys())
-            reap_orphaned_processes(
-                DATA_DIR, running_task_ids=live_tasks,
-                live_owner_skills=_installed_skill_names(),
-            )
-            # A delegated Claudexor run is an orphan under exactly the same predicate:
-            # its owning task is no longer running. It has no pid, so the process
-            # reaper cannot see it — but it is still spending quota and still writing.
-            _reconcile_delegated_runs(live_tasks)
-            _cursor_refresh_settled_terminals()
-        except Exception:
-            log.debug("Periodic custody reap failed", exc_info=True)
-    if time.time() - last_review_reconcile[0] > 300:
-        last_review_reconcile[0] = time.time()
-        _periodic_zombie_reconcile()
-
-
-def _reconcile_delegated_runs(running_task_ids: set) -> None:
-    """Settle or cancel delegated runs whose owning task is gone (startup + tick)."""
-    try:
-        from ouroboros.claudexor_daemon import ensure_owned_gateway
-        from ouroboros.delegate_custody import reconcile_orphaned_runs
-        from ouroboros.delegate_recovery import recoverable_task_ids
-
-        # The tick runs on the supervisor loop thread: a daemon sitting in its
-        # recovery-only admission window must not hold that thread for the default
-        # admission wait — skip-until-next-sweep is this caller's normal posture.
-        outcomes = reconcile_orphaned_runs(
-            DATA_DIR, running_task_ids=running_task_ids,
-            gateway_factory=lambda: ensure_owned_gateway(admission_wait_sec=0),
-            recoverable_task_ids=recoverable_task_ids(DATA_DIR),
-        )
-        if outcomes:
-            log.info("Delegated-run reconciliation handled %d orphan(s): %s", len(outcomes), outcomes)
-            # A run settled by this sweep may belong to a task that already wrote
-            # its terminal result with a non-empty unreconciled disclosure — the
-            # stored projection then lies forever (nanny-leaf S1). Audit-only
-            # refresh; never cancels.
-            from ouroboros.delegate_terminal import refresh_terminal_reconciliation
-
-            for tid in {str(o.get("task_id") or "") for o in outcomes
-                        if o.get("task_id") and (o.get("settled") or str(
-                            o.get("action") or "") in (
-                                "absent", "cancelled", "invocation_retired"))}:
-                try:
-                    refresh_terminal_reconciliation(DATA_DIR, tid)
-                except Exception:
-                    log.debug("Sweep terminal-result refresh failed for %s", tid, exc_info=True)
-    except Exception:
-        log.debug("Delegated-run reconciliation failed", exc_info=True)
-
-
-def _cursor_refresh_settled_terminals() -> None:
-    """Cursor-driven pass: runs settled OUTSIDE a generation's reconcile
-    outcomes (terminal-boundary settlements, earlier generations) never
-    reappear in the orphan sweep, so their tasks' stored evidence would stay
-    stale forever. Bounded to newly appended custody rows per tick. At BOOT
-    this runs AFTER the D1a backfill (see ``_startup_custody_sweep``), so a
-    same-generation heal keeps its pinned ``boot_backfill`` attribution and
-    the cursor's change-gated pass advances past it without a second write.
-    """
-    try:
-        from ouroboros.delegate_terminal import refresh_recently_settled_terminals
-
-        refreshed = refresh_recently_settled_terminals(DATA_DIR)
-        if refreshed:
-            log.info("Cursor refresh healed %d stale terminal result(s)", refreshed)
-    except Exception:
-        log.debug("Cursor terminal-refresh pass failed", exc_info=True)
-
-
-def _startup_custody_sweep() -> None:
-    """Both custody surfaces, swept once per generation at supervisor startup.
-
-    Nothing is running yet, so every ledgered process and every open delegated run is
-    by definition ownerless: the generation that was watching them did not survive.
-    """
-    try:
-        from ouroboros.process_custody import reap_orphaned_processes
-
-        reaped = reap_orphaned_processes(DATA_DIR, live_owner_skills=_installed_skill_names())
-        if reaped:
-            log.info("Process custody reaper killed %d orphaned process(es): %s", len(reaped), reaped)
-    except Exception:
-        log.debug("Process custody startup reap failed", exc_info=True)
-    _reconcile_delegated_runs(set())
-    try:
-        # D1a boot backfill, ONCE per generation and AFTER the orphan reconcile
-        # (so this generation's settlements are already visible to the audit):
-        # a run settled in a PREVIOUS generation never appears in any current
-        # pass's outcomes, so the sweep-side refresh above can never reach its
-        # task's stored disclosure — the backfill joins from the stored terminal
-        # results instead and heals every generation-crossing stale row.
-        from ouroboros.delegate_terminal import backfill_terminal_reconciliations
-
-        refreshed = backfill_terminal_reconciliations(DATA_DIR)
-        if refreshed:
-            log.info("Boot custody backfill refreshed %d stored disclosure(s): %s",
-                     len(refreshed), refreshed)
-    except Exception:
-        log.debug("Boot custody-disclosure backfill failed", exc_info=True)
-    _cursor_refresh_settled_terminals()
-    try:
-        # Phase A boot migration: legacy ``cancel_requested`` status latches
-        # become ordinary durable cancel intents; the supervisor watchdog then
-        # drives each through custody to a real settled outcome.
-        from ouroboros.cancel_intents import migrate_legacy_cancel_latches
-
-        migrated = migrate_legacy_cancel_latches(DATA_DIR)
-        if migrated:
-            log.info("Migrated %d legacy cancel latch(es) to durable intents: %s",
-                     len(migrated), migrated)
-    except Exception:
-        log.debug("Legacy cancel-latch migration failed", exc_info=True)
-    try:
-        # Boot half of the durable terminal outbox: an answer that was registered
-        # as owed but whose send never completed (crash between settle and send)
-        # is re-enqueued exactly once — the delivered registry suppresses a copy
-        # that actually landed.
-        from supervisor.terminal_delivery import replay_pending_deliveries
-
-        replay_pending_deliveries(DATA_DIR)
-    except Exception:
-        log.debug("Boot replay of pending terminal deliveries failed", exc_info=True)
-
-
-def _prune_delegated_snapshots() -> None:
-    """C1 delegated execution snapshots: GC cross-checked against custody.
-
-    A snapshot stays while its run is open/undisposed OR a pending invocation
-    names it; everything else (disposed, closed, refused) is torn down with its
-    pinned baseline ref. Fail-soft like every startup prune step — the guard
-    lives here so the startup sequence never dies on a GC error.
-
-    FAIL-CLOSED on an unreadable custody log (CR1-1): the keep-set comes from
-    replaying the custody rows, and ``_iter_rows`` swallows its own OSError —
-    right for the fail-soft readers, but here an unreadable log replays as
-    "no open runs", the keep-set goes EMPTY, and the prune destroys every
-    live snapshot with the child's only copy of its work. GC may delete only
-    over PROVEN settled && patch_disposed; an UNKNOWN custody state skips the
-    destructive prune entirely and says so loudly."""
-    try:
-        from ouroboros import delegate_custody as _delegate_custody
-        from ouroboros import subagent_worktrees as _snap_worktrees
-        from supervisor.state import append_jsonl
-
-        if _delegate_custody.custody_log_unreadable(DATA_DIR):
-            log.warning(
-                "Delegated snapshot prune SKIPPED: custody event log exists but "
-                "cannot be read, so open snapshots are unknowable (fail-closed)")
-            if not append_jsonl(DATA_DIR / "logs" / "events.jsonl", {
-                "ts": utc_now_iso(),
-                "type": "delegated_snapshot_prune_skipped",
-                "reason": "custody_log_unreadable",
-            }):
-                # CR2-2: the log is unwritable too — the promised durable row
-                # could not land. Escalate loudly; the skip itself already
-                # protects the open snapshots, so this stays fail-soft.
-                log.error(
-                    "Delegated snapshot prune skip could NOT be recorded durably: "
-                    "the delegated_snapshot_prune_skipped row was not written "
-                    "(custody event log unwritable). Open snapshots remain "
-                    "protected by the skip itself.")
-            return
-        snapshot_report = _snap_worktrees.prune_execution_snapshots(
-            _delegate_custody.open_snapshot_ids(DATA_DIR))
-        if snapshot_report.get("removed"):
-            append_jsonl(DATA_DIR / "logs" / "events.jsonl", {
-                "ts": utc_now_iso(),
-                "type": "delegated_snapshot_prune",
-                "report": snapshot_report,
-            })
-    except Exception:
-        log.debug("Delegated execution snapshot prune failed", exc_info=True)
-
-
-def _scoped_task_metadata(project_id: str, task_metadata: Any) -> Any:
-    """Bind a chat frame's task_metadata to the thread's project via chat_id (the
-    SSOT). A registered project chat scopes to its OWN project, overriding any
-    client-supplied project_id; a non-project chat DROPS an untrusted client
-    project_id (work is scoped to a project only via the promote_chat_to_task tool,
-    never a raw ws frame). Prevents a stale/malformed frame (chat_id A + project_id
-    B) from rendering in A while loading/writing project B's memory."""
-    if project_id:
-        return {**(task_metadata or {}), "project_id": project_id}
-    if task_metadata and task_metadata.get("project_id"):
-        return {k: v for k, v in task_metadata.items() if k != "project_id"}
-    return task_metadata
-
-
-def _owner_binding_chat_id(ctx: Any, chat_id: int, is_external_transport: bool) -> int:
-    """The owner's canonical chat for owner-targeted notices (restart, supervisor
-    death, consciousness). External transports bind to their own chat; a WEB owner
-    always binds to MAIN (1), never a project panel — so if the first post-reset
-    web message lands in a project room, owner notices still reach main."""
-    if not is_external_transport and _project_id_for_registered_chat(ctx, chat_id):
-        return 1
-    try:
-        return int(chat_id or 0)
-    except (TypeError, ValueError):
-        return 0
-
-
-def _project_id_for_registered_chat(ctx: Any, chat_id: int) -> str:
-    """Return the registered project id for a project chat_id, else ``""``.
-
-    NOT an isolation gate (full project awareness, v6.32.0): the one mind notices
-    EVERY human message via inject_observation, project rooms included. This just
-    classifies a chat as a project thread so the message is scoped to that project
-    (task_metadata.project_id) and routed to its panel. This active-only lookup is
-    paired with ``_reserved_project_for_chat`` for deleting/tombstoned IDs, so a
-    reserved chat cannot be resurrected through ordinary routing.
-    """
-    try:
-        from ouroboros.projects_registry import list_projects
-
-        cid = int(chat_id or 0)
-        for project in list_projects(ctx.DRIVE_ROOT):
-            try:
-                if int(project.get("chat_id") or 0) == cid:
-                    return str(project.get("id") or "").strip()
-            except (TypeError, ValueError):
-                continue
-    except Exception:
-        log.debug("Project chat_id lookup failed", exc_info=True)
-    return ""
-
-
-def _reserved_project_for_chat(ctx: Any, chat_id: int) -> Dict[str, Any]:
-    try:
-        from ouroboros.projects_registry import list_reserved_projects
-
-        cid = int(chat_id or 0)
-        for project in list_reserved_projects(ctx.DRIVE_ROOT):
-            try:
-                if int(project.get("chat_id") or 0) == cid:
-                    return dict(project)
-            except (TypeError, ValueError):
-                continue
-    except Exception:
-        log.debug("Reserved Project chat lookup failed", exc_info=True)
-    return {}
-
-
-def _record_routing_receipt(
-    bridge: Any,
-    ctx: Any,
-    *,
-    chat_id: int,
-    client_message_id: str,
-    action: str,
-    target: str = "",
-    target_label: str = "",
-    status: str,
-    persist: bool = True,
-    options: Optional[list] = None,
-    detail: str = "",
-    attachment_manifest: Optional[list] = None,
-) -> None:
-    """Emit a typed bubble-free ack and optionally persist its presentation state."""
-    if target and not str(target_label or "").strip():
-        from ouroboros.project_dialogue import routing_target_label
-
-        target_label = routing_target_label(ctx.DRIVE_ROOT, action, target)
-    if persist:
-        try:
-            from ouroboros.project_dialogue import append_chat_annotation
-
-            append_chat_annotation(
-                ctx.DRIVE_ROOT,
-                client_message_id,
-                action=action,
-                target=target,
-                target_label=target_label,
-                status=status,
-                detail=detail,
-                attachment_manifest=attachment_manifest,
-            )
-        except Exception:
-            log.debug("Routing annotation append failed", exc_info=True)
-    try:
-        ack = getattr(bridge, "send_routing_ack", None)
-        if callable(ack):
-            ack_kwargs = {
-                "client_message_id": client_message_id,
-                "action": action,
-                "target": target,
-                "target_label": target_label,
-                "status": status,
-            }
-            if options is not None:
-                ack_kwargs["options"] = options
-            if attachment_manifest is not None:
-                ack_kwargs["attachment_manifest"] = attachment_manifest
-            ack(
-                chat_id,
-                **ack_kwargs,
-            )
-        else:
-            broadcast = getattr(bridge, "broadcast", None)
-            if callable(broadcast):
-                payload = {
-                    "type": "message_annotation",
-                    "annotation_type": "routing_ack",
-                    "chat_id": int(chat_id or 0),
-                    "client_message_id": str(client_message_id or ""),
-                    "action": action,
-                    "target": target,
-                    "target_label": target_label,
-                    "status": status,
-                    "suppress_bubble": True,
-                }
-                if options is not None:
-                    payload["options"] = options
-                if attachment_manifest is not None:
-                    payload["attachment_manifest"] = attachment_manifest
-                broadcast(payload)
-    except Exception:
-        log.debug("Routing receipt broadcast failed", exc_info=True)
-
-
-def _route_owner_message(bridge: Any, ctx: Any, incoming: Dict[str, Any]) -> None:
-    """Route one non-command owner message through the canonical decision lane."""
-    chat_id = int(incoming["chat_id"])
-    text = str(incoming.get("text") or "")
-    image_caption = str(incoming.get("image_caption") or "")
-    client_message_id = str(incoming.get("client_message_id") or "")
-    image_data = incoming.get("image_data")
-    task_constraint = incoming.get("task_constraint")
-    task_metadata = incoming.get("task_metadata")
-    from ouroboros.contracts.task_constraint import normalize_task_constraint
-
-    normalized_constraint = normalize_task_constraint(task_constraint)
-    if normalized_constraint and normalized_constraint.mode == "skill_repair":
-        # Repair is already a typed, narrowly confined task request. Sending it
-        # through the conversation decision lane would combine skill_repair with
-        # _ephemeral_turn: ephemeral hides the repair mutators while heal mode
-        # blocks promotion. Promote it directly without weakening either policy.
-        # DELIBERATE: task_metadata (incl. any client_surface fact) is dropped on
-        # this branch — a repair task's objective is a fixed UI action and the
-        # sending surface adds nothing to it (same treatment as force_plan here).
-        from supervisor.events import _handle_promote_chat_to_task
-
-        ctx.consciousness.inject_observation(
-            f"Message from my human: {incoming.get('log_text') or ''}"
-        )
-        task_id = uuid.uuid4().hex[:16]
-        event = {
-            "type": "promote_chat_to_task",
-            "task_id": task_id,
-            "routing_token": uuid.uuid4().hex,
-            "objective": text or image_caption,
-            "chat_id": chat_id,
-            "client_message_id": client_message_id,
-            "task_constraint": task_constraint,
-            "routed_from_main": True,
-        }
-        origin_ref = incoming.get("origin_message_ref")
-        if isinstance(origin_ref, dict) and origin_ref:
-            event["source_ref"] = origin_ref
-            event["source_text"] = str(incoming.get("log_text") or "")
-        else:
-            event["origin_suppressed"] = True
-        try:
-            outcome = _handle_promote_chat_to_task(event, ctx)
-        except Exception:
-            log.warning("Direct skill-repair promotion failed", exc_info=True)
-            outcome = {
-                "status": "needs_manual_target",
-                "reason": "repair_promotion_failed",
-                "task_id": task_id,
-            }
-        outcome = outcome if isinstance(outcome, dict) else {"status": "scheduled", "task_id": task_id}
-        outcome_status = str(outcome.get("status") or "needs_manual_target")
-        if outcome_status == "scheduled":
-            try:
-                ctx.send_with_budget(
-                    chat_id,
-                    f"✅ Repair task {task_id} was accepted and durably scheduled.",
-                )
-            except Exception:
-                log.debug("Repair promotion success notification failed", exc_info=True)
-        else:
-            reason = str(outcome.get("reason") or outcome_status)
-            try:
-                ctx.send_with_budget(
-                    chat_id,
-                    f"⚠️ Repair task was not started ({reason}). Please retry from the skill card.",
-                )
-            except Exception:
-                log.debug("Repair promotion refusal notification failed", exc_info=True)
-        return
-    reserved_project = _reserved_project_for_chat(ctx, chat_id)
-    project_id = (
-        str(reserved_project.get("id") or "")
-        if str((reserved_project or {}).get("lifecycle") or "active") == "active"
-        else ""
-    )
-    if reserved_project and not project_id:
-        _record_routing_receipt(
-            bridge,
-            ctx,
-            chat_id=chat_id,
-            client_message_id=client_message_id,
-            action="project_route",
-            target=str(reserved_project.get("id") or ""),
-            status="project_unavailable",
-        )
-        return
-    ctx.consciousness.inject_observation(f"Message from my human: {incoming.get('log_text') or ''}")
-    task_metadata = _scoped_task_metadata(project_id, task_metadata)
-    swarm_intent = bool(
-        isinstance(task_metadata, dict) and task_metadata.get("force_plan")
-    )
-    # The turn's origin identity rides UNCONDITIONALLY (not only when the
-    # decision lane runs): a bare direct turn with no projects/roots yet — the
-    # first-ever project creation — must still carry it so promote/route/bind
-    # receive the ref by value.
-    origin_ref = incoming.get("origin_message_ref")
-    if isinstance(origin_ref, dict) and origin_ref:
-        task_metadata = {
-            **(task_metadata or {}),
-            "origin_message_ref": origin_ref,
-            "origin_message_text": str(incoming.get("log_text") or ""),
-        }
-    else:
-        # A suppressed (never-logged) message has a DESIGNED absence of origin;
-        # downstream binders must not classify it as a producer bug.
-        task_metadata = {**(task_metadata or {}), "origin_suppressed": True}
-    # Owner Surface Fact channel fallback: a non-web ingress (telegram/skill
-    # transports) carries no browser observables, but its channel IS the
-    # surface fact. Host-stamped here, never overwriting a real descriptor;
-    # source=="web" stays an honest absence (an old SPA sends no fact), and a
-    # synthetic A2A chat (negative id) is machine traffic — no owner sent it,
-    # so it must never wear an owner_client fact.
-    from ouroboros.contracts.chat_id_policy import is_a2a_chat_id as _is_a2a
-
-    _ingress_source = str(incoming.get("source") or "web")
-    if (
-        _ingress_source != "web"
-        and not _is_a2a(chat_id)
-        and not isinstance(task_metadata.get("client_surface"), dict)
-    ):
-        task_metadata = {**task_metadata, "client_surface": {"channel": _ingress_source}}
-    if project_id and not swarm_intent:
-        routed_to_task = _route_project_chat_to_running_task(
-            ctx,
-            chat_id,
-            text or image_caption,
-            client_message_id,
-            task_metadata=task_metadata,
-            image_data=image_data,
-        )
-        if routed_to_task:
-            _record_routing_receipt(
-                bridge,
-                ctx,
-                chat_id=chat_id,
-                client_message_id=client_message_id,
-                action="mailbox_delivery",
-                target=routed_to_task,
-                target_label=(
-                    str(task_metadata.get("_routing_target_label") or "")
-                    if isinstance(task_metadata, dict) else ""
-                ),
-                status="delivered",
-                detail=(
-                    str(task_metadata.get("_attachment_report") or "")
-                    if isinstance(task_metadata, dict) else ""
-                ),
-                attachment_manifest=(
-                    list(task_metadata.get("_attachment_manifest") or [])
-                    if isinstance(task_metadata, dict) else None
-                ),
-            )
-            return
-
-    global_roots = _addressable_root_tasks(ctx, None)
-    try:
-        from ouroboros.projects_registry import list_projects
-
-        has_projects = bool(list_projects(ctx.DRIVE_ROOT))
-    except Exception:
-        log.warning("Unable to inspect Projects for owner routing", exc_info=True)
-        has_projects = True
-    needs_decision_lane = swarm_intent or bool(project_id) or has_projects or bool(global_roots)
-    if needs_decision_lane:
-        task_metadata = _decision_turn_metadata(ctx, chat_id, client_message_id, task_metadata)
-    agent = ctx.get_chat_agent()
-
-    def _run_direct() -> None:
-        try:
-            ctx.handle_chat_direct(
-                chat_id,
-                text or image_caption,
-                image_data,
-                task_constraint=task_constraint,
-                task_metadata=task_metadata,
-            )
-        finally:
-            ctx.consciousness.resume()
-
-    if needs_decision_lane or agent._busy:
-        threading.Thread(
-            target=ctx.handle_chat_ephemeral,
-            args=(chat_id, text or image_caption, image_data),
-            kwargs={"task_constraint": task_constraint, "task_metadata": task_metadata},
-            daemon=True,
-        ).start()
-    else:
-        ctx.consciousness.pause()
-        threading.Thread(target=_run_direct, daemon=True).start()
 
 
 def _process_bridge_updates(bridge, offset: int, ctx: Any) -> int:
@@ -1878,9 +525,8 @@ def _process_bridge_updates(bridge, offset: int, ctx: Any) -> int:
                 ctx.send_with_budget(chat_id, f"🧠 Background consciousness: {bg_status}")
         elif lowered.startswith("/status"):
             from supervisor.state import status_text
-            from supervisor.queue import SOFT_TIMEOUT_SEC, HARD_TIMEOUT_SEC
 
-            status = status_text(ctx.WORKERS, ctx.PENDING, ctx.RUNNING, SOFT_TIMEOUT_SEC, HARD_TIMEOUT_SEC)
+            status = status_text(ctx.WORKERS, ctx.PENDING, ctx.RUNNING)
             ctx.send_with_budget(chat_id, status)
         else:
             _route_owner_message(
@@ -1974,91 +620,6 @@ def _bootstrap_supervisor_repo(settings: dict, git_ops_module=None):
     return False, f"Local-dev import test failed (rc={import_result.get('returncode', -1)})"
 
 
-def _periodic_zombie_reconcile() -> None:
-    """Heal zombie 'running' records on a supervisor cadence.
-
-    A worker that died mid-review (crash / SIGKILL / manual stop) leaves
-    ``review_job.json`` at status=running forever in headless/no-UI runs, where
-    the boot and ``GET /api/extensions`` reconciles never fire; the same death
-    leaves ``task_results/<id>.json`` at running. Both reconciles are
-    liveness-gated (pid-dead / queue-empty + worker-boot evidence), so a live
-    review or task is never touched.
-    """
-    try:
-        from ouroboros.skill_review_runner import reconcile_stale_review_jobs
-        reconcile_stale_review_jobs(DATA_DIR)
-    except Exception:
-        log.debug("Periodic skill review-job reconcile failed", exc_info=True)
-    try:
-        from ouroboros.task_status import reconcile_orphaned_running_tasks
-        reconcile_orphaned_running_tasks(DATA_DIR)
-    except Exception:
-        log.debug("Periodic orphaned running-task reconcile failed", exc_info=True)
-    try:
-        from ouroboros.projects_registry import reconcile_projects
-        reconcile_projects(DATA_DIR)
-    except Exception:
-        log.debug("Project registry reconcile failed", exc_info=True)
-    _resume_interrupted_project_deletions()
-
-
-def _resume_interrupted_project_deletions() -> None:
-    try:
-        from supervisor.task_lifecycle import resume_project_deletions
-
-        resume_project_deletions(DATA_DIR)
-    except Exception:
-        log.debug("Project deletion recovery failed", exc_info=True)
-
-
-def _startup_worktree_prune() -> None:
-    """Startup hygiene: prune orphaned subagent worktrees (after the custody sweep)."""
-    from supervisor.state import append_jsonl
-
-    try:
-        from ouroboros import subagent_worktrees
-
-        worktree_report = subagent_worktrees.prune_orphans()
-        if worktree_report.get("removed"):
-            append_jsonl(DATA_DIR / "logs" / "events.jsonl", {
-                "ts": utc_now_iso(),
-                "type": "subagent_worktree_prune",
-                "report": worktree_report,
-            })
-    except Exception:
-        log.debug("Subagent worktree prune failed", exc_info=True)
-
-
-def _startup_prune_sweeps() -> None:
-    """Startup hygiene: prune stale task drives/trees and orphaned temp files."""
-    from supervisor.state import append_jsonl
-
-    try:
-        from ouroboros.headless import prune_headless_task_drives, prune_task_drives, prune_task_trees
-        from ouroboros.utils import sweep_stale_temp_files
-
-        prune_report = prune_headless_task_drives(DATA_DIR)
-        task_drive_report = prune_task_drives(DATA_DIR)
-        # Ephemeral task-tree coordination ledgers age out with their terminal root.
-        prune_task_trees(DATA_DIR)
-        # Reap orphaned atomic-write temp files (.*.tmp.*) left by a hard kill.
-        sweep_stale_temp_files(DATA_DIR)
-        if (
-            prune_report.get("pruned")
-            or prune_report.get("errors")
-            or task_drive_report.get("pruned")
-            or task_drive_report.get("errors")
-        ):
-            append_jsonl(DATA_DIR / "logs" / "events.jsonl", {
-                "ts": utc_now_iso(),
-                "type": "headless_task_drive_prune",
-                "report": prune_report,
-                "task_drives": task_drive_report,
-            })
-    except Exception:
-        log.debug("Headless task drive prune failed", exc_info=True)
-
-
 def _run_supervisor(settings: dict) -> None:
     """Initialize and run the supervisor loop. Called in a background thread."""
     global _supervisor_error, _supervisor_thread, _consciousness
@@ -2122,15 +683,11 @@ def _run_supervisor(settings: dict) -> None:
         )
 
         max_workers = int(settings.get("OUROBOROS_MAX_WORKERS", 10))
-        soft_timeout = int(settings.get("OUROBOROS_SOFT_TIMEOUT_SEC", 600))
-        hard_timeout = int(settings.get("OUROBOROS_HARD_TIMEOUT_SEC", 1800))
 
         # Managed manifest branch defaults must drive worker commit/restart flows too.
         _workers_branch_dev, _workers_branch_stable = _runtime_branch_defaults()
         workers_init(
             repo_dir=REPO_DIR, drive_root=DATA_DIR, max_workers=max_workers,
-            soft_timeout=soft_timeout, hard_timeout=hard_timeout,
-            total_budget_limit=float(settings.get("TOTAL_BUDGET", SETTINGS_DEFAULTS["TOTAL_BUDGET"])),
             branch_dev=_workers_branch_dev, branch_stable=_workers_branch_stable,
         )
 
@@ -2190,6 +747,7 @@ def _run_supervisor(settings: dict) -> None:
             if st_boot.get("owner_chat_id"):
                 send_with_budget(int(st_boot["owner_chat_id"]),
                     f"♻️ Restored pending queue from snapshot: {restored_pending} tasks.")
+        _startup_retired_settings_notice(settings)
 
         auto_resume_after_restart()
 
@@ -2224,7 +782,6 @@ def _run_supervisor(settings: dict) -> None:
             queue_deep_self_review_task=queue_deep_self_review_task, persist_queue_snapshot=persist_queue_snapshot,
             safe_restart=safe_restart, kill_workers=kill_workers, spawn_workers=spawn_workers,
             sort_pending=sort_pending, consciousness=_consciousness,
-            soft_timeout=soft_timeout, hard_timeout=hard_timeout,
             get_chat_agent=_get_chat_agent, handle_chat_direct=handle_chat_direct,
             handle_chat_ephemeral=handle_chat_ephemeral, request_restart=_request_restart_exit,
         )
@@ -2251,7 +808,7 @@ def _run_supervisor(settings: dict) -> None:
     _loop_liveness = [time.monotonic()]
     _watchdog_stop = threading.Event()  # per-generation: stops the watchdog when THIS loop exits
     _start_supervisor_liveness_watchdog(_loop_liveness, _watchdog_stop)
-    while not _restart_requested.is_set():
+    while not _restart_requested.is_set() and not _supervisor_stop.is_set():
         try:
             _loop_liveness[0] = time.monotonic()
             rotate_chat_log_if_needed(DATA_DIR)
@@ -2259,6 +816,18 @@ def _run_supervisor(settings: dict) -> None:
             # readers (history backfill, SSE replay, api_logs_tail, TB ATIF) are
             # archive-chain-aware.
             rotate_jsonl_log_if_needed(DATA_DIR, "progress.jsonl", "progress")
+            # CPL4-C1..C4 rotation train: the remaining unbounded hot logs rotate
+            # on the same tick with the same rotator. events.jsonl went LAST
+            # behind chain-aware custody readers (delegate_custody replay + fault
+            # scan, complete_custody_rows, the settled-terminal chain cursor,
+            # legacy usage import, swarm rollup, worker boot verify) — rows keep
+            # replaying from archive/events_*.jsonl; tools/supervisor/
+            # task_reflections readers are tail-bounded and archive-backfilled
+            # (memory.read_jsonl_tail, api_logs_tail).
+            rotate_jsonl_log_if_needed(DATA_DIR, "events.jsonl", "events")
+            rotate_jsonl_log_if_needed(DATA_DIR, "tools.jsonl", "tools")
+            rotate_jsonl_log_if_needed(DATA_DIR, "supervisor.jsonl", "supervisor")
+            rotate_jsonl_log_if_needed(DATA_DIR, "task_reflections.jsonl", "task_reflections")
             ensure_workers_healthy()
 
             event_q = get_event_q()
@@ -2309,6 +878,11 @@ def _run_supervisor(settings: dict) -> None:
             time.sleep(0.5)
 
         except Exception as exc:
+            if _supervisor_stop.is_set() or _restart_requested.is_set():
+                # The shutdown/restart tore the bus down under this tick (a
+                # Manager proxy raising BrokenPipe/EOF): not a crash, no alarm.
+                log.info("Supervisor loop exiting on shutdown: %s", exc)
+                break
             crash_count += 1
             log.error("Supervisor loop crash #%d: %s", crash_count, exc, exc_info=True)
             if crash_count >= 3:
@@ -2330,10 +904,10 @@ def _run_supervisor(settings: dict) -> None:
                         )
                 except Exception:
                     log.debug("Failed to notify owner about supervisor death", exc_info=True)
-                _watchdog_stop.set()  # this generation is dead — stop its liveness watchdog
-                return
-            time.sleep(min(30, 2 ** crash_count))
-    _watchdog_stop.set()  # loop exited (restart) — stop this generation's watchdog
+                break  # this generation is dead: the shared exit below stops its watchdog
+            # Backoff on the stop event, not time.sleep, so a shutdown is prompt.
+            _supervisor_stop.wait(min(30, 2 ** crash_count))
+    _watchdog_stop.set()  # every ordinary exit (restart, shutdown, crash death) stops this generation's watchdog
     _supervisor_thread = None
 
 
@@ -2343,29 +917,6 @@ def _run_supervisor(settings: dict) -> None:
 # tasks is recorded here and re-checked every loop tick, so events keep
 # flowing and the drain actually observes tasks finishing.
 _pending_restart: Dict[str, Any] = {}
-
-
-def _live_running_task_ids(ctx: Any) -> list:
-    """RUNNING task ids with a fresh heartbeat — structured facts only.
-
-    Heartbeat staleness belongs to the generic supervisor queue, not to the
-    planning-scout wait policy.  The latter intentionally waits until terminal
-    state or its shared cutoff even when a scout heartbeat is stale.
-    """
-    from supervisor.queue import HEARTBEAT_STALE_SEC
-
-    now = time.time()
-    live = []
-    for tid, meta in dict(ctx.RUNNING or {}).items():
-        if not isinstance(meta, dict):
-            continue
-        try:
-            hb = float(meta.get("last_heartbeat_at") or 0.0)
-        except (TypeError, ValueError):
-            hb = 0.0
-        if hb and (now - hb) < HEARTBEAT_STALE_SEC:
-            live.append(str(tid))
-    return live
 
 
 def _handle_restart_in_supervisor(evt: Dict[str, Any], ctx: Any) -> None:
@@ -2542,74 +1093,6 @@ def _perform_supervisor_restart(
     _request_restart_exit()
 
 
-def _request_restart_exit(owner: bool = False) -> None:
-    """Signal server shutdown with restart exit code.
-
-    ``owner`` is the ONE fact the re-exec needs: an owner-initiated restart
-    re-reads the runtime mode from settings, an agent- or supervisor-initiated
-    one keeps inheriting the boot pin (see server_control.restart_current_process).
-    """
-    if owner:
-        _owner_restart_requested.set()
-    _restart_requested.set()
-
-
-def _managed_update_pending_kwargs() -> dict:
-    """Preserve queued work while a durable tx or its pre-tx quiesce owns restart."""
-    try:
-        from ouroboros.delegate_recovery import has_planned_restart_handoffs
-
-        if (
-            has_planned_restart_handoffs(DATA_DIR)
-            and _restart_requested.is_set()
-            and not _owner_restart_requested.is_set()
-        ):
-            return {"preserve_pending": True}
-        from supervisor.update_merge import active_update_tx
-
-        if active_update_tx():
-            return {"preserve_pending": True}
-        from supervisor.workers import repo_writer_admission_closed, worker_pool_admission_state
-
-        gate = repo_writer_admission_closed()
-        disabled = str(worker_pool_admission_state().get("disabled_reason") or "")
-        if gate.startswith("managed_update:") or disabled == "managed_update":
-            return {"preserve_pending": True}
-        return {}
-    except Exception:
-        return {"preserve_pending": True}
-
-
-def _safe_restart_serialized(safe_restart_fn, *, reason: str, unsynced_policy: str):
-    """Serialize checkout/reset with update apply; only a landed update may restart."""
-    from supervisor import git_ops
-    from supervisor.update_merge import (
-        acquire_update_lock,
-        read_update_tx_strict,
-        release_update_lock,
-    )
-
-    try:
-        lock_fh = acquire_update_lock()
-    except RuntimeError:
-        return False, "Managed update is changing the checkout; restart was deferred."
-    try:
-        status, tx = read_update_tx_strict()
-        if status == "corrupt":
-            return False, "Managed update state is unreadable; restart was deferred."
-        if status == "absent" and not git_ops._clear_update_intent():
-            return False, (
-                "An update intent marker with no update transaction could not be removed; "
-                "restart was deferred rather than applying an orphaned update."
-            )
-        allowed_phases = {"pending_boot_smoke", "applying_replace"}
-        if status == "valid" and str(tx.get("phase") or "") not in allowed_phases:
-            return False, "Managed update merge is still being resolved; restart was deferred."
-        return safe_restart_fn(reason=reason, unsynced_policy=unsynced_policy)
-    finally:
-        release_update_lock(lock_fh)
-
-
 def _wait_for_supervisor_update_finalize() -> bool:
     """Wait for a real init outcome; slow dependency sync is not a failed boot."""
     _supervisor_ready.wait()
@@ -2648,6 +1131,12 @@ def _boot_managed_update_tasks() -> None:
             _request_restart_exit()
             return
         update_status = compute_managed_update_status(fetch=True)
+        try:
+            from ouroboros.update_letter import refresh_after_check
+
+            refresh_after_check(update_status)
+        except Exception:
+            log.debug("boot update letter refresh failed", exc_info=True)
         broadcast_ws_sync({
             "type": "update_status_ready",
             "available": bool(update_status.get("available")),
@@ -2657,38 +1146,6 @@ def _boot_managed_update_tasks() -> None:
         log.debug("boot managed-update tasks failed", exc_info=True)
 
 
-def _shutdown_task_cleanup_args(restart_requested: bool) -> tuple[str, str]:
-    """Return ``(terminal_status, result_reason)`` for tasks torn down by a
-    graceful server shutdown.
-
-    A graceful shutdown — a requested restart (exit 42) or an external
-    stop/restart signal (SIGTERM/SIGINT) — is not a worker crash storm, so a
-    still-running task is finalized as ``cancelled`` with an honest reason
-    instead of the default crash-storm text the supervisor uses for real
-    worker deaths.
-    """
-    if restart_requested:
-        reason = (
-            "Server restarted before this task finished; the task was "
-            "interrupted by the restart, not a worker crash."
-        )
-    else:
-        reason = (
-            "Server shut down (external stop/restart signal) before this task "
-            "finished; the task was interrupted, not a worker crash."
-        )
-    return "cancelled", reason
-
-
-def _shutdown_supervisor_event_bus() -> None:
-    try:
-        from supervisor.workers import shutdown_event_q
-
-        shutdown_event_q()
-    except Exception:
-        pass
-
-
 def _execute_panic_stop(consciousness, kill_workers_fn) -> None:
     _execute_panic_stop_impl(
         consciousness,
@@ -2696,6 +1153,7 @@ def _execute_panic_stop(consciousness, kill_workers_fn) -> None:
         data_dir=DATA_DIR,
         panic_exit_code=PANIC_EXIT_CODE,
         log=log,
+        bound_port=_actual_bound_port(),
     )
 
 APP_START = time.time()
@@ -2738,29 +1196,6 @@ routes = [
 from contextlib import asynccontextmanager, suppress
 
 
-def _run_startup_task_recovery(
-    drive_root: pathlib.Path,
-    repo_dir: pathlib.Path,
-    *,
-    skip_live_data: bool,
-) -> None:
-    """Reconcile durable task phases once, after the prior process is gone."""
-    if skip_live_data:
-        return
-    try:
-        from ouroboros.task_status import reconcile_orphaned_running_tasks
-
-        reconcile_orphaned_running_tasks(drive_root)
-    except Exception:
-        log.warning("Orphaned running-task reconciliation at startup failed", exc_info=True)
-    try:
-        from ouroboros.agent_task_pipeline import recover_pending_root_post_task_synthesis
-
-        recover_pending_root_post_task_synthesis(drive_root, repo_dir)
-    except Exception:
-        log.warning("Root post-task synthesis recovery at startup failed", exc_info=True)
-
-
 @asynccontextmanager
 async def lifespan(app):
     global _event_loop
@@ -2771,19 +1206,15 @@ async def lifespan(app):
         name="ws-heartbeat",
     )
 
-    settings, provider_defaults_changed, _provider_default_keys = apply_runtime_provider_defaults(load_settings())
-    # Persist the boot normalization only for an install that ALREADY has a
-    # settings file. Creating it here would make the server — which now starts
-    # BEFORE first-run onboarding on every host — the author of the first bytes
-    # of settings.json, and every fresh-install proof is gated on that file being
-    # absent until the owner's own onboarding save (the wizard's `light` safety
-    # coverage, install-time agent presets). Nothing is lost: the values are
-    # applied in-process below, and the completion save persists the same
-    # normalization. Mirror of launcher._prepare_first_run_settings.
-    from ouroboros.config import SETTINGS_PATH as _settings_path
-
-    if provider_defaults_changed and _settings_path.exists():
-        save_settings(settings, allow_elevation=True)
+    # Boot APPLIES the provider normalization in-process and persists nothing
+    # (mirror of launcher_onboarding.prepare_first_run_settings). Two
+    # normalizations, two re-derivations: the VOCABULARY one is the read seam
+    # every reader applies (config.normalize_settings_raw); the PROVIDER one is
+    # re-derived by every consumer that needs the route — the task-start
+    # projection, the settings GET and onboarding reads, the context-fit route
+    # resolver — so a start-time write would only make boot a second author of
+    # settings.json with no reader that needs it.
+    settings, _provider_defaults_changed, _provider_default_keys = apply_runtime_provider_defaults(load_settings())
     _apply_settings_to_env(settings)
     # Pin boot-time runtime-mode after env apply; save_settings compares to this owner baseline.
     from ouroboros.config import initialize_runtime_mode_baseline
@@ -2823,6 +1254,7 @@ async def lifespan(app):
     except Exception:
         log.warning("Project registry boot reconcile failed", exc_info=True)
 
+    _supervisor_stop.clear()  # a fresh lifespan owns a fresh generation (symmetric with the teardown set)
     if has_startup_ready_provider(settings):
         _start_supervisor_if_needed(settings)
     else:
@@ -2833,16 +1265,20 @@ async def lifespan(app):
     # and run a one-shot boot-time update check (check-on-restart) so the main-screen
     # Update badge reflects availability. Both run OFF the startup critical path and
     # fail-soft — a missing managed remote / offline boot simply yields no badge.
-    threading.Thread(
-        target=_boot_managed_update_tasks, daemon=True, name="boot-managed-update",
-    ).start()
-
+    # Local autostart goes FIRST: a local-only install's boot check may write its update
+    # letter through the local model, and the git fetch ahead of that call is the head
+    # start the model server gets (no readiness wait — a letter that still finds the
+    # model loading fails typed and is rewritten by the next check).
     if has_local and settings.get("LOCAL_MODEL_SOURCE"):
         from ouroboros.local_model_autostart import auto_start_local_model
         threading.Thread(
             target=auto_start_local_model, args=(settings,),
             daemon=True, name="local-model-autostart",
         ).start()
+
+    threading.Thread(
+        target=_boot_managed_update_tasks, daemon=True, name="boot-managed-update",
+    ).start()
 
     host_service_task = None
     host_service_server = None
@@ -2955,6 +1391,7 @@ async def lifespan(app):
     try:
         yield
     finally:
+        _supervisor_stop.set()  # first: the loop must know a teardown owns what follows
         if extension_reconcile_task is not None:
             extension_reconcile_task.cancel()
             with suppress(asyncio.CancelledError, asyncio.TimeoutError):
@@ -2976,6 +1413,14 @@ async def lifespan(app):
             await ws_heartbeat_task
 
         log.info("Server shutting down...")
+        # Let the loop leave its current tick BEFORE workers are killed and the
+        # bridge/Manager go down: a tick still running would otherwise respawn
+        # a killed worker or meet BrokenPipe/EOF. Bounded well inside the
+        # launcher's force-exit budget; the stop flag already suppresses the
+        # crash counter if the join times out.
+        supervisor_thread = _supervisor_thread
+        if supervisor_thread is not None and supervisor_thread.is_alive():
+            supervisor_thread.join(timeout=2)
         try:
             from ouroboros.local_model import get_manager
             get_manager().stop_server()

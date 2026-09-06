@@ -13,6 +13,7 @@ not kill threads; a lease is a number).
 import datetime as dt
 import json
 import queue as stdqueue
+import threading
 import time
 import types
 
@@ -430,8 +431,14 @@ def test_timed_out_tool_closes_its_cognitive_lease_when_worker_settles(tmp_path,
     )
     tools = types.SimpleNamespace(_ctx=ctx, CODE_TOOLS=set())
 
+    # The tool OUTLIVES the timeout deterministically: it blocks on an event the test
+    # releases only after the timeout has answered. A sleep(0.05) against a 0.01 s timeout
+    # is a 40 ms race that a loaded macos-latest runner lost (rc.14 dispatch: the wait was
+    # scheduled late, the tool had already finished, is_error came back False).
+    release = threading.Event()
+
     def slow_tool(*_args):
-        time.sleep(0.05)
+        release.wait(10)
         return {
             "tool_call_id": "tool-1", "fn_name": "read_file", "result": "ok",
             "is_error": False, "args_for_log": {}, "is_code_tool": False,
@@ -446,18 +453,25 @@ def test_timed_out_tool_closes_its_cognitive_lease_when_worker_settles(tmp_path,
         timeout_sec=0.01,
         task_id="tool-task",
     )
+    release.set()   # let the worker settle now that the timeout has answered
     assert result["is_error"] is True
-    time.sleep(0.1)
+    # The worker settles on its own schedule (a loaded macOS runner took more
+    # than the old fixed 0.1 s): drain until the terminal row lands, bounded.
     rows = []
-    while not events.empty():
-        rows.append(events.get_nowait())
-    terminal = [
-        row for row in rows
-        if row.get("type") == "cognitive_operation"
-        and row.get("operation_id") == "tool-1"
-        and row.get("phase") == "finished"
-    ]
-    assert terminal
+    terminal = []
+    deadline = time.monotonic() + 10.0
+    while not terminal and time.monotonic() < deadline:
+        while not events.empty():
+            rows.append(events.get_nowait())
+        terminal = [
+            row for row in rows
+            if row.get("type") == "cognitive_operation"
+            and row.get("operation_id") == "tool-1"
+            and row.get("phase") == "finished"
+        ]
+        if not terminal:
+            time.sleep(0.02)
+    assert terminal, rows
 
 
 def _llm_call_event(phase, **overrides):

@@ -16,6 +16,7 @@ from __future__ import annotations
 
 import contextlib
 import json
+import logging
 import os
 import re
 import shutil
@@ -31,6 +32,8 @@ from ouroboros.platform_layer import acquire_exclusive_file_lock, release_exclus
 from ouroboros.utils import atomic_write_json
 from ouroboros.config import DATA_DIR, get_subagent_projects_root, get_subagent_worktree_root
 from ouroboros.retention import age_cutoff, get_gc_retention_days
+
+log = logging.getLogger(__name__)
 
 _REGISTRY_NAME = "subagent_worktrees.json"
 _LOCK_NAME = ".worktree_ops.lock"
@@ -99,16 +102,65 @@ def _safe_name(task_id: Any) -> str:
     return safe
 
 
-def _load_registry(data_dir: Optional[Any] = None) -> List[Dict[str, Any]]:
+class SubagentWorktreeRegistryCorrupt(RuntimeError):
+    """``state/subagent_worktrees.json`` exists but cannot be read as a registry.
+
+    Raised by every caller that would go on to REWRITE the file. Collapsing a
+    malformed registry to an empty one hands the next write a clean slate: the
+    rows are gone, and with them the only record naming the checkouts and the
+    ``refs/ouroboros/delegated/*`` refs those rows pin — a leak nothing can
+    reconcile afterwards. The malformed bytes are kept instead, which is what
+    the sibling registries (cancel intents, terminal deliveries) do and what
+    the startup GC already does when the custody log is unreadable.
+    """
+
+
+def _load_registry(
+    data_dir: Optional[Any] = None, *, strict: bool = False, op: str = "",
+) -> List[Dict[str, Any]]:
+    """The registered rows; ``strict`` refuses a malformed registry.
+
+    ABSENT is an ordinary empty registry in both modes (the first-write case).
+    MALFORMED is a different fact, and ``strict=True`` — passed by everything
+    that authors a record or acts destructively on one — reports it as such
+    instead of as "nothing is registered". Inspection reads (the UI listing)
+    stay soft: they display what they can and destroy nothing.
+    """
     path = _registry_path(data_dir)
+    if not path.is_file():
+        return []
     try:
         raw = json.loads(path.read_text(encoding="utf-8"))
-    except (OSError, json.JSONDecodeError, ValueError):
+        entries = raw.get("worktrees") if isinstance(raw, dict) else raw
+        if not isinstance(entries, list):
+            raise ValueError("subagent worktree registry 'worktrees' is not a list")
+    except (OSError, UnicodeDecodeError, json.JSONDecodeError, ValueError) as exc:
+        if strict:
+            raise _refuse_corrupt_registry(data_dir, op, exc) from exc
         return []
-    entries = raw.get("worktrees") if isinstance(raw, dict) else raw
-    if isinstance(entries, list):
-        return [e for e in entries if isinstance(e, dict)]
-    return []
+    return [e for e in entries if isinstance(e, dict)]
+
+
+def _refuse_corrupt_registry(
+    data_dir: Optional[Any], op: str, exc: Exception,
+) -> SubagentWorktreeRegistryCorrupt:
+    """Disclose an unreadable registry durably, then refuse the mutation."""
+    path = _registry_path(data_dir)
+    log.error(
+        "subagent worktree registry is corrupt; %s refused, bytes kept (%s)",
+        op or "mutation", exc,
+    )
+    try:
+        from ouroboros.utils import append_jsonl, utc_now_iso
+
+        append_jsonl(
+            _data_dir(data_dir) / "logs" / "events.jsonl",
+            {"ts": utc_now_iso(), "type": "subagent_worktree_registry_corrupt",
+             "op": str(op or ""), "registry": str(path), "error": str(exc)[:200]},
+        )
+    except Exception:
+        log.debug("registry-corrupt event append failed", exc_info=True)
+    return SubagentWorktreeRegistryCorrupt(str(exc))
 
 
 def _save_registry(entries: List[Dict[str, Any]], data_dir: Optional[Any] = None) -> None:
@@ -259,9 +311,21 @@ def provision_worktree(
             created_at=time.time(),
             parent_task_id=str(parent_task_id or ""),
         )
-        entries = [e for e in _load_registry(data_dir) if e.get("path") != str(wt_path)]
-        entries.append(asdict(handle))
-        _save_registry(entries, data_dir)
+        try:
+            entries = [
+                e for e in _load_registry(data_dir, strict=True, op="provision_worktree")
+                if e.get("path") != str(wt_path)
+            ]
+            entries.append(asdict(handle))
+            _save_registry(entries, data_dir)
+        except Exception:
+            # Registration is INSIDE the cleanup scope, mirroring the snapshot
+            # branches below: a worktree nothing registered is invisible to
+            # disposal and retention, so a corrupt registry (strict load) or a
+            # failed write would otherwise strand the checkout AND its branch
+            # on every retry, without bound.
+            _remove_paths(repo_dir, wt_path, branch, allowed_root=root)
+            raise
         return handle
 
 
@@ -529,12 +593,24 @@ def provision_execution_snapshot(
             entry_count=entry_count,
             excluded_untracked=tuple(excluded),
         )
-        entries = [e for e in _load_registry(data_dir) if e.get("path") != str(wt_path)]
-        record = asdict(handle)
-        record["kind"] = _KIND_DELEGATED_EXEC
-        record["excluded_untracked"] = excluded
-        entries.append(record)
-        _save_registry(entries, data_dir)
+        try:
+            entries = [
+                e for e in _load_registry(data_dir, strict=True, op="provision_execution_snapshot")
+                if e.get("path") != str(wt_path)
+            ]
+            record = asdict(handle)
+            record["kind"] = _KIND_DELEGATED_EXEC
+            record["excluded_untracked"] = excluded
+            entries.append(record)
+            _save_registry(entries, data_dir)
+        except Exception:
+            # Registration is INSIDE the cleanup scope, exactly like the payload
+            # branch: a snapshot nothing registered is invisible to disposal and
+            # retention, and on this branch it also strands the baseline ref,
+            # which pins its commit against git's own GC for good.
+            _remove_paths(target, wt_path, "", allowed_root=root)
+            _git(target, "update-ref", "-d", baseline_ref, check=False)
+            raise
         return handle
 
 
@@ -820,7 +896,10 @@ def provision_payload_snapshot(
             )
             # Registry write INSIDE the cleanup scope: an unregistered snapshot
             # directory would be invisible to disposal/retention (orphan leak).
-            entries = [e for e in _load_registry(data_dir) if e.get("path") != str(wt_path)]
+            entries = [
+                e for e in _load_registry(data_dir, strict=True, op="provision_payload_snapshot")
+                if e.get("path") != str(wt_path)
+            ]
             record = asdict(handle)
             record["kind"] = _KIND_DELEGATED_EXEC
             record["excluded_untracked"] = []
@@ -837,7 +916,7 @@ def find_execution_snapshot(snapshot_id: str, data_dir: Optional[Any] = None) ->
     snap = str(snapshot_id or "").strip()
     if not snap:
         return None
-    for entry in _load_registry(data_dir):
+    for entry in _load_registry(data_dir, strict=True, op="find_execution_snapshot"):
         if entry.get("kind") == _KIND_DELEGATED_EXEC and entry.get("snapshot_id") == snap:
             return entry
     return None
@@ -877,7 +956,7 @@ def remove_execution_snapshot(
                     _git(target, "update-ref", "-d", ref, check=False)
                 except Exception:
                     pass
-        survivors = [e for e in _load_registry(data_dir) if not (
+        survivors = [e for e in _load_registry(data_dir, strict=True, op="remove_execution_snapshot") if not (
             e.get("kind") == _KIND_DELEGATED_EXEC and e.get("snapshot_id") == entry.get("snapshot_id")
         )]
         _save_registry(survivors, data_dir)
@@ -902,7 +981,7 @@ def prune_execution_snapshots(
     open_ids = {str(s) for s in (open_snapshot_ids or set())}
     removed: List[str] = []
     kept: List[str] = []
-    for entry in list(_load_registry(data_dir)):
+    for entry in list(_load_registry(data_dir, strict=True, op="prune_execution_snapshots")):
         if entry.get("kind") != _KIND_DELEGATED_EXEC:
             continue
         snap = str(entry.get("snapshot_id") or "")
@@ -924,7 +1003,7 @@ def remove_worktree(
 ) -> bool:
     """Tear down a worktree by task_id or path; unregister it. Returns success."""
     want_path = str(Path(path).resolve()) if path else ""
-    entries = _load_registry(data_dir)
+    entries = _load_registry(data_dir, strict=True, op="remove_worktree")
     match: Optional[Dict[str, Any]] = None
     for entry in entries:
         if task_id and entry.get("task_id") == str(task_id):
@@ -937,7 +1016,10 @@ def remove_worktree(
     with _ops_lock(root):
         if match is not None:
             _remove_paths(Path(match.get("repo_dir") or "."), Path(match.get("path") or ""), match.get("branch") or "", allowed_root=root)
-            survivors = [e for e in _load_registry(data_dir) if e.get("path") != match.get("path")]
+            survivors = [
+                e for e in _load_registry(data_dir, strict=True, op="remove_worktree")
+                if e.get("path") != match.get("path")
+            ]
             _save_registry(survivors, data_dir)
             return True
         # Unregistered path: best-effort directory removal, but ONLY inside the
@@ -965,7 +1047,7 @@ def prune_orphans(
     kept: List[Dict[str, Any]] = []
     repos: set[str] = set()
     with _ops_lock(root):
-        for entry in _load_registry(data_dir):
+        for entry in _load_registry(data_dir, strict=True, op="prune_orphans"):
             if entry.get("kind") == _KIND_DELEGATED_EXEC:
                 # Delegated execution snapshots have their OWN lifecycle: they persist
                 # until the run's explicit patch disposition, and the startup GC

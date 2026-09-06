@@ -8,25 +8,23 @@ reviewer slots.
 
 from __future__ import annotations
 
-import hashlib
-import json
+from dataclasses import asdict, replace
 import logging
 import os
 import pathlib
 import time
-from dataclasses import asdict, dataclass, field, replace
 from typing import Any, Dict, List, Optional
 
 log = logging.getLogger("review_substrate")
 
 from ouroboros.llm import LLMClient
-from ouroboros.observability import new_call_id, persist_call, redact_projection
-from ouroboros.provider_models import provider_for_model
+from ouroboros.observability import new_call_id, persist_call, redact_projection  # noqa: F401 -- facade import surface; leaves read it through the call-time handle
+from ouroboros.provider_models import provider_for_model  # noqa: F401 -- facade import surface; leaves read it through the call-time handle
 from ouroboros.review_execution_projection import (
-    MAX_PROJECTED_ACTOR_FINDINGS, projected_finding_row,
-    review_executions_from_actor_usage,
+    MAX_PROJECTED_ACTOR_FINDINGS, projected_finding_row,  # noqa: F401 -- facade import surface; leaves read it through the call-time handle
+    review_executions_from_actor_usage,  # noqa: F401 -- facade import surface; leaves read it through the call-time handle
 )
-from ouroboros.task_results import review_binding_hash
+from ouroboros.task_results import review_binding_hash  # noqa: F401 -- facade import surface; leaves read it through the call-time handle
 # Everything below the seam. Re-exported here because the substrate is the
 # historical import site for the api_chat prompt renderers; `review_execution`
 # owns them now and must never import this module back.
@@ -38,6 +36,7 @@ from ouroboros.review_execution import (  # noqa: F401  (compat re-exports)
     ReviewRouteKind,
     ReviewRouteUnavailable,
     ReviewSlotExecutor,
+    delivery_retrieves,
     _execute_slot_attempt,
     _messages_char_count,
     _render_prompt,
@@ -45,7 +44,6 @@ from ouroboros.review_execution import (  # noqa: F401  (compat re-exports)
     _request_messages,
     _review_route_executor,
     assert_cache_breakpoint_cap,
-    configured_review_routes,
 )
 from ouroboros.review_custody import (
     _ReviewAttemptHistory, _review_exception_projection,
@@ -63,7 +61,7 @@ from ouroboros.usage_accounting import (
     usage_scope,
 )
 from ouroboros.utils import sanitize_tool_result_for_log, truncate_review_artifact
-from ouroboros._outcome_receipts import disclosed_list_projection
+from ouroboros._outcome_receipts import disclosed_list_projection  # noqa: F401 -- facade import surface; leaves read it through the call-time handle
 
 
 class _CustodyUsageContext:
@@ -108,852 +106,25 @@ def review_repo_dirs_for(ctx: Any) -> tuple[pathlib.Path, pathlib.Path]:
     return governance, subject
 
 
-@dataclass(frozen=True)
-class ReviewSlot:
-    slot_id: str
-    model: str
-    effort: str = "medium"
-    timeout_sec: Optional[float] = None
-    max_tokens: int = 16_384
-    temperature: float | None = None
-    role_hint: str = ""
-    use_local: bool = False
-    # Delivery route for this slot. ``use_local`` above is the existing
-    # precedent for a per-slot transport hint; ``route`` is the general axis.
-    route: ReviewRouteKind = ReviewRouteKind.API_CHAT
-    # agent_session rows only: THIS row's opaque ``harness[=model]`` target
-    # (6.1 — every slot is independently harness-or-API). Empty falls back to
-    # the shared session-route key, which is the whole legacy behavior.
-    session_target: str = ""
-    # Optional manual credential pin (Q2-в); '' = the daemon's rotation (D28).
-    session_profile: str = ""
-    transport_timeout_sec: Optional[float] = None
-    # Optional configured-subagent binding (resolved at admission; '' = direct).
-    subagent_id: str = ""
-
-    @property
-    def native_retrieval(self) -> bool:
-        # An api-route actor row: bounded native tool rounds, never the packet.
-        return bool(self.subagent_id) and self.route is ReviewRouteKind.API_CHAT
-
-    @property
-    def retrieves(self) -> bool:
-        # DELIVERY class for admission/fit/authority; transport tests the route.
-        return self.route is ReviewRouteKind.AGENT_SESSION or self.native_retrieval
-
-
-@dataclass
-class ReviewRequest:
-    surface: str
-    goal: str
-    scope: str = ""
-    subject: str = ""
-    evidence: Dict[str, Any] = field(default_factory=dict)
-    evidence_refs: List[Dict[str, Any]] = field(default_factory=list)
-    checklist: str = ""
-    policy: Dict[str, Any] = field(default_factory=dict)
-    task_id: str = ""
-    messages: List[Dict[str, Any]] = field(default_factory=list)
-    slot_messages: Dict[str, List[Dict[str, Any]]] = field(default_factory=dict)
-    call_type: str = ""
-    max_tokens: int | None = None
-    temperature: float | None = None
-    no_proxy: bool = False
-    # Session route owns a compact task and repository root; API ignores both.
-    # It is the same criteria without the pack because the agent retrieves it.
-    session_root: str = ""
-    session_task: str = ""
-    session_threads: Dict[str, str] = field(default_factory=dict)
-    usage_attribution: Dict[str, str] = field(default_factory=dict)
-    deadline_at: str = ""
-    retry_key: str = ""
-    reconcile_only: bool = False
-    task_attempt: Any = None
-
-@dataclass
-class ReviewActorRecord:
-    slot_id: str
-    model: str
-    status: str
-    raw_text: str = ""
-    parsed: Any = None
-    # Per-actor parsed verdict (PASS/FAIL/DEGRADED/UNKNOWN). Carried here so the
-    # objective axis can aggregate outcome_tier from only the actors that
-    # CONTRIBUTED to a quorum PASS, instead of re-deriving the verdict downstream.
-    signal: str = ""
-    error: str = ""
-    usage: Dict[str, Any] = field(default_factory=dict)
-    prompt_ref: Dict[str, Any] = field(default_factory=dict)
-    response_ref: Dict[str, Any] = field(default_factory=dict)
-    duration_sec: float = 0.0
-    # Compact typed truth for task-result/event projection.  Raw model output
-    # remains in the existing private audit record; these fields prevent UI
-    # consumers from conflating a transport failure, malformed JSON, and a
-    # valid semantic DEGRADED verdict.
-    transport_status: str = ""
-    # B1 typed failure facts, allowlist-carried off the exception's ATTRIBUTES
-    # (generic across every ClaudexorUnavailable subclass; never exc.__dict__):
-    # the machine code, the healing instant and the HTTP status survive the
-    # substrate as fields instead of flattening into `error` prose.
-    failure_code: str = ""
-    reset_at: str = ""
-    http_status: Optional[int] = None
-    parse_status: str = ""
-    semantic_verdict: str = ""
-    provider: str = ""
-    actor_role: str = ""
-    coverage: Dict[str, Any] = field(default_factory=dict)
-    # Participation is independent of agreement with the aggregate: every
-    # contract-valid PASS/FAIL response counts, while enforcement_impact says
-    # whether that participant supports completion or vetoes it.
-    quorum_contribution: bool = False
-    reason: str = ""
-    enforcement_impact: str = ""
-    # Physical operation identity survives a logical timeout.  A pending actor
-    # is custody/reconciliation state, not permission for a blind resend.
-    operation_id: str = ""
-    operation_state: str = "settled"
-    late_result_pending: bool = False
-
-
 # B1 typed failure facts, ONE shared key tuple (row/wave/last-execution projections).
-TYPED_FAILURE_FACT_KEYS = ("failure_code", "reset_at", "http_status", "transport_status")
-
-@dataclass
-class ReviewRunResult:
-    request: Dict[str, Any]
-    actors: List[Dict[str, Any]]
-    parsed_findings: List[Dict[str, Any]]
-    aggregate_signal: str
-    degraded: bool = False
-    degraded_reasons: List[str] = field(default_factory=list)
-    # Bible P3: a single configured reviewer is honored but the lost cross-model
-    # diversity is recorded LOUDLY and DURABLY here (centralized for every surface
-    # that runs through ReviewCoordinator — acceptance, etc. — so a one-slot review
-    # can never quietly look like an ordinary multi-reviewer PASS).
-    single_reviewer_no_diversity: bool = False
-    panel_id: str = ""
 
 
 # Thin ReviewProfile hardness levels (Bible P3 DRY): the behavior is carried by
 # request.policy; these name the three surfaces so callers/reviewers describe
 # hardness consistently without a parallel pipeline.
-HARDNESS_ADVISORY_VISIBLE = "advisory_visible"  # fed back as a compact capsule, never blocks
-HARDNESS_LABEL_ONLY = "label_only"              # recorded on the objective axis, not shown
-HARDNESS_HARD_GATE = "hard_gate"                # blocking commit/scope immune gate (unchanged)
 
 # Tier vocabulary SSOT lives in outcomes.py; reuse it so a future tier rename
 # cannot silently desync the capsule from the objective axis.
-from ouroboros.outcomes import OUTCOME_TIER_BEST_EFFORT, OUTCOME_TIER_BLOCKED, OUTCOME_TIER_SOLVED
-
-_TIER_ORDER = {OUTCOME_TIER_SOLVED: 0, OUTCOME_TIER_BEST_EFFORT: 1, OUTCOME_TIER_BLOCKED: 2}
-
-
-def _transport_error_status(error: Any) -> str:
-    """Classify transport failures without depending on a non-empty message."""
-    error_type = type(error).__name__ if isinstance(error, BaseException) else ""
-    error_text = str(error or "")
-    if (
-        isinstance(error, TimeoutError)
-        or "timeout" in error_type.casefold()
-        or "timeout" in error_text.casefold()
-        or "timed out" in error_text.casefold()
-    ):
-        return "timeout"
-    return "provider_transport_error"
-
-
-def _public_review_reason(value: Any) -> str:
-    """Redact model-controlled reason text before publishing it in full.
-
-    v6.70.0 honesty change (owner decision): reviewer rationale is a cognitive
-    artifact (BIBLE P1 — multi-model review outputs must not fall back to
-    generic transport truncation). The former 500/800-char caps destroyed the
-    only owner-reachable copy of the reasoning (task_results carried the same
-    truncated projection and the full observability blobs were unreferenced),
-    so the projection now publishes the COMPLETE redacted text; secrets are
-    still masked by redact_projection."""
-    text = str(value or "")
-    if not text:
-        return ""
-    return str(redact_projection(text).value)
-
-
-def _review_actor_projection(actor: Any, surface: str) -> Dict[str, Any]:
-    row = actor if isinstance(actor, dict) else asdict(actor)
-    parsed = row.get("parsed") if isinstance(row.get("parsed"), (dict, list)) else None
-    usage = row.get("usage") if isinstance(row.get("usage"), dict) else {}
-    explicit_parse = str(row.get("parse_status") or "")
-    semantic = str(row.get("semantic_verdict") or "").upper()
-    if not semantic and isinstance(parsed, dict):
-        semantic = str(parsed.get("verdict") or parsed.get("status") or "").upper()
-    if not semantic:
-        semantic = str(row.get("signal") or "").upper()
-    valid = (
-        explicit_parse != "malformed"
-        and parsed is not None
-        and semantic in {"PASS", "FAIL", "DEGRADED"}
-    )
-    error = str(row.get("error") or "")
-    transport = str(row.get("transport_status") or "")
-    if not transport:
-        transport = (
-            "success" if str(row.get("status") or "") in {"ok", "empty"}
-            else _transport_error_status(error)
-        )
-    criteria = parsed.get("criteria_used") if isinstance(parsed, dict) else []
-    criteria = criteria if isinstance(criteria, list) else []
-    if isinstance(parsed, dict):
-        parsed_findings = parsed.get("findings")
-    elif isinstance(parsed, list):
-        parsed_findings = parsed
-    else:
-        parsed_findings = []
-    parsed_findings = (
-        [item for item in parsed_findings if isinstance(item, dict)]
-        if isinstance(parsed_findings, list)
-        else []
-    )
-    reason = str(row.get("reason") or "")
-    if not reason and isinstance(parsed, dict):
-        reason = str(parsed.get("summary") or parsed.get("reason") or "")
-    if not reason and isinstance(parsed, list):
-        for item in parsed_findings:
-            reason = str(
-                item.get("summary")
-                or item.get("reason")
-                or item.get("evidence")
-                or item.get("item")
-                or item.get("recommendation")
-                or ""
-            )
-            if reason:
-                break
-    reason = reason or error or ("Reviewer response was malformed or absent." if not valid else "")
-    model = str(usage.get("resolved_model") or row.get("model") or "")
-    provider = str(usage.get("provider") or row.get("provider") or "")
-    if not provider:
-        provider = provider_for_model(model) if model else "unknown"
-    outcome_tier = (
-        str(parsed.get("outcome_tier") or "").strip().lower()
-        if isinstance(parsed, dict)
-        else ""
-    )
-    if outcome_tier not in {
-        OUTCOME_TIER_SOLVED, OUTCOME_TIER_BEST_EFFORT, OUTCOME_TIER_BLOCKED,
-    }:
-        outcome_tier = ""
-    dialogue_vote = (
-        str(parsed.get("dialogue_status") or "").strip().lower()
-        if isinstance(parsed, dict)
-        else ""
-    )
-    if dialogue_vote not in DIALOGUE_STATUS_VALUES:
-        dialogue_vote = ""
-    projection = {
-        "slot_id": str(row.get("slot_id") or ""), "model": model, "provider": provider,
-        "actor_role": str(row.get("actor_role") or f"{surface} reviewer"),
-        "transport_status": transport,
-        "parse_status": explicit_parse or ("valid" if valid else "malformed"),
-        "semantic_verdict": semantic if valid else "",
-        "outcome_tier": outcome_tier if valid else "",
-        "dialogue_status": dialogue_vote if valid else "",
-        "coverage": {
-            "criteria_total": len(criteria),
-            "findings": len(parsed_findings),
-        },
-        "quorum_contribution": bool(row.get("quorum_contribution")),
-        "reason": _public_review_reason(reason),
-        "enforcement_impact": str(row.get("enforcement_impact") or "abstains"),
-        # Preserve the physical identity when the logical actor times out.
-        "operation_id": str(row.get("operation_id") or ""),
-        "operation_state": str(row.get("operation_state") or "settled"),
-        "late_result_pending": bool(row.get("late_result_pending")),
-        "executions": review_executions_from_actor_usage([row]),
-        # Flat, redacted pointer to the private full response artifact.
-        "response_ref": _response_ref_projection(row.get("response_ref")),
-    }
-    # Structured rows ride only where a parsed response exists: an absent
-    # `findings` key is a hole, never the claim "zero findings reported".
-    if parsed is not None:
-        projection.update(disclosed_list_projection(
-            parsed_findings,
-            key="findings",
-            limit=MAX_PROJECTED_ACTOR_FINDINGS,
-            item=projected_finding_row,
-        ))
-    return projection
-
-
-def _response_ref_projection(ref: Any) -> Dict[str, str]:
-    if not isinstance(ref, dict):
-        return {}
-    out: Dict[str, str] = {}
-    if ref.get("call_id"):
-        out["call_id"] = str(ref["call_id"])
-    projection_ref = ref.get("redacted_projection_ref")
-    if isinstance(projection_ref, dict) and projection_ref.get("sha256"):
-        out["sha256"] = str(projection_ref["sha256"])
-    elif ref.get("sha256"):
-        out["sha256"] = str(ref["sha256"])
-    manifest_ref = ref.get("manifest_ref")
-    if isinstance(manifest_ref, dict) and manifest_ref.get("sha256"):
-        out["manifest_sha256"] = str(manifest_ref["sha256"])
-    return out
-
-
-def _review_enforcement_impact(run: Dict[str, Any]) -> str:
-    if str(run.get("enforcement_impact") or ""):
-        return str(run["enforcement_impact"])
-    request = run.get("request") if isinstance(run.get("request"), dict) else {}
-    hardness = str((request.get("policy") or {}).get("hardness") or "")
-    signal = str(run.get("aggregate_signal") or "").upper()
-    if str(run.get("authority") or "") == "agent_advisory" or hardness == HARDNESS_ADVISORY_VISIBLE:
-        return "advisory"
-    if signal == "PASS":
-        return "allows_completion"
-    return "blocks_completion" if signal == "FAIL" and hardness == HARDNESS_HARD_GATE else "degrades_completion"
-
-
-def _review_panel_id(request: ReviewRequest, actors: List[ReviewActorRecord]) -> str:
-    seed = {
-        "surface": request.surface,
-        "task_id": request.task_id,
-        "actors": [
-            [actor.slot_id, actor.model, actor.response_ref]
-            for actor in actors
-        ],
-    }
-    digest = hashlib.sha256(
-        json.dumps(seed, sort_keys=True, separators=(",", ":"), default=str).encode("utf-8")
-    ).hexdigest()
-    return f"panel_{digest[:16]}"
-
-
-def build_review_binding(
-    *,
-    candidate: str,
-    evidence: Dict[str, Any],
-    fence_token_or_state: Any,
-) -> Dict[str, Any]:
-    """Build the exact host-panel identity without introducing another ledger."""
-    from ouroboros.review_evidence import task_acceptance_evidence_revision
-
-    candidate_hash = hashlib.sha256(str(candidate or "").encode("utf-8")).hexdigest()
-    evidence_revision = task_acceptance_evidence_revision(evidence)
-    fence_value = (
-        json.dumps(fence_token_or_state, sort_keys=True, separators=(",", ":"), default=str)
-        if isinstance(fence_token_or_state, (dict, list, tuple))
-        else str(fence_token_or_state or "direct_context")
-    )
-    fence_hash = hashlib.sha256(fence_value.encode("utf-8")).hexdigest()
-    binding_payload = {
-        "candidate_hash": candidate_hash,
-        "evidence_revision": evidence_revision,
-        "fence_hash": fence_hash,
-    }
-    binding_hash = review_binding_hash(**binding_payload)
-    return {
-        **binding_payload,
-        "binding_hash": binding_hash,
-        "panel_id": f"panel_{binding_hash[:16]}",
-    }
-
-
-def compact_review_projection(review_runs: Any) -> Dict[str, Any]:
-    """Project existing audit runs without copying raw prompts or responses."""
-    panels: List[Dict[str, Any]] = []
-    for index, raw_run in enumerate(review_runs or []):
-        if not isinstance(raw_run, dict):
-            continue
-        request = raw_run.get("request") if isinstance(raw_run.get("request"), dict) else {}
-        surface = str(request.get("surface") or "review")
-        actors = [_review_actor_projection(actor, surface) for actor in (raw_run.get("actors") or []) if isinstance(actor, dict)]
-        policy = request.get("policy") if isinstance(request.get("policy"), dict) else {}
-        min_successful = max(1, int(policy.get("min_successful_slots") or 1))
-        contributing = sum(1 for actor in actors if actor["quorum_contribution"])
-        transport_statuses = [actor["transport_status"] for actor in actors]
-        transport = (
-            "success" if transport_statuses and all(s == "success" for s in transport_statuses)
-            else ("partial" if "success" in transport_statuses else (
-                "timeout" if transport_statuses and all(s == "timeout" for s in transport_statuses)
-                else "provider_transport_error"
-            ))
-        )
-        reasons = raw_run.get("degraded_reasons") if isinstance(raw_run.get("degraded_reasons"), list) else []
-        panel: Dict[str, Any] = {
-            "panel_id": str(raw_run.get("panel_id") or f"panel_{index + 1}"),
-            "surface": surface,
-            "authority": str(raw_run.get("authority") or "unspecified"),
-            "aggregate_signal": str(raw_run.get("aggregate_signal") or "UNKNOWN").upper(),
-            "transport_status": str(raw_run.get("transport_status") or transport),
-            "parse_status": str(raw_run.get("parse_status") or (
-                "valid" if actors and all(a["parse_status"] == "valid" for a in actors) else "malformed"
-            )),
-            "coverage": {
-                "actors_configured": len(actors),
-                "transport_success": sum(1 for actor in actors if actor["transport_status"] == "success"),
-                "parse_valid": sum(1 for actor in actors if actor["parse_status"] == "valid"),
-                "quorum_contributing": contributing,
-            },
-            "quorum": {"required": min_successful, "contributed": contributing, "configured": len(actors)},
-            # v6.74.0 (A6): the fallback reason is the structured panel_reason
-            # reducer — it names the real blocker (tier + finding / degraded
-            # causes) instead of an opaque aggregate label. An explicitly
-            # recorded reason still wins.
-            "reason": _public_review_reason(
-                str(raw_run.get("reason") or "; ".join(str(item) for item in reasons)
-                    or panel_reason(raw_run)),
-            ),
-            "enforcement_impact": _review_enforcement_impact(raw_run),
-            "actors": actors,
-            "superseded": bool(raw_run.get("superseded_by_revision")),
-        }
-        if raw_run.get("single_reviewer_no_diversity"):
-            panel["single_reviewer_no_diversity"] = True
-        if isinstance(raw_run.get("dialogue"), dict):
-            panel["dialogue"] = raw_run.get("dialogue")
-        for key in (
-            "candidate_hash", "evidence_revision", "fence_hash", "binding_hash",
-        ):
-            if raw_run.get(key) not in (None, ""):
-                panel[key] = str(raw_run.get(key))
-        panels.append(panel)
-    return {"panels": panels}
-
-
-_CRITERION_STATUSES = frozenset({"supported", "missing", "partial", "rejected"})
-
-
-def _criteria_have_supported_evidence(criteria: Any) -> bool:
-    return bool(isinstance(criteria, list) and criteria and all(
-        isinstance(item, dict)
-        and bool(str(item.get("criterion") or "").strip())
-        and str(item.get("status") or "").strip().lower() == "supported"
-        and bool(item.get("evidence_refs"))
-        for item in criteria
-    ))
-
-
-def _criteria_shape_valid(criteria: Any, tier: str) -> bool:
-    """Shape + tier coherence for a reviewer's criteria_used (v6.71.1).
-
-    SHAPE: a non-empty list of {criterion, status ∈ enum}, and every 'supported'
-    criterion names evidence_refs. COHERENCE: 'solved' still requires ALL criteria
-    'supported' with refs — the release-clean bar (task_acceptance_is_clean) is
-    unchanged; a non-solved tier (best_effort / blocked_with_evidence) may honestly
-    carry partial/missing/rejected criteria. This lets an honest PASS that marks one
-    criterion 'partial' contribute as a valid NON-clean vote instead of being demoted
-    to parse_status=malformed — the old all-must-be-'supported' gate (the prompt itself
-    offers 'partial') silently starved the honest-partial path and fueled acceptance
-    loops (BIBLE P2/P3; the FAIL-veto and clean-solved contracts are untouched)."""
-    if not (isinstance(criteria, list) and criteria):
-        return False
-    for item in criteria:
-        if not isinstance(item, dict):
-            return False
-        if not str(item.get("criterion") or "").strip():
-            return False
-        status = str(item.get("status") or "").strip().lower()
-        if status not in _CRITERION_STATUSES:
-            return False
-        if status == "supported" and not item.get("evidence_refs"):
-            return False
-    if str(tier or "").strip().lower() == OUTCOME_TIER_SOLVED:
-        return _criteria_have_supported_evidence(criteria)
-    return True
-
-
-def _contributing_actors(result: ReviewRunResult) -> List[Dict[str, Any]]:
-    """Actors whose verdict CONTRIBUTED to the aggregate, so a parse-degraded or
-    non-responsive slot cannot inject a tier / coach / finding into a clean quorum
-    result (Bible P3: one degraded slot must not poison the aggregate — the exact
-    class the split-participation gate was built to avoid). For aggregate PASS only
-    PASS actors speak; for FAIL only FAIL actors; for a DEGRADED/UNKNOWN aggregate
-    only the cleanly-parsed PASS/FAIL actors may speak (never the degraded ones)."""
-    actors = [a for a in (getattr(result, "actors", None) or []) if isinstance(a, dict)]
-    agg = str(getattr(result, "aggregate_signal", "") or "").upper()
-    if agg in ("PASS", "FAIL"):
-        return [a for a in actors if str(a.get("signal", "")).upper() == agg]
-    return [a for a in actors if str(a.get("signal", "")).upper() in ("PASS", "FAIL")]
-
-
-def aggregate_outcome_tier(result: ReviewRunResult) -> str:
-    """Worst-tier-wins across the actors that CONTRIBUTED to the aggregate verdict."""
-    worst, worst_rank = "", -1
-    for actor in _contributing_actors(result):
-        parsed = actor.get("parsed") if isinstance(actor, dict) else None
-        tier = str((parsed or {}).get("outcome_tier") or "").strip().lower() if isinstance(parsed, dict) else ""
-        rank = _TIER_ORDER.get(tier, -1)
-        if rank > worst_rank:
-            worst_rank, worst = rank, tier
-    return worst
-
-
-def task_acceptance_is_clean(result: Any) -> bool:
-    """Whether a task-acceptance verdict satisfies the release-clean contract.
-
-    The evidence condition is UNCONDITIONAL (D-Q5 deleted the constant-true
-    ``require_criterion_evidence`` knob — the v6.60.0 dead-key precedent), and a
-    'supported' criterion counts only when ≥1 of its ``evidence_refs`` RESOLVED
-    against the packet (host annotation stamped at panel time; absent on
-    historical rows — forward-only). Both demote ONLY this clean bit onto the
-    existing non-clean rails; parse validity/quorum/verdicts untouched (v6.71.1)."""
-    if str(getattr(result, "aggregate_signal", "") or "").upper() != "PASS" or bool(getattr(result, "degraded", False)):
-        return False
-    contributing = _contributing_actors(result)
-    if not contributing:
-        return False
-    for actor in contributing:
-        parsed = actor.get("parsed") if isinstance(actor, dict) else None
-        if not isinstance(parsed, dict) or str(parsed.get("outcome_tier") or "").lower() != OUTCOME_TIER_SOLVED:
-            return False
-        if not _criteria_have_supported_evidence(parsed.get("criteria_used")):
-            return False
-        if any(isinstance(r, dict) and not r.get("supported_evidence_resolves")
-               for r in (actor.get("criteria_refs_unresolved") or [])):
-            return False
-    return True
+from ouroboros.outcomes import OUTCOME_TIER_BEST_EFFORT, OUTCOME_TIER_BLOCKED, OUTCOME_TIER_SOLVED  # noqa: F401 -- facade import surface; leaves read it through the call-time handle
 
 
 # v6.74.0 (A5): reviewer-authored dialogue status. The reviewer — not a host
 # counter or hash — judges whether the acceptance dialogue is still actionable.
-DIALOGUE_CONTINUE = "continue_actionable"
-DIALOGUE_UNREACHABLE = "unreachable_here"
-DIALOGUE_STABLE_DISAGREEMENT = "stable_disagreement"
-DIALOGUE_STATUS_VALUES = (DIALOGUE_CONTINUE, DIALOGUE_UNREACHABLE, DIALOGUE_STABLE_DISAGREEMENT)
-DIALOGUE_TERMINAL_STATUSES = (DIALOGUE_UNREACHABLE, DIALOGUE_STABLE_DISAGREEMENT)
-# Reducer OUTPUTS, deliberately outside DIALOGUE_STATUS_VALUES (reviewer vocabulary
-# unchanged): no well-formed vote at all — neither terminal nor a licence to
-# continue — plus the buckets that keep a REFUSED vote disclosed, not dropped.
-DIALOGUE_INCONCLUSIVE = "inconclusive"
-DIALOGUE_VOTE_CONTINUE_WITHOUT_FINDINGS = "continue_without_findings"
-DIALOGUE_VOTE_ABSTAIN_INVALID = "abstain_invalid"
-
-
-def aggregate_dialogue_status(result: Any, *, quorum: int) -> Dict[str, Any]:
-    """Pure reducer over the reviewers' typed ``dialogue_status`` votes (A5, P5).
-    Votes are counted over the CONTRIBUTING actors, gated by contract validity
-    (owner ratification 2026-08-30, replacing the sol #3 widening). Precedence,
-    over WELL-FORMED votes only: a continue keeps the loop; else >=1 terminal vote
-    ends it with the unreachable-vs-disagreement tie-break; else ``inconclusive``,
-    which grants the dialogue no authority either way. A continue WITHOUT material
-    and a missing/invalid vote both ABSTAIN and stay disclosed in the distribution;
-    neither may default the loop into another paid round — which is exactly what
-    the old fail-safe ``continue`` default did. ``quorum`` no longer gates the
-    terminal side (ending the dialogue is the cheap direction, and the two ends are
-    now symmetric); it rides the record so it stays auditable beside the votes."""
-    from ouroboros.review_actor_aggregation import contract_valid_actors, continue_vote_is_well_formed
-
-    valid_slots = {str(row.get("slot_id", "")) for row in contract_valid_actors(result)}
-    votes: Dict[str, List[str]] = {}
-    for row in _contributing_actors(result):
-        slot_id = str(row.get("slot_id", ""))
-        if slot_id not in valid_slots:
-            continue  # a PASS/FAIL signal beside a malformed parse never votes
-        parsed = row.get("parsed") if isinstance(row.get("parsed"), dict) else {}
-        vote = str(parsed.get("dialogue_status") or "").strip().lower()
-        if vote not in DIALOGUE_STATUS_VALUES:
-            vote = DIALOGUE_VOTE_ABSTAIN_INVALID
-        elif vote == DIALOGUE_CONTINUE and not continue_vote_is_well_formed(parsed):
-            vote = DIALOGUE_VOTE_CONTINUE_WITHOUT_FINDINGS
-        votes.setdefault(vote, []).append(slot_id)
-    unreachable = votes.get(DIALOGUE_UNREACHABLE, [])
-    disagreement = votes.get(DIALOGUE_STABLE_DISAGREEMENT, [])
-    if votes.get(DIALOGUE_CONTINUE):
-        status = DIALOGUE_CONTINUE
-    elif unreachable or disagreement:
-        status = (
-            DIALOGUE_UNREACHABLE
-            if len(unreachable) >= len(disagreement)
-            else DIALOGUE_STABLE_DISAGREEMENT
-        )
-    else:
-        status = DIALOGUE_INCONCLUSIVE
-    return {"status": status, "votes": votes, "quorum": max(1, int(quorum))}
-
-
-def _unresolved_evidence_ref_labels(run: Any) -> List[str]:
-    """The D-Q5 refs a contributing actor cited that did NOT resolve, as
-    ``ref (basis)`` labels (or the panel-wide ``host_resolution_unavailable``).
-
-    Pure read of the deciding detail already recorded on the actor rows, so
-    ``panel_reason`` can name the REAL blocker: on a D-Q5 demotion every criterion
-    IS marked supported with refs, and the criteria-support line would describe a
-    condition that is already satisfied."""
-    from ouroboros.review_evidence_refs import NON_RESOLVING_BASIS_KINDS
-
-    labels: List[str] = []
-    for actor in _contributing_actors(run):
-        for row in (actor.get("criteria_refs_unresolved") or []):
-            if not isinstance(row, dict) or row.get("supported_evidence_resolves"):
-                continue
-            if str(row.get("resolution_status") or ""):
-                labels.append(str(row["resolution_status"]))
-                continue
-            for ref in (row.get("refs") or []):
-                if not isinstance(ref, dict):
-                    continue
-                basis = str(ref.get("resolved_as") or "")
-                if basis and basis not in NON_RESOLVING_BASIS_KINDS:
-                    continue  # this one resolved; it is not the blocker
-                labels.append(f"{str(ref.get('ref') or '?')[:80]} ({basis or 'no packet entry'})")
-    return list(dict.fromkeys(labels))
-
-
-def panel_reason(run: Any) -> str:
-    """One honest reason line naming the REAL blocker (v6.74.0, A6); shared by
-    the capsule header, the compact projection fallback, and progress lines.
-    Accepts a ``ReviewRunResult`` or its dict/namespace record."""
-    from types import SimpleNamespace
-
-    if isinstance(run, dict):
-        run = SimpleNamespace(**run)
-    aggregate = str(getattr(run, "aggregate_signal", "") or "UNKNOWN").upper()
-    tier = aggregate_outcome_tier(run)
-    if aggregate == "PASS":
-        if task_acceptance_is_clean(run):
-            return "clean acceptance"
-        # A D-Q5 demotion leaves every criterion marked supported WITH refs, so the
-        # criteria-support line below would name a condition that is already
-        # satisfied. Name the ref that actually decided instead.
-        unresolved = _unresolved_evidence_ref_labels(run)
-        if unresolved:
-            more = f" (+{len(unresolved) - 3} more)" if len(unresolved) > 3 else ""
-            return (
-                f"tier={tier or 'unclassified'} — cited evidence does not resolve "
-                f"against the packet: {', '.join(unresolved[:3])}{more}"
-            )
-        return (
-            f"tier={tier or 'unclassified'} — a PASS is not release-clean until "
-            "every criterion is supported"
-        )
-    if aggregate == "FAIL":
-        fail_slots = {
-            str(actor.get("slot_id", ""))
-            for actor in _contributing_actors(run)
-            if str(actor.get("signal", "")).upper() == "FAIL"
-        }
-        named = ""
-        for actor in _contributing_actors(run):
-            if str(actor.get("signal", "")).upper() != "FAIL":
-                continue
-            parsed = actor.get("parsed") if isinstance(actor.get("parsed"), dict) else {}
-            for finding in (parsed.get("findings") or []):
-                if isinstance(finding, dict):
-                    named = str(finding.get("item") or finding.get("recommendation") or "").strip()
-                    if named:
-                        break
-            if not named:
-                named = str(parsed.get("summary") or "").strip()
-            if named:
-                break
-        if not named:
-            # Coordinator-flattened findings (slot_id-stamped) from FAIL slots.
-            for finding in (getattr(run, "parsed_findings", None) or []):
-                if isinstance(finding, dict) and str(finding.get("slot_id", "")) in fail_slots:
-                    named = str(finding.get("item") or finding.get("recommendation") or "").strip()
-                    if named:
-                        break
-        if named:
-            compact = truncate_review_artifact(" ".join(named.split()), limit=300)
-            return f"tier={tier or 'unclassified'} — {compact}"
-        return f"tier={tier or 'unclassified'} — reviewer FAIL without a named finding"
-    reasons = [str(r) for r in (getattr(run, "degraded_reasons", None) or []) if str(r)]
-    if len(reasons) > 4:
-        return "; ".join(reasons[:4]) + f" ⚠️ OMISSION NOTE: +{len(reasons) - 4} more causes in the run record"
-    return "; ".join(reasons) or "no valid reviewer quorum"
-
-
-def dissent_findings(result: ReviewRunResult, *, limit: int = 1) -> List[str]:
-    """Compact dissent bullets from NON-contributing minority reviewers (v6.54.4).
-
-    A cleanly-parsed reviewer whose verdict differs from the aggregate AND who
-    carries a CONCRETE recommendation/alternative contributes ONE verbatim
-    "[DISSENT — slot N]: ..." line. Not a veto — the aggregate stands; this ends
-    the class where an aggregate-PASS silently discarded a minority FAIL whose
-    concrete recommendation was correct (GAIA 3cef3a44). A DELIBERATE minority
-    DEGRADED — the reviewer's own parsed verdict (the prompt's "cannot judge →
-    return DEGRADED and explain" branch, which is exactly what the 3cef3a44
-    reviewer returned) — may dissent too, but only on the strength of a concrete
-    findings[].recommendation. Parse-fail placeholders (parsed=None),
-    contract-demoted PASSes (their parsed verdict stays PASS — they agree with
-    the aggregate), and coach-only DEGRADED stay excluded (no clean dissenting
-    signal). ONE bullet by design (plan decision #13) — the first concrete
-    dissenter speaks."""
-    agg = str(getattr(result, "aggregate_signal", "") or "").upper()
-    contributing_ids = {str(a.get("slot_id", "")) for a in _contributing_actors(result)}
-    out: List[str] = []
-    for actor in (getattr(result, "actors", None) or []):
-        if not isinstance(actor, dict) or len(out) >= limit:
-            continue
-        slot_id = str(actor.get("slot_id", ""))
-        signal = str(actor.get("signal", "")).upper()
-        if slot_id in contributing_ids or signal == agg:
-            continue
-        parsed = actor.get("parsed") if isinstance(actor.get("parsed"), dict) else {}
-        deliberate_degraded = (
-            signal == "DEGRADED"
-            and str(parsed.get("verdict") or "").strip().upper() == "DEGRADED"
-        )
-        if signal not in ("PASS", "FAIL") and not deliberate_degraded:
-            continue
-        recommendation = ""
-        for finding in (parsed.get("findings") or []):
-            if isinstance(finding, dict):
-                recommendation = str(finding.get("recommendation") or "").strip()
-                if recommendation:
-                    break
-        if not recommendation and not deliberate_degraded:
-            recommendation = str(parsed.get("completion_coach") or "").strip()
-        if not recommendation:
-            continue  # a bare contrary verdict with no concrete alternative is noise
-        compact = " ".join(recommendation.split())
-        if len(compact) > 300:
-            compact = compact[:300].rstrip() + "…"
-        out.append(f"[DISSENT — {slot_id} said {signal}]: check this before finalizing — {compact}")
-    return out
-
-
-def build_improvement_capsule(
-    result: ReviewRunResult,
-    *,
-    rails_line: str = "",
-    open_obligations: List[Dict[str, Any]] | None = None,
-) -> str:
-    """Compact, anti-derailment "Final improvement note" fed back to the agent:
-    the actual verdict + tier + real blocker (v6.74.0, A1 — today only the tier
-    label printed), the concrete open obligation ids, one pre-rendered rails
-    line (money/time/rounds/passes headroom, assembled by the caller from the
-    real sources), exact-deduplicated actionable findings, and one
-    completion_coach. Returns "" when there is nothing actionable. The full
-    ReviewRunResult stays on the objective axis / trace; the agent sees only this
-    capsule, so it does not rewrite its deliverable into a meta-essay about the
-    review (the failure mode that made the host-forced path label-only).
-
-    Tier, coach, and bullets are drawn ONLY from the actors that contributed to the
-    aggregate verdict, so a single parse-degraded slot cannot inject a blocking note
-    into an otherwise-clean quorum PASS."""
-    aggregate_signal = str(getattr(result, "aggregate_signal", "") or "").upper()
-    contributing = _contributing_actors(result)
-    # A semantic DEGRADED verdict abstains from quorum, but a concrete finding is
-    # still an owner-approved correction rail for the required+blocking re-drive.
-    # Transport/parse placeholders and contract-demoted PASS/FAIL actors remain
-    # excluded: only an explicitly parsed verdict=DEGRADED may supply ANY capsule
-    # content (tier, coach, or finding) when the aggregate itself is DEGRADED.
-    deliberate_degraded = [
-        actor
-        for actor in (getattr(result, "actors", None) or [])
-        if (
-            aggregate_signal == "DEGRADED"
-            and isinstance(actor, dict)
-            and str(actor.get("signal") or "").upper() == "DEGRADED"
-            and isinstance(actor.get("parsed"), dict)
-            and str(actor["parsed"].get("verdict") or "").strip().upper() == "DEGRADED"
-        )
-    ]
-    eligible_actors = deliberate_degraded if aggregate_signal == "DEGRADED" else contributing
-    eligible_slots = {str(actor.get("slot_id", "")) for actor in eligible_actors}
-    tier = ""
-    tier_rank = -1
-    for actor in eligible_actors:
-        parsed = actor.get("parsed") if isinstance(actor, dict) else None
-        actor_tier = (
-            str(parsed.get("outcome_tier") or "").strip().lower()
-            if isinstance(parsed, dict)
-            else ""
-        )
-        actor_rank = _TIER_ORDER.get(actor_tier, -1)
-        if actor_rank > tier_rank:
-            tier_rank, tier = actor_rank, actor_tier
-    coach = ""
-    for actor in eligible_actors:
-        parsed = actor.get("parsed") if isinstance(actor, dict) else None
-        if isinstance(parsed, dict) and not coach:
-            coach = str(parsed.get("completion_coach") or "").strip()
-        if coach:
-            break
-    bullets: List[str] = []
-    seen_bullets: set[str] = set()
-    for finding in (getattr(result, "parsed_findings", None) or []):
-        if not isinstance(finding, dict):
-            continue
-        # Only findings from a contributing actor may surface in the capsule.
-        if str(finding.get("slot_id", "")) not in eligible_slots:
-            continue
-        text = str(finding.get("recommendation") or finding.get("item") or "").strip()
-        # Exact normalized deduplication only.  Do not introduce semantic
-        # clustering or another findings authority for the improvement loop.
-        dedup_key = " ".join(text.split())
-        if text and dedup_key not in seen_bullets:
-            seen_bullets.add(dedup_key)
-            bullets.append(text)
-    # A SOLVED review carries a (contract-required) completion_coach, but a coach
-    # alone must NOT force a revise round on an already-solved deliverable — that
-    # would re-loop EVERY clean required review. The capsule is actionable only
-    # when there are real findings to act on OR the tier itself is incomplete
-    # (best_effort/blocked). The coach is then included as the next step.
-    dissent = dissent_findings(result)
-    # A coach alone stays non-actionable for a clean SOLVED PASS, but it is the
-    # bounded correction rail for a contributing FAIL.  The coordinator admits a
-    # task-acceptance FAIL only when this function can return such a rail.
-    actionable = (
-        bool(bullets)
-        or bool(dissent)
-        or (
-            aggregate_signal == "FAIL"
-            and bool(coach)
-        )
-        or tier in (OUTCOME_TIER_BEST_EFFORT, OUTCOME_TIER_BLOCKED)
-    )
-    if not actionable:
-        return ""
-    # Lead with the actual outcome (A1): verdict + tier + the real blocker, so
-    # the agent sees WHAT failed instead of a bare ledger label.
-    header = f"[Final improvement note] Review verdict: {aggregate_signal or 'UNKNOWN'}"
-    if tier:
-        header += f" (tier: {tier})"
-    header += f" — {panel_reason(result)}."
-    lines = [header]
-    open_ids = [
-        str(o.get("id"))
-        for o in (open_obligations or [])
-        if isinstance(o, dict) and o.get("id")
-    ]
-    if open_ids:
-        lines.append(
-            f"Open blocking obligation(s) ({len(open_ids)}): " + ", ".join(open_ids) + "."
-        )
-    if rails_line:
-        lines.append(f"Remaining headroom — {rails_line}.")
-    # Dissent rides ON TOP of the capsule (v6.54.4): same anti-derailment frame,
-    # never a veto — a minority reviewer with a concrete recommendation is a
-    # "check this before finalizing" pointer, not a re-litigation of the verdict.
-    lines += dissent
-    lines += [f"- {b}" for b in bullets]
-    if coach:
-        lines.append(f"Highest-value next step: {coach}")
-    lines.append(
-        # The three real moves (A1): the old "revise only if it genuinely
-        # improves the result; otherwise produce your normal final answer" tail
-        # was the measured cause of the do-nothing resubmit loop (SWE 1b311217:
-        # 7 passes, zero tool calls). The anti-derailment guards stay verbatim.
-        "Three real moves are available: (1) FIX — change the work/answer so the next panel is "
-        "clean; (2) REBUT — file obligation_dispositions (rejected + your reason) via the "
-        "task_acceptance_review tool for findings you can show are wrong; the reviewer "
-        "adjudicates the argument; (3) DECLARE UNREACHABLE — dispose an obligation as "
-        "unsatisfiable in this environment (rejected + the concrete gap), and the reviewer "
-        "judges reachability. Resubmitting the same answer with none of these moves changes "
-        "nothing. "
-        "Do not mention this review or the reviewer unless the user asked. "
-        "The assessment tier above is an internal ledger label — never emit an internal ledger "
-        "identifier as the deliverable itself."
-    )
-    return "\n".join(lines)
 
 
 # Historical dispatch names remain re-exported for existing consumers.
 from ouroboros.review_dispatch import (  # noqa: E402,F401 — re-exports
+    acceptance_slot_fit,
     PLAN_SLOT_ID_PREFIX,
     ReviewPaidStamp,
     SCOPE_SLOT_ID_PREFIX,
@@ -964,9 +135,8 @@ from ouroboros.review_dispatch import (  # noqa: E402,F401 — re-exports
 )
 
 
-# reviewer_slots() lives in reviewer_slot_config (altitude, P7); re-exported
-# because acceptance surfaces and tests import it from here.
-from ouroboros.reviewer_slot_config import reviewer_slots  # noqa: F401,E402
+# reviewer_slots()/triad_delivery_slots() live in reviewer_slot_config (altitude, P7); re-exported for callers here.
+from ouroboros.reviewer_slot_config import SCOPE_ROLE_HINT, reviewer_slots, triad_delivery_slots  # noqa: F401,E402
 
 
 def scope_reviewer_slots(
@@ -982,7 +152,10 @@ def scope_reviewer_slots(
 
     With no explicit ``models`` the rows come from the reviewer-slot SSOT
     (6.1): stable owner ids, per-row route/target/effort. An explicit list
-    keeps the historical positional behavior for callers that rebuild one row.
+    keeps the historical positional behavior for callers that rebuild one row;
+    such rows are pinned ``api_chat`` (the caller that fans out a delegated
+    row overrides the route itself — the phase-5 per-row route envs are
+    retired, ABI-10).
 
     An omitted ``effort`` resolves to the configured scope-review effort: the
     legacy path used to take this parameter's old literal default instead,
@@ -1003,12 +176,17 @@ def scope_reviewer_slots(
         from ouroboros.config import get_scope_review_models
 
         models = get_scope_review_models()
-    from ouroboros.review_execution import SCOPE_REVIEW_ROUTES_ENV
-
     return reviewer_slots(
-        models, effort=effort, role_hint="scope reviewer", id_prefix=SCOPE_SLOT_ID_PREFIX,
-        route_env_key=SCOPE_REVIEW_ROUTES_ENV,
+        models, effort=effort, role_hint=SCOPE_ROLE_HINT, id_prefix=SCOPE_SLOT_ID_PREFIX,
     )
+
+
+def review_usage_category(surface: str) -> str:
+    """The usage-scope category every send of a review surface is attributed
+    under — the key the ledger's cache split and the root telemetry's
+    reservation identities carry, so the commit gate's admission and its
+    scope-first hold name the same scope the substrate sends under."""
+    return f"{surface}_review"
 
 
 class ReviewCoordinator:
@@ -1088,9 +266,9 @@ class ReviewCoordinator:
             global_limit = base_scope.global_limit_usd
         else:
             try:
-                configured_global_limit = float(os.environ.get("TOTAL_BUDGET", "0") or 0)
-                global_limit = configured_global_limit if configured_global_limit > 0 else None
-            except (TypeError, ValueError):
+                from ouroboros.settings_setup_contract import resolve_total_budget_usd
+                global_limit = resolve_total_budget_usd()
+            except Exception:
                 global_limit = None
         if base_scope.root_limit_usd is not None:
             root_limit = base_scope.root_limit_usd
@@ -1107,7 +285,7 @@ class ReviewCoordinator:
             task_id=task_id,
             root_task_id=root_task_id,
             parent_task_id=str(usage_meta.get("parent_task_id") or base_scope.parent_task_id or ""),
-            category=f"{request.surface}_review",
+            category=review_usage_category(request.surface),
             source="review_substrate",
             review_skill=str(review_meta.get("review_skill") or base_scope.review_skill or ""),
             review_wave_id=str(review_meta.get("review_wave_id") or base_scope.review_wave_id or ""),
@@ -1225,6 +403,7 @@ class ReviewCoordinator:
         *,
         operation_id: str = "",
         operation_state: str = "settled",
+        prompt_ref: Dict[str, Any] | None = None,
     ) -> ReviewActorRecord:
         actor_status = "not_dispatched" if operation_state == "not_dispatched" else "error"
         call_id = new_call_id(f"review_{request.surface}_{slot.slot_id}_error")
@@ -1239,19 +418,20 @@ class ReviewCoordinator:
             prompt_projection = _review_route_executor(assignment, llm=self.llm).prompt_payload()
         except Exception:
             prompt_projection = {}
-        prompt_ref: Dict[str, Any] = {}
         response_ref: Dict[str, Any] = {}
-        try:
-            prompt_ref = persist_call(
-                self.drive_root,
-                task_id=request.task_id or "review",
-                call_id=f"{call_id}_prompt",
-                call_type=f"{base_call_type}_prompt",
-                payload={"request": asdict(request), "slot": asdict(slot), **prompt_projection},
-                manifest={"surface": request.surface, "slot_id": slot.slot_id, "model": slot.model, "synthetic": True},
-            )
-        except Exception:
+        if prompt_ref is None:
             prompt_ref = {}
+            try:
+                prompt_ref = persist_call(
+                    self.drive_root,
+                    task_id=request.task_id or "review",
+                    call_id=f"{call_id}_prompt",
+                    call_type=f"{base_call_type}_prompt",
+                    payload={"request": asdict(request), "slot": asdict(slot), **prompt_projection},
+                    manifest={"surface": request.surface, "slot_id": slot.slot_id, "model": slot.model, "synthetic": True},
+                )
+            except Exception:
+                prompt_ref = {}
         try:
             response_ref = persist_call(
                 self.drive_root,
@@ -1293,6 +473,7 @@ class ReviewCoordinator:
             dispatch_stamp=self._review_paid_stamp,
         )
         executor = _review_route_executor(assignment, llm=self.llm)
+        executor.usage_observer = lambda usage: self._emit_usage(request, slot, usage, prompt_chars=executor.prompt_chars())
         executor._logical_deadline_monotonic = logical_deadline_monotonic
         # The physical session and the logical waiter must share this exact
         # mutable cell.  A fresh cell is normally empty, so ``state or {}``
@@ -1319,40 +500,30 @@ class ReviewCoordinator:
         except Exception:
             prompt_ref = {}
         free_refusal = (
-            task_acceptance_zero_physical_refusal(request.evidence)
+            task_acceptance_zero_physical_refusal(request.evidence, retrieving=bool(slot.retrieves))
             if request.surface == "task_acceptance"
             else {}
         )
         if free_refusal:
-            raw_text = json.dumps({
-                "verdict": "DEGRADED",
-                "findings": [],
-                "summary": free_refusal["summary"],
-            })
-            try:
-                response_ref = persist_call(
-                    self.drive_root,
-                    task_id=request.task_id or "review",
-                    call_id=f"{call_id}_response",
-                    call_type=f"{base_call_type}_response",
-                    payload={"message": {"content": raw_text}, "usage": {}},
-                    manifest={
-                        "surface": request.surface, "slot_id": slot.slot_id,
-                        "model": slot.model, "status": free_refusal["status"],
-                        "physical_attempts": 0,
-                    },
-                )
-            except Exception:
-                response_ref = {}
-            return ReviewActorRecord(
-                slot_id=slot.slot_id,
-                model=slot.model,
-                status="ok",
-                raw_text=raw_text,
-                prompt_ref=prompt_ref,
-                response_ref=response_ref,
-                duration_sec=round(time.time() - start, 3),
+            # Nothing was sent, so the row must not wear a verdict: it is a
+            # typed $0 ``not_dispatched`` actor whose refusal token rides into
+            # ``error`` so the aggregate names the real blocker.
+            return self._error_actor(
+                request, slot, f"{free_refusal['status']}: {free_refusal['summary']}",
+                operation_id=call_id, operation_state="not_dispatched", prompt_ref=prompt_ref,
             )
+        # Backstop for the quorum-sized packet ceiling: a narrower slot in the
+        # same panel can still be handed more than it holds, and refusing it
+        # costs nothing while the rest of the panel reviews.
+        if request.surface == "task_acceptance" and not slot.retrieves:
+            cap, estimated = acceptance_slot_fit(slot, executor, slot_input_caps=request.policy.get("slot_input_caps"))
+            if cap and estimated > cap:
+                return self._error_actor(
+                    request, slot,
+                    f"preflight_oversize: assembled acceptance prompt ~{estimated:,} tokens "
+                    f"exceeds this slot's calibrated input cap {cap:,}",
+                    operation_id=call_id, operation_state="not_dispatched", prompt_ref=prompt_ref,
+                )
         owner_deadline = str(getattr(request, "deadline_at", "") or "")
         from ouroboros.config import get_finalization_grace_sec
         from ouroboros.deadline_utils import owner_deadline_exhausted
@@ -1376,15 +547,16 @@ class ReviewCoordinator:
                 "Owner deadline exhausted before physical review dispatch",
                 operation_id=call_id,
                 operation_state="not_dispatched",
+                prompt_ref=prompt_ref,
             )
         try:
             p3_actor = request.surface in {"multi_model_review", "scope_review"}
             acceptance_actor = request.surface == "task_acceptance"
             actor_attempts = 2 if (p3_actor or acceptance_actor) else 1
             # Acceptance and P3 share one two-send rail: transport/empty retry
-            # or same-route format repair; a native tool-round slot instead
-            # gets its episode's own config-owned send cap (its second actor
-            # attempt repairs format locally, spending no send).
+            # or same-route format repair for PACKET rows; a retrieving row
+            # (native episode, agent session) carries no send count — its
+            # executor canonicalizes its own answer, so no repair resend below.
             from ouroboros.review_native_episode import native_or_packet_attempt_rail
 
             attempt_rail = native_or_packet_attempt_rail(
@@ -1456,7 +628,7 @@ class ReviewCoordinator:
                     _last_msg, _last_usage, _last_text, _has_prior = msg, usage, raw_text, True
                     if raw_text.strip():
                         if (
-                            acceptance_actor
+                            acceptance_actor and not slot.retrieves
                             and actor_attempt + 1 < actor_attempts
                             and parse_review_findings(raw_text)[0] is None
                         ):
@@ -1491,7 +663,6 @@ class ReviewCoordinator:
                         break
                     if actor_attempt + 1 >= actor_attempts:
                         break
-            self._emit_usage(request, slot, usage, prompt_chars=executor.prompt_chars())
             try:
                 response_ref = persist_call(
                     self.drive_root,
@@ -1566,8 +737,8 @@ class ReviewCoordinator:
 
             emit_review_usage(
                 self.usage_ctx,
-                model=slot.model,
-                usage=usage,
+                model=str(usage.get("resolved_model") or slot.model),
+                provider=str(usage.get("provider") or ""), usage=usage,
                 source=f"review_substrate:{request.surface}",
                 prompt_chars=prompt_chars,
                 extra={"surface": request.surface, "slot_id": slot.slot_id},
@@ -1597,3 +768,51 @@ def run_review_request(
 
         annotate_criteria_evidence_resolution(result.actors, request.evidence)
     return result
+
+
+# v7next F2.3a (D06): moved spans live in their owner leaves; re-exported
+# here so this facade stays the single import surface for callers and tests.
+from ouroboros.review_records import (  # noqa: E402, F401 -- intentional public re-exports
+    HARDNESS_ADVISORY_VISIBLE,
+    HARDNESS_HARD_GATE,
+    HARDNESS_LABEL_ONLY,
+    ReviewActorRecord,
+    ReviewRequest,
+    ReviewRunResult,
+    ReviewSlot,
+    TYPED_FAILURE_FACT_KEYS,
+)
+
+from ouroboros.review_verdict import (  # noqa: E402, F401 -- intentional public re-exports
+    DIALOGUE_CONTINUE,
+    DIALOGUE_INCONCLUSIVE,
+    DIALOGUE_STABLE_DISAGREEMENT,
+    DIALOGUE_STATUS_VALUES,
+    DIALOGUE_TERMINAL_STATUSES,
+    DIALOGUE_UNREACHABLE,
+    DIALOGUE_VOTE_ABSTAIN_INVALID,
+    DIALOGUE_VOTE_CONTINUE_WITHOUT_FINDINGS,
+    _CRITERION_STATUSES,
+    _TIER_ORDER,
+    _contributing_actors,
+    _criteria_have_supported_evidence,
+    _criteria_shape_valid,
+    _unresolved_evidence_ref_labels,
+    aggregate_dialogue_status,
+    aggregate_outcome_tier,
+    build_improvement_capsule,
+    dissent_findings,
+    panel_reason,
+    task_acceptance_is_clean,
+)
+
+from ouroboros.review_projection import (  # noqa: E402, F401 -- intentional public re-exports
+    _public_review_reason,
+    _response_ref_projection,
+    _review_actor_projection,
+    _review_enforcement_impact,
+    _review_panel_id,
+    _transport_error_status,
+    build_review_binding,
+    compact_review_projection,
+)

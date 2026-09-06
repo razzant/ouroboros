@@ -47,7 +47,7 @@ def _pinned_chat_id(settings: Dict[str, Any]) -> int:
 
 
 async def _push_notification(
-    api, chat_id: int, text: str,
+    api, chat_id: int, text: str, *, trust_env: bool = False,
 ) -> Tuple[str, Optional[BaseException]]:
     """Send one notification; never raises a typed Telegram failure.
 
@@ -61,7 +61,7 @@ async def _push_notification(
     owner-visible line per episode.
     """
     protected = api.get_settings(["TELEGRAM_BOT_TOKEN"])
-    client = TelegramClient(protected.get("TELEGRAM_BOT_TOKEN", ""))
+    client = TelegramClient(protected.get("TELEGRAM_BOT_TOKEN", ""), trust_env=trust_env)
     try:
         await client.send_message(int(chat_id), text, parse_mode="")
         return "sent", None
@@ -81,6 +81,7 @@ _BUDGET_THRESHOLDS = (100, 90, 80)  # checked high → low
 
 async def _check_budget_notify(
     api, settings: Dict[str, Any], chat_id: int, state: Dict[str, Any], lang: str,
+    *, trust_env: bool = False,
 ) -> Tuple[Optional[BaseException], bool]:
     """Returns (transient send failure if any, whether a send was delivered)."""
     if not _notify_enabled(settings, "TELEGRAM_NOTIFY_BUDGET"):
@@ -104,7 +105,7 @@ async def _check_budget_notify(
     if crossed > notified:
         msg = (f"⚠️ Бюджет: {pct:.0f}% (${spent:.2f} / ${total:.2f})" if lang == "ru"
                else f"⚠️ Budget: {pct:.0f}% (${spent:.2f} / ${total:.2f})")
-        outcome, exc = await _push_notification(api, chat_id, msg)
+        outcome, exc = await _push_notification(api, chat_id, msg, trust_env=trust_env)
         if outcome == "transient":
             return exc, False
         # "sent" delivered it; "skipped" consumes it (permanent rejection) so
@@ -116,21 +117,38 @@ async def _check_budget_notify(
     return None, delivered
 
 
+def _axis_status(axes: Any, axis: str) -> str:
+    """One `outcome_axes` axis status, tolerating the legacy bare-string shape.
+
+    Canonical rows carry ``{"lifecycle": {"status": "completed"}}``; pre-axes
+    rows carry ``{"lifecycle": "completed"}``. Stringifying the axis itself is
+    what once pushed ``· {'status': 'completed'}`` with a permanent warning
+    icon, so read the status and never the container.
+    """
+    value = axes.get(axis) if isinstance(axes, dict) else None
+    if isinstance(value, dict):
+        value = value.get("status")
+    return str(value or "")
+
+
 def _summary_ids_in_tail(api, limit: int = 200) -> list:
     rows, _omitted = _jsonl_tail(
         _data_dir(api) / "logs" / "chat.jsonl",
         max_entries=limit,
         tail_bytes=256 * 1024,
     )
-    ids = []
+    summaries = {}
     for e in rows:
-        if str(e.get("type") or "") == "task_summary" and e.get("task_id"):
-            ids.append((str(e.get("task_id")), e))
-    return ids
+        if (str(e.get("type") or "") == "task_summary" and e.get("task_id")
+                and e.get("outcome_final") is not False
+                and str(e.get("outcome_phase") or "") != "working"):
+            summaries[str(e.get("task_id"))] = e
+    return list(summaries.items())
 
 
 async def _check_tasks_notify(
     api, settings: Dict[str, Any], chat_id: int, state: Dict[str, Any], lang: str,
+    *, trust_env: bool = False,
 ) -> Tuple[Optional[BaseException], bool]:
     """Returns (last transient send failure if any, whether a send was delivered)."""
     if not _notify_enabled(settings, "TELEGRAM_NOTIFY_TASKS"):
@@ -159,13 +177,22 @@ async def _check_tasks_notify(
         except (TypeError, ValueError):
             pass
         oa = e.get("outcome_axes")
-        outcome = str(oa.get("lifecycle") or "") if isinstance(oa, dict) else ""
+        outcome = _axis_status(oa, "lifecycle")
+        degraded = _axis_status(oa, "execution").lower() in ("degraded", "best_effort")
         if outcome and outcome not in ("completed", "done"):
             parts.append(outcome)
         tail = (" · " + " · ".join(parts)) if parts else ""
-        icon = "✅" if outcome in ("", "completed", "done") else "⚠️"
+        # The host stamps one status phase on its own task rows; consume it
+        # instead of re-deriving a third status ladder from the axes. Legacy
+        # rows and pre-finalization "working" rows keep the axes rule.
+        phase = str(e.get("outcome_phase") or "")
+        if phase and phase != "working":
+            healthy = phase == "done"
+        else:
+            healthy = outcome in ("", "completed", "done") and not degraded
+        icon = "✅" if healthy else "⚠️"
         msg = (f"{icon} Задача {tid[:8]} готова{tail}" if lang == "ru" else f"{icon} Task {tid[:8]} done{tail}")
-        send_outcome, exc = await _push_notification(api, chat_id, msg)
+        send_outcome, exc = await _push_notification(api, chat_id, msg, trust_env=trust_env)
         if send_outcome == "transient":
             # Stop the batch on the first transient failure: every further
             # send would burn its full transport timeout against the same dead
@@ -182,7 +209,7 @@ async def _check_tasks_notify(
     return transient, delivered
 
 
-def _make_notifier(api):
+def _make_notifier(api, *, trust_env: bool = False):
     """Periodic, file-based proactive notifications (task done / budget threshold).
     Read-only over durable files; sends only when a pinned chat + toggle are set."""
     async def notifier() -> None:
@@ -200,14 +227,16 @@ def _make_notifier(api):
             if chat_id and want:
                 lang = str(settings.get("TELEGRAM_LANGUAGE") or "en").strip().lower()
                 state = _load_notif_state(api)
-                transient, delivered = await _check_budget_notify(api, settings, chat_id, state, lang)
+                transient, delivered = await _check_budget_notify(
+                    api, settings, chat_id, state, lang, trust_env=trust_env,
+                )
                 if transient is None:
                     # A transient budget-send failure means the transport is
                     # down right now: skip the tasks batch entirely instead of
                     # burning more transport timeouts, and let the backoff
                     # below pace the retry.
                     transient, tasks_delivered = await _check_tasks_notify(
-                        api, settings, chat_id, state, lang,
+                        api, settings, chat_id, state, lang, trust_env=trust_env,
                     )
                     delivered = delivered or tasks_delivered
                 _save_notif_state(api, state)

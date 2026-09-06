@@ -14,15 +14,15 @@ import urllib.parse
 import urllib.request
 from typing import Any, Callable, Dict, Optional
 
-from ouroboros.config import SETTINGS_DEFAULTS
+from ouroboros.config import SETTINGS_DEFAULTS, normalize_settings_raw, serialize_settings
 from ouroboros.update_channels import get_managed_update_fetch_timeout_sec, normalize_update_channel
-from ouroboros.utils import atomic_write_json
+from ouroboros.utils import atomic_write_json, write_text_atomic
 
 DEFAULT_COLAB_APP_ROOT = "/content/drive/MyDrive/Ouroboros"
 DEFAULT_COLAB_REPO_DIR = "/content/ouroboros_repo"
 DEFAULT_OFFICIAL_REPO_URL = "https://github.com/razzant/ouroboros.git"
 
-_SECRET_KEYS = ("OPENROUTER_API_KEY", "OPENAI_API_KEY", "ANTHROPIC_API_KEY", "MINIMAX_API_KEY", "CLOUDRU_FOUNDATION_MODELS_API_KEY", "GITHUB_TOKEN", "TELEGRAM_BOT_TOKEN")
+_SECRET_KEYS = ("OPENROUTER_API_KEY", "OPENAI_API_KEY", "ANTHROPIC_API_KEY", "MINIMAX_API_KEY", "DEEPSEEK_API_KEY", "CLOUDRU_FOUNDATION_MODELS_API_KEY", "GITHUB_TOKEN", "TELEGRAM_BOT_TOKEN")
 
 
 def _run_colab_git_network(args: list[str], *, cwd: pathlib.Path | None = None) -> str:
@@ -76,15 +76,16 @@ def collect_colab_secrets() -> Dict[str, str]:
     """Collect runtime secrets without printing their values.
 
     The Telegram bot token is required (the bridge needs it). Any supported
-    provider key works — OpenRouter, OpenAI, or Anthropic are collected
-    optionally, and OpenRouter is prompted only if none is found, so an
-    OpenAI-only or Anthropic-only Colab user is not forced to enter OpenRouter.
+    provider key works — OpenRouter, OpenAI, Anthropic, MiniMax, DeepSeek and
+    Cloud.ru are collected optionally, and OpenRouter is prompted only if none
+    is found, so a single-direct-provider Colab user is not forced to enter
+    OpenRouter.
     The GitHub token is optional (it only enables personal self-modification
     persistence), so a quick prototype never blocks on a GitHub prompt.
     """
     # Providers the one-click Colab launch can auto-route models for via
     # apply_runtime_provider_defaults (OpenRouter is the default aggregator;
-    # OpenAI/Anthropic/MiniMax/Cloud.ru have direct model defaults). OpenAI-compatible
+    # OpenAI/Anthropic/MiniMax/DeepSeek/Cloud.ru have direct model defaults). OpenAI-compatible
     # endpoints have no universal model default and need explicit OUROBOROS_MODEL_*
     # config, so they are an advanced manual path, not part of the quick launch.
     provider_keys = (
@@ -92,6 +93,7 @@ def collect_colab_secrets() -> Dict[str, str]:
         "OPENAI_API_KEY",
         "ANTHROPIC_API_KEY",
         "MINIMAX_API_KEY",
+        "DEEPSEEK_API_KEY",
         "CLOUDRU_FOUNDATION_MODELS_API_KEY",
     )
     out: Dict[str, str] = {}
@@ -131,15 +133,15 @@ def build_colab_settings(
     """
     settings = dict(SETTINGS_DEFAULTS)
     if existing:
-        # Apply the same v6.39 slot rename-alias migration load_settings uses, BEFORE
-        # merging over the defaults — exactly as load_settings migrates the raw loaded file
-        # before layering SETTINGS_DEFAULTS. (Migrating after the merge would see the new
-        # key already present as its empty default and skip the copy.) This keeps a Drive
-        # settings.json with legacy OUROBOROS_MODEL_CODE / USE_LOCAL_CODE /
-        # OUROBOROS_MODEL_FALLBACK customizations alive on a re-run.
-        from ouroboros.config import migrate_legacy_slot_keys
-        migrated = migrate_legacy_slot_keys(dict(existing))
-        settings.update({k: v for k, v in migrated.items() if not str(k).startswith("_")})
+        # The Drive document is an install's settings document, so it is read the way
+        # every reader reads one: the raw-stage normalization (coercion, retention fold,
+        # review-cycle seed, retired purge, slot rename, secret repair) runs BEFORE the
+        # defaults are merged — after the merge the renamed key is already present as its
+        # default and the customization under the former key is lost, then written back
+        # to Drive as the owner's choice. Private sentinel keys stay out of the document.
+        settings.update({
+            k: v for k, v in normalize_settings_raw(existing).items() if not str(k).startswith("_")
+        })
     for key, value in secrets.items():
         # Only overwrite when the freshly collected secret is non-empty, so a
         # re-run that omits an optional provider/GitHub key (collect_colab_secrets
@@ -170,18 +172,26 @@ def build_colab_settings(
 
 
 def write_colab_settings(data_dir: pathlib.Path, settings: Dict[str, Any]) -> pathlib.Path:
+    """Persist the generated document for the Drive data root, in the one on-disk spelling.
+
+    Deliberately NOT routed through the persistence prologue: it proves the owner-only
+    ratchets against THIS process's ``config.SETTINGS_PATH``, and the Drive root is another
+    path (the quickstart exports the Colab paths only after this write). The bytes are
+    still ``serialize_settings`` bytes, so the next reader of the Drive file meets the
+    spelling every other writer produces."""
     path = pathlib.Path(data_dir) / "settings.json"
     path.parent.mkdir(parents=True, exist_ok=True)
-    atomic_write_json(path, dict(settings), trailing_newline=True)
+    write_text_atomic(path, serialize_settings(dict(settings)))
     return path
 
 
 def export_colab_env(repo_dir: pathlib.Path, data_dir: pathlib.Path, settings_path: pathlib.Path) -> Dict[str, str]:
-    # Colab forks workers from the long-lived, multi-threaded supervisor; a forked
-    # child can deadlock on the CPython import lock the first time it lazily imports
-    # the OpenAI client (llm._make_no_proxy_client). spawn is the safe start method
-    # for fork-from-threads, so default to it here and respect an explicit override.
-    start_method = (os.environ.get("OUROBOROS_WORKER_START_METHOD") or "spawn").strip().lower()
+    # A child forked from the long-lived, multi-threaded supervisor can deadlock on
+    # the CPython import lock the first time it lazily imports the OpenAI client
+    # (llm._make_no_proxy_client). forkserver -- the runtime's Linux default since
+    # G13 (supervisor/workers.py) -- forks from one single-threaded server instead;
+    # export it explicitly here and respect an explicit override.
+    start_method = (os.environ.get("OUROBOROS_WORKER_START_METHOD") or "forkserver").strip().lower()
     env = {"OUROBOROS_APP_ROOT": str(pathlib.Path(data_dir).parent), "OUROBOROS_REPO_DIR": str(repo_dir), "OUROBOROS_DATA_DIR": str(data_dir), "OUROBOROS_SETTINGS_PATH": str(settings_path), "OUROBOROS_WORKER_START_METHOD": start_method, "PYTHONUNBUFFERED": "1", "PYTHONPATH": str(repo_dir)}
     os.environ.update(env)
     return env

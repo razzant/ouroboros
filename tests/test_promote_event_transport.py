@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 import multiprocessing as mp
 import threading
+import time
 import types
 from concurrent.futures import ThreadPoolExecutor
 from unittest.mock import MagicMock
@@ -157,11 +158,19 @@ def test_single_slot_respawn_starts_child_without_queue_lock(monkeypatch, tmp_pa
     monkeypatch.setattr(workers, "_get_ctx", lambda: fake_ctx)
     monkeypatch.setattr(workers, "get_event_q", lambda: object())
     monkeypatch.setattr(workers, "_record_worker_pids", lambda: None)
+    # The readiness seam is stubbed: a fake pid must never reach the real teardown.
+    handed = []
+    monkeypatch.setattr(workers, "_verify_worker_sha_after_spawn", lambda slots, *_rest: handed.append(dict(slots)))
 
     assert workers.respawn_worker(0) is True
     assert lock_was_free == [True]
     assert workers.WORKERS[0] is not old
-    assert workers.WORKERS[0].reaping is False
+    # Installed unassignable: the readiness seam opens it once the child confirms ready.
+    assert workers.WORKERS[0].reaping is True
+    deadline = time.time() + 5
+    while not handed and time.time() < deadline:
+        time.sleep(0.01)
+    assert handed == [{0: workers.WORKERS[0]}]
 
 
 def test_worker_pool_respawn_reuses_process_event_bus_and_refuses_live_pool(monkeypatch, tmp_path):

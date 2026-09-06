@@ -6,9 +6,6 @@
   "OUROBOROS_SUBAGENTS": "{\"enabled\":true,\"items\":[{\"subagent_id\":\"benchmark-model\",\"recommended_use\":\"Use for substantial implementation, difficult debugging, research synthesis, and end-to-end ownership. Prefer when overall quality and continuity matter more than speed.\",\"route\":{\"kind\":\"api_model\",\"target_id\":\"anthropic/claude-sonnet-4.6\"}}]}",
   "OUROBOROS_MODEL_LIGHT": "anthropic/claude-sonnet-4.6",
   "OUROBOROS_MODEL_FALLBACKS": "anthropic/claude-sonnet-4.6",
-  "OUROBOROS_REVIEW_MODELS": "anthropic/claude-sonnet-4.6,anthropic/claude-sonnet-4.6,anthropic/claude-sonnet-4.6",
-  "OUROBOROS_SCOPE_REVIEW_MODEL": "anthropic/claude-sonnet-4.6",
-  "OUROBOROS_SCOPE_REVIEW_MODELS": "anthropic/claude-sonnet-4.6",
   "OUROBOROS_REVIEW_ENFORCEMENT": "blocking",
   "OUROBOROS_REVIEW_MAX_CYCLES": "unlimited",
   "OUROBOROS_RUNTIME_MODE": "advanced",
@@ -28,5 +25,6 @@
     "youtube_transcript",
     "send_photo",
     "claude_code_edit"
-  ]
+  ],
+  "OUROBOROS_REVIEWER_SLOTS": "{\"triad\":[{\"slot_id\":\"benchmark-triad-1\",\"route\":{\"kind\":\"api_chat\",\"target_id\":\"anthropic/claude-sonnet-4.6\"}},{\"slot_id\":\"benchmark-triad-2\",\"route\":{\"kind\":\"api_chat\",\"target_id\":\"anthropic/claude-sonnet-4.6\"}},{\"slot_id\":\"benchmark-triad-3\",\"route\":{\"kind\":\"api_chat\",\"target_id\":\"anthropic/claude-sonnet-4.6\"}}],\"scope\":[{\"slot_id\":\"benchmark-scope-1\",\"route\":{\"kind\":\"api_chat\",\"target_id\":\"anthropic/claude-sonnet-4.6\"}}]}"
 }

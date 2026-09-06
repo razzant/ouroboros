@@ -17,7 +17,7 @@ from ouroboros.task_results import TASK_COST_META_FIELDS
 
 def _synthesis_cost_usd(usage: Dict[str, Any]) -> float | None:
     """Prefer the subtree snapshot; preserve legacy callers without one."""
-    key = "cost_usd_with_children" if "cost_usd_with_children" in usage else "cost"
+    key = "accounted_upper_bound_usd_with_children" if "accounted_upper_bound_usd_with_children" in usage else "cost"
     value = usage.get(key)
     try:
         parsed = float(value)
@@ -29,7 +29,7 @@ def _synthesis_cost_usd(usage: Dict[str, Any]) -> float | None:
 def _synthesis_cost_text(usage: Dict[str, Any]) -> str:
     cost = _synthesis_cost_usd(usage)
     if cost is None:
-        return "cost unavailable (non-final)" if "cost_usd_with_children" in usage else "cost unknown"
+        return "cost unavailable (non-final)" if "accounted_upper_bound_usd_with_children" in usage else "cost unknown"
     if bool(usage.get("cost_with_children_partial")):
         return f"${cost:.2f} subtree cost snapshot (non-final)"
     # Rendered by the cost SSOT so a known amount is spelled the same way here as
@@ -49,7 +49,7 @@ def _summary_row_cost_fields(usage: Dict[str, Any]) -> Dict[str, Any]:
 
 
 _SYNTHESIS_USAGE_PROMPT_FIELDS = (
-    "cost_usd_with_children",
+    "accounted_upper_bound_usd_with_children",
     "reserved_usd",
     "unresolved_upper_bound_usd",
     "unknown_unmetered",
@@ -66,7 +66,7 @@ _SYNTHESIS_USAGE_PROMPT_FIELDS = (
 def _synthesis_usage_snapshot_text(usage: Dict[str, Any]) -> str:
     """Render the bounded root snapshot section shared by synthesis prompts."""
     if not (
-        "cost_usd_with_children" in usage
+        "accounted_upper_bound_usd_with_children" in usage
         and str(usage.get("cost_snapshot_at") or "").strip()
         and usage.get("cost_final") is False
         and usage.get("cost_with_children_partial") is True
@@ -79,7 +79,7 @@ def _synthesis_usage_snapshot_text(usage: Dict[str, Any]) -> str:
     payload = json.dumps(projection, ensure_ascii=False, indent=2, default=str)
     return (
         "## Shared pre-synthesis cost and outcome snapshot\n"
-        "`cost_usd_with_children` is accounted subtree cost only. `reserved_usd` and\n"
+        "`accounted_upper_bound_usd_with_children` is accounted subtree cost only. `reserved_usd` and\n"
         "`unresolved_upper_bound_usd` are separate non-final exposure fields; do not add\n"
         "them to or describe them as already included in the accounted total. This snapshot is non-final:\n"
         "summary/reflection calls happen after it. Never turn null/unavailable values into zero.\n"

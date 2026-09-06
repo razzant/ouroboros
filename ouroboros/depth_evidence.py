@@ -82,11 +82,11 @@ def build_depth_summary(
     statuses = [row for row in subtree_statuses if isinstance(row, dict)]
     provenances = [task_depth_provenance(row) for row in statuses]
     provenances = [row for row in provenances if row]
-    if requested is None:
-        requested = next(
-            (row.get("requested_depth") for row in provenances if row.get("requested_depth") is not None),
-            None,
-        )
+    requested_values = [
+        value for value in [requested, *(row.get("requested_depth") for row in provenances)]
+        if value is not None
+    ]
+    requested = max(requested_values) if requested_values else None
     permitted_values = [
         value
         for value in [
@@ -97,15 +97,57 @@ def build_depth_summary(
     ]
     permitted = min(permitted_values) if permitted_values else None
 
-    def _maximum(key: str) -> Any:
-        values = [row.get(key) for row in provenances if row.get(key) is not None]
+    def _maximum(key: str, rows: list = provenances) -> Any:
+        values = [row.get(key) for row in rows if row.get(key) is not None]
         if values:
             return max(values)
         return 0 if not statuses else None
 
     attempted = _maximum("attempted_depth")
     achieved = _maximum("achieved_depth")
-    if requested is None:
+
+    # Decision: rows are per-task depth facts of one tree. Rows sharing one
+    # (request, permitted) pair form a chain whose achievement is its deepest
+    # row; a tree with several chains reports the most-reduced chain first
+    # (capability_reduced > evidence_unknown > chosen_shallower > achieved), so
+    # the verdict and its coherent chain tuple never depend on child order.
+    def _chain_status(ask: Any, cap: Any, rows: list) -> str:
+        if ask is None:
+            return "request_unknown"
+        reached = [row.get("achieved_depth") for row in rows]
+        tried = [row.get("attempted_depth") for row in rows]
+        if cap is not None and cap < ask:
+            return "capability_reduced"
+        known = [value for value in reached if value is not None]
+        if known and max(known) >= ask:
+            return "achieved"
+        if cap is None or None in reached or None in tried:
+            return "evidence_unknown"
+        return "chosen_shallower"
+
+    chains: Dict[Any, list] = {}
+    for row in provenances:
+        chains.setdefault((row.get("requested_depth"), row.get("permitted_depth")), []).append(row)
+    if chains:
+        order = ["request_unknown", "capability_reduced", "evidence_unknown", "chosen_shallower", "achieved"]
+        decisions = [
+            (
+                _chain_status(ask, cap, rows), ask, cap,
+                _maximum("attempted_depth", rows), _maximum("achieved_depth", rows),
+            )
+            for (ask, cap), rows in chains.items()
+        ]
+        status, requested, permitted, attempted, achieved = min(
+            decisions,
+            key=lambda item: (
+                order.index(item[0]),
+                -(item[1] if item[1] is not None else -1),
+                item[4] if item[4] is not None else -1,
+                item[2] if item[2] is not None else -1,
+                item[3] if item[3] is not None else -1,
+            ),
+        )
+    elif requested is None:
         status = "request_unknown"
     elif permitted is None or attempted is None or achieved is None:
         status = "evidence_unknown"

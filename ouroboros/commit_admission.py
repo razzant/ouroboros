@@ -91,6 +91,24 @@ def release_metadata_preflight(
         changed_worktree_paths(repo_dir, paths=paths))
     version_in_scope = "VERSION" in touched
     if touched and not version_in_scope:
+        # Doc-only carve (finding W3A-F1). The commit gate ALREADY exempts a
+        # doc-only diff from its compensating preflight; this admission blocked
+        # the same diff outright, so on every install a doc-only change could
+        # never obtain a fresh advisory verdict at all — the standard
+        # preflight_review -> commit_reviewed flow degraded to the AUDITED
+        # BYPASS for every doc-only change, and hardest for the two commit
+        # classes BIBLE P9 exempts from the bump (a version-neutral external
+        # contribution, a forensic recovery snapshot), which have no VERSION to
+        # name by construction. Same classifier as the commit gate, read from
+        # its owner module: one detector, so the two gates cannot drift. Narrow
+        # on purpose, and NARROWER than those two classes — a code-bearing diff
+        # without VERSION still blocks here whatever its provenance, and every
+        # carrier-coherence check below still runs the moment VERSION IS in
+        # scope.
+        from ouroboros.tools.git_review_cycle import _diff_is_doc_only
+
+        if _diff_is_doc_only(sorted(touched)):
+            return None
         return (
             "⚠️ PREFLIGHT_BLOCKED: Changed files are present but VERSION is not in scope.\n"
             "  BIBLE.md P9 requires every commit to bump VERSION and sync release artifacts.\n"
@@ -110,6 +128,7 @@ def release_metadata_preflight(
         pyproject_path = repo_dir / "pyproject.toml"
         uv_lock_path = repo_dir / "uv.lock"
         web_package_path = repo_dir / "web" / "package.json"
+        web_package_lock_path = repo_dir / "web" / "package-lock.json"
         arch_path = repo_dir / "docs" / "ARCHITECTURE.md"
         api_types_path = repo_dir / "web" / "modules" / "api_types.js"
         site_install_path = repo_dir / "site" / "install" / "index.html"
@@ -120,6 +139,9 @@ def release_metadata_preflight(
         pyproject_text = pyproject_path.read_text(encoding="utf-8") if pyproject_path.exists() else ""
         uv_lock_text = uv_lock_path.read_text(encoding="utf-8") if uv_lock_path.exists() else ""
         web_package_text = web_package_path.read_text(encoding="utf-8") if web_package_path.exists() else ""
+        web_package_lock_text = (
+            web_package_lock_path.read_text(encoding="utf-8") if web_package_lock_path.exists() else ""
+        )
         readme_text = readme_path.read_text(encoding="utf-8") if readme_path.exists() else ""
         arch_text = arch_path.read_text(encoding="utf-8") if arch_path.exists() else ""
         api_types_text = api_types_path.read_text(encoding="utf-8") if api_types_path.exists() else ""
@@ -128,6 +150,7 @@ def release_metadata_preflight(
             pyproject_text=pyproject_text,
             uv_lock_text=uv_lock_text,
             web_package_text=web_package_text,
+            web_package_lock_text=web_package_lock_text,
             readme_text=readme_text,
             arch_text=arch_text,
             api_types_text=api_types_text,

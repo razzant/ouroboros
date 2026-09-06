@@ -53,49 +53,6 @@ def test_find_child_tasks_scope_direct_excludes_siblings_and_parent(tmp_path):
     assert {r["task_id"] for r in p_direct} == {"g"}
 
 
-# --- 1.5d cost_usd_with_children rollup -------------------------------------
-
-def test_compute_cost_with_children_rolls_up_direct_children(tmp_path):
-    from ouroboros.task_status import compute_cost_with_children
-
-    root = tmp_path
-    _write_result(root, "child1", delegation_role="subagent", parent_task_id="parent",
-                  root_task_id="parent", cost_usd=1.5, cost_final=True, status="completed")
-    # A grandchild already rolled up into child2's own with-children total.
-    _write_result(root, "child2", delegation_role="subagent", parent_task_id="parent",
-                  root_task_id="parent", cost_usd=2.0, cost_usd_with_children=5.0,
-                  cost_final=True, status="completed")
-
-    total, partial = compute_cost_with_children(root, "parent", own_cost_usd=0.5)
-    # own(0.5) + child1(1.5) + child2 rolled-up(5.0) = 7.0
-    assert total == 7.0
-    assert partial is False
-
-
-def test_compute_cost_with_children_marks_partial_for_running_child(tmp_path):
-    from ouroboros.task_status import compute_cost_with_children
-
-    root = tmp_path
-    _write_result(root, "c1", delegation_role="subagent", parent_task_id="p",
-                  root_task_id="p", cost_usd=1.0, status="running")
-    total, partial = compute_cost_with_children(root, "p", own_cost_usd=0.25)
-    assert total == 1.25
-    assert partial is True
-
-
-def test_compute_cost_with_children_marks_unavailable_terminal_child_partial(tmp_path):
-    from ouroboros.task_status import compute_cost_with_children
-
-    _write_result(
-        tmp_path, "c1", delegation_role="subagent", parent_task_id="p",
-        root_task_id="p", status="completed", cost_usd=None,
-        cost_accounting_status="unavailable", cost_final=False,
-    )
-    total, partial = compute_cost_with_children(tmp_path, "p", own_cost_usd=0.25)
-    assert total == 0.25
-    assert partial is True
-
-
 # --- 1.3 policy_denials bucket ----------------------------------------------
 
 def test_policy_denial_does_not_degrade_or_headline_tool_failure():

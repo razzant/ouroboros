@@ -396,7 +396,7 @@ def test_typed_failed_publish_is_delivered_to_the_next_llm_turn():
         ],
         messages,
         trace,
-        emit_progress=lambda _message: None,
+        emit_progress=lambda _message, *, incident=None: None,
     )
 
     assert errors == 1
@@ -521,6 +521,8 @@ def test_foreground_publish_timeout_waits_until_fake_mutator_terminalizes(tmp_pa
         lifecycle.append("terminal")
         return _failed_result(status="pr_open_indeterminate")
 
+    from ouroboros.tools.tool_result import LegacyTextResultAdapter
+
     tools = SimpleNamespace(
         CODE_TOOLS=set(),
         _ctx=SimpleNamespace(
@@ -528,6 +530,11 @@ def test_foreground_publish_timeout_waits_until_fake_mutator_terminalizes(tmp_pa
             task_metadata={},
         ),
         execute=execute,
+        # The loop reads the typed dispatch seam (D02); adapt the text the way
+        # the real registry adapts a legacy handler.
+        execute_result=lambda name, args: LegacyTextResultAdapter.from_text(
+            name, execute(name, args)
+        ),
     )
     logs = tmp_path / "logs"
     logs.mkdir()

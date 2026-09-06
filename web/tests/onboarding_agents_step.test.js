@@ -65,7 +65,7 @@ test('the ladder is three rungs and states the launch gate honestly', () => {
     // Rung 2: the benefit and the D-1 limit in the same breath — a plan moves
     // delegated work and configured review rows, and CANNOT run the main agent.
     assert.match(better.body, /delegated subagents/i);
-    assert.match(better.body, /commit, plan, and skill review/i);
+    assert.match(better.body, /commit, plan, and skill review and task acceptance/i);
     assert.match(better.body, /main\s+agent keeps using the API key or local model/i);
     assert.match(better.body, /a plan cannot run it/i);
     // Rung 3: rotation, in the owner's own terms.
@@ -81,9 +81,14 @@ test('the ladder is three rungs and states the launch gate honestly', () => {
 test('the footnote refuses both easy lies: "free", and "every reviewer moves"', () => {
     assert.match(LADDER_FOOTNOTE, /not free/i);
     assert.match(LADDER_FOOTNOTE, /already\s+pay for/i);
-    // Task acceptance is the one API-pinned residual; plan + skill follow rows.
-    assert.match(LADDER_FOOTNOTE, /Task acceptance stays on the API key/i);
-    assert.match(LADDER_FOOTNOTE, /plan and skill review follow each configured triad row/i);
+    // Owner R2 (2026-09-01): task acceptance follows the triad rows too — the
+    // footnote states the RULE (what is routed moves), never "everything moves".
+    assert.match(LADDER_FOOTNOTE, /task acceptance each follow their configured\s+triad row/i);
+    assert.match(LADDER_FOOTNOTE, /acceptance panel on the subscription/i);
+    // R12: the migration disclosure carries the measured numbers, not adjectives.
+    assert.match(LADDER_FOOTNOTE, /about 12 s and\s+\$0\.07 per model row per task/i);
+    assert.match(LADDER_FOOTNOTE, /minutes of your window per task/i);
+    assert.doesNotMatch(LADDER_FOOTNOTE, /stays on the API|API-only/i);
     assert.doesNotMatch(LADDER_FOOTNOTE, /all reviewers|every reviewer/i);
 });
 
@@ -167,7 +172,7 @@ test('one connected account declares the preset request and promises nothing cer
 
     const text = agentsOutcomeText(['claude']);
     assert.match(text, /Claude Code is connected/);
-    assert.match(text, /commit, scope, advisory, plan, and skill review/);
+    assert.match(text, /commit, scope, advisory, plan, skill review, and task acceptance/);
     assert.match(text, /Available subagents/);
     // Conditional by construction: the compiler may still refuse a seat.
     assert.match(text, /will try to/);
@@ -190,7 +195,7 @@ test('a mixed reviewer-capable and task-only setup names each capability separat
     const snapshot = snapshotWith(['codex', 'agy']);
     const text = agentsOutcomeText(['codex', 'agy'], { snapshot });
     assert.match(text, /Codex and Antigravity are connected/);
-    assert.match(text, /Codex can also move commit, scope, advisory, plan, and skill review/);
+    assert.match(text, /Codex can also move commit, scope, advisory, plan, skill review, and task acceptance/);
     assert.match(text, /Antigravity is task-only/);
     assert.doesNotMatch(text, /Antigravity can also move commit review/);
 });
@@ -344,6 +349,28 @@ test('an untyped failure is not dressed up as a skippable preset problem', () =>
     assert.equal(notice.canSkip, false);
     assert.equal(notice.saved, false);
     assert.equal(notice.text, 'HTTP 500');
+});
+
+test('a 503 settings_save_timeout is read as UNKNOWN, never as "nothing was saved"', () => {
+    // The shared bounded writer answers `saved: null` when the save body outlives
+    // its bound: the bytes may already be on disk. Collapsing null to false used
+    // to offer the skip (a second write) over a transaction that may have landed.
+    const read = readCompletionAnswer({
+        status: 503, ok: false, parsed: true,
+        data: { error: 'the settings save is still running in the server', code: 'settings_save_timeout', saved: null, can_skip: true },
+    });
+    assert.equal(read.failure.saved, null);
+    const notice = completionFailureNotice(read.failure);
+    assert.equal(notice.saved, null);
+    assert.equal(notice.saveUnknown, true);
+    assert.equal(notice.canSkip, false);
+    assert.match(notice.text, /still running in the server/);
+    assert.match(notice.text, /unknown/);
+    assert.match(notice.text, /Check status/);
+    assert.doesNotMatch(notice.text, /WERE written/);
+    // The two boolean states are untouched by the third.
+    assert.equal(readCompletionAnswer({ status: 503, ok: false, parsed: true, data: { saved: false } }).failure.saved, false);
+    assert.equal(readCompletionAnswer({ status: 500, ok: false, parsed: true, data: { saved: true } }).failure.saved, true);
 });
 
 test('a failure AFTER the bytes reached disk never claims nothing was saved', () => {

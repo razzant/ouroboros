@@ -3,7 +3,7 @@ import base64
 import types
 
 
-from ouroboros.tools.core import _send_photo, _detect_image_mime, _MAX_PHOTO_FILE_BYTES
+from ouroboros.tools.core_artifacts import _send_photo, _detect_image_mime, _MAX_PHOTO_FILE_BYTES
 
 
 def _make_ctx(chat_id=123, screenshot_b64=None):

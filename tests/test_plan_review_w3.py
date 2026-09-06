@@ -56,7 +56,7 @@ def test_reviewer_requested_locator_is_attached_by_the_host_next_cycle(harness):
 def test_reviewer_requested_locator_still_obeys_the_deny_policy(harness):
     """W3 attaches what a reviewer asks for — through the SAME policy: a locator under the runtime
     data plane (the live settings file) is a named `denied_path` omission tagged as requested,
-    never attached, never silent."""
+    never attached, never silent. The panel is still dispatched and judges with the absence."""
     denied = str(harness.drive / "settings.json")
     (harness.drive / "settings.json").write_text('{"OPENROUTER_API_KEY": "sk-live-x"}', encoding="utf-8")
     ask = json.dumps([_finding("f1", "need_evidence", breaks="goal", locator=denied,
@@ -65,9 +65,11 @@ def test_reviewer_requested_locator_still_obeys_the_deny_policy(harness):
     _call(harness.make_ctx())
     sub = harness.install({"s1": CLEAN, "s2": CLEAN, "s3": CLEAN})
     out = _call(harness.make_ctx())
-    assert "cannot_verify" in out and "denied_path" in out
-    assert sub.calls == []
-    assert "sk-live-x" not in out
+    assert "denied_path" in out
+    assert len(sub.calls) == 1
+    sent = _user_text(sub.calls[0]["request"].messages[1]["content"])
+    assert "[reviewer-requested]" in sent and "denied_path" in sent
+    assert "sk-live-x" not in sent and "sk-live-x" not in out
 
 
 
@@ -364,6 +366,36 @@ def test_state_stays_persistable_at_the_worst_case_request_bounds(tmp_path):
     assert len(json.dumps(state, ensure_ascii=False).encode("utf-8")) <= 1_000_000
 
 
+def test_worst_case_state_successor_receives_the_current_decision_core(tmp_path):
+    from types import SimpleNamespace
+
+    from ouroboros.agent_startup_checks import validate_task_authority_sources
+
+    test_state_stays_persistable_at_the_worst_case_request_bounds(tmp_path)
+    source = {
+        "kind": "task_result", "task_id": "t1", "tool": "get_task_result",
+        "arguments": {"task_id": "t1", "include_authority": True},
+    }
+    task = {
+        "id": "successor", "budget_drive_root": str(tmp_path),
+        "predecessor_authority_source": source,
+    }
+
+    assert validate_task_authority_sources(SimpleNamespace(
+        drive_root=tmp_path, budget_drive_root=tmp_path,
+    ), task) == {}
+    carried = task["predecessor_authority"]["plan_review_state"]
+    assert carried.get("kind") != "bounded_field_preview"
+    assert set(carried["need_evidence_seen"]) == {"items", "items_omitted", "total"}
+    preview = json.dumps(carried, ensure_ascii=False, sort_keys=True, default=str)
+    assert len(preview) <= 15_000
+    for decision_fact in (
+        '"acceptance_claims"', '"findings"', '"dispositions"',
+        f'"request_fingerprint": "{2:064x}"',
+    ):
+        assert decision_fact in preview
+
+
 def test_below_quorum_blocking_rejection_earns_the_promised_delta_cycle(harness, monkeypatch):
     """R9-5: a REVIEW_REQUIRED wave carrying ONE below-quorum blocking finding cannot be closed
     by disposition (C-08); the closure table promises "the next paid delta cycle" for its
@@ -429,3 +461,121 @@ def test_breaks_is_bounded_like_an_id_and_blank_items_are_one_disclosure():
     assert errors == []
     blanks = [n for n in spec["normalization_omissions"] if "blank item(s) dropped" in n]
     assert blanks == ["in_scope: 30000 blank item(s) dropped"]
+
+
+def test_an_unsatisfiable_reviewer_request_never_locks_the_panel(harness):
+    """A locator the host will never fetch (a URL) is a named omission, not a permanent
+    $0 refusal: the next cycle is dispatched and the panel judges with the absence."""
+    ask = json.dumps([_finding("f1", "need_evidence", breaks="goal",
+                               locator="https://example.com/spec",
+                               summary="read the vendor page")])
+    sub = harness.install({"s1": ask, "s2": CLEAN, "s3": CLEAN})
+    _call(harness.make_ctx())
+    sub = harness.install({"s1": CLEAN, "s2": CLEAN, "s3": CLEAN})
+    out = _call(harness.make_ctx())
+    assert len(sub.calls) == 1
+    sent = _user_text(sub.calls[0]["request"].messages[1]["content"])
+    assert "url_not_fetched" in sent and "[reviewer-requested]" in sent
+    wave = _state(harness)["waves"][-1]
+    assert wave["paid"] is True and wave["actors"]
+    assert not any(str(r).startswith("cannot_verify") for r in wave.get("reasons") or [])
+    assert "cannot_verify" not in out
+
+
+def test_a_truncated_requested_document_dispatches_with_the_cut_named(harness):
+    """A requested source above the per-item byte bound is attached head-first with the
+    cut named; the panel is dispatched, never refused for the truncation."""
+    from ouroboros.tools.plan_evidence import EVIDENCE_PER_ITEM_BYTES
+
+    big = harness.workspace / "huge.txt"
+    big.write_text("h" * (EVIDENCE_PER_ITEM_BYTES + 5_000), encoding="utf-8")
+    ask = json.dumps([_finding("f1", "need_evidence", breaks="goal", locator="huge.txt",
+                               summary="read the whole document")])
+    sub = harness.install({"s1": ask, "s2": CLEAN, "s3": CLEAN})
+    _call(harness.make_ctx())
+    sub = harness.install({"s1": CLEAN, "s2": CLEAN, "s3": CLEAN})
+    out = _call(harness.make_ctx())
+    assert len(sub.calls) == 1
+    sent = _user_text(sub.calls[0]["request"].messages[1]["content"])
+    assert f"truncated_to_{EVIDENCE_PER_ITEM_BYTES}" in sent
+    assert "hhh" in sent  # the head IS attached, not withheld
+    assert _state(harness)["waves"][-1]["paid"] is True
+    assert "cannot_verify" not in out
+
+
+def test_a_compacted_paid_predecessor_degrades_to_a_fresh_dispatch(harness, monkeypatch):
+    """When the prior exact wave is gone (compacted out of the hot state), the evidence
+    continuation is a cache miss: the wave re-dispatches fresh and every slot row
+    discloses the typed `prior_exact_wave_missing` cause."""
+    (harness.workspace / "notes.md").write_text("deck notes\n", encoding="utf-8")
+    ask = json.dumps([_finding("f1", "need_evidence", breaks="goal", locator="notes.md",
+                               summary="I need the notes")])
+    sub = harness.install({"s1": ask, "s2": CLEAN, "s3": CLEAN})
+    _call(harness.make_ctx())
+    monkeypatch.setattr(pr, "_last_paid_wave", lambda state: None)
+    sub = harness.install({"s1": CLEAN, "s2": CLEAN, "s3": CLEAN})
+    out = _call(harness.make_ctx())
+    assert len(sub.calls) == 1  # dispatched, not refused
+    wave = _state(harness)["waves"][-1]
+    assert wave["paid"] is True
+    deltas = [d for row in wave["actors"] for d in row.get("capability_delta") or []]
+    assert deltas and all(d["kind"] == "capability_delta" for d in deltas)
+    assert {d["reason"] for d in deltas} == {"prior_exact_wave_missing"}
+    assert "cannot_verify" not in out
+
+
+def test_first_cycle_and_no_request_delta_cycle_carry_no_continuation_delta(harness):
+    """The `reviewer_requested` guard is load-bearing: a cycle with no reviewer request
+    has no prior thread to continue, so it must not disclose a missing predecessor."""
+    sub = harness.install({"s1": CLEAN, "s2": CLEAN, "s3": CLEAN})
+    _call(harness.make_ctx())
+    wave = _state(harness)["waves"][-1]
+    assert not [d for row in wave["actors"] for d in row.get("capability_delta") or []]
+
+    blocking = json.dumps([_finding("f1", "blocking", breaks="goal", summary="thin plan")])
+    sub = harness.install({"s1": blocking, "s2": CLEAN, "s3": CLEAN})
+    _call(harness.make_ctx(task_id="task-2"))
+    sub = harness.install({"s1": CLEAN, "s2": CLEAN, "s3": CLEAN})
+    _call(harness.make_ctx(task_id="task-2"), plan="Outline first, then draft each slide. Revised.")
+    wave2 = _state(harness, "task-2")["waves"][-1]
+    assert len(sub.calls) == 1
+    assert not [d for row in wave2["actors"] for d in row.get("capability_delta") or []]
+
+
+def test_missing_requested_evidence_reask_is_demoted_and_keeps_the_wave_open(harness):
+    """Re-asking a locator the host already could not attach is a `need_evidence_repeat`
+    note: no new attachment, no new fingerprint, and the wave stays open at $0."""
+    ask = json.dumps([_finding("f1", "need_evidence", breaks="goal", locator="gone.md",
+                               summary="read it")])
+    sub = harness.install({"s1": ask, "s2": CLEAN, "s3": CLEAN})
+    _call(harness.make_ctx())
+    sub = harness.install({"s1": ask, "s2": CLEAN, "s3": CLEAN})
+    out = _call(harness.make_ctx())
+    assert len(sub.calls) == 1
+    wave = _state(harness)["waves"][-1]
+    assert wave["paid"] is True and wave["closed"] is False
+    repeat = [f for f in wave["findings"] if f["locator"] == "gone.md"]
+    assert repeat and [f["class"] for f in repeat] == ["note"]  # demoted, never re-attached
+    assert _control(out)["closed"] is False
+
+
+def test_both_reviewer_routes_learn_the_range_selectors(harness):
+    """The locator forms live in ONE element schema, so the api system prompt and a session
+    slot's compact task both advertise them — neither route is taught a narrower spelling."""
+    harness.state["slots"] = _slots(("api1", "m/a"), ("sess1", "cursor=grok", "session"),
+                                    ("api2", "m/b"))
+    sub = harness.install({"api1": CLEAN, "sess1": CLEAN, "api2": CLEAN})
+    _call(harness.make_ctx())
+    request = sub.calls[0]["request"]
+    system = _user_text(request.messages[0]["content"])
+    assert "::lines=A-B" in system and "never fetches" in system
+    assert "::lines=A-B" in request.session_task
+
+
+def test_the_plan_spec_schema_discloses_both_halves_of_the_constitutional_trigger():
+    """The trigger reads `affected_resources` AND an existing `evidence` path; the schema the
+    agent sees says so, including that a non-existent path does not count."""
+    props = pr._SPEC_SCHEMA["properties"]
+    assert "system repository" in props["affected_resources"]["description"]
+    evidence = props["evidence"]["description"]
+    assert "system repository" in evidence and "EXISTING" in evidence

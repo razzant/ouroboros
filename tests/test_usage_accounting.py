@@ -21,6 +21,9 @@ def data_root(tmp_path, monkeypatch):
     monkeypatch.setenv("OUROBOROS_SETTINGS_PATH", str(root / "settings.json"))
     monkeypatch.setenv("TOTAL_BUDGET", "100")
     (root / "state").mkdir(parents=True)
+    # The reservation prices the task's own observed cache split; keep that
+    # process-local memory out of the next test.
+    ua._reset_task_cache_splits()
     return root
 
 

@@ -11,7 +11,8 @@ creates and deletes baseline refs and worktree registrations in the target's
 
 Reports per-run provision (baseline build + worktree checkout) and teardown
 wall-clock, plus tree shape (file count, on-disk size). The delegated-snapshot
-lifecycle this measures is documented in docs/ARCHITECTURE.md (C1 section).
+lifecycle this measures is documented in docs/ARCHITECTURE.md,
+"Delegated subagents".
 """
 
 from __future__ import annotations

@@ -53,7 +53,9 @@ def record_scheduled_admission(
             STATUS_FAILED,
             result=detail,
             reason_code=block,
-            cost_usd=0.0,
+            # ABI-3: a never-dispatched refusal spent a confirmed zero — stamped
+            # under the honest name; the retired alias is read-tolerance only.
+            accounted_upper_bound_usd=0.0,
         )
     except Exception:
         q.log.warning(
@@ -204,7 +206,7 @@ def parse_schedule_task_depth(
                     "expected_output": expected_output,
                     "constraints": constraints,
                     "context": task_context,
-                    "chat_id": chat_id or None,
+                    "chat_id": chat_id,
                     "depth": 0,
                     "raw_task_depth": evt.get("depth"),
                     "invalid_task_depth": True,
@@ -214,33 +216,6 @@ def parse_schedule_task_depth(
                 fallback_message="⚠️ Task rejected: depth must be a non-negative integer.",
             )
             return 0, True
-
-
-def reject_if_no_chat_target(
-    ctx: Any, *, desc: str, chat_id: int, delegation_role: str, tid: str, role: str,
-    parent_id: Any, root_task_id: str, result_fields: Dict[str, Any],
-) -> bool:
-    """Reject a non-subagent schedule that has no live chat target."""
-    if not (desc and not chat_id):
-        return False
-    from supervisor.events import _reject_schedule_task
-
-    if delegation_role != "subagent":
-        log.warning("Rejected scheduled task without chat target: task_id=%s desc=%s", tid, desc[:100])
-        _reject_schedule_task(
-            ctx,
-            tid=tid,
-            chat_id=chat_id,
-            delegation_role=delegation_role,
-            parent_id=parent_id,
-            root_task_id=root_task_id,
-            role=role,
-            result_fields=result_fields,
-            detail="Subagent rejected: no chat target is available for live scheduling.",
-        )
-        return True
-    log.info("Scheduled headless subagent without live chat target: task_id=%s role=%s", tid, role)
-    return False
 
 
 def reject_invalid_task_depth(

@@ -15,7 +15,7 @@ def _ctx(tmp_path, *, pending=None):
         task_id="task",
         round_idx=77,
         event_queue=None,
-        emit_progress=lambda _text: None,
+        emit_progress=lambda _text, *, incident=None: None,
     )
 
 

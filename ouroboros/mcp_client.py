@@ -25,8 +25,11 @@ from typing import Any, Awaitable, Callable, Dict, List, Optional
 
 from ouroboros.secret_masking import (
     looks_masked_secret as looks_masked_secret,
+)
+from ouroboros.secret_masking import (
     mask_prefixed_secret,
 )
+from ouroboros.tools.tool_result import ToolResult
 
 log = logging.getLogger(__name__)
 
@@ -108,6 +111,7 @@ class MCPServerRuntime:
 
     config: MCPServerConfig
     tools: List[MCPTool] = field(default_factory=list)
+    tool_name_collisions: List[Dict[str, str]] = field(default_factory=list)
     last_error: str = ""
     last_refreshed: str = ""
     last_attempted: str = ""
@@ -482,13 +486,13 @@ async def _list_tools_async(cfg: MCPServerConfig, *, timeout_sec: int) -> List[D
 
 async def _call_tool_async(
     cfg: MCPServerConfig, tool_name: str, arguments: Dict[str, Any], *, timeout_sec: int
-) -> str:
-    """Open a fresh session, call one tool, and return a stringified result."""
+) -> ToolResult:
+    """Open a fresh session and preserve the SDK-owned error bit."""
     if not _MCP_SDK_AVAILABLE:
         raise RuntimeError(
             "MCP client SDK not installed. Add `mcp>=1.6` to the runtime."
         )
-    async def _do() -> str:
+    async def _do() -> ToolResult:
         async with _transport_factory(cfg) as transport_ctx:
             streams = transport_ctx
             if isinstance(streams, tuple):
@@ -498,7 +502,7 @@ async def _call_tool_async(
             async with ClientSession(read, write) as session:
                 await session.initialize()
                 result = await session.call_tool(tool_name, arguments)
-                return _stringify_call_result(result)
+                return _tool_result_from_call_result(result)
 
     return await asyncio.wait_for(_do(), timeout=timeout_sec)
 
@@ -531,6 +535,20 @@ def _stringify_call_result(result: Any) -> str:
     if is_error:
         return f"⚠️ MCP_TOOL_ERROR: {body}"
     return body
+
+
+def _tool_result_from_call_result(result: Any) -> ToolResult:
+    """Preserve the SDK error bit without trusting result-body markers."""
+    is_error = bool(
+        getattr(result, "isError", False)
+        or getattr(result, "is_error", False)
+    )
+    return ToolResult(
+        status="error" if is_error else "ok",
+        code="MCP_ERROR" if is_error else "OK",
+        text=_stringify_call_result(result),
+        meta={"mcp_is_error": is_error},
+    )
 
 
 def _serialize_content_part(item: Any) -> Dict[str, Any]:
@@ -605,7 +623,7 @@ class MCPManager:
             lambda cfg, timeout: _list_tools_async(cfg, timeout_sec=timeout)
         )
         self._async_call_tool: Callable[
-            [MCPServerConfig, str, Dict[str, Any], int], Awaitable[str]
+            [MCPServerConfig, str, Dict[str, Any], int], Awaitable[ToolResult]
         ] = (
             lambda cfg, name, args, timeout: _call_tool_async(
                 cfg, name, args, timeout_sec=timeout
@@ -720,6 +738,24 @@ class MCPManager:
                     )
             return results
 
+    def tool_name_collisions(self) -> List[Dict[str, str]]:
+        """Return provider-name collisions omitted by first-wins normalization."""
+
+        with self._lock:
+            if not self._enabled:
+                return []
+            return [
+                dict(item, server_id=runtime.config.id)
+                for runtime in self._servers.values()
+                if runtime.config.enabled
+                for item in runtime.tool_name_collisions
+                if (
+                    not runtime.config.allowed_tools
+                    or item.get("kept_raw_name") in runtime.config.allowed_tools
+                    or item.get("dropped_raw_name") in runtime.config.allowed_tools
+                )
+            ]
+
     def get_tool(self, prefixed_name: str) -> Optional[Dict[str, Any]]:
         for tool in self.list_tools_for_registry():
             if tool["name"] == prefixed_name:
@@ -750,6 +786,9 @@ class MCPManager:
                                 "description": _redact_error_text(tool.description, cfg),
                             }
                             for tool in runtime.tools
+                        ],
+                        "tool_name_collisions": [
+                            dict(item) for item in runtime.tool_name_collisions
                         ],
                         "last_error": runtime.last_error,
                         "last_refreshed": runtime.last_refreshed,
@@ -791,6 +830,7 @@ class MCPManager:
                     target.last_error = err_text
                     target.last_attempted = attempted_at
                     target.tools = []
+                    target.tool_name_collisions = []
             return {"ok": False, "error": err_text}
 
         pagination_truncated = any(
@@ -813,27 +853,33 @@ class MCPManager:
             if str(item.get("name") or "").strip()
         ]
         normalized = [tool for tool in normalized if tool.prefixed_name]
-        # A residual slug collision (12-hex tail makes it astronomically rare)
-        # drops a tool — that is a capability omission and must be DISCLOSED,
-        # not silently swallowed (#447 P1).
-        seen: set = set()
+        # Drop duplicates caused by slug collisions. A residual collision (the
+        # 12-hex tail makes it astronomically rare) DROPS a tool — a capability
+        # omission that must be disclosed, not silently swallowed (#447 P1).
+        seen: Dict[str, MCPTool] = {}
         deduped: List[MCPTool] = []
-        collided: List[str] = []
+        collisions: List[Dict[str, str]] = []
         for tool in normalized:
             if tool.prefixed_name in seen:
-                collided.append(tool.raw_name)
+                kept = seen[tool.prefixed_name]
+                collisions.append({
+                    "prefixed_name": tool.prefixed_name,
+                    "kept_raw_name": kept.raw_name,
+                    "dropped_raw_name": tool.raw_name,
+                })
                 continue
-            seen.add(tool.prefixed_name)
+            seen[tool.prefixed_name] = tool
             deduped.append(tool)
         omission_notes: List[str] = []
-        if collided:
-            log.warning(
-                "MCP server %s: %d tool(s) dropped by slug collision: %s",
-                server_id, len(collided), ", ".join(collided[:5]),
+        if collisions:
+            log.error(
+                "MCP tool name collision on server %s; first descriptor wins: %s",
+                cfg.id,
+                ", ".join(sorted({item["prefixed_name"] for item in collisions})),
             )
             omission_notes.append(
-                f"{len(collided)} tool(s) unavailable due to slug collision: "
-                + ", ".join(collided[:5])
+                f"{len(collisions)} tool(s) unavailable due to slug collision: "
+                + ", ".join(item["dropped_raw_name"] for item in collisions[:5])
             )
         if pagination_truncated:
             omission_notes.append(
@@ -851,9 +897,10 @@ class MCPManager:
                 }
             if target is not None:
                 target.tools = deduped
+                target.tool_name_collisions = collisions
                 # A successful refresh with omissions keeps the omission note
-                # visible (#447 P1): partial catalog / collided tools must not
-                # read as a clean complete listing.
+                # visible (#447 P1): a partial catalog or a collided tool must
+                # not read as a clean complete listing.
                 target.last_error = "; ".join(omission_notes)
                 target.last_attempted = attempted_at
                 target.last_refreshed = finished_at
@@ -861,6 +908,7 @@ class MCPManager:
             "ok": True,
             "server_id": cfg.id,
             "tool_count": len(deduped),
+            "tool_name_collisions": [dict(item) for item in collisions],
             "tools": [
                 {
                     "name": tool.raw_name,
@@ -938,10 +986,13 @@ class MCPManager:
             ],
         }
 
-    def call_tool(self, prefixed_name: str, arguments: Dict[str, Any]) -> str:
-        """Synchronously invoke an MCP tool and return a model-facing string."""
+    def _call_tool_result(
+        self, prefixed_name: str, arguments: Dict[str, Any]
+    ) -> ToolResult:
+        """Invoke one MCP tool while retaining host-attested provider facts."""
         if not self.is_enabled():
-            return "⚠️ MCP_DISABLED: enable MCP in Settings → Advanced to use this tool."
+            text = "⚠️ MCP_DISABLED: enable MCP in Settings → Advanced to use this tool."
+            return ToolResult(status="unavailable", code="MCP_UNAVAILABLE", text=text)
         with self._lock:
             tool_descriptor = None
             for runtime in self._servers.values():
@@ -952,32 +1003,57 @@ class MCPManager:
                 for tool in runtime.tools:
                     if tool.prefixed_name == prefixed_name:
                         if allowed and tool.raw_name not in allowed:
-                            return (
+                            text = (
                                 f"⚠️ MCP_TOOL_DISALLOWED: {tool.raw_name!r} is not on the "
                                 f"allowed_tools list for server {cfg.id!r}."
                             )
+                            return ToolResult(status="blocked", code="ACCESS_BLOCKED", text=text)
                         tool_descriptor = (cfg, tool)
                         break
                 if tool_descriptor:
                     break
             if not tool_descriptor:
-                return (
+                text = (
                     f"⚠️ MCP_TOOL_NOT_FOUND: {prefixed_name!r}. Refresh the server in "
                     "Settings → Advanced or check the allowed_tools allowlist."
                 )
+                return ToolResult(status="unavailable", code="MCP_UNAVAILABLE", text=text)
             cfg, tool = tool_descriptor
             timeout = self._tool_timeout_sec
         try:
-            text = _run_async(
+            result = _run_async(
                 lambda: self._async_call_tool(cfg, tool.raw_name, arguments or {}, timeout),
                 join_timeout=timeout + 3,
             )
+            if not isinstance(result, ToolResult):
+                raise TypeError("MCP transport returned a non-ToolResult outcome")
         except asyncio.TimeoutError:
-            return f"⚠️ MCP_TOOL_TIMEOUT: server {cfg.id!r} did not respond in {timeout}s"
+            text = f"⚠️ MCP_TOOL_TIMEOUT: server {cfg.id!r} did not respond in {timeout}s"
+            return ToolResult(status="timeout", code="MCP_TIMEOUT", text=text)
         except BaseException as exc:  # noqa: BLE001 - any failure is reported
             body = f"⚠️ MCP_TOOL_ERROR: {type(exc).__name__}: {_redact_error_text(exc, cfg)}"
-            return _model_facing_result(cfg, tool.raw_name, body)
-        return _model_facing_result(cfg, tool.raw_name, _redact_error_text(text, cfg))
+            text = _model_facing_result(cfg, tool.raw_name, body)
+            return ToolResult(
+                status="error",
+                code="MCP_ERROR",
+                text=text,
+                meta={"dynamic_provider": True},
+            )
+        text = _model_facing_result(
+            cfg,
+            tool.raw_name,
+            _redact_error_text(result.text, cfg),
+        )
+        return ToolResult(
+            status=result.status,
+            code=result.code,
+            text=text,
+            meta={**dict(result.meta), "dynamic_provider": True},
+        )
+
+    def call_tool(self, prefixed_name: str, arguments: Dict[str, Any]) -> str:
+        """Synchronously invoke an MCP tool and return its text projection."""
+        return self._call_tool_result(prefixed_name, arguments).text
 
 
 def _normalize_input_schema(value: Any) -> Dict[str, Any]:
@@ -1041,3 +1117,8 @@ def refresh_all_background(*, reason: str = "settings") -> None:
 def call_mcp_tool(name: str, arguments: Dict[str, Any]) -> str:
     """ToolRegistry sync call helper."""
     return get_manager().call_tool(name, arguments or {})
+
+
+def _call_mcp_tool_result(name: str, arguments: Dict[str, Any]) -> ToolResult:
+    """Internal typed ToolRegistry call helper."""
+    return get_manager()._call_tool_result(name, arguments or {})

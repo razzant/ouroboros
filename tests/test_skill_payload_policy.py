@@ -10,6 +10,9 @@ from ouroboros.contracts.skill_payload_policy import (
     resolve_constrained_payload_path,
 )
 from ouroboros.contracts.task_constraint import TaskConstraint, resolve_payload_path
+from tests._typed_guard_shared import _shell_guard_text
+
+
 
 
 def test_resolve_payload_path_legacy_wrapper_matches_policy(tmp_path):
@@ -104,7 +107,7 @@ def test_publication_receipt_stem_reaches_shell_guard(tmp_path):
     repo.mkdir()
     drive.mkdir()
     reg = ToolRegistry(repo_dir=repo, drive_root=drive)
-    blocked = reg._run_shell_safety_check(
+    blocked = _shell_guard_text(reg,
         {"cmd": "rm data/state/skills/weather/ouroboroshub.json"},
         "advanced",
     )
@@ -196,14 +199,14 @@ def test_registry_shell_guard_keeps_legacy_control_dir_subset(tmp_path):
     repo.mkdir()
     drive.mkdir()
     reg = ToolRegistry(repo_dir=repo, drive_root=drive)
-    blocked = reg._run_shell_safety_check(
+    blocked = _shell_guard_text(reg,
         {"cmd": "rm data/skills/external/alpha/.self_authored.json"},
         "advanced",
     )
     assert blocked is not None
     assert "SAFETY_VIOLATION" in blocked
 
-    allowed = reg._run_shell_safety_check(
+    allowed = _shell_guard_text(reg,
         {"cmd": "rm data/skills/external/alpha/__pycache__/plugin.pyc"},
         "advanced",
     )

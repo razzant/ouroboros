@@ -42,6 +42,19 @@ from ouroboros.utils import utc_now_iso
 # Durable receipt evidence is bounded but the truncation is DISCLOSED (BIBLE P1, never
 # silent); the tool-result preview is bounded separately for transport.
 _RECEIPT_OUTPUT_CAP = 20000
+# The typed process facts a run-kind receipt DISCLOSES (D6/R4). `duration_ms` —
+# always, for every run-kind check: a 9ms SIGKILL and a 5-minute honest red are
+# different facts. `signal` — the POSIX name of the signal that killed the check
+# (returncode < 0), so a killed verification is distinguishable in the store
+# (Windows reports large positive codes and gets no name — declared residual,
+# see process_facts.signal_name_for_returncode). `resolved_runtime` — present
+# ONLY when execution ran something other than the literal recorded check
+# (Stream-A resolver seam); its absence means the recorded argv is exactly what
+# executed. The channel publishes MORE than this (the kill facts belong to the
+# call's result_meta, not to the receipt's stored shape), so the receipt keeps
+# exactly the three keys it has always carried, copied from the one publication
+# instead of derived a second time.
+_RECEIPT_PROCESS_KEYS = ("duration_ms", "signal", "resolved_runtime")
 _TOOL_OUTPUT_CAP = 4000
 # The `no_visible_machine_contract` receipt carries the agent's OWN stated proxy and
 # residual risk — decision-shaping cognitive evidence a reviewer reads, so it goes
@@ -118,7 +131,7 @@ def _check_has_exit_masking(argv: List[str]) -> tuple[bool, list[str]]:
     SHELL-STRING check `["sh"/"bash"/..., "-c", text]`, constructs that launder the real exit code
     so a failing runner reads as exit 0 (the false-green tutanota hit): a trailing pipe into a text
     filter (`... | tail/head/grep/...`; POSIX pipeline exit = the LAST stage), `|| true` / `|| :`,
-    or a `>/dev/null`/`2>/dev/null` swallow. Token-scans via shlex OUTSIDE quotes so a quoted
+    or an explicit successful tail. Token-scans via shlex OUTSIDE quotes so a quoted
     literal (e.g. grep PATTERN '| tail') is not flagged. Mirrors the artifact_lifecycle flag: it
     informs the advisory reviewer + the agent, P5-clean (it decides nothing). Returns (masked, reasons)."""
     if not argv or len(argv) < 3:
@@ -131,7 +144,7 @@ def _check_has_exit_masking(argv: List[str]) -> tuple[bool, list[str]]:
     # shlex.split is whitespace-only and would miss the no-space forms. Quotes are still respected,
     # so a quoted literal (e.g. a grep pattern `'| tail'`) is NOT flagged.
     try:
-        lexer = shlex.shlex(text, posix=True, punctuation_chars="|&<>")
+        lexer = shlex.shlex(text, posix=True, punctuation_chars="|&<>;")
         lexer.whitespace_split = True
         toks = list(lexer)
     except ValueError:
@@ -147,11 +160,18 @@ def _check_has_exit_masking(argv: List[str]) -> tuple[bool, list[str]]:
         last_stage = pathlib.PurePath(toks[nxt]).name.lower() if nxt < len(toks) else ""
         if last_stage in _EXIT_MASK_FILTER_CMDS:
             reasons.append(f"pipeline_{last_stage}")
-    if ">/dev/null" in text.replace(" ", ""):
-        reasons.append("dev_null_redirect")
+    if len(toks) >= 2 and toks[-1] in {"true", ":"} and toks[-2] == ";":
+        reasons.append(f"{toks[-2]} true")
+    if len(toks) >= 3 and toks[-2:] == ["exit", "0"] and toks[-3] in {";", "||"}:
+        reasons.append("exit 0")
     seen: set = set()
     ordered = [r for r in reasons if not (r in seen or seen.add(r))]
     return bool(ordered), ordered
+
+
+# Public name for the SECOND consumer: run_command/run_script read the same
+# sensor to disclose a masked green in their result envelope.
+check_exit_masking = _check_has_exit_masking
 
 
 _OBSERVABLE_EXTRA_ROOTS = ("subagent_projects", "deliverables", "artifact_store", "task_drive")
@@ -657,7 +677,7 @@ def _verify_and_record(
             )
         from ouroboros.tools.process_facts import (
             active_resolved_runtime as _active_resolved_runtime,
-            signal_name_for_returncode as _signal_name_for_returncode,
+            publish_process_facts as _publish_process_facts,
         )
         from ouroboros.tools.shell import (
             _RUN_SHELL_DEFAULT_TIMEOUT_SEC,
@@ -732,12 +752,17 @@ def _verify_and_record(
                     **({"env": run_env} if run_env is not None else {}),
                 )
         except subprocess.TimeoutExpired:
+            # The check is a child of THIS call, so its death is published on the
+            # typed process-facts channel exactly like run_command's, and the
+            # receipt discloses the SAME published facts (one derivation).
+            _facts = _publish_process_facts(
+                started_ts=_check_started_ts, resolved_runtime=_resolved_runtime,
+                timed_out=True, killed_by_host=True,
+            )
             # Same renderer as the completed-run receipt below, so it carries the same
             # stamp: a timeout red must be reconcilable by the later green of that argv.
             receipt.update({"status": "fail", "returncode": None, "matched": False, "check": shlex.join(argv), "check_rendering": CHECK_RENDERING_SHLEX_JOIN, "summary": f"check timed out after {timeout}s"})
-            receipt["duration_ms"] = max(0, int((time.monotonic() - _check_started_ts) * 1000))
-            if _resolved_runtime:
-                receipt["resolved_runtime"] = _resolved_runtime
+            receipt.update({k: v for k, v in _facts.items() if k in _RECEIPT_PROCESS_KEYS})
             if not append_verification_receipt(drive_root, task_id, receipt):
                 return _receipt_custody_failure(
                     kind, f"check timed out after {timeout}s",
@@ -747,9 +772,15 @@ def _verify_and_record(
                 f"root={binding.root}, cwd={binding.target_path}. Receipt recorded."
             )
         # Full output captured in-handler BEFORE any transport truncation.
-        _check_duration_ms = max(0, int((time.monotonic() - _check_started_ts) * 1000))
         out = (res.stdout or "") + (("\n" + res.stderr) if res.stderr else "")
         rc = res.returncode
+        # Same typed publication as the timeout branch: the check's own exit and
+        # (POSIX) signal, measured here where the truth is, not re-read from the
+        # ``exit=`` the result text renders for the agent.
+        _facts = _publish_process_facts(
+            returncode=rc, started_ts=_check_started_ts,
+            resolved_runtime=_resolved_runtime,
+        )
         if match_mode == "bytes_equal":
             # v6.60.0: after the check, the VERDICT is the byte-parity of the two
             # declared files (golden-file shape); the check's own exit still gates.
@@ -772,23 +803,11 @@ def _verify_and_record(
         # old space-joined `echo a b` and a new `shlex.join` of a different argv read the
         # same. The stamp makes the two incomparable instead of falsely equal.
         receipt.update({"status": "pass" if passed else "fail", "returncode": rc, "matched": bool(matched), "check": shlex.join(argv), "check_rendering": CHECK_RENDERING_SHLEX_JOIN, "summary": _bounded(out, _RECEIPT_OUTPUT_CAP)})
-        # D6/D7 disclosure keys (node-runtime sprint stream B). `duration_ms` —
-        # always, for every run-kind check: a 9ms SIGKILL and a 5-minute honest
-        # red are different facts. `signal` — the POSIX name of the signal that
-        # killed the check (returncode < 0), so a killed verification is
-        # distinguishable in the store (Windows reports large positive codes and
-        # gets no name — declared residual, see _signal_name_for_returncode).
-        # `resolved_runtime` — present ONLY when execution ran something other
-        # than the literal recorded check (Stream-A resolver seam); its absence
-        # means the recorded argv is exactly what executed. All three are
-        # disclosure-only: receipt IDENTITY (`check` text) and reconciliation
-        # read none of them.
-        receipt["duration_ms"] = _check_duration_ms
-        _signal_name = _signal_name_for_returncode(rc)
-        if _signal_name:
-            receipt["signal"] = _signal_name
-        if _resolved_runtime:
-            receipt["resolved_runtime"] = _resolved_runtime
+        # D6/D7 disclosure keys (node-runtime sprint stream B), now copied from
+        # the one publication above — see _RECEIPT_PROCESS_KEYS for which keys
+        # and why. Disclosure-only: receipt IDENTITY (`check` text) and
+        # reconciliation read none of them.
+        receipt.update({k: v for k, v in _facts.items() if k in _RECEIPT_PROCESS_KEYS})
         # C: after-only artifact-lifecycle FLAG (status unchanged — flag-only). If the agent
         # declared artifact_paths, record whether each still exists after the check, probed via
         # the SAME surface as the check, so a build-then-delete is visible to the advisory reviewer.

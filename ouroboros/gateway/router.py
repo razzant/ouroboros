@@ -40,6 +40,7 @@ def collect_routes(
         api_skill_review_history_detail,
         api_skill_toggle,
     )
+    from ouroboros.gateway.widgets import api_widgets
     from ouroboros.gateway.files import (
         api_chat_upload,
         api_chat_upload_delete,
@@ -136,7 +137,6 @@ def collect_routes(
         api_owner_auto_grant,
         api_owner_context_mode,
         api_owner_safety_mode,
-        api_owner_scope_review_floor,
         api_owner_runtime_mode,
         api_settings_get,
         api_settings_post,
@@ -151,9 +151,10 @@ def collect_routes(
     routes: list[BaseRoute] = [
         Route("/api/health", endpoint=api_health),
         Route("/api/state", endpoint=api_state),
+        Route("/api/widgets", endpoint=api_widgets, methods=["GET"]),
         Route("/api/extensions", endpoint=api_extensions_index, methods=["GET"]),
         Route("/api/extensions/{skill}/manifest", endpoint=api_extension_manifest, methods=["GET"]),
-        Route("/api/extensions/{skill}/module/{entry}", endpoint=api_extension_module, methods=["GET"]),
+        Route("/api/extensions/{skill}/module/{entry:path}", endpoint=api_extension_module, methods=["GET"]),
         Route(
             "/api/extensions/{skill}/settings_section",
             endpoint=api_extension_settings_section,
@@ -224,7 +225,6 @@ def collect_routes(
         Route("/api/owner/runtime-mode", endpoint=api_owner_runtime_mode, methods=["POST"]),
         Route("/api/owner/auto-grant", endpoint=api_owner_auto_grant, methods=["POST"]),
         Route("/api/owner/context-mode", endpoint=api_owner_context_mode, methods=["POST"]),
-        Route("/api/owner/scope-review-floor", endpoint=api_owner_scope_review_floor, methods=["POST"]),
         Route("/api/owner/safety-mode", endpoint=api_owner_safety_mode, methods=["POST"]),
         Route("/api/owner/capability-ack", endpoint=api_acknowledge_capability, methods=["POST"]),
         Route("/api/model-catalog", endpoint=api_model_catalog),

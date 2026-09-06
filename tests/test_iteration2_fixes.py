@@ -35,7 +35,7 @@ def _stub_tool_timeout_settings(monkeypatch):
     deterministic regardless of the developer's real data/settings.json (CI is already
     isolated via OUROBOROS_DATA_DIR, but local runs should not depend on it)."""
     try:
-        monkeypatch.setattr("ouroboros.tools.shell.load_settings", lambda: {})
+        monkeypatch.setattr("ouroboros.tools.shell_process.load_settings", lambda: {})
     except Exception:
         pass
     yield

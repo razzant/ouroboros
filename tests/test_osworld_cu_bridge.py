@@ -1395,8 +1395,10 @@ def test_module_grandfather_matcher_uses_exact_repo_relative_paths():
     assert not module_is_grandfathered("repo/server.py")
     assert not module_is_grandfathered("ouroboros/server.py")
     assert not module_is_grandfathered("repo/ouroboros/server.py")
-    # The tools/control.py debt cannot leak to gateway/control.py.
-    assert module_is_grandfathered("ouroboros/tools/control.py")
+    # tools/control.py's debt was retired by the v7 split (2110->492 lines);
+    # basename exactness still holds - NEITHER control.py is grandfathered now
+    # (the positive+negative exact-path pair above is server.py).
+    assert not module_is_grandfathered("ouroboros/tools/control.py")
     assert not module_is_grandfathered("ouroboros/gateway/control.py")
 
 

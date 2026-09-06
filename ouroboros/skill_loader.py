@@ -12,12 +12,13 @@ import hashlib
 import logging
 import pathlib
 from dataclasses import dataclass, field
-from typing import Any, Dict, Iterable, List, Optional
+from typing import Any, Callable, Dict, Iterable, List, Optional
 
 from ouroboros.contracts.skill_manifest import SkillManifest, SkillManifestError, canonical_skill_name, parse_skill_manifest_text
 from ouroboros.contracts.plugin_api import FORBIDDEN_SKILL_SETTINGS
+from ouroboros.contracts.schema_versions import with_schema_version
 from ouroboros.skill_review_status import STATUS_BLOCKERS, STATUS_CLEAN, STATUS_PENDING, STATUS_WARNINGS, VALID_SKILL_REVIEW_STATUSES, aggregate_skill_review_status, normalize_skill_review_status, skill_review_gate
-from ouroboros.utils import atomic_write_json, read_json_dict, utc_now_iso
+from ouroboros.utils import append_jsonl, atomic_write_json, read_json_dict, utc_now_iso
 
 log = logging.getLogger(__name__)
 
@@ -52,6 +53,11 @@ def review_status_allows_execution(status: str) -> bool:
 
 GRANTS_FILENAME = "grants.json"
 SELF_AUTHORED_MARKER_FILENAME = ".self_authored.json"
+# CPL4-C10: every per-skill owner-state document the runtime authors carries
+# the shared ABI-2 stamp on write (review.json, enabled.json, grants.json,
+# review_job.json, owner_attestation.json, accepted_rebuttals.json). Readers
+# keep legacy-0 tolerance: unstamped files are never retrofitted on read.
+SKILL_OWNER_STATE_SCHEMA_VERSION = 1
 
 
 # Dataclasses
@@ -171,14 +177,25 @@ def _skills_state_root(drive_root: pathlib.Path) -> pathlib.Path:
     return pathlib.Path(drive_root) / "state" / "skills"
 
 
-def skill_state_dir(drive_root: pathlib.Path, name: str) -> pathlib.Path:
-    """Return ``~/Ouroboros/data/state/skills/<name>/`` (created on demand).
+def skill_state_dir_path(drive_root: pathlib.Path, name: str) -> pathlib.Path:
+    """The skill's state dir path WITHOUT creating it — for read-only
+    consumers (``load_review_state``, the RC auditor's admission reuse):
+    reading state must never mutate the root it reads from.
+
+    The generation-fenced companion recovery resolves the state dir through
+    here BEFORE its fence (fix-round-6); creation belongs to the post-fence
+    attach in ``_publish_registrations``, so a stale refusal creates no
+    directories. ``skill_state_dir`` is the creating variant for load paths.
 
     The name is normalized to its alnum-dashes shape before joining so a
     malicious manifest ``name: ../foo`` cannot escape the state root.
     """
-    safe = _sanitize_skill_name(name)
-    path = _skills_state_root(drive_root) / safe
+    return _skills_state_root(drive_root) / _sanitize_skill_name(name)
+
+
+def skill_state_dir(drive_root: pathlib.Path, name: str) -> pathlib.Path:
+    """Return ``~/Ouroboros/data/state/skills/<name>/`` (created on demand)."""
+    path = skill_state_dir_path(drive_root, name)
     path.mkdir(parents=True, exist_ok=True)
     return path
 
@@ -489,14 +506,43 @@ def load_enabled(drive_root: pathlib.Path, name: str) -> bool:
     return enabled if isinstance(enabled, bool) else False
 
 
-def save_enabled(drive_root: pathlib.Path, name: str, enabled: bool) -> None:
+def save_enabled(
+    drive_root: pathlib.Path,
+    name: str,
+    enabled: bool,
+    *,
+    actor: str = "",
+    reason: str = "",
+) -> None:
+    """Persist enablement and best-effort append one typed disclosure row.
+
+    ``actor`` is a data label, never a gate: no branch reads it, and an
+    unlabelled writer records an empty actor rather than nothing at all. An
+    append failure is logged and never blocks the enablement change.
+    """
+    previous = load_enabled(drive_root, name)
     atomic_write_json(
         skill_state_dir(drive_root, name) / "enabled.json",
-        {
-            "enabled": bool(enabled),
-            "updated_at": utc_now_iso(),
-        },
+        with_schema_version(
+            {
+                "enabled": bool(enabled),
+                "updated_at": utc_now_iso(),
+            },
+            SKILL_OWNER_STATE_SCHEMA_VERSION,
+        ),
     )
+    try:
+        append_jsonl(pathlib.Path(drive_root) / "logs" / "events.jsonl", {
+            "ts": utc_now_iso(),
+            "type": "skill_enabled_changed",
+            "skill": name,
+            "enabled": bool(enabled),
+            "previous": bool(previous),
+            "actor": str(actor or ""),
+            "reason": str(reason or ""),
+        })
+    except Exception:
+        log.debug("Failed to append skill_enabled_changed for %s", name, exc_info=True)
 
 
 def load_review_state(
@@ -507,7 +553,9 @@ def load_review_state(
     is_module_widget: bool = False,
     skill_dir: Optional[pathlib.Path] = None,
 ) -> SkillReviewState:
-    data = read_json_dict(skill_state_dir(drive_root, name) / "review.json")
+    # Read-only over the state root (skill_state_dir_path, never mkdir): the
+    # RC auditor reuses this admission read over a root it must not mutate.
+    data = read_json_dict(skill_state_dir_path(drive_root, name) / "review.json")
     if not isinstance(data, dict):
         return SkillReviewState()
     raw_status = str(data.get("status") or "").lower()
@@ -541,7 +589,7 @@ def load_review_state(
     # the skill drops back to pending), exactly like native_seed provenance. Content edits
     # still stale the verdict through the normal content_hash check.
     if review_profile == "owner_attested":
-        if not (skill_state_dir(drive_root, name) / "owner_attestation.json").is_file():
+        if not (skill_state_dir_path(drive_root, name) / "owner_attestation.json").is_file():
             return SkillReviewState()
     has_review_verdicts = any(
         str(f.get("verdict") or "").upper() in {"PASS", "FAIL"}
@@ -603,7 +651,7 @@ def save_review_state(
 ) -> None:
     atomic_write_json(
         skill_state_dir(drive_root, name) / "review.json",
-        review.to_dict(),
+        with_schema_version(review.to_dict(), SKILL_OWNER_STATE_SCHEMA_VERSION),
     )
 
 
@@ -729,16 +777,22 @@ def save_skill_grants(
         granted_permissions,
         allowed=allowed_permissions,
     )
+    # Stamp at write (CPL4-C10): load_skill_grants normalizes to a fixed key
+    # set, so the stamp must be re-authored here rather than carried through
+    # the read-merge round trip.
     atomic_write_json(
         skill_state_dir(drive_root, name) / GRANTS_FILENAME,
-        {
-            "granted_keys": merged,
-            "requested_keys": sorted(allowed),
-            "granted_permissions": sorted(existing_permissions),
-            "requested_permissions": sorted(allowed_permissions),
-            "content_hash": str(content_hash or ""),
-            "updated_at": utc_now_iso(),
-        },
+        with_schema_version(
+            {
+                "granted_keys": merged,
+                "requested_keys": sorted(allowed),
+                "granted_permissions": sorted(existing_permissions),
+                "requested_permissions": sorted(allowed_permissions),
+                "content_hash": str(content_hash or ""),
+                "updated_at": utc_now_iso(),
+            },
+            SKILL_OWNER_STATE_SCHEMA_VERSION,
+        ),
     )
 
 
@@ -969,8 +1023,16 @@ def _walk_skill_packages(
     selected_manifestless_name: str = "",
     include_manifestless_root: bool = False,
     excluded_manifestless_children: frozenset[str] = frozenset(),
+    listdir: Optional[Callable[[pathlib.Path], List[pathlib.Path]]] = None,
 ) -> List[pathlib.Path]:
-    """Yield ordinary packages plus one exact selected manifestless target."""
+    """Yield ordinary packages plus one exact selected manifestless target.
+
+    ``listdir`` overrides the traversal reader: the runtime keeps the
+    fail-soft ``_safe_listdir`` default (an unreadable repo loads as empty),
+    while a strict consumer (the RC auditor) passes a raising lister so a
+    traversal ``OSError`` surfaces instead of silently emptying the walk."""
+    if listdir is None:
+        listdir = _safe_listdir
     out: List[pathlib.Path] = []
     if not root.is_dir():
         return out
@@ -985,7 +1047,7 @@ def _walk_skill_packages(
         and _sanitize_skill_name(root.name) == selected_manifestless_name
     )
     found_manifest_package = False
-    for child in _safe_listdir(root):
+    for child in listdir(root):
         if _is_orphan_marker_name(child.name):
             continue
         if _looks_like_skill_dir(child):
@@ -994,7 +1056,7 @@ def _walk_skill_packages(
             continue
         child_has_manifest_package = False
         # One level deeper for grouping containers such as native/clawhub.
-        for grandchild in _safe_listdir(child):
+        for grandchild in listdir(child):
             if _is_orphan_marker_name(grandchild.name):
                 continue
             if _looks_like_skill_dir(grandchild):
@@ -1403,11 +1465,12 @@ def list_available_for_execution(
     return out
 
 
-# Status helpers consumed by /api/state and the Skills UI
+# Status helpers consumed by the model-facing catalogue: the per-turn Installed
+# Skills section (context.py) and the list_skills tool.
 
 
 def summarize_skills(drive_root: pathlib.Path) -> Dict[str, Any]:
-    """Return a compact catalogue summary for the Skills UI / /api/state."""
+    """Return a compact catalogue summary for the model-facing skill catalogue."""
     skills = discover_skills(drive_root)
     tool_surfaces_by_skill: Dict[str, List[Dict[str, str]]] = {}
     try:
@@ -1458,6 +1521,9 @@ def summarize_skills(drive_root: pathlib.Path) -> Dict[str, Any]:
             "name": s.name,
             "description": s.manifest.description,
             "when_to_use": s.manifest.when_to_use,
+            # CPL-7: optional Model Experience prose travels to every
+            # model-visible skill surface (list_skills JSON, context section).
+            "model_experience": s.manifest.model_experience,
             "type": s.manifest.type,
             "version": s.manifest.version,
             "enabled": s.enabled,
@@ -1480,6 +1546,27 @@ def summarize_skills(drive_root: pathlib.Path) -> Dict[str, Any]:
             # and fails only at execution time.
             "manual_dependencies": list(getattr(readiness, "manual_dependencies", []) or []),
         })
+        # Extension liveness is a different fact from script executability: the
+        # same producer /api/extensions reads, so the catalogue and the HTTP
+        # surface cannot disagree. `skills=` is mandatory — without it the state
+        # helper re-walks the whole skills tree once per row.
+        live: Dict[str, Any] = {}
+        if s.manifest.is_extension() and not s.identity_collision:
+            try:
+                from ouroboros.extension_loader import runtime_state_for_loaded_skill
+
+                live = runtime_state_for_loaded_skill(s, drive_root, skills=skills)
+            except Exception:
+                log.debug("extension liveness projection failed for %s", s.name, exc_info=True)
+                live = {}
+        rows[-1].update({
+            "desired_live": bool(live.get("desired_live")),
+            "live_loaded": bool(live.get("live_loaded")),
+            "live_reason": str(live.get("reason") or "not_extension"),
+            "process": str(live.get("process") or ""),
+        })
+        if live.get("load_error"):
+            rows[-1]["load_error"] = str(live.get("load_error"))
     return {
         "count": len(skills),
         "runtime_mode": get_runtime_mode(),

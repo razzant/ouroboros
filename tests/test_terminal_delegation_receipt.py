@@ -11,6 +11,7 @@ from ouroboros.gateway.history import make_chat_history_endpoint
 from ouroboros.post_task_checkpoint import project_replica_task_result_fields
 from ouroboros.task_results import STATUS_COMPLETED, write_task_result
 from ouroboros.task_status import load_effective_task_result
+from ouroboros.task_result_schema import stamp_task_result_schema  # v7 ABI-2: unstamped rows are quarantined
 
 
 def _execution_evidence(
@@ -127,20 +128,22 @@ def test_history_rehydrates_receipt_on_latest_terminal_progress_consumer(tmp_pat
     results.mkdir()
     for task_id, cost in (("summary", 0.0), ("stale", 1.25), ("retry", 2.5)):
         (results / f"{task_id}.json").write_text(
-            json.dumps(_completed_task_result(task_id, cost)),
+            json.dumps(stamp_task_result_schema(_completed_task_result(task_id, cost))),
             encoding="utf-8",
         )
     absent = _completed_task_result("absent", 1.25)
     absent.pop("actual_substrate")
     absent["subagent_envelope"] = {"executor_route": "claude=opus"}
-    (results / "absent.json").write_text(json.dumps(absent), encoding="utf-8")
+    (results / "absent.json").write_text(json.dumps(stamp_task_result_schema(absent)), encoding="utf-8")
     (results / "original.json").write_text(
         json.dumps(
-            {
-                "task_id": "original",
-                "status": "interrupted",
-                "retry_task_id": "retry",
-            }
+            stamp_task_result_schema(
+                {
+                    "task_id": "original",
+                    "status": "interrupted",
+                    "retry_task_id": "retry",
+                }
+            )
         ),
         encoding="utf-8",
     )

@@ -235,5 +235,5 @@ class TestSupervisorTaskDoneAuditTrail:
         assert len(task_done_entries) == 1
         entry = task_done_entries[0]
         assert entry["task_id"] == "test_td"
-        assert entry["cost_usd"] == 0.05
+        assert entry["accounted_upper_bound_usd"] == 0.05
         assert entry["total_rounds"] == 1

@@ -20,7 +20,7 @@ class _Api:
 
 class _Rec:
     sent = []; edited = []; _id = [1000]
-    def __init__(self, token): pass
+    def __init__(self, token, **_kwargs): pass
     async def send_message(self, chat_id, text, parse_mode="HTML"):
         _Rec._id[0] += 1; _Rec.sent.append((chat_id, text, parse_mode, _Rec._id[0])); return _Rec._id[0]
     async def edit_message_text(self, chat_id, message_id, text, parse_mode="HTML"):

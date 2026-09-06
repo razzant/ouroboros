@@ -18,7 +18,18 @@ from ouroboros.skill_loader import (
     find_skill,
     save_skill_grants,
 )
-from ouroboros.tools.result_envelope import result_payload_text as _payload
+
+
+def _payload(result) -> str:
+    """The producer payload before any trailing host note (#447 H1).
+
+    Host notes (safety warning, auto-route note, post-exec tripwires) TRAIL the
+    payload, so a test that pins what the extension itself answered reads the
+    text up to the first appended note."""
+    text = str(result or "")
+    head, sep, _tail = text.partition("\n\n⚠️ ")
+    return head if sep else text
+
 from tests._shared import clean_extension_runtime_state
 from tests.test_extension_loader import (
     _add_fake_native_dep,
@@ -670,7 +681,7 @@ def test_isolated_dependency_extension_rejects_unproxied_side_effect_surface(tmp
     ],
 )
 def test_out_of_process_catalog_revalidates_parent_namespace(tmp_path, catalog):
-    loaded, _repo_root, _drive_root = _prepare_extension(
+    loaded, _repo_root, drive_root = _prepare_extension(
         tmp_path,
         "catalog_guard",
         "def register(api):\n    pass\n",
@@ -679,10 +690,15 @@ def test_out_of_process_catalog_revalidates_parent_namespace(tmp_path, catalog):
     )
 
     with pytest.raises(ExtensionRegistrationError, match="escaped extension namespace"):
-        extension_loader._register_out_of_process_surfaces(
+        extension_loader._publish_out_of_process_registration(
             loaded,
-            current_hash=loaded.content_hash,
             catalog=catalog,
+            drive_root=drive_root,
+            state_dir=drive_root / "state",
+            settings_reader=lambda: {},
+            granted_keys=[],
+            dependency_site_dirs_enabled=False,
+            current_hash=loaded.content_hash,
         )
 
 
@@ -697,7 +713,7 @@ def test_out_of_process_catalog_revalidates_parent_namespace(tmp_path, catalog):
     ],
 )
 def test_out_of_process_catalog_revalidates_descriptor_shape(tmp_path, catalog):
-    loaded, _repo_root, _drive_root = _prepare_extension(
+    loaded, _repo_root, drive_root = _prepare_extension(
         tmp_path,
         "catalog_guard_shape",
         "def register(api):\n    pass\n",
@@ -706,10 +722,15 @@ def test_out_of_process_catalog_revalidates_descriptor_shape(tmp_path, catalog):
     )
 
     with pytest.raises(ExtensionRegistrationError):
-        extension_loader._register_out_of_process_surfaces(
+        extension_loader._publish_out_of_process_registration(
             loaded,
-            current_hash=loaded.content_hash,
             catalog=catalog(loaded),
+            drive_root=drive_root,
+            state_dir=drive_root / "state",
+            settings_reader=lambda: {},
+            granted_keys=[],
+            dependency_site_dirs_enabled=False,
+            current_hash=loaded.content_hash,
         )
 
 

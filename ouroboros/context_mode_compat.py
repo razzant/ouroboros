@@ -6,7 +6,7 @@ import logging
 from pathlib import Path
 from typing import Any, Callable
 
-from ouroboros.utils import atomic_write_json
+from ouroboros.utils import write_text_atomic
 
 log = logging.getLogger(__name__)
 
@@ -60,7 +60,11 @@ def normalize_and_persist_context_mode_compat(
     lock_held: bool,
     guard_live_write: Callable[[], None],
 ) -> dict:
-    """Normalize raw settings and persist only the pair while its lock is held."""
+    """Normalize raw settings and persist the canonical pair while its lock is held.
+
+    The write is the raw mapping with only the pair changed — never a defaults-merged
+    document — in the one on-disk spelling every settings writer produces: the bytes of
+    ``config.serialize_settings`` through the byte-exact ``write_text_atomic``."""
     normalized = normalize_context_mode_compat(
         raw, settings_path=settings_path, warn_ambiguous=True,
     )
@@ -78,9 +82,11 @@ def normalize_and_persist_context_mode_compat(
             "will retry on the next load."
         )
         return normalized
+    from ouroboros.config import serialize_settings  # bound late: config imports this module
+
     try:
         guard_live_write()
-        atomic_write_json(settings_path, normalized, trailing_newline=False)
+        write_text_atomic(settings_path, serialize_settings(normalized))
     except Exception:
         log.warning(
             "Context settings were normalized in memory, but the canonical compatibility "

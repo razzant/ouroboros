@@ -93,7 +93,7 @@ def test_completion_summary_event_text_is_plain_and_fully_normalized(
         ctx.DRIVE_ROOT, {"status": "completed"}, "root-project", root, result, done,
     ) is True
     assert queued[0]["text"] == (
-        f"Launch 🚀 › Ship release · Completed\n{PLAIN_EXCERPT}"
+        f"Launch 🚀 › Ship release · Done\n{PLAIN_EXCERPT}"
     )
     for marker in ("#", "**", "`"):
         assert marker not in queued[0]["text"]
@@ -135,6 +135,17 @@ def test_host_salvage_terminal_incident_drops_inherited_markdown_format(tmp_path
         result_text=raw, terminal_origin=None, base_event=dict(base),
     )
     assert legacy["format"] == "markdown"
+
+    # A host NOTICE is not salvage: its own words are the answer, and its
+    # markdown must survive or the host's own code spans render escaped.
+    notice = project_terminal_result_event(
+        tmp_path, {"chat_id": 7}, "terminal-a",
+        result_text=raw, terminal_origin="host_notice", base_event=dict(base),
+    )
+    assert notice["format"] == "markdown"
+    assert notice["role"] == "system"
+    assert "system_type" not in notice
+    assert notice["text"] == raw
 
 
 def test_history_normalizes_old_project_rows_on_read_without_rewriting_log(tmp_path):
@@ -285,3 +296,259 @@ def test_cancel_receipt_rides_verbatim_live_durable_and_on_replay(
     )
     assert replayed["text"] == verbatim
     assert replayed["markdown"] is False
+
+
+def _parity_cases():
+    import pathlib
+
+    fixture = pathlib.Path(__file__).resolve().parents[1] / "web" / "tests" / "fixtures" / "outcome_phase_parity.json"
+    return json.loads(fixture.read_text(encoding="utf-8"))["cases"]
+
+
+def test_host_status_phase_mirrors_the_browser_over_the_shared_fixture():
+    """S5-03: one status-word family. The same fixture is read by
+    ``web/tests/reason_detail.test.js``, so a divergence between the browser's
+    severity fold and the host's durable label fails on both sides."""
+    from ouroboros.project_dialogue import completion_status_label, outcome_phase
+
+    cases = _parity_cases()
+    assert len(cases) >= 10
+    for case in cases:
+        record = case["record"]
+        assert outcome_phase(record, {}) == case["phase"], case["name"]
+        assert completion_status_label(record, {}) == case["headline"], case["name"]
+        # The event frame is the other half of the same merge: a record read
+        # from the task_done event alone must resolve identically.
+        assert outcome_phase({}, record) == case["phase"], case["name"]
+
+
+def test_host_status_phase_folds_the_legacy_partial_result_status_to_a_warning():
+    """The browser already shows a warning here (the gateway normalizes axes on
+    read); the host label used to agree only by accident, through a 'partial'
+    member of its own degraded set."""
+    from ouroboros.project_dialogue import completion_status_label, outcome_phase
+
+    legacy = {"status": "completed", "result_status": "partial"}
+    assert outcome_phase(legacy, {}) == "warn"
+    assert completion_status_label(legacy, {}) == "Done with warnings"
+
+
+def test_owner_requested_stop_is_done_on_the_host_row_too():
+    from ouroboros.project_dialogue import _completion_verdict, completion_status_label
+
+    stopped = {
+        "status": "completed", "reason_code": "owner_requested_finalization",
+        "outcome_axes": {"execution": {"status": "best_effort"}},
+    }
+    assert completion_status_label(stopped, {}) == "Done"
+    assert _completion_verdict(stopped, {}) == ""
+
+
+A4_DECISION = {
+    "status": "finalized_unaccepted",
+    "rationale": "Acceptance reviewers did not reach a valid quorum.",
+}
+A4_CLAUSE = "Acceptance: finalized_unaccepted — Acceptance reviewers did not reach a valid quorum."
+
+
+def _a4_result(**overrides):
+    result = {
+        "task_id": "root-project", "status": "completed", "reason_code": "final_message",
+        "project_id": "launch", "title": "Ship release", "result": "Release shipped.",
+        "outcome_axes": {
+            "execution": {"status": "ok"},
+            "review": {"status": "degraded", "acceptance_decision": dict(A4_DECISION)},
+        },
+    }
+    result.update(overrides)
+    return result
+
+
+def test_host_verdict_states_an_unaccepted_acceptance_decision_in_its_own_words():
+    """S5-04: a warning caused by REVIEW used to be explained by the execution
+    reason that happened to sit beside it (``Reason: final_message``), which
+    named the delivery step rather than the cause."""
+    from ouroboros.project_dialogue import _completion_verdict
+
+    assert _completion_verdict(_a4_result(), {}) == A4_CLAUSE
+    # The stored rationale already ends in a period; the clause must not double it.
+    assert not _completion_verdict(_a4_result(), {}).endswith("..")
+
+
+def test_host_verdict_keeps_the_execution_reason_when_acceptance_was_reached():
+    from ouroboros.project_dialogue import _completion_verdict
+
+    accepted = _a4_result(outcome_axes={
+        "execution": {"status": "ok"},
+        "review": {"status": "pass", "acceptance_decision": {"status": "accepted"}},
+    })
+    assert _completion_verdict(accepted, {}) == "Reason: final_message."
+    assert _completion_verdict({"status": "completed"}, {}) == ""
+    # A hard failure explains itself by its execution reason, not by a decision.
+    assert _completion_verdict(
+        _a4_result(status="failed", reason_code="delegated_custody_unreconciled",
+                   outcome_axes={"execution": {"status": "failed"},
+                                 "review": {"acceptance_decision": dict(A4_DECISION)}}),
+        {},
+    ) == "Reason: delegated_custody_unreconciled."
+
+
+def test_host_verdict_flattens_and_strips_a_markdown_rationale():
+    """These are durable plain-text rows: the rationale is free owner-visible
+    text up to 500 characters and may carry newlines and markdown markers."""
+    from ouroboros.project_dialogue import _completion_verdict
+
+    noisy = _a4_result(outcome_axes={
+        "execution": {"status": "ok"},
+        "review": {"status": "degraded", "acceptance_decision": {
+            "status": "revision_requested",
+            "rationale": "## Verdict\n\nThe **tests** never ran with `pytest`",
+        }},
+    })
+    verdict = _completion_verdict(noisy, {})
+    assert verdict == "Acceptance: revision_requested — Verdict The tests never ran with pytest."
+    for marker in ("#", "**", "`", "\n"):
+        assert marker not in verdict
+
+    # A rationale that already terminates itself keeps its own punctuation: a
+    # question mark is as terminal as a period, and appending one would render
+    # "…did the tests run?." to the owner.
+    asking = _a4_result(outcome_axes={
+        "execution": {"status": "ok"},
+        "review": {"status": "degraded", "acceptance_decision": {
+            "status": "revision_requested", "rationale": "Did the tests ever run?",
+        }},
+    })
+    assert _completion_verdict(asking, {}) == "Acceptance: revision_requested — Did the tests ever run?"
+
+
+def test_host_verdict_keeps_the_full_bounded_acceptance_rationale():
+    from ouroboros.project_dialogue import _completion_verdict
+
+    rationale = ("Review evidence " + ("remains material and owner-visible. " * 9)).strip()
+    result = _a4_result(outcome_axes={
+        "execution": {"status": "ok"},
+        "review": {"status": "degraded", "acceptance_decision": {
+            "status": "revision_requested", "rationale": rationale,
+        }},
+    })
+
+    assert len(rationale) > 240
+    assert _completion_verdict(result, {}) == f"Acceptance: revision_requested — {rationale}"
+
+
+def test_host_verdict_states_a_decision_without_a_rationale_alone():
+    from ouroboros.project_dialogue import _completion_verdict
+
+    bare = _a4_result(outcome_axes={
+        "execution": {"status": "degraded"},
+        "review": {"status": "degraded", "acceptance_decision": {"status": "revision_requested"}},
+    })
+    assert _completion_verdict(bare, {}) == "Acceptance: revision_requested."
+
+
+def test_host_verdict_leads_both_lifecycle_rows(tmp_path, monkeypatch):
+    """The verdict must reach the owner where the owner looks: the Main row's
+    second line and the Project thread's terminal row."""
+    from ouroboros.project_dialogue import (
+        append_terminal_task_projection, enqueue_project_completion_summary,
+    )
+    from ouroboros.projects_registry import bind_task_to_project, create_project
+
+    project = create_project(tmp_path, "launch", name="Launch 🚀")
+    bind_task_to_project(
+        tmp_path, "root-project", project["id"], project["chat_id"],
+        origin={"absent": "system"},
+    )
+    queued = []
+    monkeypatch.setattr(
+        "supervisor.terminal_delivery.enqueue_terminal_delivery",
+        lambda _root, event, **_kwargs: queued.append(dict(event)) or True,
+    )
+    root = {
+        "id": "root-project", "project_id": "launch",
+        "title": "Ship release", "chat_id": project["chat_id"],
+    }
+    result = _a4_result()
+    done = {"status": "completed", "outcome_axes": result["outcome_axes"]}
+
+    assert enqueue_project_completion_summary(
+        tmp_path, {"status": "completed"}, "root-project", root, result, done,
+    ) is True
+    assert queued[0]["text"] == (
+        f"Launch 🚀 › Ship release · Done with warnings\n{A4_CLAUSE} Release shipped."
+    )
+    assert "final_message" not in queued[0]["text"]
+
+    ordinary = _a4_result(
+        reason_code="budget_exhausted",
+        outcome_axes={"execution": {"status": "degraded"}},
+    )
+    assert enqueue_project_completion_summary(
+        tmp_path, {"status": "completed"}, "root-project", root, ordinary,
+        {"status": "completed", "outcome_axes": ordinary["outcome_axes"]},
+    ) is True
+    assert queued[1]["text"] == (
+        "Launch 🚀 › Ship release · Done with warnings\n"
+        "Reason: budget_exhausted. Release shipped."
+    )
+
+    assert append_terminal_task_projection(tmp_path, "root-project", root, result, done)
+    rows = [
+        json.loads(line)
+        for line in (tmp_path / "logs" / "chat.jsonl").read_text(encoding="utf-8").splitlines()
+        if line.strip()
+    ]
+    projection = next(row for row in rows if row.get("summary_kind") == "terminal_root_projection")
+    assert A4_CLAUSE in projection["text"]
+    assert "Reason: final_message" not in projection["text"]
+    assert projection["reason_code"] == "final_message"
+    assert projection["outcome"] == "Done with warnings"
+    assert projection["text"].endswith('Details: get_task_result(task_id="root-project")')
+
+
+def test_host_verdict_and_the_card_line_compose_the_same_sentence():
+    """The shared fixture is the only place the two languages agree; a clause
+    present there must be produced by the host verdict as well."""
+    from ouroboros.project_dialogue import _completion_verdict
+
+    for case in _parity_cases():
+        clause = case.get("acceptance_clause") or ""
+        if clause:
+            assert _completion_verdict(case["record"], {}) == clause, case["name"]
+
+
+def test_terminal_row_reports_the_depth_request_only_when_one_exists(tmp_path):
+    """S3-05: the owner-visible row is where a nested swarm's depth becomes
+    checkable — numbers first, and no line at all on swarms nobody asked to
+    nest, so an ordinary task's row stays byte-unchanged."""
+    from ouroboros.project_dialogue import append_terminal_task_projection
+
+    task = {"id": "swarm-root", "chat_id": 3, "role": "root"}
+    result = {
+        "task_id": "swarm-root", "status": "completed", "result": "Shipped.",
+        "outcome_axes": {"execution": {"status": "ok"}},
+        "swarm_efficiency": {
+            "subagent_count": 3,
+            "depth": {
+                "requested_depth": 2, "permitted_depth": 4, "attempted_depth": 2,
+                "achieved_depth": 2, "status": "achieved", "host_visible_only": True,
+            },
+        },
+    }
+    done = {"chat_id": 3, "status": "completed", "outcome_axes": result["outcome_axes"]}
+    assert append_terminal_task_projection(tmp_path, "swarm-root", task, result, done)
+
+    flat = {"id": "flat-root", "chat_id": 3, "role": "root"}
+    flat_result = {**result, "task_id": "flat-root", "swarm_efficiency": {"subagent_count": 3}}
+    assert append_terminal_task_projection(tmp_path, "flat-root", flat, flat_result, done)
+
+    rows = {
+        json.loads(line)["task_id"]: json.loads(line)
+        for line in (tmp_path / "logs" / "chat.jsonl").read_text(encoding="utf-8").splitlines()
+        if line.strip()
+    }
+    assert "Depth requested=2, permitted=4, achieved=2 (achieved)." in rows["swarm-root"]["text"]
+    assert "Depth" not in rows["flat-root"]["text"]
+    for marker in ("#", "**", "`"):
+        assert marker not in rows["swarm-root"]["text"]

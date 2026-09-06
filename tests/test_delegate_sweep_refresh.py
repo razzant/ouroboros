@@ -335,8 +335,10 @@ def test_same_boot_sweep_settlement_is_cleared_in_the_same_generation(tmp_path, 
     reconcile, so a settlement performed by THIS boot's sweep — even one whose
     outcome shape the sweep-side refresh filter never sees — is already visible
     to the backfill audit and the stored row heals in the same generation."""
-    import server as server_mod
+    # Campaign owner: the startup sweep lives in ouroboros.server_maintenance
+    # (server.py delegates); DATA_DIR is its module-level binding.
     from ouroboros import delegate_custody as custody_mod
+    from ouroboros import server_maintenance as server_mod
 
     _emit_started(tmp_path, "run-5", "t-late")
     _stale_terminal_result(tmp_path, "t-late", delegated_runs_unreconciled=["run-5"])

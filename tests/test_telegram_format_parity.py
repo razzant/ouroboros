@@ -415,7 +415,7 @@ def _configured_api(tmp_path: Path) -> _Api:
 def test_document_audio_routing(tmp_path, monkeypatch, filename, mime, expected):
     plugin, _telegram_api = _load_skill()
     client = _Client()
-    monkeypatch.setattr(plugin, "TelegramClient", lambda _token: client)
+    monkeypatch.setattr(plugin, "TelegramClient", lambda _token, **_kwargs: client)
     event = {
         "chat_id": 42,
         "transport": {},
@@ -432,7 +432,7 @@ def test_document_audio_routing(tmp_path, monkeypatch, filename, mime, expected)
 def test_send_audio_rejection_falls_back_to_document_once(tmp_path, monkeypatch):
     plugin, _telegram_api = _load_skill()
     client = _Client(audio_error=plugin.TelegramRequestRejected("rejected", status_code=400))
-    monkeypatch.setattr(plugin, "TelegramClient", lambda _token: client)
+    monkeypatch.setattr(plugin, "TelegramClient", lambda _token, **_kwargs: client)
     event = {
         "chat_id": 42,
         "file_base64": base64.b64encode(b"audio").decode("ascii"),
@@ -453,7 +453,7 @@ def test_send_audio_non_format_rejection_never_double_sends(tmp_path, monkeypatc
     client = _Client(
         audio_error=plugin.TelegramRequestRejected("rejected", status_code=status_code)
     )
-    monkeypatch.setattr(plugin, "TelegramClient", lambda _token: client)
+    monkeypatch.setattr(plugin, "TelegramClient", lambda _token, **_kwargs: client)
     api = _configured_api(tmp_path)
     event = {
         "chat_id": 42,
@@ -470,7 +470,7 @@ def test_send_audio_non_format_rejection_never_double_sends(tmp_path, monkeypatc
 def test_links_event_renders_at_most_twelve_url_buttons(tmp_path, monkeypatch):
     plugin, _telegram_api = _load_skill()
     client = _Client()
-    monkeypatch.setattr(plugin, "TelegramClient", lambda _token: client)
+    monkeypatch.setattr(plugin, "TelegramClient", lambda _token, **_kwargs: client)
     actions = [
         {"label": f"Link {index}", "url": f"https://example.com/{index}"}
         for index in range(14)
@@ -490,7 +490,7 @@ def test_links_event_renders_at_most_twelve_url_buttons(tmp_path, monkeypatch):
 def test_links_event_filters_actions_before_twelve_button_cap(tmp_path, monkeypatch):
     plugin, _telegram_api = _load_skill()
     client = _Client()
-    monkeypatch.setattr(plugin, "TelegramClient", lambda _token: client)
+    monkeypatch.setattr(plugin, "TelegramClient", lambda _token, **_kwargs: client)
     actions = [
         {"label": f"Invalid {index}"}
         for index in range(12)
@@ -512,7 +512,7 @@ def test_links_keyboard_failure_falls_back_to_plain_text(tmp_path, monkeypatch):
             plain_retry_safe=True,
         )
     )
-    monkeypatch.setattr(plugin, "TelegramClient", lambda _token: client)
+    monkeypatch.setattr(plugin, "TelegramClient", lambda _token, **_kwargs: client)
     event = {
         "chat_id": 42,
         "transport": {},
@@ -527,7 +527,7 @@ def test_links_keyboard_failure_falls_back_to_plain_text(tmp_path, monkeypatch):
 def test_links_keyboard_transport_failure_has_no_plain_fallback(tmp_path, monkeypatch):
     plugin, _telegram_api = _load_skill()
     client = _Client(keyboard_error=plugin.TelegramTransportError("ambiguous delivery"))
-    monkeypatch.setattr(plugin, "TelegramClient", lambda _token: client)
+    monkeypatch.setattr(plugin, "TelegramClient", lambda _token, **_kwargs: client)
     api = _configured_api(tmp_path)
     event = {
         "chat_id": 42,
@@ -544,7 +544,7 @@ def test_links_keyboard_transport_failure_has_no_plain_fallback(tmp_path, monkey
 def test_links_event_honors_telegram_only_transport_filter(tmp_path, monkeypatch):
     plugin, _telegram_api = _load_skill()
     client = _Client()
-    monkeypatch.setattr(plugin, "TelegramClient", lambda _token: client)
+    monkeypatch.setattr(plugin, "TelegramClient", lambda _token, **_kwargs: client)
     (tmp_path / "settings.json").write_text(
         json.dumps({"TELEGRAM_CHAT_ID": "42", "TELEGRAM_MIRROR_MODE": "telegram_only"}),
         encoding="utf-8",

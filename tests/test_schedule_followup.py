@@ -44,7 +44,7 @@ def test_once_due_selection_logic_with_a_fake_clock():
 def _queue(tmp_path):
     from supervisor import queue
 
-    queue.init(tmp_path, 600, 1800)
+    queue.init(tmp_path)
     pending: list = []
     queue.init_queue_refs(pending, {}, {"value": 0})
     return queue, pending
@@ -334,7 +334,7 @@ def test_schedules_gateway_accepts_and_validates_once_triggers(tmp_path):
     from ouroboros.gateway.schedules import api_schedules_list, api_schedules_upsert
     from supervisor import queue
 
-    queue.init(tmp_path, 600, 1800)
+    queue.init(tmp_path)
     app = Starlette(routes=[
         Route("/api/schedules", endpoint=api_schedules_list, methods=["GET"]),
         Route("/api/schedules", endpoint=api_schedules_upsert, methods=["POST"]),
@@ -374,7 +374,7 @@ def test_gateway_rearm_of_completed_once_requires_a_fresh_run_at(tmp_path):
     from ouroboros.gateway.schedules import api_schedules_upsert
     from supervisor import queue
 
-    queue.init(tmp_path, 600, 1800)
+    queue.init(tmp_path)
     pending: list = []
     queue.init_queue_refs(pending, {}, {"value": 0})
     fired = datetime.datetime(2020, 1, 1, tzinfo=UTC).isoformat()
@@ -425,7 +425,7 @@ def test_scheduled_tasks_digest_projects_run_at_for_once_records(tmp_path):
     from ouroboros.context import _scheduled_tasks_digest
     from supervisor import queue
 
-    queue.init(tmp_path, 600, 1800)
+    queue.init(tmp_path)
     queue.upsert_scheduled_task({
         "id": "fu", "name": "Follow-up", "enabled": True,
         "trigger": {"type": "once", "run_at": "2030-01-01T00:00:00+00:00"},
@@ -485,6 +485,25 @@ def test_consumed_once_records_are_pruned_past_gc_retention(tmp_path):
     assert pending == []
 
 
+def test_schema_version_is_authored_on_write(tmp_path):
+    """CPL4-C7: the stamp is written to the durable file, not just defaulted on
+    read — a legacy unversioned table gains it on its next write cycle."""
+    import json
+
+    queue, _pending = _queue(tmp_path)
+    path = tmp_path / "state" / "scheduled_tasks.json"
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps({"tasks": []}), encoding="utf-8")  # legacy: no version
+
+    queue.upsert_scheduled_task({
+        "id": "st", "enabled": True,
+        "trigger": {"type": "once", "run_at": "2999-01-01T00:00:00+00:00"},
+        "task": {"type": "task", "text": "stamped"},
+    })
+    on_disk = json.loads(path.read_text(encoding="utf-8"))
+    assert on_disk["schema_version"] == 1
+
+
 def test_identical_last_error_does_not_rewrite_the_table_every_tick(tmp_path, monkeypatch):
     """Review fix 10a: a permanently invalid record (bad once run_at AND a cron
     row with no expression) writes its typed last_error ONCE; later ticks with the
@@ -502,7 +521,8 @@ def test_identical_last_error_does_not_rewrite_the_table_every_tick(tmp_path, mo
     })
     writes = []
     real_write = queue._write_scheduled_tasks
-    monkeypatch.setattr(queue, "_write_scheduled_tasks",
+    from supervisor import queue_schedules
+    monkeypatch.setattr(queue_schedules, "_write_scheduled_tasks",
                         lambda data, drive_root=None: (writes.append(1), real_write(data, drive_root))[1])
     queue.check_scheduled_tasks()
     assert len(writes) == 1  # first tick records both typed errors

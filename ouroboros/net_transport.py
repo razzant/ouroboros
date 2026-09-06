@@ -4,7 +4,12 @@ Extracted from ``llm.py`` (size-ratchet byte budget, same precedent as
 ``loop_transport.py``): one factory owns the TCP-keepalive socket options
 for every remote httpx client class, so a NAT/VPN mapping silently dropped
 during a long silent reasoning stretch is detected by kernel probes within
-minutes instead of hanging until the transport read timeout.
+minutes instead of hanging until the transport read timeout. Linux and
+Darwin both get the idle/interval/count tuning where CPython exports the
+constants (``platform_layer.tcp_keepalive_socket_options``); proxy-routed
+installs (no explicit transport), the Anthropic-native ``requests`` lane and
+every other platform, Windows included (``SO_KEEPALIVE`` only), keep their
+current behaviour — a disclosed residual.
 """
 from __future__ import annotations
 

@@ -89,7 +89,7 @@ def normalize_review_executions(value: Any) -> List[Dict[str, str]]:
         if not isinstance(item, dict):
             continue
         kind = str(item.get("kind") or "").strip().lower()
-        if kind not in {"api", "harness"}:
+        if kind not in {"api", "harness", "native"}:
             continue
         harness_id = str(item.get("harness_id") or "").strip() if kind == "harness" else ""
         model = str(item.get("model") or "").strip()
@@ -121,7 +121,14 @@ def review_executions_from_actor_usage(actors: Any) -> List[Dict[str, str]]:
                 **({"model": model} if model else {}),
             })
         elif _has_api_execution_receipt(usage):
-            executions.append({"kind": "api", **({"model": model} if model else {})})
+            # The native tool-round episode is an API execution with a
+            # different DELIVERY (the reviewer retrieved the subject itself);
+            # the wire says so, or the owner reads a retrieving review as a
+            # packet review.
+            native = str(usage.get("delivery") or "") == "native_tool_rounds"
+            executions.append({
+                "kind": "native" if native else "api", **({"model": model} if model else {}),
+            })
     return normalize_review_executions(executions)
 
 

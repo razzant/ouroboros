@@ -45,7 +45,7 @@ test('provider test responses apply only to the exact draft generation', () => {
 test('every provider test button warns that one charged request is sent', () => {
     const html = renderSettingsPage();
     const buttons = [...html.matchAll(/data-provider-test="[^"]+"[^>]*>/g)];
-    assert.equal(buttons.length, 7);
+    assert.equal(buttons.length, 8);
     for (const [button] of buttons) {
         assert.match(
             button,
@@ -58,10 +58,10 @@ test('provider actions use the shared status-first action row contract', () => {
     const html = renderSettingsPage();
     const rows = [...html.matchAll(/<div class="settings-action-row(?:"|\s)[\s\S]*?<\/div>/g)]
         .map(([row]) => row);
-    // Seven provider probes plus the catalog action. The Claude-runtime
+    // Eight provider probes plus the catalog action. The Claude-runtime
     // status/Repair panel is retired with its product surface (the advisory
     // pre-review runs on a configured routed model or agent session now).
-    assert.equal(rows.length, 8, 'seven provider probes plus the catalog action');
+    assert.equal(rows.length, 9, 'eight provider probes plus the catalog action');
     assert.doesNotMatch(html, /settings-claude-code/);
     assert.doesNotMatch(html, /settings-ghost-btn/);
     for (const row of rows) {

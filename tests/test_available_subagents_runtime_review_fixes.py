@@ -222,7 +222,106 @@ def test_terminal_custody_outcome_reads_the_canonical_budget_root(tmp_path):
         original,
     )
     assert actual["reason_code"] == "delegated_custody_unreconciled"
+    # An undisposed own patch is a DEBT, not an infrastructure failure: the debt
+    # is ADDED on the objective axis and the derived axes are left alone.
+    assert actual["outcome_axes"]["objective"]["warning"] == (
+        "delegated_custody_unreconciled")
+    assert actual["outcome_axes"].get("execution", {}).get("status") != "infra_failed"
+
+
+def test_custody_debt_overlay_preserves_the_paid_verdicts_and_is_idempotent(tmp_path):
+    from ouroboros.agent_task_pipeline import _apply_terminal_custody_outcome
+    from ouroboros.task_results import STATUS_RUNNING, write_task_result
+
+    write_task_result(tmp_path, "t-1", STATUS_RUNNING,
+                      delegated_runs_unreconciled=["run-open"])
+    env = SimpleNamespace(drive_root=tmp_path)
+    task = {"id": "t-1", "budget_drive_root": str(tmp_path)}
+    derived = {"reason_code": "completed", "outcome_axes": {
+        "execution": {"status": "ok", "reason_code": ""},
+        "objective": {"status": "degraded", "source": "review"},
+        "review": {"status": "changes_requested", "trigger": "acceptance"},
+        "artifacts": {"status": "present"},
+    }}
+    once = _apply_terminal_custody_outcome(env, task, derived)
+    axes = once["outcome_axes"]
+    assert axes["execution"] == {"status": "ok", "reason_code": ""}
+    assert axes["objective"]["status"] == "degraded"
+    assert axes["review"] == {"status": "changes_requested", "trigger": "acceptance"}
+    assert axes["artifacts"] == {"status": "present"}
+    assert axes["objective"]["warnings"] == ["delegated_custody_unreconciled"]
+    # The derived axes the caller passed in are NOT mutated in place.
+    assert "warning" not in derived["outcome_axes"]["objective"]
+    twice = _apply_terminal_custody_outcome(env, task, once)
+    assert twice["outcome_axes"]["objective"]["warnings"] == [
+        "delegated_custody_unreconciled"]
+
+
+def test_custody_debt_does_not_launder_a_derived_infra_failure(tmp_path):
+    from ouroboros.agent_task_pipeline import _apply_terminal_custody_outcome
+    from ouroboros.task_results import STATUS_RUNNING, write_task_result
+
+    write_task_result(tmp_path, "t-2", STATUS_RUNNING,
+                      delegated_runs_unreconciled=["run-open"])
+    derived = {"reason_code": "provider_unavailable", "outcome_axes": {
+        "execution": {"status": "infra_failed", "reason_code": "provider_unavailable"},
+    }}
+    actual = _apply_terminal_custody_outcome(
+        SimpleNamespace(drive_root=tmp_path),
+        {"id": "t-2", "budget_drive_root": str(tmp_path)}, derived)
     assert actual["outcome_axes"]["execution"]["status"] == "infra_failed"
+    assert actual["outcome_axes"]["objective"]["warning"] == (
+        "delegated_custody_unreconciled")
+    # Disclosed residual: the devtools-only infra codes are not in the runtime
+    # best-effort set, so the custody code still takes the one Reason line.
+    assert actual["reason_code"] == "delegated_custody_unreconciled"
+
+
+def test_custody_debt_preserves_a_truncation_rail_reason_code(tmp_path):
+    from ouroboros.agent_task_pipeline import _apply_terminal_custody_outcome
+    from ouroboros.task_results import STATUS_RUNNING, write_task_result
+
+    write_task_result(tmp_path, "t-3", STATUS_RUNNING,
+                      delegated_runs_unreconciled=["run-open"])
+    derived = {"reason_code": "round_limit", "outcome_axes": {
+        "execution": {"status": "ok", "reason_code": "round_limit"},
+    }}
+    actual = _apply_terminal_custody_outcome(
+        SimpleNamespace(drive_root=tmp_path),
+        {"id": "t-3", "budget_drive_root": str(tmp_path)}, derived)
+    assert actual["reason_code"] == "round_limit"
+    assert actual["outcome_axes"]["objective"]["warning"] == (
+        "delegated_custody_unreconciled")
+
+
+def test_custody_debt_task_stores_as_done_with_warnings(tmp_path):
+    """Owner-visible consequence: the card reads Done with warnings, and the
+    review mirror keeps the REAL review axis instead of a skipped stand-in."""
+    from ouroboros.agent_task_pipeline import _store_task_result
+    from ouroboros.task_results import (
+        STATUS_COMPLETED, STATUS_RUNNING, load_task_result, write_task_result,
+    )
+
+    write_task_result(tmp_path, "t-4", STATUS_RUNNING,
+                      delegated_runs_unreconciled=["run-open"])
+    env = SimpleNamespace(drive_root=tmp_path)
+    loop_outcome = {"reason_code": "completed", "outcome_axes": {
+        "execution": {"status": "ok", "reason_code": ""},
+        "objective": {"status": "met", "source": "review"},
+        "review": {"status": "approved", "trigger": "acceptance"},
+        "artifacts": {"status": "present"},
+    }}
+    _store_task_result(
+        env, {"id": "t-4", "budget_drive_root": str(tmp_path)},
+        "the answer", {}, {}, loop_outcome=loop_outcome,
+    )
+    stored = load_task_result(tmp_path, "t-4")
+    assert stored["status"] == STATUS_COMPLETED
+    assert stored["reason_code"] == "delegated_custody_unreconciled"
+    axes = stored["outcome_axes"]
+    assert axes["objective"]["warning"] == "delegated_custody_unreconciled"
+    assert axes["review"]["status"] == "approved"
+    assert stored.get("review_status") == axes["review"]
 
 
 @pytest.mark.parametrize("mode", ["local_readonly_subagent", "acting_subagent"])
@@ -401,7 +500,9 @@ def test_delegate_start_recipes_match_the_fresh_start_schema():
         # schema-valid too. The live checklist has none TODAY, so it is scanned
         # tolerantly below rather than dropped from coverage.
         "docs/CHECKLISTS_ARCHIVE.md",
-        "ouroboros/subagent_dispatch_notes.py",
+        # v7 D01 split: the dispatch-note pair (and its delegate_start recipe
+        # strings) moved to the agent_dispatch leaf; sdn re-exports the pair.
+        "ouroboros/agent_dispatch.py",
         "ouroboros/tools/control.py",
         "ouroboros/tools/delegate.py",
         "ouroboros/tools/delegate_integration.py",

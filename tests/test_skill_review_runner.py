@@ -15,6 +15,8 @@ from ouroboros.skill_loader import (
 from ouroboros.skill_review import SkillReviewOutcome
 from ouroboros.skill_review_runner import _review_result_message, run_skill_review_lifecycle_blocking
 
+from tests._shared import reconcile_receipt
+
 
 def _reset_queue() -> None:
     lifecycle_queue._events.clear()
@@ -125,7 +127,7 @@ def test_blocking_review_lifecycle_uses_single_progress_card(tmp_path, monkeypat
 
     def fake_reconcile(_ctx, skill_name, **_kwargs):
         reconcile_calls.append(lifecycle_queue.queue_snapshot()["active"]["target"])
-        return "extension_loaded", "review_passed"
+        return reconcile_receipt("extension_loaded", "review_passed")
 
     monkeypatch.setattr("supervisor.message_bus.send_with_budget", fake_send)
     monkeypatch.setattr("ouroboros.skill_review_runner._reconcile_deps_after_pass_review", lambda *_a, **_k: ("installed", ""))
@@ -186,7 +188,7 @@ def test_review_lifecycle_installs_deps_after_warnings(tmp_path, monkeypatch):
 
     monkeypatch.setattr("supervisor.message_bus.send_with_budget", lambda *a, **kw: None)
     monkeypatch.setattr("ouroboros.skill_review_runner._reconcile_deps_after_pass_review", fake_deps)
-    monkeypatch.setattr("ouroboros.skill_review_runner._reconcile_extension_payload", lambda *_a, **_k: (None, None))
+    monkeypatch.setattr("ouroboros.skill_review_runner._reconcile_extension_payload", lambda *_a, **_k: reconcile_receipt())
 
     payload = run_skill_review_lifecycle_blocking(
         ctx,
@@ -289,7 +291,7 @@ def test_self_authored_review_lifecycle_uses_triad(tmp_path, monkeypatch):
     )
     monkeypatch.setattr(
         "ouroboros.skill_review_runner._reconcile_extension_payload",
-        lambda *_a, **_k: ("extension_loaded", "ready"),
+        lambda *_a, **_k: reconcile_receipt("extension_loaded", "ready"),
     )
 
     def fake_review(_ctx, _skill_name):
@@ -351,7 +353,7 @@ def test_review_lifecycle_payload_surfaces_auto_flow_grants(tmp_path, monkeypatc
     )
     monkeypatch.setattr(
         "ouroboros.skill_review_runner._reconcile_extension_payload",
-        lambda *_a, **_k: ("extension_loaded", "ready"),
+        lambda *_a, **_k: reconcile_receipt("extension_loaded", "ready"),
     )
 
     def fake_review(_ctx, _skill_name):
@@ -488,7 +490,7 @@ def test_lifecycle_finish_writes_compact_provenance_to_chat_jsonl(tmp_path, monk
     )
     monkeypatch.setattr(
         "ouroboros.skill_review_runner._reconcile_extension_payload",
-        lambda *_a, **_k: ("noop", "review_failed"),
+        lambda *_a, **_k: reconcile_receipt("noop", "review_failed"),
     )
 
     run_skill_review_lifecycle_blocking(
@@ -569,7 +571,7 @@ def test_lifecycle_finish_keeps_raw_only_review_private(tmp_path, monkeypatch):
     monkeypatch.setattr("supervisor.message_bus.send_with_budget", lambda *a, **k: None)
     monkeypatch.setattr(
         "ouroboros.skill_review_runner._reconcile_extension_payload",
-        lambda *_a, **_k: ("noop", "review_pending"),
+        lambda *_a, **_k: reconcile_receipt("noop", "review_pending"),
     )
     run_skill_review_lifecycle_blocking(
         ctx, "alpha", source="test", review_impl=fake_review, repo_path=str(skills_root),
@@ -628,7 +630,7 @@ def test_lifecycle_history_redacts_secret_shaped_reviewer_prose(tmp_path, monkey
     monkeypatch.setattr("supervisor.message_bus.send_with_budget", lambda *a, **k: None)
     monkeypatch.setattr(
         "ouroboros.skill_review_runner._reconcile_extension_payload",
-        lambda *_a, **_k: ("noop", "review_failed"),
+        lambda *_a, **_k: reconcile_receipt("noop", "review_failed"),
     )
     run_skill_review_lifecycle_blocking(
         ctx, "alpha", source="test", review_impl=fake_review, repo_path=str(skills_root),
@@ -690,7 +692,7 @@ def test_review_round_and_snapshot_attempt_are_group_scoped(tmp_path, monkeypatc
     )
     monkeypatch.setattr(
         "ouroboros.skill_review_runner._reconcile_extension_payload",
-        lambda *_a, **_k: ("noop", "test"),
+        lambda *_a, **_k: reconcile_receipt("noop", "test"),
     )
 
     def fake_review(_ctx, skill_name):
@@ -773,7 +775,7 @@ def test_review_rebinds_snapshot_hash_after_waiting_for_lifecycle_lock(tmp_path,
     )
     monkeypatch.setattr(
         "ouroboros.skill_review_runner._reconcile_extension_payload",
-        lambda *_a, **_k: ("noop", "test"),
+        lambda *_a, **_k: reconcile_receipt("noop", "test"),
     )
     ctx = SimpleNamespace(drive_root=drive_root, repo_dir=repo_dir, messages=[])
 
@@ -1021,3 +1023,20 @@ def test_success_without_typed_verdict_stays_pending_in_history(tmp_path):
     ]
     assert history[0]["status"] == "pending"
     assert history[0]["job_status"] == "succeeded"
+
+
+def test_skill_review_response_typedef_carries_qualified_reconcile_fields():
+    api_types = (
+        pathlib.Path(__file__).resolve().parents[1] / "web" / "modules" / "api_types.js"
+    ).read_text(encoding="utf-8")
+    review_declaration = api_types.split("@typedef {Object} SkillReviewResponse", 1)[1].split(
+        "*/", 1
+    )[0]
+    grant_declaration = api_types.split("@typedef {Object} SkillGrantResponse", 1)[1].split(
+        "*/", 1
+    )[0]
+
+    assert "@property {string=} extension_process" in review_declaration
+    assert "@property {string=} extension_server_reconcile" in review_declaration
+    assert "extension_process" not in grant_declaration
+    assert "extension_server_reconcile" not in grant_declaration

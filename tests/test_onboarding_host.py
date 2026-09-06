@@ -6,9 +6,10 @@ These tests pin the startup REORDERING and the single wizard host:
   every pre-server safety step still precedes the server;
 * the wizard is a real page (`GET /onboarding`) reachable with no provider
   configured and no supervisor running;
-* neither the launcher's nor the server's boot normalization may CREATE
-  settings.json, and neither may the readiness probe, because the fresh-install
-  proofs are gated on its absence;
+* neither the launcher's nor the server's boot normalization may WRITE
+  settings.json at all (a fresh install's absence is what the fresh-install
+  proofs are gated on; an existing file is not a licence to rewrite it), and
+  neither may the readiness probe;
 * neither onboarding surface hands a stored credential back out;
 * the desktop host has NO save path of its own: completion is the single atomic
   `POST /api/onboarding/complete` on every host, and that endpoint authors the
@@ -313,45 +314,143 @@ def test_the_launcher_never_authors_settings_during_first_run(monkeypatch, tmp_p
     assert not (tmp_path / "settings.json").exists()
 
 
-def test_pre_server_normalization_never_creates_the_settings_file(monkeypatch, tmp_path):
-    """The launcher normalizes provider defaults before starting the server, but
-    on a FRESH install it must not persist them: creating settings.json here
-    would destroy the freshness every install-time proof is gated on."""
+def test_pre_server_normalization_never_writes_the_settings_file(monkeypatch, tmp_path):
+    """The launcher normalizes provider defaults before starting the server and
+    persists NONE of it — on a fresh install OR on an existing one.
+
+    The fresh-install half was always the rule (creating settings.json here would
+    destroy the freshness every install-time proof is gated on); the existing-install
+    half is the same objection without the carve-out. Startup is a read, and a read
+    that rewrites the file it read turns a normalization into an owner decision.
+    Nothing is lost: the normalization is applied to the environment here and
+    re-derived by every reader, and the completion save persists it."""
     from ouroboros import config as cfg
     from ouroboros import launcher_onboarding
 
     monkeypatch.setattr(cfg, "SETTINGS_PATH", tmp_path / "settings.json")
     monkeypatch.setattr(cfg, "DATA_DIR", tmp_path)
     monkeypatch.setattr(launcher_onboarding, "load_settings", lambda: {})
-    monkeypatch.setattr(launcher_onboarding, "_apply_settings_to_env", lambda settings: None)
+    applied: list = []
+    monkeypatch.setattr(launcher_onboarding, "_apply_settings_to_env", applied.append)
     monkeypatch.setattr(
         launcher_onboarding,
         "apply_runtime_provider_defaults",
         lambda settings: (dict(settings), True, ["OUROBOROS_MODEL_LIGHT"]),
     )
-    saved: list = []
-    monkeypatch.setattr(
-        launcher_onboarding, "save_settings", lambda settings, **kwargs: saved.append(settings)
+    assert not hasattr(launcher_onboarding, "save_settings"), (
+        "the launcher bound a settings writer again"
     )
 
     _settings, onboarding_required = launcher_onboarding.prepare_first_run_settings()
 
     assert onboarding_required is True
-    assert saved == []
+    assert len(applied) == 1, "the normalization must still reach the environment"
     assert not (tmp_path / "settings.json").exists()
 
-    # An install that ALREADY has a settings file still persists normalization.
+    # An install that ALREADY has a settings file is not a licence to rewrite it.
     (tmp_path / "settings.json").write_text("{}", encoding="utf-8")
+    before = (tmp_path / "settings.json").read_bytes()
     launcher_onboarding.prepare_first_run_settings()
-    assert len(saved) == 1
+    assert (tmp_path / "settings.json").read_bytes() == before
+    assert len(applied) == 2
 
 
-def test_server_boot_normalization_carries_the_same_guard():
-    """Mirror of the launcher guard: with the server now starting BEFORE
-    onboarding, its own boot normalization must not author the file either."""
-    source = (REPO / "server.py").read_text(encoding="utf-8")
+def test_server_boot_never_writes_the_settings_file():
+    """The server's boot normalization is APPLIED in-process and persisted
+    nowhere (spec 4.3.5: start-time mutators are retired). Every reader
+    re-derives the same normalization through the shared read seam, so a
+    start-time write would only make boot a second author of settings.json —
+    on a host where the server now starts BEFORE first-run onboarding, that
+    author would create the file the wizard is proved not to have yet."""
+    import ast
+    import textwrap
 
-    assert "if provider_defaults_changed and _settings_path.exists():" in source
+    import server
+
+    source = inspect.getsource(server.lifespan)
+    tree = ast.parse(textwrap.dedent(source))
+
+    # Asserted on the syntax, not on the text: a comment that merely mentions
+    # save_settings must not be able to fail or to satisfy this.
+    called = {
+        node.func.attr if isinstance(node.func, ast.Attribute) else getattr(node.func, "id", "")
+        for node in ast.walk(tree)
+        if isinstance(node, ast.Call)
+    }
+    assert "save_settings" not in called
+    imported = {
+        alias.name
+        for node in ast.walk(tree)
+        if isinstance(node, ast.ImportFrom)
+        for alias in node.names
+    }
+    assert "SETTINGS_PATH" not in imported
+    # The normalization still runs, still reaches the environment, and only then
+    # is the owner's runtime-mode baseline pinned against it.
+    applied_at = source.index("apply_runtime_provider_defaults(load_settings())")
+    env_at = source.index("_apply_settings_to_env(settings)")
+    baseline_at = source.index("initialize_runtime_mode_baseline()")
+    assert applied_at < env_at < baseline_at
+
+
+def test_server_boot_leaves_the_settings_bytes_alone(tmp_path, monkeypatch):
+    """The behavioural half of the pin above. A REAL lifespan boot over a document
+    whose provider normalization reports a change (a retired model default the
+    normalization replaces — the exact case the retired boot write persisted) leaves
+    the file's bytes and mtime untouched. The syntactic pin is the fast tripwire; this
+    one also catches a boot write that reaches the disk through some helper other
+    than the named saver.
+
+    The boot managed-update thread is the one lifespan job stubbed for a reason of its
+    own rather than for scope: it is a daemon whose work races this assertion anyway,
+    and it reaches for the MANAGED REPO — running it would have this pin fetch from
+    whatever ``REPO_DIR`` resolves to in the process that happens to run pytest."""
+    import server as srv
+    from ouroboros import config as cfg
+    from ouroboros.server_runtime import (
+        _RETIRED_MODEL_DEFAULT_REPLACEMENTS,
+        apply_runtime_provider_defaults,
+    )
+
+    document = {"OUROBOROS_MODEL": next(iter(_RETIRED_MODEL_DEFAULT_REPLACEMENTS))}
+    assert apply_runtime_provider_defaults(dict(document))[1] is True, (
+        "the fixture must give boot something it could persist")
+    settings_path = tmp_path / "settings.json"
+    settings_path.write_text(json.dumps(document), encoding="utf-8")
+    monkeypatch.setattr(cfg, "SETTINGS_PATH", settings_path)
+    monkeypatch.setattr(cfg, "DATA_DIR", tmp_path)
+    monkeypatch.delenv("OUROBOROS_MODEL", raising=False)
+    drive_root = tmp_path / "drive"
+    drive_root.mkdir()
+    # ``srv.app`` is the auth-gate wrapper; the inner Starlette state carries the roots.
+    monkeypatch.setattr(srv.app.app.state, "drive_root", drive_root, raising=False)
+    monkeypatch.setattr(srv.app.app.state, "repo_dir", tmp_path / "repo", raising=False)
+
+    class _NoServer:
+        def __init__(self, _config):
+            self.should_exit = False
+
+        async def serve(self):
+            return None
+
+    # Everything the boot segment does NOT own is stubbed; the settings read, the
+    # provider normalization and any writer stay real, which is the point.
+    monkeypatch.setattr(srv, "_apply_settings_to_env", lambda *_a, **_k: None)
+    monkeypatch.setattr(srv, "has_startup_ready_provider", lambda *_a, **_k: False)
+    monkeypatch.setattr("ouroboros.server_runtime.has_local_routing", lambda *_a, **_k: False)
+    monkeypatch.setattr(srv, "_start_supervisor_if_needed", lambda *_a, **_k: None)
+    monkeypatch.setattr(srv, "_boot_managed_update_tasks", lambda *_a, **_k: None)
+    monkeypatch.setattr(srv.uvicorn, "Server", _NoServer)
+    monkeypatch.setattr("ouroboros.launcher_bootstrap.ensure_data_skills_seeded", lambda: None)
+    monkeypatch.setattr("ouroboros.server_auth.get_configured_network_password", lambda: "")
+    before = settings_path.read_bytes()
+    before_mtime = settings_path.stat().st_mtime_ns
+
+    with TestClient(srv.app):
+        pass
+
+    assert settings_path.read_bytes() == before, "boot rewrote the settings document"
+    assert settings_path.stat().st_mtime_ns == before_mtime
 
 
 # --------------------------------------------------------------------------

@@ -22,13 +22,15 @@ from types import SimpleNamespace
 import pytest
 
 import ouroboros.loop as loop_mod
-from ouroboros.loop import (
+from ouroboros.loop_acceptance import (
     ACCEPTANCE_DECISION_REASONS,
-    _apply_task_acceptance_result,
-    _record_acceptance_infra_failure,
     _set_acceptance_decision,
     _supersede_task_acceptance_for_evidence_change,
     _supersede_task_acceptance_for_owner_followup,
+)
+from ouroboros.loop_acceptance_review import (
+    _apply_task_acceptance_result,
+    _record_acceptance_infra_failure,
 )
 from ouroboros.outcomes import (
     ACCEPTANCE_ACCEPTED,
@@ -85,7 +87,7 @@ def _apply_ctx(tmp_path, *, prior_trace=None, passes_done=0, budget_profile=None
         llm_trace=trace,
         drive_root=None,
         messages=[{"role": "user", "content": "goal"}],
-        emit_progress=lambda _m: None,
+        emit_progress=lambda _m, *, incident=None: None,
         mode="required",
         subtree_statuses=[],
         budget_profile=budget_profile or {},
@@ -791,7 +793,7 @@ def test_deadline_reserve_writer_and_reader_move_together(monkeypatch, tmp_path)
 
     monkeypatch.setattr(loop_mod, "get_task_review_mode", lambda: "required")
     monkeypatch.setattr(loop_mod, "get_review_enforcement", lambda: "blocking")
-    monkeypatch.setattr(rs, "reviewer_slots", lambda **_k: [object()])
+    monkeypatch.setattr(rs, "triad_delivery_slots", lambda **_k: [object()])
     monkeypatch.setenv("OUROBOROS_FINALIZATION_GRACE_SEC", "120")
     now = datetime.now(timezone.utc)
     ctx = SimpleNamespace(
@@ -806,7 +808,7 @@ def test_deadline_reserve_writer_and_reader_move_together(monkeypatch, tmp_path)
     assert loop_mod._run_task_acceptance_review_once(
         tools=SimpleNamespace(_ctx=ctx), content="done", task_id="t", task_type="task",
         llm_trace=trace, drive_root=None,
-        messages=[{"role": "user", "content": "goal"}], emit_progress=lambda _m: None,
+        messages=[{"role": "user", "content": "goal"}], emit_progress=lambda _m, *, incident=None: None,
     ) is False
     decision = trace["acceptance_decision"]
     assert decision["status"] == ACCEPTANCE_FINALIZED_UNACCEPTED
@@ -827,10 +829,10 @@ def test_merge_point_is_the_only_status_writer_outside_the_agent_stance_merge():
         if 'llm_trace["acceptance_decision"] =' in path.read_text(encoding="utf-8")
         or '["acceptance_decision"] = _dec' in path.read_text(encoding="utf-8")
     )
-    # `_set_acceptance_decision` moved WHOLE into acceptance_dialogue.py with the
-    # rest of the acceptance machinery; the contract (one merge point plus the
-    # agent STANCE merge) is unchanged, only the file that holds it.
-    assert writers == ["acceptance_dialogue.py", "loop_tool_execution.py"], writers
+    # The v7 L-B split moved `_set_acceptance_decision` (and with it the single
+    # host-status assignment) into the loop_acceptance leaf; the loop.py name is
+    # a facade re-export of the same object.
+    assert writers == ["loop_acceptance.py", "loop_tool_execution.py"], writers
     trace: dict = {}
     _set_acceptance_decision(trace, {"status": ACCEPTANCE_ACCEPTED, "reason": "clean_pass"})
     assert trace["acceptance_decision"]["status"] == ACCEPTANCE_ACCEPTED

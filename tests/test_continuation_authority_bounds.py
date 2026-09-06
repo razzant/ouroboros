@@ -19,7 +19,7 @@ def _write_result(root, row: dict) -> None:
     result_dir = root / "task_results"
     result_dir.mkdir(exist_ok=True)
     (result_dir / f"{row['task_id']}.json").write_text(
-        json.dumps(row), encoding="utf-8",
+        json.dumps({"_schema_version": 1, **row}), encoding="utf-8",
     )
 
 
@@ -188,3 +188,112 @@ def test_legacy_collapse_fires_only_on_growth_carriers_and_is_idempotent():
 
     again = build_task_contract({"objective": "next-hop", "predecessor_authority": envelope})
     assert again["predecessor_authority"] == envelope, "envelope rebuild is a no-op"
+
+
+def _plan_review_state(claims, finding_id: str) -> dict:
+    """A two-wave v2 plan-review state whose reviewer transport dwarfs its decision."""
+    def _wave(cycle_index: int, fingerprint: str) -> dict:
+        return {
+            "schema_version": 2, "cycle_index": cycle_index,
+            "request_fingerprint": fingerprint, "spec_hash": "s" * 64,
+            "goal": "Ship the deck", "aggregate": "REVIEW_REQUIRED",
+            "spec": {"goal": "Ship the deck", "acceptance_claims": list(claims)},
+            "findings": [{"id": finding_id, "finding_id": f"s1:{finding_id}",
+                          "class": "blocking", "breaks": "goal", "summary": "thin"}],
+            "dispositions": [{"finding_id": f"s1:{finding_id}", "decision": "reject"}],
+            "closed": False, "paid": True, "retry_key": f"plan_review:{fingerprint}:{cycle_index}",
+            "counts": {"blocking": 1},
+            "actors": [{"slot_id": f"s{n}", "model": "m/a", "status": "ok",
+                        "raw_text": "a" * 4_000} for n in range(1, 4)],
+            "actors_degraded": [], "health_epoch": [{"slot_id": "s1", "health": "unknown"}],
+            "reasons": ["need_evidence_repeat:gone.md"],
+            "evidence_manifest": {"declared": ["notes.md"], "attached": [{"locator": "notes.md",
+                                                                          "text": "n" * 3_000}]},
+        }
+    return {"schema_version": 2, "cycles_paid": 2, "need_evidence_seen": [],
+            "waves": [_wave(1, "a" * 64), _wave(2, "b" * 64)]}
+
+
+def test_plan_review_authority_core_keeps_the_decision_and_drops_the_transport():
+    """Unit: identity, claims, findings, dispositions and closure survive because they
+    are not transport keys; older waves compact; v1 and empty states pass through."""
+    from ouroboros.task_results import plan_review_authority_core
+
+    claims = ["exactly 5 slides", "every slide has a chart"]
+    state = _plan_review_state(claims, "f1")
+    core = plan_review_authority_core(state)
+
+    assert state["waves"][-1]["actors"], "the input is not mutated"
+    old, new = core["waves"]
+    assert old["compact"] is True and old["request_fingerprint"] == "a" * 64
+    for key in ("actors", "actors_degraded", "evidence_manifest", "health_epoch",
+                "reasons", "retry_key"):
+        assert key not in new, key
+    assert new["request_fingerprint"] == "b" * 64 and new["spec_hash"] == "s" * 64
+    assert new["spec"]["acceptance_claims"] == claims and new["goal"] == "Ship the deck"
+    assert [f["id"] for f in new["findings"]] == ["f1"] and new["findings"][0]["class"] == "blocking"
+    assert new["dispositions"] and new["closed"] is False and new["aggregate"] == "REVIEW_REQUIRED"
+    core["waves"][-1]["spec"]["acceptance_claims"].append("mutated")
+    assert state["waves"][-1]["spec"]["acceptance_claims"] == claims, "deepcopy, not a view"
+
+    assert plan_review_authority_core({"schema_version": 1, "waves": [{"a": 1}]})["schema_version"] == 1
+    assert plan_review_authority_core({}) == {}
+    assert plan_review_authority_core(None) is None
+
+
+def test_plan_review_authority_core_preserves_an_unknown_schema_version():
+    from ouroboros.task_results import plan_review_authority_core
+
+    state = {"schema_version": "corrupt", "waves": [{"actors": ["untrusted"]}]}
+
+    assert plan_review_authority_core(state) is state
+
+
+def test_automatic_plan_review_authority_carries_claims_not_reviewer_transport(tmp_path):
+    """The continuation envelope's `plan_review_state` must reach the acceptance claims
+    and blocking finding ids; reviewer transport used to fill the preview before them."""
+    from ouroboros.agent_startup_checks import validate_task_authority_sources
+    from ouroboros.contracts.task_contract import build_task_contract
+    from ouroboros.task_results import plan_review_authority_core as plan_core
+    from ouroboros.tools.control import _get_task_result
+    from ouroboros.tools.registry import ToolContext
+
+    claims = ["exactly 5 slides", "every slide has a chart"]
+    state = _plan_review_state(claims, "f1")
+    _write_result(tmp_path, {
+        "task_id": "planned", "status": "completed", "result": "done",
+        "terminal_origin": "model_final", "plan_review_state": state,
+    })
+    env = SimpleNamespace(drive_root=tmp_path, budget_drive_root=tmp_path)
+    task = {
+        "id": "continue-planned", "budget_drive_root": str(tmp_path),
+        "predecessor_authority_source": _authority_source("planned"),
+    }
+    assert validate_task_authority_sources(env, task) == {}
+    carried = task["predecessor_authority"]["plan_review_state"]
+    text = json.dumps(carried)
+    projection = carried["projection"]
+    assert projection["projected_from"] == "plan_review_authority_core"
+    assert projection["dropped_keys"] == [
+        "actors", "actors_degraded", "evidence_manifest", "health_epoch", "reasons", "retry_key",
+    ]
+    assert projection["full_chars"] == len(json.dumps(state, ensure_ascii=False, sort_keys=True, default=str))
+    assert projection["source_ref"] == {
+        **_authority_source("planned"), "field": "authority.plan_review_state",
+    }
+    assert all("actors" not in wave for wave in carried["waves"])
+    for claim in (*claims, "f1", "REVIEW_REQUIRED"):
+        assert claim in text, claim
+    if isinstance(carried, dict) and carried.get("kind") == "bounded_field_preview":
+        assert carried["source_ref"]["field"] == "authority.plan_review_state"
+        assert carried["full_chars"] >= len(json.dumps(plan_core(state)))
+
+    # The named pull source stays complete, and a minted envelope rebuilds untouched.
+    explicit = json.loads(_get_task_result(
+        ToolContext(repo_dir=tmp_path, drive_root=tmp_path, budget_drive_root=str(tmp_path)),
+        "planned", include_authority=True,
+    ))
+    assert explicit["authority"]["plan_review_state"]["waves"][-1]["actors"]
+    envelope = task["predecessor_authority"]
+    again = build_task_contract({"objective": "next", "predecessor_authority": envelope})
+    assert again["predecessor_authority"] == envelope

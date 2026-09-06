@@ -85,20 +85,14 @@ def _installer_env(env_root: pathlib.Path, *, ecosystem: str = "") -> Dict[str, 
         "CARGO_HOME": str(env_root / "cargo" / "home"), "CARGO_TARGET_DIR": str(env_root / "cargo" / "target"),
     })
     if ecosystem == "node":
-        # Emergency-only: when the PATH node is missing/execution-probed broken
-        # and the healthy bundled node was selected (skill-family precedence in
-        # platform_layer), npm's `#!/usr/bin/env node` shebang must resolve the
-        # working runtime, so the curated PATH gains the bundled-node dir. On
-        # healthy systems the env stays byte-identical. npm itself is not
-        # bundled: an absent npm still fails honestly upstream, and an npm
-        # launcher with an ABSOLUTE node shebang ignoring PATH is a disclosed
-        # residual.
-        from ouroboros.platform_layer import skill_node_emergency_path_dir
+        # npm's `#!/usr/bin/env node` shebang must resolve a working runtime.
+        # node_runtime owns the emergency verdict, the byte-identical healthy
+        # case, and the disclosed residuals (npm itself is not bundled: an
+        # absent npm still fails honestly upstream, and an npm launcher with an
+        # ABSOLUTE node shebang ignores PATH).
+        from ouroboros.platform_layer import prepend_skill_node_emergency_path
 
-        prepend_dir = skill_node_emergency_path_dir()
-        if prepend_dir:
-            current = env.get("PATH", "")
-            env["PATH"] = os.pathsep.join([prepend_dir, current]) if current else prepend_dir
+        prepend_skill_node_emergency_path(env)
     return env
 
 

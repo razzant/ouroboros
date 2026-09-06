@@ -55,17 +55,17 @@ def _save(monkeypatch, isolated_settings, payload):
     return json.loads(resp.text)
 
 
-def test_a_retired_timeout_key_is_reported_retired_not_applied(monkeypatch, isolated_settings):
-    """OUROBOROS_SOFT/HARD_TIMEOUT_SEC are typed no-ops (supervisor/queue.py
-    pins the globals to constants); the old table said "took effect
-    immediately" about keys nothing reads."""
+def test_a_retired_key_is_absorbed_silently_and_claimed_by_no_bucket(monkeypatch, isolated_settings):
+    """D04 (owner 1B) finished what #285 started: the flat timeout pair is
+    RETIRED, not a typed no-op the save has to apologise for. The merge only
+    walks SETTINGS_DEFAULTS, so a stored value cannot reach an effect bucket
+    at all — and the RC auditor, not the save response, is where an upgrading
+    install learns its key is gone."""
     data = _save(monkeypatch, isolated_settings, {"OUROBOROS_SOFT_TIMEOUT_SEC": "1234"})
     assert not data.get("immediate_changed")
     assert not data.get("next_task_changed")
     assert not data.get("restart_required")
-    warnings = " ".join(data.get("warnings") or [])
-    assert "Retired setting" in warnings
-    assert "OUROBOROS_SOFT_TIMEOUT_SEC" in warnings
+    assert "OUROBOROS_SOFT_TIMEOUT_SEC" not in json.dumps(data)
 
 
 def test_hot_reconfigured_mcp_keys_are_classified_immediate(monkeypatch, isolated_settings):

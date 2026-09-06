@@ -354,6 +354,67 @@ def test_package_json_script_matches_the_gate_glob():
     assert package["scripts"]["test"] == f"node --test {pn.TESTS_GLOB}"
 
 
+# ── ESLint second layer (owner decision D-13 = A) ─────────────────────
+#
+# The gate keeps the dependency-free acorn walker (web/tests/no_undef.test.js);
+# CI additionally runs ESLint's `no-undef` as an independent second opinion.
+# Everything a registry move could change is pinned: the step itself, the
+# frozen install, the exact versions, and the one-rule config.
+
+_ESLINT_STEP = "run: cd web && npm ci --no-audit --no-fund && npm run lint:undef"
+
+
+@pytest.mark.parametrize("job", ["quick-test", "full-test"])
+def test_each_ci_job_runs_the_eslint_second_layer_after_the_node_suite(job):
+    block = _ci_job_block(job)
+    node_suite = f"run: cd {pn.WEB_DIR} && node --test {pn.TESTS_GLOB}"
+    assert block.count(_ESLINT_STEP) == 1, f"{job} does not run the ESLint no-undef layer exactly once"
+    # A second layer is only a second opinion when the first still runs.
+    assert block.index(node_suite) < block.index(_ESLINT_STEP), (
+        f"{job} runs ESLint before (or instead of) the gate's node suite"
+    )
+    # Windows runner in full-test: bash for the `cd web && ...` chain, same as the node step.
+    assert "shell: bash" in block.split(_ESLINT_STEP)[0].rsplit("- name:", 1)[-1]
+
+
+def test_the_eslint_layer_is_exact_pinned_and_lockfile_frozen():
+    """`npm ci` refuses to run without a lockfile that matches package.json, so
+    the committed lockfile plus exact (no `^`/`~`) devDependency versions make
+    the CI verdict independent of what the registry serves tomorrow."""
+    web = REPO_ROOT / pn.WEB_DIR
+    package = json.loads((web / "package.json").read_text(encoding="utf-8"))
+    dev = package["devDependencies"]
+    assert set(dev) == {"eslint", "globals"}, "the layer needs eslint and its globals tables, nothing else"
+    for name, version in dev.items():
+        assert re.fullmatch(r"\d+\.\d+\.\d+", version), f"{name} is not exact-pinned: {version!r}"
+    assert package["scripts"]["lint:undef"] == "eslint --max-warnings=0 app.js modules tests"
+    lock = json.loads((web / "package-lock.json").read_text(encoding="utf-8"))
+    assert lock["lockfileVersion"] >= 3
+    for name, version in dev.items():
+        assert lock["packages"][f"node_modules/{name}"]["version"] == version, (
+            f"package-lock.json resolves {name} to a version other than the pinned one"
+        )
+    # An installed tree must never dirty the checkout (build_repo_bundle.py refuses a dirty tree).
+    assert "web/node_modules/\n" in (REPO_ROOT / ".gitignore").read_text(encoding="utf-8")
+
+
+def test_the_eslint_config_carries_only_no_undef_over_the_gate_scope():
+    """One rule, so a divergence between the two layers is a scope-model bug in
+    one of them and never a style disagreement; the same file scope and the
+    same by-design vendored globals as the acorn walker."""
+    config = (REPO_ROOT / pn.WEB_DIR / "eslint.config.js").read_text(encoding="utf-8")
+    rules = re.findall(r"rules:\s*\{([^}]*)\}", config)
+    assert rules, "eslint.config.js declares no rules"
+    for body in rules:
+        assert re.findall(r"'([a-z-]+)'\s*:", body) == ["no-undef"], body
+    assert "files: ['app.js', 'modules/**/*.js']" in config
+    assert "globals.browser" in config and "globals.es2022" in config
+    for name in ("Chart", "marked", "DOMPurify", "mermaid", "hljs"):
+        assert f"{name}: 'readonly'" in config, f"vendored <script> global {name} missing from the ESLint layer"
+    # ...and the first layer is still there: ESLint is a second opinion, not a replacement.
+    assert (REPO_ROOT / pn.WEB_DIR / "tests" / "no_undef.test.js").is_file()
+
+
 @requires_node
 def test_node_options_cannot_green_a_red_suite(tmp_path, monkeypatch):
     """Adversarial repro (wave 1): an inherited NODE_OPTIONS test filter

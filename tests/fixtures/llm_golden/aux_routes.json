@@ -1,0 +1,1172 @@
+{
+  "cases": [
+    {
+      "id": "aux.probe.rejected_over_window",
+      "route": "the capability probe reports a 4xx pre-inference reject without raising",
+      "spec": {
+        "env": {
+          "OPENAI_API_KEY": "openai-fixture-key"
+        },
+        "transport": [
+          {
+            "kind": "error",
+            "message": "This model's maximum context length is 400000 tokens",
+            "status_code": 400
+          }
+        ],
+        "call": {
+          "kind": "method",
+          "name": "probe_oversized_context",
+          "kwargs": {
+            "model": "openai::gpt-5.5",
+            "content": "xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx",
+            "max_output_tokens": 8,
+            "timeout": 20.0
+          }
+        }
+      },
+      "expected": {
+        "returned": {
+          "value": {
+            "ok": false,
+            "status_code": 400,
+            "body": "This model's maximum context length is 400000 tokens",
+            "echoed_text": "",
+            "usage_prompt": 0
+          },
+          "value_sha256": "74c644446ba54cd4c35ffe6fee7d834b06fd7c8d3cb45895f40c777d175af4a9"
+        },
+        "sends": [
+          {
+            "transport": "openai.chat.completions.create",
+            "client": {
+              "api_key": "openai-fixture-key",
+              "base_url": "https://api.openai.com/v1",
+              "default_headers": null,
+              "max_retries": 0,
+              "http_client": null,
+              "request_options": {
+                "timeout": 20.0
+              }
+            },
+            "payload": {
+              "model": "gpt-5.5",
+              "messages": [
+                {
+                  "role": "user",
+                  "content": "xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx"
+                }
+              ],
+              "temperature": 0,
+              "max_completion_tokens": 8
+            },
+            "payload_sha256": "69f463206f5ea364a2c7ec910fe282a900526307a7b590c33d28830b2af385a4"
+          }
+        ],
+        "physical_attempts": [
+          {
+            "source": "capability_probe",
+            "model": "openai/gpt-5.5",
+            "provider": "openai",
+            "candidate_raw_sha256": "69f463206f5ea364a2c7ec910fe282a900526307a7b590c33d28830b2af385a4",
+            "candidate_raw_size_bytes": 167,
+            "candidate_measurement_kind": "canonical_json_v1",
+            "states": [
+              "reserved",
+              "dispatched",
+              "unresolved"
+            ]
+          }
+        ],
+        "unused_script_steps": 0
+      }
+    },
+    {
+      "id": "aux.probe.accepted_echo",
+      "route": "a rare 200 accept returns the echo and prompt tokens",
+      "spec": {
+        "env": {
+          "OPENROUTER_API_KEY": "or-fixture-key"
+        },
+        "transport": [
+          {
+            "kind": "response",
+            "body": {
+              "id": "probe-1",
+              "choices": [
+                {
+                  "index": 0,
+                  "message": {
+                    "role": "assistant",
+                    "content": "echo"
+                  }
+                }
+              ],
+              "usage": {
+                "prompt_tokens": 999999,
+                "completion_tokens": 1
+              }
+            }
+          }
+        ],
+        "call": {
+          "kind": "method",
+          "name": "probe_oversized_context",
+          "kwargs": {
+            "model": "x-ai/grok-4.5",
+            "content": "yyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyy",
+            "base_url": "https://probe.fixture.invalid/v1",
+            "api_key": "probe-fixture-key"
+          }
+        }
+      },
+      "expected": {
+        "returned": {
+          "value": {
+            "ok": true,
+            "status_code": 200,
+            "body": "",
+            "echoed_text": "echo",
+            "usage_prompt": 999999
+          },
+          "value_sha256": "0e7e62b0e8d42166a4b5e2f4e9d2107b8a9e89d2a131a6af876eba14af8ebe8e"
+        },
+        "sends": [
+          {
+            "transport": "openai.chat.completions.create",
+            "client": {
+              "api_key": "probe-fixture-key",
+              "base_url": "https://probe.fixture.invalid/v1",
+              "default_headers": {
+                "HTTP-Referer": "https://ouroboros-agent.ai/",
+                "X-OpenRouter-Title": "Ouroboros"
+              },
+              "max_retries": 0,
+              "http_client": null,
+              "request_options": {
+                "timeout": 20.0
+              }
+            },
+            "payload": {
+              "model": "x-ai/grok-4.5",
+              "messages": [
+                {
+                  "role": "user",
+                  "content": "yyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyy"
+                }
+              ],
+              "temperature": 0,
+              "max_tokens": 8
+            },
+            "payload_sha256": "6425ed4e83a79243dfa1dc34d698305c58cf442cfa090485afb324e39761f70a"
+          }
+        ],
+        "physical_attempts": [
+          {
+            "source": "capability_probe",
+            "model": "x-ai/grok-4.5",
+            "provider": "openrouter",
+            "candidate_raw_sha256": "6425ed4e83a79243dfa1dc34d698305c58cf442cfa090485afb324e39761f70a",
+            "candidate_raw_size_bytes": 130,
+            "candidate_measurement_kind": "canonical_json_v1",
+            "states": [
+              "reserved",
+              "dispatched",
+              "settled"
+            ],
+            "prompt_cache_ttl": "",
+            "cost_final": false
+          }
+        ],
+        "unused_script_steps": 0
+      }
+    },
+    {
+      "id": "aux.web_search.openrouter",
+      "route": "the provider-owned OpenRouter web_search server tool",
+      "spec": {
+        "env": {
+          "OPENROUTER_API_KEY": "or-fixture-key"
+        },
+        "transport": [
+          {
+            "kind": "response",
+            "body": {
+              "id": "gen-fixture-1",
+              "choices": [
+                {
+                  "index": 0,
+                  "finish_reason": "stop",
+                  "message": {
+                    "role": "assistant",
+                    "content": "ok",
+                    "refusal": null,
+                    "annotations": null,
+                    "reasoning": "short rollup"
+                  }
+                }
+              ],
+              "usage": {
+                "prompt_tokens": 120,
+                "completion_tokens": 8,
+                "cost": 0.0031,
+                "prompt_tokens_details": {
+                  "cached_tokens": 40
+                }
+              }
+            }
+          }
+        ],
+        "call": {
+          "kind": "function",
+          "name": "openrouter_web_search_server_tool",
+          "kwargs": {
+            "api_key": "search-fixture-key",
+            "model": "openai/gpt-5.5-search",
+            "query": "ouroboros benchmark",
+            "search_context_size": "medium"
+          }
+        }
+      },
+      "expected": {
+        "returned": {
+          "value": {
+            "id": "gen-fixture-1",
+            "choices": [
+              {
+                "index": 0,
+                "finish_reason": "stop",
+                "message": {
+                  "role": "assistant",
+                  "content": "ok",
+                  "refusal": null,
+                  "annotations": null,
+                  "reasoning": "short rollup"
+                }
+              }
+            ],
+            "usage": {
+              "prompt_tokens": 120,
+              "completion_tokens": 8,
+              "cost": 0.0031,
+              "prompt_tokens_details": {
+                "cached_tokens": 40
+              }
+            }
+          }
+        },
+        "sends": [
+          {
+            "transport": "openai.chat.completions.create",
+            "client": {
+              "api_key": "search-fixture-key",
+              "base_url": "https://openrouter.ai/api/v1",
+              "default_headers": {
+                "HTTP-Referer": "https://ouroboros-agent.ai/",
+                "X-OpenRouter-Title": "Ouroboros"
+              },
+              "max_retries": 0,
+              "http_client": null
+            },
+            "payload": {
+              "model": "openai/gpt-5.5-search",
+              "messages": [
+                {
+                  "role": "user",
+                  "content": "ouroboros benchmark"
+                }
+              ],
+              "tools": [
+                {
+                  "type": "openrouter:web_search",
+                  "parameters": {
+                    "search_context_size": "medium",
+                    "max_total_results": 10
+                  }
+                }
+              ]
+            },
+            "payload_sha256": "9ebedbe1092687b2751dcfc27491538406b3d1ef3c3089d84a47a984f9c84438"
+          }
+        ],
+        "physical_attempts": [
+          {
+            "source": "web_search.openrouter",
+            "model": "openai/gpt-5.5-search",
+            "provider": "openrouter",
+            "candidate_raw_sha256": "9ebedbe1092687b2751dcfc27491538406b3d1ef3c3089d84a47a984f9c84438",
+            "candidate_raw_size_bytes": 206,
+            "candidate_measurement_kind": "canonical_json_v1",
+            "states": [
+              "reserved",
+              "dispatched",
+              "settled"
+            ],
+            "prompt_cache_ttl": "",
+            "cost_final": true
+          }
+        ],
+        "unused_script_steps": 0
+      }
+    },
+    {
+      "id": "aux.web_search.anthropic",
+      "route": "the provider-owned Anthropic web_search server tool",
+      "spec": {
+        "env": {
+          "ANTHROPIC_API_KEY": "anthropic-fixture-key"
+        },
+        "transport": [
+          {
+            "kind": "response",
+            "body": {
+              "id": "gen-fixture-1",
+              "choices": [
+                {
+                  "index": 0,
+                  "finish_reason": "stop",
+                  "message": {
+                    "role": "assistant",
+                    "content": "ok",
+                    "refusal": null,
+                    "annotations": null,
+                    "reasoning": "short rollup"
+                  }
+                }
+              ],
+              "usage": {
+                "prompt_tokens": 120,
+                "completion_tokens": 8,
+                "cost": 0.0031,
+                "prompt_tokens_details": {
+                  "cached_tokens": 40
+                }
+              }
+            }
+          }
+        ],
+        "call": {
+          "kind": "function",
+          "name": "anthropic_web_search_server_tool",
+          "kwargs": {
+            "api_key": "search-fixture-key",
+            "model": "claude-sonnet-4-6",
+            "query": "ouroboros benchmark"
+          }
+        }
+      },
+      "expected": {
+        "returned": {
+          "value": {
+            "id": "gen-fixture-1",
+            "choices": [
+              {
+                "index": 0,
+                "finish_reason": "stop",
+                "message": {
+                  "role": "assistant",
+                  "content": "ok",
+                  "refusal": null,
+                  "annotations": null,
+                  "reasoning": "short rollup"
+                }
+              }
+            ],
+            "usage": {
+              "prompt_tokens": 120,
+              "completion_tokens": 8,
+              "cost": 0.0031,
+              "prompt_tokens_details": {
+                "cached_tokens": 40
+              }
+            }
+          }
+        },
+        "sends": [
+          {
+            "transport": "anthropic.messages.create",
+            "client": {
+              "api_key": "search-fixture-key",
+              "max_retries": 0
+            },
+            "payload": {
+              "model": "claude-sonnet-4-6",
+              "max_tokens": 2048,
+              "tools": [
+                {
+                  "type": "web_search_20250305",
+                  "name": "web_search",
+                  "max_uses": 5
+                }
+              ],
+              "messages": [
+                {
+                  "role": "user",
+                  "content": "ouroboros benchmark"
+                }
+              ]
+            },
+            "payload_sha256": "2ee78765489f606716c6d5f6db21a846ed51617487267c3cc3d674c6186da417"
+          }
+        ],
+        "physical_attempts": [
+          {
+            "source": "web_search.anthropic",
+            "model": "claude-sonnet-4-6",
+            "provider": "anthropic",
+            "candidate_raw_sha256": "2ee78765489f606716c6d5f6db21a846ed51617487267c3cc3d674c6186da417",
+            "candidate_raw_size_bytes": 182,
+            "candidate_measurement_kind": "canonical_json_v1",
+            "states": [
+              "reserved",
+              "dispatched",
+              "settled"
+            ],
+            "prompt_cache_ttl": "",
+            "cost_final": true
+          }
+        ],
+        "unused_script_steps": 0
+      }
+    },
+    {
+      "id": "aux.pricing.openrouter_catalog",
+      "route": "the OpenRouter pricing catalog projection including prompt-length tiers",
+      "spec": {
+        "env": {
+          "OPENROUTER_API_KEY": "or-fixture-key"
+        },
+        "transport": [
+          {
+            "kind": "response",
+            "status_code": 200,
+            "json": {
+              "data": [
+                {
+                  "id": "vendor/model-a",
+                  "pricing": {
+                    "prompt": "0.000001",
+                    "completion": "0.000004",
+                    "input_cache_read": "0.0000001",
+                    "input_cache_write": "0.00000125"
+                  }
+                },
+                {
+                  "id": "vendor/model-b",
+                  "pricing": {
+                    "prompt": "0.000002",
+                    "completion": "0.000008",
+                    "overrides": [
+                      {
+                        "min_prompt_tokens": 200000,
+                        "prompt": "0.000004",
+                        "completion": "0.000016"
+                      }
+                    ]
+                  }
+                },
+                {
+                  "id": "vendor/model-negative",
+                  "pricing": {
+                    "prompt": "-1",
+                    "completion": "0.1"
+                  }
+                },
+                {
+                  "id": "vendor/model-absurd",
+                  "pricing": {
+                    "prompt": "0.1",
+                    "completion": "0.2"
+                  }
+                },
+                {
+                  "id": "vendor/model-missing",
+                  "pricing": {
+                    "prompt": null,
+                    "completion": "0.1"
+                  }
+                }
+              ]
+            }
+          }
+        ],
+        "call": {
+          "kind": "function",
+          "name": "fetch_openrouter_pricing",
+          "project": "pricing_catalog",
+          "kwargs": {
+            "timeout_sec": 5.0
+          }
+        }
+      },
+      "expected": {
+        "returned": {
+          "vendor/model-a": {
+            "base": [
+              1.0,
+              0.1,
+              1.25,
+              4.0
+            ],
+            "tiers": []
+          },
+          "vendor/model-b": {
+            "base": [
+              2.0,
+              null,
+              null,
+              8.0
+            ],
+            "tiers": [
+              [
+                200000,
+                [
+                  4.0,
+                  null,
+                  null,
+                  16.0
+                ]
+              ]
+            ]
+          }
+        },
+        "sends": [
+          {
+            "transport": "requests.get",
+            "url": "https://openrouter.ai/api/v1/models",
+            "headers": [],
+            "timeout": 5.0,
+            "payload": {},
+            "payload_sha256": "44136fa355b3678a1146ad16f7e8649e94fb4fc21fe77e8310c060f61caaff8a"
+          }
+        ],
+        "unused_script_steps": 0
+      }
+    },
+    {
+      "id": "aux.pricing.cloudru_catalog",
+      "route": "the cloud.ru catalog converts RUB per-1M costs at the configured rate",
+      "spec": {
+        "env": {
+          "CLOUDRU_FOUNDATION_MODELS_API_KEY": "cloudru-fixture-key",
+          "OUROBOROS_RUB_USD_RATE": "80"
+        },
+        "transport": [
+          {
+            "kind": "response",
+            "status_code": 200,
+            "json": {
+              "data": [
+                {
+                  "id": "GLM-5",
+                  "metadata": {
+                    "is_billable": true,
+                    "prompt_tokens_cost": "160",
+                    "generated_tokens_cost": "640",
+                    "cache_read_tokens_cost": "16",
+                    "cache_write_tokens_cost": "200"
+                  }
+                },
+                {
+                  "id": "Free-Model",
+                  "metadata": {
+                    "is_billable": false
+                  }
+                },
+                {
+                  "id": "Unknown-Billability",
+                  "metadata": {}
+                },
+                {
+                  "id": "Negative-Output",
+                  "metadata": {
+                    "is_billable": true,
+                    "prompt_tokens_cost": "80",
+                    "generated_tokens_cost": "-1"
+                  }
+                }
+              ]
+            }
+          }
+        ],
+        "call": {
+          "kind": "function",
+          "name": "fetch_cloudru_pricing",
+          "project": "pricing_catalog",
+          "kwargs": {
+            "timeout_sec": 5.0
+          }
+        }
+      },
+      "expected": {
+        "returned": {
+          "cloudru/Free-Model": {
+            "base": [
+              0.0,
+              0.0,
+              0.0,
+              0.0
+            ],
+            "tiers": []
+          },
+          "cloudru/GLM-5": {
+            "base": [
+              2.0,
+              0.2,
+              2.5,
+              8.0
+            ],
+            "tiers": []
+          }
+        },
+        "sends": [
+          {
+            "transport": "requests.get",
+            "url": "https://foundation-models.api.cloud.ru/v1/models",
+            "headers": [
+              "Authorization"
+            ],
+            "timeout": 5.0,
+            "payload": {},
+            "payload_sha256": "44136fa355b3678a1146ad16f7e8649e94fb4fc21fe77e8310c060f61caaff8a"
+          }
+        ],
+        "unused_script_steps": 0
+      }
+    },
+    {
+      "id": "aux.pricing.cloudru_without_rate",
+      "route": "no explicit RUB/USD rate keeps the cloud.ru catalog unknown",
+      "spec": {
+        "env": {
+          "CLOUDRU_FOUNDATION_MODELS_API_KEY": "cloudru-fixture-key"
+        },
+        "transport": [],
+        "call": {
+          "kind": "function",
+          "name": "fetch_cloudru_pricing",
+          "project": "pricing_catalog",
+          "kwargs": {}
+        }
+      },
+      "expected": {
+        "returned": {},
+        "sends": [],
+        "unused_script_steps": 0
+      }
+    },
+    {
+      "id": "aux.capabilities.context_length_fetch",
+      "route": "openrouter_context_length populates the capability caches from /models",
+      "spec": {
+        "env": {
+          "OPENROUTER_API_KEY": "or-fixture-key"
+        },
+        "capabilities_fetched": false,
+        "capabilities_fetch_ok": false,
+        "transport": [
+          {
+            "kind": "response",
+            "status_code": 200,
+            "json": {
+              "data": [
+                {
+                  "id": "x-ai/grok-4.5",
+                  "context_length": 256000,
+                  "supported_parameters": [
+                    "temperature",
+                    "reasoning"
+                  ],
+                  "architecture": {
+                    "input_modalities": [
+                      "text",
+                      "image"
+                    ]
+                  }
+                }
+              ]
+            }
+          }
+        ],
+        "call": {
+          "kind": "method",
+          "name": "openrouter_context_length",
+          "kwargs": {
+            "model_id": "x-ai/grok-4.5"
+          }
+        }
+      },
+      "expected": {
+        "returned": {
+          "value": 256000
+        },
+        "sends": [
+          {
+            "transport": "requests.get",
+            "url": "https://openrouter.ai/api/v1/models",
+            "headers": [],
+            "timeout": 5,
+            "payload": {},
+            "payload_sha256": "44136fa355b3678a1146ad16f7e8649e94fb4fc21fe77e8310c060f61caaff8a"
+          }
+        ],
+        "unused_script_steps": 0
+      }
+    },
+    {
+      "id": "aux.vision.query_route",
+      "route": "vision_query builds image blocks and rides the no_proxy chat path",
+      "spec": {
+        "env": {
+          "OPENROUTER_API_KEY": "or-fixture-key"
+        },
+        "transport": [
+          {
+            "kind": "response",
+            "body": {
+              "id": "gen-fixture-1",
+              "choices": [
+                {
+                  "index": 0,
+                  "finish_reason": "stop",
+                  "message": {
+                    "role": "assistant",
+                    "content": "ok",
+                    "refusal": null,
+                    "annotations": null,
+                    "reasoning": "short rollup"
+                  }
+                }
+              ],
+              "usage": {
+                "prompt_tokens": 120,
+                "completion_tokens": 8,
+                "cost": 0.0031,
+                "prompt_tokens_details": {
+                  "cached_tokens": 40
+                }
+              }
+            }
+          }
+        ],
+        "call": {
+          "kind": "method",
+          "name": "vision_query",
+          "kwargs": {
+            "prompt": "describe",
+            "images": [
+              {
+                "url": "https://img.fixture.invalid/a.png"
+              },
+              {
+                "base64": "QUJD",
+                "mime": "image/jpeg"
+              },
+              {
+                "unknown": "shape"
+              }
+            ],
+            "model": "google/gemini-3.6-flash",
+            "max_tokens": 512
+          }
+        }
+      },
+      "expected": {
+        "returned": {
+          "message": "ok",
+          "usage": {
+            "prompt_tokens": 120,
+            "completion_tokens": 8,
+            "cost": 0.0031,
+            "prompt_tokens_details": {
+              "cached_tokens": 40
+            },
+            "response_finish_reason": "stop",
+            "cached_tokens": 40,
+            "provider": "openrouter",
+            "resolved_model": "google/gemini-3.6-flash",
+            "cost_final": true,
+            "request_wire": {
+              "requested_effort": "medium",
+              "applied_effort": "medium",
+              "requested_tool_dialect": "none",
+              "applied_tool_dialect": "none",
+              "reason_code": "requested_wire_form",
+              "source_profile_fingerprint": "c75fcd1f2ac5debc19f784b912d2352d2fb82d6e17730714bfc222d506d11053",
+              "accepted_profile_fingerprint": "c75fcd1f2ac5debc19f784b912d2352d2fb82d6e17730714bfc222d506d11053",
+              "candidate_sha256": "bfcf640285cf7097a2e11914346af8880ad2dcbf12023d596ce9d7bd995a72ed",
+              "ladder_ordinal": 1,
+              "applied_actions": [],
+              "task_local": false,
+              "attempt_id_present": true
+            }
+          },
+          "ledger_attempt_count": 1
+        },
+        "sends": [
+          {
+            "transport": "openai.chat.completions.create",
+            "client": {
+              "api_key": "or-fixture-key",
+              "base_url": "https://openrouter.ai/api/v1",
+              "default_headers": {
+                "HTTP-Referer": "https://ouroboros-agent.ai/",
+                "X-OpenRouter-Title": "Ouroboros"
+              },
+              "max_retries": 0,
+              "http_client": {
+                "trust_env": false,
+                "mounts": {},
+                "timeout": {
+                  "connect": 30.0,
+                  "read": 90.0,
+                  "write": 90.0,
+                  "pool": 30.0
+                }
+              }
+            },
+            "payload": {
+              "extra_body": {
+                "reasoning": {
+                  "effort": "medium",
+                  "exclude": false
+                }
+              },
+              "max_tokens": 512,
+              "messages": [
+                {
+                  "content": [
+                    {
+                      "text": "describe",
+                      "type": "text"
+                    },
+                    {
+                      "image_url": {
+                        "url": "https://img.fixture.invalid/a.png"
+                      },
+                      "type": "image_url"
+                    },
+                    {
+                      "image_url": {
+                        "url": "data:image/jpeg;base64,QUJD"
+                      },
+                      "type": "image_url"
+                    }
+                  ],
+                  "role": "user"
+                }
+              ],
+              "model": "google/gemini-3.6-flash"
+            },
+            "payload_sha256": "bfcf640285cf7097a2e11914346af8880ad2dcbf12023d596ce9d7bd995a72ed"
+          }
+        ],
+        "physical_attempts": [
+          {
+            "source": "llm.chat",
+            "model": "google/gemini-3.6-flash",
+            "provider": "openrouter",
+            "candidate_raw_sha256": "bfcf640285cf7097a2e11914346af8880ad2dcbf12023d596ce9d7bd995a72ed",
+            "candidate_raw_size_bytes": 338,
+            "candidate_measurement_kind": "canonical_json_v1",
+            "states": [
+              "reserved",
+              "dispatched",
+              "settled"
+            ],
+            "prompt_cache_ttl": "",
+            "cost_final": true
+          }
+        ],
+        "unused_script_steps": 0
+      }
+    },
+    {
+      "id": "aux.usage.add_usage_accumulates",
+      "route": "add_usage accumulates token/cost facts and demotes cost_final on unknown cost",
+      "spec": {
+        "call": {
+          "kind": "function",
+          "name": "add_usage",
+          "kwargs": {
+            "total": {
+              "prompt_tokens": 10,
+              "completion_tokens": 2,
+              "cost": 0.5,
+              "cost_final": true
+            },
+            "usage": {
+              "prompt_tokens": 5,
+              "completion_tokens": 1,
+              "cached_tokens": 3,
+              "cache_write_tokens": 4
+            }
+          }
+        }
+      },
+      "expected": {
+        "returned": {
+          "value": null
+        },
+        "sends": [],
+        "unused_script_steps": 0
+      }
+    },
+    {
+      "id": "aux.reasoning.display_projection",
+      "route": "extract_display_reasoning reads readable shapes and skips opaque payloads",
+      "spec": {
+        "call": {
+          "kind": "method",
+          "name": "extract_display_reasoning",
+          "kwargs": {
+            "msg": {
+              "reasoning": "flat rollup",
+              "reasoning_details": [
+                {
+                  "type": "reasoning.summary",
+                  "summary": "flat rollup"
+                },
+                {
+                  "type": "reasoning.text",
+                  "text": "detail text"
+                },
+                {
+                  "type": "reasoning.encrypted",
+                  "data": "opaque"
+                }
+              ],
+              "content": [
+                {
+                  "type": "thinking",
+                  "thinking": "thought block"
+                },
+                {
+                  "type": "redacted_thinking",
+                  "data": "opaque"
+                },
+                {
+                  "type": "text",
+                  "text": "answer"
+                }
+              ]
+            }
+          }
+        }
+      },
+      "expected": {
+        "returned": {
+          "value": "flat rollup\ndetail text\nthought block"
+        },
+        "sends": [],
+        "unused_script_steps": 0
+      }
+    },
+    {
+      "id": "aux.reasoning.cross_family_switch",
+      "route": "sanitize_reasoning_on_model_switch strips only across families",
+      "spec": {
+        "call": {
+          "kind": "method",
+          "name": "sanitize_reasoning_on_model_switch",
+          "kwargs": {
+            "messages": [
+              {
+                "role": "assistant",
+                "content": [
+                  {
+                    "type": "thinking",
+                    "thinking": "t",
+                    "signature": "sig"
+                  }
+                ],
+                "reasoning": "r"
+              }
+            ],
+            "from_model": "z-ai/glm-5.2",
+            "to_model": "anthropic/claude-sonnet-4.6"
+          }
+        }
+      },
+      "expected": {
+        "returned": {
+          "value": [
+            {
+              "role": "assistant",
+              "content": []
+            }
+          ]
+        },
+        "sends": [],
+        "unused_script_steps": 0
+      }
+    },
+    {
+      "id": "aux.reasoning.same_family_switch_is_identity",
+      "route": "a same-family switch preserves reasoning continuity untouched",
+      "spec": {
+        "call": {
+          "kind": "method",
+          "name": "sanitize_reasoning_on_model_switch",
+          "kwargs": {
+            "messages": [
+              {
+                "role": "assistant",
+                "content": [
+                  {
+                    "type": "thinking",
+                    "thinking": "t",
+                    "signature": "sig"
+                  }
+                ],
+                "reasoning": "r"
+              }
+            ],
+            "from_model": "anthropic/claude-opus-4.5",
+            "to_model": "anthropic/claude-sonnet-4.6"
+          }
+        }
+      },
+      "expected": {
+        "returned": {
+          "value": [
+            {
+              "role": "assistant",
+              "content": [
+                {
+                  "type": "thinking",
+                  "thinking": "t",
+                  "signature": "sig"
+                }
+              ],
+              "reasoning": "r"
+            }
+          ]
+        },
+        "sends": [],
+        "unused_script_steps": 0
+      }
+    },
+    {
+      "id": "aux.effort.normalisation_scale",
+      "route": "normalize_reasoning_effort accepts only the EFFORT_SCALE SSOT",
+      "spec": {
+        "call": {
+          "kind": "function",
+          "name": "normalize_reasoning_effort",
+          "kwargs": {
+            "value": "XHIGH "
+          }
+        }
+      },
+      "expected": {
+        "returned": {
+          "value": "xhigh"
+        },
+        "sends": [],
+        "unused_script_steps": 0
+      }
+    },
+    {
+      "id": "aux.effort.normalisation_rejects_unknown",
+      "route": "an unknown effort falls back to the caller's default",
+      "spec": {
+        "call": {
+          "kind": "function",
+          "name": "normalize_reasoning_effort",
+          "kwargs": {
+            "value": "turbo",
+            "default": "low"
+          }
+        }
+      },
+      "expected": {
+        "returned": {
+          "value": "low"
+        },
+        "sends": [],
+        "unused_script_steps": 0
+      }
+    },
+    {
+      "id": "aux.models.default_and_available",
+      "route": "the env-declared model slots the switch_model schema advertises",
+      "spec": {
+        "env": {
+          "OUROBOROS_MODEL": "x-ai/grok-4.5",
+          "OUROBOROS_MODEL_HEAVY": "anthropic/claude-opus-4.5",
+          "OUROBOROS_MODEL_LIGHT": "google/gemini-3.6-flash"
+        },
+        "call": {
+          "kind": "method",
+          "name": "available_models",
+          "kwargs": {}
+        }
+      },
+      "expected": {
+        "returned": {
+          "value": [
+            "x-ai/grok-4.5",
+            "google/gemini-3.6-flash"
+          ]
+        },
+        "sends": [],
+        "unused_script_steps": 0
+      }
+    },
+    {
+      "id": "aux.capabilities.metadata_fetch_failed",
+      "route": "a non-200 /models fetch is remembered as a provider outage, not as absent metadata",
+      "spec": {
+        "env": {
+          "OPENROUTER_API_KEY": "or-fixture-key"
+        },
+        "capabilities_fetched": false,
+        "capabilities_fetch_ok": false,
+        "transport": [
+          {
+            "kind": "response",
+            "status_code": 503,
+            "json": {}
+          }
+        ],
+        "call": {
+          "kind": "sequence",
+          "calls": [
+            {
+              "kind": "method",
+              "name": "openrouter_context_length",
+              "kwargs": {
+                "model_id": "x-ai/grok-4.5"
+              }
+            },
+            {
+              "kind": "method",
+              "name": "metadata_fetch_attempted_and_failed",
+              "kwargs": {}
+            }
+          ]
+        }
+      },
+      "expected": {
+        "returned": {
+          "value": [
+            0,
+            true
+          ]
+        },
+        "sends": [
+          {
+            "transport": "requests.get",
+            "url": "https://openrouter.ai/api/v1/models",
+            "headers": [],
+            "timeout": 5,
+            "payload": {},
+            "payload_sha256": "44136fa355b3678a1146ad16f7e8649e94fb4fc21fe77e8310c060f61caaff8a"
+          }
+        ],
+        "unused_script_steps": 0
+      }
+    }
+  ]
+}

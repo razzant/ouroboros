@@ -3,12 +3,14 @@
 from __future__ import annotations
 
 import math
-from typing import Any, Dict, Tuple
+import os
+from typing import Any, Dict, Optional, Tuple
 
 from ouroboros.config import SETTINGS_DEFAULTS, VALID_RUNTIME_MODES
 from ouroboros.provider_models import (
     ANTHROPIC_DIRECT_DEFAULTS,
     CLOUDRU_DIRECT_DEFAULTS,
+    DEEPSEEK_DIRECT_DEFAULTS,
     MINIMAX_DIRECT_DEFAULTS,
     MINIMAX_REGION_ENDPOINTS,
     OPENAI_DIRECT_DEFAULTS,
@@ -18,6 +20,35 @@ from ouroboros.secret_masking import (
     MASKED_SECRET_SETTING_KEYS as SECRET_SETTING_KEYS,
 )
 from ouroboros.task_pacing import COST_PLANNING_MARGIN_USD
+
+
+
+def resolve_total_budget_usd() -> Optional[float]:
+    """The effective global money limit, or None when the owner set no limit.
+
+    Lives beside this setting's owner-facing declaration below, because the
+    question it answers is what the declared default MEANS at runtime. Every
+    reader used to invent its own fallback for an absent key and they disagreed
+    threefold on the same install ($1, no limit at all, $200): the same machine
+    could reject a task at round one on the loop's money axis while the ledger
+    fence still allowed $200 of work. An absent key is not an owner decision --
+    ``config.apply_settings_to_env`` deliberately projects only what the
+    settings file actually says, so a raw harness run with no settings.json has
+    no entry at all -- so absence resolves to the product default here. A
+    non-positive value IS an owner decision and keeps its historical meaning of
+    no finite global budget.
+    """
+    raw = str(os.environ.get("TOTAL_BUDGET", "") or "").strip()
+    default = float(SETTINGS_DEFAULTS["TOTAL_BUDGET"])
+    if not raw:
+        return default
+    try:
+        value = float(raw)
+    except (TypeError, ValueError):
+        return default
+    if not math.isfinite(value):
+        return default
+    return value if value > 0 else None
 
 
 def _rows(keys: tuple[str, ...], specs: tuple[tuple[Any, ...], ...]) -> list[dict]:
@@ -40,6 +71,7 @@ _MODEL_DEFAULTS = {
     "openai": {key: value for key, value in OPENAI_DIRECT_DEFAULTS.items() if key != "heavy"},
     "cloudru": {key: value for key, value in CLOUDRU_DIRECT_DEFAULTS.items() if key != "heavy"},
     "minimax": {key: value for key, value in MINIMAX_DIRECT_DEFAULTS.items() if key != "heavy"},
+    "deepseek": {key: value for key, value in DEEPSEEK_DIRECT_DEFAULTS.items() if key != "heavy"},
     "anthropic": {key: value for key, value in ANTHROPIC_DIRECT_DEFAULTS.items() if key != "heavy"},
     # No defaults: model names are server-specific; user must fill all slots.
     "openai-compatible": {"main": "", "light": "", "vision": "", "fallback": ""},
@@ -73,6 +105,7 @@ _PROVIDER_FIELDS = _rows(("id", "stateKey", "settingKey", "settingsInputId", "la
     ("cloudru-key", "cloudruKey", "CLOUDRU_FOUNDATION_MODELS_API_KEY", "s-cloudru-key", "Cloud.ru Foundation Models API Key", "Cloud.ru API key", "Optional. If this is the only remote key, the next step prefills direct cloudru::... models.", "password", "more"),
     ("minimax-key", "minimaxKey", "MINIMAX_API_KEY", "s-minimax-key", "MiniMax API Key", "MiniMax API key", "Optional. If this is the only remote key, the next step prefills direct minimax::... models.", "password", "more"),
     ("minimax-region", "minimaxRegion", "MINIMAX_REGION", "s-minimax-region", "MiniMax Region", "global_en or cn_zh", "Choose global_en for the global endpoint or cn_zh for the China endpoint.", "text", "more"),
+    ("deepseek-key", "deepseekKey", "DEEPSEEK_API_KEY", "s-deepseek-key", "DeepSeek API Key", "sk-...", "Optional. If this is the only remote key, the next step prefills direct deepseek::... models.", "password", "more"),
     ("anthropic-key", "anthropicKey", "ANTHROPIC_API_KEY", "s-anthropic", "Anthropic API Key", "sk-ant-...", "Optional. Saved for direct anthropic::... models and Claude tooling.", "password", "primary"),
     ("openai-compatible-url", "compatibleBaseUrl", "OPENAI_COMPATIBLE_BASE_URL", "s-compatible-url", "OpenAI-compatible Base URL", "http://localhost:11434/v1", "Base URL for your OpenAI-compatible endpoint (e.g. Ollama, LM Studio, vLLM). Required when using openai-compatible:: models.", "url", "more"),
     ("openai-compatible-key", "compatibleApiKey", "OPENAI_COMPATIBLE_API_KEY", "s-compatible-key", "OpenAI-compatible API Key", "Leave empty for no auth", "API key for the endpoint. Leave empty if your server does not require authentication.", "password", "more"),
@@ -86,6 +119,7 @@ _PROFILE_SPECS = {
     "openai": ("OpenAI", "OpenAI is present, so the next step prefills direct openai:: model values.", "OpenAI-only setup detected. These defaults are explicit and official."),
     "cloudru": ("Cloud.ru Foundation Models", "Cloud.ru is present, so the next step prefills direct cloudru:: model values.", "Cloud.ru-only setup detected. These defaults use explicit cloudru:: model IDs."),
     "minimax": ("MiniMax", "MiniMax is present, so the next step prefills direct minimax:: model values.", "MiniMax-only setup detected. These defaults include MiniMax-M3 and MiniMax-M2.7."),
+    "deepseek": ("DeepSeek", "DeepSeek is present, so the next step prefills direct deepseek:: model values.", "DeepSeek-only setup detected. These defaults use deepseek-v4-pro for main work and deepseek-v4-flash for the light lane. Blocking deep/scope review in Max context mode additionally needs the owner 1M-window acknowledgement in Settings."),
     "anthropic": ("Anthropic", "Anthropic is present, so the next step prefills direct anthropic:: model values.", "Anthropic-only setup detected. These defaults are explicit and official."),
     "openai-compatible": ("OpenAI-compatible endpoint", "An OpenAI-compatible base URL is configured. Enter the model names your server exposes in the next step.", "OpenAI-compatible endpoint detected. Use openai-compatible::your-model-name for every slot. The model list is whatever your server supports."),
     "direct-multi": ("Direct multi-provider", "Multiple direct providers are present, so the next step keeps your model values editable without forcing one provider family.", "Multiple direct providers are configured. Start here, then split model slots across them if you want."),
@@ -187,7 +221,7 @@ _SUBSCRIPTION_FIELDS = _rows(("id", "payloadKey", "label", "note"), (
     ("skip-subscription-presets", SKIP_SUBSCRIPTION_PRESETS_FIELD, "Finish without agent defaults", "Completes onboarding without moving reviewers and subagents onto the connected subscriptions. Everything stays editable in Settings afterwards."),
 ))
 
-_MODEL_SUGGESTIONS = list(dict.fromkeys(("google/gemini-3.7-flash", "x-ai/grok-4.6", "openai/gpt-5.6-terra", "openai/gpt-5.6-sol", "openai/gpt-5.6-luna", "openai::gpt-5.6-terra", "openai::gpt-5.6-sol", "openai::gpt-5.6-luna", "anthropic/claude-sonnet-5", "anthropic/claude-opus-5", "anthropic::claude-sonnet-5", "anthropic::claude-opus-5", "anthropic::claude-opus-4-6", "deepseek/deepseek-v4-pro", "openai-compatible::meta-llama/compatible", "cloudru::zai-org/GLM-4.7", "minimax::MiniMax-M3", "minimax::MiniMax-M2.7")))
+_MODEL_SUGGESTIONS = list(dict.fromkeys(("google/gemini-3.8-flash", "x-ai/grok-4.6", "openai/gpt-5.6-terra", "openai/gpt-5.6-sol", "openai/gpt-5.6-luna", "openai::gpt-5.6-terra", "openai::gpt-5.6-sol", "openai::gpt-5.6-luna", "anthropic/claude-sonnet-5", "anthropic/claude-opus-5", "anthropic::claude-sonnet-5", "anthropic::claude-opus-5", "anthropic::claude-opus-4-6", "deepseek/deepseek-v4-pro", "deepseek::deepseek-v4-pro", "deepseek::deepseek-v4-flash", "openai-compatible::meta-llama/compatible", "cloudru::zai-org/GLM-4.7", "minimax::MiniMax-M3", "minimax::MiniMax-M2.7")))
 
 
 def _string(value: Any) -> str:
@@ -262,6 +296,7 @@ def derive_provider_profile(settings: dict) -> str:
         ("OPENAI_API_KEY", "openai"),
         ("CLOUDRU_FOUNDATION_MODELS_API_KEY", "cloudru"),
         ("MINIMAX_API_KEY", "minimax"),
+        ("DEEPSEEK_API_KEY", "deepseek"),
         ("ANTHROPIC_API_KEY", "anthropic"),
     ]
     configured = [name for key, name in direct if flags[key]]
@@ -399,8 +434,8 @@ def wizard_authors_safety_light() -> bool:
 
     Key absence alone is deliberately NOT the test: an older install re-entering the
     wizard (or one whose file is unreadable) would then be silently moved off the
-    fail-closed ``full``. This predicate is HOST-AGNOSTIC by design and is called by
-    the desktop launcher ONLY (`launcher.py::_run_first_run_wizard`) — the shared
+    fail-closed ``full``. This predicate is HOST-AGNOSTIC by design and its one
+    caller is the onboarding gateway (`gateway/onboarding.py`) — the shared
     validator must not author it, because web/Docker onboarding posts the same
     payload through generic `/api/settings`, which is a non-owner path. The persist
     seam re-proves freshness under the settings lock, so this is the caller-side
@@ -415,7 +450,13 @@ def validate_setup_payload(data: dict, current_settings: dict) -> Tuple[dict, st
     keys: Dict[str, str] = {}
     for field in _PROVIDER_FIELDS:
         setting_key = field["settingKey"]
-        value = _string(data.get(setting_key))
+        raw_value = data.get(setting_key)
+        if raw_value is not None and not isinstance(raw_value, str):
+            # A JSON object/array/number here is a malformed API post, never a
+            # credential: str()-ing it would persist unusable garbage as a
+            # "successful" setup. Honest rejection over silent stringification.
+            return {}, f"{field['label']} must be a text value."
+        value = _string(raw_value)
         # An untouched credential field posts back the marker it was prefilled
         # with. It means "keep the stored secret" and NEVER "store this string":
         # resolving it to the stored value here — before the length check, the
@@ -459,7 +500,7 @@ def validate_setup_payload(data: dict, current_settings: dict) -> Tuple[dict, st
     )
     has_local = bool(local_source)
     if not has_remote and not has_local:
-        return {}, "Configure OpenRouter, OpenAI, OpenAI-compatible, Cloud.ru, MiniMax, Anthropic, or a local model before continuing."
+        return {}, "Configure OpenRouter, OpenAI, OpenAI-compatible, Cloud.ru, MiniMax, DeepSeek, Anthropic, or a local model before continuing."
     minimax_region = keys.get("MINIMAX_REGION", "").lower()
     if minimax_region and minimax_region not in MINIMAX_REGION_ENDPOINTS:
         return {}, "MiniMax Region must be global_en or cn_zh."

@@ -161,13 +161,13 @@ def test_missing_role_terminal_root_is_never_labeled_child(tmp_path):
 
 
 def test_terminal_child_projection_is_idempotent_and_honest_for_all_outcomes(tmp_path):
-    from ouroboros.project_dialogue import append_terminal_task_projection
+    from ouroboros.project_dialogue import OUTCOME_PHASE_HEADLINE, append_terminal_task_projection
 
     cases = [
-        ("ok", "completed", {"execution": {"status": "ok"}}, "Completed"),
+        ("ok", "completed", {"execution": {"status": "ok"}}, "Done"),
         ("failed", "failed", {"execution": {"status": "failed"}}, "Failed"),
         ("cancelled", "cancelled", {"execution": {"status": "ok"}}, "Cancelled"),
-        ("degraded", "completed", {"execution": {"status": "best_effort"}}, "Completed with limitations"),
+        ("degraded", "completed", {"execution": {"status": "best_effort"}}, "Done with warnings"),
     ]
     for suffix, status, axes, label in cases:
         task_id = f"child-{suffix}"
@@ -196,6 +196,7 @@ def test_terminal_child_projection_is_idempotent_and_honest_for_all_outcomes(tmp
         assert row["role"] == "reviewer"
         assert row["status"] == status
         assert row["outcome"] == label
+        assert OUTCOME_PHASE_HEADLINE[row["outcome_phase"]] == label
         assert row["reason_code"] == f"reason-{suffix}"
         assert row["result_ref"] == {
             "kind": "task_result", "task_id": task_id, "reader": "get_task_result",
@@ -285,7 +286,7 @@ def test_terminal_root_fallback_covers_cancel_without_preempting_open_synthesis(
     )
     normal = next(row for row in _chat_rows(tmp_path) if row.get("task_id") == "normal-root")
     assert normal["summary_kind"] == "terminal_root_projection"
-    assert normal["outcome"] == "Completed"
+    assert normal["outcome"] == "Done"
     assert normal["outcome_final"] is True
 
 
@@ -313,7 +314,7 @@ def test_running_async_root_truth_survives_restart_degradation_once(tmp_path):
     assert stored["root_phase_checkpoint"]["post_task_synthesis"] == "degraded"
     rows = [row for row in _chat_rows(tmp_path) if row.get("task_id") == "restart-root"]
     assert len(rows) == 1
-    assert rows[0]["outcome"] == "Completed with limitations"
+    assert rows[0]["outcome"] == "Done"
     assert rows[0]["outcome"] == completion_status_label(stored, {})
     assert rows[0]["outcome_final"] is True
     assert recover_pending_root_post_task_synthesis(tmp_path, repo_dir=tmp_path / "repo") == 0

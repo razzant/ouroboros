@@ -1012,6 +1012,51 @@ def test_production_budget_wrapup_propagates_budget_exceeded(tmp_path, monkeypat
         )
 
 
+def test_wrapup_is_forced_while_real_ledger_admission_still_fits(tmp_path, monkeypatch):
+    """The post-round rail reserves the last affordable send before another
+    ordinary round could consume it; the forced call crosses real admission."""
+    from ouroboros import task_pacing
+    import ouroboros.usage_accounting as accounting
+
+    loop, _registry, ctx, _trace = _forced_test_context(
+        tmp_path, usage={"cost": 1.0, "_context_prompt_estimate": 1000},
+    )
+    scope = accounting.UsageScope(
+        drive_root=tmp_path, task_id="parent1", root_task_id="parent1",
+        global_limit_usd=1000.0, root_limit_usd=100.0,
+    )
+    with accounting.usage_scope(scope):
+        prior = accounting.reserve_attempt(accounting.AttemptRequest(
+            model="test-model", provider="openrouter", reservation_usd=96.5,
+        ))
+        accounting.mark_dispatched(prior)
+        accounting.settle_attempt(prior, {}, cost_usd=96.5, cost_final=True)
+
+        monkeypatch.setattr(accounting, "_reservation_cost", lambda _request: 2.0)
+        admitted = []
+
+        def forced_model(*_args, **_kwargs):
+            reservation = accounting.reserve_attempt(accounting.AttemptRequest(
+                model="test-model", provider="openrouter", reservation_usd=2.0,
+            ))
+            accounting.mark_dispatched(reservation)
+            accounting.settle_attempt(reservation, {}, cost_usd=2.0, cost_final=True)
+            admitted.append(reservation.attempt_id)
+            return {"role": "assistant", "content": "Affordable final answer."}, 0.0
+
+        monkeypatch.setattr(loop, "call_llm_with_retry", forced_model)
+        result = loop._check_budget_limits(
+            ctx, budget_remaining_usd=900.0,
+            cost_ceiling=task_pacing.resolve_cost_ceiling(
+                900.0, {"cost_hard_stop_pct": 50}, root_cap_usd=100.0,
+            ),
+        )
+
+    assert result is not None and result[0].startswith("Affordable final answer.")
+    assert len(admitted) == 1
+    assert accounting.usage_projection(tmp_path, root_task_id="parent1")["accounted_usd"] == 98.5
+
+
 def test_forced_owner_arrival_gets_one_complete_refresh(tmp_path, monkeypatch):
     import hashlib
 
@@ -1310,7 +1355,7 @@ def test_child_result_change_during_host_panel_supersedes_pass(tmp_path, monkeyp
         llm_trace=trace,
         drive_root=tmp_path,
         messages=messages,
-        emit_progress=lambda _text: None,
+        emit_progress=lambda _text, *, incident=None: None,
     )
 
     assert another_round is True
@@ -2474,11 +2519,14 @@ def test_forced_bypass_never_overwrites_an_existing_host_decision(tmp_path, monk
 
     # The prior host decision lane keeps authority (here the forced replacement
     # superseded the PASS through the existing revision machinery); the bypass
-    # recorder never overwrites an existing decision with a bypass reason.
+    # recorder never overwrites an existing decision with a bypass reason. The
+    # dangling revision request itself is closed, because this rail cannot take
+    # the improvement pass it promised.
     decision = returned_trace["acceptance_decision"]
-    assert decision["status"] in {"accepted", "revision_requested"}
+    assert decision["status"] == "finalized_unaccepted"
     assert decision.get("reason", "") != "acceptance_bypassed_round_limit"
-    assert decision.get("source", "") != "forced_finalization"
+    assert decision.get("reason", "") == "revision_unavailable_on_forced_rail"
+    assert decision.get("source", "") == "forced_finalization"
 
 
 def test_forced_bypass_stamps_over_deferred_agent_stance(tmp_path, monkeypatch):
@@ -2590,3 +2638,108 @@ def test_forced_bypass_probe_failure_records_unknown_eligibility(tmp_path, monke
     }
     assert "acceptance_decision" not in trace
 
+
+
+def test_forced_final_sends_the_round_tool_envelope(tmp_path, monkeypatch):
+    """The forced wrap-up call reuses the round's exact tool envelope."""
+
+    loop, registry, limit_ctx, _trace = _forced_test_context(tmp_path)
+    schemas = [{"type": "function", "function": {"name": "read_file"}}]
+    limit_ctx.tool_schemas = schemas
+    seen: dict = {}
+
+    def _capture(*args, **kwargs):
+        seen["args"] = args
+        seen["kwargs"] = kwargs
+        return {"role": "assistant", "content": "wrapped up"}, 0.0
+
+    monkeypatch.setattr(loop, "call_llm_with_retry", _capture)
+
+    loop._handle_round_limit(limit_ctx)
+
+    assert seen["args"][3] is schemas
+    assert seen["kwargs"]["allow_server_web_search"] == loop._server_web_allowed_by_task(
+        registry._ctx
+    )
+    assert "tool_choice" not in seen["kwargs"]
+
+
+def test_forced_final_tool_call_only_reply_falls_back_to_host_text(tmp_path, monkeypatch):
+    """A tool-calls-only reply on a budget rail degrades to the host fallback text."""
+
+    loop, _registry, limit_ctx, _trace = _forced_test_context(tmp_path)
+    limit_ctx.tool_schemas = [{"type": "function", "function": {"name": "read_file"}}]
+    monkeypatch.setattr(
+        loop,
+        "call_llm_with_retry",
+        lambda *_args, **_kwargs: (
+            {
+                "role": "assistant",
+                "content": "",
+                "tool_calls": [
+                    {
+                        "id": "call-1",
+                        "type": "function",
+                        "function": {"name": "read_file", "arguments": "{}"},
+                    }
+                ],
+            },
+            0.0,
+        ),
+    )
+
+    text, usage, trace = loop._handle_round_limit(limit_ctx)
+
+    assert text
+    assert not usage.get("_best_effort_extracted")
+    assert trace.get("forced_finalization", {}).get("source") != "forced_model_incomplete"
+
+
+def test_forced_final_mixed_content_and_tool_calls_is_degraded(tmp_path, monkeypatch):
+    """Content beside an unexecuted tool call is a preamble, not a final."""
+
+    loop, _registry, limit_ctx, _trace = _forced_test_context(tmp_path)
+    limit_ctx.tool_schemas = [{"type": "function", "function": {"name": "read_file"}}]
+    monkeypatch.setattr(
+        loop,
+        "call_llm_with_retry",
+        lambda *_args, **kwargs: (
+            kwargs["response_meta_out"].update(tool_call_count=1, finish_reason="tool_calls") or
+            {
+                "role": "assistant",
+                "content": "here is the answer",
+                "tool_calls": [
+                    {
+                        "id": "call-1",
+                        "type": "function",
+                        "function": {"name": "read_file", "arguments": "{}"},
+                    }
+                ],
+            },
+            0.0,
+        ),
+    )
+
+    text, usage, trace = loop._handle_round_limit(limit_ctx)
+
+    assert "here is the answer" in text
+    assert usage.get("terminal_origin") != "model_final"
+    assert trace.get("forced_finalization", {}).get("source") == "forced_model_incomplete"
+
+
+def test_web_forbidding_contract_keeps_the_forced_call_web_free(tmp_path, monkeypatch):
+    """A task that forbids web never gets server web search on the forced call."""
+
+    loop, registry, limit_ctx, _trace = _forced_test_context(tmp_path)
+    registry._ctx.task_contract = {"allowed_resources": {"web": False}}
+    seen: dict = {}
+
+    def _capture(*args, **kwargs):
+        seen.update(kwargs)
+        return {"role": "assistant", "content": "wrapped up"}, 0.0
+
+    monkeypatch.setattr(loop, "call_llm_with_retry", _capture)
+
+    loop._handle_round_limit(limit_ctx)
+
+    assert seen["allow_server_web_search"] is False

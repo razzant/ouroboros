@@ -34,7 +34,7 @@ def test_write_failure_result_creates_correct_json(tmp_path):
     assert data["task_id"] == "abc123"
     assert data["status"] == "failed"
     assert isinstance(data["result"], str) and len(data["result"]) > 0
-    assert data["cost_usd"] == 0
+    assert data["accounted_upper_bound_usd"] in (0, None)  # ABI-3: honest name; empty ledger stays honest
     assert data["total_rounds"] == 0
     assert "ts" in data
 
@@ -48,7 +48,7 @@ def test_write_failure_result_does_not_overwrite_existing(tmp_path):
     try:
         results_dir = tmp_path / "task_results"
         results_dir.mkdir(parents=True, exist_ok=True)
-        existing = {"task_id": "xyz789", "status": "completed", "result": "Success!"}
+        existing = {"_schema_version": 1, "task_id": "xyz789", "status": "completed", "result": "Success!"}
         (results_dir / "xyz789.json").write_text(
             json.dumps(existing, ensure_ascii=False), encoding="utf-8"
         )

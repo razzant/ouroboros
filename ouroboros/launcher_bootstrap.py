@@ -499,6 +499,7 @@ def _reseed_native_skill_in_place(
             # The launcher just wrote repo-reviewed bytes: refresh the
             # hash-pinned native-trust verdict for the new payload.
             _stamp_native_seed_trust(pathlib.Path(drive_root), target_skill, log_obj)
+            _carry_grants_across_reseed(pathlib.Path(drive_root), target_skill, log_obj)
         return True
     except OSError as exc:
         log_obj.warning(
@@ -597,6 +598,18 @@ def _stamp_native_seed_trust(
                 (skill.load_error if skill else "no manifest"),
             )
             return
+        # ABI-1: native_seed is a PASS-minting path and shares the NEW-PASS
+        # admission predicate — a seeded extension without the plugin_api
+        # field gets NO trust verdict (bundled skills ship the field).
+        from ouroboros.contracts.plugin_api import extension_new_pass_admission_error
+
+        admission_error = extension_new_pass_admission_error(skill.manifest)
+        if admission_error:
+            log_obj.warning(
+                "Native-trust stamp refused for %s (PluginAPI 2.0 admission): %s",
+                skill.name, admission_error,
+            )
+            return
         save_review_state(
             drive_root,
             skill.name,
@@ -635,6 +648,62 @@ def _stamp_native_seed_trust(
         )
     except Exception:
         log_obj.warning("Native-trust stamp failed for %s", skill_dir, exc_info=True)
+
+
+def _carry_grants_across_reseed(
+    drive_root: pathlib.Path,
+    skill_dir: pathlib.Path,
+    log_obj: Any,
+) -> None:
+    """Carry owner grants across a native re-seed when the requested sets are
+    unchanged (owner «A», v7next §6.1-Δ). Grants are content-hash-bound, so a
+    version resync used to orphan them (the telegram precedent) even though
+    the skill requests EXACTLY the same keys/permissions; a changed requested
+    set keeps the ordinary re-grant flow. Never raises."""
+    try:
+        from ouroboros.skill_loader import (
+            load_skill,
+            load_skill_grants,
+            requested_core_setting_keys,
+            requested_skill_permissions,
+            save_skill_grants,
+        )
+
+        skill = load_skill(skill_dir, drive_root)
+        if skill is None or skill.load_error or not skill.content_hash:
+            return
+        grants = load_skill_grants(drive_root, skill.name)
+        old_hash = str(grants.get("content_hash") or "")
+        if not old_hash or old_hash == skill.content_hash:
+            return
+        granted_keys = list(grants.get("granted_keys") or [])
+        granted_permissions = list(grants.get("granted_permissions") or [])
+        if not granted_keys and not granted_permissions:
+            return
+        new_keys = requested_core_setting_keys(list(skill.manifest.env_from_settings or []))
+        new_permissions = requested_skill_permissions(
+            list(skill.manifest.permissions or []),
+            list(skill.manifest.subscribe_events or []),
+        )
+        if sorted(grants.get("requested_keys") or []) != sorted(new_keys):
+            return
+        if sorted(grants.get("requested_permissions") or []) != sorted(new_permissions):
+            return
+        save_skill_grants(
+            drive_root,
+            skill.name,
+            granted_keys,
+            content_hash=skill.content_hash,
+            requested_keys=new_keys,
+            granted_permissions=granted_permissions,
+            requested_permissions=new_permissions,
+        )
+        log_obj.info(
+            "Carried owner grants across native re-seed for %s (requested sets unchanged)",
+            skill.name,
+        )
+    except Exception:
+        log_obj.warning("Grant carry across re-seed failed for %s", skill_dir, exc_info=True)
 
 
 def _migrate_control_file_hashes(target_root: pathlib.Path, log_obj: Any) -> None:

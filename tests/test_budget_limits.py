@@ -7,7 +7,8 @@ from unittest.mock import MagicMock, patch
 
 from ouroboros import task_pacing
 from ouroboros.contracts.task_contract import normalize_budget_profile
-from ouroboros.loop import _RoundLimitContext, _check_budget_limits
+from ouroboros.loop_budget import _check_budget_limits
+from ouroboros.loop_round_limits import _RoundLimitContext
 
 
 def _make_args(**overrides):
@@ -171,7 +172,7 @@ class TestGlobalBudgetGuard:
 # --- use_local propagation ---
 
 class TestUseLocalPropagation:
-    """Ensure use_local is passed to _call_llm_with_retry on global budget stop."""
+    """Ensure use_local is passed to call_llm_with_retry on global budget stop."""
 
     @patch("ouroboros.loop.call_llm_with_retry")
     def test_global_stop_passes_use_local(self, mock_retry, tmp_path):
@@ -509,7 +510,7 @@ class TestTreeFedDecidingValue:
         assert "lower bound" in prompt_text and "OWN calls" in prompt_text
 
     def test_root_cap_ceiling_fires_without_any_global_budget(self, tmp_path):
-        """The closed class (v6.91 audit): TOTAL_BUDGET unset makes
+        """The closed class (v6.91 audit): an explicit non-positive budget makes
         ``budget_remaining_usd`` None, but a live per-task ROOT CAP must still
         stop the task. The pre-fix guard returned None before ever looking at
         the ceiling, so a GAIA-shaped run could never soft-land."""

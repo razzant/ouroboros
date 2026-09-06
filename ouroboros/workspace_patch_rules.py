@@ -14,15 +14,17 @@ from __future__ import annotations
 
 import pathlib
 import re
-from typing import List
+from typing import Any, List
 
-# v6.35.0 (T7): bumped to 2 with binary + size + junk-artifact hygiene so the
-# real-usage workspace.patch (consumed by subagents / PR integration) never
-# carries a compiled `go build` binary, a Redis dump, or other untracked build
-# junk. Kept consistent with the bench capture_patch.sh JUNK_RE + numstat
-# binary detection. This is patch-transport hygiene only (artifact path/extension
-# + git's own binary verdict), never code/content inference (Bible P5).
-_PATCH_EXCLUDE_RULES_VERSION = 2
+# Version 3: generated output directories are no longer excluded by NAME. The
+# project's own `.gitignore` (honoured through `--exclude-standard`), the 5 MiB
+# per-file cap below, git's own binary verdict and the credential-name check
+# decide what a workspace.patch may carry; a project whose deliverable IS its
+# build output must not have it silently dropped. The benchmark capture script
+# owns its own any-depth rule and does not import this module. This is
+# patch-transport hygiene only (artifact path/extension + git's binary
+# verdict), never code/content inference (Bible P5).
+_PATCH_EXCLUDE_RULES_VERSION = 3
 _PATCH_MAX_UNTRACKED_FILE_BYTES = 5 * 1024 * 1024  # 5 MiB per untracked file
 _TOP_LEVEL_EXCLUDE_DIRS = {".ouroboros", ".venv", "venv", "env"}
 _ANY_SEGMENT_EXCLUDE_DIRS = {
@@ -37,11 +39,12 @@ _ANY_SEGMENT_EXCLUDE_DIRS = {
     "__pycache__",
     "node_modules",
 }
-# Junk file tails / build dirs the dir-sets above don't already cover; the same
-# JUNK_RE the bench capture_patch.sh uses (devtools/benchmarks/swe_bench_pro/).
+# Junk file tails and caches the dir-sets above don't already cover. Runtime
+# dumps, compiled bytecode and coverage output only; generated-output
+# directories are the project's own .gitignore decision, not a name rule here.
 _PATCH_JUNK_RE = re.compile(
     r"appendonlydir|\.rdb$|\.aof$|\.manifest$|\.log$|\.tmp$|\.pid$|\.sock$"
-    r"|\.pyc$|\.pyo$|^(dist|build)/|\.DS_Store|(^|/)\.coverage$"
+    r"|\.pyc$|\.pyo$|\.DS_Store|(^|/)\.coverage$"
     r"|coverage\.xml$|(^|/)htmlcov/"
 )
 _LOCKFILE_MANIFESTS = {
@@ -144,3 +147,37 @@ __all__ = [
     "_patch_exclude_reason",
     "_sensitive_untracked_reason",
 ]
+
+
+def format_patch_exclusions(manifest: Any) -> str:
+    """One disclosure line for files the capture dropped per policy, or ''.
+
+    The per-file exclusions (#447 F5) live in the workspace_patch manifest,
+    which no parent-facing surface used to render — a dropped deliverable hid
+    behind an affirmative "Integrated N file(s)" success line. This renders the
+    manifest rows the rules above produce, so it belongs beside them rather
+    than in either of the two integration tools that display it.
+    """
+    entries = []
+    for key in ("sensitive_blocked", "untracked_excluded", "tracked_excluded"):
+        for item in (manifest or {}).get(key) or []:
+            if isinstance(item, dict):
+                path, reason = str(item.get("path") or ""), str(item.get("reason") or "")
+            else:
+                path, reason = str(item or ""), ""
+            if path:
+                entries.append(f"{path} ({reason})" if reason else path)
+    if not entries:
+        return ""
+    shown = "; ".join(entries[:8])
+    more = (
+        f" and {len(entries) - 8} more (full list with reasons: the child's "
+        "workspace_patch.json artifact)"
+        if len(entries) > 8 else ""
+    )
+    return (
+        f"\n⚠️ {len(entries)} file(s) EXCLUDED from this patch by capture policy: "
+        f"{shown}{more}. Excluded content is NOT in this patch: if one is a real "
+        "deliverable, recover it from the child workspace/snapshot while that "
+        "still exists, or have it re-produced."
+    )

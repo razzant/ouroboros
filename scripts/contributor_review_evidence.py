@@ -302,6 +302,28 @@ def _session_evidence(
             mismatches.append(f"capability_delta:{surface}:{slot_id}:{reason}")
 
 
+def _final_session_settlements(drive_root: pathlib.Path) -> dict[str, dict] | None:
+    """Project session settlement from custody after every panel slot finished."""
+    try:
+        from ouroboros.delegate_custody import custody_log_unreadable, replay
+
+        if custody_log_unreadable(drive_root):
+            return None
+        rows = replay(drive_root)
+    except Exception:
+        return None
+    return {
+        str(run_id): {
+            "settled": row.settled,
+            "ledger_recorded": row.ledger_recorded,
+            "project_retired": not row.project_owned and not row.project_persistent,
+            "project_persistent": row.project_persistent,
+            "bound_at": "panel_complete_custody_replay",
+        }
+        for run_id, row in rows.items()
+    }
+
+
 def bind_execution_receipts(
     *,
     actors: list[tuple[str, dict]],
@@ -332,6 +354,7 @@ def bind_execution_receipts(
 
     receipts: list[dict] = []
     transcripts: list[dict] = []
+    final_settlements = _final_session_settlements(drive_root)
     for surface, actor in actors:
         slot_id = str(actor.get("slot_id") or "")
         row = requested.get((surface, slot_id), {})
@@ -349,6 +372,21 @@ def bind_execution_receipts(
             dispatched_slot=dispatched_slot, mismatches=mismatches,
         )
         usage = dict(response.get("usage") or {}) if isinstance(response.get("usage"), dict) else {}
+        expected_kind = str(route.get("kind") or "")
+        delegated_run_id = str(usage.get("delegated_run_id") or "")
+        if expected_kind == "agent_session":
+            final_settlement = (
+                final_settlements.get(delegated_run_id)
+                if final_settlements is not None else None
+            )
+            usage["settlement"] = final_settlement
+            if final_settlements is None:
+                mismatches.append(f"session_custody_replay_unreadable:{surface}:{slot_id}")
+            elif not final_settlement:
+                mismatches.append(
+                    f"session_custody_settlement_absent:{surface}:{slot_id}:"
+                    f"{delegated_run_id or 'absent'}"
+                )
         delegated_route = str(usage.get("delegated_route") or "")
         provider = str(usage.get("provider") or "")
         observed_kind = (
@@ -416,7 +454,6 @@ def bind_execution_receipts(
             mismatches.append(f"response_receipt_absent:{surface}:{slot_id}")
         if not usage:
             continue
-        expected_kind = str(route.get("kind") or "")
         expected_target = str(route.get("target_id") or "")
         if observed_kind != expected_kind:
             mismatches.append(
@@ -457,10 +494,17 @@ def bind_execution_receipts(
 
 
 def finalize_contributor_outcome(
-    *, snapshot: dict, outcome: dict, exit_code: int, mismatches: list[str],
+    *, outcome: dict, exit_code: int, mismatches: list[str],
 ) -> tuple[int, dict]:
-    """Turn receipt/trust drift into the contributor lane's typed outcome."""
+    """Turn execution-receipt drift into the contributor lane's typed outcome.
+
+    Nothing about WHICH files the proposal touches is consulted: the lane always
+    executes the target base's review machinery (owner decision 2026-08-19), so
+    there is no per-proposal trust downgrade left to apply.
+    """
     if mismatches:
+        original_block_reason = str(outcome.get("block_reason") or "")
+        original_message = str(outcome.get("message") or "")
         exit_code = 3
         outcome = {
             **outcome,
@@ -471,17 +515,8 @@ def finalize_contributor_outcome(
                 "receipts; the run is preserved as incomplete evidence."
             ),
             "execution_receipt_mismatches": mismatches,
-        }
-    if snapshot.get("review_substrate_changed") and exit_code == 0:
-        exit_code = 3
-        outcome = {
-            **outcome,
-            "status": "blocked",
-            "block_reason": "trusted_base_rerun_required",
-            "message": (
-                "The proposal changes the review substrate. Its local result is "
-                "preserved, but fast-path readiness requires a maintainer rerun "
-                "from the trusted target-base implementation."
-            ),
+            **({"original_block_reason": original_block_reason}
+               if original_block_reason else {}),
+            **({"original_message": original_message} if original_message else {}),
         }
     return exit_code, outcome

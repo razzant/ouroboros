@@ -378,7 +378,7 @@ def test_acceptance_panel_skips_with_typed_reason_and_zero_reviewer_calls(tmp_pa
     monkeypatch.setattr(loop_mod, "get_task_review_mode", lambda: "required")
     reviewer_calls = []
     monkeypatch.setattr(
-        rs, "reviewer_slots",
+        rs, "triad_delivery_slots",
         lambda **kw: reviewer_calls.append(kw) or [object()],
     )
     oh.record_requested(tmp_path, "t-acc", request_id="rq", attempt=1)
@@ -387,7 +387,7 @@ def test_acceptance_panel_skips_with_typed_reason_and_zero_reviewer_calls(tmp_pa
     assert loop_mod._run_task_acceptance_review_once(
         tools=SimpleNamespace(_ctx=ctx), content="done", task_id="t-acc", task_type="task",
         llm_trace=trace, drive_root=None,
-        messages=[{"role": "user", "content": "goal"}], emit_progress=lambda _m: None,
+        messages=[{"role": "user", "content": "goal"}], emit_progress=lambda _m, *, incident=None: None,
     ) is False
     # Exact typed vocabulary (§19.7.2 item 8).
     assert trace["review_decision"] == {
@@ -430,7 +430,7 @@ def test_unlatched_task_reaches_the_normal_acceptance_machinery(tmp_path, monkey
     loop_mod._run_task_acceptance_review_once(
         tools=SimpleNamespace(_ctx=ctx), content="done", task_id="t-acc", task_type="task",
         llm_trace=trace, drive_root=None,
-        messages=[{"role": "user", "content": "goal"}], emit_progress=lambda _m: None,
+        messages=[{"role": "user", "content": "goal"}], emit_progress=lambda _m, *, incident=None: None,
     )
     assert trace["review_decision"].get("skipped") != "owner_hurry"
     assert resolved, "the unlatched path must reach the real pacing machinery"
@@ -452,7 +452,7 @@ def test_required_blocking_unbounded_loop_collapses_to_zero_under_hurry(tmp_path
     # review-cycle cap is unlimited (D10/D20: the shared cap otherwise binds).
     monkeypatch.setenv("OUROBOROS_REVIEW_MAX_CYCLES", "unlimited")
     assert task_pacing.effective_max_improvement_passes(
-        base_profile, has_deadline=False, required_blocking=True,
+        base_profile, required_blocking=True,
     ) is None
     effective = oh.effective_budget_profile(ctx, base_profile)
     assert effective["max_improvement_passes"] == 0
@@ -740,6 +740,13 @@ def test_fresh_attempt_replays_exact_owner_text_until_terminal(
             def execute(self, name, args):
                 self.calls.append((name, args))
                 return "durable tool effect"
+
+            def execute_result(self, name, args):
+                # The loop reads the typed dispatch seam (D02); adapt the text
+                # exactly the way the real registry adapts a legacy handler.
+                from ouroboros.tools.tool_result import LegacyTextResultAdapter
+
+                return LegacyTextResultAdapter.from_text(name, self.execute(name, args))
 
         probe_tools = _ProbeTools()
         executor = StatefulToolExecutor()

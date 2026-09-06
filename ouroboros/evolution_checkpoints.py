@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import hashlib
+import logging
 import pathlib
 import subprocess
 from typing import Any, Dict, Optional
@@ -10,6 +11,8 @@ from typing import Any, Dict, Optional
 from ouroboros.outcomes import normalize_outcome_axes
 from ouroboros.utils import append_jsonl, utc_now_iso
 
+
+log = logging.getLogger(__name__)
 
 CHECKPOINTS_REL = pathlib.Path("state") / "evolution_checkpoints.jsonl"
 
@@ -62,6 +65,84 @@ def append_cycle_outcome_checkpoint(
         "outcome_axes": normalize_outcome_axes({"outcome_axes": tx.get("outcome_axes") or {}}),
     }
     append_jsonl(pathlib.Path(drive_root) / CHECKPOINTS_REL, entry)
+
+
+def append_cycle_outcome_tag(
+    drive_root: pathlib.Path, *, campaign: Any, transaction: Any,
+    source: str, backlog_id: str,
+) -> None:
+    """Append a resolution tag without letting a ledger failure break the boot.
+
+    The tag is written after the campaign transition that decided the outcome,
+    so it can never be part of that transition's atomic write; failing the
+    caller here would trade an under-reported digest for a broken restart path.
+    Invariant the callers keep: the campaign resolution and this tag are ONE
+    critical section under ``locks/state.lock`` (both the boot reconcile and the
+    marker restart-verify path append the tag before releasing it), and the
+    repair-side reader ``backfill_missing_cycle_outcomes`` takes the same lock —
+    so a concurrent booter never sees a resolved campaign whose tag is still
+    pending. What a crash inside that section loses, the backfill re-derives.
+    """
+    try:
+        append_cycle_outcome_checkpoint(
+            drive_root, campaign=campaign, transaction=transaction,
+            source=source, backlog_id=backlog_id,
+        )
+    except Exception:
+        log.debug("Failed to append %s cycle-outcome checkpoint", source, exc_info=True)
+
+
+def backfill_missing_cycle_outcomes(
+    drive_root: pathlib.Path, campaign: Dict[str, Any] | None,
+) -> int:
+    """Re-derive the cycle-outcome rows a crash lost, and return how many landed.
+
+    The campaign write that resolves a cycle and this ledger's append are NOT
+    one atomic write: a crash between them leaves a campaign that says
+    ``absorbed`` with no row, and the digest under-reports that cycle forever.
+    The resolved transaction itself carries every field the row needs, so the
+    row is derivable — this replays the missing ones at boot. Idempotent: a
+    task that already has a ``cycle_outcome`` row is skipped, and only
+    commit-bearing resolutions (the ones the two crash windows can strand) are
+    replayed. ``backlog_id`` is not recoverable after the fact and is left
+    empty, exactly as the abandoned path already writes it. Never raises.
+    The scan-then-append is only dedupe-safe under ``locks/state.lock`` — the
+    lock the resolution writers hold across campaign write + tag — so the boot
+    caller (``verify_restart``) runs it there and skips it, rather than running
+    it unlocked, when the lock is unavailable.
+    """
+    import json as _json
+
+    written = 0
+    try:
+        history = (campaign or {}).get("transaction_history") or []
+        pending = {
+            str(tx.get("task_id")): tx
+            for tx in history
+            if isinstance(tx, dict)
+            and str(tx.get("task_id") or "")
+            and str(tx.get("commit_sha") or "").strip()
+            and str(tx.get("cycle_outcome") or "") in {"absorbed", "abandoned"}
+        }
+        if not pending:
+            return 0
+        path = pathlib.Path(drive_root) / CHECKPOINTS_REL
+        for line in path.read_text(encoding="utf-8").splitlines() if path.is_file() else []:
+            try:
+                row = _json.loads(line)
+            except Exception:
+                continue
+            if isinstance(row, dict) and str(row.get("kind") or "") == "cycle_outcome":
+                pending.pop(str(row.get("task_id") or ""), None)
+        for tx in pending.values():
+            append_cycle_outcome_checkpoint(
+                drive_root, campaign=campaign, transaction=tx,
+                source="boot_backfill", backlog_id="",
+            )
+            written += 1
+    except Exception:
+        log.debug("Failed to backfill cycle-outcome checkpoints", exc_info=True)
+    return written
 
 
 def build_solve_capability_digest(drive_root: pathlib.Path, *, max_entries: int = 200) -> str:

@@ -30,7 +30,7 @@ _DIRECT_PROVIDER_AUTO_DEFAULTS = {
     for provider, defaults in DIRECT_PROVIDER_DEFAULTS.items()
 }
 # Legacy values that should be auto-replaced with a provider's direct defaults.
-# Cloud.ru, GigaChat, and MiniMax intentionally have NO entry: such a provider-only user's
+# Cloud.ru, GigaChat, MiniMax, and DeepSeek intentionally have NO entry: such a provider-only user's
 # main/code/light slots match the shipped SETTINGS_DEFAULTS or the shared
 # _PRIOR_SHIPPED_SLOT_DEFAULTS below (google/gemini era) and migrate via the
 # `current in {"", default, *legacy}` check, and the review/scope slots are
@@ -54,9 +54,9 @@ _DIRECT_PROVIDER_LEGACY_DEFAULTS = {
         "OUROBOROS_MODEL_FALLBACKS": {
             "anthropic/claude-sonnet-4.6", "openai/gpt-5.4-mini", "openai::gpt-5.4-mini",
         },
-        # The SHIPPED OpenRouter deep default and its migrated direct spelling both
-        # name a router slug that does not exist on api.openai.com (404) — a direct
-        # install must land on the real model, not on the -pro id.
+        # Prior shipped OpenRouter deep defaults and their migrated direct spellings
+        # all name router slugs that do not exist on api.openai.com (404) — a direct
+        # install must land on the real model, not on a -pro id.
         "OUROBOROS_MODEL_DEEP_SELF_REVIEW": {
             "openai/gpt-5.6-sol-pro", "openai::gpt-5.6-sol-pro",
             "openai/gpt-5.5-pro", "openai::gpt-5.5-pro",
@@ -91,8 +91,8 @@ _LEGACY_GEMINI_3_FLASH_PREVIEW = "google/gemini-" + "3-flash-preview"
 for _legacy_defaults in _DIRECT_PROVIDER_LEGACY_DEFAULTS.values():
     for _slot in ("OUROBOROS_MODEL", "OUROBOROS_MODEL_HEAVY", "OUROBOROS_MODEL_LIGHT"):
         _legacy_defaults[_slot].add(_LEGACY_GEMINI_31_FLASH_LITE)
-# Outgoing SHIPPED OpenRouter defaults (through v6.104), applied for EVERY
-# exclusive-direct provider (incl. cloudru/gigachat/minimax, which have no per-provider
+# Outgoing SHIPPED OpenRouter defaults, applied for EVERY
+# exclusive-direct provider (incl. cloudru/gigachat/minimax/deepseek, which have no per-provider
 # legacy table): before each defaults refresh a stored copy of the shipped default matched the
 # `current in {"", default}` check because SETTINGS_DEFAULTS still carried it;
 # after the defaults refresh these stored copies are still "the old DEFAULT, not
@@ -101,6 +101,7 @@ for _legacy_defaults in _DIRECT_PROVIDER_LEGACY_DEFAULTS.values():
 _PRIOR_SHIPPED_SLOT_DEFAULTS = {
     "OUROBOROS_MODEL": {
         "google/gemini-3.5-flash",
+        "google/gemini-3.7-flash",
         "x-ai/grok-4.5",
     },
     "OUROBOROS_MODEL_HEAVY": {"google/gemini-3.5-flash"},
@@ -109,9 +110,13 @@ _PRIOR_SHIPPED_SLOT_DEFAULTS = {
         "google/gemini-3.6-flash",
     },
     "OUROBOROS_MODEL_FALLBACKS": {"anthropic/claude-sonnet-4.6"},
-    # v6.81's shipped deep-review value: an upgraded direct-provider install still
-    # carries it, and it is just as unreachable without an OpenRouter credential.
-    "OUROBOROS_MODEL_DEEP_SELF_REVIEW": {"openai/gpt-5.5-pro", "openai::gpt-5.5-pro"},
+    # Prior shipped deep-review values (v6.81's gpt-5.5-pro, then the gpt-5.6-sol-pro
+    # routing slug): an upgraded direct-provider install still carries one, and each
+    # is just as unreachable without an OpenRouter credential.
+    "OUROBOROS_MODEL_DEEP_SELF_REVIEW": {
+        "openai/gpt-5.5-pro", "openai::gpt-5.5-pro",
+        "openai/gpt-5.6-sol-pro", "openai::gpt-5.6-sol-pro",
+    },
 }
 # Heavy is no longer an active role, but its bounded migration reader still
 # needs to distinguish an owner's custom value from values Ouroboros itself
@@ -251,11 +256,17 @@ def _refresh_retired_model_defaults(settings: dict) -> tuple[dict, list[str]]:
 
 
 def _migrate_scope_review_prior_default(settings: dict) -> tuple[dict, list[str]]:
+    # ABI 7.0 (ABI-10): the comma keys are RETIRED settings — load_settings
+    # purges them before this runs, so the branch fires only on a raw dict fed
+    # directly (tests/tools). The replacement source is the shipped default
+    # (the keys left SETTINGS_DEFAULTS with the retirement).
+    from ouroboros.settings_defaults import OPENROUTER_REVIEW_DEFAULTS
+
     normalized = dict(settings)
     changed: list[str] = []
     for key in ("OUROBOROS_SCOPE_REVIEW_MODEL", "OUROBOROS_SCOPE_REVIEW_MODELS"):
         if _setting_text(normalized, key) in _SCOPE_REVIEW_PRIOR_DEFAULTS:
-            normalized[key] = str(SETTINGS_DEFAULTS[key])
+            normalized[key] = ",".join(OPENROUTER_REVIEW_DEFAULTS["scope"])
             changed.append(key)
     return normalized, changed
 
@@ -269,6 +280,7 @@ def _exclusive_direct_remote_provider(settings: dict) -> str:
     has_official_openai = bool(_setting_text(settings, "OPENAI_API_KEY"))
     has_anthropic = bool(_setting_text(settings, "ANTHROPIC_API_KEY"))
     has_minimax = bool(_setting_text(settings, "MINIMAX_API_KEY"))
+    has_deepseek = bool(_setting_text(settings, "DEEPSEEK_API_KEY"))
     has_legacy_openai_base = bool(_setting_text(settings, "OPENAI_BASE_URL"))
     has_compatible = bool(_setting_text(settings, "OPENAI_COMPATIBLE_BASE_URL"))
     has_cloudru = bool(_setting_text(settings, "CLOUDRU_FOUNDATION_MODELS_API_KEY"))
@@ -288,6 +300,7 @@ def _exclusive_direct_remote_provider(settings: dict) -> str:
             ("minimax", has_minimax),
             ("cloudru", has_cloudru),
             ("gigachat", has_gigachat),
+            ("deepseek", has_deepseek),
         ) if present
     ]
     return direct[0] if len(direct) == 1 else ""
@@ -392,6 +405,7 @@ def has_remote_provider(settings: dict) -> bool:
             "OPENAI_API_KEY",
             "ANTHROPIC_API_KEY",
             "MINIMAX_API_KEY",
+            "DEEPSEEK_API_KEY",
             "OPENAI_COMPATIBLE_BASE_URL",
             "CLOUDRU_FOUNDATION_MODELS_API_KEY",
             "GIGACHAT_CREDENTIALS",
@@ -570,20 +584,28 @@ def apply_runtime_provider_defaults(settings: dict) -> tuple[dict, bool, list[st
             normalized[key] = next_value
             changed_keys.append(key)
 
-    review_models = _normalize_direct_review_models(normalized, provider)
-    if review_models != _setting_text(normalized, "OUROBOROS_REVIEW_MODELS"):
-        normalized["OUROBOROS_REVIEW_MODELS"] = review_models
-        changed_keys.append("OUROBOROS_REVIEW_MODELS")
+    # ABI 7.0 (ABI-10): the comma keys are RETIRED settings. A ghost value fed
+    # directly still normalizes (owner-value preservation on a stale dict), but
+    # an absent key is never INTRODUCED — the read-time getters
+    # (`get_review_models`/`get_scope_review_models`) perform this same
+    # direct-provider adaptation on the derived env plane.
+    if _setting_text(normalized, "OUROBOROS_REVIEW_MODELS"):
+        review_models = _normalize_direct_review_models(normalized, provider)
+        if review_models != _setting_text(normalized, "OUROBOROS_REVIEW_MODELS"):
+            normalized["OUROBOROS_REVIEW_MODELS"] = review_models
+            changed_keys.append("OUROBOROS_REVIEW_MODELS")
 
-    scope_review_model = _normalize_direct_scope_review_model(normalized, provider)
-    if scope_review_model != _setting_text(normalized, "OUROBOROS_SCOPE_REVIEW_MODEL"):
-        normalized["OUROBOROS_SCOPE_REVIEW_MODEL"] = scope_review_model
-        changed_keys.append("OUROBOROS_SCOPE_REVIEW_MODEL")
+    if _setting_text(normalized, "OUROBOROS_SCOPE_REVIEW_MODEL"):
+        scope_review_model = _normalize_direct_scope_review_model(normalized, provider)
+        if scope_review_model != _setting_text(normalized, "OUROBOROS_SCOPE_REVIEW_MODEL"):
+            normalized["OUROBOROS_SCOPE_REVIEW_MODEL"] = scope_review_model
+            changed_keys.append("OUROBOROS_SCOPE_REVIEW_MODEL")
 
-    scope_review_models = _normalize_direct_scope_review_models(normalized, provider)
-    if scope_review_models != _setting_text(normalized, "OUROBOROS_SCOPE_REVIEW_MODELS"):
-        normalized["OUROBOROS_SCOPE_REVIEW_MODELS"] = scope_review_models
-        changed_keys.append("OUROBOROS_SCOPE_REVIEW_MODELS")
+    if _setting_text(normalized, "OUROBOROS_SCOPE_REVIEW_MODELS"):
+        scope_review_models = _normalize_direct_scope_review_models(normalized, provider)
+        if scope_review_models != _setting_text(normalized, "OUROBOROS_SCOPE_REVIEW_MODELS"):
+            normalized["OUROBOROS_SCOPE_REVIEW_MODELS"] = scope_review_models
+            changed_keys.append("OUROBOROS_SCOPE_REVIEW_MODELS")
 
     changed_keys = _unique_changed_keys(changed_keys)
     return normalized, bool(changed_keys), changed_keys

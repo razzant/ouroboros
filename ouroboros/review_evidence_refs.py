@@ -40,12 +40,17 @@ DECLARED_INTENT_SECTION = "declared_intent_section"
 # built outside the acceptance builder). Fail CLOSED: unknown attestation is not
 # attestation.
 UNATTESTED_SECTION = "unattested_section"
+# A host-recorded section whose decision-bearing bytes were capped for the
+# reviewer. It remains enumerable and dispatchable, but cannot resolve a clean
+# acceptance criterion until the packet carries the complete section.
+PARTIAL_SECTION = "partial"
 NON_RESOLVING_BASIS_KINDS = frozenset({
     CLAIM_ID_UNSUPPORTED,
     RECEIPT_NOT_PASSING,
     AGENT_SUPPLIED_SECTION,
     DECLARED_INTENT_SECTION,
     UNATTESTED_SECTION,
+    PARTIAL_SECTION,
 })
 
 # Section provenance tags (``__provenance__`` in the built packet) that make a
@@ -54,7 +59,9 @@ NON_RESOLVING_BASIS_KINDS = frozenset({
 # its recording of tool results (`tool_result`), its artifact manifest
 # (`artifact`). Everything else is classified above.
 HOST_ATTESTED_SECTION_PROVENANCE = frozenset({"host_attested", "tool_result", "artifact"})
-DECLARED_INTENT_SECTIONS = frozenset({"task_contract", "acceptance_claims_source"})
+DECLARED_INTENT_SECTIONS = frozenset({
+    "task_contract", "acceptance_claims_source", "plan_claims_exhibit",
+})
 
 # D-Q5 fail-closed row: the host could not resolve this panel's refs at all. It
 # carries the SAME `supported_evidence_resolves=False` the clean gate already
@@ -74,7 +81,7 @@ def acceptance_evidence_ref_vocabulary(evidence: Any) -> Dict[str, str]:
 
     Maps each valid reviewer ``evidence_ref`` string to its CLOSED basis kind
     (claim_id | claim_id_unsupported | obligation_id | artifact |
-    verification_receipt | verification_receipt_not_passing | packet_section |
+    verification_receipt | verification_receipt_not_passing | packet_section | partial |
     agent_supplied_section | declared_intent_section | unattested_section — a
     closed table per ref kind, like ``IDENTITY_KINDS``). Pure derivation over the
     packet dict: no filesystem reads, no re-execution (a machine comparison must
@@ -150,7 +157,20 @@ def acceptance_evidence_ref_vocabulary(evidence: Any) -> Dict[str, str]:
         if name.startswith("__"):
             continue
         tag = str(provenance.get(name) or "")
-        if name in DECLARED_INTENT_SECTIONS:
+        if name == "tool_trajectory" and (
+            ev.get("tool_trajectory_complete") is False
+            or bool(ev.get("tool_trajectory_omitted_leading"))
+            or any(
+                isinstance(row, dict) and row.get("result_complete") is False
+                for row in (ev.get(name) if isinstance(ev.get(name), list) else [])
+            )
+        ):
+            basis = PARTIAL_SECTION
+        elif name == "repo_diff" and ev.get("repo_diff_complete") is False:
+            basis = PARTIAL_SECTION
+        elif name == "skill_lifecycle" and ev.get("skill_lifecycle_complete") is False:
+            basis = PARTIAL_SECTION
+        elif name in DECLARED_INTENT_SECTIONS:
             basis = DECLARED_INTENT_SECTION
         elif tag in HOST_ATTESTED_SECTION_PROVENANCE:
             basis = "packet_section"
@@ -171,8 +191,8 @@ def resolve_criteria_evidence_refs(criteria: Any, vocabulary: Dict[str, str]) ->
     every ref (rounds-6/7 rule: whatever decides is what is reported) plus
     ``supported_evidence_resolves`` — whether at least ONE ref resolved, which is
     all ``task_acceptance_is_clean`` consumes. A basis in
-    ``NON_RESOLVING_BASIS_KINDS`` (today: a claim id with no host-attested
-    supporting receipt) is DISCLOSED by name but does not resolve. Never touches
+    ``NON_RESOLVING_BASIS_KINDS`` (for example, an unsupported claim id or a
+    partial section) is DISCLOSED by name but does not resolve. Never touches
     parse validity, quorum, or verdicts (the v6.71.1 starvation class stays
     closed)."""
     rows: list = []

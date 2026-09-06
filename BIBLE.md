@@ -106,11 +106,17 @@ on every restart, but one personality that remembers its path.
   (confirmed metadata / route-fingerprinted owner acknowledgement), never an
   assumed default. The mode is permitted only when the tier-0 core (system
   prompt, BIBLE.md, identity.md, scratchpad, durable knowledge index,
-  recent-dialogue horizon) stays always-loaded in full; the agent's self-body
-  documentation (ARCHITECTURE.md, DEVELOPMENT.md) stays RESIDENT in owner-`max`,
-  and narrowing it for a task-class is itself an owner-level horizon decision,
-  not a silent default; reduction is by relocation to on-demand reads with a
-  visible pointer, or by deeper consolidation, never silent truncation; the
+  recent-dialogue horizon) stays always-loaded in full; `docs/ARCHITECTURE.md`
+  stays RESIDENT in owner-`max` for every task class, and `docs/DEVELOPMENT.md`
+  stays resident when the work addresses Ouroboros's own body — a binding to an
+  external working tree, a subagent, or an external API/CLI/scheduled surface
+  receives a visible on-demand pointer instead unless the task itself
+  explicitly requires the handbook (that per-task requirement wins in either
+  direction), while project membership alone is not the signal (an owner-level
+  horizon decision, not a silent default; any further narrowing for a task
+  class is likewise the owner's decision);
+  reduction is by relocation to on-demand reads with a visible pointer, or by
+  deeper consolidation, never silent truncation; the
   memory horizon is preserved (only granularity varies); whether the blocking
   scope reviewer applies at all is governed by this same owner-selected mode as an
   explicit policy coupling under P3 — in `max` the ≥1M blocking scope gate runs, in

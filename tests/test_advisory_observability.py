@@ -51,7 +51,7 @@ def test_advisory_row_effort_reaches_the_native_slot(monkeypatch, tmp_path):
 
     captured = {}
 
-    def _capture(prompt, repo_dir, ctx_, slot, model):
+    def _capture(prompt, repo_dir, ctx_, slot, model, **_):
         from types import SimpleNamespace
 
         captured["effort"] = slot.effort or "low"
@@ -92,7 +92,7 @@ def test_empty_advisory_result_is_error(monkeypatch, tmp_path):
 
     monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-test")
     monkeypatch.setattr(_get_advisory_module(), "_run_advisory_native",
-                        lambda prompt, repo_dir, ctx_, slot, model: (
+                        lambda prompt, repo_dir, ctx_, slot, model, **_: (
                             fake_run_readonly(), model,
                         ))
     monkeypatch.setattr(adv_mod, "_get_staged_diff", lambda *a, **kw: "diff")
@@ -161,7 +161,7 @@ def test_skill_advisory_duplicate_expected_items_warn_not_error(monkeypatch, tmp
 
     monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-test")
     monkeypatch.setattr(_get_advisory_module(), "_run_advisory_native",
-                        lambda prompt, repo_dir, ctx_, slot, model: (
+                        lambda prompt, repo_dir, ctx_, slot, model, **_: (
                             fake_run_readonly(), model,
                         ))
     monkeypatch.setattr(adv_mod, "_build_advisory_prompt", lambda *a, **kw: "prompt")
@@ -208,7 +208,7 @@ def test_skill_advisory_repeated_bug_hunting_no_contract_warning(monkeypatch, tm
 
     monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-test")
     monkeypatch.setattr(_get_advisory_module(), "_run_advisory_native",
-                        lambda prompt, repo_dir, ctx_, slot, model: (
+                        lambda prompt, repo_dir, ctx_, slot, model, **_: (
                             fake_run_readonly(), model,
                         ))
     monkeypatch.setattr(adv_mod, "_build_advisory_prompt", lambda *a, **kw: "prompt")
@@ -247,7 +247,7 @@ def test_skill_advisory_missing_expected_items_still_errors(monkeypatch, tmp_pat
 
     monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-test")
     monkeypatch.setattr(_get_advisory_module(), "_run_advisory_native",
-                        lambda prompt, repo_dir, ctx_, slot, model: (
+                        lambda prompt, repo_dir, ctx_, slot, model, **_: (
                             fake_run_readonly(), model,
                         ))
     monkeypatch.setattr(adv_mod, "_build_advisory_prompt", lambda *a, **kw: "prompt")
@@ -1087,7 +1087,7 @@ class TestLLMFallbackExtraction:
 
         monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-test")
         monkeypatch.setattr(_get_advisory_module(), "_run_advisory_native",
-                        lambda prompt, repo_dir, ctx_, slot, model: (
+                        lambda prompt, repo_dir, ctx_, slot, model, **_: (
                             fake_run_readonly(), model,
                         ))
         monkeypatch.setattr(self.mod, "build_advisory_changed_context",
@@ -1233,7 +1233,7 @@ class TestEmptyArrayIsVerifiedClean:
                             lambda raw, ctx: called.append(raw) or [])
         monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-test")
         monkeypatch.setattr(adv_mod, "_run_advisory_native",
-                            lambda prompt, repo_dir, ctx_, slot, model: (
+                            lambda prompt, repo_dir, ctx_, slot, model, **_: (
                                 _fake_native_result(
                                     result_text="[]\nNO_FINDINGS", session_id="s",
                                     usage={"prompt_tokens": 10, "completion_tokens": 1},

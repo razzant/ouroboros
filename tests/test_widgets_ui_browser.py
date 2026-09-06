@@ -4,6 +4,7 @@ import json
 import os
 import pathlib
 import textwrap
+import urllib.parse
 
 import pytest
 
@@ -13,7 +14,7 @@ direct_server_with_data = _direct_server_with_data
 
 
 def _write_module_widget_smoke_extension(data_dir: pathlib.Path) -> str:
-    """Install reviewed module tabs that exercise host geometry and teardown."""
+    """Install reviewed module tabs that exercise geometry, faults, and teardown."""
     from ouroboros.skill_loader import SkillReviewState, compute_content_hash, save_review_state
 
     name = "module_widget_smoke"
@@ -43,11 +44,14 @@ def _write_module_widget_smoke_extension(data_dir: pathlib.Path) -> str:
 
 
             def register(api):
+                # Geometry probes are cheap instruments: `start: "auto"` so they mount on show
+                # (framed cards default to `manual` and would wait behind Start otherwise).
                 api.register_route("ping", ping, methods=("GET",))
-                api.register_ui_tab("auto", "Auto module", render={"kind": "module", "entry": "widget.js"})
-                api.register_ui_tab("fixed", "Fixed module", render={"kind": "module", "entry": "widget.js", "height": 480})
-                api.register_ui_tab("capped", "Capped module", render={"kind": "module", "entry": "widget.js", "max_height": 640})
-                api.register_ui_tab("small", "Small module", render={"kind": "module", "entry": "small.js"})
+                api.register_ui_tab("auto", "Auto module", render={"kind": "module", "entry": "widget.js", "start": "auto"})
+                api.register_ui_tab("fixed", "Fixed module", render={"kind": "module", "entry": "widget.js", "height": 480, "start": "auto"})
+                api.register_ui_tab("capped", "Capped module", render={"kind": "module", "entry": "widget.js", "max_height": 640, "start": "auto"})
+                api.register_ui_tab("fault", "Fault module", render={"kind": "module", "entry": "fault.js", "max_height": 640, "start": "auto"})
+                api.register_ui_tab("small", "Small module", render={"kind": "module", "entry": "small.js", "start": "auto"})
             """
         ),
         encoding="utf-8",
@@ -88,9 +92,31 @@ def _write_module_widget_smoke_extension(data_dir: pathlib.Path) -> str:
         "document.getElementById('root').textContent = 'Small content';\n",
         encoding="utf-8",
     )
+    (skill_dir / "fault.js").write_text(
+        textwrap.dedent(
+            """\
+            const root = document.getElementById('root');
+            root.innerHTML = '<div style="height: 900px">Deterministic fault fixture</div>';
+            throw new Error('Deterministic module widget fault: ' + 'x'.repeat(320));
+            """
+        ),
+        encoding="utf-8",
+    )
     content_hash = compute_content_hash(skill_dir, manifest_entry="plugin.py")
     save_review_state(data_dir, name, SkillReviewState(status="pass", content_hash=content_hash))
     return name
+
+
+def test_module_widget_smoke_fixture_has_deterministic_fault(tmp_path):
+    name = _write_module_widget_smoke_extension(tmp_path)
+    skill_dir = tmp_path / "skills" / "external" / name
+    plugin = (skill_dir / "plugin.py").read_text(encoding="utf-8")
+    fault = (skill_dir / "fault.js").read_text(encoding="utf-8")
+
+    assert 'register_ui_tab("fault", "Fault module"' in plugin
+    assert '"entry": "fault.js", "max_height": 640, "start": "auto"' in plugin
+    assert "height: 900px" in fault
+    assert "throw new Error('Deterministic module widget fault: ' + 'x'.repeat(320));" in fault
 
 
 def _write_temporal_module_widget_extension(data_dir: pathlib.Path) -> str:
@@ -120,13 +146,13 @@ def _write_temporal_module_widget_extension(data_dir: pathlib.Path) -> str:
         textwrap.dedent(
             """\
             def register(api):
-                module = {"kind": "module", "entry": "widget.js"}
+                module = {"kind": "module", "entry": "widget.js", "start": "auto"}
                 api.register_ui_tab("auto", "Temporal auto", render={**module, "span": 2})
                 api.register_ui_tab("capped", "Temporal capped", render={**module, "span": 2, "max_height": 1000})
                 api.register_ui_tab("fixed", "Temporal fixed", render={**module, "height": 480})
-                api.register_ui_tab("floor", "Temporal floor", render={"kind": "module", "entry": "small.js", "max_height": 320})
-                api.register_ui_tab("wide", "Temporal wide", render={"kind": "module", "entry": "wide.js", "span": 2, "max_height": 700})
-                api.register_ui_tab("sibling", "Temporal sibling", render={"kind": "module", "entry": "small.js", "height": 360})
+                api.register_ui_tab("floor", "Temporal floor", render={"kind": "module", "entry": "small.js", "max_height": 320, "start": "auto"})
+                api.register_ui_tab("wide", "Temporal wide", render={"kind": "module", "entry": "wide.js", "span": 2, "max_height": 700, "start": "auto"})
+                api.register_ui_tab("sibling", "Temporal sibling", render={"kind": "module", "entry": "small.js", "height": 360, "start": "auto"})
             """
         ),
         encoding="utf-8",
@@ -303,14 +329,17 @@ _WIDGET_TEMPORAL_TRACE_SCRIPT = r"""
     const start = () => {
         const observer = new MutationObserver((records) => {
             records.forEach((row) => {
-                const target = row.target.nodeType === 1 ? row.target : row.target.parentElement;
-                if (target?.matches?.('style[id^="masonry-style-"]')) {
-                    record('masonry', target, {css: target.textContent});
+                // Masonry writes its plan as custom properties (widgets lifecycle
+                // phase 3): `--masonry-h` on the list is the one write per layout.
+                if (row.type === 'attributes' && row.target.matches?.('.widgets-list')) {
+                    record('masonry', row.target, {height: row.target.style.getPropertyValue('--masonry-h')});
                 }
             });
             scan();
         });
-        observer.observe(document.documentElement, {subtree: true, childList: true});
+        observer.observe(document.documentElement, {
+            subtree: true, childList: true, attributes: true, attributeFilter: ['style'],
+        });
         scan();
     };
     if (document.readyState === 'loading') addEventListener('DOMContentLoaded', start, {once: true});
@@ -594,6 +623,21 @@ def test_ui_smoke_module_widgets_geometry_lifecycle(direct_server_with_data):
                 assert narrow_height > 320
                 page.screenshot(path=str(evidence_dir / "module-widgets-narrow.png"), full_page=True)
 
+                # Leave/return: leaving disposes the framed mount, but the card
+                # keeps its DOM identity (an expando survives only on the same
+                # node), a hidden page issues no list request, and the return
+                # issues exactly one `GET /api/widgets` before mounting again.
+                widgets_list_requests = []
+
+                def record_widgets_request(request):
+                    if urllib.parse.urlparse(request.url).path == "/api/widgets":
+                        widgets_list_requests.append(request.url)
+
+                page.on("request", record_widgets_request)
+                page.evaluate(
+                    "(selector) => { document.querySelector(selector).__ouroCardIdentity = true; }",
+                    card_selector("auto"),
+                )
                 page.evaluate(
                     """() => {
                         const button = [...document.querySelectorAll('[data-nav-page="dashboard"]')]
@@ -606,6 +650,8 @@ def test_ui_smoke_module_widgets_geometry_lifecycle(direct_server_with_data):
                     arg=card_selector("auto"),
                     timeout=10_000,
                 )
+                page.wait_for_timeout(300)
+                assert widgets_list_requests == [], widgets_list_requests
                 page.evaluate(
                     """() => {
                         const button = [...document.querySelectorAll('[data-nav-page="widgets"]')]
@@ -614,6 +660,11 @@ def test_ui_smoke_module_widgets_geometry_lifecycle(direct_server_with_data):
                     }"""
                 )
                 page.locator(card_selector("auto")).locator("iframe").wait_for(state="attached", timeout=10_000)
+                assert page.evaluate(
+                    "(selector) => document.querySelector(selector).__ouroCardIdentity === true",
+                    card_selector("auto"),
+                ), "returning to Widgets must reuse the existing card node, not rebuild the list"
+                assert len(widgets_list_requests) == 1, widgets_list_requests
             finally:
                 browser.close()
     except PlaywrightError as exc:
@@ -880,6 +931,40 @@ def test_ui_smoke_module_widget_temporal_convergence(direct_server_with_data, br
                 fixed_final = child_metrics(frames["fixed"])
                 assert fixed_final["htmlOverflowY"] != "hidden", fixed_final
                 assert fixed_final["bodyOverflowY"] == "auto", fixed_final
+            finally:
+                browser.close()
+    except PlaywrightError as exc:
+        if "Executable doesn't exist" in str(exc) or "playwright install" in str(exc).lower():
+            pytest.skip(str(exc))
+        raise
+
+
+@pytest.mark.ui_browser
+def test_ui_smoke_widgets_page_has_a_typed_address_and_one_nav_landmark(
+    direct_server_with_data,
+):
+    """A page could not be linked to and the sidebar was not a landmark.
+
+    Opening the application with a `#widgets` fragment must land on Widgets
+    (browsers gain a shareable link; the desktop shell and the Linux fallback
+    get the same load-time route with no address bar to break), and an
+    automation or assistive client must be able to resolve the navigation by
+    its landmark instead of by an id.
+    """
+    pytest.importorskip("playwright.sync_api", reason="Playwright is not installed")
+    from playwright.sync_api import Error as PlaywrightError
+    from playwright.sync_api import sync_playwright
+
+    url = direct_server_with_data["url"]
+    try:
+        with sync_playwright() as pw:
+            browser = pw.chromium.launch(headless=True)
+            page = browser.new_page(viewport={"width": 1280, "height": 800})
+            try:
+                page.goto(f"{url}/#widgets", wait_until="domcontentloaded", timeout=30_000)
+                page.wait_for_selector("nav#primary-sidebar", timeout=15_000)
+                page.wait_for_selector("#page-widgets.active", timeout=15_000)
+                assert page.locator('[data-nav-page="widgets"].active').count() == 1
             finally:
                 browser.close()
     except PlaywrightError as exc:

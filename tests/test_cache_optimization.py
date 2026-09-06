@@ -432,7 +432,7 @@ def test_wait_for_task_appends_cache_horizon_note(tmp_path, monkeypatch):
     from types import SimpleNamespace
 
     from ouroboros.task_results import STATUS_COMPLETED, write_task_result
-    from ouroboros.tools import control as control_mod
+    from ouroboros.tools import control_task_results as control_mod
 
     write_task_result(tmp_path, "child42", STATUS_COMPLETED, result="done")
 
@@ -477,7 +477,7 @@ def test_cache_horizon_reachability_matches_the_wait_clamps():
 
     from ouroboros.config import DELEGATE_WAIT_WINDOW_MAX_SEC
     from ouroboros.llm import cache_ttl_seconds
-    from ouroboros.tools import control as control_mod
+    from ouroboros.tools import control_task_results as control_mod
     from ouroboros.tools.control import cache_horizon_note
 
     def _clamp(fn):

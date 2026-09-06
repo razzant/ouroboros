@@ -19,10 +19,14 @@ from typing import Any, Callable, Dict, List, Tuple
 # LLMs: files whose CONTENT starts with a loader magic number are hard-blocked
 # from the skill payload surface — judged by magic bytes, never by filename.
 # These prefixes are unambiguous (never legitimate text), so they block
-# regardless of UTF-8 validity.
+# regardless of UTF-8 validity. WebAssembly (``WASM_MAGIC``) is deliberately NOT
+# here: the host never loads it natively — it runs only inside the browser's
+# sandboxed widget frame — so a module is admitted as a content-hash-bound
+# descriptor the reviewer sees, routed there by its magic even when its bytes
+# happen to decode as UTF-8 (the canonical 8-byte module does).
+WASM_MAGIC = b"\x00asm"
 _EXECUTABLE_MAGICS: Tuple[Tuple[bytes, str], ...] = (
     (b"\x7fELF", "ELF executable / shared object"),
-    (b"\x00asm", "WebAssembly module"),
     (b"\xfe\xed\xfa\xce", "Mach-O executable (32-bit)"),
     (b"\xfe\xed\xfa\xcf", "Mach-O executable (64-bit)"),
     (b"\xce\xfa\xed\xfe", "Mach-O executable (32-bit, little-endian)"),
@@ -61,7 +65,8 @@ def executable_magic_kind(data: bytes, *, is_utf8_text: bool) -> str:
 
 class SkillBinaryPayload(RuntimeError):
     """Raised for loadable-executable skill payloads (judged by content magic
-    bytes); other non-UTF-8 files become ``{path,size,mime,sha256}`` descriptors."""
+    bytes); other binary payloads — non-UTF-8 files and WebAssembly admitted by
+    magic — become ``{path,size,mime_from_name,sha256}`` descriptors."""
 
     def __init__(self, relpath: str, size_bytes: int, kind: str = "") -> None:
         super().__init__(
@@ -74,8 +79,8 @@ class SkillBinaryPayload(RuntimeError):
 
 
 def binary_file_descriptor(relpath: str, data: bytes, *, filename: str = "") -> Dict[str, Any]:
-    """Typed descriptor for a non-UTF-8, non-executable payload file: the review
-    pack carries ``{path,size,mime,sha256}`` instead of raw bytes."""
+    """Typed descriptor for a binary (non-UTF-8 or WebAssembly), non-executable payload file: the review
+    pack carries ``{path,size,mime_from_name,sha256}`` instead of raw bytes."""
     import mimetypes
 
     return {

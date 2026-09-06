@@ -29,7 +29,8 @@ for "no reasoning at all" and is not an artifact — sealing it would pin
 zero-reasoning transcripts, the response_id bug class. The reactive 400
 strip-and-retry in ``llm.py`` is the safety net either way.
 """
-from typing import Any, Iterable, List, Optional
+import contextvars
+from typing import Any, Dict, Iterable, List, Optional
 
 # Families whose SEALED artifact forms are vouched to survive a same-model
 # cross-provider switch on OpenRouter (live replay probe 2026-06: Anthropic
@@ -147,3 +148,19 @@ def sealed_reasoning_pin_fact(messages: List[Any], model: Any) -> Optional[dict]
     transcript is portable. Callers stamp it from the TERMINAL sent candidate."""
     label = sealed_reasoning_artifact(messages, model)
     return {"sealed": True, "artifact": label} if label else None
+
+
+# Pin disclosure slot: a ContextVar isolates threads AND concurrent asyncio tasks.
+# It lives beside the fact it carries, so the producer (llm_attempt, on send
+# success) and the reader (llm_openai_compatible, on usage assembly) share it
+# without either leaf importing the other.
+_REASONING_PIN_CVAR: contextvars.ContextVar = contextvars.ContextVar(
+    "ouroboros_reasoning_pin_note", default=None,
+)
+
+
+def pop_reasoning_pin_note() -> Optional[Dict[str, Any]]:
+    """Take and clear this call's pin note, if the send staged one."""
+    pending = _REASONING_PIN_CVAR.get()
+    _REASONING_PIN_CVAR.set(None)
+    return pending if isinstance(pending, dict) else None

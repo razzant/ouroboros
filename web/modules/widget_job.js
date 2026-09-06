@@ -1,6 +1,17 @@
 /* Shared declarative widget request and job-status policy. */
 
 export const WIDGET_REQUEST_TIMEOUT_MS = 25000;
+// Ordered stop of a framed widget: how long the parent waits for the child's
+// `ouro-widget-disposed` acknowledgement (its dispose hooks may be async and
+// may still use the fetch bridge) before it tears the frame down anyway.
+export const WIDGET_DISPOSE_ACK_TIMEOUT_MS = 1000;
+
+// Shared numeric clamp for declarative poll/job bounds and framed geometry.
+export function boundedNumber(value, fallback, min, max) {
+    const parsed = Number(value);
+    const safe = Number.isFinite(parsed) ? parsed : fallback;
+    return Math.max(min, Math.min(safe, max));
+}
 
 function widgetTimeoutError() {
     const error = new Error('widget request timed out');

@@ -14,6 +14,7 @@ import pathlib
 from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional, Tuple
 
+from ouroboros.post_task_checkpoint import post_task_synthesis_in_flight
 from ouroboros.review_owner_custody import reconcile_confirmed_dead_review_owner as _reconcile_dead_review_owner
 from ouroboros.utils import utc_now_iso
 
@@ -657,6 +658,18 @@ def cancel_task_custody(task_id: str, *, deliver: bool = True) -> str:
                     captured_worker.reaping = True
                     break
 
+    if captured_pending is None and captured_worker is None:
+        # A settled row does not prove the direct turn is done: the pipeline
+        # persists the terminal BEFORE post-task cognition, whose in-process
+        # synthesis thread outlives the turn's own liveness (the pooled twin:
+        # a settled-but-live worker still goes through the kill path). Live
+        # ownership wins over the settled fast path; the stored terminal
+        # stays the answer either way.
+        turn = workers.direct_chat_turn(task_id)
+        if turn is not None or post_task_synthesis_in_flight(q.DRIVE_ROOT, task_id):
+            from supervisor.cancel_publication import _finish_captured_chat_turn
+
+            return _finish_captured_chat_turn(q, task_id, turn, intent=intent, deliver=deliver)
     if settled and captured_worker is None and not captured_was_reaping:
         # A slot stranded at ``reaping`` by a custody attempt that crashed is
         # recovered HERE too: the task settled on its own afterwards, so nothing
@@ -1141,13 +1154,14 @@ def _finish_captured_running(
         # artifact on a shared drive; a split-drive copy-back REPLACING the
         # canonical settled answer — completion-wins violations). Deliver +
         # settle exactly like the natural-completion branch.
-        from ouroboros.task_results import TASK_COST_META_FIELDS
+        from ouroboros.cost_projection import carry_cost_meta
 
         stored = load_task_result(q.DRIVE_ROOT, task_id) or {}
-        stored_cost = {
-            key: stored[key] for key in TASK_COST_META_FIELDS if key in stored
-        } or {"cost_accounting_status": "unavailable", "cost_final": False,
-              "cost_usd": None}
+        # ABI-3: carry_cost_meta CONVERTS a stored legacy pair (deprecated-
+        # wins) so the cancel path emits honest names only.
+        stored_cost = carry_cost_meta(stored) or {
+            "cost_accounting_status": "unavailable", "cost_final": False,
+            "accounted_upper_bound_usd": None}
         owed_ok = _register_owed_terminal_delivery(
             q, task, task_id, stored, deliver=deliver,
             unreconciled_runs=unreconciled,
@@ -1177,7 +1191,7 @@ def _finish_captured_running(
         from ouroboros.headless import (
             copy_child_task_result, finalize_task_artifacts, task_is_readonly_subagent,
         )
-        from ouroboros.task_results import TASK_COST_META_FIELDS
+        from ouroboros.cost_projection import carry_cost_meta
         from ouroboros.task_status import SETTLED_STATUSES
 
         child_result = copy_child_task_result(pathlib.Path(q.DRIVE_ROOT), task)
@@ -1189,12 +1203,11 @@ def _finish_captured_running(
                     finalize_task_artifacts(pathlib.Path(q.DRIVE_ROOT), task)
             except Exception:
                 log.debug("Artifact finalize failed for naturally-settled %s", task_id, exc_info=True)
-            child_cost = {
-                key: child_result[key]
-                for key in TASK_COST_META_FIELDS
-                if key in child_result
-            } or {"cost_accounting_status": "unavailable", "cost_final": False,
-                  "cost_usd": None}
+            # ABI-3: carry_cost_meta CONVERTS a stored legacy pair
+            # (deprecated-wins) so the cancel path emits honest names only.
+            child_cost = carry_cost_meta(child_result) or {
+                "cost_accounting_status": "unavailable", "cost_final": False,
+                "accounted_upper_bound_usd": None}
             kept_row = load_task_result(q.DRIVE_ROOT, task_id) or child_result
             # GR2-4: the kept answer is registered as OWED before the intent
             # settles — a crash between the two must not lose both the
@@ -1414,7 +1427,6 @@ def sweep_cancel_intents(*, now: Optional[float] = None) -> Dict[str, str]:
             log.warning("cancel-intent sweep custody failed for %s", task_id, exc_info=True)
             outcomes[task_id] = CANCEL_FAILED
     return outcomes
-
 
 
 def _cancel_subtree_sweep(

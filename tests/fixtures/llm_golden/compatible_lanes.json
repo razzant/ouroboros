@@ -1,0 +1,552 @@
+{
+  "cases": [
+    {
+      "id": "compatible.payload.bypass_response_cache",
+      "route": "openai-compatible bypass_response_cache rides extra_body.cache",
+      "spec": {
+        "env": {
+          "OPENAI_COMPATIBLE_API_KEY": "compatible-fixture-key",
+          "OPENAI_COMPATIBLE_BASE_URL": "https://vllm.fixture.invalid/v1"
+        },
+        "call": {
+          "kind": "build_kwargs",
+          "model": "openai-compatible::glm-5",
+          "args": {
+            "messages": [
+              {
+                "role": "system",
+                "content": "stable policy prefix"
+              },
+              {
+                "role": "user",
+                "content": "hello"
+              }
+            ],
+            "bypass_response_cache": true
+          }
+        }
+      },
+      "expected": {
+        "returned": {
+          "value": {
+            "model": "glm-5",
+            "messages": [
+              {
+                "role": "system",
+                "content": "stable policy prefix"
+              },
+              {
+                "role": "user",
+                "content": "hello"
+              }
+            ],
+            "max_tokens": 1024,
+            "extra_body": {
+              "cache": {
+                "no-cache": true
+              }
+            }
+          },
+          "value_sha256": "8bc27cae99d15b0fb0219665b42e06f06d3be5de05ea8d8e0b8eff47d9c13a3d"
+        },
+        "sends": [],
+        "unused_script_steps": 0
+      }
+    },
+    {
+      "id": "compatible.payload.no_prompt_cache_key",
+      "route": "only the direct OpenAI route gets prompt_cache_key",
+      "spec": {
+        "env": {
+          "OPENAI_COMPATIBLE_API_KEY": "compatible-fixture-key",
+          "OPENAI_COMPATIBLE_BASE_URL": "https://vllm.fixture.invalid/v1"
+        },
+        "call": {
+          "kind": "build_kwargs",
+          "model": "openai-compatible::glm-5",
+          "args": {
+            "messages": [
+              {
+                "role": "system",
+                "content": [
+                  {
+                    "type": "text",
+                    "text": "stable policy prefix",
+                    "cache_control": {
+                      "type": "ephemeral"
+                    }
+                  }
+                ]
+              },
+              {
+                "role": "user",
+                "content": "hello"
+              }
+            ]
+          }
+        }
+      },
+      "expected": {
+        "returned": {
+          "value": {
+            "model": "glm-5",
+            "messages": [
+              {
+                "role": "system",
+                "content": [
+                  {
+                    "type": "text",
+                    "text": "stable policy prefix"
+                  }
+                ]
+              },
+              {
+                "role": "user",
+                "content": "hello"
+              }
+            ],
+            "max_tokens": 1024
+          },
+          "value_sha256": "c4c7828ccb319c810e06944ee016d0f772f3c9b907efcb0638b6a35e59d66e23"
+        },
+        "sends": [],
+        "unused_script_steps": 0
+      }
+    },
+    {
+      "id": "compatible.dispatch.happy_path",
+      "route": "chat -> openai-compatible server, cost estimated",
+      "spec": {
+        "env": {
+          "OPENAI_COMPATIBLE_API_KEY": "compatible-fixture-key",
+          "OPENAI_COMPATIBLE_BASE_URL": "https://vllm.fixture.invalid/v1"
+        },
+        "transport": [
+          {
+            "kind": "response",
+            "body": {
+              "id": "gen-fixture-2",
+              "choices": [
+                {
+                  "index": 0,
+                  "finish_reason": "stop",
+                  "message": {
+                    "role": "assistant",
+                    "content": "ok"
+                  }
+                }
+              ],
+              "usage": {
+                "prompt_tokens": 200,
+                "completion_tokens": 10
+              }
+            }
+          }
+        ],
+        "pricing_estimate": 0.0009,
+        "call": {
+          "kind": "method",
+          "name": "chat",
+          "kwargs": {
+            "messages": [
+              {
+                "role": "system",
+                "content": "stable policy prefix"
+              },
+              {
+                "role": "user",
+                "content": "hello"
+              }
+            ],
+            "model": "openai-compatible::glm-5"
+          }
+        }
+      },
+      "expected": {
+        "returned": {
+          "message": {
+            "role": "assistant",
+            "content": "ok",
+            "response_id": "gen-fixture-2"
+          },
+          "usage": {
+            "prompt_tokens": 200,
+            "completion_tokens": 10,
+            "response_finish_reason": "stop",
+            "provider": "openai-compatible",
+            "resolved_model": "openai-compatible/glm-5",
+            "cost": 0.0009,
+            "cost_estimated": true,
+            "cost_final": false
+          },
+          "ledger_attempt_count": 1
+        },
+        "sends": [
+          {
+            "transport": "openai.chat.completions.create",
+            "client": {
+              "api_key": "compatible-fixture-key",
+              "base_url": "https://vllm.fixture.invalid/v1",
+              "default_headers": null,
+              "max_retries": 0,
+              "http_client": null
+            },
+            "payload": {
+              "model": "glm-5",
+              "messages": [
+                {
+                  "role": "system",
+                  "content": "stable policy prefix"
+                },
+                {
+                  "role": "user",
+                  "content": "hello"
+                }
+              ],
+              "max_tokens": 65536
+            },
+            "payload_sha256": "f34126860e2c88137c2206b0ec6bee0cb61094ccd9fd849a2118713c7a9326bd"
+          }
+        ],
+        "pricing_calls": [
+          {
+            "model": "openai-compatible/glm-5",
+            "prompt_tokens": 200,
+            "completion_tokens": 10,
+            "cache_usage": {
+              "cached_tokens": 0,
+              "cache_write_tokens": 0,
+              "prompt_cache_ttl": null,
+              "cache_write_tokens_by_ttl": null
+            },
+            "allow_live_fetch": true,
+            "provider": "openai-compatible"
+          }
+        ],
+        "physical_attempts": [
+          {
+            "source": "llm.chat",
+            "model": "openai-compatible/glm-5",
+            "provider": "openai-compatible",
+            "candidate_raw_sha256": "f34126860e2c88137c2206b0ec6bee0cb61094ccd9fd849a2118713c7a9326bd",
+            "candidate_raw_size_bytes": 134,
+            "candidate_measurement_kind": "canonical_json_v1",
+            "states": [
+              "reserved",
+              "dispatched",
+              "settled"
+            ],
+            "prompt_cache_ttl": "",
+            "cost_final": false
+          }
+        ],
+        "unused_script_steps": 0
+      }
+    },
+    {
+      "id": "cloudru.payload.cache_bypass_not_applied",
+      "route": "cloudru ignores the compatible-only cache bypass",
+      "spec": {
+        "env": {
+          "CLOUDRU_FOUNDATION_MODELS_API_KEY": "cloudru-fixture-key"
+        },
+        "call": {
+          "kind": "build_kwargs",
+          "model": "cloudru::GLM-5",
+          "args": {
+            "messages": [
+              {
+                "role": "system",
+                "content": "stable policy prefix"
+              },
+              {
+                "role": "user",
+                "content": "hello"
+              }
+            ],
+            "bypass_response_cache": true
+          }
+        }
+      },
+      "expected": {
+        "returned": {
+          "value": {
+            "model": "GLM-5",
+            "messages": [
+              {
+                "role": "system",
+                "content": "stable policy prefix"
+              },
+              {
+                "role": "user",
+                "content": "hello"
+              }
+            ],
+            "max_tokens": 1024
+          },
+          "value_sha256": "e65d25a8ebd44f1091adb7a372b4065e7a93b1da8e701e383f0327c964d53067"
+        },
+        "sends": [],
+        "unused_script_steps": 0
+      }
+    },
+    {
+      "id": "cloudru.dispatch.happy_path",
+      "route": "chat -> cloud.ru Foundation Models",
+      "spec": {
+        "env": {
+          "CLOUDRU_FOUNDATION_MODELS_API_KEY": "cloudru-fixture-key"
+        },
+        "transport": [
+          {
+            "kind": "response",
+            "body": {
+              "id": "gen-fixture-2",
+              "choices": [
+                {
+                  "index": 0,
+                  "finish_reason": "stop",
+                  "message": {
+                    "role": "assistant",
+                    "content": "ok"
+                  }
+                }
+              ],
+              "usage": {
+                "prompt_tokens": 200,
+                "completion_tokens": 10
+              }
+            }
+          }
+        ],
+        "pricing_estimate": 0.0005,
+        "call": {
+          "kind": "method",
+          "name": "chat",
+          "kwargs": {
+            "messages": [
+              {
+                "role": "system",
+                "content": "stable policy prefix"
+              },
+              {
+                "role": "user",
+                "content": "hello"
+              }
+            ],
+            "model": "cloudru::GLM-5"
+          }
+        }
+      },
+      "expected": {
+        "returned": {
+          "message": {
+            "role": "assistant",
+            "content": "ok",
+            "response_id": "gen-fixture-2"
+          },
+          "usage": {
+            "prompt_tokens": 200,
+            "completion_tokens": 10,
+            "response_finish_reason": "stop",
+            "provider": "cloudru",
+            "resolved_model": "cloudru/GLM-5",
+            "cost": 0.0005,
+            "cost_estimated": true,
+            "cost_final": false
+          },
+          "ledger_attempt_count": 1
+        },
+        "sends": [
+          {
+            "transport": "openai.chat.completions.create",
+            "client": {
+              "api_key": "cloudru-fixture-key",
+              "base_url": "https://foundation-models.api.cloud.ru/v1",
+              "default_headers": null,
+              "max_retries": 0,
+              "http_client": null
+            },
+            "payload": {
+              "model": "GLM-5",
+              "messages": [
+                {
+                  "role": "system",
+                  "content": "stable policy prefix"
+                },
+                {
+                  "role": "user",
+                  "content": "hello"
+                }
+              ],
+              "max_tokens": 65536
+            },
+            "payload_sha256": "1fff1ab5744555264b9994112da9bb1ade2b4125478274583415ea1932bb4d9a"
+          }
+        ],
+        "pricing_calls": [
+          {
+            "model": "cloudru/GLM-5",
+            "prompt_tokens": 200,
+            "completion_tokens": 10,
+            "cache_usage": {
+              "cached_tokens": 0,
+              "cache_write_tokens": 0,
+              "prompt_cache_ttl": null,
+              "cache_write_tokens_by_ttl": null
+            },
+            "allow_live_fetch": true,
+            "provider": "cloudru"
+          }
+        ],
+        "physical_attempts": [
+          {
+            "source": "llm.chat",
+            "model": "cloudru/GLM-5",
+            "provider": "cloudru",
+            "candidate_raw_sha256": "1fff1ab5744555264b9994112da9bb1ade2b4125478274583415ea1932bb4d9a",
+            "candidate_raw_size_bytes": 134,
+            "candidate_measurement_kind": "canonical_json_v1",
+            "states": [
+              "reserved",
+              "dispatched",
+              "settled"
+            ],
+            "prompt_cache_ttl": "",
+            "cost_final": false
+          }
+        ],
+        "unused_script_steps": 0
+      }
+    },
+    {
+      "id": "minimax.dispatch.happy_path",
+      "route": "chat -> MiniMax regional endpoint",
+      "spec": {
+        "env": {
+          "MINIMAX_API_KEY": "minimax-fixture-key"
+        },
+        "transport": [
+          {
+            "kind": "response",
+            "body": {
+              "id": "gen-fixture-2",
+              "choices": [
+                {
+                  "index": 0,
+                  "finish_reason": "stop",
+                  "message": {
+                    "role": "assistant",
+                    "content": "ok"
+                  }
+                }
+              ],
+              "usage": {
+                "prompt_tokens": 200,
+                "completion_tokens": 10
+              }
+            }
+          }
+        ],
+        "pricing_estimate": 0.0004,
+        "call": {
+          "kind": "method",
+          "name": "chat",
+          "kwargs": {
+            "messages": [
+              {
+                "role": "system",
+                "content": "stable policy prefix"
+              },
+              {
+                "role": "user",
+                "content": "hello"
+              }
+            ],
+            "model": "minimax::MiniMax-M2"
+          }
+        }
+      },
+      "expected": {
+        "returned": {
+          "message": {
+            "role": "assistant",
+            "content": "ok",
+            "response_id": "gen-fixture-2"
+          },
+          "usage": {
+            "prompt_tokens": 200,
+            "completion_tokens": 10,
+            "response_finish_reason": "stop",
+            "provider": "minimax",
+            "resolved_model": "minimax/MiniMax-M2",
+            "cost": 0.0004,
+            "cost_estimated": true,
+            "cost_final": false
+          },
+          "ledger_attempt_count": 1
+        },
+        "sends": [
+          {
+            "transport": "openai.chat.completions.create",
+            "client": {
+              "api_key": "minimax-fixture-key",
+              "base_url": "https://api.minimax.io/v1",
+              "default_headers": null,
+              "max_retries": 0,
+              "http_client": null
+            },
+            "payload": {
+              "model": "MiniMax-M2",
+              "messages": [
+                {
+                  "role": "system",
+                  "content": "stable policy prefix"
+                },
+                {
+                  "role": "user",
+                  "content": "hello"
+                }
+              ],
+              "max_tokens": 65536
+            },
+            "payload_sha256": "65a41fc52448a9eb26a9d2ac2eea731381971b2bac0582a3003d4c14506de338"
+          }
+        ],
+        "pricing_calls": [
+          {
+            "model": "minimax/MiniMax-M2",
+            "prompt_tokens": 200,
+            "completion_tokens": 10,
+            "cache_usage": {
+              "cached_tokens": 0,
+              "cache_write_tokens": 0,
+              "prompt_cache_ttl": null,
+              "cache_write_tokens_by_ttl": null
+            },
+            "allow_live_fetch": true,
+            "provider": "minimax"
+          }
+        ],
+        "physical_attempts": [
+          {
+            "source": "llm.chat",
+            "model": "minimax/MiniMax-M2",
+            "provider": "minimax",
+            "candidate_raw_sha256": "65a41fc52448a9eb26a9d2ac2eea731381971b2bac0582a3003d4c14506de338",
+            "candidate_raw_size_bytes": 139,
+            "candidate_measurement_kind": "canonical_json_v1",
+            "states": [
+              "reserved",
+              "dispatched",
+              "settled"
+            ],
+            "prompt_cache_ttl": "",
+            "cost_final": false
+          }
+        ],
+        "unused_script_steps": 0
+      }
+    }
+  ]
+}

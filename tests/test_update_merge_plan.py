@@ -27,6 +27,10 @@ def _init_repo(tmp_path):
 
 def _point_at(monkeypatch, repo):
     monkeypatch.setattr(git_ops, "REPO_DIR", repo)
+    # DRIVE_ROOT too: restore_update_stash(context="test") logs stash_restored
+    # through _log_supervisor — unpatched it leaked into the live
+    # data/logs/supervisor.jsonl (issue #455 repro).
+    monkeypatch.setattr(git_ops, "DRIVE_ROOT", repo.parent / "data")
     current = _git(repo, "symbolic-ref", "--short", "HEAD").stdout.strip()
     monkeypatch.setattr(git_ops, "BRANCH_DEV", current)
     monkeypatch.setattr(git_ops, "_managed_update_target", lambda: ("", "ouroboros", "remote-sim"))

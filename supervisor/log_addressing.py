@@ -9,7 +9,13 @@ from __future__ import annotations
 import logging
 from typing import Any, Dict
 
+from ouroboros.contracts.chat_id_policy import HIDDEN_CHAT_ID
+
 log = logging.getLogger(__name__)
+
+
+class ProjectThreadConflict(ValueError):
+    """An explicit chat id that would take a project-scoped run out of its room."""
 
 
 def resolve_project_chat(
@@ -37,6 +43,69 @@ def bound_project_chat_id(ctx: Any, task_id: Any, parent_task_id: Any = "", root
     return resolve_project_chat(
         getattr(ctx, "DRIVE_ROOT", None), task_id, parent_task_id, root_task_id
     )
+
+
+def ingress_chat_id(raw_chat_id: Any, drive_root: Any, project_id: Any = "") -> int:
+    """The address a headless/API task is admitted with (ingress capture rule).
+
+    A run scoped to a REGISTERED project is admitted into that project's thread,
+    so its dialogue, children and answer live in the room the owner already
+    opened; anything else (no project, or a workspace-derived id with no registry
+    row) stays in the hidden partition, where an unknown positive id would
+    instead leak into Main.
+
+    A registered project's run has exactly ONE destination, so an explicit
+    ``chat_id`` may only agree with it; anything else — the hidden partition
+    included — is refused with a typed conflict rather than honoured or silently
+    overridden, because a run addressed away from its room is the shape that puts
+    a card in Main whose project holds none of its work. Without such a project
+    the explicit id is the caller's, ``HIDDEN_CHAT_ID`` included: 0 is a real
+    session, never "missing", the same rule ``address_task_event`` enforces at
+    runtime. A value that is not a whole number (a JSON boolean or fraction
+    included) raises, so the caller keeps its typed 400. Lifecycle is NOT
+    consulted here: ``queue.enqueue_task`` fences a non-active project before an
+    address can matter, and a project deleted mid-run keeps its reserved chat.
+    """
+    project_chat = None
+    reserved_chat = None
+    pid = str(project_id or "").strip()
+    if pid:
+        try:
+            from ouroboros.projects_registry import get_reserved_project
+
+            from ouroboros.projects_registry import PROJECT_ACTIVE
+
+            row = get_reserved_project(drive_root, pid) or {}
+            if row.get("chat_id") is not None:
+                reserved_chat = int(row["chat_id"])
+                # Only an ACTIVE project supplies an address. An inactive one
+                # keeps its reserved chat and stays ACCEPTABLE, so its admission
+                # is refused by the queue's lifecycle fence with its own typed
+                # reason instead of by a different error at a different layer.
+                if str(row.get("lifecycle") or "") == PROJECT_ACTIVE:
+                    project_chat = reserved_chat
+        except Exception:
+            log.debug("ingress project chat lookup failed for %s", pid, exc_info=True)
+    if raw_chat_id is None:
+        return project_chat if project_chat is not None else HIDDEN_CHAT_ID
+    if isinstance(raw_chat_id, bool):
+        raise ValueError("chat_id must be an integer, not a boolean")
+    chat_id = int(raw_chat_id)
+    if isinstance(raw_chat_id, float) and chat_id != raw_chat_id:
+        raise ValueError("chat_id must be a whole number")
+    if project_chat is not None and chat_id != project_chat:
+        raise ProjectThreadConflict(
+            "chat_id conflicts with the task's project thread: a run scoped to a "
+            "registered project is admitted into that project's thread, and cannot "
+            "be addressed anywhere else"
+        )
+    if project_chat is None and chat_id not in (HIDDEN_CHAT_ID, reserved_chat):
+        raise ProjectThreadConflict(
+            "chat_id is not available to a task with no registered active project: "
+            "externally launched work lives in its project's thread or in the hidden "
+            "partition, never in a conversation of its own"
+        )
+    return chat_id
 
 
 def address_task_event(running: Any, drive_root: Any, payload: Dict[str, Any]) -> Dict[str, Any]:

@@ -66,6 +66,7 @@ def _seed_orphan_swarm(data_dir: pathlib.Path) -> None:
     results.mkdir(parents=True, exist_ok=True)
     (results / "swarm-root.json").write_text(
         json.dumps({
+            "_schema_version": 1,
             "task_id": "swarm-root",
             "status": "completed",
             "summary": "swarm finished",

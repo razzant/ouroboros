@@ -44,6 +44,25 @@ def test_execution_wire_uses_returned_usage_only_and_allowlists_fields():
     ]) == [{"kind": "api", "model": "m"}]
 
 
+def test_native_tool_round_delivery_is_its_own_execution_kind():
+    """A native episode is an API execution with a different DELIVERY; the
+    public wire says so (kind ``native``), and the identity keeps it distinct
+    from a packet execution on the same model."""
+    actors = [
+        {"usage": {"provider": "openai", "resolved_model": "gpt-5.6-sol", "cost": 0.4,
+                   "delivery": "native_tool_rounds", "native_rounds": 7}},
+        {"usage": {"provider": "openai", "resolved_model": "gpt-5.6-sol", "cost": 0.2}},
+        {"usage": {"delivery": "native_tool_rounds"}},  # no receipt: no execution
+    ]
+    assert review_executions_from_actor_usage(actors) == [
+        {"kind": "native", "model": "gpt-5.6-sol"},
+        {"kind": "api", "model": "gpt-5.6-sol"},
+    ]
+    assert normalize_review_executions([
+        {"kind": "native", "model": "m", "native_rounds": 7},
+    ]) == [{"kind": "native", "model": "m"}]
+
+
 def test_empty_receipt_placeholders_do_not_mint_api_execution_badges():
     assert review_executions_from_actor_usage([
         {"usage": {"ledger_attempt_ids": []}},

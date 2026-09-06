@@ -1026,6 +1026,12 @@ test('attempt marks require explicit executed receipts, render every production 
 
     const api = reviewExecutionEvidence({ executed: { kind: 'api_chat', model: 'openai\/gpt' } });
     assert.deepEqual(api, { harness: 'api', channel: 'api', label: '', model: 'openai\/gpt' });
+    // A native tool-round episode renders as the API channel with its delivery named — never null.
+    const native = reviewExecutionEvidence({ kind: 'native', model: 'openai/gpt' });
+    assert.deepEqual(native, { harness: 'api', channel: 'api', label: 'API · native tool rounds', model: 'openai/gpt' });
+    assert.equal(reviewExecutionEvidenceList([
+        { kind: 'native', model: 'openai/gpt' }, { kind: 'api', model: 'openai/gpt' },
+    ]).length, 2);
 });
 
 test('attempt provenance stays per attempt and is promoted to group only when uniform', () => {

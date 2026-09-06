@@ -58,11 +58,14 @@ def _read_jsonl(path: Path) -> list[dict[str, Any]]:
 def _read_jsonl_chain(data_dir: Path, name: str, archive_prefix: str) -> list[dict[str, Any]]:
     """Read ``logs/<name>`` plus its rotated ``archive/<prefix>_*.jsonl`` chain.
 
-    The runtime rotates chat.jsonl and progress.jsonl into ``archive/`` once they
+    The runtime rotates chat.jsonl, progress.jsonl and — since the CPL4-C1/C2
+    rotation train — events.jsonl and tools.jsonl into ``archive/`` once they
     cross ~800KB. Rotation is suppressed in sentinel-marked isolated benchmark
     roots, but not every harness writes the sentinel — so the trajectory builder
     must read the full chain (oldest archive first, then live) rather than assume
-    a from-birth single file."""
+    a from-birth single file. Every ATIF source goes through here: a live-only
+    read of a rotated log publishes a trajectory missing its early tool calls,
+    which is a FALSE trajectory, not a short one."""
     rows: list[dict[str, Any]] = []
     try:
         archives = sorted((data_dir / "archive").glob(f"{archive_prefix}_*.jsonl"))
@@ -239,11 +242,12 @@ def build_trajectory(
 ) -> dict[str, Any]:
     """Build an ATIF trajectory dict from a Harbor trial ``agent/`` directory."""
     agent_dir = Path(agent_dir)
-    logs_dir = agent_dir / "ouroboros-data" / "logs"
-
-    events = _read_jsonl(logs_dir / "events.jsonl")
+    data_dir = agent_dir / "ouroboros-data"
+    events = _read_jsonl_chain(data_dir, "events.jsonl", "events")
     tool_rows = [
-        r for r in _read_jsonl(logs_dir / "tools.jsonl") if r.get("type") == "tool_call"
+        r
+        for r in _read_jsonl_chain(data_dir, "tools.jsonl", "tools")
+        if r.get("type") == "tool_call"
     ]
     narration_rows = [
         r

@@ -98,7 +98,10 @@ def test_sse_incremental_follow_appends_with_monotonic_seq(tmp_path):
             _finalize(data, "t1")
             fired["finalized"] = True
 
-    response = asyncio.run(api_task_events(_request(data, "t1")))
+    # The stream closes at the wait deadline with a heartbeat; on a loaded
+    # macOS runner the default 8 s elapsed before the appended row and the
+    # finalization were observed. Finalization still ends the stream early.
+    response = asyncio.run(api_task_events(_request(data, "t1", wait=60)))
     events = asyncio.run(_consume(response, on_event))
 
     contents = [(e.get("data") or {}).get("content") for e in events if e["type"] == "progress"]

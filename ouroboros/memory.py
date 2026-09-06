@@ -834,14 +834,22 @@ class Memory:
         exclude_a2a: bool = False,
     ) -> List[Dict[str, Any]]:
         path = self.logs_path(log_name)
-        if not path.exists():
-            return []
         try:
-            entries = []
-            for entry in iter_jsonl_objects(path, max_entries=max_entries):
-                if exclude_a2a and is_a2a_chat_id(entry.get("chat_id")):
-                    continue
-                entries.append(entry)
+            def _rows(source, cap):
+                return [e for e in iter_jsonl_objects(source, max_entries=cap)
+                        if not (exclude_a2a and is_a2a_chat_id(e.get("chat_id")))]
+
+            entries = _rows(path, max_entries)
+            if max_entries is not None and len(entries) < max_entries:
+                # Rotation-aware backfill (CPL4-C2..C4): newest archive segments
+                # top a freshly rotated tail back up; unbounded reads keep
+                # live-file-only semantics (their consumers own their chains).
+                from ouroboros.utils import jsonl_archive_segments
+
+                for segment in reversed(jsonl_archive_segments(path)):
+                    if len(entries) >= max_entries:
+                        break
+                    entries = _rows(segment, max_entries - len(entries)) + entries
             return entries
         except Exception:
             log.warning("Failed to read JSONL entries from %s", log_name, exc_info=True)

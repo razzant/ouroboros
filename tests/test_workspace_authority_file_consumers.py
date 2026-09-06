@@ -16,6 +16,8 @@ from ouroboros.tools import git as git_tools
 from ouroboros.tools.registry import ToolContext, ToolRegistry
 from ouroboros.tools.skill_preflight import _handle_skill_preflight
 
+from tests._shared import reconcile_receipt
+
 
 def _manifest(name: str) -> str:
     return (
@@ -201,7 +203,7 @@ def test_review_lifecycle_enablement_and_job_state_follow_binding_state_root(
     )
     monkeypatch.setattr(
         runner, "_reconcile_extension_payload",
-        lambda *_args, **_kwargs: ("extension_inactive", "not_extension"),
+        lambda *_args, **_kwargs: reconcile_receipt("extension_inactive", "not_extension"),
     )
 
     result = run_skill_review_lifecycle_blocking(

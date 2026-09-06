@@ -1,0 +1,146 @@
+{
+  "purpose": "One status-word family across the browser and the host. Every case is a terminal-or-not task record read by log_events.js (taskDoneIsTerminal + taskTerminalPhase + taskPresentation) and by ouroboros.project_dialogue (outcome_phase + OUTCOME_PHASE_HEADLINE + _completion_verdict). A new axis, reason or acceptance status is added to both sides in the same commit, with a row here.",
+  "cases": [
+    {
+      "name": "clean completed root",
+      "record": {"status": "completed", "outcome_axes": {"execution": {"status": "ok"}}},
+      "phase": "done",
+      "headline": "Done",
+      "acceptance_clause": ""
+    },
+    {
+      "name": "completed while post-task synthesis is still open reads Working on both sides",
+      "record": {
+        "status": "completed",
+        "outcome_axes": {"execution": {"status": "ok"}},
+        "root_phase_checkpoint": {"post_task_synthesis": "running"}
+      },
+      "phase": "working",
+      "headline": "Working",
+      "acceptance_clause": ""
+    },
+    {
+      "name": "legacy task_done frame carrying status done stays terminal",
+      "record": {"status": "done", "outcome_axes": {"execution": {"status": "ok"}}},
+      "phase": "done",
+      "headline": "Done",
+      "acceptance_clause": ""
+    },
+    {
+      "name": "cancelled outranks failure-shaped teardown side facts",
+      "record": {
+        "status": "cancelled",
+        "outcome_axes": {"lifecycle": {"status": "cancelled"}, "artifacts": {"status": "missing"}}
+      },
+      "phase": "cancelled",
+      "headline": "Cancelled",
+      "acceptance_clause": ""
+    },
+    {
+      "name": "legacy cancel_requested event spelling",
+      "record": {"status": "cancel_requested"},
+      "phase": "cancelled",
+      "headline": "Cancelled",
+      "acceptance_clause": ""
+    },
+    {
+      "name": "failed review is a failure",
+      "record": {
+        "status": "completed",
+        "outcome_axes": {"execution": {"status": "ok"}, "review": {"status": "fail"}}
+      },
+      "phase": "error",
+      "headline": "Failed",
+      "acceptance_clause": ""
+    },
+    {
+      "name": "owner-requested finalization is a success, not a warning",
+      "record": {
+        "status": "completed",
+        "reason_code": "owner_requested_finalization",
+        "outcome_axes": {"execution": {"status": "best_effort"}}
+      },
+      "phase": "done",
+      "headline": "Done",
+      "acceptance_clause": ""
+    },
+    {
+      "name": "scheduler duplicate rejection is a warning",
+      "record": {"status": "rejected_duplicate", "outcome_axes": {"lifecycle": {"status": "rejected_duplicate"}}},
+      "phase": "warn",
+      "headline": "Done with warnings",
+      "acceptance_clause": ""
+    },
+    {
+      "name": "degraded review with an unaccepted acceptance decision",
+      "record": {
+        "status": "completed",
+        "reason_code": "final_message",
+        "outcome_axes": {
+          "execution": {"status": "ok"},
+          "review": {
+            "status": "degraded",
+            "acceptance_decision": {
+              "status": "finalized_unaccepted",
+              "rationale": "Acceptance reviewers did not reach a valid quorum."
+            }
+          }
+        }
+      },
+      "phase": "warn",
+      "headline": "Done with warnings",
+      "acceptance_clause": "Acceptance: finalized_unaccepted — Acceptance reviewers did not reach a valid quorum."
+    },
+    {
+      "name": "an accepted decision leaves the execution reason standing",
+      "record": {
+        "status": "completed",
+        "reason_code": "final_message",
+        "outcome_axes": {
+          "execution": {"status": "ok"},
+          "review": {"status": "pass", "acceptance_decision": {"status": "accepted", "rationale": "Quorum reached."}}
+        }
+      },
+      "phase": "done",
+      "headline": "Done",
+      "acceptance_clause": ""
+    },
+    {
+      "name": "a revision request without a rationale states the status alone",
+      "record": {
+        "status": "completed",
+        "outcome_axes": {
+          "execution": {"status": "degraded"},
+          "review": {"status": "degraded", "acceptance_decision": {"status": "revision_requested"}}
+        }
+      },
+      "phase": "warn",
+      "headline": "Done with warnings",
+      "acceptance_clause": "Acceptance: revision_requested."
+    },
+    {
+      "name": "a hard failure explains itself by its execution reason, not by the decision",
+      "record": {
+        "status": "failed",
+        "reason_code": "delegated_custody_unreconciled",
+        "outcome_axes": {
+          "execution": {"status": "failed"},
+          "review": {"status": "degraded", "acceptance_decision": {"status": "finalized_unaccepted", "rationale": "No quorum."}}
+        }
+      },
+      "phase": "error",
+      "headline": "Failed",
+      "acceptance_clause": ""
+    },
+    {
+      "name": "an objective warning is a warning even when every status word is clean",
+      "record": {
+        "status": "completed",
+        "outcome_axes": {"execution": {"status": "ok"}, "objective": {"status": "pass", "warning": "partial coverage"}}
+      },
+      "phase": "warn",
+      "headline": "Done with warnings",
+      "acceptance_clause": ""
+    }
+  ]
+}

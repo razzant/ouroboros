@@ -34,6 +34,7 @@ from typing import Any, Dict, List, Optional
 
 from ouroboros.utils import update_json_locked, utc_now_iso
 from ouroboros.task_finalization import (
+    HOST_AUTHORED_TERMINAL_ORIGINS,
     TERMINAL_ORIGIN_HOST_SALVAGE,
     TERMINAL_ORIGIN_MODEL_FINAL,
 )
@@ -719,10 +720,13 @@ def project_terminal_result_event(
     """Project one terminal event from producer-stamped origin.
 
     ``host_salvage`` becomes one short keyed plain System receipt (inherited
-    ``format``/``log_text`` dropped; the full bytes stay in task details);
-    ``model_final`` and a missing legacy origin keep the assistant projection
-    untouched — no text/status/length inference. The delivery id always
-    digests the stable core result rather than a mutable disclosure suffix.
+    ``format``/``log_text`` dropped; the full bytes stay in task details).
+    ``host_notice`` is a text the host wrote alone, so it keeps its OWN words
+    and inherited markdown and becomes a System row WITHOUT a system_type,
+    which is what lets a replayed card conclude on it. ``model_final`` and a
+    missing legacy origin keep the assistant projection untouched — no
+    text/status/length inference. The delivery id always digests the stable
+    core result rather than a mutable disclosure suffix.
     """
     tid = str(task_id or "")
     core_text = str(result_text or "")
@@ -732,19 +736,22 @@ def project_terminal_result_event(
     event.setdefault("chat_id", lineage_chat_id(drive_root, task or {}, tid))
     event["delivery_id"] = delivery_id_for(tid, core_text)
     origin = str(terminal_origin or "")
-    if origin == TERMINAL_ORIGIN_HOST_SALVAGE:
+    if origin in HOST_AUTHORED_TERMINAL_ORIGINS:
+        salvage = origin == TERMINAL_ORIGIN_HOST_SALVAGE
         event.update({
-            "text": _HOST_SALVAGE_RECEIPT,
+            "text": _HOST_SALVAGE_RECEIPT if salvage else (event.get("text") or core_text),
             "role": "system",
-            "system_type": "terminal_incident",
-            "terminal_origin": TERMINAL_ORIGIN_HOST_SALVAGE,
+            "terminal_origin": origin,
+            **({"system_type": "terminal_incident"} if salvage else {}),
         })
-        event.pop("log_text", None)
-        event.pop("format", None)
+        if salvage:
+            event.pop("log_text", None)
+            event.pop("format", None)
         return event
     if origin == TERMINAL_ORIGIN_MODEL_FINAL:
         event["terminal_origin"] = TERMINAL_ORIGIN_MODEL_FINAL
-    # Missing origin remains absent so legacy rows replay byte-compatibly.
+    # A missing origin now identifies only a row written before every forced
+    # rail stamped one; it stays absent so legacy rows replay byte-compatibly.
     return event
 
 

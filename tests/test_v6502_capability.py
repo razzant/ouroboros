@@ -3,7 +3,7 @@
 import json
 
 from ouroboros.tools.verify import _expected_matches
-from ouroboros.loop import _contract_expected_output
+from ouroboros.loop_nudges import _contract_expected_output
 from ouroboros.agent_task_pipeline import _build_swarm_efficiency
 
 

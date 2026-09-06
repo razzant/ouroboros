@@ -1,16 +1,16 @@
 from __future__ import annotations
 
-from ouroboros.extension_loader import PluginAPIImpl
+from ouroboros.extension_loader import PluginAPIImpl, _PluginAPIConfig
 
 
 def test_skill_job_dir_creates_isolated_job_tree(tmp_path):
-    api = PluginAPIImpl(
+    api = PluginAPIImpl(_PluginAPIConfig(
         skill_name="demo",
         permissions=[],
         env_allowlist=[],
         state_dir=tmp_path / "state",
         settings_reader=lambda: {},
-    )
+    ))
 
     job_dir = api.skill_job_dir("scene/001:retry")
 
@@ -23,13 +23,13 @@ def test_skill_job_dir_creates_isolated_job_tree(tmp_path):
 
 
 def test_skill_job_dir_sanitizes_empty_and_long_ids(tmp_path):
-    api = PluginAPIImpl(
+    api = PluginAPIImpl(_PluginAPIConfig(
         skill_name="demo",
         permissions=[],
         env_allowlist=[],
         state_dir=tmp_path / "state",
         settings_reader=lambda: {},
-    )
+    ))
 
     assert api.skill_job_dir("...").name.startswith("_job-")
     assert len(api.skill_job_dir("x" * 100).name) == 64

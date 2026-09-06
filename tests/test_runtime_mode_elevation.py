@@ -872,44 +872,38 @@ def test_every_settings_writer_routes_through_the_shared_prologue():
 
     Rounds three, four and five each fixed the disk-authored-key rule on ONE path while a sibling
     path kept bypassing it (sibling keys, then the projection, then the generic owner POST). The
-    rule now lives in ``config.prepare_settings_for_persist``, and this test enumerates every
-    function that writes the settings file so a NEW writer cannot quietly reintroduce the shape:
-    it must either route through the prologue or be added here with a reason.
+    rule now lives in ``config.prepare_settings_for_persist``, and this test walks every function
+    in the tree that writes a settings document (``tests._shared.settings_writers``, the one
+    predicate the byte pin's inventory is closed over too) so a NEW writer cannot quietly
+    reintroduce the shape: it must route through the prologue or be exempted here with a reason,
+    AND it must join ``SETTINGS_WRITERS`` so the byte pin drives it — a routed sixth writer is
+    still a sixth writer, and one outside this closed set is exactly what the scan exists to see.
     """
-    import ast
     import pathlib
-    import re
+
+    from tests._shared import SETTINGS_WRITERS, settings_writers
 
     # (module, function) -> why it may write settings.json without the prologue
     exempt = {
         ("ouroboros/context_mode_compat.py", "normalize_and_persist_context_mode_compat"):
             "one-window startup migration: while the settings lock is held, atomically rewrites "
-            "only the raw document's context compatibility pair. Routing through the prologue "
-            "would merge defaults and turn unrelated absence into authorship.",
-        ("ouroboros/usage_accounting.py", "_legacy_snapshot"):
+            "the raw document with only its context compatibility pair changed, in serializer "
+            "bytes. Routing through the prologue would merge defaults and turn unrelated absence "
+            "into authorship.",
+        ("ouroboros/usage_legacy_import.py", "_legacy_snapshot"):
             "reads/hashes the settings file for the usage archive; its writes target the archive.",
         ("ouroboros/tools/core.py", "_data_write"):
             "names SETTINGS_PATH only to REFUSE agent writes to it.",
+        ("ouroboros/colab_bootstrap.py", "write_colab_settings"):
+            "writes the generated document for ANOTHER root (the Colab Drive data dir) in "
+            "serialize_settings bytes. The prologue proves its ratchets against the value on "
+            "THIS process's disk, so routing a foreign path through it would answer the wrong file.",
     }
     # Keys are POSIX-normalised: `str(WindowsPath(...))` is backslash-separated, so on Windows
     # every `exempt` lookup below would miss and every hardcoded assertion at the end would
     # fail — turning the tripwire into either a red matrix or, worse, a guard that flags the
     # exempted writers while silently vouching for nothing.
-    writers = {}
-    for path in sorted(pathlib.Path("ouroboros").rglob("*.py")) + [pathlib.Path("server.py")]:
-        src = path.read_text(encoding="utf-8")
-        if "SETTINGS_PATH" not in src and "atomic_write_json" not in src:
-            continue
-        for node in ast.walk(ast.parse(src)):
-            if not isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
-                continue
-            seg = ast.get_source_segment(src, node) or ""
-            settings_write = (
-                "SETTINGS_PATH" in seg
-                and re.search(r"\.write_text\(|atomic_write_json\(|json\.dump\(", seg)
-            ) or "atomic_write_json(settings_path" in seg
-            if settings_write:
-                writers[(path.as_posix(), node.name)] = "prepare_settings_for_persist" in seg
+    writers = settings_writers(pathlib.Path(__file__).resolve().parents[1])
 
     unrouted = {k for k, routed in writers.items() if not routed and k not in exempt}
     assert not unrouted, (
@@ -918,9 +912,22 @@ def test_every_settings_writer_routes_through_the_shared_prologue():
         f"(naming any key they genuinely author in `authored_keys`), or add them to `exempt` with "
         f"a reason. Do not re-implement the silence/ratchet rule at the call site."
     )
-    # The two real writers must still BE routed — deleting the call must fail this test.
+    # The inventory is CLOSED over the scanned roots, routed or not: the flagged set is exactly
+    # the writers the byte pin drives plus the matches declared above as non-writers.
+    expected = set(SETTINGS_WRITERS) | set(exempt)
+    assert set(writers) == expected, (
+        f"the settings-writer inventory drifted: {sorted(set(writers) ^ expected)}. A function "
+        f"that persists a settings document belongs in tests._shared.SETTINGS_WRITERS, where the "
+        f"byte pin in tests/test_settings_read_seam.py drives it; one this scan flags without "
+        f"persisting a settings document belongs in `exempt` with a reason; a stale entry leaves "
+        f"whichever list holds it."
+    )
+    # The three real writers must still BE routed — deleting the call must fail this test.
+    # The owner endpoints' write lives in the locked read-modify-write primitive that
+    # `_owner_write_settings` is now one caller of.
     assert writers.get(("ouroboros/config.py", "save_settings")) is True
-    assert writers.get(("ouroboros/gateway/owner_settings.py", "_owner_write_settings")) is True
+    assert writers.get(("ouroboros/gateway/owner_settings.py", "_owner_update_settings")) is True
+    assert writers.get(("ouroboros/packaged_cli.py", "_save_settings")) is True
 
 
 def test_generic_settings_post_does_not_author_a_mode_decision(isolated_settings, monkeypatch):
@@ -941,7 +948,6 @@ def test_generic_settings_post_does_not_author_a_mode_decision(isolated_settings
     from ouroboros.gateway import settings as settings_mod
     from ouroboros.gateway.settings import api_settings_post
 
-    monkeypatch.setattr(_os, "environ", dict(_os.environ))
     _own_ratchet_env(monkeypatch)
     _os.environ["OUROBOROS_CONTEXT_MODE"] = "low"  # forwarded by the benchmark launcher
     _os.environ["OUROBOROS_SAFETY_MODE"] = "light"
@@ -980,7 +986,6 @@ def test_owner_endpoint_authors_its_own_key_even_at_the_default(isolated_setting
     from ouroboros import config as cfg
     from ouroboros.gateway.settings import api_owner_safety_mode
 
-    monkeypatch.setattr(_os, "environ", dict(_os.environ))
     _own_ratchet_env(monkeypatch)
     _os.environ["OUROBOROS_SAFETY_MODE"] = "light"
     _seed_disk(isolated_settings, {"TOTAL_BUDGET": "10"})
@@ -1013,9 +1018,8 @@ def test_env_forwarded_modes_survive_the_documented_startup_path(isolated_settin
 
     from ouroboros import config as cfg
 
-    # Own the WHOLE environment: apply_settings_to_env writes ~122 keys, so a real copy is the only
-    # honest ownership boundary here (the same technique the auto-low regression test uses).
-    monkeypatch.setattr(_os, "environ", dict(_os.environ))
+    # Own every mode key: apply_settings_to_env writes ~122 keys, and the autouse
+    # os.environ snapshot restores the rest after the test.
     _own_ratchet_env(monkeypatch)
     _os.environ["OUROBOROS_CONTEXT_MODE"] = "low"
     _os.environ["OUROBOROS_SAFETY_MODE"] = "light"
@@ -1066,7 +1070,6 @@ def test_agent_save_cannot_end_a_forwarded_mode_mid_run(isolated_settings, monke
     from ouroboros import config as cfg
     from ouroboros.tools.control import _set_tool_timeout
 
-    monkeypatch.setattr(_os, "environ", dict(_os.environ))  # the tool writes os.environ via apply
     _own_ratchet_env(monkeypatch)
     _os.environ["OUROBOROS_CONTEXT_MODE"] = "low"
     _os.environ["OUROBOROS_SAFETY_MODE"] = "light"
@@ -2098,13 +2101,12 @@ def test_shell_settings_tripwire_flags_obfuscated_owner_settings_write(tmp_path,
         return "done"
 
     reg.override_handler("run_command", _sneaky_writer)
-    result = reg.execute("run_command", {"cmd": ["true"]})
-
-    from ouroboros.tools.result_envelope import typed_result_meta
+    typed = reg.execute_result("run_command", {"cmd": ["true"]})
+    result = typed.text
 
     assert result.lstrip().startswith("done"), result[:300]  # payload owns line 1
     assert "⚠️ OWNER_SETTINGS_CHANGED" in result, result[:300]  # note appended, payload not replaced
-    assert (typed_result_meta(result) or {}).get("tripwire") == "owner_settings_changed"
+    assert dict(typed.meta).get("tripwire") == "owner_settings_changed"
     # Detect-and-report: the write is disclosed, not silently reverted.
     assert settings.read_text(encoding="utf-8") == '{"OWNER": "hijacked"}'
 

@@ -4,8 +4,9 @@ A reviewer row may reference an ``OUROBOROS_SUBAGENTS`` roster row instead of
 carrying an inline route. Resolution happens once at load/admission from the
 APPLIED env; the resolved slot carries the actor id as identity/provenance and
 the roster row's execution facts. An api_model actor is the RETRIEVES class
-(bounded native tool rounds) and must never enter the assembled-packet plane:
-not the pack-assembly predicate, not the D15 acceptance projection.
+(bounded native tool rounds) and must never enter the assembled-packet plane
+(the pack-assembly predicate); its roster model id still projects into the
+legacy comma key, which no review surface reads once the structured key exists.
 """
 
 import json
@@ -112,29 +113,38 @@ def test_empty_subagent_id_refuses(roster_env):
         parse_reviewer_slots(_payload([{"slot_id": "t1", "subagent_id": "  "}]))
 
 
-def test_actor_rows_never_project_into_api_only_acceptance(roster_env):
-    """D15: only DIRECT api_chat rows feed the legacy comma-key projection."""
+def test_api_rows_of_both_forms_project_their_model_ids_into_the_legacy_key(roster_env):
+    """The legacy comma key is a projection of api MODEL IDS for legacy readers
+    (external review tooling, benchmark manifests) — an actor row's roster model
+    id is one, a session row's `harness[=model]` target is not. No review surface
+    reads the key while the structured key exists (owner R2 retired the acceptance
+    pin that used to filter actor rows out of it)."""
     roster_env.setenv(REVIEWER_SLOTS_ENV, _payload([
         {"slot_id": "t1", "subagent_id": "api-critic"},
         {"slot_id": "t2", "route": {"kind": "api_chat", "target_id": "openai/gpt-5.5"}},
+        {"slot_id": "t3", "subagent_id": "session-critic"},
     ]))
     project_reviewer_slots_into_env()
-    assert roster_env is not None
     import os
 
-    assert os.environ["OUROBOROS_REVIEW_MODELS"] == "openai/gpt-5.5"
+    assert os.environ["OUROBOROS_REVIEW_MODELS"] == "openai/gpt-5.6-terra,openai/gpt-5.5"
 
 
-def test_actor_only_triad_discloses_acceptance_fallback(roster_env):
-    """A triad of actors and sessions leaves API-only acceptance on defaults."""
-    from ouroboros.reviewer_slot_config import api_fallback_disclosure
+def test_actor_and_session_triad_reaches_acceptance_as_configured(roster_env):
+    """A triad of a native-retrieving actor and a session row IS the acceptance
+    panel (R0/R2): no API-default substitution, no disclosure of one, both
+    rows carried with their actor binding and pin."""
+    from ouroboros.reviewer_slot_config import triad_delivery_slots
 
     roster_env.setenv(REVIEWER_SLOTS_ENV, _payload([
         {"slot_id": "t1", "subagent_id": "api-critic"},
         {"slot_id": "t2", "subagent_id": "session-critic"},
     ]))
-    disclosure = api_fallback_disclosure(load_reviewer_slot_config())
-    assert "triad" in disclosure
+    slots = triad_delivery_slots(role_hint="task acceptance")
+    assert [slot.slot_id for slot in slots] == ["t1", "t2"]
+    assert slots[0].native_retrieval and slots[0].subagent_id == "api-critic"
+    assert slots[1].route.value == "agent_session" and slots[1].session_profile == "profile-1"
+    assert all(slot.retrieves for slot in slots)
 
 
 def test_commit_triad_delivery_carries_actor_vector(roster_env):

@@ -77,6 +77,17 @@ function setMobileDrawerOpen(open, { sync = true } = {}) {
     if (sync) syncNavigationState();
 }
 
+// The application's one client-side route: a `#<page>` fragment, honoured once
+// on load and validated against the injected sections rather than against a
+// duplicated page list — the DOM is the single source of truth, so an unknown
+// fragment is ignored instead of painting a blank surface. Deliberately NOT
+// written back on navigation: the desktop shell and the Telegram mini app have
+// no address bar to read it from.
+function pageFromHash() {
+    const name = String(window.location.hash || '').replace(/^#/, '').trim();
+    return name && document.getElementById(`page-${name}`) ? name : '';
+}
+
 async function showPage(name, options = {}) {
     const pageName = String(name || '').trim();
     if (!pageName) return false;
@@ -713,6 +724,8 @@ initOnboardingOverlay();
 initMatrixRain();
 loadVersion();
 syncNavigationState();
+const hashPage = pageFromHash();
+if (hashPage && hashPage !== state.activePage) showPage(hashPage);
 
 // Mobile soft-keyboard handling: viewport shrink counts only while an editable
 // owns focus. Drawer opening clears that state explicitly before navigation is

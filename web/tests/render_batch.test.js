@@ -5,6 +5,7 @@ import { readFileSync } from 'node:fs';
 import {
     LOAD_OLDER_QUOTA_STEPS,
     createHistoryResyncScheduler,
+    createLiveCardBound,
     createRebuildBatch,
     createTimelineAnchors,
     loadOlderControlState,
@@ -224,6 +225,105 @@ test('a LIVE finished transition (outside a replay) schedules a real 700ms resyn
     assert.equal(timers.pending.length, 0);
 });
 
+test('the live-card bound arms past the cap relative to the last rebuild', () => {
+    const bound = createLiveCardBound(200);
+    assert.equal(bound.isArmed(), false);
+    bound.observe(200);
+    assert.equal(bound.isArmed(), false, 'the bound is exceeded-by-one, not reached');
+    bound.observe(201);
+    assert.equal(bound.isArmed(), true);
+    // The rebuild consumes the arm and the population it produced becomes the floor:
+    // a window that itself holds more than the cap must not re-arm on the next card.
+    bound.settle({ rebuilt: true, size: 210 });
+    assert.equal(bound.isArmed(), false);
+    bound.observe(211);
+    assert.equal(bound.isArmed(), false);
+    bound.observe(411);
+    assert.equal(bound.isArmed(), true);
+});
+
+test('an arm raised while a sync is in flight is not consumed by that sync', () => {
+    // The window that sync fetched predates the arm, so it cannot answer for the
+    // cards that raised it: consuming the arm there would rebuild from a stale
+    // window, drop the newest cards, and leave nothing armed to replay them.
+    const bound = createLiveCardBound(200);
+    const armedAtStart = bound.begin();
+    assert.equal(armedAtStart, false);
+    bound.beginReplay();
+    bound.observe(201);                       // the window's own rows cross the cap
+    bound.settle({ rebuilt: false, size: 201 });
+    assert.equal(bound.isArmed(), true, 'the arm survives for the next sync');
+    const nextArmed = bound.begin();
+    assert.equal(nextArmed, true);
+    bound.settle({ rebuilt: true, size: 0 });
+    assert.equal(bound.isArmed(), false);
+});
+
+test('an arm raised while the fetch was in flight outlives that rebuild', () => {
+    // A reconnect (or first load, or Load older) fetches a window, and live cards
+    // cross the cap while it is in flight. That rebuild erases those cards from a
+    // window that never contained them, so its arm is NOT answered: the next sync
+    // fetches a window that does contain them.
+    const bound = createLiveCardBound(200);
+    assert.equal(bound.begin(), false);
+    bound.observe(201);                       // live frames, still in flight
+    bound.beginReplay();                      // the synchronous replay starts here
+    bound.settle({ rebuilt: true, size: 0 });
+    assert.equal(bound.isArmed(), true, 'the older window did not answer this arm');
+    assert.equal(bound.begin(), true);
+    bound.beginReplay();
+    bound.settle({ rebuilt: true, size: 0 });
+    assert.equal(bound.isArmed(), false, 'the fresh window did');
+});
+
+test('a rebuild consumes an arm its own replay raised, and does not loop', () => {
+    // The bootstrap rebuild replays a window that itself holds more than the cap.
+    // That mints the cards, so the arm it raises is answered by the very replay that
+    // raised it: the new floor is that population and the next sync stays routine.
+    const bound = createLiveCardBound(200);
+    assert.equal(bound.begin(), false);
+    bound.beginReplay();
+    bound.observe(210);                       // the window's own rows mint these
+    assert.equal(bound.isArmed(), true);
+    bound.settle({ rebuilt: true, size: 210 });
+    assert.equal(bound.isArmed(), false);
+    bound.observe(211);
+    assert.equal(bound.isArmed(), false, 'no rebuild storm on a window above the cap');
+});
+
+test('while a full rebuild is armed, later completions cannot push the resync out', () => {
+    // The live-card bound arms the rebuild and waits for the next history sync. That
+    // sync is this debounced resync, and every completion used to restart its timer:
+    // completions arriving faster than 700ms starved it for as long as the burst
+    // lasted, which is precisely the busy session the bound exists for.
+    const timers = makeFakeTimers();
+    let runs = 0;
+    const scheduler = createHistoryResyncScheduler({
+        isReplayActive: () => false,
+        run: () => { runs += 1; },
+        setTimer: timers.setTimer,
+        clearTimer: timers.clearTimer,
+    });
+    const armed = true;
+    assert.equal(scheduler.schedule(armed), true);
+    const first = timers.pending[0];
+    for (let i = 0; i < 50; i += 1) scheduler.schedule(armed);
+    assert.equal(timers.pending.length, 1);
+    assert.equal(timers.pending[0], first, 'the original deadline survived the burst');
+    timers.fire();
+    assert.equal(runs, 1);
+    // Unarmed scheduling keeps debouncing: a quiet session still coalesces.
+    scheduler.schedule();
+    const second = timers.pending[0];
+    scheduler.schedule();
+    assert.equal(timers.pending.length, 1);
+    assert.notEqual(timers.pending[0], second);
+});
+
+test('chat.js hands the armed flag to the scheduler', () => {
+    assert.match(chatSource, /historyResyncScheduler\.schedule\(liveCardBound\.isArmed\(\)\);/);
+});
+
 test('chat.js wires the replay flag around the replay and keeps live callsites intact', () => {
     // scheduleHistorySync delegates to the scheduler, whose replay gate reads
     // _historyReplayActive; the flag wraps the whole replay dispatch (both the
@@ -241,7 +341,17 @@ test('chat.js wires the replay flag around the replay and keeps live callsites i
     // plus a terminal task-bound review lifecycle call scheduleHistorySync()
     // unconditionally — the replay decision lives ONLY behind the scheduler's
     // gate.
-    assert.equal((chatSource.match(/scheduleHistorySync\(\);/g) || []).length, 3);
+    // Three LIVE callsites call scheduleHistorySync() unconditionally. The fourth
+    // occurrence is the scheduler re-arming itself when a run settles with the bound
+    // still armed, which is how a run that only JOINED an older in-flight fetch (and
+    // spent its timer on a window fetched before the arm) keeps the deadline alive.
+    // It is gated on !destroyed: a joined sync that settles after teardown must not
+    // install a fresh timer on a dead instance (the disposer invariant).
+    assert.equal((chatSource.match(/scheduleHistorySync\(\);/g) || []).length, 4);
+    assert.match(
+        chatSource,
+        /if \(!destroyed && lastHistorySyncSucceeded && liveCardBound\.isArmed\(\)\) scheduleHistorySync\(\);/,
+    );
     assert.doesNotMatch(chatSource, /_historyReplayActive[^\n]*scheduleHistorySync/);
 });
 

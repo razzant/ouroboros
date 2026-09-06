@@ -754,3 +754,27 @@ def test_escalate_walks_past_a_settled_parent_to_the_live_ancestor(tmp_path, mon
     out = _escalate(ctx, question="?", options=["a", "b"], assumption="a")
     assert out.startswith("⚠️ ESCALATE_PARENT_SETTLED")
     assert "no live ancestor" in out
+
+
+def test_projection_refuses_foreign_schema_and_stamps_its_own_write(tmp_path):
+    """ABI-2 (audit #16-5): the quiz writer shares the hurry guard — an
+    unstamped pre-upgrade row is stamped on write, and a row stamped by another
+    schema is refused byte-untouched."""
+    import pytest
+
+    from ouroboros.contracts.schema_versions import SCHEMA_VERSION_KEY
+    from ouroboros.task_result_schema import TASK_RESULT_SCHEMA_VERSION
+
+    path = _result_path(tmp_path, "t-schema")
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps({"status": "running"}), encoding="utf-8")
+    record_asked(tmp_path, "t-schema", quiz_id="q1", question="?", options=["A", "B"])
+    row = json.loads(path.read_text(encoding="utf-8"))
+    assert row[SCHEMA_VERSION_KEY] == TASK_RESULT_SCHEMA_VERSION
+    assert "q1" in row["owner_quiz"] and row["status"] == "running"
+
+    foreign = {"status": "running", SCHEMA_VERSION_KEY: TASK_RESULT_SCHEMA_VERSION + 1}
+    path.write_text(json.dumps(foreign), encoding="utf-8")
+    with pytest.raises(ValueError, match="TASK_RESULT_SCHEMA_REFUSED"):
+        record_asked(tmp_path, "t-schema", quiz_id="q2", question="?", options=["A"])
+    assert json.loads(path.read_text(encoding="utf-8")) == foreign

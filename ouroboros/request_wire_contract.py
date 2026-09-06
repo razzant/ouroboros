@@ -46,6 +46,7 @@ OPTIONAL_REQUEST_FIELDS = OPTIONAL_SAMPLING_FIELDS + (
     "parallel_tool_calls",
 )
 NESTED_REASONING_FIELD = "extra_body.reasoning"
+NESTED_THINKING_FIELD = "extra_body.thinking"
 ANTHROPIC_REASONING_FIELDS = ("thinking", "output_config")
 DROP_FIELDS = frozenset((*OPTIONAL_REQUEST_FIELDS, NESTED_REASONING_FIELD))
 
@@ -197,6 +198,8 @@ def reasoning_carrier(payload: Mapping[str, Any]) -> str:
     extra_body = payload.get("extra_body")
     if isinstance(extra_body, Mapping) and isinstance(extra_body.get("reasoning"), Mapping):
         return NESTED_REASONING_FIELD
+    if isinstance(extra_body, Mapping) and isinstance(extra_body.get("thinking"), Mapping):
+        return NESTED_THINKING_FIELD
     return ""
 
 
@@ -213,8 +216,15 @@ def payload_effort(payload: Mapping[str, Any]) -> str:
     if isinstance(thinking, Mapping) and str(thinking.get("type") or "").lower() == "disabled":
         return "none"
     extra_body = payload.get("extra_body")
-    reasoning = extra_body.get("reasoning") if isinstance(extra_body, Mapping) else None
-    return str(reasoning.get("effort") or "").strip().lower() if isinstance(reasoning, Mapping) else ""
+    if not isinstance(extra_body, Mapping):
+        return ""
+    reasoning = extra_body.get("reasoning")
+    if isinstance(reasoning, Mapping):
+        return str(reasoning.get("effort") or "").strip().lower()
+    thinking = extra_body.get("thinking")
+    if isinstance(thinking, Mapping) and str(thinking.get("type") or "").lower() == "disabled":
+        return "none"
+    return ""
 
 
 def infer_tool_dialect(payload: Mapping[str, Any]) -> str:

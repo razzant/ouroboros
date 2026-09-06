@@ -713,6 +713,11 @@ def uninstall_skill(
     except Exception:
         log.debug("failed to clear deps state for %s", cleaned, exc_info=True)
     delete_provenance(drive_root, cleaned)
+    # CPL4-C11: mark payload-gone so the startup sweep clears the rest of the
+    # owner state (grants preserved as owner authority).
+    from ouroboros.skill_uninstall_state import write_uninstall_tombstone
+
+    write_uninstall_tombstone(drive_root, cleaned, source="clawhub")
     return UninstallResult(True, cleaned)
 
 

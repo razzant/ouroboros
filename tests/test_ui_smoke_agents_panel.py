@@ -269,7 +269,7 @@ _WIZARD_ON_SUMMARY_JS = "() => (document.querySelector('.step-title')?.textConte
 
 @pytest.mark.ui_browser
 def test_ui_smoke_agents_panel_wizard_finish_judges_the_roster(direct_server_with_data):
-    """First-run wizard (docs/ARCHITECTURE.md §3): an unrouted entry added on the Agents step
+    """First-run wizard (docs/ARCHITECTURE.md §2): an unrouted entry added on the Agents step
     does not block Continue; Finish on the summary reports it and, back on Agents, the card
     is already tinted and self-naming; the fix reconciles line and tint together and the
     second Finish passes the wizard's own checks and enters saving (the save's provider

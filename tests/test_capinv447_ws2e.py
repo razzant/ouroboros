@@ -281,7 +281,7 @@ def test_search_skip_reason_vocabulary(tmp_path):
 # ---------------------------------------------------------------------------
 
 def test_export_component_policy_matches_patch_policy():
-    from ouroboros.tools.output_export_policy import _sensitive_output_component_reason
+    from ouroboros.tools.shell_outputs import _sensitive_output_component_reason
 
     assert _sensitive_output_component_reason((".gitignore",)) == ""
     assert _sensitive_output_component_reason((".github", "workflows", "ci.yml")) == ""
@@ -292,7 +292,7 @@ def test_export_component_policy_matches_patch_policy():
 
 
 def test_single_declared_dotfile_output_is_exportable(tmp_path):
-    from ouroboros.tools.output_export_policy import _protected_output_source_reason
+    from ouroboros.tools.shell_outputs import _protected_output_source_reason
 
     ctx = SimpleNamespace(repo_dir=str(tmp_path / "repo"), drive_root=str(tmp_path / "data"))
     project = tmp_path / "project"
@@ -306,7 +306,7 @@ def test_single_declared_dotfile_output_is_exportable(tmp_path):
 
 
 def test_directory_scan_skips_members_with_receipts_instead_of_failing(tmp_path):
-    from ouroboros.tools.output_export_policy import _scan_directory_output_members
+    from ouroboros.tools.shell_outputs import _scan_directory_output_members
 
     ctx = SimpleNamespace(repo_dir=str(tmp_path / "repo"), drive_root=str(tmp_path / "data"))
     site = tmp_path / "site"

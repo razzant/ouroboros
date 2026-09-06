@@ -27,6 +27,7 @@ MASKED_SECRET_SETTING_KEYS = frozenset(
         "GIGACHAT_PASSWORD",
         "ANTHROPIC_API_KEY",
         "MINIMAX_API_KEY",
+        "DEEPSEEK_API_KEY",
         "GITHUB_TOKEN",
         "OUROBOROS_NETWORK_PASSWORD",
     }

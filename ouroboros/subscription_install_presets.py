@@ -86,7 +86,7 @@ _MODEL_ALIASES: Dict[str, Dict[str, Tuple[str, ...]]] = {
     # agy (Antigravity) spells effort inside the id like cursor. Flash High is
     # the automatic task actor; Pro remains an ordinary manual editor choice.
     HARNESS_AGY: {
-        "gemini-3.7-flash": ("gemini-3.7-flash-{effort}",),
+        "gemini-3.8-flash": ("gemini-3.8-flash-{effort}",),
         "gemini-3.1-pro": ("gemini-3.1-pro-{effort}",),
     },
 }
@@ -218,7 +218,7 @@ _TASK_POLICIES: Dict[str, SurfacePolicy] = {
     HARNESS_CLAUDE: _surface("opus-5", "medium"),
     HARNESS_CODEX: _surface("gpt-5.6-sol", "medium"),
     HARNESS_CURSOR: _surface("grok-4.6", "high"),
-    HARNESS_AGY: _surface("gemini-3.7-flash", "high"),
+    HARNESS_AGY: _surface("gemini-3.8-flash", "high"),
 }
 
 _POLICY_HARNESSES = (HARNESS_CLAUDE, HARNESS_CODEX, HARNESS_CURSOR)

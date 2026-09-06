@@ -12,7 +12,6 @@ from __future__ import annotations
 
 import hashlib
 import json
-import os
 import subprocess
 import sys
 import time
@@ -34,8 +33,30 @@ from supervisor.update_candidate import (  # noqa: F401
     destructive_apply_guard, project_version_carriers,
     quarantine_corrupt_update_tx_marker,
 )
+# The planner, the clean-plan commit builder and the live materializer — the
+# carrier engine's three insertion points — live in supervisor.update_merge_plan
+# (module-size split, re-cut from the redesign's two-module form); re-exported:
+# every caller and test reaches them via this module (F401 intended).
+from supervisor.update_merge_plan import (  # noqa: F401
+    _build_clean_merge_commit, materialize_assisted_merge_live, plan_managed_update_merge,
+)
 
 UPDATE_TX_MARKER_NAME = "ouroboros-update-tx.json"
+
+# ABI 7.0 / F14 N−1 transition shim: every tx write stamps the marker with the
+# shared ``_schema_version`` key. ``finalize_managed_update_on_boot`` is the
+# stable N−1→N entry point — an UNSTAMPED marker is the accepted pre-7.0 form
+# (a version-N updater must finalize the transaction its N−1 predecessor
+# recorded), a stamp ≤ ours is current, and an integer stamp ABOVE ours means
+# a NEWER release recorded the transaction: this version cannot interpret it,
+# so every strict reader fails closed (``"future"`` — never rolled back, left
+# for the owner). A rolled-back N−1 binary reads a stamped marker unchanged:
+# the stamp is one additive key its reader ignores.
+UPDATE_TX_SCHEMA_VERSION = 1
+
+# ``dict.get`` sentinel distinguishing a MISSING ``_schema_version`` key (the
+# accepted pre-7.0 unstamped form) from an explicit stored ``null`` (corrupt).
+_SCHEMA_STAMP_ABSENT = object()
 
 
 def managed_update_constitution_present(ref: str = "HEAD") -> bool:
@@ -43,338 +64,6 @@ def managed_update_constitution_present(ref: str = "HEAD") -> bool:
     from supervisor.update_source import official_ref_has_constitution
 
     return official_ref_has_constitution(ref, repo_dir=_g.REPO_DIR)
-
-
-def _build_clean_merge_commit(
-    tmp_wt: str,
-    base_sha: str,
-    target_sha: str,
-    *,
-    fast_forwardable: bool,
-    local_dirty_count: int,
-) -> Tuple[str, Optional[Dict[str, Any]]]:
-    """Build the durable merge commit for a CLEAN plan inside the temp worktree.
-
-    Owner decision (2026-08, Q1=C): local dirty work NEVER enters committed
-    history on a clean auto-update. The commit merges the reviewed HEAD (base)
-    and the official target only; the apply path stashes dirty work and
-    restores it as uncommitted content after the update. clean(snapshot,
-    target) implies clean(base, target) for ordinary hunk overlaps, but
-    file/directory-type collisions CAN break the implication — a conflicting
-    base re-merge is returned as ``{"base_conflicts": [...]}`` so the caller
-    routes it to the assisted lane. Returns (merge_commit, failure|None)."""
-    if local_dirty_count:
-        if fast_forwardable:
-            # Base is an ancestor of the target: pure official history,
-            # no merge commit needed at all.
-            return target_sha, None
-        rc_r, _ro, reset_error = _git_run(["git", "-C", tmp_wt, "reset", "--hard", base_sha])
-        if rc_r != 0:
-            return "", {"error": reset_error or "could not reset plan worktree to base"}
-        rc_bm, _bo, base_merge_error = _git_run(
-            ["git", *_MERGE_NEUTRAL_FLAGS, "-C", tmp_wt, "merge", "--no-commit", "--no-ff", target_sha]
-        )
-        if rc_bm == 1:
-            rc_u, unmerged_out, _ue = _git_run(
-                ["git", "-C", tmp_wt, "diff", "--name-only", "--diff-filter=U"]
-            )
-            base_conflicts = (
-                [ln.strip() for ln in unmerged_out.splitlines() if ln.strip()]
-                if rc_u == 0 else []
-            )
-            if base_conflicts:
-                return "", {"base_conflicts": base_conflicts}
-            return "", {"error": base_merge_error or "base merge failed without an inventory"}
-        if rc_bm != 0:
-            return "", {"error": base_merge_error or "clean base merge unexpectedly failed"}
-    # Q8 is unconditional on BOTH lanes: project VERSION + mechanical carrier
-    # tokens inside the temp worktree before serializing the merge commit, so a
-    # clean divergence can never ship the fork's version token. Typed failure —
-    # never a silently half-projected commit.
-    ok_p, _p_note, p_error = project_version_carriers(target_sha, cwd=tmp_wt)
-    if not ok_p:
-        return "", {"error": f"carrier projection failed: {p_error}"}
-    rc_mt, merged_tree, _mte = _git_run(["git", "-C", tmp_wt, "write-tree"])
-    if rc_mt != 0 or not merged_tree:
-        return "", {"error": "could not build merged tree"}
-    rc_mc, built, commit_error = _git_run([
-        "git", "commit-tree", merged_tree,
-        "-p", base_sha, "-p", target_sha,
-        "-m", f"Merge official Ouroboros update {target_sha[:12]} (auto)",
-    ])
-    if rc_mc != 0 or not built:
-        return "", {"error": commit_error or "could not build merge commit"}
-    return built, None
-
-
-def plan_managed_update_merge(
-    fetch: bool = False, branch: Optional[str] = None, build: bool = False
-) -> Dict[str, Any]:
-    """Dry-run the managed update as a REAL 3-way merge in an ISOLATED temp worktree and
-    classify the result (P2). NEVER touches the live worktree or index. Returns a
-    ``merge_plan`` dict: available/kind/auto_mergeable, the doc/code conflict labels,
-    target_sha/base_sha, local_dirty_count, recommended_strategy. Best-effort:
-    always cleans up the temp index + worktree; classification uses update_merge_policy.
-
-    When ``build=True`` AND the merge is clean, the merged tree is committed as a real
-    merge commit (parents = [reviewed HEAD, target]; a fast-forwardable base lands the
-    official target itself) whose sha is returned as ``merge_commit`` — a durable
-    object in the shared DB that survives temp-worktree removal, ready for
-    ``apply_managed_merge_update`` to land on the live repo. Dirty local work is used
-    only to CLASSIFY conflicts (via the synthetic snapshot); it never enters the built
-    commit — the apply path stashes and restores it (owner decision Q1=C)."""
-    import shutil
-    import tempfile
-
-    from ouroboros.update_channels import get_update_channel
-    from supervisor.update_merge_policy import classify_conflicts
-    branch_dev = branch or _g.BRANCH_DEV
-    remote_name, remote_branch, branch_ref = _g._managed_update_target()
-    update_channel = get_update_channel()
-    identity = {
-        "remote": remote_name,
-        "remote_branch": remote_branch,
-        "target_ref": branch_ref,
-        "update_channel": update_channel,
-    }
-    rc_b, current_branch, branch_error = _g.git_capture(
-        ["git", "rev-parse", "--abbrev-ref", "HEAD"]
-    )
-    if rc_b != 0 or current_branch != branch_dev:
-        return {
-            "available": False,
-            "kind": "unavailable",
-            "error": branch_error or f"managed update requires local branch {branch_dev}",
-            "current_branch": current_branch if rc_b == 0 else "unknown",
-            **identity,
-        }
-    if not branch_ref:
-        return {
-            "available": False,
-            "kind": "unavailable",
-            "error": "no managed update remote",
-            **identity,
-        }
-    if fetch and remote_name:
-        remote_ok, remote_error = _g.ensure_official_update_remote()
-        if not remote_ok:
-            return {
-                "available": False,
-                "kind": "unavailable",
-                "error": remote_error or "could not configure official update remote",
-                **identity,
-            }
-        fetch_rc, _fetch_out, fetch_error = _g.git_fetch_bounded(remote_name)
-        if fetch_rc != 0:
-            return {
-                "available": False,
-                "kind": "unavailable",
-                "error": fetch_error or f"git fetch {remote_name} failed",
-                **identity,
-            }
-
-    target_ref, target_sha, target_error = _g._resolve_managed_update_target(
-        remote_name, remote_branch, branch_ref, update_channel
-    )
-    identity["target_ref"] = target_ref or branch_ref
-    if not target_ref or not target_sha:
-        return {
-            "available": False,
-            "kind": "unavailable",
-            "error": target_error or "could not resolve managed update target",
-            **identity,
-        }
-
-    rc_h, base_sha, head_error = _g.git_capture(
-        ["git", "rev-parse", "--verify", "HEAD"]
-    )
-    pins = {"target_sha": target_sha, "base_sha": base_sha, **identity}
-    if rc_h != 0 or not base_sha:
-        return {
-            "available": False,
-            "kind": "unavailable",
-            "error": target_error or head_error or "could not resolve target/HEAD",
-            **pins,
-        }
-    if not managed_update_constitution_present(target_sha):
-        return {
-            "available": False,
-            "kind": "unavailable",
-            "error": "official update target does not preserve BIBLE.md",
-            **pins,
-        }
-    status_rc, dirty_out, status_error = _g.git_capture(["git", "status", "--porcelain"])
-    if status_rc != 0:
-        return {
-            "available": target_sha != base_sha,
-            "kind": "unknown",
-            "error": status_error or "git status failed",
-            **pins,
-        }
-    local_dirty_count = len([ln for ln in dirty_out.splitlines() if ln.strip()])
-    pins["local_dirty_count"] = local_dirty_count
-    if target_sha == base_sha:
-        return {"available": False, "kind": "current", **pins}
-    ancestor_rc, _ancestor_out, ancestor_error = _g.git_capture(
-        ["git", "merge-base", "--is-ancestor", target_sha, base_sha]
-    )
-    if ancestor_rc == 0:
-        return {"available": False, "kind": "current", **pins}
-    if ancestor_rc not in (0, 1):
-        return {
-            "available": False,
-            "kind": "unknown",
-            "error": ancestor_error or "could not compare target with HEAD",
-            **pins,
-        }
-
-    fast_forward_rc, _ff_out, fast_forward_error = _g.git_capture(
-        ["git", "merge-base", "--is-ancestor", base_sha, target_sha]
-    )
-    if fast_forward_rc not in (0, 1):
-        return {
-            "available": True,
-            "kind": "unknown",
-            "error": fast_forward_error or "could not compare HEAD with target",
-            **pins,
-        }
-    if fast_forward_rc == 0 and local_dirty_count == 0:
-        return {
-            "available": True,
-            "kind": "clean",
-            "auto_mergeable": True,
-            "doc_conflict_paths": [],
-            "code_conflict_paths": [],
-            "hot_code_paths": [],
-            "local_snapshot": base_sha,
-            "merge_commit": target_sha if build else "",
-            "recommended_strategy": "auto_merge",
-            **pins,
-        }
-
-    tmp_wt = None
-    try:
-        # A clean, diverged branch can merge directly from HEAD. A synthetic
-        # snapshot commit is needed only when it is the sole durable carrier of
-        # dirty/untracked local work (the informational/preview path; the apply
-        # path stashes first and re-plans from a clean tree).
-        local_snapshot = base_sha
-        if local_dirty_count:
-            local_tree, snapshot_error = worktree_snapshot_tree("HEAD")
-            if not local_tree:
-                return {
-                    "available": True,
-                    "kind": "unknown",
-                    "error": snapshot_error or "worktree snapshot failed",
-                    **pins,
-                }
-            rc_ct, local_snapshot, _ce = _git_run(
-                ["git", "commit-tree", local_tree, "-p", base_sha,
-                 "-m", "ouroboros local snapshot (update merge plan)"],
-            )
-            if rc_ct != 0 or not local_snapshot:
-                return {"available": True, "kind": "unknown", "error": "commit-tree failed", **pins}
-
-        # 2. Isolated temp worktree at the snapshot; merge the target THERE (never live).
-        #    Use a NON-existent child path (git worktree add refuses an existing dir).
-        tmp_wt = os.path.join(tempfile.mkdtemp(prefix="ouro-update-wt-"), "wt")
-        rc_add, _ao, add_err = _g.git_capture(["git", "worktree", "add", "--detach", tmp_wt, local_snapshot])
-        if rc_add != 0:
-            return {
-                "available": True,
-                "kind": "unknown",
-                "error": f"worktree add failed: {add_err}",
-                **pins,
-            }
-        # --no-commit --no-ff: leave the merged/conflicted index in place to inspect.
-        merge_rc, _merge_out, merge_error = _git_run(
-            ["git", *_MERGE_NEUTRAL_FLAGS, "-C", tmp_wt, "merge", "--no-commit", "--no-ff", target_sha]
-        )
-        if merge_rc not in (0, 1):
-            return {
-                "available": True,
-                "kind": "unknown",
-                "error": merge_error or f"git merge failed with exit {merge_rc}",
-                **pins,
-            }
-        rc_u, unmerged_out, unmerged_error = _git_run(
-            ["git", "-C", tmp_wt, "diff", "--name-only", "--diff-filter=U"]
-        )
-        if rc_u != 0:
-            return {
-                "available": True,
-                "kind": "unknown",
-                "error": unmerged_error or "could not inspect merge conflicts",
-                **pins,
-            }
-        unmerged = [ln.strip() for ln in unmerged_out.splitlines() if ln.strip()]
-        if (merge_rc == 0 and unmerged) or (merge_rc == 1 and not unmerged):
-            return {
-                "available": True,
-                "kind": "unknown",
-                "error": "git merge result and conflict inventory disagree",
-                **pins,
-            }
-
-        plan = classify_conflicts(unmerged)
-        kind = str(plan["kind"])
-        merge_commit = ""
-        if build and kind == "clean":
-            built, failure = _build_clean_merge_commit(
-                tmp_wt, base_sha, target_sha,
-                fast_forwardable=(fast_forward_rc == 0),
-                local_dirty_count=local_dirty_count,
-            )
-            if failure is not None:
-                if failure.get("base_conflicts"):
-                    # Exotic but real (e.g. file/directory collisions): the local
-                    # snapshot merged cleanly while the committed base does not.
-                    # Route to the assisted lane with the BASE conflict inventory
-                    # instead of refusing forever with kind=unknown.
-                    base_plan = classify_conflicts(failure["base_conflicts"])
-                    return {
-                        "available": True,
-                        "kind": base_plan["kind"] if base_plan["kind"] != "clean" else "unknown",
-                        "auto_mergeable": False,
-                        "doc_conflict_paths": base_plan["doc_conflict_paths"],
-                        "code_conflict_paths": base_plan["code_conflict_paths"],
-                        "hot_code_paths": base_plan["hot_code_paths"],
-                        "local_dirty_count": local_dirty_count,
-                        "local_snapshot": local_snapshot,
-                        "merge_commit": "",
-                        "recommended_strategy": "assisted",
-                        **pins,
-                    }
-                return {"available": True, "kind": "unknown", **pins,
-                        "error": failure.get("error") or "could not build merge commit"}
-            merge_commit = built
-        return {
-            "available": True,
-            "kind": kind,
-            "auto_mergeable": kind == "clean",
-            "doc_conflict_paths": plan["doc_conflict_paths"],
-            "code_conflict_paths": plan["code_conflict_paths"],
-            "hot_code_paths": plan["hot_code_paths"],
-            "local_dirty_count": local_dirty_count,
-            "local_snapshot": local_snapshot,
-            "merge_commit": merge_commit,
-            # Git owns clean merges. Ouroboros is needed only for a real conflict.
-            "recommended_strategy": "auto_merge" if kind == "clean" else "assisted",
-            **pins,
-        }
-    except Exception as exc:  # pragma: no cover — planning is best-effort
-        _g.log.warning("plan_managed_update_merge failed", exc_info=True)
-        return {
-            "available": True,
-            "kind": "unknown",
-            "error": f"{type(exc).__name__}: {exc}",
-            **pins,
-        }
-    finally:
-        if tmp_wt:
-            _g.git_capture(["git", "worktree", "remove", "--force", tmp_wt])
-            shutil.rmtree(os.path.dirname(tmp_wt), ignore_errors=True)
-            _g.git_capture(["git", "worktree", "prune"])
 
 
 def _update_tx_marker_path():
@@ -395,9 +84,14 @@ def read_update_tx() -> Dict[str, Any]:
 
 
 def write_update_tx(payload: Dict[str, Any]) -> None:
+    from ouroboros.contracts.schema_versions import with_schema_version
     from ouroboros.utils import atomic_write_json
 
-    atomic_write_json(_update_tx_marker_path(), payload, trailing_newline=True)
+    atomic_write_json(
+        _update_tx_marker_path(),
+        with_schema_version(payload, UPDATE_TX_SCHEMA_VERSION),
+        trailing_newline=True,
+    )
 
 
 def clear_update_tx() -> bool:
@@ -524,9 +218,18 @@ def mark_update_tx_gate_blocked(reason: str, detail: str = "", *, cleanup_only: 
 
 def read_update_tx_strict() -> Tuple[str, Dict[str, Any]]:
     """Strict tx read for safety-critical gates (commit authorization, tx-active rejection):
-    return ``(status, tx)`` where status is ``"absent"`` / ``"valid"`` / ``"corrupt"``. A
-    marker that exists but is unreadable/invalid is ``corrupt`` — callers MUST fail closed
-    (block mutative update/commit ops) rather than treat it as ``absent``."""
+    return ``(status, tx)`` where status is ``"absent"`` / ``"valid"`` / ``"corrupt"`` /
+    ``"future"``. A marker that exists but is unreadable/invalid is ``corrupt`` — callers
+    MUST fail closed (block mutative update/commit ops) rather than treat it as ``absent``.
+
+    Schema admission (F14 N−1 shim): an UNSTAMPED marker — the key ABSENT —
+    is the accepted pre-7.0 form and reads ``valid``: the boot finalizer must
+    drive a transaction the N−1 updater recorded. An integer stamp above
+    ``UPDATE_TX_SCHEMA_VERSION`` is ``future`` (recorded by a newer release;
+    the raw tx is returned as evidence but no caller may interpret or
+    overwrite it); ANY present non-integer stamp — an explicit ``null``
+    included — is ``corrupt`` (no writer ever stamps ``null``, so it is a
+    damaged stamp, not the legacy unstamped form)."""
     import json
 
     path = _update_tx_marker_path()
@@ -538,12 +241,21 @@ def read_update_tx_strict() -> Tuple[str, Dict[str, Any]]:
         return "corrupt", {}
     if not isinstance(raw, dict) or not raw:
         return "corrupt", {}
+    from ouroboros.contracts.schema_versions import SCHEMA_VERSION_KEY
+
+    stamp = raw.get(SCHEMA_VERSION_KEY, _SCHEMA_STAMP_ABSENT)
+    if stamp is not _SCHEMA_STAMP_ABSENT:
+        if isinstance(stamp, bool) or not isinstance(stamp, int) or stamp < 1:
+            return "corrupt", {}
+        if stamp > UPDATE_TX_SCHEMA_VERSION:
+            return "future", raw
     return "valid", raw
 
 
 def active_update_tx() -> Dict[str, Any]:
-    """Return the active tx dict if a (valid or corrupt) marker is present, else ``{}``. A
-    corrupt marker counts as ACTIVE (fail-closed) so a second apply cannot proceed over it."""
+    """Return the active tx dict if a (valid, corrupt or future) marker is present, else
+    ``{}``. A corrupt or future marker counts as ACTIVE (fail-closed) so a second apply
+    cannot proceed over it."""
     status, tx = read_update_tx_strict()
     if status == "absent":
         return {}
@@ -591,80 +303,6 @@ def create_rescue_local_ref(local_snapshot: str) -> str:
         if rc == 0 and _rev_parse(name) == local_snapshot:
             return name
     return ""
-
-
-def materialize_assisted_merge_live(
-    branch: str, local_snapshot: str, target_sha: str, pre_update_sha: str
-) -> Tuple[bool, str, str]:
-    """Stage a REAL ``git merge --no-commit --no-ff target`` into the LIVE worktree (MERGE_HEAD +
-    a conflicted index + markers) for the agent to resolve and the unmodified ``commit_reviewed``
-    to finalize as a reviewed 2-parent commit. Caller MUST hold the update lock with workers
-    stopped. Conflicts make ``git merge`` exit nonzero — that is EXPECTED, not failure: success is
-    judged by MERGE_HEAD == target_sha. Returns ``(ok, message, m0_tree)`` where ``m0_tree`` is
-    the pinned MECHANICAL MERGE BASELINE — the just-materialized worktree's tree (conflict
-    markers as content) captured ONCE, before any resolver edit; reviewers diff m0_tree →
-    candidate, and a later re-merge (rerere, config drift) is never authority.
-
-    Since the stash-first apply order (Q9) ``local_snapshot`` normally equals ``pre_update_sha``
-    (uncommitted work rides a stash). Legacy transactions whose snapshot still carries dirty
-    work keep working: the merge is computed FROM ``local_snapshot``, then the first parent is
-    re-based to ``pre_update_sha`` (the last REVIEWED committed state), so the reviewed diff
-    includes that work — none of it reaches history as an unreviewed parent."""
-    if not local_snapshot or not target_sha or not pre_update_sha:
-        return False, "missing local_snapshot/target_sha/pre_update_sha", ""
-    # Clean the worktree first (dirty + untracked are all captured in the stash — legacy: in
-    # local_snapshot — plus the rescue snapshot) so `checkout -B` cannot fail on "untracked file
-    # would be overwritten". A real 3-way merge needs a clean tree to run.
-    rc_reset, _ro, reset_error = _g.git_capture(["git", "reset", "--hard", "HEAD"])
-    if rc_reset != 0:
-        return False, f"could not clean tracked files before assisted merge: {reset_error}", ""
-    rc_clean, _co, clean_error = _g.git_capture(["git", "clean", "-fd"])
-    if rc_clean != 0:
-        return False, f"could not clean untracked files before assisted merge: {clean_error}", ""
-    rc_c, _o, e_c = _g.git_capture(["git", "checkout", "-B", branch, local_snapshot])
-    if rc_c != 0:
-        return False, f"checkout -B {branch} {local_snapshot[:12]} failed: {e_c}", ""
-    # Ignore the merge return code; conflicts are expected. Judge by MERGE_HEAD.
-    rc_m, _mo, merge_error = _g.git_capture(
-        ["git", *_MERGE_NEUTRAL_FLAGS, "merge", "--no-commit", "--no-ff", target_sha]
-    )
-    if rc_m not in (0, 1):
-        return False, f"merge failed before conflict resolution: {merge_error or rc_m}", ""
-    mh = _merge_head_sha()
-    if not mh:
-        return False, "merge produced no MERGE_HEAD (nothing to merge or fatal error)", ""
-    if mh != target_sha:
-        return False, f"MERGE_HEAD {mh[:12]} != target {target_sha[:12]}", ""
-    # Re-base the first parent to the reviewed pre-update state WITHOUT disturbing the merge
-    # result: `git reset --soft` is refused mid-merge, so move the branch ref directly with
-    # update-ref (HEAD follows the symbolic ref) — the index (conflicted/merged entries), the
-    # worktree, and MERGE_HEAD are all untouched, so commit_reviewed still makes a 2-parent
-    # commit [pre_update_sha, target].
-    # P9 projection (Q8, shared typed helper): VERSION := target, mechanical
-    # carrier tokens synced for non-conflicted files. MANDATORY: a failed
-    # projection aborts materialization — a half-projected tree must never be
-    # frozen as the M0 baseline (the caller rolls back and the owner retries).
-    ok_p, projected_note, projection_error = project_version_carriers(target_sha)
-    if not ok_p:
-        return False, f"carrier projection failed: {projection_error}", ""
-    # CAS: expected-old = the snapshot we just checked out; a concurrently moved
-    # ref (late human commit) must fail the re-parent instead of being clobbered.
-    rc_r, _ro, e_r = _g.git_capture(
-        ["git", "update-ref", f"refs/heads/{branch}", pre_update_sha, local_snapshot]
-    )
-    if rc_r != 0:
-        return False, f"update-ref {branch} -> {pre_update_sha[:12]} failed: {e_r}", ""
-    if _merge_head_sha() != target_sha:
-        return False, "MERGE_HEAD lost after re-parenting the branch", ""
-    m0_tree, m0_error = worktree_snapshot_tree(pre_update_sha)
-    if not m0_tree:
-        return False, f"could not pin the mechanical merge baseline (M0): {m0_error}", ""
-    return (
-        True,
-        f"materialized merge of {target_sha[:12]} (parent={pre_update_sha[:12]}, "
-        f"MERGE_HEAD set, M0 {m0_tree[:12]}{projected_note})",
-        m0_tree,
-    )
 
 
 def _assisted_head_state(tx: Dict[str, Any]) -> str:
@@ -765,8 +403,19 @@ def rollback_managed_update(
     branch ``failed-update-<target12>`` for inspection and retry, hard-resets the branch
     to pre_update_sha, cleans, clears the update markers, and logs. Boot recovery keeps
     writer admission closed until the restored process restarts. Does NOT push (unlike
-    rollback_to_version, which can push origin — wrong for an internal recovery)."""
-    tx = read_update_tx()
+    rollback_to_version, which can push origin — wrong for an internal recovery).
+
+    Marker admission is STRICT (F14): a FUTURE-schema marker was recorded by a newer
+    release — this code cannot interpret its semantics, so the rollback refuses typed
+    BEFORE any marker write or destructive reset/checkout/clean (the raw marker stays
+    byte-identical, left for the owner); a corrupt marker keeps its raw evidence and
+    refuses on the missing pre_update_sha exactly as before."""
+    status, tx = read_update_tx_strict()
+    if status == "future":
+        return False, (
+            "update tx marker was recorded by a newer version of Ouroboros; "
+            "rollback refuses to interpret it — marker left untouched for the owner"
+        )
     pre = str(tx.get("pre_update_sha") or "")
     branch = str(tx.get("pre_update_branch") or _g.BRANCH_DEV)
     if not pre:
@@ -894,11 +543,7 @@ def ensure_assisted_resolver_ready(expected_sha: str, timeout_sec: float = 90.0)
     with _queue_lock:
         if workers.WORKERS:
             return False  # update quiescence must leave no ambiguous prior generation
-    events_path = _g.DRIVE_ROOT / "logs" / "events.jsonl"
-    try:
-        events_offset = int(events_path.stat().st_size)
-    except Exception:
-        events_offset = 0
+    events_cursor = workers.events_log_cursor()
     try:
         if not workers.ensure_worker_pool_started(n=1, allow_disabled_restart=True):
             return False
@@ -915,7 +560,7 @@ def ensure_assisted_resolver_ready(expected_sha: str, timeout_sec: float = 90.0)
             }
         if not live_pids:
             return False
-        boot = workers._first_worker_event_since(events_offset, "worker_ready")
+        boot = workers._first_worker_event_since(events_cursor, "worker_ready")
         try:
             boot_pid = int((boot or {}).get("pid") or 0)
         except (TypeError, ValueError):
@@ -1519,7 +1164,10 @@ def finalize_managed_update_on_boot(supervisor_ready: bool = True) -> Dict[str, 
     restarted) → health-check + boot-loop guard; an assisted phase → non-destructive
     merge-state recovery (resume / abandon-on-divergence / rollback-on-expiry). A CORRUPT
     marker is quarantined aside byte-intact (admission reopens) unless the tree shows an
-    in-flight merge, which stays fail-closed. Best-effort; never raises."""
+    in-flight merge, which stays fail-closed; a FUTURE-schema marker recorded by a newer
+    release is left untouched (F14: never rolled back by an older binary). This dispatch
+    is the stable N−1→N transition contract: an UNSTAMPED (pre-7.0) tx is driven exactly
+    like a stamped one. Best-effort; never raises."""
     lock_fh = None
     try:
         try:
@@ -1534,6 +1182,21 @@ def finalize_managed_update_on_boot(supervisor_ready: bool = True) -> Dict[str, 
             # latch does not) unless MERGE_HEAD shows a live merge (#447);
             # mechanics in update_candidate.quarantine_corrupt_update_tx_marker.
             return quarantine_corrupt_update_tx_marker()
+        if status == "future":
+            # Recorded by a NEWER release (this process is the rollback
+            # target). This version cannot interpret the transaction; rolling
+            # it back could destroy work the newer form protects — leave the
+            # marker untouched for the owner. It is not corrupt, so it is not
+            # quarantined either: the newer binary must still find it.
+            from ouroboros.contracts.schema_versions import SCHEMA_VERSION_KEY
+
+            _log_supervisor({
+                "type": "managed_update_tx_future_schema_on_boot",
+                "schema_version": tx.get(SCHEMA_VERSION_KEY),
+                "phase": str(tx.get("phase") or ""),
+            })
+            return {"finalized": False,
+                    "reason": "update tx recorded by a newer version — left for owner"}
         phase = str(tx.get("phase") or "")
         if phase == "stashing_local_work":
             # Crash between the durable pre-stash marker and the merge apply:

@@ -10,7 +10,8 @@ GR3-6  an unowned lifecycle fault rides the normal terminal dispatch;
 GR3-7  audit failure is typed UNKNOWN, never clean;
 GR3-8  stale sweep failures do not veto a converged tree;
 GR3-9  strict registry reads refuse a corrupt projection;
-GR3-11 import coherence + fail_tasks intent-root correctness.
+GR3-11 import coherence (the fail_tasks half was retired with the
+       function itself in the 7.0 ABI window, owner Q10=A).
 """
 
 from __future__ import annotations
@@ -197,32 +198,6 @@ def test_widened_mid_flight_intent_survives_a_stale_claim_settle(tmp_path):
     assert ci.active_intent(tmp_path, "w1") is None
 
 
-def test_fail_tasks_resolves_intents_at_the_canonical_root_and_defers_cascade(tmp_path):
-    """GR3-11b: the intent projection lives at the canonical supervisor root —
-    a split-drive child's budget_drive_root must not hide its intent from the
-    budget drain. GR3-1b: a cascade-scoped intent is never settled by it."""
-    from ouroboros.task_results import fail_tasks
-
-    child_root = tmp_path / "child"
-    child_root.mkdir()
-    write_task_result(child_root, "bt1", "scheduled")
-    # The intent is recorded at the CANONICAL root, as every ingress does.
-    ci.request_cancel(tmp_path, "bt1", reason="owner cancel", scope=ci.SCOPE_CASCADE)
-
-    written = fail_tasks(
-        tmp_path, [{"id": "bt1", "budget_drive_root": str(child_root)}],
-        reason_code="budget_exhausted", result="drained",
-    )
-
-    assert written == 1
-    # The drain honors the intent: CANCELLED (not budget-failed) at the child
-    # root the waiter reads…
-    assert load_task_result(child_root, "bt1")["status"] == STATUS_CANCELLED
-    # …and the cascade intent survives for the postcondition (GR3-1).
-    row = ci.active_intent(tmp_path, "bt1")
-    assert row is not None and row["scope"] == ci.SCOPE_CASCADE
-
-
 # --------------------------------------------------------------------------
 # GR3-2 — minimal write fence on the custody kill path
 # --------------------------------------------------------------------------
@@ -286,7 +261,7 @@ def test_incomplete_evolution_stop_leaves_the_campaign_open_until_settle(tmp_pat
     from supervisor import evolution_lifecycle as el
 
     state.init(tmp_path)
-    q.init(tmp_path, 600, 1800)
+    q.init(tmp_path)
     assert el.start_evolution_campaign("Improve", source="test").get("status") == "active"
     state.update_state(lambda live: live.update(
         owner_chat_id=7, evolution_mode_enabled=True, evolution_owner_stopped=False,
@@ -328,7 +303,7 @@ def test_owner_evolution_stop_gates_closure_on_completeness(tmp_path, monkeypatc
     from supervisor import evolution_lifecycle as el
 
     state.init(tmp_path)
-    q.init(tmp_path, 600, 1800)
+    q.init(tmp_path)
     assert el.start_evolution_campaign("Improve", source="test").get("status") == "active"
     ctx = types.SimpleNamespace(
         DRIVE_ROOT=tmp_path,

@@ -84,6 +84,7 @@ def ensure_reaper_started() -> None:
 def request_finalization_grace(
     task_drive: pathlib.Path, task_id: str, terminal_reason: str, *, chat_id: int, stamp: int,
     control_msg_id: str = "", toast_text: str = "", control_text: str = "",
+    quiet: bool = False,
 ) -> str:
     """Ask a task to finalize cooperatively before the supervisor stops it.
 
@@ -121,6 +122,10 @@ def request_finalization_grace(
     except Exception:
         control_msg_id = ""
         log.debug("Failed to write finalize_now control for %s", task_id, exc_info=True)
+    if quiet:
+        # A cascade sweep speaks for the whole tree once; the per-task toast
+        # would only decorate its summary.
+        return control_msg_id
     try:
         from supervisor import workers as _workers_mod
         _workers_mod.get_event_q().put({

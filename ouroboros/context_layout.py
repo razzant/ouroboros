@@ -152,8 +152,14 @@ def reference_doc_sections(
     ``context_mode`` is the OWNER context mode and decides only the ARCHITECTURE
     form (full in max, nav map in low — D-ARCH, owner 2026-08-08).
     ``include_development`` is the caller's mode-independent decision whether the
-    self-engineering handbook is inline (self-body/self-mod/evolution work) or an
-    on-demand pointer (project tasks — folder or not — and external surfaces).
+    self-engineering handbook is inline (work on Ouroboros's own body) or an
+    on-demand pointer. The structural signal is the active repo binding, never
+    project membership: an external worktree, a subagent, or an api/cli/scheduled
+    surface gets the pointer, while a direct turn inside a project room with no
+    workspace bound keeps the handbook. An explicit ``context_requires_development``
+    on the task wins in either direction. When it is absent, a truthy
+    ``context_requires_self_body_docs`` on the task or its contract keeps the handbook
+    even for an external surface (see ``context.py`` D-DEV).
     """
     parts: List[str] = []
     on_demand: List[str] = []

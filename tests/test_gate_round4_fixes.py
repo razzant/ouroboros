@@ -445,7 +445,7 @@ def test_gr4_6_backstop_defers_while_another_evolution_task_is_live(tmp_path, mo
     from supervisor import evolution_lifecycle as el
 
     state.init(tmp_path)
-    q.init(tmp_path, 600, 1800)
+    q.init(tmp_path)
     assert el.start_evolution_campaign("Improve", source="test").get("status") == "active"
     state.update_state(lambda live: live.update(evolution_owner_stopped=True))
     monkeypatch.setattr(q, "PENDING", [])

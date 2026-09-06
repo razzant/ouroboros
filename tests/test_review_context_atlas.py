@@ -801,3 +801,29 @@ def test_canonical_context_docs_membership_includes_design():
     from ouroboros.tools.review_context_atlas import _CANONICAL_CONTEXT_DOCS
 
     assert "docs/DESIGN.md" in _CANONICAL_CONTEXT_DOCS
+
+
+def test_atlas_diff_only_reason_override_is_the_callers_typed_omission(tmp_path):
+    """A `diff_only_included` row omitted BY DESIGN (the scope pack's span-only
+    release carriers) carries the caller's reason instead of the budget one —
+    same disposition, same selection; the required-artifact escalation ignores
+    the override, so a by-design reason can never launder a refusal."""
+    _write(tmp_path / "uv.lock", "lock\n" * 50)
+    _write(tmp_path / "module.py", "q = 1\n" * 50)
+    _write(tmp_path / "prompts" / "touched.md", "p\n" * 50)
+    every = ("uv.lock", "module.py", "prompts/touched.md")
+
+    pack = compile_review_context_atlas(
+        ReviewContextAtlasRequest(
+            repo_dir=tmp_path, tracked_paths=every, anchors=every,
+            already_included=frozenset(every), diff_only_included=frozenset(every),
+            diff_only_reasons={"uv.lock": "BY-DESIGN-REASON", "prompts/touched.md": "BY-DESIGN-REASON"},
+        )
+    )
+
+    coverage = _coverage(pack)
+    assert coverage["uv.lock"]["disposition"] == "already_included"
+    assert coverage["uv.lock"]["reason"] == "BY-DESIGN-REASON"
+    assert "full snapshot omitted" in coverage["module.py"]["reason"]
+    assert coverage["prompts/touched.md"]["disposition"] == "budget_omitted"
+    assert [row["path"] for row in atlas_unassembled_required(pack.manifest)] == ["prompts/touched.md"]

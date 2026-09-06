@@ -1,6 +1,8 @@
 """Split extension-loader regression coverage kept below module size gates."""
 from __future__ import annotations
 
+import copy
+import json
 
 import pytest
 
@@ -14,6 +16,7 @@ from ouroboros.skill_loader import (
     save_enabled,
     save_review_state,
 )
+from ouroboros.tools.registry import ToolContext
 from tests._shared import clean_extension_runtime_state
 from tests.test_extension_loader import (
     _prepare_extension,
@@ -210,13 +213,13 @@ def test_send_ws_message_broadcasts_namespaced_event(tmp_path):
 
 def test_send_ws_message_still_works_after_registration_phase(tmp_path):
     sent: list[dict] = []
-    impl = extension_loader.PluginAPIImpl(
+    impl = extension_loader.PluginAPIImpl(extension_loader._PluginAPIConfig(
         skill_name="push_runtime",
         permissions=["ws_handler"],
         env_allowlist=[],
         state_dir=tmp_path,
         settings_reader=lambda: {},
-    )
+    ))
     extension_loader.set_ws_broadcaster(sent.append)
 
     impl._close_registration()
@@ -252,7 +255,6 @@ def test_register_ui_tab_surfaces_hostable_widget(tmp_path):
     err = extension_loader.load_extension(loaded, lambda: {}, drive_root=drive_root)
     assert err is None, err
     snap = extension_loader.snapshot()
-    assert snap["ui_tabs_pending"] == []
     assert snap["ui_tabs"][0]["key"] == "uiwait:weather"
     assert snap["ui_tabs"][0]["ws_prefix"] == extension_loader.extension_name_prefix("uiwait")
     assert snap["ui_tabs"][0]["render"]["kind"] == "declarative"
@@ -307,6 +309,9 @@ def test_register_ui_tab_promotes_render_span_metadata(tmp_path):
 
 
 def test_register_ui_tab_promotes_bounded_frame_geometry(tmp_path):
+    skill_dir = tmp_path / "skills" / "frameui"
+    skill_dir.mkdir(parents=True)
+    (skill_dir / "widget.js").write_text("export {};\n", encoding="utf-8")  # module tabs need their reviewed source
     loaded, _, drive_root = _prepare_extension(
         tmp_path,
         "frameui",
@@ -340,6 +345,33 @@ def test_register_ui_tab_promotes_legacy_iframe_geometry(tmp_path):
     extension_loader.unload_extension("legacyframeui")
 
 
+def test_legacy_iframe_without_route_registers_but_preflight_reports_defect(tmp_path, monkeypatch):
+    plugin = (
+        "def register(api):\n"
+        "    api.register_ui_tab('view', 'View', render={'kind': 'iframe', 'height': 640})\n"
+    )
+    loaded, repo_root, drive_root = _prepare_extension(
+        tmp_path, "legacyframeless", plugin, permissions=["widget"]
+    )
+    monkeypatch.setenv("OUROBOROS_SKILLS_REPO_PATH", str(repo_root))
+
+    err = extension_loader.load_extension(loaded, lambda: {}, drive_root=drive_root)
+    assert err is None, err
+    tab = extension_loader.snapshot()["ui_tabs"][0]
+    assert tab["render"]["kind"] == "iframe"
+    assert "route" not in tab["render"]
+
+    from ouroboros.tools.skill_preflight import _handle_skill_preflight
+
+    repo_dir = tmp_path / "repo"
+    repo_dir.mkdir()
+    result = json.loads(
+        _handle_skill_preflight(ToolContext(repo_dir=repo_dir, drive_root=drive_root), skill=loaded.name)
+    )
+    assert result["ok"] is False
+    assert any("iframe widget render requires route" in row["detail"] for row in result["widgets"])
+
+
 @pytest.mark.parametrize(
     "render,expected",
     [
@@ -350,12 +382,19 @@ def test_register_ui_tab_promotes_legacy_iframe_geometry(tmp_path):
         ({"kind": "iframe", "route": "view", "max_height": 1000}, "module widgets only"),
         ({"kind": "declarative", "schema_version": 1, "components": [], "height": 640}, "framed widgets only"),
         ({"kind": "declarative", "schema_version": 1, "components": [], "max_height": 640}, "framed widgets only"),
+        ({"kind": "iframe", "height": 640}, "requires route"),
     ],
-    ids=["below-min", "above-max", "bool", "contradictory", "legacy-max", "declarative-height", "declarative-max"],
+    ids=["below-min", "above-max", "bool", "contradictory", "legacy-max", "declarative-height", "declarative-max", "iframe-no-route"],
 )
 def test_frame_geometry_validation_rejects_ambiguous_values(render, expected):
     with pytest.raises(ExtensionRegistrationError, match=expected):
         validate_ui_render(render)
+
+
+def test_validate_ui_render_normalizes_module_entry_once():
+    """The stored entry is the stripped filename, so the loader's capture key and
+    the module URL the page builds from ``render.entry`` agree (A9/A11)."""
+    assert validate_ui_render({"kind": "module", "entry": "  widget.js "})["entry"] == "widget.js"
 
 
 _UI_TAB_REJECTION_CASES = [
@@ -365,6 +404,13 @@ _UI_TAB_REJECTION_CASES = [
         "def register(api):\n"
         "    api.register_ui_tab('bad', 'Bad', render={'kind': 'script_module', 'src': 'x.js'})\n",
         "unsupported",
+    ),
+    (
+        "module_entry_missing_on_disk",
+        "badmodulefile",
+        "def register(api):\n"
+        "    api.register_ui_tab('bad', 'Bad', render={'kind': 'module', 'entry': 'widget.js'})\n",
+        "module widget entry 'widget.js' is missing",
     ),
     (
         "bad_declarative_component",
@@ -569,3 +615,118 @@ def test_register_ui_tab_rejects(tmp_path, case_id, name, plugin, expected_subst
     err = extension_loader.load_extension(loaded, lambda: {}, drive_root=drive_root)
     assert err is not None
     assert expected_substr in err
+
+
+# --- render.start launch policy (widgets-lifecycle W1b) -----------------------------
+
+
+@pytest.mark.parametrize(
+    "render,expected_start",
+    [
+        ({"kind": "module", "entry": "widget.js"}, "manual"),
+        ({"kind": "module", "entry": "widget.js", "start": None}, "manual"),
+        ({"kind": "module", "entry": "widget.js", "start": ""}, "manual"),
+        ({"kind": "module", "entry": "widget.js", "start": "  "}, "manual"),
+        ({"kind": "module", "entry": "widget.js", "start": "auto"}, "auto"),
+        ({"kind": "module", "entry": "widget.js", "start": " auto "}, "auto"),
+        ({"kind": "module", "entry": "widget.js", "start": "retain"}, "retain"),
+        ({"kind": "iframe", "route": "view"}, "manual"),
+        ({"kind": "iframe", "route": "view", "start": None}, "manual"),
+        ({"kind": "iframe", "route": "view", "start": "retain"}, "retain"),
+        ({"kind": "declarative", "schema_version": 1, "components": []}, "auto"),
+        ({"kind": "declarative", "schema_version": 1, "components": [], "start": ""}, "auto"),
+        ({"kind": "declarative", "schema_version": 1, "components": [], "start": "auto"}, "auto"),
+    ],
+    ids=[
+        "module-default", "module-none", "module-blank", "module-whitespace", "module-auto",
+        "module-auto-padded", "module-retain", "iframe-default", "iframe-none", "iframe-retain",
+        "declarative-default", "declarative-blank", "declarative-auto",
+    ],
+)
+def test_validate_ui_render_fills_explicit_start_mode(render, expected_start):
+    original = copy.deepcopy(render)
+    clean = validate_ui_render(render)
+    assert clean["start"] == expected_start
+    # The declaration passed in is never mutated: an omitted key stays omitted and an
+    # explicit value (even a blank one) is left exactly as the author wrote it.
+    assert render == original
+    if "start" not in original:
+        assert "start" not in render
+
+
+# A present ``start`` must be an enum string: falsy non-strings and case variants are rejected,
+# never silently defaulted (only absent / None / blank take the per-kind default).
+_BAD_START_VALUES = {
+    "zero": 0, "false": False, "list": [], "dict": {}, "int": 123, "Retain": "Retain", "always": "always",
+}
+
+
+@pytest.mark.parametrize(
+    "render,expected",
+    [
+        ({"kind": "module", "entry": "widget.js", "start": "whenever"}, "expected one of"),
+        ({"kind": "iframe", "route": "view", "start": "always"}, "expected one of"),
+        *[({"kind": "module", "entry": "widget.js", "start": bad}, "expected one of") for bad in _BAD_START_VALUES.values()],
+        *[({"kind": "iframe", "route": "view", "start": bad}, "expected one of") for bad in _BAD_START_VALUES.values()],
+        ({"kind": "declarative", "schema_version": 1, "components": [], "start": "manual"}, "nothing to start"),
+        ({"kind": "declarative", "schema_version": 1, "components": [], "start": "retain"}, "nothing to start"),
+    ],
+    ids=[
+        "module-unknown", "iframe-unknown",
+        *[f"module-{name}" for name in _BAD_START_VALUES],
+        *[f"iframe-{name}" for name in _BAD_START_VALUES],
+        "declarative-manual", "declarative-retain",
+    ],
+)
+def test_validate_ui_render_rejects_bad_start_mode(render, expected):
+    with pytest.raises(ExtensionRegistrationError, match=expected):
+        validate_ui_render(render)
+
+
+def test_widget_start_modes_is_one_enum_for_validator_and_owner_override():
+    from ouroboros.extension_ui_validation import WIDGET_START_MODES
+    from ouroboros.gateway import ui_preferences
+
+    assert WIDGET_START_MODES == ("auto", "manual", "retain")
+    assert ui_preferences.WIDGET_START_MODES is WIDGET_START_MODES
+
+
+def test_settings_section_schema_carries_no_start_mode():
+    from ouroboros.extension_ui_validation import validate_settings_schema
+
+    clean = validate_settings_schema({"components": [{"type": "markdown", "text": "ok"}]})
+    assert "start" not in clean
+
+
+def test_register_ui_tab_snapshot_carries_explicit_start_mode(tmp_path):
+    skill_dir = tmp_path / "skills" / "startui"
+    skill_dir.mkdir(parents=True)
+    for entry in ("widget.js", "gauge.js"):  # module tabs need their reviewed source at registration
+        (skill_dir / entry).write_text("export {};\n", encoding="utf-8")
+    loaded, _, drive_root = _prepare_extension(
+        tmp_path,
+        "startui",
+        "def register(api):\n"
+        "    api.register_ui_tab('game', 'Game', render={'kind': 'module', 'entry': 'widget.js'})\n"
+        "    api.register_ui_tab('gauge', 'Gauge', render={'kind': 'module', 'entry': 'gauge.js', 'start': 'auto'})\n"
+        "    api.register_ui_tab('board', 'Board', render={'kind': 'declarative', 'schema_version': 1, 'components': [{'type': 'markdown', 'text': 'ok'}]})\n",
+        permissions=["widget"],
+    )
+    err = extension_loader.load_extension(loaded, lambda: {}, drive_root=drive_root)
+    assert err is None, err
+    starts = {tab["key"]: tab["render"]["start"] for tab in extension_loader.snapshot()["ui_tabs"]}
+    assert starts == {"startui:game": "manual", "startui:gauge": "auto", "startui:board": "auto"}
+    extension_loader.unload_extension("startui")
+
+
+def test_register_ui_tab_rejects_declarative_start_mode(tmp_path):
+    loaded, _, drive_root = _prepare_extension(
+        tmp_path,
+        "badstart",
+        "def register(api):\n"
+        "    api.register_ui_tab('board', 'Board', render={'kind': 'declarative', 'schema_version': 1, 'start': 'retain', 'components': [{'type': 'markdown', 'text': 'ok'}]})\n",
+        permissions=["widget"],
+    )
+    err = extension_loader.load_extension(loaded, lambda: {}, drive_root=drive_root)
+    assert err is not None
+    assert "nothing to start" in err

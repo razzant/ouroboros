@@ -11,9 +11,9 @@ import asyncio
 import base64
 import inspect
 import json
+import logging
 import os
 import pathlib
-import re
 import shutil
 import signal
 import subprocess
@@ -21,6 +21,7 @@ import sys
 import threading
 import time
 import uuid
+import weakref
 from types import SimpleNamespace
 from typing import Any, Callable, Dict, List
 
@@ -28,13 +29,18 @@ from starlette.requests import Request
 from starlette.responses import FileResponse, Response, StreamingResponse
 
 from ouroboros.provider_models import MODEL_PROVIDER_CREDENTIAL_KEYS
-from ouroboros.platform_layer import merge_hidden_kwargs, subprocess_new_group_kwargs
+from ouroboros.platform_layer import (
+    merge_hidden_kwargs, posix_signal_name, subprocess_new_group_kwargs,
+)
 from ouroboros.skill_loader import find_skill, grant_status_for_skill, skill_state_dir
+from ouroboros.tools.process_facts import publish_process_facts
 from ouroboros.tools.registry import ToolContext
 from ouroboros.tools.shell import _active_subprocesses, _kill_process_group, _subprocess_lock
 from ouroboros.tools.skill_exec import _scrub_env
 from ouroboros.usage_accounting import current_usage_scope, record_unmetered_external_dispatch
 from ouroboros.utils import sanitize_tool_result_for_log
+
+log = logging.getLogger(__name__)
 
 _NATIVE_SUFFIXES = {".so", ".pyd", ".dylib", ".dll"}
 _STDOUT_CAP = 512 * 1024
@@ -43,22 +49,15 @@ _INPUT_CAP = 1024 * 1024
 _RESULT_CAP = 512 * 1024
 _CATALOG_TIMEOUT_SEC = 30
 _RUNTIME_MODE_ENV_KEYS = ("OUROBOROS_BOOT_RUNTIME_MODE", "OUROBOROS_RUNTIME_MODE")
-_POSIX_SIGNAL_NAMES = {
-    1: "SIGHUP",
-    2: "SIGINT",
-    3: "SIGQUIT",
-    6: "SIGABRT",
-    9: "SIGKILL",
-    11: "SIGSEGV",
-    13: "SIGPIPE",
-    14: "SIGALRM",
-    15: "SIGTERM",
-}
 _POSIX_SIGABRT = 6
 
 
 class ExtensionProcessError(RuntimeError):
     """A child extension process failed without crashing the host."""
+
+    def __init__(self, message: str, *, failure_kind: str = "error") -> None:
+        super().__init__(message)
+        self.failure_kind = failure_kind
 
 
 def _format_child_returncode(returncode: int) -> str:
@@ -70,21 +69,11 @@ def _format_child_returncode(returncode: int) -> str:
         return f"returncode={returncode}"
     if code < 0:
         signum = -code
-        try:
-            sig_name = signal.Signals(signum).name
-        except ValueError:
-            sig_name = ""
-        if not sig_name or re.fullmatch(r"SIG\d+", sig_name):
-            sig_name = _POSIX_SIGNAL_NAMES.get(signum, sig_name or f"SIG{signum}")
+        sig_name = posix_signal_name(signum)
         return f"signal={sig_name}({signum}), returncode={code}"
     if code >= 128:
         signum = code - 128
-        try:
-            sig_name = signal.Signals(signum).name
-        except ValueError:
-            sig_name = ""
-        if not sig_name or re.fullmatch(r"SIG\d+", sig_name):
-            sig_name = _POSIX_SIGNAL_NAMES.get(signum, sig_name or f"SIG{signum}")
+        sig_name = posix_signal_name(signum)
         if sig_name:
             return f"signal={sig_name}({signum}), returncode={code}"
     return f"returncode={code}"
@@ -327,6 +316,106 @@ def _drain(pipe: Any, cap: int, out: bytearray, overflow: Dict[str, bool], label
         return
 
 
+_CHILD_SPAWNED_ATTR = "_ouroboros_extension_child_spawned"
+
+# Fallback registry for exception objects that refuse the attribute (e.g. an
+# overriding __setattr__): the spawn fact must be recorded once the child
+# exists, so the marker read consults this side-table too. The table is keyed
+# by id() with a weakref finalizer purging the entry, so it is IDENTITY-safe
+# and never depends on the exception being hashable or well-behaved under
+# __eq__ (a WeakSet would TypeError on an unhashable exception — on add AND
+# on the membership check — and could false-positive an equal-but-distinct
+# one), and marked exceptions never leak (the entry dies with the object,
+# before its id can be reused). An object that ALSO refuses weak references
+# cannot carry the fact at all — that theoretical residue is logged, never
+# silently dropped.
+_spawned_marker_fallback: Dict[int, "weakref.ref[BaseException]"] = {}
+_spawned_marker_lock = threading.Lock()
+
+
+def extension_child_was_spawned(exc: BaseException) -> bool:
+    """ABI-9 typed post-Popen fact: True only when the extension child process
+    was actually started before ``exc`` was raised. ``_run_child`` stamps the
+    marker on every exception that crosses the spawn boundary; a pre-spawn
+    failure — payload staging, dispatch resolve/load/env, the ``Popen`` call
+    itself — carries no marker, so dispatch provenance never records a
+    ``physical_dispatch`` for a child that never existed.
+
+    FAIL-CLOSED read: this is called from ``except`` handlers, so a broken
+    marker check (a hostile ``__getattr__``, whatever else the exception
+    object does) must never raise — it would REPLACE the original in-flight
+    error — and must never claim a physical dispatch it cannot prove."""
+    try:
+        try:
+            if bool(getattr(exc, _CHILD_SPAWNED_ATTR, False)):
+                return True
+        except Exception:
+            # A hostile __getattr__ only fires when the attribute was never
+            # SET (a set attribute is found by normal lookup first), so the
+            # probe failure falls through to exactly where the marker would
+            # then live: the identity side-table.
+            pass
+        with _spawned_marker_lock:
+            ref = _spawned_marker_fallback.get(id(exc))
+        # The referent identity check makes a stale or colliding id entry
+        # (impossible for live objects, cheap to rule out anyway) inert.
+        return ref is not None and ref() is exc
+    except Exception:
+        return False
+
+
+def _fallback_mark_spawned(exc: BaseException) -> None:
+    key = id(exc)
+
+    def _purge(_ref: "weakref.ref[BaseException]", *, _key: int = key) -> None:
+        with _spawned_marker_lock:
+            _spawned_marker_fallback.pop(_key, None)
+
+    ref = weakref.ref(exc, _purge)
+    with _spawned_marker_lock:
+        _spawned_marker_fallback[key] = ref
+
+
+def _mark_child_spawned(exc: BaseException) -> BaseException:
+    try:
+        setattr(exc, _CHILD_SPAWNED_ATTR, True)
+    except Exception:  # attribute refused: use the identity side-table
+        try:
+            _fallback_mark_spawned(exc)
+        except Exception:
+            log.warning(
+                "extension spawn marker could not be attached to %s",
+                type(exc).__name__,
+            )
+    return exc
+
+
+def _publish_child_facts(
+    proc: Any, started_ts: float, *, timed_out: bool = False,
+    killed_by_host: bool = False,
+) -> None:
+    """Publish the extension child's typed process facts to the call's channel.
+
+    The out-of-process extension child is a child of the tool call exactly like
+    a ``run_command`` subprocess, and the loop merges this thread's publication
+    into that call's ``result_meta``. Before this, an extension child's death
+    was legible only as prose in the error text — the dispatcher stamped typed
+    CODES (EXTENSION_TIMEOUT / EXTENSION_ERROR) but never an exit code or a
+    signal. A host kill is published with the code the child had at the moment
+    of the kill (often absent, since the reap happens in the caller's finally),
+    plus the kill facts, which is the whole truth on Windows too.
+    """
+    try:
+        publish_process_facts(
+            returncode=proc.poll(),
+            started_ts=started_ts,
+            timed_out=timed_out,
+            killed_by_host=killed_by_host,
+        )
+    except Exception:  # never replace an in-flight child failure
+        log.debug("extension child process facts could not be published", exc_info=True)
+
+
 def _run_child(
     payload: Dict[str, Any],
     *,
@@ -362,56 +451,46 @@ def _run_child(
     }
     kwargs.update(subprocess_new_group_kwargs())
     proc = subprocess.Popen(cmd, **merge_hidden_kwargs(kwargs))  # noqa: S603 - argv is host-constructed
-    with _subprocess_lock:
-        _active_subprocesses.add(proc)
+    child_started_ts = time.monotonic()
+    # ABI-9 spawn boundary: from here on the child EXISTS. Every exception
+    # leaving this function — process registration, the on_spawn durable
+    # disclosure, the drain/poll/result protocol, even a cleanup failure in
+    # the finally block — must carry the spawned marker, or dispatch
+    # provenance would record no physical_dispatch for a child that ran.
     try:
-        if on_spawn is not None:
-            on_spawn()
-    except BaseException:
-        # Popen has already dispatched the child.  A failed durable disclosure
-        # must stop it rather than leave an untracked external execution.
-        try:
-            _kill_process_group(proc)
-            proc.wait(timeout=2)
-        except Exception:
-            pass
         with _subprocess_lock:
-            _active_subprocesses.discard(proc)
-        for pipe in (proc.stdout, proc.stderr):
-            try:
-                if pipe:
-                    pipe.close()
-            except OSError:
-                pass
-        try:
-            input_path.unlink(missing_ok=True)
-        except OSError:
-            pass
-        try:
-            result_path.unlink(missing_ok=True)
-        except OSError:
-            pass
-        shutil.rmtree(import_root_base, ignore_errors=True)
-        raise
-    stdout = bytearray()
-    stderr = bytearray()
-    overflow = {"stdout": False, "stderr": False}
-    out_thread = threading.Thread(target=_drain, args=(proc.stdout, _STDOUT_CAP, stdout, overflow, "stdout"), daemon=True)
-    err_thread = threading.Thread(target=_drain, args=(proc.stderr, _STDERR_CAP, stderr, overflow, "stderr"), daemon=True)
-    out_thread.start()
-    err_thread.start()
-    deadline = time.monotonic() + max(1, int(timeout_sec))
-    try:
+            _active_subprocesses.add(proc)
+        if on_spawn is not None:
+            # Popen has already dispatched the child.  A failed durable
+            # disclosure must stop it rather than leave an untracked external
+            # execution: the finally block below kills and reaps the child.
+            on_spawn()
+        stdout = bytearray()
+        stderr = bytearray()
+        overflow = {"stdout": False, "stderr": False}
+        out_thread = threading.Thread(target=_drain, args=(proc.stdout, _STDOUT_CAP, stdout, overflow, "stdout"), daemon=True)
+        err_thread = threading.Thread(target=_drain, args=(proc.stderr, _STDERR_CAP, stderr, overflow, "stderr"), daemon=True)
+        out_thread.start()
+        err_thread.start()
+        deadline = time.monotonic() + max(1, int(timeout_sec))
         while proc.poll() is None:
             if overflow["stdout"] or overflow["stderr"]:
                 _kill_process_group(proc)
+                _publish_child_facts(proc, child_started_ts, killed_by_host=True)
                 raise ExtensionProcessError("extension child output exceeded safety cap")
             if time.monotonic() >= deadline:
                 _kill_process_group(proc)
-                raise ExtensionProcessError(f"extension child timed out after {timeout_sec}s")
+                _publish_child_facts(
+                    proc, child_started_ts, timed_out=True, killed_by_host=True,
+                )
+                raise ExtensionProcessError(
+                    f"extension child timed out after {timeout_sec}s",
+                    failure_kind="timeout",
+                )
             time.sleep(0.05)
         out_thread.join(timeout=2)
         err_thread.join(timeout=2)
+        _publish_child_facts(proc, child_started_ts)
         if proc.returncode != 0:
             stderr_text = stderr.decode("utf-8", errors="replace").strip()
             safe_stderr = sanitize_tool_result_for_log(stderr_text)[-2000:] if stderr_text else ""
@@ -429,30 +508,41 @@ def _run_child(
         if not result.get("ok", False):
             raise ExtensionProcessError(str(result.get("error") or "extension child failed"))
         return dict(result)
+    except BaseException as exc:
+        # Everything in this block runs AFTER Popen: the typed marker lets the
+        # dispatcher stamp physical_dispatch on real post-spawn failures only.
+        raise _mark_child_spawned(exc)
     finally:
         try:
-            if proc.poll() is None:
-                _kill_process_group(proc)
-            proc.wait(timeout=2)
-        except Exception:
-            pass
-        with _subprocess_lock:
-            _active_subprocesses.discard(proc)
-        try:
-            input_path.unlink(missing_ok=True)
-        except OSError:
-            pass
-        try:
-            result_path.unlink(missing_ok=True)
-        except OSError:
-            pass
-        shutil.rmtree(import_root_base, ignore_errors=True)
-        for pipe in (proc.stdout, proc.stderr):
             try:
-                if pipe:
-                    pipe.close()
+                if proc.poll() is None:
+                    _kill_process_group(proc)
+                proc.wait(timeout=2)
+            except Exception:
+                pass
+            with _subprocess_lock:
+                _active_subprocesses.discard(proc)
+            try:
+                input_path.unlink(missing_ok=True)
             except OSError:
                 pass
+            try:
+                result_path.unlink(missing_ok=True)
+            except OSError:
+                pass
+            shutil.rmtree(import_root_base, ignore_errors=True)
+            for pipe in (proc.stdout, proc.stderr):
+                try:
+                    if pipe:
+                        pipe.close()
+                except OSError:
+                    pass
+        except BaseException as cleanup_exc:
+            # A cleanup failure must never REPLACE a marked in-flight
+            # exception with an unmarked one (nor itself escape unmarked on
+            # the success path): the replacing exception carries the marker
+            # too — the child really did run.
+            raise _mark_child_spawned(cleanup_exc)
 
 
 def _record_extension_dispatch(

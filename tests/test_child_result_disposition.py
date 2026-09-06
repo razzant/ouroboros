@@ -914,3 +914,25 @@ def test_full_blackboard_never_locks_out_validated_dispositions(tmp_path, monkey
     )
     assert "ledger is full" not in accepted
     assert not accepted.startswith("⚠️")
+
+
+def test_the_disposition_enum_and_its_cost_come_from_one_place():
+    """The enum was hand-written twice with no per-value meaning, although the
+    consequence of ``deferred`` is real and host-enforced. Both payload sites
+    now read the validator's own set, in a stable order, and the schema states
+    what each value costs — the schema is where the model actually reads it."""
+    from ouroboros.task_tree_ledger import CHILD_RESULT_DISPOSITIONS
+    from ouroboros.tools import task_tree
+
+    entry = next(tool for tool in task_tree.get_tools() if tool.name == "tree_note")
+    payload = entry.schema["parameters"]["properties"]["payload"]["properties"]
+    single = payload["disposition"]
+    batch = payload["children"]["items"]["properties"]["disposition"]
+
+    assert single is batch or single == batch
+    for schema in (single, batch):
+        assert schema["enum"] == sorted(CHILD_RESULT_DISPOSITIONS)
+        assert schema["enum"] == ["deferred", "integrated", "irrelevant"]
+        for value in CHILD_RESULT_DISPOSITIONS:
+            assert value in schema["description"], value
+        assert "degraded/best_effort" in schema["description"]

@@ -4,13 +4,8 @@ import types
 
 import pytest
 
-from ouroboros.tools.core import (
-    _MAX_DOCUMENT_FILE_BYTES,
-    _MAX_LINK_ACTIONS,
-    _detect_document_mime,
-    _send_file,
-    _send_links,
-)
+from ouroboros.tools.core import _MAX_LINK_ACTIONS, _send_links
+from ouroboros.tools.core_artifacts import _send_file, _detect_document_mime, _MAX_DOCUMENT_FILE_BYTES
 from ouroboros.gateway.files import download_url_for_local_file
 
 
@@ -281,7 +276,7 @@ class TestSendLinks:
 
 
 def test_send_links_delivery_handler_prefers_bound_project_chat(monkeypatch):
-    from supervisor import chat_delivery_events
+    from supervisor import events_chat_delivery as chat_delivery_events
 
     sent = []
     ctx = types.SimpleNamespace(

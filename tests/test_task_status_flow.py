@@ -85,7 +85,7 @@ def test_schedule_task_live_emits_strict_contract_and_requested_status(tmp_path,
 
 
 def test_schedule_task_falls_back_to_pending_events_when_live_queue_unavailable(tmp_path, monkeypatch):
-    from ouroboros.tools import control as control_mod
+    from ouroboros.tools import control_scheduling as control_mod
     from ouroboros.tools.control import _schedule_task
 
     _configure_test_subagent(monkeypatch)
@@ -185,7 +185,7 @@ def test_natural_completion_wins_a_late_cancel(tmp_path, monkeypatch):
             "objective": {"status": "solved"},
             "review": {"status": "pass"},
         },
-        cost_usd=0.75,
+        accounted_upper_bound_usd=0.75,
     )
     event_queue = _FakeEventQueue()
     ctx = SimpleNamespace(
@@ -217,7 +217,7 @@ def test_natural_completion_wins_a_late_cancel(tmp_path, monkeypatch):
     assert queue_module.cancel_task_by_id("fast-child") is True
     stored = load_task_result(tmp_path, "fast-child")
     assert stored["status"] == STATUS_COMPLETED
-    assert stored["cost_usd"] == 0.75
+    assert stored["accounted_upper_bound_usd"] == 0.75
     assert stored["result"] == "finished in the cancellation race"
     assert stored["final_answer"] == "kept answer"
     assert stored["artifacts"] == [{"name": "kept.txt"}]
@@ -514,7 +514,7 @@ def test_get_task_result_returns_full_completed_output(tmp_path):
         "abc123",
         STATUS_COMPLETED,
         result=full_text,
-        cost_usd=1.23,
+        accounted_upper_bound_usd=1.23,
         trace_summary="trace",
     )
 
@@ -543,7 +543,7 @@ def test_get_task_result_carries_bounded_per_receipt_rows(tmp_path):
     from ouroboros.task_results import STATUS_COMPLETED, write_task_result
     from ouroboros.tools.control import _get_task_result
 
-    write_task_result(tmp_path, "abc123", STATUS_COMPLETED, result="done", cost_usd=0.1)
+    write_task_result(tmp_path, "abc123", STATUS_COMPLETED, result="done", accounted_upper_bound_usd=0.1)
     for idx in range(12):
         append_verification_receipt(tmp_path, "abc123", {
             "status": "pass" if idx else "fail",
@@ -574,7 +574,7 @@ def test_get_task_result_carries_bounded_per_receipt_rows(tmp_path):
 
     # A red that a LATER green for the same criterion reconciles is not carried:
     # the rule is the shared unreconciled-set SSOT, not "always float failures".
-    write_task_result(tmp_path, "closed", STATUS_COMPLETED, result="done", cost_usd=0.1)
+    write_task_result(tmp_path, "closed", STATUS_COMPLETED, result="done", accounted_upper_bound_usd=0.1)
     append_verification_receipt(tmp_path, "closed", {
         "status": "fail", "check": "pytest tests/a.py", "criterion_id": "claim_a",
     })
@@ -649,7 +649,7 @@ def test_child_finalization_publishes_receipts_to_canonical_root(tmp_path):
         tmp_path, tid, STATUS_SCHEDULED,
         drive_root=str(child_drive), child_drive_root=str(child_drive),
     )
-    write_task_result(child_drive, tid, STATUS_COMPLETED, result="child split done", cost_usd=0.2)
+    write_task_result(child_drive, tid, STATUS_COMPLETED, result="child split done", accounted_upper_bound_usd=0.2)
     append_verification_receipt(child_drive, tid, {
         "status": "fail", "check": "pytest tests/red.py", "criterion_id": "claim_red",
     })
@@ -992,7 +992,7 @@ def test_get_task_result_uses_child_terminal_over_stale_parent(tmp_path):
         "child123",
         STATUS_COMPLETED,
         result="child terminal handoff",
-        cost_usd=0.42,
+        accounted_upper_bound_usd=0.42,
         trace_summary="child trace",
     )
 
@@ -1017,7 +1017,7 @@ def test_wait_for_tasks_returns_compact_structural_batch(tmp_path):
         "parentdone",
         STATUS_COMPLETED,
         result="parent finished",
-        cost_usd=1.25,
+        accounted_upper_bound_usd=1.25,
         loop_outcome={"result_status": "succeeded", "compat_result_status": "succeeded"},
         verification_ledger={"entries": [{"kind": "objective_outcome"}]},
         trace_refs=[{"path": "logs/trace.jsonl"}],
@@ -1040,7 +1040,7 @@ def test_wait_for_tasks_returns_compact_structural_batch(tmp_path):
     assert parent["task_id"] == "parentdone"
     assert parent["status"] == STATUS_COMPLETED
     assert parent["result"] == "parent finished"
-    assert parent["cost_usd"] == 1.25
+    assert parent["accounted_upper_bound_usd"] == 1.25
     assert parent["outcome_axes"]["lifecycle"]["status"] == STATUS_COMPLETED
     # Forensics stay on disk — not inlined into the batch projection.
     assert "loop_outcome" not in parent
@@ -1056,7 +1056,7 @@ def test_wait_for_tasks_returns_compact_structural_batch(tmp_path):
     child = payload["tasks"]["childdone"]
     assert child["result"] == "child finished"
     assert child["trace_summary"] == "trace"
-    assert child["cost_usd"] is None  # absent accounting -> honest null, not $0
+    assert child["accounted_upper_bound_usd"] is None  # absent accounting -> honest null, not $0
     assert child["child_result_sha256"] == _child_result_sha256(
         load_effective_task_result(tmp_path, "childdone")
     )
@@ -1156,7 +1156,7 @@ def test_wait_for_tasks_any_terminal_early_return_projects_pending_child(tmp_pat
     from ouroboros.task_results import STATUS_COMPLETED, STATUS_SCHEDULED, write_task_result
     from ouroboros.tools.control import _wait_for_tasks
 
-    write_task_result(tmp_path, "fastchild", STATUS_COMPLETED, result="done first", cost_usd=0.10)
+    write_task_result(tmp_path, "fastchild", STATUS_COMPLETED, result="done first", accounted_upper_bound_usd=0.10)
     write_task_result(tmp_path, "slowchild", STATUS_SCHEDULED, result="")
 
     ctx = SimpleNamespace(drive_root=tmp_path)
@@ -1166,10 +1166,10 @@ def test_wait_for_tasks_any_terminal_early_return_projects_pending_child(tmp_pat
     assert payload["all_terminal"] is False
     assert payload["timed_out"] is False
     assert payload["tasks"]["fastchild"]["status"] == STATUS_COMPLETED
-    assert payload["tasks"]["fastchild"]["cost_usd"] == 0.10
+    assert payload["tasks"]["fastchild"]["accounted_upper_bound_usd"] == 0.10
     # The still-pending child gets the same compact shape with cost present.
     assert payload["tasks"]["slowchild"]["status"] == STATUS_SCHEDULED
-    assert "cost_usd" in payload["tasks"]["slowchild"]
+    assert "accounted_upper_bound_usd" in payload["tasks"]["slowchild"]
     assert "child_result_sha256" in payload["tasks"]["slowchild"]
 
 
@@ -1177,7 +1177,7 @@ def test_wait_for_tasks_cost_present_on_cancelled_and_failed(tmp_path):
     from ouroboros.task_results import STATUS_CANCELLED, STATUS_FAILED, write_task_result
     from ouroboros.tools.control import _wait_for_tasks
 
-    write_task_result(tmp_path, "cancelledchild", STATUS_CANCELLED, result="best-effort partial handoff", cost_usd=0.42)
+    write_task_result(tmp_path, "cancelledchild", STATUS_CANCELLED, result="best-effort partial handoff", accounted_upper_bound_usd=0.42)
     write_task_result(tmp_path, "failedchild", STATUS_FAILED, result="provider exploded")
 
     ctx = SimpleNamespace(drive_root=tmp_path)
@@ -1185,13 +1185,13 @@ def test_wait_for_tasks_cost_present_on_cancelled_and_failed(tmp_path):
 
     cancelled = payload["tasks"]["cancelledchild"]
     assert cancelled["status"] == STATUS_CANCELLED
-    assert cancelled["cost_usd"] == 0.42
+    assert cancelled["accounted_upper_bound_usd"] == 0.42
     assert cancelled["result"] == "best-effort partial handoff"
     failed = payload["tasks"]["failedchild"]
     assert failed["status"] == STATUS_FAILED
     # Absent accounting projects an honest null — never a confirmed-looking $0
     # (triad v6.71.2 r1; mirrors the ledger's unknown-cost discipline).
-    assert "cost_usd" in failed and failed["cost_usd"] is None
+    assert "accounted_upper_bound_usd" in failed and failed["accounted_upper_bound_usd"] is None
     assert "child_result_sha256" in failed
 
 
@@ -1213,7 +1213,7 @@ def test_wait_for_tasks_rejected_duplicate_carries_duplicate_of(tmp_path):
     dupe = payload["tasks"]["dupechild"]
     assert dupe["status"] == STATUS_REJECTED_DUPLICATE
     assert dupe["duplicate_of"] == "original123"
-    assert "cost_usd" in dupe
+    assert "accounted_upper_bound_usd" in dupe
 
 
 # --- v6.91 wait terminality: cancel_requested is a latch, not a settled record
@@ -1340,7 +1340,7 @@ def test_wait_for_tasks_flags_unknown_ids_and_attaches_children_roster(tmp_path)
         "realchild1",
         STATUS_COMPLETED,
         result="real child finished",
-        cost_usd=0.55,
+        accounted_upper_bound_usd=0.55,
         parent_task_id="waitparent1",
         root_task_id="waitparent1",
         delegation_role="subagent",
@@ -1368,10 +1368,8 @@ def test_wait_for_tasks_flags_unknown_ids_and_attaches_children_roster(tmp_path)
     # only — no result/trace envelope fields, absent accounting projects null.
     roster = payload["children_roster"]
     assert [row["task_id"] for row in roster] == ["realchild1"]
-    assert set(roster[0]) == {"task_id", "status", "cost_usd", "accounted_upper_bound_usd",
+    assert set(roster[0]) == {"task_id", "status", "accounted_upper_bound_usd",
                               "child_result_sha256", "outcome_axes"}
-    assert roster[0]["cost_usd"] == 0.55
-    # C2: the additive honest name carries the SAME value as the alias.
     assert roster[0]["accounted_upper_bound_usd"] == 0.55
     # Nothing was capped away, and the projection SAYS so (BIBLE P1).
     assert payload["children_roster_omitted"] == 0
@@ -1407,7 +1405,7 @@ def test_children_roster_projection_discloses_the_capped_tail(tmp_path):
     assert len(roster) == 30  # the cap holds — the surface stays compact
     assert projected["children_roster_omitted"] == total - 30  # …and is disclosed
     assert all(
-        set(row) == {"task_id", "status", "cost_usd", "accounted_upper_bound_usd",
+        set(row) == {"task_id", "status", "accounted_upper_bound_usd",
                      "child_result_sha256", "outcome_axes"}
         for row in roster
     )
@@ -1419,13 +1417,17 @@ def test_wait_for_tasks_phantom_only_set_short_circuits_the_window(tmp_path, mon
     import json as _json
 
     from ouroboros.tools import control
+    # The wait internals live in the extracted owner leaf (v7 D07 split):
+    # _wait_for_tasks reads the grace knob from its own module, so the
+    # interception targets the leaf, not the re-exporting facade.
+    from ouroboros.tools import control_task_results
 
     state_dir = tmp_path / "state"
     state_dir.mkdir(parents=True, exist_ok=True)
     (state_dir / "queue_snapshot.json").write_text(
         _json.dumps({"pending": [], "running": []}), encoding="utf-8"
     )
-    monkeypatch.setattr(control, "_UNMINTED_WAIT_GRACE_SEC", 0.1)
+    monkeypatch.setattr(control_task_results, "_UNMINTED_WAIT_GRACE_SEC", 0.1)
 
     ctx = SimpleNamespace(drive_root=tmp_path, task_id="waitparent3", task_metadata={})
     started = time.monotonic()
@@ -1446,16 +1448,20 @@ def test_wait_for_tasks_id_minted_during_grace_keeps_waiting(tmp_path, monkeypat
 
     from ouroboros.task_results import STATUS_COMPLETED, write_task_result
     from ouroboros.tools import control
+    # The wait internals live in the extracted owner leaf (v7 D07 split):
+    # _wait_for_tasks reads the grace knob and the minted-ids probe from its
+    # own module, so the interceptions target the leaf, not the facade.
+    from ouroboros.tools import control_task_results
 
     state_dir = tmp_path / "state"
     state_dir.mkdir(parents=True, exist_ok=True)
     (state_dir / "queue_snapshot.json").write_text(
         _json.dumps({"pending": [], "running": []}), encoding="utf-8"
     )
-    monkeypatch.setattr(control, "_UNMINTED_WAIT_GRACE_SEC", 0.1)
+    monkeypatch.setattr(control_task_results, "_UNMINTED_WAIT_GRACE_SEC", 0.1)
 
     real_calls = {"n": 0}
-    original = control._unminted_wait_ids
+    original = control_task_results._unminted_wait_ids
 
     def _mint_after_grace(ctx, drive_root, task_ids):
         real_calls["n"] += 1
@@ -1468,7 +1474,7 @@ def test_wait_for_tasks_id_minted_during_grace_keeps_waiting(tmp_path, monkeypat
             )
         return original(ctx, drive_root, task_ids)
 
-    monkeypatch.setattr(control, "_unminted_wait_ids", _mint_after_grace)
+    monkeypatch.setattr(control_task_results, "_unminted_wait_ids", _mint_after_grace)
     ctx = SimpleNamespace(drive_root=tmp_path, task_id="waitparent4", task_metadata={})
     payload = json.loads(control._wait_for_tasks(ctx, ["latechild1"], timeout_sec=5))
 
@@ -1520,6 +1526,39 @@ def test_recent_tasks_includes_outcome_contract_and_ledger(tmp_path):
     assert record["task_contract"]["objective"] == "Do work"
     assert record["artifact_bundle"]["status"] == "ready_no_changes"
     assert record["verification_ledger"]["entry_count"] == 1
+
+    # A ledger above the inline threshold rides as a stub with NO entries: its
+    # own summary is the count authority, so the row must not report zero.
+    write_task_result(
+        tmp_path,
+        "recent2",
+        STATUS_COMPLETED,
+        result="done",
+        verification_ledger={
+            "schema_version": 1, "omitted_to_artifact": True,
+            "summary": {"entry_count": 9, "has_failures": True},
+        },
+    )
+    payload = json.loads(_handle_recent_tasks(SimpleNamespace(drive_root=tmp_path), limit=2))
+    stub_record = next(row for row in payload["tasks"] if row["task_id"] == "recent2")
+    assert stub_record["verification_ledger"]["entry_count"] == 9
+    assert stub_record["verification_ledger"]["summary"]["has_failures"] is True
+
+
+def test_subtask_outcome_summary_reports_a_stub_ledger_count(tmp_path):
+    """The same count authority on the parent-visible child summary: a stub
+    ledger used to report ``0 entries / no failures`` to its parent."""
+    from ouroboros.tools.control import _subtask_outcome_summary
+
+    summary = json.loads(_subtask_outcome_summary({
+        "status": "completed", "result": "done",
+        "verification_ledger": {
+            "schema_version": 1, "omitted_to_artifact": True,
+            "summary": {"entry_count": 9, "has_failures": True},
+        },
+    }))
+    assert summary["verification_ledger"]["entry_count"] == 9
+    assert summary["verification_ledger"]["summary"]["has_failures"] is True
 
 
 def test_effective_status_keeps_workspace_finalization_nonterminal_without_child_drive(tmp_path):
@@ -1800,7 +1839,7 @@ def test_effective_status_preserves_parent_retry_status_over_stale_child_running
 
 def test_find_child_tasks_requires_subagent_role_and_can_exclude_current_task(tmp_path):
     from ouroboros.task_results import STATUS_COMPLETED, STATUS_RUNNING, write_task_result
-    from ouroboros.task_status import find_child_tasks, format_handoff_message
+    from ouroboros.task_status import find_child_tasks
 
     write_task_result(
         tmp_path,
@@ -1825,14 +1864,9 @@ def test_find_child_tasks_requires_subagent_role_and_can_exclude_current_task(tm
 
     children = find_child_tasks(tmp_path, parent_task_id="parent1", root_task_id="parent1")
     excluded = find_child_tasks(tmp_path, parent_task_id="parent1", root_task_id="parent1", exclude_task_id="child1")
-    handoff = format_handoff_message(children)
 
     assert [row["task_id"] for row in children] == ["child1"]
     assert excluded == []
-    assert "should not be treated as child" not in handoff
-    assert len(handoff) < 1200
-    assert "Use get_task_result" in handoff
-    assert "result_chars" in handoff
 
 
 def test_wait_for_task_times_out_when_child_is_not_terminal(tmp_path):
@@ -1883,6 +1917,7 @@ def test_wait_for_task_reports_rejected_duplicate(tmp_path):
 
 def test_handle_schedule_task_duplicate_writes_rejected_status(tmp_path, monkeypatch):
     from supervisor import events as ev_module
+    from supervisor import events_schedule_task as schedule_module
     from ouroboros.task_results import STATUS_REJECTED_DUPLICATE
 
     captured_identity = {}
@@ -1891,7 +1926,7 @@ def test_handle_schedule_task_duplicate_writes_rejected_status(tmp_path, monkeyp
         captured_identity.update(kwargs.get("dedupe_identity") or {})
         return "orig111"
 
-    monkeypatch.setattr(ev_module, "_find_duplicate_task", _duplicate)
+    monkeypatch.setattr(schedule_module, "_find_duplicate_task", _duplicate)
 
     sent = []
 
@@ -2199,9 +2234,10 @@ def test_find_duplicate_task_allows_subagent_against_pending_parent_ancestor(mon
 
 def test_handle_schedule_task_accepts_unique_subagent_with_lineage_and_constraint(tmp_path, monkeypatch):
     from supervisor import events as ev_module
+    from supervisor import events_schedule_task as schedule_module
     from ouroboros.task_results import STATUS_SCHEDULED
 
-    monkeypatch.setattr(ev_module, "_find_duplicate_task", lambda *args, **kwargs: None)
+    monkeypatch.setattr(schedule_module, "_find_duplicate_task", lambda *args, **kwargs: None)
     enqueued = []
     sent = []
 
@@ -2273,9 +2309,10 @@ def test_handle_schedule_task_accepts_unique_subagent_with_lineage_and_constrain
 
 def test_handle_schedule_task_rejects_internal_subagent_without_child_drive_contract(tmp_path, monkeypatch):
     from supervisor import events as ev_module
+    from supervisor import events_schedule_task as schedule_module
     from ouroboros.task_results import STATUS_FAILED
 
-    monkeypatch.setattr(ev_module, "_find_duplicate_task", lambda *args, **kwargs: None)
+    monkeypatch.setattr(schedule_module, "_find_duplicate_task", lambda *args, **kwargs: None)
     sent = []
 
     class FakeCtx:
@@ -2317,9 +2354,10 @@ def test_handle_schedule_task_rejects_internal_subagent_without_child_drive_cont
 
 def test_handle_schedule_task_uses_event_chat_id_without_owner(tmp_path, monkeypatch):
     from supervisor import events as ev_module
+    from supervisor import events_schedule_task as schedule_module
     from ouroboros.task_results import STATUS_SCHEDULED
 
-    monkeypatch.setattr(ev_module, "_find_duplicate_task", lambda *args, **kwargs: None)
+    monkeypatch.setattr(schedule_module, "_find_duplicate_task", lambda *args, **kwargs: None)
     enqueued = []
     sent = []
 
@@ -2380,23 +2418,26 @@ def test_handle_schedule_task_uses_event_chat_id_without_owner(tmp_path, monkeyp
     )
 
     # B1 (v6.33.0): a headless subagent with no chat target is no longer
-    # rejected — it is enqueued and runs (the live "🗓️ Scheduled" notification is
-    # skipped because chat_id is 0). Restores headless/CLI multi-agent.
+    # rejected — it is enqueued and runs. The durable record now keeps its real
+    # address instead of recording the hidden partition as "no chat" (that is the
+    # truthiness class this sprint closed), while the LIVE toast is still skipped:
+    # a progress notice needs a reader, the hidden partition has none, and a
+    # headless run's progress log is read back as its benchmark trajectory.
     assert len(enqueued) == 2
     assert enqueued[1]["id"] == "headless2"
     scheduled2 = json.loads((tmp_path / "task_results" / "headless2.json").read_text(encoding="utf-8"))
     assert scheduled2["status"] == STATUS_SCHEDULED
-    # No chat notification was emitted for the chat-less subagent.
-    assert all(s[0] != 0 for s in sent)
+    assert scheduled2["chat_id"] == 0
     assert len(sent) == 1
 
 
 def test_handle_schedule_task_depth_rejection_writes_failed_status(tmp_path, monkeypatch):
     from supervisor import events as ev_module
+    from supervisor import events_schedule_task as schedule_module
     from ouroboros.config import get_max_subagent_depth
     from ouroboros.task_results import STATUS_FAILED
 
-    monkeypatch.setattr(ev_module, "_find_duplicate_task", lambda *args, **kwargs: None)
+    monkeypatch.setattr(schedule_module, "_find_duplicate_task", lambda *args, **kwargs: None)
     sent = []
 
     class FakeCtx:
@@ -2441,6 +2482,7 @@ def test_handle_schedule_task_depth_rejection_writes_failed_status(tmp_path, mon
 def test_configured_zero_subagent_depth_truly_disables_delegation(tmp_path, monkeypatch):
     """A configured depth of zero disables child delegation, not the root task."""
     from supervisor import events as ev_module
+    from supervisor import events_schedule_task as schedule_module
     from ouroboros.config import get_max_subagent_depth
     from ouroboros.task_results import STATUS_FAILED
 
@@ -2471,7 +2513,7 @@ def test_configured_zero_subagent_depth_truly_disables_delegation(tmp_path, monk
         "achieved_depth": None,
     }
 
-    monkeypatch.setattr(ev_module, "_find_duplicate_task", lambda *args, **kwargs: None)
+    monkeypatch.setattr(schedule_module, "_find_duplicate_task", lambda *args, **kwargs: None)
     enqueued = []
 
     class FakeCtx:
@@ -2551,9 +2593,10 @@ def test_settings_ui_carries_a_configured_zero_subagent_depth():
 
 def test_handle_schedule_task_rejects_legacy_subagent_event_schema(tmp_path, monkeypatch):
     from supervisor import events as ev_module
+    from supervisor import events_schedule_task as schedule_module
     from ouroboros.task_results import STATUS_FAILED
 
-    monkeypatch.setattr(ev_module, "_find_duplicate_task", lambda *args, **kwargs: None)
+    monkeypatch.setattr(schedule_module, "_find_duplicate_task", lambda *args, **kwargs: None)
     enqueued = []
     sent = []
 
@@ -2600,9 +2643,10 @@ def test_handle_schedule_task_rejects_legacy_subagent_event_schema(tmp_path, mon
 
 def test_handle_schedule_task_queues_when_active_subagent_cap_is_full(tmp_path, monkeypatch):
     from supervisor import events as ev_module
+    from supervisor import events_schedule_task as schedule_module
     from ouroboros.task_results import STATUS_COMPLETED, STATUS_FAILED, STATUS_SCHEDULED, load_task_result, write_task_result
 
-    monkeypatch.setattr(ev_module, "_find_duplicate_task", lambda *args, **kwargs: None)
+    monkeypatch.setattr(schedule_module, "_find_duplicate_task", lambda *args, **kwargs: None)
     monkeypatch.setenv("OUROBOROS_MAX_ACTIVE_SUBAGENTS_PER_ROOT", "3")  # pin cap (v6.20.0 raised default to 6)
     sent = []
     enqueued = []
@@ -2768,9 +2812,10 @@ def test_handle_schedule_task_fails_fast_when_worker_pool_unavailable(tmp_path, 
     schedule must NOT be left as a 'scheduled' ghost — it gets a terminal
     workers_unavailable result so the parent can act."""
     from supervisor import events as ev_module
+    from supervisor import events_schedule_task as schedule_module
     from ouroboros.task_results import STATUS_FAILED
 
-    monkeypatch.setattr(ev_module, "_find_duplicate_task", lambda *args, **kwargs: None)
+    monkeypatch.setattr(schedule_module, "_find_duplicate_task", lambda *args, **kwargs: None)
     sent = []
 
     class FakeCtx:
@@ -3237,8 +3282,6 @@ def test_subagent_hard_timeout_retry_preserves_task_id(tmp_path, monkeypatch):
     monkeypatch.setattr(queue_module, "PENDING", [])
     monkeypatch.setattr(queue_module, "RUNNING", {})
     monkeypatch.setattr(queue_module, "QUEUE_SEQ_COUNTER_REF", {"value": 0})
-    monkeypatch.setattr(queue_module, "HARD_TIMEOUT_SEC", 1)
-    monkeypatch.setattr(queue_module, "SOFT_TIMEOUT_SEC", 1)
     monkeypatch.setattr(queue_module, "FINALIZATION_GRACE_SEC", 0)
     monkeypatch.setattr(queue_module, "QUEUE_MAX_RETRIES", 1)
     monkeypatch.setattr(queue_module, "load_state", lambda: {})
@@ -3313,8 +3356,6 @@ def test_absolute_deadline_does_not_retry_expired_task(tmp_path, monkeypatch):
     monkeypatch.setattr(queue_module, "PENDING", [])
     monkeypatch.setattr(queue_module, "RUNNING", {})
     monkeypatch.setattr(queue_module, "QUEUE_SEQ_COUNTER_REF", {"value": 0})
-    monkeypatch.setattr(queue_module, "HARD_TIMEOUT_SEC", 9999)
-    monkeypatch.setattr(queue_module, "SOFT_TIMEOUT_SEC", 9999)
     monkeypatch.setattr(queue_module, "FINALIZATION_GRACE_SEC", 0)
     monkeypatch.setattr(queue_module, "QUEUE_MAX_RETRIES", 3)
     monkeypatch.setattr(queue_module, "load_state", lambda: {})
@@ -3368,13 +3409,18 @@ def test_handle_text_response_keeps_full_reasoning_note():
 
 def test_request_restart_latches_reason_until_task_end(tmp_path, monkeypatch):
     from ouroboros.tools import control as control_module
+    from ouroboros.tools import control_runtime
 
-    monkeypatch.setattr(control_module, "run_cmd", lambda *args, **kwargs: "value")
+    from supervisor import evolution_lifecycle
+
+    monkeypatch.setattr(control_runtime, "run_cmd", lambda *args, **kwargs: "value")
     written = {}
+    # The marker write lives in the shared writer helper (W4-F3: one schema for
+    # the tool and the supervisor), so the capture sits at its seam.
     monkeypatch.setattr(
-        control_module,
+        evolution_lifecycle,
         "atomic_write_json",
-        lambda path, payload: written.setdefault(str(path), payload),
+        lambda path, payload, **_kwargs: written.setdefault(str(path), payload),
     )
 
     class _Ctx:
@@ -3383,6 +3429,7 @@ def test_request_restart_latches_reason_until_task_end(tmp_path, monkeypatch):
         pending_events = []
         pending_restart_reason = None
         repo_dir = tmp_path
+        drive_root = tmp_path
 
         def drive_path(self, rel):
             return tmp_path / rel

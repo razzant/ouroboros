@@ -19,6 +19,19 @@ SAFETY_CRITICAL_PATHS = frozenset({
     "ouroboros/runtime_mode_policy.py",
     "ouroboros/tools/extension_dispatch.py",
     "ouroboros/tools/registry.py",
+    # The v7 D04 split moved guard/resolution bodies out of the protected
+    # registry without moving any of the risk, so every inventory that
+    # protects the parent must cover the leaves (label parity — same rule as
+    # the git_ops family).
+    "ouroboros/tools/registry_guard_process.py",
+    "ouroboros/tools/registry_guards.py",
+    # F3.1 typed-organ leaves: the registry class body and the typed result
+    # vocabulary re-homed out of the protected registry — same label parity.
+    "ouroboros/tools/registry_core.py",
+    "ouroboros/tools/tool_catalog.py",
+    "ouroboros/tools/tool_context.py",
+    "ouroboros/tools/tool_resolution.py",
+    "ouroboros/tools/tool_result.py",
     "prompts/SAFETY.md",
 })
 
@@ -36,6 +49,14 @@ FROZEN_CONTRACT_PATHS = frozenset({
     "ouroboros/size_ratchet_manifest.py",
 })
 
+# The whole git_ops family as ONE derived constant (owner decision, batch 5
+# item 15): the facade plus its G1 leaves. Every protection inventory that
+# covers the parent consumes this set instead of hand-listing the members.
+GIT_OPS_FAMILY_PATHS = frozenset(
+    {"supervisor/git_ops.py"}
+    | {f"supervisor/git_ops_{leaf}.py" for leaf in ("remotes", "rescue", "reset", "updates")}
+)
+
 RELEASE_INVARIANT_PATHS = frozenset({
     ".github/workflows/ci.yml",
     "Ouroboros.spec",
@@ -45,9 +66,28 @@ RELEASE_INVARIANT_PATHS = frozenset({
     "scripts/build_repo_bundle.py",
     "ouroboros/launcher_bootstrap.py",
     "ouroboros/repo_remotes.py",
-    "supervisor/git_ops.py",
+    # The v7 G1 split moved the remote/managed-update/checkout-reset/rescue
+    # bodies out of the protected git_ops facade without moving any of the
+    # risk, so every inventory that protects the parent must cover the leaves
+    # (label parity — same rule as the D04 registry block above). The family
+    # is one derived constant so a future leaf cannot be forgotten here while
+    # existing elsewhere; a glob completeness test pins list-vs-tree parity.
+    *GIT_OPS_FAMILY_PATHS,
     "supervisor/update_merge.py",
     "supervisor/update_merge_policy.py",
+    # The F2.4 update-engine re-split moved the planner/materializer bodies —
+    # the carrier engine's three insertion points — out of the protected
+    # update_merge facade, and the D34 span resolver rewrites worktree files
+    # under the update lock; every inventory that protects the parent must
+    # cover them (label parity — same rule as the G1 block above).
+    "supervisor/update_merge_plan.py",
+    "supervisor/update_carriers.py",
+    # Upstream's own redesign split the candidate/carrier primitives (stash
+    # restore, failed-update preservation, tests-evidence proof) out of the
+    # protected update_merge facade without listing the leaf — an upstream gap
+    # the F2.4 lane disclosed. Closed additively here (label parity — same
+    # rule as the two blocks above; additive-literal precedent D10/#419).
+    "supervisor/update_candidate.py",
 })
 
 PROTECTED_RUNTIME_PATH_PREFIXES = FROZEN_CONTRACT_PATH_PREFIXES

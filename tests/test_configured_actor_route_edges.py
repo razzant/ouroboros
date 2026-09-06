@@ -29,7 +29,7 @@ def test_planned_restart_kill_keeps_selected_child_even_if_parent_is_interrupted
 
     repo = tmp_path / "repo"
     repo.mkdir()
-    workers.init(repo, tmp_path, 2, 600, 1800, 100.0)
+    workers.init(repo, tmp_path, 2)
     workers.WORKERS.clear()
     workers.PENDING.clear()
     workers.RUNNING.clear()

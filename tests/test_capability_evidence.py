@@ -346,11 +346,12 @@ def test_token_density_is_measured_throttled_and_bounded(tmp_path, monkeypatch):
     record_token_density(tmp_path, "m/two", prompt_chars=chars, prompt_tokens=99_000_000)
     assert get_token_density(tmp_path, "m/two") == 0.0
 
-    # The cold-conservative fallback is the MAX of the constant and every fresh
-    # observation, so a light GPT measurement can never make an unknown model optimistic.
+    # The cold-conservative fallback IS the constant: the fresh m/one (1.8) and
+    # m/dense (2.0) witnesses are other tokenizers, no evidence about never/seen —
+    # neither optimistic (a light foreign row) nor pessimistic (a dense one).
     density, source = resolve_token_density(tmp_path, "never/seen")
     assert source == "cold_conservative"
-    assert density >= COLD_START_TOKEN_DENSITY
+    assert density == COLD_START_TOKEN_DENSITY
 
 
 def test_density_reducers_use_newest_route_or_model_but_densest_review_witness(
@@ -392,13 +393,72 @@ def test_density_reducers_use_newest_route_or_model_but_densest_review_witness(
     review, source = resolve_review_token_density(tmp_path, "m/one")
     assert source == "measured"
     assert review == max(COLD_START_TOKEN_DENSITY, 1.8 * MEASURED_DENSITY_SAFETY_FACTOR)
+    # m/one's 1.8 x 1.05 = 1.89 is m/one's tokenizer; m/missing gets the floor.
     assert resolve_review_token_density(tmp_path, "m/missing") == (
-        review, "cold_conservative",
+        COLD_START_TOKEN_DENSITY, "cold_conservative",
     )
 
     stored = json.loads((tmp_path / "state" / "capability_evidence.json").read_text())
     assert set(stored["token_density"]["m/one"]) == {"pairs"}
     assert resolve_main_token_density(tmp_path, "", "never/seen") == (1.0, "cold_estimate")
+
+
+def test_foreign_density_witness_leaves_the_cold_floor_untouched(tmp_path):
+    """Paid run 2026-09-04 (lane SM1_a1): gemini-3.8-flash's witness 407,767 /
+    (900,708 / 4) = 1.81 governed gpt-5.6-terra (no exact witness yet) at
+    1.81 x 1.05 = 1.90, cutting the scope cap to 499,627 of a 1,050,000 window
+    where the floor alone gives 575,757. Another model's tokenizer is no
+    evidence about this route: the cross-model branch returns the floor."""
+    from ouroboros.capability_evidence import (
+        _DENSITY_MEMO,
+        COLD_START_TOKEN_DENSITY,
+        MEASURED_DENSITY_SAFETY_FACTOR,
+        record_token_density,
+        resolve_review_token_density,
+    )
+
+    _DENSITY_MEMO.clear()
+    record_token_density(
+        tmp_path, "google/gemini-3.8-flash", prompt_chars=900_708, prompt_tokens=407_767,
+    )
+    assert resolve_review_token_density(tmp_path, "openai/gpt-5.6-terra") == (
+        COLD_START_TOKEN_DENSITY, "cold_conservative",
+    )
+    density, source = resolve_review_token_density(tmp_path, "google/gemini-3.8-flash")
+    assert source == "measured"
+    assert abs(density - 407_767 / (900_708 / 4) * MEASURED_DENSITY_SAFETY_FACTOR) < 1e-9
+
+
+def test_doubled_cached_usage_row_is_not_a_density_witness(tmp_path):
+    """The same paid run: 22 openrouter gemini usage rows (every lane) reported
+    prompt_tokens = 2 x cached_tokens - 1 — a cache read added on top of an
+    already cache-inclusive total — beside honest rows of the same prompt at
+    1.00-1.17 x cached. Accepted, one such row is the densest fresh pair and
+    the review reducer promotes it for the 90-day TTL, so it is no witness.
+    Uncached ABOVE cached (a cold prompt with a small cache hit) is ordinary
+    accounting and stays measurable."""
+    from ouroboros import usage_accounting as ua
+    from ouroboros.capability_evidence import _DENSITY_MEMO, get_token_density, observe_token_density
+
+    def observe(root, usage, estimate):
+        _DENSITY_MEMO.clear()
+        observe_token_density(
+            ua.AttemptRequest(
+                model="google/gemini-3.8-flash", provider="openrouter",
+                prompt_tokens_estimate=estimate, drive_root=root,
+            ),
+            usage,
+            drive_root_resolver=lambda root: root,
+        )
+        return get_token_density(root, "google/gemini-3.8-flash")
+
+    doubled = tmp_path / "doubled"
+    assert observe(doubled, {"prompt_tokens": 407_767, "cached_tokens": 203_884}, 225_177) == 0.0
+    assert observe(doubled, {"prompt_tokens": 407_768, "cached_tokens": 203_884}, 225_177) == 0.0
+    honest = observe(tmp_path / "honest", {"prompt_tokens": 205_299, "cached_tokens": 203_884}, 226_443)
+    assert abs(honest - 205_299 / 226_443) < 1e-6
+    cold_hit = observe(tmp_path / "cold_hit", {"prompt_tokens": 412_884, "cached_tokens": 203_884}, 225_177)
+    assert abs(cold_hit - 412_884 / 225_177) < 1e-6
 
 
 def test_density_throttle_uses_legacy_list_order_for_equal_clock_ties(tmp_path):
@@ -880,3 +940,44 @@ def test_a_failed_probe_is_retried_once_its_throttle_expires_and_not_before(tmp_
     assert fetches, "an expired failure record must be retried"
     assert retried.status == ce.STATUS_CONFIRMED and retried.window_tokens == 1_000_000
     assert ce.confirms_at_least(retried, ce.ONE_MILLION, require_fresh=True) is True
+
+
+def test_expired_probe_records_drop_on_write(tmp_path):
+    """CPL4-C8: the write seam drops probe records the reader already treats as
+    expired — failed/unprobeable past their TTL, confirmed past GC retention —
+    while owner acks, in-retention stale confirmed (the blip-keep invariant),
+    and records with unreadable timestamps survive untouched."""
+    from ouroboros.utils import utc_now_iso
+
+    store = tmp_path / "state" / "capability_evidence.json"
+    store.parent.mkdir(parents=True, exist_ok=True)
+    old_failed = {"status": ce.STATUS_FAILED, "ts": "2020-01-01T00:00:00+00:00"}
+    old_unprobeable = {"status": ce.STATUS_UNPROBEABLE, "ts": "2020-01-01T00:00:00+00:00"}
+    ancient_confirmed = {
+        "status": ce.STATUS_CONFIRMED, "window_tokens": 1_000_000,
+        "ts": "2020-01-01T00:00:00+00:00",
+    }
+    stale_confirmed_within_gc = {
+        "status": ce.STATUS_CONFIRMED, "window_tokens": 1_000_000, "ts": utc_now_iso(),
+    }
+    broken_ts = {"status": ce.STATUS_FAILED, "ts": "not-a-time"}
+    store.write_text(json.dumps({
+        "probes": {
+            "old-failed": old_failed,
+            "old-unprobeable": old_unprobeable,
+            "ancient-confirmed": ancient_confirmed,
+            "fresh-confirmed": stale_confirmed_within_gc,
+            "broken-ts": broken_ts,
+        },
+        "owner_acks": {"acked-route": {"tokens": 1_000_000, "ts": "2020-01-01T00:00:00+00:00"}},
+    }), encoding="utf-8")
+
+    ce._store_evidence(tmp_path, "probes", "new-route", {
+        "status": ce.STATUS_CONFIRMED, "window_tokens": 200_000, "ts": utc_now_iso(),
+    })
+
+    on_disk = json.loads(store.read_text(encoding="utf-8"))
+    assert set(on_disk["probes"]) == {"fresh-confirmed", "broken-ts", "new-route"}
+    assert on_disk["owner_acks"] == {
+        "acked-route": {"tokens": 1_000_000, "ts": "2020-01-01T00:00:00+00:00"},
+    }

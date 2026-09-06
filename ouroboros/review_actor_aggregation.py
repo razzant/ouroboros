@@ -86,7 +86,7 @@ def aggregate_review_actors(
         or str((request.policy or {}).get("hardness") or "") == advisory_hardness
     )
     for actor in actors:
-        if actor.status == "error":
+        if actor.status in {"error", "not_dispatched"}:
             actor_errors.append(f"{actor.slot_id}:{actor.error}")
         elif actor.status != "ok":
             actor_errors.append(f"{actor.slot_id}:{actor.status}")

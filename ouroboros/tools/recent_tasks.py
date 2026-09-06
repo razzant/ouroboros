@@ -63,9 +63,8 @@ def _task_record(
         "status": str(data.get("status") or ""),
         "outcome_axes": normalize_outcome_axes(data),
         "description": str(data.get("description") or ""),
-        # SSOT cost projection (C2): honest null (never a fabricated $0), the
-        # additive honest name beside the deprecated alias, finality unfabricated.
-        "cost_usd": _cost["cost_usd"],
+        # SSOT cost projection (C2/ABI-3): honest null (never a fabricated $0),
+        # the honest name only, finality unfabricated.
         "accounted_upper_bound_usd": _cost["accounted_upper_bound_usd"],
         "cost_final": _cost["cost_final"],
         "total_rounds": data.get("total_rounds"),
@@ -77,10 +76,13 @@ def _task_record(
         record["artifact_bundle"] = data.get("artifact_bundle")
     ledger = data.get("verification_ledger") if isinstance(data.get("verification_ledger"), dict) else {}
     if ledger:
+        # An omitted-to-artifact stub carries no entries; its summary is the
+        # count authority, and for a full ledger the two always agree.
+        ledger_summary = ledger.get("summary") if isinstance(ledger.get("summary"), dict) else {}
         record["verification_ledger"] = {
             "schema_version": ledger.get("schema_version"),
-            "summary": ledger.get("summary") if isinstance(ledger.get("summary"), dict) else {},
-            "entry_count": len(ledger.get("entries") or []) if isinstance(ledger.get("entries"), list) else 0,
+            "summary": ledger_summary,
+            "entry_count": ledger_summary.get("entry_count", len(ledger.get("entries") or []) if isinstance(ledger.get("entries"), list) else 0),
         }
     if include_results:
         record["result"] = result

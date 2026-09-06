@@ -203,6 +203,7 @@ def _run_command(args: argparse.Namespace) -> int:
         disabled_tools.extend(part.strip() for part in str(raw or "").split(",") if part.strip())
     body = {
         "description": prompt,
+        "title": getattr(args, "title", "") or "",
         "workspace_root": args.workspace or "",
         "workspace_mode": "external" if args.workspace else "",
         "project_id": getattr(args, "project_id", "") or "",
@@ -291,9 +292,9 @@ def _chat_send_command(args: argparse.Namespace) -> int:
 
 def _chat_history_command(args: argparse.Namespace) -> int:
     # `n_human` is the server's quota for conversation (non-progress) rows. An
-    # omitted --limit sends no quota so the server's own window governs (one
-    # owner for the default); legacy `limit` still works for shipped CLIs.
-    query = "" if args.limit is None else f"?n_human={int(args.limit)}"
+    # omitted (or non-positive) --limit sends no quota so the server's own window
+    # governs, the way the server already treats a non-positive legacy `limit`.
+    query = f"?n_human={int(args.limit)}" if (args.limit or 0) > 0 else ""
     _print_json(_client(args).request("GET", f"/api/chat/history{query}"))
     return 0
 
@@ -505,6 +506,7 @@ def build_parser() -> argparse.ArgumentParser:
     run.add_argument("--start", action="store_true", help="start a local server if attach fails")
     run.add_argument("--workspace", default="", help="external workspace root")
     run.add_argument("--project-id", default="", help="per-project facts scope id (else derived from the workspace path)")
+    run.add_argument("--title", default="", help="owner-facing task name (else derived from the prompt's first line)")
     run.add_argument("--memory-mode", choices=["shared", "forked", "empty"], default="")
     run.add_argument("--attach", action="append", default=[])
     run.add_argument("--jsonl", action="store_true")
@@ -517,19 +519,15 @@ def build_parser() -> argparse.ArgumentParser:
     run.add_argument("--result-json-out", default="", help="write final task result JSON to this path")
     run.add_argument("--disable-tools", action="append", default=[], help="comma-separated tool names to withhold from this task")
     run.add_argument(
-        "--task-metadata-json",
-        default="",
+        "--task-metadata-json", default="",
         help="JSON object merged into the task metadata (e.g. budget_profile); "
-        "host-owned keys delegation_role/source cannot be overridden",
-    )
+        "host-owned keys delegation_role/source cannot be overridden")
     run.add_argument("--actor-id", default="cli")
     run.add_argument("--delegation-role", default="root")
     run.add_argument(
-        "--prompt-file",
-        default="",
+        "--prompt-file", default="",
         help="read the task prompt from this file ('-' = stdin); mutually "
-        "exclusive with the positional prompt (E2BIG hygiene for bulk prompts)",
-    )
+        "exclusive with the positional prompt (E2BIG hygiene for bulk prompts)")
     run.add_argument("prompt", nargs=argparse.REMAINDER)
     run.set_defaults(func=_run_command)
 
@@ -558,7 +556,7 @@ def build_parser() -> argparse.ArgumentParser:
     chat_history = chat_sub.add_parser("history")
     chat_history.add_argument(
         "--limit", type=int, default=None,
-        help="conversation rows to fetch (server-capped; omitted = the server's default window)",
+        help="conversation rows to fetch (server-capped; omitted, zero or negative = the server's default window)",
     )
     chat_history.set_defaults(func=_chat_history_command)
 

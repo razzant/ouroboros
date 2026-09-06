@@ -31,9 +31,12 @@ def test_positive_capture_outranks_synthetic_not_dispatched_facts(
         surface="plan_review", goal="review", task_id=f"positive-wins-{suffix}",
         retry_key=f"plan_review:positive-wins:{suffix}",
     )
+    # The slot returns at once; the timeout is not the property under test. A
+    # tight 0.2 s let a loaded macOS runner time the worker out before it was
+    # scheduled and report in_flight (CI run 33577803504).
     slot = ReviewSlot(
         slot_id="only", model="test/model", route=ReviewRouteKind.API_CHAT,
-        timeout_sec=0.2,
+        timeout_sec=10.0,
     )
 
     def run_slot(slot, operation_id, _retry_state, _deadline, _checkpoint):

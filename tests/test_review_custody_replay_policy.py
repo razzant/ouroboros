@@ -929,6 +929,43 @@ def test_agent_session_config_refusal_is_zero_send_not_dispatched(tmp_path):
     assert not actor.get("late_result_pending")
 
 
+def test_native_pre_send_refusals_are_zero_send_not_dispatched():
+    """A native tool-round refusal raised BEFORE the first provider send (no
+    inspection registry; a bound below the first send) is a $0 retryable row,
+    never a settled paid attempt."""
+    from ouroboros.review_custody import _worker_exception_operation_state
+    from ouroboros.review_execution import ReviewRouteUnavailable
+
+    for code in ("native_inspection_unavailable", "native_bound_below_first_send"):
+        error = ReviewRouteUnavailable("refused before any send", code=code)
+        assert _worker_exception_operation_state(error, {}) == "not_dispatched", code
+    # Ends AFTER a paid round stay settled.
+    for code in ("native_transcript_cap_exceeded", "native_round_without_progress"):
+        error = ReviewRouteUnavailable("refused after a paid round", code=code)
+        assert _worker_exception_operation_state(error, {}) == "settled", code
+
+
+def test_native_episode_with_paid_rounds_is_dispatched_whatever_ended_it():
+    """A mid-episode owner deadline after one paid native round must not
+    project as a $0 retryable row: the executor's own `native_rounds` fact
+    makes the actor dispatched (settled), whatever the exception's capture."""
+    from ouroboros.review_custody import _ReviewAttemptHistory, _review_exception_projection
+    from ouroboros.review_execution import ReviewRouteUnavailable
+
+    error = ReviewRouteUnavailable("owner deadline exhausted mid native review episode", code="deadline_exhausted")
+    custody = {"delivery": "native_tool_rounds", "native_rounds": 1, "native_end_reason": "deadline_exhausted",
+               "ledger_attempt_ids": ["attempt-1"], "resolved_model": "m"}
+    _custody, _capture, _http, operation_state, failure_code = _review_exception_projection(
+        error, custody, _ReviewAttemptHistory(), {},
+    )
+    assert operation_state == "settled" and failure_code == "deadline_exhausted"
+    # The same exception with NO paid round stays a $0 row.
+    _custody, _capture, _http, operation_state, _code = _review_exception_projection(
+        error, {"delivery": "native_tool_rounds", "native_rounds": 0}, _ReviewAttemptHistory(), {},
+    )
+    assert operation_state == "not_dispatched"
+
+
 def test_post_stamp_checkpoint_refusal_cannot_be_relabelled_zero_send():
     """Missing capture metadata must not erase a failure after write-ahead."""
     from ouroboros.review_custody import _worker_exception_operation_state

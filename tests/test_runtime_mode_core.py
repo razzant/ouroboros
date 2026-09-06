@@ -40,7 +40,7 @@ def test_settings_defaults_include_phase2_keys():
 
     assert SETTINGS_DEFAULTS["OUROBOROS_RUNTIME_MODE"] == "advanced"
     assert SETTINGS_DEFAULTS["OUROBOROS_SKILLS_REPO_PATH"] == ""
-    assert SETTINGS_DEFAULTS["OUROBOROS_MODEL"] == "google/gemini-3.7-flash"
+    assert SETTINGS_DEFAULTS["OUROBOROS_MODEL"] == "google/gemini-3.8-flash"
     # Empty role slots inherit Main; Light and Fallback use Luna explicitly.
     assert SETTINGS_DEFAULTS["OUROBOROS_MODEL_HEAVY"] == ""
     assert SETTINGS_DEFAULTS["OUROBOROS_MODEL_VISION"] == ""
@@ -49,7 +49,7 @@ def test_settings_defaults_include_phase2_keys():
     assert SETTINGS_DEFAULTS["OUROBOROS_MODEL_FALLBACKS"] == "openai/gpt-5.6-luna"
     assert (
         SETTINGS_DEFAULTS["OUROBOROS_MODEL_DEEP_SELF_REVIEW"]
-        == "openai/gpt-5.6-sol-pro"
+        == "openai/gpt-5.6-sol"
     )
     assert SETTINGS_DEFAULTS["TOTAL_BUDGET"] == 200.0
     assert SETTINGS_DEFAULTS["OUROBOROS_PER_TASK_COST_USD"] == 50.0

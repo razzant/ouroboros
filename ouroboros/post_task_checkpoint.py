@@ -8,11 +8,17 @@ import threading
 from datetime import datetime, timezone
 from typing import Any, Dict
 
-from ouroboros.cost_projection import honest_accounted_amount, with_cost_aliases
+from ouroboros.cost_projection import (
+    COST_ALIAS_PAIRS,
+    carry_cost_meta,
+    honest_accounted_amount,
+    with_cost_aliases,
+)
 from ouroboros.task_results import (
     TASK_COST_META_FIELDS,
     STATUS_COMPLETED,
     load_task_result,
+    merge_review_projection,
     resolve_task_lineage,
     write_task_result,
 )
@@ -30,6 +36,15 @@ _TERMINAL_ACCOUNTING_FIELDS = (
     "prompt_tokens",
     "completion_tokens",
 )
+# Scrub set for the stale-accounting pops below: ABI-3 keeps the retired
+# alias spellings HERE (read/scrub tolerance, never an emission) so a legacy
+# replica/patch overlay cannot smuggle a stale `cost_usd` past a scrub that
+# only knows the honest names — deprecated-wins at the write seam would then
+# resurrect the stale amount.
+_TERMINAL_ACCOUNTING_SCRUB_FIELDS = (
+    *_TERMINAL_ACCOUNTING_FIELDS,
+    *(old for _new, old in COST_ALIAS_PAIRS),
+)
 
 
 def post_task_synthesis_is_open(value: Any) -> bool:
@@ -40,6 +55,26 @@ def post_task_synthesis_is_open(value: Any) -> bool:
 def post_task_synthesis_is_terminal(value: Any) -> bool:
     """Return whether canonical post-task synthesis has settled."""
     return str(value or "") in POST_TASK_SYNTHESIS_TERMINAL_STATUSES
+
+
+def post_task_synthesis_in_flight(drive_root: Any, task_id: str) -> bool:
+    """Whether THIS process is still running the paid post-task synthesis of
+    ``task_id`` on ``drive_root`` — the in-flight key the pipeline holds from
+    dispatch until its terminal checkpoint is stored (GR6-1, widened to the
+    non-blocking lane): a direct-chat turn's loop returns and its liveness
+    ends while the synthesis thread still bills, so the key is the live
+    physical ownership the stop ingress and custody must see. Process-local
+    on purpose: a durable ``running`` phase alone cannot tell a live worker
+    from one that died before the boot reconciler degraded it."""
+    tid = str(task_id or "").strip()
+    if not tid or not drive_root:
+        return False
+    try:
+        root_key = str(pathlib.Path(drive_root).resolve(strict=False))
+    except (TypeError, OSError, ValueError):
+        return False
+    with POST_TASK_SYNTHESIS_LOCK:
+        return (root_key, tid) in POST_TASK_SYNTHESIS_INFLIGHT
 
 
 def _parse_updated_at(value: Any) -> datetime | None:
@@ -73,10 +108,15 @@ def project_replica_task_result_fields(
     A terminal canonical post-task checkpoint owns its synthesis fields and
     accounting snapshot. Canonical custody also retains non-regressing delegation
     receipts and canonical-if-present reconciliation disclosures under the narrow
-    rules below. The replica continues to own acceptance, result, review, and trace fields.
+    rules below. The replica continues to own acceptance, result, and trace fields;
+    review snapshots retain the newest host publication of each panel.
     ``updated_at`` is monotonic metadata only; it never selects field authority.
     """
     overlay = dict(replica_fields)
+    if "review_projection" in overlay:
+        overlay["review_projection"] = merge_review_projection(
+            canonical_fields.get("review_projection"), overlay["review_projection"],
+        )
     canonical_checkpoint = canonical_fields.get("root_phase_checkpoint")
     canonical_post_task = (
         str(canonical_checkpoint.get("post_task_synthesis") or "")
@@ -94,7 +134,7 @@ def project_replica_task_result_fields(
                 "post_task_stop_reason"
             ]
         overlay["root_phase_checkpoint"] = merged_checkpoint
-        for field in _TERMINAL_ACCOUNTING_FIELDS:
+        for field in _TERMINAL_ACCOUNTING_SCRUB_FIELDS:
             overlay.pop(field, None)
 
     # Non-Project split synthesis writes this field in the canonical parent
@@ -202,7 +242,7 @@ def project_root_post_task_checkpoint_fields(
                 "post_task_stop_reason"
             ]
         if patch_post_task != canonical_post_task:
-            for field in _TERMINAL_ACCOUNTING_FIELDS:
+            for field in _TERMINAL_ACCOUNTING_SCRUB_FIELDS:
                 overlay.pop(field, None)
     else:
         if "post_task_stop_reason" in patch:
@@ -290,7 +330,7 @@ def set_root_post_task_checkpoint(
                 subtree_final = bool(subtree.get("cost_final"))
                 subtree_amount = honest_accounted_amount(subtree)
                 cost_fields.update({
-                    "cost_usd_with_children": (
+                    "accounted_upper_bound_usd_with_children": (
                         round(subtree_amount, 6) if subtree_amount is not None else None
                     ),
                     "cost_with_children_partial": not subtree_final,
@@ -301,15 +341,15 @@ def set_root_post_task_checkpoint(
                 cost_fields.update({
                     "cost_accounting_status": "unavailable",
                     "cost_accounting_error": "ledger_unavailable",
-                    "cost_usd": None,
-                    "cost_usd_with_children": None,
+                    "accounted_upper_bound_usd": None,
+                    "accounted_upper_bound_usd_with_children": None,
                 })
-        # SSOT cost naming (C2/F12): re-converge the alias pairs as the LAST step,
-        # after every branch above has finished mutating the deprecated spellings
-        # (`reconstruct_task_cost` aliases at ITS seam, then the subtree refresh
-        # and the unavailable fallback edit `cost_usd[_with_children]` only) —
-        # otherwise this producer persists a DIVERGED pair: an honest name still
-        # carrying the pre-refresh amount beside a corrected alias.
+        # SSOT cost naming (C2/F12/ABI-3): every branch above writes the honest
+        # names directly onto the honest-named `reconstruct_task_cost` fields
+        # (Ф3.1 fix-round — producers no longer touch the retired spellings);
+        # the seam stays as the LAST step as the idempotent invariant guard —
+        # it re-normalizes amounts and would strip any retired key a future
+        # mutation leaked, so this producer can never persist a diverged pair.
         cost_fields = with_cost_aliases(cost_fields)
         checkpoint_patch = {"post_task_synthesis": effective_status}
         if stop_reason:
@@ -346,9 +386,16 @@ def set_root_post_task_checkpoint(
                 "task_id": task_id,
                 "root_task_id": str(stored.get("root_task_id") or task.get("root_task_id") or task_id),
                 "post_task_status": stored_post_task,
+                # The typed stop disclosure rides the same event (owner Stop-now
+                # during synthesis, restart recovery): absent when nothing stopped.
+                **({"post_task_stop_reason": str(stored_checkpoint.get("post_task_stop_reason"))}
+                   if stored_checkpoint.get("post_task_stop_reason") else {}),
+                # ABI-3: cost pair CONVERTED from a possibly-legacy stored row
+                # (deprecated-wins) — the event carries honest names only.
+                **carry_cost_meta(stored),
                 **{
                     field: stored[field]
-                    for field in _TERMINAL_ACCOUNTING_FIELDS
+                    for field in ("total_rounds", "prompt_tokens", "completion_tokens")
                     if field in stored
                 },
             }

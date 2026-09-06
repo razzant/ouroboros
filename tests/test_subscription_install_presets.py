@@ -58,9 +58,9 @@ LIVE_MODELS = {
         "claude-fable-5-thinking-xhigh", "claude-sonnet-5-medium",
     ),
     "agy": (
-        "gemini-3.7-flash-low",
-        "gemini-3.7-flash-medium",
-        "gemini-3.7-flash-high",
+        "gemini-3.8-flash-low",
+        "gemini-3.8-flash-medium",
+        "gemini-3.8-flash-high",
     ),
 }
 
@@ -246,7 +246,7 @@ def test_antigravity_compiles_task_actor_without_changing_core_reviewer_bytes(co
         row["route"]["target_id"]
         for row in json.loads(preset.available_subagents)["items"]
     ]
-    assert "agy=gemini-3.7-flash-high" in actor_routes
+    assert "agy=gemini-3.8-flash-high" in actor_routes
     core = tuple(harness for harness in connected if harness in CORE_HARNESSES)
     if not core:
         assert preset.reviewer_slots == ""
@@ -351,9 +351,13 @@ def test_compiler_reads_no_settings_and_carries_no_transport(monkeypatch):
 
 
 # Verbatim from the Antigravity CLI the Claudexor 3.5.0 agy adapter pins
-# (AGY_KNOWN_MODELS, verified against agy 1.1.13). Fourteen ids; effort rides
-# inside the slug, and gemini-3.1-pro exists ONLY at high/low.
+# (AGY_KNOWN_MODELS, verified against agy 1.1.13, plus the gemini-3.8-flash
+# triple the shipped preset now targets — assumed to be published by the vendor
+# CLI on the owner's decision, not read from an installed agy on this host).
+# Seventeen ids; effort rides inside the slug, and gemini-3.1-pro exists ONLY
+# at high/low.
 AGY_LIVE_MODELS = (
+    "gemini-3.8-flash-high", "gemini-3.8-flash-medium", "gemini-3.8-flash-low",
     "gemini-3.7-flash-high", "gemini-3.7-flash-medium", "gemini-3.7-flash-low",
     "gemini-3.6-flash-high", "gemini-3.6-flash-medium", "gemini-3.6-flash-low",
     "gemini-3.5-flash-high", "gemini-3.5-flash-medium", "gemini-3.5-flash-low",
@@ -397,7 +401,7 @@ def test_agy_alias_table_spells_effort_inside_the_id():
     aliases = _MODEL_ALIASES[HARNESS_AGY]
     # Every alias candidate formats to an id the pinned vendor CLI really
     # publishes, so automatic and manually selected rows resolve exact ids.
-    assert aliases["gemini-3.7-flash"][0].format(effort="high") in AGY_LIVE_MODELS
+    assert aliases["gemini-3.8-flash"][0].format(effort="high") in AGY_LIVE_MODELS
     assert aliases["gemini-3.1-pro"][0].format(effort="high") in AGY_LIVE_MODELS
     assert aliases["gemini-3.1-pro"][0].format(effort="low") in AGY_LIVE_MODELS
     # Documented trap for the future dictation: pro has no -medium slug.

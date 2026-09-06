@@ -504,6 +504,125 @@ def test_project_room_decision_turn_carries_last_task_result_ground_truth(tmp_pa
     assert "result" not in last and "RAW TEXT" not in str(last)
 
 
+@pytest.mark.parametrize("shape", ["group_crosses_the_window", "group_in_the_self_heal_tail", "equal_ts", "empty_ts"])
+def test_project_last_task_result_tie_order_is_total(tmp_path, monkeypatch, shape):
+    """The tie order is TOTAL: an equal-mtime group that crosses the 64-entry
+    search window is read to its end, a group met in the self-heal tail obeys
+    the same rule, a present `ts` beats an absent one, and equal `ts` falls
+    back to the task id deterministically. The production order is (mtime,
+    file name), so the file NAMES are chosen to sort adversely — the older or
+    key-less row ahead of the newer one — and the listing order is irrelevant."""
+    import json
+    import os
+
+    import server
+    from ouroboros import task_results as task_results_module
+    from ouroboros.projects_registry import create_project, update_project
+    from ouroboros.task_results import task_results_dir, write_task_result
+
+    create_project(tmp_path, "racer", name="Racer")
+    if shape == "group_crosses_the_window":
+        # Sorted by name: a00..a62 (foreign), y_old at index 63, z_new at 64 —
+        # the newer row is the FIRST entry past the window.
+        foreign = [f"a{i:02d}" for i in range(63)]
+        for name in foreign:
+            write_task_result(tmp_path, name, "completed", project_id="boat", objective="c", ts="2026-08-10T00:00:03Z")
+        write_task_result(tmp_path, "y_old", "completed", project_id="racer", objective="a", ts="2026-08-10T00:00:01Z")
+        write_task_result(tmp_path, "z_new", "completed", project_id="racer", objective="b", ts="2026-08-10T00:00:02Z")
+        listing = foreign + ["y_old", "z_new"]
+        expected = "z_new"
+    elif shape == "group_in_the_self_heal_tail":
+        # Sorted by name: a00..a63 (foreign) fill the window; both project rows
+        # are met only by the self-heal tail, the older one first.
+        foreign = [f"a{i:02d}" for i in range(64)]
+        for name in foreign:
+            write_task_result(tmp_path, name, "completed", project_id="boat", objective="c", ts="2026-08-10T00:00:03Z")
+        write_task_result(tmp_path, "y_old", "completed", project_id="racer", objective="a", ts="2026-08-10T00:00:01Z")
+        write_task_result(tmp_path, "z_new", "completed", project_id="racer", objective="b", ts="2026-08-10T00:00:02Z")
+        listing = foreign + ["y_old", "z_new"]
+        expected = "z_new"
+    elif shape == "equal_ts":
+        write_task_result(tmp_path, "a", "completed", project_id="racer", objective="a", ts="2026-08-10T00:00:01Z")
+        write_task_result(tmp_path, "b", "completed", project_id="racer", objective="b", ts="2026-08-10T00:00:01Z")
+        listing = ["a", "b"]
+        expected = "b"  # equal ts: the greater task id, whatever the listing order
+    else:
+        # Sorted by name the key-less row comes FIRST; the stamped row must win.
+        write_task_result(tmp_path, "b_stamped", "completed", project_id="racer", objective="a", ts="2026-08-10T00:00:01Z")
+        write_task_result(tmp_path, "a_keyless", "completed", project_id="racer", objective="b", ts="2026-08-10T00:00:02Z")
+        keyless = task_results_dir(tmp_path, create=False) / "a_keyless.json"
+        stripped = json.loads(keyless.read_text(encoding="utf-8"))
+        for key in ("ts", "updated_at"):  # the store always stamps both; a foreign/legacy row may lack them
+            stripped.pop(key, None)
+        keyless.write_text(json.dumps(stripped), encoding="utf-8")
+        listing = ["a_keyless", "b_stamped"]
+        expected = "b_stamped"  # a present ts beats an absent one
+    real_dir = task_results_dir(tmp_path, create=False)
+    tick = 1_700_000_000 * 10**9
+    for path in real_dir.glob("*.json"):
+        os.utime(path, ns=(tick, tick))  # every result in ONE tie group
+
+    class _Listing:  # the real directory with a controlled listing order
+        def __init__(self, order):
+            self.paths = [real_dir / f"{name}.json" for name in order]
+
+        def glob(self, pattern):
+            return iter(self.paths)
+
+        def __truediv__(self, name):
+            return real_dir / name
+
+    from ouroboros.projects_registry import get_project
+
+    for order in (listing, list(reversed(listing))):
+        update_project(tmp_path, "racer", last_task_result_id="")  # the scan, not the pointer, is under test
+        monkeypatch.setattr(task_results_module, "task_results_dir", lambda root, create=True, order=order: _Listing(order))
+        assert server._latest_project_task_result(_ctx(tmp_path), "racer")["task_id"] == expected
+        # The selected row — never an arbitrary tied one — became the durable pointer.
+        assert get_project(tmp_path, "racer")["last_task_result_id"] == expected
+
+
+def test_project_last_task_result_uncertainty_never_persists_the_pointer(tmp_path, monkeypatch):
+    """A result file whose stat (or JSON) cannot be read might be the project's
+    NEWER result: the scan still answers best-effort for this call, but the
+    durable pointer is not written — a later lookup must see the file once it
+    is readable again instead of the frozen older row."""
+    import server
+    from ouroboros import task_results as task_results_module
+    from ouroboros.projects_registry import create_project, get_project
+    from ouroboros.task_results import task_results_dir, write_task_result
+
+    create_project(tmp_path, "racer", name="Racer")
+    write_task_result(tmp_path, "old1", "completed", project_id="racer", objective="a", ts="2026-08-10T00:00:01Z")
+    write_task_result(tmp_path, "new1", "completed", project_id="racer", objective="b", ts="2026-08-10T00:00:02Z")
+    real_dir = task_results_dir(tmp_path, create=False)
+
+    class _Unstattable:  # readable JSON whose stat fails (a transient filesystem error)
+        def __init__(self, real):
+            self._real = real
+            self.name = real.name
+
+        def stat(self):
+            raise OSError("transient stat failure")
+
+        def __fspath__(self):
+            return str(self._real)
+
+        def __str__(self):
+            return str(self._real)
+
+    listing = [real_dir / "old1.json", _Unstattable(real_dir / "new1.json")]
+    monkeypatch.setattr(task_results_module, "task_results_dir",
+                        lambda root, create=True: types.SimpleNamespace(glob=lambda pattern: iter(listing),
+                                                                         __truediv__=lambda self, name: real_dir / name))
+    ctx = _ctx(tmp_path)
+    assert server._latest_project_task_result(ctx, "racer")["task_id"] == "old1"  # best effort for THIS call
+    assert not get_project(tmp_path, "racer").get("last_task_result_id")  # nothing frozen
+    monkeypatch.undo()
+    assert server._latest_project_task_result(ctx, "racer")["task_id"] == "new1"  # readable again: the truth wins
+    assert get_project(tmp_path, "racer")["last_task_result_id"] == "new1"
+
+
 def test_project_last_task_result_lookup_is_bounded(tmp_path, monkeypatch):
     """Finding 1: the one-row query parses newest-first by mtime and STOPS at
     the first project match — never a full task_results replay per interaction
@@ -567,9 +686,10 @@ def test_project_swarm_keeps_host_scope_when_registry_recheck_is_unavailable(
     tmp_path, monkeypatch,
 ):
     import server
+    from ouroboros import server_routing_context
 
     ctx = _ctx(tmp_path)
-    monkeypatch.setattr(server, "_project_id_for_registered_chat", lambda *_args: "")
+    monkeypatch.setattr(server_routing_context, "_project_id_for_registered_chat", lambda *_args: "")
 
     metadata = server._decision_turn_metadata(
         ctx,
@@ -733,7 +853,7 @@ def test_task_presentation_snapshot_prefers_human_names_and_keeps_machine_ids(tm
     assert snapshot == {
         "project_id": "opaque-project-id",
         "project_name": "Космос 🌌",
-        "task_id": "opaque-task-id",
+        "task_id": "opaque-task-id", "project_routable": True,
         "task_name": "Явный заголовок",
         "target_label": "Космос 🌌 › Явный заголовок",
     }
@@ -856,7 +976,7 @@ def test_project_completion_enqueues_once_for_root_and_never_for_child_or_epheme
         "type": "send_message",
         "chat_id": 1,
         "task_id": "root-project",
-        "text": "Launch 🚀 › Ship release · Completed\nRelease shipped.",
+        "text": "Launch 🚀 › Ship release · Done\nRelease shipped.",
         "role": "system",
         "system_type": "project_completion_summary",
         "delivery_id": "project-completion:root-project",
@@ -893,15 +1013,15 @@ def test_project_completion_enqueues_once_for_root_and_never_for_child_or_epheme
         (
             {"status": "completed"},
             {"outcome_axes": {"execution": {"status": "degraded"}}},
-            "Completed with limitations",
+            "Done with warnings",
         ),
         (
             {"status": "completed", "outcome_axes": {"execution": {"status": "degraded"}}},
             {},
-            "Completed with limitations",
+            "Done with warnings",
         ),
         (
-            {"status": "completed", "outcome_axes": {"objective": {"status": "fail"}}},
+            {"status": "completed", "outcome_axes": {"objective": {"status": "fail", "source": "task_acceptance_review"}}},
             {},
             "Failed",
         ),

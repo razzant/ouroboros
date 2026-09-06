@@ -19,9 +19,64 @@ HOT_CODE_PATHS = frozenset({
     "ouroboros/size_ratchet_manifest.py",
     "ouroboros/tools/control.py",
     "ouroboros/tools/registry.py",
+    # v7 D04 split leaves: code that merely moved out of the hot registry
+    # keeps the label (parity rule pinned by tests/test_lc2_owner_facades.py
+    # for the inverse direction).
+    "ouroboros/tools/registry_guard_process.py",
+    "ouroboros/tools/registry_guards.py",
+    # F3.1 typed-organ leaves: the registry class body and the typed result
+    # vocabulary keep the hot-code label at their new homes (same parity).
+    # extension_dispatch received the extension/MCP dispatch bodies that lived
+    # on the hot ToolRegistry class — the label follows the moved body.
+    "ouroboros/tools/extension_dispatch.py",
+    "ouroboros/tools/registry_core.py",
+    "ouroboros/tools/tool_catalog.py",
+    "ouroboros/tools/tool_context.py",
+    "ouroboros/tools/tool_resolution.py",
+    "ouroboros/tools/tool_result.py",
     "ouroboros/config.py",
     "supervisor/queue.py",
     "supervisor/events.py",
+    # v7 D08 split leaves: code that moved out of the hot control/queue/events
+    # monoliths keeps the label (same parity rule as the D04 block above).
+    "ouroboros/tools/control_events.py",
+    "ouroboros/tools/control_routing.py",
+    "ouroboros/tools/control_runtime.py",
+    # v7 D07 split leaves: the rest of the hot control monolith moved out with
+    # the D07 lane and keeps the label (same parity rule as the D04 block).
+    "ouroboros/tools/control_scheduling.py",
+    "ouroboros/tools/control_subagent_spec.py",
+    "ouroboros/tools/control_task_results.py",
+    "supervisor/queue_schedules.py",
+    "supervisor/events_budget.py",
+    "supervisor/events_chat_delivery.py",
+    "supervisor/events_coop_checkpoint.py",
+    "supervisor/events_project_routing.py",
+    "supervisor/events_runtime_controls.py",
+    "supervisor/events_schedule_task.py",
+    "supervisor/events_subagent_admission.py",
+    "supervisor/events_worker_reports.py",
+    # F2.2 cancel/custody organ leaves (same parity rule), plus the
+    # queue_transitions home of the owner-stop closure that moved out of the
+    # hot events monolith.
+    "supervisor/events_evolution_done.py",
+    "supervisor/events_task_done.py",
+    "supervisor/queue_snapshot.py",
+    "supervisor/queue_timeouts.py",
+    "supervisor/queue_transitions.py",
+    "supervisor/worker_assignment.py",
+    "supervisor/worker_health.py",
+    # v7 D01 split leaves: code that moved out of the hot loop monolith keeps
+    # the label (same parity rule as the D04 block above).
+    "ouroboros/loop_acceptance.py",
+    "ouroboros/loop_acceptance_review.py",
+    "ouroboros/loop_budget.py",
+    "ouroboros/loop_delivery.py",
+    "ouroboros/loop_forced_finalization.py",
+    "ouroboros/loop_messages.py",
+    "ouroboros/loop_model_call.py",
+    "ouroboros/loop_nudges.py",
+    "ouroboros/loop_round_limits.py",
 })
 
 
@@ -73,24 +128,29 @@ def rescue_pointer_note(tx: Dict[str, Any]) -> str:
     )
 
 
-VERSION_CARRIER_PATHS = frozenset({
-    "VERSION", "pyproject.toml", "README.md", "docs/ARCHITECTURE.md",
-    "web/package.json", "web/modules/api_types.js",
-})
-
-
 def carrier_guidance(conflicts: List[str]) -> str:
     """Version-carrier guidance for the resolver (owner decisions Q8/Q24): the landed
-    update carries the TARGET's version; prose and history stay the fork's own."""
-    if not any(_norm(path) in VERSION_CARRIER_PATHS for path in conflicts):
+    update carries the TARGET's version; prose and history stay the fork's own.
+
+    The carrier inventory is the span SSOT (``release_sync.CARRIER_SPAN_PATHS``,
+    imported at call time — presentation only, no policy). Conflicts confined to
+    declared spans are resolved mechanically before the resolver task is built
+    (supervisor/update_carriers.py), so a carrier still in *conflicts* DEGRADED
+    to manual resolution and the guidance names what that means."""
+    from ouroboros.tools.release_sync import CARRIER_SPAN_PATHS
+
+    if not any(_norm(path) in CARRIER_SPAN_PATHS for path in conflicts):
         return ""
     return (
         " Version carriers: the update lands under the official target's version — VERSION is "
-        "already projected and every NON-conflicted carrier token (pyproject.toml, "
+        "already projected, every NON-conflicted carrier token (pyproject.toml, "
         "web/package.json, the README badge, the docs/ARCHITECTURE.md header, install pages) is "
-        "already synced mechanically. In carriers you resolve yourself, make version tokens match "
-        "VERSION exactly. In the README Version History table keep BOTH sides' rows (never delete "
-        "this fork's local history rows); resolve prose conflicts on their merits."
+        "already synced mechanically, and carrier conflicts confined to declared version spans "
+        "were already resolved to the target's side. A carrier still in your list degraded to "
+        "manual resolution (a broken or duplicate span anchor, or a conflict outside the spans): "
+        "make its version tokens match VERSION exactly. In the README Version History table keep "
+        "BOTH sides' rows (never delete this fork's local history rows); resolve prose conflicts "
+        "on their merits."
     )
 
 

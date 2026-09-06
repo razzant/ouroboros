@@ -71,7 +71,7 @@ def _loop_kwargs(tmp_path, registry, notes):
         tools=registry,
         llm=SimpleNamespace(default_model=lambda: "test-model"),
         drive_logs=tmp_path,
-        emit_progress=notes.append,
+        emit_progress=lambda text, *, incident=None: notes.append(text),
         incoming_messages=queue.Queue(),
         task_id=str(registry._ctx.task_id),
         drive_root=tmp_path,
@@ -300,7 +300,10 @@ def test_repeated_unknown_reholds_with_backoff_floor(tmp_path, monkeypatch, _qui
     cycle_counts = [row["hold_cycles"] for row in _read_hold_events(tmp_path)
                     if row["phase"] == "entered"]
     assert cycle_counts == [1, 2]
-    assert sleeps and sleeps[0] >= 4.0  # backoff floor on the second cycle
+    # The patch is on the GLOBAL time.sleep, so a daemon thread leaked by an earlier test on the
+    # same xdist worker (a 0.5 s poll loop; windows-latest, rc.13 dispatch) lands in ``sleeps``
+    # too: pin the backoff floor of the second cycle by presence, not by position.
+    assert any(4.0 <= sec <= 15.0 for sec in sleeps), sleeps  # backoff floor on the second cycle
 
 
 def test_refused_probe_and_state_less_payload_never_hold(tmp_path, monkeypatch, _quiet_probe):

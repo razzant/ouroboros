@@ -112,6 +112,33 @@ assumed in two places that used to hardcode TB2.1:
   own rules permit web access is run with the explicit `--allow-agent-web` flag, which
   prints a loud non-leaderboard-faithful warning for TB2.1 and is recorded in the manifest
   and the disclosure ledger — never a silent default.
+- **Every reviewer row the container can run is declared; the rest is disclosed (2026-09-02).**
+  Task acceptance executes every triad row on its configured delivery (owner R2), so
+  `metadata.yaml` declares the rows the container's panel actually runs — api packet rows and
+  configured-subagent native inspection rows, by model id. An agent-session row structurally
+  cannot run inside a Terminal-Bench task container: the image has no harness CLI/daemon, the
+  forwarded-env allowlist carries no harness credentials, and the container secret policy
+  forbids them. It is therefore never declared as a used model (a declared-but-never-run model
+  would misrepresent the submission) and is carried as the typed disclosure
+  `triad_rows_not_executable_in_container` (the rows' `harness[=model]` targets) in
+  `run_manifest.json`, with the same list as a comment line in `metadata.yaml`; its acceptance
+  seat degrades typed inside the container, so configure api/native rows for a TB run. Before
+  this change only the panel's non-retrieving api rows ran and were declared, with the shipped
+  defaults substituted when none existed; runs whose panel carries retrieving rows are not
+  comparable on the acceptance axis with earlier runs, and a submission must be read against
+  its own `metadata.yaml` and manifest. `metadata.yaml` cannot distinguish an api packet row
+  from a configured-subagent native inspection row: both are declared under
+  `commit_review_triad` by model id, and under the container's one-model roster a
+  subagent-bound row resolves to the measured model and dedupes onto it
+  (`agent+commit_review_triad`). The per-delivery record is the run manifest: on a fixed-model
+  run `harness.fixed_model_actor.reviewer_slots` carries the projection's `slot_id`,
+  `route{kind, target_id}` and `effort` per row — a fixed-model panel is always direct api
+  rows, so no subagent binding exists there — and `extra.triad_rows_not_executable_in_container`
+  carries the session rows. A plain `--model` run records only the latter; its api-vs-native
+  split is recoverable from the forwarded host settings (`--settings-path`) only when the panel
+  is persisted there — the container adapter resolves the environment first
+  (`harbor_installed_agent.py`, `_container_env`), so a panel supplied only through the
+  operator's environment leaves no durable per-delivery record on a plain `--model` run.
 - **Harbor version:** the pinned TB2.1 bench venv is harbor **0.18.0** (`~/ouro/venv-tb`). 0.20.0
   is the current latest and is installed in a SEPARATE venv (`~/ouro/venv-fb`), reachable via
   `--harbor-bin` and leaving `venv-tb` frozen at 0.18.0 so published TB2.1 numbers keep their

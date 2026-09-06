@@ -60,7 +60,11 @@ class _FakeTransport:
 
     async def call_tool(self, cfg, name, arguments, timeout):
         self.call_calls.append((cfg.id, name, dict(arguments or {}), timeout))
-        return f"echo({cfg.id}/{name})"
+        # The transport contract is typed now (Awaitable[ToolResult], D02);
+        # mirror the real _call_tool_async success shape.
+        from ouroboros.tools.tool_result import ToolResult
+
+        return ToolResult(status="ok", code="OK", text=f"echo({cfg.id}/{name})")
 
 
 def _wire_singleton(transport):

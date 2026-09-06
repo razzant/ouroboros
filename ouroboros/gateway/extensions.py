@@ -24,6 +24,7 @@ from ouroboros.gateway._helpers import (
     request_json_or,
     request_repo_dir as _request_repo_dir,
 )
+from ouroboros.gateway.extension_receipts import extension_process_receipt, extension_reconcile_receipt
 from ouroboros.skill_lifecycle_queue import (
     LifecycleJobOptions,
     queue_snapshot,
@@ -317,14 +318,6 @@ def _build_extensions_index(drive_root, repo_path):
         prefix = extension_name_prefix(skill_name)
         return sum(1 for name in live_snapshot.get("ws_handlers", []) if str(name).startswith(prefix))
 
-    def _pending_ui_tabs(skill_name: str) -> list[str]:
-        prefix = f"{skill_name}:"
-        return [
-            str(name)
-            for name in live_snapshot.get("ui_tabs_pending", [])
-            if str(name).startswith(prefix)
-        ]
-
     # Inline ClawHub provenance so Installed UI avoids a second round-trip.
     try:
         from ouroboros.marketplace.provenance import read_provenance, read_publication_record
@@ -352,7 +345,6 @@ def _build_extensions_index(drive_root, repo_path):
     from ouroboros.gateway.presence_settings import presence_runtime_card_projection
     from ouroboros.skill_review_runner import skill_review_ui_projection
     from ouroboros.tools.github import github_token_from_env_or_settings
-
     # Request-invariant: resolve the github-token state ONCE for the whole index, not
     # once per skill (FR1 — avoids N settings.json reads per GET /api/extensions).
     _gh_token_configured = (
@@ -413,7 +405,6 @@ def _build_extensions_index(drive_root, repo_path):
                 "health_regressed": False,
                 "last_known_good": None,
                 "dispatch_live": False,
-                "ui_tabs_pending": [],
                 "review_findings": [],
                 "skill_review": {},
                 "grants": {},
@@ -429,14 +420,15 @@ def _build_extensions_index(drive_root, repo_path):
             "desired_live": runtime_states.get(s.name, {}).get("desired_live", False),
             "live_loaded": runtime_states.get(s.name, {}).get("live_loaded", False),
             "live_reason": runtime_states.get(s.name, {}).get("reason", "not_extension"),
+            **extension_process_receipt(runtime_states.get(s.name)),
             "health_regressed": bool((health or {}).get("regressed")),
             "last_known_good": (health or {}).get("last_known_good"),
+            "health_observations": (health or {}).get("observations", {}),
             "dispatch_live": bool(
                 _live_tool_count(s.name)
                 or _live_route_count(s.name)
                 or _live_ws_count(s.name)
             ),
-            "ui_tabs_pending": _pending_ui_tabs(s.name),
             "review_findings": list(s.review.findings or []),
             "skill_review": skill_review_ui_projection(drive_root, s.name),
             "grants": grant_status_for_skill(drive_root, s),
@@ -531,56 +523,44 @@ async def api_extension_manifest(request: Request) -> JSONResponse:
 
 
 async def api_extension_module(request: Request) -> Response:
-    """Serve reviewed widget module JS only for live registered tab entries."""
-    from ouroboros.config import get_skills_repo_path
-    from ouroboros.extension_loader import runtime_state_for_skill_name
+    """Serve one reviewed JavaScript file of a live module widget from the loaded bundle.
+
+    ``{entry:path}`` is a POSIX path relative to the skill directory: the
+    declared entry or any sibling ``.js``/``.mjs`` the reviewed payload ships
+    (``lib/x.js``). Authorization and content are one loader read under one
+    lock: 409 when the skill has no live bundle; 404 when the path is not among
+    the files captured when its module tab registered (dependency, cache, and
+    dot-prefixed paths are never captured); 400 for a path with a backslash or
+    NUL, an empty/``.``/``..`` segment (the ASGI server already decoded
+    ``%2e%2e`` and ``%2F``), or a non-``.js``/``.mjs`` suffix. The body is the
+    text captured at load — no per-request disk read, so an edit after load is
+    not served until the skill reloads (DEVELOPMENT "Passive GET"). The
+    requesting ``srcdoc`` frame has an opaque origin and fetches anonymously
+    cross-origin, hence ``Access-Control-Allow-Origin: *`` (no credentials) on
+    every response, refusals included — else ``import()`` sees a CORS failure.
+    """
+    from ouroboros.extension_loader import live_module_sources
+
+    headers = {"Cache-Control": "no-store", "Access-Control-Allow-Origin": "*"}
+
+    def refuse(message: str, status: int) -> Response:
+        return JSONResponse({"error": message}, status_code=status, headers=headers)
 
     skill_name = str(request.path_params.get("skill") or "").strip()
-    entry = str(request.path_params.get("entry") or "").strip()
-    if not skill_name or not entry:
-        return json_error("missing skill/module entry", 400)
-    if "/" in entry or "\\" in entry or ".." in entry or entry.startswith("."):
-        return json_error("invalid module entry", 400)
-
-    drive_root = _request_drive_root(request)
-    repo_path = get_skills_repo_path()
-    state = await asyncio.to_thread(
-        runtime_state_for_skill_name,
-        skill_name,
-        drive_root,
-        repo_path=repo_path,
-    )
-    if not state.get("desired_live"):
-        return json_error(f"extension {skill_name!r} not live: {state.get('reason')}", 409, state=state)
-    loaded = await asyncio.to_thread(find_skill, drive_root, skill_name, repo_path=repo_path)
-    if loaded is None:
-        return json_error("skill not found", 404)
-    # Authorize against live PluginAPI tab registrations, not only manifest ui_tab.
-    live = snapshot()
-    module_declared = any(
-        str(tab.get("skill") or "") == skill_name
-        and str((tab.get("render") or {}).get("kind") or "") == "module"
-        and str((tab.get("render") or {}).get("entry") or "") == entry
-        for tab in live.get("ui_tabs", [])
-    )
-    if not module_declared:
-        return json_error("module entry is not declared by a live widget tab", 404)
-    target = (loaded.skill_dir / entry).resolve()
-    try:
-        target.relative_to(loaded.skill_dir.resolve())
-    except ValueError:
-        return json_error("module entry escapes skill directory", 400)
-    if not target.is_file():
-        return json_error("module entry file not found", 404)
-    try:
-        text = await asyncio.to_thread(target.read_text, encoding="utf-8")
-    except UnicodeDecodeError:
-        return json_error("module entry is not UTF-8 text", 400)
-    return Response(
-        text,
-        media_type="application/javascript; charset=utf-8",
-        headers={"Cache-Control": "no-store"},
-    )
+    path = str(request.path_params.get("entry") or "")
+    if (
+        not skill_name or "\\" in path or "\0" in path
+        or any(part in {"", ".", ".."} for part in path.split("/"))
+        or not path.endswith((".js", ".mjs"))
+    ):
+        return refuse("invalid module path", 400)
+    sources = live_module_sources(skill_name)
+    if sources is None:
+        return refuse(f"extension {skill_name!r} not live", 409)
+    source = sources.get(path)
+    if source is None:
+        return refuse("module path is not a reviewed JavaScript file of a live widget", 404)
+    return Response(source, media_type="application/javascript; charset=utf-8", headers=headers)
 
 
 async def api_extension_settings_section(request: Request) -> JSONResponse:
@@ -839,7 +819,7 @@ async def api_skill_toggle(request: Request) -> JSONResponse:
                 "extension_action": action,
                 "extension_reason": "name_collision",
             }
-        save_enabled(drive_root, loaded.name, enabled)
+        save_enabled(drive_root, loaded.name, enabled, actor="owner_ui", reason=f"client_host={getattr(getattr(request, 'client', None), 'host', '') or ''}")
         try:
             from supervisor.queue import sync_skill_schedules
 
@@ -848,6 +828,7 @@ async def api_skill_toggle(request: Request) -> JSONResponse:
             log.debug("api_skill_toggle schedule sync failed", exc_info=True)
         action = None
         live_reason = "not_extension"
+        process_receipt = extension_process_receipt(None)
         if loaded.manifest.is_extension() or loaded.name in extension_loader.snapshot()["extensions"]:
             state = extension_loader.reconcile_extension(
                 loaded.name,
@@ -859,6 +840,7 @@ async def api_skill_toggle(request: Request) -> JSONResponse:
             )
             action = state.get("action")
             live_reason = str(state.get("reason") or "")
+            process_receipt = extension_process_receipt(state)
             if enabled and action == "extension_load_error":
                 # Atomic enable: reconcile already reverted enabled.json after the real
                 # out-of-process catalog/register dry-run failed, so the skill is never
@@ -878,6 +860,7 @@ async def api_skill_toggle(request: Request) -> JSONResponse:
                     "grants": grant_status_for_skill(drive_root, loaded),
                     "extension_action": action,
                     "extension_reason": live_reason,
+                    **process_receipt,
                 }
         return {
             "skill": loaded.name,
@@ -886,6 +869,7 @@ async def api_skill_toggle(request: Request) -> JSONResponse:
             "grants": grant_status_for_skill(drive_root, loaded),
             "action": action,
             "live_reason": live_reason,
+            **process_receipt,
         }
 
     async def _run_toggle() -> dict[str, Any]:
@@ -928,6 +912,7 @@ async def api_skill_toggle(request: Request) -> JSONResponse:
             "grants": queued.get("grants", {}),
             "extension_action": queued.get("action"),
             "extension_reason": queued.get("live_reason"),
+            **extension_process_receipt(queued),
         }
     )
 
@@ -1393,15 +1378,7 @@ async def api_skill_reconcile(request: Request) -> JSONResponse:
         resync_skill_schedules(drive_root)
     except Exception:
         log.debug("api_skill_reconcile schedule sync failed", exc_info=True)
-    return JSONResponse(
-        {
-            "skill": skill_name,
-            "extension_action": state.get("action"),
-            "extension_reason": state.get("reason"),
-            "live_loaded": bool(state.get("live_loaded")),
-            "load_error": state.get("load_error"),
-        }
-    )
+    return JSONResponse(extension_reconcile_receipt(skill_name, state))
 
 
 async def api_skill_delete(request: Request) -> JSONResponse:

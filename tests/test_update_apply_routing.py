@@ -222,7 +222,9 @@ def test_unknown_strategy_is_400_and_never_falls_back_to_replace():
     response = asyncio.run(control.api_update_apply(_Request({"strategy": "force"})))
 
     assert response.status_code == 400
-    assert "unsupported" in _body(response)["error"]
+    # ABI-3 ingress schema: the closed strategy vocabulary refuses at the
+    # derived-schema gate before the bespoke check.
+    assert "strategy must be one of" in _body(response)["error"]
 
 
 def test_update_apply_rejects_non_object_json():

@@ -157,7 +157,7 @@ def test_promote_tool_passes_origin_by_value_despite_rewritten_objective(tmp_pat
     from ouroboros.tools.control import _promote_chat_to_task
 
     monkeypatch.setattr(
-        "ouroboros.tools.control._wait_for_promotion_admission",
+        "ouroboros.tools.control_events._wait_for_promotion_admission",
         lambda *_args, **_kwargs: {"status": "scheduled"},
     )
     events = []

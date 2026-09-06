@@ -32,6 +32,7 @@ htmlcov/
 dist/
 build/
 site/node_modules/
+web/node_modules/
 site/public/assets/
 *.dmg
 python-standalone/

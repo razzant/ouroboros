@@ -1029,7 +1029,6 @@ def test_advisory_auto_bypass_on_missing_key(tmp_path, monkeypatch):
     subprocess.run(["git", "init"], cwd=str(repo_dir), capture_output=True)
 
     monkeypatch.delenv("OUROBOROS_REVIEWER_SLOTS", raising=False)
-    monkeypatch.delenv(adv_mod.ADVISORY_REVIEW_ROUTE_ENV, raising=False)
     for _key in ("OPENROUTER_API_KEY", "ANTHROPIC_API_KEY", "OPENAI_API_KEY",
                  "MINIMAX_API_KEY", "GIGACHAT_AUTH_KEY", "CLOUD_RU_API_KEY"):
         monkeypatch.delenv(_key, raising=False)

@@ -18,6 +18,26 @@ rollback + retry).
 here whole; the dispatch half stays in ``scope_review``. Internals are reached
 through the module object (``_scope().name``) so test monkeypatching of
 ``scope_review`` attributes keeps working.
+
+Both packets share ONE cold-start density rung (owner decision 2026-09-05,
+answer 1 = A: the commit gate gets the SAME rung the packed deep self-review
+has): a pack that would be refused or degraded for SIZE while the reviewer
+route has NO fresh exact-model density witness gets one bounded probe send on
+the exact model (``capability_evidence.cold_start_density_probe``), the witness is
+recorded, the cap recomputed and the pack rebuilt ONCE — never on a warm
+store, never retried, never on a commit whose pack fits. A probe the paid
+ledger refuses is a typed disclosure on the ladder and in the review events,
+and the existing refusal path proceeds unchanged.
+
+Money admission (owner decision 2026-09-05, answer 2 = A) is the last
+pre-dispatch gate: ``commit_gate_paid_seats`` prices every PAID seat of the
+wave — scope first, packet rows by their exact message pair, native episodes
+by their exact first send — each under the usage scope its substrate sends
+under, and ``admit_commit_gate_wave`` admits them as ONE wave against the
+task's current root fence through the shared ``review_wave_budget_gate``; a
+wave that does not fit is a typed $0 refusal naming the shortfall, never a
+half-dispatched panel. The scope-first dispatch ORDER stays with the
+orchestrator (``parallel_review._await_scope_reservation``).
 """
 
 from __future__ import annotations
@@ -65,6 +85,66 @@ def _scope():
     return scope_review
 
 
+# The scope ladder's SIZE terminals (never the integrity ones: empty/omitted).
+_SCOPE_SIZE_TERMINALS = frozenset({"fixed_overflow", "budget_exceeded"})
+
+DENSITY_PROBE_CALL_TYPE = "review_density_probe"
+DENSITY_PROBE_EVENT = "review_density_probe"
+
+
+def density_probe_before_size_refusal(ctx: Any, model: str, sample: str, *, surface: str) -> str:
+    """The commit gate's cold-start density rung; returns the shared probe's
+    typed outcome (``capability_evidence.cold_start_density_probe``) plus
+    ``"budget_refused"`` and ``"unavailable"`` (no ctx/drive root to record a
+    witness on — a bare fit-check never sends).
+
+    Disclosure mirrors the deep review's: every attempted probe is a progress
+    line (``ctx.emit_progress_fn``) and one ``review_density_probe`` review
+    event (the scope caller adds the ladder step); the send itself lands in
+    custody through ``chat_observed`` and in the paid ledger like any review
+    send. A ``BudgetExceeded`` from the ledger is the typed
+    ``budget_refused`` outcome — the pack keeps its existing size refusal;
+    nothing crashes and nothing is retried. The client comes from the review
+    surface's ``LLMClient`` seam and any failure short of the ledger's refusal
+    (a client that cannot be constructed included) is the typed ``failed``
+    outcome, never an untyped infra block of the whole gate."""
+    from ouroboros.capability_evidence import cold_start_density_probe
+    from ouroboros.tools import review as _rv
+    from ouroboros.tools.review_helpers import emit_review_event, review_drive_root
+    from ouroboros.usage_accounting import BudgetExceeded
+
+    if ctx is None or not getattr(ctx, "drive_root", None):
+        return "unavailable"
+
+    def _progress(text: str) -> None:
+        try:
+            ctx.emit_progress_fn(f"{surface}: {text}")
+        except Exception:
+            pass
+
+    try:
+        outcome = cold_start_density_probe(
+            review_drive_root(ctx), _rv.LLMClient(), _progress, str(model), sample,
+            task_id=str(getattr(ctx, "task_id", "") or "") or "commit_review",
+            call_type=DENSITY_PROBE_CALL_TYPE, source="commit_gate_cold_start_probe",
+        )
+        reason = ""
+    except BudgetExceeded as exc:
+        outcome, reason = "budget_refused", str(exc)
+        _progress(f"density probe refused by the budget ({reason}); the cold input cap stands.")
+    except Exception as exc:
+        outcome, reason = "failed", f"{type(exc).__name__}: {exc}"
+        log.warning("Density probe could not run (%s): %s", surface, exc, exc_info=True)
+        _progress(f"density probe failed ({type(exc).__name__}); the cold input cap stands.")
+    if outcome not in ("warm", "no_sample"):
+        emit_review_event(ctx, {
+            "type": DENSITY_PROBE_EVENT, "surface": surface, "model": str(model),
+            "outcome": outcome, "reason": reason,
+            "task_id": str(getattr(ctx, "task_id", "") or ""),
+        })
+    return outcome
+
+
 def fit_triad_prompt(api_models: list, assemble, current_files_section: str,
                      diff_text: str, changed: str, target_repo, ctx=None,
                      subject=None) -> tuple:
@@ -99,9 +179,29 @@ def fit_triad_prompt(api_models: list, assemble, current_files_section: str,
         ))
 
     estimate_tokens = _rv.estimate_tokens
-    input_limit = _rv._quorum_input_token_limit(
-        api_models, {m: _slot_input_limit(m) for m in api_models})
+    slot_limits = {m: _slot_input_limit(m) for m in api_models}
+    input_limit = _rv._quorum_input_token_limit(api_models, slot_limits)
     prompt, stable_prefix_len = assemble(current_files_section, diff_text)
+    if input_limit and estimate_tokens(prompt) > input_limit:
+        # Cold-start density rung: every api slot the full prompt overflows and
+        # whose route has no fresh witness gets ONE bounded probe on a slice of
+        # this very prompt; a recorded witness re-sizes the slots once, then
+        # the ladder below runs unchanged on the recalibrated limit.
+        from ouroboros.tools.review_helpers import DENSITY_PROBE_SAMPLE_CHARS
+
+        # EVERY overflowing slot is probed (a list, not a short-circuit): the
+        # quorum cap is the quorum-th largest slot cap, so one witness alone
+        # leaves the other cold slots — and the shared prompt — where they were.
+        prompt_tokens = estimate_tokens(prompt)
+        outcomes = [
+            density_probe_before_size_refusal(
+                ctx, m, prompt[:DENSITY_PROBE_SAMPLE_CHARS], surface="triad_review",
+            )
+            for m in api_models if prompt_tokens > slot_limits.get(m, 0)
+        ]
+        if "measured" in outcomes:
+            slot_limits = {m: _slot_input_limit(m) for m in api_models}
+            input_limit = _rv._quorum_input_token_limit(api_models, slot_limits)
     if input_limit and estimate_tokens(prompt) > input_limit:
         touched_paths = [line.strip() for line in changed.splitlines() if line.strip()]
         fit_note = (
@@ -158,7 +258,7 @@ def triad_not_dispatched_records(
     restricts the records to the api rows (the Q28-A oversize drop); the
     default covers every row (the Q25-A admission block). ``slot`` keeps each
     seat's ORIGINAL 1-based position in the configured plan."""
-    from ouroboros.review_execution import ReviewRouteKind
+    from ouroboros.review_execution import delivery_retrieves
 
     models = list(row_plan.get("models") or [])
     routes = list(row_plan.get("routes") or [])
@@ -167,10 +267,11 @@ def triad_not_dispatched_records(
     records = []
     for index, model in enumerate(models):
         if only_api and (
-            index >= len(routes) or routes[index] is not ReviewRouteKind.API_CHAT
-            # A configured-subagent api row retrieves; the packet drop is not
-            # its withholding and it keeps its live seat.
-            or (index < len(actors) and actors[index])
+            # A retrieving row (session, or configured-subagent api row) never
+            # received the packet; the packet drop is not its withholding and
+            # it keeps its live seat.
+            index >= len(routes)
+            or delivery_retrieves(routes[index], actors[index] if index < len(actors) else "")
         ):
             continue
         records.append({
@@ -197,7 +298,7 @@ def drop_api_rows(row_plan: dict) -> dict:
 
     Q28-A: an irreducible oversize packet drops the api subset when the session
     rows alone satisfy the quorum. The caller records the drop loudly."""
-    from ouroboros.review_execution import ReviewRouteKind
+    from ouroboros.review_execution import delivery_retrieves
 
     routes = list(row_plan.get("routes") or [])
     actors = list(row_plan.get("subagent_ids") or [])
@@ -205,7 +306,7 @@ def drop_api_rows(row_plan: dict) -> dict:
     # received the oversized packet, so packet overflow is not its failure.
     keep = [
         i for i, r in enumerate(routes)
-        if r is not ReviewRouteKind.API_CHAT or (i < len(actors) and actors[i])
+        if delivery_retrieves(r, actors[i] if i < len(actors) else "")
     ]
     filtered = dict(row_plan)
     for key in ("models", "routes", "efforts", "session_targets",
@@ -213,6 +314,19 @@ def drop_api_rows(row_plan: dict) -> dict:
         rows = list(row_plan.get(key) or [])
         filtered[key] = [rows[i] for i in keep if i < len(rows)]
     return filtered
+
+
+def _scope_pack_starved(context_status: Any, manifest: dict) -> bool:
+    """True when the assembled scope pack was refused or degraded for SIZE —
+    the only condition under which the density rung may spend a probe: a size
+    terminal of the ladder, or an assembled pack whose ladder trace shows a
+    rung taken (touched files degraded to diff-only, or the -U0 diff)."""
+    if context_status is not None:
+        return str(getattr(context_status, "status", "") or "") in _SCOPE_SIZE_TERMINALS
+    return any(
+        int(step.get("diff_only_files") or 0) > 0 or bool(step.get("zero_context_diff"))
+        for step in (dict(manifest or {}).get("ladder_steps") or []) if isinstance(step, dict)
+    )
 
 
 def prepare_scope_review(
@@ -251,11 +365,13 @@ def prepare_scope_review(
             status="error",
             block_message=f"⚠️ SCOPE_REVIEW_BLOCKED: invalid review roots: {exc}.",
         )
+    from ouroboros.review_execution import delivery_retrieves
+
     scope_model_id = scope_model or sr._get_scope_model()
     delegated = str(getattr(route, "value", route) or "") == "agent_session"
     # RETRIEVES class: a session row and a configured-subagent api row deliver
     # by retrieval — neither assembles the packet/atlas below.
-    retrieves = delegated or bool(subagent_id)
+    retrieves = delivery_retrieves(route, subagent_id)
 
     from ouroboros.tools.review_binary_context import StagedDiffUnavailable
     from ouroboros.tools.review_subject import managed_review_subject
@@ -282,24 +398,49 @@ def prepare_scope_review(
             prompt, context_status = session_task, None
         else:
             session_task = ""
-            prompt, context_status = sr._build_scope_prompt(
-                repo_dir, commit_message,
-                goal=goal, scope=scope,
-                review_rebuttal=review_rebuttal,
-                review_history=review_history,
-                scope_review_history=scope_review_history,
-                context=sr._ScopePromptContext(
-                    drive_root=(
-                        pathlib.Path(ctx.drive_root)
-                        if getattr(ctx, "drive_root", None)
-                        else None
+
+            def _assemble():
+                return sr._build_scope_prompt(
+                    repo_dir, commit_message,
+                    goal=goal, scope=scope,
+                    review_rebuttal=review_rebuttal,
+                    review_history=review_history,
+                    scope_review_history=scope_review_history,
+                    context=sr._ScopePromptContext(
+                        drive_root=(
+                            pathlib.Path(ctx.drive_root)
+                            if getattr(ctx, "drive_root", None)
+                            else None
+                        ),
+                        scope_model=scope_model_id,
+                        governance_repo_dir=governance_repo,
+                        represent_binary=subject is not None,
+                        managed_subject=subject,
                     ),
-                    scope_model=scope_model_id,
-                    governance_repo_dir=governance_repo,
-                    represent_binary=subject is not None,
-                    managed_subject=subject,
-                ),
-            )
+                )
+
+            prompt, context_status = _assemble()
+            if _scope_pack_starved(context_status, sr._current_scope_context_manifest()):
+                # Cold-start density rung (the deep review's, shared): the
+                # sample is the refused required rows first, then the selected
+                # ones; a recorded witness rebuilds the pack ONCE under the
+                # recalibrated cap. The manifest is reset by every build, so
+                # the probe's ladder step is recorded on the LAST build.
+                from ouroboros.tools.review_helpers import density_probe_sample
+
+                outcome = density_probe_before_size_refusal(
+                    ctx, scope_model_id,
+                    density_probe_sample(repo_dir, sr._current_scope_context_manifest()),
+                    surface="scope_review",
+                )
+                if outcome == "measured":
+                    prompt, context_status = _assemble()
+                if outcome not in ("warm", "no_sample", "unavailable"):
+                    sr._record_ladder_steps(
+                        list(sr._current_scope_context_manifest().get("ladder_steps") or [])
+                        + [{"step": "density_probe", "model": scope_model_id, "outcome": outcome,
+                            "rebuilt": outcome == "measured"}]
+                    )
     except (RuntimeError, StagedDiffUnavailable) as exc:
         return None, sr.ScopeReviewResult(
             blocked=True,
@@ -355,3 +496,145 @@ def prepare_scope_review(
         "context_manifest": sr._current_scope_context_manifest(),
         "stable_prefix_len": int(sr._SCOPE_STABLE_PREFIX_LEN.get() or 0),
     }, None
+
+
+def commit_gate_paid_seats(triad_prepared, triad_exited, scope_rows) -> list:
+    """The PAID seats of one commit-gate wave, SCOPE FIRST (owner decision
+    2026-09-05: the only constitutionally blocking seat takes precedence in
+    admission and reservation order). A paid seat is an api row — packet OR
+    native episode — whose every send is a ``reserve_attempt`` on the ledger;
+    an agent-session row rides the owner's subscription (its ledger row is
+    written at settlement, never reserved) and is not priced. Each seat carries
+    the exact chars of the send its substrate opens with (the packet's message
+    pair; a native episode's first send: instructions, work-order and tool
+    schemas — its later rounds reserve themselves) and that send's output
+    reservation, so the wave is priced the way ``reserve_attempt`` prices it."""
+    import json
+
+    from ouroboros.review_execution import ReviewRouteKind, delivery_retrieves
+    from ouroboros.review_native_episode import native_first_send_chars
+    from ouroboros.reviewer_slot_config import SCOPE_ROLE_HINT
+    from ouroboros.tools.review_multi_model import (
+        TRIAD_ROLE_HINT, TRIAD_USER_TURN, _review_output_budget, triad_api_messages,
+    )
+    from ouroboros.triad_review import REVIEW_JSON_ARRAY_CONTRACT
+
+    sr = _scope()
+
+    def _chars(messages) -> int:
+        return len(json.dumps({"messages": messages}, ensure_ascii=False, default=str))
+
+    def _session(route) -> bool:
+        return str(getattr(route, "value", route) or "") == ReviewRouteKind.AGENT_SESSION.value
+
+    seats = []
+    for row in scope_rows or []:
+        slot, prepared = row["slot"], row.get("prepared") or {}
+        route, slot_id = getattr(slot, "route", None), str(slot.slot_id or "")
+        if row.get("final") is not None or _session(route):
+            continue
+        model = str(prepared.get("scope_model_id") or slot.model or "")
+        output_tokens, _ = sr._window_scaled_reserves(
+            sr._scope_window(model).sizing_window(sr._SCOPE_FAILCLOSED_WINDOW)
+        )
+        if delivery_retrieves(route, getattr(slot, "subagent_id", "")):
+            chars = native_first_send_chars(
+                str(prepared.get("repo_dir") or ""), surface="scope_review", role_hint=SCOPE_ROLE_HINT,
+                slot_id=slot_id, session_task=str(prepared.get("session_task") or ""),
+                output_contract=sr.SCOPE_RETRIEVING_OUTPUT_CONTRACT,
+            )
+        else:
+            chars = _chars(sr.scope_api_messages(
+                str(prepared.get("prompt") or ""), int(prepared.get("stable_prefix_len") or 0)))
+        seats.append({"surface": "scope_review", "slot_id": slot_id, "model": model,
+                      "prompt_chars": chars, "max_completion_tokens": int(output_tokens)})
+    if triad_exited or not triad_prepared:
+        return seats
+    row_plan = triad_prepared.get("row_plan") or {}
+    models = list(triad_prepared.get("models") or row_plan.get("models") or [])
+    routes = list(triad_prepared.get("routes") or row_plan.get("routes") or [])
+    slot_ids, actors = list(row_plan.get("slot_ids") or []), list(row_plan.get("subagent_ids") or [])
+    triad_chars = None
+    for index, model in enumerate(models):
+        route = routes[index] if index < len(routes) else "api_chat"
+        slot_id = str(slot_ids[index] if index < len(slot_ids) else f"slot_{index + 1}")
+        if _session(route):
+            continue
+        if delivery_retrieves(route, actors[index] if index < len(actors) else ""):
+            chars = native_first_send_chars(
+                str(triad_prepared.get("target_repo") or ""), surface="multi_model_review",
+                role_hint=TRIAD_ROLE_HINT, slot_id=slot_id,
+                session_task=str(triad_prepared.get("session_task") or ""),
+                output_contract=REVIEW_JSON_ARRAY_CONTRACT,
+            )
+        else:
+            if triad_chars is None:
+                messages, _ = triad_api_messages(
+                    str(triad_prepared.get("prompt") or ""),
+                    int(triad_prepared.get("stable_prefix_len") or 0), TRIAD_USER_TURN,
+                )
+                triad_chars = _chars(messages)
+            chars = triad_chars
+        seats.append({"surface": "multi_model_review", "slot_id": slot_id, "model": str(model or ""),
+                      "prompt_chars": chars, "max_completion_tokens": int(_review_output_budget())})
+    return seats
+
+
+def admit_commit_gate_wave(ctx, seats) -> str | None:
+    """All-or-nothing money admission of one commit-gate wave (owner decision
+    2026-09-05): every paid seat's reservation upper bound must fit TOGETHER,
+    against every fence ``reserve_attempt`` enforces (the global TOTAL_BUDGET
+    remainder and the root fence), before ANY seat is dispatched. Returns the
+    typed refusal text ($0, nothing dispatched) naming the binding axis, or
+    None; fail-open on unknowns like the task-level surfaces that already ride
+    ``review_wave_budget_gate``."""
+    if not seats:
+        return None
+    from ouroboros.review_substrate import review_usage_category
+    from ouroboros.tools.review_helpers import review_wave_binding_fence, review_wave_budget_gate
+
+    # Each seat is priced under the usage scope its substrate will SEND under
+    # (surface category + slot), so its bound reads the seat's own observed
+    # cache split — never the caller's warm transcript split.
+    admission = review_wave_budget_gate(
+        ctx, surface="commit_gate",
+        models=[seat["model"] for seat in seats],
+        prompt_chars=[seat["prompt_chars"] for seat in seats],
+        max_completion_tokens=[seat["max_completion_tokens"] for seat in seats],
+        categories=[review_usage_category(seat["surface"]) for seat in seats],
+        slot_ids=[seat["slot_id"] for seat in seats],
+        extra={"seats": [f"{seat['surface']}:{seat['slot_id']}" for seat in seats]},
+    )
+    if admission is None:
+        return None
+    usd = lambda value: "unknown" if value is None else f"${float(value):.6f}"  # noqa: E731
+    bounds = list(admission.get("slot_bounds") or []) + [None] * len(seats)
+    wave, remaining = admission.get("estimated_wave_usd"), admission.get("remaining_usd")
+    shortfall = None if wave is None or remaining is None else max(0.0, float(wave) - float(remaining))
+    limit, accounted = admission.get("limit_usd"), admission.get("accounted_usd")
+    root_remaining = None if limit is None or accounted is None else max(0.0, float(limit) - float(accounted))
+    if admission.get("binding_axis") == "global":
+        # The refusal names the fence that binds and the knob that moves it — never
+        # a per-task fence the wave would have fit.
+        fence = (
+            f"the global budget TOTAL_BUDGET {usd(admission.get('global_limit_usd'))}: "
+            f"accounted={usd(admission.get('global_accounted_usd'))} across every task (of which "
+            f"{usd(admission.get('global_reserved_usd'))} is reserved by other in-flight attempts), "
+            f"remaining={usd(remaining)}, shortfall={usd(shortfall)}; the per-task budget fence "
+            f"{usd(limit)} alone would leave {usd(root_remaining)}"
+        )
+    else:
+        fence = (
+            f"the per-task budget fence {usd(limit)}: accounted={usd(accounted)} (of which "
+            f"{usd(admission.get('reserved_usd'))} is reserved by other in-flight attempts), "
+            f"remaining={usd(remaining)}, shortfall={usd(shortfall)}; the global budget "
+            f"{usd(admission.get('global_limit_usd'))} alone would leave {usd(admission.get('global_remaining_usd'))}"
+        )
+    remedy = review_wave_binding_fence(admission)[1]
+    return (
+        "⚠️ REVIEW_BLOCKED: commit-gate review wave declined before dispatch ($0 spent). "
+        f"The wave's reservation upper bound {usd(wave)} ("
+        + "; ".join(f"{s['surface']}:{s['slot_id']} {s['model']} {usd(bounds[i])}" for i, s in enumerate(seats))
+        + f") does not fit {fence}. No reviewer seat was dispatched (scope and triad alike): wait for "
+        f"in-flight attempts to settle or {remedy}, then retry the same commit."
+    )

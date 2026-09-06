@@ -1009,8 +1009,10 @@ def test_expiry_notes_teach_the_escalation_verb():
     assert "escalate to your human via a progress message" not in source
     assert "escalate to your human," not in source
     # The dispatch charter is an LLM-facing user message too (agent.py appends
-    # it): the same dead end must not survive there.
-    import ouroboros.subagent_dispatch_notes as dn
+    # it): the same dead end must not survive there. The campaign owner of
+    # dispatch_executor_note is agent_dispatch (subagent_dispatch_notes is the
+    # historical import facade).
+    import ouroboros.agent_dispatch as dn
 
     charter = inspect.getsource(dn)
     assert "escalated with the escalate verb (parent-first" in charter

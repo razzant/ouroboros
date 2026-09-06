@@ -474,7 +474,7 @@ def test_retry_terminal_cost_uses_logical_root_authority(tmp_path, monkeypatch):
         "supervisor.state.reconstruct_task_cost",
         lambda *_args, **_kwargs: {
             "cost_accounting_status": "available",
-            "cost_usd": 0.75,
+            "accounted_upper_bound_usd": 0.75,
             "cost_final": True,
         },
     )
@@ -501,7 +501,7 @@ def test_retry_terminal_cost_uses_logical_root_authority(tmp_path, monkeypatch):
     )
 
     assert seen == [(tmp_path, "logical-root")]
-    assert projection["cost_usd_with_children"] == 2.0
+    assert projection["accounted_upper_bound_usd_with_children"] == 2.0
     assert projection["cost_final"] is True
 
 
@@ -520,7 +520,7 @@ def test_a_root_narrowed_by_a_childs_open_row_reports_that_rows_count(tmp_path, 
         "supervisor.state.reconstruct_task_cost",
         lambda *_args, **_kwargs: {
             # This task's OWN rows are complete and final.
-            "cost_accounting_status": "available", "cost_usd": 0.75,
+            "cost_accounting_status": "available", "accounted_upper_bound_usd": 0.75,
             "cost_final": True, "non_final_rows": 0,
         },
     )
@@ -639,7 +639,7 @@ def test_corrupt_or_integrity_degraded_ledger_never_permits_budget_resume(
     from supervisor import queue, state, workers
 
     state.init(tmp_path, total_budget_limit=10.0)
-    queue.init(tmp_path, 600, 1800)
+    queue.init(tmp_path)
     monkeypatch.setattr(queue, "DRIVE_ROOT", tmp_path)
     monkeypatch.setattr(queue, "PENDING", [{
         "id": "replay-risk",
@@ -852,7 +852,7 @@ def test_terminal_emitter_still_withholds_an_unavailable_projection(tmp_path, mo
     monkeypatch.setattr(usage_accounting, "usage_breakdown", _ledger_down)
     unavailable = reconstruct_task_cost("t1", fields=True, drive_root=tmp_path)
     assert unavailable["cost_accounting_status"] == "unavailable"
-    assert unavailable["cost_usd"] is None
+    assert unavailable["accounted_upper_bound_usd"] is None
 
     events = []
     monkeypatch.setattr(workers, "get_event_q", lambda: SimpleNamespace(put=events.append))
@@ -862,7 +862,7 @@ def test_terminal_emitter_still_withholds_an_unavailable_projection(tmp_path, mo
     assert emitted["cost_accounting_error"] == "ledger_unavailable"
     assert emitted["ledger_integrity_degraded"] is True
     assert [k for k, v in emitted.items() if v is None] == []
-    assert "cost_usd" not in emitted and "non_final_rows" not in emitted
+    assert "accounted_upper_bound_usd" not in emitted and "non_final_rows" not in emitted
 
 
 def test_terminal_unknown_zero_cost_stays_nullable(tmp_path):
@@ -876,7 +876,6 @@ def test_terminal_unknown_zero_cost_stays_nullable(tmp_path):
         task_id="terminal-root", root_task_id="terminal-root",
     )
     fields = reconstruct_task_cost("terminal-root", fields=True, drive_root=tmp_path)
-    assert fields["cost_usd"] is None
     assert fields["accounted_upper_bound_usd"] is None
     assert fields["unknown_unmetered"] == 1
 
@@ -887,9 +886,7 @@ def test_terminal_unknown_zero_cost_stays_nullable(tmp_path):
     terminal = events._authoritative_terminal_cost(
         "terminal-root", task, dict(task), {}, tmp_path,
     )
-    assert terminal["cost_usd"] is None
     assert terminal["accounted_upper_bound_usd"] is None
-    assert terminal["cost_usd_with_children"] is None
     assert terminal["accounted_upper_bound_usd_with_children"] is None
     assert terminal["unknown_unmetered"] == 1
 
@@ -917,9 +914,7 @@ def test_post_task_checkpoint_keeps_unknown_zero_cost_nullable(tmp_path):
         "completed",
     )
     stored = load_task_result(data, task_id)
-    assert stored["cost_usd"] is None
     assert stored["accounted_upper_bound_usd"] is None
-    assert stored["cost_usd_with_children"] is None
     assert stored["accounted_upper_bound_usd_with_children"] is None
     assert stored["unknown_unmetered"] == 1
 
@@ -928,7 +923,7 @@ def _install_supervisor(tmp_path, monkeypatch):
     from supervisor import queue, state, workers
 
     state.init(tmp_path, total_budget_limit=10.0)
-    queue.init(tmp_path, 600, 1800)
+    queue.init(tmp_path)
     monkeypatch.setattr(workers, "DRIVE_ROOT", tmp_path)
     monkeypatch.setattr(queue, "DRIVE_ROOT", tmp_path)
     workers.PENDING[:] = []

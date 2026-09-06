@@ -186,7 +186,8 @@ def test_record_worker_pids_roundtrip(tmp_path, monkeypatch):
 # ───────────────────── #4/#6 + #7: source contracts ─────────────────────────
 
 def test_respawn_closes_old_queue_under_lock():
-    src = _read("supervisor/workers.py")
+    # respawn moved to the pool-lifecycle owner; the pool still spawns.
+    src = _read("supervisor/worker_pool_lifecycle.py")
     assert "with _queue_lock:" in src
     assert "old.in_q.close()" in src
     assert "old.in_q.cancel_join_thread()" in src
@@ -197,7 +198,7 @@ def test_spawn_reaps_orphans_and_records_pids():
     assert "reap_orphaned_workers()" in src
     assert "_record_worker_pids()" in src
     # reap guards against PID reuse and only group-kills its own setsid session
-    assert "if pgid and pgid == pid:" in src
+    assert "if pgid and pgid == pid:" in _read("supervisor/worker_pool_lifecycle.py")
 
 
 def test_emergency_cleanup_joins_children():

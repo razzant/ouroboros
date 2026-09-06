@@ -847,3 +847,36 @@ def test_acceptance_evidence_aggregates_capability_deltas(tmp_path):
     ctx_clean = ToolContext(repo_dir=root, system_repo_dir=root, drive_root=data, task_id="task-clean")
     clean_packet = build_task_acceptance_evidence(ctx_clean, drive_root=data, task_id="task-clean")
     assert "capability_deltas" not in clean_packet
+
+
+def test_acceptance_packet_reads_mutation_evidence_from_the_canonical_root(tmp_path):
+    """AP4(1): the writer and the outcome consumer resolve `budget_drive_root`
+    first. Reading the EXECUTION drive made the whole section vanish from the
+    packet on a split-root install, with no absence marker to notice."""
+    from ouroboros.mutation_attribution import (
+        capture_mutation_baseline,
+        load_mutation_evidence_projection,
+    )
+    from ouroboros.review_evidence import build_task_acceptance_evidence
+    from ouroboros.task_results import STATUS_RUNNING, write_task_result
+    from ouroboros.tools.registry import ToolContext
+
+    root = _repo(tmp_path)
+    canonical = tmp_path / "canonical"
+    local = tmp_path / "local"
+    local.mkdir(parents=True)
+    write_task_result(canonical, "task-split", STATUS_RUNNING)
+    capture_mutation_baseline(
+        canonical, "task-split",
+        [{"surface_type": "system_repo", "host_root": str(root)}],
+    )
+    assert load_mutation_evidence_projection(canonical, "task-split")
+    assert not load_mutation_evidence_projection(local, "task-split")
+
+    ctx = ToolContext(
+        repo_dir=root, system_repo_dir=root, drive_root=local,
+        budget_drive_root=canonical, task_id="task-split",
+    )
+    packet = build_task_acceptance_evidence(ctx, drive_root=local, task_id="task-split")
+    assert packet["mutation_attribution"]["present"] is True
+    assert packet["__provenance__"]["mutation_attribution"] == "host_attested"

@@ -7,6 +7,9 @@ from __future__ import annotations
 
 import os
 
+from ouroboros.model_slots import ResolvedModelTarget, parse_fallback_chain
+from ouroboros.settings_defaults import OPENROUTER_DEFAULTS, OPENROUTER_REVIEW_DEFAULTS, SETTINGS_DEFAULTS  # noqa: F401
+
 # MiniMax exposes the same OpenAI-compatible API on two regional hosts. Keep the
 # mapping centralized so transport, capability evidence, and settings diagnostics
 # fingerprint the exact endpoint selected by the owner.
@@ -23,6 +26,34 @@ def resolve_minimax_base_url(region: str = "") -> str:
     return MINIMAX_REGION_ENDPOINTS.get(selected, MINIMAX_REGION_ENDPOINTS[MINIMAX_DEFAULT_REGION])
 
 
+# DeepSeek serves one official OpenAI-compatible endpoint (no regions, no
+# owner-configurable base URL — a proxy/mirror setup belongs to the generic
+# openai-compatible slot). Kept as a module constant so transport and the
+# provider test resolve the same host; the reviewer-window/base-url fingerprint
+# maps deliberately have NO deepseek branch (both default to "" consistently —
+# the fingerprint is already unique per provider+model).
+DEEPSEEK_BASE_URL = "https://api.deepseek.com/v1"
+
+# DeepSeek's Chat Completions ``reasoning_effort`` enum is low/high/max
+# (medium/xhigh are documented aliases of high) and thinking is switched off by
+# ``thinking.type=disabled``, not by an effort value. This is the wire dialect
+# of one provider, projected at the physical-send boundary; the canonical
+# Ouroboros effort scale stays the SSOT everywhere else. Not a model or pricing
+# table and never an admission gate.
+DEEPSEEK_REASONING_EFFORT_ALIASES = {
+    "minimal": "low",
+    "medium": "high",
+    "xhigh": "high",
+    "ultra": "max",
+}
+
+
+def normalize_deepseek_reasoning_effort(value: str) -> str:
+    """Project one canonical effort tier onto DeepSeek's Chat wire enum."""
+    normalized = str(value or "").strip().lower()
+    return DEEPSEEK_REASONING_EFFORT_ALIASES.get(normalized, normalized)
+
+
 # Direct-provider prefix → canonical provider name. Un-prefixed models route
 # through OpenRouter. Order matters only for readability; prefixes are disjoint.
 PROVIDER_PREFIXES: tuple[tuple[str, str], ...] = (
@@ -31,6 +62,7 @@ PROVIDER_PREFIXES: tuple[tuple[str, str], ...] = (
     ("minimax::", "minimax"),
     ("cloudru::", "cloudru"),
     ("gigachat::", "gigachat"),
+    ("deepseek::", "deepseek"),
     ("openai-compatible::", "openai-compatible"),
     ("openrouter::", "openrouter"),
 )
@@ -41,6 +73,7 @@ PROVIDER_ENV_KEYS: dict[str, str] = {
     "anthropic": "ANTHROPIC_API_KEY",
     "minimax": "MINIMAX_API_KEY",
     "cloudru": "CLOUDRU_FOUNDATION_MODELS_API_KEY",
+    "deepseek": "DEEPSEEK_API_KEY",
     "openrouter": "OPENROUTER_API_KEY",
 }
 
@@ -66,6 +99,7 @@ PROVIDER_CREDENTIAL_GROUPS: dict[str, tuple[str, ...]] = {
     "anthropic": ("ANTHROPIC_API_KEY",),
     "minimax": ("MINIMAX_API_KEY", "MINIMAX_REGION"),
     "cloudru": ("CLOUDRU_FOUNDATION_MODELS_API_KEY", "CLOUDRU_FOUNDATION_MODELS_BASE_URL"),
+    "deepseek": ("DEEPSEEK_API_KEY",),
     "gigachat": (
         "GIGACHAT_CREDENTIALS", "GIGACHAT_PASSWORD", "GIGACHAT_USER",
         "GIGACHAT_BASE_URL", "GIGACHAT_SCOPE", "GIGACHAT_VERIFY_SSL_CERTS",
@@ -112,6 +146,51 @@ def provider_for_model(model: str) -> str:
         if name.startswith(prefix):
             return provider
     return "openrouter"
+
+
+def resolve_model_target(
+    model: str,
+    *,
+    effort: str = "",
+    credential_ref: str = "",
+    context_window: int = 0,
+) -> ResolvedModelTarget:
+    """Construct the ABI-4 typed target at an EXISTING resolution seam.
+
+    Wraps what the resolution already computed (reuse-first): the transport
+    lane comes from ``provider_for_model``, and the optional facts keep their
+    typed sentinels unless the calling seam genuinely resolved them. No
+    parallel resolver, no pricing, no window probing — a context window is
+    Capability Evidence's fact (0 = unknown, fail-open).
+    """
+    model_id = str(model or "").strip()
+    return ResolvedModelTarget(
+        model_id=model_id,
+        provider_route=provider_for_model(model_id),
+        credential_ref=str(credential_ref or "").strip(),
+        effort=str(effort or "").strip(),
+        context_window=max(0, int(context_window or 0)),
+    )
+
+
+def fallback_candidate_targets(active_model: str = "") -> tuple[ResolvedModelTarget, ...]:
+    """The cross-model fallback candidate ladder as typed targets (ABI-4).
+
+    Same membership and order as ``model_slots.get_fallback_models`` — a typed
+    view over the ONE chain SSOT, not a second resolver. Effort stays the ""
+    sentinel: the ladder resolves destinations, the dispatching round owns the
+    active effort. ``provider_route`` stays the ``""`` sentinel DELIBERATELY:
+    the chain's local-vs-remote dispatch lane is the loop's single global
+    ``USE_LOCAL_FALLBACK`` flag (the pre-existing contract, byte-identical
+    through the ABI-4 sweep), so a per-candidate route here would be a
+    fabricated fact no dispatcher consumes.
+    """
+    from ouroboros.model_slots import get_fallback_models
+
+    return tuple(
+        ResolvedModelTarget(model_id=model, provider_route="")
+        for model in get_fallback_models(active_model)
+    )
 
 
 def provider_has_credentials(provider: str) -> bool:
@@ -171,7 +250,7 @@ def local_only_review_route_env() -> bool:
         provider_has_credentials(provider)
         for provider in (
             "openrouter", "openai", "anthropic", "minimax", "cloudru", "gigachat",
-            "openai-compatible",
+            "deepseek", "openai-compatible",
         )
     )
 
@@ -191,9 +270,7 @@ def resolve_credentialed_model(default_model: str) -> str:
     # LIGHT/MAIN are single-model slots; FALLBACKS is a comma chain expanded via the
     # shared SSOT parser (which also honors the legacy singular OUROBOROS_MODEL_FALLBACK)
     # instead of testing the whole comma-string as one broken model id. Empty Light
-    # (default -> Main) simply contributes nothing here. Lazy import: config imports this
-    # module, so importing config at module load would be circular.
-    from ouroboros.config import parse_fallback_chain
+    # (default -> Main) simply contributes nothing here.
     candidates: list[str] = []
     light = str(os.environ.get("OUROBOROS_MODEL_LIGHT", "") or "").strip()
     if light:
@@ -220,9 +297,7 @@ def declared_model_settings(
     ``config.SETTINGS_DEFAULTS`` for it, so the default's provider is genuinely reachable and
     must be declared.  ``include_claude_sdk_defaults`` is a RETIRED no-op kept for caller
     compatibility: the Claude-SDK transport and its dedicated model slots are gone, so both
-    values declare the same set. Lazy config import (config imports this module)."""
-    from ouroboros.config import SETTINGS_DEFAULTS
-
+    values declare the same set."""
     declared: dict[str, str] = {}
     for key in MODEL_SETTING_KEYS:
         value = str((settings or {}).get(key) or "").strip()
@@ -297,32 +372,6 @@ def provider_credential_plan(
     }
 
 
-# Shipped router profile. Keeping the root-loop role policy beside the direct
-# provider profiles gives onboarding, runtime defaults, and tests one vocabulary
-# instead of repeating model ids across those surfaces.
-OPENROUTER_DEFAULTS = {
-    "main": "google/gemini-3.7-flash",
-    "heavy": "",
-    "light": "openai/gpt-5.6-luna",
-    "vision": "",
-    "consciousness": "",
-    "fallback": "openai/gpt-5.6-luna",
-    "deep_self_review": "openai/gpt-5.6-sol-pro",
-}
-
-OPENROUTER_REVIEW_DEFAULTS = {
-    "triad": (
-        "google/gemini-3.7-flash",
-        "openai/gpt-5.6-terra",
-        "anthropic/claude-opus-5",
-    ),
-    "scope": ("openai/gpt-5.6-terra",),
-    # Routed catalog id (the retired Claude-SDK spelling migrated same-model);
-    # without provider credentials the advisory gate records an audited bypass.
-    "advisory": "anthropic/claude-sonnet-5",
-}
-
-
 OPENAI_DIRECT_DEFAULTS = {
     "main": "openai::gpt-5.6-terra",
     "heavy": "",
@@ -335,15 +384,13 @@ OPENAI_DIRECT_DEFAULTS = {
     # Cloud.ru and GigaChat are documented BELOW that floor, so filling their slot
     # would advertise a deep review that is doomed to overflow its real route.
     #
-    # DELIBERATELY plain Sol, NOT the OpenRouter default's `-pro`: that suffix is an
-    # OpenRouter slug, not an OpenAI model id. Live-probed 2026-07-29 against
-    # api.openai.com: `gpt-5.6-sol-pro` on /v1/chat/completions -> 404; the pro
+    # Plain Sol, the same model the OpenRouter default names. A `-pro` suffix is an
+    # OpenRouter routing slug, not an OpenAI model id: live-probed 2026-07-29 against
+    # api.openai.com, `gpt-5.6-sol-pro` on /v1/chat/completions -> 404; the pro
     # reasoning mode exists only on /v1/responses as `reasoning.mode="pro"` (200),
     # and passing `reasoning` to /v1/chat/completions -> 400 "Unknown parameter".
-    # Every LLM call in llm.py is a chat.completions call, so a direct-OpenAI
-    # install runs deep review on plain Sol — an owner-accepted capability
-    # difference from the OpenRouter default, disclosed in README/ARCHITECTURE
-    # rather than papered over with a slug that does not exist.
+    # Every LLM call in llm.py is a chat.completions call, so an owner's pinned
+    # `-pro` slug lands here too (deep_self_review.deep_review_route).
     "deep_self_review": "openai::gpt-5.6-sol",
 }
 
@@ -375,6 +422,24 @@ MINIMAX_DIRECT_DEFAULTS = {
     # the Cloud.ru/GigaChat clear-instead-of-fill path; owners can opt in manually.
 }
 
+DEEPSEEK_DIRECT_DEFAULTS = {
+    "main": "deepseek::deepseek-v4-pro",
+    "heavy": "",
+    "light": "deepseek::deepseek-v4-flash",
+    "fallback": "deepseek::deepseek-v4-flash",
+    # DeepSeek documents a FIRM 1M context on every v4 model (api-docs
+    # 2026-08: "1M context, 384K max output" with no guaranteed-minimum
+    # caveat), so the slot follows the OpenAI/Anthropic fill pattern rather
+    # than the MiniMax clear-instead-of-fill path (whose guaranteed floor was
+    # 512K). The route's /models endpoint publishes NO window metadata, so the
+    # ≥1M authority for blocking deep/scope review in Max mode still requires
+    # the owner capability acknowledgement — until then the gate fails closed
+    # loudly rather than silently degrading (see ARCHITECTURE §7).
+    "deep_self_review": "deepseek::deepseek-v4-pro",
+    # No vision default: deepseek-v4-flash-vision-exp is experimental; it is
+    # recognized by supports_vision() for explicit owner selection only.
+}
+
 ANTHROPIC_DIRECT_DEFAULTS = {
     "main": "anthropic::claude-opus-5",
     "heavy": "",
@@ -392,6 +457,7 @@ DIRECT_PROVIDER_DEFAULTS = {
     "cloudru": CLOUDRU_DIRECT_DEFAULTS,
     "gigachat": GIGACHAT_DIRECT_DEFAULTS,
     "minimax": MINIMAX_DIRECT_DEFAULTS,
+    "deepseek": DEEPSEEK_DIRECT_DEFAULTS,
 }
 
 # Review panels are declared as provider ROLE sequences, then compiled against
@@ -406,6 +472,9 @@ DIRECT_PROVIDER_REVIEW_ROLES = {
     "cloudru": ("main", "main", "main"),
     "gigachat": ("main", "main", "main"),
     "minimax": ("main", "light", "light"),
+    # Strongest-main ×3 policy (same as OpenAI/Anthropic): an exclusive
+    # DeepSeek install reviews with three independent thinking v4-pro calls.
+    "deepseek": ("main", "main", "main"),
 }
 
 DIRECT_PROVIDER_SCOPE_DEFAULTS = {
@@ -450,6 +519,12 @@ def migrate_model_value(provider: str, value: str) -> str:
         if text.startswith("minimax/"):
             return f"minimax::{text[len('minimax/'):]}"
         return text
+    if provider == "deepseek":
+        if text.startswith("deepseek::"):
+            return text
+        if text.startswith("deepseek/"):
+            return f"deepseek::{text[len('deepseek/'):]}"
+        return text
     return text
 
 
@@ -487,6 +562,11 @@ _VISION_MODEL_PREFIXES: tuple[str, ...] = (
     "qwen/qwen-vl", "qwen/qwen2.5-vl", "qwen/qwen3-vl",
     "mistralai/pixtral", "meta-llama/llama-4", "meta-llama/llama-3.2-90b-vision",
     "openai/gpt-5.5",
+    # Narrow on purpose: only the dedicated vision variant. Plain deepseek
+    # chat/v4 ids stay non-vision (pinned by tests), and this slash-form
+    # normalized id also names a real OpenRouter vendor namespace — the
+    # OpenRouter /models overlay may refine exact ids either way.
+    "deepseek/deepseek-v4-flash-vision",
 )
 
 # Runtime overlay: model_id → bool, fed from OpenRouter /models
@@ -537,6 +617,8 @@ def normalize_model_identity(model: str) -> str:
         return f"gigachat/{text[len('gigachat::'):]}"
     if text.startswith("minimax::"):
         return f"minimax/{text[len('minimax::'):]}"
+    if text.startswith("deepseek::"):
+        return f"deepseek/{text[len('deepseek::'):]}"
     if text.startswith("anthropic::"):
         return f"anthropic/{normalize_anthropic_model_id(text[len('anthropic::'):])}"
     if text.startswith("anthropic/"):

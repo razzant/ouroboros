@@ -380,10 +380,12 @@ def test_ouroboroshub_rejects_windows_and_review_opaque_paths():
         "__pycache__/plugin.cpython-39.pyc",
         "plugin.pyc",
         "native.so",
-        "module.wasm",
     ):
         try:
             ouroboroshub._safe_rel(value)
         except Exception:
             continue
         raise AssertionError(f"expected unsafe path rejection for {value!r}")
+    # Q15=A: WebAssembly is a reviewable, content-hash-bound asset (it runs only
+    # inside the sandboxed widget frame), not a generated or native artifact.
+    assert ouroboroshub._safe_rel("wasm/core.wasm") == pathlib.PurePosixPath("wasm/core.wasm")

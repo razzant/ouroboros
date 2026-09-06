@@ -62,7 +62,6 @@ function normalizedState(value, fallback = 'unavailable') {
         if (state === 'pending') return 'queued';
         return state === 'open' || state === 'working' ? 'running' : state;
     }
-    if (LIFECYCLE_TERMINAL_STATES.has(state)) return 'terminal';
     if (TERMINAL_STATES.has(state)) return 'terminal';
     if (state === 'unavailable' || state === 'absent') return 'unavailable';
     if (state === 'superseded') return 'superseded';
@@ -694,8 +693,7 @@ export function planReviewGroupFromTaskDetail(detail, ownerTaskId = '') {
         verdict: currentVerdict,
         summary: text(current.reason || currentAttempt?.summary),
         activeCount,
-        attemptCount: Math.max(attempts.length, finiteCount(stateRecord.waves_omitted) != null
-            ? attempts.length + finiteCount(stateRecord.waves_omitted) : attempts.length),
+        attemptCount: attempts.length + (finiteCount(stateRecord.waves_omitted) || 0),
         countIsAuthoritative: finiteCount(stateRecord.waves_omitted) === 0,
         attempts,
     };
@@ -769,6 +767,15 @@ export function formatReviewProjection(projection) {
     return lines.join('\n');
 }
 
+function appliedReviewUrl(panel, owner) {
+    const ref = panel.applied_source_ref;
+    if (panel.applied_source_status !== 'available' || ref?.root !== 'artifact_store'
+        || ref.kind !== 'task_acceptance_review' || !/^[0-9a-f]{64}$/.test(ref.sha256 || '')
+        || !Number.isSafeInteger(ref.bytes) || ref.bytes < 0
+        || !/^[A-Za-z0-9][A-Za-z0-9._-]*$/.test(ref.path || '')) return '';
+    return `/api/tasks/${encodeURIComponent(owner)}/artifacts/${encodeURIComponent(ref.path)}`;
+}
+
 export function taskAcceptanceGroupFromTaskDetail(detail, ownerTaskId = '') {
     const owner = text(ownerTaskId || detail?.task_id);
     const projection = detail?.review_projection;
@@ -778,7 +785,9 @@ export function taskAcceptanceGroupFromTaskDetail(detail, ownerTaskId = '') {
     const attempts = panels.map((panel, index) => {
         const verdict = text(panel?.aggregate_signal || 'UNKNOWN');
         return {
-            id: attemptIdentity(panel, `panel:${index + 1}`),
+            id: [attemptIdentity(panel, `panel:${index + 1}`),
+                panel.task_attempt == null ? '' : `task-attempt:${panel.task_attempt}`,
+                panel.panel_index == null ? '' : `panel-index:${panel.panel_index}`].filter(Boolean).join(':'),
             surface: 'task_acceptance',
             state: panel?.superseded ? 'superseded' : 'terminal',
             tone: statusTone('terminal', verdict),
@@ -793,7 +802,7 @@ export function taskAcceptanceGroupFromTaskDetail(detail, ownerTaskId = '') {
             initiatorTaskId: owner,
             executions: executionsFromReviewRecord(panel),
             execution: null,
-            detailRef: null,
+            detailRef: { surface: 'task_acceptance', url: appliedReviewUrl(panel, owner) },
             detailText: `${formatReviewProjection({ panels: [panel] })}\nCost unavailable`.trim(),
         };
     });
@@ -987,26 +996,12 @@ export function mergeReviewGroup(store, incoming) {
         && hasSemanticVerdict(mergedLatestAttempt.verdict)
         && text(mergedLatestAttempt.timestamp) > text(priorLatestAttempt.timestamp)
     );
-    if (
+    const omittedLatestLifecycle = (
         !activeAttempts.length
         && priorLatestAttempt?.lifecycleOnly
         && !incomingIds.has(priorLatestAttempt.id)
         && !newAttemptHasProvenablyNewerTimestamp
-    ) {
-        // A stale history refresh may omit a newer terminal lifecycle row.  It
-        // must not resurrect the older typed verdict at group level while the
-        // newer attempt remains unresolved.
-        merged.state = priorLatestAttempt.state;
-        merged.tone = reviewTone(
-            priorLatestAttempt.state,
-            priorLatestAttempt.verdict,
-            priorLatestAttempt.lifecycleStatus,
-        );
-        merged.verdict = priorLatestAttempt.verdict || '';
-        merged.summary = priorLatestAttempt.summary || merged.summary;
-        merged.lifecycleOnly = true;
-        merged.lifecycleStatus = priorLatestAttempt.lifecycleStatus || merged.lifecycleStatus;
-    }
+    );
     const delayedSemanticProjection = (
         incoming.surface === 'skill'
         && priorOnly.length > 0
@@ -1024,19 +1019,20 @@ export function mergeReviewGroup(store, incoming) {
             || text(mergedLatestAttempt.timestamp) <= text(priorLatestAttempt.timestamp)
         )
     );
-    if (delayedSemanticProjection) {
-        // A bounded history response may contain an older semantic row that was
-        // not known when the newer row arrived live. Keep the group header tied
-        // to the newer proved attempt; the older row remains inspectable below.
+    if (omittedLatestLifecycle || delayedSemanticProjection) {
+        // A stale refresh can omit the newest terminal lifecycle row or carry
+        // an older semantic row first seen after the newer one arrived live.
+        // Both keep the header on the newest proved attempt; an unresolved
+        // lifecycle still cannot borrow the older semantic verdict.
         merged.state = priorLatestAttempt.state;
         merged.tone = reviewTone(
             priorLatestAttempt.state,
             priorLatestAttempt.verdict,
             priorLatestAttempt.lifecycleStatus,
         );
-        merged.verdict = priorLatestAttempt.verdict;
+        merged.verdict = priorLatestAttempt.verdict || '';
         merged.summary = priorLatestAttempt.summary || merged.summary;
-        merged.lifecycleOnly = false;
+        merged.lifecycleOnly = Boolean(priorLatestAttempt.lifecycleOnly);
         merged.lifecycleStatus = priorLatestAttempt.lifecycleStatus || merged.lifecycleStatus;
     }
     merged.initiatorTaskId = uniformAttemptInitiator(
@@ -1192,13 +1188,13 @@ export function reviewExecutionEvidence(execution) {
     if (!executed || typeof executed !== 'object') return null;
     const kind = text(executed.kind || executed.route_kind || executed.channel).toLowerCase();
     const harness = text(executed.harness_id || executed.harness);
-    const api = ['api', 'api_chat', 'api_model'].includes(kind);
+    const api = ['api', 'api_chat', 'api_model', 'native'].includes(kind);
     const harnessReceipt = kind === 'harness' || kind === 'agent_session' || (wrapped && Boolean(harness));
     if (!api && (!harnessReceipt || !harness)) return null;
     return {
         harness: api ? 'api' : harness,
         channel: api ? 'api' : '',
-        label: text(executed.label),
+        label: kind === 'native' ? 'API · native tool rounds' : text(executed.label),
         model: text(executed.model || executed.model_id),
     };
 }
@@ -1227,14 +1223,14 @@ export function reviewReferenceFromRow(row) {
             ? row.progress_meta.review_reference
             : null);
     const reference = direct || nested;
-    if (!reference || text(reference.surface) !== 'plan_review') return null;
+    if (!reference || !['plan_review', 'task_acceptance'].includes(text(reference.surface))) return null;
     const presentationOwnerTaskId = text(
         reference.presentation_owner_task_id || reference.task_id
         || row?.presentation_owner_task_id || row?.task_id,
     );
     if (!presentationOwnerTaskId) return null;
     return {
-        surface: 'plan_review',
+        surface: text(reference.surface),
         presentationOwnerTaskId,
         stateRevision: text(reference.state_revision),
         reviewFingerprint: text(reference.review_fingerprint),
@@ -1271,7 +1267,11 @@ export function renderReviewsSection(groupsInput, disclosure = {}) {
             const detailAttrs = skillRef
                 ? ` data-skill-review-skill="${escapeHtmlAttr(skillRef.skill)}" data-skill-review-job="${escapeHtmlAttr(skillRef.jobId)}"`
                 : '';
-            const detail = skillRef ? '' : escapeHtmlText(attempt.detailText || attempt.summary || 'No additional detail projected.');
+            const source = attempt.detailRef?.surface === 'task_acceptance' ? attempt.detailRef : null;
+            const fullSource = source ? (source.url
+                ? `<a class="btn btn-default" href="${escapeHtmlAttr(source.url)}" download>Download full applied review</a>`
+                : '<span>Full applied review unavailable.</span>') : '';
+            const detail = skillRef ? '' : `<span>${escapeHtmlText(attempt.detailText || attempt.summary || 'No additional detail projected.')}</span>${fullSource ? `<div>${fullSource}</div>` : ''}`;
             const executions = reviewExecutionEvidenceList(attempt.executions, attempt.execution);
             const executionMarkup = executions.map((execution) => (
                 harnessIdentityMarkup(execution.harness, {

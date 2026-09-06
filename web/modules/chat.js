@@ -23,6 +23,7 @@ import {
     taskStoppedWithSummary,
     taskDoneIsTerminal,
     keepStickyExecutorChip,
+    taskReasonDetail,
     taskTerminalPhase,
 } from './log_events.js';
 import {
@@ -66,6 +67,7 @@ import { harnessIdentityMarkup } from './harness_presentation.js';
 import {
     captureLiveCardProjection,
     createHistoryResyncScheduler,
+    createLiveCardBound,
     createLiveCardTimelineRenderer,
     createRebuildBatch,
     createTimelineAnchors,
@@ -467,10 +469,6 @@ export function createChatInstance({
     // a new revision) short-circuit instead of refetching. Any FAILED sync
     // resets it; scheduleHistorySync and the reconnect path never consult it.
     let initialHydrationPromise = null;
-    // the offline bootstrap painted the sessionStorage
-    // fallback and set historyLoaded=true — the first successful sync after
-    // the server comes back must still rebuild the feed from durable history.
-    let offlineBootstrapPainted = false;
     // highest project revision whose history has been fetched;
     // refreshHistory only bypasses the sticky promise for a NEWER revision.
     let lastLoadedHistoryRevision = 0;
@@ -492,6 +490,8 @@ export function createChatInstance({
     let _viewportMutationDepth = 0;
     const isInstanceVisible = () =>
         Boolean(messagesDiv) && messagesDiv.offsetParent !== null && !document.hidden;
+    const LIVE_CARD_CAP = 200;
+    const liveCardBound = createLiveCardBound(LIVE_CARD_CAP);
     const liveCardRecords = new Map();
     const markReviewAnchor = (r, on = false) => setReviewAnchor(r, on, setLiveCardPhase);
     const explicitCardExpansion = new Map();
@@ -1539,6 +1539,7 @@ export function createChatInstance({
             }
         });
         liveCardRecords.set(normalizedGroupId, record);
+        liveCardBound.observe(liveCardRecords.size);
         // apply a name that arrived (task_named) before this card existed.
         const _pendingName = pendingSuggestedNames.get(normalizedGroupId);
         if (_pendingName && !record.isSubagent) {
@@ -1808,12 +1809,15 @@ export function createChatInstance({
     }
 
     function scheduleHistorySync() {
-        historyResyncScheduler.schedule();
+        historyResyncScheduler.schedule(liveCardBound.isArmed());
     }
 
     const historyResyncScheduler = createHistoryResyncScheduler({
         isReplayActive: () => _historyReplayActive,
-        run: () => syncHistory({ includeUser: false }).catch(() => {}),
+        // A joined run's timer was spent on a window fetched before the arm: re-arm.
+        run: () => syncHistory({ includeUser: false }).catch(() => {}).then(() => {
+            if (!destroyed && lastHistorySyncSucceeded && liveCardBound.isArmed()) scheduleHistorySync();
+        }),
     });
 
     // The 12 cost-meta keys shared by both subagent whitelists (the delegation
@@ -2110,11 +2114,11 @@ export function createChatInstance({
             return finishLiveCard(taskId, 'done');
         }
         let changed = false;
-        // Restore the coined task name even when history retained no progress row.
+        // Restore task name from history.
         if (msg?.suggested_name) {
             changed = applySuggestedName(taskId, msg.suggested_name) || changed;
         }
-        const finalizing = msg?.task_phase === 'finalizing';
+        const finalizing = msg?.task_phase === 'finalizing' || msg?.outcome_final === false;
         const projectedReviews = reviewGroupsFromTaskDetail(msg, taskId);
         const hasAcceptanceReview = projectedReviews.length > 0;
         const taskState = getTaskUiState(taskId, hasAcceptanceReview || finalizing);
@@ -2133,8 +2137,7 @@ export function createChatInstance({
         // never warn-styled, with the owner-request marker in the details.
         const softStopped = taskStoppedWithSummary(msg || {});
         const softStopDetail = softStopped ? OWNER_STOP_DETAIL_MARKER : '';
-        const reasonDetail = !softStopped && msg?.reason_code
-            ? `Reason: ${String(msg.reason_code)}` : '';
+        const reasonDetail = taskReasonDetail(msg || {});
         const record = liveCardRecords.get(taskId);
         changed = Boolean(record?.reviewController?.updateMany(projectedReviews)) || changed;
         if (finalizing && record && !record.finished) record.finalizingHold = true;
@@ -2456,26 +2459,29 @@ export function createChatInstance({
             root.setAttribute('data-owner-hurry', '1');
             return true;
         }
+        // Tool counts and the error shapes that force a visible card are
+        // classified the same way for a subagent child and for its owner.
+        const applyEventTelemetry = () => {
+            if (eventType === 'tool_call_started') return markTaskToolCall(taskId, 1, false, rawTs);
+            if ((eventType === 'task_metrics_event' || eventType === 'task_eval') && Number.isFinite(Number(evt.tool_calls))) {
+                return markTaskToolCall(taskId, Number(evt.tool_calls), true, rawTs);
+            }
+            if (
+                eventType === 'tool_call_timeout'
+                || eventType === 'tool_timeout'
+                || eventType === 'llm_round_error'
+                || eventType === 'llm_api_error'
+                || (eventType === 'tool_call_finished' && evt.is_error)
+            ) return forceTaskCardVisibleChange(taskId, rawTs);
+            return false;
+        };
         // A known subagent child's log events update its linked child card.
         if (subagentChildParents.has(taskId)) {
             if (eventType === 'task_done') {
                 return routeSubagentTerminalToCard(taskId, evt);
             }
             if (subagentTerminalChildren.has(taskId)) return false;
-            let changed = false;
-            if (eventType === 'tool_call_started') {
-                changed = markTaskToolCall(taskId, 1, false, rawTs) || changed;
-            } else if ((eventType === 'task_metrics_event' || eventType === 'task_eval') && Number.isFinite(Number(evt.tool_calls))) {
-                changed = markTaskToolCall(taskId, Number(evt.tool_calls), true, rawTs) || changed;
-            } else if (
-                eventType === 'tool_call_timeout'
-                || eventType === 'tool_timeout'
-                || eventType === 'llm_round_error'
-                || eventType === 'llm_api_error'
-                || (eventType === 'tool_call_finished' && evt.is_error)
-            ) {
-                changed = forceTaskCardVisibleChange(taskId, rawTs) || changed;
-            }
+            let changed = applyEventTelemetry();
             const summary = summarizeChatLiveEvent(evt);
             if (!summary) return changed;
             const info = subagentChildParents.get(taskId);
@@ -2490,20 +2496,7 @@ export function createChatInstance({
             );
             return Boolean(changed || queued);
         }
-        let changed = false;
-        if (eventType === 'tool_call_started') {
-            changed = markTaskToolCall(taskId, 1, false, rawTs) || changed;
-        } else if ((eventType === 'task_metrics_event' || eventType === 'task_eval') && Number.isFinite(Number(evt.tool_calls))) {
-            changed = markTaskToolCall(taskId, Number(evt.tool_calls), true, rawTs) || changed;
-        } else if (
-            eventType === 'tool_call_timeout'
-            || eventType === 'tool_timeout'
-            || eventType === 'llm_round_error'
-            || eventType === 'llm_api_error'
-            || (eventType === 'tool_call_finished' && evt.is_error)
-        ) {
-            changed = forceTaskCardVisibleChange(taskId, rawTs) || changed;
-        }
+        let changed = applyEventTelemetry();
         changed = attachTaskDetailReviews(taskId, evt) || changed;
         const summary = summarizeChatLiveEvent(evt);
         if (!summary) return changed;
@@ -2738,6 +2731,7 @@ export function createChatInstance({
             return historySyncPromise;
         }
         historySyncPromise = (async () => {
+            const armedAtStart = liveCardBound.begin();
             try {
                 // Server defaults own first-load quotas; Load older overrides them.
                 let historyUrl = `/api/chat/history${isMain ? '' : `?chat_id=${chatId}`}`;
@@ -2774,20 +2768,15 @@ export function createChatInstance({
 
                 // First load/reconnect trusts server history and fully rebuilds the
                 // feed; routine post-completion syncs only fold in new task cards.
-                // a Load-older refetch (forceRebuild) and the first
-                // successful sync after an offline sessionStorage bootstrap
-                // rebuild fully too.
-                const rebuildAll = !historyLoaded || fromReconnect || forceRebuild
-                    || offlineBootstrapPainted;
+                // Load-older (forceRebuild) and an arm this sync inherited rebuild fully too.
+                const rebuildAll = !historyLoaded || fromReconnect || forceRebuild || armedAtStart;
                 // On a soft reconnect the module (and its dedupe set)
                 // survives: a plain re-sync would dedupe-drop every bubble.
                 // Restore user text and rebuild from durable history on every
                 // rebuild — incl. includeUser=false triggers (clean open /
-                // 700ms resync), since offline-bootstrap cleared those too.
-                const renderUser = includeUser || fromReconnect || offlineBootstrapPainted;
-                if (!historyLoaded || fromReconnect) retiredTaskIds.clear();
-                // The extra rebuild causes (Load-older / offline bootstrap)
-                // replay everything too, so retirement resets with them.
+                // 700ms resync), since the rebuild clears those too.
+                const renderUser = includeUser || fromReconnect || armedAtStart;
+                // Every rebuild replays everything, so retirement resets with it.
                 if (rebuildAll) retiredTaskIds.clear();
 
                 // the ENTIRE mutation below (clear -> pass 1 ->
@@ -3043,6 +3032,7 @@ export function createChatInstance({
                 // dropped synchronously, so a real live completion frame can
                 // never land while it is up.
                 _historyReplayActive = true;
+                liveCardBound.beginReplay();
                 try {
                     if (rebuildAll) {
                         // one outer withStableViewport for
@@ -3112,8 +3102,7 @@ export function createChatInstance({
                 const wasFirstLoad = !historyLoaded;
                 historyLoaded = true;
                 lastHistorySyncSucceeded = true;
-                // The durable rebuild superseded the offline fallback paint.
-                offlineBootstrapPainted = false;
+                liveCardBound.settle({ rebuilt: rebuildAll, size: liveCardRecords.size });
                 // ANY successful sync leaves the instance hydrated
                 // — later hydration triggers ride this sticky promise.
                 initialHydrationPromise = historySyncPromise;
@@ -3229,7 +3218,7 @@ export function createChatInstance({
         // make the first successful post-outage sync a NON-rebuilding routine
         // fold over stale sessionStorage bubbles. Flag it so that sync
         // rebuilds from durable history instead.
-        if (!lastHistorySyncSucceeded) offlineBootstrapPainted = true;
+        if (!lastHistorySyncSucceeded) liveCardBound.arm();
         ensureWelcomeMessage();
     })();
 

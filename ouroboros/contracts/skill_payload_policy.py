@@ -64,6 +64,9 @@ SKILL_OWNER_STATE_FILENAMES = frozenset({
     # skill may read its resolved projection, but payload/runtime writes must
     # not be able to forge the owner's confirmed capability mapping.
     PRESENCE_PROFILE_STATE_FILENAME,
+    # Uninstall tombstone (CPL4-C11): forging it would let the agent mark a
+    # live skill payload-gone and have the startup sweep clear its owner state.
+    "uninstalled.json",
 })
 
 SKILL_OWNER_STATE_STEMS = (
@@ -81,6 +84,7 @@ SKILL_OWNER_STATE_STEMS = (
     "health",
     "owner_attestation",
     PRESENCE_PROFILE_STATE_STEM,
+    "uninstalled",
 )
 
 

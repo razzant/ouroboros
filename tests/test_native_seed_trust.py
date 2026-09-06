@@ -41,6 +41,11 @@ def _write_skill(root: pathlib.Path, name: str, *, permissions: str) -> pathlib.
         "version: 0.1.0\n"
         "type: extension\n"
         "entry: plugin.py\n"
+        # ABI-1: native-seed trust shares the NEW-PASS admission predicate, so
+        # a seed extension must declare its PluginAPI generation (bundled
+        # skills ship the field; the field-less refusal is pinned in
+        # tests/test_plugin_api_admission.py).
+        'plugin_api: "2.0"\n'
         f"permissions: {permissions}\n"
         "env_from_settings: []\n"
         "when_to_use: testing\n"

@@ -602,3 +602,26 @@ def test_start_agent_windows_assigns_job_before_resume_and_records(monkeypatch, 
     record = json.loads((data_dir / "state" / "server_process.json").read_text(encoding="utf-8"))
     assert record["pid"] == 54321
     assert record["port"] == 8765
+
+
+def test_launcher_reexports_the_windows_runtime_leaf():
+    """The Windows pythonnet/pywebview preparation left launcher.py whole.
+
+    Upstream's final cutoff grew launcher.py past this branch's 1500-line module
+    ceiling, so the Windows-only runtime preparation moved to its own leaf. It is
+    an extraction, not a rewrite: launcher.py re-exports the SAME objects under the
+    SAME names, so every prior importer, every monkeypatch target and the packaging
+    hook checks that read launcher.py's source see no change at all.
+    """
+    import launcher
+    from ouroboros import launcher_windows_runtime
+
+    assert (
+        launcher._prepare_windows_webview_runtime
+        is launcher_windows_runtime._prepare_windows_webview_runtime
+    )
+    assert launcher._show_windows_message is launcher_windows_runtime._show_windows_message
+    # The DLL-directory handle list moved WITH its only reader and was never part of
+    # launcher.py's surface, so it is deliberately not re-exported.
+    assert not hasattr(launcher, "_windows_dll_dir_handles")
+    assert isinstance(launcher_windows_runtime._windows_dll_dir_handles, list)

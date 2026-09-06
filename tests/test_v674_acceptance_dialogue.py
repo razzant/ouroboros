@@ -328,7 +328,7 @@ def test_reused_panel_application_leaves_obligation_rows_byte_identical(monkeypa
     ctx = loop_mod._TaskAcceptanceContext(
         tools=NS(_ctx=tool_ctx), content="candidate", task_id="t-reuse",
         task_type="task", llm_trace=trace, drive_root=None, messages=[],
-        emit_progress=lambda _m: None, mode="required", subtree_statuses=[],
+        emit_progress=lambda _m, *, incident=None: None, mode="required", subtree_statuses=[],
         budget_profile={}, passes_done=0,
     )
     loop_mod._apply_task_acceptance_result(ctx, result)
@@ -466,7 +466,7 @@ def _apply_harness(monkeypatch, result, *, obligations=None, tmp_path=None):
         llm_trace=trace,
         drive_root=None,
         messages=[],
-        emit_progress=lambda _m: None,
+        emit_progress=lambda _m, *, incident=None: None,
         mode="required",
         subtree_statuses=[],
         budget_profile={},

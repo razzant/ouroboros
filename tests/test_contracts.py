@@ -8,7 +8,9 @@ rely on once external packages start consuming them:
 - Every ``ToolEntry`` produced by the real registry matches
   ``ToolEntryProtocol``.
 - The WS/HTTP envelopes emitted by ``server.py`` and
-  ``supervisor.message_bus`` still carry the keys declared in ``api_v1``.
+  ``supervisor.message_bus`` still carry the keys declared in
+  ``ouroboros.gateway.contracts`` (the ``contracts.api_v1`` shim was removed
+  in ABI 7.0).
 - ``SkillManifest`` parses the unified SKILL.md / skill.json format
   tolerantly without raising on missing optional fields.
 
@@ -96,11 +98,11 @@ def test_budget_profile_frozen_key_set():
     from ouroboros.contracts.task_contract import normalize_budget_profile
 
     profile = normalize_budget_profile(None)
+    # ABI 7.0 (Q10=A): stall_rounds_threshold left this shape deliberately.
     assert set(profile) == {
         "improvement_policy",
         "max_improvement_passes",
         "reserve_finalization_pct",
-        "stall_rounds_threshold",
         "cost_hard_stop_pct",
     }
     assert profile["cost_hard_stop_pct"] is None
@@ -290,28 +292,36 @@ def test_every_registered_tool_matches_protocol():
 
 
 # ---------------------------------------------------------------------------
-# api_v1 envelopes <-> real broadcasters
+# gateway.contracts envelopes <-> real broadcasters
 # ---------------------------------------------------------------------------
 
 
-def test_api_v1_declares_core_ws_message_types():
-    """api_v1 must declare the core chat/media/status WS envelopes."""
-    from ouroboros.contracts import api_v1
+def test_api_v1_shim_removed_and_gateway_declares_core_ws_message_types():
+    """ABI 7.0 (ABI-3/ABI-6д): ``ouroboros.contracts.api_v1`` is REMOVED —
+    ``ouroboros.gateway.contracts`` is the one SSOT importers must use."""
+    import importlib
+
+    import pytest
+
+    with pytest.raises(ModuleNotFoundError):
+        importlib.import_module("ouroboros.contracts.api_v1")
+
+    from ouroboros.gateway import contracts as gateway_contracts
 
     for name in ("ChatInbound", "ChatOutbound", "PhotoOutbound", "VideoOutbound", "DocumentOutbound", "LinkAction", "LinksOutbound", "QuizOption", "QuizOutbound", "QuizStateOutbound", "DecisionRequest", "DecisionResponse", "MessageAnnotationOutbound", "TypingOutbound", "LogOutbound"):
-        assert hasattr(api_v1, name), f"api_v1 missing {name}"
+        assert hasattr(gateway_contracts, name), f"gateway.contracts missing {name}"
 
 
-def test_api_v1_declares_task_named_outbound():
+def test_gateway_declares_task_named_outbound():
     """v6.40: the proactive card-naming broadcast is a frozen WS message envelope, in
     WS_MESSAGE_TYPES, with a JSDoc mirror in the frontend contract surface (ABI extension
     contract per ARCHITECTURE)."""
     import pathlib
 
-    from ouroboros.contracts import api_v1
     from ouroboros.gateway.contracts import WS_MESSAGE_TYPES
+    from ouroboros.gateway import contracts as api_v1
 
-    assert hasattr(api_v1, "TaskNamedOutbound"), "api_v1 missing TaskNamedOutbound"
+    assert hasattr(api_v1, "TaskNamedOutbound"), "gateway.contracts missing TaskNamedOutbound"
     assert set(api_v1.TaskNamedOutbound.__annotations__) >= {"type", "task_id", "suggested_name"}
     assert "task_named" in WS_MESSAGE_TYPES
     api_types = pathlib.Path(__file__).resolve().parents[1] / "web" / "modules" / "api_types.js"
@@ -372,13 +382,22 @@ def _collect_literal_progress_meta_keys(source_path: pathlib.Path) -> set[str]:
     tree = ast.parse(source_path.read_text(encoding="utf-8"))
     keys: set[str] = set()
     meta_helper_names = {"_subagent_rejection_meta", "_subagent_progress_meta", "_subagent_scheduled_meta"}
+    # A producer may build the dict under a local name and hand it over as
+    # ``progress_meta=<name>`` (events_runtime_controls: ``incident_meta``);
+    # every such name is an alias of ``progress_meta`` for the walk below, or
+    # the scan is blind to exactly those emitters and stays green when their
+    # keys drop out of the carriers.
+    meta_names = {"progress_meta"}
+    for node in ast.walk(tree):
+        if isinstance(node, ast.keyword) and node.arg == "progress_meta" and isinstance(node.value, ast.Name):
+            meta_names.add(node.value.id)
     for node in ast.walk(tree):
         if isinstance(node, ast.keyword) and node.arg == "progress_meta" and isinstance(node.value, ast.Dict):
             literal_keys, unknown = _dict_literal_keys(node.value)
             assert not unknown, f"progress_meta literal in {source_path.name} has dynamic keys: {unknown}"
             keys.update(literal_keys)
         elif isinstance(node, ast.Assign):
-            if any(isinstance(target, ast.Name) and target.id == "progress_meta" for target in node.targets) and isinstance(node.value, ast.Dict):
+            if any(isinstance(target, ast.Name) and target.id in meta_names for target in node.targets) and isinstance(node.value, ast.Dict):
                 literal_keys, unknown = _dict_literal_keys(node.value)
                 assert not unknown, f"progress_meta assignment in {source_path.name} has dynamic keys: {unknown}"
                 keys.update(literal_keys)
@@ -389,7 +408,7 @@ def _collect_literal_progress_meta_keys(source_path: pathlib.Path) -> set[str]:
                     and isinstance(target.slice.value, str)
                 ):
                     base = target.value
-                    if isinstance(base, ast.Name) and base.id == "progress_meta":
+                    if isinstance(base, ast.Name) and base.id in meta_names:
                         keys.add(target.slice.value)
                     # evt.setdefault("progress_meta", {})["key"] = ... — the
                     # in-place producer idiom (task_finalization stamps).
@@ -408,7 +427,7 @@ def _collect_literal_progress_meta_keys(source_path: pathlib.Path) -> set[str]:
                 isinstance(func, ast.Attribute)
                 and func.attr == "update"
                 and isinstance(func.value, ast.Name)
-                and func.value.id == "progress_meta"
+                and func.value.id in meta_names
                 and node.args
                 and isinstance(node.args[0], ast.Dict)
             ):
@@ -465,7 +484,7 @@ def _assert_envelope_parity(
         leaked = keys - declared_keys
         assert not leaked, (
             f"{envelope_name} envelope in {source_path.name} uses keys not "
-            f"declared in api_v1: {leaked}"
+            f"declared in gateway.contracts: {leaked}"
         )
         missing_required = required_keys - keys
         assert not missing_required, (
@@ -523,16 +542,24 @@ def test_chat_outbound_declares_progress_meta_keys_used_by_runtime():
 
     declared = set(ChatOutbound.__annotations__)
     progress_keys: set[str] = set()
-    for rel in (
-        "supervisor/events.py",
-        "supervisor/workers.py",
-        "ouroboros/agent.py",
-        "ouroboros/skill_lifecycle_queue.py",
-        "ouroboros/task_finalization.py",
-    ):
-        progress_keys.update(_collect_literal_progress_meta_keys(REPO_ROOT / rel))
+    # The v7 module split scattered the supervisor's literal emitters over the
+    # family leaves (events_chat_delivery, events_schedule_task,
+    # events_subagent_admission, events_task_done, task_reaper, worker_*), so
+    # walk the whole package instead of naming leaves: a hand-list went stale
+    # the moment supervisor/events.py stopped carrying a literal key and
+    # silently skipped every leaf it did not name.
+    sources = sorted((REPO_ROOT / "supervisor").rglob("*.py")) + [
+        REPO_ROOT / "ouroboros" / "agent.py",
+        REPO_ROOT / "ouroboros" / "skill_lifecycle_queue.py",
+        REPO_ROOT / "ouroboros" / "task_finalization.py",
+    ]
+    for source_path in sources:
+        progress_keys.update(_collect_literal_progress_meta_keys(source_path))
 
     assert progress_keys, "no literal progress_meta keys found"
+    # The named-dict idiom must be seen: this key has exactly one emitter and
+    # it hands the dict over as ``progress_meta=incident_meta``.
+    assert "cancel_physical_task_id" in progress_keys, sorted(progress_keys)
     assert progress_keys <= declared, (
         "progress_meta emits keys not declared in ChatOutbound: "
         f"{sorted(progress_keys - declared)}"
@@ -1249,8 +1276,19 @@ def test_plugin_api_surface_is_frozen():
 def test_plugin_api_version_matches_documented_surface():
     from ouroboros.contracts.plugin_api import PLUGIN_API_VERSION, VALID_EXTENSION_PERMISSIONS
 
-    assert PLUGIN_API_VERSION == "1.4"
+    assert PLUGIN_API_VERSION == "2.0"
     assert "presence" in VALID_EXTENSION_PERMISSIONS
+    # ABI-1: absent manifest field binds the LEGACY generation by construction
+    # (owner-ratified: 1.3, deliberately NOT 1.4), and the version's surface
+    # fingerprint is recorded (fail-closed in both directions).
+    from ouroboros.contracts.plugin_api import (
+        LEGACY_PLUGIN_API_GENERATION,
+        PLUGIN_API_SURFACE_FINGERPRINTS,
+        plugin_api_surface_fingerprint,
+    )
+
+    assert LEGACY_PLUGIN_API_GENERATION == "1.3"
+    assert PLUGIN_API_SURFACE_FINGERPRINTS[PLUGIN_API_VERSION] == plugin_api_surface_fingerprint()
 
 
 def test_extension_route_methods_contract_matches_server_dispatch():
@@ -1398,7 +1436,6 @@ def test_state_response_context_mode_auto_low_crosses_the_wire(tmp_path, monkeyp
 
     from ouroboros.gateway.contracts import StateResponse
 
-    monkeypatch.setattr(os, "environ", dict(os.environ))  # api_state reads mode state from env
     for key in ("OUROBOROS_CONTEXT_MODE", "OUROBOROS_CONTEXT_MODE_AUTO_LOW"):
         os.environ.pop(key, None)
 
@@ -1423,48 +1460,6 @@ def test_state_response_context_mode_auto_low_crosses_the_wire(tmp_path, monkeyp
     payload = _api_state_payload(tmp_path, monkeypatch)
     assert payload["context_mode_auto_low"] is False
     assert payload["context_mode"] == "max"
-
-
-def test_owner_scope_review_floor_deprecation_notice_crosses_the_wire(tmp_path, monkeypatch):
-    """The deprecated floor endpoint must SAY so on the wire, and match its frozen contract.
-
-    The write is still accepted and stored (an owner customization is never destroyed), but
-    enforcement now follows the owner-only context mode, so the response carries a notice naming
-    the control that actually decides. An empty or missing notice is a silent lie to the owner.
-    """
-    import json
-
-    from starlette.applications import Starlette
-    from starlette.routing import Route
-    from starlette.testclient import TestClient
-
-    from ouroboros import config as cfg
-    from ouroboros.gateway.contracts import OwnerScopeReviewFloorResponse
-    from ouroboros.gateway.settings import api_owner_scope_review_floor
-
-    settings_path = tmp_path / "settings.json"
-    settings_path.write_text(json.dumps({"TOTAL_BUDGET": "10"}), encoding="utf-8")
-    monkeypatch.setattr(cfg, "SETTINGS_PATH", settings_path)
-    monkeypatch.setattr(cfg, "DATA_DIR", tmp_path)
-
-    app = Starlette(routes=[
-        Route("/api/owner/scope-review-floor", endpoint=api_owner_scope_review_floor, methods=["POST"]),
-    ])
-    app.state.drive_root = tmp_path
-    response = TestClient(app).post("/api/owner/scope-review-floor", json={"floor": "advisory"})
-
-    assert response.status_code == 200, response.text
-    payload = response.json()
-    assert set(payload) == set(OwnerScopeReviewFloorResponse.__annotations__), (
-        "the emitted scope-review-floor payload drifted from its frozen contract"
-    )
-    assert payload["ok"] is True
-    assert payload["scope_review_floor"] == "advisory"
-    notice = payload["deprecation_notice"]
-    assert isinstance(notice, str) and notice.strip(), "the notice must not cross the wire empty"
-    assert "context mode" in notice.lower(), "the notice must name the control that now decides"
-    # The owner's customization is stored even though it is enforcement-inert.
-    assert json.loads(settings_path.read_text(encoding="utf-8"))["OUROBOROS_SCOPE_REVIEW_FLOOR"] == "advisory"
 
 
 def test_login_job_browser_envelopes_keep_their_required_discriminators():

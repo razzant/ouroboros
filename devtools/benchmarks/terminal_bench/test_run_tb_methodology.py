@@ -7,12 +7,40 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import pathlib
 import subprocess
 
 import pytest
 
 from devtools.benchmarks.terminal_bench import run_tb
+
+
+@pytest.fixture(autouse=True)
+def _hermetic_process_environment():
+    """`run_tb.apply_all_model` (and `main --all-model` through it) writes the
+    fixed-model contract into `os.environ` directly — the launcher's real
+    behaviour, kept. Under xdist that leaked `OUROBOROS_REVIEWER_SLOTS` and the
+    forwarded slot keys into every later test of the same worker (the
+    `benchmark-scope-1` contamination class). Every test here runs on a
+    snapshot of the environment that is restored afterwards, whatever it wrote —
+    and starts WITHOUT the operator shell's reviewer panel or legacy comma-list
+    keys, in the spirit of tests/conftest.py's
+    `_scrub_inherited_subagent_selection` but with a deliberately different key
+    set: conftest drops the subagent roster, the account pin and the structured
+    panel; this suite reads BOTH panel forms, so it drops the structured panel
+    AND the legacy comma-list keys (`OUROBOROS_REVIEW_MODELS`,
+    `OUROBOROS_SCOPE_REVIEW_MODELS`, `OUROBOROS_SCOPE_REVIEW_MODEL`). A
+    panel-reading test here is hermetic against the shell either way."""
+    saved = dict(os.environ)
+    for key in ("OUROBOROS_REVIEWER_SLOTS", "OUROBOROS_REVIEW_MODELS",
+                "OUROBOROS_SCOPE_REVIEW_MODELS", "OUROBOROS_SCOPE_REVIEW_MODEL"):
+        os.environ.pop(key, None)
+    try:
+        yield
+    finally:
+        os.environ.clear()
+        os.environ.update(saved)
 
 
 # --- validate_methodology gates -------------------------------------------------
@@ -180,6 +208,29 @@ def test_all_model_actor_is_durable_before_tb_external_probe(tmp_path, monkeypat
     ]) == 0
 
 
+def test_malformed_reviewer_panel_is_a_typed_refusal_on_the_durable_manifest(tmp_path, monkeypatch):
+    """The launcher structural gate: nothing reads files before admission, so a
+    malformed panel (here: in the host settings file the adapter forwards) is
+    refused INSIDE the finalize seam — recorded on the durable manifest with the
+    launcher's own vocabulary, no traceback, and no submission tree built."""
+    model = "openai/gpt-5.5"
+    run_root = tmp_path / "run"
+    settings = tmp_path / "settings.json"
+    settings.write_text(json.dumps({"OUROBOROS_REVIEWER_SLOTS": "{not json"}), encoding="utf-8")
+    _poison_fixed_actor_env(monkeypatch)
+    monkeypatch.delenv("OUROBOROS_REVIEWER_SLOTS", raising=False)
+    monkeypatch.setattr(run_tb, "harbor_version", lambda _binary: "test-harbor")
+    assert run_tb.main([
+        "--model", model, "--allow-low-k", "--allow-dirty-seed",
+        "--run-root", str(run_root), "--submission-root", str(tmp_path / "submission"),
+        "--settings-path", str(settings),
+    ]) == 1
+    manifest_text = (run_root / "run_manifest.json").read_text(encoding="utf-8")
+    assert '"leaderboard_metadata"' in manifest_text and '"refused"' in manifest_text
+    assert "OUROBOROS_REVIEWER_SLOTS" in manifest_text  # the typed reason names the key
+    assert not list((tmp_path / "submission").rglob("metadata.yaml"))
+
+
 def test_adapter_forwards_fixed_model_execution_contract(tmp_path, monkeypatch):
     import devtools.benchmarks.terminal_bench.harbor_installed_agent as tb_agent
 
@@ -312,10 +363,168 @@ def test_metadata_omits_web_search_when_web_disabled(monkeypatch):
     assert not any("web_search" in r for r in roles_off.values())
 
 
+_PANEL = {
+    "triad": [
+        {"slot_id": "t1", "route": {"kind": "api_chat", "target_id": "openai/gpt-5.5"}},
+        {"slot_id": "t2", "route": {"kind": "agent_session", "target_id": "codex=gpt-5.6-sol"}},
+    ],
+    "scope": [{"slot_id": "s1", "route": {"kind": "api_chat", "target_id": "google/gemini-3.5-pro"}}],
+    "advisory": {"enabled": False},
+}
+
+
+def test_metadata_declares_what_the_container_executes_from_the_structured_panel(monkeypatch):
+    """The container runs the structured panel the adapter forwards (operator
+    env, else the host settings file). Inside a TB task nothing commits: the
+    panel reaches the run through task acceptance, which runs every row on its
+    own delivery (owner R2, 2026-09-01) — but a task container structurally
+    cannot run an agent-session row (no harness CLI/daemon, no harness
+    credentials in the forwarded env). Metadata therefore declares the api rows
+    by model id and NEVER the session row (a declared-but-never-run model would
+    misrepresent the submission); the session row is a typed disclosure,
+    `triad_rows_not_executable_in_container`, and neither a stale legacy comma
+    key nor a shipped default the container does not run is declared."""
+
+    monkeypatch.delenv("OUROBOROS_WEBSEARCH_MODEL", raising=False)
+    monkeypatch.setenv("OUROBOROS_REVIEW_MODELS", "foreign/stale-triad")
+    monkeypatch.setenv("OUROBOROS_SCOPE_REVIEW_MODELS", "foreign/stale-scope")
+    monkeypatch.setenv("OUROBOROS_REVIEWER_SLOTS", json.dumps(_PANEL))
+    roles = dict(run_tb._effective_helper_models("openai/gpt-5.5", "google/gemini-3.5-flash", disable_agent_web=True))
+    assert "foreign/stale-triad" not in roles and "foreign/stale-scope" not in roles
+    assert roles["openai/gpt-5.5"] == "agent+commit_review_triad"
+    # The session row is disclosed, not declared: nothing in the container runs it.
+    assert "codex=gpt-5.6-sol" not in roles and not any("agent_session" in r for r in roles.values())
+    assert run_tb.triad_rows_not_executable_in_container("openai/gpt-5.5") == ["codex=gpt-5.6-sol"]
+    # Scope review is a commit-time gate: it never fires inside a task, so its
+    # rows are not declared (the same honesty rule as the advisory).
+    assert "google/gemini-3.5-pro" not in roles and "scope_review" not in roles.values()
+    assert roles["google/gemini-3.5-flash"] == "light_safety_post_task_synthesis"
+    meta = run_tb.leaderboard_metadata(
+        agent_name="Ouroboros", org_name="Ouroboros", model="openai/gpt-5.5",
+        light_model="google/gemini-3.5-flash", disable_agent_web=True,
+    )
+    assert 'model_name: "codex=gpt-5.6-sol"' not in meta and 'model_provider: "codex"' not in meta
+    # The disclosure rides metadata.yaml as a COMMENT (the leaderboard owns its keys)
+    # and run_manifest.json as the typed field.
+    assert '# triad_rows_not_executable_in_container: ["codex=gpt-5.6-sol"]' in meta
+
+    # An all-session triad declares NO reviewer row — and not the shipped defaults
+    # either: nothing in the container runs them.
+    all_session = {**_PANEL, "triad": [_PANEL["triad"][1]]}
+    monkeypatch.setenv("OUROBOROS_REVIEWER_SLOTS", json.dumps(all_session))
+    roles = dict(run_tb._effective_helper_models("openai/gpt-5.5", "google/gemini-3.5-flash", disable_agent_web=True))
+    assert roles["openai/gpt-5.5"] == "agent" and "commit_review_triad" not in "+".join(roles.values())
+    # The shipped triad defaults: ABI 7.0 retired the OUROBOROS_REVIEW_MODELS
+    # settings key, and the launcher itself reads the SSOT list the key used
+    # to be derived from (run_tb._effective_helper_models).
+    from ouroboros.settings_defaults import OPENROUTER_REVIEW_DEFAULTS
+
+    for helper in OPENROUTER_REVIEW_DEFAULTS["triad"]:
+        assert helper not in roles
+    assert run_tb.triad_rows_not_executable_in_container("openai/gpt-5.5") == ["codex=gpt-5.6-sol"]
+
+    # Settings-file fallback, exactly like the container adapter's env → settings order.
+    monkeypatch.delenv("OUROBOROS_REVIEWER_SLOTS", raising=False)
+    settings = {"OUROBOROS_REVIEWER_SLOTS": json.dumps(_PANEL)}
+    roles = dict(run_tb._effective_helper_models(
+        "openai/gpt-5.5", "google/gemini-3.5-flash", disable_agent_web=True, settings=settings))
+    assert roles["openai/gpt-5.5"] == "agent+commit_review_triad" and "foreign/stale-triad" not in roles
+    assert run_tb.triad_rows_not_executable_in_container("openai/gpt-5.5", settings) == ["codex=gpt-5.6-sol"]
+    # No structured panel at all: nothing to disclose.
+    assert run_tb.triad_rows_not_executable_in_container("openai/gpt-5.5") == []
+
+
+_PANEL_WITH_TWO_SESSIONS = {
+    "triad": [
+        {"slot_id": "t1", "route": {"kind": "api_chat", "target_id": "openai/gpt-5.5"}},
+        {"slot_id": "t2", "route": {"kind": "agent_session", "target_id": "codex=gpt-5.6-sol"}},
+        {"slot_id": "t3", "route": {"kind": "agent_session", "target_id": "cursor=openai/gpt-5"}},
+    ],
+    "scope": [{"slot_id": "s1", "route": {"kind": "api_chat", "target_id": "google/gemini-3.5-pro"}}],
+    "advisory": {"enabled": False},
+}
+
+
+def test_run_manifest_and_metadata_carry_the_rows_the_container_cannot_run(tmp_path, monkeypatch, capsys):
+    """End to end through `main` (command generation, no harbor): the durable
+    `run_manifest.json` carries `extra.triad_rows_not_executable_in_container`
+    with the session rows' targets verbatim and in row order — a target with
+    its own `/` (`cursor=openai/gpt-5`) included — `metadata.yaml` carries the
+    same list as a comment while declaring no session row as a model, and
+    (owner R40) admission prints ONE loud stderr warning naming each row and
+    the typed degradation while the run continues."""
+    model = "openai/gpt-5.5"
+    run_root = tmp_path / "run"
+    settings = tmp_path / "settings.json"
+    settings.write_text(
+        json.dumps({"OUROBOROS_REVIEWER_SLOTS": json.dumps(_PANEL_WITH_TWO_SESSIONS)}), encoding="utf-8")
+    monkeypatch.delenv("OUROBOROS_REVIEWER_SLOTS", raising=False)
+    monkeypatch.delenv("OUROBOROS_WEBSEARCH_MODEL", raising=False)
+    monkeypatch.setattr(run_tb, "harbor_version", lambda _binary: "test-harbor")
+    assert run_tb.main([
+        "--model", model, "--allow-low-k", "--allow-dirty-seed",
+        "--run-root", str(run_root), "--submission-root", str(tmp_path / "submission"),
+        "--settings-path", str(settings),
+    ]) == 0
+    manifest = json.loads((run_root / "run_manifest.json").read_text(encoding="utf-8"))
+    extra = manifest["extra"]
+    assert extra["outcome"] == "command_generated"
+    assert extra["triad_rows_not_executable_in_container"] == ["codex=gpt-5.6-sol", "cursor=openai/gpt-5"]
+    meta = pathlib.Path(extra["metadata_yaml"]).read_text(encoding="utf-8")
+    assert '# triad_rows_not_executable_in_container: ["codex=gpt-5.6-sol", "cursor=openai/gpt-5"]' in meta
+    assert 'model_name: "codex' not in meta and 'model_name: "cursor' not in meta
+    assert f'model_name: "{model}"' in meta and 'role: "agent+commit_review_triad"' in meta
+    err = capsys.readouterr().err
+    assert err.count("[run_tb] WARNING: the configured reviewer triad carries agent-session rows") == 1
+    assert "codex=gpt-5.6-sol, cursor=openai/gpt-5" in err and "degrades typed" in err
+    assert "Configure api/native triad rows" in err
+
+
+def test_an_api_only_panel_prints_no_container_warning(tmp_path, monkeypatch, capsys):
+    """The R40 warning is for session rows only: an api-only panel admits silently."""
+    run_root = tmp_path / "run"
+    settings = tmp_path / "settings.json"
+    api_only = {**_PANEL_WITH_TWO_SESSIONS, "triad": [_PANEL_WITH_TWO_SESSIONS["triad"][0]]}
+    settings.write_text(json.dumps({"OUROBOROS_REVIEWER_SLOTS": json.dumps(api_only)}), encoding="utf-8")
+    monkeypatch.delenv("OUROBOROS_REVIEWER_SLOTS", raising=False)
+    monkeypatch.setattr(run_tb, "harbor_version", lambda _binary: "test-harbor")
+    assert run_tb.main([
+        "--model", "openai/gpt-5.5", "--allow-low-k", "--allow-dirty-seed",
+        "--run-root", str(run_root), "--submission-root", str(tmp_path / "submission"),
+        "--settings-path", str(settings),
+    ]) == 0
+    assert "[run_tb] WARNING: the configured reviewer triad" not in capsys.readouterr().err
+    manifest = json.loads((run_root / "run_manifest.json").read_text(encoding="utf-8"))
+    assert manifest["extra"]["triad_rows_not_executable_in_container"] == []
+
+
+def test_metadata_parses_the_panel_under_the_container_roster(monkeypatch):
+    """A subagent-bound row resolves against the CONTAINER's one-model roster
+    (the adapter replaces the operator roster), never the operator shell's."""
+    from devtools.benchmarks.common.model_slots import BENCHMARK_SUBAGENT_ID
+
+    monkeypatch.delenv("OUROBOROS_SUBAGENTS", raising=False)
+    panel = {**_PANEL, "triad": [{"slot_id": "t1", "subagent_id": BENCHMARK_SUBAGENT_ID}]}
+    monkeypatch.setenv("OUROBOROS_REVIEWER_SLOTS", json.dumps(panel))
+    roles = dict(run_tb._effective_helper_models("openai/gpt-5.5", "google/gemini-3.5-flash", disable_agent_web=True))
+    # The benchmark actor row RETRIEVES (native tool rounds) on the measured
+    # model: acceptance executes it, so the measured model carries the triad
+    # role and no shipped default is declared.
+    from ouroboros.settings_defaults import OPENROUTER_REVIEW_DEFAULTS
+
+    assert roles["openai/gpt-5.5"] == "agent+commit_review_triad"
+    assert not any(h in roles for h in OPENROUTER_REVIEW_DEFAULTS["triad"])
+    # An operator-roster reference the container cannot resolve is a typed refusal.
+    monkeypatch.setenv("OUROBOROS_REVIEWER_SLOTS", json.dumps({**panel, "triad": [{"slot_id": "t1", "subagent_id": "operator-critic"}]}))
+    with pytest.raises(ValueError, match="operator-critic"):
+        run_tb._effective_helper_models("openai/gpt-5.5", "google/gemini-3.5-flash", disable_agent_web=True)
+
+
 def test_metadata_never_declares_the_retired_claude_code_role(monkeypatch):
     """The Claude-SDK transport (claude_code_edit) is retired: a stale
     CLAUDE_CODE_MODEL in the operator env must not add a metadata role."""
     monkeypatch.delenv("OUROBOROS_WEBSEARCH_MODEL", raising=False)
+    monkeypatch.delenv("OUROBOROS_REVIEWER_SLOTS", raising=False)
     monkeypatch.setenv("CLAUDE_CODE_MODEL", "anthropic/claude-opus-4.8")
     monkeypatch.setenv("OUROBOROS_SCOPE_REVIEW_MODELS", "google/gemini-3.5-flash")
     monkeypatch.setenv("OUROBOROS_REVIEW_MODELS", "google/gemini-3.5-flash")

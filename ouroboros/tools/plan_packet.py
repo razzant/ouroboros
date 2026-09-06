@@ -42,8 +42,8 @@ _RUBRIC = (
     "irreversibility, external commitments)?",
     "4. Deferrals — is an expensive-to-reverse decision hiding inside `deferred`?",
     "5. Evidence sufficiency — is the attached evidence enough to judge 1–4? If not, ask for "
-    "exactly what is missing with a `need_evidence` finding naming its locator (the host attaches it "
-    "on the next cycle); do not invent a gap.",
+    "exactly what is missing with a `need_evidence` finding naming its locator (the host attaches "
+    "what its evidence policy allows on the next cycle and names every absence); do not invent a gap.",
 )
 
 _BLOCKING_RULE = (
@@ -154,8 +154,10 @@ def build_plan_review_system_prompt(
             "This plan does not touch the Ouroboros system repository; the constitutional pack and "
             "the architecture reference are named on-demand pointers — request either as "
             f"`need_evidence` with locator `{str(bible_locator or 'BIBLE.md').strip()}` or "
-            f"`{str(architecture_locator or 'docs/ARCHITECTURE.md').strip()}` if you need it; the "
-            "host attaches it on the next cycle.\n"
+            f"`{str(architecture_locator or 'docs/ARCHITECTURE.md').strip()}` if you need it, or "
+            "with `::lines=A-B` for one section; the host attaches what its evidence policy "
+            "allows on the next cycle, names every absence, and cuts an over-bound source "
+            "head-first, named `truncated_to_<N>`.\n"
         )
         if bible_nav_map:
             parts.append(f"\n## BIBLE navigation map (pointer, not a copy)\n\n{bible_nav_map}\n")

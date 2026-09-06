@@ -155,10 +155,9 @@ def test_http200_body_rate_limit_blocks_unchecked_after_one_retry(monkeypatch, t
     """THE production shape: HTTP 200, empty content, ``usage['provider_error']``. Nothing
     raises, so an exception-only check would still walk the unparseable-response repair
     path into SAFETY_VIOLATION — this fails with the bug alive even when (a) passes."""
-    import ouroboros.safety as safety
     from ouroboros.safety import check_safety
 
-    monkeypatch.setattr(safety, "update_budget_from_usage", lambda usage: None)
+    monkeypatch.setattr("supervisor.state.update_budget_from_usage", lambda usage: None)
     stub = _ScriptedLLMClient([("", dict(_BODY_RATE_LIMIT_USAGE))])
     _patch_llm_client(monkeypatch, stub)
     ctx = _DriveCtx(tmp_path)
@@ -453,10 +452,9 @@ def test_http200_body_transient_that_is_not_429_still_blocks(monkeypatch, tmp_pa
     """Body lane: only `kind == "rate_limit"` (llm.py assigns it solely to a transient
     body error whose code IS 429) waves through; a body `provider_transient` keeps the
     existing unparseable-response outcome."""
-    import ouroboros.safety as safety
     from ouroboros.safety import check_safety
 
-    monkeypatch.setattr(safety, "update_budget_from_usage", lambda usage: None)
+    monkeypatch.setattr("supervisor.state.update_budget_from_usage", lambda usage: None)
     usage = {"provider_error": {"code": "502", "type": "server_error",
                                 "message": "Bad gateway", "kind": "provider_transient"},
              "prompt_tokens": 5, "completion_tokens": 0, "cost": 0.0}
@@ -684,3 +682,98 @@ def test_backoff_that_consumes_the_deadline_permits_no_second_attempt(monkeypatc
     assert len(stub.calls) == 1, "the sleep spent the deadline; no second paid call"
     assert _read_events(ctx, "safety_check_rate_limited")[-1]["action"] == \
         "blocked_unchecked_deadline_expired"
+
+
+# ---------------------------------------------------------------------------
+# Bounded SUBJECT budget: an unreviewable call is refused, never truncated
+# ---------------------------------------------------------------------------
+
+
+class _MustNotBeCalled:
+    """LLMClient stand-in for the over-budget path: any provider call is a failure."""
+
+    def chat(self, **kwargs):  # pragma: no cover - reaching this IS the failure
+        raise AssertionError("the safety model must not be called for an over-budget subject")
+
+
+def test_oversized_subject_blocks_without_a_model_call(monkeypatch, tmp_path):
+    """A subject above ``_SAFETY_SUBJECT_CHAR_BUDGET`` is refused fail-closed BEFORE
+    any provider call: never truncated (the reviewer would miss the tail), never
+    executed unchecked, and classified as a policy denial (first-line ``_BLOCKED``
+    marker), not as SAFETY_VIOLATION — the command was not judged, only its size."""
+    import ouroboros.safety as safety
+    from ouroboros.safety import check_safety
+
+    _patch_llm_client(monkeypatch, _MustNotBeCalled())
+    ctx = _DriveCtx(tmp_path)
+    huge = "x" * (safety._SAFETY_SUBJECT_CHAR_BUDGET + 1)
+
+    ok, msg = check_safety("create_github_issue", {"title": huge}, ctx=ctx)
+
+    assert ok is False, "an unreviewable guarded call must not execute"
+    assert msg.splitlines()[0].startswith("⚠️ SAFETY_SUBJECT_TOO_LARGE_BLOCKED:")
+    assert "SAFETY_VIOLATION" not in msg
+    assert "split" in msg, "the refusal carries the working alternative"
+    # The first version of this refusal told the agent to stage the body with
+    # write_file (a POLICY_SKIP tool) and run the staged file. That is a route
+    # around the supervisor: it reviews the call it is handed, and a script run
+    # from a path hands it a path, not the bytes. The remediation must not name
+    # it, and the earlier test asserting "write_file" in msg pinned the defect.
+    assert "write_file" not in msg
+    assert "staged" not in msg
+
+    rows = _read_events(ctx, "safety_subject_too_large")
+    assert len(rows) == 1
+    assert rows[0]["tool"] == "create_github_issue"
+    assert rows[0]["subject_chars"] > safety._SAFETY_SUBJECT_CHAR_BUDGET
+    assert rows[0]["budget_chars"] == safety._SAFETY_SUBJECT_CHAR_BUDGET
+
+
+def test_non_ascii_subject_near_cap_is_not_inflated(monkeypatch, tmp_path):
+    """``ensure_ascii=False`` keeps serialized length ≈ input length: a near-cap
+    Cyrillic payload must reach the model instead of being refused through the
+    6x ``\\uXXXX`` inflation the default serialization would apply — otherwise
+    a script the budget admits in ASCII would be refused for its Cyrillic twin."""
+    from ouroboros.safety import check_safety
+
+    stub = _ScriptedLLMClient([
+        (json.dumps({"status": "SAFE"}),
+         {"prompt_tokens": 1, "completion_tokens": 1, "cost": 0.0}),
+    ])
+    _patch_llm_client(monkeypatch, stub)
+    ctx = _DriveCtx(tmp_path)
+    big_cyrillic = "ы" * 200_000  # inflated 6x this would blow the 250k budget
+
+    ok, _msg = check_safety("create_github_issue", {"title": big_cyrillic}, ctx=ctx)
+
+    assert ok is True
+    assert len(stub.calls) == 1, "the near-cap non-ASCII subject reached the model"
+    assert not _read_events(ctx, "safety_subject_too_large")
+
+
+def test_lone_surrogate_subject_serializes_without_exploding():
+    """A validly parsed ``\\ud800`` escape in tool args must not crash the
+    UTF-8 provider send downstream: the rendered subject substitutes it."""
+    from ouroboros.safety import _render_subject_json
+
+    rendered = _render_subject_json({"title": "bad \ud800 surrogate"})
+
+    rendered.encode("utf-8")  # must not raise
+    assert "bad" in rendered
+
+
+def test_safe_subject_whitelist_stays_llm_free_for_oversized_calls(monkeypatch, tmp_path):
+    """INTENTIONAL pass-through pin: a deterministic safe-subject call
+    (``run_command`` with a whitelisted argv head) never builds a check prompt,
+    so the subject budget does not apply — there is nothing to inflate. The
+    budget governs only subjects that would ENTER the LLM check."""
+    from ouroboros.safety import check_safety
+
+    _patch_llm_client(monkeypatch, _MustNotBeCalled())
+    ctx = _DriveCtx(tmp_path)
+
+    ok, msg = check_safety(
+        "run_command", {"cmd": ["pytest", "-k", "x" * 300_000]}, ctx=ctx)
+
+    assert ok is True and msg == ""
+    assert not _read_events(ctx, "safety_subject_too_large")

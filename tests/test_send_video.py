@@ -2,7 +2,7 @@
 import base64
 import types
 
-from ouroboros.tools.core import _send_video, _detect_video_mime, _MAX_VIDEO_FILE_BYTES
+from ouroboros.tools.core_artifacts import _send_video, _detect_video_mime, _MAX_VIDEO_FILE_BYTES
 
 
 def _make_ctx(chat_id=123):

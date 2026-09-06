@@ -460,7 +460,12 @@ def _advanced_registry(tmp_path, monkeypatch) -> tuple[ToolRegistry, ToolContext
     monkeypatch.setattr("ouroboros.safety.check_safety", lambda *a, **k: (True, ""))
     registry = ToolRegistry(repo_dir=ctx.repo_dir, drive_root=ctx.drive_root)
     registry.set_context(ctx)
-    monkeypatch.setattr(registry, "_run_shell_safety_check", lambda *a, **k: "")
+    # Campaign owner: the safety check is a registry_guard_process module
+    # function whose no-block value is None (upstream's method returned "").
+    monkeypatch.setattr(
+        "ouroboros.tools.registry_guard_process._run_shell_safety_check",
+        lambda *a, **k: None,
+    )
     return registry, ctx
 
 
@@ -477,7 +482,9 @@ def test_registry_guard_sees_family_stable_argv_and_handler_gets_rewrite(
     """The guard inspects the ORIGINAL bare argv (the node step runs post-gates);
     the handler executes the resolver's substitution, which classifies into the
     SAME interpreter family — the disclosed guard/handler delta contract."""
-    import ouroboros.tools.registry as registry_module
+    # Campaign call site: registry_core reads the guard-args builder through
+    # the shell_guards module (upstream read it off the registry facade).
+    import ouroboros.tools.shell_guards as registry_module
 
     bin_dir = tmp_path / "bin"
     dead = _stub(bin_dir / "node", "exit 1\n")
@@ -503,7 +510,10 @@ def test_registry_guard_sees_family_stable_argv_and_handler_gets_rewrite(
         return "ok"
 
     monkeypatch.setattr(registry_module, "process_shell_guard_args", capture_guard)
-    registry._entries["run_command"].handler = capture_handler
+    import dataclasses
+    registry._entries["run_command"] = dataclasses.replace(
+        registry._entries["run_command"], handler=capture_handler,
+    )
 
     result = registry.execute("run_command", {"cmd": ["node", "--version"]})
 
@@ -538,7 +548,10 @@ def test_registry_healthy_path_handler_argv_is_untouched(tmp_path, monkeypatch, 
         observed["attested"] = getattr(_ctx, "_active_interpreter_resolution", None)
         return "ok"
 
-    registry._entries["run_command"].handler = handler
+    import dataclasses
+    registry._entries["run_command"] = dataclasses.replace(
+        registry._entries["run_command"], handler=handler,
+    )
 
     assert registry.execute("run_command", {"cmd": ["node", "--version"]}) == "ok"
     assert observed["cmd"] == ["node", "--version"]

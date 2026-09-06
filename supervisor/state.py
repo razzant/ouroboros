@@ -11,17 +11,23 @@ import uuid
 from typing import Any, Dict, List, Optional
 
 from ouroboros.config import DATA_DIR
+from ouroboros.contracts.schema_versions import SCHEMA_VERSION_KEY
 from ouroboros.platform_layer import acquire_exclusive_file_lock, release_exclusive_file_lock
-from ouroboros.utils import append_jsonl, utc_now_iso
+from ouroboros.utils import append_jsonl, assert_test_data_path, utc_now_iso, write_bytes_atomic  # noqa: F401 -- assert_test_data_path re-exported: the guard moved to the utils leaf so append_jsonl shares it; state.assert_test_data_path callers keep working
 
 log = logging.getLogger(__name__)
+
+# ABI 7.0 (Q8=B): the durable ``state.json`` snapshot names its schema on
+# every write. Stamp-on-write ONLY — readers do not require the stamp (no
+# compat branching), so a pre-7.0 file and a post-rollback stamped file both
+# load unchanged.
+STATE_SCHEMA_VERSION = 1
 
 
 DRIVE_ROOT: pathlib.Path = pathlib.Path(DATA_DIR)
 STATE_PATH: pathlib.Path = DRIVE_ROOT / "state" / "state.json"
 STATE_LAST_GOOD_PATH: pathlib.Path = DRIVE_ROOT / "state" / "state.last_good.json"
 STATE_LOCK_PATH: pathlib.Path = DRIVE_ROOT / "locks" / "state.lock"
-QUEUE_SNAPSHOT_PATH: pathlib.Path = DRIVE_ROOT / "state" / "queue_snapshot.json"
 
 # Explicit marker a benchmark/evolution driver writes into its THROWAWAY data root. A live
 # data root (the default ~/Ouroboros/data OR a custom/Drive-backed OUROBOROS_DATA_DIR) never
@@ -30,47 +36,24 @@ QUEUE_SNAPSHOT_PATH: pathlib.Path = DRIVE_ROOT / "state" / "queue_snapshot.json"
 ISOLATED_BENCHMARK_SENTINEL = ".ouroboros_isolated_benchmark"
 
 
-def assert_test_data_path(path: pathlib.Path) -> None:
-    """Fail closed when pytest resolves a writer into the live data tree."""
-    if os.environ.get("OUROBOROS_PYTEST_ACTIVE") != "1":
-        return
-    if os.environ.get("OUROBOROS_ALLOW_LIVE_DATA_TESTS") == "1":
-        return
-    roots = {pathlib.Path.home() / "Ouroboros" / "data"}
-    configured = str(os.environ.get("OUROBOROS_TEST_LIVE_DATA_ROOT") or "").strip()
-    if configured:
-        roots.add(pathlib.Path(configured))
-    target = pathlib.Path(path).resolve(strict=False)
-    for root in roots:
-        try:
-            target.relative_to(root.resolve(strict=False))
-        except ValueError:
-            continue
-        raise RuntimeError(f"PYTEST_LIVE_DATA_WRITE_BLOCKED: {target}")
-
-
 def init(drive_root: pathlib.Path, total_budget_limit: float = 0.0) -> None:
-    global DRIVE_ROOT, STATE_PATH, STATE_LAST_GOOD_PATH, STATE_LOCK_PATH, QUEUE_SNAPSHOT_PATH
+    global DRIVE_ROOT, STATE_PATH, STATE_LAST_GOOD_PATH, STATE_LOCK_PATH
     DRIVE_ROOT = drive_root
     STATE_PATH = drive_root / "state" / "state.json"
     STATE_LAST_GOOD_PATH = drive_root / "state" / "state.last_good.json"
     STATE_LOCK_PATH = drive_root / "locks" / "state.lock"
-    QUEUE_SNAPSHOT_PATH = drive_root / "state" / "queue_snapshot.json"
     set_budget_limit(total_budget_limit)
 
 
 def atomic_write_text(path: pathlib.Path, content: str) -> None:
-    assert_test_data_path(path)
-    path.parent.mkdir(parents=True, exist_ok=True)
-    tmp = path.with_name(f".{path.name}.tmp.{uuid.uuid4().hex}")
-    fd = os.open(str(tmp), os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o644)
-    try:
-        data = content.encode("utf-8")
-        os.write(fd, data)
-        os.fsync(fd)
-    finally:
-        os.close(fd)
-    os.replace(str(tmp), str(path))
+    """Durable state write: byte-exact, fsync'd, every byte landed.
+
+    Rides the utils atomic SSOT — its write loop survives a short ``os.write``
+    (the old single call could publish a truncated ``state.json`` behind a
+    successful rename), and the pytest live-data guard now sits on that same
+    seam, so every writer through it is guarded rather than this one alone.
+    """
+    write_bytes_atomic(path, content.encode("utf-8"), fsync=True)
 
 
 def json_load_file(path: pathlib.Path) -> Optional[Dict[str, Any]]:
@@ -169,6 +152,7 @@ def _load_state_unlocked() -> Dict[str, Any]:
 def _save_state_unlocked(st: Dict[str, Any]) -> None:
     """Save state; caller must hold STATE_LOCK."""
     st = ensure_state_defaults(st)
+    st[SCHEMA_VERSION_KEY] = STATE_SCHEMA_VERSION
     payload = json.dumps(st, ensure_ascii=False, indent=2)
     atomic_write_text(STATE_PATH, payload)
     atomic_write_text(STATE_LAST_GOOD_PATH, payload)
@@ -707,7 +691,7 @@ def reconstruct_task_cost(
     want = str(task_id or "")
     if not want:
         projection = {
-            "cost_accounting_status": "available", "cost_usd": 0.0,
+            "cost_accounting_status": "available", "accounted_upper_bound_usd": 0.0,
             "total_rounds": 0, "prompt_tokens": 0, "completion_tokens": 0,
             "cost_final": True, "reserved_usd": 0.0,
             "unresolved_upper_bound_usd": 0.0, "unknown_unmetered": 0,
@@ -723,7 +707,7 @@ def reconstruct_task_cost(
             bucket = usage_breakdown(authority_root, task_id=want)
             projection = {
                 "cost_accounting_status": "available",
-                "cost_usd": (
+                "accounted_upper_bound_usd": (
                     round(amount, 6)
                     if (amount := honest_accounted_amount(bucket)) is not None
                     else None
@@ -746,16 +730,17 @@ def reconstruct_task_cost(
             projection = {
                 "cost_accounting_status": "unavailable", "cost_final": False,
                 "cost_accounting_error": "ledger_unavailable",
-                "cost_usd": None, "total_rounds": None,
+                "accounted_upper_bound_usd": None, "total_rounds": None,
                 "prompt_tokens": None, "completion_tokens": None,
                 "reserved_usd": None, "unresolved_upper_bound_usd": None,
                 "unknown_unmetered": None, "non_final_rows": None,
                 "ledger_integrity_degraded": True,
             }
     if fields:
-        # SSOT cost naming (C2): the additive honest name rides beside the
-        # deprecated `cost_usd` alias with the same value on every field
-        # projection this authority hands out.
+        # SSOT cost naming (C2/ABI-3): the authority assembles the honest
+        # name directly (Ф3.1 fix-round — no producer touches the retired
+        # alias); the seam stays as the idempotent amount-normalization and
+        # would strip any retired key a future mutation leaked.
         from ouroboros.cost_projection import with_cost_aliases
 
         return with_cost_aliases(projection)
@@ -764,13 +749,13 @@ def reconstruct_task_cost(
 
         raise UsageAccountingError(f"task cost authority unavailable for {task_id}")
     return (
-        float(projection["cost_usd"]), int(projection["total_rounds"]),
+        float(projection["accounted_upper_bound_usd"]), int(projection["total_rounds"]),
         int(projection["prompt_tokens"]), int(projection["completion_tokens"]),
     )
 
 
-def status_text(workers_dict: Dict[int, Any], pending_list: list, running_dict: Dict[str, Dict[str, Any]],
-                soft_timeout_sec: int, hard_timeout_sec: int) -> str:
+def status_text(workers_dict: Dict[int, Any], pending_list: list,
+                running_dict: Dict[str, Dict[str, Any]]) -> str:
     """Build status text from worker and queue state."""
     st = load_state()
     now = time.time()
@@ -907,11 +892,7 @@ def status_text(workers_dict: Dict[int, Any], pending_list: list, running_dict: 
         + f"enabled={int(bool(st.get('evolution_mode_enabled')))}, "
         + f"cycle={int(st.get('evolution_cycle') or 0)}")
     lines.append(f"last_owner_message_at: {st.get('last_owner_message_at') or '-'}")
-    lines.append(
-        "legacy_timeouts_ignored: "
-        f"soft={soft_timeout_sec}s, hard={hard_timeout_sec}s; "
-        "active_liveness=idle+deadline+absolute_ceiling+reaper"
-    )
+    lines.append("active_liveness: idle+deadline+absolute_ceiling+reaper")
     return "\n".join(lines)
 
 

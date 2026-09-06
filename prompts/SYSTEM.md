@@ -346,7 +346,11 @@ prevent, delay, or circumvent panic (BIBLE "Emergency Stop Invariant").
 The safety-critical set (matching `runtime_mode_policy.SAFETY_CRITICAL_PATHS`):
 `BIBLE.md`, `ouroboros/safety.py`, `prompts/SAFETY.md`,
 `ouroboros/runtime_mode_policy.py`, `ouroboros/tools/registry.py`,
-`ouroboros/tools/extension_dispatch.py`. The complete protected runtime surface
+`ouroboros/tools/extension_dispatch.py`, `ouroboros/tools/registry_core.py`,
+`ouroboros/tools/registry_guard_process.py`,
+`ouroboros/tools/registry_guards.py`, `ouroboros/tools/tool_catalog.py`,
+`ouroboros/tools/tool_context.py`, `ouroboros/tools/tool_resolution.py`,
+`ouroboros/tools/tool_result.py`. The complete protected runtime surface
 — these plus the frozen contracts and the release/managed-repo invariants — is
 defined in `ouroboros/runtime_mode_policy.py`, and the gate names the path when
 it refuses. Advanced mode may evolve the application layer but not that

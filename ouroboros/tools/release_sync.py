@@ -10,7 +10,7 @@ from __future__ import annotations
 
 import re
 from pathlib import Path
-from typing import List, Tuple
+from typing import List, NamedTuple, Optional, Tuple
 
 _MAX_MAJOR = 2
 _MAX_MINOR = 5
@@ -23,7 +23,10 @@ _NUMERIC_CLAIM_RE = re.compile(
 )
 
 # Author-facing pre-release suffix; pyproject gets the PEP 440-normalized form.
-_PRE_SUFFIX = r'(?:-?(?:rc|alpha|beta|a|b)\.?\d+)?'
+# The canonical author-facing pre-release grammar, shared by every surface that has
+# to recognise a release version (update_letter reads README rows with it too).
+PRE_SUFFIX = r'(?:-?(?:rc|alpha|beta|a|b)\.?\d+)?'
+_PRE_SUFFIX = PRE_SUFFIX
 
 _VERSION_RE = re.compile(r'^\d+\.\d+\.\d+' + _PRE_SUFFIX + r'$', re.IGNORECASE)
 
@@ -55,6 +58,21 @@ _ARCH_HEADER_RE = re.compile(
     re.MULTILINE | re.IGNORECASE,
 )
 
+# web/package-lock.json (npm lockfileVersion 3) repeats the package version twice at the
+# top: the root object and its packages[""] entry; both are carriers (npm ci tolerates a
+# drift, the P9 "carriers in sync" contract does not).
+# The carrier SPAN (merge/rebase policy) is the lockfile HEADER as one anchor: the root object
+# up to the packages[""] version, so both root entries fall inside a single span.
+_WEB_LOCK_SPAN_RE = re.compile(
+    r'\A\{\s*"name"\s*:\s*"[^"\n]*",\s*"version"\s*:\s*"[^"\n]*",.*?"packages"\s*:\s*\{\s*""\s*:\s*\{'
+    r'\s*"name"\s*:\s*"[^"\n]*",\s*"version"\s*:\s*"[^"\n]*"',
+    re.DOTALL,
+)
+_WEB_LOCK_VERSION_RE = re.compile(
+    r'(^\{\s*"name"\s*:\s*"[^"\n]*",\s*"version"\s*:\s*")([^"\n]*)(")'
+    r'|(^\s*""\s*:\s*\{\s*"name"\s*:\s*"[^"\n]*",\s*"version"\s*:\s*")([^"\n]*)(")',
+    re.MULTILINE,
+)
 _UV_LOCK_ROOT_RE = re.compile(
     r'^(\[\[package\]\]\nname = "ouroboros"\nversion = ")([^"]+)'
     r'("\nsource = \{ editable = "\." \})',
@@ -95,6 +113,183 @@ def release_asset_download_url(
         f"https://github.com/{repository}/releases/download/v{normalized_version}/"
         f"{release_asset_name(proof_id, normalized_version)}"
     )
+
+
+class VersionCarrierSpan(NamedTuple):
+    """One version-carrying span in one release-carrier file.
+
+    ``pattern`` must match EXACTLY ONCE in a well-formed copy of ``path``:
+    zero matches is a malformed anchor, more than one is a duplicate anchor.
+    """
+
+    carrier_id: str
+    path: str
+    pattern: "re.Pattern[str]"
+
+
+def _install_page_spans(tag: str, path: str) -> Tuple[VersionCarrierSpan, ...]:
+    """Carrier spans for one public install page: every anchor tag owned by
+    the release projection (``data-release-download``), derived from
+    ``RELEASE_ASSET_TEMPLATES`` so a new installer automatically gets a span.
+
+    ``macos-arm64`` appears twice by design (the platform button and the
+    quick-start step); the pair disambiguates on the step's literal ``Click ``
+    prefix. A page restructure that breaks either anchor degrades the file to
+    the ordinary assisted path (malformed/duplicate anchor) — never a guess."""
+    spans: List[VersionCarrierSpan] = []
+    for proof_id in RELEASE_ASSET_TEMPLATES:
+        if proof_id == "macos-arm64":
+            spans.append(VersionCarrierSpan(
+                f"{tag}_download_{proof_id}_button", path,
+                re.compile(r'(?<!Click )<a data-release-download="macos-arm64"[^>]*>'),
+            ))
+            spans.append(VersionCarrierSpan(
+                f"{tag}_download_{proof_id}_step", path,
+                re.compile(r'(?<=Click )<a data-release-download="macos-arm64"[^>]*>'),
+            ))
+        else:
+            spans.append(VersionCarrierSpan(
+                f"{tag}_download_{proof_id}", path,
+                re.compile(rf'<a data-release-download="{re.escape(proof_id)}"[^>]*>'),
+            ))
+    return tuple(spans)
+
+
+# Version-carrier span descriptors — the SSOT the carrier-aware update engine
+# reads (owner-ratified: spec §1.9-10, batch №8 answer 6=A; mandatory v7next
+# return, owner answers 5.12-5.14=A). The managed-update resolver
+# (supervisor/update_carriers.py) and the tactical-rebase helper
+# (scripts/carrier_rebase_helper.py) resolve merge conflicts INSIDE these spans
+# by span substitution; a malformed or duplicate anchor degrades the file to
+# the ordinary assisted-conflict path (never a crash, never silent adoption),
+# and a conflict OUTSIDE a span keeps the file an ordinary conflict. The span
+# set is cut from THIS tree's carrier inventory — everything
+# ``sync_release_metadata`` writes and ``version_carrier_desyncs`` checks: the
+# classic carriers, README's badge + Version History + direct-download
+# reference block, uv.lock's editable root package, and the release-projection
+# anchors of the two public install pages.
+VERSION_CARRIER_SPANS: Tuple[VersionCarrierSpan, ...] = (
+    VersionCarrierSpan(
+        "version_file", "VERSION",
+        re.compile(r'\A\d+\.\d+\.\d+' + _PRE_SUFFIX + r'\n?\Z', re.IGNORECASE),
+    ),
+    VersionCarrierSpan(
+        "pyproject_version", "pyproject.toml",
+        re.compile(r'^version\s*=\s*"[^"\n]*"', re.MULTILINE),
+    ),
+    VersionCarrierSpan(
+        "web_package_version", "web/package.json",
+        re.compile(r'^\s*"version"\s*:\s*"[^"\n]*"', re.MULTILINE),
+    ),
+    VersionCarrierSpan(
+        "web_package_lock_version", "web/package-lock.json", _WEB_LOCK_SPAN_RE,
+    ),
+    VersionCarrierSpan(
+        "gateway_contract_version", "web/modules/api_types.js",
+        re.compile(r"GATEWAY_CONTRACT_VERSION\s*=\s*'[^'\n]*'"),
+    ),
+    VersionCarrierSpan("readme_badge", "README.md", _README_BADGE_RE),
+    VersionCarrierSpan(
+        "readme_history", "README.md",
+        re.compile(
+            r'(?:^\|\s*\d+\.\d+\.\d+' + _PRE_SUFFIX + r'\s*\|.*(?:\n|\Z))+',
+            re.MULTILINE | re.IGNORECASE,
+        ),
+    ),
+    # The contiguous named-reference block the direct-download projection
+    # rewrites ([download-<proof_id>]: <url>) — a release-owned span like the
+    # badge, so a version-bump conflict there resolves by span policy.
+    VersionCarrierSpan(
+        "readme_download_refs", "README.md",
+        re.compile(r'(?:^\[download-[a-z0-9_-]+\]:[^\n]*(?:\n|\Z))+', re.MULTILINE),
+    ),
+    VersionCarrierSpan("architecture_header", "docs/ARCHITECTURE.md", _ARCH_HEADER_RE),
+    # uv.lock mirrors the editable root package version (ARCHITECTURE "Version
+    # carriers"); the descriptor rides the same structural regex sync_version
+    # already writes through, so a managed-update or tactical-rebase conflict in
+    # this section resolves by span policy instead of falling to assisted.
+    VersionCarrierSpan("uv_lock_root_package", "uv.lock", _UV_LOCK_ROOT_RE),
+) + _install_page_spans(
+    "site_install", "site/install/index.html"
+) + _install_page_spans(
+    "docs_install", "docs/install/index.html"
+)
+
+CARRIER_SPAN_PATHS = frozenset(span.path for span in VERSION_CARRIER_SPANS)
+
+
+def carrier_spans_for(path: str) -> Tuple[VersionCarrierSpan, ...]:
+    """Return every declared carrier span for a repo-relative path ('' -> none)."""
+    normalized = str(path or "").replace("\\", "/")
+    if normalized.startswith("./"):
+        normalized = normalized[2:]
+    return tuple(span for span in VERSION_CARRIER_SPANS if span.path == normalized)
+
+
+def locate_carrier_span(
+    text: str, span: VersionCarrierSpan
+) -> Tuple[str, Optional[Tuple[int, int]]]:
+    """Locate one carrier span in *text*.
+
+    Returns ``("ok", (start, end))`` for exactly one match,
+    ``("malformed_anchor", None)`` for zero and ``("duplicate_anchor", None)``
+    for several — the two degradation reasons the update engine surfaces.
+    """
+    matches = span.pattern.finditer(str(text or ""))
+    first = next(matches, None)
+    if first is None:
+        return "malformed_anchor", None
+    if next(matches, None) is not None:
+        return "duplicate_anchor", None
+    return "ok", (first.start(), first.end())
+
+
+def substitute_carrier_spans(
+    text: str, spans: Tuple[VersionCarrierSpan, ...], preferred_text: str
+) -> Tuple[Optional[str], str]:
+    """Replace every carrier span in *text* with the preferred side's span.
+
+    The ONE span-substitution primitive over the descriptors above, shared by
+    the managed-update conflict resolver (``supervisor/update_carriers.py``)
+    and the commit-review pack cut (``carrier_only_change``). Returns
+    ``(substituted_text, "")`` or ``(None, reason)`` when any anchor is
+    malformed/duplicate in either text or the spans overlap — the degradation
+    reasons the update engine surfaces (assisted path, never a guess)."""
+    replacements: List[Tuple[Tuple[int, int], str]] = []
+    for span in spans:
+        preferred_status, preferred_loc = locate_carrier_span(preferred_text, span)
+        if preferred_status != "ok" or preferred_loc is None:
+            return None, f"{preferred_status}:{span.carrier_id}:preferred_side"
+        status, loc = locate_carrier_span(text, span)
+        if status != "ok" or loc is None:
+            return None, f"{status}:{span.carrier_id}"
+        replacements.append((loc, preferred_text[preferred_loc[0]:preferred_loc[1]]))
+    ordered = sorted(replacements, key=lambda item: item[0][0], reverse=True)
+    previous_start: Optional[int] = None
+    for (start, end), _replacement in ordered:
+        if previous_start is not None and end > previous_start:
+            return None, "overlapping_spans"
+        previous_start = start
+    substituted = text
+    for (start, end), replacement in ordered:
+        substituted = substituted[:start] + replacement + substituted[end:]
+    return substituted, ""
+
+
+def carrier_only_change(before_text: str, after_text: str, path: str) -> bool:
+    """True iff *path* is a declared release carrier and *after_text* differs
+    from *before_text* ONLY inside its declared version spans.
+
+    Putting the ``before`` spans back into ``after`` must reproduce ``before``
+    byte-for-byte; a non-carrier path, a malformed or duplicate anchor on
+    either side (a new or deleted file included) and any edit outside the
+    spans all answer False — the caller then keeps the file's full text."""
+    spans = carrier_spans_for(path)
+    if not spans:
+        return False
+    substituted, _reason = substitute_carrier_spans(
+        str(after_text or ""), spans, str(before_text or ""))
+    return substituted is not None and substituted == str(before_text or "")
 
 
 def _sync_readme_download_urls(text: str, version: str) -> str:
@@ -249,6 +444,7 @@ def version_carrier_desyncs(
     pyproject_text: str = "",
     uv_lock_text: str = "",
     web_package_text: str = "",
+    web_package_lock_text: str = "",
     readme_text: str = "",
     arch_text: str = "",
     api_types_text: str = "",
@@ -276,6 +472,11 @@ def version_carrier_desyncs(
         match = re.search(r'"version"\s*:\s*"([^"]+)"', web_package_text)
         if not match or match.group(1).strip() != version:
             desync.append(f'web/package.json (expected "version": "{version}")' if detailed else "web/package.json")
+    if web_package_lock_text:
+        found = [m.group(2) or m.group(5) for m in _WEB_LOCK_VERSION_RE.finditer(web_package_lock_text)]
+        if len(found) != 2 or any(v.strip() != version for v in found):
+            desync.append(f'web/package-lock.json (expected both root "version" entries = "{version}")'
+                          if detailed else "web/package-lock.json")
     if readme_text:
         badge_token = f"version-{_shields_escape(version)}-green"
         if extract_readme_badge_version(readme_text) != version or badge_token not in readme_text:
@@ -325,6 +526,7 @@ def check_worktree_version_sync(repo_dir) -> str:
             pyproject_text=_read("pyproject.toml"),
             uv_lock_text=_read("uv.lock"),
             web_package_text=_read("web/package.json"),
+            web_package_lock_text=_read("web/package-lock.json"),
             readme_text=_read("README.md"),
             arch_text=_read("docs/ARCHITECTURE.md"),
             api_types_text=_read("web/modules/api_types.js"),
@@ -393,6 +595,18 @@ def sync_release_metadata(repo_dir: str) -> List[str]:
         if new_text != text:
             web_package.write_text(new_text, encoding="utf-8")
             changed.append("web/package.json")
+
+    web_lock = root / "web" / "package-lock.json"
+    if web_lock.exists():
+        text = web_lock.read_text(encoding="utf-8")
+        new_text = _WEB_LOCK_VERSION_RE.sub(
+            lambda m: (f"{m.group(1)}{version}{m.group(3)}" if m.group(1) is not None
+                       else f"{m.group(4)}{version}{m.group(6)}"),
+            text,
+        )
+        if new_text != text:
+            web_lock.write_text(new_text, encoding="utf-8")
+            changed.append("web/package-lock.json")
 
     api_types = root / "web" / "modules" / "api_types.js"
     if api_types.exists():

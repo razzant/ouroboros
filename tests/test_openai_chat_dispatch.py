@@ -9,7 +9,7 @@ from types import SimpleNamespace
 import pytest
 
 import ouroboros.context_compaction as context_compaction
-import ouroboros.llm as llm_module
+import ouroboros.llm_fallback as llm_fallback
 import ouroboros.openai_chat_dispatch as dispatch
 from ouroboros.context_fit import estimate_context_prompt_tokens
 from ouroboros.llm import LLMClient
@@ -202,9 +202,12 @@ def _install_transport(monkeypatch, client, responses, *, no_proxy=False, max_se
         )
         return response
 
-    monkeypatch.setattr(llm_module, "_execute_candidate", execute)
+    # The v7 split moved the remote send drivers into llm_fallback.py, which is
+    # where `_execute_candidate` / `last_physical_attempt_capture` are read on
+    # the chat path; patching the names llm.py merely re-exports would be dead.
+    monkeypatch.setattr(llm_fallback, "_execute_candidate", execute)
     monkeypatch.setattr(
-        llm_module,
+        llm_fallback,
         "last_physical_attempt_capture",
         lambda: capture_holder["value"],
     )
@@ -590,6 +593,13 @@ class _FakeTools:
     def execute(self, name, args):
         self.calls.append((name, args))
         return "executed"
+
+    def execute_result(self, name, args):
+        # The loop reads the typed dispatch seam (D02); this fake adapts its
+        # text exactly the way the real registry adapts a legacy handler.
+        from ouroboros.tools.tool_result import LegacyTextResultAdapter
+
+        return LegacyTextResultAdapter.from_text(name, self.execute(name, args))
 
 
 def test_main_custom_schema_error_continues_without_handler(tmp_path):

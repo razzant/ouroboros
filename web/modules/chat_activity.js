@@ -335,7 +335,14 @@ export function headerBudgetPresentation(data) {
  * zero.  The returned strings are card metadata, not another cost authority.
  */
 export function taskCostMeta(payload = {}) {
-    const has = (key) => Object.prototype.hasOwnProperty.call(payload, key);
+    // Presence means a VALUE, exactly as in `resolveCostPair`: a browser
+    // producer literal (chat.js `costMetaKeys`) materializes every cost name it
+    // knows, so a bare own property proves nothing about the frame. Counting
+    // those as evidence made an evidence-free terminal frame project
+    // "cost pending" and outrank a live ceiling on recency alone — the very
+    // thing this projection promises never to do.
+    const has = (key) => Object.prototype.hasOwnProperty.call(payload, key)
+        && payload[key] !== undefined;
     // Task-scope accounting evidence only (v6.82 P1): a bare `cost_usd` is NOT
     // enough — llm_round_finished carries a per-round delta under that key, and
     // rendering it as task cost lied on the card. Subagent progress_meta and

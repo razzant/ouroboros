@@ -106,6 +106,12 @@ def test_skill_finalization_rearms_after_tool_round(monkeypatch, tmp_path):
         def execute(self, _name, _args):
             return "OK"
 
+        def execute_result(self, name, args):
+            # Typed dispatch seam (D02): adapt like the real registry.
+            from ouroboros.tools.tool_result import LegacyTextResultAdapter
+
+            return LegacyTextResultAdapter.from_text(name, self.execute(name, args))
+
         def override_handler(self, _name, _handler):
             return None
 
@@ -127,7 +133,7 @@ def test_skill_finalization_rearms_after_tool_round(monkeypatch, tmp_path):
         _Tools(),
         _LLM(),
         tmp_path,
-        progress.append,
+        lambda text, *, incident=None: progress.append(text),
         queue.Queue(),
         task_id="task",
         drive_root=tmp_path,
@@ -194,6 +200,12 @@ def test_skill_action_and_effect_round_cannot_erase_complete_candidate(monkeypat
             finalized["value"] = True
             return "OK"
 
+        def execute_result(self, name, args):
+            # Typed dispatch seam (D02): adapt like the real registry.
+            from ouroboros.tools.tool_result import LegacyTextResultAdapter
+
+            return LegacyTextResultAdapter.from_text(name, self.execute(name, args))
+
         def override_handler(self, _name, _handler):
             return None
 
@@ -219,7 +231,7 @@ def test_skill_action_and_effect_round_cannot_erase_complete_candidate(monkeypat
         _Tools(),
         _LLM(),
         tmp_path,
-        lambda _msg: None,
+        lambda _msg, *, incident=None: None,
         queue.Queue(),
         task_id="task",
         drive_root=tmp_path,
@@ -287,7 +299,7 @@ def test_skill_finalization_empty_text_does_not_append_empty_assistant(monkeypat
         _Tools(),
         _LLM(),
         tmp_path,
-        lambda _msg: None,
+        lambda _msg, *, incident=None: None,
         queue.Queue(),
         task_id="task",
         drive_root=tmp_path,

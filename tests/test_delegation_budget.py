@@ -4,6 +4,8 @@ task contract and be surfaced in the child's prompt — instead of being lost in
 freeform objective prose (the cyber-racing 'maximum subagents' request that
 collapsed into 3 flat research leaves)."""
 
+from types import SimpleNamespace
+
 
 def test_delegation_budget_defaults_and_normalization():
     from ouroboros.contracts.task_contract import build_task_contract, normalize_delegation_budget
@@ -71,6 +73,39 @@ def test_absorption_full_then_whole_pointer_and_grandchild_rollup():
 
     msg2 = format_subagent_absorption_message(children, parent_task_id="P", budget_chars=1_000_000)
     assert "B" * 5000 in msg2                    # generous budget -> both full
+
+
+def test_absorption_digest_carries_a_childs_typed_custody_debt():
+    """A parent could absorb its child's work while the child's own delegated
+    patch sat undisposed, and the digest said nothing. A clean child stays
+    noise-free."""
+    from ouroboros.task_status import format_subagent_absorption_message
+    children = [
+        {"task_id": "d1", "parent_task_id": "P", "status": "completed", "role": "a",
+         "result": "work", "delegated_runs_unreconciled": ["patch:run-x"]},
+        {"task_id": "d2", "parent_task_id": "P", "status": "completed", "role": "b",
+         "result": "clean work"},
+    ]
+    msg = format_subagent_absorption_message(children, parent_task_id="P")
+    d1_header = next(l for l in msg.splitlines() if l.startswith("## child d1"))
+    d2_header = next(l for l in msg.splitlines() if l.startswith("## child d2"))
+    assert "custody_debt=patch:run-x" in d1_header, d1_header
+    assert "custody_debt" not in d2_header, d2_header
+
+
+def test_absorption_digest_bounds_a_long_custody_debt_list():
+    from ouroboros.task_status import format_subagent_absorption_message
+    debt = [f"patch:run-{n}" for n in range(12)]
+    children = [{"task_id": "d1", "parent_task_id": "P", "status": "completed",
+                 "role": "a", "result": "work",
+                 "delegated_runs_unreconciled": debt}]
+    header = next(
+        l for l in format_subagent_absorption_message(
+            children, parent_task_id="P").splitlines()
+        if l.startswith("## child d1"))
+    assert "custody_debt=" + ",".join(debt[:10]) in header, header
+    assert "patch:run-10" not in header and "patch:run-11" not in header, header
+    assert "(+2 more" in header and 'get_task_result("d1")' in header, header
 
 
 def test_child_budget_never_widens_beyond_restrictive_parent():
@@ -183,3 +218,117 @@ def test_child_budget_strict_boolean_parsing():
     )
     assert child2["may_mutate"] is True
     assert child2["may_fan_out"] is True
+
+
+def test_requested_depth_is_recorded_as_telemetry_and_never_narrows_the_cap():
+    """A nanny chain had no way to SAY how deep it meant to nest, so the root's
+    depth summary read "request unknown" and a shallow outcome could not be told
+    apart from a reduced capability. The request is now recorded — and recording
+    it must not become a second cap: asking for less than the configured depth
+    used to narrow what the descendants were permitted."""
+    from ouroboros.depth_evidence import build_depth_summary
+    from ouroboros.tools.control_delegation import child_budget_for_schedule
+
+    root = {"delegation_budget": {"may_delegate": True}}
+
+    def _schedule(**kwargs):
+        return child_budget_for_schedule(
+            root, current_depth=0, new_depth=1, max_depth=4, may_mutate=False,
+            may_fan_out=True, max_children=0, intent_note="", **kwargs,
+        )["depth_provenance"]
+
+    asked = _schedule(requested_depth=2)
+    assert asked["requested_depth"] == 2
+    assert asked["permitted_depth"] == 4, "a request is telemetry, not a cap"
+    assert asked["attempted_depth"] == 1
+    assert asked["achieved_depth"] is None
+
+    # Absent or zero means no request of record — never a recorded zero.
+    assert _schedule()["requested_depth"] is None
+    assert _schedule(requested_depth=0)["requested_depth"] is None
+    # The immutable host ceiling bounds authority, not the attested request.
+    over_cap = _schedule(requested_depth=99)
+    assert over_cap["requested_depth"] == 99
+    assert over_cap["permitted_depth"] == 4
+    assert build_depth_summary(
+        {"delegation_budget": {"depth_provenance": over_cap}}, [],
+    )["status"] == "capability_reduced"
+    # A non-integer fails SOFT: the handler validates argument names, not value
+    # types, and refusing a whole schedule over a telemetry field would trade a
+    # real capability for bookkeeping.
+    assert _schedule(requested_depth="x")["requested_depth"] is None
+
+
+def test_an_inherited_request_of_record_survives_a_nannys_own_number():
+    from ouroboros.tools.control_delegation import child_budget_for_schedule
+
+    parent = {"delegation_budget": {
+        "may_delegate": True, "depth_provenance": {"requested_depth": 3, "permitted_depth": 4},
+    }}
+    provenance = child_budget_for_schedule(
+        parent, current_depth=1, new_depth=2, max_depth=4, may_mutate=False,
+        may_fan_out=True, max_children=0, intent_note="", requested_depth=1,
+    )["depth_provenance"]
+    assert provenance["requested_depth"] == 3
+    assert provenance["permitted_depth"] == 4
+
+
+def test_assignment_stamp_without_a_permitted_fact_uses_the_configured_cap():
+    """The stamp used to fold the REQUEST into the permitted number, so a branch
+    that asked for two lost the depth the configuration actually allowed."""
+    from ouroboros.tools.control_delegation import stamp_task_assignment_depth
+
+    task = {
+        "depth": 1,
+        "task_contract": {"delegation_budget": {
+            "depth_provenance": {"requested_depth": 2, "permitted_depth": "not-a-number"},
+        }},
+    }
+    stamped = stamp_task_assignment_depth(task, max_depth=4)
+    provenance = stamped["task_contract"]["delegation_budget"]["depth_provenance"]
+    assert provenance["requested_depth"] == 2
+    assert provenance["permitted_depth"] == 4
+
+
+def test_the_swarm_rollup_reports_requested_permitted_and_achieved_depth(tmp_path):
+    from ouroboros.task_finalization import build_swarm_efficiency
+    from ouroboros.task_results import STATUS_COMPLETED, write_task_result
+    from ouroboros.utils import append_jsonl
+
+    root_id = "depth-root"
+    (tmp_path / "logs").mkdir(parents=True, exist_ok=True)
+    append_jsonl(tmp_path / "logs" / "events.jsonl", {
+        "type": "swarm_fanout", "parent_task_id": root_id, "task_ids": ["c1"],
+        "requested_count": 1, "ts": "2026-09-03T10:00:00Z",
+    })
+    write_task_result(
+        tmp_path, "c1", STATUS_COMPLETED, result="done",
+        parent_task_id=root_id, root_task_id=root_id, delegation_role="subagent",
+        depth_provenance={
+            "requested_depth": 2, "permitted_depth": 4,
+            "attempted_depth": 1, "achieved_depth": 1,
+        },
+    )
+    rollup = build_swarm_efficiency(
+        SimpleNamespace(drive_root=tmp_path),
+        {
+            "id": root_id, "budget_drive_root": str(tmp_path),
+            "task_contract": {"delegation_budget": {
+                "depth_provenance": {"requested_depth": 2, "permitted_depth": 4},
+            }},
+        },
+    )
+    assert rollup["subagent_count"] == 1
+    assert rollup["depth"]["requested_depth"] == 2
+    assert rollup["depth"]["permitted_depth"] == 4
+    assert rollup["depth"]["achieved_depth"] == 1
+    assert rollup["depth"]["status"] == "chosen_shallower"
+    assert rollup["depth"]["host_visible_only"] is True
+
+
+def test_a_plain_task_gets_no_depth_block(tmp_path):
+    from ouroboros.task_finalization import build_swarm_efficiency
+
+    assert build_swarm_efficiency(
+        SimpleNamespace(drive_root=tmp_path), {"id": "lonely"},
+    ) is None

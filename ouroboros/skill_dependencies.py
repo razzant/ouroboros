@@ -89,6 +89,31 @@ def _payload_sidecar_specs(skill_dir: pathlib.Path) -> List[Dict[str, Any]]:
     return []
 
 
+def payload_declared_install_specs(loaded: Any) -> List[Dict[str, Any]]:
+    """Auto specs declared by HASH-COVERED payload carriers only (6.2=A).
+
+    The review content hash covers the payload sidecars and the manifest, but
+    NOT the state-plane provenance record ``auto_install_specs_for_skill``
+    prefers for ClawHub payloads. This projection is the declarative
+    dependency fingerprint: a new declared name changes the payload bytes and
+    therefore forces re-review, while the installed ``.ouroboros_env`` bytes
+    stay outside the hash by design.
+    """
+    sidecar = _payload_sidecar_specs(pathlib.Path(loaded.skill_dir))
+    if sidecar:
+        return sidecar
+    return _manifest_install_specs(getattr(loaded, "manifest", None))
+
+
+def declared_dependency_names(specs: Any) -> frozenset[str]:
+    """Canonical ``kind:package`` name set of a declared spec list."""
+    return frozenset(
+        f"{str(item.get('kind') or '').strip().lower()}:{str(item.get('package') or '').strip()}"
+        for item in (specs or [])
+        if isinstance(item, dict)
+    )
+
+
 def auto_install_specs_for_skill(drive_root: pathlib.Path, loaded: Any) -> List[Dict[str, Any]]:
     """Return normalized auto-install specs declared for ``loaded``.
 

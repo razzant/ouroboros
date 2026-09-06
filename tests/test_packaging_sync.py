@@ -31,6 +31,22 @@ def test_version_file_and_pyproject_are_synced():
     assert f'name = "ouroboros"\nversion = "{pyproject_version}"' in uv_lock
 
 
+def test_web_package_lock_root_entries_match_version():
+    """Both root entries of web/package-lock.json (the root object and its
+    packages[""] entry) carry VERSION on THIS tree, and the carrier SSOT
+    agrees — the pin the blocking gates rely on (rc.15 review MAJOR-1)."""
+    import json
+
+    from ouroboros.tools.release_sync import version_carrier_desyncs
+
+    version = (REPO / "VERSION").read_text(encoding="utf-8").strip()
+    lock_text = (REPO / "web" / "package-lock.json").read_text(encoding="utf-8")
+    lock = json.loads(lock_text)
+    assert lock["version"] == version
+    assert lock["packages"][""]["version"] == version
+    assert version_carrier_desyncs(version, web_package_lock_text=lock_text, detailed=True) == []
+
+
 def test_push_to_remote_push_tags_compatibility(monkeypatch):
     from supervisor import git_ops
 

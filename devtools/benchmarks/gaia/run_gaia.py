@@ -56,6 +56,7 @@ _PROVIDER_ENV_KEYS = {
     "CLOUDRU_FOUNDATION_MODELS_BASE_URL",
     "MINIMAX_API_KEY",
     "MINIMAX_REGION",
+    "DEEPSEEK_API_KEY",
     "GIGACHAT_CREDENTIALS",
     "GIGACHAT_USER",
     "GIGACHAT_PASSWORD",
@@ -101,6 +102,8 @@ def _credential_keys_for_model(model: str) -> set[str]:
         return {"GIGACHAT_CREDENTIALS", "GIGACHAT_USER", "GIGACHAT_PASSWORD"}
     if text.startswith("minimax::"):
         return {"MINIMAX_API_KEY", "MINIMAX_REGION"}
+    if text.startswith("deepseek::"):
+        return {"DEEPSEEK_API_KEY"}
     if text.startswith("openai-compatible::"):
         return {"OPENAI_COMPATIBLE_API_KEY", "OPENAI_COMPATIBLE_BASE_URL"}
     return {"OPENROUTER_API_KEY"}

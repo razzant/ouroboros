@@ -12,6 +12,7 @@ import textwrap
 import pytest
 
 from ouroboros.shell_parse import sudo_noninteractive_violation
+from ouroboros.tools import registry_guard_process
 
 
 # ---------------------------------------------------------------------------
@@ -69,7 +70,7 @@ def _registry(tmp_path):
 def test_skill_state_pure_read_inspection_is_allowed(tmp_path, cmd):
     # The runtime_data file plane explicitly allows reading review.json; the
     # shell plane must not refuse the same read with a WRITE-named marker.
-    blocked = _registry(tmp_path)._run_shell_safety_check({"cmd": cmd}, "advanced")
+    blocked = registry_guard_process._run_shell_safety_check(_registry(tmp_path), {"cmd": cmd}, "advanced")
     assert blocked is None
 
 
@@ -79,8 +80,9 @@ def test_skill_state_pure_read_inspection_is_allowed(tmp_path, cmd):
     'python -c "open(\'data/state/skills/w/enabled.json\', \'w\').write(\'{}\')"',
 ])
 def test_skill_state_write_shapes_stay_blocked(tmp_path, cmd):
-    blocked = _registry(tmp_path)._run_shell_safety_check({"cmd": cmd}, "advanced")
-    assert blocked is not None and "SKILL_STATE_WRITE_BLOCKED" in blocked
+    blocked = registry_guard_process._run_shell_safety_check(_registry(tmp_path), {"cmd": cmd}, "advanced")
+    # v7 D02: the guard returns a typed ToolResult; the code is the contract.
+    assert blocked is not None and blocked.code == "SKILL_STATE_WRITE_BLOCKED"
 
 
 # ---------------------------------------------------------------------------

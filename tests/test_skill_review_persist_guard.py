@@ -14,6 +14,8 @@ from ouroboros.skill_review import review_skill
 from ouroboros.tools.registry import ToolContext
 from ouroboros.utils import atomic_write_json, utc_now_iso
 
+from tests._shared import reconcile_receipt
+
 
 def _build_script_skill(root, name: str = "alpha"):
     skill_dir = root / name
@@ -374,7 +376,7 @@ def test_cancellation_during_extension_reconcile_keeps_lifecycle_lane(tmp_path, 
     def fake_reconcile(*_args, **_kwargs):
         reconcile_started.set()
         release_reconcile.wait(2)
-        return "extension_loaded", "ok"
+        return reconcile_receipt("extension_loaded", "ok")
 
     monkeypatch.setattr(runner, "_reconcile_extension_payload", fake_reconcile)
 
@@ -450,7 +452,7 @@ def test_heartbeat_continues_during_extension_reconcile(tmp_path, monkeypatch):
     def fake_reconcile(*_args, **_kwargs):
         reconcile_started.set()
         release_reconcile.wait(2)
-        return "extension_loaded", "ok"
+        return reconcile_receipt("extension_loaded", "ok")
 
     monkeypatch.setattr(runner, "_reconcile_extension_payload", fake_reconcile)
 
@@ -461,12 +463,15 @@ def test_heartbeat_continues_during_extension_reconcile(tmp_path, monkeypatch):
         assert await asyncio.to_thread(reconcile_started.wait, 2)
         job_path = review_job_state_path(drive_root, "alpha")
         before = json.loads(job_path.read_text(encoding="utf-8"))["last_heartbeat_at"]
-        for _ in range(20):
-            await asyncio.sleep(0.01)
+        # A bounded wait, not 20 x 10 ms: on windows-latest the heartbeat's atomic replace can
+        # lose a few rounds to this very poll holding the file open (sharing violation, logged
+        # and retried by the beat), and the clock ticks at ~15.6 ms — 200 ms saw no change.
+        for _ in range(60):
+            await asyncio.sleep(0.05)
             after = json.loads(job_path.read_text(encoding="utf-8"))["last_heartbeat_at"]
             if after != before:
                 break
-        assert after != before
+        assert after != before, "no heartbeat within 3 s while the reconcile blocks"
         release_reconcile.set()
         result = await asyncio.wait_for(task, timeout=2)
         assert result["status"] == "clean"

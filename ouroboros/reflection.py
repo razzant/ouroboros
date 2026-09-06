@@ -7,6 +7,7 @@ import logging
 import pathlib
 from typing import Any, Dict, List, Optional
 
+from ouroboros._outcome_tool_errors import _OK_TOOL_STATUSES
 from ouroboros.utils import utc_now_iso, append_jsonl, write_text_atomic
 
 
@@ -40,10 +41,6 @@ _ERROR_MARKERS = frozenset({
     "TOOL_TIMEOUT",
     "SHELL_EXIT_ERROR",
     "SHELL_ERROR",
-    "CLAUDE_CODE_ERROR",
-    "CLAUDE_CODE_TIMEOUT",
-    "CLAUDE_CODE_INSTALL_ERROR",
-    "CLAUDE_CODE_UNAVAILABLE",
 })
 
 REFLECTIONS_FILENAME = "task_reflections.jsonl"
@@ -62,6 +59,24 @@ def _marker_scan_view(result_str: str) -> str:
     if len(result_str) <= 700:
         return result_str
     return result_str[:350] + "\n…\n" + result_str[-350:]
+
+
+def _trace_call_errored(tc: Dict[str, Any]) -> bool:
+    """One reading of "this call went wrong" for every reflection trigger.
+
+    Reads the ok-status SSOT rather than a fourth private spelling of it. The
+    ``("", "ok")`` tuple this replaces counted two statuses whose spec says ok as
+    errors: ``untyped`` — the status a dynamic provider body carries when nothing
+    typed it, which a SUCCESSFUL extension call now has — and ``ok_autocorrected``,
+    a shell command whose regex the host repaired. Both handed a clean run the
+    error-reflection prompt with nothing to reflect on. Every other status keeps
+    its meaning here exactly.
+    """
+    return bool(
+        tc.get("is_error")
+        or str(tc.get("status") or "").strip().lower() not in _OK_TOOL_STATUSES
+    )
+
 
 _REFLECTION_PROMPT_ERROR = """\
 You are performing a post-task experience review for Ouroboros, a self-modifying AI agent.
@@ -193,7 +208,7 @@ def should_generate_reflection(
     for tc in tool_calls:
         if not isinstance(tc, dict):
             continue
-        if tc.get("is_error") or str(tc.get("status") or "").strip().lower() not in ("", "ok"):
+        if _trace_call_errored(tc):
             return True
         result_str = _marker_scan_view(str(tc.get("result", "")))
         for marker in _ERROR_MARKERS:
@@ -209,7 +224,7 @@ def _has_error_evidence(llm_trace: Dict[str, Any]) -> bool:
     for tc in tool_calls:
         if not isinstance(tc, dict):
             continue
-        if tc.get("is_error") or str(tc.get("status") or "").strip().lower() not in ("", "ok"):
+        if _trace_call_errored(tc):
             return True
         result_str = _marker_scan_view(str(tc.get("result", "")))
         for marker in _ERROR_MARKERS:
@@ -227,7 +242,7 @@ def _collect_error_details(llm_trace: Dict[str, Any], cap: int = 3000) -> str:
         if not isinstance(tc, dict):
             continue
         result_str = str(tc.get("result", ""))
-        is_error = tc.get("is_error") or str(tc.get("status") or "").strip().lower() not in ("", "ok")
+        is_error = _trace_call_errored(tc)
         is_relevant = is_error or any(m in _marker_scan_view(result_str) for m in _ERROR_MARKERS)
         if not is_relevant:
             continue
@@ -380,14 +395,17 @@ def generate_reflection(
     markers = _detect_markers(llm_trace)
     error_count = sum(
         1 for tc in (llm_trace.get("tool_calls") or [])
-        if isinstance(tc, dict) and (
-            tc.get("is_error")
-            or str(tc.get("status") or "").strip().lower() not in ("", "ok")
-        )
+        if isinstance(tc, dict) and _trace_call_errored(tc)
     )
+    panels = None
+    try:
+        from ouroboros.review_substrate import compact_review_projection
+        panels = compact_review_projection(llm_trace.get("review_runs") or []).get("panels")
+    except Exception:
+        log.debug("Acceptance panel projection unavailable for reflection", exc_info=True)
     try:
         from ouroboros.review_evidence import format_review_evidence_for_prompt
-        review_evidence_text = format_review_evidence_for_prompt(review_evidence or {}, max_chars=8000)
+        review_evidence_text = format_review_evidence_for_prompt(review_evidence or {}, max_chars=8000, acceptance_panels=panels)
     except Exception:
         review_evidence_text = "(review evidence unavailable)"
 

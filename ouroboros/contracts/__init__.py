@@ -37,7 +37,7 @@ from ouroboros.contracts.task_contract import (
 from ouroboros.contracts.plugin_api import (
     PluginAPI,
     ExtensionRegistrationError,
-    FORBIDDEN_EXTENSION_SETTINGS,
+    FORBIDDEN_SKILL_SETTINGS,
     VALID_EXTENSION_PERMISSIONS,
     ExecutionMode,
     MATRIX_CAPABILITIES,
@@ -73,7 +73,7 @@ __all__ = [
     "normalize_resource_policy",
     "PluginAPI",
     "ExtensionRegistrationError",
-    "FORBIDDEN_EXTENSION_SETTINGS",
+    "FORBIDDEN_SKILL_SETTINGS",
     "VALID_EXTENSION_PERMISSIONS",
     "ExecutionMode",
     "MATRIX_CAPABILITIES",

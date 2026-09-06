@@ -117,7 +117,13 @@ def test_pull_request_ci_is_fork_safe_and_does_not_enable_provider_jobs():
 
     assert "pull_request:\n    branches: [ouroboros]" in workflow
     assert "\n  pull_request_target:" not in workflow
-    assert "\n  schedule:" not in workflow
+    # A schedule IS admitted now (owner 9A: the keyless system-e2e-mock lane),
+    # so what this used to say by banning the trigger outright it now says
+    # directly — the unattended run must not reach the paid provider job. Its
+    # branch conditions match the default branch ref a cron run carries, hence
+    # the explicit event guard, which has to come FIRST to gate the whole `||`.
+    assert "github.event_name != 'schedule'" in workflow.partition(
+        "\n  integration-test:\n")[2].partition("\n    runs-on:")[0]
     assert "permissions:\n  contents: read" in workflow
     assert "github.event_name == 'pull_request' && github.base_ref == 'ouroboros'" in workflow
     assert "secrets." not in quick_job
@@ -158,7 +164,7 @@ def test_trusted_provider_ci_wires_full_secret_policy_and_release_dependency():
         assert f"{secret}: ${{{{ secrets.{secret} }}}}" in integration_job
 
     assert " -rs " in integration_job
-    assert "needs: [full-test, integration-test]" in release_preflight
+    assert "needs: [full-test, integration-test, system-e2e-mock]" in release_preflight
 
 
 def test_repository_has_explicit_mit_license_holder():

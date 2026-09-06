@@ -124,7 +124,7 @@ def _project_large_result(tmp_path, *, tool_name: str, call_id: str, result: str
         }],
         messages,
         trace,
-        emit_progress=lambda _message: None,
+        emit_progress=lambda _message, *, incident=None: None,
         tools=tools,
     )
     return ctx, messages[0]["content"], trace["tool_calls"][0]
@@ -394,7 +394,7 @@ def test_task_acceptance_abstains_before_review_on_unresolved_partial_source(tmp
     assert paid == []
     assert result.aggregate_signal == "DEGRADED"
     assert result.degraded is True
-    assert result.actors[0]["status"] == "ok"
+    assert result.actors[0]["status"] == "not_dispatched"
     assert result.actors[0]["signal"] == "DEGRADED"
 
 
@@ -469,3 +469,92 @@ def test_large_repo_diff_materializes_exact_source_and_keeps_pass_path(tmp_path)
         llm=_PassLLM(),
     )
     assert result.aggregate_signal == "PASS"
+
+
+# ── AP3: a pageable tool result persists its exact source like any other ──────
+
+class _CountingLLM:
+    def __init__(self):
+        self.calls = 0
+
+    def chat(self, **_kwargs):
+        self.calls += 1
+        body = {"verdict": "PASS", "findings": [], "summary": "reviewed"}
+        return {"content": json.dumps(body)}, {"prompt_tokens": 10, "completion_tokens": 5}
+
+
+def _dispatch_acceptance(tmp_path, evidence: dict, llm) -> object:
+    return run_review_request(
+        ReviewRequest(
+            surface="task_acceptance", goal="decide", subject="candidate",
+            evidence=evidence, policy={"min_successful_slots": 1}, task_id="pageable",
+        ),
+        slots=[ReviewSlot(slot_id="slot", model="review-model")],
+        drive_root=tmp_path,
+        llm=llm,
+    )
+
+
+def test_over_limit_pageable_results_persist_their_exact_source(tmp_path):
+    """The agent can page `read_file`; the acceptance DECIDER cannot. Skipping
+    persistence for pageable tools left the panel with a partial row whose exact
+    source did not exist, which refused the whole panel for nothing."""
+    for tool_name in ("read_file", "query_code", "chat_history"):
+        ctx, visible, trace_row = _project_large_result(
+            tmp_path, tool_name=tool_name, call_id=f"page-{tool_name}",
+            result="page-head\n" + ("y" * 120_000) + "\nDECISIVE_TAIL=FAIL",
+        )
+        assert trace_row["result_partial"] is True
+        assert trace_row["result_source_status"] == "ready"
+        assert "FULL_RESULT_SOURCE_JSON=" in visible
+        assert "exact source persistence failed" not in visible
+        # The wording keeps the tool's own affordance instead of forbidding it.
+        assert "or page this tool (offset/limit) for the omitted range" in visible
+        ref = _source_ref_from_visible_result(visible)
+        assert "DECISIVE_TAIL=FAIL" in _read_source(ctx, ref, start_char=100_000)
+
+        evidence = build_task_acceptance_evidence(
+            ctx, llm_trace={"tool_calls": [dict(trace_row)]},
+            drive_root=tmp_path, task_id=ctx.task_id,
+        )
+        assert evidence["tool_trajectory"][0]["result_complete"] is True
+        assert "__unresolved_partial_artifacts__" not in evidence
+
+        llm = _CountingLLM()
+        result = _dispatch_acceptance(tmp_path, evidence, llm)
+        assert llm.calls == 1
+        assert result.aggregate_signal == "PASS"
+
+
+def test_a_non_pageable_tool_keeps_its_do_not_rerun_wording(tmp_path):
+    _ctx, visible, _row = _project_large_result(
+        tmp_path, tool_name="run_command", call_id="page-run",
+        result="cmd\n" + ("z" * 120_000),
+    )
+    assert "Do not rerun this tool to recover omitted output." in visible
+    assert "or page this tool" not in visible
+
+
+def test_a_budget_shed_row_dispatches_while_a_missing_source_still_refuses(tmp_path):
+    shed_only = {
+        "task_contract": {"requirements": "do X"},
+        "__provenance__": {},
+        "__unresolved_partial_artifacts__": [{
+            "tool": "read_file", "status": "not_materialized_for_reviewer",
+            "source_ref": {"kind": "artifact", "path": "tool_results/page.txt"},
+        }],
+    }
+    llm = _CountingLLM()
+    assert _dispatch_acceptance(tmp_path, shed_only, llm).aggregate_signal == "PASS"
+    assert llm.calls == 1
+
+    genuine = {
+        **shed_only,
+        "__unresolved_partial_artifacts__": [
+            {"tool": "read_file", "status": "source_unavailable", "source_ref": {}},
+        ],
+    }
+    refusing = _MustNotReviewPartial()
+    result = _dispatch_acceptance(tmp_path, genuine, refusing)
+    assert refusing.calls == 0
+    assert result.aggregate_signal == "DEGRADED"

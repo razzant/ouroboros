@@ -15,6 +15,7 @@ import pathlib
 import uuid
 from typing import Any, Dict, Optional
 
+from ouroboros.cost_projection import honest_cost_pair_amount
 from ouroboros.evolution_fingerprint import canonical_objective_fingerprint
 from ouroboros.outcomes import normalize_outcome_axes
 from ouroboros.utils import atomic_write_json, read_json_dict, utc_now_iso
@@ -241,7 +242,11 @@ def _write_evolution_campaign(
         if lock_fd is None:
             return False
     try:
-        current = read_json_dict(path) or {}
+        current = read_json_dict(path)
+        if current is None and path.is_file():   # present but unreadable is NOT "no campaign"
+            log.warning("Refusing evolution campaign write: %s exists but is unreadable", path)
+            return False
+        current = current or {}
         current_id = str(current.get("id") or "")
         data_id = str(data.get("id") or "")
         expected_id = data_id if expected_campaign_id is None else str(expected_campaign_id or "")
@@ -610,6 +615,80 @@ def check_evolution_authority(
         state.release_file_lock(state.STATE_LOCK_PATH, lock_fd)
 
 
+def _build_commit_receipt(
+    campaign_id: str, transaction_id: str, task_id: str, commit_sha: str,
+    *, reason: str, recorded_at: str,
+) -> Dict[str, Any]:
+    """The exact receipt shape ``evolution_commit_receipt_error`` validates.
+
+    One constructor so the receipt written by the tool path and the one
+    re-derived by boot recovery are the same durable fact, differing only in
+    ``reason`` (which records HOW the SHA was attributed).
+    """
+    return {
+        "ok": True,
+        "reason": reason,
+        "campaign_id": str(campaign_id),
+        "transaction_id": str(transaction_id),
+        "task_id": str(task_id),
+        "commit_sha": str(commit_sha),
+        "recorded_at": recorded_at,
+    }
+
+
+def adopt_evolution_commit_intent(
+    campaign: Dict[str, Any], tx: Dict[str, Any], head_sha: str = "",
+) -> str:
+    """Finish an interrupted commit receipt from the pre-commit intent.
+
+    ``git commit`` and its SHA receipt are two writes; a crash between them used
+    to leave a reviewed commit on HEAD that no boot path could attribute (the
+    markerless reconcile short-circuits on an empty ``commit_sha``). The intent
+    written before the commit carries the exact reviewed tree and parents, so
+    attribution here is structural rather than a guess: the commit at HEAD is
+    adopted only when its tree AND its full parent list are identical to that
+    reviewed material. A failed commit, a contained orphan (the branch is rewound
+    to the parent) or any later HEAD movement fails the match and recovery stays
+    fail-closed. The caller owns persistence, so the recovered SHA and its receipt
+    land in the SAME write as the decision that consumed them.
+    """
+    intent = tx.get("commit_intent") if isinstance(tx, dict) else None
+    if not isinstance(intent, dict):
+        return ""
+    tree_sha = str(intent.get("tree_sha") or "")
+    parents = [str(value) for value in (intent.get("parents") or [])]
+    if not tree_sha or not parents:
+        return ""
+    head = str(head_sha or "").strip() or "HEAD"
+    try:
+        from supervisor import git_ops
+
+        rc_tree, actual_tree, _ = git_ops.git_capture(["git", "rev-parse", f"{head}^{{tree}}"])
+        rc_parents, parent_line, _ = git_ops.git_capture(
+            ["git", "rev-list", "--parents", "-n", "1", head]
+        )
+    except Exception:
+        return ""
+    fields = parent_line.strip().split() if rc_parents == 0 else []
+    if rc_tree != 0 or not fields or actual_tree.strip() != tree_sha or fields[1:] != parents:
+        return ""
+    commit_sha, now = fields[0], utc_now_iso()
+    tx.update({
+        "commit_sha": commit_sha,
+        "commit_receipt": _build_commit_receipt(
+            str(campaign.get("id") or ""), str(tx.get("transaction_id") or ""),
+            str(tx.get("task_id") or ""), commit_sha,
+            reason="recovered_from_commit_intent", recorded_at=now,
+        ),
+        "commit_receipt_recovered": True,
+        "restart_required": True,
+        "restart_verified": False,
+        "updated_at": now,
+    })
+    campaign["active_transaction"] = tx
+    return commit_sha
+
+
 def record_evolution_commit(
     campaign_id: str, transaction_id: str, task_id: str, commit_sha: str,
 ) -> Dict[str, Any]:
@@ -645,15 +724,10 @@ def record_evolution_commit(
                 refused["reason"] = reason
                 return None
             now = utc_now_iso()
-            receipt.update({
-                "ok": True,
-                "reason": "recorded",
-                "campaign_id": str(campaign_id),
-                "transaction_id": str(transaction_id),
-                "task_id": str(task_id),
-                "commit_sha": commit_sha,
-                "recorded_at": now,
-            })
+            receipt.update(_build_commit_receipt(
+                campaign_id, transaction_id, task_id, commit_sha,
+                reason="recorded", recorded_at=now,
+            ))
             tx.update({
                 "preflight_status": "passed",
                 "advisory_status": "fresh_or_bypassed",
@@ -1095,7 +1169,11 @@ def update_evolution_campaign_after_task(
             row = {
                 "task_id": str(task_id or ""),
                 "ts": utc_now_iso(),
-                "cost_usd": float(cost_usd) if cost_available else None,
+                # ABI-3 (fix-round-3): the honest cost name — this row reaches
+                # /api/state through the evolution snapshot. Stored legacy rows
+                # (cost_usd) keep resolving deprecated-wins at the readers and
+                # at the /api/state projection boundary.
+                "accounted_upper_bound_usd": float(cost_usd) if cost_available else None,
                 "cost_accounting_status": "available" if cost_available else "unavailable",
                 "outcome_axes": axes,
                 "rounds": int(rounds or 0),
@@ -1104,6 +1182,11 @@ def update_evolution_campaign_after_task(
             history.append(row)
             campaign["history"] = history[-50:]
             has_commit = bool(str(tx.get("commit_sha") or "").strip())
+            if not has_commit:
+                # A crash between the reviewed commit and its SHA receipt can reach
+                # task-done before boot recovery: adopt the commit the intent proves,
+                # so the cycle is classified as commit-bearing instead of ``no_op``.
+                has_commit = bool(adopt_evolution_commit_intent(campaign, tx))
             restart_verified = bool(tx.get("restart_verified"))
             has_rescue = bool(str(tx.get("rescue_ref") or "").strip())
             if has_commit and restart_verified:
@@ -1222,10 +1305,15 @@ def build_evolution_task_text(cycle: int) -> str:
             axes = normalize_outcome_axes(row)
             execution_status = str((axes.get("execution") or {}).get("status") or "unknown")
             objective_status = str((axes.get("objective") or {}).get("status") or "not_evaluated")
+            # ABI-3 read tolerance: a stored legacy row's spelling resolves
+            # deprecated-wins; new rows carry the honest name only.
+            _, row_amount = honest_cost_pair_amount(
+                row, "accounted_upper_bound_usd", "cost_usd",
+            )
             row_cost = (
-                f"${float(row.get('cost_usd')):.4f}"
+                f"${row_amount:.4f}"
                 if row.get("cost_accounting_status") != "unavailable"
-                and row.get("cost_usd") is not None else "unavailable"
+                and row_amount is not None else "unavailable"
             )
             parts.append(
                 f"- {row.get('task_id')}: execution={execution_status}, objective={objective_status}; "
@@ -1349,53 +1437,61 @@ def append_unique_transaction(campaign: Dict[str, Any], tx: Dict[str, Any]) -> N
     campaign["transaction_history"] = tx_history[-50:]
 
 
+def write_pending_restart_marker(
+    drive_root: pathlib.Path, *, expected_sha: str, expected_branch: str, reason: str,
+    evolution_claim: Optional[Dict[str, Any]] = None,
+) -> pathlib.Path:
+    """One schema of ``state/pending_restart_verify.json`` for both writers (the
+    supervisor's evolution restart, the agent's ``restart`` tool); ``verify_restart``
+    reads it at boot. The claim key exists only for an exact evolution claim — an
+    empty one would read as a claim mismatch."""
+    path = pathlib.Path(drive_root) / "state" / "pending_restart_verify.json"
+    atomic_write_json(path, {
+        "ts": utc_now_iso(),
+        "expected_sha": str(expected_sha or "").strip(),
+        "expected_branch": str(expected_branch or "").strip(),
+        "reason": str(reason or "").strip(),
+        **({"evolution_claim": dict(evolution_claim)} if evolution_claim else {}),
+    }, trailing_newline=True)
+    return path
+
+
 def request_evolution_restart(drive_root: pathlib.Path, tx: Dict[str, Any], log: Any = None) -> None:
-    if str(os.environ.get("OUROBOROS_EVOLUTION_AUTO_RESTART", "true") or "true").lower() in {"0", "false", "no", "off"}:
-        return
+    """Write the exact restart-verify claim, then ask the server to restart.
+    ``OUROBOROS_EVOLUTION_AUTO_RESTART`` off skips ONLY the restart: the marker is
+    what lets the next boot — the owner's manual one included — attribute the cycle
+    by exact claim rather than the weaker markerless reconcile (W4-F3)."""
     commit_sha = str(tx.get("commit_sha") or "").strip()
     if not commit_sha:
         return
-    claim = {
-        "campaign_id": str(tx.get("campaign_id") or ""),
-        "transaction_id": str(tx.get("transaction_id") or ""),
-        "task_id": str(tx.get("task_id") or ""),
-        "commit_sha": commit_sha,
-    }
+    claim = {key: str(tx.get(key) or "") for key in ("campaign_id", "transaction_id", "task_id")}
+    claim["commit_sha"] = commit_sha
     authority = check_evolution_authority(**claim)
     if not authority.get("ok"):
         if log is not None:
-            log.warning(
-                "Automatic evolution restart cancelled: exact authority changed (%s)",
-                authority.get("reason") or "unknown",
-            )
+            log.warning("Automatic evolution restart cancelled: exact authority changed (%s)",
+                        authority.get("reason") or "unknown")
         return
     try:
-        marker_path = pathlib.Path(drive_root) / "state" / "pending_restart_verify.json"
-        existing = read_json_dict(marker_path) or {}
-        existing_claim = existing.get("evolution_claim")
+        existing = read_json_dict(pathlib.Path(drive_root) / "state" / "pending_restart_verify.json") or {}
         restart_reason = (
-            str(existing.get("reason") or "").strip()
-            if isinstance(existing_claim, dict) and existing_claim == claim
-            else ""
+            str(existing.get("reason") or "").strip() if existing.get("evolution_claim") == claim else ""
         ) or "supervisor_auto_evolution_restart"
-        atomic_write_json(
-            marker_path,
-            {
-                "ts": utc_now_iso(),
-                "expected_sha": commit_sha,
-                "expected_branch": str(tx.get("base_branch") or ""),
-                "reason": restart_reason,
-                "evolution_claim": claim,
-            },
-            trailing_newline=True,
+        write_pending_restart_marker(
+            drive_root, expected_sha=commit_sha, expected_branch=str(tx.get("base_branch") or ""),
+            reason=restart_reason, evolution_claim=claim,
         )
+        auto_restart = str(os.environ.get("OUROBOROS_EVOLUTION_AUTO_RESTART", "true") or "true").lower()
+        if auto_restart in {"0", "false", "no", "off"}:
+            if log is not None:
+                log.info("Automatic evolution restart is off; the restart-verify marker for %s awaits "
+                         "a manual restart", commit_sha[:12])
+            return
         from supervisor import workers
 
         workers.get_event_q().put({
-            "type": "restart_request",
-            "reason": restart_reason,
-            "evolution_restart": True,
-            "ts": utc_now_iso(),
+            "type": "restart_request", "reason": restart_reason,
+            "evolution_restart": True, "ts": utc_now_iso(),
         })
     except Exception:
         if log is not None:

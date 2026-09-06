@@ -100,6 +100,51 @@ def test_build_trajectory_structure(tmp_path: Path) -> None:
     assert metrics["total_cost_usd"] == 0.5
 
 
+def test_rotated_events_and_tools_stay_in_the_trajectory(tmp_path: Path) -> None:
+    """Audit #15-12: the CPL4-C1/C2 train started rotating events.jsonl and
+    tools.jsonl, but ATIF still read only the LIVE files — a rotated trial
+    published a trajectory missing its early tool calls and its usage events.
+    That is a false trajectory, not a short one."""
+    agent = _make_agent_dir(tmp_path)
+    data_dir = agent / "ouroboros-data"
+    logs = data_dir / "logs"
+    archive = data_dir / "archive"
+    # Rotation moves what the live files held; the live files keep the tail.
+    archive.mkdir(parents=True)
+    (archive / "tools_20260704T180000.jsonl").write_text(
+        (logs / "tools.jsonl").read_text(encoding="utf-8"), encoding="utf-8",
+    )
+    (archive / "events_20260704T180000.jsonl").write_text(
+        (logs / "events.jsonl").read_text(encoding="utf-8"), encoding="utf-8",
+    )
+    _write_jsonl(
+        logs / "tools.jsonl",
+        [{
+            "ts": "2026-07-04T18:04:00+00:00",
+            "type": "tool_call",
+            "tool": "write_file",
+            "args": {"path": "out.txt"},
+            "result_preview": "ok",
+            "is_error": False,
+            "status": "ok",
+        }],
+    )
+    _write_jsonl(logs / "events.jsonl", [
+        {"type": "llm_usage", "prompt_tokens": 7, "completion_tokens": 1},
+    ])
+
+    trajectory = build_trajectory(agent)
+
+    called = [
+        call["function_name"]
+        for step in trajectory["steps"]
+        for call in step.get("tool_calls", [])
+    ]
+    assert called == ["run_command", "write_file"]  # archive first, then live
+    assert trajectory["final_metrics"]["total_prompt_tokens"] == 17
+    assert trajectory["agent"]["version"] == "6.56.0"  # startup row lives in the archive
+
+
 def test_build_trajectory_minimal_dir(tmp_path: Path) -> None:
     agent = tmp_path / "agent"
     agent.mkdir()

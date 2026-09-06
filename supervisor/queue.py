@@ -2,36 +2,40 @@
 
 from __future__ import annotations
 
-import datetime
-import json
 import logging
 import math
 import pathlib
 import queue as _stdqueue  # noqa: F401 — re-exported for the test suite's reap-queue isolation
 import threading
-import time
+import time  # noqa: F401 -- facade name tests read (queue.time)
 import uuid
 from typing import Any, Dict, List, Optional, Tuple
 
 from supervisor.state import (
-    load_state, append_jsonl, atomic_write_text,
-    QUEUE_SNAPSHOT_PATH, budget_remaining, EVOLUTION_BUDGET_RESERVE,
+    load_state,
+    append_jsonl,  # noqa: F401 -- queue_snapshot leaf reads it via the _queue() handle
+    atomic_write_text,  # noqa: F401 -- queue_snapshot leaf reads it via the _queue() handle
+    budget_remaining, EVOLUTION_BUDGET_RESERVE,
     reconstruct_task_cost as reconstruct_task_cost,
 )
-from supervisor.message_bus import send_with_budget
+from supervisor.message_bus import (
+    coerce_chat_identity,  # noqa: F401 -- queue_timeouts leaf reads it via the _queue() handle
+    notification_chat_route,
+    send_with_budget,
+)
 from ouroboros.config import (
     DATA_DIR,
     FINALIZATION_GRACE_DEFAULT_SEC,
     get_finalization_grace_sec,
-    get_per_call_timeout_ceiling_sec,
-    get_task_abs_ceiling_sec,
-    get_task_idle_timeout_sec,
+    get_per_call_timeout_ceiling_sec,  # noqa: F401 -- queue_timeouts leaf reads it via the _queue() handle
+    get_task_abs_ceiling_sec,  # noqa: F401 -- queue_timeouts leaf reads it via the _queue() handle
+    get_task_idle_timeout_sec,  # noqa: F401 -- queue_timeouts leaf reads it via the _queue() handle
 )
-from ouroboros.contracts.task_contract import attach_task_contract, build_task_contract, normalize_allowed_resources
-from ouroboros.schedule_contract import RESERVED_TEMPLATE_FIELDS, schedule_slug
-from ouroboros.skill_loader import skill_identity_collision_names
+from ouroboros.contracts.task_contract import attach_task_contract, build_task_contract, normalize_allowed_resources  # noqa: F401
+from ouroboros.schedule_contract import RESERVED_TEMPLATE_FIELDS, schedule_slug  # noqa: F401
+from ouroboros.skill_loader import skill_identity_collision_names  # noqa: F401
 from ouroboros.outcomes import terminal_outcome_axes
-from ouroboros.utils import atomic_write_json, read_json_dict, utc_now_iso
+from ouroboros.utils import atomic_write_json, read_json_dict, utc_now_iso  # noqa: F401
 from supervisor.evolution_lifecycle import (  # noqa: F401 -- public queue API and lazy scheduler dependencies
     _deliver_pending_owner_report,
     _read_evolution_campaign,
@@ -51,13 +55,14 @@ from supervisor.task_lifecycle import (  # noqa: F401 -- public queue API re-exp
     clear_acceptance_fence_for_root,
     resume_budget_paused_task, restore_queue_fences, transition_acceptance_fence,
 )
-from supervisor.cognitive_operations import _active_operation_progressing
 log = logging.getLogger(__name__)
 
 
 DRIVE_ROOT: pathlib.Path = pathlib.Path(DATA_DIR)
-SOFT_TIMEOUT_SEC: int = 600
-HARD_TIMEOUT_SEC: int = 1800
+# The queue snapshot path has ONE authority (MIGRATION row 1030, D18): this
+# module. init() rebinds it per drive root; the queue_snapshot leaf reads it
+# through the _queue() handle.
+QUEUE_SNAPSHOT_PATH: pathlib.Path = DRIVE_ROOT / "state" / "queue_snapshot.json"
 HEARTBEAT_STALE_SEC: int = 120
 QUEUE_MAX_RETRIES: int = 1
 FINALIZATION_GRACE_SEC: int = FINALIZATION_GRACE_DEFAULT_SEC
@@ -65,70 +70,25 @@ SCHEDULED_TASKS_FILE = pathlib.Path("state") / "scheduled_tasks.json"
 # BUG3: pause a campaign whose objective fails to absorb after this many reviewed cycles.
 # Mirrors the consecutive-failures threshold; keyed on the objective fingerprint, not failures.
 OBJECTIVE_REPEAT_CAP: int = 3
-_timeout_deprecation_emitted: bool = False
 
 
-def _task_deadline_ts(task: Dict[str, Any]) -> float:
-    raw = str(task.get("deadline_at") or "").strip()
-    if not raw:
-        metadata = task.get("metadata") if isinstance(task.get("metadata"), dict) else {}
-        raw = str(metadata.get("deadline_at") or "").strip()
-    if not raw:
-        contract = task.get("task_contract") if isinstance(task.get("task_contract"), dict) else {}
-        raw = str(contract.get("deadline_at") or "").strip()
-    if not raw:
-        return 0.0
-    try:
-        parsed = datetime.datetime.fromisoformat(raw.replace("Z", "+00:00"))
-        if parsed.tzinfo is None:
-            parsed = parsed.replace(tzinfo=datetime.timezone.utc)
-        return float(parsed.timestamp())
-    except Exception:
-        return 0.0
-
-
-def init(drive_root: pathlib.Path, soft_timeout: int, hard_timeout: int) -> None:
-    global DRIVE_ROOT, SOFT_TIMEOUT_SEC, HARD_TIMEOUT_SEC, FINALIZATION_GRACE_SEC, QUEUE_SNAPSHOT_PATH
+def init(drive_root: pathlib.Path) -> None:
+    global DRIVE_ROOT, FINALIZATION_GRACE_SEC, QUEUE_SNAPSHOT_PATH
     DRIVE_ROOT = drive_root
     QUEUE_SNAPSHOT_PATH = drive_root / "state" / "queue_snapshot.json"
-    legacy_keys = []
-    if int(soft_timeout) != 600:
-        legacy_keys.append("OUROBOROS_SOFT_TIMEOUT_SEC")
-    if int(hard_timeout) != 1800:
-        legacy_keys.append("OUROBOROS_HARD_TIMEOUT_SEC")
-    SOFT_TIMEOUT_SEC, HARD_TIMEOUT_SEC = 600, 1800
     FINALIZATION_GRACE_SEC = get_finalization_grace_sec()
     BUDGET_ROOT_FENCES.clear()
-    _emit_timeout_deprecation_once(legacy_keys)
 
 
 def refresh_timeouts_from_settings(settings: dict) -> None:
-    """Hot-reload active liveness settings; accept retired keys as typed no-ops."""
+    """Hot-reload the active liveness settings.
+
+    The flat wall-clock pair this once also had to absorb (soft/hard) is retired
+    in 7.0: load_settings strips the keys, so there is no stored value left to
+    accept, warn about, or lie about honoring.
+    """
     global FINALIZATION_GRACE_SEC
     FINALIZATION_GRACE_SEC = get_finalization_grace_sec(settings)
-    legacy_keys = []
-    if str(settings.get("OUROBOROS_SOFT_TIMEOUT_SEC", "600")) != "600":
-        legacy_keys.append("OUROBOROS_SOFT_TIMEOUT_SEC")
-    if str(settings.get("OUROBOROS_HARD_TIMEOUT_SEC", "1800")) != "1800":
-        legacy_keys.append("OUROBOROS_HARD_TIMEOUT_SEC")
-    _emit_timeout_deprecation_once(legacy_keys)
-
-
-def _emit_timeout_deprecation_once(keys: List[str]) -> None:
-    global _timeout_deprecation_emitted
-    if _timeout_deprecation_emitted or not keys:
-        return
-    _timeout_deprecation_emitted = True
-    append_jsonl(
-        pathlib.Path(DRIVE_ROOT) / "logs" / "events.jsonl",
-        {
-            "ts": utc_now_iso(),
-            "type": "deprecated_settings_ignored",
-            "keys": list(keys),
-            "remove_in": "7.0.0",
-            "replacement": "current task-liveness and shared planning-cutoff policies",
-        },
-    )
 
 
 # Set by workers.init_queue_refs().
@@ -140,8 +100,6 @@ ADMISSION_RESERVATIONS: Dict[str, str] = {}
 
 # Guards PENDING/RUNNING mutations across main loop, direct chat, watchdog.
 _queue_lock = threading.RLock()
-_last_skill_schedule_sync: float = 0.0
-_SKILL_SCHEDULE_SYNC_INTERVAL_SEC: float = 60.0
 from supervisor.task_admission import (  # noqa: E402,F401 - public queue API
     coerce_queue_order, prefer_terminalization_retry_rows, record_scheduled_admission,
     reject_invalid_task_depth, release_task_admission, restore_invalid_depth_admission,
@@ -325,739 +283,16 @@ def queue_has_task_type(task_type: str) -> bool:
     return False
 
 
-def _scheduled_tasks_path(drive_root: pathlib.Path | None = None) -> pathlib.Path:
-    return pathlib.Path(drive_root or DRIVE_ROOT) / SCHEDULED_TASKS_FILE
-
-
-def list_scheduled_tasks(drive_root: pathlib.Path | None = None) -> Dict[str, Any]:
-    """Return the persisted scheduled task table."""
-    data = read_json_dict(_scheduled_tasks_path(drive_root)) or {}
-    if not isinstance(data, dict):
-        data = {}
-    tasks = data.get("tasks")
-    if not isinstance(tasks, list):
-        data["tasks"] = []
-    data.setdefault("schema_version", 1)
-    return data
-
-
-def _write_scheduled_tasks(data: Dict[str, Any], drive_root: pathlib.Path | None = None) -> None:
-    path = _scheduled_tasks_path(drive_root)
-    path.parent.mkdir(parents=True, exist_ok=True)
-    atomic_write_json(path, data, trailing_newline=True)
-
-
-def upsert_scheduled_task(record: Dict[str, Any], *, drive_root: pathlib.Path | None = None) -> Dict[str, Any]:
-    """Create or replace a scheduled task record."""
-    with _queue_lock:
-        data = list_scheduled_tasks(drive_root)
-        tasks = [item for item in data.get("tasks") or [] if isinstance(item, dict)]
-        incoming = dict(record)
-        schedule_id = str(incoming.get("id") or "").strip() or uuid.uuid4().hex[:8]
-        incoming["id"] = schedule_id
-        incoming.setdefault("enabled", True)
-        incoming.setdefault("created_at", utc_now_iso())
-        incoming["updated_at"] = utc_now_iso()
-        if not incoming.get("next_run_at"):
-            incoming["next_run_at"] = _schedule_next_run(incoming)
-        tasks = [item for item in tasks if str(item.get("id") or "") != schedule_id]
-        tasks.append(incoming)
-        data["tasks"] = tasks
-        _write_scheduled_tasks(data, drive_root)
-        return incoming
-
-
-def remove_scheduled_task(schedule_id: str, *, drive_root: pathlib.Path | None = None) -> bool:
-    """Remove a scheduled task record by id."""
-    wanted = str(schedule_id or "").strip()
-    if not wanted:
-        return False
-    with _queue_lock:
-        data = list_scheduled_tasks(drive_root)
-        tasks = [item for item in data.get("tasks") or [] if isinstance(item, dict)]
-        kept = [item for item in tasks if str(item.get("id") or "") != wanted]
-        if len(kept) == len(tasks):
-            return False
-        data["tasks"] = kept
-        _write_scheduled_tasks(data, drive_root)
-        return True
-
-
-def sync_skill_schedules(skills: List[Any], *, drive_root: pathlib.Path | None = None) -> Dict[str, Any]:
-    """Sync reviewed skill manifest scheduled_tasks into the core schedule table."""
-    with _queue_lock:
-        data = list_scheduled_tasks(drive_root)
-        tasks = [item for item in data.get("tasks") or [] if isinstance(item, dict)]
-        by_id = {str(item.get("id") or ""): dict(item) for item in tasks}
-        touched: list[str] = []
-        blocked_skill_names = {
-            str(getattr(skill, "name", "") or "") for skill in skills
-            if bool(getattr(skill, "identity_collision", False))
-        }
-        changed = False
-        for skill in skills:
-            if bool(getattr(skill, "identity_collision", False)):
-                # Preserve prior rows: a collision is not a removed/runnable skill.
-                continue
-            manifest = getattr(skill, "manifest", None)
-            for spec in list(getattr(manifest, "scheduled_tasks", []) or []):
-                if not isinstance(spec, dict):
-                    continue
-                name = str(spec.get("name") or "").strip()
-                cron = str(spec.get("cron") or "").strip()
-                if not name or not cron:
-                    continue
-                schedule_id = schedule_slug("skill", str(getattr(skill, "name", "")), name)
-                touched.append(schedule_id)
-                # Schedule readiness plus the supervised_task permission.
-                try:
-                    from ouroboros.skill_readiness import skill_readiness_for_execution
-                    schedule_ready = skill_readiness_for_execution(pathlib.Path(drive_root or DRIVE_ROOT), skill).ready
-                except Exception:
-                    log.debug("skill schedule readiness probe failed for %s", getattr(skill, "name", ""), exc_info=True)
-                    schedule_ready = False
-                schedule_ready = schedule_ready and "supervised_task" in set(
-                    getattr(manifest, "permissions", []) or []
-                )
-                record = by_id.get(schedule_id, {})
-                trigger = {"type": "cron", "expr": cron}
-                timing_changed = (
-                    dict(record.get("trigger") or {}) != trigger
-                    or str(record.get("timezone") or "") != str(spec.get("timezone") or "")
-                    or str(record.get("skill_content_hash") or "") != str(getattr(skill, "content_hash", ""))
-                )
-                next_record = {
-                    **record,
-                    "id": schedule_id,
-                    "name": f"{getattr(skill, 'name', '')}/{name}",
-                    "description": str(spec.get("description") or f"Scheduled skill task {getattr(skill, 'name', '')}/{name}"),
-                    "enabled": bool(schedule_ready),
-                    "timezone": str(spec.get("timezone") or ""),
-                    "trigger": trigger,
-                    "task": {
-                        "type": "task",
-                        "text": (
-                            f"Run reviewed scheduled skill task `{getattr(skill, 'name', '')}/{name}`. "
-                            "Use skill_exec or the reviewed extension surface as appropriate, then report outcome."
-                        ),
-                        "metadata": {
-                            "source": "skill_scheduled_task",
-                            "skill": str(getattr(skill, "name", "")),
-                            "scheduled_task": name,
-                        },
-                    },
-                    "source": "skill_manifest",
-                    "skill": str(getattr(skill, "name", "")),
-                    "skill_content_hash": str(getattr(skill, "content_hash", "")),
-                    "updated_at": utc_now_iso(),
-                }
-                if timing_changed or not next_record.get("next_run_at"):
-                    next_record["next_run_at"] = _schedule_next_run(next_record)
-                if next_record != record:
-                    by_id[schedule_id] = next_record
-                    changed = True
-        for schedule_id, record in list(by_id.items()):
-            if (
-                str(record.get("source") or "") == "skill_manifest"
-                and str(record.get("skill") or "") not in blocked_skill_names
-                and schedule_id not in touched
-            ):
-                by_id.pop(schedule_id, None)
-                changed = True
-        if changed:
-            data["tasks"] = list(by_id.values())
-            _write_scheduled_tasks(data, drive_root)
-        return {"changed": changed, "skill_schedule_ids": touched}
-
-
-def resync_skill_schedules(drive_root: pathlib.Path | None = None) -> Dict[str, Any]:
-    """Mirror discovered manifest schedules after skill lifecycle changes."""
-    from ouroboros.config import get_skills_repo_path
-    from ouroboros.skill_loader import discover_skills
-
-    root = pathlib.Path(drive_root or DRIVE_ROOT)
-    return sync_skill_schedules(
-        discover_skills(root, repo_path=get_skills_repo_path()),
-        drive_root=root,
-    )
-
-
 # Cron/timezone schedule helpers live in supervisor/schedule_time.py (P7
 # module-size relief); imported under their historical private names.
 from supervisor.schedule_time import (  # noqa: E402
-    next_cron_time as _next_cron_time,
-    once_due as _once_due,
-    parse_schedule_time as _parse_schedule_time,
-    prune_consumed_once_records as _prune_consumed_once, record_last_error as _record_last_error,
-    schedule_next_run as _schedule_next_run,
-    timezone_for_schedule as _timezone_for_schedule,
+    next_cron_time as _next_cron_time,  # noqa: F401
+    once_due as _once_due,  # noqa: F401
+    parse_schedule_time as _parse_schedule_time,  # noqa: F401
+    prune_consumed_once_records as _prune_consumed_once, record_last_error as _record_last_error,  # noqa: F401
+    schedule_next_run as _schedule_next_run,  # noqa: F401
+    timezone_for_schedule as _timezone_for_schedule,  # noqa: F401
 )
-
-
-def _schedule_running_or_queued(schedule_id: str) -> bool:
-    if not schedule_id:
-        return False
-    for task in PENDING:
-        meta = task.get("metadata") if isinstance(task.get("metadata"), dict) else {}
-        if str(meta.get("schedule_id") or "") == schedule_id:
-            return True
-    for meta in RUNNING.values():
-        task = meta.get("task") if isinstance(meta, dict) else None
-        task_meta = task.get("metadata") if isinstance(task, dict) and isinstance(task.get("metadata"), dict) else {}
-        if str(task_meta.get("schedule_id") or "") == schedule_id:
-            return True
-    return False
-
-
-def _task_from_schedule(record: Dict[str, Any]) -> Dict[str, Any]:
-    template = dict(record.get("task") or {})
-    owner_chat_id = load_state().get("owner_chat_id") or 0
-    task_id = uuid.uuid4().hex[:8]
-    session_id = str(template.get("session_id") or f"schedule-{record.get('id') or task_id}")
-    raw_metadata = template.get("metadata") if isinstance(template.get("metadata"), dict) else {}
-    metadata = {
-        key: value for key, value in dict(raw_metadata).items()
-        if key not in RESERVED_TEMPLATE_FIELDS
-    }
-    task = {
-        "id": task_id,
-        "type": "task",
-        "text": str(template.get("text") or template.get("description") or record.get("description") or record.get("name") or "Scheduled task"),
-        "description": str(template.get("description") or template.get("text") or record.get("description") or record.get("name") or "Scheduled task"),
-        "chat_id": template.get("chat_id") if template.get("chat_id") not in (None, "") else owner_chat_id,
-        "priority": int(template["priority"]) if str(template.get("priority") or "").strip().lstrip("-").isdigit() else None,
-        "root_task_id": task_id,
-        "session_id": session_id,
-        "actor_id": "scheduler",
-        "delegation_role": "root",
-        "metadata": metadata,
-    }
-    for key in ("attachments", "context", "expected_output", "constraints", "deadline_at"):
-        if key in template:
-            task[key] = template[key]
-    allowed_resources = normalize_allowed_resources(template.get("allowed_resources") or metadata.get("allowed_resources") or {})
-    if allowed_resources:
-        task["allowed_resources"] = allowed_resources
-    existing_contract = template.get("task_contract") if isinstance(template.get("task_contract"), dict) else {}
-    if existing_contract:
-        task["task_contract"] = existing_contract
-    task["task_contract"] = build_task_contract(task)
-    task["metadata"]["schedule_id"] = str(record.get("id") or "")
-    task["metadata"]["schedule_name"] = str(record.get("name") or "")
-    task["metadata"]["schedule_trigger"] = dict(record.get("trigger") or {})
-    task["metadata"]["task_contract"] = task["task_contract"]
-    if allowed_resources:
-        task["metadata"]["allowed_resources"] = allowed_resources
-    if task.get("deadline_at"):
-        task["metadata"]["deadline_at"] = task.get("deadline_at")
-    task["metadata"].setdefault("source", "scheduled_task")
-    return task
-
-
-def check_scheduled_tasks() -> None:
-    """Queue due cron/on-idle schedules using the normal supervisor queue."""
-    global _last_skill_schedule_sync
-    with _queue_lock:
-        now_monotonic = time.monotonic()
-        if now_monotonic - _last_skill_schedule_sync >= _SKILL_SCHEDULE_SYNC_INTERVAL_SEC:
-            _last_skill_schedule_sync = now_monotonic
-            try:
-                resync_skill_schedules(DRIVE_ROOT)
-            except Exception:
-                log.debug("Failed to sync skill schedules during scheduler tick", exc_info=True)
-        data = list_scheduled_tasks()
-        changed = False
-        collision_names = None
-        now_utc = datetime.datetime.now(datetime.timezone.utc)
-        for record in list(data.get("tasks") or []):
-            if not isinstance(record, dict) or not record.get("enabled", True):
-                continue
-            schedule_id = str(record.get("id") or "").strip()
-            if not schedule_id:
-                record["id"] = uuid.uuid4().hex[:8]
-                schedule_id = str(record["id"])
-                changed = True
-            trigger = record.get("trigger") if isinstance(record.get("trigger"), dict) else {}
-            trigger_type = str(trigger.get("type") or "cron").strip().lower()
-            if _schedule_running_or_queued(schedule_id):
-                continue
-            tz = _timezone_for_schedule(record)
-            now = now_utc.astimezone(tz)
-            expr = ""
-            if trigger_type == "once":
-                # One-shot (B2b W=A): fires once at/after run_at via the same admission path
-                # as cron, then is marked done below. A consumed receipt (non-empty completed_at)
-                # NEVER re-fires even re-enabled from UI; re-arm = gateway upsert, fresh run_at.
-                if record.get("completed_at"):
-                    continue
-                due, once_error = _once_due(trigger, tz, now)
-                if once_error:
-                    changed = _record_last_error(record, once_error) or changed
-                    continue
-                if not due:
-                    continue
-            elif trigger_type != "cron":
-                changed = _record_last_error(record, f"unsupported trigger type: {trigger_type}") or changed
-                continue
-            else:
-                expr = str(trigger.get("expr") or record.get("cron") or "").strip()
-                if not expr:
-                    changed = _record_last_error(record, "missing cron expression") or changed
-                    continue
-                next_run = _parse_schedule_time(record.get("next_run_at"), tz)
-                if next_run is None:
-                    try:
-                        next_run = _next_cron_time(expr, now - datetime.timedelta(minutes=1))
-                        record["next_run_at"] = next_run.isoformat()
-                        changed = True
-                    except Exception as exc:
-                        changed = _record_last_error(record, f"{type(exc).__name__}: {exc}") or changed
-                        continue
-                if next_run > now:
-                    continue
-            if str(record.get("source") or "") == "skill_manifest":
-                if collision_names is None:
-                    collision_names = skill_identity_collision_names(DRIVE_ROOT)
-                if str(record.get("skill") or "") in collision_names:
-                    continue
-            task = _task_from_schedule(record)
-            try:
-                from ouroboros.task_results import STATUS_SCHEDULED, write_task_result
-
-                write_task_result(
-                    DRIVE_ROOT,
-                    str(task["id"]),
-                    STATUS_SCHEDULED,
-                    root_task_id=str(task["id"]),
-                    actor_id="scheduler",
-                    delegation_role="root",
-                    description=str(task.get("description") or task.get("text") or ""),
-                    expected_output=str(task.get("expected_output") or ""),
-                    constraints=str(task.get("constraints") or ""),
-                    context=str(task.get("context") or ""),
-                    allowed_resources=task.get("allowed_resources") if isinstance(task.get("allowed_resources"), dict) else {},
-                    deadline_at=str(task.get("deadline_at") or ""),
-                    task_contract=task.get("task_contract") if isinstance(task.get("task_contract"), dict) else {},
-                    result="Scheduled task queued.",
-                    metadata=dict(task.get("metadata") or {}),
-                    schedule_id=schedule_id,
-                    schedule_name=str(record.get("name") or ""),
-                )
-            except Exception:
-                log.debug("Failed to persist scheduled task result before enqueue", exc_info=True)
-            admitted = enqueue_task(task)
-            record["last_run_at"] = now.isoformat()
-            record["last_task_id"] = task["id"]
-            record_scheduled_admission(task, admitted, record)
-            if trigger_type == "once":
-                if not (isinstance(admitted, dict) and admitted.get("_admission_blocked")):
-                    # Consumed ONLY when admission succeeded (durable receipt, never re-fired); a
-                    # refused admission left the record enabled with last_error → next tick retries.
-                    record["enabled"] = False
-                    record["completed_at"] = now.isoformat()
-                    record["next_run_at"] = ""
-            else:
-                try:
-                    record["next_run_at"] = _next_cron_time(expr, now).isoformat()
-                except Exception as exc:
-                    record["last_error"] = f"{type(exc).__name__}: {exc}"
-            changed = True
-        # Consumed one-shot receipts age out past the unified GC retention (DEVELOPMENT
-        # Runtime Cleanup SSOT; enabled records are never pruned — see the helper).
-        from ouroboros.retention import age_cutoff, get_gc_retention_days
-
-        kept, pruned = _prune_consumed_once(list(data.get("tasks") or []),
-                                            age_cutoff(get_gc_retention_days()))
-        if pruned:
-            data["tasks"], changed = kept, True
-        if changed:
-            _write_scheduled_tasks(data)
-            persist_queue_snapshot(reason="scheduled_tasks")
-
-
-def _task_drive_for_task(task: Dict[str, Any], task_id: str) -> pathlib.Path:
-    """Active drive of a running task (child drive for forked/workspace tasks,
-    canonical otherwise) — where its mailbox and observability actually live.
-    Resolution mirrors forward_to_worker: task fields, then the result record."""
-    task = task if isinstance(task, dict) else {}
-    child = str(task.get("child_drive_root") or task.get("drive_root") or "").strip()
-    if not child:
-        try:
-            from ouroboros.task_results import load_task_result
-            record = load_task_result(pathlib.Path(DRIVE_ROOT), str(task_id)) or {}
-            child = str(record.get("child_drive_root") or record.get("headless_child_drive_root") or record.get("drive_root") or "").strip()
-        except Exception:
-            child = ""
-    return pathlib.Path(child) if child else pathlib.Path(DRIVE_ROOT)
-
-
-def _kept_service_pids() -> "set[int]":
-    """PIDs of deliberately-kept (session-scope) services to spare from a worker
-    tree-kill on cancel/hard-timeout. Best-effort; never raises."""
-    try:
-        from ouroboros.process_custody import live_kept_service_pids
-        return live_kept_service_pids(pathlib.Path(DRIVE_ROOT))
-    except Exception:
-        return set()
-
-
-def persist_queue_snapshot(reason: str = "") -> bool:
-    """Persist queue snapshot for restart/recovery diagnostics.
-
-    Snapshots PENDING/RUNNING under the queue lock: iterating the live dicts
-    while HTTP handlers mutate them raised "dictionary changed size during
-    iteration" in the supervisor loop (counted toward its crash limit).
-    """
-    with _queue_lock:
-        pending_items = [dict(t) for t in PENDING]
-        running_items = [
-            (task_id, dict(meta) if isinstance(meta, dict) else {})
-            for task_id, meta in RUNNING.items()
-        ]
-        acceptance_fences = [dict(row) for row in ACCEPTANCE_FENCES.values()]
-        budget_root_fences = [dict(row) for row in BUDGET_ROOT_FENCES.values()]
-        # Honest worker-pool counts from the ACTUAL pool (not the configured max): the live
-        # pool can be smaller (a crash-storm/direct-chat fallback clears WORKERS) and a slot
-        # mid-reap is popped from RUNNING but NOT assignable. Surface the real assignable-idle
-        # count so the context queue digest never falsely advertises a free worker slot.
-        try:
-            from supervisor import workers as _workers_mod
-
-            _ws = list(_workers_mod.WORKERS.values())
-            worker_total = len(_ws)
-            worker_pool_disabled_reason = str(
-                getattr(_workers_mod, "_WORKER_POOL_DISABLED_REASON", "") or ""
-            )
-            reaping_count = sum(1 for _w in _ws if getattr(_w, "reaping", False))
-            assignable_idle_workers = sum(
-                1 for _w in _ws
-                if getattr(_w, "busy_task_id", None) is None and not getattr(_w, "reaping", False)
-            )
-        except Exception:
-            worker_total = 0
-            worker_pool_disabled_reason = "unknown"
-            reaping_count = 0
-            assignable_idle_workers = 0
-    pending_rows = []
-    for t in pending_items:
-        pending_rows.append({
-            "id": t.get("id"), "type": t.get("type"), "priority": t.get("priority"),
-            "attempt": t.get("_attempt"), "queued_at": t.get("queued_at"),
-            "queue_seq": t.get("_queue_seq"),
-            "task": {
-                "id": t.get("id"), "type": t.get("type"), "chat_id": t.get("chat_id"),
-                "text": t.get("text"), "priority": t.get("priority"),
-                "depth": t.get("depth"), "description": t.get("description"),
-                "objective": t.get("objective"), "title": t.get("title"),
-                "expected_output": t.get("expected_output"),
-                "constraints": t.get("constraints"), "role": t.get("role"),
-                "context": t.get("context"), "parent_task_id": t.get("parent_task_id"),
-                "root_task_id": t.get("root_task_id"), "session_id": t.get("session_id"),
-                "actor_id": t.get("actor_id"), "delegation_role": t.get("delegation_role"),
-                "workspace_root": t.get("workspace_root"), "workspace_mode": t.get("workspace_mode"),
-                "project_id": t.get("project_id"),
-                "allowed_resources": t.get("allowed_resources"), "deadline_at": t.get("deadline_at"),
-                "task_contract": t.get("task_contract"),
-                # Scheduling INTENT survives a restart and is all a PENDING child has;
-                # `parent_model_lane` and the F9 admission fact `required_model_lane`
-                # above all (R2-3). Pinned to SUBAGENT_INTENT_FIELDS by test_model_slot.
-                "model_lane": t.get("model_lane"), "parent_model_lane": t.get("parent_model_lane"),
-                "requested_model_lane": t.get("requested_model_lane"),
-                "required_model_lane": t.get("required_model_lane"), "requested_executor": t.get("requested_executor"),
-                "effective_model_lane": t.get("effective_model_lane"),
-                "model": t.get("model"), "use_local_model": t.get("use_local_model"),
-                "effective_executor": t.get("effective_executor"), "tool_profile": t.get("tool_profile"),
-                "executor_route": t.get("executor_route"), "reasoning_effort": t.get("reasoning_effort"),
-                "capability_delta": t.get("capability_delta"),
-                "task_group_id": t.get("task_group_id"),
-                "task_group": t.get("task_group"),
-                "subagent_envelope": t.get("subagent_envelope"), "configured_subagent": t.get("configured_subagent"),
-                "memory_mode": t.get("memory_mode"), "drive_root": t.get("drive_root"), "parent_cognitive_route": t.get("parent_cognitive_route"), "subagent_availability": t.get("subagent_availability"),
-                "child_drive_root": t.get("child_drive_root"),
-                "budget_drive_root": t.get("budget_drive_root"),
-                "task_constraint": t.get("task_constraint"), "predecessor_authority_source": t.get("predecessor_authority_source"),
-                "metadata": t.get("metadata"), "origin_message_ref": t.get("origin_message_ref"),
-                "origin_message_text": t.get("origin_message_text"), "_attempt": t.get("_attempt"),
-                "review_reason": t.get("review_reason"), "review_source_task_id": t.get("review_source_task_id"),
-                "_budget_pause": t.get("_budget_pause"), "budget_resumed_at": t.get("budget_resumed_at"), "_terminalization_retry": t.get("_terminalization_retry"),
-                "_cancel_intent_authority_hold": t.get("_cancel_intent_authority_hold"),
-            },
-        })
-    running_rows = []
-    now = time.time()
-    for task_id, meta in running_items:
-        task = meta.get("task") if isinstance(meta, dict) else {}
-        started = float(meta.get("started_at") or 0.0) if isinstance(meta, dict) else 0.0
-        hb = float(meta.get("last_heartbeat_at") or 0.0) if isinstance(meta, dict) else 0.0
-        running_rows.append({
-            "id": task_id, "type": task.get("type"), "priority": task.get("priority"),
-            "attempt": meta.get("attempt"), "worker_id": meta.get("worker_id"),
-            "runtime_sec": round(max(0.0, now - started), 2) if started > 0 else 0.0,
-            "heartbeat_lag_sec": round(max(0.0, now - hb), 2) if hb > 0 else None,
-            "soft_sent": bool(meta.get("soft_sent")), "task": task,
-        })
-    payload = {
-        "ts": utc_now_iso(),
-        "reason": reason,
-        "pending_count": len(pending_items), "running_count": len(running_items),
-        "reaping_count": reaping_count,
-        "worker_total": worker_total,
-        "worker_pool_disabled_reason": worker_pool_disabled_reason,
-        "assignable_idle_workers": assignable_idle_workers,
-        "acceptance_fences": acceptance_fences,
-        "budget_root_fences": budget_root_fences,
-        "pending": pending_rows, "running": running_rows,
-    }
-    try:
-        atomic_write_text(QUEUE_SNAPSHOT_PATH, json.dumps(payload, ensure_ascii=False, indent=2))
-        return True
-    except Exception:
-        log.warning("Failed to persist queue snapshot (reason=%s)", reason, exc_info=True)
-        return False
-
-
-def parse_iso_to_ts(iso_ts: str) -> Optional[float]:
-    """Parse ISO timestamp to Unix time."""
-    txt = str(iso_ts or "").strip()
-    if not txt:
-        return None
-    try:
-        return datetime.datetime.fromisoformat(txt.replace("Z", "+00:00")).timestamp()
-    except Exception:
-        log.debug("Failed to parse ISO timestamp: %s", txt, exc_info=True)
-        return None
-
-
-def restore_pending_from_snapshot(max_age_sec: int = 900) -> int:
-    """Restore recent pending tasks from queue snapshot."""
-    if PENDING:
-        return 0
-    try:
-        if not QUEUE_SNAPSHOT_PATH.exists():
-            return 0
-        snap = json.loads(QUEUE_SNAPSHOT_PATH.read_text(encoding="utf-8"))
-        if not isinstance(snap, dict):
-            return 0
-        ts = str(snap.get("ts") or "")
-        ts_unix = parse_iso_to_ts(ts)
-        if ts_unix is None:
-            return 0
-        if (time.time() - ts_unix) > max_age_sec:
-            return 0
-        from ouroboros.task_results import (
-            _TRULY_TERMINAL_STATUSES, STATUS_CANCEL_REQUESTED, STATUS_CANCELLED,
-            load_task_result, write_task_result,
-        )
-        raw_fences = snap.get("acceptance_fences", [])
-        raw_budget_fences = snap.get("budget_root_fences", [])
-        snapshot_pending = [
-            row.get("task")
-            for row in (snap.get("pending") or [])
-            if isinstance(row, dict) and isinstance(row.get("task"), dict)
-        ]
-        snapshot_pending, pending_by_id, restored = restore_terminalization_retry_rows(
-            snapshot_pending, pending=PENDING, running=RUNNING,
-            queue_seq_counter_ref=QUEUE_SEQ_COUNTER_REF, sort_pending=sort_pending,
-        )
-        fenced_roots, malformed_fences, malformed_budget_fences = restore_queue_fences(raw_fences, raw_budget_fences)
-        if malformed_budget_fences:
-            append_jsonl(
-                DRIVE_ROOT / "logs" / "supervisor.jsonl",
-                {"ts": utc_now_iso(), "type": "queue_restore_invalid_budget_root_fences",
-                 "action": "fail_closed_no_restore"},
-            )
-            return restored
-        if malformed_fences:
-            affected = [str(task.get("id") or "") for task in snapshot_pending if task.get("id")]
-            append_jsonl(
-                DRIVE_ROOT / "logs" / "supervisor.jsonl",
-                {
-                    "ts": utc_now_iso(),
-                    "type": "queue_restore_invalid_acceptance_fences",
-                    "affected_task_ids": affected,
-                    "action": "fail_closed_no_restore",
-                },
-            )
-            try:
-                for task in snapshot_pending:
-                    task_id = str(task.get("id") or "")
-                    if task_id:
-                        existing = load_task_result(DRIVE_ROOT, task_id) or {}
-                        write_task_result(
-                            DRIVE_ROOT,
-                            task_id,
-                            STATUS_CANCELLED,
-                            **_cancel_result_fields(
-                                task,
-                                existing=existing,
-                                result="Task was not restored because its acceptance-fence snapshot was invalid.",
-                            ),
-                        )
-            except Exception:
-                log.warning("Failed to terminalize tasks from invalid acceptance-fence snapshot", exc_info=True)
-            return restored
-
-        skipped_terminal, invalid_depth_restore = 0, []
-        cancel_authority_holds: list[str] = []
-        skipped_fenced, blocked_restore = [], []
-        for task in snapshot_pending:
-            chat_id = task.get("chat_id")
-            if not task.get("id") or chat_id is None or chat_id == "":
-                continue
-            fenced = False
-            for fenced_root in fenced_roots:
-                if str(task.get("root_task_id") or "") == fenced_root:
-                    fenced = True
-                    break
-                current = task
-                seen: set[str] = set()
-                while isinstance(current, dict):
-                    parent_id = str(current.get("parent_task_id") or "")
-                    if not parent_id or parent_id in seen:
-                        break
-                    if parent_id == fenced_root:
-                        fenced = True
-                        break
-                    seen.add(parent_id)
-                    current = pending_by_id.get(parent_id)
-                if fenced:
-                    break
-            if fenced:
-                task_id = str(task.get("id") or "")
-                skipped_fenced.append(task_id)
-                try:
-                    existing = load_task_result(DRIVE_ROOT, task_id) or {}
-                    write_task_result(
-                        DRIVE_ROOT,
-                        task_id,
-                        STATUS_CANCELLED,
-                        **_cancel_result_fields(
-                            task,
-                            existing=existing,
-                            result="Task was not restored after restart because its root had entered acceptance review.",
-                        ),
-                    )
-                except Exception:
-                    log.warning("Failed to terminalize fenced snapshot task %s", task_id, exc_info=True)
-                continue
-            # AR2-10 (§8-A1): restore and the intent check share the queue lock.
-            with _queue_lock:
-                skip_revival = False
-                try:
-                    existing = load_task_result(DRIVE_ROOT, str(task.get("id")), strict=True)
-                    existing_status = str(existing.get("status") or "") if existing else ""
-                except Exception:
-                    # Result-authority loss already has terminal custody: once
-                    # its retry can prove a writable result, the task is failed
-                    # rather than replayed over an unknown exact-id lifecycle.
-                    task["_terminalization_retry"] = {
-                        "reason": "Pending task result authority is unreadable; dispatch is blocked.",
-                        "status": "failed",
-                        "trigger": "pending_result_authority",
-                        "reconcile_delegate_custody": False,
-                    }
-                    restore_terminalization_retry(
-                        task, pending=PENDING, running=RUNNING,
-                        queue_seq_counter_ref=QUEUE_SEQ_COUNTER_REF,
-                        sort_pending=sort_pending,
-                    )
-                    skipped_terminal += 1
-                    log.debug(
-                        "Snapshot restore result-authority check failed for %s",
-                        task.get("id"),
-                        exc_info=True,
-                    )
-                    continue
-                else:
-                    # Terminal OR cancel-intent — both must not be resurrected as
-                    # pending. Intent lives in the durable projection (phase A);
-                    # the status check covers legacy latch files.
-                    if not isinstance(task.get("_terminalization_retry"), dict) and (existing_status in _TRULY_TERMINAL_STATUSES or existing_status == STATUS_CANCEL_REQUESTED):
-                        skip_revival = True
-                    elif not isinstance(task.get("_terminalization_retry"), dict):
-                        try:
-                            from ouroboros.cancel_intents import has_active_intent
-
-                            if has_active_intent(
-                                DRIVE_ROOT, str(task.get("id")), strict=True,
-                            ):
-                                # Cancellation custody owns it; never revive a pending row.
-                                skip_revival = True
-                        except Exception:
-                            # This is an UNKNOWN cancel fact, not a terminal
-                            # outcome. Restore the ordinary row under a durable,
-                            # non-dispatchable hold; the pre-dispatch SSOT later
-                            # resolves it after both authorities are readable.
-                            task = dict(task)
-                            task["_cancel_intent_authority_hold"] = {
-                                "reason": "Cancel-intent authority is unreadable; dispatch is blocked.",
-                                "held_at": utc_now_iso(),
-                            }
-                            admitted = enqueue_task(task, restoring_snapshot=True)
-                            if isinstance(admitted, dict) and admitted.get("_admission_blocked"):
-                                restore_invalid_depth_admission(
-                                    task, admitted, drive_root=DRIVE_ROOT,
-                                    pending=PENDING, blocked=blocked_restore,
-                                    terminalized=invalid_depth_restore,
-                                    queue_seq_counter_ref=QUEUE_SEQ_COUNTER_REF,
-                                )
-                                try:
-                                    sort_pending()
-                                except (TypeError, ValueError, OverflowError):
-                                    log.warning(
-                                        "Deferred snapshot sort failed; custody retained",
-                                        exc_info=True,
-                                    )
-                            else:
-                                restored += 1
-                                cancel_authority_holds.append(str(task.get("id") or ""))
-                            log.debug(
-                                "Snapshot restore cancel-intent authority check failed for %s",
-                                task.get("id"),
-                                exc_info=True,
-                            )
-                            continue
-                if skip_revival:
-                    skipped_terminal += 1
-                    continue
-                admitted = enqueue_task(task, restoring_snapshot=True)
-                if isinstance(admitted, dict) and admitted.get("_admission_blocked"):
-                    restore_invalid_depth_admission(task, admitted, drive_root=DRIVE_ROOT, pending=PENDING, blocked=blocked_restore, terminalized=invalid_depth_restore, queue_seq_counter_ref=QUEUE_SEQ_COUNTER_REF)
-                    try:
-                        sort_pending()
-                    except (TypeError, ValueError, OverflowError):
-                        log.warning("Deferred snapshot sort failed; custody retained", exc_info=True)
-                    continue
-            restored += 1
-        if skipped_fenced:
-            append_jsonl(
-                DRIVE_ROOT / "logs" / "supervisor.jsonl",
-                {
-                    "ts": utc_now_iso(),
-                    "type": "queue_restore_skipped_acceptance_fence",
-                    "task_ids": skipped_fenced,
-                    "root_task_ids": sorted(fenced_roots),
-                },
-            )
-        if restored > 0 or skipped_terminal > 0 or blocked_restore:
-            append_jsonl(
-                DRIVE_ROOT / "logs" / "supervisor.jsonl",
-                {
-                    "ts": utc_now_iso(),
-                    "type": "queue_restored_from_snapshot",
-                    "restored_pending": restored,
-                    "skipped_terminal": skipped_terminal,
-                    "cancel_authority_holds": cancel_authority_holds,
-                    "blocked_admission": blocked_restore, "invalid_task_depth": invalid_depth_restore,
-                },
-            )
-        sweep_orphaned_budget_fences(PENDING, BUDGET_ROOT_FENCES, DRIVE_ROOT)
-        if restored > 0 or skipped_terminal > 0 or invalid_depth_restore:
-            persist_queue_snapshot(reason="queue_restored")
-        return restored
-    except Exception:
-        log.warning("Failed to restore pending queue from snapshot", exc_info=True)
-        return 0
 
 
 def _emit_cancel_task_done(
@@ -1095,7 +330,8 @@ def _emit_cancel_task_done(
                 ),
                 **(cost_fields or {
                     "cost_accounting_status": "unavailable", "cost_final": False,
-                    "cost_usd": None,
+                    # ABI-3: honest name only — the retired alias is read-only.
+                    "accounted_upper_bound_usd": None,
                 }),
                 "metadata": (task or {}).get("metadata") if isinstance((task or {}).get("metadata"), dict) else {},
         })
@@ -1135,336 +371,6 @@ def _cancel_task_by_id_single(task_id: str) -> bool:
 # so `supervisor.queue` stays the single import surface for callers.
 
 
-def enforce_task_timeouts() -> None:
-    """Enforce soft/hard timeouts for running tasks.
-
-    Holds the queue lock for the whole pass: RUNNING pops and worker respawn
-    decisions raced with HTTP cancel handlers (double respawn → orphaned
-    worker; wrong-task dequeue). The RLock keeps nested respawn/assign calls
-    re-entrant.
-    """
-    # Avoid circular dependency during module load.
-    from supervisor import workers
-
-    if not RUNNING:
-        return
-    now = time.time()
-    st = load_state()
-    owner_chat_id = int(st.get("owner_chat_id") or 0)
-
-    with _queue_lock:
-        _enforce_task_timeouts_locked(workers, now, owner_chat_id, st)
-
-
-def _is_descendant_of(task: Dict[str, Any], ancestor_id: str) -> bool:
-    """True if `task` is in the subtree rooted at ancestor_id. Cheap in-memory (no I/O):
-    root_task_id == ancestor_id (covers the common root-orchestrator case even when an
-    INTERMEDIATE parent has already left RUNNING — a grandchild whose parent finished is
-    still a descendant of the root), OR the parent_task_id chain (via RUNNING metas)
-    reaches ancestor_id (covers a mid-tree ancestor while the chain is intact).
-    """
-    if not isinstance(task, dict) or not ancestor_id:
-        return False
-    if str(task.get("root_task_id") or "") == ancestor_id:
-        return True
-    cur = task
-    hops = 0
-    while isinstance(cur, dict) and hops < 25:
-        pid = str(cur.get("parent_task_id") or "")
-        if not pid:
-            return False
-        if pid == ancestor_id:
-            return True
-        nxt = RUNNING.get(pid)
-        cur = nxt.get("task") if isinstance(nxt, dict) and isinstance(nxt.get("task"), dict) else None
-        hops += 1
-    return False
-
-
-def _subtree_progressing(task_id: str, now: float, idle_timeout: float) -> bool:
-    """True if any RUNNING descendant of task_id made real progress within idle_timeout.
-
-    In-memory walk over RUNNING only (NO I/O — this runs under the queue lock): keeps a
-    productively-waiting orchestrator alive while its children work, instead of a flat
-    wall-clock kill. Descendant freshness uses last_progress_at (real progress), not the
-    bare liveness heartbeat.
-    """
-    if not task_id:
-        return False
-    for tid, m in list(RUNNING.items()):
-        if tid == task_id or not isinstance(m, dict):
-            continue
-        if not _is_descendant_of(m.get("task") if isinstance(m.get("task"), dict) else {}, task_id):
-            continue
-        # Real progress only (NOT the bare 30s liveness heartbeat): a child that merely
-        # pings but makes no progress must not keep its ancestor alive.
-        lp = float(m.get("last_progress_at") or m.get("started_at") or 0.0)
-        if lp and (now - lp) < idle_timeout:
-            return True
-    return False
-
-
-def _has_live_descendant(task_id: str) -> bool:
-    """True if any LIVE (RUNNING or PENDING) task is a descendant of task_id (in-memory, no
-    I/O). Used to recognise an orchestrator at kill time so it is NOT blind-retried — a
-    blind retry would replay the plan and re-spawn the whole subtree (the timeout storm).
-    PENDING is included: a parent can time out while its children are merely QUEUED (worker
-    saturation / project lease), and those queued children are still its live subtree.
-    """
-    if not task_id:
-        return False
-    for tid, m in list(RUNNING.items()):
-        if tid == task_id or not isinstance(m, dict):
-            continue
-        if _is_descendant_of(m.get("task") if isinstance(m.get("task"), dict) else {}, task_id):
-            return True
-    for t in list(PENDING):
-        if not isinstance(t, dict) or str(t.get("id") or "") == task_id:
-            continue
-        if _is_descendant_of(t, task_id):
-            return True
-    return False
-
-
-def _has_pending_descendant(task_id: str) -> bool:
-    """True if any PENDING (queued, not yet assigned) task is a descendant of task_id. A
-    parent whose children are merely WAITING for worker capacity (saturation / project lease)
-    is not idle/stuck — keep it alive (bounded by the absolute ceiling) so it can integrate
-    them once they run, instead of killing it and orphaning the queued subtree."""
-    if not task_id:
-        return False
-    for t in list(PENDING):
-        if not isinstance(t, dict) or str(t.get("id") or "") == task_id:
-            continue
-        if _is_descendant_of(t, task_id):
-            return True
-    return False
-
-def _enforce_task_timeouts_locked(
-    workers: Any, now: float, owner_chat_id: int, st: Dict[str, Any]
-) -> None:
-    # ONE typed owner-stop predicate before the generic idle/grace consumers (S3
-    # §12.2 item 8): an OPEN owner-requested finalization intent suppresses the
-    # ordinary spare-withdraw/second-grace/retry path only while the task remains
-    # inside its independent explicit deadline and absolute safety ceiling. The
-    # intent stays the one owner will and cancellation custody stays the killer;
-    # a later graceful request can never extend either hard axis.
-    from supervisor.owner_stop import running_owner_stop_tasks
-
-    owner_stop_held = running_owner_stop_tasks(
-        DRIVE_ROOT, grace_sec=FINALIZATION_GRACE_SEC,
-    )
-    for task_id, meta in list(RUNNING.items()):
-        if not isinstance(meta, dict):
-            continue
-        task = meta.get("task") if isinstance(meta.get("task"), dict) else {}
-        started_at = float(meta.get("started_at") or 0.0)
-        if started_at <= 0:
-            continue
-        last_hb = float(meta.get("last_heartbeat_at") or started_at)
-        runtime_sec = max(0.0, now - started_at)
-        hb_lag_sec = max(0.0, now - last_hb)
-        hb_stale = hb_lag_sec >= HEARTBEAT_STALE_SEC
-        _wid = meta.get("worker_id")
-        worker_id = int(_wid) if _wid is not None else -1
-        task_type = str(task.get("type") or "")
-        _att = meta.get("attempt")
-        if _att is None:
-            _att = task.get("_attempt")
-        attempt = int(_att) if _att is not None else 1
-
-        deadline_ts = _task_deadline_ts(task)
-        deadline_reached = bool(deadline_ts and now >= deadline_ts)
-
-        idle_timeout = max(
-            float(get_task_idle_timeout_sec()),
-            float(get_per_call_timeout_ceiling_sec()) + 120.0,
-        )
-        # deep_self_review runs a single long 1M-context LLM call with NO intermediate
-        # progress events (no tool loop), so the idle timer governs it from started_at;
-        # its prior ~60min tolerance is preserved so it is not idle-killed mid-call.
-        if task_type == "deep_self_review":
-            idle_timeout = max(idle_timeout, 3600.0)
-        abs_ceiling = float(get_task_abs_ceiling_sec())
-        last_progress_at = float(meta.get("last_progress_at") or started_at)
-        idle_sec = max(0.0, now - last_progress_at)
-        subtree_progressing = _subtree_progressing(task_id, now, idle_timeout)
-        own_progress = idle_sec < idle_timeout
-        # B3 external-wait lease: a held delegate_wait window over a live delegated run
-        # is legitimate silence (hard-bounded by events._handle_external_wait_lease);
-        # it spares ONLY this idle rail — ceiling/deadline/budget/cancel never consult it.
-        lease_ts = meta.get("external_wait_lease_until")
-        active_llm_call = meta.get("active_llm_call")
-        llm_call_in_flight = isinstance(active_llm_call, dict) and active_llm_call.get("task_attempt") == attempt
-        progressing = (own_progress or subtree_progressing or _has_pending_descendant(task_id)
-                       or (isinstance(lease_ts, (int, float)) and float(lease_ts) > now)
-                       or llm_call_in_flight
-                       or _active_operation_progressing(meta, now))
-        ceiling_reached = runtime_sec >= abs_ceiling
-
-        if (
-            str(task_id) in owner_stop_held
-            and not deadline_reached
-            and not ceiling_reached
-        ):
-            # The owner-stop episode replaces only the generic idle/grace
-            # machinery.  Explicit task deadline and the absolute safety
-            # ceiling remain independent hard axes and may never be extended
-            # by a later graceful-stop request.
-            continue
-
-        # Hard axes (deadline_at, abs ceiling) stop the task regardless of activity; the
-        # idle/subtree gate only spares a still-progressing task with NO explicit deadline —
-        # an explicit/caller deadline is honored promptly, while no blanket wall-clock kills
-        # a productively-waiting orchestrator.
-        if not ceiling_reached and not deadline_reached and progressing:
-            # An outstanding episode outlives this reprieve or is withdrawn by it; the rule
-            # (own progress answers the request, sparing only suspends its clock) lives with
-            # the rest of the episode mechanics in task_reaper. The latch is checked here so
-            # the drive resolution (which may read the result record) stays off the no-episode path.
-            if meta.get("finalization_requested_at") and _resolve_grace_episode_for_spared_task(
-                _task_drive_for_task(task, str(task_id)), str(task_id), meta,
-                chat_id=int(task.get("chat_id") or owner_chat_id or 0),
-                own_progress=own_progress, now=now,
-            ):
-                RUNNING[task_id] = meta
-            continue
-
-        if ceiling_reached:
-            terminal_reason = "absolute_ceiling"
-        elif deadline_reached:
-            terminal_reason = "deadline"
-        else:
-            terminal_reason = "idle_timeout"
-        finalization_requested_at = float(meta.get("finalization_requested_at") or 0.0)
-        if finalization_requested_at <= 0 and FINALIZATION_GRACE_SEC > 0:
-            meta["finalization_requested_at"] = now
-            meta["finalization_reason"] = terminal_reason
-            # The control's msg_id IS the episode's identity: it is what the
-            # symmetric withdraw revokes, so the latch and the mailbox control
-            # can never name different episodes.
-            meta["finalization_control_msg_id"] = _request_finalization_grace(
-                _task_drive_for_task(task, str(task_id)), str(task_id), terminal_reason,
-                chat_id=int(task.get("chat_id") or owner_chat_id or 0),
-                stamp=int(now),
-            )
-            RUNNING[task_id] = meta
-            continue
-        if finalization_requested_at > 0 and now - finalization_requested_at < FINALIZATION_GRACE_SEC:
-            continue
-
-        # NOTE: "worker self-finalized at the idle boundary" is handled by the reaper's
-        # POST-KILL terminal re-check (kill+join FIRST, then honor an on-disk terminal
-        # result, idempotent task_done). No short-circuit here: freeing the slot inline
-        # would let assign_tasks reuse it mid-flight and could drop the terminal event.
-
-        # Variant A: hand the ENTIRE teardown to the background reaper so the loop tick
-        # stays fast and the terminal write + retry enqueue happen only AFTER kill/join
-        # (no race with a concurrently-assigned retry; a subagent retry reuses id/drive).
-        # Live-RUNNING decisions (orchestrator -> no blind retry; retry id) freeze HERE.
-        # Linearize the timeout decision against cancellation before withdrawing
-        # RUNNING.  When an intent already owns either this physical attempt or
-        # its proven logical retry root, yield the whole rail: cancellation
-        # custody remains the sole killer and preserves the owner's outcome and
-        # reason instead of racing a generic timeout FAILED write.
-        cancel_authority_unreadable = False
-        try:
-            from ouroboros.cancel_intents import (
-                _validated_retry_root_cancel_key,
-                active_intents,
-                cancellation_projection_lock,
-            )
-
-            with cancellation_projection_lock(DRIVE_ROOT):
-                retry_root = _validated_retry_root_cancel_key(
-                    DRIVE_ROOT, str(task_id), task_hint=task,
-                )
-                intents = active_intents(DRIVE_ROOT, strict=True)
-                cancel_target = next(
-                    (
-                        candidate
-                        for candidate in dict.fromkeys((str(task_id), retry_root))
-                        if candidate and candidate in intents
-                    ),
-                    "",
-                )
-                if cancel_target:
-                    continue
-        except Exception:
-            # Preserve the prior absolute/deadline timeout behavior when
-            # cancellation authority itself is damaged, but never let that
-            # uncertainty mint a fresh retry authority below.
-            cancel_authority_unreadable = True
-            log.error(
-                "Task timeout could not prove cancel-intent authority for %s",
-                task_id,
-                exc_info=True,
-            )
-        if task_type == "evolution":
-            from supervisor.evolution_lifecycle import update_evolution_transaction
-            if not update_evolution_transaction(task_id, dispatch_status="reaping"):
-                log.warning("Evolution timeout teardown deferred: reaping state was not durable for %s", task_id)
-                continue
-        RUNNING.pop(task_id, None)
-        proc_handle = None
-        if worker_id in workers.WORKERS:
-            w = workers.WORKERS[worker_id]
-            if w.busy_task_id == task_id:
-                w.busy_task_id = None
-            # Mark reaping under the lock so assign_tasks and the crash detector both skip
-            # this slot until the reaper installs a fresh worker.
-            w.reaping = True
-            proc_handle = w.proc
-
-        # NOTE: the "no blind retry of an orchestrator with live descendants" guarantee is
-        # TIMEOUT-REAPING-specific (this path). The worker-CRASH path
-        # (workers._ensure_workers_healthy_locked) has its own signal-vs-attempt retry
-        # semantics and is intentionally not gated here; a crashed-orchestrator storm is a
-        # separate, rarer concern than the flat-wall-clock timeout storm this batch targets.
-        orchestrator = _has_live_descendant(task_id)
-        will_retry = (
-            attempt <= QUEUE_MAX_RETRIES
-            and isinstance(task, dict)
-            and not deadline_reached
-            and not ceiling_reached
-            and not orchestrator
-        )
-        # A stopped evolution campaign breaks the auto-retry chain. `st` is the live state
-        # loaded this tick, so this reflects the current owner decision.
-        if will_retry and task_type == "evolution" and not bool(st.get("evolution_mode_enabled")):
-            will_retry = False
-        # An unreadable projection/lineage cannot authorize a new dispatch.
-        # Readable active intents already yielded the timeout rail above.
-        if will_retry and cancel_authority_unreadable:
-            will_retry = False
-        retry_task_id = ""
-        if will_retry:
-            same_id = task_type == "evolution" or str(task.get("delegation_role") or "") == "subagent"
-            retry_task_id = task_id if same_id else uuid.uuid4().hex[:8]
-
-        _ensure_reaper_started()
-        _reap_queue.put({
-            "worker_id": worker_id,
-            "proc": proc_handle,
-            "task_id": str(task_id),
-            "task": task,
-            "task_type": task_type,
-            "terminal_reason": terminal_reason,
-            "attempt": attempt,
-            "owner_chat_id": owner_chat_id,
-            "runtime_sec": runtime_sec,
-            "hb_lag_sec": hb_lag_sec,
-            "hb_stale": hb_stale,
-            "deadline_reached": deadline_reached,
-            "ceiling_reached": ceiling_reached,
-            "orchestrator": orchestrator,
-            "will_retry": will_retry,
-            "retry_task_id": retry_task_id,
-            "incident_toast_once": f"{task_id}:{terminal_reason}:{int(finalization_requested_at or now)}",
-        })
-        persist_queue_snapshot(reason="task_timeout_reap_queued")
-
-
 def queue_deep_self_review_task(reason: str, model: str = "", force: bool = False, chat_id: Optional[int] = None) -> Optional[str]:
     """Queue a deep self-review task.
 
@@ -1472,8 +378,10 @@ def queue_deep_self_review_task(reason: str, model: str = "", force: bool = Fals
     ``/review``) so the queued ack and the task results return to the requester
     instead of always defaulting to the web owner's ``owner_chat_id``.
     """
-    target_chat_id = chat_id if chat_id else load_state().get("owner_chat_id")
-    if not target_chat_id:
+    # Membership, not truthiness: a review asked for from the hidden partition
+    # is answered there, not silently re-routed to the owner's main chat.
+    target_chat_id = notification_chat_route(chat_id, load_state().get("owner_chat_id"))
+    if target_chat_id is None:
         return None
     if (not force) and queue_has_task_type("deep_self_review"):
         return None
@@ -1486,7 +394,9 @@ def queue_deep_self_review_task(reason: str, model: str = "", force: bool = Fals
         "model": model,
     })
     persist_queue_snapshot(reason="deep_self_review_enqueued")
-    send_with_budget(int(target_chat_id), f"🔎 Deep self-review queued: {tid} ({reason})")
+    # Typed SYSTEM row: an acknowledgement is never a task's answer, and the bench
+    # trajectory reader takes the last UNTYPED outbound row as one.
+    send_with_budget(int(target_chat_id), f"🔎 Deep self-review queued: {tid} ({reason})", role="system", system_type="deep_self_review_queued")
     return tid
 
 
@@ -1591,3 +501,37 @@ def get_evolution_status_snapshot(*, budget_projection: Optional[Dict[str, Any]]
         "queued_task_id": str((queued_task or {}).get("id") or ""),
         "running_task_id": str((running_task or {}).get("id") or ""),
     }
+
+
+# v7next F1 (D08): moved spans live in their owner leaves; re-exported here
+# so this facade stays the single import surface for callers and tests.
+from supervisor.queue_schedules import (  # noqa: E402, F401 -- intentional public re-exports
+    _SKILL_SCHEDULE_SYNC_INTERVAL_SEC,
+    _last_skill_schedule_sync,
+    _schedule_running_or_queued,
+    _scheduled_tasks_path,
+    _task_from_schedule,
+    _write_scheduled_tasks,
+    check_scheduled_tasks,
+    list_scheduled_tasks,
+    remove_scheduled_task,
+    resync_skill_schedules,
+    sync_skill_schedules,
+    upsert_scheduled_task,
+)
+from supervisor.queue_snapshot import (  # noqa: E402, F401 -- intentional public re-exports
+    _kept_service_pids,
+    parse_iso_to_ts,
+    persist_queue_snapshot,
+    restore_pending_from_snapshot,
+)
+from supervisor.queue_timeouts import (  # noqa: E402, F401 -- intentional public re-exports
+    _enforce_task_timeouts_locked,
+    _has_live_descendant,
+    _has_pending_descendant,
+    _is_descendant_of,
+    _subtree_progressing,
+    _task_deadline_ts,
+    _task_drive_for_task,
+    enforce_task_timeouts,
+)

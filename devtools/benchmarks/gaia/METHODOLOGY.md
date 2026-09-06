@@ -45,6 +45,16 @@ does not rewrite the scorer or normalize Ouroboros's core `final_answer`.
   with the typed `review_cycles_exhausted` reason instead of looping. Numbers from runs
   before that change are NOT comparable on this axis; set the key explicitly to restore
   the old protocol.
+- **Acceptance panels follow the configured triad rows (2026-09-02).** Task acceptance
+  no longer runs an API-only projection of the reviewer panel: every
+  `OUROBOROS_REVIEWER_SLOTS.triad` row runs on its own delivery (API packet,
+  configured-subagent native inspection episode, or agent session), with per-row
+  effort and credential pin. Runs here use the comma-list `OUROBOROS_REVIEW_MODELS`
+  (three API packet rows), so their acceptance axis is unchanged and comparable with
+  earlier runs; a run whose triad has a retrieving row is NOT comparable on the
+  acceptance axis (different evidence view, cost class and — for a session — an
+  unobserved read set). Declare the triad rows in the run manifest and never overlay
+  such a run with API-panel runs.
 - **Acceptance review is required.** GAIA Track A measures the full Ouroboros
   scaffold chosen for this sprint: `OUROBOROS_TASK_REVIEW_MODE=required`, empty
   memory, and no post-task evolution. Since v6.55.0 the default worker pool is

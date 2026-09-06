@@ -17,7 +17,7 @@ import json
 from types import SimpleNamespace
 
 import ouroboros.loop as loop_mod
-from ouroboros.acceptance_dialogue import (
+from ouroboros.loop_acceptance_review import (
     _apply_task_acceptance_result,
     acceptance_paid_identity,
     bind_acceptance_paid_identity,
@@ -93,7 +93,7 @@ def _ctx(tmp_path, *, trace=None, mode="required", passes_done=0, messages=None)
         llm_trace=trace if trace is not None else {"tool_calls": []},
         drive_root=None,
         messages=messages if messages is not None else [{"role": "user", "content": "goal"}],
-        emit_progress=lambda _m: None,
+        emit_progress=lambda _m, *, incident=None: None,
         mode=mode,
         subtree_statuses=[],
         budget_profile={"max_improvement_passes": 99},
@@ -366,7 +366,7 @@ def test_dialogue_history_does_not_change_the_evidence_revision():
 
 
 def test_dialogue_history_rows_are_bounded_and_carry_the_panel_facts():
-    from ouroboros.acceptance_dialogue import acceptance_dialogue_history
+    from ouroboros.loop_acceptance_review import acceptance_dialogue_history
 
     trace = {
         "review_runs": [

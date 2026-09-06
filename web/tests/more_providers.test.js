@@ -8,7 +8,7 @@ test('defaults-only values keep the More providers section closed', () => {
     // Base URLs / scope / TLS carry shipped defaults and are deliberately not
     // part of the predicate's inputs — an unconfigured install stays closed.
     assert.equal(moreProvidersCredentialConfigured({
-        cloudruKey: '', minimaxKey: '', gigachatCredentials: '', gigachatUser: '', gigachatPassword: '',
+        cloudruKey: '', minimaxKey: '', deepseekKey: '', gigachatCredentials: '', gigachatUser: '', gigachatPassword: '',
     }), false);
     assert.equal(moreProvidersCredentialConfigured({ cloudruKey: '   ' }), false);
 });
@@ -16,6 +16,7 @@ test('defaults-only values keep the More providers section closed', () => {
 test('each usable credential path opens the section', () => {
     assert.equal(moreProvidersCredentialConfigured({ cloudruKey: 'ck-123' }), true);
     assert.equal(moreProvidersCredentialConfigured({ minimaxKey: 'mm-123' }), true);
+    assert.equal(moreProvidersCredentialConfigured({ deepseekKey: 'sk-ds' }), true);
     assert.equal(moreProvidersCredentialConfigured({ gigachatCredentials: 'base64pair' }), true);
     // Masked secrets from the server ("***set***" / prefixed) are non-empty
     // strings and count as configured.

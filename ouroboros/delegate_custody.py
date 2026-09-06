@@ -21,16 +21,18 @@ from __future__ import annotations
 import hashlib
 import json
 import logging
+import os
 import pathlib
 import uuid
 from contextlib import contextmanager
 from dataclasses import dataclass, field
-from typing import Any, Callable, Dict, Iterator, List, Optional, Tuple
+from typing import Any, Callable, Dict, Iterator, List, Optional, Tuple  # noqa: F401
 
 from ouroboros._usage_rows import REVIEW_ATTRIBUTION_KEYS
 from ouroboros.delegate_custody_usage import (
     disclosed_spend,
     disclosed_tokens,
+    project_retirement_lock,
     summary_of,
 )
 from ouroboros.utils import append_jsonl, utc_now_iso
@@ -250,16 +252,26 @@ def custody_log_unreadable(drive_root: Any) -> bool:
     established empty state (no custody row could exist), while
     existing-but-unreadable means the open-run answer is UNKNOWN. Same probe
     the evidence reader (``task_execution_evidence``) already uses; its own
-    semantics are unchanged.
+    semantics are unchanged. Probes the WHOLE rotated chain: an unreadable
+    archive segment — or an unreadable archive DIRECTORY, which the lenient
+    enumeration reports as "never rotated" — hides custody exactly like an
+    unreadable live file.
     """
+    from ouroboros.utils import JsonlChainUnreadable, jsonl_archive_segments
+
     path = event_log_path(drive_root)
     try:
-        if not path.exists():
-            return False
-        with path.open("rb"):
-            pass
-    except OSError:
+        segments = jsonl_archive_segments(path, strict=True)
+    except JsonlChainUnreadable:
         return True
+    for candidate in (*segments, path):
+        try:
+            if not candidate.exists():
+                continue
+            with candidate.open("rb"):
+                pass
+        except OSError:
+            return True
     return False
 
 
@@ -293,27 +305,55 @@ def actor_decision_lock(drive_root: Any, task_id: str) -> Iterator[None]:
         release_exclusive_file_lock(lock_path, fd)
 
 def _iter_rows(path: pathlib.Path, tail_bytes: Optional[int] = None) -> Iterator[Dict[str, Any]]:
-    try:
-        with path.open("rb") as handle:
-            size = path.stat().st_size
-            if tail_bytes is not None and size > tail_bytes:
-                handle.seek(size - tail_bytes)
-                handle.readline()          # drop the partial first line
-            for raw in handle:
-                if _ROW_MARKER.encode("ascii") not in raw:
-                    continue
+    """Custody rows across the ROTATED CHAIN (archive segments + live file).
+
+    The event log rotates like chat/progress (CPL4-C1), so a full replay must
+    read ``archive/events_*.jsonl`` before the live file or a rotation would
+    silently amputate every older run's custody. ``tail_bytes`` bounds the read
+    to the newest bytes OF THE CHAIN — a freshly rotated live file no longer
+    empties the fault-scan window. ``jsonl_chain_handles`` makes the traversal
+    rotation-race-safe (open-live-first + inode dedup).
+    """
+    from ouroboros.utils import jsonl_chain_handles
+
+    with jsonl_chain_handles(path) as handles:
+        skip = 0
+        if tail_bytes is not None:
+            sizes = []
+            for _, handle in handles:
                 try:
-                    row = json.loads(raw.decode("utf-8", errors="replace"))
-                except ValueError:
-                    continue
-                if isinstance(row, dict) and str(row.get("type") or "").startswith(_ROW_MARKER):
-                    yield row
-    except OSError:
-        return
+                    sizes.append(os.fstat(handle.fileno()).st_size)
+                except OSError:
+                    sizes.append(0)
+            excess = sum(sizes) - tail_bytes
+            start = 0
+            while excess > 0 and start < len(handles):
+                if sizes[start] <= excess:
+                    excess -= sizes[start]
+                    start += 1
+                else:
+                    skip = excess
+                    excess = 0
+            handles = handles[start:]
+        for index, (_, handle) in enumerate(handles):
+            try:
+                if index == 0 and skip:
+                    handle.seek(skip)
+                    handle.readline()          # drop the partial first line
+                for raw in handle:
+                    if _ROW_MARKER.encode("ascii") not in raw:
+                        continue
+                    try:
+                        row = json.loads(raw.decode("utf-8", errors="replace"))
+                    except ValueError:
+                        continue
+                    if isinstance(row, dict) and str(row.get("type") or "").startswith(_ROW_MARKER):
+                        yield row
+            except OSError:
+                continue
 
 
 from ouroboros.delegate_registration_policy import (
-    record_persistent as _record_persistent,
     STARTED_FIRST_WINS_FACTS as _STARTED_FIRST_WINS_FACTS,
     STARTED_PROGRESS_FLAGS as _STARTED_PROGRESS_FLAGS,
     STARTED_STR_FIELDS as _STARTED_STR_FIELDS,
@@ -397,10 +437,12 @@ def _apply(state: Dict[str, RunCustody], row: Dict[str, Any]) -> None:
     elif kind == SETTLED_UNREAD:
         custody.unread_disclosed = True
     elif kind == PROJECT_RETIRED:
-        # Recorded on SUCCESS too, not only on failure: without it, a retirement that
-        # landed before a failed ledger write would be replayed as still-owned after a
+        # Recorded on SUCCESS too: without it, a retirement before a failed ledger write replays as owned after a
         # restart, and the retry would keep failing on an already-removed project.
-        custody.project_owned = False
+        project_id = str(row.get("project_id") or custody.project_id or "")
+        for sibling in state.values():
+            if sibling is custody or (project_id and sibling.project_id == project_id):
+                sibling.project_owned = False
     elif kind == OUTPUT_SPILLED:
         if row.get("staged") and str(row.get("artifact") or ""):
             custody.output_artifact = str(row.get("artifact") or "")
@@ -778,26 +820,20 @@ def is_terminal(detail: Dict[str, Any]) -> bool:
 
 
 def retire_project(drive_root: Any, gateway: Any, custody: RunCustody) -> None:
-    """Discharge the registration obligation. Absence IS discharge (a 404 on
-    the project is the asked-for outcome, never a failure). REFCOUNT
-    DEFERRAL: the daemon refuses removal while runs live, so only the
-    LOWEST-run_id sharer keeps attempting; the rest defer quietly and
-    discharge on the daemon's 404 (deterministic tie-break: someone always
-    attempts)."""
+    """Serialize the replay-to-retirement decision for one shared project."""
+    with project_retirement_lock(drive_root, custody.project_id):
+        _retire_project_locked(drive_root, gateway, custody)
+
+
+def _retire_project_locked(drive_root: Any, gateway: Any, custody: RunCustody) -> None:
     if custody.project_persistent:
-        # #362: stable identity outlives the run — discharge the duty DURABLY
-        # (replay must not resurrect owned=True), keep the project itself.
         custody.project_owned = False
         emit(drive_root, PROJECT_RETIRED, {"run_id": custody.run_id, "task_id": custody.task_id,
                                            "project_id": custody.project_id, "project_kept": True})
         return
-    if not (custody.project_owned and custody.project_id):
+    if not custody.project_id:
         return
     try:
-        # Sharers = EVERY run in the project (only the creator carries
-        # project_owned, but the daemon refuses removal while ANY sibling
-        # lives); the caller is mid-settlement, so only OTHERS defer.
-        # Removal is an AUTHORITY decision: complete view, caller row in it.
         from ouroboros.delegate_custody_usage import complete_custody_rows
 
         rows_raw = complete_custody_rows(
@@ -811,6 +847,8 @@ def retire_project(drive_root: Any, gateway: Any, custody: RunCustody) -> None:
             return
         rows = [run for run in state.values()
                 if run.project_id == custody.project_id and run.run_id]
+        if not any(run.project_owned for run in rows):
+            return
         if any(run.project_persistent for run in rows):
             # #362: ANY persistent sharer makes the project a durable user
             # identity — a non-persistent creator must not delete it either.
@@ -820,13 +858,10 @@ def retire_project(drive_root: Any, gateway: Any, custody: RunCustody) -> None:
             return
         if any(not run.settled and run.run_id != custody.run_id for run in rows):
             return
-        sharers = sorted(run.run_id for run in rows if run.project_owned)
     except Exception:
         log.warning("Retirement deferred: replay failed for %s",
                     custody.run_id, exc_info=True)
         return
-    if sharers and custody.run_id and custody.run_id != sharers[0]:
-        return  # deferred quietly: the canonical sharer carries the lane
     try:
         gateway.remove_project(custody.project_id)
     except Exception as exc:
@@ -839,6 +874,9 @@ def retire_project(drive_root: Any, gateway: Any, custody: RunCustody) -> None:
                                                      "reason": str(exc)[:500]})
             return
     custody.project_owned = False
+    for sibling in _CUSTODY.values():
+        if sibling.project_id == custody.project_id:
+            sibling.project_owned = False
     emit(drive_root, PROJECT_RETIRED, {"run_id": custody.run_id, "task_id": custody.task_id,
                                        "project_id": custody.project_id})
 
@@ -923,39 +961,38 @@ def settle_run(drive_root: Any, gateway: Any, custody: RunCustody, detail: Dict[
             custody.ledger_recorded = True
             emit(drive_root, LEDGER_RECORDED, {"run_id": custody.run_id, "task_id": custody.task_id,
                                                "route": custody.route_id})
-    retire_project(drive_root, gateway, custody)
-    if custody.ledger_recorded:
-        # The claim follows the row, not the call. DECOUPLED from retirement:
-        # a sibling holding the shared project must not convert a SUCCEEDED
-        # run into an unreconciled failure - the registration debt stays on
-        # ``project_owned`` for the sweep and later sharers.
-        custody.settled = emit(drive_root, SETTLED, {
-            "run_id": custody.run_id,
-            "task_id": custody.task_id,
-            "route": custody.route_id,
-            # The ENGINE-reported model (the STARTED row carries only the requested
-            # pin, which is usually empty) — so execution evidence can name what
-            # the harness really ran without joining to the ledger.
-            "model": str(summary.get("model") or ""),
-            "state": str(summary.get("state") or ""),
-            # The SAME facts the ledger row just recorded. An undisclosed spend was emitted
-            # here as `0.0` beside a flag — the render-unknown-as-zero shape the ledger row
-            # itself stopped doing — and finality ignored the estimated half exactly as the
-            # ledger write did. One envelope, one story.
-            "cost_usd": spend,
-            "cost_final": spend is not None and not estimated,
-            "spend_disclosed": spend is not None,
-            "spend_estimated": estimated,
-            # D29: the applied account rides the settlement event too, so the
-            # durable event stream answers "which account paid" without joining
-            # to the ledger row.
-            "credential_profile_id": applied_profile,
-            "access_profile": applied_access,
-        })
+    if not custody.ledger_recorded:
+        retire_project(drive_root, gateway, custody)
+    else:
+        with project_retirement_lock(drive_root, custody.project_id):
+            custody.settled = emit(drive_root, SETTLED, {
+                "run_id": custody.run_id,
+                "task_id": custody.task_id,
+                "route": custody.route_id,
+                # The ENGINE-reported model (the STARTED row carries only the requested
+                # pin, which is usually empty) — so execution evidence can name what
+                # the harness really ran without joining to the ledger.
+                "model": str(summary.get("model") or ""),
+                "state": str(summary.get("state") or ""),
+                # The SAME facts the ledger row just recorded. An undisclosed spend was emitted
+                # here as `0.0` beside a flag — the render-unknown-as-zero shape the ledger row
+                # itself stopped doing — and finality ignored the estimated half exactly as the
+                # ledger write did. One envelope, one story.
+                "cost_usd": spend,
+                "cost_final": spend is not None and not estimated,
+                "spend_disclosed": spend is not None,
+                "spend_estimated": estimated,
+                # D29: the applied account rides the settlement event too, so the
+                # durable event stream answers "which account paid" without joining
+                # to the ledger row.
+                "credential_profile_id": applied_profile,
+                "access_profile": applied_access,
+            })
+            if custody.settled:
+                _retire_project_locked(drive_root, gateway, custody)
     if custody.settled:
         resolve_containment_fault(drive_root, custody, "settled_terminal")
-    # CONSUMPTION BEFORE SETTLEMENT is the owner's directive - a LOUD FACT,
-    # not a gate, and NOT recorded here: this runs BEFORE staging, so asking
+    # CONSUMPTION BEFORE SETTLEMENT is a fact, not a gate; asking before staging
     # now would answer "no omission" for every first settlement (the render-
     # unknown-as-a-fact shape this module refuses). ``record_settled_unread``
     # records it where staging IS known: the wait path and reconciliation.
@@ -1207,13 +1244,6 @@ def _cancel_result(drive_root: Any, custody: RunCustody, outcome: str, *, accept
 # -- reconciliation ------------------------------------------------------------
 
 
-def open_runs(drive_root: Any, state: Optional[Dict[str, RunCustody]] = None) -> List[RunCustody]:
-    """Runs with a durable start and no durable settlement (``state``: a shared
-    pre-replayed snapshot, so a batch of audits pays one log traversal)."""
-    return [custody for custody in (state if state is not None else replay(drive_root)).values()
-            if not custody.settled]
-
-
 def owned_project_registrations(drive_root: Any, state: Optional[Dict[str, RunCustody]] = None) -> List[RunCustody]:
     """Runs whose registration is still owned - settled or not (``open_runs``
     cannot see registrations that outlive their runs)."""
@@ -1238,311 +1268,6 @@ def retire_settled_registrations(drive_root: Any, gateway: Any) -> None:
         except Exception:
             log.warning("Registration sweep failed for project %s",
                         rows[0].project_id, exc_info=True)
-
-
-def pending_invocations(drive_root: Any,
-                        rows: Optional[List[Dict[str, Any]]] = None) -> List[Dict[str, Any]]:
-    """Invocations with a durable request row, no bound run, no definite refusal.
-
-    The launched-never-collected class one step EARLIER than ``open_runs``: a
-    worker death between the accepted POST and ``record_started`` leaves only the
-    ``START_REQUESTED`` row. Facts come from the FIRST request row (the minting,
-    same rule as ``invocation_record``); a record whose canonical body never
-    landed is excluded (nothing byte-identical can be replayed). ``rows`` shares
-    one pre-read snapshot with ``replay`` (atomic payload busy claim)."""
-    from ouroboros.delegate_pending import pending_invocations as replay_pending
-
-    return replay_pending(drive_root, rows)
-
-def release_task_runs(drive_root: Any, task_id: str, *,
-                      gateway_factory: Optional[Callable[[], Any]] = None) -> List[Dict[str, Any]]:
-    """Run the one non-panic terminal custody boundary for a normal loop exit."""
-
-    from ouroboros.delegate_terminal import (
-        record_terminal_reconciliation, terminal_reconcile_task,
-    )
-
-    result = terminal_reconcile_task(
-        drive_root, task_id, gateway_factory=gateway_factory, trigger="loop_exit",
-    )
-    record_terminal_reconciliation(drive_root, task_id, result)
-    return list(result.get("outcomes") or [])
-
-def reconcile_task_runs(drive_root: Any, task_id: str, *,
-                        gateway_factory: Optional[Callable[[], Any]] = None) -> List[Dict[str, Any]]:
-    """Settle or cancel ONE task's open runs from the DURABLE rows (kill path).
-
-    The supervisor-side twin of ``release_task_runs`` for a task whose worker was
-    just KILLED (cancellation custody / reap): the graceful release never ran and
-    its memo died with the process, so the durable rows are the only complete
-    view. Covers pending invocations like the orphan sweep; cheap when the task
-    delegated nothing.
-    """
-    mine = str(task_id or "")
-    if not mine:
-        return []
-    held = [c for c in open_runs(drive_root) if c.task_id == mine]
-    stray = [record for record in pending_invocations(drive_root)
-             if record["task_id"] == mine]
-    # Also the registration retry lane for the task's OWN settled-but-owned
-    # runs in retire-eligible projects (a one-shot process may never see a
-    # sweep tick); deferred registrations stay with the periodic sweep.
-    snapshot = replay(drive_root).values()
-    live = {r.project_id for r in snapshot
-            if r.project_id and r.run_id and not r.settled}
-    owed = [r for r in snapshot
-            if r.task_id == mine and r.project_owned and r.project_id
-            and r.settled and r.project_id not in live]
-    if not held and not stray and not owed:
-        return []
-    return _reconcile_each(drive_root, held, gateway_factory, pending=stray)
-
-def reconcile_orphaned_runs(
-    drive_root: Any,
-    running_task_ids: Optional[set] = None,
-    *,
-    gateway_factory: Optional[Callable[[], Any]] = None,
-    recoverable_task_ids: Optional[set] = None,
-) -> List[Dict[str, Any]]:
-    """Settle or cancel every open run whose owning task is no longer running.
-
-    The owner-is-gone predicate is the SAME one ``process_custody.reap_orphaned_processes``
-    already uses (the supervisor's live task set), so a delegated run and a spawned
-    process cannot disagree about whether their owner still exists. ``running_task_ids``
-    of None means UNKNOWN and reconciles nothing — never mass-cancel on missing info.
-    """
-    if running_task_ids is None:
-        return []
-    spared = set(recoverable_task_ids or ())
-    live_or_reserved = set(running_task_ids) | spared
-    orphans = [c for c in open_runs(drive_root) if c.task_id and c.task_id not in live_or_reserved]
-    # The class ONE STEP EARLIER (P34R.2): an invocation whose POST the daemon may have
-    # accepted but whose worker died before record_started has no run row for the sweep
-    # above to find — a live mutating run nobody could ever collect. Recovered here on
-    # the SAME owner-is-gone predicate; a pending invocation whose owner is ALIVE stays
-    # untouched, because that owner holds the retry token and decides.
-    stray = [record for record in pending_invocations(drive_root)
-             if record["task_id"] and record["task_id"] not in live_or_reserved]
-    return _reconcile_each(drive_root, orphans, gateway_factory, pending=stray)
-
-
-def _reconcile_each(drive_root: Any, runs: List[RunCustody],
-                    gateway_factory: Optional[Callable[[], Any]],
-                    pending: Optional[List[Dict[str, Any]]] = None) -> List[Dict[str, Any]]:
-    """One transport, one settle-or-cancel pass. Shared by both release surfaces.
-
-    ``pending`` is the durable sweep's extra duty: START_REQUESTED-only invocations
-    (P34R.2). The in-process twin ``release_task_runs`` never passes it — its memo is
-    run-keyed and cannot name an unbound invocation — so that class is covered by the
-    startup/periodic sweep, within its cadence. The registration pass at the end is
-    the third duty: settlement no longer discharges project ownership, and the
-    startup/periodic sweep surface is where settled-but-owned registrations get
-    their retry lane (the task-scoped surface can exit early with none open).
-    """
-    # Registration duty is real work only for a retire-ELIGIBLE project:
-    # a deferred one must not spin the daemon up.
-    snapshot = replay(drive_root).values()
-    unsettled_projects = {row.project_id for row in snapshot
-                          if row.project_id and row.run_id and not row.settled}
-    registrations = [row for row in snapshot
-                     if row.project_owned and row.project_id
-                     and row.project_id not in unsettled_projects]
-    if not runs and not pending and not registrations:
-        return []
-    from ouroboros.gateways.claudexor import ClaudexorUnavailable
-
-    if gateway_factory is None:
-        # The startup sweep REAPS the prior generation's owned daemon just
-        # before this, so a discovery-only gateway always found a corpse and
-        # reconciliation silently no-opped on every restart. The ensure path
-        # starts our own daemon when there is real work (never on the empty
-        # early-return above), activating any staged runtime update.
-        from ouroboros.claudexor_daemon import ensure_owned_gateway
-
-        gateway_factory = ensure_owned_gateway
-    try:
-        gateway = gateway_factory()
-        gateway.handshake()
-    except ClaudexorUnavailable:
-        log.debug("delegated-run reconciliation skipped: transport unavailable", exc_info=True)
-        return []
-    outcomes: List[Dict[str, Any]] = []
-    try:
-        for custody in runs:
-            outcomes.append(_reconcile_one(drive_root, gateway, custody))
-        for record in pending or []:
-            outcomes.append(_recover_pending_invocation(drive_root, gateway, record))
-        # Recomputed inside: a run settled this very pass may have made its
-        # project eligible - the pre-pass gate is not the last word.
-        if registrations or runs:
-            retire_settled_registrations(drive_root, gateway)
-    finally:
-        try:
-            gateway.close()
-        except Exception:
-            log.debug("delegated-run reconciliation close failed", exc_info=True)
-    return outcomes
-
-
-def _recover_pending_invocation(drive_root: Any, gateway: Any,
-                                record: Dict[str, Any]) -> Dict[str, Any]:
-    """Recover the run (if any) behind an orphaned pending invocation, idempotently.
-
-    The stored canonical body is re-POSTed under the invocation's own wire key:
-    the engine returns the ORIGINAL handle when the first POST was accepted, and
-    starts fresh only when the daemon truly never saw it. A definite 4xx retires
-    the invocation and its registration; an unknown outcome stays pending.
-    """
-    from ouroboros.gateways.claudexor import ClaudexorUnavailable
-
-    invocation_id = str(record["invocation_id"])
-    task_id = str(record["task_id"])
-    try:
-        handle = gateway.start_run(dict(record["request"]), idempotency_key=invocation_id)
-    except ClaudexorUnavailable as exc:
-        status = int(getattr(exc, "status_code", 0) or 0)
-        if 400 <= status < 500:
-            retired = _retire_recovered_registration(gateway, record)
-            emit(drive_root, START_FAILED, {
-                "run_id": "", "task_id": task_id, "project_id": record["project_id"],
-                "project_retired": retired, "reason": f"recovery_refused_{exc.code}",
-                "invocation_id": invocation_id, "definite": True,
-            })
-            result = {"invocation_id": invocation_id, "task_id": task_id,
-                      "action": "invocation_retired"}
-        else:
-            result = {"invocation_id": invocation_id, "task_id": task_id,
-                      "action": "recovery_unreachable"}
-        emit(drive_root, RECONCILED, result)
-        return result
-    run_id = str(handle.get("runId") or handle.get("jobId") or "")
-    if not run_id:
-        # Queued without an id: durably enqueued, still unnameable. Leave the
-        # invocation pending; the next sweep replays the same key and tries again.
-        result = {"invocation_id": invocation_id, "task_id": task_id,
-                  "action": "recovery_pending"}
-        emit(drive_root, RECONCILED, result)
-        return result
-    body = record["request"]
-    execution = body.get("execution") if isinstance(body.get("execution"), dict) else {}
-    scope = body.get("scope") if isinstance(body.get("scope"), dict) else {}
-    custody = RunCustody(
-        run_id=run_id, task_id=task_id,
-        route_id=str(record["route"] or body.get("primaryHarness") or ""),
-        model=str(body.get("model") or ""),
-        profile_id=str(body.get("credentialProfileId") or ""),
-        project_id=record["project_id"], project_owned=bool(record["project_owned"]), project_persistent=_record_persistent(record),
-        root_task_id=str(record.get("root_task_id") or ""),
-        parent_task_id=str(record.get("parent_task_id") or ""),
-        category=str(record.get("category") or "subagent"),
-        source=str(record.get("source") or "delegated_subagent"),
-        **{key: str(record.get(key) or "") for key in REVIEW_ATTRIBUTION_KEYS},
-        # The sweep runs against the canonical root; a recovered run's ledger row
-        # belongs there like every other (P34R.1).
-        ledger_root=str(drive_root),
-        idempotency_key=str(record["idempotency_key"]), invocation_id=invocation_id,
-        selected_subagent_id=str(record.get("selected_subagent_id") or ""),
-        config_fingerprint=str(record.get("config_fingerprint") or ""),
-        work_order_fingerprint=str(record.get("work_order_fingerprint") or ""),
-        work_order_coverage=str(record.get("work_order_coverage") or ""),
-        work_order_source_request=(
-            dict(record.get("work_order_source_request"))
-            if isinstance(record.get("work_order_source_request"), dict) else {}
-        ),
-        authority_fingerprint=str(record.get("authority_fingerprint") or ""),
-        # The C1 isolation binding survives recovery VERBATIM: the recovered
-        # run executes in the originally provisioned snapshot (the replayed
-        # body's scope.root), so its STARTED row must name that binding or the
-        # snapshot and the child's work become GC food once no longer pending.
-        snapshot_id=str(record.get("snapshot_id") or ""),
-        execution_root=str(record.get("execution_root") or ""),
-        baseline_sha=str(record.get("baseline_sha") or ""),
-        target_root=str(record.get("target_root") or ""),
-        authority_source=str(record.get("authority_source") or ""),
-        # Carried opaquely VERBATIM — recovery never re-authorizes a target (R1-2).
-        resource_ref=record.get("resource_ref") if isinstance(record.get("resource_ref"), dict) else {},
-        # The GRANTED shape on the recovered OBJECT too, not only the row (gate
-        # fix 8c): the memo must answer the same lookups the replay does.
-        access=str(body.get("access") or ""),
-        mode=str(body.get("mode") or ""),
-        isolation=str(execution.get("isolation") or ""),
-        delegated=bool(execution.get("delegated")))
-    record_started(drive_root, custody, shape={
-        # The stored invocation is the single source of a replay's facts — the same
-        # doctrine the explicit retry path follows.
-        "effort": str(body.get("effort") or ""), "access": str(body.get("access") or ""),
-        "mode": str(body.get("mode") or ""), "isolation": str(execution.get("isolation") or ""),
-        "delegated": bool(execution.get("delegated")), "root": str(scope.get("root") or ""),
-        "recovered_from_pending_invocation": True,
-    })
-    return _reconcile_one(drive_root, gateway, custody)
-
-
-def _retire_recovered_registration(gateway: Any, record: Dict[str, Any]) -> bool:
-    """Discharge the registration an ORIGINAL attempt owned, when its invocation dies."""
-    if _record_persistent(record) or not (record.get("project_owned") and record.get("project_id")):
-        return False
-    try:
-        gateway.remove_project(record["project_id"])
-        return True
-    except Exception as exc:
-        if daemon_says_absent(exc):
-            return True
-        log.warning("Failed to retire project %s of a dead invocation",
-                    record["project_id"], exc_info=True)
-        return False
-
-
-def _reconcile_one(drive_root: Any, gateway: Any, custody: RunCustody) -> Dict[str, Any]:
-    from ouroboros.gateways.claudexor import ClaudexorUnavailable
-    from ouroboros.tools.delegate_integration import capture_stranded_patch
-
-    try:
-        detail = gateway.get_run(custody.run_id)
-    except ClaudexorUnavailable as exc:
-        if daemon_says_absent(exc):
-            close_absent_run(drive_root, gateway, custody, "reconcile_absent")
-            result = {"run_id": custody.run_id, "task_id": custody.task_id, "action": "absent"}
-        else:
-            record_containment_fault(drive_root, custody, "reconcile_unreadable", f"{exc.code}: {exc}")
-            result = {"run_id": custody.run_id, "task_id": custody.task_id, "action": "unreadable"}
-        # NO capture here (C1-R2): across the D30 boundary an absent run may
-        # still be WRITING its snapshot; an eager capture would freeze an
-        # incomplete patch the idempotent core then serves forever. Custody
-        # closes, the snapshot survives (undisposed - GC keeps it), the duty
-        # surfaces via undisposed_patches(); capture happens at disposition.
-        emit(drive_root, RECONCILED, result)
-        return result
-    if is_terminal(detail):
-        settled = settle_run(drive_root, gateway, custody, detail)
-        # Sweep custody REPLAYS with staged fields, so unlike the wait path
-        # the omission is already knowable here - and an ownerless run is the
-        # one nobody will come back to read (the D7 launched-never-collected
-        # half becomes durable in this row instead of inferred).
-        record_settled_unread(drive_root, custody)
-        # The action names the ATTEMPT; the facts ride separately (the old
-        # shape wrote action="settled" even when the returned flag was false).
-        result = {"run_id": custody.run_id, "task_id": custody.task_id,
-                  "action": "settle_attempted",
-                  "settled": settled["settled"],
-                  "project_retired": settled.get("project_retired"),
-                  **output_disposition(custody)}
-        # The C1 half: a TERMINAL DETAIL proves the run is over, so the sweep — its
-        # last terminal observer — captures the diff eagerly here.
-        result.update(capture_stranded_patch(drive_root, custody))
-    else:
-        cancelled = cancel_and_verify(drive_root, gateway, custody, "owner_task_gone")
-        result = {"run_id": custody.run_id, "task_id": custody.task_id, "action": "cancelled",
-                  "outcome": cancelled["outcome"], **output_disposition(custody)}
-        # Capture ONLY on a verified terminal receipt (the read-back proved the run
-        # over). A cancel merely requested leaves the run live and its snapshot
-        # still being written; a cancel confirmed by ABSENCE proves nothing about
-        # the run (same unknowable-state doctrine as above) — both leave the
-        # capture to disposition.
-        if cancelled["state"] in TERMINAL_STATES:
-            result.update(capture_stranded_patch(drive_root, custody))
-    emit(drive_root, RECONCILED, result)
-    return result
 
 
 __all__ = [
@@ -1598,3 +1323,18 @@ __all__ = [
     "work_order_source_verification",
     "record_source_range_verified",
 ]
+
+
+# v7next F2 (D07): moved spans live in their owner leaves; re-exported here
+# so this facade stays the single import surface for callers and tests.
+from ouroboros.delegate_custody_reconcile import (  # noqa: E402, F401 -- intentional public re-exports
+    _reconcile_each,
+    _reconcile_one,
+    _recover_pending_invocation,
+    _retire_recovered_registration,
+    open_runs,
+    pending_invocations,
+    reconcile_orphaned_runs,
+    reconcile_task_runs,
+    release_task_runs,
+)

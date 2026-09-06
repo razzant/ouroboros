@@ -10,7 +10,7 @@ makes the FACT structural (one re-loop) while the decision stays the child's.
 
 from types import SimpleNamespace
 
-from ouroboros.loop import _maybe_inject_finalization_nudges
+from ouroboros.loop_nudges import _maybe_inject_finalization_nudges
 
 
 def _run(ctx_obj, msgs, tool_calls):

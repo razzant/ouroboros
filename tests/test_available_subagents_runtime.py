@@ -160,7 +160,7 @@ def test_snapshot_is_immutable_across_queue_persistence(monkeypatch, tmp_path):
         "_attempt": 1,
     }
     pending, running = [task], {}
-    task_queue.init(tmp_path, 600, 1800)
+    task_queue.init(tmp_path)
     task_queue.init_queue_refs(pending, running, {"value": 0})
     assert task_queue.persist_queue_snapshot(reason="test") is True
     pending.clear()

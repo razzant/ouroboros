@@ -8,6 +8,8 @@ from __future__ import annotations
 
 from typing import Any, Dict, List, Optional
 
+from ouroboros.gateway.widgets import ExtensionLiveSnapshot, WidgetTab, WidgetsResponse
+
 try:  # Python 3.11+
     from typing import Literal, NotRequired, Required, TypedDict  # type: ignore[attr-defined]
 except ImportError:  # pragma: no cover - CI supports Python 3.10.
@@ -119,6 +121,9 @@ class ChatOutbound(TypedDict):
     task_terminal_status: NotRequired[str]
     ephemeral_decision: NotRequired[bool]
     task_incident: NotRequired[str]
+    # A cancellation fault names the PHYSICAL task it could not settle when that
+    # differs from the displayed (logical) task id.
+    cancel_physical_task_id: NotRequired[str]
     toast_once: NotRequired[str]
     lifecycle: NotRequired[Dict[str, Any]]
     # C4 multi-chat dedupe: a duplicate lifecycle initiator's typed pointer to
@@ -164,23 +169,25 @@ class ChatOutbound(TypedDict):
     task_group_id: NotRequired[str]
     task_event: NotRequired[str]
     status: NotRequired[str]
-    # v6.82 (P5): host-attested marker — this frame's task is a supervisor-queue
-    # task that POST /api/tasks/{id}/cancel can force-cancel (never set for
-    # in-process direct-chat turns). Gates the UI "Cancel run" card action.
+    # v6.82 (P5): host-attested marker, stamped by the supervisor's delivery
+    # seam ONLY for a task POST /api/tasks/{id}/cancel will actually stop — a
+    # lineage-resolved pooled ROOT (its RUNNING row) or the live in-process
+    # direct-chat turn (resolved through the same ownership reader the
+    # endpoint uses, supervisor.workers.direct_chat_turn); never a subagent
+    # frame, never an ephemeral decision turn. Gates the UI "Cancel run" action.
     cancelable: NotRequired[bool]
     # Monetary projections are nullable when the physical-attempt ledger cannot
     # be read.  ``None`` is deliberately distinct from a confirmed $0 result.
-    cost_usd: NotRequired[Optional[float]]
-    # C2 (owner 10=B): the additive HONEST names — accounted upper bounds, not
-    # settled receipts. Same values as the deprecated cost_usd[_with_children]
-    # aliases (ouroboros/cost_projection.py is the one author); the aliases stay
-    # outbound because their removal is a separate approved ABI break.
+    # C2 (owner 10=B) named these the HONEST names — accounted upper bounds,
+    # not settled receipts; ABI 7.0 (ABI-3) removed the deprecated
+    # ``cost_usd[_with_children]`` wire aliases, so these are the only outbound
+    # spellings (ouroboros/cost_projection.py is the one author). Stored legacy
+    # records keep both spellings readable via ``resolve_cost_pair``.
     accounted_upper_bound_usd: NotRequired[Optional[float]]
     accounted_upper_bound_usd_with_children: NotRequired[Optional[float]]
     cost_accounting_status: NotRequired[Literal["available", "unavailable"]]
     cost_accounting_error: NotRequired[str]
     cost_final: NotRequired[bool]
-    cost_usd_with_children: NotRequired[Optional[float]]
     cost_with_children_partial: NotRequired[bool]
     reserved_usd: NotRequired[Optional[float]]
     unresolved_upper_bound_usd: NotRequired[Optional[float]]
@@ -211,8 +218,6 @@ class ChatOutbound(TypedDict):
     sender_session_id: NotRequired[str]
     client_message_id: NotRequired[str]
     transport: NotRequired[TransportMetadata]
-    # Deprecated compatibility field: runtime emits ``transport`` instead.
-    telegram_chat_id: NotRequired[int]
     # UI-only system annotation emitted by skill-repair visible commands.
     system_type: NotRequired[str]
     # Event-time human presentation; raw task/project ids remain machine keys.
@@ -255,8 +260,6 @@ class PhotoOutbound(TypedDict):
     # Server-stamped when chat_id is a reserved Project thread: Main never
     # adopts it, even before the browser has learned the project.
     project_thread: NotRequired[bool]
-    # Deprecated compatibility field: runtime emits ``transport`` instead.
-    telegram_chat_id: NotRequired[int]
 
 
 class VideoOutbound(TypedDict):
@@ -288,8 +291,6 @@ class VideoOutbound(TypedDict):
     # Server-stamped when chat_id is a reserved Project thread: Main never
     # adopts it, even before the browser has learned the project.
     project_thread: NotRequired[bool]
-    # Deprecated compatibility field: runtime emits ``transport`` instead.
-    telegram_chat_id: NotRequired[int]
 
 
 class DocumentOutbound(TypedDict):
@@ -318,8 +319,6 @@ class DocumentOutbound(TypedDict):
     # Server-stamped when chat_id is a reserved Project thread: Main never
     # adopts it, even before the browser has learned the project.
     project_thread: NotRequired[bool]
-    # Deprecated compatibility field: runtime emits ``transport`` instead.
-    telegram_chat_id: NotRequired[int]
 
 
 class LinkAction(TypedDict):
@@ -811,14 +810,6 @@ class OwnerContextModeResponse(TypedDict):
     context_mode: str
 
 
-class OwnerScopeReviewFloorResponse(TypedDict):
-    ok: bool
-    scope_review_floor: str  # blocking_1m | advisory (v6.34.0, CW1)
-    # v6.80.0: the value is STORED but enforcement-inert — scope-review applicability
-    # follows the owner-only context mode. The notice says so on every write.
-    deprecation_notice: str
-
-
 class OwnerSafetyModeResponse(TypedDict):
     ok: bool
     safety_mode: str  # full | light | off (v6.54.3)
@@ -861,12 +852,11 @@ class SkillDeleteResponse(TypedDict, total=False):
 class UiPreferencesResponse(TypedDict):
     ok: NotRequired[bool]
     widget_order: list[str]
+    widget_start_mode: dict[str, Literal["auto", "manual", "retain"]]  # owner per-card launch-policy override
     nested_subagents_expanded: bool
     sidebar_width: int  # px; 0 = CSS default (resizable side sections, v6.33.0)
     project_panel_width: int  # px; 0 = CSS default
     project_seen_revision: dict[str, int]  # monotonic paint ACK per active Project
-    project_last_viewed: dict[str, str]  # deprecated one-minor accepted no-op
-    project_hidden: dict[str, bool]  # deprecated one-minor accepted no-op
 
 
 class GitLogResponse(TypedDict):
@@ -912,6 +902,7 @@ class UploadResponse(TypedDict):
 class ExtensionsIndexResponse(TypedDict, total=False):
     extensions: list[Dict[str, Any]]
     skills: list[Dict[str, Any]]
+    live: ExtensionLiveSnapshot
     lifecycle: Dict[str, Any]
     error: str
 
@@ -1020,6 +1011,10 @@ class _TaskCreateRequestRequired(TypedDict):
 class TaskCreateRequest(_TaskCreateRequestRequired, total=False):
     task_id: str
     type: str
+    # v6.115.0: the run's owner-facing name. Supplied, it fills both name slots
+    # like a promoted chat turn; omitted, admission derives a display-only name
+    # from the request's first line. `metadata.title` is refused (400).
+    title: str
     chat_id: int
     depth: int
     session_id: str
@@ -1528,7 +1523,6 @@ __all__ = [
     "OwnerRuntimeModeResponse",
     "OwnerAutoGrantResponse",
     "OwnerContextModeResponse",
-    "OwnerScopeReviewFloorResponse",
     "OwnerSafetyModeResponse",
     "OwnerSkillPresenceRuntimeRequest",
     "OwnerSkillPresenceRuntimeResponse",
@@ -1548,6 +1542,9 @@ __all__ = [
     "ScheduleDeleteResponse",
     "UploadResponse",
     "ExtensionsIndexResponse",
+    "ExtensionLiveSnapshot",
+    "WidgetTab",
+    "WidgetsResponse",
     "SkillPublishPreflightResponse",
     "SkillLifecycleQueueResponse",
     "MarketplaceSearchResponse",

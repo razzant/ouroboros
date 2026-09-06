@@ -36,7 +36,7 @@ def _write_raw(data, task_id, **fields):
     results = data / "task_results"
     results.mkdir(parents=True, exist_ok=True)
     (results / f"{task_id}.json").write_text(
-        json.dumps({"task_id": task_id, **fields}), encoding="utf-8"
+        json.dumps({"_schema_version": 1, "task_id": task_id, **fields}), encoding="utf-8"
     )
 
 
@@ -100,17 +100,82 @@ def test_rows_without_raw_ts_sort_last_with_filename_tiebreak(tmp_path):
     assert all_rows == ["with-ts", "nots-b", "nots-a"]
 
 
-def test_torn_result_file_is_skipped_then_recovered_without_poisoning_memo(tmp_path):
+def test_malformed_result_file_is_quarantined_not_silently_dropped(tmp_path):
+    """ABI-2 (Ф3.1 fix-round-2 pin): a filename whose bytes fail to parse is a
+    CANDIDATE, not noise — the sort scan hands it to the same admission reader
+    as every other row, so it is quarantined with the ``malformed`` reason and
+    counted in the ONE batched scan event instead of being silently dropped
+    before schema admission ever saw it. (This replaces the pre-fix clause
+    that pinned the silent drop as 'torn-write tolerance': a genuinely torn
+    CONCURRENT write stays safe because the quarantine primitive re-checks
+    under the row's own write lock and keeps a row the writer just made
+    admissible.) The name is never memoized: after quarantine a fresh write
+    reclaims it with its real ts."""
     data = tmp_path / "data"
     _write_raw(data, "good", status="completed", result="ok", ts="2026-01-01T01:00:00Z")
-    (data / "task_results" / "torn.json").write_text("{torn", encoding="utf-8")
+    results = data / "task_results"
+    (results / "torn.json").write_text("{torn", encoding="utf-8")
 
     assert [row["task_id"] for row in _get_tasks(data)["tasks"]] == ["good"]
+    assert [p.name for p in (results / "quarantine").glob("*.json")] == ["torn.json"]
+    events = [
+        json.loads(line)
+        for line in (data / "logs" / "events.jsonl").read_text(encoding="utf-8").splitlines()
+        if line.strip()
+    ]
+    quarantine_events = [e for e in events if e.get("type") == "task_results_quarantined"]
+    assert len(quarantine_events) == 1
+    assert quarantine_events[0]["reasons"] == {"malformed": 1}
 
-    # The torn name was NOT committed to the memo: once the write completes,
+    # The name was NOT committed to the memo: a fresh write reclaims it and
     # the next request sees the row with its real (newer) ts.
     _write_raw(data, "torn", status="completed", result="ok", ts="2026-01-01T02:00:00Z")
     assert [row["task_id"] for row in _get_tasks(data)["tasks"]] == ["torn", "good"]
+
+
+def test_malformed_candidate_beyond_the_slice_window_is_still_quarantined(tmp_path):
+    """ABI-2 (Ф3.1 fix-round-2 pin, the REAL slice boundary): with more rows
+    than ``limit``, a malformed candidate — which would sort oldest and fall
+    outside the window — is STILL routed through the admission reader: its
+    bytes move to quarantine and it is counted in the same single batched
+    event as the in-window quarantines. Disclosed residual (docstring of
+    ``_tasks_list_payload``): a PARSEABLE inadmissible row beyond the window
+    is not classified by this sliced request; the next full/filtered scan
+    quarantines it."""
+    data = tmp_path / "data"
+    for i in range(4):
+        _write_raw(
+            data, f"t{i}", status="completed", result="ok",
+            ts=f"2026-01-01T0{i}:00:00Z",
+        )
+    results = data / "task_results"
+    (results / "broken.json").write_text("not json at all", encoding="utf-8")
+    # An in-window inadmissible row too, so the batch event provably spans
+    # both sides of the boundary in ONE event.
+    (results / "unstamped.json").write_text(
+        json.dumps({"task_id": "unstamped", "status": "completed",
+                    "ts": "2026-01-01T09:00:00Z"}),
+        encoding="utf-8",
+    )
+
+    payload = _get_tasks(data, limit=2)
+
+    # Raw-ts window of 2 = [unstamped(09:00), t3]; the in-window inadmissible
+    # row is quarantined (its slot is not backfilled this request), the
+    # malformed one never sat in the window at all — and BOTH are quarantined.
+    assert [row["task_id"] for row in payload["tasks"]] == ["t3"]
+    assert sorted(p.name for p in (results / "quarantine").glob("*.json")) == [
+        "broken.json", "unstamped.json",
+    ]
+    events = [
+        json.loads(line)
+        for line in (data / "logs" / "events.jsonl").read_text(encoding="utf-8").splitlines()
+        if line.strip()
+    ]
+    quarantine_events = [e for e in events if e.get("type") == "task_results_quarantined"]
+    assert len(quarantine_events) == 1, "one batched event for the whole scan"
+    assert quarantine_events[0]["count"] == 2
+    assert quarantine_events[0]["reasons"] == {"malformed": 1, "unstamped_pre_7_0": 1}
 
 
 def test_deleted_result_file_drops_out_of_list_and_memo(tmp_path):
@@ -122,6 +187,42 @@ def test_deleted_result_file_drops_out_of_list_and_memo(tmp_path):
 
     (data / "task_results" / "gone.json").unlink()
     assert [row["task_id"] for row in _get_tasks(data)["tasks"]] == ["keep"]
+
+
+def test_unfiltered_list_slice_is_admission_aware_with_one_batched_event(tmp_path):
+    """ABI-2 (Ф3.1 fix-round pin): the sliced fast path quarantines inadmissible
+    rows exactly like the list_task_results fail-soft scan — the row never
+    reaches the response, its bytes move under task_results/quarantine/, and
+    the whole scan reports ONE batched durable event (6.3=B), never one per
+    file."""
+    data = tmp_path / "data"
+    _write_raw(data, "good", status="completed", result="ok", ts="2026-01-01T01:00:00Z")
+    results = data / "task_results"
+    # Two inadmissible rows: unstamped pre-7.0 history and a future stamp.
+    (results / "old.json").write_text(
+        json.dumps({"task_id": "old", "status": "completed", "ts": "2026-01-01T02:00:00Z"}),
+        encoding="utf-8",
+    )
+    (results / "future.json").write_text(
+        json.dumps({"_schema_version": 99, "task_id": "future", "status": "completed"}),
+        encoding="utf-8",
+    )
+
+    payload = _get_tasks(data)  # unfiltered request = the sliced fast path
+
+    assert [row["task_id"] for row in payload["tasks"]] == ["good"]
+    quarantine = results / "quarantine"
+    assert sorted(p.name for p in quarantine.glob("*.json")) == ["future.json", "old.json"]
+    events_path = data / "logs" / "events.jsonl"
+    events = [
+        json.loads(line)
+        for line in events_path.read_text(encoding="utf-8").splitlines()
+        if line.strip()
+    ]
+    quarantine_events = [e for e in events if e.get("type") == "task_results_quarantined"]
+    assert len(quarantine_events) == 1  # one batched event for the whole scan
+    assert quarantine_events[0]["count"] == 2
+    assert quarantine_events[0]["reasons"] == {"unstamped_pre_7_0": 1, "future_schema": 1}
 
 
 def test_queue_only_returns_queue_without_scanning_task_results(tmp_path, monkeypatch):
@@ -168,7 +269,10 @@ def test_list_rows_are_compact_while_detail_keeps_bulk_fields(tmp_path):
     assert row["result"] == "done"  # pinned summary field
     assert row["status"] == "completed"
     assert row["ts"] == "2026-01-01T01:00:00Z"
-    assert row["cost_usd"] == 0.5
+    # ABI-3 (fix-round-2 conversion of this OLD-ABI clause): the stored
+    # legacy spelling leaves the list row under the honest name only.
+    assert row["accounted_upper_bound_usd"] == 0.5
+    assert "cost_usd" not in row
     assert "outcome_axes" in row
 
     detail_request = SimpleNamespace(

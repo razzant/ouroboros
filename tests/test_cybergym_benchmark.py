@@ -45,12 +45,13 @@ def test_profile_pins_one_canonical_model_and_review_panel():
         "OUROBOROS_MODEL_FALLBACKS",
         "OUROBOROS_MODEL_DEEP_SELF_REVIEW",
         "OUROBOROS_WEBSEARCH_MODEL",
-        "OUROBOROS_SCOPE_REVIEW_MODELS",
-        "OUROBOROS_SCOPE_REVIEW_MODEL",
     )
     for key in active_slots:
         assert settings[key] == MODEL, key
-    assert settings["OUROBOROS_REVIEW_MODELS"] == MODEL
+    # ABI 7.0 (ABI-10): the comma keys are retired — the structured slots
+    # below are the ONE reviewer configuration surface of the profile.
+    assert "OUROBOROS_REVIEW_MODELS" not in settings
+    assert "OUROBOROS_SCOPE_REVIEW_MODELS" not in settings
     assert "CLAUDE_CODE_MODEL" not in settings  # retired transport setting
     assert "OUROBOROS_MODEL_HEAVY" not in settings
     assert "USE_LOCAL_HEAVY" not in settings

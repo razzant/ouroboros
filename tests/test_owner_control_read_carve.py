@@ -32,6 +32,9 @@ from ouroboros.tools.registry import (
     _detect_safety_mode_self_lowering,
 )
 
+from tests._typed_guard_shared import _shell_guard_text
+
+
 
 @pytest.fixture(autouse=True)
 def _home_outside_tmp(tmp_path, monkeypatch):
@@ -121,12 +124,12 @@ def test_registry_level_read_carve_end_to_end(tmp_path):
     reg.set_context(ToolContext(repo_dir=system, drive_root=data, task_id="carve-test"))
 
     # Route inspection of an owner endpoint in the repo source: allowed.
-    out = reg._run_shell_safety_check(
+    out = _shell_guard_text(reg,
         {"cmd": ["rg", "/api/owner/safety-mode", str(system)], "cwd": str(system)}, "advanced"
     )
     assert out is None
     # An HTTP client naming the same endpoint: blocked, whatever verb it spells.
-    out = reg._run_shell_safety_check(
+    out = _shell_guard_text(reg,
         {
             "cmd": [
                 "python3",

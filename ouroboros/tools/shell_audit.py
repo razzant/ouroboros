@@ -13,6 +13,7 @@ from ouroboros.shell_parse import (
     shell_argv_with_inline,
     shell_command_string,
     shell_segments,
+    split_redirections,
 )
 from ouroboros.tool_access import (
     ResolvedResourceBinding,
@@ -29,6 +30,13 @@ from ouroboros.tool_access import (
 )
 from ouroboros.tools.shell_guards import writer_target_tokens
 from ouroboros.tools.deliverables_shell import lexical_user_files_block_reason
+from ouroboros.tools.tool_result import (
+    ToolResult,
+    _publish_tool_result,
+    _published_tool_result,
+    _replace_tool_result,
+)
+from ouroboros.tools.verify import check_exit_masking
 from ouroboros.workspace_executor import (
     executor_ref_from_ctx,
     map_backend_path,
@@ -43,25 +51,12 @@ _UNDECLARED_OUTPUTS_MARKER = "⚠️ ARTIFACT_OUTPUT_UNDECLARED"
 _UNDECLARED_OUTPUT_SCAN_MAX_FILES = 5000
 _UNDECLARED_OUTPUT_METADATA_COMMANDS = frozenset({"chmod", "chown", "mkdir", "rm"})
 _SHELL_WRAPPER_COMMANDS = frozenset({"sh", "bash", "zsh"})
-_SHELL_REDIRECT_TARGET_TOKENS = frozenset({
-    ">", ">>", "1>", "1>>", "2>", "2>>", "&>", "&>>",
-})
 
 
 def _redirect_targets_for_audit(argv: list[str]) -> set[str]:
     """Return only syntactic redirect destinations from one command segment."""
-    targets: set[str] = set()
-    for index, token in enumerate(argv[:-1]):
-        text = str(token)
-        if text in _SHELL_REDIRECT_TARGET_TOKENS:
-            destination = str(argv[index + 1])
-            if destination != "/dev/null":
-                targets.add(destination)
-            continue
-        match = re.match(r"^(?:[12]|&)?(?:>|>>)(.+)$", text)
-        if match and match.group(1) not in {"/dev/null", "&1", "&2", "&-"}:
-            targets.add(match.group(1))
-    return targets
+    _command_argv, targets = split_redirections(argv)
+    return set(targets)
 
 
 def _writer_targets_for_output_audit(argv: list[str]) -> set[str]:
@@ -335,3 +330,41 @@ def _mentioned_user_file_outputs_without_declaration(
                         continue
                 mentioned.append(path_text)
     return mentioned
+
+
+def _masked_green_disclosure(ctx: ToolContext, result: str, cmd) -> str:
+    """Disclose an exit code the command's own shape laundered.
+
+    RESULT AND TRACE ONLY: the published status, code and exit_code stay exactly
+    as the producer set them, no receipt is written, and nothing here enters the
+    verification ledger or receipt reconciliation. The note TRAILS the payload so
+    line 1 still belongs to the producer's typed marker, and the reasons ride the
+    published result's ``meta`` under ``exit_masking_reasons``. Same sensor as
+    ``verify_and_record`` (``verify.check_exit_masking``), read a second time.
+    """
+    masked, reasons = check_exit_masking([str(part) for part in (cmd or [])])
+    if not masked:
+        return result
+    text = (
+        f"{result}\n\nEXIT_MASKING_NOTE: exit_code=0 belongs to the last stage "
+        f"({', '.join(reasons)}); an upstream failure cannot change it — drop the "
+        "filter, use `set -o pipefail`, or check each stage."
+    )
+    base = _published_tool_result(ctx, None)
+    if (
+        not isinstance(base, ToolResult)
+        or base.meta.get("exit_code") != 0
+        or base.text != str(result)
+    ):
+        # Only an exit-0 PROCESS is a laundered exit: the trusted process fact
+        # decides, never the typed status (an undeclared-output nudge or an
+        # artifact-registration error is still a green exit that the shape
+        # laundered) and never an inspection of the text. A non-zero exit
+        # already says what happened.
+        return result
+    # Republish the SAME typed result with the note and the reasons: status,
+    # code and the trusted process facts (exit_code, signal) are carried
+    # through untouched by `_replace_tool_result`.
+    return _publish_tool_result(ctx, _replace_tool_result(
+        base, text=text, meta_updates={"exit_masking_reasons": list(reasons)},
+    ))

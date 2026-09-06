@@ -6,7 +6,7 @@ import json
 import logging
 import os
 import pathlib
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, Iterator, List, Optional
 
 from ouroboros.platform_layer import acquire_exclusive_file_lock, release_exclusive_file_lock
 from ouroboros.tools.review_helpers import format_obligation_excerpt
@@ -20,6 +20,8 @@ _MARKER_FACT_KEYS = (
     "review_contract_fingerprint", "rebuttal_sha256", "usage_attribution_schema",
     "group_id", "content_hash", "root_task_id",
 )
+ROOT_TASK_PROJECTION_RELATIVE_PATH = "state/skill_review_root_tasks.jsonl"
+ROOT_TASK_PROJECTION_GAPS_RELATIVE_PATH = "state/skill_review_root_tasks.gaps.jsonl"
 
 
 def _redact_history_payload(payload: Dict[str, Any]) -> Dict[str, Any]:
@@ -31,6 +33,34 @@ def _redact_history_payload(payload: Dict[str, Any]) -> Dict[str, Any]:
 
 def review_history_path(drive_root: pathlib.Path, skill_name: str) -> pathlib.Path:
     return drive_root / "state" / "skills" / skill_name / "review_history.jsonl"
+
+
+def root_task_projection_path(drive_root: pathlib.Path) -> pathlib.Path:
+    return drive_root / ROOT_TASK_PROJECTION_RELATIVE_PATH
+
+
+def root_task_projection_gaps_path(drive_root: pathlib.Path) -> pathlib.Path:
+    return drive_root / ROOT_TASK_PROJECTION_GAPS_RELATIVE_PATH
+
+
+def _record_root_task_projection_gap(
+    drive_root: pathlib.Path, skill_name: str, payload: Dict[str, Any],
+) -> None:
+    """Durably disclose a terminal row missing from the root-task projection."""
+    root_task_id = str(payload.get("root_task_id") or "")
+    job_id = str(payload.get("job_id") or payload.get("wave_id") or "")
+    if not root_task_id or not job_id:
+        return
+    row = {
+        "ts": str(payload.get("ts") or ""), "root_task_id": root_task_id,
+        "skill": skill_name, "job_id": job_id,
+        "reason": "root_task_projection_append_failed",
+    }
+    if not append_jsonl(root_task_projection_gaps_path(drive_root), row):
+        _emit_history_event(drive_root, {
+            "type": "skill_review_root_task_projection_gap_append_failed",
+            **row,
+        })
 
 
 def legacy_dispatch_marker_path(drive_root: pathlib.Path, skill_name: str) -> pathlib.Path:
@@ -335,8 +365,24 @@ def load_history(
     *,
     group_id: str = "",
 ) -> List[Dict[str, Any]]:
+    """History rows inside the bounded tail window (CPL4-C12).
+
+    Every reader is byte-bounded (the ``find_history_job_bounded`` idiom) so a
+    growing per-skill log never turns a context build or a wave start into a
+    whole-file scan — including the cross-skill paid-cycle count, which reads
+    through ``iter_history_rows_bounded`` (it walks every installed skill, so
+    it is the read the bound matters most for). Counter authorities stay exact
+    across the bound because
+    lifecycle terminal rows PERSIST their ordinals and ``normalize_history``
+    takes ``max(stored, derived)`` — only a group whose newest ordinal-bearing
+    row has aged past the window restarts low (disclosed degradation: the
+    review-cycle ceiling under-counts, it never over-blocks).
+    """
     try:
-        raw_entries = list(iter_jsonl_objects(review_history_path(drive_root, skill_name)))
+        raw_entries = list(iter_jsonl_objects(
+            review_history_path(drive_root, skill_name),
+            tail_bytes=_DETAIL_LOOKUP_MAX_BYTES,
+        ))
         markers = {
             str(marker.get("wave_id") or ""): marker
             for marker in load_dispatch_markers(drive_root, skill_name)
@@ -355,6 +401,25 @@ def load_history(
     if group_id:
         entries = [entry for entry in entries if entry.get("group_id") == group_id]
     return entries[-limit:] if limit > 0 else entries
+
+
+def iter_history_rows_bounded(
+    drive_root: pathlib.Path, skill_name: str,
+) -> Iterator[Dict[str, Any]]:
+    """RAW history rows of one skill inside the same bounded tail window.
+
+    ``load_history`` normalizes and merges dispatch markers; the cross-skill
+    paid-cycle count needs the rows as written and must NOT carry the window
+    size around itself — the bound belongs here, beside the other readers
+    (CPL4-C12). This is the read that walks EVERY skill's log, so it is the one
+    that must never turn into a whole-tree scan (audit #14-6b).
+    """
+    for row in iter_jsonl_objects(
+        review_history_path(pathlib.Path(drive_root), skill_name),
+        tail_bytes=_DETAIL_LOOKUP_MAX_BYTES,
+    ):
+        if isinstance(row, dict):
+            yield row
 
 
 def find_history_job_bounded(
@@ -550,8 +615,15 @@ def append_history_once(
         return False
     try:
         try:
+            # Same bounded window as every other reader (CPL4-C12): an
+            # idempotent retry lands within its wave's lifetime, far inside
+            # the tail — never a whole-file scan per terminal write.
             existing = next(
-                (row for row in iter_jsonl_objects(path) if str(row.get("job_id") or "") == job_id),
+                (
+                    row
+                    for row in iter_jsonl_objects(path, tail_bytes=_DETAIL_LOOKUP_MAX_BYTES)
+                    if str(row.get("job_id") or "") == job_id
+                ),
                 None,
             )
             marker = load_dispatch_marker_for_wave(drive_root, skill_name, job_id)
@@ -560,6 +632,10 @@ def append_history_once(
                 # clearing only a marker whose facts are already in the row.
                 if _marker_facts_landed(existing, marker):
                     clear_dispatch_marker(drive_root, skill_name, wave_id=job_id)
+                if not _append_root_task_projection_once(drive_root, skill_name, existing):
+                    log.warning("skill review root-task projection did not land for %s", skill_name)
+                    _record_root_task_projection_gap(drive_root, skill_name, existing)
+                    return False
                 return True
             payload = _merge_marker_facts(payload, marker)
             safe_payload = _redact_history_payload(payload)
@@ -577,9 +653,57 @@ def append_history_once(
                     drive_root, skill_name,
                     wave_id=str(payload.get("wave_id") or job_id),
                 )
+            if not _append_root_task_projection_once(drive_root, skill_name, safe_payload):
+                log.warning("skill review root-task projection did not land for %s", skill_name)
+                _record_root_task_projection_gap(drive_root, skill_name, safe_payload)
+                return False
             return True
         except OSError:
             log.warning("skill review terminal history append failed for %s", skill_name, exc_info=True)
             return False
+    finally:
+        release_exclusive_file_lock(lock_path, lock_fd)
+
+
+def _append_root_task_projection_once(
+    drive_root: pathlib.Path, skill_name: str, payload: Dict[str, Any],
+) -> bool:
+    """Append the derived root-task row once, checking its whole projection."""
+    root_task_id = str(payload.get("root_task_id") or "")
+    outcome_id = str(payload.get("job_id") or payload.get("wave_id") or "")
+    if not root_task_id or not outcome_id:
+        return True
+    path = root_task_projection_path(drive_root)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    lock_path = jsonl_append_lock_path(path)
+    lock_fd = acquire_exclusive_file_lock(lock_path, timeout_sec=2.0, stale_sec=10.0)
+    if lock_fd is None:
+        return False
+    try:
+        rows = iter_jsonl_objects(path)
+        if any(
+            str(row.get("root_task_id") or "") == root_task_id
+            and str(row.get("skill") or "") == skill_name
+            and str(row.get("job_id") or row.get("wave_id") or "") == outcome_id
+            for row in rows
+        ):
+            return True
+        row = {
+            "ts": str(payload.get("ts") or ""), "root_task_id": root_task_id,
+            "skill": skill_name, "job_id": outcome_id,
+        }
+        data = (json.dumps(row, ensure_ascii=False) + "\n").encode("utf-8")
+        fd = os.open(str(path), os.O_WRONLY | os.O_CREAT | os.O_APPEND, 0o644)
+        try:
+            view = memoryview(data)
+            while view:
+                view = view[os.write(fd, view):]
+            os.fsync(fd)
+        finally:
+            os.close(fd)
+        return True
+    except OSError:
+        log.warning("skill review root-task projection append failed for %s", skill_name)
+        return False
     finally:
         release_exclusive_file_lock(lock_path, lock_fd)

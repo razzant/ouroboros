@@ -14,7 +14,6 @@ import contextvars
 import hashlib
 import json
 import logging
-import os
 import pathlib
 import threading
 import time
@@ -46,7 +45,7 @@ from ouroboros.usage_ledger import (  # noqa: F401 — re-exported substrate
     _validate_records,
     _write_bytes_atomic_fsync,
 )
-from ouroboros.utils import append_jsonl, atomic_write_json, utc_now_iso
+from ouroboros.utils import append_jsonl, atomic_write_json, utc_now_iso  # noqa: F401 -- the accounting module keeps its historical import surface for the L-C2 leaf
 from ouroboros._usage_rows import (  # noqa: F401  (re-exported substrate vocabulary)
     REVIEW_ATTRIBUTION_KEYS,
     _breakdown_bucket,
@@ -57,7 +56,6 @@ from ouroboros._usage_rows import (  # noqa: F401  (re-exported substrate vocabu
 )
 from ouroboros.skill_review_usage import skill_review_usage
 log = logging.getLogger(__name__)
-IMPORT_REL = pathlib.Path("state/usage_import_watermark.json")
 __all__ = (
     "AttemptRequest", "AttemptReservation", "BudgetExceeded", "PhysicalAttemptCapture",
     "PhysicalAttemptContext", "PhysicalAttemptLimitExceeded", "PhysicalAttemptPreconditionFailed",
@@ -96,11 +94,18 @@ _LAST_PHYSICAL_ATTEMPT: contextvars.ContextVar[Optional["PhysicalAttemptCapture"
 _ROOT_ACCOUNTING_TELEMETRY: Dict[str, Dict[str, Any]] = {}
 _ROOT_ACCOUNTING_TELEMETRY_LOCK = threading.Lock()
 _ROOT_ACCOUNTING_TELEMETRY_CAP = 64
+_ROOT_RESERVATIONS_KEPT = 8  # identities of the newest appended reservations per root
 def _stash_root_accounting(
     root_task_id: str,
     accounted_usd: Optional[float],
     root_limit_usd: Optional[float],
+    reservation: Optional[Dict[str, Any]] = None,
 ) -> None:
+    """Refresh the process-local root snapshot. ``reservation`` is the identity
+    of a row this call has just APPENDED (attempt id, task, category, review
+    slot): only a successful ``reserve_attempt`` passes one, so a reader that
+    finds its own identity here has observed its own reservation — a refresh,
+    a settlement or a refused reservation never leaves one."""
     root_task_id = str(root_task_id or "").strip()
     if not root_task_id:
         return
@@ -114,20 +119,34 @@ def _stash_root_accounting(
                 key=lambda key: _ROOT_ACCOUNTING_TELEMETRY[key]["updated_monotonic"],
             )
             _ROOT_ACCOUNTING_TELEMETRY.pop(oldest, None)
+        now = time.monotonic()
+        kept = list((_ROOT_ACCOUNTING_TELEMETRY.get(root_task_id) or {}).get("reservations") or [])
+        if reservation:
+            kept = (kept + [{**reservation, "reserved_monotonic": now}])[-_ROOT_RESERVATIONS_KEPT:]
         _ROOT_ACCOUNTING_TELEMETRY[root_task_id] = {
             "accounted_usd": None if accounted_usd is None else float(accounted_usd),
             "root_limit_usd": None if root_limit_usd is None else float(root_limit_usd),
-            "updated_monotonic": time.monotonic(),
+            "updated_monotonic": now,
+            "reservations": kept,
         }
 
 def last_root_accounting(root_task_id: str) -> Optional[Dict[str, Any]]:
-    """Newest process-local root snapshot, including in-flight holds."""
+    """Newest process-local root snapshot, including in-flight holds and the
+    identities of the newest appended reservations (each with its own
+    ``age_sec``)."""
     with _ROOT_ACCOUNTING_TELEMETRY_LOCK:
         entry = _ROOT_ACCOUNTING_TELEMETRY.get(str(root_task_id or "").strip())
         if entry is None:
             return None
         entry = dict(entry)
-    entry["age_sec"] = max(0.0, time.monotonic() - entry.pop("updated_monotonic"))
+    now = time.monotonic()
+    entry["age_sec"] = max(0.0, now - entry.pop("updated_monotonic"))
+    reservations = []
+    for row in (entry.get("reservations") or []):
+        row = dict(row)
+        row["age_sec"] = max(0.0, now - float(row.pop("reserved_monotonic", now)))
+        reservations.append(row)
+    entry["reservations"] = reservations
     return entry
 
 def refresh_root_accounting(
@@ -196,6 +215,7 @@ class UsageScope:
     review_slot_id: str = ""
     global_limit_usd: Optional[float] = None
     root_limit_usd: Optional[float] = None
+    root_cost_ceiling_usd: Optional[float] = None
 @dataclass(frozen=True)
 class PhysicalAttemptContext:
     profile: Literal["owner_max", "owner_low", "task_local_low"]
@@ -291,11 +311,11 @@ def current_usage_scope() -> Optional[UsageScope]:
 
 @contextlib.contextmanager
 def bind_physical_attempt_context(
-    context: PhysicalAttemptContext,
+    context: Optional[PhysicalAttemptContext],
     candidate_predicate: Optional[Callable[[AttemptRequest], Any]] = None,
-) -> Iterator[PhysicalAttemptContext]:
-    """Bind frozen Main metadata and an optional final-fact predicate."""
-    if not isinstance(context, PhysicalAttemptContext):
+) -> Iterator[Optional[PhysicalAttemptContext]]:
+    """Bind frozen Main metadata (None = no Main metadata) and/or a final-fact predicate."""
+    if context is not None and not isinstance(context, PhysicalAttemptContext):
         raise TypeError("physical attempt context must be PhysicalAttemptContext")
     context_token = _PHYSICAL_CONTEXT.set(context)
     predicate_token = _PHYSICAL_PREDICATE.set(candidate_predicate)
@@ -312,8 +332,6 @@ def current_physical_attempt_context() -> Optional[PhysicalAttemptContext]:
 
 def current_physical_attempt_predicate() -> Optional[Callable[[AttemptRequest], Any]]:
     return _PHYSICAL_PREDICATE.get()
-
-
 def last_physical_attempt_capture() -> Optional[PhysicalAttemptCapture]:
     return _LAST_PHYSICAL_ATTEMPT.get()
 
@@ -321,8 +339,6 @@ def last_physical_attempt_capture() -> Optional[PhysicalAttemptCapture]:
 def physical_attempt_capture_from_exception(exc: BaseException) -> Optional[PhysicalAttemptCapture]:
     capture = getattr(exc, "physical_attempt_capture", None)
     return capture if isinstance(capture, PhysicalAttemptCapture) else last_physical_attempt_capture()
-
-
 @contextlib.contextmanager
 def capture_attempt_ids() -> Iterator[list[str]]:
     """Collect physical attempt ids for one compatibility ``llm_usage`` row."""
@@ -330,10 +346,14 @@ def capture_attempt_ids() -> Iterator[list[str]]:
     token = _ATTEMPT_COLLECTOR.set(bucket)
     try:
         yield bucket
+    except BaseException as exc:
+        prior = [str(v) for v in (getattr(exc, "ledger_attempt_ids", None) or []) if v]
+        try:
+            setattr(exc, "ledger_attempt_ids", list(dict.fromkeys([*prior, *bucket])))
+        except Exception: pass
+        raise
     finally:
         _ATTEMPT_COLLECTOR.reset(token)
-
-
 @contextlib.contextmanager
 def physical_attempt_limit(maximum: int) -> Iterator[None]:
     """Bound physical provider sends in this actor context (acceptance uses 2)."""
@@ -365,12 +385,19 @@ def _merge_scope(request: AttemptRequest) -> Tuple[AttemptRequest, UsageScope]:
             request.global_limit_usd if request.global_limit_usd is not None else bound.global_limit_usd
         ),
         root_limit_usd=(request.root_limit_usd if request.root_limit_usd is not None else bound.root_limit_usd),
+        root_cost_ceiling_usd=bound.root_cost_ceiling_usd,
     )
     if not scope.root_task_id and scope.task_id:
         scope = replace(scope, root_task_id=scope.task_id)
     if request.global_limit_usd is None and scope.global_limit_usd is not None:
         request = replace(request, global_limit_usd=scope.global_limit_usd)
+    if not request.task_id and scope.task_id:
+        # The reservation below keys the task's observed cache split off this id.
+        request = replace(request, task_id=scope.task_id, root_task_id=scope.root_task_id)
     return request, scope
+from ouroboros._usage_cache_splits import (  # noqa: F401,E402  (re-exported seam)
+    invalidate_task_cache_splits, last_task_cache_split,
+    reset_task_cache_splits as _reset_task_cache_splits, stash_task_cache_split)
 from ouroboros._usage_rows_memo import (  # noqa: F401,E402  (re-exported seam)
     _LedgerRowsMemo, _ROWS_MEMO, _ROWS_MEMO_LOCK,
     _memoized_final_rows, _read_records_locked_cached, _render_cached,
@@ -405,10 +432,9 @@ def usage_projection(
     if global_limit_usd is not None:
         configured_limit = max(0.0, float(global_limit_usd))
     else:
-        try:
-            configured_limit = float(os.environ.get("TOTAL_BUDGET", "200") or 0.0)
-        except (TypeError, ValueError):
-            configured_limit = 200.0
+        from ouroboros.settings_setup_contract import resolve_total_budget_usd
+
+        configured_limit = resolve_total_budget_usd() or 0.0
     apply_limit = global_limit_usd is not None or configured_limit > 0
     cache_key = (
         "usage_projection", "", "",
@@ -541,6 +567,12 @@ def _reservation_cost(request: AttemptRequest) -> Optional[float]:
     cache_write_tokens = (
         prompt_tokens if str(request.model or "").lstrip("~").startswith(("anthropic/", "anthropic::")) else 0
     )
+    cached_tokens = 0
+    if cache_write_tokens:
+        # Price the task's OWN last observed split, not a full write every round;
+        # a missing, stale or other-model split keeps today's full-write reservation.
+        cached_tokens = min(prompt_tokens, last_task_cache_split(request.task_id, request.model, provider=request.provider) or 0)
+        cache_write_tokens = prompt_tokens - cached_tokens
     prompt_cache_ttl: Optional[str] = None
     if cache_write_tokens:
         # Price the applied candidate TTL; unknown construction sites use the owner SSOT.
@@ -561,10 +593,19 @@ def _reservation_cost(request: AttemptRequest) -> Optional[float]:
         prompt_tokens,
         max(0, int(request.max_completion_tokens or 0)),
         cache_usage={"cache_write_tokens": cache_write_tokens,
+                     "cached_tokens": cached_tokens,
                      "prompt_cache_ttl": prompt_cache_ttl},
         allow_live_fetch=True,
         provider=request.provider,
     )
+
+
+def _per_slot(value: Any, count: int) -> list:
+    """Broadcast one scalar, or align one per-slot sequence, over ``count`` slots."""
+    if isinstance(value, (list, tuple)):
+        values = list(value)
+        return values[:count] + [values[-1] if values else 0] * max(0, count - len(values))
+    return [value] * count
 
 
 def review_wave_admission(
@@ -572,13 +613,40 @@ def review_wave_admission(
     *,
     root_task_id: str,
     models: Sequence[str],
-    prompt_chars: int,
-    max_completion_tokens: int = 65536,
+    prompt_chars: int | Sequence[int],
+    max_completion_tokens: int | Sequence[int] = 65536,
     remaining_usd_override: float | None = None,
+    task_id: str = "",
+    root_limit_usd: float | None = None,
+    global_limit_usd: float | None = None,
+    categories: str | Sequence[str] = "",
+    slot_ids: str | Sequence[str] = "",
 ) -> Dict[str, Any]:
     """Read-only all-slot admission using the normal reservation math; fail open.
     ``remaining_usd_override`` serves callers outside any task usage scope (the
-    managed-update admission gate): compared against instead of the projection."""
+    managed-update admission gate): compared against instead of the projection.
+    Otherwise the wave is admitted against EVERY fence ``reserve_attempt``
+    enforces: the global ``TOTAL_BUDGET`` remainder (``global_limit_usd``,
+    resolved like the ledger's own global fence — None reads the setting, a
+    non-positive setting leaves the axis unbounded) and the root remainder;
+    ``remaining_usd`` is the tighter one and ``binding_axis`` names it.
+
+    ``prompt_chars``/``max_completion_tokens``/``categories``/``slot_ids``
+    accept one value for every slot or one value PER slot (aligned with
+    ``models``): a mixed wave (the commit gate's scope pack beside its triad
+    pack) is priced seat by seat exactly as ``reserve_attempt`` will price each
+    send. The observed cache split a reservation reads is keyed by the SENDING
+    scope (task, provider, model, category and review slot): each seat is
+    priced under its own category/slot, so a warm split of the caller's own
+    transcript never stands in for a reviewer seat's cold prefix — an empty
+    category keeps the caller's scope (a wave the caller sends itself). The
+    result also discloses the projection's ``accounted_usd``, the open holds of
+    in-flight attempts (``reserved_usd``: reserved plus dispatched upper
+    bounds) and the per-slot bounds so a refusal can name what holds the money.
+    ``root_limit_usd`` is the caller's CURRENT bound fence — the one
+    ``reserve_attempt`` will enforce — and governs when given; the ledger's
+    projection (the minimum of the historical row limits) serves only a caller
+    that binds no fence of its own."""
     result: Dict[str, Any] = {
         "fits": True,
         "estimated_wave_usd": None,
@@ -586,6 +654,11 @@ def review_wave_admission(
         "limit_usd": None,
         "slots": len(list(models or [])),
         "unpriced_slots": 0,
+        "accounted_usd": None,
+        "reserved_usd": None,
+        "slot_bounds": [],
+        **{key: None for key in ("global_limit_usd", "global_accounted_usd", "global_remaining_usd",
+                                 "global_reserved_usd", "binding_axis")},
     }
     root_task_id = str(root_task_id or "").strip()
     if not root_task_id or not models:
@@ -596,24 +669,55 @@ def review_wave_admission(
         if remaining_usd_override is not None:
             remaining = float(remaining_usd_override)
         else:
+            # Every OPEN hold counts as reserved-by-others: a reserved row and a
+            # dispatched (in-flight) row both bind their upper bound on the fence.
+            holds = lambda p: round(float(_number(p.get("reserved_usd")) or 0.0)  # noqa: E731
+                                    + float(_number(p.get("unresolved_upper_bound_usd")) or 0.0), 6)
             projection = usage_projection(drive_root, root_task_id=root_task_id)
-            limit = _number(projection.get("limit_usd"))
-            remaining = _number(projection.get("remaining_known_usd"))
-            if limit is None or remaining is None:
-                return result
-            result["limit_usd"] = limit
-        result["remaining_usd"] = remaining
-        prompt_tokens = max(0, int(prompt_chars or 0)) // 4
-        total = 0.0
-        for model in models:
-            bound = _reservation_cost(
-                AttemptRequest(
-                    model=str(model or ""),
-                    provider=infer_provider_from_model(str(model or "")),
-                    prompt_tokens_estimate=prompt_tokens,
-                    max_completion_tokens=max(0, int(max_completion_tokens or 0)),
-                )
+            limit = (
+                max(0.0, float(root_limit_usd)) if root_limit_usd is not None
+                else _number(projection.get("limit_usd"))
             )
+            accounted = _number(projection.get("accounted_usd"))
+            if limit is not None and accounted is not None:
+                remaining = round(max(0.0, limit - accounted), 6)
+                result.update(limit_usd=limit, accounted_usd=accounted, reserved_usd=holds(projection),
+                              binding_axis="root")
+            # The global axis reserve_attempt checks FIRST (all roots' rows, open holds included).
+            gp = usage_projection(drive_root, global_limit_usd=global_limit_usd, include_roots=False)
+            result.update(global_limit_usd=_number(gp.get("limit_usd")),
+                          global_accounted_usd=_number(gp.get("accounted_usd")),
+                          global_remaining_usd=_number(gp.get("remaining_known_usd")), global_reserved_usd=holds(gp))
+            global_remaining = result["global_remaining_usd"]
+            if global_remaining is not None and (result["binding_axis"] is None or global_remaining < remaining):
+                remaining, result["binding_axis"] = global_remaining, "global"
+            if result["binding_axis"] is None:
+                return result
+        result["remaining_usd"] = remaining
+        chars = _per_slot(prompt_chars, len(models))
+        outputs = _per_slot(max_completion_tokens, len(models))
+        seat_categories = _per_slot(categories, len(models))
+        seat_slot_ids = _per_slot(slot_ids, len(models))
+        base_scope = current_usage_scope() or UsageScope()
+        total = 0.0
+        for index, model in enumerate(models):
+            seat_scope = base_scope
+            if str(seat_categories[index] or ""):
+                seat_scope = replace(
+                    base_scope, category=str(seat_categories[index]),
+                    review_slot_id=str(seat_slot_ids[index] or ""),
+                )
+            with usage_scope(seat_scope):
+                bound = _reservation_cost(
+                    AttemptRequest(
+                        model=str(model or ""),
+                        provider=infer_provider_from_model(str(model or "")),
+                        prompt_tokens_estimate=max(0, int(chars[index] or 0)) // 4,
+                        max_completion_tokens=max(0, int(outputs[index] or 0)),
+                        task_id=str(task_id or ""),
+                    )
+                )
+            result["slot_bounds"].append(None if bound is None else round(float(bound), 6))
             if bound is None:
                 # Unknown contributes no invented price and remains explicitly counted.
                 result["unpriced_slots"] = int(result.get("unpriced_slots") or 0) + 1
@@ -630,11 +734,10 @@ def review_wave_admission(
 def _global_limit(request: AttemptRequest) -> float:
     if request.global_limit_usd is not None:
         return max(0.0, float(request.global_limit_usd))
-    try:
-        configured = float(os.environ.get("TOTAL_BUDGET", "200") or 0.0)
-        return configured if configured > 0 else float("inf")
-    except (TypeError, ValueError):
-        return 200.0
+    from ouroboros.settings_setup_contract import resolve_total_budget_usd
+
+    configured = resolve_total_budget_usd()
+    return float("inf") if configured is None else max(0.0, configured)
 
 
 def _active_root_budget_fence(root: pathlib.Path, root_task_id: str) -> Optional[Dict[str, Any]]:
@@ -697,7 +800,14 @@ def reserve_attempt(request: AttemptRequest) -> AttemptReservation:
     bound = _reservation_cost(request)
     pricing_known = bound is not None
     attempt_id = uuid.uuid4().hex
-    with _locked(root):
+    with _locked(root) as ledger_lock:
+        # CPL4-C6: opportunistic size-triggered compaction on exactly the path
+        # whose lock hold the ledger size degrades (contained; never raises).
+        # The pass gets the lock's heartbeat: it can legitimately outlive the
+        # staleness window that every other hold here stays far below.
+        from ouroboros.usage_compaction import maybe_compact_usage_ledger_locked
+
+        maybe_compact_usage_ledger_locked(root, heartbeat=ledger_lock)
         records = _read_records_locked_cached(root)
         finals = list(_final_rows(records).values())
         global_summary = _summary(finals)
@@ -714,12 +824,12 @@ def reserve_attempt(request: AttemptRequest) -> AttemptReservation:
             )
         root_rows: Optional[list[Dict[str, Any]]] = None
         root_limit: Optional[float] = None
-        if scope.root_task_id and scope.root_limit_usd is not None:
+        if scope.root_task_id:  # every rooted attempt refreshes the subtree telemetry, cap or not
             root_rows = [row for row in finals if str(row.get("root_task_id") or "") == scope.root_task_id]
             root_accounted = float(_summary(root_rows)["accounted_usd"])
-            root_limit = max(0.0, float(scope.root_limit_usd))
-            # Piggyback the measured pre-append subtree sum on this locked read.
-            _stash_root_accounting(scope.root_task_id, root_accounted, root_limit)
+            root_limit = None if scope.root_limit_usd is None else max(0.0, float(scope.root_limit_usd))
+            _stash_root_accounting(scope.root_task_id, root_accounted, root_limit)  # pre-append subtree sum
+        if root_limit is not None:
             if root_limit <= 0 or root_accounted >= root_limit - 1e-9 or (
                 bound is not None and root_accounted + bound > root_limit + 1e-9
             ):
@@ -765,6 +875,10 @@ def reserve_attempt(request: AttemptRequest) -> AttemptReservation:
                 scope.root_task_id,
                 float(_summary([*root_rows, *appended])["accounted_usd"]),
                 root_limit,
+                reservation={
+                    "attempt_id": attempt_id, "task_id": scope.task_id,
+                    "category": scope.category, "review_slot_id": scope.review_slot_id,
+                },
             )
     bucket = _ATTEMPT_COLLECTOR.get()
     if bucket is not None:
@@ -898,6 +1012,10 @@ def record_subscription_session(
         "credential_profile_id": str(credential_profile_id or ""),
         "access_profile": str(access_profile or ""),
         "session_id_sha256": identity,
+        # CPL-5 lane-level disclosure: a delegated/harness session never hands
+        # the host the final wire bytes, so it carries this typed limit instead
+        # of a fake model_send seal (design note §4, provider_side_transform).
+        "model_send_seal": "unobserved",
     }
     return _append_single_settled_row(root, row, comparable=(
         "kind", "model", "provider", "task_id", "root_task_id", "parent_task_id",
@@ -935,7 +1053,7 @@ def _transition(reservation: AttemptReservation, state: str, **fields: Any) -> D
         appended = _append_rows_locked(reservation.drive_root, records, [row])
         root_task_id = str(current.get("root_task_id") or "")
         root_limit = _number(current.get("root_limit_usd"))
-        if root_task_id and root_limit is not None:
+        if root_task_id:
             # Refresh from post-transition finals without another ledger read.
             subtree = [
                 r for r in _final_rows([*records, *appended]).values()
@@ -1056,6 +1174,10 @@ def settle_attempt(
         cached_tokens=cached_tokens,
         cache_write_tokens=cache_write_tokens,
         prompt_cache_ttl=str(normalized.get("prompt_cache_ttl") or ""),
+    )
+    stash_task_cache_split(
+        (_CURRENT_SCOPE.get() or UsageScope()).task_id, reservation.model, int(cached_tokens or 0), provider=reservation.provider,
+        ttl_seconds=3600.0 if str(normalized.get("prompt_cache_ttl") or "") == "1h" else 300.0,
     )
 
 
@@ -1353,230 +1475,15 @@ async def execute_physical_attempt_async(
     return response
 
 
-def _legacy_snapshot(root: pathlib.Path) -> Tuple[list[Dict[str, Any]], Dict[str, Any], Dict[str, str]]:
-    events_path = root / "logs" / "events.jsonl"
-    state_path = root / "state" / "state.json"
-    settings_path = pathlib.Path(os.environ.get("OUROBOROS_SETTINGS_PATH") or root / "settings.json")
-    sources = {"events.jsonl": events_path, "state.json": state_path}
-    snapshots: Dict[str, bytes] = {}
-    for name, path in sources.items():
-        try:
-            snapshots[name] = path.read_bytes()
-        except FileNotFoundError:
-            continue
-        except OSError as exc:
-            raise UsageAccountingError(f"cannot snapshot legacy usage source {path}: {exc}") from exc
-    hashes = {name: hashlib.sha256(snapshots[name]).hexdigest() if name in snapshots else "" for name in sources}
-    # Settings are owner-secret state: prove non-mutation by hash, never copy contents.
-    try:
-        hashes["settings.json"] = hashlib.sha256(settings_path.read_bytes()).hexdigest()
-    except FileNotFoundError:
-        hashes["settings.json"] = ""
-    except OSError as exc:
-        raise UsageAccountingError(f"cannot hash settings file {settings_path}: {exc}") from exc
-    rows: list[Dict[str, Any]] = []
-    try:
-        event_text = snapshots.get("events.jsonl", b"").decode("utf-8")
-        for line_no, line in enumerate(event_text.splitlines(), 1):
-            try:
-                value = json.loads(line)
-            except json.JSONDecodeError:
-                continue
-            if isinstance(value, dict) and value.get("type") == "llm_usage":
-                rows.append({**value, "_legacy_line": line_no})
-    except UnicodeDecodeError:
-        pass
-    try:
-        state = json.loads(snapshots.get("state.json", b"{}").decode("utf-8"))
-        if not isinstance(state, dict):
-            state = {}
-    except (UnicodeDecodeError, json.JSONDecodeError):
-        state = {}
-
-    combined = hashlib.sha256(json.dumps(hashes, sort_keys=True).encode("utf-8")).hexdigest()[:16]
-    archive = root / "archive" / "usage_import" / combined
-    archive.mkdir(parents=True, exist_ok=True)
-    for name, payload in snapshots.items():
-        target = archive / name
-        if target.exists():
-            if target.read_bytes() != payload:
-                raise UsageAccountingError(f"legacy usage archive mismatch: {target}")
-        else:
-            _write_bytes_atomic_fsync(target, payload)
-            try:
-                target.chmod(0o400)
-            except OSError:
-                pass
-    atomic_write_json(archive / "sha256.json", hashes, trailing_newline=True, fsync=True)
-    return rows, state, hashes
-
-
-def ensure_legacy_imported(
-    drive_root: Optional[pathlib.Path] = None,
-) -> Dict[str, Any]:
-    """One resumable import of legacy usage telemetry and the state cost delta."""
-    root = _drive_root(drive_root)
-    completed = _completed_import_watermark(root)
-    if completed is not None:
-        return completed
-    # Separate from the hot budget lock: source snapshot/archive may do I/O,
-    # while concurrent startup importers still serialize on one generation.
-    with _named_lock(root, "usage_import.lock", timeout_sec=60.0, stale_sec=600.0):
-        return _ensure_legacy_imported_locked(root)
-
-
-def _completed_import_watermark(root: pathlib.Path) -> Optional[Dict[str, Any]]:
-    try:
-        value = json.loads((root / IMPORT_REL).read_text(encoding="utf-8"))
-    except (FileNotFoundError, OSError, UnicodeDecodeError, json.JSONDecodeError):
-        return None
-    return value if isinstance(value, dict) and value.get("completed") else None
-
-
-def _ensure_legacy_imported_locked(
-    root: pathlib.Path,
-) -> Dict[str, Any]:
-    watermark = root / IMPORT_REL
-    existing = _completed_import_watermark(root)
-    if existing is not None:
-        return existing
-
-    legacy_rows, state, hashes = _legacy_snapshot(root)
-    baseline_source = "state.json"
-    candidates: list[Dict[str, Any]] = []
-    seen_fingerprints: set[str] = set()
-    imported_cost = 0.0
-    usage_count = 0
-    for event in legacy_rows:
-        line_no = int(event.pop("_legacy_line", 0) or 0)
-        legacy_usage = event.get("usage") if isinstance(event.get("usage"), dict) else {}
-        fingerprint = hashlib.sha256(
-            json.dumps(event, ensure_ascii=False, sort_keys=True, separators=(",", ":"), default=str).encode("utf-8")
-        ).hexdigest()
-        if fingerprint in seen_fingerprints:
-            continue
-        seen_fingerprints.add(fingerprint)
-        task_id = str(event.get("task_id") or "")
-        root_task_id = str(event.get("root_task_id") or task_id)
-        raw_cost = event.get("cost")
-        if raw_cost is None:
-            raw_cost = legacy_usage.get("cost", legacy_usage.get("total_cost"))
-        cost = _number(raw_cost)
-
-        def legacy_int(field: str, *aliases: str) -> int:
-            for candidate in (field, *aliases):
-                value = event.get(candidate)
-                if value in (None, ""):
-                    value = legacy_usage.get(candidate)
-                try:
-                    return max(0, int(float(value or 0)))
-                except (TypeError, ValueError):
-                    continue
-            return 0
-
-        prompt = legacy_int("prompt_tokens", "input_tokens")
-        completion = legacy_int("completion_tokens", "output_tokens")
-        provider = str(event.get("provider") or event.get("api_key_type") or "unknown")
-        if cost == 0 and (prompt or completion) and provider != "local":
-            cost = None  # legacy zero may mean unknown pricing, never "free"
-        usage_count += 1
-        if cost is not None:
-            imported_cost += cost
-        candidates.append(
-            {
-                "kind": "legacy_usage",
-                "attempt_id": f"legacy-{fingerprint[:24]}",
-                "state": "settled",
-                "model": str(event.get("model") or ""),
-                "provider": provider,
-                "cost_usd": cost,
-                "cost_final": bool(cost is not None and not event.get("cost_estimated")),
-                "reservation_upper_bound_usd": None,
-                "prompt_tokens": prompt,
-                "completion_tokens": completion,
-                "cached_tokens": legacy_int("cached_tokens", "cache_read_input_tokens"),
-                "cache_write_tokens": legacy_int("cache_write_tokens", "cache_creation_input_tokens"),
-                "prompt_cache_ttl": str(
-                    event.get("prompt_cache_ttl") or legacy_usage.get("prompt_cache_ttl") or ""
-                ),
-                "task_id": task_id,
-                "root_task_id": root_task_id,
-                "parent_task_id": str(event.get("parent_task_id") or ""),
-                "category": str(event.get("category") or "legacy"),
-                "source": "legacy_llm_usage",
-                "legacy_line": line_no,
-            }
-        )
-    legacy_calls = max(0, int(state.get("spent_calls") or state.get("calls") or 0))
-    metadata_count = max(0, legacy_calls - usage_count)
-    if metadata_count:
-        identity = hashlib.sha256(
-            f"legacy-metadata:{metadata_count}:{hashes.get('state.json', '')}".encode()
-        ).hexdigest()
-        candidates.append(
-            {
-                "kind": "legacy_metadata",
-                "attempt_id": f"legacy-{identity[:24]}",
-                "state": "unresolved",
-                "model": "",
-                "provider": "legacy",
-                "reservation_upper_bound_usd": None,
-                "ambiguous_call_count": metadata_count,
-                "task_id": "",
-                "root_task_id": "",
-                "parent_task_id": "",
-                "category": "legacy",
-                "source": "legacy_state_call_delta",
-            }
-        )
-    state_spent = _number(state.get("spent_usd")) or 0.0
-    delta = round(max(0.0, state_spent - imported_cost), 6)
-    if delta:
-        identity = hashlib.sha256(f"legacy-delta:{delta:.6f}:{hashes.get('state.json', '')}".encode()).hexdigest()
-        candidates.append(
-            {
-                "kind": "legacy_delta",
-                "attempt_id": f"legacy-{identity[:24]}",
-                "state": "settled",
-                "model": "",
-                "provider": "legacy",
-                "cost_usd": delta,
-                "cost_final": False,
-                "reservation_upper_bound_usd": None,
-                "task_id": "",
-                "root_task_id": "",
-                "parent_task_id": "",
-                "category": "legacy",
-                "source": "legacy_state_delta",
-            }
-        )
-
-    with _locked(root):
-        current_watermark = _completed_import_watermark(root)
-        if current_watermark is not None:
-            return current_watermark
-        records = _read_records_locked_cached(root)
-        existing_ids = {str(row.get("attempt_id") or "") for row in records}
-        missing = [row for row in candidates if row["attempt_id"] not in existing_ids]
-        _append_rows_locked(root, records, missing)
-        result = {
-            "completed": True,
-            "completed_at": utc_now_iso(),
-            "source_sha256": hashes,
-            "legacy_baseline_source": baseline_source,
-            "legacy_baseline_spent_usd": state_spent,
-            "legacy_baseline_spent_calls": legacy_calls,
-            "legacy_usage_count": usage_count,
-            "legacy_metadata_count": metadata_count,
-            "legacy_delta_usd": delta,
-            # The legacy schema has no trustworthy typed test/operator bit.
-            # Never invent exclusions from names, task ids, or source strings.
-            "quarantined_test_operator_rows": 0,
-            "test_operator_quarantine_policy": "typed_evidence_only_no_inference",
-            "events_exceed_state_calls": max(0, usage_count - legacy_calls),
-            "events_exceed_state_usd": round(max(0.0, imported_cost - state_spent), 6),
-            "rows_appended": len(missing),
-        }
-        atomic_write_json(watermark, result, trailing_newline=True, fsync=True)
-    append_jsonl(root / "logs" / "events.jsonl", {"type": "usage_import_completed", **result})
-    return result
+# v7 L-C2 split: the one-time legacy usage-telemetry import (source snapshot and
+# archive, candidate rows, state-baseline reconciliation, completed watermark)
+# lives in ouroboros/usage_legacy_import.py. Re-exported under the historical
+# names so callers and monkeypatching tests keep working unchanged (facade
+# identity pinned in tests/test_lc2_owner_facades.py).
+from ouroboros.usage_legacy_import import (  # noqa: E402, F401 -- intentional public re-exports
+    IMPORT_REL,
+    _completed_import_watermark,
+    _ensure_legacy_imported_locked,
+    _legacy_snapshot,
+    ensure_legacy_imported,
+)

@@ -82,7 +82,7 @@ def _impl(tmp_path, **overrides):
         companion_processes=[{"name": "daemon", "command": ["python3", "daemon.py"], "runtime": "python3"}],
     )
     cfg.update(overrides)
-    return extension_loader.PluginAPIImpl(**cfg)
+    return extension_loader.PluginAPIImpl(extension_loader._PluginAPIConfig(**cfg))
 
 
 def test_child_rejects_only_unavailable_capabilities(tmp_path, monkeypatch):
@@ -106,7 +106,10 @@ def test_child_companion_is_recorded_for_host_spawn(tmp_path, monkeypatch):
     monkeypatch.setenv("OUROBOROS_EXTENSION_PROCESS_CHILD", "1")
     api = _impl(tmp_path)
     api.register_companion_process("daemon")
-    # The child records the manifest-declared name; the host spawns it after catalog.
+    # The child records the manifest-declared name; the host spawns it after
+    # catalog. ABI-9: the record lands with the atomic publication the child's
+    # load performs after register() returns.
+    api._publish_registrations()
     assert "daemon" in extension_loader.list_companion_names()
 
 

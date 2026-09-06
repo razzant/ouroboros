@@ -8,6 +8,7 @@ store, transport route, or review policy of its own.
 
 from __future__ import annotations
 
+import copy
 from hashlib import sha256
 import json
 import pathlib
@@ -80,6 +81,61 @@ def authority_wave(drive_root: Any, task_id: str, hot_wave: Optional[dict]) -> O
         return hot_wave
     exact = read_wave(drive_root, task_id, ref)
     return {**exact, **hot_wave, "findings": list(exact.get("findings") or [])}
+
+
+_PLAN_REVIEW_TRANSPORT_KEYS = frozenset({
+    "actors", "actors_degraded", "evidence_manifest", "health_epoch", "reasons", "retry_key",
+})
+
+
+def plan_review_authority_core(
+    state: Dict[str, Any], *, source_ref: Optional[Dict[str, Any]] = None,
+) -> Dict[str, Any]:
+    """Project decision authority ahead of compacted request memory and transport."""
+    from ouroboros.task_results import _compact_plan_review_wave
+
+    if not isinstance(state, dict) or not state:
+        return state
+    try:
+        schema_version = int(state.get("schema_version") or 0)
+    except (TypeError, ValueError):
+        return state
+    if schema_version == 1:
+        return state
+    core = copy.deepcopy(state)
+    waves = core.get("waves") if isinstance(core.get("waves"), list) else None
+    if not waves:
+        return core
+    last = len(waves) - 1
+    core["waves"] = [
+        wave if not isinstance(wave, dict)
+        else (wave if wave.get("compact") else _compact_plan_review_wave(wave)) if index < last
+        else {k: v for k, v in wave.items() if k not in _PLAN_REVIEW_TRANSPORT_KEYS}
+        for index, wave in enumerate(waves)
+    ]
+    if source_ref is not None:
+        latest = core["waves"][-1] if isinstance(core["waves"][-1], dict) else {}
+        spec = latest.get("spec") if isinstance(latest.get("spec"), dict) else {}
+
+        def recent(value: Any) -> Dict[str, Any]:
+            items = value if isinstance(value, list) else []
+            return {"items": copy.deepcopy(items[-4:]), "items_omitted": max(0, len(items) - 4), "total": len(items)}
+
+        core["decision_core"] = {
+            "identity": {key: copy.deepcopy(latest[key]) for key in ("cycle_index", "request_fingerprint", "previous_fingerprint", "spec_hash", "evidence_manifest_hash", "aggregate", "closed", "paid") if key in latest},
+            "goal": spec.get("goal"), "acceptance_claims": recent(spec.get("acceptance_claims")),
+            "findings": recent(latest.get("findings")), "dispositions": recent(latest.get("dispositions")),
+        }
+        core["waves"] = [_compact_plan_review_wave(wave) if isinstance(wave, dict) and not wave.get("compact") else wave for wave in core["waves"]]
+        core["need_evidence_seen"] = recent(core.get("need_evidence_seen"))
+        dropped_keys = sorted({key for wave in waves if isinstance(wave, dict)
+                               for key in _PLAN_REVIEW_TRANSPORT_KEYS if key in wave})
+        core["projection"] = {
+            "projected_from": "plan_review_authority_core", "dropped_keys": dropped_keys,
+            "full_chars": len(json.dumps(state, ensure_ascii=False, sort_keys=True, default=str)),
+            "source_ref": {**copy.deepcopy(source_ref), "field": "authority.plan_review_state"},
+        }
+    return core
 
 
 def _row_has_physical_dispatch(row: Dict[str, Any]) -> bool:
@@ -235,24 +291,17 @@ def hot_index_wave(wave: dict, *, page_size: int) -> dict:
 def continuation_state(
     state_root: pathlib.Path, task_id: str, previous: Optional[dict], slots: List[Any],
     manifest: dict, *, user_content: str,
-) -> tuple[List[Any], Dict[str, List[Dict[str, Any]]], Dict[str, str], str, str]:
-    """Resolve one evidence continuation: fail-closed reason + fresh-restart cause."""
+) -> tuple[List[Any], Dict[str, List[Dict[str, Any]]], Dict[str, str], str]:
+    """Resolve one evidence continuation; the fourth element names a restart cause.
+
+    The guard is load-bearing: a cycle whose manifest names no reviewer-requested
+    locator has no prior reviewer thread to continue, so the configured slots are
+    returned untouched instead of reporting an absent predecessor wave."""
     if not manifest.get("reviewer_requested"):
-        return slots, {}, {}, "", ""
-    rebound, messages, threads, error, restarted = continuation_inputs(
+        return slots, {}, {}, ""
+    return continuation_inputs(
         state_root, task_id, previous, slots, user_content=user_content,
     )
-    requested = {str(item) for item in manifest.get("reviewer_requested") or []}
-    missing = [
-        dict(item) for item in manifest.get("omissions") or []
-        if str(item.get("locator") or "") in requested
-    ]
-    reason = error or (
-        "requested_evidence_unavailable:" + ",".join(
-            f"{item.get('locator')}={item.get('reason')}" for item in missing
-        ) if missing else ""
-    )
-    return rebound, messages, threads, str(reason or ""), restarted
 
 
 def record_exact_wave(
@@ -266,34 +315,6 @@ def record_exact_wave(
     return record_plan_review_wave(
         state_root, task_id, hot_index_wave(wave, page_size=page_size),
         need_evidence_seen=need_evidence_seen,
-    )
-
-
-def record_cannot_verify_attempt(
-    state_root: pathlib.Path, task_id: str, *, cycle_index: int, fingerprint: str,
-    previous: Optional[dict], spec: dict, plan_prose: str, manifest: dict,
-    manifest_hash: str, constitutional: bool, constitutional_note: str,
-    slots: List[Any], enforcement: str, cap: Optional[int], reason: str,
-    reviewer_config_fingerprint: str, reviewed_at: str, system_prompt: str,
-    user_content: str, session_task: str, need_evidence_seen: List[str], page_size: int,
-) -> dict:
-    """Persist an unpaid non-clean continuation refusal before hot projection."""
-    wave = cannot_verify_wave(
-        cycle_index=cycle_index, fingerprint=fingerprint, previous=previous,
-        spec=spec, plan_prose=plan_prose, manifest=manifest,
-        manifest_hash=manifest_hash, constitutional=constitutional,
-        constitutional_note=constitutional_note, slots=slots,
-        enforcement=enforcement, cap=cap, reason=reason,
-        reviewer_config_fingerprint=reviewer_config_fingerprint, reviewed_at=reviewed_at,
-    )
-    exact = exact_wave(
-        wave, plan_prose=plan_prose, manifest=manifest, slots=slots, rows=[],
-        system_prompt=system_prompt, user_content=user_content,
-        session_task=session_task, slot_messages={},
-    )
-    return record_exact_wave(
-        state_root, task_id, wave, exact,
-        need_evidence_seen=need_evidence_seen, page_size=page_size,
     )
 
 
@@ -336,30 +357,31 @@ def attach_continuation_restart_delta(rows: List[dict], cause: str) -> None:
 def continuation_inputs(
     state_root: pathlib.Path, task_id: str, previous: Optional[dict], slots: List[Any],
     *, user_content: str,
-) -> tuple[List[Any], Dict[str, List[Dict[str, Any]]], Dict[str, str], Optional[str], str]:
+) -> tuple[List[Any], Dict[str, List[Dict[str, Any]]], Dict[str, str], str]:
     """Rebuild one evidence continuation from the prior exact wave.
 
-    Fail-closed ONLY for the dispositions custody chain (a missing or unreadable
-    prior exact wave). Thread-memory misses — a changed reviewer roster, a prior
-    slot receipt or thread that is gone, an invalid prior API transcript —
-    degrade to a FRESH dispatch instead: the packet is self-contained on every
-    send (prior findings, dispositions and spec delta already ride it), so a
-    lost vendor thread is a cache miss, not a validity event. The fifth element
-    names the typed cause of such a restart ('' when continuation held); slots
-    are returned exactly as currently configured, never rebound to prior rows."""
+    Every miss here is a cache miss, never a validity event: the dispositions
+    custody chain is enforced one level up, before this function is reached. An
+    absent, unreferenced or unreadable prior exact wave, a changed reviewer
+    roster, a prior slot receipt or thread that is gone, an invalid prior API
+    transcript — each degrades to a FRESH full-packet dispatch, because the
+    packet is self-contained on every send (prior findings, dispositions and
+    spec delta already ride it). The fourth element names the typed cause of
+    such a restart ('' when continuation held); slots are returned exactly as
+    currently configured, never rebound to prior rows."""
+
+    def fresh(cause: str) -> tuple[List[Any], Dict[str, List[Dict[str, Any]]], Dict[str, str], str]:
+        return slots, {}, {}, cause
+
     if not previous:
-        return slots, {}, {}, "prior_exact_wave_missing", ""
+        return fresh("prior_exact_wave_missing")
     ref = previous.get("wave_artifact") if isinstance(previous.get("wave_artifact"), dict) else {}
     if not ref:
-        return slots, {}, {}, "prior_exact_wave_ref_missing", ""
+        return fresh("prior_exact_wave_ref_missing")
     try:
         exact = read_wave(state_root, task_id, ref)
     except (OSError, ValueError, json.JSONDecodeError) as exc:
-        return slots, {}, {}, f"prior_exact_wave_unreadable:{type(exc).__name__}", ""
-
-    def fresh(cause: str) -> tuple[List[Any], Dict[str, List[Dict[str, Any]]], Dict[str, str], Optional[str], str]:
-        return slots, {}, {}, None, cause
-
+        return fresh(f"prior_exact_wave_unreadable:{type(exc).__name__}")
     current_rows = [slot_row(slot) for slot in slots]
     if current_rows != [r for r in exact.get("slots") or [] if isinstance(r, dict)]:
         return fresh("prior_reviewer_assignment_set_changed")
@@ -394,7 +416,7 @@ def continuation_inputs(
                 {"role": "assistant", "content": str(output.get("text") or "")},
                 {"role": "user", "content": user_content},
             ]
-    return slots, slot_messages, session_threads, None, ""
+    return slots, slot_messages, session_threads, ""
 
 
 def exact_wave(
@@ -428,31 +450,4 @@ def exact_wave(
     return {
         **wave, "plan_prose": plan_prose, "evidence_manifest_full": manifest,
         "slots": [slot_row(slot) for slot in slots], "reviewer_outputs": outputs,
-    }
-
-
-def cannot_verify_wave(
-    *, cycle_index: int, fingerprint: str, previous: Optional[dict], spec: dict,
-    plan_prose: str, manifest: dict, manifest_hash: str, constitutional: bool,
-    constitutional_note: str, slots: List[Any], enforcement: str, cap: Optional[int],
-    reason: str, reviewer_config_fingerprint: str, reviewed_at: str,
-) -> dict:
-    from ouroboros.config import adaptive_quorum
-    from ouroboros.tools import plan_spec
-
-    return {
-        "schema_version": 2, "cycle_index": cycle_index,
-        "request_fingerprint": fingerprint,
-        "previous_fingerprint": str((previous or {}).get("request_fingerprint") or ""),
-        "goal": spec["goal"], "plan_prose_hash": sha256(plan_prose.encode("utf-8")).hexdigest(),
-        "spec": spec, "spec_hash": plan_spec.spec_hash(spec), "evidence_manifest": manifest,
-        "evidence_manifest_hash": manifest_hash, "constitutional": constitutional,
-        "constitutional_note": constitutional_note, "findings": [], "aggregate": "DEGRADED",
-        "reasons": [f"cannot_verify:{reason}"],
-        "counts": {"configured": len(slots), "parseable": 0, "quorum": adaptive_quorum(len(slots)),
-                   "blocking_slots": 0, "blocking": 0, "note": 0, "need_evidence": 0},
-        "closed": False, "dispositions": [], "actors": [],
-        "actors_degraded": [str(getattr(slot, "slot_id", "")) for slot in slots],
-        "enforcement": enforcement, "cycle_cap": cap, "paid": False, "health_epoch": [],
-        "reviewer_config_fingerprint": reviewer_config_fingerprint, "reviewed_at": reviewed_at,
     }

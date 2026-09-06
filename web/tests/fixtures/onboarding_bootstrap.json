@@ -1,0 +1,510 @@
+{
+  "contract": {
+    "budgetFields": [
+      {
+        "default": 200.0,
+        "inputId": "total-budget",
+        "label": "Total Budget (USD)",
+        "min": "0.01",
+        "note": "Global spend budget across the runtime. Keep this editable even after onboarding.",
+        "settingKey": "TOTAL_BUDGET",
+        "settingsInputId": "s-total-budget",
+        "stateKey": "totalBudget",
+        "step": "any",
+        "title": "Total budget"
+      },
+      {
+        "default": 50.0,
+        "inputId": "per-task-budget",
+        "label": "Per-task Cost Cap (USD)",
+        "min": "0.01",
+        "note": "Hard cap over one task's WHOLE tree, subagents included: further model calls are refused and the task is force-stopped once the tree's accounted spend reaches this (a graceful wrap-up fires just before). The wrap-up itself needs about $3.00 of room, so a cap at or below that finalizes the task immediately instead of running any work rounds.",
+        "settingKey": "OUROBOROS_PER_TASK_COST_USD",
+        "settingsInputId": "s-settings-per-task-cost",
+        "stateKey": "perTaskCostUsd",
+        "step": "any",
+        "title": "Per-task cost cap"
+      }
+    ],
+    "hostMode": "desktop",
+    "localRoutingModes": [
+      {
+        "buttonLabel": "Cloud only",
+        "flags": [
+          false,
+          false,
+          false,
+          false
+        ],
+        "label": "Cloud models only",
+        "value": "cloud"
+      },
+      {
+        "buttonLabel": "Fallback local",
+        "flags": [
+          false,
+          false,
+          false,
+          true
+        ],
+        "label": "Fallback model local",
+        "value": "fallback"
+      },
+      {
+        "buttonLabel": "All models local",
+        "flags": [
+          true,
+          true,
+          true,
+          true
+        ],
+        "label": "All active models local",
+        "value": "all"
+      }
+    ],
+    "modelSlots": [
+      {
+        "inputId": "main-model",
+        "label": "Main Model",
+        "note": "Primary reasoning and long-form work.",
+        "settingKey": "OUROBOROS_MODEL",
+        "settingsInputId": "s-model",
+        "settingsToggleId": "s-local-main",
+        "slot": "main",
+        "stateKey": "mainModel"
+      },
+      {
+        "inputId": "light-model",
+        "label": "Light Model",
+        "note": "Fast summaries, lightweight internal work, reflections, and the default Fast scout. Empty uses Main.",
+        "settingKey": "OUROBOROS_MODEL_LIGHT",
+        "settingsInputId": "s-model-light",
+        "settingsToggleId": "s-local-light",
+        "slot": "light",
+        "stateKey": "lightModel"
+      },
+      {
+        "inputId": "vision-model",
+        "label": "Vision Model",
+        "note": "Caption and VLM lane. Empty uses Main.",
+        "settingKey": "OUROBOROS_MODEL_VISION",
+        "settingsInputId": "s-model-vision",
+        "settingsToggleId": "",
+        "slot": "vision",
+        "stateKey": "visionModel"
+      },
+      {
+        "inputId": "consciousness-model",
+        "label": "Consciousness Model",
+        "note": "High-horizon background consciousness. Empty uses Main.",
+        "settingKey": "OUROBOROS_MODEL_CONSCIOUSNESS",
+        "settingsInputId": "s-model-consciousness",
+        "settingsToggleId": "s-local-consciousness",
+        "slot": "consciousness",
+        "stateKey": "consciousnessModel"
+      },
+      {
+        "inputId": "fallback-model",
+        "label": "Fallback Model",
+        "note": "Fallback and resilience path.",
+        "settingKey": "OUROBOROS_MODEL_FALLBACKS",
+        "settingsInputId": "s-model-fallback",
+        "settingsToggleId": "s-local-fallback",
+        "slot": "fallback",
+        "stateKey": "fallbackModel"
+      }
+    ],
+    "providerFields": [
+      {
+        "group": "primary",
+        "id": "openrouter-key",
+        "inputType": "password",
+        "label": "OpenRouter API Key",
+        "note": "Optional. Best when you want one router for OpenAI, Anthropic, Google, and more.",
+        "placeholder": "sk-or-v1-...",
+        "settingKey": "OPENROUTER_API_KEY",
+        "settingsInputId": "s-openrouter",
+        "stateKey": "openrouterKey"
+      },
+      {
+        "group": "primary",
+        "id": "openai-key",
+        "inputType": "password",
+        "label": "OpenAI API Key",
+        "note": "Optional. If this is the only remote key, the next step prefills direct openai::... models.",
+        "placeholder": "sk-...",
+        "settingKey": "OPENAI_API_KEY",
+        "settingsInputId": "s-openai",
+        "stateKey": "openaiKey"
+      },
+      {
+        "group": "more",
+        "id": "cloudru-key",
+        "inputType": "password",
+        "label": "Cloud.ru Foundation Models API Key",
+        "note": "Optional. If this is the only remote key, the next step prefills direct cloudru::... models.",
+        "placeholder": "Cloud.ru API key",
+        "settingKey": "CLOUDRU_FOUNDATION_MODELS_API_KEY",
+        "settingsInputId": "s-cloudru-key",
+        "stateKey": "cloudruKey"
+      },
+      {
+        "group": "more",
+        "id": "minimax-key",
+        "inputType": "password",
+        "label": "MiniMax API Key",
+        "note": "Optional. If this is the only remote key, the next step prefills direct minimax::... models.",
+        "placeholder": "MiniMax API key",
+        "settingKey": "MINIMAX_API_KEY",
+        "settingsInputId": "s-minimax-key",
+        "stateKey": "minimaxKey"
+      },
+      {
+        "group": "more",
+        "id": "minimax-region",
+        "inputType": "text",
+        "label": "MiniMax Region",
+        "note": "Choose global_en for the global endpoint or cn_zh for the China endpoint.",
+        "placeholder": "global_en or cn_zh",
+        "settingKey": "MINIMAX_REGION",
+        "settingsInputId": "s-minimax-region",
+        "stateKey": "minimaxRegion"
+      },
+      {
+        "group": "more",
+        "id": "deepseek-key",
+        "inputType": "password",
+        "label": "DeepSeek API Key",
+        "note": "Optional. If this is the only remote key, the next step prefills direct deepseek::... models.",
+        "placeholder": "sk-...",
+        "settingKey": "DEEPSEEK_API_KEY",
+        "settingsInputId": "s-deepseek-key",
+        "stateKey": "deepseekKey"
+      },
+      {
+        "group": "primary",
+        "id": "anthropic-key",
+        "inputType": "password",
+        "label": "Anthropic API Key",
+        "note": "Optional. Saved for direct anthropic::... models and Claude tooling.",
+        "placeholder": "sk-ant-...",
+        "settingKey": "ANTHROPIC_API_KEY",
+        "settingsInputId": "s-anthropic",
+        "stateKey": "anthropicKey"
+      },
+      {
+        "group": "more",
+        "id": "openai-compatible-url",
+        "inputType": "url",
+        "label": "OpenAI-compatible Base URL",
+        "note": "Base URL for your OpenAI-compatible endpoint (e.g. Ollama, LM Studio, vLLM). Required when using openai-compatible:: models.",
+        "placeholder": "http://localhost:11434/v1",
+        "settingKey": "OPENAI_COMPATIBLE_BASE_URL",
+        "settingsInputId": "s-compatible-url",
+        "stateKey": "compatibleBaseUrl"
+      },
+      {
+        "group": "more",
+        "id": "openai-compatible-key",
+        "inputType": "password",
+        "label": "OpenAI-compatible API Key",
+        "note": "API key for the endpoint. Leave empty if your server does not require authentication.",
+        "placeholder": "Leave empty for no auth",
+        "settingKey": "OPENAI_COMPATIBLE_API_KEY",
+        "settingsInputId": "s-compatible-key",
+        "stateKey": "compatibleApiKey"
+      }
+    ],
+    "providerProfiles": {
+      "anthropic": {
+        "label": "Anthropic",
+        "modelCopy": "Anthropic-only setup detected. These defaults are explicit and official.",
+        "providerCopy": "Anthropic is present, so the next step prefills direct anthropic:: model values."
+      },
+      "cloudru": {
+        "label": "Cloud.ru Foundation Models",
+        "modelCopy": "Cloud.ru-only setup detected. These defaults use explicit cloudru:: model IDs.",
+        "providerCopy": "Cloud.ru is present, so the next step prefills direct cloudru:: model values."
+      },
+      "deepseek": {
+        "label": "DeepSeek",
+        "modelCopy": "DeepSeek-only setup detected. These defaults use deepseek-v4-pro for main work and deepseek-v4-flash for the light lane. Blocking deep/scope review in Max context mode additionally needs the owner 1M-window acknowledgement in Settings.",
+        "providerCopy": "DeepSeek is present, so the next step prefills direct deepseek:: model values."
+      },
+      "direct-multi": {
+        "label": "Direct multi-provider",
+        "modelCopy": "Multiple direct providers are configured. Start here, then split model slots across them if you want.",
+        "providerCopy": "Multiple direct providers are present, so the next step keeps your model values editable without forcing one provider family."
+      },
+      "local": {
+        "label": "Local-first",
+        "modelCopy": "Local-only setup detected. Review the model values and local routing before launch.",
+        "providerCopy": "No remote key is present yet, so local-only setup remains available below."
+      },
+      "minimax": {
+        "label": "MiniMax",
+        "modelCopy": "MiniMax-only setup detected. These defaults include MiniMax-M3 and MiniMax-M2.7.",
+        "providerCopy": "MiniMax is present, so the next step prefills direct minimax:: model values."
+      },
+      "openai": {
+        "label": "OpenAI",
+        "modelCopy": "OpenAI-only setup detected. These defaults are explicit and official.",
+        "providerCopy": "OpenAI is present, so the next step prefills direct openai:: model values."
+      },
+      "openai-compatible": {
+        "label": "OpenAI-compatible endpoint",
+        "modelCopy": "OpenAI-compatible endpoint detected. Use openai-compatible::your-model-name for every slot. The model list is whatever your server supports.",
+        "providerCopy": "An OpenAI-compatible base URL is configured. Enter the model names your server exposes in the next step."
+      },
+      "openrouter": {
+        "label": "OpenRouter",
+        "modelCopy": "OpenRouter-style routing remains active. Unprefixed provider IDs like openai/gpt-5.6-terra or anthropic/claude-sonnet-5 continue to route through OpenRouter.",
+        "providerCopy": "OpenRouter is present, so the next step keeps router-style defaults while still saving any extra direct keys you paste here."
+      }
+    },
+    "reviewModes": [
+      {
+        "className": "advisory",
+        "copy": "Faster and cheaper. Review still runs, but you decide how to handle findings. Best when you want iteration speed and can manually watch for drift.",
+        "label": "Advisory",
+        "tone": "Flexible",
+        "value": "advisory"
+      },
+      {
+        "className": "blocking",
+        "copy": "Slower and more expensive, but much safer. Critical review findings stop commits, which dramatically reduces the chance of gradual code degradation.",
+        "label": "Blocking",
+        "tone": "Strict",
+        "value": "blocking"
+      }
+    ],
+    "runtimeModes": [
+      {
+        "className": "light",
+        "copy": "Self-modification of the main repo is disabled. Best for trying Ouroboros out without repo self-modification.",
+        "label": "Light",
+        "tone": "Safest",
+        "value": "light"
+      },
+      {
+        "className": "advanced",
+        "copy": "Self-modification of the evolutionary layer is allowed (current behaviour). Protected core/contract/release files stay guarded by Advanced mode.",
+        "label": "Advanced",
+        "tone": "Default",
+        "value": "advanced"
+      },
+      {
+        "className": "pro",
+        "copy": "Direct protected-surface mode. Protected core/contract/release edits are allowed on disk, but commits still require the normal triad + scope review gate.",
+        "label": "Pro",
+        "tone": "Power",
+        "value": "pro"
+      }
+    ],
+    "steps": [
+      {
+        "copy": "Fill at least one remote key or a local model source. The next step adapts to what you configured here.",
+        "footer": "Paste only what you already have. OpenRouter, direct provider keys, and an optional local model can coexist.",
+        "id": "providers",
+        "railCopy": "Keys + local",
+        "title": "Add your access"
+      },
+      {
+        "copy": "Optional. Ouroboros already runs on the access you just added. Signing in to an agent plan moves delegated subagents and commit review onto that plan instead of per-call API spend.",
+        "footer": "Skippable. Connect, add, or change agent accounts any time in Settings \u2192 Agents.",
+        "id": "agents",
+        "railCopy": "Optional",
+        "title": "Connect your agents"
+      },
+      {
+        "copy": "Review the visible model defaults derived from your current setup, then edit anything you want before launch.",
+        "footer": "Plain openai/... or anthropic/... remains router-style. Direct values use openai::... and anthropic::....",
+        "id": "models",
+        "railCopy": "model slots",
+        "title": "Choose models"
+      },
+      {
+        "copy": "Decide how strict pre-commit review should be before Ouroboros starts modifying itself.",
+        "footer": "Pick both review enforcement and the initial runtime mode before Ouroboros starts.",
+        "id": "review_mode",
+        "railCopy": "Advisory vs blocking",
+        "title": "Choose review mode"
+      },
+      {
+        "copy": "Budget is its own step because it directly shapes how far Ouroboros can go in one session and in a single task.",
+        "footer": "Total budget is global. Per-task cost cap is a hard cap over one task's whole tree, subagents included: the task wraps up gracefully just before the ledger fence force-stops it.",
+        "id": "budget",
+        "railCopy": "Session limits",
+        "title": "Set your budget"
+      },
+      {
+        "copy": "Check the final provider, model, review, and budget picture. Ouroboros will save these onboarding values before starting.",
+        "footer": "The same onboarding values remain editable later in Settings.",
+        "id": "summary",
+        "railCopy": "Final check",
+        "title": "Review before launch"
+      }
+    ],
+    "subscriptionFields": [
+      {
+        "id": "subscriptions-connected",
+        "label": "Agent subscription connected",
+        "note": "Set by the wizard when at least one agent account was signed in during onboarding. The server re-reads the live account state before applying anything.",
+        "payloadKey": "subscriptionsConnected"
+      },
+      {
+        "id": "skip-subscription-presets",
+        "label": "Finish without agent defaults",
+        "note": "Completes onboarding without moving reviewers and subagents onto the connected subscriptions. Everything stays editable in Settings afterwards.",
+        "payloadKey": "skipSubscriptionPresets"
+      }
+    ],
+    "version": 1
+  },
+  "hostMode": "desktop",
+  "initialState": {
+    "anthropicKey": "",
+    "cloudruKey": "",
+    "compatibleApiKey": "",
+    "compatibleBaseUrl": "",
+    "consciousnessModel": "",
+    "deepseekKey": "",
+    "fallbackModel": "openai/gpt-5.6-luna",
+    "lightModel": "openai/gpt-5.6-luna",
+    "localChatFormat": "",
+    "localContextLength": 16384,
+    "localFilename": "",
+    "localGpuLayers": -1,
+    "localPreset": "",
+    "localRoutingMode": "cloud",
+    "localSource": "",
+    "mainModel": "google/gemini-3.8-flash",
+    "minimaxKey": "",
+    "minimaxRegion": "",
+    "openaiKey": "",
+    "openrouterKey": "",
+    "perTaskCostUsd": 50.0,
+    "providerProfile": "openrouter",
+    "reviewEnforcement": "advisory",
+    "runtimeMode": "advanced",
+    "skillsRepoPath": "",
+    "totalBudget": 200.0,
+    "visionModel": ""
+  },
+  "localPresets": {
+    "qwen25-7b": {
+      "chatFormat": "",
+      "contextLength": 16384,
+      "filename": "qwen2.5-7b-instruct-q3_k_m.gguf",
+      "label": "Qwen2.5-7B Instruct Q3_K_M",
+      "source": "Qwen/Qwen2.5-7B-Instruct-GGUF"
+    },
+    "qwen3-14b": {
+      "chatFormat": "",
+      "contextLength": 16384,
+      "filename": "Qwen3-14B-Q4_K_M.gguf",
+      "label": "Qwen3-14B Instruct Q4_K_M",
+      "source": "Qwen/Qwen3-14B-GGUF"
+    },
+    "qwen3-32b": {
+      "chatFormat": "",
+      "contextLength": 32768,
+      "filename": "Qwen3-32B-Q4_K_M.gguf",
+      "label": "Qwen3-32B Instruct Q4_K_M",
+      "source": "Qwen/Qwen3-32B-GGUF"
+    }
+  },
+  "modelDefaults": {
+    "anthropic": {
+      "consciousness": "",
+      "deep_self_review": "anthropic::claude-opus-5",
+      "fallback": "anthropic::claude-sonnet-5",
+      "light": "anthropic::claude-sonnet-5",
+      "main": "anthropic::claude-opus-5",
+      "vision": ""
+    },
+    "cloudru": {
+      "consciousness": "",
+      "fallback": "cloudru::zai-org/GLM-4.7",
+      "light": "cloudru::zai-org/GLM-4.7",
+      "main": "cloudru::zai-org/GLM-4.7",
+      "vision": ""
+    },
+    "deepseek": {
+      "consciousness": "",
+      "deep_self_review": "deepseek::deepseek-v4-pro",
+      "fallback": "deepseek::deepseek-v4-flash",
+      "light": "deepseek::deepseek-v4-flash",
+      "main": "deepseek::deepseek-v4-pro",
+      "vision": ""
+    },
+    "local": {
+      "consciousness": "",
+      "fallback": "openai/gpt-5.6-luna",
+      "light": "openai/gpt-5.6-luna",
+      "main": "google/gemini-3.8-flash",
+      "vision": ""
+    },
+    "minimax": {
+      "consciousness": "",
+      "fallback": "minimax::MiniMax-M2.7",
+      "light": "minimax::MiniMax-M2.7",
+      "main": "minimax::MiniMax-M3",
+      "vision": ""
+    },
+    "openai": {
+      "consciousness": "",
+      "deep_self_review": "openai::gpt-5.6-sol",
+      "fallback": "openai::gpt-5.6-sol",
+      "light": "openai::gpt-5.6-luna",
+      "main": "openai::gpt-5.6-terra",
+      "vision": ""
+    },
+    "openai-compatible": {
+      "consciousness": "",
+      "fallback": "",
+      "light": "",
+      "main": "",
+      "vision": ""
+    },
+    "openrouter": {
+      "consciousness": "",
+      "fallback": "openai/gpt-5.6-luna",
+      "light": "openai/gpt-5.6-luna",
+      "main": "google/gemini-3.8-flash",
+      "vision": ""
+    }
+  },
+  "modelSuggestions": [
+    "google/gemini-3.8-flash",
+    "x-ai/grok-4.6",
+    "openai/gpt-5.6-terra",
+    "openai/gpt-5.6-sol",
+    "openai/gpt-5.6-luna",
+    "openai::gpt-5.6-terra",
+    "openai::gpt-5.6-sol",
+    "openai::gpt-5.6-luna",
+    "anthropic/claude-sonnet-5",
+    "anthropic/claude-opus-5",
+    "anthropic::claude-sonnet-5",
+    "anthropic::claude-opus-5",
+    "anthropic::claude-opus-4-6",
+    "deepseek/deepseek-v4-pro",
+    "deepseek::deepseek-v4-pro",
+    "deepseek::deepseek-v4-flash",
+    "openai-compatible::meta-llama/compatible",
+    "cloudru::zai-org/GLM-4.7",
+    "minimax::MiniMax-M3",
+    "minimax::MiniMax-M2.7"
+  ],
+  "secretPlaceholder": "***set***",
+  "stepOrder": [
+    "providers",
+    "agents",
+    "models",
+    "review_mode",
+    "budget",
+    "summary"
+  ],
+  "supportsLocalRuntimeControls": false
+}

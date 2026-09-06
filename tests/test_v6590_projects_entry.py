@@ -188,13 +188,14 @@ def test_projects_summary_shows_owner_ui_projects_without_activity(tmp_path):
 
 # --- ui preference compatibility aliases -------------------------------------------
 
-def test_ui_preferences_project_hidden_merge_and_unhide():
+def test_ui_preferences_project_hidden_is_retired():
+    """ABI 7.0 (ABI-3): the one-minor no-op input is gone — a stored legacy
+    key is ignored on read (never merged, never fatal, any shape)."""
     from ouroboros.gateway.ui_preferences import _normalize_preferences
 
     prefs = _normalize_preferences({"project_hidden": {"a": True, "b": False}}, fill_defaults=False)
-    assert prefs["project_hidden"] == {}
-    with pytest.raises(ValueError):
-        _normalize_preferences({"project_hidden": ["a"]}, fill_defaults=False)
+    assert "project_hidden" not in prefs
+    assert _normalize_preferences({"project_hidden": ["a"]}, fill_defaults=False) == {}
 
 
 # --- fs/dirs confinement ------------------------------------------------------------

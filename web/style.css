@@ -122,6 +122,7 @@
     --button-padding-x: 16px;
     --button-font-size: 13px;
     --button-min-height: 34px;
+    --widget-fault-status-max-width: min(240px, 35vw);
     /* App shell: persistent desktop sidebar + optional project detail pane. */
     --sidebar-width: 280px;
     --project-panel-width: clamp(340px, 36vw, 440px);
@@ -2004,6 +2005,10 @@ body.resizing-panels { user-select: none; }
     min-width: 0;
     line-height: 1.45;
     white-space: pre-wrap;
+    /* A derived name is the request's own first line, so it can be one long
+       unbroken token (a URL or a path). Without a wrap escape it overflows the
+       card on every narrow surface, not just the phone container query. */
+    overflow-wrap: anywhere;
 }
 
 /* Collapsed summaries have a stable compact geometry. Expanded cards keep the
@@ -4544,8 +4549,7 @@ textarea.chat-input::placeholder { color: var(--text-muted); }
     to { transform: rotate(360deg); }
 }
 
-#skills-refresh.is-loading::after,
-#widgets-refresh.is-loading::after {
+#skills-refresh.is-loading::after {
     content: '';
     display: inline-block;
     width: 10px;
@@ -5192,6 +5196,16 @@ textarea.chat-input::placeholder { color: var(--text-muted); }
     gap: 12px;
 }
 
+/* Confirm/input/alert dialogs must stay usable over EVERY overlay — the
+   reconnect shade sits at 1000 (the Panic confirm is the canonical case: it
+   must be clickable while the socket is down). Content modals
+   (:where(.marketplace-modal-backdrop), 90) deliberately stay under the
+   shade — their actions need a live connection anyway. Overlay scale:
+   modals 90 · toasts/menus 120 · reconnect 1000 · dialogs 1100. */
+.confirm-dialog-backdrop {
+    z-index: 1100;
+}
+
 .confirm-dialog {
     max-width: 520px;
 }
@@ -5294,17 +5308,24 @@ textarea.chat-input::placeholder { color: var(--text-muted); }
     padding: 0;
 }
 
-/* Widgets page. */
+/* Widgets page. Masonry (web/modules/masonry.js) measures and packs the cards
+   and writes the result ONLY as custom properties — `--masonry-h` on the list,
+   `--masonry-w/-x/-y` on each card; these static rules apply them. Cards are
+   positioned by transform in the owner's key order, so a reorder never moves a
+   DOM node (a moved <iframe> would reload). */
 
 .widgets-list {
     position: relative;
     margin-top: 16px;
+    height: var(--masonry-h, auto);
 }
 
 .widgets-card {
     position: absolute;
     left: 0;
     top: 0;
+    width: var(--masonry-w, auto);
+    transform: translate(var(--masonry-x, 0px), var(--masonry-y, 0px));
     padding: 14px;
     backdrop-filter: blur(12px);
 }
@@ -5318,14 +5339,10 @@ textarea.chat-input::placeholder { color: var(--text-muted); }
     box-shadow: 0 0 0 3px var(--accent-10);
 }
 
-.widgets-card-span-2 {
-    grid-column: span 2;
-}
-
-@media (max-width: 760px) {
-    .widgets-card-span-2 {
-        grid-column: span 1;
-    }
+/* Each card is its own stacking context (transform + backdrop-filter), so an
+   open launch-policy menu would otherwise paint under a later sibling card. */
+.widgets-card:has(.skills-card-menu-dialog[open]) {
+    z-index: 1;
 }
 
 .widgets-card-head {
@@ -5367,6 +5384,102 @@ textarea.chat-input::placeholder { color: var(--text-muted); }
 
 .widgets-card-drag:active {
     cursor: grabbing;
+}
+
+/* Framed-card head controls (widgets lifecycle phase 2): status as dot + text
+   (docs/DESIGN.md section 4 — the status pair is the semantic contract, not a
+   token migration of this surface), the one primary Start/Stop button, the
+   launch-policy menu on the Skills card menu primitive, and the drag handle.
+   Widgets is not a migrated surface (DESIGN.md section 8): these rules keep
+   the literal sizes and inks the surface already uses, not the type tokens. */
+.widgets-card-controls {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    flex: 1 1 auto;
+    flex-wrap: wrap;
+    justify-content: flex-end;
+    min-width: 0;
+}
+
+.widgets-card-controls > :not(.ui-status) {
+    flex: 0 0 auto;
+}
+
+.widgets-card-controls .ui-status:not([hidden]) {
+    display: inline-flex;
+    align-items: center;
+    min-width: 0;
+    max-width: var(--widget-fault-status-max-width);
+    white-space: normal;
+    overflow-wrap: anywhere;
+}
+
+.widgets-card-controls .ui-status[data-tone]::before {
+    content: "";
+    display: inline-block;
+    flex: 0 0 auto;
+    width: 6px;
+    height: 6px;
+    margin-right: 6px;
+    border-radius: 999px;
+    background: currentColor;
+}
+
+.widgets-menu-heading {
+    padding: 4px 10px 6px;
+    font-size: 12px;
+    line-height: 1.35;
+    color: rgba(250, 250, 250, 0.5);
+    white-space: nowrap;
+}
+
+.widgets-menu-item {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    white-space: nowrap;
+}
+
+.widgets-menu-item[aria-checked="false"] .widgets-menu-check {
+    visibility: hidden;
+}
+
+/* A stopped framed card stands in for its frame: same box, same declared
+   height (the `--widget-frame-height` custom property the frame itself uses),
+   so Start does not move the layout. */
+.widgets-facade {
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    justify-content: center;
+    gap: 10px;
+    width: 100%;
+    height: var(--widget-frame-height, 320px);
+    min-height: 320px;
+    border: 1px solid rgba(255, 255, 255, 0.08);
+    border-radius: var(--radius);
+    background: rgba(13, 11, 15, 0.88);
+    color: var(--text-primary);
+    text-align: center;
+}
+
+.widgets-facade-icon {
+    display: inline-flex;
+    font-size: 24px;
+    line-height: 1;
+    color: rgba(250, 250, 250, 0.5);
+}
+
+.widgets-facade-icon svg {
+    width: 1em;
+    height: 1em;
+}
+
+.widgets-facade-title {
+    font-size: 14px;
+    line-height: 1.5;
+    font-weight: 600;
 }
 
 .widgets-card-source {
@@ -6988,6 +7101,71 @@ textarea.chat-input {
 }
 .updates-empty-error {
     color: var(--status-error-fg);
+}
+
+/* The update letter: Ouroboros's own short paragraph about the update this
+   panel offers, kept after it lands as "What changed in this version". A fact
+   block, so it is separated from the action row the way Recovery is — a rule,
+   not a card — and it contributes no control of its own. */
+.updates-letter {
+    display: flex;
+    flex-direction: column;
+    gap: var(--space-1);
+    margin-top: var(--space-4);
+    border-top: 1px solid var(--divider);
+    padding-top: var(--space-3);
+}
+.updates-letter-head {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: baseline;
+    gap: var(--space-2);
+}
+.updates-letter-label {
+    margin: 0;
+    font-size: var(--type-body);
+    line-height: var(--line-title);
+    font-weight: 600;
+    color: var(--text-primary);
+}
+/* Provenance sits at meta ink beside the label and WRAPS at narrow widths
+   instead of truncating: the versions it names are the whole point of it. */
+.updates-letter-meta {
+    font-size: var(--type-meta);
+    line-height: var(--line-meta);
+    color: var(--text-meta);
+    overflow-wrap: anywhere;
+    min-width: 0;
+}
+/* Two note tones, each complete: a stale letter is a warning (the text still
+   holds, it was written for another range), a failed rewrite is an error. */
+.updates-letter-note {
+    font-size: var(--type-meta);
+    line-height: var(--line-meta);
+    color: var(--status-warn-fg);
+}
+.updates-letter-note-failed {
+    font-size: var(--type-meta);
+    line-height: var(--line-meta);
+    color: var(--status-error-fg);
+}
+.updates-letter-body {
+    font-size: var(--type-body);
+    line-height: var(--line-body);
+    color: var(--text-primary);
+    margin-top: var(--space-2);
+}
+/* A markdown heading inside the letter is a subsection label, never a page
+   title — same clamp the chat bubble applies to rendered markdown, declared
+   after the global .md-h* block it narrows. */
+.updates-letter-body .md-h1,
+.updates-letter-body .md-h2,
+.updates-letter-body .md-h3 {
+    font-size: var(--type-body);
+    line-height: var(--line-body);
+    color: var(--text-primary);
+    font-weight: 600;
+    margin: var(--space-2) 0 var(--space-1);
 }
 
 /* === design-system:migrated-end === */

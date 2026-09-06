@@ -998,7 +998,7 @@ def test_no_event_queue_preserves_unknown_cost_in_budget_fallback(monkeypatch):
     def _record(usage):
         captured.append(dict(usage))
 
-    monkeypatch.setattr(safety_mod, "update_budget_from_usage", _record)
+    monkeypatch.setattr("supervisor.state.update_budget_from_usage", _record)
 
     # ctx=None path
     ok, _ = check_safety("create_github_issue", {"title": "x"}, ctx=None)
@@ -1055,3 +1055,85 @@ def test_usage_event_uses_local_provider_when_use_local_light(monkeypatch):
     assert ok is True
     assert captured["provider"] == "local"
     assert "(local)" in captured["model_name"]
+
+
+# ---------------------------------------------------------------------------
+# Host facts of a safety call (ADOPTION D05): where its records land, and who
+# charges it. Both were cwd-/import-coupled before the port.
+# ---------------------------------------------------------------------------
+
+
+def test_safety_drive_root_without_context_is_the_configured_data_root(monkeypatch, tmp_path):
+    """``ctx=None`` — the extension/MCP dispatch shape — used to resolve to the
+    literal ``../data``: whatever directory happens to sit beside the process's
+    cwd. The configured data root is the SSOT, and it is read LATE so a test or
+    a runtime rebind of ``config.DATA_DIR`` is honored rather than frozen at
+    import time."""
+    from ouroboros import config
+    from ouroboros.safety import _safety_drive_root
+
+    monkeypatch.setattr(config, "DATA_DIR", tmp_path / "configured-root")
+    assert _safety_drive_root(None) == tmp_path / "configured-root"
+
+    # A context-shaped object that carries no drive_root falls the same way —
+    # never onto a cwd-relative guess.
+    class _NoRoot:
+        task_id = "t"
+
+    assert _safety_drive_root(_NoRoot()) == tmp_path / "configured-root"
+
+
+def test_safety_drive_root_prefers_the_context(tmp_path):
+    """The context owns the answer whenever it has one (isolated benchmark
+    servers and per-worker drives depend on this)."""
+    from ouroboros.safety import _safety_drive_root
+
+    class _Ctx:
+        drive_root = str(tmp_path / "ctx-root")
+
+    assert _safety_drive_root(_Ctx()) == tmp_path / "ctx-root"
+
+
+def test_importing_safety_does_not_import_supervisor_state():
+    """The budget writer is imported AT CALL TIME. ``ouroboros.safety`` is
+    imported by every worker and consulted on every guarded tool call, so an
+    import-time edge into the supervisor package is a cycle risk the six
+    sibling call sites of this writer already avoid. Asserted in a CLEAN
+    interpreter: in-process, an earlier test's import would mask a regression."""
+    import subprocess
+    import sys
+
+    proc = subprocess.run(
+        [sys.executable, "-c",
+         "import sys; import ouroboros.safety; "
+         "print('supervisor.state' in sys.modules)"],
+        capture_output=True, text=True, timeout=120,
+    )
+    assert proc.returncode == 0, proc.stderr
+    assert proc.stdout.strip() == "False", proc.stdout
+
+
+def test_record_safety_usage_prefers_the_injected_ledger_writer(monkeypatch):
+    """A context that owns its accounting is charged where it lives; the
+    process-wide supervisor state is the FALLBACK, not the first choice."""
+    import supervisor.state as sup_state
+    from ouroboros.safety import _record_safety_usage
+
+    def _explode(_usage):  # pragma: no cover — guardrail
+        raise AssertionError("the injected sink must win over supervisor state")
+
+    monkeypatch.setattr(sup_state, "update_budget_from_usage", _explode)
+
+    seen: list = []
+
+    class _Ctx:
+        update_budget_from_usage = staticmethod(seen.append)
+
+    _record_safety_usage(_Ctx(), {"cost": 0.5})
+    assert seen == [{"cost": 0.5}]
+
+    # No sink on the context -> the process's own supervisor state.
+    fallback: list = []
+    monkeypatch.setattr(sup_state, "update_budget_from_usage", fallback.append)
+    _record_safety_usage(None, {"cost": 0.25})
+    assert fallback == [{"cost": 0.25}]

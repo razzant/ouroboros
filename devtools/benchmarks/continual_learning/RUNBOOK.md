@@ -32,7 +32,13 @@ Field-tested configuration and operational hazards from the 2026-07-20 full 1-se
   failing it after the burst. The wait is visible as durable `network_wait` events in the
   isolated server's `events.jsonl`. Note: idle-rail survival via waiting progress notes
   requires a real chat thread; headless tasks without a `chat_id` keep the idle rail
-  (reaper) as an additional bound on the wait.
+  (reaper) as an additional bound on the wait. A transport death AFTER dispatch (the
+  socket dies mid-request) is repeated by the primary dispatch at most twice per round as
+  new physical attempts. One call has one outer attempt budget
+  (`OUROBOROS_TRANSIENT_RETRY_MAX` bounds every attempt of the call, repeats included),
+  within which up to three `llm_api_error` rows can be typed transport-death failures (the
+  first death plus at most two repeats), reserving up to three upper bounds against
+  `OUROBOROS_TOTAL_BUDGET`.
 - `OUROBOROS_TOTAL_BUDGET=200` per domain-seed (measured 1-seed domain costs:
   poker $117 · bsm $60 · cohort $58 · code $33 · sales $26 · db $25 — a $60 cap silently
   truncates poker mid-rollout).

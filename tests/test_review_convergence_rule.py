@@ -106,9 +106,10 @@ class TestScopeOnlyRetryPath:
     def _scope_prompt(self, review_history, scope_review_history, tmp_path, monkeypatch):
         import pathlib
         from ouroboros.tools import scope_review as mod
+        from ouroboros.tools import scope_review_pack as scope_pack
         (tmp_path / "f.py").write_text("x = 1\n", encoding="utf-8")
         monkeypatch.setattr(
-            mod, "_parse_staged_name_status",
+            scope_pack, "_parse_staged_name_status",
             lambda repo_dir: [("M", "f.py")],
         )
         monkeypatch.setattr(
@@ -121,7 +122,7 @@ class TestScopeOnlyRetryPath:
         )
         monkeypatch.setattr(mod, "load_governance_doc", lambda rd, rel, **_kw: "(dev guide)")
         monkeypatch.setattr(
-            mod, "_gather_scope_packs",
+            scope_pack, "_gather_scope_packs",
             lambda repo_dir, all_touched_paths, fixed_prompt_tokens=0: "(scope pack)",
         )
         monkeypatch.setattr(

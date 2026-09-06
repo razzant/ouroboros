@@ -32,6 +32,17 @@ test('extension registration status says Loaded, not Active', () => {
     assert.doesNotMatch(html, />Active</);
 });
 
+test('extension live state shows its answering process qualifier', () => {
+    const html = renderInstalledSkillCard(skill({
+        enabled: true,
+        live_loaded: true,
+        dispatch_live: true,
+        process: 'worker',
+    }));
+
+    assert.match(html, />Loaded · worker</);
+});
+
 test('disabled conflicting skill is explained and cannot be enabled', () => {
     const html = renderInstalledSkillCard(skill({
         conflict: { code: 'skill_conflict', skills: ['telegram-bridge'], omitted: 0 },

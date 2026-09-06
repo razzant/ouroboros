@@ -49,36 +49,6 @@ def test_best_valid_latch_invalidated_by_post_latch_tool_work():
     assert derive_loop_outcome("", {}, fresh)["final_answer"] == "good-X"
 
 
-# --- Budget terminalization (task_results.fail_tasks) ------------------------
-
-def test_fail_tasks_writes_terminal_failed(tmp_path):
-    from ouroboros.task_results import fail_tasks, load_task_result, STATUS_FAILED
-
-    child_root = tmp_path / "child_drive"
-    child_root.mkdir()
-    written = fail_tasks(
-        tmp_path,
-        [
-            {"id": "t-alpha"},
-            {"id": "t-beta"},
-            {"id": ""},  # the empty id is skipped
-            {"id": "t-child", "budget_drive_root": str(child_root)},  # canonical root differs
-        ],
-        reason_code="budget_exhausted",
-        result="🚫 Budget exhausted.",
-    )
-    assert written == 3
-    for tid in ("t-alpha", "t-beta"):
-        rec = load_task_result(tmp_path, tid)
-        assert rec is not None and rec.get("status") == STATUS_FAILED
-        assert rec.get("reason_code") == "budget_exhausted"
-    # The subagent child's result lands on ITS canonical root (budget_drive_root), where
-    # its waiter reads — not on the parent results root (which would leave it hanging).
-    child_rec = load_task_result(child_root, "t-child")
-    assert child_rec is not None and child_rec.get("status") == STATUS_FAILED
-    assert load_task_result(tmp_path, "t-child") is None
-
-
 # --- OR_PROVIDER routing resolver (llm._resolve_or_provider) -----------------
 
 def test_resolve_or_provider_presets_and_raw(monkeypatch):

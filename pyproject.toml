@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "ouroboros"
-version = "6.114.0"
+version = "7.0.0rc15"
 description = "Self-creating AI agent with constitution, background consciousness, and persistent identity"
 readme = "README.md"
 license = {text = "MIT"}
@@ -108,7 +108,7 @@ python_functions = ["test_*"]
 # Default local pytest excludes token-burning integration/browser suites.
 addopts = "-q --tb=short -m 'not integration and not browser and not ui_browser and not ui_browser_docker and not portable_detail and not skill_smoke and not size_ratchet'"
 markers = [
-    "integration: requires real provider API keys (OPENROUTER_API_KEY / OPENAI_API_KEY / ANTHROPIC_API_KEY / CLOUDRU_FOUNDATION_MODELS_API_KEY); excluded from default local runs, opt in via `pytest -m integration`",
+    "integration: real external-surface suites excluded from default local runs — the CI provider-contract lane (requires real provider API keys: OPENROUTER_API_KEY / OPENAI_API_KEY / ANTHROPIC_API_KEY / MINIMAX_API_KEY / DEEPSEEK_API_KEY / CLOUDRU_FOUNDATION_MODELS_API_KEY / GIGACHAT_CREDENTIALS; opt in via `pytest -m integration`) AND the KEYLESS tests/system_e2e/ scenario lane (real isolated servers, no provider keys; additionally env-gated on OUROBOROS_E2E_DEEP)",
     "browser: launches real Playwright Chromium; excluded from default local runs, opt in via `pytest -m browser`",
     "ui_browser: launches the real Ouroboros web UI in host/direct mode; excluded from default local runs",
     "ui_browser_docker: launches UI smoke checks against Docker runtime; excluded from default local runs",
@@ -125,6 +125,9 @@ py-modules = ["server"]
 include = ["ouroboros*", "supervisor*", "web*"]
 
 [tool.setuptools.package-data]
+ouroboros = [
+    "domains.toml",
+]
 web = [
     "*.html",
     "*.js",

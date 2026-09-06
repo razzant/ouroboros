@@ -1,0 +1,3327 @@
+{
+  "cases": [
+    {
+      "id": "fallback.exception.cache_parameter_dropped",
+      "route": "a rejected prompt_cache_key is removed once and the call re-sent",
+      "spec": {
+        "env": {
+          "OPENAI_API_KEY": "openai-fixture-key"
+        },
+        "transport": [
+          {
+            "kind": "error",
+            "message": "Unknown parameter: prompt_cache_key",
+            "status_code": 400
+          },
+          {
+            "kind": "response",
+            "body": {
+              "id": "gen-fixture-2",
+              "choices": [
+                {
+                  "index": 0,
+                  "finish_reason": "stop",
+                  "message": {
+                    "role": "assistant",
+                    "content": "ok"
+                  }
+                }
+              ],
+              "usage": {
+                "prompt_tokens": 200,
+                "completion_tokens": 10
+              }
+            }
+          }
+        ],
+        "pricing_estimate": 0.004,
+        "call": {
+          "kind": "method",
+          "name": "chat",
+          "kwargs": {
+            "messages": [
+              {
+                "role": "system",
+                "content": [
+                  {
+                    "type": "text",
+                    "text": "stable policy prefix",
+                    "cache_control": {
+                      "type": "ephemeral"
+                    }
+                  }
+                ]
+              },
+              {
+                "role": "user",
+                "content": "hello"
+              }
+            ],
+            "model": "openai::gpt-5.5"
+          }
+        }
+      },
+      "expected": {
+        "returned": {
+          "message": {
+            "role": "assistant",
+            "content": "ok",
+            "response_id": "gen-fixture-2"
+          },
+          "usage": {
+            "prompt_tokens": 200,
+            "completion_tokens": 10,
+            "response_finish_reason": "stop",
+            "provider": "openai",
+            "resolved_model": "openai/gpt-5.5",
+            "cost": 0.004,
+            "cost_estimated": true,
+            "cost_final": false,
+            "request_wire": {
+              "requested_effort": "medium",
+              "applied_effort": "medium",
+              "requested_tool_dialect": "none",
+              "applied_tool_dialect": "none",
+              "reason_code": "requested_wire_form",
+              "source_profile_fingerprint": "76eb184b069fb614bc6cd29ca34a8c4e9d2f8a71f31b2166e6c3630704fb8b00",
+              "accepted_profile_fingerprint": "76eb184b069fb614bc6cd29ca34a8c4e9d2f8a71f31b2166e6c3630704fb8b00",
+              "candidate_sha256": "85f87f507891bf5ce8bfbf56261fbfbb71e88822c53090a8cc066e56636070ae",
+              "ladder_ordinal": 1,
+              "applied_actions": [],
+              "task_local": false,
+              "attempt_id_present": true
+            }
+          },
+          "ledger_attempt_count": 2
+        },
+        "sends": [
+          {
+            "transport": "openai.chat.completions.create",
+            "client": {
+              "api_key": "openai-fixture-key",
+              "base_url": "https://api.openai.com/v1",
+              "default_headers": null,
+              "max_retries": 0,
+              "http_client": null
+            },
+            "payload": {
+              "max_completion_tokens": 65536,
+              "messages": [
+                {
+                  "content": [
+                    {
+                      "text": "stable policy prefix",
+                      "type": "text"
+                    }
+                  ],
+                  "role": "system"
+                },
+                {
+                  "content": "hello",
+                  "role": "user"
+                }
+              ],
+              "model": "gpt-5.5",
+              "prompt_cache_key": "ouroboros-64f555a52bd55e9c12f936a6d7f54e8f",
+              "reasoning_effort": "medium"
+            },
+            "payload_sha256": "042bd29c219b49a25c8defd5a638662a0dfb2a51093558c5afd23f86c97ae6ba"
+          },
+          {
+            "transport": "openai.chat.completions.create",
+            "client": {
+              "api_key": "openai-fixture-key",
+              "base_url": "https://api.openai.com/v1",
+              "default_headers": null,
+              "max_retries": 0,
+              "http_client": null
+            },
+            "payload": {
+              "max_completion_tokens": 65536,
+              "messages": [
+                {
+                  "content": [
+                    {
+                      "text": "stable policy prefix",
+                      "type": "text"
+                    }
+                  ],
+                  "role": "system"
+                },
+                {
+                  "content": "hello",
+                  "role": "user"
+                }
+              ],
+              "model": "gpt-5.5",
+              "reasoning_effort": "medium"
+            },
+            "payload_sha256": "85f87f507891bf5ce8bfbf56261fbfbb71e88822c53090a8cc066e56636070ae"
+          }
+        ],
+        "pricing_calls": [
+          {
+            "model": "openai/gpt-5.5",
+            "prompt_tokens": 200,
+            "completion_tokens": 10,
+            "cache_usage": {
+              "cached_tokens": 0,
+              "cache_write_tokens": 0,
+              "prompt_cache_ttl": null,
+              "cache_write_tokens_by_ttl": null
+            },
+            "allow_live_fetch": true,
+            "provider": "openai"
+          }
+        ],
+        "physical_attempts": [
+          {
+            "source": "llm.chat",
+            "model": "openai/gpt-5.5",
+            "provider": "openai",
+            "candidate_raw_sha256": "042bd29c219b49a25c8defd5a638662a0dfb2a51093558c5afd23f86c97ae6ba",
+            "candidate_raw_size_bytes": 264,
+            "candidate_measurement_kind": "canonical_json_v1",
+            "states": [
+              "reserved",
+              "dispatched",
+              "unresolved"
+            ]
+          },
+          {
+            "source": "llm.chat",
+            "model": "openai/gpt-5.5",
+            "provider": "openai",
+            "candidate_raw_sha256": "85f87f507891bf5ce8bfbf56261fbfbb71e88822c53090a8cc066e56636070ae",
+            "candidate_raw_size_bytes": 200,
+            "candidate_measurement_kind": "canonical_json_v1",
+            "states": [
+              "reserved",
+              "dispatched",
+              "settled"
+            ],
+            "prompt_cache_ttl": "",
+            "cost_final": false
+          }
+        ],
+        "unused_script_steps": 0
+      }
+    },
+    {
+      "id": "fallback.exception.optional_sampling_dropped",
+      "route": "a named optional-parameter rejection drops only that parameter",
+      "spec": {
+        "env": {
+          "OPENROUTER_API_KEY": "or-fixture-key"
+        },
+        "transport": [
+          {
+            "kind": "error",
+            "message": "temperature: unsupported parameter for this endpoint",
+            "status_code": 400
+          },
+          {
+            "kind": "response",
+            "body": {
+              "id": "gen-fixture-1",
+              "choices": [
+                {
+                  "index": 0,
+                  "finish_reason": "stop",
+                  "message": {
+                    "role": "assistant",
+                    "content": "ok",
+                    "refusal": null,
+                    "annotations": null,
+                    "reasoning": "short rollup"
+                  }
+                }
+              ],
+              "usage": {
+                "prompt_tokens": 120,
+                "completion_tokens": 8,
+                "cost": 0.0031,
+                "prompt_tokens_details": {
+                  "cached_tokens": 40
+                }
+              }
+            }
+          }
+        ],
+        "call": {
+          "kind": "method",
+          "name": "chat",
+          "kwargs": {
+            "messages": [
+              {
+                "role": "system",
+                "content": "stable policy prefix"
+              },
+              {
+                "role": "user",
+                "content": "hello"
+              }
+            ],
+            "model": "x-ai/grok-4.5",
+            "temperature": 0.7
+          }
+        }
+      },
+      "expected": {
+        "returned": {
+          "message": {
+            "role": "assistant",
+            "content": "ok",
+            "reasoning": "short rollup",
+            "response_id": "gen-fixture-1"
+          },
+          "usage": {
+            "prompt_tokens": 120,
+            "completion_tokens": 8,
+            "cost": 0.0031,
+            "prompt_tokens_details": {
+              "cached_tokens": 40
+            },
+            "response_finish_reason": "stop",
+            "cached_tokens": 40,
+            "provider": "openrouter",
+            "resolved_model": "x-ai/grok-4.5",
+            "cost_final": true,
+            "request_wire": {
+              "requested_effort": "medium",
+              "applied_effort": "medium",
+              "requested_tool_dialect": "none",
+              "applied_tool_dialect": "none",
+              "reason_code": "provider_unsupported_field",
+              "source_profile_fingerprint": "19c811f5ac19e7306291f6772dff68541a405d7d1b31d3065e4f812783667bf5",
+              "accepted_profile_fingerprint": "19c811f5ac19e7306291f6772dff68541a405d7d1b31d3065e4f812783667bf5",
+              "candidate_sha256": "f1b47abdc717d4734c08a823b6396cdd0d044f43637f54b397556190e9daadd1",
+              "ladder_ordinal": 2,
+              "applied_actions": [
+                {
+                  "source": "pending",
+                  "profile_fingerprint": "19c811f5ac19e7306291f6772dff68541a405d7d1b31d3065e4f812783667bf5",
+                  "action": {
+                    "kind": "drop_field",
+                    "fields": [
+                      "temperature"
+                    ],
+                    "reason_code": "provider_unsupported_field"
+                  }
+                }
+              ],
+              "task_local": false,
+              "attempt_id_present": true
+            }
+          },
+          "ledger_attempt_count": 2
+        },
+        "sends": [
+          {
+            "transport": "openai.chat.completions.create",
+            "client": {
+              "api_key": "or-fixture-key",
+              "base_url": "https://openrouter.ai/api/v1",
+              "default_headers": {
+                "HTTP-Referer": "https://ouroboros-agent.ai/",
+                "X-OpenRouter-Title": "Ouroboros"
+              },
+              "max_retries": 0,
+              "http_client": null
+            },
+            "payload": {
+              "extra_body": {
+                "reasoning": {
+                  "effort": "medium",
+                  "exclude": false
+                },
+                "session_id": "ouroboros-session-14476e6cd07256290bbf81c7a9463216"
+              },
+              "max_tokens": 65536,
+              "messages": [
+                {
+                  "content": "stable policy prefix",
+                  "role": "system"
+                },
+                {
+                  "content": "hello",
+                  "role": "user"
+                }
+              ],
+              "model": "x-ai/grok-4.5",
+              "temperature": 0.7
+            },
+            "payload_sha256": "d9b1dd51a337a3296cf84a1a91d54d1f682130a1ccc10460dae67d9c6fd7ebb3"
+          },
+          {
+            "transport": "openai.chat.completions.create",
+            "client": {
+              "api_key": "or-fixture-key",
+              "base_url": "https://openrouter.ai/api/v1",
+              "default_headers": {
+                "HTTP-Referer": "https://ouroboros-agent.ai/",
+                "X-OpenRouter-Title": "Ouroboros"
+              },
+              "max_retries": 0,
+              "http_client": null
+            },
+            "payload": {
+              "extra_body": {
+                "reasoning": {
+                  "effort": "medium",
+                  "exclude": false
+                },
+                "session_id": "ouroboros-session-14476e6cd07256290bbf81c7a9463216"
+              },
+              "max_tokens": 65536,
+              "messages": [
+                {
+                  "content": "stable policy prefix",
+                  "role": "system"
+                },
+                {
+                  "content": "hello",
+                  "role": "user"
+                }
+              ],
+              "model": "x-ai/grok-4.5"
+            },
+            "payload_sha256": "f1b47abdc717d4734c08a823b6396cdd0d044f43637f54b397556190e9daadd1"
+          }
+        ],
+        "physical_attempts": [
+          {
+            "source": "llm.chat",
+            "model": "x-ai/grok-4.5",
+            "provider": "openrouter",
+            "candidate_raw_sha256": "d9b1dd51a337a3296cf84a1a91d54d1f682130a1ccc10460dae67d9c6fd7ebb3",
+            "candidate_raw_size_bytes": 289,
+            "candidate_measurement_kind": "canonical_json_v1",
+            "states": [
+              "reserved",
+              "dispatched",
+              "unresolved"
+            ]
+          },
+          {
+            "source": "llm.chat",
+            "model": "x-ai/grok-4.5",
+            "provider": "openrouter",
+            "candidate_raw_sha256": "f1b47abdc717d4734c08a823b6396cdd0d044f43637f54b397556190e9daadd1",
+            "candidate_raw_size_bytes": 271,
+            "candidate_measurement_kind": "canonical_json_v1",
+            "states": [
+              "reserved",
+              "dispatched",
+              "settled"
+            ],
+            "prompt_cache_ttl": "",
+            "cost_final": true
+          }
+        ],
+        "unused_script_steps": 0
+      }
+    },
+    {
+      "id": "fallback.exception.mandatory_effort_floor_learned",
+      "route": "a reasoning-mandatory rejection learns a floor and re-sends with effort raised",
+      "spec": {
+        "env": {
+          "OPENROUTER_API_KEY": "or-fixture-key"
+        },
+        "transport": [
+          {
+            "kind": "error",
+            "message": "Reasoning is mandatory for this endpoint and cannot be disabled",
+            "status_code": 400
+          },
+          {
+            "kind": "response",
+            "body": {
+              "id": "gen-fixture-1",
+              "choices": [
+                {
+                  "index": 0,
+                  "finish_reason": "stop",
+                  "message": {
+                    "role": "assistant",
+                    "content": "ok",
+                    "refusal": null,
+                    "annotations": null,
+                    "reasoning": "short rollup"
+                  }
+                }
+              ],
+              "usage": {
+                "prompt_tokens": 120,
+                "completion_tokens": 8,
+                "cost": 0.0031,
+                "prompt_tokens_details": {
+                  "cached_tokens": 40
+                }
+              }
+            }
+          }
+        ],
+        "call": {
+          "kind": "method",
+          "name": "chat",
+          "kwargs": {
+            "messages": [
+              {
+                "role": "system",
+                "content": "stable policy prefix"
+              },
+              {
+                "role": "user",
+                "content": "hello"
+              }
+            ],
+            "model": "x-ai/grok-4.5",
+            "reasoning_effort": "none"
+          }
+        }
+      },
+      "expected": {
+        "returned": {
+          "message": {
+            "role": "assistant",
+            "content": "ok",
+            "reasoning": "short rollup",
+            "response_id": "gen-fixture-1"
+          },
+          "usage": {
+            "prompt_tokens": 120,
+            "completion_tokens": 8,
+            "cost": 0.0031,
+            "prompt_tokens_details": {
+              "cached_tokens": 40
+            },
+            "response_finish_reason": "stop",
+            "cached_tokens": 40,
+            "provider": "openrouter",
+            "resolved_model": "x-ai/grok-4.5",
+            "cost_final": true,
+            "request_wire": {
+              "requested_effort": "none",
+              "applied_effort": "low",
+              "requested_tool_dialect": "none",
+              "applied_tool_dialect": "none",
+              "reason_code": "provider_required_reasoning",
+              "source_profile_fingerprint": "19c811f5ac19e7306291f6772dff68541a405d7d1b31d3065e4f812783667bf5",
+              "accepted_profile_fingerprint": "19c811f5ac19e7306291f6772dff68541a405d7d1b31d3065e4f812783667bf5",
+              "candidate_sha256": "6da7458b47c265dc08d260668929db98b71ab58ffe7b0d1043a6736af3394fa3",
+              "ladder_ordinal": 2,
+              "applied_actions": [
+                {
+                  "source": "pending",
+                  "profile_fingerprint": "19c811f5ac19e7306291f6772dff68541a405d7d1b31d3065e4f812783667bf5",
+                  "action": {
+                    "kind": "set_value",
+                    "field": "effort",
+                    "mode": "floor",
+                    "from": "none",
+                    "to": "low",
+                    "reason_code": "provider_required_reasoning"
+                  }
+                }
+              ],
+              "task_local": false,
+              "attempt_id_present": true
+            }
+          },
+          "ledger_attempt_count": 2
+        },
+        "sends": [
+          {
+            "transport": "openai.chat.completions.create",
+            "client": {
+              "api_key": "or-fixture-key",
+              "base_url": "https://openrouter.ai/api/v1",
+              "default_headers": {
+                "HTTP-Referer": "https://ouroboros-agent.ai/",
+                "X-OpenRouter-Title": "Ouroboros"
+              },
+              "max_retries": 0,
+              "http_client": null
+            },
+            "payload": {
+              "extra_body": {
+                "reasoning": {
+                  "effort": "none",
+                  "exclude": false
+                },
+                "session_id": "ouroboros-session-14476e6cd07256290bbf81c7a9463216"
+              },
+              "max_tokens": 65536,
+              "messages": [
+                {
+                  "content": "stable policy prefix",
+                  "role": "system"
+                },
+                {
+                  "content": "hello",
+                  "role": "user"
+                }
+              ],
+              "model": "x-ai/grok-4.5"
+            },
+            "payload_sha256": "60c3ce133a3fac37e1071d58682711c9ebc315b55b0380aebbe96772374acdfe"
+          },
+          {
+            "transport": "openai.chat.completions.create",
+            "client": {
+              "api_key": "or-fixture-key",
+              "base_url": "https://openrouter.ai/api/v1",
+              "default_headers": {
+                "HTTP-Referer": "https://ouroboros-agent.ai/",
+                "X-OpenRouter-Title": "Ouroboros"
+              },
+              "max_retries": 0,
+              "http_client": null
+            },
+            "payload": {
+              "extra_body": {
+                "reasoning": {
+                  "effort": "low",
+                  "exclude": false
+                },
+                "session_id": "ouroboros-session-14476e6cd07256290bbf81c7a9463216"
+              },
+              "max_tokens": 65536,
+              "messages": [
+                {
+                  "content": "stable policy prefix",
+                  "role": "system"
+                },
+                {
+                  "content": "hello",
+                  "role": "user"
+                }
+              ],
+              "model": "x-ai/grok-4.5"
+            },
+            "payload_sha256": "6da7458b47c265dc08d260668929db98b71ab58ffe7b0d1043a6736af3394fa3"
+          }
+        ],
+        "physical_attempts": [
+          {
+            "source": "llm.chat",
+            "model": "x-ai/grok-4.5",
+            "provider": "openrouter",
+            "candidate_raw_sha256": "60c3ce133a3fac37e1071d58682711c9ebc315b55b0380aebbe96772374acdfe",
+            "candidate_raw_size_bytes": 269,
+            "candidate_measurement_kind": "canonical_json_v1",
+            "states": [
+              "reserved",
+              "dispatched",
+              "unresolved"
+            ]
+          },
+          {
+            "source": "llm.chat",
+            "model": "x-ai/grok-4.5",
+            "provider": "openrouter",
+            "candidate_raw_sha256": "6da7458b47c265dc08d260668929db98b71ab58ffe7b0d1043a6736af3394fa3",
+            "candidate_raw_size_bytes": 268,
+            "candidate_measurement_kind": "canonical_json_v1",
+            "states": [
+              "reserved",
+              "dispatched",
+              "settled"
+            ],
+            "prompt_cache_ttl": "",
+            "cost_final": true
+          }
+        ],
+        "unused_script_steps": 0
+      }
+    },
+    {
+      "id": "fallback.exception.signature_strip_and_reroute",
+      "route": "an OpenRouter 400 strips replayed reasoning, unpins the provider and rotates the session",
+      "spec": {
+        "env": {
+          "OPENROUTER_API_KEY": "or-fixture-key"
+        },
+        "transport": [
+          {
+            "kind": "error",
+            "message": "Error code: 400 - Invalid `signature` in `thinking` block"
+          },
+          {
+            "kind": "response",
+            "body": {
+              "id": "gen-fixture-1",
+              "choices": [
+                {
+                  "index": 0,
+                  "finish_reason": "stop",
+                  "message": {
+                    "role": "assistant",
+                    "content": "ok",
+                    "refusal": null,
+                    "annotations": null,
+                    "reasoning": "short rollup"
+                  }
+                }
+              ],
+              "usage": {
+                "prompt_tokens": 120,
+                "completion_tokens": 8,
+                "cost": 0.0031,
+                "prompt_tokens_details": {
+                  "cached_tokens": 40
+                }
+              }
+            }
+          }
+        ],
+        "call": {
+          "kind": "method",
+          "name": "chat",
+          "kwargs": {
+            "messages": [
+              {
+                "role": "user",
+                "content": "hi"
+              },
+              {
+                "role": "assistant",
+                "content": [
+                  {
+                    "type": "thinking",
+                    "thinking": "t",
+                    "signature": "sig"
+                  }
+                ]
+              },
+              {
+                "role": "user",
+                "content": "again"
+              }
+            ],
+            "model": "z-ai/glm-5.2"
+          }
+        }
+      },
+      "expected": {
+        "returned": {
+          "message": {
+            "role": "assistant",
+            "content": "ok",
+            "reasoning": "short rollup",
+            "response_id": "gen-fixture-1"
+          },
+          "usage": {
+            "prompt_tokens": 120,
+            "completion_tokens": 8,
+            "cost": 0.0031,
+            "prompt_tokens_details": {
+              "cached_tokens": 40
+            },
+            "response_finish_reason": "stop",
+            "cached_tokens": 40,
+            "provider": "openrouter",
+            "resolved_model": "z-ai/glm-5.2",
+            "cost_final": true,
+            "request_wire": {
+              "requested_effort": "medium",
+              "applied_effort": "medium",
+              "requested_tool_dialect": "none",
+              "applied_tool_dialect": "none",
+              "reason_code": "requested_wire_form",
+              "source_profile_fingerprint": "f1977c61b4f273386d36a7569540a8ba0a50839afc9ffb95ab6c222d5c16a5ba",
+              "accepted_profile_fingerprint": "f1977c61b4f273386d36a7569540a8ba0a50839afc9ffb95ab6c222d5c16a5ba",
+              "candidate_sha256": "ec542e027e83c40d241e34365d96a3116322c2ade1930d1ff593e6c35e9629a2",
+              "ladder_ordinal": 1,
+              "applied_actions": [],
+              "task_local": false,
+              "attempt_id_present": true
+            }
+          },
+          "ledger_attempt_count": 2
+        },
+        "sends": [
+          {
+            "transport": "openai.chat.completions.create",
+            "client": {
+              "api_key": "or-fixture-key",
+              "base_url": "https://openrouter.ai/api/v1",
+              "default_headers": {
+                "HTTP-Referer": "https://ouroboros-agent.ai/",
+                "X-OpenRouter-Title": "Ouroboros"
+              },
+              "max_retries": 0,
+              "http_client": null
+            },
+            "payload": {
+              "extra_body": {
+                "provider": {
+                  "allow_fallbacks": false
+                },
+                "reasoning": {
+                  "effort": "medium",
+                  "exclude": false
+                }
+              },
+              "max_tokens": 65536,
+              "messages": [
+                {
+                  "content": "hi",
+                  "role": "user"
+                },
+                {
+                  "content": [
+                    {
+                      "signature": "sig",
+                      "thinking": "t",
+                      "type": "thinking"
+                    }
+                  ],
+                  "role": "assistant"
+                },
+                {
+                  "content": "again",
+                  "role": "user"
+                }
+              ],
+              "model": "z-ai/glm-5.2"
+            },
+            "payload_sha256": "7890c53d8792f67b25416e06655f87abb1f699beb82b9e5cee681e2f1d3e5fe3"
+          },
+          {
+            "transport": "openai.chat.completions.create",
+            "client": {
+              "api_key": "or-fixture-key",
+              "base_url": "https://openrouter.ai/api/v1",
+              "default_headers": {
+                "HTTP-Referer": "https://ouroboros-agent.ai/",
+                "X-OpenRouter-Title": "Ouroboros"
+              },
+              "max_retries": 0,
+              "http_client": null
+            },
+            "payload": {
+              "extra_body": {
+                "reasoning": {
+                  "effort": "medium",
+                  "exclude": false
+                }
+              },
+              "max_tokens": 65536,
+              "messages": [
+                {
+                  "content": "hi",
+                  "role": "user"
+                },
+                {
+                  "content": [],
+                  "role": "assistant"
+                },
+                {
+                  "content": "again",
+                  "role": "user"
+                }
+              ],
+              "model": "z-ai/glm-5.2"
+            },
+            "payload_sha256": "ec542e027e83c40d241e34365d96a3116322c2ade1930d1ff593e6c35e9629a2"
+          }
+        ],
+        "physical_attempts": [
+          {
+            "source": "llm.chat",
+            "model": "z-ai/glm-5.2",
+            "provider": "openrouter",
+            "candidate_raw_sha256": "7890c53d8792f67b25416e06655f87abb1f699beb82b9e5cee681e2f1d3e5fe3",
+            "candidate_raw_size_bytes": 307,
+            "candidate_measurement_kind": "canonical_json_v1",
+            "states": [
+              "reserved",
+              "dispatched",
+              "unresolved"
+            ]
+          },
+          {
+            "source": "llm.chat",
+            "model": "z-ai/glm-5.2",
+            "provider": "openrouter",
+            "candidate_raw_sha256": "ec542e027e83c40d241e34365d96a3116322c2ade1930d1ff593e6c35e9629a2",
+            "candidate_raw_size_bytes": 218,
+            "candidate_measurement_kind": "canonical_json_v1",
+            "states": [
+              "reserved",
+              "dispatched",
+              "settled"
+            ],
+            "prompt_cache_ttl": "",
+            "cost_final": true
+          }
+        ],
+        "unused_script_steps": 0
+      }
+    },
+    {
+      "id": "fallback.exception.terminal_after_ladder",
+      "route": "a failure no ladder rung recognises surfaces after exactly one physical attempt",
+      "spec": {
+        "env": {
+          "OPENROUTER_API_KEY": "or-fixture-key"
+        },
+        "transport": [
+          {
+            "kind": "error",
+            "message": "upstream gateway exploded",
+            "status_code": 502
+          }
+        ],
+        "call": {
+          "kind": "method",
+          "name": "chat",
+          "kwargs": {
+            "messages": [
+              {
+                "role": "system",
+                "content": "stable policy prefix"
+              },
+              {
+                "role": "user",
+                "content": "hello"
+              }
+            ],
+            "model": "x-ai/grok-4.5"
+          }
+        }
+      },
+      "expected": {
+        "raised": {
+          "type": "FixtureProviderError",
+          "message": "upstream gateway exploded"
+        },
+        "sends": [
+          {
+            "transport": "openai.chat.completions.create",
+            "client": {
+              "api_key": "or-fixture-key",
+              "base_url": "https://openrouter.ai/api/v1",
+              "default_headers": {
+                "HTTP-Referer": "https://ouroboros-agent.ai/",
+                "X-OpenRouter-Title": "Ouroboros"
+              },
+              "max_retries": 0,
+              "http_client": null
+            },
+            "payload": {
+              "extra_body": {
+                "reasoning": {
+                  "effort": "medium",
+                  "exclude": false
+                },
+                "session_id": "ouroboros-session-14476e6cd07256290bbf81c7a9463216"
+              },
+              "max_tokens": 65536,
+              "messages": [
+                {
+                  "content": "stable policy prefix",
+                  "role": "system"
+                },
+                {
+                  "content": "hello",
+                  "role": "user"
+                }
+              ],
+              "model": "x-ai/grok-4.5"
+            },
+            "payload_sha256": "f1b47abdc717d4734c08a823b6396cdd0d044f43637f54b397556190e9daadd1"
+          }
+        ],
+        "physical_attempts": [
+          {
+            "source": "llm.chat",
+            "model": "x-ai/grok-4.5",
+            "provider": "openrouter",
+            "candidate_raw_sha256": "f1b47abdc717d4734c08a823b6396cdd0d044f43637f54b397556190e9daadd1",
+            "candidate_raw_size_bytes": 271,
+            "candidate_measurement_kind": "canonical_json_v1",
+            "states": [
+              "reserved",
+              "dispatched",
+              "unresolved"
+            ]
+          }
+        ],
+        "unused_script_steps": 0
+      }
+    },
+    {
+      "id": "fallback.body.transient_reroute_same_model",
+      "route": "a 200-body 429 reroutes once to a healthy endpoint of the SAME model",
+      "spec": {
+        "env": {
+          "OPENROUTER_API_KEY": "or-fixture-key"
+        },
+        "transport": [
+          {
+            "kind": "response",
+            "body": {
+              "id": "gen-fixture-429",
+              "choices": null,
+              "error": {
+                "code": 429,
+                "message": "Provider returned error: rate limit exceeded"
+              }
+            }
+          },
+          {
+            "kind": "response",
+            "body": {
+              "id": "gen-fixture-1",
+              "choices": [
+                {
+                  "index": 0,
+                  "finish_reason": "stop",
+                  "message": {
+                    "role": "assistant",
+                    "content": "ok",
+                    "refusal": null,
+                    "annotations": null,
+                    "reasoning": "short rollup"
+                  }
+                }
+              ],
+              "usage": {
+                "prompt_tokens": 120,
+                "completion_tokens": 8,
+                "cost": 0.0031,
+                "prompt_tokens_details": {
+                  "cached_tokens": 40
+                }
+              }
+            }
+          }
+        ],
+        "call": {
+          "kind": "method",
+          "name": "chat",
+          "kwargs": {
+            "messages": [
+              {
+                "role": "user",
+                "content": "hi"
+              },
+              {
+                "role": "assistant",
+                "content": "a",
+                "reasoning_details": [
+                  {
+                    "type": "reasoning.text",
+                    "text": "t"
+                  }
+                ]
+              },
+              {
+                "role": "user",
+                "content": "again"
+              }
+            ],
+            "model": "anthropic/claude-sonnet-4.6"
+          }
+        }
+      },
+      "expected": {
+        "returned": {
+          "message": {
+            "role": "assistant",
+            "content": "ok",
+            "reasoning": "short rollup",
+            "response_id": "gen-fixture-1"
+          },
+          "usage": {
+            "prompt_tokens": 120,
+            "completion_tokens": 8,
+            "cost": 0.0031,
+            "prompt_tokens_details": {
+              "cached_tokens": 40
+            },
+            "response_finish_reason": "stop",
+            "cached_tokens": 40,
+            "provider": "openrouter",
+            "resolved_model": "anthropic/claude-sonnet-4.6",
+            "cost_final": true,
+            "request_wire": {
+              "requested_effort": "medium",
+              "applied_effort": "medium",
+              "requested_tool_dialect": "none",
+              "applied_tool_dialect": "none",
+              "reason_code": "requested_wire_form",
+              "source_profile_fingerprint": "c7706246bec3319fc70ddd9c027ba3ab2e21e267b4c015bb6661152fafb520a7",
+              "accepted_profile_fingerprint": "c7706246bec3319fc70ddd9c027ba3ab2e21e267b4c015bb6661152fafb520a7",
+              "candidate_sha256": "6f9201dff3a434727a4cabb6974fa7429214821939e9f3dd23e66e8267baaae1",
+              "ladder_ordinal": 1,
+              "applied_actions": [],
+              "task_local": false,
+              "attempt_id_present": true
+            }
+          },
+          "ledger_attempt_count": 2
+        },
+        "sends": [
+          {
+            "transport": "openai.chat.completions.create",
+            "client": {
+              "api_key": "or-fixture-key",
+              "base_url": "https://openrouter.ai/api/v1",
+              "default_headers": {
+                "HTTP-Referer": "https://ouroboros-agent.ai/",
+                "X-OpenRouter-Title": "Ouroboros"
+              },
+              "max_retries": 0,
+              "http_client": null
+            },
+            "payload": {
+              "extra_body": {
+                "provider": {
+                  "require_parameters": true
+                },
+                "reasoning": {
+                  "effort": "medium",
+                  "exclude": false
+                }
+              },
+              "max_tokens": 65536,
+              "messages": [
+                {
+                  "content": "hi",
+                  "role": "user"
+                },
+                {
+                  "content": "a",
+                  "reasoning_details": [
+                    {
+                      "text": "t",
+                      "type": "reasoning.text"
+                    }
+                  ],
+                  "role": "assistant"
+                },
+                {
+                  "content": "again",
+                  "role": "user"
+                }
+              ],
+              "model": "anthropic/claude-sonnet-4.6"
+            },
+            "payload_sha256": "6f9201dff3a434727a4cabb6974fa7429214821939e9f3dd23e66e8267baaae1"
+          },
+          {
+            "transport": "openai.chat.completions.create",
+            "client": {
+              "api_key": "or-fixture-key",
+              "base_url": "https://openrouter.ai/api/v1",
+              "default_headers": {
+                "HTTP-Referer": "https://ouroboros-agent.ai/",
+                "X-OpenRouter-Title": "Ouroboros"
+              },
+              "max_retries": 0,
+              "http_client": null
+            },
+            "payload": {
+              "extra_body": {
+                "provider": {
+                  "require_parameters": true
+                },
+                "reasoning": {
+                  "effort": "medium",
+                  "exclude": false
+                }
+              },
+              "max_tokens": 65536,
+              "messages": [
+                {
+                  "content": "hi",
+                  "role": "user"
+                },
+                {
+                  "content": "a",
+                  "reasoning_details": [
+                    {
+                      "text": "t",
+                      "type": "reasoning.text"
+                    }
+                  ],
+                  "role": "assistant"
+                },
+                {
+                  "content": "again",
+                  "role": "user"
+                }
+              ],
+              "model": "anthropic/claude-sonnet-4.6"
+            },
+            "payload_sha256": "6f9201dff3a434727a4cabb6974fa7429214821939e9f3dd23e66e8267baaae1"
+          }
+        ],
+        "physical_attempts": [
+          {
+            "source": "llm.chat",
+            "model": "anthropic/claude-sonnet-4.6",
+            "provider": "openrouter",
+            "candidate_raw_sha256": "6f9201dff3a434727a4cabb6974fa7429214821939e9f3dd23e66e8267baaae1",
+            "candidate_raw_size_bytes": 332,
+            "candidate_measurement_kind": "canonical_json_v1",
+            "states": [
+              "reserved",
+              "dispatched",
+              "settled"
+            ],
+            "prompt_cache_ttl": "",
+            "cost_final": true
+          },
+          {
+            "source": "llm.chat",
+            "model": "anthropic/claude-sonnet-4.6",
+            "provider": "openrouter",
+            "candidate_raw_sha256": "6f9201dff3a434727a4cabb6974fa7429214821939e9f3dd23e66e8267baaae1",
+            "candidate_raw_size_bytes": 332,
+            "candidate_measurement_kind": "canonical_json_v1",
+            "states": [
+              "reserved",
+              "dispatched",
+              "settled"
+            ],
+            "prompt_cache_ttl": "",
+            "cost_final": true
+          }
+        ],
+        "unused_script_steps": 0
+      }
+    },
+    {
+      "id": "fallback.body.transient_reroute_strips_unverified_family",
+      "route": "the same reroute drops reasoning continuity for an unverified family",
+      "spec": {
+        "env": {
+          "OPENROUTER_API_KEY": "or-fixture-key"
+        },
+        "transport": [
+          {
+            "kind": "response",
+            "body": {
+              "id": "gen-fixture-429",
+              "choices": null,
+              "error": {
+                "code": 429,
+                "message": "Provider returned error: rate limit exceeded"
+              }
+            }
+          },
+          {
+            "kind": "response",
+            "body": {
+              "id": "gen-fixture-1",
+              "choices": [
+                {
+                  "index": 0,
+                  "finish_reason": "stop",
+                  "message": {
+                    "role": "assistant",
+                    "content": "ok",
+                    "refusal": null,
+                    "annotations": null,
+                    "reasoning": "short rollup"
+                  }
+                }
+              ],
+              "usage": {
+                "prompt_tokens": 120,
+                "completion_tokens": 8,
+                "cost": 0.0031,
+                "prompt_tokens_details": {
+                  "cached_tokens": 40
+                }
+              }
+            }
+          }
+        ],
+        "call": {
+          "kind": "method",
+          "name": "chat",
+          "kwargs": {
+            "messages": [
+              {
+                "role": "user",
+                "content": "hi"
+              },
+              {
+                "role": "assistant",
+                "content": [
+                  {
+                    "type": "thinking",
+                    "thinking": "t",
+                    "signature": "sig"
+                  }
+                ]
+              },
+              {
+                "role": "user",
+                "content": "again"
+              }
+            ],
+            "model": "z-ai/glm-5.2"
+          }
+        }
+      },
+      "expected": {
+        "returned": {
+          "message": {
+            "role": "assistant",
+            "content": "ok",
+            "reasoning": "short rollup",
+            "response_id": "gen-fixture-1"
+          },
+          "usage": {
+            "prompt_tokens": 120,
+            "completion_tokens": 8,
+            "cost": 0.0031,
+            "prompt_tokens_details": {
+              "cached_tokens": 40
+            },
+            "response_finish_reason": "stop",
+            "cached_tokens": 40,
+            "provider": "openrouter",
+            "resolved_model": "z-ai/glm-5.2",
+            "cost_final": true,
+            "request_wire": {
+              "requested_effort": "medium",
+              "applied_effort": "medium",
+              "requested_tool_dialect": "none",
+              "applied_tool_dialect": "none",
+              "reason_code": "requested_wire_form",
+              "source_profile_fingerprint": "f1977c61b4f273386d36a7569540a8ba0a50839afc9ffb95ab6c222d5c16a5ba",
+              "accepted_profile_fingerprint": "f1977c61b4f273386d36a7569540a8ba0a50839afc9ffb95ab6c222d5c16a5ba",
+              "candidate_sha256": "ec542e027e83c40d241e34365d96a3116322c2ade1930d1ff593e6c35e9629a2",
+              "ladder_ordinal": 1,
+              "applied_actions": [],
+              "task_local": false,
+              "attempt_id_present": true
+            }
+          },
+          "ledger_attempt_count": 2
+        },
+        "sends": [
+          {
+            "transport": "openai.chat.completions.create",
+            "client": {
+              "api_key": "or-fixture-key",
+              "base_url": "https://openrouter.ai/api/v1",
+              "default_headers": {
+                "HTTP-Referer": "https://ouroboros-agent.ai/",
+                "X-OpenRouter-Title": "Ouroboros"
+              },
+              "max_retries": 0,
+              "http_client": null
+            },
+            "payload": {
+              "extra_body": {
+                "provider": {
+                  "allow_fallbacks": false
+                },
+                "reasoning": {
+                  "effort": "medium",
+                  "exclude": false
+                }
+              },
+              "max_tokens": 65536,
+              "messages": [
+                {
+                  "content": "hi",
+                  "role": "user"
+                },
+                {
+                  "content": [
+                    {
+                      "signature": "sig",
+                      "thinking": "t",
+                      "type": "thinking"
+                    }
+                  ],
+                  "role": "assistant"
+                },
+                {
+                  "content": "again",
+                  "role": "user"
+                }
+              ],
+              "model": "z-ai/glm-5.2"
+            },
+            "payload_sha256": "7890c53d8792f67b25416e06655f87abb1f699beb82b9e5cee681e2f1d3e5fe3"
+          },
+          {
+            "transport": "openai.chat.completions.create",
+            "client": {
+              "api_key": "or-fixture-key",
+              "base_url": "https://openrouter.ai/api/v1",
+              "default_headers": {
+                "HTTP-Referer": "https://ouroboros-agent.ai/",
+                "X-OpenRouter-Title": "Ouroboros"
+              },
+              "max_retries": 0,
+              "http_client": null
+            },
+            "payload": {
+              "extra_body": {
+                "reasoning": {
+                  "effort": "medium",
+                  "exclude": false
+                }
+              },
+              "max_tokens": 65536,
+              "messages": [
+                {
+                  "content": "hi",
+                  "role": "user"
+                },
+                {
+                  "content": [],
+                  "role": "assistant"
+                },
+                {
+                  "content": "again",
+                  "role": "user"
+                }
+              ],
+              "model": "z-ai/glm-5.2"
+            },
+            "payload_sha256": "ec542e027e83c40d241e34365d96a3116322c2ade1930d1ff593e6c35e9629a2"
+          }
+        ],
+        "physical_attempts": [
+          {
+            "source": "llm.chat",
+            "model": "z-ai/glm-5.2",
+            "provider": "openrouter",
+            "candidate_raw_sha256": "7890c53d8792f67b25416e06655f87abb1f699beb82b9e5cee681e2f1d3e5fe3",
+            "candidate_raw_size_bytes": 307,
+            "candidate_measurement_kind": "canonical_json_v1",
+            "states": [
+              "reserved",
+              "dispatched",
+              "settled"
+            ],
+            "prompt_cache_ttl": "",
+            "cost_final": true
+          },
+          {
+            "source": "llm.chat",
+            "model": "z-ai/glm-5.2",
+            "provider": "openrouter",
+            "candidate_raw_sha256": "ec542e027e83c40d241e34365d96a3116322c2ade1930d1ff593e6c35e9629a2",
+            "candidate_raw_size_bytes": 218,
+            "candidate_measurement_kind": "canonical_json_v1",
+            "states": [
+              "reserved",
+              "dispatched",
+              "settled"
+            ],
+            "prompt_cache_ttl": "",
+            "cost_final": true
+          }
+        ],
+        "unused_script_steps": 0
+      }
+    },
+    {
+      "id": "fallback.body.reroute_failure_returns_first_response",
+      "route": "when the reroute send fails the first (errored) response is returned as-is",
+      "spec": {
+        "env": {
+          "OPENROUTER_API_KEY": "or-fixture-key"
+        },
+        "transport": [
+          {
+            "kind": "response",
+            "body": {
+              "id": "gen-fixture-429",
+              "choices": null,
+              "error": {
+                "code": 429,
+                "message": "Provider returned error: rate limit exceeded"
+              }
+            }
+          },
+          {
+            "kind": "error",
+            "message": "second endpoint also down",
+            "status_code": 503
+          }
+        ],
+        "call": {
+          "kind": "method",
+          "name": "chat",
+          "kwargs": {
+            "messages": [
+              {
+                "role": "user",
+                "content": "hi"
+              },
+              {
+                "role": "assistant",
+                "content": [
+                  {
+                    "type": "thinking",
+                    "thinking": "t",
+                    "signature": "sig"
+                  }
+                ]
+              },
+              {
+                "role": "user",
+                "content": "again"
+              }
+            ],
+            "model": "z-ai/glm-5.2"
+          }
+        }
+      },
+      "expected": {
+        "returned": {
+          "message": {
+            "response_id": "gen-fixture-429"
+          },
+          "usage": {
+            "provider_error": {
+              "code": 429,
+              "type": null,
+              "message": "Provider returned error: rate limit exceeded",
+              "kind": "rate_limit"
+            },
+            "provider": "openrouter",
+            "resolved_model": "z-ai/glm-5.2",
+            "cost": null,
+            "cost_final": false,
+            "reasoning_pin": {
+              "sealed": true,
+              "artifact": "signed_block"
+            }
+          },
+          "ledger_attempt_count": 2
+        },
+        "sends": [
+          {
+            "transport": "openai.chat.completions.create",
+            "client": {
+              "api_key": "or-fixture-key",
+              "base_url": "https://openrouter.ai/api/v1",
+              "default_headers": {
+                "HTTP-Referer": "https://ouroboros-agent.ai/",
+                "X-OpenRouter-Title": "Ouroboros"
+              },
+              "max_retries": 0,
+              "http_client": null
+            },
+            "payload": {
+              "extra_body": {
+                "provider": {
+                  "allow_fallbacks": false
+                },
+                "reasoning": {
+                  "effort": "medium",
+                  "exclude": false
+                }
+              },
+              "max_tokens": 65536,
+              "messages": [
+                {
+                  "content": "hi",
+                  "role": "user"
+                },
+                {
+                  "content": [
+                    {
+                      "signature": "sig",
+                      "thinking": "t",
+                      "type": "thinking"
+                    }
+                  ],
+                  "role": "assistant"
+                },
+                {
+                  "content": "again",
+                  "role": "user"
+                }
+              ],
+              "model": "z-ai/glm-5.2"
+            },
+            "payload_sha256": "7890c53d8792f67b25416e06655f87abb1f699beb82b9e5cee681e2f1d3e5fe3"
+          },
+          {
+            "transport": "openai.chat.completions.create",
+            "client": {
+              "api_key": "or-fixture-key",
+              "base_url": "https://openrouter.ai/api/v1",
+              "default_headers": {
+                "HTTP-Referer": "https://ouroboros-agent.ai/",
+                "X-OpenRouter-Title": "Ouroboros"
+              },
+              "max_retries": 0,
+              "http_client": null
+            },
+            "payload": {
+              "extra_body": {
+                "reasoning": {
+                  "effort": "medium",
+                  "exclude": false
+                }
+              },
+              "max_tokens": 65536,
+              "messages": [
+                {
+                  "content": "hi",
+                  "role": "user"
+                },
+                {
+                  "content": [],
+                  "role": "assistant"
+                },
+                {
+                  "content": "again",
+                  "role": "user"
+                }
+              ],
+              "model": "z-ai/glm-5.2"
+            },
+            "payload_sha256": "ec542e027e83c40d241e34365d96a3116322c2ade1930d1ff593e6c35e9629a2"
+          }
+        ],
+        "physical_attempts": [
+          {
+            "source": "llm.chat",
+            "model": "z-ai/glm-5.2",
+            "provider": "openrouter",
+            "candidate_raw_sha256": "7890c53d8792f67b25416e06655f87abb1f699beb82b9e5cee681e2f1d3e5fe3",
+            "candidate_raw_size_bytes": 307,
+            "candidate_measurement_kind": "canonical_json_v1",
+            "states": [
+              "reserved",
+              "dispatched",
+              "settled"
+            ],
+            "prompt_cache_ttl": "",
+            "cost_final": true
+          },
+          {
+            "source": "llm.chat",
+            "model": "z-ai/glm-5.2",
+            "provider": "openrouter",
+            "candidate_raw_sha256": "ec542e027e83c40d241e34365d96a3116322c2ade1930d1ff593e6c35e9629a2",
+            "candidate_raw_size_bytes": 218,
+            "candidate_measurement_kind": "canonical_json_v1",
+            "states": [
+              "reserved",
+              "dispatched",
+              "unresolved"
+            ]
+          }
+        ],
+        "unused_script_steps": 0
+      }
+    },
+    {
+      "id": "fallback.body.encrypted_reasoning_strip",
+      "route": "an encrypted-reasoning body 400 strips the replayed items and retries once",
+      "spec": {
+        "env": {
+          "OPENROUTER_API_KEY": "or-fixture-key"
+        },
+        "transport": [
+          {
+            "kind": "response",
+            "body": {
+              "id": "gen-fixture-enc",
+              "choices": null,
+              "error": {
+                "code": 400,
+                "message": "The encrypted content for item rs_abc could not be verified"
+              }
+            }
+          },
+          {
+            "kind": "response",
+            "body": {
+              "id": "gen-fixture-1",
+              "choices": [
+                {
+                  "index": 0,
+                  "finish_reason": "stop",
+                  "message": {
+                    "role": "assistant",
+                    "content": "ok",
+                    "refusal": null,
+                    "annotations": null,
+                    "reasoning": "short rollup"
+                  }
+                }
+              ],
+              "usage": {
+                "prompt_tokens": 120,
+                "completion_tokens": 8,
+                "cost": 0.0031,
+                "prompt_tokens_details": {
+                  "cached_tokens": 40
+                }
+              }
+            }
+          }
+        ],
+        "call": {
+          "kind": "method",
+          "name": "chat",
+          "kwargs": {
+            "messages": [
+              {
+                "role": "user",
+                "content": "hi"
+              },
+              {
+                "role": "assistant",
+                "content": "a",
+                "reasoning_details": [
+                  {
+                    "type": "reasoning.encrypted",
+                    "data": "rs_abc"
+                  }
+                ]
+              },
+              {
+                "role": "user",
+                "content": "again"
+              }
+            ],
+            "model": "openai/gpt-5.6"
+          }
+        }
+      },
+      "expected": {
+        "returned": {
+          "message": {
+            "role": "assistant",
+            "content": "ok",
+            "reasoning": "short rollup",
+            "response_id": "gen-fixture-1"
+          },
+          "usage": {
+            "prompt_tokens": 120,
+            "completion_tokens": 8,
+            "cost": 0.0031,
+            "prompt_tokens_details": {
+              "cached_tokens": 40
+            },
+            "response_finish_reason": "stop",
+            "cached_tokens": 40,
+            "provider": "openrouter",
+            "resolved_model": "openai/gpt-5.6",
+            "cost_final": true,
+            "request_wire": {
+              "requested_effort": "medium",
+              "applied_effort": "medium",
+              "requested_tool_dialect": "none",
+              "applied_tool_dialect": "none",
+              "reason_code": "requested_wire_form",
+              "source_profile_fingerprint": "c738bb75cde207530cea4699db62a4c42efdbed4e02334d0edd850b964e05782",
+              "accepted_profile_fingerprint": "c738bb75cde207530cea4699db62a4c42efdbed4e02334d0edd850b964e05782",
+              "candidate_sha256": "3e193e66be251839e10caf1a7e1752a690a219a8b9027b8deca0b65bcc2d1439",
+              "ladder_ordinal": 1,
+              "applied_actions": [],
+              "task_local": false,
+              "attempt_id_present": true
+            }
+          },
+          "ledger_attempt_count": 2
+        },
+        "sends": [
+          {
+            "transport": "openai.chat.completions.create",
+            "client": {
+              "api_key": "or-fixture-key",
+              "base_url": "https://openrouter.ai/api/v1",
+              "default_headers": {
+                "HTTP-Referer": "https://ouroboros-agent.ai/",
+                "X-OpenRouter-Title": "Ouroboros"
+              },
+              "max_retries": 0,
+              "http_client": null
+            },
+            "payload": {
+              "extra_body": {
+                "provider": {
+                  "allow_fallbacks": false
+                },
+                "reasoning": {
+                  "effort": "medium",
+                  "exclude": false
+                }
+              },
+              "max_tokens": 65536,
+              "messages": [
+                {
+                  "content": "hi",
+                  "role": "user"
+                },
+                {
+                  "content": "a",
+                  "reasoning_details": [
+                    {
+                      "data": "rs_abc",
+                      "type": "reasoning.encrypted"
+                    }
+                  ],
+                  "role": "assistant"
+                },
+                {
+                  "content": "again",
+                  "role": "user"
+                }
+              ],
+              "model": "openai/gpt-5.6"
+            },
+            "payload_sha256": "fadc2cc6edf5b77a2d656a3350c6502937432d20efcc59ab0e5bb67985b521d1"
+          },
+          {
+            "transport": "openai.chat.completions.create",
+            "client": {
+              "api_key": "or-fixture-key",
+              "base_url": "https://openrouter.ai/api/v1",
+              "default_headers": {
+                "HTTP-Referer": "https://ouroboros-agent.ai/",
+                "X-OpenRouter-Title": "Ouroboros"
+              },
+              "max_retries": 0,
+              "http_client": null
+            },
+            "payload": {
+              "extra_body": {
+                "reasoning": {
+                  "effort": "medium",
+                  "exclude": false
+                }
+              },
+              "max_tokens": 65536,
+              "messages": [
+                {
+                  "content": "hi",
+                  "role": "user"
+                },
+                {
+                  "content": "a",
+                  "role": "assistant"
+                },
+                {
+                  "content": "again",
+                  "role": "user"
+                }
+              ],
+              "model": "openai/gpt-5.6"
+            },
+            "payload_sha256": "3e193e66be251839e10caf1a7e1752a690a219a8b9027b8deca0b65bcc2d1439"
+          }
+        ],
+        "physical_attempts": [
+          {
+            "source": "llm.chat",
+            "model": "openai/gpt-5.6",
+            "provider": "openrouter",
+            "candidate_raw_sha256": "fadc2cc6edf5b77a2d656a3350c6502937432d20efcc59ab0e5bb67985b521d1",
+            "candidate_raw_size_bytes": 327,
+            "candidate_measurement_kind": "canonical_json_v1",
+            "states": [
+              "reserved",
+              "dispatched",
+              "settled"
+            ],
+            "prompt_cache_ttl": "",
+            "cost_final": true
+          },
+          {
+            "source": "llm.chat",
+            "model": "openai/gpt-5.6",
+            "provider": "openrouter",
+            "candidate_raw_sha256": "3e193e66be251839e10caf1a7e1752a690a219a8b9027b8deca0b65bcc2d1439",
+            "candidate_raw_size_bytes": 221,
+            "candidate_measurement_kind": "canonical_json_v1",
+            "states": [
+              "reserved",
+              "dispatched",
+              "settled"
+            ],
+            "prompt_cache_ttl": "",
+            "cost_final": true
+          }
+        ],
+        "unused_script_steps": 0
+      }
+    },
+    {
+      "id": "fallback.body.parameter_rejection_retry",
+      "route": "a parameter rejection delivered as a body 400 takes the exception-path recovery",
+      "spec": {
+        "env": {
+          "OPENROUTER_API_KEY": "or-fixture-key"
+        },
+        "transport": [
+          {
+            "kind": "response",
+            "body": {
+              "id": "gen-fixture-param",
+              "choices": null,
+              "error": {
+                "code": 400,
+                "message": "temperature: unsupported parameter for this model"
+              }
+            }
+          },
+          {
+            "kind": "response",
+            "body": {
+              "id": "gen-fixture-1",
+              "choices": [
+                {
+                  "index": 0,
+                  "finish_reason": "stop",
+                  "message": {
+                    "role": "assistant",
+                    "content": "ok",
+                    "refusal": null,
+                    "annotations": null,
+                    "reasoning": "short rollup"
+                  }
+                }
+              ],
+              "usage": {
+                "prompt_tokens": 120,
+                "completion_tokens": 8,
+                "cost": 0.0031,
+                "prompt_tokens_details": {
+                  "cached_tokens": 40
+                }
+              }
+            }
+          }
+        ],
+        "call": {
+          "kind": "method",
+          "name": "chat",
+          "kwargs": {
+            "messages": [
+              {
+                "role": "system",
+                "content": "stable policy prefix"
+              },
+              {
+                "role": "user",
+                "content": "hello"
+              }
+            ],
+            "model": "x-ai/grok-4.5",
+            "temperature": 0.7
+          }
+        }
+      },
+      "expected": {
+        "returned": {
+          "message": {
+            "role": "assistant",
+            "content": "ok",
+            "reasoning": "short rollup",
+            "response_id": "gen-fixture-1"
+          },
+          "usage": {
+            "prompt_tokens": 120,
+            "completion_tokens": 8,
+            "cost": 0.0031,
+            "prompt_tokens_details": {
+              "cached_tokens": 40
+            },
+            "response_finish_reason": "stop",
+            "cached_tokens": 40,
+            "provider": "openrouter",
+            "resolved_model": "x-ai/grok-4.5",
+            "cost_final": true,
+            "request_wire": {
+              "requested_effort": "medium",
+              "applied_effort": "medium",
+              "requested_tool_dialect": "none",
+              "applied_tool_dialect": "none",
+              "reason_code": "provider_unsupported_field",
+              "source_profile_fingerprint": "19c811f5ac19e7306291f6772dff68541a405d7d1b31d3065e4f812783667bf5",
+              "accepted_profile_fingerprint": "19c811f5ac19e7306291f6772dff68541a405d7d1b31d3065e4f812783667bf5",
+              "candidate_sha256": "f1b47abdc717d4734c08a823b6396cdd0d044f43637f54b397556190e9daadd1",
+              "ladder_ordinal": 2,
+              "applied_actions": [
+                {
+                  "source": "pending",
+                  "profile_fingerprint": "19c811f5ac19e7306291f6772dff68541a405d7d1b31d3065e4f812783667bf5",
+                  "action": {
+                    "kind": "drop_field",
+                    "fields": [
+                      "temperature"
+                    ],
+                    "reason_code": "provider_unsupported_field"
+                  }
+                }
+              ],
+              "task_local": false,
+              "attempt_id_present": true
+            }
+          },
+          "ledger_attempt_count": 2
+        },
+        "sends": [
+          {
+            "transport": "openai.chat.completions.create",
+            "client": {
+              "api_key": "or-fixture-key",
+              "base_url": "https://openrouter.ai/api/v1",
+              "default_headers": {
+                "HTTP-Referer": "https://ouroboros-agent.ai/",
+                "X-OpenRouter-Title": "Ouroboros"
+              },
+              "max_retries": 0,
+              "http_client": null
+            },
+            "payload": {
+              "extra_body": {
+                "reasoning": {
+                  "effort": "medium",
+                  "exclude": false
+                },
+                "session_id": "ouroboros-session-14476e6cd07256290bbf81c7a9463216"
+              },
+              "max_tokens": 65536,
+              "messages": [
+                {
+                  "content": "stable policy prefix",
+                  "role": "system"
+                },
+                {
+                  "content": "hello",
+                  "role": "user"
+                }
+              ],
+              "model": "x-ai/grok-4.5",
+              "temperature": 0.7
+            },
+            "payload_sha256": "d9b1dd51a337a3296cf84a1a91d54d1f682130a1ccc10460dae67d9c6fd7ebb3"
+          },
+          {
+            "transport": "openai.chat.completions.create",
+            "client": {
+              "api_key": "or-fixture-key",
+              "base_url": "https://openrouter.ai/api/v1",
+              "default_headers": {
+                "HTTP-Referer": "https://ouroboros-agent.ai/",
+                "X-OpenRouter-Title": "Ouroboros"
+              },
+              "max_retries": 0,
+              "http_client": null
+            },
+            "payload": {
+              "extra_body": {
+                "reasoning": {
+                  "effort": "medium",
+                  "exclude": false
+                },
+                "session_id": "ouroboros-session-14476e6cd07256290bbf81c7a9463216"
+              },
+              "max_tokens": 65536,
+              "messages": [
+                {
+                  "content": "stable policy prefix",
+                  "role": "system"
+                },
+                {
+                  "content": "hello",
+                  "role": "user"
+                }
+              ],
+              "model": "x-ai/grok-4.5"
+            },
+            "payload_sha256": "f1b47abdc717d4734c08a823b6396cdd0d044f43637f54b397556190e9daadd1"
+          }
+        ],
+        "physical_attempts": [
+          {
+            "source": "llm.chat",
+            "model": "x-ai/grok-4.5",
+            "provider": "openrouter",
+            "candidate_raw_sha256": "d9b1dd51a337a3296cf84a1a91d54d1f682130a1ccc10460dae67d9c6fd7ebb3",
+            "candidate_raw_size_bytes": 289,
+            "candidate_measurement_kind": "canonical_json_v1",
+            "states": [
+              "reserved",
+              "dispatched",
+              "settled"
+            ],
+            "prompt_cache_ttl": "",
+            "cost_final": true
+          },
+          {
+            "source": "llm.chat",
+            "model": "x-ai/grok-4.5",
+            "provider": "openrouter",
+            "candidate_raw_sha256": "f1b47abdc717d4734c08a823b6396cdd0d044f43637f54b397556190e9daadd1",
+            "candidate_raw_size_bytes": 271,
+            "candidate_measurement_kind": "canonical_json_v1",
+            "states": [
+              "reserved",
+              "dispatched",
+              "settled"
+            ],
+            "prompt_cache_ttl": "",
+            "cost_final": true
+          }
+        ],
+        "unused_script_steps": 0
+      }
+    },
+    {
+      "id": "fallback.async.optional_sampling_dropped",
+      "route": "the async driver mirrors the optional-parameter rung",
+      "spec": {
+        "env": {
+          "OPENROUTER_API_KEY": "or-fixture-key"
+        },
+        "transport": [
+          {
+            "kind": "error",
+            "message": "temperature: unsupported parameter for this endpoint",
+            "status_code": 400
+          },
+          {
+            "kind": "response",
+            "body": {
+              "id": "gen-fixture-1",
+              "choices": [
+                {
+                  "index": 0,
+                  "finish_reason": "stop",
+                  "message": {
+                    "role": "assistant",
+                    "content": "ok",
+                    "refusal": null,
+                    "annotations": null,
+                    "reasoning": "short rollup"
+                  }
+                }
+              ],
+              "usage": {
+                "prompt_tokens": 120,
+                "completion_tokens": 8,
+                "cost": 0.0031,
+                "prompt_tokens_details": {
+                  "cached_tokens": 40
+                }
+              }
+            }
+          }
+        ],
+        "call": {
+          "kind": "method",
+          "name": "chat_async",
+          "kwargs": {
+            "messages": [
+              {
+                "role": "system",
+                "content": "stable policy prefix"
+              },
+              {
+                "role": "user",
+                "content": "hello"
+              }
+            ],
+            "model": "x-ai/grok-4.5",
+            "temperature": 0.7
+          }
+        }
+      },
+      "expected": {
+        "returned": {
+          "message": {
+            "role": "assistant",
+            "content": "ok",
+            "reasoning": "short rollup",
+            "response_id": "gen-fixture-1"
+          },
+          "usage": {
+            "prompt_tokens": 120,
+            "completion_tokens": 8,
+            "cost": 0.0031,
+            "prompt_tokens_details": {
+              "cached_tokens": 40
+            },
+            "response_finish_reason": "stop",
+            "cached_tokens": 40,
+            "provider": "openrouter",
+            "resolved_model": "x-ai/grok-4.5",
+            "cost_final": true,
+            "request_wire": {
+              "requested_effort": "medium",
+              "applied_effort": "medium",
+              "requested_tool_dialect": "none",
+              "applied_tool_dialect": "none",
+              "reason_code": "provider_unsupported_field",
+              "source_profile_fingerprint": "19c811f5ac19e7306291f6772dff68541a405d7d1b31d3065e4f812783667bf5",
+              "accepted_profile_fingerprint": "19c811f5ac19e7306291f6772dff68541a405d7d1b31d3065e4f812783667bf5",
+              "candidate_sha256": "f1b47abdc717d4734c08a823b6396cdd0d044f43637f54b397556190e9daadd1",
+              "ladder_ordinal": 2,
+              "applied_actions": [
+                {
+                  "source": "pending",
+                  "profile_fingerprint": "19c811f5ac19e7306291f6772dff68541a405d7d1b31d3065e4f812783667bf5",
+                  "action": {
+                    "kind": "drop_field",
+                    "fields": [
+                      "temperature"
+                    ],
+                    "reason_code": "provider_unsupported_field"
+                  }
+                }
+              ],
+              "task_local": false,
+              "attempt_id_present": true
+            }
+          },
+          "ledger_attempt_count": 2
+        },
+        "sends": [
+          {
+            "transport": "async_openai.chat.completions.create",
+            "client": {
+              "api_key": "or-fixture-key",
+              "base_url": "https://openrouter.ai/api/v1",
+              "default_headers": {
+                "HTTP-Referer": "https://ouroboros-agent.ai/",
+                "X-OpenRouter-Title": "Ouroboros"
+              },
+              "max_retries": 0,
+              "http_client": null
+            },
+            "payload": {
+              "extra_body": {
+                "reasoning": {
+                  "effort": "medium",
+                  "exclude": false
+                },
+                "session_id": "ouroboros-session-14476e6cd07256290bbf81c7a9463216"
+              },
+              "max_tokens": 65536,
+              "messages": [
+                {
+                  "content": "stable policy prefix",
+                  "role": "system"
+                },
+                {
+                  "content": "hello",
+                  "role": "user"
+                }
+              ],
+              "model": "x-ai/grok-4.5",
+              "temperature": 0.7
+            },
+            "payload_sha256": "d9b1dd51a337a3296cf84a1a91d54d1f682130a1ccc10460dae67d9c6fd7ebb3"
+          },
+          {
+            "transport": "async_openai.chat.completions.create",
+            "client": {
+              "api_key": "or-fixture-key",
+              "base_url": "https://openrouter.ai/api/v1",
+              "default_headers": {
+                "HTTP-Referer": "https://ouroboros-agent.ai/",
+                "X-OpenRouter-Title": "Ouroboros"
+              },
+              "max_retries": 0,
+              "http_client": null
+            },
+            "payload": {
+              "extra_body": {
+                "reasoning": {
+                  "effort": "medium",
+                  "exclude": false
+                },
+                "session_id": "ouroboros-session-14476e6cd07256290bbf81c7a9463216"
+              },
+              "max_tokens": 65536,
+              "messages": [
+                {
+                  "content": "stable policy prefix",
+                  "role": "system"
+                },
+                {
+                  "content": "hello",
+                  "role": "user"
+                }
+              ],
+              "model": "x-ai/grok-4.5"
+            },
+            "payload_sha256": "f1b47abdc717d4734c08a823b6396cdd0d044f43637f54b397556190e9daadd1"
+          }
+        ],
+        "physical_attempts": [
+          {
+            "source": "llm.chat",
+            "model": "x-ai/grok-4.5",
+            "provider": "openrouter",
+            "candidate_raw_sha256": "d9b1dd51a337a3296cf84a1a91d54d1f682130a1ccc10460dae67d9c6fd7ebb3",
+            "candidate_raw_size_bytes": 289,
+            "candidate_measurement_kind": "canonical_json_v1",
+            "states": [
+              "reserved",
+              "dispatched",
+              "unresolved"
+            ]
+          },
+          {
+            "source": "llm.chat",
+            "model": "x-ai/grok-4.5",
+            "provider": "openrouter",
+            "candidate_raw_sha256": "f1b47abdc717d4734c08a823b6396cdd0d044f43637f54b397556190e9daadd1",
+            "candidate_raw_size_bytes": 271,
+            "candidate_measurement_kind": "canonical_json_v1",
+            "states": [
+              "reserved",
+              "dispatched",
+              "settled"
+            ],
+            "prompt_cache_ttl": "",
+            "cost_final": true
+          }
+        ],
+        "unused_script_steps": 0
+      }
+    },
+    {
+      "id": "fallback.async.body_transient_reroute",
+      "route": "the async driver mirrors the 200-body transient reroute",
+      "spec": {
+        "env": {
+          "OPENROUTER_API_KEY": "or-fixture-key"
+        },
+        "transport": [
+          {
+            "kind": "response",
+            "body": {
+              "id": "gen-fixture-429",
+              "choices": null,
+              "error": {
+                "code": 429,
+                "message": "Provider returned error: rate limit exceeded"
+              }
+            }
+          },
+          {
+            "kind": "response",
+            "body": {
+              "id": "gen-fixture-1",
+              "choices": [
+                {
+                  "index": 0,
+                  "finish_reason": "stop",
+                  "message": {
+                    "role": "assistant",
+                    "content": "ok",
+                    "refusal": null,
+                    "annotations": null,
+                    "reasoning": "short rollup"
+                  }
+                }
+              ],
+              "usage": {
+                "prompt_tokens": 120,
+                "completion_tokens": 8,
+                "cost": 0.0031,
+                "prompt_tokens_details": {
+                  "cached_tokens": 40
+                }
+              }
+            }
+          }
+        ],
+        "call": {
+          "kind": "method",
+          "name": "chat_async",
+          "kwargs": {
+            "model": "z-ai/glm-5.2",
+            "messages": [
+              {
+                "role": "user",
+                "content": "hi"
+              },
+              {
+                "role": "assistant",
+                "content": [
+                  {
+                    "type": "thinking",
+                    "thinking": "t",
+                    "signature": "sig"
+                  }
+                ]
+              },
+              {
+                "role": "user",
+                "content": "again"
+              }
+            ]
+          }
+        }
+      },
+      "expected": {
+        "returned": {
+          "message": {
+            "role": "assistant",
+            "content": "ok",
+            "reasoning": "short rollup",
+            "response_id": "gen-fixture-1"
+          },
+          "usage": {
+            "prompt_tokens": 120,
+            "completion_tokens": 8,
+            "cost": 0.0031,
+            "prompt_tokens_details": {
+              "cached_tokens": 40
+            },
+            "response_finish_reason": "stop",
+            "cached_tokens": 40,
+            "provider": "openrouter",
+            "resolved_model": "z-ai/glm-5.2",
+            "cost_final": true,
+            "request_wire": {
+              "requested_effort": "medium",
+              "applied_effort": "medium",
+              "requested_tool_dialect": "none",
+              "applied_tool_dialect": "none",
+              "reason_code": "requested_wire_form",
+              "source_profile_fingerprint": "f1977c61b4f273386d36a7569540a8ba0a50839afc9ffb95ab6c222d5c16a5ba",
+              "accepted_profile_fingerprint": "f1977c61b4f273386d36a7569540a8ba0a50839afc9ffb95ab6c222d5c16a5ba",
+              "candidate_sha256": "ec542e027e83c40d241e34365d96a3116322c2ade1930d1ff593e6c35e9629a2",
+              "ladder_ordinal": 1,
+              "applied_actions": [],
+              "task_local": false,
+              "attempt_id_present": true
+            }
+          },
+          "ledger_attempt_count": 2
+        },
+        "sends": [
+          {
+            "transport": "async_openai.chat.completions.create",
+            "client": {
+              "api_key": "or-fixture-key",
+              "base_url": "https://openrouter.ai/api/v1",
+              "default_headers": {
+                "HTTP-Referer": "https://ouroboros-agent.ai/",
+                "X-OpenRouter-Title": "Ouroboros"
+              },
+              "max_retries": 0,
+              "http_client": null
+            },
+            "payload": {
+              "extra_body": {
+                "provider": {
+                  "allow_fallbacks": false
+                },
+                "reasoning": {
+                  "effort": "medium",
+                  "exclude": false
+                }
+              },
+              "max_tokens": 65536,
+              "messages": [
+                {
+                  "content": "hi",
+                  "role": "user"
+                },
+                {
+                  "content": [
+                    {
+                      "signature": "sig",
+                      "thinking": "t",
+                      "type": "thinking"
+                    }
+                  ],
+                  "role": "assistant"
+                },
+                {
+                  "content": "again",
+                  "role": "user"
+                }
+              ],
+              "model": "z-ai/glm-5.2"
+            },
+            "payload_sha256": "7890c53d8792f67b25416e06655f87abb1f699beb82b9e5cee681e2f1d3e5fe3"
+          },
+          {
+            "transport": "async_openai.chat.completions.create",
+            "client": {
+              "api_key": "or-fixture-key",
+              "base_url": "https://openrouter.ai/api/v1",
+              "default_headers": {
+                "HTTP-Referer": "https://ouroboros-agent.ai/",
+                "X-OpenRouter-Title": "Ouroboros"
+              },
+              "max_retries": 0,
+              "http_client": null
+            },
+            "payload": {
+              "extra_body": {
+                "reasoning": {
+                  "effort": "medium",
+                  "exclude": false
+                }
+              },
+              "max_tokens": 65536,
+              "messages": [
+                {
+                  "content": "hi",
+                  "role": "user"
+                },
+                {
+                  "content": [],
+                  "role": "assistant"
+                },
+                {
+                  "content": "again",
+                  "role": "user"
+                }
+              ],
+              "model": "z-ai/glm-5.2"
+            },
+            "payload_sha256": "ec542e027e83c40d241e34365d96a3116322c2ade1930d1ff593e6c35e9629a2"
+          }
+        ],
+        "physical_attempts": [
+          {
+            "source": "llm.chat",
+            "model": "z-ai/glm-5.2",
+            "provider": "openrouter",
+            "candidate_raw_sha256": "7890c53d8792f67b25416e06655f87abb1f699beb82b9e5cee681e2f1d3e5fe3",
+            "candidate_raw_size_bytes": 307,
+            "candidate_measurement_kind": "canonical_json_v1",
+            "states": [
+              "reserved",
+              "dispatched",
+              "settled"
+            ],
+            "prompt_cache_ttl": "",
+            "cost_final": true
+          },
+          {
+            "source": "llm.chat",
+            "model": "z-ai/glm-5.2",
+            "provider": "openrouter",
+            "candidate_raw_sha256": "ec542e027e83c40d241e34365d96a3116322c2ade1930d1ff593e6c35e9629a2",
+            "candidate_raw_size_bytes": 218,
+            "candidate_measurement_kind": "canonical_json_v1",
+            "states": [
+              "reserved",
+              "dispatched",
+              "settled"
+            ],
+            "prompt_cache_ttl": "",
+            "cost_final": true
+          }
+        ],
+        "unused_script_steps": 0
+      }
+    },
+    {
+      "id": "fallback.async.no_proxy_client",
+      "route": "chat_async(no_proxy=True) builds and closes a proxy-free async client",
+      "spec": {
+        "env": {
+          "OPENROUTER_API_KEY": "or-fixture-key"
+        },
+        "transport": [
+          {
+            "kind": "response",
+            "body": {
+              "id": "gen-fixture-2",
+              "choices": [
+                {
+                  "index": 0,
+                  "finish_reason": "stop",
+                  "message": {
+                    "role": "assistant",
+                    "content": "ok"
+                  }
+                }
+              ],
+              "usage": {
+                "prompt_tokens": 200,
+                "completion_tokens": 10
+              }
+            }
+          }
+        ],
+        "pricing_estimate": 0.0021,
+        "call": {
+          "kind": "method",
+          "name": "chat_async",
+          "kwargs": {
+            "model": "x-ai/grok-4.5",
+            "messages": [
+              {
+                "role": "system",
+                "content": "stable policy prefix"
+              },
+              {
+                "role": "user",
+                "content": "hello"
+              }
+            ],
+            "no_proxy": true,
+            "timeout": 25.0
+          }
+        }
+      },
+      "expected": {
+        "returned": {
+          "message": {
+            "role": "assistant",
+            "content": "ok",
+            "response_id": "gen-fixture-2"
+          },
+          "usage": {
+            "prompt_tokens": 200,
+            "completion_tokens": 10,
+            "response_finish_reason": "stop",
+            "provider": "openrouter",
+            "resolved_model": "x-ai/grok-4.5",
+            "cost": 0.0021,
+            "cost_estimated": true,
+            "cost_final": false,
+            "request_wire": {
+              "requested_effort": "medium",
+              "applied_effort": "medium",
+              "requested_tool_dialect": "none",
+              "applied_tool_dialect": "none",
+              "reason_code": "requested_wire_form",
+              "source_profile_fingerprint": "19c811f5ac19e7306291f6772dff68541a405d7d1b31d3065e4f812783667bf5",
+              "accepted_profile_fingerprint": "19c811f5ac19e7306291f6772dff68541a405d7d1b31d3065e4f812783667bf5",
+              "candidate_sha256": "f1b47abdc717d4734c08a823b6396cdd0d044f43637f54b397556190e9daadd1",
+              "ladder_ordinal": 1,
+              "applied_actions": [],
+              "task_local": false,
+              "attempt_id_present": true
+            }
+          },
+          "ledger_attempt_count": 1
+        },
+        "sends": [
+          {
+            "transport": "async_openai.chat.completions.create",
+            "client": {
+              "api_key": "or-fixture-key",
+              "base_url": "https://openrouter.ai/api/v1",
+              "default_headers": {
+                "HTTP-Referer": "https://ouroboros-agent.ai/",
+                "X-OpenRouter-Title": "Ouroboros"
+              },
+              "max_retries": 0,
+              "http_client": {
+                "trust_env": false,
+                "mounts": {},
+                "timeout": {
+                  "connect": 30.0,
+                  "read": 25.0,
+                  "write": 25.0,
+                  "pool": 30.0
+                }
+              }
+            },
+            "payload": {
+              "extra_body": {
+                "reasoning": {
+                  "effort": "medium",
+                  "exclude": false
+                },
+                "session_id": "ouroboros-session-14476e6cd07256290bbf81c7a9463216"
+              },
+              "max_tokens": 65536,
+              "messages": [
+                {
+                  "content": "stable policy prefix",
+                  "role": "system"
+                },
+                {
+                  "content": "hello",
+                  "role": "user"
+                }
+              ],
+              "model": "x-ai/grok-4.5"
+            },
+            "payload_sha256": "f1b47abdc717d4734c08a823b6396cdd0d044f43637f54b397556190e9daadd1"
+          }
+        ],
+        "pricing_calls": [
+          {
+            "model": "x-ai/grok-4.5",
+            "prompt_tokens": 200,
+            "completion_tokens": 10,
+            "cache_usage": {
+              "cached_tokens": 0,
+              "cache_write_tokens": 0,
+              "prompt_cache_ttl": null,
+              "cache_write_tokens_by_ttl": null
+            },
+            "allow_live_fetch": false,
+            "provider": "openrouter"
+          }
+        ],
+        "physical_attempts": [
+          {
+            "source": "llm.chat",
+            "model": "x-ai/grok-4.5",
+            "provider": "openrouter",
+            "candidate_raw_sha256": "f1b47abdc717d4734c08a823b6396cdd0d044f43637f54b397556190e9daadd1",
+            "candidate_raw_size_bytes": 271,
+            "candidate_measurement_kind": "canonical_json_v1",
+            "states": [
+              "reserved",
+              "dispatched",
+              "settled"
+            ],
+            "prompt_cache_ttl": "",
+            "cost_final": false
+          }
+        ],
+        "unused_script_steps": 0
+      }
+    },
+    {
+      "id": "fallback.async.rejects_tools",
+      "route": "chat_async refuses tool calls before touching a transport",
+      "spec": {
+        "env": {
+          "OPENROUTER_API_KEY": "or-fixture-key"
+        },
+        "transport": [],
+        "call": {
+          "kind": "method",
+          "name": "chat_async",
+          "kwargs": {
+            "model": "x-ai/grok-4.5",
+            "messages": [
+              {
+                "role": "system",
+                "content": "stable policy prefix"
+              },
+              {
+                "role": "user",
+                "content": "hello"
+              }
+            ],
+            "tools": [
+              {
+                "type": "function",
+                "function": {
+                  "name": "read_file",
+                  "description": "read",
+                  "parameters": {
+                    "type": "object",
+                    "properties": {
+                      "path": {
+                        "type": "string"
+                      }
+                    }
+                  }
+                }
+              },
+              {
+                "type": "function",
+                "function": {
+                  "name": "apply_patch",
+                  "description": [
+                    "two ",
+                    "parts"
+                  ],
+                  "parameters": {
+                    "type": "object"
+                  }
+                }
+              }
+            ]
+          }
+        }
+      },
+      "expected": {
+        "raised": {
+          "type": "ValueError",
+          "message": "chat_async does not support tool calls"
+        },
+        "sends": [],
+        "unused_script_steps": 0
+      }
+    },
+    {
+      "id": "fallback.body.transient_reroute_rotates_session",
+      "route": "the reroute never reuses the sticky session key of the endpoint that failed",
+      "spec": {
+        "env": {
+          "OPENROUTER_API_KEY": "or-fixture-key"
+        },
+        "transport": [
+          {
+            "kind": "response",
+            "body": {
+              "id": "gen-fixture-429",
+              "choices": null,
+              "error": {
+                "code": 429,
+                "message": "Provider returned error: rate limit exceeded"
+              }
+            }
+          },
+          {
+            "kind": "response",
+            "body": {
+              "id": "gen-fixture-1",
+              "choices": [
+                {
+                  "index": 0,
+                  "finish_reason": "stop",
+                  "message": {
+                    "role": "assistant",
+                    "content": "ok",
+                    "refusal": null,
+                    "annotations": null,
+                    "reasoning": "short rollup"
+                  }
+                }
+              ],
+              "usage": {
+                "prompt_tokens": 120,
+                "completion_tokens": 8,
+                "cost": 0.0031,
+                "prompt_tokens_details": {
+                  "cached_tokens": 40
+                }
+              }
+            }
+          }
+        ],
+        "call": {
+          "kind": "method",
+          "name": "chat",
+          "kwargs": {
+            "model": "anthropic/claude-sonnet-4.6",
+            "messages": [
+              {
+                "role": "system",
+                "content": "stable policy prefix"
+              },
+              {
+                "role": "user",
+                "content": "hi"
+              },
+              {
+                "role": "assistant",
+                "content": "a",
+                "reasoning_details": [
+                  {
+                    "type": "reasoning.text",
+                    "text": "t"
+                  }
+                ]
+              },
+              {
+                "role": "user",
+                "content": "again"
+              }
+            ]
+          }
+        }
+      },
+      "expected": {
+        "returned": {
+          "message": {
+            "role": "assistant",
+            "content": "ok",
+            "reasoning": "short rollup",
+            "response_id": "gen-fixture-1"
+          },
+          "usage": {
+            "prompt_tokens": 120,
+            "completion_tokens": 8,
+            "cost": 0.0031,
+            "prompt_tokens_details": {
+              "cached_tokens": 40
+            },
+            "response_finish_reason": "stop",
+            "cached_tokens": 40,
+            "provider": "openrouter",
+            "resolved_model": "anthropic/claude-sonnet-4.6",
+            "cost_final": true,
+            "request_wire": {
+              "requested_effort": "medium",
+              "applied_effort": "medium",
+              "requested_tool_dialect": "none",
+              "applied_tool_dialect": "none",
+              "reason_code": "requested_wire_form",
+              "source_profile_fingerprint": "c7706246bec3319fc70ddd9c027ba3ab2e21e267b4c015bb6661152fafb520a7",
+              "accepted_profile_fingerprint": "c7706246bec3319fc70ddd9c027ba3ab2e21e267b4c015bb6661152fafb520a7",
+              "candidate_sha256": "ffb86413b08fd1fdae55cdef0fa01326ab5395f4e89953d27a9dc1e799df30ce",
+              "ladder_ordinal": 1,
+              "applied_actions": [],
+              "task_local": false,
+              "attempt_id_present": true
+            }
+          },
+          "ledger_attempt_count": 2
+        },
+        "sends": [
+          {
+            "transport": "openai.chat.completions.create",
+            "client": {
+              "api_key": "or-fixture-key",
+              "base_url": "https://openrouter.ai/api/v1",
+              "default_headers": {
+                "HTTP-Referer": "https://ouroboros-agent.ai/",
+                "X-OpenRouter-Title": "Ouroboros"
+              },
+              "max_retries": 0,
+              "http_client": null
+            },
+            "payload": {
+              "extra_body": {
+                "provider": {
+                  "require_parameters": true
+                },
+                "reasoning": {
+                  "effort": "medium",
+                  "exclude": false
+                },
+                "session_id": "ouroboros-session-1b9834eb28f81a07e1f4048b8bbb081c"
+              },
+              "max_tokens": 65536,
+              "messages": [
+                {
+                  "content": "stable policy prefix",
+                  "role": "system"
+                },
+                {
+                  "content": "hi",
+                  "role": "user"
+                },
+                {
+                  "content": "a",
+                  "reasoning_details": [
+                    {
+                      "text": "t",
+                      "type": "reasoning.text"
+                    }
+                  ],
+                  "role": "assistant"
+                },
+                {
+                  "content": "again",
+                  "role": "user"
+                }
+              ],
+              "model": "anthropic/claude-sonnet-4.6"
+            },
+            "payload_sha256": "643e5d467196605b6660b5c0aa22123ac12fb01f6a59b4be1889133cce3a9b26"
+          },
+          {
+            "transport": "openai.chat.completions.create",
+            "client": {
+              "api_key": "or-fixture-key",
+              "base_url": "https://openrouter.ai/api/v1",
+              "default_headers": {
+                "HTTP-Referer": "https://ouroboros-agent.ai/",
+                "X-OpenRouter-Title": "Ouroboros"
+              },
+              "max_retries": 0,
+              "http_client": null
+            },
+            "payload": {
+              "extra_body": {
+                "provider": {
+                  "require_parameters": true
+                },
+                "reasoning": {
+                  "effort": "medium",
+                  "exclude": false
+                },
+                "session_id": "ouroboros-session-b7af1b3e91046c0751a7c5b67f82e958"
+              },
+              "max_tokens": 65536,
+              "messages": [
+                {
+                  "content": "stable policy prefix",
+                  "role": "system"
+                },
+                {
+                  "content": "hi",
+                  "role": "user"
+                },
+                {
+                  "content": "a",
+                  "reasoning_details": [
+                    {
+                      "text": "t",
+                      "type": "reasoning.text"
+                    }
+                  ],
+                  "role": "assistant"
+                },
+                {
+                  "content": "again",
+                  "role": "user"
+                }
+              ],
+              "model": "anthropic/claude-sonnet-4.6"
+            },
+            "payload_sha256": "ffb86413b08fd1fdae55cdef0fa01326ab5395f4e89953d27a9dc1e799df30ce"
+          }
+        ],
+        "physical_attempts": [
+          {
+            "source": "llm.chat",
+            "model": "anthropic/claude-sonnet-4.6",
+            "provider": "openrouter",
+            "candidate_raw_sha256": "643e5d467196605b6660b5c0aa22123ac12fb01f6a59b4be1889133cce3a9b26",
+            "candidate_raw_size_bytes": 449,
+            "candidate_measurement_kind": "canonical_json_v1",
+            "states": [
+              "reserved",
+              "dispatched",
+              "settled"
+            ],
+            "prompt_cache_ttl": "",
+            "cost_final": true
+          },
+          {
+            "source": "llm.chat",
+            "model": "anthropic/claude-sonnet-4.6",
+            "provider": "openrouter",
+            "candidate_raw_sha256": "ffb86413b08fd1fdae55cdef0fa01326ab5395f4e89953d27a9dc1e799df30ce",
+            "candidate_raw_size_bytes": 449,
+            "candidate_measurement_kind": "canonical_json_v1",
+            "states": [
+              "reserved",
+              "dispatched",
+              "settled"
+            ],
+            "prompt_cache_ttl": "",
+            "cost_final": true
+          }
+        ],
+        "unused_script_steps": 0
+      }
+    },
+    {
+      "id": "fallback.body.typed_policy_refusal_is_not_swallowed",
+      "route": "a typed policy refusal raised on the reroute resend surfaces to the caller instead of being absorbed into the first errored response",
+      "spec": {
+        "env": {
+          "OPENROUTER_API_KEY": "or-fixture-key"
+        },
+        "transport": [
+          {
+            "kind": "response",
+            "body": {
+              "id": "gen-fixture-429",
+              "choices": null,
+              "error": {
+                "code": 429,
+                "message": "Provider returned error: rate limit exceeded"
+              }
+            }
+          },
+          {
+            "kind": "error",
+            "code": "provider_policy_refusal",
+            "message": "temperature reasoning unsupported parameter: connection is not permitted"
+          }
+        ],
+        "call": {
+          "kind": "method",
+          "name": "chat",
+          "kwargs": {
+            "model": "openai/gpt-5.6",
+            "messages": [
+              {
+                "role": "system",
+                "content": "stable policy prefix"
+              },
+              {
+                "role": "user",
+                "content": "hi"
+              },
+              {
+                "role": "assistant",
+                "content": "a",
+                "reasoning_details": [
+                  {
+                    "type": "reasoning.encrypted",
+                    "data": "rs_a"
+                  }
+                ]
+              },
+              {
+                "role": "user",
+                "content": "again"
+              }
+            ]
+          }
+        }
+      },
+      "expected": {
+        "raised": {
+          "type": "FixtureProviderError",
+          "message": "temperature reasoning unsupported parameter: connection is not permitted"
+        },
+        "sends": [
+          {
+            "transport": "openai.chat.completions.create",
+            "client": {
+              "api_key": "or-fixture-key",
+              "base_url": "https://openrouter.ai/api/v1",
+              "default_headers": {
+                "HTTP-Referer": "https://ouroboros-agent.ai/",
+                "X-OpenRouter-Title": "Ouroboros"
+              },
+              "max_retries": 0,
+              "http_client": null
+            },
+            "payload": {
+              "extra_body": {
+                "provider": {
+                  "allow_fallbacks": false
+                },
+                "reasoning": {
+                  "effort": "medium",
+                  "exclude": false
+                },
+                "session_id": "ouroboros-session-6b68a9325c7ec50094ba2af61bbc0416"
+              },
+              "max_tokens": 65536,
+              "messages": [
+                {
+                  "content": "stable policy prefix",
+                  "role": "system"
+                },
+                {
+                  "content": "hi",
+                  "role": "user"
+                },
+                {
+                  "content": "a",
+                  "reasoning_details": [
+                    {
+                      "data": "rs_a",
+                      "type": "reasoning.encrypted"
+                    }
+                  ],
+                  "role": "assistant"
+                },
+                {
+                  "content": "again",
+                  "role": "user"
+                }
+              ],
+              "model": "openai/gpt-5.6"
+            },
+            "payload_sha256": "fc523c2e4ceba8d0ed729cf24781994771a694df44285a967bfd9eb318a8d75e"
+          },
+          {
+            "transport": "openai.chat.completions.create",
+            "client": {
+              "api_key": "or-fixture-key",
+              "base_url": "https://openrouter.ai/api/v1",
+              "default_headers": {
+                "HTTP-Referer": "https://ouroboros-agent.ai/",
+                "X-OpenRouter-Title": "Ouroboros"
+              },
+              "max_retries": 0,
+              "http_client": null
+            },
+            "payload": {
+              "extra_body": {
+                "reasoning": {
+                  "effort": "medium",
+                  "exclude": false
+                },
+                "session_id": "ouroboros-session-a83747a093e9425fe805af8007af41b1"
+              },
+              "max_tokens": 65536,
+              "messages": [
+                {
+                  "content": "stable policy prefix",
+                  "role": "system"
+                },
+                {
+                  "content": "hi",
+                  "role": "user"
+                },
+                {
+                  "content": "a",
+                  "role": "assistant"
+                },
+                {
+                  "content": "again",
+                  "role": "user"
+                }
+              ],
+              "model": "openai/gpt-5.6"
+            },
+            "payload_sha256": "af42956164f7e04dfa70f8b64c49de6753cd942a39627cc5b7ebab519ea4357e"
+          }
+        ],
+        "physical_attempts": [
+          {
+            "source": "llm.chat",
+            "model": "openai/gpt-5.6",
+            "provider": "openrouter",
+            "candidate_raw_sha256": "fc523c2e4ceba8d0ed729cf24781994771a694df44285a967bfd9eb318a8d75e",
+            "candidate_raw_size_bytes": 442,
+            "candidate_measurement_kind": "canonical_json_v1",
+            "states": [
+              "reserved",
+              "dispatched",
+              "settled"
+            ],
+            "prompt_cache_ttl": "",
+            "cost_final": true
+          },
+          {
+            "source": "llm.chat",
+            "model": "openai/gpt-5.6",
+            "provider": "openrouter",
+            "candidate_raw_sha256": "af42956164f7e04dfa70f8b64c49de6753cd942a39627cc5b7ebab519ea4357e",
+            "candidate_raw_size_bytes": 338,
+            "candidate_measurement_kind": "canonical_json_v1",
+            "states": [
+              "reserved",
+              "dispatched",
+              "unresolved"
+            ]
+          }
+        ],
+        "unused_script_steps": 0
+      }
+    },
+    {
+      "id": "fallback.exception.typed_policy_refusal_is_never_re_attempted",
+      "route": "a typed policy refusal on the first send spends no second physical attempt, even though its message names parameters the ladder would otherwise drop",
+      "spec": {
+        "env": {
+          "OPENROUTER_API_KEY": "or-fixture-key"
+        },
+        "transport": [
+          {
+            "kind": "error",
+            "code": "provider_policy_refusal",
+            "message": "temperature reasoning unsupported parameter: connection is not permitted"
+          },
+          {
+            "kind": "response",
+            "body": {
+              "id": "gen-fixture-1",
+              "choices": [
+                {
+                  "index": 0,
+                  "finish_reason": "stop",
+                  "message": {
+                    "role": "assistant",
+                    "content": "ok",
+                    "refusal": null,
+                    "annotations": null,
+                    "reasoning": "short rollup"
+                  }
+                }
+              ],
+              "usage": {
+                "prompt_tokens": 120,
+                "completion_tokens": 8,
+                "cost": 0.0031,
+                "prompt_tokens_details": {
+                  "cached_tokens": 40
+                }
+              }
+            }
+          }
+        ],
+        "call": {
+          "kind": "method",
+          "name": "chat",
+          "kwargs": {
+            "model": "x-ai/grok-4.5",
+            "messages": [
+              {
+                "role": "user",
+                "content": "hi"
+              }
+            ],
+            "temperature": 0.7
+          }
+        }
+      },
+      "expected": {
+        "raised": {
+          "type": "FixtureProviderError",
+          "message": "temperature reasoning unsupported parameter: connection is not permitted"
+        },
+        "sends": [
+          {
+            "transport": "openai.chat.completions.create",
+            "client": {
+              "api_key": "or-fixture-key",
+              "base_url": "https://openrouter.ai/api/v1",
+              "default_headers": {
+                "HTTP-Referer": "https://ouroboros-agent.ai/",
+                "X-OpenRouter-Title": "Ouroboros"
+              },
+              "max_retries": 0,
+              "http_client": null
+            },
+            "payload": {
+              "extra_body": {
+                "reasoning": {
+                  "effort": "medium",
+                  "exclude": false
+                }
+              },
+              "max_tokens": 65536,
+              "messages": [
+                {
+                  "content": "hi",
+                  "role": "user"
+                }
+              ],
+              "model": "x-ai/grok-4.5",
+              "temperature": 0.7
+            },
+            "payload_sha256": "d5a7bfccf7c9b8a4f9e3499dc6e59f1b5db989e38571261419c693845d63c10d"
+          }
+        ],
+        "physical_attempts": [
+          {
+            "source": "llm.chat",
+            "model": "x-ai/grok-4.5",
+            "provider": "openrouter",
+            "candidate_raw_sha256": "d5a7bfccf7c9b8a4f9e3499dc6e59f1b5db989e38571261419c693845d63c10d",
+            "candidate_raw_size_bytes": 169,
+            "candidate_measurement_kind": "canonical_json_v1",
+            "states": [
+              "reserved",
+              "dispatched",
+              "unresolved"
+            ]
+          }
+        ],
+        "unused_script_steps": 1
+      }
+    }
+  ]
+}

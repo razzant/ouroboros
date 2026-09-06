@@ -807,9 +807,11 @@ def test_managed_update_resolver_keeps_its_exemption(tmp_path, monkeypatch):
     tools the one lane that cannot finish a conflict resolution.
     """
     from ouroboros.tools import registry as registry_mod
+    from ouroboros.tools import registry_guards
 
     reg, repo = _guard_registry(tmp_path)
     (repo / "BIBLE.md").write_text("P1 honest\n", encoding="utf-8")
+    monkeypatch.setattr(registry_guards, "_authorized_managed_update_resolver", lambda ctx: True)
     monkeypatch.setattr(registry_mod, "_authorized_managed_update_resolver", lambda ctx: True)
     result = str(reg.execute("apply_patch", {
         "patch": "*** Update File: BIBLE.md\n-P1 honest\n+P1 resolved\n",

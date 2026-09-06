@@ -1,0 +1,1638 @@
+{
+  "cases": [
+    {
+      "id": "anthropic.dispatch.happy_path",
+      "route": "native Anthropic POST /messages: system blocks, adaptive thinking, tool_use response",
+      "spec": {
+        "env": {
+          "ANTHROPIC_API_KEY": "anthropic-fixture-key",
+          "OUROBOROS_PROMPT_CACHE_TTL": "1h"
+        },
+        "transport": [
+          {
+            "kind": "response",
+            "status_code": 200,
+            "json": {
+              "id": "msg_fixture_1",
+              "type": "message",
+              "role": "assistant",
+              "model": "claude-sonnet-4-6",
+              "content": [
+                {
+                  "type": "text",
+                  "text": "anthropic ok"
+                },
+                {
+                  "type": "tool_use",
+                  "id": "toolu_1",
+                  "name": "read_file",
+                  "input": {
+                    "path": "a.txt"
+                  }
+                }
+              ],
+              "stop_reason": "tool_use",
+              "usage": {
+                "input_tokens": 100,
+                "output_tokens": 6,
+                "cache_read_input_tokens": 40,
+                "cache_creation_input_tokens": 25,
+                "cache_creation": {
+                  "ephemeral_5m_input_tokens": 5,
+                  "ephemeral_1h_input_tokens": 20
+                }
+              }
+            }
+          }
+        ],
+        "pricing_estimate": 0.021,
+        "call": {
+          "kind": "method",
+          "name": "chat",
+          "kwargs": {
+            "messages": [
+              {
+                "role": "system",
+                "content": [
+                  {
+                    "type": "text",
+                    "text": "stable policy prefix",
+                    "cache_control": {
+                      "type": "ephemeral"
+                    }
+                  }
+                ]
+              },
+              {
+                "role": "user",
+                "content": "hello"
+              }
+            ],
+            "model": "anthropic::claude-sonnet-4.6",
+            "tools": [
+              {
+                "type": "function",
+                "function": {
+                  "name": "read_file",
+                  "description": "read",
+                  "parameters": {
+                    "type": "object",
+                    "properties": {
+                      "path": {
+                        "type": "string"
+                      }
+                    }
+                  }
+                }
+              },
+              {
+                "type": "function",
+                "function": {
+                  "name": "apply_patch",
+                  "description": [
+                    "two ",
+                    "parts"
+                  ],
+                  "parameters": {
+                    "type": "object"
+                  }
+                }
+              }
+            ],
+            "reasoning_effort": "high",
+            "max_tokens": 4096
+          }
+        }
+      },
+      "expected": {
+        "returned": {
+          "message": {
+            "role": "assistant",
+            "content": "anthropic ok",
+            "tool_calls": [
+              {
+                "id": "toolu_1",
+                "type": "function",
+                "function": {
+                  "name": "read_file",
+                  "arguments": "{\"path\": \"a.txt\"}"
+                }
+              }
+            ],
+            "stop_reason": "tool_use",
+            "_anthropic_native_content": {
+              "version": 1,
+              "route": {
+                "provider": "anthropic",
+                "endpoint_sha256": "3f5f1c224721bada8dfc17f010a728a106423ab23d10f96e3e5ac95969b30159",
+                "api_surface": "messages",
+                "model": "claude-sonnet-4-6"
+              },
+              "content_sha256": "33c16322096ec7d3058394ee11a219d5f4c951098f8743370748e7f63eac892e",
+              "content_json": "[{\"type\":\"text\",\"text\":\"anthropic ok\"},{\"type\":\"tool_use\",\"id\":\"toolu_1\",\"name\":\"read_file\",\"input\":{\"path\":\"a.txt\"}}]",
+              "tool_use_ids": [
+                "toolu_1"
+              ]
+            }
+          },
+          "usage": {
+            "prompt_tokens": 165,
+            "completion_tokens": 6,
+            "cached_tokens": 40,
+            "cache_write_tokens": 25,
+            "provider": "anthropic",
+            "resolved_model": "anthropic/claude-sonnet-4-6",
+            "prompt_cache_ttl": "1h",
+            "cache_write_tokens_by_ttl": {
+              "5m": 5,
+              "1h": 20
+            },
+            "cost": 0.021,
+            "cost_estimated": true,
+            "cost_final": false,
+            "request_wire": {
+              "requested_effort": "high",
+              "applied_effort": "high",
+              "requested_tool_dialect": "function",
+              "applied_tool_dialect": "function",
+              "reason_code": "requested_wire_form",
+              "source_profile_fingerprint": "9d53b584afe27c16ff4bac7dd10fe6bf821f616b78e358a36c4f86e46f07d1b2",
+              "accepted_profile_fingerprint": "9d53b584afe27c16ff4bac7dd10fe6bf821f616b78e358a36c4f86e46f07d1b2",
+              "candidate_sha256": "44929d2f06ad18158164c1a1d4d58a867ecef72c11a8828fe06201769ef72e09",
+              "ladder_ordinal": 1,
+              "applied_actions": [],
+              "task_local": false,
+              "attempt_id_present": true
+            }
+          },
+          "ledger_attempt_count": 1
+        },
+        "sends": [
+          {
+            "transport": "requests.post",
+            "url": "https://api.anthropic.com/v1/messages",
+            "headers": {
+              "x-api-key": "anthropic-fixture-key",
+              "anthropic-version": "2023-06-01",
+              "content-type": "application/json"
+            },
+            "timeout": 120,
+            "session_trust_env": null,
+            "payload": {
+              "max_tokens": 4096,
+              "messages": [
+                {
+                  "content": [
+                    {
+                      "text": "hello",
+                      "type": "text"
+                    }
+                  ],
+                  "role": "user"
+                }
+              ],
+              "model": "claude-sonnet-4-6",
+              "output_config": {
+                "effort": "high"
+              },
+              "system": [
+                {
+                  "cache_control": {
+                    "ttl": "1h",
+                    "type": "ephemeral"
+                  },
+                  "text": "stable policy prefix",
+                  "type": "text"
+                }
+              ],
+              "thinking": {
+                "type": "adaptive"
+              },
+              "tools": [
+                {
+                  "description": "two parts",
+                  "input_schema": {
+                    "type": "object"
+                  },
+                  "name": "apply_patch"
+                },
+                {
+                  "cache_control": {
+                    "ttl": "1h",
+                    "type": "ephemeral"
+                  },
+                  "description": "read",
+                  "input_schema": {
+                    "properties": {
+                      "path": {
+                        "type": "string"
+                      }
+                    },
+                    "type": "object"
+                  },
+                  "name": "read_file"
+                }
+              ]
+            },
+            "payload_sha256": "44929d2f06ad18158164c1a1d4d58a867ecef72c11a8828fe06201769ef72e09"
+          }
+        ],
+        "pricing_calls": [
+          {
+            "model": "anthropic/claude-sonnet-4-6",
+            "prompt_tokens": 165,
+            "completion_tokens": 6,
+            "cache_usage": {
+              "cached_tokens": 40,
+              "cache_write_tokens": 25,
+              "prompt_cache_ttl": "1h",
+              "cache_write_tokens_by_ttl": {
+                "5m": 5,
+                "1h": 20
+              }
+            },
+            "provider": "anthropic"
+          }
+        ],
+        "physical_attempts": [
+          {
+            "source": "llm.anthropic",
+            "model": "anthropic/claude-sonnet-4-6",
+            "provider": "anthropic",
+            "candidate_raw_sha256": "44929d2f06ad18158164c1a1d4d58a867ecef72c11a8828fe06201769ef72e09",
+            "candidate_raw_size_bytes": 544,
+            "candidate_measurement_kind": "canonical_json_v1",
+            "states": [
+              "reserved",
+              "dispatched",
+              "settled"
+            ],
+            "prompt_cache_ttl": "1h",
+            "cost_final": false
+          }
+        ],
+        "unused_script_steps": 0
+      }
+    },
+    {
+      "id": "anthropic.dispatch.tool_result_and_empty_placeholder",
+      "route": "tool results coalesce into a user turn and an empty result gets the placeholder",
+      "spec": {
+        "env": {
+          "ANTHROPIC_API_KEY": "anthropic-fixture-key"
+        },
+        "transport": [
+          {
+            "kind": "response",
+            "status_code": 200,
+            "json": {
+              "id": "msg_2",
+              "role": "assistant",
+              "content": [
+                {
+                  "type": "text",
+                  "text": "done"
+                }
+              ],
+              "stop_reason": "end_turn",
+              "usage": {
+                "input_tokens": 20,
+                "output_tokens": 3
+              }
+            }
+          }
+        ],
+        "pricing_estimate": 0.001,
+        "call": {
+          "kind": "method",
+          "name": "chat",
+          "kwargs": {
+            "messages": [
+              {
+                "role": "user",
+                "content": [
+                  {
+                    "type": "text",
+                    "text": "look"
+                  },
+                  {
+                    "type": "image_url",
+                    "image_url": {
+                      "url": "data:image/png;base64,QUJD"
+                    }
+                  }
+                ]
+              },
+              {
+                "role": "assistant",
+                "content": "calling",
+                "tool_calls": [
+                  {
+                    "id": "toolu_1",
+                    "type": "function",
+                    "function": {
+                      "name": "read_file",
+                      "arguments": "{\"path\": \"a.txt\"}"
+                    }
+                  },
+                  {
+                    "id": "toolu_2",
+                    "type": "function",
+                    "function": {
+                      "name": "apply_patch",
+                      "arguments": "not json"
+                    }
+                  }
+                ]
+              },
+              {
+                "role": "tool",
+                "tool_call_id": "toolu_1",
+                "content": [
+                  {
+                    "type": "text",
+                    "text": "   "
+                  }
+                ]
+              },
+              {
+                "role": "tool",
+                "tool_call_id": "toolu_2",
+                "content": ""
+              }
+            ],
+            "model": "anthropic::claude-sonnet-4.6",
+            "tools": [
+              {
+                "type": "function",
+                "function": {
+                  "name": "read_file",
+                  "description": "read",
+                  "parameters": {
+                    "type": "object",
+                    "properties": {
+                      "path": {
+                        "type": "string"
+                      }
+                    }
+                  }
+                }
+              },
+              {
+                "type": "function",
+                "function": {
+                  "name": "apply_patch",
+                  "description": [
+                    "two ",
+                    "parts"
+                  ],
+                  "parameters": {
+                    "type": "object"
+                  }
+                }
+              }
+            ]
+          }
+        }
+      },
+      "expected": {
+        "returned": {
+          "message": {
+            "role": "assistant",
+            "content": "done",
+            "stop_reason": "end_turn"
+          },
+          "usage": {
+            "prompt_tokens": 20,
+            "completion_tokens": 3,
+            "cached_tokens": 0,
+            "cache_write_tokens": 0,
+            "provider": "anthropic",
+            "resolved_model": "anthropic/claude-sonnet-4-6",
+            "prompt_cache_ttl": "1h",
+            "cost": 0.001,
+            "cost_estimated": true,
+            "cost_final": false,
+            "request_wire": {
+              "requested_effort": "medium",
+              "applied_effort": "medium",
+              "requested_tool_dialect": "function",
+              "applied_tool_dialect": "function",
+              "reason_code": "requested_wire_form",
+              "source_profile_fingerprint": "9d53b584afe27c16ff4bac7dd10fe6bf821f616b78e358a36c4f86e46f07d1b2",
+              "accepted_profile_fingerprint": "9d53b584afe27c16ff4bac7dd10fe6bf821f616b78e358a36c4f86e46f07d1b2",
+              "candidate_sha256": "bb80cf8dd4d0832b251bcec5536a529890d79c3cb90a0f5b2c1378bf1af8026e",
+              "ladder_ordinal": 1,
+              "applied_actions": [],
+              "task_local": false,
+              "attempt_id_present": true
+            }
+          },
+          "ledger_attempt_count": 1
+        },
+        "sends": [
+          {
+            "transport": "requests.post",
+            "url": "https://api.anthropic.com/v1/messages",
+            "headers": {
+              "x-api-key": "anthropic-fixture-key",
+              "anthropic-version": "2023-06-01",
+              "content-type": "application/json"
+            },
+            "timeout": 120,
+            "session_trust_env": null,
+            "payload": {
+              "max_tokens": 65536,
+              "messages": [
+                {
+                  "content": [
+                    {
+                      "text": "look",
+                      "type": "text"
+                    },
+                    {
+                      "source": {
+                        "data": "QUJD",
+                        "media_type": "image/png",
+                        "type": "base64"
+                      },
+                      "type": "image"
+                    }
+                  ],
+                  "role": "user"
+                },
+                {
+                  "content": [
+                    {
+                      "text": "calling",
+                      "type": "text"
+                    },
+                    {
+                      "id": "toolu_1",
+                      "input": {
+                        "path": "a.txt"
+                      },
+                      "name": "read_file",
+                      "type": "tool_use"
+                    },
+                    {
+                      "id": "toolu_2",
+                      "input": {
+                        "raw": "not json"
+                      },
+                      "name": "apply_patch",
+                      "type": "tool_use"
+                    }
+                  ],
+                  "role": "assistant"
+                },
+                {
+                  "content": [
+                    {
+                      "content": "(no tool output)",
+                      "tool_use_id": "toolu_1",
+                      "type": "tool_result"
+                    },
+                    {
+                      "content": "(no tool output)",
+                      "tool_use_id": "toolu_2",
+                      "type": "tool_result"
+                    }
+                  ],
+                  "role": "user"
+                }
+              ],
+              "model": "claude-sonnet-4-6",
+              "output_config": {
+                "effort": "medium"
+              },
+              "thinking": {
+                "type": "adaptive"
+              },
+              "tools": [
+                {
+                  "description": "two parts",
+                  "input_schema": {
+                    "type": "object"
+                  },
+                  "name": "apply_patch"
+                },
+                {
+                  "cache_control": {
+                    "ttl": "1h",
+                    "type": "ephemeral"
+                  },
+                  "description": "read",
+                  "input_schema": {
+                    "properties": {
+                      "path": {
+                        "type": "string"
+                      }
+                    },
+                    "type": "object"
+                  },
+                  "name": "read_file"
+                }
+              ]
+            },
+            "payload_sha256": "bb80cf8dd4d0832b251bcec5536a529890d79c3cb90a0f5b2c1378bf1af8026e"
+          }
+        ],
+        "pricing_calls": [
+          {
+            "model": "anthropic/claude-sonnet-4-6",
+            "prompt_tokens": 20,
+            "completion_tokens": 3,
+            "cache_usage": {
+              "cached_tokens": 0,
+              "cache_write_tokens": 0,
+              "prompt_cache_ttl": "1h",
+              "cache_write_tokens_by_ttl": null
+            },
+            "provider": "anthropic"
+          }
+        ],
+        "physical_attempts": [
+          {
+            "source": "llm.anthropic",
+            "model": "anthropic/claude-sonnet-4-6",
+            "provider": "anthropic",
+            "candidate_raw_sha256": "bb80cf8dd4d0832b251bcec5536a529890d79c3cb90a0f5b2c1378bf1af8026e",
+            "candidate_raw_size_bytes": 932,
+            "candidate_measurement_kind": "canonical_json_v1",
+            "states": [
+              "reserved",
+              "dispatched",
+              "settled"
+            ],
+            "prompt_cache_ttl": "1h",
+            "cost_final": false
+          }
+        ],
+        "unused_script_steps": 0
+      }
+    },
+    {
+      "id": "anthropic.dispatch.effort_none_and_minimal_floor",
+      "route": "effort minimal maps to the provider floor; tool_choice required maps to any",
+      "spec": {
+        "env": {
+          "ANTHROPIC_API_KEY": "anthropic-fixture-key"
+        },
+        "transport": [
+          {
+            "kind": "response",
+            "status_code": 200,
+            "json": {
+              "id": "msg_3",
+              "role": "assistant",
+              "content": [
+                {
+                  "type": "text",
+                  "text": "x"
+                }
+              ],
+              "stop_reason": "end_turn",
+              "usage": {
+                "input_tokens": 10,
+                "output_tokens": 1
+              }
+            }
+          }
+        ],
+        "pricing_estimate": 0.0002,
+        "call": {
+          "kind": "method",
+          "name": "chat",
+          "kwargs": {
+            "messages": [
+              {
+                "role": "system",
+                "content": "stable policy prefix"
+              },
+              {
+                "role": "user",
+                "content": "hello"
+              }
+            ],
+            "model": "anthropic::claude-sonnet-4.6",
+            "reasoning_effort": "minimal",
+            "tool_choice": "required",
+            "tools": [
+              {
+                "type": "function",
+                "function": {
+                  "name": "read_file",
+                  "description": "read",
+                  "parameters": {
+                    "type": "object",
+                    "properties": {
+                      "path": {
+                        "type": "string"
+                      }
+                    }
+                  }
+                }
+              },
+              {
+                "type": "function",
+                "function": {
+                  "name": "apply_patch",
+                  "description": [
+                    "two ",
+                    "parts"
+                  ],
+                  "parameters": {
+                    "type": "object"
+                  }
+                }
+              }
+            ]
+          }
+        }
+      },
+      "expected": {
+        "returned": {
+          "message": {
+            "role": "assistant",
+            "content": "x",
+            "stop_reason": "end_turn"
+          },
+          "usage": {
+            "prompt_tokens": 10,
+            "completion_tokens": 1,
+            "cached_tokens": 0,
+            "cache_write_tokens": 0,
+            "provider": "anthropic",
+            "resolved_model": "anthropic/claude-sonnet-4-6",
+            "prompt_cache_ttl": "1h",
+            "cost": 0.0002,
+            "cost_estimated": true,
+            "cost_final": false,
+            "request_wire": {
+              "requested_effort": "low",
+              "applied_effort": "low",
+              "requested_tool_dialect": "function",
+              "applied_tool_dialect": "function",
+              "reason_code": "requested_wire_form",
+              "source_profile_fingerprint": "36c065e9a49329030370c7af0ca91254c3023880b51959e4a73b8cad720c3922",
+              "accepted_profile_fingerprint": "36c065e9a49329030370c7af0ca91254c3023880b51959e4a73b8cad720c3922",
+              "candidate_sha256": "030a6e3116f8715594966ed1f90da0ce0ee9d5c5ecae1501aa22219e96c73d89",
+              "ladder_ordinal": 1,
+              "applied_actions": [],
+              "task_local": false,
+              "attempt_id_present": true
+            }
+          },
+          "ledger_attempt_count": 1
+        },
+        "sends": [
+          {
+            "transport": "requests.post",
+            "url": "https://api.anthropic.com/v1/messages",
+            "headers": {
+              "x-api-key": "anthropic-fixture-key",
+              "anthropic-version": "2023-06-01",
+              "content-type": "application/json"
+            },
+            "timeout": 120,
+            "session_trust_env": null,
+            "payload": {
+              "max_tokens": 65536,
+              "messages": [
+                {
+                  "content": [
+                    {
+                      "text": "hello",
+                      "type": "text"
+                    }
+                  ],
+                  "role": "user"
+                }
+              ],
+              "model": "claude-sonnet-4-6",
+              "output_config": {
+                "effort": "low"
+              },
+              "system": [
+                {
+                  "text": "stable policy prefix",
+                  "type": "text"
+                }
+              ],
+              "thinking": {
+                "type": "adaptive"
+              },
+              "tool_choice": {
+                "type": "any"
+              },
+              "tools": [
+                {
+                  "description": "two parts",
+                  "input_schema": {
+                    "type": "object"
+                  },
+                  "name": "apply_patch"
+                },
+                {
+                  "cache_control": {
+                    "ttl": "1h",
+                    "type": "ephemeral"
+                  },
+                  "description": "read",
+                  "input_schema": {
+                    "properties": {
+                      "path": {
+                        "type": "string"
+                      }
+                    },
+                    "type": "object"
+                  },
+                  "name": "read_file"
+                }
+              ]
+            },
+            "payload_sha256": "030a6e3116f8715594966ed1f90da0ce0ee9d5c5ecae1501aa22219e96c73d89"
+          }
+        ],
+        "pricing_calls": [
+          {
+            "model": "anthropic/claude-sonnet-4-6",
+            "prompt_tokens": 10,
+            "completion_tokens": 1,
+            "cache_usage": {
+              "cached_tokens": 0,
+              "cache_write_tokens": 0,
+              "prompt_cache_ttl": "1h",
+              "cache_write_tokens_by_ttl": null
+            },
+            "provider": "anthropic"
+          }
+        ],
+        "physical_attempts": [
+          {
+            "source": "llm.anthropic",
+            "model": "anthropic/claude-sonnet-4-6",
+            "provider": "anthropic",
+            "candidate_raw_sha256": "030a6e3116f8715594966ed1f90da0ce0ee9d5c5ecae1501aa22219e96c73d89",
+            "candidate_raw_size_bytes": 525,
+            "candidate_measurement_kind": "canonical_json_v1",
+            "states": [
+              "reserved",
+              "dispatched",
+              "settled"
+            ],
+            "prompt_cache_ttl": "1h",
+            "cost_final": false
+          }
+        ],
+        "unused_script_steps": 0
+      }
+    },
+    {
+      "id": "anthropic.dispatch.no_proxy_session",
+      "route": "no_proxy uses a trust_env=False requests session on the native lane",
+      "spec": {
+        "env": {
+          "ANTHROPIC_API_KEY": "anthropic-fixture-key"
+        },
+        "transport": [
+          {
+            "kind": "response",
+            "status_code": 200,
+            "json": {
+              "id": "msg_4",
+              "role": "assistant",
+              "content": [
+                {
+                  "type": "text",
+                  "text": "y"
+                }
+              ],
+              "stop_reason": "end_turn",
+              "usage": {
+                "input_tokens": 10,
+                "output_tokens": 1
+              }
+            }
+          }
+        ],
+        "pricing_estimate": 0.0002,
+        "call": {
+          "kind": "method",
+          "name": "chat",
+          "kwargs": {
+            "messages": [
+              {
+                "role": "system",
+                "content": "stable policy prefix"
+              },
+              {
+                "role": "user",
+                "content": "hello"
+              }
+            ],
+            "model": "anthropic::claude-sonnet-4.6",
+            "no_proxy": true,
+            "timeout": 60.0
+          }
+        }
+      },
+      "expected": {
+        "returned": {
+          "message": {
+            "role": "assistant",
+            "content": "y",
+            "stop_reason": "end_turn"
+          },
+          "usage": {
+            "prompt_tokens": 10,
+            "completion_tokens": 1,
+            "cached_tokens": 0,
+            "cache_write_tokens": 0,
+            "provider": "anthropic",
+            "resolved_model": "anthropic/claude-sonnet-4-6",
+            "cost": 0.0002,
+            "cost_estimated": true,
+            "cost_final": false,
+            "request_wire": {
+              "requested_effort": "medium",
+              "applied_effort": "medium",
+              "requested_tool_dialect": "none",
+              "applied_tool_dialect": "none",
+              "reason_code": "requested_wire_form",
+              "source_profile_fingerprint": "e9d3d30e6fd740d183ba689ac500895f5c141295a130a3c7c3d83b1f348c47c4",
+              "accepted_profile_fingerprint": "e9d3d30e6fd740d183ba689ac500895f5c141295a130a3c7c3d83b1f348c47c4",
+              "candidate_sha256": "122186b8777e106bedf3ddee1d15886b19321dfd2686e98a83746d90d693a791",
+              "ladder_ordinal": 1,
+              "applied_actions": [],
+              "task_local": false,
+              "attempt_id_present": true
+            }
+          },
+          "ledger_attempt_count": 1
+        },
+        "sends": [
+          {
+            "transport": "requests.post",
+            "url": "https://api.anthropic.com/v1/messages",
+            "headers": {
+              "x-api-key": "anthropic-fixture-key",
+              "anthropic-version": "2023-06-01",
+              "content-type": "application/json"
+            },
+            "timeout": 60.0,
+            "session_trust_env": false,
+            "payload": {
+              "max_tokens": 65536,
+              "messages": [
+                {
+                  "content": [
+                    {
+                      "text": "hello",
+                      "type": "text"
+                    }
+                  ],
+                  "role": "user"
+                }
+              ],
+              "model": "claude-sonnet-4-6",
+              "output_config": {
+                "effort": "medium"
+              },
+              "system": [
+                {
+                  "text": "stable policy prefix",
+                  "type": "text"
+                }
+              ],
+              "thinking": {
+                "type": "adaptive"
+              }
+            },
+            "payload_sha256": "122186b8777e106bedf3ddee1d15886b19321dfd2686e98a83746d90d693a791"
+          }
+        ],
+        "pricing_calls": [
+          {
+            "model": "anthropic/claude-sonnet-4-6",
+            "prompt_tokens": 10,
+            "completion_tokens": 1,
+            "cache_usage": {
+              "cached_tokens": 0,
+              "cache_write_tokens": 0,
+              "prompt_cache_ttl": null,
+              "cache_write_tokens_by_ttl": null
+            },
+            "provider": "anthropic"
+          }
+        ],
+        "physical_attempts": [
+          {
+            "source": "llm.anthropic",
+            "model": "anthropic/claude-sonnet-4-6",
+            "provider": "anthropic",
+            "candidate_raw_sha256": "122186b8777e106bedf3ddee1d15886b19321dfd2686e98a83746d90d693a791",
+            "candidate_raw_size_bytes": 244,
+            "candidate_measurement_kind": "canonical_json_v1",
+            "states": [
+              "reserved",
+              "dispatched",
+              "settled"
+            ],
+            "prompt_cache_ttl": "",
+            "cost_final": false
+          }
+        ],
+        "unused_script_steps": 0
+      }
+    },
+    {
+      "id": "anthropic.dispatch.http_error_param_retry",
+      "route": "a 400 naming temperature drops it once and re-sends on the native lane",
+      "spec": {
+        "env": {
+          "ANTHROPIC_API_KEY": "anthropic-fixture-key"
+        },
+        "transport": [
+          {
+            "kind": "response",
+            "status_code": 400,
+            "reason": "Bad Request",
+            "text": "{\"error\": {\"message\": \"temperature: unsupported parameter\"}}"
+          },
+          {
+            "kind": "response",
+            "status_code": 200,
+            "json": {
+              "id": "msg_5",
+              "role": "assistant",
+              "content": [
+                {
+                  "type": "text",
+                  "text": "z"
+                }
+              ],
+              "stop_reason": "end_turn",
+              "usage": {
+                "input_tokens": 10,
+                "output_tokens": 1
+              }
+            }
+          }
+        ],
+        "pricing_estimate": 0.0002,
+        "call": {
+          "kind": "method",
+          "name": "chat",
+          "kwargs": {
+            "messages": [
+              {
+                "role": "system",
+                "content": "stable policy prefix"
+              },
+              {
+                "role": "user",
+                "content": "hello"
+              }
+            ],
+            "model": "anthropic::claude-sonnet-4.6",
+            "temperature": 0.4
+          }
+        }
+      },
+      "expected": {
+        "returned": {
+          "message": {
+            "role": "assistant",
+            "content": "z",
+            "stop_reason": "end_turn"
+          },
+          "usage": {
+            "prompt_tokens": 10,
+            "completion_tokens": 1,
+            "cached_tokens": 0,
+            "cache_write_tokens": 0,
+            "provider": "anthropic",
+            "resolved_model": "anthropic/claude-sonnet-4-6",
+            "cost": 0.0002,
+            "cost_estimated": true,
+            "cost_final": false,
+            "request_wire": {
+              "requested_effort": "medium",
+              "applied_effort": "medium",
+              "requested_tool_dialect": "none",
+              "applied_tool_dialect": "none",
+              "reason_code": "provider_unsupported_field",
+              "source_profile_fingerprint": "e9d3d30e6fd740d183ba689ac500895f5c141295a130a3c7c3d83b1f348c47c4",
+              "accepted_profile_fingerprint": "e9d3d30e6fd740d183ba689ac500895f5c141295a130a3c7c3d83b1f348c47c4",
+              "candidate_sha256": "122186b8777e106bedf3ddee1d15886b19321dfd2686e98a83746d90d693a791",
+              "ladder_ordinal": 2,
+              "applied_actions": [
+                {
+                  "source": "pending",
+                  "profile_fingerprint": "e9d3d30e6fd740d183ba689ac500895f5c141295a130a3c7c3d83b1f348c47c4",
+                  "action": {
+                    "kind": "drop_field",
+                    "fields": [
+                      "temperature"
+                    ],
+                    "reason_code": "provider_unsupported_field"
+                  }
+                }
+              ],
+              "task_local": false,
+              "attempt_id_present": true
+            }
+          },
+          "ledger_attempt_count": 2
+        },
+        "sends": [
+          {
+            "transport": "requests.post",
+            "url": "https://api.anthropic.com/v1/messages",
+            "headers": {
+              "x-api-key": "anthropic-fixture-key",
+              "anthropic-version": "2023-06-01",
+              "content-type": "application/json"
+            },
+            "timeout": 120,
+            "session_trust_env": null,
+            "payload": {
+              "max_tokens": 65536,
+              "messages": [
+                {
+                  "content": [
+                    {
+                      "text": "hello",
+                      "type": "text"
+                    }
+                  ],
+                  "role": "user"
+                }
+              ],
+              "model": "claude-sonnet-4-6",
+              "output_config": {
+                "effort": "medium"
+              },
+              "system": [
+                {
+                  "text": "stable policy prefix",
+                  "type": "text"
+                }
+              ],
+              "temperature": 0.4,
+              "thinking": {
+                "type": "adaptive"
+              }
+            },
+            "payload_sha256": "989eefbe3959f85c4340acb5e913519f9d72e64d0c5bc1583dd7e82ab97b21cf"
+          },
+          {
+            "transport": "requests.post",
+            "url": "https://api.anthropic.com/v1/messages",
+            "headers": {
+              "x-api-key": "anthropic-fixture-key",
+              "anthropic-version": "2023-06-01",
+              "content-type": "application/json"
+            },
+            "timeout": 120,
+            "session_trust_env": null,
+            "payload": {
+              "max_tokens": 65536,
+              "messages": [
+                {
+                  "content": [
+                    {
+                      "text": "hello",
+                      "type": "text"
+                    }
+                  ],
+                  "role": "user"
+                }
+              ],
+              "model": "claude-sonnet-4-6",
+              "output_config": {
+                "effort": "medium"
+              },
+              "system": [
+                {
+                  "text": "stable policy prefix",
+                  "type": "text"
+                }
+              ],
+              "thinking": {
+                "type": "adaptive"
+              }
+            },
+            "payload_sha256": "122186b8777e106bedf3ddee1d15886b19321dfd2686e98a83746d90d693a791"
+          }
+        ],
+        "pricing_calls": [
+          {
+            "model": "anthropic/claude-sonnet-4-6",
+            "prompt_tokens": 10,
+            "completion_tokens": 1,
+            "cache_usage": {
+              "cached_tokens": 0,
+              "cache_write_tokens": 0,
+              "prompt_cache_ttl": null,
+              "cache_write_tokens_by_ttl": null
+            },
+            "provider": "anthropic"
+          }
+        ],
+        "physical_attempts": [
+          {
+            "source": "llm.anthropic",
+            "model": "anthropic/claude-sonnet-4-6",
+            "provider": "anthropic",
+            "candidate_raw_sha256": "989eefbe3959f85c4340acb5e913519f9d72e64d0c5bc1583dd7e82ab97b21cf",
+            "candidate_raw_size_bytes": 262,
+            "candidate_measurement_kind": "canonical_json_v1",
+            "states": [
+              "reserved",
+              "dispatched",
+              "unresolved"
+            ]
+          },
+          {
+            "source": "llm.anthropic",
+            "model": "anthropic/claude-sonnet-4-6",
+            "provider": "anthropic",
+            "candidate_raw_sha256": "122186b8777e106bedf3ddee1d15886b19321dfd2686e98a83746d90d693a791",
+            "candidate_raw_size_bytes": 244,
+            "candidate_measurement_kind": "canonical_json_v1",
+            "states": [
+              "reserved",
+              "dispatched",
+              "settled"
+            ],
+            "prompt_cache_ttl": "",
+            "cost_final": false
+          }
+        ],
+        "unused_script_steps": 0
+      }
+    },
+    {
+      "id": "anthropic.dispatch.http_error_unrecoverable",
+      "route": "an unrelated 500 surfaces unchanged after one physical attempt",
+      "spec": {
+        "env": {
+          "ANTHROPIC_API_KEY": "anthropic-fixture-key"
+        },
+        "transport": [
+          {
+            "kind": "response",
+            "status_code": 500,
+            "reason": "Server Error",
+            "text": "upstream exploded"
+          }
+        ],
+        "call": {
+          "kind": "method",
+          "name": "chat",
+          "kwargs": {
+            "messages": [
+              {
+                "role": "system",
+                "content": "stable policy prefix"
+              },
+              {
+                "role": "user",
+                "content": "hello"
+              }
+            ],
+            "model": "anthropic::claude-sonnet-4.6"
+          }
+        }
+      },
+      "expected": {
+        "raised": {
+          "type": "HTTPError",
+          "message": "500 Server Error for url https://api.anthropic.com/v1/messages: upstream exploded"
+        },
+        "sends": [
+          {
+            "transport": "requests.post",
+            "url": "https://api.anthropic.com/v1/messages",
+            "headers": {
+              "x-api-key": "anthropic-fixture-key",
+              "anthropic-version": "2023-06-01",
+              "content-type": "application/json"
+            },
+            "timeout": 120,
+            "session_trust_env": null,
+            "payload": {
+              "max_tokens": 65536,
+              "messages": [
+                {
+                  "content": [
+                    {
+                      "text": "hello",
+                      "type": "text"
+                    }
+                  ],
+                  "role": "user"
+                }
+              ],
+              "model": "claude-sonnet-4-6",
+              "output_config": {
+                "effort": "medium"
+              },
+              "system": [
+                {
+                  "text": "stable policy prefix",
+                  "type": "text"
+                }
+              ],
+              "thinking": {
+                "type": "adaptive"
+              }
+            },
+            "payload_sha256": "122186b8777e106bedf3ddee1d15886b19321dfd2686e98a83746d90d693a791"
+          }
+        ],
+        "physical_attempts": [
+          {
+            "source": "llm.anthropic",
+            "model": "anthropic/claude-sonnet-4-6",
+            "provider": "anthropic",
+            "candidate_raw_sha256": "122186b8777e106bedf3ddee1d15886b19321dfd2686e98a83746d90d693a791",
+            "candidate_raw_size_bytes": 244,
+            "candidate_measurement_kind": "canonical_json_v1",
+            "states": [
+              "reserved",
+              "dispatched",
+              "unresolved"
+            ]
+          }
+        ],
+        "unused_script_steps": 0
+      }
+    },
+    {
+      "id": "anthropic.payload.async_thread_offload",
+      "route": "chat_async offloads the native lane to a thread and keeps the ledger ids",
+      "spec": {
+        "env": {
+          "ANTHROPIC_API_KEY": "anthropic-fixture-key"
+        },
+        "transport": [
+          {
+            "kind": "response",
+            "status_code": 200,
+            "json": {
+              "id": "msg_6",
+              "role": "assistant",
+              "content": [
+                {
+                  "type": "text",
+                  "text": "async"
+                }
+              ],
+              "stop_reason": "end_turn",
+              "usage": {
+                "input_tokens": 12,
+                "output_tokens": 2
+              }
+            }
+          }
+        ],
+        "pricing_estimate": 0.0003,
+        "call": {
+          "kind": "method",
+          "name": "chat_async",
+          "kwargs": {
+            "messages": [
+              {
+                "role": "system",
+                "content": "stable policy prefix"
+              },
+              {
+                "role": "user",
+                "content": "hello"
+              }
+            ],
+            "model": "anthropic::claude-sonnet-4.6"
+          }
+        }
+      },
+      "expected": {
+        "returned": {
+          "message": {
+            "role": "assistant",
+            "content": "async",
+            "stop_reason": "end_turn"
+          },
+          "usage": {
+            "prompt_tokens": 12,
+            "completion_tokens": 2,
+            "cached_tokens": 0,
+            "cache_write_tokens": 0,
+            "provider": "anthropic",
+            "resolved_model": "anthropic/claude-sonnet-4-6",
+            "cost": 0.0003,
+            "cost_estimated": true,
+            "cost_final": false,
+            "request_wire": {
+              "requested_effort": "medium",
+              "applied_effort": "medium",
+              "requested_tool_dialect": "none",
+              "applied_tool_dialect": "none",
+              "reason_code": "requested_wire_form",
+              "source_profile_fingerprint": "e9d3d30e6fd740d183ba689ac500895f5c141295a130a3c7c3d83b1f348c47c4",
+              "accepted_profile_fingerprint": "e9d3d30e6fd740d183ba689ac500895f5c141295a130a3c7c3d83b1f348c47c4",
+              "candidate_sha256": "122186b8777e106bedf3ddee1d15886b19321dfd2686e98a83746d90d693a791",
+              "ladder_ordinal": 1,
+              "applied_actions": [],
+              "task_local": false,
+              "attempt_id_present": true
+            }
+          },
+          "ledger_attempt_count": 1
+        },
+        "sends": [
+          {
+            "transport": "requests.post",
+            "url": "https://api.anthropic.com/v1/messages",
+            "headers": {
+              "x-api-key": "anthropic-fixture-key",
+              "anthropic-version": "2023-06-01",
+              "content-type": "application/json"
+            },
+            "timeout": 120,
+            "session_trust_env": null,
+            "payload": {
+              "max_tokens": 65536,
+              "messages": [
+                {
+                  "content": [
+                    {
+                      "text": "hello",
+                      "type": "text"
+                    }
+                  ],
+                  "role": "user"
+                }
+              ],
+              "model": "claude-sonnet-4-6",
+              "output_config": {
+                "effort": "medium"
+              },
+              "system": [
+                {
+                  "text": "stable policy prefix",
+                  "type": "text"
+                }
+              ],
+              "thinking": {
+                "type": "adaptive"
+              }
+            },
+            "payload_sha256": "122186b8777e106bedf3ddee1d15886b19321dfd2686e98a83746d90d693a791"
+          }
+        ],
+        "pricing_calls": [
+          {
+            "model": "anthropic/claude-sonnet-4-6",
+            "prompt_tokens": 12,
+            "completion_tokens": 2,
+            "cache_usage": {
+              "cached_tokens": 0,
+              "cache_write_tokens": 0,
+              "prompt_cache_ttl": null,
+              "cache_write_tokens_by_ttl": null
+            },
+            "provider": "anthropic"
+          }
+        ],
+        "physical_attempts": [
+          {
+            "source": "llm.anthropic",
+            "model": "anthropic/claude-sonnet-4-6",
+            "provider": "anthropic",
+            "candidate_raw_sha256": "122186b8777e106bedf3ddee1d15886b19321dfd2686e98a83746d90d693a791",
+            "candidate_raw_size_bytes": 244,
+            "candidate_measurement_kind": "canonical_json_v1",
+            "states": [
+              "reserved",
+              "dispatched",
+              "settled"
+            ],
+            "prompt_cache_ttl": "",
+            "cost_final": false
+          }
+        ],
+        "unused_script_steps": 0
+      }
+    },
+    {
+      "id": "anthropic.dispatch.ttl_promotion_ordering",
+      "route": "an owner 1h tier promotes every declared marker so a shorter ttl never precedes a longer one",
+      "spec": {
+        "env": {
+          "ANTHROPIC_API_KEY": "anthropic-fixture-key",
+          "OUROBOROS_PROMPT_CACHE_TTL": "1h"
+        },
+        "transport": [
+          {
+            "kind": "response",
+            "status_code": 200,
+            "json": {
+              "id": "msg_ttl",
+              "role": "assistant",
+              "content": [
+                {
+                  "type": "text",
+                  "text": "ok"
+                }
+              ],
+              "stop_reason": "end_turn",
+              "usage": {
+                "input_tokens": 10,
+                "output_tokens": 1
+              }
+            }
+          }
+        ],
+        "pricing_estimate": 0.0004,
+        "call": {
+          "kind": "method",
+          "name": "chat",
+          "kwargs": {
+            "model": "anthropic::claude-sonnet-4.6",
+            "tools": [
+              {
+                "type": "function",
+                "function": {
+                  "name": "read_file",
+                  "description": "read",
+                  "parameters": {
+                    "type": "object",
+                    "properties": {
+                      "path": {
+                        "type": "string"
+                      }
+                    }
+                  }
+                }
+              }
+            ],
+            "messages": [
+              {
+                "role": "system",
+                "content": [
+                  {
+                    "type": "text",
+                    "text": "prefix",
+                    "cache_control": {
+                      "type": "ephemeral",
+                      "ttl": "5m"
+                    }
+                  }
+                ]
+              },
+              {
+                "role": "user",
+                "content": "hi"
+              }
+            ]
+          }
+        }
+      },
+      "expected": {
+        "returned": {
+          "message": {
+            "role": "assistant",
+            "content": "ok",
+            "stop_reason": "end_turn"
+          },
+          "usage": {
+            "prompt_tokens": 10,
+            "completion_tokens": 1,
+            "cached_tokens": 0,
+            "cache_write_tokens": 0,
+            "provider": "anthropic",
+            "resolved_model": "anthropic/claude-sonnet-4-6",
+            "prompt_cache_ttl": "1h",
+            "cost": 0.0004,
+            "cost_estimated": true,
+            "cost_final": false,
+            "request_wire": {
+              "requested_effort": "medium",
+              "applied_effort": "medium",
+              "requested_tool_dialect": "function",
+              "applied_tool_dialect": "function",
+              "reason_code": "requested_wire_form",
+              "source_profile_fingerprint": "9d53b584afe27c16ff4bac7dd10fe6bf821f616b78e358a36c4f86e46f07d1b2",
+              "accepted_profile_fingerprint": "9d53b584afe27c16ff4bac7dd10fe6bf821f616b78e358a36c4f86e46f07d1b2",
+              "candidate_sha256": "175144b3f159dfa852e98364b13d88a0561ce82382d4265ac49adf61ccba7a78",
+              "ladder_ordinal": 1,
+              "applied_actions": [],
+              "task_local": false,
+              "attempt_id_present": true
+            }
+          },
+          "ledger_attempt_count": 1
+        },
+        "sends": [
+          {
+            "transport": "requests.post",
+            "url": "https://api.anthropic.com/v1/messages",
+            "headers": {
+              "x-api-key": "anthropic-fixture-key",
+              "anthropic-version": "2023-06-01",
+              "content-type": "application/json"
+            },
+            "timeout": 120,
+            "session_trust_env": null,
+            "payload": {
+              "max_tokens": 65536,
+              "messages": [
+                {
+                  "content": [
+                    {
+                      "text": "hi",
+                      "type": "text"
+                    }
+                  ],
+                  "role": "user"
+                }
+              ],
+              "model": "claude-sonnet-4-6",
+              "output_config": {
+                "effort": "medium"
+              },
+              "system": [
+                {
+                  "cache_control": {
+                    "ttl": "1h",
+                    "type": "ephemeral"
+                  },
+                  "text": "prefix",
+                  "type": "text"
+                }
+              ],
+              "thinking": {
+                "type": "adaptive"
+              },
+              "tools": [
+                {
+                  "cache_control": {
+                    "ttl": "1h",
+                    "type": "ephemeral"
+                  },
+                  "description": "read",
+                  "input_schema": {
+                    "properties": {
+                      "path": {
+                        "type": "string"
+                      }
+                    },
+                    "type": "object"
+                  },
+                  "name": "read_file"
+                }
+              ]
+            },
+            "payload_sha256": "175144b3f159dfa852e98364b13d88a0561ce82382d4265ac49adf61ccba7a78"
+          }
+        ],
+        "pricing_calls": [
+          {
+            "model": "anthropic/claude-sonnet-4-6",
+            "prompt_tokens": 10,
+            "completion_tokens": 1,
+            "cache_usage": {
+              "cached_tokens": 0,
+              "cache_write_tokens": 0,
+              "prompt_cache_ttl": "1h",
+              "cache_write_tokens_by_ttl": null
+            },
+            "provider": "anthropic"
+          }
+        ],
+        "physical_attempts": [
+          {
+            "source": "llm.anthropic",
+            "model": "anthropic/claude-sonnet-4-6",
+            "provider": "anthropic",
+            "candidate_raw_sha256": "175144b3f159dfa852e98364b13d88a0561ce82382d4265ac49adf61ccba7a78",
+            "candidate_raw_size_bytes": 448,
+            "candidate_measurement_kind": "canonical_json_v1",
+            "states": [
+              "reserved",
+              "dispatched",
+              "settled"
+            ],
+            "prompt_cache_ttl": "1h",
+            "cost_final": false
+          }
+        ],
+        "unused_script_steps": 0
+      }
+    }
+  ]
+}

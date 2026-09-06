@@ -617,7 +617,7 @@ def test_extensions_index_rows_expose_loader_content_hash(monkeypatch, tmp_path)
     monkeypatch.setattr(
         extensions_api,
         "snapshot",
-        lambda: {"tools": [], "routes": [], "ws_handlers": [], "ui_tabs": [], "ui_tabs_pending": []},
+        lambda: {"tools": [], "routes": [], "ws_handlers": [], "ui_tabs": []},
     )
     monkeypatch.setattr(supervisor_queue, "sync_skill_schedules", lambda *_a, **_kw: None)
     monkeypatch.setattr(

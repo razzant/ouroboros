@@ -1,0 +1,3175 @@
+{
+ "source_sha": "0f715831fab12edb02c105a43677bcbce0b1f1b6",
+ "producer": "the retired loop pair (_is_tool_execution_failure + _extract_result_metadata) at source_sha",
+ "corpus": "tests/tool_classification_corpus.py::build_corpus over the current tree",
+ "entries": {
+  "body:empty:ext_1_demo_screenshot": {
+   "is_error": false,
+   "status": "ok"
+  },
+  "body:empty:mcp_demo__ping": {
+   "is_error": false,
+   "status": "ok"
+  },
+  "body:empty:read_file": {
+   "is_error": false,
+   "status": "ok"
+  },
+  "body:empty:run_command": {
+   "is_error": false,
+   "status": "ok"
+  },
+  "body:false:ext_1_demo_screenshot": {
+   "is_error": true,
+   "status": "tool_reported_failure"
+  },
+  "body:false:mcp_demo__ping": {
+   "is_error": true,
+   "status": "tool_reported_failure"
+  },
+  "body:false:read_file": {
+   "is_error": true,
+   "status": "tool_reported_failure"
+  },
+  "body:false:run_command": {
+   "is_error": true,
+   "status": "tool_reported_failure"
+  },
+  "body:false_indented:ext_1_demo_screenshot": {
+   "is_error": true,
+   "status": "tool_reported_failure"
+  },
+  "body:false_indented:mcp_demo__ping": {
+   "is_error": true,
+   "status": "tool_reported_failure"
+  },
+  "body:false_indented:read_file": {
+   "is_error": true,
+   "status": "tool_reported_failure"
+  },
+  "body:false_indented:run_command": {
+   "is_error": true,
+   "status": "tool_reported_failure"
+  },
+  "body:list:ext_1_demo_screenshot": {
+   "is_error": false,
+   "status": "ok"
+  },
+  "body:list:mcp_demo__ping": {
+   "is_error": false,
+   "status": "ok"
+  },
+  "body:list:read_file": {
+   "is_error": false,
+   "status": "ok"
+  },
+  "body:list:run_command": {
+   "is_error": false,
+   "status": "ok"
+  },
+  "body:nested_only:ext_1_demo_screenshot": {
+   "is_error": false,
+   "status": "ok"
+  },
+  "body:nested_only:mcp_demo__ping": {
+   "is_error": false,
+   "status": "ok"
+  },
+  "body:nested_only:read_file": {
+   "is_error": false,
+   "status": "ok"
+  },
+  "body:nested_only:run_command": {
+   "is_error": false,
+   "status": "ok"
+  },
+  "body:prose:ext_1_demo_screenshot": {
+   "is_error": false,
+   "status": "ok"
+  },
+  "body:prose:mcp_demo__ping": {
+   "is_error": false,
+   "status": "ok"
+  },
+  "body:prose:read_file": {
+   "is_error": false,
+   "status": "ok"
+  },
+  "body:prose:run_command": {
+   "is_error": false,
+   "status": "ok"
+  },
+  "body:string_false:ext_1_demo_screenshot": {
+   "is_error": false,
+   "status": "ok"
+  },
+  "body:string_false:mcp_demo__ping": {
+   "is_error": false,
+   "status": "ok"
+  },
+  "body:string_false:read_file": {
+   "is_error": false,
+   "status": "ok"
+  },
+  "body:string_false:run_command": {
+   "is_error": false,
+   "status": "ok"
+  },
+  "body:true:ext_1_demo_screenshot": {
+   "is_error": false,
+   "status": "ok"
+  },
+  "body:true:mcp_demo__ping": {
+   "is_error": false,
+   "status": "ok"
+  },
+  "body:true:read_file": {
+   "is_error": false,
+   "status": "ok"
+  },
+  "body:true:run_command": {
+   "is_error": false,
+   "status": "ok"
+  },
+  "compose:clean:bare": {
+   "is_error": false,
+   "status": "ok"
+  },
+  "compose:clean:route": {
+   "is_error": false,
+   "status": "ok"
+  },
+  "compose:clean:route+safety": {
+   "is_error": false,
+   "status": "ok"
+  },
+  "compose:clean:safety": {
+   "is_error": false,
+   "status": "ok"
+  },
+  "compose:exit:bare": {
+   "is_error": true,
+   "status": "non_zero_exit"
+  },
+  "compose:exit:route": {
+   "is_error": true,
+   "status": "non_zero_exit"
+  },
+  "compose:exit:route+safety": {
+   "is_error": false,
+   "status": "ok"
+  },
+  "compose:exit:safety": {
+   "is_error": false,
+   "status": "ok"
+  },
+  "compose:integrate:bare": {
+   "is_error": true,
+   "status": "integration_blocked"
+  },
+  "compose:integrate:route": {
+   "is_error": true,
+   "status": "integration_blocked"
+  },
+  "compose:integrate:route+safety": {
+   "is_error": false,
+   "status": "ok"
+  },
+  "compose:integrate:safety": {
+   "is_error": false,
+   "status": "ok"
+  },
+  "compose:protected:bare": {
+   "is_error": true,
+   "status": "protected_blocked"
+  },
+  "compose:protected:route": {
+   "is_error": true,
+   "status": "protected_blocked"
+  },
+  "compose:protected:route+safety": {
+   "is_error": false,
+   "status": "ok"
+  },
+  "compose:protected:safety": {
+   "is_error": false,
+   "status": "ok"
+  },
+  "compose:reported:bare": {
+   "is_error": true,
+   "status": "tool_reported_failure"
+  },
+  "compose:reported:route": {
+   "is_error": false,
+   "status": "ok"
+  },
+  "compose:reported:route+safety": {
+   "is_error": false,
+   "status": "ok"
+  },
+  "compose:reported:safety": {
+   "is_error": false,
+   "status": "ok"
+  },
+  "compose:separator_in_body:bare": {
+   "is_error": false,
+   "status": "ok"
+  },
+  "compose:separator_in_body:route": {
+   "is_error": false,
+   "status": "ok"
+  },
+  "compose:separator_in_body:route+safety": {
+   "is_error": false,
+   "status": "ok"
+  },
+  "compose:separator_in_body:safety": {
+   "is_error": false,
+   "status": "ok"
+  },
+  "compose:timeout:bare": {
+   "is_error": true,
+   "status": "timeout"
+  },
+  "compose:timeout:route": {
+   "is_error": true,
+   "status": "timeout"
+  },
+  "compose:timeout:route+safety": {
+   "is_error": false,
+   "status": "ok"
+  },
+  "compose:timeout:safety": {
+   "is_error": false,
+   "status": "ok"
+  },
+  "compose:violation:bare": {
+   "is_error": true,
+   "status": "safety_violation"
+  },
+  "compose:violation:route": {
+   "is_error": true,
+   "status": "safety_violation"
+  },
+  "compose:violation:route+safety": {
+   "is_error": false,
+   "status": "ok"
+  },
+  "compose:violation:safety": {
+   "is_error": false,
+   "status": "ok"
+  },
+  "edge:autocorrect_artifact_error:read_file": {
+   "is_error": true,
+   "status": "artifact_output_error"
+  },
+  "edge:autocorrect_artifact_error:run_command": {
+   "is_error": true,
+   "status": "artifact_output_error"
+  },
+  "edge:autocorrect_line2:read_file": {
+   "is_error": true,
+   "status": "shell_error"
+  },
+  "edge:autocorrect_line2:run_command": {
+   "is_error": true,
+   "status": "shell_error"
+  },
+  "edge:autocorrect_line3:read_file": {
+   "is_error": true,
+   "status": "shell_error"
+  },
+  "edge:autocorrect_line3:run_command": {
+   "is_error": true,
+   "status": "shell_error"
+  },
+  "edge:autocorrect_only:read_file": {
+   "is_error": false,
+   "status": "ok_autocorrected"
+  },
+  "edge:autocorrect_only:run_command": {
+   "is_error": false,
+   "status": "ok_autocorrected"
+  },
+  "edge:autocorrect_undeclared:read_file": {
+   "is_error": true,
+   "status": "artifact_output_undeclared"
+  },
+  "edge:autocorrect_undeclared:run_command": {
+   "is_error": true,
+   "status": "artifact_output_undeclared"
+  },
+  "edge:critical_safety_violation:read_file": {
+   "is_error": true,
+   "status": "safety_violation"
+  },
+  "edge:critical_safety_violation:run_command": {
+   "is_error": true,
+   "status": "safety_violation"
+  },
+  "edge:mcp_envelope_marker:read_file": {
+   "is_error": false,
+   "status": "ok"
+  },
+  "edge:mcp_envelope_marker:run_command": {
+   "is_error": false,
+   "status": "ok"
+  },
+  "edge:safety_double_separator:read_file": {
+   "is_error": false,
+   "status": "ok"
+  },
+  "edge:safety_double_separator:run_command": {
+   "is_error": false,
+   "status": "ok"
+  },
+  "edge:safety_inner_block:read_file": {
+   "is_error": false,
+   "status": "ok"
+  },
+  "edge:safety_inner_block:run_command": {
+   "is_error": false,
+   "status": "ok"
+  },
+  "edge:safety_single_line:read_file": {
+   "is_error": false,
+   "status": "ok"
+  },
+  "edge:safety_single_line:run_command": {
+   "is_error": false,
+   "status": "ok"
+  },
+  "edge:unknown_tool:ext_1_a_foo": {
+   "is_error": false,
+   "status": "ok"
+  },
+  "edge:unknown_tool:mcp_demo__ping": {
+   "is_error": false,
+   "status": "ok"
+  },
+  "edge:unknown_tool:read_file": {
+   "is_error": false,
+   "status": "ok"
+  },
+  "edge:unknown_tool:run_command": {
+   "is_error": false,
+   "status": "ok"
+  },
+  "envelope:empty": {
+   "is_error": false,
+   "status": "ok"
+  },
+  "envelope:false": {
+   "is_error": false,
+   "status": "ok"
+  },
+  "envelope:false_indented": {
+   "is_error": false,
+   "status": "ok"
+  },
+  "envelope:list": {
+   "is_error": false,
+   "status": "ok"
+  },
+  "envelope:nested_only": {
+   "is_error": false,
+   "status": "ok"
+  },
+  "envelope:prose": {
+   "is_error": false,
+   "status": "ok"
+  },
+  "envelope:string_false": {
+   "is_error": false,
+   "status": "ok"
+  },
+  "envelope:true": {
+   "is_error": false,
+   "status": "ok"
+  },
+  "ident:ACCESS_DENIED:named": {
+   "is_error": false,
+   "status": "ok"
+  },
+  "ident:ACCESS_DENIED:plain": {
+   "is_error": false,
+   "status": "ok"
+  },
+  "ident:ACTING_NO_WORKSPACE_BLOCKED:named": {
+   "is_error": true,
+   "status": "blocked"
+  },
+  "ident:ACTING_NO_WORKSPACE_BLOCKED:plain": {
+   "is_error": true,
+   "status": "blocked"
+  },
+  "ident:ACTING_SUBAGENT_BLOCKED:named": {
+   "is_error": true,
+   "status": "blocked"
+  },
+  "ident:ACTING_SUBAGENT_BLOCKED:plain": {
+   "is_error": true,
+   "status": "blocked"
+  },
+  "ident:ACTING_SUBAGENT_TOOL_NOT_GRANTED:named": {
+   "is_error": false,
+   "status": "ok"
+  },
+  "ident:ACTING_SUBAGENT_TOOL_NOT_GRANTED:plain": {
+   "is_error": false,
+   "status": "ok"
+  },
+  "ident:ADVISORY_ERROR:named": {
+   "is_error": true,
+   "status": "error"
+  },
+  "ident:ADVISORY_ERROR:plain": {
+   "is_error": true,
+   "status": "error"
+  },
+  "ident:ADVISORY_PRE_REVIEW_REQUIRED:named": {
+   "is_error": false,
+   "status": "ok"
+  },
+  "ident:ADVISORY_PRE_REVIEW_REQUIRED:plain": {
+   "is_error": false,
+   "status": "ok"
+  },
+  "ident:ADVISORY_SKIPPED:named": {
+   "is_error": false,
+   "status": "ok"
+  },
+  "ident:ADVISORY_SKIPPED:plain": {
+   "is_error": false,
+   "status": "ok"
+  },
+  "ident:ANTHROPIC_API_KEY:named": {
+   "is_error": false,
+   "status": "ok"
+  },
+  "ident:ANTHROPIC_API_KEY:plain": {
+   "is_error": false,
+   "status": "ok"
+  },
+  "ident:APPLY_PATCH_BLOCKED:named": {
+   "is_error": true,
+   "status": "edit_ops_blocked"
+  },
+  "ident:APPLY_PATCH_BLOCKED:plain": {
+   "is_error": true,
+   "status": "edit_ops_blocked"
+  },
+  "ident:APPLY_PATCH_ERROR:named": {
+   "is_error": true,
+   "status": "edit_ops_blocked"
+  },
+  "ident:APPLY_PATCH_ERROR:plain": {
+   "is_error": true,
+   "status": "edit_ops_blocked"
+  },
+  "ident:ARTIFACT_AUDIT_GAP:named": {
+   "is_error": false,
+   "status": "ok"
+  },
+  "ident:ARTIFACT_AUDIT_GAP:plain": {
+   "is_error": false,
+   "status": "ok"
+  },
+  "ident:ARTIFACT_OUTPUT_ERROR:named": {
+   "is_error": true,
+   "status": "artifact_output_error"
+  },
+  "ident:ARTIFACT_OUTPUT_ERROR:plain": {
+   "is_error": true,
+   "status": "artifact_output_error"
+  },
+  "ident:ARTIFACT_OUTPUT_UNDECLARED:named": {
+   "is_error": true,
+   "status": "artifact_output_undeclared"
+  },
+  "ident:ARTIFACT_OUTPUT_UNDECLARED:plain": {
+   "is_error": true,
+   "status": "artifact_output_undeclared"
+  },
+  "ident:AUTHORITY_SOURCE_UNAVAILABLE:named": {
+   "is_error": true,
+   "status": "error"
+  },
+  "ident:AUTHORITY_SOURCE_UNAVAILABLE:plain": {
+   "is_error": true,
+   "status": "error"
+  },
+  "ident:AUTO_ROUTED_TO_ACTIVE_WORKSPACE:named": {
+   "is_error": false,
+   "status": "ok"
+  },
+  "ident:AUTO_ROUTED_TO_ACTIVE_WORKSPACE:plain": {
+   "is_error": false,
+   "status": "ok"
+  },
+  "ident:BROWSER_BACKLOG_RETIRED_SESSIONS:named": {
+   "is_error": false,
+   "status": "ok"
+  },
+  "ident:BROWSER_BACKLOG_RETIRED_SESSIONS:plain": {
+   "is_error": false,
+   "status": "ok"
+  },
+  "ident:BROWSER_EVALUATE_SYNTAX_ERROR:named": {
+   "is_error": true,
+   "status": "error"
+  },
+  "ident:BROWSER_EVALUATE_SYNTAX_ERROR:plain": {
+   "is_error": true,
+   "status": "error"
+  },
+  "ident:BROWSER_LOCAL_READONLY_BLOCKED:named": {
+   "is_error": true,
+   "status": "blocked"
+  },
+  "ident:BROWSER_LOCAL_READONLY_BLOCKED:plain": {
+   "is_error": true,
+   "status": "blocked"
+  },
+  "ident:BROWSER_SESSION_RETIRED:named": {
+   "is_error": false,
+   "status": "ok"
+  },
+  "ident:BROWSER_SESSION_RETIRED:plain": {
+   "is_error": false,
+   "status": "ok"
+  },
+  "ident:CANCEL_INTENT_PROJECTION_CORRUPT:named": {
+   "is_error": false,
+   "status": "ok"
+  },
+  "ident:CANCEL_INTENT_PROJECTION_CORRUPT:plain": {
+   "is_error": false,
+   "status": "ok"
+  },
+  "ident:CANCEL_INTENT_WRITE_FAILED:named": {
+   "is_error": true,
+   "status": "error"
+  },
+  "ident:CANCEL_INTENT_WRITE_FAILED:plain": {
+   "is_error": true,
+   "status": "error"
+  },
+  "ident:CAPABILITY_UNAVAILABLE:named": {
+   "is_error": true,
+   "status": "error"
+  },
+  "ident:CAPABILITY_UNAVAILABLE:plain": {
+   "is_error": true,
+   "status": "error"
+  },
+  "ident:CHERRY_PICK_CONFLICT:named": {
+   "is_error": false,
+   "status": "ok"
+  },
+  "ident:CHERRY_PICK_CONFLICT:plain": {
+   "is_error": false,
+   "status": "ok"
+  },
+  "ident:CHERRY_PICK_ERROR:named": {
+   "is_error": true,
+   "status": "error"
+  },
+  "ident:CHERRY_PICK_ERROR:plain": {
+   "is_error": true,
+   "status": "error"
+  },
+  "ident:CHILD_RESULT_DISPOSITION_INVALID:named": {
+   "is_error": false,
+   "status": "ok"
+  },
+  "ident:CHILD_RESULT_DISPOSITION_INVALID:plain": {
+   "is_error": false,
+   "status": "ok"
+  },
+  "ident:CHILD_RESULT_DISPOSITION_PARTIAL:named": {
+   "is_error": false,
+   "status": "ok"
+  },
+  "ident:CHILD_RESULT_DISPOSITION_PARTIAL:plain": {
+   "is_error": false,
+   "status": "ok"
+  },
+  "ident:CHILD_RESULT_DISPOSITION_WRITE_FAILED:named": {
+   "is_error": true,
+   "status": "error"
+  },
+  "ident:CHILD_RESULT_DISPOSITION_WRITE_FAILED:plain": {
+   "is_error": true,
+   "status": "error"
+  },
+  "ident:CHILD_RESULT_LINEAGE_FORBIDDEN:named": {
+   "is_error": false,
+   "status": "ok"
+  },
+  "ident:CHILD_RESULT_LINEAGE_FORBIDDEN:plain": {
+   "is_error": false,
+   "status": "ok"
+  },
+  "ident:CHILD_RESULT_STALE:named": {
+   "is_error": false,
+   "status": "ok"
+  },
+  "ident:CHILD_RESULT_STALE:plain": {
+   "is_error": false,
+   "status": "ok"
+  },
+  "ident:CI_BRANCH_INVALID:named": {
+   "is_error": false,
+   "status": "ok"
+  },
+  "ident:CI_BRANCH_INVALID:plain": {
+   "is_error": false,
+   "status": "ok"
+  },
+  "ident:CI_PUSH_FAILED:named": {
+   "is_error": true,
+   "status": "error"
+  },
+  "ident:CI_PUSH_FAILED:plain": {
+   "is_error": true,
+   "status": "error"
+  },
+  "ident:CI_REMOTE_MISMATCH:named": {
+   "is_error": false,
+   "status": "ok"
+  },
+  "ident:CI_REMOTE_MISMATCH:plain": {
+   "is_error": false,
+   "status": "ok"
+  },
+  "ident:CI_TRIGGER_FAILED:named": {
+   "is_error": true,
+   "status": "error"
+  },
+  "ident:CI_TRIGGER_FAILED:plain": {
+   "is_error": true,
+   "status": "error"
+  },
+  "ident:CI_UNAVAILABLE:named": {
+   "is_error": true,
+   "status": "error"
+  },
+  "ident:CI_UNAVAILABLE:plain": {
+   "is_error": true,
+   "status": "error"
+  },
+  "ident:CI_WORKFLOW_NOT_FOUND:named": {
+   "is_error": false,
+   "status": "ok"
+  },
+  "ident:CI_WORKFLOW_NOT_FOUND:plain": {
+   "is_error": false,
+   "status": "ok"
+  },
+  "ident:COGNITIVE_TOOL_REQUIRED:named": {
+   "is_error": true,
+   "status": "cognitive_tool_required"
+  },
+  "ident:COGNITIVE_TOOL_REQUIRED:plain": {
+   "is_error": true,
+   "status": "cognitive_tool_required"
+  },
+  "ident:CONTEXT_MODE_SELF_LOWERING_BLOCKED:named": {
+   "is_error": true,
+   "status": "blocked"
+  },
+  "ident:CONTEXT_MODE_SELF_LOWERING_BLOCKED:plain": {
+   "is_error": true,
+   "status": "blocked"
+  },
+  "ident:COOP_WORKSPACE_ERROR:named": {
+   "is_error": true,
+   "status": "error"
+  },
+  "ident:COOP_WORKSPACE_ERROR:plain": {
+   "is_error": true,
+   "status": "error"
+  },
+  "ident:CORE_PATCH_NOTICE:named": {
+   "is_error": false,
+   "status": "ok"
+  },
+  "ident:CORE_PATCH_NOTICE:plain": {
+   "is_error": false,
+   "status": "ok"
+  },
+  "ident:CORE_PROTECTION_BLOCKED:named": {
+   "is_error": true,
+   "status": "protected_blocked"
+  },
+  "ident:CORE_PROTECTION_BLOCKED:plain": {
+   "is_error": true,
+   "status": "protected_blocked"
+  },
+  "ident:DATA_LIST_BLOCKED:named": {
+   "is_error": true,
+   "status": "data_blocked"
+  },
+  "ident:DATA_LIST_BLOCKED:plain": {
+   "is_error": true,
+   "status": "data_blocked"
+  },
+  "ident:DATA_NOT_YET_CREATED:named": {
+   "is_error": false,
+   "status": "ok"
+  },
+  "ident:DATA_NOT_YET_CREATED:plain": {
+   "is_error": false,
+   "status": "ok"
+  },
+  "ident:DATA_READ_BLOCKED:named": {
+   "is_error": true,
+   "status": "data_blocked"
+  },
+  "ident:DATA_READ_BLOCKED:plain": {
+   "is_error": true,
+   "status": "data_blocked"
+  },
+  "ident:DATA_WRITE_BLOCKED:named": {
+   "is_error": true,
+   "status": "data_blocked"
+  },
+  "ident:DATA_WRITE_BLOCKED:plain": {
+   "is_error": true,
+   "status": "data_blocked"
+  },
+  "ident:DATA_WRITE_ERROR:named": {
+   "is_error": true,
+   "status": "data_blocked"
+  },
+  "ident:DATA_WRITE_ERROR:plain": {
+   "is_error": true,
+   "status": "data_blocked"
+  },
+  "ident:DEFERRED:named": {
+   "is_error": false,
+   "status": "ok"
+  },
+  "ident:DEFERRED:plain": {
+   "is_error": false,
+   "status": "ok"
+  },
+  "ident:DEGRADED:named": {
+   "is_error": false,
+   "status": "ok"
+  },
+  "ident:DEGRADED:plain": {
+   "is_error": false,
+   "status": "ok"
+  },
+  "ident:EDIT_BATCH_BLOCKED:named": {
+   "is_error": true,
+   "status": "edit_ops_blocked"
+  },
+  "ident:EDIT_BATCH_BLOCKED:plain": {
+   "is_error": true,
+   "status": "edit_ops_blocked"
+  },
+  "ident:EDIT_BATCH_ERROR:named": {
+   "is_error": true,
+   "status": "edit_ops_blocked"
+  },
+  "ident:EDIT_BATCH_ERROR:plain": {
+   "is_error": true,
+   "status": "edit_ops_blocked"
+  },
+  "ident:EDIT_OPS_PARTIAL_WRITE_FAILED:named": {
+   "is_error": true,
+   "status": "error"
+  },
+  "ident:EDIT_OPS_PARTIAL_WRITE_FAILED:plain": {
+   "is_error": true,
+   "status": "error"
+  },
+  "ident:EDIT_TEXT_BLOCKED:named": {
+   "is_error": true,
+   "status": "edit_text_blocked"
+  },
+  "ident:EDIT_TEXT_BLOCKED:plain": {
+   "is_error": true,
+   "status": "edit_text_blocked"
+  },
+  "ident:EDIT_TEXT_ERROR:named": {
+   "is_error": true,
+   "status": "edit_text_blocked"
+  },
+  "ident:EDIT_TEXT_ERROR:plain": {
+   "is_error": true,
+   "status": "edit_text_blocked"
+  },
+  "ident:ELEVATION_BLOCKED:named": {
+   "is_error": true,
+   "status": "elevation_blocked"
+  },
+  "ident:ELEVATION_BLOCKED:plain": {
+   "is_error": true,
+   "status": "elevation_blocked"
+  },
+  "ident:EPHEMERAL_TURN_RESTRICTED:named": {
+   "is_error": false,
+   "status": "ok"
+  },
+  "ident:EPHEMERAL_TURN_RESTRICTED:plain": {
+   "is_error": false,
+   "status": "ok"
+  },
+  "ident:ERROR:named": {
+   "is_error": false,
+   "status": "ok"
+  },
+  "ident:ERROR:plain": {
+   "is_error": false,
+   "status": "ok"
+  },
+  "ident:ESCALATE_PARENT_SETTLED:named": {
+   "is_error": false,
+   "status": "ok"
+  },
+  "ident:ESCALATE_PARENT_SETTLED:plain": {
+   "is_error": false,
+   "status": "ok"
+  },
+  "ident:ESCALATE_UNAVAILABLE:named": {
+   "is_error": true,
+   "status": "error"
+  },
+  "ident:ESCALATE_UNAVAILABLE:plain": {
+   "is_error": true,
+   "status": "error"
+  },
+  "ident:ESCALATE_UNWRITTEN:named": {
+   "is_error": false,
+   "status": "ok"
+  },
+  "ident:ESCALATE_UNWRITTEN:plain": {
+   "is_error": false,
+   "status": "ok"
+  },
+  "ident:EVOLUTION_AUTHORITY_REVOKED:named": {
+   "is_error": false,
+   "status": "ok"
+  },
+  "ident:EVOLUTION_AUTHORITY_REVOKED:plain": {
+   "is_error": false,
+   "status": "ok"
+  },
+  "ident:EVOLUTION_COMMIT_ORPHANED:named": {
+   "is_error": false,
+   "status": "ok"
+  },
+  "ident:EVOLUTION_COMMIT_ORPHANED:plain": {
+   "is_error": false,
+   "status": "ok"
+  },
+  "ident:EVOLUTION_ORPHAN_CONTAINMENT_FAILED:named": {
+   "is_error": true,
+   "status": "error"
+  },
+  "ident:EVOLUTION_ORPHAN_CONTAINMENT_FAILED:plain": {
+   "is_error": true,
+   "status": "error"
+  },
+  "ident:EVOLUTION_PUBLICATION_STOPPED:named": {
+   "is_error": false,
+   "status": "ok"
+  },
+  "ident:EVOLUTION_PUBLICATION_STOPPED:plain": {
+   "is_error": false,
+   "status": "ok"
+  },
+  "ident:EXECUTOR_UNAVAILABLE:named": {
+   "is_error": true,
+   "status": "error"
+  },
+  "ident:EXECUTOR_UNAVAILABLE:plain": {
+   "is_error": true,
+   "status": "error"
+  },
+  "ident:EXTRACT_VIDEO_FRAMES_UNAVAILABLE:named": {
+   "is_error": true,
+   "status": "error"
+  },
+  "ident:EXTRACT_VIDEO_FRAMES_UNAVAILABLE:plain": {
+   "is_error": true,
+   "status": "error"
+  },
+  "ident:FILE_NOT_FOUND:named": {
+   "is_error": false,
+   "status": "ok"
+  },
+  "ident:FILE_NOT_FOUND:plain": {
+   "is_error": false,
+   "status": "ok"
+  },
+  "ident:FILE_TOO_LARGE:named": {
+   "is_error": false,
+   "status": "ok"
+  },
+  "ident:FILE_TOO_LARGE:plain": {
+   "is_error": false,
+   "status": "ok"
+  },
+  "ident:FILE_WRITE_ERROR:named": {
+   "is_error": true,
+   "status": "error"
+  },
+  "ident:FILE_WRITE_ERROR:plain": {
+   "is_error": true,
+   "status": "error"
+  },
+  "ident:GH_ERROR:named": {
+   "is_error": true,
+   "status": "error"
+  },
+  "ident:GH_ERROR:plain": {
+   "is_error": true,
+   "status": "error"
+  },
+  "ident:GH_TIMEOUT:named": {
+   "is_error": false,
+   "status": "ok"
+  },
+  "ident:GH_TIMEOUT:plain": {
+   "is_error": false,
+   "status": "ok"
+  },
+  "ident:GIT_ATTRIBUTION_BLOCKED:named": {
+   "is_error": true,
+   "status": "blocked"
+  },
+  "ident:GIT_ATTRIBUTION_BLOCKED:plain": {
+   "is_error": true,
+   "status": "blocked"
+  },
+  "ident:GIT_ERROR:named": {
+   "is_error": false,
+   "status": "error"
+  },
+  "ident:GIT_ERROR:plain": {
+   "is_error": false,
+   "status": "error"
+  },
+  "ident:GIT_LOST_WORKTREE_ON_DETACHED_CHECKOUT_FAILED:named": {
+   "is_error": true,
+   "status": "error"
+  },
+  "ident:GIT_LOST_WORKTREE_ON_DETACHED_CHECKOUT_FAILED:plain": {
+   "is_error": true,
+   "status": "error"
+  },
+  "ident:GIT_NO_ATTRIBUTED_CHANGES:named": {
+   "is_error": false,
+   "status": "ok"
+  },
+  "ident:GIT_NO_ATTRIBUTED_CHANGES:plain": {
+   "is_error": false,
+   "status": "ok"
+  },
+  "ident:GIT_NO_CHANGES:named": {
+   "is_error": false,
+   "status": "ok"
+  },
+  "ident:GIT_NO_CHANGES:plain": {
+   "is_error": false,
+   "status": "ok"
+  },
+  "ident:GIT_VIA_SHELL_BLOCKED:named": {
+   "is_error": true,
+   "status": "git_via_shell_blocked"
+  },
+  "ident:GIT_VIA_SHELL_BLOCKED:plain": {
+   "is_error": true,
+   "status": "git_via_shell_blocked"
+  },
+  "ident:GIT_WARNING:named": {
+   "is_error": false,
+   "status": "ok"
+  },
+  "ident:GIT_WARNING:plain": {
+   "is_error": false,
+   "status": "ok"
+  },
+  "ident:HEAL_MODE_BLOCKED:named": {
+   "is_error": true,
+   "status": "heal_mode_blocked"
+  },
+  "ident:HEAL_MODE_BLOCKED:plain": {
+   "is_error": true,
+   "status": "heal_mode_blocked"
+  },
+  "ident:IDENTICAL_DIFF_REFUSED:named": {
+   "is_error": false,
+   "status": "ok"
+  },
+  "ident:IDENTICAL_DIFF_REFUSED:plain": {
+   "is_error": false,
+   "status": "ok"
+  },
+  "ident:IDENTITY_UPDATE_ABSTAINED:named": {
+   "is_error": false,
+   "status": "ok"
+  },
+  "ident:IDENTITY_UPDATE_ABSTAINED:plain": {
+   "is_error": false,
+   "status": "ok"
+  },
+  "ident:IMAGE_UNDECODABLE:named": {
+   "is_error": false,
+   "status": "ok"
+  },
+  "ident:IMAGE_UNDECODABLE:plain": {
+   "is_error": false,
+   "status": "ok"
+  },
+  "ident:INTEGRATE_APPLIED_UNSTAGED:named": {
+   "is_error": true,
+   "status": "integration_blocked"
+  },
+  "ident:INTEGRATE_APPLIED_UNSTAGED:plain": {
+   "is_error": true,
+   "status": "integration_blocked"
+  },
+  "ident:INTEGRATE_APPLY_HASH_MISMATCH:named": {
+   "is_error": true,
+   "status": "integration_blocked"
+  },
+  "ident:INTEGRATE_APPLY_HASH_MISMATCH:plain": {
+   "is_error": true,
+   "status": "integration_blocked"
+  },
+  "ident:INTEGRATE_APPLY_NO_OP:named": {
+   "is_error": true,
+   "status": "integration_blocked"
+  },
+  "ident:INTEGRATE_APPLY_NO_OP:plain": {
+   "is_error": true,
+   "status": "integration_blocked"
+  },
+  "ident:INTEGRATE_CONFLICT:named": {
+   "is_error": true,
+   "status": "integration_blocked"
+  },
+  "ident:INTEGRATE_CONFLICT:plain": {
+   "is_error": true,
+   "status": "integration_blocked"
+  },
+  "ident:INTEGRATE_COOP_VERIFY_FAILED:named": {
+   "is_error": true,
+   "status": "integration_blocked"
+  },
+  "ident:INTEGRATE_COOP_VERIFY_FAILED:plain": {
+   "is_error": true,
+   "status": "integration_blocked"
+  },
+  "ident:INTEGRATE_DELEGATED_ALREADY_DISPOSED:named": {
+   "is_error": true,
+   "status": "integration_blocked"
+  },
+  "ident:INTEGRATE_DELEGATED_ALREADY_DISPOSED:plain": {
+   "is_error": true,
+   "status": "integration_blocked"
+  },
+  "ident:INTEGRATE_DELEGATED_APPLY_AMBIGUOUS:named": {
+   "is_error": true,
+   "status": "integration_blocked"
+  },
+  "ident:INTEGRATE_DELEGATED_APPLY_AMBIGUOUS:plain": {
+   "is_error": true,
+   "status": "integration_blocked"
+  },
+  "ident:INTEGRATE_DELEGATED_BASELINE_UNVERIFIABLE:named": {
+   "is_error": true,
+   "status": "integration_blocked"
+  },
+  "ident:INTEGRATE_DELEGATED_BASELINE_UNVERIFIABLE:plain": {
+   "is_error": true,
+   "status": "integration_blocked"
+  },
+  "ident:INTEGRATE_DELEGATED_CAPTURE_FAILED:named": {
+   "is_error": true,
+   "status": "integration_blocked"
+  },
+  "ident:INTEGRATE_DELEGATED_CAPTURE_FAILED:plain": {
+   "is_error": true,
+   "status": "integration_blocked"
+  },
+  "ident:INTEGRATE_DELEGATED_NOT_ISOLATED:named": {
+   "is_error": true,
+   "status": "integration_blocked"
+  },
+  "ident:INTEGRATE_DELEGATED_NOT_ISOLATED:plain": {
+   "is_error": true,
+   "status": "integration_blocked"
+  },
+  "ident:INTEGRATE_DELEGATED_NOT_OWNED:named": {
+   "is_error": true,
+   "status": "integration_blocked"
+  },
+  "ident:INTEGRATE_DELEGATED_NOT_OWNED:plain": {
+   "is_error": true,
+   "status": "integration_blocked"
+  },
+  "ident:INTEGRATE_DELEGATED_NOT_TERMINAL:named": {
+   "is_error": true,
+   "status": "integration_blocked"
+  },
+  "ident:INTEGRATE_DELEGATED_NOT_TERMINAL:plain": {
+   "is_error": true,
+   "status": "integration_blocked"
+  },
+  "ident:INTEGRATE_DELEGATED_NO_CAPTURE:named": {
+   "is_error": true,
+   "status": "integration_blocked"
+  },
+  "ident:INTEGRATE_DELEGATED_NO_CAPTURE:plain": {
+   "is_error": true,
+   "status": "integration_blocked"
+  },
+  "ident:INTEGRATE_DELEGATED_PATH_ESCAPE:named": {
+   "is_error": true,
+   "status": "integration_blocked"
+  },
+  "ident:INTEGRATE_DELEGATED_PATH_ESCAPE:plain": {
+   "is_error": true,
+   "status": "integration_blocked"
+  },
+  "ident:INTEGRATE_DELEGATED_RESERVED_PATHS:named": {
+   "is_error": true,
+   "status": "integration_blocked"
+  },
+  "ident:INTEGRATE_DELEGATED_RESERVED_PATHS:plain": {
+   "is_error": true,
+   "status": "integration_blocked"
+  },
+  "ident:INTEGRATE_DELEGATED_SOURCE_UNRESOLVED:named": {
+   "is_error": true,
+   "status": "integration_blocked"
+  },
+  "ident:INTEGRATE_DELEGATED_SOURCE_UNRESOLVED:plain": {
+   "is_error": true,
+   "status": "integration_blocked"
+  },
+  "ident:INTEGRATE_DELEGATED_TARGET_MISMATCH:named": {
+   "is_error": true,
+   "status": "integration_blocked"
+  },
+  "ident:INTEGRATE_DELEGATED_TARGET_MISMATCH:plain": {
+   "is_error": true,
+   "status": "integration_blocked"
+  },
+  "ident:INTEGRATE_DISPOSITION_FAILED:named": {
+   "is_error": true,
+   "status": "integration_blocked"
+  },
+  "ident:INTEGRATE_DISPOSITION_FAILED:plain": {
+   "is_error": true,
+   "status": "integration_blocked"
+  },
+  "ident:INTEGRATE_DISPOSITION_UNWRITTEN:named": {
+   "is_error": true,
+   "status": "integration_blocked"
+  },
+  "ident:INTEGRATE_DISPOSITION_UNWRITTEN:plain": {
+   "is_error": true,
+   "status": "integration_blocked"
+  },
+  "ident:INTEGRATE_EXTERNAL_WORKSPACE_MISMATCH:named": {
+   "is_error": true,
+   "status": "integration_blocked"
+  },
+  "ident:INTEGRATE_EXTERNAL_WORKSPACE_MISMATCH:plain": {
+   "is_error": true,
+   "status": "integration_blocked"
+  },
+  "ident:INTEGRATE_EXTERNAL_WORKSPACE_MISSING:named": {
+   "is_error": true,
+   "status": "integration_blocked"
+  },
+  "ident:INTEGRATE_EXTERNAL_WORKSPACE_MISSING:plain": {
+   "is_error": true,
+   "status": "integration_blocked"
+  },
+  "ident:INTEGRATE_EXTERNAL_WORKSPACE_PARENT_MISSING:named": {
+   "is_error": true,
+   "status": "integration_blocked"
+  },
+  "ident:INTEGRATE_EXTERNAL_WORKSPACE_PARENT_MISSING:plain": {
+   "is_error": true,
+   "status": "integration_blocked"
+  },
+  "ident:INTEGRATE_EXTERNAL_WORKSPACE_TARGET_MISMATCH:named": {
+   "is_error": true,
+   "status": "integration_blocked"
+  },
+  "ident:INTEGRATE_EXTERNAL_WORKSPACE_TARGET_MISMATCH:plain": {
+   "is_error": true,
+   "status": "integration_blocked"
+  },
+  "ident:INTEGRATE_EXTERNAL_WORKSPACE_TARGET_MISSING:named": {
+   "is_error": true,
+   "status": "integration_blocked"
+  },
+  "ident:INTEGRATE_EXTERNAL_WORKSPACE_TARGET_MISSING:plain": {
+   "is_error": true,
+   "status": "integration_blocked"
+  },
+  "ident:INTEGRATE_GENESIS_FORBIDDEN:named": {
+   "is_error": true,
+   "status": "integration_blocked"
+  },
+  "ident:INTEGRATE_GENESIS_FORBIDDEN:plain": {
+   "is_error": true,
+   "status": "integration_blocked"
+  },
+  "ident:INTEGRATE_INTENT_UNWRITTEN:named": {
+   "is_error": true,
+   "status": "integration_blocked"
+  },
+  "ident:INTEGRATE_INTENT_UNWRITTEN:plain": {
+   "is_error": true,
+   "status": "integration_blocked"
+  },
+  "ident:INTEGRATE_LINEAGE_FORBIDDEN:named": {
+   "is_error": true,
+   "status": "integration_blocked"
+  },
+  "ident:INTEGRATE_LINEAGE_FORBIDDEN:plain": {
+   "is_error": true,
+   "status": "integration_blocked"
+  },
+  "ident:INTEGRATE_LOCK_TIMEOUT:named": {
+   "is_error": true,
+   "status": "integration_blocked"
+  },
+  "ident:INTEGRATE_LOCK_TIMEOUT:plain": {
+   "is_error": true,
+   "status": "integration_blocked"
+  },
+  "ident:INTEGRATE_MANIFEST_UNREADABLE:named": {
+   "is_error": true,
+   "status": "integration_blocked"
+  },
+  "ident:INTEGRATE_MANIFEST_UNREADABLE:plain": {
+   "is_error": true,
+   "status": "integration_blocked"
+  },
+  "ident:INTEGRATE_NO_CHANGES:named": {
+   "is_error": true,
+   "status": "integration_blocked"
+  },
+  "ident:INTEGRATE_NO_CHANGES:plain": {
+   "is_error": true,
+   "status": "integration_blocked"
+  },
+  "ident:INTEGRATE_PATCH_CORRUPT:named": {
+   "is_error": true,
+   "status": "integration_blocked"
+  },
+  "ident:INTEGRATE_PATCH_CORRUPT:plain": {
+   "is_error": true,
+   "status": "integration_blocked"
+  },
+  "ident:INTEGRATE_PATCH_MISSING:named": {
+   "is_error": true,
+   "status": "integration_blocked"
+  },
+  "ident:INTEGRATE_PATCH_MISSING:plain": {
+   "is_error": true,
+   "status": "integration_blocked"
+  },
+  "ident:INTEGRATE_PATCH_NOT_FOUND:named": {
+   "is_error": true,
+   "status": "integration_blocked"
+  },
+  "ident:INTEGRATE_PATCH_NOT_FOUND:plain": {
+   "is_error": true,
+   "status": "integration_blocked"
+  },
+  "ident:INTEGRATE_PATCH_UNREADABLE:named": {
+   "is_error": true,
+   "status": "integration_blocked"
+  },
+  "ident:INTEGRATE_PATCH_UNREADABLE:plain": {
+   "is_error": true,
+   "status": "integration_blocked"
+  },
+  "ident:INTEGRATE_SELF_WORKTREE_UNDER_WORKSPACE:named": {
+   "is_error": true,
+   "status": "integration_blocked"
+  },
+  "ident:INTEGRATE_SELF_WORKTREE_UNDER_WORKSPACE:plain": {
+   "is_error": true,
+   "status": "integration_blocked"
+  },
+  "ident:INTEGRATE_TARGET_ERROR:named": {
+   "is_error": true,
+   "status": "integration_blocked"
+  },
+  "ident:INTEGRATE_TARGET_ERROR:plain": {
+   "is_error": true,
+   "status": "integration_blocked"
+  },
+  "ident:INTEGRATE_TARGET_FORBIDDEN:named": {
+   "is_error": true,
+   "status": "integration_blocked"
+  },
+  "ident:INTEGRATE_TARGET_FORBIDDEN:plain": {
+   "is_error": true,
+   "status": "integration_blocked"
+  },
+  "ident:INTEGRATE_TARGET_NOT_GIT:named": {
+   "is_error": true,
+   "status": "integration_blocked"
+  },
+  "ident:INTEGRATE_TARGET_NOT_GIT:plain": {
+   "is_error": true,
+   "status": "integration_blocked"
+  },
+  "ident:INVALID_ARG:named": {
+   "is_error": false,
+   "status": "ok"
+  },
+  "ident:INVALID_ARG:plain": {
+   "is_error": false,
+   "status": "ok"
+  },
+  "ident:LIGHT_MODE_BLOCKED:named": {
+   "is_error": true,
+   "status": "light_mode_blocked"
+  },
+  "ident:LIGHT_MODE_BLOCKED:plain": {
+   "is_error": true,
+   "status": "light_mode_blocked"
+  },
+  "ident:LIGHT_MODE_REPO_WRITE_BLOCKED:named": {
+   "is_error": true,
+   "status": "light_mode_blocked"
+  },
+  "ident:LIGHT_MODE_REPO_WRITE_BLOCKED:plain": {
+   "is_error": true,
+   "status": "light_mode_blocked"
+  },
+  "ident:LIST_FILES_ERROR:named": {
+   "is_error": true,
+   "status": "error"
+  },
+  "ident:LIST_FILES_ERROR:plain": {
+   "is_error": true,
+   "status": "error"
+  },
+  "ident:LOCAL_READONLY_SUBAGENT_BLOCKED:named": {
+   "is_error": true,
+   "status": "blocked"
+  },
+  "ident:LOCAL_READONLY_SUBAGENT_BLOCKED:plain": {
+   "is_error": true,
+   "status": "blocked"
+  },
+  "ident:MANAGED_UPDATE_ERROR:named": {
+   "is_error": true,
+   "status": "error"
+  },
+  "ident:MANAGED_UPDATE_ERROR:plain": {
+   "is_error": true,
+   "status": "error"
+  },
+  "ident:MANAGED_UPDATE_GATE_BLOCKED:named": {
+   "is_error": true,
+   "status": "blocked"
+  },
+  "ident:MANAGED_UPDATE_GATE_BLOCKED:plain": {
+   "is_error": true,
+   "status": "blocked"
+  },
+  "ident:MANAGED_UPDATE_IN_PROGRESS:named": {
+   "is_error": false,
+   "status": "ok"
+  },
+  "ident:MANAGED_UPDATE_IN_PROGRESS:plain": {
+   "is_error": false,
+   "status": "ok"
+  },
+  "ident:MANAGED_UPDATE_ROLLBACK_FAILED:named": {
+   "is_error": true,
+   "status": "error"
+  },
+  "ident:MANAGED_UPDATE_ROLLBACK_FAILED:plain": {
+   "is_error": true,
+   "status": "error"
+  },
+  "ident:MANAGED_UPDATE_STATE_UNAVAILABLE:named": {
+   "is_error": true,
+   "status": "error"
+  },
+  "ident:MANAGED_UPDATE_STATE_UNAVAILABLE:plain": {
+   "is_error": true,
+   "status": "error"
+  },
+  "ident:MCP_DISABLED:named": {
+   "is_error": false,
+   "status": "ok"
+  },
+  "ident:MCP_DISABLED:plain": {
+   "is_error": false,
+   "status": "ok"
+  },
+  "ident:MCP_TOOL_DISALLOWED:named": {
+   "is_error": false,
+   "status": "ok"
+  },
+  "ident:MCP_TOOL_DISALLOWED:plain": {
+   "is_error": false,
+   "status": "ok"
+  },
+  "ident:MCP_TOOL_ERROR:named": {
+   "is_error": true,
+   "status": "error"
+  },
+  "ident:MCP_TOOL_ERROR:plain": {
+   "is_error": true,
+   "status": "error"
+  },
+  "ident:MCP_TOOL_NOT_FOUND:named": {
+   "is_error": false,
+   "status": "ok"
+  },
+  "ident:MCP_TOOL_NOT_FOUND:plain": {
+   "is_error": false,
+   "status": "ok"
+  },
+  "ident:MCP_TOOL_TIMEOUT:named": {
+   "is_error": false,
+   "status": "ok"
+  },
+  "ident:MCP_TOOL_TIMEOUT:plain": {
+   "is_error": false,
+   "status": "ok"
+  },
+  "ident:MUTATIVE_SUBAGENTS_DISABLED:named": {
+   "is_error": false,
+   "status": "ok"
+  },
+  "ident:MUTATIVE_SUBAGENTS_DISABLED:plain": {
+   "is_error": false,
+   "status": "ok"
+  },
+  "ident:NANNY_DELEGATED_RUN_FAILED:named": {
+   "is_error": true,
+   "status": "error"
+  },
+  "ident:NANNY_DELEGATED_RUN_FAILED:plain": {
+   "is_error": true,
+   "status": "error"
+  },
+  "ident:NANNY_DELEGATED_RUN_PENDING:named": {
+   "is_error": false,
+   "status": "ok"
+  },
+  "ident:NANNY_DELEGATED_RUN_PENDING:plain": {
+   "is_error": false,
+   "status": "ok"
+  },
+  "ident:NANNY_DID_NOT_DELEGATE:named": {
+   "is_error": false,
+   "status": "ok"
+  },
+  "ident:NANNY_DID_NOT_DELEGATE:plain": {
+   "is_error": false,
+   "status": "ok"
+  },
+  "ident:NANNY_METERED_OVERRUN:named": {
+   "is_error": false,
+   "status": "ok"
+  },
+  "ident:NANNY_METERED_OVERRUN:plain": {
+   "is_error": false,
+   "status": "ok"
+  },
+  "ident:NEEDS_MANUAL_TARGET:named": {
+   "is_error": false,
+   "status": "ok"
+  },
+  "ident:NEEDS_MANUAL_TARGET:plain": {
+   "is_error": false,
+   "status": "ok"
+  },
+  "ident:NOTE:named": {
+   "is_error": false,
+   "status": "ok"
+  },
+  "ident:NOTE:plain": {
+   "is_error": false,
+   "status": "ok"
+  },
+  "ident:NOT_FOUND:named": {
+   "is_error": false,
+   "status": "ok"
+  },
+  "ident:NOT_FOUND:plain": {
+   "is_error": false,
+   "status": "ok"
+  },
+  "ident:OCR_PDF_SCANNED_UNAVAILABLE:named": {
+   "is_error": true,
+   "status": "error"
+  },
+  "ident:OCR_PDF_SCANNED_UNAVAILABLE:plain": {
+   "is_error": true,
+   "status": "error"
+  },
+  "ident:OCR_PDF_UNAVAILABLE:named": {
+   "is_error": true,
+   "status": "error"
+  },
+  "ident:OCR_PDF_UNAVAILABLE:plain": {
+   "is_error": true,
+   "status": "error"
+  },
+  "ident:OMISSION:named": {
+   "is_error": false,
+   "status": "ok"
+  },
+  "ident:OMISSION:plain": {
+   "is_error": false,
+   "status": "ok"
+  },
+  "ident:OUTPUT_TRUNCATED:named": {
+   "is_error": false,
+   "status": "ok"
+  },
+  "ident:OUTPUT_TRUNCATED:plain": {
+   "is_error": false,
+   "status": "ok"
+  },
+  "ident:OWNER_SETTINGS_CHANGED:named": {
+   "is_error": false,
+   "status": "ok"
+  },
+  "ident:OWNER_SETTINGS_CHANGED:plain": {
+   "is_error": false,
+   "status": "ok"
+  },
+  "ident:OWNER_SKILL_ATTESTATION_SELF_CALL_BLOCKED:named": {
+   "is_error": true,
+   "status": "blocked"
+  },
+  "ident:OWNER_SKILL_ATTESTATION_SELF_CALL_BLOCKED:plain": {
+   "is_error": true,
+   "status": "blocked"
+  },
+  "ident:PACK:named": {
+   "is_error": false,
+   "status": "ok"
+  },
+  "ident:PACK:plain": {
+   "is_error": false,
+   "status": "ok"
+  },
+  "ident:PARTIAL:named": {
+   "is_error": false,
+   "status": "ok"
+  },
+  "ident:PARTIAL:plain": {
+   "is_error": false,
+   "status": "ok"
+  },
+  "ident:PATH_BLOCKED:named": {
+   "is_error": true,
+   "status": "blocked"
+  },
+  "ident:PATH_BLOCKED:plain": {
+   "is_error": true,
+   "status": "blocked"
+  },
+  "ident:PATH_ERROR:named": {
+   "is_error": true,
+   "status": "error"
+  },
+  "ident:PATH_ERROR:plain": {
+   "is_error": true,
+   "status": "error"
+  },
+  "ident:PLAN_REVIEW_CYCLES_EXHAUSTED:named": {
+   "is_error": false,
+   "status": "ok"
+  },
+  "ident:PLAN_REVIEW_CYCLES_EXHAUSTED:plain": {
+   "is_error": false,
+   "status": "ok"
+  },
+  "ident:PLAN_REVIEW_DEGRADED_PREFLIGHT_OVERSIZE:named": {
+   "is_error": false,
+   "status": "ok"
+  },
+  "ident:PLAN_REVIEW_DEGRADED_PREFLIGHT_OVERSIZE:plain": {
+   "is_error": false,
+   "status": "ok"
+  },
+  "ident:PLAN_REVIEW_SKIPPED_BUDGET:named": {
+   "is_error": false,
+   "status": "ok"
+  },
+  "ident:PLAN_REVIEW_SKIPPED_BUDGET:plain": {
+   "is_error": false,
+   "status": "ok"
+  },
+  "ident:PREFLIGHT_BLOCKED:named": {
+   "is_error": true,
+   "status": "blocked"
+  },
+  "ident:PREFLIGHT_BLOCKED:plain": {
+   "is_error": true,
+   "status": "blocked"
+  },
+  "ident:PRESENCE_ARGUMENT_BINDING_BLOCKED:named": {
+   "is_error": true,
+   "status": "blocked"
+  },
+  "ident:PRESENCE_ARGUMENT_BINDING_BLOCKED:plain": {
+   "is_error": true,
+   "status": "blocked"
+  },
+  "ident:PRESENCE_CAPABILITY_BLOCKED:named": {
+   "is_error": true,
+   "status": "blocked"
+  },
+  "ident:PRESENCE_CAPABILITY_BLOCKED:plain": {
+   "is_error": true,
+   "status": "blocked"
+  },
+  "ident:PRESENCE_DELEGATION_BLOCKED:named": {
+   "is_error": true,
+   "status": "blocked"
+  },
+  "ident:PRESENCE_DELEGATION_BLOCKED:plain": {
+   "is_error": true,
+   "status": "blocked"
+  },
+  "ident:PRESENCE_RESOURCE_BLOCKED:named": {
+   "is_error": true,
+   "status": "blocked"
+  },
+  "ident:PRESENCE_RESOURCE_BLOCKED:plain": {
+   "is_error": true,
+   "status": "blocked"
+  },
+  "ident:PRE_PUSH_TEST_ERROR:named": {
+   "is_error": true,
+   "status": "error"
+  },
+  "ident:PRE_PUSH_TEST_ERROR:plain": {
+   "is_error": true,
+   "status": "error"
+  },
+  "ident:PROJECTS_ERROR:named": {
+   "is_error": true,
+   "status": "error"
+  },
+  "ident:PROJECTS_ERROR:plain": {
+   "is_error": true,
+   "status": "error"
+  },
+  "ident:PR_BRANCH_ERROR:named": {
+   "is_error": true,
+   "status": "error"
+  },
+  "ident:PR_BRANCH_ERROR:plain": {
+   "is_error": true,
+   "status": "error"
+  },
+  "ident:PR_FETCH_ERROR:named": {
+   "is_error": true,
+   "status": "error"
+  },
+  "ident:PR_FETCH_ERROR:plain": {
+   "is_error": true,
+   "status": "error"
+  },
+  "ident:PR_MERGE_ERROR:named": {
+   "is_error": true,
+   "status": "error"
+  },
+  "ident:PR_MERGE_ERROR:plain": {
+   "is_error": true,
+   "status": "error"
+  },
+  "ident:PULL_ERROR:named": {
+   "is_error": true,
+   "status": "error"
+  },
+  "ident:PULL_ERROR:plain": {
+   "is_error": true,
+   "status": "error"
+  },
+  "ident:PYTHON_INTERPRETER_UNAVAILABLE:named": {
+   "is_error": true,
+   "status": "error"
+  },
+  "ident:PYTHON_INTERPRETER_UNAVAILABLE:plain": {
+   "is_error": true,
+   "status": "error"
+  },
+  "ident:QUERY_CODE_ERROR:named": {
+   "is_error": true,
+   "status": "error"
+  },
+  "ident:QUERY_CODE_ERROR:plain": {
+   "is_error": true,
+   "status": "error"
+  },
+  "ident:QUERY_CODE_TRUNCATED:named": {
+   "is_error": false,
+   "status": "ok"
+  },
+  "ident:QUERY_CODE_TRUNCATED:plain": {
+   "is_error": false,
+   "status": "ok"
+  },
+  "ident:READ_FILE_BLOCKED:named": {
+   "is_error": true,
+   "status": "blocked"
+  },
+  "ident:READ_FILE_BLOCKED:plain": {
+   "is_error": true,
+   "status": "blocked"
+  },
+  "ident:READ_FILE_ERROR:named": {
+   "is_error": true,
+   "status": "error"
+  },
+  "ident:READ_FILE_ERROR:plain": {
+   "is_error": true,
+   "status": "error"
+  },
+  "ident:REJECTED:named": {
+   "is_error": false,
+   "status": "ok"
+  },
+  "ident:REJECTED:plain": {
+   "is_error": false,
+   "status": "ok"
+  },
+  "ident:REPO_LIST_BLOCKED:named": {
+   "is_error": true,
+   "status": "blocked"
+  },
+  "ident:REPO_LIST_BLOCKED:plain": {
+   "is_error": true,
+   "status": "blocked"
+  },
+  "ident:REPO_READ_BLOCKED:named": {
+   "is_error": true,
+   "status": "blocked"
+  },
+  "ident:REPO_READ_BLOCKED:plain": {
+   "is_error": true,
+   "status": "blocked"
+  },
+  "ident:RESOURCE_CONSTRAINT_BLOCKED:named": {
+   "is_error": true,
+   "status": "resource_constraint_blocked"
+  },
+  "ident:RESOURCE_CONSTRAINT_BLOCKED:plain": {
+   "is_error": true,
+   "status": "resource_constraint_blocked"
+  },
+  "ident:RESOURCE_POLICY_BLOCKED:named": {
+   "is_error": true,
+   "status": "resource_policy_blocked"
+  },
+  "ident:RESOURCE_POLICY_BLOCKED:plain": {
+   "is_error": true,
+   "status": "resource_policy_blocked"
+  },
+  "ident:RESTART_BLOCKED:named": {
+   "is_error": true,
+   "status": "blocked"
+  },
+  "ident:RESTART_BLOCKED:plain": {
+   "is_error": true,
+   "status": "blocked"
+  },
+  "ident:RESTORE_BLOCKED:named": {
+   "is_error": true,
+   "status": "blocked"
+  },
+  "ident:RESTORE_BLOCKED:plain": {
+   "is_error": true,
+   "status": "blocked"
+  },
+  "ident:RESTORE_ERROR:named": {
+   "is_error": true,
+   "status": "error"
+  },
+  "ident:RESTORE_ERROR:plain": {
+   "is_error": true,
+   "status": "error"
+  },
+  "ident:RESTORE_PARTIAL:named": {
+   "is_error": false,
+   "status": "ok"
+  },
+  "ident:RESTORE_PARTIAL:plain": {
+   "is_error": false,
+   "status": "ok"
+  },
+  "ident:RESULT:named": {
+   "is_error": false,
+   "status": "ok"
+  },
+  "ident:RESULT:plain": {
+   "is_error": false,
+   "status": "ok"
+  },
+  "ident:REVERT_BLOCKED:named": {
+   "is_error": true,
+   "status": "blocked"
+  },
+  "ident:REVERT_BLOCKED:plain": {
+   "is_error": true,
+   "status": "blocked"
+  },
+  "ident:REVERT_ERROR:named": {
+   "is_error": true,
+   "status": "error"
+  },
+  "ident:REVERT_ERROR:plain": {
+   "is_error": true,
+   "status": "error"
+  },
+  "ident:REVIEW:named": {
+   "is_error": false,
+   "status": "ok"
+  },
+  "ident:REVIEW:plain": {
+   "is_error": false,
+   "status": "ok"
+  },
+  "ident:REVIEWED_ATTEMPT_IN_PROGRESS:named": {
+   "is_error": false,
+   "status": "ok"
+  },
+  "ident:REVIEWED_ATTEMPT_IN_PROGRESS:plain": {
+   "is_error": false,
+   "status": "ok"
+  },
+  "ident:REVIEW_BINDING_BLOCKED:named": {
+   "is_error": true,
+   "status": "blocked"
+  },
+  "ident:REVIEW_BINDING_BLOCKED:plain": {
+   "is_error": true,
+   "status": "blocked"
+  },
+  "ident:REVIEW_BINDING_FAILED:named": {
+   "is_error": true,
+   "status": "error"
+  },
+  "ident:REVIEW_BINDING_FAILED:plain": {
+   "is_error": true,
+   "status": "error"
+  },
+  "ident:REVIEW_BINDING_UNAVAILABLE:named": {
+   "is_error": true,
+   "status": "error"
+  },
+  "ident:REVIEW_BINDING_UNAVAILABLE:plain": {
+   "is_error": true,
+   "status": "error"
+  },
+  "ident:REVIEW_BLOCKED:named": {
+   "is_error": false,
+   "status": "blocked"
+  },
+  "ident:REVIEW_BLOCKED:plain": {
+   "is_error": false,
+   "status": "blocked"
+  },
+  "ident:REVIEW_CUSTODY_LOST:named": {
+   "is_error": false,
+   "status": "ok"
+  },
+  "ident:REVIEW_CUSTODY_LOST:plain": {
+   "is_error": false,
+   "status": "ok"
+  },
+  "ident:REVIEW_CYCLES_EXHAUSTED:named": {
+   "is_error": false,
+   "status": "ok"
+  },
+  "ident:REVIEW_CYCLES_EXHAUSTED:plain": {
+   "is_error": false,
+   "status": "ok"
+  },
+  "ident:REVIEW_PENDING:named": {
+   "is_error": false,
+   "status": "ok"
+  },
+  "ident:REVIEW_PENDING:plain": {
+   "is_error": false,
+   "status": "ok"
+  },
+  "ident:REVIEW_REVALIDATION_FAILED:named": {
+   "is_error": true,
+   "status": "error"
+  },
+  "ident:REVIEW_REVALIDATION_FAILED:plain": {
+   "is_error": true,
+   "status": "error"
+  },
+  "ident:REVIEW_STATE_UNAVAILABLE:named": {
+   "is_error": true,
+   "status": "error"
+  },
+  "ident:REVIEW_STATE_UNAVAILABLE:plain": {
+   "is_error": true,
+   "status": "error"
+  },
+  "ident:ROLLBACK_ERROR:named": {
+   "is_error": true,
+   "status": "error"
+  },
+  "ident:ROLLBACK_ERROR:plain": {
+   "is_error": true,
+   "status": "error"
+  },
+  "ident:ROOM_WRITE_VIA_TASK:named": {
+   "is_error": false,
+   "status": "ok"
+  },
+  "ident:ROOM_WRITE_VIA_TASK:plain": {
+   "is_error": false,
+   "status": "ok"
+  },
+  "ident:ROOT_REQUIRED_ACTIVE_WORKSPACE:named": {
+   "is_error": true,
+   "status": "root_required_active_workspace"
+  },
+  "ident:ROOT_REQUIRED_ACTIVE_WORKSPACE:plain": {
+   "is_error": true,
+   "status": "root_required_active_workspace"
+  },
+  "ident:ROOT_REQUIRED_USER_FILES:named": {
+   "is_error": true,
+   "status": "root_required_user_files"
+  },
+  "ident:ROOT_REQUIRED_USER_FILES:plain": {
+   "is_error": true,
+   "status": "root_required_user_files"
+  },
+  "ident:ROUTE_REJECTED:named": {
+   "is_error": false,
+   "status": "ok"
+  },
+  "ident:ROUTE_REJECTED:plain": {
+   "is_error": false,
+   "status": "ok"
+  },
+  "ident:ROUTE_UNCONFIRMED:named": {
+   "is_error": false,
+   "status": "ok"
+  },
+  "ident:ROUTE_UNCONFIRMED:plain": {
+   "is_error": false,
+   "status": "ok"
+  },
+  "ident:ROUTING_UNCONFIRMED:named": {
+   "is_error": false,
+   "status": "ok"
+  },
+  "ident:ROUTING_UNCONFIRMED:plain": {
+   "is_error": false,
+   "status": "ok"
+  },
+  "ident:RUN_SCRIPT_BLOCKED:named": {
+   "is_error": true,
+   "status": "run_script_blocked"
+  },
+  "ident:RUN_SCRIPT_BLOCKED:plain": {
+   "is_error": true,
+   "status": "run_script_blocked"
+  },
+  "ident:SAFETY_MODE_SELF_LOWERING_BLOCKED:named": {
+   "is_error": true,
+   "status": "blocked"
+  },
+  "ident:SAFETY_MODE_SELF_LOWERING_BLOCKED:plain": {
+   "is_error": true,
+   "status": "blocked"
+  },
+  "ident:SAFETY_SUBJECT_TOO_LARGE_BLOCKED:named": {
+   "is_error": true,
+   "status": "blocked"
+  },
+  "ident:SAFETY_SUBJECT_TOO_LARGE_BLOCKED:plain": {
+   "is_error": true,
+   "status": "blocked"
+  },
+  "ident:SAFETY_UNAVAILABLE:named": {
+   "is_error": true,
+   "status": "error"
+  },
+  "ident:SAFETY_UNAVAILABLE:plain": {
+   "is_error": true,
+   "status": "error"
+  },
+  "ident:SAFETY_VIOLATION:named": {
+   "is_error": true,
+   "status": "safety_violation"
+  },
+  "ident:SAFETY_VIOLATION:plain": {
+   "is_error": true,
+   "status": "safety_violation"
+  },
+  "ident:SAFETY_WARNING:named": {
+   "is_error": false,
+   "status": "ok"
+  },
+  "ident:SAFETY_WARNING:plain": {
+   "is_error": false,
+   "status": "ok"
+  },
+  "ident:SCOPE_QUORUM_NOT_MET:named": {
+   "is_error": false,
+   "status": "ok"
+  },
+  "ident:SCOPE_QUORUM_NOT_MET:plain": {
+   "is_error": false,
+   "status": "ok"
+  },
+  "ident:SCOPE_REVIEW_BLOCKED:named": {
+   "is_error": true,
+   "status": "blocked"
+  },
+  "ident:SCOPE_REVIEW_BLOCKED:plain": {
+   "is_error": true,
+   "status": "blocked"
+  },
+  "ident:SCOPE_REVIEW_SKIPPED:named": {
+   "is_error": false,
+   "status": "ok"
+  },
+  "ident:SCOPE_REVIEW_SKIPPED:plain": {
+   "is_error": false,
+   "status": "ok"
+  },
+  "ident:SCOPE_REVIEW_SUB_FLOOR:named": {
+   "is_error": false,
+   "status": "ok"
+  },
+  "ident:SCOPE_REVIEW_SUB_FLOOR:plain": {
+   "is_error": false,
+   "status": "ok"
+  },
+  "ident:SCOPE_SESSION_ADVISORY_ONLY:named": {
+   "is_error": false,
+   "status": "ok"
+  },
+  "ident:SCOPE_SESSION_ADVISORY_ONLY:plain": {
+   "is_error": false,
+   "status": "ok"
+  },
+  "ident:SCRATCH_BLOCKED:named": {
+   "is_error": true,
+   "status": "blocked"
+  },
+  "ident:SCRATCH_BLOCKED:plain": {
+   "is_error": true,
+   "status": "blocked"
+  },
+  "ident:SCRATCH_REMAINS:named": {
+   "is_error": false,
+   "status": "ok"
+  },
+  "ident:SCRATCH_REMAINS:plain": {
+   "is_error": false,
+   "status": "ok"
+  },
+  "ident:SCRIPT_CWD_BLOCKED:named": {
+   "is_error": true,
+   "status": "blocked"
+  },
+  "ident:SCRIPT_CWD_BLOCKED:plain": {
+   "is_error": true,
+   "status": "blocked"
+  },
+  "ident:SEARCH_BLOCKED:named": {
+   "is_error": true,
+   "status": "blocked"
+  },
+  "ident:SEARCH_BLOCKED:plain": {
+   "is_error": true,
+   "status": "blocked"
+  },
+  "ident:SEARCH_ERROR:named": {
+   "is_error": true,
+   "status": "error"
+  },
+  "ident:SEARCH_ERROR:plain": {
+   "is_error": true,
+   "status": "error"
+  },
+  "ident:SECRET_BYTES_MASKED:named": {
+   "is_error": false,
+   "status": "ok"
+  },
+  "ident:SECRET_BYTES_MASKED:plain": {
+   "is_error": false,
+   "status": "ok"
+  },
+  "ident:SELF_OVERWRITE_NOTICE:named": {
+   "is_error": false,
+   "status": "ok"
+  },
+  "ident:SELF_OVERWRITE_NOTICE:plain": {
+   "is_error": false,
+   "status": "ok"
+  },
+  "ident:SEND_LINKS_NO_CHAT:named": {
+   "is_error": false,
+   "status": "ok"
+  },
+  "ident:SEND_LINKS_NO_CHAT:plain": {
+   "is_error": false,
+   "status": "ok"
+  },
+  "ident:SERVICE_ALREADY_RUNNING:named": {
+   "is_error": false,
+   "status": "ok"
+  },
+  "ident:SERVICE_ALREADY_RUNNING:plain": {
+   "is_error": false,
+   "status": "ok"
+  },
+  "ident:SERVICE_NOT_FOUND:named": {
+   "is_error": false,
+   "status": "ok"
+  },
+  "ident:SERVICE_NOT_FOUND:plain": {
+   "is_error": false,
+   "status": "ok"
+  },
+  "ident:SERVICE_START_ERROR:named": {
+   "is_error": true,
+   "status": "error"
+  },
+  "ident:SERVICE_START_ERROR:plain": {
+   "is_error": true,
+   "status": "error"
+  },
+  "ident:SERVICE_STOP_ERROR:named": {
+   "is_error": true,
+   "status": "error"
+  },
+  "ident:SERVICE_STOP_ERROR:plain": {
+   "is_error": true,
+   "status": "error"
+  },
+  "ident:SHELL_ARG_ERROR:named": {
+   "is_error": true,
+   "status": "shell_error"
+  },
+  "ident:SHELL_ARG_ERROR:plain": {
+   "is_error": true,
+   "status": "shell_error"
+  },
+  "ident:SHELL_CMD_ERROR:named": {
+   "is_error": true,
+   "status": "shell_error"
+  },
+  "ident:SHELL_CMD_ERROR:plain": {
+   "is_error": true,
+   "status": "shell_error"
+  },
+  "ident:SHELL_CWD_BLOCKED:named": {
+   "is_error": true,
+   "status": "cwd_blocked"
+  },
+  "ident:SHELL_CWD_BLOCKED:plain": {
+   "is_error": true,
+   "status": "cwd_blocked"
+  },
+  "ident:SHELL_ERROR:named": {
+   "is_error": true,
+   "status": "shell_error"
+  },
+  "ident:SHELL_ERROR:plain": {
+   "is_error": true,
+   "status": "shell_error"
+  },
+  "ident:SHELL_EXIT_ERROR:named": {
+   "is_error": true,
+   "status": "non_zero_exit"
+  },
+  "ident:SHELL_EXIT_ERROR:plain": {
+   "is_error": true,
+   "status": "non_zero_exit"
+  },
+  "ident:SHELL_LITERAL_ARGV_NOTE:named": {
+   "is_error": true,
+   "status": "shell_error"
+  },
+  "ident:SHELL_LITERAL_ARGV_NOTE:plain": {
+   "is_error": true,
+   "status": "shell_error"
+  },
+  "ident:SHELL_REGEX_AUTO_CORRECTED:named": {
+   "is_error": false,
+   "status": "ok_autocorrected"
+  },
+  "ident:SHELL_REGEX_AUTO_CORRECTED:plain": {
+   "is_error": false,
+   "status": "ok_autocorrected"
+  },
+  "ident:SKILLS_UNAVAILABLE:named": {
+   "is_error": true,
+   "status": "error"
+  },
+  "ident:SKILLS_UNAVAILABLE:plain": {
+   "is_error": true,
+   "status": "error"
+  },
+  "ident:SKILL_EXEC_ARGV_TOO_LARGE:named": {
+   "is_error": false,
+   "status": "ok"
+  },
+  "ident:SKILL_EXEC_ARGV_TOO_LARGE:plain": {
+   "is_error": false,
+   "status": "ok"
+  },
+  "ident:SKILL_EXEC_BLOCKED:named": {
+   "is_error": true,
+   "status": "blocked"
+  },
+  "ident:SKILL_EXEC_BLOCKED:plain": {
+   "is_error": true,
+   "status": "blocked"
+  },
+  "ident:SKILL_EXEC_ERROR:named": {
+   "is_error": true,
+   "status": "error"
+  },
+  "ident:SKILL_EXEC_ERROR:plain": {
+   "is_error": true,
+   "status": "error"
+  },
+  "ident:SKILL_EXEC_EXTENSION:named": {
+   "is_error": false,
+   "status": "ok"
+  },
+  "ident:SKILL_EXEC_EXTENSION:plain": {
+   "is_error": false,
+   "status": "ok"
+  },
+  "ident:SKILL_EXEC_FAILED:named": {
+   "is_error": true,
+   "status": "error"
+  },
+  "ident:SKILL_EXEC_FAILED:plain": {
+   "is_error": true,
+   "status": "error"
+  },
+  "ident:SKILL_EXEC_GRANT_REQUIRED:named": {
+   "is_error": false,
+   "status": "ok"
+  },
+  "ident:SKILL_EXEC_GRANT_REQUIRED:plain": {
+   "is_error": false,
+   "status": "ok"
+  },
+  "ident:SKILL_EXEC_OVERFLOW:named": {
+   "is_error": false,
+   "status": "ok"
+  },
+  "ident:SKILL_EXEC_OVERFLOW:plain": {
+   "is_error": false,
+   "status": "ok"
+  },
+  "ident:SKILL_EXEC_TIMEOUT:named": {
+   "is_error": false,
+   "status": "ok"
+  },
+  "ident:SKILL_EXEC_TIMEOUT:plain": {
+   "is_error": false,
+   "status": "ok"
+  },
+  "ident:SKILL_NOT_FINALIZED:named": {
+   "is_error": false,
+   "status": "ok"
+  },
+  "ident:SKILL_NOT_FINALIZED:plain": {
+   "is_error": false,
+   "status": "ok"
+  },
+  "ident:SKILL_PAYLOAD_ARG_ERROR:named": {
+   "is_error": true,
+   "status": "skill_payload_blocked"
+  },
+  "ident:SKILL_PAYLOAD_ARG_ERROR:plain": {
+   "is_error": true,
+   "status": "skill_payload_blocked"
+  },
+  "ident:SKILL_PREFLIGHT_ERROR:named": {
+   "is_error": true,
+   "status": "error"
+  },
+  "ident:SKILL_PREFLIGHT_ERROR:plain": {
+   "is_error": true,
+   "status": "error"
+  },
+  "ident:SKILL_REDIRECT_BLOCKED:named": {
+   "is_error": true,
+   "status": "skill_payload_blocked"
+  },
+  "ident:SKILL_REDIRECT_BLOCKED:plain": {
+   "is_error": true,
+   "status": "skill_payload_blocked"
+  },
+  "ident:SKILL_REPAIR_STALE:named": {
+   "is_error": false,
+   "status": "ok"
+  },
+  "ident:SKILL_REPAIR_STALE:plain": {
+   "is_error": false,
+   "status": "ok"
+  },
+  "ident:SKILL_REVIEW_ERROR:named": {
+   "is_error": true,
+   "status": "error"
+  },
+  "ident:SKILL_REVIEW_ERROR:plain": {
+   "is_error": true,
+   "status": "error"
+  },
+  "ident:SKILL_SHORT_FORM_IGNORED:named": {
+   "is_error": false,
+   "status": "ok"
+  },
+  "ident:SKILL_SHORT_FORM_IGNORED:plain": {
+   "is_error": false,
+   "status": "ok"
+  },
+  "ident:SKILL_STATE_WRITE_BLOCKED:named": {
+   "is_error": true,
+   "status": "skill_state_blocked"
+  },
+  "ident:SKILL_STATE_WRITE_BLOCKED:plain": {
+   "is_error": true,
+   "status": "skill_state_blocked"
+  },
+  "ident:SKILL_TOGGLE_ERROR:named": {
+   "is_error": true,
+   "status": "error"
+  },
+  "ident:SKILL_TOGGLE_ERROR:plain": {
+   "is_error": true,
+   "status": "error"
+  },
+  "ident:STAGE_ADAPTATIONS_ERROR:named": {
+   "is_error": true,
+   "status": "error"
+  },
+  "ident:STAGE_ADAPTATIONS_ERROR:plain": {
+   "is_error": true,
+   "status": "error"
+  },
+  "ident:STALE:named": {
+   "is_error": false,
+   "status": "ok"
+  },
+  "ident:STALE:plain": {
+   "is_error": false,
+   "status": "ok"
+  },
+  "ident:STEER_REJECTED:named": {
+   "is_error": false,
+   "status": "ok"
+  },
+  "ident:STEER_REJECTED:plain": {
+   "is_error": false,
+   "status": "ok"
+  },
+  "ident:STEER_UNCONFIRMED:named": {
+   "is_error": false,
+   "status": "ok"
+  },
+  "ident:STEER_UNCONFIRMED:plain": {
+   "is_error": false,
+   "status": "ok"
+  },
+  "ident:STR_REPLACE_BLOCKED:named": {
+   "is_error": true,
+   "status": "blocked"
+  },
+  "ident:STR_REPLACE_BLOCKED:plain": {
+   "is_error": true,
+   "status": "blocked"
+  },
+  "ident:STR_REPLACE_ERROR:named": {
+   "is_error": true,
+   "status": "error"
+  },
+  "ident:STR_REPLACE_ERROR:plain": {
+   "is_error": true,
+   "status": "error"
+  },
+  "ident:SUBAGENT_CAPABILITY_MISMATCH:named": {
+   "is_error": false,
+   "status": "ok"
+  },
+  "ident:SUBAGENT_CAPABILITY_MISMATCH:plain": {
+   "is_error": false,
+   "status": "ok"
+  },
+  "ident:SUBAGENT_SECRET_READ_BLOCKED:named": {
+   "is_error": true,
+   "status": "blocked"
+  },
+  "ident:SUBAGENT_SECRET_READ_BLOCKED:plain": {
+   "is_error": true,
+   "status": "blocked"
+  },
+  "ident:SUBAGENT_UNAVAILABLE:named": {
+   "is_error": true,
+   "status": "error"
+  },
+  "ident:SUBAGENT_UNAVAILABLE:plain": {
+   "is_error": true,
+   "status": "error"
+  },
+  "ident:SUBTASK_ATTACHMENT_ERROR:named": {
+   "is_error": true,
+   "status": "error"
+  },
+  "ident:SUBTASK_ATTACHMENT_ERROR:plain": {
+   "is_error": true,
+   "status": "error"
+  },
+  "ident:SUBTASK_DRIVE_ERROR:named": {
+   "is_error": true,
+   "status": "error"
+  },
+  "ident:SUBTASK_DRIVE_ERROR:plain": {
+   "is_error": true,
+   "status": "error"
+  },
+  "ident:SUBTASK_STATUS_ERROR:named": {
+   "is_error": true,
+   "status": "error"
+  },
+  "ident:SUBTASK_STATUS_ERROR:plain": {
+   "is_error": true,
+   "status": "error"
+  },
+  "ident:SUDO_INTERACTIVE_BLOCKED:named": {
+   "is_error": true,
+   "status": "blocked"
+  },
+  "ident:SUDO_INTERACTIVE_BLOCKED:plain": {
+   "is_error": true,
+   "status": "blocked"
+  },
+  "ident:SWARM_NEW_ROOT_REQUIRED:named": {
+   "is_error": false,
+   "status": "ok"
+  },
+  "ident:SWARM_NEW_ROOT_REQUIRED:plain": {
+   "is_error": false,
+   "status": "ok"
+  },
+  "ident:SWARM_PROJECT_SCOPE_OWNED:named": {
+   "is_error": false,
+   "status": "ok"
+  },
+  "ident:SWARM_PROJECT_SCOPE_OWNED:plain": {
+   "is_error": false,
+   "status": "ok"
+  },
+  "ident:SYNTAX_GUARD_BYPASSED:named": {
+   "is_error": false,
+   "status": "ok"
+  },
+  "ident:SYNTAX_GUARD_BYPASSED:plain": {
+   "is_error": false,
+   "status": "ok"
+  },
+  "ident:TARGET:named": {
+   "is_error": false,
+   "status": "ok"
+  },
+  "ident:TARGET:plain": {
+   "is_error": false,
+   "status": "ok"
+  },
+  "ident:TASK_CANCEL_PENDING:named": {
+   "is_error": false,
+   "status": "ok"
+  },
+  "ident:TASK_CANCEL_PENDING:plain": {
+   "is_error": false,
+   "status": "ok"
+  },
+  "ident:TASK_FORBIDDEN:named": {
+   "is_error": false,
+   "status": "ok"
+  },
+  "ident:TASK_FORBIDDEN:plain": {
+   "is_error": false,
+   "status": "ok"
+  },
+  "ident:TASK_MESSAGE_UNWRITTEN:named": {
+   "is_error": false,
+   "status": "ok"
+  },
+  "ident:TASK_MESSAGE_UNWRITTEN:plain": {
+   "is_error": false,
+   "status": "ok"
+  },
+  "ident:TASK_NOT_ACTIVE:named": {
+   "is_error": false,
+   "status": "ok"
+  },
+  "ident:TASK_NOT_ACTIVE:plain": {
+   "is_error": false,
+   "status": "ok"
+  },
+  "ident:TASK_NOT_FOUND:named": {
+   "is_error": false,
+   "status": "ok"
+  },
+  "ident:TASK_NOT_FOUND:plain": {
+   "is_error": false,
+   "status": "ok"
+  },
+  "ident:TASK_ORPHAN_RECONCILED:named": {
+   "is_error": false,
+   "status": "ok"
+  },
+  "ident:TASK_ORPHAN_RECONCILED:plain": {
+   "is_error": false,
+   "status": "ok"
+  },
+  "ident:TESTS_FAILED:named": {
+   "is_error": true,
+   "status": "error"
+  },
+  "ident:TESTS_FAILED:plain": {
+   "is_error": true,
+   "status": "error"
+  },
+  "ident:TESTS_PREFLIGHT_BLOCKED:named": {
+   "is_error": true,
+   "status": "blocked"
+  },
+  "ident:TESTS_PREFLIGHT_BLOCKED:plain": {
+   "is_error": true,
+   "status": "blocked"
+  },
+  "ident:TOOL_ACCESS_BLOCKED:named": {
+   "is_error": true,
+   "status": "blocked"
+  },
+  "ident:TOOL_ACCESS_BLOCKED:plain": {
+   "is_error": true,
+   "status": "blocked"
+  },
+  "ident:TOOL_ARG_ERROR:named": {
+   "is_error": true,
+   "status": "error"
+  },
+  "ident:TOOL_ARG_ERROR:plain": {
+   "is_error": true,
+   "status": "error"
+  },
+  "ident:TOOL_ERROR:named": {
+   "is_error": true,
+   "status": "error"
+  },
+  "ident:TOOL_ERROR:plain": {
+   "is_error": true,
+   "status": "error"
+  },
+  "ident:TOOL_INTERNAL_ERROR:named": {
+   "is_error": true,
+   "status": "error"
+  },
+  "ident:TOOL_INTERNAL_ERROR:plain": {
+   "is_error": true,
+   "status": "error"
+  },
+  "ident:TOOL_TIMEOUT:named": {
+   "is_error": true,
+   "status": "timeout"
+  },
+  "ident:TOOL_TIMEOUT:plain": {
+   "is_error": true,
+   "status": "timeout"
+  },
+  "ident:TREE_LEDGER_WRITE_FAILED:named": {
+   "is_error": true,
+   "status": "error"
+  },
+  "ident:TREE_LEDGER_WRITE_FAILED:plain": {
+   "is_error": true,
+   "status": "error"
+  },
+  "ident:USER_FILES_PATH_BLOCKED:named": {
+   "is_error": true,
+   "status": "user_files_path_blocked"
+  },
+  "ident:USER_FILES_PATH_BLOCKED:plain": {
+   "is_error": true,
+   "status": "user_files_path_blocked"
+  },
+  "ident:VERIFY_CWD_BLOCKED:named": {
+   "is_error": true,
+   "status": "blocked"
+  },
+  "ident:VERIFY_CWD_BLOCKED:plain": {
+   "is_error": true,
+   "status": "blocked"
+  },
+  "ident:VERIFY_ERROR:named": {
+   "is_error": true,
+   "status": "error"
+  },
+  "ident:VERIFY_ERROR:plain": {
+   "is_error": true,
+   "status": "error"
+  },
+  "ident:VIEW_IMAGE_UNAVAILABLE:named": {
+   "is_error": true,
+   "status": "error"
+  },
+  "ident:VIEW_IMAGE_UNAVAILABLE:plain": {
+   "is_error": true,
+   "status": "error"
+  },
+  "ident:VLM_ANALYSIS_FAILED:named": {
+   "is_error": true,
+   "status": "vlm_error"
+  },
+  "ident:VLM_ANALYSIS_FAILED:plain": {
+   "is_error": true,
+   "status": "vlm_error"
+  },
+  "ident:VLM_IMAGE_TOO_LARGE:named": {
+   "is_error": true,
+   "status": "vlm_error"
+  },
+  "ident:VLM_IMAGE_TOO_LARGE:plain": {
+   "is_error": true,
+   "status": "vlm_error"
+  },
+  "ident:VLM_NO_VISION_MODEL:named": {
+   "is_error": true,
+   "status": "vlm_error"
+  },
+  "ident:VLM_NO_VISION_MODEL:plain": {
+   "is_error": true,
+   "status": "vlm_error"
+  },
+  "ident:VLM_QUERY_FAILED:named": {
+   "is_error": true,
+   "status": "vlm_error"
+  },
+  "ident:VLM_QUERY_FAILED:plain": {
+   "is_error": true,
+   "status": "vlm_error"
+  },
+  "ident:WARNING:named": {
+   "is_error": false,
+   "status": "ok"
+  },
+  "ident:WARNING:plain": {
+   "is_error": false,
+   "status": "ok"
+  },
+  "ident:WORKSPACE_EXECUTOR_STATE_WRITE_BLOCKED:named": {
+   "is_error": true,
+   "status": "workspace_blocked"
+  },
+  "ident:WORKSPACE_EXECUTOR_STATE_WRITE_BLOCKED:plain": {
+   "is_error": true,
+   "status": "workspace_blocked"
+  },
+  "ident:WORKSPACE_GIT_BLOCKED:named": {
+   "is_error": true,
+   "status": "workspace_blocked"
+  },
+  "ident:WORKSPACE_GIT_BLOCKED:plain": {
+   "is_error": true,
+   "status": "workspace_blocked"
+  },
+  "ident:WORKSPACE_GIT_REF_CHANGED:named": {
+   "is_error": true,
+   "status": "workspace_blocked"
+  },
+  "ident:WORKSPACE_GIT_REF_CHANGED:plain": {
+   "is_error": true,
+   "status": "workspace_blocked"
+  },
+  "ident:WORKSPACE_MODE_BLOCKED:named": {
+   "is_error": true,
+   "status": "workspace_blocked"
+  },
+  "ident:WORKSPACE_MODE_BLOCKED:plain": {
+   "is_error": true,
+   "status": "workspace_blocked"
+  },
+  "ident:WORKSPACE_SHELL_BLOCKED:named": {
+   "is_error": true,
+   "status": "workspace_blocked"
+  },
+  "ident:WORKSPACE_SHELL_BLOCKED:plain": {
+   "is_error": true,
+   "status": "workspace_blocked"
+  },
+  "ident:WRITE_BLOCKED:named": {
+   "is_error": true,
+   "status": "blocked"
+  },
+  "ident:WRITE_BLOCKED:plain": {
+   "is_error": true,
+   "status": "blocked"
+  },
+  "ident:WRITE_BLOCKED_SYNTAX:named": {
+   "is_error": true,
+   "status": "blocked"
+  },
+  "ident:WRITE_BLOCKED_SYNTAX:plain": {
+   "is_error": true,
+   "status": "blocked"
+  },
+  "ident:WRITE_ERROR:named": {
+   "is_error": true,
+   "status": "error"
+  },
+  "ident:WRITE_ERROR:plain": {
+   "is_error": true,
+   "status": "error"
+  },
+  "ident:WRITE_FILE_BATCH_PARTIAL_FAILURE:named": {
+   "is_error": true,
+   "status": "write_file_blocked"
+  },
+  "ident:WRITE_FILE_BATCH_PARTIAL_FAILURE:plain": {
+   "is_error": true,
+   "status": "write_file_blocked"
+  },
+  "ident:WRITE_FILE_BLOCKED:named": {
+   "is_error": true,
+   "status": "write_file_blocked"
+  },
+  "ident:WRITE_FILE_BLOCKED:plain": {
+   "is_error": true,
+   "status": "write_file_blocked"
+  },
+  "ident:WRITE_FILE_ERROR:named": {
+   "is_error": true,
+   "status": "write_file_blocked"
+  },
+  "ident:WRITE_FILE_ERROR:plain": {
+   "is_error": true,
+   "status": "write_file_blocked"
+  },
+  "ident:YOUTUBE_TRANSCRIPT_UNAVAILABLE:named": {
+   "is_error": true,
+   "status": "error"
+  },
+  "ident:YOUTUBE_TRANSCRIPT_UNAVAILABLE:plain": {
+   "is_error": true,
+   "status": "error"
+  },
+  "native:ACCESS_BLOCKED:ACTING_NO_WORKSPACE_BLOCKED": {
+   "is_error": true,
+   "status": "blocked"
+  },
+  "native:ACCESS_BLOCKED:ACTING_SUBAGENT_BLOCKED": {
+   "is_error": true,
+   "status": "blocked"
+  },
+  "native:ACCESS_BLOCKED:ACTING_SUBAGENT_TOOL_NOT_GRANTED": {
+   "is_error": false,
+   "status": "ok"
+  },
+  "native:ACCESS_BLOCKED:LOCAL_READONLY_SUBAGENT_BLOCKED": {
+   "is_error": true,
+   "status": "blocked"
+  },
+  "native:ACCESS_BLOCKED:MANAGED_UPDATE_IN_PROGRESS": {
+   "is_error": false,
+   "status": "ok"
+  },
+  "native:ACCESS_BLOCKED:MUTATIVE_SUBAGENTS_DISABLED": {
+   "is_error": false,
+   "status": "ok"
+  },
+  "native:ACCESS_BLOCKED:TOOL_ACCESS_BLOCKED": {
+   "is_error": true,
+   "status": "blocked"
+  },
+  "native:CAPABILITY_UNAVAILABLE:CAPABILITY_UNAVAILABLE": {
+   "is_error": true,
+   "status": "error"
+  },
+  "native:CAPABILITY_UNAVAILABLE:MANAGED_UPDATE_STATE_UNAVAILABLE": {
+   "is_error": true,
+   "status": "error"
+  },
+  "native:CAPABILITY_UNAVAILABLE:PYTHON_INTERPRETER_UNAVAILABLE": {
+   "is_error": true,
+   "status": "error"
+  },
+  "native:CONTEXT_MODE_SELF_LOWERING_BLOCKED:CONTEXT_MODE_SELF_LOWERING_BLOCKED": {
+   "is_error": true,
+   "status": "blocked"
+  },
+  "native:DATA_BLOCKED:DATA_LIST_BLOCKED": {
+   "is_error": true,
+   "status": "data_blocked"
+  },
+  "native:DATA_BLOCKED:DATA_READ_BLOCKED": {
+   "is_error": true,
+   "status": "data_blocked"
+  },
+  "native:ELEVATION_BLOCKED:ELEVATION_BLOCKED": {
+   "is_error": true,
+   "status": "elevation_blocked"
+  },
+  "native:GIT_VIA_SHELL_BLOCKED:GIT_VIA_SHELL_BLOCKED": {
+   "is_error": true,
+   "status": "git_via_shell_blocked"
+  },
+  "native:HEAL_MODE_BLOCKED:HEAL_MODE_BLOCKED": {
+   "is_error": true,
+   "status": "heal_mode_blocked"
+  },
+  "native:HEAL_MODE_BLOCKED:SKILL_REDIRECT_BLOCKED": {
+   "is_error": true,
+   "status": "skill_payload_blocked"
+  },
+  "native:LEGACY_BLOCKED:REPO_LIST_BLOCKED": {
+   "is_error": true,
+   "status": "blocked"
+  },
+  "native:LEGACY_BLOCKED:REPO_READ_BLOCKED": {
+   "is_error": true,
+   "status": "blocked"
+  },
+  "native:LEGACY_TOOL_ERROR:LIST_FILES_ERROR": {
+   "is_error": true,
+   "status": "error"
+  },
+  "native:LEGACY_TOOL_ERROR:READ_FILE_ERROR": {
+   "is_error": true,
+   "status": "error"
+  },
+  "native:LEGACY_WARNING:DATA_NOT_YET_CREATED": {
+   "is_error": false,
+   "status": "ok"
+  },
+  "native:LEGACY_WARNING:NOT_FOUND": {
+   "is_error": false,
+   "status": "ok"
+  },
+  "native:LIGHT_MODE_BLOCKED:LIGHT_MODE_BLOCKED": {
+   "is_error": true,
+   "status": "light_mode_blocked"
+  },
+  "native:OWNER_SKILL_ATTESTATION_SELF_CALL_BLOCKED:OWNER_SKILL_ATTESTATION_SELF_CALL_BLOCKED": {
+   "is_error": true,
+   "status": "blocked"
+  },
+  "native:RESOURCE_CONSTRAINT_BLOCKED:RESOURCE_CONSTRAINT_BLOCKED": {
+   "is_error": true,
+   "status": "resource_constraint_blocked"
+  },
+  "native:SAFETY_MODE_SELF_LOWERING_BLOCKED:SAFETY_MODE_SELF_LOWERING_BLOCKED": {
+   "is_error": true,
+   "status": "blocked"
+  },
+  "native:SAFETY_VIOLATION:SAFETY_VIOLATION": {
+   "is_error": true,
+   "status": "safety_violation"
+  },
+  "native:SKILL_PAYLOAD_BLOCKED:SKILL_PAYLOAD_ARG_ERROR": {
+   "is_error": true,
+   "status": "skill_payload_blocked"
+  },
+  "native:SKILL_STATE_WRITE_BLOCKED:SKILL_STATE_WRITE_BLOCKED": {
+   "is_error": true,
+   "status": "skill_state_blocked"
+  },
+  "native:SUBAGENT_SECRET_READ_BLOCKED:SUBAGENT_SECRET_READ_BLOCKED": {
+   "is_error": true,
+   "status": "blocked"
+  },
+  "native:SUDO_INTERACTIVE_BLOCKED:SUDO_INTERACTIVE_BLOCKED": {
+   "is_error": true,
+   "status": "blocked"
+  },
+  "native:TOOL_ARG_ERROR:TOOL_ARG_ERROR": {
+   "is_error": true,
+   "status": "error"
+  },
+  "native:USER_FILES_PATH_BLOCKED:USER_FILES_PATH_BLOCKED": {
+   "is_error": true,
+   "status": "user_files_path_blocked"
+  },
+  "native:WORKSPACE_BLOCKED:WORKSPACE_GIT_BLOCKED": {
+   "is_error": true,
+   "status": "workspace_blocked"
+  },
+  "native:WORKSPACE_BLOCKED:WORKSPACE_MODE_BLOCKED": {
+   "is_error": true,
+   "status": "workspace_blocked"
+  },
+  "native:WORKSPACE_BLOCKED:WORKSPACE_SHELL_BLOCKED": {
+   "is_error": true,
+   "status": "workspace_blocked"
+  },
+  "shape:binding_arg_error": {
+   "is_error": true,
+   "status": "error"
+  },
+  "shape:binding_default_error": {
+   "is_error": true,
+   "status": "error"
+  },
+  "shape:cognitive_redirect": {
+   "is_error": true,
+   "status": "cognitive_tool_required"
+  },
+  "shape:deep_self_review_unavailable": {
+   "is_error": false,
+   "status": "ok"
+  },
+  "shape:ephemeral_turn_denial": {
+   "is_error": false,
+   "status": "ok"
+  },
+  "shape:executor_crash": {
+   "is_error": true,
+   "status": "error"
+  },
+  "shape:extension_async_timeout": {
+   "is_error": true,
+   "status": "error"
+  },
+  "shape:extension_handler_error": {
+   "is_error": true,
+   "status": "error"
+  },
+  "shape:extension_not_live": {
+   "is_error": true,
+   "status": "error"
+  },
+  "shape:extension_reported_failure": {
+   "is_error": true,
+   "status": "tool_reported_failure"
+  },
+  "shape:extension_safety_wrapped_ok": {
+   "is_error": false,
+   "status": "ok"
+  },
+  "shape:followup_cap_reached": {
+   "is_error": false,
+   "status": "ok"
+  },
+  "shape:followup_data_root_unresolved": {
+   "is_error": false,
+   "status": "ok"
+  },
+  "shape:followup_objective_required": {
+   "is_error": false,
+   "status": "ok"
+  },
+  "shape:followup_persist_failed": {
+   "is_error": false,
+   "status": "ok"
+  },
+  "shape:followup_run_at_invalid": {
+   "is_error": false,
+   "status": "ok"
+  },
+  "shape:followup_scheduled": {
+   "is_error": false,
+   "status": "ok"
+  },
+  "shape:followup_subagent_refused": {
+   "is_error": false,
+   "status": "ok"
+  },
+  "shape:followup_task_id_required": {
+   "is_error": false,
+   "status": "ok"
+  },
+  "shape:followup_text_too_long": {
+   "is_error": false,
+   "status": "ok"
+  },
+  "shape:git_error_untyped_text": {
+   "is_error": false,
+   "status": "ok"
+  },
+  "shape:mcp_disabled": {
+   "is_error": false,
+   "status": "ok"
+  },
+  "shape:mcp_provider_error": {
+   "is_error": false,
+   "status": "ok"
+  },
+  "shape:mcp_tool_not_found": {
+   "is_error": false,
+   "status": "ok"
+  },
+  "shape:mcp_transport_timeout": {
+   "is_error": false,
+   "status": "ok"
+  },
+  "shape:outer_timeout": {
+   "is_error": true,
+   "status": "timeout"
+  },
+  "shape:proactive_message_empty": {
+   "is_error": false,
+   "status": "ok"
+  },
+  "shape:proactive_message_no_chat": {
+   "is_error": false,
+   "status": "ok"
+  },
+  "shape:promote_rejected": {
+   "is_error": false,
+   "status": "ok"
+  },
+  "shape:promote_unconfirmed": {
+   "is_error": false,
+   "status": "ok"
+  },
+  "shape:protected_write": {
+   "is_error": true,
+   "status": "protected_blocked"
+  },
+  "shape:resource_constraint": {
+   "is_error": true,
+   "status": "resource_constraint_blocked"
+  },
+  "shape:resource_policy": {
+   "is_error": true,
+   "status": "resource_policy_blocked"
+  },
+  "shape:review_blocked_untyped_text": {
+   "is_error": false,
+   "status": "ok"
+  },
+  "shape:root_required_active_workspace": {
+   "is_error": true,
+   "status": "root_required_active_workspace"
+  },
+  "shape:root_required_user_files": {
+   "is_error": true,
+   "status": "root_required_user_files"
+  },
+  "shape:route_rejected": {
+   "is_error": false,
+   "status": "ok"
+  },
+  "shape:route_unconfirmed": {
+   "is_error": false,
+   "status": "ok"
+  },
+  "shape:scratchpad_legacy_upgrade": {
+   "is_error": false,
+   "status": "ok"
+  },
+  "shape:send_file_missing_argument": {
+   "is_error": false,
+   "status": "ok"
+  },
+  "shape:send_file_no_chat": {
+   "is_error": false,
+   "status": "ok"
+  },
+  "shape:send_photo_empty_payload": {
+   "is_error": false,
+   "status": "ok"
+  },
+  "shape:send_photo_no_chat": {
+   "is_error": false,
+   "status": "ok"
+  },
+  "shape:send_photo_read_failure": {
+   "is_error": false,
+   "status": "ok"
+  },
+  "shape:send_video_missing_file": {
+   "is_error": false,
+   "status": "ok"
+  },
+  "shape:send_video_no_chat": {
+   "is_error": false,
+   "status": "ok"
+  },
+  "shape:shell_artifact_error": {
+   "is_error": true,
+   "status": "artifact_output_error"
+  },
+  "shape:shell_autocorrected": {
+   "is_error": false,
+   "status": "ok_autocorrected"
+  },
+  "shape:shell_cwd_block": {
+   "is_error": true,
+   "status": "cwd_blocked"
+  },
+  "shape:shell_exit_error": {
+   "is_error": true,
+   "status": "non_zero_exit"
+  },
+  "shape:shell_no_match": {
+   "is_error": false,
+   "status": "ok"
+  },
+  "shape:shell_no_match_autocorrected": {
+   "is_error": false,
+   "status": "ok_autocorrected"
+  },
+  "shape:shell_ok": {
+   "is_error": false,
+   "status": "ok"
+  },
+  "shape:shell_undeclared": {
+   "is_error": true,
+   "status": "artifact_output_undeclared"
+  },
+  "shape:subagent_capability_mismatch": {
+   "is_error": false,
+   "status": "ok"
+  },
+  "shape:subtask_depth_limit": {
+   "is_error": false,
+   "status": "ok"
+  },
+  "shape:switch_model_unknown": {
+   "is_error": false,
+   "status": "ok"
+  },
+  "shape:task_result_unknown_id": {
+   "is_error": false,
+   "status": "ok"
+  },
+  "shape:unknown_tool_extension_down": {
+   "is_error": false,
+   "status": "ok"
+  }
+ }
+}

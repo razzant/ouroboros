@@ -17,14 +17,11 @@
   "OUROBOROS_MAX_WORKERS": 4,
   "TOTAL_BUDGET": 50.0,
   "OUROBOROS_PER_TASK_COST_USD": 50.0,
-  "OUROBOROS_SOFT_TIMEOUT_SEC": 600,
-  "OUROBOROS_HARD_TIMEOUT_SEC": 1800,
   "OUROBOROS_TOOL_TIMEOUT_SEC": 600,
   "OUROBOROS_BG_MAX_ROUNDS": 5,
   "OUROBOROS_BG_WAKEUP_MIN": 30,
   "OUROBOROS_BG_WAKEUP_MAX": 7200,
   "OUROBOROS_WEBSEARCH_MODEL": "gpt-5.2",
-  "OUROBOROS_REVIEW_MODELS": "anthropic/claude-sonnet-4.5,anthropic/claude-sonnet-4.5,anthropic/claude-sonnet-4.5",
   "OUROBOROS_REVIEW_ENFORCEMENT": "advisory",
   "OUROBOROS_REVIEW_MAX_CYCLES": "unlimited",
   "OUROBOROS_AUTO_GRANT_REVIEWED_SKILLS": "false",
@@ -35,7 +32,6 @@
   "MCP_ENABLED": false,
   "MCP_SERVERS": [],
   "MCP_TOOL_TIMEOUT_SEC": 60,
-  "OUROBOROS_SCOPE_REVIEW_MODEL": "anthropic/claude-sonnet-4.5",
   "OUROBOROS_EFFORT_TASK": "high",
   "OUROBOROS_EFFORT_EVOLUTION": "high",
   "OUROBOROS_EFFORT_REVIEW": "high",
@@ -61,5 +57,6 @@
   "OUROBOROS_POST_TASK_EVOLUTION_BUDGET_USD": 0.0,
   "OUROBOROS_EVOLUTION_PERSISTENT_OBJECTIVE": "At the evolve stage, implement the objective as at most one reviewed commit, then restart once.\n1. Make the smallest safe code change; use advisory_review to surface issues; fold every correctness fix the reviewers raise into that same change before committing.\n2. Land no more than one commit_reviewed for this cycle. An honest no-op is valid when the objective is already solved, unsafe, too broad, or needs owner input.\n3. Normal Ouroboros release/version rules still apply when the reviewed commit path requires them; this benchmark steer is only about avoiding churn.\n4. After the reviewed commit lands (clean working tree, HEAD = that commit), call request_restart once with a short reason, then stop: do not edit, commit, or call request_restart again.",
   "OUROBOROS_SERVER_PORT": 8765,
-  "OUROBOROS_SAFETY_MODE": "light"
+  "OUROBOROS_SAFETY_MODE": "light",
+  "OUROBOROS_REVIEWER_SLOTS": "{\"triad\":[{\"slot_id\":\"benchmark-triad-1\",\"route\":{\"kind\":\"api_chat\",\"target_id\":\"anthropic/claude-sonnet-4.5\"}},{\"slot_id\":\"benchmark-triad-2\",\"route\":{\"kind\":\"api_chat\",\"target_id\":\"anthropic/claude-sonnet-4.5\"}},{\"slot_id\":\"benchmark-triad-3\",\"route\":{\"kind\":\"api_chat\",\"target_id\":\"anthropic/claude-sonnet-4.5\"}}],\"scope\":[{\"slot_id\":\"benchmark-scope-1\",\"route\":{\"kind\":\"api_chat\",\"target_id\":\"anthropic/claude-sonnet-4.5\"}}]}"
 }

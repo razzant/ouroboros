@@ -71,6 +71,7 @@ def test_history_recovers_legacy_final_only_row_from_task_result(tmp_path):
     results = tmp_path / "task_results"
     results.mkdir()
     (results / "child-old.json").write_text(json.dumps({
+        "_schema_version": 1,
         "task_id": "child-old",
         "status": "completed",
         "delegation_role": "subagent",
@@ -97,6 +98,7 @@ def test_history_leaves_root_final_unclassified(tmp_path):
     results = tmp_path / "task_results"
     results.mkdir()
     (results / "root-only.json").write_text(json.dumps({
+        "_schema_version": 1,
         "task_id": "root-only", "status": "completed", "delegation_role": "root",
         "root_task_id": "root-only",
     }), encoding="utf-8")
@@ -136,6 +138,7 @@ def test_supervisor_recovers_final_lineage_after_running_row_is_gone(tmp_path):
     results = tmp_path / "task_results"
     results.mkdir()
     (results / "child-replay.json").write_text(json.dumps({
+        "_schema_version": 1,
         "task_id": "child-replay", "status": "completed",
         "delegation_role": "subagent", "parent_task_id": "parent-replay",
         "root_task_id": "root-replay", "role": "recovery-reviewer",

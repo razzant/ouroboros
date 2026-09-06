@@ -1,8 +1,13 @@
-"""Typed result envelope + notes-after-payload contract (#447, В12=A minimal).
+"""Typed result contract + notes-after-payload (#447 В12=A, campaign organ).
 
-Producers that KNOW their outcome stamp typed facts on the result string
-(a str subclass), and every host note — auto-route note, safety warning,
-post-exec tripwire — TRAILS the payload. Two regressions this pins:
+Upstream landed this contract on a minimal ``result_envelope`` string subclass.
+On this branch the typed organ already exists and is STRONGER — producers
+publish a ``ToolResult`` (status/code/meta) through
+``ouroboros/tools/tool_result.py``, and the loop reads that published object
+instead of re-deriving an outcome from text. The upstream twin therefore does
+not live; these are the same contracts pinned against the campaign organ.
+
+Two regressions this pins:
 
 - H1: a leading SAFETY_WARNING used to own line 1, so a failed command
   (SHELL_EXIT_ERROR) behind a warning was classified "ok".
@@ -20,14 +25,14 @@ import pytest
 from ouroboros.loop_tool_execution import (
     _extract_result_metadata,
     _is_tool_execution_failure,
-    _structured_tool_failure,
+    _typed_execution_failure,
+    _typed_result_metadata,
 )
-from ouroboros.tools.registry import _compose_execute_result
-from ouroboros.tools.result_envelope import (
-    annotate,
-    append_note,
-    result_payload_text,
-    typed_result_meta,
+from ouroboros.tools.tool_result import (
+    LegacyTextResultAdapter,
+    ToolResult,
+    _compose_execute_result,
+    _compose_execute_result_result,
 )
 
 _WARNING = "⚠️ SAFETY_WARNING: The Safety Supervisor flagged this action as suspicious."
@@ -45,32 +50,42 @@ def test_safety_warning_no_longer_masks_shell_exit_error_first_line():
     out = _compose_execute_result(_EXIT1, "", _WARNING)
     assert out.splitlines()[0].startswith("⚠️ SHELL_EXIT_ERROR")
     assert _WARNING in out
-    assert _is_tool_execution_failure(True, out) is True
+    assert _is_tool_execution_failure(True, out, fn_name="run_command") is True
     meta = _extract_result_metadata("run_command", out, True)
     assert meta["status"] == "non_zero_exit"
-    assert meta["exit_code"] == 1
 
 
 def test_safety_warning_with_typed_shell_meta_keeps_error_status():
-    """Migrated-producer path: typed status survives every appended note."""
-    produced = annotate(_EXIT1, status="non_zero_exit", is_failure=True)
-    out = _compose_execute_result(produced, "⚠️ AUTO_ROUTED_TO_ACTIVE_WORKSPACE: note", _WARNING)
-    assert _is_tool_execution_failure(True, out) is True
-    meta = _extract_result_metadata("run_command", out, True)
+    """Migrated-producer path: the typed status survives every appended note."""
+    produced = ToolResult(
+        status="error", code="SHELL_EXIT_ERROR", text=_EXIT1, meta={"exit_code": 1},
+    )
+    composed = _compose_execute_result_result(
+        "run_command", produced,
+        "⚠️ AUTO_ROUTED_TO_ACTIVE_WORKSPACE: note", _WARNING,
+    )
+    assert _typed_execution_failure(True, composed) is True
+    meta = _typed_result_metadata("run_command", composed.text, True, composed)
     assert meta["status"] == "non_zero_exit"
-    # Both host notes are recorded as typed facts, in append order.
-    assert meta["notes"][0].startswith("⚠️ AUTO_ROUTED_TO_ACTIVE_WORKSPACE")
-    assert meta["notes"][1] == _WARNING
+    assert meta["exit_code"] == 1
+    # Both host notes are recorded as typed facts.
+    assert dict(composed.meta)["route_note"] is True
+    assert dict(composed.meta)["safety_warning"] is True
     # Payload owns line 1; notes trail it.
-    assert out.splitlines()[0].startswith("⚠️ SHELL_EXIT_ERROR")
-    assert out.index(_WARNING) > out.index("boom")
+    assert composed.text.splitlines()[0].startswith("⚠️ SHELL_EXIT_ERROR")
+    assert composed.text.index(_WARNING) > composed.text.index("boom")
 
 
 def test_typed_ok_status_is_not_flipped_by_a_trailing_warning():
-    produced = annotate("exit_code=0 (cwd=/tmp)\nSTDOUT:\nfine", status="ok", is_failure=False)
-    out = _compose_execute_result(produced, "", _WARNING)
-    assert _is_tool_execution_failure(True, out) is False
-    assert _extract_result_metadata("run_command", out, False)["status"] == "ok"
+    produced = ToolResult(
+        status="ok", code="OK",
+        text="exit_code=0 (cwd=/tmp)\nSTDOUT:\nfine", meta={"exit_code": 0},
+    )
+    composed = _compose_execute_result_result("run_command", produced, "", _WARNING)
+    assert _typed_execution_failure(True, composed) is False
+    assert _typed_result_metadata(
+        "run_command", composed.text, False, composed,
+    )["status"] == "ok"
 
 
 # ---------------------------------------------------------------------------
@@ -80,40 +95,46 @@ def test_typed_ok_status_is_not_flipped_by_a_trailing_warning():
 
 def test_structured_ext_failure_detected_behind_appended_warning():
     payload = '{"ok": false, "error": "screenshot backend died"}'
-    out = append_note(payload, _WARNING)
-    assert result_payload_text(out) == payload
-    assert _structured_tool_failure(out) is True
-    assert _is_tool_execution_failure(True, out) is True
-    meta = _extract_result_metadata("mcp__srv__shot", out, True)
+    out = _compose_execute_result(payload, "", _WARNING)
+    assert out.splitlines()[0].startswith("{")
+    adapted = LegacyTextResultAdapter.from_text("mcp__srv__shot", out)
+    assert adapted.code == "TOOL_REPORTED_FAILURE"
+    assert _typed_execution_failure(True, adapted) is True
+    meta = _typed_result_metadata("mcp__srv__shot", out, True, adapted)
     assert meta["status"] == "tool_reported_failure"
 
 
 def test_structured_failure_stays_narrow_for_plain_prose_with_json_prefix():
     # A plain string whose FULL text is not a JSON object is untouched.
-    assert _structured_tool_failure('{"ok": false} trailing prose') is False
-
-
-# ---------------------------------------------------------------------------
-# result_meta extension: policy_contract / remaining_route passthrough
-# ---------------------------------------------------------------------------
-
-
-def test_policy_contract_and_remaining_route_travel_into_result_meta():
-    refusal = annotate(
-        "⚠️ LIGHT_MODE_BLOCKED: runtime_mode=light blocks this write.",
-        status="light_mode_blocked",
-        is_failure=True,
-        policy_contract="runtime_mode.light",
-        remaining_route="root=user_files or root=task_drive",
+    adapted = LegacyTextResultAdapter.from_text(
+        "mcp__srv__shot", '{"ok": false} trailing prose',
     )
-    meta = _extract_result_metadata("write_file", refusal, True)
-    assert meta["status"] == "light_mode_blocked"
-    assert meta["policy_contract"] == "runtime_mode.light"
-    assert meta["remaining_route"] == "root=user_files or root=task_drive"
+    assert adapted.code != "TOOL_REPORTED_FAILURE"
 
 
 # ---------------------------------------------------------------------------
-# Worst-first producer: the real shell run stamps typed facts
+# result_meta extension: producer meta travels into the trace record
+# ---------------------------------------------------------------------------
+
+
+def test_producer_meta_travels_into_result_meta():
+    refusal = ToolResult(
+        status="blocked",
+        code="LIGHT_MODE_BLOCKED",
+        text="⚠️ LIGHT_MODE_BLOCKED: runtime_mode=light blocks this write.",
+        meta={
+            "policy_contract": "runtime_mode.light",
+            "remaining_route": "root=user_files or root=task_drive",
+        },
+    )
+    meta = _typed_result_metadata("write_file", refusal.text, True, refusal)
+    assert meta["status"] == "light_mode_blocked"
+    assert dict(refusal.meta)["policy_contract"] == "runtime_mode.light"
+    assert dict(refusal.meta)["remaining_route"] == "root=user_files or root=task_drive"
+
+
+# ---------------------------------------------------------------------------
+# Worst-first producer: the real shell run publishes typed facts
 # ---------------------------------------------------------------------------
 
 
@@ -122,6 +143,9 @@ def _ctx(tmp_path):
         repo_dir=tmp_path,
         drive_root=tmp_path,
         drive_logs=lambda: pathlib.Path(str(tmp_path)),
+        # The registry installs this sidecar around every builtin dispatch; the
+        # producer publishes into it. Present-and-None is the pre-dispatch state.
+        _active_builtin_tool_result=None,
     )
 
 
@@ -138,20 +162,28 @@ def fake_subprocess(monkeypatch):
     return _install
 
 
-def test_run_shell_stamps_typed_failure_meta_on_nonzero_exit(tmp_path, fake_subprocess):
+def test_run_shell_publishes_typed_failure_on_nonzero_exit(tmp_path, fake_subprocess):
     from ouroboros.tools.shell import _run_shell
+    from ouroboros.tools.tool_result import _published_tool_result
 
     fake_subprocess(returncode=3, stderr="permission denied")
-    result = _run_shell(_ctx(tmp_path), ["false"])
+    ctx = _ctx(tmp_path)
+    result = _run_shell(ctx, ["false"])
     assert result.startswith("⚠️ SHELL_EXIT_ERROR:")
-    meta = typed_result_meta(result)
-    assert meta is not None and meta["status"] == "non_zero_exit" and meta["is_failure"] is True
+    published = _published_tool_result(ctx, None)
+    assert isinstance(published, ToolResult)
+    assert (published.status, published.code) == ("error", "SHELL_EXIT_ERROR")
+    assert dict(published.meta)["exit_code"] == 3
 
 
-def test_run_shell_stamps_typed_ok_meta_on_success(tmp_path, fake_subprocess):
+def test_run_shell_publishes_typed_ok_on_success(tmp_path, fake_subprocess):
     from ouroboros.tools.shell import _run_shell
+    from ouroboros.tools.tool_result import _published_tool_result
 
     fake_subprocess(stdout="fine")
-    result = _run_shell(_ctx(tmp_path), ["true"])
-    meta = typed_result_meta(result)
-    assert meta is not None and meta["status"] == "ok" and meta["is_failure"] is False
+    ctx = _ctx(tmp_path)
+    _run_shell(ctx, ["true"])
+    published = _published_tool_result(ctx, None)
+    assert isinstance(published, ToolResult)
+    assert (published.status, published.code) == ("ok", "OK")
+    assert dict(published.meta)["exit_code"] == 0

@@ -64,7 +64,8 @@ import { installAltMenuSuppression, installDesktopShellLinkInterceptor } from '.
         modelsDirty: false,
         localSourceOpen: Boolean(INITIAL_STATE.localSource),
         moreProvidersOpen: Boolean(
-            INITIAL_STATE.cloudruKey || INITIAL_STATE.minimaxKey || INITIAL_STATE.compatibleBaseUrl || INITIAL_STATE.compatibleApiKey,
+            INITIAL_STATE.cloudruKey || INITIAL_STATE.minimaxKey || INITIAL_STATE.deepseekKey
+            || INITIAL_STATE.compatibleBaseUrl || INITIAL_STATE.compatibleApiKey,
         ),
         localStatusText: 'Status: Offline',
         localStatusTone: 'muted',
@@ -78,6 +79,10 @@ import { installAltMenuSuppression, installDesktopShellLinkInterceptor } from '.
         availableSubagents: null,
         skipSubscriptionPresets: false,
         presetFailure: null,
+        // Set when completion answered 503 `settings_save_timeout`: the save is
+        // still running in the server, so the wizard offers "Check status"
+        // instead of a blind retry (a second write over an unknown first).
+        saveUnknown: false,
         // Set once completion SUCCEEDED but the receipt says the saved runtime
         // mode needs a restart, in the one shell that cannot restart anything.
         completedRestartMode: '',
@@ -144,6 +149,7 @@ import { installAltMenuSuppression, installDesktopShellLinkInterceptor } from '.
                 ['OPENAI_API_KEY', 'openai'],
                 ['CLOUDRU_FOUNDATION_MODELS_API_KEY', 'cloudru'],
                 ['MINIMAX_API_KEY', 'minimax'],
+                ['DEEPSEEK_API_KEY', 'deepseek'],
                 ['ANTHROPIC_API_KEY', 'anthropic'],
             ].filter(([settingKey]) => configured[settingKey]);
             if (hasOpenrouter) return 'openrouter';
@@ -443,6 +449,7 @@ import { installAltMenuSuppression, installDesktopShellLinkInterceptor } from '.
         if (trim(state.openaiKey)) rows.splice(1, 0, ['OpenAI', 'configured']);
         if (trim(state.cloudruKey)) rows.splice(1, 0, ['Cloud.ru', 'configured']);
         if (trim(state.minimaxKey)) rows.splice(1, 0, ['MiniMax', 'configured']);
+        if (trim(state.deepseekKey)) rows.splice(1, 0, ['DeepSeek', 'configured']);
         if (trim(state.anthropicKey)) rows.splice(1, 0, ['Anthropic', 'configured']);
         if (hasLocalModel()) {
             rows.splice(
@@ -656,7 +663,7 @@ import { installAltMenuSuppression, installDesktopShellLinkInterceptor } from '.
                         note: slot.note,
                     })).join('')}
                 </div>
-            <div class="wizard-inline-note">Direct providers use explicit <code>provider::model</code> values, including <code>minimax::MiniMax-M3</code> and <code>minimax::MiniMax-M2.7</code>. OpenAI-compatible endpoints use <code>openai-compatible::your-model-name</code>. Plain slash-form model IDs stay router-style by design.</div>
+            <div class="wizard-inline-note">Direct providers use explicit <code>provider::model</code> values, including <code>minimax::MiniMax-M3</code>, <code>minimax::MiniMax-M2.7</code>, <code>deepseek::deepseek-v4-pro</code> and <code>deepseek::deepseek-v4-flash</code>. OpenAI-compatible endpoints use <code>openai-compatible::your-model-name</code>. Plain slash-form model IDs stay router-style by design.</div>
         `;
     }
 
@@ -794,8 +801,13 @@ import { installAltMenuSuppression, installDesktopShellLinkInterceptor } from '.
     function render() {
         const meta = STEP_META[state.currentStep];
         const index = STEP_ORDER.indexOf(state.currentStep);
+        // An UNKNOWN save (503 settings_save_timeout: the write may still be
+        // running in the server) makes "Check status" the primary action and
+        // the re-submit an explicit, secondary "Retry save" — never the default
+        // button beside it, which re-POSTed a second write over the first.
+        const saveUnknown = state.currentStep === 'summary' && state.saveUnknown;
         const nextLabel = state.currentStep === 'summary'
-            ? (state.saving ? 'Saving...' : 'Start Ouroboros')
+            ? (state.saving ? 'Saving...' : (saveUnknown ? 'Retry save' : 'Start Ouroboros'))
             : 'Continue';
         root.innerHTML = `
             <div class="wizard-shell">
@@ -817,7 +829,10 @@ import { installAltMenuSuppression, installDesktopShellLinkInterceptor } from '.
                             ${state.currentStep === 'summary' && shouldOfferPresetSkip() ? `
                                 <button class="btn btn-secondary" id="skip-presets-btn" type="button" ${state.saving ? 'disabled' : ''}>Finish without subscription presets</button>
                             ` : ''}
-                            <button class="btn btn-primary" id="next-btn" type="button" ${nextButtonShouldBeDisabled() ? 'disabled' : ''}>${escapeHtml(nextLabel)}</button>
+                            <button class="btn ${saveUnknown ? 'btn-secondary' : 'btn-primary'}" id="next-btn" type="button" ${nextButtonShouldBeDisabled() ? 'disabled' : ''}>${escapeHtml(nextLabel)}</button>
+                            ${saveUnknown ? `
+                                <button class="btn btn-primary" id="check-save-btn" type="button" ${state.saving ? 'disabled' : ''}>Check status</button>
+                            ` : ''}
                         </div>
                     </div>
                     <div class="wizard-error">${escapeHtml(state.error)}</div>
@@ -827,7 +842,6 @@ import { installAltMenuSuppression, installDesktopShellLinkInterceptor } from '.
         `;
         bindEvents();
         renderLocalStatus();
-        renderClaudeCliStatus();
     }
 
         function bindClearButtons() {
@@ -1223,6 +1237,44 @@ import { installAltMenuSuppression, installDesktopShellLinkInterceptor } from '.
         render();
     }
 
+    async function checkSaveStatus() {
+        // Completion answered 503 `settings_save_timeout`: its body kept running
+        // in the server past the shared writer bound, so whether the bytes
+        // landed is UNKNOWN (`saved: null`) and a retry would be a second write.
+        // Re-read the readiness probe the overlay itself gates on — 204 means a
+        // startup-ready provider is on disk, i.e. the transaction landed — and
+        // proceed exactly as a completion receipt would; otherwise stay open.
+        state.error = '';
+        render();
+        let status = 0;
+        try {
+            const response = await fetch('/api/onboarding', {
+                method: 'GET', headers: { Accept: 'application/json' },
+            });
+            status = response.status;
+        } catch (error) {
+            state.error = `Could not check the save status: ${String(error?.message || error)}. Try again in a moment.`;
+            render();
+            return;
+        }
+        if (status === 204) {
+            state.saveUnknown = false;
+            await agentsStep?.disposeForCompletion();
+            agentsStep = null;
+            // The receipt's `restart_required` never arrived: the boot-pinned
+            // mode is what the page loaded with, so a changed choice is treated
+            // as needing a restart — the honest side to err on.
+            announceCompletion({
+                runtime_mode: state.runtimeMode,
+                restart_required: trim(state.runtimeMode) !== trim(INITIAL_STATE.runtimeMode),
+            });
+            return;
+        }
+        state.error = 'Setup is not complete yet — the save may still be running in the '
+            + 'server. Check again in a moment; if it never completes, finish setup again.';
+        render();
+    }
+
     async function completeOnboardingAtomically(payload) {
         // The atomic completion (D-8): server-side fresh-install proof, the
         // structural provider gate, optional agent-preset compilation, a single
@@ -1308,6 +1360,7 @@ import { installAltMenuSuppression, installDesktopShellLinkInterceptor } from '.
             const notice = completionFailureNotice(error);
             state.saving = false;
             state.presetFailure = notice.canSkip ? { code: notice.code } : null;
+            state.saveUnknown = Boolean(notice.saveUnknown);
             state.error = notice.text;
             render();
         }
@@ -1328,6 +1381,9 @@ import { installAltMenuSuppression, installDesktopShellLinkInterceptor } from '.
         });
         document.getElementById('skip-presets-btn')?.addEventListener('click', () => {
             saveWizard({ skipPresets: true });
+        });
+        document.getElementById('check-save-btn')?.addEventListener('click', () => {
+            checkSaveStatus();
         });
         if (state.currentStep === 'providers') bindProvidersStep();
         if (state.currentStep === 'agents') bindAgentsStep();

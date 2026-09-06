@@ -41,7 +41,7 @@ def test_prepare_onboarding_settings_requires_runnable_config():
     prepared, error = prepare_onboarding_settings(_base_payload(), {})
 
     assert prepared == {}
-    assert "Configure OpenRouter, OpenAI, OpenAI-compatible, Cloud.ru, MiniMax, Anthropic, or a local model" in error
+    assert "Configure OpenRouter, OpenAI, OpenAI-compatible, Cloud.ru, MiniMax, DeepSeek, Anthropic, or a local model" in error
 
 
 def test_prepare_onboarding_settings_accepts_openai_only_setup():
@@ -138,6 +138,38 @@ def test_prepare_onboarding_settings_accepts_minimax_only_setup():
     assert prepared["MINIMAX_REGION"] == "cn_zh"
     assert prepared["OUROBOROS_MODEL"] == "minimax::MiniMax-M3"
     assert prepared["OUROBOROS_MODEL_LIGHT"] == "minimax::MiniMax-M2.7"
+
+
+def test_prepare_onboarding_settings_rejects_non_string_credentials():
+    # A JSON object/array/number in a credential slot is a malformed API post:
+    # str()-ing it used to persist "{'nested': ...}" as a working key with no
+    # error. The validator now refuses with an honest message instead.
+    for bad in ({"nested": "abcdefghij"}, ["sk-x"], 123, True):
+        payload = _base_payload()
+        payload.update({
+            "DEEPSEEK_API_KEY": bad,
+            "OUROBOROS_MODEL": "deepseek::deepseek-v4-pro",
+        })
+        prepared, error = prepare_onboarding_settings(payload, {})
+        assert prepared == {}
+        assert error == "DeepSeek API Key must be a text value."
+
+
+def test_prepare_onboarding_settings_accepts_deepseek_only_setup():
+    payload = _base_payload()
+    payload.update({
+        "DEEPSEEK_API_KEY": "sk-deepseek-key-1234567890",
+        "OUROBOROS_MODEL": "deepseek::deepseek-v4-pro",
+        "OUROBOROS_MODEL_LIGHT": "deepseek::deepseek-v4-flash",
+        "OUROBOROS_MODEL_FALLBACKS": "deepseek::deepseek-v4-flash",
+    })
+
+    prepared, error = prepare_onboarding_settings(payload, {})
+
+    assert error is None
+    assert prepared["DEEPSEEK_API_KEY"] == "sk-deepseek-key-1234567890"
+    assert prepared["OUROBOROS_MODEL"] == "deepseek::deepseek-v4-pro"
+    assert prepared["OUROBOROS_MODEL_LIGHT"] == "deepseek::deepseek-v4-flash"
 
 
 def test_prepare_onboarding_settings_rejects_unknown_minimax_region():
@@ -300,7 +332,7 @@ def test_prepare_onboarding_settings_rejects_openai_compatible_key_without_base_
     prepared, error = prepare_onboarding_settings(payload, {})
 
     assert prepared == {}
-    assert "Configure OpenRouter, OpenAI, OpenAI-compatible, Cloud.ru, MiniMax, Anthropic, or a local model" in error
+    assert "Configure OpenRouter, OpenAI, OpenAI-compatible, Cloud.ru, MiniMax, DeepSeek, Anthropic, or a local model" in error
 
 
 def test_onboarding_frontend_uses_base_url_first_compatible_validation():
@@ -425,8 +457,10 @@ def test_agents_step_ladder_states_the_startup_gate_honestly():
     assert "keeps using the API key or local model" in source
     assert "a plan cannot run it" in source
     assert "not free" in source
-    assert "Task acceptance stays on the API" in source
-    assert "plan and skill review follow each configured triad row" in source
+    assert "Task acceptance stays on the API" not in source
+    assert "commit, plan, skill review and task acceptance each follow their configured" in source
+    assert "acceptance panel on the subscription" in source
+    assert "about 12 s" in source and "$0.07 per model row per task" in source  # R12 numbers, not adjectives
     assert "all reviewers" not in source.lower()
     # D-10 vocabulary in the new owner-facing surface.
     assert "coding agent" not in source.lower()
@@ -580,6 +614,7 @@ def test_setup_contract_groups_rarely_used_providers():
         "CLOUDRU_FOUNDATION_MODELS_API_KEY": "more",
         "MINIMAX_API_KEY": "more",
         "MINIMAX_REGION": "more",
+        "DEEPSEEK_API_KEY": "more",
         "ANTHROPIC_API_KEY": "primary",
         "OPENAI_COMPATIBLE_BASE_URL": "more",
         "OPENAI_COMPATIBLE_API_KEY": "more",
@@ -621,6 +656,8 @@ def test_setup_contract_has_no_secret_values():
     assert "anthropic::claude-sonnet-5" in suggestions
     assert "minimax::MiniMax-M3" in suggestions
     assert "minimax::MiniMax-M2.7" in suggestions
+    assert "deepseek::deepseek-v4-pro" in suggestions
+    assert "deepseek::deepseek-v4-flash" in suggestions
     assert empty_bootstrap["initialState"]["totalBudget"] == 200.0
     assert empty_bootstrap["initialState"]["perTaskCostUsd"] == 50.0
     assert budget_fields["TOTAL_BUDGET"]["default"] == 200.0
@@ -632,6 +669,12 @@ def test_setup_contract_has_no_secret_values():
     assert initial["providerProfile"] == "minimax"
     assert initial["mainModel"] == "minimax::MiniMax-M3"
     assert initial["lightModel"] == "minimax::MiniMax-M2.7"
+
+    deepseek_bootstrap = build_setup_bootstrap({"DEEPSEEK_API_KEY": "ds-hidden-value"}, "web")
+    deepseek_initial = deepseek_bootstrap["initialState"]
+    assert deepseek_initial["providerProfile"] == "deepseek"
+    assert deepseek_initial["mainModel"] == "deepseek::deepseek-v4-pro"
+    assert deepseek_initial["lightModel"] == "deepseek::deepseek-v4-flash"
 
 
 # --- The served page must not hand back a stored credential -----------------
@@ -645,6 +688,7 @@ _SECRET_CANARIES = {
     "OPENAI_COMPATIBLE_API_KEY": "compat-SECRETCANARY125",
     "CLOUDRU_FOUNDATION_MODELS_API_KEY": "cloudru-SECRETCANARY126",
     "MINIMAX_API_KEY": "minimax-SECRETCANARY127",
+    "DEEPSEEK_API_KEY": "sk-ds-SECRETCANARY133",
     "ANTHROPIC_API_KEY": "sk-ant-SECRETCANARY128",
     "GIGACHAT_CREDENTIALS": "giga-SECRETCANARY129",
     "GIGACHAT_PASSWORD": "gigapw-SECRETCANARY130",
@@ -1017,22 +1061,19 @@ def test_the_launcher_onboarding_module_authors_no_onboarding_settings():
     default. That callback is gone: every host completes through
     `POST /api/onboarding/complete`, which authors the default itself.
 
-    What is worth pinning now is the inverse — the module keeps ONLY its
-    pre-server normalization writer and hands the setup window a lifecycle
-    bridge with no persistence at all. `save_settings` stays bound because
-    `prepare_first_run_settings` still uses it for an install that already has a
-    settings file."""
+    What is worth pinning now is the inverse, and it has since gone all the way:
+    the module persists NOTHING. Its pre-server normalization is applied to the
+    process environment and re-derived by every reader, so `save_settings` is no
+    longer bound at all and the setup window gets a lifecycle bridge with no
+    persistence."""
     from ouroboros import launcher_onboarding
 
-    assert callable(getattr(launcher_onboarding, "save_settings", None))
+    assert getattr(launcher_onboarding, "save_settings", None) is None
     source = pathlib.Path(launcher_onboarding.__file__).read_text(encoding="utf-8")
     assert "def save_wizard" not in source
     assert "onboarding_safety_default" not in source
     assert "prepare_onboarding_settings" not in source
-    # The only remaining write is the pre-server normalization, and only for an
-    # install whose settings file already exists.
-    assert source.count("save_settings(") == 1
-    assert "if provider_defaults_changed and _settings_path.exists():" in source
+    assert "save_settings(" not in source
 
 
 def test_wizard_rejects_a_newly_typed_short_key():
@@ -1174,3 +1215,27 @@ def test_the_review_step_spells_a_family_the_way_the_agents_step_did():
     step = (REPO / "web/modules/onboarding_agents_step.js").read_text(encoding="utf-8")
     assert "get snapshot()" in step
     assert "get catalogKnown()" in step
+
+
+def test_browser_render_smoke_fixture_is_the_live_bootstrap():
+    """web/tests/onboarding_wizard_render.test.js boots the wizard module under a
+    DOM stand-in with THIS fixture as ``window.__OURO_ONBOARDING_BOOTSTRAP__``.
+    The fixture must be byte-for-byte the bootstrap the server injects for a
+    fresh desktop install, so the browser smoke walks the real step order and
+    field lists; regenerate it with
+    ``python -c 'import json; from ouroboros.settings_setup_contract import
+    build_setup_bootstrap; print(json.dumps(build_setup_bootstrap({}, "desktop"),
+    indent=2, sort_keys=True))'`` when the contract changes."""
+    import json
+    import pathlib
+
+    from ouroboros.settings_setup_contract import build_setup_bootstrap
+
+    fixture_path = (
+        pathlib.Path(__file__).resolve().parents[1]
+        / "web" / "tests" / "fixtures" / "onboarding_bootstrap.json"
+    )
+    live = json.dumps(build_setup_bootstrap({}, "desktop"), indent=2, sort_keys=True) + "\n"
+    assert fixture_path.read_text(encoding="utf-8") == live, (
+        "web/tests/fixtures/onboarding_bootstrap.json drifted from build_setup_bootstrap({}, 'desktop')"
+    )

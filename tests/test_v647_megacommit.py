@@ -14,6 +14,7 @@ import types
 from pathlib import Path
 
 import pytest
+from tests._typed_guard_shared import _shell_guard_text
 
 PY = sys.executable or "python3"  # portable interpreter for cross-platform check commands
 
@@ -687,7 +688,7 @@ def test_verify_and_record_check_is_shell_guarded_against_subagent_secret_read()
     mapped = process_shell_guard_args("verify_and_record", {"check": "cat data/settings.json", "cwd": ""})
     # v6.51.0: normalized via the SSOT (non-login `sh -c`); the guard still inspects the inner command.
     assert mapped["cmd"] == ["sh", "-c", "cat data/settings.json"]
-    block = reg._run_shell_safety_check(mapped, "advanced")
+    block = _shell_guard_text(reg, mapped, "advanced")
     assert block and "SECRET" in block.upper()
 
 

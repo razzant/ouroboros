@@ -152,11 +152,17 @@ def test_promote_click_confirms_from_the_admission_record(tmp_path, monkeypatch)
         assert evt["task_id"] == derived_task_id
 
         def _mut(current):
+            from ouroboros.contracts.schema_versions import SCHEMA_VERSION_KEY
+            from ouroboros.task_result_schema import TASK_RESULT_SCHEMA_VERSION
+
             updated = dict(current)
             updated["promotion_admission"] = {
                 "routing_token": evt["routing_token"], "status": "scheduled",
             }
             updated["status"] = "scheduled"
+            # Campaign ABI 7.0: readers QUARANTINE an unstamped row — the fake
+            # supervisor must write what a real writer writes.
+            updated[SCHEMA_VERSION_KEY] = TASK_RESULT_SCHEMA_VERSION
             return updated
 
         update_json_locked(task_result_path(tmp_path, evt["task_id"], create=True), _mut)
@@ -245,7 +251,11 @@ def test_route_to_project_candidates_reorder_is_host_validated(tmp_path, monkeyp
         captured.update(evt)
         return "wired", {"status": "needs_manual_target", "options": evt["options"]}
 
-    monkeypatch.setattr(control, "_emit_and_wait_for_routing", _capture)
+    # Campaign owner: _route_to_project lives in control_routing, which froze
+    # its _emit_and_wait_for_routing binding at import time.
+    from ouroboros.tools import control_routing
+
+    monkeypatch.setattr(control_routing, "_emit_and_wait_for_routing", _capture)
     manual = [
         {"action": "steer_task", "task_id": "t-a", "label": "A"},
         {"action": "steer_task", "task_id": "t-b", "label": "B"},

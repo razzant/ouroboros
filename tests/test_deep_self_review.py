@@ -11,10 +11,16 @@ import pytest
 from ouroboros.provider_models import OPENAI_DIRECT_DEFAULTS
 from ouroboros.deep_self_review import (
     build_review_pack,
-    is_review_available,
+    deep_review_route,
     run_deep_self_review,
 )
+from ouroboros.reviewer_slot_config import DEEP_REVIEW_SLOT_ID, ConfiguredReviewerSlot
 from ouroboros.tools.review_helpers import _is_probably_binary
+
+
+def _packed_row(model: str) -> ConfiguredReviewerSlot:
+    """The packed deep-review row (a direct api row: the historical delivery)."""
+    return ConfiguredReviewerSlot(slot_id=DEEP_REVIEW_SLOT_ID, kind="api_chat", target_id=model)
 
 
 def _make_dulwich_mock(file_list: list[str]):
@@ -101,23 +107,32 @@ class TestBuildReviewPack:
         assert "Fix recurring review blocker" in pack
 
     def test_skips_missing_memory(self, tmp_repo, tmp_drive):
-        """Missing memory files are silently skipped."""
+        """Missing memory files are not inlined — and their absence is DISCLOSED
+        (omission section + typed disposition), never silently skipped."""
         with mock.patch("dulwich.repo.Repo", _make_dulwich_mock(["main.py"])):
             pack, stats = build_review_pack(tmp_repo, tmp_drive)
 
-        # registry.md, WORLD.md, index-full.md don't exist — should not appear
-        assert "registry.md" not in pack
-        assert "WORLD.md" not in pack
-        assert "index-full.md" not in pack
+        for rel in ("memory/registry.md", "memory/WORLD.md", "memory/knowledge/index-full.md"):
+            assert f"## FILE: drive/{rel}" not in pack
+            assert f"drive/{rel} (missing: not present under the data root)" in pack[pack.index("## OMITTED FILES"):]
+            assert stats["memory"]["dispositions"][rel] == "missing"
+        assert stats["memory"]["inlined"] == 3 and stats["memory"]["total"] == 7
+        assert stats["memory"]["dispositions"]["memory/identity.md"] == "inlined"
 
 
-class TestIsReviewAvailable:
+class TestPackedRouteAvailability:
+    """Availability (`deep_review_route`) of the SYNTHESIZED packed row: no `deep_review` row saved,
+    so the legacy model key is the migration source and the packed rules
+    (credentials, the -pro rewrite, the OPENAI_BASE_URL trust rule) apply."""
+
     def test_openrouter(self):
-        with (
-            mock.patch("ouroboros.deep_self_review.get_deep_self_review_model", return_value="openai/gpt-5.5-pro"),
-            mock.patch.dict(os.environ, {"OPENROUTER_API_KEY": "sk-or-test"}, clear=True),
+        with mock.patch.dict(
+            os.environ,
+            {"OPENROUTER_API_KEY": "sk-or-test", "OUROBOROS_MODEL_DEEP_SELF_REVIEW": "openai/gpt-5.5-pro"},
+            clear=True,
         ):
-            available, model = is_review_available()
+            reason, model = deep_review_route()
+            available = not reason
         assert available is True
         assert model == "openai/gpt-5.5-pro"
 
@@ -127,7 +142,8 @@ class TestIsReviewAvailable:
             # Ensure OPENROUTER_API_KEY and OPENAI_BASE_URL are not set
             os.environ.pop("OPENROUTER_API_KEY", None)
             os.environ.pop("OPENAI_BASE_URL", None)
-            available, model = is_review_available()
+            reason, model = deep_review_route()
+            available = not reason
         assert available is True
         # The direct route lands on the PROVIDER default, not a mechanical
         # `openai::` + router-slug rewrite: `-pro` is an OpenRouter routing slug
@@ -137,26 +153,31 @@ class TestIsReviewAvailable:
 
     def test_none(self):
         with mock.patch.dict(os.environ, {}, clear=True):
-            available, model = is_review_available()
+            reason, model = deep_review_route()
+            available = not reason
         assert available is False
         assert model is None
 
     def test_direct_provider_prefix_requires_matching_key_even_with_openrouter(self):
-        with (
-            mock.patch("ouroboros.deep_self_review.get_deep_self_review_model", return_value="anthropic::claude-opus-4.8"),
-            mock.patch.dict(os.environ, {"OPENROUTER_API_KEY": "sk-or-test"}, clear=True),
+        with mock.patch.dict(
+            os.environ,
+            {"OPENROUTER_API_KEY": "sk-or-test", "OUROBOROS_MODEL_DEEP_SELF_REVIEW": "anthropic::claude-opus-4.8"},
+            clear=True,
         ):
-            available, model = is_review_available()
+            reason, model = deep_review_route()
+            available = not reason
 
         assert available is False
         assert model is None
 
     def test_direct_provider_prefix_available_with_matching_key(self):
-        with (
-            mock.patch("ouroboros.deep_self_review.get_deep_self_review_model", return_value="anthropic::claude-opus-4.8"),
-            mock.patch.dict(os.environ, {"ANTHROPIC_API_KEY": "sk-ant-test"}, clear=True),
+        with mock.patch.dict(
+            os.environ,
+            {"ANTHROPIC_API_KEY": "sk-ant-test", "OUROBOROS_MODEL_DEEP_SELF_REVIEW": "anthropic::claude-opus-4.8"},
+            clear=True,
         ):
-            available, model = is_review_available()
+            reason, model = deep_review_route()
+            available = not reason
 
         assert available is True
         assert model == "anthropic::claude-opus-4.8"
@@ -172,8 +193,8 @@ class TestRequestToolEmitsEvent:
 
         ctx = FakeCtx()
         with mock.patch(
-            "ouroboros.deep_self_review.is_review_available",
-            return_value=(True, "openai/gpt-5.5-pro"),
+            "ouroboros.deep_self_review.deep_review_route",
+            return_value=("", "openai/gpt-5.5-pro"),
         ):
             result = _request_deep_self_review(ctx, "test reason")
         assert len(ctx.pending_events) == 1
@@ -184,7 +205,7 @@ class TestRequestToolEmitsEvent:
         assert "Deep self-review" in result
 
     def test_unavailable_returns_error(self):
-        """When no API key is available, returns error without emitting event."""
+        """An unavailable ROW returns the typed reason without emitting an event."""
         from ouroboros.tools.control import _request_deep_self_review
 
         class FakeCtx:
@@ -192,12 +213,13 @@ class TestRequestToolEmitsEvent:
 
         ctx = FakeCtx()
         with mock.patch(
-            "ouroboros.deep_self_review.is_review_available",
-            return_value=(False, None),
+            "ouroboros.deep_self_review.deep_review_route",
+            return_value=("no provider credentials for openai/x", None),
         ):
             result = _request_deep_self_review(ctx, "test reason")
         assert len(ctx.pending_events) == 0
-        assert "unavailable" in result
+        assert result.startswith("❌ Deep self-review unavailable: no provider credentials for openai/x")
+        assert "Review lanes" in result
 
 
 class TestVendoredFilesExcluded:
@@ -590,13 +612,15 @@ class TestNoProxyLlmChat:
         assert len(new_clients) == 0
 
     def test_run_deep_self_review_calls_llm_with_no_proxy_and_configured_effort(self, tmp_repo, tmp_drive, monkeypatch):
-        """run_deep_self_review passes no_proxy=True to llm.chat."""
+        """The packed row's wire call: no_proxy=True, the surface effort when
+        the row names none, and the report delivered behind the host header."""
         from ouroboros.deep_self_review import run_deep_self_review
         small_pack = "x" * 100
         manifest = {"status": "ok", "selected_count": 1}
         mock_llm = mock.Mock()
         mock_llm.chat.return_value = ({"content": "Review result."}, {"cost": 0.01})
         monkeypatch.setenv("OUROBOROS_EFFORT_DEEP_SELF_REVIEW", "medium")
+        monkeypatch.setenv("OPENROUTER_API_KEY", "sk-or-test")
 
         with mock.patch(
             "ouroboros.deep_self_review.build_review_pack",
@@ -614,12 +638,13 @@ class TestNoProxyLlmChat:
                 repo_dir=tmp_repo,
                 drive_root=tmp_drive,
                 llm=mock_llm,
-                emit_progress=lambda x: None,
-                event_queue=None,
-                model="openai/gpt-5.5-pro",
+                emit_progress=lambda x, *, incident=None: None,
+                slot=_packed_row("openai/gpt-5.5-pro"),
             )
 
-        assert result == "Review result."
+        assert result.endswith("\n\nReview result.")
+        assert result.startswith("<!-- deep-review provenance: delivery=api_packet, model=openai/gpt-5.5-pro, ")
+        assert usage["resolved_model"] == "openai/gpt-5.5-pro" and "execution_status" not in usage
         mock_llm.chat.assert_called_once()
         _, kwargs = mock_llm.chat.call_args
         assert kwargs.get("no_proxy") is True, "llm.chat must be called with no_proxy=True"
@@ -631,9 +656,10 @@ class TestNoProxyLlmChat:
 
 
 class TestReviewPackOverflow:
-    def test_overflow_shrinks_and_proceeds(self, tmp_repo, tmp_drive):
+    def test_overflow_shrinks_and_proceeds(self, tmp_repo, tmp_drive, monkeypatch):
         """An estimator-drift overshoot triggers ONE tighter rebuild, then the
         review proceeds — the historical '+853 tokens' fatal error class."""
+        monkeypatch.setenv("OPENROUTER_API_KEY", "sk-or-test")
         huge_pack = "x" * 4_000_000  # > 745K-token gate
         small_pack = "y" * 4_000     # comfortably under
         mock_llm = mock.Mock()
@@ -657,18 +683,19 @@ class TestReviewPackOverflow:
                 repo_dir=tmp_repo,
                 drive_root=tmp_drive,
                 llm=mock_llm,
-                emit_progress=lambda x: None,
-                event_queue=None,
-                model="test-model",
+                emit_progress=lambda x, *, incident=None: None,
+                slot=_packed_row("test-model"),
             )
 
-        assert result == "Review result."
+        assert result.endswith("\n\nReview result.")
         assert len(build_calls) == 2, "must rebuild once with a tighter budget"
         assert build_calls[1] > 0, "retry must reduce the atlas hard budget"
 
-    def test_explicit_error_when_shrink_cannot_fit(self, tmp_repo, tmp_drive):
+    def test_explicit_error_when_shrink_cannot_fit(self, tmp_repo, tmp_drive, monkeypatch):
         """If even the tighter rebuild stays over the gate, fail closed with the
-        explicit error (the pinned last-resort assertion)."""
+        explicit error (the pinned last-resort assertion) and TYPED usage, so
+        the caller never writes the error over the previous report."""
+        monkeypatch.setenv("OPENROUTER_API_KEY", "sk-or-test")
         huge_pack = "x" * 4_000_000
         mock_llm = mock.Mock()
 
@@ -680,19 +707,19 @@ class TestReviewPackOverflow:
                 repo_dir=tmp_repo,
                 drive_root=tmp_drive,
                 llm=mock_llm,
-                emit_progress=lambda x: None,
-                event_queue=None,
-                model="test-model",
+                emit_progress=lambda x, *, incident=None: None,
+                slot=_packed_row("test-model"),
             )
 
         assert "too large" in result
         # v6.80.0: the deep reviewer's cap is DENSITY-calibrated per model at call
         # time (the module constant is only the uncalibrated window arithmetic), so
         # the message must quote the calibrated number actually enforced.
-        # v6.87.9: the window itself is resolved from Capability Evidence per
-        # reviewer (an unknown route keeps the full-window assumption; a KNOWN
-        # sub-1M one shrinks) and the reserves scale to it, so the quoted number
-        # follows the same resolution instead of a hardcoded 1M.
+        # v6.87.9 / Ф3: the window is resolved from Capability Evidence per
+        # reviewer. An unknown route keeps the full-window assumption and is
+        # dispatched-and-disclosed (`window=assumed_1000000`, owner fork A
+        # pending ratification); a CONFIRMED sub-1M route is a typed refusal
+        # (no shrink). The quoted number follows that same resolution.
         from ouroboros.reviewer_window import (
             reviewer_context_window,
             window_scaled_reserves,
@@ -714,7 +741,7 @@ class TestReviewPackOverflow:
             tokenizer_margin=margin,
         )
         assert f"{enforced:,}" in result
-        assert usage == {}
+        assert usage == {"execution_status": "infra_failed", "reason_code": "deep_self_review_error"}
         mock_llm.chat.assert_not_called()
 
 
@@ -757,7 +784,7 @@ class TestOmissionSectionBound:
 def test_direct_openai_deep_review_sends_a_real_openai_model_id():
     """PHYSICAL-PAYLOAD proof, not a defaults-table assertion.
 
-    The OpenRouter default is the slug `openai/gpt-5.6-sol-pro`. That `-pro`
+    An owner may pin the slug `openai/gpt-5.6-sol-pro`. That `-pro`
     suffix is an OpenRouter routing slug, NOT an OpenAI model id: live-probed
     2026-07-29, `gpt-5.6-sol-pro` on api.openai.com /v1/chat/completions returns
     404, while pro reasoning exists only on /v1/responses as
@@ -813,18 +840,15 @@ def test_direct_fallback_preserves_an_explicit_real_model_pin():
     with mock.patch.dict(os.environ, env, clear=False):
         os.environ.pop("OPENROUTER_API_KEY", None)
         os.environ.pop("OPENAI_BASE_URL", None)
-        with mock.patch(
-            "ouroboros.deep_self_review.get_deep_self_review_model",
-            return_value="openai/gpt-5.5",
-        ):
-            available, model = is_review_available()
+        os.environ.pop("OUROBOROS_REVIEWER_SLOTS", None)
+        with mock.patch.dict(os.environ, {"OUROBOROS_MODEL_DEEP_SELF_REVIEW": "openai/gpt-5.5"}):
+            reason, model = deep_review_route()
+            available = not reason
         assert available is True
         assert model == "openai::gpt-5.5", "an explicit real-model pin survives"
-        with mock.patch(
-            "ouroboros.deep_self_review.get_deep_self_review_model",
-            return_value="openai/gpt-5.5-pro",
-        ):
-            available, model = is_review_available()
+        with mock.patch.dict(os.environ, {"OUROBOROS_MODEL_DEEP_SELF_REVIEW": "openai/gpt-5.5-pro"}):
+            reason, model = deep_review_route()
+            available = not reason
         assert available is True
         assert model == OPENAI_DIRECT_DEFAULTS["deep_self_review"], (
             "a router-only -pro slug lands on the provider default"

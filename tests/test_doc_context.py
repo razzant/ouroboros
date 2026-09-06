@@ -87,6 +87,15 @@ def test_max_mode_inlines_architecture_and_development_in_full():
     assert "## DEVELOPMENT.md" in text
 
 
+def test_plan_review_docs_pin_fail_closed_exact_artifact_custody():
+    repo = pathlib.Path(__file__).resolve().parents[1]
+
+    for relative in ("docs/ARCHITECTURE.md", "docs/DEVELOPMENT.md"):
+        text = (repo / relative).read_text(encoding="utf-8")
+        assert "plan_review_exact_artifact_unavailable" in text, relative
+        assert "only when no exact artifact reference exists" in text, relative
+
+
 def test_forked_task_captures_canonical_memory_and_exact_api_context():
     import json
 
@@ -180,6 +189,7 @@ def test_current_plan_and_open_dispositions_enter_actual_model_request():
     result_dir = env.drive_root / "task_results"
     result_dir.mkdir(parents=True)
     (result_dir / f"{task_id}.json").write_text(json.dumps({
+        "_schema_version": 1,
         "task_id": task_id,
         "status": "running",
         "plan_review_state": {
@@ -233,6 +243,7 @@ def test_valid_named_predecessor_materializes_into_first_model_request_and_actor
     result_dir = env.drive_root / "task_results"
     result_dir.mkdir(parents=True)
     (result_dir / f"{predecessor_id}.json").write_text(json.dumps({
+        "_schema_version": 1,
         "task_id": predecessor_id,
         "status": "completed",
         "objective": "o" * 700 + tail,

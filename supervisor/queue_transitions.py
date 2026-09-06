@@ -27,6 +27,7 @@ import pathlib
 import threading
 from typing import Any, Dict, List, Optional, Tuple
 
+from ouroboros.post_task_checkpoint import post_task_synthesis_in_flight
 from ouroboros.utils import utc_now_iso
 
 log = logging.getLogger(__name__)
@@ -625,10 +626,11 @@ def task_subtree_is_live(task_id: str, *, ignore_intents: bool = False) -> bool:
     """Cheap liveness pre-check for the HTTP cascade-cancel path (v6.82).
 
     True when the task itself is queued/running, when it still has live
-    descendants in the queue, or when it holds an ACTIVE durable cancel intent
-    (or the legacy ``cancel_requested`` status latch of pre-redesign files) —
-    the intent's settle still has honest work to do. Everything else is
-    inactive and must keep today's 404 contract.
+    descendants in the queue, when THIS process still runs its paid post-task
+    synthesis (the direct-chat turn's in-flight key), or when it holds an
+    ACTIVE durable cancel intent (or the legacy ``cancel_requested`` status
+    latch of pre-redesign files) — the intent's settle still has honest work
+    to do. Everything else is inactive and must keep today's 404 contract.
 
     ``ignore_intents=True`` is the PHYSICAL variant for the cascade
     postcondition (GR2-1e): the root's own cascade intent now survives until
@@ -659,6 +661,14 @@ def task_subtree_is_live(task_id: str, *, ignore_intents: bool = False) -> bool:
     if self_running and not _settled_status(q.DRIVE_ROOT, task_id):
         return True
     if any(tid and not _settled_status(q.DRIVE_ROOT, tid) for tid in descendants):
+        return True
+    # The direct-chat turn's paid post-task synthesis is PHYSICAL liveness with
+    # no queue row at all (GR6-1): the row settled and the turn's loop returned
+    # while the in-process thread still bills. Custody refuses it as "still
+    # live"; the cascade postcondition must see the same fact, or it re-judges
+    # that refusal against the stored ``completed`` alone, settles the root's
+    # cascade intent and the per-stage gate loses the Stop it was waiting on.
+    if post_task_synthesis_in_flight(q.DRIVE_ROOT, task_id):
         return True
     if ignore_intents:
         return False
@@ -842,8 +852,9 @@ def _live_retry_target_locked(q: Any, task_id: str) -> Tuple[str, str]:
 
 
 def task_has_live_ownership(task_id: str) -> bool:
-    """Whether live PHYSICAL ownership remains for this task: a RUNNING row or
-    a busy worker slot (GR6-1, the one predicate behind the class rule).
+    """Whether live PHYSICAL ownership remains for this task: a RUNNING row, a
+    busy worker slot, the in-process direct-chat turn or its still-billing
+    post-task synthesis (GR6-1, the one predicate behind the class rule).
 
     The pipeline persists the durable terminal result BEFORE post-task
     cognition ends, so "the status is settled" and "the worker is dead" are
@@ -868,6 +879,19 @@ def task_has_live_ownership(task_id: str) -> bool:
         if any(
             worker.busy_task_id == task_id for worker in workers.WORKERS.values()
         ):
+            return True
+        # The in-process direct-chat turn is live PHYSICAL ownership too: it
+        # spends on the owner's behalf from inside the supervisor process and
+        # writes an ordinary durable running row, so it must be as
+        # addressable as a pooled worker (custody stops it cooperatively).
+        if workers.direct_chat_turn(task_id) is not None:
+            return True
+        # The turn's paid post-task synthesis OUTLIVES the turn: the loop
+        # returns and ``_busy`` drops while the in-process worker thread still
+        # bills, so the pipeline's in-flight key is live physical ownership
+        # too — the stop ingress must not answer 404 while the spend
+        # continues, and custody keeps the intent open for the stage gate.
+        if post_task_synthesis_in_flight(q.DRIVE_ROOT, task_id):
             return True
         try:
             retry_target, _retry_settled_status = _live_retry_target_locked(q, task_id)
@@ -1041,6 +1065,64 @@ def resume_project_deletions(drive_root: object) -> int:
             project.get("chat_id"),
         ))
     return started
+
+
+def _close_campaign_after_owner_stop(exclude_task_id: str = "") -> None:
+    """GR3-3 owner-stop backstop: close the campaign once its live task settled.
+
+    An INCOMPLETE ``/evolve off`` / ``toggle_evolution(False)`` deliberately
+    leaves the campaign OPEN over the still-live evolution task (closing it
+    would declare a clean terminal that did not happen); the durable
+    ``evolution_owner_stopped`` state flag blocks new cycles meanwhile. Every
+    evolution terminal routes through ``_handle_evolution_task_done``, so this
+    runs at exactly the moment the deferred close becomes honest — and no-ops
+    whenever the owner never stopped or the campaign is already terminal.
+    Never raises.
+
+    GR4-6: the close is gated on NO OTHER evolution task being live — the
+    multi-live incomplete-stop shape settles ONE task at a time, and closing
+    on the first terminal would declare a clean stop over the others.
+    ``exclude_task_id`` names the task whose terminal is being processed (its
+    RUNNING row is popped only later, by ``_finish_task_done_dispatch``).
+    """
+    try:
+        from supervisor.evolution_lifecycle import (
+            _read_evolution_campaign,
+            complete_evolution_campaign,
+        )
+        from supervisor.state import load_state
+
+        if not bool(load_state().get("evolution_owner_stopped")):
+            return
+        if _read_evolution_campaign().get("status") not in {"active", "paused"}:
+            return
+        from supervisor.queue import PENDING, RUNNING, _queue_lock
+
+        with _queue_lock:
+            live = [
+                str(task.get("id") or "")
+                for task in PENDING
+                if isinstance(task, dict) and str(task.get("type") or "") == "evolution"
+            ] + [
+                str(tid)
+                for tid, meta in RUNNING.items()
+                if isinstance(meta, dict)
+                and isinstance(meta.get("task"), dict)
+                and str(meta["task"].get("type") or "") == "evolution"
+            ]
+        live = [tid for tid in live if tid and tid != str(exclude_task_id or "")]
+        if live:
+            log.info(
+                "owner-stop campaign close deferred: evolution task(s) still live: %s",
+                live,
+            )
+            return
+        complete_evolution_campaign(
+            "owner stop completed after the live evolution task settled",
+            status="stopped",
+        )
+    except Exception:
+        log.debug("owner-stop campaign close backstop failed", exc_info=True)
 
 
 def reconcile_terminal_task_projections(drive_root, task_id: str) -> None:

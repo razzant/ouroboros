@@ -1,6 +1,7 @@
 """Tests for seal_task_transcript — transcript cache-boundary sealing."""
 
-from ouroboros.loop import seal_task_transcript, _extract_plain_text_from_content
+from ouroboros.loop import seal_task_transcript
+from ouroboros.loop_messages import _extract_plain_text_from_content
 
 
 # ─────────────────────────────────────────────────────────────
@@ -57,7 +58,7 @@ def test_extract_plain_text_none():
 # ─────────────────────────────────────────────────────────────
 
 def test_no_seal_when_not_enough_tool_rounds():
-    """With <= keep_active tool rounds, nothing is sealed."""
+    """With <= keep_active tool rounds, nothing is sealed on a tool message."""
     msgs = _make_messages(n_tool_rounds=5, prefix_per_tool=3000)
     seal_task_transcript(msgs, keep_active=5, min_prefix_tokens=100)
     assert _sealed_indices(msgs) == []
@@ -232,3 +233,79 @@ def test_compaction_receives_plain_strings():
     for i, m in enumerate(msgs):
         if m.get("role") == "tool" and i not in sealed:
             assert isinstance(m["content"], str), f"Tool msg at {i} is not a plain string"
+
+
+# ─────────────────────────────────────────────────────────────
+# seal_task_transcript — the task-message anchor (short transcripts)
+# ─────────────────────────────────────────────────────────────
+
+def _task_message_markers(messages: list) -> list:
+    first_user = next((m for m in messages if m.get("role") == "user"), None)
+    content = (first_user or {}).get("content")
+    if not isinstance(content, list):
+        return []
+    return [b for b in content if isinstance(b, dict) and b.get("cache_control")]
+
+
+def test_short_transcript_anchors_the_prefix_on_the_task_message():
+    """Below the rolling-seal threshold the task message carries the one marker."""
+    msgs = _make_messages(n_tool_rounds=3, prefix_per_tool=3000)
+    seal_task_transcript(msgs, keep_active=5, min_prefix_tokens=100)
+
+    assert _sealed_indices(msgs) == []
+    assert len(_task_message_markers(msgs)) == 1
+    assert _task_message_markers(msgs)[0]["text"].startswith("start")
+
+
+def test_qualifying_rolling_seal_migrates_the_marker_in_the_same_call():
+    """Exactly one message-side marker exists across the migration."""
+    msgs = _make_messages(n_tool_rounds=3, prefix_per_tool=3000)
+    seal_task_transcript(msgs, keep_active=5, min_prefix_tokens=100)
+    assert len(_task_message_markers(msgs)) == 1
+
+    msgs.append(_assistant_msg("round 3"))
+    msgs.append(_tool_msg("x" * 3000, call_id="tc3"))
+    msgs.append(_assistant_msg("round 4"))
+    msgs.append(_tool_msg("x" * 3000, call_id="tc4"))
+    msgs.append(_assistant_msg("round 5"))
+    msgs.append(_tool_msg("x" * 3000, call_id="tc5"))
+    seal_task_transcript(msgs, keep_active=5, min_prefix_tokens=100)
+
+    assert len(_sealed_indices(msgs)) == 1
+    assert _task_message_markers(msgs) == []
+
+
+def test_an_unqualified_prefix_keeps_the_task_message_anchor():
+    """A tool count that qualifies but a prefix too small keeps one marker."""
+    msgs = _make_messages(n_tool_rounds=7, prefix_per_tool=4)
+    seal_task_transcript(msgs, keep_active=5, min_prefix_tokens=100_000)
+
+    assert _sealed_indices(msgs) == []
+    assert len(_task_message_markers(msgs)) == 1
+
+
+def test_blank_task_message_is_never_the_cache_anchor():
+    """Anthropic rejects a marker on empty text; leave it unmarked instead."""
+    msgs = [_user_msg("   "), _assistant_msg("a"), _tool_msg("out", call_id="tc0")]
+    seal_task_transcript(msgs, keep_active=5, min_prefix_tokens=100)
+
+    assert _task_message_markers(msgs) == []
+    assert msgs[0]["content"] == "   "
+
+
+def test_the_anchor_lands_on_the_last_non_empty_text_block():
+    """A multipart task message keeps its later blocks cacheable too."""
+    msgs = [
+        {"role": "user", "content": [
+            {"type": "text", "text": "task"},
+            {"type": "text", "text": "contract"},
+            {"type": "text", "text": "   "},
+        ]},
+        _assistant_msg("a"),
+        _tool_msg("out", call_id="tc0"),
+    ]
+    seal_task_transcript(msgs, keep_active=5, min_prefix_tokens=100)
+
+    markers = _task_message_markers(msgs)
+    assert len(markers) == 1
+    assert markers[0]["text"] == "contract"

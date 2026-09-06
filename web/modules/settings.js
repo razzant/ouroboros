@@ -35,7 +35,10 @@ const INPUT_FIELDS = [
     // 6.1: OUROBOROS_REVIEW_MODELS / OUROBOROS_SCOPE_REVIEW_MODELS are no
     // longer authored here — the Review lanes section composes the ONE
     // structured setting; the comma keys stay a backend-derived projection.
-    ['s-deep-self-review-model', 'OUROBOROS_MODEL_DEEP_SELF_REVIEW'], ['s-skills-repo-path', 'OUROBOROS_SKILLS_REPO_PATH'],
+    // R7: OUROBOROS_MODEL_DEEP_SELF_REVIEW is not authored here either — the
+    // deep self-review row lives in Review lanes; the key is the backend's
+    // invisible migration source for that row.
+    ['s-skills-repo-path', 'OUROBOROS_SKILLS_REPO_PATH'],
     ['s-clawhub-registry-url', 'OUROBOROS_CLAWHUB_REGISTRY_URL'], ['s-websearch-model', 'OUROBOROS_WEBSEARCH_MODEL'], ['s-gh-repo', 'GITHUB_REPO'],
     ['s-local-source', 'LOCAL_MODEL_SOURCE'], ['s-local-filename', 'LOCAL_MODEL_FILENAME'], ['s-local-chat-format', 'LOCAL_MODEL_CHAT_FORMAT'],
     ['s-subagent-worktree-root', 'OUROBOROS_SUBAGENT_WORKTREE_ROOT'], ['s-subagent-projects-root', 'OUROBOROS_SUBAGENT_PROJECTS_ROOT'],
@@ -315,7 +318,7 @@ function collectSecretValue(id, body) {
 
 // Fallback picker pills mirror config defaults plus useful direct-provider ids.
 const SETTINGS_FALLBACK_MODELS = [
-    'google/gemini-3.7-flash',
+    'google/gemini-3.8-flash',
     'x-ai/grok-4.6',
     'openai/gpt-5.6-terra',
     'openai/gpt-5.6-sol',
@@ -329,6 +332,8 @@ const SETTINGS_FALLBACK_MODELS = [
     'anthropic::claude-opus-5',
     'anthropic::claude-opus-4-6',
     'deepseek/deepseek-v4-pro',
+    'deepseek::deepseek-v4-pro',
+    'deepseek::deepseek-v4-flash',
     'minimax::MiniMax-M3',
     'minimax::MiniMax-M2.7',
 ];
@@ -343,11 +348,12 @@ let settingsModelCatalogItems = SETTINGS_FALLBACK_MODELS.map((value) => ({ value
  * Exported for dependency-free node tests.
  */
 export function moreProvidersCredentialConfigured({
-    cloudruKey = '', minimaxKey = '', gigachatCredentials = '', gigachatUser = '', gigachatPassword = '',
+    cloudruKey = '', minimaxKey = '', deepseekKey = '', gigachatCredentials = '', gigachatUser = '', gigachatPassword = '',
 } = {}) {
     const has = (v) => Boolean(String(v ?? '').trim());
     return has(cloudruKey)
         || has(minimaxKey)
+        || has(deepseekKey)
         || has(gigachatCredentials)
         || (has(gigachatUser) && has(gigachatPassword));
 }
@@ -639,6 +645,7 @@ export function initSettings({ state, setBeforePageLeave, ws } = {}) {
         if (moreProvidersCredentialConfigured({
             cloudruKey: value('s-cloudru-key'),
             minimaxKey: value('s-minimax-key'),
+            deepseekKey: value('s-deepseek-key'),
             gigachatCredentials: value('s-gigachat-credentials'),
             gigachatUser: value('s-gigachat-user'),
             gigachatPassword: value('s-gigachat-password'),

@@ -119,6 +119,51 @@ def inventory_cache_path(repo_root: pathlib.Path, drive_root: pathlib.Path) -> p
     return pathlib.Path(drive_root) / "state" / "code_intel" / repo_key / "inventory.json"
 
 
+def prune_stale_code_intel_roots(
+    drive_root: pathlib.Path,
+    retention_days: "int | None" = None,
+    *,
+    now: "float | None" = None,
+) -> Dict[str, Any]:
+    """Age-prune workspace roots whose inventory went stale (CPL4-C14).
+
+    The root-dir key is a one-way path hash, so liveness cannot be probed —
+    the ``inventory.json`` mtime is the signal (an active root rewrites it on
+    every index). Pure derived cache: a pruned root costs one full re-index,
+    never data. Fail-soft per entry; a root whose inventory is missing ages
+    by the directory's own mtime.
+    """
+    import shutil
+
+    from ouroboros.retention import age_cutoff, get_gc_retention_days
+
+    if retention_days is None:
+        retention_days = get_gc_retention_days()
+    cutoff = age_cutoff(retention_days, now)
+    report: Dict[str, Any] = {"removed": [], "kept": 0, "errors": []}
+    cache_root = pathlib.Path(drive_root) / "state" / "code_intel"
+    try:
+        entries = sorted(p for p in cache_root.iterdir() if p.is_dir())
+    except OSError:
+        return report
+    for entry in entries:
+        probe = entry / "inventory.json"
+        try:
+            mtime = (probe if probe.exists() else entry).stat().st_mtime
+        except OSError:
+            report["kept"] += 1
+            continue
+        if mtime >= cutoff:
+            report["kept"] += 1
+            continue
+        try:
+            shutil.rmtree(entry)
+            report["removed"].append(entry.name)
+        except OSError:
+            report["errors"].append({"entry": entry.name, "error": "remove_failed"})
+    return report
+
+
 def _symbol_from_json(raw: Any) -> SymbolFact:
     data = raw if isinstance(raw, dict) else {}
     return SymbolFact(

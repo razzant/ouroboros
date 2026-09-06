@@ -154,7 +154,9 @@ def _reconstructed_cost_fields(q: Any, task_id: str, task: Dict[str, Any]) -> Di
     except Exception:
         log.warning("Cost reconstruction failed for cancelled %s", task_id, exc_info=True)
         return {"cost_accounting_status": "unavailable", "cost_final": False,
-                "cost_accounting_error": "ledger_unavailable", "cost_usd": None}
+                "cost_accounting_error": "ledger_unavailable",
+                # ABI-3: honest name only — the retired alias is read-only.
+                "accounted_upper_bound_usd": None}
 
 
 def _salvage_cancelled_output(
@@ -518,6 +520,60 @@ def _cascade_delivery_row_locked(q: Any, task_id: str) -> Dict[str, Any]:
         if isinstance(task, dict) and q._is_descendant_of(task, task_id) and task.get("chat_id"):
             return dict(task)
     return {}
+
+
+def _finish_captured_chat_turn(
+    q: Any, task_id: str, turn: Dict[str, Any], *, intent: Optional[Dict[str, Any]] = None,
+    deliver: bool = True,
+) -> str:
+    """Custody's half of stopping the in-process direct-chat turn: the lane
+    arms the cooperative stop and waits its short bound
+    (``worker_chat_lane.stop_direct_chat_turn``); custody settles the intent
+    against what the turn published, or releases the claim so the sweep
+    retries — the HTTP caller then sees "still live", never a fabricated
+    ``cancelled`` row over a turn that is still running. A turn that ENDED
+    without publishing a terminal (the lane's error path writes none) takes
+    the same miss finalizer a pooled task does — ``cancelled`` with the
+    reconstructed cost — so a "successful" stop can never leave a ``running``
+    row that no control can reach again. A turn that was already gone before
+    the stop could be armed is the pooled lane's ``already_settled`` — unless
+    its paid post-task synthesis is still billing on the in-process worker
+    (``turn`` is then None): the claim is released with the typed "still
+    live" error so the durable immediate intent stays open for the
+    pipeline's per-stage gate, and the sweep settles ``already_settled``
+    once the worker drops its in-flight key."""
+    from supervisor.task_lifecycle import (
+        CANCEL_FAILED, SETTLED_ALREADY, _release_intent_claim, _settle_intent,
+    )
+    from supervisor.worker_chat_lane import (
+        DIRECT_TURN_STOP_GONE, DIRECT_TURN_STOP_LIVE, stop_direct_chat_turn,
+    )
+    from ouroboros.post_task_checkpoint import post_task_synthesis_in_flight
+    from ouroboros.task_results import load_task_result
+    from ouroboros.task_status import SETTLED_STATUSES
+
+    outcome = (
+        DIRECT_TURN_STOP_GONE if turn is None
+        else stop_direct_chat_turn(task_id, turn, deliver=deliver)
+    )
+    if outcome == DIRECT_TURN_STOP_LIVE:
+        _release_intent_claim(
+            q, task_id, error="direct chat turn has not reached its next step yet",
+            intent=intent,
+        )
+        return CANCEL_FAILED
+    if post_task_synthesis_in_flight(q.DRIVE_ROOT, task_id):
+        _release_intent_claim(
+            q, task_id, error="post-task synthesis of the direct chat turn is still running",
+            intent=intent,
+        )
+        return CANCEL_FAILED
+    stored = load_task_result(q.DRIVE_ROOT, task_id) or {}
+    if str(stored.get("status") or "") not in SETTLED_STATUSES:
+        return _finalize_cancel_intent_on_miss(q, task_id, intent=intent)
+    _settle_intent(q, task_id, outcome=SETTLED_ALREADY,
+                   detail=str(stored.get("status") or ""), intent=intent)
+    return CANCEL_ALREADY_SETTLED if outcome == DIRECT_TURN_STOP_GONE else CANCEL_CANCELLED
 
 
 def _finalize_cancel_intent_on_miss(

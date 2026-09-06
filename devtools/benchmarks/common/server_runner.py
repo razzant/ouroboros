@@ -111,6 +111,7 @@ _ISO_SETTINGS_ALLOW_EXACT = frozenset({
 _PROVIDER_ENV_KEYS = frozenset({
     "OPENROUTER_API_KEY", "OPENAI_API_KEY", "OPENAI_COMPATIBLE_API_KEY",
     "CLOUDRU_FOUNDATION_MODELS_API_KEY", "ANTHROPIC_API_KEY", "MINIMAX_API_KEY",
+    "DEEPSEEK_API_KEY",
     "GIGACHAT_CREDENTIALS", "GIGACHAT_PASSWORD",
 })
 
@@ -118,7 +119,13 @@ _PROVIDER_ENV_KEYS = frozenset({
 # parent process can still carry compatibility aliases and newer runtime knobs
 # that are not present in ``SETTINGS_DEFAULTS``; retaining any of those would
 # make an otherwise identical run depend on the operator shell.  Keep only the
-# path/port values that this lifecycle writes back explicitly.  This is scoped
+# path/port values that this lifecycle writes back explicitly, plus one
+# operational host-load lever: ``OUROBOROS_PREFLIGHT_TEST_WORKERS`` caps the
+# xdist fan-out of the commit gate's hermetic pytest pass (read by
+# ``preflight_runner._preflight_worker_count`` in the server process, never a
+# model/credential/settings key, and still scrubbed from the candidate suite's
+# own environment by ``preflight_runner._preflight_env``).  Without it every
+# isolated server resolves ``-n auto`` to the host's CPU count.  This is scoped
 # to ``settings_authoritative_env`` below; older env-first benchmark drivers
 # retain their historical inheritance contract.
 _AUTHORITATIVE_ENV_KEEP = frozenset({
@@ -129,6 +136,7 @@ _AUTHORITATIVE_ENV_KEEP = frozenset({
     "OUROBOROS_SERVER_HOST",
     "OUROBOROS_SERVER_PORT",
     "OUROBOROS_HOST_SERVICE_PORT",
+    "OUROBOROS_PREFLIGHT_TEST_WORKERS",
 })
 _AUTHORITATIVE_ENV_PREFIXES = (
     "OUROBOROS_",
@@ -136,6 +144,7 @@ _AUTHORITATIVE_ENV_PREFIXES = (
     "OPENAI_",
     "ANTHROPIC_",
     "MINIMAX_",
+    "DEEPSEEK_",
     "CLOUDRU_",
     "GIGACHAT_",
     "CLAUDE_",
@@ -241,6 +250,36 @@ def _api(base_url: str, method: str, path: str, payload: dict | None = None, tim
     return json.loads(raw) if raw.strip() else {}
 
 
+def _api_status(base_url: str, method: str, path: str, payload: dict | None = None,
+                timeout: float = 60) -> dict:
+    """Like ``_api`` but returns ``{"status": <http status>, "body": {...}}`` and never
+    raises for an error status.
+
+    The owner control surface answers its REFUSALS typed (404 ``task_not_live``, 409
+    ``cancel_pending``, 503 ``cancel_intent_projection_corrupt``, 202 ``pending``), and
+    urllib turns every non-2xx into an exception — so a driver built on ``_api`` can only
+    see "it threw", which is exactly the distinction an owner-control scenario has to
+    assert. Transport failures (server gone) surface as ``status == 0``.
+    """
+    data = json.dumps(payload).encode("utf-8") if payload is not None else None
+    headers = {"Content-Type": "application/json"} if data is not None else {}
+    req = urllib.request.Request(base_url + path, data=data, method=method, headers=headers)
+    try:
+        with urllib.request.urlopen(req, timeout=timeout) as resp:
+            status = int(resp.status)
+            raw = resp.read().decode("utf-8", errors="replace")
+    except urllib.error.HTTPError as exc:
+        status = int(exc.code)
+        raw = exc.read().decode("utf-8", errors="replace")
+    except (urllib.error.URLError, OSError) as exc:
+        return {"status": 0, "body": {}, "error": repr(exc)}
+    try:
+        parsed = json.loads(raw) if raw.strip() else {}
+    except ValueError:
+        parsed = {}
+    return {"status": status, "body": parsed if isinstance(parsed, dict) else {"raw": parsed}}
+
+
 def seed_owner_state(data_root: pathlib.Path, *, evolution_enabled: bool = False) -> None:
     """Pre-seed state.json so the evolution loop's owner_chat_id gate passes (the
     /api/tasks path never binds owner_chat_id). Optionally pre-enable the campaign."""
@@ -269,6 +308,46 @@ def seed_owner_state(data_root: pathlib.Path, *, evolution_enabled: bool = False
         }), encoding="utf-8")
         st["evolution_mode_enabled"] = True
     state_path.write_text(json.dumps(st), encoding="utf-8")
+
+
+def campaign_summary(data_root: pathlib.Path) -> dict:
+    """The durable campaign facts an absorb wait reasons about: evolution_campaign.json (presence, status,
+    source, a pending ``active_transaction``, the newest transaction outcome, the absorbed counter) and the
+    post-task promotion counter (``post_task_evolution_counter.json``: the decision ran at least once)."""
+    state_dir = pathlib.Path(data_root) / "state"
+    try:
+        campaign = json.loads((state_dir / "evolution_campaign.json").read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        campaign = {}
+    campaign = campaign if isinstance(campaign, dict) else {}
+    try:
+        counter = int(json.loads((state_dir / "post_task_evolution_counter.json").read_text(encoding="utf-8"))["n"])
+    except (OSError, ValueError, TypeError, KeyError):
+        counter = 0
+    history = [tx for tx in (campaign.get("transaction_history") or []) if isinstance(tx, dict)]
+    return {"present": bool(campaign), "status": str(campaign.get("status") or ""),
+            "source": str(campaign.get("source") or ""),
+            "active_transaction": isinstance(campaign.get("active_transaction"), dict),
+            "absorbed_cycles_done": int(campaign.get("absorbed_cycles_done") or 0),
+            "history_len": len(history),
+            "newest_outcome": str(history[-1].get("cycle_outcome") or "") if history else "",
+            "post_task_counter": counter}
+
+
+def absorb_idle_reason(campaign: dict, history_len_at_start: int = 0) -> str:
+    """Typed non-confirmation of an idle lane (``IsolatedServer.wait_for_absorb``), relative to the wait's
+    start so a resumed campaign's OLDER cycles never speak for this boundary: ``campaign_<status>`` (paused/
+    stopped/completed wins), ``no_promotion`` (no campaign although an ``every_n`` post-task tick was
+    recorded — the decision may still have declined), ``no_decision`` (no campaign, no tick recorded: ``llm``
+    cadences write none), ``cycle_no_op`` / ``cycle_not_absorbed`` (a cycle newer than the wait ended without
+    an absorb) or ``cycle_not_enqueued`` (a campaign that attached no new cycle)."""
+    if campaign.get("status") in ("paused", "stopped", "completed"):
+        return f"campaign_{campaign['status']}"
+    if not campaign.get("present"):
+        return "no_promotion" if campaign.get("post_task_counter") else "no_decision"
+    if int(campaign.get("history_len") or 0) > int(history_len_at_start or 0):
+        return "cycle_no_op" if campaign.get("newest_outcome") == "no_op" else "cycle_not_absorbed"
+    return "cycle_not_enqueued"
 
 
 def absorbed_cycles_done(data_root: pathlib.Path) -> int:
@@ -353,6 +432,9 @@ class IsolatedServer:
         self.host_service_port = free_port()
         self.base_url = f"http://{host}:{self.port}"
         self.proc: subprocess.Popen | None = None
+        # Stable per-task hurry request ids (see `hurry_task`), the driver-side mirror of
+        # the UI's `hurryRequestId` map.
+        self._hurry_request_ids: dict = {}
         # Digest of the exact settings snapshot admitted by a strict adapter.  It
         # is carried across the port patch and checked again immediately before
         # spawn, so a valid replacement cannot silently alter the applied run.
@@ -547,14 +629,48 @@ class IsolatedServer:
             time.sleep(3)
         return {"status": "timeout"}
 
-    def cancel_task(self, task_id: str) -> None:
-        """Best-effort cancel of a still-running task (used when wait_task hits its own
-        deadline) so the worker stops before the driver captures/continues."""
-        try:
-            _api(self.base_url, "POST",
-                 "/api/tasks/" + urllib.parse.quote(task_id) + "/cancel", {}, timeout=30)
-        except (urllib.error.URLError, OSError, ValueError):
-            pass
+    def cancel_task(self, task_id: str, *, cascade: bool = False, stop_policy: str = "",
+                    timeout: float = 300) -> dict:
+        """Owner stop over the SAME HTTP surface the web UI drives.
+
+        Body assembled exactly like ``cancelTask`` in ``web/modules/api_client.js``: the
+        two axes are independent — ``cascade`` selects the subtree teardown, ``stop_policy``
+        selects the terminalization policy (``finalize_then_cancel`` = the graceful
+        202/``cancel_state=pending`` acknowledgement; absent or ``immediate`` = today's hard
+        cancel). An options-free call still posts ``{}``, so the pre-existing best-effort
+        callers (a driver cleaning up after its own ``wait_task`` deadline) keep the
+        byte-identical legacy single-task request they have always sent.
+
+        The cascade lane answers only once the subtree is actually torn down, hence the
+        wide default timeout. Returns the ``_api_status`` envelope; the refusal statuses are
+        part of the contract under test, so nothing is raised or swallowed.
+        """
+        body: dict = {}
+        if cascade:
+            body["cascade"] = True
+        policy = str(stop_policy or "")
+        if policy and policy != "immediate":
+            body["stop_policy"] = policy
+        return _api_status(
+            self.base_url, "POST",
+            "/api/tasks/" + urllib.parse.quote(task_id) + "/cancel", body, timeout=timeout)
+
+    def hurry_task(self, task_id: str, request_id: str = "") -> dict:
+        """Owner hurry over the SAME HTTP surface the web UI drives (``hurryTask`` in
+        ``web/modules/api_client.js``): ``POST /api/tasks/{id}/hurry`` with a body carrying
+        ONLY the stable client-generated ``request_id`` — the endpoint refuses any other
+        field rather than dropping it, and this path never produces a chat message.
+
+        An omitted ``request_id`` mints a per-driver STABLE id for the task, mirroring the
+        UI's ``hurryRequestId`` map: a retry of the same logical hurry reuses the id and is
+        acknowledged idempotently instead of minting a second typed control.
+        """
+        rid = str(request_id or "").strip() or self._hurry_request_ids.setdefault(
+            task_id, f"hurry-{uuid.uuid4()}")
+        return _api_status(
+            self.base_url, "POST",
+            "/api/tasks/" + urllib.parse.quote(task_id) + "/hurry",
+            {"request_id": rid}, timeout=30)
 
     def wait_for_health(self, timeout: float = 180) -> bool:
         """Wait for /api/state to answer with supervisor ready again (after a
@@ -571,33 +687,44 @@ class IsolatedServer:
         return False
 
     def wait_for_absorb(self, prev_sha: str, prev_absorbed: int, timeout: float = 1800,
-                        idle_grace: float = 90) -> dict:
-        """Between instances, wait for an absorbed self-evolution cycle: the server
-        re-execs onto a new SHA and `absorbed_cycles_done` increments. Returns
-        {absorbed, new_sha, cycles, reason}. When the LLM legitimately declines to
-        promote (the common path), this returns absorbed=False EARLY — once the queue
-        is idle, no post_task_evolution_request.json is pending, and no cycle absorbed
-        within a short grace — instead of stalling the full timeout."""
+                        idle_grace: float = 90, idle_polls: int = 6) -> dict:
+        """Between instances, wait for an absorbed self-evolution cycle: the server re-execs onto a
+        new SHA and ``absorbed_cycles_done`` increments. Returns ``{absorbed, new_sha, cycles, reason,
+        campaign}``. An EARLY ``absorbed=False`` needs PROOF that no cycle is pending, held on
+        ``idle_polls`` consecutive polls after ``idle_grace``: the queue idle AND ``supervisor_ready``
+        AND no ``post_task_evolution_request.json`` AND no campaign ``active_transaction``. One idle
+        sample is not proof: a cycle that committed keeps its transaction as ``waiting_for_restart``
+        while the supervisor restarts synchronously (queue empty, counter unchanged), and the re-exec'd
+        server answers ``/api/state`` with zero counts before its supervisor is up — the counter moves
+        only when the worker boot verifies the restart (rc.15 stand, adversarial finding of 2026-09-06).
+        The typed reason is what the durable campaign state proves (``absorb_idle_reason``)."""
         deadline = time.time() + timeout
         start = time.time()
         request_path = self.data_root / "state" / "post_task_evolution_request.json"
+        idle_streak, history_at_start = 0, campaign_summary(self.data_root)["history_len"]
         while time.time() < deadline:
             cycles = absorbed_cycles_done(self.data_root)
             sha = self.current_sha()
             if cycles > prev_absorbed and sha and sha != prev_sha:
                 self.wait_for_health(timeout=180)
-                return {"absorbed": True, "new_sha": sha, "cycles": cycles, "reason": "absorbed"}
+                return {"absorbed": True, "new_sha": sha, "cycles": cycles, "reason": "absorbed",
+                        "campaign": campaign_summary(self.data_root)}
             if time.time() - start > idle_grace and cycles == prev_absorbed:
+                campaign = campaign_summary(self.data_root)
                 try:
                     st = self._state(timeout=5)
-                    idle = int(st.get("pending_count") or 0) == 0 and int(st.get("running_count") or 0) == 0
+                    idle = (int(st.get("pending_count") or 0) == 0 and int(st.get("running_count") or 0) == 0
+                            and bool(st.get("supervisor_ready")))
                 except (urllib.error.URLError, OSError, ValueError):
                     idle = False
-                if idle and not request_path.exists():
-                    return {"absorbed": False, "new_sha": sha, "cycles": cycles, "reason": "no_promotion"}
+                idle = idle and not request_path.exists() and not campaign["active_transaction"]
+                idle_streak = idle_streak + 1 if idle else 0
+                if idle_streak >= max(1, int(idle_polls)):
+                    return {"absorbed": False, "new_sha": sha, "cycles": cycles,
+                            "reason": absorb_idle_reason(campaign, history_at_start), "campaign": campaign}
             time.sleep(5)
-        return {"absorbed": False, "new_sha": self.current_sha(),
-                "cycles": absorbed_cycles_done(self.data_root), "reason": "timeout"}
+        return {"absorbed": False, "new_sha": self.current_sha(), "cycles": absorbed_cycles_done(self.data_root),
+                "reason": "timeout", "campaign": campaign_summary(self.data_root)}
 
     def stop(self) -> None:
         if self.proc is not None and self.proc.poll() is None:

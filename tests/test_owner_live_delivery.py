@@ -187,7 +187,7 @@ class TestFinalAnswerSelection:
 
 class TestSupervisorPhotoChatZero:
     def test_handle_send_photo_delivers_to_chat_zero(self):
-        from supervisor.chat_delivery_events import _handle_send_photo
+        from supervisor.events_chat_delivery import _handle_send_photo
 
         sent = []
 

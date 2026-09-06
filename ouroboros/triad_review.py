@@ -234,6 +234,70 @@ def extract_fenced_json(text: str) -> Any:
     return None
 
 
+# Output SHAPE per surface — the ONE form fact the retrieving-route canonicalizer,
+# the session output schema and the strict parser branch on. Shape is FORM only
+# (no surface policy lives here: acceptance rules, tier classification and
+# quorum authority stay with their owners). Every surface not listed returns
+# the findings ARRAY contract; ``object`` is the whole-object acceptance verdict
+# (verdict/outcome_tier/criteria_used/dialogue_status/findings/summary), which
+# the array-only canonicalizer used to reduce to its findings list; ``report``
+# is a free-form markdown product that is never canonicalized or extracted.
+REVIEW_OUTPUT_SHAPES: Dict[str, str] = {
+    "task_acceptance": "object",
+    "deep_self_review": "report",
+}
+OBJECT_VERDICT_REQUIRED_KEYS = ("verdict",)
+
+# Default output contract per SHAPE for a retrieving delivery whose surface did
+# not hand over its own `policy["output_contract"]`: the prompt must ask for the
+# same form the canonicalizer parses, or an obedient reviewer answering the
+# array contract on an object surface is demoted to malformed by its own host.
+REVIEW_JSON_OBJECT_CONTRACT = """\
+Return ONLY one JSON object with keys: verdict (PASS|FAIL|DEGRADED), findings
+([{severity, item, evidence, recommendation}] — an empty list when nothing is
+wrong), and summary, plus any keys the task's contract names. Never a bare
+array, never prose around the object: your host parses the object structurally
+and treats anything else as a non-response.
+"""
+REVIEW_REPORT_CONTRACT = """\
+Deliver the report itself as plain markdown prose — no JSON wrapper, no code
+fence around the whole answer. Most critical findings first, each with the
+evidence you read; mark anything you could not verify as unverified.
+"""
+
+
+def review_output_shape(surface: str) -> str:
+    """``array`` | ``object`` | ``report`` for one review surface."""
+    return REVIEW_OUTPUT_SHAPES.get(str(surface or ""), "array")
+
+
+def default_output_contract(shape: str) -> str:
+    """The prompt contract a retrieving row is asked for when its surface hands
+    over no ``policy["output_contract"]`` — keyed by the same shape the
+    canonicalizer parses, so the ask and the parse can never disagree."""
+    return {
+        "object": REVIEW_JSON_OBJECT_CONTRACT, "report": REVIEW_REPORT_CONTRACT,
+    }.get(str(shape or ""), REVIEW_JSON_ARRAY_CONTRACT)
+
+
+def object_verdict_payload(payload: Any) -> Optional[Dict[str, Any]]:
+    """The WHOLE object verdict, or None — mirroring `parse_review_findings`'
+    object ladder (a verdict signal is required, findings are optional) with
+    the array branch's type discipline: a non-empty string verdict and, when
+    present, findings as a list of dicts. Shape only: semantic demotion
+    (tier/coach/criteria) stays with ``review_actor_aggregation``."""
+    if not isinstance(payload, dict) or not all(key in payload for key in OBJECT_VERDICT_REQUIRED_KEYS):
+        return None
+    if not isinstance(payload.get("verdict"), str) or not payload["verdict"].strip():
+        return None
+    findings = payload.get("findings")
+    if findings is not None and (
+        not isinstance(findings, list) or not all(isinstance(item, dict) for item in findings)
+    ):
+        return None
+    return payload
+
+
 def parse_review_findings(raw_text: str) -> tuple[Any, List[Dict[str, Any]], str]:
     """Reviewer response -> (parsed, findings, signal), by the object/array ladder."""
     text = str(raw_text or "").strip()

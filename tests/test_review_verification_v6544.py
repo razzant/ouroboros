@@ -41,21 +41,24 @@ def test_normalize_budget_profile_defaults_are_conservative():
         "improvement_policy": "fixed",
         "max_improvement_passes": None,
         "reserve_finalization_pct": None,
-        "stall_rounds_threshold": None,
         "cost_hard_stop_pct": None,
     }
     out2 = normalize_budget_profile({
-        "improvement_policy": "UNTIL_DEADLINE",
+        "improvement_policy": "ADAPTIVE",
         "max_improvement_passes": "3",
         "reserve_finalization_pct": 150,
-        "stall_rounds_threshold": -4,
         "cost_hard_stop_pct": 150,
     })
-    assert out2["improvement_policy"] == "until_deadline"
+    assert out2["improvement_policy"] == "adaptive"
     assert out2["max_improvement_passes"] == 3
     assert out2["reserve_finalization_pct"] == 100  # clamped
-    assert out2["stall_rounds_threshold"] == 0
     assert out2["cost_hard_stop_pct"] == 100  # clamped
+    # ABI 7.0 (Q10=A): retired spellings normalize AWAY - the alias policy
+    # falls back to "fixed" and the stall knob is not part of the shape.
+    gone = normalize_budget_profile(
+        {"improvement_policy": "until_deadline", "stall_rounds_threshold": 12})
+    assert gone["improvement_policy"] == "fixed"
+    assert "stall_rounds_threshold" not in gone
     # 0 is a MEANINGFUL value (no in-task cost stop), preserved verbatim.
     assert normalize_budget_profile({"cost_hard_stop_pct": 0})["cost_hard_stop_pct"] == 0
 
@@ -128,24 +131,10 @@ def test_improvement_pass_blocked_when_time_exhausted_mid_cycle(monkeypatch):
     monkeypatch.setenv("OUROBOROS_FINALIZATION_GRACE_SEC", "120")
     monkeypatch.setenv("OUROBOROS_ACCEPTANCE_REVIEW_EST_SEC", "90")
     profile = normalize_budget_profile({"max_improvement_passes": 5})
-    ctx = _deadline_ctx(remaining_sec=150.0)  # spendable = 30 < est 90
+    ctx = _deadline_ctx(remaining_sec=150.0)  # spendable=30 <= floor=200
     snap = task_pacing.build_budget_snapshot(ctx)
     ok, reason = task_pacing.improvement_pass_allowed(snap, 0, profile)
     assert not ok and reason == "improvement_window_inside_reserve"
-
-
-def test_until_deadline_policy_is_time_bounded_only(monkeypatch):
-    monkeypatch.setenv("OUROBOROS_FINALIZATION_GRACE_SEC", "120")
-    monkeypatch.setenv("OUROBOROS_ACCEPTANCE_REVIEW_EST_SEC", "90")
-    profile = normalize_budget_profile({"improvement_policy": "until_deadline"})
-    ctx = _deadline_ctx(remaining_sec=800.0, total_sec=2000.0)
-    snap = task_pacing.build_budget_snapshot(ctx)
-    ok, _ = task_pacing.improvement_pass_allowed(snap, 7, profile)
-    assert ok  # count axis effectively unbounded; time still gates
-    ctx2 = _deadline_ctx(remaining_sec=150.0, profile={"improvement_policy": "until_deadline"})
-    snap2 = task_pacing.build_budget_snapshot(ctx2)
-    ok2, _ = task_pacing.improvement_pass_allowed(snap2, 0, profile)
-    assert not ok2
 
 
 def test_reserve_uses_profile_pct_when_larger_than_grace(monkeypatch):
@@ -513,7 +502,7 @@ def _acceptance_harness(monkeypatch, tmp_path, review_result, *, enforcement="bl
 
     monkeypatch.setattr(loop_mod, "get_task_review_mode", lambda: "required")
     monkeypatch.setattr(loop_mod, "get_review_enforcement", lambda: enforcement)
-    monkeypatch.setattr(rs, "reviewer_slots", lambda **k: [object(), object(), object()])
+    monkeypatch.setattr(rs, "triad_delivery_slots", lambda **k: [object(), object(), object()])
     monkeypatch.setattr(rs, "run_review_request", lambda *a, **k: review_result)
     meta = {}
     if deadline_remaining is not None:
@@ -556,7 +545,7 @@ def _acceptance_harness(monkeypatch, tmp_path, review_result, *, enforcement="bl
     tools = SimpleNamespace(_ctx=ctx)
     out = loop_mod._run_task_acceptance_review_once(
         tools=tools, content="done", task_id="t", task_type="task",
-        llm_trace=trace, drive_root=None, messages=messages, emit_progress=lambda _m: None,
+        llm_trace=trace, drive_root=None, messages=messages, emit_progress=lambda _m, *, incident=None: None,
     )
     return out, ctx, trace, messages
 
@@ -964,21 +953,6 @@ def test_tool_capture_applies_obligation_dispositions():
     assert llm_trace["acceptance_obligations"][1]["status"] == "open"
 
 
-def test_until_deadline_without_deadline_falls_back_to_count_cap(monkeypatch):
-    """Review round 2: until_deadline needs a deadline — without one the count cap
-    applies (no near-unbounded improvement loops)."""
-    # the legacy passes key is retired (migrated at load); the shared cycle cap is
-    # the runtime authority: 2 cycles = 1 improvement pass.
-    monkeypatch.setenv("OUROBOROS_REVIEW_MAX_CYCLES", "2")
-    monkeypatch.delenv("OUROBOROS_ACCEPTANCE_MAX_IMPROVEMENT_PASSES", raising=False)
-    profile = normalize_budget_profile({"improvement_policy": "until_deadline"})
-    snap = task_pacing.build_budget_snapshot(SimpleNamespace(task_metadata={}, task_contract={}))
-    ok, _ = task_pacing.improvement_pass_allowed(snap, 0, profile)
-    assert ok
-    ok2, reason2 = task_pacing.improvement_pass_allowed(snap, 1, profile)
-    assert not ok2 and reason2 == "improvement_passes_exhausted"
-
-
 def test_agent_tool_payload_carries_dissent_noted(monkeypatch, tmp_path):
     """Review round 2: DISSENT is recorded on the agent-called path too."""
     import ouroboros.review_substrate as rs
@@ -994,7 +968,7 @@ def test_agent_tool_payload_carries_dissent_noted(monkeypatch, tmp_path):
         ],
         parsed_findings=[], aggregate_signal="PASS",
     )
-    monkeypatch.setattr(rs, "reviewer_slots", lambda **k: [object(), object(), object()])
+    monkeypatch.setattr(rs, "triad_delivery_slots", lambda **k: [object(), object(), object()])
     monkeypatch.setattr(rs, "run_review_request", lambda *a, **k: result)
     monkeypatch.setattr(
         "ouroboros.review_evidence.build_task_acceptance_evidence",

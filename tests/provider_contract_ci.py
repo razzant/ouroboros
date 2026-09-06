@@ -12,7 +12,11 @@ from enum import Enum
 
 import pytest
 
-from ouroboros.provider_models import OPENAI_DIRECT_DEFAULTS, normalize_model_identity
+from ouroboros.provider_models import (
+    OPENAI_DIRECT_DEFAULTS,
+    normalize_deepseek_reasoning_effort,
+    normalize_model_identity,
+)
 from ouroboros.utils import sanitize_tool_result_for_log
 
 CANARY_TIMEOUT_SEC = 120.0
@@ -40,7 +44,7 @@ class ProviderCanary:
 
 _OPENROUTER_CANARIES = (
     ProviderCanary(
-        "openrouter_gemini", "google/gemini-3.7-flash", "openrouter",
+        "openrouter_gemini", "google/gemini-3.8-flash", "openrouter",
         "OPENROUTER_API_KEY", True, "medium",
     ),
     ProviderCanary(
@@ -70,6 +74,14 @@ _OPTIONAL_DIRECT_CANARIES = (
     ProviderCanary(
         "minimax_direct", "minimax::MiniMax-M3", "minimax",
         "MINIMAX_API_KEY", False, "none",
+    ),
+    ProviderCanary(
+        # "medium" ON PURPOSE (unlike its optional siblings): the deepseek lane
+        # CARRIES reasoning_effort, and the canary pins that carriage. The
+        # continuation is mandatory too: DeepSeek's tool contract is defined by
+        # replaying reasoning_content on the second request.
+        "deepseek_direct", "deepseek::deepseek-v4-flash", "deepseek",
+        "DEEPSEEK_API_KEY", False, "medium", continue_to_final=True,
     ),
     ProviderCanary(
         "cloudru_direct", "cloudru::zai-org/GLM-4.7", "cloudru",
@@ -452,7 +464,7 @@ def assert_openai_canary_usage(usage, model):
     return disclosure
 
 
-def assert_canary_usage(usage, canary: ProviderCanary):
+def assert_canary_usage(usage, canary: ProviderCanary, *, forced_tool_choice: bool = False):
     def failure(code):
         return _canary_failure_payload(canary, None, usage, code)
     assert isinstance(usage, dict), failure("usage_not_mapping")
@@ -461,11 +473,28 @@ def assert_canary_usage(usage, canary: ProviderCanary):
     assert _safe_nonnegative_int(usage.get("prompt_tokens")) > 0, failure("missing_prompt_tokens")
     assert _safe_nonnegative_int(usage.get("completion_tokens")) > 0, failure("missing_completion_tokens")
     if canary.reasoning_effort == "medium":
-        assert usage.get("reasoning_effort_clamped") is None, failure("reasoning_effort_clamped")
+        expected_effort = canary.reasoning_effort
+        if canary.expected_provider == "deepseek":
+            # DeepSeek's wire enum aliases medium to high, and its thinking
+            # mode rejects a forced tool choice, so the named first turn runs
+            # with thinking disabled; both projections must be disclosed and
+            # the physical payload carries the projected tier.
+            if forced_tool_choice:
+                expected_effort, reason = "none", "provider_forced_tool_choice"
+            else:
+                expected_effort = normalize_deepseek_reasoning_effort(expected_effort)
+                reason = "provider_wire_mapping"
+            note = usage.get("reasoning_effort_clamped")
+            assert isinstance(note, dict), failure("reasoning_effort_clamped")
+            assert note.get("requested") == canary.reasoning_effort, failure("reasoning_effort_clamped_requested")
+            assert note.get("applied") == expected_effort, failure("reasoning_effort_clamped_applied")
+            assert note.get("reason") == reason, failure("reasoning_effort_clamped_reason")
+        else:
+            assert usage.get("reasoning_effort_clamped") is None, failure("reasoning_effort_clamped")
         disclosure = usage.get("request_wire")
         assert isinstance(disclosure, dict), failure("missing_request_wire_disclosure")
-        assert disclosure.get("requested_effort") == "medium", failure("request_wire_requested_effort")
-        assert disclosure.get("applied_effort") == "medium", failure("request_wire_applied_effort")
+        assert disclosure.get("requested_effort") == expected_effort, failure("request_wire_requested_effort")
+        assert disclosure.get("applied_effort") == expected_effort, failure("request_wire_applied_effort")
     if canary.expected_provider == "openai":
         return assert_openai_canary_usage(usage, canary.model)
     return usage.get("request_wire")
@@ -701,7 +730,9 @@ def run_provider_contract_canary(
         usage=usage,
     )
     _record_canary_response_warnings(canary, message, usage)
-    first_disclosure = assert_canary_usage(usage, canary)
+    first_disclosure = assert_canary_usage(
+        usage, canary, forced_tool_choice=canary.named_tool_choice,
+    )
     if not canary.continue_to_final:
         return message, usage, None, None
 

@@ -27,7 +27,7 @@ from ouroboros.platform_layer import (
     kill_pid_tree,
     kill_process_group_id,
     kill_process_tree,
-    pid_is_alive,
+    pid_is_signalable,
     process_command,
     process_group_id,
     scrub_repo_from_pythonpath,
@@ -603,15 +603,19 @@ def _host_pid_matches_record(record: dict[str, Any]) -> bool:
         return False
     expected = str(record.get("host_command_sha256") or "").strip()
     if not expected:
-        # No command line could be captured at register time. This is always the
-        # case on Windows, where platform_layer.process_command() is POSIX-only
-        # and returns "". Without this fallback the record would be permanently
-        # unvalidatable, so kill_all_foreground/_services would never dispatch
-        # taskkill for it (the worktree/service cleanup leak). Fall back to a
-        # liveness check; owner/schema/id are already verified by the caller
-        # (_valid_process_record). The PID-reuse hardening via command-hash
-        # comparison still applies on POSIX, where a command line is available.
-        return pid_is_alive(host_pid)
+        # No command line could be captured at register time. On Windows that is
+        # ALWAYS the case (platform_layer.process_command() is POSIX-only), and
+        # without a fallback the record would be permanently unvalidatable, so
+        # kill_all_foreground/_services would never dispatch taskkill for it (the
+        # worktree/service cleanup leak): there, fall back to liveness — owner/
+        # schema/id are already verified by the caller (_valid_process_record).
+        # On POSIX the capture can also fail for a genuine child (macOS `ps` right
+        # after the spawn), so liveness must still count — but pid_is_alive answers
+        # the wrong question for a KILL decision: since C6 round 5.4 it reads EPERM
+        # as alive, and an owner-shaped forged record naming a foreign pid would be
+        # signalled. Ours to kill means signalable by us (platform_layer.pid_is_signalable;
+        # under root every live pid is signalable — the forged-record rule is a non-root property).
+        return pid_is_signalable(host_pid)
     return _process_command_sha256(host_pid) == expected
 
 

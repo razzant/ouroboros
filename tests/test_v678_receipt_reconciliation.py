@@ -607,8 +607,11 @@ def test_receipt_check_text_round_trips_so_two_argvs_are_two_verifications(tmp_p
     monkeypatch.setattr("ouroboros.safety.check_safety", lambda *a, **k: (True, ""))
     monkeypatch.setenv("OUROBOROS_RUNTIME_MODE", "light")
     home = tmp_path / "home"
-    repo, data = home / "Ouroboros" / "repo", home / "Ouroboros" / "data"
-    for directory in (repo, data):
+    # NEUTRAL layout, not home/Ouroboros/data: the registry gets explicit
+    # roots, and a live-SHAPED path under the (patched) home now trips the
+    # pytest fail-closed guard in append_jsonl (issue #455 class).
+    repo, data = tmp_path / "repo", tmp_path / "data"
+    for directory in (home, repo, data):
         directory.mkdir(parents=True)
     monkeypatch.setattr(pathlib.Path, "home", lambda: home)
     registry = ToolRegistry(repo_dir=repo, drive_root=data)

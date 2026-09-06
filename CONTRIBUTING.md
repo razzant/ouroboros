@@ -230,8 +230,11 @@ Applied reasoning effort is not currently exposed by every route. The packet
 records configured effort as requested and leaves effective effort absent
 rather than presenting the request as observed fact.
 
-If the PR changes the review script or review substrate, its local packet is
-diagnostic only. A maintainer must rerun from trusted target-base code.
+The lane always executes the target base's own review machinery: run from any
+checkout that is not the base, it re-runs itself from a detached worktree of
+the base commit. Your proposal is therefore never reviewed by its own copy of
+the review flow, whatever it touches, and no extra step is needed when a PR
+changes the review script or review substrate.
 
 ## 6. Open the Pull Request
 

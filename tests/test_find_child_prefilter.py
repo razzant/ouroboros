@@ -18,8 +18,13 @@ from ouroboros.task_status import find_child_tasks, wait_for_effective_tasks
 
 
 def _write_result(drive_root: pathlib.Path, row: dict) -> None:
+    from ouroboros.contracts.schema_versions import SCHEMA_VERSION_KEY
+    from ouroboros.task_result_schema import TASK_RESULT_SCHEMA_VERSION
+
     d = drive_root / "task_results"
     d.mkdir(parents=True, exist_ok=True)
+    # Campaign ABI 7.0: readers QUARANTINE an unstamped row.
+    row = {SCHEMA_VERSION_KEY: TASK_RESULT_SCHEMA_VERSION, **row}
     (d / f"{row['task_id']}.json").write_text(json.dumps(row))
 
 

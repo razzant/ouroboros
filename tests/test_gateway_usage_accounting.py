@@ -4,6 +4,7 @@ import asyncio
 import json
 import types
 
+import pytest
 from starlette.requests import Request
 
 from ouroboros import usage_accounting as ua
@@ -118,6 +119,29 @@ def test_cost_breakdown_uses_ledger_not_later_compatibility_events(tmp_path, mon
         "limit_usd": 7.5,
         "remaining_known_usd": 5.75,
     }
+
+
+@pytest.mark.parametrize("raw", [None, "not-a-number"])
+def test_cost_breakdown_uses_resolved_default_for_absent_or_invalid_budget(
+    tmp_path, monkeypatch, raw,
+):
+    from ouroboros.config import SETTINGS_DEFAULTS
+    from ouroboros.gateway.history import make_cost_breakdown_endpoint
+    from supervisor import state as supervisor_state
+
+    root = _data_root(tmp_path, monkeypatch)
+    if raw is None:
+        monkeypatch.delenv("TOTAL_BUDGET", raising=False)
+    else:
+        monkeypatch.setenv("TOTAL_BUDGET", raw)
+    monkeypatch.setattr(supervisor_state, "TOTAL_BUDGET_LIMIT", 0.0)
+
+    response = asyncio.run(make_cost_breakdown_endpoint(root)(None))
+    payload = json.loads(response.body)
+
+    expected = float(SETTINGS_DEFAULTS["TOTAL_BUDGET"])
+    assert payload["accounting"]["limit_usd"] == expected
+    assert payload["accounting"]["remaining_known_usd"] == expected
 
 
 def test_api_state_money_and_call_count_are_ledger_projections(tmp_path, monkeypatch):

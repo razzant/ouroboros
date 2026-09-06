@@ -742,7 +742,7 @@ def test_safety_mode_skip_falls_back_to_drive_logs(tmp_path, monkeypatch):
 def test_list_files_hard_failure_is_first_class_error(tmp_path, monkeypatch):
     """Review round 3: an iterdir/permission failure inside a listing helper must
     surface as the first-class LIST_FILES_ERROR string, never ok-shaped JSON."""
-    from ouroboros.tools import core as core_mod
+    from ouroboros.tools import core_file_tools as core_mod
 
     ctx = _ctx(tmp_path)
     boom = tmp_path / "data" / "task_drives" / "t-v655"

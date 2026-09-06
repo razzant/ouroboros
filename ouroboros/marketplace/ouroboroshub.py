@@ -267,7 +267,7 @@ def _safe_rel(path: str) -> pathlib.PurePosixPath:
         raise FetchError(f"unsafe catalog file path: {path!r}")
     if any(part in {"node_modules", ".ouroboros_env"} for part in rel.parts):
         raise FetchError(f"catalog file path uses review-opaque dependency directory: {path!r}")
-    if "__pycache__" in rel.parts or rel.suffix.lower() in {".pyc", ".pyo", ".so", ".dylib", ".dll", ".wasm"}:
+    if "__pycache__" in rel.parts or rel.suffix.lower() in {".pyc", ".pyo", ".so", ".dylib", ".dll"}:
         raise FetchError(f"catalog file path uses generated or binary artifact: {path!r}")
     return rel
 
@@ -463,6 +463,11 @@ def uninstall(sanitized_name: str) -> HubInstallResult:
         (skill_state_dir(target_root.parent.parent, name) / DEPS_STATE_FILENAME).unlink(missing_ok=True)
     except Exception:
         pass
+    # CPL4-C11: mark payload-gone so the startup sweep clears the rest of the
+    # owner state (grants preserved as owner authority).
+    from ouroboros.skill_uninstall_state import write_uninstall_tombstone
+
+    write_uninstall_tombstone(target_root.parent.parent, name, source="ouroboroshub")
     return HubInstallResult(True, name, target_dir=target)
 
 

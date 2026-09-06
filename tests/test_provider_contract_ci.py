@@ -9,7 +9,11 @@ import json
 
 import pytest
 
-from ouroboros.provider_models import OPENAI_DIRECT_DEFAULTS, normalize_model_identity
+from ouroboros.provider_models import (
+    OPENAI_DIRECT_DEFAULTS,
+    normalize_deepseek_reasoning_effort,
+    normalize_model_identity,
+)
 from ouroboros.request_wire_contract import canonical_sha256
 from ouroboros.request_wire_receipts import (
     WireCandidateSpec,
@@ -167,7 +171,7 @@ def test_provider_alarm_output_sanitizes_token_shaped_evidence(capsys):
 def test_exact_provider_canary_matrix_logical_turns_and_attempt_bound():
     matrix = provider_canary_matrix()
     assert [(row.canary_id, row.model) for row in matrix] == [
-        ("openrouter_gemini", "google/gemini-3.7-flash"),
+        ("openrouter_gemini", "google/gemini-3.8-flash"),
         ("openrouter_opus", "anthropic/claude-opus-5"),
         ("openrouter_gpt", "openai/gpt-5.6-luna"),
         ("openrouter_grok", "x-ai/grok-4.6"),
@@ -177,6 +181,7 @@ def test_exact_provider_canary_matrix_logical_turns_and_attempt_bound():
         ("openai_direct_fallback", "openai::gpt-5.6-sol"),
         ("anthropic_direct", "anthropic::claude-sonnet-5"),
         ("minimax_direct", "minimax::MiniMax-M3"),
+        ("deepseek_direct", "deepseek::deepseek-v4-flash"),
         ("cloudru_direct", "cloudru::zai-org/GLM-4.7"),
         ("gigachat_direct", "gigachat::GigaChat-2-Max"),
     ]
@@ -191,16 +196,17 @@ def test_exact_provider_canary_matrix_logical_turns_and_attempt_bound():
         "openai_direct_light",
         "openai_direct_fallback",
         "anthropic_direct",
+        "deepseek_direct",
     }
     assert [row.canary_id for row in matrix if row.continue_to_final] == [
-        "openai_direct_main"
+        "openai_direct_main", "deepseek_direct"
     ]
     assert [row.canary_id for row in matrix if not row.named_tool_choice] == [
         "gigachat_direct"
     ]
     logical_turns = sum(1 + int(row.continue_to_final) for row in matrix)
-    assert logical_turns == 13
-    assert logical_turns * CANARY_EMPTY_RESPONSE_MAX_ATTEMPTS == 26
+    assert logical_turns == 15
+    assert logical_turns * CANARY_EMPTY_RESPONSE_MAX_ATTEMPTS == 30
     assert sum(
         1 + int(row.continue_to_final)
         for row in matrix
@@ -585,9 +591,23 @@ def _fake_usage(canary: ProviderCanary, ordinal: int):
     }
     if canary.expected_provider != "openai":
         if canary.reasoning_effort == "medium":
+            applied_effort = canary.reasoning_effort
+            if canary.expected_provider == "deepseek":
+                forced = ordinal == 1 and canary.named_tool_choice
+                applied_effort = (
+                    "none" if forced else normalize_deepseek_reasoning_effort(applied_effort)
+                )
+                usage["reasoning_effort_clamped"] = {
+                    "requested": canary.reasoning_effort,
+                    "applied": applied_effort,
+                    "reason": "provider_forced_tool_choice" if forced else "provider_wire_mapping",
+                    "model": canary.model.split("::", 1)[-1],
+                }
             usage["request_wire"] = {
-                "requested_effort": "medium",
-                "applied_effort": "medium",
+                "requested_effort": applied_effort,
+                "applied_effort": applied_effort,
+                # A continuation must bind a fresh physical candidate.
+                "candidate_sha256": ("c" if ordinal == 1 else "d") * 64,
             }
         return usage
     usage["request_wire"] = {

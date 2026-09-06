@@ -24,7 +24,7 @@ def test_tool_trace_row_carries_exact_tool_call_id_beside_trace_ref():
         }],
         messages,
         llm_trace,
-        emit_progress=lambda _message: None,
+        emit_progress=lambda _message, *, incident=None: None,
     )
 
     assert errors == 0
@@ -57,7 +57,7 @@ def test_process_tool_results_accumulates_trace_refs_for_reclaim():
         }],
         [],
         {"tool_calls": []},
-        emit_progress=lambda _message: None,
+        emit_progress=lambda _message, *, incident=None: None,
         tools=tools,
     )
 

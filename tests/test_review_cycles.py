@@ -144,26 +144,16 @@ def test_getter_moved_out_of_config():
 
 def test_required_blocking_binds_shared_cap_unless_unlimited(monkeypatch):
     uncapped = normalize_budget_profile({})
-    assert task_pacing.effective_max_improvement_passes(uncapped, has_deadline=False, required_blocking=True) == 1
+    assert task_pacing.effective_max_improvement_passes(uncapped, required_blocking=True) == 1
     monkeypatch.setenv(KEY, "3")
-    assert task_pacing.effective_max_improvement_passes(uncapped, has_deadline=True, required_blocking=True) == 2
+    assert task_pacing.effective_max_improvement_passes(uncapped, required_blocking=True) == 2
     monkeypatch.setenv(KEY, "unlimited")
-    assert task_pacing.effective_max_improvement_passes(uncapped, has_deadline=False, required_blocking=True) is None
+    assert task_pacing.effective_max_improvement_passes(uncapped, required_blocking=True) is None
     # Explicit task-local caps still win under every policy (owner "Hurry up" = 0).
     assert task_pacing.effective_max_improvement_passes({"max_improvement_passes": 0}, required_blocking=True) == 0
     assert task_pacing.effective_max_improvement_passes({"max_improvement_passes": 6}, required_blocking=True) == 6
     monkeypatch.setenv(KEY, "1")
     assert task_pacing.effective_max_improvement_passes({"max_improvement_passes": 6}, required_blocking=False) == 6
-
-
-def test_until_deadline_alias_behavior_outside_required_blocking_unchanged(monkeypatch):
-    profile = normalize_budget_profile({"improvement_policy": "until_deadline"})
-    # With a deadline the count axis is off (unchanged one-minor alias behavior) ...
-    assert task_pacing.effective_max_improvement_passes(profile, has_deadline=True) is None
-    # ... without one the shared cap applies (was the legacy default of 1).
-    assert task_pacing.effective_max_improvement_passes(profile, has_deadline=False) == 1
-    monkeypatch.setenv(KEY, "4")
-    assert task_pacing.effective_max_improvement_passes(profile, has_deadline=False) == 3
 
 
 def test_descendant_deadline_cannot_widen_root_acceptance_wallet(tmp_path, monkeypatch):
@@ -177,9 +167,7 @@ def test_descendant_deadline_cannot_widen_root_acceptance_wallet(tmp_path, monke
     )
 
     monkeypatch.setenv(KEY, "2")
-    contract = build_task_contract({
-        "budget_profile": {"improvement_policy": "until_deadline"},
-    })
+    contract = build_task_contract({})
     write_task_result(
         tmp_path, "root-tree-cap", STATUS_RUNNING,
         root_task_id="root-tree-cap", task_contract=contract,
@@ -217,9 +205,11 @@ def test_descendant_deadline_cannot_widen_root_acceptance_wallet(tmp_path, monke
     assert projection["remaining_cycles"] == 0
     assert projection["reason"] == "review_cycles_exhausted"
 
+    # ABI 7.0 (Q10=A): the retired deadline alias no longer lifts the count
+    # axis; the uncapped-root lane comes from the shared cap being unlimited.
+    monkeypatch.setenv(KEY, "unlimited")
     deadline_contract = build_task_contract({
         "deadline_at": "2099-01-01T00:00:00+00:00",
-        "budget_profile": {"improvement_policy": "until_deadline"},
     })
     write_task_result(
         tmp_path, "deadline-root", STATUS_RUNNING,
@@ -234,6 +224,7 @@ def test_descendant_deadline_cannot_widen_root_acceptance_wallet(tmp_path, monke
         "claimed", "claimed", "claimed",
     ]
     assert root_deadline_outcomes[-1]["max_cycles"] is None
+    monkeypatch.setenv(KEY, "2")
 
     # A non-authoritative top-level deadline cannot widen the canonical contract.
     write_task_result(
@@ -315,13 +306,6 @@ def test_improvement_pass_gate_and_rails_follow_shared_cap(monkeypatch):
     assert task_pacing.improvement_pass_allowed(snapshot, 50, profile, required_blocking=True) == (True, "")
     line = task_pacing._acceptance_rails_line_inner(snapshot, profile, 50, None, required_blocking=True)
     assert "no local count cap" in line and "review cycles unlimited" in line
-    # A3: the non-RB until_deadline+deadline path also has no local count, but the
-    # shared cap is bounded there — the rails must not claim "unlimited".
-    monkeypatch.delenv(KEY, raising=False)
-    deadline_snap = task_pacing.BudgetSnapshot(has_deadline=True, remaining_sec=3600.0, reserve_sec=200.0)
-    until = normalize_budget_profile({"improvement_policy": "until_deadline"})
-    line = task_pacing._acceptance_rails_line_inner(deadline_snap, until, 0, None, required_blocking=False)
-    assert "no local count cap (deadline/budget rails bind)" in line and "unlimited" not in line
 
 
 # ---------------------------------------------------------------------------

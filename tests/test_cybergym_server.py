@@ -335,7 +335,7 @@ def test_runtime_config_strict_snapshot_cannot_be_mutated_by_owner_writer(
         nonlocal wrote
         wrote = True
 
-    monkeypatch.setattr(owner_settings, "atomic_write_json", record_write)
+    monkeypatch.setattr(owner_settings, "write_text_atomic", record_write)
     with pytest.raises(config.SettingsIntegrityError, match="immutable"):
         owner_settings._owner_write_settings({"OUROBOROS_MODEL": "wrong/model"})
     assert not wrote

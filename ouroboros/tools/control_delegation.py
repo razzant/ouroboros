@@ -207,8 +207,14 @@ def admitted_depth_cap(parent_contract: Any, live_max_depth: Any) -> int:
 def depth_provenance_for_schedule(
     parent_budget: Dict[str, Any], *, new_depth: int, max_depth: int,
     achieved_depth: Any = None, use_remaining_envelope: bool = False,
+    requested_depth: Any = None,
 ) -> Dict[str, Any]:
-    """Carry requested/permitted/attempted/achieved depth as additive facts."""
+    """Carry requested/permitted/attempted/achieved depth as additive facts.
+
+    A request is telemetry, never a cap: only the configured cap and the legacy
+    remaining envelope narrow what a branch may do, so asking for less than the
+    cap records the intent without silently binding the descendants to it.
+    """
     budget = parent_budget if isinstance(parent_budget, dict) else {}
     inherited = normalize_depth_provenance(budget.get("depth_provenance"))
     requested = inherited.get("requested_depth")
@@ -226,11 +232,22 @@ def depth_provenance_for_schedule(
             requested = max(0, int(budget.get("depth_remaining")))
         except (TypeError, ValueError):
             requested = None
+    if requested is None:
+        # An explicit request of record on THIS call stays unchanged. A
+        # non-integer fails soft to "no request recorded": the
+        # field is telemetry, and refusing the whole schedule over it would
+        # trade a real capability for a bookkeeping nicety.
+        try:
+            explicit = max(0, int(requested_depth or 0))
+        except (TypeError, ValueError):
+            explicit = 0
+        if explicit > 0:
+            requested = explicit
     try:
         cap = min(MAX_SUBAGENT_DEPTH_HARD_CAP, max(0, int(max_depth)))
     except (TypeError, ValueError):
         cap = 0
-    current_permitted = cap if requested is None else min(cap, max(0, int(requested)))
+    current_permitted = cap
     remaining = budget.get("depth_remaining")
     if (
         use_remaining_envelope
@@ -337,12 +354,7 @@ def stamp_task_assignment_depth(
         requested = admitted.get("requested_depth")
         permitted = _bounded_permitted_depth(admitted.get("permitted_depth"))
         if permitted is None:
-            permitted = min(
-                min(MAX_SUBAGENT_DEPTH_HARD_CAP, max(0, int(max_depth))),
-                min(MAX_SUBAGENT_DEPTH_HARD_CAP, max(0, int(requested)))
-                if requested is not None
-                else min(MAX_SUBAGENT_DEPTH_HARD_CAP, max(0, int(max_depth))),
-            )
+            permitted = min(MAX_SUBAGENT_DEPTH_HARD_CAP, max(0, int(max_depth)))
         provenance = {
             "requested_depth": requested,
             "permitted_depth": permitted,
@@ -418,6 +430,7 @@ def record_depth_limit_refusal(
         may_fan_out=params.get("may_fan_out", True),
         max_children=params.get("max_children", 0),
         intent_note=params.get("delegation_intent", ""),
+        requested_depth=params.get("requested_depth", 0),
     )
     from ouroboros.contracts.task_contract import build_task_contract
 
@@ -793,6 +806,7 @@ def child_budget_for_schedule(
     may_fan_out: bool,
     max_children: int,
     intent_note: str,
+    requested_depth: Any = None,
 ) -> Dict[str, Any]:
     """Resolve a child's delegation_budget at schedule time (C3.1): decrement
     depth_remaining one generation (falling back to the configured max_depth/new_depth
@@ -803,7 +817,7 @@ def child_budget_for_schedule(
     parent_budget = parent_budget if isinstance(parent_budget, dict) else {}
     provenance = depth_provenance_for_schedule(
         parent_budget, new_depth=new_depth, max_depth=max_depth,
-        use_remaining_envelope=True,
+        use_remaining_envelope=True, requested_depth=requested_depth,
     )
     permitted_remaining = max(
         0, int(provenance.get("permitted_depth") or 0) - int(new_depth),

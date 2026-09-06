@@ -114,14 +114,18 @@ def test_run_shell_publishes_signal_death_facts(tmp_path, fake_subprocess):
     assert "duration_ms" not in result
 
 
-def test_run_shell_timeout_publishes_duration_only(tmp_path, fake_subprocess):
+def test_run_shell_timeout_publishes_typed_timeout_facts(tmp_path, fake_subprocess):
     fake_subprocess(raise_timeout=True)
     result = _run_shell(_ctx(tmp_path), ["sleep", "999"])
     assert result.startswith("⚠️ TOOL_TIMEOUT")
     facts = consume_last_process_facts()
     # A timed-out child has NO returncode — structurally different from signal
-    # death (timeout classification is unchanged by this sprint).
+    # death (timeout classification is unchanged by this sprint). The absence
+    # used to be the WHOLE record; the deadline kill is now typed beside it, on
+    # every platform (typed-process-facts lane, owner 10=B).
     assert "exit_code" not in facts and "signal" not in facts
+    assert facts["timed_out"] is True
+    assert facts["killed_by_host"] is True
     assert isinstance(facts["duration_ms"], int)
 
 
@@ -136,6 +140,10 @@ def test_run_shell_missing_binary_publishes_duration_only(tmp_path, monkeypatch)
     assert result.startswith("⚠️ SHELL_ERROR")
     facts = consume_last_process_facts()
     assert "exit_code" not in facts and "signal" not in facts
+    # The spawn never happened, and the platform's exception class is the typed
+    # cause — not a synthesized exit code, and not silence.
+    assert facts["pre_exec_failure"] == "FileNotFoundError"
+    assert "timed_out" not in facts and "killed_by_host" not in facts
     assert isinstance(facts["duration_ms"], int)
 
 
@@ -168,10 +176,17 @@ def _run_single(tmp_path, execute, tool="run_command"):
 
     logs = tmp_path / "logs"
     logs.mkdir(exist_ok=True)
+    from ouroboros.tools.tool_result import LegacyTextResultAdapter
+
     tools = SimpleNamespace(
         CODE_TOOLS={tool},
         _ctx=SimpleNamespace(task_metadata={}, drive_root=tmp_path),
         execute=execute,
+        # Campaign dispatch is typed: the loop reads the dispatcher's published
+        # ToolResult; a text-only fake goes through the one legacy adapter.
+        execute_result=lambda name, args: LegacyTextResultAdapter.from_text(
+            name, str(execute(name, args))
+        ),
     )
     return _execute_single_tool(
         tools,
@@ -196,16 +211,21 @@ def test_execute_single_tool_merges_typed_meta_with_precedence(tmp_path):
     assert isinstance(meta["duration_ms"], int)
 
 
-def test_execute_single_tool_regex_fallback_for_legacy_prose(tmp_path):
+def test_execute_single_tool_legacy_prose_forges_no_process_facts(tmp_path):
+    """Campaign D02 contract (supersedes the upstream regex fallback): process
+    facts come ONLY from typed producer publications — prose spelling
+    exit_code/signal inside the result text is producer-controlled and forges
+    nothing. Absence is the honest reading for an untyped legacy record."""
     def execute(_name, _args):
-        # No typed publication (legacy path): the regex harvest still works.
+        # No typed publication (legacy path): nothing is harvested from prose.
         return "⚠️ SHELL_EXIT_ERROR: command exited with exit_code=-9 (signal=SIGKILL, cwd=/x)."
 
     out = _run_single(tmp_path, execute)
     meta = out["result_meta"]
-    assert meta["exit_code"] == -9
-    assert meta["signal"] == "SIGKILL"
+    assert "exit_code" not in meta
+    assert "signal" not in meta
     assert "duration_ms" not in meta  # nothing typed was measured
+    assert meta["status"] == "non_zero_exit"  # the typed CODE still classifies
 
 
 def test_execute_single_tool_drops_stale_thread_facts(tmp_path):
@@ -221,13 +241,35 @@ def test_execute_single_tool_drops_stale_thread_facts(tmp_path):
     assert "duration_ms" not in meta and "exit_code" not in meta
 
 
-def test_non_process_tools_do_not_consume_or_merge_facts(tmp_path):
+def test_tools_that_run_no_process_merge_no_facts(tmp_path):
+    """The channel is PUBLISHER-scoped, not tool-name-scoped (typed-process-
+    facts lane): a call that published nothing carries no process facts, and a
+    stale publication left on the thread is DROPPED before dispatch rather than
+    merely ignored — the same no-contamination contract the earlier name gate
+    provided, now without a name table that dynamic surfaces (ext_*) and the
+    skill/verify handlers could never be listed in."""
     shell._publish_process_facts(returncode=-9, started_ts=time.time())
     out = _run_single(tmp_path, lambda _n, _a: "file contents", tool="read_file")
     meta = out["result_meta"]
     assert "duration_ms" not in meta and "exit_code" not in meta
-    # The slot is untouched by non-process tools (scoped channel).
-    assert consume_last_process_facts() is not None
+    assert consume_last_process_facts() is None
+
+
+def test_any_publishing_handler_reaches_result_meta(tmp_path):
+    """A handler that is not run_command/run_script — here the skill/verify/
+    extension shape, a tool whose name no longer gates the channel — reaches
+    the call's result_meta with its typed facts."""
+    def execute(_name, _args):
+        shell._publish_process_facts(
+            returncode=None, started_ts=time.time() - 0.004,
+            timed_out=True, killed_by_host=True,
+        )
+        return "verify_and_record [visible_verifier] FAIL: check timed out after 60s."
+
+    out = _run_single(tmp_path, execute, tool="verify_and_record")
+    meta = out["result_meta"]
+    assert meta["timed_out"] is True and meta["killed_by_host"] is True
+    assert "exit_code" not in meta and "signal" not in meta
 
 
 def test_typed_meta_flows_handler_to_trace_item_to_error_record(tmp_path):
@@ -549,3 +591,301 @@ def test_freshness_audit_receives_epoch_not_monotonic(tmp_path, fake_subprocess,
     assert captured["start_ts"] is not None
     assert captured["start_ts"] > 1_000_000_000
     assert abs(captured["start_ts"] - _time.time()) < 300
+
+
+# ---------------------------------------------------------------------------
+# Typed process facts for the five remaining surfaces (owner batch 13, item
+# 10 = B). Each surface publishes at the point the truth is known; none of them
+# derives a fact from prose, and none synthesizes a code the platform did not
+# give.
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.serial
+@pytest.mark.skipif(os.name != "posix", reason="uses sh")
+def test_verify_check_publishes_typed_exit_and_signal(tmp_path):
+    """verify_and_record renders ``exit=`` for the agent but never stamped the
+    exit into the call's typed meta; the check is a child of this call and now
+    publishes like run_command's."""
+    from ouroboros.tools.verify import _verify_and_record
+
+    ctx, _drive = _verify_ctx(tmp_path)
+    _verify_and_record(ctx, contract_kind="explicit_command", check=["sh", "-c", "exit 3"])
+    facts = consume_last_process_facts()
+    assert facts["exit_code"] == 3
+    assert "signal" not in facts
+    assert isinstance(facts["duration_ms"], int)
+
+
+@pytest.mark.serial
+@pytest.mark.skipif(os.name != "posix", reason="uses sh")
+def test_verify_killed_check_publishes_signal_fact(tmp_path):
+    from ouroboros.tools.verify import _verify_and_record
+
+    ctx, _drive = _verify_ctx(tmp_path)
+    _verify_and_record(ctx, contract_kind="explicit_command", check=["sh", "-c", "kill -9 $$"])
+    facts = consume_last_process_facts()
+    assert facts["exit_code"] == -9
+    assert facts["signal"] == "SIGKILL"
+
+
+@pytest.mark.serial
+@pytest.mark.skipif(os.name != "posix", reason="uses sh")
+def test_verify_timeout_publishes_typed_kill_facts(tmp_path, monkeypatch):
+    from ouroboros.tools import verify as verify_mod
+
+    def _boom(*_a, **_k):
+        raise subprocess.TimeoutExpired(cmd="sleep", timeout=1)
+
+    monkeypatch.setattr("ouroboros.tools.shell._tracked_subprocess_run", _boom)
+    ctx, _drive = _verify_ctx(tmp_path)
+    out = verify_mod._verify_and_record(
+        ctx, contract_kind="explicit_command", check=["sh", "-c", "sleep 999"],
+    )
+    assert "timed out" in out
+    facts = consume_last_process_facts()
+    assert facts["timed_out"] is True and facts["killed_by_host"] is True
+    assert "exit_code" not in facts
+
+
+def _skill_child_facts(monkeypatch, *, returncode=0, timed_out=False, overflow=False):
+    """Drive ``_run_skill_subprocess`` over a fake child and return the facts."""
+    import ouroboros.tools.skill_exec as skill_exec
+
+    class _FakeProc:
+        pid = 5150
+
+        def __init__(self):
+            self.stdout = None
+            self.stderr = None
+            self.returncode = None if (timed_out or overflow) else returncode
+
+        def poll(self):
+            return None if (timed_out or overflow) else returncode
+
+        def wait(self, timeout=None):
+            return self.returncode
+
+    monkeypatch.setattr(skill_exec, "Popen", lambda *_a, **_k: _FakeProc())
+    monkeypatch.setattr(skill_exec, "_kill_process_group", lambda _p: None)
+
+    def _fake_drain(_pipe, _cap, _buf, flag, label):
+        if overflow:
+            flag[label] = True
+
+    monkeypatch.setattr(skill_exec, "_drain_pipe_with_cap", _fake_drain)
+    try:
+        skill_exec._run_skill_subprocess(
+            ["python", "s.py"], cwd=".", env={}, timeout_sec=(0 if timed_out else 5),
+            stdout_cap=10, stderr_cap=10,
+        )
+    except subprocess.TimeoutExpired:
+        pass
+    return consume_last_process_facts()
+
+
+def test_skill_exec_child_publishes_typed_exit_code(monkeypatch):
+    facts = _skill_child_facts(monkeypatch, returncode=7)
+    assert facts["exit_code"] == 7
+    assert "timed_out" not in facts and "killed_by_host" not in facts
+
+
+def test_skill_exec_signal_death_survives_the_or_zero_flattening(monkeypatch):
+    """``_run_skill_subprocess`` returns ``returncode or 0`` for the legacy text
+    renderer; the typed channel carries the real negative code and its signal."""
+    facts = _skill_child_facts(monkeypatch, returncode=-9)
+    assert facts["exit_code"] == -9
+    assert facts["signal"] == _KILL_NAME
+
+
+def test_skill_exec_timeout_publishes_host_kill_without_exit_code(monkeypatch):
+    facts = _skill_child_facts(monkeypatch, timed_out=True)
+    assert facts["timed_out"] is True and facts["killed_by_host"] is True
+    assert "exit_code" not in facts
+
+
+def test_skill_exec_output_cap_kill_is_a_host_kill_not_a_timeout(monkeypatch):
+    facts = _skill_child_facts(monkeypatch, overflow=True)
+    assert facts["killed_by_host"] is True and "timed_out" not in facts
+
+
+def test_skill_preflight_timeout_reports_no_returncode_instead_of_fake_minus_nine(
+    tmp_path, monkeypatch,
+):
+    """The synthesized ``-9`` read downstream as a real POSIX SIGKILL — on
+    Windows too, where a host kill produces no signal at all. The honest record
+    is no returncode plus the typed kill facts."""
+    import ouroboros.tools.skill_preflight as preflight
+
+    class _FakeProc:
+        returncode = None
+        stdout = None
+        stderr = None
+
+        def communicate(self, timeout=None):
+            raise subprocess.TimeoutExpired(cmd="node", timeout=timeout or 1)
+
+    monkeypatch.setattr(preflight, "Popen", lambda *_a, **_k: _FakeProc())
+    monkeypatch.setattr(preflight, "_kill_process_group", lambda _p: None)
+    result = preflight._run_check(["node", "--check", "x.js"], cwd=tmp_path)
+    assert result["returncode"] is None
+    assert result["timeout"] is True and result["killed_by_host"] is True
+    facts = consume_last_process_facts()
+    assert facts["timed_out"] is True and facts["killed_by_host"] is True
+    assert "exit_code" not in facts and "signal" not in facts
+
+
+def test_skill_exec_spawn_failure_publishes_typed_pre_exec_cause(monkeypatch):
+    """No child existed: the typed cause replaces silence, and no exit code is
+    invented for a process that never ran."""
+    import ouroboros.tools.skill_exec as skill_exec
+
+    def _boom(*_a, **_k):
+        raise FileNotFoundError(2, "No such file or directory", "python")
+
+    monkeypatch.setattr(skill_exec, "Popen", _boom)
+    with pytest.raises(FileNotFoundError):
+        skill_exec._run_skill_subprocess(
+            ["python", "s.py"], cwd=".", env={}, timeout_sec=5,
+            stdout_cap=10, stderr_cap=10,
+        )
+    facts = consume_last_process_facts()
+    assert facts["pre_exec_failure"] == "FileNotFoundError"
+    assert "exit_code" not in facts
+
+
+def test_skill_preflight_missing_runtime_reports_typed_pre_exec_cause(tmp_path, monkeypatch):
+    """The synthesized ``-1`` claimed an exit code for a process that never
+    existed; the typed cause replaces it."""
+    import ouroboros.tools.skill_preflight as preflight
+
+    def _boom(*_a, **_k):
+        raise FileNotFoundError(2, "No such file or directory", "node")
+
+    monkeypatch.setattr(preflight, "Popen", _boom)
+    result = preflight._run_check(["node", "--check", "x.js"], cwd=tmp_path)
+    assert result["returncode"] is None
+    assert result["pre_exec_failure"] == "FileNotFoundError"
+    facts = consume_last_process_facts()
+    assert facts["pre_exec_failure"] == "FileNotFoundError"
+    assert "exit_code" not in facts
+
+
+def _run_extension_child(tmp_path, monkeypatch, proc):
+    from ouroboros import extension_process_runner
+
+    monkeypatch.setattr(
+        extension_process_runner.subprocess, "Popen", lambda *_a, **_k: proc
+    )
+    monkeypatch.setattr(extension_process_runner, "_kill_process_group", lambda _p: None)
+    try:
+        extension_process_runner._run_child(
+            {"skill_name": "facts-probe"},
+            skill_dir=tmp_path, drive_root=tmp_path, repo_dir=tmp_path,
+            env={}, timeout_sec=1,
+        )
+    except extension_process_runner.ExtensionProcessError:
+        pass
+    return consume_last_process_facts()
+
+
+def _extension_proc(returncode):
+    import io
+
+    class _FakeProc:
+        pid = 9001
+
+        def __init__(self):
+            self.stdout = io.BytesIO(b"")
+            self.stderr = io.BytesIO(b"")
+            self.returncode = returncode
+
+        def poll(self):
+            return returncode
+
+        def wait(self, timeout=None):
+            return returncode
+
+    return _FakeProc()
+
+
+def test_extension_child_death_publishes_typed_exit_and_signal(tmp_path, monkeypatch):
+    """Extension children were closed by DELETION, not by typing: the dispatcher
+    stamped EXTENSION_ERROR but the child's exit code and signal existed only
+    inside the error prose."""
+    facts = _run_extension_child(tmp_path, monkeypatch, _extension_proc(-9))
+    assert facts["exit_code"] == -9
+    assert facts["signal"] == _KILL_NAME
+    assert isinstance(facts["duration_ms"], int)
+
+
+def test_extension_child_clean_exit_publishes_zero(tmp_path, monkeypatch):
+    facts = _run_extension_child(tmp_path, monkeypatch, _extension_proc(0))
+    assert facts["exit_code"] == 0
+    assert "signal" not in facts
+
+
+def test_extension_child_timeout_publishes_host_kill(tmp_path, monkeypatch):
+    import io
+
+    class _NeverExits:
+        pid = 9002
+
+        def __init__(self):
+            self.stdout = io.BytesIO(b"")
+            self.stderr = io.BytesIO(b"")
+            self.returncode = None
+
+        def poll(self):
+            return None
+
+        def wait(self, timeout=None):
+            return None
+
+    facts = _run_extension_child(tmp_path, monkeypatch, _NeverExits())
+    assert facts["timed_out"] is True and facts["killed_by_host"] is True
+
+
+def test_windows_host_kill_carries_no_forged_signal(tmp_path):
+    """Windows residual, pinned with the platform honest: ``TerminateProcess``
+    leaves a large POSITIVE exit status and no POSIX signal number, so the
+    signal partition can name nothing. ``killed_by_host`` beside that exit
+    status is the whole fact the platform gives — and the POSIX name is never
+    fabricated from it. Windows-executed proof pending the matrix; this pins the
+    platform-independent derivation the Windows path relies on."""
+    from ouroboros.tools.process_facts import (
+        publish_process_facts,
+        signal_name_for_returncode,
+    )
+
+    windows_terminate_status = 0xC000013A  # STATUS_CONTROL_C_EXIT
+    assert signal_name_for_returncode(windows_terminate_status) == ""
+    publish_process_facts(
+        returncode=windows_terminate_status, started_ts=time.monotonic(),
+        killed_by_host=True,
+    )
+    facts = consume_last_process_facts()
+    assert facts["exit_code"] == windows_terminate_status
+    assert facts["killed_by_host"] is True
+    assert "signal" not in facts
+
+
+def test_tools_jsonl_row_carries_the_typed_process_facts(tmp_path):
+    """Consumer pin: the row an operator greps carries the facts of the call,
+    not just its status."""
+    def execute(_name, _args):
+        shell._publish_process_facts(
+            returncode=-9, started_ts=time.monotonic(), killed_by_host=True,
+        )
+        return "⚠️ SHELL_EXIT_ERROR: command exited."
+
+    logs = tmp_path / "logs"
+    _run_single(tmp_path, execute)
+    rows = [
+        json.loads(line)
+        for line in (logs / "tools.jsonl").read_text(encoding="utf-8").splitlines()
+    ]
+    row = rows[-1]
+    assert row["exit_code"] == -9
+    assert row["signal"] == _KILL_NAME
+    assert row["killed_by_host"] is True

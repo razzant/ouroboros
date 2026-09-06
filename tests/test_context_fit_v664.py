@@ -240,6 +240,54 @@ def test_route_rebind_keeps_owner_projection_on_small_confirmed_route(monkeypatc
     assert rebound.route_fp == "small-route"
 
 
+def test_route_rebind_a_b_a_forgets_the_old_a_cache_split(monkeypatch, tmp_path):
+    from ouroboros import context, loop, usage_accounting
+    from ouroboros.tools.registry import ToolRegistry
+
+    plan = _plan()
+    registry = ToolRegistry(repo_dir=tmp_path, drive_root=tmp_path)
+    registry._ctx.task_id = "switch-back"
+    registry._ctx.event_queue = None
+    monkeypatch.setattr(
+        context,
+        "_context_fit_route",
+        lambda task, **_kw: (
+            {"model": task["model"], "provider": "openrouter", "use_local": False},
+            SimpleNamespace(
+                status="confirmed", stale=False, window_tokens=500_000,
+                route_fp=f"route-{task['model']}",
+            ),
+        ),
+    )
+    monkeypatch.setattr(
+        usage_accounting,
+        "estimate_cost_optional",
+        lambda _model, _prompt, _completion, *, cache_usage, **_kw: float(
+            cache_usage["cache_write_tokens"]
+        ),
+    )
+    request = usage_accounting.AttemptRequest(
+        model="anthropic/model-a", provider="openrouter", task_id="switch-back",
+        prompt_tokens_estimate=1_000,
+    )
+    usage_accounting.stash_task_cache_split(
+        "switch-back", request.model, 800, provider=request.provider, ttl_seconds=300,
+    )
+    assert usage_accounting._reservation_cost(request) == 200
+
+    messages = plan.messages_for("max")
+    plan, _ = loop._rebind_context_fit_plan(
+        plan, registry, messages, model="anthropic/model-b", use_local=False,
+        preferred_mode="max", tool_schemas=[],
+    )
+    loop._rebind_context_fit_plan(
+        plan, registry, messages, model=request.model, use_local=False,
+        preferred_mode="max", tool_schemas=[],
+    )
+
+    assert usage_accounting._reservation_cost(request) == 1_000
+
+
 def test_route_switch_without_immutable_core_fails_loudly(tmp_path):
     from ouroboros import loop
     from ouroboros.tools.registry import ToolRegistry

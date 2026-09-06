@@ -204,8 +204,8 @@ def _signal_pid(pid: int) -> None:
 
 def _pid_gone(pid: int) -> bool:
     """Positive nonexistence via the platform layer: EPERM means the process EXISTS and a
-    survivor must block the boot — plain ``not pid_is_alive`` would read it as dead and
-    let a colliding generation start next to a live one."""
+    survivor must block the boot — the liveness read treats it as present, so a colliding
+    generation never starts next to a live one it merely may not signal."""
     return _pl.pid_provably_gone(pid)
 
 

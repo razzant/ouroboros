@@ -1,6 +1,7 @@
 """Context overflow classification and recovery disclosure."""
 
 import json
+import time
 
 import pytest
 
@@ -105,6 +106,7 @@ def test_local_transport_stops_unchanged_retry_on_any_overflow_shape(monkeypatch
     every structured overflow code and message marker — an identical over-window
     payload is never resent (the old path matched one literal code only)."""
     from ouroboros import llm as llm_mod
+    from ouroboros import llm_local as llm_local_mod
 
     calls = {"n": 0}
 
@@ -112,8 +114,8 @@ def test_local_transport_stops_unchanged_retry_on_any_overflow_shape(monkeypatch
         calls["n"] += 1
         raise overflow_exc
 
-    monkeypatch.setattr(llm_mod, "_execute_candidate", _fake_execute)
-    monkeypatch.setattr(llm_mod, "_attempt_request", lambda *a, **k: None)
+    monkeypatch.setattr(llm_local_mod, "_execute_candidate", _fake_execute)
+    monkeypatch.setattr(llm_local_mod, "_attempt_request", lambda *a, **k: None)
     client = llm_mod.LLMClient.__new__(llm_mod.LLMClient)
     monkeypatch.setattr(client, "_get_local_client", lambda: object(), raising=False)
     monkeypatch.setattr(
@@ -132,9 +134,11 @@ def test_local_transport_stops_unchanged_retry_on_any_overflow_shape(monkeypatch
 def test_local_output_limit_error_takes_normal_retry_path_not_overflow(monkeypatch):
     """An OUTPUT-limit rejection ("max_tokens ... exceeds maximum context
     length ...") must NOT be classified as a context overflow by the local
-    transport: no LocalContextTooLargeError, ordinary bounded retry, and the
-    original provider error surfaces (S1 N-1 misclassification probe)."""
+    transport: no LocalContextTooLargeError, and the original provider error
+    surfaces UNCHANGED to the caller's retry policy (S1 N-1 misclassification
+    probe). The lane makes exactly one physical attempt either way."""
     from ouroboros import llm as llm_mod
+    from ouroboros import llm_local as llm_local_mod
 
     output_limit_exc = RuntimeError("max_tokens 65536 exceeds maximum context length 32768")
     calls = {"n": 0}
@@ -143,9 +147,8 @@ def test_local_output_limit_error_takes_normal_retry_path_not_overflow(monkeypat
         calls["n"] += 1
         raise output_limit_exc
 
-    monkeypatch.setattr(llm_mod, "_execute_candidate", _fake_execute)
-    monkeypatch.setattr(llm_mod, "_attempt_request", lambda *a, **k: None)
-    monkeypatch.setattr(llm_mod.time, "sleep", lambda _s: None)
+    monkeypatch.setattr(llm_local_mod, "_execute_candidate", _fake_execute)
+    monkeypatch.setattr(llm_local_mod, "_attempt_request", lambda *a, **k: None)
     client = llm_mod.LLMClient.__new__(llm_mod.LLMClient)
     monkeypatch.setattr(client, "_get_local_client", lambda: object(), raising=False)
     monkeypatch.setattr(
@@ -160,12 +163,13 @@ def test_local_output_limit_error_takes_normal_retry_path_not_overflow(monkeypat
         client._chat_local([{"role": "user", "content": "hi"}], None, 512, "auto")
     assert excinfo.value is output_limit_exc
     assert not isinstance(excinfo.value, llm_mod.LocalContextTooLargeError)
-    assert calls["n"] == 3
+    assert calls["n"] == 1
 
 
 def test_local_retry_does_not_inherit_unrelated_physical_capture(monkeypatch, tmp_path):
     """A missing exception-owned capture must not borrow a prior operation's custody."""
     from ouroboros import llm as llm_mod
+    from ouroboros import llm_local as llm_local_mod
     from ouroboros import usage_accounting as ua
 
     # Leave an unresolved capture in the current ContextVar, as a previous
@@ -190,9 +194,8 @@ def test_local_retry_does_not_inherit_unrelated_physical_capture(monkeypatch, tm
         calls["n"] += 1
         raise output_limit_exc
 
-    monkeypatch.setattr(llm_mod, "_execute_candidate", _fake_execute)
-    monkeypatch.setattr(llm_mod, "_attempt_request", lambda *a, **k: None)
-    monkeypatch.setattr(llm_mod.time, "sleep", lambda _s: None)
+    monkeypatch.setattr(llm_local_mod, "_execute_candidate", _fake_execute)
+    monkeypatch.setattr(llm_local_mod, "_attempt_request", lambda *a, **k: None)
     client = llm_mod.LLMClient.__new__(llm_mod.LLMClient)
     monkeypatch.setattr(client, "_get_local_client", lambda: object(), raising=False)
     monkeypatch.setattr(
@@ -206,4 +209,47 @@ def test_local_retry_does_not_inherit_unrelated_physical_capture(monkeypatch, tm
     with pytest.raises(RuntimeError) as excinfo:
         client._chat_local([{"role": "user", "content": "hi"}], None, 512, "auto")
     assert excinfo.value is output_limit_exc
-    assert calls["n"] == 3
+    assert calls["n"] == 1
+
+
+def test_local_transport_makes_exactly_one_physical_attempt(monkeypatch):
+    """spec 4.3.2: the local lane dispatches ONE candidate per call. Retrying
+    inside the lane spent the caller's physical-attempt budget without the
+    caller authorising it; the single retry policy that owns that decision is
+    `loop_llm_call.call_llm_with_retry`, which counts the attempts it makes."""
+    from ouroboros import llm as llm_mod
+    from ouroboros import llm_attempt as llm_attempt_mod
+    from ouroboros import llm_local as llm_local_mod  # noqa: F401 - the lane under test
+
+    transient = RuntimeError("connection reset by peer")
+    calls = {"n": 0}
+    slept: list[float] = []
+
+    # Count at the TRUE physical boundary (wave-3 conformance review): the
+    # real _execute_candidate runs, so an internal retry anywhere above
+    # execute_physical_attempt would be seen here as calls["n"] > 1.
+    def _fake_physical(request, send, before_dispatch=None):
+        calls["n"] += 1
+        raise transient
+
+    monkeypatch.setattr(llm_attempt_mod, "execute_physical_attempt", _fake_physical)
+    # The request builder needs an initialised client; the physical boundary
+    # above is what this pin counts, so a None request is fine.
+    monkeypatch.setattr(llm_local_mod, "_attempt_request", lambda *a, **k: None)
+    monkeypatch.setattr(time, "sleep", slept.append)
+    client = llm_mod.LLMClient.__new__(llm_mod.LLMClient)
+    monkeypatch.setattr(client, "_get_local_client", lambda: object(), raising=False)
+    monkeypatch.setattr(
+        client, "_normalize_system_message_placement", lambda m: list(m), raising=False)
+    monkeypatch.setattr(
+        client, "_strip_openrouter_roundtrip_metadata", lambda m: list(m), raising=False)
+    monkeypatch.setattr(
+        client, "_copy_messages_with_cache_policy",
+        lambda m, **k: [dict(x) for x in m], raising=False)
+
+    with pytest.raises(RuntimeError) as excinfo:
+        client._chat_local([{"role": "user", "content": "hi"}], None, 512, "auto")
+
+    assert excinfo.value is transient
+    assert calls["n"] == 1
+    assert slept == []

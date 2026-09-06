@@ -25,14 +25,20 @@ AUTH_COOKIE_NAME = "ouroboros_auth"
 _PUBLIC_HTTP_PATHS = {"/api/health", "/auth/login", "/auth/logout"}
 
 
-def get_configured_network_password() -> str:
-    raw = (os.environ.get(NETWORK_PASSWORD_KEY, "") or "").strip()
+def resolve_network_password(env_value: str | None, settings_loader) -> str:
+    """The resolution order, pure: a non-blank environment value wins, else the settings value,
+    else the empty password (a missing, blank or unreadable settings file included)."""
+    raw = (env_value or "").strip()
     if raw:
         return raw
     try:
-        return str(load_settings().get(NETWORK_PASSWORD_KEY, "") or "").strip()
+        return str(settings_loader().get(NETWORK_PASSWORD_KEY, "") or "").strip()
     except Exception:
         return ""
+
+
+def get_configured_network_password() -> str:
+    return resolve_network_password(os.environ.get(NETWORK_PASSWORD_KEY, ""), load_settings)
 
 
 def is_loopback_host(host: str | None) -> bool:

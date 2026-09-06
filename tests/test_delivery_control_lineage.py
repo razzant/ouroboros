@@ -840,7 +840,7 @@ def test_multi_improvement_stale_replace_is_decoded_before_acceptance_and_delive
         tools=registry,
         llm=FakeLLM(),
         drive_logs=tmp_path,
-        emit_progress=lambda _text: None,
+        emit_progress=lambda _text, *, incident=None: None,
         incoming_messages=queue.Queue(),
         task_id="issue-449",
         drive_root=tmp_path,

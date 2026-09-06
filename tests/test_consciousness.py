@@ -200,6 +200,24 @@ class TestBackgroundConsciousnessToolScope(unittest.TestCase):
 
 
 class TestBackgroundConsciousnessCost(unittest.TestCase):
+    def test_think_accepts_unlimited_total_budget(self):
+        from ouroboros.consciousness import BackgroundConsciousness
+        from ouroboros.settings_setup_contract import resolve_total_budget_usd
+        from ouroboros.usage_accounting import current_usage_scope
+
+        bc = object.__new__(BackgroundConsciousness)
+        bc._drive_root = pathlib.Path(tempfile.mkdtemp())
+        bc._bg_budget_pct = 5.0
+        captured = []
+        bc._think_scoped = lambda: captured.append(current_usage_scope()) or True
+
+        with patch.dict(os.environ, {"TOTAL_BUDGET": "0"}):
+            self.assertIsNone(resolve_total_budget_usd())
+            self.assertTrue(bc._think())
+
+        self.assertIsNone(captured[0].global_limit_usd)
+        self.assertIsNone(captured[0].root_limit_usd)
+
     def test_unknown_round_cost_stays_nullable_in_durable_thought(self):
         from ouroboros.consciousness import BackgroundConsciousness
 

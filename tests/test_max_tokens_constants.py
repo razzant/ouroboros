@@ -81,7 +81,7 @@ def test_summary_and_background_token_budgets():
         "ouroboros/tools/review_synthesis.py": "max_tokens=16384",
         "ouroboros/consolidator.py": "max_tokens=16384",
         "ouroboros/reflection.py": "max_tokens=16384",
-        "ouroboros/agent_task_pipeline.py": "max_tokens=16384",
+        "ouroboros/post_task_synthesis.py": "max_tokens=16384",
         "ouroboros/tools/skill_publish.py": "max_tokens=8192",
         "ouroboros/consciousness.py": "max_tokens=65536",
     }
@@ -92,19 +92,19 @@ def test_summary_and_background_token_budgets():
     assert context_compaction._summarizer_spec()["output_budget"] == 32_768
 
 
-def test_native_review_episode_caps_are_ssot():
-    """The bounded native inspection episode (the advisory/actor-row successor
-    of the retired Claude-SDK max-turns budget) reads its caps from config
-    SSOT settings with shipped defaults, never a hardcoded literal."""
-    from ouroboros.config import SETTINGS_DEFAULTS
-    from ouroboros.review_native_episode import (
-        review_native_max_rounds,
-        review_native_max_transcript_chars,
-    )
+def test_native_review_episode_ceiling_is_ssot_and_round_cap_is_retired():
+    """The native inspection episode (the advisory/actor-row successor of the
+    retired Claude-SDK max-turns budget) reads its transcript CEILING from
+    config SSOT with a shipped default, never a hardcoded literal — and has
+    no round cap at all (P13: the floor is hardcoded, never the ceiling)."""
+    from ouroboros.config import RETIRED_SETTING_KEYS, SETTINGS_DEFAULTS
+    from ouroboros import review_native_episode
+    from ouroboros.review_native_episode import review_native_max_transcript_chars
 
-    assert SETTINGS_DEFAULTS["OUROBOROS_REVIEW_NATIVE_MAX_ROUNDS"] == "16"
     assert SETTINGS_DEFAULTS["OUROBOROS_REVIEW_NATIVE_MAX_TRANSCRIPT_CHARS"] == "900000"
-    assert review_native_max_rounds() >= 1
+    assert "OUROBOROS_REVIEW_NATIVE_MAX_ROUNDS" not in SETTINGS_DEFAULTS
+    assert "OUROBOROS_REVIEW_NATIVE_MAX_ROUNDS" in RETIRED_SETTING_KEYS
+    assert not hasattr(review_native_episode, "review_native_max_rounds")
     assert review_native_max_transcript_chars() >= 10_000
 
 
@@ -282,11 +282,36 @@ def test_calibrated_input_limit_shared_helper(tmp_path, monkeypatch):
     assert limit("openai/gpt-5.5") == 1_000_000 - 100_000 - 155_000  # margin-bounded
     assert limit("openai/gpt-5.5") > int(900_000 / COLD_START_TOKEN_DENSITY)
 
-    # Deep self-review consumes the same helper for its model-aware gate.
-    assert "calibrated_input_token_limit" in inspect.getsource(deep_self_review.run_deep_self_review)
+    # Deep self-review's PACKED delivery consumes the same helper for its
+    # model-aware gate (the retrieving deliveries have no pack to size).
+    assert "calibrated_input_token_limit" in inspect.getsource(deep_self_review._run_packed_review)
     # ...as does the triad, whose pack size moves with the same formula.
     from ouroboros.tools import review as triad
     assert "calibrated_input_token_limit" in inspect.getsource(triad)
+
+
+def test_scope_cap_of_an_unwitnessed_reviewer_ignores_another_models_witness(tmp_path, monkeypatch):
+    """Paid run 2026-09-04, lane SM1_a1, commit-gate attempt 2: gpt-5.6-terra's
+    window confirmed at 1,050,000, no terra witness yet, and a gemini-3.8-flash
+    witness at 1.81 in the store. The scope cap came out at 499,627 (1.81 x 1.05
+    applied to terra) instead of the floor-based 575,757, starving 48 required
+    protected-path artifacts before any reviewer was dispatched. The cap of an
+    unwitnessed reviewer is the floor's, whatever other models measured."""
+    from ouroboros.capability_evidence import _DENSITY_MEMO, COLD_START_TOKEN_DENSITY, record_token_density
+    from ouroboros.reviewer_window import ReviewerWindow
+    from ouroboros.tools.scope_review import _effective_scope_input_limit
+
+    monkeypatch.setattr("ouroboros.tools.scope_review._scope_window",
+                        lambda m: ReviewerWindow(1_050_000, "confirmed"))
+    monkeypatch.setenv("OUROBOROS_DATA_DIR", str(tmp_path))
+    _DENSITY_MEMO.clear()
+    record_token_density(
+        tmp_path, "google/gemini-3.8-flash", prompt_chars=900_708, prompt_tokens=407_767,
+    )
+
+    cap = _effective_scope_input_limit(scope_model="openai/gpt-5.6-terra")
+    assert cap == int((1_050_000 - 100_000) / COLD_START_TOKEN_DENSITY) == 575_757
+    assert cap != 499_627
 
 
 def test_measured_density_never_loosens_a_models_own_review_pack_cap(tmp_path, monkeypatch):
@@ -391,46 +416,30 @@ def test_scope_actor_record_surfaces_error_text():
     assert build_scope_actor_record(ok, slot_id="s")["error"] == ""
 
 
-def test_deep_self_review_budget_uses_ssot():
-    """``deep_self_review`` must gate the FULL assembled prompt (system + user)
-    on an input limit derived from the SSOT constant WITH output reservation
-    (min(SSOT, window − output − margin)) — matching scope_review/plan_review —
-    using the shared ``estimate_tokens(chars/4)`` helper.
+def test_deep_self_review_budget_uses_ssot(tmp_path, monkeypatch):
+    """The packed deep review gates the FULL assembled prompt (system + user)
+    on the model-calibrated, output-reserving input limit the shared helper
+    returns (min(SSOT, window − output − margin), as scope/plan review do),
+    measured with the shared ``estimate_tokens`` (chars/4) — pinned by
+    BEHAVIOR: the limit is what the helper says, the measure includes the
+    system prompt, and a pack over it is refused before any send.
     """
-    import pathlib
-    src = pathlib.Path("ouroboros/deep_self_review.py").read_text(encoding="utf-8")
-    assert "REVIEW_PROMPT_TOKEN_BUDGET" in src, (
-        "deep_self_review must derive its gate from the SSOT constant"
-    )
-    assert "estimated_tokens > input_limit" in src, (
-        "deep_self_review must gate on the model-calibrated output-reserving input limit"
-    )
-    assert "calibrated_input_token_limit(" in src, (
-        "deep_self_review must resolve its gate through the shared model-family calibration helper"
-    )
-    assert "estimate_tokens(_SYSTEM_PROMPT + pack_text)" in src, (
-        "deep_self_review must gate on the FULL assembled prompt "
-        "(system + user) using the shared estimate_tokens(chars/4) helper."
-    )
-    # Old hardcoded literals must not survive — drift would silently desync.
-    assert "estimated_tokens > 850_000" not in src, (
-        "deep_self_review still has the old hardcoded literal; switch to the SSOT constant"
-    )
-    assert "estimated_tokens > 920_000" not in src, (
-        "deep_self_review hardcodes the current budget; use the SSOT constant instead"
-    )
-    assert "int(stats[\"total_chars\"] / 3.5)" not in src, (
-        "deep_self_review must not use its old chars/3.5 estimator"
-    )
+    from unittest import mock
 
+    from ouroboros import deep_self_review
     from ouroboros.deep_self_review import (
         _DEEP_INPUT_TOKEN_LIMIT,
         _DEEP_MAX_OUTPUT_TOKENS,
         _DEEP_MODEL_CONTEXT_WINDOW,
         _DEEP_OUTPUT_MARGIN_TOKENS,
+        _SYSTEM_PROMPT,
+        run_deep_self_review,
     )
+    from ouroboros.reviewer_slot_config import DEEP_REVIEW_SLOT_ID, ConfiguredReviewerSlot
     from ouroboros.tools.review_helpers import REVIEW_PROMPT_TOKEN_BUDGET
+    from ouroboros.utils import estimate_tokens
 
+    # The uncalibrated window arithmetic: SSOT budget with the output reserve.
     assert _DEEP_INPUT_TOKEN_LIMIT == min(
         REVIEW_PROMPT_TOKEN_BUDGET,
         _DEEP_MODEL_CONTEXT_WINDOW - _DEEP_MAX_OUTPUT_TOKENS - _DEEP_OUTPUT_MARGIN_TOKENS,
@@ -439,6 +448,28 @@ def test_deep_self_review_budget_uses_ssot():
         "deep review input cap + reserved output exceeds the reviewer window; "
         "the provider would hard-400."
     )
+
+    # The ENFORCED limit is the shared helper's answer (here: a sentinel), and
+    # the gated measure is system prompt + pack: a pack that fits alone but
+    # not with the system prompt is refused, quoting the enforced number.
+    monkeypatch.setenv("OPENROUTER_API_KEY", "sk-or-test")
+    limit = estimate_tokens(_SYSTEM_PROMPT) + 100
+    monkeypatch.setattr(deep_self_review, "calibrated_input_token_limit", lambda *a, **k: limit)
+    row = ConfiguredReviewerSlot(slot_id=DEEP_REVIEW_SLOT_ID, kind="api_chat", target_id="openai/x")
+    llm = mock.Mock()
+    llm.chat.return_value = ({"content": "ok"}, {"cost": 0.0})
+    (tmp_path / "state").mkdir()
+    too_big = "x" * (4 * 150)  # ~150 tokens: fits the limit alone, not with the system prompt
+    with mock.patch.object(deep_self_review, "build_review_pack",
+                           return_value=(too_big, {"file_count": 1, "total_chars": len(too_big), "skipped": []})):
+        text, usage = run_deep_self_review(tmp_path, tmp_path, llm, lambda _m: None, slot=row)
+    assert "too large" in text and f"~{limit:,} tokens" in text
+    assert usage["execution_status"] == "infra_failed" and not llm.chat.called
+    fits = "x" * (4 * 50)
+    with mock.patch.object(deep_self_review, "build_review_pack",
+                           return_value=(fits, {"file_count": 1, "total_chars": len(fits), "skipped": []})):
+        text, _usage = run_deep_self_review(tmp_path, tmp_path, llm, lambda _m: None, slot=row)
+    assert text.endswith("ok") and llm.chat.call_count == 1
 
 
 def test_tool_timeout_uses_max_of_settings_and_per_tool():
@@ -473,7 +504,7 @@ def test_tool_timeout_settings_wins_when_higher():
 def test_review_evidence_no_truncation_by_default():
     """format_review_evidence_for_prompt must NOT truncate by default (max_chars=0)."""
     from ouroboros.review_evidence import format_review_evidence_for_prompt
-    big = {"has_evidence": True, "data": "x" * 10000}
+    big = {"has_evidence": True, "task_id": "task-review", "data": "x" * 10000}
     result = format_review_evidence_for_prompt(big)
     assert "truncated" not in result.lower()
     assert len(result) > 10000
@@ -482,7 +513,7 @@ def test_review_evidence_no_truncation_by_default():
 def test_review_evidence_bounded_with_omission_note():
     """format_review_evidence_for_prompt truncates with explicit omission note when max_chars>0."""
     from ouroboros.review_evidence import format_review_evidence_for_prompt
-    big = {"has_evidence": True, "data": "x" * 10000}
+    big = {"has_evidence": True, "task_id": "task-review", "data": "x" * 10000}
     result = format_review_evidence_for_prompt(big, max_chars=500)
     assert "OMISSION NOTE" in result
     assert "truncated at 500 chars" in result
@@ -526,7 +557,7 @@ def test_summary_and_reflection_callers_use_bounded_evidence():
     """Summary and reflection prompt builders must call format_review_evidence_for_prompt with max_chars."""
     from pathlib import Path
 
-    for filename in ("ouroboros/agent_task_pipeline.py", "ouroboros/reflection.py"):
+    for filename in ("ouroboros/post_task_synthesis.py", "ouroboros/reflection.py"):
         src = Path(filename).read_text(encoding="utf-8")
         assert "format_review_evidence_for_prompt(" in src
         # Must pass max_chars argument (not rely on default 0)
@@ -834,3 +865,55 @@ def test_triad_fit_sizes_against_the_local_route(monkeypatch, tmp_path):
         "a local-only install must size the triad prompt against the local "
         "route's real window, not the provider inferred from the model text"
     )
+
+
+def test_update_letter_max_tokens_pinned():
+    """The update letter is ONE short paragraph (owner decision 2026-09-03): its LIGHT
+    one-shot budget stays 1024 and matches the ARCHITECTURE 'LLM output token budgets' row."""
+    from ouroboros.update_letter import UPDATE_LETTER_MAX_TOKENS
+
+    assert UPDATE_LETTER_MAX_TOKENS == 1024
+
+
+def test_acceptance_panels_reach_the_synthesis_prompts():
+    """AP7/F27: the post-task summariser and the reflection were told there was
+    no review evidence even when the task bought an acceptance panel — the
+    commit/advisory lens simply does not know about it. The panels ride along,
+    and the absence statement names the lens it describes."""
+    from ouroboros.review_evidence import format_review_evidence_for_prompt
+
+    panels = [{
+        "panel_id": "panel_1", "surface": "task_acceptance", "authority": "host",
+        "aggregate_signal": "DEGRADED", "transport_status": "not_dispatched",
+        "parse_status": "malformed", "superseded": False,
+        "quorum": {"required": 2, "contributed": 0, "configured": 3},
+        "reason": "slot_1:degraded_partial_source: the exact source is unavailable",
+    }]
+    out = format_review_evidence_for_prompt({}, max_chars=8000, acceptance_panels=panels)
+    assert "TASK ACCEPTANCE PANELS" in out
+    assert "no structured review evidence" not in out
+    assert "DEGRADED" in out and "not_dispatched" in out
+    assert '"required": 2' in out and '"contributed": 0' in out
+    assert "degraded_partial_source" in out
+
+    # No lens and no panels: the sentinel names WHICH evidence is absent.
+    bare = format_review_evidence_for_prompt({}, max_chars=8000)
+    assert bare == "(no commit/advisory review evidence recorded for this task)"
+
+    # Both together, and the existing bound still applies.
+    both = format_review_evidence_for_prompt(
+        {"has_evidence": True, "task_id": "task-review", "data": "x" * 10_000}, max_chars=500,
+        acceptance_panels=panels,
+    )
+    assert "OMISSION NOTE" in both
+    assert "truncated at 500 chars" in both
+
+
+def test_summary_and_reflection_callers_pass_the_acceptance_panels():
+    from pathlib import Path
+
+    # v7 relocated the summary/reflection synthesis callers out of
+    # agent_task_pipeline.py into ouroboros/post_task_synthesis.py.
+    for filename in ("ouroboros/post_task_synthesis.py", "ouroboros/reflection.py"):
+        src = Path(filename).read_text(encoding="utf-8")
+        assert "acceptance_panels=" in src, filename

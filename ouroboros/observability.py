@@ -452,6 +452,10 @@ def promote_call_manifest_ref(
                 nested,
                 transform_json=transform_json,
             )
+    # Honest provenance: a promoted copy's accounting rows legitimately live in
+    # the CHILD drive's ledger, so the model_send reconciliation sweep must not
+    # read this copy as an orphan seal on the canonical drive.
+    manifest.setdefault("promoted_call_manifest", True)
     promoted = write_call_manifest(
         pathlib.Path(canonical_drive_root),
         task_id=str(task_id),
@@ -635,6 +639,21 @@ def _promote_task_source_ref(
         state["promoted_source_handle_count"] += 1
         return dict(ref)
     except Exception as exc:
+        # A CONCURRENT copy-back of the same task may have claimed this exact
+        # content-addressed destination between our miss above and our write
+        # (its os.replace can refuse ours on Windows, where a destination another
+        # thread holds open cannot be replaced). The promotion's postcondition is
+        # the verified handle at the destination, not authorship of the write, so
+        # ask the destination once more: if it verifies, the copy DID happen and
+        # this caller must publish the same complete custody projection as the
+        # winner. Only a still-unreadable destination is a pending ref.
+        try:
+            read_actor_source_bytes(parent_root, task_id, ref)
+        except Exception:
+            pass
+        else:
+            state["promoted_source_handle_count"] += 1
+            return dict(ref)
         _append_promotion_fact(
             state["pending_refs"],
             _promotion_fact(
@@ -1094,8 +1113,14 @@ def persist_call(
     payload: Dict[str, Any],
     manifest: Dict[str, Any] | None = None,
     keep_raw: Optional[bool] = None,
+    finalize_manifest: Optional[Callable[["RedactionResult"], Dict[str, Any]]] = None,
 ) -> Dict[str, Any]:
     """Persist the payload and return refs plus a redacted projection.
+
+    ``finalize_manifest`` receives the exact :class:`RedactionResult` of this
+    CAS write and returns additional manifest entries — the seam the
+    ``model_send_seal`` builder uses to disclose the redaction instances that
+    actually fired, without re-running redaction (CPL-5).
 
     By default the AUTHORITATIVE blob (``full_payload_ref``) is the REDACTED value:
     secret VALUES are masked while structure, paths, model route, and all non-secret
@@ -1143,6 +1168,7 @@ def persist_call(
             "redacted_projection_ref": projection_ref,
             "redaction": redacted.manifest(),
             **dict(manifest or {}),
+            **(finalize_manifest(redacted) if finalize_manifest is not None else {}),
         },
     )
     return {
@@ -1162,29 +1188,20 @@ def persist_physical_candidate(
     candidate: Dict[str, Any],
     candidate_facts: Dict[str, Any],
 ) -> Dict[str, Any]:
-    """Persist one inspectable post-transform candidate under its attempt id.
+    """Persist one sealed post-transform candidate (home: ``model_send_seal``).
 
-    ``candidate_facts`` describe the pre-redaction canonical object. The normal
-    ``persist_call`` refs describe the redacted-by-default CAS blob; the two
-    digest domains are deliberately labelled rather than equated.
+    Kept as a thin compatibility name on the historical import surface; the
+    CPL-5 module owns the seal-bearing implementation over this module's
+    ``persist_call``.
     """
-    from ouroboros.anthropic_native_custody import physical_custody_projection
+    from ouroboros.model_send_seal import persist_physical_candidate as _persist
 
-    projected = physical_custody_projection(candidate)
-    return persist_call(
+    return _persist(
         drive_root,
         task_id=task_id,
-        call_id=attempt_id,
-        call_type="physical_llm_candidate",
-        payload=projected,
-        keep_raw=False,
-        manifest={
-            "candidate_manifest_kind": "physical_llm_candidate",
-            "candidate_raw_digest_basis": "canonical_json_v1_pre_redaction",
-            "redacted_projection_digest_basis": "observability_json_v1_post_default_redaction_cas",
-            "anthropic_native_custody_projected": projected != candidate,
-            **dict(candidate_facts),
-        },
+        attempt_id=attempt_id,
+        candidate=candidate,
+        candidate_facts=candidate_facts,
     )
 
 
@@ -1375,57 +1392,24 @@ def salvaged_output_note(
     return f"\n\n{label}):\n" + salvaged
 
 
-def prune_observability_blobs(
-    drive_root: pathlib.Path,
-    retention_days: int | None = None,
-    *,
-    now: float | None = None,
-) -> Dict[str, Any]:
-    """Best-effort observability retention audit.
+def prune_observability_blobs(drive_root: pathlib.Path) -> Dict[str, Any]:
+    """Startup observability census — counts only, never deletion.
 
-    Forensic call manifests and CAS blobs are durable replay evidence. This
-    function intentionally does not delete them; it returns counts for startup
-    housekeeping telemetry while preserving the "keep compressed" contract.
+    Forensic call manifests and CAS blobs are durable replay evidence,
+    preserved indefinitely BY CONTRACT. The retirable half of this surface —
+    ``OUROBOROS_OBSERVABILITY_RETENTION_DAYS``, a knob that was parsed,
+    clamped and reported while deleting nothing — is GONE (CPL4-C22, owner
+    7A): a documented no-op was a misleading operator surface. The key sits
+    in ``RETIRED_SETTING_KEYS`` so stored ghosts drop on settings load.
     """
 
-    enabled = retention_days is not None
-    if retention_days is None:
-        raw = os.environ.get("OUROBOROS_OBSERVABILITY_RETENTION_DAYS", "").strip()
-        if not raw:
-            return {
-                "enabled": False,
-                "preserved_indefinitely": True,
-                "manifest_count": 0,
-                "blob_count": 0,
-                "deleted_manifests": 0,
-                "deleted_blobs": 0,
-                "errors": [],
-            }
-        try:
-            retention_days = int(raw)
-            enabled = True
-        except ValueError:
-            return {
-                "enabled": False,
-                "preserved_indefinitely": True,
-                "manifest_count": 0,
-                "blob_count": 0,
-                "deleted_manifests": 0,
-                "deleted_blobs": 0,
-                "errors": [f"invalid retention days: {raw!r}"],
-            }
-    retention_days = max(1, min(int(retention_days), 365))
     root = pathlib.Path(drive_root) / OBSERVABILITY_DIR
     calls_root = root / "calls"
     blobs_root = root / "blobs"
-    report = {
-        "enabled": enabled,
+    report: Dict[str, Any] = {
         "preserved_indefinitely": True,
-        "retention_days": retention_days,
         "manifest_count": 0,
         "blob_count": 0,
-        "deleted_manifests": 0,
-        "deleted_blobs": 0,
         "errors": [],
     }
     if not root.exists():

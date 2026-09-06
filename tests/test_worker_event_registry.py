@@ -1,4 +1,4 @@
-"""Every literal-typed worker event must have a supervisor handler.
+"""Every typed worker event — literal or module-constant typed — must have a supervisor handler.
 
 The supervisor drops an event whose type is not in EVENT_HANDLERS: it is
 downgraded to a truncated ``unknown_worker_event`` repr in supervisor.jsonl
@@ -29,18 +29,41 @@ _QUEUE_HINTS = ("event_q", "event_queue", "out_q", "eq")
 _WRAPPER_FUNCS = {"emit_review_event"}
 
 
-def _dict_type(node):
+def _dict_type(node, constants=None):
+    """The event type of a dict literal: a literal string, or a module-level
+    string constant given by bare name (`DISCLOSURE_X`) or attribute
+    (`task_pacing.DISCLOSURE_X`) — the R36 pacing facts were emitted through
+    constants and a literal-only scan blessed them unregistered."""
     if not isinstance(node, ast.Dict):
         return None
+    constants = constants or {}
     for key, value in zip(node.keys, node.values):
-        if (
-            isinstance(key, ast.Constant)
-            and key.value == "type"
-            and isinstance(value, ast.Constant)
-            and isinstance(value.value, str)
-        ):
+        if not (isinstance(key, ast.Constant) and key.value == "type"):
+            continue
+        if isinstance(value, ast.Constant) and isinstance(value.value, str):
             return value.value
+        if isinstance(value, ast.Name):
+            return constants.get(value.id)
+        if isinstance(value, ast.Attribute):
+            return constants.get(value.attr)
     return None
+
+
+def _string_constants(trees):
+    """UPPER_CASE module-level `NAME = "literal"` assignments across the scanned
+    files, keyed by bare name (an attribute access resolves by its last part)."""
+    constants = {}
+    for tree in trees:
+        for node in ast.walk(tree):
+            if not isinstance(node, ast.Assign) or len(node.targets) != 1:
+                continue
+            target, value = node.targets[0], node.value
+            if (
+                isinstance(target, ast.Name) and target.id.isupper()
+                and isinstance(value, ast.Constant) and isinstance(value.value, str)
+            ):
+                constants.setdefault(target.id, value.value)
+    return constants
 
 
 def _receiver_name(func):
@@ -67,11 +90,14 @@ def _emitted_types():
     files = [REPO / "server.py"]
     files += list((REPO / "ouroboros").rglob("*.py"))
     files += list((REPO / "supervisor").rglob("*.py"))
+    trees = {}
     for path in files:
         try:
-            tree = ast.parse(path.read_text(encoding="utf-8"))
+            trees[path] = ast.parse(path.read_text(encoding="utf-8"))
         except Exception:
             continue
+    constants = _string_constants(trees.values())
+    for path, tree in trees.items():
         for node in ast.walk(tree):
             if not isinstance(node, ast.Call):
                 continue
@@ -91,7 +117,7 @@ def _emitted_types():
             if _call_name(node.func) in _WRAPPER_FUNCS:
                 candidates = node.args
             for arg in candidates:
-                event_type = _dict_type(arg)
+                event_type = _dict_type(arg, constants)
                 if event_type:
                     emitted.setdefault(event_type, []).append(
                         f"{path.relative_to(REPO)}:{node.lineno}"
@@ -104,7 +130,7 @@ def _registered_types():
     for name in (
         "supervisor/events.py",
         "supervisor/cognitive_operations.py",
-        "supervisor/chat_delivery_events.py",
+        "supervisor/events_chat_delivery.py",
         "supervisor/telemetry_events.py",
     ):
         tree = ast.parse((REPO / name).read_text(encoding="utf-8"))
@@ -162,3 +188,29 @@ def test_previously_dropped_types_are_registered():
         "plan_task_deadline_skip",
     ):
         assert event_type in registered, event_type
+
+
+def test_the_scan_resolves_an_event_type_given_as_a_module_constant():
+    """A literal-only scan once blessed constant-typed emitters unregistered and
+    the supervisor dropped them as unknown_worker_event. No production emitter
+    names its type through a constant today (the R36 pacing fact that did is
+    deleted), so the resolver is pinned on its own source instead of on a live
+    subject that can disappear again — losing the capability silently is
+    exactly the failure this file exists to prevent."""
+    source = (
+        'DISCLOSURE_X = "typed_fact_by_name"\n'
+        'def emit(event_q, ctx):\n'
+        '    event_q.put({"type": DISCLOSURE_X})\n'
+        '    ctx.pending_events.append({"type": pacing.DISCLOSURE_X})\n'
+        '    emit_review_event(ctx, {"type": "typed_fact_by_literal"})\n'
+    )
+    tree = ast.parse(source)
+    constants = _string_constants([tree])
+    assert constants["DISCLOSURE_X"] == "typed_fact_by_name"
+    dicts = [node for node in ast.walk(tree) if isinstance(node, ast.Dict)]
+    assert [_dict_type(node, constants) for node in dicts] == [
+        "typed_fact_by_name",  # bare name
+        "typed_fact_by_name",  # attribute access, resolved by its last part
+        "typed_fact_by_literal",
+    ]
+    assert _dict_type(dicts[0], {}) is None  # without the constant table: unresolvable

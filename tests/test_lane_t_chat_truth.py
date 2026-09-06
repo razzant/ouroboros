@@ -10,21 +10,29 @@ class TestStampRootFinalPhase:
         from ouroboros.task_finalization import stamp_root_final_phase
 
         evt = {"type": "send_message"}
-        stamp_root_final_phase(evt, {"_is_direct_chat": True}, post_task_open=True)
+        stamp_root_final_phase(evt, {"_is_direct_chat": True}, post_task_open=True, terminal_status="completed")
         assert evt["progress_meta"] == {"task_phase": "finalizing"}
 
     def test_settled_direct_bare_final_is_typed_terminal(self):
         from ouroboros.task_finalization import stamp_root_final_phase
 
         evt = {"type": "send_message"}
-        stamp_root_final_phase(evt, {"_is_direct_chat": True}, post_task_open=False)
+        stamp_root_final_phase(evt, {"_is_direct_chat": True}, post_task_open=False, terminal_status="completed")
         assert evt["progress_meta"] == {"task_terminal_status": "completed"}
+
+    def test_settled_direct_final_names_the_durable_status(self):
+        """A stopped direct turn settles ``failed``: the terminal word is the row's, never a blanket completed."""
+        from ouroboros.task_finalization import stamp_root_final_phase
+
+        evt = {"type": "send_message"}
+        stamp_root_final_phase(evt, {"_is_direct_chat": True}, post_task_open=False, terminal_status="failed")
+        assert evt["progress_meta"] == {"task_terminal_status": "failed"}
 
     def test_settled_managed_root_keeps_task_done_conclusion(self):
         from ouroboros.task_finalization import stamp_root_final_phase
 
         evt = {"type": "send_message"}
-        stamp_root_final_phase(evt, {}, post_task_open=False)
+        stamp_root_final_phase(evt, {}, post_task_open=False, terminal_status="failed")
         assert "progress_meta" not in evt
 
 

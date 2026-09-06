@@ -4,6 +4,7 @@ import json
 import hashlib
 import os
 import subprocess
+import sys
 import zipfile
 from pathlib import Path
 from types import SimpleNamespace
@@ -20,7 +21,9 @@ from scripts.run_external_review import (
     _configured_openrouter_models,
     _contributor_snapshot,
     _contributor_execution_receipts,
+    _contributor_result,
     _create_isolated_checkout,
+    _run_on_trusted_base,
     _freeze_contributor_slots,
     _openrouter_key_health,
     _openrouter_pool,
@@ -45,6 +48,7 @@ def test_contributor_trust_boundary_covers_functional_review_dependencies():
         "ouroboros/claudexor_daemon.py",
         "ouroboros/deadline_utils.py",
         "ouroboros/delegate_custody.py",
+        "ouroboros/delegate_custody_usage.py",
         "ouroboros/delegate_output.py",
         "ouroboros/gateways/claudexor.py",
         "ouroboros/outcomes.py",
@@ -56,6 +60,8 @@ def test_contributor_trust_boundary_covers_functional_review_dependencies():
         # a PR editing the route/executor seam there must still trip a trusted
         # rerun, exactly as one editing review_substrate.py does (XG-5R4.1).
         "ouroboros/review_execution.py",
+        "ouroboros/review_actor_aggregation.py",
+        "ouroboros/review_dispatch.py",
         "ouroboros/review_slot_cancel.py",
         "ouroboros/review_evidence.py",
         "ouroboros/reviewer_slot_config.py",
@@ -73,6 +79,9 @@ def test_contributor_trust_boundary_covers_functional_review_dependencies():
         "ouroboros/tools/scope_review_session.py",
         "ouroboros/tools/scope_window.py",
         "ouroboros/subagents.py",
+        "ouroboros/review_native_episode.py",
+        "ouroboros/review_verdict_extraction.py",
+        "ouroboros/review_execution_projection.py",
         "scripts/contributor_review_evidence.py",
     }.issubset(_REVIEW_SUBSTRATE_PATHS)
 
@@ -195,9 +204,21 @@ def _init_contributor_repo(tmp_path: Path, monkeypatch) -> Path:
     _git(repo, "config", "user.email", "test@example.com")
     _git(repo, "config", "user.name", "Test")
     _git(repo, "config", "core.autocrlf", "false")
+    # Same ignores as the real repository: importing from a checkout writes
+    # bytecode into it, which would otherwise read as an unclean worktree.
+    (repo / ".gitignore").write_text("__pycache__/\n*.pyc\n", encoding="utf-8")
     (repo / "scripts").mkdir()
-    (repo / "scripts" / "run_external_review.py").write_text("# base script\n", encoding="utf-8")
+    (repo / "scripts" / "run_external_review.py").write_text(
+        _BASE_SIDE_PROBE, encoding="utf-8"
+    )
     _write_target_config(repo)
+    # A real (not namespace) package, so a wrapper executed out of this repo
+    # imports its module-level dependency from here and not from whatever
+    # ouroboros the host interpreter happens to have installed.
+    (repo / "ouroboros" / "__init__.py").write_text("", encoding="utf-8")
+    (repo / "ouroboros" / "openrouter_attribution.py").write_text(
+        "OPENROUTER_APP_HEADERS: dict = {}\n", encoding="utf-8"
+    )
     (repo / "ouroboros" / "review_substrate.py").write_text(
         "# trusted review substrate\n", encoding="utf-8"
     )
@@ -257,6 +278,250 @@ def _init_contributor_repo(tmp_path: Path, monkeypatch) -> Path:
 
     monkeypatch.setattr(module, "REPO", repo)
     return repo
+
+
+# Stands in for the review script in the seeded repo's BASE commit, so the
+# base-side run is really executed and reports which tree it ran from.
+_BASE_SIDE_PROBE = """import json, os, pathlib, subprocess, sys
+
+out = os.environ.get("REVIEW_PROBE_OUT", "")
+if out:
+    here = pathlib.Path(__file__).resolve().parents[1]
+    pathlib.Path(out).write_text(json.dumps({
+        "argv": sys.argv[1:],
+        "machinery_sha": subprocess.run(
+            ["git", "rev-parse", "HEAD"], cwd=str(here),
+            capture_output=True, text=True,
+        ).stdout.strip(),
+        "machinery_root": str(here),
+        # resolve() while the directory still exists: on Windows the child is
+        # spawned with an 8.3 short-name temp cwd (C:\\Users\\RUNNER~1\\...) while
+        # __file__.resolve() reports the long form; both sides are recorded in
+        # the one canonical spelling so the equality below is about identity.
+        "cwd": str(pathlib.Path.cwd().resolve()),
+        "data_dir": os.environ.get("OUROBOROS_DATA_DIR", ""),
+    }), encoding="utf-8")
+raise SystemExit(1)
+"""
+
+
+def _probe_path(monkeypatch, tmp_path: Path) -> Path:
+    probe = tmp_path / "base-side-run.json"
+    monkeypatch.setenv("REVIEW_PROBE_OUT", str(probe))
+    return probe
+
+
+def _forwarded_options(argv: list[str]) -> dict[str, str]:
+    return dict(
+        item[2:].split("=", 1) for item in argv if item.startswith("--") and "=" in item
+    )
+
+
+@pytest.mark.parametrize(
+    "changed_path",
+    [
+        # A proposal that touches nothing review-related...
+        "a.txt",
+        # ...and proposals that rewrite the review machinery itself take the
+        # SAME path. That identity IS the contract: the lane never asks what a
+        # diff contains before deciding whose review code runs.
+        "ouroboros/review_substrate.py",
+        "scripts/run_external_review.py",
+        # A review-machinery module ABSENT from the evidence hand-list still
+        # executes from the base — the invariant needs no list membership
+        # (the class the retired-then-rotten classifier used to miss). Upstream
+        # later listed review_native_episode.py, so the probe moved to a review
+        # leaf the hand-list still omits.
+        "ouroboros/review_status_projection.py",
+    ],
+)
+def test_contributor_review_always_runs_on_the_trusted_base(
+    tmp_path, monkeypatch, changed_path
+):
+    """Owner decision (2026-08-19): review always runs on the old version.
+
+    The proposal is still the reviewed subject — the base-side run is handed the
+    same base/head commits — but the machinery executing the review is the
+    target base's own, whatever the proposal touches, and the base-side exit
+    code is the review's exit code. The base script really runs here: it reports
+    the tree it was loaded from.
+    """
+    if changed_path == "ouroboros/review_status_projection.py":
+        assert changed_path not in _REVIEW_SUBSTRATE_PATHS
+    repo = _init_contributor_repo(tmp_path, monkeypatch)
+    probe = _probe_path(monkeypatch, tmp_path)
+    path = repo / changed_path
+    path.write_text("# proposal\n", encoding="utf-8")
+    _git(repo, "add", "-A")
+    _git(repo, "commit", "-m", f"proposal touches {changed_path}")
+    base_sha = _git(repo, "rev-parse", "base").strip()
+    head_sha = _git(repo, "rev-parse", "HEAD").strip()
+
+    exit_code = _run_on_trusted_base(SimpleNamespace(
+        base_ref="base", head_ref="HEAD", commit_message="PR title",
+        goal="goal", scope="scope", output="", drive_root="",
+    ))
+
+    assert exit_code == 1  # the base-side verdict is this review's verdict
+    ran = json.loads(probe.read_text(encoding="utf-8"))
+    assert ran["machinery_sha"] == base_sha != head_sha
+    assert Path(ran["machinery_root"]) != repo
+    assert ran["cwd"] == ran["machinery_root"]
+    assert ran["data_dir"]
+    assert "--contributor" in ran["argv"]
+    # Commits, not refs: a moving ref cannot re-point the trusted run.
+    options = _forwarded_options(ran["argv"])
+    assert options["base-ref"] == base_sha
+    assert options["head-ref"] == head_sha
+    assert ran["argv"][-2:] == ["--", "PR title"]
+    # The trusted worktree is temporary: it is removed once the review returns.
+    assert not Path(ran["machinery_root"]).exists()
+
+
+def test_the_handoff_forwards_artifact_paths_the_child_can_still_reach(
+    tmp_path, monkeypatch
+):
+    """Relative artifact paths must not resolve inside the temporary checkout.
+
+    The child runs with cwd set to the materialized base worktree, which is
+    deleted when the review returns; a verbatim relative --output/--drive-root
+    would put the operator's results there and lose them. They are absolutized
+    against the INVOKING cwd instead. Options travel in equals form so a value
+    starting with "-" reaches the child as a value, not as a broken flag.
+    """
+    _init_contributor_repo(tmp_path, monkeypatch)
+    probe = _probe_path(monkeypatch, tmp_path)
+    monkeypatch.chdir(tmp_path)
+
+    _run_on_trusted_base(SimpleNamespace(
+        base_ref="base", head_ref="HEAD", commit_message="-title-like-a-flag",
+        goal="--goal-like-a-flag", scope="-s", output="artifacts/run",
+        drive_root="~/drive",
+    ))
+
+    ran = json.loads(probe.read_text(encoding="utf-8"))
+    options = _forwarded_options(ran["argv"])
+    assert options["output"] == str(tmp_path / "artifacts" / "run")
+    # A quoted "~/..." keeps its home meaning: the parent expands it exactly
+    # the way the in-place lane's own resolution would have.
+    assert options["drive-root"] == os.path.abspath(os.path.expanduser("~/drive"))
+    for key in ("output", "drive-root"):
+        assert not Path(options[key]).is_relative_to(Path(ran["machinery_root"]))
+    # Values that look like flags survive as values.
+    assert options["goal"] == "--goal-like-a-flag"
+    assert options["scope"] == "-s"
+    assert ran["argv"][-2:] == ["--", "-title-like-a-flag"]
+
+
+def test_contributor_review_invoked_from_the_target_base_runs_in_place(
+    tmp_path, monkeypatch
+):
+    """No re-run when the executing tree already IS the target base."""
+    repo = _init_contributor_repo(tmp_path, monkeypatch)
+    probe = _probe_path(monkeypatch, tmp_path)
+    head_sha = _git(repo, "rev-parse", "HEAD").strip()
+    _git(repo, "checkout", "--detach", "base")
+
+    assert _run_on_trusted_base(SimpleNamespace(
+        base_ref="base", head_ref=head_sha, commit_message="",
+        goal="", scope="", output="", drive_root="",
+    )) is None
+    assert not probe.exists()
+
+
+def test_the_real_wrapper_hands_off_before_it_reviews_anything(tmp_path, monkeypatch):
+    """End-to-end pin of the main() wiring, not just the helper.
+
+    The REAL script is invoked as a process from a checkout that is not the
+    target base, exactly as a contributor runs it. Reaching any review work
+    without handing off first would leave the base-side probe unexecuted, so
+    deleting the main() hook fails here even while the helper stays perfect.
+    """
+    repo = _init_contributor_repo(tmp_path, monkeypatch)
+    probe = _probe_path(monkeypatch, tmp_path)
+    wrapper = Path(__file__).resolve().parent.parent / "scripts" / "run_external_review.py"
+    # The base commit keeps the probe; the proposal carries the real wrapper.
+    (repo / "scripts" / "run_external_review.py").write_text(
+        wrapper.read_text(encoding="utf-8"), encoding="utf-8"
+    )
+    _git(repo, "add", "-A")
+    _git(repo, "commit", "-m", "proposal adopts the real wrapper")
+    base_sha = _git(repo, "rev-parse", "base").strip()
+
+    proc = subprocess.run(
+        [
+            sys.executable, str(repo / "scripts" / "run_external_review.py"),
+            "--contributor", "--base-ref=base", "--head-ref=HEAD", "--", "PR title",
+        ],
+        cwd=str(repo), capture_output=True, text=True, timeout=300,
+        env={**os.environ, "REVIEW_PROBE_OUT": str(probe)},
+    )
+
+    assert probe.exists(), f"the base-side run never happened: {proc.stderr[-2000:]}"
+    ran = json.loads(probe.read_text(encoding="utf-8"))
+    assert ran["machinery_sha"] == base_sha
+    assert proc.returncode == 1  # the probe's exit code, passed through
+
+
+def test_contributor_review_refuses_a_dirty_authoring_worktree(tmp_path, monkeypatch):
+    """The uncommitted half of a proposal must not silently drop out.
+
+    The base-side run sees a freshly materialized (always clean) worktree, so
+    this is read in the authoring worktree before the re-run leaves it.
+    """
+    repo = _init_contributor_repo(tmp_path, monkeypatch)
+    probe = _probe_path(monkeypatch, tmp_path)
+    (repo / "uncommitted.txt").write_text("work in progress\n", encoding="utf-8")
+
+    with pytest.raises(RuntimeError, match="not clean"):
+        _run_on_trusted_base(SimpleNamespace(
+            base_ref="base", head_ref="HEAD", commit_message="",
+            goal="", scope="", output="", drive_root="",
+        ))
+    assert not probe.exists()
+
+
+def test_a_base_without_the_wrapper_fails_closed_not_in_place(tmp_path, monkeypatch):
+    """The non-portable path keeps the fail-closed maintainer-rerun refusal.
+
+    A target base whose tree carries no review wrapper cannot execute this
+    review; falling back to the proposal's own machinery would be exactly the
+    self-review the handoff exists to prevent, so the lane refuses with the
+    INCOMPLETE_MAINTAINER_TRUSTED_BASE_RERUN_REQUIRED vocabulary instead.
+    """
+    repo = _init_contributor_repo(tmp_path, monkeypatch)
+    probe = _probe_path(monkeypatch, tmp_path)
+    _git(repo, "rm", "-q", "scripts/run_external_review.py")
+    _git(repo, "commit", "-m", "strip the wrapper")
+    _git(repo, "branch", "-f", "base")
+    (repo / "a.txt").write_text("proposal on wrapperless base\n", encoding="utf-8")
+    _git(repo, "add", "a.txt")
+    _git(repo, "commit", "-m", "proposal")
+
+    import io, contextlib
+    err = io.StringIO()
+    with contextlib.redirect_stderr(err):
+        exit_code = _run_on_trusted_base(SimpleNamespace(
+            base_ref="base", head_ref="HEAD", commit_message="",
+            goal="", scope="", output="", drive_root="",
+        ))
+
+    assert exit_code == 3
+    assert not probe.exists()
+    # F2 close-out conformance (item 7b): the maintainer-facing marker itself
+    # is the contract - exit 3 alone could mean anything.
+    assert "INCOMPLETE_MAINTAINER_TRUSTED_BASE_RERUN_REQUIRED" in err.getvalue()
+
+
+def test_contributor_result_is_decided_by_the_exit_code_alone():
+    """The retired D31 classifier is not a gate anywhere in the outcome path.
+
+    A proposal rewriting the review machinery gets the same result vocabulary as
+    any other, because nothing but the review's exit code reaches this decision.
+    """
+    assert _contributor_result(0) == "READY_FOR_INTEGRATION"
+    assert _contributor_result(1) == "BLOCKED"
+    assert _contributor_result(3) == "INCOMPLETE"
 
 
 def test_contributor_policy_preserves_configured_routes(monkeypatch):
@@ -597,20 +862,19 @@ def test_exit_classification_separates_infra_from_genuine_blocks():
         assert _classify_exit({"status": "blocked", "block_reason": infra_reason}) == 3, infra_reason
 
 
-def test_contributor_outcome_fails_closed_on_receipt_or_trust_drift():
+def test_contributor_outcome_fails_closed_on_receipt_drift_only():
     exit_code, outcome = finalize_contributor_outcome(
-        snapshot={"review_substrate_changed": []}, outcome={"status": "passed"},
-        exit_code=0, mismatches=["provider_mismatch:triad:t1"],
+        outcome={"status": "passed"}, exit_code=0,
+        mismatches=["provider_mismatch:triad:t1"],
     )
     assert exit_code == 3
     assert outcome["block_reason"] == "execution_receipt_mismatch"
 
-    exit_code, outcome = finalize_contributor_outcome(
-        snapshot={"review_substrate_changed": ["scripts/run_external_review.py"]},
+    # Nothing about the proposal's contents downgrades a clean run any more: the
+    # machinery that produced it was the target base's either way.
+    assert finalize_contributor_outcome(
         outcome={"status": "passed"}, exit_code=0, mismatches=[],
-    )
-    assert exit_code == 3
-    assert outcome["block_reason"] == "trusted_base_rerun_required"
+    ) == (0, {"status": "passed"})
 
 
 def test_openrouter_pool_orders_hope_keys_last(monkeypatch, tmp_path):
@@ -732,6 +996,24 @@ def test_contributor_receipts_bind_session_and_api_execution(tmp_path):
         }]},
     )
 
+    unbound_receipts, unbound_mismatches, _ = _contributor_execution_receipts(
+        ctx, config, tmp_path
+    )
+    assert "session_custody_settlement_absent:triad:t1:run-1" in unbound_mismatches
+    assert unbound_receipts[0]["observed"]["settlement"] is None
+    assert unbound_receipts[1]["observed"]["route_kind"] == "api_chat"
+
+    from ouroboros import delegate_custody as custody
+
+    custody.record_started(tmp_path, custody.RunCustody(
+        run_id="run-1", task_id="review", project_id="review-project",
+        project_owned=True, ledger_root=str(tmp_path),
+    ))
+    custody.emit(tmp_path, custody.LEDGER_RECORDED, {"run_id": "run-1"})
+    custody.emit(tmp_path, custody.SETTLED, {"run_id": "run-1"})
+    custody.emit(tmp_path, custody.PROJECT_RETIRED, {"run_id": "run-1"})
+    custody._CUSTODY.clear()
+
     receipts, mismatches, transcripts = _contributor_execution_receipts(
         ctx, config, tmp_path
     )
@@ -744,7 +1026,8 @@ def test_contributor_receipts_bind_session_and_api_execution(tmp_path):
         "delegated_run_id": "run-1", "custody_durable": True,
         "settlement": {
             "settled": True, "ledger_recorded": True,
-            "project_retired": True,
+            "project_retired": True, "project_persistent": False,
+            "bound_at": "panel_complete_custody_replay",
         },
         "output_conformance": "passed", "verdict_method": "schema",
     }
@@ -867,9 +1150,18 @@ def test_contributor_receipts_require_settlement_but_keep_advisory_delta(tmp_pat
         _last_scope_raw_result={},
     )
 
+    from ouroboros import delegate_custody as custody
+
+    custody.record_started(tmp_path, custody.RunCustody(
+        run_id="run-1", task_id="review", project_id="review-project",
+        project_owned=True, ledger_root=str(tmp_path),
+    ))
+    custody.emit(tmp_path, custody.PROJECT_RETIRED, {"run_id": "run-1"})
+    custody._CUSTODY.clear()
+
     _, mismatches, _ = _contributor_execution_receipts(ctx, config, tmp_path)
 
-    assert "session_settlement_unproven:triad:t1:ledger_recorded" in mismatches
+    assert "session_settlement_unproven:triad:t1:settled,ledger_recorded" in mismatches
     assert not any(item.startswith("capability_delta:") for item in mismatches)
 
 

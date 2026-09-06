@@ -20,6 +20,7 @@ import os
 import platform
 import re
 import secrets
+import time
 import shutil
 import stat
 import subprocess
@@ -48,6 +49,7 @@ from platform_support import (
 
 CLOUDFLARED_VERSION = "2026.7.2"
 CLOUDFLARED_BUILD = "2026-07-15-13:30 UTC"
+DOWNLOAD_DEADLINE_SEC = 300  # whole-download bound (see _download_asset)
 MAX_ASSET_BYTES = 70 * 1024 * 1024
 MAX_LOG_BYTES = 64 * 1024
 _DOWNLOAD_HOSTS = frozenset({"github.com", "release-assets.githubusercontent.com"})
@@ -274,6 +276,11 @@ def _download_asset(spec: _AssetSpec, destination: Path) -> None:
     )
     digest = hashlib.sha256()
     total = 0
+    # The per-operation socket timeout bounds one stalled read, not a trickling
+    # server; the whole download is bounded too, so the private install lock
+    # (and the worker thread an async caller cannot cancel) is held at most
+    # DOWNLOAD_DEADLINE_SEC.
+    deadline = time.monotonic() + DOWNLOAD_DEADLINE_SEC
     try:
         with opener.open(request, timeout=30) as response, destination.open("xb") as output:
             _validate_download_url(response.geturl())
@@ -289,6 +296,10 @@ def _download_asset(spec: _AssetSpec, destination: Path) -> None:
                 total += len(chunk)
                 if total > MAX_ASSET_BYTES:
                     raise CloudflaredError("Cloudflared download exceeds the 70 MiB safety limit.")
+                if time.monotonic() > deadline:
+                    raise CloudflaredError(
+                        f"Cloudflared download exceeded the {DOWNLOAD_DEADLINE_SEC}s deadline."
+                    )
                 output.write(chunk)
                 digest.update(chunk)
             output.flush()
@@ -382,11 +393,40 @@ def _verify_binary(binary: Path, spec: _AssetSpec, home: Path) -> None:
     _verify_version(binary, home)
 
 
-def _replace_with_verified_download(spec: _AssetSpec, target: Path) -> None:
-    directory = target.parent
+@contextlib.contextmanager
+def _install_lock(lock_path: Path):
+    try:
+        lock_fd = acquire_file_lock(lock_path, timeout_sec=30.0)
+    except PlatformSupportError as exc:
+        raise CloudflaredError("Could not lock the private cloudflared installation.") from exc
+    try:
+        yield
+    finally:
+        release_file_lock(lock_fd)
+
+
+def _verified_install(target: Path, spec: _AssetSpec, check_home: Path) -> bool:
+    """True when the installed path already passes every check (call under the lock)."""
+    if not (target.exists() or path_is_link_or_reparse(target)):
+        return False
+    try:
+        _verify_binary(target, spec, check_home)
+    except CloudflaredError:
+        # Preserve the old path until a complete replacement passes every check.
+        return False
+    return True
+
+
+def _fetch_verified_candidate(spec: _AssetSpec, directory: Path, check_home: Path) -> Path:
+    """Download, extract and verify the pinned asset into a private candidate file.
+
+    Runs OUTSIDE the install lock on purpose: the network stages are bounded by
+    DOWNLOAD_DEADLINE_SEC, and holding the lock across them made every
+    concurrent installer wait out somebody else's download. The caller promotes
+    the returned path under the lock and unlinks it in every outcome.
+    """
     archive = directory / f".asset-{secrets.token_hex(16)}"
     candidate = directory / f".binary-{secrets.token_hex(16)}"
-    check_home = _safe_child_dir(directory, "version-check-home")
     try:
         if spec.kind == "tgz":
             _download_asset(spec, archive)
@@ -398,16 +438,14 @@ def _replace_with_verified_download(spec: _AssetSpec, target: Path) -> None:
         else:
             raise CloudflaredError("Pinned cloudflared asset kind is unsupported.")
         _verify_binary(candidate, spec, check_home)
-        os.replace(candidate, target)
-        try:
-            fsync_directory(directory)
-        except (OSError, PlatformSupportError) as exc:
-            raise CloudflaredError("Could not persist the verified cloudflared install.") from exc
+    except BaseException:
+        with contextlib.suppress(OSError):
+            candidate.unlink(missing_ok=True)
+        raise
     finally:
         with contextlib.suppress(OSError):
             archive.unlink(missing_ok=True)
-        with contextlib.suppress(OSError):
-            candidate.unlink(missing_ok=True)
+    return candidate
 
 
 def _ensure_cloudflared_sync(state_dir: Path) -> Path:
@@ -417,23 +455,28 @@ def _ensure_cloudflared_sync(state_dir: Path) -> Path:
     target = _installed_path(root, spec)
     check_home = _safe_child_dir(directory, "version-check-home")
     lock_path = directory / ".install.lock"
+    with _install_lock(lock_path):
+        if _verified_install(target, spec, check_home):
+            return target
+    # The lock is released across the download (see _fetch_verified_candidate);
+    # only the atomic promote below holds it.
+    candidate = _fetch_verified_candidate(spec, directory, check_home)
     try:
-        lock_fd = acquire_file_lock(lock_path, timeout_sec=30.0)
-    except PlatformSupportError as exc:
-        raise CloudflaredError("Could not lock the private cloudflared installation.") from exc
-    try:
-        if target.exists() or path_is_link_or_reparse(target):
-            try:
-                _verify_binary(target, spec, check_home)
+        with _install_lock(lock_path):
+            # A concurrent installer may have promoted its own verified copy in
+            # the meantime; a verified install is never replaced.
+            if _verified_install(target, spec, check_home):
                 return target
-            except CloudflaredError:
-                # Preserve the old path until a complete replacement passes every check.
-                pass
-        _replace_with_verified_download(spec, target)
-        _verify_binary(target, spec, check_home)
-        return target
+            os.replace(candidate, target)
+            try:
+                fsync_directory(directory)
+            except (OSError, PlatformSupportError) as exc:
+                raise CloudflaredError("Could not persist the verified cloudflared install.") from exc
+            _verify_binary(target, spec, check_home)
+            return target
     finally:
-        release_file_lock(lock_fd)
+        with contextlib.suppress(OSError):
+            candidate.unlink(missing_ok=True)
 
 
 async def ensure_cloudflared(state_dir: Path) -> Path:

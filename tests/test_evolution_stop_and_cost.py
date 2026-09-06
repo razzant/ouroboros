@@ -60,7 +60,7 @@ def test_reconstruct_task_cost_never_fabricates_zero_when_ledger_unavailable(
     assert fields["cost_accounting_status"] == "unavailable"
     assert fields["cost_final"] is False
     assert fields["cost_accounting_error"] == "ledger_unavailable"
-    assert fields["cost_usd"] is None
+    assert fields["accounted_upper_bound_usd"] is None
     assert fields["total_rounds"] is None
     assert fields["ledger_integrity_degraded"] is True
     with pytest.raises(accounting.UsageAccountingError):
@@ -140,7 +140,7 @@ def _drive_hard_timeout(tmp_path, monkeypatch, *, evolution_enabled):
     import ouroboros.tools.services as services_mod
 
     state.init(tmp_path)
-    q.init(tmp_path, 600, 1800)
+    q.init(tmp_path)
     campaign = evolution_lifecycle.start_evolution_campaign("Improve", source="test")
     state.update_state(lambda live: live.update(
         owner_chat_id=7,
@@ -249,11 +249,11 @@ def test_hard_timeout_evolution_stopped_no_requeue_records_cost(tmp_path, monkey
     assert enqueued == []
     # Terminal status records reconstructed cost/rounds, not zeros.
     assert written.get("status") == "failed"
-    assert round(float(written.get("cost_usd") or 0), 6) == 1.5
+    assert round(float(written.get("accounted_upper_bound_usd") or 0), 6) == 1.5
     assert int(written.get("total_rounds") or 0) == 3
     # The terminal task_done carries the reconstructed cost for the campaign tally.
     done = [e for e in emitted if e.get("type") == "task_done"]
-    assert done and round(float(done[0].get("cost_usd") or 0), 6) == 1.5
+    assert done and round(float(done[0].get("accounted_upper_bound_usd") or 0), 6) == 1.5
     assert int(done[0].get("total_rounds") or 0) == 3
 
 
@@ -266,7 +266,7 @@ def test_handle_task_done_reconstructs_cost_from_physical_ledger(tmp_path):
     from ouroboros.task_results import STATUS_CANCELLED, write_task_result
 
     supervisor_state.init(tmp_path)
-    queue.init(tmp_path, 600, 1800)
+    queue.init(tmp_path)
     campaign = queue.start_evolution_campaign("Improve", source="test")
     supervisor_state.update_state(lambda live: live.update(
         owner_chat_id=1,
@@ -312,7 +312,7 @@ def test_handle_task_done_reconstructs_cost_from_physical_ledger(tmp_path):
 
     # The broadcast task_done carries the reconstructed cost, not the zeroed event value.
     done = [e for e in broadcast if e.get("type") == "task_done"]
-    assert done and float(done[0].get("cost_usd") or 0) == 2.5
+    assert done and float(done[0].get("accounted_upper_bound_usd") or 0) == 2.5
     assert int(done[0].get("total_rounds") or 0) == 1
     # Reconstructed cost/rounds are preserved, but a cancelled task is still an
     # axis-level failure. Cost no longer proves evolution success.
@@ -329,4 +329,4 @@ def test_hard_timeout_evolution_enabled_requeues(tmp_path, monkeypatch):
     # A retry keeps the live card active, so no terminal task_done is emitted.
     assert [e for e in emitted if e.get("type") == "task_done"] == []
     # The interrupted rollup still records reconstructed cost (not zeros).
-    assert round(float(written.get("cost_usd") or 0), 6) == 1.5
+    assert round(float(written.get("accounted_upper_bound_usd") or 0), 6) == 1.5

@@ -39,7 +39,7 @@ export const GENERIC_HARNESS_MARK = Object.freeze({
 });
 
 const GENERIC_LABELS = Object.freeze({ agy: 'Antigravity' });
-const API_IDS = new Set(['api', 'api_chat', 'api_model']);
+const API_IDS = new Set(['api', 'api_chat', 'api_model', 'native']);
 
 /** Return presentation facts only; callers retain status and evidence ownership. */
 export function harnessPresentation(harnessId, { label = '', channel = '' } = {}) {

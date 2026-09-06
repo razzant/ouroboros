@@ -89,7 +89,6 @@ _ADVISORY_ITEMS = json.dumps([
 
 def test_native_route_without_model_credentials_errors_typed(tmp_path, monkeypatch):
     _clear_provider_keys(monkeypatch)
-    monkeypatch.delenv(advisory.ADVISORY_REVIEW_ROUTE_ENV, raising=False)
     monkeypatch.delenv("OUROBOROS_REVIEWER_SLOTS", raising=False)
     ctx = _ctx(tmp_path)
     items, raw, model, chars = advisory._run_claude_advisory(
@@ -103,7 +102,14 @@ def test_delegated_route_runs_without_the_key(tmp_path, monkeypatch, fake_route)
     """The whole free-route walk: no key anywhere, route=agent_session, and the
     advisory runs as a delegated session whose checklist comes back parsed."""
     monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False)
-    monkeypatch.setenv(advisory.ADVISORY_REVIEW_ROUTE_ENV, "agent_session")
+    # ABI-10: the delegated advisory is configured through the structured slots
+    # (target = the fixture's fake harness route).
+    monkeypatch.setenv("OUROBOROS_REVIEWER_SLOTS", json.dumps({
+        "triad": [{"slot_id": "t1", "route": {"kind": "api_chat", "target_id": "openai/x"}}],
+        "scope": [{"slot_id": "s1", "route": {"kind": "api_chat", "target_id": "openai/y"}}],
+        "advisory": {"enabled": True,
+                     "route": {"kind": "agent_session", "target_id": "fake-review=fake-small"}},
+    }))
     # No catalog `json_schema_output` is set here: `CatalogHarness` carries NO
     # transport flags (agent-capabilities.ts), the reader takes the flag off the
     # /v2/harnesses manifest row, and the invented catalog key was a dead no-op that
@@ -131,7 +137,6 @@ def test_delegated_advisory_passes_expired_owner_deadline_before_dispatch(
     than only testing ``SessionInvocation`` in isolation.
     """
     monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False)
-    monkeypatch.setenv(advisory.ADVISORY_REVIEW_ROUTE_ENV, "agent_session")
     ctx = _ctx(tmp_path)
     ctx.task_metadata = {"deadline_at": "2000-01-01T00:00:00Z"}
 
@@ -151,7 +156,6 @@ def test_delegated_advisory_narrows_poll_window_to_owner_deadline(
     from datetime import datetime, timedelta, timezone
 
     monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False)
-    monkeypatch.setenv(advisory.ADVISORY_REVIEW_ROUTE_ENV, "agent_session")
     monkeypatch.setattr("ouroboros.config.get_finalization_grace_sec", lambda: 0)
     captured = {}
 
@@ -186,7 +190,6 @@ def test_delegated_advisory_does_not_start_inside_finalization_reserve(
     from datetime import datetime, timedelta, timezone
 
     monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False)
-    monkeypatch.setenv(advisory.ADVISORY_REVIEW_ROUTE_ENV, "agent_session")
     monkeypatch.setenv("OUROBOROS_FINALIZATION_GRACE_SEC", "120")
     ctx = _ctx(tmp_path)
     ctx.task_metadata = {
@@ -227,7 +230,12 @@ def test_structured_session_without_effort_preserves_the_route_default(
 
 
 def test_unknown_route_token_is_a_loud_error_not_a_transport_pick(tmp_path, monkeypatch):
-    monkeypatch.setenv(advisory.ADVISORY_REVIEW_ROUTE_ENV, "codex")
+    # ABI-10: an unknown advisory route kind arrives via the structured value.
+    monkeypatch.setenv("OUROBOROS_REVIEWER_SLOTS", json.dumps({
+        "triad": [{"slot_id": "t1", "route": {"kind": "api_chat", "target_id": "openai/x"}}],
+        "scope": [{"slot_id": "s1", "route": {"kind": "api_chat", "target_id": "openai/y"}}],
+        "advisory": {"enabled": True, "route": {"kind": "codex", "target_id": "x"}},
+    }))
     ctx = _ctx(tmp_path)
     items, raw, _model, _chars = advisory._run_claude_advisory(
         ctx.repo_dir, "msg", ctx, options={"include_repo_diff": False},
@@ -268,7 +276,6 @@ def test_missing_credentials_auto_bypass_only_on_the_native_route(tmp_path, monk
     _clear_provider_keys(monkeypatch)
 
     # Native route: credential-less model auto-bypasses, loudly and audited.
-    monkeypatch.delenv(advisory.ADVISORY_REVIEW_ROUTE_ENV, raising=False)
     monkeypatch.delenv("OUROBOROS_REVIEWER_SLOTS", raising=False)
     payload = json.loads(advisory._handle_advisory_pre_review(
         ctx, commit_message="m", skip_tests=True,
@@ -290,7 +297,12 @@ def test_missing_credentials_auto_bypass_only_on_the_native_route(tmp_path, monk
     monkeypatch.setattr(advisory, "_run_claude_advisory", _capture)
     monkeypatch.setattr(advisory, "_advisory_pre_sdk_gate",
                         lambda **_kwargs: ([], "README.md", None))
-    monkeypatch.setenv(advisory.ADVISORY_REVIEW_ROUTE_ENV, "agent_session")
+    monkeypatch.setenv("OUROBOROS_REVIEWER_SLOTS", json.dumps({
+        "triad": [{"slot_id": "t1", "route": {"kind": "api_chat", "target_id": "openai/x"}}],
+        "scope": [{"slot_id": "s1", "route": {"kind": "api_chat", "target_id": "openai/y"}}],
+        "advisory": {"enabled": True,
+                     "route": {"kind": "agent_session", "target_id": "claude"}},
+    }))
     payload = json.loads(advisory._handle_advisory_pre_review(
         ctx, commit_message="m", skip_tests=True,
     ))
@@ -312,7 +324,12 @@ def test_explicit_skip_still_bypasses_on_the_delegated_route(tmp_path, monkeypat
     drive = tmp_path / "data"
     drive.mkdir(exist_ok=True)
     ctx = ToolContext(repo_dir=repo, drive_root=drive)
-    monkeypatch.setenv(advisory.ADVISORY_REVIEW_ROUTE_ENV, "agent_session")
+    monkeypatch.setenv("OUROBOROS_REVIEWER_SLOTS", json.dumps({
+        "triad": [{"slot_id": "t1", "route": {"kind": "api_chat", "target_id": "openai/x"}}],
+        "scope": [{"slot_id": "s1", "route": {"kind": "api_chat", "target_id": "openai/y"}}],
+        "advisory": {"enabled": True,
+                     "route": {"kind": "agent_session", "target_id": "claude"}},
+    }))
     payload = json.loads(advisory._handle_advisory_pre_review(
         ctx, commit_message="m", skip_advisory_review=True, skip_tests=True,
     ))
@@ -346,7 +363,6 @@ def _clear_session_route_envs(monkeypatch):
 
 def test_disabled_slot_has_a_stable_reason_and_boolean_projection(monkeypatch):
     monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-ant-test-sentinel")
-    monkeypatch.delenv(advisory.ADVISORY_REVIEW_ROUTE_ENV, raising=False)
     monkeypatch.setenv("OUROBOROS_REVIEWER_SLOTS", json.dumps({
         "triad": [{"slot_id": "t1", "route": {"kind": "api_chat", "target_id": "openai/x"}}],
         "scope": [{"slot_id": "s1", "route": {"kind": "api_chat", "target_id": "openai/y"}}],
@@ -359,7 +375,6 @@ def test_disabled_slot_has_a_stable_reason_and_boolean_projection(monkeypatch):
 def test_credential_less_native_slot_has_a_stable_reason_and_boolean_projection(monkeypatch):
     _clear_provider_keys(monkeypatch)
     monkeypatch.delenv("OUROBOROS_REVIEWER_SLOTS", raising=False)
-    monkeypatch.delenv(advisory.ADVISORY_REVIEW_ROUTE_ENV, raising=False)
     assert advisory.advisory_gate_unavailability_reason() == "advisory_model_credentials_missing"
     assert advisory.advisory_gate_unavailable() is True
 
@@ -371,9 +386,15 @@ def test_unroutable_session_slot_reports_the_gate_unavailable(monkeypatch):
     ``ReviewRouteUnavailable`` — so the gate must report UNAVAILABLE. The key
     is present to prove the decision is route-driven, not key-driven."""
     monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-ant-test-sentinel")
-    monkeypatch.delenv("OUROBOROS_REVIEWER_SLOTS", raising=False)
-    monkeypatch.setenv(advisory.ADVISORY_REVIEW_ROUTE_ENV, "agent_session")
     _clear_session_route_envs(monkeypatch)
+    # ABI-10: the parser refuses an enabled empty-target session advisory at
+    # save AND load, so the unroutable state is synthesized to keep the
+    # defensive gate branch covered.
+    from ouroboros import reviewer_slot_config as slot_cfg
+
+    _unroutable = slot_cfg.AdvisorySlotConfig(
+        enabled=True, kind="agent_session", target_id="", effort="")
+    monkeypatch.setattr(slot_cfg, "advisory_slot_config", lambda: _unroutable)
     assert advisory.advisory_gate_unavailability_reason() == "agent_session_route_unavailable"
     assert advisory.advisory_gate_unavailable() is True
 
@@ -382,10 +403,15 @@ def test_session_slot_with_shared_route_reports_the_gate_available(monkeypatch):
     """The shared subagent route is the delegated advisory's documented
     fallback target — with it set, the keyless session slot is AVAILABLE."""
     monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False)
-    monkeypatch.delenv("OUROBOROS_REVIEWER_SLOTS", raising=False)
-    monkeypatch.setenv(advisory.ADVISORY_REVIEW_ROUTE_ENV, "agent_session")
     _clear_session_route_envs(monkeypatch)
     monkeypatch.setenv("OUROBOROS_SUBAGENT_HARNESS", "claude")
+    # ABI-10: a config-reachable session advisory always carries its own
+    # target; the shared-route fallback line is kept covered synthetically.
+    from ouroboros import reviewer_slot_config as slot_cfg
+
+    _shared = slot_cfg.AdvisorySlotConfig(
+        enabled=True, kind="agent_session", target_id="", effort="")
+    monkeypatch.setattr(slot_cfg, "advisory_slot_config", lambda: _shared)
     assert advisory.advisory_gate_unavailability_reason() is None
     assert advisory.advisory_gate_unavailable() is False
 
@@ -397,7 +423,6 @@ def test_structured_empty_session_slot_never_uses_the_shared_route(monkeypatch):
     it must not silently replace an incomplete structured owner setting.
     """
     monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False)
-    monkeypatch.delenv(advisory.ADVISORY_REVIEW_ROUTE_ENV, raising=False)
     _clear_session_route_envs(monkeypatch)
     monkeypatch.setenv("OUROBOROS_REVIEW_SESSION_ROUTE", "codex=gpt-5.6-sol:high")
     monkeypatch.setenv("OUROBOROS_REVIEWER_SLOTS", json.dumps({
@@ -414,7 +439,6 @@ def test_session_slot_with_its_own_target_reports_the_gate_available(monkeypatch
     """A structured advisory row carrying its own parseable session target
     needs no shared route at all."""
     monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False)
-    monkeypatch.delenv(advisory.ADVISORY_REVIEW_ROUTE_ENV, raising=False)
     _clear_session_route_envs(monkeypatch)
     monkeypatch.setenv("OUROBOROS_REVIEWER_SLOTS", json.dumps({
         "triad": [{"slot_id": "t1", "route": {"kind": "api_chat", "target_id": "openai/x"}}],
@@ -427,8 +451,8 @@ def test_session_slot_with_its_own_target_reports_the_gate_available(monkeypatch
 
 
 def test_malformed_advisory_configuration_keeps_value_error_authority(monkeypatch):
-    monkeypatch.delenv("OUROBOROS_REVIEWER_SLOTS", raising=False)
-    monkeypatch.setenv(advisory.ADVISORY_REVIEW_ROUTE_ENV, "cursor")
+    # ABI-10: malformed configuration arrives via the structured value.
+    monkeypatch.setenv("OUROBOROS_REVIEWER_SLOTS", "{not-valid-json")
     with pytest.raises(ValueError):
         advisory.advisory_gate_unavailability_reason()
     with pytest.raises(ValueError):
@@ -465,7 +489,7 @@ def test_native_route_applies_the_advisory_rows_model_and_effort(tmp_path, monke
     monkeypatch.setenv("OUROBOROS_REVIEWER_SLOTS", _SLOTS_API_ADVISORY)
     captured = {}
 
-    def _capture_native(prompt, repo_dir, ctx_, slot, model):
+    def _capture_native(prompt, repo_dir, ctx_, slot, model, **_):
 
         captured.update({"model": model, "effort": slot.effort})
         return SimpleNamespace(
@@ -548,7 +572,7 @@ def test_native_route_empty_target_falls_back_to_the_routed_default(tmp_path, mo
     monkeypatch.setenv("OUROBOROS_REVIEWER_SLOTS", json.dumps(slots))
     captured = {}
 
-    def _capture_native(prompt, repo_dir, ctx_, slot, model):
+    def _capture_native(prompt, repo_dir, ctx_, slot, model, **_):
 
         captured.update({"model": model, "effort": slot.effort or "low"})
         return SimpleNamespace(
@@ -584,12 +608,20 @@ def test_advisory_session_target_still_rejects_double_colon():
 
 
 def test_advisory_route_reader_vocabulary(monkeypatch):
-    monkeypatch.delenv(advisory.ADVISORY_REVIEW_ROUTE_ENV, raising=False)
     monkeypatch.delenv("OUROBOROS_REVIEWER_SLOTS", raising=False)
+    # Default panel advisory is the routed native episode.
     assert advisory.advisory_review_route() == "api_chat"
-    monkeypatch.setenv(advisory.ADVISORY_REVIEW_ROUTE_ENV, "agent_session")
+    # ABI-10: route selection arrives via the structured slots only — the
+    # retired route env is ignored even when set.
+    assert advisory.advisory_review_route() == "api_chat"
+    monkeypatch.setenv("OUROBOROS_REVIEWER_SLOTS", json.dumps({
+        "triad": [{"slot_id": "t1", "route": {"kind": "api_chat", "target_id": "openai/x"}}],
+        "scope": [{"slot_id": "s1", "route": {"kind": "api_chat", "target_id": "openai/y"}}],
+        "advisory": {"enabled": True,
+                     "route": {"kind": "agent_session", "target_id": "claude"}},
+    }))
     assert advisory.advisory_review_route() == "agent_session"
-    monkeypatch.setenv(advisory.ADVISORY_REVIEW_ROUTE_ENV, "cursor")
+    monkeypatch.setenv("OUROBOROS_REVIEWER_SLOTS", "{not-valid-json")
     with pytest.raises(ValueError):
         advisory.advisory_review_route()
 

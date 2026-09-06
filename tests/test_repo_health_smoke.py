@@ -268,11 +268,26 @@ def test_grandfather_helpers_preserve_a_real_leading_repo_component(
     assert review.function_is_grandfathered("repo/a.py", "run")
 
 
-def test_transition_rejects_function_swap_even_at_same_cardinality() -> None:
-    previous = _manifest(function_debt=frozenset({("a.py", "Service.run")}))
-    current = _manifest(function_debt=frozenset({("b.py", "Service.run")}))
+def test_transition_allows_a_same_qualname_relocation_but_not_a_swap() -> None:
+    """Moving a debt function to another module keeps its debt row; it does not mint one.
 
-    assert validate_manifest_transition(current, previous) == ["new function debt above 300 lines: b.py:Service.run"]
+    The owner relaxed the earlier "no swap at equal cardinality" rule for exactly one
+    shape — the same lexical qualname leaving one path and appearing at one other path
+    in the same transition — so extractions can carry an oversized function into its
+    leaf. Everything else at equal cardinality is still new debt.
+    """
+    previous = _manifest(function_debt=frozenset({("a.py", "Service.run")}))
+    assert validate_manifest_transition(_manifest(function_debt=frozenset({("b.py", "Service.run")})), previous) == []
+    assert validate_manifest_transition(_manifest(function_debt=frozenset({("b.py", "Other.run")})), previous) == [
+        "new function debt above 300 lines: b.py:Other.run"
+    ]
+    assert validate_manifest_transition(
+        _manifest(function_debt=frozenset({("a.py", "Service.run"), ("b.py", "Service.run")})), previous
+    ) == ["new function debt above 300 lines: b.py:Service.run"]
+    two_sources = _manifest(function_debt=frozenset({("a.py", "Service.run"), ("c.py", "Service.run")}))
+    assert validate_manifest_transition(_manifest(function_debt=frozenset({("b.py", "Service.run")})), two_sources) == [
+        "new function debt above 300 lines: b.py:Service.run"
+    ]
 
 
 @pytest.mark.parametrize("rationale", [None, "", "   "])

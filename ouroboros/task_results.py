@@ -9,7 +9,11 @@ import pathlib
 import re
 from typing import Any, Callable, Dict, List, Optional
 
-from ouroboros.cost_projection import COST_ALIAS_PAIRS, COST_OPENNESS_FIELDS
+from ouroboros.cost_projection import (
+    COST_ALIAS_PAIRS,
+    COST_OPENNESS_FIELDS,
+    normalize_task_result_cost_planes,
+)
 from ouroboros.utils import read_json_dict, update_json_locked, utc_now_iso
 
 log = logging.getLogger(__name__)
@@ -22,6 +26,17 @@ STATUS_REJECTED_DUPLICATE = "rejected_duplicate"
 STATUS_FAILED = "failed"
 STATUS_INTERRUPTED = "interrupted"
 STATUS_CANCELLED = "cancelled"
+
+# ABI 7.0 (Q8=B) schema admission lives in ouroboros/task_result_schema.py
+# (module-size split); re-exported: every caller and test reaches the stamp,
+# the classifier and the quarantine through this module (F401 intended).
+from ouroboros.task_result_schema import (  # noqa: F401
+    QUARANTINED_SCHEMA_REASON, TASK_RESULT_QUARANTINE_DIR, TASK_RESULT_SCHEMA_VERSION,
+    emit_quarantine_event as _emit_quarantine_event,
+    quarantine_task_result as _quarantine_task_result,
+    require_writable_task_result_schema, stamp_task_result_schema,
+    task_result_schema_refusal,
+)
 
 
 def review_binding_hash(
@@ -42,7 +57,7 @@ def review_binding_hash(
 
 
 def effective_task_acceptance_review_cycles(
-    profile: Dict[str, Any], *, has_deadline: bool = True,
+    profile: Dict[str, Any], *,
     required_blocking: bool = False,
 ) -> Optional[int]:
     """Project paid panels from the existing improvement-pass semantics."""
@@ -51,7 +66,6 @@ def effective_task_acceptance_review_cycles(
 
     passes = effective_max_improvement_passes(
         profile,
-        has_deadline=has_deadline,
         required_blocking=required_blocking,
     )
     return None if passes is None else max(1, int(passes) + 1)
@@ -72,7 +86,6 @@ def _root_task_acceptance_review_cap(
             "TASK_ACCEPTANCE_REVIEW_STATE_UNKNOWN: root cap authority is absent"
         )
 
-    from ouroboros import config
     from ouroboros.contracts.task_contract import (
         VALID_IMPROVEMENT_POLICIES,
         normalize_budget_profile,
@@ -102,14 +115,27 @@ def _root_task_acceptance_review_cap(
     if deadline_at.strip() and deadline is None:
         raise ValueError("TASK_ACCEPTANCE_REVIEW_STATE_UNKNOWN: root deadline is malformed")
     profile = normalize_budget_profile(raw_profile)
-    required_blocking = bool(
-        config.get_task_review_mode() == "required"
-        and config.get_review_enforcement() == "blocking"
-    )
     return effective_task_acceptance_review_cycles(
         profile,
-        has_deadline=deadline is not None,
-        required_blocking=required_blocking,
+        required_blocking=task_acceptance_required_blocking(),
+    )
+
+
+def task_acceptance_required_blocking() -> bool:
+    """The Required+Blocking acceptance lane, derived ONCE for every reader.
+
+    Byte-for-byte the real gate's predicate (``loop_acceptance``:
+    ``ctx.mode == "required" and get_review_enforcement() == "blocking"``) —
+    ``ctx.mode`` is ``config.get_task_review_mode()``, captured by
+    ``loop._run_task_acceptance_review_once`` at the acceptance launch, and
+    ``loop.get_review_enforcement`` IS ``config.get_review_enforcement``. The
+    cap reader and the capacity projection share this one derivation so no
+    second spelling can drift from the gate it projects."""
+    from ouroboros import config
+
+    return bool(
+        config.get_task_review_mode() == "required"
+        and config.get_review_enforcement() == "blocking"
     )
 
 
@@ -140,9 +166,17 @@ def project_task_acceptance_review_capacity(
     Descendants may observe but never initialize root authority. A missing or
     malformed canonical result is UNKNOWN for them; a live root may begin with
     the known empty state. The atomic claim remains dispatch authority.
+
+    WALLET AND CANCELLATION ONLY (owner R52). The TIME axis is not projected:
+    the launch rule (``task_pacing.review_launch_allowed``) is evaluated once,
+    at loop admission (owner R55; the paid claim inside the dispatch stamp
+    checks cancellation and the wallet only), and a descendant reading this
+    reads its own deadline window from the adjacent coordination ``time``
+    fact. So no budget profile, no snapshot and no duration prediction is read
+    here, and the answer cannot drift from the rule it used to imitate.
     """
 
-    from ouroboros import config, task_pacing
+    from ouroboros import config
 
     metadata = getattr(ctx, "task_metadata", {})
     metadata = metadata if isinstance(metadata, dict) else {}
@@ -224,18 +258,7 @@ def project_task_acceptance_review_capacity(
                 "state": "unknown",
                 "reason": f"cancellation_state_unknown:{type(exc).__name__}",
             }
-        budget = task_pacing.build_budget_snapshot(
-            ctx, profile=task_pacing.resolve_budget_profile(ctx),
-        )
-        launch_ok, launch_reason = task_pacing.review_launch_allowed(
-            budget,
-            estimated_sec=task_pacing.acceptance_review_estimate_sec(
-                ctx, passes_done=claimed,
-            ),
-        )
-        if not launch_ok:
-            projection.update({"state": "unavailable", "reason": launch_reason})
-        elif remaining == 0:
+        if remaining == 0:
             projection.update({
                 "state": "unavailable", "reason": "review_cycles_exhausted",
             })
@@ -257,16 +280,17 @@ STATUS_CANCEL_REQUESTED = "cancel_requested"
 # replay, task_summary chat rows, and the persisted result written here (v6.82
 # P1) — one home, so no consumer grows a divergent literal list.
 # DERIVED from the cost SSOT (``ouroboros/cost_projection.py``) rather than
-# re-typed: both alias spellings (C2, owner 10=B — the additive HONEST names for
-# what ``cost_usd[_with_children]`` always were, plus the deprecated aliases that
-# stay outbound until a separately approved ABI break) and EVERY accounting
-# openness/integrity marker. Hand-maintained copies are how a marker reaches one
-# surface and not the next: ``non_final_rows`` rides with ``cost_final`` because
-# it is that flag's DISCLOSED CAUSE (v6.89.0 panel D2), and
-# ``ledger_integrity_degraded`` was produced by the authority but named in no
-# list at all, so it never reached any surface.
+# re-typed: the HONEST names only (ABI 7.0/ABI-3: the retired
+# ``cost_usd[_with_children]`` aliases are read-tolerance, never carried
+# forward — a consumer copying by this list from a possibly-legacy source must
+# resolve the pair with ``carry_cost_meta`` instead of a key loop) and EVERY
+# accounting openness/integrity marker. Hand-maintained copies are how a
+# marker reaches one surface and not the next: ``non_final_rows`` rides with
+# ``cost_final`` because it is that flag's DISCLOSED CAUSE (v6.89.0 panel D2),
+# and ``ledger_integrity_degraded`` was produced by the authority but named in
+# no list at all, so it never reached any surface.
 TASK_COST_META_FIELDS = tuple(dict.fromkeys(
-    [name for pair in COST_ALIAS_PAIRS for name in pair] + list(COST_OPENNESS_FIELDS)
+    [new for new, _old in COST_ALIAS_PAIRS] + list(COST_OPENNESS_FIELDS)
 ))
 
 # Monotonic lifecycle ordering. A write that would move a task *backwards* past
@@ -428,6 +452,7 @@ def _update_task_acceptance_review_state(
     def _merge(existing: Dict[str, Any]) -> Optional[Dict[str, Any]]:
         if not allow_create and not existing:
             raise ValueError("TASK_ACCEPTANCE_REVIEW_STATE_UNKNOWN: root result is absent")
+        require_writable_task_result_schema(existing, path)
         if existing and str(existing.get("task_id") or "") != str(root_task_id):
             raise ValueError("TASK_ACCEPTANCE_REVIEW_STATE_INVALID: root identity mismatch")
         stored_root_id = str(existing.get("root_task_id") or "")
@@ -449,14 +474,14 @@ def _update_task_acceptance_review_state(
             candidate, root_task_id,
         )
         now = utc_now_iso()
-        return {
+        return stamp_task_result_schema({
             **existing,
             TASK_ACCEPTANCE_REVIEW_STATE_KEY: updated,
             "task_id": str(root_task_id),
             "status": str(existing.get("status") or STATUS_RUNNING),
             "ts": str(existing.get("ts") or now),
             "updated_at": now,
-        }
+        })
 
     try:
         updated = update_json_locked(
@@ -719,6 +744,12 @@ def load_task_result(
     Observational callers retain the historical fail-soft default.  Admission
     callers pass ``strict=True`` so an existing unreadable row cannot be
     reinterpreted as an unused task identity.
+
+    Schema admission (ABI 7.0, Q8=B): an inadmissible stored row — see
+    ``task_result_schema_refusal`` — is QUARANTINED by the fail-soft path
+    (moved under ``task_results/quarantine/``, one batched durable event) and
+    the read reports no result; the strict path raises WITHOUT moving, so an
+    authority probe never mutates storage.
     """
     try:
         tid = validate_task_id(task_id)
@@ -728,9 +759,26 @@ def load_task_result(
             raise
         return None
     data = read_json_dict(path)
-    if strict and path.exists() and (
-        not data
-        or str(data.get("task_id") or "") != tid
+    if data is None and not path.is_file():
+        return None  # plainly absent — nothing stored, nothing to admit
+    refusal = task_result_schema_refusal(data)
+    if refusal:
+        if strict:
+            if refusal == "malformed":
+                # Pre-ABI-2 strict contract for unreadable rows, kept stable.
+                raise ValueError(f"task result authority is unreadable or invalid: {path}")
+            raise ValueError(
+                f"task result schema is inadmissible ({QUARANTINED_SCHEMA_REASON}: {refusal}): {path}"
+            )
+        outcome = _quarantine_task_result(path, refusal)
+        if outcome == "kept_admissible":
+            data = read_json_dict(path)
+            return data if not task_result_schema_refusal(data) else None
+        if outcome == "moved":
+            _emit_quarantine_event(drive_root, [{"task_id": tid, "reason": refusal}])
+        return None
+    if strict and (
+        str(data.get("task_id") or "") != tid
         or not isinstance(data.get("status"), str)
         or not str(data.get("status") or "").strip()
     ):
@@ -749,24 +797,83 @@ def list_task_results(
     Most observational callers remain tolerant of a malformed historical row.
     Authority reducers such as direct-child admission pass ``strict=True`` so
     an unreadable row cannot be silently reinterpreted as an absent child.
+
+    Schema admission (ABI 7.0, Q8=B): the fail-soft scan QUARANTINES every
+    inadmissible row it meets and reports the whole sweep as ONE durable
+    event; the strict scan raises WITHOUT moving anything. Rows already under
+    ``task_results/quarantine/`` are outside this scan (non-recursive glob).
     """
     wanted = {str(item) for item in list(statuses or []) if str(item).strip()}
     results: List[Dict[str, Any]] = []
+    quarantined: List[Dict[str, str]] = []
     for path in sorted(task_results_dir(drive_root, create=False).glob("*.json")):
         data = read_json_dict(path)
+        if data is None and not path.is_file():
+            continue  # vanished mid-scan — nothing to admit or quarantine
+        refusal = task_result_schema_refusal(data)
+        if refusal:
+            if strict:
+                if refusal == "malformed":
+                    # Pre-ABI-2 strict contract for unreadable rows, kept stable.
+                    raise ValueError(f"task result is unreadable or invalid: {path}")
+                raise ValueError(
+                    f"task result schema is inadmissible ({QUARANTINED_SCHEMA_REASON}: {refusal}): {path}"
+                )
+            outcome = _quarantine_task_result(path, refusal)
+            if outcome == "kept_admissible":
+                data = read_json_dict(path)
+                if task_result_schema_refusal(data):
+                    continue
+            else:
+                if outcome == "moved":
+                    quarantined.append({"task_id": path.stem, "reason": refusal})
+                continue
         if strict and (
-            not data
-            or str(data.get("task_id") or "") != path.stem
+            str(data.get("task_id") or "") != path.stem
             or not isinstance(data.get("status"), str)
             or not str(data.get("status") or "").strip()
         ):
             raise ValueError(f"task result is unreadable or invalid: {path}")
-        if data is None:
-            continue
         if wanted and str(data.get("status") or "") not in wanted:
             continue
         results.append(data)
+    _emit_quarantine_event(drive_root, quarantined)
     return results
+
+
+def merge_review_projection(previous: Any, incoming: Any) -> Any:
+    """Keep newer host publication facts when a delayed task snapshot arrives.
+
+    This is read-side custody, never review authority. Attempt identity comes
+    from the task; publication_revision only orders snapshots of the SAME
+    panel. Supersession cannot be reversed by a stale or replayed projection.
+    """
+    if not isinstance(previous, dict) or not isinstance(incoming, dict):
+        return incoming
+    old_rows, new_rows = previous.get("panels"), incoming.get("panels")
+    if not isinstance(old_rows, list) or not isinstance(new_rows, list):
+        return incoming
+    if not any(isinstance(row, dict) and row.get("publication_revision") for row in old_rows + new_rows):
+        return incoming  # unchanged legacy merge semantics
+    def rank(value: Dict[str, Any]) -> tuple:
+        return (bool(value.get("superseded")),
+                value.get("publication_revision") if type(value.get("publication_revision")) is int else 0)
+
+    merged: Dict[tuple, Dict[str, Any]] = {}
+    for index, row in enumerate(old_rows + new_rows):
+        if not isinstance(row, dict):
+            continue
+        key = (str(row.get("surface") or ""), str(row.get("task_attempt") or ""),
+               str(row.get("panel_id") or f"legacy:{index}"), row.get("panel_index"))
+        prior = merged.get(key)
+        if prior is None or rank(row) > rank(prior):
+            merged[key] = copy.deepcopy(row)
+    rows = list(merged.values())
+    rows.sort(key=lambda row: (
+        row.get("task_attempt") if type(row.get("task_attempt")) is int else 0,
+        row.get("panel_index") if type(row.get("panel_index")) is int else 0,
+    ))
+    return {**previous, **incoming, "panels": rows}
 
 
 def write_task_result(
@@ -807,6 +914,9 @@ def write_task_result(
             raise ValueError(
                 f"task result authority is unreadable or invalid: {path}"
             )
+        # ABI 7.0: every write stamps the row; a row another schema version
+        # owns (a rollback survivor) is never silently downgraded.
+        require_writable_task_result_schema(existing, path)
         projected_fields = _field_projector(existing, {**fields, "status": status}) if _field_projector else dict(fields)
         projected_status = str(projected_fields.pop("status", status))
         # Monotonic lifecycle: no stale mirror may overwrite a terminal outcome.
@@ -817,15 +927,30 @@ def write_task_result(
             log.debug("Blocked status regression %s -> %s for task %s",
                       existing.get("status"), projected_status, task_id)
             return None
+        if "review_projection" in projected_fields:
+            projected_fields["review_projection"] = merge_review_projection(
+                existing.get("review_projection"), projected_fields["review_projection"],
+            )
         now = utc_now_iso()
-        return {
-            **existing,
+        # ABI-3 write seam: the merge BASE is the existing row normalized onto
+        # the honest cost names (its own legacy spelling wins its own pair,
+        # then is stripped) so a stored alias can neither survive the rewrite
+        # nor outrank this write's fresh honest value at the final
+        # normalization below; a legacy spelling arriving IN the write itself
+        # (a legacy mutator's edit) still wins that final resolution and
+        # leaves under the honest name only. Fix-round-3: BOTH passes use the
+        # shared deep normalizer, so the nested public cost planes (the
+        # subagent envelope + its usage snapshot, the loop-outcome usage)
+        # are rewritten onto honest names too — whichever side of the merge
+        # the nested dict came from.
+        return stamp_task_result_schema(normalize_task_result_cost_planes({
+            **normalize_task_result_cost_planes(existing),
             **projected_fields,
             "task_id": task_id,
             "status": projected_status,
             "ts": explicit_ts or str(existing.get("ts") or now),
             "updated_at": now,
-        }
+        }))
 
     # Never fall back to an unlocked read/merge/write. Every task-result write is
     # lifecycle authority; accepting stale state here makes the winner of a
@@ -1243,19 +1368,20 @@ def _update_plan_review_state(
     path = task_result_path(results_drive_root, task_id)
 
     def _merge(existing: Dict[str, Any]) -> Dict[str, Any]:
+        require_writable_task_result_schema(existing, path)
         state = _validated_plan_review_state(existing.get(PLAN_REVIEW_STATE_KEY))
         state.pop("legacy_v1_projection", None)  # derived on load, never persisted
         updated_state = _validated_plan_review_state(_fit_plan_review_state(mutator(state)))
         updated_state.pop("legacy_v1_projection", None)
         now = utc_now_iso()
-        return {
+        return stamp_task_result_schema({
             **existing,
             PLAN_REVIEW_STATE_KEY: updated_state,
             "task_id": task_id,
             "status": str(existing.get("status") or STATUS_RUNNING),
             "ts": str(existing.get("ts") or now),
             "updated_at": now,
-        }
+        })
 
     try:
         updated = update_json_locked(path, _merge, strict_existing_dict=True)
@@ -1286,6 +1412,13 @@ def _compact_plan_review_wave(wave: Dict[str, Any]) -> Dict[str, Any]:
         "wave_artifact": copy.deepcopy(wave.get("wave_artifact") or {}),
         **({"reviewed_at": str(wave["reviewed_at"])} if wave.get("reviewed_at") else {}),
     }
+
+
+def plan_review_authority_core(state: Dict[str, Any], *, source_ref: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
+    """Project plan authority through the exact-wave companion."""
+    from ouroboros.tools.plan_review_artifacts import plan_review_authority_core as project
+
+    return project(state, source_ref=source_ref)
 
 
 _PLAN_REVIEW_TRUNCATION_MARKER = "…[truncated to fit the durable state]"
@@ -1451,96 +1584,3 @@ def mark_plan_review_cycles_exhausted(
 
     state = _update_plan_review_state(results_drive_root, task_id, _mark)
     return plan_review_wave(state, fingerprint) or {}
-
-def fail_tasks(results_drive_root: Any, tasks: Any, *, reason_code: str, result: str) -> int:
-    """Terminally FAIL a batch of queued tasks (e.g. on budget exhaustion) so their
-    waiters get an observable result instead of hanging. Returns the count written."""
-    written = 0
-    for task in tasks or []:
-        tid = str((task or {}).get("id") or "")
-        if not tid:
-            continue
-        # Write to the task's CANONICAL status root: forked/workspace/subagent children
-        # use budget_drive_root, so the waiter reading THAT root sees the result (a child
-        # outside results_drive_root would otherwise keep hanging — the bug this fixes).
-        root = (task or {}).get("budget_drive_root") or results_drive_root
-        # The cancel-intent PROJECTION lives at the canonical supervisor data root
-        # (every ingress writes it through queue.DRIVE_ROOT == results_drive_root),
-        # never at a child's budget_drive_root (GR3-11b) — resolving intents at the
-        # child root would miss every intent for a split-drive child.
-        intent_root = results_drive_root
-        try:
-            # Honor pending cancel intent: terminalize as CANCELLED (the right reason),
-            # not as budget_exhausted — the budget drain must not relabel a cancellation.
-            # Both carriers are consulted: the durable intent projection (the live
-            # authority) and the legacy ``cancel_requested`` status latch (old files).
-            existing = load_task_result(root, tid) or {}
-            legacy_latch = str(existing.get("status") or "") == STATUS_CANCEL_REQUESTED
-            has_intent = False
-            if not legacy_latch:
-                try:
-                    from ouroboros.cancel_intents import has_active_intent
-
-                    has_intent = has_active_intent(intent_root, tid)
-                except Exception:
-                    has_intent = False
-            if legacy_latch or has_intent:
-                # AR2-2 settle-owner unity: CLAIM before settle, the same fence
-                # custody holds. A refused claim (or one that cannot be read)
-                # means a live custody owns this teardown — skip the task; that
-                # owner writes the terminal, settles, and emits its task_done.
-                claim: Dict[str, Any] = {}
-                if has_intent:
-                    try:
-                        from ouroboros.cancel_intents import claim_intent
-
-                        claim = claim_intent(intent_root, tid, owner="fail_tasks") or {}
-                    except Exception:
-                        claim = {"claim_refused": True}
-                    if claim.get("claim_refused"):
-                        continue
-                try:
-                    stored = write_task_result(
-                        root, tid, STATUS_CANCELLED, result="Cancelled before start.",
-                    ) or {}
-                except Exception:
-                    # Nothing durable happened: release the claim so the watchdog
-                    # re-feeds custody instead of waiting out a dead claim.
-                    if claim.get("request_id"):
-                        try:
-                            from ouroboros.cancel_intents import release_claim
-
-                            release_claim(
-                                intent_root, tid, error="budget-drain cancel persistence failed",
-                                expected_generation=claim.get("generation"),
-                                request_id=str(claim.get("request_id") or ""),
-                            )
-                        except Exception:
-                            log.debug("fail_tasks: claim release failed for %s", tid, exc_info=True)
-                    raise
-                try:
-                    from ouroboros.cancel_intents import settle_intent
-
-                    stored_status = str(stored.get("status") or STATUS_CANCELLED)
-                    # Fenced by this drain's OWN claim (no-op + forensic row on a
-                    # mismatch); the stored status decides the honest outcome. A
-                    # scope=cascade intent is refused atomically inside the settle
-                    # (GR3-1: the cascade postcondition is its only settle owner)
-                    # and this drain's claim is auto-released in the same write.
-                    settle_intent(
-                        intent_root, tid,
-                        outcome=("cancelled" if stored_status == STATUS_CANCELLED
-                                 else "already_settled"),
-                        detail=("budget drain before start" if stored_status == STATUS_CANCELLED
-                                else stored_status),
-                        expected_generation=claim.get("generation"),
-                        request_id=str(claim.get("request_id") or ""),
-                    )
-                except Exception:
-                    log.debug("fail_tasks: intent settle failed for %s", tid, exc_info=True)
-            else:
-                write_task_result(root, tid, STATUS_FAILED, reason_code=reason_code, result=result)
-            written += 1
-        except Exception:
-            log.debug("fail_tasks: could not fail %s", tid, exc_info=True)
-    return written

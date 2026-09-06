@@ -11,6 +11,8 @@ import shutil
 import subprocess
 import sys
 import tempfile
+import threading
+import time
 
 import pytest
 pytest.register_assert_rewrite("tests.ui_media_delivery_smoke")
@@ -132,11 +134,19 @@ def _bind_pytest_runtime_roots() -> None:
     config.DATA_DIR = root
     config.SETTINGS_PATH = root / "settings.json"
     state.init(root, state.TOTAL_BUDGET_LIMIT)
-    queue.init(root, queue.SOFT_TIMEOUT_SEC, queue.HARD_TIMEOUT_SEC)
+    queue.init(root)
     # git_ops has no env fallback: keep every rescue/log writer on the disposable
     # data root without init(), which would also overwrite branch/remote authority.
     git_ops.DRIVE_ROOT = root
     workers.DRIVE_ROOT = root
+    # git_ops.DRIVE_ROOT was the one runtime root this rebind list missed
+    # (issue #455): _log_supervisor and the reset/rescue writers resolve
+    # supervisor.jsonl through it. Un-pinned it now lazily follows the env
+    # (git_ops.__getattr__), but the explicit session pin keeps every writer
+    # on ONE root even for tests that mutate OUROBOROS_DATA_DIR mid-test.
+    from supervisor import git_ops
+
+    git_ops.DRIVE_ROOT = root
     # spawn_workers hands str(workers.REPO_DIR) to every child, and the child binds git_ops to
     # it — so leaving this at the live default would send workers started BY A TEST back at the
     # operator's checkout, undoing the isolation above.
@@ -174,6 +184,11 @@ def _mock_pollution_files(root: pathlib.Path) -> set[pathlib.Path]:
 # See docs/DEVELOPMENT.md "Pytest marker lanes".
 _SERIAL_TEST_FILES = frozenset({
     "test_workspace_executor.py",
+    # Themed siblings of test_workspace_executor.py; they spawn the same real
+    # processes, so the whole family stays in the serial lane.
+    "test_workspace_executor_services.py",
+    "test_workspace_executor_docker.py",
+    "test_workspace_executor_admission.py",
     "test_workspace_executor_cleanup.py",
     "test_process_custody.py",
     "test_kill_process_tree_orphans.py",
@@ -251,6 +266,9 @@ def pytest_sessionfinish(session, exitstatus):  # noqa: ARG001
                 file=sys.stderr,
             )
             session.exitstatus = 1
+    workeroutput = getattr(session.config, "workeroutput", None)
+    if workeroutput is not None:  # xdist worker: hand the leak list to the controller
+        workeroutput["thread_leaks"] = list(_THREAD_LEAKS)
     # Per-process temp data dir (unique mkdtemp per controller/worker) — clean on EVERY process.
     if _PYTEST_DATA_DIR is not None:
         shutil.rmtree(_PYTEST_DATA_DIR, ignore_errors=True)
@@ -278,6 +296,12 @@ def pytest_runtest_call(item):  # noqa: ARG001
     """
     test_loop = asyncio.new_event_loop()
     asyncio.set_event_loop(test_loop)
+    # Thread-hygiene baseline, taken AFTER every fixture is set up: a thread a module- or
+    # session-scoped fixture starts on its first use (the E2E stub model server) belongs to
+    # that fixture for its whole scope and is not a leak of this test; only threads the TEST
+    # BODY leaves behind are named at teardown. Thread OBJECTS, not idents: CPython recycles
+    # an ident once a baseline thread exits, so a leaked thread could inherit one.
+    item.stash[_THREADS_BEFORE_ITEM] = set(threading.enumerate())
     yield  # test body runs here
     test_loop.close()
     asyncio.set_event_loop(None)
@@ -290,10 +314,76 @@ def _rebind_runtime_roots_between_tests():
 
 
 @pytest.fixture(autouse=True)
+def _restore_gateway_settings_bindings_between_tests():
+    """``server._sync_gateway_settings_module()`` copies the server module's CURRENT
+    ``load_settings`` / ``save_settings`` / ``_apply_settings_to_env`` /
+    ``apply_runtime_provider_defaults`` onto ``ouroboros.gateway.settings`` on every
+    settings GET/POST, so a test that monkeypatches ``server.load_settings`` and then
+    hits the endpoint leaves the TEST-LOCAL loader bound on the gateway module after
+    its own monkeypatch is undone (monkeypatch never saw that assignment). The next
+    test of the same xdist worker that saves settings through the gateway then reads
+    stale "previous rows" and the one-time R12 disclosure fires twice
+    (``test_the_save_that_first_makes_the_triad_retrieve_discloses_once_with_numbers``
+    after ``test_review_cycles.py``). Snapshot the four bindings before each test and
+    restore them afterwards — the same shape as the autouse `_os_environ_isolation`
+    environment restore below."""
+    try:
+        from ouroboros.gateway import settings as _gateway_settings
+    except Exception:  # pragma: no cover - the gateway package is always importable in CI
+        yield
+        return
+    names = ("load_settings", "save_settings", "_apply_settings_to_env", "apply_runtime_provider_defaults")
+    saved = {name: getattr(_gateway_settings, name, None) for name in names}
+    try:
+        yield
+    finally:
+        for name, value in saved.items():
+            if value is None:
+                continue
+            setattr(_gateway_settings, name, value)
+
+
+@pytest.fixture(autouse=True)
 def _scrub_inherited_subagent_selection(monkeypatch):
-    """Keep tests independent of the operator's saved actor list and account pin."""
+    """Keep tests independent of the operator's saved actor list, account pin
+    and structured reviewer panel: a test that pins the legacy comma-list
+    branch must never read the shell's `OUROBOROS_REVIEWER_SLOTS`."""
     monkeypatch.delenv("OUROBOROS_SUBAGENT_PROFILE", raising=False)
     monkeypatch.delenv("OUROBOROS_SUBAGENTS", raising=False)
+    monkeypatch.delenv("OUROBOROS_REVIEWER_SLOTS", raising=False)
+    # The task's absolute ceiling bounds recorded acceptance durations; a shell
+    # export must not move the numbers the pacing tests derive from the getter.
+    monkeypatch.delenv("OUROBOROS_TASK_ABS_CEILING_SEC", raising=False)
+
+
+def restored_os_environ():
+    """Snapshot os.environ, yield, restore it IN PLACE (clear + update).
+
+    Restoring on the real os._Environ preserves the C-level putenv sync that
+    spawned subprocesses inherit from — swapping a plain dict in (the removed
+    monkeypatch idiom) severs it. Plain generator so the isolation contract is
+    directly testable without pytest plumbing.
+    """
+    saved = dict(os.environ)
+    yield
+    os.environ.clear()
+    os.environ.update(saved)
+
+
+@pytest.fixture(autouse=True)
+def _os_environ_isolation():
+    """Restore the EXACT pre-test os.environ after every test.
+
+    Tests exercise apply_settings_to_env(), owner-settings writers, and ad-hoc
+    os.environ mutation — the benchmark launchers write it directly
+    (`run_tb.apply_all_model`, `fixed_model_actor_snapshot(target=os.environ)`)
+    and `monkeypatch.delenv(raising=False)` records nothing for a key that did
+    not exist; under xdist a leaked variable poisons whichever tests share the
+    worker afterwards (order-dependent flakes, the `benchmark-scope-1`
+    contamination class). One structural snapshot/restore closes the whole leak
+    class instead of policing each call site.
+    """
+    yield from restored_os_environ()
 
 
 @pytest.fixture(autouse=True)
@@ -312,9 +402,8 @@ def _reset_runtime_mode_baseline_between_tests():
     # env (`OUROBOROS_RUNTIME_MODE`, set by apply_settings_to_env/save_settings) is what
     # `get_runtime_mode()` reads.  The operator's inherited runtime mode must not change
     # test semantics either: hermetic review intentionally loads the live non-secret
-    # settings before spawning pytest.  Snapshot it, remove it for the test so the
-    # documented default applies, then restore it at the process boundary.
-    _saved_runtime_mode = os.environ.get("OUROBOROS_RUNTIME_MODE")
+    # settings before spawning pytest.  Remove it for the test so the documented
+    # default applies; the autouse os.environ snapshot restores it afterwards.
     os.environ.pop("OUROBOROS_RUNTIME_MODE", None)
     try:
         from ouroboros.config import reset_runtime_mode_baseline_for_tests
@@ -327,10 +416,6 @@ def _reset_runtime_mode_baseline_between_tests():
         reset_runtime_mode_baseline_for_tests()
     except Exception:
         pass
-    if _saved_runtime_mode is None:
-        os.environ.pop("OUROBOROS_RUNTIME_MODE", None)
-    else:
-        os.environ["OUROBOROS_RUNTIME_MODE"] = _saved_runtime_mode
 
 
 @pytest.fixture(autouse=True)
@@ -461,6 +546,103 @@ def pytest_runtest_teardown(item, nextitem):  # noqa: ARG001
     yield  # fixture finalizers and teardown run here
     teardown_loop.close()
     asyncio.set_event_loop(None)
+    _fail_if_the_password_resolver_leaked(item)
+    _fail_if_a_thread_leaked(item)
+
+
+_PRISTINE_PASSWORD_RESOLVER = None
+
+
+def _fail_if_the_password_resolver_leaked(item):
+    """A started-and-never-stopped ``patch("ouroboros.server_auth.get_configured_network_password")``
+    on a shared xdist worker made the password gate answer '' for every later module (the rc.11
+    macos-latest red, the rc.12 ubuntu/macos red — the victim was named, never the leaker). After
+    EVERY fixture of the item is torn down (monkeypatch included) the module attribute must be the
+    genuine function again; otherwise the test that leaked it is named here and the attribute is
+    restored so no victim fails by worker ordering."""
+    import os
+
+    import ouroboros.server_auth as server_auth
+
+    global _PRISTINE_PASSWORD_RESOLVER
+    current = server_auth.__dict__.get("get_configured_network_password")
+    genuine = (getattr(current, "__module__", None) == "ouroboros.server_auth"
+               and getattr(current, "__name__", "") == "get_configured_network_password")
+    if genuine:
+        _PRISTINE_PASSWORD_RESOLVER = _PRISTINE_PASSWORD_RESOLVER or current
+        return
+    server_auth.get_configured_network_password = _PRISTINE_PASSWORD_RESOLVER or (
+        lambda: server_auth.resolve_network_password(
+            os.environ.get(server_auth.NETWORK_PASSWORD_KEY, ""), server_auth.load_settings))
+    pytest.fail(f"{item.nodeid} left ouroboros.server_auth.get_configured_network_password patched "
+                f"({type(current).__name__}); a started patch was never stopped", pytrace=False)
+
+
+# ---- thread hygiene: name the test that LEAKS a thread, not the victim it pollutes ----
+#
+# A daemon thread that outlives its test keeps running on the shared xdist worker: a 0.5 s poll
+# loop lands in a later test's GLOBAL ``time.sleep`` patch (tests/test_delegate_hold.py pinned
+# its backoff by presence instead of position for that), a settings-to-environment re-applier
+# overwrites os.environ after the conftest snapshot restored it (tests/test_server_auth.py was
+# rewritten around a pure resolver for that). Both times the victim was named and the leaker
+# never was. Same shape as the password-resolver guard above: snapshot the live thread idents
+# BEFORE the item's fixtures set up, and after EVERY fixture of the item is torn down every
+# thread that appeared since must be gone (a bounded grace lets a stopped-but-not-joined
+# thread finish); otherwise the item is failed with the thread names and recorded for the
+# session report line.
+_THREADS_BEFORE_ITEM = pytest.StashKey()
+_THREAD_LEAKS: list = []  # (nodeid, [thread names]) — session-scoped, merged onto the controller
+_THREAD_LEAK_GRACE_SEC = 2.0
+# By-design detached threads, listed by name prefix — each entry names its owner and why.
+_DETACHED_THREAD_NAME_PREFIXES = (
+    # ouroboros/project_naming.py: the inner namer call is deliberately abandoned when it
+    # overruns the wall-clock bound (the outer ``namer-<task_id>`` returns without joining it).
+    "namer-call-",
+    # ouroboros/gateway/onboarding.py: the idle worker of the module-lifetime single-worker
+    # snapshot executor — kept process-global on purpose so a retried completion JOINS an
+    # in-flight daemon read (issue #464) instead of starting a second blocked thread.
+    "onboarding-snapshot",
+)
+
+
+
+def _fail_if_a_thread_leaked(item):
+    before = item.stash.get(_THREADS_BEFORE_ITEM, None)
+    if before is None:
+        return
+    deadline = time.monotonic() + _THREAD_LEAK_GRACE_SEC
+    leaked = []
+    for thread in threading.enumerate():
+        if thread in before or thread is threading.current_thread():
+            continue
+        if thread.name.startswith(_DETACHED_THREAD_NAME_PREFIXES):
+            continue
+        thread.join(timeout=max(0.0, deadline - time.monotonic()))
+        if thread.is_alive():
+            leaked.append(f"{thread.name}{'' if thread.daemon else ' (non-daemon)'}")
+    if not leaked:
+        return
+    _THREAD_LEAKS.append((item.nodeid, leaked))
+    pytest.fail(f"{item.nodeid} leaked {len(leaked)} thread(s) still alive after every fixture "
+                f"was torn down: {', '.join(leaked)} — stop/join it at its owner (a fixture "
+                f"finalizer or the test's own missing stop), do not widen the tolerance of the "
+                f"test it pollutes", pytrace=False)
+
+
+@pytest.hookimpl(optionalhook=True)
+def pytest_testnodedown(node, error):  # noqa: ARG001
+    # pytest-xdist controller: merge each worker's leak list (shipped via workeroutput below).
+    _THREAD_LEAKS.extend(getattr(node, "workeroutput", {}).get("thread_leaks", []))
+
+
+def pytest_terminal_summary(terminalreporter):
+    if _THREAD_LEAKS:
+        tests = ", ".join(f"{nodeid} [{', '.join(names)}]" for nodeid, names in _THREAD_LEAKS)
+        terminalreporter.write_line(
+            f"thread hygiene: {sum(len(n) for _, n in _THREAD_LEAKS)} leaked thread(s) in "
+            f"{len(_THREAD_LEAKS)} test(s): {tests}")
+    else:
+        terminalreporter.write_line("thread hygiene: no leaked threads")
 
 
 # Pre-v5.15 conftest exported four fixtures (``make_git_repo``, ``tool_context``,
@@ -469,3 +651,5 @@ def pytest_runtest_teardown(item, nextitem):  # noqa: ARG001
 # contexts under ``tmp_path`` because the per-test layouts diverged enough that a
 # shared fixture was always wrong (different branch names, different ``ToolContext``
 # shapes, ``MagicMock`` vs real, etc.).
+
+

@@ -535,7 +535,7 @@ def test_planned_restart_retry_reset_preserves_owner_not_controls(monkeypatch, t
 
     repo = tmp_path / "repo"
     repo.mkdir()
-    workers.init(repo, tmp_path, 1, 600, 1800, 100.0)
+    workers.init(repo, tmp_path, 1)
     workers.WORKERS.clear()
     workers.PENDING.clear()
     workers.RUNNING.clear()

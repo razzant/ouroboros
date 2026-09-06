@@ -1,0 +1,451 @@
+{
+  "cases": [
+    {
+      "id": "gigachat.dispatch.happy_path",
+      "route": "native GigaChat: function_call collapse, function-role results, cost unknown",
+      "spec": {
+        "env": {
+          "GIGACHAT_CREDENTIALS": "gigachat-fixture-key"
+        },
+        "transport": [
+          {
+            "kind": "response",
+            "body": {
+              "message": {
+                "content": "",
+                "function_call": {
+                  "name": "read_file",
+                  "arguments": {
+                    "path": "a.txt"
+                  }
+                }
+              },
+              "usage": {
+                "prompt_tokens": 50,
+                "completion_tokens": 7,
+                "precached_prompt_tokens": 10
+              }
+            }
+          }
+        ],
+        "call": {
+          "kind": "method",
+          "name": "chat",
+          "kwargs": {
+            "messages": [
+              {
+                "role": "system",
+                "content": "policy"
+              },
+              {
+                "role": "user",
+                "content": [
+                  {
+                    "type": "text",
+                    "text": "look"
+                  },
+                  {
+                    "type": "image_url",
+                    "image_url": {
+                      "url": "u"
+                    },
+                    "_caption": "shot"
+                  }
+                ]
+              },
+              {
+                "role": "assistant",
+                "content": "calling",
+                "tool_calls": [
+                  {
+                    "id": "c1",
+                    "type": "function",
+                    "function": {
+                      "name": "read_file",
+                      "arguments": "{\"path\": \"a\"}"
+                    }
+                  },
+                  {
+                    "id": "c2",
+                    "type": "function",
+                    "function": {
+                      "name": "apply_patch",
+                      "arguments": "{}"
+                    }
+                  }
+                ]
+              },
+              {
+                "role": "tool",
+                "tool_call_id": "c1",
+                "content": "plain text result"
+              },
+              {
+                "role": "system",
+                "content": "late reminder"
+              }
+            ],
+            "model": "gigachat::GigaChat-3-Pro",
+            "tools": [
+              {
+                "type": "function",
+                "function": {
+                  "name": "read_file",
+                  "description": "read",
+                  "parameters": {
+                    "type": "object",
+                    "properties": {
+                      "path": {
+                        "type": "string"
+                      }
+                    }
+                  }
+                }
+              },
+              {
+                "type": "function",
+                "function": {
+                  "name": "apply_patch",
+                  "description": [
+                    "two ",
+                    "parts"
+                  ],
+                  "parameters": {
+                    "type": "object"
+                  }
+                }
+              }
+            ],
+            "temperature": 0.5,
+            "timeout": 30.0
+          }
+        }
+      },
+      "expected": {
+        "returned": {
+          "message": {
+            "role": "assistant",
+            "content": null,
+            "tool_calls": [
+              {
+                "id": "call_0",
+                "type": "function",
+                "function": {
+                  "name": "read_file",
+                  "arguments": "{\"path\": \"a.txt\"}"
+                }
+              }
+            ]
+          },
+          "usage": {
+            "prompt_tokens": 50,
+            "completion_tokens": 7,
+            "total_tokens": 57,
+            "cached_tokens": 10,
+            "provider": "gigachat",
+            "resolved_model": "gigachat/GigaChat-3-Pro",
+            "cost": null,
+            "cost_final": false
+          },
+          "ledger_attempt_count": 1
+        },
+        "sends": [
+          {
+            "transport": "gigachat.chat",
+            "client": {
+              "scope": "GIGACHAT_API_PERS",
+              "verify_ssl_certs": true,
+              "credentials": "gigachat-fixture-key",
+              "base_url": "https://api.giga.chat/v1",
+              "timeout": 30.0
+            },
+            "payload": {
+              "model": "GigaChat-3-Pro",
+              "messages": [
+                {
+                  "role": "system",
+                  "content": "policy"
+                },
+                {
+                  "role": "user",
+                  "content": "look[image omitted: model has no vision — shot]"
+                },
+                {
+                  "role": "assistant",
+                  "content": "calling",
+                  "function_call": {
+                    "name": "read_file",
+                    "arguments": {
+                      "path": "a"
+                    }
+                  }
+                },
+                {
+                  "role": "function",
+                  "name": "read_file",
+                  "content": "{\"result\": \"plain text result\"}"
+                },
+                {
+                  "role": "user",
+                  "content": "[SYSTEM NOTICE]\nlate reminder"
+                }
+              ],
+              "max_tokens": 65536,
+              "temperature": 0.5,
+              "functions": [
+                {
+                  "name": "read_file",
+                  "description": "read",
+                  "parameters": {
+                    "type": "object",
+                    "properties": {
+                      "path": {
+                        "type": "string"
+                      }
+                    }
+                  }
+                },
+                {
+                  "name": "apply_patch",
+                  "description": "['two ', 'parts']",
+                  "parameters": {
+                    "type": "object",
+                    "properties": {}
+                  }
+                }
+              ],
+              "function_call": "auto"
+            },
+            "payload_sha256": "83dcf6a543ee24f9eaaa33952345c2131f56b2cf2905c3af137d2b518200e509"
+          }
+        ],
+        "physical_attempts": [
+          {
+            "source": "llm.gigachat",
+            "model": "gigachat/GigaChat-3-Pro",
+            "provider": "gigachat",
+            "candidate_raw_sha256": "83dcf6a543ee24f9eaaa33952345c2131f56b2cf2905c3af137d2b518200e509",
+            "candidate_raw_size_bytes": 694,
+            "candidate_measurement_kind": "canonical_json_v1",
+            "states": [
+              "reserved",
+              "dispatched",
+              "settled"
+            ],
+            "prompt_cache_ttl": "",
+            "cost_final": false
+          }
+        ],
+        "unused_script_steps": 0
+      }
+    },
+    {
+      "id": "gigachat.dispatch.text_only_response",
+      "route": "a text-only GigaChat turn keeps content and reports unknown cost",
+      "spec": {
+        "env": {
+          "GIGACHAT_USER": "fixture-user",
+          "GIGACHAT_PASSWORD": "fixture-password"
+        },
+        "transport": [
+          {
+            "kind": "response",
+            "body": {
+              "message": {
+                "content": "plain answer"
+              },
+              "usage": {
+                "prompt_tokens": 11,
+                "completion_tokens": 2
+              }
+            }
+          }
+        ],
+        "call": {
+          "kind": "method",
+          "name": "chat",
+          "kwargs": {
+            "messages": [
+              {
+                "role": "system",
+                "content": "stable policy prefix"
+              },
+              {
+                "role": "user",
+                "content": "hello"
+              }
+            ],
+            "model": "gigachat::GigaChat-3-Pro"
+          }
+        }
+      },
+      "expected": {
+        "returned": {
+          "message": {
+            "role": "assistant",
+            "content": "plain answer"
+          },
+          "usage": {
+            "prompt_tokens": 11,
+            "completion_tokens": 2,
+            "total_tokens": 13,
+            "cached_tokens": 0,
+            "provider": "gigachat",
+            "resolved_model": "gigachat/GigaChat-3-Pro",
+            "cost": null,
+            "cost_final": false
+          },
+          "ledger_attempt_count": 1
+        },
+        "sends": [
+          {
+            "transport": "gigachat.chat",
+            "client": {
+              "scope": "GIGACHAT_API_PERS",
+              "verify_ssl_certs": true,
+              "user": "fixture-user",
+              "password": "fixture-password",
+              "base_url": "https://api.giga.chat/v1"
+            },
+            "payload": {
+              "model": "GigaChat-3-Pro",
+              "messages": [
+                {
+                  "role": "system",
+                  "content": "stable policy prefix"
+                },
+                {
+                  "role": "user",
+                  "content": "hello"
+                }
+              ],
+              "max_tokens": 65536
+            },
+            "payload_sha256": "ae531707e11cc9e6cb6d1b6a8dd776adb3ece1180c42f06e9ad6c78bc7ff00d4"
+          }
+        ],
+        "physical_attempts": [
+          {
+            "source": "llm.gigachat",
+            "model": "gigachat/GigaChat-3-Pro",
+            "provider": "gigachat",
+            "candidate_raw_sha256": "ae531707e11cc9e6cb6d1b6a8dd776adb3ece1180c42f06e9ad6c78bc7ff00d4",
+            "candidate_raw_size_bytes": 143,
+            "candidate_measurement_kind": "canonical_json_v1",
+            "states": [
+              "reserved",
+              "dispatched",
+              "settled"
+            ],
+            "prompt_cache_ttl": "",
+            "cost_final": false
+          }
+        ],
+        "unused_script_steps": 0
+      }
+    },
+    {
+      "id": "gigachat.dispatch.async_thread_offload",
+      "route": "chat_async offloads GigaChat to a thread",
+      "spec": {
+        "env": {
+          "GIGACHAT_CREDENTIALS": "gigachat-fixture-key"
+        },
+        "transport": [
+          {
+            "kind": "response",
+            "body": {
+              "message": {
+                "content": "async answer"
+              },
+              "usage": {
+                "prompt_tokens": 5,
+                "completion_tokens": 1
+              }
+            }
+          }
+        ],
+        "call": {
+          "kind": "method",
+          "name": "chat_async",
+          "kwargs": {
+            "messages": [
+              {
+                "role": "system",
+                "content": "stable policy prefix"
+              },
+              {
+                "role": "user",
+                "content": "hello"
+              }
+            ],
+            "model": "gigachat::GigaChat-3-Pro"
+          }
+        }
+      },
+      "expected": {
+        "returned": {
+          "message": {
+            "role": "assistant",
+            "content": "async answer"
+          },
+          "usage": {
+            "prompt_tokens": 5,
+            "completion_tokens": 1,
+            "total_tokens": 6,
+            "cached_tokens": 0,
+            "provider": "gigachat",
+            "resolved_model": "gigachat/GigaChat-3-Pro",
+            "cost": null,
+            "cost_final": false
+          },
+          "ledger_attempt_count": 1
+        },
+        "sends": [
+          {
+            "transport": "gigachat.chat",
+            "client": {
+              "scope": "GIGACHAT_API_PERS",
+              "verify_ssl_certs": true,
+              "credentials": "gigachat-fixture-key",
+              "base_url": "https://api.giga.chat/v1"
+            },
+            "payload": {
+              "model": "GigaChat-3-Pro",
+              "messages": [
+                {
+                  "role": "system",
+                  "content": "stable policy prefix"
+                },
+                {
+                  "role": "user",
+                  "content": "hello"
+                }
+              ],
+              "max_tokens": 65536
+            },
+            "payload_sha256": "ae531707e11cc9e6cb6d1b6a8dd776adb3ece1180c42f06e9ad6c78bc7ff00d4"
+          }
+        ],
+        "physical_attempts": [
+          {
+            "source": "llm.gigachat",
+            "model": "gigachat/GigaChat-3-Pro",
+            "provider": "gigachat",
+            "candidate_raw_sha256": "ae531707e11cc9e6cb6d1b6a8dd776adb3ece1180c42f06e9ad6c78bc7ff00d4",
+            "candidate_raw_size_bytes": 143,
+            "candidate_measurement_kind": "canonical_json_v1",
+            "states": [
+              "reserved",
+              "dispatched",
+              "settled"
+            ],
+            "prompt_cache_ttl": "",
+            "cost_final": false
+          }
+        ],
+        "unused_script_steps": 0
+      }
+    }
+  ]
+}

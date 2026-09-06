@@ -289,7 +289,7 @@ def _apply_agent_acceptance_payload(trace, payload):
         }],
         [],
         trace,
-        emit_progress=lambda _msg: None,
+        emit_progress=lambda _msg, *, incident=None: None,
     )
 
 

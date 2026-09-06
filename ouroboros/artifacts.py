@@ -16,7 +16,7 @@ from datetime import datetime, timezone
 from hashlib import sha256
 from typing import Any, Dict, Iterable, List, Optional, Union
 
-from ouroboros.utils import atomic_write_json, read_json_dict, write_bytes_atomic
+from ouroboros.utils import atomic_write_json, read_json_dict, update_json_locked, write_bytes_atomic
 from ouroboros.headless import ARTIFACT_STATUS_READY, SCRATCH_MANIFEST_NAME, task_artifacts_dir
 from ouroboros.outcome_receipt_store import is_verification_receipts_path
 from ouroboros.task_results import validate_task_id
@@ -573,7 +573,17 @@ def store_actor_source_bytes(
         f"{safe_id}-{digest}.{safe_extension}",
     )
     target = artifact_dir.joinpath(*relative.parts)
-    write_bytes_atomic(target, bytes(data))
+    # WRITE-ONCE. The name carries the digest, so an existing file with exactly
+    # these bytes IS this handle: rewriting it would only republish identical
+    # content while racing another writer for the same path (on Windows an
+    # os.replace over a destination a concurrent reader holds open is a sharing
+    # violation, which is how a second copy-back of the same handle used to fail).
+    try:
+        already_stored = not target.is_symlink() and target.read_bytes() == bytes(data)
+    except OSError:
+        already_stored = False
+    if not already_stored:
+        write_bytes_atomic(target, bytes(data))
     return {
         "kind": "task_source",
         "root": "artifact_store",
@@ -646,6 +656,31 @@ def persist_exact_text_source(
             "status": "source_unavailable",
             "reason": f"{type(exc).__name__}: {exc}",
         }
+
+
+def persist_tool_trajectory_source(
+    drive_root: Union[pathlib.Path, str], task_id: str, tool_calls: Any,
+) -> Dict[str, Any]:
+    """Persist the complete redacted tool-call corpus behind acceptance views."""
+    try:
+        from ouroboros.observability import redact_projection
+
+        calls = [dict(call) for call in (tool_calls or []) if isinstance(call, dict)]
+        projected = redact_projection(calls).value
+        data = json.dumps(projected, ensure_ascii=False, separators=(",", ":"), default=str).encode("utf-8")
+        stored_ref = store_actor_source_bytes(
+            drive_root, task_id, category="tool_results",
+            source_id="acceptance_tool_trajectory", data=data, extension="json",
+        )
+        path = str(stored_ref["path"])
+        return {
+            "kind": "task_source", "root": "artifact_store", "path": path,
+            "reader": "read_file",
+            "artifact_ref": f"artifact_store:{path}#chars=0-{len(data.decode('utf-8'))}",
+        }
+    except Exception:
+        log.warning("acceptance tool trajectory source persistence failed", exc_info=True)
+        return {}
 
 
 def collect_exact_repo_diff(repo: Any, *, include_recent_commit: bool = False) -> str:
@@ -955,14 +990,7 @@ def store_task_artifact_bytes(
     else:
         write_bytes_atomic(path, data)
     record = artifact_record(path, kind=kind)
-    manifest_path = artifact_dir / _ARTIFACT_MANIFEST
-    manifest_doc = read_json_dict(manifest_path) or {}
-    manifest = manifest_doc.get("artifacts") if isinstance(manifest_doc.get("artifacts"), dict) else {}
-    manifest = {str(key): dict(value) for key, value in manifest.items() if isinstance(value, dict)}
-    manifest[safe_name] = dict(record)
-    atomic_write_json(
-        manifest_path, {"schema_version": 1, "artifacts": manifest}, trailing_newline=True,
-    )
+    _register_task_artifact_records(artifact_dir, [record])
     return {
         "root": "artifact_store",
         "path": safe_name,
@@ -970,6 +998,23 @@ def store_task_artifact_bytes(
         "bytes": record["size"],
         "kind": kind,
     }
+
+
+def _register_task_artifact_records(artifact_dir: pathlib.Path, records: Iterable[Dict[str, Any]]) -> None:
+    """Merge only these registrations under the existing manifest-file lock.
+
+    File copying/hashing finishes before this short metadata transaction. No
+    task-result lock is acquired here, so a caller already holding one cannot
+    invert the publication path's artifact-then-result ordering.
+    """
+    additions = {pathlib.Path(str(row.get("path") or row.get("name") or "")).name: dict(row)
+                 for row in records}
+
+    def merge(current: Dict[str, Any]) -> Dict[str, Any]:
+        previous = current.get("artifacts") if isinstance(current.get("artifacts"), dict) else {}
+        return {**current, "schema_version": 1, "artifacts": {**previous, **additions}}
+
+    update_json_locked(artifact_dir / _ARTIFACT_MANIFEST, merge)
 
 
 def _artifact_versions_dir(drive_root: pathlib.Path, task_id: str, artifact_name: str) -> pathlib.Path:
@@ -1051,8 +1096,7 @@ def copy_file_to_task_artifacts(ctx: Any, source_path: Union[pathlib.Path, str],
         dest.parent.mkdir(parents=True, exist_ok=True)
         shutil.copy2(source, dest)
     record = artifact_record(dest, kind=kind, source_path=str(source))
-    manifest[pathlib.Path(str(record.get("path") or record.get("name") or "")).name] = dict(record)
-    atomic_write_json(artifact_dir / _ARTIFACT_MANIFEST, {"schema_version": 1, "artifacts": manifest}, trailing_newline=True)
+    _register_task_artifact_records(artifact_dir, [record])
     return record
 
 
@@ -1070,9 +1114,6 @@ def copy_directory_to_task_artifacts(
         return []
     task_id = task_id_for_artifacts(ctx)
     artifact_dir = task_artifact_dir_path(pathlib.Path(getattr(ctx, "drive_root")), task_id, create=True)
-    data = read_json_dict(artifact_dir / _ARTIFACT_MANIFEST) or {}
-    manifest = data.get("artifacts") if isinstance(data.get("artifacts"), dict) else {}
-    manifest = {str(key): dict(value) for key, value in manifest.items() if isinstance(value, dict)}
     root = source.resolve(strict=False)
     if member_paths is None:
         members = sorted(p for p in source.rglob("*") if p.is_file() and not p.is_symlink())
@@ -1138,9 +1179,7 @@ def copy_directory_to_task_artifacts(
         artifact_record(ledger_path, kind=f"{kind}_manifest", source_path=str(source)),
         artifact_record(zip_path, kind=kind, source_path=str(source)),
     ]
-    for record in records:
-        manifest[pathlib.Path(str(record.get("path") or record.get("name") or "")).name] = dict(record)
-    atomic_write_json(artifact_dir / _ARTIFACT_MANIFEST, {"schema_version": 1, "artifacts": manifest}, trailing_newline=True)
+    _register_task_artifact_records(artifact_dir, records)
     return records
 
 
@@ -1163,6 +1202,8 @@ def collect_task_artifact_records(drive_root: Union[pathlib.Path, str], task_id:
         # are NOT deliverables — never record them as produced artifacts.
         if path.name in (_ARTIFACT_MANIFEST, SCRATCH_MANIFEST_NAME):
             continue
+        if path == artifact_dir / (_ARTIFACT_MANIFEST + ".lock"):
+            continue  # an in-flight registration lock is not a deliverable
         # Verification receipts live beside artifacts for durable custody, but
         # they are an append-only authority stream, not a deliverable.  Letting
         # generic materialization register/copy this file can replace a newer

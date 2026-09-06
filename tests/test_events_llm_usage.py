@@ -58,6 +58,27 @@ def test_llm_usage_writes_cached_tokens_and_cache_write_tokens(tmp_path):
     assert ctx.last_usage["prompt_cache_ttl"] == "default"
 
 
+def test_llm_usage_persists_reasoning_effort_projection(tmp_path):
+    from supervisor import events as ev_module
+
+    (tmp_path / "logs").mkdir()
+
+    class FakeCtx:
+        DRIVE_ROOT = tmp_path
+
+        def update_budget_from_usage(self, usage):
+            self.last_usage = usage
+
+    note = {"requested": "medium", "applied": "high",
+            "reason": "provider_wire_mapping", "model": "deepseek-v4-flash"}
+    ev_module._handle_llm_usage(
+        {"type": "llm_usage", "task_id": "t", "usage": {"prompt_tokens": 3, "reasoning_effort_clamped": note}},
+        FakeCtx(),
+    )
+    written = json.loads((tmp_path / "logs" / "events.jsonl").read_text(encoding="utf-8"))
+    assert written["reasoning_effort_clamped"] == note
+
+
 def test_llm_usage_preserves_unknown_cost_as_null(tmp_path):
     from supervisor import events as ev_module
 
@@ -172,3 +193,14 @@ def test_task_metrics_are_persisted_and_forwarded_to_live_logs(tmp_path):
     assert written["duration_sec"] == 3.142
     assert pushed[0]["task_id"] == "task-99"
     assert pushed[0]["tool_errors"] == 1
+
+
+def test_llm_usage_serializer_carries_web_search_sources():
+    """The llm_usage serializer must persist web_search_sources (GAIA
+    campaign contract). Moved here from tests/test_devtools_benchmarks.py:
+    after the D08 split the serializer lives with its budget family, and
+    this suite owns the llm_usage event surface."""
+    import pathlib
+    src = (pathlib.Path(__file__).resolve().parent.parent
+           / "supervisor" / "events_budget.py").read_text(encoding="utf-8")
+    assert "web_search_sources" in src

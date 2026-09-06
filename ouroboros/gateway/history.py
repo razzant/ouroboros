@@ -5,19 +5,20 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
-import os
 import pathlib
-from typing import Any, Callable, Dict, Optional
+from typing import Any, Dict, Optional
 
 from starlette.requests import Request
-from starlette.responses import JSONResponse, Response
+from starlette.responses import Response
 
-from ouroboros.contracts.chat_id_policy import is_a2a_chat_id
+from ouroboros.contracts.chat_id_policy import HIDDEN_CHAT_ID, is_a2a_chat_id
 from ouroboros.gateway._helpers import (
     _TAIL_WINDOW_START_BYTES,
     coerce_int,
     read_rotated_jsonl_entries,
 )
+from ouroboros.gateway.cost_breakdown import make_cost_breakdown_endpoint  # noqa: F401 — historical import path (router)
+from ouroboros.cost_projection import carry_cost_meta
 from ouroboros.outcomes import normalize_outcome_axes
 from ouroboros.post_task_checkpoint import post_task_synthesis_is_open
 from ouroboros.subagent_messages import SUBAGENT_MESSAGE_FIELDS, subagent_message_meta
@@ -47,22 +48,6 @@ _LINEAGE_CAP = 300
 # quota the newest segments cannot satisfy is an "archive_floor" truncation.
 _ARCHIVE_BACKFILL_CAP = 3
 
-_ACCOUNTING_SUMMARY_FIELDS = (
-    "settled_usd",
-    "confirmed_usd",
-    "estimated_usd",
-    "reserved_usd",
-    "unresolved_upper_bound_usd",
-    "accounted_usd",
-    "unknown_unmetered",
-    "cost_final",
-    # `cost_final`'s DISCLOSED CAUSE travels with the flag it explains — without it
-    # the client's "Pending (N open)" text could never render (costs.js reads
-    # `accounting.non_final_rows`), so the reason for a non-final cost never
-    # reached the owner at all.
-    "non_final_rows",
-    "attempt_counts",
-)
 
 _PROGRESS_META_FIELDS = (
     "ephemeral_decision",
@@ -136,63 +121,6 @@ def _stored_chat_id(value: Any, default: int = 1) -> int:
         return int(default)
 
 
-def _compat_cost_bucket(bucket: Dict[str, Any]) -> Dict[str, Any]:
-    return {
-        "cost": round(float(bucket.get("settled_usd") or 0.0), 6),
-        "calls": int(bucket.get("physical_calls") or 0),
-        # Keep the compatibility tables honest about rows whose settled dollar
-        # amount is zero but whose accounting is still open or undisclosed.
-        "unknown_unmetered": int(bucket.get("unknown_unmetered") or 0),
-        "non_final_rows": int(bucket.get("non_final_rows") or 0),
-        "cost_final": bool(bucket.get("cost_final")),
-        "prompt_tokens": int(bucket.get("prompt_tokens") or 0),
-        "completion_tokens": int(bucket.get("completion_tokens") or 0),
-        "cached_tokens": int(bucket.get("cached_tokens") or 0),
-        "cache_write_tokens": int(bucket.get("cache_write_tokens") or 0),
-        "prompt_cache_ttls": dict(bucket.get("prompt_cache_ttls") or {}),
-    }
-
-
-def _compat_cost_groups(
-    groups: Dict[str, Dict[str, Any]],
-    unattributed: Dict[str, Any],
-    *,
-    group_key: Optional[Callable[[str], str]] = None,
-) -> Dict[str, Dict[str, Any]]:
-    result: Dict[str, Dict[str, Any]] = {}
-    for name, raw_bucket in groups.items():
-        if not (
-            int(raw_bucket.get("physical_calls") or 0)
-            or int(raw_bucket.get("unknown_unmetered") or 0)
-            or float(raw_bucket.get("accounted_usd") or 0.0)
-        ):
-            continue
-        key = group_key(str(name)) if group_key else str(name)
-        source = _compat_cost_bucket(raw_bucket)
-        if key not in result:
-            result[key] = source
-            continue
-        target = result[key]
-        for field in (
-            "cost", "calls", "unknown_unmetered", "non_final_rows",
-            "prompt_tokens", "completion_tokens",
-            "cached_tokens", "cache_write_tokens",
-        ):
-            target[field] += source[field]
-        target["cost_final"] = target["cost_final"] and source["cost_final"]
-        for ttl, count in source["prompt_cache_ttls"].items():
-            target["prompt_cache_ttls"][ttl] = int(target["prompt_cache_ttls"].get(ttl, 0)) + int(count)
-    if (
-        int(unattributed.get("physical_calls") or 0)
-        or int(unattributed.get("unknown_unmetered") or 0)
-        or float(unattributed.get("accounted_usd") or 0.0)
-    ):
-        result["unattributed"] = _compat_cost_bucket(unattributed)
-    for bucket in result.values():
-        bucket["cost"] = round(float(bucket["cost"]), 6)
-    return dict(sorted(result.items(), key=lambda item: item[1]["cost"], reverse=True))
-
-
 def _project_history_context(
     data_dir: pathlib.Path,
     thread_id: int,
@@ -264,81 +192,6 @@ def _user_annotation(
     }
 
 
-def make_cost_breakdown_endpoint(data_dir: pathlib.Path):
-    async def api_cost_breakdown(_request: Request) -> JSONResponse:
-        """Return ledger-derived cost and physical-attempt breakdowns."""
-        try:
-            from ouroboros.pricing import infer_model_category
-            from ouroboros.usage_accounting import ensure_legacy_imported, usage_breakdown
-
-            ensure_legacy_imported(data_dir)
-            breakdown = usage_breakdown(data_dir)
-            unattributed = dict(breakdown.get("unattributed") or {})
-            by_model_raw = dict(breakdown.get("by_model") or {})
-            try:
-                from supervisor.state import TOTAL_BUDGET_LIMIT
-
-                limit = float(TOTAL_BUDGET_LIMIT or 0.0)
-            except (ImportError, TypeError, ValueError):
-                limit = 0.0
-            if limit <= 0 and "TOTAL_BUDGET" in os.environ:
-                try:
-                    limit = max(0.0, float(os.environ.get("TOTAL_BUDGET") or 0.0))
-                except (TypeError, ValueError):
-                    limit = 0.0
-            accounting = {field: breakdown.get(field) for field in _ACCOUNTING_SUMMARY_FIELDS}
-            accounting.update({
-                "available": True,
-                "authority": "physical_attempt_ledger",
-                "limit_usd": round(limit, 6),
-                "remaining_known_usd": (
-                    round(max(0.0, limit - float(breakdown.get("accounted_usd") or 0.0)), 6)
-                    if limit > 0
-                    else None
-                ),
-            })
-            return JSONResponse({
-                # Compatibility fields now project the physical-attempt ledger;
-                # events.jsonl is import evidence, never a second cost authority.
-                "total_cost": round(float(breakdown.get("settled_usd") or 0.0), 6),
-                "total_calls": int(breakdown.get("physical_calls") or 0),
-                "total_prompt_tokens": int(breakdown.get("prompt_tokens") or 0),
-                "total_completion_tokens": int(breakdown.get("completion_tokens") or 0),
-                "total_cached_tokens": int(breakdown.get("cached_tokens") or 0),
-                "total_cache_write_tokens": int(breakdown.get("cache_write_tokens") or 0),
-                "prompt_cache_ttls": dict(breakdown.get("prompt_cache_ttls") or {}),
-                "by_model": _compat_cost_groups(by_model_raw, dict(unattributed.get("model") or {})),
-                "by_api_key": _compat_cost_groups(
-                    dict(breakdown.get("by_provider") or {}),
-                    dict(unattributed.get("provider") or {}),
-                ),
-                "by_model_category": _compat_cost_groups(
-                    by_model_raw,
-                    dict(unattributed.get("model") or {}),
-                    group_key=infer_model_category,
-                ),
-                "by_task_category": _compat_cost_groups(
-                    dict(breakdown.get("by_category") or {}),
-                    dict(unattributed.get("category") or {}),
-                ),
-                "accounting": accounting,
-                "unattributed": unattributed,
-            })
-        except Exception:
-            log.exception("Physical-attempt accounting unavailable")
-            return JSONResponse({
-                "error": "Physical-attempt accounting unavailable",
-                "accounting": {
-                    "available": False,
-                    "authority": "physical_attempt_ledger",
-                    "cost_final": False,
-                    "error_code": "ledger_unavailable",
-                },
-            }, status_code=503)
-
-    return api_cost_breakdown
-
-
 def _origin_fallback_rows(data_dir, thread_id: int, human_tail: list) -> list:
     """Binding-backed origin rows for a Project thread (v6.73.0 lens fallback).
 
@@ -378,7 +231,6 @@ def _origin_fallback_rows(data_dir, thread_id: int, human_tail: list) -> list:
             "sender_session_id": "",
             "client_message_id": cmid,
             "task_id": "",
-            "telegram_chat_id": 0,
             "origin_projected": True,
         })
         if len(synthesized) >= _ORIGIN_SYNTH_CAP:
@@ -398,7 +250,7 @@ def _origin_fallback_rows(data_dir, thread_id: int, human_tail: list) -> list:
                     "is_progress": False, "system_type": "origin_omission",
                     "markdown": False, "source": "", "sender_label": "",
                     "sender_session_id": "", "client_message_id": "",
-                    "task_id": "", "telegram_chat_id": 0,
+                    "task_id": "",
                 })
             break
     return synthesized
@@ -488,7 +340,12 @@ def _copy_task_summary_metadata(rec: Dict[str, Any], entry: Dict[str, Any]) -> N
     # written by agent_task_pipeline; replay it so a reload still shows cost.
     # _annotate_terminal_task_truth later OVERRIDES these with the persisted
     # task_results values when the result file survives (row = fallback only).
-    for key in _TASK_COST_META_FIELDS:
+    # ABI-3: CONVERTED, not copied — a stored legacy row's pair resolves
+    # deprecated-wins and replays under the honest names only.
+    rec.update(carry_cost_meta(entry))
+    # Live-card outcome axes ride the summary row too (the pruned-result
+    # fallback); persisted task_results values still override them below.
+    for key in ("outcome_phase", "outcome_final"):
         if key in entry:
             rec[key] = entry[key]
 
@@ -522,7 +379,7 @@ def _annotate_terminal_task_truth(
     data_dir: pathlib.Path,
     result_cache: Optional[Dict[str, Dict[str, Any]]] = None,
     floor: str = "",
-    active_children: Optional[set] = None,
+    anchored_children: Optional[set] = None,
 ) -> None:
     """Project bounded terminal truth and legacy child identity onto replay rows.
 
@@ -536,15 +393,17 @@ def _annotate_terminal_task_truth(
     ``result_cache`` (task_id -> effective result) lets the endpoint share the
     task_results reads already performed by the pre-floor lineage pass.
 
-    ``floor``/``active_children`` (already computed by ``_apply_window_quotas``)
-    extend the progress-stream lineage recency floor to chat FINALS: a
-    non-progress subagent row older than the floor whose child is not active
-    loses its lineage identity (raw fields stripped, legacy injection undone),
-    so an aged swarm's final cannot re-mint an orphaned "Working" parent card
-    on reload. Uses ONLY the floor + the pre-computed active set — zero extra
-    ``task_results`` reads."""
+    ``floor``/``anchored_children`` (already computed by ``_apply_window_quotas``)
+    extend the progress-stream lineage anchor to chat FINALS: a non-progress
+    subagent row older than the floor whose child is NOT anchored (see #496 —
+    the child is alive, or its parent is represented by this response, or the
+    parent is alive, transitively) loses its lineage identity (raw fields
+    stripped, legacy injection undone), so an ABSENT swarm's final cannot
+    re-mint an orphaned "Working" parent card on reload. Uses ONLY the floor and
+    the pre-computed set — zero extra reads."""
 
     try:
+        from ouroboros.project_dialogue import outcome_phase
         from ouroboros.task_status import FINAL_STATUSES
 
         cache = result_cache if result_cache is not None else {}
@@ -565,7 +424,6 @@ def _annotate_terminal_task_truth(
             if message.get("task_id")
             and not message.get("is_progress")
             and str(message.get("role") or "") in {"assistant", "system"}
-            and str(message.get("delegation_role") or "").lower() != "subagent"
             and str(message.get("task_id") or "") not in progress_task_ids
         }
         terminal_status_by_task: Dict[str, str] = {}
@@ -599,6 +457,7 @@ def _annotate_terminal_task_truth(
                 terminal_status_by_task[task_id] = status
                 terminal_truth: Dict[str, Any] = {
                     "outcome_axes": normalize_outcome_axes(result),
+                    "outcome_phase": outcome_phase(result, {}), "outcome_final": True,
                 }
                 if result.get("reason_code"):
                     terminal_truth["reason_code"] = str(result.get("reason_code") or "")
@@ -608,10 +467,10 @@ def _annotate_terminal_task_truth(
                 # v6.82 P1: attach the persisted terminal cost truth. Applied via
                 # message.update() below, so it OVERRIDES any row-embedded
                 # task_summary snapshot values (the result file is authoritative;
-                # the row snapshot is the pruned-result fallback).
-                for key in _TASK_COST_META_FIELDS:
-                    if key in result:
-                        terminal_truth[key] = result[key]
+                # the row snapshot is the pruned-result fallback). ABI-3:
+                # CONVERTED, not copied — a stored legacy result's pair
+                # resolves deprecated-wins and leaves under the honest names.
+                terminal_truth.update(carry_cost_meta(result))
                 terminal_truth_by_task[task_id] = terminal_truth
                 envelope = result.get("subagent_envelope")
                 evidence = (
@@ -644,7 +503,7 @@ def _annotate_terminal_task_truth(
             if previous is None or str(message.get("ts") or "") >= str(previous.get("ts") or ""):
                 latest_progress_by_task[task_id] = message
 
-        active = active_children or set()
+        anchored = anchored_children or set()
         for message in combined:
             task_id = str(message.get("task_id") or "")
             if not task_id:
@@ -661,6 +520,11 @@ def _annotate_terminal_task_truth(
                 message["task_terminal_status"] = terminal_status_by_task[task_id]
                 if latest_progress_by_task.get(task_id) is message:
                     message.update(terminal_receipt_by_task.get(task_id) or {})
+            elif task_id in anchored and task_id not in latest_progress_by_task:
+                # #496: a still-anchored child whose progress rows fell out of the
+                # read tail keeps its executor receipt on the one final row the
+                # window still holds, so its harness chip needs no "Load older".
+                message.update(terminal_receipt_by_task.get(task_id) or {})
             is_summary = str(message.get("system_type") or "") == "task_summary"
             if is_summary or (
                 task_id not in summary_task_ids
@@ -672,17 +536,18 @@ def _annotate_terminal_task_truth(
             # Floor-symmetric closed lineage window for chat FINALS: strip runs
             # AFTER the legacy setdefault injection above as the LAST writer —
             # a strip before the legacy_final_task_ids scan would re-qualify
-            # the de-roled row for revival. (The active_children clause is
+            # the de-roled row for revival. (The anchored_children clause is
             # load-bearing for mid-run child SPEECH rows (every child chat row
-            # carries lineage, not only finals) and symmetric with the progress
-            # floor; for terminal finals the clause is naturally unreachable.
-            # do not "simplify" it away.)
+            # carries lineage, not only finals), symmetric with the progress
+            # anchor, and since #496 it is live for terminal finals too: a
+            # finished child under a represented or living parent keeps its
+            # identity. Do not "simplify" it away.)
             stale = (
                 not message.get("is_progress")
                 and str(message.get("delegation_role") or "").lower() == "subagent"
                 and bool(floor)
                 and str(message.get("ts") or "") < floor
-                and task_id not in active
+                and task_id not in anchored
             )
             if stale:
                 for key in SUBAGENT_MESSAGE_FIELDS:
@@ -790,10 +655,11 @@ def _make_thread_filter(
             if isinstance(entry, dict) and _matches_project_source(entry, project_source_refs):
                 return True
             return entry_chat == thread_id
-        # chat 0 is the hidden Skill Review panel/archive partition. Main is 1;
-        # explicit panel rows never become ordinary conversation history. Keep
-        # this after the Project branch so durable task binding stays unchanged.
-        if entry_chat == 0:
+        # The hidden partition (Skill Review, and every headless run admitted
+        # without a registered project). Main is 1; explicit partition rows never
+        # become ordinary conversation history. Keep this after the Project
+        # branch so durable task binding stays unchanged.
+        if entry_chat == HIDDEN_CHAT_ID:
             return False
         # Main / non-project view: exactly the two host-stamped Project-root
         # lifecycle rows (started + terminal completion) are admitted from the
@@ -877,7 +743,10 @@ def _collect_chat_rows(
                 "sender_session_id": str(entry.get("sender_session_id", "")),
                 "client_message_id": str(entry.get("client_message_id", "")),
                 "task_id": str(entry.get("task_id", "")),
-                "telegram_chat_id": int(entry.get("telegram_chat_id") or 0),
+                # ABI-3: the deprecated ``telegram_chat_id`` twin is no longer
+                # re-emitted; legacy chat.jsonl rows carrying it stay readable
+                # (the key is simply ignored), and ``transport`` is the
+                # provenance surface.
             }
             if rec["system_type"] in {"project_started", "project_completion_summary"}:
                 # Read-side plain normalization for lifecycle rows persisted
@@ -1040,6 +909,10 @@ def _collect_progress_rows(
             for field in _PROGRESS_META_FIELDS:
                 if field in entry:
                     rec[field] = entry[field]
+            # ABI-3: the whitelist passes only the honest cost names; a stored
+            # legacy row's pair is CONVERTED here (deprecated-wins) instead of
+            # being replayed under the retired spelling or silently dropped.
+            rec.update(carry_cost_meta(entry))
             combined.append(rec)
     except Exception as exc:
         log.warning("Failed to read progress log: %s", exc)
@@ -1196,7 +1069,7 @@ def _apply_window_quotas(
     """Quota slicing, origin fallback, and the lineage floor/cap (perf2 P3).
 
     Returns ``(messages, result_cache, human_rows_dropped, lineage_truncated,
-    review_overlays_truncated, floor, active_children)`` for annotation and
+    review_overlays_truncated, floor, anchored_children)`` for annotation and
     window metadata (the last two feed the chat-final lineage strip in
     ``_annotate_terminal_task_truth``).
     """
@@ -1204,10 +1077,11 @@ def _apply_window_quotas(
     # burst of progress messages can never push the user's real conversation out
     # (the previous single combined[-limit:] tail). Subagent lineage is kept on
     # top of the progress quota so a flood can't evict a RECENT child's lifecycle
-    # events (the client rebuilds child-card lineage from them) — but only WITHIN
-    # the recent telemetry window: resurrecting an old finished swarm's child
-    # events would recreate an orphaned "Working" parent card whose own terminal
-    # row has already aged out of the window.
+    # events (the client rebuilds child-card lineage from them). Older lineage
+    # survives when the window still describes its topology (#496, below);
+    # lineage whose parent is neither represented here nor alive is dropped, so
+    # a finished swarm cannot recreate an orphaned "Working" parent card whose
+    # own terminal row has already aged out of the window.
     def _is_subagent_lineage(m: dict) -> bool:
         # Only true SUBAGENT lifecycle (delegation_role 'subagent' or any
         # subagent_event) is lineage-critical. delegation_role can also be
@@ -1306,8 +1180,9 @@ def _apply_window_quotas(
         and str(m.get("system_type") or "") != "review_reference"
     ]
     other_tail = other[-n_progress:] if n_progress > 0 else []
-    # Recency floor = oldest retained telemetry row. Drop lineage older than it so
-    # long-finished swarms don't re-materialise as stuck "Working" parent cards.
+    # Recency floor = oldest retained telemetry row. Lineage older than it is
+    # dropped unless anchored below, so an ABSENT finished swarm cannot
+    # re-materialise as a stuck "Working" parent card.
     floor = str(other_tail[0].get("ts") or "") if other_tail else ""
     lineage_rows = [m for m in progress if _is_subagent_lineage(m)]
     # perf2 P3 variant A (owner decision 2026-08-09): a QUIET but still-ACTIVE
@@ -1315,29 +1190,96 @@ def _apply_window_quotas(
     # these lineage rows. Terminal truth for the lineage task ids of the READ
     # window is resolved BEFORE the floor/cap slice; the same cache then feeds
     # _annotate_terminal_task_truth after the slice, so each task_results file
-    # is read at most once per request. The floor keeps dropping rows of
-    # terminal/unknown children (anti-zombie preserved), and the effective-
-    # status orphan guard resolves a long-dead raw "running" child as failed,
-    # i.e. terminal, so it cannot pin its lineage forever.
+    # is read at most once per request. The effective-status orphan guard
+    # resolves a long-dead raw "running" child as failed, i.e. terminal, so a
+    # dead child cannot pin its own lineage forever.
+    # #496: recency is the wrong PROXY for "does this child belong to a topology
+    # the window still describes". The honest predicate (owner liveness doctrine
+    # 2026-08-23) anchors a child when the child is itself alive, OR its parent is
+    # REPRESENTED by this response, OR the parent is alive — and a child so
+    # anchored represents ITS OWN children, so a swarm is kept or dropped whole.
+    # "Represented" is narrower than "some emitted row carries this task id": a
+    # delivery (photo, document, quiz) carries one mid-run and proves nothing
+    # about the task's card — the client refuses role+task_id as a conclusion for
+    # the same reason — so counting those would let a parent with no closable fact
+    # re-anchor a finished swarm, the zombie the floor existed to prevent.
     result_cache: Dict[str, Dict[str, Any]] = {}
-    active_children: set = set()
-    if floor and lineage_rows:
+    anchored_children: set = set()
+    child_rows = [
+        m for m in (*lineage_rows, *human_tail, *other_tail)
+        if _is_subagent_lineage(m) and m.get("task_id")
+    ]
+    if floor and child_rows:
+        def _represents(m: dict) -> str:
+            """The task this row proves is present in the window, or ""."""
+            owner = str(m.get("presentation_owner_task_id") or "")
+            if owner:
+                return owner  # a folded review / plan reference names its owner
+            task_id = str(m.get("task_id") or "")
+            if not task_id or m.get("is_progress"):
+                return task_id  # telemetry IS the task's own narration
+            # Its own message or summary closes a task; a typed delivery or a
+            # host project lifecycle row does not.
+            return task_id if str(m.get("system_type") or "") in ("", "task_summary") else ""
+
+        # Seeded outside the lineage still being decided: a PRE-FLOOR child's own
+        # final cannot represent it to its children before the window has decided
+        # whether that child belongs at all. At or after the floor a lineage row
+        # is never stripped, so it is closable and counts like any other.
+        seed = (*other_tail, *folded_reviews, *review_references,
+                *(m for m in human_tail
+                  if not _is_subagent_lineage(m) or str(m.get("ts") or "") >= floor))
+        represented = {owner for owner in map(_represents, seed) if owner}
         try:
             from ouroboros.task_status import FINAL_STATUSES
 
-            for task_id in {str(m.get("task_id") or "") for m in lineage_rows if m.get("task_id")}:
-                status = str(
-                    _load_terminal_result(data_dir, task_id, result_cache).get("status") or ""
+            def _alive(task_id: str) -> bool:
+                # Shared with the terminal-truth annotation above: a stored
+                # "completed" whose post-task synthesis is still OPEN is
+                # FINALIZING, not terminal, so its children must not be dropped.
+                result = _load_terminal_result(data_dir, task_id, result_cache)
+                status = str(result.get("status") or "")
+                checkpoint = result.get("root_phase_checkpoint")
+                synthesis = (
+                    str(checkpoint.get("post_task_synthesis") or "")
+                    if isinstance(checkpoint, dict) else ""
                 )
-                if status and status not in FINAL_STATUSES:
-                    active_children.add(task_id)
+                if post_task_synthesis_is_open(synthesis) and status not in {"failed", "cancelled"}:
+                    return True
+                return bool(status) and status not in FINAL_STATUSES
+
+            # Fixed point: an anchored child is itself represented for its own
+            # children. Seeded only from facts above, so a cycle or a
+            # self-parenting row can never bootstrap itself into the window.
+            pending = list(child_rows)
+            while True:
+                grew = False
+                for m in pending:
+                    task_id = str(m.get("task_id") or "")
+                    if task_id in anchored_children:
+                        continue
+                    # The IMMEDIATE parent only: anchoring to a represented tree
+                    # ROOT would keep a leaf whose own parent is absent and dead,
+                    # and the client mints that missing parent's card from the
+                    # leaf's lineage — a card this response cannot close. The
+                    # fixed point carries a live root down one real link at a time.
+                    parent = str(m.get("parent_task_id") or "")
+                    if (
+                        (parent and (parent in represented or parent in anchored_children))
+                        or _alive(task_id)
+                        or (parent and parent != task_id and _alive(parent))
+                    ):
+                        anchored_children.add(task_id)
+                        grew = True
+                if not grew:
+                    break
         except Exception as exc:
             log.debug("Failed to resolve pre-floor lineage terminal truth: %s", exc)
     lineage = [
         m for m in lineage_rows
         if not floor
         or str(m.get("ts") or "") >= floor
-        or str(m.get("task_id") or "") in active_children
+        or str(m.get("task_id") or "") in anchored_children
     ]
     # The cap stays a suffix slice applied AFTER the floor: an active child with
     # more rows than the cap keeps its newest rows, so its card stays alive.
@@ -1351,7 +1293,7 @@ def _apply_window_quotas(
     )
     return (
         messages, result_cache, human_rows_dropped, lineage_truncated,
-        review_overlays_truncated, floor, active_children,
+        review_overlays_truncated, floor, anchored_children,
     )
 
 
@@ -1438,7 +1380,7 @@ def _assemble_history_response(
         combined.append(lifecycle_row)
     (
         messages, result_cache, human_rows_dropped, lineage_truncated,
-        review_overlays_truncated, floor, active_children,
+        review_overlays_truncated, floor, anchored_children,
     ) = _apply_window_quotas(
         data_dir, thread_id, project_chat_ids, combined, n_human, n_progress
     )
@@ -1453,7 +1395,7 @@ def _assemble_history_response(
     # a row the client will see (see _annotate_terminal_task_truth).
     _annotate_terminal_task_truth(
         messages, data_dir, result_cache=result_cache,
-        floor=floor, active_children=active_children,
+        floor=floor, anchored_children=anchored_children,
     )
 
     # Background consciousness writes no task_result, so its progress would

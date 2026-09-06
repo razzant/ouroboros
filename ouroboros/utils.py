@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import contextlib
 import datetime as _dt
 import hashlib
 import json
@@ -16,7 +17,7 @@ import time
 import uuid
 from collections import deque
 from collections.abc import Iterator
-from typing import Any, Callable, Dict, List, Optional
+from typing import Any, Callable, Dict, List, Optional, Tuple
 
 log = logging.getLogger(__name__)
 
@@ -209,19 +210,30 @@ _REPLACE_RETRY_INITIAL_DELAY_SEC = 0.002
 _REPLACE_RETRY_MAX_DELAY_SEC = 0.1
 
 
-def replace_atomic(src: pathlib.Path | str, dst: pathlib.Path | str) -> None:
+def replace_atomic(
+    src: pathlib.Path | str, dst: pathlib.Path | str, *,
+    precondition: Callable[[], bool] | None = None,
+) -> bool:
     """``os.replace`` with a bounded retry on Windows sharing violations.
 
     Retries ONLY on PermissionError, which POSIX rename(2) never raises for an
     open destination — so POSIX behavior is byte-identical (one syscall, no
     sleeps). After the bound is exhausted the last PermissionError propagates
     unchanged; every other exception propagates immediately.
+
+    ``precondition`` is asked immediately before EVERY attempt, retries
+    included: a proof taken before a refused attempt is stale by the next one
+    (the monetary ledger swap re-proves lock ownership and its snapshot here,
+    CPL4-C6). A ``False`` answer leaves ``dst`` untouched and returns False,
+    ``src`` left for the caller to remove; True once replaced.
     """
     delay = _REPLACE_RETRY_INITIAL_DELAY_SEC
     for attempt in range(_REPLACE_RETRY_ATTEMPTS):
+        if precondition is not None and not precondition():
+            return False
         try:
             os.replace(src, dst)
-            return
+            return True
         except PermissionError:
             if attempt == _REPLACE_RETRY_ATTEMPTS - 1:
                 raise
@@ -245,40 +257,50 @@ def _atomic_overwrite(path: pathlib.Path, write_temp: Callable[[pathlib.Path], N
     Note: a symlink at ``path`` is REPLACED with a regular file (os.replace acts on the
     link, not its target). This is intentional and confinement-preserving — writing
     THROUGH a symlink could escape the caller's allowed root — so the write always lands
-    inside ``path``'s directory rather than wherever a link points."""
+    inside ``path``'s directory rather than wherever a link points.
+
+    Being that SSOT is also why the pytest live-data guard sits here rather than on each
+    writer: every full-file overwrite in the tree replaces through this seam, so the next
+    writer added is guarded by construction instead of by remembering (RES-14b)."""
     path = pathlib.Path(path)
+    assert_test_data_path(path)
     path.parent.mkdir(parents=True, exist_ok=True)
     try:
         # 0o7777 keeps the special bits (setuid/setgid/sticky) too, not just rwx.
         existing_mode = os.stat(path).st_mode & 0o7777
     except OSError:
         existing_mode = None  # new file -> keep the platform default
-    tmp_name = (
-        f".{path.name}.tmp.{os.getpid()}.{threading.get_ident()}.{uuid.uuid4().hex[:8]}"
-    )
-    tmp = path.with_name(tmp_name)
+    tmp = path.with_name(f".{path.name}.tmp.{os.getpid()}.{threading.get_ident()}.{uuid.uuid4().hex[:8]}")
     try:
         write_temp(tmp)
         if existing_mode is not None:
-            try:
+            with contextlib.suppress(OSError):
                 os.chmod(tmp, existing_mode)
-            except OSError:
-                pass
         replace_atomic(tmp, path)
     except Exception:
-        try:
+        with contextlib.suppress(OSError):
             tmp.unlink()
-        except OSError:
-            pass
         raise
 
 
-def write_bytes_atomic(
-    path: pathlib.Path,
-    content: bytes,
-    *,
-    fsync: bool = False,
-) -> None:
+def _write_fd_fully(fd: int, data: bytes, target: pathlib.Path) -> None:
+    """``os.write`` until every byte lands.
+
+    A single call may write SHORT (POSIX permits partial writes — signals,
+    quota edges, some filesystems), and treating its return as done truncates
+    the record silently: the atomic lanes would publish a half document behind
+    a successful rename, and the append lane a TORN line behind a successful
+    append. One loop for every durable writer in this module.
+    """
+    view = memoryview(data)
+    while view:
+        written = os.write(fd, view)
+        if written <= 0:
+            raise OSError(f"short write to {target}")
+        view = view[written:]
+
+
+def write_bytes_atomic(path: pathlib.Path, content: bytes, *, fsync: bool = False) -> None:
     """Atomically overwrite ``path`` with exact bytes."""
 
     def _write(tmp: pathlib.Path) -> None:
@@ -288,12 +310,7 @@ def write_bytes_atomic(
         flags = os.O_WRONLY | os.O_CREAT | os.O_TRUNC | getattr(os, "O_BINARY", 0)
         fd = os.open(str(tmp), flags, 0o644)
         try:
-            view = memoryview(content)
-            while view:
-                written = os.write(fd, view)
-                if written <= 0:
-                    raise OSError(f"short write to {tmp}")
-                view = view[written:]
+            _write_fd_fully(fd, content, tmp)
             os.fsync(fd)
         finally:
             os.close(fd)
@@ -301,35 +318,27 @@ def write_bytes_atomic(
     _atomic_overwrite(path, _write)
 
 
-def write_text_atomic(
-    path: pathlib.Path,
-    content: str,
-    *,
-    fsync: bool = False,
-) -> None:
-    """Atomically overwrite UTF-8 text with platform newline semantics."""
+def write_text_atomic(path: pathlib.Path, content: str, *, fsync: bool = False) -> None:
+    """Atomically overwrite ``path`` with ``content`` encoded UTF-8, BYTE-EXACT.
 
-    def _write(tmp: pathlib.Path) -> None:
-        if fsync:
-            fd = os.open(str(tmp), os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o644)
-            try:
-                os.write(fd, content.encode("utf-8"))
-                os.fsync(fd)
-            finally:
-                os.close(fd)
-        else:
-            tmp.write_text(content, encoding="utf-8")
+    The file receives exactly ``content.encode("utf-8")`` on every platform:
+    the newlines the caller wrote are the newlines on disk. This is the
+    contract every caller in this tree needs — durable JSON state (through
+    ``atomic_write_json``), receipts, run manifests, projection files, and the
+    agent's own file writes/edits, which round-trip source text that Python
+    reads back with universal newlines.
 
-    _atomic_overwrite(path, _write)
+    It used to be "platform newline semantics": both lanes translated ``\\n``
+    to ``\\r\\n`` on Windows (``Path.write_text`` in text mode, and ``os.open``
+    without ``O_BINARY``). Nothing asked for that translation, while a
+    byte-compared manifest, a hashed receipt and an LF source file the agent
+    merely re-saved were all silently rewritten by it.
+    """
+    write_bytes_atomic(pathlib.Path(path), content.encode("utf-8"), fsync=fsync)
 
 
-def atomic_write_json(
-    path: pathlib.Path,
-    payload: Any,
-    *,
-    trailing_newline: bool = False,
-    fsync: bool = False,
-) -> None:
+def atomic_write_json(path: pathlib.Path, payload: Any, *, trailing_newline: bool = False,
+                      fsync: bool = False) -> None:
     """Atomically persist a JSON value (object or list) via a sibling temp file."""
     content = json.dumps(payload, ensure_ascii=False, indent=2)
     if trailing_newline:
@@ -350,6 +359,12 @@ def sweep_stale_temp_files(root: pathlib.Path, *, min_age_sec: float = 3600.0) -
     Only files whose suffix after the final ``.tmp.`` is the atomic signature
     (pid/tid/uuid → hex digits and dots) are reaped, so a legitimate user dotfile
     such as ``.config.tmp.backup`` is never deleted.
+
+    The data-root ``tmp_scripts/`` fallback is in scope too (CPL4-C20):
+    ``tools/shell.py`` unlinks its ``script_<uuid>.<ext>`` files in a
+    ``finally``, so one that survived is a hard-kill orphan. Only the
+    TOP-LEVEL fallback dir is swept here — task-drive copies die with their
+    drive's own GC prune — and only at startup, when no script can be live.
     """
     root = pathlib.Path(root)
     if not root.is_dir():
@@ -359,17 +374,21 @@ def sweep_stale_temp_files(root: pathlib.Path, *, min_age_sec: float = 3600.0) -
     now = time.time()
     try:
         candidates = list(root.rglob(".*.tmp.*"))
+        candidates.extend(root.glob("tmp_scripts/script_*"))
     except OSError:
         return 0
+    fallback_scripts = root / "tmp_scripts"
     for tmp in candidates:
         try:
             if not tmp.is_file():
                 continue
-            # Require the post-".tmp." suffix to be the atomic signature (hex/dot
-            # only) so we never delete an unrelated dotfile that happens to match.
-            suffix = tmp.name.rsplit(".tmp.", 1)
-            if len(suffix) != 2 or not suffix[1] or set(suffix[1]) - hex_chars:
-                continue
+            if not (tmp.parent == fallback_scripts and tmp.name.startswith("script_")):
+                # Require the post-".tmp." suffix to be the atomic signature
+                # (hex/dot only) so we never delete an unrelated dotfile that
+                # happens to match.
+                suffix = tmp.name.rsplit(".tmp.", 1)
+                if len(suffix) != 2 or not suffix[1] or set(suffix[1]) - hex_chars:
+                    continue
             if now - tmp.stat().st_mtime < min_age_sec:
                 continue
             tmp.unlink()
@@ -460,6 +479,38 @@ def jsonl_append_lock_path(path: pathlib.Path) -> pathlib.Path:
     return path.parent / f".append_jsonl_{path_hash}.lock"
 
 
+def assert_test_data_path(path: pathlib.Path) -> None:
+    """Fail closed when pytest resolves a writer into the live data tree.
+
+    Lives here (the no-ouroboros-imports leaf) so the whole durable-write
+    surface guards the same roots from two seams: ``append_jsonl`` below for
+    appends, and ``_atomic_overwrite`` above for every full-file replace
+    (``supervisor.state.atomic_write_text`` included, which also calls it
+    directly). The jsonl side was the unguarded half that let the issue #455
+    supervisor.jsonl leak land silently. Outside pytest this is one env read.
+    """
+    if os.environ.get("OUROBOROS_PYTEST_ACTIVE") != "1":
+        return
+    if os.environ.get("OUROBOROS_ALLOW_LIVE_DATA_TESTS") == "1":
+        return
+    # ``expanduser``, not ``Path.home()``: this guards the tree of the operator
+    # RUNNING pytest, which the environment fixes. A suite that redirects
+    # ``Path.home`` into its own tmp dir is hermetic by construction, and reading
+    # the patched attribute made those writes look live; redirecting ``$HOME``
+    # itself still moves the guard, as the hermetic subprocess pin needs.
+    roots = {pathlib.Path(os.path.expanduser("~")) / "Ouroboros" / "data"}
+    configured = str(os.environ.get("OUROBOROS_TEST_LIVE_DATA_ROOT") or "").strip()
+    if configured:
+        roots.add(pathlib.Path(configured))
+    target = pathlib.Path(path).resolve(strict=False)
+    for root in roots:
+        try:
+            target.relative_to(root.resolve(strict=False))
+        except ValueError:
+            continue
+        raise RuntimeError(f"PYTEST_LIVE_DATA_WRITE_BLOCKED: {target}")
+
+
 def append_jsonl(
     path: pathlib.Path, obj: Dict[str, Any], *, ensure_record_boundary: bool = False,
     require_lock: bool = False,
@@ -470,7 +521,8 @@ def append_jsonl(
     append; it is opt-in so high-volume event logs keep their established path.
     ``require_lock`` is reserved for authority streams that also have atomic
     whole-file reconciliation: unlike high-volume observational logs, they may
-    not fall back to an unlocked append after lock timeout.
+    not fall back to an unlocked append after lock timeout. Both lanes take the
+    shared owner-aware lock primitive, so a live holder is never displaced.
     Returns ``True`` on successful write, ``False`` when all retries
     failed (which is also logged at WARNING). Important events
     (``task_done``, ``llm_round``, escalation messages) need that signal
@@ -479,59 +531,40 @@ def append_jsonl(
     """
     if not isinstance(path, pathlib.Path):
         raise TypeError(f"append_jsonl: path must be pathlib.Path, got {type(path).__name__}")
+    assert_test_data_path(path)
     path.parent.mkdir(parents=True, exist_ok=True)
     line = json.dumps(obj, ensure_ascii=False)
     data = (line + "\n").encode("utf-8")
 
-    lock_timeout_sec = 2.0
-    lock_stale_sec = 10.0
-    lock_sleep_sec = 0.01
     write_retries = 3
     retry_sleep_base_sec = 0.01
 
+    from ouroboros.platform_layer import (
+        acquire_exclusive_file_lock,
+        release_exclusive_file_lock,
+    )
+
     lock_path = jsonl_append_lock_path(path)
     lock_fd = None
-    lock_acquired = False
     _written = False
 
     try:
-        if require_lock:
-            from ouroboros.platform_layer import acquire_exclusive_file_lock
+        # ONE lock primitive for both lanes. The unlocked lane used to hand-roll
+        # its own O_CREAT|O_EXCL + age-reclaim loop — the duplicate this module's
+        # own contract tells feature code not to write — and the copy was NOT
+        # owner-aware, so a high-volume appender could delete the lock of a LIVE
+        # holder (the memory-journal compactor rewrites a journal under exactly
+        # this lock). Owner-aware everywhere: a live holder is waited out and the
+        # non-required lane then appends unlocked, exactly as before.
+        lock_fd = acquire_exclusive_file_lock(
+            lock_path,
+            timeout_sec=2.0,
+            stale_sec=10.0,
+            poll_sec=0.01,
+            owner_aware_stale=True,
+        )
 
-            lock_fd = acquire_exclusive_file_lock(
-                lock_path,
-                timeout_sec=lock_timeout_sec,
-                stale_sec=lock_stale_sec,
-                poll_sec=lock_sleep_sec,
-                owner_aware_stale=True,
-            )
-            lock_acquired = lock_fd is not None
-        else:
-            start = time.time()
-            while time.time() - start < lock_timeout_sec:
-                try:
-                    lock_fd = os.open(
-                        str(lock_path), os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o644,
-                    )
-                    lock_acquired = True
-                    break
-                except FileExistsError:
-                    try:
-                        stat = lock_path.stat()
-                        if time.time() - stat.st_mtime > lock_stale_sec:
-                            lock_path.unlink()
-                            continue
-                    except Exception:
-                        log.debug(
-                            "Failed to read lock stat during lock acquisition retry",
-                            exc_info=True,
-                        )
-                    time.sleep(lock_sleep_sec)
-                except Exception:
-                    log.debug("Failed to acquire file lock for jsonl append", exc_info=True)
-                    break
-
-        if require_lock and not lock_acquired:
+        if require_lock and lock_fd is None:
             log.warning("append_jsonl: required lock unavailable for %s", path)
             return False
 
@@ -555,15 +588,27 @@ def append_jsonl(
         for attempt in range(write_retries):
             try:
                 fd = os.open(str(path), os.O_WRONLY | os.O_CREAT | os.O_APPEND, 0o644)
-                try:
-                    os.write(fd, append_data)
-                finally:
-                    os.close(fd)
-                _written = True
-                return True
             except Exception:
                 if attempt < write_retries - 1:
                     time.sleep(retry_sleep_base_sec * (2 ** attempt))
+                continue
+            try:
+                # One bare ``os.write`` may land SHORT: trusting its return
+                # published a TORN line as a successful append (the class the
+                # atomic writers already fixed). Share their full-write loop.
+                _write_fd_fully(fd, append_data, path)
+                _written = True
+                return True
+            except Exception:
+                # Bytes of this record may already be in the file; re-appending
+                # the whole line would duplicate that prefix. Report the failure
+                # (the caller owns the fallback) and let the next append's
+                # ``ensure_record_boundary`` start a clean record — a partially
+                # landed record is never retried whole.
+                log.warning("append_jsonl: torn write to %s", path, exc_info=True)
+                return False
+            finally:
+                os.close(fd)
 
         for attempt in range(write_retries):
             try:
@@ -577,18 +622,7 @@ def append_jsonl(
     except Exception:
         log.warning("append_jsonl: all write attempts failed for %s", path, exc_info=True)
     finally:
-        if lock_fd is not None:
-            try:
-                os.close(lock_fd)
-            except Exception:
-                log.debug("Failed to close lock fd after jsonl append", exc_info=True)
-                pass
-        if lock_acquired:
-            try:
-                lock_path.unlink()
-            except Exception:
-                log.debug("Failed to unlink lock file after jsonl append", exc_info=True)
-                pass
+        release_exclusive_file_lock(lock_path, lock_fd)
         # Live-stream only runtime LOG files. chat.jsonl has its own live
         # channel (the chat frame family), and state/memory/receipt jsonl
         # stores are durable data, not a log feed — streaming them made every
@@ -664,6 +698,155 @@ def iter_jsonl_objects(
                     gap_reasons.add("invalid_jsonl_row")
     except FileNotFoundError:
         return
+
+
+class JsonlChainUnreadable(OSError):
+    """A rotated JSONL chain could not be enumerated or opened IN FULL.
+
+    Authority readers (money, custody) pass ``strict=True`` so an unreadable
+    ``archive/`` directory or segment is a TYPED incomplete view instead of an
+    empty one — the lenient default answers "this store never rotated" for
+    both, which is how a permission error silently under-counts a ledger.
+    Fail-soft readers (UI tails, context backfill, boot probes) keep the
+    lenient default: a missing segment degrades their window, it decides
+    nothing.
+    """
+
+
+def jsonl_archive_segments(
+    path: pathlib.Path, *, strict: bool = False,
+) -> List[pathlib.Path]:
+    """Rotated archive segments for a ``logs/<name>.jsonl`` store, oldest first.
+
+    ``rotate_jsonl_log_if_needed`` renames the live file to
+    ``archive/<stem>_<ts>[_<n>].jsonl`` beside the ``logs/`` directory;
+    lexicographic name order is chronological by construction (the rotator's
+    ``_<n>`` collision suffix sorts after ``<ts>.jsonl``). A store that never
+    rotated yields an empty list.
+
+    Enumeration is an explicit ``scandir``: ``Path.glob`` SWALLOWS a
+    ``PermissionError`` on the archive directory and yields nothing, so the
+    former ``except OSError`` never saw the very failure that matters. With
+    ``strict`` an unreadable directory raises :class:`JsonlChainUnreadable`;
+    an absent one is still positively empty on both paths.
+    """
+    path = pathlib.Path(path)
+    archive_dir = path.parent.parent / "archive"
+    stem = path.name[:-len(".jsonl")] if path.name.endswith(".jsonl") else path.stem
+    prefix = f"{stem}_"
+    try:
+        with os.scandir(archive_dir) as entries:
+            found = [
+                pathlib.Path(entry.path)
+                for entry in entries
+                if entry.name.startswith(prefix)
+                and entry.name.endswith(".jsonl")
+                and entry.is_file()
+            ]
+    except FileNotFoundError:
+        return []
+    except OSError as exc:
+        if strict:
+            raise JsonlChainUnreadable(
+                f"cannot enumerate the rotated archive of {path}: {exc}"
+            ) from exc
+        return []
+    return sorted(found)
+
+
+@contextlib.contextmanager
+def jsonl_chain_handles(
+    path: pathlib.Path, *, strict: bool = False,
+) -> Iterator[List[Tuple[pathlib.Path, Any]]]:
+    """Open a rotated JSONL store's whole chain for ONE consistent read.
+
+    Yields ``[(path, binary_handle), ...]`` oldest→newest with the live file
+    last. The live file is opened FIRST, then the archive is enumerated: a
+    rotation racing this read renames the just-opened file into the archive,
+    where inode identity dedups it — so every durable row as of the open
+    instant is seen exactly once, in chronological order, whichever side of
+    the rename the reader lands on. (On Windows the rotator's ``os.replace``
+    fails while the handle is open, so the race cannot occur at all.)
+    By default unopenable segments are skipped (fail-soft readers own their
+    own probes). ``strict=True`` raises :class:`JsonlChainUnreadable` instead —
+    an absent live file, or a segment that vanished between enumeration and
+    stat, stays benign (rotation never deletes, so absence is positively
+    empty), but anything UNREADABLE is an incomplete view. Handles are closed
+    on exit.
+    """
+    path = pathlib.Path(path)
+    handles: List[Tuple[pathlib.Path, Any]] = []
+    live_handle = None
+    try:
+        try:
+            live_handle = path.open("rb")
+        except FileNotFoundError:
+            live_handle = None
+        except OSError as exc:
+            if strict:
+                raise JsonlChainUnreadable(f"cannot open {path}: {exc}") from exc
+            live_handle = None
+        live_id = None
+        if live_handle is not None:
+            try:
+                stat = os.fstat(live_handle.fileno())
+                live_id = (stat.st_dev, stat.st_ino)
+            except OSError as exc:
+                if strict:
+                    raise JsonlChainUnreadable(f"cannot stat {path}: {exc}") from exc
+                live_id = None
+        for segment in jsonl_archive_segments(path, strict=strict):
+            try:
+                seg_stat = segment.stat()
+            except FileNotFoundError:
+                continue
+            except OSError as exc:
+                if strict:
+                    raise JsonlChainUnreadable(f"cannot stat {segment}: {exc}") from exc
+                continue
+            if live_id is not None and (seg_stat.st_dev, seg_stat.st_ino) == live_id:
+                continue  # the open live handle IS this rotated segment
+            try:
+                handles.append((segment, segment.open("rb")))
+            except OSError as exc:
+                if strict:
+                    raise JsonlChainUnreadable(f"cannot open {segment}: {exc}") from exc
+                continue
+        if live_handle is not None:
+            handles.append((path, live_handle))
+            live_handle = None  # ownership moved into the list
+        yield handles
+    finally:
+        if live_handle is not None:
+            with contextlib.suppress(Exception):
+                live_handle.close()
+        for _, handle in handles:
+            with contextlib.suppress(Exception):
+                handle.close()
+
+
+def iter_jsonl_chain_objects(
+    path: pathlib.Path,
+    dict_only: bool = True,
+) -> Iterator[Any]:
+    """``iter_jsonl_objects`` across the rotated archive chain + live file.
+
+    Full-history readers that must not lose early rows to rotation use this
+    instead of a single-file read; bounded/tail readers keep their own
+    windows.
+    """
+    with jsonl_chain_handles(pathlib.Path(path)) as handles:
+        for _, handle in handles:
+            for raw in handle:
+                line = raw.decode("utf-8", errors="replace").strip()
+                if not line:
+                    continue
+                try:
+                    entry = json.loads(line)
+                except (json.JSONDecodeError, ValueError):
+                    continue
+                if not dict_only or isinstance(entry, dict):
+                    yield entry
 
 
 def iter_llm_usage_events(

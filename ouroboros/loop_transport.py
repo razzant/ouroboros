@@ -5,11 +5,34 @@ refused/timed out before request bytes left this host, $0 in the ledger) is not 
 model failure. Instead of burning the fallback chain or terminalizing, the round
 gate in ``loop.py`` latches a :class:`TransportWaitEpisode` and waits: durable
 ``network_wait`` events + owner progress notes, an interruptible backoff sleep,
-then a free redial of the SAME round (the round budget is not consumed). The wait
-is bounded only by the task's existing rails — owner deadline, budget, Stop, and
-the supervisor's absolute ceiling — never by a new limit. When the rails run out,
-``_handle_provider_unavailable`` takes a deterministic no-resend terminal keyed on
-the episode's ``wait_cause`` (no forced-final provider call).
+then a free redial of the SAME round (the round budget is not consumed). A managed
+task waits as long as its existing rails allow — owner deadline minus the
+dispatch-admission reserve, budget, Stop, and the supervisor's absolute ceiling.
+Every turn stamped direct-chat (owner chat and Presence turns) or ephemeral — the
+``interactive`` class — waits the same way but carries no queue rails and
+ordinarily no owner deadline, so its episode is bounded by the raw configured
+task idle timeout (``get_task_idle_timeout_sec``): the bound limits idle WAITING,
+measured from each outage episode's entry (a flapping egress starts a new
+episode); a granted redial runs to its own connect timeout and a dispatched
+response is always accepted — the bound never cancels in-flight work. When an
+explicit deadline window also exists, the shorter window binds. When the binding
+window runs out, ``_handle_provider_unavailable`` takes a deterministic no-resend
+terminal keyed on the episode's ``wait_cause`` (no forced-final provider call);
+the durable ``ended`` detail names the rail that expired — the bound's own
+``interactive_wait_window_exhausted``, or the deadline's detail when the owner
+window closed first. Interactive notes promise no cancellation (an in-process
+turn has no Stop contract; a direct turn's mailbox message still wakes the
+sleep). Recovery is an owner note for every episode; local adoption and
+error-kind change are notes for interactive turns only, because such a turn
+has no progress row to show the closure — a managed task keeps the durable
+row and its ordinary progress; exhaustion is a note for an interactive turn,
+while a managed task's exhaustion is its terminal result; only an ephemeral
+turn's episode-boundary
+notes (entry, recovery/closure, exhaustion) carry the typed ``task_incident``
+toast pair, because the browser renders no progress rows for that turn (direct
+turns get live-card rows); periodic notes stay silent. Every episode note passes
+``incident=`` (``None`` unless it is such a boundary note), so an ``emit_progress``
+callable handed to ``run_llm_loop`` must accept that keyword.
 
 Also hosts the owner-facing provider-failure text helpers and terminal salvage
 readers used by that terminal path (extracted from ``loop.py``, which is at its
@@ -32,8 +55,8 @@ from ouroboros.config import (
     get_finalization_grace_sec,
     get_task_idle_timeout_sec,
 )
-from ouroboros.deadline_utils import dispatch_window_remaining_sec, parse_deadline_ts
-from ouroboros.loop_llm_call import _TRANSIENT_BACKOFF_CAP_SEC
+from ouroboros.deadline_utils import parse_deadline_ts
+from ouroboros.loop_llm_call import TRANSPORT_DEATHS_KEY, _TRANSIENT_BACKOFF_CAP_SEC
 from ouroboros.utils import append_jsonl, utc_now_iso
 
 log = logging.getLogger(__name__)
@@ -53,16 +76,46 @@ class TransportWaitEpisode:
     terminal cause: later failures (a failed local fallback pass, the deadline
     admission gate) overwrite the usage projection, and the terminal decision
     must stay deterministic (no forced-final resend after a waited-out outage).
+    ``interactive`` is the wait-class fact (every turn stamped direct-chat or
+    ephemeral); ``ephemeral`` is the presentation fact (the browser renders no
+    progress rows for such a turn); ``wait_bound_sec`` is the local ceiling an
+    interactive turn gets in place of the queue rails it does not have.
     """
 
     wait_cause: str = "transport_unavailable"
     started_monotonic: float = 0.0
-    wait_eligible: bool = True
+    interactive: bool = False
+    ephemeral: bool = False
+    wait_bound_sec: Optional[float] = None
     redials: int = 0
     wait_iterations: int = 0
     last_note_monotonic: float = 0.0
     local_pass_used: bool = False
     final_redial_done: bool = False
+
+    @property
+    def waited_sec(self) -> float:
+        """Wall time spent waiting and redialing; 0.0 before the first wait
+        iteration, so a zero-wait terminal never claims it waited."""
+        return time.monotonic() - self.started_monotonic if self.wait_iterations else 0.0
+
+    def incident(self, task_id: str, phase: str) -> Optional[Dict[str, str]]:
+        """Typed toast pair for an ephemeral episode's owner note.
+
+        The browser renders progress rows for managed tasks and direct turns
+        but not for ephemeral decision turns, whose only owner-visible wait
+        surface is the one-shot ``task_incident`` toast (``toast_once`` dedupes
+        replay; the millisecond entry stamp keeps two episodes of one turn
+        distinct). Managed and direct episodes carry none.
+        """
+        if not self.ephemeral:
+            return None
+        return {
+            "task_incident": "network_wait",
+            "toast_once": (
+                f"{task_id}:network_wait:{phase}:{int(self.started_monotonic * 1000)}"
+            ),
+        }
 
 
 def emit_network_wait_event(
@@ -74,9 +127,14 @@ def emit_network_wait_event(
     redials: int,
     model: str,
     next_sleep_sec: Optional[float] = None,
+    window_remaining_sec: Optional[float] = None,
     detail: str = "",
 ) -> None:
-    """Durable episode evidence in events.jsonl (typed rows; no keyword scans)."""
+    """Durable episode evidence in events.jsonl (typed rows; no keyword scans).
+
+    ``window_remaining_sec`` is the binding wait window left on a ``waiting``
+    row (deadline or interactive bound); absent when no window bounds the wait.
+    """
     try:
         append_jsonl(pathlib.Path(drive_logs) / "events.jsonl", {
             "ts": utc_now_iso(),
@@ -89,6 +147,8 @@ def emit_network_wait_event(
             "next_sleep_sec": (
                 round(float(next_sleep_sec), 1) if next_sleep_sec is not None else None
             ),
+            **({"window_remaining_sec": round(float(window_remaining_sec), 1)}
+               if window_remaining_sec is not None else {}),
             **({"detail": detail} if detail else {}),
         })
     except Exception:
@@ -99,9 +159,17 @@ def _use_local_fallback_configured() -> bool:
     return os.environ.get("USE_LOCAL_FALLBACK", "").lower() in ("true", "1")
 
 
-def fallback_chain_allowed(ctx: Any, last_error_kind: str, episode: Optional[TransportWaitEpisode]) -> bool:
+def fallback_chain_allowed(
+    ctx: Any, last_error_kind: str, episode: Optional[TransportWaitEpisode],
+    accumulated_usage: Optional[Dict[str, Any]] = None,
+) -> bool:
     """Whether this round may walk the cross-model fallback chain."""
     if bool(getattr(ctx, "exact_model_route", False)):
+        return False
+    if isinstance((accumulated_usage or {}).get(TRANSPORT_DEATHS_KEY), dict):
+        # The round still holds an unresolved attempt (a granted transport-death
+        # repeat with no usable response since): no paid candidate may dial over
+        # it, whatever the last kind says.
         return False
     if episode is not None:
         # Q4: during a remote transport outage the chain runs at most ONCE per
@@ -129,14 +197,22 @@ def reconcile_transport_wait(
     drive_logs: pathlib.Path,
     task_id: str,
     model: str,
-    emit_progress: Callable[[str], None],
+    emit_progress: Callable[..., None],
     after_local_pass: bool = False,
 ) -> Optional[TransportWaitEpisode]:
     """Reconcile the episode latch with one dispatch outcome.
 
     Enters a new episode on a fresh ``transport_unavailable`` failure (durable
-    ``entered`` event; the first owner note fires immediately for wait-eligible
-    turns). The round gate reconciles twice per failed dispatch: once with the
+    ``entered`` event; the first owner note fires immediately). An interactive
+    turn's episode gets the idle-timeout bound at entry, because the bound is
+    measured from entry and the turn has no other rail. ``emit_progress``
+    honors the ``incident=`` keyword (``OuroborosAgent._emit_progress``): the
+    typed toast pair rides the note for ephemeral episodes; recovery is a note
+    for every episode, local adoption and error-kind change are notes for
+    interactive turns only (a managed episode keeps its durable ``ended`` row
+    and its ordinary progress), and exhaustion is separately noted only for
+    interactive turns (``transport_wait_step``).
+    The round gate reconciles twice per failed dispatch: once with the
     pre-chain kind, and once after the fallback chain with the FRESH kind — so
     an outage first observed MID-chain (a remote candidate dying pre-dispatch
     while the primary failed generically) still latches an episode instead of
@@ -151,23 +227,27 @@ def reconcile_transport_wait(
     if episode is None:
         if msg_present or error_kind != "transport_unavailable":
             return None
+        ephemeral = bool(getattr(ctx, "is_ephemeral_turn", False))
+        interactive = ephemeral or bool(getattr(ctx, "is_direct_chat", False))
         episode = TransportWaitEpisode(
             started_monotonic=time.monotonic(),
-            wait_eligible=(
-                not bool(getattr(ctx, "is_direct_chat", False))
-                and not bool(getattr(ctx, "is_ephemeral_turn", False))
-            ),
+            interactive=interactive,
+            ephemeral=ephemeral,
+            wait_bound_sec=float(get_task_idle_timeout_sec()) if interactive else None,
         )
         emit_network_wait_event(
             drive_logs, task_id=task_id, phase="entered",
             elapsed_sec=0.0, redials=0, model=model,
         )
-        if episode.wait_eligible:
-            episode.last_note_monotonic = time.monotonic()
-            emit_progress(
-                "🌐 Could not establish a provider connection — waiting and "
-                "redialing automatically (failed attempts are $0). Stop cancels."
-            )
+        episode.last_note_monotonic = time.monotonic()
+        # Only managed work has a Stop contract; an in-process turn cannot be
+        # cancelled, so its note promises nothing it cannot deliver.
+        emit_progress(
+            "🌐 Could not establish a provider connection — waiting and "
+            "redialing automatically (failed attempts are $0)."
+            + ("" if interactive else " Stop cancels."),
+            incident=episode.incident(task_id, "entered"),
+        )
         return episode
     elapsed = time.monotonic() - episode.started_monotonic
     if msg_present:
@@ -176,13 +256,20 @@ def reconcile_transport_wait(
                 drive_logs, task_id=task_id, phase="ended", elapsed_sec=elapsed,
                 redials=episode.redials, model=model, detail="local_fallback_adopted",
             )
+            if episode.interactive:  # a managed task keeps its durable row and ordinary progress
+                emit_progress(
+                    f"🌐 Provider connection still unavailable after {elapsed / 60.0:.1f} min "
+                    "— continuing on the local fallback model.",
+                    incident=episode.incident(task_id, "ended"),
+                )
         else:
             emit_network_wait_event(
                 drive_logs, task_id=task_id, phase="recovered", elapsed_sec=elapsed,
                 redials=episode.redials, model=model,
             )
             emit_progress(
-                f"🌐 Provider connection restored after {elapsed / 60.0:.1f} min — resuming."
+                f"🌐 Provider connection restored after {elapsed / 60.0:.1f} min — resuming.",
+                incident=episode.incident(task_id, "recovered"),
             )
         return None
     if (
@@ -196,6 +283,12 @@ def reconcile_transport_wait(
             redials=episode.redials, model=model,
             detail=f"error_kind_changed:{error_kind}",
         )
+        if episode.interactive:  # a managed task keeps its durable row and ordinary progress
+            emit_progress(
+                f"🌐 Provider connection restored after {elapsed / 60.0:.1f} min — the redial "
+                f"got past the connect phase and failed as {error_kind}; ordinary failure policy resumes.",
+                incident=episode.incident(task_id, "recovered"),
+            )
         return None
     return episode
 
@@ -254,43 +347,70 @@ def transport_wait_step(
     drive_logs: pathlib.Path,
     task_id: str,
     model: str,
-    emit_progress: Callable[[str], None],
+    emit_progress: Callable[..., None],
     incoming_messages: Optional[queue.Queue],
     owner_msg_seen: Optional[set],
 ) -> bool:
     """One wait iteration of an active episode.
 
     Returns True to redial (the caller re-enters the round top WITHOUT consuming
-    a round) and False to terminalize via the no-resend branch. The wait is
-    bounded by the owner deadline minus the existing dispatch-admission reserve
-    (so a granted redial actually dials); the acceptance-review percentage
-    reserve is deliberately NOT a wait ceiling (Q18), and the supervisor's
-    absolute 6h ceiling stays an external rail, not duplicated here.
+    a round) and False to terminalize via the no-resend branch. The wait window
+    is the None-aware minimum of the owner deadline minus the existing
+    dispatch-admission reserve (so a granted redial actually dials) and, for an
+    interactive turn, its ``wait_bound_sec`` measured from episode entry; the
+    ``ended`` detail names the rail that expired. The acceptance-review
+    percentage reserve is deliberately NOT a wait ceiling (Q18), and the
+    supervisor's absolute 6h ceiling stays an external rail, not duplicated here.
     """
     elapsed = time.monotonic() - episode.started_monotonic
+    # Signed windows (negative = how long ago that rail expired) decide the
+    # attribution: the rail that expired EARLIER binds even when a process stall
+    # inside a sleep overshot both — clamping first would erase the ordering.
+    # Only the value used for sleeping and telemetry is clamped. An exact tie
+    # keeps the deadline's detail (measure-zero; the owner window is the
+    # stronger claim). The positive deadline case equals
+    # ``dispatch_window_remaining_sec(deadline_ts, reserve=grace)``.
+    deadline_ts = task_deadline_epoch(tools)
+    deadline_signed = (
+        None if deadline_ts is None
+        else deadline_ts - max(0.0, float(get_finalization_grace_sec())) - time.time()
+    )
+    bound_signed = (
+        None if episode.wait_bound_sec is None else episode.wait_bound_sec - elapsed
+    )
+    bound_binds = bound_signed is not None and (
+        deadline_signed is None or bound_signed < deadline_signed
+    )
+    remaining = bound_signed if bound_binds else deadline_signed
+    if remaining is not None:
+        remaining = max(0.0, remaining)
 
     def _ended(detail: str) -> bool:
         emit_network_wait_event(
             drive_logs, task_id=task_id, phase="ended", elapsed_sec=elapsed,
             redials=episode.redials, model=model, detail=detail,
         )
+        if episode.interactive:
+            emit_progress(
+                "🌐 Stopped waiting for a provider connection after "
+                f"{elapsed / 60.0:.1f} min — this turn ends as a provider outage.",
+                incident=episode.incident(task_id, "ended"),
+            )
         return False
 
-    if not episode.wait_eligible:
-        # Direct/ephemeral chat turns keep the responsive lane responsive:
-        # fast honest failure; the owner retries when connectivity returns (Q12).
-        return _ended("wait_ineligible_turn")
     if error_kind == "deadline_exhausted":
-        # The redial was refused before dispatch: the owner window is spent.
-        return _ended("deadline_refused_dispatch")
+        # The redial was refused before dispatch: the owner window is spent. One
+        # attribution rule everywhere — a bound that expired earlier keeps its
+        # own detail; the refusal stays visible in the llm_not_dispatched row.
+        return _ended(
+            "interactive_wait_window_exhausted" if bound_binds else "deadline_refused_dispatch"
+        )
     if episode.final_redial_done:
-        return _ended("deadline_after_final_redial")
-    remaining = dispatch_window_remaining_sec(
-        deadline_ts=task_deadline_epoch(tools),
-        reserve_sec=get_finalization_grace_sec(),
-    )
+        return _ended(
+            "interactive_wait_window_exhausted" if bound_binds else "deadline_after_final_redial"
+        )
     if remaining is not None and remaining <= 0:
-        return _ended("deadline_exhausted")
+        return _ended("interactive_wait_window_exhausted" if bound_binds else "deadline_exhausted")
     backoff = min(
         NETWORK_WAIT_BACKOFF_START_SEC * (2.0 ** min(episode.wait_iterations, 4)),
         _TRANSIENT_BACKOFF_CAP_SEC,
@@ -303,18 +423,20 @@ def transport_wait_step(
     # rail alive even on owner-lowered idle timeouts.
     sleep_sec = min(backoff, note_interval)
     if remaining is not None and remaining < sleep_sec + _FINAL_REDIAL_MARGIN_SEC:
-        # One last free redial just before the admission window closes (Q14).
+        # One last free redial just before the binding window closes (Q14).
         sleep_sec = max(0.0, remaining - _FINAL_REDIAL_MARGIN_SEC)
         episode.final_redial_done = True
     if time.monotonic() - episode.last_note_monotonic >= note_interval:
         episode.last_note_monotonic = time.monotonic()
         emit_progress(
             f"🌐 Still waiting for a provider connection — {elapsed / 60.0:.0f} min "
-            f"elapsed, {episode.redials} redials; will resume automatically."
+            f"elapsed, {episode.redials} redials; will resume automatically.",
+            incident=None,  # a periodic note is never a toast; the episode always passes incident=
         )
     emit_network_wait_event(
         drive_logs, task_id=task_id, phase="waiting", elapsed_sec=elapsed,
         redials=episode.redials, model=model, next_sleep_sec=sleep_sec,
+        window_remaining_sec=remaining,
     )
     episode.wait_iterations += 1
     interruptible_wait_sleep(
@@ -356,8 +478,8 @@ def finalize_now_transport_terminal(
     return handle_provider_unavailable(
         error_kind="transport_unavailable",
         wait_cause=episode.wait_cause,
-        waited=episode.wait_iterations > 0 or episode.redials > 0,
-        wait_eligible=episode.wait_eligible,
+        waited_sec=episode.waited_sec,
+        interactive=episode.interactive,
     )
 
 
@@ -405,18 +527,22 @@ def provider_terminal_fallback_text(
     *,
     is_context_overflow: bool,
     is_transport_wait: bool,
-    waited: bool,
-    wait_eligible: bool = True,
+    waited_sec: float,
+    interactive: bool = False,
     is_deadline_exhausted: bool,
 ) -> str:
     """Owner-facing terminal text when provider death left nothing to salvage.
 
-    ``wait_eligible`` is the episode's turn-class fact and ``waited`` its wait
-    fact (iterations or redials happened). The fast-fail wording is keyed on
-    NOT wait_eligible: a managed task whose admission window was already spent
-    before the first wait iteration is not "this interactive turn". The
-    waited-out wording deliberately avoids the supervisor's lifecycle term
-    INTERRUPTED (STATUS_INTERRUPTED means pre-requeue, not terminal).
+    ``is_context_overflow`` and ``is_transport_wait`` are the caller's resolved
+    verdict, never re-derived here: ``_provider_unavailable_result`` decides the
+    terminal precedence (a round record, then the latched wait cause, then the
+    overflow salvage) and passes at most one of the two flags true.
+    ``interactive`` is the episode's wait-class fact — a direct-chat, Presence, or
+    ephemeral decision turn is "this turn", never "the task" — and ``waited_sec`` its wait
+    fact (0.0 when the binding window was already spent before the first wait
+    iteration, so that terminal never claims a wait). The waited-out wording
+    deliberately avoids the supervisor's lifecycle term INTERRUPTED
+    (STATUS_INTERRUPTED means pre-requeue, not terminal).
     """
     if is_context_overflow:
         return (
@@ -424,24 +550,40 @@ def provider_terminal_fallback_text(
             "Any files written so far are preserved in the workspace."
         )
     if is_transport_wait:
-        if not wait_eligible:
-            return (
-                "⚠️ Could not establish a provider connection; this interactive turn fails fast "
-                "— retry when connectivity returns. Any files written so far are preserved in "
-                "the workspace."
+        if interactive and waited_sec > 0:
+            text = (
+                "⚠️ Could not establish a provider connection; this turn waited and "
+                f"redialed for {waited_sec / 60.0:.1f} min and ended as a provider outage, "
+                "not completed. Retry when connectivity returns."
             )
-        if waited:
-            return (
+        elif interactive:
+            text = (
+                "⚠️ Could not establish a provider connection, and no wait window was left; "
+                "this turn ended as a provider outage, not completed. Retry when "
+                "connectivity returns."
+            )
+        elif waited_sec > 0:
+            text = (
                 "⚠️ Could not establish a provider connection; the task waited and redialed "
                 "until its own limits ran out and ended as a provider outage, not completed. "
                 "Any files written so far are preserved in the workspace. Retry when "
                 "connectivity returns."
             )
-        return (
-            "⚠️ Could not establish a provider connection, and the owner deadline left no "
-            "time to wait; the task ended as a provider outage, not completed. Any files "
-            "written so far are preserved in the workspace. Retry when connectivity returns."
-        )
+        else:
+            text = (
+                "⚠️ Could not establish a provider connection, and the owner deadline left no "
+                "time to wait; the task ended as a provider outage, not completed. Any files "
+                "written so far are preserved in the workspace. Retry when connectivity returns."
+            )
+        if isinstance(accumulated_usage.get(TRANSPORT_DEATHS_KEY), dict):
+            # The episode redialed a granted transport-death repeat that never left the
+            # host: an earlier attempt of the round is still unresolved at its upper
+            # bound, and the owner text says both facts (the wait and the fence). The
+            # class the repeat was released with is on the record, and the hint reads it
+            # there — never the sticky kind, which by the time the window closes names a
+            # LATER free redial's refusal (``deadline_exhausted``).
+            text += provider_recovery_hint(accumulated_usage)
+        return text
     if is_deadline_exhausted:
         return "⚠️ The owner deadline ended primary model work; any files written so far are preserved."
     return (
@@ -461,6 +603,38 @@ def provider_failure_hint(accumulated_usage: Dict[str, Any]) -> str:
 def provider_recovery_hint(accumulated_usage: Dict[str, Any]) -> str:
     """Explain whether retrying later is likely to help."""
     kind = str(accumulated_usage.get("_last_llm_error_kind") or "").strip()
+    deaths = accumulated_usage.get(TRANSPORT_DEATHS_KEY)
+    repeats = int(deaths.get("count") or 0) if isinstance(deaths, dict) else 0
+    if repeats:
+        # Paid repeats already spent on the last dispatched round's typed transport
+        # deaths (the record is round-keyed and cleared only by a usable response):
+        # name them, and the class the repeat failed with, so the terminal never
+        # reads as "sent once" and never promises a retry the fence forbids. That
+        # class lives on the record, stamped by the repeat's own failure once that
+        # failure is classified as an exception: the sticky kind may by now belong to
+        # a later free redial of the round, or to a refusal, and would misname the
+        # paid attempt. A record without the stamp falls back to the sticky kind, and
+        # on those paths the sticky kind IS the repeat's own outcome: a repeat that
+        # returned an empty response left the host and stamps no exception class, so
+        # the sticky kind is that response's own class (provider_incomplete_response,
+        # rate_limit, provider_body_error, ...); a repeat refused before it was sent
+        # by the admission gate or the sleep gate (each writes its own durable row) is
+        # un-counted and keeps the unknown class. A budget refusal does not un-count:
+        # the budget rail cannot prove the repeat never left the host, so the record
+        # keeps the attempt booked and the budget terminal, not this hint's provider
+        # terminal, ends the round.
+        failed_as = str(deaths.get("error_kind") or kind)
+        last = (
+            " the dispatched request has no terminal provider outcome;"
+            if failed_as == "provider_outcome_unknown" else f" the repeat failed as {failed_as};"
+        )
+        return (
+            f" {repeats} earlier physical attempt(s) of the last dispatched round died "
+            "with a typed transport death and were repeated as new attempts (the dead "
+            f"ones stay unresolved at their upper bound);{last} no further retry or paid "
+            "fallback was sent while the earlier request has no terminal outcome, since "
+            "either could duplicate live work."
+        )
     if kind == "provider_outcome_unknown":
         return (
             " The dispatched request has no terminal provider outcome, so no "

@@ -6,7 +6,6 @@ import asyncio
 import functools
 import json
 import logging
-import os
 import pathlib
 import shutil
 import time
@@ -18,7 +17,11 @@ from starlette.requests import Request
 from starlette.responses import FileResponse, JSONResponse
 
 from ouroboros.gateway._helpers import coerce_int, json_error, json_exception, request_drive_root, request_json_or, request_repo_dir, stage_initial_task_attachments
+from ouroboros.gateway.contracts import TaskCreateRequest
+from ouroboros.gateway.schema import validate_ingress
 from ouroboros.depth_evidence import parse_task_depth
+from ouroboros.project_naming import admission_names
+from supervisor.log_addressing import ProjectThreadConflict, ingress_chat_id
 # Re-exported SSE surface (split out by the 1600-line module gate): route
 # wiring, the CLI, and long-standing monkeypatch pins address these names on
 # gateway.tasks; task_events resolves its patched collaborators back through
@@ -53,6 +56,11 @@ from ouroboros.contracts.task_contract import (
 )
 from ouroboros.outcomes import public_task_result
 from ouroboros.artifacts import resolve_chat_media_path
+from ouroboros.task_result_schema import (
+    emit_quarantine_event,
+    quarantine_task_result,
+    task_result_schema_refusal,
+)
 from ouroboros.task_results import (
     STATUS_FAILED,
     STATUS_SCHEDULED,
@@ -225,7 +233,7 @@ def _admission_rejection_response(
         admission=admission,
         artifact_status=ARTIFACT_STATUS_FAILED if workspace_root else "",
         result=detail,
-        cost_usd=0.0,
+        accounted_upper_bound_usd=0.0,
     )
     if child_drive is not None:
         from ouroboros.headless import remove_subagent_task_drive
@@ -311,6 +319,9 @@ def _complete_api_task_admission(
         "session_id": task.get("session_id"),
         "actor_id": task.get("actor_id"),
         "delegation_role": task.get("delegation_role"),
+        "chat_id": task.get("chat_id"),
+        "title": task.get("title"),
+        "suggested_name": task.get("suggested_name"),
         "project_id": project_id,
         "description": description,
         "context": task.get("context"),
@@ -395,6 +406,7 @@ def _complete_api_task_admission(
             drive_root, task_id, admission_token, child_drive
         )
         return json_exception(exc, 503)
+    _broadcast_task_named(task_id, str(task.get("suggested_name") or ""))
     return JSONResponse({
         "ok": True,
         "task_id": task_id,
@@ -403,12 +415,53 @@ def _complete_api_task_admission(
     })
 
 
+def _task_identity_occupied(drive_root: pathlib.Path, task_id: str) -> bool:
+    """Whether a stored task-result row already owns *task_id*.
+
+    ABI-2: identity collision is an AUTHORITY question, so the probe is the
+    strict reader. The fail-soft default would QUARANTINE an inadmissible
+    stored row as a side effect of this check and then report "no result",
+    letting the endpoint reuse that row's task id; strict raises WITHOUT
+    moving anything, and any stored row — admissible or not — keeps its
+    identity occupied.
+    """
+    try:
+        return load_task_result(drive_root, task_id, strict=True) is not None
+    except ValueError:
+        return True
+
+
+def _broadcast_task_named(task_id: str, suggested_name: str) -> None:
+    """Publish an admitted run's name so its card is never born nameless.
+
+    The live card takes its title from ``suggested_name``; without this frame a
+    project-homed run would paint as its status phrase until the first history
+    replay. WS only — never a chat.jsonl row — and the client buffers a name that
+    arrives before the card exists, so ordering does not matter. Fail-soft: a
+    missing bridge (CLI/test process) simply means no live viewer.
+    """
+    if not suggested_name:
+        return
+    try:
+        from supervisor.message_bus import try_get_bridge
+
+        bridge = try_get_bridge()
+        if bridge is not None:
+            bridge.broadcast(
+                {"type": "task_named", "task_id": task_id, "suggested_name": suggested_name}
+            )
+    except Exception:
+        log.debug("task_named broadcast failed for %s", task_id, exc_info=True)
+
+
 async def api_tasks_create(request: Request) -> JSONResponse:
     """POST /api/tasks — enqueue a managed headless task."""
 
     body = await request_json_or(request, {})
     if not isinstance(body, dict):
         return json_error("request body must be a JSON object", 400)
+    if schema_errors := validate_ingress(body, TaskCreateRequest):  # executable gateway ABI (ABI-3, Q7=A): derived-schema ingress gate
+        return json_error(f"invalid request body: {schema_errors[0]}", 400, schema_errors=schema_errors[:8])
     description = str(body.get("description") or "").strip()
     if not description:
         return json_error("description is required", 400)
@@ -423,7 +476,7 @@ async def api_tasks_create(request: Request) -> JSONResponse:
         task_id = validate_task_id(body.get("task_id") or uuid.uuid4().hex[:16])
     except ValueError as exc:
         return json_error(str(exc), 400)
-    if load_task_result(drive_root, task_id):
+    if _task_identity_occupied(drive_root, task_id):
         return json_error(f"task_id already exists: {task_id}", 409)
     if (drive_root / HEADLESS_TASKS_DIR / task_id).exists() or (drive_root / ARTIFACTS_DIR / task_id).exists():
         return json_error(f"task_id already has headless state: {task_id}", 409)
@@ -441,20 +494,17 @@ async def api_tasks_create(request: Request) -> JSONResponse:
         return json_error("memory_mode must be one of forked, empty, shared", 400)
     if workspace_root and memory_mode == "shared":
         return json_error("memory_mode=shared is not allowed for external workspaces; use forked or empty", 400)
+    from ouroboros.project_facts import explicit_project_id_ok, resolve_project_id as _resolve_pid
+
     raw_project_id = str(body.get("project_id") or "")
-    if raw_project_id:
-        from ouroboros.project_facts import explicit_project_id_ok
-
-        # Validate the UNSTRIPPED value so leading/trailing whitespace (which would
-        # collapse two inputs into one store) is rejected, not silently normalized.
-        if not explicit_project_id_ok(raw_project_id):
-            # Fail closed: an explicit project_id must already be filesystem-clean.
-            # Reject (rather than silently normalize/empty -> canonical), so two
-            # inputs never collapse to one store and isolation is never defeated.
-            return json_error(
-                "project_id must be filesystem-safe (alphanumeric/_/-/., no spaces or slashes)", 400)
-    from ouroboros.project_facts import resolve_project_id as _resolve_pid
-
+    # Validate the UNSTRIPPED value so leading/trailing whitespace (which would
+    # collapse two inputs into one store) is rejected, not silently normalized.
+    if raw_project_id and not explicit_project_id_ok(raw_project_id):
+        # Fail closed: an explicit project_id must already be filesystem-clean.
+        # Reject (rather than silently normalize/empty -> canonical), so two
+        # inputs never collapse to one store and isolation is never defeated.
+        return json_error(
+            "project_id must be filesystem-safe (alphanumeric/_/-/., no spaces or slashes)", 400)
     _task_project_id = _resolve_pid({"project_id": raw_project_id, "workspace_root": str(workspace_root or "")})
     # D5 (Option A): keep the RECORDED memory_mode exactly as requested — shared/forked/
     # empty semantics are unchanged. Isolation for a project-scoped `shared` task comes
@@ -473,8 +523,10 @@ async def api_tasks_create(request: Request) -> JSONResponse:
     if workspace_root and task_type != "task":
         return json_error("external workspace tasks must use type='task'", 400)
     try:
-        chat_id = int(body.get("chat_id") if body.get("chat_id") is not None else 0)
+        chat_id = ingress_chat_id(body.get("chat_id"), drive_root, _task_project_id)
         depth = parse_task_depth(body.get("depth"), default=0)
+    except ProjectThreadConflict as exc:
+        return json_error(str(exc), 400)
     except (TypeError, ValueError) as exc:
         return json_error(
             "depth must be a non-negative integer"
@@ -488,10 +540,11 @@ async def api_tasks_create(request: Request) -> JSONResponse:
         return json_error("delegation_role=subagent is only allowed through the internal schedule_subagent tool", 400)
     if str(body.get("parent_task_id") or "").strip() or str(body.get("root_task_id") or "").strip():
         return json_error("parent_task_id and root_task_id are internal lineage fields; external tasks must start as roots", 400)
-    if "project_id" in raw_metadata:
-        # project_id is a top-level field; silently dropping it from metadata would
-        # let a caller believe isolation is active while the task runs unscoped.
-        return json_error("project_id must be a top-level field, not metadata", 400)
+    for _top_level_only in ("project_id", "title"):
+        # Top-level fields; silently dropping either from metadata would let a
+        # caller believe isolation is active, or a name was accepted, when it was not.
+        if _top_level_only in raw_metadata:
+            return json_error(f"{_top_level_only} must be a top-level field, not metadata", 400)
     metadata = {str(k): v for k, v in raw_metadata.items() if str(k) not in _RESERVED_METADATA_KEYS}
     allowed_resources, resource_policy, disabled_tools, acceptance_claims, policy_error = (
         _fold_contract_policies(body, raw_metadata, metadata)
@@ -533,7 +586,6 @@ async def api_tasks_create(request: Request) -> JSONResponse:
         deadline_at = _normalize_deadline_at(body.get("deadline_at") or raw_metadata.get("deadline_at") or "")
     except ValueError as exc:
         return json_error(str(exc), 400)
-    timeout_sec = 0.0
     try:
         timeout_sec = float(body.get("timeout_sec") or body.get("timeout") or 0)
     except (TypeError, ValueError):
@@ -577,9 +629,7 @@ async def api_tasks_create(request: Request) -> JSONResponse:
     effective_drive = child_drive or drive_root
     attachment_manifest, attachment_error = stage_initial_task_attachments(
         effective_drive, task_id, _normalize_attachments(body.get("attachments")),
-        # Partial staging is the DEFAULT (В25c, capinv-447): good attachments
-        # stage, rejected ones stay disclosed rows. Pass explicit false for the
-        # old atomic all-or-nothing admission.
+        # Partial staging is the DEFAULT (В25c); explicit false = atomic admission.
         allow_partial=body.get("allow_partial_attachments") is not False,
     )
     if attachment_error is not None:
@@ -635,10 +685,12 @@ async def api_tasks_create(request: Request) -> JSONResponse:
             drive_root, task_id, admission_token, child_drive
         )
         return json_exception(exc, 503)
+    _title, _suggested_name = admission_names(body, description)
     task = {
         "id": task_id,
         "type": task_type,
         "chat_id": chat_id,
+        "title": _title, "suggested_name": _suggested_name,
         "text": task_text,
         "description": description,
         "context": str(body.get("context") or ""),
@@ -719,14 +771,13 @@ _LIST_ROW_OMITTED_FIELDS = frozenset({
     "subagent_envelope",
 })
 
-# Process-wide {(results_dir, filename) -> raw ts} memo for the unfiltered list
-# path. The raw `ts` is CREATION-STABLE (write_task_result sets it on the first
-# write; later updates touch only updated_at), so entries never need
-# invalidation — only deletions are dropped and new names decoded. Keyed by the
-# directory too, so multiple drive roots (tests, child drives) never collide.
-# Concurrency note: worst case a race re-reads a file and stores the identical
-# creation-stable value; no lock needed.
-_RAW_TS_MEMO: Dict[tuple, str] = {}
+# The raw creation-ts sort scan and the ABI-2 malformed-candidate admission
+# live in ouroboros/gateway/task_list_scan.py (module-size split); imported
+# here so this module keeps the endpoint wiring surface.
+from ouroboros.gateway.task_list_scan import (  # noqa: E402
+    _quarantine_malformed_candidates,
+    _raw_sorted_result_names,
+)
 
 
 def _compact_list_row(row: Dict[str, Any]) -> Dict[str, Any]:
@@ -736,37 +787,6 @@ def _compact_list_row(row: Dict[str, Any]) -> Dict[str, Any]:
     workspace fields, the TASK_COST_META_FIELDS, outcome_axes — all preserved
     because the projection is subtractive, never a whitelist)."""
     return {key: value for key, value in row.items() if key not in _LIST_ROW_OMITTED_FIELDS}
-
-
-def _raw_sorted_result_names(results_dir: pathlib.Path) -> List[str]:
-    """Result filenames sorted newest-first by RAW creation ts (memoized).
-
-    A row whose file lacks `ts` sorts as minus-infinity (oldest), tie-broken by
-    filename for determinism. A file that fails to parse (torn concurrent
-    write) is excluded from THIS request and left out of the memo, so the next
-    request re-reads it — a torn write can never poison the memo."""
-    try:
-        with os.scandir(results_dir) as entries:
-            names = [entry.name for entry in entries if entry.name.endswith(".json")]
-    except OSError:
-        return []
-    dir_key = str(results_dir)
-    present = set(names)
-    for key in [k for k in list(_RAW_TS_MEMO) if k[0] == dir_key and k[1] not in present]:
-        _RAW_TS_MEMO.pop(key, None)
-    decorated: List[tuple] = []
-    for name in names:
-        key = (dir_key, name)
-        raw_ts = _RAW_TS_MEMO.get(key)
-        if raw_ts is None:
-            data = read_json_dict(results_dir / name)
-            if data is None:
-                continue
-            raw_ts = str(data.get("ts") or "")
-            _RAW_TS_MEMO[key] = raw_ts
-        decorated.append((raw_ts, name))
-    decorated.sort(reverse=True)  # "" (no ts) sorts after every real timestamp
-    return [name for _ts, name in decorated]
 
 
 def _tasks_list_payload(
@@ -784,7 +804,17 @@ def _tasks_list_payload(
     ts, so an old task freshly completed through its child can fall outside the
     slice until its raw file is rewritten. Status-filtered requests keep the
     full projection path — filtering needs every row's effective status (the
-    child-drive promotion contract pinned by test_headless_cli)."""
+    child-drive promotion contract pinned by test_headless_cli).
+
+    Admission at the slice boundary (ABI-2): a MALFORMED candidate discovered
+    by the sort scan reaches the admission reader even when it lies beyond
+    the slice window (the scan had to read its bytes anyway), so it is
+    quarantined and counted in the same ONE batched scan event. Disclosed
+    residual: a PARSEABLE but inadmissible row (unstamped/future stamp)
+    beyond the window is not classified by this sliced request — its raw ts
+    is all the sort reads — and is quarantined by the next scan that
+    actually reaches it (a filtered request, ``limit=0``, or any
+    list_task_results caller)."""
     if queue_only:
         return {"tasks": [], "queue": _queue_snapshot(drive_root)}
     # One shared events-tail parse for every stale-running orphan check in this
@@ -805,17 +835,39 @@ def _tasks_list_payload(
             rows = rows[:limit]
         return {"tasks": rows, "queue": _queue_snapshot(drive_root)}
     results_dir = task_results_dir(drive_root, create=False)
-    names = _raw_sorted_result_names(results_dir)
+    names, malformed_names = _raw_sorted_result_names(results_dir)
     if limit is not None:
         names = names[:limit]
     rows = []
+    quarantined: List[Dict[str, str]] = []
     for name in names:
-        raw = read_json_dict(results_dir / name)
-        if raw is None:
+        path = results_dir / name
+        raw = read_json_dict(path)
+        if raw is None and not path.is_file():
             continue  # vanished/torn between the scandir and this read
+        # ABI-2: the sliced fast path is admission-aware like every other
+        # reader — an inadmissible row is quarantined and never projected,
+        # with ONE batched durable event for the whole scan (6.3=B), the
+        # same semantics as the list_task_results fail-soft scan.
+        refusal = task_result_schema_refusal(raw)
+        if refusal:
+            outcome = quarantine_task_result(path, refusal)
+            if outcome == "kept_admissible":
+                raw = read_json_dict(path)
+                if raw is None or task_result_schema_refusal(raw):
+                    continue
+            else:
+                if outcome == "moved":
+                    quarantined.append({"task_id": path.stem, "reason": refusal})
+                continue
         rows.append(_compact_list_row(public_task_result(effective_task_result(
             drive_root, raw, materialize_artifacts=False, _events_index=events_index,
         ))))
+    # ABI-2: a candidate whose bytes failed to parse is NOT silently dropped —
+    # it reaches the same admission reader (quarantine + the batched event)
+    # even beyond the slice window (see task_list_scan).
+    quarantined.extend(_quarantine_malformed_candidates(results_dir, malformed_names))
+    emit_quarantine_event(drive_root, quarantined)
     # Re-sort the slice by effective ts: the child-drive merge may have replaced
     # ts, and the response order is the displayed order.
     rows.sort(key=lambda item: str(item.get("ts") or ""), reverse=True)

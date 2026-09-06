@@ -1167,7 +1167,7 @@ def test_schema_and_docs_split_git_staging_from_payload_live_apply():
     assert "applied LIVE into the non-Git payload" in decision
     arch = (pathlib.Path(__file__).resolve().parents[1] / "docs" /
             "ARCHITECTURE.md").read_text(encoding="utf-8")
-    assert "differs is the staging substrate" in arch
+    assert "staging substrate differs" in arch
     assert "A SKILL-PAYLOAD target captures through the payload adapter" in arch
     assert "QUEUES the extension reconcile request" in arch
 

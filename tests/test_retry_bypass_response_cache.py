@@ -252,11 +252,11 @@ class TestRetryLoopRequestsCacheOptOut:
 
 class TestStrictCompatibleRecovery:
     def test_explicit_cache_rejection_gets_one_exact_retry(self, monkeypatch):
-        import ouroboros.llm as llm_mod
+        import ouroboros.llm_attempt as llm_attempt_mod
         from ouroboros.llm import LLMClient
 
         monkeypatch.setattr(
-            llm_mod,
+            llm_attempt_mod,
             "execute_physical_attempt",
             lambda _request, send: send(),
         )

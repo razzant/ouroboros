@@ -1,8 +1,10 @@
 """Reviewer-slot configuration SSOT (phase 6.1).
 
 ONE structured setting — ``OUROBOROS_REVIEWER_SLOTS`` — describes every
-configured reviewer row: the commit-triad slots, the scope slots, and the one
-optional advisory reviewer. Each row is::
+configured reviewer row: the commit-triad slots, the scope slots, the one
+optional advisory reviewer, and the one optional deep self-reviewer
+(``deep_review``; absent = synthesized from the legacy model key, see
+``deep_review_slot``). Each row is::
 
     {"slot_id": "t_9f3a", "route": {"kind": "api_chat" | "agent_session",
                                     "target_id": "<model id | harness[=model]>"},
@@ -29,30 +31,38 @@ direct row carries (route drift after admission changes later waves only). An
 ``api_model`` actor delivers as bounded native tool rounds — retrieval, never
 the assembled ``api_chat`` packet.
 
-MIGRATION (D15: "старый читается, если новых нет"): when the structured key is
-absent, the legacy comma-lists (``OUROBOROS_REVIEW_MODELS`` /
-``OUROBOROS_SCOPE_REVIEW_MODELS``) plus the phase-5 per-row route lists are
-read into rows, and the global Review / Scope Review efforts are copied into
-each row. There is NO permanent double-write: once the structured key is
-saved, the comma keys become a derived runtime projection
-(``project_reviewer_slots_into_env``) for legacy consumers. Task acceptance
-stays API-only by owner decision (D15); commit, scope, plan, advisory, and skill
-review follow their configured delivery rows.
+ABI 7.0 (ABI-10, owner 5.4=A): the legacy comma-list migration read is GONE —
+the structured key is the ONE configuration surface. When it is absent the
+loader serves the SHIPPED DEFAULT PANEL: api_chat triad/scope rows over the
+effective default model lists (``get_review_models``/``get_scope_review_models``
+— the derived env plane, which also honours a bench launcher's env override)
+and the default advisory row. The comma keys are RETIRED settings
+(``RETIRED_SETTING_KEYS``): an install that configured reviewers only through
+them gets the default panel, and the RC auditor names that migration. The
+comma ENV spellings survive solely as the derived runtime projection
+(``project_reviewer_slots_into_env``) for the API-pinned surfaces. EVERY review
+surface — commit, scope, plan, advisory, skill review and task acceptance —
+follows its configured delivery rows; the triad rows reach plan review, skill
+review and task acceptance through ONE builder (``triad_delivery_slots``), so
+no surface reads a projection of the panel instead of the panel (owner
+decision R2, 2026-09-01: the former task-acceptance API pin and its
+default-panel fallback are gone).
 
 Malformed configuration RAISES: mapping a typo to ``api_chat`` would silently
 spend the API money the owner configured the row to move off of, and mapping
 it to ``agent_session`` would silently delegate a row the owner never
-delegated (same posture as ``configured_review_routes``).
+delegated.
 """
 
 from __future__ import annotations
 
+import contextlib as _contextlib
 import json
 import os
 import pathlib
 import threading
 from dataclasses import dataclass
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Dict, List, Optional, Sequence, Tuple
 
 from ouroboros.route_spec import (
     ROUTE_KIND_AGENT_SESSION as SHARED_ROUTE_KIND_SESSION,
@@ -67,6 +77,9 @@ REVIEWER_SLOTS_ENV = "OUROBOROS_REVIEWER_SLOTS"
 
 ROUTE_KIND_API = "api_chat"
 ROUTE_KIND_SESSION = "agent_session"
+# The one role hint every scope row carries (structured or default panel); the
+# commit gate's wave admission renders a native scope seat's work-order with it.
+SCOPE_ROLE_HINT = "scope reviewer"
 
 # Real limits, shown in the UI instead of promising an arbitrary number (D14).
 # Pinned against their owners by tests: the triad ceiling is
@@ -77,6 +90,10 @@ TRIAD_SLOT_LIMIT = 10
 SCOPE_SLOT_LIMIT = 4
 
 _SLOT_ID_MAX_CHARS = 64
+
+# The deep self-review row is a singleton like the advisory: its identity is
+# fixed (the UI reads «Выполняется как» under this id), never owner-minted.
+DEEP_REVIEW_SLOT_ID = "deep_review_slot_1"
 
 
 @dataclass(frozen=True)
@@ -123,7 +140,9 @@ class ConfiguredReviewerSlot:
         route-name comparisons — a session row and a native-retrieval actor
         row are one class here, and neither receives an assembled packet.
         """
-        return self.is_session or self.native_retrieval
+        from ouroboros.review_execution import delivery_retrieves
+
+        return delivery_retrieves(self.kind, self.subagent_id)
 
 
 @dataclass(frozen=True)
@@ -167,7 +186,16 @@ class ReviewerSlotConfig:
     triad: Tuple[ConfiguredReviewerSlot, ...]
     scope: Tuple[ConfiguredReviewerSlot, ...]
     advisory: AdvisorySlotConfig
-    source: str  # "structured" | "legacy"
+    source: str  # "structured" | "default" (ABI 7.0: the legacy read is gone)
+    # The optional deep self-review row on the shared vocabulary (no
+    # ``enabled``: a deep review is owner-triggered, never a standing gate).
+    # None = not configured; ``deep_review_slot`` then synthesizes the packed
+    # api row from the deep-review model key. An api row WITHOUT a subagent
+    # reference is the packed 1M-context review (the historical delivery); a
+    # configured-subagent api row is a native inspection episode and an
+    # agent_session row a delegated session — the same three deliveries as
+    # every other surface, chosen by the same ``retrieves`` predicate.
+    deep_review: Optional[ConfiguredReviewerSlot] = None
 
 
 def structured_reviewer_slots_raw() -> str:
@@ -483,6 +511,19 @@ def _parse_advisory(raw: Any) -> AdvisorySlotConfig:
     )
 
 
+def _parse_deep_review(raw: Any, seen_ids: set) -> Optional[ConfiguredReviewerSlot]:
+    """The optional deep self-review row: the shared row vocabulary minus
+    ``slot_id`` (a singleton's identity is fixed) and minus ``enabled``."""
+    if raw is None:
+        return None
+    if not isinstance(raw, dict):
+        raise ValueError(f"{REVIEWER_SLOTS_ENV}: deep_review must be an object")
+    unknown = sorted(set(raw) - {"route", "subagent_id", "effort"})
+    if unknown:
+        raise ValueError(f"{REVIEWER_SLOTS_ENV}: deep_review has unknown keys: {unknown}")
+    return _parse_slot({**raw, "slot_id": DEEP_REVIEW_SLOT_ID}, "deep_review", seen_ids)
+
+
 def parse_reviewer_slots(raw: str) -> ReviewerSlotConfig:
     """Strict parse of the structured setting. Raises ValueError, row-precise."""
     try:
@@ -491,7 +532,7 @@ def parse_reviewer_slots(raw: str) -> ReviewerSlotConfig:
         raise ValueError(f"{REVIEWER_SLOTS_ENV} is not valid JSON: {exc}") from exc
     if not isinstance(payload, dict):
         raise ValueError(f"{REVIEWER_SLOTS_ENV} must be a JSON object")
-    unknown = sorted(set(payload) - {"triad", "scope", "advisory"})
+    unknown = sorted(set(payload) - {"triad", "scope", "advisory", "deep_review"})
     if unknown:
         raise ValueError(f"{REVIEWER_SLOTS_ENV} has unknown top-level keys: {unknown}")
     seen_ids: set = set()
@@ -519,127 +560,80 @@ def parse_reviewer_slots(raw: str) -> ReviewerSlotConfig:
         scope=tuple(groups["scope"]),
         advisory=_parse_advisory(payload.get("advisory")),
         source="structured",
+        deep_review=_parse_deep_review(payload.get("deep_review"), seen_ids),
     )
 
 
+
+def authored_reviewer_slots_state(raw: str) -> Tuple[str, str]:
+    """THE three states of the owner's structured setting, as ``(state, parse_error)``.
+
+    ``("absent", "")`` — no structured value: the loader serves the shipped default
+    panel. ``("authored", "")`` — the strict parser accepts the text: that panel runs.
+    ``("invalid", <row-precise error>)`` — the text is malformed: the loader RAISES on it
+    (``load_reviewer_slot_config``), so NO panel serves — commit review blocks as
+    ``infra_failure`` (advisory enforcement merely warns and commits unreviewed), plan
+    and skill review refuse through ``reviewer_slot_config_error`` — until the owner
+    repairs the setting. The retired-keys notice reads this so it never announces a
+    default panel that is not serving.
+    """
+    text = str(raw or "").strip()
+    if not text:
+        return "absent", ""
+    try:
+        parse_reviewer_slots(text)
+    except ValueError as exc:
+        return "invalid", str(exc)
+    return "authored", ""
+
 # ---------------------------------------------------------------------------
-# Legacy migration read (comma-lists + phase-5 route envs + global efforts).
+# Shipped default panel (ABI 7.0: served when no structured value is saved).
 # ---------------------------------------------------------------------------
 
 
-def _shared_session_route_spec() -> tuple[str, str, str]:
-    """The legacy shared session route as ``(identity, effort, profile)``.
+def _default_config() -> ReviewerSlotConfig:
+    """The shipped default panel — api_chat rows over the effective defaults.
 
-    Identity is ``harness[=model]`` — route identity ONLY, effort split off so
-    the per-slot effort field stays the single SSOT (D1/6.3). '' when no shared
-    session route is configured (a legacy row marked agent_session with no
-    shared route was already undeliverable; the empty target keeps that honest
-    rather than inventing a harness)."""
-    from ouroboros.review_execution import review_session_route
+    Model lists come from the derived env plane (`get_review_models` /
+    `get_scope_review_models`): on an unconfigured install those are the
+    shipped defaults (provider-adapted for a single-direct-provider install);
+    a bench launcher's env override plane keeps working unchanged. Row effort
+    stays '' so `row_effort` resolves the surface default at use time. Slot
+    ids reuse the deterministic per-row spelling so receipts keep lining up.
+    """
+    from ouroboros.config import get_review_models, get_scope_review_models
+    from ouroboros.review_substrate import (
+        SCOPE_SLOT_ID_PREFIX,
+        SLOT_ID_PREFIX,
+        slot_id_for_row,
+    )
 
-    route = review_session_route()
-    if route is None:
-        return "", "", ""
-    identity = route.route_id + (f"={route.model}" if route.model else "")
-    effort = str(route.effort or "") or compound_session_effort(RouteSpec(
-        kind=SHARED_ROUTE_KIND_SESSION,
-        target_id=identity,
-        credential_profile_id=str(route.profile_id or ""),
-    ))
-    return identity, effort, str(route.profile_id or "")
-
-
-def _legacy_rows(models: List[str], route_env_key: str, effort: str,
-                 id_prefix: str) -> List[ConfiguredReviewerSlot]:
-    from ouroboros.review_execution import ReviewRouteKind
-    from ouroboros.review_substrate import configured_review_routes, slot_id_for_row
-
-    routes = configured_review_routes(route_env_key, len(models))
-    session_target, session_effort, session_profile = _shared_session_route_spec()
-    rows: List[ConfiguredReviewerSlot] = []
-    for idx, model in enumerate(models):
-        session = routes[idx] is ReviewRouteKind.AGENT_SESSION
-        if session:
-            # A legacy session row delivered via the SHARED session route (a
-            # harness), and its comma-list "model" was never used for delivery
-            # — the session resolves its own. So its route identity is that
-            # shared harness, NOT the model: writing the model into the
-            # harness-shaped target_id is exactly the mapping bug the UI then
-            # renders as a nonsense harness. Effort rides the field only.
-            rows.append(ConfiguredReviewerSlot(
-                slot_id=slot_id_for_row(idx + 1, prefix=id_prefix),
-                kind=ROUTE_KIND_SESSION,
-                target_id=session_target,
-                session_target=session_target,
-                effort=session_effort or effort,
-                profile_id=session_profile,
-            ))
-        else:
-            # An api row keeps its provider-tagged model as the route identity.
-            rows.append(ConfiguredReviewerSlot(
-                slot_id=slot_id_for_row(idx + 1, prefix=id_prefix),
+    def _rows(models, prefix):
+        return tuple(
+            ConfiguredReviewerSlot(
+                slot_id=slot_id_for_row(idx + 1, prefix=prefix),
                 kind=ROUTE_KIND_API,
                 target_id=str(model),
-                effort=effort,
-            ))
-    return rows
-
-
-def _legacy_config() -> ReviewerSlotConfig:
-    from ouroboros.config import get_review_models, get_scope_review_models, resolve_effort
-    from ouroboros.review_execution import (
-        SCOPE_REVIEW_ROUTES_ENV,
-        TRIAD_REVIEW_ROUTES_ENV,
-    )
-    from ouroboros.review_substrate import SCOPE_SLOT_ID_PREFIX, SLOT_ID_PREFIX
-
-    triad = _legacy_rows(
-        [str(m) for m in (get_review_models() or []) if str(m or "").strip()],
-        TRIAD_REVIEW_ROUTES_ENV, resolve_effort("review"), SLOT_ID_PREFIX,
-    )
-    scope = _legacy_rows(
-        [str(m) for m in (get_scope_review_models() or []) if str(m or "").strip()],
-        SCOPE_REVIEW_ROUTES_ENV, resolve_effort("scope_review"), SCOPE_SLOT_ID_PREFIX,
-    )
-    # The legacy advisory had no standing enable switch (bypass was per-call)
-    # and no per-row effort; the route token is the phase-5 env.
-    raw_route = str(os.environ.get("OUROBOROS_ADVISORY_REVIEW_ROUTE", "") or "").strip().lower()
-    if raw_route in ("", "api", "api_chat"):
-        # Legacy 'api' meant the retired Claude-SDK transport; both now mean
-        # the routed native inspection episode on the shipped default model.
-        advisory_kind = ROUTE_KIND_API
-    elif raw_route == ROUTE_KIND_SESSION:
-        advisory_kind = ROUTE_KIND_SESSION
-    else:
-        raise ValueError(
-            f"OUROBOROS_ADVISORY_REVIEW_ROUTE names an unknown advisory route "
-            f"{raw_route!r}; valid: api, agent_session"
+            )
+            for idx, model in enumerate(
+                str(m) for m in (models or []) if str(m or "").strip()
+            )
         )
-    advisory_target = ""
-    advisory_effort = "low"
-    advisory_profile = ""
-    if advisory_kind == ROUTE_KIND_SESSION:
-        advisory_target, advisory_effort, advisory_profile = _shared_session_route_spec()
+
     return ReviewerSlotConfig(
-        triad=tuple(triad),
-        scope=tuple(scope),
-        advisory=AdvisorySlotConfig(
-            enabled=True,
-            kind=advisory_kind,
-            target_id=advisory_target,
-            effort=advisory_effort,
-            profile_id=advisory_profile,
-        ),
-        source="legacy",
+        triad=_rows(get_review_models(), SLOT_ID_PREFIX),
+        scope=_rows(get_scope_review_models(), SCOPE_SLOT_ID_PREFIX),
+        advisory=AdvisorySlotConfig(),
+        source="default",
     )
 
 
 def load_reviewer_slot_config() -> ReviewerSlotConfig:
-    """THE loader: structured when present, legacy migration read otherwise."""
+    """THE loader: structured when present, the shipped default panel otherwise."""
     raw = structured_reviewer_slots_raw()
     if raw:
         return parse_reviewer_slots(raw)
-    return _legacy_config()
+    return _default_config()
 
 
 def reviewer_slot_config_error() -> str:
@@ -647,18 +641,10 @@ def reviewer_slot_config_error() -> str:
 
     Thin facade for the surfaces that must refuse loudly instead of running on
     a silently projected default panel (plan review, skill review). Reads ONLY
-    the structured raw value — a legacy-only config (comma keys, no structured
-    key) always returns '' (bench constraint: benches configure legacy keys
-    only and must stay unaffected). No caching: the check re-parses so a
+    the structured raw value — an install without it runs the shipped default
+    panel and always returns ''. No caching: the check re-parses so a
     hot-reloaded fix is seen immediately."""
-    raw = structured_reviewer_slots_raw()
-    if not raw:
-        return ""
-    try:
-        parse_reviewer_slots(raw)
-    except ValueError as exc:
-        return str(exc)
-    return ""
+    return authored_reviewer_slots_state(structured_reviewer_slots_raw())[1]
 
 
 # ---------------------------------------------------------------------------
@@ -679,6 +665,37 @@ def advisory_slot_config() -> AdvisorySlotConfig:
     return load_reviewer_slot_config().advisory
 
 
+def deep_review_slot(config: Optional[ReviewerSlotConfig] = None) -> ConfiguredReviewerSlot:
+    """THE deep self-review row: the configured ``deep_review`` row, or the
+    packed api row synthesized from the legacy model key.
+
+    ``OUROBOROS_MODEL_DEEP_SELF_REVIEW`` stays the invisible migration source
+    and fallback: an install that never saved a row keeps today's exact
+    delivery (one packed 1M-context review on that model), and the row's own
+    effort — resolved by ``row_effort(row, "deep_self_review")`` — outranks the
+    surface key ``OUROBOROS_EFFORT_DEEP_SELF_REVIEW`` only when set (R6). A
+    malformed structured value raises the same typed ValueError as every other
+    consumer of this parser; the surface turns it into its typed refusal.
+    ``config`` lets a caller that already parsed the setting avoid a second parse.
+    """
+    row = (config if config is not None else load_reviewer_slot_config()).deep_review
+    return row if row is not None else synthesized_deep_review_slot()
+
+
+def synthesized_deep_review_slot() -> ConfiguredReviewerSlot:
+    """The packed api row the legacy model key stands for — the ONE synthesis
+    rule, shared by ``deep_review_slot`` and the settings endpoint (which shows
+    it beside a malformed structured value as the legacy-derived REPAIR
+    PLACEHOLDER — no row is effective there until the setting is repaired;
+    ``deep_review_slot`` itself raises on a malformed value)."""
+    from ouroboros.config import get_deep_self_review_model
+
+    return ConfiguredReviewerSlot(
+        slot_id=DEEP_REVIEW_SLOT_ID, kind=ROUTE_KIND_API,
+        target_id=get_deep_self_review_model(),
+    )
+
+
 def structured_scope_review_slots() -> Optional[list]:
     """The scope ReviewSlots from the structured SSOT, or None on legacy.
 
@@ -687,24 +704,72 @@ def structured_scope_review_slots() -> Optional[list]:
     """
     if not structured_reviewer_slots_present():
         return None
-    from ouroboros.config import review_model_uses_local
+    return [
+        _delivery_slot(row, effort_surface="scope_review", role_hint=SCOPE_ROLE_HINT)
+        for row in commit_scope_rows()
+    ]
+
+
+def _delivery_slot(
+    row: ConfiguredReviewerSlot, *, effort_surface: str, role_hint: str,
+    default_effort: str = "", **slot_fields: Any,
+) -> Any:
+    """ONE configured row as the substrate's ``ReviewSlot``, carrying its own
+    delivery: the route kind, the opaque session target and credential pin, and
+    the configured-subagent binding the route seam turns into a native episode."""
+    from ouroboros.config import resolved_review_model_target
     from ouroboros.review_execution import ReviewRouteKind
     from ouroboros.review_substrate import ReviewSlot
 
+    # ABI-4: the local-route fact is read off the typed target constructed at
+    # the review seam, not re-derived per model string here.
+    return ReviewSlot(
+        slot_id=row.slot_id,
+        model=row.target_id,
+        effort=row_effort(row, effort_surface, default=default_effort),
+        role_hint=role_hint,
+        use_local=(resolved_review_model_target(row.target_id).provider_route == "local"),
+        route=(ReviewRouteKind.AGENT_SESSION if row.is_session
+               else ReviewRouteKind.API_CHAT),
+        session_target=row.session_target,
+        session_profile=row.profile_id,
+        subagent_id=row.subagent_id,
+        **slot_fields,
+    )
+
+
+def triad_delivery_slots(
+    *,
+    role_hint: str = "",
+    default_effort: str = "",
+    config: Optional["ReviewerSlotConfig"] = None,
+    **slot_fields: Any,
+) -> List[Any]:
+    """The configured triad rows as ``ReviewSlot`` objects — THE builder for
+    plan review, skill/commit review (through ``commit_triad_delivery``'s
+    aligned vectors) and task acceptance (owner R2: acceptance reads the same
+    rows every other triad surface reads, with each row's own effort, session
+    target, credential pin, configured-subagent binding and stable slot id).
+
+    Every row rides its own delivery: an ``api_chat`` row receives the
+    assembled packet, an ``agent_session`` row is a delegated retrieving
+    reviewer, a ``subagent_id`` api row is a native retrieving episode — the
+    substrate's route seam decides from the slot fields carried here. Effort is
+    the row's explicit value, else a compound Cursor/Agy route's encoded value,
+    else ``default_effort``, else the configured Review effort. Slot ids are the
+    rows' own, owner-assigned on the structured config (ABI-10 retired the
+    legacy comma-list read). ``slot_fields`` are the caller's per-surface ReviewSlot
+    properties (timeout, output budget, temperature). A malformed structured
+    value RAISES ValueError — every surface turns that into its typed refusal
+    (R3); no surface has a silently projected default panel to fall back to.
+    """
+    rows = (config if config is not None else load_reviewer_slot_config()).triad
     return [
-        ReviewSlot(
-            slot_id=row.slot_id,
-            model=row.target_id,
-            effort=row_effort(row, "scope_review"),
-            role_hint="scope reviewer",
-            use_local=review_model_uses_local(row.target_id),
-            route=(ReviewRouteKind.AGENT_SESSION if row.is_session
-                   else ReviewRouteKind.API_CHAT),
-            session_target=row.session_target,
-            session_profile=row.profile_id,
-            subagent_id=row.subagent_id,
+        _delivery_slot(
+            row, effort_surface="review", role_hint=role_hint,
+            default_effort=default_effort, **slot_fields,
         )
-        for row in commit_scope_rows()
+        for row in rows
     ]
 
 
@@ -714,61 +779,66 @@ def reviewer_slots(
     effort: str = "medium",
     role_hint: str = "",
     id_prefix: str = "",
-    route_env_key: str = "",
 ) -> List[Any]:
-    """The configured reviewer rows, each carrying its DELIVERY route.
+    """The configured reviewer rows, every one pinned ``api_chat``.
 
     Moved here from ``review_substrate`` for module altitude (P7); the
-    substrate re-exports it. ``route_env_key`` names the surface's per-row
-    route list (plan 5.1): the commit triad and scope pass theirs, so a row
-    can be an api_chat call or a delegated agent session. Surfaces that stay
-    on the API by owner decision (task acceptance — D15) pass NOTHING, which
-    pins every row to ``api_chat`` explicitly rather than by accident.
+    substrate re-exports it. Per-row delegated delivery is a structured-SSOT
+    fact (``OUROBOROS_REVIEWER_SLOTS`` rows — D14/6.1): the phase-5 per-row
+    route envs are RETIRED settings keys (ABI-10) and are ignored here, so a
+    row built from a plain model list is an api_chat call explicitly rather
+    than by accident (the scope caller that fans out a delegated row overrides
+    the route itself). Surfaces that follow the configured triad rows do not
+    come here — they use ``triad_delivery_slots``.
     """
-    from ouroboros.config import get_review_models, review_model_uses_local
-    from ouroboros.review_execution import ReviewRouteKind, configured_review_routes
+    from ouroboros.config import get_review_models, resolved_review_model_target
+    from ouroboros.review_execution import ReviewRouteKind
     from ouroboros.review_substrate import SLOT_ID_PREFIX, ReviewSlot, slot_id_for_row
 
     id_prefix = id_prefix or SLOT_ID_PREFIX
     raw_models = models if models is not None else get_review_models()
     named = [str(model) for model in (raw_models or []) if str(model or "").strip()]
-    routes = configured_review_routes(route_env_key, len(named)) if route_env_key else [
-        ReviewRouteKind.API_CHAT
-    ] * len(named)
+    # ABI-4: the local-route fact comes off the typed target constructed at the
+    # review seam (one predicate application, at construction) instead of a
+    # per-string predicate call here.
     return [
         ReviewSlot(slot_id=slot_id_for_row(idx + 1, prefix=id_prefix), model=model, effort=effort,
-                   role_hint=role_hint, use_local=review_model_uses_local(model),
-                   route=routes[idx])
+                   role_hint=role_hint,
+                   use_local=(resolved_review_model_target(model).provider_route == "local"),
+                   route=ReviewRouteKind.API_CHAT)
         for idx, model in enumerate(named)
     ]
 
 
 def commit_triad_delivery() -> Dict[str, Any]:
-    """Aligned per-row delivery vectors for the commit triad, one call.
+    """Aligned per-row delivery vectors for the commit triad and skill review.
 
-    The commit surface consumes rows as parallel lists (models for display and
-    slot construction, routes for delivery, efforts/session targets/ids as row
-    properties); deriving them HERE keeps the surface at its size gate and
-    keeps the vectors impossible to misalign. Raises ValueError on a malformed
+    Those surfaces consume rows as parallel lists (models for display and slot
+    construction, routes for delivery, efforts/session targets/ids as row
+    properties); projecting them from ``triad_delivery_slots`` keeps the
+    surfaces at their size gates, keeps the vectors impossible to misalign,
+    and keeps ONE reader of the triad rows. Raises ValueError on a malformed
     configuration — the caller turns that into its typed infra block.
     """
     from ouroboros.review_execution import ReviewRouteKind
 
     config = load_reviewer_slot_config()
-    rows = list(config.triad)
+    slots = triad_delivery_slots(config=config, role_hint="multi-model review")
     return {
-        "models": [row.target_id for row in rows],
-        "routes": [
-            ReviewRouteKind.AGENT_SESSION if row.is_session else ReviewRouteKind.API_CHAT
-            for row in rows
-        ],
-        "efforts": [row_effort(row, "review") for row in rows],
-        "session_targets": [row.session_target for row in rows],
-        "session_profiles": [row.profile_id for row in rows],
-        "slot_ids": [row.slot_id for row in rows],
-        "subagent_ids": [row.subagent_id for row in rows],
+        "models": [slot.model for slot in slots],
+        "routes": [slot.route for slot in slots],
+        "efforts": [slot.effort for slot in slots],
+        "session_targets": [slot.session_target for slot in slots],
+        "session_profiles": [slot.session_profile for slot in slots],
+        "slot_ids": [slot.slot_id for slot in slots],
+        "subagent_ids": [slot.subagent_id for slot in slots],
+        # The historical fingerprint identity survives for the UNCONFIGURED
+        # panel (source="default", all api rows): a 7.0 upgrade must not lapse
+        # every install's skill-review replay authority. ABI-10 retired the
+        # legacy comma-list source, so "not structured" IS the default panel.
         "legacy_skill_fingerprint": (
-            config.source == "legacy" and all(not row.is_session for row in rows)
+            config.source != "structured"
+            and all(slot.route is ReviewRouteKind.API_CHAT for slot in slots)
         ),
     }
 
@@ -804,115 +874,96 @@ def row_effort(
 
 
 # ---------------------------------------------------------------------------
-# Runtime projection for the API-pinned surfaces (D15).
+# Save-time validation and the legacy comma-key projection.
 # ---------------------------------------------------------------------------
 
 
-def api_fallback_disclosure(config: "ReviewerSlotConfig") -> Dict[str, Any]:
-    """What API-pinned task acceptance runs with no triad api_chat row (D4/D15).
-
-    The review gates follow configured delivery rows. Task acceptance remains
-    API-only, so an all-session triad makes its legacy projection fall back to
-    shipped defaults. That real paid substitution stays owner-visible.
-    """
-    from ouroboros.config import SETTINGS_DEFAULTS
-
-    out: Dict[str, Any] = {}
-    # An actor row never feeds the API-only acceptance projection (its api form
-    # is retrieval delivery, not an api_chat packet model), so a triad of
-    # sessions and actors falls back exactly like an all-session one.
-    if config.triad and not any(
-        not r.retrieves for r in config.triad
-    ):
-        out["triad"] = str(SETTINGS_DEFAULTS["OUROBOROS_REVIEW_MODELS"]).split(",")
-    return out
+# Measured acceptance-panel cost on the API packet delivery (plan §4.1, traces of
+# 2026-09-01): the ONE-TIME migration disclosure quotes them (owner R12) so an
+# owner whose triad now retrieves knows what each substantive task's acceptance
+# panel used to cost and what it spends instead. History, not a price table.
+_ACCEPTANCE_API_PANEL_MEASURED = (
+    "measured on the API packet panel it was ≈12 s and ≈$0.07 per model row per task "
+    "(median, OSWorld traces; a three-row panel ≈75 s / ≈$0.82 on ProgramBench; "
+    "7.5–8.9% of a run's cost)"
+)
 
 
-def reviewer_slot_api_fallback_warning(raw: Optional[str] = None) -> str:
-    """Save-time warning for the all-delegated substitution, or '' when none.
-
-    ``raw`` lets the save handler pass the INCOMING structured value (before it
-    is stored); with none it reads the currently stored value. A malformed
-    value returns '' (the strict parser reports that separately)."""
-    raw = structured_reviewer_slots_raw() if raw is None else str(raw or "").strip()
-    if not raw:
-        return ""
-    try:
-        disclosure = api_fallback_disclosure(parse_reviewer_slots(raw))
-    except ValueError:
-        return ""
-    return _fallback_warning_text(disclosure)
-
-
-def _fallback_warning_text(disclosure: Dict[str, Any]) -> str:
-    """The owner-facing all-delegated routing disclosure, or '' when none.
-
-    Deliberately NOT advice. It used to end "keep at least one API reviewer row
-    to avoid the fallback", which told the owner to undo the ratified default
-    (D-3: with a subscription connected, everything that can run on a
-    subscription does, and a triad is never half API and half subscription).
-    What remains true is a routing FACT worth stating once: which surfaces this
-    configuration moved off the API, which ones the API still serves, and which
-    models they will use when they run."""
-    if not disclosure:
-        return ""
-    models = sorted({m for row in disclosure.values() for m in row})
+def acceptance_delivery_disclosure(rows: Sequence[ConfiguredReviewerSlot]) -> str:
+    """The one-time R12 disclosure for a triad that (newly) retrieves: which rows,
+    and what every substantive task's acceptance panel spends on them."""
+    named = ", ".join(
+        f"{row.slot_id} ({'agent session ' + row.session_target if row.is_session else 'native inspection'}"
+        f"{' via ' + row.subagent_id if row.subagent_id else ''} → {row.target_id})"
+        for row in rows
+    )
     return (
-        "Every commit, plan, and skill-review triad row runs on an agent "
-        "subscription, so those reviews spend subscription windows instead of "
-        "API budget and never fall back to API spend. Task acceptance remains "
-        f"API-only and uses the shipped default models ({', '.join(models)})."
+        f"Task acceptance now follows these triad rows, including the retrieving ones — {named}. "
+        f"Every substantive task's acceptance panel runs on them from the next task: {_ACCEPTANCE_API_PANEL_MEASURED}. "
+        "A native inspection row spends API money as rounds × one send; an agent-session row spends "
+        "minutes of your subscription window per task instead. A triad that also carries an "
+        "api_chat row keeps a packet panel beside them."
     )
 
 
-def reviewer_slot_save_check(raw: str, *, subagents_raw: Optional[str] = None) -> str:
-    """Validate an incoming structured value and return the fallback warning.
+def reviewer_slot_save_check(
+    raw: str, *, subagents_raw: Optional[str] = None, previous_raw: Optional[str] = None,
+) -> str:
+    """Validate an incoming structured value; return the save-time disclosure.
 
     Raises ValueError (row-precise) on a malformed value so the save handler
-    turns it into a 400; returns the all-delegated API-fallback warning ('' when
-    none) otherwise. ``subagents_raw`` threads the roster the SAME save
+    turns it into a 400. ``subagents_raw`` threads the roster the SAME save
     produces (S4 atomicity) through a context-local override — actor
-    references validate against it without any process-env mutation."""
-    if subagents_raw is None:
-        disclosure = api_fallback_disclosure(parse_reviewer_slots(raw))
-        return _fallback_warning_text(disclosure)
+    references validate against it without any process-env mutation.
+
+    The disclosure is the ONE-TIME migration notice of owner R12: returned when
+    the saved triad has a retrieving row (agent session or configured-subagent
+    native inspection) and the previously stored value had none — a legacy
+    comma-key config, a packet-only triad, an unknown/malformed previous value.
+    A save that keeps an already-retrieving triad discloses nothing again. The
+    former all-delegated API-fallback warning described a task-acceptance
+    substitution that no longer exists (acceptance follows the rows, R2)."""
+    with roster_env_override(subagents_raw) if subagents_raw is not None else _contextlib.nullcontext():
+        retrieving = [row for row in parse_reviewer_slots(raw).triad if row.retrieves]
+        if not retrieving:
+            return ""
+        try:
+            if previous_raw and any(row.retrieves for row in parse_reviewer_slots(previous_raw).triad):
+                return ""  # already disclosed when that value was saved
+        except ValueError:
+            pass  # a malformed previous value never ran a retrieving panel: disclose
+    return acceptance_delivery_disclosure(retrieving)
+
+
+@_contextlib.contextmanager
+def roster_env_override(subagents_raw: str):
+    """Parse reviewer rows against THIS roster instead of the process env —
+    the save handler's incoming roster, or a benchmark container's one-model
+    roster — without mutating the environment concurrent dispatch observes."""
     overlay = dict(os.environ)
     overlay["OUROBOROS_SUBAGENTS"] = str(subagents_raw)
     token = _ROSTER_ENV_OVERRIDE.set(overlay)
     try:
-        disclosure = api_fallback_disclosure(parse_reviewer_slots(raw))
+        yield
     finally:
         _ROSTER_ENV_OVERRIDE.reset(token)
-    return _fallback_warning_text(disclosure)
-
-
-def _record_api_fallback_substitution(disclosure: Dict[str, Any]) -> None:
-    """Durable half of the D4 disclosure: a config projection that silently
-    substituted default models leaves a record, not just a log line."""
-    from ouroboros.utils import utc_now_iso, write_text_atomic
-
-    path = _last_execution_path().parent / "reviewer_slot_api_fallback.json"
-    try:
-        path.parent.mkdir(parents=True, exist_ok=True)
-        write_text_atomic(path, json.dumps({
-            "ts": utc_now_iso(),
-            "reason": "all_commit_rows_delegated_api_surfaces_fell_back_to_defaults",
-            "substituted": disclosure,
-        }, ensure_ascii=False, indent=1))
-    except OSError:
-        pass
 
 
 def project_reviewer_slots_into_env() -> None:
-    """Project the structured config into the legacy env keys, at env-apply time.
+    """Project the structured config into the legacy comma keys, at env-apply time.
 
-    Task acceptance stays on the API by owner decision (D15) and keeps reading
-    ``get_review_models()``; when the owner's triad mixes in delegated rows it
-    must see ONLY the API rows. Commit, plan, and skill review read structured
-    rows directly, including both delivery kinds.
-    This is a runtime DERIVATION, not a second write: settings.json holds the
-    structured key alone, and a stale comma value there is overwritten here
-    rather than winning silently.
+    No review surface reads these keys while the structured key is present —
+    commit, scope, plan, skill review and task acceptance all read the
+    structured rows directly, both delivery kinds — but legacy consumers still
+    do: the external review script's key ordering, benchmark manifests, and
+    ``get_review_models()`` callers with no panel of their own. Only api_chat
+    rows project (a session row's target is a ``harness[=model]`` spec, not a
+    model id); a configured-subagent api row's target IS its roster model id
+    and projects like any other api row. An all-session triad therefore
+    leaves the comma key at the shipped default for those legacy readers —
+    never for a review surface. This is a runtime DERIVATION, not a second
+    write: settings.json holds the structured key alone, and a stale comma
+    value there is overwritten here rather than winning silently.
 
     Also owns the historical default-if-empty floor for both comma keys (moved
     verbatim from ``apply_settings_to_env`` so the tail behavior is one place).
@@ -922,7 +973,7 @@ def project_reviewer_slots_into_env() -> None:
     down with it; the review surfaces themselves re-parse strictly and BLOCK
     with the precise error instead.
     """
-    from ouroboros.config import SETTINGS_DEFAULTS
+    from ouroboros.settings_defaults import OPENROUTER_REVIEW_DEFAULTS
 
     raw = structured_reviewer_slots_raw()
     if raw:
@@ -937,47 +988,21 @@ def project_reviewer_slots_into_env() -> None:
                 REVIEWER_SLOTS_ENV, exc_info=True,
             )
         else:
-            # D15: only DIRECT api_chat rows project into the legacy comma keys
-            # API-only task acceptance reads. A configured-subagent api row is
-            # retrieval delivery — projecting its model here would silently
-            # hand acceptance a packet reviewer the owner configured as an
-            # actor (and its model id may not even be an api_chat catalog id).
-            api_triad = [
-                r.target_id for r in config.triad if not r.retrieves
-            ]
-            api_scope = [
-                r.target_id for r in config.scope if not r.retrieves
-            ]
+            api_triad = [r.target_id for r in config.triad if not r.is_session]
+            api_scope = [r.target_id for r in config.scope if not r.is_session]
             if api_triad:
                 os.environ["OUROBOROS_REVIEW_MODELS"] = ",".join(api_triad)
             else:
-                # An all-delegated triad leaves API-only task acceptance (D15)
-                # on shipped defaults rather than on zero reviewers.
                 os.environ.pop("OUROBOROS_REVIEW_MODELS", None)
             if api_scope:
                 os.environ["OUROBOROS_SCOPE_REVIEW_MODELS"] = ",".join(api_scope)
             else:
                 os.environ.pop("OUROBOROS_SCOPE_REVIEW_MODELS", None)
                 os.environ.pop("OUROBOROS_SCOPE_REVIEW_MODEL", None)
-            # D4: the substitution about to happen at the floor below is not
-            # silent — it lands loudly in the log and a durable record. The
-            # save-time warning (reviewer_slot_api_fallback_warning) is the
-            # third disclosure surface the owner actually reads.
-            disclosure = api_fallback_disclosure(config)
-            if disclosure:
-                import logging
-
-                logging.getLogger(__name__).warning(
-                    "reviewer slots: every %s row is delegated; API-only task "
-                    "acceptance falls back to shipped default models %s and "
-                    "spends API budget",
-                    " and ".join(disclosure), disclosure,
-                )
-                _record_api_fallback_substitution(disclosure)
     if not os.environ.get("OUROBOROS_REVIEW_MODELS"):
-        os.environ["OUROBOROS_REVIEW_MODELS"] = str(SETTINGS_DEFAULTS["OUROBOROS_REVIEW_MODELS"])
+        os.environ["OUROBOROS_REVIEW_MODELS"] = ",".join(OPENROUTER_REVIEW_DEFAULTS["triad"])
     if not os.environ.get("OUROBOROS_SCOPE_REVIEW_MODELS") and not os.environ.get("OUROBOROS_SCOPE_REVIEW_MODEL"):
-        os.environ["OUROBOROS_SCOPE_REVIEW_MODELS"] = str(SETTINGS_DEFAULTS["OUROBOROS_SCOPE_REVIEW_MODELS"])
+        os.environ["OUROBOROS_SCOPE_REVIEW_MODELS"] = ",".join(OPENROUTER_REVIEW_DEFAULTS["scope"])
 
 
 # ---------------------------------------------------------------------------
@@ -989,7 +1014,7 @@ def project_reviewer_slots_into_env() -> None:
 # ---------------------------------------------------------------------------
 
 LAST_EXECUTION_FILENAME = "reviewer_slot_last_execution.json"
-_LAST_EXECUTION_CAP = 64  # slots are ≤ 10+4+1; the cap only bounds junk growth
+_LAST_EXECUTION_CAP = 64  # slots are ≤ 10+4+1+1 (triad, scope, advisory, deep review); the cap only bounds junk growth
 
 
 def _last_execution_path() -> "pathlib.Path":
@@ -1101,6 +1126,7 @@ def reviewer_slot_last_executions() -> Dict[str, Any]:
 
 
 __all__ = [
+    "DEEP_REVIEW_SLOT_ID",
     "REVIEWER_SLOTS_ENV",
     "ROUTE_KIND_API",
     "ROUTE_KIND_SESSION",
@@ -1110,18 +1136,22 @@ __all__ = [
     "ConfiguredReviewerSlot",
     "ReviewerSlotConfig",
     "advisory_slot_config",
-    "api_fallback_disclosure",
     "commit_scope_rows",
     "commit_triad_rows",
-    "reviewer_slot_api_fallback_warning",
+    "deep_review_slot",
+    "synthesized_deep_review_slot",
     "load_reviewer_slot_config",
     "parse_reviewer_slots",
     "reviewer_slot_config_error",
+    "authored_reviewer_slots_state",
     "project_reviewer_slots_into_env",
     "record_reviewer_slot_executions",
     "reviewer_slot_last_executions",
+    "acceptance_delivery_disclosure",
+    "reviewer_slot_save_check",
     "row_effort",
     "structured_reviewer_slots_present",
     "structured_scope_review_slots",
     "structured_reviewer_slots_raw",
+    "triad_delivery_slots",
 ]

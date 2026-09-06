@@ -37,12 +37,12 @@ def test_installer_env_node_emergency_prepends_bundled_node_dir(monkeypatch, tmp
     """Emergency only (PATH node dead + healthy bundled selected): the node
     installer env PATH gains the bundled-node dir so npm's `#!/usr/bin/env node`
     shebang resolves the working runtime. Python installs never get it."""
-    from ouroboros import platform_layer
+    from ouroboros import node_runtime
 
     monkeypatch.setenv("PATH", "/usr/bin")
     bundle_bin = str(tmp_path / "bundle" / "bin")
     monkeypatch.setattr(
-        platform_layer, "skill_node_emergency_path_dir", lambda timeout_sec=10: bundle_bin
+        node_runtime, "skill_node_emergency_path_dir", lambda timeout_sec=10: bundle_bin
     )
 
     node_env = _installer_env(tmp_path / ".ouroboros_env", ecosystem="node")
@@ -53,11 +53,11 @@ def test_installer_env_node_emergency_prepends_bundled_node_dir(monkeypatch, tmp
 
 
 def test_installer_env_node_healthy_system_is_byte_identical(monkeypatch, tmp_path):
-    from ouroboros import platform_layer
+    from ouroboros import node_runtime
 
     monkeypatch.setenv("PATH", "/usr/bin")
     monkeypatch.setattr(
-        platform_layer, "skill_node_emergency_path_dir", lambda timeout_sec=10: ""
+        node_runtime, "skill_node_emergency_path_dir", lambda timeout_sec=10: ""
     )
 
     node_env = _installer_env(tmp_path / ".ouroboros_env", ecosystem="node")

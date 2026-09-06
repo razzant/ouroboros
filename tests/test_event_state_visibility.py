@@ -99,3 +99,33 @@ def test_sweep_stale_temp_files(tmp_path):
 
     # missing dir is a no-op, never raises
     assert sweep_stale_temp_files(tmp_path / "does-not-exist") == 0
+
+
+def test_sweep_covers_the_tmp_scripts_fallback(tmp_path):
+    """CPL4-C20: hard-kill orphans in the data-root tmp_scripts fallback are
+    swept; young scripts, foreign names, and task-drive copies (owned by the
+    drive prune) are not."""
+    from ouroboros.utils import sweep_stale_temp_files
+
+    fallback = tmp_path / "tmp_scripts"
+    fallback.mkdir()
+    aged = time.time() - 7200
+    orphan = fallback / "script_deadbeef01.py"
+    orphan.write_text("echo orphan", encoding="utf-8")
+    os.utime(orphan, (aged, aged))
+    young = fallback / "script_cafebabe02.sh"
+    young.write_text("echo young", encoding="utf-8")
+    foreign = fallback / "notes.txt"
+    foreign.write_text("keep", encoding="utf-8")
+    os.utime(foreign, (aged, aged))
+    drive_copy = tmp_path / "task_drives" / "t1" / "tmp_scripts" / "script_beef.py"
+    drive_copy.parent.mkdir(parents=True)
+    drive_copy.write_text("echo drive", encoding="utf-8")
+    os.utime(drive_copy, (aged, aged))
+
+    removed = sweep_stale_temp_files(tmp_path, min_age_sec=3600)
+
+    assert removed == 1
+    assert not orphan.exists()
+    assert young.exists() and foreign.exists()
+    assert drive_copy.exists()  # transitively owned by the task-drive GC prune

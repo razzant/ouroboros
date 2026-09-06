@@ -7,9 +7,6 @@
   "OUROBOROS_MODEL_LIGHT": "google/gemini-2.5-pro",
   "OUROBOROS_MODEL_VISION": "",
   "OUROBOROS_MODEL_FALLBACKS": "google/gemini-2.5-pro",
-  "OUROBOROS_REVIEW_MODELS": "google/gemini-2.5-pro,google/gemini-2.5-pro,google/gemini-2.5-pro",
-  "OUROBOROS_SCOPE_REVIEW_MODELS": "google/gemini-2.5-pro",
-  "OUROBOROS_SCOPE_REVIEW_MODEL": "google/gemini-2.5-pro",
   "OUROBOROS_TASK_REVIEW_MODE": "required",
   "OUROBOROS_REVIEW_ENFORCEMENT": "blocking",
   "OUROBOROS_REVIEW_MAX_CYCLES": "unlimited",
@@ -21,5 +18,6 @@
   "OUROBOROS_EFFORT_TASK": "high",
   "OUROBOROS_EFFORT_REVIEW": "high",
   "OUROBOROS_EFFORT_SCOPE_REVIEW": "high",
-  "OUROBOROS_SAFETY_MODE": "light"
+  "OUROBOROS_SAFETY_MODE": "light",
+  "OUROBOROS_REVIEWER_SLOTS": "{\"triad\":[{\"slot_id\":\"benchmark-triad-1\",\"route\":{\"kind\":\"api_chat\",\"target_id\":\"google/gemini-2.5-pro\"}},{\"slot_id\":\"benchmark-triad-2\",\"route\":{\"kind\":\"api_chat\",\"target_id\":\"google/gemini-2.5-pro\"}},{\"slot_id\":\"benchmark-triad-3\",\"route\":{\"kind\":\"api_chat\",\"target_id\":\"google/gemini-2.5-pro\"}}],\"scope\":[{\"slot_id\":\"benchmark-scope-1\",\"route\":{\"kind\":\"api_chat\",\"target_id\":\"google/gemini-2.5-pro\"}}]}"
 }

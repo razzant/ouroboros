@@ -67,7 +67,7 @@ def test_main_route_to_existing_project_explicitly_selects_predecessor_or_stays_
     }
     result_dir = tmp_path / "task_results"
     result_dir.mkdir()
-    (result_dir / "racer-old.json").write_text(json.dumps(predecessor), encoding="utf-8")
+    (result_dir / "racer-old.json").write_text(json.dumps({"_schema_version": 1, **predecessor}), encoding="utf-8")
     preview = server._task_result_ground_truth(predecessor)
     metadata = {"main_routing_manifest": {"final_results": [preview]}}
     events = []
@@ -167,7 +167,7 @@ def test_manual_target_preserves_valid_predecessor_and_rejects_unreadable_one(tm
     }
     result_dir = tmp_path / "task_results"
     result_dir.mkdir()
-    (result_dir / "previous.json").write_text(json.dumps(predecessor), encoding="utf-8")
+    (result_dir / "previous.json").write_text(json.dumps({"_schema_version": 1, **predecessor}), encoding="utf-8")
     preview = server._task_result_ground_truth(predecessor)
     events = []
     metadata = {"main_routing_manifest": {"final_results": [preview]}}

@@ -75,7 +75,7 @@ def test_task_detail_projects_legacy_state_without_rewriting_disk(tmp_path):
     task_id = "legacy-detail"
     path = tmp_path / "task_results" / f"{task_id}.json"
     path.parent.mkdir(parents=True)
-    stored = {"task_id": task_id, "status": "running", "plan_review_state": _legacy("open")}
+    stored = {"_schema_version": 1, "task_id": task_id, "status": "running", "plan_review_state": _legacy("open")}
     atomic_write_json(path, stored)
     request = SimpleNamespace(
         path_params={"task_id": task_id},

@@ -24,21 +24,19 @@ def programbench_budget_profile() -> dict[str, Any]:
         # the 6h deadline and the run's own key/budget caps own the bounds;
         # cost milestones stay informational against the start snapshot.
         "cost_hard_stop_pct": 0,
-        # v6.56.0 (owner decision): spend the WHOLE 6h window on improvement
-        # passes — the time gate (remaining − reserve > est_review) is the only
-        # bound; until_deadline lifts the count axis while a deadline exists.
-        "improvement_policy": "until_deadline",
-        # Explicit task-local caps remain authoritative under every policy.
-        # ProgramBench allows up to six acceptance/improvement passes; the
-        # deadline/reserve rails may still stop the loop earlier.
+        # ABI 7.0 (Q10=A): the legacy until_deadline alias is removed. The
+        # explicit task-local cap below was ALWAYS authoritative over the count
+        # axis (an explicit cap binds under every policy), so "fixed" + cap 6
+        # reproduces the run behavior exactly; the deadline/reserve rails still
+        # stop the loop earlier when time runs out.
+        "improvement_policy": "fixed",
+        # ProgramBench allows up to six acceptance/improvement passes.
         "max_improvement_passes": 6,
         # 0-100 percentage of the total budget kept for finalization
         # (15% of 6h ≈ the last ~54 minutes).
         "reserve_finalization_pct": 15,
-        # NB: stall_rounds_threshold is normalized into the contract but not yet
-        # consumed by the runtime (explicitly deferred, per the sprint plan);
-        # carried here so the contract does not churn when stall detection lands.
-        "stall_rounds_threshold": 12,
+        # stall_rounds_threshold was removed with the 7.0 ABI window (Q10=A):
+        # it was normalized into the contract but never consumed by the runtime.
     }
 
 

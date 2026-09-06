@@ -110,7 +110,9 @@ def _active_direct_provider(settings: dict[str, Any]) -> str:
         for provider, key in (
             ("openai", "OPENAI_API_KEY"),
             ("anthropic", "ANTHROPIC_API_KEY"),
+            ("minimax", "MINIMAX_API_KEY"),
             ("cloudru", "CLOUDRU_FOUNDATION_MODELS_API_KEY"),
+            ("deepseek", "DEEPSEEK_API_KEY"),
         )
         if _setting_or_env(settings, key)
     ]

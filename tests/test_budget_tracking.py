@@ -328,6 +328,29 @@ class TestSupervisorDedupCostTracking:
         assert scope.category == "planning"
         assert scope.source == "task_duplicate_check"
 
+    @pytest.mark.parametrize("raw, expected_default", [(None, True), ("0", False)])
+    def test_dedup_scope_uses_total_budget_resolver(self, tmp_path, monkeypatch, raw, expected_default):
+        import supervisor.events as ev_mod
+        from ouroboros.config import SETTINGS_DEFAULTS
+        from ouroboros.usage_accounting import current_usage_scope
+
+        if raw is None:
+            monkeypatch.delenv("TOTAL_BUDGET", raising=False)
+        else:
+            monkeypatch.setenv("TOTAL_BUDGET", raw)
+        captured = []
+        with patch("ouroboros.llm.LLMClient") as mock_cls:
+            mock_cls.return_value.chat.side_effect = lambda **_k: (
+                captured.append(current_usage_scope()) or {"content": "NONE"}, {}
+            )
+            ev_mod._find_duplicate_task(
+                "new", "", [{"id": "old", "text": "old"}], {},
+                dedupe_identity={"task_id": "new", "budget_drive_root": str(tmp_path)},
+            )
+
+        expected = float(SETTINGS_DEFAULTS["TOTAL_BUDGET"]) if expected_default else None
+        assert captured[0].global_limit_usd == expected
+
     def test_no_budget_call_when_no_usage(self):
         import supervisor.events as ev_mod
 

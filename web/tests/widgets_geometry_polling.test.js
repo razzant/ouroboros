@@ -182,13 +182,17 @@ test('module overflow ownership covers floor equality, fixed-height no-op, and c
     assert.equal(harness.observerDisconnects(), 1);
     assert.equal(harness.listeners.has('load'), false);
 
-    const widgetsSource = readFileSync(new URL('../modules/widgets.js', import.meta.url), 'utf8');
-    assert.match(widgetsSource, /const resizeBridge = autoHeight\s*\? moduleResizeScript\(/);
+    // Page host plus the framed mounts split out of it: the resize bridge wiring
+    // lives in widget_module.js; the negative pin must hold across both files.
+    const framedSource = ['widgets.js', 'widget_module.js']
+        .map((name) => readFileSync(new URL(`../modules/${name}`, import.meta.url), 'utf8'))
+        .join('\n');
+    assert.match(framedSource, /const resizeBridge = autoHeight\s*\? moduleResizeScript\(/);
     assert.match(
-        widgetsSource,
+        framedSource,
         /moduleResizeScript\(\s*nonce,\s*WIDGET_FRAME_DEFAULT_HEIGHT,\s*maxHeight,\s*WIDGET_FRAME_BORDER_RESERVE,/,
     );
-    assert.doesNotMatch(widgetsSource, /scrolling="no"|syncModuleFrameScrolling/);
+    assert.doesNotMatch(framedSource, /scrolling="no"|syncModuleFrameScrolling/);
 });
 
 test('widget job retry classification distinguishes transport from terminal errors', () => {

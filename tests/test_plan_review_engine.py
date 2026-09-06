@@ -484,6 +484,29 @@ def test_notes_close_by_disposition_at_zero_cost(harness):
     assert bad.startswith("ERROR: PLAN_REVIEW_DISPOSITION_INVALID") or "unknown_finding_id" in bad
 
 
+def test_v2_wave_without_exact_artifact_can_close_by_disposition(harness):
+    sub = harness.install({"s1": json.dumps([_finding("n1", "note")]), "s2": CLEAN, "s3": CLEAN})
+    ctx = harness.make_ctx()
+    _call(ctx)
+    fp = _state(harness)["waves"][-1]["request_fingerprint"]
+    result_path = harness.drive / "task_results" / "task-1.json"
+    result = json.loads(result_path.read_text(encoding="utf-8"))
+    result["plan_review_state"]["waves"][-1].pop("wave_artifact")
+    result_path.write_text(json.dumps(result), encoding="utf-8")
+
+    closed = pr._handle_plan_task(ctx, review_disposition={
+        "review_fingerprint": fp,
+        "items": [{"finding_id": "s1:n1", "decision": "accept", "rationale": "will do"}],
+    })
+
+    assert _control(closed) == {"outcome": "REVIEW_REQUIRED", "closed": True}
+    assert "exact_artifact_absent" in closed
+    wave = _state(harness)["waves"][-1]
+    assert any(note.startswith("exact_artifact_absent:") for note in wave["closure_notes"])
+    assert wave["wave_artifact"]["root"] == "artifact_store"
+    assert len(sub.calls) == 1
+
+
 def test_blocking_findings_never_close_by_disposition_and_reject_rides_into_delta_cycle(harness):
     blocking = json.dumps([_finding("b1", "blocking", breaks="invariant_1", summary="Friday is impossible")])
     sub = harness.install({"s1": blocking, "s2": blocking, "s3": CLEAN})
@@ -729,7 +752,7 @@ def _acceptance_ctx(tmp_path, *, passes_done, events=None):
     return loop_mod._TaskAcceptanceContext(
         tools=SimpleNamespace(_ctx=tool_ctx), content="done", task_id="acc-1", task_type="task",
         llm_trace={"tool_calls": [{"tool": "write_file", "args": {"path": "x.py"}}]}, drive_root=None,
-        messages=[{"role": "user", "content": "goal"}], emit_progress=lambda _m: None, mode="required",
+        messages=[{"role": "user", "content": "goal"}], emit_progress=lambda _m, *, incident=None: None, mode="required",
         subtree_statuses=[], budget_profile={}, passes_done=passes_done,
     )
 
@@ -1539,58 +1562,3 @@ def test_epoch_replay_free_while_unchanged_transient_keeps_it_healed_repays(harn
     assert _state(harness)["cycles_paid"] == 2
 
 
-def test_quorum_unreachable_releases_finalization_for_a_blocked_terminal(harness, monkeypatch):
-    """B2b blocked finalization: with the quorum structurally unreachable under
-    blocking, the gate RELEASES finalization (agent's choice, never auto), the
-    review stays OPEN, implementation stays held, and outcomes terminalizes the
-    finalized task as blocked_with_evidence with the typed quorum reason."""
-    _patch_health(monkeypatch, lambda slots: dict(_DEAD_PANEL))
-    harness.install({"s1": CLEAN})
-    ctx = harness.make_ctx()
-    out = _call(ctx)
-    assert "implementation still held" in out
-    from ouroboros.owner_hurry import force_plan_decision, plan_review_disclosure
-    from ouroboros.task_results import plan_review_gate_projection
-
-    state = _state(harness)
-    gate = plan_review_gate_projection(state, "blocking")
-    assert gate["status"] == "open" and gate["allow"] is True and gate["closed"] is False
-    assert gate["quorum_unreachable"] is True
-    assert gate["earliest_reset"] == "2030-01-01T00:00:00+00:00"
-    # advisory is untouched: it already proceeded under loud disclosure
-    advisory = plan_review_gate_projection(state, "advisory")
-    assert advisory["status"] == "advisory_open" and advisory["allow"] is True
-    decision = force_plan_decision(ctx, {}, enforcement="blocking")
-    assert decision["allow"] is True and decision["quorum_unreachable"] is True
-    disclosure = plan_review_disclosure(decision)
-    assert "blocked_with_evidence" in disclosure and "structurally unreachable" in disclosure
-    assert "2030-01-01T00:00:00+00:00" in disclosure
-    from ouroboros.outcomes import derive_loop_outcome
-
-    outcome = derive_loop_outcome("done", {}, {"force_plan_decision": decision, "tool_calls": []})
-    objective = outcome["outcome_axes"]["objective"]
-    assert objective["status"] == "fail"
-    assert objective["outcome_tier"] == "blocked_with_evidence"
-    assert objective["reason"] == "plan_review_quorum_unreachable"
-    # the review itself is NOT closed by the release
-    assert _state(harness)["waves"][-1]["closed"] is False
-
-
-def test_reachable_quorum_with_one_dead_slot_still_holds_under_blocking(harness, monkeypatch):
-    """One dead slot of three leaves the quorum reachable: no release, the open
-    DEGRADED wave holds finalization under blocking exactly as before."""
-    _patch_health(monkeypatch, lambda slots: {
-        "s3": {"failure_code": "subscription_window_exhausted",
-               "reset_at": "2030-01-01T00:00:00+00:00"}})
-    prose = "prose only, no findings array"
-    harness.install({"s1": prose, "s2": prose})
-    ctx = harness.make_ctx()
-    out = _call(ctx)
-    assert _control(out) == {"outcome": "DEGRADED", "closed": False}
-    wave = _state(harness)["waves"][-1]
-    assert "quorum_unreachable" not in wave
-    from ouroboros.task_results import plan_review_gate_projection
-
-    gate = plan_review_gate_projection(_state(harness), "blocking")
-    assert gate["allow"] is False and gate["status"] == "open"
-    assert gate["quorum_unreachable"] is False

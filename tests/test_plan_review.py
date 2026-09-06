@@ -554,7 +554,7 @@ class TestPlanReviewToolRegistration(unittest.TestCase):
 
         self.assertIn("TOOL_ARG_ERROR (plan_task)", result)
         self.assertIn("review_disposition", result)
-        self.assertNotIn("review_dispositon", result)
+        self.assertIn("unsupported argument(s): review_dispositon", result)
         self.assertNotIn("handler-ran", result)
 
     def test_plan_task_description_is_domain_neutral_and_trigger_free(self):
@@ -695,7 +695,7 @@ class TestPlanReviewDispositionEnvelope(unittest.TestCase):
 
     def test_control_line_outcomes_follow_the_parser_contract(self):
         import ouroboros.tools.plan_review as pr
-        from ouroboros.loop_tool_execution import _parse_plan_review_control
+        from ouroboros.tools.plan_render import _parse_plan_review_control
 
         for aggregate, closed, expected in (
             ("GREEN", True, ("GREEN", True)),

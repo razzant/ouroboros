@@ -322,14 +322,14 @@ def test_a_malformed_body_says_saved_false(monkeypatch, isolated_settings):
     assert resp.json()["saved"] is False, resp.text
 
 
-# The FIVE single-decision owner endpoints — membership is "calls
-# `_owner_write_settings`", not "wears the decorator". Each entry is the route,
-# the handler name and a payload its own validation accepts.
+# The FOUR single-decision owner endpoints — membership is "calls
+# `_owner_update_settings`" (directly, or through `_owner_write_settings`), not
+# "wears the decorator". Each entry is the route, the handler name and a payload
+# its own validation accepts.
 _OWNER_SETTINGS_WRITERS = [
     ("/api/owner/runtime-mode", "api_owner_runtime_mode", {"mode": "pro"}),
     ("/api/owner/auto-grant", "api_owner_auto_grant", {"enabled": False}),
     ("/api/owner/context-mode", "api_owner_context_mode", {"mode": "low"}),
-    ("/api/owner/scope-review-floor", "api_owner_scope_review_floor", {"floor": "advisory"}),
     ("/api/owner/safety-mode", "api_owner_safety_mode", {"mode": "light"}),
 ]
 
@@ -352,7 +352,6 @@ def test_owner_endpoints_map_a_contended_lock_to_a_typed_refusal(monkeypatch, is
     guard cannot quietly go missing from four of them."""
     from ouroboros.gateway import settings as settings_mod
 
-    monkeypatch.setattr(os, "environ", dict(os.environ))
     monkeypatch.setattr(settings_mod, "_has_running_agent_tasks", lambda: False, raising=False)
     app = _owner_app(handler_name, route, isolated_settings)
 
@@ -369,7 +368,6 @@ def test_owner_endpoints_map_a_contended_lock_to_a_typed_refusal(monkeypatch, is
 def test_owner_endpoint_validation_refusals_say_saved_false(monkeypatch, isolated_settings,
                                                             route, handler_name, _payload):
     """The same field on the same endpoints' PRE-commit validation path."""
-    monkeypatch.setattr(os, "environ", dict(os.environ))
     app = _owner_app(handler_name, route, isolated_settings)
     resp = TestClient(app).post(route, json={"mode": "?", "enabled": "?", "floor": "?"})
 
@@ -481,11 +479,18 @@ def test_settings_save_body_runs_off_the_event_loop():
         pathlib.Path(__file__).resolve().parents[1]
         / "ouroboros" / "gateway" / "settings.py"
     ).read_text(encoding="utf-8")
-    endpoint_text = ""
+    endpoint_text = writer_seam_text = ""
     for node in ast.walk(ast.parse(src)):
         if isinstance(node, ast.AsyncFunctionDef) and node.name == "api_settings_post":
             endpoint_text = ast.unparse(node)
-    assert "asyncio.to_thread(_api_settings_post_sync" in endpoint_text
+        if isinstance(node, ast.AsyncFunctionDef) and node.name == "_run_settings_writer":
+            writer_seam_text = ast.unparse(node)
+    # The endpoint hands its body to the ONE writer seam, and that seam is
+    # what runs it off the loop (and maps the bounded document lock's typed
+    # refusal to 503 settings_busy for every writer).
+    assert "_run_settings_writer(_api_settings_post_sync" in endpoint_text
+    assert "asyncio.to_thread(fn, request, body)" in writer_seam_text
+    assert "SettingsDocumentBusy" in writer_seam_text
 
     # Worker threads do not inherit the event loop's free serialization: a
     # writer interleaving read-merge-write with another would silently drop
@@ -504,7 +509,6 @@ def test_settings_save_body_runs_off_the_event_loop():
         "_api_owner_runtime_mode_sync",
         "_api_owner_auto_grant_sync",
         "_api_owner_context_mode_sync",
-        "_api_owner_scope_review_floor_sync",
         "_api_owner_safety_mode_sync",
     }
     # The loop must NEVER hold the document lock: every async settings writer
@@ -512,9 +516,11 @@ def test_settings_save_body_runs_off_the_event_loop():
     for node in ast.walk(ast.parse(src)):
         if isinstance(node, ast.AsyncFunctionDef) and node.name in {
             "api_owner_runtime_mode", "api_owner_auto_grant", "api_owner_context_mode",
-            "api_owner_scope_review_floor", "api_owner_safety_mode",
+            "api_owner_safety_mode",
         }:
-            assert "asyncio.to_thread" in ast.unparse(node), (
+            # Off the loop through the ONE writer seam (itself pinned above to
+            # asyncio.to_thread + the typed busy mapping), never inline.
+            assert "_run_settings_writer(" in ast.unparse(node), (
                 f"{node.name} must run its locked body off the event loop"
             )
     seen = {}
@@ -549,17 +555,30 @@ def test_settings_save_body_runs_off_the_event_loop():
         break
     else:
         raise AssertionError("onboarding.py holds no settings_document_mutation block")
+    # And the onboarding endpoint runs that locked body through the SAME bounded
+    # writer seam as the settings.py writers (audit point 3): a bare
+    # ``to_thread`` was the one settings write with no initiating-writer cap.
+    for node in ast.walk(ast.parse(onboarding_src)):
+        if isinstance(node, ast.AsyncFunctionDef) and node.name == "api_onboarding_complete":
+            text = ast.unparse(node)
+            assert "_run_settings_writer(" in text and "to_thread(" not in text, (
+                "api_onboarding_complete must persist through settings._run_settings_writer"
+            )
+            break
+    else:
+        raise AssertionError("onboarding.py defines no api_onboarding_complete")
 
-    # And any FUTURE writer: every _owner_write_settings call site in this
-    # module must live inside one of the locked writers above. The locked body
-    # itself is the one exemption — its caller _api_settings_post_sync holds
-    # the lock for it.
+    # And any FUTURE writer: every _owner_write_settings / _owner_update_settings
+    # call site in this module must live inside one of the locked writers above.
+    # The locked body itself is the one exemption — its caller
+    # _api_settings_post_sync holds the lock for it.
     for node in ast.walk(ast.parse(src)):
         if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
             if node.name in writers or node.name == "_api_settings_post_locked":
                 continue
-            if "_owner_write_settings(" in ast.unparse(node):
-                assert "settings_document_mutation" in ast.unparse(node), (
+            text = ast.unparse(node)
+            if "_owner_write_settings(" in text or "_owner_update_settings(" in text:
+                assert "settings_document_mutation" in text, (
                     f"new settings writer {node.name} does not hold the document lock"
                 )
 

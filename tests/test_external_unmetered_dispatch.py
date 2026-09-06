@@ -186,8 +186,10 @@ def test_skill_exec_timeout_keeps_one_post_spawn_disclosure(tmp_path, monkeypatc
         return process
 
     monkeypatch.setattr(skill_exec, "Popen", fake_popen)
-    # Force the first loop iteration past the deadline without sleeping.
-    ticks = iter((0.0, 2.0))
+    # Force the first loop iteration past the deadline without sleeping. Three
+    # reads: the child's start stamp (typed process facts), the deadline, and
+    # the first loop check.
+    ticks = iter((0.0, 0.0, 2.0))
     # Replace the module reference, not attributes on the process-global
     # ``time`` module (pytest itself calls monotonic on Windows).
     monkeypatch.setattr(
@@ -645,7 +647,9 @@ def test_extension_child_timeout_keeps_one_post_spawn_disclosure(tmp_path, monke
         spawned["value"] = True
         return process
 
-    ticks = iter((0.0, 2.0))
+    # Three reads: the child's start stamp (typed process facts), the deadline,
+    # and the first loop check.
+    ticks = iter((0.0, 0.0, 2.0))
     monkeypatch.setattr(extension_runner.subprocess, "Popen", fake_popen)
     monkeypatch.setattr(
         extension_runner,

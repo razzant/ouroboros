@@ -1,0 +1,877 @@
+# Production domain manifest — module -> domain, 1:1, for every runtime module
+# (plan §7.1, CPL-1). The Ф0 report-only stage lived at scripts/v7next_domains.toml;
+# this file is its production successor and the SSOT the domain gates read.
+#
+# Structure:
+#   - [domains] / [modules] / [classification] are HUMAN sections: the domain
+#     vocabulary and the 1:1 assignment. Completeness against the live tree is
+#     enforced by scripts/check_domains.py + tests/test_domain_manifest.py
+#     (a tracked module without a row = red).
+#   - [graph] and [duplicates] are GENERATED sections (regenerate with
+#     `python scripts/check_domains.py --write`): today's factual dependency
+#     matrix, cycle ceiling, lazy/dynamic classification and the literal-copy
+#     baseline, pinned as data. Baseline = current reality; tightening any of
+#     it is a separate owner decision (plan §7.1 discipline).
+#   - docs/DOMAIN_MAP.md is generated from this manifest (same --write).
+#
+# Derivation of the assignment:
+#   - domain vocabulary and the original 411-module assignment parsed from the
+#     frozen reference worktree ouroboros_v7_wip @ 9f691656 docs/DOMAIN_MAP.md;
+#   - upstream modules absent from the v7 map were classified by reading each
+#     header/docstring/imports; those 80 placements rode in
+#     [classification].proposed until the owner accepted them as the 7.0 base
+#     (batch №9 №10=A, 2026-09-01), so every row here is now settled.
+#
+# The seven package __init__.py files go with their package (DOMAIN_MAP Method note);
+# ouroboros/gateways/__init__.py is placed with D07 (its residents split D06/D07 —
+# claude_code.py is D06 transport, claudexor.py is D07).
+
+[meta]
+reference_tree = "ouroboros_v7_wip @ 9f691656e7e756c483f72ef549418c0e7a1b8054 (frozen)"
+population_rule = "git-tracked *.py under ouroboros/ and supervisor/, plus server.py and launcher.py"
+
+[domains]
+D01 = "Agent core & main loop"
+D02 = "LLM client, routing & providers"
+D03 = "Context assembly, fit & compaction"
+D04 = "Tool execution: registry, access & typed results"
+D05 = "Tool surfaces: files, code, shell, media, external"
+D06 = "Review stack"
+D07 = "Delegation, subagents & Claudexor"
+D08 = "Supervisor: queue, workers, events & runtime control"
+D09 = "Cancellation, owner control & process custody"
+D10 = "Git, update & release machinery"
+D11 = "Gateway, server & Web UI"
+D12 = "Settings & configuration"
+D13 = "Safety, guards & runtime mode"
+D14 = "Skills & extensions"
+D15 = "Memory, knowledge, consciousness & self-evolution"
+D16 = "Observability, usage accounting & cost"
+D17 = "Projects, workspaces & task results"
+D18 = "Launcher, packaging, platform & shared substrate"
+D19 = "Frozen contracts (ABI)"
+D20 = "Presence"
+
+[modules]
+"launcher.py" = "D18"
+"ouroboros/launcher_windows_runtime.py" = "D18"
+"ouroboros/__init__.py" = "D18"
+"ouroboros/_outcome_receipts.py" = "D01"
+"ouroboros/_outcome_tool_errors.py" = "D01"
+"ouroboros/_usage_response.py" = "D16"
+"ouroboros/_usage_rows.py" = "D16"
+"ouroboros/_usage_rows_memo.py" = "D16"
+"ouroboros/agent.py" = "D01"
+"ouroboros/agent_dispatch.py" = "D01"
+"ouroboros/agent_startup_checks.py" = "D01"
+"ouroboros/agent_task_pipeline.py" = "D01"
+"ouroboros/anthropic_native_custody.py" = "D02"
+"ouroboros/argv_budget.py" = "D13"
+"ouroboros/artifacts.py" = "D05"
+"ouroboros/betterleaks_runtime.py" = "D14"
+"ouroboros/cancel_intents.py" = "D09"
+"ouroboros/capability_evidence.py" = "D03"
+"ouroboros/claudexor_daemon.py" = "D07"
+"ouroboros/claudexor_runtime.py" = "D07"
+"ouroboros/cli.py" = "D18"
+"ouroboros/client_surface.py" = "D11"
+"ouroboros/code_intelligence.py" = "D05"
+"ouroboros/code_intelligence_architecture.py" = "D05"
+"ouroboros/code_search_rg.py" = "D05"
+"ouroboros/colab_bootstrap.py" = "D12"
+"ouroboros/commit_admission.py" = "D06"
+"ouroboros/config.py" = "D12"
+"ouroboros/model_slots.py" = "D12"
+"ouroboros/review_model_routes.py" = "D12"
+"ouroboros/runtime_limits.py" = "D12"
+"ouroboros/settings_defaults.py" = "D12"
+"ouroboros/settings_scales.py" = "D12"
+"ouroboros/configured_subagents.py" = "D07"
+"ouroboros/consciousness.py" = "D15"
+"ouroboros/consolidator.py" = "D15"
+"ouroboros/context.py" = "D03"
+"ouroboros/context_runtime_facts.py" = "D03"
+"ouroboros/context_budget.py" = "D03"
+"ouroboros/context_compaction.py" = "D03"
+"ouroboros/context_fit.py" = "D03"
+"ouroboros/context_health.py" = "D03"
+"ouroboros/context_layout.py" = "D03"
+"ouroboros/context_mode_compat.py" = "D03"
+"ouroboros/contracts/__init__.py" = "D19"
+"ouroboros/contracts/chat_id_policy.py" = "D19"
+"ouroboros/contracts/plugin_api.py" = "D19"
+"ouroboros/contracts/schema_versions.py" = "D19"
+"ouroboros/contracts/skill_manifest.py" = "D19"
+"ouroboros/contracts/skill_payload_policy.py" = "D19"
+"ouroboros/contracts/task_constraint.py" = "D19"
+"ouroboros/contracts/task_contract.py" = "D19"
+"ouroboros/contracts/tool_abi.py" = "D19"
+"ouroboros/contracts/tool_context.py" = "D19"
+"ouroboros/coop_checkpoint.py" = "D17"
+"ouroboros/cost_projection.py" = "D16"
+"ouroboros/deadline_utils.py" = "D01"
+"ouroboros/deep_self_review.py" = "D06"
+"ouroboros/delegate_containment.py" = "D07"
+"ouroboros/delegate_custody.py" = "D07"
+"ouroboros/delegate_state_sweep.py" = "D07"
+"ouroboros/delegate_custody_reconcile.py" = "D07"
+"ouroboros/delegate_custody_usage.py" = "D07"
+"ouroboros/delegate_evidence.py" = "D07"
+"ouroboros/delegate_hold.py" = "D07"
+"ouroboros/delegate_interactions.py" = "D07"
+"ouroboros/delegate_output.py" = "D07"
+"ouroboros/delegate_pending.py" = "D07"
+"ouroboros/delegate_progress.py" = "D07"
+"ouroboros/delegate_recovery.py" = "D07"
+"ouroboros/delegate_shared.py" = "D07"
+"ouroboros/delegate_source_coverage.py" = "D07"
+"ouroboros/delegate_start_claims.py" = "D07"
+"ouroboros/delegate_start_instructions.py" = "D07"
+"ouroboros/delegate_supervision.py" = "D07"
+"ouroboros/delegate_terminal.py" = "D07"
+"ouroboros/deliverables_paths.py" = "D17"
+"ouroboros/depth_evidence.py" = "D07"
+"ouroboros/dialogue_provenance.py" = "D15"
+"ouroboros/event_bus.py" = "D14"
+"ouroboros/evolution_checkpoints.py" = "D15"
+"ouroboros/evolution_fingerprint.py" = "D15"
+"ouroboros/extension_companion.py" = "D14"
+"ouroboros/extension_health.py" = "D14"
+"ouroboros/extension_isolated_deps.py" = "D14"
+"ouroboros/extension_loader.py" = "D14"
+"ouroboros/extension_child_catalog.py" = "D14"
+"ouroboros/extension_import_staging.py" = "D14"
+"ouroboros/extension_liveness.py" = "D14"
+"ouroboros/extension_plugin_api.py" = "D14"
+"ouroboros/extension_registry_state.py" = "D14"
+"ouroboros/extension_surface_names.py" = "D14"
+"ouroboros/extension_process_runner.py" = "D14"
+"ouroboros/extension_reconcile_queue.py" = "D14"
+"ouroboros/extension_ui_validation.py" = "D14"
+"ouroboros/fallback_cooldown.py" = "D02"
+"ouroboros/gateway/__init__.py" = "D11"
+"ouroboros/gateway/_helpers.py" = "D11"
+"ouroboros/gateway/claudexor_accounts.py" = "D11"
+"ouroboros/gateway/claudexor_quota.py" = "D11"
+"ouroboros/gateway/contracts.py" = "D11"
+"ouroboros/gateway/control.py" = "D11"
+"ouroboros/gateway/cost_breakdown.py" = "D11"
+"ouroboros/gateway/extensions.py" = "D11"
+"ouroboros/gateway/widgets.py" = "D11"
+"ouroboros/gateway/extension_receipts.py" = "D11"
+"ouroboros/gateway/files.py" = "D11"
+"ouroboros/gateway/history.py" = "D11"
+"ouroboros/gateway/host_service.py" = "D11"
+"ouroboros/gateway/logs.py" = "D11"
+"ouroboros/gateway/marketplace.py" = "D11"
+"ouroboros/gateway/mcp.py" = "D11"
+"ouroboros/gateway/models.py" = "D11"
+"ouroboros/gateway/onboarding.py" = "D11"
+"ouroboros/gateway/onboarding_host.py" = "D11"
+"ouroboros/gateway/owner_settings.py" = "D11"
+"ouroboros/gateway/presence_settings.py" = "D11"
+"ouroboros/gateway/projects.py" = "D11"
+"ouroboros/gateway/router.py" = "D11"
+"ouroboros/gateway/schema.py" = "D11"
+"ouroboros/gateway/schedules.py" = "D11"
+"ouroboros/gateway/settings.py" = "D11"
+"ouroboros/gateway/skill_publish.py" = "D11"
+"ouroboros/gateway/state.py" = "D11"
+"ouroboros/gateway/task_events.py" = "D11"
+"ouroboros/gateway/task_hurry.py" = "D11"
+"ouroboros/gateway/task_list_scan.py" = "D11"
+"ouroboros/gateway/tasks.py" = "D11"
+"ouroboros/gateway/ui_preferences.py" = "D11"
+"ouroboros/gateway/ws.py" = "D11"
+"ouroboros/gateways/__init__.py" = "D07"
+"ouroboros/gateways/claudexor.py" = "D07"
+"ouroboros/git_shell_policy.py" = "D13"
+"ouroboros/headless.py" = "D17"
+"ouroboros/headless_status.py" = "D17"
+"ouroboros/workspace_patch_capture.py" = "D17"
+"ouroboros/improvement_backlog.py" = "D15"
+"ouroboros/launcher_bootstrap.py" = "D18"
+"ouroboros/launcher_onboarding.py" = "D12"
+"ouroboros/launcher_server_reaper.py" = "D18"
+"ouroboros/llm.py" = "D02"
+"ouroboros/llm_anthropic.py" = "D02"
+"ouroboros/llm_attempt.py" = "D02"
+"ouroboros/llm_capability_policy.py" = "D02"
+"ouroboros/llm_fallback.py" = "D02"
+"ouroboros/llm_gigachat.py" = "D02"
+"ouroboros/llm_local.py" = "D02"
+"ouroboros/llm_messages.py" = "D02"
+"ouroboros/reasoning_artifacts.py" = "D02"
+"ouroboros/llm_openai_compatible.py" = "D02"
+"ouroboros/llm_pricing.py" = "D02"
+"ouroboros/llm_routing.py" = "D02"
+"ouroboros/llm_observability.py" = "D02"
+"ouroboros/llm_probe.py" = "D02"
+"ouroboros/local_model.py" = "D02"
+"ouroboros/local_model_autostart.py" = "D02"
+"ouroboros/loop.py" = "D01"
+"ouroboros/loop_acceptance.py" = "D01"
+"ouroboros/loop_acceptance_review.py" = "D01"
+"ouroboros/loop_budget.py" = "D01"
+"ouroboros/loop_delivery.py" = "D01"
+"ouroboros/loop_forced_finalization.py" = "D01"
+"ouroboros/loop_messages.py" = "D01"
+"ouroboros/loop_model_call.py" = "D01"
+"ouroboros/loop_nudges.py" = "D01"
+"ouroboros/loop_round_limits.py" = "D01"
+"ouroboros/loop_llm_call.py" = "D01"
+"ouroboros/loop_tool_execution.py" = "D01"
+"ouroboros/loop_transport.py" = "D01"
+"ouroboros/main_context_authority.py" = "D03"
+"ouroboros/marketplace/__init__.py" = "D14"
+"ouroboros/marketplace/adapter.py" = "D14"
+"ouroboros/marketplace/clawhub.py" = "D14"
+"ouroboros/marketplace/fetcher.py" = "D14"
+"ouroboros/marketplace/install.py" = "D14"
+"ouroboros/marketplace/install_specs.py" = "D14"
+"ouroboros/marketplace/isolated_deps.py" = "D14"
+"ouroboros/marketplace/ouroboroshub.py" = "D14"
+"ouroboros/marketplace/provenance.py" = "D14"
+"ouroboros/mcp_client.py" = "D05"
+"ouroboros/memory.py" = "D15"
+"ouroboros/memory_journal_compaction.py" = "D15"
+"ouroboros/model_concurrency.py" = "D02"
+"ouroboros/model_send_seal.py" = "D16"
+"ouroboros/mutation_attribution.py" = "D01"
+"ouroboros/nanny_pacing.py" = "D07"
+"ouroboros/net_transport.py" = "D02"
+"ouroboros/observability.py" = "D16"
+"ouroboros/onboarding_wizard.py" = "D12"
+"ouroboros/openai_chat_custom.py" = "D02"
+"ouroboros/openai_chat_dispatch.py" = "D02"
+"ouroboros/openrouter_attribution.py" = "D02"
+"ouroboros/outcome_receipt_store.py" = "D01"
+"ouroboros/outcomes.py" = "D01"
+"ouroboros/owner_hurry.py" = "D09"
+"ouroboros/owner_quiz.py" = "D09"  # F6 sync (#Q-2b): owner quiz cards, structural expiry with the authoring task
+"ouroboros/owner_mailbox.py" = "D01"
+"ouroboros/packaged_cli.py" = "D18"
+"ouroboros/packaged_cli_install.py" = "D18"
+"ouroboros/platform_layer.py" = "D18"
+"ouroboros/post_task_checkpoint.py" = "D01"
+"ouroboros/post_task_synthesis.py" = "D01"
+"ouroboros/post_task_evolution.py" = "D15"
+"ouroboros/preflight_node.py" = "D06"
+"ouroboros/preflight_runner.py" = "D06"
+"ouroboros/presence_admission.py" = "D20"
+"ouroboros/presence_authority.py" = "D20"
+"ouroboros/presence_bindings.py" = "D20"
+"ouroboros/presence_capabilities.py" = "D20"
+"ouroboros/presence_context.py" = "D20"
+"ouroboros/presence_profile.py" = "D20"
+"ouroboros/presence_runner.py" = "D20"
+"ouroboros/presence_runtime.py" = "D20"
+"ouroboros/pricing.py" = "D02"
+"ouroboros/process_containment.py" = "D09"
+"ouroboros/process_custody.py" = "D09"
+"ouroboros/project_dialogue.py" = "D17"
+"ouroboros/project_facts.py" = "D15"
+"ouroboros/project_lease.py" = "D17"
+"ouroboros/project_naming.py" = "D17"
+"ouroboros/project_sources.py" = "D17"
+"ouroboros/projects_registry.py" = "D17"
+"ouroboros/promotion_source.py" = "D08"
+"ouroboros/protected_artifacts.py" = "D04"
+"ouroboros/provider_models.py" = "D02"
+"ouroboros/process_interpreters.py" = "D05"  # F6 sync: upstream retired python_interpreter.py into this two-family (python/node) resolver
+"ouroboros/reflection.py" = "D15"
+"ouroboros/repo_remotes.py" = "D10"
+"ouroboros/request_wire_attempt.py" = "D02"
+"ouroboros/request_wire_contract.py" = "D02"
+"ouroboros/request_wire_custom_validation.py" = "D02"
+"ouroboros/request_wire_receipts.py" = "D02"
+"ouroboros/request_wire_recovery.py" = "D02"
+"ouroboros/request_wire_resolution.py" = "D02"
+"ouroboros/retention.py" = "D17"
+"ouroboros/review.py" = "D06"
+"ouroboros/review_actor_aggregation.py" = "D06"
+"ouroboros/review_custody.py" = "D06"
+"ouroboros/review_cycles.py" = "D06"
+"ouroboros/review_dispatch.py" = "D06"
+"ouroboros/review_evidence.py" = "D06"
+"ouroboros/review_evidence_sections.py" = "D06"
+"ouroboros/review_evidence_refs.py" = "D06"
+"ouroboros/review_execution.py" = "D06"
+"ouroboros/review_execution_projection.py" = "D06"
+"ouroboros/review_native_episode.py" = "D06"
+"ouroboros/review_owner_custody.py" = "D06"
+"ouroboros/review_projection.py" = "D06"
+"ouroboros/review_status_projection.py" = "D06"
+"ouroboros/review_records.py" = "D06"
+"ouroboros/review_session_custody.py" = "D06"
+"ouroboros/review_session_usage.py" = "D06"
+"ouroboros/review_slot_cancel.py" = "D06"
+"ouroboros/review_state.py" = "D06"
+"ouroboros/review_state_custody.py" = "D06"
+"ouroboros/review_state_model.py" = "D06"
+"ouroboros/review_state_records.py" = "D06"
+"ouroboros/review_substrate.py" = "D06"
+"ouroboros/review_thread_continuity.py" = "D06"
+"ouroboros/review_verdict.py" = "D06"
+"ouroboros/review_verdict_extraction.py" = "D06"
+"ouroboros/reviewer_slot_config.py" = "D06"
+"ouroboros/reviewer_window.py" = "D06"
+"ouroboros/route_spec.py" = "D02"
+"ouroboros/runtime_mode_policy.py" = "D13"
+"ouroboros/safety.py" = "D13"
+"ouroboros/schedule_contract.py" = "D08"
+"ouroboros/secret_masking.py" = "D12"
+"ouroboros/credential_shapes.py" = "D13"
+"ouroboros/semantic_dedup.py" = "D15"
+"ouroboros/server_auth.py" = "D11"
+"ouroboros/server_control.py" = "D09"
+"ouroboros/server_entrypoint.py" = "D11"
+"ouroboros/server_runtime.py" = "D11"
+"ouroboros/server_web.py" = "D11"
+"ouroboros/settings_integrity.py" = "D12"
+"ouroboros/settings_setup_contract.py" = "D12"
+"ouroboros/shell_parse.py" = "D13"
+"ouroboros/size_ratchet_manifest.py" = "D10"
+"ouroboros/skill_dependencies.py" = "D14"
+"ouroboros/skill_lifecycle_queue.py" = "D14"
+"ouroboros/skill_loader.py" = "D14"
+"ouroboros/skill_uninstall_state.py" = "D14"
+"ouroboros/skill_owner_attestation.py" = "D14"
+"ouroboros/skill_payload_binding.py" = "D14"
+"ouroboros/skill_publish_eligibility.py" = "D14"
+"ouroboros/skill_publish_github.py" = "D14"
+"ouroboros/skill_publish_result.py" = "D14"
+"ouroboros/skill_publish_scanner.py" = "D14"
+"ouroboros/skill_publish_snapshot.py" = "D14"
+"ouroboros/skill_readiness.py" = "D14"
+"ouroboros/skill_repair_admission.py" = "D14"
+"ouroboros/skill_review.py" = "D14"
+"ouroboros/skill_review_output.py" = "D14"
+"ouroboros/skill_review_packs.py" = "D14"
+"ouroboros/skill_review_prompt.py" = "D14"
+"ouroboros/skill_review_rebuttals.py" = "D14"
+"ouroboros/skill_review_cycles.py" = "D14"
+"ouroboros/skill_review_history.py" = "D14"
+"ouroboros/skill_review_passes.py" = "D14"
+"ouroboros/skill_review_runner.py" = "D14"
+"ouroboros/skill_review_status.py" = "D14"
+"ouroboros/skill_review_usage.py" = "D14"
+"ouroboros/skill_token.py" = "D14"
+"ouroboros/subagent_bootstrap.py" = "D07"
+"ouroboros/subagent_dispatch_notes.py" = "D07"
+"ouroboros/subagent_messages.py" = "D07"
+"ouroboros/subagent_runtime.py" = "D07"
+"ouroboros/subagent_work_order.py" = "D07"
+"ouroboros/subagent_worktrees.py" = "D07"
+"ouroboros/subagents.py" = "D07"
+"ouroboros/subagent_route_health.py" = "D07"
+"ouroboros/subscription_install_presets.py" = "D12"
+"ouroboros/synthesis_cost_text.py" = "D01"
+"ouroboros/task_continuation.py" = "D06"
+"ouroboros/task_finalization.py" = "D01"
+"ouroboros/task_pacing.py" = "D01"
+"ouroboros/task_results.py" = "D17"
+"ouroboros/task_result_schema.py" = "D17"
+"ouroboros/task_status.py" = "D17"
+"ouroboros/task_tree_ledger.py" = "D07"
+"ouroboros/tool_access.py" = "D04"
+"ouroboros/tool_access_paths.py" = "D04"
+"ouroboros/tool_access_roots.py" = "D04"
+"ouroboros/tool_access_types.py" = "D04"
+"ouroboros/tool_access_user_files.py" = "D04"
+"ouroboros/tool_capabilities.py" = "D04"
+"ouroboros/tool_policy.py" = "D04"
+"ouroboros/tools/__init__.py" = "D04"
+"ouroboros/tools/browser.py" = "D05"
+"ouroboros/tools/ci.py" = "D10"
+"ouroboros/tools/claude_advisory_review.py" = "D06"
+"ouroboros/tools/preflight_review_prompt.py" = "D06"
+"ouroboros/tools/preflight_review_run.py" = "D06"
+"ouroboros/tools/commit_gate.py" = "D10"
+"ouroboros/tools/compact_context.py" = "D03"
+"ouroboros/tools/control.py" = "D08"
+"ouroboros/tools/control_scheduling.py" = "D07"
+"ouroboros/tools/control_subagent_spec.py" = "D07"
+"ouroboros/tools/control_task_results.py" = "D07"
+"ouroboros/tools/control_events.py" = "D08"
+"ouroboros/tools/control_routing.py" = "D08"
+"ouroboros/tools/control_runtime.py" = "D08"
+"ouroboros/tools/control_delegation.py" = "D07"
+"ouroboros/tools/core.py" = "D05"
+"ouroboros/tools/core_artifacts.py" = "D05"
+"ouroboros/tools/core_file_tools.py" = "D05"
+"ouroboros/tools/core_secret_paths.py" = "D05"
+"ouroboros/tools/delegate.py" = "D07"
+"ouroboros/tools/delegate_terminal_evidence.py" = "D07"
+"ouroboros/tools/delegate_integration.py" = "D07"
+"ouroboros/tools/delegate_payload_patch.py" = "D07"
+"ouroboros/tools/deliverables_shell.py" = "D13"
+"ouroboros/tools/edit_ops.py" = "D05"
+"ouroboros/tools/evolution_stats.py" = "D15"
+"ouroboros/tools/extension_dispatch.py" = "D04"
+"ouroboros/tools/followup.py" = "D08"
+"ouroboros/tools/git.py" = "D10"
+"ouroboros/tools/git_evolution.py" = "D10"
+"ouroboros/tools/git_plumbing.py" = "D10"
+"ouroboros/tools/git_repo_edit.py" = "D10"
+"ouroboros/tools/git_review_cycle.py" = "D10"
+"ouroboros/tools/git_vcs_ops.py" = "D10"
+"ouroboros/tools/git_pr.py" = "D10"
+"ouroboros/tools/git_rollback.py" = "D10"
+"ouroboros/tools/github.py" = "D10"
+"ouroboros/tools/health.py" = "D05"
+"ouroboros/tools/join_ledger.py" = "D07"
+"ouroboros/tools/knowledge.py" = "D15"
+"ouroboros/tools/media.py" = "D05"
+"ouroboros/tools/memory_tools.py" = "D15"
+"ouroboros/tools/parallel_review.py" = "D06"
+"ouroboros/tools/plan_evidence.py" = "D06"
+"ouroboros/tools/plan_packet.py" = "D06"
+"ouroboros/tools/plan_render.py" = "D06"
+"ouroboros/tools/plan_review.py" = "D06"
+"ouroboros/tools/plan_review_artifacts.py" = "D06"
+"ouroboros/tools/plan_review_references.py" = "D06"
+"ouroboros/tools/plan_review_runtime.py" = "D06"
+"ouroboros/tools/plan_spec.py" = "D06"
+"ouroboros/tools/presence.py" = "D20"
+"ouroboros/tools/project_journal.py" = "D17"
+"ouroboros/tools/query_code.py" = "D05"
+"ouroboros/tools/recent_tasks.py" = "D05"
+"ouroboros/tools/registry.py" = "D04"
+"ouroboros/tools/registry_core.py" = "D04"
+"ouroboros/tools/tool_result.py" = "D04"
+"ouroboros/tools/registry_guard_process.py" = "D04"
+"ouroboros/tools/registry_guards.py" = "D04"
+"ouroboros/tools/tool_catalog.py" = "D04"
+"ouroboros/tools/tool_context.py" = "D04"
+"ouroboros/tools/tool_resolution.py" = "D04"
+"ouroboros/tools/release_sync.py" = "D10"
+"ouroboros/tools/review.py" = "D06"
+"ouroboros/tools/review_multi_model.py" = "D06"
+"ouroboros/tools/review_admission.py" = "D06"
+"ouroboros/tools/review_binary_context.py" = "D06"
+"ouroboros/tools/review_context_atlas.py" = "D06"
+"ouroboros/tools/review_helpers.py" = "D06"
+"ouroboros/tools/review_file_pack.py" = "D06"
+"ouroboros/tools/review_prompt_text.py" = "D06"
+"ouroboros/tools/review_response.py" = "D06"
+"ouroboros/tools/review_revalidation.py" = "D10"
+"ouroboros/tools/review_subject.py" = "D06"
+"ouroboros/tools/review_synthesis.py" = "D06"
+"ouroboros/tools/scope_review.py" = "D06"
+"ouroboros/tools/scope_review_budget.py" = "D06"
+"ouroboros/tools/scope_review_pack.py" = "D06"
+"ouroboros/tools/scope_review_contract.py" = "D06"
+"ouroboros/tools/scope_review_session.py" = "D06"
+"ouroboros/tools/scope_window.py" = "D06"
+"ouroboros/tools/search.py" = "D05"
+"ouroboros/tools/services.py" = "D05"
+"ouroboros/tools/shell.py" = "D05"
+"ouroboros/tools/shell_audit.py" = "D05"
+"ouroboros/tools/shell_effects.py" = "D05"
+"ouroboros/tools/shell_guards.py" = "D13"
+"ouroboros/tools/shell_outputs.py" = "D05"
+"ouroboros/tools/shell_process.py" = "D05"
+"ouroboros/tools/skill_exec.py" = "D14"
+"ouroboros/tools/skill_preflight.py" = "D14"
+"ouroboros/tools/skill_publish.py" = "D14"
+"ouroboros/tools/subagent_integration.py" = "D07"
+"ouroboros/tools/subagent_integration_delegated.py" = "D07"
+"ouroboros/tools/task_tree.py" = "D07"
+"ouroboros/tools/tool_discovery.py" = "D04"
+"ouroboros/tools/verify.py" = "D05"
+"ouroboros/tools/vision.py" = "D05"
+"ouroboros/tools/write_shape.py" = "D13"
+"ouroboros/transport_custody.py" = "D02"
+"ouroboros/triad_review.py" = "D06"
+"ouroboros/update_channels.py" = "D12"
+"ouroboros/update_letter.py" = "D12"
+"ouroboros/usage_accounting.py" = "D16"
+"ouroboros/_usage_cache_splits.py" = "D16"
+"ouroboros/usage_compaction.py" = "D16"
+"ouroboros/usage_legacy_import.py" = "D16"
+"ouroboros/usage_ledger.py" = "D16"
+"ouroboros/utils.py" = "D18"
+"ouroboros/version.py" = "D10"
+"ouroboros/vision_routing.py" = "D02"
+"ouroboros/workspace_admission.py" = "D17"
+"ouroboros/workspace_executor.py" = "D17"
+"ouroboros/workspace_patch_rules.py" = "D17"
+"ouroboros/workspace_preflight.py" = "D17"
+"ouroboros/world_profiler.py" = "D15"
+"server.py" = "D11"
+"ouroboros/server_liveness.py" = "D11"
+"ouroboros/server_maintenance.py" = "D11"
+"ouroboros/server_owner_routing.py" = "D11"
+"ouroboros/server_process.py" = "D11"
+"ouroboros/server_restart.py" = "D11"
+"ouroboros/server_routing_context.py" = "D11"
+"supervisor/__init__.py" = "D08"
+"supervisor/active_activity.py" = "D08"
+"supervisor/cancel_publication.py" = "D09"
+"supervisor/cognitive_operations.py" = "D08"
+"supervisor/events.py" = "D08"
+"supervisor/event_taxonomy.py" = "D08"
+"supervisor/events_evolution_done.py" = "D08"
+"supervisor/events_task_done.py" = "D08"
+"supervisor/events_budget.py" = "D08"
+"supervisor/events_chat_delivery.py" = "D08"
+"supervisor/events_coop_checkpoint.py" = "D08"
+"supervisor/events_project_routing.py" = "D08"
+"supervisor/events_runtime_controls.py" = "D08"
+"supervisor/events_schedule_task.py" = "D08"
+"supervisor/events_subagent_admission.py" = "D08"
+"supervisor/events_worker_reports.py" = "D08"
+"supervisor/evolution_lifecycle.py" = "D15"
+"supervisor/git_ops.py" = "D10"
+"supervisor/git_ops_remotes.py" = "D10"
+"supervisor/git_ops_rescue.py" = "D10"
+"supervisor/git_ops_reset.py" = "D10"
+"supervisor/git_ops_updates.py" = "D10"
+"supervisor/log_addressing.py" = "D08"
+"supervisor/message_bus.py" = "D08"
+"supervisor/owner_stop.py" = "D09"
+"supervisor/queue.py" = "D08"
+"supervisor/queue_snapshot.py" = "D08"
+"supervisor/queue_timeouts.py" = "D08"
+"supervisor/queue_schedules.py" = "D08"
+"supervisor/queue_transitions.py" = "D08"
+"supervisor/schedule_time.py" = "D08"
+"supervisor/state.py" = "D08"
+"supervisor/steering.py" = "D09"
+"supervisor/subagent_task_truth.py" = "D08"
+"supervisor/task_admission.py" = "D08"
+"supervisor/task_dispatch.py" = "D08"
+"supervisor/task_lifecycle.py" = "D09"
+"supervisor/task_reaper.py" = "D09"
+"supervisor/terminal_delivery.py" = "D09"
+"supervisor/update_candidate.py" = "D10"
+"supervisor/update_merge.py" = "D10"
+"supervisor/update_carriers.py" = "D10"
+"supervisor/update_merge_plan.py" = "D10"
+"supervisor/update_merge_policy.py" = "D10"
+"supervisor/update_recovery.py" = "D10"
+"supervisor/update_source.py" = "D10"
+"supervisor/workers.py" = "D08"
+"supervisor/worker_assignment.py" = "D08"
+"supervisor/worker_health.py" = "D08"
+"supervisor/worker_chat_lane.py" = "D08"
+"supervisor/worker_pool_lifecycle.py" = "D08"
+"supervisor/worker_process.py" = "D08"
+"supervisor/worker_promotion.py" = "D08"
+
+# F6 rolling-upstream sync (b9f7597f..8d13373b) — new upstream leaves, placed by
+# their campaign families (same evidence discipline as the base map).
+"ouroboros/delegate_registration_policy.py" = "D07"
+"ouroboros/gateway/endpoint_index.py" = "D11"
+"ouroboros/gateway/routing_decision.py" = "D11"
+"ouroboros/gateway/task_decision.py" = "D11"
+"ouroboros/node_runtime.py" = "D18"
+"ouroboros/routing_wait.py" = "D17"
+"ouroboros/tools/owner_delivery.py" = "D05"
+"ouroboros/tools/patch_verdict.py" = "D07"
+"ouroboros/tools/process_facts.py" = "D04"
+"supervisor/telemetry_events.py" = "D08"
+
+[classification]
+# The 80 new-upstream module placements this campaign derived rode here as
+# `proposed` (owner review pending) until owner batch №9 №10=A (2026-09-01)
+# accepted them as the 7.0 base; nine of them (the Presence family) had been
+# approved earlier under 4.2=A. The assignment itself lives in [modules] and
+# is unchanged by the acceptance — what is gone is the review marker, so
+# docs/DOMAIN_MAP.md no longer stars any row. A future placement that is
+# genuinely undecided goes back on this list rather than into [modules]
+# silently.
+proposed = []
+
+# The Ф0 [split_pending]/[split_pending_leaves] sections are retired: every row
+# was resolved during F2 (dispositions recorded in docs/v7next/LEDGER_CORRECTIONS.md,
+# owner decisions 2026-08-31).
+
+# --- BEGIN GENERATED (python scripts/check_domains.py --write) ---
+# Factual dependency data of the live tree, pinned as baseline data.
+# Regenerate with `python scripts/check_domains.py --write`; the diff of
+# this block is the reviewed decision surface for every new direction,
+# cycle change, hidden coupling, or cross-domain literal copy.
+
+[graph]
+# Strict cross-domain dependency directions (from->to). Absent = forbidden.
+allowed = [
+  "D01->D02",
+  "D01->D03",
+  "D01->D04",
+  "D01->D05",
+  "D01->D06",
+  "D01->D07",
+  "D01->D09",
+  "D01->D12",
+  "D01->D13",
+  "D01->D14",
+  "D01->D15",
+  "D01->D16",
+  "D01->D17",
+  "D01->D18",
+  "D01->D19",
+  "D01->D20",
+  "D02->D01",
+  "D02->D03",
+  "D02->D12",
+  "D02->D16",
+  "D02->D18",
+  "D03->D01",
+  "D03->D02",
+  "D03->D04",
+  "D03->D12",
+  "D03->D15",
+  "D03->D18",
+  "D03->D19",
+  "D04->D05",
+  "D04->D13",
+  "D04->D17",
+  "D04->D18",
+  "D04->D19",
+  "D05->D01",
+  "D05->D02",
+  "D05->D04",
+  "D05->D10",
+  "D05->D11",
+  "D05->D12",
+  "D05->D13",
+  "D05->D15",
+  "D05->D16",
+  "D05->D17",
+  "D05->D18",
+  "D05->D19",
+  "D06->D01",
+  "D06->D02",
+  "D06->D03",
+  "D06->D04",
+  "D06->D07",
+  "D06->D10",
+  "D06->D12",
+  "D06->D13",
+  "D06->D14",
+  "D06->D16",
+  "D06->D17",
+  "D06->D18",
+  "D06->D19",
+  "D07->D01",
+  "D07->D02",
+  "D07->D04",
+  "D07->D05",
+  "D07->D06",
+  "D07->D08",
+  "D07->D12",
+  "D07->D13",
+  "D07->D16",
+  "D07->D17",
+  "D07->D18",
+  "D07->D19",
+  "D08->D01",
+  "D08->D04",
+  "D08->D05",
+  "D08->D06",
+  "D08->D07",
+  "D08->D09",
+  "D08->D12",
+  "D08->D14",
+  "D08->D15",
+  "D08->D16",
+  "D08->D17",
+  "D08->D18",
+  "D08->D19",
+  "D09->D01",
+  "D09->D06",
+  "D09->D08",
+  "D09->D18",
+  "D10->D04",
+  "D10->D05",
+  "D10->D06",
+  "D10->D08",
+  "D10->D12",
+  "D10->D13",
+  "D10->D18",
+  "D10->D19",
+  "D11->D01",
+  "D11->D02",
+  "D11->D03",
+  "D11->D04",
+  "D11->D05",
+  "D11->D07",
+  "D11->D08",
+  "D11->D09",
+  "D11->D10",
+  "D11->D12",
+  "D11->D14",
+  "D11->D16",
+  "D11->D17",
+  "D11->D18",
+  "D11->D19",
+  "D11->D20",
+  "D12->D01",
+  "D12->D02",
+  "D12->D03",
+  "D12->D07",
+  "D12->D11",
+  "D12->D18",
+  "D13->D01",
+  "D13->D02",
+  "D13->D04",
+  "D13->D12",
+  "D13->D17",
+  "D13->D18",
+  "D14->D02",
+  "D14->D04",
+  "D14->D05",
+  "D14->D06",
+  "D14->D09",
+  "D14->D10",
+  "D14->D11",
+  "D14->D12",
+  "D14->D16",
+  "D14->D18",
+  "D14->D19",
+  "D15->D01",
+  "D15->D02",
+  "D15->D03",
+  "D15->D04",
+  "D15->D12",
+  "D15->D16",
+  "D15->D18",
+  "D15->D19",
+  "D16->D02",
+  "D16->D06",
+  "D16->D12",
+  "D16->D14",
+  "D16->D18",
+  "D17->D01",
+  "D17->D04",
+  "D17->D15",
+  "D17->D16",
+  "D17->D18",
+  "D17->D19",
+  "D18->D09",
+  "D18->D10",
+  "D18->D12",
+  "D19->D14",
+  "D19->D18",
+  "D20->D04",
+  "D20->D05",
+  "D20->D14",
+  "D20->D15",
+  "D20->D17",
+  "D20->D18",
+  "D20->D19",
+]
+# Domains locked in strict-quotient cycles (SCC ceiling; the target is []).
+cycle_groups = [
+  ["D01", "D02", "D03", "D04", "D05", "D06", "D07", "D08", "D09", "D10", "D11", "D12", "D13", "D14", "D15", "D16", "D17", "D18", "D19", "D20"],
+]
+# Cross-domain pairs reachable ONLY through function-level (lazy) imports —
+# hidden coupling, classified out of the strict graph.
+lazy_only = [
+  "D01->D08",
+  "D01->D10",
+  "D01->D11",
+  "D02->D09",
+  "D03->D05",
+  "D03->D06",
+  "D03->D07",
+  "D03->D08",
+  "D03->D10",
+  "D03->D11",
+  "D03->D14",
+  "D03->D16",
+  "D03->D17",
+  "D03->D20",
+  "D04->D06",
+  "D04->D10",
+  "D04->D12",
+  "D04->D14",
+  "D04->D20",
+  "D05->D06",
+  "D05->D07",
+  "D05->D09",
+  "D05->D14",
+  "D06->D05",
+  "D06->D08",
+  "D06->D09",
+  "D06->D15",
+  "D07->D09",
+  "D07->D10",
+  "D07->D11",
+  "D07->D14",
+  "D07->D15",
+  "D07->D20",
+  "D08->D02",
+  "D08->D10",
+  "D08->D11",
+  "D09->D02",
+  "D09->D05",
+  "D09->D07",
+  "D09->D11",
+  "D09->D12",
+  "D09->D14",
+  "D09->D15",
+  "D09->D16",
+  "D09->D17",
+  "D10->D01",
+  "D10->D14",
+  "D10->D15",
+  "D10->D17",
+  "D11->D06",
+  "D11->D15",
+  "D12->D05",
+  "D12->D06",
+  "D12->D10",
+  "D12->D15",
+  "D12->D16",
+  "D12->D17",
+  "D13->D05",
+  "D13->D06",
+  "D13->D08",
+  "D13->D15",
+  "D14->D08",
+  "D14->D13",
+  "D14->D17",
+  "D14->D20",
+  "D15->D06",
+  "D15->D07",
+  "D15->D08",
+  "D15->D09",
+  "D15->D10",
+  "D15->D17",
+  "D16->D03",
+  "D16->D05",
+  "D16->D17",
+  "D17->D02",
+  "D17->D03",
+  "D17->D05",
+  "D17->D06",
+  "D17->D07",
+  "D17->D09",
+  "D17->D12",
+  "D18->D01",
+  "D18->D07",
+  "D18->D11",
+  "D18->D14",
+  "D18->D16",
+  "D18->D17",
+  "D18->D19",
+  "D19->D04",
+  "D19->D08",
+  "D19->D20",
+  "D20->D01",
+  "D20->D07",
+  "D20->D11",
+  "D20->D12",
+]
+# Cross-domain pairs created by resolved dynamic imports (importlib/__import__).
+dynamic_pairs = []
+
+[duplicates]
+# Literal-copy baseline: normalized function bodies (>= 10 normalized lines)
+# present in modules of MORE THAN ONE domain. A new row is a banned
+# literal-copy "fix" of a dependency edge; shrinking this list is progress.
+allowed = []
+# --- END GENERATED ---

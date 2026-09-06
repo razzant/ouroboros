@@ -40,18 +40,28 @@ class EventBus:
     def set_loop(self, loop: asyncio.AbstractEventLoop | None) -> None:
         self._loop = loop
 
-    def subscribe(self, skill_name: str, topic: str, handler: Callable[[Dict[str, Any]], Any]) -> str:
+    def subscribe(
+        self,
+        skill_name: str,
+        topic: str,
+        handler: Callable[[Dict[str, Any]], Any],
+        *,
+        sub_id: Optional[str] = None,
+    ) -> str:
+        """Attach one subscription; ``sub_id`` lets a staged registration
+        pre-mint the id it already returned to the caller (ABI-9: the bus
+        attach is deferred to publication, the id is not)."""
         if topic not in VALID_TOPICS:
             raise ValueError(f"unsupported event topic: {topic}")
-        sub_id = uuid.uuid4().hex
+        sid = str(sub_id) if sub_id else uuid.uuid4().hex
         with self._lock:
-            self._subscriptions[sub_id] = EventSubscription(
-                id=sub_id,
+            self._subscriptions[sid] = EventSubscription(
+                id=sid,
                 skill_name=str(skill_name or ""),
                 topic=topic,
                 handler=handler,
             )
-        return sub_id
+        return sid
 
     def unsubscribe(self, sub_id: str) -> None:
         with self._lock:
@@ -64,6 +74,17 @@ class EventBus:
                     self._subscriptions.pop(sub_id, None)
 
     def publish(self, topic: str, data: Dict[str, Any]) -> None:
+        """Invoke every live subscription of *topic* with a copy of *data*.
+
+        Copy semantics (ABI-9 unload residual, by design): the subscriber
+        list is COPIED under the bus lock and the handlers run with NO lock
+        held, so ``unsubscribe`` guarantees only that a publish STARTING
+        after it returns will not deliver; a publish that already copied the
+        handler may still invoke it after the unsubscribe. The extension
+        unload path therefore unsubscribes (and closes the runtime API)
+        BEFORE removing surfaces, and a late in-flight delivery is a no-op
+        against the host.
+        """
         if topic not in VALID_TOPICS:
             raise ValueError(f"unsupported event topic: {topic}")
         with self._lock:

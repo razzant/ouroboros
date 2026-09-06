@@ -341,10 +341,17 @@ def test_the_reviewer_disclosure_stopped_advising_against_the_default() -> None:
     """The sentence used to end "keep at least one API reviewer row to avoid the
     fallback", which asks the owner to undo the ratified default (D-3: with a
     subscription connected, everything that can run on one does, and a triad is
-    never half API and half subscription). It is a routing DISCLOSURE now."""
+    never half API and half subscription). Its carrier — the conditional
+    all-delegated warning about a task-acceptance API fallback — is gone with the
+    fallback itself (owner R2/R12, 2026-09-01): acceptance follows the rows, and
+    the only server-side sentence left is the ONE-TIME migration disclosure with
+    the measured numbers, which states what the rows now cost and never advises
+    against the default."""
     config = (REPO_ROOT / "ouroboros" / "reviewer_slot_config.py").read_text(encoding="utf-8")
     assert "Keep at least one API reviewer row" not in config
-    assert "never fall back" in config
+    assert "never fall back" not in config and "stays API-only" not in config
+    assert "Task acceptance now follows these triad rows" in config
+    assert "Keep an api_chat row" not in config
     lanes = _read("reviewer_slots.js")
     assert "keep at least one API row" not in lanes
     assert "never fall back to API spend" in lanes

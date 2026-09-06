@@ -114,7 +114,7 @@ def test_send_quiz_refuses_invalid_payload_and_missing_ids(monkeypatch, tmp_path
 
 
 def test_handle_send_quiz_prefers_bound_project_chat(monkeypatch):
-    from supervisor.chat_delivery_events import _handle_send_quiz
+    from supervisor.events_chat_delivery import _handle_send_quiz
 
     sent = []
 
@@ -125,7 +125,7 @@ def test_handle_send_quiz_prefers_bound_project_chat(monkeypatch):
 
     ctx = types.SimpleNamespace(bridge=_Bridge(), append_jsonl=lambda *a, **k: None,
                                 DRIVE_ROOT=None)
-    import supervisor.chat_delivery_events as cde
+    import supervisor.events_chat_delivery as cde
 
     monkeypatch.setattr(cde, "_bound_project_chat_id", lambda *a, **k: 4242)
     evt = {

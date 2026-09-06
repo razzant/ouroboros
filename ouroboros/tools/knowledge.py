@@ -1,6 +1,5 @@
 """Persistent topic-based knowledge files with an auto-maintained index."""
 
-import json
 import hashlib
 import logging
 import os
@@ -10,7 +9,7 @@ from pathlib import Path
 from typing import List
 
 from ouroboros.tools.registry import ToolEntry, ToolContext
-from ouroboros.utils import utc_now_iso
+from ouroboros.utils import append_jsonl, utc_now_iso
 from ouroboros.platform_layer import file_lock_exclusive, file_unlock
 
 log = logging.getLogger(__name__)
@@ -229,14 +228,15 @@ def _record_backlog_history(backlog_file: Path, topic: str, mode: str, task_id: 
     try:
         history_path = backlog_file.parent.parent / "knowledge_history.jsonl"
         new_content = backlog_file.read_text(encoding="utf-8") if backlog_file.exists() else ""
-        with open(history_path, "a", encoding="utf-8") as hf:
-            hf.write(json.dumps({
-                "ts": utc_now_iso(),
-                "task_id": task_id,
-                "topic": topic,
-                "mode": f"{mode}->merge",
-                "new_sha256": hashlib.sha256(new_content.encode("utf-8")).hexdigest() if new_content else "",
-            }, ensure_ascii=False) + "\n")
+        # CPL4-C17: the sidecar-locked append seam every other journal uses —
+        # a raw open("a") could tear a line under concurrent writers.
+        append_jsonl(history_path, {
+            "ts": utc_now_iso(),
+            "task_id": task_id,
+            "topic": topic,
+            "mode": f"{mode}->merge",
+            "new_sha256": hashlib.sha256(new_content.encode("utf-8")).hexdigest() if new_content else "",
+        })
     except Exception:
         pass
 
@@ -299,17 +299,17 @@ def _knowledge_write(ctx: ToolContext, topic: str, content: str, mode: str = "ov
 
     try:
         history_path = _knowledge_dir(ctx).parent / "knowledge_history.jsonl"
-        with open(history_path, "a", encoding="utf-8") as hf:
-            hf.write(json.dumps({
-                "ts": utc_now_iso(),
-                "task_id": str(getattr(ctx, "task_id", "") or ""),
-                "topic": sanitized_topic,
-                "mode": mode,
-                "old_sha256": hashlib.sha256(old_content.encode("utf-8")).hexdigest() if old_content else "",
-                "new_sha256": hashlib.sha256(new_content.encode("utf-8")).hexdigest() if new_content else "",
-                "old_content": old_content,
-                "new_content": new_content,
-            }, ensure_ascii=False) + "\n")
+        # CPL4-C17: locked append (torn-line hazard under concurrent writers).
+        append_jsonl(history_path, {
+            "ts": utc_now_iso(),
+            "task_id": str(getattr(ctx, "task_id", "") or ""),
+            "topic": sanitized_topic,
+            "mode": mode,
+            "old_sha256": hashlib.sha256(old_content.encode("utf-8")).hexdigest() if old_content else "",
+            "new_sha256": hashlib.sha256(new_content.encode("utf-8")).hexdigest() if new_content else "",
+            "old_content": old_content,
+            "new_content": new_content,
+        })
     except Exception:
         pass
 
@@ -328,8 +328,7 @@ def _knowledge_write(ctx: ToolContext, topic: str, content: str, mode: str = "ov
             "file_kb": path.stat().st_size / 1024,
             "total_knowledge_kb": round(total_kb, 2),
         }
-        with open(journal_path, "a", encoding="utf-8") as jf:
-            jf.write(json.dumps(entry) + "\n")
+        append_jsonl(journal_path, entry)  # CPL4-C17: same locked seam
     except Exception:
         pass
 

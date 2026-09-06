@@ -6,7 +6,8 @@ import os
 import pathlib
 from collections.abc import Callable, Sequence
 
-from ouroboros.tools.shell_guards import directory_destination_child_name, directory_destination_pairs
+from ouroboros.shell_parse import directory_destination_child_name
+from ouroboros.tools.shell_guards import directory_destination_pairs
 from ouroboros.credential_shapes import (
     BENIGN_DOT_NAMES,
     CREDENTIAL_COMPONENT_NAMES,

@@ -83,10 +83,11 @@ def aggregate_skill_review_status(
     against the live catalog. Deterministic preflight/sensitive/binary/path/
     dependency/grant/enablement gates remain fail-closed outside this function.
     """
-    # A deterministic preflight FAIL is a structural gate failure, not an LLM
-    # verdict. It persists as STATUS_PENDING (non-executable under every
-    # enforcement mode) and MUST reload that way — never as advisory-overridable
-    # BLOCKERS — so honor it before the severity-driven aggregation below.
+    # A deterministic preflight FAIL — and the ABI-1 PluginAPI admission
+    # refusal — are structural gate failures, not LLM verdicts. They persist
+    # as STATUS_PENDING (non-executable under every enforcement mode) and MUST
+    # reload that way — never as advisory-overridable BLOCKERS or WARNINGS —
+    # so honor them before the severity-driven aggregation below.
     if preflight_failed(findings):
         return STATUS_PENDING
     is_official_hub = review_profile == "official_hub"
@@ -128,6 +129,17 @@ def normalize_skill_review_status(status: str) -> str:
     } else STATUS_PENDING)
 
 
+def review_status_grandfatherable(status: str) -> bool:
+    """ABI-1 grandfather predicate, shared by the PluginAPI admission refusal
+    path (``skill_review_cycles.plugin_api_admission_refusal_outcome``) and the
+    RC auditor: only a ``clean``/``warnings`` verdict counts as the hash-bound
+    PASS that keeps a plugin_api-less extension loading. Deliberately
+    ENFORCEMENT-INDEPENDENT: advisory enforcement can make a BLOCKERS verdict
+    executable (``skill_review_gate``), but it never makes one a grandfather —
+    the refusal path persists ``pending`` over anything else."""
+    return normalize_skill_review_status(status) in (STATUS_CLEAN, STATUS_WARNINGS)
+
+
 WARNINGS_CONVERGENCE_ROUNDS = 3
 
 
@@ -165,17 +177,18 @@ def preflight_failed(findings: Any) -> bool:
     """True when the persisted findings carry a deterministic preflight FAIL.
 
     The SSOT for the shape is the finding `_run_deterministic_preflight`
-    persists (item=skill_preflight / model=deterministic_preflight); the same
-    condition drives the pending aggregation above. UI cards use this fact to
-    offer Repair instead of a Re-review that would deterministically fail
-    again (#335).
+    persists (item=skill_preflight / model=deterministic_preflight) — plus the
+    ABI-1 PluginAPI admission refusal (item/model=plugin_api_admission), the
+    same structural-gate class; the same condition drives the pending
+    aggregation above. UI cards use this fact to offer Repair instead of a
+    Re-review that would deterministically fail again (#335).
     """
     for finding in findings or []:
         if not isinstance(finding, dict):
             continue
         if finding.get("verdict") == "FAIL" and (
-            finding.get("item") == "skill_preflight"
-            or str(finding.get("model") or "") == "deterministic_preflight"
+            finding.get("item") in ("skill_preflight", "plugin_api_admission")
+            or str(finding.get("model") or "") in ("deterministic_preflight", "plugin_api_admission")
         ):
             return True
     return False

@@ -131,8 +131,8 @@ test('Cancel run offered only on live, marker-attested root cards', () => {
     // Finished and converted cards have nothing live to cancel.
     assert.equal(cancelRunEligibility({ ...eligible, finished: true }), false);
     assert.equal(cancelRunEligibility({ ...eligible, converted: true }), false);
-    // Without the host-attested marker (e.g. a direct-chat turn's card, which has
-    // the same shape but no queue entry) the button must not appear.
+    // Without the host-attested marker (e.g. a replayed subagent narration that
+    // lost its lineage, or a card whose turn the supervisor no longer owns):
     assert.equal(cancelRunEligibility({ ...eligible, cancelable: false }), false);
     assert.equal(cancelRunEligibility({ ...eligible, groupId: '' }), false);
 });

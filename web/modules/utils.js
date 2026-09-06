@@ -314,7 +314,17 @@ export const COST_ALIAS_PAIRS = [
  */
 export function resolveCostPair(payload, newName, oldName) {
     const source = payload || {};
-    const has = (key) => Object.prototype.hasOwnProperty.call(source, key);
+    // Presence means a VALUE, not just a key: a browser producer literal
+    // (`{ cost_usd: src?.cost_usd, ... }`) materializes every name it knows as
+    // an own property valued `undefined`, and since ABI-3 the write seam strips
+    // the retired `cost_usd*` aliases, so those own properties stand for a key
+    // the wire never carried. Reading them as "the deprecated name is present"
+    // made the deprecated-wins rule answer null for a frame that carried the
+    // honest amount — a subagent card froze on "cost pending". An explicit
+    // `null` IS present (Python parity: `old in src` with a None value), and a
+    // real legacy amount still wins its pair.
+    const has = (key) => Object.prototype.hasOwnProperty.call(source, key)
+        && source[key] !== undefined;
     const raw = has(oldName) ? source[oldName] : (has(newName) ? source[newName] : null);
     if (raw === null || raw === undefined || raw === '') return null;
     const num = Number(raw);

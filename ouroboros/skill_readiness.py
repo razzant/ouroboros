@@ -24,6 +24,212 @@ class SkillReadiness:
     manual_dependencies: List[str] = field(default_factory=list)
 
 
+_SKILL_PAYLOAD_EDIT_TOOLS = frozenset({
+    "write_file", "edit_text", "run_command", "run_script", "delegate_start",
+})
+_SKILL_PAYLOAD_SELECTOR_KEYS = {
+    "run_command": "cwd", "run_script": "cwd", "delegate_start": "root",
+}
+_ROOT_TASK_PROJECTION_MAX_BYTES = 1024 * 1024
+_ROOT_TASK_PROJECTION_MAX_RECORDS = 512
+
+
+def _skill_tool_identity_mapping() -> Dict[str, str]:
+    """Live skill-tool name -> identity argument, derived from their schemas."""
+    from ouroboros.tools.skill_exec import _EXEC_SCHEMA, _REVIEW_SCHEMA, _TOGGLE_SCHEMA
+    from ouroboros.tools.skill_preflight import _PREFLIGHT_SCHEMA
+    from ouroboros.tools.skill_publish import _PUBLISH_SCHEMA
+
+    schemas = (_REVIEW_SCHEMA, _PREFLIGHT_SCHEMA, _EXEC_SCHEMA, _TOGGLE_SCHEMA, _PUBLISH_SCHEMA)
+    return {
+        str(schema["name"]): str(schema["parameters"]["required"][0])
+        for schema in schemas
+    }
+
+
+def skill_names_touched_by_trace(llm_trace: Dict[str, Any]) -> List[str]:
+    """Names of the skills a task's tool trace touched.
+
+    Payload edits name the skill through ``bucket``/``skill_name`` or the path;
+    the skill lifecycle tools name it directly, which is the only carrier for a
+    delegated payload the root never wrote with ``write_file``/``edit_text``.
+    """
+    names: List[str] = []
+    identity_keys = _skill_tool_identity_mapping()
+    for call in llm_trace.get("tool_calls") or []:
+        if not isinstance(call, dict):
+            continue
+        tool = str(call.get("tool") or "")
+        if tool not in _SKILL_PAYLOAD_EDIT_TOOLS and tool not in identity_keys:
+            continue
+        args = call.get("args") if isinstance(call.get("args"), dict) else {}
+        if tool in identity_keys:
+            named = str(args.get(identity_keys[tool]) or "").strip()
+            if named and named not in names:
+                names.append(named)
+            continue
+        selector_key = _SKILL_PAYLOAD_SELECTOR_KEYS.get(tool)
+        if selector_key:
+            selector = str(args.get(selector_key) or "").replace("\\", "/").rstrip("/")
+            if not (
+                selector == "skill_payload"
+                or (selector_key == "cwd" and selector.startswith("skill_payload/"))
+            ):
+                continue
+        bucket = str(args.get("bucket") or "").strip().lower()
+        skill_name = str(args.get("skill_name") or "").strip()
+        if bucket in {"external", "clawhub", "ouroboroshub", "user_repo"} and skill_name:
+            if skill_name not in names:
+                names.append(skill_name)
+            continue
+        candidates = [str(args.get("path") or "")]
+        for raw in candidates:
+            norm = raw.replace("\\", "/").strip().lstrip("/")
+            if norm.startswith("data/"):
+                norm = norm[len("data/"):]
+            parts = pathlib.PurePosixPath(norm).parts
+            if len(parts) >= 3 and parts[0] == "skills" and parts[1] in {"external", "clawhub", "ouroboroshub", "native"}:
+                name = parts[2]
+                if name and name not in names:
+                    names.append(name)
+    return names
+
+
+def acceptance_skill_lifecycle(
+    drive_root: Any, llm_trace: Dict[str, Any], root_task_id: str = "",
+    task_started_at: str = "",
+    history_coverage: Optional[Dict[str, Any]] = None,
+) -> List[Dict[str, Any]]:
+    """Per-skill lifecycle facts for the acceptance packet — VISIBILITY ONLY.
+
+    Names come from the task's own trace plus any skill whose review history
+    records this ``root_task_id`` (which is how a child-authored payload shows
+    up at all). A UI or manual review carries no root task id and is simply not
+    joined. Acceptance judges quality, never the execution route, so nothing
+    here is a gate.
+    """
+    root = pathlib.Path(drive_root) if drive_root else None
+    if root is None:
+        return []
+    names = list(skill_names_touched_by_trace(llm_trace or {}))
+    history = _skill_names_from_review_history(
+        root, str(root_task_id or ""), task_started_at=task_started_at,
+    )
+    if history_coverage is not None:
+        history_coverage.update(history["coverage"])
+    for name in history["names"]:
+        if name not in names:
+            names.append(name)
+    if not names:
+        return []
+    from ouroboros.skill_loader import discover_skills, find_skill
+
+    peers = discover_skills(root)
+    rows: List[Dict[str, Any]] = []
+    for name in names:
+        skill = find_skill(root, name)
+        if skill is None:
+            rows.append({"name": name, "present": False})
+            continue
+        readiness = skill_readiness_for_execution(root, skill, skills=peers)
+        rows.append({
+            "name": skill.name,
+            "source": str(getattr(skill, "source", "") or ""),
+            "review_status": str(getattr(skill.review, "status", "") or ""),
+            "review_stale": bool(skill.review.is_stale_for(skill.content_hash)),
+            "enabled": bool(getattr(skill, "enabled", False)),
+            "ready": bool(readiness.ready),
+            "blockers": list(readiness.blockers),
+            "manual_dependencies": list(readiness.manual_dependencies),
+        })
+    return rows
+
+
+def _skill_names_from_review_history(
+    drive_root: pathlib.Path, root_task_id: str, *, task_started_at: str = "",
+) -> Dict[str, Any]:
+    """Skills named by the compact root-task projection, never full histories."""
+    from ouroboros.skill_review_history import (
+        ROOT_TASK_PROJECTION_GAPS_RELATIVE_PATH, ROOT_TASK_PROJECTION_RELATIVE_PATH,
+        root_task_projection_gaps_path, root_task_projection_path,
+    )
+    from ouroboros.utils import iter_jsonl_objects
+
+    path = root_task_projection_path(drive_root)
+    gap_path = root_task_projection_gaps_path(drive_root)
+    source_ref = {
+        "kind": "canonical_jsonl", "path": ROOT_TASK_PROJECTION_RELATIVE_PATH,
+        "reader": "read_file",
+    }
+    gaps: set[str] = set()
+    try:
+        byte_truncated = path.stat().st_size > _ROOT_TASK_PROJECTION_MAX_BYTES
+    except FileNotFoundError:
+        byte_truncated = False
+    except OSError:
+        byte_truncated = False
+        gaps.add("projection_unreadable")
+    names: List[str] = []
+    try:
+        rows = list(iter_jsonl_objects(
+            path,
+            max_entries=_ROOT_TASK_PROJECTION_MAX_RECORDS,
+            tail_bytes=_ROOT_TASK_PROJECTION_MAX_BYTES,
+            gap_reasons=gaps,
+        ))
+    except OSError:
+        rows = []
+        gaps.add("projection_unreadable")
+    if byte_truncated:
+        gaps.add("tail_bytes_truncated")
+    try:
+        gap_byte_truncated = gap_path.stat().st_size > _ROOT_TASK_PROJECTION_MAX_BYTES
+    except FileNotFoundError:
+        gap_byte_truncated = False
+    except OSError:
+        gap_byte_truncated = False
+        gaps.add("projection_gap_log_unreadable")
+    try:
+        gap_rows = list(iter_jsonl_objects(
+            gap_path,
+            max_entries=_ROOT_TASK_PROJECTION_MAX_RECORDS,
+            tail_bytes=_ROOT_TASK_PROJECTION_MAX_BYTES,
+            gap_reasons=gaps,
+        ))
+    except OSError:
+        gap_rows = []
+        gaps.add("projection_gap_log_unreadable")
+    if gap_byte_truncated:
+        gaps.add("projection_gap_tail_bytes_truncated")
+    cutoff = str(task_started_at or "").replace("Z", "+00:00")
+    if root_task_id:
+        for row in reversed(rows):
+            row_ts = str(row.get("ts") or "").replace("Z", "+00:00")
+            if cutoff and row_ts and row_ts < cutoff:
+                break
+            if not isinstance(row, dict) or str(row.get("root_task_id") or "") != root_task_id:
+                continue
+            name = str(row.get("skill") or "").strip()
+            if name and name not in names:
+                names.append(name)
+        for row in reversed(gap_rows):
+            row_ts = str(row.get("ts") or "").replace("Z", "+00:00")
+            if cutoff and row_ts and row_ts < cutoff:
+                break
+            if isinstance(row, dict) and str(row.get("root_task_id") or "") == root_task_id:
+                gaps.add(str(row.get("reason") or "root_task_projection_gap"))
+    coverage = {
+        "rows_scanned": len(rows), "gap_rows_scanned": len(gap_rows),
+        "truncated": bool(byte_truncated or gap_byte_truncated or "max_entries_truncated" in gaps),
+        "complete": not gaps, "gap_reasons": sorted(gaps), "source_ref": source_ref,
+        "gap_source_ref": {
+            "kind": "canonical_jsonl", "path": ROOT_TASK_PROJECTION_GAPS_RELATIVE_PATH,
+            "reader": "read_file",
+        },
+    }
+    return {"names": names, "coverage": coverage}
+
+
 def skill_readiness_for_execution(
     drive_root: pathlib.Path,
     skill: Any,

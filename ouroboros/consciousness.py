@@ -38,6 +38,7 @@ from ouroboros.loop_tool_execution import StatefulToolExecutor, _truncate_tool_r
 from ouroboros.memory import Memory
 from ouroboros.platform_layer import acquire_exclusive_file_lock, release_exclusive_file_lock
 from ouroboros.pricing import infer_provider_from_model
+from ouroboros.settings_setup_contract import resolve_total_budget_usd
 from ouroboros.utils import (
     append_jsonl,
     emit_log_event,
@@ -672,8 +673,8 @@ class BackgroundConsciousness:
         try:
             from ouroboros.usage_accounting import usage_projection
 
-            total_budget = float(os.environ.get("TOTAL_BUDGET", "1"))
-            if total_budget <= 0:
+            total_budget = resolve_total_budget_usd()
+            if total_budget is None:
                 return True
             max_bg = total_budget * (self._bg_budget_pct / 100.0)
             projection = usage_projection(
@@ -690,18 +691,16 @@ class BackgroundConsciousness:
         """Bind each wakeup to the global ledger and its background sub-budget."""
         from ouroboros.usage_accounting import UsageScope, usage_scope
 
-        try:
-            total_budget = float(os.environ.get("TOTAL_BUDGET", "0") or 0)
-        except (TypeError, ValueError):
-            total_budget = 0.0
-        root_limit = total_budget * (self._bg_budget_pct / 100.0) if total_budget > 0 else None
+        total_budget = resolve_total_budget_usd()
+        root_limit = total_budget * (self._bg_budget_pct / 100.0) if total_budget else None
+
         with usage_scope(UsageScope(
             drive_root=self._drive_root,
             task_id="bg-consciousness",
             root_task_id="bg-consciousness",
             category="consciousness",
             source="background_consciousness",
-            global_limit_usd=total_budget if total_budget > 0 else None,
+            global_limit_usd=total_budget,
             root_limit_usd=root_limit,
         )):
             return self._think_scoped()
@@ -1378,3 +1377,108 @@ class BackgroundConsciousness:
         }, label=f"tool receipt:{fn_name}")
 
         return result_str
+
+
+def compact_acknowledged_observations(
+    drive_root: Any,
+    retention_days: Optional[int] = None,
+    *,
+    now: Optional[float] = None,
+) -> Dict[str, Any]:
+    """Fold old ACKNOWLEDGED observation rows into an archive segment (CPL4-C23).
+
+    Contract: unacknowledged rows are NEVER pruned — they must survive
+    restart and overflow verbatim. An acknowledged enqueue older than the
+    unified GC retention moves, together with every ack row naming it, into
+    ``archive/consciousness_observations_<ts>.jsonl`` (durable history,
+    never GC'd). STRICTLY fail-closed: any malformed line, invalid row or
+    ghost ack skips the whole fold — the same gap classes that block a live
+    ack — and the archive segment is written BEFORE the live rewrite, so a
+    crash can only duplicate rows into forensic history, never lose them.
+    Runs at server startup, before Background Consciousness starts, under
+    the store's own writer lock.
+    """
+    from ouroboros.deadline_utils import parse_deadline_ts
+    from ouroboros.retention import age_cutoff, get_gc_retention_days
+
+    path = pathlib.Path(drive_root) / _OBSERVATIONS_REL
+    report: Dict[str, Any] = {"folded": 0, "skipped": "", "archive": ""}
+    if not path.exists():
+        return report
+    if retention_days is None:
+        retention_days = get_gc_retention_days()
+    cutoff = age_cutoff(retention_days, now)
+    lock_path = jsonl_append_lock_path(path)
+    lock_fd = acquire_exclusive_file_lock(lock_path, timeout_sec=2.0, stale_sec=10.0)
+    if lock_fd is None:
+        report["skipped"] = "lock_unavailable"
+        return report
+    try:
+        raw_lines = path.read_bytes().splitlines(keepends=True)
+        parsed: List[tuple] = []  # (raw_bytes, row_dict, identifier, is_ack)
+        gap_reasons: List[str] = []
+        enqueued_ids: set = set()
+        acked_ids: set = set()
+        for line_no, raw in enumerate(raw_lines, 1):
+            stripped = raw.strip()
+            if not stripped:
+                report["skipped"] = "blank_line"
+                return report
+            try:
+                row = json.loads(stripped.decode("utf-8"))
+            except (UnicodeDecodeError, ValueError):
+                report["skipped"] = "malformed_row"
+                return report
+            if not isinstance(row, dict) or not BackgroundConsciousness._validate_observation_row(
+                row, line_no, gap_reasons,
+            ) or gap_reasons:
+                report["skipped"] = "invalid_row"
+                return report
+            identifier = str(row.get("id", row.get("observation_id")) or "")
+            is_ack = row.get("op") == "ack"
+            if is_ack:
+                if identifier not in enqueued_ids:
+                    report["skipped"] = "ghost_ack"
+                    return report
+                acked_ids.add(identifier)
+            else:
+                enqueued_ids.add(identifier)
+            parsed.append((raw, row, identifier, is_ack))
+        fold_ids: set = set()
+        for _raw, row, identifier, is_ack in parsed:
+            if is_ack or identifier not in acked_ids:
+                continue
+            enqueued_at = parse_deadline_ts(str(row.get("time") or row.get("observed_at") or ""))
+            if enqueued_at is not None and enqueued_at.timestamp() < cutoff:
+                fold_ids.add(identifier)
+        if not fold_ids:
+            return report
+        keep: List[bytes] = []
+        fold: List[bytes] = []
+        for raw, _row, identifier, _is_ack in parsed:
+            (fold if identifier in fold_ids else keep).append(raw)
+        ts = utc_now_iso().replace("-", "").replace(":", "").split(".")[0]
+        archive_dir = pathlib.Path(drive_root) / "archive"
+        archive_dir.mkdir(parents=True, exist_ok=True)
+        segment = archive_dir / f"consciousness_observations_{ts}.jsonl"
+        suffix = 0
+        while segment.exists():
+            suffix += 1
+            segment = archive_dir / f"consciousness_observations_{ts}_{suffix}.jsonl"
+        # Archive FIRST: a crash between the two writes duplicates rows into
+        # forensic history instead of destroying the owner's inbox.
+        with segment.open("wb") as handle:
+            handle.write(b"".join(fold))
+            handle.flush()
+            os.fsync(handle.fileno())
+        tmp = path.with_name(path.name + ".compact.tmp")
+        tmp.write_bytes(b"".join(keep))
+        os.replace(tmp, path)
+        report["folded"] = len(fold_ids)
+        report["archive"] = segment.name
+        return report
+    except OSError:
+        report["skipped"] = "io_error"
+        return report
+    finally:
+        release_exclusive_file_lock(lock_path, lock_fd)

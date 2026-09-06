@@ -3,8 +3,9 @@
 Project conversion stores a reference to the original owner row on the immutable
 task binding. A Project room projects that row instead of copying it into
 ``chat.jsonl``. Terminal task projections append to that same canonical biography;
-``chat_annotations.jsonl`` remains presentation-only and never owns routing or
-Project state.
+``chat_annotations.jsonl`` is presentation-first and owns no Project state; its
+token-bound ``needs_manual_target`` decision card is the one routing-authority
+exception.
 """
 
 from __future__ import annotations
@@ -418,42 +419,51 @@ def routing_option_label(option: Any) -> str:
     return "Project" if option.get("project_id") and not option.get("task_id") else "Task"
 
 
-def completion_status_label(result: Dict[str, Any], event: Dict[str, Any]) -> str:
-    from ouroboros.task_results import (
-        STATUS_CANCELLED, STATUS_COMPLETED, STATUS_FAILED, STATUS_REJECTED_DUPLICATE,
-    )
+OUTCOME_PHASE_HEADLINE = {"working": "Working", "done": "Done", "warn": "Done with warnings",
+                          "error": "Failed", "cancelled": "Cancelled"}
 
-    status = str(result.get("status") or event.get("status") or "").strip().lower()
-    axes = {}
-    for source in (event, result):
-        value = source.get("outcome_axes")
-        if isinstance(value, dict):
-            axes.update({key: axis for key, axis in value.items() if isinstance(axis, dict)})
-    axis_status = {key: str(axis.get("status") or "").lower() for key, axis in axes.items()}
-    failed = (
-        status == STATUS_FAILED
-        or axis_status.get("lifecycle") == STATUS_FAILED
-        or axis_status.get("execution") in {"failed", "infra_failed"}
-        or axis_status.get("objective") == "fail"
-        or axis_status.get("review") == "fail"
-        or axis_status.get("artifacts") in {"failed", "missing"}
-        or str(result.get("artifact_status") or event.get("artifact_status") or "").lower()
-        in {"failed", "missing"}
-    )
-    degraded = any(value in {"degraded", "partial", "best_effort"}
-                   for value in axis_status.values())
-    checkpoint = result.get("root_phase_checkpoint")
-    degraded |= bool(isinstance(checkpoint, dict)
-                     and str(checkpoint.get("post_task_synthesis") or "").lower() == "degraded")
-    if status == STATUS_CANCELLED:
-        return "Cancelled"
-    if failed:
-        return "Failed"
-    if status == STATUS_COMPLETED:
-        return "Completed with limitations" if degraded else "Completed"
-    if status == STATUS_REJECTED_DUPLICATE:
-        return "Not started"
-    return status.replace("_", " ").title() or "Finished"
+
+def outcome_phase(result: Dict[str, Any], event: Dict[str, Any]) -> str:
+    """The host mirror of the browser's terminality gate and severity fold.
+
+    Durable host rows read exactly what ``log_events.js`` paints, over
+    NORMALIZED axes; web/tests/fixtures/outcome_phase_parity.json pins both.
+    """
+    from ouroboros.outcomes import REASON_OWNER_REQUESTED_FINALIZATION, normalize_outcome_axes
+    from ouroboros.post_task_checkpoint import post_task_synthesis_is_open
+    from ouroboros.task_status import FINAL_STATUSES
+
+    record = {**event, **{key: value for key, value in result.items() if value not in (None, "")}}
+    sources = [s.get("outcome_axes") for s in (event, result) if isinstance(s.get("outcome_axes"), dict)]
+    record["outcome_axes"] = {k: v for source in sources for k, v in source.items() if isinstance(v, dict)}
+    axes = normalize_outcome_axes(record)
+    axis = {k: str(v.get("status") or "").lower() for k, v in axes.items() if isinstance(v, dict)}
+    status = str(record.get("task_terminal_status") or record.get("status") or "").strip().lower()
+    checkpoint = record.get("root_phase_checkpoint")
+    synthesis = checkpoint.get("post_task_synthesis") if isinstance(checkpoint, dict) else ""
+    if not (status in {"done", "cancel_requested"} or (status in FINAL_STATUSES and not (
+            status == "completed" and post_task_synthesis_is_open(synthesis)))):
+        return "working"
+    lifecycle = axis.get("lifecycle") or status
+    if lifecycle in {"cancelled", "cancel_requested"}:
+        return "cancelled"
+    if (lifecycle == "failed" or axis.get("execution") in {"failed", "infra_failed"}
+            or axis.get("objective") == "fail" or axis.get("review") == "fail"
+            or {axis.get("artifacts"), str(record.get("artifact_status") or "").lower()} & {"failed", "missing"}):
+        return "error"
+    if str(record.get("reason_code") or "") == REASON_OWNER_REQUESTED_FINALIZATION:
+        return "done"
+    if (lifecycle == "rejected_duplicate" or bool((axes.get("objective") or {}).get("warning"))
+            or axis.get("execution") in {"degraded", "best_effort"}
+            or axis.get("objective") in {"degraded", "best_effort"}
+            or axis.get("review") == "degraded"):
+        return "warn"
+    return "done"
+
+
+def completion_status_label(result: Dict[str, Any], event: Dict[str, Any]) -> str:
+    """The one owner-visible status word for a host-authored task row."""
+    return OUTCOME_PHASE_HEADLINE[outcome_phase(result, event)]
 
 
 def append_canonical_task_summary(drive_root: Any, row: Dict[str, Any]) -> bool:
@@ -710,7 +720,8 @@ def _append_terminal_task_projection(
         project_id = resolve_project_id({**task, **effective})
         role = str(effective.get("role") or task.get("role") or ("root" if is_root else "child"))
         reason = str(effective.get("reason_code") or event.get("reason_code") or "")
-        outcome = completion_status_label(effective, event)
+        phase = outcome_phase(effective, event)
+        outcome = OUTCOME_PHASE_HEADLINE[phase]
         excerpt = _completion_excerpt(effective)
         details = f'Details: get_task_result(task_id="{tid}")'
         text = (
@@ -719,8 +730,12 @@ def _append_terminal_task_projection(
         )
         if excerpt:
             text += f" {excerpt}"
-        if reason:
-            text += f" Reason: {reason}."
+        verdict = _completion_verdict(effective, event)
+        if verdict:
+            text += f" {verdict}"
+        depth = (effective.get("swarm_efficiency") or {}).get("depth") if isinstance(effective.get("swarm_efficiency"), dict) else None
+        if isinstance(depth, dict) and depth.get("requested_depth") is not None:
+            text += f" Depth requested={depth['requested_depth']}, permitted={depth.get('permitted_depth')}, achieved={depth.get('achieved_depth')} ({depth.get('status')})."
         result_ref = {"kind": "task_result", "task_id": tid, "reader": "get_task_result"}
         row = {
             "ts": str(event.get("ts") or effective.get("ts") or utc_now_iso()),
@@ -731,7 +746,7 @@ def _append_terminal_task_projection(
             "chat_id": int(event.get("chat_id") or task.get("chat_id") or 0),
             "delegation_role": str(effective.get("delegation_role") or task.get("delegation_role") or ""),
             "role": role, "status": str(effective.get("status") or status),
-            "outcome": outcome, "outcome_final": True,
+            "outcome": outcome, "outcome_phase": phase, "outcome_final": True,
             "outcome_authority": "canonical_task_result_after_finalization",
             "outcome_axes": effective.get("outcome_axes") or event.get("outcome_axes") or {},
             "reason_code": reason, "result_ref": result_ref,
@@ -786,6 +801,69 @@ def _completion_excerpt(result: Dict[str, Any]) -> str:
     return ""
 
 
+def _completion_verdict(result: Dict[str, Any], event: Dict[str, Any]) -> str:
+    """One TERMINATED host clause for BOTH lifecycle rows.
+
+    A host row must not present an unaccepted claim as the whole story: a
+    non-accepted decision leads with its full upstream-bounded rationale;
+    otherwise the execution reason stands. The Python twin of
+    ``taskReasonDetail``'s acceptance branch; callers add no punctuation.
+    """
+    from ouroboros.outcomes import ACCEPTANCE_ACCEPTED, REASON_OWNER_REQUESTED_FINALIZATION
+
+    decision: Dict[str, Any] = {}
+    for source in (event, result):
+        axes = source.get("outcome_axes") if isinstance(source.get("outcome_axes"), dict) else {}
+        for holder in (source.get("review_status"), axes.get("review")):
+            if isinstance(holder, dict) and isinstance(holder.get("acceptance_decision"), dict):
+                decision = holder["acceptance_decision"]
+    status = str(decision.get("status") or "").strip()
+    reason = str(result.get("reason_code") or event.get("reason_code") or "")
+    if (reason != REASON_OWNER_REQUESTED_FINALIZATION and status != ACCEPTANCE_ACCEPTED
+            and status and outcome_phase(result, event) in {"done", "warn"}):
+        clause = f"Acceptance: {status}"
+        rationale = " ".join(strip_markdown(str(decision.get("rationale") or "")).split())
+        if rationale:
+            clause += " — " + rationale
+    elif reason and reason != REASON_OWNER_REQUESTED_FINALIZATION:
+        clause = f"Reason: {reason}"
+    else:
+        return ""
+    return clause if clause.endswith((".", "!", "?", "…")) else clause + "."
+
+
+def _run_lives_in_its_project(
+    drive_root: Any, task_id: str, project_id: str, task: Dict[str, Any], result: Dict[str, Any],
+) -> bool:
+    """Did this run's work actually go into that project's room?
+
+    Two facts answer yes, and only these two. The run was ADDRESSED there —
+    admission resolves a registered project's thread, and a scoped run cannot be
+    addressed anywhere else. Or the run is BOUND to it, which is how a task that
+    started unscoped joins a project mid-flight; a binding re-homes every row it
+    already wrote, including the ones written before the project existed.
+
+    Registration alone is not that fact. A run scoped to an id nobody had
+    registered yet is admitted to the hidden partition; if that id is registered
+    while the run is still going, a room appears its rows never entered, and
+    answering "a room exists" is how the reported defect comes back.
+    """
+    try:
+        from ouroboros.projects_registry import get_reserved_project, project_binding_for_task
+
+        chat_id = result.get("chat_id")
+        if chat_id is None:
+            chat_id = task.get("chat_id")
+        project_chat = (get_reserved_project(drive_root, project_id) or {}).get("chat_id")
+        if chat_id is not None and project_chat is not None and int(chat_id) == int(project_chat):
+            return True
+        binding = project_binding_for_task(drive_root, task_id) or {}
+        return str(binding.get("project_id") or "") == str(project_id)
+    except Exception:
+        log.debug("project-room membership check failed for %s", task_id, exc_info=True)
+        return False
+
+
 def enqueue_project_completion_summary(
     drive_root: Any, evt: Dict[str, Any], task_id: str, task: Dict[str, Any],
     result: Dict[str, Any], task_done_event: Dict[str, Any],
@@ -821,14 +899,26 @@ def enqueue_project_completion_summary(
             drive_root, tid, task=task, result=result,
             project_id=str(result.get("project_id") or task.get("project_id") or ""),
         )
-        if not snapshot["project_id"]:
+        if not snapshot["project_id"] or not snapshot["project_routable"]:
+            # Owner decision 3A: a run whose project id was DERIVED from a
+            # workspace has no room, so Main stays silent instead of offering an
+            # "Open Project" that lands in an empty duplicate of itself. The same
+            # holds once a project is deleting or tombstoned.
+            return False
+        if not _run_lives_in_its_project(drive_root, tid, snapshot["project_id"], task, result):
+            # The room exists but holds none of this run's work: its id was only
+            # registered AFTER admission, or a mid-flight bind failed fail-soft.
+            # Offering "Open the Project" would reproduce the reported defect —
+            # a Main row leading into an empty room.
             return False
         excerpt = _completion_excerpt(result)
+        verdict = _completion_verdict(result, task_done_event)
+        lead = f"{verdict} " if verdict else ""
         event = {
             "type": "send_message", "chat_id": 1, "task_id": tid,
             "text": (f"{snapshot['target_label']} · "
                      f"{completion_status_label(result, task_done_event)}\n"
-                     f"{excerpt or 'Open the Project for details.'}"),
+                     f"{lead}{excerpt or 'Open the Project for details.'}"),
             "role": "system", "system_type": "project_completion_summary",
             "delivery_id": f"project-completion:{tid}",
             "progress_meta": {
@@ -899,6 +989,7 @@ __all__ = [
     "latest_chat_annotations",
     "enqueue_project_completion_summary",
     "completion_status_label",
+    "outcome_phase",
     "owner_message_ref_is_valid",
     "project_origin_rows",
     "project_recent_dialogue",

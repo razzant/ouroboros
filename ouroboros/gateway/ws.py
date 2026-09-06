@@ -177,10 +177,16 @@ def broadcast_ws_sync(msg: dict) -> None:
     loop = _event_loop
     if loop is None:
         return
+    coro = broadcast_ws(msg)
     try:
-        asyncio.run_coroutine_threadsafe(broadcast_ws(msg), loop)
+        asyncio.run_coroutine_threadsafe(coro, loop)
     except RuntimeError:
-        pass
+        # A closed or already-stopped loop never schedules the coroutine. The
+        # broadcast is deliberately a no-op then, but the coroutine object must
+        # still be closed here: dropped un-awaited it emits "coroutine
+        # 'broadcast_ws' was never awaited" from whatever code is running when
+        # it is collected, blaming an innocent caller for this line.
+        coro.close()
 
 
 async def _dispatch_extension_message(
@@ -317,6 +323,27 @@ async def ws_endpoint(websocket: WebSocket) -> None:
             msg_type = str(msg.get("type", "") or "")
             if await _dispatch_extension_message(websocket, msg, msg_type):
                 continue
+
+            # Executable gateway ABI (ABI-3, Q7=A): inbound chat/command frames
+            # are validated against the derived contract schema at THIS ingress
+            # seam only — egress and history replay are never validated.
+            if msg_type in ("chat", "command"):
+                from ouroboros.gateway.contracts import ChatInbound, CommandInbound
+                from ouroboros.gateway.schema import validate_ingress
+
+                schema_errors = validate_ingress(
+                    msg, ChatInbound if msg_type == "chat" else CommandInbound)
+                if schema_errors:
+                    await websocket.send_text(json.dumps({
+                        "type": "log",
+                        "data": {
+                            "level": "warning",
+                            "message": ("ingress schema rejected a "
+                                        f"{msg_type} message: "
+                                        + "; ".join(schema_errors[:5])),
+                        },
+                    }))
+                    continue
 
             payload = msg.get("content", "") if msg_type == "chat" else msg.get("cmd", "")
             if msg_type in ("chat", "command") and payload:

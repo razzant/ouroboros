@@ -64,10 +64,18 @@ def _mutate_projection(
     abort (file untouched) or anything else to commit. Returns the post-write
     (or pre-write, on abort) quizzes view.
     """
+    from ouroboros.task_results import (
+        require_writable_task_result_schema,
+        stamp_task_result_schema,
+    )
+
     view: Dict[str, Dict[str, Any]] = {}
 
     def _mutate(current: Dict[str, Any]) -> Optional[Dict[str, Any]]:
         view.clear()
+        # ABI 7.0 (hurry idiom): never write over a row another schema owns;
+        # every write stamps the row (stamp-on-write, not a converter).
+        require_writable_task_result_schema(current)
         raw = current.get("owner_quiz")
         quizzes = {
             str(k): dict(v) for k, v in raw.items() if isinstance(v, dict)
@@ -90,7 +98,7 @@ def _mutate_projection(
         updated = dict(current)
         updated["owner_quiz"] = quizzes
         view.update(quizzes)
-        return updated
+        return stamp_task_result_schema(updated)
 
     update_json_locked(_quiz_result_path(drive_root, task_id), _mutate)
     return view

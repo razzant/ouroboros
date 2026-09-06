@@ -149,6 +149,29 @@ def test_check_budget_reports_corrupt_state_json(tmp_path, monkeypatch):
     assert "state.json" in result["error"]
 
 
+def test_check_budget_absence_uses_shipped_default(tmp_path, monkeypatch):
+    from ouroboros.config import SETTINGS_DEFAULTS
+
+    (tmp_path / "state").mkdir(parents=True)
+    (tmp_path / "state" / "state.json").write_text("{}\n", encoding="utf-8")
+    env = types.SimpleNamespace(drive_path=lambda rel: tmp_path / rel)
+    monkeypatch.delenv("TOTAL_BUDGET", raising=False)
+
+    result, issues = startup_mod.check_budget(env)
+
+    assert issues == 0
+    assert result["total_usd"] == float(SETTINGS_DEFAULTS["TOTAL_BUDGET"])
+
+
+def test_check_budget_explicit_zero_remains_unconfigured(tmp_path, monkeypatch):
+    (tmp_path / "state").mkdir(parents=True)
+    (tmp_path / "state" / "state.json").write_text("{}\n", encoding="utf-8")
+    env = types.SimpleNamespace(drive_path=lambda rel: tmp_path / rel)
+    monkeypatch.setenv("TOTAL_BUDGET", "0")
+
+    assert startup_mod.check_budget(env) == ({"status": "unconfigured"}, 0)
+
+
 def test_check_budget_uses_unresolved_ledger_upper_bound(tmp_path, monkeypatch):
     from ouroboros import usage_accounting as ua
 

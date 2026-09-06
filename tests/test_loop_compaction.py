@@ -507,3 +507,71 @@ def test_strict_shrink_predicate_requires_entire_physical_tuple():
     }
     for label, candidate in variants.items():
         assert predicate(candidate) is False, label
+
+
+def test_overflow_retry_is_skipped_while_the_round_holds_an_unresolved_attempt(tmp_path, monkeypatch):
+    """Through the REAL dispatcher: a granted transport-death repeat that is
+    then rejected as a context overflow must not open the compaction retry —
+    attempt #1 of the round is still unresolved, so a smaller candidate would
+    be a third paid send over it. The round record is the single fact."""
+    import json
+
+    import httpx
+
+    from ouroboros import loop, loop_llm_call
+    from ouroboros import usage_accounting as ua
+    from ouroboros.loop_llm_call import TRANSPORT_DEATHS_KEY
+
+    def _unresolved(**extra):
+        return ua.PhysicalAttemptCapture(
+            attempt_id="pa", model="same-model", provider="openrouter", state="unresolved",
+            candidate_measurement_kind="opaque", **extra,
+        )
+
+    class _DeathThenOverflow:
+        calls = 0
+
+        def chat(self, **_kwargs):
+            self.calls += 1
+            if self.calls == 1:
+                try:
+                    raise RuntimeError("Connection error.") from httpx.ReadError("socket died")
+                except RuntimeError as exc:
+                    exc.physical_attempt_capture = _unresolved()
+                    raise
+            exc = RuntimeError("routed to a smaller upstream window")
+            exc.code = "context_length_exceeded"
+            exc.physical_attempt_capture = _unresolved(provider_status_code=400, provider_code="context_length_exceeded")
+            raise exc
+
+    context = _ctx(tmp_path)
+    context.llm = _DeathThenOverflow()
+    fits = iter([_fit(), _fit(profile="task_local_low", mode="low")])
+    reclaims = []
+
+    def measure(ctx, **_kwargs):
+        disposition = next(fits)
+        loop._remember_main_fit(ctx, disposition)
+        return disposition
+
+    monkeypatch.setattr(loop, "_measure_round_main_fit", measure)
+    monkeypatch.setattr(loop, "_run_main_reclaim", lambda ctx, d, **_k: reclaims.append(d))
+    monkeypatch.setattr(loop, "last_physical_attempt_capture", lambda: _failed_capture())
+    monkeypatch.setattr(loop_llm_call, "_sleep_within_deadline", lambda _sec, _dl: True)
+
+    msg, _cost, mode = loop._call_round_model(context)
+
+    assert msg is None
+    assert context.llm.calls == 2  # the death and its one repeat; no compaction retry
+    assert context.accumulated_usage["_last_llm_error_kind"] == "context_overflow"
+    assert context.accumulated_usage[TRANSPORT_DEATHS_KEY]["count"] == 1
+    assert reclaims == []
+    assert ("route-a", "exec:round:1") not in context.tools._ctx._context_overflow_retries
+    assert mode == "max"  # the retry was refused before any low re-projection
+    rows = [json.loads(line) for line in (tmp_path / "logs" / "events.jsonl").read_text().splitlines() if line.strip()]
+    skipped = [row for row in rows if row.get("type") == "context_overflow_retry_skipped"]
+    assert [row["reason"] for row in skipped] == ["round_holds_unresolved_attempt"]
+    api_errors = [row for row in rows if row.get("type") == "llm_api_error"]
+    assert [(row["error_kind"], row["retry_same_request"]) for row in api_errors] == [
+        ("provider_outcome_unknown", True), ("context_overflow", False),
+    ]

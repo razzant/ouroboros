@@ -3,9 +3,11 @@
 The warnings stay globally visible (a preserved-and-invisible result is how
 work rots on disk), but only the OWNER task receives the call-shaped
 instruction: ``integrate_delegated_patch`` refuses a non-owner with
-``run_not_owned`` and the read acknowledgement only credits the owner, so a
-foreign reader must be told WHO can act, never handed a call that
-structurally refuses.
+``run_not_owned`` while the owner task is LIVE, and the read acknowledgement
+only credits the owner, so a foreign reader must be told WHO can act, never
+handed a ready-to-paste call that structurally refuses. Once the owner task is
+terminal, apply needs matching target authority but reject does not, so the
+clause states that split without minting a callable shape.
 """
 
 import types
@@ -43,10 +45,28 @@ def test_non_owner_gets_no_call_shaped_instruction(tmp_path, monkeypatch):
     assert "DELEGATED RESULT NEVER READ" in text
     assert "DELEGATED PATCH AWAITS DISPOSITION" in text
     assert "owner task task-owner" in text.lower() or "task-owner" in text
-    # The obligation is visible, the undischargeable call is not.
-    assert "integrate_delegated_patch(run_id=" not in text
+    # The obligation is visible; the DIRECTLY CALLABLE shape is not. The clause
+    # names the tool only inside the conditional rule (a terminal owner's orphan
+    # has distinct apply/reject authority), never as a
+    # ready-to-paste call this foreign reader could make against a LIVE owner.
+    assert "integrate_delegated_patch(run_id='run-p'" not in text
+    assert "once that task is terminal" in text
+    assert "apply requires the caller's active Git root or fresh payload binding" in text
+    assert "reject may release it even from a different active root" in text
+    assert "disposition row records who acted" in text
     assert "read_file" not in text
     assert "run_not_owned" in text
+
+
+def test_architecture_states_the_terminal_owner_apply_reject_authority_split():
+    import pathlib
+
+    architecture = (pathlib.Path(__file__).resolve().parents[1] / "docs" /
+                    "ARCHITECTURE.md").read_text(encoding="utf-8")
+    assert "Apply requires the caller's active Git root or fresh payload binding" in architecture
+    assert "Reject requires only the owner's proven terminality" in architecture
+    assert "a live top-level task with a different active root may reject and release" in architecture
+    assert "disposition row records who did it" in architecture
 
 
 def test_owner_keeps_the_call_shaped_instruction(tmp_path, monkeypatch):

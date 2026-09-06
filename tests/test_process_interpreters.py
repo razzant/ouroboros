@@ -297,7 +297,8 @@ def test_light_run_script_default_cwd_uses_active_workspace_agent_python(tmp_pat
 
 def test_registry_guard_and_handler_receive_same_resolved_verify_argv(tmp_path, monkeypatch):
     import ouroboros.safety as safety
-    import ouroboros.tools.registry as registry_module
+    import ouroboros.tools.registry_guard_process as registry_guard_process
+    import ouroboros.tools.shell_guards as shell_guards
 
     ctx = _context(tmp_path)
     agent_python = _executable(tmp_path / "agent" / "bin" / "python")
@@ -312,7 +313,7 @@ def test_registry_guard_and_handler_receive_same_resolved_verify_argv(tmp_path, 
     registry = ToolRegistry(repo_dir=ctx.repo_dir, drive_root=ctx.drive_root)
     registry.set_context(ctx)
     captured: dict[str, list[str]] = {}
-    original_guard = registry_module.process_shell_guard_args
+    original_guard = shell_guards.process_shell_guard_args
 
     def capture_guard(name, args, **kwargs):
         guarded = original_guard(name, args, **kwargs)
@@ -325,9 +326,9 @@ def test_registry_guard_and_handler_receive_same_resolved_verify_argv(tmp_path, 
         captured["handler"] = list(check)
         return "ok"
 
-    monkeypatch.setattr(registry_module, "process_shell_guard_args", capture_guard)
-    monkeypatch.setattr(registry, "_run_shell_safety_check", lambda *args, **kwargs: "")
-    registry._entries["verify_and_record"].handler = capture_handler
+    monkeypatch.setattr(shell_guards, "process_shell_guard_args", capture_guard)
+    monkeypatch.setattr(registry_guard_process, "_run_shell_safety_check", lambda *args, **kwargs: None)
+    registry.override_handler("verify_and_record", capture_handler)
 
     result = registry.execute(
         "verify_and_record",
@@ -364,7 +365,7 @@ def test_registry_uses_current_process_python_before_server_bootstrap(
         observed["cmd"] = cmd
         return "ok"
 
-    registry._entries["run_command"].handler = handler
+    registry.override_handler("run_command", handler)
 
     result = registry.execute("run_command", {"cmd": ["python", "-V"]})
 
@@ -386,7 +387,8 @@ def test_run_script_accepts_registry_attested_versioned_agent_python(
 
     registry = ToolRegistry(repo_dir=ctx.repo_dir, drive_root=ctx.drive_root)
     registry.set_context(ctx)
-    monkeypatch.setattr(registry, "_run_shell_safety_check", lambda *args, **kwargs: "")
+    import ouroboros.tools.registry_guard_process as registry_guard_process
+    monkeypatch.setattr(registry_guard_process, "_run_shell_safety_check", lambda *args, **kwargs: None)
 
     result = registry.execute(
         "run_script",

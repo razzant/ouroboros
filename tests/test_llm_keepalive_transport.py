@@ -84,11 +84,33 @@ def test_keepalive_socket_options_pin_linux_probe_tuning(monkeypatch):
 
 
 def test_keepalive_socket_options_pin_darwin_idle_spelling(monkeypatch):
-    """Darwin spells the idle threshold TCP_KEEPALIVE; when the constant
-    exists the option carries the config idle value."""
+    """Darwin spells the idle threshold TCP_KEEPALIVE and then takes the same
+    probe interval/count as Linux (CPython exports both on Darwin), in order,
+    each carrying its config value."""
     monkeypatch.setattr(platform_layer, "IS_LINUX", False)
     monkeypatch.setattr(platform_layer, "IS_MACOS", True)
     monkeypatch.setattr(socket, "TCP_KEEPALIVE", 0x10, raising=False)
+    monkeypatch.setattr(socket, "TCP_KEEPINTVL", 0x101, raising=False)
+    monkeypatch.setattr(socket, "TCP_KEEPCNT", 0x102, raising=False)
+
+    options = platform_layer.tcp_keepalive_socket_options()
+
+    assert options == [
+        (socket.SOL_SOCKET, socket.SO_KEEPALIVE, 1),
+        (socket.IPPROTO_TCP, socket.TCP_KEEPALIVE, TCP_KEEPALIVE_IDLE_SEC),
+        (socket.IPPROTO_TCP, socket.TCP_KEEPINTVL, TCP_KEEPALIVE_INTERVAL_SEC),
+        (socket.IPPROTO_TCP, socket.TCP_KEEPCNT, TCP_KEEPALIVE_PROBE_COUNT),
+    ]
+
+
+def test_keepalive_socket_options_darwin_without_interval_count_keeps_idle_only(monkeypatch):
+    """An interpreter that does not export the interval/count constants still
+    gets the idle threshold: the guards degrade per option, never all-or-nothing."""
+    monkeypatch.setattr(platform_layer, "IS_LINUX", False)
+    monkeypatch.setattr(platform_layer, "IS_MACOS", True)
+    monkeypatch.setattr(socket, "TCP_KEEPALIVE", 0x10, raising=False)
+    monkeypatch.delattr(socket, "TCP_KEEPINTVL", raising=False)
+    monkeypatch.delattr(socket, "TCP_KEEPCNT", raising=False)
 
     options = platform_layer.tcp_keepalive_socket_options()
 

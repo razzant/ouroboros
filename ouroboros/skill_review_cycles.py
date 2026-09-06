@@ -42,15 +42,16 @@ import pathlib
 from typing import Any, Dict, List, Optional
 
 from ouroboros.review_cycles import emit_review_cycles_exhausted, review_max_cycles
-from ouroboros.skill_review_history import load_history
+from ouroboros.skill_review_history import iter_history_rows_bounded, load_history
 from ouroboros.skill_review_status import (
     STATUS_BLOCKERS,
     STATUS_CLEAN,
     STATUS_PENDING,
     STATUS_WARNINGS,
     normalize_skill_review_status,
+    review_status_grandfatherable,
 )
-from ouroboros.utils import atomic_write_json, iter_jsonl_objects, utc_now_iso
+from ouroboros.utils import atomic_write_json, utc_now_iso
 
 log = logging.getLogger(__name__)
 
@@ -250,11 +251,13 @@ def count_paid_skill_review_cycles(
     for skill_dir in skill_dirs:
         rows: List[Dict[str, Any]] = []
         try:
-            rows = [
-                row
-                for row in iter_jsonl_objects(skill_dir / "review_history.jsonl")
-                if isinstance(row, dict)
-            ]
+            # Bounded like every other history reader (CPL4-C12): this is the
+            # read that walks EVERY skill's log, so a whole-file scan here
+            # multiplies by the number of installed skills. Same disclosed
+            # residual as the rest of the family — a group whose newest
+            # ordinal-bearing row aged past the window under-counts, it never
+            # over-blocks.
+            rows = list(iter_history_rows_bounded(drive_root, skill_dir.name))
         except OSError:
             rows = []
         count += sum(
@@ -478,6 +481,75 @@ def skill_review_cycles_refusal(
     )
 
 
+def plugin_api_admission_refusal_outcome(
+    ctx: Any,
+    skill: Any,
+    drive_root: pathlib.Path,
+    *,
+    content_hash: str,
+    admission_error: str,
+    persist: bool,
+) -> Any:
+    """ABI-1: typed $0 refusal at NEW-PASS issuance for an inadmissible extension.
+
+    The predicate (``extension_new_pass_admission_error``) is common to every
+    PASS-minting path and lives OUTSIDE the deterministic preflight. Clobber
+    guard: when the SAME bytes already hold a live executable verdict (the
+    grandfather), nothing is persisted — a repeat review must never destroy
+    the hash-bound PASS the grandfather construction depends on.
+    """
+    from ouroboros.skill_loader import SkillReviewState, save_review_state
+    from ouroboros.skill_review import SkillReviewOutcome, _append_skill_review_history
+
+    findings = [{
+        "item": "plugin_api_admission",
+        "verdict": "FAIL",
+        "severity": "critical",
+        "reason": admission_error,
+        "model": "plugin_api_admission",
+    }]
+    live = getattr(skill, "review", None)
+    live_pass = bool(
+        live is not None
+        and not live.is_stale_for(content_hash)
+        and review_status_grandfatherable(live.status)
+    )
+    outcome = SkillReviewOutcome(
+        skill_name=skill.name,
+        status=STATUS_PENDING,
+        findings=findings,
+        reviewer_models=["plugin_api_admission"],
+        content_hash=content_hash,
+        error=(
+            "new review PASS refused (PluginAPI 2.0 admission): " + admission_error
+            + (
+                "; the existing hash-bound PASS for these bytes is preserved "
+                "(grandfather) and nothing was persisted"
+                if live_pass else ""
+            )
+        ),
+    )
+    if persist and not live_pass:
+        review_state = SkillReviewState(
+            status=outcome.status,
+            content_hash=content_hash,
+            findings=findings,
+            reviewer_models=outcome.reviewer_models,
+            timestamp=utc_now_iso(),
+        )
+        save_review_state(drive_root, skill.name, review_state)
+        if not getattr(ctx, "_skill_review_lifecycle_guard", False):
+            _append_skill_review_history(
+                drive_root,
+                skill.name,
+                status=outcome.status,
+                content_hash=content_hash,
+                findings=findings,
+            )
+        skill.review = review_state
+    return outcome
+
+
 def install_skill_dispatch_stamp(
     ctx: Any,
     drive_root: pathlib.Path,
@@ -531,8 +603,9 @@ def review_wave_budget_block(
     models: List[str],
 ) -> Optional[str]:
     """Return a human-readable refusal when the review wave cannot fit the
-    remaining root budget, else None. Read-only; emits one typed event."""
-    from ouroboros.tools.review_helpers import review_wave_budget_gate
+    remaining budget (global or root axis, the binding one named), else None.
+    Read-only; emits one typed event."""
+    from ouroboros.tools.review_helpers import review_wave_binding_fence, review_wave_budget_gate
 
     # Estimate the WHOLE wave: a chunked oversized skill runs one full
     # reviewer pass PER pack (run_skill_review_passes), and every pass re-sends
@@ -562,12 +635,12 @@ def review_wave_budget_block(
     )
     if admission is None:
         return None
+    fence, remedy = review_wave_binding_fence(admission)
     return (
         "review wave declined before dispatch: estimated reviewer-wave cost "
-        f"~${admission.get('estimated_wave_usd')} exceeds the remaining root budget "
-        f"${admission.get('remaining_usd')} (limit ${admission.get('limit_usd')}). "
-        "No reviewer was called; the skill stays pending. Raise the per-task "
-        "budget or re-run the review in a fresh task."
+        f"~${admission.get('estimated_wave_usd')} exceeds the remaining budget "
+        f"${admission.get('remaining_usd')} ({fence}). No reviewer was called; the skill "
+        f"stays pending. Wait for in-flight attempts to settle, {remedy}, or re-run the review in a fresh task."
     )
 
 
@@ -686,7 +759,14 @@ def record_accepted_rebuttal(
         if passed_models:
             target["models_that_passed_after"] = list(passed_models)
     try:
+        from ouroboros.contracts.schema_versions import with_schema_version
+        from ouroboros.skill_loader import SKILL_OWNER_STATE_SCHEMA_VERSION
+
         path.parent.mkdir(parents=True, exist_ok=True)
-        atomic_write_json(path, {"items": existing}, trailing_newline=True)
+        atomic_write_json(
+            path,
+            with_schema_version({"items": existing}, SKILL_OWNER_STATE_SCHEMA_VERSION),
+            trailing_newline=True,
+        )
     except OSError:
         log.debug("accepted rebuttal write failed", exc_info=True)

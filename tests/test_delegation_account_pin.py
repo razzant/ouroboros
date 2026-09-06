@@ -2,7 +2,7 @@
 
 Split out of tests/test_delegated_subagent_transport.py, whose size is pinned
 by the one-way byte ratchet; the shared transport fixtures are imported from
-that module.
+tests/_delegated_transport_shared.py (the S7a theme split re-homed them there).
 """
 
 from __future__ import annotations
@@ -10,7 +10,7 @@ from __future__ import annotations
 import json
 
 from ouroboros import subagents
-from tests.test_delegated_subagent_transport import (  # noqa: F401 — autouse fixture
+from tests._delegated_transport_shared import (  # noqa: F401 — autouse fixture
     _owned_gateway_uses_each_test_transport,
     _plain_ctx,
 )

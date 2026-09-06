@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import json
+
 import pytest
 
 from ouroboros import utils
@@ -128,3 +130,137 @@ def test_replace_atomic_does_not_retry_other_oserrors(tmp_path, monkeypatch):
     with pytest.raises(OSError):
         utils.replace_atomic(tmp_path / "a", tmp_path / "b")
     assert calls["n"] == 1
+
+
+@pytest.mark.parametrize("writer,payload,read", [
+    (write_text_atomic, "short-write survivor ✓ text", lambda p: p.read_text(encoding="utf-8")),
+    (write_bytes_atomic, b"short-write survivor bytes", lambda p: p.read_bytes()),
+])
+def test_fsync_path_survives_short_os_writes(tmp_path, monkeypatch, writer, payload, read):
+    """External-audit correction lane (base 8827fd2c), item 2: the fsync lane
+    of write_text_atomic issued ONE bare ``os.write`` and trusted its return —
+    a partial write published a truncated file behind a successful rename.
+    Both fsync lanes must loop until every byte lands (``_write_fd_fully``)."""
+    import os as _os
+
+    target = tmp_path / "out.dat"
+    real_write = _os.write
+
+    def one_byte_at_a_time(fd, data):
+        return real_write(fd, bytes(data)[:1])
+
+    monkeypatch.setattr(utils.os, "write", one_byte_at_a_time)
+    writer(target, payload, fsync=True)
+    monkeypatch.undo()
+    assert read(target) == payload
+
+
+def test_append_jsonl_survives_short_os_writes(tmp_path, monkeypatch):
+    """Audit #15-11/12 corrective lane: ``append_jsonl`` issued ONE bare
+    ``os.write`` and returned success without checking the byte count — the
+    same short-write class the atomic writers already fixed, left in the
+    append SSOT every authority JSONL stream goes through. A torn line here is
+    a lost record, not a truncated file."""
+    import os as _os
+
+    target = tmp_path / "logs" / "events.jsonl"
+    real_write = _os.write
+
+    def one_byte_at_a_time(fd, data):
+        if bytes(data).startswith(b"pid="):
+            return real_write(fd, data)  # the lock primitive's own metadata
+        return real_write(fd, bytes(data)[:1])
+
+    monkeypatch.setattr(utils.os, "write", one_byte_at_a_time)
+    assert utils.append_jsonl(target, {"type": "llm_usage", "cost": 1.5}) is True
+    monkeypatch.undo()
+    lines = target.read_text(encoding="utf-8").splitlines()
+    assert len(lines) == 1
+    assert json.loads(lines[0]) == {"type": "llm_usage", "cost": 1.5}
+
+
+def test_append_jsonl_reports_failure_and_never_retries_a_torn_record(tmp_path, monkeypatch):
+    """A write that dies MID-record must report False, not retry the whole
+    line: the retry would duplicate the prefix already on disk. Only the open
+    is retried."""
+    import os as _os
+
+    target = tmp_path / "logs" / "events.jsonl"
+    real_write = _os.write
+    calls = {"n": 0}
+
+    def half_then_die(fd, data):
+        if bytes(data).startswith(b"pid="):
+            return real_write(fd, data)  # the lock primitive's own metadata
+        calls["n"] += 1
+        if calls["n"] == 1:
+            return real_write(fd, bytes(data)[:4])
+        raise OSError("device gone")
+
+    monkeypatch.setattr(utils.os, "write", half_then_die)
+    assert utils.append_jsonl(target, {"type": "task_done"}) is False
+    monkeypatch.undo()
+    assert calls["n"] == 2  # one short write, one failure — no whole-record replay
+    assert target.read_bytes() == b'{"ty'
+
+
+@pytest.mark.parametrize("fsync", [False, True])
+def test_write_text_atomic_is_byte_exact_on_every_platform(tmp_path, monkeypatch, fsync):
+    """Audit #14-5: the text lane used to translate newlines on Windows — the
+    non-fsync lane through ``Path.write_text``'s text mode, the fsync lane
+    through an ``os.open`` without ``O_BINARY``. Byte-exact consumers (run
+    manifests, hashed receipts, agent file writes that round-trip LF source)
+    were rewritten silently by it.
+
+    POSIX has no translation to observe, so the flag is simulated: give ``os``
+    an ``O_BINARY`` bit the way Windows has one, pin that the fsync lane passes
+    it, and pin the exact bytes on both lanes."""
+    import os as _os
+
+    # Windows has the real bit: pin it as-is (stripping it would re-enable the
+    # text-mode translation this test forbids). POSIX has none, so simulate one.
+    real_o_binary = getattr(_os, "O_BINARY", None)
+    fake_o_binary = real_o_binary if real_o_binary is not None else 1 << 26
+    target = tmp_path / "run_manifest.json"
+    content = '{\n  "seed": "v7next\\r",\n  "lines": "a\\nb"\n}\n'
+    flags_seen: list[int] = []
+    real_open = _os.open
+
+    def spy_open(path, flags, *args, **kwargs):
+        flags_seen.append(flags)
+        if real_o_binary is None:
+            flags &= ~fake_o_binary
+        return real_open(path, flags, *args, **kwargs)
+
+    monkeypatch.setattr(_os, "O_BINARY", fake_o_binary, raising=False)
+    monkeypatch.setattr(utils.os, "open", spy_open)
+    write_text_atomic(target, content, fsync=fsync)
+    monkeypatch.undo()
+
+    assert target.read_bytes() == content.encode("utf-8")
+    if fsync:
+        assert flags_seen and all(flags & fake_o_binary for flags in flags_seen)
+
+
+def test_atomic_write_json_lands_exact_bytes(tmp_path):
+    """The JSON SSOT inherits the byte-exact contract: durable state hashes the
+    same on every platform."""
+    target = tmp_path / "state.json"
+    atomic_write_json(target, {"a": [1, 2], "b": "x"}, trailing_newline=True)
+    assert target.read_bytes() == b'{\n  "a": [\n    1,\n    2\n  ],\n  "b": "x"\n}\n'
+
+
+def test_supervisor_state_atomic_write_text_lands_every_byte_on_short_writes(tmp_path, monkeypatch):
+    """Audit #16-6: ``supervisor.state.atomic_write_text`` used to publish one
+    ``os.write`` behind the rename — a short write became a truncated
+    ``state.json``. It rides the utils write loop now."""
+    import os
+
+    from supervisor import state as sup_state
+
+    real_write = os.write
+    monkeypatch.setattr(utils.os, "write", lambda fd, data: real_write(fd, bytes(data[:1])))
+    target = tmp_path / "state.json"
+    payload = '{"a": 1, "b": "' + "x" * 300 + '"}\n'
+    sup_state.atomic_write_text(target, payload)
+    assert target.read_bytes() == payload.encode("utf-8")

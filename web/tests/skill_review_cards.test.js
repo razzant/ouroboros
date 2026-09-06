@@ -3,6 +3,7 @@ import assert from 'node:assert/strict';
 import test from 'node:test';
 
 import {
+    SKILL_REVIEW_DETAIL_CAP,
     loadSkillReviewDetail,
     nestedSkillReviewRef,
     renderSkillReviewDisclosure,
@@ -160,6 +161,19 @@ test('nested attempts reuse the instance exact-job store after DOM rebuild', asy
     assert.deepEqual(nestedSkillReviewRef({ dataset: {
         skillReviewSkill: 'alpha', skillReviewJob: 'nested-job',
     } }), { skill: 'alpha', jobId: 'nested-job' });
+});
+
+test('the instance store is trimmed FIFO past the cap by the loader itself (issue #135)', async () => {
+    const store = new Map();
+    const fetchImpl = async () => ({ ok: true, json: async () => ({ markdown: '# detail' }) });
+    for (let i = 0; i <= SKILL_REVIEW_DETAIL_CAP; i += 1) {
+        await loadSkillReviewDetail(makeFull(), { skill: 'alpha', jobId: `job-${i}` },
+            { store, fetchImpl, render: (md) => md });
+    }
+    assert.equal(store.size, SKILL_REVIEW_DETAIL_CAP);
+    const keys = [...store.keys()];
+    assert.ok(!keys.some((key) => key.endsWith('job-0')), 'the oldest entry left first');
+    assert.ok(keys.at(-1).endsWith(`job-${SKILL_REVIEW_DETAIL_CAP}`));
 });
 
 test('cached loaded detail does not repaint an already-loaded live node', async () => {

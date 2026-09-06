@@ -5,10 +5,12 @@
 # Tier 2.5 (Integration): Push to main / ouroboros / ouroboros-stable / manual / tag  → Real-provider tests       (~2 min)
 # Tier 2.6 (Skill smoke): Push to ouroboros-stable / manual / tag                     → LIVE OuroborosHub official-skill install smoke (3-OS, ~5 min) + review→grant→enable-persistence flow on one cheap reviewer slot (ubuntu-only step, OPENROUTER_API_KEY, ~$1.2/run)
 # Tier 3 (Build+Release): Tag v*                                                       → PyInstaller + GitHub Release (~15 min)
+# Scheduled (System E2E): Daily cron / manual                                          → KEYLESS tests/system_e2e/ scenario lane (Ubuntu, ≤40 min)
+# Scheduled (Live E2E):   Nightly cron 03:17 UTC (ouroboros tip) / dispatch input e2e_live=true → PAID devtools/e2e_live stand, $30 cap, OUROBOROS_E2E_LIVE_OPENROUTER_KEY (skipped honestly without it)
 #
 # Tier 2.5 requires OPENROUTER_API_KEY / OPENAI_API_KEY / ANTHROPIC_API_KEY.
-# Optional MiniMax / Cloud.ru / GigaChat rows run when their repository secrets
-# exist. The job runs the `integration` pytest marker; locally these tests are
+# Optional MiniMax / DeepSeek / Cloud.ru / GigaChat rows run when their
+# repository secrets exist. The job runs the `integration` pytest marker; locally these tests are
 # excluded by `addopts = -m 'not integration'` in pyproject.toml.
 
 name: CI
@@ -51,7 +53,26 @@ on:
   # Only the deterministic quick-test job matches pull_request refs below.
   pull_request:
     branches: [ouroboros]
+  # A plain dispatch (the pre-tag 3-OS matrix: `gh workflow run CI --ref <branch>`)
+  # never spends money: the paid e2e-live lane runs only when its opt-in input is
+  # set (`-f e2e_live=true`). Inputs do not change `github.event_name`, so every
+  # job gated on the bare `workflow_dispatch` event is unaffected by this block.
   workflow_dispatch:
+    inputs:
+      e2e_live:
+        description: 'Run the paid live E2E stand ($30 cap; needs the OUROBOROS_E2E_LIVE_OPENROUTER_KEY secret)'
+        type: boolean
+        default: false
+  # Two crons, each owned by exactly ONE job through `github.event.schedule`:
+  # 04:37 is the keyless system-e2e-mock lane, 03:17 the paid e2e-live stand.
+  # Off the hour deliberately: GitHub's cron queue is deepest at :00. NOTE for
+  # any job added later — a scheduled run reports the DEFAULT BRANCH in
+  # github.ref, so a job gated on a branch ref alone will fire on BOTH crons
+  # (see integration-test), and a job gated on the bare event name fires twice
+  # a night — bind it to its own cron string.
+  schedule:
+    - cron: '37 4 * * *'
+    - cron: '17 3 * * *'
 
 # Note: GitHub Actions evaluates `branches` + `paths` together but `tags`
 # separately — a tag push matching `v*` will trigger regardless of paths.
@@ -109,6 +130,13 @@ jobs:
       - name: Run browser-module tests (node --test — mirrored by the hermetic commit gate)
         shell: bash
         run: cd web && node --test tests/*.test.js
+      # ESLint `no-undef` is the second, independent layer of the browser no-undef
+      # gate (owner decision D-13): the hermetic commit gate keeps the dependency-free
+      # acorn walker in the suite above; this layer is CI-only, lockfile-frozen
+      # (`npm ci` on web/package-lock.json) and exact-pinned in web/package.json.
+      - name: Lint browser modules (ESLint no-undef — CI-only second layer of the acorn gate)
+        shell: bash
+        run: cd web && npm ci --no-audit --no-fund && npm run lint:undef
       # NOTE: a command-line `-m` REPLACES the pyproject `addopts` markexpr, so the default
       # `not integration and not browser ...` exclusions must be repeated here, then ANDed with
       # the serial split. --timeout guards against a hung test blocking the whole job.
@@ -132,6 +160,41 @@ jobs:
         run: python -m pytest tests/ -m size_ratchet -q --tb=short
       - name: Guard extracted transport imports stay out of core
         run: python -m pytest tests/test_no_core_a2a_telegram_imports.py -q
+
+  # ──────────────────────────────────────────────────────────────────
+  # Benchmark methodology tests (owner decision R42). The devtools/benchmarks
+  # suites live OUTSIDE pyproject's `testpaths = ["tests"]`, so the full-suite
+  # passes above never collect them; this job runs them explicitly beside
+  # their in-tree sibling tests/test_devtools_benchmarks.py, under the same
+  # canonical marker exclusions, in one serial pass (the serial-marked rows
+  # are included; nothing here needs -n). Deterministic and hermetic: no
+  # provider secret, no docker, no `harbor` / `inspect_ai` (the suites stub
+  # them or never import them); the OUROBOROS_* roots point at a runner-temp
+  # data root the way betterleaks-platform-smoke pins its own. Ubuntu-only:
+  # the terminal_bench methodology targets a Linux harness (harbor + docker)
+  # and its suites have never run on the Windows/macOS matrix.
+  # ──────────────────────────────────────────────────────────────────
+  benchmark-methodology:
+    if: |
+      (github.event_name == 'push' && github.ref == 'refs/heads/ouroboros')
+      || (github.event_name == 'pull_request' && github.base_ref == 'ouroboros')
+      || github.event_name == 'workflow_dispatch'
+      || github.ref == 'refs/heads/ouroboros-stable'
+      || startsWith(github.ref, 'refs/tags/v')
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: ./.github/actions/setup-python-env
+      # `devtools/benchmarks` as a directory IS the `devtools/benchmarks/**/test_*.py`
+      # glob (pyproject `python_files`): no shell globstar, no list to maintain
+      # when a bench adds a suite. The roots ride the STEP env: the `runner`
+      # context is step-only (the same shape as betterleaks-platform-smoke).
+      - name: Run benchmark methodology tests (tests/test_devtools_benchmarks.py + devtools/benchmarks/**/test_*.py)
+        env:
+          OUROBOROS_APP_ROOT: ${{ runner.temp }}/ouroboros-benchmark-methodology
+          OUROBOROS_DATA_DIR: ${{ runner.temp }}/ouroboros-benchmark-methodology/data
+          OUROBOROS_SETTINGS_PATH: ${{ runner.temp }}/ouroboros-benchmark-methodology/data/settings.json
+        run: python -m pytest tests/test_devtools_benchmarks.py devtools/benchmarks -m "not integration and not browser and not ui_browser and not ui_browser_docker and not portable_detail and not skill_smoke and not size_ratchet" --timeout=300 --timeout-method=thread -q --tb=short
 
   # ──────────────────────────────────────────────────────────────────
   # Tier 2: Full matrix (stable branch, manual, or tag push)
@@ -166,6 +229,13 @@ jobs:
       - name: Run browser-module tests (node --test — mirrored by the hermetic commit gate)
         shell: bash
         run: cd web && node --test tests/*.test.js
+      # ESLint `no-undef` is the second, independent layer of the browser no-undef
+      # gate (owner decision D-13): the hermetic commit gate keeps the dependency-free
+      # acorn walker in the suite above; this layer is CI-only, lockfile-frozen
+      # (`npm ci` on web/package-lock.json) and exact-pinned in web/package.json.
+      - name: Lint browser modules (ESLint no-undef — CI-only second layer of the acorn gate)
+        shell: bash
+        run: cd web && npm ci --no-audit --no-fund && npm run lint:undef
       # A command-line `-m` REPLACES the pyproject addopts markexpr, so repeat the default
       # marker-lane exclusions and AND them with the serial split. --timeout guards hangs.
       - name: Run tests (parallel — excludes the costly marker lanes AND the serial real-process suites)
@@ -226,19 +296,23 @@ jobs:
   # Tier 2.5: Integration tests against real provider APIs
   # Triggered on push to main / ouroboros / ouroboros-stable, manual,
   # or tag v*. OPENROUTER_API_KEY / OPENAI_API_KEY / ANTHROPIC_API_KEY
-  # are required in the official trusted job; MiniMax / Cloud.ru / GigaChat
-  # credentials are optional and their absent rows remain visible as skips.
+  # are required in the official trusted job; MiniMax / DeepSeek / Cloud.ru /
+  # GigaChat credentials are optional and their absent rows remain visible as skips.
   # The `integration` pytest marker controls inclusion via `-m integration`.
   # Confirmed provider-contract failures block release-preflight; the test
   # classifier keeps quota/rate-limit/5xx/timeout outcomes inconclusive.
   # ──────────────────────────────────────────────────────────────────
   integration-test:
+    # The leading schedule guard is what keeps the nightly cron above OFF this
+    # paid lane: a scheduled run carries the default branch in github.ref, which
+    # three of the conditions below already match.
     if: |
-      github.event_name == 'workflow_dispatch'
+      github.event_name != 'schedule'
+      && (github.event_name == 'workflow_dispatch'
       || github.ref == 'refs/heads/main'
       || github.ref == 'refs/heads/ouroboros'
       || github.ref == 'refs/heads/ouroboros-stable'
-      || startsWith(github.ref, 'refs/tags/v')
+      || startsWith(github.ref, 'refs/tags/v'))
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -249,6 +323,7 @@ jobs:
           OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
           ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
           MINIMAX_API_KEY: ${{ secrets.MINIMAX_API_KEY }}
+          DEEPSEEK_API_KEY: ${{ secrets.DEEPSEEK_API_KEY }}
           CLOUDRU_FOUNDATION_MODELS_API_KEY: ${{ secrets.CLOUDRU_FOUNDATION_MODELS_API_KEY }}
           CLOUDRU_FOUNDATION_MODELS_BASE_URL: ${{ secrets.CLOUDRU_FOUNDATION_MODELS_BASE_URL }}
           GIGACHAT_CREDENTIALS: ${{ secrets.GIGACHAT_CREDENTIALS }}
@@ -448,11 +523,245 @@ jobs:
             "PLAYWRIGHT_BROWSERS_PATH=0 python -m playwright install --only-shell chromium && python -m pytest tests/ -m portable_detail -q --tb=short"
 
   # ──────────────────────────────────────────────────────────────────
+  # Scheduled: the KEYLESS system_e2e scenario lane (tests/system_e2e/).
+  # Those tests carry `integration` + `serial` AND the OUROBOROS_E2E_DEEP env
+  # gate, so no other job in this file can reach them — without this one the
+  # suite would be proof nobody executes. Deliberately NOT a push/PR lane
+  # (owner 9A, replacing the plan §8 PR lane): each scenario spawns a real
+  # isolated server, so the cost belongs on a nightly, not on every review.
+  # No provider secrets: the lane is keyless by construction and this job
+  # names none, which is the only way a job gets one. The four OUROBOROS_*
+  # roots point into runner.temp so no scenario can reach a real install.
+  # Red here = investigate; there is no fallback-skip.
+  # ──────────────────────────────────────────────────────────────────
+  system-e2e-mock:
+    # Also on a release tag: the release bar must not skip the 57-scenario lane
+    # (owner decision, batch №13 item 4, 2026-09-02). Bound to ITS cron string:
+    # the 03:17 cron belongs to e2e-live and must not run this lane a second
+    # time each night.
+    if: |
+      (github.event_name == 'schedule' && github.event.schedule == '37 4 * * *')
+      || github.event_name == 'workflow_dispatch'
+      || startsWith(github.ref, 'refs/tags/v')
+    runs-on: ubuntu-latest
+    timeout-minutes: 40
+    steps:
+      - uses: actions/checkout@v4
+      - uses: ./.github/actions/setup-python-env
+      # -o addopts="" replaces the pyproject default markexpr wholesale: the
+      # lane's own `integration` marker is exactly what that default excludes.
+      - name: Run the keyless system E2E scenario lane (real isolated servers)
+        env:
+          OUROBOROS_E2E_DEEP: mock
+          OUROBOROS_APP_ROOT: ${{ runner.temp }}/ouroboros-system-e2e/app
+          OUROBOROS_REPO_DIR: ${{ runner.temp }}/ouroboros-system-e2e/repo
+          OUROBOROS_DATA_DIR: ${{ runner.temp }}/ouroboros-system-e2e/data
+          OUROBOROS_SETTINGS_PATH: ${{ runner.temp }}/ouroboros-system-e2e/data/settings.json
+        run: python -m pytest tests/system_e2e/ -o addopts="" -q
+      # The cancellation E-suite mock lane (18 scenarios + 4 mock-only) ran only on
+      # operator hosts before 7.0; on the same isolated roots it is keyless too
+      # (owner decision, batch №13 item 16, 2026-09-02).
+      - name: Run the cancellation E-suite mock lane
+        env:
+          OUROBOROS_E2E_CANCEL: mock
+          OUROBOROS_APP_ROOT: ${{ runner.temp }}/ouroboros-e2e-cancel/app
+          OUROBOROS_REPO_DIR: ${{ runner.temp }}/ouroboros-e2e-cancel/repo
+          OUROBOROS_DATA_DIR: ${{ runner.temp }}/ouroboros-e2e-cancel/data
+          OUROBOROS_SETTINGS_PATH: ${{ runner.temp }}/ouroboros-e2e-cancel/data/settings.json
+        run: python -m pytest tests/test_e2e_cancellation_scenarios.py -o addopts="" -q
+
+  # ──────────────────────────────────────────────────────────────────
+  # Scheduled (paid): the LIVE E2E stand (devtools/e2e_live/run_live_lanes.py)
+  # exactly as the operator runs it — a clean detached seed of the checked-out
+  # commit, one isolated real server per lane, a real OpenRouter key, the
+  # post-task evolution cycle with its re-exec restart (--self-mod), the same
+  # flag set as the operator launcher minus the run size. Two triggers only,
+  # never push, PR or tag: (1) a dispatch that OPTS IN through the `e2e_live`
+  # input — a plain `gh workflow run CI` (the pre-tag matrix) never runs this
+  # lane; (2) the nightly 03:17 UTC cron (its own cron string, see the schedule
+  # block). A scheduled run executes the workflow file of the DEFAULT branch
+  # (main, the promoted release line) and reports that branch in
+  # github.sha/github.ref, so the nightly checks out and seeds the `ouroboros`
+  # branch TIP — the development line the nightly is meant to certify — while
+  # a dispatch seeds the dispatched github.sha; the manifest's seed block names
+  # the resolved commit either way. The key is the repository secret
+  # OUROBOROS_E2E_LIVE_OPENROUTER_KEY
+  # (the owner creates it; nothing in this repo writes a secret to GitHub):
+  # without it the job is SKIPPED honestly — one step-summary line, exit 0 —
+  # never red and never a pretend run. The secret context is illegal inside
+  # `if:`, so the presence gate is the job-level non-secret env
+  # HAS_E2E_LIVE_KEY (the same shape as HAS_APPLE_SIGNING in `build`).
+  #
+  # Run size — the stand's own admission arithmetic, computed from the code at
+  # this base (devtools/e2e_live/run_live_lanes.py `RunBudget.reservation`):
+  #   reservation(attempt) = max(0.01, per_task_usd x (root_tasks + 1 if --self-mod and the scenario absorbs else root_tasks))
+  #   root_tasks           = 1 for SM1 and SW1, 2 for SK1 (scenarios.py); --self-mod
+  #                          adds one root for the post-task evolution cycle of the
+  #                          scenario that absorbs (SM1; SW1/SK1 pin promotion off)
+  # and an attempt is admitted only while spent + reserved(in flight) +
+  # reservation <= --total-budget; one that can never fit is recorded not_run
+  # and fails the verdict. Worst case (every attempt spends its whole
+  # reservation) the full operator set SM1,SW1,SK1 x3 with --self-mod needs
+  # per_task x (2 + 1 + 2) x 3 = 15 x per_task, and the product's default
+  # per-task cap (settings_defaults OUROBOROS_PER_TASK_COST_USD = 50) makes a
+  # SINGLE SM1 attempt reserve 50 x (1 + 1) = $100 > $30: nothing would be
+  # admissible. So the fence is --per-task-usd 15 = 30 / 2, the largest value
+  # under which one single-root self-mod attempt fits: SM1 x1 reserves exactly
+  # 15 x (1 + 1) = $30 = the cap (the full set: 15 x 15 = $225). Any second
+  # attempt (SW1 $15, SK1 15 x 2 = $30) cannot fit beside it by that rule,
+  # hence ONE lane, ONE attempt, SM1 only — the largest feasible subset,
+  # named in the job title. Only if SM1's evolution root ever left the rule
+  # would SM1 + SW1 (15 + 15 = 30) become feasible together: revisit
+  # --scenarios then, keep the arithmetic here (the feasibility test and the
+  # summary-header pin re-derive it from the code and trip on a rule change).
+  # --min-credit-usd defaults to --total-budget: the key needs >= $30 headroom
+  # (min of key limit remaining and account credits) or the stand refuses
+  # with a typed credit_preflight refusal in run_manifest.json.
+  #
+  # Runner shape: the commit gate's hermetic pytest pass runs INSIDE the lane
+  # server with OUROBOROS_PREFLIGHT_TEST_WORKERS = 16 // lanes = 16 workers
+  # on a 4-vCPU runner (slower than the operator host, not wrong), the node
+  # lane of that gate needs node 22, and the UI probe / the agent's browser
+  # tool need Playwright Chromium — the same provisioning as ui-smoke, minus
+  # webkit. The run root is under runner.temp (the stand refuses a root inside
+  # the repo), the lane settings file (0600, carries the key) is NEVER
+  # uploaded: the artifact globs name the manifest, the result index, each
+  # lane's result.json and its screenshots only — no `lanes/**`.
+  # ──────────────────────────────────────────────────────────────────
+  e2e-live:
+    name: e2e-live (SM1 x1 — largest subset feasible under the $30 cap)
+    if: |
+      (github.event_name == 'workflow_dispatch' && github.event.inputs.e2e_live == 'true')
+      || (github.event_name == 'schedule' && github.event.schedule == '17 3 * * *')
+    runs-on: ubuntu-latest
+    # One SM1 lane: the task (--task-timeout 2400), the self-mod evolution cycle
+    # as a second root task, the absorb wait with the re-exec restart, and two
+    # hermetic preflight suites on a 4-vCPU runner — well inside this bound.
+    timeout-minutes: 150
+    env:
+      HAS_E2E_LIVE_KEY: ${{ secrets.OUROBOROS_E2E_LIVE_OPENROUTER_KEY != '' && 'true' || 'false' }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          # Nightly: the `ouroboros` branch tip (the schedule itself fires on
+          # the default branch, main); dispatch: the dispatched sha.
+          ref: ${{ github.event_name == 'schedule' && 'ouroboros' || github.sha }}
+          # Full history + tags: the seed's `git describe` provenance and the
+          # SM1 release admission gate read them.
+          fetch-depth: 0
+          # The model under test executes real code and commits inside its
+          # lane clone; it must never find GITHUB_TOKEN in .git/config.
+          persist-credentials: false
+      - name: Report the missing secret (skip, not red)
+        if: env.HAS_E2E_LIVE_KEY != 'true'
+        run: |
+          echo "skipped: secret OUROBOROS_E2E_LIVE_OPENROUTER_KEY not configured" >> "$GITHUB_STEP_SUMMARY"
+          echo "skipped: secret OUROBOROS_E2E_LIVE_OPENROUTER_KEY not configured"
+      - uses: ./.github/actions/setup-python-env
+        if: env.HAS_E2E_LIVE_KEY == 'true'
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
+        if: env.HAS_E2E_LIVE_KEY == 'true'
+        with:
+          node-version: '22'
+      - name: Install the UI probe browser (Playwright Chromium)
+        if: env.HAS_E2E_LIVE_KEY == 'true'
+        run: python -m playwright install --with-deps chromium
+      # The key reaches the stand by NAME (--key-env) and this step's env only;
+      # the stand redacts the run-level settings template and writes the value
+      # solely into the lane's 0600 settings file, disclosed by fingerprint.
+      # --seed HEAD is the checked-out commit (the ouroboros tip on schedule,
+      # the dispatched sha otherwise — GITHUB_SHA names the default branch on
+      # a schedule); the stand resolves it and records the sha in the manifest.
+      - name: Run the live E2E stand (SM1 x1, $30 cap, self-mod)
+        if: env.HAS_E2E_LIVE_KEY == 'true'
+        env:
+          OUROBOROS_E2E_LIVE_OPENROUTER_KEY: ${{ secrets.OUROBOROS_E2E_LIVE_OPENROUTER_KEY }}
+        run: |
+          python -m devtools.e2e_live.run_live_lanes \
+            --source-repo "$GITHUB_WORKSPACE" --seed HEAD --out "$RUNNER_TEMP/e2e_live" \
+            --scenarios SM1 --attempts 1 --pass-of 1 --lanes 1 \
+            --total-budget 30 --per-task-usd 15 --task-timeout 2400 --self-mod \
+            --key-env OUROBOROS_E2E_LIVE_OPENROUTER_KEY --watch-interval 60
+      # The manifest is written at admission and finalized on EVERY exit path,
+      # so the summary reads the run's own record — and must render EVERY shape
+      # of it: `extra.scenarios` is the requested id LIST until the verdict dict
+      # is written on completion, so a typed refusal (credit_preflight,
+      # key_unusable, seed_materialize) or a crash leaves the list; verdicts
+      # render only for a dict, the refusal/error fields otherwise. The step
+      # reports, it never fails on its own: the stand's exit is the verdict.
+      - name: Summarize the run
+        if: always() && env.HAS_E2E_LIVE_KEY == 'true'
+        run: |
+          python - <<'PY'
+          import json, os, pathlib
+          manifest = pathlib.Path(os.environ["RUNNER_TEMP"]) / "e2e_live" / "run_manifest.json"
+          lines = ["## e2e-live: SM1 x1 — the largest subset feasible under the $30 cap "
+                   "(per-task $15 x (roots + the self-mod evolution root): SM1 x1 = $30; "
+                   "the full SM1/SW1/SK1 x3 set needs $225)"]
+          try:
+              if not manifest.exists():
+                  lines.append("no run_manifest.json: the stand never reached admission (see the step log)")
+              else:
+                  doc = json.loads(manifest.read_text(encoding="utf-8"))
+                  extra = doc.get("extra") if isinstance(doc.get("extra"), dict) else {}
+                  seed = doc.get("seed") if isinstance(doc.get("seed"), dict) else {}
+                  lines.append(f"outcome: {extra.get('outcome')} (exit {extra.get('exit_code')}); "
+                               f"seed {extra.get('seed_describe') or extra.get('seed_head') or seed.get('resolved_sha') or extra.get('seed_ref')}; "
+                               f"model {extra.get('effective_model') or 'not applied'}")
+                  # The run's OWN reservations come from the manifest's budget_preflight
+                  # (the stand's ledger at admission), never from arithmetic kept in text.
+                  preflight = extra.get("budget_preflight")
+                  if isinstance(preflight, dict) and isinstance(preflight.get("scenarios"), list):
+                      lines.append("reservations: " + "; ".join(
+                          f"{row.get('scenario')} ${float(row.get('reservation_usd') or 0):.2f} x {row.get('attempts')} "
+                          f"({row.get('root_tasks')} root{' + evolution' if preflight.get('self_mod') else ''})"
+                          for row in preflight["scenarios"] if isinstance(row, dict))
+                          + f"; worst case ${float(preflight.get('worst_case_usd') or 0):.2f} of cap "
+                            f"${float(preflight.get('cap_usd') or 0):.2f} at per-task ${float(preflight.get('per_task_usd') or 0):.2f}")
+                  for key in ("refusal", "error", "credit_preflight", "stop_reason"):
+                      if extra.get(key):
+                          lines.append(f"{key}: {json.dumps(extra[key], ensure_ascii=False, default=str)}")
+                  scenarios = extra.get("scenarios")
+                  if isinstance(scenarios, dict):
+                      for sid, verdict in scenarios.items():
+                          lines.append(f"{sid}: {json.dumps(verdict, ensure_ascii=False, default=str)}")
+                  else:
+                      lines.append(f"no verdicts (the run did not complete); requested scenarios: {scenarios}")
+                  budget = extra.get("budget")
+                  if isinstance(budget, dict) and budget:
+                      lines.append(f"budget: spent ${float(budget.get('spent_usd') or 0):.2f} of cap "
+                                   f"${float(budget.get('cap_usd') or 0):.2f}; refusals {len(budget.get('refusals') or [])}")
+                  if extra.get("self_mod"):
+                      lines.append(f"self_mod: {json.dumps(extra['self_mod'], ensure_ascii=False, default=str)}")
+          except Exception as exc:  # the summary reports; it never fails the job on its own
+              lines.append(f"summary could not read run_manifest.json ({type(exc).__name__}: {exc})")
+          text = "\n".join(lines) + "\n"
+          print(text, end="")
+          path = os.environ.get("GITHUB_STEP_SUMMARY")
+          if path:
+              with open(path, "a", encoding="utf-8") as fh:
+                  fh.write(text)
+          PY
+      - name: Upload run artifacts (manifest, lane results, screenshots)
+        if: always() && env.HAS_E2E_LIVE_KEY == 'true'
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: e2e-live-run
+          path: |
+            ${{ runner.temp }}/e2e_live/run_manifest.json
+            ${{ runner.temp }}/e2e_live/result_index.jsonl
+            ${{ runner.temp }}/e2e_live/lanes/*/result.json
+            ${{ runner.temp }}/e2e_live/lanes/*/shots/*.png
+          if-no-files-found: warn
+          retention-days: 30
+
+  # ──────────────────────────────────────────────────────────────────
   # Tier 3: Build & Release (tag push only)
   # ──────────────────────────────────────────────────────────────────
   release-preflight:
     if: startsWith(github.ref, 'refs/tags/v')
-    needs: [full-test, integration-test]
+    # system-e2e-mock joined the release bar with the v7 campaign (batch №13 item 4).
+    needs: [full-test, integration-test, system-e2e-mock]
     runs-on: ubuntu-latest
     outputs:
       is_prerelease: ${{ steps.release_meta.outputs.is_prerelease }}
@@ -463,6 +772,11 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: '3.10'
+      - name: v7next adoption release bar
+        # The campaign ledger's release gate (every transplanted delta done or an
+        # explicit post-release row with its authority) runs on the tag path itself,
+        # not only inside the pytest wrapper (batch №13 item 4).
+        run: python scripts/v7next_adoption.py --release
       - name: Validate tag matches VERSION
         id: release_meta
         run: |
@@ -516,7 +830,6 @@ jobs:
             syft_binary: syft.exe
     runs-on: ${{ matrix.os }}
     env:
-      OUROBOROS_MANAGED_SOURCE_BRANCH: ouroboros
       OUROBOROS_RELEASE_TAG: ${{ github.ref_name }}
       # Only non-secret booleans are job-wide. Credential values are exposed
       # to the exact first-party steps that import, sign, or notarize.
@@ -535,6 +848,32 @@ jobs:
           # themselves, not just the refs.
           fetch-depth: 0
           fetch-tags: true
+      # The embedded repo.bundle records the managed source branch the packaged
+      # app updates from, and scripts/build_repo_bundle.py refuses a HEAD that
+      # branch does not contain. A release tag on the live line resolves to
+      # `ouroboros`; a pre-release cut from another branch (the v7 campaign's
+      # `ouroboros_v7next`, owner batch №13 item 14) resolves to the ONE remote
+      # branch that contains the tag — ambiguity or none fails the build loudly
+      # rather than embedding a branch the tag is not on.
+      - name: Resolve the managed source branch of this tag
+        shell: bash
+        run: |
+          set -euo pipefail
+          if git merge-base --is-ancestor HEAD origin/ouroboros; then
+            branch=ouroboros
+          else
+            # Portable across bash 3.2 (macOS runners): no bash-4-only array builtins.
+            branches="$(git branch -r --contains HEAD --format='%(refname:short)' \
+              | sed -n 's#^origin/##p' | grep -v '^HEAD$' || true)"
+            count="$(printf '%s\n' "$branches" | sed '/^$/d' | wc -l | tr -d ' ')"
+            if [ "$count" != "1" ]; then
+              echo "managed source branch for ${GITHUB_REF_NAME}: expected exactly one remote branch containing HEAD, got: ${branches:-none}" >&2
+              exit 1
+            fi
+            branch="$(printf '%s\n' "$branches" | sed '/^$/d')"
+          fi
+          echo "managed source branch: $branch"
+          echo "OUROBOROS_MANAGED_SOURCE_BRANCH=$branch" >> "$GITHUB_ENV"
 
       # Defense-in-depth: re-fetch tag objects explicitly. On tag-push
       # runs the action sometimes creates a local lightweight-style ref

@@ -146,6 +146,14 @@ def _review_exception_projection(
     elif malformed_capture:
         http_status = None
         failure_custody.pop("provider_status_code", None)
+    if int(failure_custody.get("native_rounds") or 0) > 0 and not history.dispatched:
+        # The executor's own proven fact: a native episode that ran paid rounds
+        # was dispatched whatever the exception's capture says — a mid-episode
+        # deadline or transport end must never read as a $0 retryable row. The
+        # rounds that ran are SETTLED ledger rows; only an exception's own
+        # positive capture may say the last send's outcome is unknown.
+        history.dispatched = True
+        history.capture_state = "settled"
     history.preserve(failure_custody, capture_state)
     dispatched = history.dispatched
     if history.unknown_outcome_seen:
@@ -220,6 +228,8 @@ def _worker_exception_operation_state(
             "session_target_unparsable", "session_route_unconfigured",
             "custody_root_missing", "session_root_missing",
             "unknown_review_route", "review_route_not_implemented",
+            # Native tool-round refusals raised BEFORE the first provider send.
+            "native_inspection_unavailable", "native_bound_below_first_send",
         }:
             return "not_dispatched"
         return "settled"

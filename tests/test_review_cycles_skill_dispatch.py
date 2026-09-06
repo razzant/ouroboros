@@ -536,3 +536,37 @@ def test_bound_api_paid_stamp_waits_for_durable_sync_and_async_dispatch(tmp_path
 
     assert asyncio.run(_run())["usage"]["prompt_tokens"] == 0
     assert writes == ["paid", "async"]
+
+
+def test_the_cross_skill_paid_count_is_byte_bounded(tmp_path, monkeypatch):
+    """Audit #14-6b: ``load_history`` claims "every reader is byte-bounded",
+    but the task-scoped count still scanned EVERY installed skill's
+    review_history.jsonl WHOLE — the one read that multiplies the cost by the
+    number of skills. It now uses the same tail window as the rest of the
+    family, with the family's disclosed residual: a row aged past the window
+    under-counts, it never over-blocks."""
+    from ouroboros import skill_review_history
+    from ouroboros.skill_review_cycles import count_paid_skill_review_cycles
+    from ouroboros.skill_review_history import append_history_once
+
+    drive = pathlib.Path(tmp_path)
+    (drive / "logs").mkdir(parents=True, exist_ok=True)
+
+    def _row(skill, wave, ancient=False):
+        return {
+            "ts": "t", "status": "clean", "paid": True,
+            "content_hash": "h", "group_id": "task:root-b:" + skill,
+            "root_task_id": "root-b", "job_id": wave, "wave_id": wave,
+            "usage_attribution_schema": "physical_attempt_v1",
+            "padding": "x" * 4000 if ancient else "",
+        }
+
+    for skill in ("alpha", "beta"):
+        assert append_history_once(drive, skill, _row(skill, f"{skill}-ancient", ancient=True))
+        assert append_history_once(drive, skill, _row(skill, f"{skill}-recent"))
+
+    assert count_paid_skill_review_cycles(drive, "alpha", "task:root-b:alpha") == 4
+    # Shrink the window below the ancient rows: they fall out of the read for
+    # BOTH skills, proving the count no longer scans the files whole.
+    monkeypatch.setattr(skill_review_history, "_DETAIL_LOOKUP_MAX_BYTES", 1024)
+    assert count_paid_skill_review_cycles(drive, "alpha", "task:root-b:alpha") == 2

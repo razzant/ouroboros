@@ -188,6 +188,7 @@ def test_presence_cancel_work_accepts_only_same_binding_and_conversation(monkeyp
     atomic_write_json(
         tmp_path / "task_results" / "presence-work-1.json",
         {
+            "_schema_version": 1,
             "task_id": "presence-work-1",
             "status": "running",
             "metadata": {

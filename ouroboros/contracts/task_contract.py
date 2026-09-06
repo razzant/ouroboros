@@ -187,7 +187,10 @@ def normalize_delegation_budget(value: Any) -> Dict[str, Any]:
     return budget
 
 
-VALID_IMPROVEMENT_POLICIES = ("fixed", "adaptive", "until_deadline")
+# ABI 7.0 (owner Q10=A): the legacy ``until_deadline`` policy alias and the
+# never-consumed ``stall_rounds_threshold`` knob are REMOVED. An unknown
+# policy (including the retired spelling) normalizes to "fixed".
+VALID_IMPROVEMENT_POLICIES = ("fixed", "adaptive")
 
 
 def _opt_pct(value: Any) -> Any:
@@ -230,7 +233,7 @@ def normalize_budget_profile(value: Any) -> Dict[str, Any]:
 
     ``improvement_policy``: fixed (default; the configured/max pass cap decides) |
     adaptive (passes stop early when the remaining window can no longer fit a
-    review comfortably) | until_deadline (passes bounded ONLY by the time gate).
+    review comfortably).
 
     ``cost_hard_stop_pct`` (v6.56.0, additive): the in-task cost hard-stop as a
     percentage of the budget remaining at task start. None -> the historical
@@ -250,7 +253,6 @@ def normalize_budget_profile(value: Any) -> Dict[str, Any]:
         "improvement_policy": policy if policy in VALID_IMPROVEMENT_POLICIES else "fixed",
         "max_improvement_passes": _opt_nonneg_int(v.get("max_improvement_passes")),
         "reserve_finalization_pct": _opt_pct(v.get("reserve_finalization_pct")),
-        "stall_rounds_threshold": _opt_nonneg_int(v.get("stall_rounds_threshold")),
         "cost_hard_stop_pct": _opt_cost_hard_stop_pct(v.get("cost_hard_stop_pct")),
     }
 

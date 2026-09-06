@@ -33,7 +33,11 @@ class ElementStub {
         this.value = '';
         this.hidden = false;
         this.disabled = false;
-        this.isConnected = true;
+        // Detached until mounted under the connected mount (insertBefore /
+        // innerHTML propagate): a stub that reports every fresh node as
+        // connected hides the history-rebuild card path, whose pass 2 mounts a
+        // replayed root card only when `!rec.root.isConnected`.
+        this.isConnected = false;
         this.offsetParent = {};
         this.offsetHeight = 0;
         this.scrollTop = 0;
@@ -65,6 +69,7 @@ class ElementStub {
             }
             node.parentNode = this;
             node.parentElement = this;
+            node.isConnected = this.isConnected;
             this.children.push(node);
             if (node.id) this.ownerDocument.byId.set(node.id, node);
         }
@@ -92,7 +97,8 @@ class ElementStub {
         if (index >= 0) this.children.splice(index, 0, node); else this.children.push(node);
         node.parentNode = this;
         node.parentElement = this;
-        node.isConnected = true;
+        const connect = (el, value) => { el.isConnected = value; for (const child of el.children || []) connect(child, value); };
+        connect(node, this.isConnected);
         this.scrollHeight = this.children.length * 20;
         return node;
     }
@@ -163,6 +169,7 @@ function installDom(fetchImpl = async () => ({ ok: true, json: async () => ({ ac
         addEventListener() {}, removeEventListener() {},
     };
     const mount = new ElementStub('div', document);
+    mount.isConnected = true;
     document.byId.set('content', mount);
     const storage = new Map();
     globalThis.document = document;
@@ -997,4 +1004,169 @@ test('history replay keeps an ownerless duplicate acknowledgement without a task
         instance?.destroy();
         restoreDom(prior);
     }
+});
+test('an alias-free subagent terminal keeps the honest amount, live and on reload', async () => {
+    // Stage-2 regression: since ABI-3 the write seam strips the retired
+    // `cost_usd*` aliases (cost_projection.with_cost_aliases), so a terminal
+    // frame carries ONLY the honest names — while the card's cost whitelist
+    // materializes the retired names as own properties valued `undefined`.
+    // The shared pair resolver read that as "the deprecated name is present"
+    // and answered null, so a child card that already showed `up to $0.99`
+    // froze on `cost pending` (sticky, and the terminal reading is final).
+    let historyRows = [];
+    const { prior, mount } = installDom(async (url) => {
+        if (String(url).startsWith('/api/chat/history')) {
+            return { ok: true, json: async () => ({ messages: historyRows, window: { complete: true } }) };
+        }
+        return { ok: true, json: async () => ({ active_direct_turns: [] }) };
+    });
+    const handlers = new Map();
+    const ws = {
+        on(type, fn) { handlers.set(type, fn); return () => handlers.delete(type); },
+        isConnected: () => true,
+        send() {},
+    };
+    let generation = 0;
+    const stateSnapshots = {
+        begin: () => ({ generation: ++generation, requestedAt: Date.now() }),
+        isCurrent: () => true,
+        apply() {},
+    };
+    // Subagent cards live inside their parent card, so walk the tree.
+    const findCard = (taskId) => {
+        const walk = (node) => {
+            if (node.dataset?.taskId === taskId) return node;
+            for (const child of node.children || []) {
+                const hit = walk(child);
+                if (hit) return hit;
+            }
+            return null;
+        };
+        return walk(globalThis.document.byId.get('chat-messages'));
+    };
+    const costText = (taskId) => findCard(taskId)?.querySelector('[data-live-meta]')?.innerHTML || '';
+    let instance;
+    try {
+        instance = createChatInstance({
+            ws,
+            state: { activePage: 'chat', projectChatIds: new Set(), unreadCount: 0 },
+            updateUnreadBadge() {}, stateSnapshots, chatId: 2, idPrefix: 'chat', mountEl: mount,
+            asPanel: true,
+        });
+        handlers.get('chat')({
+            chat_id: 2, role: 'assistant', is_progress: true, content: 'child working',
+            ts: '2026-09-02T00:00:00Z', task_id: 'child-1', parent_task_id: 'root-1',
+            subagent_task_id: 'child-1', delegation_role: 'subagent',
+            subagent_event: 'running', subagent_role: 'coder', model: 'm',
+            accounted_upper_bound_usd_with_children: 0.99,
+            cost_accounting_status: 'available', cost_final: false,
+        });
+        assert.match(costText('child-1'), /up to \$0\.99/, 'honest progress frame shows the ceiling');
+        // Same class, other reader: a terminal frame with NO accounting evidence
+        // must not touch the card's cost at all. The whitelist materializes all
+        // twelve names, so the evidence test has to mean a VALUE too — otherwise
+        // a costless task_done outranked the live ceiling on recency alone.
+        handlers.get('log')({ chat_id: 2, data: {
+            type: 'task_done', task_id: 'child-1', status: 'completed',
+            ts: '2026-09-02T00:00:05Z',
+        } });
+        assert.match(costText('child-1'), /up to \$0\.99/, 'a costless terminal keeps the ceiling');
+        handlers.get('log')({ chat_id: 2, data: {
+            type: 'task_done', task_id: 'child-1', status: 'completed',
+            ts: '2026-09-02T00:00:10Z',
+            accounted_upper_bound_usd_with_children: 0.99,
+            cost_accounting_status: 'available', cost_final: true,
+        } });
+        assert.match(costText('child-1'), /\$0\.99/, 'the alias-free terminal settles the amount');
+        assert.doesNotMatch(costText('child-1'), /cost pending/);
+        // An upstream producer that still MIRRORS the retired alias keeps
+        // winning its pair (deprecated-wins is the one precedence rule).
+        handlers.get('log')({ chat_id: 2, data: {
+            type: 'task_done', task_id: 'child-1', status: 'completed',
+            ts: '2026-09-02T00:00:20Z', cost_usd_with_children: 1.25,
+            cost_accounting_status: 'available', cost_final: true,
+        } });
+        assert.match(costText('child-1'), /\$1\.25/, 'a mirrored legacy alias still reads');
+        // Reload replays the same terminal routing for a fresh child card.
+        historyRows = [
+            {
+                chat_id: 2, role: 'assistant', is_progress: true, content: 'child working',
+                ts: '2026-09-02T01:00:00Z', task_id: 'child-2', parent_task_id: 'root-2',
+                subagent_task_id: 'child-2', delegation_role: 'subagent',
+                subagent_event: 'running', subagent_role: 'coder', model: 'm',
+            },
+            {
+                chat_id: 2, role: 'assistant', text: 'child done', content: 'child done',
+                ts: '2026-09-02T01:00:10Z', task_id: 'child-2',
+                task_terminal_status: 'completed',
+                accounted_upper_bound_usd_with_children: 0.5,
+                cost_accounting_status: 'available', cost_final: true,
+            },
+        ];
+        handlers.get('open')({ previouslyConnected: true });
+        await new Promise((resolve) => setTimeout(resolve, 25));
+        assert.match(costText('child-2'), /\$0\.50/, 'reload keeps the replayed terminal amount');
+        assert.doesNotMatch(costText('child-2'), /cost pending/);
+    } finally {
+        instance?.destroy();
+        restoreDom(prior);
+    }
+});
+test('a stopped direct turn replays its persisted terminal word, never a blanket Done', async () => {
+    // The pipeline's closed-phase outbox stamp is persisted on the chat row
+    // (message_bus copies task_terminal_status) and replay reads it as the
+    // card's phase: a "Stop now" turn settles `failed` under
+    // owner_requested_finalization, so its final row must not read Done.
+    const replay = async (terminalStatus) => {
+        const rows = [
+            {
+                // The latest progress row replays the durable row's truth (gateway/history
+                // _annotate_terminal_task_truth): the stopped turn settled `failed`.
+                chat_id: 2, role: 'system', is_progress: true, content: 'listing the root',
+                ts: '2026-09-05T00:00:00Z', task_id: `stopped-${terminalStatus}`,
+                task_terminal_status: 'failed', reason_code: 'owner_requested_finalization',
+                outcome_axes: { lifecycle: { status: 'failed' }, execution: { status: 'failed' } },
+                tool_calls: 3, rounds: 4,
+            },
+            {
+                // The final row carries the pipeline's outbox stamp verbatim.
+                chat_id: 2, role: 'assistant', text: 'Stopped: listed the root so far.',
+                content: 'Stopped: listed the root so far.', ts: '2026-09-05T00:00:10Z',
+                task_id: `stopped-${terminalStatus}`, task_terminal_status: terminalStatus,
+            },
+        ];
+        const { prior, mount } = installDom(async (url) => {
+            if (String(url).startsWith('/api/chat/history')) {
+                return { ok: true, json: async () => ({ messages: rows }) };
+            }
+            return { ok: true, json: async () => ({ active_direct_turns: [] }) };
+        });
+        const ws = { on() { return () => {}; }, isConnected: () => true, send() {} };
+        let generation = 0;
+        const stateSnapshots = {
+            begin: () => ({ generation: ++generation, requestedAt: Date.now() }),
+            isCurrent: () => true, apply() {},
+        };
+        let instance;
+        try {
+            instance = createChatInstance({
+                ws, state: { activePage: 'chat', projectChatIds: new Set(), unreadCount: 0 },
+                updateUnreadBadge() {}, stateSnapshots, chatId: 2, idPrefix: 'chat', mountEl: mount,
+                asPanel: true,
+            });
+            await instance.refreshHistory({ revision: 1 });
+            await new Promise((resolve) => setTimeout(resolve, 25));
+            const messages = globalThis.document.byId.get('chat-messages');
+            const card = messages.children.find((node) => node.classList.contains('chat-live-card')
+                && node.dataset.taskId === `stopped-${terminalStatus}`);
+            assert.ok(card, 'the replayed final row minted its task card');
+            assert.equal(card.dataset.finished, '1');
+            return card.querySelector('[data-live-phase]')?.textContent;
+        } finally {
+            instance?.destroy();
+            restoreDom(prior);
+        }
+    };
+    assert.equal(await replay('failed'), 'Failed', 'the stopped turn keeps its durable terminal word');
+    assert.equal(await replay('completed'), 'Done', 'the old blanket stamp is exactly what flipped the card');
 });

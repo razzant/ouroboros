@@ -553,7 +553,8 @@ class TestRunScopeReviewFailClosed:
             calls.append(bool(kwargs.get("compact")))
             return "COMPACT ATLAS"
 
-        monkeypatch.setattr(mod, "_gather_scope_packs", fake_gather)
+        scope_pack = _get_module("ouroboros.tools.scope_review_pack")
+        monkeypatch.setattr(scope_pack, "_gather_scope_packs", fake_gather)
 
         prompt, omitted = mod._build_scope_prompt(tmp_path, "test commit")
 
@@ -590,7 +591,8 @@ class TestRunScopeReviewFailClosed:
             calls.append(compact)
             raise mod._ScopeAtlasNotAssembled({"estimated_total_tokens": 900_001})
 
-        monkeypatch.setattr(mod, "_gather_scope_packs", fake_gather)
+        scope_pack = _get_module("ouroboros.tools.scope_review_pack")
+        monkeypatch.setattr(scope_pack, "_gather_scope_packs", fake_gather)
         monkeypatch.setattr(mod, "estimate_tokens", lambda _text: 800_000)
 
         prompt, status = mod._build_scope_prompt(tmp_path, "test commit")
@@ -632,7 +634,8 @@ class TestRunScopeReviewFailClosed:
 
         monkeypatch.setattr(mod, "capture_staged_diff", fake_capture)
         monkeypatch.setattr(mod, "_effective_scope_input_limit", lambda **_kw: 100_000)
-        monkeypatch.setattr(mod, "_gather_scope_packs", lambda *_a, **_k: "COMPACT ATLAS")
+        scope_pack = _get_module("ouroboros.tools.scope_review_pack")
+        monkeypatch.setattr(scope_pack, "_gather_scope_packs", lambda *_a, **_k: "COMPACT ATLAS")
 
         prompt, status = mod._build_scope_prompt(tmp_path, "test commit")
 
@@ -755,7 +758,8 @@ class TestRunScopeReviewFailClosed:
         subprocess.run(["git", "add", "."], cwd=str(tmp_path), capture_output=True)
 
         mod = _get_module("ouroboros.tools.scope_review")
-        monkeypatch.setattr(mod, "_gather_scope_packs", lambda *_a, **_k: "TINY ATLAS")
+        scope_pack = _get_module("ouroboros.tools.scope_review_pack")
+        monkeypatch.setattr(scope_pack, "_gather_scope_packs", lambda *_a, **_k: "TINY ATLAS")
         monkeypatch.setattr(
             mod, "_effective_scope_input_limit", lambda **_kw: 30_000
         )
@@ -1526,8 +1530,10 @@ class TestGitWiring:
         source = inspect.getsource(git._run_parallel_review)
         prepare_triad = source.find("_prepare_unified_review(")
         prepare_scope = source.find("_prepare_scope_rows(")
-        submit_triad = source.find("pool.submit(_dispatch_unified_review")
-        submit_scope = source.find("pool.submit(_run_scope")
+        # Each submission runs under a copy of the admitting context (one fence
+        # for admission and reservation); the anchors name the submitted seam.
+        submit_triad = source.find("copy_context().run, _dispatch_unified_review")
+        submit_scope = source.find("copy_context().run, _run_scope")
         result_triad = source.find("triad_fut.result()")
         result_scope = source.find("scope_fut.result()")
         for position in (prepare_triad, prepare_scope, submit_triad, submit_scope,
@@ -2144,11 +2150,18 @@ class TestSharedLLMRouting:
         assert "requests.post" not in source
         assert "httpx" not in source
 
-    def test_triad_emits_llm_usage_events(self):
-        """Triad review must use the shared review usage emitter."""
-        mod = _get_module("ouroboros.tools.review")
-        source = inspect.getsource(mod._multi_model_review_async)
-        assert "emit_review_usage" in source
+    def test_triad_emits_llm_usage_once_via_substrate(self):
+        """Triad usage is emitted exactly ONCE, by the shared review substrate.
+
+        The former job-level re-emit in _multi_model_review_async doubled every
+        triad call in llm_usage telemetry and mislabelled a delegated session's
+        provider: the substrate per-slot emission is the single source, the
+        same shape scope review already received.
+        """
+        source = inspect.getsource(_get_module("ouroboros.tools.review"))
+        assert 'source="review"' not in source  # no job-level re-emit
+        substrate = inspect.getsource(_get_module("ouroboros.review_substrate"))
+        assert 'source=f"review_substrate:{request.surface}"' in substrate
         helper = inspect.getsource(_get_module("ouroboros.tools.review_helpers").emit_review_usage)
         assert "llm_usage" in helper
         assert "emit_review_event" in helper
@@ -3805,3 +3818,179 @@ def test_expired_evidence_is_re_sourced_instead_of_wedging_the_process(monkeypat
         [], scope_model_id=model, result_kwargs={},
     )
     assert result is None, "a healthy install must not block its own commits after 24h"
+
+
+class TestTriadPackExclusions:
+    """The triad pack's disclosed exclusion classes (review economics, D-06a).
+
+    The builder takes the advisory seam's ``exclude_paths`` shape and marks an
+    excluded path ONCE; ``triad_pack_exclusions`` names exactly two classes the
+    host can back — span-only release carriers on a VERSION-staged commit
+    (``release_sync`` carrier SSOT) and governance docs byte-identical to the
+    inlined prefix copy — and returns the disclosure note the caller appends."""
+
+    def test_exclude_paths_withhold_the_text_with_one_marker(self, tmp_path):
+        mod = _get_module("ouroboros.tools.review_helpers")
+        # Oversize AND excluded: the exclusion marker wins, never two markers.
+        (tmp_path / "uv.lock").write_bytes(b"x" * (1_048_576 + 1))
+        (tmp_path / "a.py").write_text("print('kept')", encoding="utf-8")
+        pack, omitted = mod.build_touched_file_pack(
+            tmp_path, ["uv.lock", "a.py"], exclude_paths={"uv.lock"})
+        assert omitted == ["uv.lock"]
+        assert pack.count("### uv.lock") == 1
+        assert "withheld by the caller's exclusion note" in pack
+        assert "byte limit" not in pack and "xxxx" not in pack
+        assert "print('kept')" in pack
+        # The default is byte-identical to the pre-exclusion builder.
+        pack_default, omitted_default = mod.build_touched_file_pack(tmp_path, ["a.py"])
+        assert omitted_default == [] and "print('kept')" in pack_default
+
+    @staticmethod
+    def _carrier_repo(tmp_path, *, with_lock=True):
+        repo = tmp_path / "repo"
+        repo.mkdir()
+        subprocess.run(["git", "init", "-q"], cwd=str(repo), check=True)
+        subprocess.run(["git", "config", "user.email", "t@t"], cwd=str(repo), check=True)
+        subprocess.run(["git", "config", "user.name", "t"], cwd=str(repo), check=True)
+        (repo / "VERSION").write_text("1.0.0\n", encoding="utf-8")
+        (repo / "pyproject.toml").write_text(
+            '[project]\nname = "ouroboros"\nversion = "1.0.0"\n', encoding="utf-8")
+        if with_lock:
+            (repo / "uv.lock").write_text(_uv_lock_text("1.0.0"), encoding="utf-8")
+        (repo / "docs").mkdir()
+        (repo / "docs" / "ARCHITECTURE.md").write_text(
+            "# Ouroboros v1.0.0 — Architecture\n\nArchitecture body.\n", encoding="utf-8")
+        (repo / "docs" / "DEVELOPMENT.md").write_text("# DEV\n\nHandbook body.\n", encoding="utf-8")
+        (repo / "app.py").write_text("x = 1\n", encoding="utf-8")
+        subprocess.run(["git", "add", "-A"], cwd=str(repo), check=True)
+        subprocess.run(["git", "commit", "-qm", "base"], cwd=str(repo), check=True)
+        return repo
+
+    @staticmethod
+    def _staged_paths(repo):
+        out = subprocess.run(["git", "diff", "--cached", "--name-only"], cwd=str(repo),
+                             check=True, capture_output=True, text=True).stdout
+        return [line for line in out.splitlines() if line]
+
+    def test_span_only_carriers_and_prefix_duplicates_are_cut_on_a_version_bump(self, tmp_path):
+        mod = _get_module("ouroboros.tools.review_file_pack")
+        repo = self._carrier_repo(tmp_path)
+        (repo / "VERSION").write_text("1.0.1\n", encoding="utf-8")
+        (repo / "uv.lock").write_text(_uv_lock_text("1.0.1"), encoding="utf-8")
+        # pyproject: version bump PLUS a dependency edit outside its span.
+        (repo / "pyproject.toml").write_text(
+            '[project]\nname = "ouroboros"\nversion = "1.0.1"\ndependencies = ["httpx"]\n',
+            encoding="utf-8")
+        (repo / "docs" / "ARCHITECTURE.md").write_text(
+            "# Ouroboros v1.0.1 — Architecture\n\nArchitecture body.\n", encoding="utf-8")
+        (repo / "docs" / "DEVELOPMENT.md").write_text("# DEV\n\nHandbook body, revised.\n", encoding="utf-8")
+        (repo / "app.py").write_text("x = 2\n", encoding="utf-8")
+        subprocess.run(["git", "add", "-A"], cwd=str(repo), check=True)
+        paths = self._staged_paths(repo)
+        dev_text = (repo / "docs" / "DEVELOPMENT.md").read_text(encoding="utf-8")
+
+        excluded, note = mod.triad_pack_exclusions(
+            repo, paths, prefix_texts={"docs/DEVELOPMENT.md": dev_text, "docs/DESIGN.md": ""})
+
+        assert excluded == {"VERSION", "uv.lock", "docs/ARCHITECTURE.md", "docs/DEVELOPMENT.md"}
+        assert "pyproject.toml" not in excluded and "app.py" not in excluded
+        assert note.startswith("⚠️ PACK EXCLUSION NOTE: full text withheld for 4 touched file(s)")
+        assert "VERSION_CARRIER_SPANS" in note and "version_carrier_desyncs" in note
+        assert "uv.lock" in note and "byte-identical" in note and "docs/DEVELOPMENT.md" in note
+        # The pack renders the cut through the builder's own marker + omitted list.
+        pack, omitted = mod.build_touched_file_pack(repo, paths, exclude_paths=excluded)
+        assert set(omitted) == excluded
+        assert "httpx" in pack and "x = 2" in pack  # kept texts
+        assert "Handbook body, revised." not in pack and "editable" not in pack  # withheld texts
+
+    def test_without_version_staged_carriers_keep_their_text(self, tmp_path):
+        """The carrier class is a release-bump mechanism: no VERSION staged, no
+        carrier cut (the preflight carrier gate did not run); the prefix-dedup
+        class is independent of it."""
+        mod = _get_module("ouroboros.tools.review_file_pack")
+        repo = self._carrier_repo(tmp_path)
+        (repo / "uv.lock").write_text(_uv_lock_text("1.0.1"), encoding="utf-8")
+        (repo / "docs" / "DEVELOPMENT.md").write_text("# DEV\n\nHandbook body, revised.\n", encoding="utf-8")
+        subprocess.run(["git", "add", "-A"], cwd=str(repo), check=True)
+        paths = self._staged_paths(repo)
+        dev_text = (repo / "docs" / "DEVELOPMENT.md").read_text(encoding="utf-8")
+
+        excluded, note = mod.triad_pack_exclusions(
+            repo, paths, prefix_texts={"docs/DEVELOPMENT.md": dev_text})
+        assert excluded == {"docs/DEVELOPMENT.md"}
+        assert "release carrier" not in note and "byte-identical" in note
+        # A prefix copy with DIFFERENT bytes (or none) keeps the doc's full text.
+        assert mod.triad_pack_exclusions(
+            repo, paths, prefix_texts={"docs/DEVELOPMENT.md": "# DEV\n\nOther bytes.\n"}) == (set(), "")
+        assert mod.triad_pack_exclusions(repo, paths, prefix_texts={}) == (set(), "")
+
+    def test_a_carrier_new_at_head_keeps_its_text(self, tmp_path):
+        mod = _get_module("ouroboros.tools.review_file_pack")
+        repo = self._carrier_repo(tmp_path, with_lock=False)
+        (repo / "VERSION").write_text("1.0.1\n", encoding="utf-8")
+        (repo / "uv.lock").write_text(_uv_lock_text("1.0.1"), encoding="utf-8")
+        subprocess.run(["git", "add", "-A"], cwd=str(repo), check=True)
+        excluded, _note = mod.triad_pack_exclusions(
+            repo, self._staged_paths(repo), prefix_texts={})
+        assert excluded == {"VERSION"}
+
+
+def _uv_lock_text(version):
+    return (
+        'version = 1\n\n[[package]]\nname = "ouroboros"\n'
+        f'version = "{version}"\nsource = {{ editable = "." }}\n\n'
+        '[[package]]\nname = "httpx"\nversion = "0.27.0"\n'
+    )
+
+
+def test_scope_pack_applies_the_carrier_cut_over_its_own_staged_pair(tmp_path, monkeypatch):
+    """Owner decision (F3 Q4 = A): the scope pack cuts span-only release carriers
+    over the HEAD→index pair it reviews — no snapshot, named in the dedup note, a
+    typed `already_included` row with the by-design reason in the durable
+    manifest, the ladder's first entry — while the canonical docs (the governance
+    prefix) and a carrier edited outside its span keep every byte. A managed
+    subject and an artifact the atlas owes in full are never cut."""
+    from ouroboros.tools import scope_review as sr
+    from ouroboros.tools import scope_review_pack as pack
+
+    def _lock(v):  # an unchanged tail marker far outside every -U3 hunk
+        return _uv_lock_text(v) + "".join(
+            f'\n[[package]]\nname = "filler{i}"\nversion = "1.0.0"\n' for i in range(6)
+        ) + '\n[[package]]\nname = "UNCHANGED_LOCK_TAIL_MARKER"\nversion = "9.9.9"\n'
+
+    repo = TestTriadPackExclusions._carrier_repo(tmp_path)
+    (repo / "docs" / "CHECKLISTS.md").write_text(
+        "## Intent / Scope Review Checklist\n\nplaceholder\n", encoding="utf-8")
+    (repo / "uv.lock").write_text(_lock("1.0.0"), encoding="utf-8")
+    subprocess.run(["git", "add", "-A"], cwd=str(repo), check=True)
+    subprocess.run(["git", "commit", "-qm", "lock"], cwd=str(repo), check=True)
+    (repo / "VERSION").write_text("1.0.1\n", encoding="utf-8")
+    (repo / "uv.lock").write_text(_lock("1.0.1"), encoding="utf-8")
+    (repo / "pyproject.toml").write_text(  # version bump PLUS an edit outside its span
+        '[project]\nname = "ouroboros"\nversion = "1.0.1"\ndependencies = ["httpx"]\n', encoding="utf-8")
+    (repo / "docs" / "ARCHITECTURE.md").write_text(
+        "# Ouroboros v1.0.1 — Architecture\n\nArchitecture body.\n", encoding="utf-8")
+    (repo / "app.py").write_text("x = 2\n", encoding="utf-8")
+    subprocess.run(["git", "add", "-A"], cwd=str(repo), check=True)
+
+    prompt, status = sr._build_scope_prompt(repo, "release: 1.0.1")
+
+    assert status is None and prompt
+    dedup = prompt.split("## CURRENT FILE CONTEXT DEDUPLICATION NOTE", 1)[1].split("\n\n", 1)[0]
+    assert "- uv.lock" in dedup and "- VERSION" in dedup and "VERSION_CARRIER_SPANS" in dedup
+    assert "- docs/ARCHITECTURE.md" in dedup and "pyproject.toml" not in dedup
+    assert "UNCHANGED_LOCK_TAIL_MARKER" not in prompt  # no snapshot anywhere in the pack
+    assert 'version = "1.0.1"' in prompt  # …while the staged diff carries the change
+    assert "httpx" in prompt and "Architecture body." in prompt  # kept: outside-span carrier; prefix copy
+    manifest = sr._current_scope_context_manifest()
+    rows = {r["path"]: r for r in manifest["coverage"]}
+    assert rows["uv.lock"]["disposition"] == "already_included"
+    assert "omitted by design" in rows["uv.lock"]["reason"] and "VERSION_CARRIER_SPANS" in rows["uv.lock"]["reason"]
+    assert rows["pyproject.toml"]["reason"] == "included in fixed prompt context"
+    steps = manifest["ladder_steps"]
+    assert steps[0]["step"] == "carrier_span_only_omitted" and sorted(steps[0]["paths"]) == ["VERSION", "uv.lock"]
+    assert steps[1]["step"] == "compact_atlas" and "TOUCHED FILE BUDGET DEGRADATION NOTE" not in prompt
+    # The seam's two refusals: a managed subject, and an artifact owed in full.
+    assert pack._carrier_span_only_paths(repo, ["VERSION", "uv.lock", "app.py"], object()) == []
+    monkeypatch.setattr(sr, "atlas_required_beyond_diff", lambda rel: rel == "uv.lock")
+    assert pack._carrier_span_only_paths(repo, ["VERSION", "uv.lock", "app.py"], None) == ["VERSION"]

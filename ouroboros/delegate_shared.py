@@ -68,4 +68,35 @@ def _owned_run(ctx: ToolContext, tool: str, run_id: str) -> Tuple[Optional[str],
     return None, entry
 
 
-__all__ = ["_emit", "_fail", "_owned_run"]
+def orphan_disposition_status(
+    ctx: ToolContext, drive: Any, run_id: str,
+) -> Tuple[str, Optional[_RunCustody], str]:
+    """Custody for a DISPOSITION, with the orphan rule applied.
+
+    An obligation is held by the run's durable rows, not by the task that
+    created them. While the owning task is LIVE, only that identity may decide
+    its captured patch. Once that task is terminal, a live TOP-LEVEL task may
+    apply or reject the orphan; every apply-path guard still runs unchanged
+    (recorded-target match, protected paths, proven drift, the whole-payload
+    CAS), and the PATCH_DISPOSED row records who wrote it.
+
+    This is a DISPOSITION-ONLY upgrade. ``_owned_run`` governs wait/cancel/
+    answer and is deliberately NOT widened: cancelling or answering a foreign
+    run destroys work instead of closing an obligation.
+
+    Returns ``(status, entry, orphan_of)``, where ``orphan_of`` is the terminal
+    owner's task id when the upgrade applied and "" otherwise.
+    """
+    from ouroboros.delegate_terminal import _task_is_terminal
+    from ouroboros.tool_access import _TOP_LEVEL_PRINCIPAL_PROFILES, active_tool_profile
+
+    status, entry = custody.lookup(drive, str(getattr(ctx, "task_id", "") or ""), run_id)
+    if (status == custody.FOREIGN and entry is not None
+            and entry.settled and not entry.patch_disposed
+            and str(active_tool_profile(ctx)) in _TOP_LEVEL_PRINCIPAL_PROFILES
+            and _task_is_terminal(drive, entry.task_id)):
+        return custody.OWNED, entry, str(entry.task_id or "")
+    return status, entry, ""
+
+
+__all__ = ["_emit", "_fail", "_owned_run", "orphan_disposition_status"]

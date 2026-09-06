@@ -610,8 +610,9 @@ class OwnedClaudexorDaemon:
     def _record_rotation_receipt(self, engine_version: str, patched: list) -> None:
         """Durable half of the reconcile: a settings POST that changed the
         daemon's policy leaves a record naming the daemon identity, the
-        patched harnesses and the moment — not just a log line (the
-        ``_record_api_fallback_substitution`` pattern)."""
+        patched harnesses and the moment — not just a log line: a typed JSON
+        receipt written atomically under ``state/`` beside the policy it
+        describes, so an audit reads the fact instead of grepping logs."""
         import json
 
         from ouroboros.config import DATA_DIR

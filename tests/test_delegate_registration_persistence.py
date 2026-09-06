@@ -19,6 +19,36 @@ class _Gateway:
         pass
 
 
+class _ProcessGateway:
+    def __init__(self, removals):
+        self.removals = removals
+
+    def remove_project(self, pid):
+        self.removals.put(pid)
+
+
+def _settle_shared_project_process(root, run_id, removals, replay_barrier):
+    from pathlib import Path
+    from ouroboros import delegate_custody as dc
+    from ouroboros import delegate_custody_usage as usage
+
+    original = usage.complete_custody_rows
+
+    def synchronized_replay(*args, **kwargs):
+        try:
+            replay_barrier.wait(timeout=0.5)
+        except Exception:
+            pass
+        return original(*args, **kwargs)
+
+    usage.complete_custody_rows = synchronized_replay
+    row = dc.replay(Path(root))[run_id]
+    dc.settle_run(
+        Path(root), _ProcessGateway(removals), row,
+        {"summary": {"state": "succeeded"}},
+    )
+
+
 def test_persistent_registration_predicate():
     # Stable execution workspace + the user's own tree => durable identity.
     assert persistent_registration("/home/user/project", "workspace_write") is True
@@ -222,3 +252,134 @@ def test_pre_marker_record_falls_back_to_the_stored_request(tmp_path):
     assert record_persistent({"request": {"access": "workspace_write",
                                           "execution": {"isolation": "live"}}}) is False
     assert record_persistent({}) is False
+
+
+def test_concurrent_final_siblings_retire_shared_project_once(tmp_path):
+    import json
+    import threading
+
+    dc = custody
+
+    class _RacingGateway:
+        def __init__(self):
+            self.calls = []
+            self.second_arrived = threading.Event()
+
+        def remove_project(self, project_id):
+            self.calls.append(project_id)
+            if len(self.calls) == 1:
+                self.second_arrived.wait(timeout=0.25)
+            else:
+                self.second_arrived.set()
+
+    for run_id, task_id in (("run-a", "task-a"), ("run-b", "task-b")):
+        dc.record_started(tmp_path, dc.RunCustody(
+            run_id=run_id, task_id=task_id, route_id="r", model="m",
+            project_id="project-race", project_owned=True, ledger_root=str(tmp_path),
+        ))
+        dc.emit(tmp_path, dc.SETTLED, {"run_id": run_id, "task_id": task_id, "route": "r"})
+    rows = dc.replay(tmp_path)
+    gateway = _RacingGateway()
+    threads = [
+        threading.Thread(target=dc.retire_project, args=(tmp_path, gateway, rows[run_id]))
+        for run_id in ("run-a", "run-b")
+    ]
+    for thread in threads:
+        thread.start()
+    for thread in threads:
+        thread.join(timeout=2)
+
+    assert all(not thread.is_alive() for thread in threads)
+    assert gateway.calls == ["project-race"]
+    retired = [
+        row for row in (
+            json.loads(line) for line in
+            (tmp_path / "logs" / "events.jsonl").read_text(encoding="utf-8").splitlines()
+        ) if row.get("type") == dc.PROJECT_RETIRED
+    ]
+    assert len(retired) == 1
+
+
+def test_concurrent_live_settlements_publish_before_last_sibling_retirement(
+    tmp_path, monkeypatch,
+):
+    import threading
+
+    dc = custody
+    dc._CUSTODY.clear()
+    gateway = _Gateway()
+    rows = []
+    for run_id, task_id in (("run-live-a", "task-live-a"), ("run-live-b", "task-live-b")):
+        row = dc.RunCustody(
+            run_id=run_id, task_id=task_id, route_id="r", model="m",
+            project_id="project-live-race", project_owned=True,
+            ledger_root=str(tmp_path), ledger_recorded=True,
+        )
+        dc.record_started(tmp_path, row)
+        rows.append(row)
+
+    original_retire = dc.retire_project
+    both_pre_settlement_decisions = threading.Barrier(2)
+
+    def _retire_then_release_peer(*args):
+        original_retire(*args)
+        both_pre_settlement_decisions.wait(timeout=2)
+
+    monkeypatch.setattr(dc, "retire_project", _retire_then_release_peer)
+    results = []
+    threads = [
+        threading.Thread(
+            target=lambda row=row: results.append(dc.settle_run(
+                tmp_path, gateway, row, {"summary": {"state": "succeeded"}},
+            )),
+        )
+        for row in rows
+    ]
+    for thread in threads:
+        thread.start()
+    for thread in threads:
+        thread.join(timeout=3)
+
+    assert all(not thread.is_alive() for thread in threads)
+    assert len(results) == 2 and all(result["settled"] for result in results)
+    assert gateway.removals == ["project-live-race"]
+
+
+def test_cross_process_settlements_retire_shared_project_once(tmp_path):
+    import multiprocessing
+    import queue
+
+    dc = custody
+    dc._CUSTODY.clear()
+    for run_id, task_id in (("run-proc-a", "task-proc-a"), ("run-proc-b", "task-proc-b")):
+        dc.record_started(tmp_path, dc.RunCustody(
+            run_id=run_id, task_id=task_id, route_id="r", model="m",
+            project_id="project-process-race", project_owned=True,
+            ledger_root=str(tmp_path), ledger_recorded=True,
+        ))
+    process_ctx = multiprocessing.get_context("spawn")
+    removals = process_ctx.Queue()
+    replay_barrier = process_ctx.Barrier(2)
+    processes = [
+        process_ctx.Process(
+            target=_settle_shared_project_process,
+            args=(str(tmp_path), run_id, removals, replay_barrier),
+        )
+        for run_id in ("run-proc-a", "run-proc-b")
+    ]
+    for process in processes:
+        process.start()
+    for process in processes:
+        process.join(timeout=10)
+    assert [process.exitcode for process in processes] == [0, 0]
+    assert removals.get(timeout=1) == "project-process-race"
+    try:
+        duplicate_removal = removals.get(timeout=0.2)
+    except queue.Empty:
+        duplicate_removal = None
+    assert duplicate_removal is None
+    retired = [
+        row for row in dc._iter_rows(dc.event_log_path(tmp_path))
+        if row.get("type") == dc.PROJECT_RETIRED
+    ]
+    assert len(retired) == 1

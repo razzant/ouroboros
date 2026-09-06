@@ -72,6 +72,10 @@ def _live_root_task(task_id: str) -> Tuple[Optional[Dict[str, Any]], str]:
                 None,
             )
         if task is None:
+            from supervisor.workers import direct_chat_turn
+
+            task = direct_chat_turn(task_id)
+        if task is None:
             return None, "task_not_live"
         lineage = resolve_task_lineage(
             task_id,

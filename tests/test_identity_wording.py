@@ -20,7 +20,12 @@ def test_prompts_do_not_infer_current_human_from_authors():
 
 def test_live_task_message_marker_uses_my_human_wording():
     system = (REPO_ROOT / "prompts" / "SYSTEM.md").read_text(encoding="utf-8")
-    loop = (REPO_ROOT / "ouroboros" / "loop.py").read_text(encoding="utf-8")
+    # v7 L-B split: sweep the whole loop family (facade + leaves).
+    loop_dir = REPO_ROOT / "ouroboros"
+    loop = "".join(
+        path.read_text(encoding="utf-8")
+        for path in [loop_dir / "loop.py", *sorted(loop_dir.glob("loop_*.py"))]
+    )
     tools = (REPO_ROOT / "ouroboros" / "tools" / "core.py").read_text(encoding="utf-8")
 
     assert "[Message from my human]" in system

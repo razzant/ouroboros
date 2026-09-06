@@ -124,7 +124,10 @@ def test_completed_result_survives_a_late_cancellation(drive):
     assert kept["result"] == "real child result"
     assert kept["final_answer"] == "real answer"
     assert kept["artifacts"] == [{"name": "real.txt"}]
-    assert kept["cost_usd"] == 1.25
+    # ABI-3 fix-round-2: stored under the honest name only (the write above
+    # used the legacy kwarg — deprecated-wins honored it, then stripped it).
+    assert kept["accounted_upper_bound_usd"] == 1.25
+    assert "cost_usd" not in kept
 
     tr.write_task_result(drive, "failed", tr.STATUS_FAILED, result="real failure")
     tr.write_task_result(drive, "failed", tr.STATUS_CANCELLED)
@@ -224,7 +227,7 @@ def test_proactive_namer_late_settlement_refreshes_cost_without_late_name(tmp_pa
         "late-root",
         tr.STATUS_COMPLETED,
         root_task_id="late-root",
-        cost_usd=0.0,
+        accounted_upper_bound_usd=0.0,
         cost_final=True,
         root_phase_checkpoint={"post_task_synthesis": "completed"},
     )
@@ -262,14 +265,21 @@ def test_proactive_namer_late_settlement_refreshes_cost_without_late_name(tmp_pa
     assert not any(th.name == "namer-late-root" for th in threading.enumerate())
 
     release.set()
-    for _ in range(200):
+    # The subject is that the late settlement's refresh LANDS, not how fast: the
+    # detached thread runs reserve → dispatch → settle → cost reconstruction →
+    # locked task-result write, each a real lock cycle with fsyncs, and the
+    # Windows full-test leg took longer than a 2 s poll twice out of five runs
+    # (d0bb839e, 5fbdabd3) while green on the others. A refresh that never lands
+    # still fails here — after a bound wide enough for a loaded runner.
+    started = time.monotonic()
+    for _ in range(2000):
         stored = tr.load_task_result(tmp_path, "late-root")
-        if stored.get("cost_usd") == 0.25:
+        if stored.get("accounted_upper_bound_usd") == 0.25:
             break
         time.sleep(0.01)
     stored = tr.load_task_result(tmp_path, "late-root")
-    assert stored["cost_usd"] == 0.25
-    assert stored["cost_usd_with_children"] == 0.25
+    assert stored["accounted_upper_bound_usd"] == 0.25, f"no refresh after {time.monotonic() - started:.1f}s"
+    assert stored["accounted_upper_bound_usd_with_children"] == 0.25
     assert stored["cost_final"] is True
     assert stored.get("suggested_name") is None
     assert broadcasts == []

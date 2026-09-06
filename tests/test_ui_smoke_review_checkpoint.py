@@ -156,6 +156,7 @@ def test_ui_smoke_review_truth_is_visible_in_chat_and_logs(direct_server_with_da
         "waves_omitted": 0,
     }
     (task_results / "review-no-summary.json").write_text(json.dumps({
+        "_schema_version": 1,
         "task_id": "review-no-summary",
         "status": "completed",
         "reason_code": "acceptance_degraded",

@@ -75,7 +75,7 @@ def _stub_headless_teardown(monkeypatch, launcher, order):
     monkeypatch.setattr(
         launcher,
         "_kill_orphaned_children",
-        lambda port: order.append(("kill_orphans", port)),
+        lambda port, reason="window_close": order.append(("kill_orphans", port, reason)),
     )
     monkeypatch.setattr(
         launcher, "release_pid_lock", lambda: order.append("release_pid_lock")
@@ -240,7 +240,7 @@ def test_run_headless_main_shuts_down_cleanly_on_event(monkeypatch, capsys):
     # not announce the URL or launch the owner's browser mid-teardown.
     assert order == [
         "stop_agent",
-        ("kill_orphans", 8765),
+        ("kill_orphans", 8765, "headless_shutdown"),
     ]
     # Single-release contract (adversarial round c1): this path exits via
     # sys.exit, so the atexit-registered release owns the PID lock — an
@@ -270,8 +270,27 @@ def test_run_headless_main_exits_nonzero_when_lifecycle_thread_dies(monkeypatch)
     assert order[0] == ("browser", "http://127.0.0.1:8765")
     # Teardown still ran in full despite the abnormal exit; the PID-lock
     # release belongs to atexit on this sys.exit path (single release).
-    assert order[-2:] == ["stop_agent", ("kill_orphans", 8765)]
+    assert order[-2:] == ["stop_agent", ("kill_orphans", 8765, "crash_fuse")]
     assert "release_pid_lock" not in order
+
+
+def test_run_headless_main_crash_fuse_survives_event_set_during_stop_agent(monkeypatch):
+    """A signal landing while stop_agent() runs must not relabel a crash-fuse
+    exit as a requested shutdown: reason and exit code come from one read."""
+    import launcher
+
+    order = []
+    event = _FakeEvent(initially_set=False)
+    monkeypatch.setattr(launcher, "_shutdown_event", event)
+    _stub_headless_teardown(monkeypatch, launcher, order)
+    monkeypatch.setattr(launcher, "stop_agent", lambda: (order.append("stop_agent"), event.set()))
+    dead_thread = types.SimpleNamespace(is_alive=lambda: False)
+
+    with pytest.raises(SystemExit) as excinfo:
+        launcher._run_headless_main("http://127.0.0.1:8765", 8765, dead_thread)
+
+    assert excinfo.value.code == 1
+    assert order[-2:] == ["stop_agent", ("kill_orphans", 8765, "crash_fuse")]
 
 
 # ---------------------------------------------------------------------------
@@ -352,14 +371,14 @@ def test_headless_teardown_targets_the_authoritative_bound_port():
 
     src = inspect.getsource(launcher.main)
     assert "_run_headless_main(url, actual_port" in src
-    assert "_kill_orphaned_children(actual_port)" in src
+    assert "_kill_orphaned_children(actual_port" in src
     # the requested-port variants must be GONE from main's headless paths
     assert "_run_headless_main(url, port" not in src
     abort_at = src.index("Shutdown requested during headless startup")
     fail_at = src.index("failed to become healthy")
-    for section_start in (abort_at, fail_at):
+    for section_start, reason in ((abort_at, "startup_abort"), (fail_at, "startup_failure")):
         section = src[section_start:section_start + 700]
-        assert "_kill_orphaned_children(actual_port)" in section
+        assert f'_kill_orphaned_children(actual_port, reason="{reason}")' in section
 
 
 def test_headless_signal_handler_only_sets_event(monkeypatch):
@@ -554,3 +573,58 @@ def test_open_browser_detached_returns_joinable_thread(monkeypatch):
 
     assert not thread.is_alive()
     assert calls == ["http://127.0.0.1:9999"]
+
+
+def test_kill_orphaned_children_records_the_real_reason(monkeypatch, tmp_path):
+    """The cleanup journal must name the actual trigger, not always the
+    window-close default (issue #153): panic, headless shutdown, the crash
+    fuse, and the two startup teardowns each pass their own reason."""
+    import launcher
+
+    seen = []
+    monkeypatch.setattr(launcher, "_cleanup_recorded_server_process", seen.append)
+    monkeypatch.setattr(launcher, "_kill_stale_runtime_ports", lambda port: None)
+    monkeypatch.setattr(launcher, "_kill_stale_on_port", lambda port: None)
+    monkeypatch.setattr(launcher, "DATA_DIR", tmp_path)
+    monkeypatch.setattr("multiprocessing.active_children", lambda: [])
+
+    launcher._kill_orphaned_children(0)
+    launcher._kill_orphaned_children(0, reason="crash_fuse")
+
+    assert seen == ["window_close", "crash_fuse"]
+
+
+def test_teardown_reason_lands_in_the_journal_without_a_record(monkeypatch, tmp_path, caplog):
+    """Normal teardowns reach _kill_orphaned_children AFTER stop_agent already
+    consumed the server-process record, so the reason must be journalled at
+    teardown entry — not only on the (usually absent) recorded-process row."""
+    import logging
+
+    import launcher
+
+    monkeypatch.setattr(launcher, "_kill_stale_runtime_ports", lambda port: None)
+    monkeypatch.setattr(launcher, "_kill_stale_on_port", lambda port: None)
+    monkeypatch.setattr(launcher, "DATA_DIR", tmp_path)
+    monkeypatch.setattr(
+        launcher, "_server_process_record_path", lambda: tmp_path / "absent.json")
+    monkeypatch.setattr("multiprocessing.active_children", lambda: [])
+
+    with caplog.at_level(logging.INFO, logger=launcher.log.name):
+        launcher._kill_orphaned_children(0, reason="headless_shutdown")
+
+    assert any(
+        "Tearing down runtime orphans (headless_shutdown)" in rec.getMessage()
+        for rec in caplog.records
+    ), "the trigger reason must land in the journal even with no record on disk"
+
+
+def test_panic_stop_teardown_names_its_reason():
+    """The panic branch os._exit()s from the lifecycle thread, so it has no
+    behavioural twin here; pin its reason by source. The headless
+    shutdown/crash-fuse split is proven by test_run_headless_main_shuts_down_
+    cleanly_on_event and ..._exits_nonzero_when_lifecycle_thread_dies above."""
+    import inspect
+
+    import launcher
+
+    assert 'reason="panic_stop"' in inspect.getsource(launcher)

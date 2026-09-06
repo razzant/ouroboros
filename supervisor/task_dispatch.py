@@ -27,6 +27,7 @@ def build_scheduled_task_payload(fields: Dict[str, Any]) -> Dict[str, Any]:
     drive_root = str(fields.get("drive_root") or "")
     child_drive_root = str(fields.get("child_drive_root") or "")
     budget_drive_root = str(fields.get("budget_drive_root") or "")
+    root_cost_ceiling_usd = fields.get("root_cost_ceiling_usd")
     task_constraint = fields.get("task_constraint") if isinstance(fields.get("task_constraint"), dict) else None
     required_capabilities = fields.get("required_capabilities") if isinstance(fields.get("required_capabilities"), list) else []
     workspace_root = str(fields.get("workspace_root") or "")
@@ -66,6 +67,7 @@ def build_scheduled_task_payload(fields: Dict[str, Any]) -> Dict[str, Any]:
         "drive_root": drive_root,
         "child_drive_root": child_drive_root,
         "budget_drive_root": budget_drive_root,
+        "root_cost_ceiling_usd": root_cost_ceiling_usd,
         "task_constraint": task_constraint,
         "required_capabilities": required_capabilities,
         "workspace_root": workspace_root,
@@ -109,6 +111,7 @@ def build_scheduled_task_payload(fields: Dict[str, Any]) -> Dict[str, Any]:
             "subagent_envelope": subagent_envelope,
             "configured_subagent": configured_subagent,
             "parent_cognitive_route": parent_cognitive_route,
+            "root_cost_ceiling_usd": root_cost_ceiling_usd,
         },
     }
     if not drive_root:

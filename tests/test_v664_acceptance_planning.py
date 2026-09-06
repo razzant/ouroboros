@@ -37,7 +37,7 @@ def test_required_blocking_binds_shared_cycle_cap_but_explicit_cap_always_wins(m
     ) == (True, "")
     monkeypatch.delenv("OUROBOROS_REVIEW_MAX_CYCLES", raising=False)
 
-    for policy in ("fixed", "adaptive", "until_deadline"):
+    for policy in ("fixed", "adaptive"):
         capped = normalize_budget_profile({
             "improvement_policy": policy,
             "max_improvement_passes": 6,
@@ -103,17 +103,16 @@ def test_review_capacity_discloses_corrupt_cancellation_projection(tmp_path):
     )
 
 
-def test_acceptance_review_reserve_uses_existing_event_ewma(tmp_path, monkeypatch):
+def test_acceptance_timing_rows_go_to_the_canonical_split_drive_stream(tmp_path, monkeypatch):
+    """The timing row a paid panel writes belongs to the CANONICAL drive of a
+    split task, not the child's own logs. Its content is telemetry: since owner
+    R52 no gate reads it back."""
     monkeypatch.setenv("OUROBOROS_ACCEPTANCE_REVIEW_EST_SEC", "90")
     canonical = tmp_path / "canonical"
     child = tmp_path / "child"
     events = canonical / "logs" / "events.jsonl"
     append_jsonl(events, {"type": "task_acceptance_review_timing", "duration_sec": 100})
-    append_jsonl(events, {"type": "task_acceptance_review_timing", "duration_sec": 400})
     ctx = SimpleNamespace(drive_root=str(child), budget_drive_root=str(canonical))
-    # EWMA(alpha=.5) = 250; subsequent reserve = 1.5 * 250.
-    assert task_pacing.acceptance_review_estimate_sec(ctx, passes_done=1) == 375.0
-    assert task_pacing.acceptance_review_estimate_sec(ctx, passes_done=0) == 200.0
     assert task_pacing.acceptance_timing_events_path(ctx) == events
     assert not (child / "logs" / "events.jsonl").exists()
 
@@ -148,7 +147,7 @@ def test_acceptance_panel_persists_timing_to_canonical_root(tmp_path, monkeypatc
     )
     monkeypatch.setattr(evidence_mod, "build_task_acceptance_evidence", lambda *_a, **_k: {})
     monkeypatch.setattr(
-        substrate, "reviewer_slots",
+        substrate, "triad_delivery_slots",
         lambda **_k: [SimpleNamespace(model="test-reviewer")],
     )
     monkeypatch.setattr(review_helpers, "review_wave_budget_gate", lambda *_a, **_k: None)
@@ -165,7 +164,7 @@ def test_acceptance_panel_persists_timing_to_canonical_root(tmp_path, monkeypatc
         llm_trace={"tool_calls": []},
         drive_root=child,
         messages=[{"role": "system", "content": "policy"}, {"role": "user", "content": "goal"}],
-        emit_progress=lambda _text: None,
+        emit_progress=lambda _text, *, incident=None: None,
         mode="required",
         subtree_statuses=[],
         budget_profile={},
@@ -222,7 +221,7 @@ def _root_acceptance_context(tmp_path, evidence):
             {"role": "system", "content": "policy"},
             {"role": "user", "content": "goal"},
         ],
-        emit_progress=lambda _text: None,
+        emit_progress=lambda _text, *, incident=None: None,
         mode="required",
         subtree_statuses=[],
         budget_profile=contract["budget_profile"],
@@ -242,7 +241,7 @@ def _allow_acceptance_wave(monkeypatch):
 
     monkeypatch.setattr(
         substrate,
-        "reviewer_slots",
+        "triad_delivery_slots",
         lambda **_kwargs: [ReviewSlot(slot_id="slot", model="review-model")],
     )
     monkeypatch.setattr(
@@ -279,34 +278,35 @@ def test_acceptance_cancellation_recheck_precedes_wallet_claim(
     assert state["claims_by_binding"] == {}
 
 
-def test_acceptance_deadline_recheck_precedes_wallet_claim(tmp_path, monkeypatch):
+def test_the_paid_claim_rechecks_the_wallet_and_never_the_floor(tmp_path, monkeypatch):
+    """Owner R55: the paid claim (`_claim` in the dispatch stamp, which the
+    stub fires exactly where a route does, before its first physical send)
+    rechecks the WALLET and cancellation (the test above); time belongs to the
+    loop gate, so `review_launch_allowed` is armed to fail the test if the
+    claim asks it. The wallet is exhausted for REAL between admission and the
+    send (another binding buys the tree's only cycle); the refusal is FREE —
+    no claim row for this binding, no reviewer call — and typed DEGRADED."""
     import ouroboros.loop as loop
     import ouroboros.review_substrate as substrate
-    from ouroboros.task_results import load_task_acceptance_review_state
+    from ouroboros.task_results import claim_task_acceptance_review_cycle, load_task_acceptance_review_state
 
     ctx = _root_acceptance_context(tmp_path, {"evidence": "complete"})
     _allow_acceptance_wave(monkeypatch)
-    monkeypatch.setattr(
-        task_pacing, "review_launch_allowed",
-        lambda *_args, **_kwargs: (False, "inside_finalization_reserve"),
-    )
-    monkeypatch.setattr(
-        substrate,
-        "run_review_request",
-        lambda *_args, **_kwargs: (_ for _ in ()).throw(
-            AssertionError("reviewer must not be called")
-        ),
-    )
+    monkeypatch.setattr(task_pacing, "review_launch_allowed", lambda *_a, **_k: (_ for _ in ()).throw(
+        AssertionError("the launch floor is the loop gate's, never the claim's")))
+    other = substrate.build_review_binding(candidate="another", evidence={}, fence_token_or_state="wallet-gate")
 
+    def _exhaust_wallet_then_fire_stamp(_request, *, usage_ctx, **_kwargs):
+        claimed = claim_task_acceptance_review_cycle(tmp_path, ctx.task_id, other, claimed_by_task_id=ctx.task_id)
+        assert claimed["status"] == "claimed"  # the tree's one cycle is now spent
+        usage_ctx._review_paid_stamp()  # the route's write-ahead call: refuses first
+        raise AssertionError("reviewer must not be called")
+
+    monkeypatch.setattr(substrate, "run_review_request", _exhaust_wallet_then_fire_stamp)
     result = loop._execute_task_acceptance_panel(ctx)
-
-    assert result.degraded is True
-    assert result.degraded_reasons == [
-        "inside_finalization_reserve (no reviewer was called)"
-    ]
-    assert load_task_acceptance_review_state(
-        tmp_path, ctx.task_id,
-    )["claims_by_binding"] == {}
+    assert result.degraded is True and result.degraded_reasons[0].startswith("review_cycles_exhausted")
+    claims = load_task_acceptance_review_state(tmp_path, ctx.task_id)["claims_by_binding"]
+    assert set(claims) == {other["binding_hash"]}  # the other binding's row, never this one's
 
 
 def test_acceptance_corrupt_cancellation_projection_is_unknown_without_claim(
@@ -411,7 +411,7 @@ def test_acceptance_zero_physical_refusal_does_not_claim_wallet(
     result = loop._execute_task_acceptance_panel(ctx)
 
     assert result.aggregate_signal == "DEGRADED"
-    assert result.actors[0]["status"] == "ok"
+    assert result.actors[0]["status"] == "not_dispatched"
     state = load_task_acceptance_review_state(tmp_path, ctx.task_id)
     assert state["claims_by_binding"] == {}
 
@@ -531,24 +531,20 @@ def test_acceptance_dispatch_rechecks_cancel_before_provider_send(tmp_path, monk
     assert projection["attempt_counts"] == {"released": 1} and projection["non_final_rows"] == 0
     assert projection["cost_final"] is True
 
-def test_normalized_stall_default_does_not_emit_deprecation_noise(tmp_path):
-    quiet = SimpleNamespace(
-        drive_root=tmp_path,
-        task_id="quiet",
-        task_contract={"budget_profile": normalize_budget_profile({})},
-    )
-    task_pacing.resolve_budget_profile(quiet)
-    events = tmp_path / "logs" / "events.jsonl"
-    assert not events.exists()
-
+def test_resolve_budget_profile_emits_no_deprecation_events(tmp_path):
+    """ABI 7.0 (Q10=A): the alias deprecation machinery is gone - a profile
+    carrying retired spellings resolves quietly, without the retired keys."""
     legacy = SimpleNamespace(
         drive_root=tmp_path,
         task_id="legacy",
-        task_contract={"budget_profile": normalize_budget_profile({"stall_rounds_threshold": 2})},
+        task_contract={"budget_profile": {
+            "improvement_policy": "until_deadline", "stall_rounds_threshold": 2,
+        }},
     )
-    task_pacing.resolve_budget_profile(legacy)
-    rows = [json.loads(line) for line in events.read_text(encoding="utf-8").splitlines()]
-    assert rows[-1]["aliases"] == ["stall_rounds_threshold"]
+    resolved = task_pacing.resolve_budget_profile(legacy)
+    assert resolved["improvement_policy"] == "fixed"
+    assert "stall_rounds_threshold" not in resolved
+    assert not (tmp_path / "logs" / "events.jsonl").exists()
 
 
 def test_child_task_never_becomes_host_acceptance_authority():

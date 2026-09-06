@@ -687,7 +687,7 @@ def test_extension_skill_never_executable_in_phase3(tmp_path):
     loaded = find_skill(drive_root, "ext1", repo_path=str(repo_root))
     assert loaded.manifest.is_extension()
     assert loaded.available_for_execution is False, (
-        "Phase 3 must defer type=extension execution until Phase 4."
+        "available_for_execution is the script-execution flag; extension liveness is live_loaded."
     )
 
 

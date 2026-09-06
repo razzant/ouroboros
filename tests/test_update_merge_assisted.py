@@ -105,10 +105,14 @@ def test_marker_gate_accepts_staged_deletion_and_binary_blob(tmp_path, monkeypat
 
 
 def test_materialize_projects_version_to_target_and_pins_m0(tmp_path, monkeypatch):
-    """P9 projection (Q8): a conflicted VERSION file — a pure version token — is
-    mechanically resolved to the official target's side BEFORE the resolver sees
-    the tree, and the pinned M0 baseline already includes that projection (the
-    resolution delta must show only the resolver's own work)."""
+    """P9 projection (Q8): a conflicted VERSION file is mechanically resolved
+    to the official target's side BEFORE the resolver sees the tree, and the
+    pinned M0 baseline already includes that projection (the resolution delta
+    must show only the resolver's own work). The local token is deliberately
+    NOT a valid version: a well-formed token conflict is already resolved by
+    the carrier-span engine at the PLANNER (D34) and never reaches this lane,
+    while a degraded anchor falls past the span resolver to the projection —
+    which projects VERSION conflicted-or-drifted alike."""
     repo, head = _init_repo(tmp_path)
     (repo / "VERSION").write_text("1.0.0\n")
     _git(repo, "add", "-A")
@@ -119,7 +123,7 @@ def test_materialize_projects_version_to_target_and_pins_m0(tmp_path, monkeypatc
     _git(repo, "add", "-A")
     _git(repo, "commit", "-q", "-m", "official release")
     _git(repo, "checkout", "-q", head)
-    (repo / "VERSION").write_text("1.5.0\n")
+    (repo / "VERSION").write_text("not-a-version\n")
     (repo / "local.txt").write_text("local\n")
     _git(repo, "add", "-A")
     _git(repo, "commit", "-q", "-m", "local fork release")

@@ -563,7 +563,20 @@ def validate_manifest_transition(
 
     for path in sorted(current.giant_paths - previous.giant_paths):
         errors.append(f"new module debt above {MAX_MODULE_LINES} lines: {path}")
-    for path, qualname in sorted(current.function_debt - previous.function_debt):
+    added_functions = current.function_debt - previous.function_debt
+    removed_functions = previous.function_debt - current.function_debt
+    # A same-qualname relocation — the function left exactly one path and appeared
+    # at exactly one other in the same transition — moves existing debt, it does
+    # not create it: the count is unchanged and the ratchet still names the
+    # function. A fresh >300-line function, a swap onto a different qualname, or
+    # an ambiguous many-to-one move is still refused.
+    relocated_functions = {
+        (path, qualname)
+        for path, qualname in added_functions
+        if sum(1 for _p, q in removed_functions if q == qualname) == 1
+        and sum(1 for _p, q in added_functions if q == qualname) == 1
+    }
+    for path, qualname in sorted(added_functions - relocated_functions):
         errors.append(f"new function debt above {MAX_FUNCTION_LINES} lines: {path}:{qualname}")
 
     previous_band = set(previous.band_paths)

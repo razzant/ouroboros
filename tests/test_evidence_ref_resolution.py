@@ -103,7 +103,8 @@ def test_vocabulary_enumerates_packet_exhibits_exactly():
     assert vocab["verification_receipts"] == "packet_section"  # the exhibit list itself
     assert vocab["repo_diff"] == "packet_section"
     assert vocab["verification_summary"] == "packet_section"
-    assert vocab["tool_trajectory"] == "packet_section"   # host-recorded tool results
+    # The packet discloses four omitted leading rows, so the carried tail is partial.
+    assert vocab["tool_trajectory"] == "partial"
     assert "__provenance__" not in vocab
     # Robust to junk input.
     assert acceptance_evidence_ref_vocabulary(None) == {}
@@ -511,3 +512,38 @@ def test_annotation_rides_the_panel_and_never_blocks_it(tmp_path):
     rows = actor["criteria_refs_unresolved"]
     assert rows[0]["supported_evidence_resolves"] is False
     assert task_acceptance_is_clean(result) is False   # only the clean bit demotes
+
+
+def test_an_open_wave_exhibit_is_declared_intent_and_never_resolves(tmp_path):
+    """AP5: the exhibit is disclosed BY NAME. Citing it (or one of its claim
+    ids) must not certify anything, because an open wave binds nothing."""
+    from ouroboros.review_evidence_refs import (
+        DECLARED_INTENT_SECTION,
+        acceptance_evidence_ref_vocabulary,
+        resolve_criteria_evidence_refs,
+    )
+
+    packet = {
+        "task_contract": {"requirements": "do X"},
+        "acceptance_claims_source": "none_open_plan_wave",
+        "plan_claims_exhibit": {
+            "binding": "not bound: wave open",
+            "acceptance_claims": [{"id": "claim_1", "claim": "the widget renders"}],
+        },
+        "repo_diff": "diff --git a/x b/x",
+        "__provenance__": {
+            "task_contract": "host_attested",
+            "acceptance_claims_source": "host_attested",
+            "plan_claims_exhibit": "host_attested",
+            "repo_diff": "host_attested",
+        },
+    }
+    vocabulary = acceptance_evidence_ref_vocabulary(packet)
+    assert vocabulary["plan_claims_exhibit"] == DECLARED_INTENT_SECTION
+    assert vocabulary["repo_diff"] == "packet_section"
+
+    rows = resolve_criteria_evidence_refs(
+        [{"criterion": "c", "status": "supported", "evidence_refs": ["plan_claims_exhibit"]}],
+        vocabulary,
+    )
+    assert rows and rows[0]["supported_evidence_resolves"] is False

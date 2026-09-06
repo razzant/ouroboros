@@ -106,8 +106,8 @@ def test_requested_tail_preempts_a_full_120k_declared_pack(_harness) -> None:
     assert "DECISIVE_TAIL" in current_user
 
 
-def test_missing_requested_evidence_cannot_close_clean(_harness) -> None:
-    from tests.test_plan_review_engine import CLEAN, _call, _control, _finding
+def test_missing_requested_evidence_dispatches_with_the_absence_named(_harness) -> None:
+    from tests.test_plan_review_engine import CLEAN, _call, _control, _finding, _user_text
 
     ask = json.dumps([
         _finding(
@@ -123,9 +123,11 @@ def test_missing_requested_evidence_cannot_close_clean(_harness) -> None:
     substrate = _harness.install({"s1": CLEAN, "s2": CLEAN, "s3": CLEAN})
     out = _call(_harness.make_ctx())
 
-    assert "cannot_verify" in out
-    assert _control(out)["closed"] is False
-    assert substrate.calls == []
+    assert "cannot_verify" not in out
+    assert len(substrate.calls) == 1  # the panel is dispatched, never refused for free
+    sent = _user_text(substrate.calls[0]["request"].slot_messages["s1"][-1]["content"])
+    assert "[reviewer-requested]" in sent and "missing.md::lines=1-2" in sent
+    assert _control(out) == {"outcome": "GREEN", "closed": True}  # the panel's own call
 
 
 def test_wave_9_and_65_remain_exactly_readable_after_hot_trimming(tmp_path) -> None:
@@ -215,11 +217,10 @@ def test_continuation_roster_change_degrades_to_fresh_dispatch(tmp_path, current
     ref = persist_wave(tmp_path, "task-1", exact)
     current = [ReviewSlot(slot_id=sid, model=f"model-{sid}") for sid in current_ids]
 
-    slots_out, messages, threads, error, restarted = continuation_inputs(
+    slots_out, messages, threads, restarted = continuation_inputs(
         tmp_path, "task-1", {"wave_artifact": ref}, current, user_content="continue",
     )
 
-    assert error is None
     assert restarted == "prior_reviewer_assignment_set_changed"
     assert messages == {} and threads == {}
     assert slots_out == current  # exactly as configured, never rebound to prior rows
@@ -245,11 +246,11 @@ def test_continuation_uses_the_currently_configured_slot_pin(tmp_path) -> None:
     }
     ref = persist_wave(tmp_path, "task-1", exact)
 
-    rebound, _messages, threads, error, restarted = continuation_inputs(
+    rebound, _messages, threads, restarted = continuation_inputs(
         tmp_path, "task-1", {"wave_artifact": ref}, [prior], user_content="continue",
     )
 
-    assert error is None and restarted == ""
+    assert restarted == ""
     assert threads == {"s1": "thread-1"}
     assert rebound[0].session_profile == "profile-a"
 
@@ -269,19 +270,18 @@ def test_agent_session_continuation_restarts_fresh_when_prior_thread_is_missing(
     }
     ref = persist_wave(tmp_path, "task-1", exact)
 
-    slots_out, messages, threads, error, restarted = continuation_inputs(
+    slots_out, messages, threads, restarted = continuation_inputs(
         tmp_path, "task-1", {"wave_artifact": ref}, [slot], user_content="continue",
     )
 
-    assert error is None
     assert restarted == "prior_review_thread_missing:s1"
     assert messages == {} and threads == {}
     assert slots_out == [slot]
 
 
-def test_exact_wave_custody_gaps_stay_fail_closed(tmp_path) -> None:
-    """The dispositions custody chain keeps its refusals: a missing or unreadable
-    prior exact wave is never silently degraded to a fresh dispatch."""
+def test_exact_wave_custody_gaps_degrade_to_a_named_fresh_dispatch(tmp_path) -> None:
+    """An absent or unreadable prior exact wave is a cache miss here: custody is
+    enforced one level up, so each gap names a typed fresh-restart cause."""
     from ouroboros.review_substrate import ReviewSlot
     from ouroboros.tools.plan_review_artifacts import continuation_inputs
 
@@ -291,17 +291,17 @@ def test_exact_wave_custody_gaps_stay_fail_closed(tmp_path) -> None:
         (None, "prior_exact_wave_missing"),
         ({"paid": True}, "prior_exact_wave_ref_missing"),
     ):
-        _slots, messages, threads, error, restarted = continuation_inputs(
+        _slots, messages, threads, restarted = continuation_inputs(
             tmp_path, "task-1", previous, [slot], user_content="continue",
         )
-        assert error == expected and restarted == ""
+        assert restarted == expected
         assert messages == {} and threads == {}
 
     ref = {"root": "artifact_store", "path": "missing-wave.json", "bytes": 3, "sha256": "0" * 64}
-    _slots, _messages, _threads, error, restarted = continuation_inputs(
+    _slots, _messages, _threads, restarted = continuation_inputs(
         tmp_path, "task-1", {"wave_artifact": ref}, [slot], user_content="continue",
     )
-    assert str(error or "").startswith("prior_exact_wave_unreadable:") and restarted == ""
+    assert restarted.startswith("prior_exact_wave_unreadable:")
 
 
 def test_api_chat_continuation_uses_exact_slot_transcript() -> None:
@@ -348,11 +348,10 @@ def test_api_chat_continuation_restarts_fresh_on_invalid_transcript(
     }
     ref = persist_wave(tmp_path, "task-1", exact)
 
-    _slots, messages, threads, error, restarted = continuation_inputs(
+    _slots, messages, threads, restarted = continuation_inputs(
         tmp_path, "task-1", {"wave_artifact": ref}, [slot], user_content="continue",
     )
 
-    assert error is None
     assert restarted == "prior_api_transcript_invalid:s1"
     assert messages == {} and threads == {}
 

@@ -3,7 +3,48 @@
 Split from test_delegated_run_isolation.py (module line cap)."""
 from __future__ import annotations
 
+import itertools
+
 from ouroboros import delegate_custody as custody
+
+
+def test_last_shared_project_sibling_retires_once_in_every_settlement_order(tmp_path):
+    class _Gateway:
+        def __init__(self):
+            self.removals = []
+
+        def remove_project(self, project_id):
+            self.removals.append(project_id)
+
+    run_ids = ("run-a", "run-b", "run-c")
+    for case, order in enumerate(itertools.permutations(run_ids)):
+        root = tmp_path / str(case)
+        gateway = _Gateway()
+        custody._CUSTODY.clear()
+        for index, run_id in enumerate(run_ids):
+            custody.record_started(root, custody.RunCustody(
+                run_id=run_id,
+                task_id=f"task-{run_id}",
+                project_id="shared-project",
+                project_owned=index == 0,
+                ledger_root=str(root),
+            ))
+            custody.emit(root, custody.LEDGER_RECORDED, {"run_id": run_id})
+
+        for run_id in order:
+            row = custody.replay(root)[run_id]
+            custody.settle_run(root, gateway, row, {"summary": {"state": "succeeded"}})
+
+        assert gateway.removals == ["shared-project"], order
+        replayed = custody.replay(root)
+        assert all(not row.project_owned for row in replayed.values()), order
+        retired = [
+            row for row in custody._iter_rows(custody.event_log_path(root))
+            if row.get("type") == custody.PROJECT_RETIRED
+        ]
+        assert len(retired) == 1, order
+    custody._CUSTODY.clear()
+
 def test_registration_sweep_defers_behind_a_live_unowned_sharer(tmp_path):
     """Sharers are ALL runs in a project, owned or not: only the creator
     carries the registration, but the daemon refuses removal while any

@@ -24,7 +24,6 @@ def test_owner_can_enable_max_without_main_route_capability_ack(tmp_path, monkey
     }), encoding="utf-8")
     monkeypatch.setattr(cfg, "SETTINGS_PATH", settings_path)
     monkeypatch.setattr(cfg, "DATA_DIR", tmp_path)
-    monkeypatch.setattr(os, "environ", dict(os.environ))
     os.environ["OUROBOROS_CONTEXT_MODE"] = "low"
     os.environ["OUROBOROS_CONTEXT_MODE_AUTO_LOW"] = "false"
 
@@ -61,7 +60,6 @@ def test_bare_env_low_cannot_author_owner_low_while_busy(tmp_path, monkeypatch):
     settings_path = tmp_path / "settings.json"
     monkeypatch.setattr(cfg, "SETTINGS_PATH", settings_path)
     monkeypatch.setattr(cfg, "DATA_DIR", tmp_path)
-    monkeypatch.setattr(os, "environ", dict(os.environ))
     os.environ["OUROBOROS_CONTEXT_MODE"] = "low"
     os.environ.pop("OUROBOROS_CONTEXT_MODE_AUTO_LOW", None)
     monkeypatch.setattr(gateway_settings, "_has_running_agent_tasks", lambda: True)

@@ -37,6 +37,7 @@ from typing import Any, Dict, List, Optional, Set, Tuple
 from ouroboros.deadline_utils import parse_deadline_ts, utc_now
 from ouroboros.utils import (
     atomic_write_json,
+    estimate_tokens,
     is_credential_header_name,
     read_json_dict,
     utc_now_iso,
@@ -297,10 +298,46 @@ def _store_evidence(drive_root: Any, kind: str, fp: str, value: Dict[str, Any]) 
     try:
         with _STORE_LOCK:
             data = _load(drive_root)
+            _drop_expired_probes(data)
             data.setdefault(kind, {})[fp] = value
             _save(drive_root, data)
     except Exception:
         log.debug("capability evidence store failed (%s)", kind, exc_info=True)
+
+
+def _drop_expired_probes(data: Dict[str, Any]) -> None:
+    """Write-side expiry for the ``probes`` namespace (CPL4-C8).
+
+    Failed/unprobeable records are pure retry throttles: past
+    ``_FAILED_TTL_SEC`` the reader ignores them, so the write drops them.
+    Confirmed records outlive their read TTL as provider-blip evidence
+    (``probe`` deliberately keeps a stale prior CONFIRMED across an outage)
+    and drop only past the unified GC retention — a route unprobed for that
+    long re-establishes evidence from scratch, the documented fail-closed
+    reset. ``owner_acks`` are owner authority and never expire; the other
+    namespaces already filter expired entries on their own write paths.
+    Records with an unparseable timestamp or an unknown status are KEPT
+    (fail-closed: never delete what cannot be read).
+    """
+    from ouroboros.retention import get_gc_retention_days
+
+    probes = data.get("probes")
+    if not isinstance(probes, dict):
+        return
+    confirmed_max_age_sec = get_gc_retention_days() * 86400.0
+    for fp in list(probes):
+        record = probes.get(fp)
+        if not isinstance(record, dict):
+            continue
+        if parse_deadline_ts(str(record.get("ts") or "")) is None:
+            continue  # unreadable timestamp: fail-closed, keep
+        age = _age_seconds(str(record.get("ts") or ""))
+        status = str(record.get("status") or "")
+        if status == STATUS_CONFIRMED:
+            if age > confirmed_max_age_sec:
+                probes.pop(fp, None)
+        elif status in (STATUS_FAILED, STATUS_UNPROBEABLE) and age > _FAILED_TTL_SEC:
+            probes.pop(fp, None)
 
 
 def _age_seconds(ts: str) -> float:
@@ -474,7 +511,10 @@ def get_rejected_params(drive_root: Any, fingerprint: str) -> Set[str]:
 # One raw pair namespace keyed by normalized model. Reducers choose witnessed
 # values; no independently refreshed aggregate scalar is an authority.
 
-_TOKEN_DENSITY_TTL_SEC = 14 * 24 * 3600.0
+# 90 days: a model's tokenizer does not drift week to week, and an install that
+# idles past the TTL would otherwise fall back to the cold floor and refuse the
+# packed deep self-review it could assemble warm (owner decision R60/R61).
+_TOKEN_DENSITY_TTL_SEC = 90 * 24 * 3600.0
 _TOKEN_DENSITY_FRESH_SEC = 6 * 3600.0
 _TOKEN_DENSITY_MAX_PAIRS = 5
 _TOKEN_DENSITY_DRIFT_TOLERANCE = 0.05
@@ -648,13 +688,17 @@ def _normalized_density_model(model_id: str) -> str:
 def _fresh_density_pairs(
     store: Dict[str, Any], model_id: str = "", *, basis: str = "",
 ) -> List[Tuple[Dict[str, Any], float]]:
+    # Without ``model_id`` every model's rows are returned — ONLY for the main
+    # resolver's exact-route lookup (a route fingerprint belongs to one model;
+    # the caller filters on it). No resolver reduces over other models' rows:
+    # another tokenizer's density is no evidence about this route.
     # ``basis`` filters to rows measured on one named basis. The MAIN fit
     # resolver passes "bounded_proxy" — its multiplier must match the fit
     # estimator's own measure: a pre-basis row (no stamp) or a legacy ``raw``
     # row was measured against raw base64 chars and can sit at 0.05-0.65 on
     # image routes, so letting it stay authoritative for its 14-day TTL after
     # an upgrade re-poisons exactly what the basis fix cures (the cost is a
-    # brief cold start at 1.0). Review/aggregate resolvers pass no basis: their
+    # brief cold start at 1.0). The review resolver passes no basis: its
     # text-heavy witnesses measure the same on either basis.
     entries = [store.get(model_id) or {}] if model_id else list(store.values())
     return [
@@ -697,23 +741,24 @@ def resolve_main_token_density(drive_root: Any, route_fp: str, model_id: str) ->
 
 def resolve_review_token_density(drive_root: Any, model_id: str) -> Tuple[float, str]:
     """Densest fresh exact-model witness (authoritative, may undercut the cold
-    floor), else the cold floor over any fresh compatible witness.
+    floor), else the cold floor.
 
     A fresh exact-model witness measures THIS model's real tokenizer density, so
     it is allowed to lower the effective density below ``COLD_START_TOKEN_DENSITY``
     (issue #284: the floor otherwise shrinks a 1M-window reviewer to ~575K
     estimated input tokens against a measured 0.86-1.01 density, and the managed
-    scope atlas can never assemble). The floor keeps governing when the only
-    evidence is stale (TTL-expired), absent, or from a different model."""
+    scope atlas can never assemble). The floor governs when the only evidence is
+    stale (TTL-expired) or absent — and when the only witnesses belong to OTHER
+    models: another tokenizer's density says nothing about this route, and
+    letting the densest foreign pair govern could only push the cap BELOW the
+    already-conservative floor (paid run 2026-09-04: a gemini-3.8-flash row at
+    1.81 sized gpt-5.6-terra, measured 0.87-0.96, at 1.90 and cut its scope cap
+    from 575,757 to 499,627 of a 1,050,000-token window)."""
     try:
         store = _load(drive_root).get("token_density", {}) or {}
         exact = _fresh_density_pairs(store, _normalized_density_model(model_id))
         if exact:
             return max(item[1] for item in exact) * MEASURED_DENSITY_SAFETY_FACTOR, "measured"
-        witnessed = _fresh_density_pairs(store)
-        if witnessed:
-            density = max(item[1] for item in witnessed) * MEASURED_DENSITY_SAFETY_FACTOR
-            return max(COLD_START_TOKEN_DENSITY, density), "cold_conservative"
     except Exception:
         pass
     return COLD_START_TOKEN_DENSITY, "cold_conservative"
@@ -722,6 +767,106 @@ def resolve_review_token_density(drive_root: Any, model_id: str) -> Tuple[float,
 def resolve_token_density(drive_root: Any, model_id: str) -> Tuple[float, str]:
     """Compatibility alias for the conservative review reducer."""
     return resolve_review_token_density(drive_root, model_id)
+
+
+# Cold-start density probe (owner decisions R60/R61 for the packed deep
+# self-review; the commit gate runs the same rung since 2026-09-05): when a
+# review pack is refused or degraded under the COLD floor, ONE bounded send on
+# the exact model sources a real witness for the store above.
+# Room for a reasoning model to finish thinking AND answer: a cap that ends the
+# call mid-reasoning comes back with no content and no usage — no witness.
+DENSITY_PROBE_MAX_TOKENS = 256
+DENSITY_PROBE_EFFORT = "low"
+DENSITY_PROBE_SYSTEM_PROMPT = "Token-density calibration probe: reply with the single word OK."
+
+
+def cold_start_density_probe(
+    drive_root: Any,
+    llm: Any,
+    emit_progress: Any,
+    model: str,
+    sample: str,
+    *,
+    task_id: str,
+    call_type: str,
+    source: str,
+) -> str:
+    """The cold-start rung shared by the packed deep self-review and the commit
+    gate (scope ladder and triad fit). Returns a typed outcome:
+
+    ``"warm"`` — a fresh exact-model witness already governs: nothing is sent;
+    ``"no_sample"`` — nothing to measure on; ``"failed"`` / ``"no_usage"`` /
+    ``"unrecorded"`` — the probe sent but yielded no governing witness (the
+    cold cap stands, disclosed on progress); ``"measured"`` — the witness is
+    recorded and now governs, so the caller recomputes the cap and rebuilds
+    ONCE.
+
+    The calibrated input cap is the density-form bound over a FRESH exact-model
+    witness, else the cold floor ``COLD_START_TOKEN_DENSITY`` — which lies
+    above every measured density, so a repository whose required set fits warm
+    is refused cold, and the refusal happens before any send, so the model
+    never records the witness that would have admitted it. This rung breaks
+    that loop with ONE bounded send on the exact model (``sample``: a slice of
+    the real pack, a few output tokens) through the ordinary observed call,
+    under ``physical_attempt_limit(1)`` so the transport ladder's own retries
+    (a body-error reroute, an encrypted-reasoning strip) cannot turn the ONE
+    send into several paid attempts. It never runs on a warm store and never
+    retries. ``BudgetExceeded`` propagates:
+    the paid ledger's refusal is budget vocabulary the caller discloses in its
+    own terms (the deep review lets it reach the agent's budget rail; the
+    commit gate records a typed disclosure and keeps its existing refusal)."""
+    from ouroboros.llm_observability import chat_observed
+    from ouroboros.usage_accounting import BudgetExceeded, physical_attempt_limit
+
+    _density, density_source = resolve_review_token_density(drive_root, model)
+    if density_source == "measured":
+        return "warm"
+    if not sample:
+        return "no_sample"
+    emit_progress(
+        f"No fresh token-density witness for {model}: one bounded probe "
+        f"(~{estimate_tokens(sample):,} estimated tokens) calibrates the input cap..."
+    )
+    try:
+        with physical_attempt_limit(1):
+            _response, usage = chat_observed(
+                llm,
+                drive_root=drive_root,
+                task_id=task_id,
+                call_type=call_type,
+                messages=[
+                    {"role": "system", "content": DENSITY_PROBE_SYSTEM_PROMPT},
+                    {"role": "user", "content": sample},
+                ],
+                model=model,
+                tools=None,
+                reasoning_effort=DENSITY_PROBE_EFFORT,
+                max_tokens=DENSITY_PROBE_MAX_TOKENS,
+                temperature=None,
+                no_proxy=True,
+            )
+    except BudgetExceeded:
+        raise
+    except Exception as exc:
+        log.warning("Token-density probe failed (%s): %s", call_type, exc, exc_info=True)
+        emit_progress(f"Density probe failed ({type(exc).__name__}); the cold input cap stands.")
+        return "failed"
+    real = int((usage or {}).get("prompt_tokens") or 0)
+    if real <= 0:
+        emit_progress("Density probe returned no usage (prompt_tokens=0); the cold input cap stands.")
+        return "no_usage"
+    record_token_density(
+        drive_root,
+        _normalized_density_model(model),
+        prompt_chars=len(DENSITY_PROBE_SYSTEM_PROMPT) + len(sample),
+        prompt_tokens=real,
+        source=source,
+    )
+    density, density_source = resolve_review_token_density(drive_root, model)
+    emit_progress(f"Token density for {model}: {density:.2f} ({density_source}).")
+    # A witness the store refused (too few chars, an insane ratio) leaves the
+    # cold cap standing — disclosed above by the unchanged source.
+    return "measured" if density_source == "measured" else "unrecorded"
 
 
 # --- Owner acknowledgement (asserted) -----------------------------------------
@@ -1031,9 +1176,14 @@ def probe(
     return ev
 
 
-# Cache-inclusive prompt totals are measurable; GigaChat's semantics remain unknown.
+# Cache-inclusive prompt totals are measurable; GigaChat's and MiniMax's
+# semantics remain unknown. DeepSeek probed 2026-09-01: prompt_tokens =
+# prompt_cache_hit_tokens + prompt_cache_miss_tokens, i.e. cache-inclusive —
+# and its automatic cache makes nearly every warm call cache-bearing, so
+# excluding it would starve the route of density witnesses entirely.
 _CACHE_INCLUSIVE_PROMPT_TOKEN_PROVIDERS = frozenset({
     "openrouter", "openai", "openai-compatible", "cloudru", "local", "anthropic",
+    "deepseek",
 })
 
 
@@ -1041,14 +1191,24 @@ def observe_token_density(request: Any, usage: Optional[Dict[str, Any]], *, driv
     """Learn density after settlement; unknown cache semantics produce no witness."""
     try:
         normalized = dict(usage or {})
-        cache_bearing = bool(
-            int(normalized.get("cached_tokens") or 0)
-            or int(normalized.get("cache_write_tokens") or 0)
-        )
+        cached = int(normalized.get("cached_tokens") or 0)
+        cache_bearing = bool(cached or int(normalized.get("cache_write_tokens") or 0))
         provider = str(request.provider or "").strip().lower()
         if cache_bearing and provider not in _CACHE_INCLUSIVE_PROMPT_TOKEN_PROVIDERS:
             return
         real = int(normalized.get("prompt_tokens") or normalized.get("input_tokens") or 0)
+        # A cache-inclusive total landing on 2 x cached_tokens (+-1) is a gateway
+        # adding the cache read on top of an already inclusive total, not a
+        # tokenizer measurement (paid run 2026-09-04: 22 openrouter gemini rows
+        # at exactly 2 x cached - 1, beside honest rows of the same prompt at
+        # 1.00-1.17 x cached). One such row, promoted by the densest-wins review
+        # reducer, governs the exact model for the 90-day TTL (1.81 against a
+        # real 0.88-1.03), so it is no witness. An honest row with
+        # uncached == cached +-1 is a coincidence whose loss costs nothing
+        # (writes are throttled and five pairs retained); uncached ABOVE cached
+        # is ordinary and stays measurable.
+        if cached and abs(real - 2 * cached) <= 1:
+            return
         # The witness MUST calibrate the basis the fit estimator measures on
         # (bounded image proxy) — the raw-base64 basis fed a self-consistent
         # ~27% under-prediction: measure_main_fit multiplied a BOUNDED

@@ -75,6 +75,22 @@ def coerce_chat_identity(value: Any, default: int = 1) -> int:
         return default
 
 
+def row_chat_identity(*candidates: Any, default: int = 0) -> int:
+    """The row's OWN address: the FIRST PRESENT candidate, coerced.
+
+    Sibling of ``notification_chat_route`` for the other question. Routing asks
+    "where does this notice go" and therefore suppresses synthetic A2A ids;
+    a RECORD must not, or a synthetic row would be filed under an audience it
+    never had. Addressing is honest — the broadcast choke is what keeps A2A
+    traffic out of a human stream, not a rewritten record.
+    """
+    for candidate in candidates:
+        if candidate is None or (isinstance(candidate, str) and not candidate.strip()):
+            continue
+        return coerce_chat_identity(candidate, default)
+    return default
+
+
 def notification_chat_route(*candidates: Any) -> Optional[int]:
     """The first DELIVERABLE chat among ``candidates``, or None when there is none.
 

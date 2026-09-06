@@ -26,12 +26,15 @@ export const REUSABLE_TASK_IDS = new Set(['bg-consciousness', 'active']);
 
 /**
  * v6.82 (P5): may this live card offer the stop/hurry control?
- * Card shape alone cannot answer it — an in-process direct-chat turn mints an
- * ordinary non-reusable, non-subagent card (supervisor/workers.py builds it a
- * real uuid task id) yet has no queue entry to cancel. So eligibility requires
- * the supervisor's host-attested `cancelable` progress-meta marker on top of
- * the structural gates: a ROOT (non-subagent) pooled card, not a reusable slot,
- * not finished, not converted into a project chip.
+ * Card shape alone cannot answer it — a subagent narration replayed without
+ * its lineage would mint a root-shaped card with a live Cancel. So eligibility
+ * requires the supervisor's host-attested `cancelable` progress-meta marker on
+ * top of the structural gates: a ROOT (non-subagent) card, not a reusable
+ * slot, not finished, not converted into a project chip. The marker is stamped
+ * from the ONE ownership seam the cancel endpoint itself consults — a pooled
+ * root's RUNNING row, or the in-process direct-chat turn (which has no queue
+ * row but is stopped cooperatively through the same owner mailbox) — so a
+ * card that shows the control is a task the endpoint will actually stop.
  */
 export function cancelRunEligibility({
     groupId = '', isSubagent = false, finished = false, cancelable = false, converted = false,

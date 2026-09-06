@@ -11,7 +11,8 @@ import subprocess
 
 import pytest
 
-from ouroboros.tools.core import _code_search, _edit_text, _is_search_skippable, _read_file, _write_file
+from ouroboros.tools.core import _code_search, _edit_text, _is_search_skippable, _write_file
+from ouroboros.tools.core_file_tools import _read_file
 from ouroboros.tools.registry import ToolContext
 
 

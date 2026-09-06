@@ -166,10 +166,10 @@ def test_mandatory_reasoning_400_through_retry_ladder(
     (_create_chat_completion_with_retries with a fake create_fn): first send
     400s with the live Gemini text, the floored retry succeeds, and the second
     physical payload carries effort low with the carrier present."""
-    import ouroboros.llm as llm_mod
+    import ouroboros.llm_attempt as llm_attempt_mod
     from ouroboros.llm import LLMClient
 
-    monkeypatch.setattr(llm_mod, "execute_physical_attempt", lambda req, fn: fn())
+    monkeypatch.setattr(llm_attempt_mod, "execute_physical_attempt", lambda req, fn: fn())
     client = LLMClient(api_key="test")
     sends = []
 
@@ -206,10 +206,10 @@ def test_terminal_retry_death_discards_clamp_note(
     """A failed exact-route floor retry commits no model-global authority."""
     import pytest as _pytest
 
-    import ouroboros.llm as llm_mod
+    import ouroboros.llm_attempt as llm_attempt_mod
     from ouroboros.llm import LLMClient
 
-    monkeypatch.setattr(llm_mod, "execute_physical_attempt", lambda req, fn: fn())
+    monkeypatch.setattr(llm_attempt_mod, "execute_physical_attempt", lambda req, fn: fn())
     client = LLMClient(api_key="test")
     sends = []
 
@@ -242,10 +242,10 @@ def test_mandatory_reasoning_body_400_in_http200_recovers(
         def model_dump(self):
             return self._body
 
-    import ouroboros.llm as llm_mod
+    import ouroboros.llm_attempt as llm_attempt_mod
     from ouroboros.llm import LLMClient
 
-    monkeypatch.setattr(llm_mod, "execute_physical_attempt", lambda req, fn: fn())
+    monkeypatch.setattr(llm_attempt_mod, "execute_physical_attempt", lambda req, fn: fn())
     client = LLMClient(api_key="test")
     sends = []
     body_err = _FakeResp({
@@ -435,19 +435,19 @@ def test_usage_accounting_abort_discards_clamp_note(
 
     import pytest as _pytest
 
-    import ouroboros.llm as llm_mod
+    import ouroboros.llm_attempt as llm_attempt_mod
     from ouroboros.llm import LLMClient
     from ouroboros.usage_accounting import UsageAccountingError
 
     def _abort(req, fn):
         raise UsageAccountingError("budget rail")
 
-    monkeypatch.setattr(llm_mod, "execute_physical_attempt", _abort)
+    monkeypatch.setattr(llm_attempt_mod, "execute_physical_attempt", _abort)
 
     async def _abort_async(req, fn):
         raise UsageAccountingError("budget rail")
 
-    monkeypatch.setattr(llm_mod, "execute_physical_attempt_async", _abort_async)
+    monkeypatch.setattr(llm_attempt_mod, "execute_physical_attempt_async", _abort_async)
     client = LLMClient(api_key="test")
     target = {"usage_model": "vendor/uae-test", "resolved_model": "vendor/uae-test"}
 
@@ -460,12 +460,18 @@ def test_usage_accounting_abort_discards_clamp_note(
         client._create_chat_completion_with_retries(lambda **kw: {"ok": True}, {"model": "m"}, target)
     assert client._pop_effort_clamp_disclosure() is None
 
-    assert client._clamp_effort_for_model("vendor/uae-test", "none") == "low"
-    with _pytest.raises(UsageAccountingError):
-        asyncio.run(client._create_chat_completion_with_retries_async(
-            lambda **kw: {"ok": True}, {"model": "m"}, target,
-        ))
-    assert client._pop_effort_clamp_disclosure() is None
+    # The note lives in a ContextVar (isolated per thread AND per asyncio
+    # task, like the reasoning pin), so stage it where chat_async does: inside
+    # the coroutine that runs the driver.
+    async def _stage_then_abort():
+        assert client._clamp_effort_for_model("vendor/uae-test", "none") == "low"
+        with _pytest.raises(UsageAccountingError):
+            await client._create_chat_completion_with_retries_async(
+                lambda **kw: {"ok": True}, {"model": "m"}, target,
+            )
+        assert client._pop_effort_clamp_disclosure() is None
+
+    asyncio.run(_stage_then_abort())
 
 
 def test_uae_on_floored_resend_discards_clamp_note(
@@ -484,7 +490,7 @@ def test_uae_on_floored_resend_discards_clamp_note(
 
     import pytest as _pytest
 
-    import ouroboros.llm as llm_mod
+    import ouroboros.llm_attempt as llm_attempt_mod
     from ouroboros.llm import LLMClient
     from ouroboros.usage_accounting import UsageAccountingError
 
@@ -496,7 +502,7 @@ def test_uae_on_floored_resend_discards_clamp_note(
             raise UsageAccountingError("budget rail")
         return fn()
 
-    monkeypatch.setattr(llm_mod, "execute_physical_attempt", _gate)
+    monkeypatch.setattr(llm_attempt_mod, "execute_physical_attempt", _gate)
     client = LLMClient(api_key="test")
     body_err = _FakeResp({
         "error": {"code": 400, "message": "Reasoning is mandatory for this endpoint and cannot be disabled."},

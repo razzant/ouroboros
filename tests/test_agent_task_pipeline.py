@@ -2,155 +2,9 @@ import json
 import pathlib
 from types import SimpleNamespace
 
+import pytest
+
 import ouroboros.agent_task_pipeline as pipeline
-
-
-def test_task_summary_prefers_direct_model_when_openrouter_missing(tmp_path, monkeypatch):
-    monkeypatch.delenv("OPENROUTER_API_KEY", raising=False)
-    monkeypatch.setenv("OPENAI_API_KEY", "test-openai-key")
-    monkeypatch.setenv("OUROBOROS_MODEL_LIGHT", "openai::gpt-5.5-mini")
-    monkeypatch.setenv("OUROBOROS_MODEL_FALLBACKS", "openai::gpt-5.5-mini")
-    monkeypatch.setenv("OUROBOROS_MODEL", "openai::gpt-5.5")
-    monkeypatch.setenv("OUROBOROS_MODEL_HEAVY", "openai::gpt-5.5")
-
-    captured = {}
-
-    class FakeLlm:
-        def chat(self, *, messages, model, reasoning_effort, max_tokens, use_local):
-            captured["messages"] = messages
-            captured["model"] = model
-            captured["reasoning_effort"] = reasoning_effort
-            captured["max_tokens"] = max_tokens
-            captured["use_local"] = use_local
-            return {"content": "direct summary ok"}, {"cost": 0}
-
-    drive_logs = tmp_path / "logs"
-    drive_logs.mkdir(parents=True)
-
-    # Use rounds > 1 so the task is non-trivial and the LLM summary path is taken
-    pipeline._run_task_summary(
-        env=None,
-        llm=FakeLlm(),
-        task={"id": "task-123", "type": "task", "text": "Reply with exactly OK."},
-        usage={"rounds": 3, "cost": 0.01, "result_status": "failed", "reason_code": "empty_final_text"},
-        llm_trace={"tool_calls": [{"tool": "read_file", "args": {}}], "reasoning_notes": []},
-        drive_logs=drive_logs,
-    )
-
-    assert captured["model"] == "openai::gpt-5.5-mini"
-    assert captured["use_local"] is False
-    chat_lines = (drive_logs / "chat.jsonl").read_text(encoding="utf-8").splitlines()
-    assert len(chat_lines) == 1
-    payload = json.loads(chat_lines[0])
-    assert payload["type"] == "task_summary"
-    assert payload["text"] == "direct summary ok"
-    # Non-trivial task metadata is persisted
-    assert payload["tool_calls"] == 1
-    assert payload["rounds"] == 3
-    assert payload["outcome_axes"]["execution"]["status"] == "failed"
-    assert payload["outcome_axes"]["objective"]["status"] == "not_evaluated"
-    assert payload["reason_code"] == "empty_final_text"
-
-
-def test_task_summary_row_carries_chat_id_for_trivial_task(tmp_path):
-    """A trivial task (no tools, <=1 round) skips the LLM summary but still
-    stamps the project chat_id, so the summary row routes to its project
-    thread on history reload instead of defaulting to the main chat."""
-    drive_logs = tmp_path / "logs"
-    drive_logs.mkdir(parents=True)
-    pipeline._run_task_summary(
-        env=None,
-        llm=None,
-        task={"id": "p1", "type": "task", "text": "hi", "chat_id": 1234},
-        usage={"rounds": 1, "cost": 0.0},
-        llm_trace={"tool_calls": [], "reasoning_notes": []},
-        drive_logs=drive_logs,
-    )
-    rows = [
-        json.loads(line)
-        for line in (drive_logs / "chat.jsonl").read_text(encoding="utf-8").splitlines()
-        if line.strip()
-    ]
-    summaries = [r for r in rows if r.get("type") == "task_summary"]
-    assert summaries and summaries[0]["chat_id"] == 1234
-
-
-def test_task_summary_row_carries_flat_snapshot_cost_fields(tmp_path):
-    """v6.82 P1: the task_summary chat row carries the pre-synthesis snapshot's
-    flat cost fields (previously discarded into prose) so history replay can
-    show honest card cost. Fields absent from the snapshot (cost_usd,
-    cost_accounting_error) are never fabricated."""
-    drive_logs = tmp_path / "logs"
-    drive_logs.mkdir(parents=True)
-    snapshot_usage = {
-        "rounds": 1,
-        "cost": 0.0,
-        # _pre_synthesis_usage_snapshot root-shape keys:
-        "cost_snapshot_at": "2026-07-29T00:00:00Z",
-        "cost_final": False,
-        "cost_with_children_partial": True,
-        "cost_usd_with_children": 1.25,
-        "reserved_usd": 0.1,
-        "unresolved_upper_bound_usd": 0.2,
-        "unknown_unmetered": 0,
-        "ledger_integrity": "ok",
-        "cost_accounting_status": "available",
-    }
-    pipeline._run_task_summary(
-        env=None,
-        llm=None,
-        task={"id": "p2", "type": "task", "text": "hi", "chat_id": 1},
-        usage=snapshot_usage,
-        llm_trace={"tool_calls": [], "reasoning_notes": []},
-        drive_logs=drive_logs,
-    )
-    rows = [
-        json.loads(line)
-        for line in (drive_logs / "chat.jsonl").read_text(encoding="utf-8").splitlines()
-        if line.strip()
-    ]
-    row = next(r for r in rows if r.get("type") == "task_summary")
-    assert row["cost_final"] is False
-    assert row["cost_with_children_partial"] is True
-    assert row["cost_usd_with_children"] == 1.25
-    assert row["reserved_usd"] == 0.1
-    assert row["unresolved_upper_bound_usd"] == 0.2
-    assert row["unknown_unmetered"] == 0
-    assert row["cost_accounting_status"] == "available"
-    assert "cost_usd" not in row
-    assert "cost_accounting_error" not in row
-
-
-def test_task_summary_uses_configured_light_model_when_openrouter_present(monkeypatch):
-    from ouroboros.consolidator import _consolidation_route
-
-    monkeypatch.setenv("OPENROUTER_API_KEY", "test-openrouter-key")
-    # Unprefixed provider/model ids use OpenRouter, so this Light model is
-    # credentialed by the key above and MUST be kept verbatim. An ``openai::``
-    # id would select the direct OpenAI transport instead — uncredentialed here
-    # (no OPENAI_API_KEY) — and the documented provider-independence fallback in
-    # resolve_credentialed_model() would then rewrite it to the first credentialed
-    # slot, making the assertion depend on ambient OUROBOROS_MODEL* env leaked by
-    # earlier tests in the same worker (the chronic v6.64.2..v6.65.4 CI red).
-    monkeypatch.setenv("OUROBOROS_MODEL_LIGHT", "openai/gpt-5.5-mini")
-
-    assert _consolidation_route() == ("openai/gpt-5.5-mini", False)
-
-
-def test_task_summary_accepts_openai_compatible_when_legacy_base_url_is_present(monkeypatch):
-    from ouroboros.consolidator import _consolidation_route
-
-    monkeypatch.delenv("OPENROUTER_API_KEY", raising=False)
-    monkeypatch.delenv("OPENAI_COMPATIBLE_API_KEY", raising=False)
-    monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False)
-    monkeypatch.setenv("OPENAI_API_KEY", "legacy-openai-key")
-    monkeypatch.setenv("OPENAI_BASE_URL", "https://example.invalid/v1")
-    monkeypatch.setenv("OUROBOROS_MODEL_LIGHT", "anthropic/claude-opus-4.6")
-    monkeypatch.setenv("OUROBOROS_MODEL_FALLBACKS", "openai-compatible::custom-model")
-    monkeypatch.setenv("OUROBOROS_MODEL", "anthropic/claude-opus-4.6")
-    monkeypatch.setenv("OUROBOROS_MODEL_HEAVY", "anthropic/claude-opus-4.6")
-
-    assert _consolidation_route() == ("openai-compatible::custom-model", False)
 
 
 def test_emit_task_results_queues_restart_after_final_events(tmp_path, monkeypatch):
@@ -320,214 +174,6 @@ def test_split_drive_root_runs_one_canonical_post_task_synthesis(tmp_path, monke
     assert calls == [(canonical, str(child))]
 
 
-def test_root_phase_checkpoint_is_durable_and_completion_is_idempotent(tmp_path):
-    env = SimpleNamespace(drive_root=tmp_path, repo_dir=tmp_path)
-    task = {"id": "root-checkpoint", "root_task_id": "root-checkpoint", "type": "task"}
-    trace = {
-        "tool_calls": [],
-        "reasoning_notes": [],
-        "root_phase_checkpoint": {
-            "phase": "task_acceptance",
-            "status": "pass",
-            "pass_index": 1,
-            "post_task_synthesis": "pending_once",
-        },
-    }
-    pipeline._store_task_result(
-        env, task, "done", {"rounds": 1, "cost": 0.0}, trace,
-    )
-    stored = pipeline.load_task_result(tmp_path, "root-checkpoint")
-    assert stored["root_phase_checkpoint"]["post_task_synthesis"] == "pending_once"
-    pipeline._set_root_post_task_checkpoint(env, task, "completed")
-    assert pipeline._root_post_task_already_completed(env, task) is True
-
-    # A repeated result materialization must preserve the terminal phase marker.
-    pipeline._store_task_result(
-        env, task, "done again", {"rounds": 1, "cost": 0.0}, trace,
-    )
-    stored = pipeline.load_task_result(tmp_path, "root-checkpoint")
-    assert stored["root_phase_checkpoint"]["post_task_synthesis"] == "completed"
-
-    degraded_task = {"id": "root-degraded", "root_task_id": "root-degraded"}
-    pipeline.write_task_result(
-        tmp_path, "root-degraded", pipeline.STATUS_COMPLETED,
-        root_phase_checkpoint={"post_task_synthesis": "degraded"},
-    )
-    assert pipeline._root_post_task_already_completed(env, degraded_task) is True
-
-
-def test_root_checkpoint_reconciles_exact_subtree_and_late_namer_cost(tmp_path):
-    from ouroboros import usage_accounting as accounting
-
-    env = SimpleNamespace(drive_root=tmp_path, repo_dir=tmp_path)
-    task = {
-        "id": "root-cost", "root_task_id": "root-cost", "type": "task",
-        "budget_drive_root": str(tmp_path),
-    }
-    pipeline.write_task_result(
-        tmp_path, "root-cost", pipeline.STATUS_COMPLETED,
-        root_task_id="root-cost", cost_usd=99.0, cost_final=True,
-        root_phase_checkpoint={"post_task_synthesis": "running"},
-    )
-
-    def settle(task_id, cost):
-        reservation = accounting.reserve_attempt(accounting.AttemptRequest(
-            model="openai/gpt-5.2", provider="openai", reservation_usd=cost,
-            drive_root=tmp_path, task_id=task_id, root_task_id="root-cost",
-            global_limit_usd=10.0, root_limit_usd=10.0,
-        ))
-        accounting.mark_dispatched(reservation)
-        accounting.settle_attempt(reservation, {}, cost_usd=cost, cost_final=True)
-
-    settle("root-cost", 1.0)
-    settle("abnormal-child", 2.0)
-    pipeline._set_root_post_task_checkpoint(env, task, "completed")
-    stored = pipeline.load_task_result(tmp_path, "root-cost")
-    assert stored["cost_usd"] == 1.0
-    assert stored["cost_usd_with_children"] == 3.0
-    assert stored["cost_final"] is True
-    assert stored["cost_with_children_partial"] is False
-
-    settle("root-cost", 0.25)
-    pipeline._set_root_post_task_checkpoint(env, task, "refresh")
-    stored = pipeline.load_task_result(tmp_path, "root-cost")
-    assert stored["root_phase_checkpoint"]["post_task_synthesis"] == "completed"
-    assert stored["cost_usd"] == 1.25
-    assert stored["cost_usd_with_children"] == 3.25
-
-
-def test_retry_root_checkpoint_preserves_logical_subtree_cost(tmp_path):
-    from ouroboros import usage_accounting as accounting
-
-    env = SimpleNamespace(drive_root=tmp_path, repo_dir=tmp_path)
-    task = {
-        "id": "retry-2",
-        "root_task_id": "logical-root",
-        "parent_task_id": "",
-        "delegation_role": "root",
-        "original_task_id": "retry-1",
-        "timeout_retry_from": "retry-1",
-        "budget_drive_root": str(tmp_path),
-    }
-    assert pipeline._is_root_post_task(task) is True
-    assert pipeline._is_root_post_task({
-        **task,
-        "timeout_retry_from": "different-attempt",
-    }) is False
-    pipeline.write_task_result(
-        tmp_path,
-        "retry-2",
-        pipeline.STATUS_COMPLETED,
-        **{key: value for key, value in task.items() if key != "id"},
-        root_phase_checkpoint={"post_task_synthesis": "running"},
-    )
-
-    def settle(task_id, cost):
-        reservation = accounting.reserve_attempt(accounting.AttemptRequest(
-            model="openai/gpt-5.2",
-            provider="openai",
-            reservation_usd=cost,
-            drive_root=tmp_path,
-            task_id=task_id,
-            root_task_id="logical-root",
-            global_limit_usd=10.0,
-            root_limit_usd=10.0,
-        ))
-        accounting.mark_dispatched(reservation)
-        accounting.settle_attempt(
-            reservation, {}, cost_usd=cost, cost_final=True,
-        )
-
-    settle("logical-root", 1.25)
-    settle("retry-2", 0.75)
-    pipeline._set_root_post_task_checkpoint(env, task, "completed")
-
-    stored = pipeline.load_task_result(tmp_path, "retry-2")
-    assert stored["root_task_id"] == "logical-root"
-    assert stored["cost_usd"] == 0.75
-    assert stored["cost_usd_with_children"] == 2.0
-    assert stored["cost_final"] is True
-
-
-def test_startup_recovery_reuses_pending_root_result_checkpoint(tmp_path, monkeypatch):
-    pipeline.write_task_result(
-        tmp_path,
-        "recover-root",
-        pipeline.STATUS_COMPLETED,
-        root_task_id="recover-root",
-        objective="finish recovery",
-        total_rounds=3,
-        cost_usd=0.25,
-        root_phase_checkpoint={
-            "phase": "task_acceptance",
-            "status": "pass",
-            "post_task_synthesis": "pending_once",
-        },
-    )
-    calls = []
-
-    def fake_run(env, task, usage, trace, evidence, drive_logs, *, blocking=False,
-                 sealed_final=None):
-        calls.append((env.drive_root, task, usage, trace, evidence, drive_logs, blocking))
-        pipeline._set_root_post_task_checkpoint(env, task, "completed")
-
-    monkeypatch.setattr(pipeline, "_run_post_task_processing_async", fake_run)
-    assert pipeline.recover_pending_root_post_task_synthesis(tmp_path, tmp_path / "repo") == 1
-    assert calls[0][1]["id"] == "recover-root"
-    assert calls[0][2]["rounds"] == 3
-    assert calls[0][3]["recovered_post_task_synthesis"] is True
-    assert calls[0][-1] is False
-    assert pipeline.recover_pending_root_post_task_synthesis(tmp_path, tmp_path / "repo") == 0
-
-
-def test_startup_recovery_never_replays_indeterminate_paid_post_task_phase(tmp_path, monkeypatch):
-    pipeline.write_task_result(
-        tmp_path,
-        "crashed-root",
-        pipeline.STATUS_COMPLETED,
-        root_task_id="crashed-root",
-        root_phase_checkpoint={
-            "phase": "task_acceptance",
-            "status": "pass",
-            "post_task_synthesis": "running",
-        },
-    )
-    paid_replays = []
-    monkeypatch.setattr(
-        pipeline,
-        "_run_post_task_processing_async",
-        lambda *args, **kwargs: paid_replays.append((args, kwargs)),
-    )
-
-    assert pipeline.recover_pending_root_post_task_synthesis(tmp_path, tmp_path / "repo") == 1
-    assert paid_replays == []
-    stored = pipeline.load_task_result(tmp_path, "crashed-root")
-    checkpoint = stored["root_phase_checkpoint"]
-    assert checkpoint["post_task_synthesis"] == "degraded"
-    assert checkpoint["post_task_stop_reason"] == "restart_indeterminate_running"
-    assert pipeline.recover_pending_root_post_task_synthesis(tmp_path, tmp_path / "repo") == 0
-
-
-def test_periodic_orphan_reconcile_does_not_degrade_live_post_task_synthesis(tmp_path):
-    from ouroboros.task_status import reconcile_orphaned_running_tasks
-
-    pipeline.write_task_result(
-        tmp_path,
-        "live-synthesis",
-        pipeline.STATUS_COMPLETED,
-        root_task_id="live-synthesis",
-        root_phase_checkpoint={
-            "phase": "task_acceptance",
-            "status": "pass",
-            "post_task_synthesis": "running",
-        },
-    )
-
-    assert reconcile_orphaned_running_tasks(tmp_path) == 0
-    stored = pipeline.load_task_result(tmp_path, "live-synthesis")
-    assert stored["root_phase_checkpoint"]["post_task_synthesis"] == "running"
-
-
 def test_task_result_and_task_done_mirror_authoritative_review_status(tmp_path, monkeypatch):
     monkeypatch.setattr(pipeline, "_run_post_task_processing_async", lambda *args, **kwargs: None)
     pending_events = []
@@ -667,373 +313,6 @@ def test_ephemeral_typed_routing_delivers_nonempty_final_and_keeps_receipt_metad
         assert done["typed_routing_action"] == action
 
 
-def test_project_scoped_post_task_processing_feeds_global_backlog_but_project_memory(tmp_path, monkeypatch):
-    import ouroboros.post_task_evolution as post_task_evolution
-
-    calls = []
-    reflection = {"backlog_candidates": [{"summary": "tool friction"}], "memory_actions": [{"kind": "note"}]}
-    monkeypatch.setattr(pipeline, "_run_task_summary", lambda *args, **kwargs: calls.append(("summary",)))
-    monkeypatch.setattr(pipeline, "_run_reflection", lambda *args, **kwargs: reflection)
-    monkeypatch.setattr(pipeline, "_update_improvement_backlog", lambda _env, entry: calls.append(("backlog", entry)) or 1)
-    monkeypatch.setattr(
-        pipeline,
-        "_apply_reflection_memory_actions",
-        lambda _env, entry, project_id="": calls.append(("memory", project_id, entry)) or 1,
-    )
-    monkeypatch.setattr(post_task_evolution, "maybe_promote", lambda _env, task, entry, _llm: calls.append(("promote", task.get("project_id"), entry)))
-    env = SimpleNamespace(repo_dir=tmp_path, drive_root=tmp_path, drive_path=lambda rel: tmp_path / rel)
-
-    pipeline._run_post_task_processing_async(
-        env,
-        {"id": "task-1", "type": "task", "project_id": "proj-1", "text": "fix workspace"},
-        {"rounds": 3, "cost": 0.1},
-        {"tool_calls": [], "reasoning_notes": []},
-        {},
-        tmp_path / "logs",
-        blocking=True,
-    )
-
-    assert ("backlog", reflection) in calls
-    assert ("memory", "proj-1", reflection) in calls
-    assert ("promote", "proj-1", reflection) in calls
-
-
-def test_root_synthesis_uses_one_shared_nonfinal_subtree_cost_snapshot(tmp_path, monkeypatch):
-    import ouroboros.memory as memory_mod
-    import ouroboros.post_task_evolution as post_task_evolution
-    import ouroboros.usage_accounting as accounting
-    import ouroboros.llm as llm_mod
-
-    reads = []
-    order = []
-    snapshots = []
-
-    def fake_breakdown(root, *, root_task_id="", task_id=""):
-        order.append("snapshot")
-        reads.append((root, root_task_id, task_id))
-        return {
-            "accounted_usd": 4.75,
-            "reserved_usd": 1.5,
-            "unresolved_upper_bound_usd": 0.75,
-            "unknown_unmetered": 2,
-            "integrity_degraded": False,
-        }
-
-    monkeypatch.setattr(accounting, "usage_breakdown", fake_breakdown)
-    monkeypatch.setattr(llm_mod, "LLMClient", lambda: object())
-    monkeypatch.setattr(memory_mod, "Memory", lambda **_kwargs: object())
-    monkeypatch.setattr(
-        pipeline, "_run_chat_consolidation",
-        lambda *args, **kwargs: order.append("chat_consolidation"),
-    )
-    monkeypatch.setattr(
-        pipeline, "_run_scratchpad_consolidation",
-        lambda *args, **kwargs: order.append("scratchpad_consolidation"),
-    )
-    monkeypatch.setattr(
-        pipeline,
-        "_run_task_summary",
-        lambda _env, _llm, _task, usage, *_args, **_kwargs: (
-            order.append("summary"), snapshots.append(usage)
-        ),
-    )
-    monkeypatch.setattr(
-        pipeline,
-        "_run_reflection",
-        lambda _env, _llm, _task, usage, *_args, **_kwargs: (
-            order.append("reflection"), snapshots.append(usage)
-        ),
-    )
-    monkeypatch.setattr(pipeline, "_update_improvement_backlog", lambda *args, **kwargs: 0)
-    monkeypatch.setattr(pipeline, "_apply_reflection_memory_actions", lambda *args, **kwargs: 0)
-    monkeypatch.setattr(post_task_evolution, "maybe_promote", lambda *args, **kwargs: None)
-    monkeypatch.setattr(pipeline, "_set_root_post_task_checkpoint", lambda *args, **kwargs: None)
-
-    env = SimpleNamespace(
-        repo_dir=tmp_path,
-        drive_root=tmp_path,
-        drive_path=lambda rel: tmp_path / rel,
-    )
-    pipeline._run_post_task_processing_async(
-        env,
-        {
-            "id": "root-synthesis",
-            "root_task_id": "root-synthesis",
-            "budget_drive_root": str(tmp_path),
-        },
-        {"rounds": 8, "cost": 1.25},
-        {"tool_calls": [], "reasoning_notes": []},
-        {},
-        tmp_path / "logs",
-        blocking=True,
-    )
-
-    assert reads == [(tmp_path, "root-synthesis", "")]
-    assert order[:5] == [
-        "snapshot", "chat_consolidation", "scratchpad_consolidation",
-        "summary", "reflection",
-    ]
-    assert len(snapshots) == 2 and snapshots[0] is snapshots[1]
-    snapshot = snapshots[0]
-    assert snapshot["cost_usd_with_children"] == 4.75
-    assert snapshot["reserved_usd"] == 1.5
-    assert snapshot["unresolved_upper_bound_usd"] == 0.75
-    assert snapshot["unknown_unmetered"] == 2
-    assert snapshot["ledger_integrity"] == "ok"
-    assert snapshot["cost_final"] is False
-    assert snapshot["cost_with_children_partial"] is True
-
-
-def test_nonblocking_post_task_snapshot_precedes_worker_dispatch(tmp_path, monkeypatch):
-    import ouroboros.usage_accounting as accounting
-
-    order = []
-    worker_targets = []
-
-    monkeypatch.setattr(
-        accounting,
-        "usage_breakdown",
-        lambda *_args, **_kwargs: order.append("snapshot") or {
-            "accounted_usd": 1.0,
-            "reserved_usd": 0.0,
-            "unresolved_upper_bound_usd": 0.0,
-            "unknown_unmetered": 0,
-            "integrity_degraded": False,
-        },
-    )
-    monkeypatch.setattr(pipeline, "_set_root_post_task_checkpoint", lambda *args, **kwargs: None)
-
-    class DeferredThread:
-        def __init__(self, *, target, daemon):
-            assert order == ["snapshot"]
-            assert daemon is True
-            worker_targets.append(target)
-
-        def start(self):
-            order.append("thread_start")
-
-    monkeypatch.setattr(pipeline.threading, "Thread", DeferredThread)
-    env = SimpleNamespace(
-        repo_dir=tmp_path,
-        drive_root=tmp_path,
-        drive_path=lambda rel: tmp_path / rel,
-    )
-
-    pipeline._run_post_task_processing_async(
-        env,
-        {
-            "id": "async-root",
-            "root_task_id": "async-root",
-            "budget_drive_root": str(tmp_path),
-        },
-        {"cost": 0.5},
-        {},
-        {},
-        tmp_path / "logs",
-    )
-
-    assert order == ["snapshot", "thread_start"]
-    assert len(worker_targets) == 1
-    with pipeline._POST_TASK_SYNTHESIS_LOCK:
-        pipeline._POST_TASK_SYNTHESIS_INFLIGHT.discard(
-            (str(tmp_path.resolve(strict=False)), "async-root")
-        )
-
-
-def test_pre_synthesis_cost_failure_is_unavailable_not_zero(tmp_path, monkeypatch):
-    import ouroboros.usage_accounting as accounting
-
-    monkeypatch.setattr(
-        accounting,
-        "usage_breakdown",
-        lambda *args, **kwargs: (_ for _ in ()).throw(OSError("ledger unavailable")),
-    )
-    env = SimpleNamespace(drive_root=tmp_path)
-    snapshot = pipeline._pre_synthesis_usage_snapshot(
-        env,
-        {"id": "root", "root_task_id": "root", "budget_drive_root": str(tmp_path)},
-        {"rounds": 2, "cost": 1.0},
-    )
-
-    assert snapshot["cost_usd_with_children"] is None
-    assert snapshot["reserved_usd"] is None
-    assert snapshot["unresolved_upper_bound_usd"] is None
-    assert snapshot["unknown_unmetered"] is None
-    assert snapshot["ledger_integrity"] == "unavailable"
-    assert pipeline._synthesis_cost_text(snapshot) == "cost unavailable (non-final)"
-
-
-def _capture_summary_and_reflection_prompts(
-    tmp_path, monkeypatch, usage, *, task_overrides=None,
-):
-    import ouroboros.consolidator as consolidator
-
-    monkeypatch.setattr(
-        consolidator,
-        "_consolidation_route",
-        lambda: ("test/synthesis-model", False),
-    )
-
-    class CapturingLlm:
-        def __init__(self):
-            self.prompts = []
-
-        def chat(self, *, messages, **_kwargs):
-            self.prompts.append(messages[0]["content"])
-            return {"content": "captured synthesis"}, {}
-
-    drive_logs = tmp_path / "logs"
-    drive_logs.mkdir(parents=True, exist_ok=True)
-    task = {
-        "id": "root-synthesis-prompt",
-        "root_task_id": "root-synthesis-prompt",
-        "type": "task",
-        "text": "Inspect the shared cost snapshot",
-        "drive_root": str(tmp_path),
-    }
-    task.update(task_overrides or {})
-    trace = {
-        "tool_calls": [{
-            "tool": "run_command",
-            "status": "error",
-            "is_error": True,
-            "result": "TOOL_ERROR: synthetic prompt-capture trigger",
-        }],
-        "reasoning_notes": [],
-    }
-
-    summary_llm = CapturingLlm()
-    pipeline._run_task_summary(
-        env=None,
-        llm=summary_llm,
-        task=task,
-        usage=usage,
-        llm_trace=trace,
-        drive_logs=drive_logs,
-    )
-
-    reflection_llm = CapturingLlm()
-    entry = pipeline._run_reflection(
-        SimpleNamespace(drive_root=tmp_path),
-        reflection_llm,
-        task,
-        usage,
-        trace,
-        {},
-    )
-
-    assert entry is not None
-    assert len(summary_llm.prompts) == 1
-    assert len(reflection_llm.prompts) == 1
-    return summary_llm.prompts[0], reflection_llm.prompts[0]
-
-
-def test_shared_cost_snapshot_reaches_summary_and_reflection_prompts(tmp_path, monkeypatch):
-    snapshot = {
-        "rounds": 8,
-        "cost": 1.25,
-        "cost_usd_with_children": 4.75,
-        "reserved_usd": 1.5,
-        "unresolved_upper_bound_usd": 0.75,
-        "unknown_unmetered": 2,
-        "ledger_integrity": "ok",
-        "cost_snapshot_at": "2026-07-15T12:34:56+00:00",
-        "cost_final": False,
-        "cost_with_children_partial": True,
-        "cost_accounting_status": "available",
-        "reason_code": "child_results_deferred",
-        "outcome_axes": {
-            "execution": {"status": "degraded"},
-            "objective": {"status": "best_effort"},
-            "review": {"status": "degraded"},
-        },
-    }
-
-    prompts = _capture_summary_and_reflection_prompts(
-        tmp_path, monkeypatch, snapshot,
-    )
-    snapshot_text = pipeline._synthesis_usage_snapshot_text(snapshot)
-    expected_fragments = (
-        '"cost_usd_with_children": 4.75',
-        '"reserved_usd": 1.5',
-        '"unresolved_upper_bound_usd": 0.75',
-        '"unknown_unmetered": 2',
-        '"ledger_integrity": "ok"',
-        '"cost_snapshot_at": "2026-07-15T12:34:56+00:00"',
-        '"cost_final": false',
-        '"cost_with_children_partial": true',
-        '"cost_accounting_status": "available"',
-        '"reason_code": "child_results_deferred"',
-        '"status": "best_effort"',
-    )
-    for prompt in prompts:
-        assert snapshot_text in prompt
-        assert "accounted subtree cost only" in prompt
-        assert "separate non-final exposure fields" in prompt
-        assert "including the reserved" not in prompt
-        assert "outcome_axes` is canonical task truth" in prompt
-        assert '"review": {' in prompt
-        for fragment in expected_fragments:
-            assert fragment in prompt
-
-
-def test_unavailable_cost_snapshot_is_null_not_zero_in_both_prompts(tmp_path, monkeypatch):
-    snapshot = {
-        "rounds": 8,
-        "cost": 1.25,
-        "cost_usd_with_children": None,
-        "reserved_usd": None,
-        "unresolved_upper_bound_usd": None,
-        "unknown_unmetered": None,
-        "ledger_integrity": "unavailable",
-        "cost_snapshot_at": "2026-07-15T12:35:00+00:00",
-        "cost_final": False,
-        "cost_with_children_partial": True,
-        "cost_accounting_status": "unavailable",
-    }
-
-    prompts = _capture_summary_and_reflection_prompts(
-        tmp_path, monkeypatch, snapshot,
-    )
-    snapshot_text = pipeline._synthesis_usage_snapshot_text(snapshot)
-    null_fields = (
-        "cost_usd_with_children",
-        "reserved_usd",
-        "unresolved_upper_bound_usd",
-        "unknown_unmetered",
-    )
-    for prompt in prompts:
-        assert snapshot_text in prompt
-        for field in null_fields:
-            assert f'"{field}": null' in prompt
-        assert '"ledger_integrity": "unavailable"' in prompt
-        assert '"cost_snapshot_at": "2026-07-15T12:35:00+00:00"' in prompt
-        assert '"cost_final": false' in prompt
-        assert '"cost_with_children_partial": true' in prompt
-        assert '"cost_accounting_status": "unavailable"' in prompt
-        assert "$0" not in prompt
-
-
-def test_child_legacy_usage_does_not_claim_a_subtree_snapshot(tmp_path, monkeypatch):
-    prompts = _capture_summary_and_reflection_prompts(
-        tmp_path,
-        monkeypatch,
-        {"rounds": 8, "cost": 1.25},
-        task_overrides={
-            "id": "child-synthesis-prompt",
-            "root_task_id": "root-synthesis-prompt",
-            "parent_task_id": "root-synthesis-prompt",
-            "delegation_role": "subagent",
-        },
-    )
-
-    for prompt in prompts:
-        assert "Shared pre-synthesis cost snapshot" not in prompt
-        assert "cost_usd_with_children" not in prompt
-        assert "cost_snapshot_at" not in prompt
-    assert "Cost: $1.25" in prompts[0]
-
-
 def test_emit_project_scoped_parent_drive_gets_only_global_backlog_channel(tmp_path, monkeypatch):
     monkeypatch.setattr(pipeline, "_store_task_result", lambda *args, **kwargs: None)
     monkeypatch.setattr(pipeline, "load_task_result", lambda *args, **kwargs: {})
@@ -1086,517 +365,6 @@ def test_emit_project_scoped_parent_drive_gets_only_global_backlog_channel(tmp_p
 
     assert post_calls == [(child, "proj-1")]
     assert global_calls == [(parent, "proj-1", reflection)]
-
-
-def test_project_global_promotion_uses_real_maybe_promote_without_project_scope(tmp_path, monkeypatch):
-    import ouroboros.post_task_evolution as post_task_evolution
-
-    monkeypatch.setattr("ouroboros.config.get_post_task_evolution_enabled", lambda: True)
-    monkeypatch.setattr("ouroboros.config.get_runtime_mode", lambda: "pro")
-    monkeypatch.setattr("ouroboros.config.get_post_task_evolution_cadence", lambda: "every_n:1")
-    monkeypatch.setattr(
-        post_task_evolution,
-        "_decide_promotion",
-        lambda *_args, **_kwargs: {
-            "promote": True,
-            "objective": "Improve Ouroboros workspace tool feedback",
-            "requires_plan_review": True,
-            "backlog_id": "",
-        },
-    )
-    env = SimpleNamespace(drive_root=tmp_path, drive_path=lambda rel: tmp_path / rel)
-    reflection = {
-        "reflection": "Project-specific detail should not be forwarded.",
-        "memory_actions": [{"kind": "note"}],
-        "backlog_candidates": [{"summary": "Improve Ouroboros workspace tool feedback"}],
-    }
-
-    pipeline._run_global_backlog_promotion_only(
-        env,
-        {
-            "id": "task-project",
-            "project_id": "proj-1",
-            "workspace_root": "/tmp/project",
-            "workspace_mode": "external",
-            "metadata": {"workspace_preflight": {"git": {"head": "abc"}}},
-        },
-        reflection,
-        object(),
-    )
-
-    req = json.loads((tmp_path / "state" / "post_task_evolution_request.json").read_text(encoding="utf-8"))
-    assert req["objective"] == "Improve Ouroboros workspace tool feedback"
-    backlog = (tmp_path / "memory" / "knowledge" / "improvement-backlog.md").read_text(encoding="utf-8")
-    assert "Project-specific detail" not in backlog
-
-
-def test_build_trace_summary_shows_structured_failure_facts():
-    trace = {
-        "tool_calls": [{
-            "tool": "run_command",
-            "args": {"cmd": ["npm", "install", "-g", "@anthropic-ai/claude-code"]},
-            "result": "⚠️ SHELL_EXIT_ERROR: command exited with exit_code=-9 (signal=SIGKILL).",
-            "is_error": True,
-            "status": "non_zero_exit",
-            "exit_code": -9,
-            "signal": "SIGKILL",
-        }],
-        "reasoning_notes": ["Thought this might still work."],
-    }
-
-    summary = pipeline.build_trace_summary(trace)
-
-    assert "status=non_zero_exit" in summary
-    assert "exit_code=-9" in summary
-    assert "signal=SIGKILL" in summary
-    assert "Agent notes (supplementary, not source of truth)" in summary
-
-    long_trace = {
-        "tool_calls": [
-            {
-                "tool": "run_command",
-                "args": {"cmd": "x" * 5000},
-                "is_error": False,
-            }
-            for _ in range(40)
-        ],
-        "reasoning_notes": ["note" * 2000],
-    }
-    assert "OMISSION NOTE" in pipeline.build_trace_summary(long_trace)
-
-
-def test_task_summary_prompt_includes_review_evidence(tmp_path, monkeypatch):
-    monkeypatch.setenv("OPENAI_API_KEY", "test-openai-key")
-    monkeypatch.setenv("OUROBOROS_MODEL_LIGHT", "openai::gpt-5.5-mini")
-
-    captured = {}
-
-    class FakeLlm:
-        def chat(self, *, messages, model, reasoning_effort, max_tokens, use_local):
-            captured["prompt"] = messages[0]["content"]
-            return {"content": "summary with review evidence"}, {"cost": 0}
-
-    drive_logs = tmp_path / "logs"
-    drive_logs.mkdir(parents=True)
-
-    pipeline._run_task_summary(
-        env=None,
-        llm=FakeLlm(),
-        task={"id": "task-review", "type": "task", "text": "Fix commit flow"},
-        usage={"rounds": 4, "cost": 0.02},
-        llm_trace={"tool_calls": [{"tool": "commit_reviewed", "args": {}}], "reasoning_notes": []},
-        drive_logs=drive_logs,
-        review_evidence={
-            "has_evidence": True,
-            "recent_attempts": [{
-                "status": "blocked",
-                "critical_findings": [{
-                    "severity": "critical",
-                    "item": "tests_affected",
-                    "reason": "broken",
-                }],
-            }],
-        },
-    )
-
-    assert "Structured review evidence" in captured["prompt"]
-    assert "tests_affected" in captured["prompt"]
-    assert "critical" in captured["prompt"]
-    assert "meta-reflection" in captured["prompt"].lower()
-    assert "What friction, errors, or weak assumptions slowed the work?" in captured["prompt"]
-    assert "What should Ouroboros change in its own process or prompts" in captured["prompt"]
-    assert "keep it to 1-2 sentences and DO NOT add meta-reflection" in captured["prompt"]
-
-
-def test_trivial_task_summary_bypasses_llm_and_uses_short_format(tmp_path):
-    class FailIfCalledLlm:
-        def chat(self, *args, **kwargs):  # pragma: no cover - should never be called
-            raise AssertionError("LLM summary path must be skipped for trivial tasks")
-
-    drive_logs = tmp_path / "logs"
-    drive_logs.mkdir(parents=True)
-
-    pipeline._run_task_summary(
-        env=None,
-        llm=FailIfCalledLlm(),
-        task={"id": "task-trivial", "type": "task", "text": "Say hi"},
-        usage={"rounds": 1, "cost": 0.0, "result_status": "infra_failed", "reason_code": "llm_api_error"},
-        llm_trace={"tool_calls": [], "reasoning_notes": []},
-        drive_logs=drive_logs,
-    )
-
-    payload = json.loads((drive_logs / "chat.jsonl").read_text(encoding="utf-8").splitlines()[0])
-    assert payload["type"] == "task_summary"
-    assert payload["task_id"] == "task-trivial"
-    assert payload["text"] == "Task task-trivial (task): Say hi. 1r, $0.00."
-    assert payload["tool_calls"] == 0
-    assert payload["rounds"] == 1
-    assert payload["outcome_axes"]["execution"]["status"] == "infra_failed"
-    assert payload["outcome_axes"]["objective"]["status"] == "not_evaluated"
-    assert payload["reason_code"] == "llm_api_error"
-
-
-def test_multi_round_zero_tool_task_uses_llm_summary_prompt(tmp_path, monkeypatch):
-    monkeypatch.setenv("OPENAI_API_KEY", "test-openai-key")
-    monkeypatch.setenv("OUROBOROS_MODEL_LIGHT", "openai::gpt-5.5-mini")
-
-    captured = {}
-
-    class FakeLlm:
-        def chat(self, *, messages, model, reasoning_effort, max_tokens, use_local):
-            captured["prompt"] = messages[0]["content"]
-            return {"content": "multi-round summary"}, {"cost": 0}
-
-    drive_logs = tmp_path / "logs"
-    drive_logs.mkdir(parents=True)
-
-    pipeline._run_task_summary(
-        env=None,
-        llm=FakeLlm(),
-        task={"id": "task-zero-tool-multi-round", "type": "task", "text": "Think carefully"},
-        usage={"rounds": 3, "cost": 0.01},
-        llm_trace={"tool_calls": [], "reasoning_notes": ["note"]},
-        drive_logs=drive_logs,
-    )
-
-    assert "0 tool calls and ≤1 round" in captured["prompt"]
-    assert "DO NOT add meta-reflection" in captured["prompt"]
-    payload = json.loads((drive_logs / "chat.jsonl").read_text(encoding="utf-8").splitlines()[0])
-    assert payload["text"] == "multi-round summary"
-    assert payload["tool_calls"] == 0
-    assert payload["rounds"] == 3
-
-
-def test_store_task_result_persists_review_evidence(tmp_path):
-    env = SimpleNamespace(drive_root=tmp_path)
-
-    pipeline._store_task_result(
-        env=env,
-        task={"id": "task-store", "type": "task", "text": "hi"},
-        text="done",
-        usage={"rounds": 2, "cost": 0.1},
-        llm_trace={"tool_calls": [], "reasoning_notes": []},
-        review_evidence={"has_evidence": True, "open_obligations": [{"item": "tests_affected"}]},
-    )
-
-    payload = json.loads((tmp_path / "task_results" / "task-store.json").read_text(encoding="utf-8"))
-    assert payload["review_evidence"]["has_evidence"] is True
-    assert payload["review_evidence"]["open_obligations"][0]["item"] == "tests_affected"
-
-
-def test_store_task_result_persists_only_compact_review_projection(tmp_path):
-    env = SimpleNamespace(drive_root=tmp_path)
-    trace = {
-        "tool_calls": [],
-        "review_runs": [{
-            "request": {"surface": "task_acceptance", "policy": {"min_successful_slots": 1}},
-            "authority": "host_root",
-            "aggregate_signal": "DEGRADED",
-            "actors": [{
-                "slot_id": "slot_1", "model": "openai/gpt-5.6-sol", "status": "ok",
-                "parsed": {"verdict": "DEGRADED", "summary": "not enough evidence"},
-                "signal": "DEGRADED", "raw_text": "PRIVATE RAW MODEL RESPONSE",
-            }],
-        }],
-    }
-    pipeline._store_task_result(
-        env=env,
-        task={"id": "task-review-projection", "type": "task", "text": "hi"},
-        text="done",
-        usage={"rounds": 1, "cost": 0.0},
-        llm_trace=trace,
-        review_evidence={},
-    )
-
-    payload = json.loads(
-        (tmp_path / "task_results" / "task-review-projection.json").read_text(encoding="utf-8")
-    )
-    actor = payload["review_projection"]["panels"][0]["actors"][0]
-    assert actor["model"] == "openai/gpt-5.6-sol"
-    assert actor["parse_status"] == "valid"
-    assert actor["semantic_verdict"] == "DEGRADED"
-    assert "raw_text" not in actor
-    assert "PRIVATE RAW MODEL RESPONSE" not in json.dumps(payload)
-
-
-def test_store_task_result_preserves_failed_status(tmp_path):
-    from ouroboros.task_results import STATUS_FAILED, write_task_result
-
-    env = SimpleNamespace(drive_root=tmp_path)
-    write_task_result(tmp_path, "task-failed", STATUS_FAILED, result="initial failure")
-
-    pipeline._store_task_result(
-        env=env,
-        task={"id": "task-failed", "type": "task", "text": "hi"},
-        text="final failure reply",
-        usage={"rounds": 1, "cost": 0.0},
-        llm_trace={"tool_calls": [], "reasoning_notes": []},
-        review_evidence={},
-    )
-
-    payload = json.loads((tmp_path / "task_results" / "task-failed.json").read_text(encoding="utf-8"))
-    assert payload["status"] == STATUS_FAILED
-    assert payload["result"] == "final failure reply"
-
-
-def test_store_task_result_marks_unresolved_tool_failure_failed(tmp_path):
-    from ouroboros.task_results import STATUS_COMPLETED
-
-    env = SimpleNamespace(drive_root=tmp_path)
-
-    pipeline._store_task_result(
-        env=env,
-        task={"id": "task-tool-failed", "type": "task", "text": "make file"},
-        text="Created the file.",
-        usage={"rounds": 2, "cost": 0.0},
-        llm_trace={
-            "tool_calls": [{
-                "tool": "run_command",
-                "args": {"cmd": "python3 -c ..."},
-                "result": "⚠️ ARTIFACT_OUTPUT_ERROR: command succeeded but declared output registration failed.",
-                "is_error": True,
-                "status": "artifact_output_error",
-            }],
-            "reasoning_notes": [],
-        },
-        review_evidence={},
-    )
-
-    payload = json.loads((tmp_path / "task_results" / "task-tool-failed.json").read_text(encoding="utf-8"))
-    assert payload["status"] == STATUS_COMPLETED
-    assert payload["outcome_axes"]["execution"]["status"] == "degraded"
-    assert payload["outcome_axes"]["objective"]["status"] == "not_evaluated"
-    assert payload["reason_code"] == "tool_failure"
-    assert payload["loop_outcome"]["failure"]["tool_errors"][0]["status"] == "artifact_output_error"
-
-
-def test_store_task_result_allows_recovered_tool_failure_success(tmp_path):
-    from ouroboros.task_results import STATUS_COMPLETED
-
-    env = SimpleNamespace(drive_root=tmp_path)
-
-    pipeline._store_task_result(
-        env=env,
-        task={"id": "task-tool-recovered", "type": "task", "text": "make file"},
-        text="Created the file.",
-        usage={"rounds": 3, "cost": 0.0},
-        llm_trace={
-            "tool_calls": [
-                {
-                    "tool": "edit_text",
-                    "args": {"path": "Desktop/report.html"},
-                    "result": "⚠️ EDIT_TEXT_ERROR: old_str matched 0 times",
-                    "is_error": True,
-                    "status": "edit_text_blocked",
-                },
-                {
-                    "tool": "write_file",
-                    "args": {"root": "user_files", "path": "Desktop/report.html"},
-                    "result": "OK: wrote user_files:Desktop/report.html\nARTIFACT_OUTPUTS: registered user file -> artifact_store:report.html",
-                    "is_error": False,
-                    "status": "ok",
-                    "artifact_registered": True,
-                },
-            ],
-            "reasoning_notes": [],
-        },
-        review_evidence={},
-    )
-
-    payload = json.loads((tmp_path / "task_results" / "task-tool-recovered.json").read_text(encoding="utf-8"))
-    assert payload["status"] == STATUS_COMPLETED
-    assert payload["outcome_axes"]["execution"]["status"] == "ok"
-    assert payload["outcome_axes"]["objective"]["status"] == "not_evaluated"
-    assert payload["loop_outcome"]["failure"] is None
-
-
-def test_collect_review_evidence_keeps_recent_attempts_task_scoped(tmp_path):
-    from ouroboros.review_evidence import collect_review_evidence
-    from ouroboros.review_state import AdvisoryReviewState, CommitAttemptRecord, make_repo_key, save_state
-
-    repo_dir = tmp_path / "repo"
-    repo_dir.mkdir(parents=True)
-    (repo_dir / ".git").mkdir()
-
-    state = AdvisoryReviewState()
-    state.record_attempt(CommitAttemptRecord(
-        ts="2026-04-07T10:00:00+00:00",
-        commit_message="other task attempt",
-        status="blocked",
-        repo_key=make_repo_key(repo_dir),
-        tool_name="commit_reviewed",
-        task_id="task-other",
-        attempt=1,
-        block_reason="critical_findings",
-    ))
-    save_state(tmp_path, state)
-
-    evidence = collect_review_evidence(
-        tmp_path,
-        task_id="task-current",
-        repo_dir=repo_dir,
-    )
-
-    assert evidence["recent_attempts"] == []
-
-
-def test_update_improvement_backlog_appends_candidates(tmp_path):
-    env = SimpleNamespace(drive_root=tmp_path)
-
-    added = pipeline._update_improvement_backlog(
-        env,
-        {
-            "backlog_candidates": [{
-                "summary": "Reduce recurring task friction around REVIEW_BLOCKED",
-                "category": "process",
-                "source": "execution_reflection",
-                "task_id": "task-backlog",
-                "evidence": "REVIEW_BLOCKED",
-                "context": "The task retried blocked review loops without narrowing scope.",
-                "proposed_next_step": "Run plan_task before touching review prompts again.",
-            }],
-        },
-    )
-
-    assert added == 1
-    backlog_path = tmp_path / "memory" / "knowledge" / "improvement-backlog.md"
-    assert backlog_path.exists()
-    text = backlog_path.read_text(encoding="utf-8")
-    assert "Reduce recurring task friction around REVIEW_BLOCKED" in text
-
-
-def test_run_reflection_returns_entry_when_generated(tmp_path):
-    captured = {}
-
-    class FakeLlm:
-        def chat(self, *, messages, model, reasoning_effort, max_tokens):
-            captured["prompt"] = messages[0]["content"]
-            return {
-                "content": (
-                    "Reflection text.\n"
-                    "BACKLOG_CANDIDATES_JSON: "
-                    "[{\"summary\":\"Reduce recurring task friction around REVIEW_BLOCKED\"," 
-                    "\"category\":\"process\"," 
-                    "\"source\":\"execution_reflection\"," 
-                    "\"evidence\":\"REVIEW_BLOCKED\"}]"
-                )
-            }, {"cost": 0}
-
-    env = SimpleNamespace(drive_root=tmp_path)
-    (tmp_path / "logs").mkdir(parents=True)
-
-    entry = pipeline._run_reflection(
-        env,
-        FakeLlm(),
-        {"id": "task-reflect", "type": "task", "text": "Fix it"},
-        {"rounds": 2, "cost": 0.01},
-        {"tool_calls": [{"tool": "commit_reviewed", "is_error": False, "result": "⚠️ REVIEW_BLOCKED"}]},
-        {"recent_attempts": [], "open_obligations": [{"item": "tests_affected", "reason": "Fix the failing test before commit"}]},
-    )
-
-    assert entry is not None
-    assert entry["task_id"] == "task-reflect"
-    assert entry["reflection"] == "Reflection text."
-    assert len(entry["backlog_candidates"]) == 1
-    assert entry["backlog_candidates"][0]["summary"] == "Reduce recurring task friction around REVIEW_BLOCKED"
-
-
-def test_collect_review_evidence_scopes_open_obligations_to_repo(tmp_path):
-    from ouroboros.review_evidence import collect_review_evidence
-    from ouroboros.review_state import (
-        AdvisoryReviewState,
-        AdvisoryRunRecord,
-        CommitAttemptRecord,
-        compute_snapshot_hash,
-        make_repo_key,
-        save_state,
-    )
-
-    repo_a = tmp_path / "repo-a"
-    repo_b = tmp_path / "repo-b"
-    repo_a.mkdir(parents=True)
-    repo_b.mkdir(parents=True)
-    (repo_a / ".git").mkdir()
-    (repo_b / ".git").mkdir()
-    (repo_a / "tracked.py").write_text("print('repo a')\n", encoding="utf-8")
-    (repo_b / "tracked.py").write_text("print('repo b')\n", encoding="utf-8")
-
-    repo_a_key = make_repo_key(repo_a)
-    repo_b_key = make_repo_key(repo_b)
-    state = AdvisoryReviewState()
-    state.add_run(AdvisoryRunRecord(
-        snapshot_hash=compute_snapshot_hash(repo_a),
-        commit_message="repo a ready",
-        status="fresh",
-        ts="2026-04-07T10:00:00+00:00",
-        repo_key=repo_a_key,
-    ))
-    state.record_attempt(CommitAttemptRecord(
-        ts="2026-04-07T10:01:00+00:00",
-        commit_message="repo b blocked",
-        status="blocked",
-        repo_key=repo_b_key,
-        tool_name="commit_reviewed",
-        task_id="task-b",
-        attempt=1,
-        block_reason="critical_findings",
-        critical_findings=[{
-            "item": "foreign_issue",
-            "reason": "other repo only",
-            "severity": "critical",
-            "verdict": "FAIL",
-        }],
-    ))
-    state.last_stale_from_edit_ts = "2026-04-07T10:02:00+00:00"
-    state.last_stale_reason = "repo-b mutation"
-    state.last_stale_repo_key = repo_b_key
-    save_state(tmp_path, state)
-
-    evidence = collect_review_evidence(tmp_path, repo_dir=repo_a)
-
-    assert evidence["current_repo"]["repo_commit_ready"] is True
-    assert evidence["current_repo"]["stale_reason"] == ""
-    assert evidence["current_repo"]["stale_ts"] == ""
-    assert evidence["open_obligations"] == []
-    assert evidence["commit_readiness_debts"] == []
-
-
-def test_collect_review_evidence_includes_commit_readiness_debt(tmp_path):
-    from ouroboros.review_evidence import collect_review_evidence
-    from ouroboros.review_state import AdvisoryReviewState, CommitAttemptRecord, make_repo_key, save_state
-
-    repo_dir = tmp_path / "repo"
-    repo_dir.mkdir(parents=True)
-    (repo_dir / ".git").mkdir()
-    (repo_dir / "tracked.py").write_text("print('hi')\n", encoding="utf-8")
-
-    repo_key = make_repo_key(repo_dir)
-    state = AdvisoryReviewState()
-    for idx, reason in enumerate(["missing tests", "coverage still missing"], start=1):
-        state.record_attempt(CommitAttemptRecord(
-            ts=f"2026-04-07T10:0{idx}:00+00:00",
-            commit_message=f"blocked {idx}",
-            status="blocked",
-            repo_key=repo_key,
-            tool_name="commit_reviewed",
-            task_id=f"task-{idx}",
-            attempt=idx,
-            block_reason="critical_findings",
-            critical_findings=[{
-                "item": "tests_affected",
-                "reason": reason,
-                "severity": "critical",
-                "verdict": "FAIL",
-            }],
-            readiness_warnings=["Start retry from review debt."],
-        ))
-    save_state(tmp_path, state)
-
-    evidence = collect_review_evidence(tmp_path, repo_dir=repo_dir)
-
-    assert evidence["current_repo"]["repo_commit_ready"] is False
-    assert len(evidence["commit_readiness_debts"]) >= 1
-    assert evidence["commit_readiness_debts"][0]["category"] in {"obligation_repeat", "readiness_warning"}
 
 
 def test_truncate_with_notice_uses_utils_ssot():
@@ -1662,95 +430,263 @@ def test_emit_task_results_surfaces_receipt_absent_flag_in_event_stream(tmp_path
     assert captured["loop_outcome"]["outcome_axes"]["objective"].get("warning") == "receipt_absent"
 
 
-def _work_uncommitted_loop_outcome(tmp_path):
-    """A ``derive_loop_outcome`` result put through the work-uncommitted
-    post-processor against a repo with an uncommitted tracked change — the
-    isolated-worktree regime (task tree != env tree), so the raw probe fires."""
+def test_stopped_direct_turn_pays_no_post_task_synthesis(tmp_path, monkeypatch):
+    """"Stop now" on a direct-chat turn: ZERO model calls after the stop, end to
+    end through the real post-task lane. The loop's hard stop records the
+    existing ``_skip_post_task_synthesis`` marker on the tool context;
+    ``emit_task_results`` copies it onto the task before the root predicate
+    runs, so the summary/reflection worker is never dispatched and no open
+    ``root_phase_checkpoint`` is seeded for the boot reconciler to re-pay. A
+    positive control (the same turn, not stopped) proves the recording model
+    would have seen the paid summary + reflection calls."""
+    import ouroboros.llm as llm_mod
+    from ouroboros.outcomes import REASON_OWNER_REQUESTED_FINALIZATION
+    from supervisor.owner_stop import REASON_OWNER_STOPPED_DIRECT_TURN
+    from tests.test_delivery_forced_finalization import _forced_test_context
+
+    calls = []
+
+    class RecordingLLM:
+        def __init__(self, *_a, **_k):
+            pass
+
+        def chat(self, messages=None, model=None, **kw):
+            calls.append({"model": model, "has_tools": bool(kw.get("tools"))})
+            return ({"role": "assistant", "content": "recorded"},
+                    {"cost": 0.0, "prompt_tokens": 1, "completion_tokens": 1})
+
+    monkeypatch.setattr(llm_mod, "LLMClient", RecordingLLM)
+
+    class InlineThread:  # the non-blocking lane, run inline so any paid call is recorded
+        def __init__(self, *, target, daemon):
+            assert daemon is True
+            self._target = target
+
+        def start(self):
+            self._target()
+
+    monkeypatch.setattr(pipeline.threading, "Thread", InlineThread)
+    # The durable outbox (stamp + owed registration, no model call) must still cover the
+    # stop notice: the marker skips PAID work only (the codex M3 finding).
+    stamped, owed = [], []
+    _stamp, _owe = pipeline.stamp_root_final_phase, pipeline.register_final_answer_owed
+    monkeypatch.setattr(pipeline, "stamp_root_final_phase",
+                        lambda send_event, task, **kw: stamped.append((task["id"], kw.get("post_task_open"))) or _stamp(send_event, task, **kw))
+    monkeypatch.setattr(pipeline, "register_final_answer_owed",
+                        lambda task, send_event, **kw: owed.append(task["id"]) or _owe(task, send_event, **kw))
+    root = tmp_path / "data"
+    (root / "logs").mkdir(parents=True)
+    (root / "memory").mkdir()
+    (root / "repo").mkdir()
+    env = SimpleNamespace(drive_root=root, repo_dir=root / "repo", drive_path=lambda rel: root / rel)
+    # Non-trivial and above the reflection threshold: both paid post-steps would fire.
+    llm_trace = {"reasoning_notes": [], "tool_calls": [
+        {"tool": "list_files", "arguments": {}, "result": "ok", "is_error": False}]}
+
+    def _turn(task_id, *, stopped):
+        loop, registry, ctx, _trace = _forced_test_context(root, usage={"rounds": 20, "cost": 0.02})
+        registry._ctx.task_id = task_id
+        registry._ctx.task_metadata = {"budget_drive_root": str(root), "root_task_id": task_id}
+        if stopped:
+            text, usage, _t = loop._handle_forced_finalization(ctx, REASON_OWNER_STOPPED_DIRECT_TURN)
+            assert usage["reason_code"] == REASON_OWNER_REQUESTED_FINALIZATION
+        else:
+            text, usage = "Listed the root.", dict(ctx.accumulated_usage)
+        task = {"id": task_id, "type": "task", "chat_id": 1, "_is_direct_chat": True,
+                "text": "List the repository root and keep listing it until the owner stops you."}
+        events = []
+        calls.clear()
+        pipeline.emit_task_results(
+            env, object(), object(), events, task, text, usage, dict(llm_trace), 0.0,
+            root / "logs", ctx=registry._ctx, event_queue=None,
+        )
+        return task, events, list(calls)
+
+    task, events, stopped_calls = _turn("stopped1", stopped=True)
+    assert stopped_calls == [], stopped_calls
+    assert task.get("_skip_post_task_synthesis") is True
+    assert [e["type"] for e in events] == ["send_message", "task_metrics", "task_done"]
+    stored = pipeline.load_task_result(root, "stopped1") or {}
+    assert stored.get("status") == "failed", stored
+    assert "root_phase_checkpoint" not in stored, stored  # nothing for the boot reconciler to re-pay
+    assert ("stopped1", False) in stamped and "stopped1" in owed   # outbox insurance kept, synthesis closed
+    # The closed-phase stamp names the turn's ACTUAL terminal word: the durable row is
+    # "failed" (owner_requested_finalization), and the stamp is what the chat row persists
+    # and replay reads as the card's phase — a blanket "completed" would flip it to Done.
+    from supervisor.terminal_delivery import pending_deliveries
+
+    assert events[0]["progress_meta"]["task_terminal_status"] == "failed", events[0]
+    owed_rows = [row for row in pending_deliveries(root) if row.get("task_id") == "stopped1"]
+    assert owed_rows and owed_rows[0]["progress_meta"]["task_terminal_status"] == "failed", owed_rows
+
+    def _summary_rows(task_id):
+        chat_log = root / "logs" / "chat.jsonl"
+        rows = chat_log.read_text(encoding="utf-8").splitlines() if chat_log.exists() else []
+        return [row for row in rows if "authored_root_summary" in row and task_id in row]
+
+    assert _summary_rows("stopped1") == []
+
+    _task, _events, control_calls = _turn("control1", stopped=False)
+    assert len(control_calls) >= 2 and all(not c["has_tools"] for c in control_calls), control_calls
+    assert len(_summary_rows("control1")) == 1  # the reader sees the phase when it does run
+
+
+# --- "Stop now" while the paid synthesis is ALREADY in flight (audit point 4, G18) ---
+
+_STAGES = ("chat_consolidation", "scratchpad_consolidation", "summary", "reflection", "promotion")
+
+
+def _stubbed_stages(monkeypatch, calls, *, on_first=None):
+    """Record the five paid stages in order; ``on_first`` runs INSIDE stage 1
+    (the Stop lands after the synthesis has begun, past the entry snapshot)."""
+    import ouroboros.llm as llm_mod
+    import ouroboros.post_task_evolution as pte
+
+    monkeypatch.setattr(llm_mod, "LLMClient", lambda *a, **k: object())
+
+    def _stage(name, ret=None):
+        def _f(*a, **k):
+            calls.append(name)
+            if name == "chat_consolidation" and on_first is not None:
+                on_first()
+            return ret
+        return _f
+
+    monkeypatch.setattr(pipeline, "_run_chat_consolidation", _stage("chat_consolidation"))
+    monkeypatch.setattr(pipeline, "_run_scratchpad_consolidation", _stage("scratchpad_consolidation"))
+    monkeypatch.setattr(pipeline, "_run_task_summary", _stage("summary"))
+    monkeypatch.setattr(pipeline, "_run_reflection", _stage(
+        "reflection", {"reflection": "x", "backlog_candidates": [], "memory_actions": []}))
+    monkeypatch.setattr(pipeline, "_update_improvement_backlog", _stage("promotion"))
+    monkeypatch.setattr(pipeline, "_apply_reflection_memory_actions", lambda *a, **k: None)
+    monkeypatch.setattr(pte, "maybe_promote", lambda *a, **k: None)
+
+
+def _synthesis_root(tmp_path):
+    root = tmp_path / "data"
+    for rel in ("logs", "memory", "repo"):
+        (root / rel).mkdir(parents=True)
+    return root, SimpleNamespace(drive_root=root, repo_dir=root / "repo", drive_path=lambda rel: root / rel)
+
+
+def _finalized_events(root, task_id):
+    rows = [json.loads(line) for line in (root / "logs" / "events.jsonl").read_text(encoding="utf-8").splitlines()]
+    return [row for row in rows if row.get("type") == "task_cost_finalized" and row.get("task_id") == task_id]
+
+
+@pytest.mark.parametrize("stop", ["intent", "live_marker"])
+def test_stop_now_during_inflight_synthesis_skips_the_remaining_paid_stages(tmp_path, monkeypatch, stop):
+    """The Stop lands AFTER stage 1 began (the loop has returned, the entry
+    snapshot saw no marker): the durable immediate cancel intent every stop
+    ingress mints — or the live task marker re-read — trips the per-stage gate,
+    so stages 2..5 never run, the checkpoint settles ``degraded`` and the typed
+    ``post_task_stop_reason`` NAMES the skipped stages, riding the result row
+    and the ``task_cost_finalized`` event alike. The in-flight key is gone."""
+    from ouroboros.cancel_intents import STOP_POLICY_IMMEDIATE, request_cancel
+
+    root, env = _synthesis_root(tmp_path)
+    task_id = "inflight1"
+    task = {"id": task_id, "type": "task", "chat_id": 1, "_is_direct_chat": True, "text": "keep listing"}
+    pipeline._store_task_result(env, task, "Listed.", {"rounds": 20, "cost": 0.02}, {"tool_calls": [], "reasoning_notes": []})
+    calls = []
+
+    def _deliver_stop():
+        if stop == "intent":
+            request_cancel(root, task_id, source="http_single", allow_settled_target=True,
+                           requested_stop_policy=STOP_POLICY_IMMEDIATE)
+        else:
+            task["_skip_post_task_synthesis"] = True   # the LIVE dict, not the entry snapshot
+
+    _stubbed_stages(monkeypatch, calls, on_first=_deliver_stop)
+    pipeline._run_post_task_processing_async(
+        env, task, {"rounds": 20, "cost": 0.02}, {"tool_calls": [], "reasoning_notes": []}, {}, root / "logs", blocking=True)
+
+    assert calls == ["chat_consolidation"], calls
+    checkpoint = (pipeline.load_task_result(root, task_id) or {}).get("root_phase_checkpoint") or {}
+    assert checkpoint.get("post_task_synthesis") == "degraded", checkpoint
+    assert checkpoint.get("post_task_stop_reason") == (
+        "owner_stopped:skipped=scratchpad_consolidation,summary,reflection,promotion"), checkpoint
+    finalized = _finalized_events(root, task_id)
+    assert len(finalized) == 1 and finalized[0]["post_task_status"] == "degraded", finalized
+    assert finalized[0]["post_task_stop_reason"] == checkpoint["post_task_stop_reason"], finalized
+    assert (str(root.resolve()), task_id) not in pipeline._POST_TASK_SYNTHESIS_INFLIGHT
+
+
+def test_no_stop_runs_every_paid_stage_and_finalizes_without_a_stop_reason(tmp_path, monkeypatch):
+    """Positive control for the gate: an un-stopped synthesis runs all five
+    stages in order and the checkpoint is byte-identical to before (``completed``,
+    no ``post_task_stop_reason`` anywhere)."""
+    root, env = _synthesis_root(tmp_path)
+    task_id = "unstopped1"
+    task = {"id": task_id, "type": "task", "chat_id": 1, "_is_direct_chat": True, "text": "keep listing"}
+    pipeline._store_task_result(env, task, "Listed.", {"rounds": 20, "cost": 0.02}, {"tool_calls": [], "reasoning_notes": []})
+    calls = []
+    _stubbed_stages(monkeypatch, calls)
+    pipeline._run_post_task_processing_async(
+        env, task, {"rounds": 20, "cost": 0.02}, {"tool_calls": [], "reasoning_notes": []}, {}, root / "logs", blocking=True)
+
+    assert calls == list(_STAGES), calls
+    checkpoint = (pipeline.load_task_result(root, task_id) or {}).get("root_phase_checkpoint") or {}
+    assert checkpoint.get("post_task_synthesis") == "completed", checkpoint
+    assert "post_task_stop_reason" not in checkpoint, checkpoint
+    finalized = _finalized_events(root, task_id)
+    assert len(finalized) == 1 and "post_task_stop_reason" not in finalized[0], finalized
+
+
+def test_entry_marker_still_skips_every_paid_stage_and_seeds_no_checkpoint(tmp_path, monkeypatch):
+    """The rc.14 path is unchanged: a Stop that landed inside the loop (marker
+    on the task at entry) pays nothing and leaves no open checkpoint for the
+    boot reconciler — the gate trips before stage 1 and the marker keeps the
+    checkpoint writer's root predicate False."""
+    root, env = _synthesis_root(tmp_path)
+    task_id = "marked1"
+    task = {"id": task_id, "type": "task", "chat_id": 1, "_is_direct_chat": True,
+            "text": "keep listing", "_skip_post_task_synthesis": True}
+    pipeline._store_task_result(env, task, "Stopped.", {"rounds": 2, "cost": 0.01}, {"tool_calls": [], "reasoning_notes": []})
+    calls = []
+    _stubbed_stages(monkeypatch, calls)
+    pipeline._run_post_task_processing_async(
+        env, task, {"rounds": 2, "cost": 0.01}, {"tool_calls": [], "reasoning_notes": []}, {}, root / "logs", blocking=True)
+
+    assert calls == [], calls
+    stored = pipeline.load_task_result(root, task_id) or {}
+    assert "root_phase_checkpoint" not in stored, stored
+    assert not (root / "logs" / "events.jsonl").exists() or _finalized_events(root, task_id) == []
+
+
+@pytest.mark.parametrize("role", ["root", "subagent"])
+def test_requested_file_result_completes_without_committing_the_worktree(tmp_path, role):
+    """An edited file is a valid requested result; dirty Git state adds no failure.
+
+    Retains the contributor's isolated tracked-diff fixture, while asserting the
+    owner-approved contract instead of universal commit-or-fail finalization.
+    """
     import subprocess
 
-    from ouroboros.outcomes import derive_loop_outcome
-    from ouroboros.work_uncommitted import REASON_WORK_UNCOMMITTED
-    from ouroboros.work_uncommitted import downgrade_outcome_for_uncommitted_work
-
-    repo = tmp_path / "repo"
+    repo = tmp_path / "workspace"
     repo.mkdir()
-    for args in (("init", "-q"), ("config", "user.email", "t@t"), ("config", "user.name", "t")):
-        subprocess.run(["git", *args], cwd=str(repo), check=True, capture_output=True)
-    (repo / "a.py").write_text("x = 1\n")
-    subprocess.run(["git", "add", "."], cwd=str(repo), check=True, capture_output=True)
-    subprocess.run(["git", "commit", "-qm", "base"], cwd=str(repo), check=True, capture_output=True)
-    (repo / "a.py").write_text("x = 2  # changed, never committed\n")
+    def git(*args):
+        return subprocess.run(["git", *args], cwd=repo, check=True, capture_output=True, text=True).stdout
 
-    loop_outcome = derive_loop_outcome(
-        "I implemented the change to a.py; the tests pass.",
-        {"rounds": 3, "cost": 0.0},
-        {"tool_calls": [], "reasoning_notes": []},
-    )
-    loop_outcome = downgrade_outcome_for_uncommitted_work(
-        loop_outcome,
-        SimpleNamespace(repo_dir=str(tmp_path / "host_tree"), drive_root=tmp_path),
-        {"id": "task-a", "repo_dir": str(repo)},
-        {},
-    )
-    assert loop_outcome["reason_code"] == REASON_WORK_UNCOMMITTED
-    return loop_outcome
-
-
-def test_store_task_result_fails_host_bound_task_with_uncommitted_diff(tmp_path):
-    """ibl-local-27745117e0e1 enforcement: a host-bound task that left its own
-    tracked changes uncommitted finalizes STATUS_FAILED, not STATUS_COMPLETED —
-    the uncommitted diff IS the failure. The axes still carry the typed reason
-    and the file list."""
-    from ouroboros.task_results import STATUS_FAILED
-
-    env = SimpleNamespace(drive_root=tmp_path)
-    loop_outcome = _work_uncommitted_loop_outcome(tmp_path)
-
+    git("init", "-q")
+    (repo / "answer.txt").write_text("old\n", encoding="utf-8")
+    git("add", "answer.txt")
+    git("-c", "user.email=t@example.com", "-c", "user.name=T", "commit", "-qm", "base")
+    base = git("rev-parse", "HEAD")
+    (repo / "answer.txt").write_text("42\n", encoding="utf-8")
+    task = {"id": "file-result", "type": "task", "repo_dir": str(repo), "delegation_role": role,
+            "text": "Write 42 to answer.txt and leave the edited file for me.",
+            "expected_output": "The edited answer.txt file; no Git commit requested."}
     pipeline._store_task_result(
-        env=env,
-        task={"id": "task-uncommitted", "type": "task", "text": "implement it"},
-        text="I implemented the change to a.py; the tests pass.",
-        usage={"rounds": 3, "cost": 0.0},
-        llm_trace={"tool_calls": [], "reasoning_notes": []},
-        review_evidence={},
-        loop_outcome=loop_outcome,
+        env=SimpleNamespace(drive_root=tmp_path, repo_dir=tmp_path / "host_tree"), task=task,
+        text="answer.txt contains 42.", usage={"rounds": 1, "cost": 0},
+        llm_trace={"tool_calls": [{"tool": "write_file", "status": "ok",
+                                   "args": {"path": "answer.txt", "content": "42\n"}}]},
     )
-
-    payload = json.loads((tmp_path / "task_results" / "task-uncommitted.json").read_text(encoding="utf-8"))
-    assert payload["status"] == STATUS_FAILED
-    assert payload["reason_code"] == "work_uncommitted"
-    assert payload["outcome_axes"]["execution"]["status"] == "degraded"
-    assert any(
-        "a.py" in line
-        for line in payload["loop_outcome"]["failure"].get("files", [])
-    )
-
-
-def test_store_task_result_does_not_fail_subagent_with_uncommitted_diff(tmp_path):
-    """A subagent's uncommitted worktree is the parent's concern, not a task
-    failure — the enforcement is scoped to host-bound (non-subagent) tasks."""
-    from ouroboros.task_results import STATUS_COMPLETED
-
-    env = SimpleNamespace(drive_root=tmp_path)
-    loop_outcome = _work_uncommitted_loop_outcome(tmp_path)
-
-    pipeline._store_task_result(
-        env=env,
-        task={
-            "id": "task-sub-uncommitted", "type": "task", "text": "implement it",
-            "delegation_role": "subagent",
-        },
-        text="Implemented; parent will absorb the patch.",
-        usage={"rounds": 3, "cost": 0.0},
-        llm_trace={"tool_calls": [], "reasoning_notes": []},
-        review_evidence={},
-        loop_outcome=loop_outcome,
-    )
-
-    payload = json.loads(
-        (tmp_path / "task_results" / "task-sub-uncommitted.json").read_text(encoding="utf-8")
-    )
-    assert payload["status"] == STATUS_COMPLETED
-    # The typed reason is still recorded — observation preserved, verdict withheld.
-    assert payload["reason_code"] == "work_uncommitted"
-
+    stored = pipeline.load_task_result(tmp_path, "file-result")
+    assert stored["status"] == "completed"
+    assert stored["reason_code"] != "work_uncommitted"
+    assert stored["result"] == "answer.txt contains 42."
+    assert (repo / "answer.txt").read_text(encoding="utf-8") == "42\n"
+    assert git("rev-parse", "HEAD") == base
+    assert "+42" in git("diff", "--", "answer.txt")

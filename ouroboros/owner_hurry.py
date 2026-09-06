@@ -103,10 +103,18 @@ def _mutate_projection(
     block. Returns the post-write ``{"owner_hurry": ..., "owner_hurry_history":
     ...}`` view (or the pre-write view on abort).
     """
+    from ouroboros.task_results import (
+        require_writable_task_result_schema,
+        stamp_task_result_schema,
+    )
+
     view: Dict[str, Any] = {}
 
     def _mutate(current: Dict[str, Any]) -> Optional[Dict[str, Any]]:
         view.clear()
+        # ABI 7.0: never write over a row a newer schema owns; every write
+        # stamps the row (stamp-on-write, Q8=B).
+        require_writable_task_result_schema(current)
         block = current.get("owner_hurry")
         block = dict(block) if isinstance(block, dict) else None
         history_raw = current.get("owner_hurry_history")
@@ -126,7 +134,7 @@ def _mutate_projection(
             "owner_hurry": updated.get("owner_hurry"),
             "owner_hurry_history": updated.get("owner_hurry_history"),
         })
-        return updated
+        return stamp_task_result_schema(updated)
 
     update_json_locked(_hurry_result_path(drive_root, task_id), _mutate)
     return view

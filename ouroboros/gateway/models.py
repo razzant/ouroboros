@@ -17,6 +17,7 @@ from ouroboros.observability import redact_projection
 from ouroboros.provider_models import (
     ALL_PROVIDER_CREDENTIAL_KEYS,
     ACTIVE_MODEL_SETTING_KEYS,
+    DEEPSEEK_BASE_URL,
     DIRECT_PROVIDER_DEFAULTS,
     MINIMAX_REGION_ENDPOINTS,
     OPENROUTER_DEFAULTS,
@@ -251,6 +252,21 @@ def _provider_specs(
                 "MiniMax",
                 minimax_api_key,
                 minimax_base_url,
+            ),
+        ))
+
+    deepseek_api_key = str(settings.get("DEEPSEEK_API_KEY", "") or "").strip()
+    if deepseek_api_key:
+        # DeepSeek serves an OpenAI-compatible GET /models on its one official
+        # host, so the catalog is fetched live like the other remote providers.
+        specs.append((
+            "deepseek",
+            lambda client: _fetch_openai_compatible_model_catalog(
+                client,
+                "deepseek",
+                "DeepSeek",
+                deepseek_api_key,
+                DEEPSEEK_BASE_URL,
             ),
         ))
 
@@ -616,6 +632,16 @@ async def api_provider_test(request: Request) -> JSONResponse:
         return json_error("request body must be a JSON object", 400)
     if not isinstance(body, dict):
         return json_error("request body must be a JSON object", 400)
+    # Executable gateway ABI (ABI-3, Q7=A): ProviderTestRequest schema gate.
+    from ouroboros.gateway.contracts import ProviderTestRequest
+    from ouroboros.gateway.schema import validate_ingress
+
+    schema_errors = validate_ingress(body, ProviderTestRequest)
+    if schema_errors:
+        return json_error(
+            f"invalid request body: {schema_errors[0]}", 400,
+            schema_errors=schema_errors[:8],
+        )
     provider_id = str(body.get("provider_id", "") or "").strip()
     if not provider_id:
         return json_error("provider_id is required", 400)

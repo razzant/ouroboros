@@ -551,9 +551,9 @@ def test_promote_chat_description_carries_ground_truth_probe():
 def test_degraded_owner_line_bounds_each_reason():
     import inspect
 
-    # The DEGRADED owner line lives with the rest of the acceptance machinery,
-    # which moved out of loop.py whole; the contract below is unchanged.
-    from ouroboros import acceptance_dialogue as accept_mod
+    # v7 L-B split: the degraded-owner-line writer lives with the host
+    # acceptance review owner; loop.py re-exports it.
+    from ouroboros import loop_acceptance_review as accept_mod
 
     src = inspect.getsource(accept_mod)
     assert "more in the task result" in src  # overflow disclosure, not silence
@@ -614,9 +614,10 @@ def test_ephemeral_turn_producer_sets_flag():
     chat-turn producer actually sets it (integration seam, run-2 gate finding)."""
     import inspect
 
-    from supervisor import workers
+    # v7next D08: the chat-turn producer lives in supervisor/worker_chat_lane.py
+    from supervisor import worker_chat_lane
 
-    src = inspect.getsource(workers)
+    src = inspect.getsource(worker_chat_lane)
     assert 'task["_ephemeral_turn"] = True' in src
 
 

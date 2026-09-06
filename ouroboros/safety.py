@@ -22,7 +22,6 @@ from ouroboros.llm import LLMClient
 from ouroboros.loop_llm_call import classify_llm_exception, is_rate_limit_text
 from ouroboros.pricing import emit_llm_usage_event, estimate_cost_optional, infer_provider_from_model
 from ouroboros.utils import sanitize_tool_result_for_log, utc_now_iso
-from supervisor.state import update_budget_from_usage
 
 log = logging.getLogger(__name__)
 
@@ -424,6 +423,15 @@ def _redact_secrets_in_text(text: str) -> str:
 _SAFETY_CONTEXT_CHAR_BUDGET = 4000
 _SAFETY_OMISSION_MARKER = "[… {n} older messages omitted]"
 
+# Character budget for the serialized SUBJECT (the proposed call's own arguments).
+# The subject is embedded VERBATIM — truncating it would hide the tail from the
+# reviewer, so an over-budget subject is REFUSED fail-closed instead: one oversized
+# run_script/run_command payload otherwise inflates this prompt past provider
+# limits, and the conversation budget above cannot help because the subject rides
+# outside it. The refusal is a typed policy denial with a working alternative
+# (split the payload into reviewable calls), never a truncated half-reviewed call.
+_SAFETY_SUBJECT_CHAR_BUDGET = 250_000
+
 
 def _format_messages_for_safety(messages: List[Dict[str, Any]]) -> str:
     """Format compact safety context, redacting before truncation.
@@ -466,16 +474,34 @@ def _format_messages_for_safety(messages: List[Dict[str, Any]]) -> str:
     return "\n".join(kept)
 
 
+def _render_subject_json(arguments: Dict[str, Any]) -> str:
+    """Serialize the redacted call arguments exactly as the check prompt embeds them.
+
+    ``ensure_ascii=False`` keeps serialized length ≈ input length: the default
+    \\uXXXX escaping inflates non-ASCII text 6×, which would make the subject
+    budget below a false promise for e.g. Cyrillic scripts. The prompt goes to
+    an LLM; UTF-8 is fine.
+    """
+    safe_args = _redact_secrets_in_arguments(arguments or {})
+    try:
+        rendered = json.dumps(safe_args, indent=2, default=repr, ensure_ascii=False)
+    except Exception:
+        rendered = repr(safe_args)
+    # A lone surrogate (a validly PARSED \ud800 escape in tool args) survives
+    # json.dumps but is unencodable UTF-8 and would explode the provider send
+    # downstream; the prompt is a rendering, so substitute rather than crash.
+    return rendered.encode("utf-8", "replace").decode("utf-8")
+
+
 def _build_check_prompt(
     tool_name: str,
     arguments: Dict[str, Any],
     messages: Optional[List[Dict[str, Any]]] = None,
+    *,
+    args_json: Optional[str] = None,
 ) -> str:
-    safe_args = _redact_secrets_in_arguments(arguments or {})
-    try:
-        args_json = json.dumps(safe_args, indent=2, default=repr)
-    except Exception:
-        args_json = repr(safe_args)
+    if args_json is None:
+        args_json = _render_subject_json(arguments)
     runtime_mode = os.environ.get("OUROBOROS_RUNTIME_MODE", "advanced") or "advanced"
     prompt = (
         "Proposed tool call:\n"
@@ -560,6 +586,7 @@ _REMOTE_PROVIDER_KEYS = (
     "OPENAI_API_KEY",
     "ANTHROPIC_API_KEY",
     "MINIMAX_API_KEY",
+    "DEEPSEEK_API_KEY",
     "OPENAI_COMPATIBLE_API_KEY",
     "CLOUDRU_FOUNDATION_MODELS_API_KEY",
     "GIGACHAT_CREDENTIALS",
@@ -580,6 +607,7 @@ _PROVIDER_KEY_ENV = {
     "openai": "OPENAI_API_KEY",
     "anthropic": "ANTHROPIC_API_KEY",
     "minimax": "MINIMAX_API_KEY",
+    "deepseek": "DEEPSEEK_API_KEY",
     "openai-compatible": "OPENAI_COMPATIBLE_API_KEY",
     "cloudru": "CLOUDRU_FOUNDATION_MODELS_API_KEY",
     "gigachat": "GIGACHAT_CREDENTIALS",
@@ -857,6 +885,77 @@ def _safety_unavailable_blocked(
     )
 
 
+def _safety_drive_root(ctx: Optional[Any]) -> pathlib.Path:
+    """Where this safety call's observability records belong.
+
+    The context owns the answer. Without one, the process's configured data root
+    is the SSOT — never the old cwd-relative ``../data``, which names whatever
+    directory happens to sit beside the current working directory and only
+    resolves to the real root by coincidence of the dev layout (a safety call
+    made with ``ctx=None`` — the extension/MCP dispatch shape — wrote its
+    observability rows there). Read late off the module so test isolation and
+    runtime rebinding are honored, the same resolution order the review
+    surfaces already use.
+    """
+    root = getattr(ctx, "drive_root", None) if ctx is not None else None
+    if root:
+        return pathlib.Path(root)
+    from ouroboros import config
+
+    return pathlib.Path(config.DATA_DIR)
+
+
+def _record_safety_usage(ctx: Optional[Any], usage_payload: Dict[str, Any]) -> None:
+    """Charge a safety call that had no event queue to report on.
+
+    The queue is the normal path; this is the fallback. The ledger writer is
+    INJECTED by the context when it has one (the ``update_budget_from_usage``
+    attribute the supervisor event context already carries), so a caller that
+    owns its own accounting is charged where it lives. A context without one
+    falls back to this process's own supervisor state, imported AT CALL TIME so
+    the safety module — which runs inside every worker and on every tool call —
+    keeps no import-time dependency on the supervisor package, exactly as the
+    six sibling call sites of this writer already do.
+    """
+    sink = getattr(ctx, "update_budget_from_usage", None) if ctx is not None else None
+    if callable(sink):
+        sink(usage_payload)
+        return
+    from supervisor.state import update_budget_from_usage
+
+    update_budget_from_usage(usage_payload)
+
+
+def _subject_too_large_blocked(
+    ctx: Optional[Any], tool_name: str, subject_chars: int,
+) -> Tuple[bool, str]:
+    """Over-budget subject: BLOCK this one call with a typed policy denial.
+
+    Truncating the subject instead would weaken the check — anything past the cut
+    would run unreviewed — and `full` mode's owner contract is that an unchecked
+    guarded call never executes. The `_BLOCKED` first-line marker classifies as a
+    policy denial downstream (never `safety_violation`), and the message carries
+    the working alternative (P5: the instruction lives with the fact). Disclosed
+    twice: the result the agent reads, and the durable event an owner can find."""
+    log.error(
+        "Safety subject for %s is %d chars (budget %d); refusing the unreviewable call",
+        tool_name, subject_chars, _SAFETY_SUBJECT_CHAR_BUDGET,
+    )
+    _emit_durable_safety_event(ctx, {
+        "type": "safety_subject_too_large", "tool": tool_name,
+        "subject_chars": int(subject_chars),
+        "budget_chars": _SAFETY_SUBJECT_CHAR_BUDGET,
+    })
+    return False, (
+        "⚠️ SAFETY_SUBJECT_TOO_LARGE_BLOCKED: this call's arguments serialize to "
+        f"{subject_chars:,} characters, above the {_SAFETY_SUBJECT_CHAR_BUDGET:,}-character "
+        "budget the Safety Supervisor can review in one prompt. The call was NOT executed "
+        "and the subject was NOT truncated (a partially reviewed call must never run). "
+        "Reshape it: split the payload into smaller calls that each fit the budget, so "
+        "every byte that runs is a byte the supervisor saw."
+    )
+
+
 def _safety_model_call(
     *, client: Any, ctx: Optional[Any], tool_name: str, light_model: str,
     use_local: bool, call_type: str, user_prompt: str, on_usage: Any,
@@ -899,7 +998,7 @@ def _safety_model_call(
             ):
                 msg, usage = chat_observed(
                     client,
-                    drive_root=pathlib.Path(getattr(ctx, "drive_root", "../data")) if ctx is not None else pathlib.Path("../data"),
+                    drive_root=_safety_drive_root(ctx),
                     task_id=str(getattr(ctx, "task_id", "") or "safety"),
                     call_type=call_type,
                     # This payload is TOOL-FREE and the send-time cache finalizer may only
@@ -956,7 +1055,10 @@ def _run_llm_check(
             f"({_skip_reason.rstrip('.')}). {_UNCHECKED_WARNING_SUFFIX}"
         )
 
-    prompt = _build_check_prompt(tool_name, arguments, messages)
+    args_json = _render_subject_json(arguments)
+    if len(args_json) > _SAFETY_SUBJECT_CHAR_BUDGET:
+        return _subject_too_large_blocked(ctx, tool_name, len(args_json))
+    prompt = _build_check_prompt(tool_name, arguments, messages, args_json=args_json)
     client = LLMClient()
     light_model = get_light_model()
     log.info(f"Running safety check on {tool_name} using {light_model} (local={_use_local_light})")
@@ -1010,7 +1112,7 @@ def _run_llm_check(
                 source="safety_check",
             )
         else:
-            update_budget_from_usage(usage_payload)
+            _record_safety_usage(ctx, usage_payload)
 
     try:
         msg, usage = _safety_model_call(

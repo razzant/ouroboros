@@ -43,23 +43,37 @@ def _summary(rows: Sequence[Dict[str, Any]]) -> Dict[str, Any]:
     session_windows: Dict[str, str] = {}
     for row in rows:
         state = str(row.get("state") or "")
-        if str(row.get("kind") or "") == "subscription_session":
+        kind = str(row.get("kind") or "")
+        if kind == "usage_baseline":
+            # Compaction stamp header (CPL4-C6): pure provenance, no money,
+            # no counts — the folded contributions live on its group rows.
+            continue
+        # A baseline group row carries the PRE-SUMMED monetary/token totals of
+        # ``folded_attempt_count`` final attempt rows that shared every branch
+        # predicate below (the compactor's group key), so sums add ONCE and
+        # count axes add the weight. Ordinary rows keep weight 1 exactly.
+        weight = (
+            max(1, int(row.get("folded_attempt_count") or 1))
+            if kind == "usage_baseline_group"
+            else 1
+        )
+        if kind == "subscription_session":
             sessions += 1
             route = str(row.get("subscription_route") or "")
             reset_at = str(row.get("subscription_reset_at") or "")
             if route and reset_at:
                 session_windows[route] = max(session_windows.get(route, ""), reset_at)
-        if str(row.get("kind") or "") == "legacy_metadata":
+        if kind == "legacy_metadata":
             ambiguous = max(1, int(row.get("ambiguous_call_count") or 1))
             counts["metadata_only"] = counts.get("metadata_only", 0) + ambiguous
             continue
-        counts[state] = counts.get(state, 0) + 1
+        counts[state] = counts.get(state, 0) + weight
         pricing_unknown = row.get("pricing_known") is False
         if state == "settled":
             cost = _number(row.get("cost_usd"))
             if cost is None:
-                unknown += 1
-                non_final_rows += 1
+                unknown += weight
+                non_final_rows += weight
                 bound = _number(row.get("reservation_upper_bound_usd"))
                 if bound is not None:
                     unresolved += bound
@@ -69,19 +83,19 @@ def _summary(rows: Sequence[Dict[str, Any]]) -> Dict[str, Any]:
                     confirmed += cost
                 else:
                     estimated += cost
-                    non_final_rows += 1
+                    non_final_rows += weight
         elif state == "reserved":
-            non_final_rows += 1
+            non_final_rows += weight
             bound = _number(row.get("reservation_upper_bound_usd"))
             if bound is None or pricing_unknown:
-                unknown += 1
+                unknown += weight
             if bound is not None:
                 reserved += bound
         elif state in {"dispatched", "unresolved"}:
-            non_final_rows += 1
+            non_final_rows += weight
             bound = _number(row.get("reservation_upper_bound_usd"))
             if bound is None or pricing_unknown:
-                unknown += 1
+                unknown += weight
             if bound is not None:
                 unresolved += bound
     settled, confirmed, estimated, reserved, unresolved = (
@@ -130,6 +144,14 @@ def _physical_call_count(row: Dict[str, Any]) -> int:
     # A subscription session is not a core-mediated physical provider send; it is
     # counted on the sessions axis instead (see record_subscription_session).
     if kind == "subscription_session":
+        return 0
+    # CPL4-C6 baseline rows: the stamp header carries no calls; a group row
+    # stands for `folded_attempt_count` final attempt rows of one state.
+    if kind == "usage_baseline":
+        return 0
+    if kind == "usage_baseline_group":
+        if str(row.get("state") or "") in {"settled", "unresolved"}:
+            return max(1, int(row.get("folded_attempt_count") or 1))
         return 0
     return 1 if str(row.get("state") or "") in {"dispatched", "settled", "unresolved"} else 0
 

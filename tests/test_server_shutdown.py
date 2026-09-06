@@ -1,4 +1,19 @@
+import threading
 from types import SimpleNamespace
+
+
+def _stop_restart_watcher(server):
+    """Stop the restart watcher ``server.main()`` starts (an unnamed daemon polling
+    ``_restart_requested`` on a 0.5 s ``time.sleep``). Its only stop seam is the flag it polls,
+    so a test that returns from ``main()`` with the flag clear — or clears it before the next
+    poll — leaves the poller running on the xdist worker for good (the ``sleeps`` polluter
+    tests/test_delegate_hold.py pinned around). Raise the flag, join, then restore it."""
+    server._restart_requested.set()
+    for thread in threading.enumerate():
+        if thread.name.endswith("(_check_restart)"):
+            thread.join(timeout=5)
+            assert not thread.is_alive(), "restart watcher did not stop"
+    server._restart_requested.clear()
 
 
 def test_lifespan_shutdown_kills_executor_foreground_before_services():
@@ -229,9 +244,13 @@ def test_main_normal_exit_does_not_run_emergency_cleanup(monkeypatch):
     monkeypatch.setattr(server.uvicorn, "Config", lambda *a, **k: object())
     monkeypatch.setattr(server.uvicorn, "Server", FakeServer)
     monkeypatch.setattr(server, "_emergency_process_cleanup", lambda: cleanup_calls.append("cleanup"))
+    monkeypatch.setattr(server, "_event_loop", None)  # the watcher's close_all_ws hop needs no loop here
     server._restart_requested.clear()
 
-    assert server.main() == 0
+    try:
+        assert server.main() == 0
+    finally:
+        _stop_restart_watcher(server)
     assert cleanup_calls == []
 
 
@@ -262,6 +281,7 @@ def test_main_graceful_restart_cleanup_avoids_port_sweep(monkeypatch):
     monkeypatch.setattr(server, "_LAUNCHER_MANAGED", True)
     monkeypatch.setattr(server, "_emergency_process_cleanup", lambda **kw: cleanup_calls.append(kw))
     monkeypatch.setattr(server.os, "_exit", lambda code: (_ for _ in ()).throw(ExitCalled(code)))
+    monkeypatch.setattr(server, "_event_loop", None)  # the watcher's close_all_ws hop needs no loop here
     server._restart_requested.clear()
 
     try:
@@ -269,7 +289,7 @@ def test_main_graceful_restart_cleanup_avoids_port_sweep(monkeypatch):
     except ExitCalled:
         pass
     finally:
-        server._restart_requested.clear()
+        _stop_restart_watcher(server)
 
     assert cleanup_calls == [{"port_sweep": False}]
 
@@ -369,3 +389,256 @@ def test_panic_stop_kills_services_without_log_finalization(monkeypatch, tmp_pat
         "force": True, "archive_service_logs": False,
         "reconcile_delegate_custody": False,
     }]
+
+
+# ---------------------------------------------------- shutdown-aware supervisor loop
+
+class _FakeStopEvent:
+    """A stop event whose backoff wait returns at once and records its timeout."""
+
+    def __init__(self):
+        self.flag = False
+        self.waits = []
+
+    def is_set(self):
+        return self.flag
+
+    def set(self):
+        self.flag = True
+
+    def clear(self):
+        self.flag = False
+
+    def wait(self, timeout=None):
+        self.waits.append(timeout)
+        return self.flag
+
+
+class _Recorder:
+    def __init__(self):
+        self.alerts = []
+        self.watchdog_stops = []
+        self.steps = []
+        self.stop = _FakeStopEvent()
+        self.restart = None
+        self.ready = None
+
+
+def _supervisor_harness(monkeypatch, tmp_path, steps):
+    """Drive the REAL server._run_supervisor with every init/tick collaborator
+    stubbed (no processes, ports, Manager or live data root). The scripted
+    ``steps`` fire from the first call of each tick: ``ok`` = healthy tick,
+    ``raise`` = a crash, ``stop``/``restart`` = set the flag (the loop exits at
+    its next ``while`` check), ``raise_after_stop``/``raise_after_restart`` =
+    the flag is set and the same tick then crashes (the shutdown race)."""
+    import threading
+    import queue as queue_mod
+
+    import server
+    import supervisor.events as events_mod
+    import supervisor.message_bus as bus_mod
+    import supervisor.queue as queue_pkg
+    import supervisor.state as state_mod
+    import supervisor.workers as workers_mod
+
+    rec = _Recorder()
+    rec.steps = list(steps)
+    rec.restart = threading.Event()
+    rec.ready = threading.Event()
+
+    def _tick_head(_data_dir):
+        step = rec.steps.pop(0) if rec.steps else "stop"
+        if step in ("stop", "raise_after_stop"):
+            rec.stop.set()
+        if step in ("restart", "raise_after_restart"):
+            rec.restart.set()
+        if step.startswith("raise"):
+            raise BrokenPipeError(32, "Broken pipe")
+
+    class _Bridge:
+        def __init__(self, _settings):
+            self._broadcast_fn = None
+
+    class _Consciousness:
+        def __init__(self, **_kwargs):
+            pass
+
+        def start(self):
+            pass
+
+        def stop(self):
+            pass
+
+    import time as time_mod
+
+    noop = lambda *_a, **_k: None  # noqa: E731
+    monkeypatch.setattr(server, "DATA_DIR", tmp_path)
+    # Patch the module's bound name, not the process-wide time.sleep.
+    monkeypatch.setattr(server, "time", SimpleNamespace(sleep=noop, monotonic=time_mod.monotonic, time=time_mod.time))
+    monkeypatch.setattr(server, "_supervisor_stop", rec.stop)
+    monkeypatch.setattr(server, "_restart_requested", rec.restart)
+    monkeypatch.setattr(server, "_supervisor_ready", rec.ready)
+    monkeypatch.setattr(server, "_supervisor_error", None)
+    monkeypatch.setattr(server, "_supervisor_thread", None)
+    monkeypatch.setattr(server, "_consciousness", None)
+    monkeypatch.setattr(server, "_apply_settings_to_env", noop)
+    monkeypatch.setattr(server, "ensure_legacy_imported", noop)
+    monkeypatch.setattr(server, "_bootstrap_supervisor_repo", lambda _s: (True, "ok"))
+    monkeypatch.setattr(server, "_runtime_branch_defaults", lambda: ("dev", "stable"))
+    for name in (
+        "_resume_interrupted_project_deletions", "_startup_prune_sweeps", "_startup_custody_sweep",
+        "_startup_worktree_prune", "_prune_delegated_snapshots", "_periodic_supervisor_maintenance",
+    ):
+        monkeypatch.setattr(server, name, noop)
+    monkeypatch.setattr(server, "_start_supervisor_liveness_watchdog",
+                        lambda _liveness, stop_event=None: rec.watchdog_stops.append(stop_event))
+    monkeypatch.setattr(server, "_process_bridge_updates", lambda _bridge, offset, _ctx: offset)
+    monkeypatch.setattr(server, "_check_pending_restart_drain", lambda _ctx: True)
+    monkeypatch.setattr(bus_mod, "init", noop)
+    monkeypatch.setattr(bus_mod, "LocalChatBridge", _Bridge)
+    monkeypatch.setattr(bus_mod, "send_with_budget", lambda chat_id, text: rec.alerts.append((chat_id, text)))
+    monkeypatch.setattr("ouroboros.utils.set_log_sink", noop)
+    monkeypatch.setattr(events_mod, "make_server_log_sink", lambda *_a, **_k: None)
+    monkeypatch.setattr(events_mod, "dispatch_event", noop)
+    monkeypatch.setattr(state_mod, "init", noop)
+    monkeypatch.setattr(state_mod, "init_state", noop)
+    monkeypatch.setattr(state_mod, "load_state", lambda: {"owner_chat_id": 7})
+    for name in ("save_state", "update_state", "append_jsonl", "update_budget_from_usage",
+                 "rotate_jsonl_log_if_needed"):
+        monkeypatch.setattr(state_mod, name, noop)
+    monkeypatch.setattr(state_mod, "rotate_chat_log_if_needed", _tick_head)
+    for name in ("enqueue_task", "enforce_task_timeouts", "enqueue_evolution_task_if_needed",
+                 "persist_queue_snapshot", "cancel_task_by_id", "queue_deep_self_review_task",
+                 "sort_pending", "check_scheduled_tasks"):
+        monkeypatch.setattr(queue_pkg, name, noop)
+    monkeypatch.setattr(queue_pkg, "restore_pending_from_snapshot", lambda: 0)
+    for name in ("init", "spawn_workers", "kill_workers", "assign_tasks", "ensure_workers_healthy",
+                 "auto_resume_after_restart"):
+        monkeypatch.setattr(workers_mod, name, noop)
+    monkeypatch.setattr(workers_mod, "get_event_q", lambda: queue_mod.Queue())
+    monkeypatch.setattr("ouroboros.delegate_recovery.pre_adopt_planned_handoffs", noop)
+    monkeypatch.setattr("ouroboros.observability.prune_observability_blobs", lambda _root: {})
+    monkeypatch.setattr("ouroboros.tools.services.prune_service_logs", lambda _root: {})
+    monkeypatch.setattr("ouroboros.consciousness.BackgroundConsciousness", _Consciousness)
+    return rec
+
+
+def _run(rec, server):
+    server._run_supervisor({})
+    assert rec.ready.is_set() or server._supervisor_error  # init reached the loop
+    return rec
+
+
+def test_exception_while_stopping_exits_quietly_without_counting_a_crash(monkeypatch, tmp_path, caplog):
+    """The graceful-shutdown race: the teardown sets the stop flag, then the tick
+    meets the torn-down bus (BrokenPipe). That is not a crash: no owner alarm,
+    readiness untouched, no supervisor error — and the watchdog generation stops."""
+    import logging
+
+    import server
+
+    rec = _supervisor_harness(monkeypatch, tmp_path, ["ok", "raise_after_stop"])
+    with caplog.at_level(logging.INFO, logger="server"):
+        _run(rec, server)
+
+    assert rec.alerts == []
+    assert rec.ready.is_set() is True
+    assert server._supervisor_error is None
+    assert rec.watchdog_stops and rec.watchdog_stops[0].is_set()
+    assert server._supervisor_thread is None
+    assert any("exiting on shutdown" in record.getMessage() for record in caplog.records)
+    assert not any(record.levelno >= logging.ERROR for record in caplog.records)
+
+
+def test_exception_while_restarting_exits_quietly_too(monkeypatch, tmp_path):
+    import server
+
+    rec = _supervisor_harness(monkeypatch, tmp_path, ["raise_after_restart"])
+    _run(rec, server)
+
+    assert rec.alerts == []
+    assert rec.ready.is_set() is True
+    assert server._supervisor_error is None
+    assert rec.watchdog_stops[0].is_set()
+
+
+def test_three_genuine_consecutive_crashes_still_die_visibly(monkeypatch, tmp_path):
+    """Without a shutdown the contract stays: the third consecutive crash records
+    the error, clears readiness, alerts the owner exactly once, stops the
+    watchdog generation — and the backoff between crashes waits on the stop
+    event (prompt shutdown), never on time.sleep."""
+    import server
+
+    rec = _supervisor_harness(monkeypatch, tmp_path, ["raise", "raise", "raise", "ok"])
+    _run(rec, server)
+
+    assert len(rec.alerts) == 1
+    assert rec.alerts[0][0] == 7
+    assert "died after repeated crashes" in rec.alerts[0][1]
+    assert rec.ready.is_set() is False
+    assert "3 consecutive crashes" in str(server._supervisor_error)
+    assert rec.watchdog_stops[0].is_set()
+    assert server._supervisor_thread is None
+    assert rec.stop.waits == [2, 4]
+    assert rec.steps == ["ok"]  # the loop is dead: the next tick never ran
+
+
+def test_healthy_tick_between_crashes_resets_the_count(monkeypatch, tmp_path):
+    import server
+
+    rec = _supervisor_harness(monkeypatch, tmp_path, ["raise", "raise", "ok", "raise", "raise", "stop"])
+    _run(rec, server)
+
+    assert rec.alerts == []
+    assert rec.ready.is_set() is True
+    assert server._supervisor_error is None
+    assert rec.steps == []
+    assert rec.stop.waits == [2, 4, 2, 4]
+
+
+def test_lifespan_teardown_stops_and_joins_the_loop_before_the_bus_goes_down():
+    """Source-order pin (the file's style for lifespan ordering): the stop flag is
+    the FIRST teardown statement, and the bounded join precedes the worker kill,
+    the bridge shutdown and the event-bus shutdown; a fresh lifespan clears the
+    flag before it starts a generation."""
+    import inspect
+    import server
+
+    source = inspect.getsource(server.lifespan)
+    assert source.index("_supervisor_stop.clear()") < source.index("_start_supervisor_if_needed(settings)")
+    finally_idx = source.index("\n    finally:\n") + 1
+    stop_idx = source.index("_supervisor_stop.set()")
+    join_idx = source.index("supervisor_thread.join(timeout=2)")
+    kill_idx = source.index("kill_workers(")
+    bridge_idx = source.index("get_bridge().shutdown()")
+    bus_idx = source.index("_shutdown_supervisor_event_bus()")
+    assert finally_idx < stop_idx < join_idx < kill_idx < bridge_idx < bus_idx
+    # Nothing between `finally:` and the stop flag but whitespace.
+    assert source[finally_idx + len("    finally:\n"):stop_idx].strip() == ""
+
+
+def test_supervisor_revival_clears_a_stale_stop_flag(monkeypatch):
+    import server
+
+    started = []
+
+    class _Thread:
+        def __init__(self, **kwargs):
+            self.kwargs = kwargs
+
+        def start(self):
+            started.append(self.kwargs["target"])
+
+    import threading
+
+    monkeypatch.setattr(server, "has_startup_ready_provider", lambda _s: True)
+    monkeypatch.setattr(server, "_supervisor_thread", None)
+    monkeypatch.setattr(server, "_supervisor_error", "stale")
+    monkeypatch.setattr(server, "threading", SimpleNamespace(Thread=_Thread, Event=threading.Event))
+    server._supervisor_stop.set()
+    try:
+        assert server._start_supervisor_if_needed({}) is True
+        assert server._supervisor_stop.is_set() is False
+        assert started == [server._run_supervisor]
+    finally:
+        server._supervisor_stop.clear()

@@ -9,6 +9,7 @@ success, while typed runtime evidence may conservatively degrade an otherwise
 
 from __future__ import annotations
 
+import copy
 import json
 import logging
 import pathlib
@@ -19,40 +20,18 @@ from ouroboros import _outcome_receipts
 # Tool-call trace vocabulary + execution-axis classifier (leaf module). Re-exported
 # here so `from ouroboros.outcomes import _classify_tool_errors/_POLICY_DENIAL_STATUSES/...`
 # keeps resolving for every historical import site.
-from ouroboros._outcome_tool_errors import (
+from ouroboros._outcome_tool_errors import (  # explicit re-exports, one statement
     _BLOCKING_TOOL_STATUSES as _BLOCKING_TOOL_STATUSES,
-)
-from ouroboros._outcome_tool_errors import (
     _classify_tool_errors as _classify_tool_errors,
-)
-from ouroboros._outcome_tool_errors import (
     _COSMETIC_TOOL_NAMES as _COSMETIC_TOOL_NAMES,
-)
-from ouroboros._outcome_tool_errors import (
     _is_ignored_readonly_block as _is_ignored_readonly_block,
-)
-from ouroboros._outcome_tool_errors import (
     _NON_BLOCKING_READONLY_BLOCK_STATUSES as _NON_BLOCKING_READONLY_BLOCK_STATUSES,
-)
-from ouroboros._outcome_tool_errors import (
     _NON_BLOCKING_RECOVERABLE_STATUSES as _NON_BLOCKING_RECOVERABLE_STATUSES,
-)
-from ouroboros._outcome_tool_errors import (
     _OK_TOOL_STATUSES as _OK_TOOL_STATUSES,
-)
-from ouroboros._outcome_tool_errors import (
     _POLICY_DENIAL_STATUSES as _POLICY_DENIAL_STATUSES,
-)
-from ouroboros._outcome_tool_errors import (
     _RECOVERY_TOOL_NAMES as _RECOVERY_TOOL_NAMES,
-)
-from ouroboros._outcome_tool_errors import (
     _ROOT_WRITE_TOOLS as _ROOT_WRITE_TOOLS,
-)
-from ouroboros._outcome_tool_errors import (
     _unresolved_tool_errors as _unresolved_tool_errors,
-)
-from ouroboros._outcome_tool_errors import (
     _user_file_basenames as _user_file_basenames,
 )
 from ouroboros.headless import (
@@ -148,6 +127,7 @@ REASON_PROVIDER_FAILURE = "provider_failure"
 REASON_TASK_EXCEPTION = "task_exception"
 REASON_DEEP_SELF_REVIEW_UNAVAILABLE = "deep_self_review_unavailable"
 REASON_DEEP_SELF_REVIEW_ERROR = "deep_self_review_error"
+REASON_DEEP_SELF_REVIEW_PACK_UNFIT = "deep_self_review_pack_unfit"
 REASON_TOOL_FAILURE = "tool_failure"
 REASON_DELIVERY_CONTROL_DEGRADED = "delivery_control_degraded"
 REASON_CHILD_RESULTS_DEFERRED = "child_results_deferred"
@@ -495,6 +475,27 @@ def infra_failed_axes(reason_code: str, *, lifecycle: str = "failed", review_tri
         reason_code=reason_code,
         review_trigger=review_trigger,
     )
+
+
+# An undisposed own delegated patch is a DEBT, not a failure: the task's own
+# derived verdicts (execution, review, objective, artifacts) are what it earned
+# and must survive, so the custody fact is ADDED as an objective warning rather
+# than replacing the axes with an infrastructure terminal.
+WARN_DELEGATED_CUSTODY_UNRECONCILED = "delegated_custody_unreconciled"
+
+
+def custody_debt_axes(axes: Any) -> Dict[str, Any]:
+    """Add the custody-debt warning to derived axes without rewriting them.
+
+    Idempotent: the overlay is applied again when the result row is stored, and
+    ``_merge_objective_warning`` already dedups. Nothing is copied onto the
+    execution axis — the debt list itself lives on the row as
+    ``delegated_runs_unreconciled`` plus the reconciliation envelope."""
+    out = copy.deepcopy(axes) if isinstance(axes, dict) and axes else {}
+    objective = out.setdefault(
+        "objective", {"status": OBJECTIVE_NOT_EVALUATED, "source": "none"})
+    _merge_objective_warning(objective, WARN_DELEGATED_CUSTODY_UNRECONCILED)
+    return out
 
 # Tools/roots whose successful use means the turn produced reviewable work.
 # Root-aware write tools: these take a `root` arg, so the scratch-exclusion rule
@@ -894,6 +895,17 @@ def public_task_result(result: Dict[str, Any], *, include_outcome_axes: bool = T
                     stack.append((child_value, clone, child_key))
     if not isinstance(public, dict):
         return {}
+    # ABI-3 projection boundary: the public contract carries NO retired cost
+    # alias — a stored legacy row's pair resolves deprecated-wins and leaves
+    # under the honest names only, at the top level and on the nested public
+    # cost planes (the subagent envelope with its usage snapshot and the
+    # loop-outcome usage snapshot) — ONE shared normalizer with the
+    # write_task_result rewrite seam (fix-round-3). Internal planes that
+    # merely share the spelling inside evidence blobs (review receipts,
+    # ledger rows) are their own schemas and pass through untouched.
+    from ouroboros.cost_projection import normalize_task_result_cost_planes
+
+    public = normalize_task_result_cost_planes(public)
     plan_state = public.get("plan_review_state")
     if isinstance(plan_state, dict) and plan_state.get("schema_version") == 1:
         plan_state["legacy_v1_projection"] = legacy_plan_review_projection(plan_state)
@@ -910,6 +922,7 @@ _INFRA_TEXT_PREFIXES = (
     ("❌ Deep self-review unavailable:", "runtime", REASON_DEEP_SELF_REVIEW_UNAVAILABLE),
     ("⚠️ Deep self-review error:", "runtime", REASON_DEEP_SELF_REVIEW_ERROR),
     ("❌ Deep self-review failed:", "runtime", REASON_DEEP_SELF_REVIEW_ERROR),
+    ("❌ Deep self-review pack unfit:", "runtime", REASON_DEEP_SELF_REVIEW_PACK_UNFIT),
 )
 
 
@@ -948,6 +961,25 @@ def _apply_actor_first_terminal_projection(
         })
     outcome["actor_first_terminal"] = actor
     return outcome
+
+
+def _loop_usage_snapshot(usage: Dict[str, Any], resource_limit: Dict[str, Any]) -> Dict[str, Any]:
+    """The loop-outcome's flat usage snapshot (module-size law extraction).
+
+    ABI-3: the loop's own accounted cost rides the honest name — this
+    sub-dict reaches the public task-result payload through ``loop_outcome``
+    (stored legacy rows still resolve deprecated-wins at the projection
+    boundary)."""
+    return {
+        "accounted_upper_bound_usd": (
+            round(float(usage["cost"]), 6)
+            if usage.get("cost") is not None else None
+        ),
+        "prompt_tokens": int(usage.get("prompt_tokens") or 0),
+        "completion_tokens": int(usage.get("completion_tokens") or 0),
+        "total_rounds": int(usage.get("rounds") or 0),
+        **({"resource_limit": resource_limit} if resource_limit else {}),
+    }
 
 
 def derive_loop_outcome(final_text: str, usage: Dict[str, Any], llm_trace: Dict[str, Any]) -> Dict[str, Any]:
@@ -990,23 +1022,15 @@ def derive_loop_outcome(final_text: str, usage: Dict[str, Any], llm_trace: Dict[
     )
     disposition_projection = _trace_mapping(llm_trace, "child_result_dispositions")
     deferred_child_count = int(disposition_projection.get("deferred_count") or 0)
-    deferred_child_suffix = bool(
-        deferred_child_count
-        and str(delivery_candidate.get("degraded_reason") or "")
-        == "host_child_status_suffix"
-    )
+    degraded_reason = str(delivery_candidate.get("degraded_reason") or "")
+    deferred_child_suffix = bool(deferred_child_count and degraded_reason == "host_child_status_suffix")
     forced_best_effort_with_deferred_child = bool(
         deferred_child_count
-        and (
-            str(delivery_candidate.get("degraded_reason") or "")
-            in BEST_EFFORT_REASON_CODES
-            # provider_unavailable left the best-effort set (2026-08-10 saga:
-            # a provider-killed task is failed, not best-effort), but a forced
-            # provider rail must still not erase the more specific
-            # deferred-child objective below.
-            or str(delivery_candidate.get("degraded_reason") or "")
-            == "provider_unavailable"
-        )
+        # provider_unavailable left the best-effort set (2026-08-10 saga:
+        # a provider-killed task is failed, not best-effort), but a forced
+        # provider rail must still not erase the more specific
+        # deferred-child objective below.
+        and (degraded_reason in BEST_EFFORT_REASON_CODES or degraded_reason == "provider_unavailable")
     )
     verification_failures: List[Dict[str, Any]] = []
     for event in llm_trace.get("verification_events") or []:
@@ -1028,7 +1052,10 @@ def derive_loop_outcome(final_text: str, usage: Dict[str, Any], llm_trace: Dict[
         execution_status = EXECUTION_INFRA_FAILED
         reason_code = usage_reason or REASON_PROVIDER_FAILURE
         failure = {"kind": "provider", "reason_code": reason_code}
-        if str(usage.get("_last_llm_error_kind") or "") == "context_overflow":
+        # The overflow salvage keeps `llm_api_error`; a waited-out outage or the unknown
+        # no-resend fence may leave the same sticky kind behind under its own reason code,
+        # and the published projection must not contradict the terminal that chose it.
+        if reason_code == "llm_api_error" and str(usage.get("_last_llm_error_kind") or "") == "context_overflow":
             failure["error_kind"] = "context_overflow"
     elif (
         usage_status == RESULT_FAILED
@@ -1062,7 +1089,7 @@ def derive_loop_outcome(final_text: str, usage: Dict[str, Any], llm_trace: Dict[
         failure = {"kind": _infra[1], "reason_code": reason_code}
     elif delivery_candidate.get("degraded") and not deferred_child_suffix:
         execution_status = EXECUTION_DEGRADED
-        reason_code = usage_reason or REASON_DELIVERY_CONTROL_DEGRADED
+        reason_code = usage_reason or degraded_reason or REASON_DELIVERY_CONTROL_DEGRADED
         failure = {"kind": "finalization_control", "reason_code": reason_code}
     elif deferred_child_count:
         execution_status = EXECUTION_DEGRADED
@@ -1235,18 +1262,9 @@ def derive_loop_outcome(final_text: str, usage: Dict[str, Any], llm_trace: Dict[
         # is not "missing" one; marker-free tasks (no answer_protocol) simply read True,
         # which downstream consumers must interpret via the contract, not as a failure.
         "final_answer_missing_sentinel": not final_answer_payload,
-        "failure": headline_failure,
+        "failure": headline_failure, "degraded": bool(delivery_candidate.get("degraded")), "degraded_reason": degraded_reason,
         "recoveries": recovered_tool_errors[:20],
-        "usage": {
-            "cost_usd": (
-                round(float(usage["cost"]), 6)
-                if usage.get("cost") is not None else None
-            ),
-            "prompt_tokens": int(usage.get("prompt_tokens") or 0),
-            "completion_tokens": int(usage.get("completion_tokens") or 0),
-            "total_rounds": int(usage.get("rounds") or 0),
-            **({"resource_limit": resource_limit} if resource_limit else {}),
-        },
+        "usage": _loop_usage_snapshot(usage, resource_limit),
         "trace_refs": collect_trace_refs(usage, llm_trace),
     }
     return _apply_actor_first_terminal_projection(outcome, usage)
@@ -1353,6 +1371,11 @@ def refresh_verification_ledger_artifacts(
     """Return ``ledger`` with artifact status synchronized after finalization."""
 
     if not isinstance(ledger, dict):
+        return ledger
+    # An omitted-to-artifact stub is a PROJECTION of the artifact file, not a
+    # source: it carries no entries, so rebuilding from it would mint "0
+    # entries / no failures / execution ok" over the real ledger's summary.
+    if ledger.get("omitted_to_artifact"):
         return ledger
     entries = [
         item for item in (ledger.get("entries") or [])

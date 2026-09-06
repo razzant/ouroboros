@@ -11,6 +11,10 @@ import subprocess
 import time
 from typing import Any, Dict, Tuple
 
+from ouroboros.evolution_checkpoints import (
+    append_cycle_outcome_tag,
+    backfill_missing_cycle_outcomes,
+)
 from ouroboros.task_finalization import TERMINAL_ORIGIN_HOST_SALVAGE
 from ouroboros.tool_capabilities import DEFAULT_TOOL_RESULT_LIMIT
 from ouroboros.utils import (
@@ -148,6 +152,10 @@ def _automatic_predecessor_authority_projection(
     from ouroboros.contracts.task_contract import bounded_continuation_envelope
 
     authority = task_result_authority_projection(row, drive_root=drive_root)
+    if isinstance(authority.get("plan_review_state"), dict):
+        from ouroboros.task_results import plan_review_authority_core
+
+        authority["plan_review_state"] = plan_review_authority_core(authority["plan_review_state"], source_ref=source)
     contract = authority.get("task_contract") if isinstance(authority.get("task_contract"), dict) else {}
     nested = contract.get("predecessor_authority") if isinstance(contract.get("predecessor_authority"), dict) else {}
     nested_source = nested.get("source") if isinstance(nested.get("source"), dict) else {}
@@ -450,12 +458,12 @@ def check_budget(env: Any) -> Tuple[dict, int]:
                 "error": "state.json missing or invalid",
                 "path": str(state_path),
             }, 1
-        total_budget_str = os.environ.get("TOTAL_BUDGET", "")
+        from ouroboros.settings_setup_contract import resolve_total_budget_usd
+        total_budget = resolve_total_budget_usd()
 
-        if not total_budget_str or float(total_budget_str) == 0:
+        if total_budget is None:
             return {"status": "unconfigured"}, 0
         else:
-            total_budget = float(total_budget_str)
             from ouroboros.usage_accounting import ensure_legacy_imported, usage_projection
 
             ensure_legacy_imported(accounting_root)
@@ -713,31 +721,42 @@ def _hot_store_thresholds() -> Tuple[Tuple[str, int, str], ...]:
         BG_OBSERVATIONS_WARN_BYTES,
         PROGRESS_LOG_WARN_BYTES,
         SCHEDULED_TASKS_WARN_BYTES,
+        SKILL_REVIEW_ROOT_TASKS_WARN_BYTES,
+        SUPERVISOR_LOG_WARN_BYTES,
+        TASK_REFLECTIONS_LOG_WARN_BYTES,
         TOOLS_LOG_WARN_BYTES,
         USAGE_LEDGER_WARN_BYTES,
     )
 
-    no_rotation = (
-        "This store has no rotation; readers that replay it degrade with size. "
-        "Rotation/archival is the remediation (tracked as a GitHub issue)."
+    rotation_expected = (
+        "This log is expected to be rotation-bounded far below this "
+        "threshold; rotation is broken or missing — investigate the "
+        "supervisor rotation tick (rotate_chat_log_if_needed pattern)."
     )
     return (
         (
             "state/consciousness_observations.jsonl",
             BG_OBSERVATIONS_WARN_BYTES,
             "Background consciousness replays this append-only inbox on wake; "
-            "archive only through an owner-preserving retention change that keeps "
-            "every unacknowledged row readable.",
+            "acknowledged rows past GC retention fold into an archive segment "
+            "at startup (unacknowledged rows never) — growth past this size "
+            "means a large unacknowledged backlog or a gap-blocked fold.",
         ),
         (
             "state/usage_attempts.jsonl",
             USAGE_LEDGER_WARN_BYTES,
             "Every reservation re-reads the ledger under the monetary lock "
-            "(~0.5s hold at 20MB — see usage_ledger.py); ledger compaction is "
-            "the remediation (tracked as a GitHub issue).",
+            "(~0.5s hold at 20MB — see usage_ledger.py); size-triggered "
+            "compaction (usage_compaction.py, CPL4-C6) should hold the file "
+            "far below this — growth past it means compaction is broken, the "
+            "unfoldable residue itself is this large, or the lock directory "
+            "takes no kernel locks so compaction refuses on the name tier "
+            "(see the usage_ledger_compaction_refused event in events.jsonl).",
         ),
-        ("logs/events.jsonl", EVENTS_LOG_WARN_BYTES, no_rotation),
-        ("logs/tools.jsonl", TOOLS_LOG_WARN_BYTES, no_rotation),
+        ("logs/events.jsonl", EVENTS_LOG_WARN_BYTES, rotation_expected),
+        ("logs/tools.jsonl", TOOLS_LOG_WARN_BYTES, rotation_expected),
+        ("logs/supervisor.jsonl", SUPERVISOR_LOG_WARN_BYTES, rotation_expected),
+        ("logs/task_reflections.jsonl", TASK_REFLECTIONS_LOG_WARN_BYTES, rotation_expected),
         (
             "logs/progress.jsonl",
             PROGRESS_LOG_WARN_BYTES,
@@ -749,8 +768,15 @@ def _hot_store_thresholds() -> Tuple[Tuple[str, int, str], ...]:
             "state/scheduled_tasks.json",
             SCHEDULED_TASKS_WARN_BYTES,
             "The scheduler parses and rewrites this whole document on every tick "
-            "under the queue lock, and consumed one-shot follow-ups are retained "
-            "as durable receipts; pruning old consumed receipts is the remediation.",
+            "under the queue lock; consumed one-shot receipts age out past GC "
+            "retention on the same tick — growth past this size means the prune "
+            "is broken or the live schedule set itself is this large.",
+        ),
+        (
+            "state/skill_review_root_tasks.jsonl",
+            SKILL_REVIEW_ROOT_TASKS_WARN_BYTES,
+            "Acceptance packet assembly reads this compact skill-review index; "
+            "archive old root-task rows with their review histories.",
         ),
     )
 
@@ -760,7 +786,7 @@ def hot_store_growth_notes(env: Any) -> list:
 
     Reused live by context.py::build_health_invariants (the
     check_stray_server_processes pattern). Deliberately NOT TTL-cached
-    (contrast context._STRAY_PROBE_CACHE): four os.stat calls per task turn
+    (contrast context._STRAY_PROBE_CACHE): nine os.stat calls per task turn
     are orders of magnitude cheaper than the pgrep probe that cache exists
     for, and a stale reading would delay the regression signal."""
     from supervisor.state import ISOLATED_BENCHMARK_SENTINEL
@@ -799,6 +825,28 @@ def hot_store_growth_notes(env: Any) -> list:
             f"{CHAT_ARCHIVE_SCAN_WARN_BYTES // 1_000_000} MB). Ordinary context reads "
             "the consolidation-owned suffix; explicit chat_history replay scans this chain. "
             "Investigate archive indexing/compaction without shortening the memory horizon."
+        )
+    # Custody replay walks the whole events chain (live + rotated segments), so
+    # the pre-rotation 100MB replay-degradation signal now watches the chain.
+    try:
+        events_chain_size = sum(
+            path.stat().st_size for path in (drive_root / "archive").glob("events_*.jsonl")
+            if path.is_file()
+        )
+    except OSError:
+        events_chain_size = 0
+    try:
+        events_chain_size += (drive_root / "logs" / "events.jsonl").stat().st_size
+    except OSError:
+        pass
+    from ouroboros.context_budget import EVENTS_ARCHIVE_SCAN_WARN_BYTES
+    if events_chain_size > EVENTS_ARCHIVE_SCAN_WARN_BYTES:
+        notes.append(
+            "WARNING: HOT STORE GROWTH — the events chain (logs/events.jsonl + "
+            f"archive/events_*.jsonl) totals {events_chain_size / 1_000_000:.1f} MB "
+            f"(threshold {EVENTS_ARCHIVE_SCAN_WARN_BYTES // 1_000_000} MB). Custody "
+            "replay scans this chain on ownership questions. Investigate chain "
+            "indexing/compaction; archives are durable history and are never deleted."
         )
     return notes
 
@@ -927,36 +975,6 @@ def _reconcile_review_attempts_on_startup(env: Any) -> Dict[str, Any]:
     return reconcile_review_custody_on_process_start(drive_root)
 
 
-def inject_crash_report(env: Any) -> None:
-    """If a crash report exists from a rollback, log it to events.
-
-    The file is NOT deleted — it stays so that build_health_invariants()
-    shows CRITICAL: RECENT CRASH ROLLBACK on every task until the issue
-    is investigated and removed via run_command (LLM-first, P5).
-    """
-    try:
-        crash_path = env.drive_path("state") / "crash_report.json"
-        if not crash_path.exists():
-            return
-        crash_data = read_json_dict(crash_path)
-        if not crash_data:
-            append_jsonl(env.drive_path("logs") / "events.jsonl", {
-                "ts": utc_now_iso(),
-                "type": "crash_report_invalid",
-                "path": str(crash_path),
-            })
-            log.warning("Crash report exists but is not valid JSON object: %s", crash_path)
-            return
-        append_jsonl(env.drive_path("logs") / "events.jsonl", {
-            "ts": utc_now_iso(),
-            "type": "crash_rollback_detected",
-            "crash_data": crash_data,
-        })
-        log.warning("Crash rollback detected: %s", crash_data)
-    except Exception:
-        log.debug("Failed to process crash report", exc_info=True)
-
-
 def _record_pending_owner_report(campaign: Dict[str, Any], tx: Dict[str, Any]) -> None:
     """Stage the WS-13.5 owner absorb/abandon report ON THE CAMPAIGN for the
     server to deliver.
@@ -978,28 +996,34 @@ def _record_pending_owner_report(campaign: Dict[str, Any], tx: Dict[str, Any]) -
     }
 
 
-def _append_cycle_outcome_tag(env: Any, *, campaign: Any, transaction: Any, source: str, backlog_id: str) -> None:
-    """Solve-capability ledger tag (Block 5C): the task-done checkpoint recorded
-    waiting_for_restart; this writes the post-restart resolution. Never raises."""
-    try:
-        from ouroboros.evolution_checkpoints import append_cycle_outcome_checkpoint
-        append_cycle_outcome_checkpoint(
-            env.drive_root,
-            campaign=campaign,
-            transaction=transaction,
-            source=source,
-            backlog_id=backlog_id,
-        )
-    except Exception:
-        log.debug("Failed to append %s cycle-outcome checkpoint", source, exc_info=True)
-
-
 def verify_restart(env: Any, git_sha: str) -> None:
     """Best-effort restart verification."""
     from supervisor import state as supervisor_state
 
     campaign_path = env.drive_path("state") / "evolution_campaign.json"
     supervisor_state.assert_test_data_path(campaign_path)
+    # The campaign write and the ledger append are two writes: re-derive any
+    # cycle-outcome row a crash between them lost, before anything reads them.
+    # The scan-then-append runs under the SAME locks/state.lock both resolution
+    # writers below hold across their campaign write AND their tag, so a second
+    # booting worker sees either the unresolved campaign or the tagged ledger —
+    # never the gap in between (an unlocked scan landing there is exactly the
+    # duplicate-row writer S22 caught). An unavailable lock SKIPS the repair
+    # (the next boot replays it) rather than backfilling unlocked; the boot
+    # itself never fails on it.
+    drive_root = campaign_path.parent.parent
+    state_lock_path = env.drive_path("locks") / "state.lock"
+    try:
+        backfill_fd = supervisor_state.acquire_file_lock(state_lock_path)
+        if backfill_fd is None:
+            log.warning("Skipped cycle-outcome backfill: %s unavailable", state_lock_path)
+        else:
+            try:
+                backfill_missing_cycle_outcomes(drive_root, read_json_dict(campaign_path) or {})
+            finally:
+                supervisor_state.release_file_lock(state_lock_path, backfill_fd)
+    except Exception:
+        log.debug("Failed to backfill cycle-outcome checkpoints at boot", exc_info=True)
 
     def _append_unique_transaction(campaign: Dict[str, Any], tx: Dict[str, Any]) -> None:
         tx_history = list(campaign.get("transaction_history") or [])
@@ -1080,6 +1104,8 @@ def verify_restart(env: Any, git_sha: str) -> None:
 
         return current_evolution_boot_generation()
 
+    from supervisor.evolution_lifecycle import adopt_evolution_commit_intent
+
     def _reconcile_dangling_campaign_transaction(observed_sha: str) -> None:
         try:
             snapshot = read_json_dict(campaign_path) or {}
@@ -1107,15 +1133,18 @@ def verify_restart(env: Any, git_sha: str) -> None:
             # file lost all call this; the lock + in-lock re-read make exactly one
             # of them reconcile per generation (the rest see the claimed gen and
             # abort), instead of an unlocked stampede that double-increments
-            # absorbed_cycles_done / lost-updates each other. (The os.rename WINNER
-            # runs _mark_campaign_restart_verified, which stays unlocked; the narrow
+            # absorbed_cycles_done / lost-updates each other. Invariant shared with
+            # the os.rename WINNER's _mark_campaign_restart_verified: the campaign
+            # resolution and its cycle_outcome ledger tag are ONE critical section
+            # under locks/state.lock, and the repair-side reader (the boot backfill
+            # at the top of verify_restart) takes the same lock — so no actor can
+            # observe a resolved campaign whose tag is still pending. (The narrow
             # winner-vs-loser ordering edge on an ancestor-not-HEAD commit is
             # idempotency-mitigated — see _mark_campaign_restart_verified.)
             event: Dict[str, Any] = {}  # captured in-lock for post-lock event logging
 
             outcome_snapshot: Dict[str, Any] = {}
             state_path = env.drive_path("state") / "state.json"
-            state_lock_path = env.drive_path("locks") / "state.lock"
 
             def _mutate(campaign: Dict[str, Any]):
                 if not isinstance(campaign, dict):
@@ -1130,6 +1159,14 @@ def verify_restart(env: Any, git_sha: str) -> None:
                     return None  # already reconciled this generation — abort, no write
                 tx = campaign.get("active_transaction") if isinstance(campaign.get("active_transaction"), dict) else {}
                 commit_sha = str(tx.get("commit_sha") or "").strip()
+                expected_sha, reachable = snapshot_sha, snapshot_reachable
+                if not commit_sha and not bool(tx.get("restart_verified")):
+                    # A crash between the reviewed commit and its SHA receipt: the
+                    # pre-commit intent proves the commit sitting on HEAD is this
+                    # transaction's, so finish the receipt in THIS write.
+                    commit_sha = adopt_evolution_commit_intent(campaign, tx, observed_sha)
+                    if commit_sha:
+                        expected_sha, reachable = commit_sha, True
                 # Capture before the absorbed branch pops it via _close_post_task_backlog.
                 outcome_snapshot["backlog_id"] = str(campaign.get("post_task_backlog_id") or "")
                 if not commit_sha or bool(tx.get("restart_verified")):
@@ -1141,7 +1178,7 @@ def verify_restart(env: Any, git_sha: str) -> None:
                         campaign["updated_at"] = utc_now_iso()
                         return campaign
                     return None
-                if commit_sha != snapshot_sha:
+                if commit_sha != expected_sha:
                     if gen:
                         campaign["last_boot_reconcile_gen"] = gen
                         campaign["updated_at"] = utc_now_iso()
@@ -1178,7 +1215,7 @@ def verify_restart(env: Any, git_sha: str) -> None:
                 tx["restart_verified_at"] = now
                 tx["restart_observed_sha"] = observed_sha
                 tx["updated_at"] = now
-                if snapshot_reachable:
+                if reachable:
                     tx["restart_required"] = False
                     tx["restart_verified"] = True
                     tx["verified_by"] = "boot_reconciliation"
@@ -1230,18 +1267,21 @@ def verify_restart(env: Any, git_sha: str) -> None:
                 return
             try:
                 update_json_locked(campaign_path, _mutate)
+                # The tag lands INSIDE the state lock, like the marker path's: a
+                # ledger failure is swallowed by append_cycle_outcome_tag, so the
+                # boot never breaks on it — only the lock hold grows by one append.
+                if outcome_snapshot.get("transaction"):
+                    append_cycle_outcome_tag(
+                        drive_root,
+                        campaign=outcome_snapshot.get("campaign"),
+                        transaction=outcome_snapshot.get("transaction"),
+                        source="boot_reconcile",
+                        backlog_id=str(outcome_snapshot.get("backlog_id") or ""),
+                    )
             finally:
                 supervisor_state.release_file_lock(state_lock_path, lock_fd)
             if event:
                 append_jsonl(env.drive_path("logs") / "events.jsonl", event)
-            if outcome_snapshot.get("transaction"):
-                _append_cycle_outcome_tag(
-                    env,
-                    campaign=outcome_snapshot.get("campaign"),
-                    transaction=outcome_snapshot.get("transaction"),
-                    source="boot_reconcile",
-                    backlog_id=str(outcome_snapshot.get("backlog_id") or ""),
-                )
         except Exception:
             log.debug("Failed to reconcile dangling evolution transaction", exc_info=True)
 
@@ -1253,7 +1293,6 @@ def verify_restart(env: Any, git_sha: str) -> None:
         # Only the os.rename winner reaches this transition. It stamps the custody
         # generation before removing the claim; losers either see the claimed file or
         # the generation stamp, so markerless reconciliation cannot bypass the claim.
-        state_lock_path = env.drive_path("locks") / "state.lock"
         lock_fd = None
         try:
             lock_fd = supervisor_state.acquire_file_lock(state_lock_path)
@@ -1395,8 +1434,8 @@ def verify_restart(env: Any, git_sha: str) -> None:
             atomic_write_json(campaign_path, campaign, trailing_newline=True)
             mark_error["durable"] = "1"
             if tx.get("cycle_outcome") == "absorbed":
-                _append_cycle_outcome_tag(
-                    env,
+                append_cycle_outcome_tag(
+                    drive_root,
                     campaign={"id": campaign.get("id"), "objective": campaign.get("objective")},
                     transaction=tx,
                     source="restart_verified",

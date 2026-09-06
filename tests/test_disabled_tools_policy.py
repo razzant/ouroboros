@@ -217,7 +217,7 @@ def test_registry_arg_aliases_and_public_tool_arg_errors(tmp_path):
     result = reg.execute("commit_reviewed", {"commit_message": "x", "skip_advisory_pre_review": True})
     assert "TOOL_ARG_ERROR (commit_reviewed)" in result
     assert "skip_advisory_review" in result
-    assert "skip_advisory_pre_review" not in result
+    assert "unsupported argument(s): skip_advisory_pre_review" in result
 
     result = reg.execute("list_skills", {"foo": "bar"})
     assert "TOOL_ARG_ERROR (list_skills)" in result

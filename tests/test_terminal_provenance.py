@@ -304,10 +304,12 @@ def test_deadline_grace_final_is_never_stamped_host_salvage(monkeypatch):
     assert usage.get("terminal_origin") != L.TERMINAL_ORIGIN_HOST_SALVAGE
 
 
-def test_budget_and_round_limit_rails_keep_legacy_missing_origin(monkeypatch):
-    """The wrapper deviation's whole point (fable lane B gap #2): budget and
-    round-limit rails never enter the wrapper, so their terminals still carry
-    NO terminal_origin (missing = legacy shape)."""
+def test_budget_and_round_limit_rails_stamp_host_notice(monkeypatch):
+    """INTENTIONAL behaviour change, not a bug fix of the test: these rails used
+    to leave terminal_origin absent because they never enter the provider-death
+    wrapper, so "missing" meant both "written before the stamp existed" and "the
+    host wrote this text alone". The forced-finalization sink now stamps
+    host_notice, and a missing origin identifies only legacy rows."""
     import pathlib
     from types import SimpleNamespace
 
@@ -324,4 +326,131 @@ def test_budget_and_round_limit_rails_keep_legacy_missing_origin(monkeypatch):
     )
     monkeypatch.setattr(L, "call_llm_with_retry", lambda *a, **k: (None, 0.0))
     _t, usage, _tr = L._handle_round_limit(ctx)
-    assert "terminal_origin" not in usage
+    assert usage.get("terminal_origin") == L.TERMINAL_ORIGIN_HOST_NOTICE
+
+
+def _rail_ctx(task_id="t-rail", round_idx=11):
+    import pathlib
+    from types import SimpleNamespace
+
+    return SimpleNamespace(
+        messages=[{"role": "user", "content": "do"}],
+        llm=None, active_model="m", active_effort="low", max_retries=1,
+        drive_logs=pathlib.Path("/tmp"), task_id=task_id, round_idx=round_idx,
+        event_queue=None, accumulated_usage={},
+        task_type="", active_use_local=False, max_rounds=10, deadline_ts=None,
+        drive_root=None, budget_drive_root=None, root_task_id="", tools=None,
+        llm_trace={},
+    )
+
+
+def test_budget_rejection_before_any_work_is_a_host_notice(monkeypatch):
+    """The host wrote this text alone, so it must be attributable — and it must
+    be published verbatim rather than replaced by the outage receipt."""
+    import ouroboros.loop as L
+
+    ctx = _rail_ctx(task_id="t-budget", round_idx=1)
+    result = L._check_budget_limits(ctx, 0.0)
+    assert result is not None
+    text, usage, _trace = result
+    assert text.startswith("🚫 Task rejected")
+    assert usage["terminal_origin"] == L.TERMINAL_ORIGIN_HOST_NOTICE
+    assert usage["reason_code"] == "budget_exhausted"
+
+
+def test_a_host_notice_publishes_its_own_words_with_its_markdown(tmp_path):
+    """A notice is NOT salvage: replacing its text with the outage receipt would
+    name the wrong cause, and dropping its markdown would render the host's own
+    code spans as escaped plain text. It also carries no system_type, which is
+    what lets a replayed task card conclude on it."""
+    from supervisor.terminal_delivery import project_terminal_result_event
+
+    text = "🚫 Task rejected. Total budget exhausted.\n\nPlan review left open: `plan_review_advisory`."
+    base = {
+        "type": "send_message", "chat_id": 7, "task_id": "terminal-n",
+        "text": text, "format": "markdown", "log_text": "kept",
+    }
+    notice = project_terminal_result_event(
+        tmp_path, {"chat_id": 7}, "terminal-n",
+        result_text=text, terminal_origin="host_notice", base_event=dict(base),
+    )
+    assert notice["text"] == text
+    assert "model-provider outage" not in notice["text"]
+    assert notice["role"] == "system"
+    assert notice["terminal_origin"] == "host_notice"
+    assert "system_type" not in notice
+    assert notice["format"] == "markdown"
+    assert notice["log_text"] == "kept"
+
+
+def test_the_durable_result_carries_the_third_producer_word():
+    from ouroboros.task_finalization import terminal_result_fields
+
+    assert terminal_result_fields({"terminal_origin": "host_notice"})["terminal_origin"] == "host_notice"
+    assert terminal_result_fields({"terminal_origin": "model_final"})["terminal_origin"] == "model_final"
+    # An unknown producer stays legacy rather than acquiring a word.
+    assert "terminal_origin" not in terminal_result_fields({"terminal_origin": "something_new"})
+
+
+def test_provider_death_arms_are_not_downgraded_by_the_forced_sink(monkeypatch):
+    """Regression for the sink's interaction with the provider rail: the sink
+    stamps host_notice FIRST on the three no-call/no-resend provider-death arms,
+    so a plain setdefault in the wrapper would have become a no-op and a
+    provider-death salvage would have published verbatim."""
+    import ouroboros.loop as L
+
+    monkeypatch.setattr(L, "call_llm_with_retry", lambda *a, **k: (None, 0.0))
+    for kind, wait_cause in (
+        ("provider_outcome_unknown", ""),
+        ("provider_unavailable", "transport_unavailable"),
+        ("context_overflow", ""),
+    ):
+        ctx = _rail_ctx(task_id=f"t-{kind}")
+        ctx.accumulated_usage = {"terminal_origin": L.TERMINAL_ORIGIN_HOST_NOTICE}
+        _text, usage, _trace = L._handle_provider_unavailable(
+            ctx, error_kind=kind, wait_cause=wait_cause,
+        )
+        assert usage.get("terminal_origin") == L.TERMINAL_ORIGIN_HOST_SALVAGE, kind
+
+
+def test_a_notice_keeps_its_completion_excerpt_unlike_a_salvage():
+    """Only salvage hides its text behind the neutral details copy."""
+    from ouroboros.project_dialogue import _completion_excerpt
+
+    assert _completion_excerpt({"result": "x", "terminal_origin": "host_notice"}) == "x"
+    assert _completion_excerpt({"result": "x", "terminal_origin": "host_salvage"}) == ""
+
+
+def test_a_non_provider_rail_with_a_complete_candidate_stays_model_final(tmp_path, monkeypatch):
+    """The candidate branch only stamped provenance on the provider rail, so a
+    round-limit stop that delivered the model's own complete answer went out
+    unattributed. The ordinary no-tool final composes the same disclosure glue
+    and stays model_final; this rail now says the same thing, and the glue is
+    still appended to the model's text."""
+    from tests.test_delivery_forced_finalization import _forced_test_context
+
+    loop, registry, limit_ctx, trace = _forced_test_context(tmp_path)
+    answer = "Complete current model answer."
+    loop._replace_delivery_candidate(registry, limit_ctx, trace, answer, control="replace")
+    monkeypatch.setattr(
+        loop, "_force_plan_disclosure",
+        lambda *_a, **_k: "\n\nPlan review was left open.",
+    )
+
+    text, usage, _returned_trace = loop._handle_round_limit(limit_ctx)
+
+    assert text.startswith(answer)
+    assert text.endswith("Plan review was left open.")
+    assert usage["terminal_origin"] == loop.TERMINAL_ORIGIN_MODEL_FINAL
+    assert usage["terminal_plan_review_open"] is True
+
+
+def test_a_non_provider_rail_without_a_candidate_is_a_host_notice(tmp_path, monkeypatch):
+    from tests.test_delivery_forced_finalization import _forced_test_context
+
+    loop, _registry, limit_ctx, _trace = _forced_test_context(tmp_path)
+    monkeypatch.setattr(loop, "call_llm_with_retry", lambda *_a, **_k: (None, 0.0))
+
+    _text, usage, _returned_trace = loop._handle_round_limit(limit_ctx)
+
+    assert usage["terminal_origin"] == loop.TERMINAL_ORIGIN_HOST_NOTICE

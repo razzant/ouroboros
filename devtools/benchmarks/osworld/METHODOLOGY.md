@@ -171,6 +171,14 @@ final-state-only numbers; say so. Preflight-blocked and adapter-error tasks
 stay in the denominator via `result_index.jsonl` (`status=blocked` /
 `adapter_error`).
 
+The task-acceptance panel is a scaffold axis of its own (2026-09-02): it runs the
+configured `OUROBOROS_REVIEWER_SLOTS.triad` rows on their own deliveries (API packet,
+configured-subagent native inspection episode, or agent session) instead of an
+API-only projection. The runs recorded here used three API packet rows, so their
+acceptance axis is unchanged; a run whose triad contains a retrieving row is not
+comparable on that axis — declare the triad rows with the scaffold disclosures and do
+not merge it with API-panel runs under the §7.9 dedup rule.
+
 **Do NOT score by filtering `result_index.jsonl` rows on `status == "completed"`.**
 `status` is a claim about the RECORD, not about the evaluation:
 

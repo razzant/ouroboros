@@ -28,6 +28,7 @@ _OPS = (
     "impact",
     "structural",
     "digest",
+    "architecture",
 )
 _MAX_LIMIT = 200
 # Structural walks read every candidate file, so bound them for an arbitrary
@@ -371,7 +372,22 @@ def _query_code(
     offset = max(0, int(offset or 0))
 
     try:
-        if op == "structural":
+        if op == "architecture":
+            # Architecture facts (CPL-3) are defined over the Ouroboros repo's
+            # pinned inventories — the manifest/inventory carriers live in the
+            # code roots, never in a skill payload or an external target.
+            if normalized_root not in ("active_workspace", "system_repo"):
+                return (
+                    "⚠️ TOOL_ARG_ERROR (query_code): op architecture requires "
+                    "root=active_workspace or system_repo."
+                )
+            from ouroboros.code_intelligence_architecture import architecture_fact_rows
+
+            try:
+                rows = architecture_fact_rows(repo_root, query)
+            except ValueError as exc:
+                return f"⚠️ TOOL_ARG_ERROR (query_code): {exc}"
+        elif op == "structural":
             # Collect through the requested page (offset+limit, like relevant_files
             # above): collecting only `limit` rows made rows[offset:] empty on every
             # page after the first and blamed the query for it (#447 D6).
@@ -519,11 +535,16 @@ def get_tools() -> List[ToolEntry]:
                 "...); op=structural (node-type queries) is polyglot too — tree-sitter for every supported "
                 "language (Python/JS/TS/Go/Rust/Java/Ruby/C/C++/C#/PHP/Kotlin/Swift/Scala/Lua/Bash), with a "
                 "visible structural_unavailable:<lang> marker when a grammar is missing (Python also has a "
-                "stdlib-ast fallback). Returns compact file:line anchors and signatures/snippets, never full bodies."
+                "stdlib-ast fallback). op=architecture answers over the Ouroboros repo's pinned inventories "
+                "(domain manifest, facade/persistence/frozen-contract carriers): query='<fact> <argument>' with "
+                "fact one of owner_of, domain_dependencies, facade_consumers, persistence_entities_written_by, "
+                "protected_contracts_affected (argument = path/symbol, domain id, facade/name, writer, or a "
+                "comma-separated changed-path list). Returns compact file:line anchors and signatures/snippets, "
+                "never full bodies."
             ),
             "parameters": {"type": "object", "properties": {
-                "op": {"type": "string", "enum": list(_OPS), "description": "Operation: relevant_files (where to look), digest (whole-repo map), symbols, definition, references, callers, callees, impact, structural."},
-                "query": {"type": "string", "default": "", "description": "Exact symbol name (definition/references/callers/...), AST node type (structural), or task text (relevant_files). Empty for digest."},
+                "op": {"type": "string", "enum": list(_OPS), "description": "Operation: relevant_files (where to look), digest (whole-repo map), symbols, definition, references, callers, callees, impact, structural, architecture (domain/facade/persistence/protected facts)."},
+                "query": {"type": "string", "default": "", "description": "Exact symbol name (definition/references/callers/...), AST node type (structural), task text (relevant_files), or '<fact> <argument>' (architecture). Empty for digest."},
                 "path": {"type": "string", "default": "", "description": "Optional file/dir scope or definition disambiguator. REQUIRED for root=user_files (the explicit target dir/file, e.g. '/app' or '/app/src'); it is never the whole home."},
                 "lang": {"type": "string", "enum": ["python", "javascript", "typescript", "go", "rust", "java", "ruby", "c", "cpp", "csharp", "php", "kotlin", "swift", "scala", "lua", "bash", "any"], "default": "any"},
                 "kind": {"type": "string", "enum": ["function", "async_function", "class", "constant", "any"], "default": "any"},

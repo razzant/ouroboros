@@ -473,7 +473,7 @@ _TRUNCATION_DECISIONS: dict[str, tuple[bool, str]] = {
     ),
     "delegated_custody_unreconciled": (
         False,
-        "agent_task_pipeline.py terminal custody audit; a delegated-child infrastructure terminal, never a root benchmark capability result",
+        "agent_task_pipeline.py terminal custody overlay; an additive custody-debt disclosure (Done with warnings) on any task that finished with an undisposed own delegated patch, never a truncation; a truncation rail code is preserved",
     ),
     "provider_outcome_unknown": (
         False,
@@ -495,8 +495,8 @@ _TRUNCATION_DECISIONS: dict[str, tuple[bool, str]] = {
     "delegation_constraint_child_cap": (False, "control_delegation.py:149 rejected call"),
     "delegation_constraint_halt_fanout": (False, "control_delegation.py:103 rejected call"),
     "delegation_constraint_require_lane": (False, "control_delegation.py:126 rejected call"),
-    "deep_self_review_unavailable": (False, "agent.py:705 owner-config gap on a review task"),
-    "deep_self_review_error": (False, "agent.py:743 review-stage error on a review task"),
+    "deep_self_review_unavailable": (False, "deep_self_review.py typed unavailable deep_review row/route on a review task; never a truncation"),
+    "deep_self_review_error": (False, "deep_self_review.py review-stage error (and agent.py's exception branch) on a review task; never a truncation"),
     "worker_pool_unavailable": (False, "gateway/tasks.py managed-task admission refusal"),
     "worker_pool_state_unavailable": (False, "gateway/tasks.py fail-closed admission inspection"),
     "attachment_admission_rejected": (
@@ -521,6 +521,10 @@ _TRUNCATION_DECISIONS: dict[str, tuple[bool, str]] = {
     # a HURRY request — the task itself keeps running untouched, so no trial
     # ever terminalizes with any of them.
     "request_id_required": (False, "gateway/task_hurry.py hurry ingress refusal (400); never a task terminal"),
+    "invalid_request_body": (
+        False,
+        "gateway/task_hurry.py ABI-3 derived-schema ingress refusal (400); never a task terminal",
+    ),
     "unexpected_fields": (
         False,
         "gateway/task_hurry.py hurry ingress refusal (400, text-free contract); never a task terminal",

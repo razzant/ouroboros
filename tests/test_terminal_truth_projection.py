@@ -35,7 +35,7 @@ def _seed_atomic_race(tmp_path):
             "pass_index": 0,
             "post_task_synthesis": "pending_once",
         },
-        cost_usd=1.0,
+        accounted_upper_bound_usd=1.0,
         cost_final=False,
         cost_with_children_partial=True,
     )
@@ -51,7 +51,7 @@ def _seed_atomic_race(tmp_path):
             "pass_index": 1,
             "post_task_synthesis": "running",
         },
-        cost_usd=7.0,
+        accounted_upper_bound_usd=7.0,
         cost_final=False,
         cost_with_children_partial=True,
         total_rounds=7,
@@ -85,9 +85,7 @@ def _seed_split_result(
             "post_task_synthesis": child_post_task,
             "post_task_stop_reason": "stale_child_reason",
         },
-        cost_usd=7.0,
         accounted_upper_bound_usd=7.0,
-        cost_usd_with_children=8.0,
         accounted_upper_bound_usd_with_children=8.0,
         cost_final=not canonical_cost_final,
         cost_with_children_partial=canonical_cost_final,
@@ -110,9 +108,7 @@ def _seed_split_result(
             "post_task_synthesis": canonical_post_task,
             "post_task_stop_reason": f"canonical_{canonical_post_task}_reason",
         },
-        cost_usd=91.0,
         accounted_upper_bound_usd=91.0,
-        cost_usd_with_children=99.0,
         accounted_upper_bound_usd_with_children=99.0,
         cost_final=canonical_cost_final,
         cost_with_children_partial=not canonical_cost_final,
@@ -142,9 +138,7 @@ def _assert_terminal_projection(
     assert result["result"] == "child answer"
     assert result["review_status"] == {"status": "fail", "source": "acceptance"}
     assert result["trace_summary"] == "child trace"
-    assert result["cost_usd"] == 91.0
     assert result["accounted_upper_bound_usd"] == 91.0
-    assert result["cost_usd_with_children"] == 99.0
     assert result["accounted_upper_bound_usd_with_children"] == 99.0
     assert result["cost_final"] is canonical_cost_final
     assert result["cost_with_children_partial"] is (not canonical_cost_final)
@@ -192,12 +186,12 @@ def test_root_patch_keeps_terminal_state_and_accounting_sticky(stale_status):
             "post_task_synthesis": "completed",
             "post_task_stop_reason": "terminal_writer",
         },
-        "cost_usd": 99.0,
+        "accounted_upper_bound_usd": 99.0,
         "cost_final": True,
     }
     patch = {
         "root_phase_checkpoint": {"post_task_synthesis": stale_status},
-        "cost_usd": 7.0,
+        "accounted_upper_bound_usd": 7.0,
         "cost_final": False,
     }
 
@@ -365,7 +359,7 @@ def test_open_and_legacy_canonical_results_keep_provisional_child_overlay(
             "pass_index": 1,
             "post_task_synthesis": "running",
         },
-        cost_usd=12.5,
+        accounted_upper_bound_usd=12.5,
         cost_final=False,
         total_rounds=12,
         ts="2026-08-19T00:00:02+00:00",
@@ -373,7 +367,7 @@ def test_open_and_legacy_canonical_results_keep_provisional_child_overlay(
     canonical_fields = {
         "result": "canonical placeholder",
         "child_drive_root": str(child),
-        "cost_usd": 1.0,
+        "accounted_upper_bound_usd": 1.0,
         "cost_final": True,
         "total_rounds": 1,
         "ts": "2026-08-19T00:00:01+00:00",
@@ -387,7 +381,7 @@ def test_open_and_legacy_canonical_results_keep_provisional_child_overlay(
     assert effective["result"] == "provisional child answer"
     assert effective["root_phase_checkpoint"]["post_task_synthesis"] == "running"
     assert effective["root_phase_checkpoint"]["status"] == "pass"
-    assert effective["cost_usd"] == 12.5
+    assert effective["accounted_upper_bound_usd"] == 12.5
     assert effective["cost_final"] is False
     assert effective["total_rounds"] == 12
     assert effective["ts"] == "2026-08-19T00:00:02+00:00"
@@ -479,7 +473,7 @@ def test_delayed_copyback_projects_against_terminal_current_record(
             "post_task_synthesis": "completed",
             "post_task_stop_reason": "terminal_writer",
         },
-        cost_usd=99.0,
+        accounted_upper_bound_usd=99.0,
         cost_final=True,
         cost_with_children_partial=False,
         total_rounds=99,
@@ -499,7 +493,7 @@ def test_delayed_copyback_projects_against_terminal_current_record(
         "post_task_stop_reason": "terminal_writer",
     }
     assert stored["producer_exit_code"] == 23
-    assert stored["cost_usd"] == 99.0
+    assert stored["accounted_upper_bound_usd"] == 99.0
     assert stored["cost_final"] is True
     assert stored["cost_with_children_partial"] is False
     assert stored["total_rounds"] == 99
@@ -531,7 +525,6 @@ def test_delayed_terminal_checkpoint_merges_current_acceptance_and_stays_termina
         supervisor_state,
         "reconstruct_task_cost",
         lambda *args, **kwargs: {
-            "cost_usd": 99.0,
             "accounted_upper_bound_usd": 99.0,
             "cost_final": True,
             "cost_with_children_partial": False,
@@ -579,7 +572,7 @@ def test_delayed_terminal_checkpoint_merges_current_acceptance_and_stays_termina
     assert stored["root_phase_checkpoint"]["pass_index"] == 1
     assert stored["root_phase_checkpoint"]["post_task_synthesis"] == "completed"
     assert stored["producer_exit_code"] == 23
-    assert stored["cost_usd"] == 99.0
+    assert stored["accounted_upper_bound_usd"] == 99.0
     assert stored["cost_final"] is True
     assert stored["cost_with_children_partial"] is False
 
@@ -590,7 +583,7 @@ def test_delayed_terminal_checkpoint_merges_current_acceptance_and_stays_termina
     )
     after_open = load_task_result(data, task_id)
     assert after_open["root_phase_checkpoint"] == stored["root_phase_checkpoint"]
-    assert after_open["cost_usd"] == 99.0
+    assert after_open["accounted_upper_bound_usd"] == 99.0
     assert after_open["cost_final"] is True
     assert after_open["cost_with_children_partial"] is False
 
@@ -621,7 +614,7 @@ def test_terminal_checkpoint_uses_current_lifecycle_status_before_regression_gua
             "pass_index": 0,
             "post_task_synthesis": "running",
         },
-        cost_usd=1.0,
+        accounted_upper_bound_usd=1.0,
         cost_final=False,
         cost_with_children_partial=True,
     )
@@ -637,7 +630,7 @@ def test_terminal_checkpoint_uses_current_lifecycle_status_before_regression_gua
             "pass_index": 1,
             "post_task_synthesis": "running",
         },
-        cost_usd=7.0,
+        accounted_upper_bound_usd=7.0,
         cost_final=False,
         cost_with_children_partial=True,
         total_rounds=7,
@@ -660,7 +653,6 @@ def test_terminal_checkpoint_uses_current_lifecycle_status_before_regression_gua
         supervisor_state,
         "reconstruct_task_cost",
         lambda *args, **kwargs: {
-            "cost_usd": 99.0,
             "accounted_upper_bound_usd": 99.0,
             "cost_final": True,
             "cost_with_children_partial": False,
@@ -716,7 +708,7 @@ def test_terminal_checkpoint_uses_current_lifecycle_status_before_regression_gua
         "post_task_synthesis": "completed",
     }
     assert stored["producer_exit_code"] == 23
-    assert stored["cost_usd"] == 99.0
+    assert stored["accounted_upper_bound_usd"] == 99.0
     assert stored["cost_final"] is True
     assert stored["cost_with_children_partial"] is False
     assert stored["total_rounds"] == 99
@@ -729,7 +721,7 @@ def test_terminal_checkpoint_uses_current_lifecycle_status_before_regression_gua
     finalized = events[-1]
     assert finalized["type"] == "task_cost_finalized"
     assert finalized["post_task_status"] == "completed"
-    assert finalized["cost_usd"] == 99.0
+    assert finalized["accounted_upper_bound_usd"] == 99.0
     assert finalized["cost_final"] is True
     assert finalized["total_rounds"] == 99
 
@@ -772,7 +764,7 @@ def test_startup_recovery_merges_child_acceptance_after_stale_scan(
     monkeypatch.setattr(
         supervisor_state,
         "reconstruct_task_cost",
-        lambda *args, **kwargs: {"cost_usd": 99.0, "cost_final": True},
+        lambda *args, **kwargs: {"accounted_upper_bound_usd": 99.0, "cost_final": True},
     )
     monkeypatch.setattr(
         usage_accounting,
@@ -809,7 +801,7 @@ def test_startup_recovery_merges_child_acceptance_after_stale_scan(
         "post_task_synthesis": "degraded",
         "post_task_stop_reason": "restart_indeterminate_running",
     }
-    assert stored["cost_usd"] == 99.0
+    assert stored["accounted_upper_bound_usd"] == 99.0
     assert stored["cost_final"] is True
 
 
@@ -834,9 +826,7 @@ def test_finalized_event_projects_actual_stored_terminal_truth(tmp_path, monkeyp
         STATUS_COMPLETED,
         root_task_id=task_id,
         root_phase_checkpoint=canonical_checkpoint,
-        cost_usd=99.0,
         accounted_upper_bound_usd=99.0,
-        cost_usd_with_children=99.0,
         accounted_upper_bound_usd_with_children=99.0,
         cost_final=True,
         cost_with_children_partial=False,
@@ -846,7 +836,6 @@ def test_finalized_event_projects_actual_stored_terminal_truth(tmp_path, monkeyp
         supervisor_state,
         "reconstruct_task_cost",
         lambda *args, **kwargs: {
-            "cost_usd": 7.0,
             "accounted_upper_bound_usd": 7.0,
             "cost_final": True,
             "total_rounds": 7,
@@ -868,7 +857,7 @@ def test_finalized_event_projects_actual_stored_terminal_truth(tmp_path, monkeyp
     stored = load_task_result(data, task_id)
     assert persisted == stored
     assert stored["root_phase_checkpoint"] == canonical_checkpoint
-    assert stored["cost_usd"] == 99.0
+    assert stored["accounted_upper_bound_usd"] == 99.0
     events = [
         json.loads(line)
         for line in (data / "logs" / "events.jsonl").read_text(encoding="utf-8").splitlines()
@@ -876,8 +865,8 @@ def test_finalized_event_projects_actual_stored_terminal_truth(tmp_path, monkeyp
     finalized = events[-1]
     assert finalized["type"] == "task_cost_finalized"
     assert finalized["post_task_status"] == "completed"
-    assert finalized["cost_usd"] == 99.0
-    assert finalized["cost_usd_with_children"] == 99.0
+    assert finalized["accounted_upper_bound_usd"] == 99.0
+    assert finalized["accounted_upper_bound_usd_with_children"] == 99.0
     assert finalized["cost_final"] is True
     assert finalized["total_rounds"] == 99
 
@@ -978,7 +967,6 @@ def test_history_and_task_detail_project_terminal_canonical_accounting(tmp_path)
     assert detail["root_phase_checkpoint"]["post_task_stop_reason"] == (
         "canonical_completed_reason"
     )
-    assert detail["cost_usd_with_children"] == 99.0
     assert detail["accounted_upper_bound_usd_with_children"] == 99.0
     assert detail["cost_final"] is True
     assert detail["cost_with_children_partial"] is False
@@ -993,7 +981,6 @@ def test_history_and_task_detail_project_terminal_canonical_accounting(tmp_path)
     )
     assert progress["task_terminal_status"] == STATUS_COMPLETED
     assert progress.get("task_phase") != "finalizing"
-    assert progress["cost_usd_with_children"] == 99.0
     assert progress["accounted_upper_bound_usd_with_children"] == 99.0
     assert progress["cost_final"] is True
     assert progress["cost_with_children_partial"] is False

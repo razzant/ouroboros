@@ -224,7 +224,8 @@ def _function_calls(tree: ast.AST, func_name: str) -> set[str]:
 
 
 def test_all_three_routing_producers_attach_client_surface():
-    tree = ast.parse((REPO / "ouroboros" / "tools" / "control.py").read_text(encoding="utf-8"))
+    # tools/control.py re-exports them; the producers live in the routing leaf.
+    tree = ast.parse((REPO / "ouroboros" / "tools" / "control_routing.py").read_text(encoding="utf-8"))
     for producer in ("_promote_chat_to_task", "_route_to_project", "_steer_task"):
         calls = _function_calls(tree, producer)
         assert "_attach_client_surface" in calls, (
@@ -427,7 +428,11 @@ def test_steering_and_project_mailbox_writers_pass_client_surface():
     # exercised via write_owner_message round-trip; these pins catch a dropped
     # kwarg at the two forwarding call sites).
     steering = (REPO / "supervisor" / "steering.py").read_text(encoding="utf-8")
-    server_src = (REPO / "server.py").read_text(encoding="utf-8")
+    # v7 split: the project-mailbox write moved to the owner-routing leaf while the
+    # log_chat forwarding stayed in server.py, so the pin reads BOTH owners as one
+    # surface — the point is that neither call site loses the kwarg.
+    server_src = ((REPO / "server.py").read_text(encoding="utf-8")
+                  + (REPO / "ouroboros" / "server_owner_routing.py").read_text(encoding="utf-8"))
     assert "client_surface=" in steering, "steer mailbox write dropped client_surface"
     # BOTH server call sites (project-mailbox write AND log_chat forwarding)
     # must carry the kwarg — a single-substring pin went false-green when one

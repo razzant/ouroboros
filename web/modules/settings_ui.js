@@ -20,7 +20,7 @@ const SETTINGS_TABS = [
 // Guard markers: renderTabStrip emits behavior/advanced tabs at runtime.
 
 const MODEL_CARDS = [
-    ['Main', 'Primary reasoning model.', 's-model', 's-local-main', 'google/gemini-3.7-flash'],
+    ['Main', 'Primary reasoning model.', 's-model', 's-local-main', 'google/gemini-3.8-flash'],
     ['Light', 'Fast summaries, lightweight internal work, reflections, and the default Fast scout. Empty uses Main.', 's-model-light', 's-local-light', 'openai/gpt-5.6-luna'],
     ['Vision', 'Caption and VLM lane. Empty uses Main.', 's-model-vision', '', ''],
     ['Consciousness', 'High-horizon background consciousness. Empty uses Main.', 's-model-consciousness', 's-local-consciousness', ''],
@@ -121,6 +121,15 @@ const PROVIDER_CARDS = [
         testProvider: 'minimax',
         testInputs: { 's-minimax-key': 'MINIMAX_API_KEY', 's-minimax-region': 'MINIMAX_REGION' },
         note: 'Use <code>minimax::MiniMax-M3</code> or <code>minimax::MiniMax-M2.7</code> in the Models tab. Leave Region empty for <code>global_en</code>; use <code>cn_zh</code> for the China endpoint.',
+    },
+    {
+        id: 'deepseek', title: 'DeepSeek', icon: '', hint: 'Direct OpenAI-compatible runtime (v4 family)', advanced: true,
+        fields: [
+            { id: 's-deepseek-key', settingKey: 'DEEPSEEK_API_KEY', label: 'API Key', placeholder: 'sk-...' },
+        ],
+        testProvider: 'deepseek',
+        testInputs: { 's-deepseek-key': 'DEEPSEEK_API_KEY' },
+        note: 'Use <code>deepseek::deepseek-v4-pro</code> or <code>deepseek::deepseek-v4-flash</code> in the Models tab. Blocking deep/scope review in Max context mode additionally needs the owner 1M-window acknowledgement.',
     },
     {
         id: 'gigachat', title: 'GigaChat', icon: '/static/providers/gigachat.svg', hint: 'Sber GigaChat via the gigachat library', advanced: true,
@@ -238,6 +247,7 @@ export const SECRET_KEYS = [
     ['GIGACHAT_PASSWORD', 'GigaChat Password (basic auth)', 'password'],
     ['ANTHROPIC_API_KEY', 'Anthropic API Key', 'sk-ant-...'],
     ['MINIMAX_API_KEY', 'MiniMax API Key', 'MiniMax key'],
+    ['DEEPSEEK_API_KEY', 'DeepSeek API Key', 'sk-...'],
     ['GITHUB_TOKEN', 'GitHub Token', 'ghp_...'],
     ['OUROBOROS_NETWORK_PASSWORD', 'Network Password', 'Required for LAN/Docker binds'],
 ];
@@ -314,7 +324,7 @@ export function renderSettingsPage() {
                     <details class="settings-more-providers" id="settings-more-providers">
                         <summary>
                             <span class="settings-provider-title"><span>More providers</span></span>
-                            <span class="settings-provider-hint">Cloud.ru Foundation Models, MiniMax, and GigaChat</span>
+                            <span class="settings-provider-hint">Cloud.ru Foundation Models, MiniMax, DeepSeek, and GigaChat</span>
                         </summary>
                         <div class="settings-more-providers-body">
                             ${PROVIDER_CARDS.filter((card) => card.advanced).map(providerSettingsCard).join('')}
@@ -376,16 +386,14 @@ export function renderSettingsPage() {
                     <!-- Review lanes and Delegation moved to the Agents tab
                          (D-10): they answer "who does the work", not "which API
                          model id". One capability, one section — no control here
-                         duplicates one there. -->
+                         duplicates one there. The deep self-review reviewer is a
+                         Review lanes row too (R7); its former model field's key,
+                         OUROBOROS_MODEL_DEEP_SELF_REVIEW, survives only as the
+                         backend's invisible migration source for that row. -->
 
                     <div class="form-section">
                         <h3>Other Model Slots</h3>
                         <div class="form-grid two">
-                            <div class="form-field">
-                                <label>Deep Self-Review Model</label>
-                                <input id="s-deep-self-review-model" placeholder="openai/gpt-5.6-sol-pro">
-                                <div class="settings-inline-note">Dedicated model slot for deep self-review. Empty uses the shipped default.</div>
-                            </div>
                             <div class="form-field">
                                 <label>Web Search Model</label>
                                 <input id="s-websearch-model" placeholder="gpt-5.2">

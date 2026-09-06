@@ -84,7 +84,24 @@ def _tree_read(
 
 
 def get_tools() -> List[ToolEntry]:
-    from ouroboros.task_tree_ledger import DELEGATION_CONSTRAINT_DIRECTIVES, LEDGER_KINDS
+    from ouroboros.task_tree_ledger import (
+        CHILD_RESULT_DISPOSITIONS, DELEGATION_CONSTRAINT_DIRECTIVES, LEDGER_KINDS,
+    )
+
+    # The schema is where the model learns WHEN to choose each value, so the
+    # per-value consequence belongs here rather than in prose elsewhere. Read
+    # from the validator's own frozenset, sorted so the enum order is stable
+    # across worker processes (a frozenset's iteration order is not).
+    disposition_schema = {
+        "type": "string",
+        "enum": sorted(CHILD_RESULT_DISPOSITIONS),
+        "description": (
+            "integrated = consumed by this answer (item closes); irrelevant = not needed "
+            "here (the child result stays as evidence; item closes); deferred = STILL OWED: "
+            "your terminal answer reads degraded/best_effort until you re-disposition this "
+            "exact child_result_sha256."
+        ),
+    }
 
     return [
         ToolEntry("tree_note", {
@@ -125,10 +142,7 @@ def get_tools() -> List[ToolEntry]:
                     "properties": {
                         "type": {"type": "string", "enum": ["child_result_disposition"]},
                         "child_task_id": {"type": "string"},
-                        "disposition": {
-                            "type": "string",
-                            "enum": ["integrated", "irrelevant", "deferred"],
-                        },
+                        "disposition": disposition_schema,
                         "child_result_sha256": {"type": "string"},
                         "children": {
                             "type": "array",
@@ -140,10 +154,7 @@ def get_tools() -> List[ToolEntry]:
                                 "type": "object",
                                 "properties": {
                                     "child_task_id": {"type": "string"},
-                                    "disposition": {
-                                        "type": "string",
-                                        "enum": ["integrated", "irrelevant", "deferred"],
-                                    },
+                                    "disposition": disposition_schema,
                                     "child_result_sha256": {"type": "string"},
                                 },
                                 "required": [

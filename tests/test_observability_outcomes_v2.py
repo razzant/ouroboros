@@ -1,6 +1,7 @@
 import gzip
 import json
 import os
+import pathlib
 from concurrent.futures import ThreadPoolExecutor
 from types import SimpleNamespace
 
@@ -1238,3 +1239,76 @@ def test_has_failures_true_for_failed_receipt():
         {"status": "ready", "artifacts": [], "errors": []},
     )
     assert refreshed["summary"]["has_failures"] is True
+
+
+def test_omitted_ledger_stub_keeps_the_real_summary_across_artifact_finalization(tmp_path):
+    """A ledger above the inline threshold rides as a stub with no entries.
+
+    Artifact finalization rebuilt the ledger FROM that stub, so a task whose
+    real ledger held nine entries and a failing verification receipt was
+    rewritten to "0 entries / no failures / execution ok" on the record the
+    owner and the parent read — the stub is a projection of the artifact file,
+    never a source. The stub's summary is now re-projected from the refreshed
+    file, and the recomputed bundle describes the bytes actually on disk.
+    """
+    from hashlib import sha256
+
+    from tests._headless_cli_shared import _init_repo_with_file
+
+    from ouroboros import headless
+    from ouroboros.task_results import STATUS_COMPLETED, load_task_result, write_task_result
+
+    parent = tmp_path / "data"
+    parent.mkdir()
+    repo = tmp_path / "repo"
+    _init_repo_with_file(repo)
+    task_id = "stubledger"
+    ledger = {
+        "schema_version": 2, "created_at": "now", "task_id": task_id,
+        "entries": [{"kind": "verification_receipt", "status": "fail", "detail": "x" * 1600}]
+        + [{"kind": "objective_outcome", "status": "not_evaluated", "detail": "y" * 1600} for _ in range(8)],
+        "summary": {"entry_count": 9, "has_failures": True},
+    }
+    refs = maybe_write_verification_artifact(parent, task_id, ledger)
+    assert refs["artifact"] is not None, "the fixture must exceed the inline threshold"
+    assert refs["inline"]["omitted_to_artifact"] is True
+    assert "entries" not in refs["inline"]
+
+    write_task_result(
+        parent, task_id, STATUS_COMPLETED, result="done",
+        verification_ledger=refs["inline"], artifacts=[refs["artifact"]],
+        artifact_status="ready",
+        outcome_axes={"lifecycle": {"status": STATUS_COMPLETED}, "execution": {"status": EXECUTION_OK}},
+    )
+
+    for run in ("first", "second"):
+        headless.finalize_task_artifacts(parent, {"id": task_id, "workspace_root": str(repo)})
+        stored = load_task_result(parent, task_id)
+        stub = stored["verification_ledger"]
+        assert stub["omitted_to_artifact"] is True, run
+        assert "entries" not in stub, run
+        assert "outcome_axes" not in stub, run
+        assert stub["summary"]["entry_count"] == 9, run
+        assert stub["summary"]["has_failures"] is True, run
+
+        ledger_item = next(
+            item for item in stored["artifact_bundle"]["artifacts"]
+            if item.get("kind") == "verification_ledger"
+        )
+        data = pathlib.Path(ledger_item["path"]).read_bytes()
+        assert ledger_item["size"] == len(data), run
+        assert ledger_item["sha256"] == sha256(data).hexdigest(), run
+        on_disk = json.loads(data.decode("utf-8"))
+        assert on_disk["summary"]["entry_count"] == 9, run
+        assert on_disk["summary"]["has_failures"] is True, run
+
+
+def test_refreshing_an_omitted_ledger_stub_is_an_identity():
+    stub = {
+        "schema_version": 1, "created_at": "now", "task_id": "t",
+        "summary": {"entry_count": 9, "has_failures": True}, "omitted_to_artifact": True,
+    }
+    for status in ("ready", "ready_with_changes", "failed", "pending", "missing"):
+        assert refresh_verification_ledger_artifacts(
+            dict(stub), {"status": status, "artifacts": [], "errors": []},
+        ) == stub

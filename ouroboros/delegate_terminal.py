@@ -412,29 +412,26 @@ def refresh_recently_settled_terminals(drive_root: Any) -> int:
     generation) never reappears there, so its task's stored evidence stays
     stale forever. A durable byte-offset cursor over the append-only custody
     event log keeps each tick bounded to newly appended SETTLED rows (house
-    projection-beside-the-log pattern) — never a full replay per sweep. A
-    shrunken/rotated log resets the cursor; the one-time historical pass is
-    paced by the per-tick byte cap. Returns the number of refreshed tasks.
+    projection-beside-the-log pattern) — never a full replay per sweep. The
+    offset counts bytes across the ROTATED CHAIN (archive segments + live
+    file, CPL4-C1): archive segments are immutable and never GC'd, so the
+    chain offset stays monotonic across rotation and no settled row is lost
+    to a rename. A shrunken chain (manual surgery) resets the cursor; the
+    one-time historical pass is paced by the per-tick byte cap. Returns the
+    number of refreshed tasks.
     """
+    import os as _os
     import pathlib as _pathlib
 
-    from ouroboros.utils import atomic_write_json, read_json_dict
+    from ouroboros.utils import atomic_write_json, jsonl_chain_handles, read_json_dict
 
     log_path = custody.event_log_path(drive_root)
     cursor_path = _pathlib.Path(drive_root) / _REFRESH_CURSOR_REL
-    try:
-        size = log_path.stat().st_size if log_path.exists() else 0
-    except OSError:
-        return 0
     stored = read_json_dict(cursor_path) or {}
     offset = int(stored.get("offset") or 0)
-    if offset > size:
-        offset = 0  # rotated/truncated log: re-ground once
     deferred: Dict[str, str] = {
         str(k): str(v) for k, v in (stored.get("deferred") or {}).items() if k
     }
-    if offset >= size and not deferred:
-        return 0
     # A settled run whose OWNING TASK has not yet written its terminal result
     # cannot be healed now (refresh no-ops on a non-terminal task) — the run
     # settled at the terminal boundary, the exact class this pass exists to
@@ -446,19 +443,49 @@ def refresh_recently_settled_terminals(drive_root: Any) -> int:
     batch_ids: set = set()
     end_offset = offset
     try:
-        with log_path.open("rb") as fh:
-            fh.seek(offset)
+        with jsonl_chain_handles(log_path) as handles:
+            sizes = []
+            for _, handle in handles:
+                try:
+                    sizes.append(_os.fstat(handle.fileno()).st_size)
+                except OSError:
+                    sizes.append(0)
+            total = sum(sizes)
+            if offset > total:
+                offset = 0  # shrunken chain: re-ground once
+            end_offset = offset
+            if offset >= total and not deferred:
+                return 0
+            consumed, index = offset, 0
+            while index < len(handles) and consumed >= sizes[index]:
+                consumed -= sizes[index]
+                index += 1
             read_bytes = 0
-            for raw in fh:
-                if not raw.endswith(b"\n") or read_bytes > _REFRESH_SCAN_CAP_BYTES:
-                    break  # incomplete tail line stays for the next tick
-                read_bytes += len(raw)
-                end_offset += len(raw)
-                row = _json_row(raw)
-                if str(row.get("type") or "") in (custody.SETTLED, custody.CLOSED_ABSENT):
-                    tid = str(row.get("task_id") or "")
-                    if tid:
-                        batch_ids.add(tid)
+            for pos in range(index, len(handles)):
+                _, handle = handles[pos]
+                if pos == index and consumed:
+                    handle.seek(consumed)
+                is_live = pos == len(handles) - 1
+                for raw in handle:
+                    if read_bytes > _REFRESH_SCAN_CAP_BYTES:
+                        break
+                    if not raw.endswith(b"\n"):
+                        # A torn LIVE tail line completes on a later tick; a
+                        # torn line inside an immutable archive segment never
+                        # will — consume its bytes or the cursor wedges there.
+                        if is_live:
+                            break
+                        end_offset += len(raw)
+                        continue
+                    read_bytes += len(raw)
+                    end_offset += len(raw)
+                    row = _json_row(raw)
+                    if str(row.get("type") or "") in (custody.SETTLED, custody.CLOSED_ABSENT):
+                        tid = str(row.get("task_id") or "")
+                        if tid:
+                            batch_ids.add(tid)
+                if read_bytes > _REFRESH_SCAN_CAP_BYTES:
+                    break
     except OSError:
         return 0
     from ouroboros.utils import utc_now_iso

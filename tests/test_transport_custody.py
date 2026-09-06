@@ -134,10 +134,26 @@ def test_requests_proxy_error_without_connect_evidence_stays_untyped(data_root):
     ("http://localhost:11434/v1", True),
     ("http://127.0.0.1:1234/v1", True),
     ("http://[::1]:8000/v1", True),
+    ("http://127.0.0.2:11434/v1", True),  # the whole 127.0.0.0/8 range is this host
+    ("http://127.255.255.254:1/v1", True),
+    ("http://[::ffff:127.0.0.1]:8000/v1", True),  # IPv4-mapped IPv6 loopback
+    ("http://10.0.0.5:8000/v1", False),
+    ("http://example.com/v1", False),
+    ("http://localhost.example/v1", False),  # a name is loopback only when it IS localhost
     ("https://openrouter.ai/api/v1", False),
     ("https://api.anthropic.com/v1", False),
     ("", False),
     ("not a url", False),
+    # every inet_aton spelling the OS accepts for a local server, and a trailing-dot name
+    ("http://127.1:8000/v1", True),
+    ("http://127.0.1:8000/v1", True),
+    ("http://2130706433:8000/v1", True),
+    ("http://0x7f000001:8000/v1", True),
+    ("http://0177.0.0.1:8000/v1", True),
+    ("http://localhost.:11434/v1", True),
+    ("http://10.1:8000/v1", False),  # an inet_aton shorthand of a remote address stays remote
+    ("http://8.8.8.8/v1", False),
+    ("http://example.com./v1", False),
 ])
 def test_is_loopback_base_url(url, expected):
     from ouroboros.transport_custody import is_loopback_base_url
@@ -205,3 +221,260 @@ def test_attempt_custody_cause_walk_matches_bare_builtin_transport_errors():
     except RuntimeError as exc:
         fields = attempt_custody_event_fields(exc)
     assert fields["transport_cause_type"] == "ConnectionResetError"
+
+
+# ------------------------------------------- bounded paid repeat: the death class
+
+def _unresolved_capture(provider: str = "openrouter", **extra) -> ua.PhysicalAttemptCapture:
+    return ua.PhysicalAttemptCapture(
+        attempt_id="pa-death", model="m", provider=provider, state="unresolved",
+        candidate_measurement_kind="opaque", **extra,
+    )
+
+
+def _sdk_wrapped(cause: BaseException, capture=None):
+    """The OpenAI SDK shape: ``raise APIConnectionError(request=request) from err``
+    with the physical-attempt capture attached by execute_physical_attempt."""
+    try:
+        raise RuntimeError("Connection error.") from cause
+    except RuntimeError as exc:
+        if capture is not None:
+            exc.physical_attempt_capture = capture
+        return exc
+
+
+@pytest.mark.parametrize("cause_cls", [httpx.ReadError, httpx.WriteError, httpx.RemoteProtocolError])
+def test_typed_transport_death_on_dispatched_remote_route_is_retryable(cause_cls):
+    from ouroboros.transport_custody import is_retryable_transport_death
+
+    exc = _sdk_wrapped(cause_cls("socket died after dispatch"), _unresolved_capture())
+    assert is_retryable_transport_death(exc) is True
+
+
+@pytest.mark.parametrize("cause_cls", [
+    httpx.ReadTimeout, httpx.WriteTimeout, httpx.ConnectError, httpx.ConnectTimeout,
+    httpx.PoolTimeout,
+])
+def test_timeouts_and_pre_dispatch_failures_are_not_transport_deaths(cause_cls):
+    """A timeout is "we gave up" (the provider may still be working); a connect
+    failure is the free released class — neither earns a paid repeat."""
+    from ouroboros.transport_custody import is_retryable_transport_death
+
+    exc = _sdk_wrapped(cause_cls("not a death"), _unresolved_capture())
+    assert is_retryable_transport_death(exc) is False
+
+
+def test_httpx_proxy_error_is_pre_dispatch_never_a_death():
+    """A tunnel/CONNECT failure is the free released class even when it rides a
+    dispatched-looking capture: the pre-dispatch predicate is evaluated first,
+    so the two predicates can never both be true."""
+    from ouroboros.transport_custody import is_pre_dispatch_transport_failure, is_retryable_transport_death
+
+    exc = _sdk_wrapped(httpx.ProxyError("CONNECT tunnel failed"), _unresolved_capture())
+    assert is_pre_dispatch_transport_failure(exc) is True
+    assert is_retryable_transport_death(exc) is False
+
+
+def test_provider_status_error_is_not_a_transport_death():
+    from ouroboros.transport_custody import is_retryable_transport_death
+
+    exc = RuntimeError("HTTP 503 upstream unavailable")
+    exc.status_code = 503
+    exc.physical_attempt_capture = _unresolved_capture(provider_status_code=503)
+    assert is_retryable_transport_death(exc) is False
+
+
+def test_implicit_context_chain_never_proves_a_transport_death():
+    """Only an explicit ``raise ... from`` carries transport provenance."""
+    from ouroboros.transport_custody import is_retryable_transport_death
+
+    try:
+        raise httpx.ReadError("earlier leg died")
+    except httpx.ReadError:
+        try:
+            raise RuntimeError("later wrapper without a cause")
+        except RuntimeError as exc:
+            exc.physical_attempt_capture = _unresolved_capture()
+            assert exc.__context__ is not None
+            assert is_retryable_transport_death(exc) is False
+
+
+@pytest.mark.parametrize("capture", [
+    _unresolved_capture(provider="local"),
+    _unresolved_capture(provider="openai-compatible", route_is_loopback=True),
+    ua.PhysicalAttemptCapture(
+        attempt_id="pa-rel", model="m", provider="openrouter", state="released",
+        candidate_measurement_kind="opaque",
+    ),
+    None,
+])
+def test_local_loopback_released_or_captureless_death_is_not_retryable(capture):
+    """The classifier's locality gate: a dead local/loopback server is not a
+    network fault worth paying for again; released custody is the free
+    pre-dispatch class, never a paid repeat; a missing capture fails closed."""
+    from ouroboros.transport_custody import is_retryable_transport_death
+
+    exc = _sdk_wrapped(httpx.ReadError("socket died"), capture)
+    assert is_retryable_transport_death(exc) is False
+
+
+def test_requests_protocol_error_with_remote_disconnected_is_a_transport_death():
+    """The Anthropic-native requests/urllib3 shape of a mid-request socket death."""
+    import http.client
+
+    import requests
+    import urllib3
+    from ouroboros.transport_custody import is_pre_dispatch_transport_failure, is_retryable_transport_death
+
+    disconnected = http.client.RemoteDisconnected("Remote end closed connection without response")
+    exc = requests.exceptions.ConnectionError(
+        urllib3.exceptions.ProtocolError("Connection aborted.", disconnected)
+    )
+    exc.physical_attempt_capture = _unresolved_capture(provider="anthropic")
+    assert is_retryable_transport_death(exc) is True
+    assert is_pre_dispatch_transport_failure(exc) is False  # the two predicates are exclusive
+    # The same fact through an explicit wrapper (the recovery ladder re-raises with a cause).
+    assert is_retryable_transport_death(_sdk_wrapped(exc, _unresolved_capture(provider="anthropic"))) is True
+    # urllib3 may hand the same fact over as MaxRetryError(reason=ProtocolError).
+    retried = requests.exceptions.ConnectionError(urllib3.exceptions.MaxRetryError(
+        None, "/messages", reason=urllib3.exceptions.ProtocolError("Connection aborted.", disconnected),
+    ))
+    retried.physical_attempt_capture = _unresolved_capture(provider="anthropic")
+    assert is_retryable_transport_death(retried) is True
+
+
+def test_requests_chunked_body_disconnect_is_a_transport_death():
+    """The lane's OTHER wrapper. The Anthropic-native POST is non-streaming, so
+    the body is read inside ``requests.post``: a socket that dies mid-BODY
+    surfaces as ``ChunkedEncodingError(ProtocolError(RemoteDisconnected))``,
+    which does NOT subclass ``ConnectionError``. It is the same post-dispatch
+    death and earns the same bounded repeat; without a typed transport cause the
+    wrapper proves nothing and keeps the base no-resend terminal."""
+    import http.client
+
+    import requests
+    import urllib3
+    from ouroboros.transport_custody import (
+        attempt_custody_event_fields,
+        is_pre_dispatch_transport_failure,
+        is_retryable_transport_death,
+    )
+
+    assert not issubclass(
+        requests.exceptions.ChunkedEncodingError, requests.exceptions.ConnectionError,
+    )  # why this class has to be named explicitly
+    disconnected = http.client.RemoteDisconnected("Remote end closed connection without response")
+    exc = requests.exceptions.ChunkedEncodingError(
+        urllib3.exceptions.ProtocolError("Connection broken: IncompleteRead(0 bytes read)", disconnected)
+    )
+    exc.physical_attempt_capture = _unresolved_capture(provider="anthropic")
+    assert is_retryable_transport_death(exc) is True
+    assert is_pre_dispatch_transport_failure(exc) is False  # the two predicates stay exclusive
+    assert attempt_custody_event_fields(exc)["transport_cause_type"] == "RemoteDisconnected"
+    # The same fact through an explicit wrapper (the recovery ladder re-raises with a cause).
+    assert is_retryable_transport_death(_sdk_wrapped(exc, _unresolved_capture(provider="anthropic"))) is True
+    # A body failure with no typed transport cause is not a death.
+    untyped = requests.exceptions.ChunkedEncodingError("Connection broken: IncompleteRead(0 bytes read)")
+    untyped.physical_attempt_capture = _unresolved_capture(provider="anthropic")
+    assert is_retryable_transport_death(untyped) is False
+    assert "transport_cause_type" not in attempt_custody_event_fields(untyped)
+
+
+def test_requests_lane_event_fields_name_the_innermost_typed_cause(data_root):
+    """The durable row and the ledger's bounded cause text see the requests
+    lane's typed death, which lives in ``args``/``reason``, not ``__cause__``:
+    RemoteDisconnected over its ProtocolError wrapper; ProtocolError alone when
+    urllib3 hands it over as MaxRetryError.reason; wrappers keep it."""
+    import http.client
+    import json
+
+    import requests
+    import urllib3
+    from ouroboros.transport_custody import attempt_custody_event_fields
+
+    disconnected = http.client.RemoteDisconnected("Remote end closed connection without response")
+    bare = requests.exceptions.ConnectionError(urllib3.exceptions.ProtocolError("Connection aborted.", disconnected))
+    bare.physical_attempt_capture = _unresolved_capture(provider="anthropic")
+    fields = attempt_custody_event_fields(bare)
+    assert fields["transport_cause_type"] == "RemoteDisconnected"
+    assert fields["physical_attempt_id"] == "pa-death"
+    assert attempt_custody_event_fields(_sdk_wrapped(bare))["transport_cause_type"] == "RemoteDisconnected"
+    retried = requests.exceptions.ConnectionError(urllib3.exceptions.MaxRetryError(
+        None, "/messages", reason=urllib3.exceptions.ProtocolError("Connection aborted."),
+    ))
+    assert attempt_custody_event_fields(retried)["transport_cause_type"] == "ProtocolError"
+    # A pre-dispatch requests shape carries no typed death and stays unnamed, as before.
+    refused = requests.exceptions.ConnectionError(urllib3.exceptions.MaxRetryError(
+        None, "/messages", reason=urllib3.exceptions.NewConnectionError(None, "connection refused"),
+    ))
+    assert "transport_cause_type" not in attempt_custody_event_fields(refused)
+    # The ledger terminalization path reads the same fact into its bounded reason.
+    reservation = ua.reserve_attempt(_request(data_root))
+    ua.mark_dispatched(reservation)
+    assert ua._terminalize_failed_attempt(reservation, bare) == "unresolved"
+    rows = [json.loads(line) for line in (data_root / ua.LEDGER_REL).read_text().splitlines() if line.strip()]
+    assert rows[-1]["state"] == "unresolved"
+    assert rows[-1]["reason"].startswith("ConnectionError [cause: RemoteDisconnected]:")
+
+
+def test_requests_read_timeout_and_connect_shapes_are_not_transport_deaths():
+    import requests
+    import urllib3
+    from ouroboros.transport_custody import is_retryable_transport_death
+
+    capture = _unresolved_capture(provider="anthropic")
+    timeout = requests.exceptions.ReadTimeout("read timed out")
+    timeout.physical_attempt_capture = capture
+    assert is_retryable_transport_death(timeout) is False
+    connect_timeout = requests.exceptions.ConnectTimeout("connect timed out")
+    connect_timeout.physical_attempt_capture = capture
+    assert is_retryable_transport_death(connect_timeout) is False
+    read_timeout_wrapped = requests.exceptions.ConnectionError(
+        urllib3.exceptions.MaxRetryError(
+            None, "/messages", reason=urllib3.exceptions.ReadTimeoutError(None, "/messages", "read timed out"),
+        )
+    )
+    read_timeout_wrapped.physical_attempt_capture = capture
+    assert is_retryable_transport_death(read_timeout_wrapped) is False
+    refused = requests.exceptions.ConnectionError(
+        urllib3.exceptions.MaxRetryError(
+            None, "/messages", reason=urllib3.exceptions.NewConnectionError(None, "connection refused"),
+        )
+    )
+    refused.physical_attempt_capture = capture
+    assert is_retryable_transport_death(refused) is False
+
+
+def test_requests_proxy_tunnel_death_is_neither_pre_dispatch_nor_a_death():
+    """The tunnel to the proxy died (RemoteDisconnected nested in a urllib3
+    ProxyError): not the base pre-dispatch class (no connect-time evidence —
+    a proxy that ANSWERS is not an outage to wait out), and never a paid
+    repeat either — the round keeps the base unknown no-resend terminal. With
+    connect-time evidence the base pre-dispatch contract still holds, and a
+    proxy failure is still not a death."""
+    import http.client
+
+    import requests
+    import urllib3
+    from ouroboros.transport_custody import is_pre_dispatch_transport_failure, is_retryable_transport_death
+
+    tunnel_died = requests.exceptions.ProxyError(urllib3.exceptions.MaxRetryError(
+        None, "/messages", reason=urllib3.exceptions.ProxyError(
+            "Unable to connect to proxy", http.client.RemoteDisconnected("Remote end closed connection without response"),
+        ),
+    ))
+    tunnel_died.physical_attempt_capture = _unresolved_capture(provider="anthropic")
+    assert is_pre_dispatch_transport_failure(tunnel_died) is False
+    assert is_retryable_transport_death(tunnel_died) is False
+    refused = requests.exceptions.ProxyError(urllib3.exceptions.MaxRetryError(
+        None, "/messages", reason=urllib3.exceptions.ProxyError(
+            "Cannot connect to proxy.", urllib3.exceptions.NewConnectionError(None, "connection refused"),
+        ),
+    ))
+    refused.physical_attempt_capture = _unresolved_capture(provider="anthropic")
+    assert is_pre_dispatch_transport_failure(refused) is True
+    assert is_retryable_transport_death(refused) is False
+    bare = requests.exceptions.ProxyError("proxy refused the CONNECT")
+    bare.physical_attempt_capture = _unresolved_capture(provider="anthropic")
+    assert is_pre_dispatch_transport_failure(bare) is False
+    assert is_retryable_transport_death(bare) is False

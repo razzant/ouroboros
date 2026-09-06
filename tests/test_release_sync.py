@@ -63,6 +63,13 @@ def _make_repo(tmp_path: Path, version: str = "4.99.1") -> Path:
         '{\n  "name": "ouroboros-web",\n  "version": "0.0.0"\n}\n',
         encoding="utf-8",
     )
+    (web / "package-lock.json").write_text(
+        '{\n  "name": "ouroboros-web",\n  "version": "0.0.0",\n  "lockfileVersion": 3,\n'
+        '  "packages": {\n    "": {\n      "name": "ouroboros-web",\n      "version": "0.0.0",\n'
+        '      "devDependencies": {"eslint": "10.10.0"}\n    },\n    "node_modules/eslint": {\n'
+        '      "version": "10.10.0"\n    }\n  }\n}\n',
+        encoding="utf-8",
+    )
     modules = web / "modules"
     modules.mkdir()
     (modules / "api_types.js").write_text(
@@ -159,6 +166,25 @@ class TestSyncReleaseMetadata:
         assert "web/package.json" in changed
         text = (repo / "web" / "package.json").read_text()
         assert '"version": "1.2.3-rc.4"' in text
+
+    def test_syncs_web_package_lock_root_versions_only(self, tmp_path):
+        repo = _make_repo(tmp_path, "1.2.3-rc.4")
+        changed = sync_release_metadata(str(repo))
+        assert "web/package-lock.json" in changed
+        text = (repo / "web" / "package-lock.json").read_text(encoding="utf-8")
+        assert text.count('"version": "1.2.3-rc.4"') == 2 and '"version": "10.10.0"' in text
+
+    def test_web_package_lock_participates_in_desync_checks(self, tmp_path):
+        repo = _make_repo(tmp_path, "1.2.3-rc.4")
+        sync_release_metadata(str(repo))
+        lock = repo / "web" / "package-lock.json"
+        lock.write_text(lock.read_text(encoding="utf-8").replace('"version": "1.2.3-rc.4"', '"version": "1.2.3-rc.3"', 1),
+                        encoding="utf-8")
+        desync = version_carrier_desyncs(
+            "1.2.3-rc.4", detailed=True,
+            web_package_lock_text=lock.read_text(encoding="utf-8"),
+        )
+        assert desync == ['web/package-lock.json (expected both root "version" entries = "1.2.3-rc.4")']
 
     def test_web_package_json_participates_in_desync_checks(self, tmp_path):
         repo = _make_repo(tmp_path, "1.2.3-rc.4")

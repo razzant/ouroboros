@@ -980,39 +980,43 @@ def _submit_skill_to_hub(
         )
 
 
+_PUBLISH_SCHEMA = {
+    "name": "submit_skill_to_hub",
+    "description": (
+        "Publish one immutable reviewed skill snapshot to OuroborosHub by "
+        "opening a GitHub pull request. A failed result is repair evidence "
+        "for the next agent turn; success contains a validated PR receipt."
+    ),
+    "parameters": {
+        "type": "object",
+        "properties": {
+            "skill": {
+                "type": "string",
+                "description": "Installed skill name (slug).",
+            },
+            "note": {
+                "type": "string",
+                "default": "",
+                "description": "Optional public author note for the pull request.",
+            },
+            "confirm_public_submission": {
+                "type": "boolean",
+                "description": (
+                    "Must be true: confirms the human approved this public "
+                    "OuroborosHub submission."
+                ),
+            },
+        },
+        "required": ["skill", "confirm_public_submission"],
+    },
+}
+
+
 def get_tools() -> List[ToolEntry]:
     return [
         ToolEntry(
-            name="submit_skill_to_hub",
-            schema={
-                "name": "submit_skill_to_hub",
-                "description": (
-                    "Publish one immutable reviewed skill snapshot to OuroborosHub by "
-                    "opening a GitHub pull request. A failed result is repair evidence "
-                    "for the next agent turn; success contains a validated PR receipt."
-                ),
-                "parameters": {
-                    "type": "object",
-                    "properties": {
-                        "skill": {
-                            "type": "string",
-                            "description": "Installed skill name (slug).",
-                        },
-                        "note": {
-                            "type": "string",
-                            "default": "",
-                            "description": "Optional public author note for the pull request.",
-                        },
-                        "confirm_public_submission": {
-                            "type": "boolean",
-                            "description": (
-                                "Must be true: confirms the human approved this public OuroborosHub submission."
-                            ),
-                        },
-                    },
-                    "required": ["skill", "confirm_public_submission"],
-                },
-            },
+            name="submit_skill_to_hub",  # literal: the tool-policy AST scan keys on it
+            schema=_PUBLISH_SCHEMA,
             handler=_submit_skill_to_hub,
             is_code_tool=False,
             timeout_sec=180,

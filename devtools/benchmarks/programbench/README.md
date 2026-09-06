@@ -81,8 +81,9 @@ The task body carries `metadata.budget_profile` (see `schemas.programbench_budge
 `POST /api/tasks` normalizes it additively into `task_contract.budget_profile`
 (there is deliberately no top-level `task_contract` field on the gateway):
 
-- `improvement_policy=until_deadline`, `max_improvement_passes=6` (the explicit cap remains authoritative under every policy),
-  `reserve_finalization_pct=15` (0–100 pct), `stall_rounds_threshold=12`.
+- `improvement_policy=fixed`, `max_improvement_passes=6` (the explicit cap is authoritative under every policy;
+  the legacy `until_deadline` alias and `stall_rounds_threshold` knob were removed in ABI 7.0, Q10=A),
+  `reserve_finalization_pct=15` (0–100 pct).
 - The 6h official budget flows through the body's `timeout_sec` (gateway →
   `deadline_at`); round caps come from settings (`OUROBOROS_MAX_ROUNDS`).
 

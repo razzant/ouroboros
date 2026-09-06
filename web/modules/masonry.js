@@ -1,16 +1,13 @@
-const bound = new WeakMap();
-let nextId = 1;
+/* Absolute-position masonry for the Widgets list. `layout()` measures the
+   container and its items, plans the columns (`planMasonryLayout`, pure) and
+   writes the plan back ONLY as narrow custom properties — `--masonry-w/-x/-y`
+   on each item, `--masonry-h` on the container — which one static rule set in
+   web/style.css turns into width / transform / height. The visual order is the
+   caller's explicit key order (`options.order`), never the DOM order: a reorder
+   relayouts without moving a node, so a running <iframe> in a card is never
+   reloaded by it. `applyMasonry` returns an idempotent disposer. */
 
-function ensureStyleElement(id) {
-    const styleId = `masonry-style-${id}`;
-    let el = document.getElementById(styleId);
-    if (!el) {
-        el = document.createElement('style');
-        el.id = styleId;
-        document.head.appendChild(el);
-    }
-    return el;
-}
+const bound = new WeakMap();
 
 function shortestColumn(columns) {
     let index = 0;
@@ -91,10 +88,23 @@ export function planMasonryLayout(width, itemSpecs, options = {}) {
     };
 }
 
+// Items in the caller's key order; keys the order does not name keep their
+// relative DOM order after the named ones (the `sortTabsByWidgetOrder` rule).
+function orderedItems(container, config) {
+    const rank = new Map(config.order.map((key, index) => [key, index]));
+    return Array.from(container.querySelectorAll(config.itemSelector))
+        .map((item, index) => {
+            const key = config.keyOf(item);
+            return { item, index, rank: rank.has(key) ? rank.get(key) : Number.MAX_SAFE_INTEGER };
+        })
+        .sort((a, b) => a.rank - b.rank || a.index - b.index)
+        .map((entry) => entry.item);
+}
+
 function layout(container, config) {
-    const items = Array.from(container.querySelectorAll(config.itemSelector));
+    const items = orderedItems(container, config);
     if (!items.length) {
-        ensureStyleElement(container.dataset.masonryId).textContent = '';
+        container.style.removeProperty('--masonry-h');
         return;
     }
     const width = container.clientWidth;
@@ -105,34 +115,46 @@ function layout(container, config) {
         height: item.offsetHeight,
     }));
     const plan = planMasonryLayout(width, itemSpecs, config);
-    const rules = [
-        `.widgets-list[data-masonry-id="${container.dataset.masonryId}"]{height:0;}`,
-    ];
     items.forEach((item, idx) => {
         const placement = plan.placements[idx];
-        rules.push(
-            `.widgets-list[data-masonry-id="${container.dataset.masonryId}"]>${config.itemSelector}:nth-child(${idx + 1}){width:${placement.width}px;transform:translate(${placement.left}px,${placement.top}px);}`
-        );
+        item.style.setProperty('--masonry-w', `${placement.width}px`);
+        item.style.setProperty('--masonry-x', `${placement.left}px`);
+        item.style.setProperty('--masonry-y', `${placement.top}px`);
     });
-    rules[0] = `.widgets-list[data-masonry-id="${container.dataset.masonryId}"]{height:${plan.height}px;}`;
-    ensureStyleElement(container.dataset.masonryId).textContent = rules.join('\n');
+    container.style.setProperty('--masonry-h', `${plan.height}px`);
 }
 
+/**
+ * Bind (once per container) and schedule a layout. A later call with
+ * `options.order` replaces the key order and relayouts; every call returns the
+ * same idempotent disposer, which disconnects the three observers, cancels a
+ * pending frame and forgets the container.
+ */
 export function applyMasonry(container, options = {}) {
-    if (!container) return;
+    if (!container) return () => {};
+    const existing = bound.get(container);
+    if (existing) {
+        if (Array.isArray(options.order)) existing.config.order = options.order.slice();
+        existing.run();
+        return existing.dispose;
+    }
     const config = {
         itemSelector: options.itemSelector || '.widgets-card',
         gap: options.gap ?? 14,
         minColumnWidth: options.minColumnWidth ?? 280,
         spanClass: options.spanClass || 'widgets-card-span-2',
+        keyOf: options.keyOf || ((item) => item.dataset.widgetKey || ''),
+        order: Array.isArray(options.order) ? options.order.slice() : [],
     };
-    if (!container.dataset.masonryId) {
-        container.dataset.masonryId = `m${nextId}`;
-        nextId += 1;
-    }
-    const run = () => requestAnimationFrame(() => layout(container, config));
-    run();
-    if (bound.has(container)) return;
+    // One layout per frame however many triggers land before it.
+    let frame = 0;
+    const run = () => {
+        if (frame) cancelAnimationFrame(frame);
+        frame = requestAnimationFrame(() => {
+            frame = 0;
+            layout(container, config);
+        });
+    };
     const observedItems = new Set();
     const itemResizeObserver = new ResizeObserver(run);
     const observeItems = () => {
@@ -147,7 +169,6 @@ export function applyMasonry(container, options = {}) {
             itemResizeObserver.observe(item);
         });
     };
-    observeItems();
     const resizeObserver = new ResizeObserver(run);
     resizeObserver.observe(container);
     const mutationObserver = new MutationObserver(() => {
@@ -155,5 +176,19 @@ export function applyMasonry(container, options = {}) {
         run();
     });
     mutationObserver.observe(container, { childList: true, subtree: true });
-    bound.set(container, { resizeObserver, itemResizeObserver, mutationObserver });
+    const entry = { config, run };
+    entry.dispose = () => {
+        if (bound.get(container) !== entry) return;
+        bound.delete(container);
+        if (frame) cancelAnimationFrame(frame);
+        frame = 0;
+        resizeObserver.disconnect();
+        itemResizeObserver.disconnect();
+        mutationObserver.disconnect();
+        observedItems.clear();
+    };
+    bound.set(container, entry);
+    observeItems();
+    run();
+    return entry.dispose;
 }

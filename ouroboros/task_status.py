@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import json
 import pathlib
 import time
 from datetime import datetime, timezone
@@ -75,7 +74,6 @@ ARTIFACT_NONTERMINAL_STATUSES: frozenset[str] = frozenset({
     ARTIFACT_STATUS_PENDING,
     ARTIFACT_STATUS_FINALIZING,
 })
-HANDOFF_SNIPPET_CHARS = 240
 _ORPHAN_RUNNING_GRACE_SECONDS = 30.0
 _ARTIFACT_LIFECYCLE_FIELDS: frozenset[str] = frozenset({
     "artifact_status",
@@ -1056,101 +1054,6 @@ def find_child_tasks(
     return sorted(rows.values(), key=lambda item: (str(item.get("ts") or ""), str(item.get("task_id") or "")))
 
 
-def compute_cost_with_children(
-    drive_root: pathlib.Path, task_id: str, own_cost_usd: float
-) -> tuple[float, bool]:
-    """Recursive per-task cost rollup (v6.57.0, P6b): own cost PLUS the cost of every
-    direct child. Each child already stored its own ``cost_usd_with_children``, so
-    summing the direct children's rolled-up value makes this correct for the whole
-    subtree without re-walking it. Returns ``(total, partial)`` where ``partial`` is
-    True when any direct child is still non-terminal (its cost is not final yet).
-
-    Why a NEW field and not a change to ``cost_usd``: existing consumers (per-task
-    accounting, the global session budget ledger) read ``cost_usd`` as this task's own
-    spend; the parent card / Logs read the rollup. Never mutate ``cost_usd`` — the
-    site/PB incident showed a parent under-reporting because children weren't summed,
-    but the fix is an ADDITIVE field, not a semantics change (P7 SSOT)."""
-    total = float(own_cost_usd or 0.0)
-    partial = False
-    try:
-        children = find_child_tasks(
-            pathlib.Path(drive_root), parent_task_id=str(task_id), root_task_id="", scope="direct"
-        )
-    except Exception:
-        return round(total, 6), True
-    for child in children:
-        accounting_available = str(child.get("cost_accounting_status") or "available") == "available"
-        child_total = child.get("cost_usd_with_children")
-        if child_total is None:
-            child_total = child.get("cost_usd")
-        try:
-            if child_total is None or not accounting_available:
-                raise ValueError("child cost unavailable")
-            total += float(child_total)
-        except (TypeError, ValueError):
-            partial = True
-        if (
-            str(child.get("status") or "").strip().lower() not in FINAL_STATUSES
-            or child.get("cost_final") is not True
-            or bool(child.get("cost_with_children_partial"))
-        ):
-            partial = True
-    return round(total, 6), partial
-
-
-def _handoff_snippet(value: Any) -> Dict[str, Any]:
-    text = str(value or "")
-    stripped = text.strip()
-    if not stripped:
-        return {"available": False, "chars": 0, "preview": ""}
-    preview = stripped.replace("\n", " ")
-    if len(preview) > HANDOFF_SNIPPET_CHARS:
-        preview = preview[: HANDOFF_SNIPPET_CHARS - 3] + "..."
-    return {"available": True, "chars": len(text), "preview": preview}
-
-
-def format_handoff_message(children: List[Dict[str, Any]]) -> str:
-    from ouroboros.tools.join_ledger import _child_result_sha256
-
-    from ouroboros.cost_projection import cost_projection
-
-    payload = []
-    for child in children:
-        result_info = _handoff_snippet(child.get("result"))
-        trace_info = _handoff_snippet(child.get("trace_summary"))
-        _cost = cost_projection(child)
-        payload.append({
-            "task_id": str(child.get("task_id") or child.get("id") or ""),
-            "status": str(child.get("status") or ""),
-            "role": str(child.get("role") or ""),
-            "description": str(child.get("description") or child.get("objective") or ""),
-            # SSOT cost projection (C2): honest null — a child with no accounting
-            # reads null here, never a fabricated $0 — plus the additive name.
-            "cost_usd": _cost["cost_usd"],
-            "accounted_upper_bound_usd": _cost["accounted_upper_bound_usd"],
-            "cost_final": _cost["cost_final"],
-            "artifact_status": str(child.get("artifact_status") or ""),
-            "terminal_result_status": (
-                str(child.get("child_status") or "")
-                if str(child.get("child_status") or "") != str(child.get("status") or "")
-                else ""
-            ),
-            "child_result_sha256": _child_result_sha256(child),
-            "result_available": result_info["available"],
-            "result_chars": result_info["chars"],
-            "result_preview": result_info["preview"],
-            "trace_available": trace_info["available"],
-            "trace_chars": trace_info["chars"],
-            "trace_preview": trace_info["preview"],
-            "full_output": "Use get_task_result or wait_task for the full untruncated child output (wait_tasks returns a compact batch projection).",
-        })
-    return (
-        "[SUBAGENT_HANDOFF_STATUS]\n"
-        + json.dumps(payload, ensure_ascii=False, indent=2)
-        + "\n[/SUBAGENT_HANDOFF_STATUS]"
-    )
-
-
 def _artifact_stat_marker(path: str) -> str:
     """GROUND-TRUTH existence fact for a child's claimed artifact path. An ABSOLUTE path
     that does not exist is flagged ⚠ MISSING (a child can report a deliverable it never
@@ -1235,8 +1138,18 @@ def format_subagent_absorption_message(
             if terminal_status and terminal_status != str(child.get("status") or "")
             else ""
         )
+        # A child's typed custody debt travels WITH its result: the parent could
+        # absorb the work while its child's own delegated patch sat undisposed,
+        # and nothing in the digest said so. Bounded, and silent for a clean
+        # child. Visibility only — authority over that patch is the orphan rule.
+        debt = child.get("delegated_runs_unreconciled")
+        debt = [str(x) for x in debt] if isinstance(debt, list) else []
+        debt_suffix = f", custody_debt={','.join(debt[:10])}" if debt else ""
+        if len(debt) > 10:
+            debt_suffix += f' (+{len(debt) - 10} more — get_task_result("{cid}"))'
         lines.append(
-            f"\n## child {cid} ({role}) — status={child.get('status')}{status_suffix}, "
+            f"\n## child {cid} ({role}) — status={child.get('status')}{status_suffix}"
+            f"{debt_suffix}, "
             # SSOT cost projection (C2): unknown says unknown, never $0.0000.
             f"cost={cost_display(child, decimals=4)}, child_result_sha256={_child_result_sha256(child)}"
         )

@@ -136,6 +136,8 @@ function statusChip(skill, action, live) {
             ? { tone: 'ok', label: 'Loaded' }
             : { tone: 'warn', label: skill.live_loaded ? 'Loaded — UI tab pending' : 'Enabled — not loaded' };
     } else if (skill.enabled) status = { tone: 'ok', label: 'Enabled' };
+    const process = ['server', 'worker'].includes(skill.process) ? skill.process : '';
+    if (skill.type === 'extension' && process) status.label += ` · ${process}`;
     const attrs = action.action ? `data-skill="${escapeHtml(skill.name)}" data-skill-action="${escapeHtml(action.action)}" role="button" tabindex="0"` : '';
     return `<span class="skills-status-chip skills-status-${status.tone} ${action.action ? 'is-clickable' : ''}" ${attrs}>${escapeHtml(status.label)}</span>`;
 }

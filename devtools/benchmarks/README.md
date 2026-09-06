@@ -82,7 +82,8 @@ All committed bench settings templates share these disclosed defaults:
 - Cost pacing (v6.56.0): tasks with a finite budget receive latched in-task
   COST milestones (50/25/10% remaining + ~80%-spent wrap-up note) from the
   `task_pacing` SSOT; `budget_profile.cost_hard_stop_pct=0` (SWE-Pro/PB
-  profiles) disables the in-task hard stop so deadline/rounds own the bounds.
+  profiles) disables the in-task hard stop AND the wrap-up affordability rail,
+  so deadline/rounds own the bounds.
 
 - `OUROBOROS_MAX_WORKERS=4` — same-model subagent slots for decomposition
   WITHIN one task (the root agent takes one lane). Never independent attempts

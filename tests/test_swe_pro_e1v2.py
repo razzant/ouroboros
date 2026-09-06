@@ -286,9 +286,9 @@ def test_e1v2_entrypoint_solve_argv_pins_workspace_and_budget_metadata():
     # /app default via ${VAR-default} (an EXPLICIT empty string keeps legacy mode).
     assert 'OBO_SOLVE_WORKSPACE_ROOT="${OBO_SOLVE_WORKSPACE_ROOT-/app}"' in entry
     assert '--workspace "$OBO_SOLVE_WORKSPACE_ROOT"' in entry
-    # Budget metadata: until_deadline pacing + no in-task cost stop.
+    # Budget metadata: fixed policy + explicit pass cap, no in-task cost stop.
     assert "--task-metadata-json" in entry
-    assert '"improvement_policy": "until_deadline"' in entry
+    assert '"improvement_policy": "fixed"' in entry
     assert '"max_improvement_passes": 6' in entry
     assert '"cost_hard_stop_pct": 0' in entry
     # Fresh child memory drive is the explicit entrypoint default.

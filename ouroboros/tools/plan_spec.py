@@ -444,7 +444,6 @@ def _is_url(locator: str) -> bool:
 def _is_path_locator(locator: str) -> bool:
     return bool(locator) and not _is_url(locator) and not locator.startswith(_TASK_LOCATOR_PREFIX)
 
-
 def _resolve_locator_path(locator: str, root: pathlib.Path) -> tuple[Optional[pathlib.Path], str]:
     """Relative → under ``root``; absolute (or ``file://`` absolute) as-is. Returns
     ``(path, "")`` or ``(None, reason)`` — ``symlink_loop`` (RuntimeError from resolve) or
@@ -500,6 +499,7 @@ def resolve_constitutional(
     true. Returns ``(constitutional, note)`` — the note names the deciding
     locator for disclosure.
     """
+    from ouroboros.tools.plan_evidence import _split_selector
     system = pathlib.Path(system_repo_root).resolve(strict=False)
     active = pathlib.Path(active_root).resolve(strict=False)
     # Payload roots are supplied by the FROZEN skill-payload predicate
@@ -518,7 +518,7 @@ def resolve_constitutional(
             locator = str(raw or "").strip()
             if not _is_path_locator(locator):
                 continue
-            resolved, _reason = _resolve_locator_path(locator, active)
+            resolved, _reason = _resolve_locator_path(_split_selector(locator)[0], active)
             if resolved is None or any(_under(resolved, payload) for payload in payloads):
                 continue
             if resolved == system or _under(resolved, system):
@@ -530,14 +530,17 @@ def resolve_constitutional(
                 if label == "evidence" and not exists(resolved):
                     skipped.append(locator)
                     continue
+                # The locator is quoted VERBATIM (never ``repr``): the note is disclosure a
+                # reviewer copies back, and ``repr`` doubles every backslash of a Windows path.
                 return True, (
-                    f"constitutional: {label} locator {locator!r} resolves under the "
+                    f"constitutional: {label} locator '{locator}' resolves under the "
                     "Ouroboros system repository (structural fact)"
                 )
     if skipped:
+        listed = ", ".join(f"'{item}'" for item in skipped[:5])
         return False, (
             "not constitutional: the only system-repo locators declared are EVIDENCE paths that do "
-            f"not exist ({', '.join(repr(item) for item in skipped[:5])}) — declare them under "
+            f"not exist ({listed}) — declare them under "
             "affected_resources if the work will change them"
         )
     return False, "not constitutional: no declared locator resolves under the Ouroboros system repository"
@@ -578,7 +581,7 @@ _PLAN_FINDING_ELEMENT_SCHEMA = """\
   "id": "<short local id, e.g. f1>",
   "class": "blocking" | "note" | "need_evidence",
   "breaks": "<spec id — REQUIRED for blocking: goal | claim_N | invariant_N | decision_N | deferred_N>",
-  "locator": "<REQUIRED for need_evidence: the exact path / URL / task:<id> you need>",
+  "locator": "<REQUIRED for need_evidence: an absolute path, or one relative to the subject workspace root; add ::lines=A-B, ::bytes=A-B, ::tail=N or ::symbol=Name (.py only) for one range; task:<id> = a prior task's result; a URL may be named; the host never fetches it>",
   "summary": "<what is wrong or missing, concretely>",
   "recommendation": "<the smallest change to the SPEC that resolves it>"
 }"""
@@ -814,7 +817,7 @@ def closure_after_disposition(
     rationale → next paid delta cycle). DEGRADED → not closable by disposition
     (rerun the wave). Advisory enforcement never flips ``closed``: the caller
     may proceed with the wave open under loud disclosure — this function only
-    reports. Control-line invariants (``loop_tool_execution
+    reports. Control-line invariants (``tools.plan_render
     ._parse_plan_review_control``): GREEN ⇒ closed, REVISE_PLAN ⇒ not closed.
     """
     verdict = str(aggregate or "").strip().upper()

@@ -387,3 +387,58 @@ __all__ = [
     "CompanionDescriptor", "CompanionSupervisor", "init_global_supervisor",
     "init_server_process_pid", "is_server_process", "panic_kill_all", "snapshot_processes",
 ]
+
+
+def companion_spawn_env(
+    spec: Dict[str, Any], token: str, *, env_allow: Any, granted_upper: Any,
+    skill: str, skill_dir: Optional[pathlib.Path], state_dir: pathlib.Path,
+) -> Dict[str, str]:
+    """The env one staged companion is spawned with (fix-round-6).
+
+    Built only inside ``PluginAPIImpl._publish_registrations``'s post-swap attach, after
+    the generation fence admitted the publication: the settings-derived
+    values (``_scrub_env`` -> ``load_settings`` takes the settings lock and
+    may persist a settings migration), the manifest env overlay, the Host
+    Service bridge URL/token and the isolated-dep PYTHONPATH are all
+    resolved HERE, so the pre-fence descriptor build stays purely
+    computational.
+    """
+    from ouroboros.contracts.plugin_api import FORBIDDEN_SKILL_SETTINGS
+    from ouroboros.node_runtime import prepend_skill_node_emergency_path, skill_manifest_owns_path
+    from ouroboros.extension_isolated_deps import _isolated_python_site_dirs
+    from ouroboros.gateway.host_service import DEFAULT_HOST_SERVICE_HOST, host_service_port
+    from ouroboros.tools.skill_exec import _scrub_env
+    # Case-aware merge (delta finding D2-8): a manifest "Path" must REPLACE
+    # the allowlisted "PATH" on Windows, never sit next to it — duplicate
+    # case-variant env keys make CreateProcess-era spawns fail or pick an
+    # undefined winner. Same contract as the executor-local service lane.
+    from ouroboros.workspace_executor import overlay_env
+
+    reserved = set(FORBIDDEN_SKILL_SETTINGS) | {"HOST_SERVICE_TOKEN", "HOST_SERVICE_URL"}
+    env = overlay_env(
+        _scrub_env(
+            list(env_allow), state_dir, skill,
+            granted_keys=list(granted_upper),
+        ),
+        {
+            str(key): str(value)
+            for key, value in (spec.get("env") or {}).items()
+            if str(key).upper() not in reserved
+        },
+    )
+    env["HOST_SERVICE_URL"] = f"http://{DEFAULT_HOST_SERVICE_HOST}:{host_service_port()}"
+    env["HOST_SERVICE_TOKEN"] = token
+    site_dirs = [] if skill_dir is None else [
+        str(path) for path in _isolated_python_site_dirs(skill_dir)
+    ]
+    if site_dirs:
+        inherited = env.get("PYTHONPATH")
+        env["PYTHONPATH"] = os.pathsep.join([*site_dirs, inherited] if inherited else site_dirs)
+    if str(spec.get("runtime") or "").strip() in {"node", "npm"} and not skill_manifest_owns_path(spec):
+        # T14 emergency PATH prepend, the other half of the argv rewrite in
+        # register_companion_process: descriptor env keys win over the
+        # supervisor's `_companion_base_env` merge, so the prepend reaches
+        # the child (and the PATH it would otherwise inherit) and survives
+        # supervisor restarts.
+        prepend_skill_node_emergency_path(env, fallback_path=os.environ.get("PATH", ""))
+    return env

@@ -181,7 +181,7 @@ class TestPreflightGatesBeforeSDK:
 
         monkeypatch.setattr(
             advisory, "_run_advisory_native",
-            lambda prompt, repo_dir, ctx_, slot, model: (
+            lambda prompt, repo_dir, ctx_, slot, model, **_: (
                 _fake_run_readonly(), model,
             ),
         )
@@ -252,7 +252,7 @@ class TestPreflightGatesBeforeSDK:
         # so patch the source symbol.
         monkeypatch.setattr(
             advisory, "_run_advisory_native",
-            lambda prompt, repo_dir, ctx_, slot, model: (
+            lambda prompt, repo_dir, ctx_, slot, model, **_: (
                 _fake_run_readonly(), model,
             ),
         )
@@ -408,6 +408,31 @@ class TestHandleAdvisoryPreReviewSurfacesPreflightBlocked:
         assert result is not None
         assert "uv.lock" in result
 
+    def test_release_metadata_preflight_blocks_stale_web_package_lock(self, tmp_path):
+        """MAJOR-1 (rc.15 review): the lockfile is a release carrier the sync
+        writes; the admission preflight must read it like its siblings, so a
+        root-entry desync is a typed PREFLIGHT_BLOCKED naming the file (this
+        preflight is also the SM1 stand check's carrier gate)."""
+        from ouroboros.tools import claude_advisory_review as adv
+
+        repo = _make_agent_repo(tmp_path)
+        _write_release_files(repo, version="5.99.0-rc.1")
+        (repo / "web").mkdir()
+        (repo / "web" / "package.json").write_text(
+            '{\n  "name": "ouroboros-web",\n  "version": "5.99.0-rc.1"\n}\n', encoding="utf-8",
+        )
+        (repo / "web" / "package-lock.json").write_text(
+            '{\n  "name": "ouroboros-web",\n  "version": "5.98.0",\n  "lockfileVersion": 3,\n'
+            '  "packages": {\n    "": {\n      "name": "ouroboros-web",\n      "version": "5.98.0"\n'
+            '    }\n  }\n}\n',
+            encoding="utf-8",
+        )
+
+        result = adv._release_metadata_preflight(repo, "v5.99.0-rc.1: release", ["VERSION"])
+
+        assert result is not None and "PREFLIGHT_BLOCKED" in result
+        assert 'web/package-lock.json (expected both root "version" entries = "5.99.0-rc.1")' in result
+
     def test_changed_diff_without_version_blocks_before_sdk(self, tmp_path, monkeypatch):
         from ouroboros.tools import claude_advisory_review as adv
         import json as _json
@@ -448,6 +473,91 @@ class TestHandleAdvisoryPreReviewSurfacesPreflightBlocked:
         result = _json.loads(result_raw)
         assert result["status"] == "preflight_blocked"
         assert "VERSION is not in scope" in result["error"]
+
+    def test_doc_only_diff_without_version_reaches_the_critic(self, tmp_path, monkeypatch):
+        """Doc-only carve (finding W3A-F1). The commit gate already exempts a
+        doc-only diff from its compensating preflight, while this admission
+        blocked the very same diff — so a doc-only change could never obtain a
+        FRESH advisory verdict on any install and the standard flow degraded to
+        the audited bypass. The critic must now actually be dispatched."""
+        from ouroboros.tools import claude_advisory_review as adv
+        import json as _json
+
+        repo_root = tmp_path / "repo"
+        repo_root.mkdir(parents=True, exist_ok=True)
+        repo = _make_agent_repo(repo_root)
+        _init_git_repo(repo)
+        (repo / "logs").mkdir(exist_ok=True)
+        _write_release_files(repo, version="5.99.0-rc.1")
+        subprocess.run(["git", "add", "."], cwd=str(repo), check=True)
+        subprocess.run(["git", "commit", "-qm", "base"], cwd=str(repo), check=True)
+        (repo / "docs" / "NOTES.md").write_text("# notes\n", encoding="utf-8")
+        subprocess.run(["git", "add", "docs/NOTES.md"], cwd=str(repo), check=True)
+
+        monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-ant-fake-for-test")
+        monkeypatch.setattr(adv, "check_worktree_readiness", lambda *args, **kwargs: [])
+
+        dispatched: list = []
+
+        def fake_run(repo_dir, commit_message, ctx, **kwargs):
+            dispatched.append(commit_message)
+            return [], "[]", "fake-model", 2
+
+        monkeypatch.setattr(adv, "_run_claude_advisory", fake_run)
+
+        fake_ctx = mock.MagicMock()
+        fake_ctx.repo_dir = repo
+        fake_ctx.drive_root = repo
+        fake_ctx.emit_progress_fn = lambda *a, **kw: None
+        fake_ctx.task_id = "t-doc-only"
+
+        result = _json.loads(adv._handle_advisory_pre_review(
+            fake_ctx,
+            commit_message="docs: notes",
+            paths=["docs/NOTES.md"],
+            skip_tests=True,
+        ))
+        assert result["status"] != "preflight_blocked", result
+        assert dispatched == ["docs: notes"]
+
+    def test_doc_only_carve_is_the_commit_gate_classifier(self, tmp_path):
+        """One detector, not two: the carve is decided by the SAME
+        ``_diff_is_doc_only`` the commit gate applies, so the gates cannot
+        drift. A code file, a mixed diff and a doc under ``tests/`` all keep
+        the block; the carve never touches the carrier-coherence checks, which
+        still run the moment VERSION IS in scope."""
+        from ouroboros.commit_admission import release_metadata_preflight
+        from ouroboros.tools.git_review_cycle import _diff_is_doc_only
+
+        repo = _make_agent_repo(tmp_path)
+        _init_git_repo(repo)
+        _write_release_files(repo, version="5.99.0-rc.1")
+        subprocess.run(["git", "add", "."], cwd=str(repo), check=True)
+        subprocess.run(["git", "commit", "-qm", "base"], cwd=str(repo), check=True)
+        (repo / "docs" / "NOTES.md").write_text("# notes\n", encoding="utf-8")
+        (repo / "ouroboros" / "feature.py").write_text("x = 1\n", encoding="utf-8")
+        (repo / "tests").mkdir(exist_ok=True)
+        (repo / "tests" / "NOTES.md").write_text("# notes\n", encoding="utf-8")
+
+        def _preflight(paths):
+            return release_metadata_preflight(repo, "m", paths)
+
+        assert _preflight(["docs/NOTES.md"]) is None
+        assert _diff_is_doc_only(["docs/NOTES.md"]) is True
+
+        for scope in (["ouroboros/feature.py"],
+                      ["docs/NOTES.md", "ouroboros/feature.py"],
+                      ["tests/NOTES.md"]):
+            assert _diff_is_doc_only(scope) is False, scope
+            blocked = _preflight(scope)
+            assert blocked is not None and "VERSION is not in scope" in blocked, scope
+
+        # VERSION in scope: the carve is out of the way and the coherence
+        # checks own the answer again (stale carrier -> still blocked).
+        (repo / "pyproject.toml").write_text(
+            '[project]\nname = "ouroboros"\nversion = "5.98.0"\n', encoding="utf-8")
+        stale = _preflight(["VERSION", "docs/NOTES.md"])
+        assert stale is not None and "pyproject.toml" in stale
 
     def test_advisory_auto_syncs_release_metadata_when_version_staged(self, tmp_path, monkeypatch):
         from ouroboros.tools import claude_advisory_review as adv

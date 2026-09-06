@@ -39,6 +39,19 @@ def test_transport_timeout_is_narrowed_by_numeric_owner_deadline(monkeypatch):
     assert deadlines.transport_timeout_with_deadline(90, deadline_ts=999.0) == 0.001
 
 
+def test_update_letter_timeout_is_a_clamped_config_getter(monkeypatch):
+    from ouroboros.config import SETTINGS_DEFAULTS, get_update_letter_timeout_sec
+
+    monkeypatch.delenv("OUROBOROS_UPDATE_LETTER_TIMEOUT_SEC", raising=False)
+    assert get_update_letter_timeout_sec() == float(SETTINGS_DEFAULTS["OUROBOROS_UPDATE_LETTER_TIMEOUT_SEC"])
+    monkeypatch.setenv("OUROBOROS_UPDATE_LETTER_TIMEOUT_SEC", "not-a-number")
+    assert get_update_letter_timeout_sec() == 120.0
+    monkeypatch.setenv("OUROBOROS_UPDATE_LETTER_TIMEOUT_SEC", "0")
+    assert get_update_letter_timeout_sec() == 10.0
+    monkeypatch.setenv("OUROBOROS_UPDATE_LETTER_TIMEOUT_SEC", "99999")
+    assert get_update_letter_timeout_sec() == 600.0
+
+
 def test_dispatch_window_distinguishes_no_deadline_from_spent_deadline(monkeypatch):
     import ouroboros.deadline_utils as deadlines
 
@@ -1042,7 +1055,9 @@ def test_expired_local_deadline_does_not_dispatch_a_paid_final_call(monkeypatch,
 
     assert result is not None
     assert result[0].startswith("⚠️ Task reached its deadline")
-    assert ctx.accumulated_usage == {
+    usage = dict(ctx.accumulated_usage)
+    assert usage.pop("terminal_origin") == "host_notice"
+    assert usage == {
         "execution_status": "failed",
         "reason_code": "deadline_local",
     }

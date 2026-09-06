@@ -26,7 +26,6 @@ from ouroboros.gateway.contracts import (
     OwnerHurryProjection,
     OwnerSkillPresenceRuntimeRequest,
     OwnerSkillPresenceRuntimeResponse,
-    OwnerScopeReviewFloorResponse,
     DocumentOutbound,
     LinkAction,
     LinksOutbound,
@@ -50,6 +49,7 @@ from ouroboros.gateway.contracts import (
     TaskHurryRequest,
     TaskHurryResponse,
     TypingOutbound,
+    UiPreferencesResponse,
     UpdateApplyErrorResponse,
     UpdateApplyRequest,
     UpdateApplySuccessResponse,
@@ -60,6 +60,7 @@ from ouroboros.gateway.contracts import (
     VideoOutbound,
 )
 from ouroboros.gateway.router import collect_routes
+from ouroboros.gateway.widgets import WidgetTab, WidgetsResponse
 
 
 def _js_typedef_fields(text: str, name: str) -> set[str]:
@@ -227,6 +228,8 @@ def test_gateway_contract_endpoint_index_matches_router_and_types(tmp_path):
         "ClaudexorLoginJobProblem",
         "ClaudexorCredentialProfileDeleteResponse",
         "ClaudexorVendorCredentialDisposition",
+        "WidgetTab",
+        "WidgetsResponse",
     ):
         assert re.search(rf"@typedef \{{Object\}} {name}\b", text), f"api_types.js missing {name}"
     api_client = (pathlib.Path(__file__).resolve().parent.parent / "web" / "modules" / "api_client.js").read_text(
@@ -241,8 +244,10 @@ def test_gateway_contract_endpoint_index_matches_router_and_types(tmp_path):
     # never have to appear in the browser's typedef (ARCHITECTURE.md §11.3).
     for cls in (ChatInbound, ChatOutbound, PhotoOutbound, VideoOutbound, DocumentOutbound,
                 DecisionRequest, DecisionResponse, LinkAction, LinksOutbound, QuizOption, QuizOutbound, QuizStateOutbound,
+                # widgets-lifecycle W1b: the owner's per-card start-mode override is checked field by field.
+                UiPreferencesResponse,
                 ActiveDirectTurn, ActiveChatActivity, TypingOutbound,
-                StateResponse, OwnerScopeReviewFloorResponse, UpdateMergePlan,
+                StateResponse, UpdateMergePlan,
                 UpdatePreflightRequest, UpdatePreflightResponse, UpdateApplyRequest,
                 UpdateApplySuccessResponse, UpdateApplyErrorResponse,
                 UpdateStatusReadyOutbound, TaskCostBreakdown, TaskDetailResponse,
@@ -257,10 +262,28 @@ def test_gateway_contract_endpoint_index_matches_router_and_types(tmp_path):
                 ClaudexorLoginJobResponse, ClaudexorLoginJobProblem,
                 ClaudexorCredentialProfileDeleteResponse,
                 ClaudexorVendorCredentialDisposition,
-                ClaudexorStatusReads, ClaudexorStatusResponse):
+                ClaudexorStatusReads, ClaudexorStatusResponse,
+                WidgetTab, WidgetsResponse):
         expected = set(get_type_hints(cls, include_extras=True))
         actual = _js_typedef_fields(text, cls.__name__)
+        # ABI 7.0 (ABI-3): the alias JSDoc lines were cleaned up in the F3.3
+        # comma-sweep tact — the browser mirror is exact again, no excuse set.
         assert actual == expected, f"{cls.__name__} JSDoc fields drifted: missing={sorted(expected - actual)}, extra={sorted(actual - expected)}"
+    # ABI-3 removal exact pins: the five removed alias fields stay out of BOTH
+    # mirrors of the frames they were removed from — a JSDoc resurrection alone
+    # (the exact loop would catch a Python one) must go red here.
+    for cls, removed in (
+        (ChatOutbound, ("cost_usd", "cost_usd_with_children", "telegram_chat_id")),
+        (PhotoOutbound, ("telegram_chat_id",)),
+        (VideoOutbound, ("telegram_chat_id",)),
+        (DocumentOutbound, ("telegram_chat_id",)),
+        (UiPreferencesResponse, ("project_last_viewed", "project_hidden")),
+    ):
+        hints = set(get_type_hints(cls, include_extras=True))
+        js_fields = _js_typedef_fields(text, cls.__name__)
+        for field in removed:
+            assert field not in hints, f"{cls.__name__}.{field} resurrected in Python"
+            assert field not in js_fields, f"{cls.__name__}.{field} resurrected in JSDoc"
     # Field-set parity alone would accept an optional marker on the two
     # discriminators. Pin the browser mirror's requiredness as well as names.
     success_decl = re.search(
@@ -365,9 +388,6 @@ def test_gateway_contract_endpoint_index_matches_router_and_types(tmp_path):
     assert re.search(r"@property \{boolean\} context_mode_auto_low\b", text), (
         "StateResponse.context_mode_auto_low must remain a JSDoc boolean compatibility field"
     )
-    assert re.search(r"@property \{string\} deprecation_notice\b", text), (
-        "OwnerScopeReviewFloorResponse.deprecation_notice must be declared for the browser"
-    )
     assert re.search(r"@property \{boolean=\} force_plan\b", text), "ChatInbound missing force_plan"
     assert re.search(r"@property \{Object=\} client_surface\b", text), "ChatInbound missing client_surface"
     for field in ("model_lane", "requested_model_lane", "effective_model_lane", "model", "task_group_id"):
@@ -389,7 +409,9 @@ def test_gateway_contract_endpoint_index_matches_router_and_types(tmp_path):
         "artifact_status",
     ):
         assert re.search(rf"@property \{{string=\}} {field}\b", text), f"ChatOutbound missing {field}"
-    assert re.search(r"@property \{\?number=\} cost_usd\b", text), "ChatOutbound cost_usd must be nullable"
+    assert re.search(r"@property \{\?number=\} accounted_upper_bound_usd\b", text), (
+        "ChatOutbound accounted_upper_bound_usd must be nullable"
+    )
     assert re.search(r"@property \{number=\} chat_id\b", text), "ChatOutbound missing chat_id"
     # Main-thread fan-out stamp: every card/bubble-MINTING outbound frame family
     # declares the same additive-optional boolean in both mirrors (message_annotation
@@ -431,14 +453,16 @@ def test_gateway_money_contracts_keep_unavailable_distinct_from_zero():
 
     chat_hints = get_type_hints(ChatOutbound, include_extras=True)
     for field in (
-        "cost_usd",
-        "cost_usd_with_children",
+        "accounted_upper_bound_usd",
+        "accounted_upper_bound_usd_with_children",
         "reserved_usd",
         "unresolved_upper_bound_usd",
         "unknown_unmetered",
     ):
         assert _contains_none(chat_hints[field]), f"ChatOutbound.{field} must admit ledger-unavailable null"
     assert {"cost_accounting_status", "cost_final", "cost_with_children_partial"} <= set(chat_hints)
+    # ABI 7.0 (ABI-3): the retired aliases never come back to the contract.
+    assert {"cost_usd", "cost_usd_with_children", "telegram_chat_id"}.isdisjoint(chat_hints)
 
 
 def test_skill_lifecycle_queue_contract_matches_runtime_shape():

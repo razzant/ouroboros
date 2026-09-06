@@ -232,7 +232,9 @@ def test_wall_clock_jump_neither_fabricates_nor_masks_a_supervisor_stall(monkeyp
     boot_mono = 500.0
     wall = 1_700_000_000.0
     clock = _FakeServerClock(wall=wall, mono=boot_mono)
-    monkeypatch.setattr(server, "time", clock)
+    # The watchdog reads its clock from its owner module (v7 server split).
+    from ouroboros import server_liveness
+    monkeypatch.setattr(server_liveness, "time", clock)
     stop = threading.Event()  # local per-test token
     try:
         # The loop ticked "just now" on the monotonic clock — it is healthy.
@@ -270,7 +272,9 @@ def test_wall_clock_jump_neither_fabricates_nor_masks_a_chat_turn_wedge(monkeypa
     boot_mono = 500.0
     wall = 1_700_000_000.0
     clock = _FakeServerClock(wall=wall, mono=boot_mono)
-    monkeypatch.setattr(server, "time", clock)
+    # The watchdog reads its clock from its owner module (v7 server split).
+    from ouroboros import server_liveness
+    monkeypatch.setattr(server_liveness, "time", clock)
     agent_stub = types.SimpleNamespace(
         _busy=True, _current_task_id="wedged-mono", _last_activity_ts=boot_mono)
     monkeypatch.setattr(w, "_chat_agent", agent_stub)

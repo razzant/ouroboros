@@ -326,3 +326,304 @@ def test_acceptance_revision_round_does_not_arm_delivery_control(tmp_path, monke
     # conflicted with OPEN OBLIGATIONS prose + the periodic self-check and froze
     # the model into identical no-tool resubmits).
     assert not bool(getattr(registry._ctx, "_delivery_control_required", False))
+
+
+# ── AP1: the packet ceiling follows the review quorum's real windows ───────────
+
+def test_acceptance_packet_budget_falls_back_to_the_floor_without_calibration():
+    from ouroboros.review_evidence import _ACCEPT_TOTAL_BUDGET, acceptance_packet_budget_chars
+
+    # No slots at all, and a slot list whose models calibrate to nothing, both
+    # read the historical floor: an unknown route never gets a THINNER packet.
+    assert acceptance_packet_budget_chars([]) == _ACCEPT_TOTAL_BUDGET
+    assert acceptance_packet_budget_chars(None) == _ACCEPT_TOTAL_BUDGET
+    blank = [ReviewSlot(slot_id="slot_1", model="", effort="high")]
+    assert acceptance_packet_budget_chars(blank) == _ACCEPT_TOTAL_BUDGET
+
+
+def test_acceptance_packet_budget_uses_the_quorum_window_and_dense_chars(monkeypatch):
+    from ouroboros.review_evidence import (
+        ACCEPTANCE_PROMPT_OVERHEAD_CHARS,
+        _ACCEPT_DENSE_CHARS_PER_TOKEN,
+        _ACCEPT_TOTAL_BUDGET,
+        acceptance_packet_budget_chars,
+    )
+    from ouroboros.tools import review_synthesis
+
+    caps = {"wide-1": 900_000, "wide-2": 800_000, "narrow": 120_000}
+    monkeypatch.setattr(
+        review_synthesis, "per_slot_input_token_limits",
+        lambda models, **kwargs: {str(m): caps.get(str(m), 0) for m in models},
+    )
+    slots = [
+        ReviewSlot(slot_id="slot_1", model="wide-1", effort="high"),
+        ReviewSlot(slot_id="slot_2", model="wide-2", effort="high"),
+        ReviewSlot(slot_id="slot_3", model="narrow", effort="high"),
+    ]
+    budget = acceptance_packet_budget_chars(slots)
+    # quorum of 3 is 2, so the second-largest cap sizes the shared prompt; the
+    # narrow slot drops out of the quorum instead of shrinking everyone's packet.
+    expected = int(800_000 * _ACCEPT_DENSE_CHARS_PER_TOKEN) - ACCEPTANCE_PROMPT_OVERHEAD_CHARS
+    assert budget == expected > _ACCEPT_TOTAL_BUDGET
+    # A retrieving slot brings its own tools and is not sized against this pack.
+    retrieving = _t.SimpleNamespace(model="wide-1", max_tokens=16_384, retrieves=True)
+    assert acceptance_packet_budget_chars([retrieving]) == _ACCEPT_TOTAL_BUDGET
+
+
+def test_predecessor_envelope_sheds_first_and_is_disclosed():
+    dr = Path(tempfile.mkdtemp())
+    ctx = _t.SimpleNamespace(
+        task_contract={
+            "requirements": "do X", "expected_output": "42",
+            "predecessor_authority": {
+                "source": {"kind": "task_result", "task_id": "prev-task"},
+                "final_answer": "P" * 60_000,
+            },
+        },
+        task_metadata={}, drive_root=str(dr), task_id="acc", repo_dir=str(dr),
+    )
+    trace = {"tool_calls": [
+        {"tool": "run_command", "status": "ok", "result": f"call-{i}-" + ("X" * 25000)}
+        for i in range(25)
+    ]}
+    ev = build_task_acceptance_evidence(ctx, llm_trace=trace, drive_root=dr, task_id="acc")
+    stub = ev["task_contract"]["predecessor_authority"]
+    assert stub["kind"] == "predecessor_authority_omitted_for_budget"
+    assert stub["previous_task_id"] == "prev-task"
+    assert stub["omitted_chars"] > 60_000
+    rows = [o for o in ev["omissions_manifest"]
+            if o.get("section") == "task_contract.predecessor_authority"]
+    assert rows and rows[0]["reason"] == "evidence_budget"
+    # ...and it sheds BEFORE the trajectory tail is re-capped for the same bytes.
+    assert ev["omissions_manifest"].index(rows[0]) == 0
+
+
+def test_repo_diff_previews_last_and_keeps_its_source_ref(monkeypatch):
+    from ouroboros import review_evidence
+
+    dr = Path(tempfile.mkdtemp())
+    ref = {"kind": "artifact", "path": "task_results/artifacts/acc/repo_diff.txt"}
+    monkeypatch.setattr(
+        review_evidence, "collect_turn_diff",
+        lambda *a, **k: "D" * 300_000,
+    )
+    monkeypatch.setattr(
+        review_evidence, "_accept_owner_directives", lambda *a, **k: "",
+    )
+    ev = build_task_acceptance_evidence(
+        _acc_ctx(dr), llm_trace={"tool_calls": []}, drive_root=dr, task_id="acc",
+    )
+    # Without a durable source ref the diff is NOT previewed — it stays exact and
+    # the packet honestly overflows instead of losing bytes nobody can recover.
+    assert len(ev["repo_diff"]) == 300_000
+    assert "repo_diff" not in {o.get("section") for o in ev["omissions_manifest"]}
+
+    ev2 = build_task_acceptance_evidence(
+        _acc_ctx(dr), llm_trace={"tool_calls": []}, drive_root=dr, task_id="acc",
+    )
+    ev2["repo_diff_source_ref"] = ref
+    from ouroboros.review_evidence import _accept_enforce_budget
+
+    ev2["repo_diff"] = "D" * 300_000
+    ev2["omissions_manifest"] = []
+    ev2.pop("__immutable_core_overflow__", None)
+    ev2.pop("__budget_note__", None)
+    shed = _accept_enforce_budget(ev2)
+    assert len(shed["repo_diff"]) <= 20_100
+    assert shed["repo_diff_source_ref"] == ref
+    row = [o for o in shed["omissions_manifest"] if o.get("section") == "repo_diff"]
+    assert row and row[0]["source_ref"] == ref
+    assert "__immutable_core_overflow__" not in shed
+    assert "__unresolved_partial_artifacts__" not in shed
+
+
+def test_core_overflow_reason_names_the_largest_sections():
+    from ouroboros.review_evidence import _accept_enforce_budget
+    from ouroboros.review_dispatch import task_acceptance_zero_physical_refusal
+
+    ev = {
+        "owner_requirements_and_decisions": "O" * 300_000,
+        "task_contract": {"requirements": "R" * 50_000},
+        "verification_summary": {"note": "V" * 10_000},
+    }
+    out = _accept_enforce_budget(ev)
+    reason = out["__immutable_core_overflow__"]["reason"]
+    assert reason.startswith("packet exceeds budget after every disclosed shed")
+    assert "owner_requirements_and_decisions=" in reason
+    assert "task_contract=" in reason
+    refusal = task_acceptance_zero_physical_refusal(out)
+    assert refusal["status"] == "degraded_core_overflow"
+    assert "owner_requirements_and_decisions=" in refusal["summary"]
+
+
+def test_budget_shed_partials_no_longer_veto_the_panel(tmp_path):
+    from ouroboros.review_dispatch import task_acceptance_zero_physical_refusal
+
+    shed_only = {"__unresolved_partial_artifacts__": [
+        {"tool": "read_file", "status": "not_materialized_for_reviewer",
+         "source_ref": {"kind": "artifact", "path": "p"}},
+    ]}
+    assert task_acceptance_zero_physical_refusal(shed_only) == {}
+    genuine = {"__unresolved_partial_artifacts__": [
+        {"tool": "read_file", "status": "not_materialized_for_reviewer", "source_ref": {}},
+        {"tool": "artifact_manifest", "status": "source_unavailable", "source_ref": {}},
+    ]}
+    assert task_acceptance_zero_physical_refusal(genuine)["status"] == "degraded_partial_source"
+
+
+def test_packet_budget_is_memoised_once_per_task(tmp_path, monkeypatch):
+    """A ceiling that moved between the binding build and the staleness rebuild
+    would flip the evidence revision, supersede the paid identity and terminalize
+    the task on an identical-acceptance refusal. The context resolves it ONCE."""
+    from dataclasses import replace
+
+    from ouroboros import loop
+    from ouroboros.review_evidence import task_acceptance_evidence_revision
+
+    ctx = _t.SimpleNamespace(
+        task_contract={"requirements": "do X"}, task_metadata={},
+        drive_root=str(tmp_path), task_id="acc", repo_dir=str(tmp_path),
+    )
+    review_ctx = loop._TaskAcceptanceContext(
+        tools=_t.SimpleNamespace(_ctx=ctx), content="done", task_id="acc",
+        task_type="", llm_trace={"tool_calls": []}, drive_root=tmp_path,
+        messages=[{}, {"content": "goal"}], emit_progress=lambda *_: None,
+        mode="auto", subtree_statuses=[], budget_profile=None, passes_done=0,
+        packet_budget_chars=1_000_000,
+    )
+    first = task_acceptance_evidence_revision(loop._build_host_acceptance_evidence(review_ctx))
+    again = task_acceptance_evidence_revision(
+        loop._build_host_acceptance_evidence(replace(review_ctx, evidence={})),
+    )
+    assert first == again
+
+
+# ── AP5: an OPEN plan wave binds nothing, and says so ─────────────────────────
+
+def _record_wave(root: Path, task_id: str, *, closed: bool, cycle: int = 1) -> None:
+    from ouroboros.task_results import record_plan_review_wave
+
+    record_plan_review_wave(root, task_id, {
+        "schema_version": 2,
+        "cycle_index": cycle,
+        "request_fingerprint": f"{cycle:064x}",
+        "spec": {"goal": "g", "acceptance_claims": [
+            {"id": "claim_1", "claim": "the widget renders", "priority": "must"},
+            {"id": "claim_2", "claim": "the counter increments", "priority": "should"},
+        ]},
+        "findings": [],
+        "aggregate": "GREEN" if closed else "REVISE_PLAN",
+        "closed": closed,
+        "paid": True,
+        "dispositions": [],
+    })
+
+
+def test_an_open_plan_wave_is_disclosed_as_binding_nothing():
+    dr = Path(tempfile.mkdtemp())
+    _record_wave(dr, "acc", closed=False)
+    ev = build_task_acceptance_evidence(
+        _acc_ctx(dr), llm_trace={"tool_calls": []}, drive_root=dr, task_id="acc",
+    )
+    assert ev["acceptance_claims_source"] == "none_open_plan_wave"
+    exhibit = ev["plan_claims_exhibit"]
+    assert exhibit["binding"] == "not bound: wave open"
+    assert exhibit["cycle_index"] == 1
+    assert len(exhibit["acceptance_claims"]) == 2
+    assert "the widget renders" in json.dumps(exhibit)
+    # Nothing was bound: the contract keeps no claims and no support refs.
+    assert "acceptance_claims" not in ev["task_contract"]
+    assert "acceptance_support_refs" not in ev
+    assert ev["__provenance__"]["plan_claims_exhibit"] == "host_attested"
+
+
+def test_a_closed_wave_still_binds_and_leaves_no_exhibit():
+    dr = Path(tempfile.mkdtemp())
+    _record_wave(dr, "acc", closed=True)
+    ev = build_task_acceptance_evidence(
+        _acc_ctx(dr), llm_trace={"tool_calls": []}, drive_root=dr, task_id="acc",
+    )
+    assert ev["acceptance_claims_source"] == "plan_review"
+    assert "plan_claims_exhibit" not in ev
+    claims = ev["task_contract"]["acceptance_claims"]
+    assert [row["id"] for row in claims] == ["claim_1", "claim_2"]
+
+
+def test_ingress_claims_win_over_an_open_wave_with_no_exhibit():
+    dr = Path(tempfile.mkdtemp())
+    _record_wave(dr, "acc", closed=False)
+    ctx = _t.SimpleNamespace(
+        task_contract={
+            "requirements": "do X", "expected_output": "42",
+            "acceptance_claims": [{"id": "ingress_1", "claim": "the ingress claim"}],
+        },
+        task_metadata={}, drive_root=str(dr), task_id="acc", repo_dir=str(dr),
+    )
+    ev = build_task_acceptance_evidence(
+        ctx, llm_trace={"tool_calls": []}, drive_root=dr, task_id="acc",
+    )
+    assert ev["acceptance_claims_source"] == "ingress_contract"
+    assert "plan_claims_exhibit" not in ev
+
+
+def test_a_task_with_no_wave_at_all_stays_silent():
+    dr = Path(tempfile.mkdtemp())
+    ev = build_task_acceptance_evidence(
+        _acc_ctx(dr), llm_trace={"tool_calls": []}, drive_root=dr, task_id="acc",
+    )
+    assert "acceptance_claims_source" not in ev
+    assert "plan_claims_exhibit" not in ev
+
+
+# ── AP6: a forced rail closes a dangling revision request ────────────────────
+
+def _decision(status: str, reason: str = "") -> dict:
+    trace: dict = {"acceptance_decision": {
+        "status": status, "reason": reason,
+        "agent_disposition": "deferred", "agent_rationale": "the host decides",
+    }, "review_decision": {"run_count": 2}}
+    return trace
+
+
+def test_a_terminal_decision_is_never_overwritten():
+    from ouroboros.loop_acceptance import terminalize_dangling_revision
+
+    for status in ("accepted", "finalized_unaccepted"):
+        trace = _decision(status, reason="clean_quorum")
+        assert terminalize_dangling_revision(trace, rail="round_limit") is False
+        assert trace["acceptance_decision"]["status"] == status
+        assert trace["acceptance_decision"]["reason"] == "clean_quorum"
+        assert "acceptance_bypassed_round_limit" not in json.dumps(trace)
+
+
+def test_a_dangling_revision_terminalizes_on_every_forced_rail():
+    from ouroboros.loop_acceptance import terminalize_dangling_revision
+
+    for rail, prior in (
+        ("round_limit", "delivery_binding_superseded"),
+        ("budget_exhausted", "improvement_capsule"),
+        ("children_unabsorbed", "improvement_capsule"),
+    ):
+        trace = _decision("revision_requested", reason=prior)
+        assert terminalize_dangling_revision(trace, rail=rail) is True
+        decision = trace["acceptance_decision"]
+        assert decision["status"] == "finalized_unaccepted"
+        assert decision["reason"] == "revision_unavailable_on_forced_rail"
+        assert decision["source"] == "forced_finalization"
+        # The rationale names the PRIOR reason: "the panel requested an
+        # improvement pass" is false for the superseded-binding shape.
+        assert prior in decision["rationale"]
+        assert rail in decision["rationale"]
+        # The agent's own stance survives, and no bypass reason is stamped over
+        # a panel that really ran.
+        assert decision["agent_disposition"] == "deferred"
+        assert decision["agent_rationale"] == "the host decides"
+        assert "acceptance_bypassed" not in json.dumps(decision)
+        # The paid audit trail is untouched.
+        assert trace["review_decision"]["run_count"] == 2
+
+
+def test_the_terminal_pair_keeps_the_objective_best_effort():
+    from ouroboros.outcomes import _ACCEPTANCE_BLOCKED_TERMINAL_REASONS
+
+    assert "revision_unavailable_on_forced_rail" not in _ACCEPTANCE_BLOCKED_TERMINAL_REASONS

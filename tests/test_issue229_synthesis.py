@@ -8,7 +8,7 @@ from types import SimpleNamespace
 import pytest
 
 import ouroboros.context_compaction as context_compaction
-import ouroboros.llm as llm_module
+import ouroboros.llm_fallback as llm_fallback
 import ouroboros.llm_observability as llm_observability
 import ouroboros.request_wire_contract as wire_contract
 from ouroboros.llm import LLMClient, add_usage
@@ -154,9 +154,12 @@ def _install_transport(monkeypatch, responses, *, max_sends=None):
         )
         return response
 
-    monkeypatch.setattr(llm_module, "_execute_candidate", execute)
+    # The v7 split moved the remote send drivers into llm_fallback.py, which is
+    # where `_execute_candidate` / `last_physical_attempt_capture` are read on
+    # the chat path; patching the names llm.py merely re-exports would be dead.
+    monkeypatch.setattr(llm_fallback, "_execute_candidate", execute)
     monkeypatch.setattr(
-        llm_module, "last_physical_attempt_capture", lambda: capture["value"],
+        llm_fallback, "last_physical_attempt_capture", lambda: capture["value"],
     )
     return client, sent
 

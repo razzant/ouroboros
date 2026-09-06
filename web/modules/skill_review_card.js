@@ -105,6 +105,9 @@ function renderDetailStateIfChanged(full, entry, render, onDomWrite = writeDirec
     return renderDetailState(full, entry, render, onDomWrite);
 }
 
+// The per-instance store keeps heavy rendered markdown per exact job, so it
+// is trimmed FIFO past this many entries (issue #135).
+export const SKILL_REVIEW_DETAIL_CAP = 200;
 export async function loadSkillReviewDetail(full, ref, deps = {}) {
     const fetchImpl = deps.fetchImpl || apiFetch;
     const render = deps.render || renderMarkdown;
@@ -139,6 +142,7 @@ export async function loadSkillReviewDetail(full, ref, deps = {}) {
         retryable: true,
     };
     store?.set(cacheKey, entry);
+    while (store?.size > SKILL_REVIEW_DETAIL_CAP) store.delete(store.keys().next().value);
     renderDetailState(full, entry, render, onDomWrite);
     entry.promise = (async () => {
         try {

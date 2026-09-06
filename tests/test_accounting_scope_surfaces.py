@@ -97,3 +97,14 @@ def test_async_project_namer_preserves_active_tree_scope_across_to_thread(
     # Explicit zero rails must survive the category/source replacement.
     assert scope.global_limit_usd == 0.0
     assert scope.root_limit_usd == 0.0
+
+
+def test_project_naming_scope_accepts_unlimited_total_budget(tmp_path, monkeypatch):
+    from ouroboros.settings_setup_contract import resolve_total_budget_usd
+
+    monkeypatch.setenv("TOTAL_BUDGET", "0")
+    assert resolve_total_budget_usd() is None
+
+    scope = project_naming._project_naming_usage_scope(tmp_path, "naming-task")
+
+    assert scope.global_limit_usd is None

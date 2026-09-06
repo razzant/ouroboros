@@ -313,17 +313,9 @@ def build_health_invariants(env: Any, task_id: str = "") -> str:
     except Exception:
         pass
 
-    try:
-        crash_report = env.drive_path("state/crash_report.json")
-        crash_data = read_json_dict(crash_report)
-        if crash_data:
-            checks.append(
-                f"CRITICAL: RECENT CRASH ROLLBACK — rolled back from "
-                f"{crash_data.get('rolled_back_from', '?')[:12]} to tag "
-                f"{crash_data.get('tag', '?')} at {crash_data.get('ts', '?')}"
-            )
-    except Exception:
-        pass
+    # state/crash_report.json retired (CPL4-C9, owner 2A): its writer — the
+    # crash-rollback path — no longer exists in this tree, so the reader and
+    # its CRITICAL health line were dead surface. Stale files are inert.
 
     try:
         from ouroboros.extension_health import regressed_extensions
@@ -400,14 +392,19 @@ def build_health_invariants(env: Any, task_id: str = "") -> str:
                     f"integrate_delegated_patch captures it at disposition)"
                 )
                 persist_clause = "The snapshot persists until that disposition."
-            # Ownership-aware instruction: integrate_delegated_patch refuses a
-            # non-owner with run_not_owned and only the owner can write the
-            # clearing PATCH_DISPOSED row, so a foreign reader is told WHO must
-            # act instead of being handed a call that structurally refuses.
+            # Ownership-aware instruction: a foreign reader is told WHO must act
+            # instead of being handed a call that structurally refuses. The
+            # wording is STATIC — stating the rule costs no per-orphan
+            # task_result read, and the tool itself is the authority on whether
+            # this particular caller may dispose this particular run.
             if task_id and run.task_id and task_id != run.task_id:
                 decide_clause = (
-                    f"Only its owner task {run.task_id} can decide it (a foreign "
-                    f"integrate_delegated_patch call is refused as run_not_owned)."
+                    f"Only its owner task {run.task_id} can decide it while that task "
+                    f"is live; once that task is terminal, a live top-level task may dispose it: "
+                    f"apply requires the caller's active Git root or fresh payload binding to equal "
+                    f"the run's recorded target, while reject requires only terminality and reject "
+                    f"may release it even from a different active root; the disposition row records "
+                    f"who acted (a live-owner foreign call is still refused as run_not_owned)."
                 )
             else:
                 decide_clause = (

@@ -1,67 +1,60 @@
-import json
+"""Observability census pins (CPL4-C22, owner 7A: the retention knob is GONE).
+
+``prune_observability_blobs`` counts manifests and blobs for startup
+telemetry and deletes NOTHING — the preserve-indefinitely contract. The
+former ``OUROBOROS_OBSERVABILITY_RETENTION_DAYS`` knob (parsed, clamped,
+reported, deleting nothing) is retired entirely: absent from the module and
+listed in ``RETIRED_SETTING_KEYS`` so stored ghosts drop on settings load.
+"""
+
+from __future__ import annotations
+
 import os
+import time
 
-from ouroboros.observability import persist_call, prune_observability_blobs, write_blob
-
-
-def test_observability_retention_preserves_old_manifests_and_orphan_blobs(tmp_path):
-    persist_call(
-        tmp_path,
-        task_id="old-task",
-        call_id="old-call",
-        call_type="llm_call",
-        payload={"message": "old"},
-    )
-    keep = persist_call(
-        tmp_path,
-        task_id="new-task",
-        call_id="new-call",
-        call_type="llm_call",
-        payload={"message": "new"},
-    )
-    orphan = write_blob(tmp_path, {"message": "orphan"})
-
-    old_manifest = tmp_path / "observability" / "calls" / "old-task" / "old-call.json"
-    new_manifest = tmp_path / "observability" / "calls" / "new-task" / "new-call.json"
-    old_time = 1_000_000.0
-    new_time = old_time + 10 * 86400
-    os.utime(old_manifest, (old_time, old_time))
-    os.utime(new_manifest, (new_time, new_time))
-    os.utime(orphan["path"], (old_time, old_time))
-
-    report = prune_observability_blobs(tmp_path, retention_days=7, now=new_time)
-
-    assert report["preserved_indefinitely"] is True
-    assert report["deleted_manifests"] == 0
-    assert report["deleted_blobs"] == 0
-    assert old_manifest.exists()
-    assert new_manifest.exists()
-    assert os.path.exists(orphan["path"])
-    assert report["manifest_count"] == 2
-    assert report["blob_count"] >= 3
-    manifest = json.loads(new_manifest.read_text(encoding="utf-8"))
-    assert os.path.exists(manifest["full_payload_ref"]["path"])
-    assert os.path.exists(manifest["redacted_projection_ref"]["path"])
-    assert keep["manifest_ref"]["path"] == str(new_manifest)
+from ouroboros.observability import prune_observability_blobs
 
 
-def test_observability_retention_preserves_fresh_orphan_blobs(tmp_path):
-    orphan = write_blob(tmp_path, {"message": "fresh service log blob"})
-    now = 1_000_000.0
-    os.utime(orphan["path"], (now, now))
+def _seed_store(tmp_path):
+    calls = tmp_path / "observability" / "calls" / "t1"
+    blobs = tmp_path / "observability" / "blobs"
+    calls.mkdir(parents=True)
+    blobs.mkdir(parents=True)
+    aged = time.time() - 4000 * 86400
+    manifests = [calls / "a.json", calls / "b.json"]
+    blob_files = [blobs / "x.gz", blobs / "y.gz", blobs / "z.gz"]
+    for path in (*manifests, *blob_files):
+        path.write_bytes(b"data")
+        os.utime(path, (aged, aged))
+    return manifests, blob_files
 
-    report = prune_observability_blobs(tmp_path, retention_days=7, now=now)
 
-    assert report["deleted_blobs"] == 0
-    assert os.path.exists(orphan["path"])
-
-
-def test_observability_retention_disabled_without_env(tmp_path, monkeypatch):
-    orphan = write_blob(tmp_path, {"message": "kept"})
-    monkeypatch.delenv("OUROBOROS_OBSERVABILITY_RETENTION_DAYS", raising=False)
+def test_census_counts_and_preserves_everything(tmp_path, monkeypatch):
+    monkeypatch.setenv("OUROBOROS_OBSERVABILITY_RETENTION_DAYS", "1")  # inert: retired
+    manifests, blob_files = _seed_store(tmp_path)
 
     report = prune_observability_blobs(tmp_path)
 
-    assert report["enabled"] is False
     assert report["preserved_indefinitely"] is True
-    assert os.path.exists(orphan["path"])
+    assert report["manifest_count"] == 2 and report["blob_count"] == 3
+    assert not report["errors"]
+    assert all(path.exists() for path in (*manifests, *blob_files))
+
+
+def test_absent_store_reports_empty_census(tmp_path):
+    report = prune_observability_blobs(tmp_path)
+    assert report == {
+        "preserved_indefinitely": True, "manifest_count": 0, "blob_count": 0, "errors": [],
+    }
+
+
+def test_retention_knob_is_retired_everywhere():
+    import inspect
+
+    import ouroboros.observability as observability
+    from ouroboros.settings_defaults import RETIRED_SETTING_KEYS
+
+    source = inspect.getsource(observability)
+    # The docstring may still NAME the retired knob; nothing may READ it.
+    assert 'environ.get("OUROBOROS_OBSERVABILITY_RETENTION_DAYS"' not in source
+    assert "OUROBOROS_OBSERVABILITY_RETENTION_DAYS" in RETIRED_SETTING_KEYS

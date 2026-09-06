@@ -1,6 +1,6 @@
 """Claudexor v3 control-plane transport.
 
-Pure I/O, like every gateway (docs/DEVELOPMENT.md "Gateway Rules"): discover the
+Pure I/O, like every gateway (docs/DEVELOPMENT.md "Gateway Boundary Pattern"): discover the
 loopback daemon, negotiate the protocol, and translate the typed ``/v2`` surface
 into Python primitives. No routing, no policy, no harness identity branches — the
 caller asks for a CAPABILITY (an access profile, an opaque route id) and reads the

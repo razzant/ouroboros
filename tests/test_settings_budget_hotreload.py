@@ -178,7 +178,6 @@ def test_context_mode_compat_migration_truth_table_and_second_start(
         ({"OUROBOROS_CONTEXT_MODE": "low", "OUROBOROS_CONTEXT_MODE_AUTO_LOW": "unknown"}, "max", True),
     ]
 
-    monkeypatch.setattr(os, "environ", dict(os.environ))
     for index, (raw, expected_mode, warning_expected) in enumerate(cases):
         settings_path = tmp_path / f"settings-{index}.json"
         raw_document = {
@@ -257,7 +256,7 @@ def test_context_mode_compat_migration_write_failure_is_honest_and_nonfatal(
     def fail_atomic_write(*_args, **_kwargs):
         raise OSError("simulated migration write failure")
 
-    monkeypatch.setattr(context_mode_compat, "atomic_write_json", fail_atomic_write)
+    monkeypatch.setattr(context_mode_compat, "write_text_atomic", fail_atomic_write)
     caplog.set_level(logging.WARNING, logger=context_mode_compat.__name__)
 
     loaded = cfg.load_settings()
@@ -284,7 +283,7 @@ def test_context_mode_compat_migration_does_not_rewrite_unchanged_raw_pair(
     monkeypatch.setattr(cfg, "DATA_DIR", tmp_path)
     monkeypatch.setattr(
         context_mode_compat,
-        "atomic_write_json",
+        "write_text_atomic",
         lambda *_args, **_kwargs: writes.append((_args, _kwargs)),
     )
 
@@ -335,7 +334,6 @@ def test_context_mode_env_and_disk_owner_semantics(monkeypatch, tmp_path):
     import ouroboros.config as cfg
     from ouroboros.tools import scope_review as sr
 
-    monkeypatch.setattr(os, "environ", dict(os.environ))
     settings_path = tmp_path / "settings.json"
     monkeypatch.setattr(cfg, "SETTINGS_PATH", settings_path)
     monkeypatch.setattr(cfg, "DATA_DIR", tmp_path)
@@ -409,6 +407,7 @@ def test_auto_low_source_inventory_has_no_true_writer_or_ghost_reader():
     key_paths = {path for path, text in sources.items() if key in text}
     assert key_paths == {
         "ouroboros/config.py",
+        "ouroboros/settings_defaults.py",
         "ouroboros/context_mode_compat.py",
         "ouroboros/gateway/owner_settings.py",
         "ouroboros/gateway/settings.py",
@@ -449,3 +448,30 @@ def test_auto_low_source_inventory_has_no_true_writer_or_ghost_reader():
     assert "context_mode_downgraded" not in settings_source
     assert "_active_route_confirms_max" not in settings_source
     assert "SWITCH_BLOCKED" not in control_source
+
+
+def test_the_worker_pool_carries_no_third_budget_limit_copy():
+    """Owner batch #6 item 3=A, second SSOT fix.
+
+    ``supervisor/workers.py`` declared its own ``TOTAL_BUDGET_LIMIT`` and
+    ``workers.init`` took a ``total_budget_limit`` to write it, and NOTHING in
+    the module or outside it ever read the result. A module-global spelled like
+    the live limit, hot-reloaded by nobody, reads as a live tunable to anyone
+    grepping for the budget — the same misleading-surface class the retired
+    timeout pair was. The two copies that ARE read stay: ``supervisor.state``
+    (the authority every budget decision reads through ``budget_remaining``)
+    and ``supervisor.message_bus`` (the reporting plane), both fed by the save
+    endpoint above.
+    """
+    import inspect
+
+    from supervisor import state, workers
+
+    assert not hasattr(workers, "TOTAL_BUDGET_LIMIT")
+    assert "total_budget_limit" not in inspect.signature(workers.init).parameters
+    assert "TOTAL_BUDGET_LIMIT" not in inspect.getsource(workers)
+    # The live limit still has exactly one authority, and it is the one the
+    # dispatch gate reads.
+    state.set_budget_limit(41.0)
+    assert state.TOTAL_BUDGET_LIMIT == 41.0
+    assert "TOTAL_BUDGET_LIMIT" in inspect.getsource(state.budget_remaining)

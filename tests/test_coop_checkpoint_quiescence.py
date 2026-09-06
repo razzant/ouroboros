@@ -51,6 +51,7 @@ def _subagent_task(task_id: str, root_id: str) -> dict:
 
 def test_quiescence_detect_fires_for_settled_root_and_empty_tree(tmp_path, monkeypatch):
     from supervisor import events
+    from supervisor import events_coop_checkpoint as events_coop
     from ouroboros.task_results import write_task_result
 
     data = tmp_path / "data"
@@ -58,7 +59,7 @@ def test_quiescence_detect_fires_for_settled_root_and_empty_tree(tmp_path, monke
     write_task_result(data, "root1", "failed", reason_code="budget_exhausted", title="Sunken city")
     spawned = []
     monkeypatch.setattr(
-        events, "_spawn_coop_checkpoint",
+        events_coop, "_spawn_coop_checkpoint",
         lambda ctx, root_tid, *, title, trigger: spawned.append((root_tid, title, trigger)),
     )
     events._maybe_checkpoint_coop_on_tree_quiescence(
@@ -69,6 +70,7 @@ def test_quiescence_detect_fires_for_settled_root_and_empty_tree(tmp_path, monke
 
 def test_quiescence_detect_skips_while_siblings_live(tmp_path, monkeypatch):
     from supervisor import events
+    from supervisor import events_coop_checkpoint as events_coop
     from ouroboros.task_results import write_task_result
 
     data = tmp_path / "data"
@@ -76,7 +78,7 @@ def test_quiescence_detect_skips_while_siblings_live(tmp_path, monkeypatch):
     write_task_result(data, "root1", "failed", reason_code="budget_exhausted")
     spawned = []
     monkeypatch.setattr(
-        events, "_spawn_coop_checkpoint",
+        events_coop, "_spawn_coop_checkpoint",
         lambda *a, **k: spawned.append(a),
     )
     # A sibling subagent still RUNNING under the same root.
@@ -89,13 +91,14 @@ def test_quiescence_detect_skips_while_siblings_live(tmp_path, monkeypatch):
 
 def test_quiescence_detect_skips_while_root_still_running_or_pending(tmp_path, monkeypatch):
     from supervisor import events
+    from supervisor import events_coop_checkpoint as events_coop
     from ouroboros.task_results import write_task_result
 
     data = tmp_path / "data"
     data.mkdir()
     write_task_result(data, "root1", "failed")
     spawned = []
-    monkeypatch.setattr(events, "_spawn_coop_checkpoint", lambda *a, **k: spawned.append(a))
+    monkeypatch.setattr(events_coop, "_spawn_coop_checkpoint", lambda *a, **k: spawned.append(a))
     events._maybe_checkpoint_coop_on_tree_quiescence(
         _ctx(data, running={"root1": {"task": {"id": "root1"}}}),
         _subagent_task("child1", "root1"), "child1",
@@ -111,13 +114,14 @@ def test_quiescence_detect_requires_truly_settled_root(tmp_path, monkeypatch):
     """cancel_requested is NOT settled: its cancellation custody is still in
     flight and the root's own terminal event re-triggers later."""
     from supervisor import events
+    from supervisor import events_coop_checkpoint as events_coop
     from ouroboros.task_results import write_task_result
 
     data = tmp_path / "data"
     data.mkdir()
     write_task_result(data, "root1", "cancel_requested")
     spawned = []
-    monkeypatch.setattr(events, "_spawn_coop_checkpoint", lambda *a, **k: spawned.append(a))
+    monkeypatch.setattr(events_coop, "_spawn_coop_checkpoint", lambda *a, **k: spawned.append(a))
     events._maybe_checkpoint_coop_on_tree_quiescence(
         _ctx(data), _subagent_task("child1", "root1"), "child1",
     )
@@ -236,6 +240,7 @@ def test_spawned_checkpoint_revalidation_survives_a_racing_running_pop(tmp_path,
     """
     import ouroboros.coop_checkpoint as coop
     from supervisor import events
+    from supervisor import events_subagent_admission as admission
     from supervisor.queue import _queue_lock
 
     data = tmp_path / "data"
@@ -256,7 +261,7 @@ def test_spawned_checkpoint_revalidation_survives_a_racing_running_pop(tmp_path,
         observed["live"] = has_live_tree_tasks
         return [{"committed": True, "root": str(root_tid)}]
 
-    monkeypatch.setattr(events, "_is_active_subagent_task", _racing_predicate)
+    monkeypatch.setattr(admission, "_is_active_subagent_task", _racing_predicate)
     monkeypatch.setattr(coop, "checkpoint_commit_coop_roots", _fake_commit)
     thread = events._spawn_coop_checkpoint(ctx, "rootR", title="", trigger="tree_quiescence")
     assert thread is not None
@@ -371,11 +376,12 @@ def test_root_done_path_defers_to_quiescence_when_children_live(tmp_path, monkey
     """The root-done handler must NOT permanently skip a live tree — the skip
     is now a deferral to the quiescence trigger."""
     from supervisor import events
+    from supervisor import events_coop_checkpoint as events_coop
 
     data = tmp_path / "data"
     data.mkdir()
     spawned = []
-    monkeypatch.setattr(events, "_spawn_coop_checkpoint", lambda *a, **k: spawned.append(a))
+    monkeypatch.setattr(events_coop, "_spawn_coop_checkpoint", lambda *a, **k: spawned.append(a))
     running = {"child": {"task": _subagent_task("child", "root1")}}
     events._checkpoint_coop_roots_on_root_done(
         _ctx(data, running=running), {"id": "root1", "root_task_id": "root1"}, "root1",

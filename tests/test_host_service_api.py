@@ -620,6 +620,7 @@ def test_presence_work_returns_only_correlated_terminal_result(tmp_path: pathlib
     atomic_write_json(
         tmp_path / "task_results" / f"{work_ref}.json",
         {
+            "_schema_version": 1,
             "task_id": work_ref,
             "status": "completed",
             "result": "late answer",
@@ -650,6 +651,7 @@ def test_presence_work_returns_only_correlated_terminal_result(tmp_path: pathlib
     atomic_write_json(
         tmp_path / "task_results" / f"{work_ref}.json",
         {
+            "_schema_version": 1,
             "task_id": work_ref,
             "status": "completed",
             "result": "late deferred answer",
