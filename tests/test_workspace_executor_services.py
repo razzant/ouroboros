@@ -16,12 +16,155 @@ from __future__ import annotations
 import json
 import subprocess
 import sys
+from pathlib import Path
 from types import SimpleNamespace
 
+import pytest
 
 from ouroboros.tools.registry import ToolContext, ToolRegistry
 
 from tests._workspace_executor_shared import _init_repo
+
+
+@pytest.mark.parametrize("executor_kind", [None, "local"])
+def test_real_service_observes_exact_selected_env_and_cwd(tmp_path, monkeypatch, executor_kind):
+    import gzip
+    from ouroboros.tools import services
+
+    monkeypatch.setenv("OUROBOROS_RUNTIME_MODE", "advanced")
+    monkeypatch.setenv("UNSELECTED_660_SECRET", "synthetic-host-only")
+    monkeypatch.setattr("ouroboros.safety.check_safety", lambda *a, **k: (True, ""))
+    workspace = tmp_path / "project with spaces"
+    workspace.mkdir()
+    cwd = workspace / "chosen cwd"
+    cwd.mkdir()
+    script = workspace / "observe.py"
+    script.write_text('''import json, os, pathlib, time
+observed = {"cwd": os.getcwd(), "token": os.environ["TOKEN"],
+    "empty": os.environ["EMPTY"], "proxy": os.environ["HTTPS_PROXY"],
+    "unselected": os.environ.get("UNSELECTED_660_SECRET")}
+pathlib.Path("observed.json").write_text(json.dumps(observed))
+print("TOKEN=" + os.environ["TOKEN"], flush=True)
+print("READY", flush=True)
+time.sleep(30)
+''', encoding="utf-8")
+    env = {"TOKEN": 'synthetic-660-quote"\\tail\nprivate-fragment-660', "EMPTY": "",
+           "HTTPS_PROXY": "http://synthetic-user:synthetic-pass@127.0.0.1:7777",
+           "DEPLOYMENT_MODE": "running", "FIELD_NAME": "state"}
+    monkeypatch.setattr(services, "load_settings", lambda: {"TEST_SERVICE_KEY": env["TOKEN"]})
+    registry = ToolRegistry(repo_dir=tmp_path / "system", drive_root=tmp_path / "data")
+    ctx = ToolContext(repo_dir=tmp_path / "system", drive_root=tmp_path / "data",
+                      workspace_root=workspace, workspace_mode="external", task_id="selected-env")
+    if executor_kind:
+        ctx.executor_ref = {"type": "local", "workspace_host_path": str(workspace),
+                            "workspace_backend_path": str(workspace)}
+    registry.set_context(ctx)
+    try:
+        started = registry.execute("start_service", {"name": "selected", "cmd": [sys.executable, str(script)],
+            "cwd": str(cwd), "env": {key: value for key, value in env.items() if key != "TOKEN"},
+            "env_from_settings": {"TOKEN": "TEST_SERVICE_KEY"},
+            "readiness": {"log_contains": "READY", "timeout_sec": 3}})
+        assert json.loads(started)["ready"]
+        assert json.loads(started)["state"] == "running"
+        observed = json.loads((cwd / "observed.json").read_text())
+        assert observed == {"cwd": str(cwd), "token": env["TOKEN"], "empty": "",
+                            "proxy": env["HTTPS_PROXY"], "unselected": None}
+        logs = registry.execute("service_logs", {"name": "selected"})
+        status = registry.execute("service_status", {"name": "selected"})
+        assert json.loads(status)["state"] == "running"
+        assert env["TOKEN"] not in started + logs + status
+        assert json.dumps(env["TOKEN"])[1:-1] not in logs
+        assert "private-fragment-660" not in logs
+        assert "***" in json.loads(logs)["tail"]
+        if not executor_kind:
+            ref = json.loads(logs)["full_log_ref"]
+            assert env["TOKEN"] not in gzip.decompress(Path(ref["path"]).read_bytes()).decode()
+    finally:
+        stopped = json.loads(services._stop_service(ctx, "selected"))
+    finalization = stopped["log_finalization"]
+    assert finalization["deleted_live_log"] and not finalization["errors"]
+    final = gzip.decompress(Path(finalization["full_log_ref"]["path"]).read_bytes()).decode()
+    assert "private-fragment-660" not in final and "READY" in final
+    assert services.prune_service_logs(ctx.drive_root, retention_days=0)["archived_files"] == 0
+
+
+def test_service_baseline_preserves_allowed_values_without_inheriting_credentials(monkeypatch):
+    from ouroboros.tools.services import _service_env
+    from ouroboros.workspace_executor import _executor_service_env
+
+    value = "https://synthetic-user:synthetic-password@127.0.0.1/modules"
+    monkeypatch.setenv("NODE_PATH", value)
+    monkeypatch.setenv("UNSELECTED_660_SECRET", "synthetic-host-only")
+    for build in (_service_env, _executor_service_env):
+        env = build()
+        assert env["NODE_PATH"] == value
+        assert "UNSELECTED_660_SECRET" not in env
+
+
+@pytest.mark.parametrize("invalid", [[], {"BAD=NAME": "x"}, {"": "x"}, {"KEY": None}, {"KEY": "x\x00y"}])
+def test_service_rejects_invalid_env_without_spawning(tmp_path, monkeypatch, invalid):
+    from ouroboros.tools.services import _start_service
+    monkeypatch.setattr("ouroboros.process_custody.spawn_supervised", lambda *a, **k: pytest.fail("must not spawn"))
+    result = _start_service(ToolContext(repo_dir=tmp_path, drive_root=tmp_path), [sys.executable], env=invalid)
+    assert "TOOL_ARG_ERROR" in result
+
+
+def test_docker_service_only_forwards_selected_env_names(tmp_path, monkeypatch):
+    import os
+    from ouroboros import workspace_executor as executor
+
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    ctx = ToolContext(repo_dir=tmp_path, drive_root=tmp_path / "data", task_id="docker-env",
+        executor_ref={"type": "docker_exec", "container_name": "controlled", "network": "host",
+                      "workspace_host_path": str(workspace), "workspace_backend_path": "/project"})
+    selected = {"TOKEN": "synthetic-660-docker", "PATH": "/backend/bin", "EMPTY": "",
+                "DOCKER_HOST": "tcp://backend-only:1234"}
+    calls = []
+
+    def run(cmd, **kwargs):
+        calls.append((cmd, kwargs))
+        return subprocess.CompletedProcess(cmd, 0, stdout="123\n" if "nohup" in cmd[-1] else "running\n", stderr="")
+
+    monkeypatch.setattr(executor.subprocess, "run", run)
+    payload = executor.start_service(ctx, name="selected", cmd=["server"], host_cwd=workspace,
+        cwd_root="active_workspace", readiness={"timeout_sec": 0}, outputs=[], before_outputs={},
+        env=selected, env_overlay={"PATH": "/host-only/node", "HOST_ONLY": "never-forward"})
+    cmd, kwargs = next(call for call in calls if "nohup" in call[0][-1])
+    aliases = cmd[3:2 + 2 * len(selected):2]
+    assert all(alias.startswith("OUROBOROS_SERVICE_ENV_") for alias in aliases)
+    assert [kwargs["env"][alias] for alias in aliases] == list(selected.values())
+    assert kwargs["env"]["PATH"] == os.environ["PATH"]
+    assert kwargs["env"].get("DOCKER_HOST") == os.environ.get("DOCKER_HOST")
+    assert "/host-only/node" not in str(kwargs) and "HOST_ONLY" not in cmd
+    assert selected["TOKEN"] not in str(cmd) + json.dumps(payload)
+    assert payload["backend_cwd"] == "/project"
+
+
+def test_docker_environment_wrapper_preserves_values_in_real_shell(tmp_path):
+    import os
+    import shlex
+    from ouroboros import workspace_executor as executor
+
+    if os.name == "nt":
+        pytest.skip("Docker backend shell is POSIX")
+    aliases = {"TOKEN": "OUROBOROS_SERVICE_ENV_A", "odd.name": "OUROBOROS_SERVICE_ENV_B"}
+    expected = {"TOKEN": 'synthetic-660-quote"\n$(not-a-command)', "odd.name": ""}
+    record = SimpleNamespace(cmd=[sys.executable, "-c",
+        "import os,json; print(json.dumps({key:os.environ.get(key) for key in ['TOKEN','odd.name','OUROBOROS_SERVICE_ENV_A','OUROBOROS_SERVICE_ENV_B']}))"],
+        backend_cwd=str(tmp_path))
+    shell = executor._docker_service_start_shell(record, str(tmp_path / "log"), aliases)
+    # Exercise the exact payload executed by both setsid/non-setsid branches,
+    # in a foreground owned child so this probe cannot leave a service behind.
+    tokens = shlex.split(shell)
+    command = tokens[tokens.index("-c") + 1]
+    result = subprocess.run(["sh", "-c", command], cwd=tmp_path,
+        env={**os.environ, **{aliases[key]: value for key, value in expected.items()}},
+        capture_output=True, text=True, timeout=5)
+    assert result.returncode == 0, result.stderr
+    observed = json.loads(result.stdout)
+    assert {key: observed[key] for key in expected} == expected
+    assert observed["OUROBOROS_SERVICE_ENV_A"] is None and observed["OUROBOROS_SERVICE_ENV_B"] is None
 
 
 def test_executor_local_service_lifecycle_hides_private_snapshot(tmp_path, monkeypatch):

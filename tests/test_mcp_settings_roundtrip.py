@@ -78,6 +78,9 @@ def test_settings_round_trip_preserves_stdio_command_and_exact_args(_isolate_set
         "auth_header": "Authorization",
         "auth_token": "",
         "allowed_tools": ["read_file"],
+        "cwd": "/path with spaces/project",
+        "env_from_settings": {"TOKEN": "CUSTOM_MCP_KEY"},
+        "future_option": {"keep": True},
     }
     payload = dict(cfg.SETTINGS_DEFAULTS)
     payload["MCP_ENABLED"] = True
@@ -87,6 +90,9 @@ def test_settings_round_trip_preserves_stdio_command_and_exact_args(_isolate_set
     loaded = cfg.load_settings()["MCP_SERVERS"][0]
     assert loaded["transport"] == "stdio"
     assert loaded["command"] == "npx"
+    assert loaded["cwd"] == server["cwd"]
+    assert loaded["env_from_settings"] == server["env_from_settings"]
+    assert loaded["future_option"] == {"keep": True}
     assert loaded["args"] == [
         "-y",
         "@modelcontextprotocol/server-filesystem",

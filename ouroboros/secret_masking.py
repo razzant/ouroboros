@@ -10,6 +10,7 @@ tool-output egress before model context/history.
 
 from __future__ import annotations
 
+import json
 import re
 from typing import Any, Collection, Dict, Tuple
 
@@ -34,6 +35,7 @@ MASKED_SECRET_SETTING_KEYS = frozenset(
 )
 
 CONFIGURED_SECRET_PLACEHOLDER = "***set***"
+MCP_RESPONSE_ONLY_FIELDS = frozenset({"auth_configured"})
 
 PASSWORD_SECRET_SETTING_KEYS = frozenset(
     {
@@ -62,6 +64,33 @@ def mask_prefixed_secret(value: Any, *, visible_chars: int) -> str:
     if not text:
         return ""
     return text[:visible_chars] + "..." if len(text) > visible_chars else "***"
+
+
+def redact_known_values(value: Any, secrets: Collection[str]) -> Any:
+    """Project explicit process secrets, including their JSON-escaped echoes.
+
+    Only diagnostic copies pass through this seam; process env and arguments
+    retain their exact values. Replace in one pass so one secret cannot alter
+    another's replacement, and preserve non-string payload types.
+    """
+    variants = {variant for secret in secrets if secret for variant in (
+        secret, json.dumps(secret, ensure_ascii=True)[1:-1],
+        json.dumps(secret, ensure_ascii=False)[1:-1],
+    )}
+    if not variants:
+        return value
+    pattern = re.compile("|".join(re.escape(item) for item in sorted(variants, key=len, reverse=True)))
+
+    def project(item: Any) -> Any:
+        if isinstance(item, str):
+            return pattern.sub(lambda _match: "***", item)
+        if isinstance(item, dict):
+            return {key: project(child) for key, child in item.items()}
+        if isinstance(item, list):
+            return [project(child) for child in item]
+        return item
+
+    return project(value)
 
 
 def mask_settings_secret(key: Any, value: Any) -> str:
