@@ -2434,6 +2434,32 @@ The reaper kills strictly by (pid, start_time, cmd_sha256) fingerprint —
 never add command-line-class matching, which would let a dev instance reap a
 packaged instance's processes. `tests/test_process_custody.py` enforces the
 chokepoint with an explicit allowlist for bounded synchronous helpers.
+An installation-owned daemon uses `daemon` scope, with legacy purpose retention
+provided by its lifecycle owner and checked against the existing ledger identity;
+server-generation changes alone must not kill it. A worker's process tree is
+killed only through `supervisor.worker_pool_lifecycle.kill_worker_tree` — pool
+shutdown and restart, the managed-update fence, unready-slot replacement, cancel
+and timeout custody alike — which spares the ledger's live `daemon`-scope roots
+(`process_custody.live_daemon_root_pids`, including the owner's retained legacy
+purposes) and, for one task's cancel or timeout only, the kept services; a direct `kill_pid_tree` on a worker anywhere else in
+`supervisor/` is a defect. The explicit stop (`OwnedClaudexorDaemon.stop`, which
+Panic calls before the worker tree-kill) requires the owned marker and authenticated
+endpoint for attached roots, then matches the ledger against one set of live
+start-time and command observations. Only confirmed exit permits `process_stopped`
+and pruning; concurrent and unreadable ledger bytes remain intact under the append
+lock. Each root gets its own exit window; partial success never means the whole
+daemon stop succeeded. Unconfirmed stop emits a critical diagnostic and existing
+supervisor-log row, including lock contention and unknown custody. The manager
+lock uses the short-poll bound separately from HTTP phase timeouts. Authenticated
+attach creates a missing owned marker only after validating the home; malformed
+or foreign markers are never replaced. The reaper's permissive keep is never stop authority, and a daemon known
+only by name or port is never signalled.
+Explicit stop and next-start runtime selection remain separate contracts: a
+staged engine pin applies at the daemon's next start, and a planned restart
+reports it staged while the serving engine's atomic replacement predicate still
+omits setup jobs with unconfirmed termination. Service quiescence excludes
+zombie-only groups, but checks every member before releasing a writer fence
+(`tests/test_claudexor_custody_lifetime.py`, `tests/test_process_custody_liveness.py`).
 
 ## Platform Abstraction Rule
 
@@ -2786,8 +2812,12 @@ Contributor rules:
 - Process containment is unconditional, including after a green pass:
   Windows uses a kill-on-close Job Object; POSIX uses an environment
   membership token plus a process-group enumeration backstop and promises
-  honest detection with a fail-closed verdict, not guaranteed teardown of
-  an arbitrary detached process. A crashed worker, a timeout-killed
+  honest detection with a fail-closed verdict for attributed members, not
+  guaranteed teardown of an arbitrary detached process. A same-uid unreadable
+  stranger is a warning, never membership proof; an unobserved descendant
+  that detached and hid its token remains a disclosed detection gap. Known
+  roots, groups and the retained set of observed members still fail closed when unreadable
+  (`tests/test_preflight_process_containment.py`). A crashed worker, a timeout-killed
   worker, a missing plugin, containment failure, and ordinary test failure
   keep distinct diagnostics.
 - Mark process/port/global-state tests `serial`; make a merely slow test

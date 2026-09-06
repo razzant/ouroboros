@@ -484,3 +484,38 @@ def test_a_stranger_that_took_a_recycled_pid_or_pgid_is_never_signalled(monkeypa
         if stranger.poll() is None:
             force_kill_pid(stranger.pid)
         stranger.wait(timeout=10)
+
+
+@pytest.mark.serial
+@pytest.mark.skipif(not sys.platform.startswith("linux"), reason="Linux nondumpable process fixture")
+def test_unrelated_nondumpable_process_does_not_block_or_receive_a_signal(monkeypatch, caplog):
+    from ouroboros import process_containment
+
+    container = process_containment.ProcessContainer()
+    root = container.spawn([sys.executable, "-c", "import sys; sys.stdin.read()"], stdin=subprocess.PIPE)
+    stranger = subprocess.Popen(
+        [sys.executable, "-c", "import ctypes,sys; "
+         "assert ctypes.CDLL(None).prctl(4, 0, 0, 0, 0) == 0; "
+         "print('ready', flush=True); sys.stdin.read()"],
+        stdin=subprocess.PIPE, stdout=subprocess.PIPE, text=True, start_new_session=True,
+    )
+    signals = []
+    try:
+        assert stranger.stdout.readline().strip() == "ready"
+        assert process_containment.pid_marker_state(stranger.pid, container._token) == process_containment.MARKER_UNREADABLE
+        root.stdin.close()
+        root.wait(timeout=10)
+        monkeypatch.setattr(process_containment._pl, "force_kill_pid", lambda pid: signals.append(pid))
+        assert container.reap() == ""
+        assert stranger.poll() is None
+        assert stranger.pid not in signals
+        assert "Unattributed processes have unreadable environments" in caplog.text
+        assert str(stranger.pid) in caplog.text
+    finally:
+        container.close()
+        if not root.stdin.closed:
+            root.stdin.close()
+        root.wait(timeout=10)
+        stranger.stdin.close()
+        stranger.wait(timeout=10)
+        stranger.stdout.close()
