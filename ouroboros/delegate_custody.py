@@ -119,7 +119,7 @@ class RunCustody:
     task_id: str = ""
     route_id: str = ""
     model: str = ""
-    # Requested pin (`credentialProfileId`) from the start body; '' = automatic; applied half = settlement authRoute.
+    # Requested pin (`credentialProfileId`); '' = automatic; applied half = final-attempt telemetry.
     profile_id: str = ""
     project_id: str = ""
     project_owned: bool = False
@@ -915,17 +915,18 @@ def settle_run(drive_root: Any, gateway: Any, custody: RunCustody, detail: Dict[
         return {"settled": True, "ledger_recorded": True,
                 "project_retired": not custody.project_owned and not custody.project_persistent,
                 "project_persistent": custody.project_persistent, "retried": False}
+    from ouroboros.gateways.claudexor import final_attempt_facts
+
     summary = summary_of(detail)
+    observed = final_attempt_facts(detail, custody.run_id)
     # Claudexor reports CASH in `spendUsd`, EXACTNESS in `spendEstimated`. A run
     # is only free when the amount is really zero AND really settled: expired
     # sessions, bill-by-construction routes and auth fallbacks all charge, and
     # writing 0.0/cost_final=True over them hides money from every budget fence.
     spend, estimated = disclosed_spend(summary)
-    # D29: the applied credential-profile id + access profile the deciding
-    # attempt disclosed (authRoute receipt / effectiveAccess), written to the
-    # durable row by default. Null on runs whose engine telemetry predates the
-    # receipt — empty string, never invented.
-    applied_profile = str((summary.get("authRoute") or {}).get("profileId") or "")
+    # Model and credential profile belong to one final attempt. The run-level
+    # authRoute can borrow an earlier account; missing final facts stay unknown.
+    applied_profile = observed.get("profile_id", "")
     # Only `effectiveAccess` testifies. The daemon computes `access` as
     # `effectiveAccess ?? the client's own parsed request`, so falling back to it wrote
     # our own ASK into the durable row under a column that promises applied facts.
@@ -938,7 +939,7 @@ def settle_run(drive_root: Any, gateway: Any, custody: RunCustody, detail: Dict[
                 custody.run_id,
                 drive_root=pathlib.Path(custody.ledger_root or drive_root),
                 route=custody.route_id,
-                model=str(summary.get("model") or ""),
+                model=observed.get("model", ""),
                 task_id=custody.task_id,
                 root_task_id=custody.root_task_id,
                 parent_task_id=custody.parent_task_id,
@@ -969,10 +970,11 @@ def settle_run(drive_root: Any, gateway: Any, custody: RunCustody, detail: Dict[
                 "run_id": custody.run_id,
                 "task_id": custody.task_id,
                 "route": custody.route_id,
-                # The ENGINE-reported model (the STARTED row carries only the requested
-                # pin, which is usually empty) — so execution evidence can name what
-                # the harness really ran without joining to the ledger.
-                "model": str(summary.get("model") or ""),
+                # Route above remains custody authority. Fresh observations
+                # may differ from a replayed historical ledger row's model;
+                # they never rewrite that row, ownership, bounds or spend.
+                "model": observed.get("model", ""),
+                "observed_attempt": observed,
                 "state": str(summary.get("state") or ""),
                 # The SAME facts the ledger row just recorded. An undisclosed spend was emitted
                 # here as `0.0` beside a flag — the render-unknown-as-zero shape the ledger row
@@ -982,9 +984,8 @@ def settle_run(drive_root: Any, gateway: Any, custody: RunCustody, detail: Dict[
                 "cost_final": spend is not None and not estimated,
                 "spend_disclosed": spend is not None,
                 "spend_estimated": estimated,
-                # D29: the applied account rides the settlement event too, so the
-                # durable event stream answers "which account paid" without joining
-                # to the ledger row.
+                # The final attempt's account rides the settlement event too;
+                # a replayed ledger can retain its older observation unchanged.
                 "credential_profile_id": applied_profile,
                 "access_profile": applied_access,
             })

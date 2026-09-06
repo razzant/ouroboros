@@ -40,10 +40,11 @@ def test_credential_gated_tool_is_not_advertised_when_unavailable(tmp_path, monk
 
     monkeypatch.setattr(search, "_available_web_search_backends", lambda: [])
     monkeypatch.delenv("GITHUB_TOKEN", raising=False)
+    monkeypatch.setattr("ouroboros.tools.github.github_cli_configured", lambda: False)
     toolset = _toolset(tmp_path)
     assert "web_search" not in toolset["top_level_tools"]
     assert "missing_credential" in toolset["unavailable_builtin_tools"]["web_search"]
-    # GitHub built-ins without a token: same typed omission, not "does not exist".
+    # No GitHub credentials from env, settings or CLI: the same typed omission.
     assert "get_github_issue" not in toolset["top_level_tools"]
     assert "missing_credential" in toolset["unavailable_builtin_tools"]["get_github_issue"]
 

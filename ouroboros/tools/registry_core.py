@@ -170,8 +170,19 @@ def _presence_binding_allowed(ctx: Any, binding: Any) -> bool:
 
 def _presence_bound_args(ctx: Any, name: str, args: Any) -> tuple[dict[str, Any], str]:
     try:
-        from ouroboros.presence_authority import apply_presence_argument_bindings
+        from ouroboros.presence_authority import apply_presence_argument_bindings, presence_ceiling_from_context
 
+        ceiling = presence_ceiling_from_context(ctx)
+        if ceiling is not None and dict(args or {}).get("repo"):
+            from ouroboros.tools.github import get_tools as github_tools
+
+            if name in {entry.name for entry in github_tools()}:
+                grant = next((item for item in ceiling.tool_grants if item.name == name), None)
+                if grant is None or not any(binding.argument_path == ("repo",) for binding in grant.bindings):
+                    return {}, (
+                        "⚠️ PRESENCE_ARGUMENT_BINDING_BLOCKED: an explicit GitHub repository "
+                        "requires the presence's host-selected repo argument binding."
+                    )
         bound = apply_presence_argument_bindings(ctx, name, dict(args or {}))
         if not _presence_tool_allowed(ctx, name):
             return {}, (
@@ -1038,7 +1049,7 @@ class ToolRegistry:
             # success, tool error, and exception paths alike (the per-tool
             # manual calls missed early-return/error paths), and skips
             # invalidation when a flagged tool ran read-only.
-            if worktree_before is not None:
+            if entry.mutates_worktree:
                 self._invalidate_advisory_if_worktree_changed(name, worktree_before)
 
     def _execute_legacy_text(self, name: str, args: Dict[str, Any]) -> str | ToolResult:
@@ -1316,17 +1327,17 @@ class ToolRegistry:
         """Compatibility ABI: return the exact model-facing text projection."""
         return self.execute_result(name, args).text
 
-    def _worktree_status_snapshot(self) -> str:
+    def _worktree_status_snapshot(self) -> Optional[str]:
         try:
             from ouroboros.utils import run_cmd
 
             return run_cmd(["git", "status", "--porcelain"], cwd=self._ctx.repo_dir, timeout=20)
         except Exception:
-            return "<status-unavailable>"
+            return None
 
-    def _invalidate_advisory_if_worktree_changed(self, tool_name: str, before: str) -> None:
+    def _invalidate_advisory_if_worktree_changed(self, tool_name: str, before: Optional[str]) -> None:
         after = self._worktree_status_snapshot()
-        if after == before:
+        if before is not None and after is not None and after == before:
             return
         try:
             from ouroboros.review_state import invalidate_advisory_after_mutation

@@ -73,8 +73,7 @@ def raw_result_facts(results_dir: pathlib.Path, *, reader=None) -> tuple[Dict[st
         facts = {field: str(data.get(field) or "") for field in _RESULT_FACT_KEYS}
         facts["schema_refusal"] = task_result_schema_refusal(data)
         rows[name] = facts
-        if not facts["schema_refusal"]:
-            _RAW_TS_MEMO[key] = (signature, tuple(facts.items()))
+        _RAW_TS_MEMO[key] = (signature, tuple(facts.items()))
     return rows, malformed
 
 

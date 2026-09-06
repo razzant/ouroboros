@@ -68,13 +68,14 @@ def _bounded(rows: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
     for row in rows[-_TIMELINE_TAIL:]:
         item = {"type": _label(row.get("type")), "title": _label(row.get("title")),
                 "severity": _label(row.get("severity"))}
+        for key in ("attemptId", "harnessId"):
+            if isinstance(row.get(key), str) and row[key]:
+                item[key] = _label(row[key])
         if row.get("textKind") in _TEXT_KINDS and isinstance(row.get("detail"), str):
             # The typed body preserves stream whitespace; the engine's title is
             # only a preview. Keep the same disclosed bound, without a second copy.
             item.update(title=_label(row["detail"]), textKind=row["textKind"],
-                        textDelta=row.get("textDelta") is True,
-                        attemptId=_label(row.get("attemptId")),
-                        harnessId=_label(row.get("harnessId")))
+                        textDelta=row.get("textDelta") is True)
         out.append(item)
     return out
 
@@ -541,6 +542,10 @@ def live_line(run_id: str, advance: _Advance) -> str:
         text_kind = row.get("textKind")
         is_text = text_kind in _TEXT_KINDS and isinstance(row.get("title"), str)
         text = row["title"] if is_text else str(row.get("title") or row.get("type") or "")
+        if not is_text:
+            actor = "/".join(str(row[key]) for key in ("harnessId", "attemptId") if row.get(key))
+            if actor:
+                text = f"[{actor}] {text}"
         stream = (text_kind, row.get("attemptId"), row.get("harnessId")) \
             if is_text and row.get("textDelta") is True else None
         if not text:

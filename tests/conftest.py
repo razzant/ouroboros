@@ -200,6 +200,7 @@ _SERIAL_TEST_FILES = frozenset({
     # trees / sweeps processes referencing a temp root → can collateral-damage sibling xdist
     # workers under -n (their unrelated tests then fail as a crashed-worker batch).
     "test_preflight_runner.py",
+    "test_preflight_process_containment.py",
     # Imports/mutates the process-global server settings facade; when xdist
     # reuses a worker after unrelated server tests, cached route/probe state can
     # escape monkeypatch restoration and turn the mocked capability probe into

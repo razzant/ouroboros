@@ -163,15 +163,69 @@ def test_schema_is_not_asked_on_an_interactive_transport_route(tmp_path, fake_ro
 
 
 def test_a_run_reported_off_the_pinned_route_is_disclosed(tmp_path, fake_route):
-    """Belt over the pin: the engine's own receipt of the pool the run used
-    must echo the pinned route; drift surfaces as a capability_delta, never as
-    a quietly accepted substitute route."""
+    """The final attempt, not the requested pool, witnesses route drift."""
     fake_route.detail = _terminal_detail('{"findings": []}', conformance="passed")
-    fake_route.detail["summary"]["harnesses"] = ["other-route"]
+    fake_route.detail["summary"]["harnesses"] = ["fake-review"]
+    fake_route.telemetry = {"run_id": "run-1", "final_attempt_id": "a01", "attempts": [{
+        "attempt_id": "a01", "harness_id": "other-route", "observed_model": "fake-small",
+    }]}
     result = run_review_request(_agent_request(), slots=[_agent_slot()],
                                 drive_root=tmp_path, llm=FakeLLM())
     deltas = result.actors[0]["usage"]["capability_delta"]
     assert any(d["reason"] == "session_ran_off_pinned_route" for d in deltas)
+
+
+@pytest.mark.parametrize("final_model", ["observed-model", None])
+def test_final_attempt_identity_reaches_review_projection_without_request_or_prior_fallback(
+    tmp_path, monkeypatch, fake_route, final_model,
+):
+    from ouroboros.reviewer_slot_config import record_reviewer_slot_executions, reviewer_slot_last_executions
+    from ouroboros.review_execution_projection import review_executions_from_actor_usage
+
+    monkeypatch.setattr("ouroboros.config.DATA_DIR", tmp_path / "canonical-data")
+    fake_route.detail = _terminal_detail('[]', model="request-model")
+    fake_route.detail["summary"].update(
+        harnesses=["fake-review"], authRoute={"profileId": "prior-profile"}, effectiveAccess="readonly",
+        route={"observedModel": "prior-model", "harnessId": "prior-route", "verified": True},
+    )
+    fake_route.telemetry = {"run_id": "run-1", "final_attempt_id": "a02", "attempts": [
+        {"attempt_id": "a01", "harness_id": "prior-route", "observed_model": "prior-model",
+         "profile_id": "prior-profile"},
+        {"attempt_id": "a02", "harness_id": "actual-route", "observed_model": final_model,
+         "profile_id": "actual-profile"},
+    ]}
+    slot = _agent_slot()
+    result = run_review_request(_agent_request(), slots=[slot], drive_root=tmp_path, llm=FakeLLM())
+    actor = result.actors[0]
+    usage = actor["usage"]
+    assert usage["resolved_model"] == (final_model or "")
+    assert usage["delegated_route"] == "actual-route"
+    assert usage["requested_route"] == "fake-review"
+    assert usage["applied_profile"] == "actual-profile"
+    assert usage["observed_attempt"]["attempt_id"] == "a02"
+    assert len(fake_route.instances[0].start_requests) == 1
+    assert review_executions_from_actor_usage([actor]) == [{
+        "kind": "harness", "harness_id": "actual-route",
+        **({"model": final_model} if final_model else {}),
+    }]
+    record_reviewer_slot_executions("scope_review", [SimpleNamespace(**actor)], {slot.slot_id: slot})
+    row = reviewer_slot_last_executions()[slot.slot_id]
+    assert row["effective"]["route"] == "agent_session:actual-route"
+    assert row["effective"]["model"] == (final_model or "")
+    assert row["effective"]["profile_id"] == "actual-profile"
+    assert row["requested"]["model"] == slot.model
+
+
+def test_session_without_final_attempt_receipt_never_masquerades_as_api(tmp_path, fake_route):
+    from ouroboros.review_execution_projection import review_executions_from_actor_usage
+
+    fake_route.telemetry = {"run_id": "run-1", "final_attempt_id": "missing", "attempts": []}
+    result = run_review_request(_agent_request(), slots=[_agent_slot()], drive_root=tmp_path, llm=FakeLLM())
+    actor = result.actors[0]
+    assert actor["usage"]["resolved_model"] == ""
+    assert actor["usage"]["delegated_route"] == ""
+    assert actor["usage"]["observed_attempt"] == {}
+    assert review_executions_from_actor_usage([actor]) == [{"kind": "harness"}]
 
 
 def test_conformance_gate_is_the_gate_not_run_success(tmp_path, fake_route):
@@ -417,7 +471,7 @@ def test_positive_custody_session_failure_emits_one_unknown_cost_usage_row(tmp_p
 
     assert len(rows) == 1
     assert rows[0]["provider"] == "claudexor"
-    assert rows[0]["resolved_model"] == "api/model-a"
+    assert rows[0]["resolved_model"] == ""  # the requested model is not an execution receipt
     assert rows[0]["delegated_run_started"] is True
     assert rows[0]["delegated_run_id"] == "run-paid-failure"
     assert rows[0]["cost"] is None
@@ -1281,3 +1335,64 @@ def test_owner_disabled_route_refusal_carries_its_typed_code(tmp_path, fake_rout
         _run_session_directly(tmp_path)
     assert excinfo.value.code == "route_disabled"
     assert not any(inst.start_requests for inst in fake_route.instances)
+
+
+@pytest.mark.parametrize("telemetry_case", [
+    "missing_file", "old_without_final_id", "malformed_yaml", "known_off_pin", "known_exact",
+])
+def test_final_route_observation_absence_is_disclosed_without_discarding_the_verdict(
+    tmp_path, monkeypatch, fake_route, telemetry_case,
+):
+    from ouroboros.reviewer_slot_config import record_reviewer_slot_executions, reviewer_slot_last_executions
+
+    monkeypatch.setattr("ouroboros.config.DATA_DIR", tmp_path / "canonical-data")
+    run_dir = tmp_path / "engine-run"
+    final = run_dir / "final"
+    final.mkdir(parents=True)
+    observed_route = "other-route" if telemetry_case == "known_off_pin" else "fake-review"
+    telemetry = {"run_id": "run-1", "final_attempt_id": "a02", "attempts": [
+        {"attempt_id": "a01", "harness_id": "earlier-route", "observed_model": "earlier-model"},
+        {"attempt_id": "a02", "harness_id": observed_route,
+         "observed_model": "fake-small", "profile_id": "observed-profile"},
+    ]}
+    if telemetry_case == "old_without_final_id":
+        telemetry.pop("final_attempt_id")
+    if telemetry_case != "missing_file":
+        raw = "bad: [" if telemetry_case == "malformed_yaml" else json.dumps(telemetry)
+        (final / "telemetry.yaml").write_text(raw, encoding="utf-8")
+    # The transport supplies only the summary; the real reader sees the file above.
+    fake_route.run_dir = None
+    fake_route.detail = _terminal_detail(json.dumps({"findings": [
+        {"item": "route", "verdict": "PASS", "severity": "advisory"},
+    ]}), conformance="passed")
+    fake_route.detail["summary"].update(
+        runDir=str(run_dir), harnesses=["fake-review"], effectiveAccess="readonly",
+        route={"harnessId": "earlier-route", "observedModel": "earlier-model", "verified": True},
+        authRoute={"profileId": "earlier-profile"},
+    )
+    slot = _agent_slot(model="fake-review=fake-small", session_target="fake-review=fake-small")
+    llm = FakeLLM()
+    result = run_review_request(_agent_request(), slots=[slot], drive_root=tmp_path, llm=llm)
+    actor = result.actors[0]
+    usage = actor["usage"]
+    deltas = usage.get("capability_delta", [])
+    unknown = telemetry_case in {"missing_file", "old_without_final_id", "malformed_yaml"}
+    expected = (["session_route_observation_unavailable"] if unknown else
+                ["session_ran_off_pinned_route"] if telemetry_case == "known_off_pin" else [])
+    assert [row["reason"] for row in deltas] == expected
+    assert actor["status"] == "ok" and result.aggregate_signal == "PASS"
+    assert usage["delegated_route"] == ("" if unknown else observed_route)
+    assert usage["resolved_model"] == ("" if unknown else "fake-small")
+    assert usage["applied_profile"] == ("" if unknown else "observed-profile")
+    assert not llm.calls
+    assert sum(len(g.start_requests) for g in fake_route.instances) == 1
+    assert not any(g.cancels for g in fake_route.instances)
+    events = [json.loads(line) for line in (tmp_path / "logs" / "events.jsonl").read_text().splitlines()]
+    disclosures = [row for row in events if row.get("type") == "review_slot_capability_delta"]
+    assert len(disclosures) == bool(expected)
+    if expected:
+        assert disclosures[0]["deltas"] == deltas
+    record_reviewer_slot_executions("scope_review", [SimpleNamespace(**actor)], {slot.slot_id: slot})
+    projection = reviewer_slot_last_executions()[slot.slot_id]
+    assert projection["capability_delta"] == deltas
+    assert projection["effective"]["model"] == usage["resolved_model"]

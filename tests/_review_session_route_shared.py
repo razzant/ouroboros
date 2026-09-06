@@ -69,6 +69,8 @@ class FakeGateway:
     artifact_error = None
     nonterminal = False
     project_unregistered = False
+    telemetry = None
+    run_dir = None
 
     def __init__(self, *args, **kwargs):
         FakeGateway.instances.append(self)
@@ -103,6 +105,8 @@ class FakeGateway:
         cls.artifact_error = None
         cls.nonterminal = False
         cls.project_unregistered = False
+        cls.telemetry = None
+        cls.run_dir = None
 
     def handshake(self, **_kw):
         return {"compatible": True, "protocolMajor": 3, "engine": {"version": self.engine_version}}
@@ -149,7 +153,20 @@ class FakeGateway:
             raise exc
         if FakeGateway.nonterminal:
             return {"summary": {"state": "running"}, "lastSeq": 1}
-        return json.loads(json.dumps(FakeGateway.detail))
+        detail = json.loads(json.dumps(FakeGateway.detail))
+        if self.run_dir is not None:
+            telemetry = FakeGateway.telemetry
+            if telemetry is None:
+                telemetry = {"run_id": run_id, "final_attempt_id": "a01", "attempts": [{
+                    "attempt_id": "a01", "harness_id": "fake-review",
+                    "observed_model": detail.get("summary", {}).get("model"), "profile_id": None,
+                }]}
+            final = self.run_dir / "final"
+            final.mkdir(parents=True, exist_ok=True)
+            # JSON is a YAML subset: same separate artifact as the real engine.
+            (final / "telemetry.yaml").write_text(json.dumps(telemetry), encoding="utf-8")
+            detail.setdefault("summary", {})["runDir"] = str(self.run_dir)
+        return detail
 
     def get_run_artifact(self, run_id, path):
         self.artifact_gets.append((run_id, path))
@@ -176,8 +193,9 @@ class FakeLLM:
         return {"content": self.reply}, {"prompt_tokens": 5, "completion_tokens": 2, "cost": 0.0001}
 
 @pytest.fixture()
-def fake_route(monkeypatch):
+def fake_route(monkeypatch, tmp_path):
     FakeGateway.reset()
+    FakeGateway.run_dir = tmp_path / "review-run"
     monkeypatch.setattr("ouroboros.gateways.claudexor.ClaudexorGateway", FakeGateway)
     monkeypatch.setenv(REVIEW_SESSION_ROUTE_ENV, "fake-review=fake-small:low")
     # ABI-10: the phase-5 per-row route envs are retired and IGNORED; nothing

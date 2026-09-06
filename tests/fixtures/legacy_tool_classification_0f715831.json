@@ -931,6 +931,30 @@
    "is_error": true,
    "status": "error"
   },
+  "ident:GH_TARGET_INVALID:named": {
+   "is_error": false,
+   "status": "ok"
+  },
+  "ident:GH_TARGET_INVALID:plain": {
+   "is_error": false,
+   "status": "ok"
+  },
+  "ident:GH_TARGET_REQUIRED:named": {
+   "is_error": false,
+   "status": "ok"
+  },
+  "ident:GH_TARGET_REQUIRED:plain": {
+   "is_error": false,
+   "status": "ok"
+  },
+  "ident:GH_TARGET_UNAVAILABLE:named": {
+   "is_error": true,
+   "status": "error"
+  },
+  "ident:GH_TARGET_UNAVAILABLE:plain": {
+   "is_error": true,
+   "status": "error"
+  },
   "ident:GH_TIMEOUT:named": {
    "is_error": false,
    "status": "ok"
@@ -946,6 +970,14 @@
   "ident:GIT_ATTRIBUTION_BLOCKED:plain": {
    "is_error": true,
    "status": "blocked"
+  },
+  "ident:GIT_BRANCH_UNAVAILABLE:named": {
+   "is_error": true,
+   "status": "error"
+  },
+  "ident:GIT_BRANCH_UNAVAILABLE:plain": {
+   "is_error": true,
+   "status": "error"
   },
   "ident:GIT_ERROR:named": {
    "is_error": false,
@@ -2914,6 +2946,14 @@
   "native:SUDO_INTERACTIVE_BLOCKED:SUDO_INTERACTIVE_BLOCKED": {
    "is_error": true,
    "status": "blocked"
+  },
+  "native:TOOL_ARG_ERROR:GH_TARGET_INVALID": {
+   "is_error": false,
+   "status": "ok"
+  },
+  "native:TOOL_ARG_ERROR:GH_TARGET_REQUIRED": {
+   "is_error": false,
+   "status": "ok"
   },
   "native:TOOL_ARG_ERROR:TOOL_ARG_ERROR": {
    "is_error": true,
