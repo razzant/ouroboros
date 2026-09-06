@@ -718,6 +718,7 @@ def _schedule_task(ctx: ToolContext, internal: Dict[str, Any] | None = None, /, 
     # recorded here is what the parent ASKED for, plus the parent's own lane, which
     # is the fact an omitted lane inherits and which only the parent knows.
     tid = uuid.uuid4().hex[:8]
+    created_at = utc_now_iso()
     root_task_id = root_task_id_seed or tid
     parent_cognitive_route = {
         "model": str(getattr(ctx, "active_model", "") or metadata.get("model") or ""),
@@ -812,6 +813,7 @@ def _schedule_task(ctx: ToolContext, internal: Dict[str, Any] | None = None, /, 
             status_drive_root,
             tid,
             STATUS_REQUESTED,
+            created_at=created_at,
             parent_task_id=parent_task_id or None,
             root_task_id=root_task_id,
             session_id=session_id,

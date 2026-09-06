@@ -269,9 +269,10 @@ def _latest_project_task_result(ctx: Any, project_id: str) -> Optional[Dict[str,
 
 def _main_routing_manifest(ctx: Any) -> Dict[str, Any]:
     """Bounded canonical facts for one Main-chat LLM routing decision."""
+    from ouroboros.gateway._helpers import read_rotated_jsonl_entries
+    from ouroboros.gateway.task_list_scan import raw_result_facts
     from ouroboros.projects_registry import list_projects
-    from ouroboros.task_results import list_task_results
-    from ouroboros.utils import iter_jsonl_objects
+    from ouroboros.task_results import load_task_result, task_results_dir
 
     projects = [{
         "project_id": str(row.get("id") or ""),
@@ -284,27 +285,41 @@ def _main_routing_manifest(ctx: Any) -> Dict[str, Any]:
     } for row in list_projects(ctx.DRIVE_ROOT)]
     roots = _addressable_root_tasks(ctx, None)
 
-    all_results = list_task_results(ctx.DRIVE_ROOT)
-    all_results.sort(key=lambda row: str(row.get("ts") or row.get("updated_at") or ""), reverse=True)
-    finals = [_task_result_ground_truth(row) for row in all_results[:16]]
+    results_error = ""
+    try:
+        facts, unreadable = raw_result_facts(task_results_dir(ctx.DRIVE_ROOT, create=False))
+    except OSError as exc:
+        facts, unreadable = {}, ["result_directory_unreadable"]
+        results_error = f"result_directory_unreadable: {exc}"
+    ordered = sorted(facts, key=lambda name: facts[name]["ts"] or facts[name]["updated_at"], reverse=True)
+    finals = []
+    for name in ordered:
+        if facts[name]["schema_refusal"]:
+            continue
+        row = load_task_result(ctx.DRIVE_ROOT, pathlib.Path(name).stem)
+        if row is not None:
+            finals.append(_task_result_ground_truth(row))
+        if len(finals) == 16:
+            break
 
     dialogue_rows: list = []
-    chat_paths = sorted(
-        (pathlib.Path(ctx.DRIVE_ROOT) / "archive").glob("chat_*.jsonl"),
-        key=lambda path: path.name,
-    )[-2:] + [pathlib.Path(ctx.DRIVE_ROOT) / "logs" / "chat.jsonl"]
-    for path in chat_paths:
-        for row in iter_jsonl_objects(path):
-            text = str(row.get("text") or "").strip()
-            if text:
-                dialogue_rows.append({
-                    "ts": str(row.get("ts") or ""),
-                    "direction": str(row.get("direction") or ""),
-                    "chat_id": int(row.get("chat_id") or 1),
-                    "text": _clip_marked(text, 500),
-                    "task_id": str(row.get("task_id") or ""),
-                    "client_message_id": str(row.get("client_message_id") or ""),
-                })
+    root = pathlib.Path(ctx.DRIVE_ROOT)
+    rows, gaps = read_rotated_jsonl_entries(
+        root / "logs" / "chat.jsonl", root / "archive", "chat", 20,
+        lambda row: bool(str(row.get("text") or "").strip()),
+        max_archives=2, include_gaps=True,
+    )
+    for row in rows:
+        text = str(row.get("text") or "").strip()
+        if text:
+            dialogue_rows.append({
+                "ts": str(row.get("ts") or ""),
+                "direction": str(row.get("direction") or ""),
+                "chat_id": row.get("chat_id", 1),
+                "text": _clip_marked(text, 500),
+                "task_id": str(row.get("task_id") or ""),
+                "client_message_id": str(row.get("client_message_id") or ""),
+            })
     dialogue = dialogue_rows[-20:]
     return {
         "projects": projects[:40],
@@ -314,8 +329,13 @@ def _main_routing_manifest(ctx: Any) -> Dict[str, Any]:
         "omissions": {
             "projects": max(0, len(projects) - 40),
             "root_tasks": max(0, len(roots) - 40),
-            "final_results": max(0, len(all_results) - 16),
-            "dialogue_rows": max(0, len(dialogue_rows) - 20),
+            "final_results": None if unreadable else max(0, len(facts) - len(finals)),
+            "final_results_error": results_error,
+            # A bounded read cannot count bytes/rows it deliberately did not
+            # visit. The exact historical messages remain available by id.
+            "dialogue_rows": None,
+            "dialogue_source": "chat_history (canonical chat and archives)",
+            "dialogue_gaps": sorted(gaps),
         },
     }
 

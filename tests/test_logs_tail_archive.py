@@ -41,6 +41,81 @@ def test_logs_tail_backfills_from_rotated_progress_archive(tmp_path):
     assert contents == ["archived-0", "archived-1", "archived-2", "live-row"]
 
 
+def test_logs_tail_backfills_from_rotated_events_archive(tmp_path):
+    """v6.109.29: events.jsonl rotates on the supervisor tick (server.py). The
+    generalized archive-aware reader (api_logs_tail -> read_rotated_jsonl_entries)
+    already passes the log `name` as the archive prefix, so /api/logs/events
+    picks up archive/events_*.jsonl automatically — no code change needed in
+    logs.py beyond the stale comment update."""
+    data = tmp_path / "data"
+    logs = data / "logs"
+    logs.mkdir(parents=True)
+    archive = data / "archive"
+    archive.mkdir()
+    (archive / "events_20260101T000100.jsonl").write_text(
+        "\n".join(
+            json.dumps({
+                "ts": f"2026-01-01T00:00:{i:02d}Z",
+                "type": "llm_call",
+                "task_id": "t1",
+                "content": f"archived-event-{i}",
+            })
+            for i in range(2)
+        ) + "\n",
+        encoding="utf-8",
+    )
+    (logs / "events.jsonl").write_text(
+        json.dumps({
+            "ts": "2026-01-01T00:02:00Z",
+            "type": "llm_call",
+            "task_id": "t1",
+            "content": "live-event",
+        }) + "\n",
+        encoding="utf-8",
+    )
+
+    payload = TestClient(_app(data)).get("/api/logs/events?limit=10").json()
+
+    contents = [row["content"] for row in payload["entries"]]
+    assert contents == ["archived-event-0", "archived-event-1", "live-event"]
+
+
+def test_logs_tail_backfills_from_rotated_tools_archive(tmp_path):
+    """v6.109.29: tools.jsonl rotates alongside events.jsonl; same archive-aware
+    reader contract — /api/logs/tools merges archive/tools_*.jsonl with the live
+    file in chronological order."""
+    data = tmp_path / "data"
+    logs = data / "logs"
+    logs.mkdir(parents=True)
+    archive = data / "archive"
+    archive.mkdir()
+    (archive / "tools_20260101T000100.jsonl").write_text(
+        json.dumps({
+            "ts": "2026-01-01T00:00:00Z",
+            "type": "tool_call",
+            "task_id": "t1",
+            "tool": "read_file",
+            "content": "archived-tool",
+        }) + "\n",
+        encoding="utf-8",
+    )
+    (logs / "tools.jsonl").write_text(
+        json.dumps({
+            "ts": "2026-01-01T00:02:00Z",
+            "type": "tool_call",
+            "task_id": "t1",
+            "tool": "write_file",
+            "content": "live-tool",
+        }) + "\n",
+        encoding="utf-8",
+    )
+
+    payload = TestClient(_app(data)).get("/api/logs/tools?limit=10").json()
+
+    contents = [row["content"] for row in payload["entries"]]
+    assert contents == ["archived-tool", "live-tool"]
+
+
 def test_logs_tail_skips_archives_when_live_satisfies_limit(tmp_path):
     data = tmp_path / "data"
     logs = data / "logs"
