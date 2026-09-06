@@ -14,6 +14,29 @@ from ouroboros.tools.registry import ToolContext, ToolRegistry
 pytestmark = pytest.mark.serial
 
 
+@pytest.mark.parametrize('location,relative', [
+    ('repo', 'config/.env'),
+    ('repo', 'deploy/credentials.json'),
+    ('data', 'claudexor/profile/session/auth.json'),
+])
+def test_nested_exact_credential_names_stay_denied_to_children(environment, location, relative):
+    from ouroboros.tools.core_secret_paths import _is_subagent_secret_repo_target
+    from ouroboros.tools.registry_guard_process import _subagent_shell_targets_secret
+
+    reg, ctx, _home, work, data = environment
+    ctx.task_constraint = TaskConstraint(mode='acting_subagent', surface='external_workspace', write_root=str(work))
+    target = (work if location == 'repo' else data) / relative
+    target.parent.mkdir(parents=True, exist_ok=True)
+    target.write_text('unprefixed-credential-canary', encoding='utf-8')
+    assert _is_subagent_secret_repo_target(target, work, ctx=ctx)
+    command = [sys.executable, '-c', f'from pathlib import Path; print(Path({str(target)!r}).read_text())']
+    assert _subagent_shell_targets_secret(shlex.join(command), ctx=ctx, cwd=work)
+    read = reg.execute('read_file', {'root': 'active_workspace' if location == 'repo' else 'runtime_data', 'path': relative})
+    assert 'unprefixed-credential-canary' not in read and 'BLOCKED' in read
+    shell = reg.execute('run_command', {'cmd': command, 'cwd': str(work)})
+    assert 'unprefixed-credential-canary' not in shell and 'BLOCKED' in shell
+
+
 @pytest.fixture
 def environment(tmp_path, monkeypatch):
     home = tmp_path / 'home'

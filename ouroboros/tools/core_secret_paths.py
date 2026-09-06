@@ -10,7 +10,6 @@ ordinary source directory names do not identify credential stores. The
 
 from __future__ import annotations
 
-import os
 import pathlib
 from typing import TYPE_CHECKING, List
 
@@ -48,8 +47,6 @@ def _is_subagent_secret_data_path(norm: str) -> bool:
     # task payloads, source trees or artifact stores beneath it.
     if parts[0] in {"auth", "credentials", "secrets", "tokens"}:
         return True
-    if len(parts) != 1:
-        return False
     name = parts[-1]
     normalized_names = {name, name.lstrip(".")}
     if name.lstrip(".") == "settings.tmp":
@@ -65,16 +62,17 @@ def _is_subagent_secret_data_path(norm: str) -> bool:
     return False
 
 
-def _is_subagent_secret_repo_path(norm: str) -> bool:
+def _is_subagent_secret_repo_path(norm: str, *, credential_names: bool = True) -> bool:
     """Repo source names do not confer owner authority or identify a secret store."""
     text = str(norm or "").replace("\\", "/").strip()
     parts = pathlib.PurePosixPath(text).parts
     if ".git" in {part.lower() for part in parts}:
         return True
-    # A repository's own credential files are locations; a file in src/auth
-    # or a public certificate is not a secret merely because of its spelling.
-    if len(parts) != 1:
+    if not credential_names:
         return False
+    # Exact credential names remain protected at every depth. Ordinary source
+    # directories such as src/auth and public certificate suffixes do not
+    # identify a credential store.
     name = pathlib.PurePosixPath(text).name.lower()
     if name in (_SUBAGENT_SECRET_FILE_NAMES - {"settings.json", "settings.json.lock"}):
         return True
@@ -92,13 +90,14 @@ def restricted_data_roots(ctx: ToolContext) -> list[pathlib.Path]:
     isolated drive must not hide canonical owner state nested in its repository.
     """
     from ouroboros.tool_access import canonical_data_root
+    from ouroboros.config import DATA_DIR
 
     values = [getattr(ctx, "drive_root", "")]
     try:
         values.append(canonical_data_root(ctx))
     except Exception:
         pass
-    values.append(os.environ.get("OUROBOROS_DATA_DIR", "") or "~/Ouroboros/data")
+    values.append(DATA_DIR)
     roots = []
     for value in values:
         if not str(value or "").strip():
@@ -117,12 +116,23 @@ def _is_subagent_secret_repo_target(
     ctx: ToolContext | None = None,
 ) -> bool:
     from ouroboros.credential_shapes import owner_credential_locations
+    from ouroboros.tool_access import resource_root_path
 
     root = pathlib.Path(repo_root).resolve(strict=False)
     target = pathlib.Path(target).resolve(strict=False)
     protected, allowed = owner_credential_locations(pathlib.Path.home())
     if target not in allowed and any(target.is_relative_to(path.resolve(strict=False)) for path in protected):
         return True
+    # Host-selected task/output roots hold ordinary content. Their filenames
+    # do not turn them into repository credentials, while resolved owner-state
+    # aliases and VCS internals below retain their separate protection.
+    task_content = False
+    if ctx is not None:
+        try:
+            task_content = any(target.is_relative_to(resource_root_path(ctx, kind))
+                               for kind in ("task_drive", "artifact_store"))
+        except (AttributeError, OSError, TypeError, ValueError):
+            pass
     data_roots = restricted_data_roots(ctx) if ctx is not None else []
     if data_root is not None:
         data_roots.append(pathlib.Path(data_root).resolve(strict=False))
@@ -133,7 +143,7 @@ def _is_subagent_secret_repo_target(
         except ValueError:
             data_rel = ""
         if data_rel and (
-            _is_subagent_secret_data_path(data_rel)
+            (not task_content and _is_subagent_secret_data_path(data_rel))
             or _is_skill_owner_state_target(target, data)
             or is_skill_owner_state_alias(target, data)
         ):
@@ -147,7 +157,7 @@ def _is_subagent_secret_repo_target(
         rel = target.relative_to(root).as_posix()
     except ValueError:
         rel = target.as_posix()
-    if _is_subagent_secret_repo_path(rel):
+    if _is_subagent_secret_repo_path(rel, credential_names=not task_content):
         return True
     try:
         secret_candidates.extend(candidate for candidate in root.iterdir()
