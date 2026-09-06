@@ -231,14 +231,16 @@ def _legacy_start_matches(pid: int, recorded: str, current: str) -> bool:
     return bool(recorded) and process_start_time_legacy(pid) == recorded
 
 
-def _fingerprint_matches(entry: Dict[str, Any]) -> bool:
+def _fingerprint_matches(entry: Dict[str, Any], *, require_measured: bool = False) -> bool:
     """STRICT identity: the live process must still BE the recorded one.
 
     pid alive + same start_time (when we have one) + same command hash (when
     we have one). A recycled pid fails this and is left alone. We never match
     by command-line class. The start-time comparison is DUAL-FORMAT on Linux:
     the cheap current representation first, and the pre-upgrade spelling only
-    once that mismatched (see ``_legacy_start_matches``).
+    once that mismatched (see ``_legacy_start_matches``). Explicit stop sets
+    ``require_measured``: both recorded dimensions must match these exact live
+    observations; retention alone may tolerate unavailable measurements.
     """
     pid = int(entry.get("pid") or 0)
     if pid <= 0 or not pid_is_alive(pid):
@@ -246,8 +248,13 @@ def _fingerprint_matches(entry: Dict[str, Any]) -> bool:
     fp = entry.get("fingerprint") if isinstance(entry.get("fingerprint"), dict) else {}
     recorded_boot = str(fp.get("start_time_boot") or "")
     recorded_start = str(fp.get("start_time") or "")
+    recorded_cmd = str(fp.get("cmd_sha256") or "")
+    if require_measured and not ((recorded_boot or recorded_start) and recorded_cmd):
+        return False
     if recorded_boot or recorded_start:
         live_start = process_start_time(pid)
+        if require_measured and not live_start:
+            return False
         if live_start and not (
             # Preferred: the exact boot-qualified token of a row written by THIS line.
             (recorded_boot and live_start == recorded_boot)
@@ -265,9 +272,10 @@ def _fingerprint_matches(entry: Dict[str, Any]) -> bool:
             or (not recorded_boot and _legacy_start_matches(pid, recorded_start, live_start))
         ):
             return False
-    recorded_cmd = str(fp.get("cmd_sha256") or "")
     if recorded_cmd:
         live_cmd = _live_cmd_sha256(pid)
+        if require_measured and not live_cmd:
+            return False
         if live_cmd and live_cmd != recorded_cmd:
             return False
         if not live_cmd and not recorded_start:

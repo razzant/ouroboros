@@ -168,3 +168,32 @@ def _filter_subagent_secret_listing(items: List[str], data_root: pathlib.Path) -
     if redacted:
         filtered.append(f"⚠️ {redacted} secret/control entr{'y' if redacted == 1 else 'ies'} hidden from this subagent.")
     return filtered
+
+
+def restricted_data_roots(ctx: ToolContext) -> list[pathlib.Path]:
+    """All runtime roots used by file admission, including a forked child's parent.
+
+    The root set comes from the existing vision/file parity owner: child drive,
+    canonical budget drive, and configured runtime admission root. A child's
+    isolated drive must not hide canonical owner state nested in its repository.
+    """
+    from ouroboros.tool_access import canonical_data_root
+    from ouroboros.config import DATA_DIR
+
+    values = [getattr(ctx, "drive_root", "")]
+    try:
+        values.append(canonical_data_root(ctx))
+    except Exception:
+        pass
+    values.append(DATA_DIR)
+    roots = []
+    for value in values:
+        if not str(value or "").strip():
+            continue
+        try:
+            root = pathlib.Path(value).expanduser().resolve(strict=False)
+        except (OSError, ValueError, RuntimeError):
+            continue
+        if root not in roots:
+            roots.append(root)
+    return roots

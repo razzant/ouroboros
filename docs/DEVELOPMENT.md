@@ -1637,9 +1637,17 @@ both critical. The imperatives:
   tool-enable, skills lifecycle, and cognitive-memory writes blocked; only
   `schedule_subagent` may create subagents (forged `delegation_role`
   rejected at API/CLI ingress); live `memory_mode=shared` stays disabled
-  (`tests/test_acting_subagents.py`). The subagent browser boundary is DNS
-  fail-closed with the loopback control-plane carve-out
-  (`tests/test_browser_isolation.py`; full rules: CHECKLISTS item 18).
+  (`tests/test_acting_subagents.py`). The subagent browser boundary refuses a
+  target DNS cannot classify (a typed `BROWSER_POLICY_UNAVAILABLE` before
+  navigation), allows loopback except actual or expected Ouroboros
+  control-service endpoints by identity — an unverifiable expected endpoint is
+  refused, never treated as foreign, while other ports and reused pathnames
+  keep working — admits private origins only through host-established
+  `resource_policy.allowed_origins`, and re-checks every redirect hop before
+  returning page content (`tests/test_browser_url_policy.py`,
+  `tests/test_browser_isolation.py`, `tests/test_browser_redirect_chain.py`;
+  mechanism: ARCHITECTURE "Tool capability and execution"; full rules:
+  CHECKLISTS item 18).
 - The parent is the SOLE committer of the live body: acting children return
   a `workspace.patch`, the parent applies a chosen patch with
   `integrate_subagent_patch` and runs its own `commit_reviewed`. The shared
@@ -2497,6 +2505,12 @@ selected from risk. Review-only: scored by CHECKLISTS items 2(i) and 30
 (`web_design_system`).
 
 ### Browser dialogs
+
+For agent page readiness, use `browser_action(action="wait", selector=..., state=...)` on the current page, or `browse_page(wait_for=..., state=...)` after navigation. States are `attached`, `visible`, `hidden`, and `detached`; hidden also accepts an absent element. A timeout returns the requested state, URL, current match count and first-element visibility rather than navigating again. These observations do not decide whether the task should continue; bounded `evaluate` remains available to its existing profiles.
+
+Image-reader regressions must include a real PNG under a synthetic user home with distinct task and canonical skill roots. Exercise same-round auto-attachment, the durable local copy and the actual send-time image block; a placeholder PNG, a flat drive or a mocked attachment helper cannot prove that path. Keep secret/owner-state and protected-artifact denial controls.
+
+Browser-boundary regressions run the installed Chromium and WebKit (`PLAYWRIGHT_BROWSERS_PATH`; a test never installs a browser, and `OUROBOROS_EXPECT_BROWSER_ENGINES` turns a missing engine from a skip into a failure) against real loopback servers bound through `server_entrypoint.bound_service_socket`, so the control endpoint under test is an actual recorded binding rather than a fixed port. The redirect residual is one strict xfail (`tests/test_browser_private_service.py`, the server-side dispatch counter) beside the passing content-refusal proof (`tests/test_browser_redirect_chain.py`); do not turn either into the other. The private-service proof takes its LAN target from `OUROBOROS_TEST_PRIVATE_BROWSER_HOST`/`_ADDRESS` (`OUROBOROS_EXPECT_PRIVATE_BROWSER=1` fails instead of skipping) and writes the images it viewed to `OUROBOROS_BROWSER_EVIDENCE_OUT`.
 
 `window.prompt`, `window.confirm`, and `window.alert` are forbidden in
 `web/modules`: PyWebView shells implement them inconsistently, native

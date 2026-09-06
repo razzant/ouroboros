@@ -3,18 +3,15 @@
 from __future__ import annotations
 
 import base64
-import ipaddress
 import json
 import logging
 import os
 import pathlib
 import re
-import socket
 import subprocess
 import sys
 import threading
 from typing import Any, Dict, List, Tuple
-from urllib.parse import urlparse
 
 try:
     from playwright_stealth import Stealth
@@ -22,10 +19,10 @@ try:
 except ImportError:
     _HAS_STEALTH = False
 
-from ouroboros.config import AGENT_SERVER_PORT
-from ouroboros.server_auth import is_loopback_host
+from ouroboros import browser_policy
 from ouroboros.tool_access import active_tool_profile
 from ouroboros.tools.registry import ToolContext, ToolEntry
+from ouroboros.tools.tool_result import _compose_execute_result
 
 log = logging.getLogger(__name__)
 
@@ -33,7 +30,6 @@ _playwright_ready = False
 _playwright_ready_engines: set[tuple[str, str]] = set()
 _playwright_browsers_path_managed = False
 _MISSING_EXECUTABLE_RE = re.compile(r"Executable doesn't exist at ([^\n]+)")
-_NONSTANDARD_NUMERIC_IPV4_RE = re.compile(r"^(?:0x[0-9a-f]+|[0-9]+)(?:\.(?:0x[0-9a-f]+|[0-9]+)){0,3}$", re.I)
 _SUPPORTED_BROWSER_ENGINES = frozenset({"chromium", "webkit"})
 
 
@@ -48,163 +44,6 @@ def _normalize_browser_engine(engine: str = "") -> str:
 # delegated subagents — read-only, acting, and fail-closed missing-constraint.
 # Same fail-closed predicate as secret/control READ denials (SSOT in tools.core).
 from ouroboros.tools.core import is_restricted_subagent_profile as _readonly_subagent  # noqa: E402
-
-
-def _is_subagent_blocked_browser_url(url: str, ctx: Any = None) -> bool:
-    parsed = urlparse(str(url or ""))
-    scheme = parsed.scheme
-    if scheme == "file":
-        # Readonly/acting subagents may open their OWN built files for visual
-        # checks, scoped to the task's explicit workspace root only — never the
-        # data root, so secrets like data/settings.json stay unreachable.
-        return not _file_url_under_workspace(parsed, ctx)
-    if scheme not in {"http", "https"}:
-        return True
-    host = (parsed.hostname or "").strip().rstrip(".").lower()
-    if not host:
-        return True
-    if is_loopback_host(host) or host == "localhost":
-        # Local app verification is allowed EXCEPT the Ouroboros control-plane
-        # ports: loopback API is unauthenticated (server_auth bypasses auth for
-        # loopback), so a subagent must never reach it.
-        return _is_blocked_loopback_port(parsed)
-    try:
-        ip = ipaddress.ip_address(host)
-    except ValueError:
-        if _NONSTANDARD_NUMERIC_IPV4_RE.match(host):
-            return True
-        return _hostname_resolves_to_blocked_ip(host)
-    if ip.is_loopback:
-        return _is_blocked_loopback_port(parsed)
-    return _is_blocked_subagent_ip(ip)
-
-
-def _control_plane_loopback_ports() -> set[int]:
-    """Ouroboros loopback control-plane ports a subagent must never reach: the three live
-    defaults agent-API (8765), local-model (8765+1=8766) and host-service (8765+2=8767);
-    the configured LOCAL_MODEL_PORT; the ACTUAL bound server port (find_free_port may fall
-    back, recorded in state/server_port); and any isolated-run server's EXPLICIT
-    OUROBOROS_SERVER_PORT / OUROBOROS_HOST_SERVICE_PORT. The +1/+2 above are the fixed
-    default ports, NOT adjacency guesses — configured/bound ports are blocked EXACTLY (the
-    isolated server sets both env ports independently, so no neighbor needs guessing)."""
-    ports = {AGENT_SERVER_PORT, AGENT_SERVER_PORT + 1, AGENT_SERVER_PORT + 2}
-    for env in ("OUROBOROS_SERVER_PORT", "OUROBOROS_HOST_SERVICE_PORT", "LOCAL_MODEL_PORT"):
-        value = os.environ.get(env, "").strip()
-        if value.isdigit():
-            ports.add(int(value))
-    # The server may bind a fallback port (find_free_port) recorded only in state.
-    try:
-        from ouroboros.config import DATA_DIR
-
-        port_text = (DATA_DIR / "state" / "server_port").read_text(encoding="utf-8").strip()
-        if port_text.isdigit():
-            ports.add(int(port_text))
-    except (OSError, ValueError):
-        pass
-    return ports
-
-
-def _is_blocked_loopback_port(parsed: Any) -> bool:
-    try:
-        port = parsed.port if parsed.port is not None else (443 if parsed.scheme == "https" else 80)
-    except ValueError:
-        return True
-    return int(port) in _control_plane_loopback_ports()
-
-
-def _file_url_under_workspace(parsed: Any, ctx: Any) -> bool:
-    """True only when a file:// path resolves under the task's EXPLICIT workspace
-    root, so a subagent can view its own built app but not the data root/secrets."""
-    if ctx is None:
-        return False
-    ws = str(getattr(ctx, "workspace_root", "") or "").strip()
-    if not ws:
-        return False
-    try:
-        from urllib.request import url2pathname
-
-        path = pathlib.Path(url2pathname(parsed.path)).resolve(strict=False)
-        base = pathlib.Path(ws).resolve(strict=False)
-        path.relative_to(base)
-        return True
-    except (ValueError, OSError):
-        return False
-
-
-def _is_blocked_subagent_ip(ip: ipaddress._BaseAddress) -> bool:
-    return bool(
-        ip.is_loopback
-        or ip.is_private
-        or ip.is_link_local
-        or ip.is_unspecified
-        or ip.is_reserved
-    )
-
-
-# AWS IMDSv6 endpoint; the IPv4 metadata services all live in 169.254.0.0/16
-# (link-local), which ``is_link_local`` covers including decimal/hex URL
-# spellings once ipaddress normalizes the resolved address.
-_METADATA_IPV6_ADDRESSES = frozenset({ipaddress.ip_address("fd00:ec2::254")})
-
-
-def _is_metadata_ip(ip: ipaddress._BaseAddress) -> bool:
-    # Unwrap IPv4-mapped IPv6 (http://[::ffff:169.254.169.254]/) so the
-    # link-local check sees the real IPv4 — mirrors mcp_client's guard.
-    mapped = getattr(ip, "ipv4_mapped", None)
-    if mapped is not None:
-        ip = mapped
-    return bool(ip.is_link_local) or ip in _METADATA_IPV6_ADDRESSES
-
-
-def _is_metadata_blocked_browser_url(url: str) -> bool:
-    """Main-agent guard: True only for link-local/cloud-metadata destinations."""
-    parsed = urlparse(str(url or ""))
-    if parsed.scheme not in {"http", "https"}:
-        return False
-    host = (parsed.hostname or "").strip().rstrip(".").lower()
-    if not host:
-        return False
-    try:
-        return _is_metadata_ip(ipaddress.ip_address(host))
-    except ValueError:
-        pass
-    if _NONSTANDARD_NUMERIC_IPV4_RE.match(host):
-        # Decimal/hex IPv4 spellings (e.g. http://2852039166/) bypass naive
-        # string checks; resolve via inet_aton normalization below.
-        try:
-            packed = socket.inet_aton(host)
-            return _is_metadata_ip(ipaddress.ip_address(socket.inet_ntoa(packed)))
-        except OSError:
-            return True
-    try:
-        infos = socket.getaddrinfo(host, None, type=socket.SOCK_STREAM)
-    except OSError:
-        return False  # unresolvable hosts fail naturally at fetch time
-    for info in infos:
-        try:
-            if _is_metadata_ip(ipaddress.ip_address(str(info[4][0]))):
-                return True
-        except ValueError:
-            continue
-    return False
-
-
-def _hostname_resolves_to_blocked_ip(host: str) -> bool:
-    try:
-        infos = socket.getaddrinfo(host, None, type=socket.SOCK_STREAM)
-    except OSError:
-        return True
-    if not infos:
-        return True
-    for info in infos:
-        try:
-            sockaddr = info[4]
-            ip = ipaddress.ip_address(str(sockaddr[0]))
-        except Exception:
-            return True
-        if _is_blocked_subagent_ip(ip):
-            return True
-    return False
 
 
 def _has_platform_browser(local_browsers_dir: pathlib.Path, engine: str = "chromium") -> bool:
@@ -577,40 +416,48 @@ def _ensure_browser(ctx: ToolContext, *, engine: str = "chromium", device: str =
         stealth.apply_stealth_sync(bs.page)
 
     bs.page.set_default_timeout(30000)
-    # Browser tools are agent-controlled. They may inspect the UI, but must not
-    # use clicks/fetches to change the owner-controlled context horizon.
-    bs_context.route("**/api/owner/context-mode", _block_context_mode_owner_post)
-    # Broad glob (any /api/owner/** path): the glob matches the RAW URL, so a
-    # percent-encoded `safety%2Dmode` would slip a literal pattern — the handler
-    # URL-DECODES and aborts only the safety-mode POST (review round 6).
-    bs_context.route("**/api/owner/**", _block_safety_mode_owner_post)
-    # Broad glob (any /api/owner/skills/** path) so a percent-encoded `attest%2Dreview`
-    # still routes to the handler, which then URL-DECODES and precisely aborts the
-    # attestation POST (the glob matches the RAW URL, so it must not assume the literal).
-    bs_context.route("**/api/owner/skills/**", _block_owner_skill_attest_post)
-    # Owner-only self-modification toggles ride /api/settings; block the browser
-    # click+Save path (POST /api/settings) for them, not just evaluate-JS. Applies to
-    # every browser session (root + subagents).
-    bs_context.route("**/api/settings", _block_owner_settings_post)
-    if readonly_subagent:
-        bs_context.route(
-            "**/*",
-            lambda route: route.abort()
-            if _is_subagent_blocked_browser_url(route.request.url, ctx)
-            else _route_fallback(route),
-        )
-    else:
-        # Main-agent SSRF guard (conservative): block ONLY link-local /
-        # cloud-metadata endpoints (169.254.0.0/16 incl. decimal/hex spellings,
-        # fd00:ec2::254). Private/LAN stays reachable — owners legitimately
-        # browse their own LAN services. Route interception re-validates every
-        # hop, so redirects cannot smuggle a metadata fetch.
-        bs_context.route(
-            "**/*",
-            lambda route: route.abort()
-            if _is_metadata_blocked_browser_url(route.request.url)
-            else _route_fallback(route),
-        )
+    page = bs.page
+    setattr(bs, "navigations", [])
+
+    def observe_navigation(response: Any) -> None:
+        # Native redirect hops never reach the route callback, so a navigation
+        # response that ends a redirect chain is kept for the chain check
+        # (_navigation_block_reason) that runs before any page result. A
+        # main-frame navigation starts a new document and drops the old rows;
+        # an unredirected navigation was already judged by the route callback.
+        try:
+            request = response.request
+            if not request.is_navigation_request():
+                return
+            rows = [] if response.frame == page.main_frame else list(getattr(bs, "navigations", []))
+            if request.redirected_from is not None:
+                rows.append(response)
+            setattr(bs, "navigations", rows)
+        except Exception:
+            log.debug("Browser navigation observation failed", exc_info=True)
+
+    page.on("response", observe_navigation)
+    # Requests exposed by Playwright share the target decision. Native HTTP
+    # redirect hops can bypass route callbacks and are checked after navigation;
+    # that check withholds content, not the already-sent request. Existing owner
+    # POST shapes apply at the actual Ouroboros origin; a dev app reusing their
+    # pathname is not Ouroboros.
+    def route_request(route: Any) -> None:
+        try:
+            reason = browser_policy.browser_request_block_reason(
+                route.request, ctx, restricted=readonly_subagent)
+        except Exception:
+            log.warning("Browser request policy could not read target identity", exc_info=True)
+            reason = "BROWSER_POLICY_UNAVAILABLE: runtime service identity could not be read"
+        if reason:
+            # Diagnostic only, on the page's owning generation; never an origin
+            # grant or a cached permission decision for a later request.
+            setattr(bs, "request_block_reason", reason)
+            route.abort()
+        else:
+            route.continue_()
+
+    bs_context.route("**/*", route_request)
     return bs.page, bs
 
 
@@ -749,174 +596,6 @@ def _is_infrastructure_error(obj: Any) -> bool:
         "page has been closed",
         "connection closed",
     ))
-
-
-def _blocks_context_mode_self_lowering_js(value: str) -> bool:
-    low = str(value or "").lower()
-    return "low" in low and (
-        "/api/owner/context-mode" in low
-        or ("ouroboros_context_mode" in low and ("settings.json" in low or "save_settings" in low))
-    )
-
-
-def _blocks_safety_mode_self_lowering_js(value: str) -> bool:
-    """Block browser JS that tries to change the owner-only LLM-safety coverage mode
-    (v6.54.3) — the click+fetch bypass of the dedicated owner endpoint. URL-decode
-    first so a percent-encoded path (``safety%2Dmode``) cannot slip the literal
-    match (review round 6; mirrors the owner-attestation guard)."""
-    import urllib.parse
-
-    low = str(value or "").lower()
-    decoded = urllib.parse.unquote(urllib.parse.unquote(low)).lower()
-    text = f"{low} {decoded}"
-    return (
-        "/api/owner/safety-mode" in text
-        or ("ouroboros_safety_mode" in text and (
-            "settings.json" in text or "save_settings" in text or "/api/settings" in text
-        ))
-    )
-
-
-def _blocks_mutative_toggle_js(value: str) -> bool:
-    """Block browser JS that tries to enable the owner-only mutative-subagents toggle."""
-    low = str(value or "").lower()
-    return "ouroboros_allow_mutative_subagents" in low and (
-        "settings.json" in low or "save_settings" in low or "/api/settings" in low
-    )
-
-
-def _blocks_post_task_evolution_js(value: str) -> bool:
-    """Block browser JS that tries to set an owner-only self-evolution control (the
-    post-task evolution toggle or the persistent evolution-objective steer)."""
-    low = str(value or "").lower()
-    return (
-        "ouroboros_post_task_evolution" in low
-        or "ouroboros_evolution_persistent_objective" in low
-    ) and (
-        "settings.json" in low or "save_settings" in low or "/api/settings" in low
-    )
-
-
-def _blocks_owner_skill_attest_js(value: str) -> bool:
-    """Block browser JS that tries to loopback-POST the OWNER-ONLY skill-attestation
-    endpoint (C1, v6.39) — owner-attestation skips the LLM skill review and must be
-    owner-issued, never agent self-callable from a browser fetch. URL-decode first so a
-    percent-encoded path (``%61ttest-review``) cannot slip past the literal match."""
-    import urllib.parse
-    low = str(value or "").lower()
-    decoded = urllib.parse.unquote(urllib.parse.unquote(low)).lower()
-    text = f"{low} {decoded}"
-    return "/api/owner/skills/" in text and "attest-review" in text
-
-
-def _route_fallback(route: Any) -> None:
-    """Pass a non-matching request DOWN the guard chain (review round 8).
-
-    Playwright runs route handlers in REVERSE registration order and
-    ``route.continue_()`` FINALIZES the request — a later-registered catch-all
-    that continued would silently skip every earlier-registered owner-endpoint
-    block (they were dead, not merely ordered oddly). ``route.fallback()``
-    defers to the next matching handler and plain-continues when none remain,
-    so every guard in the chain actually evaluates. Older Playwright fakes/
-    versions without ``fallback`` degrade to ``continue_`` (the historical
-    behavior)."""
-    fallback = getattr(route, "fallback", None)
-    if callable(fallback):
-        fallback()
-        return
-    route.continue_()
-
-
-def _is_context_mode_owner_post(request: Any) -> bool:
-    try:
-        parsed = urlparse(str(request.url or ""))
-        method = str(request.method or "").upper()
-    except Exception:
-        return False
-    return method == "POST" and parsed.path.rstrip("/") == "/api/owner/context-mode"
-
-
-def _block_context_mode_owner_post(route: Any) -> None:
-    if _is_context_mode_owner_post(route.request):
-        route.abort()
-        return
-    _route_fallback(route)
-
-
-def _is_safety_mode_owner_post(request: Any) -> bool:
-    """POST to the owner safety-mode endpoint — decoded, so a percent-encoded
-    path cannot slip past (the broad ``**/api/owner/**`` route registration
-    feeds RAW URLs here; Starlette decodes server-side, so we must too)."""
-    import urllib.parse
-
-    try:
-        parsed = urlparse(str(request.url or ""))
-        method = str(request.method or "").upper()
-    except Exception:
-        return False
-    path = urllib.parse.unquote(urllib.parse.unquote(parsed.path)).rstrip("/")
-    return method == "POST" and path == "/api/owner/safety-mode"
-
-
-def _block_safety_mode_owner_post(route: Any) -> None:
-    if _is_safety_mode_owner_post(route.request):
-        route.abort()
-        return
-    _route_fallback(route)
-
-
-def _is_owner_skill_attest_post(request: Any) -> bool:
-    """A browser POST to the owner-only skill owner-attestation endpoint — the click/form
-    bypass of the evaluate-only JS guard (C1, v6.39)."""
-    try:
-        import urllib.parse
-        parsed = urlparse(str(request.url or ""))
-        method = str(request.method or "").upper()
-        # Decode so a percent-encoded path (which the server decodes before routing) is
-        # matched the same way the route is registered.
-        path = urllib.parse.unquote(urllib.parse.unquote(parsed.path)).rstrip("/").lower()
-    except Exception:
-        return False
-    return method == "POST" and path.startswith("/api/owner/skills/") and path.endswith("/attest-review")
-
-
-def _block_owner_skill_attest_post(route: Any) -> None:
-    if _is_owner_skill_attest_post(route.request):
-        route.abort()
-        return
-    _route_fallback(route)
-
-
-def _is_owner_settings_self_elevation_post(request: Any) -> bool:
-    """A browser POST /api/settings carrying an owner-only self-modification toggle —
-    the click+Save bypass of the evaluate-only JS guards."""
-    try:
-        if str(request.method or "").upper() != "POST":
-            return False
-        parsed = urlparse(str(request.url or ""))
-        if parsed.path.rstrip("/") != "/api/settings":
-            return False
-        body = str(request.post_data or "").lower()
-    except Exception:
-        return False
-    return (
-        "ouroboros_post_task_evolution" in body
-        or "ouroboros_allow_mutative_subagents" in body
-        or "ouroboros_evolution_persistent_objective" in body
-        # v6.88: the delegated-executor POLICY. D1 makes the executor axis the OWNER's,
-        # and this key is the whole of it — which route answers, on whose subscription.
-        # It rides the generic settings path deliberately (the Settings UI sets a route
-        # string often, and a dedicated endpoint would be ceremony for nothing), so it
-        # joins the keys already guarded here rather than getting a mechanism of its own.
-        or "ouroboros_subagent_harness" in body
-    )
-
-
-def _block_owner_settings_post(route: Any) -> None:
-    if _is_owner_settings_self_elevation_post(route.request):
-        route.abort()
-        return
-    _route_fallback(route)
 
 
 _MARKDOWN_JS = """() => {
@@ -1128,27 +807,74 @@ def _extract_page_output(page: Any, output: str, ctx: ToolContext,
         return text[:30000] + ("... [truncated]" if len(text) > 30000 else "")
 
 
+def _wait_for_page_state(page: Any, selector: str, state: str, timeout: int) -> tuple[bool, str]:
+    """Observe a selector on this page, without navigation or model polling."""
+    if not selector or state not in {"attached", "visible", "hidden", "detached"}:
+        return False, "Error: wait requires a selector and state attached/visible/hidden/detached."
+    from playwright.sync_api import TimeoutError as PlaywrightTimeoutError
+
+    reached = True
+    try:
+        page.wait_for_selector(selector, state=state, timeout=max(int(timeout or 30000), 1))
+    except PlaywrightTimeoutError:
+        reached = False
+    locator = page.locator(selector)
+    count = locator.count()
+    return reached, json.dumps({
+        "status": "reached" if reached else "timeout", "selector": selector,
+        "requested_state": state, "url": page.url, "matched_elements": count,
+        "first_visible": locator.first.is_visible() if count else False,
+    }, ensure_ascii=False)
+
+
+def _navigation_block_reason(page: Any, bs: Any, ctx: ToolContext, restricted: bool,
+                             response: Any = None) -> str:
+    """Apply the target decision to the current URL and every observed redirect hop.
+
+    ``response`` is the navigation result of the call's own ``goto``; ``bs`` carries
+    every navigation response observed for the current document (subframes
+    included). Each ``request.redirected_from`` chain is walked with the same
+    predicate as direct navigation, so an allowed→blocked→allowed redirect
+    withholds the content it produced. The forbidden hop's request was already
+    dispatched natively by then — a disclosed residual, not a pre-request guard.
+    """
+    targets = [str(getattr(page, "url", "") or "")]
+    for root in (response, *getattr(bs, "navigations", [])):
+        request = getattr(root, "request", None) if root is not None else None
+        while request is not None:
+            targets.append(str(request.url))
+            request = request.redirected_from
+    for target in dict.fromkeys(targets):
+        if reason := browser_policy.browser_url_block_reason(target, ctx, restricted=restricted):
+            return reason
+    return ""
+
+
 def _browse_page(ctx: ToolContext, url: str, output: str = "text",
                  wait_for: str = "", timeout: int = 30000,
-                 viewport: str = "", engine: str = "chromium", device: str = "") -> str:
+                 viewport: str = "", engine: str = "chromium", device: str = "", state: str = "visible") -> str:
     readonly_subagent = _readonly_subagent(ctx)
-    if readonly_subagent and _is_subagent_blocked_browser_url(str(url or ""), ctx):
-        return "⚠️ BROWSER_LOCAL_READONLY_BLOCKED: subagents may browse external HTTP(S), localhost (non-Ouroboros ports), and file:// under their workspace — not the Ouroboros API ports, private/link-local IPs, or other schemes."
+    if reason := browser_policy.browser_url_block_reason(
+        str(url or ""), ctx, restricted=readonly_subagent):
+        return "⚠️ " + reason
     entry_generation = ctx.browser_state
     try:
         page, entry_generation = _ensure_browser(ctx, engine=engine, device=device)
+        setattr(entry_generation, "request_block_reason", "")
         # The caller's page-load timeout is also the session default so the
         # extraction calls that honor the default (screenshot, inner_text,
         # content) share the same bound instead of a stale prior value.
         page.set_default_timeout(int(timeout) if timeout else 30000)
         if viewport:
             _apply_viewport(page, viewport)
-        page.goto(url, timeout=timeout, wait_until="domcontentloaded")
-        if wait_for:
-            page.wait_for_selector(wait_for, timeout=timeout)
-        if readonly_subagent and _is_subagent_blocked_browser_url(str(getattr(page, "url", "") or ""), ctx):
-            return "⚠️ BROWSER_LOCAL_READONLY_BLOCKED: subagents may browse external HTTP(S), localhost (non-Ouroboros ports), and file:// under their workspace — not the Ouroboros API ports, private/link-local IPs, or other schemes."
-        return _extract_page_output(page, output, ctx, bs=entry_generation)
+        response = page.goto(url, timeout=timeout, wait_until="domcontentloaded")
+        waited = _wait_for_page_state(page, wait_for, state, timeout) if wait_for else (True, "")
+        if reason := _navigation_block_reason(page, entry_generation, ctx, readonly_subagent, response):
+            return "⚠️ " + reason
+        if not waited[0]:
+            return waited[1]
+        return _compose_execute_result(_extract_page_output(page, output, ctx, bs=entry_generation),
+                                       getattr(entry_generation, "request_block_reason", ""), "")
     except Exception as e:
         if ctx.browser_state is not entry_generation and \
                 ctx.browser_state is not getattr(ctx, "_active_browser_generation", None):
@@ -1162,19 +888,24 @@ def _browse_page(ctx: ToolContext, url: str, output: str = "text",
             cleanup_browser_handles(entry_generation)
             return ("⚠️ BROWSER_SESSION_RETIRED: this call timed out and its "
                     "browser session was retired; the result is void.")
+        if reason := getattr(entry_generation, "request_block_reason", ""):
+            return "⚠️ " + reason
         if _is_infrastructure_error(ctx):
             log.warning("Browser infrastructure error: %s. Cleaning up and retrying...", e)
             cleanup_browser(ctx)
             page, entry_generation = _ensure_browser(ctx, engine=engine, device=device)
+            setattr(entry_generation, "request_block_reason", "")
             page.set_default_timeout(int(timeout) if timeout else 30000)
             if viewport:
                 _apply_viewport(page, viewport)
-            page.goto(url, timeout=timeout, wait_until="domcontentloaded")
-            if wait_for:
-                page.wait_for_selector(wait_for, timeout=timeout)
-            if readonly_subagent and _is_subagent_blocked_browser_url(str(getattr(page, "url", "") or ""), ctx):
-                return "⚠️ BROWSER_LOCAL_READONLY_BLOCKED: subagents may browse external HTTP(S), localhost (non-Ouroboros ports), and file:// under their workspace — not the Ouroboros API ports, private/link-local IPs, or other schemes."
-            return _extract_page_output(page, output, ctx, bs=entry_generation)
+            response = page.goto(url, timeout=timeout, wait_until="domcontentloaded")
+            waited = _wait_for_page_state(page, wait_for, state, timeout) if wait_for else (True, "")
+            if reason := _navigation_block_reason(page, entry_generation, ctx, readonly_subagent, response):
+                return "⚠️ " + reason
+            if not waited[0]:
+                return waited[1]
+            return _compose_execute_result(_extract_page_output(page, output, ctx, bs=entry_generation),
+                                           getattr(entry_generation, "request_block_reason", ""), "")
         raise
 
 
@@ -1190,7 +921,7 @@ def _apply_viewport(page: Any, viewport: str) -> None:
 
 def _browser_action(ctx: ToolContext, action: str, selector: str = "",
                     value: str = "", timeout: int = 5000,
-                    engine: str = "", device: str = "") -> str:
+                    engine: str = "", device: str = "", state: str = "visible") -> str:
     normalized_action = str(action or "").strip().lower()
     readonly_subagent = _readonly_subagent(ctx)
     # Keep the broad restricted-subagent predicate for URL/install and
@@ -1216,16 +947,19 @@ def _browser_action(ctx: ToolContext, action: str, selector: str = "",
             engine=engine or getattr(ctx.browser_state, "_browser_engine", "chromium") or "chromium",
             device=device or getattr(ctx.browser_state, "_browser_device", "") or "",
         )
+        setattr(generation_cell[0], "request_block_reason", "")
         # The caller timeout (default 5000) keeps its explicit click/fill/select
         # wait semantics below, but as the SESSION default it is floored at
         # 30000 so the 5s action default cannot strangle the default-honoring
         # capture calls (screenshot); an explicitly larger timeout widens them.
         effective_default_ms = max(int(timeout or 0), 30000)
         page.set_default_timeout(effective_default_ms)
-        if readonly_subagent and _is_subagent_blocked_browser_url(str(getattr(page, "url", "") or ""), ctx):
-            return "⚠️ BROWSER_LOCAL_READONLY_BLOCKED: subagents may act on external HTTP(S), localhost (non-Ouroboros ports), and file:// under their workspace — not the Ouroboros API ports or private/link-local pages."
+        if reason := _navigation_block_reason(page, generation_cell[0], ctx, readonly_subagent):
+            return "⚠️ " + reason
 
-        if normalized_action == "click":
+        if normalized_action == "wait":
+            return _wait_for_page_state(page, selector, state, timeout)[1]
+        elif normalized_action == "click":
             if not selector:
                 return "Error: selector required for click"
             page.click(selector, timeout=timeout)
@@ -1260,38 +994,8 @@ def _browser_action(ctx: ToolContext, action: str, selector: str = "",
         elif normalized_action == "evaluate":
             if not value:
                 return "Error: value (JS code) required for evaluate"
-            if _blocks_context_mode_self_lowering_js(value):
-                return (
-                    "⚠️ CONTEXT_MODE_SELF_LOWERING_BLOCKED: browser JavaScript "
-                    "looks like an attempt to lower OUROBOROS_CONTEXT_MODE. "
-                    "Context mode is owner-controlled — ask the owner to use "
-                    "the Low/Max toggle."
-                )
-            if _blocks_safety_mode_self_lowering_js(value):
-                return (
-                    "⚠️ SAFETY_MODE_SELF_LOWERING_BLOCKED: browser JavaScript "
-                    "looks like an attempt to change OUROBOROS_SAFETY_MODE. "
-                    "LLM-safety coverage is owner-controlled (BIBLE P3) — the agent "
-                    "must not reduce its own supervision."
-                )
-            if _blocks_mutative_toggle_js(value):
-                return (
-                    "⚠️ ELEVATION_BLOCKED: browser JavaScript looks like an attempt to enable "
-                    "OUROBOROS_ALLOW_MUTATIVE_SUBAGENTS. This master toggle is owner-controlled — "
-                    "the agent must not self-enable mutative subagents."
-                )
-            if _blocks_post_task_evolution_js(value):
-                return (
-                    "⚠️ ELEVATION_BLOCKED: browser JavaScript looks like an attempt to enable "
-                    "OUROBOROS_POST_TASK_EVOLUTION. Post-task self-evolution is owner-controlled — "
-                    "the agent must not self-enable it."
-                )
-            if _blocks_owner_skill_attest_js(value):
-                return (
-                    "⚠️ OWNER_SKILL_ATTESTATION_SELF_CALL_BLOCKED: browser JavaScript looks like an "
-                    "attempt to POST /api/owner/skills/<skill>/attest-review. Owner-attestation skips "
-                    "the LLM skill review and is owner-only — the agent must not self-attest its own skill."
-                )
+            if reason := browser_policy.browser_evaluate_block_reason(str(getattr(page, "url", "") or ""), value, ctx):
+                return reason
             try:
                 result = _evaluate_bounded(page, value, effective_default_ms)
             except Exception as eval_err:  # noqa: BLE001
@@ -1331,10 +1035,11 @@ def _browser_action(ctx: ToolContext, action: str, selector: str = "",
                 _evaluate_bounded(page, "window.scrollTo(0, document.body.scrollHeight)", effective_default_ms)
             return f"Scrolled {direction}"
         else:
-            return f"Unknown action: {action}. Use: click, fill, select, screenshot, evaluate, scroll"
+            return f"Unknown action: {action}. Use: click, fill, select, screenshot, evaluate, scroll, wait"
 
     try:
-        return _do_action()
+        result = _do_action()
+        return _compose_execute_result(result, getattr(generation_cell[0], "request_block_reason", ""), "")
     except Exception as e:
         if ctx.browser_state is not generation_cell[0] and \
                 ctx.browser_state is not getattr(ctx, "_active_browser_generation", None):
@@ -1346,10 +1051,13 @@ def _browser_action(ctx: ToolContext, action: str, selector: str = "",
             cleanup_browser_handles(generation_cell[0])
             return ("⚠️ BROWSER_SESSION_RETIRED: this call timed out and its "
                     "browser session was retired; the result is void.")
+        if reason := getattr(generation_cell[0], "request_block_reason", ""):
+            return "⚠️ " + reason
         if _is_infrastructure_error(ctx):
             log.warning("Browser infrastructure error: %s. Cleaning up and retrying...", e)
             cleanup_browser(ctx)
-            return _do_action()
+            result = _do_action()
+            return _compose_execute_result(result, getattr(generation_cell[0], "request_block_reason", ""), "")
         raise
 
 
@@ -1381,6 +1089,8 @@ def get_tools() -> List[ToolEntry]:
                             "type": "string",
                             "description": "CSS selector to wait for before extraction",
                         },
+                        "state": {"type": "string", "enum": ["attached", "visible", "hidden", "detached"],
+                                  "description": "State for wait_for (default visible). Timeout returns observed selector facts."},
                         "timeout": {
                             "type": "integer",
                             "description": "Page load timeout in ms (default: 30000)",
@@ -1413,20 +1123,22 @@ def get_tools() -> List[ToolEntry]:
                     "Perform action on current browser page. Actions: "
                     "click (selector), fill (selector + value), select (selector + value), "
                     "screenshot (base64 PNG), evaluate (JS code in value), "
-                    "scroll (value: up/down/top/bottom)."
+                    "scroll (value: up/down/top/bottom), wait (selector + state, without navigation)."
                 ),
                 "parameters": {
                     "type": "object",
                     "properties": {
                         "action": {
                             "type": "string",
-                            "enum": ["click", "fill", "select", "screenshot", "evaluate", "scroll"],
+                            "enum": ["click", "fill", "select", "screenshot", "evaluate", "scroll", "wait"],
                             "description": "Action to perform",
                         },
                         "selector": {
                             "type": "string",
-                            "description": "CSS selector for click/fill/select",
+                            "description": "CSS selector for click/fill/select/wait",
                         },
+                        "state": {"type": "string", "enum": ["attached", "visible", "hidden", "detached"],
+                                  "description": "Wait state (default visible). Timeout reports current match/visibility; hidden also accepts absence."},
                         "value": {
                             "type": "string",
                             "description": "Value for fill/select, JS for evaluate, direction for scroll",

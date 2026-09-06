@@ -378,6 +378,41 @@ def effective_acceptance_claims(
     return [], ""
 
 
+def normalize_browser_origin(value: Any, *, origin_only: bool = False) -> str:
+    """Canonical exact HTTP(S) origin; malformed or wildcard targets grant nothing."""
+    import ipaddress
+    from urllib.parse import urlsplit
+
+    if not isinstance(value, str):
+        return ""
+    if any(character.isspace() or ord(character) < 32 for character in value.strip()):
+        return ""
+    try:
+        parsed = urlsplit(value.strip())
+        host = str(parsed.hostname or "").rstrip(".").lower()
+        if parsed.scheme not in {"http", "https"} or not host or any(c in host for c in "*%\\"):
+            return ""
+        if parsed.username is not None or parsed.password is not None:
+            return ""
+        if origin_only and (parsed.path not in {"", "/"} or parsed.query or parsed.fragment):
+            return ""
+        port = parsed.port if parsed.port is not None else (443 if parsed.scheme == "https" else 80)
+        if not 0 < port < 65536:
+            return ""
+        host = f"[{ipaddress.ip_address(host).compressed}]" if ":" in host else host.encode("idna").decode("ascii")
+        return f"{parsed.scheme}://{host}:{port}"
+    except (ValueError, UnicodeError):
+        return ""
+
+
+def normalize_allowed_origins(value: Any) -> list[str]:
+    """Normalize only explicit origins, preserving an empty declared subset."""
+    if not isinstance(value, list):
+        return []
+    return list(dict.fromkeys(origin for item in value
+                              if (origin := normalize_browser_origin(item, origin_only=True))))
+
+
 def normalize_resource_policy(value: Any) -> Dict[str, Any]:
     if not isinstance(value, Mapping):
         return {}
@@ -417,6 +452,9 @@ def normalize_resource_policy(value: Any) -> Dict[str, Any]:
             out["protected_artifacts"] = records
     for key, raw in value.items():
         if key == "protected_artifacts":
+            continue
+        if key == "allowed_origins":
+            out[key] = normalize_allowed_origins(raw)
             continue
         if raw is not None:
             out[str(key)] = raw
@@ -788,4 +826,4 @@ def attach_task_contract(task: Dict[str, Any]) -> Dict[str, Any]:
     return task
 
 
-__all__ = ["answer_protocol_active", "attach_task_contract", "build_task_contract", "effective_acceptance_claims", "normalize_acceptance_claims", "normalize_allowed_resources", "normalize_answer_protocol", "normalize_attachment_manifest", "normalize_bool", "normalize_budget_profile", "normalize_delegation_budget", "normalize_depth_provenance", "normalize_disabled_tools", "normalize_resource_policy"]
+__all__ = ["answer_protocol_active", "attach_task_contract", "build_task_contract", "effective_acceptance_claims", "normalize_acceptance_claims", "normalize_allowed_resources", "normalize_allowed_origins", "normalize_browser_origin", "normalize_answer_protocol", "normalize_attachment_manifest", "normalize_bool", "normalize_budget_profile", "normalize_delegation_budget", "normalize_depth_provenance", "normalize_disabled_tools", "normalize_resource_policy"]

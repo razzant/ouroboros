@@ -531,6 +531,14 @@
    "is_error": true,
    "status": "blocked"
   },
+  "ident:BROWSER_ORIGIN_NOT_GRANTED:named": {
+   "is_error": false,
+   "status": "ok"
+  },
+  "ident:BROWSER_ORIGIN_NOT_GRANTED:plain": {
+   "is_error": false,
+   "status": "ok"
+  },
   "ident:BROWSER_SESSION_RETIRED:named": {
    "is_error": false,
    "status": "ok"

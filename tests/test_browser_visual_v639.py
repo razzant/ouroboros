@@ -83,9 +83,6 @@ def test_evaluate_retries_statement_snippet_in_iife(monkeypatch):
 
     monkeypatch.setattr(browser, "_ensure_browser", lambda ctx, *a, **k: (_Page(), ctx.browser_state))
     monkeypatch.setattr(browser, "_readonly_subagent", lambda ctx: False)
-    monkeypatch.setattr(browser, "_blocks_context_mode_self_lowering_js", lambda v: False)
-    monkeypatch.setattr(browser, "_blocks_mutative_toggle_js", lambda v: False)
-    monkeypatch.setattr(browser, "_blocks_post_task_evolution_js", lambda v: False)
 
     out = browser._browser_action(_Ctx(), "evaluate", value="return 1 + 1;")
     assert "iife-ok" in out
@@ -114,9 +111,6 @@ def test_evaluate_runtime_error_not_misreported_as_syntax(monkeypatch):
 
     monkeypatch.setattr(browser, "_ensure_browser", lambda ctx, *a, **k: (_Page(), ctx.browser_state))
     monkeypatch.setattr(browser, "_readonly_subagent", lambda ctx: False)
-    for _g in ("_blocks_context_mode_self_lowering_js",
-               "_blocks_mutative_toggle_js", "_blocks_post_task_evolution_js"):
-        monkeypatch.setattr(browser, _g, lambda v: False)
     monkeypatch.setattr(browser, "_is_infrastructure_error", lambda ctx: False)
     with pytest.raises(Exception) as exc:
         browser._browser_action(_Ctx(), "evaluate", value="return missingFn();")

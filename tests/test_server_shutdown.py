@@ -223,7 +223,7 @@ def test_failed_boot_rollback_does_not_restart(monkeypatch):
     assert calls == ["update_status_ready"]
 
 
-def test_main_normal_exit_does_not_run_emergency_cleanup(monkeypatch):
+def test_main_normal_exit_does_not_run_emergency_cleanup(monkeypatch, tmp_path):
     import server
 
     cleanup_calls = []
@@ -232,11 +232,14 @@ def test_main_normal_exit_does_not_run_emergency_cleanup(monkeypatch):
         def __init__(self, _config):
             self.should_exit = False
 
-        def run(self):
+        def run(self, *, sockets):
+            assert len(sockets) == 1 and sockets[0].getsockname()[1] > 0
             return None
 
     monkeypatch.setattr(server, "load_settings", lambda: {"OUROBOROS_SERVER_HOST": "127.0.0.1"})
-    monkeypatch.setattr(server, "parse_server_args", lambda *_a, **_k: SimpleNamespace(host="127.0.0.1", port=8765))
+    monkeypatch.setattr(server, "parse_server_args", lambda *_a, **_k: SimpleNamespace(host="127.0.0.1", port=0))
+    monkeypatch.setattr(server, "DATA_DIR", tmp_path)
+    monkeypatch.setattr(server, "_ACTUAL_BOUND_PORT", None)
     monkeypatch.setattr(server, "get_network_auth_startup_warning", lambda _host: "")
     monkeypatch.setattr(server, "validate_network_auth_configuration", lambda _host: "")
     monkeypatch.setattr(server, "find_free_port", lambda _host, port: port)
@@ -254,7 +257,7 @@ def test_main_normal_exit_does_not_run_emergency_cleanup(monkeypatch):
     assert cleanup_calls == []
 
 
-def test_main_graceful_restart_cleanup_avoids_port_sweep(monkeypatch):
+def test_main_graceful_restart_cleanup_avoids_port_sweep(monkeypatch, tmp_path):
     import server
 
     cleanup_calls = []
@@ -263,7 +266,8 @@ def test_main_graceful_restart_cleanup_avoids_port_sweep(monkeypatch):
         def __init__(self, _config):
             self.should_exit = False
 
-        def run(self):
+        def run(self, *, sockets):
+            assert len(sockets) == 1 and sockets[0].getsockname()[1] > 0
             server._restart_requested.set()
             return None
 
@@ -271,7 +275,9 @@ def test_main_graceful_restart_cleanup_avoids_port_sweep(monkeypatch):
         pass
 
     monkeypatch.setattr(server, "load_settings", lambda: {"OUROBOROS_SERVER_HOST": "127.0.0.1"})
-    monkeypatch.setattr(server, "parse_server_args", lambda *_a, **_k: SimpleNamespace(host="127.0.0.1", port=8765))
+    monkeypatch.setattr(server, "parse_server_args", lambda *_a, **_k: SimpleNamespace(host="127.0.0.1", port=0))
+    monkeypatch.setattr(server, "DATA_DIR", tmp_path)
+    monkeypatch.setattr(server, "_ACTUAL_BOUND_PORT", None)
     monkeypatch.setattr(server, "get_network_auth_startup_warning", lambda _host: "")
     monkeypatch.setattr(server, "validate_network_auth_configuration", lambda _host: "")
     monkeypatch.setattr(server, "find_free_port", lambda _host, port: port)
