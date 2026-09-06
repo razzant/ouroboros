@@ -2769,7 +2769,7 @@ def test_dead_owned_daemon_is_restarted_and_reconciled(monkeypatch, tmp_path):
         new_descriptor = (config_dir / "daemon" / "control-api.json").read_text()
         assert new_descriptor != old_descriptor
         assert endpoint.port == _json.loads(new_descriptor)["port"]
-        assert spawned["kwargs"] == {"purpose": "claudexor_daemon", "scope": "session"}
+        assert spawned["kwargs"] == {"purpose": "claudexor_daemon", "scope": "daemon"}
         assert manager.status_dict()["state"] == "running"
         # The provision moment (re)wrote OUR ownership marker.
         assert owned.read_ownership_marker()["data_dir"] == str(data_dir.resolve())

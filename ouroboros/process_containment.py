@@ -39,7 +39,7 @@ MARKER_UNREADABLE = "unreadable"
 
 def pid_marker_state(pid: int, marker: str) -> str:
     """Tri-state membership for ONE pid from live kernel state: ABSENT means ANSWERED-not-a-member;
-    UNREADABLE means unanswerable — ``reap`` treats it as a leak. Windows: ABSENT (job = membership)."""
+    UNREADABLE means unanswerable — a leak only for an attributed member. Windows: ABSENT (job = membership)."""
     if _pl.IS_WINDOWS or not marker or int(pid) <= 0:
         return MARKER_ABSENT
     if os.path.isdir("/proc"):
@@ -132,17 +132,38 @@ def pid_is_zombie(pid: int) -> bool:
         return False
 
 
-def _could_be_hidden_member(pid: int, since_ticks: int) -> bool:
-    """Whether a pid whose ENVIRONMENT cannot be read could still be a container member.
+def process_group_has_live_members(pgid: int) -> bool:
+    """Whether a recorded service group can still execute; unknown stays alive.
 
-    Dropping such a pid is how a live descendant leaves containment without exiting — ``setsid()``
-    sheds the group and nondumpability sheds the token — so it is enumerated on PLAUSIBILITY and
-    reported undetermined, which blocks. What the kernel publishes however it hid (``stat`` and
-    ``status`` stay world-readable) rules out two things a member cannot be: started BEFORE the
-    container root, which a member is forked FROM, or running under another EFFECTIVE uid, which
-    needs privilege we do not have and would be unsignallable anyway. All else is kept, unanswered
-    reads included: an exited pid re-probes as absent and a stranger costs a clearable false block,
-    while dropping a live member is the leak itself."""
+    Signal-zero sees a zombie-only group as present. Inspect ALL group members,
+    because an exited leader can still have a live child. This is a fresh read,
+    not a saved process-table snapshot or new authority to signal a group.
+    """
+    if not _pl.process_group_is_alive(pgid):
+        return False
+    try:
+        rows = subprocess.run(["ps", "-A", "-o", "pgid=,state="],
+                              capture_output=True, text=True, timeout=5)
+        if rows.returncode != 0:
+            return True
+        states = [fields[1] if len(fields) == 2 else "unknown"
+                  for line in rows.stdout.splitlines()
+                  if (fields := line.split()) and fields[0] == str(pgid)]
+        if states:
+            return any(not state.startswith("Z") for state in states)
+    except (OSError, subprocess.TimeoutExpired):
+        return True
+    # No visible member is not proof that a still-existing group is empty.
+    return _pl.process_group_is_alive(pgid)
+
+
+def _unattributed_candidate(pid: int, since_ticks: int) -> bool:
+    """Select plausible unreadable strangers for disclosure, never membership.
+
+    Same euid and a recent start cannot attribute an SSH session or other
+    concurrent process to this pass. Known roots, groups and token members
+    remain fail-closed separately in ``ProcessContainer._scan``.
+    """
     started = _pl._proc_start_ticks(pid)
     if since_ticks > 0 and 0 < started < since_ticks:
         return False
@@ -160,11 +181,10 @@ def pids_with_env_marker(marker: str, pgid: int = 0, since_ticks: int = 0) -> "O
     """Pids that belong to a container, read from live kernel state; ``None`` when the process
     table could NOT be read at all (conflating that with "empty" reports a clean reap).
 
-    THREE signals, each covering the others' blind spots: the kernel-copied ENVIRONMENT token
-    (survives setsid/fd-closing/reparenting — but is claimed by READING the process, so a member
-    turning nondumpable drops out silently), the kernel-held PROCESS GROUP (names nondumpable and
-    env-replaced members), and on Linux the undetermined-unreadable candidates
-    ``_could_be_hidden_member`` cannot rule out (dated by ``since_ticks``), kept fail-closed.
+    TWO positive signals: the kernel-copied ENVIRONMENT token (survives
+    setsid/fd-closing/reparenting) and the kernel-held PROCESS GROUP (names
+    nondumpable and env-replaced members). Plausible unreadable strangers are
+    disclosed, not attributed by their uid or start time.
     The group is an ENUMERATION input only — ``reap`` never signals by pgid."""
     if _pl.IS_WINDOWS or not marker:
         return []
@@ -174,15 +194,20 @@ def pids_with_env_marker(marker: str, pgid: int = 0, since_ticks: int = 0) -> "O
             entries = os.listdir("/proc")
         except OSError:
             return None
+        unattributed: List[int] = []
         for name in entries:
             if not name.isdigit():
                 continue
             state = pid_marker_state(int(name), marker)
             if (state == MARKER_MEMBER
-                    or (pgid and _pl.process_group_id(int(name)) == pgid)
-                    or (state == MARKER_UNREADABLE
-                        and _could_be_hidden_member(int(name), since_ticks))):
+                    or (pgid and _pl.process_group_id(int(name)) == pgid)):
                 found.append(int(name))
+            elif state == MARKER_UNREADABLE and _unattributed_candidate(int(name), since_ticks):
+                unattributed.append(int(name))
+        if unattributed:
+            log.warning("Unattributed processes have unreadable environments; not counted as "
+                        "container members or signalled: %s. Detached descendants that hid their "
+                        "token before observation cannot be ruled out.", unattributed)
         return found
     try:
         out = subprocess.run(["ps", "-E", "-ww", "-Ao", "pid=,pgid=,command="],
@@ -215,7 +240,7 @@ def _containment_leak_reason(alive: List[int], undetermined: List[int]) -> str:
         parts.append("still alive after a best-effort kill: "
                      + ", ".join(str(pid) for pid in alive))
     if undetermined:
-        parts.append("liveness could not be determined (the process environment could not be "
+        parts.append("liveness could not be determined (the attributed process environment could not be "
                      "read): " + ", ".join(str(pid) for pid in undetermined))
     detail = "; ".join(parts) or ("no member was visible in the last scan, but two consecutive "
                                   "quiet scans were never reached, so nothing is proven gone")
@@ -231,8 +256,8 @@ class ProcessContainer:
     container claims an honest ANSWER instead: ``reap`` resolves membership
     (``pids_with_env_marker``) from the LIVE table at teardown — never from mid-run samples — then
     attempts one bounded best-effort kill sweep and reports every member still alive or
-    undeterminable to the caller, which hard-blocks. Residual limit on Linux: a descendant that
-    sheds the token, leaves the group AND changes euid; without ``/proc`` (macOS/BSD) one that
+    undeterminable to the caller, which hard-blocks. Residual limit on Linux: a descendant never
+    observed as a member that leaves the group and hides/replaces the token; without ``/proc`` (macOS/BSD) one that
     sheds the token and leaves the group. Windows membership is the Job Object (kernel-enforced
     teardown — but only when the API confirms it). Prefer ``spawn`` over ``Popen`` + ``adopt``:
     POSIX ``adopt`` can neither plant the token nor vouch for a pid or group."""
@@ -401,5 +426,4 @@ class ProcessContainer:
         if _pl.IS_WINDOWS and self._job is not None:
             _pl.close_job(self._job)
             self._job = None
-
 

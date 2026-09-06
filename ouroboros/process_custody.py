@@ -12,7 +12,7 @@ Scopes:
   - ``task``:    dies with its owning task; reapable as soon as the task is no
                  longer running (and always across server generations).
   - ``session``: dies with the server generation (session_id mismatch → reap).
-  - ``daemon``:  genuine launcher-managed processes (e.g. ``server_restart_fallback``)
+  - ``daemon``:  installation-owned processes (e.g. the shared Claudexor daemon)
                  outlive generations — never killed. Skill COMPANIONS also record
                  daemon scope but are the exception: ``reap_orphaned_processes``
                  reaps them on owner-uninstall or a foreign generation.
@@ -39,11 +39,11 @@ from ouroboros.platform_layer import (
     pid_is_alive,
     process_command,
     process_group_id,
-    process_group_is_alive,
     process_start_time,
     process_start_time_legacy,
     subprocess_new_group_kwargs,
 )
+from ouroboros.process_containment import pid_is_zombie, process_group_has_live_members
 from ouroboros.utils import append_jsonl, utc_now_iso
 
 log = logging.getLogger(__name__)
@@ -241,7 +241,7 @@ def _fingerprint_matches(entry: Dict[str, Any]) -> bool:
     once that mismatched (see ``_legacy_start_matches``).
     """
     pid = int(entry.get("pid") or 0)
-    if pid <= 0 or not pid_is_alive(pid):
+    if pid <= 0 or not pid_is_alive(pid) or pid_is_zombie(pid):
         return False
     fp = entry.get("fingerprint") if isinstance(entry.get("fingerprint"), dict) else {}
     recorded_boot = str(fp.get("start_time_boot") or "")
@@ -278,7 +278,7 @@ def _fingerprint_matches(entry: Dict[str, Any]) -> bool:
 
 
 def _service_group_survives_leader(entry: Dict[str, Any]) -> bool:
-    """Keep dead-leader service evidence while its recorded group still exists."""
+    """Keep dead-leader evidence while a group member can still execute."""
     purpose = str(entry.get("purpose") or "")
     scope = str(entry.get("scope") or "")
     pgid = int(entry.get("pgid") or 0)
@@ -286,7 +286,7 @@ def _service_group_survives_leader(entry: Dict[str, Any]) -> bool:
         purpose.startswith(("service:", "workspace_service:"))
         and scope in {"task", "session"}
         and pgid > 0
-        and process_group_is_alive(pgid)
+        and process_group_has_live_members(pgid)
     )
 
 
@@ -543,6 +543,7 @@ def reap_orphaned_processes(
     running_task_ids: Optional[set] = None,
     live_owner_skills: Optional[set] = None,
     enforce_companion_reap: bool = False,
+    retained_purposes: Optional[set[str]] = None,
 ) -> List[int]:
     """Kill ledgered processes whose owning generation/task is gone.
 
@@ -551,8 +552,11 @@ def reap_orphaned_processes(
       - current session's entries → keep (their owners are alive);
         EXCEPT task-scoped entries whose owner task is no longer running;
       - previous generations: task/session scopes → kill group + reap event;
-        daemon scope → keep (genuine launcher-managed lifecycles, e.g.
-        ``server_restart_fallback``).
+        daemon scope → keep (installation-owned lifecycles).
+      - ``retained_purposes`` lets the lifecycle owner preserve legacy records
+        of its installation-owned process, only after fingerprint identity
+        matches. The ledger's drive root and exact recorded process remain the
+        provenance; a purpose name alone never rescues a stale/recycled row.
       - skill COMPANIONS (purpose ``companion:<skill>:<name>``, recorded under
         daemon scope) are the exception to daemon-keep: reap when the owner skill
         is UNINSTALLED (not in ``live_owner_skills``) OR the entry is from a
@@ -595,7 +599,7 @@ def reap_orphaned_processes(
         # prune), never killed. The skipped fingerprint only cost a `ps` per row on
         # every 600s tick (the startup sweep sees prior-generation rows as
         # foreign-session, so it saves nothing there). This is the hot majority of the ledger:
-        # worker-pool members, the SyncManager, the claudexor daemon, the local-model
+        # worker-pool members, the SyncManager, the local-model
         # server and keep-services are all scope="session".
         #
         # A DEAD pid deliberately FALLS THROUGH instead of pruning here: a session
@@ -610,6 +614,7 @@ def reap_orphaned_processes(
             and pid > 0
             and not str(entry.get("purpose") or "").startswith("companion:")
             and pid_is_alive(pid)
+            and not pid_is_zombie(pid)
         ):
             survivors.append(entry)
             continue
@@ -617,6 +622,9 @@ def reap_orphaned_processes(
         group_survives = _service_group_survives_leader(entry)
         if not leader_matches and not group_survives:
             continue  # dead/recycled pid with no surviving service group: prune silently
+        if leader_matches and entry.get("purpose") in (retained_purposes or set()):
+            survivors.append(entry)
+            continue
         owner_task = str(entry.get("owner_task") or "")
         purpose = str(entry.get("purpose") or "")
         task_owner_gone = (

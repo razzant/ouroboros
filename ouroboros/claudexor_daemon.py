@@ -9,17 +9,17 @@ first-class seam, and the owner's existing logins stay the owner's (accounts
 for the Ouroboros home are logged in fresh, through the daemon's own login
 jobs).
 
-Lifecycle follows the local-model-server template:
+Lifecycle belongs to the installation, not the process that first needed it:
 
-* spawn through ``process_custody`` (session scope) so a dead server
-  generation's daemon is reaped by fingerprint, never by command-line class;
+* spawn through ``process_custody`` (daemon scope); server sweeps preserve
+  fingerprint-matching legacy session records through the same named purpose;
 * ATTACH-IF-ALIVE: a live daemon already serving our config dir (a previous
   generation's, custody-pending) is attached to, not duplicated — the engine
   refuses a second daemon on the same socket anyway;
 * OWN-ONLY-IF-SELF-STARTED: ``stop`` terminates only a process THIS manager
   spawned. An attached daemon — ours-by-home or anyone else's — is never
-  killed here; foreign daemons are not ours to stop, and the custody reaper
-  already owns cross-generation cleanup for self-spawned ones.
+  killed here; a generation change alone never authorizes stopping live runs.
+  A newer runtime pin is staged for the next natural start, never hot-swapped.
 
 Zero auth logic lives here or anywhere in Ouroboros: login jobs, device-code
 custody, verification and rotation are the daemon's own product surface,
@@ -42,6 +42,7 @@ from typing import Any, Dict, Optional
 log = logging.getLogger(__name__)
 
 _OWNED_DIR_NAME = "claudexor"
+CUSTODY_PURPOSE = "claudexor_daemon"
 _SPAWN_WAIT_SEC = 20.0
 _SPAWN_POLL_SEC = 0.25
 # Admission, distinct from reachability: a 3.4+ daemon serves the authenticated
@@ -456,8 +457,8 @@ class OwnedClaudexorDaemon:
                 self._proc = spawn_supervised(
                     command,
                     drive_root=pathlib.Path(DATA_DIR),
-                    purpose="claudexor_daemon",
-                    scope="session",
+                    purpose=CUSTODY_PURPOSE,
+                    scope="daemon",
                     env=env,
                     stdin=subprocess.DEVNULL,
                     stdout=sink,
