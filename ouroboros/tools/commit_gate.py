@@ -841,9 +841,20 @@ def _check_overlapping_review_attempt(ctx: ToolContext) -> Optional[str]:
     )
 
 
+def review_failure_is_technical(facts: Dict[str, Any]) -> bool:
+    """Classify producer facts only; candidate and owner admission stay separate."""
+    return (
+        facts.get("failure_phase") in {"context", "delivery", "format", "window_authority"}
+        and facts.get("operation_state") not in {"in_flight", "custody_lost"}
+        and not facts.get("pending_invocation_id") and not facts.get("late_result_pending")
+    )
+
+
 def _check_advisory_freshness(ctx: ToolContext, commit_message: str,
                               skip_advisory_pre_review: bool = False,
-                              paths: Optional[List[str]] = None) -> Optional[str]:
+                              paths: Optional[List[str]] = None, *,
+                              review_rebuttal: str = "",
+                              decision: Optional[Dict[str, Any]] = None) -> Optional[str]:
     from ouroboros.review_state import AdvisoryRunRecord, compute_snapshot_hash, load_state, make_repo_key, update_state, _utc_now
     from ouroboros.config import get_review_enforcement
     from ouroboros.utils import append_jsonl
@@ -857,6 +868,19 @@ def _check_advisory_freshness(ctx: ToolContext, commit_message: str,
     open_obs = state.get_open_obligations(repo_key=repo_key)
     open_debts = state.get_open_commit_readiness_debts(repo_key=repo_key)
 
+    matching_run = state.find_by_hash(snapshot_hash, repo_key=repo_key)
+    same_rebuttal = compute_rebuttal_sha256(review_rebuttal) == compute_rebuttal_sha256(
+        getattr(matching_run, "review_rebuttal", "")
+    )
+    fresh = state.is_fresh(snapshot_hash, repo_key=repo_key) and same_rebuttal
+    if decision is not None:
+        execution = getattr(matching_run, "execution", {}) or {}
+        decision["pending"] = bool(execution.get("pending_invocation_id")) or execution.get("operation_state") in {"in_flight", "custody_lost"}
+        decision["refresh_required"] = (
+            not skip_advisory_pre_review and not fresh
+            and str(getattr(matching_run, "status", "")) != "preflight_blocked"
+        )
+
     def _render_obligations() -> list[str]:
         return [
             f"  [{o.obligation_id}] {o.item}: {_truncate_review_reason(o.reason, limit=80)}"
@@ -869,10 +893,28 @@ def _check_advisory_freshness(ctx: ToolContext, commit_message: str,
             for debt in open_debts
         ]
 
-    if state.is_fresh(snapshot_hash, repo_key=repo_key) and not open_obs and not open_debts:
+    technical_failure = bool(matching_run is not None and matching_run.status in {"error", "parse_failure"}
+                             and same_rebuttal and enforcement == "advisory"
+                             and review_failure_is_technical(matching_run.execution))
+    if technical_failure:
+        from ouroboros.tools.review import _record_advisory_override
+
+        warning = (
+            f"Preflight {matching_run.status} ({matching_run.execution.get('failure_phase')}): "
+            f"{matching_run.raw_result}\nReview enforcement=advisory permits continuing; "
+            "this failed preflight is not a PASS. Its full source and findings remain recorded."
+        )
+        if open_obs or open_debts:
+            warning += "\nExisting unresolved obligations and commit-readiness debt:\n" + "\n".join(
+                [*_render_obligations(), *_render_debts()])
+        ctx._last_review_block_reason = "advisory_technical_failure"
+        _record_advisory_override(ctx, warning)
+        ctx._review_advisory = list(getattr(ctx, "_review_advisory", []) or []) + [warning, *matching_run.items]
+
+    if (fresh or technical_failure) and not open_obs and not open_debts:
         return None
 
-    if skip_advisory_pre_review:
+    if skip_advisory_pre_review and not technical_failure:
         task_id = str(getattr(ctx, "task_id", "") or "")
         reason = "skip_advisory_review=True passed to commit_reviewed"
         try:
@@ -902,7 +944,7 @@ def _check_advisory_freshness(ctx: ToolContext, commit_message: str,
 
         return None  # audited bypass
 
-    if state.is_fresh(snapshot_hash, repo_key=repo_key) and (open_obs or open_debts):
+    if (fresh or technical_failure) and (open_obs or open_debts):
         if enforcement == "advisory":
             drive_logs = ctx.drive_logs() if callable(getattr(ctx, "drive_logs", None)) else drive_root / "logs"
             event = {
@@ -928,8 +970,9 @@ def _check_advisory_freshness(ctx: ToolContext, commit_message: str,
             debt_parts.append(f"{len(open_obs)} open obligation(s)")
         if open_debts:
             debt_parts.append(f"{len(open_debts)} commit-readiness debt item(s)")
+        state_label = "Failed advisory disclosure could not be recorded" if technical_failure else "Advisory is current"
         lines = [
-            f"⚠️ ADVISORY_PRE_REVIEW_REQUIRED: Advisory is current (hash={snapshot_hash[:12]}) "
+            f"⚠️ ADVISORY_PRE_REVIEW_REQUIRED: {state_label} (hash={snapshot_hash[:12]}) "
             f"but {' and '.join(debt_parts)} remain unresolved.\n"
         ]
         if open_obs:

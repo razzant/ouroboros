@@ -157,6 +157,29 @@ class AdvisoryReviewState:
         return run is not None and run.status in ("fresh", "bypassed", "skipped")
 
     def add_run(self, run: AdvisoryRunRecord) -> None:
+        invocation = str(run.execution.get("invocation_id") or run.execution.get("operation_id") or "")
+        for index, existing in enumerate(self.advisory_runs):
+            if (run.status == "bypassed" and run.bypass_reason
+                    and existing.blocks_preflight and existing.repo_key == run.repo_key):
+                # Both existing bypass writers converge here under the state lock.
+                # Preserve the old task, exact request token, result and custody.
+                existing.bypass_reason = run.bypass_reason
+                existing.bypassed_by_task = run.bypassed_by_task
+                existing.updated_ts = _rs()._utc_now()
+            if (existing.blocks_preflight and existing.repo_key == run.repo_key
+                    and (not invocation or invocation != (existing.execution.get("invocation_id") or existing.execution.get("operation_id")))):
+                raise ValueError("an unresolved preflight already owns this repository")
+            if (invocation and (existing.execution.get("invocation_id") or existing.execution.get("operation_id")) == invocation
+                    and (existing.repo_key, existing.task_id) == (run.repo_key, run.task_id)):
+                run.attempt, run.created_ts = existing.attempt, existing.created_ts
+                if existing.bypass_reason:
+                    # A late result updates its own historical row in place; it
+                    # cannot revoke the newer bypass or reclaim its admission.
+                    run.bypass_reason, run.bypassed_by_task = existing.bypass_reason, existing.bypassed_by_task
+                    self.advisory_runs[index] = run
+                    return
+                self.advisory_runs.pop(index)
+                break
         if not run.attempt:
             run.attempt = self.next_advisory_attempt_number(
                 str(run.repo_key or _rs()._LEGACY_CURRENT_REPO_KEY),
@@ -170,7 +193,11 @@ class AdvisoryReviewState:
         self.mark_all_stale_except(run.snapshot_hash, repo_key=run.repo_key)
         self.advisory_runs.append(run)
         if len(self.advisory_runs) > _rs()._MAX_RUN_HISTORY:
-            self.advisory_runs = self.advisory_runs[-_rs()._MAX_RUN_HISTORY:]
+            cutoff = len(self.advisory_runs) - _rs()._MAX_RUN_HISTORY
+            self.advisory_runs = [
+                row for index, row in enumerate(self.advisory_runs)
+                if index >= cutoff or row.execution_pending
+            ]
         if run.status in ("fresh", "bypassed", "skipped", "parse_failure"):
             self.last_stale_from_edit_ts = ""
             self.last_stale_reason = ""

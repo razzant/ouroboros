@@ -476,6 +476,7 @@ _PUBLISHED_CHILD_REF_FIELDS = frozenset(
         "loop_outcome",
         "review_evidence",
         "review_projection",
+        "completion_observations",
         "verification_ledger",
         "root_phase_checkpoint",
         "plan_review_state",

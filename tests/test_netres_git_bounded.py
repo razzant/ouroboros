@@ -281,6 +281,7 @@ def test_commit_path_auto_push_timeout_is_best_effort_warning(tmp_path, monkeypa
 
     ctx = SimpleNamespace(
         repo_dir=tmp_path,
+        drive_root=tmp_path / "drive",
         branch_dev="ouroboros",
         current_task_type="task",
         task_id="t1",

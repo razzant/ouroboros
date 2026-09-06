@@ -97,15 +97,16 @@ def _check_budget_limits(
     )
     ceiling_usd = cost_ceiling.ceiling_usd
     prompt_estimate = int(accumulated_usage.get("_context_prompt_estimate") or 0)
+    global_remaining = _wrapup_global_remaining() if prompt_estimate > 0 and not ctx.active_use_local else None
     wrapup_fits = None
-    if cost_ceiling.root_cap_usd is not None and deciding is not None and prompt_estimate > 0:
-        finish_reason = task_pacing.wrapup_last_fit_text(deciding, cost_ceiling)
+    if prompt_estimate > 0 and (global_remaining is not None or (cost_ceiling.root_cap_usd is not None and deciding is not None)):
+        finish_reason = task_pacing.wrapup_last_fit_text(deciding, cost_ceiling, global_remaining)
         forced_prompt = f"[BUDGET LIMIT] {finish_reason} {_loop()._FORCED_BEST_EFFORT_TAIL}"
         request_args = dict(model=ctx.active_model, prompt_tokens=prompt_estimate,
                             use_local=ctx.active_use_local)
-        wrapup_args = dict(
-            **request_args, root_cap_usd=cost_ceiling.root_cap_usd, deciding_usd=deciding,
-        )
+        balances = dict(root_cap_usd=cost_ceiling.root_cap_usd, deciding_usd=deciding,
+                        global_remaining_usd=global_remaining)
+        wrapup_args = dict(**request_args, **balances)
         wrapup_fits = task_pacing.wrapup_reservation_fits(**wrapup_args)
         two_fit = task_pacing.wrapup_reservation_fits(**wrapup_args, reservation_count=2) if wrapup_fits is True else None
         server_web = _loop()._server_web_allowed_by_task(getattr(getattr(ctx, "tools", None), "_ctx", None))
@@ -122,7 +123,7 @@ def _check_budget_limits(
                 reasoning_effort=ctx.active_effort, tools=ctx.tool_schemas,
                 allow_server_web_search=server_web, prompt_tokens=prompt_estimate,
             )
-            wrapup_args = dict(request=probe, root_cap_usd=cost_ceiling.root_cap_usd, deciding_usd=deciding)
+            wrapup_args = dict(request=probe, **balances)
             wrapup_fits = task_pacing.wrapup_reservation_fits(**wrapup_args)
             two_fit = task_pacing.wrapup_reservation_fits(**wrapup_args, reservation_count=2) if wrapup_fits is True else None
         if wrapup_fits is False or two_fit is False:
@@ -135,16 +136,13 @@ def _check_budget_limits(
             wrapup_request, send_messages = task_pacing.prepared_wrapup_candidate(
                 ctx, prospective_messages, allow_server_web_search=server_web,
             )
-            wrapup_args = dict(
-                request=wrapup_request, root_cap_usd=cost_ceiling.root_cap_usd,
-                deciding_usd=deciding,
-            )
+            wrapup_args = dict(request=wrapup_request, **balances)
             wrapup_fits = task_pacing.wrapup_reservation_fits(**wrapup_args)
             if wrapup_fits is False:
                 accumulated_usage["cost_stop_spend_basis"] = spend_basis
                 accumulated_usage["cost_stop_rail"] = "wrapup_reservation_last_fit"
                 return _loop()._forced_fallback_result(
-                    ctx, trace, task_pacing.wrapup_unaffordable_text(deciding, cost_ceiling),
+                    ctx, trace, task_pacing.wrapup_unaffordable_text(deciding, cost_ceiling, global_remaining),
                     "budget_exhausted", source="budget_wrapup_unaffordable",
                 )
             if wrapup_fits is True and task_pacing.wrapup_reservation_fits(
@@ -201,6 +199,25 @@ def _resolve_task_cost_ceiling(
     resolved = task_pacing.resolve_task_cost_ceiling(ctx, budget_remaining_usd)
     setattr(ctx, "_cost_ceiling", resolved)
     return resolved
+
+
+def _wrapup_global_remaining() -> Optional[float]:
+    """Read one fresh wallet observation for this phase's candidate comparisons."""
+    from ouroboros.usage_accounting import current_usage_scope, usage_projection
+
+    scope = current_usage_scope()
+    if scope is None or not scope.task_id:
+        return None
+    try:
+        projection = usage_projection(scope.drive_root, global_limit_usd=scope.global_limit_usd,
+                                      include_roots=False)
+        if projection.get("integrity_degraded"):
+            return None
+        remaining = projection.get("remaining_known_usd")
+        return None if remaining is None else float(remaining)
+    except Exception:
+        log.debug("Wrap-up global budget observation unavailable", exc_info=True)
+        return None
 
 
 _TREE_ACCOUNTING_MAX_STALE_SEC = 120.0
@@ -269,6 +286,8 @@ def _soft_land_exhausted_ceiling(
     limit_ctx.accumulated_usage["cost_stop_spend_basis"] = spend_basis
     if task_pacing.wrapup_reservation_fits(
         request=request, root_cap_usd=cost_ceiling.root_cap_usd, deciding_usd=deciding or 0.0,
+        global_remaining_usd=_wrapup_global_remaining() if not limit_ctx.active_use_local else None,
+        use_local=limit_ctx.active_use_local,
     ) is False:
         limit_ctx.accumulated_usage["cost_stop_rail"] = "wrapup_reservation_last_fit"
         return _loop()._forced_fallback_result(

@@ -73,9 +73,9 @@ MANAGED_OVERSIZE_GUIDANCE = (
 # override applies where these statuses are produced — packet ASSEMBLY, before
 # any dispatch. A DISPATCH-TIME oversize (the provider's own tokenizer
 # rejecting an assembled prompt, scope_review status `fixed_overflow` from the
-# transport) still fail-closed blocks: whether that late refusal should also
-# yield to a session quorum is an owner-level consistency question, escalated
-# separately — no semantics are changed here.
+# transport) stays a failed row, not an admission-time quorum yield. The commit
+# aggregate separately applies owner-selected advisory enforcement to typed
+# technical failures; it never promotes that row to an authoritative verdict.
 SCOPE_FIT_BLOCK_STATUSES = frozenset({"sub_floor", "fixed_overflow"})
 
 
@@ -362,7 +362,7 @@ def prepare_scope_review(
     except (TypeError, ValueError) as exc:
         return None, sr.ScopeReviewResult(
             blocked=True,
-            status="error",
+            status="error", failure_phase="authority", failure_code="invalid_roots",
             block_message=f"⚠️ SCOPE_REVIEW_BLOCKED: invalid review roots: {exc}.",
         )
     from ouroboros.review_execution import delivery_retrieves
@@ -378,6 +378,12 @@ def prepare_scope_review(
 
     try:
         subject = managed_review_subject(ctx, repo_dir)
+    except (RuntimeError, StagedDiffUnavailable, ValueError) as exc:
+        return None, sr.ScopeReviewResult(
+            blocked=True, status="error", failure_phase="authority", failure_code="subject_unavailable",
+            block_message=f"⚠️ SCOPE_REVIEW_BLOCKED: review subject could not be established: {exc}",
+        )
+    try:
         if retrieves:
             # Session delivery (5.2): same task/checklist/contract, no assembled
             # pack — the session retrieves with its own tools in the repo root.
@@ -441,7 +447,7 @@ def prepare_scope_review(
                         + [{"step": "density_probe", "model": scope_model_id, "outcome": outcome,
                             "rebuilt": outcome == "measured"}]
                     )
-    except (RuntimeError, StagedDiffUnavailable) as exc:
+    except (RuntimeError, StagedDiffUnavailable, OSError, ValueError) as exc:
         return None, sr.ScopeReviewResult(
             blocked=True,
             block_message=(
@@ -450,7 +456,7 @@ def prepare_scope_review(
                 "Ensure git is available and the repository is in a valid state."
             ),
             model_id=scope_model_id,
-            status="error",
+            status="error", failure_phase="context", failure_code="context_unavailable",
             context_manifest=sr._current_scope_context_manifest(),
         )
 

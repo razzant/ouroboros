@@ -331,13 +331,14 @@ class UpdateTxCorrupt(RuntimeError):
 
 
 def record_managed_tests_evidence(
-    task_id: str, task_metadata: Optional[Dict[str, Any]] = None
+    task_id: str, task_metadata: Optional[Dict[str, Any]] = None, *, force: bool = False,
 ) -> str:
     """After a GREEN full hermetic pytest run inside the authorized resolver's flow,
     pin the exact candidate tree the suite ran against (the live worktree projection —
     what ``run_hermetic_pytest`` actually tests) into the tx as ``tests_evidence``.
-    Skips recording when the suite was env-disabled (no run happened — recording
-    would forge a proof). Returns the recorded tree sha, '' when not applicable.
+    An env-disabled legacy call records nothing. ``force`` is supplied only by
+    the authorized host runner after its mandatory suite actually ran green;
+    it does not replace resolver authorization. Returns the tree sha, or ''.
 
     AUTHORITY NOTE (synthesis F2): the durable ``tests_evidence`` copy written
     here is FORENSIC/telemetry only. The tx marker is a plain writable file the
@@ -345,7 +346,7 @@ def record_managed_tests_evidence(
     (``_managed_candidate_needs_proof`` / ``_managed_post_commit_tests_gate``)
     consult ONLY the process-held record on the task ctx (see
     ``record_managed_tests_proof``), never this file."""
-    if os.environ.get("OUROBOROS_PRE_PUSH_TESTS", "1") != "1":
+    if not force and os.environ.get("OUROBOROS_PRE_PUSH_TESTS", "1") != "1":
         return ""
     from supervisor import update_merge as _um
 
@@ -387,7 +388,7 @@ def record_managed_tests_evidence(
     return tree
 
 
-def record_managed_tests_proof(ctx: Any) -> str:
+def record_managed_tests_proof(ctx: Any, *, force: bool = False) -> str:
     """PROCESS-HELD authority for the managed single-run contract (Q10).
 
     Called by BOTH host recording sites — the compensating commit preflight
@@ -401,7 +402,7 @@ def record_managed_tests_proof(ctx: Any) -> str:
     restart between the proof run and the commit loses the ctx record and
     re-runs the suite once (the safe direction). Returns the pinned tree."""
     tree = record_managed_tests_evidence(
-        str(getattr(ctx, "task_id", "") or ""), getattr(ctx, "task_metadata", None)
+        str(getattr(ctx, "task_id", "") or ""), getattr(ctx, "task_metadata", None), force=force,
     )
     if tree:
         proofs = getattr(ctx, "_managed_tests_proof_trees", None)

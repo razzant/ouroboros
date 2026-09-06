@@ -252,7 +252,7 @@ def test_unknown_exception_capture_projects_custody_loss_over_http_status():
     assert status is None
     assert operation_state == "custody_lost"
     assert failure_code == "provider_outcome_unknown"
-    assert custody == {"physical_attempt_state": "unresolved"}
+    assert custody == {"physical_attempt_state": "unresolved", "review_failure_phase": "delivery"}
 
 
 def test_coordinator_does_not_retry_malformed_physical_capture(tmp_path, monkeypatch):

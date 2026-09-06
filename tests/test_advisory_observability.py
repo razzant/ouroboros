@@ -265,7 +265,8 @@ def test_skill_advisory_missing_expected_items_still_errors(monkeypatch, tmp_pat
         },
     )
 
-    assert items == []
+    assert [item["item"] for item in items] == ["manifest_schema"]
+    assert "Full reviewer output:" in raw
     assert raw.startswith("⚠️ ADVISORY_ERROR:")
     assert "checklist contract mismatch" in raw
     assert any(ev.get("type") == "advisory_suspect_result" for ev in ctx.pending_events)

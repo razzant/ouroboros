@@ -629,6 +629,8 @@ def _execute_single_tool(
                     "tool_call_id": tool_call_id,
                     "tool": fn_name,
                     "status": "arg_error",
+                    "tool_code": tool_result.code,
+                    "error_preview": truncate_for_log(sanitize_tool_result_for_log(result), 600),
                 },
             )
         except Exception:
@@ -723,6 +725,8 @@ def _execute_single_tool(
                 "tool": fn_name,
                 "status": str(result_meta.get("status") or ("ok" if tool_ok else "exception")),
                 "semantic_ok": not is_error,
+                "tool_code": tool_result.code,
+                **({"error_preview": truncate_for_log(sanitize_tool_result_for_log(result), 600)} if is_error else {}),
             },
         )
     except Exception:
@@ -860,6 +864,8 @@ def _make_timeout_result(
                 "tool": fn_name,
                 "status": "timeout",
                 "timeout_sec": timeout_sec,
+                "tool_code": tool_result.code,
+                "error_preview": truncate_for_log(sanitize_tool_result_for_log(result), 600),
             },
         )
     except Exception:

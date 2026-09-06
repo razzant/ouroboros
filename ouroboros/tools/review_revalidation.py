@@ -29,7 +29,7 @@ def _build_revalidation_failure(
 ) -> str:
     if kind == "revalidation_failed":
         return (
-            "⚠️ REVIEW_REVALIDATION_FAILED: the staged diff changed after review. "
+            "⚠️ REVIEW_REVALIDATION_FAILED: the prepared review candidate changed. "
             f"before={before.get('fingerprint', '')[:12]}, "
             f"after={str((after or {}).get('fingerprint', ''))[:12]}. "
             "The reviewed findings were invalidated and were NOT carried forward. "

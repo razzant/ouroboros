@@ -485,7 +485,7 @@ def emit_task_results(
         # on a nearby progress row that may age out independently.
         send_event["progress_meta"] = dict(_message_meta)
     send_event = prepare_terminal_send_event(env.drive_root, task, text, usage, send_event, ephemeral=_ephemeral, presence=_presence)
-    pending_events.append(build_presence_result_event(task, text, ctx) if _presence else send_event)
+    pending_events.append(build_presence_result_event(task, text, ctx, provider_notice=str(usage.get("terminal_provider_notice") or "")) if _presence else send_event)
     duration_sec = round(time.time() - start_time, 3)
     n_tool_calls = len(llm_trace.get("tool_calls", []))
     n_tool_errors = sum(1 for tc in llm_trace.get("tool_calls", [])
@@ -822,6 +822,10 @@ def _store_task_result(env: Any, task: Dict[str, Any], text: str,
     do not derive/flag a second time. It is only re-derived here when called without one.
     """
     try:
+        from ouroboros.review_projection import publish_acceptance_checkpoint
+
+        publish_acceptance_checkpoint(env, llm_trace, task_id=str(task.get("id") or ""),
+                                      drive_root=env.drive_root, chat_id=task.get("chat_id"))
         trace_summary = build_trace_summary(llm_trace)
         from ouroboros.cost_projection import with_cost_aliases
 
@@ -847,6 +851,11 @@ def _store_task_result(env: Any, task: Dict[str, Any], text: str,
         execution_status = str((outcome_axes.get("execution") or {}).get("status") or "")
         reason_code = str(loop_outcome.get("reason_code") or "")
         status = _durable_terminal_status(env, task, execution_status, existing=existing)
+        from ouroboros.task_finalization import build_completion_observations
+
+        observations = build_completion_observations(
+            env.drive_root, {**task, "started_at": existing.get("started_at")}, llm_trace,
+        )
         task_contract = build_task_contract(task)
         task = {**task, "task_contract": task_contract}
         artifact_bundle_for_ledger = artifact_bundle_from_result(existing)
@@ -988,6 +997,7 @@ def _store_task_result(env: Any, task: Dict[str, Any], text: str,
             trace_refs=loop_outcome.get("trace_refs") or {},
             **cost_fields,
             review_evidence=review_evidence or {},
+            completion_observations=observations,
             **({"review_projection": review_projection} if review_projection.get("panels") else {}),
             verification_ledger=verification_refs.get("inline"),
             artifact_bundle=artifact_bundle,
@@ -1052,6 +1062,7 @@ def build_review_context(env: Any) -> str:
         repo_commit_ready = advisory_commit_ready(
             current_run is not None and current_run.status in ("fresh", "bypassed", "skipped"),
             open_obs, open_debts,
+            matching_run=current_run if getattr(current_run, "repo_key", None) == repo_key else None,
         )
         lines.append(f"- repo_key={repo_key}")
         lines.append(f"- snapshot_hash={snapshot_hash[:12] or '(empty)'}")

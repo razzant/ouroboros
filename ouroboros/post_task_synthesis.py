@@ -336,11 +336,14 @@ def _run_task_summary(env, llm, task, usage, llm_trace, drive_logs, review_evide
             cost_text=cost_text,
             usage_snapshot=_synthesis_usage_snapshot_text(usage),
             sealed_final=sealed_final_prompt_section(sealed_final),
-            trace_summary=_truncate_with_notice(trace, 3000),
+            trace_summary=trace,
             review_evidence=review_section,
         )
         try:
-            msg, _usage = llm.chat(messages=[{"role": "user", "content": prompt}],
+            from ouroboros.llm_observability import chat_observed
+
+            msg, _usage = chat_observed(llm, drive_root=canonical_root, task_id=task_id,
+                                   call_type="task_summary", messages=[{"role": "user", "content": prompt}],
                                    model=summary_model,
                                    reasoning_effort=CONSOLIDATION_REASONING_EFFORT,
                                    max_tokens=16384,

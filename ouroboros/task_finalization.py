@@ -25,6 +25,7 @@ and sealed post-task ground truth.
 from __future__ import annotations
 
 import hashlib
+import json
 import logging
 import pathlib
 from typing import Any, Dict, List
@@ -36,6 +37,7 @@ log = logging.getLogger(__name__)
 # Prompt bounds: the overflow count is disclosed instead of silently dropped.
 _SEALED_MANIFEST_MAX_FILES = 200
 _SEALED_FINAL_TEXT_PROMPT_CHARS = 4000
+_COMPLETION_SKILL_PREVIEW_ROWS = 20
 
 # Closed producer vocabulary. Missing remains a valid legacy state and must
 # never be inferred from result text or lifecycle status.
@@ -68,15 +70,24 @@ def send_provider_death_notice(
         f"\n\n{TERMINAL_PLAN_REVIEW_NOTE}"
         if final_result.get("terminal_plan_review_open") is True else ""
     )
+    notice = str(final_result.get("terminal_provider_notice") or "") or (
+        "A model-provider outage stopped this task. Partial work and workspace files "
+        "are preserved; inspect the task details before starting another run."
+    )
     ctx.send_with_budget(
         chat_id,
-        f"🔌 Task {task_id} was stopped by a model-provider outage and was "
-        "NOT completed. Partial work and workspace files are preserved; "
-        f"re-run the task once the provider recovers.{plan_note}",
+        f"🔌 Task {task_id} was NOT completed.\n\n{notice}{plan_note}",
         role="system",
         system_type="terminal_incident",
     )
     return True
+
+
+def provider_terminal_body(text: str, notice: str) -> str:
+    """Render a host-labelled status beside raw text on single-body transports."""
+    if not notice:
+        return text
+    return (text + "\n\n" if text else "") + "[Host status]\n" + notice
 
 
 def stamp_root_final_phase(
@@ -107,6 +118,7 @@ def prepare_terminal_send_event(
 ) -> Dict[str, Any]:
     """Preserve raw host salvage, then build the one live/replay projection."""
     origin = str(usage.get("terminal_origin") or "")
+    notice = str(usage.get("terminal_provider_notice") or "")
     if ephemeral and not presence:
         # #369: an ephemeral decision's task_done frame is dropped at the
         # client's log-event entry by design, so this final is the turn's
@@ -114,11 +126,11 @@ def prepare_terminal_send_event(
         # branch (supervisor/workers.py stamps task_terminal_status="failed")
         # and lets the live concludesTurn gate settle the activity.
         send_event.setdefault("progress_meta", {})["task_terminal_status"] = "completed"
-    if ephemeral or presence or origin not in _STAMPED_TERMINAL_ORIGINS:
+    if origin not in _STAMPED_TERMINAL_ORIGINS:
         return send_event
     canonical_root = pathlib.Path(task.get("budget_drive_root") or env_drive_root)
     preserved_path = ""
-    if origin == TERMINAL_ORIGIN_HOST_SALVAGE and text:
+    if text and (origin == TERMINAL_ORIGIN_HOST_SALVAGE or (ephemeral and notice)):
         try:
             from ouroboros.observability import preserve_salvaged_output
 
@@ -128,11 +140,20 @@ def prepare_terminal_send_event(
         except Exception:
             log.warning("Failed to pre-preserve terminal host salvage", exc_info=True)
         usage["terminal_salvage_path"] = preserved_path
+    if presence:
+        return send_event  # Presence's existing body renderer owns its delivery outcome.
+    if ephemeral:
+        if notice:
+            body = ("Preserved intermediate output (not a final answer):\n" + text
+                    if origin == TERMINAL_ORIGIN_HOST_SALVAGE and text else text)
+            body = provider_terminal_body(body, notice)
+            send_event.update(text=body, log_text=body)
+        return send_event  # no task-details promise on a turn with no durable task row
     from supervisor.terminal_delivery import project_terminal_result_event
 
     return project_terminal_result_event(
         canonical_root, task, str(task.get("id") or ""),
-        result_text=text, terminal_origin=origin, base_event=send_event,
+        result_text=text, terminal_origin=origin, base_event=send_event, provider_notice=notice,
     )
 
 
@@ -147,6 +168,8 @@ def terminal_result_fields(usage: Dict[str, Any]) -> Dict[str, Any]:
         fields["terminal_salvage_path"] = path
     if usage.get("terminal_plan_review_open") is True:
         fields["terminal_plan_review_open"] = True
+    if isinstance(usage.get("terminal_provider_notice"), str) and usage["terminal_provider_notice"]:
+        fields["terminal_provider_notice"] = usage["terminal_provider_notice"]
     return fields
 
 
@@ -257,6 +280,97 @@ def register_final_answer_owed(
         log.debug("final-answer owed registration failed for %s", task.get("id"), exc_info=True)
 
 
+def build_completion_observations(drive_root: Any, task: Dict[str, Any], trace: Dict[str, Any]) -> Dict[str, Any]:
+    """Retain task-observed actions for synthesis without inventing delivery receipts.
+
+    The exact recorded returns live in the existing artifact store. Packet-only
+    synthesis receives counts and the latest return of EACH send-family tool,
+    so an earlier photo is not hidden by a tail of later text sends. Skill state
+    is the existing task-related readiness projection, not owner-click authorship.
+    """
+    from ouroboros.artifacts import store_actor_source_bytes
+    from ouroboros.observability import redact_projection
+    from ouroboros.skill_readiness import acceptance_skill_lifecycle
+    from ouroboros.tool_capabilities import OWNER_DELIVERY_TOOL_NAMES
+    from ouroboros.utils import utc_now_iso
+
+    calls = trace.get("tool_calls")
+    deliveries = [{key: call[key] for key in (
+        "tool", "tool_call_id", "status", "code", "result", "result_partial", "is_error",
+    ) if key in call} for call in (calls or [])
+        if isinstance(call, dict) and call.get("tool") in OWNER_DELIVERY_TOOL_NAMES]
+    coverage: Dict[str, Any] = {}
+    try:
+        skills = acceptance_skill_lifecycle(
+            task.get("budget_drive_root") or drive_root, trace,
+            str(task.get("root_task_id") or task.get("id") or ""),
+            task_started_at=str(task.get("started_at") or ""), history_coverage=coverage,
+        )
+    except Exception:
+        skills, coverage = [], {"complete": False, "status": "unavailable"}
+        log.debug("Completion skill-state observations unavailable", exc_info=True)
+    snapshot = redact_projection({
+        "observed_at": utc_now_iso(), "trace_available": isinstance(calls, list),
+        "delivery_results": deliveries, "skill_state": skills,
+        "skill_history_coverage": coverage,
+        "delivery_receipt_coverage": "not_observed_by_tool_trace",
+        "skill_state_scope": "current_state_of_task_related_skills; not action attribution",
+    }).value
+    counts: Dict[str, Any] = {}
+    latest: Dict[str, Any] = {}
+    for row in snapshot["delivery_results"]:
+        name = str(row["tool"])
+        count = counts.setdefault(name, {"calls": 0, "reported_ok": 0, "status_unknown": 0})
+        count["calls"] += 1
+        count["reported_ok"] += int(row.get("status") == "ok")
+        count["status_unknown"] += int(not row.get("status"))
+        latest[name] = {**row, "result": truncate_review_artifact(str(row.get("result") or ""), limit=600)}
+    projection = {**snapshot, "delivery_counts": counts, "delivery_results": list(latest.values()),
+                  "delivery_results_omitted": len(deliveries) - len(latest),
+                  "skill_state": snapshot["skill_state"][:_COMPLETION_SKILL_PREVIEW_ROWS],
+                  "skill_state_omitted": max(0, len(skills) - _COMPLETION_SKILL_PREVIEW_ROWS)}
+    if not deliveries and not skills:
+        return projection  # no full action record to store for an ordinary empty turn
+    raw = json.dumps(snapshot, ensure_ascii=False, sort_keys=True, default=str).encode("utf-8")
+    try:
+        projection["source_ref"] = store_actor_source_bytes(
+            task.get("budget_drive_root") or drive_root, str(task.get("id") or ""),
+            category="context_checkpoints", source_id="completion", data=raw, extension="json",
+        )
+        projection["source_ref"]["reader"] = {
+            "tool": "get_task_result",
+            "arguments": {"task_id": str(task.get("id") or ""), "include_completion_source": True},
+        }
+        projection["source_status"] = "available"
+    except (OSError, ValueError, TimeoutError):
+        projection["source_status"] = "unavailable"
+        log.warning("Completion observations full source unavailable", exc_info=True)
+    return projection
+
+
+def completion_source_projection(
+    drive_root: Any, task_id: str, result: Dict[str, Any], start_char: Any = None, end_char: Any = None,
+) -> Dict[str, Any]:
+    """Read the selected task's complete stored observations through its canonical root."""
+    from ouroboros.artifacts import read_actor_source_bytes, text_source_range_projection
+
+    unavailable = {"schema": 1, "kind": "task_completion_observations", "status": "unavailable"}
+    observations = result.get("completion_observations")
+    ref = observations.get("source_ref") if isinstance(observations, dict) else None
+    if not isinstance(ref, dict) or ref.get("kind") not in {"task_source", unavailable["kind"]}:
+        return {**unavailable, "reason": "source_unavailable"}
+    try:
+        raw = read_actor_source_bytes(drive_root, str(result.get("task_id") or task_id), ref)
+        projection, reason = text_source_range_projection(raw.decode("utf-8"), unavailable["kind"], start_char, end_char)
+    except ValueError as exc:
+        reason = "source_identity_mismatch" if "verification" in str(exc) else "source_ref_invalid"
+        return {**unavailable, "reason": reason}
+    except (OSError, RuntimeError):
+        return {**unavailable, "reason": "source_unavailable"}
+    payload = projection or unavailable
+    return {**payload, **({"reason": reason} if reason else {})}
+
+
 def build_sealed_final_package(result_row: Any, final_text: str) -> Dict[str, Any]:
     """Host-attested final outcome: delivered text + artifact-store manifest.
 
@@ -280,6 +394,7 @@ def build_sealed_final_package(result_row: Any, final_text: str) -> Dict[str, An
         "final_result_text": str(final_text or ""),
         "artifact_manifest": manifest[:_SEALED_MANIFEST_MAX_FILES],
         **({"artifact_manifest_omitted": omitted} if omitted else {}),
+        "completion_observations": row.get("completion_observations") or {"status": "unavailable"},
     }
 
 
@@ -301,18 +416,25 @@ def sealed_final_prompt_section(sealed_final: Dict[str, Any] | None) -> str:
     if omitted:
         rows.append(f"- ... {omitted} more file(s) exist in the store (list bounded)")
     manifest_text = "\n".join(rows) if rows else "(no files in the artifact store)"
+    observations = json.dumps(sealed_final.get("completion_observations") or {"status": "unavailable"},
+                              ensure_ascii=False, default=str)
     return (
         "## Sealed final outcome (host-attested ground truth)\n"
-        "Below are the final answer the owner actually received and a host-built\n"
+        "Below are the final answer submitted for delivery and a host-built\n"
         "manifest of this task's durable artifact store (plain filesystem facts).\n"
         "Outcomes stated here OVERRIDE impressions from the error trace: if the\n"
         "trace suggests failure but this package shows a delivered result or\n"
         "artifact, describe the recovery honestly instead of declaring the\n"
         "deliverable missing.\n"
-        "Final result text (as delivered to the owner):\n"
+        "An empty final answer, manifest, or observation section is not evidence that no action occurred.\n"
+        "Tool success records a submitted/queued action, not a chat receipt or proof the owner received it.\n"
+        "Skill readiness is current task-related state; it does not attribute an owner's click to this task.\n"
+        "Use the inline counts/results and coverage below; source refs are for later agent readers,\n"
+        "not additional evidence you have read. Omitted or unavailable facts remain unknown.\n"
+        "Final result text (submitted for delivery):\n"
         f"{final_text}\n"
         "Artifact store manifest (task_results/artifacts/<task_id>/):\n"
-        f"{manifest_text}\n\n"
+        f"{manifest_text}\nTask completion observations:\n{observations}\n\n"
     )
 
 

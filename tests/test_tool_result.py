@@ -43,11 +43,11 @@ _LOCAL_READONLY_TEXT = (
 )
 _ACTING_BUILTIN_TEXT = (
     "⚠️ ACTING_SUBAGENT_BLOCKED: this mutative subagent may read and "
-    "write inside its isolated write root and run shell/services "
+    "write inside its assigned write root and run shell/services "
     "there, but may not call first-party tool 'commit_reviewed'. It cannot "
     "commit the live body, run review/runtime/skills lifecycle, enable "
-    "tools, or write cognitive memory; the parent integrates the "
-    "returned patch and is the sole committer."
+    "tools, or write cognitive memory; the parent applies isolated patches or verifies "
+    "shared external files and is the sole live-body committer."
 )
 _ACTING_EXTERNAL_TEXT = (
     "⚠️ ACTING_SUBAGENT_TOOL_NOT_GRANTED: extension/MCP tool "

@@ -16,7 +16,7 @@ from datetime import datetime, timezone
 from hashlib import sha256
 from typing import Any, Dict, Iterable, List, Optional, Union
 
-from ouroboros.utils import atomic_write_json, read_json_dict, write_bytes_atomic
+from ouroboros.utils import atomic_write_json, read_json_dict, update_json_locked, write_bytes_atomic
 from ouroboros.headless import ARTIFACT_STATUS_READY, SCRATCH_MANIFEST_NAME, task_artifacts_dir
 from ouroboros.outcome_receipt_store import is_verification_receipts_path
 from ouroboros.task_results import validate_task_id
@@ -26,6 +26,25 @@ log = logging.getLogger(__name__)
 _ARTIFACT_MANIFEST = ".artifact_manifest.json"
 _ARTIFACT_VERSION_RETENTION = 5
 _ARTIFACT_VERSIONS_DIR = "artifact_versions"
+
+
+def text_source_range_projection(
+    text: str, kind: str, start_char: Any = None, end_char: Any = None,
+) -> tuple[dict[str, Any] | None, str]:
+    """Project an explicit character range while retaining complete-source identity."""
+    projection = {"schema": 1, "kind": kind, "complete_chars": len(text),
+                  "complete_sha256": sha256(text.encode("utf-8")).hexdigest()}
+    if start_char is None and end_char is None:
+        projection["range_required"] = True
+        return projection, "source_range_required"
+    if type(start_char) is not int or type(end_char) is not int:
+        return None, "source_range_invalid"
+    if start_char < 0 or end_char <= start_char or end_char > len(text):
+        return None, "source_range_invalid"
+    part = text[start_char:end_char]
+    projection.update(start_char=start_char, end_char=end_char, text=part,
+                      text_chars=len(part), text_sha256=sha256(part.encode("utf-8")).hexdigest())
+    return projection, ""
 
 # Ephemeral verification scratch (v6.52.2): the task-scoped manifest of {ABSOLUTE_path: sha256}
 # FINGERPRINTS for files the agent declared via run_command/run_script `scratch=[...]` — transient
@@ -608,12 +627,17 @@ def read_actor_source_bytes(
 ) -> bytes:
     """Resolve and verify one task-local actor source ref or raise explicitly."""
 
-    if not isinstance(ref, dict) or ref.get("kind") != "task_source":
+    legacy = isinstance(ref, dict) and ref.get("kind") in {"task_acceptance_review", "task_completion_observations"}
+    if not isinstance(ref, dict) or (ref.get("kind") != "task_source" and not legacy):
         raise ValueError("actor source ref has an unexpected kind")
     if ref.get("root") != "artifact_store":
         raise ValueError("actor source ref has an unexpected root")
     rel = pathlib.PurePosixPath(str(ref.get("path") or ""))
-    if not rel.parts or rel.parts[0] != _SOURCE_HANDLES_SUBDIR or rel.is_absolute():
+    valid_path = (
+        len(rel.parts) == 1 and rel.name not in {".", ".."} and "\\" not in str(ref.get("path") or "")
+        if legacy else bool(rel.parts and rel.parts[0] == _SOURCE_HANDLES_SUBDIR)
+    )
+    if not valid_path or rel.is_absolute():
         raise ValueError("actor source ref has an invalid path")
     base = task_artifact_dir_path(drive_root, task_id, create=False).resolve(strict=False)
     target = base.joinpath(*rel.parts)
@@ -628,7 +652,7 @@ def read_actor_source_bytes(
         raise ValueError("actor source ref escapes its task artifact root") from exc
     raw = target.read_bytes()
     try:
-        expected_size = int(ref["size"])
+        expected_size = int(ref["bytes" if legacy else "size"])
     except (KeyError, TypeError, ValueError) as exc:
         raise ValueError("actor source ref has no valid size") from exc
     if len(raw) != expected_size:
@@ -636,6 +660,22 @@ def read_actor_source_bytes(
     if sha256(raw).hexdigest() != str(ref.get("sha256") or ""):
         raise ValueError("actor source ref failed sha256 verification")
     return raw
+
+
+def read_task_result_source_bytes(
+    drive_root: Any, result: Dict[str, Any], name: str, source_path: str,
+) -> bytes:
+    """Read an exact published source ref, never a caller-selected filesystem path."""
+    review = result.get("review_projection")
+    panels = review.get("panels") if isinstance(review, dict) else []
+    refs = [row.get("applied_source_ref") for row in (panels if isinstance(panels, list) else []) if isinstance(row, dict)]
+    observations = result.get("completion_observations")
+    if isinstance(observations, dict):
+        refs.append(observations.get("source_ref"))
+    for ref in refs:
+        if isinstance(ref, dict) and ref.get("path") == source_path and pathlib.PurePosixPath(source_path).name == name:
+            return read_actor_source_bytes(drive_root, validate_task_id(result.get("task_id")), ref)
+    raise ValueError("the requested source is not published by this task result")
 
 
 def persist_exact_text_source(
@@ -990,14 +1030,7 @@ def store_task_artifact_bytes(
     else:
         write_bytes_atomic(path, data)
     record = artifact_record(path, kind=kind)
-    manifest_path = artifact_dir / _ARTIFACT_MANIFEST
-    manifest_doc = read_json_dict(manifest_path) or {}
-    manifest = manifest_doc.get("artifacts") if isinstance(manifest_doc.get("artifacts"), dict) else {}
-    manifest = {str(key): dict(value) for key, value in manifest.items() if isinstance(value, dict)}
-    manifest[safe_name] = dict(record)
-    atomic_write_json(
-        manifest_path, {"schema_version": 1, "artifacts": manifest}, trailing_newline=True,
-    )
+    _register_task_artifact_records(artifact_dir, [record])
     return {
         "root": "artifact_store",
         "path": safe_name,
@@ -1005,6 +1038,23 @@ def store_task_artifact_bytes(
         "bytes": record["size"],
         "kind": kind,
     }
+
+
+def _register_task_artifact_records(artifact_dir: pathlib.Path, records: Iterable[Dict[str, Any]]) -> None:
+    """Merge only these registrations under the existing manifest-file lock.
+
+    File copying/hashing finishes before this short metadata transaction. No
+    task-result lock is acquired here, so a caller already holding one cannot
+    invert the publication path's artifact-then-result ordering.
+    """
+    additions = {pathlib.Path(str(row.get("path") or row.get("name") or "")).name: dict(row)
+                 for row in records}
+
+    def merge(current: Dict[str, Any]) -> Dict[str, Any]:
+        previous = current.get("artifacts") if isinstance(current.get("artifacts"), dict) else {}
+        return {**current, "schema_version": 1, "artifacts": {**previous, **additions}}
+
+    update_json_locked(artifact_dir / _ARTIFACT_MANIFEST, merge)
 
 
 def _artifact_versions_dir(drive_root: pathlib.Path, task_id: str, artifact_name: str) -> pathlib.Path:
@@ -1086,8 +1136,7 @@ def copy_file_to_task_artifacts(ctx: Any, source_path: Union[pathlib.Path, str],
         dest.parent.mkdir(parents=True, exist_ok=True)
         shutil.copy2(source, dest)
     record = artifact_record(dest, kind=kind, source_path=str(source))
-    manifest[pathlib.Path(str(record.get("path") or record.get("name") or "")).name] = dict(record)
-    atomic_write_json(artifact_dir / _ARTIFACT_MANIFEST, {"schema_version": 1, "artifacts": manifest}, trailing_newline=True)
+    _register_task_artifact_records(artifact_dir, [record])
     return record
 
 
@@ -1105,9 +1154,6 @@ def copy_directory_to_task_artifacts(
         return []
     task_id = task_id_for_artifacts(ctx)
     artifact_dir = task_artifact_dir_path(pathlib.Path(getattr(ctx, "drive_root")), task_id, create=True)
-    data = read_json_dict(artifact_dir / _ARTIFACT_MANIFEST) or {}
-    manifest = data.get("artifacts") if isinstance(data.get("artifacts"), dict) else {}
-    manifest = {str(key): dict(value) for key, value in manifest.items() if isinstance(value, dict)}
     root = source.resolve(strict=False)
     if member_paths is None:
         members = sorted(p for p in source.rglob("*") if p.is_file() and not p.is_symlink())
@@ -1173,14 +1219,48 @@ def copy_directory_to_task_artifacts(
         artifact_record(ledger_path, kind=f"{kind}_manifest", source_path=str(source)),
         artifact_record(zip_path, kind=kind, source_path=str(source)),
     ]
-    for record in records:
-        manifest[pathlib.Path(str(record.get("path") or record.get("name") or "")).name] = dict(record)
-    atomic_write_json(artifact_dir / _ARTIFACT_MANIFEST, {"schema_version": 1, "artifacts": manifest}, trailing_newline=True)
+    _register_task_artifact_records(artifact_dir, records)
     return records
 
 
-def collect_task_artifact_records(drive_root: Union[pathlib.Path, str], task_id: str) -> List[Dict[str, Any]]:
-    """Return records for files already present in the task artifact store."""
+def is_task_bookkeeping_artifact(record: Any) -> bool:
+    """Registered review/completion custody is readable source, not a deliverable."""
+    return isinstance(record, dict) and record.get("kind") in {"task_acceptance_review", "task_completion_observations"}
+
+
+def project_deliverable_artifacts(result: Dict[str, Any]) -> Dict[str, Any]:
+    """Remove bookkeeping records from result views without deleting their sources.
+
+    Older in-flight replicas may already carry these records and inferred ready
+    statuses. Only that derived ready status is neutralized; real artifacts and
+    independently meaningful pending/finalizing/failure outcomes stay intact.
+    This is pure projection, including on the status-only read path.
+    """
+    projected = dict(result)
+    bundle = dict(result.get("artifact_bundle") or {}) if isinstance(result.get("artifact_bundle"), dict) else {}
+    removed = False
+    for owner in (projected, bundle):
+        records = owner.get("artifacts")
+        if isinstance(records, list):
+            filtered = [row for row in records if not is_task_bookkeeping_artifact(row)]
+            removed = removed or len(filtered) != len(records)
+            owner["artifacts"] = filtered
+    if removed and not projected.get("artifacts") and not bundle.get("artifacts"):
+        if projected.get("artifact_status") == ARTIFACT_STATUS_READY:
+            projected["artifact_status"] = "not_applicable"
+        if bundle.get("status") == ARTIFACT_STATUS_READY:
+            bundle["status"] = "not_applicable"
+        axes = projected.get("outcome_axes")
+        artifact_axis = axes.get("artifacts") if isinstance(axes, dict) else None
+        if isinstance(artifact_axis, dict) and artifact_axis.get("status") == ARTIFACT_STATUS_READY:
+            projected["outcome_axes"] = {**axes, "artifacts": {**axes["artifacts"], "status": "not_applicable"}}
+    if isinstance(result.get("artifact_bundle"), dict):
+        projected["artifact_bundle"] = bundle
+    return projected
+
+
+def collect_task_artifact_records(drive_root: Union[pathlib.Path, str], task_id: str, *, include_bookkeeping: bool = False) -> List[Dict[str, Any]]:
+    """Collect deliverables; explicit source downloads may include registered bookkeeping."""
 
     try:
         artifact_dir = task_artifact_dir_path(pathlib.Path(drive_root), validate_task_id(task_id), create=False)
@@ -1198,6 +1278,8 @@ def collect_task_artifact_records(drive_root: Union[pathlib.Path, str], task_id:
         # are NOT deliverables — never record them as produced artifacts.
         if path.name in (_ARTIFACT_MANIFEST, SCRATCH_MANIFEST_NAME):
             continue
+        if path == artifact_dir / (_ARTIFACT_MANIFEST + ".lock"):
+            continue  # an in-flight registration lock is not a deliverable
         # Verification receipts live beside artifacts for durable custody, but
         # they are an append-only authority stream, not a deliverable.  Letting
         # generic materialization register/copy this file can replace a newer
@@ -1214,9 +1296,11 @@ def collect_task_artifact_records(drive_root: Union[pathlib.Path, str], task_id:
             _ATTACHMENTS_SUBDIR, _CHAT_MEDIA_SUBDIR, _SOURCE_HANDLES_SUBDIR,
         }:
             continue
+        manifest_record = manifest.get(path.name) if path.parent == artifact_dir else None
+        if not include_bookkeeping and is_task_bookkeeping_artifact(manifest_record):
+            continue
         try:
             record = artifact_record(path)
-            manifest_record = manifest.get(path.name)
             if manifest_record:
                 record.update({
                     key: value
@@ -1234,7 +1318,7 @@ def merge_artifact_records(*groups: Iterable[Dict[str, Any]]) -> List[Dict[str, 
     order: List[str] = []
     for group in groups:
         for item in group:
-            if not isinstance(item, dict):
+            if not isinstance(item, dict) or is_task_bookkeeping_artifact(item):
                 continue
             key = str(item.get("path") or item.get("name") or "")
             if not key:
