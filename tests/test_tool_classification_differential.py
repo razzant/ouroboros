@@ -76,6 +76,8 @@ APPROVED_DELTAS: Mapping[str, Delta] = MappingProxyType({
     "SAFETY_UNAVAILABLE": Delta(True, "error", True, "unavailable", "A.18", "unavailability gets its own status name; the report bucket is unchanged"),
     "SUBAGENT_UNAVAILABLE": Delta(True, "error", True, "unavailable", "A.18", "unavailability gets its own status name; the report bucket is unchanged"),
     "EXTRACT_VIDEO_FRAMES_UNAVAILABLE": Delta(True, "error", True, "unavailable", "A.18", "unavailability gets its own status name; the report bucket is unchanged"),
+    "GH_TARGET_UNAVAILABLE": Delta(True, "error", True, "unavailable", "A.18", "unavailability gets its own status name; the report bucket is unchanged"),
+    "GIT_BRANCH_UNAVAILABLE": Delta(True, "error", True, "unavailable", "A.18", "unavailability gets its own status name; the report bucket is unchanged"),
     "GH_TIMEOUT": Delta(False, "ok", True, "timeout", "A.2", "an expired GitHub operation is a timeout, not a success"),
     "GIT_ERROR": Delta(False, "error", False, "git_error", "A.17", "the version-control refusal gets its own bucket; is_error is unchanged"),
     "INVALID_ARG": Delta(False, "ok", True, "argument_error", "A.6", "a bad pull-request argument is an error, not a success"),
