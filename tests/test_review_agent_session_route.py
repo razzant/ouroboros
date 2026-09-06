@@ -1335,3 +1335,64 @@ def test_owner_disabled_route_refusal_carries_its_typed_code(tmp_path, fake_rout
         _run_session_directly(tmp_path)
     assert excinfo.value.code == "route_disabled"
     assert not any(inst.start_requests for inst in fake_route.instances)
+
+
+@pytest.mark.parametrize("telemetry_case", [
+    "missing_file", "old_without_final_id", "malformed_yaml", "known_off_pin", "known_exact",
+])
+def test_final_route_observation_absence_is_disclosed_without_discarding_the_verdict(
+    tmp_path, monkeypatch, fake_route, telemetry_case,
+):
+    from ouroboros.reviewer_slot_config import record_reviewer_slot_executions, reviewer_slot_last_executions
+
+    monkeypatch.setattr("ouroboros.config.DATA_DIR", tmp_path / "canonical-data")
+    run_dir = tmp_path / "engine-run"
+    final = run_dir / "final"
+    final.mkdir(parents=True)
+    observed_route = "other-route" if telemetry_case == "known_off_pin" else "fake-review"
+    telemetry = {"run_id": "run-1", "final_attempt_id": "a02", "attempts": [
+        {"attempt_id": "a01", "harness_id": "earlier-route", "observed_model": "earlier-model"},
+        {"attempt_id": "a02", "harness_id": observed_route,
+         "observed_model": "fake-small", "profile_id": "observed-profile"},
+    ]}
+    if telemetry_case == "old_without_final_id":
+        telemetry.pop("final_attempt_id")
+    if telemetry_case != "missing_file":
+        raw = "bad: [" if telemetry_case == "malformed_yaml" else json.dumps(telemetry)
+        (final / "telemetry.yaml").write_text(raw, encoding="utf-8")
+    # The transport supplies only the summary; the real reader sees the file above.
+    fake_route.run_dir = None
+    fake_route.detail = _terminal_detail(json.dumps({"findings": [
+        {"item": "route", "verdict": "PASS", "severity": "advisory"},
+    ]}), conformance="passed")
+    fake_route.detail["summary"].update(
+        runDir=str(run_dir), harnesses=["fake-review"], effectiveAccess="readonly",
+        route={"harnessId": "earlier-route", "observedModel": "earlier-model", "verified": True},
+        authRoute={"profileId": "earlier-profile"},
+    )
+    slot = _agent_slot(model="fake-review=fake-small", session_target="fake-review=fake-small")
+    llm = FakeLLM()
+    result = run_review_request(_agent_request(), slots=[slot], drive_root=tmp_path, llm=llm)
+    actor = result.actors[0]
+    usage = actor["usage"]
+    deltas = usage.get("capability_delta", [])
+    unknown = telemetry_case in {"missing_file", "old_without_final_id", "malformed_yaml"}
+    expected = (["session_route_observation_unavailable"] if unknown else
+                ["session_ran_off_pinned_route"] if telemetry_case == "known_off_pin" else [])
+    assert [row["reason"] for row in deltas] == expected
+    assert actor["status"] == "ok" and result.aggregate_signal == "PASS"
+    assert usage["delegated_route"] == ("" if unknown else observed_route)
+    assert usage["resolved_model"] == ("" if unknown else "fake-small")
+    assert usage["applied_profile"] == ("" if unknown else "observed-profile")
+    assert not llm.calls
+    assert sum(len(g.start_requests) for g in fake_route.instances) == 1
+    assert not any(g.cancels for g in fake_route.instances)
+    events = [json.loads(line) for line in (tmp_path / "logs" / "events.jsonl").read_text().splitlines()]
+    disclosures = [row for row in events if row.get("type") == "review_slot_capability_delta"]
+    assert len(disclosures) == bool(expected)
+    if expected:
+        assert disclosures[0]["deltas"] == deltas
+    record_reviewer_slot_executions("scope_review", [SimpleNamespace(**actor)], {slot.slot_id: slot})
+    projection = reviewer_slot_last_executions()[slot.slot_id]
+    assert projection["capability_delta"] == deltas
+    assert projection["effective"]["model"] == usage["resolved_model"]

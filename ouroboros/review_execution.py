@@ -1345,7 +1345,14 @@ class AgentSessionReviewExecutor(ReviewSlotExecutor):
                 "reason": "schema_not_conformed_on_effective_route",
             })
         effective_routes = facts.get("effective_route_ids") or []
-        if effective_routes and set(effective_routes) != {facts["route_id"]}:
+        if not effective_routes:
+            self._deltas.append({
+                "kind": "capability_delta",
+                "requested": f"route {facts['route_id']} (pinned pool)",
+                "effective": "final-attempt route observation unavailable; pinned pool could not be verified",
+                "reason": "session_route_observation_unavailable",
+            })
+        elif set(effective_routes) != {facts["route_id"]}:
             # Belt over the pin: the request names exactly one eligible
             # harness, so the engine's receipt disagreeing is drift that must
             # surface loudly, never a quietly accepted substitute route.
