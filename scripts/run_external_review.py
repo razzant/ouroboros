@@ -1253,15 +1253,14 @@ def _pending_checkout_custody(ctx) -> dict:
     from ouroboros.tools.git import _review_custody_pending
 
     facts = {}
-    if _review_custody_pending(ctx):
-        facts["reviewers"] = _actor_records_with_surface(ctx)
+    reviewers = _actor_records_with_surface(ctx)
+    if _review_custody_pending(ctx) and (reviewers or getattr(ctx, "_review_custody_lost", False)):
+        facts["reviewers"] = reviewers
         facts["custody_lost"] = bool(getattr(ctx, "_review_custody_lost", False))
     try:
         state = _load_state_unlocked(pathlib.Path(ctx.drive_root), strict_attempt_authority=True)
-        runs = state.filter_advisory_runs(repo_key=make_repo_key(ctx.repo_dir))
-        active = [run.execution for run in runs if run.status == "pending"
-                  or run.execution.get("pending_invocation_id")
-                  or run.execution.get("operation_state") in {"in_flight", "custody_lost"}]
+        runs = state.filter_advisory_runs(repo_key=make_repo_key(pathlib.Path(ctx.repo_dir)))
+        active = [run.execution for run in runs if run.execution_pending]
         if active:
             facts["preflight"] = active
     except Exception as exc:

@@ -167,7 +167,6 @@ def _advisory_child_timeout(ctx: object) -> Optional[float]:
 def _run_advisory_native(
     prompt: str, repo_dir: pathlib.Path, ctx: ToolContext, slot, model: str,
     mandatory_read_corpus_chars: int = 0,
-    checkpoint=None,
 ):
     """The advisory as a bounded native inspection episode, rehydrated into the
     same result structure the retired SDK path produced (only the transport
@@ -223,14 +222,11 @@ def _run_advisory_native(
             int(mandatory_read_corpus_chars), request.policy["native_mandatory_read_chars"],
             native_episode_transcript_bound(request, rslot),
         )
-    from ouroboros.observability import new_call_id
-    from ouroboros.review_dispatch import ReviewPaidStamp
+    from ouroboros.delegate_custody import custody_root
 
-    operation_id = new_call_id("advisory_native") if checkpoint else f"advisory:{request.task_id or 'manual'}"
     assignment = ReviewAssignment(
-        request=request, slot=rslot, call_id=operation_id,
-        dispatch_stamp=(ReviewPaidStamp(lambda: checkpoint(operation_id=operation_id), fail_closed=True)
-                        if checkpoint else None),
+        request=request, slot=rslot, call_id=f"advisory:{request.task_id or 'manual'}",
+        custody_root=custody_root(ctx),
     )
     executor = NativeToolRoundReviewExecutor(assignment, llm=LLMClient())
     _scope = _dc_replace(
@@ -957,7 +953,7 @@ def _advisory_pre_sdk_gate(
             "ts": existing.ts,
             "items": existing.items,
             "readiness_warnings": readiness_warnings,
-            "message": "A fresh advisory run already exists for this snapshot. Proceed with commit_reviewed.",
+            "message": f"Advisory status {existing.status!r} already covers this snapshot; no new review ran. Proceed with commit_reviewed.",
         })
 
     ctx.emit_progress_fn("Running preflight pre-review (read-only critic)...")
@@ -1077,10 +1073,12 @@ def _handle_advisory_pre_review(
         execution, pending_run = pending_advisory_execution(
             ctx, commit_message, goal=goal, scope=scope, paths=paths,
             review_rebuttal=review_rebuttal,
+            skip_advisory_review=skip_advisory_pre_review,
         )
     except Exception as exc:
         return _json_response({"status": "pending", "error": str(exc),
-                               "message": "Preflight custody must be reconciled before preparing another candidate."})
+                               "failure_code": str(getattr(exc, "code", "") or ""),
+                               "message": "Preflight custody must be reconciled before preparing another candidate. Read review_status for its bound intent and execution."})
     resuming = pending_run is not None
     if resuming:
         paths = pending_run.snapshot_paths

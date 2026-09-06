@@ -42,6 +42,34 @@ def _git():
     return git
 
 
+def _review_custody_pending(ctx: ToolContext) -> bool:
+    """Keep the prepared candidate while physical review custody is unresolved."""
+    from ouroboros.review_state import _load_state_unlocked, make_repo_key
+
+    try:
+        state = _load_state_unlocked(pathlib.Path(ctx.drive_root), strict_attempt_authority=True)
+        if any(run.execution_pending for run in state.filter_advisory_runs(repo_key=make_repo_key(pathlib.Path(ctx.repo_dir)))):
+            return True
+    except Exception:
+        # A crash can occur after the durable checkpoint and before ctx meta.
+        # An unreadable record is not permission to destroy that candidate.
+        log.warning("Cannot establish review custody before candidate cleanup", exc_info=True)
+        return True
+    if bool(getattr(ctx, "_review_custody_lost", False)):
+        return True
+    triad = list(getattr(ctx, "_last_triad_raw_results", []) or [])
+    scope_raw = getattr(ctx, "_last_scope_raw_result", {}) or {}
+    scope_rows = list(scope_raw.get("raw_results") or []) if isinstance(scope_raw, dict) else []
+    if not scope_rows and isinstance(scope_raw, dict) and scope_raw:
+        scope_rows = [scope_raw]
+    return any(
+        bool(row.get("late_result_pending"))
+        or str(row.get("operation_state") or "") in {"in_flight", "custody_lost"}
+        for row in [*triad, *scope_rows]
+        if isinstance(row, dict)
+    )
+
+
 def _fingerprint_staged_diff(repo_dir: pathlib.Path) -> Dict[str, Any]:
     """Bind review to the exact commit material, not only a textual diff.
 
@@ -529,7 +557,8 @@ def _reset_commit_review_state(ctx):
     ctx._current_review_attempt_number = None
 
 
-def _reconcile_advisory_before_preparation(ctx, commit_message, *, goal, scope, paths, review_rebuttal):
+def _reconcile_advisory_before_preparation(ctx, commit_message, *, goal, scope, paths, review_rebuttal,
+                                         skip_advisory_review=False):
     """Resolve the same delegated preflight before touching its candidate."""
     from ouroboros.tools.preflight_review_run import pending_advisory_execution
 
@@ -537,6 +566,7 @@ def _reconcile_advisory_before_preparation(ctx, commit_message, *, goal, scope, 
     try:
         execution, _ = pending_advisory_execution(
             ctx, commit_message, goal=goal, scope=scope, paths=paths, review_rebuttal=review_rebuttal,
+            skip_advisory_review=skip_advisory_review, for_commit=True,
         )
         if execution.get("pending_invocation_id"):
             _git()._handle_advisory_pre_review(
@@ -545,6 +575,7 @@ def _reconcile_advisory_before_preparation(ctx, commit_message, *, goal, scope, 
             )
             remaining, _ = pending_advisory_execution(
                 ctx, commit_message, goal=goal, scope=scope, paths=paths, review_rebuttal=review_rebuttal,
+                for_commit=True,
             )
             if remaining.get("pending_invocation_id"):
                 return "⚠️ REVIEW_PENDING: the exact preflight invocation remains unresolved; no candidate preparation was performed."
@@ -882,6 +913,7 @@ def _run_non_committing_review_cycle(
         }
     preflight_pending = _git()._reconcile_advisory_before_preparation(
         ctx, commit_message, goal=goal, scope=scope, paths=paths, review_rebuttal=review_rebuttal,
+        skip_advisory_review=skip_advisory_pre_review,
     )
     if preflight_pending:
         return {"status": "blocked", "message": preflight_pending, "block_reason": "advisory_pending"}

@@ -238,7 +238,7 @@ class CommitReadinessDebtItem:
 
 @dataclass
 class AdvisoryRunRecord:
-    """Completed advisory pre-review run."""
+    """One advisory pre-review and its retained physical execution."""
 
     snapshot_hash: str
     commit_message: str
@@ -271,6 +271,17 @@ class AdvisoryRunRecord:
     model_used: str = ""
     session_id: str = ""
     duration_sec: float = 0.0
+
+    @property
+    def execution_pending(self) -> bool:
+        """Unresolved custody survives a failed response or a missing local meta update."""
+        return bool(self.status == "pending" or self.execution.get("pending_invocation_id")
+                    or self.execution.get("operation_state") in {"in_flight", "custody_lost"})
+
+    @property
+    def blocks_preflight(self) -> bool:
+        """An audited bypass releases admission, never the retained physical work."""
+        return self.execution_pending and not self.bypass_reason
 
 
 @dataclass

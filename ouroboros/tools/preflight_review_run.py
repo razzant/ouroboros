@@ -266,7 +266,8 @@ def advisory_gate_unavailable() -> bool:
     return _car().advisory_gate_unavailability_reason() is not None
 
 
-def pending_advisory_execution(ctx, commit_message, *, goal="", scope="", paths=None, review_rebuttal=""):
+def pending_advisory_execution(ctx, commit_message, *, goal="", scope="", paths=None, review_rebuttal="",
+                               skip_advisory_review=False, for_commit=False):
     """Read the existing preflight's custody before any candidate preparation.
 
     No prompt copy: delegate_custody.invocation_record owns its immutable
@@ -279,26 +280,74 @@ def pending_advisory_execution(ctx, commit_message, *, goal="", scope="", paths=
     repo_dir = pathlib.Path(ctx.repo_dir)
     intent = {"commit_message": commit_message, "goal": goal, "scope": scope,
               "review_rebuttal": review_rebuttal}
-    records = update_state(pathlib.Path(ctx.drive_root), lambda state: [
-        run for run in state.filter_advisory_runs(repo_key=make_repo_key(repo_dir))
-        if run.status == "pending" or run.execution.get("pending_invocation_id")
-        or run.execution.get("operation_state") in {"in_flight", "custody_lost"}
-    ])
+    def pending_records(state):
+        from ouroboros.delegate_custody import custody_root, invocation_record
+
+        records = []
+        for run in state.filter_advisory_runs(repo_key=make_repo_key(repo_dir)):
+            if not run.execution_pending:
+                continue
+            token = str(run.execution.get("pending_invocation_id") or "")
+            stored = invocation_record(custody_root(ctx), token) if token else None
+            if (stored and stored.get("state") == "failed_definite"
+                    and stored.get("task_id") == run.task_id
+                    and stored.get("surface") == "advisory_review"):
+                # Only the existing definite producer discharges the checkpoint.
+                # A missing row, old timestamp or missing run id proves nothing.
+                run.execution.update(pending_invocation_id="", operation_state="settled")
+                if run.status == "pending":
+                    run.status = "error"
+                continue
+            if not for_commit or run.blocks_preflight:
+                records.append(run)
+        return records
+
+    records = update_state(pathlib.Path(ctx.drive_root), pending_records)
+    # No POST/rejoin is needed to record the explicit logical bypass. Its
+    # existing writer must still persist the audit and retain these records.
+    if skip_advisory_review:
+        return {"intent": intent}, None
+    if not records:
+        return {"intent": intent}, None
+    binding = _fingerprint_staged_diff(repo_dir)
+    def binding_mismatches(run):
+        bound_intent = run.execution.get("intent")
+        return [name for name, differs in {
+            "task_id": run.task_id != str(getattr(ctx, "task_id", "") or ""),
+            "intent.fields": not isinstance(bound_intent, dict) or set(bound_intent) != set(intent),
+            **{f"intent.{key}": not isinstance(bound_intent, dict) or bound_intent.get(key) != value
+               for key, value in intent.items()},
+            "snapshot_hash": compute_snapshot_hash(repo_dir, paths=run.snapshot_paths) != run.snapshot_hash,
+            "staged_fingerprint": not binding.get("ok") or binding.get("fingerprint") != run.execution.get("fingerprint"),
+        }.items() if differs]
+
+    blocking = [run for run in records if run.blocks_preflight]
+    # An explicit standalone call may rejoin its exact released invocation.
+    # Other retained physical work is history, not admission for this request.
+    records = blocking or [run for run in records
+                           if run.execution.get("pending_invocation_id") and not binding_mismatches(run)]
     if not records:
         return {"intent": intent}, None
     run = records[0]
     execution = dict(run.execution)
-    binding = _fingerprint_staged_diff(repo_dir)
-    if (len(records) != 1 or run.task_id != str(getattr(ctx, "task_id", "") or "")
-            or execution.get("intent") != intent
-            or compute_snapshot_hash(repo_dir, paths=run.snapshot_paths) != run.snapshot_hash
-            or not binding.get("ok") or binding.get("fingerprint") != execution.get("fingerprint")):
+    mismatches = binding_mismatches(run)
+    if len(records) != 1:
+        mismatches.append("pending_records")
+    skip_hint = (" Use skip_advisory_review=true for an audited logical bypass; "
+                 "existing physical work and its costs remain retained.")
+    if mismatches:
         raise ReviewRouteUnavailable(
-            "unresolved preflight belongs to different or unverifiable candidate/intent; "
-            "no preparation or replacement review was started", code="advisory_pending_mismatch")
+            "unresolved preflight binding differs or is unavailable: " + ", ".join(mismatches)
+            + "; read review_status for the bound intent and execution. "
+            "No preparation or replacement review was started." + skip_hint, code="advisory_pending_mismatch")
+    if execution.get("pending_invocation_id") and advisory_review_route() != "agent_session":
+        raise ReviewRouteUnavailable(
+            "unresolved delegated preflight requires its agent_session delivery; the current advisory "
+            "route kind differs. Restore that delivery kind to rejoin the recorded invocation; "
+            "no replacement review was started." + skip_hint, code="advisory_pending_route_mismatch")
     if not execution.get("pending_invocation_id"):
         raise ReviewRouteUnavailable(
-            "preflight physical outcome remains unknown without recoverable delegated custody",
+            "preflight physical outcome remains unknown without recoverable delegated custody." + skip_hint,
             code="advisory_custody_lost")
     return execution, run
 
@@ -327,8 +376,8 @@ def _advisory_failure(exc, executor, retry_state=None):
     )
 
 
-def _checkpoint_advisory_execution(ctx, repo_dir, commit_message, paths, options, invocation_id="", *, operation_id=""):
-    """Bind the existing record at either route's physical dispatch boundary."""
+def _checkpoint_advisory_execution(ctx, repo_dir, commit_message, paths, options, invocation_id):
+    """Bind the existing delegated record before its provider POST."""
     execution = options["execution"]
     from ouroboros.tools.git_review_cycle import _fingerprint_staged_diff
     from ouroboros.review_execution import ReviewRouteUnavailable
@@ -337,10 +386,7 @@ def _checkpoint_advisory_execution(ctx, repo_dir, commit_message, paths, options
     if not binding.get("ok"):
         raise ReviewRouteUnavailable("preflight candidate fingerprint unavailable before dispatch", code="advisory_candidate_unavailable")
     execution.update(operation_state="in_flight", fingerprint=binding["fingerprint"])
-    if invocation_id:
-        execution.update(invocation_id=invocation_id, pending_invocation_id=invocation_id)
-    if operation_id:
-        execution["operation_id"] = operation_id
+    execution.update(invocation_id=invocation_id, pending_invocation_id=invocation_id)
     try:
         _car()._persist_preflight_record(ctx, options["snapshot_hash"], commit_message, {
             "status": "pending", "execution": execution, "paths": paths,
@@ -618,7 +664,6 @@ def _run_claude_advisory(
             result, model = _car()._run_advisory_native(
                 prompt, repo_dir, ctx, _slot, model,
                 mandatory_read_corpus_chars=_car()._mandatory_read_corpus_chars(repo_dir, review_surface),
-                **({"checkpoint": checkpoint} if options.get("snapshot_hash") else {}),
             )
 
         usage = dict(getattr(result, "usage", {}) or {})

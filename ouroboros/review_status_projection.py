@@ -13,7 +13,7 @@ from __future__ import annotations
 import pathlib
 from typing import Any, Dict
 
-from ouroboros.utils import truncate_review_artifact
+from ouroboros.utils import sanitize_tool_result_for_log, truncate_review_artifact
 
 
 def build_review_projection(
@@ -207,6 +207,17 @@ def _review_status_run_to_dict(run: Any) -> Dict[str, Any]:
     execution = getattr(run, "execution", {}) or {}
     data["failure_phase"] = str(execution.get("failure_phase") or "") or None
     data["failure_code"] = str(execution.get("failure_code") or "") or None
+    if execution:
+        data["execution"] = {key: str(execution[key]) for key in (
+            "invocation_id", "pending_invocation_id", "operation_id", "operation_state", "fingerprint",
+        ) if isinstance(execution.get(key), str)}
+        intent = execution.get("intent")
+        if isinstance(intent, dict):
+            # Exact host-authored rejoin inputs, never the private reviewer prompt
+            # or its raw answer; use the existing public secret redactor.
+            data["execution"]["intent"] = {key: sanitize_tool_result_for_log(intent[key]) for key in (
+                "commit_message", "goal", "scope", "review_rebuttal",
+            ) if isinstance(intent.get(key), str)}
     data["model_used"] = str(getattr(run, "model_used", "") or "") or None
     duration = getattr(run, "duration_sec", None)
     data["duration_sec"] = round(float(duration), 2) if duration else None

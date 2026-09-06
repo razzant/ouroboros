@@ -430,8 +430,7 @@ def build_scope_actor_record(scope_result: object, *, fallback_model_id: str = "
         "model_id": getattr(scope_result, "model_id", "") or fallback_model_id,
         "status": status,
         "error": error_text,
-        "failure_phase": str(getattr(scope_result, "failure_phase", "") or ""),
-        "failure_code": str(getattr(scope_result, "failure_code", "") or ""),
+        **{key: str(getattr(scope_result, key, "") or "") for key in ("failure_phase", "failure_code")},
         "raw_text": getattr(scope_result, "raw_text", ""),
         "prompt_chars": getattr(scope_result, "prompt_chars", 0),
         # measured | estimated_from_tokens | not_assembled — a back-computed count
@@ -735,11 +734,7 @@ def check_worktree_readiness(
     return warnings
 
 
-def _run_review_preflight_tests(
-    ctx: "Any",
-    timeout: Optional[int] = None,
-    *, force: bool = False,
-) -> Optional[str]:
+def _run_review_preflight_tests(ctx: "Any", timeout: Optional[int] = None, *, force: bool = False) -> Optional[str]:
     """Run pytest before expensive review steps unless disabled or unavailable.
 
     Timeout is owned by ``run_hermetic_pytest`` (default + ``OUROBOROS_PREFLIGHT_TIMEOUT_SEC``

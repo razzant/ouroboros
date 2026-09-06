@@ -80,23 +80,6 @@ from ouroboros.contracts.skill_payload_policy import (
 log = logging.getLogger(__name__)
 
 
-def _review_custody_pending(ctx: ToolContext) -> bool:
-    """Whether this gate still owns paid work that is not terminal."""
-    if bool(getattr(ctx, "_review_custody_lost", False)):
-        return True
-    triad = list(getattr(ctx, "_last_triad_raw_results", []) or [])
-    scope_raw = getattr(ctx, "_last_scope_raw_result", {}) or {}
-    scope_rows = list(scope_raw.get("raw_results") or []) if isinstance(scope_raw, dict) else []
-    if not scope_rows and isinstance(scope_raw, dict) and scope_raw:
-        scope_rows = [scope_raw]
-    return any(
-        bool(row.get("late_result_pending"))
-        or str(row.get("operation_state") or "") in {"in_flight", "custody_lost"}
-        for row in [*triad, *scope_rows]
-        if isinstance(row, dict)
-    )
-
-
 def _repair_managed_merge_head(ctx: ToolContext) -> None:
     """Re-establish MERGE_HEAD for an authorized managed resolver after a
     refusal's index reset, so the resolution is not stranded (same repair the
@@ -513,23 +496,21 @@ def _advisory_and_tests_gate(
     whole out of ``_run_reviewed_stage_cycle`` at the function-size gate).
     ``None`` = proceed to review."""
     decision: Dict[str, Any] = {}
-    advisory_err = None
-    if not free_replay:
+    advisory_err = _check_advisory_freshness(
+        ctx, commit_message, skip_advisory_pre_review, paths=advisory_paths,
+        review_rebuttal=review_rebuttal, decision=decision,
+    )
+    if (not free_replay and advisory_err and decision.get("refresh_required")
+            and not bool(getattr(ctx, "_advisory_reconciled", False))):
+        ctx.emit_progress_fn("Running preflight_review for the prepared candidate...")
+        _handle_advisory_pre_review(
+            ctx, commit_message, paths=advisory_paths, skip_tests=skip_tests,
+            review_rebuttal=review_rebuttal, goal=goal, scope=scope, prepared=True,
+        )
         advisory_err = _check_advisory_freshness(
-            ctx, commit_message, skip_advisory_pre_review, paths=advisory_paths,
+            ctx, commit_message, paths=advisory_paths,
             review_rebuttal=review_rebuttal, decision=decision,
         )
-        if (advisory_err and decision.get("refresh_required")
-                and not bool(getattr(ctx, "_advisory_reconciled", False))):
-            ctx.emit_progress_fn("Running preflight_review for the prepared candidate...")
-            _handle_advisory_pre_review(
-                ctx, commit_message, paths=advisory_paths, skip_tests=skip_tests,
-                review_rebuttal=review_rebuttal, goal=goal, scope=scope, prepared=True,
-            )
-            advisory_err = _check_advisory_freshness(
-                ctx, commit_message, paths=advisory_paths,
-                review_rebuttal=review_rebuttal, decision=decision,
-            )
     if advisory_err:
         if not decision.get("pending"):
             run_cmd(["git", "reset", "HEAD"], cwd=ctx.repo_dir)
@@ -1211,6 +1192,7 @@ def _repo_commit_push(ctx: ToolContext, commit_message: str,
         return overlap_err
     preflight_pending = _reconcile_advisory_before_preparation(
         ctx, commit_message, goal=goal, scope=scope, paths=paths, review_rebuttal=review_rebuttal,
+        skip_advisory_review=skip_advisory_pre_review,
     )
     if preflight_pending:
         return preflight_pending
@@ -1593,6 +1575,7 @@ from ouroboros.tools.git_review_cycle import (  # noqa: E402,F401
     _handle_revalidation_failure,
     _mark_failed_bypass_advisory_stale,
     _review_binding_precondition_error,
+    _review_custody_pending,
     _review_cycle_infra_failure,
     _run_non_committing_review_cycle,
     _reconcile_advisory_before_preparation,

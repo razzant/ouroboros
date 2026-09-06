@@ -11,7 +11,7 @@ from ouroboros.tools import git
 from tests.test_advisory_inline_freshness import candidate  # noqa: F401
 
 
-@pytest.mark.parametrize("mode", ["preflight", "wave", "exception_pending", "finished", "exception_empty"])
+@pytest.mark.parametrize("mode", ["preflight", "wave", "exception_pending", "base_exception_pending", "finished", "exception_empty"])
 def test_wrapper_retains_only_unresolved_custody(candidate, monkeypatch, tmp_path, mode):  # noqa: F811
     repo = candidate.repo_dir
     (repo / "VERSION").write_text("1.0.0\n")
@@ -39,10 +39,13 @@ def test_wrapper_retains_only_unresolved_custody(candidate, monkeypatch, tmp_pat
     monkeypatch.setattr(runner, "_remove_isolated_checkout", capture_remove)
     full_source = "complete received review\n" * 100
 
+    class Crash(BaseException):
+        pass
+
     def cycle(ctx, message, **kwargs):
         assert kwargs["skip_advisory_review"] is False
         (ctx.repo_dir / "late-untracked.txt").write_text("preserve without staging\n")
-        if mode in {"preflight", "exception_pending"}:
+        if mode in {"preflight", "exception_pending", "base_exception_pending"}:
             update_state(ctx.drive_root, lambda state: state.add_run(AdvisoryRunRecord(
                 snapshot_hash=compute_snapshot_hash(ctx.repo_dir), commit_message=message,
                 repo_key=make_repo_key(ctx.repo_dir), status="pending", ts="2026-09-06T00:00:00Z",
@@ -50,19 +53,24 @@ def test_wrapper_retains_only_unresolved_custody(candidate, monkeypatch, tmp_pat
             )))
         if mode == "wave":
             ctx._last_triad_raw_results = [{"slot_id": "s", "operation_id": "op", "operation_state": "in_flight", "late_result_pending": True}]
+        if mode == "base_exception_pending":
+            raise Crash("checkpointed before local result")
         if mode.startswith("exception"):
             raise RuntimeError("cycle interrupted")
         return {"status": "blocked", "block_reason": "preflight", "message": "recorded refusal"}
 
     monkeypatch.setattr(git, "_run_non_committing_review_cycle", cycle)
     try:
-        if mode.startswith("exception"):
+        if mode == "base_exception_pending":
+            with pytest.raises(Crash):
+                runner.main()
+        elif mode.startswith("exception"):
             with pytest.raises(RuntimeError, match="cycle interrupted"):
                 runner.main()
         else:
             assert runner.main() == 3
         _, checkout = created[0]
-        pending = mode in {"preflight", "wave", "exception_pending"}
+        pending = mode in {"preflight", "wave", "exception_pending", "base_exception_pending"}
         assert checkout.exists() == pending
         assert bool(removed) == (not pending)
         if pending:

@@ -21,6 +21,25 @@ def _seed(ctx, *, phase="format", operation_state="settled"):
     )))
 
 
+def test_status_rejoin_projection_redacts_secrets_without_mutating_the_record(candidate):  # noqa: F811
+    from ouroboros.review_state import load_state
+
+    fake_token = "ghp_" + "a" * 36
+    intent = {"commit_message": "candidate", "goal": f"Verify token {fake_token}",
+              "scope": "exact scope", "review_rebuttal": "evidence\n" * 500}
+    update_state(candidate.drive_root, lambda state: state.add_run(AdvisoryRunRecord(
+        snapshot_hash=compute_snapshot_hash(candidate.repo_dir), repo_key=make_repo_key(candidate.repo_dir),
+        commit_message="candidate", status="pending", ts="2026-09-06T00:00:00Z",
+        execution={"pending_invocation_id": "existing-invocation", "intent": intent},
+    )))
+    result = json.loads(advisory._handle_review_status(candidate))
+    projected = result["advisory_runs"][0]["execution"]
+    assert projected["pending_invocation_id"] == "existing-invocation"
+    assert projected["intent"]["review_rebuttal"] == intent["review_rebuttal"]
+    assert fake_token not in json.dumps(result) and "REDACTED" in projected["intent"]["goal"]
+    assert load_state(candidate.drive_root).advisory_runs[-1].execution["intent"] == intent
+
+
 @pytest.mark.parametrize("enforcement", ["advisory", "blocking"])
 def test_three_readiness_callers_keep_failure_status(candidate, monkeypatch, enforcement):  # noqa: F811
     monkeypatch.setenv("OUROBOROS_REVIEW_ENFORCEMENT", enforcement)
