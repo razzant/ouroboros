@@ -65,6 +65,10 @@ rules have no automated surface — review-only.
 - External workspace tasks keep governance bound to the system repository while
   contextual tools default through `ToolContext.active_repo_dir()`. Admission
   rejects overlap with the system repo/data and records a read-only preflight.
+- Physical file resolution must preserve the requested address. Normalize
+  in-root absolute paths for every resource; refuse an outside address before
+  relative-path sanitization. Keep repo-prefix and canonical artifact redirects
+  on the same resolver used by guards and handlers.
 - Project focus changes the default target, not the top-level tool surface.
   Generic VCS selects active/system explicitly; advisory, reviewed commit,
   rollback, promotion, restart, and runtime control keep their intrinsic
@@ -74,6 +78,23 @@ rules have no automated surface — review-only.
   installs remain safety-reviewed, and `sudo` is non-interactive (`sudo -n`).
 - Do not add a second scheduler for operator tooling or a generic CLI file
   manager. Use the task queue, attachments, logs, and artifact endpoints.
+- A process cwd determines relative paths, not the root task's entire write
+  authority. Reuse the resource binding for other authorized destinations;
+  preserve child write confinement and actual runtime/credential boundaries.
+  Local guard inspection excludes SSH remote payloads while retaining local
+  options and redirections; the executed argv remains literal and unchanged.
+  Remote commands can reach local files through configured SSH trust (including
+  loopback); this local inspection is not a remote-effect sandbox.
+- Do not infer credential authority from ordinary source/config directory
+  names. Restricted source reads/searches use the existing byte masker; the
+  owner credential fence covers the enumerated locations in
+  `credential_shapes.owner_credential_locations`, credential leaves and VCS
+  control directories. The exact SSH config exception does not permit key writes
+  under `.ssh`; unlisted stores such as `.cargo`, `.terraform.d` and `.kaggle`
+  are not protected by an arbitrary dotted-directory default-deny.
+- An unlaunchable sole cmd element gets an actionable argv/shell hint, never
+  automatic splitting or an implicit shell. Repo-only edit tools reject their
+  unsupported roots through their existing argument categories.
 
 Enforcement: `tests/test_headless_cli.py` (task-API admission, typed refusal
 terminality, attachment admission), `tests/test_cli_entrypoint.py` (the CLI

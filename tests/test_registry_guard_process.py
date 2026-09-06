@@ -27,7 +27,7 @@ from ouroboros.tools.tool_result import LegacyTextResultAdapter, ToolResult
 #   (which replaced ``write_target_argvs``).
 _FUNCTION_SIGNATURES = {
     "_detect_runtime_mode_elevation": "(text_lower: 'str', *, writeish: 'bool' = True) -> 'bool'",
-    "_subagent_shell_targets_secret": "(cmd_path_lower: 'str') -> 'bool'",
+    "_subagent_shell_targets_secret": "(cmd_path_lower: 'str', *, ctx: 'Any' = None, cwd: 'Any' = None) -> 'bool'",
     "_detect_mutative_toggle_self_change": "(text_lower: 'str', *, writeish: 'bool' = True) -> 'bool'",
     "_detect_evolution_owner_control_self_change": "(text_lower: 'str', *, writeish: 'bool' = True) -> 'bool'",
     "_detect_context_mode_self_lowering": "(text_lower: 'str', *, writeish: 'bool' = True) -> 'bool'",
@@ -62,7 +62,6 @@ _REGISTRY_GUARD_SIGNATURES = {
 }
 
 _CONSTANT_CARDINALITIES = {
-    "_SUBAGENT_SHELL_SECRET_MARKERS": 18,
     "_READ_ONLY_INSPECTION_COMMANDS": 41,
     "_COMMAND_HEAD_WRAPPERS": 11,
     "_SEARCH_TOOL_EXEC_OPTIONS": 4,
@@ -677,7 +676,7 @@ def test_process_guard_denials_preserve_exact_text(tmp_path, monkeypatch):
     )
 
     stub.acting = True
-    secret = check("cat data/settings.json")
+    secret = check("cat .env")
     assert secret.code == "SUBAGENT_SECRET_READ_BLOCKED"
     assert secret.text == (
         "⚠️ SUBAGENT_SECRET_READ_BLOCKED: subagents may not read Ouroboros secrets, "
@@ -796,8 +795,8 @@ def test_process_guard_denials_preserve_exact_text(tmp_path, monkeypatch):
     light_data = check("echo ok", "light")
     assert light_data.code == "LIGHT_MODE_BLOCKED"
     assert light_data.text == (
-        "⚠️ LIGHT_MODE_BLOCKED: runtime_mode=light blocks process commands that write under "
-        "runtime_data paths outside this task's own roots. This task's real roots are: "
+        "⚠️ LIGHT_MODE_BLOCKED: runtime_mode=light blocks this command's "
+        "access to runtime_data outside the permitted task roots. This task's real roots are: "
         f"artifact_store={artifact_dir}, task_drive={task_drive} — staged attachments live "
         f"under {artifact_dir / 'attachments'}. Use those absolute paths in scripts, or "
         "root=artifact_store / root=task_drive / root=user_files in file tools. Blocked paths: "

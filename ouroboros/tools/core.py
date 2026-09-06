@@ -983,7 +983,7 @@ def _code_search(ctx: ToolContext, query: str, path: str = ".",
         # home surfaces file CONTENT in the match lines, so raw credential
         # bytes must be masked here too — on BOTH the rg path and the Python
         # fallback. Names/paths stay; values become ***.
-        if normalized != "user_files":
+        if normalized != "user_files" and not subagent_readonly:
             return result_text
         masked_text, masked = mask_secret_bytes(result_text)
         if masked:

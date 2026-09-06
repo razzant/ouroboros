@@ -291,8 +291,15 @@ def _repo_read(
             code="LEGACY_WARNING",
             text=f"⚠️ NOT_FOUND: file does not exist: {target}",
         ))
-    return _render_line_slice(display_path or path, content, max_lines=max_lines, start_line=start_line,
-                              start_char=start_char, extent=extent)
+    rendered = _render_line_slice(display_path or path, content, max_lines=max_lines, start_line=start_line,
+                                  start_char=start_char, extent=extent)
+    if is_restricted_subagent_profile(ctx):
+        from ouroboros.secret_masking import mask_secret_bytes
+
+        rendered, count = mask_secret_bytes(rendered)
+        if count:
+            rendered += f"\n⚠️ SECRET_BYTES_MASKED: {count} secret-shaped span(s) replaced with ***."
+    return rendered
 
 
 def _repo_list(

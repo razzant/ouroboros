@@ -161,9 +161,8 @@ def test_query_code_subagent_name_shape_is_not_authorization(tmp_path):
     """#447 A1 conversion: this test used to pin the REFUSAL (an ordinary source
     file named secret.py was invisible to children). The positive contract is
     pinned instead: a credential-shaped NAME on an ordinary source file at an
-    allowed location is readable/queryable by children (the suffix carve);
-    only the conventional credential LOCATION (an auth/ directory) stays
-    denied, and no code-intel cache is written for a restricted child."""
+    allowed location is readable/queryable by children; auth directories also
+    contain ordinary source, and no code-intel cache is written for a child."""
     from ouroboros.contracts.task_constraint import TaskConstraint
     from ouroboros.tool_capabilities import LOCAL_READONLY_SUBAGENT_MODE
 
@@ -181,6 +180,6 @@ def test_query_code_subagent_name_shape_is_not_authorization(tmp_path):
     result = _query_code(ctx, op="structural", query="FunctionDef", path="pkg")
     assert "pkg/secret.py" in result  # the NAME alone does not hide the file
     located = _query_code(ctx, op="structural", query="FunctionDef", path="auth")
-    assert "auth/service.py" not in located  # the conventional LOCATION still does
+    assert "auth/service.py" in located  # a directory name is not credential authority
     cache_files = list((tmp_path / "data" / "state" / "code_intel").glob("*/inventory.json"))
     assert cache_files == []

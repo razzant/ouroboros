@@ -919,12 +919,12 @@ def _external_runtime_protected_paths(
     # project .env) stays the task's own — and a non-path token like
     # "os.environ" can never spuriously match.
     try:
-        _home = pathlib.Path.home()
-        for _rel in (".ssh", ".aws", ".gnupg", ".netrc", ".pgpass", ".config/gcloud",
-                     ".docker/config.json", ".kube/config", ".npmrc", "file1.txt"):
-            protected_values.append(_home / _rel)
+        from ouroboros.credential_shapes import owner_credential_locations
+
+        owner_paths, owner_configs = owner_credential_locations(pathlib.Path.home())
+        protected_values.extend(owner_paths)
     except Exception:
-        pass
+        owner_configs = []
     def _text_forms(value: Any) -> list:
         # Both the as-given and the symlink-resolved form, so a command using
         # /var/... matches a root resolved to /private/var/... (macOS) and vice
@@ -959,8 +959,8 @@ def _external_runtime_protected_paths(
         rp = _resolved(v)
         if rp is not None and rp not in protected_paths:
             protected_paths.append(rp)
-    allowed_texts: list = []
-    allowed_paths: list = []
+    allowed_texts = [text for path in owner_configs for text in _text_forms(path)]
+    allowed_paths: list = []  # owner_configs are exact files, not allowed subtrees
     task_id = task_id_for_artifacts(self._ctx)
     for data_root in (getattr(self._ctx, "drive_root", None), meta.get("drive_root"), meta.get("budget_drive_root")):
         if not data_root:
@@ -1061,6 +1061,8 @@ def _external_shell_runtime_or_secret_block(
             resolved = p.resolve(strict=False) if p.is_absolute() else (work_dir / p).resolve(strict=False)
         except Exception:
             continue
+        if str(resolved).replace("\\", "/").lower() in allowed_texts:
+            continue
         if any(_within(resolved, ap) for ap in allowed_paths):
             continue
         if any(_within(resolved, pp) for pp in protected_paths):
@@ -1140,7 +1142,7 @@ def _workspace_shell_write_block(
     acting_subagent: bool,
     binding: Any,
 ) -> ToolResult | None:
-    """Keep workspace writes inside the selected target plus task custody roots."""
+    """Authorize root writes by resource; keep children inside their write surface."""
 
     items = _registry()._binding_items(binding)
     if not items:
@@ -1257,8 +1259,9 @@ def _workspace_shell_write_block(
             text=direct_target_block,
         )
 
-    # Acting subagents must write ONLY inside their isolated surface, so pro
-    # mode does NOT grant them the outside-workspace absolute-path passthrough.
+    allowed_write_roots = [*allowed_relative_roots, *allowed_data_roots]
+    # The root's existing user_files authority is independent of cwd.
+    # Acting children retain their isolated write surface in every mode.
     pro_workspace_passthrough = (
         str(runtime_mode or "").strip().lower() == "pro" and not acting_subagent
     )
@@ -1322,6 +1325,16 @@ def _workspace_shell_write_block(
         ):
             candidates.append(token_text)
         for candidate in candidates:
+            root_write_allowed = pro_workspace_passthrough
+            if is_write and not acting_subagent and not root_write_allowed:
+                try:
+                    _registry().build_resolved_resource_binding(
+                        self._ctx, root="user_files", operation="write",
+                        path=str((candidate_cwd / pathlib.Path(candidate)).resolve(strict=False)),
+                    )
+                    root_write_allowed = True
+                except (OSError, ValueError, RuntimeError):
+                    pass
             if candidate == "/dev/null":
                 continue
             if _registry().is_absolute_path_text(candidate):
@@ -1333,9 +1346,7 @@ def _workspace_shell_write_block(
                         if deliverables_decision:
                             continue
                         return deliverables_block
-                    if any(mapped_executor.is_relative_to(root) for root in allowed_relative_roots):
-                        continue
-                    if any(mapped_executor.is_relative_to(root) for root in allowed_data_roots):
+                    if any(mapped_executor.is_relative_to(root) for root in allowed_write_roots):
                         continue
                     for protected_path in protected_paths:
                         try:
@@ -1346,7 +1357,7 @@ def _workspace_shell_write_block(
                 if _executor_backend_candidate_allowed(
                     self._ctx,
                     candidate,
-                    [*allowed_relative_roots, *allowed_data_roots],
+                    allowed_write_roots,
                 ):
                     continue
                 windows_drive_path = bool(re.match(r"^[A-Za-z]:[\\/]", candidate))
@@ -1373,9 +1384,7 @@ def _workspace_shell_write_block(
                         if deliverables_decision:
                             continue
                         return deliverables_block
-                    if any(resolved.is_relative_to(root) for root in allowed_relative_roots):
-                        continue
-                    if any(resolved.is_relative_to(root) for root in allowed_data_roots):
+                    if any(resolved.is_relative_to(root) for root in allowed_write_roots):
                         continue
                     for protected_path in protected_paths:
                         try:
@@ -1383,7 +1392,7 @@ def _workspace_shell_write_block(
                             return _workspace_write_block_runtime_result(resolved, candidate)
                         except Exception:
                             pass
-                    if is_write and not pro_workspace_passthrough:
+                    if is_write and not root_write_allowed:
                         return _workspace_write_block_outside_root_result(resolved, work_dir, candidate)
                     continue
                 deliverables_decision = decide_deliverables(pathlib.Path(candidate))
@@ -1391,14 +1400,12 @@ def _workspace_shell_write_block(
                     if deliverables_decision:
                         continue
                     return deliverables_block
-                if any(_registry().path_text_is_inside(candidate, root) for root in allowed_relative_roots):
-                    continue
-                if any(_registry().path_text_is_inside(candidate, root) for root in allowed_data_roots):
+                if any(_registry().path_text_is_inside(candidate, root) for root in allowed_write_roots):
                     continue
                 for protected_path in protected_paths:
                     if _registry().path_text_is_inside(candidate, protected_path):
                         return _workspace_write_block_runtime_result(candidate)
-                if is_write and not pro_workspace_passthrough:
+                if is_write and not root_write_allowed:
                     return _workspace_write_block_outside_root_result(candidate, work_dir)
                 continue
             resolved = (candidate_cwd / pathlib.Path(candidate)).resolve(strict=False)
@@ -1412,9 +1419,7 @@ def _workspace_shell_write_block(
                 if deliverables_decision:
                     continue
                 return deliverables_block
-            if any(resolved.is_relative_to(root) for root in allowed_relative_roots):
-                continue
-            if any(resolved.is_relative_to(root) for root in allowed_data_roots):
+            if any(resolved.is_relative_to(root) for root in allowed_write_roots):
                 continue
             for protected_path in protected_paths:
                 try:
@@ -1422,7 +1427,7 @@ def _workspace_shell_write_block(
                     return _workspace_write_block_runtime_result(resolved, candidate)
                 except Exception:
                     pass
-            if is_write and not pro_workspace_passthrough:
+            if is_write and not root_write_allowed:
                 return _workspace_write_block_outside_root_result(resolved, work_dir, candidate)
     return None
 

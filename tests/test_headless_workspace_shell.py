@@ -12,6 +12,7 @@ import sys
 
 import pytest
 
+from ouroboros.contracts.task_constraint import TaskConstraint
 from ouroboros.tools.core_file_tools import _repo_read
 from ouroboros.tools.registry import ToolContext, ToolRegistry
 from ouroboros.workspace_preflight import _infer_tools_from_manifests
@@ -114,9 +115,10 @@ def test_workspace_run_shell_cwd_allows_scratch_and_explicit_system(tmp_path, mo
     assert "WORKSPACE_SHELL_BLOCKED" in outside_write
     embedded_outside_write = registry.execute(
         "run_command",
-        {"cmd": ["python", "-c", "open('/tmp/ouroboros-outside.txt','w').write('x')"]},
+        {"cmd": ["python", "-c", f"open({str(outside / 'result.txt')!r},'w').write('x')"]},
     )
-    assert "WORKSPACE_SHELL_BLOCKED" in embedded_outside_write
+    assert "WORKSPACE_SHELL_BLOCKED" not in embedded_outside_write
+    assert (outside / "result.txt").read_text() == "x"
 
 
 def test_workspace_shell_safe_stdio_redirects_are_not_write_like(tmp_path, monkeypatch):
@@ -140,7 +142,8 @@ def test_workspace_shell_safe_stdio_redirects_are_not_write_like(tmp_path, monke
     assert "WORKSPACE_SHELL_BLOCKED" not in stderr_sink, stderr_sink
     assert "WORKSPACE_SHELL_BLOCKED" not in fd_dup, fd_dup
     assert "WORKSPACE_SHELL_BLOCKED" not in fd_close, fd_close
-    assert "WORKSPACE_SHELL_BLOCKED" in real_redirect
+    assert "WORKSPACE_SHELL_BLOCKED" not in real_redirect
+    assert not (outside / "out.txt").exists()  # direct argv never executes redirection
 
 
 def test_workspace_shell_blocks_windows_absolute_redirects_before_shell_execution(tmp_path, monkeypatch):
@@ -152,6 +155,7 @@ def test_workspace_shell_blocks_windows_absolute_redirects_before_shell_executio
         path.mkdir()
     ctx = ToolContext(repo_dir=system_repo, drive_root=data, workspace_root=workspace, workspace_mode="external")
     registry = ToolRegistry(repo_dir=system_repo, drive_root=data)
+    ctx.task_constraint = TaskConstraint(mode="acting_subagent", surface="external_workspace", write_root=str(workspace))
     registry.set_context(ctx)
 
     drive_redirect = registry.execute("run_command", {"cmd": r"echo x > C:\ouroboros-outside\out.txt"})
@@ -207,6 +211,7 @@ def test_workspace_shell_blocks_nested_symlink_escape_absolute_path(tmp_path, mo
         pytest.skip(f"symlink unavailable on this platform: {exc}")
     ctx = ToolContext(repo_dir=system_repo, drive_root=data, workspace_root=workspace, workspace_mode="external")
     registry = ToolRegistry(repo_dir=system_repo, drive_root=data)
+    ctx.task_constraint = TaskConstraint(mode="acting_subagent", surface="external_workspace", write_root=str(workspace))
     registry.set_context(ctx)
 
     result = registry.execute("run_command", {"cmd": f"touch {outlink / 'escaped.txt'}"})
@@ -468,7 +473,7 @@ def test_workspace_shell_sudo_and_pro_passthrough_policy(tmp_path):
     # mention, not an invocation (#447 A7 argv-positional gh policy).
     assert _shell_guard_text(registry, {"cmd": ["sh", "-c", "gh\nrepo\ncreate x"]}, "pro") is None
     outside_write = {"cmd": ["python", "-c", "open('/tmp/ouroboros-pro.txt','w').write('x')"]}
-    assert "WORKSPACE_SHELL_BLOCKED" in _shell_guard_text(registry, outside_write, "advanced")
+    assert _shell_guard_text(registry, outside_write, "advanced") is None
     assert _shell_guard_text(registry, outside_write, "pro") is None
 
 

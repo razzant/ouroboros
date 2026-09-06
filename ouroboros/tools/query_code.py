@@ -464,7 +464,9 @@ def _query_code(
     def _mask_user_files_rows(text: str) -> str:
         # Same egress seam as read_file/search (#447 В23): query_code snippets
         # over the owner's home must not carry raw credential bytes.
-        if normalized_root != "user_files":
+        from ouroboros.tools.core_secret_paths import is_restricted_subagent_profile
+
+        if normalized_root != "user_files" and not is_restricted_subagent_profile(ctx):
             return text
         from ouroboros.secret_masking import mask_secret_bytes
 

@@ -3,9 +3,9 @@
 Which locations a read-only / acting / constraint-less delegated child may NOT
 read: owner secrets and control state under the data root, credential-shaped
 files in the repository, and the listing-side redaction that hides such
-entries. Extracted from ``core_file_tools`` so the child contract (pinned
-byte-for-byte by ``tests/test_credential_shapes.py``) has one owner; the
-``tools/core`` facade keeps every historical import path.
+entries. The child contract has one owner across read/list/search/query;
+ordinary source directory names do not identify credential stores. The
+``tools/core`` facade keeps the shared import surface.
 """
 
 from __future__ import annotations
@@ -68,25 +68,22 @@ def _is_subagent_secret_data_path(norm: str) -> bool:
 
 
 def _is_subagent_secret_repo_path(norm: str) -> bool:
+    """Repo source names do not confer owner authority or identify a secret store."""
     text = str(norm or "").replace("\\", "/").strip()
-    while text.startswith("./"):
-        text = text[2:]
-    parts = [part.lower() for part in text.split("/") if part and part != "."]
-    if ".git" in parts or any(part in {"auth", "credentials", "secrets", "tokens"} for part in parts):
+    parts = pathlib.PurePosixPath(text).parts
+    if ".git" in {part.lower() for part in parts}:
         return True
-    if not parts:
-        return False
-    name = parts[-1]
-    if name in _SUBAGENT_SECRET_FILE_NAMES or name == "settings.tmp":
+    name = pathlib.PurePosixPath(text).name.lower()
+    if name in (_SUBAGENT_SECRET_FILE_NAMES - {"settings.json", "settings.json.lock"}):
         return True
+    # Match the live dotenv forms, not an ordinary example/template payload.
     if name.startswith(".env") or name.endswith(".env") or ".env." in name:
-        return True
+        return not name.endswith((".example", ".sample", ".template", ".dist"))
     if name.endswith(CREDENTIAL_FILE_SUFFIXES):
         return True
-    if CREDENTIAL_NAME_RE.search(name):
-        suffix = pathlib.PurePosixPath(name).suffix.lower()
-        return suffix in {"", ".json", ".env", ".key", ".pem", ".p12", ".pfx", ".toml", ".yaml", ".yml", ".ini", ".cfg", ".conf"}
-    return False
+    # Credential records remain private; an arbitrary source/config suffix or
+    # a directory named auth/tokens is not a credential location.
+    return bool(CREDENTIAL_NAME_RE.search(name)) and pathlib.PurePosixPath(name).suffix in {"", ".json", ".env"}
 
 
 def _is_subagent_secret_repo_target(target: pathlib.Path, repo_root: pathlib.Path) -> bool:

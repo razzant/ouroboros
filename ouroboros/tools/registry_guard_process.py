@@ -8,8 +8,10 @@ monkeypatch targets keep working unchanged.
 
 from __future__ import annotations
 
+import ast
 import hashlib
 import pathlib
+import re
 import subprocess
 
 from ouroboros.contracts.skill_payload_policy import SKILL_OWNER_STATE_STEMS
@@ -52,28 +54,96 @@ def _detect_runtime_mode_elevation(text_lower: str, *, writeish: bool = True) ->
     return _registry()._owner_control_mention_blocks(text_lower, detected, writeish)
 
 
-_SUBAGENT_SHELL_SECRET_MARKERS = (
-    # Ouroboros owner secrets/control state. The relative form (no leading slash)
-    # closes the interpreter-string bypass (CW4, v6.34.0): the whole-command
-    # substring scan already catches "/data/settings.json" and "../../data/..",
-    # but a bare "data/settings.json" (e.g. python -c "open('data/settings.json')"
-    # from a workspace cwd) needs the slash-less marker too.
-    "/data/settings.json", "data/settings.json", "ouroboros/data/settings", "file1.txt",
-    # Universal credential/secret/control files (relative or absolute).
-    # ouroboros-update-tx.json is the managed-update tx marker (.git/…): owner
-    # control state, mirrored on .git/config. Subagent shell only — the
-    # authorized resolver is the MAIN agent and the supervisor/host writers go
-    # through supervisor.update_merge, so neither is affected (synthesis F3).
-    ".env", ".git/config", ".git/credentials", "ouroboros-update-tx.json",
-    "credentials.json", "tokens.json",
-    "/.ssh/", ".ssh/", "id_rsa", "id_ed25519", ".netrc", ".npmrc", ".pgpass", ".aws/",
-)
+def _subagent_shell_targets_secret(cmd_path_lower: str, *, ctx: Any = None, cwd: Any = None) -> bool:
+    """Inspect path operands/literals, never substrings of code such as os.environ.
 
+    Runtime/control locations are physical; the same repo-file predicate as
+    read_file protects credential leaves without hiding auth/tokens source dirs.
+    This is a best-effort argv inspection, not a sandbox for computed paths.
+    """
+    from ouroboros.credential_shapes import owner_credential_locations
+    from ouroboros.shell_parse import (
+        EMBEDDED_WINDOWS_ABSOLUTE_PATH_RE,
+        collect_leading_env, embedded_absolute_path_tokens, env_chdir_operand,
+        interpreter_reads_program_from_stdin, sequential_effective_cwds,
+        shell_command_string, shell_segment_rows,
+    )
+    from ouroboros.tools.core_secret_paths import _is_subagent_secret_repo_path, _is_subagent_secret_data_path
+    from ouroboros.tools.shell_guards import (
+        _MAX_INLINE_RECURSION, _SHELL_WRAPPER_HEADS, _expand_known_runtime_roots,
+    )
+    from ouroboros.tools.write_shape import python_body_ast
 
-def _subagent_shell_targets_secret(cmd_path_lower: str) -> bool:
-    """Deterministic guard: a shell command referencing Ouroboros secrets/credentials
-    or owner-control state (settings.json, ssh keys, token/credential files)."""
-    return any(marker in cmd_path_lower for marker in _SUBAGENT_SHELL_SECRET_MARKERS)
+    home = pathlib.Path.home()
+    protected, allowed = owner_credential_locations(home)
+    data_roots = []
+    if ctx is not None:
+        metadata = getattr(ctx, "task_metadata", {}) or {}
+        for root in (getattr(ctx, "drive_root", None), metadata.get("budget_drive_root")):
+            if root:
+                data_roots.append(pathlib.Path(root).resolve(strict=False))
+    drive = data_roots[0] if data_roots else home
+
+    def inspect(command: Any, work_dir: pathlib.Path, depth: int = 0) -> bool:
+        segments = shell_segment_rows(command)
+        rows = [(collect_leading_env(segment)[1], [], (), False) for segment, _, _ in segments]
+        # Expand only the inspection view; the executor retains the original argv.
+        cwd_rows = [([_expand_known_runtime_roots(str(token), drive, home) for token in argv], [], (), False)
+                    for argv, _, _, _ in rows]
+        cwds = sequential_effective_cwds(cwd_rows, work_dir)
+        for (segment, _, heredocs), (argv, _, _, _), row_cwd in zip(segments, rows, cwds):
+            if not argv:
+                continue
+            wrapper_cwd = env_chdir_operand(segment)
+            if wrapper_cwd:
+                wrapper_cwd = _expand_known_runtime_roots(wrapper_cwd, drive, home)
+                row_cwd = (row_cwd / pathlib.Path(wrapper_cwd).expanduser()).resolve(strict=False)
+            head = pathlib.PurePath(argv[0]).name.lower().removesuffix(".exe")
+            bodies = []
+            nested = []
+            if head in _SHELL_WRAPPER_HEADS and depth < _MAX_INLINE_RECURSION:
+                body = shell_command_string(argv)
+                nested = [body] if body else list(heredocs) if interpreter_reads_program_from_stdin(argv) else []
+                if nested:
+                    if any(inspect(body, row_cwd, depth + 1) for body in nested):
+                        return True
+                    bodies = nested  # the wrapper body is code; outer redirects still count
+            bodies = bodies or _registry().interpreter_inline_code(argv)
+            if not bodies and interpreter_reads_program_from_stdin(argv):
+                bodies = list(heredocs)
+            paths = [str(token) for token in argv[1:] if token not in bodies and not str(token).startswith("-")]
+            # A wrapper body was already inspected under its own sequential
+            # cwd. Re-reading its literals here would assign the outer cwd.
+            for body in (() if nested else bodies):
+                tree = python_body_ast(body)
+                if tree is not None:
+                    paths.extend(node.value for node in ast.walk(tree) if isinstance(node, ast.Constant) and isinstance(node.value, str))
+                else:
+                    paths.extend(value for _quote, value in re.findall(r"(['\"])(.*?)\1", body))
+            expanded = _expand_known_runtime_roots(" ".join(argv), drive, home)
+            paths.extend(embedded_absolute_path_tokens(expanded))
+            paths.extend(EMBEDDED_WINDOWS_ABSOLUTE_PATH_RE.findall(expanded))
+            for text in paths:
+                try:
+                    path = pathlib.Path(_expand_known_runtime_roots(text, drive, home)).expanduser()
+                    target = (row_cwd / path).resolve(strict=False)
+                    # Bare search terms and string data are not file operands.
+                    # A separator, suffix or existing entry supplies path shape.
+                    plausible = "/" in text or "\\" in text or bool(path.suffix) or text.startswith(".") or target.exists()
+                except (OSError, ValueError, RuntimeError):
+                    continue
+                if not plausible:
+                    continue
+                if _is_subagent_secret_repo_path(text):
+                    return True
+                if target not in allowed and any(target.is_relative_to(path.resolve(strict=False)) for path in protected):
+                    return True
+                for root in data_roots:
+                    if target.is_relative_to(root) and _is_subagent_secret_data_path(target.relative_to(root).as_posix()):
+                        return True
+        return False
+
+    return inspect(cmd_path_lower, pathlib.Path(cwd or ".").resolve(strict=False))
 
 
 def _detect_mutative_toggle_self_change(text_lower: str, *, writeish: bool = True) -> bool:
@@ -480,7 +550,9 @@ def _run_shell_safety_check(
     self, args: Dict[str, Any], runtime_mode: str, binding: Any = None,
 ) -> ToolResult | None:
     """Pre-execution run_command filter; returns a native denial or ``None``."""
-    raw_cmd = args.get("cmd", args.get("command", ""))
+    from ouroboros.shell_parse import local_shell_subject
+
+    raw_cmd = local_shell_subject(args.get("cmd", args.get("command", "")))
     if binding is None:
         operation = (
             "service"
@@ -524,7 +596,8 @@ def _run_shell_safety_check(
     while "//" in cmd_path_lower: cmd_path_lower = cmd_path_lower.replace("//", "/")
     # Subagents must not read owner secrets/credentials/control state via shell
     # (read_file already denies these). read_file is the gated inspection path.
-    if (acting_subagent or self._is_local_readonly_subagent()) and _subagent_shell_targets_secret(cmd_path_lower):
+    if (acting_subagent or self._is_local_readonly_subagent()) and _subagent_shell_targets_secret(
+            raw_cmd, ctx=self._ctx, cwd=getattr(binding, "target_path", None)):
         return ToolResult(
             status="blocked",
             code="SUBAGENT_SECRET_READ_BLOCKED",
@@ -711,17 +784,17 @@ def _run_shell_safety_check(
                 drive_root=pathlib.Path(self._ctx.drive_root),
                 work_dir=pathlib.Path(work_dir),
                 allowed_roots=allowed_runtime_roots,
+                target_rows=target_rows,
             )
             if runtime_data_targets:
-                action = "write under" if writeish else "write-indicating commands that mention"
                 # Name the REAL task roots: a mis-guessed absolute path used to
                 # produce this block with no way to self-correct (v6.54.3).
                 return ToolResult(
                     status="blocked",
                     code="LIGHT_MODE_BLOCKED",
                     text=(
-                        "⚠️ LIGHT_MODE_BLOCKED: runtime_mode=light blocks process commands "
-                        f"that {action} runtime_data paths outside this task's own roots. "
+                        "⚠️ LIGHT_MODE_BLOCKED: runtime_mode=light blocks this command's "
+                        "access to runtime_data outside the permitted task roots. "
                         f"This task's real roots are: artifact_store={own_artifact_dir}, "
                         f"task_drive={own_task_drive} — staged attachments live under "
                         f"{own_artifact_dir / 'attachments'}. Use those absolute paths in scripts, "
