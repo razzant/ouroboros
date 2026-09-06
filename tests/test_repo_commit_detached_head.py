@@ -3,7 +3,7 @@
 fix_verification.sh checks the pure-git LOGIC; this exercises the real ouroboros.tools.git code:
 on a detached HEAD it must issue `git checkout -B ctx.branch_dev HEAD` (preserve the in-flight
 commit) and NEVER the plain `git checkout ctx.branch_dev` that orphans it, and flow
-came_from_detached_checkout=True into the stage cycle; on a normal branch the path is unchanged.
+came_from_detached_checkout=True into the stage cycle; a normal branch uses a verified local ref.
 """
 from __future__ import annotations
 
@@ -72,10 +72,10 @@ def test_detached_head_force_moves_with_B_and_never_orphans(tmp_path):
         "the detached-reconcile flag must flow into the stage cycle (for the GIT_LOST diagnostic)"
 
 
-def test_on_branch_uses_plain_checkout_no_force_move(tmp_path):
+def test_on_branch_uses_unambiguous_checkout_no_force_move(tmp_path):
     checkout_cmds, stage_kwargs = _drive_commit(tmp_path, head_branch="ouroboros")  # on-branch
-    assert "git checkout ouroboros" in checkout_cmds, \
-        f"on-branch must use the plain checkout (byte-identical to pre-fix); got {checkout_cmds}"
+    assert "git checkout --no-guess ouroboros --" in checkout_cmds, \
+        f"on-branch must select the local branch without path or remote guessing; got {checkout_cmds}"
     assert not any("-B" in c for c in checkout_cmds), \
         f"on-branch must NOT force-move; got {checkout_cmds}"
     assert not stage_kwargs.get("came_from_detached_checkout"), \

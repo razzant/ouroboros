@@ -136,6 +136,7 @@ def test_registry_hides_and_blocks_disabled_tools(tmp_path, monkeypatch):
 
 
 def test_registry_hides_missing_credential_tools(tmp_path, monkeypatch):
+    monkeypatch.setattr("ouroboros.tools.github.github_cli_configured", lambda: False)
     monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False)
     monkeypatch.delenv("GITHUB_TOKEN", raising=False)
     monkeypatch.delenv("OPENROUTER_API_KEY", raising=False)

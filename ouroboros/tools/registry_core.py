@@ -170,8 +170,19 @@ def _presence_binding_allowed(ctx: Any, binding: Any) -> bool:
 
 def _presence_bound_args(ctx: Any, name: str, args: Any) -> tuple[dict[str, Any], str]:
     try:
-        from ouroboros.presence_authority import apply_presence_argument_bindings
+        from ouroboros.presence_authority import apply_presence_argument_bindings, presence_ceiling_from_context
 
+        ceiling = presence_ceiling_from_context(ctx)
+        if ceiling is not None and dict(args or {}).get("repo"):
+            from ouroboros.tools.github import get_tools as github_tools
+
+            if name in {entry.name for entry in github_tools()}:
+                grant = next((item for item in ceiling.tool_grants if item.name == name), None)
+                if grant is None or not any(binding.argument_path == ("repo",) for binding in grant.bindings):
+                    return {}, (
+                        "⚠️ PRESENCE_ARGUMENT_BINDING_BLOCKED: an explicit GitHub repository "
+                        "requires the presence's host-selected repo argument binding."
+                    )
         bound = apply_presence_argument_bindings(ctx, name, dict(args or {}))
         if not _presence_tool_allowed(ctx, name):
             return {}, (

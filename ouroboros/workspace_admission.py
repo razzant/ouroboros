@@ -186,8 +186,11 @@ def room_chat_lens_dir(drive_root: Any, project_id: str) -> tuple[str, str]:
 
         project = get_project(drive_root, pid) or {}
         raw = str(project.get("working_dir") or "").strip()
-    except Exception:
-        return "", ""
+    except Exception as exc:
+        return "", (
+            f"project {pid!r} registry entry is unreadable ({type(exc).__name__}: {exc}) — "
+            "cannot determine the room's repository"
+        )
     if not raw:
         return "", ""
     try:
