@@ -316,11 +316,44 @@ def build_completion_observations(drive_root: Any, task: Dict[str, Any], trace: 
             task.get("budget_drive_root") or drive_root, str(task.get("id") or ""), f"completion-{hashlib.sha256(raw).hexdigest()}.json",
             raw, kind="task_completion_observations",
         )
+        projection["source_ref"]["reader"] = {
+            "tool": "get_task_result",
+            "arguments": {"task_id": str(task.get("id") or ""), "include_completion_source": True},
+        }
         projection["source_status"] = "available"
     except (OSError, ValueError, TimeoutError):
         projection["source_status"] = "unavailable"
         log.warning("Completion observations full source unavailable", exc_info=True)
     return projection
+
+
+def completion_source_projection(
+    drive_root: Any, task_id: str, result: Dict[str, Any], start_char: Any = None, end_char: Any = None,
+) -> Dict[str, Any]:
+    """Read the selected task's complete stored observations through its canonical root."""
+    from ouroboros.artifacts import task_artifact_dir_path, text_source_range_projection
+
+    unavailable = {"schema": 1, "kind": "task_completion_observations", "status": "unavailable"}
+    observations = result.get("completion_observations")
+    ref = observations.get("source_ref") if isinstance(observations, dict) else None
+    if not isinstance(ref, dict) or ref.get("root") != "artifact_store" or ref.get("kind") != unavailable["kind"]:
+        return {**unavailable, "reason": "source_unavailable"}
+    name = ref.get("path")
+    if not isinstance(name, str) or not name or pathlib.Path(name).name != name or "\\" in name or name in {".", ".."}:
+        return {**unavailable, "reason": "source_ref_invalid"}
+    try:
+        root = task_artifact_dir_path(drive_root, task_id).resolve()
+        path = (root / name).resolve()
+        if not path.is_relative_to(root):
+            return {**unavailable, "reason": "source_ref_invalid"}
+        raw = path.read_bytes()
+        if len(raw) != ref.get("bytes") or hashlib.sha256(raw).hexdigest() != ref.get("sha256"):
+            return {**unavailable, "reason": "source_identity_mismatch"}
+        projection, reason = text_source_range_projection(raw.decode("utf-8"), unavailable["kind"], start_char, end_char)
+    except (OSError, ValueError, RuntimeError):
+        return {**unavailable, "reason": "source_unavailable"}
+    payload = projection or unavailable
+    return {**payload, **({"reason": reason} if reason else {})}
 
 
 def build_sealed_final_package(result_row: Any, final_text: str) -> Dict[str, Any]:

@@ -162,9 +162,9 @@ def _subtask_outcome_summary(data: Dict[str, Any], receipts: list | None = None)
 def _get_task_result(
     ctx: ToolContext, task_id: str, include_authority: bool = False,
     include_work_order_source: bool = False, source_start_char: Any = None,
-    source_end_char: Any = None,
+    source_end_char: Any = None, include_completion_source: bool = False,
 ) -> str:
-    """Read a task result, or one bounded canonical work-order source range."""
+    """Read a task result, or a bounded canonical work-order/completion source range."""
     metadata = getattr(ctx, "task_metadata", {}) if isinstance(getattr(ctx, "task_metadata", {}), dict) else {}
     status_drive_root = Path(str(metadata.get("budget_drive_root") or getattr(ctx, "budget_drive_root", "") or ctx.drive_root))
     data = load_effective_task_result(status_drive_root, task_id)
@@ -173,7 +173,7 @@ def _get_task_result(
             status="unavailable", code="LEGACY_UNAVAILABLE",
             text=f"Task {task_id}: unknown or not yet registered",
         ))
-    if bool(include_authority) or bool(include_work_order_source):
+    if bool(include_authority) or bool(include_work_order_source) or bool(include_completion_source):
         from ouroboros.agent_startup_checks import task_result_authority_projection
 
         authority = task_result_authority_projection(data, drive_root=status_drive_root)
@@ -209,6 +209,12 @@ def _get_task_result(
             }
             if reason:
                 payload["work_order_source"]["reason"] = reason
+        if bool(include_completion_source):
+            from ouroboros.task_finalization import completion_source_projection
+
+            payload["completion_source"] = completion_source_projection(
+                status_drive_root, str(task_id), data, source_start_char, source_end_char,
+            )
         return json.dumps(payload, ensure_ascii=False, sort_keys=True)
     status = data.get("status", "unknown")
     result = data.get("result", "")

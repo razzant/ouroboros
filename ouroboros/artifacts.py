@@ -27,6 +27,25 @@ _ARTIFACT_MANIFEST = ".artifact_manifest.json"
 _ARTIFACT_VERSION_RETENTION = 5
 _ARTIFACT_VERSIONS_DIR = "artifact_versions"
 
+
+def text_source_range_projection(
+    text: str, kind: str, start_char: Any = None, end_char: Any = None,
+) -> tuple[dict[str, Any] | None, str]:
+    """Project an explicit character range while retaining complete-source identity."""
+    projection = {"schema": 1, "kind": kind, "complete_chars": len(text),
+                  "complete_sha256": sha256(text.encode("utf-8")).hexdigest()}
+    if start_char is None and end_char is None:
+        projection["range_required"] = True
+        return projection, "source_range_required"
+    if type(start_char) is not int or type(end_char) is not int:
+        return None, "source_range_invalid"
+    if start_char < 0 or end_char <= start_char or end_char > len(text):
+        return None, "source_range_invalid"
+    part = text[start_char:end_char]
+    projection.update(start_char=start_char, end_char=end_char, text=part,
+                      text_chars=len(part), text_sha256=sha256(part.encode("utf-8")).hexdigest())
+    return projection, ""
+
 # Ephemeral verification scratch (v6.52.2): the task-scoped manifest of {ABSOLUTE_path: sha256}
 # FINGERPRINTS for files the agent declared via run_command/run_script `scratch=[...]` — transient
 # in-workspace files (e.g. a throwaway test it writes, runs, and deletes) that are NOT deliverables.

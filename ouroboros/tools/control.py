@@ -382,8 +382,10 @@ def get_tools() -> List[ToolEntry]:
                                       "description": "Return the exact selected result, task contract, origin, artifact references, and current plan-review authority."},
                 "include_work_order_source": {"type": "boolean", "default": False,
                                                "description": "Return the canonical work-order source projection; provide both source_start_char and source_end_char for the exact bounded range."},
-                "source_start_char": {"type": "integer", "description": "Inclusive character offset for the requested canonical work-order source range."},
-                "source_end_char": {"type": "integer", "description": "Exclusive character offset for the requested canonical work-order source range."},
+                "include_completion_source": {"type": "boolean", "default": False,
+                                              "description": "Read the full stored completion observations for this task, including returns omitted from the summary. Omit bounds for source length/hash, then request explicit character ranges."},
+                "source_start_char": {"type": "integer", "description": "Inclusive character offset for the requested canonical source range."},
+                "source_end_char": {"type": "integer", "description": "Exclusive character offset for the requested canonical source range."},
             }},
         }, _get_task_result),
         ToolEntry("wait_task", {

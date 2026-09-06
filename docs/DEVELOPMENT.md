@@ -2188,7 +2188,10 @@ by "Provider Independence" above. Call-site imperatives:
   still running. Registered review bookkeeping remains downloadable without entering
   user deliverables or making an otherwise artifact-free task ready. Completion
   observations use the same classifier only after canonical-first full-source
-  persistence (`task.budget_drive_root or drive_root`). Preserve that
+  persistence (`task.budget_drive_root or drive_root`). Give native readers an
+  executable get_task_result selector for that source task; reuse explicit character
+  ranges and complete-source hashes so a split or later task never resolves the
+  basename against its own artifact directory. Preserve that
   distinction through effective reads and child copy-back; terminal references must
   carry the task's chat id, including zero. A missing source is disclosed, never reconstructed from a
   bounded preview. Source/capacity, publication order and paid identity are
