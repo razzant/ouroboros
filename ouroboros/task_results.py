@@ -749,9 +749,8 @@ def load_task_result(
     ``task_result_schema_refusal`` — is QUARANTINED by the fail-soft path
     (moved under ``task_results/quarantine/``, one batched durable event) and
     the read reports no result; the strict path raises WITHOUT moving, so an
-    authority probe never mutates storage. Historical review-source artifacts
-    are projected out of deliverables here without rewriting their saved bytes;
-    lifecycle, cost, review references and independent artifact states remain.
+    authority probe never mutates storage. Admissible rows are returned as
+    stored, without projecting their deliverables or independent state axes.
     """
     try:
         tid = validate_task_id(task_id)
