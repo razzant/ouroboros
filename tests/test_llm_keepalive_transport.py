@@ -162,7 +162,8 @@ def test_no_proxy_sync_client_carries_keepalive_transport():
         def __init__(self, **kwargs):
             captured.update(kwargs)
 
-    with patch("httpx.Client", FakeClient), patch("openai.OpenAI"):
+    # Import the SDK before replacing the HTTP classes it inherits at import time.
+    with patch("openai.OpenAI"), patch("httpx.Client", FakeClient):
         LLMClient._make_no_proxy_client(_target())
 
     assert captured.get("trust_env") is False
@@ -177,7 +178,7 @@ def test_no_proxy_async_client_carries_keepalive_transport():
         def __init__(self, **kwargs):
             captured.update(kwargs)
 
-    with patch("httpx.AsyncClient", FakeAsyncClient), patch("openai.AsyncOpenAI"):
+    with patch("openai.AsyncOpenAI"), patch("httpx.AsyncClient", FakeAsyncClient):
         LLMClient._make_no_proxy_async_client(_target())
 
     assert captured.get("trust_env") is False
@@ -202,9 +203,9 @@ def test_no_proxy_transports_ignore_ssl_env_and_keep_httpx_pool_defaults(monkeyp
 
     monkeypatch.setattr(httpx, "HTTPTransport", FakeTransport)
     monkeypatch.setattr(httpx, "AsyncHTTPTransport", FakeAsyncTransport)
-    with patch("httpx.Client"), patch("openai.OpenAI"):
+    with patch("openai.OpenAI"), patch("httpx.Client"):
         LLMClient._make_no_proxy_client(_target())
-    with patch("httpx.AsyncClient"), patch("openai.AsyncOpenAI"):
+    with patch("openai.AsyncOpenAI"), patch("httpx.AsyncClient"):
         LLMClient._make_no_proxy_async_client(_target())
 
     assert len(sync_kwargs) == 1 and len(async_kwargs) == 1
