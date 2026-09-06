@@ -350,6 +350,31 @@ def test_reconnect_gets_fresh_terminal_result_without_replaying_consumed_logs(tm
     assert reads.count(True) == 1
 
 
+@pytest.mark.parametrize("schema", [None, 999])
+def test_refused_result_facts_are_cached_until_the_file_changes(tmp_path, monkeypatch, schema):
+    from ouroboros.gateway import tasks
+
+    root = seed(tmp_path / "data")
+    path = root / "task_results" / "child.json"
+    raw = {"task_id": "child", "status": "running", "parent_task_id": "root"}
+    if schema is not None:
+        raw["_schema_version"] = schema
+    path.write_text(json.dumps(raw), encoding="utf-8")
+    reads = []
+    reader = tasks.read_json_dict
+    monkeypatch.setattr(tasks, "read_json_dict", lambda p: reads.append(p.name) or reader(p))
+    follower = _TaskEventCursorFollower(root, "root", {"v": 2, "seq": 0, "view": "", "positions": {}})
+    for _ in range(3):
+        follower.refresh_view()
+        assert "child" not in follower.task_filter_ids
+    assert reads.count("child.json") == 1
+    path.unlink()
+    write_task_result(root, "child", "running", parent_task_id="root", delegation_role="subagent")
+    follower.refresh_view()
+    assert "child" in follower.task_filter_ids
+    assert reads.count("child.json") == 2
+
+
 def test_result_facts_cannot_admit_an_invalid_schema(tmp_path):
     from ouroboros.task_results import load_task_result
     root = seed(tmp_path / 'data')
