@@ -37,6 +37,7 @@ from ouroboros.tool_access import (
 )
 from ouroboros.tools.claude_advisory_review import (
     ADVISORY_REVIEW_CHOICE_GUIDANCE,
+    _handle_advisory_pre_review,
     advisory_gate_unavailable,
 )
 from ouroboros.tools.commit_gate import (
@@ -548,6 +549,22 @@ def _subject_binding_mismatch_outcome(
     }
 
 
+# The two advisory-block shapes an inline advisory_review can actually clear:
+# no run matches the current snapshot, or the last one could not be parsed. A
+# SyntaxError preflight block or an "advisory current but obligations still
+# open" block reproduces identically on a re-run, so those are handed back to
+# the agent unchanged.
+_ADVISORY_SELF_RECOVERABLE_MARKERS = (
+    "No fresh advisory run found for this snapshot",
+    "could not be parsed",
+)
+
+
+def _advisory_freshness_gap_is_self_recoverable(advisory_err: str) -> bool:
+    text = str(advisory_err or "")
+    return any(marker in text for marker in _ADVISORY_SELF_RECOVERABLE_MARKERS)
+
+
 def _advisory_and_tests_gate(
     ctx: ToolContext,
     commit_message: str,
@@ -567,6 +584,45 @@ def _advisory_and_tests_gate(
         skip_advisory_pre_review,
         paths=advisory_paths,
     )
+    if (
+        advisory_err
+        and not skip_advisory_pre_review
+        and _advisory_freshness_gap_is_self_recoverable(advisory_err)
+    ):
+        # A missing / edit-staled advisory is the single most common
+        # commit_reviewed bounce: the task edited the very files it was sent to
+        # edit, which invalidates any advisory it ran earlier, so a
+        # production-touching change lands here on the FIRST commit_reviewed and
+        # has to leave the gate, call advisory_review by hand, and come back —
+        # and any further edit restarts the loop. Run the SAME advisory the
+        # agent would run, inline, against the current snapshot, then re-check
+        # once. A real AdvisoryRunRecord is written (not a bypass), so the
+        # compensating test-preflight coupling below is unchanged. One attempt
+        # only: a genuine block (SyntaxError preflight, open obligations, a
+        # critical advisory finding) survives the re-check and is returned as
+        # before.
+        try:
+            ctx.emit_progress_fn(
+                "No fresh advisory for this snapshot — running preflight_review inline "
+                "before triad + scope review..."
+            )
+        except Exception:
+            pass
+        try:
+            _handle_advisory_pre_review(
+                ctx,
+                commit_message,
+                paths=advisory_paths,
+                skip_tests=skip_tests,
+            )
+        except Exception:
+            log.warning("inline advisory_review failed (non-fatal)", exc_info=True)
+        advisory_err = _check_advisory_freshness(
+            ctx,
+            commit_message,
+            skip_advisory_pre_review,
+            paths=advisory_paths,
+        )
     if advisory_err:
         run_cmd(["git", "reset", "HEAD"], cwd=ctx.repo_dir)
         _record_commit_attempt(
