@@ -506,7 +506,7 @@ export function createChatInstance({
     // A task_named frame can arrive before the card's record exists; buffer it.
     const pendingSuggestedNames = new Map();
     const taskUiStates = new Map();
-    // Decision turns keep their own activity identity and compact progress card.
+    // Decision turns keep activity ordering and render progress cards.
     const ephemeralDecisionTaskIds = new Set();
     // Server-confirmed in-flight direct/ephemeral/managed activities.
     const activeDirectActivities = new Map();
