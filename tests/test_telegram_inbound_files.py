@@ -6,6 +6,9 @@ import importlib.util
 import json
 import sys
 import types
+import uuid
+
+import pytest
 from pathlib import Path
 
 
@@ -112,7 +115,7 @@ def test_document_with_caption_is_parked_relayed_and_cleaned_up(tmp_path, monkey
     (spec,) = payload["attachments"]
     parked = Path(spec["path"])
     assert parked.parent == tmp_path / "inbox", "parked inside this skill's own state root"
-    assert parked.name.endswith("_report.pdf")
+    assert uuid.UUID(hex=parked.name).hex == parked.name
     assert spec["name"] == "report.pdf" and spec["mime"] == "application/pdf"
     assert seen[str(parked)] == b"%PDF-1.4 bytes", "the file existed when the host was asked to copy it"
     assert not parked.exists(), "the parked copy is removed once the host answered"
@@ -192,3 +195,21 @@ def test_inbound_file_descriptor_shapes():
     assert note["name"] == "video_note_12345678.mp4" and note["mime"] == "video/mp4"
     assert inbound.inbound_file({"audio": {"file_id": "", "file_name": "x.mp3"}}) is None
     assert inbound.refusal_text({"size": 12 * 1024 * 1024}, "ru").startswith("Файл весит 12.0 МиБ")
+
+
+@pytest.mark.parametrize("filename", [r"x\..\..\..\escape.txt", r"C:\outside\data.pdf", "report.pdf"])
+def test_parked_bytes_use_native_safe_identity_and_preserve_display_name(tmp_path, monkeypatch, filename):
+    import ntpath
+
+    plugin = _load_plugin()
+    seen = {}
+    injected, _client, _api = _run(plugin, tmp_path, monkeypatch, {
+        "document": {"file_id": "named", "file_name": filename, "mime_type": "application/pdf"},
+    }, seen_at_inject=seen)
+    spec = injected[0]["attachments"][0]
+    path = Path(spec["path"])
+    assert path.parent == tmp_path / "inbox"
+    assert uuid.UUID(hex=path.name).hex == path.name
+    assert ntpath.dirname(ntpath.normpath(ntpath.join(r"C:\skill\inbox", path.name))) == r"C:\skill\inbox"
+    assert spec["name"] == filename and spec["mime"] == "application/pdf"
+    assert seen[str(path)] == b"%PDF-1.4 bytes" and not path.exists()

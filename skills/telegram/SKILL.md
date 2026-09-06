@@ -33,7 +33,9 @@ this integration's 10 MiB download cap) can be sent to Ouroboros, with or withou
 caption; replies, photos, videos, documents, typing state, subagent cards, quiz
 cards, and opt-in notifications are mirrored back to that owner. A quiz card is
 answered by tapping an option or by replying to the card with a free-form
-answer; both reach the same host decision ingress as the web UI.
+answer; both reach the same host decision ingress as the web UI. Slash commands
+keep their ordinary command-mode rules even in replies; quote a literal command
+as code or include it inside an explanation to send it as a quiz answer.
 
 Version 1.1 adds richer Telegram formatting, native MP3/M4A playback, and
 inline link keyboards. Version 1.1.1 fixes the task-done push, which read the

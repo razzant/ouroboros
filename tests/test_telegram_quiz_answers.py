@@ -156,7 +156,7 @@ def test_tapped_option_reaches_the_decision_ingress_and_settles_the_card(tmp_pat
                            "\nAnswered: 2. postgres", [])]
 
 
-@pytest.mark.parametrize("answer_text", ["Use mysql instead", "  Use mysql instead\n", "2"])
+@pytest.mark.parametrize("answer_text", ["Use mysql instead", "  Use mysql instead\n", "2", "`/panic`", "The command is /panic"])
 def test_reply_to_the_card_is_the_owners_own_answer(tmp_path, monkeypatch, answer_text):
     plugin = _load_plugin()
     api = _send_card(plugin, tmp_path, monkeypatch)
@@ -280,3 +280,20 @@ def _tracking_init(self, token, **kwargs):
 
 
 Client.__init__ = _tracking_init
+
+
+@pytest.mark.parametrize("command", ["/panic", "/restart", "/status"])
+@pytest.mark.parametrize("reply_to_quiz", [False, True])
+def test_owner_commands_keep_dispatch_when_replying_to_quiz(tmp_path, monkeypatch, command, reply_to_quiz):
+    plugin = _load_plugin()
+    api = _send_card(plugin, tmp_path, monkeypatch)
+    _settings(tmp_path, TELEGRAM_COMMAND_MODE="full_access")
+    message = {"message_id": 602, "chat": {"id": 42, "type": "private"},
+               "from": {"id": 42}, "text": command}
+    if reply_to_quiz:
+        message["reply_to_message"] = {"message_id": 555}
+    Client.updates = [{"update_id": 89, "message": message}]
+    posts = []
+    injected = _run_poller(plugin, api, monkeypatch, posts)
+    assert posts == []
+    assert [row["text"] for row in injected] == [command]

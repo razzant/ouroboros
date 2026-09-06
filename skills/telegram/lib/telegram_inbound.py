@@ -106,7 +106,7 @@ async def park_inbound_file(api, client, info: Dict[str, Any]) -> ParkedFile:
     content = await client.download_file(info["file_id"])
     inbox = pathlib.Path(api.get_state_dir()) / "inbox"
     inbox.mkdir(parents=True, exist_ok=True)
-    safe_name = str(info["name"]).replace(" ", "_")[:120] or "file"
-    path = inbox / f"{uuid.uuid4().hex[:12]}_{safe_name}"
+    # Display names are transport metadata, never native filesystem paths.
+    path = inbox / uuid.uuid4().hex
     path.write_bytes(content)
     return ParkedFile(path, {"path": str(path), "name": str(info["name"]), "mime": str(info.get("mime") or "")})

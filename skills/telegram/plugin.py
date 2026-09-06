@@ -929,14 +929,15 @@ async def _handle_owner_message(
         return
 
     reply_to = message.get("reply_to_message") or {}
-    if safe_text and isinstance(reply_to, dict) and reply_to:
+    if safe_text and not _SLASH_COMMAND_RE.match(text) and isinstance(reply_to, dict) and reply_to:
         quiz_ref = telegram_quiz.quiz_for_message(
             api, chat_id, int(reply_to.get("message_id") or 0),
         )
         if quiz_ref is not None:
             # A reply to a quiz card is the owner's own answer to
             # that question, not a new chat turn (#472).
-            # Keep the dispatch rules above, but deliver the selected answer verbatim.
+            # Commands keep their existing dispatch even in replies. Other
+            # answers, including code-formatted command names, stay verbatim.
             answer_text = str(message.get("text") or message.get("caption") or "")
             await telegram_quiz.answer_from_reply(
                 api, client, quiz_ref, answer_text, chat_id=chat_id,
