@@ -1,7 +1,7 @@
 """Inbound Telegram files → the host's shared chat-attachment path (#668).
 
 A document, video, audio, voice or video-note message is downloaded (within
-Telegram's 10 MiB bot-download cap), parked in this skill's own state directory
+this integration's 10 MiB download cap), parked in this skill's own state directory
 and relayed through ``/chat/inject`` ``attachments``. The host copies it into
 the same ``data/uploads`` store the browser paperclip uses and stages it for
 the task like any other chat attachment; the parked copy is removed once the
@@ -28,11 +28,11 @@ _UNSUPPORTED_KINDS = ("sticker", "animation", "location", "contact", "poll", "ve
 
 _TEXTS = {
     "en": {
-        "too_large": "This file is {size} MB; Telegram lets a bot download at most 10 MiB. Send a smaller file or a link.",
+        "too_large": "This file is {size} MiB; this integration accepts files up to 10 MiB. Send a smaller file or a link.",
         "unsupported": "This kind of message isn't supported — send text, a photo, or a file (document, video, audio, voice).",
     },
     "ru": {
-        "too_large": "Файл весит {size} МБ; Telegram позволяет боту скачать не больше 10 МиБ. Пришлите файл поменьше или ссылку.",
+        "too_large": "Файл весит {size} МиБ; эта интеграция принимает файлы не больше 10 МиБ. Пришлите файл поменьше или ссылку.",
         "unsupported": "Такой тип сообщения не поддерживается — пришлите текст, фото или файл (документ, видео, аудио, голосовое).",
     },
 }

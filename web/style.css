@@ -2414,7 +2414,8 @@ body.resizing-panels { user-select: none; }
    narrow regime flattens the indentation rails to keep the text column, so a
    box nested inside a child box takes a slightly stronger tint and border than
    its parent — depth reads from tone, not from pixels the column cannot spare.
-   Alternating parity keeps every level distinct from the one that contains it. */
+   The first four depths alternate; deeper boxes retain the last translucent
+   tint, which continues to layer over the containing box. */
 .chat-subagents .chat-subagents > .chat-live-card.subagent {
     border-color: var(--accent-25);
     background: rgba(255, 255, 255, 0.045);

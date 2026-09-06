@@ -167,7 +167,7 @@ def test_oversize_file_is_refused_before_download(tmp_path, monkeypatch):
     })
     assert injected == []
     assert client.downloads == []
-    assert client.sent == [(42, "This file is 11.0 MB; Telegram lets a bot download at most 10 MiB. "
+    assert client.sent == [(42, "This file is 11.0 MiB; this integration accepts files up to 10 MiB. "
                                 "Send a smaller file or a link.")]
     assert not (tmp_path / "inbox").exists()
 
@@ -191,4 +191,4 @@ def test_inbound_file_descriptor_shapes():
     note = inbound.inbound_file({"video_note": {"file_id": "abcdefgh12345678", "file_size": 5}})
     assert note["name"] == "video_note_12345678.mp4" and note["mime"] == "video/mp4"
     assert inbound.inbound_file({"audio": {"file_id": "", "file_name": "x.mp3"}}) is None
-    assert inbound.refusal_text({"size": 12 * 1024 * 1024}, "ru").startswith("Файл весит 12.0 МБ")
+    assert inbound.refusal_text({"size": 12 * 1024 * 1024}, "ru").startswith("Файл весит 12.0 МиБ")

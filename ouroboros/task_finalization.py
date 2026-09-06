@@ -120,11 +120,9 @@ def prepare_terminal_send_event(
     origin = str(usage.get("terminal_origin") or "")
     notice = str(usage.get("terminal_provider_notice") or "")
     if ephemeral and not presence:
-        # #369: an ephemeral decision's task_done frame is dropped at the
-        # client's log-event entry by design, so this final is the turn's
-        # ONLY conclusion vehicle. The typed fact mirrors the direct-error
-        # branch (supervisor/workers.py stamps task_terminal_status="failed")
-        # and lets the live concludesTurn gate settle the activity.
+        # This final concludes the transient activity even if task_done is
+        # missed. emit_task_results adds its computed outcome/accounting facts
+        # before dispatch: completed means the turn ended, not that it succeeded.
         send_event.setdefault("progress_meta", {})["task_terminal_status"] = "completed"
     if origin not in _STAMPED_TERMINAL_ORIGINS:
         return send_event

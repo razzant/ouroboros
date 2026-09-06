@@ -468,12 +468,11 @@ def emit_task_results(
     _presence = is_presence_task(task)
     _typed_routing_action = (
         str(getattr(ctx, "_typed_routing_action_emitted", "") or "").strip()
-        if ctx is not None else ""
     )
-    _has_typed_routing_action = bool(_ephemeral and _typed_routing_action)
     _message_meta = subagent_message_meta(task, task_id=str(task.get("id") or ""))
     if _ephemeral:
-        _message_meta["ephemeral_decision"] = True
+        _message_meta.update(ephemeral_decision=True, outcome_axes=outcome_axes,
+                             reason_code=reason_code)
     send_event = {
         "type": "send_message", "chat_id": task["chat_id"],
         "text": text or "\u200b", "log_text": text or "",
@@ -509,11 +508,14 @@ def emit_task_results(
         }
     # SSOT cost naming (C2/ABI-3): the honest names on every terminal frame
     # this pipeline emits; the seam also strips any legacy alias spelling.
-    from ouroboros.cost_projection import with_cost_aliases
+    from ouroboros.cost_projection import carry_cost_meta, with_cost_aliases
 
     task_cost_fields = with_cost_aliases(task_cost_fields)
-    if _is_root_post_task(task) and not _root_post_task_already_completed(env, task):
+    if not _ephemeral and _is_root_post_task(task) and not _root_post_task_already_completed(env, task):
         task_cost_fields["cost_final"] = False
+    if _ephemeral:
+        # Chat retains the terminal facts: this turn has no task_result or synthesis.
+        send_event["progress_meta"].update(carry_cost_meta(task_cost_fields))
     if not _ephemeral:
         try:
             append_jsonl(drive_logs / "events.jsonl", {
@@ -600,10 +602,10 @@ def emit_task_results(
         # missing-result task_result for a transient decision turn (which has none).
         "_ephemeral": _ephemeral,
         # Presentation marker only. The supervisor's typed routing event remains
-        # the action/receipt authority; this keeps a transient decision task from
-        # becoming a visible task card (and a bogus "Turn into project" target).
+        # the action/receipt authority; the visible transient card gets no
+        # managed-task controls (including "Turn into project").
         "ephemeral_decision": _ephemeral,
-        **({"typed_routing_action": _typed_routing_action} if _has_typed_routing_action else {}),
+        **({"typed_routing_action": _typed_routing_action} if _ephemeral and _typed_routing_action else {}),
         # Carry the thread so the terminal card finalizes in its project panel
         # (per-thread fan-out), not just the main chat.
         "chat_id": int(task.get("chat_id") or 0),

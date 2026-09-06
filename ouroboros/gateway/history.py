@@ -325,9 +325,11 @@ def _read_progress_history_entries(live, adir, want, counts_toward_quota, *, inc
 
 
 def _copy_task_summary_metadata(rec: Dict[str, Any], entry: Dict[str, Any]) -> None:
-    """Copy the bounded task-summary fields replayed by the Chat surface."""
-    if entry.get("type") != "task_summary":
+    """Copy terminal chat facts for task summaries and transient turns."""
+    if entry.get("type") != "task_summary" and not entry.get("ephemeral_decision"):
         return
+    if entry.get("ephemeral_decision"):
+        rec["ephemeral_decision"] = True
     for key in ("tool_calls", "rounds"):
         if key in entry:
             rec[key] = int(entry[key])
@@ -336,8 +338,8 @@ def _copy_task_summary_metadata(rec: Dict[str, Any], entry: Dict[str, Any]) -> N
         rec["reason_code"] = str(entry.get("reason_code") or "")
     if isinstance(entry.get("review_projection"), dict):
         rec["review_projection"] = dict(entry.get("review_projection") or {})
-    # v6.82 P1: the summary row now carries the flat task-scope cost snapshot
-    # written by agent_task_pipeline; replay it so a reload still shows cost.
+    # The chat row carries the flat task-scope cost snapshot written by
+    # agent_task_pipeline; transient turns have no later durable task record.
     # _annotate_terminal_task_truth later OVERRIDES these with the persisted
     # task_results values when the result file survives (row = fallback only).
     # ABI-3: CONVERTED, not copied — a stored legacy row's pair resolves

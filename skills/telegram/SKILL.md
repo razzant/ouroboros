@@ -29,7 +29,7 @@ companion_processes:
 One owner-only Telegram integration provides both the established bot bridge
 and the optional Mini App. The first positive private Telegram chat binds as
 the sole owner. Text, photos and files (documents, video, audio and voice notes within
-Telegram's 10 MiB bot-download cap) can be sent to Ouroboros, with or without a
+this integration's 10 MiB download cap) can be sent to Ouroboros, with or without a
 caption; replies, photos, videos, documents, typing state, subagent cards, quiz
 cards, and opt-in notifications are mirrored back to that owner. A quiz card is
 answered by tapping an option or by replying to the card with a free-form

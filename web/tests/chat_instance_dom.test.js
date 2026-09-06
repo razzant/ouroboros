@@ -1315,8 +1315,10 @@ test('an ephemeral decision turn renders its tool work on a card without task au
         handlers.get('chat')({
             chat_id: 1, role: 'assistant', content: 'The earliest window resets on Monday.',
             ts: '2026-09-05T10:22:00Z', task_id: 'eph-1', task_terminal_status: 'completed',
+            accounted_upper_bound_usd: 0.75, cost_accounting_status: 'available', cost_final: true,
         });
         assert.equal(card.dataset.finished, '1');
+        assert.match(card.querySelector('[data-live-meta]').innerHTML, /\$0\.75/);
         const receipts = messages.children.filter((n) => n.classList.contains('chat-bubble')
             && n.classList.contains('assistant') && !n.classList.contains('progress')
             && /resets on Monday/.test(n.innerHTML));
@@ -1347,7 +1349,8 @@ test('an ephemeral decision turn renders its tool work on a card without task au
     }
 });
 
-test('history replay of an ephemeral turn shows its progress and its typed conclusion (#691)', async () => {
+for (const [execution, phase] of [['ok', 'done'], ['degraded', 'warn'], ['failed', 'error'], ['infra_failed', 'error']]) {
+test(`history replay of an ephemeral turn preserves ${execution} (#691)`, async () => {
     const rows = [
         { chat_id: 1, role: 'user', content: 'compare the reset windows', text: 'compare the reset windows',
           ts: '2026-09-05T10:00:00Z' },
@@ -1357,7 +1360,10 @@ test('history replay of an ephemeral turn shows its progress and its typed concl
           content: 'Comparing the reset windows…', ts: '2026-09-05T10:05:00Z', task_id: 'eph-h' },
         { chat_id: 1, role: 'assistant', content: 'The earliest window resets on Monday.',
           text: 'The earliest window resets on Monday.', ts: '2026-09-05T10:22:00Z', task_id: 'eph-h',
-          task_terminal_status: 'completed' },
+          task_terminal_status: 'completed', ephemeral_decision: true,
+          outcome_axes: { execution: { status: execution } }, reason_code: execution === 'ok' ? 'final_message' : 'tool_failure',
+          accounted_upper_bound_usd: execution === 'ok' ? 0.75 : null,
+          cost_final: execution === 'ok', unknown_unmetered: execution === 'ok' ? 0 : 1, cost_accounting_status: 'available' },
     ];
     const { prior, mount } = installDom(async (url) => {
         if (String(url).startsWith('/api/chat/history')) {
@@ -1386,13 +1392,18 @@ test('history replay of an ephemeral turn shows its progress and its typed concl
         const card = walkCard(messages, 'eph-h');
         assert.ok(card, 'replayed progress mints the card');
         assert.equal(card.dataset.finished, '1', 'the persisted typed conclusion finishes it');
+        assert.equal(card.querySelector('[data-live-phase]').dataset.phase, phase);
+        assert.doesNotMatch(card.querySelector('[data-live-meta]').innerHTML, /\$0(?:\.00)?(?:\s|<|$)/);
+        if (execution === 'ok') assert.match(card.querySelector('[data-live-meta]').innerHTML, /\$0\.75/);
         assert.equal(card.querySelector('[data-turn-into-project]'), null);
+        assert.equal(card.querySelector('[data-cancel-run]'), null);
         assert.equal(messages.children.filter((n) => /resets on Monday/.test(n.innerHTML)).length, 1);
     } finally {
         instance?.destroy();
         restoreDom(prior);
     }
 });
+}
 
 // ---------------------------------------------------------------------------
 // #300: a root proven terminal settles a child card whose terminal frame was

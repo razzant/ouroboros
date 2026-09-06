@@ -2108,7 +2108,7 @@ export function createChatInstance({
         const hasAcceptanceReview = projectedReviews.length > 0;
         const taskState = getTaskUiState(taskId, hasAcceptanceReview || finalizing);
         if (!taskState) {
-            return finishLiveCard(taskId, 'done') || changed;
+            return finishLiveCard(taskId, taskTerminalPhase(msg)) || changed;
         }
         if (hasAcceptanceReview) taskState.forceCard = true;
         changed = revealBufferedCardIfNeeded(taskState, { suppressDomInsert, rawTs }) || changed;
@@ -2973,7 +2973,7 @@ export function createChatInstance({
                         continue;
                     }
                     const rec = liveCardRecords.get(tid);
-                    if (rec && !rec.finished) {
+                    if (rec) {
                         insertCardIfNeeded(tid);
                         if (terminalRecord.outcome_axes || terminalRecord.review_projection || terminalRecord.reason_code) {
                             appendTaskSummaryToLiveCard(terminalRecord);
@@ -4078,7 +4078,7 @@ export function createChatInstance({
             let changed = false;
             if (finalizing) changed = markLiveCardFinalizing(explicitTaskId) || changed;
             else if (explicitTaskId && typedTerminal) {
-                changed = finishLiveCard(explicitTaskId, taskTerminalPhase(msg)) || changed;
+                changed = appendTaskSummaryToLiveCard(msg) || changed;
             }
             if (!finalizing && typedTerminal) markAssistantReply(explicitTaskId);
             const routingCleared = clearTransientRoutingAnnotations();
