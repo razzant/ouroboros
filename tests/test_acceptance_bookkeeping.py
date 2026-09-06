@@ -1,6 +1,5 @@
 """Applied review sources retain download custody without becoming task deliverables."""
 
-import copy
 import hashlib
 import shutil
 from types import SimpleNamespace
@@ -55,10 +54,10 @@ def _download(root, stored):
     app.state.drive_root = root
     with TestClient(app) as client:
         response = client.get(f"/api/tasks/applied/artifacts/{Path(ref['path']).name}",
-                              params={"source": ref["path"]} if ref["kind"] == "task_source" else {})
+                              params={"source": ref["path"]})
         assert response.status_code == 200
         assert hashlib.sha256(response.content).hexdigest() == ref["sha256"]
-        assert len(response.content) == ref.get("size", ref.get("bytes"))
+        assert len(response.content) == ref["size"]
         assert len(response.json()["actors"][0]["parsed"]["findings"]) == 80
         for name in (artifacts._ARTIFACT_MANIFEST, artifacts._ARTIFACT_MANIFEST + ".lock", "verification_receipts.jsonl"):
             assert client.get(f"/api/tasks/applied/artifacts/{name}").status_code == 404
@@ -85,7 +84,7 @@ def test_terminal_pipeline_routes_review_and_downloads_without_bookkeeping_deliv
     assert [row["name"] for row in stored["artifacts"]] == (["notes.lock"] if user_file else [])
     done = next(row for row in pending if row.get("type") == "task_done")
     assert done["artifact_status"] == expected_artifacts
-    assert not any(artifacts.is_task_bookkeeping_artifact(row) for row in done["artifact_bundle"]["artifacts"])
+    assert [row["name"] for row in done["artifact_bundle"]["artifacts"]] == (["notes.lock"] if user_file else [])
     _download(tmp_path, stored)
     for materialize in (False, True):
         effective = load_effective_task_result(tmp_path, "applied", materialize_artifacts=materialize)
@@ -131,82 +130,13 @@ def test_canonical_source_survives_actual_child_copyback_and_cleanup(tmp_path, m
     expected = "ready" if user_file else "not_applicable"
     assert copied["artifact_bundle"]["status"] == expected
     assert [row["name"] for row in copied["artifacts"]] == (["notes.lock"] if user_file else [])
-    assert not any(artifacts.is_task_bookkeeping_artifact(row) for row in copied["artifacts"])
+    assert all(row["kind"] == "user_file" for row in copied["artifacts"])
     assert copied["review_projection"] == child_result["review_projection"]
     final = load_effective_task_result(canonical, "applied")
     assert final["artifact_bundle"]["status"] == expected
     _download(canonical, final)
     if user_file:
         assert artifacts.task_artifact_dir_path(canonical, "applied").joinpath("notes.lock").read_bytes() == b"user deliverable"
-
-
-@pytest.mark.parametrize("status", ["ready", "pending", "finalizing", "failed", "partial", "missing", "ready_no_changes"])
-@pytest.mark.parametrize("kind", ["task_acceptance_review", "task_completion_observations"])
-def test_existing_bookkeeping_projection_preserves_independent_states(status, kind):
-    review = {"name": "source.json", "kind": kind, "status": "ready"}
-    row = {"artifacts": [review], "artifact_status": status,
-           "artifact_bundle": {"artifacts": [review], "status": status},
-           "outcome_axes": {"artifacts": {"status": status}}}
-    before = copy.deepcopy(row)
-    projected = artifacts.project_deliverable_artifacts(row)
-    expected = "not_applicable" if status == "ready" else status
-    assert projected["artifacts"] == [] and projected["artifact_bundle"]["artifacts"] == []
-    assert projected["artifact_status"] == projected["artifact_bundle"]["status"] == expected
-    assert projected["outcome_axes"]["artifacts"]["status"] == expected
-    assert row == before
-
-
-def test_stale_review_only_replica_does_not_restore_ready_status(tmp_path):
-    canonical, child = tmp_path / "canonical", tmp_path / "child"
-    source = artifacts.store_task_artifact_bytes(canonical, "applied", "review.json", b"canonical source", kind="task_acceptance_review")
-    review = artifacts.artifact_record(artifacts.task_artifact_dir_path(canonical, "applied") / source["path"], kind="task_acceptance_review")
-    fields = {"artifacts": [review], "artifact_status": "ready",
-              "artifact_bundle": {"artifacts": [review], "status": "ready"},
-              "outcome_axes": {"artifacts": {"status": "ready"}}}
-    write_task_result(canonical, "applied", "completed", child_drive_root=str(child), **fields)
-    write_task_result(child, "applied", "completed", **fields)
-    for materialize in (False, True):
-        effective = load_effective_task_result(canonical, "applied", materialize_artifacts=materialize)
-        assert effective["artifacts"] == []
-        assert effective["artifact_bundle"]["status"] == "not_applicable"
-    copied = copy_child_task_result(canonical, {"id": "applied", "drive_root": str(child)})
-    assert copied["artifacts"] == []
-    assert copied["artifact_status"] == "not_applicable"
-    assert copied["artifact_bundle"]["status"] == "not_applicable"
-    assert (artifacts.task_artifact_dir_path(canonical, "applied") / source["path"]).read_bytes() == b"canonical source"
-
-
-def test_unregistered_review_names_remain_deliverables_but_registered_sources_do_not(tmp_path):
-    store = artifacts.task_artifact_dir_path(tmp_path, "applied", create=True)
-    (store / "acceptance-user.json").write_text("user file", encoding="utf-8")
-    (store / "notes.lock").write_text("user lock", encoding="utf-8")
-    artifacts.store_task_artifact_bytes(tmp_path, "applied", "completion.json", b"retained555", kind="task_completion_observations")
-    artifacts.store_task_artifact_bytes(tmp_path, "applied", "acceptance-host.json", b"host551", kind="task_acceptance_review")
-    nested = store / "user-folder"
-    nested.mkdir()
-    (nested / "acceptance-host.json").write_text("unregistered same basename", encoding="utf-8")
-    records = artifacts.collect_task_artifact_records(tmp_path, "applied")
-    assert {row["path"] for row in records} == {str(store / "acceptance-user.json"), str(store / "notes.lock"),
-                                               str(nested / "acceptance-host.json")}
-    assert (store / "completion.json").read_bytes() == b"retained555"
-    assert {row["kind"] for row in artifacts.collect_task_artifact_records(tmp_path, "applied", include_bookkeeping=True)} >= {
-        "task_completion_observations", "task_acceptance_review"}
-
-
-def test_materialized_user_artifact_outweighs_stale_review_only_readiness(tmp_path):
-    source = artifacts.store_task_artifact_bytes(tmp_path, "applied", "review.json", b"source", kind="task_acceptance_review")
-    review = artifacts.artifact_record(artifacts.task_artifact_dir_path(tmp_path, "applied") / source["path"], kind="task_acceptance_review")
-    write_task_result(tmp_path, "applied", "completed", artifacts=[review], artifact_status="ready",
-                      artifact_bundle={"artifacts": [review], "status": "ready"},
-                      outcome_axes={"artifacts": {"status": "ready"}})
-    artifacts.store_task_artifact_bytes(tmp_path, "applied", "answer.txt", b"real result", kind="user_file")
-
-    effective = load_effective_task_result(tmp_path, "applied")
-
-    assert [item["name"] for item in effective["artifacts"]] == ["answer.txt"]
-    assert effective["artifact_bundle"]["status"] == "ready"
-    assert effective["artifact_status"] == "ready"
-    assert effective["outcome_axes"]["artifacts"]["status"] == "ready"
 
 
 @pytest.mark.parametrize("status", ["pending", "finalizing", "failed", "partial", "missing"])

@@ -14,8 +14,8 @@ const panel = (overrides = {}) => ({
     surface: 'task_acceptance', panel_id: 'panel_1', aggregate_signal: 'FAIL',
     reason: 'The host applied the complete review.', task_attempt: 0,
     applied_source_status: 'available',
-    applied_source_ref: { root: 'artifact_store', path: `acceptance-${hash}.json`,
-        sha256: hash, bytes: 75000, kind: 'task_acceptance_review' },
+    applied_source_ref: { root: 'artifact_store', path: `source_handles/context_checkpoints/acceptance-${hash}.json`,
+        sha256: hash, size: 75000, kind: 'task_source' },
     ...overrides,
 });
 const detail = (panels) => ({ task_id: 'root', review_projection: { panels } });
@@ -24,7 +24,7 @@ const group = (value) => taskAcceptanceGroupFromTaskDetail(detail([value]));
 test('the complete applied source uses the existing artifact download route', () => {
     const projected = group(panel());
     assert.equal(projected.attempts[0].detailRef.url,
-        `/api/tasks/root/artifacts/acceptance-${hash}.json`);
+        `/api/tasks/root/artifacts/acceptance-${hash}.json?source=${encodeURIComponent(panel().applied_source_ref.path)}`);
     const html = renderReviewsSection([projected]);
     assert.match(html, /Download full applied review<\/a>/);
     assert.match(html, / download>/);
@@ -41,7 +41,7 @@ test('legacy, unavailable and malformed sources remain explicitly unavailable', 
         { applied_source_ref: { ...panel().applied_source_ref, path: '../private.json' } },
         { applied_source_ref: { ...panel().applied_source_ref, path: 'file%2Fprivate.json' } },
         { applied_source_ref: { ...panel().applied_source_ref, sha256: '' } },
-        { applied_source_ref: { ...panel().applied_source_ref, bytes: '75000' } },
+        { applied_source_ref: { ...panel().applied_source_ref, size: '75000' } },
     ]) {
         const html = renderReviewsSection([group(panel(overrides))]);
         assert.match(html, /Full applied review unavailable\./);
@@ -95,7 +95,7 @@ test('acceptance invalidation joins a current read and refreshes to the newly ap
     release[1](panel({ publication_revision: 2 }));
     await two;
     assert.equal(applied.at(-1).attempts[0].detailRef.url,
-        `/api/tasks/root/artifacts/acceptance-${hash}.json`);
+        `/api/tasks/root/artifacts/acceptance-${hash}.json?source=${encodeURIComponent(panel().applied_source_ref.path)}`);
     await hydrator.hydrate(second.presentationOwnerTaskId, second.stateRevision);
     assert.equal(release.length, 2);
     assert.equal(reviewReferenceFromRow({ type: 'review_reference', surface: 'commit', task_id: 'root' }), null);

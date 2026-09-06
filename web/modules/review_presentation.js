@@ -795,7 +795,7 @@ export function taskAcceptanceGroupFromTaskDetail(detail, ownerTaskId = '') {
             executions: executionsFromReviewRecord(panel),
             execution: null,
             detailRef: { surface: 'task_acceptance', url: panel.applied_source_status === 'available'
-                ? taskSourceDownloadUrl(owner, panel.applied_source_ref, 'task_acceptance_review') : '' },
+                ? taskSourceDownloadUrl(owner, panel.applied_source_ref) : '' },
             detailText: `${formatReviewProjection({ panels: [panel] })}\nCost unavailable`.trim(),
         };
     });

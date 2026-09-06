@@ -11,8 +11,7 @@ from starlette.testclient import TestClient
 from ouroboros import artifacts, review_projection
 from ouroboros.gateway.tasks import api_task_artifact
 from ouroboros.headless import copy_child_task_result, prepare_task_drive, remove_subagent_task_drive
-from ouroboros.task_finalization import completion_source_projection
-from ouroboros.task_results import load_task_result, task_result_path, write_task_result
+from ouroboros.task_results import write_task_result
 from tests.test_acceptance_publication import _context, _run
 
 
@@ -69,28 +68,6 @@ def test_unchanged_review_source_is_write_once(tmp_path, monkeypatch):
     assert trace["review_runs"][0]["applied_source_ref"] == ref
     assert path.stat().st_mtime_ns == stamp
     assert not (path.parents[2] / artifacts._ARTIFACT_MANIFEST).exists()
-
-
-@pytest.mark.serial
-@pytest.mark.parametrize("kind", ["task_acceptance_review", "task_completion_observations"])
-def test_legacy_flat_sources_remain_readable_without_data_migration(tmp_path, kind):
-    raw = b'{"delivery_results": [], "legacy": true}'
-    ref = artifacts.store_task_artifact_bytes(tmp_path, "source", "old.json", raw, kind=kind)
-    record = artifacts.artifact_record(artifacts.task_artifact_dir_path(tmp_path, "source") / "old.json", kind=kind)
-    write_task_result(tmp_path, "source", "completed", artifacts=[record], artifact_status="ready",
-                      **_field(ref, "completion" if kind == "task_completion_observations" else "review"))
-    path = task_result_path(tmp_path, "source", create=False)
-    original = path.read_bytes()
-    loaded = load_task_result(tmp_path, "source")
-    assert loaded["artifacts"] == [] and loaded["artifact_status"] == "not_applicable"
-    assert artifacts.read_actor_source_bytes(tmp_path, "source", ref) == raw
-    if kind == "task_completion_observations":
-        assert completion_source_projection(tmp_path, "source", loaded, 0, len(raw))["text"] == raw.decode()
-    app = Starlette(routes=[Route("/api/tasks/{task_id}/artifacts/{name}", api_task_artifact)])
-    app.state.drive_root = tmp_path
-    with TestClient(app) as client:
-        assert client.get("/api/tasks/source/artifacts/old.json").content == raw
-    assert path.read_bytes() == original
 
 
 @pytest.mark.serial

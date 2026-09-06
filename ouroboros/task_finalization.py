@@ -355,7 +355,7 @@ def completion_source_projection(
     unavailable = {"schema": 1, "kind": "task_completion_observations", "status": "unavailable"}
     observations = result.get("completion_observations")
     ref = observations.get("source_ref") if isinstance(observations, dict) else None
-    if not isinstance(ref, dict) or ref.get("kind") not in {"task_source", unavailable["kind"]}:
+    if not isinstance(ref, dict) or ref.get("kind") != "task_source":
         return {**unavailable, "reason": "source_unavailable"}
     try:
         raw = read_actor_source_bytes(drive_root, str(result.get("task_id") or task_id), ref)
