@@ -1018,36 +1018,38 @@ def _prepare_review_commit_worktree(
     merges keep their live MERGE_HEAD and only run the existing transaction
     precommit verification.
     """
-    is_detached = False
+    if managed_tx:
+        from supervisor.update_merge import managed_assisted_precommit_verify
+
+        verified, error_message = managed_assisted_precommit_verify(managed_tx)
+        return False, "" if verified else error_message
     came_from_detached_checkout = False
-    if not managed_tx:
-        try:
-            current_branch = run_cmd(
-                ["git", "rev-parse", "--abbrev-ref", "HEAD"], cwd=ctx.repo_dir
-            ).strip()
-            is_detached = current_branch == "HEAD"
-        except Exception:
-            pass
     try:
-        if not managed_tx:
-            if is_detached:
-                run_cmd(
-                    ["git", "checkout", "-B", ctx.branch_dev, "HEAD"],
-                    cwd=ctx.repo_dir,
-                )
-                came_from_detached_checkout = True
-            else:
-                run_cmd(["git", "checkout", ctx.branch_dev], cwd=ctx.repo_dir)
+        current_branch = run_cmd(
+            ["git", "rev-parse", "--abbrev-ref", "HEAD"], cwd=ctx.repo_dir
+        ).strip()
+        if current_branch != "HEAD":
+            # A missing branch must never resolve as a package path or remote guess.
+            run_cmd(["git", "show-ref", "--verify", f"refs/heads/{ctx.branch_dev}"], cwd=ctx.repo_dir)
+    except Exception as exc:
+        return False, (
+            f"⚠️ GIT_BRANCH_UNAVAILABLE: cannot verify local branch {ctx.branch_dev!r}. "
+            f"Current branch, index and files were preserved. {_sanitize_git_error(str(exc))}"
+        )
+    try:
+        if current_branch == "HEAD":
+            run_cmd(["git", "checkout", "-B", ctx.branch_dev, "HEAD"], cwd=ctx.repo_dir)
+            came_from_detached_checkout = True
+        else:
+            run_cmd(["git", "checkout", "--no-guess", ctx.branch_dev, "--"], cwd=ctx.repo_dir)
     except Exception as exc:
         error_message = _sanitize_git_error(str(exc))
-        already_on_target = False
         try:
-            current_branch_after = run_cmd(
+            already_on_target = run_cmd(
                 ["git", "rev-parse", "--abbrev-ref", "HEAD"], cwd=ctx.repo_dir
-            ).strip()
-            already_on_target = current_branch_after == ctx.branch_dev
+            ).strip() == ctx.branch_dev
         except Exception:
-            pass
+            already_on_target = False
         if not already_on_target:
             return came_from_detached_checkout, f"⚠️ GIT_ERROR (checkout): {error_message}"
         try:
@@ -1067,12 +1069,6 @@ def _prepare_review_commit_worktree(
                 "the checkout failure as an incidental dirty-tree no-op.\n"
                 f"{unmerged}"
             )
-    if managed_tx:
-        from supervisor.update_merge import managed_assisted_precommit_verify
-
-        verified, error_message = managed_assisted_precommit_verify(managed_tx)
-        if not verified:
-            return came_from_detached_checkout, error_message
     return came_from_detached_checkout, ""
 
 

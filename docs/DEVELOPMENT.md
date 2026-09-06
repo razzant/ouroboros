@@ -72,6 +72,12 @@ rules have no automated surface — review-only.
   implicit sandbox.
 - Project-local installs may run within the workspace policy. Global/system
   installs remain safety-reviewed, and `sudo` is non-interactive (`sudo -n`).
+- GitHub issue/PR tools resolve the same process binding as shell commands and
+  carry an explicit `repo` into every dependent call. Project focus overrides
+  ambient `GH_REPO`; broken room bindings refuse and file-less Projects need an
+  explicit repository. Presence may override its default repository only through
+  a host-selected argument binding. Native CLI configuration proves configuration,
+  not active authentication; discovery never logs in or probes the network.
 - Do not add a second scheduler for operator tooling or a generic CLI file
   manager. Use the task queue, attachments, logs, and artifact endpoints.
 

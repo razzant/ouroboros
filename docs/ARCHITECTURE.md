@@ -400,7 +400,7 @@ server.py (Starlette+uvicorn) ← HTTP + WebSocket on configurable host:port (de
       │   ├── commit_gate.py   ← Commit gate: `_record_commit_attempt` (LLM claim synthesis), `classify_review_block`/`attempt_block_class`, `check_identical_verdict_refusal`, `count_paid_review_cycles`/`check_review_cycles_ceiling`, `commit_review_contract_fingerprint`
       │   ├── git_rollback.py  ← Wraps `git_ops.rollback_to_version`
       │   ├── git_pr.py        ← Five PR tools (non-core)
-      │   ├── github.py        ← Issue + PR tools (frozen tool module)
+      │   ├── github.py        ← Issue + PR tools (frozen tool module): shared process binding selects the active Project; explicit repo flows through every subcall; missing implicit Project targets fail visibly. Discovery reads token sources or native CLI configuration without an authentication probe; explicit Hub/API transport retains its own target.
       │   ├── parallel_review.py ← Triad + scope review orchestration: assembly of both packets, the money admission call (`review_admission.py`), the scope-first hold, and the executor transitions that carry the admitting usage scope (`contextvars.copy_context`) into every seat
       │   ├── plan_review_references.py ← Reference projection that also writes its own provenance rows (`append_jsonl` into `logs/progress.jsonl`, `emit_log_event`), never a second plan authority
       │   ├── plan_review.py   ← `plan_task` engine: evidence, packet, fan-out over the review substrate, `plan_review_state` v2, the shared `OUROBOROS_REVIEW_MAX_CYCLES` cap, free identical replays; no scouts, Atlas, or plan_class
@@ -1251,6 +1251,8 @@ Disclosed delegated-isolation residuals (deliberate): a run whose owner's termin
 **Read provenance on the accounts surface.** `GET /api/claudexor/status` carries a `reads` block (`ClaudexorStatusReads`: `catalog`/`accounts`/`quota`, each `ok`|`not_read`|`failed`) because the owned daemon starts lazily: an idle daemon serves empty collections under a 200, and "no account connected" must not be inferred from a collection that was never read — `ok` makes the matching collection authoritative (empty means empty); one parity-tested client reader (`facetReadState`) applies the same rule, and the aggregate `daemon.state` is never the negative answer. Login jobs: the daemon stays the sole process/fence authority and reconcile is an explicit POST, never passive polling (`gateway/claudexor_accounts.py`).
 
 ### Git and commit review
+
+Commit preparation verifies the exact local working-branch ref before an unambiguous checkout. A missing ref refuses without changing the current branch, index or files; remote guessing and implicit branch creation are disabled. Detached work retains the existing `checkout -B <branch> HEAD` recovery, and managed assisted merges retain transaction-owned precommit verification.
 
 `tools/git.py` owns repository writes, staging, reviewed commit, rollback or restore, tags, push, and CI follow-up. File-edit tools validate their own atomic write shape; `mutation_attribution.py` captures the root-task baseline and projects only the clean-at-baseline system-repository delta — a changed pre-existing dirty path, stale or missing baseline, or failed scan blocks automatic staging. `commit_reviewed(paths=None)` stages only that attributed candidate, explicit paths must be a subset, and an empty candidate returns `GIT_NO_ATTRIBUTED_CHANGES`; managed update transactions keep their separate typed whole-tree authority.
 
