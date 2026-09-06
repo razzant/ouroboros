@@ -284,6 +284,7 @@ def test_non_committing_review_cycle_runtime_unstages_on_success(monkeypatch):
     released = []
 
     monkeypatch.setattr(git_mod, "_check_overlapping_review_attempt", lambda ctx: None)
+    monkeypatch.setattr(git_mod, "_reconcile_advisory_before_preparation", lambda *a, **kw: "")
     monkeypatch.setattr(git_mod, "_acquire_git_lock", lambda ctx: "lock-token")
     monkeypatch.setattr(git_mod, "_release_git_lock", lambda lock: released.append(lock))
     monkeypatch.setattr(
@@ -326,6 +327,7 @@ def test_non_committing_review_cycle_runtime_unstages_on_block(monkeypatch):
     released = []
 
     monkeypatch.setattr(git_mod, "_check_overlapping_review_attempt", lambda ctx: None)
+    monkeypatch.setattr(git_mod, "_reconcile_advisory_before_preparation", lambda *a, **kw: "")
     monkeypatch.setattr(git_mod, "_acquire_git_lock", lambda ctx: "lock-token")
     monkeypatch.setattr(git_mod, "_release_git_lock", lambda lock: released.append(lock))
     monkeypatch.setattr(

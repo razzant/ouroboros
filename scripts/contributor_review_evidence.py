@@ -205,12 +205,14 @@ def _compare_dispatch(
         "session_target": str(dispatched_slot.get("session_target") or "") or None,
         "profile_id": str(dispatched_slot.get("session_profile") or "") or None,
         "effort": str(dispatched_slot.get("effort") or "") or None,
+        "subagent_id": str(dispatched_slot.get("subagent_id") or "") or None,
     }
     if not dispatched_slot:
         mismatches.append(f"prompt_receipt_absent:{surface}:{slot_id}")
         return dispatched
     expected = {
         "route": kind,
+        "subagent_id": str(row.get("subagent_id") or ""),
         "model": target,
         "effort": str(row.get("effort") or ""),
         "session_target": target if kind == "agent_session" else "",

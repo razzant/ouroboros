@@ -114,7 +114,7 @@ def _review_exception_projection(
 ) -> tuple[Dict[str, Any], str, Optional[int], str, str]:
     """Project one failed actor while retaining earlier rail custody."""
     from ouroboros.review_execution import ReviewRouteUnavailable
-    from ouroboros.usage_accounting import BudgetExceeded
+    from ouroboros.usage_accounting import BudgetExceeded, UsageAccountingError
 
     failure_custody = dict(executor_custody or {})
     capture = getattr(exc, "physical_attempt_capture", None)
@@ -184,6 +184,25 @@ def _review_exception_projection(
         and not isinstance(http_status, int)
         else str(getattr(exc, "code", "") or "")
     )
+    # Origin is a producer fact, not the rendered transport label (which can
+    # contain error prose). Ledger/admission and authority refusals stay
+    # independent of the owner's advisory review enforcement.
+    if isinstance(exc, UsageAccountingError) or failure_code in {
+        "subscription_window_exhausted", "credential_pool_exhausted",
+    }:
+        phase = "admission"
+    elif failure_code == "deadline_exhausted":
+        phase = "deadline"
+    elif isinstance(exc, ReviewRouteUnavailable) and failure_code not in {
+        "api_chat_unavailable", "route_unavailable", "harness_unavailable",
+        "provider_unavailable", "native_inspection_unavailable",
+        "native_bound_below_first_send", "native_round_without_progress",
+        "native_transcript_cap_exceeded",
+    }:
+        phase = "authority"
+    else:
+        phase = "delivery"
+    failure_custody["review_failure_phase"] = phase
     return failure_custody, capture_state, http_status, operation_state, failure_code
 
 
@@ -422,6 +441,7 @@ def _frozen_actor(row: Dict[str, Any], slot: Any) -> Any:
     raw_text = str(row.get("raw_text") or row.get("text") or "")
     actor_status = (
         "not_dispatched" if status == "not_dispatched"
+        else "error" if status == "error"
         else "ok" if raw_text or status in {"responded", "ok", "empty", "parse_failure", "partial"}
         else "error"
     )
@@ -435,6 +455,8 @@ def _frozen_actor(row: Dict[str, Any], slot: Any) -> Any:
         value = row.get(key)
         if value not in (None, "") and key not in usage:
             usage[key] = copy.deepcopy(value)
+    if row.get("failure_phase"):
+        usage["review_failure_phase"] = str(row["failure_phase"])
     operation_state = str(row.get("operation_state") or "settled")
     http_status = row.get("http_status")
     if isinstance(http_status, bool):

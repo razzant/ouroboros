@@ -97,56 +97,6 @@ def _review_custody_pending(ctx: ToolContext) -> bool:
     )
 
 
-def _finalize_pending_review(
-    ctx: ToolContext,
-    commit_message: str,
-    commit_start: float,
-    *,
-    pre_fingerprint: Dict[str, Any],
-    post_fingerprint: Dict[str, Any],
-) -> str:
-    """Persist the non-terminal wave and leave its exact retry fail-closed."""
-    custody_lost = bool(getattr(ctx, "_review_custody_lost", False))
-    message = (
-        "⚠️ REVIEW_CUSTODY_LOST: the paid review wave is still unresolved, but "
-        "its exact process-local custody is unavailable. A second dispatch was "
-        "not started; operator reconciliation is required."
-        if custody_lost else
-        "⚠️ REVIEW_PENDING: physical reviewer work remains in flight. Retry the "
-        "same commit to reconcile that exact paid wave; no second dispatch is allowed."
-    )
-    post_value = str(post_fingerprint.get("fingerprint") or "")
-    pre_value = str(pre_fingerprint.get("fingerprint") or "")
-    fingerprint_status = (
-        "matched" if post_value and post_value == pre_value
-        else "mismatch" if post_value else "unavailable"
-    )
-    _record_commit_attempt(
-        ctx,
-        commit_message,
-        "reviewing",
-        block_reason="review_custody_lost" if custody_lost else "review_late_result_pending",
-        block_details=message,
-        duration_sec=time.time() - commit_start,
-        phase="late_wait",
-        late_result_pending=True,
-        pre_review_fingerprint=pre_value,
-        post_review_fingerprint=post_value,
-        fingerprint_status=fingerprint_status,
-        triad_models=getattr(ctx, "_last_triad_models", []),
-        scope_model=getattr(ctx, "_last_scope_model", ""),
-        triad_raw_results=getattr(ctx, "_last_triad_raw_results", []),
-        scope_raw_result=getattr(ctx, "_last_scope_raw_result", {}),
-        degraded_reasons=list(getattr(ctx, "_review_degraded_reasons", []) or []),
-        review_retry_key=str(getattr(ctx, "_current_review_retry_key", "") or ""),
-    )
-    try:
-        run_cmd(["git", "reset", "HEAD"], cwd=ctx.repo_dir)
-    except Exception:
-        pass
-    return message
-
-
 def _repair_managed_merge_head(ctx: ToolContext) -> None:
     """Re-establish MERGE_HEAD for an authorized managed resolver after a
     refusal's index reset, so the resolution is not stranded (same repair the
@@ -206,10 +156,6 @@ def _free_cycle_gate(
         ):
             ctx._review_reconcile_only = True
             return None
-        try:
-            run_cmd(["git", "reset", "HEAD"], cwd=ctx.repo_dir)
-        except Exception:
-            pass
         return {
             "status": "blocked",
             "message": (
@@ -549,22 +495,6 @@ def _subject_binding_mismatch_outcome(
     }
 
 
-# The two advisory-block shapes an inline advisory_review can actually clear:
-# no run matches the current snapshot, or the last one could not be parsed. A
-# SyntaxError preflight block or an "advisory current but obligations still
-# open" block reproduces identically on a re-run, so those are handed back to
-# the agent unchanged.
-_ADVISORY_SELF_RECOVERABLE_MARKERS = (
-    "No fresh advisory run found for this snapshot",
-    "could not be parsed",
-)
-
-
-def _advisory_freshness_gap_is_self_recoverable(advisory_err: str) -> bool:
-    text = str(advisory_err or "")
-    return any(marker in text for marker in _ADVISORY_SELF_RECOVERABLE_MARKERS)
-
-
 def _advisory_and_tests_gate(
     ctx: ToolContext,
     commit_message: str,
@@ -574,57 +504,35 @@ def _advisory_and_tests_gate(
     advisory_paths: Optional[List[str]],
     skip_advisory_pre_review: bool,
     skip_tests: bool,
+    review_rebuttal: str = "",
+    free_replay: bool = False,
+    goal: str = "",
+    scope: str = "",
 ) -> Optional[Dict[str, Any]]:
     """Advisory-freshness gate plus the compensating tests preflight (moved
     whole out of ``_run_reviewed_stage_cycle`` at the function-size gate).
     ``None`` = proceed to review."""
-    advisory_err = _check_advisory_freshness(
-        ctx,
-        commit_message,
-        skip_advisory_pre_review,
-        paths=advisory_paths,
-    )
-    if (
-        advisory_err
-        and not skip_advisory_pre_review
-        and _advisory_freshness_gap_is_self_recoverable(advisory_err)
-    ):
-        # A missing / edit-staled advisory is the single most common
-        # commit_reviewed bounce: the task edited the very files it was sent to
-        # edit, which invalidates any advisory it ran earlier, so a
-        # production-touching change lands here on the FIRST commit_reviewed and
-        # has to leave the gate, call advisory_review by hand, and come back —
-        # and any further edit restarts the loop. Run the SAME advisory the
-        # agent would run, inline, against the current snapshot, then re-check
-        # once. A real AdvisoryRunRecord is written (not a bypass), so the
-        # compensating test-preflight coupling below is unchanged. One attempt
-        # only: a genuine block (SyntaxError preflight, open obligations, a
-        # critical advisory finding) survives the re-check and is returned as
-        # before.
-        try:
-            ctx.emit_progress_fn(
-                "No fresh advisory for this snapshot — running preflight_review inline "
-                "before triad + scope review..."
-            )
-        except Exception:
-            pass
-        try:
-            _handle_advisory_pre_review(
-                ctx,
-                commit_message,
-                paths=advisory_paths,
-                skip_tests=skip_tests,
-            )
-        except Exception:
-            log.warning("inline advisory_review failed (non-fatal)", exc_info=True)
+    decision: Dict[str, Any] = {}
+    advisory_err = None
+    if not free_replay:
         advisory_err = _check_advisory_freshness(
-            ctx,
-            commit_message,
-            skip_advisory_pre_review,
-            paths=advisory_paths,
+            ctx, commit_message, skip_advisory_pre_review, paths=advisory_paths,
+            review_rebuttal=review_rebuttal, decision=decision,
         )
+        if (advisory_err and decision.get("refresh_required")
+                and not bool(getattr(ctx, "_advisory_reconciled", False))):
+            ctx.emit_progress_fn("Running preflight_review for the prepared candidate...")
+            _handle_advisory_pre_review(
+                ctx, commit_message, paths=advisory_paths, skip_tests=skip_tests,
+                review_rebuttal=review_rebuttal, goal=goal, scope=scope, prepared=True,
+            )
+            advisory_err = _check_advisory_freshness(
+                ctx, commit_message, paths=advisory_paths,
+                review_rebuttal=review_rebuttal, decision=decision,
+            )
     if advisory_err:
-        run_cmd(["git", "reset", "HEAD"], cwd=ctx.repo_dir)
+        if not decision.get("pending"):
+            run_cmd(["git", "reset", "HEAD"], cwd=ctx.repo_dir)
         _record_commit_attempt(
             ctx,
             commit_message,
@@ -643,7 +551,7 @@ def _advisory_and_tests_gate(
     # missed a disabled advisory slot (audited bypass with NO compensating test
     # preflight) and falsely bypassed the keyless delegated route (duplicate
     # hermetic pytest + a false "Advisory bypassed" progress line).
-    if skip_advisory_pre_review:
+    if skip_advisory_pre_review or free_replay:
         _advisory_bypassed = True
     else:
         try:
@@ -681,7 +589,7 @@ def _advisory_and_tests_gate(
         from ouroboros.commit_admission import run_tests_preflight_with_proof
 
         test_err = run_tests_preflight_with_proof(
-            ctx, runner=lambda c: _run_review_preflight_tests(c))
+            ctx, runner=lambda c, **kw: _run_review_preflight_tests(c, **kw))
         if test_err:
             msg = _tests_preflight_block_message(_managed_needs_proof, test_err)
             try:
@@ -1264,19 +1172,7 @@ def _repo_commit_push(ctx: ToolContext, commit_message: str,
                        scope: str = "") -> str:
     """Stage, review, and commit files with unified pre-commit review."""
     skip_advisory_pre_review = bool(skip_advisory_review or skip_advisory_pre_review)
-    ctx.last_push_succeeded = False
-    ctx._review_advisory = []
-    ctx._last_triad_models = []
-    ctx._last_scope_model = ""
-    ctx._last_triad_raw_results = []
-    ctx._last_scope_raw_result = {}
-    ctx._review_degraded_reasons = []
-    ctx._current_review_tool_name = "commit_reviewed"
-    ctx._current_review_retry_key = ""
-    ctx._review_reconcile_only = False
-    ctx._review_frozen_rows = {}
-    ctx._review_custody_lost = False
-    ctx._current_review_attempt_number = None
+    _reset_commit_review_state(ctx)
     _commit_start = time.time()
     if not commit_message.strip():
         return "⚠️ ERROR: commit_message must be non-empty."
@@ -1317,6 +1213,11 @@ def _repo_commit_push(ctx: ToolContext, commit_message: str,
             phase="preflight",
         )
         return overlap_err
+    preflight_pending = _reconcile_advisory_before_preparation(
+        ctx, commit_message, goal=goal, scope=scope, paths=paths, review_rebuttal=review_rebuttal,
+    )
+    if preflight_pending:
+        return preflight_pending
     if not bool(getattr(ctx, "_review_resume_pending", False)):
         _record_commit_attempt(ctx, commit_message, "reviewing")
     try:
@@ -1336,9 +1237,11 @@ def _repo_commit_push(ctx: ToolContext, commit_message: str,
             triad_raw_results=getattr(ctx, "_last_triad_raw_results", []),
             scope_raw_result=getattr(ctx, "_last_scope_raw_result", {})), msg)[1]
     try:
-        came_from_detached_checkout, preparation_error = _prepare_review_commit_worktree(
-            ctx, _managed_tx
-        )
+        came_from_detached_checkout, preparation_error = (False, "")
+        if not bool(getattr(ctx, "_review_resume_pending", False)):
+            came_from_detached_checkout, preparation_error = _prepare_review_commit_worktree(
+                ctx, _managed_tx
+            )
         if preparation_error:
             return _fail(preparation_error)
         evolution_claim: Dict[str, str] = {}
@@ -1689,12 +1592,15 @@ from ouroboros.tools.git_review_cycle import (  # noqa: E402,F401
     _DOC_ONLY_EXTENSIONS,
     _diff_is_doc_only,
     _finalize_blocked_review,
+    _finalize_pending_review,
     _fingerprint_staged_diff,
     _handle_revalidation_failure,
     _mark_failed_bypass_advisory_stale,
     _review_binding_precondition_error,
     _review_cycle_infra_failure,
     _run_non_committing_review_cycle,
+    _reconcile_advisory_before_preparation,
+    _reset_commit_review_state,
     _run_reviewed_stage_cycle,
     _stage_candidate_for_review,
     _verify_reviewed_commit_binding,

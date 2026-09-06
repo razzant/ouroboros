@@ -640,12 +640,6 @@ def _run_on_trusted_base(args) -> int | None:
         _remove_isolated_checkout(checkout_root, trusted)
 
 
-def _actor_records(ctx: object) -> list[dict]:
-    """Return physical reviewer actor records without double-counting summaries."""
-    actors = [actor for _, actor in _actor_records_with_surface(ctx)]
-    return actors
-
-
 def _actor_records_with_surface(ctx: object) -> list[tuple[str, dict]]:
     """Return ``(surface, actor)`` rows for the configured triad and scope slots."""
     actors = [
@@ -698,7 +692,7 @@ def _review_evidence_and_cost(ctx: object) -> tuple[list[dict], dict]:
     reported_cost = 0.0
     reported_slots: list[str] = []
     unreported_slots: list[str] = []
-    for idx, actor in enumerate(_actor_records(ctx), start=1):
+    for idx, (_surface, actor) in enumerate(_actor_records_with_surface(ctx), start=1):
         slot = str(actor.get("slot_id") or actor.get("slot") or f"actor_{idx}")
         prompt_ref = actor.get("prompt_ref") or {}
         response_ref = actor.get("response_ref") or {}
@@ -752,6 +746,7 @@ def _resolved_review_config(*, profile: str = "production_commit_gate") -> dict:
             "slot_id": row.slot_id,
             "route": route,
             "effort": row_effort(row, surface),
+            **({"subagent_id": row.subagent_id} if row.subagent_id else {}),
         }
 
     triad_slots = [_project(row, "review") for row in config.triad]
@@ -774,17 +769,25 @@ def _resolved_review_config(*, profile: str = "production_commit_gate") -> dict:
 
 
 def _slot_plan_payload(resolved_config: dict) -> dict:
+    def wire_row(row):
+        # A stored reference and its resolved route are mutually exclusive.
+        return ({key: row[key] for key in ("slot_id", "subagent_id", "effort")}
+                if row.get("subagent_id") else dict(row))
+
     return {
-        "triad": list(resolved_config.get("triad_slots") or []),
-        "scope": list(resolved_config.get("scope_slots") or []),
+        "triad": [wire_row(row) for row in resolved_config.get("triad_slots") or []],
+        "scope": [wire_row(row) for row in resolved_config.get("scope_slots") or []],
         "advisory": {"enabled": False},
     }
 
 
 def _slot_plan_sha256(resolved_config: dict) -> str:
-    raw = json.dumps(
-        _slot_plan_payload(resolved_config), sort_keys=True, separators=(",", ":")
-    ).encode("utf-8")
+    plan = _slot_plan_payload(resolved_config)
+    for surface in ("triad", "scope"):
+        rows = list(resolved_config.get(f"{surface}_slots") or [])
+        if any(row.get("subagent_id") for row in rows):
+            plan[surface] = rows  # evidence binds the reference AND its resolved route
+    raw = json.dumps(plan, sort_keys=True, separators=(",", ":")).encode("utf-8")
     return hashlib.sha256(raw).hexdigest()
 
 
@@ -796,7 +799,7 @@ def _freeze_contributor_slots(resolved_config: dict) -> dict:
     )
     os.environ["OUROBOROS_REVIEWER_SLOTS"] = raw
     frozen = _resolved_review_config(profile=_CONTRIBUTOR_PROFILE)
-    if _slot_plan_payload(frozen) != _slot_plan_payload(resolved_config):
+    if any(frozen.get(key) != resolved_config.get(key) for key in ("triad_slots", "scope_slots")):
         raise RuntimeError("contributor reviewer slot freeze changed the resolved plan")
     frozen["slot_config_source"] = source
     frozen["execution_slot_config_source"] = "frozen_structured"
@@ -1030,20 +1033,19 @@ def _write_contributor_packet(
 
 
 def _diff_size_refusal(args, resolved_config: dict, reviewable_chars: int, cap: int) -> bool:
-    """Whether the advisory hard cap actually binds THIS panel.
+    """The cap binds packet recipients; configured retrieving actors read files.
 
-    It protects a reviewer that receives the diff AS PROMPT TEXT: the Claude advisory lane and
-    any ``api_chat`` slot. An ``agent_session`` slot is handed a pointer ("the subject is the
-    staged diff of the repository you are running in" — ``review._triad_session_task``) and
-    retrieves it with its own tools, so the diff never enters its prompt and the cap guards
-    nothing. Applying it there refused a review the panel could actually do (owner decision,
-    2026-08-16)."""
+    The non-contributor advisory flow keeps its existing hard cap. Native
+    API actors remain paid seats even though they do not receive a packet.
+    """
+    from ouroboros.review_execution import delivery_retrieves
+
     if reviewable_chars <= cap:
         return False
     if not getattr(args, "contributor", False):
         return True
     return any(
-        (row.get("route") or {}).get("kind") == "api_chat"
+        not delivery_retrieves((row.get("route") or {}).get("kind"), row.get("subagent_id"))
         for row in [
             *list(resolved_config.get("triad_slots") or []),
             *list(resolved_config.get("scope_slots") or []),
@@ -1245,6 +1247,29 @@ def _operator_reviewable_diff_chars(fallback_chars: int) -> int:
     return len(result.stdout or "")
 
 
+def _pending_checkout_custody(ctx) -> dict:
+    """Retain the candidate while actual reviewer custody is unresolved."""
+    from ouroboros.review_state import _load_state_unlocked, make_repo_key
+    from ouroboros.tools.git import _review_custody_pending
+
+    facts = {}
+    if _review_custody_pending(ctx):
+        facts["reviewers"] = _actor_records_with_surface(ctx)
+        facts["custody_lost"] = bool(getattr(ctx, "_review_custody_lost", False))
+    try:
+        state = _load_state_unlocked(pathlib.Path(ctx.drive_root), strict_attempt_authority=True)
+        runs = state.filter_advisory_runs(repo_key=make_repo_key(ctx.repo_dir))
+        active = [run.execution for run in runs if run.status == "pending"
+                  or run.execution.get("pending_invocation_id")
+                  or run.execution.get("operation_state") in {"in_flight", "custody_lost"}]
+        if active:
+            facts["preflight"] = active
+    except Exception as exc:
+        # Unknown is disclosed as unknown; it does not assert a live worker.
+        facts["custody_unreadable"] = f"{type(exc).__name__}: {exc}"
+    return facts
+
+
 def main() -> int:
     version = (REPO / "VERSION").read_text(encoding="utf-8").strip()
     args = _parse_args()
@@ -1296,7 +1321,7 @@ def main() -> int:
             f"ERROR: staged diff is {reviewable_chars:,} chars — over the advisory hard cap "
             f"({_MAX_DIFF_CHARS_ERROR:,}) and at least one reviewer receives the diff as prompt "
             "text. Policy: split the phase into smaller single-intent commits instead of "
-            "relaxing the gate (an all-`agent_session` panel retrieves the diff itself and is "
+            "relaxing the gate (a panel of retrieving actors reads the diff itself and is "
             "not bound by this cap).",
             file=sys.stderr,
         )
@@ -1373,6 +1398,7 @@ def main() -> int:
     )
 
     t0 = time.time()
+    outcome, retained_custody = {}, {}
     try:
         from ouroboros.tools.git import _run_non_committing_review_cycle
 
@@ -1383,26 +1409,10 @@ def main() -> int:
                 file=sys.stderr,
             )
         else:
-            # The default operator lane runs the configured advisory route. Its
-            # freshness state lives in this run's drive root, so the production
-            # cycle below sees a fresh advisory.
+            # The shared cycle owns preparation, admission and any paid preflight.
             advisory_warning = _advisory_unavailability_warning()
             if advisory_warning:
                 print(advisory_warning, file=sys.stderr)
-            from ouroboros.tools.claude_advisory_review import _handle_advisory_pre_review
-
-            advisory_text = _handle_advisory_pre_review(
-                ctx, commit_message=commit_message, goal=goal, scope=scope,
-            )
-            (output_dir / "advisory.txt").write_text(
-                str(advisory_text) + "\n", encoding="utf-8"
-            )
-            print(
-                "=" * 80
-                + "\nADVISORY PRE-REVIEW (full)\n"
-                + "=" * 80
-                + f"\n{advisory_text}"
-            )
 
         outcome = _run_non_committing_review_cycle(
             ctx,
@@ -1411,6 +1421,15 @@ def main() -> int:
             goal=goal,
             scope=scope,
         )
+        if not args.contributor:
+            from dataclasses import asdict
+            from ouroboros.review_state import load_state, make_repo_key
+
+            runs = load_state(review_drive_root).filter_advisory_runs(repo_key=make_repo_key(repo_for_review))
+            record = asdict(runs[-1]) if runs else {"status": "not_run", "reason": "cycle did not reach preflight"}
+            advisory_text = json.dumps(record, ensure_ascii=False, indent=2)
+            (output_dir / "advisory.txt").write_text(advisory_text + "\n", encoding="utf-8")
+            print("ADVISORY PRE-REVIEW (recorded full source)\n" + advisory_text)
         if args.contributor:
             outcome = _apply_contributor_landing_obligations(
                 outcome,
@@ -1421,7 +1440,8 @@ def main() -> int:
                     )
                 ),
             )
-        if checkout is not None:
+        retained_custody = _pending_checkout_custody(ctx)
+        if checkout is not None and not retained_custody:
             # The cycle may auto-sync release metadata (version carriers) in the
             # checkout; a drifted tree means reviewers approved MORE than the
             # operator's staged patch — surface that loudly. The cycle's final
@@ -1453,27 +1473,29 @@ def main() -> int:
                         "block_reason": "reviewed_tree_drift",
                     }
     finally:
+        retained_custody = retained_custody or _pending_checkout_custody(ctx)
         if checkout_root is not None and checkout is not None:
-            _remove_isolated_checkout(checkout_root, checkout)
+            if retained_custody:
+                outcome.update(status="blocked", block_reason=outcome.get("block_reason") or "review_custody_unresolved",
+                               retained_checkout=str(checkout), retained_custody=retained_custody,
+                               review_drive_root=str(review_drive_root),
+                               retention_reason="review custody unresolved; reconcile before cleanup")
+                (output_dir / "outcome.json").write_text(json.dumps({"exit_code": 3, "outcome": outcome}, default=str) + "\n", encoding="utf-8")
+                print(f"Review checkout retained for reconciliation: {checkout} (custody drive: {review_drive_root})", file=sys.stderr)
+            else:
+                _remove_isolated_checkout(checkout_root, checkout)
 
     evidence_refs, cost_report = _review_evidence_and_cost(ctx)
-    execution_receipts: list[dict] = []
-    execution_mismatches: list[str] = []
-    session_transcripts: list[dict] = []
-    if contributor_snapshot is not None:
-        execution_receipts, execution_mismatches, session_transcripts = (
-            _contributor_execution_receipts(ctx, resolved_config, review_drive_root)
-        )
     exit_code = _classify_exit(outcome)
     if contributor_snapshot is not None:
         from scripts.contributor_review_evidence import finalize_contributor_outcome
 
-        exit_code, outcome = finalize_contributor_outcome(
-            outcome=outcome, exit_code=exit_code,
-            mismatches=execution_mismatches,
+        execution_receipts, execution_mismatches, session_transcripts = (
+            _contributor_execution_receipts(ctx, resolved_config, review_drive_root)
         )
-
-    if contributor_snapshot is not None:
+        exit_code, outcome = finalize_contributor_outcome(
+            outcome=outcome, exit_code=exit_code, mismatches=execution_mismatches,
+        )
         replacements = sorted(
             [
                 (str(checkout or ""), "$REVIEW_CHECKOUT"),

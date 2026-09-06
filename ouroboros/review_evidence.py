@@ -467,6 +467,7 @@ def collect_review_evidence(
             "repo_commit_ready": advisory_commit_ready(
                 current_run is not None and current_run.status in ("fresh", "bypassed", "skipped"),
                 open_obligations, open_debts,
+                matching_run=current_run if getattr(current_run, "repo_key", None) == repo_key and repo_key else None,
             ),
             "bypass_reason": str(getattr(current_run, "bypass_reason", "") or ""),
             "stale_reason": str(getattr(state, "last_stale_reason", "") or "") if stale_matches_repo else "",

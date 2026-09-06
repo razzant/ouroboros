@@ -215,6 +215,72 @@ def _handle_revalidation_failure(*args, **kwargs):
     )
 
 
+def _revalidation_outcome(ctx, commit_message, commit_start, before, after, *, worktree_changed=False):
+    """Keep prepared and reviewed material bound through the same transition."""
+    if not after.get("ok"):
+        kind = "fingerprint_unavailable"
+    elif worktree_changed or after.get("fingerprint") != before.get("fingerprint"):
+        kind = "revalidation_failed"
+    else:
+        return None
+    return {
+        "status": "blocked", "block_reason": kind,
+        "message": _git()._handle_revalidation_failure(
+            ctx, commit_message, commit_start,
+            pre_fingerprint=before, post_fingerprint=after, kind=kind,
+        ),
+        "pre_fingerprint": before, "post_fingerprint": after,
+    }
+
+
+def _finalize_pending_review(
+    ctx: ToolContext,
+    commit_message: str,
+    commit_start: float,
+    *,
+    pre_fingerprint: Dict[str, Any],
+    post_fingerprint: Dict[str, Any],
+) -> str:
+    """Persist the non-terminal wave and leave its exact retry fail-closed."""
+    custody_lost = bool(getattr(ctx, "_review_custody_lost", False))
+    message = (
+        "⚠️ REVIEW_CUSTODY_LOST: the paid review wave is still unresolved, but "
+        "its exact process-local custody is unavailable. A second dispatch was "
+        "not started; operator reconciliation is required."
+        if custody_lost else
+        "⚠️ REVIEW_PENDING: physical reviewer work remains in flight. Retry the "
+        "same commit to reconcile that exact paid wave; no second dispatch is allowed."
+    )
+    post_value = str(post_fingerprint.get("fingerprint") or "")
+    pre_value = str(pre_fingerprint.get("fingerprint") or "")
+    fingerprint_status = (
+        "matched" if post_value and post_value == pre_value
+        else "mismatch" if post_value else "unavailable"
+    )
+    _git()._record_commit_attempt(
+        ctx,
+        commit_message,
+        "reviewing",
+        block_reason="review_custody_lost" if custody_lost else "review_late_result_pending",
+        block_details=message,
+        duration_sec=time.time() - commit_start,
+        phase="late_wait",
+        late_result_pending=True,
+        pre_review_fingerprint=pre_value,
+        post_review_fingerprint=post_value,
+        fingerprint_status=fingerprint_status,
+        triad_models=getattr(ctx, "_last_triad_models", []),
+        scope_model=getattr(ctx, "_last_scope_model", ""),
+        triad_raw_results=getattr(ctx, "_last_triad_raw_results", []),
+        scope_raw_result=getattr(ctx, "_last_scope_raw_result", {}),
+        degraded_reasons=list(getattr(ctx, "_review_degraded_reasons", []) or []),
+        review_retry_key=str(getattr(ctx, "_current_review_retry_key", "") or ""),
+    )
+    # The index is part of this live wave's identity. Retain it for exact
+    # reconciliation; rebuilding it from the worktree could review new bytes.
+    return message
+
+
 def _finalize_blocked_review(
     ctx: ToolContext,
     commit_message: str,
@@ -335,35 +401,43 @@ def _stage_candidate_for_review(
     came_from_detached_checkout: bool,
 ) -> tuple[List[str], Optional[List[str]], Optional[Dict[str, Any]]]:
     """Stage the candidate and return its paths without invoking any reviewer."""
-    if paths:
+    if not bool(getattr(ctx, "_review_resume_pending", False)):
+        from ouroboros.commit_admission import auto_sync_release_metadata_if_needed
+
+        synced = auto_sync_release_metadata_if_needed(
+            ctx, pathlib.Path(ctx.repo_dir), pathlib.Path(ctx.drive_root), paths,
+        )
+        if paths is not None and synced:
+            paths = sorted(set(paths) | set(synced))
+        if paths:
+            try:
+                safe_paths = [_git().safe_relpath(path) for path in paths if str(path).strip()]
+            except ValueError as exc:
+                error = _git()._review_cycle_infra_failure(
+                    ctx, commit_message, commit_start, f"⚠️ PATH_ERROR: {exc}"
+                )
+                return [], None, error
+            add_cmd = ["git", "add"] + safe_paths
+        else:
+            _git()._ensure_gitignore(ctx.repo_dir)
+            add_cmd = ["git", "add", "-A"]
         try:
-            safe_paths = [_git().safe_relpath(path) for path in paths if str(path).strip()]
-        except ValueError as exc:
+            _git().run_cmd(add_cmd, cwd=ctx.repo_dir)
+        except Exception as exc:
             error = _git()._review_cycle_infra_failure(
-                ctx, commit_message, commit_start, f"⚠️ PATH_ERROR: {exc}"
+                ctx,
+                commit_message,
+                commit_start,
+                _publish_git_error(
+                    ctx,
+                    f"⚠️ GIT_ERROR (add): {_sanitize_git_error(str(exc))}",
+                ),
             )
             return [], None, error
-        add_cmd = ["git", "add"] + safe_paths
-    else:
-        _git()._ensure_gitignore(ctx.repo_dir)
-        add_cmd = ["git", "add", "-A"]
-    try:
-        _git().run_cmd(add_cmd, cwd=ctx.repo_dir)
-    except Exception as exc:
-        error = _git()._review_cycle_infra_failure(
-            ctx,
-            commit_message,
-            commit_start,
-            _publish_git_error(
-                ctx,
-                f"⚠️ GIT_ERROR (add): {_sanitize_git_error(str(exc))}",
-            ),
-        )
-        return [], None, error
-    if not paths and not _git()._authorized_managed_update_resolver(ctx):
-        removed = _git()._unstage_binaries(ctx.repo_dir)
-        if removed:
-            log.warning("Unstaged %d binary files: %s", len(removed), removed)
+        if not paths and not _git()._authorized_managed_update_resolver(ctx):
+            removed = _git()._unstage_binaries(ctx.repo_dir)
+            if removed:
+                log.warning("Unstaged %d binary files: %s", len(removed), removed)
     try:
         status = _git().run_cmd(["git", "status", "--porcelain"], cwd=ctx.repo_dir)
     except Exception as exc:
@@ -438,6 +512,48 @@ def _stage_candidate_for_review(
     return classification_paths, advisory_paths, None
 
 
+def _reset_commit_review_state(ctx):
+    """One per-call reset for committing and review-only entry points."""
+    ctx.last_push_succeeded = False
+    ctx._review_advisory = []
+    ctx._last_triad_models = []
+    ctx._last_scope_model = ""
+    ctx._last_triad_raw_results = []
+    ctx._last_scope_raw_result = {}
+    ctx._review_degraded_reasons = []
+    ctx._current_review_tool_name = "commit_reviewed"
+    ctx._current_review_retry_key = ""
+    ctx._review_reconcile_only = False
+    ctx._review_frozen_rows = {}
+    ctx._review_custody_lost = False
+    ctx._current_review_attempt_number = None
+
+
+def _reconcile_advisory_before_preparation(ctx, commit_message, *, goal, scope, paths, review_rebuttal):
+    """Resolve the same delegated preflight before touching its candidate."""
+    from ouroboros.tools.preflight_review_run import pending_advisory_execution
+
+    ctx._advisory_reconciled = False
+    try:
+        execution, _ = pending_advisory_execution(
+            ctx, commit_message, goal=goal, scope=scope, paths=paths, review_rebuttal=review_rebuttal,
+        )
+        if execution.get("pending_invocation_id"):
+            _git()._handle_advisory_pre_review(
+                ctx, commit_message, goal=goal, scope=scope, paths=paths,
+                review_rebuttal=review_rebuttal, prepared=True,
+            )
+            remaining, _ = pending_advisory_execution(
+                ctx, commit_message, goal=goal, scope=scope, paths=paths, review_rebuttal=review_rebuttal,
+            )
+            if remaining.get("pending_invocation_id"):
+                return "⚠️ REVIEW_PENDING: the exact preflight invocation remains unresolved; no candidate preparation was performed."
+            ctx._advisory_reconciled = True
+    except Exception as exc:
+        return f"⚠️ REVIEW_PENDING: preflight custody could not be reconciled: {exc}"
+    return ""
+
+
 def _run_reviewed_stage_cycle(
     ctx: ToolContext,
     commit_message: str,
@@ -479,7 +595,8 @@ def _run_reviewed_stage_cycle(
             action="commit",
         )
         try:
-            _git().run_cmd(["git", "reset", "HEAD"], cwd=ctx.repo_dir)
+            if not bool(getattr(ctx, "_review_resume_pending", False)):
+                _git().run_cmd(["git", "reset", "HEAD"], cwd=ctx.repo_dir)
         except Exception:
             pass
         if not bool(getattr(ctx, "_review_resume_pending", False)):
@@ -533,17 +650,6 @@ def _run_reviewed_stage_cycle(
             advisory_replay = gate_outcome
         else:
             return gate_outcome
-    advisory_gate_outcome = None
-    if not bool(getattr(ctx, "_review_reconcile_only", False)):
-        advisory_gate_outcome = _git()._advisory_and_tests_gate(
-            ctx, commit_message, commit_start,
-            classification_paths=classification_paths,
-            advisory_paths=advisory_paths,
-            skip_advisory_pre_review=skip_advisory_pre_review,
-            skip_tests=skip_tests,
-        )
-    if advisory_gate_outcome is not None:
-        return advisory_gate_outcome
     binding_error = _git()._review_binding_precondition_error(
         pre_fingerprint, require_release_tag=require_release_tag
     )
@@ -570,6 +676,31 @@ def _run_reviewed_stage_cycle(
             "pre_fingerprint": pre_fingerprint,
             "post_fingerprint": {},
         }
+    from ouroboros.review_state import compute_snapshot_hash
+
+    prepared_snapshot = compute_snapshot_hash(pathlib.Path(ctx.repo_dir), commit_message, paths=advisory_paths)
+    advisory_gate_outcome = None
+    if not bool(getattr(ctx, "_review_reconcile_only", False)):
+        advisory_gate_outcome = _git()._advisory_and_tests_gate(
+            ctx, commit_message, commit_start,
+            classification_paths=classification_paths,
+            advisory_paths=advisory_paths,
+            skip_advisory_pre_review=skip_advisory_pre_review,
+            skip_tests=skip_tests,
+            review_rebuttal=review_rebuttal,
+            free_replay=advisory_replay is not None,
+            goal=goal, scope=scope,
+        )
+    if advisory_gate_outcome is not None:
+        return advisory_gate_outcome
+    if not bool(getattr(ctx, "_review_reconcile_only", False)):
+        after_preflight = _git()._fingerprint_staged_diff(pathlib.Path(ctx.repo_dir))
+        changed = compute_snapshot_hash(pathlib.Path(ctx.repo_dir), commit_message, paths=advisory_paths) != prepared_snapshot
+        revalidation = _revalidation_outcome(
+            ctx, commit_message, commit_start, pre_fingerprint, after_preflight, worktree_changed=changed,
+        )
+        if revalidation is not None:
+            return revalidation
     _git()._record_commit_attempt(
         ctx,
         commit_message,
@@ -609,7 +740,7 @@ def _run_reviewed_stage_cycle(
             )
         disclosure = (
             "Review enforcement=Advisory: no new triad+scope review was bought for "
-            f"this commit ({replay_reason}). "
+            f"this commit ({replay_reason}); no fresh automatic preflight was bought. "
             + str(advisory_replay.get("advisory_replay") or "")
         )
         advisory_list = getattr(ctx, "_review_advisory", None)
@@ -665,41 +796,19 @@ def _run_reviewed_stage_cycle(
             "pre_fingerprint": pre_fingerprint,
             "post_fingerprint": post_fingerprint,
         }
-    if not post_fingerprint.get("ok"):
-        return {
-            "status": "blocked",
-            "message": _git()._handle_revalidation_failure(
-                ctx,
-                commit_message,
-                commit_start,
-                pre_fingerprint=pre_fingerprint,
-                post_fingerprint=post_fingerprint,
-                kind="fingerprint_unavailable",
-            ),
-            "block_reason": "fingerprint_unavailable",
-            "pre_fingerprint": pre_fingerprint,
-            "post_fingerprint": post_fingerprint,
-        }
-    if post_fingerprint.get("fingerprint") != pre_fingerprint.get("fingerprint"):
-        return {
-            "status": "blocked",
-            "message": _git()._handle_revalidation_failure(
-                ctx,
-                commit_message,
-                commit_start,
-                pre_fingerprint=pre_fingerprint,
-                post_fingerprint=post_fingerprint,
-                kind="revalidation_failed",
-            ),
-            "block_reason": "revalidation_failed",
-            "pre_fingerprint": pre_fingerprint,
-            "post_fingerprint": post_fingerprint,
-        }
+    revalidation = _revalidation_outcome(ctx, commit_message, commit_start, pre_fingerprint, post_fingerprint)
+    if revalidation is not None:
+        return revalidation
     _subject_mismatch = _git()._subject_binding_mismatch_outcome(
         ctx, commit_message, commit_start, pre_fingerprint, post_fingerprint
     )
     if _subject_mismatch is not None:
         return _subject_mismatch
+    from ouroboros.review_custody import review_retry_cancelled
+    from ouroboros.deadline_utils import owner_deadline_exhausted_for_context
+
+    if review_retry_cancelled(ctx) or owner_deadline_exhausted_for_context(ctx):
+        blocked, combined_msg, block_reason = True, "⚠️ REVIEW_STOPPED: owner cancellation or deadline prevents this commit.", "owner_stopped"
     if blocked:
         # Typed block-row classification (Q16/Δ5): a reviewer VERDICT builds
         # the identical-diff refusal streak; an INFRA fact (fit/quorum/
@@ -749,20 +858,8 @@ def _run_non_committing_review_cycle(
     review_rebuttal: str = "",
 ) -> Dict[str, Any]:
     skip_advisory_pre_review = bool(skip_advisory_review or skip_advisory_pre_review)
-    ctx.last_push_succeeded = False
     ctx.last_reviewed_commit_sha = ""
-    ctx._review_advisory = []
-    ctx._last_triad_models = []
-    ctx._last_scope_model = ""
-    ctx._last_triad_raw_results = []
-    ctx._last_scope_raw_result = {}
-    ctx._review_degraded_reasons = []
-    ctx._current_review_tool_name = "commit_reviewed"
-    ctx._current_review_retry_key = ""
-    ctx._review_reconcile_only = False
-    ctx._review_frozen_rows = {}
-    ctx._review_custody_lost = False
-    ctx._current_review_attempt_number = None
+    _git()._reset_commit_review_state(ctx)
     commit_start = time.time()
     if not commit_message.strip():
         return {"status": "failed", "message": "⚠️ ERROR: commit_message must be non-empty."}
@@ -783,6 +880,11 @@ def _run_non_committing_review_cycle(
             "message": overlap_err,
             "block_reason": "overlap_guard",
         }
+    preflight_pending = _git()._reconcile_advisory_before_preparation(
+        ctx, commit_message, goal=goal, scope=scope, paths=paths, review_rebuttal=review_rebuttal,
+    )
+    if preflight_pending:
+        return {"status": "blocked", "message": preflight_pending, "block_reason": "advisory_pending"}
     try:
         lock = _git()._acquire_git_lock(ctx)
     except (TimeoutError, Exception) as exc:
@@ -828,11 +930,18 @@ def _run_non_committing_review_cycle(
                 degraded_reasons=list(getattr(ctx, "_review_degraded_reasons", []) or []),
             )
             ctx._scope_review_history = {}
-            outcome["message"] = "Review-only cycle passed. Commit was not created and the index was unstaged."
+            outcome["message"] = (
+                "Review-only cycle completed under advisory enforcement; failed or missing review remains recorded. "
+                if "review_technical_failure_advisory" in (getattr(ctx, "_review_degraded_reasons", []) or [])
+                else "Review-only cycle passed. "
+            ) + "Commit was not created and the index was unstaged."
         return outcome
     finally:
         try:
-            _git().run_cmd(["git", "reset", "HEAD"], cwd=ctx.repo_dir)
+            if not (_git()._review_custody_pending(ctx)
+                    or (bool(getattr(ctx, "_review_resume_pending", False))
+                        and (locals().get("outcome") or {}).get("status") != "passed")):
+                _git().run_cmd(["git", "reset", "HEAD"], cwd=ctx.repo_dir)
         except Exception as exc:
             unstage_warning = f"⚠️ GIT_WARNING (reset): {_sanitize_git_error(str(exc))}"
         _git()._release_git_lock(lock)

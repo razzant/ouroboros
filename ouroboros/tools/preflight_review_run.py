@@ -20,6 +20,7 @@ handle, so their facade patch points keep working.
 from __future__ import annotations
 
 import json
+from functools import partial
 import logging
 import pathlib
 from typing import List, Optional
@@ -265,7 +266,96 @@ def advisory_gate_unavailable() -> bool:
     return _car().advisory_gate_unavailability_reason() is not None
 
 
-def _run_advisory_delegated(prompt: str, repo_dir: pathlib.Path, ctx: ToolContext):
+def pending_advisory_execution(ctx, commit_message, *, goal="", scope="", paths=None, review_rebuttal=""):
+    """Read the existing preflight's custody before any candidate preparation.
+
+    No prompt copy: delegate_custody.invocation_record owns its immutable
+    request. Unknown/lost authority cannot authorize a replacement invocation.
+    """
+    from ouroboros.review_execution import ReviewRouteUnavailable
+    from ouroboros.review_state import compute_snapshot_hash, make_repo_key, update_state
+    from ouroboros.tools.git_review_cycle import _fingerprint_staged_diff
+
+    repo_dir = pathlib.Path(ctx.repo_dir)
+    intent = {"commit_message": commit_message, "goal": goal, "scope": scope,
+              "review_rebuttal": review_rebuttal}
+    records = update_state(pathlib.Path(ctx.drive_root), lambda state: [
+        run for run in state.filter_advisory_runs(repo_key=make_repo_key(repo_dir))
+        if run.status == "pending" or run.execution.get("pending_invocation_id")
+        or run.execution.get("operation_state") in {"in_flight", "custody_lost"}
+    ])
+    if not records:
+        return {"intent": intent}, None
+    run = records[0]
+    execution = dict(run.execution)
+    binding = _fingerprint_staged_diff(repo_dir)
+    if (len(records) != 1 or run.task_id != str(getattr(ctx, "task_id", "") or "")
+            or execution.get("intent") != intent
+            or compute_snapshot_hash(repo_dir, paths=run.snapshot_paths) != run.snapshot_hash
+            or not binding.get("ok") or binding.get("fingerprint") != execution.get("fingerprint")):
+        raise ReviewRouteUnavailable(
+            "unresolved preflight belongs to different or unverifiable candidate/intent; "
+            "no preparation or replacement review was started", code="advisory_pending_mismatch")
+    if not execution.get("pending_invocation_id"):
+        raise ReviewRouteUnavailable(
+            "preflight physical outcome remains unknown without recoverable delegated custody",
+            code="advisory_custody_lost")
+    return execution, run
+
+
+def _advisory_failure(exc, executor, retry_state=None):
+    """Reuse the review substrate's strongest physical-fact projection."""
+    from types import SimpleNamespace
+    from ouroboros.review_custody import _ReviewAttemptHistory, _review_exception_projection
+
+    history = _ReviewAttemptHistory()
+    # This direct caller shares the main thread: an unrelated earlier Main
+    # capture is not evidence about this critic. Native/delegated executors
+    # supply their own failure facts; an attached capture belongs to this error.
+    if getattr(exc, "physical_attempt_capture", None) is not None:
+        history.observe(exc)
+    usage, _, _, operation_state, code = _review_exception_projection(
+        exc, executor.failure_custody(), history, retry_state,
+    )
+    usage["operation_state"] = operation_state
+    source = getattr(executor, "_raw_transcript", None)
+    return SimpleNamespace(
+        source_text=source if isinstance(source, str) else "",
+        success=False, result_text="(no output)",
+        session_id=str(usage.get("delegated_run_id") or ""), cost_usd=0.0,
+        usage=usage, failure_code=code, error=f"{type(exc).__name__}: {exc}", stderr_tail="",
+    )
+
+
+def _checkpoint_advisory_execution(ctx, repo_dir, commit_message, paths, options, invocation_id="", *, operation_id=""):
+    """Bind the existing record at either route's physical dispatch boundary."""
+    execution = options["execution"]
+    from ouroboros.tools.git_review_cycle import _fingerprint_staged_diff
+    from ouroboros.review_execution import ReviewRouteUnavailable
+
+    binding = _fingerprint_staged_diff(repo_dir)
+    if not binding.get("ok"):
+        raise ReviewRouteUnavailable("preflight candidate fingerprint unavailable before dispatch", code="advisory_candidate_unavailable")
+    execution.update(operation_state="in_flight", fingerprint=binding["fingerprint"])
+    if invocation_id:
+        execution.update(invocation_id=invocation_id, pending_invocation_id=invocation_id)
+    if operation_id:
+        execution["operation_id"] = operation_id
+    try:
+        _car()._persist_preflight_record(ctx, options["snapshot_hash"], commit_message, {
+            "status": "pending", "execution": execution, "paths": paths,
+            "review_rebuttal": options.get("review_rebuttal", ""),
+            "raw_result": "Preflight execution checkpointed before physical dispatch.",
+            "strict": True,
+        })
+    except Exception as exc:
+        raise ReviewRouteUnavailable(
+            "preflight custody checkpoint could not be persisted before dispatch",
+            code="review_custody_checkpoint_unwritable",
+        ) from exc
+
+
+def _run_advisory_delegated(prompt: str, repo_dir: pathlib.Path, ctx: ToolContext, *, execution=None, checkpoint=None):
     """The advisory as a delegated agent session on the SHARED executor seam.
 
     One substrate executor (``AgentSessionReviewExecutor``) owns the session:
@@ -324,16 +414,30 @@ def _run_advisory_delegated(prompt: str, repo_dir: pathlib.Path, ctx: ToolContex
         custody_root=drive,
     )
     executor = AgentSessionReviewExecutor(assignment, llm=LLMClient())
+    retry_state = dict(execution or {})
+    executor.restore_custody(retry_state)
+    executor.set_pending_invocation_checkpoint(checkpoint)
     try:
+        if retry_state.get("pending_invocation_id"):
+            from ouroboros.delegate_custody import invocation_record
+            from ouroboros.review_execution import ReviewRouteUnavailable
+
+            stored = invocation_record(drive, retry_state["pending_invocation_id"])
+            request_body = stored.get("request") if isinstance(stored, dict) else None
+            if not isinstance(request_body, dict) or not isinstance(request_body.get("prompt"), str):
+                raise ReviewRouteUnavailable("canonical preflight request is unavailable", code="review_custody_lost")
+            # The executor's own immutable payload cache is restored from the
+            # canonical request, never rebuilt from mutable review history.
+            # The shared transport still corroborates owner/root/operation.
+            executor._session_prompt = request_body["prompt"]
         attempt = executor.execute()
     except Exception as exc:
-        return SimpleNamespace(
-            success=False, result_text="(no output)", session_id="", cost_usd=0.0,
-            usage={}, error=f"{type(exc).__name__}: {exc}", stderr_tail="",
-        ), ""
+        return _advisory_failure(exc, executor, retry_state), ""
     usage = dict(attempt.usage or {})
     resolved_model = str(usage.get("resolved_model") or "")
+    source = attempt.message.get("session_transcript") if isinstance(attempt.message, dict) else None
     return SimpleNamespace(
+        source_text=source if isinstance(source, str) else str(attempt.raw_text or ""),
         success=True,
         result_text=str(attempt.raw_text or ""),
         session_id=str(usage.get("delegated_run_id") or ""),
@@ -398,64 +502,84 @@ def _run_claude_advisory(
     except Exception:
         pass
 
-    try:
-        if include_repo_diff:
-            diff_text, context_paths, early, managed_subject_diff = _car()._advisory_review_diff(
-                repo_dir, ctx, paths
-            )
-            if early is not None:
-                kind, message, early_chars = early
-                return [], message, model if kind == "skipped" else "", early_chars
-            if diff_text.startswith("⚠️ ADVISORY_ERROR:"):
-                return [], diff_text, "", 0
-            changed_files_text = _car()._get_changed_file_list(repo_dir, paths=context_paths)
-            if changed_files_text.startswith("⚠️ ADVISORY_ERROR:"):
-                return [], changed_files_text, "", 0
-            resolved_paths, touched_pack, omitted_paths = _car().build_advisory_changed_context(
-                repo_dir,
-                changed_files_text=changed_files_text,
-                paths=context_paths,
-                exclude_paths={"docs/ARCHITECTURE.md"},
-            )
-            preflight_err = _car()._syntax_preflight_staged_py_files(repo_dir, resolved_paths)
-            if preflight_err:
-                log.warning("Advisory skipped — syntax preflight blocked: %s", preflight_err.splitlines()[0])
-                return [], preflight_err, "", 0
-        else:
-            diff_text = "(not included; this advisory review is scoped to the supplied payload pack)"
-            changed_files_text = "(not included; this advisory review is scoped to the supplied payload pack)"
-            resolved_paths, touched_pack, omitted_paths = [], "", []
-            managed_subject_diff = False
+    execution = options.get("execution")
+    execution = execution if isinstance(execution, dict) else {}
+    options["execution"] = execution
+    def assembly_failure(message, *, phase="context"):
+        execution.update(failure_phase=phase, failure_code="context_unavailable")
+        _note_meta_error(ctx, {"execution": execution}, message)
+        return [], message, "", 0
 
-        prompt = _car()._build_advisory_prompt(
-            repo_dir,
-            commit_message,
-            goal=goal,
-            scope=scope,
-            resolved_paths=resolved_paths,
-            drive_root=drive_root,
-            prompt_context={
-                "diff": diff_text,
-                "changed_files": changed_files_text,
-                "touched_pack": touched_pack,
-                "omitted_paths": omitted_paths,
-                "review_surface": review_surface,
-                "expected_items": expected_items,
-            },
-            # Both deliveries RETRIEVE governance docs via mandatory-read
-            # pointers (the session with its own tools, the native episode with
-            # host inspection tools): the inlined multi-hundred-KB governance
-            # pack died with the Claude-SDK transport.
-            governance_by_retrieval=True,
-        )
-    except RuntimeError as exc:
-        return [], f"⚠️ ADVISORY_ERROR: failed to build advisory prompt: {exc}", "", 0
-    except Exception as exc:
-        return [], f"⚠️ ADVISORY_ERROR: unexpected error building prompt: {exc}", "", 0
+    resuming = bool(execution.get("pending_invocation_id"))
+    if resuming:
+        from ouroboros.delegate_custody import custody_root, invocation_record
+
+        stored = invocation_record(custody_root(ctx), execution["pending_invocation_id"])
+        request_body = stored.get("request") if isinstance(stored, dict) else None
+        if not isinstance(request_body, dict) or not isinstance(request_body.get("prompt"), str):
+            return [], "⚠️ ADVISORY_ERROR: canonical pending request is unavailable", "", 0
+        prompt = request_body["prompt"]
+        resolved_paths, managed_subject_diff = list(paths or []), False
+    else:
+        try:
+            if include_repo_diff:
+                diff_text, context_paths, early, managed_subject_diff = _car()._advisory_review_diff(
+                    repo_dir, ctx, paths
+                )
+                if early is not None:
+                    kind, message, early_chars = early
+                    if kind == "error":
+                        return assembly_failure(message, phase="authority")
+                    return [], message, model, early_chars
+                if diff_text.startswith("⚠️ ADVISORY_ERROR:"):
+                    return assembly_failure(diff_text)
+                changed_files_text = _car()._get_changed_file_list(repo_dir, paths=context_paths)
+                if changed_files_text.startswith("⚠️ ADVISORY_ERROR:"):
+                    return assembly_failure(changed_files_text)
+                resolved_paths, touched_pack, omitted_paths = _car().build_advisory_changed_context(
+                    repo_dir,
+                    changed_files_text=changed_files_text,
+                    paths=context_paths,
+                    exclude_paths={"docs/ARCHITECTURE.md"},
+                )
+                preflight_err = _car()._syntax_preflight_staged_py_files(repo_dir, resolved_paths)
+                if preflight_err:
+                    log.warning("Advisory skipped — syntax preflight blocked: %s", preflight_err.splitlines()[0])
+                    return [], preflight_err, "", 0
+            else:
+                diff_text = "(not included; this advisory review is scoped to the supplied payload pack)"
+                changed_files_text = "(not included; this advisory review is scoped to the supplied payload pack)"
+                resolved_paths, touched_pack, omitted_paths = [], "", []
+                managed_subject_diff = False
+
+            prompt = _car()._build_advisory_prompt(
+                repo_dir,
+                commit_message,
+                goal=goal,
+                scope=scope,
+                resolved_paths=resolved_paths,
+                drive_root=drive_root,
+                prompt_context={
+                    "diff": diff_text,
+                    "changed_files": changed_files_text,
+                    "touched_pack": touched_pack,
+                    "omitted_paths": omitted_paths,
+                    "review_surface": review_surface,
+                    "review_rebuttal": str(options.get("review_rebuttal") or ""),
+                    "expected_items": expected_items,
+                },
+                # Both deliveries RETRIEVE governance docs via mandatory-read
+                # pointers (the session with its own tools, the native episode with
+                # host inspection tools): the inlined multi-hundred-KB governance
+                # pack died with the Claude-SDK transport.
+                governance_by_retrieval=True,
+            )
+        except Exception as exc:
+            return assembly_failure(f"⚠️ ADVISORY_ERROR: failed to build advisory prompt: {exc}")
 
     prompt_chars = len(prompt)
     diag = _car()._get_runtime_diagnostics(model, prompt_chars, resolved_paths)
-    size_skip = _car()._predispatch_size_skip(ctx, delegated_route, model, prompt, managed_subject_diff)
+    size_skip = None if resuming else _car()._predispatch_size_skip(ctx, delegated_route, model, prompt, managed_subject_diff)
     if size_skip is not None:
         return size_skip
 
@@ -464,6 +588,8 @@ def _run_claude_advisory(
         diag["model"], diag["prompt_chars"], diag["touched_paths"],
     )
 
+    checkpoint = partial(_checkpoint_advisory_execution, ctx, repo_dir, commit_message, paths, options)
+
     try:
         if delegated_route:
             # 5.8: only the transport changes — the delegated session runs the
@@ -471,7 +597,9 @@ def _run_claude_advisory(
             # result structure. The SDK budget kill is replaced by the runner's
             # nanny-enforced time cap; cost settles through delegate_custody.
             scope_effort = ""  # the session route carries its own effort
-            result, model = _car()._run_advisory_delegated(prompt, repo_dir, ctx)
+            custody_args = ({"execution": execution, "checkpoint": checkpoint}
+                            if options.get("snapshot_hash") else {})
+            result, model = _car()._run_advisory_delegated(prompt, repo_dir, ctx, **custody_args)
         else:
             # The native inspection episode (the retired Claude-SDK
             # transport's successor): same prompt, same repo root, same result
@@ -490,9 +618,25 @@ def _run_claude_advisory(
             result, model = _car()._run_advisory_native(
                 prompt, repo_dir, ctx, _slot, model,
                 mandatory_read_corpus_chars=_car()._mandatory_read_corpus_chars(repo_dir, review_surface),
+                **({"checkpoint": checkpoint} if options.get("snapshot_hash") else {}),
             )
 
+        usage = dict(getattr(result, "usage", {}) or {})
+        execution.update(
+            pending_invocation_id=str(usage.get("pending_invocation_id") or ""),
+            operation_state=str(usage.get("operation_state") or "settled"),
+            failure_code=str(getattr(result, "failure_code", "") or ""),
+            failure_phase=str(usage.get("review_failure_phase") or ""),
+            usage=usage,  # retain native terminal-round/receipt evidence on failures too
+        )
+        execution.pop("source_text", None)
+        original = getattr(result, "source_text", None)
+        if not isinstance(original, str):
+            original = str(result.result_text or "")
+        if original and original != str(result.result_text or ""):
+            execution["source_text"] = original  # complete source before canonicalization
         meta = {
+            "execution": execution,
             "model": model,
             "session_id": getattr(result, "session_id", "") or "",
             "prompt_chars": prompt_chars,
@@ -523,7 +667,8 @@ def _run_claude_advisory(
             )
             log.error("Advisory delivery failure:\n%s", err_msg)
             _note_meta_error(ctx, meta, err_msg)
-            return [], err_msg, model, prompt_chars
+            raw_received = str(getattr(result, "result_text", "") or "")
+            return [], err_msg + "\n\nReviewer output:\n" + raw_received, model, prompt_chars
 
         raw_text = str(result.result_text or "")
 
@@ -544,6 +689,7 @@ def _run_claude_advisory(
                 "reason": "advisory result had empty output",
                 "review_surface": review_surface,
             })
+            execution.update(failure_phase="format", failure_code="empty_response", source_text=original)
             _note_meta_error(ctx, meta, err_msg)
             return [], err_msg, model, prompt_chars
 
@@ -572,8 +718,9 @@ def _run_claude_advisory(
                 "reason": contract_error,
                 "review_surface": review_surface,
             })
+            execution.update(failure_phase="format", failure_code="checklist_contract", source_text=original)
             _note_meta_error(ctx, meta, err_msg)
-            return [], err_msg, model, prompt_chars
+            return items, err_msg + "\n\nFull reviewer output:\n" + raw_text, model, prompt_chars
 
         if contract_warning:
             _car().emit_review_event(ctx, {

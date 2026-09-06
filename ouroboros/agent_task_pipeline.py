@@ -1052,6 +1052,7 @@ def build_review_context(env: Any) -> str:
         repo_commit_ready = advisory_commit_ready(
             current_run is not None and current_run.status in ("fresh", "bypassed", "skipped"),
             open_obs, open_debts,
+            matching_run=current_run if getattr(current_run, "repo_key", None) == repo_key else None,
         )
         lines.append(f"- repo_key={repo_key}")
         lines.append(f"- snapshot_hash={snapshot_hash[:12] or '(empty)'}")

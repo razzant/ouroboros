@@ -1100,6 +1100,39 @@ Review delivery has two closed route kinds in `review_execution.py`: `api_chat` 
 
 Advisory availability is evaluated from the current configured slot and route, never inferred from a stale stored verdict. A disabled advisory slot is an audited bypass; an `api_chat` row requires provider credentials for its RESOLVED model, an `agent_session` row a resolvable session route. If the commit advisory is unavailable, the commit gate runs its compensating hermetic preflight only when tests remain independently applicable (not explicitly skipped, diff not documentation-only). Malformed structured slot configuration is refused at save and becomes a typed loud review-time failure for commit triad, scope, advisory, plan, skill review — and deep self-review (`deep_review_slot()` raises on the malformed value and `run_deep_self_review` returns the typed `deep_self_review_unavailable` result instead of a report). Task acceptance refuses the same way (a typed DEGRADED panel, `reviewer_slot_config_invalid`; owner R3). No surface silently chooses the opposite route or a default panel.
 
+The reviewed-commit cycle checks authorization and unresolved prior work before
+mechanical preparation and staging, then binds the exact candidate before its
+existing free-cycle/budget admission. Needed preflight runs inline with the full
+rebuttal and applicable tests; the index and worktree snapshot are revalidated
+before triad/scope. `git_review_cycle` owns both entry-point state resets and
+pending/blocked finalization. Free advisory replay buys no automatic preflight
+and still runs applicable compensating tests. Explicit skips remain audited.
+
+`AdvisoryRunRecord.execution` binds preflight intent and candidate at the existing
+physical dispatch stamp: a native operation id or a delegated invocation token.
+The same row retains terminal usage/receipt evidence on failure.
+`delegate_custody.invocation_record` owns
+the immutable request, including the full prompt; no second prompt store is
+created. An exact pending rejoin restores that request through the shared
+executor. Changed/foreign/lost identity is refused before preparation; failed
+checkpoint writes cannot dispatch. Unresolved rows survive history trimming.
+Native ambiguous physical outcomes remain custody, without a new native resume
+protocol. The external wrapper runs the same cycle, exports the real advisory
+record to `advisory.txt`, and preserves a pending checkout without restaging.
+
+Technical failure and commit permission are separate facts. Producers retain
+failure origin (context, delivery, format or window authority) alongside the
+original status, source and findings; the shared physical exception projection
+keeps budget/admission and authority refusals distinct. Under advisory
+enforcement the commit aggregate can continue on a known bound candidate;
+under blocking it still refuses. Neither path turns missing review into PASS or
+changes quorum. Custody, Stop/deadline, ownership and candidate binding remain
+independent. Readiness projections receive only an exact repo/hash-matched
+advisory record and keep its failed status/freshness. Contributor slot evidence
+retains configured-subagent identity while its stored wire uses the existing
+mutually exclusive reference-or-route form, preserving native retrieval and
+its API budget admission.
+
 Session reviewer identity comes from `gateways.claudexor.final_attempt_facts`: the
 unique `final_attempt_id` row in the engine-owned `final/telemetry.yaml`, bound to
 the requested run id. Model, harness and credential profile come from that SAME

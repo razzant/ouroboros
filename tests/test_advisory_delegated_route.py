@@ -121,7 +121,7 @@ def test_delegated_route_runs_without_the_key(tmp_path, monkeypatch, fake_route)
     )
     assert not raw.startswith("⚠️ ADVISORY_ERROR")
     assert [i["item"] for i in items] == ["correctness"]
-    assert model  # the effective session model/route is reported
+    assert model == ""  # No final-attempt telemetry: the requested label is not observation.
     start = fake_route.instances[0].start_requests[0]
     assert start["authPreference"] == "subscription"
     assert start["access"] == "readonly"

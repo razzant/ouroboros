@@ -1,119 +1,117 @@
-"""`_advisory_and_tests_gate` recovers a pure advisory-freshness gap inline
-(runs the real `preflight_review` against the current snapshot, re-checks once)
-instead of bouncing the task out of the gate — but a block that reproduces on a
-re-run (SyntaxError preflight, open obligations) is still returned unchanged.
-"""
+"""Prepared-candidate preflight uses ledger facts, never rendered error text."""
 
-import importlib
+import subprocess
 
 import pytest
 
-
-def _get_git_module():
-    """Import ouroboros.tools.git fresh (mirrors tests/test_commit_gate.py)."""
-    import ouroboros.tools.git as git_mod
-
-    importlib.reload(git_mod)
-    return git_mod
+from ouroboros.review_state import AdvisoryRunRecord, compute_snapshot_hash, load_state, make_repo_key, update_state
+from ouroboros.tools import claude_advisory_review as advisory
+from ouroboros.tools import git
+from ouroboros.tools.registry import ToolContext
 
 
+@pytest.fixture
+def candidate(tmp_path, monkeypatch):
+    repo, drive = tmp_path / "repo", tmp_path / "data"
+    repo.mkdir()
+    drive.mkdir()
+    for args in (("init",), ("config", "user.name", "Test"), ("config", "user.email", "test@example.invalid")):
+        subprocess.run(["git", *args], cwd=repo, check=True, capture_output=True)
+    (repo / "change.py").write_text("value = 1\n")
+    subprocess.run(["git", "add", "change.py"], cwd=repo, check=True)
+    subprocess.run(["git", "commit", "-m", "base"], cwd=repo, check=True, capture_output=True)
+    (repo / "change.py").write_text("value = 2\n")
+    subprocess.run(["git", "add", "change.py"], cwd=repo, check=True)
+    ctx = ToolContext(repo_dir=repo, drive_root=drive, task_id="inline-task", emit_progress_fn=lambda *a: None)
+    monkeypatch.setattr(advisory, "advisory_review_route", lambda: "agent_session")
+    monkeypatch.setattr(advisory, "advisory_slot_enabled", lambda: True)
+    monkeypatch.setattr(advisory, "check_worktree_readiness", lambda *a, **kw: [])
+    monkeypatch.setattr(advisory, "_release_metadata_preflight", lambda *a: None)
+    monkeypatch.setattr(advisory, "_check_worktree_version_sync_shared", lambda *a: "")
+    monkeypatch.setattr(git, "advisory_gate_unavailable", lambda: False)
+    monkeypatch.setattr(git, "_managed_candidate_needs_proof", lambda ctx: False)
+    monkeypatch.setenv("OUROBOROS_REVIEW_ENFORCEMENT", "blocking")
+    return ctx
 
 
-def test_advisory_gate_runs_advisory_inline_on_freshness_gap(monkeypatch, tmp_path):
-    """when the only block is 'no fresh advisory run found',
-    _advisory_and_tests_gate runs advisory_review inline against the current
-    snapshot and proceeds — instead of bouncing the agent out to run it by
-    hand. A real advisory record is written, so the compensating test-preflight
-    coupling is unchanged (advisory_gate_unavailable stays the arbiter)."""
-    git_mod = _get_git_module()
-
-    calls = {"freshness": 0, "inline_advisory": 0, "preflight": 0}
-
-    def fake_freshness(ctx, commit_message, skip, paths=None):
-        calls["freshness"] += 1
-        # First call: freshness gap. After the inline advisory runs, it clears.
-        if calls["inline_advisory"] == 0:
-            return (
-                "⚠️ ADVISORY_PRE_REVIEW_REQUIRED: No fresh advisory run found for "
-                "this snapshot (hash=abc123).\nNo advisory runs recorded yet.\n"
-            )
-        return None
-
-    def fake_inline_advisory(ctx, commit_message, paths=None, skip_tests=False):
-        calls["inline_advisory"] += 1
-        return "{}"
-
-    monkeypatch.setattr(git_mod, "_check_advisory_freshness", fake_freshness)
-    monkeypatch.setattr(git_mod, "_handle_advisory_pre_review", fake_inline_advisory)
-    monkeypatch.setattr(git_mod, "advisory_gate_unavailable", lambda: False)
-    monkeypatch.setattr(git_mod, "_diff_is_doc_only", lambda paths: False)
-    monkeypatch.setattr(git_mod, "_managed_candidate_needs_proof", lambda ctx: False)
-    monkeypatch.setattr(
-        git_mod, "_run_review_preflight_tests",
-        lambda ctx: pytest.fail("preflight must not run when advisory is real"),
+def _gate(ctx, **kwargs):
+    return git._advisory_and_tests_gate(
+        ctx, "candidate", 0,
+        classification_paths=["change.py"], advisory_paths=["change.py"],
+        skip_advisory_pre_review=False, skip_tests=False, **kwargs,
     )
 
-    class FakeCtx:
-        repo_dir = tmp_path
-        drive_root = tmp_path
 
-        def emit_progress_fn(self, *_a, **_k):
-            pass
-
-    result = git_mod._advisory_and_tests_gate(
-        FakeCtx(),
-        "test commit",
-        0.0,
-        classification_paths=["ouroboros/foo.py"],
-        advisory_paths=["ouroboros/foo.py"],
-        skip_advisory_pre_review=False,
-        skip_tests=False,
+def _record(ctx, status, **kwargs):
+    record = AdvisoryRunRecord(
+        snapshot_hash=compute_snapshot_hash(ctx.repo_dir, paths=["change.py"]),
+        commit_message="candidate", status=status, ts="2026-09-06T00:00:00Z",
+        repo_key=make_repo_key(ctx.repo_dir), task_id=ctx.task_id, **kwargs,
     )
-
-    assert result is None, f"gate should proceed after inline advisory, got: {result}"
-    assert calls["inline_advisory"] == 1, "inline advisory_review must run exactly once"
-    assert calls["freshness"] == 2, "freshness must be re-checked after the inline run"
+    update_state(ctx.drive_root, lambda state: state.add_run(record))
+    return record
 
 
-def test_advisory_gate_does_not_retry_inline_on_syntax_preflight_block(monkeypatch, tmp_path):
-    """A SyntaxError preflight block reproduces identically on a re-run, so the
-    gate must NOT burn a ~2min inline advisory on it — it returns the block."""
-    git_mod = _get_git_module()
+def test_inline_preflight_runs_after_tests_and_preserves_rebuttal(candidate, monkeypatch):
+    calls = []
+    rebuttal = "The branch is unreachable because the caller validates the input."
+    monkeypatch.setattr(advisory, "_run_advisory_tests", lambda ctx: calls.append("tests"))
+    monkeypatch.setattr(advisory, "_auto_sync_release_metadata_if_needed", lambda *a: pytest.fail("prepared candidate must not mutate"))
 
-    calls = {"inline_advisory": 0}
+    def critic(repo, message, ctx, **kwargs):
+        assert calls == ["tests"]
+        calls.append("critic")
+        assert kwargs["options"]["review_rebuttal"] == rebuttal
+        return [], "[]", "reviewer", 100
 
-    def fake_freshness(ctx, commit_message, skip, paths=None):
-        return (
-            "⚠️ ADVISORY_PRE_REVIEW_REQUIRED: Last advisory run for this snapshot "
-            "was blocked by the syntax preflight (hash=abc123). The Claude SDK "
-            "advisory was skipped because a staged `.py` file has a SyntaxError.\n"
-        )
+    monkeypatch.setattr(advisory, "_run_claude_advisory", critic)
+    assert _gate(candidate, review_rebuttal=rebuttal) is None
+    assert calls == ["tests", "critic"]
+    row = load_state(candidate.drive_root).advisory_runs[-1]
+    assert row.status == "fresh" and row.review_rebuttal == rebuttal
+    assert _gate(candidate, review_rebuttal=rebuttal) is None
+    assert calls == ["tests", "critic"]
 
-    def fake_inline_advisory(*a, **k):
-        calls["inline_advisory"] += 1
-        return "{}"
 
-    monkeypatch.setattr(git_mod, "_check_advisory_freshness", fake_freshness)
-    monkeypatch.setattr(git_mod, "_handle_advisory_pre_review", fake_inline_advisory)
-    monkeypatch.setattr(git_mod, "run_cmd", lambda *a, **k: "")
-    monkeypatch.setattr(git_mod, "_record_commit_attempt", lambda *a, **k: None)
+def test_new_rebuttal_invalidates_fresh_shortcut(candidate, monkeypatch):
+    _record(candidate, "fresh", raw_result="[]", review_rebuttal="previous evidence")
+    calls = []
+    monkeypatch.setattr(advisory, "_run_advisory_tests", lambda ctx: None)
+    monkeypatch.setattr(advisory, "_run_claude_advisory", lambda *a, **kw: (calls.append(kw["options"]["review_rebuttal"]) or [], "[]", "reviewer", 1))
+    assert _gate(candidate, review_rebuttal="new evidence") is None
+    assert calls == ["new evidence"]
 
-    class FakeCtx:
-        repo_dir = tmp_path
-        drive_root = tmp_path
 
-        def emit_progress_fn(self, *_a, **_k):
-            pass
+def test_deterministic_block_is_not_a_refresh_request(candidate, monkeypatch):
+    _record(candidate, "preflight_blocked", reason_kind="syntax", raw_result="No fresh advisory run found for this snapshot")
+    monkeypatch.setattr(git, "_handle_advisory_pre_review", lambda *a, **kw: pytest.fail("must not dispatch"))
+    result = _gate(candidate)
+    assert result["block_reason"] == "no_advisory"
+    assert "SyntaxError" in result["message"]
 
-    result = git_mod._advisory_and_tests_gate(
-        FakeCtx(),
-        "test commit",
-        0.0,
-        classification_paths=["ouroboros/foo.py"],
-        advisory_paths=["ouroboros/foo.py"],
-        skip_advisory_pre_review=False,
-        skip_tests=False,
-    )
 
-    assert result is not None and result["block_reason"] == "no_advisory"
-    assert calls["inline_advisory"] == 0, "must not run inline advisory for a syntax block"
+@pytest.mark.parametrize("test_error", [None, "failed targeted suite"])
+def test_free_replay_compensates_tests_even_when_backend_available(candidate, monkeypatch, test_error):
+    old = _record(candidate, "parse_failure", raw_result="unparsed original source")
+    monkeypatch.setattr(git, "_handle_advisory_pre_review", lambda *a, **kw: pytest.fail("free replay must not buy preflight"))
+    calls = []
+    monkeypatch.setattr(git, "_run_review_preflight_tests", lambda ctx: calls.append("tests") or test_error)
+    result = _gate(candidate, free_replay=True)
+    assert calls == ["tests"]
+    assert (result is None) == (test_error is None)
+    rows = load_state(candidate.drive_root).advisory_runs
+    assert rows[0].raw_result == old.raw_result
+    assert not any(row.status == "fresh" for row in rows)
+
+
+def test_rebuttal_reaches_real_prompt_builder(candidate, monkeypatch):
+    monkeypatch.setattr(advisory, "_get_staged_diff", lambda *a, **kw: "diff")
+    monkeypatch.setattr(advisory, "_get_changed_file_list", lambda *a, **kw: "M change.py")
+    from ouroboros.tools.preflight_review_prompt import _build_advisory_prompt
+
+    rebuttal = "New evidence: both callers preserve a zero chat identifier."
+    prompt = _build_advisory_prompt(candidate.repo_dir, "candidate", prompt_context={"review_rebuttal": rebuttal}, governance_by_retrieval=True)
+    assert rebuttal in prompt
+    assert "Developer's rebuttal" in prompt
+    assert "offset/limit" not in prompt
+    assert "start_line/max_lines" in prompt

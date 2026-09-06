@@ -63,7 +63,7 @@ def build_review_projection(
         current_hash = hasher(repo_dir_path, "", paths=latest.snapshot_paths if latest else None)
         hash_mismatch = bool(
             latest
-            and latest.status in {"fresh", "bypassed", "skipped", "parse_failure", "preflight_blocked", "tests_preflight_blocked"}
+            and latest.status in {"fresh", "bypassed", "skipped", "parse_failure", "preflight_blocked", "tests_preflight_blocked", "error", "pending"}
             and latest.snapshot_hash != current_hash
         )
     except Exception:
@@ -110,7 +110,11 @@ def build_review_projection(
         ) or ("Current snapshot hash no longer matches the latest advisory run." if hash_mismatch else None),
         "open_obligations": open_obligations,
         "open_debts": open_debts,
-        "repo_commit_ready": advisory_commit_ready(bool(effective_is_fresh), open_obligations, open_debts),
+        "repo_commit_ready": advisory_commit_ready(
+            bool(effective_is_fresh), open_obligations, open_debts,
+            matching_run=(matching_run if repo_dir_path is not None
+                          and getattr(matching_run, "repo_key", None) == repo_filter == make_repo_key(repo_dir_path) else None),
+        ),
         "retry_anchor": "commit_readiness_debt" if open_debts else None,
         "advisory_overrides": advisory_overrides,
     }
@@ -200,6 +204,9 @@ def _review_status_run_to_dict(run: Any) -> Dict[str, Any]:
     # Already persisted per run, previously dropped from the projection: without
     # these the owner sees repeated identical statuses with no usable cause.
     data["failure_reason"] = _run_failure_reason(run)
+    execution = getattr(run, "execution", {}) or {}
+    data["failure_phase"] = str(execution.get("failure_phase") or "") or None
+    data["failure_code"] = str(execution.get("failure_code") or "") or None
     data["model_used"] = str(getattr(run, "model_used", "") or "") or None
     duration = getattr(run, "duration_sec", None)
     data["duration_sec"] = round(float(duration), 2) if duration else None

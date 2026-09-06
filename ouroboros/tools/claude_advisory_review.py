@@ -167,6 +167,7 @@ def _advisory_child_timeout(ctx: object) -> Optional[float]:
 def _run_advisory_native(
     prompt: str, repo_dir: pathlib.Path, ctx: ToolContext, slot, model: str,
     mandatory_read_corpus_chars: int = 0,
+    checkpoint=None,
 ):
     """The advisory as a bounded native inspection episode, rehydrated into the
     same result structure the retired SDK path produced (only the transport
@@ -222,9 +223,14 @@ def _run_advisory_native(
             int(mandatory_read_corpus_chars), request.policy["native_mandatory_read_chars"],
             native_episode_transcript_bound(request, rslot),
         )
+    from ouroboros.observability import new_call_id
+    from ouroboros.review_dispatch import ReviewPaidStamp
+
+    operation_id = new_call_id("advisory_native") if checkpoint else f"advisory:{request.task_id or 'manual'}"
     assignment = ReviewAssignment(
-        request=request, slot=rslot,
-        call_id=f"advisory:{request.task_id or 'manual'}",
+        request=request, slot=rslot, call_id=operation_id,
+        dispatch_stamp=(ReviewPaidStamp(lambda: checkpoint(operation_id=operation_id), fail_closed=True)
+                        if checkpoint else None),
     )
     executor = NativeToolRoundReviewExecutor(assignment, llm=LLMClient())
     _scope = _dc_replace(
@@ -238,14 +244,12 @@ def _run_advisory_native(
         # The episode's proven facts (rounds, receipts, transcript vs bound,
         # paid ledger) and its typed code survive the failure: the caller
         # classifies on ``failure_code``, never on the message text.
-        return SimpleNamespace(
-            success=False, result_text="(no output)", session_id="", cost_usd=0.0,
-            usage=executor.failure_custody(), failure_code=str(getattr(exc, "code", "") or ""),
-            error=f"{type(exc).__name__}: {exc}", stderr_tail="",
-        ), model
+        return _advisory_failure(exc, executor), model
     usage = dict(attempt.usage or {})
     usage["cost_disclosed_usd"] = usage.get("cost")
+    source = attempt.message.get("native_transcript") if isinstance(attempt.message, dict) else None
     return SimpleNamespace(
+        source_text=source if isinstance(source, str) else str(attempt.raw_text or ""),
         success=True,
         result_text=str(attempt.raw_text or ""),
         session_id="",
@@ -602,27 +606,15 @@ def _advisory_run_record(
     task_id: str,
     **fields,
 ) -> AdvisoryRunRecord:
-    return AdvisoryRunRecord(
-        snapshot_hash=snapshot_hash,
-        commit_message=commit_message,
-        status=status,
-        ts=_utc_now(),
-        repo_key=repo_key,
-        tool_name="advisory_review",
-        task_id=task_id,
-        items=list(fields.get("items") or []),
-        snapshot_summary=str(fields.get("snapshot_summary") or ""),
-        raw_result=str(fields.get("raw_result") or ""),
-        bypass_reason=str(fields.get("bypass_reason") or ""),
-        bypassed_by_task=str(fields.get("bypassed_by_task") or ""),
-        snapshot_paths=fields.get("snapshot_paths"),
-        reason_kind=str(fields.get("reason_kind") or ""),
-        readiness_warnings=list(fields.get("readiness_warnings") or []),
-        prompt_chars=int(fields.get("prompt_chars") or 0),
-        model_used=str(fields.get("model_used") or ""),
-        session_id=str(fields.get("session_id") or ""),
-        duration_sec=float(fields.get("duration_sec") or 0.0),
-    )
+    from ouroboros.review_state import _record_from_dict
+
+    # One normalization contract for authored and reloaded advisory records.
+    return _record_from_dict({
+        **{name: value for name, value in fields.items() if value is not None},
+        "snapshot_hash": snapshot_hash, "commit_message": commit_message,
+        "status": status, "ts": _utc_now(), "repo_key": repo_key,
+        "tool_name": "advisory_review", "task_id": task_id,
+    })
 
 
 def _record_bypass(ctx: ToolContext, state: "AdvisoryReviewState", snapshot_hash: str,
@@ -752,7 +744,7 @@ def _resolve_matching_obligations(
 def _next_step_guidance(latest: Optional["AdvisoryRunRecord"], state: "AdvisoryReviewState",
                         stale_from_edit: bool, stale_from_edit_ts: Optional[str],
                         open_obs: list, open_debts: list, effective_is_fresh: bool = False,
-                        enforcement: str = "blocking") -> str:
+                        enforcement: str = "blocking", *, advisory_permitted: bool = False) -> str:
     """Return a concrete next-step string based on current advisory state.
 
     ``enforcement`` keeps the guidance HONEST (O1): under blocking the
@@ -782,6 +774,13 @@ def _next_step_guidance(latest: Optional["AdvisoryRunRecord"], state: "AdvisoryR
 
     def _with_choices(message: str) -> str:
         return f"{message.rstrip()} {ADVISORY_REVIEW_CHOICE_GUIDANCE}"
+
+    if (advisory_permitted and not stale_from_edit and latest is not None
+            and latest.status in {"error", "parse_failure"}):
+        return (
+            "The current preflight failed technically; its source and findings remain recorded, not PASS. "
+            "Advisory enforcement permits commit_reviewed subject to its independent checks."
+        )
 
     if not effective_is_fresh:
         status = str(getattr(latest, "status", "") or "")
@@ -885,29 +884,23 @@ def _persist_preflight_record(
     commit_message: str,
     record: dict,
 ) -> None:
-    """Persist a durable preflight-blocked advisory record; never raises."""
+    """Persist a preflight fact; strict pre-POST checkpoints propagate failure."""
+    record = dict(record or {})
+    strict = bool(record.pop("strict", False))
     try:
-        record = dict(record or {})
         drive_root = pathlib.Path(ctx.drive_root)
-        repo_key = make_repo_key(pathlib.Path(ctx.repo_dir))
-        task_id = str(getattr(ctx, "task_id", "") or "")
-
-        def _mutate(pre_state: AdvisoryReviewState) -> None:
-            pre_state.add_run(_advisory_run_record(
-                snapshot_hash, commit_message, str(record.get("status") or "error"),
-                repo_key=repo_key, task_id=task_id,
-                snapshot_summary=("advisory delivery error" if record.get("session_id") else "preflight block — critic not called"),
-                raw_result=record.get("raw_result"),
-                reason_kind=record.get("reason_kind"),
-                snapshot_paths=record.get("paths"),
-                readiness_warnings=record.get("readiness_warnings"),
-                prompt_chars=record.get("prompt_chars"),
-                model_used=record.get("model_used"),
-                session_id=record.get("session_id"),
-                duration_sec=record.get("duration_sec"),
-            ))
-        update_state(drive_root, _mutate)
+        record["snapshot_paths"] = record.pop("paths", None)
+        status = str(record.pop("status", "error"))
+        record.setdefault("snapshot_summary", "preflight execution fact")
+        run = _advisory_run_record(
+            snapshot_hash, commit_message, status,
+            repo_key=make_repo_key(pathlib.Path(ctx.repo_dir)),
+            task_id=str(getattr(ctx, "task_id", "") or ""), **record,
+        )
+        update_state(drive_root, lambda state: state.add_run(run))
     except Exception:
+        if strict:
+            raise
         log.debug("_persist_preflight_record failed (non-critical)", exc_info=True)
 
 
@@ -919,6 +912,7 @@ def _advisory_pre_sdk_gate(
     commit_message: str,
     paths: Optional[List[str]],
     skip_tests: bool,
+    review_rebuttal: str = "",
 ):
     """Run cheap pre-SDK gates and return warnings/status/early JSON exit."""
     repo_key = make_repo_key(repo_dir)
@@ -953,6 +947,7 @@ def _advisory_pre_sdk_gate(
     open_debts = state.get_open_commit_readiness_debts(repo_key=repo_key)
     already_fresh_ok = (
         existing and existing.status in ("fresh", "bypassed", "skipped")
+        and str(existing.review_rebuttal or "").strip() == str(review_rebuttal or "").strip()
         and not open_obligations and not open_debts
     )
     if already_fresh_ok:
@@ -1017,7 +1012,7 @@ def _advisory_pre_sdk_gate(
         from ouroboros.commit_admission import run_tests_preflight_with_proof
 
         test_err = run_tests_preflight_with_proof(
-            ctx, runner=lambda c: _run_advisory_tests(c))
+            ctx, runner=lambda c, **kw: _run_advisory_tests(c, **kw))
         if test_err:
             msg = (
                 "⚠️ TESTS_PREFLIGHT_BLOCKED: Tests must pass before advisory review.\n"
@@ -1047,14 +1042,18 @@ def _advisory_pre_sdk_gate(
             })
         # A green run already carries the Q10 managed proof: the shared
         # admission helper records it (commit_admission SSOT).
-        ctx.emit_progress_fn("Tests passed ✓ — proceeding with the advisory delivery call.")
+        ctx.emit_progress_fn(
+            "Tests passed ✓ — proceeding with the advisory delivery call."
+            if getattr(ctx, "_preflight_tests_passed", False) is True else
+            "Tests skipped by configured policy; no green test proof was recorded."
+        )
 
     return readiness_warnings, changed_files, None
 
 
-def _run_advisory_tests(ctx: ToolContext) -> Optional[str]:
+def _run_advisory_tests(ctx: ToolContext, *, force: bool = False) -> Optional[str]:
     """Run shared pytest preflight while preserving this monkeypatch seam."""
-    return _run_review_preflight_tests(ctx)
+    return _run_review_preflight_tests(ctx, force=True) if force else _run_review_preflight_tests(ctx)
 
 
 def _handle_advisory_pre_review(
@@ -1066,19 +1065,31 @@ def _handle_advisory_pre_review(
     scope: str = "",
     paths: Optional[List[str]] = None,
     skip_tests: bool = False,
+    review_rebuttal: str = "",
+    prepared: bool = False,
 ) -> str:
     """Run an advisory pre-commit review through the configured read-only route."""
     skip_advisory_pre_review = bool(skip_advisory_review or skip_advisory_pre_review)
     repo_dir = pathlib.Path(ctx.repo_dir)
     drive_root = pathlib.Path(ctx.drive_root)
 
-    # KNOWN ORDERING DEBT (v6.82 backlog, deliberately NOT restructured here): this self-repair
-    # runs ~87 lines AFTER `_release_metadata_preflight`, the gate it exists to satisfy, so with
-    # respect to that gate it is dead code — a desynced version carrier still blocks. Left in
-    # place because reordering runtime review machinery is out of scope for a provenance commit.
-    auto_synced_paths = _auto_sync_release_metadata_if_needed(ctx, repo_dir, drive_root, paths)
-    if paths is not None and auto_synced_paths:
-        paths = sorted({str(p) for p in list(paths) + auto_synced_paths if str(p).strip()})
+    try:
+        execution, pending_run = pending_advisory_execution(
+            ctx, commit_message, goal=goal, scope=scope, paths=paths,
+            review_rebuttal=review_rebuttal,
+        )
+    except Exception as exc:
+        return _json_response({"status": "pending", "error": str(exc),
+                               "message": "Preflight custody must be reconciled before preparing another candidate."})
+    resuming = pending_run is not None
+    if resuming:
+        paths = pending_run.snapshot_paths
+    # commit_reviewed already prepared and fingerprinted this candidate.
+    # Standalone preflight retains its existing mechanical preparation.
+    if not prepared and not resuming:
+        auto_synced_paths = _auto_sync_release_metadata_if_needed(ctx, repo_dir, drive_root, paths)
+        if paths is not None and auto_synced_paths:
+            paths = sorted(set(paths) | set(auto_synced_paths))
 
     snapshot_hash = compute_snapshot_hash(repo_dir, commit_message, paths=paths)
 
@@ -1087,63 +1098,67 @@ def _handle_advisory_pre_review(
     task_id = str(getattr(ctx, "task_id", "") or "")
     state = load_state(drive_root)
 
-    # Auto-bypass a missing Anthropic key ONLY when the configured advisory
-    # route actually needs it (plan 5.8 site 3 — the dangerous one): on the
-    # delegated route the constitutional gate RUNS instead of recording a
-    # routine-looking "auto-bypassed" over a commit the free route could have
-    # reviewed. A misconfigured route token is a loud error, not a bypass.
-    try:
-        _native_route = advisory_review_route() == "api_chat"
-        _advisory_enabled = advisory_slot_enabled()
-    except ValueError as exc:
-        return _json_response({
-            "status": "error",
-            "snapshot_hash": snapshot_hash,
-            "error": f"⚠️ ADVISORY_ERROR: {exc}",
-            "message": "Fix the advisory reviewer configuration "
-                       "(OUROBOROS_REVIEWER_SLOTS advisory row) and retry.",
-        })
-    if not _advisory_enabled:
-        # The owner switched the advisory slot off (6.2) — or the legacy
-        # Claude-SDK target migration force-disabled the row with a typed
-        # reason. The constitutional gate still runs — as an AUDITED BYPASS on
-        # this exact snapshot, the same durable record an explicit skip makes.
-        from ouroboros.reviewer_slot_config import advisory_slot_config as _asc
+    if not resuming:
+        # Auto-bypass a missing Anthropic key ONLY when the configured advisory
+        # route actually needs it (plan 5.8 site 3 — the dangerous one): on the
+        # delegated route the constitutional gate RUNS instead of recording a
+        # routine-looking "auto-bypassed" over a commit the free route could have
+        # reviewed. A misconfigured route token is a loud error, not a bypass.
+        try:
+            _native_route = advisory_review_route() == "api_chat"
+            _advisory_enabled = advisory_slot_enabled()
+        except ValueError as exc:
+            return _json_response({
+                "status": "error",
+                "snapshot_hash": snapshot_hash,
+                "error": f"⚠️ ADVISORY_ERROR: {exc}",
+                "message": "Fix the advisory reviewer configuration "
+                           "(OUROBOROS_REVIEWER_SLOTS advisory row) and retry.",
+            })
+        if not _advisory_enabled:
+            # The owner switched the advisory slot off (6.2) — or the legacy
+            # Claude-SDK target migration force-disabled the row with a typed
+            # reason. The constitutional gate still runs — as an AUDITED BYPASS on
+            # this exact snapshot, the same durable record an explicit skip makes.
+            from ouroboros.reviewer_slot_config import advisory_slot_config as _asc
 
-        _dis = str(getattr(_asc(), "disabled_reason", "") or "")
-        return _record_bypass(ctx, state, snapshot_hash, commit_message,
-                               "advisory reviewer disabled in settings — audited bypass"
-                               + (f" ({_dis})" if _dis else ""),
-                               task_id, drive_root,
-                               snapshot_paths=paths)
-    if _native_route:
-        from ouroboros.provider_models import model_has_credentials
-
-        _m = _advisory_native_model()
-        if not model_has_credentials(_m):
+            _dis = str(getattr(_asc(), "disabled_reason", "") or "")
             return _record_bypass(ctx, state, snapshot_hash, commit_message,
-                                   f"no provider credentials for advisory model {_m} "
-                                   "— auto-bypassed (audited)",
+                                   "advisory reviewer disabled in settings — audited bypass"
+                                   + (f" ({_dis})" if _dis else ""),
                                    task_id, drive_root,
                                    snapshot_paths=paths)
+        if _native_route:
+            from ouroboros.provider_models import model_has_credentials
 
-    # Explicit audited bypass.
-    if skip_advisory_pre_review:
-        return _record_bypass(ctx, state, snapshot_hash, commit_message,
-                               "explicit skip_advisory_review=True", task_id, drive_root,
-                               snapshot_paths=paths)
+            _m = _advisory_native_model()
+            if not model_has_credentials(_m):
+                return _record_bypass(ctx, state, snapshot_hash, commit_message,
+                                       f"no provider credentials for advisory model {_m} "
+                                       "— auto-bypassed (audited)",
+                                       task_id, drive_root,
+                                       snapshot_paths=paths)
 
-    readiness_warnings, changed_files, early_exit = _advisory_pre_sdk_gate(
-        ctx=ctx,
-        repo_dir=repo_dir,
-        drive_root=drive_root,
-        snapshot_hash=snapshot_hash,
-        commit_message=commit_message,
-        paths=paths,
-        skip_tests=skip_tests,
-    )
-    if early_exit is not None:
-        return early_exit
+        # Explicit audited bypass.
+        if skip_advisory_pre_review:
+            return _record_bypass(ctx, state, snapshot_hash, commit_message,
+                                   "explicit skip_advisory_review=True", task_id, drive_root,
+                                   snapshot_paths=paths)
+
+    readiness_warnings, changed_files = [], ""
+    if not resuming:
+        readiness_warnings, changed_files, early_exit = _advisory_pre_sdk_gate(
+            ctx=ctx,
+            repo_dir=repo_dir,
+            drive_root=drive_root,
+            snapshot_hash=snapshot_hash,
+            commit_message=commit_message,
+            paths=paths,
+            skip_tests=skip_tests,
+            review_rebuttal=review_rebuttal,
+        )
+        if early_exit is not None:
+            return early_exit
 
     # Managed resolutions display the DISCLOSED dual counters instead of one
     # whole-candidate file count (display only — snapshot hashing above stays
@@ -1172,65 +1187,38 @@ def _handle_advisory_pre_review(
         goal=goal,
         scope=scope,
         paths=paths,
-        options={"drive_root": drive_root},
+        options={"drive_root": drive_root, "review_rebuttal": review_rebuttal,
+                 "execution": execution, "snapshot_hash": snapshot_hash},
     )
     _advisory_duration = _time.monotonic() - _advisory_start
     advisory_meta = dict(getattr(ctx, "_last_claude_advisory_meta", {}) or {})
     advisory_session_id = str(advisory_meta.get("session_id") or "")
+    execution = dict(advisory_meta.get("execution") or execution)
 
-    # Delivery errors.
+    # Delivery and deterministic syntax failures share persistence, while their
+    # typed status/cause remain separate for admission and diagnostics.
+    error_status, reason_kind, failure_message = "", "", ""
     if raw_result.startswith("⚠️ ADVISORY_ERROR"):
-        _persist_preflight_record(
-            ctx=ctx,
-            snapshot_hash=snapshot_hash,
-            commit_message=commit_message,
-            record={
-                "status": "error",
-                "raw_result": raw_result,
-                "paths": paths,
-                "duration_sec": _advisory_duration,
-                "readiness_warnings": readiness_warnings,
-                "prompt_chars": prompt_chars,
-                "model_used": model_used,
-                "session_id": advisory_session_id,
-            },
+        error_status = "error"
+        failure_message = "Advisory review failed; the complete source and cause remain recorded."
+    elif raw_result.startswith("⚠️ PREFLIGHT_BLOCKED"):
+        error_status, reason_kind = "preflight_blocked", "syntax"
+        failure_message = (
+            "Advisory delivery was skipped: a staged .py file has a SyntaxError. "
+            "Fix the syntax error listed above and re-run preflight_review."
         )
-        return _json_response({
-            "status": "error",
-            "snapshot_hash": snapshot_hash,
-            "error": raw_result,
-            "session_id": advisory_session_id,
-            "readiness_warnings": readiness_warnings,
-            "message": (
-                "Advisory review failed to run. Fix the error and retry, "
-                "or use skip_advisory_review=True to bypass (will be audited)."
-            ),
+    if error_status:
+        _persist_preflight_record(ctx, snapshot_hash, commit_message, {
+            "status": error_status, "reason_kind": reason_kind, "execution": execution, "strict": True,
+            "review_rebuttal": review_rebuttal, "items": items, "raw_result": raw_result,
+            "paths": paths, "duration_sec": _advisory_duration,
+            "readiness_warnings": readiness_warnings, "prompt_chars": prompt_chars,
+            "model_used": model_used, "session_id": advisory_session_id,
         })
-
-    # Syntax preflight skipped SDK; persist explicit blocker, not parse_failure.
-    if raw_result.startswith("⚠️ PREFLIGHT_BLOCKED"):
-        _persist_preflight_record(
-            ctx=ctx,
-            snapshot_hash=snapshot_hash,
-            commit_message=commit_message,
-            record={
-                "status": "preflight_blocked",
-                "reason_kind": "syntax",
-                "raw_result": raw_result,
-                "paths": paths,
-                "duration_sec": _advisory_duration,
-                "readiness_warnings": readiness_warnings,
-            },
-        )
         return _json_response({
-            "status": "preflight_blocked",
-            "snapshot_hash": snapshot_hash,
-            "error": raw_result,
-            "readiness_warnings": readiness_warnings,
-            "message": (
-                "Advisory delivery was skipped: a staged .py file has a SyntaxError. "
-                "Fix the syntax error listed above and re-run preflight_review."
-            ),
+            "status": error_status, "snapshot_hash": snapshot_hash,
+            "error": raw_result, "session_id": advisory_session_id,
+            "readiness_warnings": readiness_warnings, "message": failure_message,
         })
 
     # Prompt too large: persist non-blocking skipped run as fresh for this snapshot.
@@ -1241,6 +1229,7 @@ def _handle_advisory_pre_review(
                 snapshot_hash, commit_message, "skipped",
                 repo_key=repo_key, task_id=task_id,
                 snapshot_summary=snapshot_summary, raw_result=raw_result,
+                review_rebuttal=review_rebuttal, execution=execution,
                 snapshot_paths=paths, readiness_warnings=readiness_warnings,
                 prompt_chars=prompt_chars, model_used=model_used,
                 session_id=advisory_session_id, duration_sec=_advisory_duration,
@@ -1271,10 +1260,13 @@ def _handle_advisory_pre_review(
     # Same predicate as triad, so one contract cannot mean two things.
     verified_clean = not items and _is_clean_verdict(raw_result)
     run_status = "fresh" if (items or verified_clean) else "parse_failure"
+    if run_status == "parse_failure":
+        execution.update(failure_phase="format", failure_code="parse_failure")
     run = _advisory_run_record(
         snapshot_hash, commit_message, run_status,
         repo_key=repo_key, task_id=task_id,
         items=items, snapshot_summary=snapshot_summary, raw_result=raw_result,
+        review_rebuttal=review_rebuttal, execution=execution,
         snapshot_paths=paths, readiness_warnings=readiness_warnings,
         prompt_chars=prompt_chars, model_used=model_used,
         session_id=advisory_session_id, duration_sec=_advisory_duration,
@@ -1369,6 +1361,7 @@ def _handle_review_status(
         projection["open_debts"],
         effective_is_fresh=projection["effective_is_fresh"],
         enforcement=_get_review_enforcement(),
+        advisory_permitted=bool(projection["repo_commit_ready"]),
     )
     return json.dumps(
         build_review_status_payload(projection, next_step=next_step, include_raw=include_raw),
@@ -1394,6 +1387,7 @@ def _preflight_review_params() -> dict:
             ),
             "goal": _schema_param("string", "High-level goal of this change. Used to judge completeness."),
             "scope": _schema_param("string", "Declared scope boundary. Issues outside scope are advisory-only."),
+            "review_rebuttal": _schema_param("string", "Counter-argument to previous review findings, delivered in full to this preflight reviewer."),
             "paths": _schema_param("array", "Explicit list of changed file paths. Auto-detected from git status if omitted.", items={"type": "string"}),
             "skip_tests": _schema_param("boolean", "Skip the preflight pytest run. Default: False (tests run by default). Use True only for intentionally incomplete WIP code where test failures are expected. Tests are run before the paid critic call — in a hermetic worktree, as the same two passes CI runs (parallel 'not serial' then serial) — to catch broken code early and avoid wasting review budget.", default=False),
         },
@@ -1473,6 +1467,8 @@ from ouroboros.tools.preflight_review_prompt import (  # noqa: E402, F401 -- int
 )
 from ouroboros.tools.preflight_review_run import (  # noqa: E402, F401 -- intentional public re-exports
     _ADVISORY_EXTRACT_CONTRACT,
+    _advisory_failure,
+    pending_advisory_execution,
     _ADVISORY_PROMPT_MAX_CHARS,
     _ADVISORY_SESSION_MAX_SECONDS,
     _check_expected_items,

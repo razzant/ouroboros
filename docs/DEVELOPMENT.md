@@ -890,19 +890,22 @@ That required presence test is the enforcing surface; CHECKLISTS item 11
 
 ## Review & Commit Protocol
 
-Reviewed commits separate cheap improvement evidence from authoritative
-candidate-bound authority. The operator sequence: finish all edits, run focused
-tests, run the advisory when useful, then freeze and review the exact
-candidate — do not interleave edits with repeated review calls.
-`docs/CHECKLISTS.md` is the only reviewer-question, severity, and output SSOT;
-ARCHITECTURE "Review stack" owns the dataflow.
+Reviewed commits separate improvement evidence from candidate-bound authority.
+Finish the edits and focused tests, then call `commit_reviewed`; standalone
+`preflight_review` remains available when an earlier critique is useful.
+`docs/CHECKLISTS.md` owns reviewer questions, severity and output contracts;
+ARCHITECTURE "Review delivery" owns the dataflow.
 
-1. **Cheap advisory preflight.** After edits, `preflight_review` may find
-   omissions before the expensive gate. Without an explicit skip,
-   `commit_reviewed` requires fresh advisory coverage and no open advisory
-   obligations or commit-readiness debt; any edit makes coverage stale.
-   `skip_advisory_review=True` bypasses only these advisory admission checks;
-   the skip is chosen by LLM judgment and durably audited with its reason.
+1. **Prepared preflight.** Authorization and unresolved-work checks precede
+   mechanical file preparation, staging/classification/protection and the
+   fingerprint. Existing free-cycle/budget admission precedes any automatic
+   preflight. When needed, the same `preflight_review` runs inline with the full
+   `review_rebuttal` and the independently applicable test preflight. The
+   candidate must remain unchanged before triad/scope dispatch. Explicit
+   `skip_advisory_review=True`, disabled and unconfigured paths retain their
+   audited behavior. A free advisory replay buys neither another preflight nor
+   another triad/scope wave; applicable compensating tests still run even when
+   the reviewer backend is available. Explicit test skips are not green proof.
 2. **Authoritative gate.** Independently configured deterministic test policy,
    staged fingerprinting, triad review, applicable scope review, aggregation,
    and pre/post revalidation. The fingerprint binds `git write-tree`, ordered
@@ -913,6 +916,24 @@ ARCHITECTURE "Review stack" owns the dataflow.
    mutation, rebase, conflict resolution, or changed landing parent
    invalidates exact-candidate authority and requires the applicable final
    gate again.
+
+A technical review failure may permit continuing under owner-selected advisory
+enforcement on a known, independently bound candidate. The failure's phase,
+reason, received findings and full result stay recorded as failure, never PASS.
+Blocking enforcement still blocks. Candidate/ownership, unfinished custody,
+Stop/deadline and budget/admission errors remain independent. Diagnostic
+`repo_commit_ready` projects this permission only from an exact repo/hash match;
+it does not change the failed review's status or freshness.
+
+Pending triad/scope reconciliation retains the prepared index and never restages
+or reconstructs a lost index. Pending delegated preflight binds the existing
+`delegate_custody` invocation in `AdvisoryRunRecord.execution` before POST and
+replays its canonical request, without another prompt store or physical run.
+Native preflight uses the existing physical dispatch stamp on that same record;
+an ambiguous native outcome remains blocked. The external review wrapper uses
+the same cycle and retains its candidate
+checkout/index while custody remains unresolved; its existing outcome records
+the checkout, drive root, reason and invocation for reconciliation.
 
 Triad slots review the staged diff against `docs/CHECKLISTS.md`; duplicate
 model ids remain independent slots and `config.adaptive_quorum` owns quorum. A

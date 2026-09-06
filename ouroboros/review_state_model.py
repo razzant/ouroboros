@@ -157,6 +157,18 @@ class AdvisoryReviewState:
         return run is not None and run.status in ("fresh", "bypassed", "skipped")
 
     def add_run(self, run: AdvisoryRunRecord) -> None:
+        invocation = str(run.execution.get("invocation_id") or run.execution.get("operation_id") or "")
+        for index, existing in enumerate(self.advisory_runs):
+            active = (existing.status == "pending" or existing.execution.get("pending_invocation_id")
+                      or existing.execution.get("operation_state") in {"in_flight", "custody_lost"})
+            if (active and existing.repo_key == run.repo_key
+                    and (not invocation or invocation != (existing.execution.get("invocation_id") or existing.execution.get("operation_id")))):
+                raise ValueError("an unresolved preflight already owns this repository")
+            if (invocation and (existing.execution.get("invocation_id") or existing.execution.get("operation_id")) == invocation
+                    and (existing.repo_key, existing.task_id) == (run.repo_key, run.task_id)):
+                run.attempt, run.created_ts = existing.attempt, existing.created_ts
+                self.advisory_runs.pop(index)
+                break
         if not run.attempt:
             run.attempt = self.next_advisory_attempt_number(
                 str(run.repo_key or _rs()._LEGACY_CURRENT_REPO_KEY),
@@ -170,7 +182,12 @@ class AdvisoryReviewState:
         self.mark_all_stale_except(run.snapshot_hash, repo_key=run.repo_key)
         self.advisory_runs.append(run)
         if len(self.advisory_runs) > _rs()._MAX_RUN_HISTORY:
-            self.advisory_runs = self.advisory_runs[-_rs()._MAX_RUN_HISTORY:]
+            cutoff = len(self.advisory_runs) - _rs()._MAX_RUN_HISTORY
+            self.advisory_runs = [
+                row for index, row in enumerate(self.advisory_runs)
+                if index >= cutoff or row.status == "pending" or row.execution.get("pending_invocation_id")
+                or row.execution.get("operation_state") in {"in_flight", "custody_lost"}
+            ]
         if run.status in ("fresh", "bypassed", "skipped", "parse_failure"):
             self.last_stale_from_edit_ts = ""
             self.last_stale_reason = ""
