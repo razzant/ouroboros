@@ -245,7 +245,7 @@ def test_queue_only_returns_queue_without_scanning_task_results(tmp_path, monkey
 
     assert payload["tasks"] == []
     assert payload["queue"]["pending"][0]["id"] == "queued-task"
-    assert reads == []  # no task-results scan at all
+    assert reads == [str(data / "state" / "queue_snapshot.json")]  # no task-results scan
 
 
 def test_list_rows_are_compact_while_detail_keeps_bulk_fields(tmp_path):

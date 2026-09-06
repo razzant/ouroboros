@@ -21,7 +21,7 @@ from pathlib import Path
 from typing import Any, Dict
 
 from ouroboros.task_results import validate_task_id
-from ouroboros.task_status import load_effective_task_result
+from ouroboros.task_status import load_effective_task_result, observe_cancellation_target
 from ouroboros.task_tree_ledger import (
     CHILD_RESULT_DISPOSITIONS,
     CHILD_RESULT_DISPOSITION_TYPE,
@@ -632,6 +632,8 @@ def _cancel_task(ctx: ToolContext, task_id: str, reason: str = "") -> str:
     try:
         from ouroboros.cancel_intents import CancelIntentProjectionCorrupt, request_cancel
 
+        observation = observe_cancellation_target(status_drive_root, tid, include_execution=True,
+            request_origin={"kind": "agent_task", "task_id": str(getattr(ctx, "task_id", "") or "")})
         intent = request_cancel(
             status_drive_root,
             tid,
@@ -639,6 +641,7 @@ def _cancel_task(ctx: ToolContext, task_id: str, reason: str = "") -> str:
             source="agent_tool",
             requested_by=str(getattr(ctx, "task_id", "") or "") if own else "",
             allow_settled_target=live_ownership,
+            observation=observation,
         )
     except CancelIntentProjectionCorrupt:
         # GR4-8: a corrupt projection is not a transient — "retry" cannot
@@ -659,13 +662,17 @@ def _cancel_task(ctx: ToolContext, task_id: str, reason: str = "") -> str:
             f"⚠️ CANCEL_INTENT_WRITE_FAILED: durable cancel intent for {tid} could not "
             "be recorded; nothing was cancelled. Retry, or report the failure."
         )
+    observation["matches_cancel_target"] = observation.get("observed_task_id") == str(intent.get("task_id") or tid)
+    observed_note = ("\n[OBSERVED_TARGET]\n" + json.dumps(observation, ensure_ascii=False)
+                     + "\n[/OBSERVED_TARGET]\nThese source observations are separate from the caller's reason; "
+                     "missing or stale facts do not prove that no work or spending occurred.")
     if intent.get("already_settled"):
         # Completion wins (owner 4=A): nothing to tear down, and minting an intent
         # for a settled task would show a false "Cancelling…" state on a finished
         # card until the watchdog cleaned it up.
         return (
             f"Nothing to cancel: {tid} had already finished ({intent.get('status')}). "
-            "Its result is preserved — use discard_child_result if you want to drop it."
+            "Its result is preserved — use discard_child_result if you want to drop it." + observed_note
         )
     if own:
         _record_child_decision_beacon(
@@ -689,7 +696,7 @@ def _cancel_task(ctx: ToolContext, task_id: str, reason: str = "") -> str:
     return (
         f"Cancel requested: {tid}{(' — ' + reason_text) if reason_text else ''}{note}{already}. "
         "cancel_state=pending until the supervisor confirms teardown; a child that "
-        "already finished keeps its completed result (use discard_child_result to drop it)."
+        "already finished keeps its completed result (use discard_child_result to drop it)." + observed_note
     )
 
 

@@ -822,6 +822,10 @@ def _store_task_result(env: Any, task: Dict[str, Any], text: str,
     do not derive/flag a second time. It is only re-derived here when called without one.
     """
     try:
+        from ouroboros.review_projection import publish_acceptance_checkpoint
+
+        publish_acceptance_checkpoint(env, llm_trace, task_id=str(task.get("id") or ""),
+                                      drive_root=env.drive_root, chat_id=task.get("chat_id"))
         trace_summary = build_trace_summary(llm_trace)
         from ouroboros.cost_projection import with_cost_aliases
 
@@ -847,6 +851,11 @@ def _store_task_result(env: Any, task: Dict[str, Any], text: str,
         execution_status = str((outcome_axes.get("execution") or {}).get("status") or "")
         reason_code = str(loop_outcome.get("reason_code") or "")
         status = _durable_terminal_status(env, task, execution_status, existing=existing)
+        from ouroboros.task_finalization import build_completion_observations
+
+        observations = build_completion_observations(
+            env.drive_root, {**task, "started_at": existing.get("started_at")}, llm_trace,
+        )
         task_contract = build_task_contract(task)
         task = {**task, "task_contract": task_contract}
         artifact_bundle_for_ledger = artifact_bundle_from_result(existing)
@@ -988,6 +997,7 @@ def _store_task_result(env: Any, task: Dict[str, Any], text: str,
             trace_refs=loop_outcome.get("trace_refs") or {},
             **cost_fields,
             review_evidence=review_evidence or {},
+            completion_observations=observations,
             **({"review_projection": review_projection} if review_projection.get("panels") else {}),
             verification_ledger=verification_refs.get("inline"),
             artifact_bundle=artifact_bundle,

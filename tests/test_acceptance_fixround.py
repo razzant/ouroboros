@@ -536,10 +536,17 @@ def test_budget_ladder_stops_shedding_after_predecessor_fits():
         }],
     }
     budget = len(json.dumps(compact_without_envelope)) + 10
+    compact_without_envelope["__budget_note__"] = (
+        f"⚠️ OMISSION NOTE: evidence exceeded {budget} chars; "
+        f"omitted the predecessor authority envelope ({compact_without_envelope['omissions_manifest'][0]['omitted']} chars). "
+        "Full content is durable off-axis."
+    )
+    budget = len(json.dumps(compact_without_envelope, ensure_ascii=False)) + 10
 
     result = _accept_enforce_budget(evidence, budget=budget)
 
     assert result["tool_trajectory"] == trajectory
+    assert len(json.dumps(result, ensure_ascii=False, default=str)) <= budget
     assert not any(
         row.get("section") == "tool_trajectory"
         for row in result["omissions_manifest"]

@@ -10,6 +10,7 @@ import pathlib
 
 from typing import Any, Callable, Dict, List, Optional
 from ouroboros.review_cycles import REASON_REVIEW_CYCLES_EXHAUSTED
+from ouroboros.review_projection import publish_acceptance_checkpoint
 from ouroboros.outcomes import ACCEPTANCE_ACCEPTED, ACCEPTANCE_BYPASS_REASONS, ACCEPTANCE_BYPASS_REASON_BY_RAIL, ACCEPTANCE_DECISION_STATUSES, ACCEPTANCE_FINALIZED_UNACCEPTED, ACCEPTANCE_REVISION_REQUESTED, REASON_ACCEPTANCE_REVIEW_SKIPPED_DEADLINE_RESERVE, REASON_IDENTICAL_ACCEPTANCE_REFUSED, extract_final_answer, turn_has_reviewable_effects
 from ouroboros.tools.registry import ToolRegistry
 from ouroboros.utils import truncate_review_artifact
@@ -282,6 +283,7 @@ def _supersede_delivery_acceptance_binding(
             "acceptance; the prior panel is retained only as superseded audit evidence."
         ),
     })
+    publish_acceptance_checkpoint(tools._ctx, llm_trace)
     return True
 
 
@@ -318,6 +320,7 @@ def _supersede_task_acceptance_for_owner_followup(
         "source": "owner_followup",
         "rationale": "The owner added a directive after acceptance evidence was frozen; re-review is required.",
     })
+    publish_acceptance_checkpoint(ctx, llm_trace)
     return released
 
 
@@ -388,6 +391,7 @@ def _supersede_task_acceptance_for_evidence_change(
     emit_progress(
         "Task acceptance review superseded: task or child evidence changed before delivery."
     )
+    publish_acceptance_checkpoint(ctx, llm_trace)
 
 
 def _task_acceptance_subtree_snapshot(
@@ -597,6 +601,12 @@ def _set_acceptance_decision(llm_trace: Dict[str, Any], decision: Dict[str, Any]
         if previous.get(key) and not merged.get(key):
             merged[key] = previous.get(key)
     llm_trace["acceptance_decision"] = merged
+    # A full applied-review source includes the host's actual decision, not
+    # only the provider's earlier response. The decision above stays authority.
+    for run in reversed(llm_trace.get("review_runs") or []):
+        if isinstance(run, dict) and run.get("authority") == "host_root":
+            run["applied_decision"] = dict(merged)
+            break
 
 
 def _collect_acceptance_obligations(llm_trace: Dict[str, Any], result: Any) -> None:
@@ -866,6 +876,7 @@ def _record_forced_acceptance_bypass(
         # A revision request is not a terminal host decision: this rail cannot
         # take the pass it promised, so close it instead of leaving it dangling.
         terminalize_dangling_revision(llm_trace, rail=str(reason_code or ""))
+        publish_acceptance_checkpoint(tools_ctx, llm_trace, task_id=ctx.task_id)
         return
     if getattr(tools_ctx, "_task_acceptance_reviewed", False):
         return

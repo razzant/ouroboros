@@ -1209,4 +1209,7 @@ def build_intrinsic_pacing_note(
     if tree_accounted is not None:
         checkpoint["tree_accounted_usd"] = round(tree_accounted, 4)
         checkpoint["tree_cap_usd"] = round(tree_cap, 4) if tree_cap is not None else None
+    ceiling = getattr(ctx, "_cost_ceiling", None)
+    if isinstance(ceiling, CostCeiling):
+        checkpoint["cost_ceiling"] = cost_ceiling_disclosure(ceiling)
     return PacingNote(text=text, checkpoint=checkpoint)

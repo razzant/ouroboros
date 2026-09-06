@@ -97,6 +97,22 @@ export function cancelTask(taskId, { cascade = false, stopPolicy = '' } = {}) {
     return Object.keys(body).length ? jsonPost(url, body) : fetchJson(url, { method: 'POST' });
 }
 
+/** URL for one published immutable source, retaining the legacy flat-ref contract. */
+export function taskSourceDownloadUrl(taskId, ref, legacyKind = '') {
+    const source = ref?.kind === 'task_source';
+    const size = source ? ref?.size : ref?.bytes;
+    const path = typeof ref?.path === 'string' ? ref.path : '';
+    const allowedPath = source
+        ? /^source_handles\/(tool_results|context_checkpoints)\/[A-Za-z0-9][A-Za-z0-9._-]*$/
+        : /^[A-Za-z0-9][A-Za-z0-9._-]*$/;
+    if (!taskId || ref?.root !== 'artifact_store' || (!source && ref?.kind !== legacyKind)
+        || !/^[0-9a-f]{64}$/.test(ref?.sha256 || '') || !allowedPath.test(path)
+        || !Number.isSafeInteger(size) || size < 0) return '';
+    const name = path.split('/').at(-1);
+    const url = `/api/tasks/${encodeURIComponent(taskId)}/artifacts/${encodeURIComponent(name)}`;
+    return source ? `${url}?source=${encodeURIComponent(path)}` : url;
+}
+
 export async function resumeTask(taskId) {
     return fetchJson(`/api/tasks/${encodeURIComponent(taskId)}/resume`, { method: 'POST' });
 }

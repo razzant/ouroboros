@@ -427,7 +427,6 @@ def remove_subagent_task_drive(parent_drive_root: pathlib.Path, task_id: str) ->
 
 def copy_child_task_result(parent_drive_root: pathlib.Path, task: Dict[str, Any]) -> Optional[Dict[str, Any]]:
     """Copy a child-drive task result back to the parent data root."""
-
     task_id = str(task.get("id") or "")
     if not task_id:
         return None
@@ -916,6 +915,7 @@ def _merge_artifacts(
     *,
     drop_kinds: Optional[set[str]] = None,
 ) -> List[Dict[str, Any]]:
+
     merged: List[Dict[str, Any]] = []
     drop = drop_kinds or set()
     key_for = lambda item: (

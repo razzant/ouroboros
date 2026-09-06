@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import asyncio
 import functools
-import json
 import logging
 import pathlib
 import shutil
@@ -14,7 +13,7 @@ from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional
 
 from starlette.requests import Request
-from starlette.responses import FileResponse, JSONResponse
+from starlette.responses import FileResponse, JSONResponse, Response
 
 from ouroboros.gateway._helpers import coerce_int, json_error, json_exception, request_drive_root, request_json_or, request_repo_dir, stage_initial_task_attachments
 from ouroboros.gateway.contracts import TaskCreateRequest
@@ -55,7 +54,7 @@ from ouroboros.contracts.task_contract import (
     normalize_resource_policy,
 )
 from ouroboros.outcomes import public_task_result
-from ouroboros.artifacts import resolve_chat_media_path
+from ouroboros import artifacts as artifact_store
 from ouroboros.task_result_schema import (
     emit_quarantine_event,
     quarantine_task_result,
@@ -74,6 +73,7 @@ from ouroboros.task_status import (
     _EventsTailIndex,
     effective_task_result,
     load_effective_task_result,
+    observe_cancellation_target,
 )
 from ouroboros.utils import read_json_dict, utc_now_iso
 from ouroboros.tool_access import path_is_relative_to, paths_overlap_casefold
@@ -991,25 +991,32 @@ async def api_task_artifact(request: Request):
     if not name or "/" in name or "\\" in name or name in {".", ".."} or ".." in pathlib.PurePosixPath(name).parts:
         return json_error("artifact name must be a simple filename", 400)
     drive_root = request_drive_root(request)
-    chat_media = resolve_chat_media_path(drive_root, task_id, name)
-    if chat_media is not None:
-        return FileResponse(chat_media)
-    result = load_effective_task_result(drive_root, task_id)
-    if not result:
-        return json_error("task not found", 404)
-    artifact = _artifact_by_name(result, name)
-    if artifact is None:
-        return json_error("artifact not found", 404, task_id=task_id, artifact=name)
-    base = task_artifacts_dir(drive_root, task_id).resolve(strict=False)
-    path = pathlib.Path(str(artifact.get("path") or "")).resolve(strict=False)
-    if path.name != name:
-        return json_error("artifact metadata path does not match requested name", 500)
-    try:
-        path.relative_to(base)
-    except ValueError:
-        return json_error("artifact path is outside task artifact directory", 500)
-    if not path.is_file():
-        return json_error("artifact file is missing", 404, task_id=task_id, artifact=name)
+    path = artifact_store.resolve_chat_media_path(drive_root, task_id, name)
+    if path is None:
+        result = load_effective_task_result(drive_root, task_id)
+        if not result:
+            return json_error("task not found", 404)
+        if source := request.query_params.get("source"):
+            try:
+                return Response(artifact_store.read_task_result_source_bytes(drive_root, result, name, source), media_type="application/json")
+            except (OSError, ValueError, RuntimeError):
+                return json_error("task source is unavailable or does not match its recorded identity", 404)
+        artifact = _artifact_by_name(result, name)
+        if artifact is None:
+            records = artifact_store.collect_task_artifact_records(drive_root, task_id, include_bookkeeping=True)
+            artifact = _artifact_by_name({"artifacts": [row for row in records if artifact_store.is_task_bookkeeping_artifact(row)]}, name)
+        if artifact is None:
+            return json_error("artifact not found", 404, task_id=task_id, artifact=name)
+        base = task_artifacts_dir(drive_root, task_id).resolve(strict=False)
+        path = pathlib.Path(str(artifact.get("path") or "")).resolve(strict=False)
+        if path.name != name:
+            return json_error("artifact metadata path does not match requested name", 500)
+        try:
+            path.relative_to(base)
+        except ValueError:
+            return json_error("artifact path is outside task artifact directory", 500)
+        if not path.is_file():
+            return json_error("artifact file is missing", 404, task_id=task_id, artifact=name)
     return FileResponse(path)
 
 
@@ -1119,11 +1126,13 @@ async def _graceful_stop_acknowledgement(task_id: str, *, cascade: bool) -> JSON
     live_own = await asyncio.to_thread(_live_ownership, task_id)
     if not live_own and not await asyncio.to_thread(_live_check, task_id):
         return json_error("task not found or not active", 404, task_id=task_id)
+    observation = await asyncio.to_thread(observe_cancellation_target, _drive_root, task_id, request_origin={"kind": "http_client", "source": "http_graceful"})
     try:
         intent = await asyncio.to_thread(functools.partial(
             request_cancel, _drive_root, task_id,
             reason="owner requested finalize-then-stop",
             source="http_graceful", requested_by="owner",
+            observation=observation,
             requested_stop_policy=STOP_POLICY_FINALIZE,
             allow_settled_target=bool(cascade or live_own),
             **({"scope": SCOPE_CASCADE} if cascade else {}),
@@ -1253,6 +1262,7 @@ async def api_task_cancel(request: Request) -> JSONResponse:
         try:
             intent = request_cancel(
                 _drive_root, task_id, source=source,
+                observation=observe_cancellation_target(_drive_root, task_id, request_origin={"kind": "http_client", "source": source}),
                 **({"scope": SCOPE_CASCADE} if cascade_scope else {}),
                 allow_settled_target=bool(cascade_scope or allow_settled),
                 # §13.1: an omitted/empty-body or explicit-immediate request IS
@@ -1537,9 +1547,7 @@ def _render_attachment_lines(attachments: Any) -> str:
 
 def _artifact_by_name(result: Dict[str, Any], name: str) -> Optional[Dict[str, Any]]:
     for artifact in result.get("artifacts") or []:
-        if not isinstance(artifact, dict):
-            continue
-        if str(artifact.get("name") or pathlib.Path(str(artifact.get("path") or "")).name) == name:
+        if isinstance(artifact, dict) and str(artifact.get("name") or pathlib.Path(str(artifact.get("path") or "")).name) == name:
             return artifact
     return None
 
@@ -1547,10 +1555,9 @@ def _artifact_by_name(result: Dict[str, Any], name: str) -> Optional[Dict[str, A
 def _queue_snapshot(drive_root: pathlib.Path) -> Dict[str, Any]:
     path = pathlib.Path(drive_root) / "state" / "queue_snapshot.json"
     try:
-        data = json.loads(path.read_text(encoding="utf-8"))
+        return read_json_dict(path) or {}
     except Exception:
         return {}
-    return data if isinstance(data, dict) else {}
 
 
 def _supervisor_ready_error(request: Request) -> Optional[JSONResponse]:

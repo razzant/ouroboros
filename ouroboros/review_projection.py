@@ -1,6 +1,7 @@
 """Panel identity and the compact, redacted projection of a review run.
 
-Owns the outward-facing view of a completed panel: transport-failure
+Owns the outward-facing view of a completed panel: full applied acceptance
+source persistence through the existing artifact/task-result owners, transport-failure
 classification, redaction of model-authored reason text, the per-actor and
 per-panel projections that task results and the UI consume, the enforcement
 impact label, and the panel-identity hash over the actor rows. Extracted from
@@ -12,6 +13,8 @@ from __future__ import annotations
 
 import hashlib
 import json
+import copy
+import logging
 from dataclasses import asdict
 from typing import Any, Dict, List, TYPE_CHECKING
 
@@ -302,6 +305,11 @@ def compact_review_projection(review_runs: Any) -> Dict[str, Any]:
             panel["single_reviewer_no_diversity"] = True
         if isinstance(raw_run.get("dialogue"), dict):
             panel["dialogue"] = raw_run.get("dialogue")
+        if surface == "task_acceptance":
+            panel["applied_source_status"] = str(raw_run.get("applied_source_status") or "unavailable")
+            for key in ("task_attempt", "panel_index", "publication_revision", "applied_source_ref"):
+                if key in raw_run:
+                    panel[key] = copy.deepcopy(raw_run[key])
         for key in (
             "candidate_hash", "evidence_revision", "fence_hash", "binding_hash",
         ):
@@ -309,3 +317,73 @@ def compact_review_projection(review_runs: Any) -> Dict[str, Any]:
                 panel[key] = str(raw_run.get(key))
         panels.append(panel)
     return {"panels": panels}
+
+
+def publish_acceptance_checkpoint(
+    ctx: Any, llm_trace: Dict[str, Any], *, task_id: str = "",
+    drive_root: Any = None, chat_id: Any = None,
+) -> None:
+    """Save the complete applied host record before publishing its read model.
+
+    This does not grant review authority or alter task lifecycle. Source bytes
+    use the existing immutable artifact store; publication_revision only orders
+    concurrent snapshots of a panel within the existing task attempt.
+    """
+    from pathlib import Path
+
+    from ouroboros.artifacts import store_actor_source_bytes
+    from ouroboros.task_results import write_task_result
+    from ouroboros.tools.plan_review_references import _emit_review_reference
+
+    runs = [run for run in (llm_trace.get("review_runs") or [])
+            if isinstance(run, dict) and run.get("authority") == "host_root"
+            and isinstance(run.get("request"), dict)
+            and (run.get("request") or {}).get("surface") == "task_acceptance"]
+    task_id = str(task_id or getattr(ctx, "task_id", "") or "")
+    meta = getattr(ctx, "task_metadata", {})
+    meta = meta if isinstance(meta, dict) else {}
+    root = meta.get("budget_drive_root") or getattr(ctx, "budget_drive_root", None) or drive_root or getattr(ctx, "drive_root", None)
+    if not runs or not task_id or not root:
+        return
+    revision = int(llm_trace.get("_acceptance_publication_revision") or 0) + 1
+    llm_trace["_acceptance_publication_revision"] = revision
+    snapshots = copy.deepcopy(llm_trace.get("review_runs") or [])
+    for index, run in enumerate(snapshots):
+        if not isinstance(run, dict) or run.get("authority") != "host_root" or not isinstance(run.get("request"), dict) or run["request"].get("surface") != "task_acceptance":
+            continue
+        run.setdefault("panel_id", f"panel_{index + 1}")
+        run.setdefault("panel_index", index)
+        source = {key: value for key, value in run.items()
+                  if key not in {"applied_source_ref", "applied_source_status", "publication_revision"}}
+        raw = json.dumps(_sub().redact_projection(source).value, ensure_ascii=False, sort_keys=True, default=str).encode("utf-8")
+        run.pop("applied_source_ref", None)
+        run["applied_source_status"] = "unavailable"
+        try:
+            run["applied_source_ref"] = store_actor_source_bytes(
+                Path(root), task_id, category="context_checkpoints",
+                source_id="acceptance", data=raw, extension="json",
+            )
+            run["applied_source_status"] = "available"
+        except (OSError, ValueError, TimeoutError):
+            logging.getLogger(__name__).warning("Applied acceptance source unavailable", exc_info=True)
+        run["publication_revision"] = revision
+        # A later snapshot may have completed during slow artifact I/O. It owns
+        # the in-memory projection too; the durable merge applies the same rule.
+        if llm_trace.get("_acceptance_publication_revision") == revision:
+            current = llm_trace["review_runs"][index]
+            for key in ("panel_id", "panel_index", "task_attempt", "publication_revision", "applied_source_ref", "applied_source_status"):
+                if key in run:
+                    current[key] = copy.deepcopy(run[key])
+            if "applied_source_ref" not in run:
+                current.pop("applied_source_ref", None)
+    projection = compact_review_projection(snapshots)
+    try:
+        result = write_task_result(
+            root, task_id, "running", review_projection=projection,
+            strict_existing_dict=True,
+            _field_projector=lambda current, fields: {**fields, "status": current.get("status") or "running"},
+        )
+        state = result.get("review_projection") or {}
+        _emit_review_reference(ctx, task_id, state, surface="task_acceptance", state_root=Path(root), chat_id=chat_id)
+    except (OSError, ValueError, TimeoutError):
+        logging.getLogger(__name__).warning("Applied acceptance projection unavailable", exc_info=True)

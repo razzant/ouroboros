@@ -567,6 +567,7 @@ def record_patch_disposed(drive_root: Any, custody: RunCustody, *, disposition: 
     custody.patch_apply_pending = False  # a disposition completes the intent story
     return emit(drive_root, PATCH_DISPOSED, {
         "run_id": custody.run_id, "task_id": custody.task_id,
+        "root_task_id": custody.root_task_id, "parent_task_id": custody.parent_task_id,
         "snapshot_id": custody.snapshot_id, "disposition": str(disposition or ""),
         **payload,
     })
@@ -961,6 +962,7 @@ def settle_run(drive_root: Any, gateway: Any, custody: RunCustody, detail: Dict[
         else:
             custody.ledger_recorded = True
             emit(drive_root, LEDGER_RECORDED, {"run_id": custody.run_id, "task_id": custody.task_id,
+                                               "root_task_id": custody.root_task_id, "parent_task_id": custody.parent_task_id,
                                                "route": custody.route_id})
     if not custody.ledger_recorded:
         retire_project(drive_root, gateway, custody)
@@ -969,6 +971,7 @@ def settle_run(drive_root: Any, gateway: Any, custody: RunCustody, detail: Dict[
             custody.settled = emit(drive_root, SETTLED, {
                 "run_id": custody.run_id,
                 "task_id": custody.task_id,
+                "root_task_id": custody.root_task_id, "parent_task_id": custody.parent_task_id,
                 "route": custody.route_id,
                 # Route above remains custody authority. Fresh observations
                 # may differ from a replayed historical ledger row's model;
@@ -1076,6 +1079,7 @@ def record_settled_unread(drive_root: Any, custody: RunCustody) -> bool:
     if not custody.unread_disclosed:
         custody.unread_disclosed = emit(drive_root, SETTLED_UNREAD, {
             "run_id": custody.run_id, "task_id": custody.task_id,
+            "root_task_id": custody.root_task_id, "parent_task_id": custody.parent_task_id,
             "route": custody.route_id, "artifact": custody.output_artifact,
         })
     return True

@@ -393,9 +393,14 @@ def build_task_acceptance_evidence(
         prov["task_type"] = "host_attested"
     if isinstance(undispositioned_children, list) and undispositioned_children:
         ev["undispositioned_children"] = undispositioned_children
+    ev["__provenance__"] = prov
+    # The host facts own identity; the bounded packet is their presentation.
+    # Keep exact receipt changes visible even beyond an exhibit's text cap.
+    ev[ACCEPTANCE_SOURCE_REVISION_KEY] = task_acceptance_evidence_revision({
+        **ev, "verification_receipts_source": redact_projection(receipts).value,
+    })
     if isinstance(acceptance_dialogue_history, list) and acceptance_dialogue_history:
         ev[UNHASHED_ACCEPTANCE_DIALOGUE_HISTORY_KEY] = acceptance_dialogue_history
-    ev["__provenance__"] = prov
     return _accept_enforce_budget(ev, budget=budget_chars)
 
 
@@ -712,6 +717,7 @@ def _debt_to_dict(item: Any) -> Dict[str, Any]:
 # v7next F2.3a (D06): moved spans live in their owner leaves; re-exported
 # here so this facade stays the single import surface for callers and tests.
 from ouroboros.review_evidence_sections import (  # noqa: E402, F401 -- intentional public re-exports
+    ACCEPTANCE_SOURCE_REVISION_KEY,
     ACCEPTANCE_PROMPT_OVERHEAD_CHARS,
     AcceptancePacketBudget,
     _ACCEPT_ARGS_CAP,
