@@ -1321,27 +1321,12 @@ def sanitize_tool_args_for_log(
 ) -> Dict[str, Any]:
     """Sanitize tool arguments for logging: redact secrets, truncate large fields."""
 
-    def _redact_public_string(value: str) -> tuple[str, bool]:
-        try:
-            from ouroboros.observability import redact_projection
-
-            redacted = redact_projection(value)
-            return str(redacted.value), bool(redacted.records)
-        except Exception:
-            log.debug("Failed to run observability redactor for tool args", exc_info=True)
-            return sanitize_tool_result_for_log(value), sanitize_tool_result_for_log(value) != value
-
     def _sanitize_value(key: str, value: Any, depth: int) -> Any:
         if depth > 3:
             return {"_depth_limit": True}
         if key.lower() in _SECRET_KEYS:
             return "*** REDACTED ***"
         if isinstance(value, str):
-            redacted, did_redact = _redact_public_string(value)
-            if did_redact:
-                if len(redacted) > threshold:
-                    return f"<REDACTED_TRUNCATED:{key}:{len(redacted)}ch>"
-                return redacted
             if len(value) > threshold:
                 return f"<TRUNCATED:{key}:{len(value)}ch:sha={sha256_text(value)[:12]}>"
             return value
@@ -1357,17 +1342,19 @@ def sanitize_tool_args_for_log(
             return value
         except (TypeError, ValueError):
             log.debug("Failed to JSON serialize value in sanitize_tool_args", exc_info=True)
-            return {"_repr": repr(value)}
+            return {"_repr": sanitize_tool_result_for_log(repr(value))}
 
     try:
-        return {k: _sanitize_value(k, v, 0) for k, v in args.items()}
+        from ouroboros.observability import redact_projection
+
+        # Redact with the complete nested key context before limiting depth,
+        # list length or field size; a value alone loses DB_PASSWORD's meaning.
+        projected = redact_projection(args).value
+        return {k: _sanitize_value(k, v, 0) for k, v in projected.items()}
     except Exception:
         log.debug("Failed to sanitize tool arguments for logging", exc_info=True)
-        try:
-            return json.loads(json.dumps(args, ensure_ascii=False, default=str))
-        except Exception:
-            log.debug("Tool argument sanitization failed completely", exc_info=True)
-            return {"_error": "sanitization_failed"}
+        return {"_error": "sanitization_failed"}
+
 
 
 async def collect_evolution_metrics(repo_dir: str, data_dir: str | None = None) -> list[dict]:

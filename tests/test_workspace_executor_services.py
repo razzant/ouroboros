@@ -51,6 +51,7 @@ time.sleep(30)
     env = {"TOKEN": 'synthetic-660-quote"\\tail\nprivate-fragment-660', "EMPTY": "",
            "HTTPS_PROXY": "http://synthetic-user:synthetic-pass@127.0.0.1:7777",
            "DEPLOYMENT_MODE": "running", "FIELD_NAME": "state"}
+    monkeypatch.setattr(services, "load_settings", lambda: {"TEST_SERVICE_KEY": env["TOKEN"]})
     registry = ToolRegistry(repo_dir=tmp_path / "system", drive_root=tmp_path / "data")
     ctx = ToolContext(repo_dir=tmp_path / "system", drive_root=tmp_path / "data",
                       workspace_root=workspace, workspace_mode="external", task_id="selected-env")
@@ -60,7 +61,9 @@ time.sleep(30)
     registry.set_context(ctx)
     try:
         started = registry.execute("start_service", {"name": "selected", "cmd": [sys.executable, str(script)],
-            "cwd": str(cwd), "env": env, "readiness": {"log_contains": "READY", "timeout_sec": 3}})
+            "cwd": str(cwd), "env": {key: value for key, value in env.items() if key != "TOKEN"},
+            "env_from_settings": {"TOKEN": "TEST_SERVICE_KEY"},
+            "readiness": {"log_contains": "READY", "timeout_sec": 3}})
         assert json.loads(started)["ready"]
         assert json.loads(started)["state"] == "running"
         observed = json.loads((cwd / "observed.json").read_text())
@@ -77,7 +80,12 @@ time.sleep(30)
             ref = json.loads(logs)["full_log_ref"]
             assert env["TOKEN"] not in gzip.decompress(Path(ref["path"]).read_bytes()).decode()
     finally:
-        services._stop_service(ctx, "selected")
+        stopped = json.loads(services._stop_service(ctx, "selected"))
+    finalization = stopped["log_finalization"]
+    assert finalization["deleted_live_log"] and not finalization["errors"]
+    final = gzip.decompress(Path(finalization["full_log_ref"]["path"]).read_bytes()).decode()
+    assert "private-fragment-660" not in final and "READY" in final
+    assert services.prune_service_logs(ctx.drive_root, retention_days=0)["archived_files"] == 0
 
 
 def test_service_baseline_preserves_allowed_values_without_inheriting_credentials(monkeypatch):

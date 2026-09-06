@@ -139,14 +139,17 @@ globalThis.document = { getElementById: (id) => id === 'mcp-servers-list' ? host
 globalThis.fetch = async () => ({ ok: false });
 const server = { id: 'selected', transport: 'stdio', command: 'python',
     args: ['exact argument', ''], enabled: true, cwd: '/project/"quoted"',
-    env_from_settings: { TOKEN: 'CUSTOM_MCP_KEY' }, future_field: { retained: true },
+    env: { PORT: '8080' }, env_from_settings: { TOKEN: 'CUSTOM_MCP_KEY' }, future_field: { retained: true },
     url: 'https://unsupported-for-stdio.example/mcp' };
-applyMcpSettings({ MCP_ENABLED: true, MCP_SERVERS: [server] });
+applyMcpSettings({ MCP_ENABLED: true, MCP_SERVERS: [{ ...server, auth_configured: false }] });
 const saved = collectMcpSettings().MCP_SERVERS[0];
 for (const key of Object.keys(server)) assert.deepEqual(saved[key], server[key]);
 assert.match(host.innerHTML, /data-mcp-field="cwd"/);
 assert.match(host.innerHTML, /data-mcp-field="env_from_settings"/);
-assert.match(host.innerHTML, /Unsupported fields retained:.*future_field/);
+assert.match(host.innerHTML, /data-mcp-field="env"/);
+assert.match(host.innerHTML, /Fields retained but not applied:.*future_field/);
+assert.ok(!host.innerHTML.includes('auth_configured'));
+assert.ok(!Object.hasOwn(saved, 'auth_configured'));
 assert.ok(!host.innerHTML.includes('value="/project/"quoted""'));
 applyMcpSettings({ MCP_SERVERS: [{ ...server, env_from_settings: '{unfinished', args: 'unsupported' }] });
 assert.equal(collectMcpSettings().MCP_SERVERS[0].env_from_settings, '{unfinished');

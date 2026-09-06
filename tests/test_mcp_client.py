@@ -189,7 +189,7 @@ def test_normalize_server_config_accepts_exact_stdio_argv():
 
 
 @pytest.mark.parametrize("extra", [
-    {"env": {"TOKEN": "synthetic-unsupported"}}, {"future_option": True},
+    {"env": {"TOKEN": 42}}, {"env": "not a mapping"},
     {"url": "https://unused.example/mcp"}, {"auth_token": "unused"},
     {"cwd": 42}, {"cwd": "bad\x00cwd"}, {"env_from_settings": []},
     {"env_from_settings": {"BAD=NAME": "KEY"}}, {"env_from_settings": {"TOKEN": "MISSING"}},

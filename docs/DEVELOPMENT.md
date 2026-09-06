@@ -2574,32 +2574,43 @@ not policy: configuration trust must not turn remote prose into policy.
 Enabled tools join the initial capability envelope, still pass runtime
 safety, and remain unavailable in repair/heal contexts; discovery failure
 becomes a visible capability omission. Stdio accepts one executable command
-and an exact string argument list without a shell. Optional `cwd` and
-`env_from_settings` (a map from environment names to existing string-valued
-setting keys) apply to both listing and calling through the saved manager
-configuration. The owner selects these references in Settings; skill-specific
-grants do not grant an unrelated MCP identity access. Missing references,
-unknown fields, and fields unsupported by the selected transport produce
-`MCP_CONFIG_ERROR`; the UI retains unsupported fields until explicitly removed.
-Omitted selections keep the SDK's minimal default environment and cwd.
-Descriptions, tool-result text and stderr diagnostics mask selected process values
-(`ouroboros/secret_masking.py` owns the shared placeholders). Resources,
-prompts, and MCP server behavior remain separate architecture changes.
-Enforcement: `tests/test_mcp_client.py`.
+and an exact string argument list without a shell. Optional `cwd`, literal
+`env`, and `env_from_settings` (environment names mapped to existing string-valued
+setting keys) apply to listing and calling through the same manager configuration.
+References override matching literal names. The owner chooses MCP references in
+Settings; a caller's existing MCP tool grant does not authorize new references.
+Unknown fields remain saved and show a not-applied warning without disabling a
+valid server. Invalid known fields, missing references and incompatible transport
+fields produce `MCP_CONFIG_ERROR`. Response-only `auth_configured` is discarded at
+the configuration boundary. Omission preserves SDK environment/cwd defaults.
+Settings' existing built-in/custom-secret classification determines masking:
+ordinary selected values remain readable, while exact secret values (including
+short values and JSON-escaped echoes) are masked in descriptions/results/stderr.
+Executable schema properties, required fields, enum and default values stay intact.
+Resources, prompts, and MCP server behavior remain separate architecture changes.
+Enforcement: `tests/test_mcp_client.py`, `tests/test_process_environment.py`.
 
-`start_service` accepts an explicit string-valued `env` map, overlaid on the
-existing minimal service environment. It does not read settings or inherit all
-host variables. Cwd still uses the host-owned resolved resource binding; local
-executor import scrubbing and interpreter defaults remain in place. Explicit
-values override defaults unchanged. Docker transports selected values through
-inert CLI environment aliases and restores their names inside the container;
-host Docker configuration and interpreter defaults retain their own environment.
-Secret values never appear in the host argv or generated shell code.
-Service command/note diagnostics, log tails and finalized log blobs mask
-selected values; protocol keys, service identity/state and executable MCP schema
-properties, required fields, enum and default values remain unchanged. The live
-child-output file retains the existing private raw-log
-contract until finalization. Enforcement: `tests/test_workspace_executor_services.py`.
+`start_service` overlays ordinary literal `env` on the existing minimal host
+baseline; root tasks can additionally choose `env_from_settings` through their
+host-resolved process authority. Restricted and Presence tasks receive no new
+Settings-selection authority, while their previous literal env and configured MCP
+access remain available. Skill grants do not authorize an unrelated service.
+Both service backends and MCP reuse `workspace_executor.resolve_process_env`;
+referenced Settings fields retain the same secret/ordinary classification.
+Cwd still uses the host-owned resource binding; local import scrubbing and
+interpreter defaults remain. Docker forwards values through inert CLI environment
+aliases and restores the selected names inside the container, preserving host CLI
+configuration. Values do not enter host argv or generated shell source.
+Service diagnostics and finalized log blobs mask referenced secrets; ordinary
+PORT/PATH/DEBUG values, protocol identity/state and executable schema stay intact.
+The executor's record-stop owner finalizes local logs through the existing service
+log owner before forgetting the in-memory selections, including task/global cleanup
+and replacement after exit. Unconfirmed termination retains the existing record;
+a later cleanup can settle it. Live child logs and logs surviving worker loss keep
+the existing private raw-log contract until successful finalization; oversized or
+uncapturable logs retain their existing explicit omission/error report. No secret
+values are added to the durable process ledger. Enforcement:
+`tests/test_process_environment.py`, `tests/test_workspace_executor_services.py`.
 
 ## Gateway Boundary Pattern
 

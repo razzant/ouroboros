@@ -35,6 +35,7 @@ MASKED_SECRET_SETTING_KEYS = frozenset(
 )
 
 CONFIGURED_SECRET_PLACEHOLDER = "***set***"
+MCP_RESPONSE_ONLY_FIELDS = frozenset({"auth_configured"})
 
 PASSWORD_SECRET_SETTING_KEYS = frozenset(
     {

@@ -6,7 +6,7 @@ call opens a fresh session. Secrets, server descriptions/results, and obvious
 metadata SSRF targets are handled defensively because MCP servers are external.
 
 For ``stdio``, ``command`` is an executable and ``args`` is passed as an exact
-list without a shell. Optional cwd and settings-backed environment selections
+list without a shell. Optional cwd, literal and settings-backed environment selections
 apply to both discovery and calls; omitted fields retain SDK defaults.
 """
 
@@ -31,12 +31,13 @@ from ouroboros.secret_masking import (
     looks_masked_secret as looks_masked_secret,
 )
 from ouroboros.secret_masking import (
+    MCP_RESPONSE_ONLY_FIELDS,
     mask_prefixed_secret,
     redact_known_values,
 )
 from ouroboros.tools.tool_result import ToolResult
 from ouroboros.platform_layer import IS_WINDOWS
-from ouroboros.workspace_executor import validate_process_env
+from ouroboros.workspace_executor import resolve_process_env, validate_process_env
 
 log = logging.getLogger(__name__)
 
@@ -97,6 +98,8 @@ class MCPServerConfig:
     cwd: str = ""
     env_from_settings: Dict[str, str] = field(default_factory=dict)
     env: Dict[str, str] = field(default_factory=dict, repr=False)
+    secret_values: tuple[str, ...] = field(default=(), repr=False)
+    configuration_warnings: tuple[str, ...] = ()
 
     def has_auth(self) -> bool:
         return bool(self.auth_token.strip())
@@ -285,6 +288,7 @@ def normalize_server_config(
 
     if not isinstance(raw, dict):
         return invalid("server must be an object")
+    raw = {key: value for key, value in raw.items() if key not in MCP_RESPONSE_ONLY_FIELDS}
 
     raw_id = raw.get("id") or raw.get("slug") or raw.get("name")
     server_slug = canonical_server_id(raw_id)
@@ -297,28 +301,19 @@ def normalize_server_config(
 
     try:
         known = {"id", "slug", "name", "label", "enabled", "transport", "url", "command",
-                 "args", "auth_header", "auth_token", "allowed_tools", "cwd", "env_from_settings"}
+                 "args", "auth_header", "auth_token", "allowed_tools", "cwd", "env", "env_from_settings"}
         unknown = set(raw) - known
-        if unknown:
-            raise ValueError("unsupported fields: " + ", ".join(sorted(map(str, unknown)))
-                             + "; use env_from_settings for stdio environment selections")
+        warnings = ("Fields retained but not applied: " + ", ".join(sorted(map(str, unknown))),) if unknown else ()
         cwd = raw.get("cwd", "")
         if not isinstance(cwd, str) or "\x00" in cwd:
             raise ValueError("cwd must be a string without NUL")
         refs = validate_process_env(raw.get("env_from_settings"))
-        env: Dict[str, str] = {}
-        unused = ("url", "auth_token") if transport == "stdio" else ("command", "args", "cwd", "env_from_settings")
+        env, secret_values = resolve_process_env(raw.get("env"), refs, settings=settings)
+        unused = ("url", "auth_token") if transport == "stdio" else ("command", "args", "cwd", "env", "env_from_settings")
         if any(raw.get(key) for key in unused):
             raise ValueError("fields unsupported by this transport: " + ", ".join(key for key in unused if raw.get(key)))
         if transport == "stdio" and raw.get("auth_header", "Authorization") not in (None, "", "Authorization"):
             raise ValueError("auth_header is unsupported for stdio")
-        for key, reference in refs.items():
-            if not reference or settings is None or reference not in settings:
-                raise ValueError(f"env_from_settings: setting for {key!r} is missing")
-            value = settings[reference]
-            if not isinstance(value, str) or "\x00" in value:
-                raise ValueError(f"env_from_settings: setting for {key!r} must be a string without NUL")
-            env[key] = value
         if transport == "stdio":
             url = ""
             command = _validate_stdio_command(raw.get("command"))
@@ -357,6 +352,8 @@ def normalize_server_config(
         cwd=cwd,
         env_from_settings=refs,
         env=env,
+        secret_values=secret_values,
+        configuration_warnings=warnings,
     )
 
 
@@ -415,7 +412,7 @@ def _redact_error_text(text: Any, cfg: Optional[MCPServerConfig] = None) -> str:
         token = str(cfg.auth_token or "")
         if token:
             out = out.replace(token, "<redacted:mcp-auth-token>")
-        out = redact_known_values(out, cfg.env.values())
+        out = redact_known_values(out, cfg.secret_values)
         parsed = urllib.parse.urlparse(cfg.url)
         if parsed.username or parsed.password:
             safe_netloc = parsed.hostname or ""
@@ -512,7 +509,7 @@ def _transport_factory(cfg: MCPServerConfig):
         # The SDK merges a plain dict onto its defaults. Windows env names are
         # case-insensitive: canonical names prevent a second Path/PATH entry.
         env = {key.upper() if IS_WINDOWS else key: value for key, value in cfg.env.items()}
-        selected = {"env": env} if cfg.env_from_settings else {}
+        selected = {"env": env} if cfg.env else {}
         if cfg.cwd:
             selected["cwd"] = cfg.cwd
         params = StdioServerParameters(command=cfg.command, args=list(cfg.args), **selected)
@@ -881,6 +878,7 @@ class MCPManager:
                         "allowed_tools": list(cfg.allowed_tools),
                         "cwd": cfg.cwd,
                         "env_from_settings": dict(cfg.env_from_settings),
+                        "configuration_warnings": list(cfg.configuration_warnings),
                         "tool_count": len(runtime.tools),
                         "tools": [
                             {
@@ -1014,6 +1012,7 @@ class MCPManager:
             "ok": True,
             "server_id": cfg.id,
             "tool_count": len(deduped),
+            "configuration_warnings": list(cfg.configuration_warnings),
             "tool_name_collisions": [dict(item) for item in collisions],
             "tools": [
                 {
@@ -1081,6 +1080,7 @@ class MCPManager:
             "ok": True,
             "server_id": cfg.id,
             "tool_count": len(tools_raw),
+            "configuration_warnings": list(cfg.configuration_warnings),
             **({"pagination_truncated": True} if truncated else {}),
             "tools": [
                 {

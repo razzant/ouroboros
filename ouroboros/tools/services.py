@@ -26,6 +26,7 @@ from ouroboros.process_interpreters import (
     interpreter_path_overlay,
 )
 from ouroboros.tools.registry import ToolContext, ToolEntry
+from ouroboros.config import load_settings
 from ouroboros.tools.tool_result import (
     ToolResult,
     _publish_tool_result,
@@ -36,10 +37,11 @@ from ouroboros.tool_access import (
     build_resolved_resource_binding,
     canonical_data_root,
     shell_cwd_block_message,
+    _TOP_LEVEL_PRINCIPAL_PROFILES,
 )
 from ouroboros.utils import append_jsonl, utc_now_iso
 from ouroboros.workspace_executor import executor_ref_from_ctx
-from ouroboros.workspace_executor import overlay_env, service_env, validate_process_env
+from ouroboros.workspace_executor import overlay_env, resolve_process_env, service_env, validate_process_env
 from ouroboros.workspace_executor import kill_all_services as executor_kill_all_services
 from ouroboros.workspace_executor import map_host_path as executor_map_host_path
 from ouroboros.workspace_executor import _read_local_service_marker
@@ -75,6 +77,7 @@ class ServiceRecord:
     before_outputs: Dict[str, tuple[bool, int, str]] = field(default_factory=dict)
     keep_alive: bool = False
     env: Dict[str, str] = field(default_factory=dict, repr=False)
+    secret_values: tuple[str, ...] = field(default=(), repr=False)
 
 
 _LOCK = threading.Lock()
@@ -170,7 +173,7 @@ def _service_env() -> Dict[str, str]:
 
 
 def _service_diagnostic(record: ServiceRecord, value: Any) -> Any:
-    return redact_projection(redact_known_values(value, getattr(record, "env", {}).values())).value
+    return redact_projection(redact_known_values(value, getattr(record, "secret_values", ()))).value
 
 
 def _stop_record(record: ServiceRecord, *, wait: bool = True) -> None:
@@ -186,9 +189,11 @@ def _stop_record(record: ServiceRecord, *, wait: bool = True) -> None:
         pass
 
 
-def _finalize_service_log_for_drive(drive_root: pathlib.Path, record: ServiceRecord) -> Dict[str, Any]:
+def _finalize_service_log_for_drive(
+    drive_root: pathlib.Path, record: ServiceRecord, *, log_path: pathlib.Path | None = None,
+) -> Dict[str, Any]:
     result: Dict[str, Any] = {"deleted_live_log": False, "full_log_ref": {}, "tail": "", "errors": []}
-    log_path = record.log_path
+    log_path = log_path if log_path is not None else record.log_path
     try:
         size = log_path.stat().st_size if log_path.exists() else 0
         result["tail"] = _service_diagnostic(record, _tail(log_path, _MAX_SERVICE_LOG_TAIL_CHARS))
@@ -361,12 +366,25 @@ def _start_service(
     outputs: List[str] | None = None,
     keep_alive: bool = False,
     env: Dict[str, str] | None = None,
+    env_from_settings: Dict[str, str] | None = None,
     _resolved_binding: ResolvedResourceBinding | None = None,
 ) -> str:
     if not isinstance(cmd, list) or not cmd or not all(str(x).strip() for x in cmd):
         return "⚠️ TOOL_ARG_ERROR (start_service): cmd must be a non-empty array of strings."
     try:
-        env = validate_process_env(env)
+        refs = validate_process_env(env_from_settings)
+        if refs:
+            # Presence authority is relevant only to selecting new Settings
+            # references; literal env keeps its existing process capability.
+            from ouroboros.presence_authority import presence_ceiling_from_context
+
+            if (active_tool_profile(ctx) not in (_TOP_LEVEL_PRINCIPAL_PROFILES | {"operator_control"})
+                    or presence_ceiling_from_context(ctx) is not None):
+                return _publish_tool_result(ctx, ToolResult(
+                    status="blocked", code="ACCESS_BLOCKED",
+                    text="⚠️ SERVICE_ENV_REFERENCE_BLOCKED: this task cannot select settings-backed service environment. A root task can start the service; existing literal environment and configured MCP access remain available.",
+                ))
+        env, secret_values = resolve_process_env(env, refs, settings=load_settings() if refs else None)
     except ValueError as exc:
         return f"⚠️ TOOL_ARG_ERROR (start_service): {exc}"
     service_name, name_error = _sanitize_service_name(name)
@@ -422,6 +440,10 @@ def _start_service(
     # kills it once the task ends — breaking the keep contract for a service a
     # verifier still needs (triad review r1, gpt-5.5 critical).
     keep_alive = bool(keep_alive) or task_service_teardown(ctx) == "keep"
+    if existing is not None:
+        # Retire the exited host record before a new process can append to its
+        # log with a different environment (or switch to an executor backend).
+        _stop_service(ctx, name=service_name)
     if _executor_can_run_cwd(ctx, workdir):
         try:
             payload = executor_start_service(
@@ -439,10 +461,11 @@ def _start_service(
                 keep_alive=keep_alive,
                 env_overlay=interpreter_path_overlay(active_node_resolution(ctx)),
                 env=env,
+                secret_values=secret_values,
             )
             return json.dumps(payload, ensure_ascii=False, indent=2)
         except Exception as exc:
-            return redact_known_values(f"⚠️ SERVICE_START_ERROR: executor backend failed: {type(exc).__name__}: {exc}", env.values())
+            return redact_known_values(f"⚠️ SERVICE_START_ERROR: executor backend failed: {type(exc).__name__}: {exc}", secret_values)
     task_id = str(getattr(ctx, "task_id", "") or "manual")
     log_dir = pathlib.Path(ctx.drive_root) / "services" / task_id
     log_dir.mkdir(parents=True, exist_ok=True)
@@ -476,7 +499,7 @@ def _start_service(
         log_fh.close()
     except Exception as exc:
         log_fh.close()
-        return redact_known_values(f"⚠️ SERVICE_START_ERROR: {type(exc).__name__}: {exc}", env.values())
+        return redact_known_values(f"⚠️ SERVICE_START_ERROR: {type(exc).__name__}: {exc}", secret_values)
     record = ServiceRecord(
         name=service_name,
         service_id=key,
@@ -495,6 +518,7 @@ def _start_service(
         before_outputs=before_outputs,
         keep_alive=keep_alive,
         env=env,
+        secret_values=secret_values,
     )
     with _LOCK:
         _SERVICES[key] = record
@@ -932,7 +956,8 @@ def get_tools() -> List[ToolEntry]:
                     ),
                 },
                 "name": {"type": "string", "default": "service"},
-                "env": {"type": "object", "additionalProperties": {"type": "string"}, "description": "Explicit process environment overrides. Values are passed unchanged on local and Docker executors and masked in diagnostics. Other host variables are not automatically inherited."},
+                "env": {"type": "object", "additionalProperties": {"type": "string"}, "description": "Ordinary literal environment overrides, passed unchanged on local and Docker executors over the minimal host baseline. Use env_from_settings for secrets."},
+                "env_from_settings": {"type": "object", "additionalProperties": {"type": "string"}, "description": "Root tasks only: environment name to saved setting key. References override literal env; Settings-classified secrets are masked in diagnostics. Children retain their existing literal environment and configured MCP access."},
                 "readiness": {"type": "object", "default": {}, "description": "Optional {log_contains|stdout_contains, timeout_sec} readiness probe."},
                 "outputs": {"type": "array", "items": {"type": "string"}, "default": [], "description": "Files generated by the service to copy into the task artifact store when the service stops."},
                 "keep_alive": {"type": "boolean", "default": False, "description": "Leave this service running after the task ends (e.g. a dev server the user or an external verifier still needs). It stays custody-ledgered and dies with the server session or panic."},
