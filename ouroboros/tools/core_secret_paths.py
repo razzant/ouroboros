@@ -86,8 +86,22 @@ def _is_subagent_secret_repo_path(norm: str) -> bool:
     return bool(CREDENTIAL_NAME_RE.search(name)) and pathlib.PurePosixPath(name).suffix in {"", ".json", ".env"}
 
 
-def _is_subagent_secret_repo_target(target: pathlib.Path, repo_root: pathlib.Path) -> bool:
+def _is_subagent_secret_repo_target(
+    target: pathlib.Path, repo_root: pathlib.Path, *, data_root: pathlib.Path | None = None,
+) -> bool:
     root = pathlib.Path(repo_root).resolve(strict=False)
+    if data_root is not None:
+        data_root = pathlib.Path(data_root).resolve(strict=False)
+        try:
+            data_rel = pathlib.Path(target).resolve(strict=False).relative_to(data_root).as_posix()
+        except (OSError, ValueError):
+            data_rel = ""
+        if data_rel and (
+            _is_subagent_secret_data_path(data_rel)
+            or _is_skill_owner_state_target(target, data_root)
+            or is_skill_owner_state_alias(target, data_root)
+        ):
+            return True
     try:
         rel = str(pathlib.Path(target).resolve(strict=False).relative_to(root)).replace(os.sep, "/")
     except (OSError, ValueError):
@@ -114,7 +128,9 @@ def _is_subagent_secret_repo_target(target: pathlib.Path, repo_root: pathlib.Pat
     )
 
 
-def _filter_subagent_secret_repo_listing(items: List[str], repo_root: pathlib.Path) -> List[str]:
+def _filter_subagent_secret_repo_listing(
+    items: List[str], repo_root: pathlib.Path, *, data_root: pathlib.Path | None = None,
+) -> List[str]:
     filtered: List[str] = []
     redacted = 0
     root = pathlib.Path(repo_root).resolve(strict=False)
@@ -123,7 +139,7 @@ def _filter_subagent_secret_repo_listing(items: List[str], repo_root: pathlib.Pa
         if marker.startswith("⚠️") or marker.startswith("...("):
             filtered.append(item)
             continue
-        if _is_subagent_secret_repo_path(marker) or _is_subagent_secret_repo_target(root / marker, root):
+        if _is_subagent_secret_repo_path(marker) or _is_subagent_secret_repo_target(root / marker, root, data_root=data_root):
             redacted += 1
             continue
         filtered.append(item)

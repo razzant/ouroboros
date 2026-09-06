@@ -86,7 +86,10 @@ rules have no automated surface — review-only.
   Remote commands can reach local files through configured SSH trust (including
   loopback); this local inspection is not a remote-effect sandbox.
 - Do not infer credential authority from ordinary source/config directory
-  names. Restricted source reads/searches use the existing byte masker; the
+  names. Restricted repository reads/searches use the existing byte masker with
+  `mask_opaque=False`: preserve ordinary long source while masking known token
+  formats and PEM keys. Keep owner-home opaque masking enabled. A runtime data
+  directory inside a project retains its actual secret/control path rules. The
   owner credential fence covers the enumerated locations in
   `credential_shapes.owner_credential_locations`, credential leaves and VCS
   control directories. The exact SSH config exception does not permit key writes

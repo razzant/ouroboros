@@ -32,9 +32,10 @@ PEM_BLOCK = (
 _FINGERPRINT_RE = re.compile(r"^\*\*\*REDACTED\[\w+:len=\d+:sha256_8=[0-9a-f]{8}\]\*\*\*$")
 
 
-def test_mask_secret_bytes_masks_entropy_formats():
+@pytest.mark.parametrize("mask_opaque", [True, False])
+def test_mask_secret_bytes_masks_entropy_formats(mask_opaque):
     text = f"config a\nkey={OPENROUTER_KEY}\nAuthorization: Bearer {GITHUB_TOKEN}\nplain tail"
-    masked, count = mask_secret_bytes(text)
+    masked, count = mask_secret_bytes(text, mask_opaque=mask_opaque)
     assert OPENROUTER_KEY not in masked
     assert GITHUB_TOKEN not in masked
     assert count >= 2
@@ -43,19 +44,21 @@ def test_mask_secret_bytes_masks_entropy_formats():
     assert "config a" in masked and "plain tail" in masked
 
 
-def test_mask_secret_bytes_masks_pem_block():
-    masked, count = mask_secret_bytes(f"prefix\n{PEM_BLOCK}\nsuffix")
+@pytest.mark.parametrize("mask_opaque", [True, False])
+def test_mask_secret_bytes_masks_pem_block(mask_opaque):
+    masked, count = mask_secret_bytes(f"prefix\n{PEM_BLOCK}\nsuffix", mask_opaque=mask_opaque)
     assert "PRIVATE KEY" not in masked
     assert "b3BlbnNzaC1rZXktdjE" not in masked
     assert count == 1
     assert masked.startswith("prefix\n") and masked.endswith("\nsuffix")
 
 
-def test_mask_secret_bytes_masks_unterminated_pem_to_end():
+@pytest.mark.parametrize("mask_opaque", [True, False])
+def test_mask_secret_bytes_masks_unterminated_pem_to_end(mask_opaque):
     # A read slice can cut the file before the END marker; the tail is still
     # key material and must not survive.
     head, _, _ = PEM_BLOCK.partition("-----END")
-    masked, count = mask_secret_bytes(f"prefix\n{head}")
+    masked, count = mask_secret_bytes(f"prefix\n{head}", mask_opaque=mask_opaque)
     assert count == 1
     assert "b3BlbnNzaC1rZXktdjE" not in masked
     assert masked == "prefix\n***"
@@ -81,6 +84,107 @@ def test_mask_secret_bytes_masks_long_opaque_runs():
     # accepted FP, disclosed by design: a bare sha256 is an opaque run too
     masked3, count3 = mask_secret_bytes("sha256: " + "a" * 64 + "\n")
     assert "a" * 64 not in masked3 and count3 == 1
+
+
+def test_repo_precision_masking_preserves_long_source_and_hashes():
+    source = "x" * 4000 + "\nsha256: " + "ab12cd34" * 8 + "\n"
+    assert mask_secret_bytes(source, mask_opaque=False) == (source, 0)
+    masked, count = mask_secret_bytes(source)
+    assert count == 2 and "x" * 4000 not in masked
+
+
+@pytest.mark.parametrize("profile", ["local_readonly_subagent", "acting_subagent"])
+def test_restricted_repo_read_delivers_full_source_and_masks_known_credentials(tmp_path, profile):
+    from ouroboros.contracts.task_constraint import TaskConstraint
+    from ouroboros.tools.registry import ToolRegistry
+
+    repo, data = tmp_path / "repo", tmp_path / "data"
+    repo.mkdir()
+    data.mkdir()
+    body = "x" * 4000 + "\nsha256: " + "ab12cd34" * 8 + "\n"
+    (repo / "source.txt").write_text(body + GITHUB_TOKEN + "\n" + PEM_BLOCK, encoding="utf-8")
+    registry = ToolRegistry(repo, data)
+    registry._ctx.task_constraint = TaskConstraint(mode=profile, write_root=str(repo), surface="external_workspace")
+    out = registry.execute("read_file", {"path": "source.txt"})
+    assert body in out
+    assert GITHUB_TOKEN not in out and "b3BlbnNzaC1rZXktdjE" not in out
+    assert "SECRET_BYTES_MASKED" in out
+    assert registry._ctx.last_read_view["end_line"] == registry._ctx.last_read_view["total_lines"]
+    assert registry._ctx.last_read_view["opened_path"] == "source.txt"
+    chunk = registry.execute("read_file", {"path": "source.txt", "start_char": 2000, "max_lines": 1})
+    assert "x" * 2000 in chunk and "SECRET_BYTES_MASKED" not in chunk
+
+
+@pytest.mark.parametrize("fallback", [False, True])
+def test_restricted_repo_search_preserves_source_identifiers(tmp_path, monkeypatch, fallback):
+    from ouroboros.contracts.task_constraint import TaskConstraint
+    from ouroboros.tools.registry import ToolRegistry
+
+    repo, data = tmp_path / "repo", tmp_path / "data"
+    repo.mkdir()
+    data.mkdir()
+    identifier = "ordinary_source_identifier_" + "x" * 50
+    source = f"def {identifier}(value='{GITHUB_TOKEN}'):\n    return value\ndef {GITHUB_TOKEN}():\n    pass\n"
+    (repo / "source.py").write_text(source, encoding="utf-8")
+    registry = ToolRegistry(repo, data)
+    registry._ctx.task_constraint = TaskConstraint(mode="local_readonly_subagent")
+    if fallback:
+        monkeypatch.setattr("ouroboros.code_search_rg._rg_binary", lambda: "")
+    out = registry.execute("search_code", {"query": "ordinary_source_identifier"})
+    assert identifier in out and "SECRET_BYTES_MASKED" in out
+    assert GITHUB_TOKEN not in out
+    assert ("files searched" if fallback else "ripgrep") in out
+    query = registry.execute("query_code", {"op": "definition", "query": identifier})
+    assert identifier in query and "source.py:1" in query
+    assert GITHUB_TOKEN not in query and "SECRET_BYTES_MASKED" not in query
+    credential = registry.execute("query_code", {"op": "symbols", "path": "source.py"})
+    assert GITHUB_TOKEN not in credential and "SECRET_BYTES_MASKED" in credential
+
+
+def test_project_settings_source_is_readable_by_verify_guard(tmp_path):
+    from ouroboros.contracts.task_constraint import TaskConstraint
+    from ouroboros.tools.registry import ToolRegistry
+    from ouroboros.tools.shell_guards import process_shell_guard_args
+    from tests._typed_guard_shared import _shell_guard_text
+
+    repo, data = tmp_path / "repo", tmp_path / "runtime"
+    (repo / "data").mkdir(parents=True)
+    data.mkdir()
+    (repo / "data" / "settings.json").write_text('{"ordinary": "project fixture"}', encoding="utf-8")
+    registry = ToolRegistry(repo, data)
+    registry._ctx.task_constraint = TaskConstraint(mode="acting_subagent", surface="external_workspace", write_root=str(repo))
+    mapped = process_shell_guard_args("verify_and_record", {"check": "cat data/settings.json", "cwd": str(repo)})
+    result = _shell_guard_text(registry, mapped, "advanced")
+    assert result is None, result
+    assert "project fixture" in registry.execute("read_file", {"path": "data/settings.json"})
+
+
+@pytest.mark.parametrize("profile", ["local_readonly_subagent", "acting_subagent"])
+def test_runtime_data_inside_repo_keeps_its_read_protection(tmp_path, monkeypatch, profile):
+    from ouroboros.contracts.task_constraint import TaskConstraint
+    from ouroboros.tools.registry import ToolRegistry
+
+    repo = tmp_path / "repo"
+    data = repo / "data"
+    (data / "auth").mkdir(parents=True)
+    (repo / "auth").mkdir()
+    (repo / "auth" / "secret.py").write_text("def public_source():\n    pass\n", encoding="utf-8")
+    (data / "auth" / "secret.py").write_text("def runtime_private():\n    pass\n", encoding="utf-8")
+    (data / "settings.json").write_text('{"fixture": "runtime_private"}', encoding="utf-8")
+    registry = ToolRegistry(repo, data)
+    registry._ctx.task_constraint = TaskConstraint(mode=profile, write_root=str(repo), surface="external_workspace")
+    for path in ("data/auth/secret.py", str(data / "auth" / "secret.py"), "data/settings.json"):
+        result = registry.execute("read_file", {"path": path})
+        assert "BLOCKED" in result and "runtime_private" not in result
+    assert "auth/" not in registry.execute("list_files", {"path": "data"})
+    assert "secret.py" in registry.execute("list_files", {"path": "auth"})
+    assert "public_source" in registry.execute("read_file", {"path": "auth/secret.py"})
+    query = registry.execute("query_code", {"op": "symbols"})
+    assert "public_source" in query and "runtime_private" not in query
+    monkeypatch.setattr("ouroboros.code_search_rg._rg_binary", lambda: "")
+    search = registry.execute("search_code", {"query": "def "})
+    assert "public_source" in search and "runtime_private" not in search
+    assert "files searched" in search
 
 
 @pytest.fixture()

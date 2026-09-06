@@ -375,10 +375,10 @@ def test_native_row_missing_mandatory_read_is_disclosed_not_refused(review_repo,
     assert overlap["state"] == "partial" and overlap["covered_lines"] == 8
     # Coverage folds on the OPENED path, never on the model's spelling: every
     # spelling the REAL registry reads as BIBLE.md (absolute in-repo, whitespace-
-    # padded, redundant `repo/` prefix, root-qualified `/`, dot-prefixed) credits
+    # padded, redundant `repo/` prefix, dot-prefixed) credits
     # `read` — one scripted episode per spelling, through the real registry.
     total = len(_BIBLE.splitlines())
-    for spelled in (str(review_repo / "BIBLE.md"), " BIBLE.md", "repo/BIBLE.md", "/BIBLE.md", "./BIBLE.md", "BIBLE.md"):
+    for spelled in (str(review_repo / "BIBLE.md"), " BIBLE.md", "repo/BIBLE.md", "./BIBLE.md", "BIBLE.md"):
         llm = _ScriptedLLM([{"tool_calls": [_tool_call("read_file", {"path": spelled}, "c1")]}, {"content": _REPORT}])
         text, usage = run_deep_self_review(review_repo, review_drive, llm, lambda _m: None, slot=_native_row())
         receipt = usage["native_tool_receipts"][0]
@@ -939,7 +939,7 @@ def test_a_registry_refused_read_never_inherits_the_previous_reads_extent(review
     monkeypatch.setenv("OPENROUTER_API_KEY", "sk-or-test")
     # ONE traversal shape at the coverage level; the refusal trio itself is the
     # executor suite's receipt-level pin (test_read_file_receipts_carry_the_delivered_extent).
-    shapes = ("a/../BIBLE.md",)
+    shapes = ("a/../BIBLE.md", "/BIBLE.md")
     llm = _ScriptedLLM([
         {"tool_calls": [_tool_call("read_file", {"path": "docs/ARCHITECTURE.md"}, "c1")]
                        + [_tool_call("read_file", {"path": p}, f"c{i}") for i, p in enumerate(shapes, 2)]},

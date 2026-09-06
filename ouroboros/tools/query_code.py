@@ -12,7 +12,6 @@ from ouroboros.protected_artifacts import block_reason_for_path
 from ouroboros.tool_access import (
     ResolvedResourceBinding,
     build_resolved_resource_binding,
-    normalize_root_relative,
     path_is_relative_to,
 )
 from ouroboros.tools.registry import ToolContext, ToolEntry
@@ -97,7 +96,7 @@ def _visible_file(
     try:
         from ouroboros.tools.core import is_restricted_subagent_profile as _is_local_readonly_subagent, _is_subagent_secret_repo_target
 
-        if _is_local_readonly_subagent(ctx) and _is_subagent_secret_repo_target(target, repo_root):
+        if _is_local_readonly_subagent(ctx) and _is_subagent_secret_repo_target(target, repo_root, data_root=ctx.drive_root):
             return False
     except Exception:
         pass
@@ -325,7 +324,6 @@ def _query_code(
             repo_root = binding.base_path
         elif normalized_root == "skill_payload":
             repo_root = binding.base_path
-            path = binding.target_path.relative_to(binding.base_path).as_posix()
         elif normalized_root == "user_files":
             # Read-only structured intelligence over an EXTERNAL workspace target
             # (e.g. the SWE-bench dig-direct /app) — R1. Restricted subagents must
@@ -351,19 +349,17 @@ def _query_code(
             target = binding.target_path
             if target.is_dir():
                 repo_root = target.resolve(strict=False)
-                path = ""
             elif target.is_file():
                 repo_root = target.parent.resolve(strict=False)
-                path = target.name
             else:
                 raise ValueError(f"user_files path does not exist: {str(path).strip()}")
         else:
             raise ValueError(
                 "root must be active_workspace, system_repo, skill_payload, or user_files"
             )
-        # Accept absolute/redundant-prefix paths inside the root (e.g. '/app/x'
-        # or 'app/x' under a root at /app); _safe_path still confines below.
-        path = normalize_root_relative(repo_root, path)
+        # The binding already resolved host/backend addresses and confinement;
+        # scope the query to that physical target instead of re-reading raw args.
+        path = binding.target_path.relative_to(repo_root).as_posix()
         scoped_path = _safe_path(repo_root, path)
     except ValueError as exc:
         return f"⚠️ TOOL_ARG_ERROR (query_code): {exc}"
@@ -412,7 +408,7 @@ def _query_code(
                     persist = False
                     exclude_paths = [
                         p for p in repo_root.rglob("*")
-                        if _is_subagent_secret_repo_target(p, repo_root)
+                        if _is_subagent_secret_repo_target(p, repo_root, data_root=ctx.drive_root)
                     ]
             except Exception:
                 pass
@@ -470,7 +466,9 @@ def _query_code(
             return text
         from ouroboros.secret_masking import mask_secret_bytes
 
-        masked, count = mask_secret_bytes(text)
+        masked, count = mask_secret_bytes(
+            text, mask_opaque=normalized_root not in {"active_workspace", "system_repo"},
+        )
         if count:
             masked += (
                 f"\n⚠️ SECRET_BYTES_MASKED: {count} secret-shaped span(s) were "

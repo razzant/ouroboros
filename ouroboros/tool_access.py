@@ -567,6 +567,14 @@ def _resolve_target_in_selected_base(
         path_text = normalize_runtime_data_path(resolved_base, path_text)
     elif root in {"active_workspace", "system_repo"}:
         path_text = normalize_root_relative(resolved_base, path_text)
+    if root == "active_workspace" and is_absolute_path_text(path_text):
+        # An admitted Docker workspace has a second, explicit address space.
+        # Map it through the executor owner, then apply the same confinement.
+        from ouroboros.workspace_executor import executor_ref_from_ctx, map_backend_path
+
+        executor = executor_ref_from_ctx(ctx)
+        if executor is not None and executor.kind == "docker_exec":
+            path_text = str(map_backend_path(executor, path_text))
     if is_absolute_path_text(path_text):
         candidate = pathlib.Path(path_text).expanduser()
         # A foreign Windows absolute spelling has no native anchor on POSIX;

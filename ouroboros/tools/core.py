@@ -918,7 +918,8 @@ def _code_search(ctx: ToolContext, query: str, path: str = ".",
 
     max_results = min(max(1, max_results), _MAX_SEARCH_RESULTS)
     root_path = binding.base_path
-    display_search_path = _root_display_path(normalized, path)
+    display_path = binding.target_path.relative_to(root_path).as_posix() if normalized in {"active_workspace", "system_repo"} else path
+    display_search_path = _root_display_path(normalized, display_path)
     search_root = binding.target_path
     if not search_root.exists():
         return f"⚠️ SEARCH_ERROR: path not found: {display_search_path}"
@@ -985,7 +986,9 @@ def _code_search(ctx: ToolContext, query: str, path: str = ".",
         # fallback. Names/paths stay; values become ***.
         if normalized != "user_files" and not subagent_readonly:
             return result_text
-        masked_text, masked = mask_secret_bytes(result_text)
+        masked_text, masked = mask_secret_bytes(
+            result_text, mask_opaque=normalized not in {"active_workspace", "system_repo"},
+        )
         if masked:
             masked_text += (
                 f"\n⚠️ SECRET_BYTES_MASKED: {masked} secret-shaped span(s) in these "

@@ -261,7 +261,7 @@ def _repo_read(
         if _resolved_binding is not None
         else active_repo_dir_for(ctx)
     )
-    if is_restricted_subagent_profile(ctx) and _is_subagent_secret_repo_target(target, repo_root):
+    if is_restricted_subagent_profile(ctx) and _is_subagent_secret_repo_target(target, repo_root, data_root=ctx.drive_root):
         return _publish_tool_result(ctx, ToolResult(
             status="blocked",
             code="LEGACY_BLOCKED",
@@ -296,7 +296,7 @@ def _repo_read(
     if is_restricted_subagent_profile(ctx):
         from ouroboros.secret_masking import mask_secret_bytes
 
-        rendered, count = mask_secret_bytes(rendered)
+        rendered, count = mask_secret_bytes(rendered, mask_opaque=False)
         if count:
             rendered += f"\n⚠️ SECRET_BYTES_MASKED: {count} secret-shaped span(s) replaced with ***."
     return rendered
@@ -314,7 +314,7 @@ def _repo_list(
         else active_repo_dir_for(ctx)
     )
     target = _resolved_binding.target_path if _resolved_binding is not None else ctx.repo_path(dir)
-    if is_restricted_subagent_profile(ctx) and _is_subagent_secret_repo_target(target, repo_root):
+    if is_restricted_subagent_profile(ctx) and _is_subagent_secret_repo_target(target, repo_root, data_root=ctx.drive_root):
         # First-class tool error, not an ok-shaped one-element JSON listing
         # (v6.54.3, review round 5 — the whole-call block IS the result).
         return _publish_tool_result(ctx, ToolResult(
@@ -330,7 +330,7 @@ def _repo_list(
         listed_rel = dir
     items = _list_dir(repo_root, listed_rel, max_entries)
     if is_restricted_subagent_profile(ctx):
-        items = _filter_subagent_secret_repo_listing(items, repo_root)
+        items = _filter_subagent_secret_repo_listing(items, repo_root, data_root=ctx.drive_root)
     return json.dumps(items, ensure_ascii=False, indent=2)
 
 
@@ -563,13 +563,12 @@ def _local_readonly_resource_block(
     *,
     action: str,
 ) -> str:
-    # Resource (active_workspace/system_repo) restriction is for STRICT read-only
-    # subagents only — acting children legitimately write their isolated surface.
-    from ouroboros.tool_access import active_tool_profile
-    if active_tool_profile(ctx) != "local_readonly_subagent":
+    # All restricted children share secret-read denials; this read/search
+    # predicate does not restrict acting children's writes to their surface.
+    if not is_restricted_subagent_profile(ctx):
         return ""
     if normalized in {"active_workspace", "system_repo"}:
-        if _is_subagent_secret_repo_target(target, pathlib.Path(base)):
+        if _is_subagent_secret_repo_target(target, pathlib.Path(base), data_root=ctx.drive_root):
             return f"⚠️ {action}_BLOCKED: this subagent cannot access repo secret or control paths."
         return ""
     if normalized in {"runtime_data", "task_drive", "skill_payload", "artifact_store", "user_files"}:
@@ -706,7 +705,7 @@ def _read_file(
         display_path = (
             f"{target} (project room)"
             if binding.source == "project_room"
-            else _root_display_path(normalized, path)
+            else _root_display_path(normalized, opened)
         )
         return _stamp_read_view(ctx, target, opened, opened_root, extent, _annotate_reread(ctx, target, start_line, max_lines, _repo_read(
             ctx,
@@ -857,7 +856,7 @@ def _list_files(
         items = _list_dir(binding.base_path, rel, max_entries)
         if is_restricted_subagent_profile(ctx):
             if normalized == "system_repo":
-                items = _filter_subagent_secret_repo_listing(items, binding.base_path)
+                items = _filter_subagent_secret_repo_listing(items, binding.base_path, data_root=ctx.drive_root)
             elif normalized in {"task_drive", "skill_payload", "artifact_store", "user_files"}:
                 items = _filter_subagent_secret_listing(items, binding.base_path)
         return json.dumps(items, ensure_ascii=False, indent=2)
