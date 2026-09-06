@@ -64,7 +64,7 @@ from devtools.benchmarks.common.server_runner import (
     seed_owner_state,
 )
 from devtools.e2e_live import stub_lane
-from devtools.e2e_live.scenarios import SCENARIOS, LaneContext, diff_sha256, head_sha, now_iso
+from devtools.e2e_live.scenarios import SCENARIOS, STAND_PANEL_SETTINGS, LaneContext, diff_sha256, head_sha, now_iso
 from devtools.e2e_live.ui_probe import resolve_ui_client
 from ouroboros.provider_models import ALL_PROVIDER_CREDENTIAL_KEYS, declared_model_settings
 
@@ -128,6 +128,7 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
                          "(never a live worktree)")
     ap.add_argument("--source-repo", default="", help="checkout the seed ref is resolved in (default: this tree)")
     ap.add_argument("--stub", action="store_true", help="loopback stub model, no key, no money")
+    ap.add_argument("--production-panel", action="store_true", help="the tree's default review panel and efforts, not the stand's cheap panel")
     ap.add_argument("--watch-interval", type=float, default=30.0)
     ap.add_argument("--prune-clones", action="store_true", help="delete lane clones after each lane (results stay)")
     args = ap.parse_args(argv)
@@ -179,11 +180,10 @@ def effective_settings(args: argparse.Namespace, key: str) -> dict:
         "OUROBOROS_PER_TASK_COST_USD": float(args.per_task_usd),
         "OUROBOROS_POST_TASK_EVOLUTION": "true" if args.self_mod else "false",
         **({"OUROBOROS_POST_TASK_EVOLUTION_CADENCE": "every_n:1"} if args.self_mod else {}),
+        **({} if args.stub or args.production_panel else STAND_PANEL_SETTINGS),   # scenarios.STAND_REVIEW_PANEL
+        **({"OUROBOROS_MODEL": str(args.model)} if args.model else {}),
+        **({"OPENROUTER_API_KEY": key} if key else {}),
     }
-    if args.model:
-        overrides["OUROBOROS_MODEL"] = str(args.model)
-    if key:
-        overrides["OPENROUTER_API_KEY"] = key
     return build_isolated_settings({}, **overrides)
 
 
