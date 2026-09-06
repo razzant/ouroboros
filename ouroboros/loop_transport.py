@@ -20,9 +20,9 @@ window runs out, ``_handle_provider_unavailable`` takes a deterministic no-resen
 terminal keyed on the episode's ``wait_cause`` (no forced-final provider call);
 the durable ``ended`` detail names the rail that expired — the bound's own
 ``interactive_wait_window_exhausted``, or the deadline's detail when the owner
-window closed first. Interactive notes promise no cancellation (an in-process
-turn has no Stop contract; a direct turn's mailbox message still wakes the
-sleep). Recovery is an owner note for every episode; local adoption and
+window closed first. Interactive progress notes omit cancellation promises;
+direct-turn Stop uses its existing typed control and wakes the same sleep.
+Recovery is an owner note for every episode; local adoption and
 error-kind change are notes for interactive turns only, because such a turn
 has no progress row to show the closure — a managed task keeps the durable
 row and its ordinary progress; exhaustion is a note for an interactive turn,
@@ -136,6 +136,8 @@ def emit_network_wait_event(
 
     ``window_remaining_sec`` is the binding wait window left on a ``waiting``
     row (deadline or interactive bound); absent when no window bounds the wait.
+    Closing rows describe cooperative worker exits. After external termination,
+    correlate a confirmed task terminal; missing rows alone prove no outcome.
     """
     try:
         append_jsonl(pathlib.Path(drive_logs) / "events.jsonl", {
@@ -242,8 +244,8 @@ def reconcile_transport_wait(
             elapsed_sec=0.0, redials=0, model=model,
         )
         episode.last_note_monotonic = time.monotonic()
-        # Only managed work has a Stop contract; an in-process turn cannot be
-        # cancelled, so its note promises nothing it cannot deliver.
+        # Interactive notes keep their existing wording; direct-turn Stop is
+        # separately handled through its typed mailbox control.
         emit_progress(
             "🌐 Could not establish a provider connection — waiting and "
             "redialing automatically (failed attempts are $0)."
@@ -313,6 +315,74 @@ def interruptible_wait_sleep(seconds: float, wake_check: Callable[[], bool]) -> 
         if remaining <= 0:
             return False
         time.sleep(min(1.0, remaining))
+
+
+def transport_repeat_stop_requested(ctx: Any, *, mailbox_peek: Any = None) -> bool:
+    """Accept a current finalize control at the unsent-repeat boundary.
+
+    Mail remains unacknowledged; direct Stop retains its existing prohibition
+    on post-task model work even though the unknown-outcome rail owns this exit.
+    """
+    if ctx is None or not getattr(ctx, "task_id", "") or getattr(ctx, "drive_root", None) is None:
+        return False
+    try:
+        from ouroboros.owner_mailbox import KIND_FINALIZE_NOW, drain_owner_entries
+        from ouroboros.outcomes import REASON_OWNER_REQUESTED_FINALIZATION
+        from supervisor.owner_stop import REASON_OWNER_STOPPED_DIRECT_TURN, _owner_stop_control_is_current
+
+        root, seen, attempt = pathlib.Path(ctx.drive_root), set(getattr(ctx, "_loop_mailbox_seen_ids", ()) or ()), getattr(ctx, "task_attempt", None) or 1
+        if mailbox_peek is not None and not mailbox_peek.pending(root, ctx.task_id, seen, attempt):
+            return False
+        entries = drain_owner_entries(root, ctx.task_id, seen, attempt)
+        for entry in entries:
+            if entry.get("kind") != KIND_FINALIZE_NOW:
+                continue
+            first_line = str(entry.get("text") or "").splitlines()[0]
+            if first_line.strip() != REASON_OWNER_REQUESTED_FINALIZATION or _owner_stop_control_is_current(
+                ctx, ctx.drive_root, ctx.task_id, str(entry.get("msg_id") or ""),
+            ):
+                if first_line.strip() == REASON_OWNER_STOPPED_DIRECT_TURN:
+                    ctx._skip_post_task_synthesis = True
+                ctx._transport_repeat_control_reason = first_line.strip()
+                return True
+        return False
+    except Exception:
+        log.debug("finalize-control peek failed during transport repeat", exc_info=True)
+        return False
+
+
+def wait_transport_repeat(ctx: Any) -> bool:
+    """Stop a granted transport repeat only before its new physical dispatch."""
+    from ouroboros.loop_llm_call import _emit_retry_deadline_exhausted, _sleep_within_deadline, _uncount_transport_death
+
+    # Granted, counted and deadline-checked in _record_llm_call_error; only
+    # the recorded backoff (by death ordinal) is left before the loop sends
+    # a NEW physical attempt. Not a spent wall either — the unknown
+    # no-resend terminal outranks the wall.
+    backoff = (ctx.accumulated_usage.get(TRANSPORT_DEATHS_KEY) or {}).get("backoff_sec")
+    if backoff is None:
+        return True
+    interrupted = False
+
+    def wake_check() -> bool:
+        nonlocal interrupted
+        interrupted = bool(ctx.stop_retry_check())
+        return interrupted
+
+    options = {"wake_check": wake_check} if ctx.stop_retry_check is not None else {}
+    if _sleep_within_deadline(backoff, ctx.deadline_ts, **options):
+        return False
+    _uncount_transport_death(ctx.accumulated_usage)  # only this never-sent grant; prior custody stays
+    if interrupted:
+        append_jsonl(ctx.drive_logs / "events.jsonl", {
+            "ts": utc_now_iso(), "type": "llm_not_dispatched", "task_id": ctx.task_id,
+            "round": ctx.round_idx, "model": ctx.model, "reason_code": "finalize_control_pending",
+        })
+    else:
+        _emit_retry_deadline_exhausted(ctx.drive_logs, task_id=ctx.task_id, execution_id=ctx.execution_id,
+            round_id=ctx.round_id, round_idx=ctx.round_idx, attempt=ctx.attempt,
+            model=ctx.model, error_kind="provider_outcome_unknown")
+    return True
 
 
 def _owner_signal_pending(
@@ -465,6 +535,7 @@ def finalize_now_transport_terminal(
     task_id: str,
     model: str,
     handle_provider_unavailable: Callable[..., Any],
+    control_reason: str = "",
 ) -> Any:
     """Route a finalize_now that lands during an active episode to the honest
     transport no-resend terminal.
@@ -486,6 +557,7 @@ def finalize_now_transport_terminal(
         wait_cause=episode.wait_cause,
         waited_sec=episode.waited_sec,
         interactive=episode.interactive,
+        control_reason=control_reason,
     )
 
 
@@ -536,6 +608,7 @@ def provider_terminal_fallback_text(
     waited_sec: float,
     interactive: bool = False,
     is_deadline_exhausted: bool,
+    control_reason: str = "",
 ) -> str:
     """Owner-facing terminal text when provider death left nothing to salvage.
 
@@ -550,38 +623,49 @@ def provider_terminal_fallback_text(
     deliberately avoids the supervisor's lifecycle term INTERRUPTED
     (STATUS_INTERRUPTED means pre-requeue, not terminal).
     """
+    from ouroboros.outcomes import REASON_OWNER_REQUESTED_FINALIZATION
+    from supervisor.owner_stop import REASON_OWNER_STOPPED_DIRECT_TURN
+
+    unknown = (isinstance(accumulated_usage.get(TRANSPORT_DEATHS_KEY), dict)
+               or accumulated_usage.get("_last_llm_error_kind") == "provider_outcome_unknown")
+    if control_reason in {REASON_OWNER_REQUESTED_FINALIZATION, REASON_OWNER_STOPPED_DIRECT_TURN}:
+        action = "Stop" if control_reason == REASON_OWNER_STOPPED_DIRECT_TURN else "Wrap up"
+        waited = f" The wait ended after {waited_sec / 60.0:.1f} min;" if waited_sec else ""
+        return (f"⚠️ The owner requested {action} while the provider connection was unavailable."
+                f"{waited} No new summary request was sent. Any files written so far are preserved."
+                + (provider_recovery_hint(accumulated_usage) if unknown else ""))
     if is_context_overflow:
         return (
             "⚠️ The context exceeded the selected model window; no further provider call was made. "
             "Any files written so far are preserved in the workspace."
         )
     if is_transport_wait:
+        advice = ("Inspect the preserved facts before starting another run." if unknown
+                  else "Retry when connectivity returns.")
         if interactive and waited_sec > 0:
             text = (
                 "⚠️ Could not establish a provider connection; this turn waited and "
                 f"redialed for {waited_sec / 60.0:.1f} min and ended as a provider outage, "
-                "not completed. Retry when connectivity returns."
+                f"not completed. {advice}"
             )
         elif interactive:
             text = (
                 "⚠️ Could not establish a provider connection, and no wait window was left; "
-                "this turn ended as a provider outage, not completed. Retry when "
-                "connectivity returns."
+                f"this turn ended as a provider outage, not completed. {advice}"
             )
         elif waited_sec > 0:
             text = (
                 "⚠️ Could not establish a provider connection; the task waited and redialed "
-                "until its own limits ran out and ended as a provider outage, not completed. "
-                "Any files written so far are preserved in the workspace. Retry when "
-                "connectivity returns."
+                f"for {waited_sec / 60.0:.1f} min until its own limits ran out and ended as a provider outage, not completed. "
+                f"Any files written so far are preserved in the workspace. {advice}"
             )
         else:
             text = (
                 "⚠️ Could not establish a provider connection, and the owner deadline left no "
                 "time to wait; the task ended as a provider outage, not completed. Any files "
-                "written so far are preserved in the workspace. Retry when connectivity returns."
+                f"written so far are preserved in the workspace. {advice}"
             )
-        if isinstance(accumulated_usage.get(TRANSPORT_DEATHS_KEY), dict):
+        if unknown:
             # The episode redialed a granted transport-death repeat that never left the
             # host: an earlier attempt of the round is still unresolved at its upper
             # bound, and the owner text says both facts (the wait and the fence). The
@@ -591,7 +675,10 @@ def provider_terminal_fallback_text(
             text += provider_recovery_hint(accumulated_usage)
         return text
     if is_deadline_exhausted:
-        return "⚠️ The owner deadline ended primary model work; any files written so far are preserved."
+        text = "⚠️ The owner deadline ended primary model work; any files written so far are preserved."
+        if unknown:
+            text += provider_recovery_hint(accumulated_usage)
+        return text
     return (
         "⚠️ The model provider returned no usable response after retries and same-model reroute."
         f"{provider_failure_hint(accumulated_usage)}{provider_recovery_hint(accumulated_usage)} "
@@ -600,7 +687,9 @@ def provider_terminal_fallback_text(
 
 
 def provider_failure_hint(accumulated_usage: Dict[str, Any]) -> str:
-    detail = " ".join(str(accumulated_usage.get("_last_llm_error") or "").split()).strip()
+    from ouroboros.utils import sanitize_tool_result_for_log
+
+    detail = " ".join(sanitize_tool_result_for_log(str(accumulated_usage.get("_last_llm_error") or "")).split()).strip()
     if not detail:
         return ""
     return f" Last provider error: {detail}"

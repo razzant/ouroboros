@@ -70,15 +70,24 @@ def send_provider_death_notice(
         f"\n\n{TERMINAL_PLAN_REVIEW_NOTE}"
         if final_result.get("terminal_plan_review_open") is True else ""
     )
+    notice = str(final_result.get("terminal_provider_notice") or "") or (
+        "A model-provider outage stopped this task. Partial work and workspace files "
+        "are preserved; inspect the task details before starting another run."
+    )
     ctx.send_with_budget(
         chat_id,
-        f"🔌 Task {task_id} was stopped by a model-provider outage and was "
-        "NOT completed. Partial work and workspace files are preserved; "
-        f"re-run the task once the provider recovers.{plan_note}",
+        f"🔌 Task {task_id} was NOT completed.\n\n{notice}{plan_note}",
         role="system",
         system_type="terminal_incident",
     )
     return True
+
+
+def provider_terminal_body(text: str, notice: str) -> str:
+    """Render a host-labelled status beside raw text on single-body transports."""
+    if not notice:
+        return text
+    return (text + "\n\n" if text else "") + "[Host status]\n" + notice
 
 
 def stamp_root_final_phase(
@@ -109,6 +118,7 @@ def prepare_terminal_send_event(
 ) -> Dict[str, Any]:
     """Preserve raw host salvage, then build the one live/replay projection."""
     origin = str(usage.get("terminal_origin") or "")
+    notice = str(usage.get("terminal_provider_notice") or "")
     if ephemeral and not presence:
         # #369: an ephemeral decision's task_done frame is dropped at the
         # client's log-event entry by design, so this final is the turn's
@@ -116,11 +126,11 @@ def prepare_terminal_send_event(
         # branch (supervisor/workers.py stamps task_terminal_status="failed")
         # and lets the live concludesTurn gate settle the activity.
         send_event.setdefault("progress_meta", {})["task_terminal_status"] = "completed"
-    if ephemeral or presence or origin not in _STAMPED_TERMINAL_ORIGINS:
+    if origin not in _STAMPED_TERMINAL_ORIGINS:
         return send_event
     canonical_root = pathlib.Path(task.get("budget_drive_root") or env_drive_root)
     preserved_path = ""
-    if origin == TERMINAL_ORIGIN_HOST_SALVAGE and text:
+    if text and (origin == TERMINAL_ORIGIN_HOST_SALVAGE or (ephemeral and notice)):
         try:
             from ouroboros.observability import preserve_salvaged_output
 
@@ -130,11 +140,20 @@ def prepare_terminal_send_event(
         except Exception:
             log.warning("Failed to pre-preserve terminal host salvage", exc_info=True)
         usage["terminal_salvage_path"] = preserved_path
+    if presence:
+        return send_event  # Presence's existing body renderer owns its delivery outcome.
+    if ephemeral:
+        if notice:
+            body = ("Preserved intermediate output (not a final answer):\n" + text
+                    if origin == TERMINAL_ORIGIN_HOST_SALVAGE and text else text)
+            body = provider_terminal_body(body, notice)
+            send_event.update(text=body, log_text=body)
+        return send_event  # no task-details promise on a turn with no durable task row
     from supervisor.terminal_delivery import project_terminal_result_event
 
     return project_terminal_result_event(
         canonical_root, task, str(task.get("id") or ""),
-        result_text=text, terminal_origin=origin, base_event=send_event,
+        result_text=text, terminal_origin=origin, base_event=send_event, provider_notice=notice,
     )
 
 
@@ -149,6 +168,8 @@ def terminal_result_fields(usage: Dict[str, Any]) -> Dict[str, Any]:
         fields["terminal_salvage_path"] = path
     if usage.get("terminal_plan_review_open") is True:
         fields["terminal_plan_review_open"] = True
+    if isinstance(usage.get("terminal_provider_notice"), str) and usage["terminal_provider_notice"]:
+        fields["terminal_provider_notice"] = usage["terminal_provider_notice"]
     return fields
 
 

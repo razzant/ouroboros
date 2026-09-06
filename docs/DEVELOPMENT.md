@@ -1959,16 +1959,18 @@ by "Provider Independence" above. Call-site imperatives:
   admission and the transport bound cannot disagree.
 - Tree-spend pacing decides on root-subtree ledger spend including in-flight
   holds; own cost is a disclosed lower-bound fallback, and unavailable is
-  unknown, never `$0`. The root's deciding ceiling bounds every tree member;
-  each descendant intersects that root-cap component with its own current
-  global resolution, resolves once, and discloses the same object the loop later decides on, printed with its
-  binding bound named on every host cost surface. Refresh `usage_accounting.last_root_accounting` only
-  at rare cache-breaking decision surfaces, never per round or inside a
-  stable cached prefix (`tests/test_budget_limits.py`). Graceful
-  finalization precedes the ledger fence because the affordability rail
-  borrows the fence's own per-attempt reservation (cache-aware only from the
-  task's last settled same-provider normalized-route split), never a constant margin alone and never a
-  per-round ledger scan (`tests/test_tree_cost_ceiling.py`). Read the
+  unknown, never `$0`. Resolve the original early threshold at the root and
+  retain it across enabled descendants, forwarding the existing root carrier.
+  A legacy child's local fallback is not proof of the original root threshold.
+  Keep explicit disabled profiles and real monetary fences independent. Publish
+  the same CostCeiling object the loop decides on. Reuse the existing bounded-stale
+  tree snapshot; refresh at its bound or when final preparation requires it.
+  Price the final call with the fence's own cache-aware reservation and compare
+  every known root/global remainder, including tasks with only a global bound.
+  Read the current wallet once per priced phase through the existing cached
+  usage projection, reuse it across candidate probes, and leave final admission
+  to the atomic fence. A check reserves no share; other tasks can spend before
+  dispatch (`tests/test_network_budget_wallet.py`). Read the
   configured global budget through the one resolver rather than an
   inline default, so the loop axis, the bound scope and the ledger fence
   cannot disagree about the same install. Post-task
@@ -2032,7 +2034,10 @@ by "Provider Independence" above. Call-site imperatives:
   never folded into `quota_exhausted`, which is correctly permanent for a
   billing refusal and wrong for a window whose only cure is waiting
   (`tests/test_reviewer_slot_config.py`).
-- Classify provider failures before retrying the same request:
+- Classify provider failures before retrying the same request. The combined
+  Anthropic input-plus-max_tokens rejection is a context-window overflow;
+  preserve true output/body-size precedence in the shared context_budget
+  classifiers, without requiring the input alone to exceed the window.
   quota/auth/billing, hard bad-request, and request-too-large failures are
   non-retryable as-is (record the exact category and surface a recovery
   hint); a typed 408/429/5xx or a failure proven pre-dispatch may retry; a
@@ -2044,10 +2049,14 @@ by "Provider Independence" above. Call-site imperatives:
   and never a resend of the unresolved one, deciding the `retry_same_request`
   flag before the durable row is written
   (`tests/test_transport_death_retry.py`): the flag records that a repeat
-  was granted when the row was written, and exactly two refusal paths take a
-  never-sent repeat back off the round record, each recorded by its own
-  durable row — the admission gate (`llm_not_dispatched`) and the sleep gate
-  (`llm_retry_deadline_exhausted`). A budget refusal does NOT un-count: the
+  was granted when the row was written. Only a proven refusal takes a never-sent
+  grant back off the round record: deadline admission (`llm_not_dispatched`),
+  deadline backoff (`llm_retry_deadline_exhausted`), or a current typed finalization
+  control during the paid-repeat wait (`llm_not_dispatched`, `finalize_control_pending`).
+  Reuse the interruptible sleep and execution mailbox/current-intent readers;
+  peek without delivery or ACK, and leave ordinary input/hurry/revoked controls
+  alone. Generic transient/empty-response backoffs retain their own contract.
+  A budget refusal does NOT un-count: the
   budget rail cannot prove the repeat never left the host (`llm.chat` retries
   on the wire before a later reservation can be refused), so the record keeps
   the attempt booked and the budget terminal, not the provider terminal, ends
@@ -2080,6 +2089,15 @@ by "Provider Independence" above. Call-site imperatives:
   a keyword or regex over content (BIBLE P5). Fixed kill-timeouts (hard
   task/tool ceilings, watchdog) remain the outer safety bound; progress-aware
   waiting tunes the passive wait only.
+- Preserve raw terminal model/salvage bytes separately from the host-authored
+  `terminal_provider_notice`. Existing receipts and secondary notices consume
+  those same facts; a retained answer must not hide wait or unknown-attempt
+  evidence or invite a blind rerun. Ephemeral and message/deferred Presence
+  responses render one host-labelled status section; cached Presence output
+  is already rendered. Preserve silent/tool-delivered authority and never
+  promise task details for an ephemeral turn with no task result. Carry the
+  actual control reason through wait termination: owner Wrap up is distinct
+  from deadline/budget finalization and still sends no new summary request.
 - The transport-wait episode's owner notes always pass `incident=` — the
   typed `task_incident`/`toast_once` pair on an ephemeral turn's
   episode-boundary notes (entry, recovery/closure, exhaustion), `None` on

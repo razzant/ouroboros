@@ -557,7 +557,7 @@ def test_overflow_retry_is_skipped_while_the_round_holds_an_unresolved_attempt(t
     monkeypatch.setattr(loop, "_measure_round_main_fit", measure)
     monkeypatch.setattr(loop, "_run_main_reclaim", lambda ctx, d, **_k: reclaims.append(d))
     monkeypatch.setattr(loop, "last_physical_attempt_capture", lambda: _failed_capture())
-    monkeypatch.setattr(loop_llm_call, "_sleep_within_deadline", lambda _sec, _dl: True)
+    monkeypatch.setattr(loop_llm_call, "_sleep_within_deadline", lambda _sec, _dl, **_kw: True)
 
     msg, _cost, mode = loop._call_round_model(context)
 

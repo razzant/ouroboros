@@ -485,7 +485,7 @@ def emit_task_results(
         # on a nearby progress row that may age out independently.
         send_event["progress_meta"] = dict(_message_meta)
     send_event = prepare_terminal_send_event(env.drive_root, task, text, usage, send_event, ephemeral=_ephemeral, presence=_presence)
-    pending_events.append(build_presence_result_event(task, text, ctx) if _presence else send_event)
+    pending_events.append(build_presence_result_event(task, text, ctx, provider_notice=str(usage.get("terminal_provider_notice") or "")) if _presence else send_event)
     duration_sec = round(time.time() - start_time, 3)
     n_tool_calls = len(llm_trace.get("tool_calls", []))
     n_tool_errors = sum(1 for tc in llm_trace.get("tool_calls", [])
