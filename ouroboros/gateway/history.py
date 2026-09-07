@@ -333,7 +333,8 @@ def _copy_task_summary_metadata(rec: Dict[str, Any], entry: Dict[str, Any]) -> N
     for key in ("tool_calls", "rounds"):
         if key in entry:
             rec[key] = int(entry[key])
-    rec["outcome_axes"] = normalize_outcome_axes(entry)
+    if entry.get("type") == "task_summary" or isinstance(entry.get("outcome_axes"), dict):
+        rec["outcome_axes"] = normalize_outcome_axes(entry)
     if "reason_code" in entry:
         rec["reason_code"] = str(entry.get("reason_code") or "")
     if isinstance(entry.get("review_projection"), dict):

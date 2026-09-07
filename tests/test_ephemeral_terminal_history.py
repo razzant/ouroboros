@@ -12,6 +12,24 @@ from supervisor import message_bus, state
 from supervisor.events import _handle_send_message
 
 
+@pytest.mark.parametrize("stream", ["chat", "progress"])
+def test_unstamped_ephemeral_history_does_not_invent_execution_facts(tmp_path, stream):
+    logs = tmp_path / "logs"
+    logs.mkdir()
+    entry = {
+        "ts": "2026-09-06T00:00:00Z", "chat_id": 1, "direction": "out",
+        "task_id": "old-transient", "ephemeral_decision": True,
+        "text": "Original transient text", "content": "Original transient text",
+    }
+    (logs / f"{stream}.jsonl").write_text(json.dumps(entry) + "\n", encoding="utf-8")
+    response = asyncio.run(make_chat_history_endpoint(tmp_path)(SimpleNamespace(query_params={"chat_id": "1"})))
+    [row] = json.loads(response.body)["messages"]
+    assert row["ephemeral_decision"] is True
+    assert "outcome_axes" not in row
+    assert "reason_code" not in row
+    assert carry_cost_meta(row) == {}
+
+
 @pytest.mark.parametrize("execution,reason", [
     ("ok", "final_message"), ("degraded", "tool_failure"),
     ("infra_failed", "provider_unavailable"), ("failed", "owner_requested_finalization"),
