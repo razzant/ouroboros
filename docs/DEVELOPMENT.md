@@ -65,6 +65,10 @@ rules have no automated surface — review-only.
 - External workspace tasks keep governance bound to the system repository while
   contextual tools default through `ToolContext.active_repo_dir()`. Admission
   rejects overlap with the system repo/data and records a read-only preflight.
+- Physical file resolution must preserve the requested address. Normalize
+  in-root absolute paths for every resource; refuse an outside address before
+  relative-path sanitization. Keep repo-prefix and canonical artifact redirects
+  on the same resolver used by guards and handlers.
 - Project focus changes the default target, not the top-level tool surface.
   Generic VCS selects active/system explicitly; advisory, reviewed commit,
   rollback, promotion, restart, and runtime control keep their intrinsic
@@ -80,6 +84,37 @@ rules have no automated surface — review-only.
   not active authentication; discovery never logs in or probes the network.
 - Do not add a second scheduler for operator tooling or a generic CLI file
   manager. Use the task queue, attachments, logs, and artifact endpoints.
+- A process cwd determines relative paths, not the root task's entire write
+  authority. Reuse the resource binding for other authorized destinations;
+  preserve child write confinement and actual runtime/credential boundaries.
+  Only the filesystem writer lane excludes SSH remote payloads, retaining local
+  options and redirections. Other guards inspect the original command, as does
+  execution. Child, external-task and Light read checks share the physical paths
+  from `shell_guards.shell_inspection_paths`, including each row's effective cwd.
+  Remote commands can reach local files through configured SSH trust (including
+  loopback); this local inspection is not a remote-effect sandbox.
+  Positional GitHub policy inspects direct `gh` and shell-wrapper segments;
+  remote `ssh ... gh auth` is an inherited residual, not classified as local auth.
+- Do not infer credential authority from ordinary source/config directory
+  names. Restricted repository reads/searches use the existing byte masker with
+  `mask_opaque=False`: preserve ordinary long source while masking known token
+  formats and PEM keys. Keep owner-home opaque masking enabled. A runtime data
+  directory inside a project retains its actual secret/control path rules,
+  including a forked child's canonical parent (`core_secret_paths.restricted_data_roots`).
+  Prepare invariant credential/root locations once per list/search/query call
+  through `make_subagent_secret_target_check`; never retain that predicate across
+  calls. Target resolution and owner-state/file-identity checks remain per target.
+  Task/artifact source names and public PEM certificates carry no credential
+  authority. Restricted file readers mask complete private-key blocks before
+  selecting a window, preserving character positions and line breaks. The
+  owner credential fence covers the enumerated locations in
+  `credential_shapes.owner_credential_locations`, credential leaves and VCS
+  control directories. The exact SSH config exception does not permit key writes
+  under `.ssh`; unlisted stores such as `.cargo`, `.terraform.d` and `.kaggle`
+  are not protected by an arbitrary dotted-directory default-deny.
+- An unlaunchable sole cmd element gets an actionable argv/shell hint, never
+  automatic splitting or an implicit shell. Repo-only edit tools reject their
+  unsupported roots through their existing argument categories.
 
 Enforcement: `tests/test_headless_cli.py` (task-API admission, typed refusal
 terminality, attachment admission), `tests/test_cli_entrypoint.py` (the CLI
@@ -1712,9 +1747,17 @@ both critical. The imperatives:
   tool-enable, skills lifecycle, and cognitive-memory writes blocked; only
   `schedule_subagent` may create subagents (forged `delegation_role`
   rejected at API/CLI ingress); live `memory_mode=shared` stays disabled
-  (`tests/test_acting_subagents.py`). The subagent browser boundary is DNS
-  fail-closed with the loopback control-plane carve-out
-  (`tests/test_browser_isolation.py`; full rules: CHECKLISTS item 18).
+  (`tests/test_acting_subagents.py`). The subagent browser boundary refuses a
+  target DNS cannot classify (a typed `BROWSER_POLICY_UNAVAILABLE` before
+  navigation), allows loopback except actual or expected Ouroboros
+  control-service endpoints by identity — an unverifiable expected endpoint is
+  refused, never treated as foreign, while other ports and reused pathnames
+  keep working — admits private origins only through host-established
+  `resource_policy.allowed_origins`, and re-checks every redirect hop before
+  returning page content (`tests/test_browser_url_policy.py`,
+  `tests/test_browser_isolation.py`, `tests/test_browser_redirect_chain.py`;
+  mechanism: ARCHITECTURE "Tool capability and execution"; full rules:
+  CHECKLISTS item 18).
 - The parent is the SOLE committer of the live body: acting children return
   a `workspace.patch`, the parent applies a chosen patch with
   `integrate_subagent_patch` and runs its own `commit_reviewed`. The shared
@@ -2513,6 +2556,41 @@ The reaper kills strictly by (pid, start_time, cmd_sha256) fingerprint —
 never add command-line-class matching, which would let a dev instance reap a
 packaged instance's processes. `tests/test_process_custody.py` enforces the
 chokepoint with an explicit allowlist for bounded synchronous helpers.
+An installation-owned daemon uses `daemon` scope, with legacy purpose retention
+provided by its lifecycle owner and checked against the existing ledger identity;
+server-generation changes alone must not kill it. A worker's process tree is
+killed only through `supervisor.worker_pool_lifecycle.kill_worker_tree` — pool
+shutdown and restart, the managed-update fence, unready-slot replacement, cancel
+and timeout custody alike — which spares the ledger's live `daemon`-scope roots
+(`process_custody.live_daemon_root_pids`, including the owner's retained legacy
+purposes) and, for one task's cancel or timeout only, the kept services; a direct `kill_pid_tree` on a worker anywhere else in
+`supervisor/` is a defect. The explicit stop (`OwnedClaudexorDaemon.stop`, which
+Panic calls before the worker tree-kill) requires the owned marker for attached
+roots, then matches the ledger against one set of live start-time and command
+observations. An authenticated endpoint or the gateway's typed HTTP transport
+failure permits that stop; a received refusal, protocol/malformed response, or
+invalid descriptor/token discovery never does. Preserve a received HTTP status
+before reading the body, so a later read timeout cannot erase an authentication
+refusal. Local protocol/configuration and response-decoding failures are not
+network-unavailability evidence. Keep transport provenance distinct from the
+public stale status; a matching error-code string is not transport proof.
+Only confirmed exit permits `process_stopped`
+and pruning; concurrent and unreadable ledger bytes remain intact under the append
+lock. Each root gets its own exit window; partial success never means the whole
+daemon stop succeeded. Unconfirmed stop emits a critical diagnostic and existing
+supervisor-log row, including lock contention and unknown custody. The manager
+lock uses the short-poll bound separately from HTTP phase timeouts. Authenticated
+attach creates a missing owned marker only after validating the home again under
+the shared JSON publication lock. Atomic publication leaves absence or a complete
+marker after a write fault; existing malformed or foreign markers are never
+replaced. The reaper's permissive keep is never stop authority, and a daemon known
+only by name or port is never signalled.
+Explicit stop and next-start runtime selection remain separate contracts: a
+staged engine pin applies at the daemon's next start, and a planned restart
+reports it staged while the serving engine's atomic replacement predicate still
+omits setup jobs with unconfirmed termination. Service quiescence excludes
+zombie-only groups, but checks every member before releasing a writer fence
+(`tests/test_claudexor_custody_lifetime.py`, `tests/test_process_custody_liveness.py`).
 
 ## Platform Abstraction Rule
 
@@ -2651,6 +2729,12 @@ selected from risk. Review-only: scored by CHECKLISTS items 2(i) and 30
 
 ### Browser dialogs
 
+For agent page readiness, use `browser_action(action="wait", selector=..., state=...)` on the current page, or `browse_page(wait_for=..., state=...)` after navigation. States are `attached`, `visible`, `hidden`, and `detached`; hidden also accepts an absent element. A timeout returns the requested state, URL, current match count and first-element visibility rather than navigating again. These observations do not decide whether the task should continue; bounded `evaluate` remains available to its existing profiles.
+
+Image-reader regressions must include a real PNG under a synthetic user home with distinct task and canonical skill roots. Exercise same-round auto-attachment, the durable local copy and the actual send-time image block; a placeholder PNG, a flat drive or a mocked attachment helper cannot prove that path. Keep secret/owner-state and protected-artifact denial controls.
+
+Browser-boundary regressions run the installed Chromium and WebKit (`PLAYWRIGHT_BROWSERS_PATH`; a test never installs a browser, and `OUROBOROS_EXPECT_BROWSER_ENGINES` turns a missing engine from a skip into a failure) against real loopback servers bound through `server_entrypoint.bound_service_socket`, so the control endpoint under test is an actual recorded binding rather than a fixed port. The redirect residual is one strict xfail (`tests/test_browser_private_service.py`, the server-side dispatch counter) beside the passing content-refusal proof (`tests/test_browser_redirect_chain.py`); do not turn either into the other. The private-service proof takes its LAN target from `OUROBOROS_TEST_PRIVATE_BROWSER_HOST`/`_ADDRESS` (`OUROBOROS_EXPECT_PRIVATE_BROWSER=1` fails instead of skipping) and writes the images it viewed to `OUROBOROS_BROWSER_EVIDENCE_OUT`.
+
 `window.prompt`, `window.confirm`, and `window.alert` are forbidden in
 `web/modules`: PyWebView shells implement them inconsistently, native
 dialogs bypass the design system and browser tests, and the macOS shell has
@@ -2707,11 +2791,43 @@ not policy: configuration trust must not turn remote prose into policy.
 Enabled tools join the initial capability envelope, still pass runtime
 safety, and remain unavailable in repair/heal contexts; discovery failure
 becomes a visible capability omission. Stdio accepts one executable command
-and an exact string argument list — no shell, custom environment, or custom
-working directory. Tokens never appear in status responses
-(`ouroboros/secret_masking.py` owns the shared placeholders). Resources,
-prompts, and MCP server behavior remain separate architecture changes.
-Enforcement: `tests/test_mcp_client.py`.
+and an exact string argument list without a shell. Optional `cwd`, literal
+`env`, and `env_from_settings` (environment names mapped to existing string-valued
+setting keys) apply to listing and calling through the same manager configuration.
+References override matching literal names. The owner chooses MCP references in
+Settings; a caller's existing MCP tool grant does not authorize new references.
+Unknown fields remain saved and show a not-applied warning without disabling a
+valid server. Invalid known fields, missing references and incompatible transport
+fields produce `MCP_CONFIG_ERROR`. Response-only `auth_configured` is discarded at
+the configuration boundary. Omission preserves SDK environment/cwd defaults.
+Settings' existing built-in/custom-secret classification determines masking:
+ordinary selected values remain readable, while exact secret values (including
+short values and JSON-escaped echoes) are masked in descriptions/results/stderr.
+Executable schema properties, required fields, enum and default values stay intact.
+Resources, prompts, and MCP server behavior remain separate architecture changes.
+Enforcement: `tests/test_mcp_client.py`, `tests/test_process_environment.py`.
+
+`start_service` overlays ordinary literal `env` on the existing minimal host
+baseline; root tasks can additionally choose `env_from_settings` through their
+host-resolved process authority. Restricted and Presence tasks receive no new
+Settings-selection authority, while their previous literal env and configured MCP
+access remain available. Skill grants do not authorize an unrelated service.
+Both service backends and MCP reuse `workspace_executor.resolve_process_env`;
+referenced Settings fields retain the same secret/ordinary classification.
+Cwd still uses the host-owned resource binding; local import scrubbing and
+interpreter defaults remain. Docker forwards values through inert CLI environment
+aliases and restores the selected names inside the container, preserving host CLI
+configuration. Values do not enter host argv or generated shell source.
+Service diagnostics and finalized log blobs mask referenced secrets; ordinary
+PORT/PATH/DEBUG values, protocol identity/state and executable schema stay intact.
+The executor's record-stop owner finalizes local logs through the existing service
+log owner before forgetting the in-memory selections, including task/global cleanup
+and replacement after exit. Unconfirmed termination retains the existing record;
+a later cleanup can settle it. Live child logs and logs surviving worker loss keep
+the existing private raw-log contract until successful finalization; oversized or
+uncapturable logs retain their existing explicit omission/error report. No secret
+values are added to the durable process ledger. Enforcement:
+`tests/test_process_environment.py`, `tests/test_workspace_executor_services.py`.
 
 ## Gateway Boundary Pattern
 
@@ -2865,8 +2981,12 @@ Contributor rules:
 - Process containment is unconditional, including after a green pass:
   Windows uses a kill-on-close Job Object; POSIX uses an environment
   membership token plus a process-group enumeration backstop and promises
-  honest detection with a fail-closed verdict, not guaranteed teardown of
-  an arbitrary detached process. A crashed worker, a timeout-killed
+  honest detection with a fail-closed verdict for attributed members, not
+  guaranteed teardown of an arbitrary detached process. A same-uid unreadable
+  stranger is a warning, never membership proof; an unobserved descendant
+  that detached and hid its token remains a disclosed detection gap. Known
+  roots, groups and the retained set of observed members still fail closed when unreadable
+  (`tests/test_preflight_process_containment.py`). A crashed worker, a timeout-killed
   worker, a missing plugin, containment failure, and ordinary test failure
   keep distinct diagnostics.
 - Mark process/port/global-state tests `serial`; make a merely slow test

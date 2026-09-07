@@ -64,8 +64,8 @@ async def api_mcp_test(request: Request) -> JSONResponse:
         await asyncio.to_thread(_ensure_configured)
         manager = get_manager()
         server_id = canonical_server_id(body.get("server_id") or "")
+        settings = await asyncio.to_thread(load_settings)
         if server_id:
-            settings = await asyncio.to_thread(load_settings)
             servers = settings.get("MCP_SERVERS") or []
             target: Dict[str, Any] | None = None
             for entry in servers:
@@ -86,7 +86,7 @@ async def api_mcp_test(request: Request) -> JSONResponse:
                 if looks_masked_mcp_secret(probe.get("auth_token")):
                     probe["auth_token"] = str(target.get("auth_token") or "")
                 target = probe
-            outcome = await asyncio.to_thread(manager.test_server, target)
+            outcome = await asyncio.to_thread(manager.test_server, target, settings=settings)
             return JSONResponse(outcome)
         candidate = body.get("server")
         if not isinstance(candidate, dict):
@@ -94,7 +94,7 @@ async def api_mcp_test(request: Request) -> JSONResponse:
                 {"ok": False, "error": "request body must include `server` (object) or `server_id` (string)"},
                 status_code=400,
             )
-        outcome = await asyncio.to_thread(manager.test_server, candidate)
+        outcome = await asyncio.to_thread(manager.test_server, candidate, settings=settings)
         return JSONResponse(outcome)
     except Exception as exc:
         log.exception("api_mcp_test failed")

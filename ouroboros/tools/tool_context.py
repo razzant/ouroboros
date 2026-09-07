@@ -125,28 +125,20 @@ class ToolContext:
         )
 
     def repo_path(self, rel: str) -> pathlib.Path:
-        root = self.active_repo_dir()
-        # Accept the paths an agent naturally writes against a workspace root:
-        # an absolute path already INSIDE the root (e.g. /app/out.txt under a
-        # workspace rooted at /app — otherwise re-nested as /app/app/out.txt) and
-        # a redundant root-basename prefix ('app/out.txt'). normalize_root_relative
-        # only ever returns a relative string; paths not under the root fall
-        # through to safe_relpath (kept inside) and the boundary check below.
-        rel_str = _registry().normalize_root_relative(root, str(rel))
-        resolved = (root / _registry().safe_relpath(rel_str)).resolve()
-        try:
-            resolved.relative_to(root.resolve())
-        except ValueError:
-            raise ValueError(f"Path escapes repo_dir boundary: {rel}")
-        return resolved
+        from ouroboros.tool_access import _resolve_target_in_selected_base
+
+        return _resolve_target_in_selected_base(
+            self, root="active_workspace", base_path=self.active_repo_dir(),
+            path=str(rel), operation="read",
+        )
 
     def drive_path(self, rel: str) -> pathlib.Path:
-        resolved = (self.drive_root / _registry().safe_relpath(rel)).resolve()
-        try:
-            resolved.relative_to(self.drive_root.resolve())
-        except ValueError:
-            raise ValueError(f"Path escapes drive_root boundary: {rel}")
-        return resolved
+        from ouroboros.tool_access import _resolve_target_in_selected_base
+
+        return _resolve_target_in_selected_base(
+            self, root="runtime_data", base_path=self.drive_root,
+            path=str(rel), operation="read",
+        )
 
     def drive_logs(self) -> pathlib.Path:
         return (self.drive_root / "logs").resolve()

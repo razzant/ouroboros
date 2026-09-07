@@ -161,11 +161,10 @@ def _reconcile_each(drive_root: Any, runs: List[RunCustody],
     from ouroboros.gateways.claudexor import ClaudexorUnavailable
 
     if gateway_factory is None:
-        # The startup sweep REAPS the prior generation's owned daemon just
-        # before this, so a discovery-only gateway always found a corpse and
-        # reconciliation silently no-opped on every restart. The ensure path
-        # starts our own daemon when there is real work (never on the empty
-        # early-return above), activating any staged runtime update.
+        # Attach to the installation's surviving daemon, or restart a dead one
+        # when reconciliation has real work (never on the empty early return).
+        # A staged runtime pin applies at that natural start, not by killing
+        # a live daemon merely because its spawning server generation ended.
         from ouroboros.claudexor_daemon import ensure_owned_gateway
 
         gateway_factory = ensure_owned_gateway

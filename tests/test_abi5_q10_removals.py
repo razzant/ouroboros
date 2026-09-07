@@ -64,6 +64,7 @@ def test_scope_review_floor_gateway_surface_is_gone():
 
 
 def test_scope_review_floor_guards_are_gone_but_family_read_carve_survives():
+    from ouroboros import browser_policy
     from ouroboros.tools import browser, registry, registry_guard_process
 
     for mod in (registry, registry_guard_process):
@@ -74,6 +75,7 @@ def test_scope_review_floor_guards_are_gone_but_family_read_carve_survives():
         "_block_scope_review_floor_owner_post",
     ):
         assert not hasattr(browser, name)
+        assert not hasattr(browser_policy, name)
     # The shared read-carve the floor guard adjudicated stays, family-wide.
     assert callable(registry_guard_process._is_pure_read_inspection)
     assert callable(registry._detect_safety_mode_self_lowering)

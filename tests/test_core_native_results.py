@@ -225,7 +225,7 @@ def test_root_guard_publishes_its_two_refusals(tmp_path):
             "resource_block",
             "read_file",
             "LEGACY_BLOCKED",
-            "⚠️ READ_FILE_BLOCKED: this subagent cannot access repo secret or control paths.",
+            "⚠️ READ_FILE_BLOCKED: this subagent cannot access secret or owner-control data files.",
         ),
     ],
 )

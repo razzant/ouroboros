@@ -1852,7 +1852,7 @@ def test_context_mode_guard_does_not_block_readonly_diagnostics(diagnostic_cmd, 
 def test_browser_evaluate_context_mode_self_lowering_guard():
     from types import SimpleNamespace
 
-    from ouroboros.tools.browser import _blocks_context_mode_self_lowering_js, _is_context_mode_owner_post
+    from ouroboros.browser_policy import _blocks_context_mode_self_lowering_js, _is_context_mode_owner_post
 
     assert _blocks_context_mode_self_lowering_js(
         "fetch('/api/owner/context-mode', {method:'POST', body: JSON.stringify({mode:'low'})})"

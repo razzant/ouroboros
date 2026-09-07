@@ -335,7 +335,17 @@ def test_local_readonly_subagent_task_drive_and_skill_payload_filters(tmp_path):
         )
     )
 
-    assert "READ_FILE_BLOCKED" in registry.execute("read_file", {"root": "task_drive", "path": "settings.json"})
+    from ouroboros.tool_access import resource_root_path
+
+    task_root = resource_root_path(registry._ctx, "task_drive")
+    task_root.mkdir(parents=True, exist_ok=True)
+    (task_root / "settings.json").write_text("ordinary task settings", encoding="utf-8")
+    (task_root / "auth_token.json").write_text("ordinary task output", encoding="utf-8")
+    assert "ordinary task settings" in registry.execute("read_file", {"root": "task_drive", "path": "settings.json"})
+    assert "ordinary task output" in registry.execute("read_file", {"root": "task_drive", "path": "auth_token.json"})
+    denied = registry.execute_result("read_file", {"root": "runtime_data", "path": "settings.json"})
+    assert denied.code == "DATA_BLOCKED"
+    assert denied.text == "⚠️ DATA_READ_BLOCKED: this subagent cannot read secret or owner-control data files."
     traversal = registry.execute(
         "read_file",
         {"root": "skill_payload", "bucket": "external", "skill_name": "../../settings.json", "path": "."},

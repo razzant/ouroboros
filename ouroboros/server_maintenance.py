@@ -77,6 +77,7 @@ def _periodic_supervisor_maintenance(last_custody_reap: list, last_review_reconc
     if time.time() - last_custody_reap[0] > 600:
         last_custody_reap[0] = time.time()
         try:
+            from ouroboros.claudexor_daemon import CUSTODY_PURPOSE
             from ouroboros.process_custody import reap_orphaned_processes
             from supervisor.queue import RUNNING as _running_tasks
 
@@ -84,6 +85,7 @@ def _periodic_supervisor_maintenance(last_custody_reap: list, last_review_reconc
             reap_orphaned_processes(
                 DATA_DIR, running_task_ids=live_tasks,
                 live_owner_skills=_installed_skill_names(),
+                retained_purposes={CUSTODY_PURPOSE},
             )
             # A delegated Claudexor run is an orphan under exactly the same predicate:
             # its owning task is no longer running. It has no pid, so the process
@@ -406,13 +408,17 @@ def _cursor_refresh_settled_terminals() -> None:
 def _startup_custody_sweep() -> None:
     """Both custody surfaces, swept once per generation at supervisor startup.
 
-    Nothing is running yet, so every ledgered process and every open delegated run is
-    by definition ownerless: the generation that was watching them did not survive.
+    This generation has no workers yet. The shared installation daemon can
+    still serve recoverable runs from the prior generation and must survive.
     """
     try:
+        from ouroboros.claudexor_daemon import CUSTODY_PURPOSE
         from ouroboros.process_custody import reap_orphaned_processes
 
-        reaped = reap_orphaned_processes(DATA_DIR, live_owner_skills=_installed_skill_names())
+        reaped = reap_orphaned_processes(
+            DATA_DIR, live_owner_skills=_installed_skill_names(),
+            retained_purposes={CUSTODY_PURPOSE},
+        )
         if reaped:
             log.info("Process custody reaper killed %d orphaned process(es): %s", len(reaped), reaped)
     except Exception:

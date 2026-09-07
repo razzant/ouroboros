@@ -58,6 +58,20 @@ def _kept_service_pids() -> "set[int]":
         return set()
 
 
+def _retained_daemon_pids() -> "set[int]":
+    """PIDs of the installation's live daemon roots (``daemon``-scope custody rows,
+    the shared Claudexor daemon among them) that EVERY worker tree-kill spares:
+    their lifetime is the installation's, not the worker's. Best-effort; never raises."""
+    try:
+        from ouroboros.process_custody import live_daemon_root_pids
+        from ouroboros.claudexor_daemon import CUSTODY_PURPOSE
+        return live_daemon_root_pids(
+            pathlib.Path(_queue().DRIVE_ROOT), retained_purposes={CUSTODY_PURPOSE},
+        )
+    except Exception:
+        return set()
+
+
 def persist_queue_snapshot(reason: str = "") -> bool:
     """Persist queue snapshot for restart/recovery diagnostics.
 

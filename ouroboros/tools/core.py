@@ -66,6 +66,7 @@ from ouroboros.tools.core_file_tools import (  # noqa: F401
     _is_subagent_secret_data_path,
     _is_subagent_secret_repo_path,
     _is_subagent_secret_repo_target,
+    make_subagent_secret_target_check,
     _list_dir,
     _list_files,
     _list_user_files_dir,
@@ -918,7 +919,8 @@ def _code_search(ctx: ToolContext, query: str, path: str = ".",
 
     max_results = min(max(1, max_results), _MAX_SEARCH_RESULTS)
     root_path = binding.base_path
-    display_search_path = _root_display_path(normalized, path)
+    display_path = binding.target_path.relative_to(root_path).as_posix() if normalized in {"active_workspace", "system_repo"} else path
+    display_search_path = _root_display_path(normalized, display_path)
     search_root = binding.target_path
     if not search_root.exists():
         return f"⚠️ SEARCH_ERROR: path not found: {display_search_path}"
@@ -941,8 +943,11 @@ def _code_search(ctx: ToolContext, query: str, path: str = ".",
     if protected_root_read_block and search_root.is_file():
         return protected_root_read_block
     subagent_readonly = is_restricted_subagent_profile(ctx)
+    secret_check = None
     if subagent_readonly:
-        block_msg = _local_readonly_resource_block(ctx, normalized, search_root, root_path, action="SEARCH")
+        secret_repo = root_path if normalized in {"active_workspace", "system_repo"} else active_repo_dir_for(ctx)
+        secret_check = make_subagent_secret_target_check(secret_repo, ctx=ctx)
+        block_msg = _local_readonly_resource_block(ctx, normalized, search_root, root_path, action="SEARCH", secret_check=secret_check)
         if block_msg:
             return block_msg
     root_resolved = root_path.resolve(strict=False)
@@ -967,7 +972,7 @@ def _code_search(ctx: ToolContext, query: str, path: str = ".",
         # runtime_data per-project store is reachable only via scoped knowledge tools.
         if normalized == "runtime_data" and rel_parts and str(rel_parts[0]).casefold() == "projects":
             return _drop("project_store_scoped")
-        if subagent_readonly and _local_readonly_resource_block(ctx, normalized, fp, root_path, action="SEARCH"):
+        if subagent_readonly and _local_readonly_resource_block(ctx, normalized, fp, root_path, action="SEARCH", secret_check=secret_check):
             return _drop("restricted_subagent")
         if normalized == "user_files" and user_files_path_block_reason(ctx, fp, operation="search"):
             return _drop("user_files_policy")
@@ -983,9 +988,11 @@ def _code_search(ctx: ToolContext, query: str, path: str = ".",
         # home surfaces file CONTENT in the match lines, so raw credential
         # bytes must be masked here too — on BOTH the rg path and the Python
         # fallback. Names/paths stay; values become ***.
-        if normalized != "user_files":
+        if normalized != "user_files" and not subagent_readonly:
             return result_text
-        masked_text, masked = mask_secret_bytes(result_text)
+        masked_text, masked = mask_secret_bytes(
+            result_text, mask_opaque=normalized not in {"active_workspace", "system_repo"},
+        )
         if masked:
             masked_text += (
                 f"\n⚠️ SECRET_BYTES_MASKED: {masked} secret-shaped span(s) in these "
@@ -1083,7 +1090,7 @@ def _code_search(ctx: ToolContext, query: str, path: str = ".",
         if subagent_readonly:
             kept_dirs = []
             for d in dirnames:
-                if _local_readonly_resource_block(ctx, normalized, pathlib.Path(dirpath) / d, root_path, action="SEARCH"):
+                if _local_readonly_resource_block(ctx, normalized, pathlib.Path(dirpath) / d, root_path, action="SEARCH", secret_check=secret_check):
                     _drop("restricted_subagent")
                 else:
                     kept_dirs.append(d)
@@ -1095,7 +1102,7 @@ def _code_search(ctx: ToolContext, query: str, path: str = ".",
             if include and not fnmatch.fnmatch(fname, include):
                 continue
 
-            if subagent_readonly and _local_readonly_resource_block(ctx, normalized, fp, root_path, action="SEARCH"):
+            if subagent_readonly and _local_readonly_resource_block(ctx, normalized, fp, root_path, action="SEARCH", secret_check=secret_check):
                 _drop("restricted_subagent")
                 continue
             if normalized == "user_files" and user_files_path_block_reason(ctx, fp, operation="search"):

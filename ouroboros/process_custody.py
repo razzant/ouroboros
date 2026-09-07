@@ -12,7 +12,7 @@ Scopes:
   - ``task``:    dies with its owning task; reapable as soon as the task is no
                  longer running (and always across server generations).
   - ``session``: dies with the server generation (session_id mismatch → reap).
-  - ``daemon``:  genuine launcher-managed processes (e.g. ``server_restart_fallback``)
+  - ``daemon``:  installation-owned processes (e.g. the shared Claudexor daemon)
                  outlive generations — never killed. Skill COMPANIONS also record
                  daemon scope but are the exception: ``reap_orphaned_processes``
                  reaps them on owner-uninstall or a foreign generation.
@@ -39,11 +39,11 @@ from ouroboros.platform_layer import (
     pid_is_alive,
     process_command,
     process_group_id,
-    process_group_is_alive,
     process_start_time,
     process_start_time_legacy,
     subprocess_new_group_kwargs,
 )
+from ouroboros.process_containment import pid_is_zombie, process_group_has_live_members
 from ouroboros.utils import append_jsonl, utc_now_iso
 
 log = logging.getLogger(__name__)
@@ -231,23 +231,30 @@ def _legacy_start_matches(pid: int, recorded: str, current: str) -> bool:
     return bool(recorded) and process_start_time_legacy(pid) == recorded
 
 
-def _fingerprint_matches(entry: Dict[str, Any]) -> bool:
+def _fingerprint_matches(entry: Dict[str, Any], *, require_measured: bool = False) -> bool:
     """STRICT identity: the live process must still BE the recorded one.
 
     pid alive + same start_time (when we have one) + same command hash (when
     we have one). A recycled pid fails this and is left alone. We never match
     by command-line class. The start-time comparison is DUAL-FORMAT on Linux:
     the cheap current representation first, and the pre-upgrade spelling only
-    once that mismatched (see ``_legacy_start_matches``).
+    once that mismatched (see ``_legacy_start_matches``). Explicit stop sets
+    ``require_measured``: both recorded dimensions must match these exact live
+    observations; retention alone may tolerate unavailable measurements.
     """
     pid = int(entry.get("pid") or 0)
-    if pid <= 0 or not pid_is_alive(pid):
+    if pid <= 0 or not pid_is_alive(pid) or pid_is_zombie(pid):
         return False
     fp = entry.get("fingerprint") if isinstance(entry.get("fingerprint"), dict) else {}
     recorded_boot = str(fp.get("start_time_boot") or "")
     recorded_start = str(fp.get("start_time") or "")
+    recorded_cmd = str(fp.get("cmd_sha256") or "")
+    if require_measured and not ((recorded_boot or recorded_start) and recorded_cmd):
+        return False
     if recorded_boot or recorded_start:
         live_start = process_start_time(pid)
+        if require_measured and not live_start:
+            return False
         if live_start and not (
             # Preferred: the exact boot-qualified token of a row written by THIS line.
             (recorded_boot and live_start == recorded_boot)
@@ -265,9 +272,10 @@ def _fingerprint_matches(entry: Dict[str, Any]) -> bool:
             or (not recorded_boot and _legacy_start_matches(pid, recorded_start, live_start))
         ):
             return False
-    recorded_cmd = str(fp.get("cmd_sha256") or "")
     if recorded_cmd:
         live_cmd = _live_cmd_sha256(pid)
+        if require_measured and not live_cmd:
+            return False
         if live_cmd and live_cmd != recorded_cmd:
             return False
         if not live_cmd and not recorded_start:
@@ -278,7 +286,7 @@ def _fingerprint_matches(entry: Dict[str, Any]) -> bool:
 
 
 def _service_group_survives_leader(entry: Dict[str, Any]) -> bool:
-    """Keep dead-leader service evidence while its recorded group still exists."""
+    """Keep dead-leader evidence while a group member can still execute."""
     purpose = str(entry.get("purpose") or "")
     scope = str(entry.get("scope") or "")
     pgid = int(entry.get("pgid") or 0)
@@ -286,7 +294,7 @@ def _service_group_survives_leader(entry: Dict[str, Any]) -> bool:
         purpose.startswith(("service:", "workspace_service:"))
         and scope in {"task", "session"}
         and pgid > 0
-        and process_group_is_alive(pgid)
+        and process_group_has_live_members(pgid)
     )
 
 
@@ -323,6 +331,8 @@ def _read_ledger_records(
         try:
             by_pid[int(entry.get("pid") or 0)] = entry
         except (TypeError, ValueError):
+            if strict:
+                return False, []
             continue
     by_pid.pop(0, None)
     return True, list(by_pid.values())
@@ -336,7 +346,16 @@ def _read_ledger(drive_root: pathlib.Path) -> List[Dict[str, Any]]:
     return _read_ledger_records(drive_root, strict=False)[1]
 
 
-def _rewrite_ledger(drive_root: pathlib.Path, entries: List[Dict[str, Any]]) -> None:
+def _rewrite_ledger(
+    drive_root: pathlib.Path, entries: List[Dict[str, Any]], *,
+    previous: Optional[List[Dict[str, Any]]] = None,
+) -> None:
+    """Prune only exact observed rows under the append lock, preserving new/opaque bytes.
+
+    ``previous=None`` is the explicit replacement form used by isolated fixtures.
+    Lifecycle callers pass their read snapshot; signals and waits stay outside
+    this short transaction, so a new spawn can always enter durable custody.
+    """
     import json
 
     path = ledger_path(drive_root)
@@ -346,12 +365,25 @@ def _rewrite_ledger(drive_root: pathlib.Path, entries: List[Dict[str, Any]]) -> 
 
         lock_path = jsonl_append_lock_path(path)
         lock_fd = acquire_exclusive_file_lock(lock_path, timeout_sec=2.0, stale_sec=10.0)
+        if lock_fd is None:
+            log.warning("process ledger rewrite skipped: append lock unavailable")
+            return
         try:
+            if previous is None:
+                payload = "".join(json.dumps(entry, ensure_ascii=False) + "\n" for entry in entries).encode("utf-8")
+            else:
+                removed = [entry for entry in previous if entry not in entries]
+                kept = []
+                for line in path.read_bytes().splitlines(keepends=True):
+                    try:
+                        row = json.loads(line)
+                    except (ValueError, UnicodeError):
+                        row = None
+                    if row not in removed:
+                        kept.append(line)
+                payload = b"".join(kept)
             tmp = path.with_name(path.name + f".tmp.{os.getpid()}")
-            tmp.write_text(
-                "".join(json.dumps(entry, ensure_ascii=False) + "\n" for entry in entries),
-                encoding="utf-8",
-            )
+            tmp.write_bytes(payload)
             replace_atomic(tmp, path)
         finally:
             release_exclusive_file_lock(lock_path, lock_fd)
@@ -480,6 +512,121 @@ def live_kept_service_pids(drive_root: pathlib.Path) -> "set[int]":
     return pids
 
 
+def live_daemon_root_pids(
+    drive_root: pathlib.Path, *, retained_purposes: Optional[set[str]] = None,
+) -> "set[int]":
+    """PIDs of still-alive installation-owned (``daemon``-scope) ledger roots.
+
+    Used by every worker tree-kill to spare a process whose lifetime belongs to
+    the installation, not to the worker that happened to spawn it: the shared
+    Claudexor daemon is such a root when a task worker was the first to need it,
+    and its paid runs outlive that worker and the server generation alike. Only
+    live, fingerprint-matching ``daemon`` rows qualify; ``kill_pid_tree`` spares
+    an excluded pid together with its own descendants, so the delegated harness
+    runs under the daemon survive too. Sparing is the safe direction — a row the
+    reaper would keep is a row a worker teardown must not kill.
+    """
+    pids: set[int] = set()
+    try:
+        for entry in _read_ledger(pathlib.Path(drive_root)):
+            retained = entry.get("purpose") in (retained_purposes or set())
+            if (entry.get("scope") != "daemon" and not retained) or not _fingerprint_matches(entry):
+                continue
+            pid = int(entry.get("pid") or 0)
+            if pid > 0:
+                pids.add(pid)
+    except Exception:
+        return pids
+    return pids
+
+
+def pending_process_stops(drive_root: pathlib.Path, purposes: "set[str]") -> List[str]:
+    """Read unresolved custody for stop diagnostics, never as signal authority."""
+    readable, entries = _read_ledger_strict(drive_root)
+    if not readable:
+        return ["process custody ledger unreadable"]
+    pending = []
+    for entry in entries:
+        if entry.get("purpose") not in purposes:
+            continue
+        pid, pgid = int(entry.get("pid") or 0), int(entry.get("pgid") or 0)
+        if _fingerprint_matches(entry) or (pgid > 0 and process_group_has_live_members(pgid)):
+            pending.append(f"process {pid} remains alive or unconfirmed")
+    return pending
+
+
+def stop_ledgered_processes(
+    drive_root: pathlib.Path, purposes: "set[str]", *, timeout_sec: float = 5.0,
+    unconfirmed: Optional[List[str]] = None,
+) -> List[int]:
+    """Kill the installation's own processes of the named purposes, any scope.
+
+    The lifecycle owner's explicit stop (Panic): identity is the recorded row
+    under THIS drive root with a confirmed live fingerprint — never a command-
+    line class, a process name or a port, so a foreign daemon that recycled our
+    descriptor port is never signalled. Legacy ``session`` rows of the same
+    purpose are stopped too: the process is ours whichever generation recorded
+    it. A stopped row leaves the ledger with a ``process_stopped`` supervisor
+    row; a row that fails identity stays for the reaper to judge. Returns the
+    stopped pids; optional diagnostics retain failed signals and known children
+    even after their leader exits. Each eligible row gets its own exit window.
+    """
+    drive_root = pathlib.Path(drive_root)
+    stopped: List[int] = []
+    survivors: List[Dict[str, Any]] = []
+    entries = _read_ledger(drive_root)
+    failures = unconfirmed if unconfirmed is not None else []
+    for entry in entries:
+        purpose = str(entry.get("purpose") or "")
+        if purpose not in purposes or not _fingerprint_matches(entry, require_measured=True):
+            survivors.append(entry)
+            continue
+        pid = int(entry.get("pid") or 0)
+        pgid = int(entry.get("pgid") or 0)
+        from ouroboros.platform_layer import collect_descendant_pids, kill_pid_tree
+
+        children = collect_descendant_pids(pid)
+        deadline = time.monotonic() + max(0.0, timeout_sec)
+        try:
+            # Harness children lead their own groups. Capture and stop the PID
+            # tree before its parent dies, then sweep the original group too.
+            kill_pid_tree(pid)
+            if pgid > 0:
+                kill_process_group_id(pgid)
+        except Exception:
+            log.warning("Failed to stop ledgered process %s", pid, exc_info=True)
+            failures.append(f"process {pid} signal failed")
+            survivors.append(entry)
+            continue
+        while True:
+            alive = (
+                _fingerprint_matches(entry) or (pgid > 0 and process_group_has_live_members(pgid))
+                or any(pid_is_alive(child) and not pid_is_zombie(child) for child in children)
+            )
+            if not alive or time.monotonic() >= deadline:
+                break
+            time.sleep(0.05)
+        if alive:
+            log.warning("process %s stop is unconfirmed; custody retained", pid)
+            failures.append(f"process {pid} tree exit unconfirmed")
+            survivors.append(entry)
+            continue
+        stopped.append(pid)
+        append_jsonl(drive_root / "logs" / "supervisor.jsonl", {
+            "ts": utc_now_iso(),
+            "type": "process_stopped",
+            "pid": pid,
+            "pgid": pgid,
+            "purpose": purpose,
+            "scope": str(entry.get("scope") or ""),
+            "recorded_session": str(entry.get("session_id") or ""),
+            "reason": "owner_stop",
+        })
+    if stopped:
+        _rewrite_ledger(drive_root, survivors, previous=entries)
+    return stopped
+
+
 def quiesce_custodied_services(
     drive_root: pathlib.Path, *, timeout_sec: float = 5.0
 ) -> tuple[bool, List[str]]:
@@ -533,7 +680,7 @@ def quiesce_custodied_services(
                 "pgid": int(entry.get("pgid") or 0),
                 "purpose": entry.get("purpose"),
             })
-    _rewrite_ledger(drive_root, survivors)
+    _rewrite_ledger(drive_root, survivors, previous=entries)
     return not blockers, blockers
 
 
@@ -543,6 +690,7 @@ def reap_orphaned_processes(
     running_task_ids: Optional[set] = None,
     live_owner_skills: Optional[set] = None,
     enforce_companion_reap: bool = False,
+    retained_purposes: Optional[set[str]] = None,
 ) -> List[int]:
     """Kill ledgered processes whose owning generation/task is gone.
 
@@ -551,8 +699,11 @@ def reap_orphaned_processes(
       - current session's entries → keep (their owners are alive);
         EXCEPT task-scoped entries whose owner task is no longer running;
       - previous generations: task/session scopes → kill group + reap event;
-        daemon scope → keep (genuine launcher-managed lifecycles, e.g.
-        ``server_restart_fallback``).
+        daemon scope → keep (installation-owned lifecycles).
+      - ``retained_purposes`` lets the lifecycle owner preserve legacy records
+        of its installation-owned process, only after fingerprint identity
+        matches. The ledger's drive root and exact recorded process remain the
+        provenance; a purpose name alone never rescues a stale/recycled row.
       - skill COMPANIONS (purpose ``companion:<skill>:<name>``, recorded under
         daemon scope) are the exception to daemon-keep: reap when the owner skill
         is UNINSTALLED (not in ``live_owner_skills``) OR the entry is from a
@@ -595,7 +746,7 @@ def reap_orphaned_processes(
         # prune), never killed. The skipped fingerprint only cost a `ps` per row on
         # every 600s tick (the startup sweep sees prior-generation rows as
         # foreign-session, so it saves nothing there). This is the hot majority of the ledger:
-        # worker-pool members, the SyncManager, the claudexor daemon, the local-model
+        # worker-pool members, the SyncManager, the local-model
         # server and keep-services are all scope="session".
         #
         # A DEAD pid deliberately FALLS THROUGH instead of pruning here: a session
@@ -610,6 +761,7 @@ def reap_orphaned_processes(
             and pid > 0
             and not str(entry.get("purpose") or "").startswith("companion:")
             and pid_is_alive(pid)
+            and not pid_is_zombie(pid)
         ):
             survivors.append(entry)
             continue
@@ -617,6 +769,9 @@ def reap_orphaned_processes(
         group_survives = _service_group_survives_leader(entry)
         if not leader_matches and not group_survives:
             continue  # dead/recycled pid with no surviving service group: prune silently
+        if leader_matches and entry.get("purpose") in (retained_purposes or set()):
+            survivors.append(entry)
+            continue
         owner_task = str(entry.get("owner_task") or "")
         purpose = str(entry.get("purpose") or "")
         task_owner_gone = (
@@ -687,5 +842,5 @@ def reap_orphaned_processes(
         except Exception:
             log.warning("Failed to reap ledgered process %s", pid, exc_info=True)
             survivors.append(entry)
-    _rewrite_ledger(drive_root, survivors)
+    _rewrite_ledger(drive_root, survivors, previous=entries)
     return reaped

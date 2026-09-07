@@ -87,3 +87,38 @@ def test_panic_stop_survives_daemon_stop_failure(monkeypatch, tmp_path):
         "force": True, "archive_service_logs": False,
         "reconcile_delegate_custody": False,
     }]
+
+
+def test_panic_stops_the_daemon_before_the_worker_trees(monkeypatch, tmp_path):
+    """The worker tree-kill spares the installation's daemon roots by design, so the
+    explicit daemon stop must come FIRST and is what ends them under Panic."""
+    order = []
+    from ouroboros import server_control
+
+    monkeypatch.setattr("ouroboros.tools.shell.kill_all_tracked_subprocesses", lambda: None)
+    monkeypatch.setattr("ouroboros.workspace_executor.kill_all_foreground", lambda *a, **k: None)
+    monkeypatch.setattr("ouroboros.tools.services.kill_all_services", lambda *a, **k: None)
+    monkeypatch.setattr("ouroboros.local_model.get_manager",
+                        lambda: SimpleNamespace(stop_server=lambda: None))
+    monkeypatch.setattr("supervisor.state.load_state", lambda: {})
+    monkeypatch.setattr("supervisor.state.save_state", lambda _state: None)
+    monkeypatch.setattr("supervisor.evolution_lifecycle.complete_evolution_campaign",
+                        lambda *a, **k: {})
+    monkeypatch.setattr("ouroboros.post_task_evolution.drop_pending_request", lambda *a, **k: None)
+    monkeypatch.setattr("ouroboros.extension_companion.panic_kill_all", lambda: None)
+    monkeypatch.setattr("multiprocessing.active_children", lambda: [])
+    monkeypatch.setattr("ouroboros.platform_layer.kill_process_on_port", lambda _port: None)
+    monkeypatch.setattr("ouroboros.platform_layer.force_kill_pid", lambda *a, **k: None)
+    monkeypatch.setattr("ouroboros.gateway.host_service.host_service_port", lambda: 8767)
+    monkeypatch.setattr("ouroboros.claudexor_daemon.get_owned_daemon",
+                        lambda: SimpleNamespace(stop=lambda: order.append("daemon_stop") or True))
+    monkeypatch.setattr(server_control.os, "_exit",
+                        lambda code: (_ for _ in ()).throw(_ExitCalled(code)))
+    with pytest.raises(_ExitCalled):
+        server_control.execute_panic_stop(
+            consciousness=SimpleNamespace(stop=lambda: None),
+            kill_workers_fn=lambda **kw: order.append("kill_workers"),
+            data_dir=tmp_path, panic_exit_code=120,
+            log=SimpleNamespace(critical=lambda *a, **k: None),
+        )
+    assert order == ["daemon_stop", "kill_workers"]
