@@ -89,14 +89,11 @@ def user_files_path_block_reason(
     """Return a block reason when candidate is not an external user file.
 
     Location checks (outside-home, control-plane overlap) apply to every
-    operation. The credential-shape name gate applies ONLY to non-read
-    operations (capinv-447 / В23=A): the ROOT principal reads the owner's home
-    in full — secret bytes are masked at egress, not refused at read time —
-    while writes/edits/shell targets keep the shape deny (overwriting
-    ~/.bashrc or ~/.ssh material is a persistence hazard, not a read).
-    ``operation=""`` (unknown caller) keeps the shape deny, fail-closed for
-    mutation surfaces. Children never hold a user_files grant (profile
-    policy), so the read-side lift is root-only by construction.
+    operation. Root reads are location-authorized with byte masking at egress.
+    Mutations additionally protect known credential leaves and physical owner
+    stores through credential_shapes; ordinary .config/Library/settings files
+    and the exact SSH config are not rejected as credential stores by name.
+    Children never hold a user_files grant in the profile matrix.
     """
 
     resolved = pathlib.Path(candidate).expanduser().resolve(strict=False)

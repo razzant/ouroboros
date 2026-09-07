@@ -235,6 +235,11 @@ function sealCard(handlers, id, second) {
     });
 }
 const taskCards = (messages) => messages.children.filter((node) => node.dataset.taskId);
+// Inspect live additions independently of the server rows also rendered by replay.
+const liveTaskCards = (messages, historyRows) => {
+    const historical = new Set(historyRows.map((row) => row.task_id));
+    return taskCards(messages).filter((node) => !historical.has(node.dataset.taskId));
+};
 
 // The server reports a quota-truncated window so the Load-older control is
 // offered; `rows` is the durable history it returns for that request.
@@ -310,17 +315,15 @@ test('exactly at the cap a sync stays routine', async () => {
     }
 });
 
-// A durable row mints a live-card RECORD on replay, but this DOM stub reports
-// every fresh node as already connected, so the pass-2 sweep never inserts it:
-// the cards visible below are the LIVE ones. That is the observable this suite
-// needs — a rebuild drops every live card, a routine sync keeps it.
+// A durable summary also renders a card. Track exact server identities separately
+// from live additions: a rebuild drops the additions and replays durable cards;
+// a routine sync preserves both. The bound counts all records, including progress.
 test('after Load older the cap is relative to the wider window and its rebuild keeps the owner quota', async () => {
     const historyCalls = [];
     // The default window is empty; the escalated one carries 50 durable cards.
+    const olderRows = Array.from({ length: 50 }, (_all, i) => summaryRow(`older-t${i}`, i));
     const { prior, mount } = installDom(historyFetch(historyCalls, (url) => (
-        url.includes('n_human=400')
-            ? Array.from({ length: 50 }, (_all, i) => summaryRow(`older-t${i}`, i))
-            : []
+        url.includes('n_human=400') ? olderRows : []
     )));
     // The stub reports every fresh element as connected, so the Load-older
     // control is never (re)prepended; capture its button at creation instead.
@@ -341,14 +344,18 @@ test('after Load older the cap is relative to the wider window and its rebuild k
         for (let i = 0; i < 200; i += 1) sealCard(handlers, `wide-t${i}`, i);
         await sync(instance, 2);
         assert.match(historyCalls.at(-1), /n_human=400/);
-        assert.equal(taskCards(messages).length, 200, 'the sync folded in routinely');
+        assert.equal(liveTaskCards(messages, olderRows).length, 200, 'the sync folded in routinely');
+        assert.ok(olderRows.every((row) => taskCards(messages).some((card) => card.dataset.taskId === row.task_id)),
+            'durable summaries are also visible');
 
         // One more crosses the relative bound. The window is wide, so the
         // rebuild replays the OWNER's quota instead of skipping the cap.
         sealCard(handlers, 'wide-t200', 200);
         await sync(instance, 3);
         assert.match(historyCalls.at(-1), /n_human=400/, 'the rebuild kept the owner quota');
-        assert.equal(taskCards(messages).length, 0, 'the rebuild replaced every live card');
+        assert.equal(liveTaskCards(messages, olderRows).length, 0, 'the rebuild replaced every live card');
+        assert.deepEqual(new Set(taskCards(messages).map((card) => card.dataset.taskId)),
+            new Set(olderRows.map((row) => row.task_id)), 'the durable window remains visible');
     } finally {
         instance.destroy();
         restoreDom(prior);
@@ -374,7 +381,7 @@ test('a window that itself exceeds the cap does not rebuild on every later sync'
         for (let revision = 2; revision <= 5; revision += 1) {
             sealCard(handlers, `live-t${revision}`, 300 + revision);
             await sync(instance, revision);
-            assert.equal(taskCards(messages).length, revision - 1,
+            assert.equal(liveTaskCards(messages, rows).length, revision - 1,
                 `sync ${revision} folded in routinely instead of rebuilding`);
         }
     } finally {
@@ -397,13 +404,15 @@ test('an arm raised while a routine replay is running survives to the next sync'
         sealCard(handlers, 'live-before', 1);
         rows = Array.from({ length: 201 }, (_all, i) => summaryRow(`grown-t${i}`, i));
         await sync(instance, 2);
-        assert.deepEqual(taskCards(messages).map((node) => node.dataset.taskId), ['live-before'],
+        assert.deepEqual(liveTaskCards(messages, rows).map((node) => node.dataset.taskId), ['live-before'],
             'the cap-crossing sync itself stayed routine');
         await sync(instance, 3);
-        assert.equal(taskCards(messages).length, 0, 'the armed rebuild ran on the next sync');
+        assert.equal(liveTaskCards(messages, rows).length, 0, 'the armed rebuild ran on the next sync');
+        assert.deepEqual(new Set(taskCards(messages).map((card) => card.dataset.taskId)),
+            new Set(rows.map((row) => row.task_id)), 'rebuild preserves the fetched durable cards');
         sealCard(handlers, 'after-rebuild', 400);
         await sync(instance, 4);
-        assert.deepEqual(taskCards(messages).map((node) => node.dataset.taskId), ['after-rebuild'],
+        assert.deepEqual(liveTaskCards(messages, rows).map((node) => node.dataset.taskId), ['after-rebuild'],
             'that rebuild set the new floor: later syncs are routine again');
     } finally {
         instance.destroy();

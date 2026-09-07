@@ -31,6 +31,7 @@ from .lib.telegram_state import (
     _mirror_progress_enabled, _render_subagent_card, _data_dir,
     _jsonl_tail, _load_runtime_state, _read_json_file,
 )
+from .lib import telegram_inbound, telegram_quiz
 from .lib.telegram_health import _collect_health, _build_menu_tasks
 from .lib.telegram_notifier import _make_notifier
 from .lib.miniapp_registration import _read_status, register as register_miniapp
@@ -326,6 +327,10 @@ def _bridge_status(api) -> dict[str, Any]:
         state = "error"
         poller = "failed"
         reason_code = str(runtime.get("reason_code") or "telegram_rejected")[:64]
+    elif token_configured and str(runtime.get("state") or "") == "degraded":
+        state = "degraded"
+        poller = "degraded"
+        reason_code = str(runtime.get("reason_code") or "telegram_startup_deferred")[:64]
     result = {
         "state": state,
         "owner_bound": owner_bound,
@@ -393,12 +398,8 @@ def _target_chat(settings: Dict[str, Any], event: Dict[str, Any]) -> int:
         return 0
 
 
-async def _inject(api, payload: Dict[str, Any]) -> None:
-    settings = _load_settings(api)
-    pinned_chat = str(settings.get("TELEGRAM_CHAT_ID") or "").strip()
-    if not pinned_chat:
-        api.log("warning", "Host inject refused: TELEGRAM_CHAT_ID is not configured or bound.")
-        return
+async def _host_post(api, path: str, payload: Dict[str, Any]) -> tuple[int, Dict[str, Any]]:
+    """POST one JSON payload to the loopback Host Service; return ``(status, body)``."""
     try:
         port = int(os.environ.get("OUROBOROS_HOST_SERVICE_PORT", "8767"))
     except (TypeError, ValueError):
@@ -411,12 +412,26 @@ async def _inject(api, payload: Dict[str, Any]) -> None:
         follow_redirects=False,
     ) as client:
         response = await client.post(
-            f"http://127.0.0.1:{port}/chat/inject",
+            f"http://127.0.0.1:{port}{path}",
             headers=_host_headers(api),
             json=payload,
         )
-        if response.status_code >= 400:
-            raise RuntimeError(f"Host inject returned HTTP {response.status_code}")
+    try:
+        body = response.json()
+    except Exception:
+        body = {}
+    return int(response.status_code), (body if isinstance(body, dict) else {})
+
+
+async def _inject(api, payload: Dict[str, Any]) -> None:
+    settings = _load_settings(api)
+    pinned_chat = str(settings.get("TELEGRAM_CHAT_ID") or "").strip()
+    if not pinned_chat:
+        api.log("warning", "Host inject refused: TELEGRAM_CHAT_ID is not configured or bound.")
+        return
+    status, _body = await _host_post(api, "/chat/inject", payload)
+    if status >= 400:
+        raise RuntimeError(f"Host inject returned HTTP {status}")
     # A new user turn starts here — break the silent-mode chain so the next
     # outbound message begins a fresh bubble rather than overwriting the last.
     try:
@@ -606,6 +621,10 @@ async def _start_poller(api):
             # budget: stay alive and revalidate from the polling loop once
             # transport returns. Permanent rejections still raise below.
             validated = False
+            # Truthful status while validation is deferred (#376): neither
+            # ready nor failed. The in-loop validation overwrites it.
+            _save_bridge_status(api, "degraded", "telegram_startup_deferred")
+            api.log("warning", "Telegram token validation deferred by a transport failure; polling waits for the network.")
         return client, offset, pinned_chat, max_updates, command_mode, lang, validated
     except TelegramSettingsError:
         _save_bridge_status(api, "error", "settings_invalid")
@@ -789,6 +808,15 @@ async def _poller(api) -> None:
                                 await _edit_panel(api, client, cb_chat_id, cb_message_id, header, keyboard)
                                 continue
 
+                        # --- Quiz answers (#472): a tapped option reaches the host's
+                        # decision ingress; the owner is already verified above.
+                        if cb_data.startswith("qz:"):
+                            await telegram_quiz.answer_from_callback(
+                                api, client, cb_data, cb_id=cb_id,
+                                update_id=update_id, lang=lang, post=_host_post,
+                            )
+                            continue
+
                         if cb_data.startswith(("set_model:", "set_budget:")):
                             await client.answer_callback_query(
                                 cb_id,
@@ -800,95 +828,7 @@ async def _poller(api) -> None:
                         continue
 
                     # --- Handle regular messages ---
-                    message = update.get("message") or {}
-                    chat = message.get("chat") or {}
-                    sender = message.get("from") or {}
-                    chat_id = int(chat.get("id") or 0)
-                    # Owner binding + filtering is already enforced at the top of
-                    # the update loop (TOFU for all command modes), so chat_id is
-                    # guaranteed to equal the pinned owner chat here.
-                    text = str(message.get("text") or message.get("caption") or "").strip()
-                    caption = str(message.get("caption") or "").strip()
-
-                    # Handle /menu command locally — always allowed
-                    cleaned_text = text.lower().strip()
-                    is_menu_cmd = _is_exact_bot_command(cleaned_text, "/menu")
-                    if is_menu_cmd:
-                        header, keyboard = _build_menu_keyboard(command_mode, lang)
-                        if keyboard:
-                            await client.send_message_with_inline_keyboard(chat_id, header, keyboard)
-                        else:
-                            await client.send_message(chat_id, header)
-                        continue
-
-                    # Handle /language command locally — always allowed
-                    is_lang_cmd = _is_exact_bot_command(cleaned_text, "/language")
-                    if is_lang_cmd:
-                        header, keyboard = _build_language_keyboard(lang)
-                        await client.send_message_with_inline_keyboard(chat_id, header, keyboard)
-                        continue
-
-                    # Handle /help command locally — always allowed
-                    is_help_cmd = _is_exact_bot_command(cleaned_text, "/help")
-                    if is_help_cmd:
-                        help_text = _LOCALIZED_TEXTS[lang]["help_text"]
-                        await client.send_message(chat_id, help_text)
-                        continue
-
-                    # Translate commands to safe natural-language text.
-                    # _translate_command returns None when the command is rejected.
-                    safe_text = _translate_command(text, command_mode)
-                    safe_caption = _translate_command(caption, command_mode) if caption else caption
-                    if safe_text is None or safe_caption is None:
-                        if command_mode == _COMMAND_MODE_STRICT:
-                            await client.send_message(
-                                chat_id,
-                                _LOCALIZED_TEXTS[lang]["slash_blocked_strict"],
-                            )
-                        else:
-                            await client.send_message(
-                                chat_id,
-                                _LOCALIZED_TEXTS[lang]["slash_blocked_mode"],
-                            )
-                        continue
-
-                    photos = message.get("photo") or []
-                    image_base64 = ""
-                    image_mime = ""
-                    if photos:
-                        file_id = str((photos[-1] or {}).get("file_id") or "").strip()
-                        if file_id:
-                            image_base64, image_mime = await client.download_photo(file_id)
-                    if not safe_text and not image_base64:
-                        # Acknowledge unsupported inbound attachments instead of
-                        # silently swallowing them. Inbound file INGESTION is not
-                        # yet wired on the host side (only text/photo), so
-                        # tell the user rather than leaving them wondering.
-                        if message.get("document") or message.get("video") or message.get("audio") or message.get("voice") or message.get("sticker"):
-                            await client.send_message(
-                                chat_id,
-                                ("Пока я не умею принимать файлы/видео/аудио — поддерживаются текст и фото."
-                                 if lang == "ru" else
-                                 "I can't accept files/video/audio yet — supported input: text and photos."),
-                            )
-                        continue
-                    sender_name = _extract_sender_label(sender, chat_id)
-                    sender_label = f"Telegram ({sender_name})"
-                    await _inject(api, {
-                        "text": safe_text,
-                        "chat_id": chat_id,
-                        "user_id": int(sender.get("id") or chat_id or 1),
-                        "source": "telegram",
-                        "sender_label": sender_label,
-                        "transport": {
-                            "kind": "telegram",
-                            "conversation_id": str(chat_id),
-                            "sender_label": sender_label,
-                        },
-                        "image_base64": image_base64,
-                        "image_mime": image_mime,
-                        "image_caption": safe_caption,
-                    })
+                    await _handle_owner_message(api, client, update, update_id, command_mode, lang)
                 except Exception as exc:
                     api.log(
                         "warning",
@@ -927,6 +867,128 @@ async def _poller(api) -> None:
             _save_bridge_status(api, "error", "poller_failed")
             api.log("error", f"Telegram poller failed ({type(exc).__name__}).")
             raise
+
+
+async def _handle_owner_message(
+    api, client, update: Dict[str, Any], update_id: int, command_mode: str, lang: str,
+) -> None:
+    """One authorized owner message: local /menu /language /help, command-mode
+    translation, a reply to a quiz card (#472), then text/photo/file relay (#668).
+    Owner binding is already enforced by the caller (TOFU for every command mode).
+    """
+    message = update.get("message") or {}
+    chat = message.get("chat") or {}
+    sender = message.get("from") or {}
+    chat_id = int(chat.get("id") or 0)
+    # Owner binding + filtering is already enforced at the top of
+    # the update loop (TOFU for all command modes), so chat_id is
+    # guaranteed to equal the pinned owner chat here.
+    text = str(message.get("text") or message.get("caption") or "").strip()
+    caption = str(message.get("caption") or "").strip()
+
+    # Handle /menu command locally — always allowed
+    cleaned_text = text.lower().strip()
+    is_menu_cmd = _is_exact_bot_command(cleaned_text, "/menu")
+    if is_menu_cmd:
+        header, keyboard = _build_menu_keyboard(command_mode, lang)
+        if keyboard:
+            await client.send_message_with_inline_keyboard(chat_id, header, keyboard)
+        else:
+            await client.send_message(chat_id, header)
+        return
+
+    # Handle /language command locally — always allowed
+    is_lang_cmd = _is_exact_bot_command(cleaned_text, "/language")
+    if is_lang_cmd:
+        header, keyboard = _build_language_keyboard(lang)
+        await client.send_message_with_inline_keyboard(chat_id, header, keyboard)
+        return
+
+    # Handle /help command locally — always allowed
+    is_help_cmd = _is_exact_bot_command(cleaned_text, "/help")
+    if is_help_cmd:
+        help_text = _LOCALIZED_TEXTS[lang]["help_text"]
+        await client.send_message(chat_id, help_text)
+        return
+
+    # Translate commands to safe natural-language text.
+    # _translate_command returns None when the command is rejected.
+    safe_text = _translate_command(text, command_mode)
+    safe_caption = _translate_command(caption, command_mode) if caption else caption
+    if safe_text is None or safe_caption is None:
+        if command_mode == _COMMAND_MODE_STRICT:
+            await client.send_message(
+                chat_id,
+                _LOCALIZED_TEXTS[lang]["slash_blocked_strict"],
+            )
+        else:
+            await client.send_message(
+                chat_id,
+                _LOCALIZED_TEXTS[lang]["slash_blocked_mode"],
+            )
+        return
+
+    reply_to = message.get("reply_to_message") or {}
+    if safe_text and not _SLASH_COMMAND_RE.match(text) and isinstance(reply_to, dict) and reply_to:
+        quiz_ref = telegram_quiz.quiz_for_message(
+            api, chat_id, int(reply_to.get("message_id") or 0),
+        )
+        if quiz_ref is not None:
+            # A reply to a quiz card is the owner's own answer to
+            # that question, not a new chat turn (#472).
+            # Commands keep their existing dispatch even in replies. Other
+            # answers, including code-formatted command names, stay verbatim.
+            answer_text = str(message.get("text") or message.get("caption") or "")
+            await telegram_quiz.answer_from_reply(
+                api, client, quiz_ref, answer_text, chat_id=chat_id,
+                update_id=update_id, lang=lang, post=_host_post,
+            )
+            return
+    photos = message.get("photo") or []
+    image_base64 = ""
+    image_mime = ""
+    if photos:
+        file_id = str((photos[-1] or {}).get("file_id") or "").strip()
+        if file_id:
+            image_base64, image_mime = await client.download_photo(file_id)
+    inbound = None if photos else telegram_inbound.inbound_file(message)
+    if inbound is not None and inbound.get("refusal"):
+        await client.send_message(chat_id, telegram_inbound.refusal_text(inbound, lang))
+        return
+    if not safe_text and not image_base64 and inbound is None:
+        # Acknowledge an unsupported message kind (sticker, poll,
+        # location…) instead of silently swallowing it.
+        if telegram_inbound.unsupported_kind(message):
+            await client.send_message(chat_id, telegram_inbound.unsupported_text(lang))
+        return
+    sender_name = _extract_sender_label(sender, chat_id)
+    sender_label = f"Telegram ({sender_name})"
+    parked = None
+    if inbound is not None:
+        # Documents, video, audio and voice ride the host's shared
+        # attachment path (#668): parked in this skill's state dir,
+        # copied by the host into data/uploads, removed here after.
+        parked = await telegram_inbound.park_inbound_file(api, client, inbound)
+    try:
+        await _inject(api, {
+            "text": safe_text,
+            "chat_id": chat_id,
+            "user_id": int(sender.get("id") or chat_id or 1),
+            "source": "telegram",
+            "sender_label": sender_label,
+            "transport": {
+                "kind": "telegram",
+                "conversation_id": str(chat_id),
+                "sender_label": sender_label,
+            },
+            "image_base64": image_base64,
+            "image_mime": image_mime,
+            "image_caption": safe_caption,
+            **({"attachments": [parked.spec]} if parked is not None else {}),
+        })
+    finally:
+        if parked is not None:
+            parked.cleanup()
 
 
 def _make_poller(api):
@@ -1197,19 +1259,26 @@ def _make_quiz(api):
             labels = labels[:6]
             if not question or len(labels) < 2:
                 return
+            task_id = str(event.get("task_id") or "").strip()
+            quiz_id = str(event.get("quiz_id") or "").strip()
+            if not task_id or not quiz_id:
+                return  # the host refuses anonymous quizzes; nothing to answer to
             _clear_silent_msg(api, chat_id)
             stake = str(event.get("stake") or "").strip()
             assumption = str(event.get("assumption") or "").strip()
-            lines = [f"Question: {question}"]
-            if stake:
-                lines.append(f"At stake: {stake}")
-            lines.extend(f"{index}. {label}" for index, label in enumerate(labels, 1))
-            if assumption:
-                lines.append(f"Continuing meanwhile: {assumption}")
-            # Display-only for now: answering happens in the web UI. A tappable
-            # inline-keyboard answer flow is a planned follow-up of this skill.
-            lines.append("Answer from the Ouroboros web UI.")
-            await client.send_message(chat_id, "\n".join(lines), parse_mode="")
+            lang = _poller_preferences(api)[4]
+            body = telegram_quiz.render_quiz_text(question, labels, stake, assumption)
+            token = telegram_quiz.mint_token(task_id, quiz_id)
+            # One button per option; a reply to the card is a free-form answer.
+            # Both reach the host's decision ingress (#472).
+            message_id = await client.send_message_with_inline_keyboard(
+                chat_id, f"{body}\n{telegram_quiz.hint(lang)}",
+                telegram_quiz.quiz_keyboard(token, labels), parse_mode="",
+            )
+            telegram_quiz.remember_quiz(api, token, {
+                "task_id": task_id, "quiz_id": quiz_id, "chat_id": chat_id,
+                "message_id": int(message_id or 0), "options": labels, "text": body,
+            })
         except Exception as exc:
             api.log("error", f"Telegram quiz error: {exc}")
     return handle

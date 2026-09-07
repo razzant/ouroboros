@@ -167,7 +167,6 @@ from ouroboros.tools.registry_guard_process import (  # noqa: F401 — re-export
     _READ_ONLY_INSPECTION_COMMANDS,
     _SEARCH_TOOL_EXEC_OPTIONS,
     _SKILL_OWNER_STATE_STEMS,
-    _SUBAGENT_SHELL_SECRET_MARKERS,
     _TRUSTED_EXECUTABLE_DIRS,
     _denied_read_option,
     _detect_context_mode_self_lowering,

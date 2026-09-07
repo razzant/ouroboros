@@ -366,8 +366,13 @@ def test_gateway_contract_endpoint_index_matches_router_and_types(tmp_path):
     assert _notrequired_fields(ActiveChatActivity) == set(), (
         "ActiveChatActivity snapshot rows always emit every field: keep them all required"
     )
-    assert ActiveChatActivity.__annotations__.keys() == ActiveDirectTurn.__annotations__.keys(), (
+    assert get_type_hints(ActiveChatActivity, include_extras=True) == get_type_hints(ActiveDirectTurn, include_extras=True), (
         "ActiveChatActivity must mirror ActiveDirectTurn's field shape so one client reducer hydrates both"
+    )
+    from ouroboros.gateway.schema import json_schema_for
+
+    assert json_schema_for(ActiveChatActivity) == json_schema_for(ActiveDirectTurn), (
+        "the shared activity shape must preserve flat keys, types and requiredness"
     )
     assert _notrequired_fields(TypingOutbound) == {
         "chat_id", "activity_id", "client_message_id", "phase", "kind",

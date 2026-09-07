@@ -53,7 +53,10 @@ function makeFakeDom() {
             return {
                 _isFragment: true,
                 children: [],
-                appendChild(node) { this.children.push(node); },
+                // DOM-faithful: appending re-parents the node (mount() reads
+                // parentNode to tell "still in the holding fragment" from
+                // "pass 2 nested this node inside another card").
+                appendChild(node) { node.parentNode = this; this.children.push(node); },
             };
         },
     };
@@ -63,6 +66,7 @@ function makeFakeDom() {
             const incoming = node._isFragment ? node.children : [node];
             const index = this.children.indexOf(before);
             this.children.splice(index === -1 ? this.children.length : index, 0, ...incoming);
+            for (const item of incoming) item.parentNode = this;
         },
         appendChild(node) { this.insertBefore(node, null); },
     });
@@ -84,6 +88,31 @@ test('mount inserts one sorted fragment before typing; typing stays last', () =>
     batch.collect(makeNode('c', 3));
     batch.mount(messages, typing);
     assert.deepEqual(messages.children.map((n) => n.id), ['a', 'b', 'c', 'typing']);
+});
+
+test('mount leaves a node that pass 2 nested inside another card where it is (#636)', () => {
+    // The replay collects every card into a detached holding fragment; when a
+    // later row moves a child card INTO its parent's subagent container, the
+    // node has left the fragment and mount() must not tear it back out as a
+    // top-level card below the whole feed.
+    const { doc, makeMessages } = makeFakeDom();
+    const messages = makeMessages();
+    const batch = createRebuildBatch(doc);
+    const parent = makeNode('parent', 1);
+    const child = makeNode('child', 2);
+    const later = makeNode('later', 3);
+    batch.collect(parent);
+    batch.collect(child);
+    batch.collect(later);
+    assert.ok(child.parentNode?._isFragment, 'collected nodes wait in the holding fragment');
+    assert.equal(child.parentNode, parent.parentNode);
+    // pass 2 nests the child under its parent (parent.appendChild in production)
+    const container = { id: 'parent-subagents', children: [] };
+    container.children.push(child);
+    child.parentNode = container;
+    batch.mount(messages, null);
+    assert.deepEqual(messages.children.map((n) => n.id), ['parent', 'later']);
+    assert.equal(child.parentNode, container, 'the nested child stays inside its parent');
 });
 
 test('mount without a mounted typing node appends at the end', () => {

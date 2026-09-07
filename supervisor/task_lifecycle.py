@@ -1105,7 +1105,7 @@ def _finish_captured_running(
     the intent settles ``already_settled`` after the confirmed death.
     """
     q = _queue_module()
-    from ouroboros.platform_layer import kill_pid_tree
+    from supervisor.worker_pool_lifecycle import kill_worker_tree
     from ouroboros.task_results import STATUS_CANCELLED, load_task_result, write_task_result
 
     task = meta.get("task") if isinstance(meta.get("task"), dict) else {}
@@ -1116,14 +1116,13 @@ def _finish_captured_running(
     # worker outside RUNNING, where `task_subtree_is_live` cannot see it and the
     # cascade would report a settled tree.
     try:
-        keep = q._kept_service_pids()
         if worker.proc.pid:
-            kill_pid_tree(worker.proc.pid, exclude_pids=keep)
+            kill_worker_tree(worker.proc.pid, keep_services=True)
         elif worker.proc.is_alive():
             worker.proc.terminate()
         worker.proc.join(timeout=5)
         if worker.proc.is_alive() and worker.proc.pid:
-            kill_pid_tree(worker.proc.pid, exclude_pids=keep)
+            kill_worker_tree(worker.proc.pid, keep_services=True)
             worker.proc.join(timeout=2)
     except Exception:
         log.error("Worker teardown for %s raised; cancellation refused", task_id, exc_info=True)

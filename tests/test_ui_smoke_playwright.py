@@ -2409,13 +2409,19 @@ def test_ui_smoke_live_cards_keep_usable_geometry_at_depth_and_in_project_panel(
             const activityStyle = getComputedStyle(activity);
             const activityLineHeight = parseFloat(activityStyle.lineHeight);
             const activityRect = activity.getBoundingClientRect();
+            const cardMain = card.querySelector(':scope > .chat-live-summary-button .chat-live-summary-main').getBoundingClientRect();
+            const cardSide = card.querySelector(':scope > .chat-live-summary-button .chat-live-summary-side').getBoundingClientRect();
             return {
                 id: card.dataset.taskId,
+                collapsedChild: card.classList.contains('subagent') && card.dataset.expanded !== '1',
                 clientWidth: card.clientWidth,
                 scrollWidth: card.scrollWidth,
                 titleWidth: titleRect.width,
                 titleHeight: titleRect.height,
                 titleLines: lineHeight > 0 ? titleRect.height / lineHeight : 99,
+                titleTop: titleRect.top,
+                mainTop: cardMain.top,
+                summaryBottom: Math.max(cardMain.bottom, cardSide.bottom),
                 activityLines: activityLineHeight > 0 ? activityRect.height / activityLineHeight : 99,
                 activityTitle: activity.getAttribute('title'),
             };
@@ -2458,6 +2464,13 @@ def test_ui_smoke_live_cards_keep_usable_geometry_at_depth_and_in_project_panel(
         assert 0.9 <= min(card["titleLines"] for card in facts["cardFacts"]), facts
         assert max(card["titleLines"] for card in facts["cardFacts"]) <= 2.2, facts
         assert max(card["activityLines"] for card in facts["cardFacts"]) <= 2.2, facts
+        # #623: a collapsed child keeps its identity row — the title beside the
+        # chip, the summary at most two bands (the side wraps under only when a
+        # 160px title cannot share the row), never a third band for the title.
+        for card in facts["cardFacts"]:
+            if card["collapsedChild"]:
+                assert abs(card["titleTop"] - card["mainTop"]) <= 4, card
+                assert card["summaryBottom"] - card["mainTop"] <= 2.2 * card["titleHeight"] + 8, card
         assert all(card["activityTitle"] is None for card in facts["cardFacts"]), facts
         deepest = page.locator('.chat-live-card[data-task-id="layout-child-10"]')
         assert "pty-tests · gemini-3.6-flash" in deepest.inner_text()
@@ -2585,6 +2598,7 @@ def test_ui_smoke_live_cards_keep_usable_geometry_at_depth_and_in_project_panel(
                             const main = summary.querySelector('.chat-live-summary-main').getBoundingClientRect();
                             const side = summary.querySelector('.chat-live-summary-side').getBoundingClientRect();
                             const rect = card.getBoundingClientRect();
+                            const title = summary.querySelector('.chat-live-title').getBoundingClientRect();
                             return {
                                 id,
                                 left: rect.left,
@@ -2594,19 +2608,25 @@ def test_ui_smoke_live_cards_keep_usable_geometry_at_depth_and_in_project_panel(
                                 mainBottom: main.bottom,
                                 sideTop: side.top,
                                 sideBottom: side.bottom,
+                                titleTop: title.top,
                                 client: card.clientWidth,
                                 scroll: card.scrollWidth,
                             };
                         });
                     }"""
                 )
-                assert [card["wrap"] for card in wide_facts] == ["nowrap", "nowrap", "wrap"], wide_facts
                 assert wide_facts[1]["left"] - wide_facts[0]["left"] >= 30, wide_facts
                 assert wide_facts[2]["left"] - wide_facts[1]["left"] >= 30, wide_facts
                 assert all(card["scroll"] <= card["client"] + 1 for card in wide_facts), wide_facts
                 for card in wide_facts[:2]:
                     assert min(card["mainBottom"], card["sideBottom"]) \
                         > max(card["mainTop"], card["sideTop"]), wide_facts
+                # #623: the depth-2 collapsed child is in the 560px container regime
+                # (wrap allowed) yet keeps ONE identity row: chip, title, side controls.
+                deep = wide_facts[2]
+                assert deep["wrap"] == "wrap", wide_facts
+                assert abs(deep["titleTop"] - deep["mainTop"]) <= 4, wide_facts
+                assert deep["sideTop"] < deep["mainBottom"], wide_facts
 
                 # The 620-700px column (laptop with the project panel open): the root
                 # card takes up to 620px there and keeps its single-row header.

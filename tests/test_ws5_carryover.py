@@ -149,13 +149,16 @@ def test_non_ephemeral_turn_allows_durable_mutators(tmp_path, monkeypatch):
 
 # --- CW4: the external-shell secret guard catches relative interpreter paths ---
 
-def test_secret_guard_catches_relative_interpreter_path():
+def test_secret_guard_catches_relative_interpreter_path(tmp_path):
+    from types import SimpleNamespace
     from ouroboros.tools.registry import _subagent_shell_targets_secret
 
-    assert _subagent_shell_targets_secret("python -c \"open('data/settings.json')\"") is True
-    assert _subagent_shell_targets_secret("node -e \"readfilesync('../../data/settings.json')\"") is True
-    assert _subagent_shell_targets_secret("cat ~/.ssh/id_rsa") is True
-    assert _subagent_shell_targets_secret("cat /tmp/notes.txt") is False
+    data = tmp_path / "data"
+    ctx = SimpleNamespace(drive_root=data, task_metadata={})
+    assert _subagent_shell_targets_secret(["python", "-c", "open('data/settings.json')"], ctx=ctx, cwd=tmp_path)
+    assert _subagent_shell_targets_secret(["node", "-e", "readFileSync('../../data/settings.json')"], ctx=ctx, cwd=tmp_path / "a" / "b")
+    assert _subagent_shell_targets_secret("cat ~/.ssh/id_rsa")
+    assert not _subagent_shell_targets_secret("cat /tmp/notes.txt")
 
 
 # --- Exact-route context fitting honours USE_LOCAL_MAIN ---

@@ -1,8 +1,16 @@
 """The direct and ephemeral chat lanes, and the resume after a restart.
 
 A chat turn runs on the single long-lived agent under its own lock; an ephemeral
-turn gets a throwaway one. Both are refused while the repo-writer gate is closed,
-so a managed update never races a turn that could write to the repo.
+turn gets a throwaway one. Both are refused while the repo-writer gate is closed
+for a DESTRUCTIVE update window (apply/replace prologue, materialization,
+rollback), so a managed update never races a turn that could touch the checkout
+mid-reset. While the ONE authorized assisted resolver holds the repository
+(``assisted_resolution`` / ``committing_assisted``) the lanes stay open:
+conversation admission is not repo-writing permission — the registry's
+managed-update guard refuses every repo-mutating tool to any task but that
+resolver — and an owner line reaches the resolver through the ordinary
+``steer_task`` mailbox path (#283). The server's own owner-control path is
+imported BEFORE conflict markers land in the live tree (``preload_owner_control_path``).
 """
 
 from __future__ import annotations
@@ -39,6 +47,120 @@ def _pool():
     return workers
 
 
+# Update phases during which the repository is held by the ONE authorized
+# assisted resolver and nothing else moves the tree: conversation stays open.
+_CONVERSATION_ADMITTED_PHASES = frozenset({"assisted_resolution", "committing_assisted"})
+
+
+def conversation_admitted_during_update(gate_reason: str) -> bool:
+    """Whether a chat turn may run while ``gate_reason`` closes the repo-writer gate.
+
+    True only while the durable update transaction is VALID and held by the
+    authorized assisted resolver — phase ``assisted_resolution`` or
+    ``committing_assisted`` — and the process-local latch is either absent (a
+    post-restart resume: only the durable marker closes the gate) or the assisted
+    latch of that same transaction. Every other closure is a destructive window
+    (the apply/replace/rollback prologue, materialization, a corrupt or future
+    marker) and keeps refusing. Conversation admission is not repo-writing
+    permission: the registry guard still refuses repo tools to a non-resolver.
+    """
+    from supervisor.update_merge import assisted_writer_gate_reason, read_update_tx_strict
+
+    reason = str(gate_reason or "")
+    if not reason:
+        return True
+    try:
+        status, tx = read_update_tx_strict()
+    except Exception:
+        return False
+    if status != "valid" or str(tx.get("phase") or "") not in _CONVERSATION_ADMITTED_PHASES:
+        return False
+    if reason.startswith("managed_update_tx:"):
+        return True
+    return reason == assisted_writer_gate_reason(tx)
+
+
+def owner_conversation_admitted(chat_id: int) -> bool:
+    """Admit one owner chat turn: open gate, or a resolver-held update.
+
+    A refused turn gets the pool's existing lock notice (``_repo_writer_turn_allowed``).
+    """
+    reason = _pool().repo_writer_admission_closed()
+    if not reason or conversation_admitted_during_update(reason):
+        return True
+    return bool(_pool()._repo_writer_turn_allowed(chat_id))
+
+
+# The server's owner-control path: every first-party module a Main turn may
+# import for the first time while answering, steering or waiting for a receipt
+# during an update. tests/test_update_owner_conversation.py pins the transitive
+# closure against the function-local imports of the routing/steering chain.
+OWNER_CONTROL_PATH_MODULES: tuple[str, ...] = (
+    "ouroboros.server_owner_routing",
+    "ouroboros.server_routing_context",
+    "ouroboros.routing_wait",
+    "ouroboros.owner_mailbox",
+    "ouroboros.owner_hurry",
+    "ouroboros.owner_quiz",
+    "ouroboros.project_dialogue",
+    "ouroboros.project_naming",
+    "ouroboros.projects_registry",
+    "ouroboros.cancel_intents",
+    "ouroboros.artifacts",
+    "ouroboros.client_surface",
+    "ouroboros.loop_round_limits",
+    "ouroboros.post_task_evolution",
+    "ouroboros.promotion_source",
+    "ouroboros.contracts.task_constraint",
+    "ouroboros.contracts.chat_id_policy",
+    "ouroboros.gateway.tasks",
+    "ouroboros.gateway.task_decision",
+    "ouroboros.tools.control_routing",
+    "ouroboros.agent",
+    "supervisor.steering",
+    "supervisor.events",
+    "supervisor.events_project_routing",
+    "supervisor.message_bus",
+    "supervisor.queue",
+    "supervisor.active_activity",
+    "supervisor.owner_stop",
+    "supervisor.task_reaper",
+    "supervisor.update_merge",
+)
+
+
+def preload_owner_control_path() -> list[str]:
+    """Import the server's owner-control path while the live tree is still clean.
+
+    The assisted merge is about to write conflict markers into the checkout this
+    process imports from. A module already in ``sys.modules`` keeps working; a
+    function-local import that first runs AFTER the markers land raises
+    SyntaxError on a conflicted file — the late receipt-wait import that broke
+    the update conversation (#283). Called right after the resolver readiness
+    proof and before a boot re-materialization. Best effort: a failure is logged
+    and returned, never a reason to refuse the update (it would degrade the
+    conversation, not the update). The tool catalog is loaded exactly the way
+    the chat agent's registry loads it, so every tool module is resident too.
+    """
+    import importlib
+
+    failed: list[str] = []
+    for name in OWNER_CONTROL_PATH_MODULES:
+        try:
+            importlib.import_module(name)
+        except Exception:
+            log.warning("owner control path preload: %s failed", name, exc_info=True)
+            failed.append(name)
+    try:
+        from ouroboros.tools.registry import ToolRegistry
+
+        ToolRegistry(pathlib.Path(_pool().REPO_DIR), pathlib.Path(_pool().DRIVE_ROOT))
+    except Exception:
+        log.warning("owner control path preload: tool catalog failed", exc_info=True)
+        failed.append("ouroboros.tools.*")
+    return failed
+
+
 def handle_chat_direct(
     chat_id: int,
     text: str,
@@ -47,7 +169,7 @@ def handle_chat_direct(
     task_metadata: Optional[dict] = None,
 ) -> None:
     with _pool()._chat_agent_lock:
-        if not _pool()._repo_writer_turn_allowed(chat_id):
+        if not owner_conversation_admitted(chat_id):
             return
         _handle_chat_direct_locked(
             chat_id,
@@ -356,7 +478,7 @@ def handle_chat_ephemeral(
     from ouroboros.agent import make_agent
 
     with _pool()._ephemeral_chat_lock:
-        if not _pool()._repo_writer_turn_allowed(chat_id):
+        if not owner_conversation_admitted(chat_id):
             return
         agent = make_agent(repo_dir=str(_pool().REPO_DIR), drive_root=str(_pool().DRIVE_ROOT), event_queue=_pool().get_event_q())
         _run_chat_task(

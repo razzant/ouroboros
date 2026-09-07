@@ -21,6 +21,7 @@ import { escapeHtmlAttr as escapeHtml, formatDualVersion } from './utils.js';
 import { apiClient, apiFetch, cleanExtensionRoute, extensionRoutePath } from './api_client.js';
 import { claudexorStatus } from './claudexor_status_store.js';
 import { collectSafeFieldValues, renderSafeField, setInlineStatus, revealNewRow } from './ui_helpers.js';
+import { extensionActionStatus } from './extension_status_text.js';
 
 let markSettingsDirty = () => {};
 const BASE_SECRET_KEYS = new Set(SECRET_KEYS.map(([key]) => key));
@@ -289,7 +290,8 @@ function renderExtensionSettingsSections(root, sections) {
                 });
                 const data = await resp.json().catch(() => ({}));
                 if (!resp.ok || data.error) throw new Error(data.error || `HTTP ${resp.status}`);
-                setInlineStatus(status, data.message || 'Saved.', 'ok');
+                const outcome = extensionActionStatus(data);
+                setInlineStatus(status, outcome.text, outcome.tone);
             } catch (err) {
                 setInlineStatus(status, err.message || String(err), 'danger');
             } finally {

@@ -2386,6 +2386,20 @@ body.resizing-panels { user-select: none; }
     .chat-subagents .chat-subagents {
         padding-inline-start: 0;
     }
+
+    /* A COLLAPSED nested child keeps its one-line identity row — status chip ·
+       `role · model` · `N notes` · chevron — over its metadata row (DESIGN.md
+       §5) instead of dropping the title to a third band once its own inline
+       width crosses this threshold (#623). The title is already nowrap/ellipsis
+       here; it keeps the same 160px demand the mobile readability floor uses,
+       and only when even that cannot share the row do the side controls wrap
+       under it. Higher specificity than the .chat-live-title rule above, so the
+       cascade decides, not source order. */
+    .chat-live-card.subagent:not([data-expanded="1"]) > .chat-live-summary-button .chat-live-title {
+        order: 0;
+        flex: 1 1 160px;
+        min-width: 0;
+    }
 }
 
 .chat-live-card.subagent {
@@ -2396,6 +2410,27 @@ body.resizing-panels { user-select: none; }
     box-shadow: inset 0 1px 0 rgba(255, 200, 210, 0.03);
 }
 
+/* Depth cue for a grandchild and deeper (#623, owner: nested frames stay): the
+   narrow regime flattens the indentation rails to keep the text column, so a
+   box nested inside a child box takes a slightly stronger tint and border than
+   its parent — depth reads from tone, not from pixels the column cannot spare.
+   The first four depths alternate; deeper boxes retain the last translucent
+   tint, which continues to layer over the containing box. */
+.chat-subagents .chat-subagents > .chat-live-card.subagent {
+    border-color: var(--accent-25);
+    background: rgba(255, 255, 255, 0.045);
+}
+
+.chat-subagents .chat-subagents .chat-subagents > .chat-live-card.subagent {
+    border-color: var(--accent-18);
+    background: rgba(255, 255, 255, 0.025);
+}
+
+.chat-subagents .chat-subagents .chat-subagents .chat-subagents > .chat-live-card.subagent {
+    border-color: var(--accent-25);
+    background: rgba(255, 255, 255, 0.045);
+}
+
 .chat-live-card.subagent .chat-live-summary-button {
     padding: 9px 12px;
 }
@@ -2404,8 +2439,9 @@ body.resizing-panels { user-select: none; }
    an identity row (chip · role · model · notes + chevron; the `Show details`
    label is the root's) over its metadata row (harness chip with the run count,
    cost, last update, docked Reviews count). Only its narration line waits for
-   expansion. The title stays on one line; the narrow regime still moves it
-   under the chip row so it keeps a readable width. */
+   expansion. The title stays on one line and stays IN the identity row at every
+   width (the narrow-regime rule above gives it a 160px demand and lets the side
+   controls wrap under it instead). */
 .chat-live-card.subagent .chat-live-title {
     font-weight: 400;
     color: var(--text-secondary);

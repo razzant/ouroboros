@@ -5,6 +5,7 @@ from types import SimpleNamespace
 import pytest
 
 import ouroboros.agent_task_pipeline as pipeline
+from ouroboros.cost_projection import carry_cost_meta
 
 
 def test_emit_task_results_queues_restart_after_final_events(tmp_path, monkeypatch):
@@ -249,8 +250,12 @@ def test_emit_task_results_ephemeral_turn_skips_all_durable_memory(tmp_path, mon
     )
     assert "send_message" in [evt["type"] for evt in pending_events]  # reply still delivered
     inline = next(evt for evt in pending_events if evt["type"] == "send_message")
+    done = next(evt for evt in pending_events if evt["type"] == "task_done")
     assert inline["progress_meta"] == {
         "ephemeral_decision": True, "task_terminal_status": "completed",
+        "outcome_axes": done["outcome_axes"], "reason_code": done["reason_code"],
+        **carry_cost_meta({key: value for key, value in done.items()
+                           if key not in {"accounted_upper_bound_usd_with_children", "cost_with_children_partial"}}),
     }
     assert memory_calls == []  # NO durable memory writes for an ephemeral turn
     assert store_calls == []  # CW3: no durable task_result for a transient decision turn
@@ -304,9 +309,11 @@ def test_ephemeral_typed_routing_delivers_nonempty_final_and_keeps_receipt_metad
         assert len(sends) == 1
         assert sends[0]["text"] == f"Receipt prose for {action}"
         assert sends[0]["log_text"] == f"Receipt prose for {action}"
-        assert sends[0]["progress_meta"] == {
-            "ephemeral_decision": True, "task_terminal_status": "completed",
-        }
+        done = next(evt for evt in pending_events if evt["type"] == "task_done")
+        assert sends[0]["progress_meta"]["ephemeral_decision"] is True
+        assert sends[0]["progress_meta"]["task_terminal_status"] == "completed"
+        assert sends[0]["progress_meta"]["outcome_axes"] == done["outcome_axes"]
+        assert sends[0]["progress_meta"]["reason_code"] == done["reason_code"]
         done = next(evt for evt in pending_events if evt["type"] == "task_done")
         assert pending_events.index(sends[0]) < pending_events.index(done)
         assert done["ephemeral_decision"] is True

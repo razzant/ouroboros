@@ -489,7 +489,9 @@ test('first task-bound review hydrates a progress-created owner once and reconci
             { chat_id: 2, role: 'system', is_progress: true, task_id: 'routine-root', content: 'Second visible progress', ts: '2026-08-24T00:01:01Z' },
             { chat_id: 2, role: 'system', is_progress: true, task_id: 'routine-child', delegation_role: 'subagent', subagent_event: 'running', subagent_task_id: 'routine-child', parent_task_id: 'routine-root', subagent_role: 'reader', content: 'Child progress', ts: '2026-08-24T00:01:02Z' },
         ];
-        for (const row of routineRows) handlers.get('chat')(row); reconnectRows = [...routineRows, { chat_id: 2, role: 'system', is_progress: true, task_id: 'routine-hidden', ephemeral_decision: true, content: 'Hidden decision' }];
+        // #691: an ephemeral decision row renders like any other progress row, so
+        // the no-op replay is exactly the rows already on screen.
+        for (const row of routineRows) handlers.get('chat')(row); reconnectRows = [...routineRows];
         messages.scrollHeight = 1000; messages.clientHeight = 400; messages.scrollTop = 600; messages.listeners.get('scroll')[0](); messages.scrollTop = 560; messages.listeners.get('scroll')[0]();
         await instance.refreshHistory({ revision: 1 });
         assert.equal(messages.scrollTop, 560, 'ordinary and subagent replay no-ops cannot consume the 40px follow zone');
@@ -1169,4 +1171,319 @@ test('a stopped direct turn replays its persisted terminal word, never a blanket
     };
     assert.equal(await replay('failed'), 'Failed', 'the stopped turn keeps its durable terminal word');
     assert.equal(await replay('completed'), 'Done', 'the old blanket stamp is exactly what flipped the card');
+});
+
+// ---------------------------------------------------------------------------
+// #636: a full history rebuild keeps nested branches inside their parents.
+// Production-shaped window: the parent subagent is represented ONLY by its
+// final row (no progress/lifecycle rows, no task_terminal_status on subagent
+// finals), its grandchildren by task_summary rows.
+// ---------------------------------------------------------------------------
+function walkCard(node, taskId) {
+    if (node?.dataset?.taskId === taskId && node.classList?.contains('chat-live-card')) return node;
+    for (const child of node?.children || []) {
+        const hit = walkCard(child, taskId);
+        if (hit) return hit;
+    }
+    return null;
+}
+
+test('history rebuild keeps a lineage-known branch nested, never appended top-level (#636)', async () => {
+    const rows = [
+        { chat_id: 2, role: 'user', content: 'run the tree', text: 'run the tree', ts: '2026-09-06T14:00:00Z' },
+        // previous root: final answer only (its progress rows fell out of the window)
+        { chat_id: 2, role: 'assistant', content: 'root done', text: 'root done',
+          ts: '2026-09-06T15:09:43Z', task_id: 'prev-root', task_terminal_status: 'completed' },
+        // code-lens: a child known ONLY by its final row + lineage
+        { chat_id: 2, role: 'assistant', content: 'code lens findings', text: 'code lens findings',
+          ts: '2026-09-06T14:54:00Z', task_id: 'code-lens', delegation_role: 'subagent',
+          parent_task_id: 'prev-root', root_task_id: 'prev-root', subagent_task_id: 'code-lens',
+          subagent_role: 'code-lens', model: 'm' },
+        // grandchild-infra-lens: child of code-lens, final row only
+        { chat_id: 2, role: 'assistant', content: 'infra lens findings', text: 'infra lens findings',
+          ts: '2026-09-06T14:54:31Z', task_id: 'grandchild-infra-lens', delegation_role: 'subagent',
+          parent_task_id: 'code-lens', root_task_id: 'prev-root', subagent_task_id: 'grandchild-infra-lens',
+          subagent_role: 'infra-lens', model: 'm' },
+        // its own cancelled descendant: task_summary row
+        { chat_id: 2, role: 'system', system_type: 'task_summary', content: 'Cancelled before start.',
+          text: 'Cancelled before start.', ts: '2026-09-06T14:53:04Z', task_id: 'scout',
+          status: 'cancelled', delegation_role: 'subagent', parent_task_id: 'grandchild-infra-lens',
+          root_task_id: 'prev-root', subagent_task_id: 'scout', subagent_role: 'scout', model: 'm' },
+        // the continuation root, 90 minutes later
+        { chat_id: 2, role: 'user', content: 'continue', text: 'continue', ts: '2026-09-06T16:22:27Z' },
+        { chat_id: 2, role: 'assistant', content: 'continuation acknowledged', text: 'continuation acknowledged',
+          ts: '2026-09-06T16:24:52Z', task_id: 'cont-root', task_terminal_status: 'completed' },
+    ];
+    const { prior, mount } = installDom(async (url) => {
+        if (String(url).startsWith('/api/chat/history')) {
+            return { ok: true, json: async () => ({ messages: rows, window: { complete: true } }) };
+        }
+        return { ok: true, json: async () => ({ active_direct_turns: [] }) };
+    });
+    const handlers = new Map();
+    const ws = {
+        on(type, fn) { handlers.set(type, fn); return () => handlers.delete(type); },
+        isConnected: () => true, send() {},
+    };
+    let generation = 0;
+    const stateSnapshots = {
+        begin: () => ({ generation: ++generation, requestedAt: Date.now() }),
+        isCurrent: () => true, apply() {},
+    };
+    let instance;
+    try {
+        instance = createChatInstance({
+            ws, state: { activePage: 'chat', projectChatIds: new Set(), unreadCount: 0 },
+            updateUnreadBadge() {}, stateSnapshots, chatId: 2, idPrefix: 'chat', mountEl: mount,
+            asPanel: true,
+        });
+        await instance.refreshHistory({ revision: 1 });
+        const messages = globalThis.document.byId.get('chat-messages');
+        const topCards = () => messages.children
+            .filter((n) => n.classList.contains('chat-live-card')).map((n) => n.dataset.taskId);
+        // The continuation root has only its answer row in this window, so it
+        // is a plain assistant bubble, not a card; the previous root is a card
+        // because its branch is nested under it.
+        assert.deepEqual(topCards(), ['prev-root'], 'only roots are top-level cards');
+        const continuation = messages.children.find((n) => /continuation acknowledged/.test(n.innerHTML));
+        assert.ok(continuation && !continuation.classList.contains('chat-live-card'));
+        const root = walkCard(messages, 'prev-root');
+        const codeLens = walkCard(messages, 'code-lens');
+        const infra = walkCard(messages, 'grandchild-infra-lens');
+        const scout = walkCard(messages, 'scout');
+        assert.ok(root && codeLens && infra && scout, 'every node of the tree is rendered');
+        assert.equal(codeLens.classList.contains('subagent'), true);
+        assert.equal(codeLens.parentNode?.dataset?.subagentsFor, 'prev-root', 'code-lens sits in its root');
+        assert.equal(infra.parentNode?.dataset?.subagentsFor, 'code-lens', 'grandchild sits in code-lens');
+        assert.equal(scout.parentNode?.dataset?.subagentsFor, 'grandchild-infra-lens');
+        assert.equal(codeLens.dataset.parentTaskId, 'prev-root');
+        assert.equal(infra.dataset.parentTaskId, 'code-lens');
+        // A reconnect replays the same window again: still nested, no duplicates.
+        handlers.get('open')({ previouslyConnected: true });
+        await new Promise((resolve) => setTimeout(resolve, 25));
+        assert.deepEqual(topCards(), ['prev-root']);
+        assert.equal(walkCard(messages, 'grandchild-infra-lens').parentNode?.dataset?.subagentsFor, 'code-lens');
+    } finally {
+        instance?.destroy();
+        restoreDom(prior);
+    }
+});
+
+// ---------------------------------------------------------------------------
+// #691: a decision (ephemeral) turn's tool work shows on the ordinary live card,
+// concludes truthfully, merges its accounting, and claims no task authority.
+// ---------------------------------------------------------------------------
+test('an ephemeral decision turn renders its tool work on a card without task authority (#691)', async () => {
+    const { prior, mount } = installDom(async () => ({ ok: true, json: async () => ({ active_direct_turns: [] }) }));
+    const handlers = new Map();
+    const ws = {
+        on(type, fn) { handlers.set(type, fn); return () => handlers.delete(type); },
+        isConnected: () => true, send() {},
+    };
+    let generation = 0;
+    const stateSnapshots = {
+        begin: () => ({ generation: ++generation, requestedAt: Date.now() }),
+        isCurrent: () => true, apply() {},
+    };
+    let instance;
+    try {
+        // Main chat: the only surface that offers "Turn into project".
+        instance = createChatInstance({
+            ws, state: { activePage: 'chat', projectChatIds: new Set(), unreadCount: 0 },
+            updateUnreadBadge() {}, stateSnapshots, chatId: 1, idPrefix: 'chat', mountEl: mount,
+        });
+        const messages = globalThis.document.byId.get('chat-messages');
+        handlers.get('log')({ chat_id: 1, data: {
+            type: 'task_started', task_id: 'eph-1', ephemeral_decision: true, ts: '2026-09-05T10:00:00Z',
+        } });
+        assert.equal(walkCard(messages, 'eph-1'), null, 'a plain start mints no card');
+        handlers.get('log')({ chat_id: 1, data: {
+            type: 'tool_call_started', task_id: 'eph-1', tool: 'read_file', ts: '2026-09-05T10:00:01Z',
+        } });
+        const card = walkCard(messages, 'eph-1');
+        assert.ok(card, 'real tool work reveals the ordinary live card');
+        assert.equal(card.querySelector('[data-turn-into-project]'), null, 'no task claim: no Convert');
+        assert.equal(card.querySelector('[data-cancel-run]'), null, 'no host cancelable marker: no Cancel');
+        handlers.get('chat')({
+            chat_id: 1, role: 'assistant', is_progress: true, ephemeral_decision: true,
+            content: 'Comparing the reset windows…', ts: '2026-09-05T10:00:02Z', task_id: 'eph-1',
+        });
+        assert.equal(card.dataset.finished, '0');
+        assert.ok(card.isConnected, 'progress keeps the card, it is not torn down');
+        // The typed conclusion: the final answer frame finishes the card and
+        // is the ONE inline receipt.
+        handlers.get('chat')({
+            chat_id: 1, role: 'assistant', content: 'The earliest window resets on Monday.',
+            ts: '2026-09-05T10:22:00Z', task_id: 'eph-1', task_terminal_status: 'completed',
+            accounted_upper_bound_usd: 0.75, cost_accounting_status: 'available', cost_final: true,
+        });
+        assert.equal(card.dataset.finished, '1');
+        assert.match(card.querySelector('[data-live-meta]').innerHTML, /\$0\.75/);
+        const receipts = messages.children.filter((n) => n.classList.contains('chat-bubble')
+            && n.classList.contains('assistant') && !n.classList.contains('progress')
+            && /resets on Monday/.test(n.innerHTML));
+        assert.equal(receipts.length, 1);
+        // The blank-status ephemeral task_done carries the accounting facts; it
+        // must merge them without reopening the finished card.
+        handlers.get('log')({ chat_id: 1, data: {
+            type: 'task_done', task_id: 'eph-1', status: '', ephemeral_decision: true,
+            ts: '2026-09-05T10:22:01Z', outcome_axes: { execution: { status: 'degraded' } },
+            reason_code: 'tool_failure', accounted_upper_bound_usd: 2.700732,
+            cost_accounting_status: 'available', cost_final: true,
+        } });
+        assert.equal(card.dataset.finished, '1');
+        assert.match(card.querySelector('[data-live-meta]').innerHTML, /\$2\.70/);
+        assert.equal(card.querySelector('[data-turn-into-project]'), null);
+        // An ephemeral turn WITHOUT tool work or progress stays a plain answer.
+        handlers.get('log')({ chat_id: 1, data: {
+            type: 'task_started', task_id: 'eph-2', ephemeral_decision: true, ts: '2026-09-05T11:00:00Z',
+        } });
+        handlers.get('chat')({
+            chat_id: 1, role: 'assistant', content: 'Just a short answer.',
+            ts: '2026-09-05T11:00:01Z', task_id: 'eph-2', task_terminal_status: 'completed',
+        });
+        assert.equal(walkCard(messages, 'eph-2'), null);
+    } finally {
+        instance?.destroy();
+        restoreDom(prior);
+    }
+});
+
+for (const [execution, phase] of [['ok', 'done'], ['degraded', 'warn'], ['failed', 'error'], ['infra_failed', 'error']]) {
+test(`history replay of an ephemeral turn preserves ${execution} (#691)`, async () => {
+    const rows = [
+        { chat_id: 1, role: 'user', content: 'compare the reset windows', text: 'compare the reset windows',
+          ts: '2026-09-05T10:00:00Z' },
+        { chat_id: 1, role: 'assistant', is_progress: true, ephemeral_decision: true,
+          content: 'Reading the account snapshots…', ts: '2026-09-05T10:00:02Z', task_id: 'eph-h' },
+        { chat_id: 1, role: 'assistant', is_progress: true, ephemeral_decision: true,
+          content: 'Comparing the reset windows…', ts: '2026-09-05T10:05:00Z', task_id: 'eph-h' },
+        { chat_id: 1, role: 'assistant', content: 'The earliest window resets on Monday.',
+          text: 'The earliest window resets on Monday.', ts: '2026-09-05T10:22:00Z', task_id: 'eph-h',
+          task_terminal_status: 'completed', ephemeral_decision: true,
+          outcome_axes: { execution: { status: execution } }, reason_code: execution === 'ok' ? 'final_message' : 'tool_failure',
+          accounted_upper_bound_usd: execution === 'ok' ? 0.75 : null,
+          cost_final: execution === 'ok', unknown_unmetered: execution === 'ok' ? 0 : 1, cost_accounting_status: 'available' },
+    ];
+    const { prior, mount } = installDom(async (url) => {
+        if (String(url).startsWith('/api/chat/history')) {
+            return { ok: true, json: async () => ({ messages: rows, window: { complete: true } }) };
+        }
+        return { ok: true, json: async () => ({ active_direct_turns: [] }) };
+    });
+    const handlers = new Map();
+    const ws = {
+        on(type, fn) { handlers.set(type, fn); return () => handlers.delete(type); },
+        isConnected: () => true, send() {},
+    };
+    let generation = 0;
+    const stateSnapshots = {
+        begin: () => ({ generation: ++generation, requestedAt: Date.now() }),
+        isCurrent: () => true, apply() {},
+    };
+    let instance;
+    try {
+        instance = createChatInstance({
+            ws, state: { activePage: 'chat', projectChatIds: new Set(), unreadCount: 0 },
+            updateUnreadBadge() {}, stateSnapshots, chatId: 1, idPrefix: 'chat', mountEl: mount,
+        });
+        await instance.refreshHistory({ revision: 1 });
+        const messages = globalThis.document.byId.get('chat-messages');
+        const card = walkCard(messages, 'eph-h');
+        assert.ok(card, 'replayed progress mints the card');
+        assert.equal(card.dataset.finished, '1', 'the persisted typed conclusion finishes it');
+        assert.equal(card.querySelector('[data-live-phase]').dataset.phase, phase);
+        assert.doesNotMatch(card.querySelector('[data-live-meta]').innerHTML, /\$0(?:\.00)?(?:\s|<|$)/);
+        if (execution === 'ok') assert.match(card.querySelector('[data-live-meta]').innerHTML, /\$0\.75/);
+        assert.equal(card.querySelector('[data-turn-into-project]'), null);
+        assert.equal(card.querySelector('[data-cancel-run]'), null);
+        assert.equal(messages.children.filter((n) => /resets on Monday/.test(n.innerHTML)).length, 1);
+    } finally {
+        instance?.destroy();
+        restoreDom(prior);
+    }
+});
+}
+
+// ---------------------------------------------------------------------------
+// #300: a root proven terminal settles a child card whose terminal frame was
+// lost, from the child's own durable result — one read, no cascade.
+// ---------------------------------------------------------------------------
+test('a terminal root settles its still-open child card from the child result (#300)', async () => {
+    const detailReads = [];
+    const { prior, mount } = installDom(async (url) => {
+        const u = String(url);
+        if (u.startsWith('/api/tasks/')) {
+            detailReads.push(u);
+            if (u.includes('child-lost')) {
+                return { ok: true, json: async () => ({
+                    task_id: 'child-lost', status: 'completed', result: 'child finished quietly',
+                    outcome_axes: { execution: { status: 'ok' } },
+                    accounted_upper_bound_usd: 0.3, cost_accounting_status: 'available', cost_final: true,
+                }) };
+            }
+            if (u.includes('child-open')) {
+                return { ok: true, json: async () => ({ task_id: 'child-open', status: 'running' }) };
+            }
+            return { ok: false, status: 404, json: async () => ({}) };
+        }
+        if (u.startsWith('/api/chat/history')) {
+            return { ok: true, json: async () => ({ messages: [], window: { complete: true } }) };
+        }
+        return { ok: true, json: async () => ({ active_direct_turns: [] }) };
+    });
+    const handlers = new Map();
+    const ws = {
+        on(type, fn) { handlers.set(type, fn); return () => handlers.delete(type); },
+        isConnected: () => true, send() {},
+    };
+    let generation = 0;
+    const stateSnapshots = {
+        begin: () => ({ generation: ++generation, requestedAt: Date.now() }),
+        isCurrent: () => true, apply() {},
+    };
+    let instance;
+    try {
+        instance = createChatInstance({
+            ws, state: { activePage: 'chat', projectChatIds: new Set(), unreadCount: 0 },
+            updateUnreadBadge() {}, stateSnapshots, chatId: 2, idPrefix: 'chat', mountEl: mount,
+            asPanel: true,
+        });
+        // Let the instance's initial history hydration settle first: the live
+        // frames below are the whole story, the durable window is empty.
+        await instance.refreshHistory({ revision: 1 });
+        const messages = globalThis.document.byId.get('chat-messages');
+        const child = (id, role) => ({
+            chat_id: 2, role: 'assistant', is_progress: true, content: `${role} working`,
+            ts: '2026-09-06T12:00:01Z', task_id: id, parent_task_id: 'root-x', root_task_id: 'root-x',
+            subagent_task_id: id, delegation_role: 'subagent', subagent_event: 'running',
+            subagent_role: role, model: 'm',
+        });
+        handlers.get('chat')({ chat_id: 2, role: 'assistant', is_progress: true, content: 'root working',
+            ts: '2026-09-06T12:00:00Z', task_id: 'root-x', cancelable: true });
+        handlers.get('chat')(child('child-lost', 'scout'));
+        handlers.get('chat')(child('child-open', 'writer'));
+        const lost = walkCard(messages, 'child-lost');
+        const open = walkCard(messages, 'child-open');
+        assert.equal(lost.dataset.finished, '0');
+        // The root's terminal task_done arrives; the child's own terminal was lost.
+        handlers.get('log')({ chat_id: 2, data: {
+            type: 'task_done', task_id: 'root-x', status: 'completed', ts: '2026-09-06T12:30:00Z',
+        } });
+        await new Promise((resolve) => setTimeout(resolve, 25));
+        assert.equal(walkCard(messages, 'root-x').dataset.finished, '1');
+        assert.equal(lost.dataset.finished, '1', 'the lost child closes from its own durable result');
+        assert.match(lost.querySelector('[data-live-meta]').innerHTML, /\$0\.30/);
+        assert.equal(open.dataset.finished, '0', 'a child with no proven terminal keeps its state');
+        assert.deepEqual(detailReads.map((u) => u.replace('/api/tasks/', '')).sort(), ['child-lost', 'child-open']);
+        // A second root terminal (replayed task_done) does not re-read settled children.
+        handlers.get('log')({ chat_id: 2, data: {
+            type: 'task_done', task_id: 'root-x', status: 'completed', ts: '2026-09-06T12:30:01Z',
+        } });
+        await new Promise((resolve) => setTimeout(resolve, 25));
+        assert.equal(detailReads.filter((u) => u.includes('child-lost')).length, 1);
+    } finally {
+        instance?.destroy();
+        restoreDom(prior);
+    }
 });

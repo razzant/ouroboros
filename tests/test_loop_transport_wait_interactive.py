@@ -445,6 +445,8 @@ def test_error_kind_change_closure_is_an_interactive_note(tmp_path, monkeypatch,
     if flags.get("is_ephemeral_turn"):
         assert incident["task_incident"] == "network_wait"
         assert incident["toast_once"].startswith("t-kind:network_wait:recovered:")
+        # #628: the connection is back but the round still failed — a warning.
+        assert incident["toast_tone"] == "warn"
     else:
         assert incident is None
 
@@ -474,6 +476,7 @@ def test_local_fallback_adoption_closure_is_an_interactive_note(tmp_path, monkey
     if flags.get("is_ephemeral_turn"):
         assert incident["task_incident"] == "network_wait"
         assert incident["toast_once"].startswith("t-local:network_wait:ended:")
+        assert incident["toast_tone"] == "warn"  # #628: degraded, not an alarm
     else:
         assert incident is None
 
@@ -510,11 +513,11 @@ def test_managed_episode_owner_texts_are_byte_identical_to_base(tmp_path, monkey
 
 
 def test_ephemeral_episode_entry_recovery_and_exhaustion_carry_distinct_incident_toasts(tmp_path, monkeypatch):
-    """The browser renders no progress rows for an ephemeral turn, only the
-    `task_incident` toast keyed by `toast_once`: entry, recovery, and exhaustion
-    each carry the pair, every key is a distinct one-shot — two episodes of one
-    turn that START INSIDE THE SAME WALL SECOND do not collide — and periodic
-    notes carry none."""
+    """An ephemeral turn's episode-boundary notes carry the `task_incident`
+    toast keyed by `toast_once`: entry, recovery, and exhaustion each carry the
+    pair, every key is a distinct one-shot — two episodes of one turn that
+    START INSIDE THE SAME WALL SECOND do not collide — periodic notes carry
+    none, and each pair names its valence (#628: a recovery is not an alarm)."""
     clock = _FakeClock(monkeypatch)
     monkeypatch.setattr(loop_transport, "get_task_idle_timeout_sec", lambda: 60)
     ctx = _ctx(is_ephemeral_turn=True)
@@ -524,6 +527,7 @@ def test_ephemeral_episode_entry_recovery_and_exhaustion_carry_distinct_incident
     entered = notes.incidents[0]
     assert entered["task_incident"] == "network_wait"
     assert entered["toast_once"].startswith("eph1:network_wait:entered:")
+    assert entered["toast_tone"] == "warn"
     assert loop_transport.reconcile_transport_wait(
         episode, ctx, msg_present=True, error_kind="", drive_logs=tmp_path,
         task_id="eph1", model="m", emit_progress=notes,
@@ -531,6 +535,7 @@ def test_ephemeral_episode_entry_recovery_and_exhaustion_carry_distinct_incident
     recovered = notes.incidents[-1]
     assert recovered["task_incident"] == "network_wait"
     assert recovered["toast_once"].startswith("eph1:network_wait:recovered:")
+    assert recovered["toast_tone"] == "ok"
     assert "restored" in notes.texts[-1]
 
     clock.now += 0.2  # the second episode starts inside the same wall second
@@ -541,6 +546,7 @@ def test_ephemeral_episode_entry_recovery_and_exhaustion_carry_distinct_incident
     ended = notes.incidents[-1]
     assert ended["task_incident"] == "network_wait"
     assert ended["toast_once"].startswith("eph1:network_wait:ended:")
+    assert ended["toast_tone"] == "error"
     keys = [inc["toast_once"] for inc in notes.incidents if inc]
     assert [key.split(":")[2] for key in keys] == ["entered", "recovered", "entered", "ended"]
     assert len(set(keys)) == len(keys)
@@ -597,5 +603,6 @@ def test_ephemeral_turn_end_to_end_emits_entry_and_exhaustion_incidents(tmp_path
     incidents = [inc for inc in notes.incidents if inc]
     assert [inc["toast_once"].split(":")[2] for inc in incidents] == ["entered", "ended"]
     assert all(inc["task_incident"] == "network_wait" for inc in incidents)
+    assert [inc["toast_tone"] for inc in incidents] == ["warn", "error"]
     assert usage.get("reason_code") == "provider_unavailable"
     assert "this turn waited and redialed for" in result

@@ -26,12 +26,13 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import pathlib
 from typing import Any, Dict, Optional, Tuple
 
 from starlette.requests import Request
 from starlette.responses import JSONResponse
 
-from ouroboros.gateway._helpers import json_error, json_exception, request_drive_root, request_json_or
+from ouroboros.gateway._helpers import request_drive_root, request_json_or
 from ouroboros.task_results import resolve_task_lineage, validate_task_id
 
 log = logging.getLogger(__name__)
@@ -127,40 +128,53 @@ def _quiz_answer_frame(
     return "\n".join(lines)
 
 
-async def api_decision_answer(request: Request) -> JSONResponse:
-    """POST /api/decisions — idempotent owner answer for a decision card."""
-    body = await request_json_or(request, {})
+def _refused(message: str, status: int, **extra: Any) -> Tuple[int, Dict[str, Any]]:
+    """A typed refusal as a ``(status, payload)`` pair (the gateway error shape)."""
+    payload: Dict[str, Any] = {"error": message}
+    payload.update(extra)
+    return status, payload
+
+
+async def answer_decision(drive_root: pathlib.Path, body: Any) -> Tuple[int, Dict[str, Any]]:
+    """The ONE decision-answer ingress, transport-neutral: ``(status, payload)``.
+
+    ``POST /api/decisions`` (the browser card) and the loopback Host Service
+    ``POST /chat/decision`` (a reviewed transport skill relaying the owner's
+    tap or reply, e.g. Telegram — #472) both call this, so every surface gets
+    the same idempotent ``request_id`` write, first-answer-wins race and the
+    same honest 404/409 on a late answer.
+    """
     if not isinstance(body, dict):
-        return json_error("request body must be a JSON object", 400)
+        return _refused("request body must be a JSON object", 400)
     request_id = str(body.get("request_id") or "").strip()
     if not request_id or len(request_id) > _REQUEST_ID_MAX:
-        return json_error(
+        return _refused(
             "request_id is required (a stable client-generated id, reused on retry)",
             400, reason_code="request_id_required",
         )
     decision_id = str(body.get("decision_id") or "").strip()
     raw_comment = body.get("comment")
     if raw_comment is not None and not isinstance(raw_comment, str):
-        return json_error("comment must be a string", 400, reason_code="comment_invalid")
+        return _refused("comment must be a string", 400, reason_code="comment_invalid")
     # VERBATIM: the owner's exact characters, edges included, reach the
     # projection and the frame — the only transformations are validation.
     comment = raw_comment or ""
     if len(comment) > _COMMENT_MAX:
         # VERBATIM contract: the frame signs the comment as the owner's exact
         # words — refuse instead of silently truncating them.
-        return json_error(
+        return _refused(
             f"comment is {len(comment):,} characters (limit {_COMMENT_MAX:,}) — "
             "shorten it; it is delivered verbatim",
             400, reason_code="comment_too_long",
         )
     if any(key not in {"request_id", "decision_id", "option_index", "comment"} for key in body):
-        return json_error(
+        return _refused(
             "decision accepts only {request_id, decision_id, option_index, comment?}",
             400, reason_code="unexpected_fields",
         )
     family, task_id, quiz_id = _parse_quiz_decision_id(decision_id)
     if family not in _KNOWN_FAMILIES:
-        return json_error(
+        return _refused(
             "unknown decision family (expected quiz:/routing:/interaction:)",
             400, reason_code="unknown_decision_family",
         )
@@ -168,7 +182,7 @@ async def api_decision_answer(request: Request) -> JSONResponse:
         # Typed, honest: the interaction family is RESERVED — #204 is served
         # by the escalation hierarchy (see the module docstring), so no direct
         # owner interaction card exists by design.
-        return json_error(
+        return _refused(
             f"the {family} decision family is not served yet",
             501, reason_code="decision_family_not_served",
         )
@@ -176,7 +190,7 @@ async def api_decision_answer(request: Request) -> JSONResponse:
     if raw_index is not None and (
         not isinstance(raw_index, int) or isinstance(raw_index, bool) or raw_index < 0
     ):
-        return json_error(
+        return _refused(
             "option_index must be a non-negative integer",
             400, reason_code="option_index_invalid",
         )
@@ -186,12 +200,11 @@ async def api_decision_answer(request: Request) -> JSONResponse:
         # comment carries verbatim. The routing family has no such verb — its
         # option IS the destination — so it keeps the integer requirement.
         if family != "quiz" or not comment.strip():
-            return json_error(
+            return _refused(
                 "option_index is required (a quiz answer may instead carry a "
                 "non-empty comment as the owner's own answer)",
                 400, reason_code="option_index_required",
             )
-    drive_root = request_drive_root(request)
     if family == "routing":
         from ouroboros.gateway.routing_decision import handle_routing_decision
 
@@ -200,20 +213,20 @@ async def api_decision_answer(request: Request) -> JSONResponse:
             request_id=request_id, decision_id=decision_id,
             option_index=raw_index, comment=comment,
         )
-        return JSONResponse(payload, status_code=status_code)
+        return status_code, payload
     if not task_id or not quiz_id:
-        return json_error(
+        return _refused(
             "malformed quiz decision_id (expected quiz:{task_id}:{quiz_id})",
             400, reason_code="malformed_decision_id",
         )
     try:
         task_id = validate_task_id(task_id)
     except ValueError as exc:
-        return json_error(str(exc), 400)
+        return _refused(str(exc), 400)
     try:
         task, refusal = _live_root_task(task_id)
         if refusal == "not_a_root_task":
-            return json_error(
+            return _refused(
                 "quiz answers address root tasks only", 409,
                 task_id=task_id, reason_code=refusal,
             )
@@ -234,7 +247,7 @@ async def api_decision_answer(request: Request) -> JSONResponse:
             error = str(outcome.get("error") or "quiz_answer_refused")
             state = str(outcome.get("state") or "")
             if error == "quiz_not_found":
-                return json_error("quiz not found", 404, task_id=task_id,
+                return _refused("quiz not found", 404, task_id=task_id,
                                   reason_code=error)
             status = 409
             payload: Dict[str, Any] = {
@@ -253,7 +266,7 @@ async def api_decision_answer(request: Request) -> JSONResponse:
                 payload["comment"] = str(refused_block["comment"])
             if error in {"option_out_of_range", "answer_empty"}:
                 status = 400
-            return JSONResponse(payload, status_code=status)
+            return status, payload
         block = outcome.get("block") if isinstance(outcome.get("block"), dict) else {}
         if task is not None:
             from supervisor.queue import _task_drive_for_task
@@ -287,7 +300,7 @@ async def api_decision_answer(request: Request) -> JSONResponse:
                 # The projection already recorded the answer (the card is
                 # truthful); the injection control failed — say so. A retry
                 # of this request re-attempts the append.
-                return json_error(
+                return _refused(
                     "the answer was recorded but the task control could not "
                     "be written — retry to deliver it to the task",
                     503, task_id=task_id, reason_code="mailbox_write_failed",
@@ -298,11 +311,12 @@ async def api_decision_answer(request: Request) -> JSONResponse:
             get_bridge().send_quiz_state(
                 quiz_id, task_id, str(outcome.get("state") or "answered"),
                 answered_index=block.get("answered_index"),
+                comment=str(block.get("comment") or ""),
             )
         except Exception:
             log.debug("quiz_state broadcast failed for %s", quiz_id, exc_info=True)
     except Exception as exc:
-        return json_exception(exc, 503)
+        return 503, {"error": str(exc)}
     payload_ok: Dict[str, Any] = {
         "ok": True,
         "decision_id": decision_id,
@@ -318,7 +332,16 @@ async def api_decision_answer(request: Request) -> JSONResponse:
         payload_ok["answered_index"] = recorded_index
     if str(block.get("comment") or ""):
         payload_ok["comment"] = str(block["comment"])
-    return JSONResponse(payload_ok)
+    return 200, payload_ok
 
 
-__all__ = ["api_decision_answer"]
+
+
+async def api_decision_answer(request: Request) -> JSONResponse:
+    """POST /api/decisions — idempotent owner answer for a decision card."""
+    body = await request_json_or(request, {})
+    status, payload = await answer_decision(request_drive_root(request), body)
+    return JSONResponse(payload, status_code=status)
+
+
+__all__ = ["answer_decision", "api_decision_answer"]

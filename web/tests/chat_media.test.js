@@ -91,6 +91,7 @@ class NodeStub {
     }
     append(...nodes) { nodes.forEach((node) => this.appendChild(node)); }
     setAttribute(name, value) { this.attributes.set(name, String(value)); }
+    getAttribute(name) { return this.attributes.get(name) || ''; }
     removeAttribute(name) { this.attributes.delete(name); }
     addEventListener(type, fn) {
         if (!this.listeners.has(type)) this.listeners.set(type, new Set());
@@ -687,4 +688,52 @@ test('a live data: photo still hands the bridge the frame addresses', () => {
         assert.ok(html.includes('data:image/png'), 'display stays base64');
         assert.ok(!html.includes('/api/files/download'), 'compat address is bridge-only, not the display');
     } finally { restore(); }
+});
+
+test('a task-incident toast carries the frame tone; absent tone keeps the alarm (#628)', async () => {
+    const { showTaskIncidentToast } = await import('../modules/chat_media.js');
+    const priorDocument = globalThis.document;
+    const created = [];
+    const tracker = { adds: 0, removes: 0 };
+    const stack = new NodeStub('div', tracker);
+    globalThis.document = {
+        getElementById: () => stack,
+        createElement: (tag) => { const node = new NodeStub(tag, tracker); created.push(node); return node; },
+        body: { appendChild() {} },
+    };
+    const priorTimeout = globalThis.setTimeout;
+    globalThis.setTimeout = () => 0;
+    try {
+        const recovered = showTaskIncidentToast({
+            task_incident: 'network_wait', toast_once: 'eph:network_wait:recovered:1',
+            toast_tone: 'ok', content: 'Provider connection restored — resuming.',
+        });
+        assert.ok(recovered, 'a new incident key renders a toast');
+        assert.ok(recovered.classList.contains('toast-ok'), recovered.className);
+        assert.equal(recovered.getAttribute('role'), 'status');
+        const waiting = showTaskIncidentToast({
+            task_incident: 'network_wait', toast_once: 'eph:network_wait:entered:1', toast_tone: 'warn',
+            content: 'Could not establish a provider connection — waiting.',
+        });
+        assert.ok(waiting.classList.contains('toast-warn'));
+        // No tone on the frame (older producers, cancellation_fault): the alarm.
+        const fault = showTaskIncidentToast({
+            task_incident: 'cancellation_fault', toast_once: 'root:cancellation_fault', content: 'did not settle',
+        });
+        assert.ok(fault.classList.contains('toast-danger'));
+        assert.equal(fault.getAttribute('role'), 'alert');
+        // An unknown tone spelling never crashes and never lands on a made-up class.
+        const odd = showTaskIncidentToast({
+            task_incident: 'network_wait', toast_once: 'eph:network_wait:ended:1', toast_tone: 'purple', content: 'x',
+        });
+        assert.ok(odd.classList.contains('toast-danger'));
+        // Dedupe by toast_once is unchanged: the same key renders nothing again.
+        assert.equal(showTaskIncidentToast({
+            task_incident: 'network_wait', toast_once: 'eph:network_wait:recovered:1', toast_tone: 'ok', content: 'again',
+        }), null);
+        assert.equal(created.length, 4);
+    } finally {
+        globalThis.document = priorDocument;
+        globalThis.setTimeout = priorTimeout;
+    }
 });

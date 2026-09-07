@@ -53,6 +53,11 @@ def _fill_executor_blocked_caps(ctx: Any, cap_info: Dict[str, Any], dispatch: An
         )
         cap_info["executor_blocked_requested"] = str(res.requested if res is not None else "harness")
         cap_info["executor_blocked_reset_at"] = str(res.reset_at if res is not None else "")
+        # The OPAQUE route the pin named and the resolution refused (#363): the
+        # child's card shows `{harness} · blocked` from it. Empty when no route
+        # was configured at all — nothing to name, no chip.
+        route = res.route if res is not None else None
+        cap_info["executor_blocked_route"] = str(getattr(route, "route_id", "") or "")
         return
     refusal = getattr(ctx, "_configured_startup_refusal", None)
     if isinstance(refusal, dict):

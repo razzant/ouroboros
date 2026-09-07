@@ -312,6 +312,33 @@ test('applyQuizStateFrame settles an existing card and ignores unknown ids', asy
     }
 });
 
+test('a live quiz_state frame carries the owner comment onto the card like replay does (#471)', () => {
+    const fx = fixture();
+    if (!globalThis.CSS) globalThis.CSS = { escape: (v) => String(v) };
+    try {
+        const card = fx.decision.buildQuizCard(WS_MSG);
+        const inner = card.children[0] || card;
+        const quizCard = inner.matchesClass && inner.matchesClass('chat-quiz-card') ? inner : card;
+        const root = { querySelector: (sel) => (sel.includes('qz-1') ? quizCard : null) };
+        // The owner rejected every option and answered in their own words: the
+        // frame carries no answered_index and the recorded comment.
+        assert.equal(fx.decision.applyQuizStateFrame(root, {
+            quiz_id: 'qz-1', task_id: 't-1', state: 'answered', comment: 'neither — use duckdb',
+        }), true);
+        assert.equal(quizCard.dataset.state, 'answered');
+        assert.equal(quizCard.dataset.ownerComment, 'neither — use duckdb');
+        assert.equal(quizCard.querySelector('.chat-quiz-answer').textContent,
+            "Owner's answer: neither — use duckdb");
+        assert.ok(quizCard.querySelectorAll('.chat-quiz-option').every((btn) => !btn.classList.contains('chosen')));
+        // A later lifecycle frame without a comment never wipes the recorded one.
+        fx.decision.applyQuizStateFrame(root, { quiz_id: 'qz-1', task_id: 't-1', state: 'superseded' });
+        assert.equal(quizCard.dataset.ownerComment, 'neither — use duckdb');
+        assert.equal(quizCard.dataset.state, 'superseded');
+    } finally {
+        fx.restore();
+    }
+});
+
 // ---- free answer (the owner's own option) ----
 
 function commentParts(card) {

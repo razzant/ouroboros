@@ -879,14 +879,16 @@ def test_strict_poll_phase_budget_is_bounded_in_wall_time():
 
 def test_claudexor_bound_applies_to_connect_phase_too():
     import httpx
+    from contextlib import contextmanager
     from ouroboros.gateways import claudexor as cx
 
     calls = []
 
     class Recorder:
-        def request(self, method, path, **kwargs):
+        @contextmanager
+        def stream(self, method, path, **kwargs):
             calls.append(kwargs)
-            return httpx.Response(200, json={"id": "run-1", "summary": {}})
+            yield httpx.Response(200, json={"id": "run-1", "summary": {}})
 
     gateway = cx.ClaudexorGateway(cx.DaemonEndpoint("127.0.0.1", 1, "token"))
     gateway.close()

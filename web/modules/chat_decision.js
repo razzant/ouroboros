@@ -496,6 +496,12 @@ export function createChatDecision({
         const card = rootNode.querySelector(`.chat-quiz-card[data-quiz-id="${CSS.escape(quizId)}"]`);
         if (!card) return false;
         const index = Number.isInteger(frame.answered_index) ? frame.answered_index : null;
+        // The owner's recorded free-text answer rides the frame (#471) so the
+        // live card shows `Owner's answer:` exactly as the replayed card does.
+        // Set only when present, never cleared by its absence: a later
+        // lifecycle frame (expired/superseded) carries no comment.
+        const comment = String(frame.comment || '');
+        if (comment) card.dataset.ownerComment = comment;
         return setCardState(card, String(frame.state || ''), index);
     }
 

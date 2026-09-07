@@ -169,6 +169,11 @@ export function orderBatchNodes(nodes) {
  * one detached fragment, one insertBefore ahead of the typing indicator
  * (typing stays last). No awaits happen between the feed clearing and this
  * mount — the caller keeps the whole section synchronous [GPT#14].
+ *
+ * A collected node that pass 2 has since moved INTO another card (a child
+ * card appended to its parent's subagent container) has left the holding
+ * fragment; mount() leaves it where the lineage placed it instead of tearing
+ * it back out as a top-level card below the whole feed (#636).
  */
 export function createRebuildBatch(doc = null) {
     const nodes = [];
@@ -200,7 +205,9 @@ export function createRebuildBatch(doc = null) {
             const ordered = orderBatchNodes(nodes);
             const ownerDoc = doc || messages.ownerDocument || globalThis.document;
             const fragment = ownerDoc.createDocumentFragment();
-            for (const node of ordered) fragment.appendChild(node);
+            for (const node of ordered) {
+                if (!holding || node.parentNode === holding) fragment.appendChild(node);
+            }
             if (typing && typing.parentNode === messages) messages.insertBefore(fragment, typing);
             else messages.appendChild(fragment);
         },

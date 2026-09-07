@@ -509,7 +509,7 @@ _REDIRECT_OPERATOR_RE = re.compile(
 )
 
 
-def split_redirections(tokens: List[str]) -> tuple[List[str], List[str]]:
+def split_redirections(tokens: List[str], *, redirect_tokens: List[str] | None = None) -> tuple[List[str], List[str]]:
     """Split redirections off a command segment.
 
     Returns ``(argv_without_redirections, output_targets)``. Input redirections
@@ -518,13 +518,15 @@ def split_redirections(tokens: List[str]) -> tuple[List[str], List[str]]:
     the clean operand. Without this split the writer-target lane counted the
     redirect OPERAND as the command's own operand — `cp x y >> log.txt` reported
     `log.txt` and LOST the destination `y`, and a glued `2>/dev/null;` was forged
-    into the path `/dev/null;`.
+    into the path `/dev/null;`. ``redirect_tokens`` optionally receives the
+    exact removed tokens, including input redirects, for local-effect views.
     """
     items = [str(token) for token in (tokens or [])]
     argv: List[str] = []
     targets: List[str] = []
     index = 0
     while index < len(items):
+        start = index
         token = items[index]
         match = _REDIRECT_OPERATOR_RE.match(token)
         if match is None and token.isdigit() and index + 1 < len(items):
@@ -543,6 +545,8 @@ def split_redirections(tokens: List[str]) -> tuple[List[str], List[str]]:
             index += 1
             operand = items[index]
         index += 1
+        if redirect_tokens is not None:
+            redirect_tokens.extend(items[start:index])
         if operator.startswith("<"):
             continue
         if operator == ">&" and (operand == "-" or operand.isdigit()):
@@ -551,6 +555,74 @@ def split_redirections(tokens: List[str]) -> tuple[List[str], List[str]]:
             continue
         targets.append(operand)
     return argv, targets
+
+
+def local_shell_subject(raw_cmd: Any, _depth: int = 0) -> Any:
+    """Local-effect view of SSH argv; execution always keeps the original input.
+
+    OpenSSH sends command/arguments after destination to the remote host
+    (https://man.openbsd.org/ssh). Its options, -E log sink, and every outer
+    redirection remain local. Unknown option syntax retains the original view.
+    Shell wrappers reuse the existing segment/redirection grammar; no remote
+    command is parsed as a local program or assigned a local filesystem path.
+    """
+    if _depth >= 3:
+        return raw_cmd
+    changed = False
+    result: List[str] = []
+    for segment, leading, bodies in shell_segment_rows(raw_cmd):
+        if bodies:
+            return raw_cmd  # an unmodelled stdin program keeps its prior guard
+        if result:
+            result.append(leading or ";")
+        argv = shell_argv(segment)
+        head = pathlib.PurePath(argv[0]).name.lower().removesuffix(".exe") if argv else ""
+        if head in _SHELLS:
+            body = shell_command_string(argv)
+            local = local_shell_subject(body, _depth + 1) if body else body
+            if local != body:
+                redirects: List[str] = []
+                split_redirections(argv, redirect_tokens=redirects)
+                result.extend([*shell_argv(local), *redirects])
+                changed = True
+                continue
+        if head != "ssh":
+            result.extend(argv)
+            continue
+        redirects = []
+        program, _targets = split_redirections(argv, redirect_tokens=redirects)
+        index = 1
+        logs: List[str] = []
+        valid = True
+        while index < len(program) and program[index].startswith("-"):
+            token = program[index]
+            if token == "--":
+                index += 1
+                break
+            letters = token[1:]
+            if not letters or letters.startswith("-"):
+                valid = False
+                break
+            for position, letter in enumerate(letters):
+                if letter in "BbcDEeFIiJLlmOoPpQRSWw":
+                    value = letters[position + 1:]
+                    if not value:
+                        index += 1
+                        value = program[index] if index < len(program) else ""
+                    if not value:
+                        valid = False
+                    if letter == "E" and value:
+                        logs.extend([">", value])
+                    break
+                if letter not in "46AaCfGgKkMNnqsTtVvXxYyZ":
+                    valid = False
+                    break
+            index += 1
+        if not valid:
+            return raw_cmd
+        result.extend([*program[:index + 1], *logs, *redirects])
+        changed = changed or index + 1 < len(program) or bool(logs)
+    return result if changed else raw_cmd
 
 
 def collect_leading_env(argv: List[str]) -> tuple[dict, List[str]]:

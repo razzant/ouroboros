@@ -18,7 +18,7 @@ from ouroboros.gateway._helpers import (
     read_rotated_jsonl_entries,
 )
 from ouroboros.gateway.cost_breakdown import make_cost_breakdown_endpoint  # noqa: F401 — historical import path (router)
-from ouroboros.cost_projection import carry_cost_meta
+from ouroboros.cost_projection import carry_cost_meta, live_root_cost_projection
 from ouroboros.outcomes import normalize_outcome_axes
 from ouroboros.post_task_checkpoint import post_task_synthesis_is_open
 from ouroboros.subagent_messages import SUBAGENT_MESSAGE_FIELDS, subagent_message_meta
@@ -325,19 +325,22 @@ def _read_progress_history_entries(live, adir, want, counts_toward_quota, *, inc
 
 
 def _copy_task_summary_metadata(rec: Dict[str, Any], entry: Dict[str, Any]) -> None:
-    """Copy the bounded task-summary fields replayed by the Chat surface."""
-    if entry.get("type") != "task_summary":
+    """Copy terminal chat facts for task summaries and transient turns."""
+    if entry.get("type") != "task_summary" and not entry.get("ephemeral_decision"):
         return
+    if entry.get("ephemeral_decision"):
+        rec["ephemeral_decision"] = True
     for key in ("tool_calls", "rounds"):
         if key in entry:
             rec[key] = int(entry[key])
-    rec["outcome_axes"] = normalize_outcome_axes(entry)
+    if entry.get("type") == "task_summary" or isinstance(entry.get("outcome_axes"), dict):
+        rec["outcome_axes"] = normalize_outcome_axes(entry)
     if "reason_code" in entry:
         rec["reason_code"] = str(entry.get("reason_code") or "")
     if isinstance(entry.get("review_projection"), dict):
         rec["review_projection"] = dict(entry.get("review_projection") or {})
-    # v6.82 P1: the summary row now carries the flat task-scope cost snapshot
-    # written by agent_task_pipeline; replay it so a reload still shows cost.
+    # The chat row carries the flat task-scope cost snapshot written by
+    # agent_task_pipeline; transient turns have no later durable task record.
     # _annotate_terminal_task_truth later OVERRIDES these with the persisted
     # task_results values when the result file survives (row = fallback only).
     # ABI-3: CONVERTED, not copied — a stored legacy row's pair resolves
@@ -431,6 +434,7 @@ def _annotate_terminal_task_truth(
         terminal_receipt_by_task: Dict[str, Dict[str, Any]] = {}
         legacy_child_meta_by_task: Dict[str, Dict[str, Any]] = {}
         suggested_name_by_task: Dict[str, str] = {}
+        live_cost_by_task: Dict[str, Dict[str, Any]] = {}
         finalizing_tasks: set = set()
         for task_id in progress_task_ids | summary_task_ids | legacy_final_task_ids:
             result = _load_terminal_result(data_dir, task_id, cache)
@@ -493,6 +497,15 @@ def _annotate_terminal_task_truth(
             suggested_name = str(result.get("suggested_name") or "").strip()
             if suggested_name:
                 suggested_name_by_task[task_id] = suggested_name
+            live = task_id in finalizing_tasks or (status and status not in FINAL_STATUSES)
+            if live and task_id in progress_task_ids:
+                # #469: a root still running or finalizing replays the SAME
+                # non-final subtree ceiling its heartbeat pushes live, from the
+                # one cost owner (cost_final=False, partial); a subtree with no
+                # attributable rows stays absent — unknown is never zero.
+                live_cost_by_task[task_id] = live_root_cost_projection(
+                    task_id, result, {}, data_dir,
+                )
 
         latest_progress_by_task: Dict[str, Dict[str, Any]] = {}
         for message in combined:
@@ -520,6 +533,8 @@ def _annotate_terminal_task_truth(
                 message["task_terminal_status"] = terminal_status_by_task[task_id]
                 if latest_progress_by_task.get(task_id) is message:
                     message.update(terminal_receipt_by_task.get(task_id) or {})
+            elif latest_progress_by_task.get(task_id) is message:
+                message.update(live_cost_by_task.get(task_id) or {})
             elif task_id in anchored and task_id not in latest_progress_by_task:
                 # #496: a still-anchored child whose progress rows fell out of the
                 # read tail keeps its executor receipt on the one final row the

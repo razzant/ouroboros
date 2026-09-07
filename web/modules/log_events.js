@@ -21,12 +21,21 @@ export const LOG_CATEGORIES = {
     consciousness: { label: 'Consciousness', color: 'var(--accent)' },
 };
 
-export function categorizeLogEvent(evt) {
+// Logs phases that file a row under the Errors filter (#323). They are the
+// typed failure outcomes summarizeLogEvent already derives — a failed task_done,
+// a tool that errored/was killed/timed out, an LLM call failure, a review
+// lifecycle error — so the category and the phase pill of one row can never
+// disagree, live or on replay.
+const ERROR_LOG_PHASES = new Set(['error', 'timeout', 'lifecycle_error']);
+
+export function categorizeLogEvent(evt, view = summarizeLogEvent(evt)) {
     const t = evt.type || evt.event || '';
     if (evt.is_progress) {
         return evt.task_id === 'bg-consciousness' ? 'consciousness' : 'tasks';
     }
-    if (t.includes('error') || t.includes('crash') || t.includes('fail')) return 'errors';
+    // Severity comes from the typed projection, never from the event name; the
+    // name substrings below only pick the domain family of a non-error row.
+    if (ERROR_LOG_PHASES.has(String(view?.phase || ''))) return 'errors';
     if (t.includes('llm') || t.includes('model')) return 'llm';
     if (t.includes('tool') || evt.tool) return 'tools';
     if (t.includes('task') || t.includes('evolution') || t.includes('review')) return 'tasks';
@@ -138,6 +147,20 @@ export function executorChip(evt) {
     // could contradict the label if a producer ever decoupled them).
     const substrateNote = evidence ? (SUBSTRATE_NOTE[String(evt?.actual_substrate || '')] || '') : '';
     const withSubstrate = (title) => (substrateNote ? `${title} — ${substrateNote}` : title);
+    if (String(evt?.reason_code || '') === 'subagent_executor_unavailable') {
+        // The typed $0 terminal of a harness pin the resolution refused (#363):
+        // the route names WHO refused, the reason code says the child never
+        // ran. Checked before the evidence branches — an empty custody read
+        // would otherwise print "no run yet" over a child that was never
+        // dispatched at all. Evidence-grade so a later dispatch-shaped frame
+        // cannot downgrade it to "dispatched".
+        return {
+            ...base,
+            hasEvidence: true,
+            label: `${name} · blocked`,
+            title: `Pinned to ${name}, but the route could not run — the task was NOT run (no metered API spend, no delegated run)`,
+        };
+    }
     if (!evidence) {
         // Evidence rides TERMINAL frames only, so a live frame proves nothing
         // either way — and under the pre-start charter the leaf usually IS
@@ -652,9 +675,24 @@ export function summarizeLogEvent(evt) {
     }
 
     if (t === 'tool_call' || evt.tool) {
-        return view('result', `${evt.tool || 'tool'} result`, {
+        // The durable tools.jsonl row (replay/backfill) carries the same typed
+        // failure facts as the live tool_call_finished frame — is_error plus the
+        // signal/exit facts — so a failed call reads the same after a reload.
+        const signalDeath = Boolean(evt.signal) || (typeof evt.exit_code === 'number' && evt.exit_code < 0);
+        const failed = Boolean(evt.is_error) || signalDeath;
+        const label = signalDeath ? `killed (${evt.signal || evt.exit_code})` : failed ? 'failed' : 'result';
+        return view(failed ? 'error' : 'result', `${evt.tool || 'tool'} ${label}`, {
             body: shortText(evt.result_preview || compactJson(evt.args, 220), 260),
-            meta: taskMeta(),
+            meta: taskMeta(formatLogDuration(evt.duration_sec)),
+        });
+    }
+
+    if (t === 'task_start_settings_reload_failed') {
+        // #285 disclosure, same valence as the Chat card: the task runs on the
+        // previously applied configuration — a warning, not an unresolved error.
+        return view('warn', 'Settings reload failed at task start', {
+            body: shortText(evt.error, 260),
+            meta: taskMeta('runs on the previously applied configuration'),
         });
     }
 
@@ -791,18 +829,16 @@ export function summarizeLogEvent(evt) {
         });
     }
 
-    if (t.includes('error') || t.includes('crash') || t.includes('fail')) {
-        return view('error', t, {
-            body: shortText(evt.error || evt.result_preview || evt.text || '', 260),
-            meta: taskMeta(evt.tool ? `tool=${evt.tool}` : ''),
-        });
-    }
-
     if (t === 'swarm_fanout') {
         const n = (evt.requested_count != null)
             ? evt.requested_count
             : (Array.isArray(evt.task_ids) ? evt.task_ids.length : 0);
-        return view('info', `swarm fan-out: ${n} subagent(s) requested`, {
+        // #318: a delegated harness run rides the same telemetry with the host
+        // constant role="delegated_run"; it is not a subagent.
+        const headline = evt.role === 'delegated_run'
+            ? 'swarm fan-out: delegated run requested'
+            : `swarm fan-out: ${n} subagent(s) requested`;
+        return view('info', headline, {
             meta: [
                 evt.task_group_id ? `group=${evt.task_group_id}` : '',
                 evt.role ? `role=${evt.role}` : '',
@@ -813,8 +849,31 @@ export function summarizeLogEvent(evt) {
         });
     }
 
+    // Typed severity carried by host/extension frames (`ok`, logging `level`)
+    // outranks the event name. The name-substring test that follows is the
+    // NON-EXPANDING remainder for an unknown name that carries no typed fact:
+    // it keeps a genuine producer-side failure with only a name visible under
+    // Errors, and it is pinned as a remainder, not a taxonomy.
+    const level = String(evt.level || '').toLowerCase();
+    const body = shortText(
+        evt.error || evt.message || evt.text || evt.result_preview
+            || compactJson(evt.args || evt.task || evt.checks, 260), 260,
+    );
+    if (evt.ok === true) {
+        return view('ok', shortText(t, 120), { body, meta: taskMeta() });
+    }
+    if (evt.ok === false || level === 'error' || level === 'critical' || level === 'fatal') {
+        return view('error', shortText(t, 120), { body, meta: taskMeta(evt.tool ? `tool=${evt.tool}` : '') });
+    }
+    if (level === 'warning' || level === 'warn') {
+        return view('warn', shortText(t, 120), { body, meta: taskMeta() });
+    }
+    if (t.includes('error') || t.includes('crash') || t.includes('fail')) {
+        return view('error', t, { body, meta: taskMeta(evt.tool ? `tool=${evt.tool}` : '') });
+    }
+
     return view('info', shortText(t, 120), {
-        body: shortText(evt.text || evt.error || evt.result_preview || compactJson(evt.args || evt.task || evt.checks, 260), 260),
+        body,
         meta: taskMeta(evt.model || '', formatLogMoney(accountedUpperBound(evt) ?? evt.cost)),
     });
 }

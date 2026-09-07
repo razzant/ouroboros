@@ -350,7 +350,7 @@ def test_read_version_returns_empty_for_missing_files(tmp_path):
     assert _read_skill_manifest_version(skill) == ""
 
 
-def test_telegram_format_upgrade_reseeds_version_1_1_1(tmp_path, fake_log):
+def test_telegram_format_upgrade_reseeds_version_1_2_0(tmp_path, fake_log):
     """The launcher-owned Telegram payload must resync for format parity.
 
     The pinned string is the RESYNC KEY, not decoration: `_per_skill_version_resync`
@@ -374,5 +374,5 @@ def test_telegram_format_upgrade_reseeds_version_1_1_1(tmp_path, fake_log):
     )
 
     assert upgraded == 1
-    assert "version: 1.1.1" in (installed / "SKILL.md").read_text(encoding="utf-8")
+    assert "version: 1.2.0" in (installed / "SKILL.md").read_text(encoding="utf-8")
     assert (installed / "plugin.py").is_file()

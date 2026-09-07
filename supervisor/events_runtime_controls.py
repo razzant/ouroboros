@@ -9,7 +9,6 @@ from __future__ import annotations
 
 import logging
 from typing import Any, Dict
-from ouroboros.task_results import load_task_result
 from ouroboros.utils import utc_now_iso
 
 log = logging.getLogger(__name__)
@@ -118,60 +117,39 @@ def _handle_promote_to_stable(evt: Dict[str, Any], ctx: Any) -> None:
 def _handle_cancel_task(evt: Dict[str, Any], ctx: Any) -> None:
     """Drive one agent-requested cancel through custody — TYPED outcome end to end.
 
-    Phase A1.12: the old boolean facade collapsed ``already_settled`` into the
-    same "✅ cancel" as a real teardown — a lie when the child had finished on its
-    own and kept its completed result. Each typed outcome now gets its honest
-    acknowledgement, and ✅ is sent only after a CONFIRMED teardown + durable
-    settled write."""
+    Custody publishes the settled truth itself: a cancelled child's
+    ``task_summary``/salvage row lands in the task's own thread through the
+    terminal-delivery seam, an already-settled child keeps the result it
+    already published, and the calling agent received the typed tool result.
+    A second host acknowledgement here (#624) reached the global owner chat as
+    an untyped assistant row with no task identity — duplicate presentation in
+    Main Chat, and for a pending-drop race it misstated the causal history.
+    Only the FAILED outcome still speaks: the task is live, the intent stays
+    open, and the owner needs the typed incident."""
     task_id = str(evt.get("task_id") or "").strip()
     requested_task_id = str(evt.get("requested_task_id") or "").strip()
     display_task_id = requested_task_id or task_id
     st = ctx.load_state()
     owner_chat_id = st.get("owner_chat_id")
-    from supervisor.queue import (
-        CANCEL_ALREADY_SETTLED,
-        CANCEL_CANCELLED,
-        CANCEL_NOT_FOUND,
-        drive_cancel_intent_scope,
-    )
+    from supervisor.queue import CANCEL_FAILED, CANCEL_NOT_FOUND, drive_cancel_intent_scope
 
     outcome = drive_cancel_intent_scope(task_id) if task_id else CANCEL_NOT_FOUND
-    if not owner_chat_id:
+    if not owner_chat_id or outcome != CANCEL_FAILED:
         return
-    if outcome == CANCEL_CANCELLED:
-        ctx.send_with_budget(
-            int(owner_chat_id),
-            f"✅ cancel {display_task_id or '?'}: teardown confirmed, outcome settled (event)",
-        )
-    elif outcome == CANCEL_ALREADY_SETTLED:
-        settled_status = str(
-            (load_task_result(ctx.DRIVE_ROOT, task_id) or {}).get("status") or "settled"
-        )
-        ctx.send_with_budget(
-            int(owner_chat_id),
-            f"ℹ️ cancel {display_task_id or '?'}: the task had already finished "
-            f"({settled_status}) — its result is preserved, nothing was torn down (event)",
-        )
-    elif outcome == CANCEL_NOT_FOUND:
-        ctx.send_with_budget(
-            int(owner_chat_id),
-            f"⚠️ cancel {display_task_id or '?'}: no such live task (event)",
-        )
-    else:
-        incident_meta = {
-            "task_incident": "cancellation_fault",
-            "toast_once": f"{display_task_id or 'unknown'}:cancellation_fault",
-        }
-        if task_id and display_task_id != task_id:
-            incident_meta["cancel_physical_task_id"] = task_id
-        ctx.send_with_budget(
-            int(owner_chat_id),
-            f"❌ cancel {display_task_id or '?'} did not settle — the task is still live; "
-            "the durable cancel intent stays open and the supervisor watchdog retries (event)",
-            is_progress=True,
-            task_id=display_task_id,
-            progress_meta=incident_meta,
-        )
+    incident_meta = {
+        "task_incident": "cancellation_fault",
+        "toast_once": f"{display_task_id or 'unknown'}:cancellation_fault",
+    }
+    if task_id and display_task_id != task_id:
+        incident_meta["cancel_physical_task_id"] = task_id
+    ctx.send_with_budget(
+        int(owner_chat_id),
+        f"❌ cancel {display_task_id or '?'} did not settle — the task is still live; "
+        "the durable cancel intent stays open and the supervisor watchdog retries (event)",
+        is_progress=True,
+        task_id=display_task_id,
+        progress_meta=incident_meta,
+    )
 
 
 def _handle_toggle_evolution(evt: Dict[str, Any], ctx: Any) -> None:

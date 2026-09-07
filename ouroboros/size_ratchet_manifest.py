@@ -114,6 +114,7 @@ BAND_PATHS = {
     "ouroboros/artifacts.py": "Exact task-source persistence and repository-diff materialization now share the actor-readable artifact seam for acceptance evidence.",
     "ouroboros/cancel_intents.py": "Entered the band from 929 lines: reciprocal timeout-retry lineage validation and physical-leaf/logical-root aliasing stay with the durable cancel-intent mutation authority so Stop-now hardens the same request across retry races.",
     "ouroboros/capability_evidence.py": "Grew INTO the band by the #284 fix: a fresh exact-model density witness may honestly undercut the cold floor \u2014 evidence logic belongs beside the witness store it reads.",
+    "ouroboros/claudexor_daemon.py": "Installation daemon lifecycle owns marker and authenticated endpoint stop authority, confirmed self-started handles, and duplicate-start refusal; process signal and ledger mechanics remain in process_custody. No new lifecycle store or scheduler.",
     "ouroboros/cli.py": "The existing command-line transport keeps task-event negotiation, bounded replay deduplication and result rendering together; the additive cursor does not introduce a second CLI or task engine.",
     "ouroboros/consciousness.py": "Durable Background Consciousness observation inbox and bounded truthful replay",
     "ouroboros/context.py": "Entered the band from the 1501-1600 zone (1590 lines) by the v7 D03 extraction of the runtime-section fact builders into ouroboros/context_runtime_facts.py; shrink-only residue of the split, not new growth.",
@@ -240,5 +241,5 @@ BYTE_BASELINE_DEBT = {
 
 BYTE_DEBT = {
     "tests/test_devtools_benchmarks.py": 327840,
-    "web/modules/chat.js": 206940,
+    "web/modules/chat.js": 206885,
 }

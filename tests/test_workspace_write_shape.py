@@ -21,6 +21,7 @@ import pytest
 # test_external_workspace_access.py; keep it in the serial lane.
 pytestmark = pytest.mark.serial
 
+from ouroboros.contracts.task_constraint import TaskConstraint
 from ouroboros.tools.registry import ToolContext, ToolRegistry
 from ouroboros.tools.shell_guards import interpreter_write_shape, shell_has_write_indicator
 from tests._typed_guard_shared import _shell_guard_text
@@ -37,7 +38,7 @@ def _home_outside_tmp(tmp_path, monkeypatch):
     monkeypatch.setattr(pathlib.Path, "home", lambda: fake_home)
 
 
-def _registry(tmp_path: pathlib.Path, *, mode: str = "external") -> ToolRegistry:
+def _registry(tmp_path: pathlib.Path, *, mode: str = "external", acting: bool = False) -> ToolRegistry:
     system = tmp_path / "system"
     workspace = tmp_path / "workspace"
     data = tmp_path / "data"
@@ -51,6 +52,8 @@ def _registry(tmp_path: pathlib.Path, *, mode: str = "external") -> ToolRegistry
             workspace_root=workspace,
             workspace_mode=mode,
             task_id="task-write-shape",
+            task_constraint=(TaskConstraint(mode="acting_subagent", surface="external_workspace",
+                                            write_root=str(workspace)) if acting else None),
         )
     )
     return reg
@@ -64,6 +67,9 @@ READ_ONLY_HASH_SCRIPT = (
     "print(h({target!r}))\n"
 )
 
+
+# Outside-workspace write refusals below use an ACTING child. Ordinary roots
+# have the same user_files write authority regardless of their selected cwd.
 
 # --- unit layer: the classifier itself -------------------------------------
 
@@ -398,7 +404,7 @@ def test_inline_body_isolation_for_joined_and_wrapped_forms():
 def test_pure_filter_write_channels_still_blocked(tmp_path):
     """The real channels stay writes: sort -o, sed -i, uniq's second operand,
     tar extract, gzip default all still take guard B."""
-    reg = _registry(tmp_path, mode="external")
+    reg = _registry(tmp_path, mode="external", acting=True)
     scratch = tmp_path / "scratch"
     scratch.mkdir()
     src = scratch / "in.txt"
@@ -428,7 +434,7 @@ def test_workspace_write_block_message_names_path_and_route(tmp_path):
 def test_outside_root_write_block_message_names_path_and_root(tmp_path):
     """The outside-process-root variant names the blocked path and the selected
     process root, so the agent can self-correct instead of guessing."""
-    reg = _registry(tmp_path, mode="external")
+    reg = _registry(tmp_path, mode="external", acting=True)
     scratch = tmp_path / "scratch"
     scratch.mkdir()
     cmd = ["python3", "-c", f"open({str(scratch / 'out.txt')!r}, 'w').write('hi')"]
@@ -462,7 +468,7 @@ def test_unprovable_row_never_promotes_absolute_executable_to_write(tmp_path, cm
 
 
 def test_uncertain_python_body_naming_outside_path_stays_blocked(tmp_path):
-    reg = _registry(tmp_path, mode="external")
+    reg = _registry(tmp_path, mode="external", acting=True)
     cmd = [
         "/usr/bin/python3", "-c",
         'import subprocess; subprocess.run(["rm", "/Users/Shared/x"])',
@@ -477,7 +483,7 @@ def test_uncertain_python_body_naming_outside_path_stays_blocked(tmp_path):
 def test_os_write_through_literal_os_open_outside_stays_blocked(tmp_path):
     from ouroboros.tools.shell_guards import _python_write_targets_and_unknown
 
-    reg = _registry(tmp_path, mode="external")
+    reg = _registry(tmp_path, mode="external", acting=True)
     code = (
         'import os; fd=os.open("/Users/Shared/out", os.O_WRONLY|os.O_CREAT); '
         'os.write(fd, b"x")'
@@ -556,7 +562,7 @@ def test_cp_source_outside_root_is_a_read_and_destination_still_blocked(tmp_path
     """A writer's SOURCE operand is a read: copying an outside file INTO the
     process root is the sanctioned transfer route, while an outside DESTINATION
     stays refused."""
-    reg = _registry(tmp_path, mode="external")
+    reg = _registry(tmp_path, mode="external", acting=True)
     workspace = str(tmp_path / "workspace")
     outside = tmp_path / "outside"
     outside.mkdir()
@@ -598,7 +604,7 @@ def test_relative_protected_root_source_still_blocked(tmp_path):
 def test_glued_operator_is_not_a_path_candidate(tmp_path):
     """A redirection glued to the following separator is not a path: `2>/dev/null;`
     was forged into the target `/dev/null;` and refused a pure read."""
-    reg = _registry(tmp_path, mode="external")
+    reg = _registry(tmp_path, mode="external", acting=True)
     workspace = str(tmp_path / "workspace")
     outside = tmp_path / "outside"
     outside.mkdir()
@@ -635,7 +641,7 @@ def test_inline_code_segment_keeps_the_mention_scan(tmp_path):
 
     DISCLOSED FLIP: an outside path merely READ by an in-root writer no longer
     refuses — the same class as a cp source operand."""
-    reg = _registry(tmp_path, mode="external")
+    reg = _registry(tmp_path, mode="external", acting=True)
     workspace = str(tmp_path / "workspace")
     outside = tmp_path / "outside"
     outside.mkdir()
@@ -655,7 +661,7 @@ def test_inline_code_segment_keeps_the_mention_scan(tmp_path):
     assert str(outside / "ok") in outside_write
     # (c) a protected runtime path mentioned by an in-root writer still refuses
     protected_read = check(f"open('ok','w'); print(open({str(protected)!r}).read())") or ""
-    assert "mentions Ouroboros system/data paths" in protected_read
+    assert "SUBAGENT_SECRET_READ_BLOCKED" in protected_read
     # (d) the disclosed flip: an ordinary outside path merely READ is allowed
     assert check(f"open('ok','w'); print(open({str(outside / 'y')!r}).read())") is None
 
@@ -663,7 +669,7 @@ def test_inline_code_segment_keeps_the_mention_scan(tmp_path):
 def test_sed_in_script_target_survives_the_narrowed_scan(tmp_path):
     """sed's in-script `w FILE` hides the path inside the script operand, so the
     parsed targets keep their embedded-path pass."""
-    reg = _registry(tmp_path, mode="external")
+    reg = _registry(tmp_path, mode="external", acting=True)
     workspace = str(tmp_path / "workspace")
     scratch = tmp_path / "scratch"
     scratch.mkdir()
@@ -675,7 +681,7 @@ def test_sed_in_script_target_survives_the_narrowed_scan(tmp_path):
 
 
 def _outside_write_result(tmp_path, cmd):
-    reg = _registry(tmp_path, mode="external")
+    reg = _registry(tmp_path, mode="external", acting=True)
     workspace = str(tmp_path / "workspace")
     outside = tmp_path / "outside"
     outside.mkdir(exist_ok=True)
@@ -793,7 +799,7 @@ def test_f7_python_literal_heredoc_read_stays_allowed(tmp_path):
 
 
 def test_round5_sequential_effective_cwd_blocks_nested_escape(tmp_path):
-    reg = _registry(tmp_path, mode="external")
+    reg = _registry(tmp_path, mode="external", acting=True)
     workspace = tmp_path / "workspace"
     fixtures = workspace / "fixtures"
     fixtures.mkdir()
@@ -820,7 +826,7 @@ def test_round5_sequential_effective_cwd_keeps_in_workspace_write_allowed(tmp_pa
 
 
 def test_round6_redirect_file_targets_outside_workspace_are_blocked(tmp_path):
-    reg = _registry(tmp_path, mode="external")
+    reg = _registry(tmp_path, mode="external", acting=True)
     workspace = tmp_path / "workspace"
     outside = tmp_path / "outside"
     outside.mkdir()
@@ -841,7 +847,7 @@ def test_round6_redirect_file_targets_outside_workspace_are_blocked(tmp_path):
     ids=("python-no-dash", "sh-stdin", "node-stdin"),
 )
 def test_round5_stdin_heredoc_writes_outside_are_blocked(tmp_path, command):
-    reg = _registry(tmp_path, mode="external")
+    reg = _registry(tmp_path, mode="external", acting=True)
     outside = tmp_path / "outside"
     outside.mkdir()
     target = outside / "heredoc-write"
@@ -864,7 +870,7 @@ def test_round5_python_stdin_heredoc_read_without_dash_is_allowed(tmp_path):
 
 @pytest.mark.parametrize("write", (False, True), ids=("read-allowed", "write-blocked"))
 def test_round6_piped_python_heredoc_write_policy(tmp_path, write):
-    reg = _registry(tmp_path, mode="external")
+    reg = _registry(tmp_path, mode="external", acting=True)
     outside = tmp_path / "outside"
     outside.mkdir()
     target = outside / ("write" if write else "read")
@@ -885,7 +891,7 @@ def test_round6_piped_python_heredoc_write_policy(tmp_path, write):
     ids=("node-async-write", "ruby-file-delete"),
 )
 def test_round5_mixed_literal_writer_targets_are_all_modelled(tmp_path, argv):
-    reg = _registry(tmp_path, mode="external")
+    reg = _registry(tmp_path, mode="external", acting=True)
     out = _shell_guard_text(reg,
         {"cmd": argv, "cwd": str(tmp_path / "workspace")}, "advanced"
     ) or ""
@@ -905,7 +911,7 @@ def test_f8_uncertain_perl_row_does_not_widen_independent_cat(tmp_path):
 def test_round3_old_block_coverage_stays_blocked(tmp_path):
     import shlex
 
-    reg = _registry(tmp_path, mode="external")
+    reg = _registry(tmp_path, mode="external", acting=True)
     workspace = str(tmp_path / "workspace")
     outside = tmp_path / "outside"
     outside.mkdir()
@@ -1085,7 +1091,7 @@ def test_windows_spelled_pure_reads_stay_allowed_on_every_host(tmp_path):
 
 
 def test_windows_spelled_writes_stay_blocked_and_named(tmp_path):
-    reg = _registry(tmp_path, mode="external")
+    reg = _registry(tmp_path, mode="external", acting=True)
     workspace = str(tmp_path / "workspace")
     out = f"{WINDOWS_TMP}\\outside\\out"
     for command in (
@@ -1102,7 +1108,7 @@ def test_outside_root_block_names_the_spelling_the_model_used(tmp_path):
     """When the resolved path differs from the operand (a relative spelling, a
     symlink alias — or, on Windows, a POSIX-rooted spelling resolved onto the
     cwd drive), the block names both, resolved first so earlier pins hold."""
-    reg = _registry(tmp_path, mode="external")
+    reg = _registry(tmp_path, mode="external", acting=True)
     workspace = tmp_path / "workspace"
     real = tmp_path / "outside_real"
     real.mkdir()

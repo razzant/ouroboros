@@ -759,19 +759,23 @@ class TelegramClient:
 
     async def send_message_with_inline_keyboard(
         self, chat_id: int, text: str, keyboard: list[list[dict]], parse_mode: str = "HTML"
-    ) -> None:
-        """Send a message with an inline keyboard (list of button rows)."""
+    ) -> int:
+        """Send a message with an inline keyboard (list of button rows); return its message id (0 if unknown)."""
         import json as _json
         reply_markup = _json.dumps({"inline_keyboard": keyboard})
         formatted = markdown_to_telegram_html(text) if parse_mode == "HTML" else text
         data = {"chat_id": str(chat_id), "text": formatted, "reply_markup": reply_markup}
         if parse_mode:
             data["parse_mode"] = parse_mode
-        await self.call(
+        payload = await self.call(
             "sendMessage",
             data=data,
             timeout=20,
         )
+        try:
+            return int(((payload or {}).get("result") or {}).get("message_id") or 0)
+        except (AttributeError, TypeError, ValueError):
+            return 0
 
     async def answer_callback_query(self, callback_query_id: str, *, text: str = "") -> None:
         """Acknowledge a callback query from an inline button press."""

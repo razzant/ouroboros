@@ -466,6 +466,12 @@ def test_startup_deferred_validation_with_network_still_down_paces_with_backoff(
     assert all(later >= earlier for earlier, later in zip(sleeps, sleeps[1:]))
     assert max(sleeps) == 60
     assert sleeps[-2:] == [60, 60]
+    # #376: while validation stays deferred the durable status is truthful —
+    # neither `ready` nor an error, and never absent.
+    assert json.loads((tmp_path / "bridge_status.json").read_text(encoding="utf-8")) == {
+        "state": "degraded",
+        "reason_code": "telegram_startup_deferred",
+    }
 
 
 def test_startup_permanent_rejection_keeps_raise_semantics(tmp_path, monkeypatch):

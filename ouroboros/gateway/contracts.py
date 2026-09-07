@@ -125,6 +125,10 @@ class ChatOutbound(TypedDict):
     # differs from the displayed (logical) task id.
     cancel_physical_task_id: NotRequired[str]
     toast_once: NotRequired[str]
+    # #628: the incident's valence for the one-shot toast (warn/ok/error),
+    # stamped by the producer that knows whether the boundary is a wait, a
+    # recovery or an exhaustion; absent = the browser keeps its alarm tone.
+    toast_tone: NotRequired[str]
     lifecycle: NotRequired[Dict[str, Any]]
     # C4 multi-chat dedupe: a duplicate lifecycle initiator's typed pointer to
     # the job that already owns the routing ({job_id, kind, target, status,
@@ -393,6 +397,9 @@ class QuizStateOutbound(TypedDict):
     state: str
     ts: str
     answered_index: NotRequired[int]
+    # #471: the owner's recorded free-text answer rides the live frame (absent
+    # when empty) so the open card renders `Owner's answer:` as replay does.
+    comment: NotRequired[str]
     chat_id: NotRequired[int]
 
 
@@ -678,7 +685,7 @@ class ActiveDirectTurn(TypedDict):
     started_at: float
 
 
-class ActiveChatActivity(TypedDict):
+class ActiveChatActivity(ActiveDirectTurn):
     """One in-flight chat activity in ``StateResponse.active_chat_activities``.
 
     The combined snapshot: direct/ephemeral registry turns (same rows as
@@ -690,14 +697,6 @@ class ActiveChatActivity(TypedDict):
     Field shape mirrors ``ActiveDirectTurn`` so one client reducer hydrates
     both; managed rows carry an empty ``client_message_id``.
     """
-
-    activity_id: str
-    chat_id: int
-    project_id: str
-    client_message_id: str
-    kind: str
-    phase: str
-    started_at: float
 
 
 class StateResponse(TypedDict):
