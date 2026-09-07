@@ -101,6 +101,9 @@ rules have no automated surface — review-only.
   formats and PEM keys. Keep owner-home opaque masking enabled. A runtime data
   directory inside a project retains its actual secret/control path rules,
   including a forked child's canonical parent (`core_secret_paths.restricted_data_roots`).
+  Prepare invariant credential/root locations once per list/search/query call
+  through `make_subagent_secret_target_check`; never retain that predicate across
+  calls. Target resolution and owner-state/file-identity checks remain per target.
   Task/artifact source names and public PEM certificates carry no credential
   authority. Restricted file readers mask complete private-key blocks before
   selecting a window, preserving character positions and line breaks. The

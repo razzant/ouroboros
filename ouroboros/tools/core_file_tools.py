@@ -6,7 +6,7 @@ import bisect
 import json
 import logging
 import pathlib
-from typing import Any, Dict, List, Optional
+from typing import Any, Callable, Dict, List, Optional
 
 from ouroboros.contracts.skill_payload_policy import (
     SKILL_OWNER_STATE_FILENAMES,
@@ -33,6 +33,7 @@ from ouroboros.tool_access import (
 )
 from ouroboros.tools.registry import ToolContext, active_repo_dir_for
 from ouroboros.tools.core_secret_paths import (  # noqa: F401 — re-exported moved surface (core facade identity)
+    make_subagent_secret_target_check,
     is_restricted_subagent_profile,
     _is_subagent_secret_data_path,
     _is_subagent_secret_repo_path,
@@ -316,7 +317,8 @@ def _repo_list(
         else active_repo_dir_for(ctx)
     )
     target = _resolved_binding.target_path if _resolved_binding is not None else ctx.repo_path(dir)
-    if is_restricted_subagent_profile(ctx) and _is_subagent_secret_repo_target(target, repo_root, ctx=ctx):
+    secret_check = make_subagent_secret_target_check(repo_root, ctx=ctx) if is_restricted_subagent_profile(ctx) else None
+    if secret_check and secret_check(target):
         # First-class tool error, not an ok-shaped one-element JSON listing
         # (v6.54.3, review round 5 — the whole-call block IS the result).
         return _publish_tool_result(ctx, ToolResult(
@@ -331,8 +333,8 @@ def _repo_list(
     except ValueError:
         listed_rel = dir
     items = _list_dir(repo_root, listed_rel, max_entries)
-    if is_restricted_subagent_profile(ctx):
-        items = _filter_subagent_secret_repo_listing(items, repo_root, ctx=ctx)
+    if secret_check:
+        items = _filter_subagent_secret_repo_listing(items, repo_root, ctx=ctx, secret_check=secret_check)
     return json.dumps(items, ensure_ascii=False, indent=2)
 
 
@@ -444,7 +446,8 @@ def _data_list(
     # one-element JSON listings (v6.54.3, review round 5).
     if (b := _project_store_access_block(norm_dir)):
         return str(b)
-    if is_restricted_subagent_profile(ctx):
+    secret_check = make_subagent_secret_target_check(active_repo_dir_for(ctx), ctx=ctx) if is_restricted_subagent_profile(ctx) else None
+    if secret_check:
         try:
             list_target = (
                 _resolved_binding.target_path
@@ -455,7 +458,7 @@ def _data_list(
             return _publish_tool_result(ctx, ToolResult(
                 status="blocked", code="DATA_BLOCKED", text=f"⚠️ DATA_LIST_BLOCKED: {e}",
             ))
-        if _is_subagent_secret_repo_target(list_target, active_repo_dir_for(ctx), ctx=ctx):
+        if secret_check(list_target):
             return _publish_tool_result(ctx, ToolResult(
                 status="blocked",
                 code="DATA_BLOCKED",
@@ -472,8 +475,8 @@ def _data_list(
                 text="⚠️ DATA_LIST_BLOCKED: resolved target escapes runtime_data root.",
             ))
         items = _filter_out_project_store(norm_dir, _list_dir(root, rel, max_entries))
-        if is_restricted_subagent_profile(ctx):
-            items = _filter_subagent_secret_listing(items, root, ctx=ctx)
+        if secret_check:
+            items = _filter_subagent_secret_listing(items, root, ctx=ctx, secret_check=secret_check)
         return json.dumps(items, ensure_ascii=False, indent=2)
     if task_constraint and task_constraint.mode == "skill_repair" and task_constraint.payload_root:
         try:
@@ -486,8 +489,8 @@ def _data_list(
         return json.dumps(items, ensure_ascii=False, indent=2)
     # Drop any projects/<id> entry so a generic root listing never exposes the store.
     items = _filter_out_project_store(_normalize_data_read_path(ctx, dir), _list_dir(ctx.drive_root, dir, max_entries))
-    if is_restricted_subagent_profile(ctx):
-        items = _filter_subagent_secret_listing(items, pathlib.Path(ctx.drive_root), ctx=ctx)
+    if secret_check:
+        items = _filter_subagent_secret_listing(items, pathlib.Path(ctx.drive_root), ctx=ctx, secret_check=secret_check)
     return json.dumps(items, ensure_ascii=False, indent=2)
 
 
@@ -534,12 +537,13 @@ def _local_readonly_resource_block(
     base: pathlib.Path,
     *,
     action: str,
+    secret_check: Callable[[pathlib.Path], bool] | None = None,
 ) -> str:
     # Reading policy follows the physical target for every resource spelling.
     # Acting children still retain their independent declared write surface.
     repo_root = pathlib.Path(base) if normalized in {"active_workspace", "system_repo"} else active_repo_dir_for(ctx)
-    if is_restricted_subagent_profile(ctx) and _is_subagent_secret_repo_target(
-        target, repo_root, ctx=ctx,
+    if is_restricted_subagent_profile(ctx) and (
+        secret_check(target) if secret_check else _is_subagent_secret_repo_target(target, repo_root, ctx=ctx)
     ):
         return f"⚠️ {action}_BLOCKED: this subagent cannot access secret or owner-control data files."
     return ""

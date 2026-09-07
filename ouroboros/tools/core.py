@@ -66,6 +66,7 @@ from ouroboros.tools.core_file_tools import (  # noqa: F401
     _is_subagent_secret_data_path,
     _is_subagent_secret_repo_path,
     _is_subagent_secret_repo_target,
+    make_subagent_secret_target_check,
     _list_dir,
     _list_files,
     _list_user_files_dir,
@@ -942,8 +943,11 @@ def _code_search(ctx: ToolContext, query: str, path: str = ".",
     if protected_root_read_block and search_root.is_file():
         return protected_root_read_block
     subagent_readonly = is_restricted_subagent_profile(ctx)
+    secret_check = None
     if subagent_readonly:
-        block_msg = _local_readonly_resource_block(ctx, normalized, search_root, root_path, action="SEARCH")
+        secret_repo = root_path if normalized in {"active_workspace", "system_repo"} else active_repo_dir_for(ctx)
+        secret_check = make_subagent_secret_target_check(secret_repo, ctx=ctx)
+        block_msg = _local_readonly_resource_block(ctx, normalized, search_root, root_path, action="SEARCH", secret_check=secret_check)
         if block_msg:
             return block_msg
     root_resolved = root_path.resolve(strict=False)
@@ -968,7 +972,7 @@ def _code_search(ctx: ToolContext, query: str, path: str = ".",
         # runtime_data per-project store is reachable only via scoped knowledge tools.
         if normalized == "runtime_data" and rel_parts and str(rel_parts[0]).casefold() == "projects":
             return _drop("project_store_scoped")
-        if subagent_readonly and _local_readonly_resource_block(ctx, normalized, fp, root_path, action="SEARCH"):
+        if subagent_readonly and _local_readonly_resource_block(ctx, normalized, fp, root_path, action="SEARCH", secret_check=secret_check):
             return _drop("restricted_subagent")
         if normalized == "user_files" and user_files_path_block_reason(ctx, fp, operation="search"):
             return _drop("user_files_policy")
@@ -1086,7 +1090,7 @@ def _code_search(ctx: ToolContext, query: str, path: str = ".",
         if subagent_readonly:
             kept_dirs = []
             for d in dirnames:
-                if _local_readonly_resource_block(ctx, normalized, pathlib.Path(dirpath) / d, root_path, action="SEARCH"):
+                if _local_readonly_resource_block(ctx, normalized, pathlib.Path(dirpath) / d, root_path, action="SEARCH", secret_check=secret_check):
                     _drop("restricted_subagent")
                 else:
                     kept_dirs.append(d)
@@ -1098,7 +1102,7 @@ def _code_search(ctx: ToolContext, query: str, path: str = ".",
             if include and not fnmatch.fnmatch(fname, include):
                 continue
 
-            if subagent_readonly and _local_readonly_resource_block(ctx, normalized, fp, root_path, action="SEARCH"):
+            if subagent_readonly and _local_readonly_resource_block(ctx, normalized, fp, root_path, action="SEARCH", secret_check=secret_check):
                 _drop("restricted_subagent")
                 continue
             if normalized == "user_files" and user_files_path_block_reason(ctx, fp, operation="search"):
