@@ -1102,7 +1102,7 @@ def _code_search(ctx: ToolContext, query: str, path: str = ".",
             if include and not fnmatch.fnmatch(fname, include):
                 continue
 
-            if subagent_readonly and _local_readonly_resource_block(ctx, normalized, fp, root_path, action="SEARCH"):
+            if subagent_readonly and _local_readonly_resource_block(ctx, normalized, fp, root_path, action="SEARCH", secret_check=secret_check):
                 _drop("restricted_subagent")
                 continue
             if normalized == "user_files" and user_files_path_block_reason(ctx, fp, operation="search"):

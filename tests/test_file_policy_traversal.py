@@ -13,14 +13,22 @@ pytestmark = pytest.mark.serial
 
 
 @pytest.mark.parametrize("mode", ["local_readonly_subagent", "acting_subagent"])
-@pytest.mark.parametrize("tool,args", [
-    ("list_files", {"path": "src", "max_entries": 200}),
-    ("search_code", {"path": "src", "query": "visible_function"}),
-    ("query_code", {"op": "symbols", "path": "src/module_0.py"}),
-    ("query_code", {"op": "structural", "query": "FunctionDef", "path": "src"}),
+@pytest.mark.parametrize("tool,args,rg_failure", [
+    ("list_files", {"path": "src", "max_entries": 200}, None),
+    ("search_code", {"path": "src", "query": "visible_function"}, None),
+    ("search_code", {"path": "src", "query": "visible_function"}, FileNotFoundError),
+    ("search_code", {"path": "src", "query": "visible_function"}, RuntimeError),
+    ("search_code", {"path": "src/module_0.py", "query": "visible_function"}, None),
+    ("query_code", {"op": "symbols", "path": "src/module_0.py"}, None),
+    ("query_code", {"op": "structural", "query": "FunctionDef", "path": "src"}, None),
 ])
-def test_each_walk_prepares_locations_once_and_next_call_refreshes(environment, monkeypatch, mode, tool, args):
-    from ouroboros import credential_shapes, tool_access
+def test_each_walk_prepares_locations_once_and_next_call_refreshes(environment, monkeypatch, mode, tool, args, rg_failure):
+    from ouroboros import code_search_rg, credential_shapes, tool_access
+
+    if rg_failure is not None:
+        def unavailable(*_args, **_kwargs):
+            raise rg_failure("controlled search backend failure")
+        monkeypatch.setattr(code_search_rg, "search_with_rg", unavailable)
 
     reg, ctx, _home, repo, _data = environment
     ctx.task_constraint = TaskConstraint(mode=mode, surface="external_workspace", write_root=str(repo))
