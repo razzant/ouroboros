@@ -6,7 +6,7 @@ import os
 import pathlib
 import re
 import time
-from typing import Any, List
+from typing import Any, Callable, List
 
 from ouroboros.protected_artifacts import block_reason_for_path
 from ouroboros.tool_access import (
@@ -88,6 +88,7 @@ def _visible_file(
     repo_root: pathlib.Path,
     rel_path: str,
     binding: ResolvedResourceBinding | None = None,
+    secret_check: Callable[[pathlib.Path], bool] | None = None,
 ) -> bool:
     try:
         target = (repo_root / rel_path).resolve(strict=False)
@@ -96,7 +97,9 @@ def _visible_file(
     try:
         from ouroboros.tools.core import is_restricted_subagent_profile as _is_local_readonly_subagent, _is_subagent_secret_repo_target
 
-        if _is_local_readonly_subagent(ctx) and _is_subagent_secret_repo_target(target, repo_root, ctx=ctx):
+        if _is_local_readonly_subagent(ctx) and (
+            secret_check(target) if secret_check else _is_subagent_secret_repo_target(target, repo_root, ctx=ctx)
+        ):
             return False
     except Exception:
         pass
@@ -112,6 +115,7 @@ def _inventory_rows(
     repo_root: pathlib.Path,
     opts: dict[str, Any],
     binding: ResolvedResourceBinding | None = None,
+    secret_check: Callable[[pathlib.Path], bool] | None = None,
 ) -> list[str]:
     from ouroboros.code_intelligence import (
         impact_files,
@@ -132,24 +136,24 @@ def _inventory_rows(
     rows: list[str] = []
     if op in {"symbols", "definition"}:
         for file, symbol in symbol_definitions(inventory, query, path=path, kind=kind or "any"):
-            if _visible_file(ctx, repo_root, file.path, binding):
+            if _visible_file(ctx, repo_root, file.path, binding, secret_check):
                 rows.append(f"{file.path}:{symbol.line_start} {symbol.kind} {symbol.signature or symbol.name}")
     elif op == "references":
         for file, ref in symbol_references(inventory, query, path=path):
-            if _visible_file(ctx, repo_root, file.path, binding):
+            if _visible_file(ctx, repo_root, file.path, binding, secret_check):
                 rows.append(f"{file.path}:{ref.line} {query}{' in ' + ref.enclosing if ref.enclosing else ''}")
     elif op in {"callers", "callees"}:
         iterator = symbol_callers(inventory, query, path=path) if op == "callers" else symbol_callees(inventory, query, path=path)
         for file, call in iterator:
-            if _visible_file(ctx, repo_root, file.path, binding):
+            if _visible_file(ctx, repo_root, file.path, binding, secret_check):
                 rows.append(f"{file.path}:{call.line} {call.enclosing + ' -> ' if call.enclosing else ''}{call.name}")
     elif op == "impact":
         for file, reason in impact_files(inventory, path or query, depth=depth):
-            if _visible_file(ctx, repo_root, file.path, binding):
+            if _visible_file(ctx, repo_root, file.path, binding, secret_check):
                 rows.append(f"{file.path}  {reason}")
     elif op == "relevant_files":
         for idx, (file, score, reason) in enumerate(relevant_files(inventory, query, limit=min(_MAX_LIMIT, offset + limit)), 1):
-            if _visible_file(ctx, repo_root, file.path, binding):
+            if _visible_file(ctx, repo_root, file.path, binding, secret_check):
                 top_symbols = ", ".join(symbol.name for symbol in file.symbols[:5])
                 rows.append(f"{idx}. {file.path} score={score:.2f} reason={reason}{' symbols=' + top_symbols if top_symbols else ''}")
     return rows
@@ -163,6 +167,7 @@ def _structural(
     lang: str,
     limit: int,
     binding: ResolvedResourceBinding | None = None,
+    secret_check: Callable[[pathlib.Path], bool] | None = None,
 ) -> list[str]:
     # Conservative first step: use tree-sitter when available, otherwise a Python
     # ast fallback plus literal matching. Query may be a tree-sitter S-expression
@@ -242,7 +247,7 @@ def _structural(
             rel = fp.relative_to(repo_root).as_posix()
         except ValueError:
             continue
-        if not _visible_file(ctx, repo_root, rel, binding):
+        if not _visible_file(ctx, repo_root, rel, binding, secret_check):
             continue
         if not ts_node_type:
             continue
@@ -366,6 +371,14 @@ def _query_code(
 
     limit = min(max(1, int(limit or 40)), _MAX_LIMIT)
     offset = max(0, int(offset or 0))
+    secret_check = None
+    try:
+        from ouroboros.tools.core_secret_paths import is_restricted_subagent_profile, make_subagent_secret_target_check
+
+        if op != "architecture" and is_restricted_subagent_profile(ctx):
+            secret_check = make_subagent_secret_target_check(repo_root, ctx=ctx)
+    except Exception:
+        pass  # Preserve the existing per-target fallback on policy preparation failure.
 
     try:
         if op == "architecture":
@@ -389,7 +402,7 @@ def _query_code(
             # page after the first and blamed the query for it (#447 D6).
             rows = _structural(
                 ctx, repo_root, query, scoped_path, str(lang or "any"),
-                min(_MAX_LIMIT, offset + limit), binding
+                min(_MAX_LIMIT, offset + limit), binding, secret_check
             )
         else:
             from ouroboros.code_intelligence import build_code_inventory
@@ -408,14 +421,14 @@ def _query_code(
                     persist = False
                     exclude_paths = [
                         p for p in repo_root.rglob("*")
-                        if _is_subagent_secret_repo_target(p, repo_root, ctx=ctx)
+                        if (secret_check(p) if secret_check else _is_subagent_secret_repo_target(p, repo_root, ctx=ctx))
                     ]
             except Exception:
                 pass
             inventory = build_code_inventory(repo_root, drive_root=pathlib.Path(ctx.drive_root), persist=persist, exclude_paths=exclude_paths)
             inventory.files = [
                 file for file in inventory.files
-                if _visible_file(ctx, repo_root, file.path, binding)
+                if _visible_file(ctx, repo_root, file.path, binding, secret_check)
             ]
             if op == "digest":
                 # Whole-repo map (folded from the former codebase_digest tool):
@@ -432,7 +445,7 @@ def _query_code(
             rows = _inventory_rows(ctx, inventory, repo_root, {
                 "op": op, "query": query, "path": scoped_path, "kind": kind,
                 "depth": depth, "limit": limit, "offset": offset,
-            }, binding)
+            }, binding, secret_check)
     except Exception as exc:
         return f"⚠️ QUERY_CODE_ERROR: {type(exc).__name__}: {exc}"
 
