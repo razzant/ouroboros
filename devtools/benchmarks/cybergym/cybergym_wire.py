@@ -7,24 +7,42 @@ payloads and never touches containers, workspaces, or child processes.
 """
 from __future__ import annotations
 
+import datetime
 import gzip
 import hashlib
 import json
 import math
 import pathlib
 import re
+import time
 import urllib.error
 import urllib.parse
 import urllib.request
 from typing import Any, Mapping, Sequence
 
 from devtools.benchmarks.cybergym.cybergym_adapter import (
+    _TERMINAL_GATEWAY_STATUSES,
     CyberGymIntegrationUnavailable,
     _terminal_gateway_accounting,
 )
 
 _HEX64 = re.compile(r"^[0-9a-f]{64}$")
 _PROVIDER_ID = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.:/ -]{0,127}$")
+_TOOL_MARKUP_OPEN = re.compile(
+    r"<(?:｜DSML｜)?(?:tool_calls|invoke)\b|<tool_call\b",
+    re.IGNORECASE,
+)
+
+
+def _contains_leftover_tool_markup(text: str) -> bool:
+    """Recognize a terminal wire envelope without depending on core parsing.
+
+    CyberGym needs only to refuse an unexecuted tool-call envelope as a final
+    answer.  Promoting it into calls belongs to the model transport, whose
+    implementation changed in v7; importing the retired v6 parser would make
+    the benchmark adapter unable to run on the current core.
+    """
+    return bool(_TOOL_MARKUP_OPEN.search(text or ""))
 
 
 class ExecutorFailure(CyberGymIntegrationUnavailable):
@@ -48,6 +66,25 @@ class HttpStatusError(ExecutorFailure):
 
 class GatewayAdmissionRejected(ExecutorFailure):
     """The gateway definitively rejected the POST before task admission."""
+
+
+class GatewayTransportError(ExecutorFailure):
+    """The gateway could not be reached at transport level at all.
+
+    Distinct from ``HttpStatusError`` (the gateway answered with a status) and
+    from malformed-body failures (the gateway answered with bytes): only a
+    dead or unreachable isolate raises this, which is the signal the campaign
+    circuit breaker counts.
+    """
+
+
+# Bounded wall-clock budget for riding out transient gateway transport
+# failures.  The isolate's supervisor loop stalls for ~95-105 s under a
+# 64-lane event burst, and a single 60 s poll timeout used to kill a healthy
+# paid task.  The first transport error opens the budget, a successful call
+# resets it, and exhausting it re-raises so a genuinely dead gateway still
+# produces the circuit-breaker row, just minutes later.
+GATEWAY_TRANSPORT_RETRY_BUDGET_SEC = 600.0
 
 
 def urllib_json(
@@ -76,7 +113,7 @@ def urllib_json(
             int(exc.code),
         ) from exc
     except (urllib.error.URLError, OSError) as exc:
-        raise ExecutorFailure(f"HTTP {method.upper()} transport failed") from exc
+        raise GatewayTransportError(f"HTTP {method.upper()} transport failed") from exc
     if not raw.strip():
         return {}
     try:
@@ -92,6 +129,28 @@ def _response_status(payload: Mapping[str, Any]) -> str:
     return str(payload.get("status") or "").strip().lower()
 
 
+# How long the launcher keeps waiting for a task whose WORKER has already
+# finished while the server is still finalizing its workspace artifacts. The
+# gateway projects such a task as `status=running, artifact_status=finalizing`
+# (child_status carries the worker's terminal status) — a paid, finished
+# result that must not be cancelled: cancelling it re-runs the same
+# finalization in the cancel path and the 300 s custody window expires on a
+# finished task (CyberGym r9, 2026-09-04: nine tasks written off 1-15 min
+# before the server delivered their completed results).
+FINALIZATION_GRACE_SEC = 1800.0
+_WORKER_TERMINAL_CHILD_STATUSES = frozenset({"completed", "failed", "cancelled"})
+
+
+def _gateway_finalizing(payload: Mapping[str, Any]) -> bool:
+    """True when the task is `running` only because artifact finalization is
+    still in progress after the worker itself reached a terminal status."""
+    if not isinstance(payload, Mapping) or _response_status(payload) != "running":
+        return False
+    artifact_status = str(payload.get("artifact_status") or "").strip().lower()
+    child_status = str(payload.get("child_status") or "").strip().lower()
+    return artifact_status == "finalizing" or child_status in _WORKER_TERMINAL_CHILD_STATUSES
+
+
 def _cost_final_marker(payload: Mapping[str, Any]) -> bool | None:
     """Return an explicit cost-finality marker, without guessing absence."""
     marker = _terminal_gateway_accounting(payload).get("cost_final")
@@ -103,8 +162,257 @@ def _cost_is_pending(payload: Mapping[str, Any]) -> bool:
     return _cost_final_marker(payload) is not True
 
 
-def _gateway_execution_status(payload: Mapping[str, Any]) -> str:
-    """Read execution health only from canonical gateway result envelopes."""
+# A transient provider failure (e.g. a 429 during the admission burst) can
+# leave a usage-ledger row ``unresolved`` forever — no production path
+# terminalizes it — so a completed gateway frame's ``cost_final`` never turns
+# true and the delivery poll would burn the whole task timeout before the
+# cancel request 404s on the long-inactive task.  When the abandoned residue
+# is the ONLY open cause, its reservation upper bound is already inside the
+# frame's accounted upper bound, so after a bounded grace window the frame is
+# deliverable: the solved task is scored and the residue is disclosed on the
+# frame, never silently called fully final.  The residue bound is a quarter
+# of the per-task claim envelope: every row in it is one abandoned call's
+# reservation (~$0.03), so the bound still excludes only pathological frames
+# whose unresolved liability is a large fraction of the task's own cost.
+_COST_GRACE_UNRESOLVED_UB_USD = 5.00
+_COST_GRACE_PERIOD_SEC = 120.0
+_COST_GRACE_MARKER = "cost_grace_acceptance"
+
+
+def _frame_accounting_sources(payload: Mapping[str, Any]) -> list[Mapping[str, Any]]:
+    """Walk the frame plus its nested accounting views (terminal-projection shape)."""
+    sources: list[Mapping[str, Any]] = []
+    queue: list[Mapping[str, Any]] = [payload]
+    seen: set[int] = set()
+    for source in queue:
+        marker = id(source)
+        if marker in seen:
+            continue
+        seen.add(marker)
+        sources.append(source)
+        for child_key in ("result", "task_result", "runtime_result", "cost_breakdown"):
+            child = source.get(child_key)
+            if isinstance(child, Mapping):
+                queue.append(child)
+    return sources
+
+
+def _abandoned_cost_residue_usd(payload: Mapping[str, Any]) -> float | None:
+    """Return the abandoned-row residue when it is the frame's ONLY open cost cause.
+
+    Eligible frame: ``completed``, still cost-pending, ledger integrity
+    intact, accounting available, nothing unmetered, nothing reserved in
+    flight, no estimated cost, and a known unresolved upper bound within
+    ``_COST_GRACE_UNRESOLVED_UB_USD``.  Any other openness axis returns None
+    and keeps the frame on the normal wait-for-final path.
+    """
+    if not isinstance(payload, Mapping):
+        return None
+    if _response_status(payload) != "completed" or not _cost_is_pending(payload):
+        return None
+    sources = _frame_accounting_sources(payload)
+
+    def present(name: str) -> list[Any]:
+        return [source[name] for source in sources if name in source and source[name] is not None]
+
+    def numbers(name: str) -> list[float] | None:
+        values: list[float] = []
+        for raw in present(name):
+            if isinstance(raw, bool):
+                return None
+            try:
+                value = float(raw)
+            except (TypeError, ValueError):
+                return None
+            if not math.isfinite(value):
+                return None
+            values.append(value)
+        return values
+
+    integrity = present("ledger_integrity_degraded")
+    if not integrity or any(value is not False for value in integrity):
+        return None
+    accounting = present("cost_accounting_status")
+    if not accounting or any(
+        not isinstance(value, str) or value.strip().lower() != "available"
+        for value in accounting
+    ):
+        return None
+    estimated = present("cost_estimated")
+    if not estimated or any(value is not False for value in estimated):
+        return None
+    for name in ("unknown_unmetered", "reserved_usd"):
+        values = numbers(name)
+        if not values or any(value != 0 for value in values):
+            return None
+    unresolved = numbers("unresolved_upper_bound_usd")
+    if not unresolved:
+        return None
+    residue = max(unresolved)
+    if not 0.0 < residue <= _COST_GRACE_UNRESOLVED_UB_USD:
+        return None
+    return residue
+
+
+def _terminal_frame_epoch(payload: Mapping[str, Any]) -> float | None:
+    """Newest parseable terminal timestamp on the frame, as epoch seconds."""
+    newest: float | None = None
+    for name in ("artifact_finalized_at", "updated_at", "ts"):
+        raw = payload.get(name)
+        if not isinstance(raw, str) or not raw.strip():
+            continue
+        try:
+            parsed = datetime.datetime.fromisoformat(raw.strip())
+        except ValueError:
+            continue
+        if parsed.tzinfo is None:
+            parsed = parsed.replace(tzinfo=datetime.timezone.utc)
+        epoch = parsed.timestamp()
+        if newest is None or epoch > newest:
+            newest = epoch
+    return newest
+
+
+class _CostGraceTracker:
+    """One bounded grace window for an abandoned-residue-blocked frame.
+
+    The window opens at the first eligible sighting; a frame whose own
+    terminal timestamps are already older than the window (a long-finished
+    task met by a custody poll or a reconcile pass) has objectively outlived
+    the grace and is accepted immediately.  A sighting whose open cause is
+    not only the abandoned residue resets the window.
+    """
+
+    def __init__(self) -> None:
+        self._since: float | None = None
+
+    def accept(
+        self,
+        payload: Mapping[str, Any],
+        *,
+        now: float,
+        wall_now: float | None = None,
+    ) -> dict[str, Any] | None:
+        """Return the frame with its grace disclosure once the window elapsed."""
+        residue = _abandoned_cost_residue_usd(payload)
+        if residue is None:
+            self._since = None
+            return None
+        if self._since is None:
+            self._since = now
+        elapsed = max(0.0, now - self._since)
+        terminal_epoch = _terminal_frame_epoch(payload)
+        if terminal_epoch is not None and wall_now is not None:
+            elapsed = max(elapsed, wall_now - terminal_epoch)
+        if elapsed < _COST_GRACE_PERIOD_SEC:
+            return None
+        frame = dict(payload)
+        frame[_COST_GRACE_MARKER] = {
+            "schema": "ouroboros.benchmark.cybergym.cost_grace.v1",
+            "reason": "abandoned_unresolved_residue",
+            "unresolved_upper_bound_usd": residue,
+            "grace_period_sec": _COST_GRACE_PERIOD_SEC,
+            "waited_sec": round(elapsed, 3),
+        }
+        return frame
+
+
+def _valid_cost_grace(payload: Mapping[str, Any]) -> dict[str, Any] | None:
+    """Return the frame's grace disclosure when it is genuine.
+
+    The marker alone never authorizes delivery: the frame must still qualify
+    on its own current accounting fields, and the disclosed residue must
+    match the recomputed one.
+    """
+    if not isinstance(payload, Mapping):
+        return None
+    marker = payload.get(_COST_GRACE_MARKER)
+    if not isinstance(marker, Mapping):
+        return None
+    if (
+        marker.get("schema") != "ouroboros.benchmark.cybergym.cost_grace.v1"
+        or marker.get("reason") != "abandoned_unresolved_residue"
+        or marker.get("grace_period_sec") != _COST_GRACE_PERIOD_SEC
+    ):
+        return None
+    waited = marker.get("waited_sec")
+    if isinstance(waited, bool):
+        return None
+    try:
+        if float(waited) < _COST_GRACE_PERIOD_SEC:
+            return None
+    except (TypeError, ValueError):
+        return None
+    residue = _abandoned_cost_residue_usd(payload)
+    if residue is None:
+        return None
+    claimed = marker.get("unresolved_upper_bound_usd")
+    if isinstance(claimed, bool):
+        return None
+    try:
+        claimed_value = float(claimed)
+    except (TypeError, ValueError):
+        return None
+    if not math.isclose(claimed_value, residue, rel_tol=1e-9, abs_tol=1e-9):
+        return None
+    return dict(marker)
+
+
+def _apply_cost_grace_to_outcome(outcome: dict[str, Any]) -> bool:
+    """Carry a genuine grace disclosure onto the outer outcome cost fields.
+
+    The accounted upper bound already contains the residue, so the outcome
+    keeps its amount; the disclosure downgrades only the finality story.
+    """
+    if not isinstance(outcome, dict):
+        return False
+    grace = _valid_cost_grace(outcome.get("runtime_result") or {})
+    if grace is None:
+        return False
+    outcome["cost_final"] = False
+    outcome["unresolved_upper_bound_usd"] = grace["unresolved_upper_bound_usd"]
+    outcome["cost_grace_acceptance"] = grace
+    return True
+
+
+def _status_after_cost_check(outcome: dict[str, Any], requested_status: str) -> str:
+    """Resolve the row status for a completed outcome whose cost is unverifiable.
+
+    A completed row without an exact provider charge would make the hard
+    campaign cap unverifiable, so it demotes to an infra result with its
+    reservation left unresolved for the caller — unless the terminal frame
+    carries a genuine abandoned-residue grace disclosure, which is applied
+    to the outcome instead and keeps the completed status.
+    """
+    if requested_status != "completed":
+        return requested_status
+    if _apply_cost_grace_to_outcome(outcome):
+        return "completed"
+    outcome["lifecycle"] = "cost_unverifiable"
+    outcome["infra_reason"] = "cost_unverifiable"
+    return "infra_failed"
+
+
+def _redeliverable_terminal_frame(payload: Mapping[str, Any]) -> Mapping[str, Any] | None:
+    """Return the deliverable terminal frame for a custody/reconcile re-read.
+
+    A settled frame is deliverable; a completed cost-pending frame only via
+    the abandoned-residue grace, whose window a long-terminal frame has
+    already outlived on its own timestamps, so recovery never waits.
+    """
+    if not isinstance(payload, Mapping):
+        return None
+    status = _response_status(payload)
+    if status not in _TERMINAL_GATEWAY_STATUSES:
+        return None
+    if status == "completed" and _cost_is_pending(payload) and _valid_cost_grace(payload) is None:
+        return _CostGraceTracker().accept(payload, now=time.monotonic(), wall_now=time.time())
+    return payload
+
+
+def _gateway_execution_axis(payload: Mapping[str, Any]) -> Mapping[str, Any]:
+    """The canonical ``outcome_axes.execution`` mapping of a gateway envelope
+    (outermost wins), or an empty mapping when the envelope carries none."""
 
     queue: list[Mapping[str, Any]] = [payload]
     seen: set[int] = set()
@@ -116,12 +424,102 @@ def _gateway_execution_status(payload: Mapping[str, Any]) -> str:
         axes = current.get("outcome_axes")
         execution = axes.get("execution") if isinstance(axes, Mapping) else None
         if isinstance(execution, Mapping):
-            return str(execution.get("status") or "").strip().lower()
+            return execution
         for child_key in ("result", "task_result", "runtime_result"):
             child = current.get(child_key)
             if isinstance(child, Mapping):
                 queue.append(child)
-    return ""
+    return {}
+
+
+def _gateway_execution_status(payload: Mapping[str, Any]) -> str:
+    """Read execution health only from canonical gateway result envelopes."""
+    return str(_gateway_execution_axis(payload).get("status") or "").strip().lower()
+
+
+# Tool results that report the MODEL's own mistake back to it: arguments the
+# runtime could not parse or does not accept, a replace anchor that is not in
+# the file, a directory that does not exist, a command that ran past the
+# documented per-command cap and was stopped as promised. The runtime did
+# exactly what its contract says and the model saw the message and carried on,
+# so a run whose only execution blemishes are of this kind ran FAIRLY: a
+# missing final marker afterwards is a capability outcome, not infrastructure.
+# Anything else (a tool raising, a sandbox or workspace fault, a provider
+# error) keeps the infrastructure classification.
+_AGENT_ATTRIBUTABLE_TOOL_ERROR_PREFIXES = (
+    "TOOL_ARG_ERROR",
+    "STR_REPLACE_ERROR",
+    "LIST_FILES_ERROR",
+    "TOOL_TIMEOUT",
+)
+
+
+def _gateway_fair_completion(payload: Mapping[str, Any]) -> tuple[bool, str]:
+    """Whether the gateway task RAN fairly, with the basis for that verdict.
+
+    ``("execution_ok")`` is the plain case. A run the runtime marked
+    ``degraded`` solely because of agent-attributable tool errors (see
+    ``_AGENT_ATTRIBUTABLE_TOOL_ERROR_PREFIXES``) is fair as well, basis
+    ``agent_attributable_tool_errors``: CyberGym r9 (2026-09-04) recorded nine
+    tasks as infrastructure ``FinalPocRefused`` whose runs had finished under
+    their own steam, 40-90 minutes before the deadline, with a final message
+    and no marker, because the model had emitted malformed ``run_command``
+    argument JSON along the way. Every other execution status — failed,
+    infra_failed, best_effort, a degraded run with any other failure kind or
+    any tool error outside the allowlist — is not fair (basis names why).
+    """
+    execution = _gateway_execution_axis(payload)
+    status = str(execution.get("status") or "").strip().lower()
+    if status == "ok":
+        return True, "execution_ok"
+    if status != "degraded":
+        return False, f"execution_{status or 'missing'}"
+    failure = execution.get("failure")
+    if not isinstance(failure, Mapping) or str(failure.get("kind") or "") != "tool":
+        return False, "degraded_non_tool_failure"
+    errors = failure.get("tool_errors")
+    if not isinstance(errors, list) or not errors:
+        return False, "degraded_tool_failure_without_errors"
+    for entry in errors:
+        if not isinstance(entry, Mapping):
+            return False, "degraded_untyped_tool_error"
+        text = str(entry.get("result") or "").lstrip().lstrip("⚠️❌").strip()
+        if not text.startswith(_AGENT_ATTRIBUTABLE_TOOL_ERROR_PREFIXES):
+            return False, "degraded_runtime_tool_error"
+    return True, "agent_attributable_tool_errors"
+
+
+def _gateway_assistant_text(payload: Mapping[str, Any]) -> str:
+    """Return the assistant-facing terminal text from a gateway envelope."""
+    if not isinstance(payload, Mapping):
+        return ""
+    queue: list[Mapping[str, Any]] = [payload]
+    seen: set[int] = set()
+    first_text = ""
+    for current in queue:
+        marker = id(current)
+        if marker in seen:
+            continue
+        seen.add(marker)
+        for key in ("final_text", "result", "content", "text"):
+            value = current.get(key)
+            if isinstance(value, str) and value.strip():
+                if _contains_leftover_tool_markup(value):
+                    return value
+                if not first_text:
+                    first_text = value
+            elif isinstance(value, Mapping):
+                queue.append(value)
+        for key in ("task_result", "runtime_result", "agent_result"):
+            child = current.get(key)
+            if isinstance(child, Mapping):
+                queue.append(child)
+    return first_text
+
+
+def _gateway_has_tool_markup(payload: Mapping[str, Any]) -> bool:
+    """True when the gateway final is leftover DSML/XML tool markup."""
+    return _contains_leftover_tool_markup(_gateway_assistant_text(payload))
 
 
 def _runtime_value(payload: Mapping[str, Any], *keys: str) -> Any:
