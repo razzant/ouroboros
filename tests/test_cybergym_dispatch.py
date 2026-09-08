@@ -904,16 +904,23 @@ def test_budget_cap_reached_leaves_undispatched_tasks_row_free(tmp_path):
 
     exc = excinfo.value
     assert isinstance(exc, CyberGymError)
-    assert [row["task_id"] for row in exc.rows] == ["arvo:1"]
-    assert exc.remaining_task_ids == ["arvo:2", "arvo:3"]
+    # With two lanes the first claim wins the whole cap; which of the first
+    # pair wins is a thread-scheduling race, so assert the invariants:
+    # exactly one row landed, the other two tasks stay row-free for resume.
+    assert len(exc.rows) == 1
+    winner = exc.rows[0]["task_id"]
+    assert winner in {"arvo:1", "arvo:2"}
+    assert exc.remaining_task_ids == sorted(
+        {"arvo:1", "arvo:2", "arvo:3"} - {winner}
+    )
     payload = exc.as_dict()
     assert payload["outcome"] == "budget_cap_reached"
     assert payload["dispatched_rows"] == 1
     assert payload["pause"]["refusals"] >= 1
     # Never-dispatched tasks leave no row and no task directory, so a later
     # resume campaign re-runs them without any retry flag.
-    assert [row["task_id"] for row in _result_index(root)] == ["arvo:1"]
-    for task_id in ("arvo:2", "arvo:3"):
+    assert [row["task_id"] for row in _result_index(root)] == [winner]
+    for task_id in exc.remaining_task_ids:
         assert not safe_task_path(root, task_id).exists()
     projection = BudgetLedger(root / "claims.jsonl", cap_usd=20).projection()
     assert projection.settled_usd == pytest.approx(20)
@@ -922,6 +929,39 @@ def test_budget_cap_reached_leaves_undispatched_tasks_row_free(tmp_path):
     assert '"budget_pause"' in logged
     assert '"budget_gate_closed"' in logged
     assert '"cap_exhausted"' in logged
+
+
+def test_budget_cap_returns_completed_rows_behind_a_refused_position():
+    """A refusal at an EARLIER position must not strand later completed rows.
+
+    The source-order drain keys on ``next_record``; a refused position never
+    produces a row, so without the union drain every later completion stays
+    stuck in ``completed`` and the campaign would report zero landed rows
+    (seen under parallel load in the campaign-level cap test).
+    """
+
+    from devtools.benchmarks.cybergym.cybergym_adapter import BudgetRefused
+    from devtools.benchmarks.cybergym.cybergym_dispatch import (
+        BudgetCapReached,
+        run_dispatched,
+    )
+
+    def run_one(task):
+        if task.task_id == "arvo:1":
+            raise BudgetRefused("reservation would exceed campaign budget cap")
+        return {"task_id": task.task_id, "status": "completed"}
+
+    with pytest.raises(BudgetCapReached) as excinfo:
+        run_dispatched(
+            [_Task(f"arvo:{index}") for index in range(1, 4)],
+            run_one,
+            max_workers=2,
+            budget_probe=lambda: False,
+        )
+
+    exc = excinfo.value
+    assert [row["task_id"] for row in exc.rows] == ["arvo:2"]
+    assert exc.remaining_task_ids == ["arvo:1", "arvo:3"]
 
 
 def test_budget_refusal_in_a_serial_lane_ends_the_campaign_cleanly(tmp_path):

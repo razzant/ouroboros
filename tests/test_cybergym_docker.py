@@ -329,6 +329,10 @@ def test_reconcile_task_leaves_nonterminal_gateway_attempt_running(tmp_path):
 
 
 def test_reconcile_task_records_terminal_sparse_cost_as_infra(tmp_path):
+    """A sparse cached frame is a refusal snapshot, not evidence: the gateway
+    is re-polled (its sparseness cause may have healed), and only with the
+    gateway unreachable and no isolate-disk record does the cached refusal
+    stand — the checkpoint is then left untouched for a later pass."""
     gateway_id = "gateway-task-sparse-cost"
     terminal = {
         "task_id": gateway_id,
@@ -342,23 +346,132 @@ def test_reconcile_task_records_terminal_sparse_cost_as_infra(tmp_path):
         "unresolved_upper_bound_usd": 0.2,
     }
 
+    polled = []
+
+    def http(method, url, **_kwargs):
+        polled.append(url)
+        raise ExecutorFailure("isolate gateway is down")
+
     config, executor, task_dir, checkpoint = _reconcile_fixture(
         tmp_path,
         gateway_id,
         {"gateway_task_id": gateway_id, "status": "completed", "result": terminal},
-        http_runner=lambda *_args, **_kwargs: (_ for _ in ()).throw(
-            AssertionError("cached terminal frame must avoid a gateway poll")
-        ),
+        http_runner=http,
     )
     outcome = executor.reconcile_task(
         TaskSpec("arvo:1", "arvo"), task_dir, "attempt-1", checkpoint,
     )
 
+    assert polled, "a sparse cached frame must re-poll the gateway once"
     assert outcome["status"] == "infra_failed"
     assert outcome["lifecycle"] == "terminal_cost_unverifiable"
     assert outcome["reconcile_disposition"] == "delivery_failed"
     assert outcome["runtime_result"]["cost_usd"] == pytest.approx(1.25)
     assert config.run_root in pathlib.Path(outcome["artifact_refs"]["task_dir"]).parents
+    frame = json.loads(checkpoint.read_text(encoding="utf-8"))
+    assert "reconciled" not in frame
+
+
+def test_reconcile_task_repoll_supersedes_healed_sparse_cache(tmp_path):
+    """Run 20260907T233516Z pass-2 case: the cached frame was poisoned by the
+    isolate's sticky integrity flag; after the operator-acknowledged quarantine
+    heal the re-polled frame is cost-final and must supersede the cache."""
+    gateway_id = "gateway-task-sparse-healed"
+    sparse = {
+        "task_id": gateway_id,
+        "status": "completed",
+        "cost_usd": 1.25,
+        "cost_final": False,
+        "ledger_integrity_degraded": False,
+        "cost_accounting_status": "available",
+        "unknown_unmetered": 0,
+        "reserved_usd": 0.0,
+        "unresolved_upper_bound_usd": 0.2,
+    }
+    healed = {
+        "task_id": gateway_id,
+        "status": "completed",
+        "cost_usd": 1.25,
+        "cost_final": True,
+        "ledger_integrity_degraded": False,
+        "cost_accounting_status": "available",
+        "unknown_unmetered": 0,
+        "reserved_usd": 0.0,
+        "unresolved_upper_bound_usd": 0.0,
+    }
+
+    def http(method, url, **_kwargs):
+        assert method == "GET"
+        assert gateway_id in url
+        return healed
+
+    _config_unused, executor, task_dir, checkpoint = _reconcile_fixture(
+        tmp_path,
+        gateway_id,
+        {"gateway_task_id": gateway_id, "status": "completed", "result": sparse},
+        http_runner=http,
+        command_runner=lambda *_args, **_kwargs: CommandResult(1, "", "No such object"),
+    )
+    outcome = executor.reconcile_task(
+        TaskSpec("arvo:1", "arvo"), task_dir, "attempt-1", checkpoint,
+    )
+
+    # The sparse refusal is gone: delivery of the healed frame was attempted
+    # and stopped at the served-telemetry seam (the frame carries no model
+    # evidence), which proves the poll superseded the cache.
+    assert outcome["lifecycle"] != "terminal_cost_unverifiable"
+    assert outcome["status"] == "infra_failed"
+    assert "model" in outcome["error"]
+    frame = json.loads(checkpoint.read_text(encoding="utf-8"))
+    assert frame["reconciled"] is True
+    assert frame["reconcile_source"] == "gateway_poll"
+    assert frame["result"]["cost_final"] is True
+
+
+def test_reconcile_task_disk_record_supersedes_sparse_cache(tmp_path):
+    """With the gateway unreachable, a healthy terminal record on the isolate
+    data root supersedes the sparse cached refusal snapshot."""
+    gateway_id = "gateway-task-sparse-disk-healed"
+    sparse = {
+        "task_id": gateway_id,
+        "status": "completed",
+        "cost_usd": 1.25,
+        "cost_final": False,
+        "unresolved_upper_bound_usd": 0.2,
+    }
+    external = tmp_path / "nvme" / "ouroboros-data"
+    records = external / "task_results"
+    records.mkdir(parents=True)
+    (records / f"{gateway_id}.json").write_text(
+        json.dumps({
+            "task_id": gateway_id,
+            "status": "completed",
+            "cost_usd": 1.25,
+            "cost_final": True,
+            "unresolved_upper_bound_usd": 0.0,
+        }),
+        encoding="utf-8",
+    )
+
+    config, executor, task_dir, checkpoint = _reconcile_fixture(
+        tmp_path,
+        gateway_id,
+        {"gateway_task_id": gateway_id, "status": "completed", "result": sparse},
+        http_runner=lambda *_args, **_kwargs: (_ for _ in ()).throw(
+            ExecutorFailure("isolate gateway is down")
+        ),
+        isolate_data_root=external,
+        command_runner=lambda *_args, **_kwargs: CommandResult(1, "", "No such object"),
+    )
+    outcome = executor.reconcile_task(
+        TaskSpec("arvo:1", "arvo"), task_dir, "attempt-1", checkpoint,
+    )
+
+    assert outcome["lifecycle"] != "terminal_cost_unverifiable"
+    assert "model" in outcome["error"]
+    frame = json.loads(checkpoint.read_text(encoding="utf-8"))
+    assert frame["reconcile_source"] == "isolate_task_results"
+    assert frame["result"]["cost_final"] is True
 
 
 def test_reconcile_task_records_sparse_cost_from_isolate_disk(tmp_path):

@@ -231,7 +231,11 @@ class _ReconcileMixin:
 
         The checkpoint's last observed frame is authoritative when it is
         settled and cost-final; otherwise the live gateway is polled once.
-        A non-terminal or unreachable task is reported with
+        A cached sparse (terminal but cost-unverifiable) frame is only a
+        refusal snapshot: it never suppresses that poll, and it stands as the
+        pass's outcome solely when neither the live gateway nor the isolate
+        disk can produce a frame at all.  A non-terminal or unreachable task
+        is reported with
         ``reconcile_disposition`` and left untouched for a later pass.  This
         method never raises for task-level conditions; unexpected internal
         errors become an ``infra_failed`` outcome with the ``reconcile``
@@ -274,17 +278,25 @@ class _ReconcileMixin:
                 and cached is None
             )
             if cached is not None or cached_sparse:
-                # The cached frame is delivered without any gateway poll, so it
-                # must be bound to this checkpoint's task exactly like the
-                # isolate-disk fallback is; a foreign or id-less cached result
-                # is an infra error, never deliverable.
+                # Any cached frame we act on is used without a fresh bind proof
+                # from the gateway, so it must be bound to this checkpoint's
+                # task exactly like the isolate-disk fallback is; a foreign or
+                # id-less cached result is an infra error, never deliverable.
                 cached_frame = cached if cached is not None else raw_cached
                 cached_task_id = str(cached_frame.get("task_id") or "").strip()
                 if cached_task_id != gateway_task_id:
                     raise ExecutorFailure("cached checkpoint result belongs to a different task")
-                gateway_result = cached_frame
-                terminal_cost_unverifiable = cached_sparse
+            if cached is not None:
+                gateway_result = cached
             else:
+                # A cached SPARSE frame is a refusal snapshot, never evidence:
+                # whatever made it undeliverable when it was cached (for
+                # example an integrity-poisoned read-time cost breakdown on the
+                # gateway) may have healed since, so it never suppresses the
+                # live poll below.  Only when the gateway is unreachable AND
+                # the isolate disk holds no terminal record does the cached
+                # refusal stand as this pass's outcome.
+                sparse_cached_frame = raw_cached if cached_sparse else None
                 latest: Mapping[str, Any] | None = None
                 poll_error: BaseException | None = None
                 try:
@@ -307,59 +319,63 @@ class _ReconcileMixin:
                 if latest is None:
                     latest = self._terminal_result_from_isolate_disk(gateway_task_id)
                     source = "isolate_task_results"
-                    if latest is None:
+                if latest is None:
+                    if sparse_cached_frame is None:
                         raise ExecutorFailure(
                             "gateway task is unreachable and has no terminal "
                             "record on the isolate data root"
                         ) from poll_error
-                returned_id = str(latest.get("task_id") or "").strip()
-                if returned_id and returned_id != gateway_task_id:
-                    raise ExecutorFailure("Ouroboros status response belongs to a different task")
-                status = _response_status(latest)
-                deliverable = _redeliverable_terminal_frame(latest)
-                terminal_cost_unverifiable = (
-                    status == "completed"
-                    and status in _TERMINAL_GATEWAY_STATUSES
-                    and deliverable is None
-                )
-                terminal = deliverable is not None or terminal_cost_unverifiable
-                if deliverable is not None:
-                    latest = deliverable
-                if terminal and returned_id != gateway_task_id:
-                    # A terminal frame we may deliver must be bound to this
-                    # checkpoint's task exactly, like the isolate-disk
-                    # fallback; an empty id is an infra error, not a delivery,
-                    # and the foreign frame is never cached into the checkpoint.
-                    raise ExecutorFailure("Ouroboros status response has no usable task id")
-                _write_json(
-                    checkpoint,
-                    {
-                        "gateway_task_id": gateway_task_id,
-                        "status": status,
-                        "result": dict(latest),
-                        "reconciled": True,
-                        "reconcile_source": source,
-                    },
-                )
-                if not terminal:
-                    return {
-                        "status": "infra_failed",
-                        "lifecycle": "reconcile_pending",
-                        "infra_reason": "gateway_not_terminal",
-                        "reconcile_disposition": "left_running",
-                        "gateway_task_id": gateway_task_id,
-                        "cost_usd": 0.0,
-                        "cost_estimated": False,
-                        "cost_final": True,
-                        "cost_status": "known_no_dispatch",
-                        "artifact_refs": {
-                            "task_dir": str(task_dir),
-                            "checkpoint": str(checkpoint),
-                            "workspace_cleanup": str(cleanup_ref),
+                    gateway_result = sparse_cached_frame
+                    terminal_cost_unverifiable = True
+                else:
+                    returned_id = str(latest.get("task_id") or "").strip()
+                    if returned_id and returned_id != gateway_task_id:
+                        raise ExecutorFailure("Ouroboros status response belongs to a different task")
+                    status = _response_status(latest)
+                    deliverable = _redeliverable_terminal_frame(latest)
+                    terminal_cost_unverifiable = (
+                        status == "completed"
+                        and status in _TERMINAL_GATEWAY_STATUSES
+                        and deliverable is None
+                    )
+                    terminal = deliverable is not None or terminal_cost_unverifiable
+                    if deliverable is not None:
+                        latest = deliverable
+                    if terminal and returned_id != gateway_task_id:
+                        # A terminal frame we may deliver must be bound to this
+                        # checkpoint's task exactly, like the isolate-disk
+                        # fallback; an empty id is an infra error, not a delivery,
+                        # and the foreign frame is never cached into the checkpoint.
+                        raise ExecutorFailure("Ouroboros status response has no usable task id")
+                    _write_json(
+                        checkpoint,
+                        {
+                            "gateway_task_id": gateway_task_id,
+                            "status": status,
+                            "result": dict(latest),
+                            "reconciled": True,
+                            "reconcile_source": source,
                         },
-                        "error": "gateway task is not terminal; left for a later reconcile pass",
-                    }
-                gateway_result = latest
+                    )
+                    if not terminal:
+                        return {
+                            "status": "infra_failed",
+                            "lifecycle": "reconcile_pending",
+                            "infra_reason": "gateway_not_terminal",
+                            "reconcile_disposition": "left_running",
+                            "gateway_task_id": gateway_task_id,
+                            "cost_usd": 0.0,
+                            "cost_estimated": False,
+                            "cost_final": True,
+                            "cost_status": "known_no_dispatch",
+                            "artifact_refs": {
+                                "task_dir": str(task_dir),
+                                "checkpoint": str(checkpoint),
+                                "workspace_cleanup": str(cleanup_ref),
+                            },
+                            "error": "gateway task is not terminal; left for a later reconcile pass",
+                        }
+                    gateway_result = latest
             if terminal_cost_unverifiable:
                 return {
                     "runtime_result": dict(gateway_result),

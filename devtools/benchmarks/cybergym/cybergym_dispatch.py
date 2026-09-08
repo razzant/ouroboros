@@ -595,4 +595,10 @@ def run_dispatched(
                 next_record += 1
             if breaker.paused:
                 breaker.tick()
-    return settle([dispatched[position] for position in sorted(dispatched)], submitted)
+    # A budget-refused position never produces a row, so the source-order
+    # drain above can strand later completed rows behind that row-less
+    # position in ``completed``.  The campaign's landed rows are the union of
+    # both maps (they are disjoint: ``dispatched`` is drained FROM
+    # ``completed``), still reported in source order.
+    landed = {**completed, **dispatched}
+    return settle([landed[position] for position in sorted(landed)], submitted)
