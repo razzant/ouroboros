@@ -437,6 +437,118 @@ def test_reconcile_supersedes_settled_transport_failure_without_resettling(
     assert fake.released == [(task_id, attempt_id)]
 
 
+def test_reconcile_supersedes_unresolved_transport_failure_and_settles_measured(
+    tmp_path, monkeypatch,
+):
+    """Interrupted-run case (run 20260907T233516Z): the launcher died after
+    dispatch, the gateway later reached a terminal state, and the recorded
+    transport row left the claim unresolved.  Redelivery must supersede the
+    row with the terminal evidence AND settle the claim at the delivered
+    measured cost — not at the reservation upper bound."""
+    task_id = "arvo:1"
+    attempt_id = "attempt-a01"
+    run_dir = _write_run(
+        tmp_path / "run",
+        [task_id],
+        checkpoints=[(task_id, attempt_id)],
+    )
+    append_cybergym_result(
+        run_dir,
+        {
+            "task_id": task_id,
+            "attempt_id": attempt_id,
+            "status": "infra_failed",
+            "lifecycle": "executor_failed",
+            "infra_reason": "GatewayTransportError",
+            "cost_usd": None,
+        },
+    )
+    ledger = BudgetLedger(run_dir / "claims.jsonl", cap_usd=3500)
+    ledger.mark_unresolved(attempt_id, 1.0)
+    assert ledger.attempt_state(attempt_id) == "unresolved"
+    terminal_row = {
+        "task_id": task_id,
+        "attempt_id": attempt_id,
+        "status": "completed",
+        "lifecycle": "official_verified",
+        "cost_usd": 0.25,
+        "cost_final": True,
+        "cost_estimated": False,
+    }
+    fake = _FakeExecutor({"status": "completed", "lifecycle": "official_verified"})
+    _install_fake_executor(monkeypatch, fake)
+    monkeypatch.setattr(
+        cybergym_reconcile,
+        "finalize_outcome_row",
+        lambda *_args, **_kwargs: dict(terminal_row),
+    )
+
+    assert reconcile_main(_reconcile_args(run_dir)) == 0
+
+    # The redelivery path ran (not the settle-only recorded-recovery path).
+    assert fake.reconciled == [(task_id, attempt_id)]
+    rows = _read_rows(run_dir)
+    assert [row["status"] for row in rows] == ["infra_failed", "completed"]
+    assert rows[-1]["row_role"] == "late_delivery"
+    assert ledger.attempt_state(attempt_id) == "settled"
+    projection = BudgetLedger(run_dir / "claims.jsonl", cap_usd=3500).projection()
+    assert projection.settled_usd == pytest.approx(0.25)
+    assert projection.unresolved_upper_bound_usd == 0
+    assert projection.reserved_usd == 0
+    report = _read_manifest(run_dir)["extra"]["reconcile_passes"][-1]
+    assert report["late_delivered"][0]["disposition"] == "late_delivered"
+    assert report["late_delivered"][0]["claim_state"] == "settled"
+    assert fake.released == [(task_id, attempt_id)]
+
+
+def test_reconcile_unresolved_claim_without_terminal_evidence_stays_open(
+    tmp_path, monkeypatch,
+):
+    """A supersedeable row whose gateway task produced no terminal evidence
+    keeps its claim untouched: no superseding row, no settle, no release."""
+    task_id = "arvo:1"
+    attempt_id = "attempt-a01"
+    run_dir = _write_run(
+        tmp_path / "run",
+        [task_id],
+        checkpoints=[(task_id, attempt_id)],
+    )
+    append_cybergym_result(
+        run_dir,
+        {
+            "task_id": task_id,
+            "attempt_id": attempt_id,
+            "status": "infra_failed",
+            "lifecycle": "executor_failed",
+            "infra_reason": "GatewayTransportError",
+            "cost_usd": None,
+        },
+    )
+    ledger = BudgetLedger(run_dir / "claims.jsonl", cap_usd=3500)
+    ledger.mark_unresolved(attempt_id, 1.0)
+    fake = _FakeExecutor(
+        {
+            "status": "infra_failed",
+            "lifecycle": "reconcile_pending",
+            "infra_reason": "gateway_not_terminal",
+            "reconcile_disposition": "left_running",
+            "cost_usd": 0.0,
+            "cost_estimated": False,
+            "cost_final": True,
+        }
+    )
+    _install_fake_executor(monkeypatch, fake)
+
+    assert reconcile_main(_reconcile_args(run_dir)) == 0
+
+    assert fake.reconciled == [(task_id, attempt_id)]
+    assert [row["status"] for row in _read_rows(run_dir)] == ["infra_failed"]
+    assert ledger.attempt_state(attempt_id) == "unresolved"
+    assert fake.released == []
+    report = _read_manifest(run_dir)["extra"]["reconcile_passes"][-1]
+    assert report["left_running"][0]["disposition"] == "left_running"
+
+
 def test_reconcile_repairs_torn_late_delivery_pair(tmp_path, monkeypatch):
     task_id = "arvo:1"
     attempt_id = "attempt-a01"

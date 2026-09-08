@@ -4,12 +4,15 @@ When the launcher dies after the gateway accepted tasks but before their rows
 were delivered, ``--reconcile <run root>`` re-reads the manifest, attaches to
 the still-running isolated server and workspace containers, and runs the
 shared delivery path for every checkpointed attempt that has no
-``result_index.jsonl`` row, plus settled transport failures whose durable
-terminal evidence arrived late.  It never re-runs an agent, never starts new
-infrastructure, and never rewrites an existing row; late evidence is appended
-as a hash-linked superseding row. Attempts whose gateway task is still alive
-are reported ``left_running`` for a later pass, and each report is appended to
-``extra.reconcile_passes`` in the finalized manifest.
+``result_index.jsonl`` row, plus transport failures whose durable terminal
+evidence arrived late — whether the claim already settled or was left
+non-terminal (unresolved/reserved) by the interrupted run, in which case the
+delivered row's measured terminal cost settles the claim exactly.  It never
+re-runs an agent, never starts new infrastructure, and never rewrites an
+existing row; late evidence is appended as a hash-linked superseding row.
+Attempts whose gateway task is still alive are reported ``left_running`` for
+a later pass, and each report is appended to ``extra.reconcile_passes`` in
+the finalized manifest.
 
 ``_ReconcileMixin`` carries the executor-side adoption/delivery methods and is
 assembled into ``CyberGymExecutor``; ``reconcile_main`` is the launcher entry.
@@ -852,7 +855,7 @@ def reconcile_main(args: argparse.Namespace) -> int:
                     if (
                         (task_id, attempt_dir.name) not in recorded_attempts
                         or (
-                            claim_state == "settled"
+                            claim_state in {"settled", "unresolved"}
                             and is_supersedeable_result(
                                 recorded_rows.get((task_id, attempt_dir.name), {})
                             )
@@ -948,10 +951,19 @@ def reconcile_main(args: argparse.Namespace) -> int:
             for task_id, attempt_id, checkpoint in pending:
                 spec = specs[task_id]
                 attempt_key = (task_id, attempt_id)
+                claim_state_at_entry = ledger.attempt_state(attempt_id)
+                # A supersedeable row redelivers whenever its claim is not
+                # terminal yet.  ``settled`` is the classic late-evidence case;
+                # ``unresolved``/``reserved`` are the interrupted-run cases
+                # (run 20260907T233516Z: the launcher died mid-flight, the
+                # gateway later reached a terminal state, and only the durable
+                # terminal record can resolve the claim at its measured cost).
+                # A still-running gateway task is never delivered:
+                # ``reconcile_task`` reports it ``left_running`` instead.
                 late_delivery = (
                     attempt_key in recorded_attempts
                     and is_supersedeable_result(recorded_rows[attempt_key])
-                    and ledger.attempt_state(attempt_id) == "settled"
+                    and claim_state_at_entry in {"settled", "unresolved", "reserved"}
                 )
                 if attempt_key in recorded_attempts and not late_delivery:
                     entry = {
@@ -1049,15 +1061,22 @@ def reconcile_main(args: argparse.Namespace) -> int:
                             raise CyberGymError(
                                 "late result is not terminal benchmark evidence"
                             )
-                        settled_cost = _settled_attempt_cost_usd(ledger, attempt_id)
-                        delivered_cost = float(row.get("cost_usd"))
-                        if (
-                            not math.isfinite(delivered_cost)
-                            or round(settled_cost, 6) != round(delivered_cost, 6)
-                        ):
+                        try:
+                            delivered_cost = float(row.get("cost_usd"))
+                        except (TypeError, ValueError) as exc:
                             raise LedgerError(
-                                "late terminal cost disagrees with settled claim"
-                            )
+                                "late terminal row has no finite cost"
+                            ) from exc
+                        if not math.isfinite(delivered_cost):
+                            raise LedgerError("late terminal row has no finite cost")
+                        if claim_state_at_entry == "settled":
+                            # An already-settled claim is terminal accounting:
+                            # the redelivered row must agree with it exactly.
+                            settled_cost = _settled_attempt_cost_usd(ledger, attempt_id)
+                            if round(settled_cost, 6) != round(delivered_cost, 6):
+                                raise LedgerError(
+                                    "late terminal cost disagrees with settled claim"
+                                )
                         checkpoint_value = json.loads(
                             checkpoint.read_text(encoding="utf-8")
                         )
@@ -1111,6 +1130,13 @@ def reconcile_main(args: argparse.Namespace) -> int:
                 recorded_rows[attempt_key] = dict(row)
                 entry["row_status"] = str(row.get("status") or "")
                 if late_delivery:
+                    if claim_state_at_entry in {"unresolved", "reserved"}:
+                        # The superseded row left the claim non-terminal; the
+                        # delivered row carries the measured terminal cost that
+                        # resolves it exactly.  Durability order is preserved:
+                        # row appended above, claim settled here, and only then
+                        # the adopted workspace released.
+                        settle_finished_attempt(ledger, attempt_id, row)
                     release = executor_obj.release_reconciled_workspace(
                         spec, attempt_id
                     )
